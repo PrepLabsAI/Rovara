@@ -2,7 +2,7 @@
 // (`decisions/project.ts`) makes a card from. Pure: no store, no clock, no route. The card's tier comes from `riskTierOf` alone (by the amount asked; "cost unavailable" asks for nothing priced, so it is low),
 // and the choices are `choose` actions, each a POST of this server. The route that receives them (and re-checks the caller's live authority, the skip rules and the lock) is wiring pending .
 import { type DesignReviewTier } from "@agentx/contracts";
-import type { DecisionItem } from "../decisions/project.js";
+import type { DecisionItem, ItemBase } from "../decisions/project.js";
 import type { DesignReviewCapGate, DesignSpendChoice } from "./estimate.js";
 
 /**
@@ -29,7 +29,7 @@ function labelOf(choice: DesignSpendChoice): string {
   }
 }
 
-export interface DesignSpendCardInput {
+export interface DesignSpendCardInput extends Pick<ItemBase, "revealMoney"> {
   /** The task and project the gate stopped. `subjectId` is stable per task and gate: a second gate on the same task is the same card. */
   taskId: string;
   subjectId: string;
@@ -54,6 +54,7 @@ export function designSpendCardItem(input: DesignSpendCardInput): DecisionItem {
   const { gate } = input;
   return {
     kind: "approve_spend",
+    revealMoney: input.revealMoney,
     subjectId: input.subjectId,
     taskId: input.taskId,
     project: input.project,

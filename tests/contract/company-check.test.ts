@@ -29,6 +29,26 @@ describe("membership checked developer reads", () => {
     expect((await h.read(paths[0]!)).statusCode).toBe(401);
     expect(companyOf).toHaveBeenCalledTimes(3);
   });
+  it.each(["member", "admin", "owner"] as const)("reuses the checked %s role for every task's money and refreshes it next request", async (role) => {
+    const h = companyRouteHarness();
+    const other = "22222222-2222-4222-8222-222222222222";
+    for (const id of [TASK, other]) h.db.set({ ...h.task(id, COMPANY_A.orgId), spentUsd: 7.31, spentRuns: 1 });
+    const reader = companyMembershipFromDynamo(h.db, "State");
+    const membershipOf = vi.fn((personId: string) => reader.membershipOf!(personId));
+    const companyOf = vi.fn((personId: string) => reader.companyOf(personId));
+    h.deps.companies = { membershipOf, companyOf };
+    h.db.set({ ...member(), role });
+    for (const path of [paths[0]!, "/v1/dev/tasks?detail=1"]) {
+      const response = await h.read(path);
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toContain("7.31");
+    }
+    expect(membershipOf.mock.calls).toEqual([[PERSON], [PERSON]]);
+    expect(companyOf).not.toHaveBeenCalled();
+    h.db.set({ ...member(), revokedAt: TIME });
+    expect((await h.read(paths[0]!)).statusCode).toBe(401);
+    expect(membershipOf).toHaveBeenCalledTimes(3);
+  });
   it("returns byte-identical not-found for foreign and missing tasks; list and catalog are empty", async () => {
     const h = companyRouteHarness(); h.deps.companies = { companyOf: async () => COMPANY_B.orgId };
     const absent = await h.read(paths[0]!);
