@@ -3,7 +3,7 @@
 // Every guard has a named mutant in briefs/lead4/L4-EVH-MUTANTS-20261118.md, each broken by hand and seen to fail one of these tests.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { EVAL_HEALTH_MAX_AGE_MS, EVAL_HEALTH_RUN_MAX_MS, EvalHealthResultBodySchema, EvalBaseRecordSchema, evalBaseCacheKey, createDocumentBaseScoreCache, evalHealthNotRunWords, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalReservationAdapter, type Principal } from "@agentx/contracts";
+import { EVAL_HEALTH_MAX_AGE_MS, EVAL_HEALTH_RUN_MAX_MS, EvalHealthResultBodySchema, EvalBaseRecordSchema, evalBaseCacheKey, standInSettingsFingerprint, createDocumentBaseScoreCache, evalHealthNotRunWords, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalReservationAdapter, type Principal } from "@agentx/contracts";
 import { deliverEvalHealthPlan, recordEvalHealthResult, startEvalHealthRun, type EvalHealthRunDeps } from "../../packages/broker/src/core/setup-agent/eval-health-run.js";
 import { evalHealthKeyOf } from "../../packages/broker/src/core/setup-agent/eval-health-run.js";
 import { evalHealthRequestKey, readEvalHealthRow, readEvalHealthView, requestEvalHealthCheck } from "../../packages/broker/src/core/setup-agent/eval-health-request.js";
@@ -58,6 +58,15 @@ async function started(w: World) {
   return { requestId: r!.requestId, claimId: outcome.claimId };
 }
 const partsOf = async (w: World) => (await w.row())!.claim!.parts as unknown as EvalBaseCacheKeyParts;
+const versioned = (parts: EvalBaseCacheKeyParts, v: string): EvalBaseCacheKeyParts => ({ ...parts, standInSetVersion: v, settingsFingerprint: standInSettingsFingerprint(parts.settingsFingerprint, v) });
+/** A store whose named methods are replaced and the rest delegate to the real (class) store, so its private state still works. */
+function withStore<S extends object>(real: S, over: Partial<Record<keyof S, unknown>>): S {
+  return new Proxy(real, { get: (target, prop) => {
+    if (Object.prototype.hasOwnProperty.call(over, prop)) return (over as Record<PropertyKey, unknown>)[prop];
+    const value: unknown = Reflect.get(target, prop);
+    return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+  } });
+}
 
 describe("the health baseline binds the stand-in version to its claim", () => {
   const version = "c".repeat(64);
@@ -135,10 +144,24 @@ describe("the health baseline binds the stand-in version to its claim", () => {
   });
   it("refuses a version that cannot be bound to the live claim", async () => {
     const w = await world(); const lease = await started(w); const parts = await partsOf(w);
-    const store = { ...w.w.store, update: async () => ({ applied: false as const, reason: "condition_failed" as const }) };
+    const store = withStore(w.w.store, { update: async () => ({ applied: false as const, reason: "condition_failed" as const }) });
     expect(await recordEvalHealthResult(w.deps({ store }), project, body(lease.requestId, lease.claimId, { status: "measured", record: record(), standInSetVersion: version }))).toEqual({ outcome: "refused" });
     expect(await w.cache().read(parts)).toBeUndefined();
+    expect(await w.cache().read(versioned(parts, version))).toBeUndefined();
     expect((await w.row())!.state).toBe("running");
+  });
+  it("refuses a competing version bound by a concurrent post after this post read the claim", async () => {
+    const w = await world(); const lease = await started(w); const parts = await partsOf(w);
+    const key = evalHealthRequestKey(A, project); const stale = (await w.w.store.get(key))!;
+    // Another post binds "d..." first; this post read the claim before that bind (a stale, unbound claim).
+    await w.w.store.put({ item: { ...stale, claim: { ...(stale["claim"] as Record<string, never>), standInSetVersion: "d".repeat(64) } } });
+    let first = true;
+    const real = w.w.store;
+    const store = withStore(real, { get: async (k: Parameters<typeof real.get>[0]) => { if (first) { first = false; return structuredClone(stale); } return await real.get(k); } });
+    expect(await recordEvalHealthResult(w.deps({ store }), project, body(lease.requestId, lease.claimId, { status: "measured", record: record(), standInSetVersion: version }))).toEqual({ outcome: "refused" });
+    expect(first).toBe(false);
+    expect((await w.row())!.claim).toMatchObject({ standInSetVersion: "d".repeat(64) });
+    expect(await w.cache().read(versioned(parts, version))).toBeUndefined();
   });
   it("refuses a record carrying an unbound or different version", async () => {
     const w = await world(); const lease = await started(w);

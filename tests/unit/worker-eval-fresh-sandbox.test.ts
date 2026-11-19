@@ -503,3 +503,34 @@ it("never starts a preparation command whose checkout no longer satisfies its se
   expect(daemon.calls.some(args => args[0] === "run" && args.includes("alembic"))).toBe(false);
   expect(daemon.containers).toHaveLength(0);
 });
+
+describe("stand-in project commands: folder and isolation (L4-EINT2 review)", () => {
+  it("runs a command in its folder inside the side's checkout and refuses a folder that climbs out", async () => {
+    const daemon = fakeDaemon();
+    const w = await world(daemon, { reportStandInDatabases: true, sealedDns: false, services: {
+      async start(_net, signal, commands) {
+        const started = { hosts: [], env: [], secrets: [], started: [], targets: [], unsupported: [] };
+        expect(await commands!(started)({ cwd: "repo/db", executable: "alembic", args: ["upgrade", "head"], timeoutSeconds: 2 }, signal)).toEqual({ exitCode: 0, timedOut: false });
+        await expect(commands!(started)({ cwd: "../elsewhere", executable: "alembic", args: ["upgrade", "head"], timeoutSeconds: 2 }, signal)).rejects.toThrow("the eval seed folder is unavailable");
+        return { ...started, stop: async () => undefined };
+      },
+    } });
+    await w.sandbox.run(w.input());
+    const seeds = daemon.calls.filter(args => args[0] === "run" && args.includes("alembic"));
+    expect(seeds).toHaveLength(1);
+    expect(seeds[0]![seeds[0]!.indexOf("--workdir") + 1]).toBe(`${FRESH_EVAL_WORKSPACE}/db`);
+  });
+  it("stops a preparation box that can see the model bridge folder, and removes it", async () => {
+    const daemon = fakeDaemon({ extraSandboxMount: (bridgeDir) => ({ Source: bridgeDir, Destination: "/x", RW: false, Type: "bind" }) });
+    const w = await world(daemon, { reportStandInDatabases: true, sealedDns: false, services: {
+      async start(_net, signal, commands) {
+        const started = { hosts: [], env: [], secrets: [], started: [], targets: [], unsupported: [] };
+        await expect(commands!(started)({ cwd: ".", executable: "alembic", args: ["upgrade", "head"], timeoutSeconds: 2 }, signal)).rejects.toThrow("the eval seed is not isolated");
+        throw new Error("services failed");
+      },
+    } });
+    await w.sandbox.run(w.input()).catch(() => undefined);
+    expect(daemon.calls.some(args => args[0] === "wait")).toBe(false);
+    expect(daemon.containers).toHaveLength(0);
+  });
+});
