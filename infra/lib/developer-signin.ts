@@ -105,6 +105,8 @@ export interface DeveloperSignInProps {
    * optional string, but Table's getter returns string | undefined, which this repo's
    * exactOptionalPropertyTypes rejects as an ITable. */
   turnRecords: dynamodb.Table;
+  /** State table containing Code's company-audit rows; sign-in has only the AUDIT-family PutItem below. */
+  stateTable: dynamodb.Table;
   /** DEC 254zg (a), named environments only: the company layer's switch (control-plane.ts makes it from parameters.company, before the Slack company mode that requires it). */
   company?: CompanySignInSwitch;
 }
@@ -173,6 +175,7 @@ export class DeveloperSignIn extends Construct {
       AGENTX_ENV: props.env,
       DEVELOPER_TOKEN_ISSUER: issuer,
       DEVELOPER_SIGNIN_TABLE_NAME: table.tableName,
+      STATE_TABLE_NAME: props.stateTable.tableName,
       DEVELOPER_TOKEN_KEY_ARN: tokenKey.keyArn,
       SLACK_SECRET_ARN: props.slackSecret.secretArn,
       SLACK_TEAM_ID: p.slackTeamId.valueAsString,
@@ -368,6 +371,11 @@ export class DeveloperSignIn extends Construct {
         }),
       ],
     };
+    // DEC 254zzz202: the existing company-audit reader queries State; the sign-in role gets one PutItem on that exact key family only.
+    if (company !== undefined) fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:PutItem"], resources: [props.stateTable.tableArn],
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#AUDIT"] }, Null: { "dynamodb:LeadingKeys": "false" } },
+    }));
     // Named: one policy, as deployed. #1129, the legacy deployment (production): the company sign-in grants (1)-(4) only while CompanySignIn is on (a conditional policy,
     // company-signin.ts), and the import undo (5) always, since the operator imports the members (and may undo it) BEFORE switching company sign-in on (DEC 254b (b)).
     if (named) new iam.Policy(this, "SignInCompanyGrants", { roles: [fn.role!], statements: [...companyStatements.signIn.slice(0, 3), ...companyStatements.importUndo, ...companyStatements.signIn.slice(3)] });

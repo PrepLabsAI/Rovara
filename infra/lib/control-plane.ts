@@ -1028,7 +1028,7 @@ export class ControlPlaneStack extends Stack {
     }
     if (taskParameters !== undefined) {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
-        naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, dispatcher, slackSecret, parameters: signInParameters, turnRecords,
+        naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, dispatcher, slackSecret, parameters: signInParameters, turnRecords, stateTable: state,
         ...(companySignIn === undefined ? {} : { company: companySignIn }),
       });
       // Named: one statement for the broker's two invokes (the plan evidence job and the sign-in function; developer-signin.ts leaves its grant to this), ENV-ROOM 2's IAM room.

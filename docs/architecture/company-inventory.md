@@ -1,4 +1,4 @@
-514 record kinds: 146 company-scoped, 19 install-wide, 349 needs-company. 272 routes: 94 company-scoped, 9 install-wide, 169 needs-company.
+515 record kinds: 147 company-scoped, 19 install-wide, 349 needs-company. 272 routes: 94 company-scoped, 9 install-wide, 169 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -201,6 +201,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | builder:packages/contracts/src/org-scoped-keys.ts:slackLimitPk | company-scoped | State table | no | - | ORG-prefixed key constructor; contracts-base and dynamodb-two-company tests pin separation. |
 | record | builder:packages/contracts/src/ports/company-scope.ts:companyScoped | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:ADMIN_CHANGE_AUDIT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | entity:AUDIT | company-scoped | State table | no | - | Existing company audit rows use ORG#<company>#AUDIT; sign-in capture writes only after company membership resolves, and the reader rechecks company ownership. |
 | record | entity:ADMIN_CHANGE_REQUEST | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:AGENT_GUARDRAILS | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:AGENT_REQUEST | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |

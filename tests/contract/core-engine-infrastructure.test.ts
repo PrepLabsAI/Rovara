@@ -641,9 +641,10 @@ describe("L1a broker environment derivation", () => {
     // machine's definition (new states SizeChosen, the *Sized and X86 launches, SizedLaunchFailed, SizeUnavailable; Start, LaunchConfiguration, RunInstance*, RecordInstance carry the size).
     // Batch 14: measured on the combined tree (batch 13 + the machine size stack); the legacy synth differs from batch 13's head only in the three machine size places above.
     // #1129: re-pinned for the company layer, the sign-in extras and the company-secrets role in the legacy template (both company switches off by default).
+    // SIGNIN-AUDIT: re-pinned for the sign-in role's conditional AUDIT-family PutItem on State.
     // #1131: re-pinned. The legacy (production) template gains the reliability parts named environments had: the DispatchDeadLetters, StuckCancels and UnwaitedTaskFailures
     // alarms, the reconciler's idle Slack backstop (its settings, ReadThreadWaiters, PostUnwaitedTaskNote, the Slack poster) and callback key read, and the hand-off grant's ordering.
-    expect(digest(legacy.toJSON())).toBe("8810373a272829e43c4598946700c01a64b5ee1fb54a5d9507e51f7e36120bdf");
+    expect(digest(legacy.toJSON())).toBe("acb74c03849850ee56fd9fb744177629701d72c405d0f77f3855c8f0b1828e09");
   });
 });
 import { createHash } from "node:crypto";

@@ -288,6 +288,7 @@ describe("the named TEST proof-only installation gate", () => {
     // Batch 14 combined (DEC 254zzl-amend3, DEC 254zzn(2)): named and foreign re-pinned again; legacy unchanged. Against the first batch-14 synth the templates differ ONLY in the
     // CoreSystemRuns parameter (default off) and its condition, the hourly upkeep-night schedule (existing invoke role, DISABLED unless that condition holds), the CoreAnswersModel
     // parameter (default empty), `aa`/`sy` in the broker's and `sy` in the dispatcher's AGENTX_SETTINGS, and the proof function's CurrentVersion id (its code changed).
+    // SIGNIN-AUDIT: pre-removal hashes also include the sign-in Lambda's required State binding and AUDIT-family writer policy.
     // Owner DEC 254zzz73 (rule D, a removal): named and foreign re-pinned for the step-up's removal ONLY. A dump of the hashed remainder before and after differs in exactly the
     // StepUpEmailSender parameter, the sign-in function's STEP_UP_EMAIL_FROM and DEVELOPER_PASSKEYS variables and its two statements; `beforeStepUpRemoval` proves it (withStepUpRestored
     // puts exactly those back and gives the old pins). Legacy unchanged.
@@ -295,21 +296,21 @@ describe("the named TEST proof-only installation gate", () => {
       {
         label: "named",
         template: named,
-        withRoute: "68b6f3773112b50de33dd51f904eb8d88b11e1ce399796da8d24f2c618331152", withoutRoute: "4c7bfd1c54470b7d7a29b6ca16ddfda40613cb3a4034e2714993d148c7d42c44",
-        beforeStepUpRemoval: { withRoute: "28ac511b3de836798c7019b85d17a9b78f1ab41f6612bbca09bc2b88078871ce", withoutRoute: "8ff25bf806a8428450ecb20234834bcb937208beefa487af7a257dbfcb9bc990" },
+        withRoute: "2beba6779fc172d748a78b8a465c83bf9e2f388367399e07ac7d137de21e4149", withoutRoute: "8215affe144051c347a3a3118c78eca6650638b83b0c4eb5e4e393db7c5d025f",
+        beforeStepUpRemoval: { withRoute: "d207772b3d110d6147725a2034e0cbd3fa5e645f901a01882b9f058e02d61958", withoutRoute: "b6664899450bd12658c72a336c8dec42579f1012e9d3a85b41eda2025aefbc26" },
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "d337df4794e8c7fdf5e3d745b72cf4360b7e6ac8dd5d8b9aee9694c79e418db3", withoutRoute: "80d4a4a9c340ca4ed612dac08e5fd6a562456aa4122cd6d7e7bca8dbee3677c9",
-        beforeStepUpRemoval: { withRoute: "14f9db9630796cb0d931e94aae7a84ab6c3e7823a9dd1721d570f75261ae88cc", withoutRoute: "3c8f70cf97644e22fbddcb27ee00b41c5eeb06628287ae6d22926b07323ea7a7" },
+        withRoute: "16101e51b1589356c36be5efc81a9b0f59ae344f8425ebca082c754c14db309c", withoutRoute: "8ae5f3edceed2dc9ac646f14bc40cdf73aeba8df69a32db1c5bad7cc54fc9b33",
+        beforeStepUpRemoval: { withRoute: "5525613df3f299e1bcd969779dc241c8bd01b90296d6e7b3c68bfa8745dc012c", withoutRoute: "78e573c209b6822e8580a2dbbab30a4f828eeb8cc7c9dc1fa1978abe5c5e85aa" },
       },
       {
         label: "legacy",
         template: legacy,
         // #1129, #1131: the company layer, GitHub sign-in, the company-secrets role and the reliability parts in the legacy (production) template too (no step-up: DEC 254zzz73).
-        withRoute: "2ada0f3ccfc2635f4dcfebf6c33131171c6fd5cf49c48d8db1d0accc34f1bdd6",
-        withoutRoute: "0ffd303eea90c1ff34aed6104fa581546de67abeb76d3d5ce6cfb17aaf81f55b",
+        withRoute: "ad0d4d84c4fb5c1aea022856713398de3b41463ac70cc208046b66b8c34b38af",
+        withoutRoute: "c240fc3dbab19eb7efb585c56469f90856e572c9c352b416357a77fa6cf08a96",
         beforeStepUpRemoval: undefined,
       },
     ] as const;
@@ -344,6 +345,7 @@ describe("the named TEST proof-only installation gate", () => {
       const environment = label === "named" ? "agentxlivetest123" : "staging";
       const pinned = label === "legacy" ? template : withoutWorkerSandboxEgress(withoutDispatcherHookSigner(withoutGithubSignIn(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutChatGptKeyDeny(withoutSavedEnvSwitch(withoutSavedEnvImages(withoutBrokerSlackPoster(structuredClone(template), environment), environment))))), environment)));
       // L4-HARD (c): the ChatGPT key's Deny is asserted and taken out too (tests/support/chatgpt-key-deny-template.ts); legacy has none.
+      // SIGNIN-AUDIT: parent hashes include the sign-in Lambda's required State binding and its AUDIT-family writer policy.
       expect(parentRemainderDigest(pinned), `${label} parent remainder with the route`).toBe(withRoute);
       const priorRemainder = structuredClone(pinned);
       delete priorRemainder.Resources?.ProjectSetupExecutionReadRoute;

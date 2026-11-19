@@ -1,8 +1,9 @@
 // Port lane W0, policy seam: the audit sink.
 //
 // Cloud writes an audit ledger, and the ledger row commits in the same document-store transaction as the change it records (the
-// Ask, diagnosis and lesson audits work this way today). Code writes nothing. The port is only this interface: the ledger, its
-// verifier and its outbox stay in Cloud (decision 41).
+// Ask, diagnosis and lesson audits work this way today). DEC 254zzz202 is the narrow exception: Code's DeveloperIdentity Lambda
+// writes sign-in outcomes only as AUDIT rows in the existing company-audit store. Code writes no other audit event through this
+// exception. The port is only this interface: the ledger, its verifier and its outbox stay in Cloud (decision 41).
 import type { JsonObject } from "./json.js";
 import type { PolicySubject } from "./policy.js";
 import type { TransactItem } from "./document-store.js";

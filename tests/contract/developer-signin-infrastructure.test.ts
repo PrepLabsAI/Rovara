@@ -251,6 +251,18 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(JSON.stringify(reads.map((s) => s.Resource))).toContain("ChannelApiSlackAdapterSecret");
   });
 
+  it("gives DeveloperIdentity exactly one State-table PutItem for company audit rows", () => {
+    const [stateId] = ofType(named, "AWS::DynamoDB::Table").find(([logicalId]) => logicalId.startsWith("State"))!;
+    const statements = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => touches(statement, "dynamodb") && reaches(named, statement, stateId, SAMPLE_TABLE_ARN));
+    expect(statements).toHaveLength(1);
+    expect(actionsOf(statements[0]!)).toEqual(["dynamodb:PutItem"]);
+    expect(statements[0]!.Resource).toEqual({ "Fn::GetAtt": [stateId, "Arn"] });
+    expect(statements[0]!.Condition).toEqual({
+      "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#AUDIT"] },
+      Null: { "dynamodb:LeadingKeys": "false" },
+    });
+  });
+
   it("lets only the broker invoke DeveloperIdentity directly, and API Gateway only on /v1/auth/*", () => {
     const fnId = functionId(named, "DeveloperSignInFunction");
     for (const action of ["lambda:InvokeFunction", "lambda:InvokeFunctionUrl"]) {
@@ -708,7 +720,8 @@ describe("task-token key and membership IAM", () => {
     // Owner DEC 254zzz73 (rule D, a removal): re-pinned for the step-up's removal ONLY: the StepUpEmailSender parameter, the sign-in function's STEP_UP_EMAIL_FROM and DEVELOPER_PASSKEYS variables,
     // its ses:SendEmail statement and its PASSKEYS# Query/DeleteItem statement. The named-templates snapshot diff of the same change is those 68 lines deleted and nothing added, and the
     // effective-tuple pin below drops exactly those three tuples. The old value was ed3d1dc0a51d0607302a7b61ad15bc4613a4fbe86e8031beadbcc58a2b125668.
-    expect(createHash("sha256").update(text).digest("hex")).toBe("c8615c4a5a67361e911f7e38383ef9f63ed2df3c18ea7390ecb0f4d635a2f86b");
+    // SIGNIN-AUDIT: the effective tuple pin also includes exactly the sign-in role's conditional State AUDIT-family PutItem.
+    expect(createHash("sha256").update(text).digest("hex")).toBe("ec9b3f54dbc853343f7bdfc04ae7f6abe5851d534defbceb8862ae2a943677a8");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -1734,6 +1747,10 @@ const byText = (left: AccessTuple, right: AccessTuple) => JSON.stringify(left).l
 const githubSignInTuples: AccessTuple[] = [
   ["role:DeveloperSignInFunctionServiceRole","Allow","secretsmanager:GetSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/developer-github-??????","{}"],
 ];
+/** DEC 254zzz202: the sign-in function may append only the company AUDIT family in the shared State store. */
+const companySignInAuditTuples: AccessTuple[] = [
+  ["role:DeveloperSignInFunctionServiceRole", "Allow", "dynamodb:PutItem", "table:State", "{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"ORG#org_????????????????????#AUDIT\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
+];
 // Guided onboarding PR 4 (Add to Slack): DeveloperIdentity writes, reads (to revoke) and overwrites each company's bot token in the token store's family; no delete, no tags.
 // DEC 254zg (a), owner-approved re-pin: those three tuples (secretsmanager CreateSecret, GetSecretValue and PutSecretValue on
 // arn:...:secret:agentx/staging/slack-workspaces/*, role DeveloperSignInFunctionServiceRole, no condition) were pinned here as slackInstallTuples. With CompanySignIn off
@@ -1796,7 +1813,7 @@ const lessonsReflectTuples: AccessTuple[] = [
 ];
 // L4-HARD (c): the ChatGPT key's Deny: the four actions, denied to every principal but the broker's role (the same shape as the sibling keys' Deny tuples in beforeTuples).
 const chatGptKeyDenyTuples: AccessTuple[] = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey*", "kms:ReEncrypt*"].map((action) => ["*", "Deny", action, "key:ChatGptConnectionKey", "{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\"]}}"] as AccessTuple);
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...chatGptKeyDenyTuples, ...hostedWiringTuples, ...githubSignInTuples, ...attentionEmailTuples, ...companyImportTuples,
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...chatGptKeyDenyTuples, ...hostedWiringTuples, ...githubSignInTuples, ...companySignInAuditTuples, ...attentionEmailTuples, ...companyImportTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
   // DEC 254v(c): the dispatcher reads the callback signing key's one secret, under the core switch's condition (core-engine.ts). The broker, the eval tick and the reconciler read it through the secret's own policy, which adds no tuple here.
   ["role:DispatcherServiceRole", "Allow", "secretsmanager:GetSecretValue", "secret:CallbackSigningKeySecret", "{}"] as AccessTuple,
