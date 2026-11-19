@@ -15,12 +15,12 @@ const stage = readFileSync(new URL("../../packages/worker/ec2/sandbox-egress.sh"
 const bootScript = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
 const WORKER_IMAGE = `111122223333.dkr.ecr.us-west-2.amazonaws.com/agentx-staging/worker@sha256:${"a".repeat(64)}`;
 
-interface Host { dir: string; daemon: string; firewall: string; envFile: string; calls: string; rules: string; rules6: string; units: string; restore: string; resolv: string; state: string; failure: string }
+interface Host { proxyReply: string | null; dir: string; daemon: string; firewall: string; envFile: string; calls: string; rules: string; rules6: string; units: string; restore: string; resolv: string; state: string; failure: string }
 interface Options {
   failRuleInsert?: boolean; noMetadataBlock?: boolean; failInnerCreate?: boolean; failOuterCreate?: boolean; emptyProgram?: boolean; fewNames?: boolean; badName?: boolean;
   failCreate?: boolean; failConnect?: boolean; failStart?: boolean; ghostNetworks?: boolean; failProbe?: boolean; innerNotInternal?: boolean; innerExistsRight?: boolean;
   // L4-NETG2: the Docker daemon's name server, the container firewall script, and the old agentx-task bridge.
-  otherDaemonDns?: boolean; failDockerRestart?: boolean; failFirewall?: boolean; dockerNotReady?: boolean; staleTaskNetwork?: boolean; taskNetworkHeld?: boolean; loopbackResolver?: boolean; dnsAlreadySet?: boolean; emptyDaemonJson?: boolean; notJsonDaemon?: boolean; noResolvers?: boolean;
+  otherDaemonDns?: boolean; failDockerRestart?: boolean; failFirewall?: boolean; dockerNotReady?: boolean; staleTaskNetwork?: boolean; taskNetworkHeld?: boolean; loopbackResolver?: boolean; dnsAlreadySet?: boolean; emptyDaemonJson?: boolean; notJsonDaemon?: boolean; noResolvers?: boolean; proxyDead?: boolean; proxyOpen?: boolean; noRegion?: boolean;
 }
 const DAEMON_BEFORE = '{"data-root": "/mnt/workspace/.docker", "default-address-pools": [{"base":"172.28.0.0/16","size":24}]}\n';
 const TASK_NETWORK_ID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -30,11 +30,11 @@ function host(options: Options = {}): Host {
   const dir = mkdtempSync(join(tmpdir(), "se-stage-"));
   const bin = join(dir, "bin");
   mkdirSync(bin);
-  const h: Host = { dir, daemon: join(dir, "daemon.json"), firewall: join(dir, "firewall.sh"), envFile: join(dir, "worker.env"), calls: join(dir, "calls.log"), rules: join(dir, "rules"), rules6: join(dir, "rules6"), units: join(dir, "systemd"), restore: join(dir, "restore.sh"), resolv: join(dir, "resolv.conf"), state: join(dir, "state"), failure: join(dir, "failure") };
+  const h: Host = { proxyReply: options.proxyDead === true ? null : options.proxyOpen === true ? "HTTP/1.1 200 Connection Established" : "HTTP/1.1 403 Forbidden", dir, daemon: join(dir, "daemon.json"), firewall: join(dir, "firewall.sh"), envFile: join(dir, "worker.env"), calls: join(dir, "calls.log"), rules: join(dir, "rules"), rules6: join(dir, "rules6"), units: join(dir, "systemd"), restore: join(dir, "restore.sh"), resolv: join(dir, "resolv.conf"), state: join(dir, "state"), failure: join(dir, "failure") };
   mkdirSync(h.units);
   mkdirSync(join(dir, "agentx"));
   mkdirSync(join(h.state, "nets"), { recursive: true });
-  writeFileSync(h.envFile, "AWS_REGION=us-west-2\nAGENTX_SANDBOX_IMAGE=x\n");
+  writeFileSync(h.envFile, options.noRegion === true ? "AGENTX_SANDBOX_IMAGE=x\n" : "AWS_REGION=us-west-2\nAGENTX_SANDBOX_IMAGE=x\n");
   writeFileSync(h.rules, options.noMetadataBlock === true ? "" : "DOCKER-USER -d 169.254.169.254/32 -j DROP\n");
   writeFileSync(h.rules6, "");
   writeFileSync(h.resolv, options.noResolvers === true ? "nameserver 127.0.0.53\n" : `${options.loopbackResolver === true ? "nameserver 127.0.0.53\n" : ""}nameserver 10.42.0.2\nnameserver 169.254.169.253\n`);
@@ -115,7 +115,8 @@ ${body}`;
 }
 function runStage(h: Host, withTestServices = false): { status: number | null; stderr: string; failure: string } {
   // The test-services stage's functions, as boot.sh leaves them defined (it sources the stage inside a function): the rvi wall is missing after the Docker restart unless the stage puts it back.
-  const functions = withTestServices ? `ts_run_walls_present() { return 1; }\nts_wall_run_networks() { echo "ts-wall-run-networks" >>"${h.calls}"; }\nts_wall_ipv6() { echo "ts-wall-ipv6" >>"${h.calls}"; }\n` : "";
+  const proxyAsk = `se_proxy_ask() { ${h.proxyReply === null ? "return 1" : `printf '%s' "${h.proxyReply}"`}; }\n`;
+  const functions = proxyAsk + (withTestServices ? `ts_run_walls_present() { return 1; }\nts_wall_run_networks() { echo "ts-wall-run-networks" >>"${h.calls}"; }\nts_wall_ipv6() { echo "ts-wall-ipv6" >>"${h.calls}"; }\n` : "");
   const ran = spawnSync("bash", ["-c", harness(h, `${functions}sandbox_egress_main`)], { encoding: "utf8", env: { PATH: `${join(h.dir, "bin")}:${process.env.PATH ?? ""}`, AGENTX_WORKER_IMAGE: WORKER_IMAGE } });
   return { status: ran.status, stderr: ran.stderr, failure: existsSync(h.failure) ? readFileSync(h.failure, "utf8").trim() : "" };
 }
@@ -123,6 +124,7 @@ const envLines = (h: Host): string[] => readFileSync(h.envFile, "utf8").split("\
 const calls = (h: Host): string[] => (existsSync(h.calls) ? readFileSync(h.calls, "utf8").split("\n").filter((line) => line !== "") : []);
 const rules = (h: Host): string[] => readFileSync(h.rules, "utf8").split("\n").filter(Boolean);
 const NO_SANDBOX_ENV = ["AWS_REGION=us-west-2", "AGENTX_SANDBOX_IMAGE=x"];
+const DROPIN_TEXT = '[Service]\nEnvironment="HTTP_PROXY=http://172.28.251.2:3128" "HTTPS_PROXY=http://172.28.251.2:3128" "NO_PROXY=localhost,127.0.0.1,172.28.251.2,logs.us-west-2.amazonaws.com"\n';
 
 describe("the sandbox-egress stage on a worker (gateway mode)", () => {
   it("walls the two bridges, makes the internal network and the outer one, runs the hardened gateway on both, checks it from a sandbox's place, and hands the worker the network and name server", () => {
@@ -142,8 +144,8 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     expect(create).toContain("--sysctl net.ipv4.ip_forward=0");
     expect(create).toContain("--pids-limit 512 --memory 512m");
     expect(create).not.toMatch(/--network host|--privileged|--cap-add|docker\.sock|--publish|-p /u);
-    const config = JSON.parse(/ROVARA_GW_CONFIG=(\{.*?\}\}) --entrypoint/u.exec(create)![1]!) as { mode: string; sandboxDenied: string[]; nets: Record<string, string> };
-    expect(config).toEqual({ mode: "host", sandboxDenied: [...SANDBOX_REGISTRY_DENY], nets: { sandbox: "172.28.250.0/24", external: "172.28.251.0/24" } });
+    const config = JSON.parse(/ROVARA_GW_CONFIG=(\{.*?\}\}) --entrypoint/u.exec(create)![1]!) as { mode: string; sandboxDenied: string[]; proxy: Record<string, unknown>; nets: Record<string, string> };
+    expect(config).toEqual({ mode: "host", sandboxDenied: [...SANDBOX_REGISTRY_DENY], proxy: { port: 3128, peer: "172.28.251.1/32" }, nets: { sandbox: "172.28.250.0/24", external: "172.28.251.0/24" } });
     expect(create).toContain(`--entrypoint /usr/local/bin/node ${WORKER_IMAGE} -e "use strict";`);
     const connect = log.indexOf("docker network connect --ip 172.28.250.2 rovara-snet rovara-egw");
     expect(connect).toBeGreaterThan(log.findIndex((line) => line.startsWith("docker create")));
@@ -155,7 +157,7 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     // The program and the deny list are read from the digest-pinned worker image with no network, no capability and a read-only root.
     for (const line of log.filter((entry) => entry.startsWith("docker run") && entry.includes("--input-type=module"))) expect(line).toContain(`--rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --workdir /opt/agentx --entrypoint node ${WORKER_IMAGE} --input-type=module -e`);
     // The worker's environment: exactly the three lines, and only after the checks passed.
-    expect(envLines(h)).toEqual([...NO_SANDBOX_ENV, "AGENTX_SANDBOX_EGRESS=gateway", "AGENTX_SANDBOX_NETWORK=rovara-snet", "AGENTX_SANDBOX_DNS=172.28.250.2"]);
+    expect(envLines(h)).toEqual([...NO_SANDBOX_ENV, "AGENTX_SANDBOX_EGRESS=gateway", "AGENTX_SANDBOX_NETWORK=rovara-snet", "AGENTX_SANDBOX_DNS=172.28.250.2", "AGENTX_DAEMON_PROXY=http://172.28.251.2:3128"]);
   });
 
   it("installs the walls: nothing leaves the sandbox bridge, the host is unreachable from both bridges, the gateway's way out loses the private ranges but keeps the host's resolvers' port 53", () => {
@@ -195,6 +197,8 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     ["a sandbox's place cannot reach the gateway, or reaches a registry or a raw address", { failProbe: true }, "did not pass its checks"],
     ["Docker already has another default name server (it is never overwritten)", { otherDaemonDns: true }, "default name server"],
     ["the host has no non-loopback name server to give the worker", { noResolvers: true }, "host's name servers"],
+    ["the daemon proxy does not answer", { proxyDead: true }, "daemon proxy"],
+    ["the daemon proxy opens a tunnel to a raw address, an S3 bucket and a port 22 instead of refusing", { proxyOpen: true }, "daemon proxy"],
     ["daemon.json is not a JSON object", { notJsonDaemon: true }, "default name server"],
     ["Docker does not restart on the new daemon file", { failDockerRestart: true }, "default name server"],
     ["the container firewall cannot be put back after the restart", { failFirewall: true }, "default name server"],
@@ -290,11 +294,66 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     expect(JSON.parse(readFileSync(h.daemon, "utf8"))).toEqual({ dns: ["172.28.250.2"] });
   });
 
-  it("does not restart Docker again when the gateway is already its name server (a second boot step or a rerun)", () => {
-    const h = host({ dnsAlreadySet: true });
+  it("L4-NETG3: gives the Docker daemon the gateway's daemon proxy in a systemd drop-in (not daemon.json), with NO_PROXY for the proxy, loopback and the region's logs endpoint, activated by the same single restart", () => {
+    const h = host();
     expect(runStage(h).status).toBe(0);
+    expect(readFileSync(join(h.units, "docker.service.d", "30-rovara-build-proxy.conf"), "utf8")).toBe(DROPIN_TEXT);
+    // Not `proxies` in daemon.json, which Docker also copies into every container's environment.
+    expect(readFileSync(h.daemon, "utf8")).not.toContain("proxies");
+    const log = calls(h);
+    expect(log.filter((line) => line === "systemctl restart docker.service")).toHaveLength(1);
+    expect(log.indexOf("systemctl daemon-reload")).toBeGreaterThan(-1);
+    expect(log.indexOf("systemctl daemon-reload")).toBeLessThan(log.indexOf("systemctl restart docker.service"));
+  });
+
+  it("FAILS THE BOOT when the worker's environment has no region (the drop-in could not name the logs endpoint it must keep off the proxy), before anything is changed", () => {
+    const h = host({ noRegion: true });
+    const result = runStage(h);
+    expect(result.status).not.toBe(0);
+    expect(result.failure).toContain("proxy settings");
+    expect(readFileSync(h.daemon, "utf8")).toBe(DAEMON_BEFORE);
     expect(calls(h)).not.toContain("systemctl restart docker.service");
-    expect(readFileSync(h.daemon, "utf8")).toBe('{"dns": ["172.28.250.2"], "data-root": "/x"}\n');
+  });
+
+  it("does not restart Docker again on a rerun (both the name server and the proxy drop-in are already as wanted), and does when only one of them is", () => {
+    const h = host();
+    expect(runStage(h).status).toBe(0);
+    expect(runStage(h).status).toBe(0);
+    expect(calls(h).filter((line) => line === "systemctl restart docker.service")).toHaveLength(1);
+    expect(readFileSync(h.daemon, "utf8")).toBe(`{"dns": ["172.28.250.2"], ${DAEMON_BEFORE.slice(1)}`);
+    // Only the name server is there: the drop-in is added and Docker restarted once, the file untouched.
+    const partial = host({ dnsAlreadySet: true });
+    expect(runStage(partial).status).toBe(0);
+    expect(calls(partial).filter((line) => line === "systemctl restart docker.service")).toHaveLength(1);
+    expect(readFileSync(partial.daemon, "utf8")).toBe('{"dns": ["172.28.250.2"], "data-root": "/x"}\n');
+    expect(existsSync(join(partial.units, "docker.service.d", "30-rovara-build-proxy.conf"))).toBe(true);
+  });
+
+  it("puts the drop-in back (removes it when there was none) with the old daemon.json when Docker will not run on the new files, then fails the boot", () => {
+    const h = host({ failDockerRestart: true });
+    expect(runStage(h).status).not.toBe(0);
+    expect(existsSync(join(h.units, "docker.service.d", "30-rovara-build-proxy.conf"))).toBe(false);
+    expect(readFileSync(h.daemon, "utf8")).toBe(DAEMON_BEFORE);
+    expect(calls(h).filter((line) => line === "systemctl daemon-reload").length).toBeGreaterThanOrEqual(2);
+    // A drop-in somebody left is restored as it was.
+    const left = host({ failDockerRestart: true });
+    mkdirSync(join(left.units, "docker.service.d"));
+    writeFileSync(join(left.units, "docker.service.d", "30-rovara-build-proxy.conf"), "[Service]\nEnvironment=OLD=1\n");
+    expect(runStage(left).status).not.toBe(0);
+    expect(readFileSync(join(left.units, "docker.service.d", "30-rovara-build-proxy.conf"), "utf8")).toBe("[Service]\nEnvironment=OLD=1\n");
+  });
+
+  it("lets the host's connection to the gateway's outer address come back in (established only, above the drop), and still drops a NEW connection from the gateway's side", () => {
+    const h = host();
+    expect(runStage(h).status).toBe(0);
+    const installed = rules(h);
+    const accept = installed.indexOf("INPUT -i rvx+ -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT");
+    const drop = installed.indexOf("INPUT -i rvx+ -j DROP");
+    expect(accept).toBeGreaterThan(-1);
+    expect(drop).toBeGreaterThan(-1);
+    expect(accept).toBeLessThan(drop);
+    expect(installed.filter((rule) => rule.includes("rvx+") && rule.endsWith("ACCEPT"))).toHaveLength(1);
+    expect(installed.filter((rule) => rule.includes("rvs+") && rule.endsWith("ACCEPT"))).toHaveLength(0);
   });
 
   it("puts the old daemon.json back (and restarts Docker on it) when Docker will not run on the new one, then fails the boot", () => {
@@ -394,6 +453,13 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     writeFileSync(h.daemon, '{"data-root": "/x"}\n');
     expect(run().status).not.toBe(0);
     writeFileSync(h.daemon, daemonNow);
+    expect(run().status).toBe(0);
+    // The daemon's proxy drop-in is gone or changed: the unit fails too.
+    const dropin = join(h.units, "docker.service.d", "30-rovara-build-proxy.conf");
+    const dropinNow = readFileSync(dropin, "utf8");
+    writeFileSync(dropin, "[Service]\n");
+    expect(run().status).not.toBe(0);
+    writeFileSync(dropin, dropinNow);
     expect(run().status).toBe(0);
     // The gateway cannot be started: the unit fails.
     spawnSync("rm", ["-f", join(h.state, "gw.running")]);

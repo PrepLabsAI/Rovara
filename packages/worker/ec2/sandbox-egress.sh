@@ -40,6 +40,12 @@ readonly SE_FIREWALL=/usr/local/libexec/rovara-container-firewall
 readonly SE_DAEMON_JSON=/etc/docker/daemon.json
 readonly SE_TASK_NETWORK=agentx-task
 readonly SE_WORKER_DNS_FILE=/etc/agentx/worker-dns
+# L4-NETG3 (DEC 254zzz105): the Docker DAEMON's own fetches during a build (ADD <url>, a FROM base image, dev container features) go through the gateway's daemon proxy, which listens on the gateway's OUTER address and answers only the host
+# (the bridge's own address, the first of the subnet). The daemon is given it in a systemd drop-in (not in daemon.json, whose `proxies` would also be copied into every container's environment).
+readonly SE_PROXY_PORT=3128
+readonly SE_PROXY_PEER=172.28.251.1
+readonly SE_DROPIN_DIR=/etc/systemd/system/docker.service.d
+readonly SE_DROPIN=$SE_DROPIN_DIR/30-rovara-build-proxy.conf
 
 # The host's own resolvers, one per line (the VPC resolver; systemd-resolved's loopback stub is no use inside a container).
 se_host_resolvers() { awk '$1=="nameserver"&&$2~/^[0-9.]+$/&&$2!~/^127\./{print $2}' /etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null | sort -u || true; }
@@ -50,23 +56,47 @@ se_worker_dns() {
   # (/etc/agentx exists: boot.sh made it for the launcher; only the file is made here, so the directory keeps its mode.)
   install -m 0644 /dev/null "$SE_WORKER_DNS_FILE" && printf '%s\n' "$resolvers" >"$SE_WORKER_DNS_FILE"
 }
-# The gateway is the Docker DAEMON's default name server. A container with its own `--dns` is not affected; a container that has none (a `docker build` step, which has no such option) asks the gateway, which is reachable only from rovara-snet: on any other
-# network (docker0, a stale bridge) a name lookup now fails, which is the point. Idempotent. Docker is restarted only when the file changes, then the container firewall is put back (a restart rebuilds Docker's chains).
+# The gateway is the Docker DAEMON's default name server (a `docker build` step has no `--dns`): "dns" in daemon.json. And the daemon's own HTTP(S) fetches use the gateway's daemon proxy (HTTP_PROXY/HTTPS_PROXY in a systemd drop-in of
+# docker.service). NO_PROXY keeps off the proxy: the proxy itself, loopback, and the CloudWatch Logs endpoint of the region (the awslogs driver of the worker container, which must not depend on the gateway). A container with its own `--dns` is not
+# affected by the default name server; one with none asks the gateway, which is reachable only from rovara-snet: on any other network (docker0, a stale bridge) a name lookup now fails, which is the point.
+# Idempotent. Docker is restarted only when either file changes, then the container firewall is put back (a restart rebuilds Docker's chains); on any failure both files are put back and Docker restarted on them.
 se_daemon_dns_is() { grep -q "\"dns\": \[\"${SE_INNER_IP//./\\.}\"\]" "$SE_DAEMON_JSON" 2>/dev/null; }
-se_daemon_dns() {
-  local content
-  se_daemon_dns_is && return 0
-  grep -q '"dns"' "$SE_DAEMON_JSON" 2>/dev/null && return 1
-  cp -p "$SE_DAEMON_JSON" "$SE_DAEMON_JSON.before-sandbox-egress" || return 1
-  # The file is one JSON object (boot.sh and the test-services stage write it so); the key goes in right after the opening brace. Anything else is left alone and the boot fails.
-  content=$(<"$SE_DAEMON_JSON")
-  if [[ "${content//[[:space:]]/}" == "{}" ]]; then printf '{"dns": ["%s"]}\n' "$SE_INNER_IP" >"$SE_DAEMON_JSON"
-  elif [[ "$content" == \{* ]]; then printf '%s\n' "{\"dns\": [\"$SE_INNER_IP\"], ${content:1}" >"$SE_DAEMON_JSON"
-  else mv -f "$SE_DAEMON_JSON.before-sandbox-egress" "$SE_DAEMON_JSON"; return 1; fi
-  if se_daemon_dns_is && systemctl restart docker.service && bash "$SE_FIREWALL" && se_after_restart_walls && se_docker_ready; then rm -f "$SE_DAEMON_JSON.before-sandbox-egress"; return 0; fi
-  mv -f "$SE_DAEMON_JSON.before-sandbox-egress" "$SE_DAEMON_JSON"
+# The drop-in's text for this host (needs the region from the worker's environment file), and whether the file on disk is exactly that (SE_DROPIN_WANT).
+se_dropin_text() {
+  local region
+  region=$(sed -n 's/^AWS_REGION=//p' "$WORKER_ENV_FILE" 2>/dev/null | head -n 1)
+  [[ "$region" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || return 1
+  printf '[Service]\nEnvironment="HTTP_PROXY=http://%s:%s" "HTTPS_PROXY=http://%s:%s" "NO_PROXY=localhost,127.0.0.1,%s,logs.%s.amazonaws.com"\n' "$SE_OUTER_IP" "$SE_PROXY_PORT" "$SE_OUTER_IP" "$SE_PROXY_PORT" "$SE_OUTER_IP" "$region"
+}
+se_dropin_is() { [[ -n "${SE_DROPIN_WANT:-}" && -f "$SE_DROPIN" && "$(<"$SE_DROPIN")" == "$SE_DROPIN_WANT" ]]; }
+se_daemon_rollback() {
+  mv -f "$SE_DAEMON_JSON.before-sandbox-egress" "$SE_DAEMON_JSON" 2>/dev/null
+  if [[ -f "$SE_DROPIN.before-sandbox-egress" ]]; then mv -f "$SE_DROPIN.before-sandbox-egress" "$SE_DROPIN"; else rm -f "$SE_DROPIN"; fi
+  systemctl daemon-reload 2>/dev/null || true
   systemctl reset-failed docker.service 2>/dev/null || true
   systemctl restart docker.service
+}
+se_daemon_config() {
+  local content
+  se_daemon_dns_is && se_dropin_is && return 0
+  # A default name server of someone else's is never overwritten.
+  if grep -q '"dns"' "$SE_DAEMON_JSON" 2>/dev/null && ! se_daemon_dns_is; then return 1; fi
+  cp -p "$SE_DAEMON_JSON" "$SE_DAEMON_JSON.before-sandbox-egress" || return 1
+  rm -f "$SE_DROPIN.before-sandbox-egress"
+  if [[ -f "$SE_DROPIN" ]]; then cp -p "$SE_DROPIN" "$SE_DROPIN.before-sandbox-egress" || return 1; fi
+  if ! se_daemon_dns_is; then
+    # The file is one JSON object (boot.sh and the test-services stage write it so); the key goes in right after the opening brace. Anything else is left alone and the boot fails.
+    content=$(<"$SE_DAEMON_JSON")
+    if [[ "${content//[[:space:]]/}" == "{}" ]]; then printf '{"dns": ["%s"]}\n' "$SE_INNER_IP" >"$SE_DAEMON_JSON"
+    elif [[ "$content" == \{* ]]; then printf '%s\n' "{\"dns\": [\"$SE_INNER_IP\"], ${content:1}" >"$SE_DAEMON_JSON"
+    else rm -f "$SE_DAEMON_JSON.before-sandbox-egress" "$SE_DROPIN.before-sandbox-egress"; return 1; fi
+  fi
+  if install -d -m 0755 "$SE_DROPIN_DIR" && printf '%s\n' "$SE_DROPIN_WANT" >"$SE_DROPIN" && chmod 0644 "$SE_DROPIN" \
+    && se_daemon_dns_is && se_dropin_is && systemctl daemon-reload && systemctl restart docker.service && bash "$SE_FIREWALL" && se_after_restart_walls && se_docker_ready; then
+    rm -f "$SE_DAEMON_JSON.before-sandbox-egress" "$SE_DROPIN.before-sandbox-egress"
+    return 0
+  fi
+  se_daemon_rollback
   return 1
 }
 # A Docker restart may rebuild Docker's chains. The test-services stage (boot.sh sources it, so its functions are defined here when it ran) walls the rvi bridges from each other and closes them on IPv6; put those back.
@@ -104,6 +134,8 @@ se_walls() {
     for proto in udp tcp; do se_rule iptables DOCKER-USER -i rvx+ -d "$resolver" -p "$proto" --dport 53 -j RETURN || return 1; done
   done
   se_rule iptables INPUT -i rvx+ -j DROP || return 1
+  # The daemon proxy: the host connects to the gateway's outer address, and the gateway's answers (established connections only) must get back in; a NEW connection from rvx+ is still dropped above. Inserted after the DROP, so it sits above it.
+  se_rule iptables INPUT -i rvx+ -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || return 1
   for bridge in docker0 "$(se_task_bridge)"; do
     [[ -n "$bridge" ]] || continue
     se_rule iptables DOCKER-USER -i "$bridge" -j DROP || return 1
@@ -156,7 +188,7 @@ se_config() {
   done < <(se_denied_names)
   ((${#names[@]} >= 10)) || return 1
   for name in "${names[@]}"; do list+="${list:+,}\"$name\""; done
-  printf '{"mode":"host","sandboxDenied":[%s],"nets":{"sandbox":"%s","external":"%s"}}' "$list" "$SE_INNER_SUBNET" "$SE_OUTER_SUBNET"
+  printf '{"mode":"host","sandboxDenied":[%s],"proxy":{"port":%s,"peer":"%s/32"},"nets":{"sandbox":"%s","external":"%s"}}' "$list" "$SE_PROXY_PORT" "$SE_PROXY_PEER" "$SE_INNER_SUBNET" "$SE_OUTER_SUBNET"
 }
 
 # The gateway container: no capability (it binds 53, 80 and 443 only because the namespace's unprivileged port start is 53), read-only, bounded, no forwarding, restarted by Docker if it dies. Created on the outer network, joined to the
@@ -206,12 +238,31 @@ se_probe() {
     --entrypoint "$SE_NODE" "$AGENTX_WORKER_IMAGE" -e "$SE_PROBE" default >/dev/null
 }
 
+# The daemon proxy, asked from the HOST (as the daemon asks it): it must answer, and refuse a raw address, an S3 bucket and a port other than 443 (all refused before any name is looked up, so this needs no network). A dead proxy fails the connect.
+se_proxy_ask() {
+  local reply
+  exec 3<>"/dev/tcp/$SE_OUTER_IP/$SE_PROXY_PORT" || return 1
+  printf 'CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n' "$1" "$1" >&3
+  IFS= read -r -t 10 reply <&3 || { exec 3<&- 3>&-; return 1; }
+  exec 3<&- 3>&-
+  printf '%s' "$reply"
+}
+se_proxy_probe() {
+  local target reply
+  for target in 1.1.1.1:443 probe-bucket.s3.us-west-2.amazonaws.com:443 registry-1.docker.io:22; do
+    reply=$(se_proxy_ask "$target") || return 1
+    [[ "$reply" == "HTTP/1.1 403"* ]] || return 1
+  done
+}
+
 # After a reboot or a Docker restart: the walls and the gateway again, before the worker starts. Any miss exits non-zero, and the worker (which Requires this unit) does not start.
 se_install_restore_unit() {
   { printf 'readonly SE_GATEWAY=%s SE_INNER_NET=%s SE_OUTER_NET=%s\n' "$SE_GATEWAY" "$SE_INNER_NET" "$SE_OUTER_NET"
-    declare -f se_rule se_task_bridge se_walls se_gateway_running se_daemon_dns_is
-    printf 'readonly SE_DAEMON_JSON=%s SE_INNER_IP=%s SE_TASK_NETWORK=%s\n' "$SE_DAEMON_JSON" "$SE_INNER_IP" "$SE_TASK_NETWORK"
+    declare -f se_rule se_task_bridge se_walls se_gateway_running se_daemon_dns_is se_dropin_is
+    printf 'readonly SE_DAEMON_JSON=%s SE_INNER_IP=%s SE_TASK_NETWORK=%s SE_DROPIN=%s\n' "$SE_DAEMON_JSON" "$SE_INNER_IP" "$SE_TASK_NETWORK" "$SE_DROPIN"
+    printf 'SE_DROPIN_WANT=%q\n' "$SE_DROPIN_WANT"
     printf 'se_daemon_dns_is || exit 1\n'
+    printf 'se_dropin_is || exit 1\n'
     printf 'se_walls || exit 1\n'
     printf 'se_gateway_running || { docker start "$SE_GATEWAY" >/dev/null 2>&1; sleep 3; }\n'
     printf 'se_gateway_running || exit 1\n'
@@ -237,7 +288,8 @@ UNIT
 
 sandbox_egress_main() {
   BOOT_STEP="make the gateway the Docker name server"
-  se_daemon_dns || fail "could not make the sandbox egress gateway the Docker daemon's default name server"
+  SE_DROPIN_WANT=$(se_dropin_text) || fail "could not work out the Docker daemon's proxy settings (no region in the worker's environment)"
+  se_daemon_config || fail "could not make the sandbox egress gateway the Docker daemon's default name server and proxy"
   BOOT_STEP="give the worker the host's resolvers"
   se_worker_dns || fail "could not give the worker container the host's name servers"
   BOOT_STEP="wall the sandbox network"
@@ -252,8 +304,10 @@ sandbox_egress_main() {
   BOOT_STEP="check the sandbox egress gateway"
   se_gateway_running || fail "the sandbox egress gateway is not running on its two networks"
   se_probe || fail "the sandbox egress gateway did not pass its checks (a registry name must be refused and a raw address unreachable from a sandbox)"
+  BOOT_STEP="check the Docker daemon proxy"
+  se_proxy_probe || fail "the sandbox egress gateway's daemon proxy did not answer, or did not refuse a raw address, an S3 bucket and a port other than 443"
   BOOT_STEP="hand the worker its sandbox network"
-  printf 'AGENTX_SANDBOX_EGRESS=gateway\nAGENTX_SANDBOX_NETWORK=%s\nAGENTX_SANDBOX_DNS=%s\n' "$SE_INNER_NET" "$SE_INNER_IP" >>"$WORKER_ENV_FILE" || fail "could not write the worker's sandbox network settings"
+  printf 'AGENTX_SANDBOX_EGRESS=gateway\nAGENTX_SANDBOX_NETWORK=%s\nAGENTX_SANDBOX_DNS=%s\nAGENTX_DAEMON_PROXY=http://%s:%s\n' "$SE_INNER_NET" "$SE_INNER_IP" "$SE_OUTER_IP" "$SE_PROXY_PORT" >>"$WORKER_ENV_FILE" || fail "could not write the worker's sandbox network settings"
   se_install_restore_unit || fail "could not install the sandbox egress restore unit"
   log "sandbox egress: gateway on $SE_INNER_NET ($SE_INNER_IP); sandboxes and dev containers have no other way out"
 }

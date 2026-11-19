@@ -11,11 +11,14 @@
 //   - a dev container's image build (the classic builder through the wrapper) has no way to a raw address or a registry name, and reaches an allowed name through the gateway; a build on an ordinary user bridge (the control) does reach the raw address;
 //   - the verifier's contained E2E build commands (createDockerApplicationHost with `buildEgress`) the same, and no rvb build bridge is made;
 //   - docker0 and a left-over agentx-task bridge cannot forward (the stage's walls), while an ordinary user bridge (the control) can.
+// Lane L4-NETG3 (DEC 254zzz105) adds: the Docker DAEMON's own fetches go through the gateway's daemon proxy (ADD <url> to a raw address is refused, a base image from an allowed registry pulls, a dev container feature from an allowed host downloads
+// through the CLI with the proxy in its environment), judged by the gateway's own refusal log.
 // The stage runs its REAL daemon step here: /etc/docker/daemon.json gets the gateway as default name server and Docker is restarted (the original file is put back after).
 // Needs ROVARA_DOCKER=1, passwordless sudo, and the container firewall of boot.sh (the CI job installs it first, as for the other network-wall tests).
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { connect as netConnect } from "node:net";
 import { request } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -112,6 +115,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     await docker("network", "create", "agentx-task");
     const held = await docker("run", "-d", "--name", HELD_CONTAINER, "--pull=never", "--network", "agentx-task", APP_NODE_IMAGE, "sleep", "3600");
     expect(held.code, held.stderr).toBe(0);
+    await writeFile(join(dir, "worker.env"), "AWS_REGION=us-west-2\n");
     const made = await stage(EGRESS_GATEWAY_SOURCE);
     expect(made.code, `${made.failure}\n${made.output}`).toBe(0);
   }, 300_000);
@@ -124,6 +128,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     await docker("network", "rm", "rovara-xnet");
     await sudo("rm", "-f", "/etc/agentx/worker-dns");
     // Docker's own configuration is put back, and Docker restarted on it with the runner's container firewall.
+    await sudo("rm", "-f", "/etc/systemd/system/docker.service.d/30-rovara-build-proxy.conf");
+    await sudo("systemctl", "daemon-reload");
     if (daemonBefore === undefined) await sudo("rm", "-f", DAEMON_JSON);
     else await sudo("cp", join(dir, "daemon.before"), DAEMON_JSON);
     await sudo("systemctl", "restart", "docker.service");
@@ -186,7 +192,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   }, 120_000);
 
   it("a sandbox cannot reach the host, the metadata address, the gateway's other side or another private address", async () => {
-    for (const target of [["169.254.169.254", 80], ["172.28.251.2", 443], ["172.28.250.1", 22], ["10.0.0.1", 443]] as const) {
+    for (const target of [["169.254.169.254", 80], ["172.28.251.2", 443], ["172.28.251.2", 3128], ["172.28.250.1", 22], ["10.0.0.1", 443]] as const) {
       const result = await sandbox(connectOutcome(target[0], target[1]));
       expect(result.stdout.trim(), `${target[0]}: ${result.stderr}`).toMatch(/^(ENETUNREACH|EHOSTUNREACH|ECONNREFUSED|timeout)$/u);
     }
@@ -320,6 +326,72 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       if (/^status /u.test(control)) expect(built.build, built.log).toMatchObject({ commandIndex: 1, exitCode: 0 });
     }, 600_000);
   });
+
+  // ---- Lane L4-NETG3 (DEC 254zzz105): the daemon's own fetches ----
+  const PROXY_HOST = "172.28.251.2";
+  /** One request to the daemon proxy from the host (this process is on the host network, as the daemon is): the status line, or "" when nothing answered. */
+  function proxyAsk(text: string): Promise<string> {
+    return new Promise((resolve) => {
+      let received = "";
+      const socket = netConnect({ host: PROXY_HOST, port: 3128 }, () => socket.write(text));
+      socket.on("data", (chunk) => { received += chunk.toString("latin1"); });
+      socket.on("error", () => resolve(received));
+      socket.on("close", () => resolve(received));
+      setTimeout(() => { socket.destroy(); resolve(received); }, 8000).unref();
+    });
+  }
+  const statusLine = (text: string): string => text.split("\r\n")[0] ?? "";
+  const gatewayLog = async (): Promise<string> => { const logs = await docker("logs", "rovara-egw"); return `${logs.stdout}${logs.stderr}`; };
+
+  it("the daemon proxy answers the host and refuses a raw address, an S3 bucket and a port other than 443, and tunnels an allowed registry name", async () => {
+    expect(statusLine(await proxyAsk("CONNECT 1.1.1.1:443 HTTP/1.1\r\nHost: 1.1.1.1:443\r\n\r\n"))).toMatch(/^HTTP\/1\.1 403/u);
+    expect(statusLine(await proxyAsk("CONNECT netg3-test-bucket.s3.us-west-2.amazonaws.com:443 HTTP/1.1\r\nHost: x\r\n\r\n"))).toMatch(/^HTTP\/1\.1 403/u);
+    expect(statusLine(await proxyAsk("CONNECT registry-1.docker.io:22 HTTP/1.1\r\nHost: x\r\n\r\n"))).toMatch(/^HTTP\/1\.1 403/u);
+    expect(statusLine(await proxyAsk("CONNECT netg3-not-a-real-name.invalid:443 HTTP/1.1\r\nHost: x\r\n\r\n"))).toMatch(/^HTTP\/1\.1 403/u);
+    // An allowed name (the runner's resolver answers it): the registry the sandbox side is denied is tunnelled for the daemon.
+    if (/^status /u.test(await hostHttps("registry-1.docker.io"))) expect(statusLine(await proxyAsk("CONNECT registry-1.docker.io:443 HTTP/1.1\r\nHost: registry-1.docker.io:443\r\n\r\n"))).toMatch(/^HTTP\/1\.1 200/u);
+  }, 60_000);
+
+  it("an ADD of a URL on a raw address FAILS in a build (the daemon's own fetch is refused by the proxy, which says so in its log), while an ADD of an allowed name works", async () => {
+    const refusedBefore = (await gatewayLog()).split("\n").filter((line) => line.includes("proxy_refused")).length;
+    const bad = await context("add-raw", [`ADD http://1.1.1.1/netg3-probe /netg3-probe`]);
+    const failed = await run("docker", ["build", "--network", NETWORK, "-t", "rovara-netg3-add-raw", bad], { env: { ...process.env, DOCKER_BUILDKIT: "0" }, maxBuffer: 10_000_000 }).then(() => 0, (error: { code?: number }) => error.code ?? 1);
+    expect(failed, "ADD of a raw address must not succeed").not.toBe(0);
+    const log = await gatewayLog();
+    expect(log.split("\n").filter((line) => line.includes("proxy_refused")).length, "the refusal must be the proxy's").toBeGreaterThan(refusedBefore);
+    expect(log).toMatch(/"event":"proxy_refused"[^\n]*"host":"1\.1\.1\.1"/u);
+    if (/^status /u.test(await hostHttps("registry.npmjs.org"))) {
+      const good = await context("add-name", ["ADD https://registry.npmjs.org/ /netg3-registry-answer"]);
+      const built = await run("docker", ["build", "--network", NETWORK, "-t", "rovara-netg3-add-name", good], { env: { ...process.env, DOCKER_BUILDKIT: "0" }, maxBuffer: 10_000_000 }).then(() => ({ code: 0, err: "" }), (error: { code?: number; stderr?: string }) => ({ code: error.code ?? 1, err: error.stderr ?? "" }));
+      expect(built.code, built.err.slice(0, 500)).toBe(0);
+    }
+    for (const tag of ["add-raw", "add-name"]) await docker("rmi", "--force", `rovara-netg3-${tag}`);
+  }, 600_000);
+
+  it("a FROM / pull of a base image from an allowed registry works through the proxy, and one from a raw address:port is refused by it", async () => {
+    const refused = await docker("pull", "203.0.113.7:5000/netg3/probe:latest");
+    expect(refused.code).not.toBe(0);
+    expect(await gatewayLog()).toMatch(/"event":"proxy_refused"[^\n]*"host":"203\.113\.7"|"event":"proxy_refused"[^\n]*"reason":"port"/u);
+    if (/^status /u.test(await hostHttps("public.ecr.aws"))) {
+      await docker("rmi", "--force", "public.ecr.aws/docker/library/hello-world:latest");
+      const pulled = await docker("pull", "public.ecr.aws/docker/library/hello-world:latest");
+      expect(pulled.code, pulled.stderr.slice(0, 500)).toBe(0);
+      await docker("rmi", "--force", "public.ecr.aws/docker/library/hello-world:latest");
+    }
+  }, 300_000);
+
+  it("the dev container CLI, given the proxy in its environment, downloads a feature manifest from an allowed host through it, and a feature on a raw address is refused by the proxy (the CLI honours the proxy)", async () => {
+    const cli = new URL("../../node_modules/@devcontainers/cli/devcontainer.js", import.meta.url).pathname;
+    const env = { ...process.env, HTTP_PROXY: `http://${PROXY_HOST}:3128`, HTTPS_PROXY: `http://${PROXY_HOST}:3128`, http_proxy: `http://${PROXY_HOST}:3128`, https_proxy: `http://${PROXY_HOST}:3128`, NO_PROXY: "localhost,127.0.0.1", no_proxy: "localhost,127.0.0.1" };
+    const features = (reference: string) => run(process.execPath, [cli, "features", "info", "manifest", reference, "--log-level", "error"], { env, timeout: 90_000, maxBuffer: 10_000_000 }).then((done) => ({ code: 0, out: done.stdout, err: done.stderr }), (error: { code?: number; stdout?: string; stderr?: string }) => ({ code: error.code ?? 1, out: error.stdout ?? "", err: error.stderr ?? "" }));
+    const bad = await features("203.0.113.9/netg3/feature:1");
+    expect(bad.code).not.toBe(0);
+    expect(await gatewayLog(), "the CLI must have gone through the proxy").toMatch(/"event":"proxy_refused"[^\n]*"host":"203\.113\.9"/u);
+    if (/^status /u.test(await hostHttps("ghcr.io"))) {
+      const good = await features("ghcr.io/devcontainers/features/common-utils:2");
+      expect(good.code, `${good.out}\n${good.err}`.slice(0, 600)).toBe(0);
+    }
+  }, 300_000);
 
   // LAST: it replaces the gateway with a broken one.
   it("FAILS the boot when the gateway cannot start (it comes up and dies at once), and never leaves the worker an environment", async () => {

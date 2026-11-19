@@ -15,6 +15,12 @@ export const EGRESS_GATEWAY_SOURCE = String.raw`"use strict";
 // the host's own network), no callback relay and no published port. There is no static allow list either: a name is allowed when (1) it is a plain public-style name, (2) it is NOT on the sandbox deny list (the push-capable
 // registries, config.sandboxDenied) and (3) the host's own resolver (the VPC resolver, behind the DNS firewall) answers it with public addresses. So a name the DNS firewall blocks is NXDOMAIN to the sandbox too, and the registries
 // the host itself pulls from stay refused to the sandbox. Anything not said exactly "host" is the laptop mode, so a mistyped mode never opens the list.
+//
+// DAEMON PROXY (config.proxy, host mode only, lane L4-NETG3): the Docker daemon's OWN fetches while it builds an image ('ADD <url>', the base image of a 'FROM', a dev container feature) run on the host, outside the walled build containers. On
+// a gateway-mode worker the daemon is given this proxy (HTTP_PROXY / HTTPS_PROXY in its systemd unit). It listens on the EXTERNAL address only and answers only the host's own address on that network (config.proxy.peer), so no sandbox or build
+// container can use it. It takes CONNECT host:443 and absolute-URI GET/HEAD for http://host[:80]/, nothing else, and judges the NAME exactly as the forwarders do (a plain name, never an address; the host resolver must answer it with public
+// addresses; the connection goes to those addresses only), except that the sandbox deny list does not apply (the daemon pulls images from the registries the sandboxes are denied) and S3 hosts are refused, because any bucket is a place to
+// send data (the one S3 host a registry pull needs is ECR's layer bucket).
 const net = require("net");
 const dgram = require("dgram");
 const http = require("http");
@@ -36,6 +42,8 @@ const QUIET = process.env.ROVARA_GW_LIBRARY === "1"; // loaded as a library by t
 // Library mode only: the tests open the 443 and 80 forwarders on a port of their own (0 for any free one). A running gateway always uses 443 and 80.
 const TLS_PORT = QUIET && process.env.ROVARA_GW_TLS_PORT !== undefined ? Number(process.env.ROVARA_GW_TLS_PORT) : 443;
 const PLAIN_PORT = QUIET && process.env.ROVARA_GW_PLAIN_PORT !== undefined ? Number(process.env.ROVARA_GW_PLAIN_PORT) : 80;
+const PROXY = HOST_MODE && config.proxy && typeof config.proxy === "object" && typeof config.proxy.peer === "string" ? config.proxy : undefined;
+const PROXY_PORT = QUIET && process.env.ROVARA_GW_PROXY_PORT !== undefined ? Number(process.env.ROVARA_GW_PROXY_PORT) : PROXY ? Number(PROXY.port) : 0;
 const TEST_ADDRESSES = QUIET ? process.env.ROVARA_GW_TEST_ADDRESSES : undefined;
 const DNS_PORT = QUIET && process.env.ROVARA_GW_DNS_PORT !== undefined ? Number(process.env.ROVARA_GW_DNS_PORT) : 53;
 let logged = 0;
@@ -430,6 +438,88 @@ function startPlainForwarder(ip, cidr, role) {
   return server;
 }
 
+// ---- the Docker daemon's proxy (host mode, lane L4-NETG3): see the header
+// S3 in any spelling: a label that is "s3" or starts with "s3-" or "s3express", under amazonaws.com (the bucket can be a label of the name or the path, so a bucket cannot be told apart from another).
+// The one S3 host a registry pull needs is ECR's layer bucket, spelled out exactly.
+function s3Host(host) {
+  if (!/\.amazonaws\.com(\.cn)?$/.test(host)) return false;
+  const labels = host.split(".");
+  for (let i = 0; i < labels.length; i++) if (labels[i] === "s3" || labels[i].indexOf("s3-") === 0 || labels[i].indexOf("s3express") === 0) return true;
+  return false;
+}
+const ECR_LAYER_BUCKET = /^prod-[a-z0-9-]{1,40}-starport-layer-bucket\.s3\.[a-z0-9-]{1,30}\.amazonaws\.com$/;
+function proxyAllowed(host) {
+  if (!validName(host)) return false;
+  if (s3Host(host) && !ECR_LAYER_BUCKET.test(host)) return false;
+  return hostAllowed(host, "worker");
+}
+function startDaemonProxy(ip) {
+  const peer = PROXY.peer;
+  const refuseSocket = function (socket, status, reason, host) {
+    stats.webRefused += 1;
+    log("proxy_refused", { reason: reason, host: host });
+    socket.end("HTTP/1.1 " + status + " " + (status === 403 ? "Forbidden" : "Bad Request") + "\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+  };
+  const server = http.createServer({ maxHeaderSize: 16384 }, function (request, response) {
+    if (!peerIn(request.socket.remoteAddress, peer)) return request.socket.destroy();
+    const refuse = function (status, reason, host) {
+      stats.webRefused += 1;
+      log("proxy_refused", { reason: reason, host: host });
+      response.writeHead(status, { "content-type": "text/plain", connection: "close" });
+      response.end("not allowed\n");
+    };
+    if (request.method !== "GET" && request.method !== "HEAD") return refuse(405, "method");
+    let target;
+    try { target = new URL(request.url); } catch (error) { return refuse(400, "bad_target"); }
+    if (target.protocol !== "http:" || (target.port !== "" && target.port !== "80") || target.username !== "" || target.password !== "") return refuse(403, "not_plain_http");
+    const host = target.hostname.toLowerCase().replace(/\.$/, "");
+    if (!proxyAllowed(host)) return refuse(403, "not_allowed", host);
+    if (request.headers.upgrade !== undefined) return refuse(400, "upgrade", host);
+    resolvePublic(host).then(function (addresses) {
+      stats.webAllowed += 1;
+      const headers = Object.assign({}, request.headers);
+      ["connection", "proxy-connection", "keep-alive", "proxy-authorization", "proxy-authenticate", "te", "trailer", "transfer-encoding"].forEach(function (name) { delete headers[name]; });
+      headers.host = host;
+      const upstream = http.request({ host: addresses[0], port: 80, method: request.method, path: target.pathname + target.search, headers: headers, agent: false, timeout: LIMITS.connectMs }, function (answer) {
+        response.writeHead(answer.statusCode || 502, answer.headers);
+        answer.pipe(response);
+      });
+      upstream.setTimeout(LIMITS.idleMs, function () { upstream.destroy(); });
+      upstream.on("error", function () { if (!response.headersSent) response.writeHead(502); response.end(); });
+      upstream.end();
+    }, function (error) {
+      refuse(403, error.message === "private_address" ? "private_address" : "upstream", host);
+    });
+  });
+  server.on("connect", function (request, socket, head) {
+    socket.on("error", function () {});
+    if (!peerIn(socket.remoteAddress, peer)) return socket.destroy();
+    if (open >= LIMITS.maxConnections) return socket.destroy();
+    const match = /^([a-z0-9.-]{1,253}):([0-9]{1,5})$/i.exec(String(request.url));
+    if (match === null) return refuseSocket(socket, 400, "bad_target");
+    const host = match[1].toLowerCase().replace(/\.$/, "");
+    if (match[2] !== "443") return refuseSocket(socket, 403, "port", host);
+    if (!proxyAllowed(host)) return refuseSocket(socket, 403, "not_allowed", host);
+    open += 1;
+    socket.on("close", function () { open -= 1; });
+    connectPublic(host, 443).then(function (upstream) {
+      stats.webAllowed += 1;
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head && head.length > 0) upstream.write(head);
+      tie(socket, upstream);
+    }, function (error) {
+      refuseSocket(socket, 403, error.message === "private_address" ? "private_address" : "upstream", host);
+    });
+  });
+  server.headersTimeout = 10000;
+  server.requestTimeout = 600000;
+  server.maxConnections = LIMITS.maxConnections;
+  server.on("clientError", function (error, socket) { socket.destroy(); });
+  server.on("error", function (error) { log("listen_error", { port: PROXY_PORT, reason: error.code }); });
+  server.listen(PROXY_PORT, ip);
+  return server;
+}
+
 // ---- the callback relay: the worker's calls to the broker, and only those
 // Four families. (1) The operation callbacks, POST. (2) The model proxy (lane L9a): POST to the three model routes; the broker's proxy holds the
 // model key and the worker holds only a short-lived token. (3) GET /v1/internal/model-access, where the worker asks for that token with its callback
@@ -549,6 +639,8 @@ function main() {
     }
     const hosted = [];
     addresses.sandbox.forEach(function (ip) { hosted.push(startNetwork("sandbox", ip, config.nets.sandbox)); });
+    // The Docker daemon's proxy answers on the EXTERNAL address only, and only the host's own address on that network.
+    if (PROXY !== undefined) addresses.external.forEach(function (ip) { hosted.push({ role: "daemon-proxy", proxy: startDaemonProxy(ip) }); });
     if (QUIET) return hosted;
     process.on("uncaughtException", function (error) { log("error", { reason: String(error && error.code) }); });
     process.on("SIGTERM", function () { process.exit(0); });
@@ -571,7 +663,7 @@ function main() {
 }
 
 if (process.env.ROVARA_GW_LIBRARY === "1") {
-  module.exports = { callbackRoute: callbackRoute, startCallbackRelay: startCallbackRelay, hostAllowed: hostAllowed, startTlsForwarder: startTlsForwarder, startPlainForwarder: startPlainForwarder, main: main, validName: validName, publicAddress: publicAddress, patternCovers: patternCovers, serverNameOf: serverNameOf, answerFor: answerFor, peerIn: peerIn, parseQuestion: parseQuestion, inCidr: inCidr, stats: stats };
+  module.exports = { callbackRoute: callbackRoute, startCallbackRelay: startCallbackRelay, hostAllowed: hostAllowed, startTlsForwarder: startTlsForwarder, startPlainForwarder: startPlainForwarder, startDaemonProxy: startDaemonProxy, proxyAllowed: proxyAllowed, s3Host: s3Host, main: main, validName: validName, publicAddress: publicAddress, patternCovers: patternCovers, serverNameOf: serverNameOf, answerFor: answerFor, peerIn: peerIn, parseQuestion: parseQuestion, inCidr: inCidr, stats: stats };
 } else {
   main();
 }
