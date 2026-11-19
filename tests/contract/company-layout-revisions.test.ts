@@ -222,8 +222,9 @@ describe("R2-F1 lane 1: a named company's revisions come from its own partition"
     w.project(A, "demo-tasklog", 1); w.grant(A, MEMBER, "demo-tasklog");
     const members = (id: string, name = "demo-tasklog") => w.call(id, "GET", `/v1/dev/client/projects/${name}/members`);
     expect((await members(OWNER)).status).toBe(200);
-    // Bob owns company B, which has no such project: not his to manage.
-    expect((await members(BOB)).status).toBe(403);
+    // Bob owns company B, which has no such project: not his to manage. Batch b20 (controller-agreed): 404, the stricter rule of #1088 / DEC 254zzz81
+    // (a project not in the caller's company reads as missing, so its existence never leaks).
+    expect((await members(BOB)).status).toBe(404);
     w.project(B, "demo-tasklog", 1);
     expect((await members(BOB)).status).toBe(200);
     // A project only a legacy row names is not company A's.
