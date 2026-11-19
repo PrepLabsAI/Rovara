@@ -20,6 +20,8 @@ import { usdPerMillion } from "../core/cost/price-table.js";
 import { registryModelPrices } from "../local/model-prices.js";
 
 export const SECOND_PROVIDER_UNAVAILABLE = "Second review not available: connect a second AI provider";
+/** The fixed line when the second-review settings cannot be read: nothing is started, no reviewer grant is requested and no gateway call is made (fail closed; default is OFF). */
+export const SECOND_REVIEW_SETTINGS_UNAVAILABLE = "second review skipped: settings unavailable";
 export interface HostedReviewerOptions {
   flow: TaskFlowDeps;
   companyId: OrgId;
@@ -71,7 +73,11 @@ export function createHostedReviewers(options: HostedReviewerOptions) {
       try {
         const settings = await readSecondReviewSettings(flow.store, companyId, task.project);
         mode = configuredSecondReviewMode({ project: settings.projectMode, companyDefault: settings.companyDefault, companyLock: settings.companyLock });
-      } catch { mode = "shadow" as const; }
+      } catch (error) {
+        // Fail closed: settings that cannot be read never become an opt-in. Nothing below runs: no authority read, no admission, no reviewer grant, no gateway call.
+        flow.log?.({ component: "broker", event: "second_review.settings_unreadable", errorName: error instanceof Error ? error.name : "unknown" });
+        return { firstEvent: SECOND_REVIEW_SETTINGS_UNAVAILABLE };
+      }
       if (mode === "off") return {};
       const unavailable = () => ({ firstEvent: SECOND_PROVIDER_UNAVAILABLE, record: { candidateDigest: input.task!.workflow!.candidate!.digest, notRun: { mode: mode === "on" ? "on" as const : "shadow" as const, reason: "no-candidate" as const } } });
       const access = await authority();
