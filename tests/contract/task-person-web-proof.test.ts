@@ -66,7 +66,7 @@ const task = (overrides: Partial<DeveloperTaskRecord> & Record<string, unknown> 
   createdAt: CREATED, updatedAt: CREATED, companyId: COMPANY_A,
   workflow: { revision: 7, stage: "PLAN_REVIEW", state: "WAITING" } as never,
   ...overrides,
-} as DeveloperTaskRecord);
+});
 
 const slackRow = (personId: string, slackUserId: string, name: string) => ({
   pk: `DEVTASK#${TASK_A}`, sk: `PERSON#${personId}`, schemaVersion: 1, personId, developerId: developerIdForSlackUser(slackUserId),
@@ -235,8 +235,8 @@ describe("the web proof: all four rules, read live, no Slack call", () => {
   });
 
   it("rule 3: the task's company is the stored task's (absent = the implicit company)", async () => {
-    const legacy = task({ companyId: undefined });
-    delete (legacy as unknown as Record<string, unknown>).companyId;
+    const legacy = task();
+    delete legacy.companyId;
     const h = harness({ tasks: [legacy], memberships: { [GALE_ID]: { companyId: IMPLICIT_COMPANY_ID } } });
     h.seed(webRow(), subjectRow(P_GALE, GALE_ID));
     expect(await checkTaskPersonIdentity(h.identityDeps, legacy, GALE_ID)).toMatchObject({ eligible: true, channelMember: true });
@@ -248,7 +248,9 @@ describe("the web proof: all four rules, read live, no Slack call", () => {
     ["a null company id on the stored task", { companyId: null }, {}],
     ["a caller's copy naming another company", {}, { companyId: COMPANY_B }],
   ])("rule 3: refuses %s", async (_label, storedOverride, givenOverride) => {
-    const stored = task(storedOverride);
+    const stored = task();
+    // Model malformed persisted data without widening the typed fixture helper.
+    Object.assign(stored, storedOverride);
     const h = harness({ tasks: [stored] });
     h.seed(webRow(), subjectRow(P_GALE, GALE_ID));
     expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, { ...stored, ...givenOverride }, GALE_ID))).code).toBe("PROJECT_ACCESS_DENIED");

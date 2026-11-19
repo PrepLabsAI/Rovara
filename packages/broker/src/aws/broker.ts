@@ -302,7 +302,7 @@ import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepositor
 import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, githubDisconnectedRefusal, GithubInstallationBindings, isGithubDisconnected } from "./github-credentials.js"; import { handleGithubInstallationWebhook, isGithubInstallationEvent } from "./github-lifecycle.js"; import { GitHubAppCredentialProvider as GitHubAppClient } from "../plugins/code-host/github/client.js"; import { bulkCreate, COMMIT_DEADLINE_MS, companyProjectCreatorOf, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js"; import { companyNameClaimWrites, companyNameTaken, companyProjectNaming, type ClientProjectNaming } from "./company-project-names.js";
 import { handleLinearAppWebhook, LINEAR_WEBHOOK_PATH, linearWebhookResponse, type LinearWebhookWiring } from "./linear-app-webhook.js";
 import { linearCompanyWiring } from "./linear-wiring.js";
-import { boundedCompanyReads, ownPartitionRow, recordInCompany, type CompanyMembershipReader } from "./company-check.js"; import { OFFERED_MODELS_COMPANY_PARAMETER, offeredModelsCompany } from "./admin-offered-models.js";
+import { assertTaskProjectCompany, boundedCompanyReads, ownPartitionRow, recordInCompany, type CompanyMembershipReader } from "./company-check.js"; import { OFFERED_MODELS_COMPANY_PARAMETER, offeredModelsCompany } from "./admin-offered-models.js";
 import { grantKeyFor, namedCompany, revisionKeyFor } from "./company-layout.js";
 import { refuseNamedCompanyName } from "./admin-name-collision.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
@@ -4954,6 +4954,7 @@ async function taskOperationParts(
   identity?: AuthenticatedIdentity,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
+  if (identity?.developer?.client === "Slack") assertTaskProjectCompany(identity.developer, settings);
   const resolvedModel = await resolveProjectModel(dependencies, settings);
   // #341: a task whose owner connected a working ChatGPT plan runs on it; `model` stays the default it falls back to.
   const chatgpt = dependencies.chatgpt === undefined ? undefined

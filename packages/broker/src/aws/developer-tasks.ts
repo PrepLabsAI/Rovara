@@ -1590,7 +1590,8 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   if (full !== undefined && await releaseFinishedTasksOf(deps, charge.member) > 0) full = await limitReached(deps.documentClient, deps.tableName, charge, limits);
   if (full !== undefined) return refused(await limitError(deps, caller, full, limits));
 
-  const identity = developerTaskIdentity({ taskId, developerId: caller.developerId, provider: caller.amr, developerName: caller.name, client });
+  const identity = developerTaskIdentity({ taskId, developerId: caller.developerId, provider: caller.amr, developerName: caller.name, client,
+    ...(access.companyId === undefined ? {} : { companyId: access.companyId }) });
   const preparation = await deps.actions.preparation(identity, project, request.requestId);
   const workspaceId = preparation.workspace.id;
   const conversationId = randomUUID();
@@ -1599,7 +1600,7 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   const task: DeveloperTaskRecord = {
     ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, developerId: caller.developerId, provider: caller.amr, developerName: caller.name,
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
-    client, project: request.project, title, workspaceId, ownerKey: identity.ownerKey, conversationId, startingRevision: revision,
+    client, ...(access.companyId === undefined ? {} : { companyId: access.companyId }), project: request.project, title, workspaceId, ownerKey: identity.ownerKey, conversationId, startingRevision: revision,
     // A workflow task quotes the request in each plan's "why"; every start (Slack and AI tool) comes through here.
     ...(request.workflow === true ? { requestText: storedRequestText(request.instructions) } : {}),
     charge, shared: share !== undefined, ...(share === undefined ? {} : { share, shareVersion: 1 }),

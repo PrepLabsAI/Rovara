@@ -76,6 +76,14 @@ export function recordInCompany(record: unknown, companyId: string | undefined):
   return company.success && company.data === companyId;
 }
 
+/** A Slack task's legacy project read must match the task's persisted, valid company, never a same-name row from another layout. */
+export function assertTaskProjectCompany(task: { companyId?: unknown }, projectRow: unknown): void {
+  const company = OrgIdSchema.safeParse(task.companyId);
+  if (!company.success || !recordInCompany(projectRow, company.data)) {
+    throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  }
+}
+
 /** A row in a company's own partition: the partition key (`ORG#<company>#...`) already names its company, so the row may leave `companyId`/`orgId` out (Code's own writers and the
  * switch-over move do). A row that names a company must name THIS one: a present, different (or malformed) owner is drift, never this company's data. */
 export function ownPartitionRow(row: Record<string, unknown>, companyId: string): boolean {
