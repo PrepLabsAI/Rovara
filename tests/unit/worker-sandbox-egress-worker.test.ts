@@ -1,6 +1,7 @@
 // Lane L4-NETG (DEC 254zzz77): what the WORKER does on a gateway-mode EC2 host. Everything that runs task code goes on the internal network with the gateway as its only name server, and nothing falls back to a bridge with a
 // way out: the task sandbox, the setup run's sandbox, an eval install box and the devcontainer. Not in gateway mode (`bridge`, and every laptop), none of this applies and the arguments are exactly what they were.
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -52,16 +53,18 @@ describe("gatewayEgressFor", () => {
 describe("the task sandbox on a gateway-mode worker", () => {
   const cleanup: string[] = [];
   afterEach(async () => { await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
-  async function start(environment: NodeJS.ProcessEnv, extra: Partial<ConstructorParameters<typeof TaskSandbox>[0]> = {}): Promise<{ calls: string[][]; error?: unknown }> {
+  async function start(environment: NodeJS.ProcessEnv, extra: Partial<ConstructorParameters<typeof TaskSandbox>[0]> = {}): Promise<{ calls: string[][]; sandbox: InstanceType<typeof TaskSandbox>; error?: unknown }> {
     const root = await realpath(await mkdtemp(join(tmpdir(), "agentx-gateway-sandbox-")));
-    cleanup.push(root);
+    const resolverRoot = await realpath(await mkdtemp(join(tmpdir(), "agentx-gateway-resolver-")));
+    cleanup.push(root, resolverRoot);
     const calls: string[][] = [];
     const docker = { run: async (args: readonly string[]) => { calls.push([...args]); return { exitCode: 0, stdout: "", stderr: "" }; } };
+    const sandbox = new TaskSandbox({ rootPath: root, taskId: TASK, docker, image: IMAGE, environment, gatewayResolverDirectory: resolverRoot, ...extra });
     try {
-      await new TaskSandbox({ rootPath: root, taskId: TASK, docker, image: IMAGE, environment, ...extra }).start();
-      return { calls };
+      await sandbox.start();
+      return { calls, sandbox };
     } catch (error) {
-      return { calls, error };
+      return { calls, sandbox, error };
     }
   }
 
@@ -71,13 +74,28 @@ describe("the task sandbox on a gateway-mode worker", () => {
     expect(calls.filter((call) => call[0] === "network")).toEqual([]);
     const run = calls.find((call) => call[0] === "run")!;
     expect(flag(run, "--network")).toEqual(["rovara-snet"]);
-    expect(flag(run, "--dns")).toEqual(["172.28.250.2"]);
+    expect(flag(run, "--dns")).toEqual([]);
+    const resolverMount = flag(run, "--mount").find((value) => value.includes("dst=/etc/resolv.conf,readonly"));
+    expect(resolverMount).toBeDefined();
+    const resolverPath = /^type=bind,src=([^,]+),dst=\/etc\/resolv\.conf,readonly$/u.exec(resolverMount!)![1]!;
+    expect(await readFile(resolverPath, "utf8")).toBe("nameserver 172.28.250.2\noptions ndots:0 timeout:3 attempts:1\n");
     expect(run).not.toContain(TASK_SANDBOX_NETWORK);
+  });
+
+  it("removes the run-owned resolver after the sandbox is removed", async () => {
+    const { calls, sandbox } = await start(GATEWAY_ENV);
+    const mount = flag(calls.find((call) => call[0] === "run")!, "--mount").find((value) => value.includes("dst=/etc/resolv.conf,readonly"))!;
+    const file = /^type=bind,src=([^,]+),dst=\/etc\/resolv\.conf,readonly$/u.exec(mount)![1]!;
+    expect(existsSync(file)).toBe(true);
+    await sandbox.dispose();
+    expect(existsSync(file)).toBe(false);
   });
 
   it("ignores a name server a caller asked for: the gateway is the only one", async () => {
     const { calls } = await start(GATEWAY_ENV, { dns: ["8.8.8.8", "1.1.1.1"] });
-    expect(flag(calls.find((call) => call[0] === "run")!, "--dns")).toEqual(["172.28.250.2"]);
+    const run = calls.find((call) => call[0] === "run")!;
+    expect(flag(run, "--dns")).toEqual([]);
+    expect(flag(run, "--mount").some((value) => value.includes("dst=/etc/resolv.conf,readonly"))).toBe(true);
   });
 
   it("REFUSES to start on a network of its own (a bridge with a way out), and without the network or the name server; docker is never asked to run anything", async () => {
@@ -86,6 +104,7 @@ describe("the task sandbox on a gateway-mode worker", () => {
       [{ AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway" }, {}],
       [{ AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_NETWORK: "rovara-snet" }, {}],
       [{ AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_DNS: "172.28.250.2" }, {}],
+      [GATEWAY_ENV, { gatewayResolverDirectory: "/dev/null/rovara-resolver" }],
     ] as const) {
       const { calls, error } = await start(environment, extra);
       expect(error, JSON.stringify(environment)).toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
@@ -112,13 +131,15 @@ describe("the task sandbox on a gateway-mode worker", () => {
     expect(setupSharedNetwork({ AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_NETWORK: "rovara-snet-0123" })).toBeUndefined();
     expect(setupSharedNetwork({ AGENTX_SANDBOX_NETWORK: "rovara-snet-0123" })).toBe("rovara-snet-0123");
     const root = await realpath(await mkdtemp(join(tmpdir(), "agentx-gateway-setup-")));
-    cleanup.push(root);
+    const resolverRoot = await realpath(await mkdtemp(join(tmpdir(), "agentx-gateway-setup-resolver-")));
+    cleanup.push(root, resolverRoot);
     const calls: string[][] = [];
     const docker = { run: async (args: readonly string[]) => { calls.push([...args]); return { exitCode: 0, stdout: "", stderr: "" }; } };
-    await createSetupSandbox({ rootPath: root, taskId: TASK, docker, image: IMAGE, environment: GATEWAY_ENV }).start();
+    await createSetupSandbox({ rootPath: root, taskId: TASK, docker, image: IMAGE, environment: GATEWAY_ENV, gatewayResolverDirectory: resolverRoot }).start();
     const run = calls.find((call) => call[0] === "run")!;
     expect(flag(run, "--network")).toEqual(["rovara-snet"]);
-    expect(flag(run, "--dns")).toEqual(["172.28.250.2"]);
+    expect(flag(run, "--dns")).toEqual([]);
+    expect(flag(run, "--mount").some((value) => value.includes("dst=/etc/resolv.conf,readonly"))).toBe(true);
   });
 });
 

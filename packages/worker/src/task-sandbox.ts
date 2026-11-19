@@ -27,6 +27,8 @@ import { modelHostAddHostArgs, type ModelHostBlock } from "./model-helper-block.
 
 /** The user-defined bridge network of every sandbox: outbound internet works, the host's network and other containers' do not. */
 export const TASK_SANDBOX_NETWORK = "agentx-task";
+/** Host-shared, worker-owned files used by containers on the gateway's internal network. */
+export const GATEWAY_RESOLVER_DIRECTORY = "/var/lib/rovara-egress/runs";
 /** The label every sandbox carries, with the ID of the operation it serves. */
 export const TASK_SANDBOX_LABEL = "agentx.task";
 /** The label that says which workspace a sandbox belongs to, so a worker removes only its own. */
@@ -246,6 +248,8 @@ export interface TaskSandboxRunInput {
    * forwarder (setup-dns-watch.ts), which is how a blocked website is found without reading any command's output. At most `TASK_SANDBOX_DNS_MAX`.
    */
   dns?: readonly string[];
+  /** Worker-owned resolver mount. Docker 25 does not forward embedded DNS for internal-only containers. */
+  resolvConfPath?: string;
   /**
    * A network of the sandbox's own instead of the shared task network, and the address it takes on it (`--network <name> --ip <ip>`). Only the setup run sets it: each setup run has a small network of its
    * own, with the DNS watch's helper container on it (setup-network.ts). The network is made and removed by the caller; the sandbox does not create it. Absent: the task network, as every sandbox.
@@ -287,6 +291,7 @@ export function taskSandboxRunArgs(input: TaskSandboxRunInput): string[] {
     "--network", input.network?.name ?? input.sharedNetwork ?? TASK_SANDBOX_NETWORK,
     ...(input.network === undefined ? [] : ["--ip", input.network.ip]),
     ...dnsArgs(input.dns),
+    ...(input.resolvConfPath === undefined ? [] : ["--mount", `type=bind,src=${input.resolvConfPath},dst=/etc/resolv.conf,readonly`]),
     ...(input.modelBlock === undefined ? [] : modelHostAddHostArgs(input.modelBlock)),
     "--user", TASK_SANDBOX_USER,
     // A sandbox shares the instance with the worker: a runaway command (or a file-tool search) must not take every core or process.
@@ -323,6 +328,8 @@ export interface TaskSandboxOptions {
   /** Default: AGENTX_SANDBOX_IMAGE in `environment`. */
   image?: string;
   environment?: NodeJS.ProcessEnv;
+  /** Test seam; production files are placed under the host-shared egress directory. */
+  gatewayResolverDirectory?: string;
   /** DNS servers for the sandbox (see `TaskSandboxRunInput.dns`). Default: none, the daemon's resolver. */
   dns?: readonly string[];
   /** A network of its own (see `TaskSandboxRunInput.network`). */
@@ -349,6 +356,7 @@ export class TaskSandbox {
   private disposed = false;
   private services: SandboxServices | undefined;
   private wrappedExec: ContainerExec | undefined;
+  private gatewayResolverDirectory: string | undefined;
 
   constructor(private readonly options: TaskSandboxOptions) {
     if (options.modelBlock?.role !== undefined && options.modelBlock.role !== "working") throw agentXError("CONFIG_INVALID", "a task sandbox is the working sandbox: it cannot take a model block made for a round's check sandbox");
@@ -440,7 +448,10 @@ export class TaskSandbox {
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       const result = await this.docker.run(["rm", "--force", this.name], { timeoutMs: DOCKER_CALL_TIMEOUT_MS })
         .catch((error: unknown) => ({ exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : String(error) }));
-      if (result.exitCode === 0 || /no such container/iu.test(result.stderr)) return true;
+      if (result.exitCode === 0 || /no such container/iu.test(result.stderr)) {
+        await this.removeGatewayResolverFile();
+        return true;
+      }
       failure = (result.stderr || result.stdout).trim().split("\n").slice(-3).join(" ").slice(0, 400) || `exit ${String(result.exitCode)}`;
     }
     (this.options.log ?? logEvent)({ event: "task-sandbox.remove.failed", container: this.name, taskId: this.options.taskId, reason: failure });
@@ -461,11 +472,28 @@ export class TaskSandbox {
     if (this.options.network === undefined && sharedNetwork === undefined) await this.ensureNetwork();
     const dns = gateway === undefined ? this.options.dns : [gateway.dns];
     const maskedPaths = await hiddenWorkspaceDirectories(root);
+    let resolvConfPath: string | undefined;
+    if (gateway !== undefined) {
+      const resolverDirectory = join(this.options.gatewayResolverDirectory ?? GATEWAY_RESOLVER_DIRECTORY, randomUUID());
+      resolvConfPath = join(resolverDirectory, "resolv.conf");
+      try {
+        await mkdir(resolverDirectory, { recursive: true, mode: 0o700 });
+        await writeFile(resolvConfPath, `nameserver ${gateway.dns}\noptions ndots:0 timeout:3 attempts:1\n`, { flag: "wx", mode: 0o644 });
+        this.gatewayResolverDirectory = resolverDirectory;
+      } catch (error) {
+        await rm(resolverDirectory, { recursive: true, force: true }).catch(() => undefined);
+        throw agentXError("RUNTIME_UNAVAILABLE", `this worker could not write the gateway resolver file, so AgentX did not start the sandbox: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     const result = await this.docker.run(
-      taskSandboxRunArgs({ name: this.name, taskId: this.options.taskId, image, rootPath: root, maskedPaths, ...(dns === undefined ? {} : { dns }), ...(this.options.network === undefined ? {} : { network: this.options.network }), ...(sharedNetwork === undefined ? {} : { sharedNetwork }), ...(this.options.modelBlock === undefined ? {} : { modelBlock: this.options.modelBlock.block }) }),
+      taskSandboxRunArgs({ name: this.name, taskId: this.options.taskId, image, rootPath: root, maskedPaths, ...(gateway === undefined && dns !== undefined ? { dns } : {}), ...(resolvConfPath === undefined ? {} : { resolvConfPath }), ...(this.options.network === undefined ? {} : { network: this.options.network }), ...(sharedNetwork === undefined ? {} : { sharedNetwork }), ...(this.options.modelBlock === undefined ? {} : { modelBlock: this.options.modelBlock.block }) }),
       { timeoutMs: SANDBOX_START_TIMEOUT_MS },
-    );
+    ).catch(async (error: unknown) => {
+      await this.removeGatewayResolverFile();
+      throw error;
+    });
     if (result.exitCode !== 0) {
+      await this.removeGatewayResolverFile();
       const detail = (result.stderr || result.stdout).trim().split("\n").slice(-5).join(" ").slice(0, 800);
       throw agentXError("RUNTIME_UNAVAILABLE", `AgentX could not start the task sandbox${result.timedOut === true ? " (timed out)" : ""}: ${detail || `exit ${String(result.exitCode)}`}`);
     }
@@ -475,12 +503,19 @@ export class TaskSandbox {
         await this.options.modelBlock.attach(this.name);
       } catch {
         await this.remove();
+        await this.removeGatewayResolverFile();
         throw agentXError("RUNTIME_UNAVAILABLE", "AgentX could not start the task sandbox: it could not join the model helper's network");
       }
     }
     await this.prepareUserBase(root);
     // A write the file tools' helper was killed in leaves a `.agentx-file-ops-*` file; an earlier task's must not reach this one's snapshots.
     await fileOpsExec(this.fileOpsTarget(), { root, op: "sweep", path: root }).catch(() => undefined);
+  }
+
+  private async removeGatewayResolverFile(): Promise<void> {
+    const directory = this.gatewayResolverDirectory;
+    this.gatewayResolverDirectory = undefined;
+    if (directory !== undefined) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
   }
 
   /**
