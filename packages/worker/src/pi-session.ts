@@ -25,7 +25,6 @@ import {
   type SessionStats,
   type Skill,
 } from "@earendil-works/pi-coding-agent";
-import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { ROUTE_PROVIDER, TOOL_SEARCH_TOOL_NAME, createModelRuntimeWithFallback, excludeUnselectedBuiltIns, planToolExposure, routeUsageIdentity, type ChatGptFallback, type ChatGptFallbackReason, type ModelFallbackNotice, type ModelProxyOptions } from "@agentx/model-runtime";
 import { createPiSettingsManager } from "@agentx/model-runtime/pi-settings";
@@ -625,15 +624,26 @@ async function createDefaultSession(
     const live: { session?: AgentSession } = {};
     const summarise: CompactionSummariser = async (preparation, instructions, signal) => {
       const model = live.session?.model ?? sessionModel;
-      // As Pi does: with the default stream, a key that cannot be resolved is an error to see; with a custom stream (the worker's own runtimes carry their key) it is left to the stream.
+      // Pi's current session stream owns credential resolution. Pre-reading auth here bypasses runtime-managed credentials and can write to Pi's host auth store.
       const streamFunction = live.session?.agent.streamFunction;
-      let auth: Awaited<ReturnType<ModelRuntime["getAuth"]>>;
-      try { auth = await modelRuntime.getAuth(model, { signal }); } catch (error) { if (signal.aborted || streamFunction === streamSimple) throw error; auth = undefined; }
-      const requestModel = auth?.auth.baseUrl ? { ...model, baseUrl: auth.auth.baseUrl } : model;
-      const headers = auth?.auth.headers === undefined ? undefined : (Object.fromEntries(Object.entries(auth.auth.headers).filter((entry) => entry[1] !== null)) as Record<string, string>);
+      // Each completed model call can incur spend even when Pi later rejects its response, retries it, or fails the turn-prefix summary.
+      // Persist at the stream boundary using Pi's existing usage entry, before compact() can throw or cancellation can discard its result.
+      const trackedStream: NonNullable<Parameters<typeof compact>[7]> = async (...args) => {
+        const stream = await (streamFunction === undefined ? modelRuntime.streamSimple(...args) : streamFunction(...args));
+        const recorded = stream.result().then((message) => {
+          manager.appendUsage("compaction", message.provider, message.responseModel ?? message.model, message.usage);
+          return message;
+        });
+        // Memoize the recorded result: a consumer reading it again must not record the call twice.
+        stream.result = () => recorded;
+        return stream;
+      };
       // A retry of the summary is reported as a fixed sentence (the provider's own words are not).
       const retries = { onRetryScheduled: (attempt: number, maxAttempts: number) => { try { input.onDiagnostic?.(`conversation compaction: the summary will be tried again (${String(attempt)} of ${String(maxAttempts)})`); } catch { /* reporting must not break a turn */ } } };
-      return compact(preparation, requestModel, auth?.auth.apiKey, headers, instructions, signal, live.session?.thinkingLevel, streamFunction, auth?.env, settingsManager.getRetrySettings(), retries);
+      const result = await compact(preparation, model, undefined, undefined, instructions, signal, live.session?.thinkingLevel, trackedStream, undefined, settingsManager.getRetrySettings(), retries);
+      // Every attempt is already persisted, including attempts omitted from Pi's success-only aggregate.
+      delete result.usage;
+      return result;
     };
     const compaction = compactionExtension(input.compaction ?? {}, summarise, input.onDiagnostic === undefined ? undefined : (message) => { try { input.onDiagnostic?.(redactText(message)); } catch { /* reporting must not break a turn */ } });
     const { resourceLoader, settingsManager } = await createWorkerResources({ ...input, extensionFactories: [...(input.extensionFactories ?? []), ...midRun, ...(sourceMcp?.extensions ?? []), ...exposure.extensions, compaction], ...(exposure.note === undefined ? {} : { toolSearchNote: exposure.note }), loadedSkills: skills, ...(input.agentRun !== undefined ? { systemPrompt: input.agentRun.systemPrompt } : input.workflowMode === "SETUP" ? { systemPrompt: SETUP_SYSTEM_PROMPT } : input.workflowMode === "WIKI" ? { systemPrompt: WIKI_SYSTEM_PROMPT } : {}) });
