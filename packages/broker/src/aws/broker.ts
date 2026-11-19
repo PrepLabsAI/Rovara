@@ -3,7 +3,8 @@ import { createHostedBrokerCoreServices } from "./core-job-services.js"; import 
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
 import { createSlackLinkCodes, createSlackPersonResolver, slackBindingCompany, slackCompanyPerson, slackCompanyProject, type SlackCompanyDependencies, type SlackWorkspaceAccess } from "./slack-person.js";
-import { latestRevisionRowFor, namedCompanySlackBinding, slackChannelBindingKeyFor } from "./company-layout.js";
+import { latestRevisionRowFor } from "./company-layout.js";
+import { namedCompanySlackBinding, slackChannelBindingKeyFor } from "./slack-company-layout.js";
 import { companyThenInstallLinkCodes, installAdapterLinkCodes, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
 import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { askSlackAnswerForIdentity } from "./slack-answers.js";
