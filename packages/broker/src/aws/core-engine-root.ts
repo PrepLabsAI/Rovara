@@ -1049,7 +1049,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           canReadProject: (personId, project) => projectGrant(personId, project),
           // DEC 254zzz94: the Merge button, over the root's own grant reader, the project's pinned repositories on the registry's code host, and the project's merge method (Code's default: squash).
           merge: {
-            projectGrantRole: (personId, project) => projectGrantRole(personId, project),
+            projectGrantRole: (personId, project, companyId) => projectGrantRole(personId, project, companyId),
             merge: (audit) => hostedMergeDependencies({ runtime, registry, audit, settings: inputs.codeSettings, defaults: DEFAULT_CODE_SETTINGS, now: () => now().getTime(), policyHook: hookSettings !== undefined || hookProblem }),
             afterMerge: (taskId) => wakeMergeTracking(runtime.flow.deps.store, taskId, now().getTime()),
           },
