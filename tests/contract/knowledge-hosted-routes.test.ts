@@ -139,7 +139,7 @@ describe("the knowledge routes at the developer router", () => {
     expect(await callOn(deps, "PUT", "/v1/dev/company/lessons/local-tools", `Bearer ${web.access!}`, { stays: true })).toEqual({ status: 200, body: { stays: true } });
     expect(await callOn(deps, "PUT", `${P}/lessons/local-tools`, `Bearer ${web.access!}`, { enabled: false })).toMatchObject({ status: 200, body: { enabled: false } });
     expect(events).toHaveLength(2);
-    // Another full-access client that is not the web app (an AI tool's) is refused too.
+    // A script token is not a sign-in at all here (the unit test covers a full-access caller with webApp false or missing).
     expect((await callOn(deps, "PUT", "/v1/dev/company/lessons/local-tools", `Bearer ${TOKEN}`, { stays: false })).status).toBe(401);
   });
 

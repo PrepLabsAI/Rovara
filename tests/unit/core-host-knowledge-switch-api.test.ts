@@ -200,6 +200,15 @@ describe("the website's own client only (owner DEC 254zzz99)", () => {
     expect(await w.localTools.readCompany(A)).toBe(false);
     expect(ON_THE_WEBSITE).toBe("Do this on the Rovara website: the command line and AI tools cannot make this change.");
   });
+  it("is checked before anything is read: membership, the store, the audit sink and the catalog are never asked for a refused PUT", async () => {
+    const asked: string[] = [];
+    const never = (what: string) => async (): Promise<never> => { asked.push(what); throw new Error(what); };
+    const api = createKnowledgeSwitchApi({ companyOf: never("membership"), store: never("store"), audit: never("audit"), projectExists: never("catalog"), projectRole: never("role"), now });
+    for (const [path, body] of [[KNOWLEDGE_SWITCH_COMPANY_PATH, { stays: true }], ["/v1/dev/projects/payments/lessons/local-tools", { enabled: false }]] as const) {
+      await expect(api.answer({ method: "PUT", path, body: JSON.stringify(body) }, { personId: "ownerA" })).rejects.toThrow(ON_THE_WEBSITE);
+    }
+    expect(asked).toEqual([]);
+  });
   it("the same person through the web app succeeds, and the GETs are the same for any full-access client", async () => {
     const w = world();
     expect(await call(w, "PUT", KNOWLEDGE_SWITCH_COMPANY_PATH, { personId: "ownerA", webApp: true }, { stays: true })).toEqual({ stays: true });
@@ -336,13 +345,13 @@ describe("the route table and the router", () => {
     expect(isKnowledgeSwitchPath("/v1/dev/projects/payments/lessons/local-tools")).toBe(true);
     for (const other of ["/v1/dev/company/lessons/local-tools/", "/v1/dev/company/lessons", "/v1/dev/projects/p/lessons/local-tools/x", "/v1/dev/projects//lessons/local-tools", "/v1/dev/projects/a/b/lessons/local-tools", "/v1/dev/me/lessons/local-tools", "/v1/app/org/lessons/local-tools"]) expect(isKnowledgeSwitchPath(other), other).toBe(false);
   });
-  it("the dev router asks the same path test and answers 'route not found' where the install has no such API", () => {
+  it("the dev router asks the same path test and answers a fixed not-served 404 (never 'route not found', which would make a route row an unknown route) where the install has no such API", () => {
     const source = readFileSync("packages/broker/src/aws/developer-routes.ts", "utf8");
     // The router's two literals (the inventory scanner reads them) say exactly what the API's own path test says.
     expect(source).toContain(`url.pathname === "${KNOWLEDGE_SWITCH_COMPANY_PATH}" || /^\\/v1\\/dev\\/projects\\/[^/]+\\/lessons\\/local-tools$/u.test(url.pathname)`);
     for (const path of [KNOWLEDGE_SWITCH_COMPANY_PATH, "/v1/dev/projects/x/lessons/local-tools", "/v1/dev/projects/x/y/lessons/local-tools", "/v1/dev/projects//lessons/local-tools", "/v1/dev/company/lessons/local-tools/"]) {
       expect(isKnowledgeSwitchPath(path), path).toBe(path === KNOWLEDGE_SWITCH_COMPANY_PATH || /^\/v1\/dev\/projects\/[^/]+\/lessons\/local-tools$/u.test(path));
     }
-    expect(source).toMatch(/if \(deps\.knowledgeSwitch === undefined\) throw agentXError\("NOT_FOUND", "route not found"\);/u);
+    expect(source).toMatch(/if \(deps\.knowledgeSwitch === undefined\) throw agentXError\("NOT_FOUND", "These settings are not available on this install\."\);/u);
   });
 });
