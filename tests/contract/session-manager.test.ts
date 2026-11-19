@@ -56,6 +56,21 @@ async function provisionToReady(sessions: SessionManager, workspaceId: string) {
 }
 
 describe("session manager: first provisioning", () => {
+  it("keeps each workspace's session and provisioning idempotency name separate", async () => {
+    const { db, sessions, startExecution, workspaceId } = setup();
+    const otherWorkspaceId = randomUUID();
+
+    await sessions.ensureSession({ workspaceId, binding });
+    await sessions.ensureSession({ workspaceId: otherWorkspaceId, binding });
+
+    expect(startExecution.mock.calls.map(([call]) => call.name)).toEqual([
+      `ws-${workspaceId}-gen-1`,
+      `ws-${otherWorkspaceId}-gen-1`,
+    ]);
+    expect(db.get(`WORKSPACE#${workspaceId}`, "SESSION")).toMatchObject({ workspaceId, generation: 1 });
+    expect(db.get(`WORKSPACE#${otherWorkspaceId}`, "SESSION")).toMatchObject({ workspaceId: otherWorkspaceId, generation: 1 });
+  });
+
   it("starts generation 1 in the chosen zone, parks the dispatched record and indexes the state", async () => {
     const { db, sessions, startExecution, workspaceId, session } = setup();
     const { outboxId } = seedOperation(db, workspaceId);

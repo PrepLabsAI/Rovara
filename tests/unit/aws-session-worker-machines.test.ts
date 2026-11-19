@@ -41,6 +41,18 @@ runWorkerMachinesConformance("EC2 workspace sessions (Code's AWS deployment)", {
 });
 
 describe("Code's EC2 session machines, company by company", () => {
+  it("refuses to deliver one workspace's invocation to another workspace's machine", async () => {
+    const world = createSessionMachinesWorld();
+    const machines = world.machinesFor(COMPANY_A);
+    const machineWorkspaceId = world.workspace(COMPANY_A);
+    const otherWorkspaceId = world.workspace(COMPANY_A);
+    const machine = await machines.start({ machineKey: machineWorkspaceId, companyId: COMPANY_A });
+    await world.settle();
+
+    await expect(machines.deliver(machine.machineId, invocationFor(otherWorkspaceId))).rejects.toMatchObject({ code: "rejected" });
+    expect(world.posts).toEqual([]);
+  });
+
   it("never starts, stops, ends, asks about or hands a job to another company's workspace, and tells it apart from no workspace at all only by nothing", async () => {
     const world = createSessionMachinesWorld();
     const ofB = world.workspace(COMPANY_B);

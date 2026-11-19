@@ -25,7 +25,7 @@ import { modelHostAddHostArgs, type ModelHostBlock } from "./model-helper-block.
  * A project's devcontainer is the other sandbox (devcontainer.ts, devcontainer-policy.ts).
  */
 
-/** The user-defined bridge network of every sandbox: outbound internet works, the host's network and other containers' do not. */
+/** Sandboxes on one worker share this bridge; Docker permits inter-container traffic here, so task isolation comes from one VM per task workspace. */
 export const TASK_SANDBOX_NETWORK = "agentx-task";
 /** The label every sandbox carries, with the ID of the operation it serves. */
 export const TASK_SANDBOX_LABEL = "agentx.task";
