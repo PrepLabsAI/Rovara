@@ -1,0 +1,34 @@
+import { expect, it } from "vitest";
+import { createTaskTokenDescriber } from "../../packages/broker/src/core/model-gateway/describer.js";
+import { mintTaskToken, type TaskTokenOperation } from "../../packages/broker/src/core/model-gateway/token.js";
+import { intakePortsOf } from "../../packages/broker/src/core/intake/wiring.js";
+import { ingestIntake } from "../../packages/broker/src/core/intake/engine.js";
+import { operationKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
+import { createSessionStartExtras } from "../../packages/broker/src/local/app/session-start.js";
+import { createHarness } from "../support/task-flow-harness.js";
+import { signingWorld } from "../support/model-gateway.js";
+
+it("a Linear tracker start still mints model access with the member payer", async () => {
+  const h = createHarness({ understandFirst: true }); await h.registerProject();
+  h.deps.startExtras = createSessionStartExtras(h.deps.companyId);
+  h.deps.modelAccess = { route: async () => ({ alias: "claude-sonnet-4-5", api: "anthropic-messages", catalog: "claude-sonnet-4-5" }) };
+  const intake = intakePortsOf({ store: h.store, companyId: h.deps.companyId, now: () => h.clock.now, identity: { getPrincipal: async () => h.owner.principal, resolveExternalAccount: async () => h.owner.principal }, access: h.deps.access, flow: h.flow, owner: h.owner.principal, fenceKey: Buffer.alloc(32, 4), milestones: {} as never });
+  const candidate = { orgId: h.deps.companyId, project: "payments", channel: "tracker" as const, externalRef: { system: "linear", id: "issue-1", url: "https://linear.app/acme/issue/issue-1" }, title: "Fix ticket", body: "Fix ticket", actor: { kind: "person" as const, account: { provider: "linear", tenant: "", accountId: "person" } }, parent: { kind: "project" as const, id: "parent-1", title: "Payments", url: "https://linear.app/acme/project/parent-1" } };
+  const answer = await ingestIntake(intake, candidate);
+  if (answer.outcome !== "started") throw new Error(`Linear intake did not start: ${JSON.stringify(answer)}`);
+  const task = (await h.store.get(taskKey(answer.taskId)))!;
+  expect(task["origin"]).toBe("tracker");
+  const workspaceId = task["workspaceId"] as string;
+  const workspace = (await h.store.get(workspaceKey(h.deps.companyId, workspaceId)))!;
+  const activeOperationId = workspace["activeOperationId"];
+  if (typeof activeOperationId !== "string") throw new Error("Linear task has no active operation");
+  const scope: TaskTokenOperation = { workspaceId, operationId: activeOperationId, fence: 1 };
+  const opKey = operationKey(h.deps.companyId, workspaceId, scope.operationId);
+  const op = (await h.store.get(opKey))!;
+  await h.store.put({ item: { ...op, kind: "task", status: "RUNNING", requester: { personId: developerIdOf(h.owner.principal), provider: "test" }, dispatch: { kind: "task", payload: {} } } });
+  const signer = signingWorld();
+  const minted = await mintTaskToken({ signer: signer.signer, issuer: "https://install-a.example/v1/auth", now: () => 1_800_000_000_000, describer: createTaskTokenDescriber(h.deps) }, scope);
+  const claims = signer.reference(minted.token, 1_800_000_000);
+  expect(claims).toMatchObject({ src: "tracker", pay: { kind: "member", developerId: developerIdOf(h.owner.principal) }, mdl: ["claude-sonnet-4-5"] });
+});
