@@ -4,15 +4,16 @@
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
-import type { CompactionResult, InlineExtension, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type TranscriptContext } from "@earendil-works/pi-ai";
+import { ModelRuntime, type CompactionResult, type InlineExtension, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ContextToolCatalog } from "../../packages/contracts/src/index.js";
 import { PLAN_FACTS_HEADING, approvedPlanFacts, type ConversationCompacted } from "../../packages/worker/src/compaction.js";
 import { createContextTools } from "../../packages/worker/src/context-sources/bridge.js";
 import { createSourceTextGuard } from "../../packages/worker/src/context-sources/text-guard.js";
 import { createDefaultPiSessionAdapter, createWorkspacePiSession, type PiSessionHandle } from "../../packages/worker/src/pi-session.js";
-import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
+import { FAUX_MODEL } from "../support/faux-model.js";
+import type { fauxModelRuntime } from "../support/faux-model.js";
 
 // Twenty-five words: longer than the guard's run of twenty, so a copy of it is cut out of stored text.
 // The worker's Pi settings are built in memory (createPiSettingsManager) and no settings file is read, so a test that wants a short conversation to have something to summarise
@@ -50,10 +51,12 @@ afterEach(async () => {
 type Script = Parameters<Awaited<ReturnType<typeof fauxModelRuntime>>["faux"]["setResponses"]>[0];
 
 /** A session whose compaction keeps almost nothing recent (the mock above), so a short conversation has something to summarise. */
-async function world(script: Script, mode: "PLAN" | "UNDERSTAND" | "REVIEW" | "IMPLEMENT") {
+async function world(script: Script, mode: "PLAN" | "UNDERSTAND" | "REVIEW" | "IMPLEMENT" | "SETUP" | "WIKI") {
   const rootPath = await mkdtemp(join(tmpdir(), "compact-root-"));
   cleanup.push(rootPath);
-  const { modelRuntime, faux } = await fauxModelRuntime();
+  const faux = fauxProvider({ provider: FAUX_MODEL.provider, models: [{ id: FAUX_MODEL.modelId }] });
+  const modelRuntime = await ModelRuntime.create({ refreshOnCreate: false, credentials: new InMemoryCredentialStore() });
+  modelRuntime.registerNativeProvider(faux.provider);
   faux.setResponses(script);
   const adapter = createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) });
   const trigger: { current?: (options: { onComplete: (result: CompactionResult) => void; onError: (error: Error) => void }) => void } = {};
@@ -233,22 +236,34 @@ describe("the event", () => {
   });
 });
 
-describe("a session with no sources and no plan", () => {
-  it("compacts exactly as Pi does by default: the summary is the model's own, and Pi writes it", async () => {
+describe("the worker compaction guard", () => {
+  it.each(["PLAN", "IMPLEMENT", "REVIEW", "UNDERSTAND", "SETUP", "WIKI"] as const)("supplies its own summary for every %s session", async (mode) => {
     const asked: string[] = [];
-    const w = await world([fauxAssistantMessage("Hello."), fauxAssistantMessage("Again."), summaryCall(asked, "Plain summary."), summaryCall(asked, "Plain prefix.")], "PLAN");
-    const handle = await createWorkspacePiSession({ rootPath: w.rootPath, model: FAUX_MODEL, workflowMode: "PLAN", localFileTools: true, extensionFactories: [w.probe] }, w.adapter);
+    const w = await world([fauxAssistantMessage("Hello."), fauxAssistantMessage("Again."), summaryCall(asked, "Worker summary."), summaryCall(asked, "Worker prefix.")], mode);
+    const handle = await createWorkspacePiSession({ rootPath: w.rootPath, model: FAUX_MODEL, workflowMode: mode, localFileTools: true, extensionFactories: [w.probe] }, w.adapter);
     try { await handle.prompt("hi"); await handle.prompt("hi again"); await w.compactNow(); } finally { handle.dispose(); }
-    const entries = (await readFile(handle.sessionFile, "utf8")).split("\n").filter((line) => line.includes('"type":"compaction"')).map((line) => JSON.parse(line) as { summary: string; fromHook?: boolean });
+    const entries = (await readFile(handle.sessionFile, "utf8")).split("\n").filter((line) => line.includes('"type":"compaction"')).map((line) => JSON.parse(line) as { summary: string; fromHook?: boolean; usage?: unknown });
     expect(entries).toHaveLength(1);
-    expect(entries[0]!.summary).toContain("Plain summary.");
+    expect(entries[0]!.summary).toContain("Worker summary.");
     expect(entries[0]!.summary).not.toContain(PLAN_FACTS_HEADING);
-    // Pi wrote it itself: the hook stood aside.
-    expect(entries[0]!.fromHook ?? false).toBe(false);
-    // And no instructions of ours went to the summariser.
+    expect(entries[0]!.fromHook).toBe(true);
+    expect(entries[0]!.usage).toBeDefined();
     expect(asked.join("")).not.toContain("connected sources");
     expect(asked.join("")).not.toContain("approved plan");
   });
+
+  it("supplies its own summary for agent-run sessions too", async () => {
+    const asked: string[] = [];
+    const w = await world([fauxAssistantMessage("Hello."), fauxAssistantMessage("Again."), summaryCall(asked, "Agent summary."), summaryCall(asked, "Agent prefix.")], "PLAN");
+    const handle = await createWorkspacePiSession({ rootPath: w.rootPath, model: FAUX_MODEL, localFileTools: true, extensionFactories: [w.probe], agentRun: { systemPrompt: "Agent role.", tools: [] } }, w.adapter);
+    try { await handle.prompt("hi"); await handle.prompt("hi again"); await w.compactNow(); } finally { handle.dispose(); }
+    const entries = (await readFile(handle.sessionFile, "utf8")).split("\n").filter((line) => line.includes('"type":"compaction"')).map((line) => JSON.parse(line) as { summary: string; fromHook?: boolean; usage?: unknown });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.summary).toContain("Agent summary.");
+    expect(entries[0]!.fromHook).toBe(true);
+    expect(entries[0]!.usage).toBeDefined();
+  });
+
   it("leaves nothing behind but the session file", async () => {
     const asked: string[] = [];
     const w = await world([fauxAssistantMessage("Hello."), fauxAssistantMessage("Again."), summaryCall(asked, "Plain summary."), summaryCall(asked, "Plain prefix.")], "PLAN");

@@ -154,11 +154,11 @@ describe("the hook", () => {
     expect(result?.compaction?.summary).toBe(`Did a thing.\n\n${PLAN_FACTS_HEADING}\nClaim 1: retry twice`);
   });
 
-  it("stands aside when there is nothing to clean, no guard activity and no plan", async () => {
-    const summarise = vi.fn();
-    const { result } = await run({ sourceGuard: () => createSourceTextGuard() }, summarise, preparation([{ role: "user", content: "go" }, toolResult("a Rovara sentence", "src_sim_x")]));
-    expect(result).toBeUndefined();
-    expect(summarise).not.toHaveBeenCalled();
+  it("supplies its own summary even when there are no sources or plan facts", async () => {
+    const summarise = vi.fn(async () => done("Worker summary."));
+    const { result } = await run({ sourceGuard: () => createSourceTextGuard() }, summarise, preparation([{ role: "user", content: "go" }]));
+    expect(summarise).toHaveBeenCalledOnce();
+    expect(result?.compaction?.summary).toBe("Worker summary.");
   });
 
   it("passes the user's own instructions on, and adds the source and plan instructions only when they apply", async () => {
@@ -169,18 +169,19 @@ describe("the hook", () => {
     expect(seen[0]).not.toContain("connected sources");
   });
 
-  it("cancels when the summary fails and sources were involved; lets Pi's own summary run when none were", async () => {
+  it("cancels when the summary fails, whether or not sources were involved", async () => {
     const fail: CompactionSummariser = async () => { throw new Error("model down"); };
     const withSource = await run({}, fail, preparation([toolResult(FRAMED)]));
     expect(withSource.result).toEqual({ cancel: true });
     const withoutSource = await run({ planFacts: () => "facts" }, fail, preparation([{ role: "user", content: "go" }]));
-    expect(withoutSource.result).toBeUndefined();
+    expect(withoutSource.result).toEqual({ cancel: true });
   });
 
-  it("leaves Pi's own summary running on cleaned messages when the hook itself fails first (cleaning is done in place)", async () => {
+  it("cancels when the hook itself fails after cleaning (cleaning is done in place)", async () => {
     const prep = preparation([toolResult(FRAMED)]);
-    await run({}, async () => { throw new Error("boom"); }, prep);
+    const { result } = await run({}, async () => { throw new Error("boom"); }, prep);
     expect(JSON.stringify(prep.messagesToSummarize)).not.toContain("alpha bravo");
+    expect(result).toEqual({ cancel: true });
   });
 
   it("lets an abort through", async () => {
@@ -189,7 +190,7 @@ describe("the hook", () => {
     await expect(run({}, async () => { throw new Error("aborted"); }, preparation([toolResult(FRAMED)]), { signal: controller.signal })).rejects.toThrow("aborted");
   });
 
-  it("cancels, and leaves the preparation as it was, when cleaning fails part way (nothing partly cleaned reaches Pi's own summary)", async () => {
+  it("cancels, and leaves the preparation as it was, when cleaning fails part way", async () => {
     const guard = createSourceTextGuard();
     guard.remember(SECRET);
     let calls = 0;
@@ -210,9 +211,9 @@ describe("the hook", () => {
     expect(a.result).toEqual({ cancel: true });
     const b = await run({ planFacts: () => { throw new Error("facts failed"); } }, async () => done("S"), preparation([toolResult(FRAMED)]));
     expect(b.result).toEqual({ cancel: true });
-    // With no source anywhere in the conversation, a failure leaves Pi's own summary to run.
+    // A facts-reader failure must not fall through to Pi's unguarded summary.
     const c = await run({ planFacts: () => { throw new Error("facts failed"); } }, async () => done("S"), preparation([{ role: "user", content: "go" }]));
-    expect(c.result).toBeUndefined();
+    expect(c.result).toEqual({ cancel: true });
   });
 
   it("cancels when it fails before it could look at the guard and a source is anywhere in the conversation, whether as a frame, a context tool's result or a tool's name", async () => {
@@ -224,8 +225,8 @@ describe("the hook", () => {
     // A source in the earlier summary, or in the start of the last turn.
     expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([{ role: "user", content: "go" }], { previousSummary: "It used search_team_knowledge." }))).result).toEqual({ cancel: true });
     expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([{ role: "user", content: "go" }], { turnPrefixMessages: [toolResult("x", "search_team_knowledge")] }))).result).toEqual({ cancel: true });
-    // No source anywhere: Pi's own summary may run.
-    expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([{ role: "user", content: "go" }, { role: "assistant", content: [{ type: "text", text: "Done." }] }]))).result).toBeUndefined();
+    // No source anywhere: a failed guard still must not fall through to Pi's own summary.
+    expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([{ role: "user", content: "go" }, { role: "assistant", content: [{ type: "text", text: "Done." }] }]))).result).toEqual({ cancel: true });
   });
 
   it("cancels when it cannot even look through the conversation (an unreadable message errs toward a source being there)", async () => {
@@ -240,7 +241,7 @@ describe("the hook", () => {
     const handlers = load(compactionExtension({ planFacts: () => "facts", onCompacted: (info) => { seen.push(info); } }, async () => done("S")));
     await handlers.session_before_compact!(before(preparation([{ role: "user", content: "go" }])));
     handlers.session_compact!({ type: "session_compact", compactionEntry: { tokensBefore: 1, summary: "S" }, fromExtension: true, reason: "threshold", willRetry: false });
-    // Pi's own summary ran this time (the worker's failed in Build with no source): no facts.
+    // A summary that was not supplied by this hook cannot claim the plan facts.
     handlers.session_compact!({ type: "session_compact", compactionEntry: { tokensBefore: 1, summary: "S" }, fromExtension: false, reason: "threshold", willRetry: false });
     expect(seen.map((entry) => entry.keptApprovedPlan)).toEqual([true, false]);
   });

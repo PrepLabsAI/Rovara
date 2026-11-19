@@ -9,10 +9,11 @@
 //   (a) replaces every context-source result in what the summary is built from with its stub, redacts what the source-text guard remembers from the messages and from the
 //       summary itself, and takes any source frame out of the summary;
 //   (b) adds the approved plan's key facts to the end of the summary word for word (and asks the summariser to leave them out of its own text);
-//   (c) reports "the conversation was compacted" once the entry is saved (`onCompacted`, which the worker turns into a task event).
+//   (c) preserves Pi's summary usage in the compaction entry so session/task totals include it; and
+//   (d) reports "the conversation was compacted" once the entry is saved (`onCompacted`, which the worker turns into a task event).
 //
 // The messages are cleaned into new values and assigned together before anything else happens. Pi's runner catches a handler's throw and then runs its own summary on whatever the
-// preparation holds, so every failure with sources involved (or not known to be absent) cancels the compaction: an unscrubbed summary is worse than no summary.
+// preparation holds, so every failure cancels the compaction: an unguarded summary is worse than no summary.
 import type { WorkflowApprovedPlan } from "@agentx/contracts";
 import type { CompactionResult, InlineExtension, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 import { stubContextEvent } from "./context-sources/events.js";
@@ -86,7 +87,7 @@ export interface ConversationCompacted {
   willRetry: boolean;
   tokensBefore: number;
   summaryChars: number;
-  /** Whether the worker's hook wrote the summary (false when Pi's own summary ran, which never carries the plan's facts). */
+  /** Whether the worker's hook supplied the summary; worker sessions require this. */
   fromHook: boolean;
   /** Whether the summary ends with the plan's (or the item's) facts. */
   keptApprovedPlan: boolean;
@@ -127,17 +128,9 @@ function withoutPlanFacts(summary: string): string {
   return at < 0 ? summary : summary.slice(0, at).trimEnd();
 }
 
-/** Whether the conversation being summarised may hold a source's text: a stage with a guard, or any source frame or context-tool result anywhere in it. Errs toward yes. */
-function mayHoldSources(preparation: Preparation, guard: SourceTextGuard | undefined): boolean {
-  if (guard !== undefined) return true;
-  try {
-    return /source-result|src_[a-z]|search_team_knowledge/iu.test(JSON.stringify([preparation.messagesToSummarize, preparation.turnPrefixMessages, preparation.previousSummary ?? ""]));
-  } catch { return true; }
-}
-
 /**
- * The compaction extension. Installed in every worker session; a session with nothing to clean, no guard and no facts compacts exactly as Pi does by default.
- * Pi's runner catches a handler's throw and then runs its own summary on the preparation as it stands, so nothing here may throw with sources involved: every error returns `cancel`.
+ * The compaction extension. Installed in every worker session; Pi's default summary is never used.
+ * Pi's runner catches a handler's throw and then runs its own summary on the preparation as it stands, so every error returns `cancel`.
  */
 export function compactionExtension(options: SessionCompactionOptions, summarise: CompactionSummariser, onDiagnostic?: (message: string) => void): InlineExtension {
   return {
@@ -148,7 +141,6 @@ export function compactionExtension(options: SessionCompactionOptions, summarise
         keptFacts = false;
         const preparation = event.preparation;
         let guard: SourceTextGuard | undefined;
-        let sensitive = false;
         try {
           guard = options.sourceGuard?.();
           // (a) Everything is cleaned into new values first and assigned together, so a failure part way leaves the preparation as it was and the handler's catch decides (cancel).
@@ -158,9 +150,8 @@ export function compactionExtension(options: SessionCompactionOptions, summarise
           preparation.messagesToSummarize = history.messages;
           preparation.turnPrefixMessages = prefix.messages;
           if (previous !== undefined) preparation.previousSummary = previous;
-          sensitive = history.stubbed + prefix.stubbed > 0 || history.changed || prefix.changed || guard?.active() === true;
+          const sensitive = history.stubbed + prefix.stubbed > 0 || history.changed || prefix.changed || guard?.active() === true;
           const facts = options.planFacts?.();
-          if (!sensitive && facts === undefined) return undefined;
           const instructions = [event.customInstructions, sensitive ? SOURCE_INSTRUCTION : undefined, facts === undefined ? undefined : PLAN_INSTRUCTION].filter((part): part is string => part !== undefined && part !== "").join("\n\n");
           const result = await summarise(preparation, instructions, event.signal, event);
           // (a) The summary itself: no source frame, none of the guard's runs. (b) The facts after it, word for word.
@@ -171,8 +162,8 @@ export function compactionExtension(options: SessionCompactionOptions, summarise
         } catch (error) {
           if (event.signal.aborted) throw error;
           onDiagnostic?.(`conversation compaction: the worker's summary failed (${error instanceof Error ? error.message : String(error)})`);
-          // With sources involved (or not known to be absent) no summary is better than an unscrubbed one. With none, Pi's own summary may run on the messages as they are.
-          return sensitive || mayHoldSources(preparation, guard) ? { cancel: true } : undefined;
+          // No fallback summary: Pi's default does not apply Rovara's source and plan guarantees or its usage accounting.
+          return { cancel: true };
         }
       });
       pi.on("session_compact", (event) => {
