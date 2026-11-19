@@ -23,11 +23,11 @@ export interface DeveloperSignInParameters {
   slackSince: CfnParameter; oidcSince: CfnParameter;
   /** Named environments only: the developer task settings, which the legacy deployment does not have. */
   tasks?: DeveloperTaskParameters;
-  /** Hosted wiring (a), named environments only: the verified SES identity (one address) step-up codes are sent from; empty: no email factor. */
+  /** Hosted wiring (a) (the legacy deployment too since #1129): the verified SES identity (one address) step-up codes are sent from; empty: no email factor. */
   stepUpEmailSender?: CfnParameter;
-  /** DEC 254h, named environments only: GitHub sign-in (offered only with Code's company layer), its OAuth app's client id, and when it was last turned on. */
+  /** DEC 254h (the legacy deployment too since #1129): GitHub sign-in (offered only with Code's company layer), its OAuth app's client id, and when it was last turned on. */
   github?: { enabled: CfnParameter; clientId: CfnParameter; since: CfnParameter };
-  /** DEC 254zg (a), named environments only: Code's company layer (CompanySignIn) and self-serve create (CompanySelfServe), both off by default (company-signin.ts). */
+  /** DEC 254zg (a): Code's company layer (CompanySignIn) and self-serve create (CompanySelfServe), both off by default (company-signin.ts); the legacy deployment too since #1129. */
   company?: CompanySignInParameters;
 }
 
@@ -42,7 +42,7 @@ export interface DeveloperTaskParameters {
  * Declared on the stack itself, so the parameter names are exactly these. Spec 064: the legacy deployment
  * (`tasks: false`) gets the sign-in ones only, declared in the same order so named templates are unchanged.
  */
-export function developerSignInParameters(stack: Stack, options: { tasks: boolean; named?: boolean } = { tasks: true }): DeveloperSignInParameters {
+export function developerSignInParameters(stack: Stack, options: { tasks: boolean } = { tasks: true }): DeveloperSignInParameters {
   const signIn = {
     slackTeamId: new CfnParameter(stack, "SlackTeamId", { type: "String", default: "", allowedPattern: "^$|^[TE][A-Z0-9]{2,31}$", description: "The Slack workspace (team) ID this environment serves; Slack sign-in is refused while it is empty" }),
     slack: new CfnParameter(stack, "DeveloperSignInSlack", { type: "String", default: "disabled", allowedValues: ["enabled", "disabled"], description: "enabled: developers may sign in with Slack; disabled: they may not" }),
@@ -64,8 +64,9 @@ export function developerSignInParameters(stack: Stack, options: { tasks: boolea
     workflowDependenciesEnabled: new CfnParameter(stack, "WorkflowDependenciesEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether bounded serial task work breakdowns are enabled in this environment" }),
     mcpConfirmElicitation: new CfnParameter(stack, "McpConfirmElicitation", { type: "String", default: "enabled", allowedValues: ["enabled", "disabled"], description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button (or the CLI)" }),
   };
-  if (options.named !== true) return { ...signIn, tasks };
-  // Hosted wiring (a): named environments only, declared last, so the legacy template keeps its parameters exactly.
+  // #1129: the legacy deployment (production) declares the ones below too, after all of its own, so its existing parameters keep their order and values: email step-up
+  // (empty sender: no email factor), GitHub sign-in (disabled) and Code's company layer (both switches disabled).
+  // Hosted wiring (a): declared last.
   const stepUpEmailSender = new CfnParameter(stack, "StepUpEmailSender", { type: "String", default: "", maxLength: 254, allowedPattern: STEP_UP_EMAIL_SENDER_PATTERN, description: "The verified Amazon SES email identity (one address) that sends step-up codes; empty: no emailed codes (passkeys only)" });
   // DEC 254h: declared after StepUpEmailSender, so the parameters before it keep their order. The client secret is never a parameter: it lives in
   // the secret agentx/<env>/developer-github, which only the sign-in function may read.
@@ -298,15 +299,16 @@ export class DeveloperSignIn extends Construct {
       fn.addEnvironment("POLICY_HOOK_KEY_ARN", policyHookKey.keyArn);
       addBrokerName(props.broker, props.naming, "policyHookKey", policyHookKey.keyId, policyHookKey.keyArn);
     }
-    // Named environments only (the legacy deployment runs tasks too, but its template stays as deployed).
     const named = props.naming.env !== undefined;
-    if (named && tasks !== undefined) {
+    // #1129: in the legacy deployment (production) too: email step-up (no email factor while StepUpEmailSender is empty), GitHub sign-in (served only while
+    // DeveloperSignInGithub and CompanySignIn are both enabled) and passkeys (on as soon as this deploys).
+    if (tasks !== undefined) {
       // Hosted wiring (a): step-up codes by email, sent only as the one identity the parameter names. SES authorizes SendEmail on the sender identity's ARN; the condition pins the From
       // address too. (While the account is in the SES sandbox, SES also checks the recipient's identity: move the account out of the sandbox before people other than the verified
       // test addresses step up.) An empty parameter names no identity, and the function then builds no sender.
-      if (p.stepUpEmailSender === undefined) throw new Error("a named environment declares StepUpEmailSender");
-      if (p.github === undefined) throw new Error("a named environment declares the GitHub sign-in parameters");
-      if (p.company === undefined) throw new Error("a named environment declares the company sign-in parameters");
+      if (p.stepUpEmailSender === undefined) throw new Error("a deployment with developer tasks declares StepUpEmailSender");
+      if (p.github === undefined) throw new Error("a deployment with developer tasks declares the GitHub sign-in parameters");
+      if (p.company === undefined) throw new Error("a deployment with developer tasks declares the company sign-in parameters");
       // DEC 254h: GitHub sign-in. The client secret is read by reference (its name) by this function only; the grant names that one secret.
       const githubSecretName = `agentx/${props.env}/developer-github`;
       fn.addEnvironment("DEVELOPER_SIGNIN_GITHUB", p.github.enabled.valueAsString);
@@ -337,8 +339,8 @@ export class DeveloperSignIn extends Construct {
       }));
     }
     props.slackSecret.grantRead(fn);
-    // DEC 254zg (a): the company layer's switch. Named environments only (the legacy template stays as deployed).
-    const company = named ? props.company : undefined;
+    // DEC 254zg (a): the company layer's switch; #1129: in the legacy deployment (production) too, off by default.
+    const company = props.company;
     if (named && company === undefined) throw new Error("a named environment has the company sign-in switch");
     if (company !== undefined) {
       company.addTo(fn);
@@ -350,7 +352,7 @@ export class DeveloperSignIn extends Construct {
       company.grant("SlackWorkspaceTokens", fn.role!, [new iam.PolicyStatement({
         sid: "WriteSlackWorkspaceTokens",
         actions: ["secretsmanager:CreateSecret", "secretsmanager:PutSecretValue", "secretsmanager:GetSecretValue"],
-        resources: [stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `agentx/${props.naming.env}/slack-workspaces/*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+        resources: [stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `agentx/${props.env}/slack-workspaces/*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
       })]);
     }
     fn.addToRolePolicy(new iam.PolicyStatement({
@@ -358,12 +360,11 @@ export class DeveloperSignIn extends Construct {
       // Secrets Manager appends "-" and six characters to a secret's name in its ARN.
       resources: [stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${oidcSecretName}-??????`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
     }));
-    // DEC 254zzz33: what the company layer's own sign-in writes and reads need beyond the grants above (each call site listed; staging audit 2026-11-18). Its own role policy, named
-    // environments only (the legacy template stays as deployed), as the broker's BrokerCompanyImportReads: never the DefaultPolicy. Every table statement names its key families
+    // DEC 254zzz33: what the company layer's own sign-in writes and reads need beyond the grants above (each call site listed; staging audit 2026-11-18). Its own role policy (#1129: the
+    // legacy deployment too, below), as the broker's BrokerCompanyImportReads: never the DefaultPolicy. Every table statement names its key families
     // with the Null guard; no ORG# family but the three named, for a company id of the shape OrgIdSchema accepts.
-    if (named) new iam.Policy(this, "SignInCompanyGrants", {
-      roles: [fn.role!],
-      statements: [
+    const companyStatements = {
+      signIn: [
         // (1) TransactWriteItems' condition checks: a member change's live-member and owner checks (company-membership.ts liveMemberCheck), self-serve create's switch
         // (company-invites.ts SELF_SERVE_KEY), a sign-in link's finish (sign-in-links.ts: DEVELOPER#, COMPANY_MEMBER#, SESSION#) and an admin's unlink (COMPANY_MEMBER#).
         new iam.PolicyStatement({
@@ -380,18 +381,27 @@ export class DeveloperSignIn extends Construct {
           actions: ["dynamodb:DeleteItem"], resources: [table.tableArn],
           conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SIGNIN_LINKS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
         }),
-        // (5) The operator's company import undo (company-import.ts undoImport): the imported company record, member views and memberships, each conditioned on being unchanged.
-        new iam.PolicyStatement({
-          actions: ["dynamodb:DeleteItem"], resources: [table.tableArn],
-          conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#COMPANY", "ORG#org_????????????????????#MEMBERS", "COMPANY_MEMBER#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
-        }),
         // (3) A company's own OIDC client secret (company-issuer.ts companyIssuerSecretName: agentx/<env>/org-signin/<company>/oidc), read-only. An operator stores it (no role writes it).
         new iam.PolicyStatement({
           actions: ["secretsmanager:GetSecretValue"],
           resources: [stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `agentx/${props.env}/org-signin/*/oidc-??????`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
         }),
       ],
-    });
+      importUndo: [
+        // (5) The operator's company import undo (company-import.ts undoImport): the imported company record, member views and memberships, each conditioned on being unchanged.
+        new iam.PolicyStatement({
+          actions: ["dynamodb:DeleteItem"], resources: [table.tableArn],
+          conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#COMPANY", "ORG#org_????????????????????#MEMBERS", "COMPANY_MEMBER#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
+        }),
+      ],
+    };
+    // Named: one policy, as deployed. #1129, the legacy deployment (production): the company sign-in grants (1)-(4) only while CompanySignIn is on (a conditional policy,
+    // company-signin.ts), and the import undo (5) always, since the operator imports the members (and may undo it) BEFORE switching company sign-in on (DEC 254b (b)).
+    if (named) new iam.Policy(this, "SignInCompanyGrants", { roles: [fn.role!], statements: [...companyStatements.signIn.slice(0, 3), ...companyStatements.importUndo, ...companyStatements.signIn.slice(3)] });
+    else if (company !== undefined) {
+      company.grant("SignInCompanyGrants", fn.role!, companyStatements.signIn);
+      new iam.Policy(this, "SignInCompanyImportUndo", { roles: [fn.role!], statements: companyStatements.importUndo });
+    }
 
     const integration = new apigwv2.CfnIntegration(this, "Integration", {
       apiId: props.api.ref, integrationType: "AWS_PROXY", integrationUri: fn.functionArn, payloadFormatVersion: "2.0",
@@ -444,8 +454,8 @@ export class DeveloperSignIn extends Construct {
     broker.addEnvironment("DEVELOPER_OIDC_ISSUER", p.oidcIssuer.valueAsString);
     addBrokerSetting(broker, props.naming, "signInSlackSince", p.slackSince.valueAsString);
     addBrokerSetting(broker, props.naming, "oidcSince", p.oidcSince.valueAsString);
-    // DEC 254zg (a): the broker's COMPANY_SIGNIN (packed), from the same switch.
-    if (company !== undefined) addBrokerSetting(broker, props.naming, "companySignIn", company.flag);
+    // DEC 254zg (a): the broker's COMPANY_SIGNIN (packed), from the same switch. #1129: the legacy broker takes the variable whole, so it gets "enabled" or "disabled".
+    if (company !== undefined) addBrokerSetting(broker, props.naming, "companySignIn", named ? company.flag : company.value);
     if (tasks !== undefined) {
       addBrokerSetting(broker, props.naming, "mcpConfirmElicitation", tasks.mcpConfirmElicitation.valueAsString);
       // Hosted wiring (d), named environments only: the company audit and event reads (still behind SIGN_IN_CLIENT_ROUTES, which nothing in infra sets). Membership is read from
@@ -488,8 +498,8 @@ export class DeveloperSignIn extends Construct {
     // OrgIdSchema accepts (`org_` and 20 base-36 characters), read-only; nothing else under ORG#, and no write. Its own role policy, not the broker's DefaultPolicy:
     // that one is near CDK's split threshold (above), and a split would be a managed policy the deploy role cannot create. An inline AWS::IAM::Policy is what the deploy
     // role and the permissions boundary already allow (iam:PutRolePolicy under the install's role path).
-    // Named environments only, as the COMPANY_MEMBER# read and the company reads above: the legacy deployment (production) runs tasks too but its template stays as deployed.
-    if (named) new iam.Policy(this, "BrokerCompanyImportReads", {
+    // #1129: the legacy deployment (production) too, always: the operator's import reads them BEFORE company sign-in is switched on (DEC 254b (b)).
+    if (company !== undefined) new iam.Policy(this, "BrokerCompanyImportReads", {
       roles: [broker.role!],
       statements: [
         new iam.PolicyStatement({
@@ -514,6 +524,14 @@ export class DeveloperSignIn extends Construct {
         }),
       ],
     });
+    // #1129: a named broker reads COMPANY_MEMBER# with the sign-in grants above (with the task token key); the legacy broker reads it (company-check.ts and
+    // company-member-forwarding.ts: GetItem, one person's membership) only while company sign-in is on, through a conditional policy.
+    if (!named && company !== undefined) {
+      company.grant("BrokerCompanyMemberships", broker.role!, [new iam.PolicyStatement({
+        actions: ["dynamodb:GetItem"], resources: [table.tableArn],
+        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["COMPANY_MEMBER#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
+      })]);
+    }
 
     // FR-037, R27: the developer task routes write immutable AI-tool turn records, only under TASK#.
     // No update or delete: a record is written once with a condition and never changed.

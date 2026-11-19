@@ -127,12 +127,33 @@ describe("CompanySignIn and CompanySelfServe: the parameters", () => {
     expect(stagingSlack.Parameters.CompanySignIn).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
   });
 
-  it("leave the legacy templates without either parameter or any COMPANY_SIGNIN", () => {
-    for (const template of [legacy, legacySlack]) {
-      expect(Object.keys(template.Parameters)).not.toContain("CompanySignIn");
-      expect(Object.keys(template.Parameters)).not.toContain("CompanySelfServe");
-      expect(JSON.stringify(template)).not.toMatch(/COMPANY_SIGNIN|COMPANY_SELF_SERVE|company-signin-/u);
+  // #1129: the legacy deployment (production) has the company layer too, off by default, so production can make invite codes once an operator switches it on.
+  it("are declared on the legacy control plane too, disabled by default, with every company-only grant under the switch and every reader off", () => {
+    for (const name of ["CompanySignIn", "CompanySelfServe"]) {
+      expect(legacy.Parameters[name]).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
     }
+    // No name built from a missing environment name.
+    expect(JSON.stringify(legacy)).not.toMatch(/agentx\/undefined|undefined\//u);
+    const legacyReaders = ["Broker", "DeveloperSignInFunction", "SlackIngress", "ChannelApiIngress", "DeveloperTaskNotifierFunction", "SessionsReconciler"];
+    const off = deployed(legacy, {});
+    for (const reader of legacyReaders) expect(variablesOf(off, onlyId(off, reader)).COMPANY_SIGNIN, reader).toBe("disabled");
+    expect(variablesOf(off, onlyId(off, "DeveloperSignInFunction")).COMPANY_SELF_SERVE).toBe("disabled");
+    // Off: no company sign-in policy is deployed, and nothing names the per-company Slack token family.
+    expect(Object.values(off.Resources).filter((resource) => resource.Type === "AWS::IAM::Policy" && JSON.stringify(resource.Properties.PolicyName ?? "").includes("company-signin-"))).toEqual([]);
+    expect(namesSlackWorkspaces(off)).toEqual([]);
+    // Every company sign-in policy carries the switch's condition.
+    const companyPolicies = Object.entries(legacy.Resources).filter(([, resource]) => JSON.stringify(resource.Properties.PolicyName ?? "").includes("company-signin-"));
+    expect(companyPolicies.map(([id]) => id.replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual(["CompanySignInSwitchBrokerCompanyMemberships", "CompanySignInSwitchSignInCompanyGrants", "CompanySignInSwitchSlackWorkspaceTokens"]);
+    const companyOn = Object.keys(legacy.Conditions ?? {}).find((id) => id.startsWith("CompanySignInSwitchOn"))!;
+    for (const [, resource] of companyPolicies) expect(resource.Condition).toBe(companyOn);
+    const on = deployed(legacy, { CompanySignIn: "enabled" });
+    for (const reader of legacyReaders) expect(variablesOf(on, onlyId(on, reader)).COMPANY_SIGNIN, reader).toBe("enabled");
+    expect(variablesOf(on, onlyId(on, "DeveloperSignInFunction")).COMPANY_SELF_SERVE).toBe("disabled");
+    expect(grantsSlackWorkspaceWrite(on).map(({ statement }) => JSON.stringify(statement.Resource))).toEqual([expect.stringContaining("secret:agentx/production/slack-workspaces/*")]);
+    expect(variablesOf(deployed(legacy, { CompanySignIn: "enabled", CompanySelfServe: "enabled" }), onlyId(on, "DeveloperSignInFunction")).COMPANY_SELF_SERVE).toBe("enabled");
+    // Slack company mode stays named-only: the legacy Slack stack has no copy of the switch.
+    expect(Object.keys(legacySlack.Parameters)).not.toContain("CompanySignIn");
+    expect(JSON.stringify(legacySlack)).not.toMatch(/COMPANY_SIGNIN|COMPANY_SELF_SERVE|company-signin-/u);
   });
 
   it("drive two conditions: on exactly when CompanySignIn is enabled, and self-serve only with both", () => {
