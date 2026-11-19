@@ -311,8 +311,8 @@ describe("the named TEST proof-only installation gate", () => {
         // #1129, #1131: the company layer, GitHub sign-in, the company-secrets role and the reliability parts in the legacy (production) template too (no step-up: DEC 254zzz73).
         // #1149: re-pinned for the legacy broker's packed environment (names parameter, AGENTX_SETTINGS, the names parameter's read).
         // #1148: re-pinned for the core engine in the legacy template (CoreEngine off by default, the /v1/app route, saved environment images, the core's keys).
-        withRoute: "d8af185a8e0358129e350521b90822e203f92a35c119729fa21e68e0926a7619",
-        withoutRoute: "139d4dc3a006b30543a654597f925cbde546b8004f1ad4020d22bd70d4578464",
+        withRoute: "c07fe8ab40debf3e1fb8700f895c9822ec7200f7e829ecc15bae8ff62052b1cb",
+        withoutRoute: "5cc5bafe4a8a5fa2411069b88d17d73e5afdf2a742787327b7e90b2912df3207",
         beforeStepUpRemoval: undefined,
       },
     ] as const;
