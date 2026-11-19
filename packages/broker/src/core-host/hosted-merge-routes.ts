@@ -57,12 +57,17 @@ export const HOSTED_MERGE_WORDS = {
   requestReused: "That request was already used by someone else. Reload the page and press Merge again.",
   unavailable: "Rovara couldn't reach GitHub just now, so nothing was merged. Try again in a minute.",
   notRecorded: "Rovara couldn't record the merge just now, so nothing was merged. Try again in a minute.",
+  /** The core ended in a way that does not say what GitHub did (a lost answer, a fault): neutral words, and tracking reads GitHub again. */
+  outcomeUnknown: "We couldn't confirm the result yet; checking GitHub. Reload this page in a moment.",
 } as const;
 
 /** What the deployment wires for one company (the hosted root). Absent: both paths say merging from Rovara is not set up. */
 export interface HostedMergeWiring {
-  /** The person's grant on a project, through the root's existing grant reader (never raw keys here). `administrator` is a project admin (maintainer). A read that throws is "no grant". */
-  projectGrantRole(personId: string, project: string): Promise<"developer" | "administrator" | undefined>;
+  /**
+   * The person's grant on a project IN THIS COMPANY, through the root's company-layout grant reader (DEC 254zzz98: grants follow the named company; never raw keys here). `companyId` is the membership's company,
+   * already checked against the task's. `administrator` is a project admin (maintainer). A read that throws is "no grant".
+   */
+  projectGrantRole(personId: string, project: string, companyId: OrgId): Promise<"developer" | "administrator" | undefined>;
   /** The merge core's dependencies for this company (every gate's seam; `requirePassingCi` on), with this request's audit sink. Throws when the install cannot build them (the route then says not set up). */
   merge(audit: AuditSink): MergeDependencies;
   /** Makes the task's tracking row due now (`wakeMergeTracking`), after a merge. Best effort. */
@@ -111,7 +116,7 @@ async function standingOf(input: HostedMergeInput, wiring: HostedMergeWiring, ta
   if (task === undefined || task.companyId !== companyId) throw taskNotFound();
   if (await flow.access.canAct(principal, task).catch(() => false)) return { task, may: "task-owner" };
   if (input.role === "owner" || input.role === "admin") return { task, may: "company-admin" };
-  const grant = await wiring.projectGrantRole(principal.personId, task.project).catch(() => undefined);
+  const grant = await wiring.projectGrantRole(principal.personId, task.project, companyId).catch(() => undefined);
   if (grant === "administrator") return { task, may: "project-admin" };
   // Not one of them: a reader of the task is told so; anyone else reads exactly as for a missing task.
   await loadReadableTask(flow, { principal }, taskId);
@@ -193,11 +198,15 @@ async function press(input: HostedMergeInput, wiring: HostedMergeWiring, taskId:
   } catch (error) {
     await input.audit.record(event(MERGE_RESULT_AUDIT, { outcome: error instanceof AgentXError ? error.code : "failed" })).catch(() => input.log?.({ event: "hosted_merge.audit_result_failed", companyId, taskId }));
     await release();
-    // After a half merge (some pull request merged) tracking finds out what GitHub holds now; a plain refusal changed nothing, so nothing is woken.
-    if (error instanceof AgentXError && halfMerged(error)) await wiring.afterMerge(taskId).catch(() => undefined);
-    if (error instanceof AgentXError) throw error.code === "NOT_FOUND" ? taskNotFound() : error;
-    input.log?.({ event: "hosted_merge.failed", error: error instanceof Error ? error.name : "unknown" });
-    throw agentXError("RUNTIME_UNAVAILABLE", HOSTED_MERGE_WORDS.unavailable);
+    // An end that does not say what GitHub did (anything but the core's own refusal: a lost answer, a fault, a host that could not be read) may have merged: neutral words, and tracking reads GitHub again.
+    const unknown = !(error instanceof AgentXError) || error.code === "RUNTIME_UNAVAILABLE";
+    // After a half merge (some pull request merged), or an unknown end, tracking finds out what GitHub holds now; a plain refusal changed nothing, so nothing is woken.
+    if (unknown || halfMerged(error)) await wiring.afterMerge(taskId).catch(() => undefined);
+    if (unknown) {
+      input.log?.({ event: "hosted_merge.outcome_unknown", error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" });
+      throw agentXError("RUNTIME_UNAVAILABLE", HOSTED_MERGE_WORDS.outcomeUnknown);
+    }
+    throw (error).code === "NOT_FOUND" ? taskNotFound() : error;
   }
   await input.audit.record(event(MERGE_RESULT_AUDIT, { outcome: "merged", merged })).catch(() => input.log?.({ event: "hosted_merge.audit_result_failed", companyId, taskId }));
   await wiring.afterMerge(taskId).catch(() => undefined);
