@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { KNOWLEDGE_STAYS_SENTENCE, teamRecordPk, type AuditEvent, type AuditSink, type DocumentStore, type OrgId, type OrgRole, type ProjectRole } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { DEV_ROUTES } from "../../packages/broker/src/aws/dev-route-scopes.js";
-import { KNOWLEDGE_SWITCH_COMPANY_PATH, COMPANY_SWITCH_NEEDS_ADMIN, PROJECT_SWITCH_NEEDS_ADMIN, createKnowledgeSwitchApi, isKnowledgeSwitchPath, type KnowledgeSwitchCaller } from "../../packages/broker/src/core-host/knowledge-switch-api.js";
+import { KNOWLEDGE_SWITCH_COMPANY_PATH, COMPANY_SWITCH_NEEDS_ADMIN, ON_THE_WEBSITE, PROJECT_SWITCH_NEEDS_ADMIN, createKnowledgeSwitchApi, isKnowledgeSwitchPath, type KnowledgeSwitchCaller } from "../../packages/broker/src/core-host/knowledge-switch-api.js";
 import { DocumentLocalToolsSettings, documentLearningSettings } from "../../packages/broker/src/lessons/document-settings.js";
 import { localToolsGate, wikiToolsGate } from "../../packages/broker/src/lessons/local-tools.js";
 import { setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
@@ -56,8 +56,8 @@ function world(over: { store?: DocumentStore; companyOf?: Parameters<typeof crea
 type World = ReturnType<typeof world>;
 const call = (w: World, method: string, path: string, caller: KnowledgeSwitchCaller, body?: unknown) =>
   w.api.answer({ method, path, ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }) }, caller);
-const company = (w: World, method: "GET" | "PUT", who: string, body?: unknown) => call(w, method, KNOWLEDGE_SWITCH_COMPANY_PATH, { personId: who }, body);
-const project = (w: World, method: "GET" | "PUT", who: string, name = "payments", body?: unknown) => call(w, method, `/v1/dev/projects/${name}/lessons/local-tools`, { personId: who }, body);
+const company = (w: World, method: "GET" | "PUT", who: string, body?: unknown) => call(w, method, KNOWLEDGE_SWITCH_COMPANY_PATH, { personId: who, webApp: true }, body);
+const project = (w: World, method: "GET" | "PUT", who: string, name = "payments", body?: unknown) => call(w, method, `/v1/dev/projects/${name}/lessons/local-tools`, { personId: who, webApp: true }, body);
 
 describe("the company's switch: Knowledge stays in Rovara", () => {
   it("is off until an owner or admin turns it on; the stored row is the company's own and names no person", async () => {
@@ -111,9 +111,9 @@ describe("the company's switch: Knowledge stays in Rovara", () => {
     for (const body of ["", "not json", "{}", { stays: "yes" }, { stays: 1 }, { stays: true, company: B }, { enabled: true }, [], null]) {
       await expect(company(w, "PUT", "ownerA", body), JSON.stringify(body)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     }
-    await expect(call(w, "POST", KNOWLEDGE_SWITCH_COMPANY_PATH, { personId: "ownerA" }, { stays: true })).rejects.toMatchObject({ code: "NOT_FOUND" });
-    await expect(call(w, "DELETE", KNOWLEDGE_SWITCH_COMPANY_PATH, { personId: "ownerA" })).rejects.toMatchObject({ code: "NOT_FOUND" });
-    await expect(call(w, "GET", `${KNOWLEDGE_SWITCH_COMPANY_PATH}/${B}`, { personId: "ownerA" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(call(w, "POST", KNOWLEDGE_SWITCH_COMPANY_PATH, { personId: "ownerA", webApp: true }, { stays: true })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(call(w, "DELETE", KNOWLEDGE_SWITCH_COMPANY_PATH, { personId: "ownerA", webApp: true })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(call(w, "GET", `${KNOWLEDGE_SWITCH_COMPANY_PATH}/${B}`, { personId: "ownerA", webApp: true })).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(w.writes).toEqual([]);
   });
 });
@@ -179,8 +179,44 @@ describe("a project's switch: local coding tools can fetch lessons", () => {
     for (const body of ["", "not json", "{}", { enabled: "no" }, { enabled: 0 }, { enabled: true, project: "ledger" }, { stays: true }, [], null]) {
       await expect(project(w, "PUT", "maintA", "payments", body), JSON.stringify(body)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     }
-    await expect(call(w, "POST", "/v1/dev/projects/payments/lessons/local-tools", { personId: "maintA" }, { enabled: false })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(call(w, "POST", "/v1/dev/projects/payments/lessons/local-tools", { personId: "maintA", webApp: true }, { enabled: false })).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(w.writes).toEqual([]);
+  });
+});
+
+describe("the website's own client only (owner DEC 254zzz99)", () => {
+  const nonWeb: KnowledgeSwitchCaller[] = [{ personId: "ownerA" }, { personId: "ownerA", webApp: false }];
+  it("a full-access caller that is not the web app gets the fixed 'Do this on the Rovara website' words on both PUTs, before anything is read, audited or written", async () => {
+    const w = world();
+    for (const caller of nonWeb) {
+      await expect(call(w, "PUT", KNOWLEDGE_SWITCH_COMPANY_PATH, caller, { stays: true })).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(await messageOf(call(w, "PUT", KNOWLEDGE_SWITCH_COMPANY_PATH, caller, { stays: true }))).toBe(ON_THE_WEBSITE);
+      expect(await messageOf(call(w, "PUT", "/v1/dev/projects/payments/lessons/local-tools", caller, { enabled: false }))).toBe(ON_THE_WEBSITE);
+      // Even a bad body or a project that does not exist is the website words first: nothing about the request is looked at.
+      expect(await messageOf(call(w, "PUT", "/v1/dev/projects/nothing/lessons/local-tools", caller, "garbage"))).toBe(ON_THE_WEBSITE);
+    }
+    expect(w.writes).toEqual([]);
+    expect(w.ledger.events).toEqual([]);
+    expect(await w.localTools.readCompany(A)).toBe(false);
+    expect(ON_THE_WEBSITE).toBe("Do this on the Rovara website: the command line and AI tools cannot make this change.");
+  });
+  it("is checked before anything is read: membership, the store, the audit sink and the catalog are never asked for a refused PUT", async () => {
+    const asked: string[] = [];
+    const never = (what: string) => async (): Promise<never> => { asked.push(what); throw new Error(what); };
+    const api = createKnowledgeSwitchApi({ companyOf: never("membership"), store: never("store"), audit: never("audit"), projectExists: never("catalog"), projectRole: never("role"), now });
+    for (const [path, body] of [[KNOWLEDGE_SWITCH_COMPANY_PATH, { stays: true }], ["/v1/dev/projects/payments/lessons/local-tools", { enabled: false }]] as const) {
+      await expect(api.answer({ method: "PUT", path, body: JSON.stringify(body) }, { personId: "ownerA" })).rejects.toThrow(ON_THE_WEBSITE);
+    }
+    expect(asked).toEqual([]);
+  });
+  it("the same person through the web app succeeds, and the GETs are the same for any full-access client", async () => {
+    const w = world();
+    expect(await call(w, "PUT", KNOWLEDGE_SWITCH_COMPANY_PATH, { personId: "ownerA", webApp: true }, { stays: true })).toEqual({ stays: true });
+    expect(await call(w, "PUT", "/v1/dev/projects/payments/lessons/local-tools", { personId: "ownerA", webApp: true }, { enabled: false })).toMatchObject({ enabled: false });
+    for (const caller of nonWeb) {
+      expect(await call(w, "GET", KNOWLEDGE_SWITCH_COMPANY_PATH, caller)).toEqual({ stays: true });
+      expect(await call(w, "GET", "/v1/dev/projects/payments/lessons/local-tools", caller)).toMatchObject({ companyStays: true, canChange: true });
+    }
   });
 });
 
@@ -227,7 +263,7 @@ describe("two companies keep their own", () => {
 describe("a script token reads and sets nothing (a tool must never change its own gate)", () => {
   it("is refused on all four routes before any read or write", async () => {
     const w = world();
-    const token = { personId: "ownerA", scriptToken: { tokenId: "t" } };
+    const token = { personId: "ownerA", webApp: true, scriptToken: { tokenId: "t" } };
     for (const [method, path, body] of [["GET", KNOWLEDGE_SWITCH_COMPANY_PATH], ["PUT", KNOWLEDGE_SWITCH_COMPANY_PATH, { stays: true }], ["GET", "/v1/dev/projects/payments/lessons/local-tools"], ["PUT", "/v1/dev/projects/payments/lessons/local-tools", { enabled: false }]] as const) {
       await expect(call(w, method, path, token, body), `${method} ${path}`).rejects.toMatchObject({ code: "FORBIDDEN" });
     }
@@ -257,14 +293,14 @@ describe("faults are fixed words", () => {
   it("a project role read that fails is no role (the person is not on the project), never a grant", async () => {
     const w = world();
     const api = createKnowledgeSwitchApi({ store: w.store, audit: w.ledger, now, companyOf: async () => ({ companyId: A, role: "member" }), projectExists: async () => true, projectRole: async () => { throw new Error("down"); } });
-    await expect(api.answer({ method: "PUT", path: "/v1/dev/projects/payments/lessons/local-tools", body: JSON.stringify({ enabled: false }) }, { personId: "maintA" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(api.answer({ method: "PUT", path: "/v1/dev/projects/payments/lessons/local-tools", body: JSON.stringify({ enabled: false }) }, { personId: "maintA", webApp: true })).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(w.ledger.events).toEqual([]);
   });
 
   it("a catalog read that fails is 'unavailable', not 'no such project' and not a write", async () => {
     const w = world();
     const api = createKnowledgeSwitchApi({ store: w.store, audit: w.ledger, now, companyOf: async () => ({ companyId: A, role: "owner" }), projectExists: async () => { throw new Error("down"); }, projectRole: async () => undefined });
-    await expect(api.answer({ method: "PUT", path: "/v1/dev/projects/payments/lessons/local-tools", body: JSON.stringify({ enabled: false }) }, { personId: "x" })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    await expect(api.answer({ method: "PUT", path: "/v1/dev/projects/payments/lessons/local-tools", body: JSON.stringify({ enabled: false }) }, { personId: "x", webApp: true })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     expect(w.ledger.events).toEqual([]);
   });
 });
@@ -309,13 +345,13 @@ describe("the route table and the router", () => {
     expect(isKnowledgeSwitchPath("/v1/dev/projects/payments/lessons/local-tools")).toBe(true);
     for (const other of ["/v1/dev/company/lessons/local-tools/", "/v1/dev/company/lessons", "/v1/dev/projects/p/lessons/local-tools/x", "/v1/dev/projects//lessons/local-tools", "/v1/dev/projects/a/b/lessons/local-tools", "/v1/dev/me/lessons/local-tools", "/v1/app/org/lessons/local-tools"]) expect(isKnowledgeSwitchPath(other), other).toBe(false);
   });
-  it("the dev router asks the same path test and answers 'route not found' where the install has no such API", () => {
+  it("the dev router asks the same path test and answers a fixed not-served 404 (never 'route not found', which would make a route row an unknown route) where the install has no such API", () => {
     const source = readFileSync("packages/broker/src/aws/developer-routes.ts", "utf8");
     // The router's two literals (the inventory scanner reads them) say exactly what the API's own path test says.
     expect(source).toContain(`url.pathname === "${KNOWLEDGE_SWITCH_COMPANY_PATH}" || /^\\/v1\\/dev\\/projects\\/[^/]+\\/lessons\\/local-tools$/u.test(url.pathname)`);
     for (const path of [KNOWLEDGE_SWITCH_COMPANY_PATH, "/v1/dev/projects/x/lessons/local-tools", "/v1/dev/projects/x/y/lessons/local-tools", "/v1/dev/projects//lessons/local-tools", "/v1/dev/company/lessons/local-tools/"]) {
       expect(isKnowledgeSwitchPath(path), path).toBe(path === KNOWLEDGE_SWITCH_COMPANY_PATH || /^\/v1\/dev\/projects\/[^/]+\/lessons\/local-tools$/u.test(path));
     }
-    expect(source).toMatch(/if \(deps\.knowledgeSwitch === undefined\) throw agentXError\("NOT_FOUND", "route not found"\);/u);
+    expect(source).toMatch(/if \(deps\.knowledgeSwitch === undefined\) throw agentXError\("NOT_FOUND", "These settings are not available on this install\."\);/u);
   });
 });

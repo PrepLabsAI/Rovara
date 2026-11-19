@@ -2461,8 +2461,9 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
     return deps.lessons.answer({ method: request.method, path: url.pathname, query: url.searchParams, ...(request.body === undefined ? {} : { body: request.body }) }, { personId: caller.developerId });
   }
   if (url.pathname === "/v1/dev/company/lessons/local-tools" || /^\/v1\/dev\/projects\/[^/]+\/lessons\/local-tools$/u.test(url.pathname)) { // L4-JA7 (core-host/knowledge-switch-api.ts parses the same paths; a test holds the two equal)
-    if (deps.knowledgeSwitch === undefined) throw agentXError("NOT_FOUND", "route not found");
-    return deps.knowledgeSwitch.answer({ method: request.method, path: url.pathname, ...(request.body === undefined ? {} : { body: request.body }) }, { personId: caller.developerId });
+    // Where the core does not serve (no switch API), the routes are there but not served: a fixed answer that is not "route not found" (named-scopes: a route row is never an unknown route).
+    if (deps.knowledgeSwitch === undefined) throw agentXError("NOT_FOUND", "These settings are not available on this install.");
+    return deps.knowledgeSwitch.answer({ method: request.method, path: url.pathname, ...(request.body === undefined ? {} : { body: request.body }) }, { personId: caller.developerId, webApp: caller.webApp === true });
   }
   if (url.pathname === "/v1/dev/me/lessons-slack") { // L4-SRC-SL (core-host/lessons-slack-switch-api.ts parses the same path; a test holds the two equal)
     if (deps.lessonsSlackSwitch === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
