@@ -751,8 +751,8 @@ describe("task-token key and membership IAM", () => {
       const [signIn] = ofType(template, "AWS::DynamoDB::Table").find(([id]) => id.startsWith("DeveloperSignInTable"))!;
       const grants = statementsOfRole(template, "BrokerServiceRole").filter((s) => touches(s, "dynamodb") && reaches(template, s, signIn, SAMPLE_TABLE_ARN));
       for (const action of ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"]) expect(grants.some((s) => allows(s, action))).toBe(false);
-      // DEC 254zzz(2): the one Query is the install company import's member mirror read, under exactly ORG#<id>#MEMBERS (named environments only).
-      expect(grants.filter((s) => allows(s, "dynamodb:Query")).map((s) => leadingKeysOf(s))).toEqual(template === legacy ? [] : [["ORG#org_????????????????????#MEMBERS"]]);
+      // DEC 254zzz(2): the one Query is the install company import's member mirror read, under exactly ORG#<id>#MEMBERS (#1129: the legacy deployment too).
+      expect(grants.filter((s) => allows(s, "dynamodb:Query")).map((s) => leadingKeysOf(s))).toEqual([["ORG#org_????????????????????#MEMBERS"]]);
       if (template === legacy) expect(leadingKeysOf(grants.find((s) => allows(s, "dynamodb:GetItem"))!)).toEqual(["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS"]);
       for (const s of statementsOfRole(template, "BrokerServiceRole").filter((s) => touches(s, "dynamodb") && s.Condition?.["ForAllValues:StringLike"] !== undefined)) {
         const keys = leadingKeysOf(s);
@@ -1991,7 +1991,7 @@ describe("install company import reads (DEC 254zzz(2))", () => {
   const brokerOf = (template: TemplateJson) => ofType(template, "AWS::IAM::Role").find(([id]) => withoutHash(id) === "BrokerServiceRole")![0];
   const signInTableOf = (template: TemplateJson) => ofType(template, "AWS::DynamoDB::Table").find(([id]) => id.startsWith("DeveloperSignInTable"))![0];
 
-  it("gives the broker exactly the install company import's two reads, in its own role policy, in named environments only", () => {
+  it("gives the broker exactly the install company import's two reads, in its own role policy (the legacy deployment too since #1129)", () => {
     const policies = companyImportPolicies(named);
     expect(policies).toHaveLength(1);
     const [[, policy]] = policies as [[string, Resource]];
@@ -2010,10 +2010,15 @@ describe("install company import reads (DEC 254zzz(2))", () => {
     ]);
     // The company id is the shape OrgIdSchema accepts: org_ and 20 base-36 characters.
     expect(COMPANY_PARTITION.replace("#COMPANY", "").slice("ORG#".length)).toHaveLength("org_".length + 20);
-    // Nothing else changed in the broker's other policy for this: the DefaultPolicy has no ORG# key family, and the legacy (production) template has no such policy.
+    // Nothing else changed in the broker's other policy for this: the DefaultPolicy has no ORG# key family.
     expect(JSON.stringify(brokerDefaultStatements(named))).not.toContain("ORG#");
-    expect(companyImportPolicies(legacy)).toEqual([]);
-    expect(JSON.stringify(legacy)).not.toContain("BrokerCompanyImportReads");
+    // #1129: the legacy (production) template has the same policy, always (the operator imports before switching company sign-in on), on its own broker and table.
+    const legacyPolicies = companyImportPolicies(legacy);
+    expect(legacyPolicies).toHaveLength(1);
+    expect(legacyPolicies[0]![1].Properties.Roles).toEqual([{ Ref: brokerOf(legacy) }]);
+    expect(JSON.stringify(statementsIn(legacyPolicies[0]![1].Properties.PolicyDocument)).replaceAll(signInTableOf(legacy), "T"))
+      .toBe(JSON.stringify(statementsIn(policy.Properties.PolicyDocument)).replaceAll(signInTableOf(named), "T"));
+    expect(JSON.stringify(brokerDefaultStatements(legacy))).not.toContain("ORG#");
   });
 
   it("is a role policy the deploy role and the permissions boundary allow, not a split managed policy", () => {
@@ -2138,11 +2143,12 @@ describe("company sign-in issuer read (DEC 254zzz29)", () => {
     // And the email index key emailIndexKey builds for a company: ORG#<id>#EMAIL#<sha256 of the email>; the built-in company's stays EMAIL#<sha256> (granted before).
     expect(emailIndexKey("Person@Example.test", COMPANY_A.orgId).pk).toMatch(globRegExp(EMAIL_PARTITION));
     expect(emailIndexKey("Person@Example.test", IMPLICIT_COMPANY_ID).pk).toMatch(/^EMAIL#[a-f0-9]{64}$/u);
-    // Nowhere else: not the DefaultPolicy, not another role, not the legacy (production) template.
+    // Nowhere else: not the DefaultPolicy, not another role; #1129: the legacy (production) template has the same one policy.
     expect(JSON.stringify(brokerDefaultStatements(named))).not.toContain("SIGNIN_ISSUER");
     expect(JSON.stringify(brokerDefaultStatements(named))).not.toContain("ORG#");
     expect(Object.values(named.Resources).filter((r) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r).includes("SIGNIN_ISSUER"))).toHaveLength(1);
-    expect(JSON.stringify(legacy)).not.toContain("SIGNIN_ISSUER");
+    expect(Object.values(legacy.Resources).filter((r) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r).includes("SIGNIN_ISSUER"))).toHaveLength(1);
+    expect(JSON.stringify(brokerDefaultStatements(legacy))).not.toContain("SIGNIN_ISSUER");
   });
 
   it("DEC 254zzz33: the sign-in function's company grants are one named-only role policy, and removing it gives back exactly the old template", () => {
@@ -2151,8 +2157,15 @@ describe("company sign-in issuer read (DEC 254zzz29)", () => {
     expect(namedWithSignInGrants.Resources[policies[0]!]!.Type).toBe("AWS::IAM::Policy");
     // The helper asserts the exact five statements before taking it out; what is left is byte-identical to the pinned template.
     expect(JSON.stringify(withoutSignInCompanyGrants(structuredClone(namedWithSignInGrants)))).toBe(JSON.stringify(named));
-    expect(JSON.stringify(legacy)).not.toContain("SignInCompanyGrants");
-    expect(JSON.stringify(legacy)).not.toContain("org-signin");
+    // #1129: the legacy (production) template holds statements (1)-(4) in a policy that exists only while CompanySignIn is on, and the import undo (5) in its own, always.
+    const legacyGrants = Object.entries(legacy.Resources).filter(([id]) => id.startsWith("CompanySignInSwitchSignInCompanyGrants"));
+    expect(legacyGrants).toHaveLength(1);
+    expect((legacyGrants[0]![1] as { Condition?: string }).Condition).toMatch(/^CompanySignInSwitchOn/u);
+    expect(JSON.stringify(legacyGrants[0]![1])).toContain("secret:agentx/production/org-signin/*/oidc-??????");
+    const undo = Object.entries(legacy.Resources).filter(([id]) => /^DeveloperSignInSignInCompanyImportUndo[0-9A-F]{8}$/u.test(id));
+    expect(undo).toHaveLength(1);
+    expect((undo[0]![1] as { Condition?: string }).Condition).toBeUndefined();
+    expect(statementsIn(undo[0]![1].Properties.PolicyDocument).map((statement) => statement.Action)).toEqual(["dynamodb:DeleteItem"]);
   });
 
   it("allows the issuer row's GetItem for any company and nothing wider", () => {

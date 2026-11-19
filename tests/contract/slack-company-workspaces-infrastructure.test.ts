@@ -51,7 +51,8 @@ beforeAll(() => {
   legacy = controlPlane(undefined);
   proofEnv = controlPlane("agentxlivetest123");
   on = Object.keys(named.Conditions).find((id) => id.startsWith("SlackCompanyModeOn"))!;
-});
+  // #1120: three control plane synths; on a busy CI runner they pass the 10 s default, as the other stack tests allow for.
+}, 240_000);
 
 describe("Slack company mode's switch (18a)", () => {
   it("is one default-off parameter whose condition is exactly 'enabled' AND company sign-in on (DEC 254zk)", () => {
@@ -62,7 +63,8 @@ describe("Slack company mode's switch (18a)", () => {
   });
 
   it("does not exist in the deployment that predates environments", () => {
-    expect(JSON.stringify(legacy)).not.toMatch(/SlackCompany|SLACK_COMPANY_WORKSPACES|slack-workspaces/u);
+    // #1129: the legacy deployment has company sign-in (whose Add to Slack writes slack-workspaces tokens, under CompanySignIn), but not Slack company mode.
+    expect(JSON.stringify(legacy)).not.toMatch(/SlackCompany|SLACK_COMPANY_WORKSPACES/u);
   });
 
   it("grants only through policies under its condition, one per consumer", () => {

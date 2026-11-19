@@ -2,7 +2,7 @@
 // turn it on. CompanySignIn (default "disabled") is the single source: every function that reads COMPANY_SIGNIN gets it from the CompanySignInOn condition, and every grant only the
 // company layer needs is a separate IAM policy resource under that condition, so the off template holds no such grant. CompanySelfServe (default "disabled") is the second, separate
 // switch: self-serve company create is served only while BOTH are enabled, so self-serve stays closed while company sign-in is on (the switch-on order: close self-serve, migrate the
-// members, then company sign-in on). Named environments only: the legacy template does not change. `agentx config set company.signIn` / `company.selfServe` flip them.
+// members, then company sign-in on). #1129: the legacy deployment (production) has both too, off by default. `agentx config set company.signIn` / `company.selfServe` flip them.
 import { CfnCondition, CfnParameter, Fn, Token, aws_iam as iam, type Stack, type aws_lambda as lambda } from "aws-cdk-lib";
 import { Construct } from "constructs";
 

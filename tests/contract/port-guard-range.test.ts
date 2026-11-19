@@ -10,7 +10,11 @@ const git = (...args: string[]): string => {
   const result = spawnSync("git", args, { encoding: "utf8" });
   return result.status === 0 ? result.stdout.trim() : "";
 };
-const haveRange = git("rev-parse", "--verify", "--quiet", "origin/mainline^{commit}") !== "" && git("rev-parse", "--is-shallow-repository") === "false";
+// #1124: on mainline itself (the release build checks out mainline) the range is empty: there is nothing beyond mainline to guard, so skip there too.
+const haveRange =
+  git("rev-parse", "--verify", "--quiet", "origin/mainline^{commit}") !== "" &&
+  git("rev-parse", "--is-shallow-repository") === "false" &&
+  Number(git("rev-list", "--count", "origin/mainline..HEAD") || "0") > 0;
 
 describe("the guard over the real CI range", () => {
   it.skipIf(!haveRange)(
