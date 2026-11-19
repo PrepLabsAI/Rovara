@@ -133,6 +133,19 @@ export function sandboxDnsFromEnvironment(environment: NodeJS.ProcessEnv = proce
 }
 
 /**
+ * Lane L4-NETG3: the gateway's daemon proxy (AGENTX_DAEMON_PROXY, written by the boot's sandbox-egress stage). The Docker daemon is given it in its own unit; the dev container CLI, which runs here on the host network and downloads a project's
+ * features itself, is given it through its environment. Only in gateway mode: a gateway-mode worker without a valid one refuses (RUNTIME_UNAVAILABLE), so a feature download never goes out directly. Elsewhere: undefined.
+ */
+export const DAEMON_PROXY_ENVIRONMENT = "AGENTX_DAEMON_PROXY";
+export function daemonProxyFromEnvironment(environment: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (!gatewayEgressFromEnvironment(environment)) return undefined;
+  const value = environment[DAEMON_PROXY_ENVIRONMENT] ?? "";
+  const match = /^http:\/\/(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})$/u.exec(value);
+  if (match === null || isIP(match[1]!) !== 4 || Number(match[2]) > 65535) throw agentXError("RUNTIME_UNAVAILABLE", "this worker's dev container downloads must go through the egress gateway's daemon proxy, but its address is missing or not valid, so AgentX did not run the dev container tool");
+  return value;
+}
+
+/**
  * The network and name server a gateway-mode worker gives everything that runs task code. Both are required: a gateway-mode worker that has lost either one refuses (RUNTIME_UNAVAILABLE) and never falls back to a bridge with a way out.
  * Not in gateway mode: undefined, and the callers behave as before.
  */

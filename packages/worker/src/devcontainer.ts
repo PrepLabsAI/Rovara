@@ -30,7 +30,7 @@ import {
 import { inertContextText } from "./context-text.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import { fileOpsExec, type FileOpsTarget } from "./file-ops-exec.js";
-import { gatewayEgressFor, sandboxNetworkFromEnvironment } from "./task-sandbox.js";
+import { daemonProxyFromEnvironment, gatewayEgressFor, sandboxNetworkFromEnvironment } from "./task-sandbox.js";
 import type { CommandResult } from "./readiness.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 import { hiddenWorkspaceDirectories, isMaskVolumeName } from "./workspace-state.js";
@@ -911,11 +911,14 @@ export function createDevcontainerCli(options: { dockerPath?: string; environmen
   const gateway = gatewayEgressFor(options.environment ?? process.env);
   const dockerPath = gateway === undefined ? options.dockerPath : DEVCONTAINER_GATEWAY_DOCKER;
   const docker = dockerPath ?? "docker";
+  // L4-NETG3: the tool downloads a project's dev container features itself (from ghcr.io and other hosts), on the host network. A gateway-mode worker gives it the gateway's daemon proxy, so that goes through the same name rules; the Docker daemon has the same proxy.
+  const proxy = daemonProxyFromEnvironment(options.environment ?? process.env);
+  const toolEnvironment = proxy === undefined ? undefined : { ...(options.environment ?? process.env), HTTP_PROXY: proxy, HTTPS_PROXY: proxy, http_proxy: proxy, https_proxy: proxy, NO_PROXY: "localhost,127.0.0.1", no_proxy: "localhost,127.0.0.1" };
   const run: DevcontainerCli["run"] = (args, runOptions) => runCollected(process.execPath, [
     script,
     // A gateway-mode worker also tells the tool never to use BuildKit (`--buildkit never`), on top of the wrapper's own refusal of buildx: the classic builder is the only one that takes the walled network.
     ...(dockerPath === undefined || args[0] === undefined ? args : [args[0], "--docker-path", dockerPath, ...(gateway !== undefined && (args[0] === "up" || args[0] === "build") ? ["--buildkit", "never"] : []), ...args.slice(1)]),
-  ], runOptions);
+  ], toolEnvironment === undefined ? runOptions : { ...runOptions, env: toolEnvironment });
   return {
     run,
     ...(gateway === undefined ? {} : { walledNetwork: { name: gateway.network, ensure: () => ensureGatewayNetwork(gateway.network) } }),

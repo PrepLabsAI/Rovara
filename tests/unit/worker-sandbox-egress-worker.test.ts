@@ -6,13 +6,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as CollectedProcessModule from "../../packages/worker/src/collected-process.js";
 
-const captured = vi.hoisted(() => ({ calls: [] as string[][] }));
+const captured = vi.hoisted(() => ({ calls: [] as string[][], environments: [] as Array<NodeJS.ProcessEnv | undefined> }));
 vi.mock("../../packages/worker/src/collected-process.js", async (importOriginal) => {
   const original = await importOriginal<typeof CollectedProcessModule>();
-  return { ...original, runCollected: async (_executable: string, args: readonly string[]) => { captured.calls.push([...args]); return { exitCode: 0, stdout: "", stderr: "" }; } };
+  return { ...original, runCollected: async (_executable: string, args: readonly string[], options?: { env?: NodeJS.ProcessEnv }) => { captured.calls.push([...args]); captured.environments.push(options?.env); return { exitCode: 0, stdout: "", stderr: "" }; } };
 });
 
-const { TASK_SANDBOX_NETWORK, TaskSandbox, gatewayEgressFor, gatewayEgressFromEnvironment, sandboxDnsFromEnvironment } = await import("../../packages/worker/src/task-sandbox.js");
+const { TASK_SANDBOX_NETWORK, TaskSandbox, daemonProxyFromEnvironment, gatewayEgressFor, gatewayEgressFromEnvironment, sandboxDnsFromEnvironment } = await import("../../packages/worker/src/task-sandbox.js");
 const { setupSharedNetwork } = await import("../../packages/worker/src/setup-agent-invocation.js");
 const { DEVCONTAINER_GATEWAY_DOCKER, createDevcontainerCli, ensureGatewayNetwork } = await import("../../packages/worker/src/devcontainer.js");
 const { evalInstallArgProblems, evalInstallRunArgs } = await import("../../packages/worker/src/verification/eval-bridged-exec.js");
@@ -20,7 +20,8 @@ const { createSetupSandbox } = await import("../../packages/worker/src/setup-age
 
 const IMAGE = `rovara/worker@sha256:${"c".repeat(64)}`;
 const TASK = "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11";
-const GATEWAY_ENV = { AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "172.28.250.2" } as const;
+const PROXY = "http://172.28.251.2:3128";
+const GATEWAY_ENV = { AGENTX_DAEMON_PROXY: PROXY, AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "172.28.250.2" } as const;
 const flag = (args: readonly string[], name: string): string[] => args.flatMap((arg, index) => (args[index - 1] === name ? [arg] : []));
 
 describe("gatewayEgressFor", () => {
@@ -161,6 +162,31 @@ describe("the devcontainer on a gateway-mode worker", () => {
     captured.calls.length = 0;
     await createDevcontainerCli({ environment: {} }).run(["up"], {});
     expect(captured.calls[0]).not.toContain("--buildkit");
+  });
+
+  // Lane L4-NETG3 (DEC 254zzz105): the CLI downloads a project's features itself, on the host network; it is given the gateway's daemon proxy.
+  it("runs the dev container CLI with the gateway's daemon proxy in its environment (HTTP_PROXY, HTTPS_PROXY, both spellings), keeping loopback off it", async () => {
+    captured.calls.length = 0; captured.environments.length = 0;
+    await createDevcontainerCli({ environment: GATEWAY_ENV, dockerPath: "/usr/bin/docker" }).run(["up"], {});
+    const environment = captured.environments[0]!;
+    expect(environment).toMatchObject({ HTTP_PROXY: PROXY, HTTPS_PROXY: PROXY, http_proxy: PROXY, https_proxy: PROXY, NO_PROXY: "localhost,127.0.0.1", no_proxy: "localhost,127.0.0.1" });
+    // Not in gateway mode: the CLI's environment is left as it was (no env option at all).
+    captured.environments.length = 0;
+    await createDevcontainerCli({ environment: {} }).run(["up"], {});
+    expect(captured.environments[0]).toBeUndefined();
+  });
+
+  it("daemonProxyFromEnvironment: only in gateway mode, only a plain http://address:port, and a gateway-mode worker without one refuses (a feature download never goes out directly)", () => {
+    expect(daemonProxyFromEnvironment(GATEWAY_ENV)).toBe(PROXY);
+    expect(daemonProxyFromEnvironment({})).toBeUndefined();
+    expect(daemonProxyFromEnvironment({ ...GATEWAY_ENV, AGENTX_SANDBOX_EGRESS: "bridge" })).toBeUndefined();
+    for (const bad of ["", "172.28.251.2:3128", "https://172.28.251.2:3128", "http://proxy.example.com:3128", "http://172.28.251.2", "http://172.28.251.2:3128/x", "http://172.28.251.2:99999", "http://999.1.1.1:3128", "http://user@172.28.251.2:3128"]) {
+      expect(() => daemonProxyFromEnvironment({ ...GATEWAY_ENV, AGENTX_DAEMON_PROXY: bad }), bad).toThrowError(expect.objectContaining({ code: "RUNTIME_UNAVAILABLE" }));
+    }
+    const without: Record<string, string> = { ...GATEWAY_ENV };
+    delete without["AGENTX_DAEMON_PROXY"];
+    expect(() => daemonProxyFromEnvironment(without)).toThrowError(expect.objectContaining({ code: "RUNTIME_UNAVAILABLE" }));
+    expect(() => createDevcontainerCli({ environment: without })).toThrowError(expect.objectContaining({ code: "RUNTIME_UNAVAILABLE" }));
   });
 
   it("is untouched when the gateway is off: no walled network, the caller's docker path or none", async () => {
