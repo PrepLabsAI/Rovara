@@ -946,6 +946,9 @@ it("redacts every company figure in the member JSON while owners and admins keep
  // Walk the entire serialized response: leaks in a hold, binding or future nested field must also fail.
  const numbers = (value: unknown): number[] => typeof value === "number" ? [value] : value !== null && typeof value === "object" ? Object.values(value).flatMap(numbers) : [];
  const member = await read("member");
+ const options = (member as { options: Array<{ firstBindingLimit: unknown }> }).options;
+ for (const q of options) expect(numbers(q.firstBindingLimit)).toEqual([]);
+ expect(member).toMatchObject({ options: [{ firstBindingLimit: { value: { bindingScope: "engine_task" } } }, { firstBindingLimit: { value: { bindingScope: "engine_task" } } }] });
  expect(numbers(member).filter(n => companyNumbers.includes(n))).toEqual([]);
  expect(member).toMatchObject({ options: [{ limits: [], initialHoldMicros: { state: "unavailable", reason: "restricted" }, firstBindingLimit: { state: "available", value: { scope: "RESTRICTED", blocked: false } } }, { limits: [], firstBindingLimit: { state: "available", value: { scope: "RESTRICTED", blocked: false } } }] });
  for (const role of ["owner", "admin"] as const) {

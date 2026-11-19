@@ -66,9 +66,9 @@ describe("advisory start comparison", () => {
 it("strictly accepts the restricted binding's three states without accepting hidden figures", async () => {
  const quote = await startEstimates({ store }, input);
  for (const blocked of [true, false, null]) {
-  const restricted = { ...quote, options: quote.options.map(q => ({ ...q, limits: [], initialHoldMicros: { state: "unavailable", reason: "restricted" }, firstBindingLimit: av({ scope: "RESTRICTED", blocked }) })) };
+  const restricted = { ...quote, options: quote.options.map(q => ({ ...q, limits: [], initialHoldMicros: { state: "unavailable", reason: "restricted" }, firstBindingLimit: av({ scope: "RESTRICTED", blocked, bindingScope: "engine_day" }) })) };
   expect(parsePreviewV2(restricted)).toEqual(restricted);
-  for (const patch of [{ availableMicros: 123 }, { requiredMicros: av(123) }, { blocked: "false" }, { blocked: undefined }]) {
+  for (const patch of [{ availableMicros: 123 }, { requiredMicros: av(123) }, { blocked: "false" }, { blocked: undefined }, { bindingScope: "other" }, { bindingScope: 123 }]) {
    expect(parsePreviewV2({ ...restricted, options: restricted.options.map(q => ({ ...q, firstBindingLimit: av({ ...q.firstBindingLimit.value, ...patch }) })) })).toBeUndefined();
   }
   expect(parsePreviewV2({ ...restricted, options: restricted.options.map(q => ({ ...q, limits: quote.options[0].limits })) })).toBeUndefined();
@@ -79,5 +79,21 @@ it("strictly accepts the restricted binding's three states without accepting hid
 
 it("pins the mirrored PreviewV2 contract and member boundary", () => {
  const bytes = readFileSync("packages/contracts/src/start-estimates.ts");
- expect(createHash("sha256").update(bytes).digest("hex")).toBe("420d6c6fe174fb4dd99735bc01d417387ecb87c65ae1f1b7cb26e5888a0426a5");
+ expect(createHash("sha256").update(bytes).digest("hex")).toBe("9db6c3ee44077f81cb402cb8cd36c29f6574b6abb3da90ca5c747b4e8bb0a34c");
 });
+
+ it("keeps only each binding scope and status when restricting a quote, idempotently", async () => {
+  const { restrictPreviewV2 } = await import("../../packages/contracts/src/start-estimates.js");
+  const numbers = (v: unknown): number[] => typeof v === "number" ? [v] : v !== null && typeof v === "object" ? Object.values(v).flatMap(numbers) : [];
+  for (const scope of ["engine_task", "project_task", "engine_day", "gateway_task", "project_month", "person_month", "company_month", "purpose_month"] as const) {
+   const raw = await startEstimates({ store }, { ...input, context: { ...context, limits: [{ ...context.limits[0]!, scope }] } });
+   const member = restrictPreviewV2(raw);
+   expect(parsePreviewV2(member)).toEqual(member);
+   expect(restrictPreviewV2(member)).toEqual(member);
+   for (const q of member.options) {
+    const rawBinding = raw.options[member.options.indexOf(q)]!.firstBindingLimit;
+    expect(q.firstBindingLimit).toEqual(av({ scope: "RESTRICTED", bindingScope: scope, blocked: rawBinding.state === "available" ? rawBinding.value?.blocked ?? null : null }));
+    expect(numbers(q.firstBindingLimit)).toEqual([]);
+   }
+  }
+ });
