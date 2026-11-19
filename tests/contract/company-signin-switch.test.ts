@@ -139,11 +139,12 @@ describe("CompanySignIn and CompanySelfServe: the parameters", () => {
     for (const reader of legacyReaders) expect(variablesOf(off, onlyId(off, reader)).COMPANY_SIGNIN, reader).toBe("disabled");
     expect(variablesOf(off, onlyId(off, "DeveloperSignInFunction")).COMPANY_SELF_SERVE).toBe("disabled");
     // Off: no company sign-in policy is deployed, and nothing names the per-company Slack token family.
-    expect(Object.values(off.Resources).filter((resource) => resource.Type === "AWS::IAM::Policy" && JSON.stringify(resource.Properties.PolicyName ?? "").includes("company-signin-"))).toEqual([]);
+    expect(Object.values(off.Resources).filter((resource) => resource.Type === "AWS::IAM::Policy" && JSON.stringify(resource.Properties?.PolicyName ?? "").includes("company-signin-"))).toEqual([]);
     expect(namesSlackWorkspaces(off)).toEqual([]);
     // Every company sign-in policy carries the switch's condition.
-    const companyPolicies = Object.entries(legacy.Resources).filter(([, resource]) => JSON.stringify(resource.Properties.PolicyName ?? "").includes("company-signin-"));
-    expect(companyPolicies.map(([id]) => id.replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual(["CompanySignInSwitchBrokerCompanyMemberships", "CompanySignInSwitchSignInCompanyGrants", "CompanySignInSwitchSlackWorkspaceTokens"]);
+    const companyPolicies = Object.entries(legacy.Resources).filter(([, resource]) => JSON.stringify(resource.Properties?.PolicyName ?? "").includes("company-signin-"));
+    // #1148: the legacy broker reads COMPANY_MEMBER# with its sign-in grants now (it has the task token key), as a named broker does, so BrokerCompanyMemberships is gone.
+    expect(companyPolicies.map(([id]) => id.replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual(["CompanySignInSwitchSignInCompanyGrants", "CompanySignInSwitchSlackWorkspaceTokens"]);
     const companyOn = Object.keys(legacy.Conditions ?? {}).find((id) => id.startsWith("CompanySignInSwitchOn"))!;
     for (const [, resource] of companyPolicies) expect(resource.Condition).toBe(companyOn);
     const on = deployed(legacy, { CompanySignIn: "enabled" });

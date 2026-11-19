@@ -144,7 +144,7 @@ export class DeveloperSignIn extends Construct {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    // Named environments publish a stable task kid before a gateway is enabled. The legacy deployment (production) runs tasks too but has no such key: its template stays as deployed.
+    // Named environments publish a stable task kid before a gateway is enabled. #1148: the legacy deployment (production) too, for the core engine's model gateway (legacyNaming's alias).
     const taskTokenKeyAlias = tasks === undefined ? undefined : props.naming.taskTokenKeyAlias;
     const taskTokenKey = taskTokenKeyAlias === undefined ? undefined : new kms.Key(this, "TaskTokenKey", {
       alias: taskTokenKeyAlias,
@@ -155,8 +155,8 @@ export class DeveloperSignIn extends Construct {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    // Hosted wiring (c): the policy hook's question key, a separate key from the task key (plan v3.2 7.5: a question can never pass for a task token, or the other way round). Named
-    // environments only; the legacy template stays as deployed.
+    // Hosted wiring (c): the policy hook's question key, a separate key from the task key (plan v3.2 7.5: a question can never pass for a task token, or the other way round).
+    // #1148: the legacy install too (legacyNaming's alias).
     const policyHookKeyAlias = tasks === undefined ? undefined : props.naming.policyHookKeyAlias;
     const policyHookKey = policyHookKeyAlias === undefined ? undefined : new kms.Key(this, "PolicyHookKey", {
       alias: policyHookKeyAlias,
@@ -403,7 +403,8 @@ export class DeveloperSignIn extends Construct {
     // 0.5.18 staging stack already holds ANY /v1/app/{proxy+} under that ID. A new ID made CloudFormation create a second route
     // with the same key before its cleanup deleted the old one, and the update failed with 409 AlreadyExists.
     // Pinned by tests/unit/collision-check.test.ts; check new previews with scripts/collision-check.ts.
-    const coreAppRoute = named && tasks !== undefined ? new apigwv2.CfnRoute(this, "AppRoute", {
+    // #1148: the legacy install (production) too: Rovara Cloud's project page and Inbox call /v1/app/*; the broker serves it only while CoreEngine is not off.
+    const coreAppRoute = tasks !== undefined ? new apigwv2.CfnRoute(this, "AppRoute", {
       apiId: props.api.ref, routeKey: CORE_APP_ROUTE_KEY, target: `integrations/${props.brokerIntegration.ref}`, authorizationType: "NONE",
     }) : undefined;
     // Public routes are stage-capped: bursts of 50, 20 requests a second on average,
@@ -435,7 +436,8 @@ export class DeveloperSignIn extends Construct {
       // Hosted wiring (d), named environments only: the company audit and event reads (the /v1/dev/client/* routes are always on since DEC 254zzz81). Membership is read from
       // COMPANY_MEMBER# (granted below, also named only).
       // Derived by a named broker (DERIVED_BROKER_VARIABLES; DEC 254h, room for GitHub sign-in): synthesis stops unless the broker would set exactly "enabled".
-      if (named) addDerivedBrokerVariable(broker, props.naming, "COMPANY_READS", "enabled");
+      // #1148: the legacy broker too (derived: COMPANY_READS is marked legacy in DERIVED_BROKER_VARIABLES).
+      addDerivedBrokerVariable(broker, props.naming, "COMPANY_READS", "enabled");
     } else {
       broker.addEnvironment("DEVELOPER_API_SCOPE", "linking");
     }
@@ -499,8 +501,9 @@ export class DeveloperSignIn extends Construct {
       ],
     });
     // #1129: a named broker reads COMPANY_MEMBER# with the sign-in grants above (with the task token key); the legacy broker reads it (company-check.ts and
-    // company-member-forwarding.ts: GetItem, one person's membership) only while company sign-in is on, through a conditional policy.
-    if (!named && company !== undefined) {
+    // company-member-forwarding.ts: GetItem, one person's membership) only while company sign-in is on, through a conditional policy. #1148: the legacy install has the task
+    // token key now, so it reads it with the grants above as a named broker does, and this policy is only for an install without that key.
+    if (!named && company !== undefined && taskTokenKeyAlias === undefined) {
       company.grant("BrokerCompanyMemberships", broker.role!, [new iam.PolicyStatement({
         actions: ["dynamodb:GetItem"], resources: [table.tableArn],
         conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["COMPANY_MEMBER#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },

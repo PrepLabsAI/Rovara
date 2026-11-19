@@ -59,9 +59,8 @@ describe("the per-company agent model choice (CoreAgentModelChoice, DEC 254n(1))
       expect(env[CORE_AGENT_MODEL_CHOICE_VARIABLE]).toBe(value);
     }
   });
-  it("is absent from the legacy template, kept across an upgrade and set by coreEngine.agentModelChoice", () => {
-    expect(legacy.Parameters).not.toHaveProperty("CoreAgentModelChoice");
-    expect(JSON.stringify(legacy.Resources)).not.toContain("CoreAgentModelChoice");
+  it("is in the legacy template too since #1148 (off by default), kept across an upgrade and set by coreEngine.agentModelChoice", () => {
+    expect(legacy.Parameters.CoreAgentModelChoice).toMatchObject({ Default: "off" });
     expect(OPERATOR_PARAMETERS["control-plane"]).toContain("CoreAgentModelChoice");
     expect(configKey("coreEngine.agentModelChoice")).toMatchObject({ target: { kind: "stack-parameter", part: "control-plane", parameter: "CoreAgentModelChoice" }, defaultValue: "off" });
   });

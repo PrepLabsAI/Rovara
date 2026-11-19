@@ -78,6 +78,9 @@ export function legacyNaming(): AgentXNaming {
     workspaceKeyAlias: "alias/agentx/production-workspaces",
     // Never used: developer sign-in exists only for named environments (R3).
     developerTokenKeyAlias: "alias/agentx/developer-tokens",
+    // #1148: the core engine's keys, as a named environment's (both aliases were free in the production account on 2026-11-19).
+    taskTokenKeyAlias: "alias/agentx/production/task-tokens",
+    policyHookKeyAlias: "alias/agentx/production/policy-questions",
     alertsTopicName: "AgentXOperatorAlerts",
     alarmName: (suffix) => `AgentX${suffix}`,
     connectorSecretPrefix: "agentx/connectors/",
