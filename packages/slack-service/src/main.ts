@@ -38,7 +38,7 @@ import { createThreadApi } from "./thread-api.js";
 import { runEvalBatchWatcher } from "./eval-batch-watcher.js";
 import { HANDOFF_MILLISECONDS, activeTurnFromItem, turnNoteFromItem } from "./interrupted-turn.js";
 import { classifierTimeoutMs, createHostedClassifier, createHostedRequestRouter, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
-import { classifierForTurn, refusalWords, requestRouterFor, resolveTurnModels, turnRefusalWords } from "./company-models.js";
+import { classifierForTurn, refusalWords, requestRouterFor, resolveTurnModels, turnRefusalWords } from "./slack-company-models.js";
 import { createAnswerChoices, createAnswerDoor } from "./slack-answer-door.js";
 import { createChoiceOffer, routeSlackRequest } from "./request-routing.js";
 import { createContinuationRecorder } from "./thread-continuation.js";
