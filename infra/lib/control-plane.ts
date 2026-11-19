@@ -719,9 +719,9 @@ export class ControlPlaneStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(notifyOperator);
-    // Issue #46, named environments only: a dispatch job that exhausts its receives lands here and
-    // nothing else reports it. The legacy AgentXControlPlane template stays as it is.
-    if (naming.env !== undefined) {
+    // Issue #46: a dispatch job that exhausts its receives lands here and nothing else reports it.
+    // #1131: every deployment, production (the legacy template) included.
+    {
       new cloudwatch.Alarm(this, "DispatchDeadLettersAlarm", {
         alarmName: naming.alarmName("DispatchDeadLetters"),
         alarmDescription: "A worker dispatch job exhausted its receives and is in the dispatch dead-letter queue. Check the dispatcher logs for its operation ID, then redrive or purge the queue.",
@@ -1188,8 +1188,8 @@ export class ControlPlaneStack extends Stack {
       // Lambda validates destination permissions when creating EventInvokeConfig. Keep this
       // grant on the execution role, and explicitly order both grant and any queue policy first.
       // SqsDestination repeats the identical grant; CDK deduplicates it in DefaultPolicy.
-      // Named environments only: the legacy (production) template is unchanged.
-      const handOffGrant = naming.env !== undefined ? handOffFailures.grantSendMessages(broker) : undefined;
+      // #1131: every deployment (the legacy template had the destination's own grant, without this ordering).
+      const handOffGrant = handOffFailures.grantSendMessages(broker);
       broker.configureAsyncInvoke({ onFailure: new lambdaDestinations.SqsDestination(handOffFailures) });
       if (handOffGrant !== undefined) {
         const brokerInvokeConfig = broker.node.findChild("EventInvokeConfig");
@@ -1261,14 +1261,12 @@ export class ControlPlaneStack extends Stack {
     broker.addEnvironment("EC2_WORKER_LAUNCH_TEMPLATE_ID", foundationParameter("Ec2WorkerLaunchTemplateId"));
     // A6: where the State table expires index items itself, the reconciler's legacy sweep is off.
     if (naming.env !== undefined) sessions.reconciler.addEnvironment("INDEX_EXPIRY", "ttl");
-    // Issue 195: the alarm for stuck cancels. Named environments only: the legacy template is
-    // unchanged. A stuck cancel on a live worker is queued again with the signing key the backstop
-    // below gives the reconciler; the legacy reconciler has none, and only logs and counts it.
-    if (naming.env !== undefined) sessions.connectStuckCancelAlarm();
-    // Issue 173: the backstop for idle Slack tasks nobody waits on. Named environments only: the
-    // legacy template is unchanged.
-    if (naming.env !== undefined) sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKeySecretName);
-    if (naming.env !== undefined) channelAdapters.connectSlackPoster(sessions.reconciler, signInParameters.slackTeamId.valueAsString);
+    // Issue 195: the alarm for stuck cancels. A stuck cancel on a live worker is queued again with the
+    // signing key the backstop below gives the reconciler. #1131: every deployment, production included.
+    sessions.connectStuckCancelAlarm();
+    // Issue 173: the backstop for idle Slack tasks nobody waits on. #1131: every deployment.
+    sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKeySecretName);
+    channelAdapters.connectSlackPoster(sessions.reconciler, signInParameters.slackTeamId.valueAsString);
     if (slackCompany !== undefined) {
       // The reconciler already reads and writes the State table; it needs only the company's token for its thread notes.
       slackCompany.grant("SessionReconciler", sessions.reconciler.role!, [slackCompany.tokenRead()]);
@@ -1345,9 +1343,9 @@ export class ControlPlaneStack extends Stack {
       });
     }
     // AUTOREQUALIFY (AR-2): the machine that renews the browser and API test machine by itself. CDK context agentx:autoRequalify=enabled, off by default
-    // (only the exact string "enabled" turns it on); named environments only. Its resources all carry the logical-ID prefix RuntimeRequalify, so the
+    // (only the exact string "enabled" turns it on); #1131: in every deployment, production included. Its resources all carry the logical-ID prefix RuntimeRequalify, so the
     // requalify-infra deploy unit adds them to a live stack with an Add-only change set. The foundation's values are the stack parameters SessionLifecycle declared.
-    if (naming.env !== undefined && this.node.tryGetContext(REQUALIFY_CONTEXT_KEY) === "enabled") {
+    if (this.node.tryGetContext(REQUALIFY_CONTEXT_KEY) === "enabled") {
       const foundationValue = (name: string): string => (this.node.findChild(name) as CfnParameter).valueAsString;
       const hour = Number(this.node.tryGetContext("agentx:autoRequalifyHourUtc") ?? REQUALIFY_DEFAULT_HOUR_UTC);
       new RuntimeRequalify(this, "RuntimeRequalify", {
@@ -1390,7 +1388,8 @@ export class ControlPlaneStack extends Stack {
     }, Duration.seconds(90));
     state.grantReadWriteData(evalBatchTick);
     callbackSigningKeyReaders.push(evalBatchTick.role!);
-    if (naming.env !== undefined) callbackSigningKeyReaders.push(sessions.reconciler.role!);
+    // #1131: the reconciler signs stuck-cancel retries and the idle backstop's cancels, in every deployment.
+    callbackSigningKeyReaders.push(sessions.reconciler.role!);
     callbackSigningKeySecret.addToResourcePolicy(new iam.PolicyStatement({
       sid: "ReadCallbackSigningKey",
       principals: callbackSigningKeyReaders.map((role) => new iam.ArnPrincipal(role.roleArn)),
