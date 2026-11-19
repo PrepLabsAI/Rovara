@@ -15,7 +15,16 @@ export const AGENT_MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 /** The most models one company's list may hold. */
 export const OFFERED_AGENT_MODELS_MAX = 64;
 
-export const OfferedAgentModelSchema = z.object({ model: z.string().regex(AGENT_MODEL_NAME) }).strict();
+/** The most a model's list price may be, in US dollars per million tokens. */
+export const OFFERED_PRICE_USD_MAX = 10_000;
+const UsdPerMillion = z.number().finite().min(0).max(OFFERED_PRICE_USD_MAX);
+/**
+ * DEC 254zzz96 (2): the gateway may say a model's list price (US dollars per million input and output tokens), for display on the company's
+ * step models card only. Optional: a gateway that does not publish prices answers exactly as before. Nothing in the engine chooses or limits by it,
+ * and the broker never stores it (stored-agent-model-choice.ts keeps the names only).
+ */
+export const OfferedModelPriceSchema = z.object({ inputUsdPerMillion: UsdPerMillion, outputUsdPerMillion: UsdPerMillion }).strict();
+export const OfferedAgentModelSchema = z.object({ model: z.string().regex(AGENT_MODEL_NAME), price: OfferedModelPriceSchema.optional() }).strict();
 export type OfferedAgentModel = z.infer<typeof OfferedAgentModelSchema>;
 
 /** What the gateway offers one company's agents. Never empty (a gateway that offers none answers a refusal instead), and a model is listed once. */

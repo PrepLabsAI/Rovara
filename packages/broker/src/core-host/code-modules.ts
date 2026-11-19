@@ -146,7 +146,7 @@ export const OWED_POINTS = {
   admission: "lane G (money at the gateway); never Code's allow-all default",
   metering: "lane G (money at the gateway); never Code's price-table default",
   identity: "lanes ID and T (Code's sign-in, company membership)",
-  approvers: "lanes ID and T (project roles, step-up)",
+  approvers: "lanes ID and T (project roles)",
   "audit-sink": "lane AU (engine audit records)",
 } as const satisfies Partial<Record<PluginPoint, string>>;
 

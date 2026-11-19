@@ -1,12 +1,10 @@
-// Hosted wiring (plan v3.2 staging switch-over): the deployed builders for the step-up factors, the policy hook's key, the company reads, the audit caller word, the nightly
-// company binding and the session cap. Offline: fake KMS, a recording SES and DynamoDB sender; no AWS call.
+// Hosted wiring (plan v3.2 staging switch-over; the step-up factors are gone, DEC 254zzz73): the deployed builders for the policy hook's key, the company reads, the audit caller word, the nightly
+// company binding and the session cap. Offline: fake KMS and a DynamoDB sender; no AWS call.
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import type { SendEmailCommand } from "@aws-sdk/client-sesv2";
 import { describe, expect, it } from "vitest";
 import { DEVELOPER_SESSION_SECONDS, IMPLICIT_COMPANY_ID, type AuditEvent, type AuditSink } from "@agentx/contracts";
-import { extraPublicKeysFromEnvironment, PASSKEY_RP_NAME, stepUpFromEnvironment, taskPublicKeysFromEnvironment } from "../../packages/broker/src/aws/developer-identity.js";
+import { extraPublicKeysFromEnvironment, taskPublicKeysFromEnvironment } from "../../packages/broker/src/aws/developer-identity.js";
 import { auditSinkForDeployedCaller, companyReadsFromEnvironment, deployedAuditVia, hostedNightlyCompany, hostedSessionCapSeconds, policyHookInstallFromEnvironment } from "../../packages/broker/src/aws/hosted-wiring.js";
-import { sesStepUpEmailSender, stepUpEmailSenderAddress, StepUpEmailNotSent } from "../../packages/broker/src/aws/step-up-email.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { issueAccessToken, POLICY_QUESTION_KEY_PURPOSE } from "../../packages/broker/src/developer/tokens.js";
 import { fakeKms, httpEvent, identityHarness } from "../support/developer-fakes.js";
@@ -30,10 +28,6 @@ function kmsByKey() {
   } };
 }
 
-function recordingSes(fail?: Error) {
-  const sent: SendEmailCommand[] = [];
-  return { sent, async send(command: unknown) { if (fail !== undefined) throw fail; sent.push(command as SendEmailCommand); return {}; } };
-}
 
 describe("hosted wiring (c): the policy hook's question key in the JWKS", () => {
   it("publishes nothing new without POLICY_HOOK_KEY_ARN: the task-only list is as before", async () => {
@@ -94,47 +88,6 @@ describe("hosted wiring (c): the policy hook's question key in the JWKS", () => 
     expect(policyHookInstallFromEnvironment({ POLICY_HOOK_KEY_ARN: POLICY_KEY }, kms)).toBeUndefined();
     expect(policyHookInstallFromEnvironment({ DEVELOPER_TOKEN_ISSUER: ISSUER, POLICY_HOOK_KEY_ARN: POLICY_KEY }, kms)?.issuer).toBe(ISSUER);
     expect(kms.calls).toEqual([]);
-  });
-});
-
-describe("hosted wiring (a) and (b): the step-up factors", () => {
-  const noSes = () => { throw new Error("SES is not built without a sender"); };
-
-  it("turns nothing on without the settings (a step-up stays refused, as before)", () => {
-    const logs: unknown[] = [];
-    expect(stepUpFromEnvironment({}, ISSUER, noSes, (entry) => logs.push(entry))).toBeUndefined();
-    expect(stepUpFromEnvironment({ STEP_UP_EMAIL_FROM: "", DEVELOPER_PASSKEYS: "disabled" }, ISSUER, noSes, (entry) => logs.push(entry))).toBeUndefined();
-    expect(logs).toEqual([]);
-  });
-
-  it("passkeys use the API's own host as the relying-party id", () => {
-    expect(stepUpFromEnvironment({ DEVELOPER_PASSKEYS: "enabled" }, ISSUER, noSes, () => undefined)).toEqual({ passkeys: { rpId: "abc123.execute-api.us-west-2.amazonaws.com", rpName: PASSKEY_RP_NAME } });
-  });
-
-  it("an unusable sender builds no email factor and logs fixed words, never the value", () => {
-    for (const bad of ["Codes <codes@example.com>", "codes@", "two@@example.com", "a b@example.com", "codes@example", "x".repeat(250) + "@example.com"]) {
-      const logs: unknown[] = [];
-      expect(stepUpFromEnvironment({ STEP_UP_EMAIL_FROM: bad }, ISSUER, noSes, (entry) => logs.push(entry)), bad).toBeUndefined();
-      expect(logs).toEqual([{ event: "signin.step_up_email_not_configured", detail: "STEP_UP_EMAIL_FROM is not one plain address" }]);
-      expect(stepUpEmailSenderAddress(bad)).toBeUndefined();
-    }
-  });
-
-  it("sends the code through SES from the configured identity only, and the message is in no error", async () => {
-    const ses = recordingSes();
-    const stepUp = stepUpFromEnvironment({ STEP_UP_EMAIL_FROM: "codes@example.com", DEVELOPER_PASSKEYS: "enabled" }, ISSUER, () => ses, () => undefined)!;
-    expect(stepUp.passkeys?.rpId).toBe("abc123.execute-api.us-west-2.amazonaws.com");
-    await stepUp.email!.send({ to: "maya@example.com", subject: "Your code", text: "123456" });
-    expect(ses.sent.map((command) => command.input)).toEqual([{
-      FromEmailAddress: "codes@example.com",
-      Destination: { ToAddresses: ["maya@example.com"] },
-      Content: { Simple: { Subject: { Data: "Your code", Charset: "UTF-8" }, Body: { Text: { Data: "123456", Charset: "UTF-8" } } } },
-    }]);
-    const failing = sesStepUpEmailSender({ ses: recordingSes(new Error("MessageRejected: maya@example.com 654321")), from: "codes@example.com" });
-    const error = await failing.send({ to: "maya@example.com", subject: "s", text: "654321" }).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(StepUpEmailNotSent);
-    expect(JSON.stringify([String(error), (error as Error).message, (error as Error).stack])).not.toMatch(/654321|maya@example\.com/u);
-    expect(() => sesStepUpEmailSender({ ses: recordingSes(), from: "not an address" })).toThrow();
   });
 });
 

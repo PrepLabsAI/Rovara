@@ -3,7 +3,7 @@
 // (`createHostedLessonsPeople`, aws/hosted-lessons-people.ts: live membership, company-bound, throws for another company) is reused here over a client that can only do what the dispatcher's role may:
 //   - sign-in table: one strongly consistent GetItem, and ONLY of `COMPANY_MEMBER#<id>` with the Membership fields or `DEVELOPER#<id>` with the projected developer fields: the exact keys and attributes the dispatcher role is granted
 //     (infra/lib/task-person-proof.ts `DispatcherPolicy`); any other key, any other command, any other table is refused before it is sent;
-//   - State table: GetItem only (the project grant row `MEMBER#<id>` / `PROJECT#<name>`); no Query, no write.
+//   - State table: GetItem only (the project grant row `MEMBER#<id>` / `PROJECT#<name>`, or a named company's `ORG#<company>#MEMBER#<id>` / `PROJECT#<name>`); no Query, no write.
 // NOT given (no new IAM): the company's member list (a Query the dispatcher's role is not granted) so `approvers` and `projectMembers` refuse; and the merge record `mergedInto` of a developer (not among the attributes the role may read)
 // so `resolveMember` is absent and ids compare as they are, exactly as the dispatcher's lessons did before this port (the approvals were checked with merges resolved when they were made, on the broker).
 // Nothing here writes, keeps anything between calls, or takes a company from the job: the company is the one the runtime was built for.
@@ -40,8 +40,8 @@ export function dispatcherPeopleClient(base: Pick<DispatcherLessonsPeopleBase, "
       const key = input.Key as { pk?: unknown; sk?: unknown } | undefined;
       if (input.ConsistentRead !== true || typeof key?.pk !== "string" || typeof key.sk !== "string") return refused();
       if (input.TableName === base.stateTableName) {
-        // The project grant row only: this person's grant on one project.
-        if (!key.pk.startsWith("MEMBER#") || !key.sk.startsWith("PROJECT#")) return refused();
+        // The project grant row only: this person's grant on one project (DEC 254zzz80: a named company's is in its own partition, `ORG#<company>#MEMBER#<person>`).
+        if (!(key.pk.startsWith("MEMBER#") || /^ORG#org_[a-z0-9]{20}#MEMBER#[^#]+$/u.test(key.pk)) || !key.sk.startsWith("PROJECT#")) return refused();
         return await base.documentClient.send(command);
       }
       if (base.signInTableName === undefined || base.signInTableName === "" || input.TableName !== base.signInTableName) return refused();

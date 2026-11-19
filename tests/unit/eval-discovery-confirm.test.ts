@@ -492,6 +492,48 @@ describe("happy path: setup report -> confirm -> approval -> task -> final-check
     expect("evalEnvironment" in configs[1]!).toBe(false);
     expect("evalEnvironment" in configs[2]!).toBe(false);
   });
+
+  it("L4-EINT: the production stand-ins are OFF unless AGENTX_EVAL_STAND_INS is exactly 1 (the config, the services' context and the version are then exactly what they were); ON they plan ONE round from the delivered descriptor", async () => {
+    const { w, sources, operationId } = await confirmedToCheck();
+    const configs: FreshEvalSandboxConfig[] = [];
+    const contexts: unknown[] = [];
+    const scratch = await realpath(await mkdtemp(join(tmpdir(), "edc-scratch-"))); roots.push(scratch);
+    const descriptor = { version: 1 as const, hosts: [{ name: "api.tiktok.com", port: 443 }] };
+    const host = (environment: Record<string, string>, standIns: EvalFreshHost["standIns"]): EvalFreshHost => ({ environment: { AGENTX_WORKER_IMAGE: IMAGE, ...environment }, docker: { run: async () => ({ exitCode: 0, stdout: "", stderr: "" }) }, workspaceKey: async () => "0123456789abcdef",
+      services: (context) => { contexts.push(context); return undefined; }, ...(standIns === undefined ? {} : { standIns }),
+      make: (config) => { configs.push(config); return { available: () => true, run: async () => ({ report: { root: scratch, cwd: ".", argument: "r.json", notBeforeMs: 0 } }) }; } });
+    const round = { workingSandbox: null, roundBudgetMs: 60_000, scratchDir: scratch };
+    const input = (side: "old" | "new") => ({ side, ids: ["q1"], runs: 1 as const, signal: new AbortController().signal, model: { socketPath: "/tmp/e/models/m", token: "a".repeat(32) } });
+    const pinned = <T>(fn: () => Promise<T>) => withEvalPinnedCandidate(w.repo.repositories, w.repo.candidates, new AbortController().signal, fn, round);
+    // OFF, every way: no variable, a wrong value, the host option absent although the variable is "1".
+    for (const [environment, standIns] of [[{}, { dependencies: undefined }], [{ AGENTX_EVAL_STAND_INS: "true" }, { dependencies: undefined }], [{ AGENTX_EVAL_STAND_INS: "1" }, undefined]] as const) {
+      const planned = plannedFreshEvalSandbox(host(environment, standIns), { operationId, workspaceId: "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11" }, sources.deliveredPlan, async () => undefined, async () => descriptor);
+      await pinned(() => planned.sandbox.run(input("new")));
+      const config = configs.at(-1)!;
+      expect("standIns" in config).toBe(false);
+      expect(contexts.at(-1)).toEqual({ side: "new", prepared: undefined });
+      expect("standInSetVersion" in planned).toBe(false);
+      expect("fillMissingRows" in planned).toBe(false);
+    }
+    // ON: one round for the whole check (both sides share it), a version, and the services are told the prepared set.
+    const on = plannedFreshEvalSandbox(host({ AGENTX_EVAL_STAND_INS: "1" }, { dependencies: undefined }), { operationId, workspaceId: "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11" }, sources.deliveredPlan, async () => undefined, async () => descriptor);
+    expect(on.fillMissingRows).toBeTypeOf("function");
+    const before = configs.length;
+    await pinned(() => on.sandbox.run(input("old")));
+    await pinned(() => on.sandbox.run(input("new")));
+    const [oldConfig, newConfig] = configs.slice(before) as [FreshEvalSandboxConfig, FreshEvalSandboxConfig];
+    expect(oldConfig.standIns?.round).toBeDefined();
+    expect(newConfig.standIns?.round).toBe(oldConfig.standIns?.round);
+    expect(oldConfig.standIns?.round.plannedHosts()).toEqual(["api.tiktok.com"]);
+    expect(contexts.slice(-2).map((context) => (context as { side: string }).side)).toEqual(["old", "new"]);
+    expect(await pinned(() => on.standInSetVersion!())).toMatch(/^[a-f0-9]{64}$/u);
+    expect(await pinned(() => on.fillMissingRows!({ ids: ["q1"] }))).toEqual([]);
+    // A descriptor that names nothing (and no recording) is no round, and the eval runs as it did.
+    const quiet = plannedFreshEvalSandbox(host({ AGENTX_EVAL_STAND_INS: "1" }, { dependencies: undefined }), { operationId, workspaceId: "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11" }, sources.deliveredPlan, async () => undefined, async () => undefined);
+    await pinned(() => quiet.sandbox.run(input("new")));
+    expect("standIns" in configs.at(-1)!).toBe(false);
+    expect(await pinned(() => quiet.standInSetVersion!())).toBeUndefined();
+  });
 });
 
 // ---- DEC 253q: the cap from the trusted host's source, the broker's own judge pin, the pinned scoring file, and the producer end to end

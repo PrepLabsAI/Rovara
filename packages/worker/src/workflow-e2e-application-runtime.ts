@@ -5,9 +5,12 @@ import { WEB_API_BUILD_IMAGE, containedRuntimeProfileForHost, createDockerApplic
 import type { WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
 import { runnerHostEnvironment } from "./e2e-runtime-environment.js";
 import { executorImageSyncsSession } from "./e2e-session-sync-feature.js";
+import { gatewayEgressFor } from "./task-sandbox.js";
 
 /** What the worker's own configuration gives the Docker application host; nothing here comes from an invocation. */
-export type WorkflowE2EApplicationRuntimeConfig = Readonly<{ executorImage: string; buildImage: string; runRoot: string }>;
+export type WorkflowE2EApplicationRuntimeConfig = Readonly<{ executorImage: string; buildImage: string; runRoot: string;
+  /** Lane L4-NETG2: only on a worker whose boot said `AGENTX_SANDBOX_EGRESS=gateway`: the gateway's network and name server, which the candidate's build commands then run on (the verifier's `buildEgress`). */
+  buildEgress?: Readonly<{ network: string; dns: string }> }>;
 
 /**
  * Reads the configuration, failing closed when any of it is missing: the executor image is the worker's `EXECUTOR_IMAGE` (the image its boot script pulled), the build
@@ -20,7 +23,9 @@ export function workflowE2EApplicationRuntimeConfig(environment: NodeJS.ProcessE
   }
   const scratch = containedRuntimeProfileForHost(platform, arch)?.candidateScratchRoot;
   if (scratch === undefined) throw new Error("this host has no shared runtime directory for application E2E runs, so application checks cannot run here");
-  return { executorImage, buildImage: WEB_API_BUILD_IMAGE, runRoot: join(scratch, "web-api-runs") };
+  // A gateway-mode worker that has lost its network or name server throws here (RUNTIME_UNAVAILABLE): application checks are then not offered, and no build runs on a bridge with a way out.
+  const buildEgress = gatewayEgressFor(environment);
+  return { executorImage, buildImage: WEB_API_BUILD_IMAGE, runRoot: join(scratch, "web-api-runs"), ...(buildEgress === undefined ? {} : { buildEgress }) };
 }
 
 /**
@@ -31,6 +36,7 @@ export function workflowE2EApplicationHostDeps(config: WorkflowE2EApplicationRun
   input: Parameters<WorkflowE2EApplicationRuntime["createHost"]>[0]): DockerApplicationHostDeps {
   return { docker, executorImage: config.executorImage, buildImage: config.buildImage, runRoot: config.runRoot, now,
     admission: input.admission, groupId: input.groupId, candidateSourceDir: input.candidateSourceDir,
+    ...(config.buildEgress === undefined ? {} : { buildEgress: { network: config.buildEgress.network, dns: config.buildEgress.dns } }),
     ...(input.modelChannel === undefined ? {} : { modelChannel: input.modelChannel }) };
 }
 

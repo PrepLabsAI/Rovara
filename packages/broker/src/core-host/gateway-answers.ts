@@ -45,6 +45,21 @@ const COST_USD_MAX = 1_000;
 const ANSWER_KEY = /^answer:a[0-9a-f]{31}$/u;
 const PAUSE_STATUSES: readonly number[] = [403, 422];
 
+/**
+ * One answers token, minted exactly as the adapter below mints its own (`tokenFor`): the install's task key, purpose `task`, the answers step, this company and project, `answer:<id>` as its task, the one
+ * model, no person, a fresh workspace and operation. Used by the answers adapter for every call, and by the Slack chat's model access (DEC 254zzz79 (3): the same route, so the company's answers month and the
+ * combined company cap count the call). The company is the caller's to bind and is checked here.
+ */
+export async function mintAnswersCallToken(input: { signer: TokenSigner; issuer: string; companyId: OrgId; project: string; model: string; answerKey?: string; now?: () => number }): Promise<string> {
+  if (!OrgIdSchema.safeParse(input.companyId).success || !AGENTX_NAME_PATTERN.test(input.project) || !CORE_CLAUDE_AGENT_MODEL.test(input.model)) throw new Error("not a valid answers token request");
+  const key = input.answerKey ?? `answer:a${randomUUID().replace(/-/gu, "").slice(0, 31)}`;
+  if (!ANSWER_KEY.test(key)) throw new Error("not a valid answers token request");
+  const describer: TaskTokenDescriber = {
+    describe: async () => ({ companyId: input.companyId, project: input.project, payer: { kind: "project", project: input.project }, taskId: key, step: ANSWERS_STEP, models: [input.model] }),
+  };
+  return (await mintTaskToken({ signer: input.signer, issuer: input.issuer, describer, ...(input.now === undefined ? {} : { now: input.now }) }, { workspaceId: randomUUID(), operationId: randomUUID(), fence: 0 })).token;
+}
+
 export interface HttpAnswersGatewayOptions {
   /** The gateway's https origin (checked: no path, credentials, query or fragment). */
   gatewayUrl: string;
@@ -96,10 +111,7 @@ export function createHttpAnswersGateway(options: HttpAnswersGatewayOptions): An
 
   /** The token of one call: a task token of the answers step, for exactly this reservation's company, project and answer. */
   async function tokenFor(reservation: Open): Promise<string> {
-    const describer: TaskTokenDescriber = {
-      describe: async () => ({ companyId: reservation.companyId, project: reservation.project, payer: { kind: "project", project: reservation.project }, taskId: reservation.key, step: ANSWERS_STEP, models: [options.model] }),
-    };
-    return (await mintTaskToken({ signer: options.signer, issuer: options.issuer, describer, now }, { workspaceId: randomUUID(), operationId: randomUUID(), fence: 0 })).token;
+    return await mintAnswersCallToken({ signer: options.signer, issuer: options.issuer, companyId: reservation.companyId, project: reservation.project, model: options.model, answerKey: reservation.key, now });
   }
 
   return {

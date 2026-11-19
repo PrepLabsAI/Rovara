@@ -11,7 +11,8 @@ import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, WORKSPACE_LIMITS_KEY, isWholeLimi
 import { emailIndexKey } from "../developer/store.js";
 import { profileAvatarUrl, profileDisplayName } from "../developer/github-profile.js";
 import { ownerKeyForSubject } from "./lambda.js";
-import { recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
+import { ownPartitionRow, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
+import { grantKeyFor, namedCompany, projectMemberRowKeyFor, projectMembersPkFor } from "./company-layout.js";
 import { OrgIdSchema } from "@agentx/contracts";
 
 export interface AdminActionDependencies {
@@ -106,10 +107,19 @@ export async function resolveDeveloper(deps: AdminActionDependencies, reference:
   } catch { throw agentXError("NOT_FOUND", EMAIL_NOT_SIGNED_IN); }
 }
 
-/** The membership row's role, and when it was granted (null for a row without that, such as an administrator's). */
+/**
+ * The membership row's role, and when it was granted (null for a row without that, such as an administrator's). DEC 254zzz80: a NAMED company's grant lives in its own
+ * partition (`ORG#<company>#MEMBER#<person>` / `PROJECT#<name>`, company-layout.ts) and is the only grant read for it; a row there that names another company, or whose keys or
+ * project name disagree, is none. The built-in company and no company read the legacy row exactly as before (with its stored-company rule).
+ */
 export async function projectGrant(deps: Pick<AdminActionDependencies, "documentClient" | "tableName">, project: string, developerId: string, companyId?: string): Promise<{ role: "developer" | "administrator"; grantedAt: string | null } | undefined> {
-  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}` }, ConsistentRead: true })) as { Item?: { role?: unknown; grantedAt?: unknown } };
-  if (!recordInCompany(response.Item, companyId)) return undefined;
+  const key = grantKeyFor(companyId, developerId, project);
+  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> & { role?: unknown; grantedAt?: unknown } };
+  const company = namedCompany(companyId);
+  if (company !== undefined) {
+    const row = response.Item;
+    if (row === undefined || row.pk !== key.pk || row.sk !== key.sk || !ownPartitionRow(row, company) || (Object.hasOwn(row, "projectName") && row.projectName !== project)) return undefined;
+  } else if (!recordInCompany(response.Item, companyId)) return undefined;
   const role = response.Item?.role;
   if (role !== "developer" && role !== "administrator") return undefined;
   return { role, grantedAt: typeof response.Item?.grantedAt === "string" ? response.Item.grantedAt : null };
@@ -118,9 +128,10 @@ export async function projectGrant(deps: Pick<AdminActionDependencies, "document
 /**
  * Spec 065: the project's side of a grant, so a project's members can be listed (memberships are keyed by person). Written
  * and removed in the same transaction as the membership row. Grants made before it are not listed until made again.
+ * DEC 254zzz80: a named company's in its own partition (company-layout.ts); otherwise the legacy key.
  */
-export function projectMemberKey(project: string, developerId: string): { pk: string; sk: string } {
-  return { pk: `PROJECT_MEMBERS#${project}`, sk: `DEVELOPER#${developerId}` };
+export function projectMemberKey(project: string, developerId: string, companyId?: string): { pk: string; sk: string } {
+  return projectMemberRowKeyFor(companyId, project, developerId);
 }
 
 /** A transaction's condition failed (or a single write's): the row was not as the write needed it. */
@@ -131,18 +142,22 @@ function conditionFailed(error: unknown): boolean {
 }
 
 /** Spec 065: a project's members as its side of each grant records them, oldest first. */
-export async function listProjectMembers(deps: AdminActionDependencies, project: string): Promise<Array<{ developerId: string; role: "administrator" | "developer"; grantedAt: string | null }>> {
+/** DEC 254zzz80: a named company's members are read from its own partition only, and a row there that names another company is never listed. */
+export async function listProjectMembers(deps: AdminActionDependencies, project: string, companyId?: string): Promise<Array<{ developerId: string; role: "administrator" | "developer"; grantedAt: string | null }>> {
   const members: Array<{ developerId: string; role: "administrator" | "developer"; grantedAt: string | null }> = [];
+  const pk = projectMembersPkFor(companyId, project);
+  const company = namedCompany(companyId);
   let start: Record<string, unknown> | undefined;
   do {
     const page = await deps.documentClient.send(new QueryCommand({
       TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :developer)",
-      ExpressionAttributeValues: { ":pk": `PROJECT_MEMBERS#${project}`, ":developer": "DEVELOPER#" }, ConsistentRead: true,
+      ExpressionAttributeValues: { ":pk": pk, ":developer": "DEVELOPER#" }, ConsistentRead: true,
       ...(start === undefined ? {} : { ExclusiveStartKey: start }),
     })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
     for (const item of page.Items ?? []) {
       const developerId = typeof item.sk === "string" ? item.sk.slice("DEVELOPER#".length) : "";
       if (developerId === "" || (item.role !== "administrator" && item.role !== "developer")) continue;
+      if (company !== undefined && (item.pk !== pk || !ownPartitionRow(item, company))) continue;
       members.push({ developerId, role: item.role, grantedAt: typeof item.grantedAt === "string" ? item.grantedAt : null });
     }
     start = page.LastEvaluatedKey;
@@ -151,8 +166,9 @@ export async function listProjectMembers(deps: AdminActionDependencies, project:
 }
 
 /** FR-013.1: a `developer` ProjectMembership row. An administrator row for the same key is kept as it is. */
-export async function grantProjectAccess(deps: AdminActionDependencies, admin: { issuer: string; subject: string }, project: string, developerId: string): Promise<{ granted: true; already: boolean }> {
-  const current = await projectGrant(deps, project, developerId);
+/** DEC 254zzz80: `companyId` is the company the grant is made in (the caller's LIVE membership): a named company's grant and its reverse row go to its own partition. */
+export async function grantProjectAccess(deps: AdminActionDependencies, admin: { issuer: string; subject: string }, project: string, developerId: string, companyId?: string): Promise<{ granted: true; already: boolean }> {
+  const current = await projectGrant(deps, project, developerId, companyId);
   if (current?.role === "administrator") throw agentXError("CONFIG_INVALID", `that developer already administers ${project}, so there is nothing to grant`);
   if (current?.role === "developer") return { granted: true, already: true };
   const grantedAt = new Date(deps.now()).toISOString();
@@ -160,40 +176,49 @@ export async function grantProjectAccess(deps: AdminActionDependencies, admin: {
     await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Put: {
         TableName: deps.tableName,
-        Item: { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}`, entityType: "MEMBERSHIP", ownerKey: developerId, projectName: project, role: "developer",
+        Item: { ...grantKeyFor(companyId, developerId, project), entityType: "MEMBERSHIP", ownerKey: developerId, projectName: project, role: "developer",
           grantId: randomUUID(), grantedBy: admin, grantedAt },
         ConditionExpression: "attribute_not_exists(pk)",
       } },
-      { Put: { TableName: deps.tableName, Item: { ...projectMemberKey(project, developerId), entityType: "PROJECT_MEMBER", role: "developer", grantedAt } } },
+      { Put: { TableName: deps.tableName, Item: { ...projectMemberKey(project, developerId, companyId), entityType: "PROJECT_MEMBER", role: "developer", grantedAt } } },
     ] }));
   } catch (error) {
     if (!conditionFailed(error)) throw error;
     // A row appeared between the read and the write: say what it is rather than assume.
-    const raced = await projectGrant(deps, project, developerId);
+    const raced = await projectGrant(deps, project, developerId, companyId);
     if (raced?.role === "administrator") throw agentXError("CONFIG_INVALID", `that developer already administers ${project}, so there is nothing to grant`);
     return { granted: true, already: true };
   }
   return { granted: true, already: false };
 }
 
-export async function revokeProjectAccess(deps: AdminActionDependencies, project: string, developerId: string): Promise<{ revoked: boolean }> {
-  try {
-    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      { Delete: {
-        TableName: deps.tableName,
-        Key: { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}` },
-        // Only a grant: an administrator row is never removed by revoking a developer's access.
-        ConditionExpression: "#role = :developer",
-        ExpressionAttributeNames: { "#role": "role" },
-        ExpressionAttributeValues: { ":developer": "developer" },
-      } },
-      { Delete: { TableName: deps.tableName, Key: projectMemberKey(project, developerId) } },
-    ] }));
-    return { revoked: true };
-  } catch (error) {
-    if (conditionFailed(error)) return { revoked: false };
-    throw error;
-  }
+/** DEC 254zzz80: revoked where the grant lives for `companyId` (the caller's LIVE membership): a named company's own partition, so nothing of the grant is left behind there. */
+export async function revokeProjectAccess(deps: AdminActionDependencies, project: string, developerId: string, companyId?: string): Promise<{ revoked: boolean }> {
+  const revokeAt = async (company: string | undefined): Promise<boolean> => {
+    try {
+      await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        { Delete: {
+          TableName: deps.tableName,
+          Key: grantKeyFor(company, developerId, project),
+          // Only a grant: an administrator row is never removed by revoking a developer's access.
+          ConditionExpression: "#role = :developer",
+          ExpressionAttributeNames: { "#role": "role" },
+          ExpressionAttributeValues: { ":developer": "developer" },
+        } },
+        { Delete: { TableName: deps.tableName, Key: projectMemberKey(project, developerId, company) } },
+      ] }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  };
+  const revoked = await revokeAt(companyId);
+  // DEC 254zzz98 (review M1): a NAMED company's revoke leaves nothing in either layout. A legacy developer grant of that person on that name (pre-R2-F1 data, or a row the
+  // backfill copied from and kept) still opens the routes that read the legacy revision (broker.ts requireMembership), so it goes too, with its legacy reverse row. A legacy
+  // administrator row is never removed by a revoke, as before. The built-in company and none: the one legacy delete above, byte for byte.
+  const legacyRevoked = namedCompany(companyId) === undefined ? false : await revokeAt(undefined);
+  return { revoked: revoked || legacyRevoked };
 }
 
 /** E19, FR-053: the setting the broker reads at each workspace creation. */

@@ -2,7 +2,7 @@
 // (optional instructions); only the findings to fix go back to coding. Cloud's `resolveTaskWorkflowFindings`, over the ports. Today Code has no way for the owner to decide a finding.
 //
 // The move is the engine's own (`resolveWorkflowReviewFindings`: owner only, every blocking finding answered exactly once, an accept needs a reason of 1 to 500 characters, at the exact revision and candidate; the
-// accepted findings are recorded for that candidate only). Accepting a SECURITY finding is the web page's alone, with a fresh step-up (`security-accept.ts`, DEC 236h): a script token or an API token may accept only the
+// accepted findings are recorded for that candidate only). Accepting a SECURITY finding is the web page's alone (`security-accept.ts`, DEC 236h): a script token or an API token may accept only the
 // code review's findings. A fix returns the task to coding like a send-back does (`send-back.ts`), with the findings to fix as the problems (the accepted ones are no longer blocking, so
 // the coding step lists only the others) and the owner's per-finding instructions kept whole beside the workflow (`owner-note.ts`). With every finding accepted and no other review problem the draft pull request is due,
 // committed with the decision as a passing review's result commits it.
@@ -48,9 +48,9 @@ export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskAct
     if (prior.source !== "FINDINGS" || prior.workflowRevision !== request.expectedRevision || !sameAnswers(workflow, request, prior.reason)) throw agentXError("IDEMPOTENCY_CONFLICT", REQUEST_ID_USED);
     return taskViewOf(deps, task);
   }
-  // Accepting a security finding is the web page's, with a fresh sign-in (DEC 236h): refused before anything else is read or written.
+  // Accepting a security finding is the web page's (DEC 236h): refused before anything else is read or written.
   const now = iso(deps);
-  await requirePageForSecurityAccept(options, caller, via, workflow, request, (deps.now?.() ?? new Date()).getTime());
+  requirePageForSecurityAccept(caller, via, workflow, request);
   // A person's move never skips an approval of more spend.
   if (waitingForSpend(workflow)) throw agentXError("CONFIG_INVALID", WAITING_FOR_SPEND);
   if (request.expectedRevision !== workflow.revision || workflow.candidate?.digest !== request.candidateDigest) throw agentXError("IDEMPOTENCY_CONFLICT", FINDINGS_OUT_OF_DATE);

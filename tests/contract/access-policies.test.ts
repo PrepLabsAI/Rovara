@@ -31,6 +31,21 @@ describe("service role policy", () => {
       if (statement.Sid === "ServiceLinkedRoles") {
         expect(resources).toEqual(["arn:aws:iam::123456789012:role/aws-service-role/*"]);
         expect(statement.Condition?.StringLike?.["iam:AWSServiceName"]).toBeDefined();
+      } else if (statement.Sid === "EcrTemplateServiceLinkedRole") {
+        // L4-SE6: ECR's repository creation template service-linked role, exactly (not aws-service-role/*), and only for ECR.
+        expect(statement).toEqual({
+          Sid: "EcrTemplateServiceLinkedRole", Effect: "Allow", Action: ["iam:CreateServiceLinkedRole"],
+          Resource: "arn:aws:iam::123456789012:role/aws-service-role/ecr.amazonaws.com/AWSServiceRoleForECRTemplate",
+          Condition: { StringEquals: { "iam:AWSServiceName": "ecr.amazonaws.com" } },
+        });
+      } else if (statement.Sid === "IamFixedNameRolesNotYetCreated") {
+        // L4-SE6: the three saved environment image roles by their PATH-LESS ARN (what CloudFormation looks up before it creates a fixed-name role): lookups and deletes, never a create or change.
+        expect(resources).toEqual([
+          "arn:aws:iam::123456789012:role/agentx-staging-img-push",
+          "arn:aws:iam::123456789012:role/agentx-staging-img-pull",
+          "arn:aws:iam::123456789012:role/agentx-staging-img-manage",
+        ]);
+        expect(statement.Action).toEqual(["iam:GetRole", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:DeleteRole"]);
       } else if (statement.Sid === "IamInstanceProfiles") {
         // The EC2 workers' instance profile, under the same path as the environment's roles.
         expect(resources).toEqual(["arn:aws:iam::123456789012:instance-profile/agentx/staging/*"]);
@@ -259,9 +274,20 @@ describe("default permission boundary", () => {
 
   it("allows only sts:GetCallerIdentity from STS, never AssumeRole", () => {
     const sts = allows.flatMap((s) => s.Action).filter((a) => a.startsWith("sts:"));
-    expect(sts).toEqual(["sts:GetCallerIdentity"]);
+    // L4-SE6: the one AssumeRole is the broker's, on the three saved environment image roles (asserted exactly below); no other statement has an sts action.
+    expect(sts).toEqual(["sts:GetCallerIdentity", "sts:AssumeRole"]);
     expect(allows.find((s) => s.Sid === "CallerIdentity")).toEqual({ Sid: "CallerIdentity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" });
-    expect(allows.flatMap((s) => s.Action).filter((a) => a === "*" || a === "sts:*" || /^sts:AssumeRole/.test(a))).toEqual([]);
+    expect(allows.filter((s) => s.Action.some((a) => /^sts:AssumeRole/u.test(a))).map((s) => s.Sid)).toEqual(["AssumeSessionRoles"]);
+    expect(allows.find((s) => s.Sid === "AssumeSessionRoles")).toEqual({
+      Sid: "AssumeSessionRoles", Effect: "Allow", Action: ["sts:AssumeRole"],
+      Resource: [
+        "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-img-push",
+        "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-img-pull",
+        "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-img-manage",
+      ],
+      Condition: { ArnEquals: { "aws:PrincipalArn": "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-broker-role" } },
+    });
+    expect(allows.flatMap((s) => s.Action).filter((a) => a === "*" || a === "sts:*")).toEqual([]);
   });
 
   it("never allows iam:* or any user, group, access key, login profile or managed-policy action", () => {

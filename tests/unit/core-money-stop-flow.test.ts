@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { USAGE_CHECKPOINTS_FEATURE, type Admission, type AdmissionRequest, type OrgId, type WorkerInvocation } from "@agentx/contracts";
 import { cancelTask } from "../../packages/broker/src/core/task-flow/cancel.js";
 import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { RUN_START_ACTION, SPEND_STOP_REASON, SPEND_UNKNOWN_STOP_REASON, USAGE_FLUSH_WAIT_MS, requestSpendStop, type MoneyStop } from "../../packages/broker/src/core/task-flow/money-stop.js";
+import { RUN_START_ACTION, SPEND_UNKNOWN_STOP_REASON, spendStopReason, USAGE_FLUSH_WAIT_MS, requestSpendStop, type MoneyStop } from "../../packages/broker/src/core/task-flow/money-stop.js";
 import { RUN_LOST_GRACE_SECONDS, RUN_LOST_MESSAGE } from "../../packages/broker/src/core/task-flow/run-watch.js";
 import type { OperationRecord, WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
@@ -227,7 +227,7 @@ describe("the per-run stop", () => {
     await h.flow.dispatchOnce({ maxMessages: 10 });
     expect(cancelsTo(w, run)).toHaveLength(1);
     await h.flow.recordResult({ workspaceId: run.workspaceId, operationId: run.operationId, fence: run.fence, status: "CANCELLED" });
-    expect((await h.flow.get(h.owner, run.taskId)).workflow).toMatchObject({ state: "BLOCKED", blockReason: SPEND_STOP_REASON });
+    expect((await h.flow.get(h.owner, run.taskId)).workflow).toMatchObject({ state: "BLOCKED", blockReason: spendStopReason("task_cap") });
     expect(kept).toEqual([]);
   });
 
@@ -248,10 +248,10 @@ describe("the per-run stop", () => {
     expect((await operationOf(h, run)).status).toBe("CANCEL_REQUESTED");
     h.clock.advance(2);
     expect(await h.flow.sweepRunsOnce()).toMatchObject({ interrupted: 1 });
-    expect(await operationOf(h, run)).toMatchObject({ status: "CANCELLED", error: SPEND_STOP_REASON, usageUnflushed: true });
+    expect(await operationOf(h, run)).toMatchObject({ status: "CANCELLED", error: spendStopReason("company_day_cap"), usageUnflushed: true });
     expect(kept).toEqual([{ reservationId: undefined, operationId: run.operationId, taskId: run.taskId }]);
     expect((await h.machines.health(run.machineId)).state).toBe("stopped");
-    expect((await h.flow.get(h.owner, run.taskId)).workflow).toMatchObject({ state: "BLOCKED", blockReason: SPEND_STOP_REASON });
+    expect((await h.flow.get(h.owner, run.taskId)).workflow).toMatchObject({ state: "BLOCKED", blockReason: spendStopReason("company_day_cap") });
   });
 
   it("does nothing on an install without the money stop, or for a run already ended", async () => {
@@ -305,9 +305,9 @@ describe("dispatching a model run on a deployed install", () => {
     expect(h.machines.delivered(workspace.machine!.machineId).filter((invocation) => invocation.kind === "task")).toEqual([]);
     const view = await h.flow.get(h.owner, started.task.taskId);
     // Ended as a spend stop (CANCELLED with the reason), not as a failure a retry policy would repeat.
-    expect(view.workflow).toMatchObject({ state: "BLOCKED", blockReason: SPEND_STOP_REASON });
+    expect(view.workflow).toMatchObject({ state: "BLOCKED", blockReason: spendStopReason("task_cap") });
     const operations = (await h.store.query({ pk: workspaceKey(workspace.companyId, workspace.id).pk, sk: { op: "beginsWith", prefix: "OPERATION#" } })).items as unknown as OperationRecord[];
-    expect(operations.filter((operation) => operation.kind === "task")).toEqual([expect.objectContaining({ status: "CANCELLED", stopReason: "task_cap", error: SPEND_STOP_REASON })]);
+    expect(operations.filter((operation) => operation.kind === "task")).toEqual([expect.objectContaining({ status: "CANCELLED", stopReason: "task_cap", error: spendStopReason("task_cap") })]);
   });
 
   it("refuses a model run to a worker that does not report usage while it runs", async () => {

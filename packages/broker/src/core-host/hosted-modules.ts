@@ -17,7 +17,7 @@
 //               It authenticates no credential itself.
 //   audit-sink  Code's audit records: the `AUDIT` rows of the company's own partition (the document audit sink), read back by lane AU's company audit read.
 //
-//   approvers   Switch-on lane L2a (core-host/hosted-approvers.ts): the task owner, as the broker's existing rule, with #662's fresh step-up proved for one act, bound to its card, and
+//   approvers   Switch-on lane L2a (core-host/hosted-approvers.ts): the task owner, as the broker's existing rule, with a proof of one act by the signed-in person, bound to its card, and
 //               its one-time part claimed in the company's partition. Built after identity (it names people through that point). A host without the proof key (the dispatcher, which
 //               decides nothing for a person) refuses every proof.
 //
@@ -36,7 +36,7 @@ import { readTask, workspaceOperations } from "../core/task-flow/reads.js";
 import { DEFAULT_PLANNING_LIMIT_USD } from "../core/cost/limits.js";
 import type { CoreService } from "./core-runtime.js";
 import { costMicrosOf, createModelPrices, type ModelPrices } from "../core/cost/price-table.js";
-import { createHostedApprovers, stepUpApprovalKeyOf, type HostedChatApproval } from "./hosted-approvers.js";
+import { createHostedApprovers, approvalProofKeyOf, type HostedChatApproval } from "./hosted-approvers.js";
 import { GITHUB_LINK_PROVIDER, githubLinkReaderOver, type GithubLinkReader } from "../core/people/github-links.js";
 import { coreAdapter, type CoreAdapterModule } from "./registry.js";
 
@@ -149,6 +149,19 @@ export async function taskCapOf(deps: { store: DocumentStore; settings: HostedAd
   if (limit === undefined) return { micros: install, project: false };
   if (!Number.isSafeInteger(limit) || limit < 0) throw new Error("the project's limit is not readable");
   return limit < install ? { micros: limit, project: true } : { micros: install, project: false };
+}
+
+/**
+ * L4-TA6: the cap one task is held to now, in dollars, for the flow's `taskCapUsd` (automatic fixing holds its rounds to it): the very value Admission, the per-run stop and the owner's round read (`taskCapOf`: the install's
+ * task cap lowered to the project's own per-task limit), read fresh on every call for ONE company. No caps on this install (`settings` undefined), a task of another company, or a project or limit that cannot be read: throws,
+ * so the flow asks the owner; it never answers a larger or invented figure.
+ */
+export function hostedTaskCapUsd(deps: { store: DocumentStore; companyId: string; settings: HostedAdmissionSettings | undefined; projectTaskCap?: ProjectTaskCap | undefined }): (task: { companyId: string; taskId: string; project: string }) => Promise<number> {
+  return async (task) => {
+    if (deps.settings === undefined || task.companyId !== deps.companyId) throw new Error("the task cap is unavailable");
+    const cap = await taskCapOf({ store: deps.store, settings: deps.settings, projectTaskCap: deps.projectTaskCap }, deps.companyId, task.taskId, task.project);
+    return cap.micros / 1_000_000;
+  };
 }
 
 /** What a model call of unknown cost holds (an Ask, a diagnosis): never nothing, so a full day refuses it. */
@@ -535,7 +548,7 @@ export interface HostedSecurityInputs {
   taskOwner?: (input: { companyId: OrgId; store: DocumentStore; principal: Principal; task: { taskId: string; developerId: string; project: string } }) => Promise<boolean>;
   /** L2-5 (b): the project's own per-task limit (see `HostedAdmissionOptions.projectTaskCap`). */
   projectTaskCap?: ProjectTaskCap | undefined;
-  /** HW5b: the chat a press may approve a low or medium risk plan in (see `HostedChatApproval`). Absent (the dispatcher): the approvers point takes the step-up alone. */
+  /** HW5b: the chat a press may approve a low or medium risk plan in (see `HostedChatApproval`). Absent (the dispatcher): the approvers point takes the page's proof alone. */
   chat?: HostedChatApproval | undefined;
 }
 
@@ -561,7 +574,7 @@ export function hostedSecurityModules(inputs: HostedSecurityInputs): CoreAdapter
       point: "approvers", name: "hosted-step-up", owner: "switch-on lane L2a",
       create: (context, registry) => createHostedApprovers({
         store: registry.require("storage"), identity: registry.require("identity"), now: context.now,
-        ...(inputs.callbackSigningKey === undefined ? {} : { key: stepUpApprovalKeyOf(inputs.callbackSigningKey) }),
+        ...(inputs.callbackSigningKey === undefined ? {} : { key: approvalProofKeyOf(inputs.callbackSigningKey) }),
         ...(inputs.taskOwner === undefined ? {} : { taskOwner: (asked: { companyId: OrgId; principal: Principal; task: { taskId: string; developerId: string; project: string } }) => inputs.taskOwner!({ ...asked, store: registry.require("storage") }) }),
         ...(inputs.chat === undefined ? {} : { chat: inputs.chat }),
       }),

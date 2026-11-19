@@ -48,12 +48,16 @@ function world() {
     },
   };
   /** A member: the authoritative row, the company's list row, and (optionally) a project grant. */
+  /** Each member's company: a named company keeps its grants in its own partition (DEC 254zzz80). */
+  const companyOf = new Map<string, OrgId>();
   const member = (personId: string, companyId: OrgId, role: "owner" | "admin" | "member", extra: Row = {}) => {
+    companyOf.set(personId, companyId);
     const base = { entityType: "COMPANY_MEMBERSHIP", personId, companyId, role, joinedAt: "2026-10-01T00:00:00.000Z", joinedVia: "preapproval", ...extra };
     put(SIGN_IN, { pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY", ...base });
     put(SIGN_IN, { pk: companyScoped(companyId, "MEMBERS"), sk: `MEMBER#${personId}`, ...base, entityType: "COMPANY_MEMBER_VIEW" });
   };
-  const grant = (personId: string, project: string, role: "developer" | "administrator") => put(STATE, { pk: `MEMBER#${personId}`, sk: `PROJECT#${project}`, projectName: project, role });
+  /** A grant in the person's own company's partition (`ORG#<company>#MEMBER#<person>`, DEC 254zzz80). */
+  const grant = (personId: string, project: string, role: "developer" | "administrator") => put(STATE, { pk: `ORG#${companyOf.get(personId)!}#MEMBER#${personId}`, sk: `PROJECT#${project}`, projectName: project, role });
   const developer = (personId: string, extra: Row = {}) => put(SIGN_IN, { pk: `DEVELOPER#${personId}`, sk: "META", entityType: "DEVELOPER", displayName: `Name ${personId.slice(-2)}`, provider: "oidc", ...extra });
   /** Changes one member's authoritative row only (the list row is left as it was: the answer must come from the authoritative one). */
   const patchAuthoritative = (personId: string, patch: Row) => {
@@ -253,7 +257,7 @@ describe("hosted lessons people: live, at once", () => {
     const w = seeded();
     const a = peopleA(w);
     expect(await a.onProjectRoster(A, "web", DEV_A)).toBe(true);
-    w.rows.delete(`${STATE}|MEMBER#${DEV_A}|PROJECT#web`);
+    w.rows.delete(`${STATE}|ORG#${A}#MEMBER#${DEV_A}|PROJECT#web`);
     expect(await a.onProjectRoster(A, "web", DEV_A)).toBe(false);
     expect((await a.projectMembers!(A, "web")).ids).not.toContain(DEV_A);
     const before = w.sends.length;
@@ -302,7 +306,7 @@ describe("hosted lessons people: the roster the names filter needs", () => {
     await expect(peopleA(f).projectMembers!(A, "web")).rejects.toThrow();
     await expect(peopleA(f).approvers(A, "web")).rejects.toThrow();
     const g = seeded();
-    g.failing.getPk = "MEMBER#";
+    g.failing.getPk = `ORG#${A}#MEMBER#`;
     await expect(peopleA(g).projectMembers!(A, "web")).rejects.toThrow();
     await expect(peopleA(g).onProjectRoster(A, "web", DEV_A)).rejects.toThrow();
     const h = seeded();

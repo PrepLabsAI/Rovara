@@ -18,7 +18,7 @@ export function createSavedEnvLoginProvider(input: {
     try {
       response = await send(endpoint, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-agentx-repository-grant": input.invocation.payload.repositoryGrant },
+        headers: { "content-type": "application/json", "x-agentx-repository-grant": input.invocation.payload.repositoryGrant, "x-agentx-callback-capability": input.invocation.callbackCapability },
         body: "{}",
         signal: AbortSignal.timeout(30_000),
       });
@@ -46,7 +46,7 @@ export function createSavedEnvFallbackReporter(input: {
     try {
       const response = await send(endpoint, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-agentx-repository-grant": input.invocation.payload.repositoryGrant },
+        headers: { "content-type": "application/json", "x-agentx-repository-grant": input.invocation.payload.repositoryGrant, "x-agentx-callback-capability": input.invocation.callbackCapability },
         body: JSON.stringify({ step }),
         signal: AbortSignal.timeout(10_000),
       });

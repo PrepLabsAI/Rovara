@@ -1,5 +1,5 @@
 // Python detector: pytest (with the report path the config already writes, or the flag to add as a PROPOSAL), ruff, flake8, mypy, bandit, requirements and lockfiles.
-import { awsClientCandidate, callArguments, candidate, isOwnedElsewhere, mergeCandidates, normalizeAwsService, scanDrivers, type DriverRule } from "./dependency-candidates.js";
+import { awsClientCandidate, callArguments, candidate, gcpClientFamily, isOwnedElsewhere, mergeCandidates, normalizeAwsService, scanDrivers, type DriverRule } from "./dependency-candidates.js";
 import { type DependencyCandidate, type Detection, type Detector, type DetectorContext, findLine } from "./types.js";
 
 const TIMEOUT = { test: 1_800, lint: 600, setup: 900 } as const;
@@ -84,6 +84,12 @@ const PY_PACKAGES: Readonly<Record<string, string>> = {
   pika: "rabbitmq", "aio-pika": "rabbitmq",
   elasticsearch: "elasticsearch", "elasticsearch-dsl": "elasticsearch", "opensearch-py": "opensearch",
   pymemcache: "memcached", "python-memcached": "memcached",
+  "pandas-gbq": "bigquery",
+};
+/** `google-cloud-<name>`: a Google Cloud client library of the GCP pack (`google-cloud-pubsub`, `google-cloud-storage`, ...), or undefined. */
+const pyGoogleFamily = (name: string): string | undefined => {
+  const short = /^google-cloud-([a-z0-9-]+)$/u.exec(name)?.[1];
+  return short === undefined ? undefined : gcpClientFamily(short);
 };
 const PY_STUBS = /^(?:mypy-boto3|types-boto3|types-aiobotocore|boto3-stubs|types-aioboto3)-([a-z0-9-]+)$/u;
 const PY_DEPENDENCY_SECTION = /dependenc|dependency-groups/u;
@@ -116,7 +122,7 @@ export async function pythonManifestCandidates(repo: DetectorContext["repo"]): P
       for (const token of line.matchAll(/(?:^|["'\s,])([A-Za-z0-9][A-Za-z0-9._-]{0,100})(?:\[([^\]\s]{0,200})\])?(?=[\s<>=!~;,"'\]#]|$)/gu)) {
         const name = pyName(token[1]!);
         const evidence = { path, line: index + 1 };
-        const family = PY_PACKAGES[name];
+        const family = PY_PACKAGES[name] ?? pyGoogleFamily(name);
         if (family !== undefined) found.push(candidate(family, "mentioned", evidence, { seenBy: ["driver"] }));
         const stub = PY_STUBS.exec(name)?.[1];
         const services = name === "boto3-stubs" || name === "types-boto3" ? (token[2] ?? "").split(",") : stub !== undefined ? [stub] : [];
@@ -131,6 +137,8 @@ export async function pythonManifestCandidates(repo: DetectorContext["repo"]): P
 }
 
 const IMPORT = (names: string): RegExp => new RegExp(`^[ \\t]*(?:import|from)\\s{1,40}(?:${names})\\b`, "mu");
+/** `from google.cloud import pubsub_v1` (one or several names, on the line), `import google.cloud.storage`, `from google.cloud.firestore_v1 import ...`: the module names are the pack's. */
+const PY_GOOGLE = (names: string): RegExp => new RegExp(`^[ \\t]*(?:(?:import|from)\\s{1,40}google\\.cloud\\.(?:${names})\\b|from\\s{1,40}google\\.cloud\\s{1,40}import\\s{1,40}\\(?\\s{0,40}(?:[A-Za-z0-9_]{1,60}(?:\\s{1,10}as\\s{1,10}[A-Za-z0-9_]{1,60})?\\s{0,10},\\s{0,10}){0,12}(?:${names})\\b)`, "mu");
 export const PY_DRIVERS: readonly DriverRule[] = [
   { family: "postgres", uses: IMPORT("psycopg2|psycopg|asyncpg|pg8000"), call: /\b(?:psycopg2|psycopg|asyncpg|pg8000)\.(?:connect|create_pool|create_connection)\s{0,120}\(/u },
   { family: "mysql", uses: IMPORT("pymysql|MySQLdb|mysql\\.connector|aiomysql|asyncmy"), call: /\b(?:pymysql|MySQLdb|aiomysql|asyncmy|mysql\.connector)\.(?:connect|create_pool)\s{0,120}\(/u },
@@ -141,6 +149,14 @@ export const PY_DRIVERS: readonly DriverRule[] = [
   { family: "elasticsearch", uses: IMPORT("elasticsearch"), call: /\bElasticsearch\s{0,120}\(/u },
   { family: "opensearch", uses: IMPORT("opensearchpy"), call: /\bOpenSearch\s{0,120}\(/u },
   { family: "memcached", uses: IMPORT("pymemcache|memcache"), call: /\b(?:HashClient|Client)\s{0,120}\(/u },
+  // The GCP pack (L4-E8). A client built with a string endpoint in its options is flagged, as for the other drivers.
+  { family: "pubsub", uses: PY_GOOGLE("pubsub(?:_v1)?"), call: /\b(?:Publisher|Subscriber)(?:Async)?Client\s{0,120}\(/u },
+  { family: "firestore", uses: PY_GOOGLE("firestore(?:_[a-z0-9_]{1,40})?"), call: /\bfirestore(?:_v1)?\.(?:Async)?Client\s{0,120}\(/u },
+  { family: "datastore", uses: PY_GOOGLE("datastore(?:_[a-z0-9_]{1,40})?|ndb"), call: /\bdatastore\.Client\s{0,120}\(/u },
+  { family: "bigtable", uses: PY_GOOGLE("bigtable(?:_[a-z0-9_]{1,40})?"), call: /\bbigtable\.Client\s{0,120}\(/u },
+  { family: "spanner", uses: PY_GOOGLE("spanner(?:_[a-z0-9_]{1,40})?"), call: /\bspanner\.Client\s{0,120}\(/u },
+  { family: "gcs", uses: PY_GOOGLE("storage"), call: /\bstorage\.Client\s{0,120}\(/u },
+  { family: "bigquery", uses: PY_GOOGLE("bigquery(?:_storage(?:_v1)?|_v2)?"), call: /\bbigquery\.Client\s{0,120}\(/u },
 ];
 
 /** AWS clients (`boto3.client("s3")`) and drivers a Python source file uses (test services D5). An `endpoint_url` written as a string is flagged: it bypasses the endpoint variables. */

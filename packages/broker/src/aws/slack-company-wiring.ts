@@ -7,7 +7,8 @@ import { GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 import type { DocumentStore } from "@agentx/contracts";
 import { createDynamoStoreFromSettings } from "@rovara/aws-adapters/dynamodb";
-import { companyMembershipFromDynamo, type CompanyMembershipReader } from "./company-check.js";
+import { companyMembershipFromDynamo, ownPartitionRow, type CompanyMembershipReader } from "./company-check.js";
+import { namedCompany, revisionPkFor } from "./company-layout.js";
 import { createSlackWorkspaceBindings, slackWorkspaceTeam } from "./slack-workspace-binding.js";
 import { createSlackWorkspaceTokens, type SlackWorkspaceTokens } from "./slack-workspace-tokens.js";
 import { slackLinkNotice, type SlackWorkspaceAccess } from "./slack-person.js";
@@ -98,8 +99,22 @@ export function slackCompanyDependenciesFromEnvironment(env: NodeJS.ProcessEnv, 
       tokenForCompany: (companyId, teamId) => tokens.tokenForCompany(companyId, teamId),
       store: lazyStore,
       // Only the newest revision's company (18a grants exactly pk, sk, companyId on PROJECT#*).
-      async getProject(name) {
+      async getProject(name, companyId) {
         if (typeof name !== "string" || name.length === 0 || name.length > PROJECT_NAME_MAX || name.includes("#")) return undefined;
+        // DEC 254zzz80 (R2-F1): a NAMED company's project is in its own partition; it holds the project when its newest revision that is not a candidate (a setup waiting for
+        // approval) names no other company. Keys and those two fields only (COMPANY_PROJECT_REVISION_KEYS grants exactly pk, sk, companyId, candidate there).
+        // Known gap (fails closed): the catalog pointer is not read (no grant for it), so a project whose only usable revision is an approved candidate (the pointer names it,
+        // the row keeps `candidate`), or whose newest 20 revisions are all candidates, reads as "not held" here: its Slack checks refuse until a plain revision exists.
+        const named = namedCompany(companyId);
+        if (named !== undefined) {
+          const pk = revisionPkFor(named, name);
+          const own = await clients.documentClient.send(new QueryCommand({
+            TableName: tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)", ExpressionAttributeValues: { ":pk": pk, ":revision": "REV#" },
+            ProjectionExpression: "pk, sk, companyId, candidate", ScanIndexForward: false, Limit: 20, ConsistentRead: true,
+          }) as never) as { Items?: Array<Record<string, unknown>> };
+          const row = (own.Items ?? []).find((item) => item.candidate !== true);
+          return row !== undefined && row.pk === pk && ownPartitionRow(row, named) ? { companyId: named } : undefined;
+        }
         const answer = await clients.documentClient.send(new QueryCommand({
           TableName: tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)", ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":revision": "REV#" },
           ProjectionExpression: "pk, sk, companyId", ScanIndexForward: false, Limit: 1, ConsistentRead: true,

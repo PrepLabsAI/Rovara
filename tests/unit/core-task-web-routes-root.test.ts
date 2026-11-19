@@ -28,9 +28,11 @@ function root(taskRules?: BrokerCoreRootInputs["taskRules"]) {
   const client = { async send(command: unknown) {
     if (!(command instanceof GetCommand)) throw new Error("unexpected write");
     const { TableName, Key } = command.input as { TableName: string; Key: { pk: string; sk: string } };
-    const person = Key.pk.replace(/^(COMPANY_MEMBER|MEMBER)#/u, "");
+    const person = Key.pk.replace(/^COMPANY_MEMBER#/u, "");
     if (TableName === "signin" && Key.pk.startsWith("COMPANY_MEMBER#") && memberships[person] !== undefined) return { Item: { pk: Key.pk, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: person, companyId: memberships[person], role: "member", joinedAt: "2026-11-01T00:00:00.000Z" } };
-    if (TableName === "state" && Key.sk === "PROJECT#payments" && memberships[person] !== undefined) return { Item: { pk: Key.pk, sk: Key.sk, projectName: "payments", role: "developer" } };
+    // DEC 254zzz80: a person's grant sits in their own company's partition (`ORG#<company>#MEMBER#<person>`), as a named company keeps its grants.
+    const grant = /^ORG#(org_[0-9a-z]{20})#MEMBER#(.+)$/u.exec(Key.pk);
+    if (TableName === "state" && Key.sk === "PROJECT#payments" && grant !== null && memberships[grant[2]!] === grant[1]) return { Item: { pk: Key.pk, sk: Key.sk, projectName: "payments", role: "developer" } };
     return { Item: undefined };
   } };
   const built = createBrokerCoreRoot({

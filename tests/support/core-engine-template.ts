@@ -16,7 +16,9 @@ export function withoutCoreEngine(template: unknown): unknown {
   expect(synthesized.Parameters.CoreEngine).toMatchObject({ Type: "String", Default: "off" });
   // Web task channel C8 (option b): the attention email's three parameters (default off), its condition and its template rule (checked in core-engine-infrastructure).
   expect(synthesized.Parameters.CoreAttentionEmail).toMatchObject({ Type: "String", Default: "off", AllowedValues: ["off", "on"] });
-  for (const name of ["CoreEngine", "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreSystemRuns", "CoreModelGatewayHost", "CoreAgentModel", "CoreAnswersModel", "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender"]) delete synthesized.Parameters[name];
+  // Live switches check 2026-11-18 (DEC 254n(1)): the per-company agent model choice, off by default, the broker's packed `mx` only (asserted below).
+  expect(synthesized.Parameters.CoreAgentModelChoice).toMatchObject({ Type: "String", Default: "off", AllowedValues: ["off", "on"] });
+  for (const name of ["CoreEngine", "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreSystemRuns", "CoreModelGatewayHost", "CoreAgentModel", "CoreAnswersModel", "CoreLearningModel", "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender", "CoreAgentModelChoice"]) delete synthesized.Parameters[name];
   const conditions = Object.keys(synthesized.Conditions).filter((id) => id.startsWith("CoreEngineJobs"));
   expect(conditions.map((id) => id.replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual(["CoreEngineJobsAttentionEmailAttentionEmailIsOn", "CoreEngineJobsCoreEngineIsOn", "CoreEngineJobsCoreSystemRunsIsOn"]);
   // (L4-P1: the upkeep night's own condition is the system-runs flag AND the switch.)
@@ -30,6 +32,8 @@ export function withoutCoreEngine(template: unknown): unknown {
   const added = Object.entries(synthesized.Resources).filter(([id]) => id.startsWith("CoreEngineJobs"));
   expect(added.map(([, resource]) => resource.Type).sort()).toEqual([
     "AWS::CloudWatch::Alarm", "AWS::IAM::Policy", "AWS::IAM::Role", ...Array<string>(CORE_JOB_SCHEDULES.length).fill("AWS::Scheduler::Schedule"), "AWS::Scheduler::ScheduleGroup",
+    "AWS::SQS::Queue", "AWS::SQS::Queue", "AWS::SQS::QueuePolicy", "AWS::SQS::QueuePolicy",
+    // L4-SQS (journey audit B3c): the lessons reflection queue and its dead letters, and their two queue policies (checked in tests/contract/core-lessons-reflect-queue.test.ts).
     "AWS::SQS::Queue", "AWS::SQS::Queue", "AWS::SQS::QueuePolicy", "AWS::SQS::QueuePolicy",
     // R2 step 4: the dispatcher's core queue mapping and its policy under the condition.
     "AWS::Lambda::EventSourceMapping", "AWS::IAM::Policy",
@@ -100,11 +104,11 @@ export function withoutCoreEngine(template: unknown): unknown {
   const variables = (brokers[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
   // Core switch-on blocker (2026-11-17): the switch and the gateway settings are packed in the broker's settings.
   const settingsJoin = JSON.stringify(variables.AGENTX_SETTINGS);
-  for (const [code, parameter] of [["sw", "CoreEngine"], ["gw", "CoreModelGatewayHost"], ["am", "CoreAgentModel"], ["aa", "CoreAnswersModel"]] as const) expect(settingsJoin, code).toMatch(new RegExp(`${code}=",\\{"Ref":"${parameter}"\\}`, "u"));
+  for (const [code, parameter] of [["sw", "CoreEngine"], ["gw", "CoreModelGatewayHost"], ["am", "CoreAgentModel"], ["aa", "CoreAnswersModel"], ["lm", "CoreLearningModel"], ["mx", "CoreAgentModelChoice"]] as const) expect(settingsJoin, code).toMatch(new RegExp(`${code}=",\\{"Ref":"${parameter}"\\}`, "u"));
   // Web task channel C8 (option b): the attention email switch, packed (the web app's host is the sender function's alone).
   expect(settingsJoin).toMatch(/ae=",\{"Ref":"CoreAttentionEmail"\}/u);
   expect(settingsJoin).not.toContain("CoreAttentionEmailHost");
-  removePackedPieces(variables, "AGENTX_SETTINGS", ["aa", "ac", "ae", "am", "cd", "cl", "ct", "gw", "sw", "sy"]);
+  removePackedPieces(variables, "AGENTX_SETTINGS", ["aa", "ac", "ae", "am", "cd", "cl", "ct", "gw", "lm", "mx", "sw", "sy"]);
   delete variables.ROVARA_POLICY_HOOK;
   delete variables.ROVARA_CORE_ALLOWED_COMPANIES;
 

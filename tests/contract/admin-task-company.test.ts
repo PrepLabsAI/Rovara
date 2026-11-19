@@ -81,6 +81,9 @@ describe("share-mode and e2e-replay bind the administrator's grant to the task's
     task.harness.db.set({ ...record, companyId: OTHER });
     for (const route of [task.shareMode, task.replays]) expect((await route(ADMIN)).body.error).toMatchObject({ code: "FORBIDDEN", message: "administrator project membership is required" });
     memberships.set(ADMIN_KEY, OTHER);
+    // DEC 254zzz80: a task of named company B is judged by B's administrator grant, which lives in B's own partition; the name-only legacy row is not B's.
+    for (const route of [task.shareMode, task.replays]) expect((await route(ADMIN)).body.error).toMatchObject({ code: "FORBIDDEN", message: "administrator project membership is required" });
+    for (const row of task.harness.db.find((item) => String(item.pk) === `MEMBER#${ADMIN_KEY}`)) task.harness.db.set({ ...row, pk: `ORG#${OTHER}#MEMBER#${ADMIN_KEY}` });
     for (const route of [task.shareMode, task.replays]) expect((await route(ADMIN)).body.error).not.toMatchObject({ code: "FORBIDDEN" });
   });
 });

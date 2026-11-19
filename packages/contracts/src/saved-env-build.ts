@@ -9,6 +9,10 @@ import { ImageDigestSchema, SavedEnvSecretNameSchema } from "./saved-env.js";
 import { isSavedEnvRepositoryName } from "./saved-env-image.js";
 import { TestEnvironmentBodySchema } from "./test-environment.js";
 
+/** Reviewed rootless BuildKit index (ANSWER-4, round 6); mirrors must retain these bytes. */
+export const SAVED_ENV_BUILDER_DIGEST = "sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1" as const;
+export const SAVED_ENV_BUILDER_IMAGE = `moby/buildkit:v0.34.2-rootless@${SAVED_ENV_BUILDER_DIGEST}` as const;
+
 /** The worker feature (listed on /ping) that takes the prepare payload's `savedEnvBuild`. A worker without it is never sent the job (the build is not something to skip). */
 export const PREPARE_SAVED_ENV_BUILD_FEATURE = "prepare.savedEnvBuild.v1" as const;
 

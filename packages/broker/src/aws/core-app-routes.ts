@@ -2,10 +2,10 @@
 //
 // The developer API (aws/developer-routes.ts, `routeAppRequest`) refuses a method and path with no row in the route table (dev-route-scopes.ts, APP_ROUTES) before anyone is
 // authenticated, verifies the developer token itself (no API Gateway authorizer, as /v1/dev/*), checks the row's scope, and only then hands the signed-in caller here. This entry:
-//   - maps the broker's signed-in caller to the principal the core knows (`deployedCallerOf`: the company and role from LIVE membership, never a token claim; the step-up only as the
-//     verified token states it). No mapping, or a mapping that throws, is the sign-in refusal; nothing is read for the core.
+//   - maps the broker's signed-in caller to the principal the core knows (`deployedCallerOf`: the company and role from LIVE membership, never a token claim; the sign-in method and client only as the
+//     verified token states them). No mapping, or a mapping that throws, is the sign-in refusal; nothing is read for the core.
 //   - hands a person erase (`POST /v1/app/people/<id>/erase`) to the person-erase route (#687), and every other /v1/app path to the core host's dev routes, which check the company,
-//     the person's level, grant or role, and the fresh step-up on every act.
+//     the person's level, grant or role on every act (DEC 254zzz73: no step-up).
 //   - answers anything the core's handlers throw (a runtime or registry that cannot be built) with fixed words and a log line naming only the error's kind.
 // While the core switch is off the deployment builds no entry at all, so the developer API answers every /v1/app/* path "route not found" and reads nothing.
 import type { DeployedCaller, SlackThreadAnswer, SlackThreadAnswerInput } from "../core-host/dev-routes.js";

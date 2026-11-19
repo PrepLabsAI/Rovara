@@ -2,8 +2,8 @@ import { proofIndexOf, type ProofIndexResponse } from "../local/app/proof-index.
 import { rowInCompany } from "../developer/company-rows.js";
 import type { SlackWorkspaceScope } from "@agentx/contracts";
 import { routeTaskMerge, type TaskMergeWiring } from "./task-merge.js";
-import type { CallerStepUp } from "./step-up-check.js";
 import { CompanyReadItemLimit, recordInCompany } from "./company-check.js";
+import { namedCompany } from "./company-layout.js";
 // Spec 025 FR-016 to FR-021: the developer task routes. Every task has its own workspace, reached
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
 // reads the deployment mode (FR-024).
@@ -283,15 +283,14 @@ export interface DeveloperTaskRouteDependencies extends Pick<TaskPeopleEffectsDe
   companyId?: string;
   /** Lane W: the merge core wired for this deployment's tasks (lane E2); absent, `POST .../merge` answers a fixed "not set up". */
   taskMerge?: TaskMergeWiring;
-  /** Lane W: the caller's step-up as the verified token states it (step-up-check.ts); the merge route checks its age. Never from a header, a query or a body. */
-  stepUp?: CallerStepUp;
   /** One page (30 files) of a pull request's changed files, from GitHub; absent answers RUNTIME_UNAVAILABLE on the diff route. */
   readPullRequestDiff?(repositoryUrl: string, number: number, page: number): Promise<{ files: Array<{ filename: string; additions: number; deletions: number; patch?: string }>; more: boolean }>;
   /** Present only for a Slack-signed internal task start; the existing thread becomes the task thread. */
   initialSlackThread?: { teamId: string; channelId: string; threadTs: string };
-  checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }>;
+  /** `companyId`: the caller's company as the check resolved it (absent: no company mode); the start checks the project row it loads against it (DEC 254zzz98). */
+  checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[]; companyId?: string }>;
   /** Spec 067: a registered, not removed person and whether they are a member of `project` (for task readers); without it, tasks can't be shared. */
-  taskReaderPerson?(developerId: string, project: string): Promise<TaskReaderPerson | undefined>;
+  taskReaderPerson?(developerId: string, project: string, taskCompany?: string): Promise<TaskReaderPerson | undefined>;
   /** C3: bound channels' names and privacy, best effort (R10). */
   workspaceForTask?(task: DeveloperTaskRecord): Promise<SlackWorkspaceScope | undefined>;
   workspaceForProject?(project: string): Promise<SlackWorkspaceScope | undefined>;
@@ -1572,6 +1571,12 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   }
   const project = await deps.actions.latestProject(request.project);
   if (project === undefined) return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist in this AgentX`));
+  // DEC 254zzz98 (re-review H): this start runs on the project's LEGACY revision (`PROJECT#<name>`, read by name). A NAMED company's caller (its access was checked in its own
+  // partition) may start only on a legacy row that is its own company's (pre-R2-F1 data, stamped); a legacy row of that name that is the built-in company's or another company's
+  // is never theirs (names are not unique between the layouts): not found, exactly as a missing project. The built-in company and no company mode: unchanged.
+  if (namedCompany(access.companyId) !== undefined && !recordInCompany(project, access.companyId)) {
+    return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist in this AgentX`));
+  }
   // The policy checked must be the policy started: a revision registered between the two reads
   // could have turned tasks off or required sharing. Nothing was decided, so nothing is recorded.
   if (project.definition.revision !== access.revision) {
@@ -3005,8 +3010,8 @@ export async function resolveTaskWorkflowFindings(deps: DeveloperTaskRouteDepend
     if (prior.source !== "FINDINGS") throw agentXError("IDEMPOTENCY_CONFLICT", "this request ID was already used for another decision on this task; use a new one");
     return { task: await taskView(deps, task, { events: 0, details: false }) };
   }
-  // DEC 236h: accepting a security finding is the web page's, the Rovara web app's own sign-in client with a fresh step-up; a token of the CLI, an AI tool, a scoped client or another full-access client may accept only the code review's findings.
-  await requireWebPageForSecurityAccept(caller, workflow, request, deps.now());
+  // DEC 236h: accepting a security finding is the web page's, the Rovara web app's own sign-in client; a token of the CLI, an AI tool, a scoped client or another full-access client may accept only the code review's findings.
+  requireWebPageForSecurityAccept(caller, workflow, request);
   if (request.expectedRevision !== workflow.revision || workflow.candidate?.digest !== request.candidateDigest) {
     throw agentXError("IDEMPOTENCY_CONFLICT", "these findings are out of date; refresh the task and try again");
   }
@@ -6551,7 +6556,7 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "share") return shareTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "merge") {
     // Lane W: every merge rule is the merge core's (task-merge.ts); this only refuses earlier.
-    return routeTaskMerge({ wiring: deps.taskMerge, companyId: deps.companyId ?? IMPLICIT_COMPANY_ID, taskId, personId: caller.developerId, stepUp: deps.stepUp, body: body(request), now: deps.now() });
+    return routeTaskMerge({ wiring: deps.taskMerge, companyId: deps.companyId ?? IMPLICIT_COMPANY_ID, taskId, personId: caller.developerId, body: body(request), now: deps.now() });
   }
   throw agentXError("NOT_FOUND", "route not found");
 }

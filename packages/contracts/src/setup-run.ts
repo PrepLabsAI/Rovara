@@ -103,6 +103,20 @@ export const SETUP_RUN_END_WORDS = [...SETUP_RUN_LIMIT_STOPS, "proposed", "stopp
 export const SetupRunEndWordSchema = z.enum(SETUP_RUN_END_WORDS);
 export type SetupRunEndWord = z.infer<typeof SetupRunEndWordSchema>;
 
+/**
+ * L4-T5: the fixed sentences a worker refuses a setup run with, before it starts anything, when trying again cannot help. The broker matches the worker's error against them exactly and says what to fix
+ * (`SETUP_AGENT_FAILURES`); every other failed start stays "Try again". The image variable's name is written out so this module needs nothing from the worker (a worker test holds the two equal).
+ */
+export const SETUP_RUN_REFUSED_MESSAGES = {
+  noModelPrice: "AgentX does not know this model's price, so it did not start the setup run",
+  noSandboxImage: "AgentX has no task sandbox image (AGENTX_SANDBOX_IMAGE), so it did not run the setup",
+  noModelProxy: "this install has no model proxy, so AgentX did not run the setup (its spending could not be counted)",
+  isolationUnavailable: "setup isolation unavailable on this worker, so AgentX did not run the setup (nothing was run); other tasks are not affected",
+} as const;
+export type SetupRunRefusal = keyof typeof SETUP_RUN_REFUSED_MESSAGES;
+/** Why a run that ended `infrastructure` could not go on when trying again cannot help: a company admin turned setup runs off while it ran. Only the worker sets it, from the broker's own poll answer. */
+export const SETUP_RUN_CANNOT_REASONS = ["company_off"] as const;
+
 export function isSetupRunLimitStop(word: string): word is SetupRunLimitStop {
   return (SETUP_RUN_LIMIT_STOPS as readonly string[]).includes(word);
 }
@@ -191,6 +205,8 @@ export const SetupRunSummarySchema = z
     partial: z.boolean(),
     /** L4-SR2: why the gateway paused nightly upkeep under an unattended repair draft's run (HTTP 422 `upkeep_paused`). Only the worker sets it, from the gateway's fixed sentence; absent on every other run. */
     pause: UpkeepPauseReasonSchema.optional(),
+    /** L4-T5: why the run could not go on when trying again cannot help (`SETUP_RUN_CANNOT_REASONS`). Only with stop `infrastructure`; absent on every other run. */
+    cannot: z.enum(SETUP_RUN_CANNOT_REASONS).optional(),
   })
   .strict()
   .refine((summary) => !isSetupRunLimitStop(summary.stop) || summary.partial, { message: "a limit stop keeps a partial proposal", path: ["partial"] });

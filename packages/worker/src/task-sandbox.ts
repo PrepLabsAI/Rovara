@@ -111,6 +111,52 @@ export function sandboxNetworkFromEnvironment(environment: NodeJS.ProcessEnv = p
   return name;
 }
 
+/**
+ * Lane L4-NETG (DEC 254zzz77): the egress gateway of an EC2 worker host. `AGENTX_SANDBOX_EGRESS=gateway` is written to the worker's environment by the boot's sandbox-egress stage (packages/worker/ec2/sandbox-egress.sh) together with
+ * `AGENTX_SANDBOX_NETWORK` (the internal network) and `AGENTX_SANDBOX_DNS` (the gateway's address on it, the one name server of every sandbox). With it, nothing the worker starts for task code may join any other network:
+ * a sandbox without the network or the name server refuses to start instead of falling back to the `agentx-task` bridge. Absent (`bridge`, and every laptop): nothing here applies.
+ */
+export const SANDBOX_EGRESS_ENVIRONMENT = "AGENTX_SANDBOX_EGRESS";
+export const TASK_SANDBOX_DNS_ENVIRONMENT = "AGENTX_SANDBOX_DNS";
+
+/** Whether this worker's sandboxes and devcontainers are walled behind the host's egress gateway: an EC2 worker whose boot said exactly `gateway`. */
+export function gatewayEgressFromEnvironment(environment: NodeJS.ProcessEnv = process.env): boolean {
+  return environment["AGENTX_RUNTIME"] === "ec2" && environment[SANDBOX_EGRESS_ENVIRONMENT] === "gateway";
+}
+
+/** The gateway's address on the sandbox network (AGENTX_SANDBOX_DNS), or undefined when it is not set. One IPv4 address, so a string out of the environment can never become a docker option. */
+export function sandboxDnsFromEnvironment(environment: NodeJS.ProcessEnv = process.env): string | undefined {
+  const address = environment[TASK_SANDBOX_DNS_ENVIRONMENT];
+  if (address === undefined || address === "") return undefined;
+  if (isIP(address) !== 4) throw agentXError("CONFIG_INVALID", `${TASK_SANDBOX_DNS_ENVIRONMENT} is not an IPv4 address`);
+  return address;
+}
+
+/**
+ * Lane L4-NETG3: the gateway's daemon proxy (AGENTX_DAEMON_PROXY, written by the boot's sandbox-egress stage). The Docker daemon is given it in its own unit; the dev container CLI, which runs here on the host network and downloads a project's
+ * features itself, is given it through its environment. Only in gateway mode: a gateway-mode worker without a valid one refuses (RUNTIME_UNAVAILABLE), so a feature download never goes out directly. Elsewhere: undefined.
+ */
+export const DAEMON_PROXY_ENVIRONMENT = "AGENTX_DAEMON_PROXY";
+export function daemonProxyFromEnvironment(environment: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (!gatewayEgressFromEnvironment(environment)) return undefined;
+  const value = environment[DAEMON_PROXY_ENVIRONMENT] ?? "";
+  const match = /^http:\/\/(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})$/u.exec(value);
+  if (match === null || isIP(match[1]!) !== 4 || Number(match[2]) > 65535) throw agentXError("RUNTIME_UNAVAILABLE", "this worker's dev container downloads must go through the egress gateway's daemon proxy, but its address is missing or not valid, so AgentX did not run the dev container tool");
+  return value;
+}
+
+/**
+ * The network and name server a gateway-mode worker gives everything that runs task code. Both are required: a gateway-mode worker that has lost either one refuses (RUNTIME_UNAVAILABLE) and never falls back to a bridge with a way out.
+ * Not in gateway mode: undefined, and the callers behave as before.
+ */
+export function gatewayEgressFor(environment: NodeJS.ProcessEnv = process.env): { network: string; dns: string } | undefined {
+  if (!gatewayEgressFromEnvironment(environment)) return undefined;
+  const network = sandboxNetworkFromEnvironment(environment);
+  const dns = sandboxDnsFromEnvironment(environment);
+  if (network === undefined || dns === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "this worker's sandboxes must go through the egress gateway, but the network or name server it set up is missing, so AgentX did not start the sandbox");
+  return { network, dns };
+}
+
 /** The environment variable that names the sandbox image; boot.sh sets it to the worker's own image. */
 export const TASK_SANDBOX_IMAGE_ENVIRONMENT = "AGENTX_SANDBOX_IMAGE";
 /** `local` or `sandbox` (the default): where a project without a devcontainer runs its commands. `local` is for tests and a developer's machine, never EC2. */
@@ -407,11 +453,16 @@ export class TaskSandbox {
       throw agentXError("RUNTIME_UNAVAILABLE", `AgentX has no task sandbox image (${TASK_SANDBOX_IMAGE_ENVIRONMENT}), so it did not run the task's commands`);
     }
     const root = resolve(this.options.rootPath);
-    const sharedNetwork = sandboxNetworkFromEnvironment(this.options.environment ?? process.env);
+    const environment = this.options.environment ?? process.env;
+    const sharedNetwork = sandboxNetworkFromEnvironment(environment);
+    // L4-NETG: on a gateway-mode worker the only network is the internal one and the only name server the gateway; a run network of its own (a bridge with a way out) is refused, and nothing falls back to `agentx-task`.
+    const gateway = gatewayEgressFor(environment);
+    if (gateway !== undefined && this.options.network !== undefined) throw agentXError("RUNTIME_UNAVAILABLE", "this worker's sandboxes must go through the egress gateway, so AgentX did not start a sandbox on a network of its own");
     if (this.options.network === undefined && sharedNetwork === undefined) await this.ensureNetwork();
+    const dns = gateway === undefined ? this.options.dns : [gateway.dns];
     const maskedPaths = await hiddenWorkspaceDirectories(root);
     const result = await this.docker.run(
-      taskSandboxRunArgs({ name: this.name, taskId: this.options.taskId, image, rootPath: root, maskedPaths, ...(this.options.dns === undefined ? {} : { dns: this.options.dns }), ...(this.options.network === undefined ? {} : { network: this.options.network }), ...(sharedNetwork === undefined ? {} : { sharedNetwork }), ...(this.options.modelBlock === undefined ? {} : { modelBlock: this.options.modelBlock.block }) }),
+      taskSandboxRunArgs({ name: this.name, taskId: this.options.taskId, image, rootPath: root, maskedPaths, ...(dns === undefined ? {} : { dns }), ...(this.options.network === undefined ? {} : { network: this.options.network }), ...(sharedNetwork === undefined ? {} : { sharedNetwork }), ...(this.options.modelBlock === undefined ? {} : { modelBlock: this.options.modelBlock.block }) }),
       { timeoutMs: SANDBOX_START_TIMEOUT_MS },
     );
     if (result.exitCode !== 0) {

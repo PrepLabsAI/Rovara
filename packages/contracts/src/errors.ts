@@ -142,6 +142,12 @@ export const INTENT_NOT_WAITING_MESSAGE = "This task isn't waiting for answers."
 /** What TRASH_EXPIRED (410) says: discarded work past its 7 days. */
 export const TRASH_EXPIRED_MESSAGE = "This discarded work was removed after 7 days.";
 
+/**
+ * Owner DEC 254zzz91: what a company's most sensitive changes say (403 FORBIDDEN) when they come from anything but the Rovara website's own sign-in client (the operator-marked
+ * `webApp` client): the command line, an AI tool, or another full-access client. There is no extra confirm step; the website's own client is the whole rule.
+ */
+export const ON_THE_WEBSITE_MESSAGE = "Do this on the Rovara website: the command line and AI tools cannot make this change.";
+
 /** What LAST_OWNER (409) says: the organization's last owner may not step down, leave or be removed. */
 export const LAST_OWNER_MESSAGE = "An organization needs at least one owner. Make someone else an owner first.";
 

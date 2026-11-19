@@ -1,7 +1,7 @@
 // FR-048: agentx config's fixed, documented keys. Each maps to exactly one place: a stack parameter,
 // an SSM value (the environment settings) or a control-plane setting. docs/day-two.md lists the
 // same table.
-import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PARAMETER, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PARAMETER, CORE_ENGINE_BROKER_WIRED, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PARAMETER, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, isClaudeAgentModel, isCoreAgentModelId, isCoreAnswersModelId, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
+import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_AGENT_MODEL_CHOICE_DEFAULT, CORE_AGENT_MODEL_CHOICE_PARAMETER, CORE_AGENT_MODEL_CHOICE_VALUES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PARAMETER, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PARAMETER, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PARAMETER, CORE_ENGINE_BROKER_WIRED, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PARAMETER, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, isClaudeAgentModel, isCoreAgentModelId, isCoreAnswersModelId, isCoreLearningModelId, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
 import { catalogModel } from "@agentx/model-runtime/catalog";
 import { AlertEmailSchema, MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
 import type { DeployPart } from "../deploy/parameters.js";
@@ -51,6 +51,29 @@ const wholeNumber = (key: string, min: number, max: number) => (value: string): 
 
 /** The core engine switch (stack parameter CoreEngine): exactly the parameter's own pattern. */
 export const CORE_ENGINE_NOT_WIRED_WORDS = "coreEngine.switch can only be off on this release: the broker does not run the core engine yet";
+
+/** Saved image role outputs required before enabling the install switch (L4-SE-OUTPUT-CONTRACT: role ARNs carry the environment path /agentx/<env>/). */
+export const SAVED_ENV_REGISTRY_OUTPUTS = ["SavedEnvImgPushRoleArn", "SavedEnvImgPullRoleArn", "SavedEnvImgManageRoleArn", "SavedEnvRepoPrefix", "SavedEnvRegistryReady"] as const;
+
+export function savedEnvRegistryReadiness(outputs: Record<string, string> | undefined, env: string, account: string): string[] {
+  const missing = SAVED_ENV_REGISTRY_OUTPUTS.filter((key) => outputs?.[key] === undefined || outputs[key] === "");
+  if (missing.length > 0) return [...missing];
+  const expected = {
+    SavedEnvImgPushRoleArn: `arn:aws:iam::${account}:role/agentx/${env}/agentx-${env}-img-push`,
+    SavedEnvImgPullRoleArn: `arn:aws:iam::${account}:role/agentx/${env}/agentx-${env}-img-pull`,
+    SavedEnvImgManageRoleArn: `arn:aws:iam::${account}:role/agentx/${env}/agentx-${env}-img-manage`,
+    SavedEnvRepoPrefix: `rovara-env/${env}`,
+    SavedEnvRegistryReady: "1",
+  };
+  return SAVED_ENV_REGISTRY_OUTPUTS.filter((key) => outputs?.[key] !== expected[key]);
+}
+
+const savedEnvSwitchValue = (value: string): string => {
+  const trimmed = value.trim();
+  if (trimmed === "on") return "1";
+  if (trimmed === "off") return "0";
+  return refuse("savedEnvironments.switch", "on or off");
+};
 
 const coreEngineValue = (key: string, wired: boolean = CORE_ENGINE_BROKER_WIRED) => (value: string): string => {
   const trimmed = value.trim();
@@ -112,6 +135,20 @@ export const coreAnswersModel = (key: string) => (value: string): string => {
   if (CORE_GATEWAY_UNSET.has(trimmed)) return "";
   if (!isCoreAnswersModelId(trimmed) || catalogModel({ provider: "anthropic", modelId: trimmed }) === undefined) {
     return refuse(key, `empty (none: answers use the agent model) or an Anthropic model id this Rovara knows, such as claude-haiku-5-5 (not a Bedrock us.anthropic. id, and not a model other than Claude: the answers run on the company's own Anthropic account; lowercase letters, digits and . - only, at most ${CORE_ANSWERS_MODEL_MAX_LENGTH} characters)`);
+  }
+  return trimmed;
+};
+
+/**
+ * coreEngine.learningModel (DEC 254zzz58/63): the INSTALL default; empty (Claude Haiku 5.5, claude-haiku-5-5), or ONE Anthropic model id this Rovara's catalog knows (such as claude-haiku-5-5) that
+ * the hosted lessons' learning calls run on, separate from the agent model. A company may choose its own (its AI settings), which wins for it. A Claude engine name only: the learning route used runs on the company's own Anthropic account, so a Bedrock
+ * `us.anthropic....` id or a model such as zai.glm-5 is refused here, before any deploy. The catalog must know it (the per-call cap is priced from it). The refusal never echoes the value.
+ */
+export const coreLearningModel = (key: string) => (value: string): string => {
+  const trimmed = value.trim();
+  if (CORE_GATEWAY_UNSET.has(trimmed)) return "";
+  if (!isCoreLearningModelId(trimmed) || catalogModel({ provider: "anthropic", modelId: trimmed }) === undefined) {
+    return refuse(key, `empty (none: Claude Haiku 5.5, claude-haiku-5-5) or an Anthropic model id this Rovara knows, such as claude-haiku-5-5 (not a Bedrock us.anthropic. id, and not a model other than Claude: lessons learn on the company's own Anthropic account; lowercase letters, digits and . - only, at most ${CORE_LEARNING_MODEL_MAX_LENGTH} characters)`);
   }
   return trimmed;
 };
@@ -194,8 +231,15 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
   // DEC 254zm: Code's workers run test services only once the install's five starter copies are in place: run scripts/test-services-mirror.ts --copy, then --verify, then set this to mirrored.
   { key: "testServices.images", description: "none (the default): this install's workers do not run test services; mirrored: the five starter image copies were made and checked (scripts/test-services-mirror.ts --verify), so workers pull them at boot and run test services",
     target: parameter("control-plane", "TestServiceImages"), defaultValue: "none", parse: oneOf("testServices.images", ["none", "mirrored"]) },
+  { key: "savedEnvironments.switch", description: "on: enable saved environment images after the control plane publishes all three image roles and the registry template; off (the default): keep saved environments disabled",
+    target: parameter("control-plane", "SavedEnvironments"), defaultValue: "0", shown: (stored) => stored === "1" ? "on" : "off", parse: savedEnvSwitchValue },
+  // L4-NETG (DEC 254zzz77): how the EC2 worker hosts' task sandboxes and devcontainers reach the internet. Applies to workers booted AFTER the change; a running worker keeps its boot until it stops.
+  { key: "workerSandboxEgress", description: "bridge (the default): task sandboxes and devcontainers reach the internet through the worker host's own network, as before; gateway: the commands the agent runs (shell, setup, checks, install steps, the dev container's own processes) sit on an internal network whose only exit is the host's egress gateway (the install's DNS list applies, raw IP connections and the push-capable registries are refused, S3 is refused unless a project lifts a bucket); a worker whose gateway cannot start does not boot. The image build steps of a dev container (Dockerfile RUN, features) and the end-to-end verifier's build commands go out the same way, and Docker's default bridge is walled. The Docker daemon's own build fetches (`ADD <url>`, a `FROM` base image, a dev container's features) and the host's own image pulls go through the gateway's daemon proxy: only names the install's DNS list allows, no raw addresses, no S3 buckets (packages/worker/ec2/README.md, Sandbox egress gateway). Not covered: what the install's DNS list allows (github.com push, Slack and Atlassian web APIs, a project's additions and lifted S3 buckets) and Rovara's own services. Takes effect for workers booted after the change (named environments only)",
+    target: parameter("control-plane", "WorkerSandboxEgress"), defaultValue: "bridge", parse: oneOf("workerSandboxEgress", ["bridge", "gateway"]) },
   { key: "coreEngine.answersModel", description: "the model the hosted Just answer and the start-box classifier run on through the model gateway (not coding tasks, which keep coreEngine.agentModel): an Anthropic model id, such as claude-haiku-5-5; empty (the default, or none) uses coreEngine.agentModel, as before",
     target: parameter("control-plane", CORE_ANSWERS_MODEL_PARAMETER), defaultValue: "", parse: coreAnswersModel("coreEngine.answersModel") },
+  { key: "coreEngine.learningModel", description: "the model the hosted lessons learn with (the reflector and the judges) through the model gateway, on the company's own Anthropic account (not coding tasks, which keep coreEngine.agentModel): an Anthropic model id, such as claude-haiku-5-5; empty (the default, or none) uses claude-haiku-5-5; a company may choose its own in its AI settings, which wins for that company",
+    target: parameter("control-plane", CORE_LEARNING_MODEL_PARAMETER), defaultValue: "", parse: coreLearningModel("coreEngine.learningModel") },
   { key: "mcp.confirmElicitation", description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button or the CLI", target: parameter("control-plane", "McpConfirmElicitation"), defaultValue: "enabled", parse: oneOf("mcp.confirmElicitation", ["enabled", "disabled"]) },
   // DEC 254zg (a): Code's company layer, one switch for every function that reads COMPANY_SIGNIN and every company-only grant; the Slack service's stack takes the same value.
   { key: "company.signIn", description: "enabled: Code's company layer is on (company membership sign-in, invites, Add to Slack, Slack company mode); disabled (the default): it is off, and the template holds no company-only grant. Close self-serve (company.selfServe disabled) and migrate the members before enabling it (named environments only)",
@@ -205,6 +249,9 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
   // DEC 254zk: per-company Slack bots (Slack company mode, #845), set by a deploy or here: the control plane's SlackCompanyWorkspaces and the Slack service's copy.
   { key: "slack.companyWorkspaces", description: "enabled: Slack workspaces other than the install's own use their company's own bot token and company checks, only while company.signIn is enabled too; disabled (the default): only the install's workspace is served, as before (named environments only)",
     target: { kind: "stack-parameter", part: "control-plane", parameter: "SlackCompanyWorkspaces", also: [{ part: "slack", parameter: "SlackCompanyWorkspacesState" }] }, defaultValue: "disabled", parse: oneOf("slack.companyWorkspaces", ["enabled", "disabled"]) },
+  // Live switches check 2026-11-18: a switch the broker read that nothing in infra set (DEC 254n(1)).
+  { key: "coreEngine.agentModelChoice", description: "on: each company picks its core engine model from the models the gateway offers it (setup's AI and spending step), coreEngine.agentModel being the default; off (the default): every company runs coreEngine.agentModel (named environments only)",
+    target: parameter("control-plane", CORE_AGENT_MODEL_CHOICE_PARAMETER), defaultValue: CORE_AGENT_MODEL_CHOICE_DEFAULT, parse: oneOf("coreEngine.agentModelChoice", CORE_AGENT_MODEL_CHOICE_VALUES) },
 ];
 
 export function configKey(name: string): ConfigKey {

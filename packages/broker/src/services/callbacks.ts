@@ -48,6 +48,12 @@ import type { RepositoryCredential, RepositoryGrantService } from "../repository
 import { handleModelAccess, MODEL_ACCESS_PATH, type ModelGateway } from "../core/model-gateway/route.js";
 
 const ROUTE = /^\/v1\/internal\/workspaces\/([0-9a-f-]{36})\/operations\/([0-9a-f-]{36})\/([a-z-]+)$/u;
+import { savedEnvLeaseContext, savedEnvLoginContext } from "../core/test-env/saved-env-operations.js";
+import { savedEnvPushLoginCore, savedEnvResultCore, savedEnvFallbackCore, type SavedEnvLeaseContext } from "../core/test-env/saved-env-lease.js";
+import { exchangeSavedEnvLoginCore } from "../core/test-env/saved-env-login.js";
+import { savedEnvPullLogin, type SavedEnvDeps } from "../core/test-env/saved-env.js";
+import { savedEnvWorkerRouteOf } from "../aws/dev-route-scopes.js";
+
 export const CAPABILITY_HEADER = "x-agentx-callback-capability";
 export { PLAN_RETENTION };
 export const PLAN_ARTIFACT_NAME = "plan.md";
@@ -68,6 +74,9 @@ export const artifactObjectKey = (workspaceId: string, operationId: string, name
 export const artifactKey = (workspace: { pk: string }, operationId: string, name: string) => ({ pk: workspace.pk, sk: `ARTIFACT#${operationId}#${name}` });
 
 export interface CallbackDeps {
+  /** Worker-only saved-image callbacks; absent while the install switch is off. */
+  savedEnv?: { deps: SavedEnvDeps; inspectGrant: SavedEnvLeaseContext["inspectGrant"]; registryAuthSchema?: SavedEnvLeaseContext["registryAuthSchema"] };
+
   /** Set only on installs using the signed task-token path. */
   modelGateway?: ModelGateway;
   flow: TaskFlowDeps;
@@ -302,6 +311,9 @@ const uploadStores = (deps: CallbackDeps): UploadStores => ({ store: deps.flow.s
 export function createCallbackHandler(deps: CallbackDeps): (request: BrokerRequest) => Promise<BrokerResponse> {
   const capabilities = new CallbackCapabilities(Buffer.from(deps.flow.callbackSigningKey));
   return async (request) => {
+    const savedMatch = ROUTE.exec(request.path.split("?")[0] ?? "");
+    const savedRoute = savedMatch === null ? undefined : savedEnvWorkerRouteOf(request.method, request.path.split("?")[0] ?? "");
+    let savedResult = "INTERNAL";
     try {
       // The design review's reviewers read their packets here (a GET; the capability names the action and the stored binding names the slots).
       if (request.method === "GET" && (request.path.split("?")[0] ?? "") === DESIGN_REVIEW_PACKET_PATH) return await handleDesignReviewPacket(deps.flow, capabilities, request);
@@ -318,7 +330,7 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (action === "repository-credentials") return json(200, { credential: await exchangeCredential(deps, request, workspaceId, operationId) });
       const token = request.headers[CAPABILITY_HEADER];
       if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
-      if (!SERVED_ACTIONS.has(action) || (action === "setup-agent" && deps.setupAgent === undefined) || (action === "wiki-build" && deps.wikiBuild === undefined) || (action === "browser-evidence-sign-in" && deps.browserEvidenceSignIn === undefined)
+      if ((!SERVED_ACTIONS.has(action) && !(deps.savedEnv !== undefined && savedEnvWorkerRouteOf(request.method, bare) !== undefined)) || (action === "setup-agent" && deps.setupAgent === undefined) || (action === "wiki-build" && deps.wikiBuild === undefined) || (action === "browser-evidence-sign-in" && deps.browserEvidenceSignIn === undefined)
         || (action === EVAL_PLAN_DELIVERY_ACTION && deps.evalPlan === undefined) || (action === EVAL_HEALTH_RESULT_PATH && deps.evalHealth === undefined)) {
         // A callback this install does not serve yet. The capability is still checked, so the answer tells an unauthorised caller nothing.
         capabilities.verify(token, action as CallbackAction);
@@ -337,6 +349,22 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
         const booked = action === "events" ? await bookTerminalUsage(deps, operation, bodyOf(request)) : undefined;
         if (booked !== undefined) return json(200, booked);
         throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
+      }
+      if (savedEnvWorkerRouteOf(request.method, bare) !== undefined && deps.savedEnv !== undefined) {
+        const saved = deps.savedEnv;
+        const common = { companyId: deps.flow.companyId, store: deps.flow.store, inspectGrant: saved.inspectGrant, log: () => undefined };
+        const lease = { ...savedEnvLeaseContext({ ...common, deps: saved.deps }), ...(saved.registryAuthSchema === undefined ? {} : { registryAuthSchema: saved.registryAuthSchema }) };
+        const input = { workspaceId, operationId, body: bodyOf(request), grant: request.headers["x-agentx-repository-grant"] };
+        let answer: unknown;
+        if (action === "saved-env-push-login") answer = await savedEnvPushLoginCore(lease, input);
+        else if (action === "saved-env-result") answer = await savedEnvResultCore(lease, input);
+        else if (action === "saved-env-fallback") answer = await savedEnvFallbackCore(lease, input);
+        else answer = await exchangeSavedEnvLoginCore({ ...savedEnvLoginContext({ ...common, enabled: saved.deps.session.config.enabled, login: async ({ orgId, projectName, digest }) => {
+          const result = await savedEnvPullLogin(saved.deps, { orgId, projectId: projectName }, digest);
+          return result.ok ? result.auth : undefined;
+        } }), ...(saved.registryAuthSchema === undefined ? {} : { registryAuthSchema: saved.registryAuthSchema }) }, input);
+        savedResult = "ok";
+        return { ...json(200, answer), headers: { "content-type": "application/json", "cache-control": "no-store" } };
       }
       if (isCodingRunUpload(action)) return json(200, await handleCodingRunUpload(action, uploadStores(deps), operation, bodyOf(request)));
       if (action === "e2e-admission" || action === "e2e-evidence") {
@@ -412,9 +440,13 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       const recorded = await recordOperationResult(deps.flow, { workspaceId, operationId, fence: capability.fence, status, ...(error === undefined ? {} : { error }), ...(outcome === undefined ? {} : { outcome }) });
       return json(200, { ok: true, duplicate: recorded.duplicate });
     } catch (error) {
+      if (error instanceof AgentXError) savedResult = error.code;
       if (error instanceof AgentXError) return json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } });
-      deps.flow.log?.({ component: "callbacks", event: "callback_failed", error: error instanceof Error ? error.name : "unknown" });
+      if (savedRoute === undefined) deps.flow.log?.({ component: "callbacks", event: "callback_failed", error: error instanceof Error ? error.name : "unknown" });
       return json(500, { error: { code: "INTERNAL", message: "the callback could not be recorded" } });
+    } finally {
+      // Only fixed route words, the validated operation id and a fixed outcome: no body, grants, tokens or error messages.
+      if (savedRoute !== undefined) deps.flow.log?.({ component: "callbacks", event: "saved_env.callback", route: savedMatch![3], operationId: savedMatch![2], result: savedResult });
     }
   };
 }

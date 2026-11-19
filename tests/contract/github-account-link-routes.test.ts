@@ -7,7 +7,7 @@ import { AgentXError } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
-import { LINK_HAS_ANOTHER, LINK_NOT_SET_UP, LINK_WEB_ONLY, LINK_STEP_UP, LINK_TAKEN, START_AGAIN, githubAccountKey, githubAuditPk, githubPersonKey } from "../../packages/broker/src/aws/github-account-link-routes.js";
+import { LINK_HAS_ANOTHER, LINK_NOT_SET_UP, LINK_WEB_ONLY, LINK_TAKEN, START_AGAIN, githubAccountKey, githubAuditPk, githubPersonKey } from "../../packages/broker/src/aws/github-account-link-routes.js";
 import { githubLinkOf, linkedGithubPerson } from "../../packages/broker/src/core/people/github-links.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
@@ -90,9 +90,6 @@ function world(users: Record<string, GitHubUser> = {
     }
   };
   const as = (id: string, sid = SESSIONS[id]!) => { claims.sub = id; claims.sid = sid; };
-  const stepUp = (age = 30, method = "passkey") => { claims.step_up_at = Math.floor((now - age * 1000) / 1000); claims.step_up_amr = method; };
-  const noStepUp = () => { delete claims.step_up_at; delete claims.step_up_amr; };
-  stepUp();
   const start = () => call("POST", "/v1/dev/me/github/link", {});
   const claim = (body: Record<string, unknown>) => call("POST", "/v1/dev/me/github/link/claim", body);
   const read = () => call("GET", "/v1/dev/me/github");
@@ -100,14 +97,14 @@ function world(users: Record<string, GitHubUser> = {
   const startState = async () => (await start()).body.state as string;
   /** One whole link as the signed-in person: start, then claim with the GitHub code. */
   const link = async (code: string) => claim({ state: await startState(), code });
-  return { db, store, github, logs, deps, claims, as, stepUp, noStepUp, call, start, claim, read, unlink, startState, link, tick: (ms: number) => { now += ms; } };
+  return { db, store, github, logs, deps, claims, as, call, start, claim, read, unlink, startState, link, tick: (ms: number) => { now += ms; } };
 }
 type World = ReturnType<typeof world>;
 
 const linkedPerson = (w: World, company: string, githubUserId: string) => linkedGithubPerson(w.store, company, githubUserId);
 
 describe("start", () => {
-  it("a member with a fresh step-up gets a single-use state stored only as its hash, and GitHub's authorize address", async () => {
+  it("a member (no step-up, DEC 254zzz73) gets a single-use state stored only as its hash, and GitHub's authorize address", async () => {
     const w = world();
     const answer = await w.start();
     expect(answer.status).toBe(200);
@@ -126,14 +123,22 @@ describe("start", () => {
     const w = world();
     for (const [id, expected] of [[ADA, 200], [BEA, 200], [CAL, 200], [DEE, 200]] as const) { w.as(id); expect((await w.start()).status).toBe(expected); }
   });
-  it("needs a fresh step-up from a factor Code owns: none, an old one and a Slack one are refused, minting nothing", async () => {
-    for (const set of [(w: World) => w.noStepUp(), (w: World) => w.stepUp(601), (w: World) => w.stepUp(30, "slack")]) {
-      const w = world(); set(w);
-      const put = vi.spyOn(w.store, "put");
-      const answer = await w.start();
-      expect(answer.status).toBe(403); expect(answer.body.error).toEqual({ code: "REAUTH_REQUIRED", message: LINK_STEP_UP });
-      expect(put).not.toHaveBeenCalled();
-    }
+  it("DEC 254zzz73: start and claim need no step-up claim, and still refuse a removed member (no live membership) at start and at claim", async () => {
+    const w = world();
+    expect(w.claims).not.toHaveProperty("step_up_at");
+    const state = await w.startState();
+    expect((await w.claim({ state, code: "ada-code" })).status).toBe(200);
+    expect(await linkedPerson(w, A, "7")).toBe(ADA);
+    // A removed member: refused at start and at claim, nothing minted, GitHub not asked.
+    const v = world();
+    const vState = await v.startState();
+    v.db.set({ ...membershipKey(ADA), entityType: "COMPANY_MEMBERSHIP", personId: ADA, companyId: A, role: "member", joinedAt: TIME, revokedAt: TIME });
+    const put = vi.spyOn(v.store, "put");
+    expect((await v.start()).status).not.toBe(200);
+    expect((await v.claim({ state: vState, code: "ada-code" })).status).not.toBe(200);
+    expect(put).not.toHaveBeenCalled();
+    expect(v.github.requests).toHaveLength(0);
+    expect(await githubLinkOf(v.store, A, ADA)).toBeUndefined();
   });
   it("is unknown without the company layer or the wiring, before anyone is authenticated", async () => {
     for (const off of ["companies", "wiring"]) {
@@ -241,16 +246,6 @@ describe("claim: the person links the account GitHub says is theirs, to themselv
     expect(await linkedPerson(w, B, "7")).toBeUndefined();
     expect(await linkedPerson(w, A, "7")).toBe(ADA);
   });
-  it("needs a fresh step-up again at the claim: a stale one is refused and the state stays usable", async () => {
-    const w = world();
-    const state = await w.startState();
-    w.stepUp(601);
-    const stale = await w.claim({ state, code: "ada-code" });
-    expect(stale.status).toBe(403); expect(stale.body.error.code).toBe("REAUTH_REQUIRED");
-    expect(w.github.requests).toHaveLength(0);
-    w.stepUp();
-    expect((await w.claim({ state, code: "ada-code" })).status).toBe(200);
-  });
   it("a claim for a state that is unknown, malformed, used, expired, another person's or another session's is one answer; GitHub is not asked", async () => {
     const w = world();
     const state = await w.startState();
@@ -266,7 +261,7 @@ describe("claim: the person links the account GitHub says is theirs, to themselv
     w.as(ADA);
     expect((await w.claim({ state, code: "ada-code" })).status).toBe(200);
     expect((await w.claim({ state, code: "ada-code" })).body.error).toEqual(uniform);
-    const late = await w.startState(); w.tick(601_000); w.stepUp();
+    const late = await w.startState(); w.tick(601_000);
     expect((await w.claim({ state: late, code: "bea-code" })).body.error).toEqual(uniform);
   });
   it("one state sent twice at once: exactly one claim proceeds", async () => {
@@ -347,7 +342,7 @@ describe("claim: the person links the account GitHub says is theirs, to themselv
 
 describe("only the Rovara web app's own sign-in client may link (security review 1, Medium)", () => {
   const notWebApp = (w: World) => w.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Other tool", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, installLevel: true, secretHash: "f".repeat(64), fullAccess: true, createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
-  it("a full-access client that is not the web app, even with a fresh step-up, is refused on every route: nothing is minted, GitHub is not asked, nothing is linked", async () => {
+  it("a full-access client that is not the web app is refused on every route: nothing is minted, GitHub is not asked, nothing is linked", async () => {
     const w = world();
     const state = await w.startState();
     notWebApp(w);
@@ -401,10 +396,6 @@ describe("unlink", () => {
     expect(named.status).toBe(400);
     expect((await w.unlink()).body).toMatchObject({ unlinked: false });
     expect(await linkedPerson(w, A, "7")).toBe(ADA);
-  });
-  it("needs no step-up (it only takes away what the person had)", async () => {
-    const w = world(); await w.link("ada-code"); w.noStepUp();
-    expect((await w.unlink()).status).toBe(200);
   });
   it("only an account row that still names the caller is removed with theirs", async () => {
     const w = world(); await w.link("ada-code");

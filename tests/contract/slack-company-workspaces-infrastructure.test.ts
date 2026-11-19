@@ -96,6 +96,42 @@ describe("Slack company mode's switch (18a)", () => {
     }
   });
 
+  it("gives the Slack Lambda (only) a NAMED company's own channel-binding rows, by key, with the exact company-id shape and the Null guard (DEC 254zzz80, owner-approved)", () => {
+    const resource = policy(named, "SlackIngressCompanyBindings");
+    expect(roleOf(resource)).toEqual([roleOfFunction(named, "SlackIngress")]);
+    expect(resource.Condition).toBe(on);
+    expect(resource.Properties.PolicyName).toBe("slack-company-workspaces-slackingresscompanybindings");
+    expect(statementsOf(resource)).toStrictEqual([reads("ReadCompanySlackChannelBindings", tableArn(named, "State"), ["ORG#org_????????????????????#SLACK_BINDING#*"])]);
+    // What the pattern lets in, as DynamoDB's LeadingKeys StringLike matches it (? one character, * any run): the staging company's binding partition and no other family.
+    const glob = (pattern: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/gu, "\\$&").replaceAll("*", ".*").replaceAll("?", ".")}$`, "u");
+    const allowed = (key: string) => glob("ORG#org_????????????????????#SLACK_BINDING#*").test(key);
+    expect(allowed("ORG#org_demoaaaaaaaaaaaaaaaa#SLACK_BINDING#T0BSHLLUGBD")).toBe(true);
+    for (const key of ["SLACK_BINDING#T0BSHLLUGBD", "ORG#org_demoaaaaaaaaaaaaaaaa#PROJECT#demo-tasklog", "ORG#org_demoaaaaaaaaaaaaaaaa#MEMBER#e46d", "ORG#org_short#SLACK_BINDING#T0BSHLLUGBD",
+      "ORG#org_demoaaaaaaaaaaaaaaaa#CHANNEL_LINK#slack/T0BSHLLUGBD", "ORG#org_demoaaaaaaaaaaaaaaaaX#SLACK_BINDING#T0BSHLLUGBD", "SLACK_TEAM#T0BSHLLUGBD"]) expect(allowed(key), key).toBe(false);
+    // No other consumer gets it, and the legacy deployment has none of it.
+    const others = Object.entries(named.Resources).filter(([id, r]) => r.Type === "AWS::IAM::Policy" && !id.startsWith("SlackCompanyModeSlackIngressCompanyBindings") && JSON.stringify(r.Properties).includes("#SLACK_BINDING#"));
+    expect(others.map(([id]) => id)).toEqual([]);
+    expect(JSON.stringify(legacy)).not.toContain("#SLACK_BINDING#");
+  });
+
+  it("gives the Slack Lambda and the channel API a NAMED company's project revisions: Query, keys plus companyId and candidate, the exact company-id shape (R2-F1 lane 1 review M2)", () => {
+    const state = tableArn(named, "State");
+    for (const [id, fn] of [["SlackIngressCompanyProjects", "SlackIngress"], ["ChannelApiCompanyProjects", "ChannelApiIngress"]] as const) {
+      const resource = policy(named, id);
+      expect(roleOf(resource)).toEqual([roleOfFunction(named, fn)]);
+      expect(resource.Condition).toBe(on);
+      expect(statementsOf(resource)).toStrictEqual([{ Sid: "ReadCompanyProjectRevisions", Effect: "Allow", Action: "dynamodb:Query", Resource: state,
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#PROJECT#*"] }, "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "companyId", "candidate"] },
+          StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" }, Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" } } }]);
+    }
+    const glob = (pattern: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/gu, "\\$&").replaceAll("*", ".*").replaceAll("?", ".")}$`, "u");
+    const allowed = (key: string) => glob("ORG#org_????????????????????#PROJECT#*").test(key);
+    expect(allowed("ORG#org_demoaaaaaaaaaaaaaaaa#PROJECT#demo-tasklog")).toBe(true);
+    for (const key of ["PROJECT#demo-tasklog", "ORG#org_demoaaaaaaaaaaaaaaaa#PROJECT_CATALOG", "ORG#org_demoaaaaaaaaaaaaaaaa#PROJECT_MEMBERS#demo-tasklog", "ORG#org_demoaaaaaaaaaaaaaaaa#MEMBER#e46d",
+      "ORG#org_short#PROJECT#demo-tasklog"]) expect(allowed(key), key).toBe(false);
+    expect(JSON.stringify(legacy)).not.toContain("ReadCompanyProjectRevisions");
+  });
+
   it("never lets the Slack Lambda write the State table, switch on or off (#126)", () => {
     const role = roleOfFunction(named, "SlackIngress");
     const stateId = byPrefix(named, "State", "AWS::DynamoDB::Table")[0];

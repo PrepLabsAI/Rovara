@@ -129,6 +129,7 @@ describe("secret scan", () => {
     const root = await tree({ "a.txt": "1", "b.txt": "2", "c.txt": "3" });
     expect(await scanTreeForSecrets(root, { maxFiles: 2 })).toEqual({ ok: false, reason: "unscannable", detail: "too_many_files" });
     expect(await scanTreeForSecrets(root, { maxTotalBytes: 1 })).toEqual({ ok: false, reason: "unscannable", detail: "too_many_bytes" });
+    expect(await scanTreeForSecrets(root, { maxTotalBytes: 3 })).toEqual({ ok: true, files: 3, bytes: 3 });
     expect(await scanTreeForSecrets(root, { deadlineAtMs: 5, now: () => 10 })).toEqual({ ok: false, reason: "unscannable", detail: "deadline" });
   });
 
@@ -184,6 +185,12 @@ describe("secret scan", () => {
       await chmod(join(root, "svc", "tool"), mode);
       expect(await scanTreeForSecrets(root), mode.toString(8)).toEqual({ ok: false, reason: "unscannable", detail: "unsafe_mode" });
     }
+  });
+
+  it("counts Git object and LFS bytes in the total cap, including the exact boundary", async () => {
+    const root = await tree({ "svc/.git/objects/ab/packed": "ab", "svc/.git/lfs/objects/large": "cd", "svc/app": "e" });
+    expect(await scanTreeForSecrets(root, { maxTotalBytes: 5 })).toEqual({ ok: true, files: 3, bytes: 5 });
+    expect(await scanTreeForSecrets(root, { maxTotalBytes: 4 })).toEqual({ ok: false, reason: "unscannable", detail: "too_many_bytes" });
   });
 
   it("a text file in .git/objects of a repository folder is not read; a log under .git is", async () => {

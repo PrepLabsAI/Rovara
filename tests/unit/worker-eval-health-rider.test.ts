@@ -79,6 +79,13 @@ describe("the rider measures main and posts the one result", () => {
     expect(JSON.parse(t.net.sent[0]!.body)).toEqual(JSON.parse(JSON.stringify(answer)));
     expect(t.w.holds).toHaveLength(1);
   });
+  it("posts the prepared stand-in version with the measured result", async () => {
+    const t = await withPorts(); const version = "c".repeat(64); const original = t.base.ports!;
+    t.base.ports = inv => ({ ...original(inv)!, standInSetVersion: async () => version });
+    const answer = await runEvalHealthRider(t.base);
+    expect(answer?.result).toMatchObject({ status: "measured", standInSetVersion: version });
+    expect(EvalHealthResultBodySchema.parse(JSON.parse(t.net.sent[0]!.body)).result).toMatchObject({ status: "measured", standInSetVersion: version });
+  });
   it("hands the job the delivered plan inside the pin: the plan's per-question hashes are read at the pinned commit", async () => {
     const t = await withPorts({ ports: (inv) => { void inv; return { plan: async () => { const planned = await pinnedEvalPlan({}); return planned; }, approval: { read: async () => undefined }, meter: { reserve: async () => undefined }, runner: async () => { throw new Error("no"); } }; } });
     const answer = await runEvalHealthRider(t.base);

@@ -322,6 +322,8 @@ export interface SetupPageView {
   limits: { commands: number; sameStepTries: number; wallClockMin: number; budgetCents: number; hostAsks: number };
   /** Rovara cannot start a run (no model key, or the feature is off): the sentence. */
   cannotStart?: string;
+  /** L4-E7: what the run's sample-data writer does and costs (or that an AI must be connected first), in fixed words; shown beside the run's limits, before the run. */
+  standInWriter?: string;
   summary?: { commandsRun: number; spendCents: number; elapsedMin: number; hostAsks: number; partial: boolean; stop: string };
   items: SetupItemView[];
   verified: boolean;
@@ -336,6 +338,8 @@ export interface SetupPageView {
    * the model and is shown as such. `cannotConfirm`: the install cannot confirm one (a laptop has no eval budget), with the fixed reason; no Confirm button is shown then.
    */
   evalDiscovery?: SetupEvalDiscoveryView;
+  /** L4-E12: what the free dry run of the drafted eval found it reaches, in the TH1 words (`eval-dependency-list.ts` `evalReachesView`). Absent: no dry run ran or it found nothing worth saying. Fixed words only. */
+  evalReaches?: { words: string };
   /** No eval was discovered and this install could not confirm one anyway (no eval budget): the fixed reason, shown in the empty eval panel. */
   evalNoBudget?: string;
   /** The independent eval-spend item. No repository text reaches its labels. */

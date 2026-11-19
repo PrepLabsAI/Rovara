@@ -3,6 +3,25 @@
 exports[`named environment templates > agentx-staging-access is unchanged 1`] = `
 {
   "Conditions": {
+    "HasOperatorExternalId": {
+      "Fn::And": [
+        {
+          "Condition": "HasOperatorPrincipal",
+        },
+        {
+          "Fn::Not": [
+            {
+              "Fn::Equals": [
+                {
+                  "Ref": "OperatorExternalId",
+                },
+                "",
+              ],
+            },
+          ],
+        },
+      ],
+    },
     "HasOperatorPrincipal": {
       "Fn::Not": [
         {
@@ -81,10 +100,18 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
       "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
       "Type": "AWS::SSM::Parameter::Value<String>",
     },
-    "OperatorPrincipalArn": {
-      "AllowedPattern": "^$|^arn:aws[a-z-]*:iam::[0-9]{12}:(root|role/.+|user/.+)$",
+    "OperatorExternalId": {
+      "AllowedPattern": "^$|^[\\w+=,.@:/-]{2,1224}$",
+      "ConstraintDescription": "must be empty or 2 to 1224 characters of letters, digits and + = , . @ : / _ -",
       "Default": "",
-      "Description": "Optional operator-role principal; empty trusts account root",
+      "Description": "The sts:ExternalId a principal of ANOTHER account must present to assume the operator role (required for one; unused for a principal of this account). Not a secret: it guards against a confused deputy",
+      "Type": "String",
+    },
+    "OperatorPrincipalArn": {
+      "AllowedPattern": "^$|^arn:aws[a-z-]*:iam::[0-9]{12}:(role|user)/.+$",
+      "ConstraintDescription": "must be empty (this account's own principals) or the ARN of ONE IAM role or user, arn:aws:iam::<12-digit account>:role/<name> or :user/<name>; a whole account (:root) is refused",
+      "Default": "",
+      "Description": "Optional operator-role principal: one IAM role or user ARN. Empty trusts this account's own principals. A principal of another account also needs OperatorExternalId",
       "Type": "String",
     },
     "PermissionsBoundaryArn": {
@@ -777,6 +804,13 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
           "Statement": [
             {
               "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:PrincipalAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
+                },
+              },
               "Effect": "Allow",
               "Principal": {
                 "AWS": {
@@ -804,6 +838,32 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
                   ],
                 },
               },
+              "Sid": "OperatorOfThisAccount",
+            },
+            {
+              "Fn::If": [
+                "HasOperatorExternalId",
+                {
+                  "Action": "sts:AssumeRole",
+                  "Condition": {
+                    "StringEquals": {
+                      "sts:ExternalId": {
+                        "Ref": "OperatorExternalId",
+                      },
+                    },
+                  },
+                  "Effect": "Allow",
+                  "Principal": {
+                    "AWS": {
+                      "Ref": "OperatorPrincipalArn",
+                    },
+                  },
+                  "Sid": "NamedOperatorWithExternalId",
+                },
+                {
+                  "Ref": "AWS::NoValue",
+                },
+              ],
             },
           ],
           "Version": "2012-10-17",
@@ -1689,6 +1749,37 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
         },
       ],
     },
+    "OperatorExternalIdNeedsPrincipal": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "OperatorPrincipalArn",
+                  },
+                  "",
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "OperatorExternalId is only used with OperatorPrincipalArn: name the role or user that will present it, or clear OperatorExternalId",
+        },
+      ],
+      "RuleCondition": {
+        "Fn::Not": [
+          {
+            "Fn::Equals": [
+              {
+                "Ref": "OperatorExternalId",
+              },
+              "",
+            ],
+          },
+        ],
+      },
+    },
   },
 }
 `;
@@ -2159,13 +2250,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       ],
       "Default": "disabled",
       "Description": "enabled: Slack conversations go through the channel API as the built-in Slack adapter (spec 062 Phase 7); disabled: Slack's own queue, as before",
-      "Type": "String",
-    },
-    "StepUpEmailSender": {
-      "AllowedPattern": "^$|^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,252}\\.[A-Za-z]{2,63}$",
-      "Default": "",
-      "Description": "The verified Amazon SES email identity (one address) that sends step-up codes; empty: no emailed codes (passkeys only)",
-      "MaxLength": 254,
       "Type": "String",
     },
     "TestServiceImages": {
@@ -5572,7 +5656,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "DEVELOPER_OIDC_SINCE": {
               "Ref": "DeveloperOidcSince",
             },
-            "DEVELOPER_PASSKEYS": "enabled",
             "DEVELOPER_SIGNIN_SLACK": {
               "Ref": "DeveloperSignInSlack",
             },
@@ -5622,9 +5705,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             },
             "SLACK_VIA_CHANNEL": {
               "Ref": "SlackViaChannel",
-            },
-            "STEP_UP_EMAIL_FROM": {
-              "Ref": "StepUpEmailSender",
             },
             "TASK_TOKEN_KEY_ARN": {
               "Fn::GetAtt": [
@@ -5852,63 +5932,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Resource": {
                 "Fn::GetAtt": [
                   "DeveloperSignInPolicyHookKey1CC2C9E2",
-                  "Arn",
-                ],
-              },
-            },
-            {
-              "Action": "ses:SendEmail",
-              "Condition": {
-                "StringEquals": {
-                  "ses:FromAddress": {
-                    "Ref": "StepUpEmailSender",
-                  },
-                },
-              },
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":ses:",
-                    {
-                      "Ref": "AWS::Region",
-                    },
-                    ":",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":identity/",
-                    {
-                      "Ref": "StepUpEmailSender",
-                    },
-                  ],
-                ],
-              },
-            },
-            {
-              "Action": [
-                "dynamodb:Query",
-                "dynamodb:DeleteItem",
-              ],
-              "Condition": {
-                "ForAllValues:StringLike": {
-                  "dynamodb:LeadingKeys": [
-                    "PASSKEYS#*",
-                  ],
-                },
-                "Null": {
-                  "dynamodb:LeadingKeys": "false",
-                },
-              },
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "DeveloperSignInTable26CE739E",
                   "Arn",
                 ],
               },
@@ -16960,6 +16983,59 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
                 "logs:CreateLogStream",
                 "logs:PutLogEvents",
               ],
+              "Condition": {
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition",
+                        },
+                        ":events:",
+                        {
+                          "Ref": "AWS::Region",
+                        },
+                        ":",
+                        {
+                          "Ref": "AWS::AccountId",
+                        },
+                        ":rule/agentx-staging-",
+                        {
+                          "Fn::Select": [
+                            0,
+                            {
+                              "Fn::Split": [
+                                "-",
+                                {
+                                  "Fn::Select": [
+                                    2,
+                                    {
+                                      "Fn::Split": [
+                                        "/",
+                                        {
+                                          "Ref": "AWS::StackId",
+                                        },
+                                      ],
+                                    },
+                                  ],
+                                },
+                              ],
+                            },
+                          ],
+                        },
+                        "-service-failures",
+                      ],
+                    ],
+                  },
+                },
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
+                },
+              },
               "Effect": "Allow",
               "Principal": {
                 "Service": "events.amazonaws.com",

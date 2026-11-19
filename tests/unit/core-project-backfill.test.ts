@@ -84,6 +84,7 @@ it("resumes after failure before or after every I/O step with no loss or overwri
 function seedPerson(db: FakeDynamoDb) { db.set({ pk: `DEVELOPER#${personId}`, sk: "META", entityType: "DEVELOPER", developerId: personId, provider: "oidc", issuer: "https://example.test", subject: "person", firstSignInAt: at, revoked: false }); }
 function operatorInput() { return { ...input, bindings: [{ installationId: 42, accountLogin: "example" }], people: [{ personId, role: "member" }], grants: [{ personId, projectName: "web", role: "developer" }] }; }
 it("reports people gaps read-only, then writes only explicit valid people and grants", async () => {
+  // DEC 254zzz80: the mapped company is a named company, so the grant and its reverse row are written in its own partition, never the legacy keys.
   const { db, deps } = setup(); seedPerson(db);
   const before = [...db.items];
   expect(await checkCorePeople(deps, operatorInput())).toMatchObject({ gaps: [{ person: 0, reason: "membership_missing" }, { grant: 0, reason: "grant_missing" }] });
@@ -91,9 +92,12 @@ it("reports people gaps read-only, then writes only explicit valid people and gr
   expect(await backfillCorePage(deps, { ...operatorInput(), dryRun: false })).toMatchObject({ written: 4, failed: 0 });
   expect(await checkCorePeople(deps, operatorInput())).toMatchObject({ gaps: [] });
   expect(db.get(`COMPANY_MEMBER#${personId}`, "COMPANY")).toMatchObject({ companyId: A, role: "member" });
-  expect(await listProjectMembers({ tableName: "state", documentClient: deps.documentClient } as never, "web")).toEqual([{ developerId: personId, role: "developer", grantedAt: at }]);
-  expect(db.get(projectMemberKey("web", personId).pk, projectMemberKey("web", personId).sk)).toEqual({ ...projectMemberKey("web", personId), entityType: "PROJECT_MEMBER", role: "developer", grantedAt: at });
+  expect(await listProjectMembers({ tableName: "state", documentClient: deps.documentClient } as never, "web", A)).toEqual([{ developerId: personId, role: "developer", grantedAt: at }]);
+  expect(db.get(projectMemberKey("web", personId, A).pk, projectMemberKey("web", personId, A).sk)).toEqual({ ...projectMemberKey("web", personId, A), entityType: "PROJECT_MEMBER", role: "developer", grantedAt: at });
   expect(await backfillCorePage(deps, { ...operatorInput(), dryRun: false })).toMatchObject({ written: 0, skippedExisting: 4 });
+  expect(db.get(`ORG#${A}#MEMBER#${personId}`, "PROJECT#web")).toMatchObject({ entityType: "MEMBERSHIP", role: "developer" });
+  expect(db.get(`MEMBER#${personId}`, "PROJECT#web")).toBeUndefined();
+  expect(db.get("PROJECT_MEMBERS#web", `DEVELOPER#${personId}`)).toBeUndefined();
 });
 it("backfills a GitHub person like any other and still refuses a provider it does not know (DEC 254p (a))", async () => {
   const { db, deps } = setup(); seedPerson(db);
@@ -108,13 +112,13 @@ it("backfills a GitHub person like any other and still refuses a provider it doe
 it("refuses a reverse member row with a different role without changing either row", async () => {
   const { db, deps } = setup(); seedPerson(db);
   db.set({ pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", companyId: A, personId, role: "member", joinedAt: at });
-  const key = projectMemberKey("web", personId);
+  const key = projectMemberKey("web", personId, A);
   const foreignRole = { ...key, entityType: "PROJECT_MEMBER", role: "administrator", grantedAt: at };
   db.set(foreignRole);
   const before = db.get(key.pk, key.sk);
   expect(await backfillCorePage(deps, { ...operatorInput(), dryRun: false })).toMatchObject({ skippedConflict: 1, written: 2 });
   expect(db.get(key.pk, key.sk)).toEqual(before);
-  expect(db.get(`MEMBER#${personId}`, "PROJECT#web")).toBeUndefined();
+  expect(db.get(`ORG#${A}#MEMBER#${personId}`, "PROJECT#web")).toBeUndefined(); // DEC 254zzz80: the mapped company's own partition
 });
 it("never invents membership for an unknown/revoked person or overwrites foreign membership", async () => {
   for (const kind of ["unknown", "revoked", "foreign"]) {
@@ -126,7 +130,7 @@ it("never invents membership for an unknown/revoked person or overwrites foreign
     const outcome = await backfillCorePage(deps, { ...operatorInput(), dryRun: false });
     expect(outcome.issues).toContainEqual({ phase: 2, index: 0, reason: "conflict" });
     expect(db.get(`COMPANY_MEMBER#${personId}`, "COMPANY")).toEqual(before);
-    expect(db.get(`MEMBER#${personId}`, "PROJECT#web")).toBeUndefined();
+    expect(db.get(`ORG#${A}#MEMBER#${personId}`, "PROJECT#web")).toBeUndefined(); // DEC 254zzz80: the mapped company's own partition
   }
 });
 it("uses the existing binding writer and never steals an installation", async () => {
@@ -200,7 +204,7 @@ it("a catalog at an earlier revision must have matching content before advancing
 it("read-only people check reports foreign, revoked and malformed grant rows without writes", async () => {
   const { db, deps, commands } = setup(); seedPerson(db);
   db.set({ pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", companyId: B, personId, role: "member", joinedAt: at, revokedAt: at });
-  db.set({ pk: `MEMBER#${personId}`, sk: "PROJECT#web", entityType: "wrong", ownerKey: personId, projectName: "web", role: "developer" });
+  db.set({ pk: `ORG#${A}#MEMBER#${personId}`, sk: "PROJECT#web", entityType: "wrong", ownerKey: personId, projectName: "web", role: "developer" });
   expect(await checkCorePeople(deps, operatorInput())).toMatchObject({ gaps: [{ person: 0, reason: "membership_conflict" }, { grant: 0, reason: "grant_conflict" }] });
   expect(commands.every(c => c.name === "GetCommand")).toBe(true);
 });
@@ -267,7 +271,7 @@ it("does not restore a revoked same-company membership or invent a role change",
     const result = await backfillCorePage(deps, { ...operatorInput(), dryRun: false });
     expect(result.issues).toContainEqual({ phase: 2, index: 0, reason: "conflict" });
     expect(db.get(row.pk, row.sk)).toEqual(row);
-    expect(db.get(`MEMBER#${personId}`, "PROJECT#web")).toBeUndefined();
+    expect(db.get(`ORG#${A}#MEMBER#${personId}`, "PROJECT#web")).toBeUndefined(); // DEC 254zzz80: the mapped company's own partition
   }
 });
 it("uses the sign-in table for existing people and memberships, State for grants", async () => {
@@ -282,7 +286,7 @@ it("uses the sign-in table for existing people and memberships, State for grants
     return (c.input.TableName === "signin" ? signin : state).send(command as never);
   } } };
   signin.set({ pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", companyId: A, personId, role: "member", joinedAt: at });
-  state.set({ pk: `MEMBER#${personId}`, sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: personId, projectName: "web", role: "developer" });
+  state.set({ pk: `ORG#${A}#MEMBER#${personId}`, sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: personId, projectName: "web", role: "developer" });
   expect(await checkCorePeople(deps, operatorInput())).toEqual({ gaps: [] });
 });
 it("refuses a malformed existing person before previewing membership", async () => {

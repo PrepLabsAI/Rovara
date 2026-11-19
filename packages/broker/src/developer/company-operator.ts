@@ -13,7 +13,8 @@ const request = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("company-preapprove"), companyId: OrgIdSchema, email: CompanyEmail, role: z.enum(["admin", "member"]), expiresInHours: CompanyExpiryHours, createdBy: CompanyPersonId.optional(), inviteHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict(),
   z.object({ kind: z.literal("company-preapproval-withdraw"), companyId: OrgIdSchema, email: CompanyEmail.optional(), emailHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), createdBy: CompanyPersonId.optional() }).strict().refine((value) => (value.email === undefined) !== (value.emailHash === undefined)),
   z.object({ kind: z.literal("company-preapprovals-list"), companyId: OrgIdSchema }).strict(),
-  z.object({ kind: z.literal("company-member-revoke"), companyId: OrgIdSchema, personId: CompanyPersonId, createdBy: CompanyPersonId.optional() }).strict(),
+  // DEC 254zzz84 (5): a removal with a hand-over fences the role the remover saw and a live successor inside its own transaction (both optional: an operator's revoke names neither).
+  z.object({ kind: z.literal("company-member-revoke"), companyId: OrgIdSchema, personId: CompanyPersonId, createdBy: CompanyPersonId.optional(), expectedRole: z.enum(["member", "admin", "owner"]).optional(), successorId: CompanyPersonId.optional() }).strict(),
   z.object({ kind: z.literal("company-member-restore"), companyId: OrgIdSchema, personId: CompanyPersonId, createdBy: CompanyPersonId.optional() }).strict(),
   z.object({ kind: z.literal("company-member-role-set"), companyId: OrgIdSchema, personId: CompanyPersonId, role: z.enum(["member", "admin", "owner"]), createdBy: CompanyPersonId.optional() }).strict(),
   MemberListInput.extend({ kind: z.literal("company-member-list") }).strict(),
@@ -82,7 +83,12 @@ export async function companyOperator(deps: { store: CompanySignInStore; invites
         deps.log({ event: input.kind, companyId });
         return { ok: true, ...listed };
       }
-      case "company-member-revoke": case "company-member-restore": if (!await deps.store.setRevoked(companyId, input.personId, input.kind === "company-member-revoke", input.createdBy)) return { ok: false, error: "not_found" }; break;
+      case "company-member-revoke": case "company-member-restore": {
+        // Only a revoke's schema carries the fences (a restore's has neither field).
+        const fence = { ...("expectedRole" in input && input.expectedRole !== undefined ? { expectedRole: input.expectedRole } : {}), ...("successorId" in input && input.successorId !== undefined ? { successorId: input.successorId } : {}) };
+        if (!await deps.store.setRevoked(companyId, input.personId, input.kind === "company-member-revoke", input.createdBy, fence)) return { ok: false, error: "not_found" };
+        break;
+      }
       case "company-member-role-set": {
         const result = await deps.store.setRole(companyId, input.personId, input.role, input.createdBy);
         if (result === "not_found") return { ok: false, error: "not_found" };
