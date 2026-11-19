@@ -69,7 +69,8 @@ const ALL_BODIES = { ...BODIES, ...KEYWORD_BODIES };
 // so mild regressions are still caught there. Either way a pair over its bar is timed once more and the faster run is judged. The failures this test exists for took
 // 26 s to minutes, past every bar.
 const MAX_SLOWDOWN = 4;
-const ON_CI = process.env["CI"] !== undefined && process.env["CI"] !== "" && process.env["CI"] !== "false";
+// #1124: the release build (CodeBuild) sets CODEBUILD_BUILD_ID, not CI, and is as busy as a CI runner, so it gets the CI bar too.
+const ON_CI = (process.env["CI"] !== undefined && process.env["CI"] !== "" && process.env["CI"] !== "false") || (process.env["CODEBUILD_BUILD_ID"] ?? "") !== "";
 async function timed(files: Files): Promise<number> {
   const started = performance.now();
   await detect(files);
