@@ -466,7 +466,7 @@ describe("production release pipeline", () => {
     template.hasResourceProperties("AWS::CodeBuild::Project", {
       Name: AGENTX_RELEASE_PROJECT_NAME,
       ConcurrentBuildLimit: 1,
-      TimeoutInMinutes: 60,
+      TimeoutInMinutes: 120,
       Environment: Match.objectLike({
         Type: "ARM_CONTAINER",
         ComputeType: "BUILD_GENERAL1_LARGE",

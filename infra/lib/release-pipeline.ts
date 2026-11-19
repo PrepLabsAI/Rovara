@@ -77,7 +77,8 @@ export class ReleasePipelineStack extends Stack {
         privileged: true,
       },
       concurrentBuildLimit: 1,
-      timeout: Duration.minutes(60),
+      // #1151: a release that runs the full checks (CI proof not proven) and rebuilds the worker took over 60 minutes; one proven by CI takes 5-15.
+      timeout: Duration.minutes(120),
       cache: codebuild.Cache.local(codebuild.LocalCacheMode.DOCKER_LAYER),
       logging: { cloudWatch: { logGroup } },
       buildSpec: codebuild.BuildSpec.fromObject({

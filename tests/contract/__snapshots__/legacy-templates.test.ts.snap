@@ -13018,7 +13018,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
 }",
           "Type": "CODEPIPELINE",
         },
-        "TimeoutInMinutes": 60,
+        "TimeoutInMinutes": 120,
       },
       "Type": "AWS::CodeBuild::Project",
     },
