@@ -5,6 +5,9 @@
 //     company's milestones and session lines, and the validated CI mode reader of the runtime;
 //   - `requirePassingCi`: the checks must have passed ("no CI" never shows the button: owner, DEC 254zzz104);
 //   - a branch the host needs up to date makes the tracking row due now (the sync slot), as tracking's own wake.
+//   - the second review's merge wait (the task's second opinion and the owner's acknowledgements), and the merge order from the task's own repository edges (the company-bound evidence store);
+//   - while the install has a company rules service (the policy hook), nothing is built: that service is asked only at an approver's verdict, which a website press does not make, so a press there would
+//     merge without the company's rules. The route then says merging from Rovara is not set up (the person merges on GitHub). Asking the service for a person's press is a follow-up.
 // No CI mode reader on the runtime (an invalid or missing wiring): throws, and the route says merging is not set up.
 import type { AdapterRegistry, CodeSettings, OrgId } from "@agentx/contracts";
 import { agentXError } from "@agentx/contracts";
@@ -17,11 +20,14 @@ import { createIdentityMergePeople } from "../core/merge/people.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { pullRequestRecordOf } from "../core/build-step/records.js";
 import { createMilestoneService, createRepositoryResolver, mergeTaskOf, sessionTimeline, wakeMergeTracking } from "../services/merge-tracking.js";
+import { createTaskRepositoryEdgesSeam } from "../core/merge/repository-edges.js";
+import { hostedEvidenceBlobs } from "../core-host/hosted-evidence.js";
 
 export const HOSTED_MERGE_SETTINGS_REFUSED = "the project's merge rules could not be read";
 
-export function hostedMergeDependencies(input: { runtime: CoreRuntime; registry: AdapterRegistry; settings: CodeSettingsReader | undefined; defaults: CodeSettings; now: () => number }): MergeDependencies {
+export function hostedMergeDependencies(input: { runtime: CoreRuntime; registry: AdapterRegistry; settings: CodeSettingsReader | undefined; defaults: CodeSettings; now: () => number; policyHook: boolean }): MergeDependencies {
   const { runtime, registry, now } = input;
+  if (input.policyHook) throw new Error("the company rules service is not asked for a website press yet");
   const companyId: OrgId = runtime.companyId;
   const flow = runtime.flow.deps;
   const ciMode = runtime.ciReporting?.ciMode;
@@ -54,5 +60,8 @@ export function hostedMergeDependencies(input: { runtime: CoreRuntime; registry:
     now,
     ciMode: (task) => ciMode(task),
     requirePassingCi: true,
+    // The second review that did not run waits for the owner (the merge card's wait), as everywhere else.
+    mergeWait: (task) => flow.secondReview?.mergeWait(task),
+    repositoryEdges: createTaskRepositoryEdgesSeam({ flow, blobs: hostedEvidenceBlobs({ blobs: registry.require("object-storage"), store, companyId }), companyId }),
   };
 }

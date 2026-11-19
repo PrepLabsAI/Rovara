@@ -582,9 +582,16 @@ export const WEBSITE_PRESS_METHOD = "rovara-website-press";
  */
 export async function pressMergeAsPerson(
   deps: MergeDependencies,
-  input: { taskId: string; requestId: string; presserPersonId: string; orderOverride?: boolean | undefined },
+  input: {
+    taskId: string; requestId: string; presserPersonId: string; orderOverride?: boolean | undefined;
+    /** What the person was SHOWN: the heads (a push since is "it changed", never merged) and the risk level (a different level now is "it changed"). */
+    expectedHeads?: ReadonlyArray<{ repositoryId: string; number: number; headSha: string }> | undefined; risk?: MergeRisk["level"] | undefined;
+  },
 ): Promise<MergePressResult> {
   const prepared = await prepareMerge(deps, input);
+  if (input.risk !== undefined && input.risk !== prepared.risk.level) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
+  // The approvers point's own count still holds: a merge that needs more than one approver is never one person's press.
+  if (prepared.requirement.minApprovers !== 1) throw agentXError("FORBIDDEN", NEEDS_MORE_APPROVERS);
   const task = await deps.host.loadTask(input.taskId);
   if (task === undefined || task.orgId === undefined || !tracksMerge(task.workflow)) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
   if (task.closedAt !== undefined || task.releasedAt !== undefined) throw agentXError("MERGE_NOT_READY", M.taskClosed);

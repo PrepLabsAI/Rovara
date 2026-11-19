@@ -98,6 +98,7 @@ export function mergeTaskOf(record: TaskRecord, companyId: OrgId): (MergeTask & 
     ...(record.sessionId === undefined ? {} : { sessionId: record.sessionId }), ...(record.closedAt === undefined ? {} : { closedAt: record.closedAt }),
     ...(record.releasedAt === undefined ? {} : { releasedAt: record.releasedAt }), ...(record.workflow === undefined ? {} : { workflow: record.workflow }),
     ownerId: record.workflow?.ownerId ?? record.ownerKey, ownerName: record.developerName ?? "the owner", creatorId: record.developerId,
+    ...(record.secondOpinion === undefined ? {} : { secondOpinion: record.secondOpinion }), ...(record.secondReviewAcknowledged === undefined ? {} : { secondReviewAcknowledged: record.secondReviewAcknowledged }),
   };
 }
 

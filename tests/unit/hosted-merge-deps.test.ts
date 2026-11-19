@@ -10,17 +10,17 @@ import { recoveryRowKey } from "../../packages/broker/src/core/merge/store.js";
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId, B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
 const TASK = "11111111-2222-4333-8444-555555555555";
 
-function build(options: { ciMode?: false } = {}) {
+function build(options: { ciMode?: false; policyHook?: boolean; mergeWait?: (task: unknown) => string | undefined } = {}) {
   const store = new MemoryDocumentStore();
   const settingsAsked: string[] = [];
   const projectsAsked: string[] = [];
   const registry = { require: (point: string) => ({ point, capabilities: {} }), get: () => undefined, names: () => [] } as never;
   const runtime = {
     companyId: A, services: {},
-    flow: { deps: { store, companyId: A, audit: { stage: () => [], record: async () => undefined }, projects: { revision: async (project: string) => { projectsAsked.push(project); return undefined; } } } },
+    flow: { deps: { store, companyId: A, audit: { stage: () => [], record: async () => undefined }, projects: { revision: async (project: string) => { projectsAsked.push(project); return undefined; } }, ...(options.mergeWait === undefined ? {} : { secondReview: { mergeWait: options.mergeWait } }) } },
     ...(options.ciMode === false ? {} : { ciReporting: { honest: true, ciMode: async () => "their_ci_fix" } }),
   } as never;
-  const deps = () => hostedMergeDependencies({ runtime, registry, settings: { read: async (orgId: OrgId, project: string) => { settingsAsked.push(`${orgId}/${project}`); return { ...DEFAULT_CODE_SETTINGS, mergeMethod: "merge" }; } }, defaults: DEFAULT_CODE_SETTINGS, now: () => 1_000 });
+  const deps = () => hostedMergeDependencies({ runtime, registry, settings: { read: async (orgId: OrgId, project: string) => { settingsAsked.push(`${orgId}/${project}`); return { ...DEFAULT_CODE_SETTINGS, mergeMethod: "merge" }; } }, defaults: DEFAULT_CODE_SETTINGS, now: () => 1_000, policyHook: options.policyHook === true });
   return { store, deps, settingsAsked, projectsAsked };
 }
 
@@ -49,6 +49,21 @@ describe("hosted merge dependencies", () => {
     await store.put({ item: { ...recoveryRowKey(TASK), kind: "tracking", taskId: TASK, nextAttemptAt: 99_999, quiet: 3 } });
     await deps().host.requireSyncForMerge!({ taskId: TASK } as never);
     expect(await store.get(recoveryRowKey(TASK))).toMatchObject({ nextAttemptAt: 1_000, quiet: 0 });
+  });
+
+  it("builds nothing while the install has a company rules service (it is asked only at an approver's verdict)", () => {
+    expect(() => build({ policyHook: true }).deps()).toThrow();
+  });
+
+  it("the second review's wait reads the task's own opinion and acknowledgements, and the merge order seam is wired", async () => {
+    const seen: unknown[] = [];
+    const { store, deps } = build({ mergeWait: (task) => { seen.push(task); return "wait"; } });
+    await store.put({ item: { ...taskKey(TASK), taskId: TASK, companyId: A, project: "web", startingRevision: 1, workspaceId: "ws", ownerKey: "o", developerId: "d", secondOpinion: { status: "did_not_run" }, secondReviewAcknowledged: ["k"] } });
+    const d = deps();
+    const task = await d.host.loadTask(TASK);
+    expect(d.mergeWait!(task!)).toBe("wait");
+    expect(seen[0]).toMatchObject({ secondOpinion: { status: "did_not_run" }, secondReviewAcknowledged: ["k"] });
+    expect(typeof d.repositoryEdges).toBe("function");
   });
 
   it("builds nothing without the runtime's CI mode reader", () => {

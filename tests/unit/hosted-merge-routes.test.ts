@@ -31,7 +31,7 @@ function countingHost(model: FakeHostModel, calls: Array<{ revision: string }>, 
   }) as CodeHost;
 }
 
-interface Options { changeAfterPrepare?: { workflow: { revision: number } } | { closedAt: string }; scopeUnreadable?: boolean; allowSelfApproval?: boolean; wiring?: false; audit?: "fail"; mergeThrows?: boolean; pullRequests?: Array<{ repositoryId: string; number: number }> }
+interface Options { minApprovers?: number; mergeWait?: string; changeAfterPrepare?: { workflow: { revision: number } } | { closedAt: string }; scopeUnreadable?: boolean; allowSelfApproval?: boolean; wiring?: false; audit?: "fail"; mergeThrows?: boolean; pullRequests?: Array<{ repositoryId: string; number: number }> }
 
 async function hosted(options: Options = {}) {
   const merges: Array<{ revision: string }> = [];
@@ -64,7 +64,8 @@ async function hosted(options: Options = {}) {
         const after = options.changeAfterPrepare!;
         return "closedAt" in after ? { ...task, closedAt: after.closedAt } : { ...task, workflow: { ...task.workflow!, revision: after.workflow.revision } };
       } };
-      return { ...world.deps, store, host, requirePassingCi: true };
+      const approvers = options.minApprovers === undefined ? world.deps.approvers : { ...world.deps.approvers, requirement: async (request: never) => ({ ...(await world.deps.approvers.requirement(request)), minApprovers: options.minApprovers! }) };
+      return { ...world.deps, store, host, approvers, requirePassingCi: true, ...(options.mergeWait === undefined ? {} : { mergeWait: () => options.mergeWait }) };
     },
     afterMerge: async (taskId) => { woken.push(taskId); },
   };
@@ -245,6 +246,32 @@ describe("hosted Merge button: every merge-core gate holds (H1)", () => {
     }
   });
 
+  it("what the person was shown binds the press: the heads and risk the read gave merge; other heads or another risk merge nothing", async () => {
+    const h = await hosted();
+    const view = (await h.call("GET")).body as { heads: Array<{ repositoryId: string; number: number; headSha: string }>; risk: string };
+    expect(view.heads).toEqual([{ repositoryId: "app", number: h.world.prs[0]!.number, headSha: h.world.prs[0]!.head }]);
+    expect(["low", "medium", "high"]).toContain(view.risk);
+    const other = view.risk === "high" ? "low" : "high";
+    expect(((await h.call("POST", { ...press(), risk: other })).body as ErrorBody).error).toEqual({ code: "MERGE_NOT_READY", message: M.changedAfterConfirm });
+    expect(((await h.call("POST", { ...press(), expectedHeads: [{ ...view.heads[0]!, headSha: "f".repeat(40) }] })).body as ErrorBody).error).toEqual({ code: "MERGE_NOT_READY", message: M.changedAfterConfirm });
+    expect(h.merges).toEqual([]);
+    expect((await h.call("POST", { ...press(), expectedHeads: view.heads, risk: view.risk })).status).toBe(200);
+    expect(h.merges).toHaveLength(1);
+  });
+
+  it("a merge the approvers point says needs more than one approver is never one person's press", async () => {
+    const h = await hosted({ minApprovers: 2 });
+    expect(((await h.call("POST", press())).body as ErrorBody).error.code).toBe("FORBIDDEN");
+    expect(h.merges).toEqual([]);
+  });
+
+  it("a second review that did not run waits for the owner (the merge card's wait)", async () => {
+    const h = await hosted({ mergeWait: "The second review didn't run. Acknowledge it before merging." });
+    expect(((await h.call("POST", press())).body as ErrorBody).error).toEqual({ code: "MERGE_NOT_READY", message: "The second review didn't run. Acknowledge it before merging." });
+    expect((await h.call("GET")).body).toMatchObject({ ready: false, message: "The second review didn't run. Acknowledge it before merging." });
+    expect(h.merges).toEqual([]);
+  });
+
   it("a refusal from GitHub is told in the core's words and the lock is given back", async () => {
     const h = await hosted();
     h.refuse.value = true;
@@ -289,7 +316,7 @@ describe("hosted Merge button: one merge, one answer per request", () => {
 
   it("no audit record, no merge", async () => {
     const h = await hosted({ audit: "fail" });
-    expect(await h.call("POST", press())).toEqual({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE", message: HOSTED_MERGE_WORDS.unavailable } } });
+    expect(await h.call("POST", press())).toEqual({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE", message: HOSTED_MERGE_WORDS.notRecorded } } });
     expect(h.merges).toEqual([]);
     expect(await lockOf(h.world)).toBeUndefined();
   });
