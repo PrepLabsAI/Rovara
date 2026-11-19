@@ -37,6 +37,8 @@ export interface AuthenticatedIdentity {
     name: string;
     client: string;
     taskId: string;
+    /** The verified company stamped on a Slack-started developer task; carried only for task-scoped legacy reads. */
+    companyId?: unknown;
   };
   /**
    * Spec 025 C11: the call comes from a shared task's Slack thread. In `continue` the identity is the
