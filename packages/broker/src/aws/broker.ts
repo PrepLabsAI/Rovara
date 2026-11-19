@@ -2128,7 +2128,7 @@ async function authorizeWorkspaceConnectors(dependencies: AwsBrokerDependencies,
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
   // The policy and the scopes it may address come from the project's latest registered revision,
   // so enabling, narrowing or revoking a tool reaches an existing thread at once.
-  const project = await requireLatestProject(dependencies, workspace.projectName);
+  const project = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
   const integrations = project.definition.integrations;
   if (!integrations?.githubMcp && !integrations?.connectors?.length) throw agentXError("FORBIDDEN", "GitHub MCP is not enabled for this project revision");
   return { workspace, project };
@@ -3405,6 +3405,17 @@ async function refuseForeignLegacyNamesake(dependencies: AwsBrokerDependencies, 
   if (legacy !== undefined && !recordInCompany(legacy, company)) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
 }
 
+/**
+ * DEC 254zzz98 (re-review M): the row a Slack thread's route actually read. When the thread's binding is a NAMED company's (it carries `companyId`), the legacy revision the route
+ * loaded by name must be that company's own (recordInCompany); any other is refused as unbound, so a namesake registered between the identity check and this read never serves
+ * the thread, and a pinned older revision of another company neither. Any other identity (no Slack binding, or the built-in company's): the row, unchanged.
+ */
+function slackThreadOwnRow<T>(identity: AuthenticatedIdentity, row: T): T {
+  const company = namedCompany((identity.slack?.binding as { companyId?: unknown } | undefined)?.companyId as string | undefined);
+  if (company !== undefined && !recordInCompany(row, company)) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  return row;
+}
+
 async function getLegacySlackBinding(
   dependencies: AwsBrokerDependencies,
   teamId: string,
@@ -3908,7 +3919,7 @@ async function ensureThreadWorkspace(
   }
 
   // New threads use the latest revision; an existing thread keeps the revision its workspace was prepared with.
-  const project = await requireLatestProject(dependencies, projectName);
+  const project = slackThreadOwnRow(identity, await requireLatestProject(dependencies, projectName));
   if (lazyPreparation) {
     return createUnpreparedThreadWorkspace(dependencies, identity, requestId, project, include, includeSettingsRevision);
   }
@@ -4124,7 +4135,7 @@ async function startThreadPreparation(
   const charging = threadCharging(dependencies, identity);
   if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {
     // #213: a released failed workspace a lazy turn was told is UNPREPARED; prepared again, charged afresh.
-    const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+    const pinned = slackThreadOwnRow(identity, await requireProject(dependencies, workspace.projectName, workspace.projectRevision));
     const retried = await retryThreadPreparation(dependencies, identity, requestId, pinned, workspace, includeOpenTaskCount);
     if ("outcome" in retried) {
       if (retried.outcome === "LIMIT_REACHED") return retried;
@@ -4139,7 +4150,7 @@ async function startThreadPreparation(
   await charging.heal(effective);
   // One read of the latest revision feeds every field below, so a revision registered meanwhile
   // cannot mix in. The fence condition refuses the write if the workspace changed since it was read.
-  const latest = await requireLatestProject(dependencies, workspace.projectName);
+  const latest = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
   const projectRevision = latest.definition.revision;
   const now = new Date().toISOString();
   const operationId = randomUUID();
@@ -4455,7 +4466,7 @@ async function sharedThreadWorkspace(
       ? { outcome: "VIEW_ONLY", taskId: shared.taskId, closed: true }
       : { outcome: "CLOSED", workspaceId: workspace.id, closedAt: workspace.closedAt };
   }
-  const settings = await requireLatestProject(dependencies, workspace.projectName);
+  const settings = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
   const active = await activeOperationForChannel(dependencies, workspace);
   return {
     outcome: "WORKSPACE",
@@ -4501,8 +4512,8 @@ async function existingThreadWorkspace(
   // Preparation rebuilds the workspace's disk, so it keeps the revision recorded on the workspace
   // (for a Slack thread, the latest revision when its compute was first prepared). Everything the
   // model is told comes from the project's latest registered revision.
-  const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
-  const settings = await requireLatestProject(dependencies, workspace.projectName);
+  const pinned = slackThreadOwnRow(identity, await requireProject(dependencies, workspace.projectName, workspace.projectRevision));
+  const settings = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
   const applied = {
     orchestratorInstructions: settings.definition.orchestratorInstructions,
     ...await threadIntegrations(settings.definition, include, dependencies),
@@ -14996,7 +15007,7 @@ async function getProjectModels(
 ): Promise<ProjectModelOptions> {
   const projectName = conversationProjectName(identity);
   if (!projectName) throw agentXError("FORBIDDEN", "a conversation's project binding is required");
-  const project = await requireLatestProject(dependencies, projectName);
+  const project = slackThreadOwnRow(identity, await requireLatestProject(dependencies, projectName));
   const policy = project.definition.models;
   if (!policy) throw agentXError("CONFIG_INVALID", "this project has no approved coding models; ask an administrator to configure models");
   const selection = await getItem<ProjectModelSelectionRecord>(dependencies, projectModelSelectionKey(projectName));
@@ -15022,7 +15033,7 @@ async function putProjectModel(
   const requester = identity.slack?.requester ?? (identity.channel === undefined ? undefined : channelRequester(identity.channel));
   if (!projectName || !requester) throw agentXError("FORBIDDEN", "a conversation's project binding and requester are required");
   const requested = ProjectModelSelectionRequestSchema.parse(value);
-  const project = await requireLatestProject(dependencies, projectName);
+  const project = slackThreadOwnRow(identity, await requireLatestProject(dependencies, projectName));
   const policy = project.definition.models;
   if (!policy) throw agentXError("CONFIG_INVALID", "this project has no approved coding models; ask an administrator to configure models");
   const selected = policy.approved.find((candidate) => modelKey(candidate) === modelKey(requested));

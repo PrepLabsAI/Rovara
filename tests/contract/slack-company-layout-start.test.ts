@@ -40,7 +40,7 @@ const companyProject = (company: string, name: string) => ({
  * A broker with Slack company mode on. `installCompany` is what the install team's (SLACK_TEAM's) operator binding names; OTHER_TEAM is company B's (company mode). The person is
  * linked in the install team's company. `legacyInstall`: the install team takes the legacy view (slackWorkspaceLegacyTeamId), as on staging.
  */
-async function world(options: { installCompany: string; legacyInstall?: boolean }) {
+async function world(options: { installCompany: string; legacyInstall?: boolean; core?: false }) {
   const h = await createDeveloperTaskBroker({ channelMembers: async (r) => ({ ok: true, memberOf: r.channelIds }) });
   h.db.set(companyProject(A, "demo-tasklog"));
   h.db.set(companyProject(B, "b-project"));
@@ -58,7 +58,8 @@ async function world(options: { installCompany: string; legacyInstall?: boolean 
   }
   const starts: Array<Record<string, unknown>> = [];
   const route = vi.fn<(request: { body?: string }, caller?: unknown) => Promise<{ statusCode: number; headers: Record<string, string>; body: string }>>(async (request) => { starts.push(JSON.parse(request.body ?? "{}") as Record<string, unknown>); return { statusCode: 200, headers: {}, body: JSON.stringify({ task: { taskId: TASK } }) }; });
-  const entry: CoreTaskEntry = { route, recordThread: vi.fn(async () => true) };
+  // `core: false`: the core declines the start (a company the core does not cover answers undefined, engine-boundary.ts), so the legacy start answers it.
+  const entry: CoreTaskEntry = { route: (options.core === false ? (async () => undefined) : route) as CoreTaskEntry["route"], recordThread: vi.fn(async () => true) };
   const module = await loadSlackBroker();
   const handler = module.createAwsBrokerHandler({ ...h.brokerInput, store, workspaces, companies: { companyOf: async (id: string) => members.get(id) },
     ...(options.legacyInstall === false ? {} : { slackWorkspaceLegacyTeamId: SLACK_TEAM }),
@@ -222,5 +223,40 @@ describe("DEC 254zzz98 (delta review H1): a named company's Slack thread never r
     // The broker's registered legacy binding names "payments" (createDeveloperTaskBroker); the namesake of another name is never read for it.
     const answer = await ensureWorkspace(w.handler, THREAD, USER);
     expect(JSON.stringify(answer.body)).not.toContain("Slack channel is not bound to a project");
+  });
+});
+
+describe("DEC 254zzz98 (re-review H): a named company's start the core does not take never runs on a legacy project of the same name that is not its own", () => {
+  const namesake = (companyId?: string) => ({ pk: "PROJECT#demo-tasklog", sk: "REV#000000000001", entityType: "PROJECT", ...(companyId === undefined ? {} : { companyId }),
+    registeredBy: "c".repeat(64), registeredAt: "2026-11-18T00:00:00.000Z", runtimeBinding: { deploymentMode: "ec2-ebs" },
+    definition: { name: "demo-tasklog", revision: 1, orchestratorInstructions: "built-in", setup: [], readiness: [],
+      repositories: [{ name: "builtin", url: "https://github.com/builtin/secret.git", defaultBranch: "main", path: "repo/builtin", credentialRef: "github" }] } });
+  const tasksOf = (w: { db: { find(p: (item: Record<string, unknown>) => boolean): unknown[] } }) =>
+    w.db.find((item) => String(item.pk).startsWith("DEVTASK#") && item.sk === "META" && item.project === "demo-tasklog");
+
+  it("the built-in company's unstamped namesake: the legacy start is refused as not found; no task, no workspace on its repositories", async () => {
+    const w = await world({ installCompany: A, core: false });
+    w.db.set(companyBinding(A));
+    // The person's grant on A's own project, in A's partition: the access check passes, so only the project row the start loads can refuse.
+    w.db.set({ pk: `ORG#${A}#MEMBER#${PERSON}`, sk: "PROJECT#demo-tasklog", entityType: "MEMBERSHIP", ownerKey: PERSON, projectName: "demo-tasklog", role: "developer" });
+    w.db.set(namesake());
+    const result = await w.start();
+    expect(result.statusCode).not.toBe(200);
+    expect(result.body).toContain("PROJECT_NOT_FOUND");
+    expect(result.body).not.toMatch(/builtin|secret/);
+    expect(tasksOf(w)).toEqual([]);
+    expect(w.db.find((item) => JSON.stringify(item).includes("builtin/secret") && item.pk !== "PROJECT#demo-tasklog")).toEqual([]);
+  });
+
+  it("another named company's stamped namesake is refused the same way", async () => {
+    const w = await world({ installCompany: A, core: false });
+    w.db.set(companyBinding(A));
+    // The person's grant on A's own project, in A's partition: the access check passes, so only the project row the start loads can refuse.
+    w.db.set({ pk: `ORG#${A}#MEMBER#${PERSON}`, sk: "PROJECT#demo-tasklog", entityType: "MEMBERSHIP", ownerKey: PERSON, projectName: "demo-tasklog", role: "developer" });
+    w.db.set(namesake(B));
+    const result = await w.start();
+    expect(result.statusCode).not.toBe(200);
+    expect(result.body).toContain("PROJECT_NOT_FOUND");
+    expect(tasksOf(w)).toEqual([]);
   });
 });

@@ -1821,7 +1821,7 @@ export async function checkProjectAccess(
   caller: ProjectAccessSubject,
   project: string,
   membership?: { freshMemberOf: readonly string[] },
-): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }> {
+): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[]; companyId?: string }> {
   // A name that is not a project name is never echoed back: it could be long or carry markup.
   if (!AgentXNameSchema.safeParse(project).success) throw agentXError("PROJECT_NOT_FOUND", "that is not a valid AgentX project name");
   const companyId = companySlackMode(deps) ? await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId) : undefined;
@@ -1865,7 +1865,8 @@ export async function checkProjectAccess(
       : [...(await channelNames(deps, result.visibleChannelIds, workspace)).values()].filter((channel) => !channel.isPrivate).map((channel) => channel.name).sort();
     throw agentXError("PROJECT_ACCESS_DENIED", accessDeniedMessage(project, visible));
   }
-  return { revision: result.revision, policy: result.policy, access: result.access, channelIds: result.channelIds };
+  // DEC 254zzz98 (re-review H): the caller's company as resolved here, so the start can check the project row it actually loads (developer-tasks.ts startTask).
+  return { revision: result.revision, policy: result.policy, access: result.access, channelIds: result.channelIds, ...(companyId === undefined ? {} : { companyId }) };
 }
 
 /**

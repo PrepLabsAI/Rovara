@@ -4,6 +4,7 @@ import type { SlackWorkspaceScope } from "@agentx/contracts";
 import { routeTaskMerge, type TaskMergeWiring } from "./task-merge.js";
 import type { CallerStepUp } from "./step-up-check.js";
 import { CompanyReadItemLimit, recordInCompany } from "./company-check.js";
+import { namedCompany } from "./company-layout.js";
 // Spec 025 FR-016 to FR-021: the developer task routes. Every task has its own workspace, reached
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
 // reads the deployment mode (FR-024).
@@ -289,7 +290,8 @@ export interface DeveloperTaskRouteDependencies extends Pick<TaskPeopleEffectsDe
   readPullRequestDiff?(repositoryUrl: string, number: number, page: number): Promise<{ files: Array<{ filename: string; additions: number; deletions: number; patch?: string }>; more: boolean }>;
   /** Present only for a Slack-signed internal task start; the existing thread becomes the task thread. */
   initialSlackThread?: { teamId: string; channelId: string; threadTs: string };
-  checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }>;
+  /** `companyId`: the caller's company as the check resolved it (absent: no company mode); the start checks the project row it loads against it (DEC 254zzz98). */
+  checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[]; companyId?: string }>;
   /** Spec 067: a registered, not removed person and whether they are a member of `project` (for task readers); without it, tasks can't be shared. */
   taskReaderPerson?(developerId: string, project: string, taskCompany?: string): Promise<TaskReaderPerson | undefined>;
   /** C3: bound channels' names and privacy, best effort (R10). */
@@ -1572,6 +1574,12 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   }
   const project = await deps.actions.latestProject(request.project);
   if (project === undefined) return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist in this AgentX`));
+  // DEC 254zzz98 (re-review H): this start runs on the project's LEGACY revision (`PROJECT#<name>`, read by name). A NAMED company's caller (its access was checked in its own
+  // partition) may start only on a legacy row that is its own company's (pre-R2-F1 data, stamped); a legacy row of that name that is the built-in company's or another company's
+  // is never theirs (names are not unique between the layouts): not found, exactly as a missing project. The built-in company and no company mode: unchanged.
+  if (namedCompany(access.companyId) !== undefined && !recordInCompany(project, access.companyId)) {
+    return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist in this AgentX`));
+  }
   // The policy checked must be the policy started: a revision registered between the two reads
   // could have turned tasks off or required sharing. Nothing was decided, so nothing is recorded.
   if (project.definition.revision !== access.revision) {
