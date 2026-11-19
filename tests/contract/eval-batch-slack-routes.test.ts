@@ -267,7 +267,8 @@ describe("the batch watcher against the broker (spec 052 Task 6, Ruling 19)", ()
     const watcher = { api, slack, logError, now: () => Date.parse("2026-10-02T12:00:00.000Z") };
     await watchEvalBatchesOnce(watcher);
     expect(logError).not.toHaveBeenCalled();
-    expect(posts).toEqual([{ threadTs: undefined, text: expect.stringContaining(`Eval batch \`${batchId}\` started from the CLI: 1 run of SWE-bench Verified: 1 task × 1 model × 1 repeat, with a cost cap of $50.00`) as unknown }]);
+    expect(posts).toEqual([{ threadTs: undefined, text: expect.stringContaining(`Eval batch \`${batchId}\` started from the CLI: 1 run of SWE-bench Verified: 1 task × 1 model × 1 repeat.`) as unknown }]);
+    expect(posts[0]!.text).not.toContain("$");
     // The list carries no thread; the record acts for the batch's placeholder thread.
     expect(sent[0]).toEqual({ thread: null, path: "/v1/service/evals/batches/active" });
     // The opener is claimed, posted, its timestamp stored, and then its thread recorded (Ruling 24).
@@ -289,9 +290,10 @@ describe("the batch watcher against the broker (spec 052 Task 6, Ruling 19)", ()
     // Its one run was cancelled before it started, so it has no result row.
     expect(posts[1]!.threadTs).toBe(opened.threadTs);
     expect(posts[1]!.text.split("\n").slice(0, 2)).toEqual([
-      `Eval batch \`${batchId}\` was stopped: 0/1 runs finished, 0 resolved, $0.00 spent of the $50.00 cap.`,
+      `Eval batch \`${batchId}\` was stopped: 0/1 runs finished, 0 resolved.`,
       "No run has a result row, so there is no table.",
     ]);
+    expect(posts[1]!.text).not.toContain("$");
     expect(db.get(`EVAL_BATCH#${batchId}`, "META")).toMatchObject({ watch: { summaryPostedAt: "2026-10-02T12:00:00.000Z" } });
   });
 });

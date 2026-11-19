@@ -2593,8 +2593,21 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
     const scope = checked && deps.companies !== undefined ? boundedCompanyReads(deps.documentClient) : undefined;
     // Lane W: a merge press is company-checked too (membership, never a claim).
     const merging = request.method === "POST" && /^\/v1\/dev\/tasks\/[^/]+\/merge$/.test(url.pathname);
-    const companyId = checked || merging ? await resolveCompany(deps.companies, caller.developerId) : undefined;
+    // Reuse this route's live membership for money visibility; never read it again per task.
+    let membership: Awaited<ReturnType<NonNullable<CompanyMembershipReader["membershipOf"]>>>;
+    const companies = deps.companies;
+    const checkedCompanies = companies?.membershipOf === undefined ? companies : {
+      companyOf: async (personId: string) => {
+        membership = await companies.membershipOf!(personId);
+        return membership?.companyId;
+      },
+    };
+    const companyId = checked || merging ? await resolveCompany(checkedCompanies, caller.developerId) : undefined;
     const taskDeps = developerTaskRouteDependencies(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller);
+    if ((checked || merging) && companies !== undefined) {
+      taskDeps.taskMoneyVisible = async (task) => recordInCompany(task, companyId)
+        && (taskOwnerView(task)?.developerId === caller.developerId || membership?.role === "owner" || membership?.role === "admin");
+    }
     const checkedDeps = scope === undefined ? taskDeps : { ...taskDeps, actions: companyReadActions(taskDeps.actions, scope),
       ...(taskDeps.workflowE2EPresentation === undefined ? {} : { workflowE2EPresentation: (input: Parameters<NonNullable<DeveloperTaskRouteDependencies["workflowE2EPresentation"]>>[0]) => scope.read(() => taskDeps.workflowE2EPresentation!(input)) }) };
     const result = await routeDeveloperTaskRequest({

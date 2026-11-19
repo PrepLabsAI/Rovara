@@ -29,6 +29,94 @@ describe("membership checked developer reads", () => {
     expect((await h.read(paths[0]!)).statusCode).toBe(401);
     expect(companyOf).toHaveBeenCalledTimes(3);
   });
+  it.each(["member", "admin", "owner"] as const)("reuses the checked %s role for every task's money and refreshes it next request", async (role) => {
+    const h = companyRouteHarness();
+    const other = "22222222-2222-4222-8222-222222222222";
+    for (const id of [TASK, other]) h.db.set({ ...h.task(id, COMPANY_A.orgId), spentUsd: 7.31, spentRuns: 1 });
+    const reader = companyMembershipFromDynamo(h.db, "State");
+    const membershipOf = vi.fn((personId: string) => reader.membershipOf!(personId));
+    const companyOf = vi.fn((personId: string) => reader.companyOf(personId));
+    h.deps.companies = { membershipOf, companyOf };
+    h.db.set({ ...member(), role });
+    for (const path of [paths[0]!, "/v1/dev/tasks?detail=1"]) {
+      const response = await h.read(path);
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toContain("7.31");
+    }
+    expect(membershipOf.mock.calls).toEqual([[PERSON], [PERSON]]);
+    expect(companyOf).not.toHaveBeenCalled();
+    h.db.set({ ...member(), revokedAt: TIME });
+    expect((await h.read(paths[0]!)).statusCode).toBe(401);
+    expect(membershipOf).toHaveBeenCalledTimes(3);
+  });
+  it.each(["member", "admin", "owner"] as const)("checks another stored owner's money and one membership read per route for role %s", async (role) => {
+    const h = companyRouteHarness();
+    const storedOwner = "e".repeat(64);
+    const designReview = {
+      status: "done", spentUsd: 2.83, capUsd: 17.43, estimateUsd: 3.91,
+      rounds: [{ reviewers: [{ costUsd: 0.87 }] }],
+      approvals: [{ kind: "spend", approvedUsd: 5.67 }, { kind: "raise_cap", fromUsd: 9.73, capUsd: 18.61 }],
+      earlierReviews: [{ spentUsd: 1.81 }],
+    };
+    const task = { ...h.task(TASK, COMPANY_A.orgId), developerId: storedOwner, ownerKey: storedOwner,
+      developerName: "Other Person", spentUsd: 28.4812, spentRuns: 1,
+      workflow: { path: "FULL", decisions: [], artifacts: [], reviews: [], designReview },
+    };
+    h.db.set(task);
+    h.project(COMPANY_A.orgId);
+    h.db.set({ pk: `DEVTASK#${TASK}`, sk: `READER#${PERSON}`, schemaVersion: 1,
+      developerId: PERSON, role: "viewer", grantedBy: storedOwner, grantedAt: TIME });
+    const reader = companyMembershipFromDynamo(h.db, "State");
+    const membershipOf = vi.fn((personId: string) => reader.membershipOf!(personId));
+    const companyOf = vi.fn((personId: string) => reader.companyOf(personId));
+    h.deps.companies = { membershipOf, companyOf };
+    // Inspect every nested money field, including archived design reviews and approval history.
+    const moneyNumbers = (value: unknown, path: string[] = []): Record<string, number> => {
+      if (typeof value === "number") return path.some((key) => /money|runEstimate|cost|spent|designReview|usd/i.test(key)) ? { [path.join(".")]: value } : {};
+      if (value === null || typeof value !== "object") return {};
+      return Object.assign({}, ...Object.entries(value).map(([key, field]) => moneyNumbers(field, [...path, key]))) as Record<string, number>;
+    };
+    expect(task.developerId).not.toBe(PERSON);
+    for (const companyId of [COMPANY_A.orgId, COMPANY_B.orgId]) {
+      h.db.set({ ...member(companyId), role });
+      for (const path of [paths[0]!, "/v1/dev/tasks?detail=1"]) {
+        membershipOf.mockClear(); companyOf.mockClear();
+        const response = await h.read(path);
+        const body = JSON.parse(response.body) as { task?: { owner?: { developerId: string } }; tasks?: unknown[] };
+        const figures = moneyNumbers(body);
+        const detailList = path.includes("?detail=1");
+        if (detailList) {
+          // The ordinary list is owner-only, even with a stale index in this caller's partition.
+          expect(response.statusCode).toBe(200);
+          expect(body.tasks).toEqual([]);
+          expect(figures).toEqual({});
+        } else if (companyId === COMPANY_B.orgId) {
+          expect(response.statusCode).toBe(404);
+          expect(figures).toEqual({});
+        } else {
+          expect(response.statusCode).toBe(200);
+          expect(body.task?.owner?.developerId).toBe(storedOwner);
+          if (role === "member") expect(figures).toEqual({});
+          else expect(figures).toEqual({
+            "task.spent.usd": 28.4812, "task.spent.runs": 1,
+            "task.spent.inputTokens": 0, "task.spent.outputTokens": 0, "task.spent.unpricedRuns": 0,
+            "task.workflow.designReview.spentUsd": 2.83,
+            "task.workflow.designReview.capUsd": 17.43,
+            "task.workflow.designReview.estimateUsd": 3.91,
+            "task.workflow.designReview.rounds.0.reviewers.0.costUsd": 0.87,
+            "task.workflow.designReview.approvals.0.approvedUsd": 5.67,
+            "task.workflow.designReview.approvals.1.fromUsd": 9.73,
+            "task.workflow.designReview.approvals.1.capUsd": 18.61,
+            "task.workflow.designReview.earlierReviews.0.spentUsd": 1.81,
+          });
+        }
+        expect.soft(membershipOf.mock.calls, path).toEqual([[PERSON]]);
+        // The long-standing reader-grant check also reads the caller's company on a same-company non-owner GET.
+        // De-duplicating that read is a logged follow-up; list paths and foreign-task refusals skip it.
+        expect.soft(companyOf.mock.calls, path).toEqual(!detailList && companyId === COMPANY_A.orgId ? [[PERSON]] : []);
+      }
+    }
+  });
   it("returns byte-identical not-found for foreign and missing tasks; list and catalog are empty", async () => {
     const h = companyRouteHarness(); h.deps.companies = { companyOf: async () => COMPANY_B.orgId };
     const absent = await h.read(paths[0]!);
