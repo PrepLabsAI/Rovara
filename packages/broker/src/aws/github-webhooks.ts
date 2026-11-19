@@ -123,14 +123,14 @@ export async function authorizeLinkedGithubWebhook(input: {
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   scope: { installationId: number; repositoryId: number; fullName: string; pullRequestNumber: number };
-  loadTask(taskId: string): Promise<{ project: string; startingRevision: number; workflow?: {
+  loadTask(taskId: string): Promise<{ companyId?: unknown; project: string; startingRevision: number; workflow?: {
     stage: string;
     state?: string | undefined;
     blockReason?: string | undefined;
     candidate?: { digest: string } | undefined;
     pullRequests?: Array<{ repositoryId: string; number: number; url: string; candidateDigest: string }> | undefined;
   } | undefined } | undefined>;
-  repositoryUrl(projectName: string, revision: number, repositoryId: string): Promise<string | undefined>;
+  repositoryUrl(projectName: string, revision: number, repositoryId: string, task: { companyId?: unknown }): Promise<string | undefined>;
   verifyRepository(url: string, scope: { installationId: number; repositoryId: number; fullName: string }): Promise<boolean>;
 }): Promise<boolean> {
   const linked = await findLinkedGithubWorkflowPullRequest({
@@ -146,7 +146,7 @@ export async function authorizeLinkedGithubWebhook(input: {
     || !workflow.pullRequests?.some((pullRequest) => pullRequest.repositoryId === linked.repositoryId
       && pullRequest.number === linked.number && pullRequest.url === linked.url
       && pullRequest.candidateDigest === linked.candidateDigest)) return false;
-  const repositoryUrl = await input.repositoryUrl(task.project, task.startingRevision, linked.repositoryId);
+  const repositoryUrl = await input.repositoryUrl(task.project, task.startingRevision, linked.repositoryId, task);
   if (repositoryUrl === undefined) return false;
   return input.verifyRepository(repositoryUrl, {
     installationId: input.scope.installationId,
@@ -177,8 +177,8 @@ export interface ReconcileTaskPullRequestFeedbackInput {
   observationMode?: "feedback" | "merge";
   /** The head a push event says the pull request now has (a hint): until GitHub's own read shows it, nothing is decided. */
   expectedHeadSha?: string;
-  loadTask(taskId: string): Promise<{ project: string; startingRevision: number; closedAt?: string; workflow?: WorkflowSnapshot } | undefined>;
-  repositoryUrl(project: string, revision: number, repositoryId: string): Promise<string | undefined>;
+  loadTask(taskId: string): Promise<{ companyId?: unknown; project: string; startingRevision: number; closedAt?: string; workflow?: WorkflowSnapshot } | undefined>;
+  repositoryUrl(project: string, revision: number, repositoryId: string, task: { companyId?: unknown }): Promise<string | undefined>;
   getCurrentFeedback(repositoryUrl: string, number: number): Promise<GitHubPullRequestFeedback>;
   /** Writes exact payload bytes to immutable content-addressed storage; never overwrites an artifact. */
   persistBundle(bundle: WorkflowFeedbackBundle, bytes: string, sha256: string): Promise<string>;
@@ -223,7 +223,7 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
     }
     const reads: Array<{ pr: NonNullable<WorkflowSnapshot["pullRequests"]>[number]; feedback: GitHubPullRequestFeedback; url: string; fullName: string }> = [];
     for (const pr of [...(current.pullRequests ?? [])].sort((a, b) => a.repositoryId.localeCompare(b.repositoryId) || a.number - b.number)) {
-      const url = await input.repositoryUrl(task.project, task.startingRevision, pr.repositoryId);
+      const url = await input.repositoryUrl(task.project, task.startingRevision, pr.repositoryId, task);
       if (!url) throw new GithubWebhookRefusal("linked PR repository is missing from the pinned project");
       const parsed = parseGitHubRepository(url);
       const fullName = `${parsed.owner}/${parsed.name}`;
@@ -483,7 +483,7 @@ export async function verifyTaskPullRequestFeedbackCurrent(input: Pick<Reconcile
   if (prs.length !== review.bundleRefs.length) return false;
   const observations: WorkflowFeedbackThreadObservation[] = [];
   for (const pr of prs) {
-    const url = await input.repositoryUrl(task.project, task.startingRevision, pr.repositoryId);
+    const url = await input.repositoryUrl(task.project, task.startingRevision, pr.repositoryId, task);
     if (!url) return false;
     const fullName = (() => { const parsed = parseGitHubRepository(url); return `${parsed.owner}/${parsed.name}`; })();
     const index = await findLinkedGithubWorkflowPullRequest({ ...input, repositoryFullName: fullName, number: pr.number });
