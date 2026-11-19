@@ -62,6 +62,20 @@ async function overHttp(answer: (url: URL, init: RequestInit | undefined) => Res
   return { mcp: await connect(client), calls, client };
 }
 
+it("lists hosted sessions through the HTTP client and MCP tool when money is omitted", async () => {
+  const tile = tileOf(SES, "Fix the login bug");
+  const summary: Partial<typeof tile.summary> = { ...tile.summary };
+  delete summary.costUsd;
+  const { client, mcp } = await overHttp(() => Response.json({ sessions: [{ ...tile, summary }] }));
+  const listed = await client.listSessions({ shared: "me" });
+  expect(listed.sessions[0]?.summary).not.toHaveProperty("costUsd");
+  const result = await mcp.callTool({ name: "agentx_list_sessions", arguments: { shared_with_me: true } });
+  expect(isError(result)).toBe(false);
+  expect(structured(result)).toMatchObject({ sessions: [{ id: SES, title: "Fix the login bug", status: "running" }] });
+  expect(JSON.stringify(structured(result))).not.toContain("cost_usd");
+  await mcp.close();
+});
+
 describe("the session tools in the list", () => {
   it("adds exactly the five session tools", async () => {
     const names = (await (await connect({})).listTools()).tools.map((tool) => tool.name);

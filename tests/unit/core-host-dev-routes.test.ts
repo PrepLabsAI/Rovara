@@ -1096,7 +1096,9 @@ it("hosted session read and list keep FULL task figures private even when a read
    const answer = await routes.route(get(path), caller);
    expect(answer?.statusCode).toBe(200);
    const body: unknown = JSON.parse(answer!.body);
-   if (path.endsWith(sessionId)) { const { SessionResponseReaderSchema } = await import("@agentx/contracts");const parsed = SessionResponseReaderSchema.safeParse(body);expect(parsed.success, parsed.success ? undefined : JSON.stringify(parsed.error.issues)).toBe(true); }
+   const { SessionResponseReaderSchema, SessionListReaderSchema } = await import("@agentx/contracts");
+   const parsed = path.endsWith(sessionId) ? SessionResponseReaderSchema.safeParse(body) : SessionListReaderSchema.safeParse(body);
+   expect(parsed.success, parsed.success ? undefined : JSON.stringify(parsed.error.issues)).toBe(true);
    if (caller === owner || caller === admin) { expect(walk(body)).toContain(1.23); if (path.endsWith(sessionId)) expect(walk(body)).toContain(2.83); }
    else { for (const figure of [1.23, 12.71, 4.37, 10.19, ...REVIEW_MONEY]) expect(walk(body), path).not.toContain(figure); }
   }

@@ -1674,7 +1674,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     outputSchema: {
       sessions: z.array(z.object({
         id: z.string().describe("the session's ID, for agentx_get_session"), kind: z.string(), title: z.string(), project: z.string().optional(), owner: z.string(), status: z.string(), status_text: z.string(), step: z.string().optional(),
-        cost_usd: z.number(), your_level: z.string(), changed_at: z.string().describe("when the session last changed"),
+        cost_usd: z.number().optional(), your_level: z.string(), changed_at: z.string().describe("when the session last changed"),
       })),
       next_cursor: z.string().optional().describe("pass it as cursor to get the next page"),
     },

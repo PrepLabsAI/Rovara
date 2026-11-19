@@ -190,7 +190,9 @@ export const SessionTileSchema = z
     where: SessionWhereSchema,
     level: z.enum(SESSION_LEVELS),
     revision: z.number().int().min(0),
-    summary: SessionSummarySchema,
+    // Read projection: money is absent for people who do not own this task.
+    // SessionSummarySchema remains strict for stored session records.
+    summary: SessionSummarySchema.partial({ costUsd: true, runLimitUsd: true, stopAtUsd: true }),
     createdAt: InstantSchema,
     updatedAt: InstantSchema,
     endedAt: InstantSchema.optional(),
