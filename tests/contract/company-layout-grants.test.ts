@@ -1,7 +1,7 @@
 // DEC 254zzz80 (owner, option A), R2-F1 lane 2 (grants): for a NAMED company, its own partition is the ONE place its project grants live
 // (`ORG#<company>#MEMBER#<person>` / `PROJECT#<name>`, reverse rows `ORG#<company>#PROJECT_MEMBERS#<name>` / `DEVELOPER#<person>`), for every reader and writer.
 // The built-in company and a Code with no company layer keep the legacy keys byte-for-byte. The world below reproduces staging's sign-in exactly (an OIDC session
-// through the install's shared method, Code's company membership, clientRoutes on) and staging's grant rows (role developer, projectRole maintainer, grantId, ...).
+// through the install's shared method, Code's company membership, client routes always on, DEC 254zzz81) and staging's grant rows (role developer, projectRole maintainer, grantId, ...).
 //
 // Revisions are lane 1's (revision readers). So that these grant tests do not depend on which revision layout the readers of this commit use, `project()` seeds the
 // company's own-layout revision rows exactly as staging holds them AND a legacy revision row stamped with the same company. Grants are only ever seeded in ONE layout.
@@ -60,7 +60,7 @@ function world() {
   const deps: DeveloperRouteDependencies = {
     documentClient: db, tableName: "State", now: () => NOW, companies: companyMembershipFromDynamo(db, "SignIn"),
     developer: {
-      issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true }, signInTableName: "SignIn", clientRoutes: true,
+      issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true }, signInTableName: "SignIn",
       verifyAccessToken: async () => claims, channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }),
     },
   };

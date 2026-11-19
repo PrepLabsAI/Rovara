@@ -104,7 +104,7 @@ function world() {
     documentClient: db, tableName: "State", now: () => NOW,
     companies: companyMembershipFromDynamo(db, "SignIn"),
     developer: {
-      issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true }, signInTableName: "SignIn", clientRoutes: true,
+      issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true }, signInTableName: "SignIn",
       verifyAccessToken: async () => claims, channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }),
     },
   };
