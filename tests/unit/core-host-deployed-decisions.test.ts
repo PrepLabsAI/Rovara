@@ -473,6 +473,9 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
   it("lists the card for a co-owner and approves it; the decision is recorded as the co-owner, with the point's proof for the co-owner", async () => {
     const t = await peopleWorld();
     const before = await t.stored(t.taskId);
+    await t.world.store.put({ item: { ...await t.world.store.get(taskKey(t.taskId)), runEstimate: { lowUsd: 4.37, highUsd: 12.71 } } as never });
+    expect(JSON.stringify(await view(t.deps, PB))).not.toMatch(/12\.71|4\.37|\$/u);
+    expect(JSON.stringify(await view(t.deps, PA))).toContain("$12.71");
     expect((await view(t.deps, PB)).cards.map((card) => card.id)).toEqual([cardOf(t.taskId)]);
     const reply = await approve(t.deps, t.taskId, cardCaller(PB));
     expect(reply?.statusCode).toBe(200);

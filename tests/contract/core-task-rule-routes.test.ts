@@ -243,7 +243,9 @@ describe("DEC 254zzz44 (a): a reader the owner shared a core task with opens it 
     for (const who of [TESS, SAM]) expect(await h.dev(who, "GET", path), who.name).toEqual(await h.missing(who, "GET", ""));
     await h.dev(MAYA, "PUT", `${path}/readers/${TESS.developerId}`, { requestId: randomUUID(), role: "viewer" });
     const shared = await h.dev(TESS, "GET", path);
-    expect(shared).toEqual(own);
+    const { money, ...readableTask } = own.body.task as Record<string, unknown>;
+    expect(money).toBeDefined();
+    expect(shared).toEqual({ ...own, body: { ...own.body, task: readableTask } });
     expect(await h.dev(SAM, "GET", path)).toEqual(await h.missing(SAM, "GET", ""));
     // Off the project: no longer a reader; back on it: a reader again; unshared (revoked): no longer.
     h.db.delete(`MEMBER#${TESS.developerId}`, "PROJECT#payments");

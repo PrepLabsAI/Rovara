@@ -161,7 +161,8 @@ describe("what the detector carries", () => {
 // PR #485 inside the hostile-input suite's 1 h timeout). So this grows each hostile file in steps and stops at the first step over its bar: a
 // slow pattern fails at a small size, in seconds. Linear work at 64 KiB takes a few ms; the quadratic `^\s*` shapes took seconds there.
 describe("the detector stays fast on hostile files, and a slow pattern fails rather than hangs", () => {
-  const ON_CI = process.env["CI"] !== undefined && process.env["CI"] !== "" && process.env["CI"] !== "false";
+  // #1124: the release build (CodeBuild) sets CODEBUILD_BUILD_ID, not CI, and is as busy as a CI runner, so it gets the CI bar too.
+  const ON_CI = (process.env["CI"] !== undefined && process.env["CI"] !== "" && process.env["CI"] !== "false") || (process.env["CODEBUILD_BUILD_ID"] ?? "") !== "";
   const BAR_MS = ON_CI ? 1_000 : 250;
   const SIZES = [1_024, 4_096, 16_384, 65_536];
   const CALLER = { "app/score.py": "import boto3\nimport sagemaker\nruntime = boto3.client('sagemaker-runtime')\nruntime.invoke_endpoint(EndpointName='m')\n" };

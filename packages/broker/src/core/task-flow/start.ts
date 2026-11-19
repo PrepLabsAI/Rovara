@@ -1,3 +1,5 @@
+import { parsePreviewV2 } from "@agentx/contracts";
+import { captureStartQuote } from "../cost/run-usage.js";
 // Lane L6a, task flow core: starting a task (Cloud's `aws/developer-tasks/start.ts`, rewritten onto the W0 ports).
 //
 // One start is one document-store transaction: the workspace, its preparation (an operation and its staged dispatch message), the task, its
@@ -174,7 +176,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   const title = redactedTitle(request);
   const ownerKey = taskOwnerKey(developerId, taskId);
   const requestText = storedRequestText(request.instructions);
-  const extras = deps.startExtras?.({ taskId, workspaceId, project: request.project, title, principal, client, receivedAt, origin: origin.data, ...(run?.setupAgent === undefined ? {} : { purpose: "setup_agent" as const }), ...(caller.ticket === undefined ? {} : { ticket: caller.ticket }) });
+  const extras = deps.startExtras?.({ taskId, workspaceId, project: request.project, title, principal, client, receivedAt, origin: origin.data, ...(run?.setupAgent !== undefined ? { purpose: "setup_agent" as const } : run?.wikiBuild !== undefined ? { purpose: "wiki_build" as const } : {}), ...(caller.ticket === undefined ? {} : { ticket: caller.ticket }) });
   // L4-DR (DEC 254z c): the free drift check. No model runs; the base commit's setup files are compared with the snapshot saved at the setup's approval, and a change starts the project's own setup check by itself (once per
   // commit, under the monthly cap on automatic runs). The task is not held here: only its first coding run waits for the result. A setup run (it IS the fix) is never checked; any fault is logged and the start goes on.
   const driftItems = run?.setupAgent === undefined ? await setupDriftAtStart(deps, { project: request.project, taskId, definition: project.definition }) : [];
@@ -221,8 +223,17 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     },
     requester: { personId: developerId, provider: principal.provider },
   });
+  let startComparison: TaskRecord["startComparison"];
+  if (asWorkflow && run?.setupAgent === undefined && run?.wikiBuild === undefined && deps.captureStartComparison !== undefined) {
+    try {
+      const quote = parsePreviewV2(await deps.captureStartComparison({ project: request.project, inputText: request.instructions }));
+      const capturedAt = iso(deps);
+      if (quote !== undefined && quote.orgId === deps.companyId && quote.project === request.project && Date.parse(quote.asOf) <= Date.parse(capturedAt) && Date.parse(quote.expiresAt) > Date.parse(capturedAt)) startComparison = { ...quote, selectedPath: workflowPath };
+    } catch { /* Unavailable advisory data never authorizes or prevents a start. */ }
+  }
   const task: TaskRecord = {
     ...taskKey(taskId), entityType: "DEVELOPER_TASK", companyId: deps.companyId, taskId, developerId, provider: principal.provider, developerName: principal.displayName,
+    ...(startComparison === undefined ? {} : { startComparison }),
     origin: origin.data, client, project: request.project, title, workspaceId, ownerKey, conversationId, startingRevision: revision, charge, shared: false,
     // A workflow task quotes the request in each plan's "why".
     ...(asWorkflow ? { requestText } : {}),
@@ -241,6 +252,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
       ...(understandFirst && deps.planCheck !== false ? { program: ROVARA_CODE_PROGRAM } : {}),
     }) } : {}),
   };
+  task.usageStartQuote = await captureStartQuote(deps, task, iso(deps));
   const pointer: TaskPointerRecord = {
     ...taskPointerKey(deps.companyId, workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId, developerId,
     requester: { kind: "developer", developerId, provider: principal.provider },

@@ -904,6 +904,97 @@ describe("the eval check card on the deployed API (L4-EVCI2)", () => {
   });
 });
 
+
+describe("read-only start-estimates", () => {
+ it("registers only the approved read scope on the dev boundary", async () => {
+  const { devRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
+  expect(devRouteOf("POST", "/v1/dev/projects/payments/start-estimates")?.requires).toBe("tasks:read");
+  for (const method of ["GET", "PUT", "DELETE"]) expect(devRouteOf(method, "/v1/dev/projects/payments/start-estimates")).toBeUndefined();
+ });
+ it("serves the negotiated comparison with live company/project checks and never creates a hold or task", async () => {
+  const { world, app, companyOf, remember } = await world2();
+  const caller = remember(FAKE_COMPANY);
+  const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, canReadProject: async () => false }) });
+  const writes = vi.spyOn(world.store, "transact");
+  const put = vi.spyOn(world.store, "put");
+  const result = await routes.route(post("/v1/dev/projects/payments/start-estimates", { quoteVersion: 2 }), caller);
+  expect(result?.statusCode).toBe(200);
+  expect(JSON.parse(result!.body)).toMatchObject({ quoteVersion: 2, orgId: FAKE_COMPANY, options: [{ path: "QUICK" }, { path: "FULL" }] });
+  expect(writes).not.toHaveBeenCalled();expect(put).not.toHaveBeenCalled();
+  const denied = remember(OTHER, "member");
+  expect((await routes.route(post("/v1/dev/projects/payments/start-estimates", { quoteVersion: 2 }), denied))?.statusCode).toBe(404);
+  expect((await routes.route(post("/v1/dev/projects/payments/start-estimates", { quoteVersion: 2, companyId: OTHER }), caller))?.statusCode).toBe(400);
+ });
+});
+
+
+it("redacts every company figure in the member JSON while owners and admins keep the numeric quote", async () => {
+ const { app, companyOf, remember } = await world2();
+ const av = <T>(value: T) => ({ state: "available" as const, value });
+ const un = { state: "unavailable" as const, reason: "not_measured" as const };
+ const companyNumbers = [9100011, 8100013, 7100017, 5100023, 4100029];
+ const context = { policyRevision: "p1", stages: {}, initialHoldCeilingMicros: 5100023, limits: [
+  { scope: "engine_day" as const, maximumMicros: av(9100011), availableMicros: av(8100013), heldMicros: av(7100017), resetAt: un },
+  { scope: "engine_task" as const, maximumMicros: av(6100019), availableMicros: av(5100023), heldMicros: av(4100029), resetAt: un },
+ ] };
+ const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, canReadProject: async () => true, startEstimates: async () => context }) });
+ const read = async (role: CompanyMembership["role"]) => {
+  const result = await routes.route(post("/v1/dev/projects/payments/start-estimates", { quoteVersion: 2 }), remember(FAKE_COMPANY, role));
+  expect(result?.statusCode).toBe(200);
+  return JSON.parse(result!.body) as unknown;
+ };
+ // Walk the entire serialized response: leaks in a hold, binding or future nested field must also fail.
+ const numbers = (value: unknown): number[] => typeof value === "number" ? [value] : value !== null && typeof value === "object" ? Object.values(value).flatMap(numbers) : [];
+ const member = await read("member");
+ const options = (member as { options: Array<{ firstBindingLimit: unknown }> }).options;
+ for (const q of options) expect(numbers(q.firstBindingLimit)).toEqual([]);
+ expect(member).toMatchObject({ options: [{ firstBindingLimit: { value: { bindingScope: "engine_task" } } }, { firstBindingLimit: { value: { bindingScope: "engine_task" } } }] });
+ expect(numbers(member).filter(n => companyNumbers.includes(n))).toEqual([]);
+ expect(options.map(q => Object.keys(q).sort())).toEqual([0, 1].map(() => ["path", "scope", "range", "taskMaximumMicros", "limitCoverage", "firstBindingLimit", "notices"].sort()));
+ expect(member).toMatchObject({ options: [{ range: av({ lowMicros: 1_000_000, highMicros: 3_000_000 }), taskMaximumMicros: av(6100019) }, { range: av({ lowMicros: 4_000_000, highMicros: 10_000_000 }), taskMaximumMicros: av(6100019) }] });
+ expect(numbers(member)).toEqual([2, 1_000_000, 3_000_000, 6100019, 4_000_000, 10_000_000, 6100019]);
+ for (const role of ["owner", "admin"] as const) {
+  const quote = await read(role);
+  expect(numbers(quote)).toEqual(expect.arrayContaining(companyNumbers));
+ }
+});
+
+describe("start-estimates history and refresh boundary", () => {
+ it("labels five historical runs, preserves unknown optional increments, refreshes changed options and discloses blocking held room", async () => {
+  const { world, app, companyOf, remember } = await world2();
+  const { recordRunCost } = await import("../../packages/broker/src/core/cost/estimate.js");
+  const { parsePreviewV2 } = await import("../../packages/contracts/src/start-estimates.js");
+  for (let i = 0; i < 5; i++) {
+   const taskId = `history-${i}`;
+   await world.store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", companyId: FAKE_COMPANY } });
+   await recordRunCost({ store: world.store }, { orgId: FAKE_COMPANY, project: "payments", taskId, path: "QUICK", endedAt: "2026-11-17T00:00:00.000Z", costUsd: 0.5 + i / 2 });
+  }
+  const av = <T>(value: T) => ({ state: "available" as const, value });
+  const un = { state: "unavailable" as const, reason: "not_measured" as const };
+  const context = { policyRevision: "p1", stages: {}, initialHoldCeilingMicros: 5_000_000, limits: [{ scope: "engine_day" as const, maximumMicros: av(5_000_000), availableMicros: av(1_000_000), heldMicros: av(4_000_000), resetAt: un }] };
+  const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, canReadProject: async () => false, startEstimates: async () => context }) });
+  const caller = remember(FAKE_COMPANY);
+  const read = async (body: unknown) => parsePreviewV2(JSON.parse((await routes.route(post("/v1/dev/projects/payments/start-estimates", body), caller))!.body))!;
+  const q = await read({ quoteVersion: 2 });
+  // This caller reads the full (non-restricted) quote: narrow before reading its admin-only fields.
+  const [quickQuote, fullQuote] = q.options;
+  if (!("basis" in quickQuote) || !("planningAllowanceMicros" in fullQuote)) throw new Error("expected the full (unrestricted) quote");
+  expect(quickQuote.basis).toMatchObject({ kind: "history", modelPriced: false, samples: 5 });
+  expect(q.options[0].range).toEqual(av({ lowMicros: 1_500_000, highMicros: 2_000_000 }));
+  expect(q.options[1].range).toEqual(av({ lowMicros: 4_000_000, highMicros: 10_000_000 }));
+  expect(fullQuote.planningAllowanceMicros).toEqual(av(6_000_000));
+  expect(fullQuote.initialHoldMicros).toEqual(av(5_000_000));
+  expect(q.options[0].firstBindingLimit).toMatchObject({ state: "available", value: { scope: "engine_day", appliesAt: "start", blocked: true, reason: "held" } });
+  const refreshed = await read({ quoteVersion: 2, options: { eval: true } });
+  expect(refreshed.inputsDigest).not.toBe(q.inputsDigest);
+  expect(refreshed.quoteId).not.toBe(q.quoteId);
+  expect(refreshed.options[0].range).toEqual(un);
+  if (!("stages" in refreshed.options[0])) throw new Error("admin comparison must retain stage details");
+  expect(refreshed.options[0].stages.find(s => s.stage === "legacy_aggregate")?.range).toEqual(q.options[0].range);
+  expect(refreshed.options[0].limitCoverage).toBe("partial");
+ });
+});
+
 // Internal worker routes are inventoried in the scope table, with no person scope.
 it("inventories exactly four worker-only saved image callbacks without exposing app or developer aliases", async () => {
   const { APP_ROUTES, DEV_ROUTES, SAVED_ENV_WORKER_ROUTES, savedEnvWorkerRouteOf, appRouteOf, devRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
@@ -916,4 +1007,101 @@ it("inventories exactly four worker-only saved image callbacks without exposing 
     expect(devRouteOf("POST", path)).toBeUndefined();
   }
   expect([...APP_ROUTES, ...DEV_ROUTES].some(row => row.path.includes("/v1/internal/"))).toBe(false);
+});
+
+
+it("shows task money only to its stored owner or a live company admin, never a reader, co-owner or second company", async () => {
+ const { world, app, companyOf, remember } = await world2();
+ const owner = remember(FAKE_COMPANY, "member", "task-owner");
+ const reader = remember(FAKE_COMPANY, "member", "reader");
+ const coOwner = remember(FAKE_COMPANY, "member", "co-owner");
+ const admin = remember(FAKE_COMPANY, "admin", "admin");
+ const foreign = remember(OTHER, "member", "task-owner");
+ const runtime = await app.runtimeFor(FAKE_COMPANY);
+ const { task } = await runtime.flow.start({ principal: owner.principal, origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Owned task", workflow: true, workflowPath: "FULL" });
+ const runEstimate = { lowUsd: 4.37, highUsd: 10.19, runLimitUsd: 12.71, stopAtUsd: 12.71, basis: "default" as const, samples: 0 };
+ const stored = await world.store.get(taskKey(task.taskId));
+ await world.store.put({ item: { ...stored, runEstimate, spentUsd: 1.23, spentRuns: 1, workflow: { ...stored?.["workflow"] as Record<string, unknown>, designReview: fullMoneyReview() } } as never });
+ runtime.flow.deps.access.canRead = async () => true;
+ runtime.flow.deps.access.canAct = async principal => principal.personId !== "reader";
+ // Use the ledger's real partition and an engine aggregate, just as worker accounting does.
+ const { costPartition } = await import("../../packages/broker/src/core/cost/ledger.js");
+ const costPk = costPartition(FAKE_COMPANY, task.taskId);
+ await world.store.put({ item: { pk: costPk, sk: "ENTRY#one", companyId: FAKE_COMPANY, taskId: task.taskId, currency: "USD", micros: 1_230_000 } });
+ const cap = vi.fn(async () => ({ limitUsd: 12, spentUsd: 1.23 }));
+ const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, taskActions: { roundCap: cap } }) });
+ const read = async (caller: DeployedCaller) => routes.route(get(`/v1/dev/tasks/${task.taskId}`), caller);
+ for (const caller of [owner, admin]) {
+  const answer = await read(caller);
+  expect(answer?.statusCode).toBe(200);
+  expect(JSON.parse(answer!.body)).toMatchObject({ task: { owner: { developerId: "task-owner" }, runEstimate, money: { spentMicros: { value: 1_230_000 }, estimatedMicros: { value: 1_230_000 }, stop: { taskMaximumMicros: { value: 12_000_000 } } } } });
+ }
+ for (const caller of [reader, coOwner]) {
+  cap.mockClear();
+  const query = vi.spyOn(world.store, "query");
+  const answer = await read(caller);
+  expect(answer?.statusCode).toBe(200);
+  const body = JSON.parse(answer!.body) as { task: { money?: unknown } };
+  expect(body.task.money).toBeUndefined();
+  const walk = (value: unknown): number[] => typeof value === "number" ? [value] : value !== null && typeof value === "object" ? Object.values(value).flatMap(walk) : [];
+  for (const figure of [4.37, 10.19, 12.71, 1.23, 1_230_000, 12_000_000, ...REVIEW_MONEY]) expect(walk(body)).not.toContain(figure);
+  expect(body.task).not.toHaveProperty("runEstimate");
+  expect(body.task).not.toHaveProperty("spent");
+  expect(query.mock.calls.filter(([input]) => input.pk === costPk)).toEqual([]);
+  expect(cap).not.toHaveBeenCalled();
+  query.mockRestore();
+  expect(await routes.taskMoney(caller, task.taskId)).toBeUndefined();
+ }
+ expect((await read(foreign))?.statusCode).toBe(404);
+ expect(await routes.taskMoney(foreign, task.taskId)).toBeUndefined();
+});
+
+const REVIEW_MONEY = [2.83, 17.43, 3.91, 0.87, 5.67, 9.73, 18.61, 1.81];
+function fullMoneyReview() {
+ const reviewer = { role: "critic", promptId: "design-review-critic", promptVersion: 1, promptDigest: "a".repeat(64), model: { provider: "anthropic", modelId: "claude-opus-5-5" }, sourceId: "src", sessionId: "review-1", modelKeyId: "key", packetDigest: "b".repeat(64), packet: [], filesRead: [], verified: true, inputProof: "digest_only", tokensIn: 100, tokensOut: 20, costUsd: 0.87, startedAt: "2026-11-19T00:00:00.000Z", endedAt: "2026-11-19T00:00:01.000Z" };
+ return { decidedBy: "auto", reasons: [], status: "done", tier: "light", spentUsd: 2.83, capUsd: 17.43, estimateUsd: 3.91,
+  rounds: [{ round: 1, designDigest: "c".repeat(64), reviewers: [reviewer], findings: [], resolutions: [] }],
+  approvals: [{ kind: "spend", by: { actorId: "owner" }, at: "2026-11-19T00:00:00.000Z", approvedUsd: 5.67 }, { kind: "raise_cap", by: { actorId: "owner" }, at: "2026-11-19T00:00:00.000Z", fromUsd: 9.73, capUsd: 18.61 }],
+  earlierReviews: [{ sentBackBy: { actorId: "owner" }, sentBackAt: "2026-11-19T00:00:00.000Z", spentUsd: 1.81, rounds: [{ round: 1, designDigest: "c".repeat(64), reviewers: [{ role: reviewer.role, model: reviewer.model, sessionId: reviewer.sessionId, modelKeyId: reviewer.modelKeyId, packetDigest: reviewer.packetDigest, verified: true, tokensIn: 100, tokensOut: 20, costUsd: 0.87 }], findings: [] }] }] };
+}
+
+it("hosted session read and list keep FULL task figures private even when a reader or co-owner owns the session", async () => {
+ const { world, app, companyOf, remember } = await world2();
+ const owner = remember(FAKE_COMPANY, "member", "stored-owner");
+ const reader = remember(FAKE_COMPANY, "member", "reader");
+ const coOwner = remember(FAKE_COMPANY, "member", "co-owner");
+ const admin = remember(FAKE_COMPANY, "admin", "admin");
+ const foreign = remember(OTHER, "admin", "foreign");
+ const runtime = await app.runtimeFor(FAKE_COMPANY);
+ const { task } = await runtime.flow.start({ principal: owner.principal, origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Full task", workflow: true, workflowPath: "FULL" });
+ const { agentSessionKey, mySessionsKey } = await import("@agentx/contracts");
+ const { taskSessionHeader, taskSessionId } = await import("../../packages/broker/src/core/sessions/create.js");
+ const sessionId = taskSessionId(task.taskId);
+ const { record: session } = taskSessionHeader({ orgId: FAKE_COMPANY, sessionId, taskId: task.taskId, project: task.project, title: task.title, owner: owner.principal, agent: { agentId: "agt_aaaaaaaaaaaaaaaaaaaa", name: "Planner", version: 1 }, origin: "app", payer: { kind: "project", project: "payments" }, now: task.createdAt });
+ expect(session).toBeDefined();
+ const runEstimate = { lowUsd: 4.37, highUsd: 10.19, runLimitUsd: 12.71, stopAtUsd: 12.71, basis: "default", samples: 0 };
+ const stored = await world.store.get(taskKey(task.taskId));
+ await world.store.put({ item: { ...stored, runEstimate, workflow: { ...stored?.["workflow"] as Record<string, unknown>, designReview: fullMoneyReview() } } as never });
+ await world.store.put({ item: { pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, people: [{ developerId: developerIdOf(coOwner.principal), role: "owner" }, { developerId: developerIdOf(reader.principal), role: "viewer" }] } });
+ const members = { companyRole: async (person: { principal?: DeployedCaller["principal"] | undefined }) => person.principal === undefined ? undefined : (await companyOf({ principal: person.principal }))?.role, projectGrant: (person: { principal?: DeployedCaller["principal"] | undefined }) => person.principal?.personId === "reader" ? "viewer" as const : "contributor" as const };
+ const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, members }) });
+ const walk = (value: unknown): number[] => typeof value === "number" ? [value] : value !== null && typeof value === "object" ? Object.values(value).flatMap(walk) : [];
+ for (const caller of [owner, admin, reader, coOwner]) {
+  // Deliberately differ session owner from stored task owner. A session owner is not a financial owner.
+  const changed = { ...session, owner: { developerId: developerIdOf(caller.principal), name: caller.principal.displayName }, summary: { ...session.summary, costUsd: 1.23, runLimitUsd: 12.71, stopAtUsd: 12.71 } };
+  // A stored copy, as the table would hold it (no undefined fields).
+  await world.store.put({ item: JSON.parse(JSON.stringify({ ...changed, ...agentSessionKey(FAKE_COMPANY, sessionId, "META") })) as Parameters<typeof world.store.put>[0]["item"] });
+  await world.store.put({ item: { ...mySessionsKey(FAKE_COMPANY, developerIdOf(caller.principal), changed.createdAt, changed.sessionId), sessionId: changed.sessionId } });
+  for (const path of [`/v1/app/sessions/${sessionId}`, "/v1/app/sessions"]) {
+   const answer = await routes.route(get(path), caller);
+   expect(answer?.statusCode).toBe(200);
+   const body: unknown = JSON.parse(answer!.body);
+   const { SessionResponseReaderSchema, SessionListReaderSchema } = await import("@agentx/contracts");
+   const parsed = path.endsWith(sessionId) ? SessionResponseReaderSchema.safeParse(body) : SessionListReaderSchema.safeParse(body);
+   expect(parsed.success, parsed.success ? undefined : JSON.stringify(parsed.error.issues)).toBe(true);
+   if (caller === owner || caller === admin) { expect(walk(body)).toContain(1.23); if (path.endsWith(sessionId)) expect(walk(body)).toContain(2.83); }
+   else { for (const figure of [1.23, 12.71, 4.37, 10.19, ...REVIEW_MONEY]) expect(walk(body), path).not.toContain(figure); }
+  }
+ }
+ expect((await routes.route(get(`/v1/app/sessions/${sessionId}`), foreign))?.statusCode).toBe(404);
 });

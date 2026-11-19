@@ -1,0 +1,21 @@
+import { expect, it } from "vitest";
+import { runCostKey } from "@agentx/contracts";
+import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { createCostLedger } from "../../packages/broker/src/core/cost/ledger.js";
+import { recordRunCost, runCostInputOf } from "../../packages/broker/src/core/cost/estimate.js";
+import { chargeReceipt } from "./charge-receipt-fixture.js";
+it("provisional and zero history can be revised once at the original sample key", async () => {
+  const store = new MemoryDocumentStore(), r = chargeReceipt();
+  await store.put({ item: { pk: `DEVTASK#${r.taskId}`, sk: "META", companyId: r.companyId } });
+  const ledger = createCostLedger({ store, metering: { async price() { return null; }, async record() { return { cost: null, source: "unknown" }; } } });
+  await ledger.applyChargeReceipt(r);
+  const cost = await ledger.taskCost(r.companyId, r.taskId);
+  expect(runCostInputOf(cost)).toMatchObject({ partial: true, chargeRevision: 1 });
+  const base = { orgId: r.companyId, project: r.project, taskId: r.taskId, path: "QUICK" as const, endedAt: r.occurredAt };
+  expect(await recordRunCost({ store }, { ...base, ...runCostInputOf(cost) })).toBe("skipped");
+  expect(await recordRunCost({ store }, { ...base, endedAt: "2026-02-01T00:00:00.000Z", costUsd: 0.00003, chargeRevision: 2 })).toBe("recorded");
+  expect(await recordRunCost({ store }, { ...base, costUsd: 0.00009, chargeRevision: 3 })).toBe("recorded");
+  expect(await recordRunCost({ store }, { ...base, costUsd: 0.00003, chargeRevision: 2 })).toBe("already_recorded");
+  const rows = await store.query({ pk: runCostKey(base.orgId, base.project, "rovara-code", base.path, base.endedAt, base.taskId).pk });
+  expect(rows.items).toHaveLength(1); expect(rows.items[0]).toMatchObject({ costUsd: 0.00009, endedAt: base.endedAt });
+});

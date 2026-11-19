@@ -1,3 +1,4 @@
+import { taskOwnerView } from "../developer/task-owner-view.js";
 // Switch-on lane L11: the decision cards, the session levels and how we work on the deployed core's developer routes (`core-host/dev-routes.ts`, `CoreDevWiring`), from the company's OWN records.
 //
 //   - Session levels (`deployedSessionMembers`): the person's company role is their LIVE membership (R4's `COMPANY_MEMBER#` row: owner, admin or member), and their role on a project is the broker's own
@@ -283,6 +284,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
     if (artifact.format === "structured" && loaded?.format !== "structured") return undefined;
     const facts = planFactsOf(loaded, workflow);
     const base = {
+      revealMoney: viewer.admin || taskOwnerView(task)?.developerId === viewer.principal.personId,
       subjectId: task.taskId, taskId: task.taskId, project: task.project, title: task.title, createdAt: artifact.createdAt, contentVersion: artifact.sha256,
       binding: { revision: workflow.revision, artifactDigest: artifact.sha256 }, openPath: taskOpenPath(task),
     };

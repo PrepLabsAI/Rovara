@@ -21,6 +21,7 @@ interface Seed {
   project?: string;
   title?: string;
   origin?: Parameters<typeof reportStartItems>[0]["origin"];
+  ticketSystem?: string;
   startedAt: string;
   closedAt?: string;
   workflow?: Record<string, unknown>;
@@ -34,9 +35,9 @@ function world() {
   const seed = async (input: Seed): Promise<string> => {
     const company = input.company ?? A;
     const taskId = id(input.n);
-    const items = reportStartItems({ companyId: company, taskId, project: input.project ?? "alpha", title: input.title ?? `Task ${input.n}`, origin: input.origin ?? "app", purpose: input.purpose, receivedAt: input.startedAt });
+    const items = reportStartItems({ companyId: company, taskId, project: input.project ?? "alpha", title: input.title ?? `Task ${input.n}`, origin: input.origin ?? "app", purpose: input.purpose, ...(input.ticketSystem === undefined ? {} : { ticket: { system: input.ticketSystem } }), receivedAt: input.startedAt });
     if (items.length > 0) expect((await store.transact(items)).applied).toBe(true);
-    await store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", companyId: company, taskId, developerId: DEVELOPER_CANARY, project: input.project ?? "alpha", title: input.title ?? `Task ${input.n}`, createdAt: input.startedAt, ...(input.closedAt === undefined ? {} : { closedAt: input.closedAt }), ...(input.workflow === undefined ? {} : { workflow: input.workflow as never }) } });
+    await store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", companyId: company, taskId, developerId: DEVELOPER_CANARY, project: input.project ?? "alpha", title: input.title ?? `Task ${input.n}`, createdAt: input.startedAt, ...(input.ticketSystem === undefined ? {} : { ticket: { system: input.ticketSystem } }), ...(input.closedAt === undefined ? {} : { closedAt: input.closedAt }), ...(input.workflow === undefined ? {} : { workflow: input.workflow as never }) } });
     if (input.cost !== undefined) {
       await store.put({ item: { pk: costPartition(company, taskId), sk: "TOTAL", entityType: "COST_TOTAL", taskId, companyId: input.cost.companyId ?? company, ...(input.cost.currency === undefined ? {} : { currency: input.cost.currency as string }), micros: (input.cost.micros ?? 0) as number, entries: (input.cost.entries ?? 1) as number, unpricedEntries: (input.cost.unpricedEntries ?? 0) as number } });
     }
@@ -71,6 +72,12 @@ describe("the start row", () => {
   });
   it("says where a task started", () => {
     expect(["app", "cli", "mcp", "slack", "linear", "jira", "github_issue", "schedule", undefined].map((o) => reportOriginOf(o as never))).toEqual(["web", "tool", "tool", "slack", "linear", "jira", "other", "other", "other"]);
+  });
+  it.each([["linear", "linear"], ["jira", "jira"], ["github_issue", "other"]] as const)("classifies a tracker task from its ticket system %s", async (ticketSystem, expected) => {
+    const w = world();
+    const taskId = await w.seed({ n: ticketSystem === "linear" ? 81 : ticketSystem === "jira" ? 82 : 83, startedAt: day(3), origin: "tracker", ticketSystem });
+    const response = await w.read(A, { from: day(3), to: day(3) });
+    expect(response.tasks.find((row) => row.taskId === taskId)?.origin).toBe(expected);
   });
   it("cuts and cleans a title", () => {
     expect([...reportTitleOf("x".repeat(500))]).toHaveLength(120);

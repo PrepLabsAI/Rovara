@@ -1,3 +1,4 @@
+import { taskOwnerView } from "../developer/task-owner-view.js";
 import { slackRecordScope } from "./slack-workspace-tokens.js";
 import { listSlackWorkspaceScopes, SlackWorkspaceRefused, type SlackWorkspaceBindings } from "./slack-workspace-binding.js";
 import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
@@ -112,7 +113,7 @@ import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access
 import { routeCompanyReads, type CompanyReadsConfiguration } from "../developer/company-reads.js";
 import { evaluateProjectAuthority, mayUseProject } from "../developer/task-project-access.js";
 import { renameTaskOwner } from "../developer/task-owner-name.js";
-import { checkTaskPersonIdentity, listTaskWebCandidates, registerTaskChannelPeople, registerTaskWebPerson, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
+import { taskCompanyId, checkTaskPersonIdentity, listTaskWebCandidates, registerTaskChannelPeople, registerTaskWebPerson, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
 import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { decodeJwt } from "jose";
@@ -140,7 +141,7 @@ import { createFeedbackReviewWeb } from "./feedback-review-web.js";
 import { TASK_PAGE, TASK_PEOPLE_CONFIRMATION, TASK_STATUS, createTaskWeb } from "./task-web.js";
 import { TASK_PAGE_API_PREFIX, createTaskWebApi } from "./task-web-api.js";
 import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
-import type { CoreTaskEntry } from "./engine-boundary.js";
+import { coreAnswerValue, type CoreTaskEntry } from "./engine-boundary.js";
 import type { CoreAppEntry } from "./core-app-routes.js";
 import type { BrokerResponse } from "../handler.js"; import { profileDisplayName } from "../developer/github-profile.js";
 import type { CompanyImportRegistry } from "./company-import-forwarding.js"; import { routeSignInLinks, type SignInLinkForward } from "./sign-in-link-routes.js";
@@ -2060,6 +2061,15 @@ export function developerTaskRouteDependencies(
   return {
     documentClient: deps.documentClient,
     tableName: deps.tableName,
+    taskMoneyVisible: async (task) => {
+      const own = taskOwnerView(task)?.developerId === caller.developerId;
+      const reader = deps.companies ?? deps.developer.companies;
+      if (reader === undefined) return own;
+      const membership = await reader.membershipOf?.(caller.developerId);
+      if (membership === undefined) return own && await reader.companyOf(caller.developerId) === taskCompanyId(task);
+      return membership.companyId === taskCompanyId(task)
+        && (own || membership.role === "owner" || membership.role === "admin");
+    },
     ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
     issuer: deps.developer.issuer,
     ...(deps.developer.coreTasks === undefined ? {} : { coreTasks: deps.developer.coreTasks }),
@@ -2536,6 +2546,14 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (request.method === "POST" && KNOWLEDGE_API_ROUTES.test(url.pathname)) return knowledgeRoute(deps, request, url, route);
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const caller = await authenticateCaller(deps, request.headers.authorization, route);
+  // The preview is read-only; the core resolves live company membership and project access.
+  if (/^\/v1\/dev\/projects\/([^/]+)\/start-estimates$/u.test(url.pathname)) {
+    const core = deps.developer.coreTasks;
+    if (core === undefined) throw agentXError("NOT_FOUND", "Start estimates are not available on this install.");
+    const answer = await core.route({ method: request.method, path: request.path, headers: {}, ...(request.body === undefined ? {} : { body: request.body }), requestId: request.requestId }, caller);
+    if (answer === undefined) throw agentXError("NOT_FOUND", "Start estimates are not available on this install.");
+    return coreAnswerValue(answer);
+  }
   const machineSize = /^\/v1\/dev\/projects\/([^/]+)\/machine-size$/u.exec(url.pathname);
   if (machineSize !== null && (request.method === "GET" || request.method === "POST")) return routeMachineSize(deps, caller, request, machineSize[1]!);
   const settings = /^\/v1\/dev\/projects\/([^/]+)\/settings$/.exec(url.pathname);
@@ -2575,8 +2593,21 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
     const scope = checked && deps.companies !== undefined ? boundedCompanyReads(deps.documentClient) : undefined;
     // Lane W: a merge press is company-checked too (membership, never a claim).
     const merging = request.method === "POST" && /^\/v1\/dev\/tasks\/[^/]+\/merge$/.test(url.pathname);
-    const companyId = checked || merging ? await resolveCompany(deps.companies, caller.developerId) : undefined;
+    // Reuse this route's live membership for money visibility; never read it again per task.
+    let membership: Awaited<ReturnType<NonNullable<CompanyMembershipReader["membershipOf"]>>>;
+    const companies = deps.companies;
+    const checkedCompanies = companies?.membershipOf === undefined ? companies : {
+      companyOf: async (personId: string) => {
+        membership = await companies.membershipOf!(personId);
+        return membership?.companyId;
+      },
+    };
+    const companyId = checked || merging ? await resolveCompany(checkedCompanies, caller.developerId) : undefined;
     const taskDeps = developerTaskRouteDependencies(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller);
+    if ((checked || merging) && companies !== undefined) {
+      taskDeps.taskMoneyVisible = async (task) => recordInCompany(task, companyId)
+        && (taskOwnerView(task)?.developerId === caller.developerId || membership?.role === "owner" || membership?.role === "admin");
+    }
     const checkedDeps = scope === undefined ? taskDeps : { ...taskDeps, actions: companyReadActions(taskDeps.actions, scope),
       ...(taskDeps.workflowE2EPresentation === undefined ? {} : { workflowE2EPresentation: (input: Parameters<NonNullable<DeveloperTaskRouteDependencies["workflowE2EPresentation"]>>[0]) => scope.read(() => taskDeps.workflowE2EPresentation!(input)) }) };
     const result = await routeDeveloperTaskRequest({

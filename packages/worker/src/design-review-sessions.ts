@@ -13,7 +13,7 @@ import { assistantOutcome, failedTurn, type AssistantOutcome } from "./session-e
 import { designReviewRuntime } from "./task-model.js";
 import { designMergeAnswerSpec, designReviewAnswerSpec } from "./design-review-answers.js";
 import { answerToolInstruction, createAnswerChannel, structuredAnswersEnabled } from "./structured-answer.js";
-import { createTaskUsageTelemetry } from "./usage.js";
+import { createTaskUsageTelemetry, createUsageCheckpointer } from "./usage.js";
 import { assistantText } from "./verification/extension.js";
 
 const CAPABILITY_HEADER = "x-agentx-callback-capability";
@@ -124,7 +124,10 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
     let lastText: string | undefined;
     let first: { system: string; user: string; messages: number; systemObserved: boolean } | undefined;
     const files = new Set<string>();
+    const usageModel = () => ({ ...handle.getModel(), ...(runtime.model.cacheRetention === undefined ? {} : { cacheRetention: runtime.model.cacheRetention }) });
+    const usageTracker = createUsageCheckpointer({ enabled: false, baseline: undefined, stats: () => handle.getSessionStats(), model: usageModel, requested: runtime.model, send: () => undefined });
     const unsubscribe = handle.subscribe((event) => {
+      usageTracker.observe(event);
       const value = event as { type?: unknown; toolName?: unknown; args?: unknown; message?: unknown } | undefined;
       if (value?.type === "tool_execution_start" && typeof value.toolName === "string" && READ_TOOLS.has(value.toolName)) {
         const path = value.args !== null && typeof value.args === "object" ? (value.args as { path?: unknown }).path : undefined;
@@ -170,7 +173,9 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
           if (options.onUsage !== undefined) {
             let payload: unknown;
             try {
-              payload = createTaskUsageTelemetry(handle.getSessionStats(), { ...handle.getModel(), ...(runtime.model.cacheRetention === undefined ? {} : { cacheRetention: runtime.model.cacheRetention }) }, finished ? "SUCCEEDED" : lastOutcome?.stopReason === "aborted" ? "CANCELLED" : "FAILED");
+              const stats = handle.getSessionStats();
+              const outcome = finished ? "SUCCEEDED" : lastOutcome?.stopReason === "aborted" ? "CANCELLED" : "FAILED";
+              payload = usageTracker.endReport(stats, usageModel(), outcome, runtime.model) ?? createTaskUsageTelemetry(stats, usageModel(), outcome);
             } catch { payload = {}; } // Unreadable usage makes the existing ledger refuse further spend.
             options.onUsage(payload);
           }

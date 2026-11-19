@@ -194,7 +194,7 @@ async function press(input: HostedMergeInput, wiring: HostedMergeWiring, taskId:
   let merged: Array<{ repositoryId: string; number: number }>;
   try {
     // The task is read again inside the core, after the lock: every gate runs on the task as it is now.
-    merged = (await pressMergeAsPerson(deps, { taskId, requestId, presserPersonId: personId, expectedHeads, risk })).pullRequests;
+    merged = (await pressMergeAsPerson(deps, { taskId, requestId, presserPersonId: personId, presser: principal, expectedHeads, risk })).pullRequests;
   } catch (error) {
     await input.audit.record(event(MERGE_RESULT_AUDIT, { outcome: error instanceof AgentXError ? error.code : "failed" })).catch(() => input.log?.({ event: "hosted_merge.audit_result_failed", companyId, taskId }));
     await release();

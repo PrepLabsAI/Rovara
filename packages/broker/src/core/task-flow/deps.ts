@@ -1,3 +1,4 @@
+import type { PreviewV2 } from "@agentx/contracts";
 import type { AgentXError, ScriptTokenPermission, WorkOrigin } from "@agentx/contracts";
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
@@ -160,8 +161,8 @@ export interface StartExtrasInput {
   ticket?: { system: string; id: string; url: string; parent?: { kind: "project" | "parent_issue" | "epic"; id: string; title: string; url?: string | undefined } } | undefined;
   /** Where the task started (the surface that asked for it). */
   origin?: WorkOrigin | undefined;
-  /** What the task is for when it is not ordinary work (a setup run); absent for ordinary work. */
-  purpose?: "setup_agent" | undefined;
+  /** What the task is for when it is not ordinary feature work; absent for ordinary work. */
+  purpose?: "setup_agent" | "wiki_build" | undefined;
 }
 
 /** Reads what a worker saved (a plan, a document) by its object key. At most `maxBytes` are read; undefined when it is not there. Lane L9a's object-storage port fills it. */
@@ -218,6 +219,8 @@ export interface DesignReviewSteps {
 }
 
 export interface TaskFlowDeps {
+  /** Advisory snapshot captured by the host; never supplied as browser authority. */
+  captureStartComparison?: (input: { project: string; inputText: string }) => Promise<PreviewV2>;
   /** Code's one company (`IMPLICIT_COMPANY_ID`); every port call carries it. */
   companyId: OrgId;
   store: DocumentStore;

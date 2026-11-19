@@ -123,7 +123,8 @@ describe("the worker's Pi session, as pinned on Pi 0.85.1", () => {
       // Spec 053: getModel also reports the level the session used; the scripted model does not reason, so "off".
       expect(handle.getModel()).toEqual({ provider: "agentx-faux", modelId: "scripted", thinkingLevel: "off" });
       const stats = handle.getSessionStats();
-      expect(keys(stats)).toEqual(["assistantMessages", "contextUsage", "cost", "sessionFile", "sessionId", "tokens", "toolCalls", "toolResults", "totalMessages", "userMessages"]);
+      expect(keys(stats)).toEqual(["assistantMessages", "calls", "contextUsage", "cost", "sessionFile", "sessionId", "tokens", "toolCalls", "toolResults", "totalMessages", "userMessages"]);
+      expect(stats.calls).toEqual([expect.objectContaining({ granularity: "call", stage: "unknown", status: "estimated", model: { state: "available", value: { provider: "agentx-faux", modelId: "scripted" } } })]);
       expect(keys(stats.tokens)).toEqual(["cacheRead", "cacheWrite", "input", "output", "total"]);
       expect(keys(stats.contextUsage)).toEqual(["contextWindow", "percent", "tokens"]);
       expect({ userMessages: stats.userMessages, assistantMessages: stats.assistantMessages, toolCalls: stats.toolCalls, toolResults: stats.toolResults, totalMessages: stats.totalMessages })

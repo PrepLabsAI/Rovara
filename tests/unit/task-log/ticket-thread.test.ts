@@ -7,6 +7,7 @@ import {
 import {
   THREAD_REPLIES_PER_TASK, THREAD_REPLIES_RESERVED, THREAD_ROOT_EDITS_PER_TASK, THREAD_ROOT_EDIT_GAP_MS, refreshTicketThread, sendTicketUpdate, saveTicketUpdates, type TicketUpdatesDependencies,
 } from "../../../packages/broker/src/core/ticket-updates/index.js";
+import { renderRoot } from "../../../packages/broker/src/core/ticket-updates/thread-render.js";
 import { answerEntriesOf, appendTaskLog, approvalEntryOf, planSummaryEntryOf, pullRequestEntryOf, questionEntriesOf, readTaskLog, statusEntryOf } from "../../../packages/broker/src/core/task-log/index.js";
 import { createLocalIntake, type LocalIntake } from "../../../packages/broker/src/local/app/intake.js";
 import { createLocalMilestones } from "../../../packages/broker/src/local/app/tracking.js";
@@ -209,9 +210,10 @@ describe("the level is the gate, by kind", () => {
     expect(w.comments()).toHaveLength(1);
   });
 
-  it("Plan + decisions: the plan's summary, risk and estimate in the root, still no replies for questions, the plan or the pull request", async () => {
+  it("Plan + decisions: the plan's summary and risk without figures in the root, still no replies for questions, the plan or the pull request", async () => {
     const w = await drawn("plan_decisions");
-    expect(rootOf(w)).toContain("Plan: Add a cap to campaigns\n1. Add a field\n2. Check it on the server\nRisk: medium. Estimate: $4 to $10.");
+    expect(rootOf(w)).toContain("Plan: Add a cap to campaigns\n1. Add a field\n2. Check it on the server\nRisk: medium.");
+    expect(rootOf(w)).not.toContain("$");
     expect(rootOf(w)).toContain("Pull request: https://github.com/example/demo/pull/7");
     expect(w.comments()).toHaveLength(1);
   });
@@ -645,4 +647,12 @@ describe("the contract's defaults", () => {
     expect(ticketUpdateLevelOf(legacy)).toBe("status_only");
     expect(TicketUpdatesSettingsSchema.safeParse({ comments: true, changeStatus: false, statuses: {}, level: "everything" }).success).toBe(false);
   });
+});
+
+it("never republishes an estimate from a historical log row into a shared ticket", () => {
+ const entries: TaskLogEntry[] = [{ kind: "plan_summary", key: "plan:r1", at: "2026-11-17T10:00:00.000Z", revision: 1, needed: "Fix retries", lines: ["Check the retry"], risk: "low", estimate: "$4.37 to $10.19" }];
+ const text = renderRoot({ title: "Fix retries", level: "plan_decisions", entries });
+ expect(text).toContain("Plan: Fix retries");
+ expect(text).not.toContain("$");
+ expect(text).not.toContain("Estimate:");
 });

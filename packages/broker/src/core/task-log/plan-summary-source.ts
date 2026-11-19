@@ -1,6 +1,6 @@
-// The facts the log's `plan_summary` is made of, read from the task and its plan document: the card's summary lines (`core/decisions/plan-summary.ts`), the risk tier the decision gate grades the plan at, and the
-// estimate range the task keeps. Read at the moment the plan waits for review, for the revision that waits.
-import { formatRunLimitUsd, type DocumentStore, type OrgId, type WorkflowArtifact, type WorkflowSnapshot } from "@agentx/contracts";
+// The shared log's plan summary: the card's summary lines and the decision gate's risk tier, without private cost figures.
+// Read at the moment the plan waits for review, for the revision that waits.
+import { type DocumentStore, type OrgId, type WorkflowArtifact, type WorkflowSnapshot } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { textReaderOf } from "../build-step/plan-input.js";
 import { documentSummary } from "../decisions/plan-summary.js";
@@ -30,10 +30,8 @@ export function planSummarySourceOf(deps: PlanSummarySourceDeps): (orgId: OrgId,
     const summary = documentSummary(await loadWorkflowDocument(textReaderOf(deps.artifacts), artifact, {}).catch(() => undefined));
     if (summary === undefined) return undefined;
     const found = await deps.gate.requirement(orgId, WORKFLOW_DOCUMENT_KIND, taskId);
-    const estimate = task["runEstimate"] as { lowUsd?: unknown; highUsd?: unknown } | undefined;
     return {
       revision: workflow.revision, needed: summary.needed, lines: summary.lines, risk: found?.risk ?? "high",
-      ...(typeof estimate?.lowUsd === "number" && typeof estimate.highUsd === "number" ? { estimate: `${formatRunLimitUsd(estimate.lowUsd)} to ${formatRunLimitUsd(estimate.highUsd)}` } : {}),
     };
   };
 }

@@ -28,7 +28,7 @@ import type {
   EvalBatchWatched,
   EvalBatchWatchUpdateResult,
 } from "@agentx/contracts";
-import { batchStartMessage, modelLabel, usd } from "./eval-batch-command.js";
+import { batchStartMessage, modelLabel } from "./eval-batch-command.js";
 import { escapeText } from "./slack-format.js";
 import { SlackApiError } from "./slack-web.js";
 
@@ -278,10 +278,10 @@ async function inThread(dependencies: EvalBatchWatcherDependencies, batch: EvalB
   return dependencies.slack.post(batch.thread, batch.thread.threadTs, text);
 }
 
-/** "12/72 done, 7 resolved, $41.20 spent", and a line for each model that has just finished. */
+/** Counts and results only (DEC 164), and a line for each model that has just finished. */
 export function progressMessage(batch: EvalBatchWatched, endedModels: readonly number[] = []): string {
   return [
-    `Batch progress: ${batch.finished}/${batch.runs} done, ${batch.resolved} resolved, ${usd(batch.spentUsd)} spent of the ${usd(batch.costCapUsd)} cap.`,
+    `Batch progress: ${batch.finished}/${batch.runs} done, ${batch.resolved} resolved.`,
     ...endedModels.map((index) => {
       const entry = batch.models[index]!;
       return `${modelLabel(entry.model)} is done: ${entry.finished} runs, ${entry.resolved} resolved.`;
@@ -291,7 +291,7 @@ export function progressMessage(batch: EvalBatchWatched, endedModels: readonly n
 
 /** FR-010: the batch's end, its per-model table from summary.json, and where its CSV is. */
 export function summaryMessage(batch: EvalBatchWatched): string {
-  const totals = `${batch.finished}/${batch.runs} runs finished, ${batch.resolved} resolved, ${usd(batch.spentUsd)} spent of the ${usd(batch.costCapUsd)} cap`;
+  const totals = `${batch.finished}/${batch.runs} runs finished, ${batch.resolved} resolved`;
   const opening = batch.status === "STOPPED"
     ? `Eval batch \`${batch.batchId}\` was stopped: ${totals}.`
     : batch.status === "CAPPED"
@@ -299,15 +299,13 @@ export function summaryMessage(batch: EvalBatchWatched): string {
       : `Eval batch \`${batch.batchId}\` is done: ${totals}.`;
   const models = batch.summary?.models ?? [];
   const rows = [
-    ["Model", "Graded", "Resolved", "Rate (95% CI)", "Failed", "Cost", "Per solved"],
+    ["Model", "Graded", "Resolved", "Rate (95% CI)", "Failed"],
     ...models.map((model) => [
       summaryModelName(model),
       String(model.runs),
       String(model.resolved),
       model.rate === null ? "-" : `${percent(model.rate)}% (${percent(model.wilsonLow ?? 0)}-${percent(model.wilsonHigh ?? 0)}%)`,
       String(model.failed),
-      `${usd(model.totalCostUsd)}${model.unpricedRuns > 0 ? "*" : ""}`,
-      model.costPerSolvedUsd === null ? "-" : usd(model.costPerSolvedUsd),
     ]),
   ];
   const widths = rows[0]!.map((_, column) => Math.max(...rows.map((row) => row[column]!.length)));
@@ -315,7 +313,6 @@ export function summaryMessage(batch: EvalBatchWatched): string {
   return [
     opening,
     ...(models.length === 0 ? ["No run has a result row, so there is no table."] : ["```", ...table, "```"]),
-    ...(models.some((model) => model.unpricedRuns > 0) ? ["* includes runs that reported no cost, charged at their ceiling."] : []),
     `Results: \`evals/batches/${batch.batchId}/results.csv\` in the artifact bucket; \`agentx admin eval batch results ${batch.batchId} --csv <path>\` downloads it.`,
   ].join("\n");
 }

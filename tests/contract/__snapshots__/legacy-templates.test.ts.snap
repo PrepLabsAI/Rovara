@@ -12038,6 +12038,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
   "env": {
     "shell": "bash",
     "variables": {
+      "NODE_OPTIONS": "--max-old-space-size=8192",
       "AWS_CLI_VERSION": "2.36.47",
       "GITLEAKS_VERSION": "8.30.1",
       "GITLEAKS_SHA256": "<asset-hash>"

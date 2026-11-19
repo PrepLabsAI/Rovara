@@ -24,6 +24,11 @@ export interface PolicyHookApproversOptions {
   maxEntries?: number;
 }
 
+export interface PersonPressDecision { allowed: boolean; reason?: string }
+export interface PersonPressApprover { decideForPerson(request: ApprovalRequest, person: Principal): Promise<PersonPressDecision> }
+const personPressApprovers = new WeakMap<Approvers, PersonPressApprover>();
+export function personPressOf(approvers: Approvers): PersonPressApprover | undefined { return personPressApprovers.get(approvers); }
+
 /** The stricter default, used for a requirement before the service has answered for its kind: a second person needed. */
 export const STRICTER_DEFAULT_ANSWER: PolicyHookDecideAnswer = Object.freeze({ allow: true, minApprovers: 1, secondPerson: true, selfApproval: false });
 
@@ -139,6 +144,24 @@ export function withPolicyHookApprovers(base: Approvers, hook: PolicyHookClient,
       return verdict;
     },
   };
+  personPressApprovers.set(wrapped, {
+    async decideForPerson(request, person) {
+      let asked: Awaited<ReturnType<typeof ask>>;
+      try { asked = await ask(request, "verdict", person); } catch { return { allowed: false, reason: "company_rules_no_answer" }; }
+      if (asked === undefined) return { allowed: false, reason: "company_rules_no_answer" };
+      if (asked === "unaskable") return { allowed: false, reason: "company_rules_refused" };
+      const answer = asked.answer;
+      remember(known, kindKey(request), { answer: answer.allow ? answer : STRICTER_DEFAULT_ANSWER, expiresAt: asked.expiresAt }, maxEntries);
+      if (!answer.allow) return { allowed: false, reason: "company_rules_refused" };
+      const isRequester = request.requestedBy !== undefined && person.provider === request.requestedBy.provider && person.personId === request.requestedBy.personId;
+      if ((answer.secondPerson || !answer.selfApproval) && isRequester) return { allowed: false, reason: "self_approval_not_allowed" };
+      try {
+        const baseRequirement = await base.requirement(request);
+        if (stricterRequirement(baseRequirement, answer, request).minApprovers > 1) return { allowed: false, reason: "company_rules_refused" };
+      } catch { return { allowed: false, reason: "company_rules_refused" }; }
+      return { allowed: true };
+    },
+  });
   if (base.commitClaim !== undefined) wrapped.commitClaim = (claimId) => base.commitClaim!(claimId);
   if (base.releaseClaim !== undefined) wrapped.releaseClaim = (claimId) => base.releaseClaim!(claimId);
   return wrapped;
