@@ -8,11 +8,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { TaskDependencyPlanSchema, ownerCatalogOf, ownerStarterEntries, type TaskDependencyPlan } from "@agentx/contracts";
 import {
-  EVAL_BRIDGE_SOCKET_NAME, EVAL_HELPER_DIR_NAME, FRESH_EVAL_WORKSPACE, bridgeFolderMountProblems, createFreshEvalSandbox, freshEvalEnvironment, freshEvalSandboxArgProblems, freshEvalSandboxRunArgs,
+  EVAL_BRIDGE_SOCKET_NAME, EVAL_HELPER_DIR_NAME, FRESH_EVAL_WORKSPACE, bridgeFolderMountProblems, createFreshEvalSandbox, freshEvalModelBlock, freshEvalEnvironment, freshEvalSandboxArgProblems, freshEvalSandboxRunArgs,
   type FreshEvalSandboxConfig, type FreshEvalSandboxRun,
 } from "../../packages/worker/src/verification/eval-bridged-exec.js";
 import { EVAL_SERVICES_FAILURE_SENTENCE, createEvalServicesStarter, type EvalServicesStarted, type EvalServicesStarter } from "../../packages/worker/src/verification/eval-services.js";
-import { planModelHostBlock } from "../../packages/worker/src/model-helper-block.js";
 import { runNetworkAddresses, runNetworkHelperIp, runNetworkModelHelperIp } from "../../packages/worker/src/run-network.js";
 import { testServicesConfigFromEnvironment, TEST_SERVICES_OWNER_IMAGES_ENVIRONMENT } from "../../packages/worker/src/test-services-run.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
@@ -78,7 +77,7 @@ function stubStarter(services: { alias: string; slotIndex: number; env: Array<[s
 
 describe("E1: the sandbox's arguments (allow-list)", () => {
   const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", dnsHelperIp: "172.30.7.2", labelArgs: () => ["--label", "rovara.run-network=rovara-svc-0123456789ab", "--label", "rovara.run-network.created=1", "--label", "rovara.run-network.expires=2", "--label", `rovara.run-network.workspace=${WS}`] };
-  const block = planModelHostBlock({ hasModelRow: true, helperIp: "172.30.7.9" });
+  const block = freshEvalModelBlock("172.30.7.9");
   const build = (extra: object = {}) => freshEvalSandboxRunArgs({ net, image: IMAGE, name: `${net.name}-eval`, checkout: "/scratch/run-a/checkout", envFile: "/scratch/run-a/env", block, command: { executable: "node", args: ["eval.js"], cwd: "." }, ...extra }, { bridgeDir: "/scratch/e1/models" });
   const problems = (args: string[], extra: object = {}) => freshEvalSandboxArgProblems(args, net, { checkout: "/scratch/run-a/checkout", bridgeDir: "/scratch/e1/models", helperIp: "172.30.7.9", ...extra });
   const service = [{ alias: "postgres", address: "172.30.7.16" }];
@@ -333,7 +332,7 @@ describe("E2: review fixes (embedded resolver, default, cleanup)", () => {
   it("a sealed box's only --dns is the run's own name server: another upstream, loopback or none is refused (mutant: drop the --dns check)", () => {
     const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", dnsHelperIp: "172.30.7.2", labelArgs: () => ["--label", "rovara.run-network=rovara-svc-0123456789ab", "--label", "rovara.run-network.created=1", "--label", "rovara.run-network.expires=2", "--label", `rovara.run-network.workspace=${WS}`] };
     const dnsFiles = { resolvConfPath: "/scratch/run-a/resolv.conf", hostsPath: "/scratch/run-a/hosts" };
-    const block = planModelHostBlock({ hasModelRow: true, helperIp: "172.30.7.9" });
+    const block = freshEvalModelBlock("172.30.7.9");
     const args = freshEvalSandboxRunArgs({ net, image: IMAGE, name: `${net.name}-eval`, checkout: "/scratch/run-a/checkout", envFile: "/scratch/run-a/env", block, command: { executable: "node", args: ["e.js"], cwd: "." }, dnsFiles }, { bridgeDir: "/scratch/e1/models" });
     const expected = { checkout: "/scratch/run-a/checkout", bridgeDir: "/scratch/e1/models", helperIp: "172.30.7.9", dnsFiles };
     expect(freshEvalSandboxArgProblems(args, net, expected)).toEqual([]);
@@ -344,7 +343,7 @@ describe("E2: review fixes (embedded resolver, default, cleanup)", () => {
 
   it("the allow-list checks a service entry itself: an alias that is not plain or an address outside .16 to .47 of the round is a problem even when the pin matches it", () => {
     const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", dnsHelperIp: "172.30.7.2", labelArgs: () => ["--label", "rovara.run-network=rovara-svc-0123456789ab", "--label", "rovara.run-network.created=1", "--label", "rovara.run-network.expires=2", "--label", `rovara.run-network.workspace=${WS}`] };
-    const block = planModelHostBlock({ hasModelRow: true, helperIp: "172.30.7.9" });
+    const block = freshEvalModelBlock("172.30.7.9");
     for (const bad of [{ alias: "postgres", address: "172.30.7.60" }, { alias: "postgres", address: "172.30.7.15" }, { alias: "postgres", address: "172.30.8.16" }, { alias: "Bad_Name", address: "172.30.7.16" }]) {
       const base = freshEvalSandboxRunArgs({ net, image: IMAGE, name: `${net.name}-eval`, checkout: "/scratch/run-a/checkout", envFile: "/scratch/run-a/env", block, command: { executable: "node", args: ["e.js"], cwd: "." } }, { bridgeDir: "/scratch/e1/models" });
       const at = base.indexOf("--user");
