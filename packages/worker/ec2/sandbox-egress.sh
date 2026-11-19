@@ -232,27 +232,35 @@ se_gateway_running() {
   [[ $(docker inspect --format '{{.State.Running}}|{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}' "$SE_GATEWAY" 2>/dev/null) == "true|$SE_INNER_NET $SE_OUTER_NET " ]]
 }
 
-# What a sandbox would see, tried from a container of the worker image on the inner network with the gateway as its only name server: (1) the gateway answers, and a registry name is NXDOMAIN (a dead gateway times out, a gateway
+# What a sandbox would see (including an allowed-name passing control), tried from a container of the worker image on the inner network with the gateway as its only name server: (1) the gateway answers, and a registry name is NXDOMAIN (a dead gateway times out, a gateway
 # without its deny list answers); (2) a connection to a public address by number has no route. Both must hold or the boot fails.
 readonly SE_PROBE='
 const dns = require("dns"), net = require("net");
-const resolver = new dns.promises.Resolver({ timeout: 4000, tries: 2 });
-if (process.argv[1] !== "default") resolver.setServers([process.argv[1]]);
+// Use getaddrinfo, like git/npm/pip, so a broken or missing mounted resolver fails boot.
+const resolver = { resolve4: (name) => dns.promises.lookup(name, { family: 4 }) };
 const done = (ok, why) => { console.log(JSON.stringify({ ok, why })); process.exit(ok ? 0 : 1); };
-resolver.resolve4("ghcr.io").then(() => done(false, "a registry name resolved"), (error) => {
+dns.promises.lookup("registry.npmjs.org", { family: 4 }).then((answer) => {
+  if (answer.address !== process.argv[1]) return done(false, "an allowed name did not resolve to the gateway");
+  resolver.resolve4("ghcr.io").then(() => done(false, "a registry name resolved"), (error) => {
   if (error.code !== "ENOTFOUND") return done(false, "the gateway did not answer: " + error.code);
   const socket = net.connect({ host: "1.1.1.1", port: 443, timeout: 4000 });
   socket.on("connect", () => done(false, "a raw address was reachable"));
   socket.on("timeout", () => done(true, "no route"));
   // Only a real no-route answer counts: a refusal (ECONNREFUSED) means something on that network answered.
   socket.on("error", (e) => (e.code === "ENETUNREACH" || e.code === "EHOSTUNREACH") ? done(true, "no route") : done(false, "unexpected: " + e.code));
-});'
+  });
+}, (error) => done(false, "the allowed-name control did not resolve: " + error.code));'
 se_probe() {
-  timeout --foreground --kill-after=10s "$(try_seconds 60)s" docker run --rm --network "$SE_INNER_NET" --dns "$SE_INNER_IP" --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 \
-    --entrypoint "$SE_NODE" "$AGENTX_WORKER_IMAGE" -e "$SE_PROBE" "$SE_INNER_IP" >/dev/null || return 1
-  # The same from a container with NO `--dns` of its own, as a docker build step is: its name server is the daemon's default, which must be the gateway (a daemon that was not restarted on the new file fails here).
-  timeout --foreground --kill-after=10s "$(try_seconds 60)s" docker run --rm --network "$SE_INNER_NET" --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 \
-    --entrypoint "$SE_NODE" "$AGENTX_WORKER_IMAGE" -e "$SE_PROBE" default >/dev/null
+  local directory status
+  directory=$(mktemp -d "$SE_ALLOW_DIR/probe-XXXXXXXXXXXX") || return 1
+  if ! printf 'nameserver %s\noptions ndots:0 timeout:3 attempts:1\n' "$SE_INNER_IP" >"$directory/resolv.conf" || ! chmod 0644 "$directory/resolv.conf"; then
+    rm -f "$directory/resolv.conf"; rmdir "$directory"; return 1
+  fi
+  timeout --foreground --kill-after=10s "$(try_seconds 60)s" docker run --rm --network "$SE_INNER_NET" --mount "type=bind,src=$directory/resolv.conf,dst=/etc/resolv.conf,readonly" --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 \
+    --entrypoint "$SE_NODE" "$AGENTX_WORKER_IMAGE" -e "$SE_PROBE" "$SE_INNER_IP" >/dev/null
+  status=$?
+  rm -f "$directory/resolv.conf"; rmdir "$directory"
+  return "$status"
 }
 
 # The daemon proxy, asked from the HOST (as the daemon asks it): it must answer, and refuse a raw address, an S3 bucket and a port other than 443 (all refused before any name is looked up, so this needs no network). A dead proxy fails the connect.

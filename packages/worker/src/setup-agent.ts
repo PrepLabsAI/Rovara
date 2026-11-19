@@ -1,3 +1,4 @@
+import { gatewayWorkerDirectory } from "./gateway-name-files.js";
 // Setup agent (design setup-test-health 3.1-3.2 and 12, task SH7): the worker's half of the setup run that RUNS things. This module is the part that can be built and tested without the model session:
 // the sandbox the commands run in and the rules around it, the shell the agent gets, the check that tracked files were left alone, and the reading of the final answer. The session itself is created
 // by the caller (run-task.ts, SH14) with `setupAgentSessionParts`, and the journal and the limits are SH8 (`SetupAgentHooks` is where they plug in).
@@ -13,7 +14,7 @@
 //   - a command has a time limit even when the model names none;
 //   - the answer is read by the draft's reader (`readSetupProposalAnswer`): bounded, redacted, cited, secrets by name only. Repository text and command output are data.
 import { isIP } from "node:net";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { agentXError, isCredentialKey, redactText, remoteCodeReason, type SetupProposal, type SetupRunEndWord } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { snapshotTree, withIsolatedGit } from "./isolated-git.js";
@@ -114,17 +115,25 @@ export function assertSetupSandboxRunArgs(args: readonly string[], options: { ro
     if (!SETUP_NETWORK_NAME.test(options.network.name) || dnsServers.length !== 1 || dnsServers[0] !== options.network.helperIp) return refuse();
   } else if (options.gateway !== undefined) {
     if (!exactly("--network", options.gateway.network) || dnsServers.length !== 0) return refuse();
-    const resolver = seen.get("--mount") ?? [];
-    const match = resolver.length === 1 ? /^type=bind,src=(\/[^,]+),dst=\/etc\/resolv\.conf,readonly$/u.exec(resolver[0]!) : null;
-    const resolverRoot = resolve(options.gatewayResolverDirectory ?? GATEWAY_RESOLVER_DIRECTORY);
-    const relativeSource = match === null ? ".." : relative(resolverRoot, match[1]!);
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/resolv\.conf$/u.test(relativeSource)
-      || resolve(match![1]!) !== match![1] || match![1] !== resolve(resolverRoot, relativeSource)) return refuse();
+    const mounts = seen.get("--mount") ?? [];
+    const sources = new Map<string, string>();
+    for (const mount of mounts) {
+      const match = /^type=bind,src=(\/[^,]+),dst=(\/etc\/(?:resolv\.conf|hosts)),readonly$/u.exec(mount);
+      if (match === null || sources.has(match[2]!)) return refuse();
+      sources.set(match[2]!, match[1]!);
+    }
+    const resolverRoot = gatewayWorkerDirectory(root, options.gatewayResolverDirectory ?? GATEWAY_RESOLVER_DIRECTORY);
+    const resolver = sources.get("/etc/resolv.conf");
+    if (resolver === undefined) return refuse();
+    const relativeSource = relative(resolverRoot, resolver);
+    if (!/^run-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/resolv\.conf$/u.test(relativeSource)
+      || resolve(resolver) !== resolver || resolver !== resolve(resolverRoot, relativeSource)
+      || sources.get("/etc/hosts") !== join(dirname(resolver), "hosts")) return refuse();
   } else if (dnsServers.length > 3 || dnsServers.some((server) => isIP(server) === 0)) return refuse();
   if (!exactly("--user", TASK_SANDBOX_USER) || !exactly("--cap-drop", "ALL") || !exactly("--security-opt", "no-new-privileges")) return refuse();
   const volumes = seen.get("--volume") ?? [];
   const mounts = seen.get("--mount") ?? [];
-  if (!exactly("--workdir", root) || !exactly("--entrypoint", SANDBOX_INIT) || volumes.length !== 1 || volumes[0] !== `${root}:${root}` || mounts.length !== (options.gateway === undefined ? 0 : 1) || !seen.has("--detach")) return refuse();
+  if (!exactly("--workdir", root) || !exactly("--entrypoint", SANDBOX_INIT) || volumes.length !== 1 || volumes[0] !== `${root}:${root}` || mounts.length !== (options.gateway === undefined ? 0 : 2) || !seen.has("--detach")) return refuse();
   if (!/^[1-9][0-9]{0,6}$/u.test(only("--pids-limit") ?? "")) return refuse();
   const cpus = seen.get("--cpus");
   if (cpus !== undefined && !(cpus.length === 1 && /^[1-9][0-9]{0,3}$/u.test(cpus[0]!))) return refuse();

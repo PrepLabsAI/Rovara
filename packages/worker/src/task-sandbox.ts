@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { availableParallelism, totalmem } from "node:os";
-import { lstat, mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, realpath, rename, rm, truncate, writeFile } from "node:fs/promises";
 import { openDirectory } from "./candidate-fs.js";
 import { join, resolve } from "node:path";
 import { agentXError, type ProjectCommand } from "@agentx/contracts";
@@ -12,6 +12,8 @@ import type { CommandResult } from "./readiness.js";
 import { hiddenWorkspaceDirectories } from "./workspace-state.js";
 import { containerGone, type QuarantinedSandbox } from "./workspace-quarantine.js";
 import { createDockerCli, taskContainerExec, type DockerCli } from "./swebench/containers.js";
+import { createGatewayNameFiles, GATEWAY_RESOLVER_DIRECTORY } from "./gateway-name-files.js";
+export { GATEWAY_RESOLVER_DIRECTORY } from "./gateway-name-files.js";
 import { modelHostAddHostArgs, type ModelHostBlock } from "./model-helper-block.js";
 
 /**
@@ -27,8 +29,6 @@ import { modelHostAddHostArgs, type ModelHostBlock } from "./model-helper-block.
 
 /** The user-defined bridge network of every sandbox: outbound internet works, the host's network and other containers' do not. */
 export const TASK_SANDBOX_NETWORK = "agentx-task";
-/** Host-shared, worker-owned files used by containers on the gateway's internal network. */
-export const GATEWAY_RESOLVER_DIRECTORY = "/var/lib/rovara-egress/runs";
 /** The label every sandbox carries, with the ID of the operation it serves. */
 export const TASK_SANDBOX_LABEL = "agentx.task";
 /** The label that says which workspace a sandbox belongs to, so a worker removes only its own. */
@@ -250,6 +250,7 @@ export interface TaskSandboxRunInput {
   dns?: readonly string[];
   /** Worker-owned resolver mount. Docker 25 does not forward embedded DNS for internal-only containers. */
   resolvConfPath?: string;
+  hostsPath?: string;
   /**
    * A network of the sandbox's own instead of the shared task network, and the address it takes on it (`--network <name> --ip <ip>`). Only the setup run sets it: each setup run has a small network of its
    * own, with the DNS watch's helper container on it (setup-network.ts). The network is made and removed by the caller; the sandbox does not create it. Absent: the task network, as every sandbox.
@@ -292,7 +293,8 @@ export function taskSandboxRunArgs(input: TaskSandboxRunInput): string[] {
     ...(input.network === undefined ? [] : ["--ip", input.network.ip]),
     ...dnsArgs(input.dns),
     ...(input.resolvConfPath === undefined ? [] : ["--mount", `type=bind,src=${input.resolvConfPath},dst=/etc/resolv.conf,readonly`]),
-    ...(input.modelBlock === undefined ? [] : modelHostAddHostArgs(input.modelBlock)),
+    ...(input.hostsPath === undefined ? [] : ["--mount", `type=bind,src=${input.hostsPath},dst=/etc/hosts,readonly`]),
+    ...(input.hostsPath !== undefined || input.modelBlock === undefined ? [] : modelHostAddHostArgs(input.modelBlock)),
     "--user", TASK_SANDBOX_USER,
     // A sandbox shares the instance with the worker: a runaway command (or a file-tool search) must not take every core or process.
     ...(sandboxCpuLimit(input.hostCpus ?? availableParallelism()) === undefined ? [] : ["--cpus", sandboxCpuLimit(input.hostCpus ?? availableParallelism())!]),
@@ -357,6 +359,8 @@ export class TaskSandbox {
   private services: SandboxServices | undefined;
   private wrappedExec: ContainerExec | undefined;
   private gatewayResolverDirectory: string | undefined;
+  private gatewayHostsPath: string | undefined;
+  private gatewayBaseHosts = "127.0.0.1 localhost\n::1 localhost ip6-localhost\n";
 
   constructor(private readonly options: TaskSandboxOptions) {
     if (options.modelBlock?.role !== undefined && options.modelBlock.role !== "working") throw agentXError("CONFIG_INVALID", "a task sandbox is the working sandbox: it cannot take a model block made for a round's check sandbox");
@@ -376,6 +380,22 @@ export class TaskSandbox {
   attachServices(services: SandboxServices): void {
     this.services = services;
     this.wrappedExec = services.wrapExec(this.rawExec);
+  }
+
+  /** Local service names only; write the mounted inode in place so Docker sees updates after start. */
+  async setServiceHosts(helpers: readonly { address: string; aliases: readonly string[] }[]): Promise<void> {
+    if (this.gatewayHostsPath === undefined) return;
+    const lines: string[] = [];
+    for (const helper of helpers) {
+      if (isIP(helper.address) !== 4 || !/^(?:10\.|192\.168\.|172\.(?:1[6-9]|2[0-9]|3[01])\.)/u.test(helper.address)) throw new Error("a test service must have a private IPv4 address");
+      for (const alias of helper.aliases) {
+        if (!/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/u.test(alias) || alias === "localhost") throw new Error("a test service alias must be a local service name");
+        lines.push(`${helper.address} ${alias}\n`);
+      }
+    }
+    await writeFile(this.gatewayHostsPath, this.gatewayBaseHosts + lines.join(""), { flag: "r+" });
+    // r+ preserves the inode; truncate any aliases left by a longer previous list.
+    await truncate(this.gatewayHostsPath, Buffer.byteLength(this.gatewayBaseHosts + lines.join("")));
   }
 
   /** Starts the container, once; a failed start stays failed. */
@@ -474,19 +494,22 @@ export class TaskSandbox {
     const maskedPaths = await hiddenWorkspaceDirectories(root);
     let resolvConfPath: string | undefined;
     if (gateway !== undefined) {
-      const resolverDirectory = join(this.options.gatewayResolverDirectory ?? GATEWAY_RESOLVER_DIRECTORY, randomUUID());
-      resolvConfPath = join(resolverDirectory, "resolv.conf");
       try {
-        await mkdir(resolverDirectory, { recursive: true, mode: 0o700 });
-        await writeFile(resolvConfPath, `nameserver ${gateway.dns}\noptions ndots:0 timeout:3 attempts:1\n`, { flag: "wx", mode: 0o644 });
-        this.gatewayResolverDirectory = resolverDirectory;
+        const files = await createGatewayNameFiles(root, gateway.dns, this.options.gatewayResolverDirectory ?? GATEWAY_RESOLVER_DIRECTORY);
+        this.gatewayResolverDirectory = files.directory;
+        this.gatewayHostsPath = files.hostsPath;
+        resolvConfPath = files.resolvConfPath;
+        // Preserve the existing model-host block (worker-selected dropped/helper addresses), never a project's external names.
+        const modelArgs = this.options.modelBlock === undefined ? [] : modelHostAddHostArgs(this.options.modelBlock.block);
+        this.gatewayBaseHosts += modelArgs.filter((_, index) => index % 2 === 1).map(pair => { const at = pair.lastIndexOf(":"); return `${pair.slice(at + 1)} ${pair.slice(0, at)}\n`; }).join("");
+        await this.setServiceHosts([]);
       } catch (error) {
-        await rm(resolverDirectory, { recursive: true, force: true }).catch(() => undefined);
+        await this.removeGatewayResolverFile();
         throw agentXError("RUNTIME_UNAVAILABLE", `this worker could not write the gateway resolver file, so AgentX did not start the sandbox: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
     const result = await this.docker.run(
-      taskSandboxRunArgs({ name: this.name, taskId: this.options.taskId, image, rootPath: root, maskedPaths, ...(gateway === undefined && dns !== undefined ? { dns } : {}), ...(resolvConfPath === undefined ? {} : { resolvConfPath }), ...(this.options.network === undefined ? {} : { network: this.options.network }), ...(sharedNetwork === undefined ? {} : { sharedNetwork }), ...(this.options.modelBlock === undefined ? {} : { modelBlock: this.options.modelBlock.block }) }),
+      taskSandboxRunArgs({ name: this.name, taskId: this.options.taskId, image, rootPath: root, maskedPaths, ...(gateway === undefined && dns !== undefined ? { dns } : {}), ...(resolvConfPath === undefined ? {} : { resolvConfPath, hostsPath: this.gatewayHostsPath! }), ...(this.options.network === undefined ? {} : { network: this.options.network }), ...(sharedNetwork === undefined ? {} : { sharedNetwork }), ...(this.options.modelBlock === undefined ? {} : { modelBlock: this.options.modelBlock.block }) }),
       { timeoutMs: SANDBOX_START_TIMEOUT_MS },
     ).catch(async (error: unknown) => {
       await this.removeGatewayResolverFile();
@@ -515,6 +538,7 @@ export class TaskSandbox {
   private async removeGatewayResolverFile(): Promise<void> {
     const directory = this.gatewayResolverDirectory;
     this.gatewayResolverDirectory = undefined;
+    this.gatewayHostsPath = undefined;
     if (directory !== undefined) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
   }
 

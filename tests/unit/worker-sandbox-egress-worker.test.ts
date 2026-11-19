@@ -91,6 +91,23 @@ describe("the task sandbox on a gateway-mode worker", () => {
     expect(existsSync(file)).toBe(false);
   });
 
+  it("mounts worker-owned hosts read-only and updates that inode for local services only", async () => {
+    const { calls, sandbox } = await start(GATEWAY_ENV);
+    const mount = flag(calls.find(call => call[0] === "run")!, "--mount").find(value => value.includes("dst=/etc/hosts,readonly"))!;
+    const path = /^type=bind,src=([^,]+),dst=\/etc\/hosts,readonly$/u.exec(mount)![1]!;
+    const { stat } = await import("node:fs/promises");
+    const inode = (await stat(path)).ino;
+    await sandbox.setServiceHosts([{ address: "172.30.1.16", aliases: ["postgres", "test-db"] }]);
+    expect(await readFile(path, "utf8")).toContain("172.30.1.16 test-db\n");
+    expect((await stat(path)).ino).toBe(inode);
+    for (const alias of ["example.com", "localhost", "ghcr.io", "db\n1.1.1.1 example.com"]) await expect(sandbox.setServiceHosts([{ address: "172.30.1.16", aliases: [alias] }])).rejects.toThrow();
+    await expect(sandbox.setServiceHosts([{ address: "8.8.8.8", aliases: ["test-db"] }])).rejects.toThrow();
+    await sandbox.setServiceHosts([]);
+    expect(await readFile(path, "utf8")).toBe("127.0.0.1 localhost\n::1 localhost ip6-localhost\n");
+    await sandbox.dispose();
+    expect(existsSync(path)).toBe(false);
+  });
+
   it("ignores a name server a caller asked for: the gateway is the only one", async () => {
     const { calls } = await start(GATEWAY_ENV, { dns: ["8.8.8.8", "1.1.1.1"] });
     const run = calls.find((call) => call[0] === "run")!;
@@ -146,16 +163,18 @@ describe("the task sandbox on a gateway-mode worker", () => {
 describe("the eval install box on a gateway-mode worker", () => {
   const input = { network: "rovara-snet", image: IMAGE, name: "rovara-eval-install-abc-1-1", checkout: "/scratch/run-1/checkout", command: { executable: "python3", args: ["-m", "pip", "install", "-r", "requirements.txt"], cwd: "." }, taskId: "op-1", workspace: "0123456789abcdef" };
 
-  it("takes the gateway as its one name server, and the argument check accepts exactly that one", () => {
-    const args = evalInstallRunArgs({ ...input, dns: "172.28.250.2" });
+  it("pins the exact read-only resolver source and refuses a writable, absent, extra or different mount", () => {
+    const expected = { ...input, dns: "172.28.250.2", resolvConfPath: "/scratch/names/resolv.conf" };
+    const args = evalInstallRunArgs(expected);
     expect(flag(args, "--network")).toEqual(["rovara-snet"]);
-    expect(flag(args, "--dns")).toEqual(["172.28.250.2"]);
-    expect(evalInstallArgProblems(args, { ...input, dns: "172.28.250.2" })).toEqual([]);
-    // Any other name server, a second one, or none where one is expected: refused.
-    expect(evalInstallArgProblems(args, { ...input, dns: "8.8.8.8" }).length).toBeGreaterThan(0);
-    expect(evalInstallArgProblems([...args.slice(0, args.indexOf("--workdir")), "--dns", "8.8.8.8", ...args.slice(args.indexOf("--workdir"))], { ...input, dns: "172.28.250.2" }).length).toBeGreaterThan(0);
-    expect(evalInstallArgProblems(evalInstallRunArgs(input), { ...input, dns: "172.28.250.2" }).length).toBeGreaterThan(0);
-    expect(() => evalInstallRunArgs({ ...input, dns: "not an address" })).toThrow("the eval install step's arguments are unsound");
+    expect(flag(args, "--dns")).toEqual([]);
+    expect(flag(args, "--mount")).toEqual(["type=bind,src=/scratch/names/resolv.conf,dst=/etc/resolv.conf,readonly"]);
+    expect(evalInstallArgProblems(args, expected)).toEqual([]);
+    const bad = [args.map(value => value.replace(",readonly", ",rw")), args.map(value => value.replace("/scratch/names/", "/etc/")), args.map(value => value.replace("dst=/etc/resolv.conf", "dst=/tmp/resolv.conf")), evalInstallRunArgs(input)];
+    for (const variant of bad) expect(evalInstallArgProblems(variant, expected).length).toBeGreaterThan(0);
+    const at = args.indexOf("--workdir");
+    expect(evalInstallArgProblems([...args.slice(0, at), "--dns", "8.8.8.8", ...args.slice(at)], expected).length).toBeGreaterThan(0);
+    expect(() => evalInstallRunArgs({ ...expected, resolvConfPath: "/bad,path" })).toThrow("the eval install step's arguments are unsound");
   });
 
   it("without a gateway there is no --dns, and a --dns in the arguments is still refused (as before)", () => {

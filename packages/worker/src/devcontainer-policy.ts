@@ -1,3 +1,4 @@
+import { gatewayResolverMount, gatewayWorkerDirectory } from "./gateway-name-files.js";
 import { lstatSync, readlinkSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -406,6 +407,7 @@ function hostPathAllowed(path: string, root: string, options: { allowRoot: boole
 
 /** The parts of `docker inspect` that say what a container was given. */
 export interface ContainerInspection {
+  Config?: { Labels?: Readonly<Record<string, string>> | null };
   HostConfig?: {
     Privileged?: boolean;
     CapAdd?: readonly string[] | null;
@@ -421,7 +423,7 @@ export interface ContainerInspection {
     VolumesFrom?: readonly string[] | null;
     DeviceRequests?: readonly unknown[] | null;
   };
-  Mounts?: ReadonlyArray<{ Type?: string; Name?: string; Source?: string; Destination?: string }> | null;
+  Mounts?: ReadonlyArray<{ Type?: string; Name?: string; Source?: string; Destination?: string; RW?: boolean }> | null;
   /** Every network the container is attached to, by name. */
   NetworkSettings?: { Networks?: Readonly<Record<string, unknown>> | null };
 }
@@ -469,8 +471,10 @@ export function containerProblems(
   const mounts = inspection.Mounts ?? [];
   let dataVisible = false;
   let stateVisible = false;
+  const gatewayResolver = context.walledNetwork === undefined ? undefined : gatewayResolverMount(inspection, gatewayWorkerDirectory(context.rootPath));
   for (const mount of mounts) {
     if (mount.Type !== "bind") continue;
+    if (gatewayResolver !== undefined && mount.Destination === "/etc/resolv.conf" && gatewayResolver === mount.Source) continue;
     const source = mount.Source === undefined ? undefined : resolvePath(resolve(mount.Source));
     if (source === undefined || !hostPathAllowed(source, root, { allowRoot: true })) {
       problems.push(`a bind mount of ${mount.Source ?? "an unknown path"}`);

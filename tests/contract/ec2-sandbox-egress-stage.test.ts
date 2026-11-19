@@ -1,11 +1,10 @@
 // Lane L4-NETG (DEC 254zzz77): the EC2 worker's sandbox-egress stage (packages/worker/ec2/sandbox-egress.sh) and boot.sh's hook, run in bash with a STATEFUL fake Docker, a fake iptables with a rules file and fake systemd
 // commands. Every path the stage writes as root is replaced by a temporary one; every line that decides something runs as written. The real-Docker half (an internal network really has no route, the gateway really answers)
 // is tests/linux/worker-sandbox-egress.test.ts, which CI runs.
-import { execFile, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createSocket } from "node:dgram";
 import { describe, expect, it } from "vitest";
 import { EGRESS_GATEWAY_SOURCE } from "../../packages/contracts/src/egress-gateway-source.js";
 import { SANDBOX_REGISTRY_DENY, SANDBOX_S3_DENY } from "../../packages/contracts/src/sandbox-deny-domains.js";
@@ -85,7 +84,10 @@ case "$1" in
   run)
     case " $* " in
       *" --input-type=module "*) case "$*" in *EGRESS_GATEWAY_SOURCE*) cat "${join(dir, "program")}" ;; *SANDBOX_S3_DENY*) cat "${join(dir, "s3names")}" ;; *) cat "${join(dir, "names")}" ;; esac ;;
-      *" --network rovara-snet "*) ${options.failProbe === true ? "exit 1" : "exit 0"} ;;
+      *" --network rovara-snet "*)
+        source=""; for arg; do case "$arg" in type=bind,src=*,dst=/etc/resolv.conf,readonly) source=\${arg#type=bind,src=}; source=\${source%,dst=/etc/resolv.conf,readonly} ;; esac; done
+        [[ -n "$source" ]] && cp "$source" "$S/probe-resolv.conf" || exit 1
+        ${options.failProbe === true ? "exit 1" : "exit 0"} ;;
       *) exit 1 ;;
     esac ;;
   *) exit 1 ;;
@@ -102,7 +104,7 @@ function stageFor(h: Host): string {
     .split("/etc/docker/daemon.json").join(h.daemon)
     .split("/etc/systemd/system").join(h.units)
     .split("/var/lib/rovara-egress").join(join(h.dir, "egress-allow"))
-    .split("/etc/resolv.conf").join(h.resolv)
+    .split(" /etc/resolv.conf ").join(` ${h.resolv} `)
     .split("/run/systemd/resolve/resolv.conf").join(`${h.resolv}.none`);
 }
 
@@ -154,7 +156,10 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     expect(connect).toBeLessThan(log.indexOf("docker start rovara-egw"));
     // The check: a container of the worker image on the inner network with the gateway as its name server, no capability, read-only.
     const probe = log.find((line) => line.startsWith("docker run") && line.includes("--network rovara-snet"))!;
-    expect(probe).toContain("--dns 172.28.250.2 --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000");
+    expect(probe).not.toContain("--dns");
+    expect(readFileSync(join(h.state, "probe-resolv.conf"), "utf8")).toBe("nameserver 172.28.250.2\noptions ndots:0 timeout:3 attempts:1\n");
+    expect(probe).toMatch(/--mount type=bind,src=.*\/probe-[A-Za-z0-9]+\/resolv\.conf,dst=\/etc\/resolv\.conf,readonly --read-only --cap-drop ALL/u);
+    expect(log.filter(line => line.startsWith("docker run") && line.includes("--network rovara-snet"))).toHaveLength(1);
     expect(log.indexOf(probe)).toBeGreaterThan(log.indexOf("docker start rovara-egw"));
     // The program and the deny list are read from the digest-pinned worker image with no network, no capability and a read-only root.
     for (const line of log.filter((entry) => entry.startsWith("docker run") && entry.includes("--input-type=module"))) expect(line).toContain(`--rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --workdir /opt/agentx --entrypoint node ${WORKER_IMAGE} --input-type=module -e`);
@@ -271,21 +276,16 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     expect(readFileSync(join(present.dir, "agentx", "worker-dns"), "utf8")).toBe("10.42.0.2\n169.254.169.253\n");
   });
 
-  it("probes the default name server too: a second check from a container with no --dns of its own (as a docker build step is) that must also see the registry name refused", () => {
-    const h = host();
-    expect(runStage(h).status).toBe(0);
-    const probes = calls(h).filter((line) => line.startsWith("docker run") && line.includes("--network rovara-snet"));
-    expect(probes).toHaveLength(2);
-    expect(probes[0]).toContain("--dns 172.28.250.2");
-    expect(probes[1]).not.toContain("--dns");
-    // (the probe script spans lines in the call log, so its last argument is on a later line; the fake `timeout` and the fake `docker` each log the call)
-    expect(calls(h).filter((line) => line.endsWith(" default"))).toHaveLength(2);
-    // The second one failing fails the boot (a daemon that was not restarted on the new file).
-    const failing = host();
-    writeFileSync(join(failing.dir, "bin", "docker"), readFileSync(join(failing.dir, "bin", "docker"), "utf8").replace('*" --network rovara-snet "*) exit 0 ;;', '*" --network rovara-snet "*) case "$*" in *" default") exit 1 ;; *) exit 0 ;; esac ;;'));
-    const result = runStage(failing);
-    expect(result.status).not.toBe(0);
-    expect(result.failure).toContain("did not pass its checks");
+  it("probes through the mounted resolver only and removes the probe file afterward, including on a broken-resolver failure", () => {
+    for (const failProbe of [false, true]) {
+      const h = host({ failProbe });
+      expect(runStage(h).status === 0).toBe(!failProbe);
+      const probes = calls(h).filter(line => line.startsWith("docker run") && line.includes("--network rovara-snet"));
+      expect(probes).toHaveLength(1);
+      expect(probes[0]).not.toContain("--dns");
+      const source = /type=bind,src=([^,]+),dst=\/etc\/resolv\.conf,readonly/u.exec(probes[0]!)![1]!;
+      expect(existsSync(source)).toBe(false);
+    }
   });
 
   it("the worker's launcher (boot.sh) gives the worker container --dns for each line of that file, before it execs docker, and nothing when the file is absent (bridge mode)", () => {
@@ -525,40 +525,28 @@ describe("the snippets the stage runs", () => {
     expect(spawnSync(process.execPath, ["--check", "-"], { input: probe, encoding: "utf8" }).status).toBe(0);
   });
 
-  it("the probe passes only when a registry name is NXDOMAIN AND a raw address has no route; it fails when the name resolves, when a raw address connects, and when nothing answers", async () => {
-    // A name server on a loopback port that answers every question with `rcode` (and an A record when 0), and the probe run against it; `net.connect` is replaced (through a preload file) so the test never touches a network.
+  it("the probe passes only when a registry name is NXDOMAIN AND a raw address has no route; a broken resolver still fails boot", () => {
     const dir = mkdtempSync(join(tmpdir(), "se-probe-"));
-    const preloadFile = join(dir, "preload.cjs");
-    const run = async (input: { rcode: number; reach: "no route" | "open" | "refused" }, withServer = true) => {
-      const server = createSocket("udp4");
-      server.on("message", (message, remote) => {
-        const reply = Buffer.from(message);
-        reply.writeUInt16BE(0x8180 | input.rcode, 2);
-        if (input.rcode === 0) reply.writeUInt16BE(1, 6);
-        const answer = input.rcode === 0 ? Buffer.from([0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 1, 2, 3, 4]) : Buffer.alloc(0);
-        server.send(Buffer.concat([reply, answer]), remote.port, remote.address);
-      });
-      await new Promise<void>((resolve) => server.bind(0, "127.0.0.1", resolve));
-      const port = server.address().port;
-      if (!withServer) server.close();
-      writeFileSync(preloadFile, `const net=require("net");const events=require("events");net.connect=()=>{const s=new events.EventEmitter();setImmediate(()=>s.emit(${input.reach === "open" ? '"connect"' : input.reach === "refused" ? '"error", Object.assign(new Error("refused"), {code:"ECONNREFUSED"})' : '"error", Object.assign(new Error("unreachable"), {code:"ENETUNREACH"})'}));return s;};`);
-      // Asynchronous: the name server above lives in this process, so a blocking spawn would stop it from answering.
-      const ran = await new Promise<{ status: number | null; out: string }>((resolve) => {
-        execFile(process.execPath, ["-r", preloadFile, "-e", probe, `127.0.0.1:${String(port)}`], { encoding: "utf8", timeout: 30_000 }, (error, stdout) => resolve({ status: error === null ? 0 : typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : null, out: stdout }));
-      });
-      if (withServer) server.close();
-      return ran;
+    const preload = join(dir, "preload.cjs");
+    const run = (dns: "ENOTFOUND" | "EAI_AGAIN" | "ECONNREFUSED" | "answer", reach: "ENETUNREACH" | "EHOSTUNREACH" | "ECONNREFUSED" | "open" | "timeout", allow = true) => {
+      writeFileSync(preload, `const dns=require("dns"),net=require("net"),events=require("events");dns.promises.lookup=async(name)=>{if(name==="registry.npmjs.org"){${allow ? 'return {address:"172.28.250.2",family:4}' : 'throw Object.assign(new Error("resolver"),{code:"ENOTFOUND"})'}}if(name!=="ghcr.io")throw new Error("wrong name");${dns === "answer" ? 'return {address:"1.2.3.4",family:4}' : `throw Object.assign(new Error("resolver"),{code:${JSON.stringify(dns)}})`}};net.connect=()=>{const s=new events.EventEmitter();setImmediate(()=>s.emit(${reach === "open" ? '"connect"' : reach === "timeout" ? '"timeout"' : `"error",{code:${JSON.stringify(reach)}}`}));return s;};`);
+      return spawnSync(process.execPath, ["-r", preload, "-e", probe, "172.28.250.2"], { encoding: "utf8", timeout: 5000 });
     };
-    expect(await run({ rcode: 3, reach: "no route" })).toMatchObject({ status: 0 });
-    expect((await run({ rcode: 3, reach: "no route" })).out).toContain('"ok":true');
-    expect(await run({ rcode: 0, reach: "no route" })).toMatchObject({ status: 1 });
-    expect((await run({ rcode: 0, reach: "no route" })).out).toContain("a registry name resolved");
-    expect(await run({ rcode: 3, reach: "open" })).toMatchObject({ status: 1 });
-    expect((await run({ rcode: 3, reach: "open" })).out).toContain("a raw address was reachable");
-    expect(await run({ rcode: 3, reach: "no route" }, false)).toMatchObject({ status: 1 });
-    // A refusal is not "no route": something on that network answered.
-    expect(await run({ rcode: 3, reach: "refused" })).toMatchObject({ status: 1 });
-  }, 60_000);
+    for (const reach of ["ENETUNREACH", "EHOSTUNREACH", "timeout"] as const) expect(run("ENOTFOUND", reach).status).toBe(0);
+    expect(run("answer", "ENETUNREACH").status).toBe(1);
+    expect(run("ENOTFOUND", "ENETUNREACH", false).status).toBe(1);
+    expect(run("ENOTFOUND", "open").status).toBe(1);
+    expect(run("ENOTFOUND", "ECONNREFUSED").status).toBe(1);
+    for (const dns of ["EAI_AGAIN", "ECONNREFUSED"] as const) {
+      const broken = run(dns, "ENETUNREACH");
+      expect(broken.status).toBe(1);
+      expect(broken.stdout).toContain("the gateway did not answer");
+    }
+    // Production must use getaddrinfo's mounted resolver, with no explicit-server bypass.
+    expect(probe).toContain("dns.promises.lookup");
+    expect(probe).not.toContain("setServers");
+  });
+
 });
 
 describe("boot.sh's sandbox-egress hook and the boot configuration", () => {
