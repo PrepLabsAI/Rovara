@@ -8,7 +8,7 @@ import { currentWorkflowPublicationAuthorityForTask } from "../../packages/broke
 import { getItem } from "../../packages/broker/src/aws/cancellation.js";
 import { taskKey, type DeveloperTaskRecord, developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
 import { finishPlanningWithMarkdown } from "../support/plan-documents.js";
-import { createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
+import { MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, finishOperation, loadSlackBroker } from "../support/slack-broker.js";
 
 const A = "org_demoaaaaaaaaaaaaaaaa";
@@ -83,6 +83,34 @@ async function startedTask() {
   await finishOperation(w.handler, w.db, workspaceId, String(plan.id), "FAILED");
   return { w, taskId, workspaceId };
 }
+
+describe("built-in install Slack workflow", () => {
+  it("plans and approves an unstamped legacy task with no company layer", async () => {
+    const h = await createSingleAnswerPlanBroker({ channelMembers: async r => ({ ok: true, memberOf: r.channelIds }) });
+    const started = await h.handler({ source: "agentx.slack-ingress", action: "start-workflow",
+      thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1700000000.000001" },
+      userId: MAYA.slackUserId, instructions: "Fix the retry bug", workflowPath: "QUICK", requestId: randomUUID() });
+    expect(started.statusCode, started.body).toBe(200);
+    const taskId = String((JSON.parse(started.body) as { taskId: string }).taskId);
+    const task = h.db.get(`DEVTASK#${taskId}`, "META")!;
+    expect(task.companyId).toBeUndefined();
+    const workspaceId = String(task.workspaceId);
+    const prepare = h.db.find(row => row.workspaceId === workspaceId && row.kind === "prepare")[0]!;
+    await finishOperation(h.handler, h.db, workspaceId, String(prepare.id), "SUCCEEDED",
+      { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] });
+    const plan = h.db.find(row => row.workspaceId === workspaceId && row.workflowMode === "PLAN")[0]!;
+    expect(plan).toBeDefined();
+    const artifactDigest = await finishPlanningWithMarkdown(h, workspaceId, String(plan.id), "# Plan\n\n1. Fix the retry bug.\n");
+    const workflow = h.db.get(`DEVTASK#${taskId}`, "META")!.workflow as { revision: number };
+    const approved = await h.handler({ source: "agentx.slack-ingress", action: "workflow-decision", taskId, userId: MAYA.slackUserId,
+      thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1700000000.000001" }, requestId: randomUUID(),
+      expectedRevision: workflow.revision, artifactDigest, decision: "APPROVE", reason: "Approved", selectedOptionalCheckIds: [] });
+    expect(approved.statusCode, approved.body).toBe(200);
+    expect(JSON.parse(approved.body), approved.body).not.toHaveProperty("refused");
+    expect(h.db.find(row => row.workspaceId === workspaceId && row.workflowMode === "IMPLEMENT")).toHaveLength(1);
+    expect(h.db.get(`DEVTASK#${taskId}`, "META")!.companyId).toBeUndefined();
+  });
+});
 
 describe("Slack workflow retry project rows are checked against the task company", () => {
   it("the shared helper accepts only a valid task company and its own legacy row", () => {

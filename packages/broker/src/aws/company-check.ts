@@ -89,11 +89,12 @@ export function assertTaskProjectCompany(task: { companyId?: unknown }, projectR
   }
 }
 
-/** Read one legacy revision for a persisted task. Missing rows retain the reader's existing handling; present rows must belong to the task before use. */
-export async function readTaskLegacyProject<T>(task: { companyId?: unknown }, read: () => Promise<T>): Promise<T> {
-  taskProjectCompany(task); // Invalid or absent scope must refuse before model/integration reads.
+/** Read one legacy revision for a persisted task. Only server wiring with no company layer may recover an unstamped task as built-in; named-company wiring stays strict. */
+export async function readTaskLegacyProject<T>(task: { companyId?: unknown }, read: () => Promise<T>, implicitCompanyOnly = false): Promise<T> {
+  const scopedTask = implicitCompanyOnly && task.companyId === undefined ? { companyId: IMPLICIT_COMPANY_ID } : task;
+  taskProjectCompany(scopedTask); // Invalid or absent named-company scope refuses before model/integration reads.
   const project = await read();
-  if (project !== undefined) assertTaskProjectCompany(task, project);
+  if (project !== undefined) assertTaskProjectCompany(scopedTask, project);
   return project;
 }
 

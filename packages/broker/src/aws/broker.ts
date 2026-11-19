@@ -3441,7 +3441,8 @@ async function taskLegacyScope<T extends { companyId?: unknown; share?: { teamId
   if (task.companyId !== undefined) return task;
   const refuse = () => agentXError("FORBIDDEN", "Slack channel is not bound to a project");
   const companyOfTeam = dependencies.workspaces?.requireCompany.bind(dependencies.workspaces) ?? dependencies.installTeamCompany;
-  if (companyOfTeam === undefined) return { ...task, companyId: IMPLICIT_COMPANY_ID };
+  if (companyOfTeam === undefined) return dependencies.companies === undefined && dependencies.slackCompanies === undefined && dependencies.developer?.companies === undefined
+    ? { ...task, companyId: IMPLICIT_COMPANY_ID } : task;
   const team = task.share?.teamId;
   if (team === undefined || team !== (dependencies.slackWorkspaceLegacyTeamId ?? dependencies.slackInstallTeamOnly ?? dependencies.developer?.slackTeamId)) return task;
   let company: unknown;
@@ -15357,9 +15358,9 @@ async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity:
   if (membership?.role !== "administrator" || !await administratorOfTaskCompany(dependencies, identity, task)) throw agentXError("FORBIDDEN", "administrator project membership is required");
   const claimed = [identity.claims.name, identity.claims.email].find((claim): claim is string => typeof claim === "string" && claim.trim() !== "");
   return adminShareMode(
-    { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: tasks, now: Date.now },
+    { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: tasks, now: Date.now, implicitCompanyOnly: dependencies.workspaces === undefined && dependencies.installTeamCompany === undefined && dependencies.companies === undefined && dependencies.slackCompanies === undefined && dependencies.developer.companies === undefined },
     { issuer: identity.issuer, subject: identity.subject, ...(claimed === undefined ? {} : { displayName: claimed.trim() }) },
-    task,
+    await taskLegacyScope(dependencies, task),
     value,
   );
 }
@@ -15630,7 +15631,7 @@ async function assertCurrentWorkflowPublication(dependencies: AwsBrokerDependenc
     tableName: dependencies.tableName,
     workflowE2EPresentation: (input) => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
     workflowE2EPublicationChecks: (input) => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
-  }, task);
+  }, await taskLegacyScope(dependencies, task));
   if (currentAuthority === undefined || currentAuthority.mode !== publication.publicationMode
     || currentAuthority.pinnedRevision !== publication.admittedPinnedRevision
     || currentAuthority.latestRevision !== publication.admittedLatestRevision
