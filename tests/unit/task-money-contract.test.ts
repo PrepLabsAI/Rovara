@@ -10,5 +10,5 @@ it("strictly reads the shared task-money snapshot and pins its wire schema", () 
   const sample = (JSON.parse(bytes.toString()) as { examples: Record<string, unknown>[] }).examples[0]!;
   expect(parse(sample)).toEqual(sample);
   for (const patch of [{ spentMicros: { state: "available", value: 160 } }, { revision: -1 }, { currency: "EUR" }, { source: {} }, { finality: "final" }, { estimatedMicros: { state: "available", value: Number.MAX_SAFE_INTEGER + 1 } }]) expect(parse({ ...sample, ...patch })).toBeUndefined();
-  expect(createHash("sha256").update(bytes).digest("hex")).toBe("e405f0c6c995c4ed797ee88a621718e56134a34f436c943729e09b2c82a5d809");
+  expect(createHash("sha256").update(bytes).digest("hex")).toBe("5f35eba06e7884206679701604e7166cd024510059710714c06cbc607f94733e");
 });

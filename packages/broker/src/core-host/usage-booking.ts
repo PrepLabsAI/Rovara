@@ -1,3 +1,5 @@
+import { RunUsageCallSchema } from "@agentx/contracts";
+import type { LearningMeterEntry } from "../core/cost/ledger.js";
 // Usage booking on a deployed install (switch-on lane L8): every model usage a core task's worker reports is booked into the task's cost ledger, as the laptop's model proxy books each call
 // (`meter` in local/app/app.ts). A worker reports one `usage` event per model session (a run, a reviewer, a part of a plan) through the callback layer (services/callbacks.ts `bookUsage`),
 // and the batch is acknowledged only once its usage is booked: a booking that fails fails the batch, the worker sends it again, and the ledger counts each usage once.
@@ -91,7 +93,11 @@ export function createUsageBooking(deps: { store: DocumentStore; metering: Meter
     // Never apply receipts from a worker, even when their schema and scope look valid. In particular
     // they cannot finalize charges or apply signed revisions. Keep booking the aggregate tokens.
     const read = readUsagePayload(report.payload, { checkpointsBooked: report.checkpointsBooked === true });
-    const entry: MeterEntry = {
+    const payloadCalls = (report.payload as { calls?: unknown } | null)?.calls;
+    const parsedCalls = Array.isArray(payloadCalls) && payloadCalls.length <= 2000 ? payloadCalls.map((call: unknown) => RunUsageCallSchema.safeParse(call)) : undefined;
+    const runUsageCalls = parsedCalls?.every((call) => call.success) ? parsedCalls.map((call) => call.data) : undefined;
+    const entry: LearningMeterEntry = {
+      ...(runUsageCalls === undefined ? {} : { runUsageCalls }),
       companyId: report.companyId, entryId: report.entryId, at: report.at, taskId: report.taskId,
       usage: read?.usage ?? { provider: UNREADABLE_USAGE_PROVIDER, modelId: "unreadable", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
       ...(read?.reportedMicros === undefined ? {} : { reportedCost: { micros: read.reportedMicros, currency: "USD" } }),

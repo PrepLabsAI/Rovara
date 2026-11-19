@@ -2,7 +2,7 @@
 import { SECOND_REVIEW_OPERATION_TAG, createTaskUsageTelemetry as telemetryOf, type TaskUsageOutcome as Outcome, type UsageStats } from "@agentx/contracts";
 import { budgetExhaustedFromMarker, modelNotAllowedFromMarker } from "@agentx/model-runtime";
 import { sanitizeModelCallEvent } from "./model-call-monitor.js";
-import { redactCredentials } from "./events.js";
+import { redactCredentials, WORKER_EVENT_PAYLOAD_MAX_BYTES } from "./events.js";
 export {
   createTaskUsageTelemetry,
   effectiveCacheRetention,
@@ -24,6 +24,14 @@ export const reviewUsageArtifactName = (role: string, secondReviewTry: number | 
   secondReviewTry === undefined ? `workflow-review-${role.toLowerCase()}-usage.json` : `workflow-${SECOND_REVIEW_OPERATION_TAG}-${String(secondReviewTry)}-usage.json`;
 
 export function usageForControlPlane<T>(usage: T, requested: { thinkingLevel?: unknown }): T {
+  // Unit history is optional. Preserve the accounting envelope when its history would
+  // exceed the event bound; usage.json still keeps every call, and older readers use
+  // the aggregate as session-granularity history rather than a partial call count.
+  if (typeof usage === "object" && usage !== null && "calls" in usage && Buffer.byteLength(JSON.stringify(usage), "utf8") > WORKER_EVENT_PAYLOAD_MAX_BYTES) {
+    const { calls: _calls, ...aggregate } = usage;
+    void _calls;
+    return usageForControlPlane(aggregate, requested) as T;
+  }
   if (requested.thinkingLevel !== undefined || typeof usage !== "object" || usage === null || !("thinkingLevel" in usage)) return usage;
   const rest: Record<string, unknown> = { ...usage };
   delete rest.thinkingLevel;
@@ -40,6 +48,7 @@ export function statsSince<T extends UsageStats>(stats: T, baseline: UsageStats 
   const tokens = (now: number, before: number) => Math.max(0, now - before);
   return {
     ...stats,
+    ...(stats.calls === undefined ? {} : { calls: stats.calls.filter((call) => !baseline.calls?.some((previous) => previous.callId === call.callId)) }),
     tokens: {
       input: tokens(stats.tokens.input, baseline.tokens.input), output: tokens(stats.tokens.output, baseline.tokens.output),
       cacheRead: tokens(stats.tokens.cacheRead, baseline.tokens.cacheRead), cacheWrite: tokens(stats.tokens.cacheWrite, baseline.tokens.cacheWrite),

@@ -556,14 +556,16 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
 
   /** Records what the call used and adds its cost to the operation's spend. Recording the same entry twice counts once (the port's rule). */
   async function record(token: { operationId: string; taskId: string | undefined; projectName: string | undefined; budget: Cost | undefined; slot?: string | undefined }, route: ProxyRoute, usage: TokenUsage, ledger: { currency: string | undefined; spentMicros: number; unpriced: number }, assumed?: ModelGrant["assumedPrice"]): Promise<void> {
-    const result = await options.metering.record({
+    const entry = {
       companyId: options.companyId,
+      usageGranularity: "call" as const,
       entryId: `${token.operationId}:${randomUUID()}`,
       at: new Date(now()).toISOString(),
       usage: { provider: route.provider, modelId: route.model, tokens: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite } },
       ...(token.taskId === undefined ? {} : { taskId: token.taskId }),
       ...(token.projectName === undefined ? {} : { projectName: token.projectName }),
-    });
+    };
+    const result = await options.metering.record(entry);
     if (result.cost === null && assumed !== undefined) {
       // An unpriced slot the owner accepted: the slot's own record counts the call at the assumed price (an upper bound); the cost ledger above recorded it as unknown.
       ledger.currency = "USD";

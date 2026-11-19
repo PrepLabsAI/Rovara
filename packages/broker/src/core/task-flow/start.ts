@@ -1,3 +1,5 @@
+import { parsePreviewV2 } from "@agentx/contracts";
+import { captureStartQuote } from "../cost/run-usage.js";
 // Lane L6a, task flow core: starting a task (Cloud's `aws/developer-tasks/start.ts`, rewritten onto the W0 ports).
 //
 // One start is one document-store transaction: the workspace, its preparation (an operation and its staged dispatch message), the task, its
@@ -221,8 +223,17 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     },
     requester: { personId: developerId, provider: principal.provider },
   });
+  let startComparison: TaskRecord["startComparison"];
+  if (asWorkflow && run?.setupAgent === undefined && run?.wikiBuild === undefined && deps.captureStartComparison !== undefined) {
+    try {
+      const quote = parsePreviewV2(await deps.captureStartComparison({ project: request.project, inputText: request.instructions }));
+      const capturedAt = iso(deps);
+      if (quote !== undefined && quote.orgId === deps.companyId && quote.project === request.project && Date.parse(quote.asOf) <= Date.parse(capturedAt) && Date.parse(quote.expiresAt) > Date.parse(capturedAt)) startComparison = { ...quote, selectedPath: workflowPath };
+    } catch { /* Unavailable advisory data never authorizes or prevents a start. */ }
+  }
   const task: TaskRecord = {
     ...taskKey(taskId), entityType: "DEVELOPER_TASK", companyId: deps.companyId, taskId, developerId, provider: principal.provider, developerName: principal.displayName,
+    ...(startComparison === undefined ? {} : { startComparison }),
     origin: origin.data, client, project: request.project, title, workspaceId, ownerKey, conversationId, startingRevision: revision, charge, shared: false,
     // A workflow task quotes the request in each plan's "why".
     ...(asWorkflow ? { requestText } : {}),
@@ -241,6 +252,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
       ...(understandFirst && deps.planCheck !== false ? { program: ROVARA_CODE_PROGRAM } : {}),
     }) } : {}),
   };
+  task.usageStartQuote = await captureStartQuote(deps, task, iso(deps));
   const pointer: TaskPointerRecord = {
     ...taskPointerKey(deps.companyId, workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId, developerId,
     requester: { kind: "developer", developerId, provider: principal.provider },

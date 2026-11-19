@@ -53,6 +53,7 @@ describe("the route table", () => {
     ["DELETE", "/v1/dev/client/projects/payments/members/abc", "projects:members"],
     ["POST", "/v1/dev/tasks", "tasks:start"],
     ["GET", "/v1/dev/tasks/t1", "tasks:read"],
+    ["POST", "/v1/dev/projects/payments/start-estimates", "tasks:read"],
     ["POST", "/v1/dev/tasks/t1/cancel", "tasks:act"],
     ["POST", "/v1/dev/tasks/t1/close", "tasks:act"],
     ["GET", "/v1/dev/tasks/t1/people", "tasks:read"],
@@ -168,6 +169,7 @@ const ADA = "a".repeat(64);
 const signer = localSigner();
 let db: FakeDynamoDb;
 let handler: AdminHandler;
+const previewCore = vi.fn(async () => ({ statusCode: 200, headers: {}, body: JSON.stringify({ quoteVersion: 2 }) }));
 
 async function bearer(claims: Record<string, unknown> = {}): Promise<string> {
   const body = { iss: ISSUER, aud: "web-app", azp: "web-app", sub: ADA, amr: "oidc", env: "production", sid: "s-cloud", iat: T0 / 1000, nbf: T0 / 1000, exp: T0 / 1000 + 3600, ...claims };
@@ -210,6 +212,7 @@ async function setUp(mode: "linking" | "developer") {
     // Guided onboarding PR 7: the Linear connect routes need their wiring to exist; this one connects nothing, so only the route table's answer is tested here.
     linearConnect: { connections: {} as never, app: async () => undefined, fetch: vi.fn() as never, log: () => undefined },
     // L2-4: the waiting-ticket routes need the core's intake to exist; this one holds no tickets, so only the route table's answer is tested here.
+    coreTasks: { route: previewCore },
     coreIntake: { intakeFor: async () => undefined, waiting: async () => ({ items: [], sources: [] }), start: async () => ({ outcome: "not_found" }), seedTicketUpdates: async () => "no_intake", dismiss: async () => false },
     // Guided onboarding PR 14: the company engine model route needs its wiring to exist; this gateway offers nothing readable, so only the route table's answer is tested here.
     companyEngineModel: { offered: async () => { throw new Error("none"); }, installModel: () => undefined, log: () => undefined },
@@ -293,6 +296,18 @@ describe("the developer API with a scoped client's token (a named environment)",
     cloudClient([], true);
     const authorization = await scoped();
     for (const route of gated) expect(refusedForScope(await call(route.method, sample(route.path), authorization)), `${route.method} ${route.path}`).toBe(false);
+  });
+
+  it("dispatches the preview only after its read scope is checked, without forwarding credentials", async () => {
+    previewCore.mockClear();
+    cloudClient(["tasks:read"]);
+    const path = "/v1/dev/projects/payments/start-estimates";
+    expect((await call("POST", path, await scoped())).status).toBe(403);
+    expect(previewCore).not.toHaveBeenCalled();
+    expect(await call("POST", path, await scoped("tasks:read"))).toMatchObject({ status: 200, body: { quoteVersion: 2 } });
+    expect(previewCore.mock.calls).toEqual([[expect.objectContaining({ method: "POST", path, headers: {}, body: "{}" }), expect.objectContaining({ developerId: ADA })]]);
+    expect((await call("GET", path, await scoped("tasks:read"))).status).toBe(404);
+    expect(previewCore).toHaveBeenCalledTimes(1);
   });
 
   it("logs a refusal with the client's id, the route and the missing scope, never the token", async () => {
