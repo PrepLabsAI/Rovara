@@ -1418,7 +1418,6 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
         if (request.method === "POST" && serviceUrl.pathname === "/v1/workflows/quick-start") {
           return json(await startQuickFromIntake(dependencies, tasks, identity, parseBody(request.body)), request.requestId);
         }
-        // Lead 4 J2: the smart Just answer for a Slack thread (slack-answers.ts). Who may ask and which project is decided there from the verified thread and member, never from the body.
         // DEC 254zzz79 (3): how this thread's chat and routing model calls are made (the company's AI through the gateway, never Rovara-paid; slack-model-access.ts).
         if (request.method === "POST" && serviceUrl.pathname === SLACK_MODEL_ACCESS_SERVICE_PATH) {
           const bindings = createSlackWorkspaceBindings({ client: dependencies.documentClient, tableName: dependencies.tableName, legacyTeamId: dependencies.slackWorkspaceLegacyTeamId });
@@ -1427,6 +1426,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
             env: dependencies.slackModelAccess?.env ?? {}, taskTokens: dependencies.slackModelAccess?.taskTokens,
           }, identity), request.requestId);
         }
+        // Lead 4 J2: the smart Just answer for a Slack thread (slack-answers.ts). Who may ask and which project is decided there from the verified thread and member, never from the body.
         if (request.method === "POST" && serviceUrl.pathname === SLACK_ANSWER_SERVICE_PATH) {
           return json(await askSlackAnswerForIdentity({ company: dependencies, core: dependencies.developer?.coreApp }, identity, parseBody(request.body)), request.requestId);
         }
