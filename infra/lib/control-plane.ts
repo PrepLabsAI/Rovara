@@ -41,7 +41,7 @@ import { CompanySecrets } from "./company-secrets.js";
 import { SavedEnvImages } from "./saved-env-images.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { TaskPersonProof } from "./task-person-proof.js";
-import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerNamesParameterArn } from "./broker-names.js";
+import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerEnvironmentName, brokerNamesParameterArn } from "./broker-names.js";
 import { CompanySignInSwitch } from "./company-signin.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
@@ -216,16 +216,10 @@ export class ControlPlaneStack extends Stack {
       visibilityTimeout: Duration.minutes(2),
     });
 
-    // ENV-ROOM (infra/lib/broker-names.ts): a named environment's broker gets its generated names packed (AGENTX_NAMES) and derives what the environment's name decides; the legacy
-    // template passes every variable whole, as before.
-    // ENV-ROOM 2: the entry reads a named environment's broker names from their SSM parameter before it loads broker.ts (packages/broker/src/aws/broker-handler.ts).
+    // ENV-ROOM (infra/lib/broker-names.ts): the broker gets its generated names packed (AGENTX_NAMES) and derives what the environment's name decides. #1149: the legacy
+    // install (production) too, under "production", deriving only the values identical to its own (contracts LEGACY_INSTALL_LAYOUT).
+    // ENV-ROOM 2: the entry reads the broker's names from their SSM parameter before it loads broker.ts (packages/broker/src/aws/broker-handler.ts).
     const broker = packagedFunction(this, "Broker", "packages/broker/src/aws/broker-handler.ts", {
-      ...(naming.env !== undefined ? {} : {
-        STATE_TABLE_NAME: state.tableName,
-        AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID: projectSetupRuntimeCatalogId,
-        AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: e2eFeatureRuntimeCatalogId,
-        ARTIFACT_BUCKET_NAME: artifacts.bucketName,
-      }),
       OIDC_ISSUER: oidcIssuer.valueAsString,
       ADMIN_CLAIM: adminClaim.valueAsString,
       ADMIN_VALUES: adminValues.valueAsString,
@@ -240,11 +234,11 @@ export class ControlPlaneStack extends Stack {
     if (naming.env !== undefined) {
       (broker.role!.node.defaultChild as iam.CfnRole).roleName = brokerRoleName(naming);
       (broker.node.defaultChild as lambda.CfnFunction).functionName = brokerFunctionName(naming);
-      addBrokerName(broker, naming, "stateTable", state.tableName, state.tableName);
-      addBrokerName(broker, naming, "artifactBucket", artifacts.bucketName, artifacts.bucketName);
-      addDerivedBrokerVariable(broker, naming, "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID", projectSetupRuntimeCatalogId);
-      addDerivedBrokerVariable(broker, naming, "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID", e2eFeatureRuntimeCatalogId);
     }
+    addBrokerName(broker, naming, "stateTable", state.tableName, state.tableName);
+    addBrokerName(broker, naming, "artifactBucket", artifacts.bucketName, artifacts.bucketName);
+    addDerivedBrokerVariable(broker, naming, "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID", projectSetupRuntimeCatalogId);
+    addDerivedBrokerVariable(broker, naming, "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID", e2eFeatureRuntimeCatalogId);
     const connectorSecretsArn = this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${naming.connectorSecretPrefix}*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
     if (naming.env !== undefined) {
       // The two grantReadWriteData statements' action/resource cross product, less dynamodb:GetRecords and dynamodb:GetShardIterator (ENV-ROOM 2, IAM room for the names
@@ -302,7 +296,8 @@ export class ControlPlaneStack extends Stack {
     const swebenchStateMachineArn = this.formatArn({ service: "states", resource: "stateMachine", resourceName: swebenchNames(naming).stateMachineName, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
     // ENV-ROOM 2: a named broker reads its names from their one SSM parameter (infra/lib/broker-names.ts) with this same action, so the parameter's ARN joins this statement
     // rather than adding one (the broker's inline policy has little room: tests/contract/developer-signin-infrastructure.test.ts, broker IAM headroom).
-    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: naming.env === undefined ? swebenchParameterArns : [...swebenchParameterArns, brokerNamesParameterArn(naming.env)] }));
+    // #1149: the legacy install's broker reads its names parameter too (under "production").
+    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: [...swebenchParameterArns, brokerNamesParameterArn(brokerEnvironmentName(naming))] }));
     // Named: the broker's two StartExecution grants (this and the session deleter's, sessions.connectBroker) are one statement, for the same room. Legacy: as before.
     if (naming.env === undefined) broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
 
@@ -1164,7 +1159,7 @@ export class ControlPlaneStack extends Stack {
       addBrokerDeadLetterQueues(broker, naming, [
         ["dispatchDeadLetters", deadLetterQueues.dispatch], ["slackRequestDeadLetters", deadLetterQueues["slack-requests"]], ["developerNoticeDeadLetters", deadLetterQueues["developer-notices"]],
         ["developerNoticeStreamFailures", deadLetterQueues["developer-notice-stream"]], ["channelEventDeadLetters", deadLetterQueues["channel-events"]],
-      ], () => this.toJsonString(Object.fromEntries(Object.entries(deadLetterQueues).map(([name, queue]) => [name, queue.queueUrl]))));
+      ]);
       // Named environments only: the legacy (production) template keeps one statement on the broker's role, as mainline deploys it.
       if (naming.env !== undefined) {
         for (const queue of Object.values(deadLetterQueues)) queue.addToResourcePolicy(new iam.PolicyStatement({

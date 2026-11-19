@@ -18,14 +18,14 @@ const variablesOf = (stack: Stack, fn: lambda.Function): Record<string, unknown>
  * Batch 12 (#863, ENV-ROOM 2): a named broker's AGENTX_NAMES list is written to its one SSM String parameter, not the environment; the environment holds the parameter's name and
  * the revision, which must equal the one in the parameter's value. Returns the list after checking all of that.
  */
-function namesOf(stack: Stack, fn: lambda.Function): unknown {
+function namesOf(stack: Stack, fn: lambda.Function, env = "staging"): unknown {
   const variables = variablesOf(stack, fn);
   expect(variables).not.toHaveProperty("AGENTX_NAMES");
-  expect(variables.AGENTX_NAMES_PARAMETER).toBe("/agentx/staging/broker-names");
+  expect(variables.AGENTX_NAMES_PARAMETER).toBe(`/agentx/${env}/broker-names`);
   const parameters = Object.values((Template.fromStack(stack).toJSON() as { Resources: Record<string, { Type: string; Properties: { Name: string; Value: unknown } }> }).Resources)
     .filter((resource) => resource.Type === "AWS::SSM::Parameter");
   expect(parameters).toHaveLength(1);
-  expect(parameters[0]!.Properties.Name).toBe("/agentx/staging/broker-names");
+  expect(parameters[0]!.Properties.Name).toBe(`/agentx/${env}/broker-names`);
   const decoded = decodeBrokerNamesParameter(parameters[0]!.Properties.Value as string);
   if ("error" in decoded) throw new Error(decoded.error);
   expect(variables.AGENTX_NAMES_REVISION).toBe(decoded.revision);
@@ -33,10 +33,17 @@ function namesOf(stack: Stack, fn: lambda.Function): unknown {
 }
 
 describe("addBrokerName / addBrokerSetting", () => {
-  it("passes the whole value in the legacy install, and packs the bare one in a named environment with the account", () => {
+  it("packs the bare value with the account, in a named environment and (#1149) in the legacy install, which keeps a role's ARN whole and says it is the legacy layout", () => {
     const legacy = broker();
     addBrokerName(legacy.fn, legacyNaming(), "stateTable", "bare", "whole");
-    expect(variablesOf(legacy.stack, legacy.fn)).toEqual({ STATE_TABLE_NAME: "whole" });
+    addBrokerName(legacy.fn, legacyNaming(), "slackOrchestratorRole", "role-name", "role-arn-whole");
+    addBrokerSetting(legacy.fn, legacyNaming(), "signInSlack", "enabled");
+    const legacyVariables = variablesOf(legacy.stack, legacy.fn);
+    expect(legacyVariables).not.toHaveProperty("STATE_TABLE_NAME");
+    expect(legacyVariables.SLACK_ORCHESTRATOR_ROLE_ARN).toBe("role-arn-whole");
+    expect(legacyVariables.AGENTX_ACCOUNT_ID).toEqual({ Ref: "AWS::AccountId" });
+    expect(namesOf(legacy.stack, legacy.fn, "production")).toEqual("ts=bare");
+    expect(legacyVariables.AGENTX_SETTINGS).toEqual("ly=legacy,ss=enabled");
     const named = broker();
     addBrokerName(named.fn, environmentNaming("staging"), "stateTable", "my-table", "whole");
     addBrokerSetting(named.fn, environmentNaming("staging"), "signInSlack", "enabled");
@@ -72,10 +79,18 @@ describe("addBrokerName / addBrokerSetting", () => {
 });
 
 describe("addDerivedBrokerVariable", () => {
-  it("passes the value whole in the legacy install", () => {
+  it("passes the value whole in the legacy install, unless (#1149) the entry is marked legacy and derives exactly that value for production", () => {
     const { stack, fn } = broker();
+    // Not marked legacy: whole, whatever the value.
     addDerivedBrokerVariable(fn, legacyNaming(), "AGENTX_ALARM_PREFIX", "agentx-");
-    expect(variablesOf(stack, fn)).toEqual({ AGENTX_ALARM_PREFIX: "agentx-" });
+    // Marked legacy, and identical: nothing passed (the broker derives it).
+    addDerivedBrokerVariable(fn, legacyNaming(), "SWEBENCH_SETTINGS_PREFIX", "/agentx/production/");
+    // Marked legacy, but a different value: whole.
+    addDerivedBrokerVariable(fn, legacyNaming(), "CHANNEL_ADAPTER_SECRET_PREFIX", "agentx/elsewhere/");
+    const variables = variablesOf(stack, fn);
+    expect(variables.AGENTX_ALARM_PREFIX).toBe("agentx-");
+    expect(variables).not.toHaveProperty("SWEBENCH_SETTINGS_PREFIX");
+    expect(variables.CHANNEL_ADAPTER_SECRET_PREFIX).toBe("agentx/elsewhere/");
   });
 
   it("passes nothing in a named environment when the broker derives exactly that value, and stops synthesis when it would derive another", () => {

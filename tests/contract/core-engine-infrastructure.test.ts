@@ -26,6 +26,7 @@ import { CORE_ENGINE_VARIABLE as BROKER_SWITCH_VARIABLE, CORE_JOBS, CORE_SCHEDUL
 import { configKey, coreEngineValueWhenWired } from "../../packages/cli/src/config/keys.js";
 import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -92,12 +93,12 @@ describe("the model gateway settings (stack parameters CoreModelGatewayHost and 
     }
   });
 
-  it("are absent from the legacy (production) template, whose broker is still given the secret prefix whole", () => {
+  it("are absent from the legacy (production) template, whose broker derives the same secret prefix it was given whole (#1149)", () => {
     const legacyJson = legacy.toJSON() as Json;
     expect(legacyJson.Parameters).not.toHaveProperty("CoreModelGatewayHost");
     expect(legacyJson.Parameters).not.toHaveProperty("CoreAgentModel");
     const legacyBroker = Object.entries(legacyJson.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")!;
-    expect((legacyBroker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables.CHANNEL_ADAPTER_SECRET_PREFIX).toBe("agentx/production/");
+    expect(unpackedBrokerVariables((legacyBroker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables, legacyJson as never).CHANNEL_ADAPTER_SECRET_PREFIX).toBe("agentx/production/");
   });
 });
 
@@ -643,7 +644,9 @@ describe("L1a broker environment derivation", () => {
     // #1129: re-pinned for the company layer, the sign-in extras and the company-secrets role in the legacy template (both company switches off by default).
     // #1131: re-pinned. The legacy (production) template gains the reliability parts named environments had: the DispatchDeadLetters, StuckCancels and UnwaitedTaskFailures
     // alarms, the reconciler's idle Slack backstop (its settings, ReadThreadWaiters, PostUnwaitedTaskNote, the Slack poster) and callback key read, and the hand-off grant's ordering.
-    expect(digest(legacy.toJSON())).toBe("8810373a272829e43c4598946700c01a64b5ee1fb54a5d9507e51f7e36120bdf");
+    // #1149: re-pinned. The legacy broker packs its environment (the names parameter /agentx/production/broker-names, AGENTX_SETTINGS with the legacy layout marker, the
+    // names parameter's read in its ssm:GetParameters statement); tests/contract/legacy-broker-packed-environment.test.ts proves it boots with the same values.
+    expect(digest(legacy.toJSON())).toBe("b81c69c67ebd312df34dc1dbd55b5c5bcd00ced17aeb754fd76c368438909e04");
   });
 });
 import { createHash } from "node:crypto";

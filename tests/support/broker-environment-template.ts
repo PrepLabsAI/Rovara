@@ -6,12 +6,12 @@
 //  - HEALTH_DEAD_LETTER_QUEUES: `{ label: the queue's QueueName intrinsic }`;
 //  - a packed setting: its parameter's Ref;
 //  - a derived variable: the literal the broker derives from AGENTX_ENV (a core dispatch queue's URL as its fixed queue name).
-// A legacy broker (nothing packed) is returned as it is.
+// A broker with nothing packed is returned as it is. #1149: the legacy (production) broker is packed too, with AGENTX_INSTALL_LAYOUT=legacy: it derives only the entries marked `legacy`.
 // ENV-ROOM 2 (2026-11-17): a named broker's names are in their SSM parameter, not its Variables; pass the template and they are read from there (the parameter's Value less its
 // `v1:<revision>:` prefix), and the parameter's name and revision are left out, as the broker's code reads neither once the handler has read the names.
 import {
   BROKER_NAMES, BROKER_NAMES_PARAMETER_VARIABLE, BROKER_NAMES_REVISION_VARIABLE, BROKER_NAMES_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, DERIVED_BROKER_VARIABLES,
-  type BrokerNameSpec, type BrokerSettingSpec,
+  LEGACY_INSTALL_LAYOUT, type BrokerNameSpec, type BrokerSettingSpec,
 } from "@agentx/contracts";
 
 type TemplateResource = { Type: string; Properties?: Record<string, unknown>; DependsOn?: string[] };
@@ -35,11 +35,28 @@ function pieces(raw: unknown): Map<string, unknown> {
   const join = (raw as { "Fn::Join"?: [string, unknown[]] } | undefined)?.["Fn::Join"];
   const found = new Map<string, unknown>();
   if (join === undefined) return found;
-  for (let index = 0; index < join[1].length; index += 2) {
-    const code = /^,?([a-z]{2})=$/u.exec(String(join[1][index]))?.[1];
-    if (code === undefined) throw new Error(`unexpected packed piece ${JSON.stringify(join[1][index])}`);
-    found.set(code, join[1][index + 1]);
+  // `code=` pieces, each followed by its value: an intrinsic, or (CDK merges adjacent literals) a literal inside the same string, as in `,ly=legacy,mc=` (#1149). A packed value never
+  // holds a comma, so a string splits on commas into `code=value` pairs, the last of which may still wait for its intrinsic.
+  let pending: string | undefined;
+  for (const part of join[1]) {
+    if (typeof part !== "string") {
+      if (pending === undefined) throw new Error(`unexpected packed piece ${JSON.stringify(part)}`);
+      found.set(pending, part);
+      pending = undefined;
+      continue;
+    }
+    const pairs = part.split(",");
+    pairs.forEach((pair, index) => {
+      // A string after a waiting `code=` (a template whose condition a test resolved to its literal) starts with that code's value.
+      if (index === 0 && pending !== undefined) { found.set(pending, pair); pending = undefined; return; }
+      if (index === 0 && pair === "") return;
+      const match = /^([a-z]{2})=(.*)$/u.exec(pair);
+      if (match === null) throw new Error(`unexpected packed piece ${JSON.stringify(part)}`);
+      if (index === pairs.length - 1 && match[2] === "") pending = match[1]!;
+      else found.set(match[1]!, match[2]!);
+    });
   }
+  if (pending !== undefined) found.set(pending, "");
   return found;
 }
 
@@ -72,7 +89,14 @@ export function unpackedBrokerVariables(variables: Record<string, unknown>, temp
     out[spec.variable] = spec.switchFlag === true && (value === "1" || value === "0") ? (value === "1" ? "enabled" : "disabled") : value;
   }
   const env = rest.AGENTX_ENV;
-  if (typeof env === "string") for (const entry of DERIVED_BROKER_VARIABLES) out[entry.variable] = entry.kind === "text" ? entry.value(env) : entry.queueName(env);
+  // #1149: as the broker does, the legacy layout derives only what is marked `legacy`, and a variable passed whole is never replaced.
+  const legacy = out[BROKER_SETTINGS.installLayout.variable] === LEGACY_INSTALL_LAYOUT;
+  if (typeof env === "string") {
+    for (const entry of DERIVED_BROKER_VARIABLES) {
+      if ((legacy && entry.legacy !== true) || entry.variable in rest) continue;
+      out[entry.variable] = entry.kind === "text" ? entry.value(env) : entry.queueName(env);
+    }
+  }
   return out;
 }
 
@@ -80,11 +104,14 @@ export function unpackedBrokerVariables(variables: Record<string, unknown>, temp
 export function removePackedPieces(variables: Record<string, unknown>, variable: string, codes: readonly string[]): void {
   const join = (variables[variable] as { "Fn::Join"?: [string, unknown[]] } | undefined)?.["Fn::Join"];
   if (join === undefined) throw new Error(`${variable} is not packed`);
-  const parts = join[1];
+  // #1149: read with pieces() (a literal value may sit inside a string, as `ly=legacy`), then written back as CDK writes it: `code=` before each value, adjacent strings merged.
   const kept: unknown[] = [];
-  for (let index = 0; index < parts.length; index += 2) {
-    const code = /^,?([a-z]{2})=$/u.exec(String(parts[index]))![1]!;
-    if (!codes.includes(code)) kept.push(`${kept.length === 0 ? "" : ","}${code}=`, parts[index + 1]);
+  for (const [code, value] of pieces(variables[variable])) {
+    if (codes.includes(code)) continue;
+    for (const piece of [`${kept.length === 0 ? "" : ","}${code}=`, value]) {
+      if (typeof piece === "string" && typeof kept[kept.length - 1] === "string") kept[kept.length - 1] = `${String(kept[kept.length - 1])}${piece}`;
+      else if (piece !== "") kept.push(piece);
+    }
   }
   if (kept.length === 0) delete variables[variable];
   else join[1] = kept;

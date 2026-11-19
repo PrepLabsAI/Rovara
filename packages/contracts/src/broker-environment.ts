@@ -222,6 +222,9 @@ export const BROKER_SETTINGS = {
   coreAttentionEmail: { code: "ae", variable: "ROVARA_ATTENTION_EMAIL" },
   // Live switches check 2026-11-18 (DEC 254n(1)): the per-company agent model choice (the stack parameter CoreAgentModelChoice, off/on, default off), the BROKER only.
   coreAgentModelChoice: { code: "mx", variable: CORE_AGENT_MODEL_CHOICE_VARIABLE },
+  // #1149: which layout the install's names follow. Only the legacy install (production, the un-named template) sets it, to LEGACY_INSTALL_LAYOUT, and then the broker derives
+  // only what DERIVED_BROKER_VARIABLES marks `legacy` (a value identical to the legacy install's own); a named environment never sets it.
+  installLayout: { code: "ly", variable: "AGENTX_INSTALL_LAYOUT" },
 } as const satisfies Record<string, BrokerSettingSpec>;
 
 /** DEC 254z-amend3: the values of the TestServices stack parameter. "1" is on (the default); "0" is the owner's opt-out. The broker reads anything but exactly "0" as on. */
@@ -243,20 +246,28 @@ export type BrokerSettingKey = keyof typeof BROKER_SETTINGS;
  *  - `queueUrl`: the URL of a queue with a fixed name (built with the region and the account).
  */
 export type DerivedBrokerVariable =
-  | { readonly variable: string; readonly kind: "text"; readonly value: (env: string) => string }
-  | { readonly variable: string; readonly kind: "queueUrl"; readonly queueName: (env: string) => string };
+  | { readonly variable: string; readonly kind: "text"; readonly value: (env: string) => string; readonly legacy?: true }
+  | { readonly variable: string; readonly kind: "queueUrl"; readonly queueName: (env: string) => string; readonly legacy?: true };
+
+/**
+ * #1149: the legacy install (production, the un-named template) packs its broker's names and settings as a named environment does, with AGENTX_ENV=production, but its resources
+ * are not named the way a named environment's are. So its broker derives only the variables marked `legacy`: those whose derivation for "production" is exactly the value the
+ * legacy install has always passed (infra/lib/broker-names.ts checks it at synthesis). Every other derived variable is either passed whole by the legacy template or, as before,
+ * not set at all; a derivation never adds one.
+ */
+export const LEGACY_INSTALL_LAYOUT = "legacy";
 
 /** Every variable the broker derives. The infrastructure checks, at synthesis, that each `text` value is the one it would have passed (infra/lib/broker-names.ts). */
 export const DERIVED_BROKER_VARIABLES: readonly DerivedBrokerVariable[] = [
   { variable: "CONNECTOR_SECRET_PREFIX", kind: "text", value: environmentConnectorSecretPrefix },
-  { variable: "SWEBENCH_SETTINGS_PREFIX", kind: "text", value: environmentSettingsPrefix },
+  { variable: "SWEBENCH_SETTINGS_PREFIX", kind: "text", value: environmentSettingsPrefix, legacy: true },
   { variable: "AGENTX_E2E_AGENT_SETTINGS_PREFIX", kind: "text", value: environmentSettingsPrefix },
   { variable: "AGENTX_ALARM_PREFIX", kind: "text", value: environmentAlarmPrefix },
   { variable: "AGENTX_METRICS_NAMESPACE", kind: "text", value: environmentMetricsNamespace },
-  { variable: "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID", kind: "text", value: environmentProjectSetupRuntimeCatalogId },
-  { variable: "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID", kind: "text", value: environmentE2eFeatureRuntimeCatalogId },
+  { variable: "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID", kind: "text", value: environmentProjectSetupRuntimeCatalogId, legacy: true },
+  { variable: "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID", kind: "text", value: environmentE2eFeatureRuntimeCatalogId, legacy: true },
   // Core switch-on blocker (2026-11-17): the channel adapters' secret prefix is the environment's own, so it is derived, making room for the gateway settings.
-  { variable: "CHANNEL_ADAPTER_SECRET_PREFIX", kind: "text", value: environmentChannelAdapterSecretPrefix },
+  { variable: "CHANNEL_ADAPTER_SECRET_PREFIX", kind: "text", value: environmentChannelAdapterSecretPrefix, legacy: true },
   // DEC 254h (room for GitHub sign-in): every named broker has the company reads on (infra/lib/developer-signin.ts, hosted wiring (d)); a named environment always deploys the
   // tasks, so the value is the same for every name, and the broker sets it itself. The legacy install, which is never packed, is given none, as before.
   { variable: "COMPANY_READS", kind: "text", value: () => "enabled" },

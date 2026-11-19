@@ -142,11 +142,13 @@ describe("the revision", () => {
 
 describe("the legacy template", () => {
   const legacy = synthesized(undefined).template;
-  it("gains no parameter, no variable and no statement", () => {
-    expect(ofType(legacy, "AWS::SSM::Parameter")).toEqual([]);
+  // #1149: production's broker keeps its names in the parameter too, under "production" (tests/contract/legacy-broker-packed-environment.test.ts proves it boots with the same values).
+  it("has the one names parameter, /agentx/production/broker-names, which its broker points at and may read", () => {
+    const parameters = ofType(legacy, "AWS::SSM::Parameter");
+    expect(parameters.map(([, resource]) => resource.Properties!.Name)).toEqual(["/agentx/production/broker-names"]);
     const variables = (brokerOf(legacy)[1].Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
-    expect(variables).not.toHaveProperty(BROKER_NAMES_PARAMETER_VARIABLE);
-    expect(variables).not.toHaveProperty(BROKER_NAMES_REVISION_VARIABLE);
-    expect(JSON.stringify(legacy)).not.toContain("broker-names");
+    expect(variables[BROKER_NAMES_PARAMETER_VARIABLE]).toBe("/agentx/production/broker-names");
+    expect(variables).toHaveProperty(BROKER_NAMES_REVISION_VARIABLE);
+    expect(JSON.stringify(legacy)).toContain(":parameter/agentx/production/broker-names");
   });
 });
