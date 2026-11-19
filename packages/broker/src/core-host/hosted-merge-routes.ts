@@ -201,12 +201,12 @@ async function press(input: HostedMergeInput, wiring: HostedMergeWiring, taskId:
     // An end that does not say what GitHub did (anything but the core's own refusal: a lost answer, a fault, a host that could not be read) may have merged: neutral words, and tracking reads GitHub again.
     const unknown = !(error instanceof AgentXError) || error.code === "RUNTIME_UNAVAILABLE";
     // After a half merge (some pull request merged), or an unknown end, tracking finds out what GitHub holds now; a plain refusal changed nothing, so nothing is woken.
-    if (unknown || halfMerged(error as AgentXError)) await wiring.afterMerge(taskId).catch(() => undefined);
+    if (unknown || halfMerged(error)) await wiring.afterMerge(taskId).catch(() => undefined);
     if (unknown) {
       input.log?.({ event: "hosted_merge.outcome_unknown", error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" });
       throw agentXError("RUNTIME_UNAVAILABLE", HOSTED_MERGE_WORDS.outcomeUnknown);
     }
-    throw (error as AgentXError).code === "NOT_FOUND" ? taskNotFound() : error;
+    throw (error).code === "NOT_FOUND" ? taskNotFound() : error;
   }
   await input.audit.record(event(MERGE_RESULT_AUDIT, { outcome: "merged", merged })).catch(() => input.log?.({ event: "hosted_merge.audit_result_failed", companyId, taskId }));
   await wiring.afterMerge(taskId).catch(() => undefined);
