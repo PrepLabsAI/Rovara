@@ -45,6 +45,33 @@ describe("the verdict source", () => {
     expect(verdict!.heading).toContain("risk");
     expect(verdict!.body.some((line) => line.startsWith("**Changed** "))).toBe(true);
   });
+  for (const missing of ["all", "CRITIC", "SECURITY"] as const) {
+    const blocked = async () => {
+      const w = await world();
+      await w.patchTask((record) => {
+        Object.assign(record.workflow, {
+          stage: "REVIEW", state: "BLOCKED", programStepId: "review",
+          blockReason: "independent review operation ended failed",
+          reviews: missing === "all" ? [] : w.task.workflow!.reviews!.filter((review) => review.role !== missing),
+        });
+      });
+      return w;
+    };
+    it(`REVIEW/BLOCKED with ${missing} reports missing has no passing Check verdict`, async () => {
+      const w = await blocked();
+      expect(await w.source(w.input)).toBeUndefined();
+    });
+    it(`REVIEW/BLOCKED with ${missing} reports missing has no passing PR text`, async () => {
+      const w = await blocked();
+      const task = (await readTask(w.h.deps, TASK_ID))!;
+      expect(task.workflow!.stage).toBe("REVIEW");
+      expect(task.workflow!.state).toBe("BLOCKED");
+      const body = workflowPullRequestBody(task, task.workflow!, "Approved plan", undefined);
+      expect(body).toContain("The required reviews did not finish.");
+      expect(body).not.toContain("Code review and security review passed");
+      expect(body).not.toMatch(/Reviews: .*passed/u);
+    });
+  }
   // Mutant S1: the source ignores the head (a stale or someone else's head gets the verdict of the recorded one).
   it("a head that is not the recorded one has no verdict", async () => {
     const w = await world();

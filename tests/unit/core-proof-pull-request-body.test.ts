@@ -10,7 +10,7 @@ import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot
 import { RISK_SENSITIVE_PATH_PATTERNS, assessRisk, isSensitivePath, type RiskInput } from "../../packages/broker/src/core/proof/risk.js";
 import { parseChangedFiles } from "../../packages/broker/src/core/proof/changed-files.js";
 import { recomputeRisk, withLinearCloseLine } from "../../packages/broker/src/core/proof/pull-request-body.js";
-import { pullRequestTitle, workflowPullRequestBody, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
+import { pullRequestTitle, workflowPullRequestBody, workflowPullRequestCheckVerdict, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
 import { rewriteAttributionBody } from "../../packages/contracts/src/attribution.js";
 import { feedbackFixesSection, withFeedbackFixes, withStatusLines } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
 
@@ -407,7 +407,7 @@ describe("the version 2 pull request description", () => {
 
   it("names a failed check, a check that couldn't run and a review-only change in Tests", () => {
     const failing = workflowWith({
-      stage: "VERIFY", state: "BLOCKED", blockReason: "candidate checks failed or have unknown results", reviews: undefined,
+      stage: "VERIFY", state: "BLOCKED", blockReason: "candidate checks failed or have unknown results",
       checkPolicy: { required: [check("unit", "Unit tests"), check("lint", "Lint"), check("types", "Types")], optional: [], selectedOptionalIds: [], proposed: [] },
       verification: { candidateDigest: candidate("1").digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now,
         results: [{ checkId: "unit", status: "PASS" }, { checkId: "lint", status: "FAILED" }, { checkId: "types", status: "FAILED", programNotFound: true }] },
@@ -423,7 +423,7 @@ describe("the version 2 pull request description", () => {
     // The failed row is the first row of the table.
     expect(tests.indexOf("| Lint ")).toBeLessThan(tests.indexOf("| Unit tests "));
     const reviewOnly = workflowWith({
-      stage: "REVIEW", state: "WAITING", reviews: undefined,
+      stage: "REVIEW", state: "WAITING",
       checkPolicy: { required: [], optional: [], selectedOptionalIds: [], proposed: [], noneReason: "Documentation only" },
       verification: { candidateDigest: candidate("1").digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results: [], reviewOnly: true },
     });
@@ -457,9 +457,10 @@ describe("the version 2 pull request description", () => {
     const body = workflowPullRequestBody(task, reviewed, planOf, SESSION, context());
     expect(body).toContain("High risk");
     expect(aboveFold(body)).toMatch(/code review/i);
-    // A review of other code doesn't count (the snapshot is at its review step, where that is allowed).
+    // A review of other code does not affect risk, but cannot clear the missing current role.
     const stale = workflowWith({ stage: "REVIEW", state: "WAITING", reviews: workflowWith().reviews!.map((review) => review.role === "CRITIC" ? { ...review, risk: "high", candidateDigest: candidate("2").digest } : review) });
-    expect(workflowPullRequestBody(task, stale, planOf, SESSION, context())).toContain("Low risk");
+    expect(recomputeRisk(stale, context().changedFiles, {}).risk?.level).toBe("low");
+    expect(workflowPullRequestBody(task, stale, planOf, SESSION, context())).toContain("The required reviews did not finish.");
   });
 
   it("an accepted finding raises the risk and is listed under Reviews", () => {
@@ -860,14 +861,14 @@ describe("every text path into a version 2 pull request leaves no Linear key but
 
   it("a check's label, a failed check, a check that couldn't run, a test added and the reason there was no check", () => {
     const failing = workflowWith({
-      stage: "VERIFY", state: "BLOCKED", blockReason: "candidate checks failed or have unknown results", reviews: undefined,
+      stage: "VERIFY", state: "BLOCKED", blockReason: "candidate checks failed or have unknown results",
       checkPolicy: { required: [check("unit", "Unit OPS-1"), check("lint", "Lint OPS-2"), check("types", "Types OPS-3")], optional: [], selectedOptionalIds: [], proposed: [] },
       verification: { candidateDigest: candidate("1").digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now,
         results: [{ checkId: "unit", status: "PASS" }, { checkId: "lint", status: "FAILED" }, { checkId: "types", status: "FAILED", programNotFound: true }] },
     });
     onlyOwn(workflowPullRequestBody(task, failing, planOf, SESSION, withOwn({ changedFiles: { files: [file("src/OPS-4.test.ts")], complete: true } })));
     const reviewOnly = workflowWith({
-      stage: "REVIEW", state: "WAITING", reviews: undefined,
+      stage: "REVIEW", state: "WAITING",
       checkPolicy: { required: [], optional: [], selectedOptionalIds: [], proposed: [], noneReason: "Documentation only, see OPS-9" },
       verification: { candidateDigest: candidate("1").digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results: [], reviewOnly: true },
     });
@@ -1010,6 +1011,20 @@ describe("the version 2 description carries the test proof", () => {
     const lines = workflowPullRequestStatusLines(workflowWith(), context(), [PROOF]);
     expect(lines).toContain(`- ${PROOF}`);
     expect(workflowPullRequestStatusLines(workflowWith(), context())).not.toContain(`- ${PROOF}`);
+  });
+});
+
+describe("failed reviews in pull request text", () => {
+  it("does not write a passed status line or verdict when a required review could not run", () => {
+    const reviews = workflowWith().reviews!.map((review) => review.role === "CRITIC"
+      ? { ...review, status: "UNKNOWN" as const, failureReason: "SESSION_FAILED" as const }
+      : review);
+    const workflow = { ...workflowWith(), reviews } as WorkflowSnapshot;
+    const lines = workflowPullRequestStatusLines(workflow);
+    expect(lines.join("\n")).toContain("The required reviews did not finish");
+    expect(lines.join("\n")).not.toContain("code review passed");
+    expect(workflowPullRequestBody(task, workflow, planOf, SESSION, context())).toContain("The required reviews did not finish");
+    expect(workflowPullRequestCheckVerdict(task, workflow, planOf, context())).toBeUndefined();
   });
 });
 

@@ -136,7 +136,7 @@ describe("the worker's code review", () => {
           async prompt(text) {
             if (text.includes("Review role: CODE")) sessionRole = "CRITIC";
             seen.push({ role: sessionRole, prompt: text });
-            listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: answers[sessionRole] }] } });
+            listener?.({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: answers[sessionRole] }] } });
           },
           async abort() {},
           getModel: () => ({ provider: "test", modelId: "review-v1" }),

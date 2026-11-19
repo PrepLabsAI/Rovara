@@ -273,6 +273,7 @@ describe("workflow Slack messages", () => {
     for (const failureReason of WORKFLOW_REVIEW_FAILURE_REASONS) {
       const text = workflowMessage({ taskId, workflow: snapshot("REVIEW", "BLOCKED", { reviews: [review("SECURITY", "UNKNOWN", { failureReason })] }) })!.text;
       expect(text, failureReason).toMatch(/^A review couldn't finish \(security review: [a-z' ]+\)\. Nothing was sent to GitHub\.$/);
+      expect(text, failureReason).not.toMatch(/passed|opening a draft pull request/iu);
       expect(text, failureReason).not.toContain(failureReason.toLowerCase().replaceAll("_", " "));
     }
     expect(workflowMessage({ taskId, workflow: snapshot("REVIEW", "BLOCKED", { reviews: [review("SECURITY", "UNKNOWN", { failureReason: "INVALID_JSON" })] }) })!.text)

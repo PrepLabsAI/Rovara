@@ -62,7 +62,11 @@ export const agentReviewerRun: ReviewerRun = async (input) => {
     const [command = "codex", ...args] = reviewerCommand(input, lastMessage);
     const ran = await runHeadless(command, args, input);
     if (!ran.ok) return ran;
-    return { ok: true, text: await readFile(lastMessage, "utf8").catch(() => ran.text) };
+    try {
+      return { ok: true, text: await readFile(lastMessage, "utf8") };
+    } catch {
+      return { ok: false, reason: "Codex did not write a readable designated final answer" };
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

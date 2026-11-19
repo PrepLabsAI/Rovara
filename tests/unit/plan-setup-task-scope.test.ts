@@ -160,7 +160,7 @@ describe("the coding agent never writes its own mock", () => {
 
 describe("the pull request says so once per mock", () => {
   const candidate = createCandidateManifest([{ repositoryId: "app", commitSha: "1".repeat(40), treeSha: "1".repeat(40), baseCommitSha: "e".repeat(40) }]);
-  const workflow = { ...createWorkflowSnapshot({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", ownerId: "a".repeat(64), now: "2026-11-13T12:00:00.000Z", definitionVersion: "1.1.0" }), candidate } as unknown as WorkflowSnapshot;
+  const workflow = { ...createWorkflowSnapshot({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", ownerId: "a".repeat(64), now: "2026-11-13T12:00:00.000Z", definitionVersion: "1.1.0" }), candidate, reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: "2026-11-13T12:00:00.000Z" })) } as unknown as WorkflowSnapshot;
   const status = (setupLines?: readonly string[]) => rovaraStatusLines(workflow, { ...(setupLines === undefined ? {} : { setupLines }) }, () => ["- no findings"]);
 
   it("words the line as the design does: fake made by Rovara for this task, not yet part of the project's setup", () => {
@@ -191,7 +191,7 @@ describe("the pull request says so once per mock", () => {
 // L4-EVW4 (DEC 254zzz43): the one line the pull request carries while the project's eval card is set aside and an eval is still unread.
 describe("the pull request says an eval was not read", () => {
   const candidate = createCandidateManifest([{ repositoryId: "app", commitSha: "1".repeat(40), treeSha: "1".repeat(40), baseCommitSha: "e".repeat(40) }]);
-  const workflow = { ...createWorkflowSnapshot({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", ownerId: "a".repeat(64), now: "2026-11-13T12:00:00.000Z", definitionVersion: "1.1.0" }), candidate } as unknown as WorkflowSnapshot;
+  const workflow = { ...createWorkflowSnapshot({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", ownerId: "a".repeat(64), now: "2026-11-13T12:00:00.000Z", definitionVersion: "1.1.0" }), candidate, reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: "2026-11-13T12:00:00.000Z" })) } as unknown as WorkflowSnapshot;
   const status = (evalSetupLines?: readonly string[]) => rovaraStatusLines(workflow, { ...(evalSetupLines === undefined ? {} : { evalSetupLines }) }, () => ["- no findings"]);
 
   it("adds an Eval section with the fixed line, and a description without one is what it was", () => {

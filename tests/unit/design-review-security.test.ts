@@ -2,7 +2,7 @@ import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // The security rules of the design review in Code's own wiring: the packet route (who may read which reviewer's packet), the one-shot model key of a reviewer's slot, the rule that a design-review operation never gets a key of
 // its own, the blocker-reason rule and its record, the tier a reviewed design is approved at, the hold nobody can answer, and a flow with the switch off. Each test names the rule it holds; a change that loosens a rule fails one of them.
 import { describe, expect, it } from "vitest";
-import { DesignReviewBindingSchema, WORKER_INVOCATION_FEATURES, type PlanDocument } from "@agentx/contracts";
+import { DesignReviewBindingSchema, WORKER_INVOCATION_FEATURES, createCandidateManifest, type PlanDocument } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { DESIGN_REVIEW_PACKET_PATH, handleDesignReviewPacket } from "../../packages/broker/src/core/design-review/packet-route.js";
 import { readSlotPacket } from "../../packages/broker/src/core/design-review/packet-store.js";
@@ -308,7 +308,10 @@ describe("a design that went through no review", () => {
     const plan: PlanDocument = {
       schemaVersion: 1, title: "Retry", why: [{ text: "Timed-out payments are dropped.", author: "Priya" }], claims: [{ id: "1", text: "A timed-out payment is retried once." }], notChanging: ["Refunds stay as they are."], risks: ["A retry could charge twice."], decisions: [],
     };
-    const body = workflowPullRequestBody(task, waiting, undefined, undefined, { lessonsUsed: NO_LESSONS_USED, proof: { plan, design: proofDesignOf(context) } });
+    // This projection is after code review; the design review above still did not run.
+    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "1".repeat(40), treeSha: "2".repeat(40), baseCommitSha: "3".repeat(40) }]);
+    const reviewed = { ...waiting, candidate, reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: task.taskId, candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS" as const, findings: [], readOnly: true, recordedAt: "2026-11-19T00:00:00.000Z" })) };
+    const body = workflowPullRequestBody(task, reviewed as typeof waiting, undefined, undefined, { lessonsUsed: NO_LESSONS_USED, proof: { plan, design: proofDesignOf(context) } });
     expect(body).toContain("<summary>Requirements and proof: ");
     expect(body).toContain("Design review did not run: no price is known");
   });
