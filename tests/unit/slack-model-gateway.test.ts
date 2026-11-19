@@ -3,7 +3,7 @@
 // Broker side (aws/slack-model-access.ts): the route that says how a thread's model calls are made. Proved: the token names ONLY the answers step and the workspace's own company (never a caller's), a company
 // thread is never `install`, every unknown (no company binding, the install team's implicit company, no gateway, no signer, a model that is not a Claude engine name, a conversation with no Slack thread) is
 // `unavailable` with NO token minted, and two companies never share a token.
-// Slack service side (slack-service/src/company-models.ts + orchestrator/gateway-model.ts): the runtime speaks to `<gateway>/v1/answers/v1/messages` with a fresh token for every request and nothing else (no
+// Slack service side (slack-service/src/slack-company-models.ts + orchestrator/gateway-model.ts): the runtime speaks to `<gateway>/v1/answers/v1/messages` with a fresh token for every request and nothing else (no
 // Bedrock, no AWS client is built here), a company with no AI connected or over its cap is told fixed words and a refused thread makes ZERO model calls, and the router and the gate's classifier use the same
 // runtime. An injected fetch stands in for both the broker and the gateway; nothing reaches a network.
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
@@ -13,7 +13,7 @@ import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js"
 import { ANSWERS_STEP } from "../../packages/broker/src/core-host/gateway-answers.js";
 import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { askSlackModelAccessForIdentity, type SlackModelAccessWiring } from "../../packages/broker/src/aws/slack-model-access.js";
-import { classifierForTurn, refusalWords, requestRouterFor, resolveTurnModels, turnRefusalWords } from "../../packages/slack-service/src/company-models.js";
+import { classifierForTurn, refusalWords, requestRouterFor, resolveTurnModels, turnRefusalWords } from "../../packages/slack-service/src/slack-company-models.js";
 import { createCompanyGatewayRuntime } from "../../packages/orchestrator/src/gateway-model.js";
 
 const ORG_A = "org_slackmodela000000000" as const;

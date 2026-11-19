@@ -21,8 +21,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { agentXError, ON_THE_WEBSITE_MESSAGE, channelBindingPartition, companyLog, OrgIdSchema, SLACK_CHANNEL, SlackTeamIdSchema, SlackUserIdSchema } from "@agentx/contracts";
-import { slackChannelBindingPkFor } from "./company-layout.js";
+import { agentXError, ON_THE_WEBSITE_MESSAGE, companyLog, OrgIdSchema, SlackTeamIdSchema, SlackUserIdSchema } from "@agentx/contracts";
+import { slackChannelBindingPkFor } from "./slack-company-layout.js";
 import { Membership, membershipKey } from "./company-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";

@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { orgOfProjectPk } from "@agentx/contracts";
-import { grantsPkFor, namedCompany, revisionPkFor, slackChannelBindingKeyMatches } from "./company-layout.js";
+import { grantsPkFor, namedCompany, revisionPkFor } from "./company-layout.js";
+import { slackChannelBindingKeyMatches } from "./slack-company-layout.js";
 import { mayUseProject, type ProjectAuthorityWitness, type ProjectUseRole } from "../developer/task-project-access.js";
 
 export type TaskPersonProjectAuthorityWitness = ProjectAuthorityWitness & {

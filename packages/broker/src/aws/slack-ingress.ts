@@ -1,5 +1,5 @@
 import { slackBindingCompany, slackBindingInCompany, slackCompanyPerson, slackCompanyToken, slackLinkNotice, slackRequestWorkspace, type SlackCompanyDependencies } from "./slack-person.js";
-import { namedCompanySlackBinding } from "./company-layout.js";
+import { namedCompanySlackBinding } from "./slack-company-layout.js";
 import { slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { splitBySlackIngressTeam } from "./slack-company-split.js";
 import { slackWorkspaceToken } from "./slack-workspace-tokens.js";

@@ -19,7 +19,7 @@ import {
 import { grantKeyFor, projectMemberRowKeyFor, revisionKeyFor, revisionPkFor } from "../../packages/broker/src/aws/company-layout.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { linkedProjectOf, type SlackChannelContext } from "../../packages/broker/src/aws/slack-channel-link.js";
-import { namedCompanySlackBinding } from "../../packages/broker/src/aws/company-layout.js";
+import { namedCompanySlackBinding } from "../../packages/broker/src/aws/slack-company-layout.js";
 import { slackBindingCompany, slackBindingInCompany } from "../../packages/broker/src/aws/slack-person.js";
 import { companyInstallKey } from "../../packages/broker/src/aws/slack-company-install.js";
 import { parseBinding, teamKey } from "../../packages/broker/src/aws/slack-workspace-binding.js";

@@ -57,7 +57,8 @@ se_host_resolvers() { awk '$1=="nameserver"&&$2~/^[0-9.]+$/&&$2!~/^127\./{print 
 se_worker_dns() {
   local resolvers
   resolvers=$(se_host_resolvers) && [[ -n "$resolvers" ]] || return 1
-  # (/etc/agentx exists: boot.sh made it for the launcher; only the file is made here, so the directory keeps its mode.)
+  # /etc/agentx is boot.sh's (write_worker_launcher makes it 0700 before this stage runs on a real worker): an existing one keeps its mode, and only a missing one (the stage run on its own, as the Linux CI test does) is made, the same 0700.
+  [[ -d "${SE_WORKER_DNS_FILE%/*}" ]] || install -d -m 0700 "${SE_WORKER_DNS_FILE%/*}" || return 1
   install -m 0644 /dev/null "$SE_WORKER_DNS_FILE" && printf '%s\n' "$resolvers" >"$SE_WORKER_DNS_FILE"
 }
 # The gateway is the Docker DAEMON's default name server (a `docker build` step has no `--dns`): "dns" in daemon.json. And the daemon's own HTTP(S) fetches use the gateway's daemon proxy (HTTP_PROXY/HTTPS_PROXY in a systemd drop-in of

@@ -18,7 +18,7 @@ import { z } from "zod";
 import { OrgIdSchema, OrgRoleSchema, agentDirectoryKey, agentKey, chainDirectoryKey, chainKey, companyScoped, type AuditEvent, type OrgId, type OrgRole } from "@agentx/contracts";
 import { DocumentAuditSink } from "@agentx/local-adapters";
 import { ownPartitionRow, recordInCompany } from "./company-check.js";
-import { grantKeyFor, grantsPkFor, namedCompany, projectMemberRowKeyFor } from "./company-layout.js";
+import { grantKeyFor, grantsPkFor, latestRevisionRowFor, namedCompany, projectMemberRowKeyFor } from "./company-layout.js";
 import { involvedPartition } from "../core/task-flow/involved.js";
 import { taskOwnershipHandOverSteps, type TaskHandOverSkip, type TaskPeopleDependencies } from "../developer/task-people.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
@@ -157,6 +157,12 @@ function companyGrant(row: Record<string, unknown> | undefined, companyId: OrgId
   return row;
 }
 
+/** Whether the project's latest revision lives in this company's own layout (a named company's partition; the legacy one naming this company). A read error throws. */
+async function projectInCompany(ctx: HandOverContext, companyId: OrgId, project: string): Promise<boolean> {
+  const revision = await latestRevisionRowFor(ctx.documentClient, ctx.tableName, companyId, project);
+  return revision !== undefined && (namedCompany(companyId) !== undefined || recordInCompany(revision, companyId));
+}
+
 /**
  * The projects the leaver administers in this company: per project, the successor's administrator grant (put new, or their developer grant raised) and its
  * project-side row, and the leaver's administrator grant and project-side row deleted, each under a condition on the row as read.
@@ -170,6 +176,9 @@ async function administeredProjects(ctx: HandOverContext, companyId: OrgId, leav
     if (project === undefined || row["role"] !== "administrator") continue;
     const leaverKey = grantKeyFor(companyId, leaverId, project);
     if (companyGrant(row, companyId, leaverKey, project) === undefined) continue;
+    // Only a project of THIS company, read where the company layout keeps it (company-layout.ts): a grant naming another company's project, or none, is
+    // left as it is (for cleanup), never handed over or counted.
+    if (!await projectInCompany(ctx, companyId, project)) continue;
     const successorKey = grantKeyFor(companyId, successorId, project);
     const raw = await get(ctx, successorKey);
     const current = companyGrant(raw, companyId, successorKey, project);

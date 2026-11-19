@@ -1,6 +1,7 @@
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { agentXError, orgOfProjectPk } from "@agentx/contracts";
-import { grantsPkFor, namedCompany, revisionPkFor, slackChannelBindingKeyMatches } from "./company-layout.js";
+import { grantsPkFor, namedCompany, revisionPkFor } from "./company-layout.js";
+import { slackChannelBindingKeyMatches } from "./slack-company-layout.js";
 import { taskCompanyId } from "../developer/task-person-identity.js";
 import type { DurableOutboxRecord } from "./lambda.js";
 import { taskOpen } from "../developer/task-access.js";
