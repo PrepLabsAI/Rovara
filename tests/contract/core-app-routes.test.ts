@@ -129,6 +129,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/intake/updates", "full"], ["PUT", "/v1/app/projects/payments/intake/updates", "full"],
     // DEC 254zzz39 (6): the task owner's Accept findings on the web page (a security finding needs it). Additive: no existing row changed.
     ["POST", "/v1/app/tasks/t1/review-findings", "full"],
+    ["GET", "/v1/app/tasks/t1/merge", "tasks:read"],
+    ["POST", "/v1/app/tasks/t1/merge", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);

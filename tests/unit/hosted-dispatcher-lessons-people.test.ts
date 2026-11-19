@@ -60,7 +60,8 @@ async function world() {
     // see each source task, so it is the RUNNING person's standing on the roster that is read, live, for a lesson learned from another person's task (the source author has no row here at all).
     for (const id of [w.runner]) {
       signIn.set(`COMPANY_MEMBER#${id}|COMPANY`, { pk: `COMPANY_MEMBER#${id}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: id, companyId: company, role: "member", joinedAt: iso, joinedVia: "preapproval" });
-      await store.put({ item: { pk: `MEMBER#${id}`, sk: "PROJECT#payments", projectName: "payments", role: "developer" } });
+      // DEC 254zzz80: a named company's grant lives in its own partition.
+      await store.put({ item: { pk: `ORG#${company}#MEMBER#${id}`, sk: "PROJECT#payments", projectName: "payments", role: "developer" } });
     }
   }
   const sent: Array<{ table: string; kind: string; key: { pk: string; sk: string }; projection: string[] | undefined }> = [];
@@ -105,7 +106,7 @@ describe("the dispatcher's company-scoped lessons people port", () => {
     expect(JSON.stringify(b)).not.toContain("A advice");
     // The running person's standing was read for each company's own person (membership projected, then the project grant); the source authors were never looked up.
     expect(w.sent.some((read) => read.key.pk === `COMPANY_MEMBER#${WORLD[A].runner}` && read.table === SIGN_IN && read.projection !== undefined)).toBe(true);
-    expect(w.sent.some((read) => read.key.pk === `MEMBER#${WORLD[B].runner}` && read.table === STATE)).toBe(true);
+    expect(w.sent.some((read) => read.key.pk === `ORG#${B}#MEMBER#${WORLD[B].runner}` && read.table === STATE)).toBe(true);
     expect(w.sent.some((read) => read.key.pk.includes(WORLD[A].author) || read.key.pk.includes(WORLD[B].author))).toBe(false);
     for (const write of w.writes) expect(write).not.toHaveBeenCalled();
   });
@@ -131,7 +132,7 @@ describe("the dispatcher's company-scoped lessons people port", () => {
       const key = `COMPANY_MEMBER#${WORLD[A].runner}|COMPANY`;
       if (change === "removed") w.signIn.set(key, { ...w.signIn.get(key)!, revokedAt: iso });
       if (change === "other-company") w.signIn.set(key, { ...w.signIn.get(key)!, companyId: B });
-      if (change === "no-grant") await w.store.delete({ key: { pk: `MEMBER#${WORLD[A].runner}`, sk: "PROJECT#payments" } });
+      if (change === "no-grant") await w.store.delete({ key: { pk: `ORG#${A}#MEMBER#${WORLD[A].runner}`, sk: "PROJECT#payments" } });
       expect(await w.flowFor(A).learned!(request(A)), change).toEqual({});
       // The other company is unaffected.
       expect((await w.flowFor(B).learned!(request(B))).learnedContext?.lessons.map((lesson) => lesson.id)).toEqual(["les_bbbb1111"]);

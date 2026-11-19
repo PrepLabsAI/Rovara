@@ -92,9 +92,17 @@ describe("broker execution checks", () => {
 });
 
 // The queue preserves only Slack coordinates. Execution must resolve today's person again.
-import { createDeveloperTaskBroker, grantProject } from "../support/developer-task-broker.js";
+import { bindSlackChannelInCompany, createDeveloperTaskBroker, grantProject } from "../support/developer-task-broker.js";
 import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/links.js";
 import { createSlackChannelEventsHandler } from "../../packages/broker/src/aws/slack-adapter.js";
+
+/**
+ * DEC 254zzz98 (delta review H1): make the workflow's legacy revision of "payments" company A's own (pre-R2-F1 company data, stamped A). Unstamped, it is the built-in company's
+ * same-named project, which A's Slack thread is refused before anything else (slack-company-layout-start.test.ts covers that refusal); tests of a later check stamp it.
+ */
+function legacyRevisionIsA(h: { db: { find(p: (item: Record<string, unknown>) => boolean): Array<Record<string, unknown>>; set(item: Record<string, unknown>): void } }): void {
+  for (const row of h.db.find((item) => item.pk === "PROJECT#payments" && String(item.sk).startsWith("REV#"))) h.db.set({ ...row, companyId: A });
+}
 
 async function brokerWorld(installTeam = OTHER) {
   const h = await createDeveloperTaskBroker({ channelMembers: async (r) => ({ ok: true, memberOf: r.channelIds }) });
@@ -105,6 +113,8 @@ async function brokerWorld(installTeam = OTHER) {
   const taskId = String((JSON.parse(start.body) as { taskId: string }).taskId);
   const task = h.db.get(`DEVTASK#${taskId}`, "META")!;
   h.db.set({ ...task, companyId: A, developerId: person });
+  // DEC 254zzz80: company A is a NAMED company: its channel binding lives in its own partition.
+  bindSlackChannelInCompany(h.db, A);
   const w = world(); w.members.clear(); w.members.set(person, A);
   w.workspaces.requireCompany = async (team) => { if (team !== SLACK_TEAM) throw Error("private"); return A; };
   const actor = { channel: "slack", tenant: SLACK_TEAM, userId: USER };
@@ -139,16 +149,19 @@ describe("company broker authority on execution", () => {
     expect(foreign).toEqual(missing); expect(foreign.statusCode).not.toBe(200);
   });
   it("service model writer refuses with the fixed web sentence", async () => {
-    const h = await brokerWorld();
+    const h = await brokerWorld(); legacyRevisionIsA(h);
     const result = await call(h.handler, { method: "PUT", path: "/v1/service/project/model", service: { principal: orchestratorPrincipal,
       thread: `${SLACK_TEAM}/${SLACK_CHANNEL}/${TS}`, slackUser: USER }, body: { provider: "amazon-bedrock", modelId: "private-model" } });
     expect(JSON.stringify(result.body)).toContain(WEB);
   });
   it("a queued service request rechecks membership and link before reading project models", async () => {
-    const h = await brokerWorld();
+    const h = await brokerWorld(); legacyRevisionIsA(h);
     const execute = () => call(h.handler, { method: "GET", path: "/v1/service/project/models", service: { principal: orchestratorPrincipal,
       thread: `${SLACK_TEAM}/${SLACK_CHANNEL}/${TS}`, slackUser: USER } });
-    const allowed = await execute(); expect(JSON.stringify(allowed.body)).not.toContain(WEB);
+    // The control is a real answer (round-3 review L3): the request reaches company A's own project's models (this fixture approves none), never a refusal before it.
+    const allowed = await execute();
+    expect(allowed.body).toMatchObject({ error: { code: "CONFIG_INVALID", message: "this project has no approved coding models; ask an administrator to configure models" } });
+    expect(JSON.stringify(allowed.body)).not.toContain(WEB);
     h.members.clear(); expect(JSON.stringify((await execute()).body)).toContain(WEB);
   });
   it("workflow start resolves the web person before writing", async () => {
@@ -270,7 +283,7 @@ describe("company execution seam controls", () => {
     expect(response.body).toContain(WEB); expect(h.db.find(() => true)).toEqual(before);
   });
   it("service rechecks the company of an existing shared task", async () => {
-    const h = await brokerWorld(); h.db.set({ ...h.db.get(`DEVTASK#${h.taskId}`, "META")!, companyId: B });
+    const h = await brokerWorld(); legacyRevisionIsA(h); h.db.set({ ...h.db.get(`DEVTASK#${h.taskId}`, "META")!, companyId: B });
     const response = await call(h.handler, { method: "GET", path: "/v1/service/project/models", service: { principal: orchestratorPrincipal, thread: `${SLACK_TEAM}/${SLACK_CHANNEL}/${TS}`, slackUser: USER } });
     expect(JSON.stringify(response.body)).toContain("no task here that you can see");
   });
@@ -323,7 +336,7 @@ describe("company broker secondary workspace", () => {
 });
 
 it("secondary workspace starts for a linked person with an explicit project grant", async () => {
-  const h = await brokerWorld(); grantProject(h.db, { developerId: person, name: "Member", provider: "oidc", sessionId: "fixture" });
+  const h = await brokerWorld(); legacyRevisionIsA(h); grantProject(h.db, { developerId: person, name: "Member", provider: "oidc", sessionId: "fixture" }, "payments", A);
   const response = await h.handler({ source: "agentx.slack-ingress", action: "start-workflow", thread: { ...h.currentThread, threadTs: "1700000000.000006" },
     userId: USER, instructions: "explicit grant", workflowPath: "QUICK", requestId: randomUUID() });
   expect(response.statusCode, response.body).toBe(200);
@@ -338,6 +351,15 @@ it("queued stop rechecks membership before touching task state", async () => {
 });
 it("broker refuses a channel binding to a foreign project on read and write", async () => {
   const h = await brokerWorld(); h.workspaces.getProject = async () => ({ companyId: B });
+  // DEC 254zzz80 (R2-F1): company A is NAMED, so its binding is only its own row; the binding of this channel kept under company B's partition (and the legacy row naming a
+  // project whose revision is B's) is not A's: not bound. This replaces the legacy row's foreign-project check for a named company.
+  const own = h.db.get(`ORG#${A}#SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)!;
+  h.db.delete(String(own.pk), String(own.sk));
+  h.db.set({ ...own, pk: `ORG#${B}#SLACK_BINDING#${SLACK_TEAM}` });
+  // And the project is not A's: its revision is only in B's partition.
+  const project = h.db.get(`ORG#${A}#PROJECT#payments`, "REV#000000000001")!;
+  h.db.delete(String(project.pk), String(project.sk));
+  h.db.set({ ...project, pk: `ORG#${B}#PROJECT#payments`, companyId: B });
   const read = await call(h.handler, { method: "GET", path: "/v1/service/project/models", service: { principal: orchestratorPrincipal,
     thread: `${SLACK_TEAM}/${SLACK_CHANNEL}/${TS}`, slackUser: USER } });
   expect(JSON.stringify(read.body)).toContain("Slack channel is not bound to a project");

@@ -21,6 +21,7 @@ import { parseTaskPeopleEntry, type TaskPeopleEntry } from "../developer/task-pe
 import { taskPersonInviteClaimDigest, type TaskPersonInviteClaimFields } from "../developer/task-people-effects.js";
 import type { TaskPersonRuntime } from "./task-person-runtime.js";
 import { taskPersonInviteStateConditions, type TaskPersonInviteStateCondition, type TaskPersonProjectAuthorityWitness } from "./task-person-invite-authority-fence.js";
+import { taskCompanyId } from "../developer/task-person-identity.js";
 
 const unavailable = () => agentXError("SLACK_UNAVAILABLE", "task channel invitation is unavailable");
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -287,7 +288,7 @@ export function createTaskPersonInviteHandler(ports: TaskPersonInviteHandlerPort
         return resultFor(request, "failed", { reason: "authorization_refused" });
       }
       const authorityConditions = taskPersonInviteStateConditions({
-        taskId: task.taskId, project: task.project, teamId: proposal.invitationTeamId,
+        taskId: task.taskId, companyId: taskCompanyId(task), project: task.project, teamId: proposal.invitationTeamId,
         actor: actorAuthority, target: targetAuthority,
       });
       if (authorityConditions === undefined) return resultFor(request, "failed", { reason: "authorization_refused" });

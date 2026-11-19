@@ -6,20 +6,24 @@ import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   SlackTeamIdSchema,
   agentXError,
+  orgOfProjectPk,
+  type OrgId,
   type TaskPersonProofRequest,
   type TaskPersonProofResponse,
 } from "@agentx/contracts";
 import {
   checkTaskPersonIdentity,
+  taskCompanyId,
   type ProjectAccessSubject,
   type TaskPersonIdentityDependencies,
 } from "../developer/task-person-identity.js";
-import { evaluateProjectAuthority, readProjectAuthority, type ProjectAuthorityReader, type ProjectAuthorityRevision, type ProjectAuthorityWitness } from "../developer/task-project-access.js";
+import { evaluateProjectAuthority, readProjectAuthority, type BoundedProjectReadAdmission, type ProjectAuthorityReader, type ProjectAuthorityRevision, type ProjectAuthorityWitness } from "../developer/task-project-access.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { taskOwnerKey } from "../developer/task-records.js";
 import { META, type DeveloperRecord } from "../developer/store.js";
 import type { TaskAuthorityAdmission } from "./task-authority-admission.js";
-import { membershipKey, recordInCompany, strictLiveMembership } from "./company-check.js";
+import { membershipKey, ownPartitionRow, recordInCompany, strictLiveMembership } from "./company-check.js";
+import { namedCompany, namedCompanyLatestRevisionRow, revisionPkFor } from "./company-layout.js";
 
 export const TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES = [
   "pk", "sk", "developerId", "provider", "issuer", "subject", "slackUserId", "revoked", "displayName",
@@ -91,6 +95,38 @@ export function taskPersonRevisionFromResponse(response: unknown): { revision?: 
     definition: Object.hasOwn(item.definition, "developerTasks") ? { developerTasks: item.definition.developerTasks } : {} }, complete: true };
 }
 
+/**
+ * DEC 254zzz80: the dispatcher's latest-revision read for a NAMED company's project: its own partition in the core's order (company-layout.ts: the catalog pointer, else the
+ * newest non-candidate; a row naming another company or not parsing is absent). The first read uses the admitted signal; each later read is admitted before it is issued.
+ */
+export async function taskPersonNamedLatestRevision(
+  client: { send(command: never, options: { abortSignal: AbortSignal }): Promise<unknown> }, stateTableName: string, company: OrgId, project: string,
+  admission: Pick<BoundedProjectReadAdmission, "admitStateRead" | "assertOpen">, abortSignal: AbortSignal,
+): Promise<{ revision?: ProjectAuthorityRevision; complete: boolean }> {
+  let first = true;
+  const admitted = { send: async (command: unknown) => {
+    const signal = first ? abortSignal : admission.admitStateRead();
+    first = false;
+    const answer = await client.send(command as never, { abortSignal: signal });
+    admission.assertOpen();
+    return answer;
+  } };
+  const row = await namedCompanyLatestRevisionRow(admitted, stateTableName, company, project);
+  return taskPersonRevisionFromResponse({ Items: row === undefined ? [] : [row] });
+}
+
+/**
+ * R2-F1 review round 3: a NAMED company's grant or binding rows read from its own partition, kept only when they name no other company (`ownPartitionRow`), with the company
+ * fields removed so the rows have the legacy readers' shape.
+ */
+export function ownCompanyAuthorityRows<T extends Record<string, unknown>>(items: readonly T[], company: OrgId): Array<Omit<T, "companyId" | "orgId">> {
+  return items.filter((item) => ownPartitionRow(item, company)).map((item) => {
+    const { companyId: _company, orgId: _org, ...rest } = item;
+    void _company; void _org;
+    return rest;
+  });
+}
+
 /** C2: the fields of a `COMPANY_MEMBER#<developerId>` / `COMPANY` row the web proof reads (the reviewed `Membership` record, company-check.ts). */
 export const TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES = [
   "pk", "sk", "entityType", "personId", "companyId", "role", "joinedAt", "joinedVia", "revokedAt", "revokedBy",
@@ -157,9 +193,12 @@ function identityDependencies(input: {
   onProjectAuthority(witness: ProjectAuthorityWitness): void;
 }): TaskPersonIdentityDependencies {
   const { task, developerId, slackTeamId, admission, ports } = input;
+  // R2-F1 review round 3: the task's NAMED company (the company the task record names), whose own revision, grants and bindings the checks read; else the legacy rows.
+  // A task naming a malformed company refuses (taskCompanyId), as the identity check does.
+  const taskCompany = namedCompany(taskCompanyId(task));
   const readBindings = async (project: string): Promise<readonly string[]> => {
     admission.assertOpen();
-    const result = await ports.projectAuthorityReader.bindings(slackTeamId, admission, admission.admitStateRead());
+    const result = await ports.projectAuthorityReader.bindings(slackTeamId, admission, admission.admitStateRead(), taskCompany);
     admission.assertOpen();
     if (!result.complete) throw unavailable();
     return result.items.filter((binding) => binding.projectName === project).map((binding) => binding.channelId).sort();
@@ -213,15 +252,19 @@ function identityDependencies(input: {
       // `access: "granted"` (a developer or administrator grant). The company is bound by rule 3 (membership in the task's company) AND, as a second lock
       // (row 3654 #3), by the revision itself: the revision row must name the task's company (an unstamped row is the implicit company's, as everywhere else).
       admission.assertOpen();
-      const latest = await ports.projectAuthorityReader.latestRevision(project, admission, admission.admitStateRead());
+      // DEC 254zzz80: a named company's project is read from the task company's own partition (the reader checks that partition's rows); otherwise the legacy row.
+      const named = typeof taskCompanyId === "string" ? namedCompany(taskCompanyId) : undefined;
+      const latest = await ports.projectAuthorityReader.latestRevision(project, admission, admission.admitStateRead(), named);
       admission.assertOpen();
       if (!latest.complete || latest.revision === undefined) throw unavailable();
       // Fail closed and without a verdict: a revision of another company (or of an unreadable company) is never read as "no grant", which would demote a person; the step parks like any unavailable proof.
-      if (typeof taskCompanyId !== "string" || !recordInCompany({ companyId: latest.revision.companyId }, taskCompanyId)) throw unavailable();
-      const grants = await ports.projectAuthorityReader.memberships(targetDeveloperId, admission, admission.admitStateRead());
+      if (typeof taskCompanyId !== "string" || (named === undefined ? !recordInCompany({ companyId: latest.revision.companyId }, taskCompanyId)
+        : latest.revision.pk !== revisionPkFor(named, project) || !ownPartitionRow({ ...(latest.revision.companyId === undefined ? {} : { companyId: latest.revision.companyId }) }, named))) throw unavailable();
+      // The person's grants in the same company's partition (lane 2): a legacy row, or another company's grant, never counts.
+      const grants = await ports.projectAuthorityReader.memberships(targetDeveloperId, admission, admission.admitStateRead(), named);
       admission.assertOpen();
       if (!grants.complete) throw unavailable();
-      const result = evaluateProjectAuthority({ project, developerId: targetDeveloperId, teamId: slackTeamId, revision: latest.revision, memberships: grants.items, bindings: [] });
+      const result = evaluateProjectAuthority({ project, developerId: targetDeveloperId, teamId: slackTeamId, revision: latest.revision, memberships: grants.items, bindings: [], ...(named === undefined ? {} : { companyId: named }) });
       if (result.kind === "allowed") {
         if (result.access !== "granted" || result.witness === undefined) throw unavailable();
         input.onProjectAuthority(result.witness);
@@ -239,6 +282,7 @@ function identityDependencies(input: {
         freshMemberOf,
         ...(subject.slackUserId === undefined ? {} : { slackUserId: subject.slackUserId }),
         admission,
+        ...(taskCompany === undefined ? {} : { companyId: taskCompany }),
       });
       if (result.kind === "allowed") {
         if (result.witness === undefined) throw unavailable();
@@ -280,7 +324,9 @@ export function createTaskPersonRuntime(input: {
   const currentWitness = async (task: DeveloperTaskRecord, developerId: string, witness: TaskPersonStateAuthorityWitness | undefined): Promise<TaskPersonStateAuthorityWitness | undefined> => {
     if (witness === undefined || witness.taskId !== task.taskId || witness.developerId !== developerId || witness.project !== task.project) return undefined;
     input.admission.assertOpen();
-    const latest = await input.ports.projectAuthorityReader.latestRevision(task.project, input.admission, input.admission.admitStateRead());
+    // The witness's own revision key names the partition it was read from (DEC 254zzz80): the re-read is of that same company's partition.
+    const witnessCompany = orgOfProjectPk(witness.projectRevision.pk);
+    const latest = await input.ports.projectAuthorityReader.latestRevision(task.project, input.admission, input.admission.admitStateRead(), witnessCompany);
     input.admission.assertOpen();
     const revision = latest.revision;
     const validRevision = revision !== undefined && Number.isSafeInteger(revision.revision) && revision.revision >= 0

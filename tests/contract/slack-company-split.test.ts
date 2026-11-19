@@ -2,6 +2,7 @@
 // the company path; with no `workspaces` (Slack company mode off) the broker is today's handler itself.
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { slackTokens } from "../../packages/testing/src/channel/slack-world.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { companyThenInstallLinkCodes, installAdapterLinkCodes, slackCompanyServes, slackRequestTeam, splitBySlackTeam, withoutSlackCompanyMode } from "../../packages/broker/src/aws/slack-company-split.js";
@@ -11,7 +12,7 @@ import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { call, createBroker, loadSlackBroker, orchestratorPrincipal, registerSlackProject, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
-const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";
+const B = "org_bbbbbbbbbbbbbbbbbbbb";
 const OTHER = "T0BBBBBBB", USER = "U0SHARED00", TS = "1700000000.000001";
 const WEB = "That needs a web sign-in. Open it in Rovara.";
 const http = (headers: Record<string, string>, rawPath = "/v1/service/project/models") => ({ requestContext: { http: { method: "GET" } }, rawPath, headers });
@@ -141,8 +142,9 @@ function companyWorld() {
   const store = new MemoryDocumentStore();
   return {
     workspaces: { store, getProject: async () => ({ companyId: B }), linkUrl: (code: string) => `https://example.test/review/link/${code}`,
-      requireCompany: async (team: string): Promise<string> => { if (team === OTHER) return B; if (team === SLACK_TEAM) return A; throw Error("private"); },
-      tokenForEvent: async (team: string) => ({ companyId: team === OTHER ? B : A, token: slackTokens(team).bot }) },
+      // The install's team is the built-in company's (DEC 254zzz80: a NAMED install company's Slack start is that company's, covered in slack-company-layout-start.test.ts).
+      requireCompany: async (team: string): Promise<string> => { if (team === OTHER) return B; if (team === SLACK_TEAM) return IMPLICIT_COMPANY_ID; throw Error("private"); },
+      tokenForEvent: async (team: string) => ({ companyId: team === OTHER ? B : IMPLICIT_COMPANY_ID, token: slackTokens(team).bot }) },
     companies: { companyOf: async () => undefined },
     slackWorkspaceLegacyTeamId: SLACK_TEAM,
   };
@@ -240,9 +242,12 @@ describe("the broker's split (golden)", () => {
   it("answers the install's team byte for byte as the broker without company mode does (responses and storage calls)", async () => {
     const legacy = await run(false, SLACK_TEAM);
     const split = await run(true, SLACK_TEAM);
-    expect(split).toStrictEqual(legacy);
-    // The company path was never touched for the install's team (no binding, token, project or store call).
-    expect(split.touched).toEqual([]);
+    // DEC 254zzz80 (R2-F1): the install team's company is read once per binding read (its operator binding picks the binding layout); for the built-in company everything else,
+    // responses and every storage call, is byte for byte today's.
+    expect({ ...split, touched: [] }).toStrictEqual({ ...legacy, touched: [] });
+    // The company path was never touched for the install's team (no token, project or store call): only the team's company was asked.
+    expect(split.touched.filter((name) => name !== "requireCompany")).toEqual([]);
+    expect(split.touched.length).toBeGreaterThan(0);
     expect(legacy.inputs.length).toBeGreaterThan(0);
     // Positive control: the legacy path really ran (nothing said "web sign-in", storage was used), and it differs from the company path's answers for the same events.
     expect(JSON.stringify(legacy.answers)).not.toContain(WEB);

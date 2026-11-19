@@ -90,6 +90,7 @@ import { isUpkeepPath, routeHostedUpkeep, type HostedUpkeepWiring } from "./upke
 import { isEvalCheckPath, routeHostedEvalCheck, type HostedEvalCheckWiring } from "./eval-check-routes.js";
 import { isAgentDirectoryPath, routeHostedAgentDirectory } from "./agent-directory-routes.js";
 import { isSystemRunsPath, routeHostedSystemRuns } from "./system-runs-routes.js";
+import { isHostedMergePath, routeHostedMerge, type HostedMergeWiring } from "./hosted-merge-routes.js";
 import { isTicketUpdatesPath, routeHostedTicketUpdates, type HostedTicketUpdatesWiring } from "./ticket-updates-routes.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
@@ -237,6 +238,8 @@ export interface CoreDevWiring {
   projectNotices?: { administers(orgId: string, developerId: string, project: string): Promise<boolean>; setupRead?(orgId: string, project: string): Promise<{ key: string; failedStep: string; fixReady: boolean } | undefined> } | undefined;
   /** L4-EVCI2: the setup card's eval check from the customer's CI (`/v1/app/projects/<p>/ci-eval-check`, eval-check-routes.ts). Absent: that path says "not on the core yet". */
   evalCheck?: HostedEvalCheckWiring;
+  /** DEC 254zzz94: the Merge button on a finished task (`/v1/app/tasks/<id>/merge`, hosted-merge-routes.ts). Absent: those paths say merging from Rovara is not set up. */
+  merge?: HostedMergeWiring;
   /** Audit gap 11b: a project's ticket-sharing settings (`/v1/app/projects/<p>/intake/updates`, ticket-updates-routes.ts). Absent: that path says "not on the core yet". */
   ticketUpdates?: HostedTicketUpdatesWiring;
 }
@@ -286,6 +289,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (TASK_READ.test(path) || TASK_EVIDENCE.test(path) || PLAYBOOK.test(path) || TEST_ENVIRONMENT.test(path) || SAVED_ENV_IMAGE.test(path)) return method === "GET";
   if (TEST_ENVIRONMENT_APPROVE.test(path)) return method === "POST";
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path)) return method === "POST";
+  if (isHostedMergePath(path, method)) return true;
   if (coreTaskRuleOf(path, method) !== undefined) return true;
   if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
@@ -510,7 +514,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       if (caller.scriptToken !== undefined && TASK_ANSWERS.test(path)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       // A script token reaches task reads or the two scoped wiki reads; never sessions, decisions, playbooks or token management.
       // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
-      if (caller.scriptToken !== undefined && (TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
+      if (caller.scriptToken !== undefined && (TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, request.method) || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       if (caller.scriptToken !== undefined && !TASK_READ.test(path) && scriptTokenRoute(request.method, path)?.permission !== "wiki") return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
       let target: Mounted;
       try {
@@ -613,6 +617,14 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           await target.actions.resolveFindings({ ...taskCaller, webApp: true }, taskId, body, "page");
           const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
           return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller)) });
+        }
+        if (isHostedMergePath(path, request.method)) {
+          // DEC 254zzz94: the Merge button (hosted-merge-routes.ts holds every rule: the website only for a press, who may merge, Rovara's checks and GitHub's mergeable state, one merge at a time, audit).
+          const audit = target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit);
+          return await routeHostedMerge({
+            request, path, principal: caller.principal, companyId: target.runtime.companyId, role: membership.role, flow: target.runtime.flow.deps, wiring: target.wiring.merge, audit,
+            now: () => nowOf(target), webApp: caller.webApp === true, ...(options.log === undefined ? {} : { log: options.log }),
+          });
         }
         const answers = TASK_ANSWERS.exec(path);
         if (answers !== null) {

@@ -2,7 +2,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { type SlackWorkspaceDelivery } from "./slack-workspace-tokens.js";
 import { recordInCompany } from "./company-check.js";
-import { LINK_REQUIRED_INTERVAL_SECONDS, orgScoped, when, ChannelLinkSchema, OrgIdSchema, SlackUserIdSchema, agentXError, type DocumentStore } from "@agentx/contracts";
+import { namedCompany } from "./company-layout.js";
+import { LINK_REQUIRED_INTERVAL_SECONDS, orgScoped, when, ChannelLinkSchema, OrgIdSchema, SlackUserIdSchema, agentXError, type DocumentStore, type OrgId } from "@agentx/contracts";
 import { linkedPerson, issueChannelLinkCode, previewChannelLinkCode, redeemChannelLinkCode } from "../core/channel/links.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import type { CompanyMembershipReader } from "./company-check.js";
@@ -123,7 +124,8 @@ export function createSlackLinkCodes(deps: SlackPersonDependencies) {
  * deliberately a separate optional dependency: an absent reader means unlinked. */
 export interface SlackWorkspaceAccess extends SlackWorkspaceDelivery {
   store: DocumentStore;
-  getProject(name: string): Promise<unknown>;
+  /** The project's company record: the legacy newest revision's; for a NAMED `companyId` (DEC 254zzz80), its own partition's (a `{ companyId }` when it holds the project). */
+  getProject(name: string, companyId?: string): Promise<unknown>;
   linkUrl(code: string): string;
   /** L2-2 PR 18c: a consumer without State writes (the Slack Lambda, #126) asks the broker for the notice; the broker runs slackLinkNotice with its own store. */
   linkNotice?(teamId: string, userId: string): Promise<string | undefined>;
@@ -140,6 +142,12 @@ export interface SlackCompanyDependencies {
   slackInstallTeamOnly?: string;
   /** L2-2 PR 18c: told after the broker accepted a verified removal (#836), to drop this process's cached token. */
   onWorkspaceRemoved?: (teamId: string) => void;
+  /**
+   * DEC 254zzz80 (R2-F1): the install team's company, from its operator binding (`SLACK_TEAM#<team>` / `BINDING`, slack-workspace-binding.ts), given to the install team's legacy
+   * view only while Slack company mode is on (`slackInstallTeamOnly` is set too). A NAMED company keeps its channel bindings only in its own partition, so the install team's
+   * channel bindings are read there when this names one. Absent (company mode off): the legacy keys, as before. A failed read throws (never a guess at the layout).
+   */
+  installTeamCompany?: (teamId: string) => Promise<string>;
 }
 
 export const SLACK_LINK_NOTICE = "link your account: Open in Rovara";
@@ -155,8 +163,30 @@ export async function slackCompanyProject(deps: SlackCompanyDependencies, teamId
   if (deps.workspaces === undefined) return deps.slackInstallTeamOnly === undefined || teamId === deps.slackInstallTeamOnly;
   try {
     const company = await deps.workspaces.requireCompany(teamId);
-    return OrgIdSchema.safeParse(company).success && recordInCompany(await deps.workspaces.getProject(name), company);
+    return OrgIdSchema.safeParse(company).success && recordInCompany(await deps.workspaces.getProject(name, company), company);
   } catch { return false; }
+}
+
+/**
+ * DEC 254zzz80 (R2-F1): the NAMED company whose own partition holds this Slack team's channel bindings, or undefined for the legacy keys (the built-in company, or no company
+ * layer). The company is the verified request's (slackRequestWorkspace) when it is for this team, else the team's operator binding: the company handler's `workspaces`, or the
+ * install team's legacy view's `installTeamCompany` for exactly the install's team. Never a request field. A binding that cannot be read throws.
+ */
+export async function slackBindingCompany(deps: SlackCompanyDependencies, teamId: string): Promise<OrgId | undefined> {
+  const context = slackRequestWorkspace.getStore();
+  if (context !== undefined && context.teamId === teamId) return namedCompany(context.companyId);
+  if (deps.workspaces !== undefined) return namedCompany(await deps.workspaces.requireCompany(teamId));
+  if (deps.installTeamCompany !== undefined && deps.slackInstallTeamOnly !== undefined && teamId === deps.slackInstallTeamOnly) return namedCompany(await deps.installTeamCompany(teamId));
+  return undefined;
+}
+
+/**
+ * Whether a channel binding is this team's company's. A binding read from a NAMED company's own partition (it carries `companyId`: company-layout.ts namedCompanySlackBinding) is
+ * the company's by its key, so it must name the team's company now; any other binding keeps today's check (slackCompanyProject: the project's newest revision is the company's).
+ */
+export async function slackBindingInCompany(deps: SlackCompanyDependencies, teamId: string, binding: { projectName: string; companyId?: string }): Promise<boolean> {
+  if (binding.companyId === undefined) return slackCompanyProject(deps, teamId, binding.projectName);
+  try { return namedCompany(binding.companyId) !== undefined && await slackBindingCompany(deps, teamId) === binding.companyId; } catch { return false; }
 }
 
 /** Only the verified request establishes this context. Read it once per Web API call. */

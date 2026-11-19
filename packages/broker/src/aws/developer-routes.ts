@@ -3,7 +3,8 @@ import { listSlackWorkspaceScopes, SlackWorkspaceRefused, type SlackWorkspaceBin
 import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
 import { CompanySelfServeNameSchema, COMPANY_INVITE_CODE_MAX, COMPANY_SELF_CREATE_TEXT, CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteListSchema, CompanySelfCreateBodySchema, companyInviteCodeHash, newCompanyInviteLink, type CompanyInviteList, type CompanyPreapprovalCreated, type CompanySelfCreateResponse } from "@agentx/contracts";
 import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
-import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, strictLiveMembership, type CompanyMembershipReader } from "./company-check.js";
+import { Membership, membershipKey, boundedCompanyReads, companyReadActions, ownPartitionRow, recordInCompany, resolveCompany, strictLiveMembership, type CompanyMembershipReader } from "./company-check.js";
+import { grantsPkFor, namedCompany, namedCompanyLatestRevisionRow, namedCompanyProjectArchived, slackChannelBindingPkFor } from "./company-layout.js";
 import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js"; import { putEvalNone, putSkip, readProjectSetupStatus } from "./project-setup-status.js"; import { LIFECYCLE_NOT_FOUND, routeProjectLifecycle, type LifecycleAction } from "./project-lifecycle-routes.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
@@ -58,7 +59,9 @@ import {
   TaskPeopleDisplayReadResponseSchema,
   agentXError,
   developerTaskPolicy,
+  workspaceProjectIndexValue,
   workspaceRecordFields,
+  type OrgId,
   type ChannelByNameRequest,
   type ChannelByNameResponse,
   type ChannelInfoRequest,
@@ -224,7 +227,7 @@ export interface DeveloperApiConfiguration {
   slackRequestQueue?: SlackRequestQueue;
 }
 export interface DeveloperRouteDependencies {
-  workspaces?: Pick<SlackWorkspaceBindings, "requireCompany"> & { getProject?(name: string): Promise<unknown> };
+  workspaces?: Pick<SlackWorkspaceBindings, "requireCompany"> & { getProject?(name: string, companyId?: string): Promise<unknown> };
   workspace?: SlackWorkspaceScope;
   channelLinkCodes?: { preview(personId: string, code: string): Promise<{ channel: string; maskedUserId: string } | undefined>; redeem(personId: string, code: string): ReturnType<typeof redeemLinkCode> };
   policyHook?: ProjectSettingsHook;
@@ -246,11 +249,11 @@ export interface DeveloperRouteDependencies {
   /** L4-JA7: the company's "Knowledge stays in Rovara" and a project's "local coding tools can fetch lessons" (`core-host/knowledge-switch-api.ts`). It does not depend on the lessons switch. Absent: its routes are not found. */
   knowledgeSwitch?: Pick<KnowledgeSwitchApi, "answer">;
   /** Spec 065b: a project from one GitHub repository, as a sign-in client's signed-in Rovara administrator. */
-  createClientProject?: (developerId: string, input: CreateClientProjectRequest, naming?: ClientProjectNaming) => Promise<{ name: string; latestRevision: number }>;
+  createClientProject?: (developerId: string, input: CreateClientProjectRequest, naming?: ClientProjectNaming) => Promise<{ name: string; latestRevision: number; companyId?: string }>;
   /** Spec 065b: the repositories the GitHub App can reach, to choose one for a new project. */
   clientRepositories?: (developerId?: string) => Promise<ClientRepositoriesResponse["installations"]>;
   /** Guided onboarding PR 6: one project from several repositories (all on the caller's company's installations, or nothing is created). */
-  createClientProjects?: (developerId: string, input: CreateClientProjectsRequest, naming?: ClientProjectNaming) => Promise<{ name: string; latestRevision: number }>;
+  createClientProjects?: (developerId: string, input: CreateClientProjectsRequest, naming?: ClientProjectNaming) => Promise<{ name: string; latestRevision: number; companyId?: string }>;
   /** Guided onboarding PR 6: one project per repository, with one result row each. */
   createClientProjectsBulk?: (developerId: string, input: BulkCreateClientProjectsRequest, naming?: ClientProjectNaming) => Promise<BulkCreateClientProjectsResponse>;
   /** Guided onboarding PR 6: the repository picker: the company's connected repositories, each marked with the company's projects that hold it. */
@@ -827,6 +830,9 @@ async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) 
 
 /** The latest revision's number and task policy: the only fields read, so only they are fetched. */
 async function latestDefinition(deps: DeveloperRouteDependencies, project: string, companyId?: string): Promise<{ revision: number; developerTasks?: unknown } | undefined> {
+  // DEC 254zzz80: a named company's projects live only in its own partition.
+  const named = namedCompany(companyId);
+  if (named !== undefined) return namedCompanyDefinition(deps, named, project);
   // T4a's project provider owns company identity; the legacy policy projection may be unstamped.
   let storageCompanyId = companyId;
   if (companyId !== undefined && deps.workspaces?.getProject !== undefined) {
@@ -847,6 +853,20 @@ async function latestDefinition(deps: DeveloperRouteDependencies, project: strin
   })) as { Items?: Array<{ definition: { revision: number; developerTasks?: unknown } }> };
   const row = response.Items?.[0];
   return recordInCompany(row, storageCompanyId) ? row?.definition : undefined;
+}
+
+/**
+ * DEC 254zzz80: a named company's project's latest revision (the core's order, company-layout.ts) and its task policy. An archived project (its META row) stays listed but takes no
+ * new work, as the core engine refuses it: its policy is a stored null, which developerTaskPolicy reads as tasks and channel access off (fail closed).
+ */
+async function namedCompanyDefinition(deps: DeveloperRouteDependencies, company: OrgId, project: string): Promise<{ revision: number; developerTasks?: unknown } | undefined> {
+  const [row, archived] = await Promise.all([
+    namedCompanyLatestRevisionRow(deps.documentClient, deps.tableName, company, project),
+    namedCompanyProjectArchived(deps.documentClient, deps.tableName, company, project),
+  ]);
+  if (row === undefined) return undefined;
+  const definition = row.definition as { revision: number; developerTasks?: unknown };
+  return { revision: definition.revision, developerTasks: archived ? null : definition.developerTasks };
 }
 
 /** Each named project's latest revision and task policy; projects with no revision are left out. */
@@ -931,10 +951,29 @@ const describeChannel = (channelId: string, names: Map<string, { name: string; i
  * owner key, so an admin's `administrator` rows sit under the same key when both sign in through one
  * IdP, and that person may use the projects they administer (#630).
  */
-async function grantsOf(deps: DeveloperRouteDependencies, caller: ProjectAccessSubject): Promise<string[]> {
-  return (await queryAll<{ projectName: string; role?: string }>(deps, `MEMBER#${caller.developerId}`, "PROJECT#"))
+async function grantsOf(deps: DeveloperRouteDependencies, caller: ProjectAccessSubject, companyId?: string): Promise<string[]> {
+  return (await grantRowsOf(deps, caller.developerId, companyId))
     .filter((membership) => mayUseProject(membership.role))
     .map((membership) => membership.projectName);
+}
+
+/**
+ * DEC 254zzz80: a person's grant rows for the company named by their LIVE membership. A named company's are read from its own partition only (`ORG#<company>#MEMBER#<person>`,
+ * company-layout.ts), and a row there whose keys disagree with its project name, or that names another company, is never this company's grant. The built-in company and no
+ * company read the legacy rows exactly as before.
+ */
+async function grantRowsOf<T extends { pk?: unknown; sk?: unknown; projectName: string; role?: string }>(deps: DeveloperRouteDependencies, personId: string, companyId: string | undefined, maxItems?: number): Promise<T[]> {
+  const pk = grantsPkFor(companyId, personId);
+  const rows = await queryAll<T>(deps, pk, "PROJECT#", maxItems);
+  const company = namedCompany(companyId);
+  if (company === undefined) return rows;
+  return rows.filter((row) => row.pk === pk && typeof row.projectName === "string" && row.sk === `PROJECT#${row.projectName}` && ownPartitionRow(row as Record<string, unknown>, company));
+}
+
+/** DEC 254zzz80: the NAMED company of a person's LIVE membership (where their grants live), read now; undefined: no company layer, or the built-in company (the legacy keys). */
+async function liveNamedCompany(deps: DeveloperRouteDependencies, personId: string): Promise<string | undefined> {
+  const reader = deps.companies ?? deps.developer.companies;
+  return reader === undefined ? undefined : namedCompany(await resolveCompany(reader, personId));
 }
 
 async function bindingsOf(deps: DeveloperRouteDependencies, workspace?: SlackWorkspaceScope, companyId?: string): Promise<SlackChannelBinding[]> {
@@ -956,9 +995,13 @@ async function bindingsOf(deps: DeveloperRouteDependencies, workspace?: SlackWor
   const bindings: SlackChannelBinding[] = [];
   for (const scope of scopes) {
     if (!SlackWorkspaceScopeSchema.safeParse(scope).success || await deps.workspaces.requireCompany(scope.teamId) !== scope.companyId) throw new SlackWorkspaceRefused();
-    const rows = await queryAll<SlackChannelBinding>({ ...deps, documentClient: budget.client }, channelBindingPartition(SLACK_CHANNEL, scope.teamId), channelBindingSortPrefix(SLACK_CHANNEL));
+    // DEC 254zzz98 (review M1): a NAMED company's channel bindings live only in its own partition (`ORG#<company>#SLACK_BINDING#<team>`, slackChannelBindingPkFor), as the Slack
+    // ingress, the dispatcher and the channel-link writer read and write them; a legacy row on its team is never this company's. A row there naming another company is dropped.
+    // The built-in company keeps the legacy partition, byte for byte.
+    const named = namedCompany(scope.companyId);
+    const rows = await queryAll<SlackChannelBinding>({ ...deps, documentClient: budget.client }, slackChannelBindingPkFor(scope.companyId, scope.teamId), channelBindingSortPrefix(SLACK_CHANNEL));
     if (rows.some((row) => row.teamId !== scope.teamId)) throw new SlackWorkspaceRefused();
-    bindings.push(...rows);
+    bindings.push(...(named === undefined ? rows : rows.filter((row) => ownPartitionRow(row as unknown as Record<string, unknown>, named))));
   }
   return bindings;
 }
@@ -1191,9 +1234,9 @@ async function projectsAPersonUses(deps: DeveloperRouteDependencies, developerId
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
   }, companyId);
   // An administrator row also gives task access (#630), but this answer keeps naming it `administrator`, after the rest.
-  const administered = (await queryAll<{ projectName?: unknown; role?: unknown }>(deps, `MEMBER#${developerId}`, "PROJECT#"))
+  const administered = (await grantRowsOf<{ projectName: string; role?: string }>(deps, developerId, companyId))
     .filter((membership) => membership.role === "administrator" && typeof membership.projectName === "string")
-    .map((membership) => membership.projectName as string);
+    .map((membership) => membership.projectName);
   const registered = await projectsWithPolicy(deps, administered, companyId);
   return {
     displayName: developer.displayName,
@@ -1219,12 +1262,14 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
   if (access === undefined) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   const mine = access.projects.find((entry) => entry.name === project);
   if (mine === undefined) throw agentXError("NOT_FOUND", "project not found");
-  const response = await deps.documentClient.send(new QueryCommand({
-    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
-  })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown } }> };
-  const row = response.Items?.[0];
-  if (!recordInCompany(row, companyId)) throw agentXError("NOT_FOUND", "project not found");
+  // DEC 254zzz80: a named company's revision from its own partition (company-layout.ts checks the partition); the legacy row keeps its stored-company check.
+  const named = namedCompany(companyId);
+  const row = named !== undefined ? await namedCompanyLatestRevisionRow(deps.documentClient, deps.tableName, named, project) as { definition?: { revision?: unknown; repositories?: unknown } } | undefined
+    : (await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+      ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+    })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown } }> }).Items?.[0];
+  if (named === undefined ? !recordInCompany(row, companyId) : row === undefined) throw agentXError("NOT_FOUND", "project not found");
   scope?.check();
   const definition = row?.definition;
   if (definition === undefined || typeof definition.revision !== "number") throw agentXError("NOT_FOUND", "project not found");
@@ -1365,10 +1410,19 @@ function memberActions(deps: DeveloperRouteDependencies) {
 }
 
 /** Spec 067: a registered, not removed person, with their name and whether they hold a grant on `project`. */
-async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string): Promise<{ name: string; projectMember: boolean } | undefined> {
+async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string, taskCompany?: string): Promise<{ name: string; projectMember: boolean } | undefined> {
   const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName">>(deps, `DEVELOPER#${developerId}`);
   if (person === undefined || person.revoked === true) return undefined;
-  return { name: person.displayName ?? "Unknown", projectMember: await projectGrant(memberActions(deps), project, developerId) !== undefined };
+  const name = person.displayName ?? "Unknown";
+  // DEC 254zzz80 / 254zzz98 (review L2): a reader of a task must be a LIVE member of the TASK's company, and their grant is read where that company keeps it (beside its
+  // revision): never in the reader's own other company, so a share never says whether a person of another company holds a grant there. No live company: no grant.
+  // With no company layer at all, nothing here is company-scoped: the legacy grant, byte for byte as before.
+  if ((deps.companies ?? deps.developer.companies) === undefined) return { name, projectMember: await projectGrant(memberActions(deps), project, developerId, undefined) !== undefined };
+  let company: string | undefined;
+  try { company = await liveNamedCompany(deps, developerId); } catch { return { name, projectMember: false }; }
+  const owning = taskCompany === undefined ? company : namedCompany(taskCompany);
+  if (owning !== company) return { name, projectMember: false };
+  return { name, projectMember: await projectGrant(memberActions(deps), project, developerId, owning) !== undefined };
 }
 
 const CLIENT_PROJECT = /^\/v1\/dev\/client\/projects\/([^/]+)$/;
@@ -1398,7 +1452,7 @@ async function routeClientCodeSettings(deps: DeveloperRouteDependencies, request
   if (!access.projects.some((entry) => entry.name === project)) throw agentXError("NOT_FOUND", "project not found");
   const store = { documentClient: deps.documentClient, tableName: deps.tableName };
   if (request.method === "GET") return { settings: await readCodeSettings(store, companyId ?? IMPLICIT_COMPANY_ID, project) };
-  const own = await projectGrant(memberActions(deps), project, person.developerId);
+  const own = await projectGrant(memberActions(deps), project, person.developerId, namedCompany(companyId));
   const membership = companyId === undefined ? undefined : await deps.companies?.membershipOf?.(person.developerId);
   const companyAdmin = companyId === undefined ? person.administrator : membership?.companyId === companyId && (membership.role === "admin" || membership.role === "owner");
   return putCodeSettings({ ...store, now: deps.now, // The file's one company-less logger (already in the log-site inventory), with the company added when there is one.
@@ -1435,13 +1489,15 @@ async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request:
   if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
   const scope = boundedCompanyReads(deps.documentClient, deps.now);
   const companyId = await resolveCompany(deps.companies, person.developerId);
-  const latest = await scope.client.send(new QueryCommand({
-    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
-  })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown } }> };
-  const row = latest.Items?.[0];
+  // DEC 254zzz80: a named company's revision from its own partition; the legacy row keeps its stored-company check.
+  const named = namedCompany(companyId);
+  const row = named !== undefined ? await namedCompanyLatestRevisionRow(scope.client, deps.tableName, named, project) as { definition?: { revision?: unknown; repositories?: unknown } } | undefined
+    : (await scope.client.send(new QueryCommand({
+      TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+      ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+    })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown } }> }).Items?.[0];
   const definition = row?.definition;
-  if (!recordInCompany(row, companyId) || definition === undefined || typeof definition.revision !== "number") throw agentXError("NOT_FOUND", "project not found");
+  if ((named === undefined ? !recordInCompany(row, companyId) : row === undefined) || definition === undefined || typeof definition.revision !== "number") throw agentXError("NOT_FOUND", "project not found");
   // With no company layer there is no company to belong to: the person must be one who may use the project.
   if (companyId === undefined) {
     const access = await projectsAPersonUses({ ...deps, documentClient: scope.client }, person.developerId, undefined);
@@ -1450,7 +1506,7 @@ async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request:
   }
   const membership = companyId === undefined ? undefined : await deps.companies?.membershipOf?.(person.developerId);
   const role = membership !== undefined && membership.companyId === companyId ? membership.role : undefined;
-  const own = await projectGrant({ ...memberActions(deps), documentClient: scope.client }, project, person.developerId);
+  const own = await projectGrant({ ...memberActions(deps), documentClient: scope.client }, project, person.developerId, namedCompany(companyId));
   const projectAdmin = own?.role === "administrator";
   const companyAdmin = companyId === undefined ? person.administrator : role === "admin" || role === "owner";
   const effectiveCompany = companyId ?? IMPLICIT_COMPANY_ID;
@@ -1511,7 +1567,7 @@ async function routeClientLifecycle(deps: DeveloperRouteDependencies, request: A
   return routeProjectLifecycle({
     documentClient: deps.documentClient, tableName: deps.tableName, now: deps.now,
     membershipOf: async (personId) => await reader.membershipOf!(personId),
-    grantRole: async (personId, project) => (await projectGrant(memberActions(deps), project, personId))?.role,
+    grantRole: async (personId, project) => (await projectGrant(memberActions(deps), project, personId, await liveNamedCompany(deps, personId)))?.role,
     archiveTakesEffect: (companyId) => deps.developer.projectArchiveTakesEffect?.(companyId) === true,
     linkedSlackChannels: async (companyId, project) => (await bindingsOf(deps, undefined, companyId)).filter((binding) => binding.projectName === project).length,
   }, { personId: person.developerId, project: rawProject, action, body: request.body });
@@ -1551,6 +1607,9 @@ async function companyManagesProject(deps: DeveloperRouteDependencies, caller: {
   const membership = await reader.membershipOf(caller.developerId);
   if (membership === undefined || (membership.role !== "owner" && membership.role !== "admin")) return false;
   if (caller.companyId !== undefined && caller.companyId !== membership.companyId) return false;
+  // DEC 254zzz80: a named company's project is one with a revision in its own partition.
+  const named = namedCompany(membership.companyId);
+  if (named !== undefined) return await namedCompanyLatestRevisionRow(deps.documentClient, deps.tableName, named, project) !== undefined;
   const latest = await deps.documentClient.send(new QueryCommand({
     TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
@@ -1622,14 +1681,15 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
       const created = await deps.createClientProjects(creator.developerId, many.data, ...naming);
       logDeveloperEvent({ event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name, repositories: many.data.repositories.length,
         ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }) });
-      return readClientProject(deps, creator.developerId, created.name, creator.companyId);
+      // DEC 254zzz80: read back where the create wrote: a named company's own partition (the company the create resolved from live membership), else as before.
+      return readClientProject(deps, creator.developerId, created.name, namedCompany(created.companyId) ?? creator.companyId);
     }
     if (deps.createClientProject === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
     const parsed = CreateClientProjectRequestSchema.safeParse(body);
     if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid project: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
     const created = await deps.createClientProject(creator.developerId, parsed.data, ...naming);
     console.log(JSON.stringify({ component: "broker", event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name }));
-    return readClientProject(deps, creator.developerId, created.name, creator.companyId);
+    return readClientProject(deps, creator.developerId, created.name, namedCompany(created.companyId) ?? creator.companyId);
   }
   // Guided onboarding PR 16 (DEC 254n item 3): a project's archive and restore, preview first (project-lifecycle-routes.ts).
   const lifecycle = CLIENT_LIFECYCLE.exec(url.pathname);
@@ -1657,33 +1717,39 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   const project = decodeURIComponent(members[1]!);
   if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
   const actions = memberActions(deps);
+  // DEC 254zzz80: every grant read and write below is in the company of the caller's LIVE membership (a named company's own partition), never a request's.
+  const grantCompany = await liveNamedCompany(deps, caller.developerId);
   // FR-004: as the person: they administer the project, they are a Rovara administrator, or (DEC 254n item 3, the rule of `lifecycleAccess`) they are a LIVE owner or admin of the company
   // the project belongs to, grant or not.
-  // DEC 254zzz81 (the routes are always on): with a company, the project must be the caller's company's, read before any grant counts, so a grant on another company's project (or the
-  // implicit company's) changes nothing and that project answers like a missing one.
-  const registered = await deps.documentClient.send(new QueryCommand({
-    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, Limit: 1, ScanIndexForward: false, ConsistentRead: true,
-  })) as { Items?: unknown[] };
-  const latest = registered.Items?.[0];
-  if (caller.companyId !== undefined && (latest === undefined || !recordInCompany(latest, caller.companyId))) throw agentXError("NOT_FOUND", "project not found");
-  const own = await projectGrant(actions, project, caller.developerId);
+  // DEC 254zzz81 (the routes are always on) with DEC 254zzz80 (one company layout): the project must be the caller's company's, read before any grant counts, so a grant on another
+  // company's project (or the implicit company's) changes nothing and that project answers like a missing one. A named company's project is only its own partition's; otherwise the
+  // legacy rows, which must name the caller's company.
+  const namedCaller = namedCompany(caller.companyId);
+  const latest = namedCaller !== undefined
+    ? await namedCompanyLatestRevisionRow(deps.documentClient, deps.tableName, namedCaller, project)
+    : ((await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+      ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, Limit: 1, ScanIndexForward: false, ConsistentRead: true,
+    }))) as { Items?: unknown[] }).Items?.[0];
+  if (caller.companyId !== undefined && (latest === undefined || (namedCaller === undefined && !recordInCompany(latest, caller.companyId)))) throw agentXError("NOT_FOUND", "project not found");
+  const own = await projectGrant(actions, project, caller.developerId, grantCompany);
   if (!caller.administrator && own?.role !== "administrator" && !await companyManagesProject(deps, caller, project)) throw agentXError("FORBIDDEN", CLIENT_MEMBERS_NOT_ALLOWED);
   if (latest === undefined) throw agentXError("NOT_FOUND", `project ${project} is not registered`);
   const by = { issuer: `sign-in-client:${caller.client.clientId}`, subject: caller.developerId };
   if (request.method === "GET" && members[2] === undefined) {
-    const listed = await listProjectMembers(actions, project);
+    const listed = await listProjectMembers(actions, project, grantCompany);
     const named = await Promise.all(listed.map(async (member) => ({ ...member, name: profileDisplayName((await getSignIn<Pick<DeveloperRecord, "displayName" | "provider" | "subject">>(deps, `DEVELOPER#${member.developerId}`)) ?? {}) ?? "Unknown" })));
     return { project, members: named } satisfies ClientProjectMembersResponse;
   }
   if (members[2] === undefined || (request.method !== "PUT" && request.method !== "DELETE")) throw agentXError("NOT_FOUND", "route not found");
-  const target = await resolveDeveloper(actions, decodeURIComponent(members[2]), caller.companyId);
+  // The target is fenced to the same LIVE company the grant is written in (the built-in company and none: as before, the caller's company).
+  const target = await resolveDeveloper(actions, decodeURIComponent(members[2]), grantCompany ?? caller.companyId);
   if (request.method === "PUT") {
-    const granted = await grantProjectAccess(actions, by, project, target.developerId);
+    const granted = await grantProjectAccess(actions, by, project, target.developerId, grantCompany);
     console.log(JSON.stringify({ component: "broker", event: "client.project_member_granted", clientId: caller.client.clientId, by: caller.developerId, developerId: target.developerId, project, already: granted.already }));
     return { project, developerId: target.developerId, outcome: granted.already ? "already_member" : "granted" } satisfies ClientProjectMemberChangeResponse;
   }
-  const revoked = await revokeProjectAccess(actions, project, target.developerId);
+  const revoked = await revokeProjectAccess(actions, project, target.developerId, grantCompany);
   console.log(JSON.stringify({ component: "broker", event: "client.project_member_revoked", clientId: caller.client.clientId, by: caller.developerId, developerId: target.developerId, project, revoked: revoked.revoked }));
   return { project, developerId: target.developerId, outcome: revoked.revoked ? "revoked" : "not_member" } satisfies ClientProjectMemberChangeResponse;
 }
@@ -1691,7 +1757,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
 async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller, companyId?: string): Promise<DeveloperProjectsResponse> {
   // Company mode, with or without the workspace service: the caller's company filters every project the list shows (the install's own team is the implicit company's).
   companyId ??= companySlackMode(deps) ? await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId) : undefined;
-  const grants = await grantsOf(deps, caller);
+  const grants = await grantsOf(deps, caller, companyId);
   const bindings = await bindingsOf(deps, undefined, companyId);
   const policies = await projectsWithPolicy(deps, [...grants, ...bindings.map((binding) => binding.projectName)], companyId);
   const access = await resolveDeveloperAccess({
@@ -1739,13 +1805,13 @@ export async function checkProjectAccess(
   caller: ProjectAccessSubject,
   project: string,
   membership?: { freshMemberOf: readonly string[] },
-): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }> {
+): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[]; companyId?: string }> {
   // A name that is not a project name is never echoed back: it could be long or carry markup.
   if (!AgentXNameSchema.safeParse(project).success) throw agentXError("PROJECT_NOT_FOUND", "that is not a valid AgentX project name");
   const companyId = companySlackMode(deps) ? await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId) : undefined;
   const known = (await projectsWithPolicy(deps, [project], companyId)).get(project);
   if (known === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
-  const grants = (await grantsOf(deps, caller)).filter((name) => name === project);
+  const grants = (await grantsOf(deps, caller, companyId)).filter((name) => name === project);
   const requestedWorkspace = deps.workspace === undefined ? undefined : await callerWorkspace(deps, caller, { companyId: deps.workspace.companyId }, deps.workspace.teamId);
   const bindings = (await bindingsOf(deps, requestedWorkspace, companyId)).filter((binding) => binding.projectName === project);
   const teams = [...new Set(bindings.map((binding) => binding.teamId))];
@@ -1783,7 +1849,8 @@ export async function checkProjectAccess(
       : [...(await channelNames(deps, result.visibleChannelIds, workspace)).values()].filter((channel) => !channel.isPrivate).map((channel) => channel.name).sort();
     throw agentXError("PROJECT_ACCESS_DENIED", accessDeniedMessage(project, visible));
   }
-  return { revision: result.revision, policy: result.policy, access: result.access, channelIds: result.channelIds };
+  // DEC 254zzz98 (re-review H): the caller's company as resolved here, so the start can check the project row it actually loads (developer-tasks.ts startTask).
+  return { revision: result.revision, policy: result.policy, access: result.access, channelIds: result.channelIds, ...(companyId === undefined ? {} : { companyId }) };
 }
 
 /**
@@ -1791,8 +1858,12 @@ export async function checkProjectAccess(
  * Only a workspace's own fields are read; the index carries the whole item, so no second get is
  * needed per workspace.
  */
-async function projectWorkspaces(deps: DeveloperRouteDependencies, project: string): Promise<DeveloperWorkspace[]> {
+async function projectWorkspaces(deps: DeveloperRouteDependencies, project: string, company?: OrgId): Promise<DeveloperWorkspace[]> {
   const items: Array<Record<string, unknown>> = [];
+  // DEC 254zzz80: a named company's workspaces are listed from its own index partition (`workspaceProjectIndexValue`), never the bare name another company's project may share;
+  // an item there must name this company (`orgId` or `companyId`) and no other: one that names another company, or none, is drift and left out.
+  const ownCompany = (item: Record<string, unknown>) => company === undefined
+    || ((item.orgId === company || item.companyId === company) && ownPartitionRow(item, company) && item[WORKSPACE_PROJECT_INDEX.partitionKey] === workspaceProjectIndexValue(company, project));
   let start: Record<string, unknown> | undefined;
   do {
     const response = await deps.documentClient.send(new QueryCommand({
@@ -1800,14 +1871,14 @@ async function projectWorkspaces(deps: DeveloperRouteDependencies, project: stri
       IndexName: WORKSPACE_PROJECT_INDEX.name,
       KeyConditionExpression: "#project = :project",
       ExpressionAttributeNames: { "#project": WORKSPACE_PROJECT_INDEX.partitionKey },
-      ExpressionAttributeValues: { ":project": project },
+      ExpressionAttributeValues: { ":project": company === undefined ? project : workspaceProjectIndexValue(company, project) },
       // Newest first, and never more than one page past the cap: a project with thousands of
       // thread workspaces must not turn one page load into an unbounded scan.
       ScanIndexForward: false,
       Limit: DEVELOPER_WORKSPACES_PER_PROJECT,
       ...(start === undefined ? {} : { ExclusiveStartKey: start }),
     })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
-    items.push(...(response.Items ?? []).filter((item) => item.entityType !== "WORKSPACE_COMPANY_POINTER"));
+    items.push(...(response.Items ?? []).filter((item) => item.entityType !== "WORKSPACE_COMPANY_POINTER" && ownCompany(item)));
     start = items.length >= DEVELOPER_WORKSPACES_PER_PROJECT ? undefined : response.LastEvaluatedKey;
   } while (start !== undefined);
 
@@ -1839,9 +1910,15 @@ async function projectWorkspaces(deps: DeveloperRouteDependencies, project: stri
  * membership only where the project's developerTasks policy allows it, failing closed).
  */
 async function listWorkspaces(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperWorkspacesResponse> {
-  const listing = await listProjects(deps, caller);
+  // DEC 254zzz80: the caller's company as listProjects resolves it (live membership); a named company's listing and workspaces are read under one bounded company budget.
+  const companyId = companySlackMode(deps) ? await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId) : undefined;
+  const company = namedCompany(companyId);
+  const scope = company === undefined ? undefined : boundedCompanyReads(deps.documentClient, deps.now);
+  if (scope !== undefined) deps = { ...deps, documentClient: scope.client };
+  const listing = await listProjects(deps, caller, companyId);
   const workspaces: DeveloperWorkspace[] = [];
-  for (const project of listing.projects) workspaces.push(...await projectWorkspaces(deps, project.name));
+  for (const project of listing.projects) workspaces.push(...await projectWorkspaces(deps, project.name, company));
+  scope?.check();
   // Across projects, still newest first, so the page's list reads as one timeline.
   workspaces.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   return { ...listing, workspaces };
@@ -1882,10 +1959,11 @@ export function developerTaskRouteDependencies(
   const definitionReads = new Map<string, ReturnType<typeof latestDefinition>>();
   const webProof: Pick<TaskPersonIdentityDependencies, "companyMembership" | "projectGrant" | "projectMemberIds"> = {
     // C4: one bounded page of the project's side of its grants (admin-actions.ts projectMemberKey rows); each id is proved live before use.
-    projectMemberIds: async (project, limit) => {
+    // DEC 254zzz80: in the TASK'S company's own partition for a named company (company-layout.ts); the legacy rows otherwise.
+    projectMemberIds: async (project, limit, companyId) => {
       const response = await deps.documentClient.send(new QueryCommand({
         TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :developer)",
-        ExpressionAttributeValues: { ":pk": projectMemberKey(project, "").pk, ":developer": "DEVELOPER#" }, ConsistentRead: true, Limit: limit,
+        ExpressionAttributeValues: { ":pk": projectMemberKey(project, "", companyId).pk, ":developer": "DEVELOPER#" }, ConsistentRead: true, Limit: limit,
       })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
       const ids = (response.Items ?? []).map((item) => typeof item.sk === "string" && item.sk.startsWith("DEVELOPER#") ? item.sk.slice("DEVELOPER#".length) : "");
       return { ids, complete: response.LastEvaluatedKey === undefined };
@@ -1910,7 +1988,7 @@ export function developerTaskRouteDependencies(
       }
       const revision = await pending;
       if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", "task person project was not found");
-      const memberships = await queryAll<{ pk?: string; sk?: string; projectName: string; role?: string }>(deps, `MEMBER#${targetDeveloperId}`, "PROJECT#", WEB_PROOF_GRANT_ROWS_MAX);
+      const memberships = await grantRowsOf<{ pk?: string; sk?: string; projectName: string; role?: string }>(deps, targetDeveloperId, companyId, WEB_PROOF_GRANT_ROWS_MAX);
       const result = evaluateProjectAuthority({ project, revision: { revision: revision.revision, definition: { developerTasks: revision.developerTasks } }, memberships, bindings: [] });
       if (result.kind === "allowed") return result.access === "granted";
       if (result.kind === "denied" && result.reason === "project-access") return false;
@@ -1953,7 +2031,7 @@ export function developerTaskRouteDependencies(
         const revision = await latestDefinition(deps, project, workspace?.companyId);
         if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
         const [memberships, allBindings] = await Promise.all([
-          queryAll<{ projectName: string; role?: string }>(deps, `MEMBER#${subject.developerId}`, "PROJECT#"),
+          grantRowsOf<{ projectName: string; role?: string }>(deps, subject.developerId, workspace?.companyId),
           bindingsOf(deps, workspace),
         ]);
         const result = evaluateProjectAuthority({
@@ -2054,7 +2132,7 @@ export function developerTaskRouteDependencies(
         throw error;
       }
     },
-    taskReaderPerson: (developerId, project) => taskReaderPerson(deps, developerId, project),
+    taskReaderPerson: (developerId, project, taskCompany) => taskReaderPerson(deps, developerId, project, taskCompany),
     ...(!companySlackMode(deps) ? {} : { workspaceForTask: taskWorkspace, workspaceForProject }),
     channelMember: async (slackUserId, channelId, workspace) => {
       if (companySlackMode(deps) && (workspace === undefined || await callerWorkspace(deps, caller, { companyId: workspace.companyId }, workspace.teamId) === undefined)) throw new SlackWorkspaceRefused();
