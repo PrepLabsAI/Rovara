@@ -255,6 +255,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
  * the laptop's asks, automations or page routes). Behind every row the core's own handler still takes the company from live membership and checks the person's level, grant or role.
  */
 export const APP_ROUTES: readonly DevRoute[] = [
+  { method: "GET", path: "/v1/app/projects/{project}/known-failing", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/known-failing", requires: "full" },
   // Sessions (the core's session routes): reading one's own sessions is a task read; following and presence are a reader's own marks.
   { method: "GET", path: "/v1/app/sessions", requires: "tasks:read" },
   { method: "GET", path: "/v1/app/sessions/{sessionId}", requires: "tasks:read" },

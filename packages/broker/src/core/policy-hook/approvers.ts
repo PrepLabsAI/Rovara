@@ -49,8 +49,17 @@ function decideQuestion(request: ApprovalRequest, stage: "requirement" | "verdic
   };
 }
 
+type DecisionRule = Pick<ApprovalRequest, "requestedBy"> & Partial<Pick<ApprovalRequest, "kind" | "subject">>;
+
+/** Known-failing marks need one authorized approver. The hook still decides allow/refuse; its count and self-approval settings do not apply to this kind. */
+function approvalCountRule(answer: PolicyHookDecideAnswer, request: DecisionRule): PolicyHookDecideAnswer {
+  return request.kind === "known_failing" && request.subject?.type === "known_failing"
+    ? { ...answer, minApprovers: 1, secondPerson: false, selfApproval: true } : answer;
+}
+
 /** The install's requirement, made only stricter by the answer. */
-export function stricterRequirement(base: ApprovalRequirement, answer: PolicyHookDecideAnswer, request: Pick<ApprovalRequest, "requestedBy">): ApprovalRequirement {
+export function stricterRequirement(base: ApprovalRequirement, answer: PolicyHookDecideAnswer, request: DecisionRule): ApprovalRequirement {
+  answer = approvalCountRule(answer, request);
   const floor = answer.secondPerson ? (request.requestedBy === undefined ? 2 : 1) : 1;
   // DEC 254zzz73: an answer's `signInMaxAgeSeconds` (a re-sign-in window) is accepted on the wire and ignored: no answer asks for a step-up or a recent sign-in.
   const { soleApproverAllowed, ...rest } = base;
@@ -114,7 +123,7 @@ export function withPolicyHookApprovers(base: Approvers, hook: PolicyHookClient,
       try { asked = await ask(request, "verdict", verdict.approver); } catch { return refuse(verdict, "company_rules_no_answer"); }
       if (asked === undefined) return refuse(verdict, "company_rules_no_answer");
       if (asked === "unaskable") return refuse(verdict, "company_rules_refused");
-      const answer = asked.answer;
+      const answer = approvalCountRule(asked.answer, request);
       // Every signed answer is the last known one for this kind until it expires; a "no" is kept as the stricter default, never as permission.
       remember(known, kindKey(request), { answer: answer.allow ? answer : STRICTER_DEFAULT_ANSWER, expiresAt: asked.expiresAt }, maxEntries);
       if (!answer.allow) return refuse(verdict, "company_rules_refused");

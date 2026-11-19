@@ -11,6 +11,10 @@
 //   4. Partially verified: nothing failed or was blocked, but something planned did not run or could not be read.
 //   5. Verified: every required check ran on the current candidate, the evidence is for exactly this code, and nothing is missing.
 // Anything that cannot be read is never Verified.
+import type { OrgId } from "@agentx/contracts";
+import type { TestEnvDeps } from "../test-env/deps.js";
+import { readKnownFailingMarks, knownFailingTaskBranches, verificationResultsEnabled } from "../test-env/known-failing.js";
+import { usableNightlyBaseline } from "../test-env/nightly-usable.js";
 import {
   autoFixDecision, classifyBlockedWorkflow, E2E_PROJECT_CHECK_ID, SANDBOX_MODEL_HOSTS_ITEM_ID, isValidTestId,
   type AutoFixBudget, type AutoFixCode, type AutoFixFacts, type EvidencePack, type TestingBlockedReason, type TestingCodeReason, type TestingPartialReason, type TestingReason, type TestingResult,
@@ -285,4 +289,22 @@ function laterWaiting(current: ResultWaiting | undefined, next: ResultWaiting): 
  */
 function knownFailingExcusedAll(failingChecks: readonly EvidencePack["checks"][number][], originalFailingChecks: readonly EvidencePack["checks"][number][], alreadyFailing: readonly KnownFailingEntry[]): boolean {
   return failingChecks.length === originalFailingChecks.length && knownFailingExcused(originalFailingChecks, alreadyFailing);
+}
+
+/** Storage-backed production classifier. Any incomplete required read excuses nothing. */
+export async function alreadyFailingForResults(deps: Pick<TestEnvDeps, "store" | "now" | "env">, input: { companyId: OrgId; project: string; taskId: string }): Promise<KnownFailingEntry[]> {
+  if (!verificationResultsEnabled(deps.env)) return [];
+  try {
+    const marks = await readKnownFailingMarks(deps, input.companyId, input.project);
+    const taskBranches = await knownFailingTaskBranches(deps, input.taskId);
+    if (taskBranches === undefined) return [];
+    const baseline = await usableNightlyBaseline(deps, input.companyId, input.project, { taskBranches });
+    // No usable complete baseline means the whole exemption read is unavailable.
+    if (baseline === undefined) return [];
+    return [...baseline.failed, ...marks.marks.map(({ name, checkId }) => ({ name, checkId }))];
+  } catch { return []; }
+}
+
+export async function classifyStoredTestingResult(deps: Pick<TestEnvDeps, "store" | "now" | "env">, input: Omit<ResultInput, "alreadyFailing"> & { companyId: OrgId; project: string; taskId: string }): Promise<ResultOutcome> {
+  return classifyTestingResult({ ...input, alreadyFailing: await alreadyFailingForResults(deps, input) });
 }

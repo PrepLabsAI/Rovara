@@ -56,6 +56,8 @@ import { SCRIPT_TOKEN_CREATE_ADMIN_ONLY } from "../core/script-tokens/store.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { createSessionRoutes } from "../local/app/session-routes.js"; import { INBOX_PATH, createInboxRoutes, inboxAnswer, inboxOwns } from "./inbox-routes.js";
 import { createLocalPlaybook } from "../local/app/playbook.js";
+import { isKnownFailingPath, routeKnownFailing } from "./known-failing-routes.js";
+import { hostedTestingView, observeHostedBlockedTask } from "./known-failing.js";
 import { developerTaskView } from "../local/app/task-view.js";
 import { proofIndexOf } from "../local/app/proof-index.js";
 import { loadEvidencePack } from "../core/proof/evidence-keep.js";
@@ -148,6 +150,8 @@ export interface DeployedCaller {
 /** A decision card's caller on the deployed API: who acts, as the broker's sign-in vouched for them. */
 export interface DeployedDecisionCaller extends DecisionCaller {
   principal: Principal;
+  /** Authenticated Rovara website client, carried from sign-in for KF writes only. */
+  webApp?: true | undefined;
 }
 
 /** What membership says about the caller: the company and the live role in it (never a token claim). */
@@ -287,7 +291,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
-  if (isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isTicketUpdatesPath(path, method)) return true;
+  if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isTicketUpdatesPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
@@ -539,7 +543,9 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
               return shared;
             })
             : await loadOwnedTask(target.runtime.flow.deps, taskCaller, task[1]!);
-          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
+          await observeHostedBlockedTask(target.runtime.flow.deps, record, target.wiring.testEnvironment?.env);
+          const testing = await hostedTestingView(target.runtime.flow.deps, target.blobs, record, target.wiring.testEnvironment?.env);
+          return json(200, { task: { ...await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs), ...(testing === undefined ? {} : { testing }) } });
         }
         const evidence = TASK_EVIDENCE.exec(path);
         if (evidence !== null) {
@@ -629,6 +635,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           const decisionCaller: DeployedDecisionCaller = {
             orgId: companyId, developerId: developerIdOf(caller.principal),
             principal: person,
+            ...(caller.webApp === true ? { webApp: true as const } : {}),
           };
           const reply = await routeDecisionCards(target.wiring.decisions, decisionCaller, { method: request.method, pathname: path, searchParams: url.searchParams, body });
           if (reply === undefined) throw agentXError("NOT_FOUND", "route not found");
@@ -701,6 +708,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target), log: options.log,
           });
         }
+        if (isKnownFailingPath(path, request.method)) return await routeKnownFailing({ flow: target.runtime.flow.deps, principal: caller.principal, companyId: target.runtime.companyId, members: target.wiring.members, webApp: caller.webApp === true, path, request, ...(target.wiring.testEnvironment === undefined ? {} : { env: target.wiring.testEnvironment.env }) });
         if (isTicketUpdatesPath(path, request.method)) {
           // Audit gap 11b: the company's own runtime and store, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
           if (target.wiring.ticketUpdates === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
