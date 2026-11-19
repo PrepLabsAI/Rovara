@@ -183,9 +183,14 @@ describe("(d) company reads and (g) the outbox", () => {
 describe("(h) the company-secrets role (T6)", () => {
   const role = () => ofType(named, "AWS::IAM::Role").find(([id]) => withoutHash(id) === "CompanySecretsRole")!;
 
-  it("exists in named environments only, and the broker gets its ARN", () => {
+  it("exists (the legacy deployment too since #1129, under agentx/production/), and the broker gets its ARN", () => {
     expect(role()).toBeDefined();
-    expect(JSON.stringify(legacy)).not.toContain("CompanySecrets");
+    const legacyRole = ofType(legacy, "AWS::IAM::Role").find(([id]) => withoutHash(id) === "CompanySecretsRole")!;
+    expect(legacyRole).toBeDefined();
+    expect(envOf(legacy, "Broker").COMPANY_SECRETS_ROLE_ARN).toEqual({ "Fn::GetAtt": [legacyRole[0], "Arn"] });
+    const legacyPaths = JSON.stringify(ofType(legacy, "AWS::IAM::Policy").filter(([id]) => id.startsWith("CompanySecretsRoleDefaultPolicy")));
+    expect(legacyPaths).toContain(":secret:agentx/production/org-connectors/${aws:PrincipalTag/rovara:org}/*");
+    expect(legacyPaths).toContain(":secret:agentx/production/org-hooks/${aws:PrincipalTag/rovara:org}/*");
     // ENV-ROOM: the role's name packed; the broker builds its ARN in the environment's role path (tests/contract/broker-environment.test.ts).
     expect(envOf(named, "Broker").COMPANY_SECRETS_ROLE_ARN).toEqual({ Ref: role()[0] });
   });

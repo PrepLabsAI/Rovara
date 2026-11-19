@@ -157,7 +157,7 @@ export class ControlPlaneStack extends Stack {
     });
     // Spec 025 phase 25a: declared on the stack itself so the names are exact. The legacy deployment (production) has
     // the developer task settings too, so it runs tasks as named environments do.
-    const signInParameters = developerSignInParameters(this, { tasks: true, named: naming.env !== undefined });
+    const signInParameters = developerSignInParameters(this, { tasks: true });
     const taskPersonProofEnabled = naming.env === "agentxlivetest123" ? new CfnParameter(this, "TaskPersonProofEnabled", {
       type: "String",
       default: "false",
@@ -720,9 +720,9 @@ export class ControlPlaneStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(notifyOperator);
-    // Issue #46, named environments only: a dispatch job that exhausts its receives lands here and
-    // nothing else reports it. The legacy AgentXControlPlane template stays as it is.
-    if (naming.env !== undefined) {
+    // Issue #46: a dispatch job that exhausts its receives lands here and nothing else reports it.
+    // #1131: every deployment, production (the legacy template) included.
+    {
       new cloudwatch.Alarm(this, "DispatchDeadLettersAlarm", {
         alarmName: naming.alarmName("DispatchDeadLetters"),
         alarmDescription: "A worker dispatch job exhausted its receives and is in the dispatch dead-letter queue. Check the dispatcher logs for its operation ID, then redrive or purge the queue.",
@@ -979,13 +979,14 @@ export class ControlPlaneStack extends Stack {
     new CfnOutput(this, "ChannelEventQueueUrl", { value: channelAdapters.events.queueUrl });
     // Spec 025 phase 25a: developer sign-in and tasks, in every deployment; the legacy one is named production.
     const taskParameters = signInParameters.tasks;
-    // DEC 254zg (a): the company layer's switch (CompanySignIn), named environments only; every function that reads COMPANY_SIGNIN gets it from here, and every company-only
-    // grant is a policy under its condition (company-signin.ts).
-    const companySignIn = naming.env === undefined || signInParameters.company === undefined ? undefined : new CompanySignInSwitch(this, "CompanySignInSwitch", signInParameters.company);
+    // DEC 254zg (a): the company layer's switch (CompanySignIn); every function that reads COMPANY_SIGNIN gets it from here, and every company-only grant is a policy under its
+    // condition (company-signin.ts). #1129: the legacy deployment (production) too, off by default, so production can make invite codes once it is switched on.
+    const companySignIn = signInParameters.company === undefined ? undefined : new CompanySignInSwitch(this, "CompanySignInSwitch", signInParameters.company);
     // DEC 254o (b), L2-2 PR 18a: Slack company mode's switch (stack parameter SlackCompanyWorkspaces, default disabled). Named environments only; every grant it adds is a
     // separate policy under its condition, so nothing is granted while it is off (slack-company-workspaces.ts). DEC 254zg (a), 254zk: its condition also requires company
     // sign-in, so its grants and its "enabled" exist only with both switches on.
-    const slackCompany = companySignIn === undefined ? undefined : new SlackCompanyWorkspaces(this, "SlackCompanyMode", { naming, requires: companySignIn.isOn });
+    // #1129: still named environments only; the legacy deployment's Slack stays on its one workspace, with or without company sign-in.
+    const slackCompany = companySignIn === undefined || naming.env === undefined ? undefined : new SlackCompanyWorkspaces(this, "SlackCompanyMode", { naming, requires: companySignIn.isOn });
     if (slackCompany !== undefined) {
       // The Slack Lambda and the channel API's Slack router: the team's binding and company, the linked person (company-scoped link row, sign-in membership below), the
       // project's revisions (company check) and the company's token. Reads only: link notices and codes are written by the broker (#126 holds).
@@ -1101,9 +1102,10 @@ export class ControlPlaneStack extends Stack {
       // Migration plan v3.2 lane E2: the core engine's switch (stack parameter CoreEngine, default off), its dispatch queue and its scheduled jobs (core-engine.ts).
       // Named environments only: the legacy (production) template has none of it, and this block now also runs for the legacy deployment.
       if (naming.env !== undefined) new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env, broker, dispatcher, notifyOperator });
-      // Lane T6 (DEFERRED T6-SECRETS-IAM-20261114-v2): the role the broker will assume for one company's secrets. Named environments only; nothing assumes it yet.
-      if (naming.env !== undefined) {
-        const companySecretsRole = new CompanySecrets(this, "CompanySecrets", { env: naming.env, brokerRole: broker.role! }).role;
+      // Lane T6 (DEFERRED T6-SECRETS-IAM-20261114-v2): the role the broker will assume for one company's secrets; nothing assumes it yet. #1129: the legacy deployment
+      // (production) too, its secrets under agentx/production/.
+      {
+        const companySecretsRole = new CompanySecrets(this, "CompanySecrets", { env: naming.env ?? "production", brokerRole: broker.role! }).role;
         addBrokerName(broker, naming, "companySecretsRole", companySecretsRole.roleName, companySecretsRole.roleArn);
       }
       // L4-SE6 (owner-approved 2026-11-18): the saved environment images' registry side: ONE repository creation template for `rovara-env/<env>` and the three roles (push, pull, manage) that trust only
@@ -1214,8 +1216,8 @@ export class ControlPlaneStack extends Stack {
       // Lambda validates destination permissions when creating EventInvokeConfig. Keep this
       // grant on the execution role, and explicitly order both grant and any queue policy first.
       // SqsDestination repeats the identical grant; CDK deduplicates it in DefaultPolicy.
-      // Named environments only: the legacy (production) template is unchanged.
-      const handOffGrant = naming.env !== undefined ? handOffFailures.grantSendMessages(broker) : undefined;
+      // #1131: every deployment (the legacy template had the destination's own grant, without this ordering).
+      const handOffGrant = handOffFailures.grantSendMessages(broker);
       broker.configureAsyncInvoke({ onFailure: new lambdaDestinations.SqsDestination(handOffFailures) });
       if (handOffGrant !== undefined) {
         const brokerInvokeConfig = broker.node.findChild("EventInvokeConfig");
@@ -1295,14 +1297,12 @@ export class ControlPlaneStack extends Stack {
     broker.addEnvironment("EC2_WORKER_LAUNCH_TEMPLATE_ID", foundationParameter("Ec2WorkerLaunchTemplateId"));
     // A6: where the State table expires index items itself, the reconciler's legacy sweep is off.
     if (naming.env !== undefined) sessions.reconciler.addEnvironment("INDEX_EXPIRY", "ttl");
-    // Issue 195: the alarm for stuck cancels. Named environments only: the legacy template is
-    // unchanged. A stuck cancel on a live worker is queued again with the signing key the backstop
-    // below gives the reconciler; the legacy reconciler has none, and only logs and counts it.
-    if (naming.env !== undefined) sessions.connectStuckCancelAlarm();
-    // Issue 173: the backstop for idle Slack tasks nobody waits on. Named environments only: the
-    // legacy template is unchanged.
-    if (naming.env !== undefined) sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKeySecretName);
-    if (naming.env !== undefined) channelAdapters.connectSlackPoster(sessions.reconciler, signInParameters.slackTeamId.valueAsString);
+    // Issue 195: the alarm for stuck cancels. A stuck cancel on a live worker is queued again with the
+    // signing key the backstop below gives the reconciler. #1131: every deployment, production included.
+    sessions.connectStuckCancelAlarm();
+    // Issue 173: the backstop for idle Slack tasks nobody waits on. #1131: every deployment.
+    sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKeySecretName);
+    channelAdapters.connectSlackPoster(sessions.reconciler, signInParameters.slackTeamId.valueAsString);
     if (slackCompany !== undefined) {
       // The reconciler already reads and writes the State table; it needs only the company's token for its thread notes.
       slackCompany.grant("SessionReconciler", sessions.reconciler.role!, [slackCompany.tokenRead()]);
@@ -1379,9 +1379,9 @@ export class ControlPlaneStack extends Stack {
       });
     }
     // AUTOREQUALIFY (AR-2): the machine that renews the browser and API test machine by itself. CDK context agentx:autoRequalify=enabled, off by default
-    // (only the exact string "enabled" turns it on); named environments only. Its resources all carry the logical-ID prefix RuntimeRequalify, so the
+    // (only the exact string "enabled" turns it on); #1131: in every deployment, production included. Its resources all carry the logical-ID prefix RuntimeRequalify, so the
     // requalify-infra deploy unit adds them to a live stack with an Add-only change set. The foundation's values are the stack parameters SessionLifecycle declared.
-    if (naming.env !== undefined && this.node.tryGetContext(REQUALIFY_CONTEXT_KEY) === "enabled") {
+    if (this.node.tryGetContext(REQUALIFY_CONTEXT_KEY) === "enabled") {
       const foundationValue = (name: string): string => (this.node.findChild(name) as CfnParameter).valueAsString;
       const hour = Number(this.node.tryGetContext("agentx:autoRequalifyHourUtc") ?? REQUALIFY_DEFAULT_HOUR_UTC);
       new RuntimeRequalify(this, "RuntimeRequalify", {
@@ -1424,7 +1424,8 @@ export class ControlPlaneStack extends Stack {
     }, Duration.seconds(90));
     state.grantReadWriteData(evalBatchTick);
     callbackSigningKeyReaders.push(evalBatchTick.role!);
-    if (naming.env !== undefined) callbackSigningKeyReaders.push(sessions.reconciler.role!);
+    // #1131: the reconciler signs stuck-cancel retries and the idle backstop's cancels, in every deployment.
+    callbackSigningKeyReaders.push(sessions.reconciler.role!);
     callbackSigningKeySecret.addToResourcePolicy(new iam.PolicyStatement({
       sid: "ReadCallbackSigningKey",
       principals: callbackSigningKeyReaders.map((role) => new iam.ArnPrincipal(role.roleArn)),

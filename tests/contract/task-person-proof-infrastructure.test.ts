@@ -307,8 +307,9 @@ describe("the named TEST proof-only installation gate", () => {
       {
         label: "legacy",
         template: legacy,
-        withRoute: "fc5271f6edfbbe24ca24965cd06a17c952eb90f9892499f23982352967d79523",
-        withoutRoute: "0757ab45466760b0c22c9e43c1d0e114168e9aba7e290c50d579875e2e840da5",
+        // #1129, #1131: the company layer, GitHub sign-in, the company-secrets role and the reliability parts in the legacy (production) template too (no step-up: DEC 254zzz73).
+        withRoute: "2ada0f3ccfc2635f4dcfebf6c33131171c6fd5cf49c48d8db1d0accc34f1bdd6",
+        withoutRoute: "0ffd303eea90c1ff34aed6104fa581546de67abeb76d3d5ce6cfb17aaf81f55b",
         beforeStepUpRemoval: undefined,
       },
     ] as const;

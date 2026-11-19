@@ -50,7 +50,14 @@ describe("refresh-token write-back grant (phase 7)", () => {
     const all = secretsWrites(template);
     const adapterSecrets = all.filter((statement) => JSON.stringify(statement.Resource).includes("secret:agentx/production/channel-adapter/*"));
     expect(adapterSecrets.map((statement) => [statement.Action].flat())).toEqual([["secretsmanager:CreateSecret", "secretsmanager:PutSecretValue"]]);
-    const writes = all.filter((statement) => !adapterSecrets.includes(statement));
+    // #1129: the company layer's own writes, each only under its company's own path in agentx/production/: the company-secrets role (T6; nothing assumes it yet) and
+    // Add to Slack's per-company bot tokens (under the CompanySignIn switch).
+    const companyWrites = all.filter((statement) => /secret:agentx\/production\/(org-connectors|org-hooks|slack-workspaces)\//u.test(JSON.stringify(statement.Resource)));
+    expect(companyWrites.map((statement) => [statement.Action].flat().sort().join(" ")).sort()).toEqual([
+      "secretsmanager:CreateSecret", "secretsmanager:CreateSecret secretsmanager:GetSecretValue secretsmanager:PutSecretValue",
+      "secretsmanager:DeleteSecret", "secretsmanager:DescribeSecret secretsmanager:GetSecretValue secretsmanager:PutSecretValue",
+    ]);
+    const writes = all.filter((statement) => !adapterSecrets.includes(statement) && !companyWrites.includes(statement));
     expect(writes).toHaveLength(1);
     expect([writes[0]!.Action].flat()).toEqual(["secretsmanager:PutSecretValue"]);
     expect(JSON.stringify(writes[0]!.Resource)).toContain("secret:agentx/connectors/*");
