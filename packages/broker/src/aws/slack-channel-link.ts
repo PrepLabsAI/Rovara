@@ -23,7 +23,8 @@ import {
 } from "@agentx/contracts";
 import { projectGrant } from "./admin-actions.js";
 import { Membership, membershipKey, ownPartitionRow, recordInCompany } from "./company-check.js";
-import { latestRevisionRowFor, namedCompany, slackChannelBindingKeyFor, slackChannelBindingPkFor } from "./company-layout.js";
+import { latestRevisionRowFor, namedCompany } from "./company-layout.js";
+import { slackChannelBindingKeyFor, slackChannelBindingPkFor } from "./slack-company-layout.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { companyInstallKey } from "./slack-company-install.js";

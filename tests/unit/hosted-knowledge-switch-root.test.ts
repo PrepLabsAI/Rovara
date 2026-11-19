@@ -5,6 +5,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { grantKeyFor } from "../../packages/broker/src/aws/company-layout.js";
 import { KNOWLEDGE_STAYS_SENTENCE, companyScoped, orgProjectCatalogKey, projectRevisionKey, teamRecordPk, type JsonValue, type OrgId } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { createHostedLessonsPeople } from "../../packages/broker/src/aws/hosted-lessons-people.js";
@@ -39,8 +40,9 @@ async function setup(env: Record<string, string> = { ROVARA_CORE_LESSONS: "on" }
   };
   member(OWNER_A, A, "owner"); member(ADMIN_A, A, "admin"); member(MAINT_A, A, "member"); member(DEV_A, A, "member"); member(STRANGER_A, A, "member");
   member(OWNER_B, B, "owner"); member(MAINT_B, B, "member");
-  const grant = (personId: string, role: string) => rows.set(`state|MEMBER#${personId}|PROJECT#payments`, { pk: `MEMBER#${personId}`, sk: "PROJECT#payments", projectName: "payments", role });
-  grant(MAINT_A, "administrator"); grant(DEV_A, "developer"); grant(MAINT_B, "administrator");
+  // DEC 254zzz80 (#1106, batch b21): a named company's project grant lives in that company's own partition (company-layout.ts grantKeyFor).
+  const grant = (personId: string, companyId: OrgId, role: string) => { const key = grantKeyFor(companyId, personId, "payments"); rows.set(`state|${key.pk}|${key.sk}`, { ...key, projectName: "payments", role }); };
+  grant(MAINT_A, A, "administrator"); grant(DEV_A, A, "developer"); grant(MAINT_B, B, "administrator");
   // Company A and company B each have a project called "payments" in their own catalog; only B has "only-b".
   for (const [company, name] of [[A, "payments"], [B, "payments"], [B, "only-b"]] as const) {
     await world.store.put({ item: { ...projectRevisionKey(company, name, 1), entityType: "PROJECT", definition: JSON.parse(JSON.stringify({ ...definition, name })) as JsonValue } });

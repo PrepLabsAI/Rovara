@@ -5,7 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { IMPLICIT_COMPANY_ID, type OrgId } from "@agentx/contracts";
-import { namedCompanySlackBinding, slackChannelBindingKeyFor, slackChannelBindingPkFor } from "../../packages/broker/src/aws/company-layout.js";
+import { namedCompanySlackBinding, slackChannelBindingKeyFor, slackChannelBindingPkFor } from "../../packages/broker/src/aws/slack-company-layout.js";
 import { slackBindingCompany, slackBindingInCompany, slackRequestWorkspace } from "../../packages/broker/src/aws/slack-person.js";
 import {
   SLACK_CHANNEL_NOT_BOUND_NOTICE, awsSlackRouterDependencies, createSlackMentionRouter, type SlackMention, type SlackRouterTransport,

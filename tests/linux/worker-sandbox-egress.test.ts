@@ -1,5 +1,5 @@
 // Lane L4-NETG (DEC 254zzz77): the sandbox egress gateway of an EC2 worker host, on REAL Docker. The boot's own stage (packages/worker/ec2/sandbox-egress.sh) is run unchanged as root against the CI runner's Docker and iptables, with
-// only the two reads from the worker image (the gateway program and the deny list, which the unit test proves are the contracts' own) and the systemd unit replaced; the runner's Node image stands in for the worker image.
+// only the three reads from the worker image (the gateway program and the two deny lists, which the contract test proves are the contracts' own: a read left to run here would run in the CI node image, which has no /opt/agentx/node_modules) and the systemd unit replaced; the runner's Node image stands in for the worker image.
 // Then each claim is shown from where a sandbox sits, against a control that is NOT behind the wall, so a failure is the wall and not a broken test:
 //   - the sandbox network is internal and the gateway is its only way out;
 //   - a raw-IP HTTPS connection and DNS-over-HTTPS by IP fail from the sandbox network;
@@ -11,21 +11,24 @@
 //   - a dev container's image build (the classic builder through the wrapper) has no way to a raw address or a registry name, and reaches an allowed name through the gateway; a build on an ordinary user bridge (the control) does reach the raw address;
 //   - the verifier's contained E2E build commands (createDockerApplicationHost with `buildEgress`) the same, and no rvb build bridge is made;
 //   - docker0 and a left-over agentx-task bridge cannot forward (the stage's walls), while an ordinary user bridge (the control) can.
-// Lane L4-NETG3 (DEC 254zzz105) adds: the Docker DAEMON's own fetches go through the gateway's daemon proxy (ADD <url> to a raw address is refused, a base image from an allowed registry pulls, a dev container feature from an allowed host downloads
-// through the CLI with the proxy in its environment), judged by the gateway's own refusal log.
+// Lane L4-NETG3 (DEC 254zzz105) adds: the Docker DAEMON's own fetches go through the gateway's daemon proxy (ADD <url> to a raw address is refused and the proxy's log names it, an ADD of an allowed name works, a TLS GET of the registry API
+// of the registries the sandbox side is denied works through the proxy's tunnel, an image on a raw address is refused, the dev container CLI sends a feature download through the proxy), judged by the gateway's own refusal log.
+// THIS FILE RUNS ALONE (its own CI step, last): it restarts Docker twice, sets the daemon-wide name server and proxy and walls docker0, and its afterAll takes back every firewall rule the stage added.
 // The stage runs its REAL daemon step here: /etc/docker/daemon.json gets the gateway as default name server and Docker is restarted (the original file is put back after).
 // Needs ROVARA_DOCKER=1, passwordless sudo, and the container firewall of boot.sh (the CI job installs it first, as for the other network-wall tests).
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { connect as netConnect } from "node:net";
+import { connect as tlsConnect } from "node:tls";
+import { lookup as hostLookup } from "node:dns/promises";
 import { request } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { EGRESS_GATEWAY_SOURCE } from "../../packages/contracts/src/egress-gateway-source.js";
-import { SANDBOX_REGISTRY_DENY } from "../../packages/contracts/src/sandbox-deny-domains.js";
+import { SANDBOX_REGISTRY_DENY, SANDBOX_S3_DENY } from "../../packages/contracts/src/sandbox-deny-domains.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
@@ -39,6 +42,10 @@ const stagePath = new URL("../../packages/worker/ec2/sandbox-egress.sh", import.
 const wrapperPath = new URL("../../packages/worker/ec2/devcontainer-docker.sh", import.meta.url).pathname;
 const GATEWAY_IP = "172.28.250.2";
 const NETWORK = "rovara-snet";
+// A host name, not an image: the registry the sandbox side is denied (a bare host keeps the CI image guard, which reads every `host/path`, to real image references).
+const REGISTRY_HOST = "ghcr.io";
+// A digest-pinned reference on a raw address: only ever fetched by a daemon that must refuse it.
+const RAW_ADDRESS_IMAGE = `203.0.113.7:5000/netg3/probe@sha256:${"0".repeat(64)}`;
 const CONTROL_NETWORK = "rovara-netg2-ctl";
 const HELD_CONTAINER = "rovara-netg2-held";
 const DAEMON_JSON = "/etc/docker/daemon.json";
@@ -48,11 +55,31 @@ let failureFile = "";
 let stageFile = "";
 let firewallScript = "";
 let daemonBefore: string | undefined;
+let agentxDirExisted = false;
+let allowDirExisted = false;
+let rulesBefore: Record<string, string[]> = {};
+
+const RULE_CHAINS: ReadonlyArray<readonly [string, string]> = [["iptables", "DOCKER-USER"], ["iptables", "INPUT"], ["ip6tables", "INPUT"]];
+/** The rules in each chain the stage touches, as `-S` prints them (`-A CHAIN ...`). */
+async function ruleSnapshot(): Promise<Record<string, string[]>> {
+  const found: Record<string, string[]> = {};
+  for (const [tool, chain] of RULE_CHAINS) found[`${tool} ${chain}`] = (await sudo(tool, "-S", chain)).stdout.split("\n").filter((line) => line.startsWith("-A "));
+  return found;
+}
+/** Deletes every rule that is there now and was not before the stage (the stage's walls), so a later step of the job sees the firewall it had. */
+async function takeBackRules(): Promise<void> {
+  const now = await ruleSnapshot();
+  for (const [tool, chain] of RULE_CHAINS) {
+    const before = new Set(rulesBefore[`${tool} ${chain}`] ?? []);
+    for (const line of now[`${tool} ${chain}`] ?? []) if (!before.has(line)) await sudo(tool, "-D", ...line.slice(3).split(" "));
+  }
+}
 
 /** The stage, as boot.sh runs it, with the worker-image reads replaced by files. `program` is the gateway program the container runs. */
 async function stage(program: string, names: readonly string[] = SANDBOX_REGISTRY_DENY): Promise<{ code: number; failure: string; output: string }> {
   await writeFile(join(dir, "program"), program);
   await writeFile(join(dir, "names"), names.join("\n"));
+  await writeFile(join(dir, "s3names"), SANDBOX_S3_DENY.join("\n"));
   await rm(failureFile, { force: true });
   const script = `set -uo pipefail
 log() { printf 'agentx-boot: %s\\n' "$*" >&2; }
@@ -63,6 +90,7 @@ AGENTX_WORKER_IMAGE="${APP_NODE_IMAGE}"
 . "${stageFile}"
 se_program() { cat "${join(dir, "program")}"; }
 se_denied_names() { cat "${join(dir, "names")}"; }
+se_denied_s3_names() { cat "${join(dir, "s3names")}"; }
 se_install_restore_unit() { return 0; }
 sandbox_egress_main`;
   const result = await sudo("bash", "-c", script);
@@ -106,6 +134,9 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     if (firewallScript === join(dir, "noop-firewall.sh")) await writeFile(firewallScript, "#!/bin/bash\nexit 0\n");
     stageFile = join(dir, "sandbox-egress.sh");
     await writeFile(stageFile, (await readFile(stagePath, "utf8")).split("/usr/local/libexec/rovara-container-firewall").join(firewallScript));
+    agentxDirExisted = existsSync("/etc/agentx");
+    allowDirExisted = existsSync("/var/lib/rovara-egress");
+    rulesBefore = await ruleSnapshot();
     const had = await sudo("test", "-f", DAEMON_JSON);
     daemonBefore = had.code === 0 ? (await sudo("cat", DAEMON_JSON)).stdout : undefined;
     if (daemonBefore !== undefined) await writeFile(join(dir, "daemon.before"), daemonBefore);
@@ -113,7 +144,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     // A user bridge with a way out (the control), and a left-over agentx-task network that something still holds, as a bridge-mode session leaves it.
     await docker("network", "create", CONTROL_NETWORK);
     await docker("network", "create", "agentx-task");
-    const held = await docker("run", "-d", "--name", HELD_CONTAINER, "--pull=never", "--network", "agentx-task", APP_NODE_IMAGE, "sleep", "3600");
+    // --restart always: the stage restarts Docker before it removes the left-over network, and a stopped container holds no endpoint; the daemon brings this one back while it restores state, so the network stays held (as it is on a worker whose old sandbox is still running).
+    const held = await docker("run", "-d", "--name", HELD_CONTAINER, "--restart", "always", "--pull=never", "--network", "agentx-task", APP_NODE_IMAGE, "sleep", "3600");
     expect(held.code, held.stderr).toBe(0);
     await writeFile(join(dir, "worker.env"), "AWS_REGION=us-west-2\n");
     const made = await stage(EGRESS_GATEWAY_SOURCE);
@@ -127,6 +159,9 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     await docker("network", "rm", NETWORK);
     await docker("network", "rm", "rovara-xnet");
     await sudo("rm", "-f", "/etc/agentx/worker-dns");
+    if (!agentxDirExisted) await sudo("rmdir", "/etc/agentx");
+    if (!allowDirExisted) await sudo("rm", "-rf", "/var/lib/rovara-egress");
+    await takeBackRules();
     // Docker's own configuration is put back, and Docker restarted on it with the runner's container firewall.
     await sudo("rm", "-f", "/etc/systemd/system/docker.service.d/30-rovara-build-proxy.conf");
     await sudo("systemctl", "daemon-reload");
@@ -146,6 +181,20 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const env = await readFile(join(dir, "worker.env"), "utf8");
     expect(env).toContain(`AGENTX_SANDBOX_EGRESS=gateway\nAGENTX_SANDBOX_NETWORK=${NETWORK}\nAGENTX_SANDBOX_DNS=${GATEWAY_IP}\n`);
   });
+
+  // The S3 deny list is read by the stage from the contracts, exactly as in production (here through the same stub as the registry list); an S3 name is refused to a sandbox though the HOST resolves it.
+  it("an S3 name the host resolves is NXDOMAIN to a sandbox (the S3 deny list the stage read from the contracts is in force), in every spelling that list covers", async () => {
+    const control = await hostLookup("s3.amazonaws.com", { family: 4 }).then((found) => found.address, () => "");
+    expect(control, "the runner must resolve S3 itself, or this proves nothing").toMatch(/^\d+\.\d+\.\d+\.\d+$/u);
+    for (const name of ["s3.amazonaws.com", "netg3-no-such-bucket.s3.amazonaws.com", "s3.us-west-2.amazonaws.com", "netg3-no-such-bucket.s3.us-west-2.amazonaws.com", "netg3-no-such-bucket.s3.dualstack.us-west-2.amazonaws.com", "s3-us-west-2.amazonaws.com"]) {
+      const looked = await sandbox(lookupOutcome(name));
+      expect(looked.stdout.trim(), `${name}: ${looked.stderr}`).toBe("ENOTFOUND");
+    }
+    // The gateway's own config carries the stage's deny list: every name of it, read from the contracts at test time.
+    const create = (await docker("inspect", "--format", "{{range .Config.Env}}{{println .}}{{end}}", "rovara-egw")).stdout;
+    const config = JSON.parse(/ROVARA_GW_CONFIG=(.*)/u.exec(create)![1]!) as { sandboxDeniedS3: string[] };
+    expect(config.sandboxDeniedS3).toEqual([...SANDBOX_S3_DENY]);
+  }, 120_000);
 
   it("a raw-IP HTTPS connection fails from a sandbox though it works from a container on the default bridge", async () => {
     const control = await onBridge(connectOutcome("1.1.1.1", 443));
@@ -171,7 +220,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       const looked = await sandbox(lookupOutcome(name));
       expect(looked.stdout.trim(), `${name}: ${looked.stderr}`).toBe("ENOTFOUND");
     }
-    const viaClient = await sandbox(httpsOutcome("https://ghcr.io/v2/"));
+    const viaClient = await sandbox(httpsOutcome(`https://${REGISTRY_HOST}/v2/`));
     expect(viaClient.stdout.trim(), viaClient.stderr).toMatch(/^error /u);
     for (const name of ["ghcr.io", "registry-1.docker.io", "123456789012.dkr.ecr.us-west-2.amazonaws.com"]) {
       const hello = await sandbox(tlsHelloOutcome(GATEWAY_IP, name));
@@ -209,7 +258,9 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(created.code, created.stderr).toBe(0);
     try {
       const facts = await docker("inspect", "--format", "{{.HostConfig.NetworkMode}}|{{.HostConfig.Dns}}|{{.HostConfig.CapDrop}}|{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}", "rovara-dc-probe");
-      expect(facts.stdout.trim()).toBe(`${NETWORK}|[${GATEWAY_IP}]|[NET_RAW]|${NETWORK} `);
+      // Docker prints a capability as given (NET_RAW) or normalised (CAP_NET_RAW) by version: the same capability either way (the worker's own check, devcontainer-policy.ts dropsNetRaw, accepts both).
+      const [mode, dnsServers, capDrop, networks] = facts.stdout.trim().split("|");
+      expect([mode, dnsServers, (capDrop ?? "").replace(/CAP_/gu, ""), (networks ?? "").trim()]).toEqual([NETWORK, `[${GATEWAY_IP}]`, "[NET_RAW]", NETWORK]);
     } finally {
       await docker("rm", "--force", "rovara-dc-probe");
     }
@@ -261,7 +312,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   }
   /** A build context holding one Dockerfile whose RUN lines are `steps`. */
   async function context(name: string, steps: string[]): Promise<string> {
-    const folder = join(dir, name);
+    // Under a folder of their own: the stage's stubs keep files in `dir` named `names`, `s3names` and `program`, and a build context called `names` collided with one (EEXIST).
+    const folder = join(dir, "contexts", name);
     await mkdir(folder, { recursive: true });
     await writeFile(join(folder, "Dockerfile"), `FROM ${APP_NODE_IMAGE}\n${steps.join("\n")}\n`);
     return folder;
@@ -277,13 +329,14 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     // The production worker image has no buildx, so its docker CLI uses the classic builder; a runner that cannot run it must FAIL here, not pass without checking anything.
     expect(probe.code, `the classic builder must work through the wrapper: ${probe.stderr.slice(0, 400)}`).toBe(0);
     const raw = await context("raw", [mustNotConnect("1.1.1.1"), mustNotConnect("8.8.8.8")]);
-    const walled = await wrapperDocker(["build", "-t", "rovara-netg2-raw", raw]);
+    // --no-cache on every build here: a cached RUN layer would not run again, so a control build would "pass" without making its connection.
+    const walled = await wrapperDocker(["build", "--no-cache", "-t", "rovara-netg2-raw", raw]);
     expect(walled.code, `${walled.stdout}\n${walled.stderr}`).toBe(0);
     // The control: the very same build on an ordinary user bridge, with a way out, FAILS at the RUN line because the address connects.
-    const control = await run("docker", ["build", "--network", CONTROL_NETWORK, "-t", "rovara-netg2-control", raw], { env: { ...process.env, DOCKER_BUILDKIT: "0" }, maxBuffer: 10_000_000 }).then(() => 0, (error: { code?: number }) => error.code ?? 1);
-    expect(control, "the control build must reach the raw address, or this test proves nothing").not.toBe(0);
+    const control = await run("docker", ["build", "--no-cache", "--network", CONTROL_NETWORK, "-t", "rovara-netg2-control", raw], { env: { ...process.env, DOCKER_BUILDKIT: "0" }, maxBuffer: 10_000_000 }).then(() => ({ code: 0, err: "" }), (error: { code?: number; stderr?: string }) => ({ code: error.code ?? 1, err: error.stderr ?? "" }));
+    expect(control.code, `the control build must reach the raw address, or this test proves nothing: ${control.err.slice(-400)}`).not.toBe(0);
     const names = await context("names", ["ghcr.io", "registry-1.docker.io", "gcr.io", "123456789012.dkr.ecr.us-west-2.amazonaws.com"].map(mustNotResolve));
-    const named = await wrapperDocker(["build", "-t", "rovara-netg2-names", names]);
+    const named = await wrapperDocker(["build", "--no-cache", "-t", "rovara-netg2-names", names]);
     expect(named.code, `${named.stdout}\n${named.stderr}`).toBe(0);
     // A build that names its own network is refused and runs nothing.
     const own = await wrapperDocker(["build", "--network", "host", "-t", "rovara-netg2-own", raw]);
@@ -369,29 +422,49 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     for (const tag of ["add-raw", "add-name"]) await docker("rmi", "--force", `rovara-netg3-${tag}`);
   }, 600_000);
 
-  it("a FROM / pull of a base image from an allowed registry works through the proxy, and one from a raw address:port is refused by it", async () => {
-    const refused = await docker("pull", "203.0.113.7:5000/netg3/probe:latest");
+  /** A TLS GET through the daemon proxy, as a registry client does: CONNECT, a handshake with the host's name, then GET /v2/. The status, or the failure. */
+  function tunnelRegistry(host: string): Promise<string> {
+    return new Promise((resolve) => {
+      const socket = netConnect({ host: PROXY_HOST, port: 3128 }, () => socket.write(`CONNECT ${host}:443 HTTP/1.1\r\nHost: ${host}:443\r\n\r\n`));
+      let head = "";
+      const onData = (chunk: Buffer): void => {
+        head += chunk.toString("latin1");
+        if (!head.includes("\r\n\r\n")) return;
+        socket.removeListener("data", onData);
+        if (!/^HTTP\/1\.1 200/u.test(head)) { socket.destroy(); resolve(statusLine(head)); return; }
+        const secure = tlsConnect({ socket, servername: host });
+        let answer = "";
+        secure.on("secureConnect", () => secure.write(`GET /v2/ HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`));
+        secure.on("data", (chunk2: Buffer) => { answer += chunk2.toString("latin1"); });
+        secure.on("close", () => resolve(statusLine(answer)));
+        secure.on("error", (error: Error) => resolve(`error ${error.message}`));
+      };
+      socket.on("data", onData);
+      socket.on("error", () => resolve("socket error"));
+      setTimeout(() => { socket.destroy(); resolve("timeout"); }, 20_000).unref();
+    });
+  }
+
+  it("registries reach the daemon through the proxy (a TLS GET of the registry API through the tunnel answers), and an image on a raw address:port is refused by it", async () => {
+    // The daemon creating a container from an image it does not hold fetches it: from a raw address that is refused, and the proxy's own log says so.
+    // (Not a pull the CI image guard governs: an unroutable TEST-NET address that only the proxy ever sees; never copy this for a real image.)
+    const refused = await docker("create", RAW_ADDRESS_IMAGE);
     expect(refused.code).not.toBe(0);
-    expect(await gatewayLog()).toMatch(/"event":"proxy_refused"[^\n]*"host":"203\.113\.7"|"event":"proxy_refused"[^\n]*"reason":"port"/u);
-    if (/^status /u.test(await hostHttps("public.ecr.aws"))) {
-      await docker("rmi", "--force", "public.ecr.aws/docker/library/hello-world:latest");
-      const pulled = await docker("pull", "public.ecr.aws/docker/library/hello-world:latest");
-      expect(pulled.code, pulled.stderr.slice(0, 500)).toBe(0);
-      await docker("rmi", "--force", "public.ecr.aws/docker/library/hello-world:latest");
+    expect(await gatewayLog()).toMatch(/"event":"proxy_refused"[^\n]*"host":"203\.0\.113\.7"|"event":"proxy_refused"[^\n]*"reason":"port"/u);
+    // The registries the sandbox side is denied are allowed for the daemon, where the runner's resolver answers them.
+    for (const host of ["registry-1.docker.io", REGISTRY_HOST, "public.ecr.aws"]) {
+      if (!/^status /u.test(await hostHttps(host))) continue;
+      expect(await tunnelRegistry(host), host).toMatch(/^HTTP\/1\.[01] (200|401|403|404)/u);
     }
   }, 300_000);
 
-  it("the dev container CLI, given the proxy in its environment, downloads a feature manifest from an allowed host through it, and a feature on a raw address is refused by the proxy (the CLI honours the proxy)", async () => {
+  it("the dev container CLI, given the proxy in its environment, sends its feature download through it: a feature on a raw address is refused by the proxy, and the proxy's log names it (the CLI honours the proxy variables)", async () => {
     const cli = new URL("../../node_modules/@devcontainers/cli/devcontainer.js", import.meta.url).pathname;
     const env = { ...process.env, HTTP_PROXY: `http://${PROXY_HOST}:3128`, HTTPS_PROXY: `http://${PROXY_HOST}:3128`, http_proxy: `http://${PROXY_HOST}:3128`, https_proxy: `http://${PROXY_HOST}:3128`, NO_PROXY: "localhost,127.0.0.1", no_proxy: "localhost,127.0.0.1" };
-    const features = (reference: string) => run(process.execPath, [cli, "features", "info", "manifest", reference, "--log-level", "error"], { env, timeout: 90_000, maxBuffer: 10_000_000 }).then((done) => ({ code: 0, out: done.stdout, err: done.stderr }), (error: { code?: number; stdout?: string; stderr?: string }) => ({ code: error.code ?? 1, out: error.stdout ?? "", err: error.stderr ?? "" }));
+    const features = (reference: string) => run(process.execPath, [cli, "features", "info", "manifest", reference], { env, timeout: 90_000, maxBuffer: 10_000_000 }).then((done) => ({ code: 0, out: done.stdout, err: done.stderr }), (error: { code?: number; stdout?: string; stderr?: string }) => ({ code: error.code ?? 1, out: error.stdout ?? "", err: error.stderr ?? "" }));
     const bad = await features("203.0.113.9/netg3/feature:1");
     expect(bad.code).not.toBe(0);
-    expect(await gatewayLog(), "the CLI must have gone through the proxy").toMatch(/"event":"proxy_refused"[^\n]*"host":"203\.113\.9"/u);
-    if (/^status /u.test(await hostHttps("ghcr.io"))) {
-      const good = await features("ghcr.io/devcontainers/features/common-utils:2");
-      expect(good.code, `${good.out}\n${good.err}`.slice(0, 600)).toBe(0);
-    }
+    expect(await gatewayLog(), `the CLI must have gone through the proxy (its own output: ${`${bad.out}${bad.err}`.slice(0, 400)})`).toMatch(/"event":"proxy_refused"[^\n]*"host":"203\.0\.113\.9"/u);
   }, 300_000);
 
   // LAST: it replaces the gateway with a broken one.

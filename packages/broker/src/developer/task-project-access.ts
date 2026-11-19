@@ -6,7 +6,8 @@ import {
   type SlackChannelBinding,
 } from "@agentx/contracts";
 import type { TaskAuthorityAdmission } from "../aws/task-authority-admission.js";
-import { grantsPkFor, namedCompany, revisionPkFor, slackChannelBindingKeyMatches } from "../aws/company-layout.js";
+import { grantsPkFor, namedCompany, revisionPkFor } from "../aws/company-layout.js";
+import { slackChannelBindingKeyMatches } from "../aws/slack-company-layout.js";
 
 export interface ProjectAuthorityRevision {
   pk?: string;

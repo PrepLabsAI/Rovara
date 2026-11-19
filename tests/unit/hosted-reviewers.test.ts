@@ -4,7 +4,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { DesignReviewBindingSchema, systemOwnerIdOf, ROVARA_CODE_AGENT_ID, agentModelIdentity, consumeReviewerGrant, taskTokenClaimsFor, REVIEWER_GRANT_SECONDS, type RegistryView, type TaskTokenClaims, type JsonValue } from "@agentx/contracts";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
-import { createHostedReviewers, SECOND_PROVIDER_UNAVAILABLE } from "../../packages/broker/src/core-host/hosted-reviewers.js";
+import { createHostedReviewers, SECOND_PROVIDER_UNAVAILABLE, SECOND_REVIEW_SETTINGS_UNAVAILABLE } from "../../packages/broker/src/core-host/hosted-reviewers.js";
 import { createReviewSessionOpener } from "../../packages/worker/src/design-review-sessions.js";
 import { createUsageBooking } from "../../packages/broker/src/core-host/usage-booking.js";
 import { createHostedDesignReview } from "../../packages/broker/src/core-host/hosted-design-review.js";
@@ -356,6 +356,51 @@ describe("hosted reviewer grants", () => {
       expect(w.hosted.secondReview.prLines({ secondOpinion: opinion }, digest)).toEqual([SECOND_PROVIDER_UNAVAILABLE]);
     }
     expect(admit).not.toHaveBeenCalled();
+  });
+  describe("second review settings (fail closed)", () => {
+    const failOn = (w: Awaited<ReturnType<typeof world>>, method: "get" | "query") => {
+      const real = w.h.store[method].bind(w.h.store) as (...args: unknown[]) => Promise<unknown>;
+      return vi.spyOn(w.h.store, method as "get").mockImplementation((async (...args: unknown[]) => {
+        if (JSON.stringify(args[0]).includes("SECONDREVIEW#")) throw new Error("settings store down");
+        return real(...args);
+      }) as never);
+    };
+    it("a settings read that throws starts no review: no reviewer grant, no gateway call, no admission, and says so", async () => {
+      expect(SECOND_REVIEW_SETTINGS_UNAVAILABLE).toBe("second review skipped: settings unavailable");
+      for (const method of ["get", "query"] as const) {
+        const w = await world(); const admit = vi.spyOn(w.h.deps.admission, "admit"); const spy = failOn(w, method);
+        const log = vi.fn(); w.h.deps.log = log;
+        const task = (await w.records()).task;
+        w.offered.mockClear();
+        const prepared = await w.hosted.secondReview.prepare({ task });
+        expect(spy.mock.calls.some(([key]) => JSON.stringify(key).includes("SECONDREVIEW#"))).toBe(true);
+        expect(prepared).toEqual({ firstEvent: SECOND_REVIEW_SETTINGS_UNAVAILABLE });
+        expect(prepared.field).toBeUndefined(); expect(prepared.record).toBeUndefined();
+        expect(w.offered).not.toHaveBeenCalled();
+        expect(admit).not.toHaveBeenCalled();
+        expect(log).toHaveBeenCalledWith(expect.objectContaining({ event: "second_review.settings_unreadable", errorName: "Error" }));
+      }
+    });
+    it("a settings read that works is unchanged: ON or shadow prepares one reviewer, OFF starts nothing", async () => {
+      const shadow = await world();
+      expect((await shadow.hosted.secondReview.prepare({ task: (await shadow.records()).task })).field?.candidates).toHaveLength(1);
+      const off = await world(); const admit = vi.spyOn(off.h.deps.admission, "admit");
+      await off.h.store.put({ item: { ...secondReviewSettingsKey(A), default: "off" } });
+      off.offered.mockClear();
+      expect(await off.hosted.secondReview.prepare({ task: (await off.records()).task })).toEqual({});
+      expect(off.offered).not.toHaveBeenCalled(); expect(admit).not.toHaveBeenCalled();
+      const on = await world(); await on.h.store.put({ item: { ...secondReviewSettingsKey(A), default: "on" } });
+      const prepared = await on.hosted.secondReview.prepare({ task: (await on.records()).task });
+      expect(prepared.firstEvent).not.toBe(SECOND_REVIEW_SETTINGS_UNAVAILABLE);
+      expect(prepared.field !== undefined || prepared.record?.notRun?.mode === "on").toBe(true);
+    });
+    it("a malformed stored mode reads as OFF and starts nothing", async () => {
+      const w = await world(); const admit = vi.spyOn(w.h.deps.admission, "admit");
+      await w.h.store.put({ item: { ...secondReviewSettingsKey(A), default: { not: "a mode" } } });
+      w.offered.mockClear();
+      expect((await w.hosted.secondReview.prepare({ task: (await w.records()).task })).field).toBeUndefined();
+      expect(w.offered).not.toHaveBeenCalled(); expect(admit).not.toHaveBeenCalled();
+    });
   });
   it("design review reads only through createCompanyArtifactReader, refusing another company's artifact", async () => {
     const w = await world(); const records = await w.records(); const body = new TextEncoder().encode("design result");
