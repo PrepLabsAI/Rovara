@@ -17,6 +17,7 @@
 // The stage runs its REAL daemon step here: /etc/docker/daemon.json gets the gateway as default name server and Docker is restarted (the original file is put back after).
 // Needs ROVARA_DOCKER=1, passwordless sudo, and the container firewall of boot.sh (the CI job installs it first, as for the other network-wall tests).
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { connect as netConnect } from "node:net";
@@ -30,12 +31,16 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { EGRESS_GATEWAY_SOURCE } from "../../packages/contracts/src/egress-gateway-source.js";
 import { SANDBOX_REGISTRY_DENY, SANDBOX_S3_DENY } from "../../packages/contracts/src/sandbox-deny-domains.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
+import { verifyExecutorSeccompProfile } from "../../packages/verifier/src/host/executor-seccomp.js";
+import { BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES, encodeBrowserEvidenceExecutorPlan } from "../../packages/contracts/src/index.js";
+import { browserEvidenceExecutorArgs, parseCaptureOutput } from "../../packages/worker/src/browser-evidence-run.js";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
 import { createLinuxHost, linuxRunInput } from "../support/linux-runtime.js";
 import { ensureLocalImage } from "../support/ci-images.js";
 import { APP_NODE_IMAGE } from "../support/linux-runtime.js";
 import { docker, sudo } from "../support/linux-network-walls.js";
+import { repoExecutorSeccompProfilePath } from "../../scripts/executor-smoke.js";
 
 const run = promisify(execFile);
 const stagePath = new URL("../../packages/worker/ec2/sandbox-egress.sh", import.meta.url).pathname;
@@ -466,6 +471,133 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(bad.code).not.toBe(0);
     expect(await gatewayLog(), `the CLI must have gone through the proxy (its own output: ${`${bad.out}${bad.err}`.slice(0, 400)})`).toMatch(/"event":"proxy_refused"[^\n]*"host":"203\.0\.113\.9"/u);
   }, 300_000);
+
+  // F11 (BE-0): the real capture executor joins a gateway-mode task sandbox. The
+  // separate Chromium probe below uses the same executor hardening without the
+  // screenshot driver's loopback-only origin filter, so it tests the network wall.
+  it("F11: capture shares the gateway sandbox loopback and cannot use other egress or reach another container", async () => {
+    const image = process.env.ROVARA_EXECUTOR_IMAGE ?? "rovara-e2e-executor:ci";
+    const fixture = join(process.cwd(), "tests/fixtures/browser-evidence-app");
+    const suffix = randomBytes(5).toString("hex");
+    const sandboxName = `rovara-be0-sbx-${suffix}`;
+    const captureName = `rovara-be0-cap-${suffix}`;
+    const probeName = `rovara-be0-probe-${suffix}`;
+    const remoteName = `rovara-be0-peer-${suffix}`;
+    const innerName = `rovara-be0-inner-${suffix}`;
+    const port = 4321;
+    const remotePort = 4567;
+    const marker = `be0-peer-${suffix}`;
+    const seccomp = verifyExecutorSeccompProfile(repoExecutorSeccompProfilePath());
+    const removed: string[] = [sandboxName, captureName, probeName, remoteName, innerName];
+    try {
+      const present = await docker("image", "inspect", image);
+      expect(present.code, `CI must preload ${image}: ${present.stderr}`).toBe(0);
+      expect((await sudo("cat", DAEMON_JSON)).stdout).toContain(`"dns": ["${GATEWAY_IP}"]`);
+      expect((await sudo("cat", "/etc/systemd/system/docker.service.d/30-rovara-build-proxy.conf")).stdout).toContain("http://172.28.251.2:3128");
+
+      // The project server exists only in its task sandbox, bound to its loopback.
+      const started = await docker("run", "-d", "--pull=never", "--name", sandboxName, "--network", NETWORK, "--dns", GATEWAY_IP,
+        "--cap-drop=ALL", "--security-opt", "no-new-privileges", "-v", `${fixture}:/fixture:ro`, "--env", `PORT=${String(port)}`,
+        "--workdir", "/fixture/after", image, "node", "../server.mjs");
+      expect(started.code, started.stderr).toBe(0);
+      const ready = await docker("exec", sandboxName, "node", "-e", `fetch('http://127.0.0.1:${String(port)}/health').then(async r=>{console.log(r.status+' '+await r.text())}).catch(e=>{console.log(e.message);process.exit(1)})`);
+      expect(ready.stdout.trim(), ready.stderr).toBe("200 ok");
+
+      // A control proves both raw-IP routes work from a container with ordinary egress.
+      for (const address of ["1.1.1.1", "8.8.8.8"]) {
+        const control = await onBridge(connectOutcome(address, 443));
+        expect(control.stdout.trim(), `raw-IP control ${address}: ${control.stderr}`).toBe("open");
+      }
+
+      // A live peer on the stale agentx-task bridge (and one on rovara-snet) has
+      // a unique response. Controls verify the peers before Chromium probes them.
+      const peerScript = `require('http').createServer((_,r)=>r.end(${JSON.stringify(marker)})).listen(${String(remotePort)},'0.0.0.0')`;
+      for (const [name, network] of [[remoteName, "agentx-task"], [innerName, NETWORK]] as const) {
+        const peer = await docker("run", "-d", "--pull=never", "--name", name, "--network", network, "--cap-drop=ALL", "--security-opt", "no-new-privileges", image, "node", "-e", peerScript);
+        expect(peer.code, peer.stderr).toBe(0);
+      }
+      const remoteIp = (await docker("inspect", "--format", `{{(index .NetworkSettings.Networks "agentx-task").IPAddress}}`, remoteName)).stdout.trim();
+      const innerIp = (await docker("inspect", "--format", `{{(index .NetworkSettings.Networks "${NETWORK}").IPAddress}}`, innerName)).stdout.trim();
+      expect(remoteIp).toMatch(/^\d+\.\d+\.\d+\.\d+$/u);
+      expect(innerIp).toMatch(/^\d+\.\d+\.\d+\.\d+$/u);
+      for (const [network, address] of [["agentx-task", remoteIp], [NETWORK, innerIp]] as const) {
+        const control = await docker("run", "--rm", "--pull=never", "--network", network, "--cap-drop=ALL", "--security-opt", "no-new-privileges", image,
+          "node", "-e", `fetch('http://${address}:${String(remotePort)}').then(r=>r.text()).then(t=>{console.log(t);process.exit(t===${JSON.stringify(marker)}?0:1)}).catch(e=>{console.log(e.message);process.exit(2)})`);
+        expect(control.stdout.trim(), `${network} peer control: ${control.stderr}`).toBe(marker);
+      }
+
+      // Run the production capture in the executor image with exactly its usual
+      // isolation flags; keep it detached briefly to inspect the live namespace.
+      const plan = encodeBrowserEvidenceExecutorPlan({ port, readyPath: "/health", routes: ["/checkout", "/missing", "/busy"], maskSelectors: [], runMs: 60_000, pageMs: 15_000 });
+      const captureArgs = browserEvidenceExecutorArgs({ image, sandbox: sandboxName, name: captureName, seccompProfile: seccomp, plan });
+      expect(captureArgs.filter((value) => value === "--network")).toHaveLength(1);
+      expect(captureArgs).toContain(`container:${sandboxName}`);
+      expect(captureArgs).not.toContain("-v");
+      expect(captureArgs).not.toContain("-e");
+      expect(captureArgs).toContain("--cap-drop=ALL");
+      expect(captureArgs).toContain("--read-only");
+      expect(captureArgs).toContain(`seccomp=${seccomp}`);
+      expect(captureArgs).toContain("--memory");
+      const detachedArgs = captureArgs.filter((value) => value !== "--rm");
+      detachedArgs.splice(1, 0, "--detach");
+      const launched = await docker(...detachedArgs);
+      expect(launched.code, launched.stderr).toBe(0);
+      const mode = await docker("inspect", "--format", "{{.HostConfig.NetworkMode}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.CapDrop}}|{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}", captureName);
+      expect(mode.stdout.trim()).toBe(`container:${sandboxName}|true|[ALL]|`);
+
+      // Chromium's shared network namespace has just the app listener, never a
+      // DevTools or proxy listener of its own.
+      const listeners = await docker("exec", sandboxName, "node", "-e", "const fs=require('fs');const p=new Set();for(const f of ['/proc/net/tcp','/proc/net/tcp6']){try{for(const l of fs.readFileSync(f,'utf8').trim().split('\\n').slice(1)){const c=l.trim().split(/\\s+/);if(c[3]==='0A')p.add(parseInt(c[1].split(':').pop(),16))}}catch(e){if(f==='/proc/net/tcp')throw e}}console.log(JSON.stringify([...p].sort((a,b)=>a-b)))");
+      expect(JSON.parse(listeners.stdout.trim()) as number[]).toEqual([port]);
+      const captureWait = run("docker", ["wait", captureName], { timeout: 120_000 }).then(() => undefined, () => undefined);
+      // The /busy route holds the executor open long enough to inspect the listener table.
+      await captureWait;
+      const captureLog = await docker("logs", captureName);
+      const captured = parseCaptureOutput(Buffer.from(captureLog.stdout), ["/checkout", "/missing", "/busy"]);
+      expect(captured?.app, `${captureLog.stderr}\n${captureLog.stdout.slice(0, 300)}`).toBe("ready");
+      const checkout = captured?.shots.get("/checkout");
+      expect(checkout).toMatchObject({ t: "shot", ok: true });
+      if (checkout?.t !== "shot" || !checkout.ok) throw new Error("/checkout was not captured");
+      const jpeg = Buffer.from(checkout.jpegBase64, "base64");
+      expect([...jpeg.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
+      expect(jpeg.byteLength).toBeGreaterThan(0);
+      expect(jpeg.byteLength).toBeLessThanOrEqual(BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES);
+      expect(captured?.shots.get("/missing")).toMatchObject({ t: "shot", ok: false, reason: "page_did_not_load" });
+      expect(captured?.shots.has("/busy")).toBe(false);
+
+      const closedPlan = encodeBrowserEvidenceExecutorPlan({ port: port + 1, readyPath: "/health", routes: ["/checkout"], maskSelectors: [], runMs: 2_000, pageMs: 2_000 });
+      const closed = await docker(...browserEvidenceExecutorArgs({ image, sandbox: sandboxName, name: `${captureName}-closed`, seccompProfile: seccomp, plan: closedPlan }));
+      expect(closed.code, closed.stderr).toBe(0);
+      const noApp = parseCaptureOutput(Buffer.from(closed.stdout), ["/checkout"]);
+      expect(noApp?.app).toBe("time_limit");
+      expect(noApp?.shots.size).toBe(0);
+
+      // Test-only Chromium has no origin filter. Its local success is a required
+      // launch control; only explicit network-denial errors count as a wall.
+      const probeScript = `const {openEvidenceChromium}=require('/opt/agentx/packages/verifier/dist/executor/browser-evidence-chromium.js');(async()=>{const c=await openEvidenceChromium({signal:AbortSignal.timeout(90000)});try{const p=await c.browser.newPage();const out={};const local=await p.goto('http://127.0.0.1:${String(port)}/checkout',{waitUntil:'domcontentloaded',timeout:10000});out.local={status:local&&local.status(),body:(await p.locator('body').innerText()).slice(0,2000)};for(const [key,url] of Object.entries(${JSON.stringify({ raw1: "https://1.1.1.1/", raw2: "https://8.8.8.8/", registry: "https://ghcr.io/v2/", peer: `http://${remoteIp}:${String(remotePort)}/`, inner: `http://${innerIp}:${String(remotePort)}/`, host: "http://172.28.251.2:443/", gatewayDns: "http://172.28.250.2:443/", gatewayInner: "http://172.28.250.1:22/", metadata: "http://169.254.169.254/", daemonProxy: "http://172.28.251.2:3128/" })})){try{const r=await p.goto(url,{waitUntil:'domcontentloaded',timeout:8000});out[key]={status:r&&r.status(),body:(await p.locator('body').innerText().catch(()=>'' )).slice(0,2000)}}catch(e){out[key]={error:String(e.message)}}}try{const r=await p.goto('https://registry.npmjs.org/',{waitUntil:'domcontentloaded',timeout:20000});out.allowed={status:r&&r.status(),body:(await p.locator('body').innerText()).slice(0,2000)}}catch(e){out.allowed={error:String(e.message)}}console.log(JSON.stringify(out))}finally{await c.close()}})().catch(e=>{console.error(e);process.exit(1)})`;
+      const probeArgs = browserEvidenceExecutorArgs({ image, sandbox: sandboxName, name: probeName, seccompProfile: seccomp, plan });
+      const imageIndex = probeArgs.indexOf(image);
+      probeArgs.splice(imageIndex + 1, probeArgs.length, "node", "-e", probeScript);
+      const probe = await docker(...probeArgs);
+      expect(probe.code, probe.stderr).toBe(0);
+      const result = JSON.parse(probe.stdout.trim().split("\n").at(-1) ?? "{}") as Record<string, { status?: number; body?: string; error?: string }>;
+      expect(result.local?.status).toBe(200);
+      expect(result.local?.body).toContain("Account");
+      for (const key of ["raw1", "raw2"] as const) expect(result[key]?.error, `${key}: ${JSON.stringify(result[key])}`).toMatch(/net::ERR_(ADDRESS_UNREACHABLE|CONNECTION_TIMED_OUT|CONNECTION_REFUSED)/u);
+      for (const key of ["peer", "inner"] as const) expect(result[key]?.error, `${key}: ${JSON.stringify(result[key])}`).toMatch(/net::ERR_(ADDRESS_UNREACHABLE|CONNECTION_TIMED_OUT|CONNECTION_REFUSED)/u);
+      for (const key of ["host", "gatewayDns", "gatewayInner", "metadata", "daemonProxy"] as const) expect(result[key]?.error, `${key}: ${JSON.stringify(result[key])}`).toMatch(/net::ERR_(ADDRESS_UNREACHABLE|CONNECTION_TIMED_OUT|CONNECTION_REFUSED)/u);
+      expect(result.registry?.error).toMatch(/net::ERR_NAME_NOT_RESOLVED/u);
+      const deniedHost = await hostHttps("ghcr.io");
+      expect(deniedHost, "host/daemon registry control").toMatch(/^status (200|401|403|404)$/u);
+      expect(result.allowed).toMatchObject({ status: 200 });
+      expect(result.allowed?.body).toMatch(/^\s*\{[\s\S]*\}\s*$/u);
+      expect(() => { void (JSON.parse(result.allowed?.body ?? "") as unknown); }).not.toThrow();
+      expect(await gatewayLog()).toMatch(/"event":"proxy_refused"/u);
+    } finally {
+      for (const name of removed) await docker("rm", "--force", name);
+      await docker("rm", "--force", `${captureName}-closed`);
+    }
+  }, 900_000);
 
   // LAST: it replaces the gateway with a broken one.
   it("FAILS the boot when the gateway cannot start (it comes up and dies at once), and never leaves the worker an environment", async () => {
