@@ -1,7 +1,6 @@
 // Issue 195: the stuck-cancel retry runs in the reconciler's own process (through #173's shared
 // cancel code and signing key), so it adds no grant and no environment variable: only the
-// StuckCancels alarm, in named environments only. The legacy templates are proven byte-identical by
-// legacy-templates.test.ts.
+// StuckCancels alarm, in every deployment (#1131: production, the legacy template, too).
 import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
@@ -79,11 +78,16 @@ describe("the stuck-cancel retry's infrastructure (#195)", () => {
     expect(name.slice(prefix.length)).toMatch(/^[A-Za-z0-9]+$/);
   });
 
-  it("adds none of it to the legacy deployment", () => {
+  // #1131: production (the legacy template) retries stuck cancels and alarms on them too.
+  it("gives the legacy (production) reconciler the same retry and alarm, under production's names", () => {
     const { environment, statements } = reconciler(legacy);
     expect(environment).not.toHaveProperty("BROKER_FUNCTION_NAME");
+    expect(environment).toMatchObject({ CALLBACK_SIGNING_KEY_SECRET_ID: "agentx/production/callback-key" });
     expect(environment).not.toHaveProperty("CALLBACK_SIGNING_KEY");
     expect(actionsOf(statements).filter((action) => action.startsWith("lambda:"))).toEqual([]);
-    expect(stuckCancelAlarms(legacy)).toEqual([]);
+    const alarms = stuckCancelAlarms(legacy);
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0]![1].Properties).toMatchObject({ AlarmName: "AgentXStuckCancels", AlarmActions: [{ Ref: topicId(legacy) }] });
+    expect(JSON.stringify(alarms[0]![1].Properties.Metrics)).toContain('"Namespace":"AgentX"');
   });
 });
