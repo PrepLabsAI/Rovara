@@ -1467,7 +1467,8 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
         }
         // Lead 4 J2: the smart Just answer for a Slack thread (slack-answers.ts). Who may ask and which project is decided there from the verified thread and member, never from the body.
         if (request.method === "POST" && serviceUrl.pathname === SLACK_ANSWER_SERVICE_PATH) {
-          return json(await askSlackAnswerForIdentity({ company: dependencies, core: dependencies.developer?.coreApp }, identity, parseBody(request.body)), request.requestId);
+          const view = identity.slack === undefined ? dependencies : await namedInstallTeamView(dependencies, identity.slack.thread.teamId);
+          return json(await askSlackAnswerForIdentity({ company: view, core: view.developer?.coreApp }, identity, parseBody(request.body)), request.requestId);
         }
         if (request.method === "POST" && serviceUrl.pathname === "/v1/tasks/comments/answered") {
           return json(await markCommentAnswered(dependencies, identity, parseBody(request.body)), request.requestId);
@@ -2529,7 +2530,7 @@ async function registerProject(
   throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration exceeded its bounded catalog retries");
 }
 
-async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, projectName: string): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number; newest?: RegisteredProjectRecord }> {
+async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, projectName: string, task?: DeveloperTaskRecord): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number; newest?: RegisteredProjectRecord }> {
   const catalog = await getItem<{ entityType?: string; name?: string; latestRevision?: number }>(dependencies, projectCatalogKey(projectName));
   if (catalog !== undefined && (catalog.entityType !== "PROJECT_CATALOG" || catalog.name !== projectName
     || (catalog.latestRevision !== undefined && (!Number.isSafeInteger(catalog.latestRevision) || catalog.latestRevision < 1)))) {
@@ -2538,7 +2539,7 @@ async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, p
   let newestRevision = 0;
   let newest: RegisteredProjectRecord | undefined;
   try {
-    newest = await requireLatestProject(dependencies, projectName);
+    newest = task === undefined ? await requireLatestProject(dependencies, projectName) : await requireTaskLatestProject(dependencies, task);
     newestRevision = newest.definition.revision;
     if (newest.definition.name !== projectName || !Number.isSafeInteger(newestRevision) || newestRevision < 1) {
       throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is invalid");
@@ -2614,11 +2615,11 @@ async function repairNamedCompanyCatalogPointer(dependencies: AwsBrokerDependenc
   }
 }
 
-async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDependencies, projectName: string, options: { createCatalogRow?: boolean } = {}): Promise<void> {
+async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDependencies, projectName: string, options: { createCatalogRow?: boolean; task?: DeveloperTaskRecord } = {}): Promise<void> {
   // Legacy index repair and the known-company core copy commit together. No legacy revision is rewritten.
   const coreBudget = boundedCompanyReads(dependencies.documentClient);
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const snapshot = await readProjectCatalogSnapshot(dependencies, projectName);
+    const snapshot = await readProjectCatalogSnapshot(dependencies, projectName, options.task);
     const targetRevision = snapshot.newestRevision;
     if (targetRevision < 1) throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is unavailable");
     if (snapshot.catalog === undefined && options.createCatalogRow === false) throw agentXError("PROJECT_REVISION_MISMATCH", "catalog-row-absent");
@@ -2653,7 +2654,7 @@ async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDep
     } catch (error) {
       if (!isConditional(error)) throw error;
       if (attempt === 2) throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer could not be reconciled with immutable revision history");
-      const refreshed = await readProjectCatalogSnapshot(dependencies, projectName);
+      const refreshed = await readProjectCatalogSnapshot(dependencies, projectName, options.task);
       if (refreshed.newestRevision <= snapshot.newestRevision
         && (refreshed.catalog?.latestRevision ?? 0) <= (snapshot.catalog?.latestRevision ?? 0)) {
         throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer changed without revision history advancing");
@@ -2673,7 +2674,7 @@ async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDep
  * row that already has its pointer is left alone. The E2E current-authority check also runs this when a task or Slack
  * card is presented, so a legacy project's first view writes the (index-only, conditional) pointer.
  */
-async function ensureProjectCatalogPointer(dependencies: AwsBrokerDependencies, projectName: string): Promise<void> {
+async function ensureProjectCatalogPointer(dependencies: AwsBrokerDependencies, projectName: string, task?: DeveloperTaskRecord): Promise<void> {
   const catalog = await getItem<{ latestRevision?: unknown }>(dependencies, projectCatalogKey(projectName));
   if (catalog?.latestRevision !== undefined) return;
   const refuse = (reason: string): never => {
@@ -2682,7 +2683,7 @@ async function ensureProjectCatalogPointer(dependencies: AwsBrokerDependencies, 
   };
   if (catalog === undefined) return refuse("catalog-row-absent");
   try {
-    await repairProjectCatalogPointerFromHistory(dependencies, projectName, { createCatalogRow: false });
+    await repairProjectCatalogPointerFromHistory(dependencies, projectName, { createCatalogRow: false, ...(task === undefined ? {} : { task }) });
   } catch (error) {
     if (!(error instanceof AgentXError) || error.code !== "PROJECT_REVISION_MISMATCH") throw error;
     return refuse(error.message.replace(/^PROJECT_REVISION_MISMATCH: /u, ""));
@@ -3193,8 +3194,11 @@ async function slackServiceIdentity(
     return channelConversationIdentity(channelConversationDependencies(dependencies), conversation.ref, conversation.actor);
   }
   const context = parseSlackHeaders(request.headers);
-  await companySlackCaller(dependencies, context.thread, context.requester.userId);
-  const binding = await getSlackBinding(dependencies, context.thread.teamId, context.thread.channelId);
+  let view: AwsBrokerDependencies;
+  try { view = await namedInstallTeamView(dependencies, context.thread.teamId); }
+  catch { throw agentXError("RUNTIME_UNAVAILABLE", "This Slack workspace is not available."); }
+  await companySlackCaller(view, context.thread, context.requester.userId);
+  const binding = await getSlackBinding(view, context.thread.teamId, context.thread.channelId);
   if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
   const subject = slackThreadSubject(context.thread);
   const own: AuthenticatedIdentity = {
@@ -3205,9 +3209,9 @@ async function slackServiceIdentity(
     claims: {},
     slack: { ...context, binding },
   };
-  const shared = await sharedThread(dependencies, context.thread);
+  const shared = await sharedThread(view, context.thread);
   if (shared === undefined) return own;
-  await requireSlackTaskCompany(dependencies, context.thread, shared.taskId);
+  await requireSlackTaskCompany(view, context.thread, shared.taskId);
   const sharedTask = { taskId: shared.taskId, workspaceId: shared.workspaceId, developerName: shared.developerName };
   // C11: open only while continue, not closed, and the channel still serves the task's project.
   // A Slack-started task's own thread is driven by its owner's buttons, never by the channel's chat agent: closed to it.
@@ -3218,7 +3222,7 @@ async function slackServiceIdentity(
   }
   if (dependencies.developer === undefined) throw agentXError("FORBIDDEN", "developer task workflows are not configured");
   let access: TaskAccess;
-  try { ({ access } = await slackTaskAccess(dependencies, developerTaskActions(dependencies), shared.taskId, context.requester.userId, "comment", false, context.thread)); }
+  try { ({ access } = await slackTaskAccess(view, developerTaskActions(view), shared.taskId, context.requester.userId, "comment", false, context.thread)); }
   catch { throw agentXError("FORBIDDEN", "this Slack member cannot continue the task"); }
   if (access.task.share?.teamId !== context.thread.teamId || access.task.share.channelId !== context.thread.channelId
     || access.task.share.threadTs !== context.thread.threadTs) throw agentXError("FORBIDDEN", "this task belongs to another Slack thread");
@@ -3412,9 +3416,70 @@ function slackThreadOwnRow<T>(identity: AuthenticatedIdentity | undefined, row: 
 
 /** The same check for a route that holds the channel binding itself (the SWE-bench routes): a NAMED company's binding needs the legacy row it read to be that company's. */
 function bindingOwnRow<T>(binding: SlackChannelBinding | undefined, row: T): T {
-  const company = namedCompany((binding as { companyId?: unknown } | undefined)?.companyId as string | undefined);
-  if (company !== undefined && !recordInCompany(row, company)) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  return slackCompanyOwnRow((binding as { companyId?: string } | undefined)?.companyId, row);
+}
+
+/** The same guard for queued work, whose accepted task retains its company instead of a live Slack identity. */
+function slackCompanyOwnRow<T>(companyId: string | undefined, row: T): T {
+  if (companyId !== undefined && !OrgIdSchema.safeParse(companyId).success) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  if (!recordInCompany(row, companyId)) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
   return row;
+}
+
+/** A saved task supplies authority, never an absent/invalid stamp's default layout. Only the operator's built-in install binding can recover an old Slack task. */
+async function taskCompanyScope(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord | undefined, workspace?: WorkspaceInstance): Promise<string | undefined> {
+  const refuse = () => agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  if (task === undefined || task.entityType !== "DEVELOPER_TASK" || typeof task.taskId !== "string" || typeof task.project !== "string"
+    || task.pk !== taskKey(task.taskId).pk || task.sk !== "META"
+    || (workspace !== undefined && (task.workspaceId !== workspace.id || task.project !== workspace.projectName || task.ownerKey !== workspace.ownerKey))) throw refuse();
+  if (task.companyId !== undefined) {
+    const company = OrgIdSchema.safeParse(task.companyId);
+    if (!company.success) throw refuse();
+    return company.data;
+  }
+  const companyOfTeam = dependencies.workspaces?.requireCompany.bind(dependencies.workspaces) ?? dependencies.installTeamCompany;
+  if (companyOfTeam === undefined) return undefined; // Company mode off: the original single-install engine.
+  const team = task.share?.teamId;
+  if (team === undefined || team !== (dependencies.slackWorkspaceLegacyTeamId ?? dependencies.slackInstallTeamOnly ?? dependencies.developer?.slackTeamId)) throw refuse();
+  let company: unknown;
+  try { company = await companyOfTeam(team); } catch { throw refuse(); }
+  if (company !== IMPLICIT_COMPANY_ID) throw refuse();
+  return IMPLICIT_COMPANY_ID;
+}
+
+async function requireTaskProject(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord): Promise<RegisteredProjectRecord> {
+  const company = await taskCompanyScope(dependencies, task);
+  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  return slackCompanyOwnRow(company, project);
+}
+
+async function requireTaskLatestProject(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord): Promise<RegisteredProjectRecord> {
+  const company = await taskCompanyScope(dependencies, task);
+  const project = await requireLatestProject(dependencies, task.project);
+  return slackCompanyOwnRow(company, project);
+}
+
+/** Feedback adapters load a task before asking for its repository. Keep that checked scope through the callback's separate revision read. */
+function taskRepositoryReader(dependencies: AwsBrokerDependencies) {
+  const scopes = new Map<string, string | undefined>();
+  const key = (name: string, revision: number) => JSON.stringify([name, revision]);
+  return {
+    async loadTask(this: void, taskId: string) {
+      const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+      if (task === undefined) return undefined;
+      const company = await taskCompanyScope(dependencies, task);
+      const id = key(task.project, task.startingRevision);
+      if (scopes.has(id) && scopes.get(id) !== company) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+      scopes.set(id, company);
+      return task;
+    },
+    async project(name: string, revision: number) {
+      const id = key(name, revision);
+      if (!scopes.has(id)) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+      const project = await requireProject(dependencies, name, revision);
+      return slackCompanyOwnRow(scopes.get(id), project);
+    },
+  };
 }
 
 async function getLegacySlackBinding(
@@ -4510,12 +4575,12 @@ async function existingThreadWorkspace(
   includeOpenTaskCount = false,
   lazyPreparation = false,
 ): Promise<SlackThreadWorkspaceResult> {
-  await recordThreadRequester(dependencies, identity, workspace.id, false);
   // Preparation rebuilds the workspace's disk, so it keeps the revision recorded on the workspace
   // (for a Slack thread, the latest revision when its compute was first prepared). Everything the
   // model is told comes from the project's latest registered revision.
   const pinned = slackThreadOwnRow(identity, await requireProject(dependencies, workspace.projectName, workspace.projectRevision));
   const settings = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
+  await recordThreadRequester(dependencies, identity, workspace.id, false);
   const applied = {
     orchestratorInstructions: settings.definition.orchestratorInstructions,
     ...await threadIntegrations(settings.definition, include, dependencies),
@@ -4919,7 +4984,7 @@ async function resolveWorkspace(
 ) {
   if (!Number.isInteger(revision) || revision < 1) throw agentXError("CONFIG_INVALID", "revision is required");
   await requireMembership(dependencies, identity.ownerKey, projectName);
-  await requireProject(dependencies, projectName, revision);
+  slackThreadOwnRow(identity, await requireProject(dependencies, projectName, revision));
   const workspace = await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
   if (!workspace) throw agentXError("WORKSPACE_NOT_READY", "workspace has not been prepared by an administrator");
   if (workspace.projectRevision !== revision) {
@@ -4952,8 +5017,15 @@ async function taskOperationParts(
   input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; operationId?: string; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowE2EAdmission?: E2EWorkflowAdmissionRef; workflowE2EBaselineSource?: true; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowApprovedPlan?: WorkflowApprovedPlan; workflowReviewFeedback?: WorkflowReviewFeedback; workflowReviewNote?: WorkflowReviewNote; retiredClaimIds?: readonly string[]; slackThread?: SlackThread },
   now: string,  /** The Slack thread's identity when a thread asked (acceptTask): its binding's company checks the legacy revision read (slackThreadOwnRow). */
   identity?: AuthenticatedIdentity,
+  companyId?: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
-  const settings = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
+  if (identity?.developer !== undefined) {
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(identity.developer.taskId));
+    companyId = await taskCompanyScope(dependencies, task, workspace);
+    await requireTaskProject(dependencies, task!);
+  }
+  const latestProject = await requireLatestProject(dependencies, workspace.projectName);
+  const settings = slackCompanyOwnRow(companyId, slackThreadOwnRow(identity, latestProject));
   const resolvedModel = await resolveProjectModel(dependencies, settings);
   // #341: a task whose owner connected a working ChatGPT plan runs on it; `model` stays the default it falls back to.
   const chatgpt = dependencies.chatgpt === undefined ? undefined
@@ -5097,7 +5169,7 @@ async function codingPlanChecksInstructions(dependencies: AwsBrokerDependencies,
   const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
   if (task === undefined) throw agentXError("CONFIG_INVALID", "the task for this planning step is missing");
   if (task.workflow?.checkPolicy === undefined) return "";
-  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  const project = await requireTaskProject(dependencies, task);
   return planChecksInstructions(project.definition.repositories.map((repository) => repository.path), task.workflow?.checkPolicy?.required ?? []);
 }
 
@@ -5107,7 +5179,7 @@ async function codingPlanWorkBreakdownContext(dependencies: AwsBrokerDependencie
   const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
   const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
   if (task === undefined) throw agentXError("CONFIG_INVALID", "the task for this planning step is missing");
-  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  const project = await requireTaskProject(dependencies, task);
   if (project.definition.repositories.length !== 1) return undefined;
   return { taskId: task.taskId, repositoryId: project.definition.repositories[0]!.name };
 }
@@ -5195,7 +5267,7 @@ async function evaluateWorkflowE2EApplicationSelectionNow(dependencies: AwsBroke
   const catalogId = dependencies.e2eFeatureRuntimeCatalogId;
   if (catalogId === undefined) return unevaluable("no runtime catalog is configured");
   let project: RegisteredProjectRecord;
-  try { project = await requireProject(dependencies, task.project, task.startingRevision); }
+  try { project = await requireTaskProject(dependencies, task); }
   catch { return unevaluable("the pinned project revision is unavailable"); }
   const policy = E2EPolicySchema.safeParse(project.definition.e2e);
   if (!policy.success) return unevaluable("the pinned project has no valid E2E policy");
@@ -5251,7 +5323,7 @@ async function validateWorkflowE2EApplicationPlan(dependencies: AwsBrokerDepende
   const derived = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact, { mode: options.reapproval === true ? "reapprove" : "approve", pinned: [] });
   if (derived.ok) {
     // M1.3 Task 3.7b (owner decision D2): whether this project wants the informational baseline round; the coding run is then asked to export the unchanged code.
-    const baselineWanted = projectE2EBaselineWanted(await requireProject(dependencies, task.project, task.startingRevision));
+    const baselineWanted = projectE2EBaselineWanted(await requireTaskProject(dependencies, task));
     return { selection: derived.selection, conditions: derived.conditions, baselineWanted };
   }
   if (derived.kind === "unevaluable") {
@@ -5269,7 +5341,7 @@ async function codingPlanFeatureE2EContext(dependencies: AwsBrokerDependencies, 
   const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
   const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
   if (task === undefined) throw agentXError("CONFIG_INVALID", "the task for this planning step is missing");
-  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  const project = await requireTaskProject(dependencies, task);
   if (project.definition.e2e === undefined) return undefined;
   const parsedPolicy = E2EPolicySchema.safeParse(project.definition.e2e);
   if (!parsedPolicy.success) return { status: "unknown" as const, reason: "the task's pinned E2E policy could not be validated" };
@@ -6768,7 +6840,7 @@ export function workflowApplicationRouteDependencies(dependencies: AwsBrokerDepe
     workflowE2EScenarioResults: (input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }) => loadWorkflowE2EScenarioResults(dependencies, input.task, input.operations, input.actor),
     workflowE2EArtifact: (input: { task: DeveloperTaskRecord; sha256: string }) => loadWorkflowE2EArtifact(dependencies, input.task, input.sha256),
     startWorkflowE2EBaseline: async (input: { task: DeveloperTaskRecord }) => requestWorkflowE2EBaselineRound({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, input.task,
-      { enabled: projectE2EBaselineWanted(await requireProject(dependencies, input.task.project, input.task.startingRevision)) }),
+      { enabled: projectE2EBaselineWanted(await requireTaskProject(dependencies, input.task)) }),
     validateWorkflowE2EApplicationPlan: (input: { task: DeveloperTaskRecord; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string }; reapproval?: boolean }) =>
       validateWorkflowE2EApplicationPlan(dependencies, input.task, input.intent, input.artifact, input.reapproval === true ? { reapproval: true } : {}),
     registeredRepositoryIdentity: dependencies.githubPullRequests.getRepositoryIdentity === undefined ? undefined : (url: string) => dependencies.githubPullRequests.getRepositoryIdentity!(url),
@@ -8845,15 +8917,15 @@ async function loadCurrentApprovedPlan(dependencies: AwsBrokerDependencies, task
 /** The task's pinned project and the latest one, which must hold the same E2E policy and runtime binding, with the catalog entry that names the latest. */
 async function loadCurrentProjectAuthority(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, mark: AuthorityMark, reject: AuthorityReject) {
   mark("project-record");
-  const project = await requireProject(dependencies, task.project, task.startingRevision);
-  const latestProject = await requireLatestProject(dependencies, task.project);
+  const project = await requireTaskProject(dependencies, task);
+  const latestProject = await requireTaskLatestProject(dependencies, task);
   if (latestProject.setupApproval === undefined) { reject("current-project-setup-approval-unavailable"); return undefined; }
   // A catalog row written before the latest-revision pointer existed is repaired from the revision history first (never created);
   // the strict comparison below and the catalog fence in the transaction then stay exact. Both the portable and the application
   // authority come through here.
   mark("project-catalog-pointer");
   try {
-    await ensureProjectCatalogPointer(dependencies, task.project);
+    await ensureProjectCatalogPointer(dependencies, task.project, task);
   } catch (error) {
     if (error instanceof AgentXError && error.code === "CONFIG_INVALID") { reject(`config-invalid-project-catalog-pointer-unrepairable:${task.project}`); return undefined; }
     throw error;
@@ -9788,11 +9860,12 @@ async function verifyTaskFeedbackForWorkerStart(dependencies: AwsBrokerDependenc
   const parsed = linked === undefined ? undefined : /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/.exec(linked.url);
   const getFeedback = dependencies.githubPullRequests.getPullRequestFeedback;
   if (!task || !linked || !parsed || getFeedback === undefined) return false;
+  const projects = taskRepositoryReader(dependencies);
   return verifyTaskPullRequestFeedbackCurrent({
     documentClient: dependencies.documentClient, tableName: dependencies.tableName,
-    repositoryFullName: parsed[1]!, number: Number(parsed[2]), loadTask: id => getItem<DeveloperTaskRecord>(dependencies, taskKey(id)),
+    repositoryFullName: parsed[1]!, number: Number(parsed[2]), loadTask: projects.loadTask,
     repositoryUrl: async (projectName, revision, repositoryId) => {
-      const project = await requireProject(dependencies, projectName, revision);
+      const project = await projects.project(projectName, revision);
       return project.definition.repositories.find(repository => repository.name === repositoryId)?.url;
     },
     getCurrentFeedback: (url, number) => getFeedback.call(dependencies.githubPullRequests, url, number),
@@ -9944,7 +10017,7 @@ async function readFeedbackBundlesForCritic(
 async function feedbackTaskChecks(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, workflow: WorkflowSnapshot): Promise<WorkflowFeedbackTaskChecks | undefined> {
   const policy = workflow.checkPolicy;
   if (policy === undefined) return undefined;
-  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  const project = await requireTaskProject(dependencies, task);
   const kept = policy.selectedProposedIds;
   return WorkflowFeedbackTaskChecksSchema.parse({
     proposed: policy.proposed.filter((check) => kept === undefined || kept.includes(check.id)),
@@ -10699,7 +10772,7 @@ async function validateWorkflowProgressChunk(
     if (baseCommit === undefined || dependencies.githubPullRequests.getCommitTree === undefined) {
       throw agentXError("CALLBACK_FORBIDDEN", "the approved work breakdown base tree cannot be confirmed");
     }
-    const project = await requireProject(dependencies, task.project, task.startingRevision);
+    const project = await requireTaskProject(dependencies, task);
     const repository = project.definition.repositories.find((entry) => entry.name === invocation.graph.items[0]?.repository);
     if (repository === undefined) throw agentXError("CALLBACK_FORBIDDEN", "the approved work breakdown repository is no longer registered");
     firstBaseTree = await dependencies.githubPullRequests.getCommitTree(repository.url, baseCommit);
@@ -10823,7 +10896,9 @@ async function queuedFirstTask(
   pointer: DeveloperTaskPointerRecord & { pendingPrompt: string },
   now: string,
 ): Promise<{ workspaceUpdate: TransactItems[number]; items: TransactItems }> {
-  const task = pointer.pendingWorkflowMode === "PLAN" ? await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId)) : undefined;
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  const companyId = await taskCompanyScope(dependencies, task, workspace);
+  await requireTaskProject(dependencies, task!);
   const { operation, outbox, fence } = await taskOperationParts(dependencies, workspace, {
     requestId: pointer.firstRequestId,
     conversationId: pointer.conversationId,
@@ -10833,7 +10908,7 @@ async function queuedFirstTask(
     workflowMode: pointer.pendingWorkflowMode ?? "IMPLEMENT",
     ...(pointer.pendingWorkflowMode === undefined ? { legacyTask: true } : {}),
     ...(task?.workflow?.reviewPhase === undefined ? {} : { workflowPhase: task.workflow.reviewPhase }),
-  }, now);
+  }, now, undefined, companyId);
   return {
     workspaceUpdate: { Update: {
       TableName: dependencies.tableName,
@@ -11119,13 +11194,14 @@ export async function processGithubWorkflowEvent(
   if (getFeedback === undefined) throw agentXError("RUNTIME_UNAVAILABLE", options === undefined
     ? "current GitHub feedback collection is not configured"
     : "current GitHub merge observation is not configured");
+  const projects = taskRepositoryReader(dependencies);
   await reconcileTaskPullRequestFeedback({
     documentClient: dependencies.documentClient, tableName: dependencies.tableName,
     repositoryFullName: event.fullName, number: event.number, deliveryId,
     ...(event.headSha === undefined ? {} : { expectedHeadSha: event.headSha }),
-    loadTask: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
+    loadTask: projects.loadTask,
     repositoryUrl: async (projectName, revision, repositoryId) => {
-      const project = await requireProject(dependencies, projectName, revision);
+      const project = await projects.project(projectName, revision);
       return project.definition.repositories.find(repository => repository.name === repositoryId)?.url;
     },
     getCurrentFeedback: async (url, number) => options === undefined
@@ -11310,13 +11386,14 @@ export async function reconcileWorkflowMergeRecoveryTask(
 }
 
 async function githubEventStillAuthorized(dependencies: AwsBrokerDependencies, event: ReceivedGithubWebhook["event"]): Promise<boolean> {
+  const projects = taskRepositoryReader(dependencies);
   return authorizeLinkedGithubWebhook({
     documentClient: dependencies.documentClient,
     tableName: dependencies.tableName,
     scope: { installationId: event.installationId, repositoryId: event.repositoryId, fullName: event.fullName, pullRequestNumber: event.number },
-    loadTask: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
+    loadTask: projects.loadTask,
     repositoryUrl: async (projectName, revision, repositoryId) => {
-      const project = await requireProject(dependencies, projectName, revision);
+      const project = await projects.project(projectName, revision);
       if (dependencies.githubBindings !== undefined) {
         try {
           const companyId = await dependencies.githubBindings.ownerOf(event.installationId);
@@ -12351,7 +12428,7 @@ async function startBaselineApplicationRound(
     // The base commit is the task's real one (GitHub has it, and it is pinned); the tree the worker exported for it is held to GitHub's tree for that commit, so a worker cannot label
     // other code as the unchanged code. Where the broker cannot ask GitHub, the exported tree is the worker's word, and it only ever shapes informational rows.
     if (dependencies.githubPullRequests.getCommitTree !== undefined) {
-      const project = await requireProject(dependencies, task.project, task.startingRevision);
+      const project = await requireTaskProject(dependencies, task);
       const url = project.definition.repositories.find((entry) => entry.name === stored.repositoryId)?.url;
       if (url === undefined || await dependencies.githubPullRequests.getCommitTree(url, stored.baseCommitSha) !== stored.baseTreeSha) return await unavailable("refused");
     }
@@ -12431,7 +12508,7 @@ export async function startPlanGroundingRound(
     const exported = StoredBaselineSourceSchema.safeParse(planOperation.baselineSource);
     if (!exported.success || exported.data.status === "REFUSED") return await unavailable("not-exported");
     const stored: ReadyBaselineSource = exported.data;
-    const project = await requireProject(dependencies, task.project, task.startingRevision);
+    const project = await requireTaskProject(dependencies, task);
     const repository = project.definition.repositories.length === 1 ? project.definition.repositories[0] : undefined;
     const pinned = repository === undefined ? undefined : (workflow.reviewBase ?? task.preparedBase)?.find((entry) => entry.repositoryId === repository.name);
     if (repository === undefined || pinned === undefined || stored.repositoryId !== pinned.repositoryId || stored.baseCommitSha !== pinned.baseCommitSha || stored.buildSource.commitSha !== stored.baseCommitSha
@@ -12703,7 +12780,7 @@ async function startWorkflowE2EChecksDispatch(
     treeComplete: true, treePaths: sourceRepository.treePaths,
     sources: sourceRepository.sources.map((source) => ({ path: source.path, sha256: source.sha256, kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") })),
   };
-  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  const project = await requireTaskProject(dependencies, task);
   if (project.runtimeBinding.deploymentMode !== "ec2-ebs") throw agentXError("RUNTIME_UNAVAILABLE", "the qualified feature verifier binding is not an EC2 runtime");
   const policy = E2EPolicySchema.parse(project.definition.e2e);
   const featureRecord = await getItem<Record<string, unknown>>(dependencies, e2eFeatureVerifierKey(catalogId, policy.defaultSandboxProfileId));
@@ -13100,7 +13177,7 @@ async function completedPullRequestUpdateItems(
     }
     pushedCommit = pushed.data.commit;
   }
-  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  const project = await requireTaskProject(dependencies, task);
   const repository = project.definition.repositories.find((entry) => entry.name === maintenance.repository);
   const gateway = dependencies.githubPullRequests;
   const getFeedback = gateway.getPullRequestFeedback;
@@ -13240,7 +13317,7 @@ async function completedWorkflowItems(
     if (terminalStatus !== "SUCCEEDED" || task.workflow.stage !== "PULL_REQUEST" || task.workflow.state !== "READY" || task.workflow.candidate === undefined) return [];
     const published = PullRequestResultSchema.safeParse(result);
     if (!published.success) throw agentXError("CONFIG_INVALID", "workflow pull request result is invalid");
-    const project = await requireProject(dependencies, task.project, task.startingRevision);
+    const project = await requireTaskProject(dependencies, task);
     const repository = project.definition.repositories.find((entry) => entry.name === published.data.repository);
     if (repository === undefined) throw agentXError("CONFIG_INVALID", "published pull request repository is not part of the task's registered project revision");
     const repositoryFullName = githubRepositoryFullName(repository.url);
@@ -13417,7 +13494,7 @@ async function completedWorkflowItems(
           verificationDetail = checks.data.notVerifiedReason ?? checks.data.status;
           throw new Error("checks were not verified");
         }
-        const project = await requireProject(dependencies, task.project, task.startingRevision);
+        const project = await requireTaskProject(dependencies, task);
         const expectedRepositoryIds = project.definition.repositories.map((repository) => repository.name).sort();
         const candidateInput = repositories as CandidateRepository[];
         const candidate = createCandidateManifest(candidateInput);
@@ -13838,7 +13915,7 @@ async function storePlanAnswer(
   const content = answer.Body ? await answer.Body.transformToString("utf8") : "";
   if (Buffer.byteLength(content, "utf8") > WORKFLOW_PLAN_MAX_BYTES) return unreadable(["the answer is too long"]);
 
-  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  const project = await requireTaskProject(dependencies, task);
   // Claim numbers an earlier structured document of this task had and its latest dropped may not come back. A document
   // that cannot be read back or fails its digest is skipped.
   const earlier: PlanDocument[] = [];
@@ -14768,8 +14845,12 @@ async function publicationProject(
   workspace: WorkspaceInstance,
   identity: AuthenticatedIdentity,
 ): Promise<{ project: RegisteredProjectRecord; settingsRevision: number }> {
+  const task = identity.developer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(identity.developer.taskId));
+  const company = identity.developer === undefined ? undefined : await taskCompanyScope(dependencies, task, workspace);
   const pinned = slackThreadOwnRow(identity, await requireProject(dependencies, workspace.projectName, workspace.projectRevision));
   const settings = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
+  slackCompanyOwnRow(company, pinned);
+  slackCompanyOwnRow(company, settings);
   if (settings.definition.revision === pinned.definition.revision) {
     return { project: pinned, settingsRevision: pinned.definition.revision };
   }
@@ -15551,7 +15632,11 @@ async function exchangeRepositoryCredential(
       throw agentXError("FORBIDDEN", "repository credential grant does not cover this request");
     }
     const workspace = await requireWorkspace(dependencies, workspaceId);
+    const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspace.id));
+    const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+    const company = pointer === undefined ? undefined : await taskCompanyScope(dependencies, task, workspace);
     const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+    slackCompanyOwnRow(company, project);
     await requireGithubProjectBinding(dependencies, project, input.repositoryUrl);
   }
   return dependencies.repositoryGrants.exchange(grant, {

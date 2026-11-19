@@ -81,6 +81,8 @@ export interface DeveloperTaskRecord extends TaskSpendTotals {
   slackUserId?: string;
   client: string;
   project: string;
+  /** Company scope captured when a task is accepted, for queued work that later rereads its project. */
+  companyId?: string;
   title: string;
   workspaceId: string;
   ownerKey: string;

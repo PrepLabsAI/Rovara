@@ -56,7 +56,8 @@ const companyId = (letter: string) => `org_${letter.repeat(20)}`;
 const COMPANY_A = companyId("a");
 const COMPANY_B = companyId("b");
 
-const task = (overrides: Partial<DeveloperTaskRecord> & Record<string, unknown> = {}): DeveloperTaskRecord => ({
+// Persisted company data may be malformed; keep those refusal fixtures explicit.
+const task = (overrides: Partial<Omit<DeveloperTaskRecord, "companyId">> & { companyId?: unknown } & Record<string, unknown> = {}): DeveloperTaskRecord => ({
   pk: `DEVTASK#${TASK_A}`, sk: "META", entityType: "DEVELOPER_TASK", taskId: TASK_A,
   developerId: SAM_ID, provider: "slack", developerName: "Sam Slack", slackUserId: SAM,
   client: "slack", project: "payments", title: "Payments", workspaceId: `workspace-${TASK_A}`,
@@ -235,8 +236,8 @@ describe("the web proof: all four rules, read live, no Slack call", () => {
   });
 
   it("rule 3: the task's company is the stored task's (absent = the implicit company)", async () => {
-    const legacy = task({ companyId: undefined });
-    delete (legacy as unknown as Record<string, unknown>).companyId;
+    const legacy = task();
+    delete legacy.companyId;
     const h = harness({ tasks: [legacy], memberships: { [GALE_ID]: { companyId: IMPLICIT_COMPANY_ID } } });
     h.seed(webRow(), subjectRow(P_GALE, GALE_ID));
     expect(await checkTaskPersonIdentity(h.identityDeps, legacy, GALE_ID)).toMatchObject({ eligible: true, channelMember: true });
