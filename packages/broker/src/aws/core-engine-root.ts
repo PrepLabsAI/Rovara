@@ -32,7 +32,8 @@ import {
   CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, codeRepositoriesOf, OrgRoleSchema, agentXError, WIKI_BUILD_WORDS, isContextSourceStage,
   when, isSystemOwnerId, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
-import { createRepositoryResolver } from "../services/merge-tracking.js";
+import { wakeMergeTracking } from "../services/merge-tracking.js";
+import { hostedMergeDependencies } from "./hosted-merge-deps.js";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
 import { CORE_DISPATCH_QUEUE, codeAdapterModules, type CodeModuleDeps } from "../core-host/code-modules.js";
 import { resolveTaskPeopleAccess, type TaskPeopleDependencies, type CheckTaskPerson } from "../developer/task-people.js";
@@ -1006,8 +1007,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           // DEC 254zzz94: the Merge button, over the root's own grant reader, the project's pinned repositories on the registry's code host, and the project's merge method (Code's default: squash).
           merge: {
             projectGrantRole: (personId, project) => projectGrantRole(personId, project),
-            repository: createRepositoryResolver(runtime.flow.deps, registry),
-            mergeMethod: async (companyId, project) => (inputs.codeSettings === undefined ? DEFAULT_CODE_SETTINGS : await inputs.codeSettings.read(companyId, project)).mergeMethod,
+            merge: () => hostedMergeDependencies({ runtime, registry, settings: inputs.codeSettings, defaults: DEFAULT_CODE_SETTINGS, now: () => now().getTime() }),
+            afterMerge: (taskId) => wakeMergeTracking(runtime.flow.deps.store, taskId, now().getTime()),
           },
           // DEC 254z-amend3: the project's test environment state, with the install's switches (and the host's "not available here" marker, broker-environment-init.ts) and the owner starter list as the catalog.
           testEnvironment: { env, serviceCatalog: hostedServiceCatalog(env), catalogName: "owner-starter-list" },

@@ -3,7 +3,7 @@
 //     for the task's owner or a People co-owner (DEC 254zzz73: no step-up); anyone else is refused and nothing is written.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { MERGE_NOT_READY_MESSAGES, ON_THE_WEBSITE_MESSAGE, WorkflowSnapshotSchema, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
+import { ON_THE_WEBSITE_MESSAGE, WorkflowSnapshotSchema, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
@@ -294,8 +294,9 @@ describe("DEC 254zzz44 (a): only the core rule's 'no such task' falls back to th
 describe("DEC 254zzz94: the Merge button through the dev routes", () => {
   const MERGE = (taskId: string) => `/v1/app/tasks/${taskId}/merge`;
   const mergeWiring = () => {
-    const repository = vi.fn(async () => undefined);
-    return { repository, wiring: { merge: { projectGrantRole: async () => undefined, repository, mergeMethod: async () => "squash" as const } } };
+    // The merge core's seams: a spy that throws (the install cannot build them), so a request that reaches past WHERE and WHO says "not set up" and one refused earlier never asks.
+    const repository = vi.fn(() => { throw new Error("no seams in this test"); });
+    return { repository, wiring: { merge: { projectGrantRole: async () => undefined, merge: repository, afterMerge: async () => undefined } } };
   };
 
   it("a script token never reaches it (it reads like a missing route), and nothing is read for it", async () => {
@@ -317,13 +318,12 @@ describe("DEC 254zzz94: the Merge button through the dev routes", () => {
       expect(answer?.statusCode).toBe(403);
       expect(errorOf(answer).message).toBe(ON_THE_WEBSITE_MESSAGE);
     }
-    // The task is not waiting for its merge yet: the owner on the website is told so in the merge core's words, and no repository is resolved.
-    const page = await routes.route(post(MERGE(taskId), { requestId: randomUUID() }), { ...own, webApp: true });
-    expect(page?.statusCode).toBe(409);
-    expect(errorOf(page)).toEqual({ code: "MERGE_NOT_READY", message: MERGE_NOT_READY_MESSAGES.changing });
-    const view = await routes.route(get(MERGE(taskId)), own);
-    expect(JSON.parse(view!.body)).toMatchObject({ mayMerge: true, ready: false, message: MERGE_NOT_READY_MESSAGES.changing });
     expect(repository).not.toHaveBeenCalled();
+    // The owner on the website reaches the merge core (here: seams the install cannot build, so "not set up"), for the press and the read alike.
+    const page = await routes.route(post(MERGE(taskId), { requestId: randomUUID() }), { ...own, webApp: true });
+    expect(errorOf(page)).toEqual({ code: "NOT_FOUND", message: HOSTED_MERGE_WORDS.notSetUp });
+    expect(errorOf(await routes.route(get(MERGE(taskId)), own))).toEqual({ code: "NOT_FOUND", message: HOSTED_MERGE_WORDS.notSetUp });
+    expect(repository).toHaveBeenCalledTimes(2);
   });
 
   it("another company's member reads 'no such task' for this company's task", async () => {
