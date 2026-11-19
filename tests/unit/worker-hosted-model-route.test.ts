@@ -8,6 +8,11 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { SETUP_AGENT_LIMITS_DEFAULT, SETUP_RUN_REFUSED_MESSAGES, agentXError } from "../../packages/contracts/src/index.js";
+import { createModelPrices } from "../../packages/broker/src/core/cost/price-table.js";
+import { createHostedMetering } from "../../packages/broker/src/core-host/hosted-modules.js";
+import { readGatewayModelAccess } from "../../packages/broker/src/core-host/gateway-model-access.js";
+import { listPricesPerMillion } from "../../packages/model-runtime/src/catalog.js";
+import { routeUsageIdentity } from "../../packages/model-runtime/src/index.js";
 import { modelSpendIsMetered, setupModelPrice } from "../../packages/worker/src/setup-agent-price.js";
 import { runSetupAgentInvocation } from "../../packages/worker/src/setup-agent-invocation.js";
 import { runWikiBuildInvocation } from "../../packages/worker/src/wiki-build-invocation.js";
@@ -18,7 +23,9 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 const temp = async () => { const dir = await mkdtemp(join(tmpdir(), "hosted-route-")); roots.push(dir); return dir; };
 
-const ROUTE = { routeId: "route-1", routeRevision: "rev-1", alias: "claude-sonnet-4-6" };
+const ROUTE = { alias: "claude-sonnet-4-6", api: "anthropic-messages", catalog: "claude-sonnet-4-6" } as const;
+/** A route whose catalog name no installed catalog knows: the ledger has no price for it. */
+const UNKNOWN_ROUTE = { alias: "unlisted", api: "anthropic-messages", catalog: "unlisted" } as const;
 const PRICED = { provider: "rovara-route", modelId: "claude-sonnet-4-6" };
 const IMAGE = { AGENTX_SANDBOX_IMAGE: "i@sha256:" + "b".repeat(64) };
 const PROXY = { AGENTX_MODEL_PROXY_URL: "https://proxy.test" };
@@ -60,7 +67,7 @@ describe("hosted setup run (no env proxy, a model route)", () => {
   }
 
   it("proceeds past the money check with a model route and no env var: the next refusal is the price, not the proxy", async () => {
-    const unpriced = await attempt({ ...IMAGE }, { modelRoute: ROUTE }, { provider: "rovara-route", modelId: "unlisted" });
+    const unpriced = await attempt({ ...IMAGE }, { modelRoute: UNKNOWN_ROUTE }, { provider: "rovara-route", modelId: "unlisted" });
     expect(unpriced.message).toBe(agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES.noModelPrice).message);
     // With a priced model it goes on to build the run (it reaches Docker); it is never refused for the proxy.
     const priced = await attempt({ ...IMAGE }, { modelRoute: ROUTE });
@@ -113,7 +120,7 @@ describe("hosted wiki build (no env proxy, a model route)", () => {
   });
 
   it("an unpriced model still does not start, route or not", async () => {
-    const result = await attempt({}, { modelRoute: ROUTE }, { provider: "rovara-route", modelId: "unlisted" });
+    const result = await attempt({}, { modelRoute: UNKNOWN_ROUTE }, { provider: "rovara-route", modelId: "unlisted" });
     expect(result.callbacks).toEqual([]);
     expect(result.message).toContain("RUNTIME_UNAVAILABLE");
   });
@@ -122,5 +129,53 @@ describe("hosted wiki build (no env proxy, a model route)", () => {
 describe("the hosted route alias is priced (the next blocker would be noModelPrice)", () => {
   it.each(["claude-sonnet-4-6", "claude-opus-4-7", "claude-haiku-4-5", "claude-sonnet-5-5"])("alias %s on the route provider has a setup price", (alias) => {
     expect(setupModelPrice({ provider: "rovara-route", modelId: alias })).toBeDefined();
+  });
+});
+
+// Hotfix 0.5.33: a routed run is priced as the broker's ledger prices it (the price must never be below what is charged).
+describe("setupModelPrice on a hosted route (the ledger's price, not a name match)", () => {
+  // The exact staging shape: CoreAgentModel zai.glm-5, built by the broker's own route reader (gateway-model-access.ts), and the task model the worker builds from it (task-model.ts routedTaskModel).
+  const read = readGatewayModelAccess({ ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example.com", ROVARA_CORE_AGENT_MODEL: "zai.glm-5" });
+  const STAGING_ROUTE = (read as { route: { alias: string; api: "anthropic-messages"; catalog: string } }).route;
+  const STAGING_MODEL = { provider: "rovara-route", modelId: "zai.glm-5" };
+
+  it("the staging route has the expected shape", () => {
+    expect(STAGING_ROUTE).toEqual({ alias: "zai.glm-5", api: "anthropic-messages", catalog: "zai.glm-5" });
+  });
+
+  it("CASE: without the route the staging model has NO price (the bug: canonical zai-glm-5 matches no catalog entry)", () => {
+    expect(setupModelPrice(STAGING_MODEL)).toBeUndefined();
+  });
+
+  it("with the route it is priced, and it equals what the hosted meter charges per million tokens for that route", async () => {
+    const price = setupModelPrice(STAGING_MODEL, STAGING_ROUTE);
+    expect(price).toEqual({ inputPerMTok: 1, outputPerMTok: 3.2 });
+    // The ledger: the identity the worker reports for the route, through the hosted meter's own price table (cap price and recorded price).
+    const prices = createModelPrices({ providers: () => [], catalog: listPricesPerMillion });
+    const identity = routeUsageIdentity(STAGING_ROUTE);
+    expect(identity).toEqual({ provider: "amazon-bedrock", modelId: "zai.glm-5" });
+    for (const found of [prices.find(identity), prices.findCap(identity)]) {
+      expect(found?.price.inputMicrosPerMillionTokens).toBe(Math.round(price!.inputPerMTok * 1_000_000));
+      expect(found?.price.outputMicrosPerMillionTokens).toBe(Math.round(price!.outputPerMTok * 1_000_000));
+    }
+    // And the meter itself: one million input and one million output tokens cost exactly the setup price's total.
+    const cost = await createHostedMetering().price({ provider: identity.provider, modelId: identity.modelId, tokens: { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0 } });
+    expect(cost.micros).toBe(Math.round((price!.inputPerMTok + price!.outputPerMTok) * 1_000_000));
+  });
+
+  it("is never below the cheaper OpenRouter entry for the same name (that was the under-price risk)", () => {
+    expect(setupModelPrice(STAGING_MODEL, STAGING_ROUTE)!.inputPerMTok).toBeGreaterThan(0.6);
+    expect(setupModelPrice(STAGING_MODEL, STAGING_ROUTE)!.outputPerMTok).toBeGreaterThan(1.9);
+  });
+
+  it("an unknown routed model has no price (refused, never zero or guessed)", () => {
+    expect(setupModelPrice({ provider: "rovara-route", modelId: "unlisted" }, UNKNOWN_ROUTE)).toBeUndefined();
+  });
+
+  it("non-routed pricing is unchanged", () => {
+    expect(setupModelPrice({ provider: "rovara-route", modelId: "claude-sonnet-4-6" })).toBeDefined();
+    expect(setupModelPrice({ provider: "openrouter", modelId: "z-ai/glm-5" })).toEqual({ inputPerMTok: 0.6, outputPerMTok: 1.9 });
+    // A model that is not on the route provider ignores a route.
+    expect(setupModelPrice({ provider: "amazon-bedrock", modelId: "global.zai.glm-5.3" }, STAGING_ROUTE)).toEqual(setupModelPrice({ provider: "amazon-bedrock", modelId: "global.zai.glm-5.3" }));
   });
 });

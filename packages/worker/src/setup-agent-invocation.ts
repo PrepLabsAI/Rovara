@@ -78,7 +78,7 @@ export async function runSetupAgentInvocation(
   // Money: a setup run is metered by the model proxy (the broker's spend ledger) and priced from the catalog; without either it does not start.
   // Hotfix 0.5.33: the boot-time proxy (laptop) OR the invocation's own model route (hosted, metered through the control plane); neither refuses.
   if (!modelSpendIsMetered(environment, invocation.payload)) throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES.noModelProxy);
-  const price = setupModelPrice(dependencies.model);
+  const price = setupModelPrice(dependencies.model, invocation.payload.modelRoute);
   const docker = dependencies.docker ?? createDockerCli();
   const callback = dependencies.setupAgent;
   // On a laptop (`rovara up`) the worker is walled in by its own sandbox network and name server: the run joins that network, and the Docker socket guard does not let a worker make a network of its own or

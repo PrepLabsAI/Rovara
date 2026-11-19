@@ -51,7 +51,7 @@ export async function runWikiBuildInvocation(
   // Money: a wiki build is metered by the model proxy (the broker's spend ledger) and priced from the catalog; without either it does not start.
   // Hotfix 0.5.33: the boot-time proxy (laptop) OR the invocation's own model route (hosted, metered through the control plane); neither refuses.
   if (!modelSpendIsMetered(environment, invocation.payload)) throw agentXError("RUNTIME_UNAVAILABLE", "this install has no model proxy, so AgentX did not build the wiki (its spending could not be counted)");
-  const price = setupModelPrice(dependencies.model);
+  const price = setupModelPrice(dependencies.model, invocation.payload.modelRoute);
   const callback = dependencies.wikiBuild;
   const events = new EventBatcher(dependencies.eventSink);
   const conversationId = invocation.payload.conversationId;
