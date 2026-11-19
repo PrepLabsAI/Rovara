@@ -26,6 +26,7 @@ export async function readTaskMoney(input: {
   };
   if (task.companyId !== companyId) return base;
   let unreadable = structuredClone(base);
+  unreadable.spentMicros = unknown("unreadable");
   try {
     const pk = costPartition(companyId, task.taskId);
     const total = await store.get({ pk, sk: "TOTAL" });
@@ -47,9 +48,9 @@ export async function readTaskMoney(input: {
     if (JSON.stringify(total) !== JSON.stringify(after)) return base;
     const workspace = await store.get(workspaceKey(companyId, task.workspaceId));
     const operations = workspace === undefined ? undefined : await workspaceOperations({ store, companyId }, task.workspaceId);
-    // Only a terminal, idle local workspace with no operation history proves no spend.
+    // Only a terminal, idle local workspace with no ledger or operation history proves no spend.
     // Non-task stages may call models too; completion alone does not prove booking.
-    const provenEmpty = input.hosted !== true && terminal && workspace?.["companyId"] === companyId && workspace["activeOperationId"] === null && operations?.length === 0 && entries.length === 0;
+    const provenEmpty = total === undefined && input.hosted !== true && terminal && workspace?.["companyId"] === companyId && workspace["activeOperationId"] === null && operations?.length === 0 && entries.length === 0;
     if (entries.length === 0 && !provenEmpty) return base;
     let final = 0, estimated = 0, awaiting = 0, unpriced = 0, unknownAwaiting = false;
     const receipts = entries.flatMap(entry => {

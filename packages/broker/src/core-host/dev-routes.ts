@@ -1,4 +1,4 @@
-import { parsePreviewRequestV2 } from "@agentx/contracts";
+import { parsePreviewRequestV2, restrictPreviewV2 } from "@agentx/contracts";
 import { startEstimates, type PreviewContext } from "../core/cost/start-estimates.js";
 import { readTaskMoney } from "../core/cost/task-money.js";
 import type { TaskMoneyV1 } from "@agentx/contracts";
@@ -767,7 +767,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           const parsed = parsePreviewRequestV2(jsonBodyOf(request));
           if (parsed === undefined) throw agentXError("CONFIG_INVALID", "invalid start estimate request");
           const context = await target.wiring.startEstimates?.(project) ?? { policyRevision: "unavailable", stages: {}, limits: [] };
-          return json(200, await startEstimates({ store: target.runtime.flow.deps.store }, { orgId: companyId, project, request: parsed, asOf: new Date(nowOf(target)).toISOString(), context }));
+          const quote = await startEstimates({ store: target.runtime.flow.deps.store }, { orgId: companyId, project, request: parsed, asOf: new Date(nowOf(target)).toISOString(), context });
+          return json(200, membership.role === "owner" || membership.role === "admin" ? quote : restrictPreviewV2(quote));
         }
         const playbook = PLAYBOOK.exec(path);
         if (playbook !== null) {

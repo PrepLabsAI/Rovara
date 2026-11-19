@@ -52,10 +52,13 @@ export function mergeTaskMoney(previous: TaskMoneyV1 | undefined, next: TaskMone
   if (next === undefined) return undefined;
   return previous?.taskId === next.taskId && previous.revision > next.revision ? previous : next;
 }
-/** One formatter for task lists, sessions and receipts. Preserve sub-cent amounts. */
+/** One formatter for task lists, sessions and receipts. Unknown spend never becomes zero. */
 export function taskMoneyWords(money: TaskMoneyV1 | undefined): string {
-  if (money === undefined || money.state === "unavailable" || money.spentMicros.state === "unavailable") return money !== undefined && money.coverage.awaitingUsageCalls > 0 ? "Cost unavailable · awaiting usage" : "Cost unavailable";
+  if (money === undefined || money.state === "unavailable" || money.spentMicros.state === "unavailable") return "Cost unavailable";
   const micros = money.spentMicros.value;
-  const dollars = `$${(micros / 1_000_000).toFixed(micros % 10_000 === 0 ? 2 : 6).replace(/(\.\d{2,}?)0+$/u, "$1")}`;
-  return `${money.state === "partial" ? "at least " : ""}${dollars}${money.coverage.estimatedCalls > 0 ? " · estimated" : ""}${money.coverage.awaitingUsageCalls > 0 ? " · awaiting usage" : ""}${money.terminal && money.finality === "provisional" ? " · provisional" : ""}`;
+  if (micros === 0 && money.state === "current" && money.coverage.awaitingUsageCalls === 0 && taskMoneyValue(money.unpricedCalls) === 0) return "No spend yet";
+  if (micros === 0) return "Cost unavailable";
+  const dollars = micros < 10_000 ? "under $0.01" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(micros / 1_000_000);
+  if (money.terminal && money.finality === "final") return dollars;
+  return `${micros < 10_000 ? "" : "About "}${dollars}${money.terminal ? " (not yet confirmed)" : " so far"}`;
 }

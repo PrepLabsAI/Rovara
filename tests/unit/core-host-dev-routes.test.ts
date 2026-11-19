@@ -928,6 +928,35 @@ describe("read-only start-estimates", () => {
 });
 
 
+it("redacts every company figure in the member JSON while owners and admins keep the numeric quote", async () => {
+ const { app, companyOf, remember } = await world2();
+ const av = <T>(value: T) => ({ state: "available" as const, value });
+ const un = { state: "unavailable" as const, reason: "not_measured" as const };
+ const companyNumbers = [9100011, 8100013, 7100017, 6100019, 5100023, 4100029];
+ const context = { policyRevision: "p1", stages: {}, initialHoldCeilingMicros: 5100023, limits: [
+  { scope: "engine_day" as const, maximumMicros: av(9100011), availableMicros: av(8100013), heldMicros: av(7100017), resetAt: un },
+  { scope: "engine_task" as const, maximumMicros: av(6100019), availableMicros: av(5100023), heldMicros: av(4100029), resetAt: un },
+ ] };
+ const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, canReadProject: async () => true, startEstimates: async () => context }) });
+ const read = async (role: CompanyMembership["role"]) => {
+  const result = await routes.route(post("/v1/dev/projects/payments/start-estimates", { quoteVersion: 2 }), remember(FAKE_COMPANY, role));
+  expect(result?.statusCode).toBe(200);
+  return JSON.parse(result!.body) as unknown;
+ };
+ // Walk the entire serialized response: leaks in a hold, binding or future nested field must also fail.
+ const numbers = (value: unknown): number[] => typeof value === "number" ? [value] : value !== null && typeof value === "object" ? Object.values(value).flatMap(numbers) : [];
+ const member = await read("member");
+ const options = (member as { options: Array<{ firstBindingLimit: unknown }> }).options;
+ for (const q of options) expect(numbers(q.firstBindingLimit)).toEqual([]);
+ expect(member).toMatchObject({ options: [{ firstBindingLimit: { value: { bindingScope: "engine_task" } } }, { firstBindingLimit: { value: { bindingScope: "engine_task" } } }] });
+ expect(numbers(member).filter(n => companyNumbers.includes(n))).toEqual([]);
+ expect(member).toMatchObject({ options: [{ limits: [], initialHoldMicros: { state: "unavailable", reason: "restricted" }, firstBindingLimit: { state: "available", value: { scope: "RESTRICTED", blocked: false } } }, { limits: [], firstBindingLimit: { state: "available", value: { scope: "RESTRICTED", blocked: false } } }] });
+ for (const role of ["owner", "admin"] as const) {
+  const quote = await read(role);
+  expect(numbers(quote)).toEqual(expect.arrayContaining(companyNumbers));
+ }
+});
+
 describe("start-estimates history and refresh boundary", () => {
  it("labels five historical runs, preserves unknown optional increments, refreshes changed options and discloses blocking held room", async () => {
   const { world, app, companyOf, remember } = await world2();
