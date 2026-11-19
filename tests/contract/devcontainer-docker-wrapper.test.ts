@@ -1,26 +1,35 @@
 // Lane L4-NETG (DEC 254zzz77): the docker program a gateway-mode worker hands the devcontainer CLI (packages/worker/ec2/devcontainer-docker.sh). It is run here against a fake docker that records its arguments.
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
+const cleanup: string[] = [];
+afterEach(() => { for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true }); });
 const wrapper = readFileSync(new URL("../../packages/worker/ec2/devcontainer-docker.sh", import.meta.url), "utf8");
 
 function run(args: string[], environment: Record<string, string>): { status: number | null; stderr: string; seen: string[] | undefined; env: Record<string, string> | undefined } {
   const dir = mkdtempSync(join(tmpdir(), "dc-docker-"));
+  cleanup.push(dir);
   const fakeDocker = join(dir, "docker");
   const record = join(dir, "args.json");
-  writeFileSync(fakeDocker, `#!/bin/bash\nnode -e 'const fs=require("fs");fs.writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)));fs.writeFileSync(process.argv[1]+".env", JSON.stringify(process.env))' "${record}" "$@"\n`);
+  writeFileSync(fakeDocker, `#!/bin/bash\nif [[ "$1" == ps && "$2" == --all ]]; then echo container1; exit 0; fi\nnode -e 'const fs=require("fs");fs.writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)));fs.writeFileSync(process.argv[1]+".env", JSON.stringify(process.env))' "${record}" "$@"\n`);
   chmodSync(fakeDocker, 0o755);
   const script = join(dir, "wrapper.sh");
-  writeFileSync(script, wrapper.split("/usr/local/bin/docker").join(fakeDocker));
+  writeFileSync(script, wrapper.split("/usr/local/bin/docker").join(fakeDocker).split("/var/lib/rovara-egress/runs").join(join(dir, "runs")));
   chmodSync(script, 0o755);
   const ran = spawnSync("bash", [script, ...args], { encoding: "utf8", env: { PATH: process.env.PATH ?? "", ...environment } });
   return { status: ran.status, stderr: ran.stderr, seen: existsSync(record) ? (JSON.parse(readFileSync(record, "utf8")) as string[]) : undefined, env: existsSync(`${record}.env`) ? (JSON.parse(readFileSync(`${record}.env`, "utf8")) as Record<string, string>) : undefined };
 }
 const GATEWAY = { AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "172.28.250.2" };
-const WALL = ["--network", "rovara-snet", "--dns", "172.28.250.2", "--cap-drop", "NET_RAW"];
+function wall(seen: string[]): string[] {
+  const mount = seen[seen.indexOf("--mount") + 1]!;
+  expect(mount).toMatch(/^type=bind,src=.*\/devcontainer-[A-Za-z0-9]+\/resolv\.conf,dst=\/etc\/resolv\.conf,readonly$/u);
+  const source = mount.split(",src=")[1]!.split(",dst=")[0]!;
+  expect(readFileSync(source, "utf8")).toBe("nameserver 172.28.250.2\noptions ndots:0 timeout:3 attempts:1\n");
+  return ["--network", "rovara-snet", "--mount", mount, "--label", `rovara.egress.resolver=${source}`, "--cap-drop", "NET_RAW"];
+}
 
 describe("the devcontainer docker wrapper", () => {
   it("puts the internal network, the gateway as the only name server and no NET_RAW on `docker run` and `docker create`, in front of what the CLI asked for", () => {
@@ -28,9 +37,12 @@ describe("the devcontainer docker wrapper", () => {
     for (const verb of ["run", "create"]) {
       const result = run([verb, ...asked], GATEWAY);
       expect(result.status, result.stderr).toBe(0);
-      expect(result.seen).toEqual([verb, ...WALL, ...asked]);
+      expect(result.seen).toEqual([verb, ...wall(result.seen!), ...asked]);
     }
-    for (const verb of ["run", "create"]) expect(run(["container", verb, ...asked], GATEWAY).seen).toEqual([verb, ...WALL, ...asked]);
+    for (const verb of ["run", "create"]) {
+      const result = run(["container", verb, ...asked], GATEWAY);
+      expect(result.seen).toEqual([verb, ...wall(result.seen!), ...asked]);
+    }
   });
 
   it("passes every other command through untouched (pull, exec, inspect, rm, volume, container ls, image ls, start)", () => {
@@ -39,6 +51,44 @@ describe("the devcontainer docker wrapper", () => {
       expect(result.status, args.join(" ")).toBe(0);
       expect(result.seen, args.join(" ")).toEqual(args);
     }
+  });
+
+  it("keeps the exact resolver through start/restart, and removes it only with successful cleanup (also automatic --rm)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "dc-resolver-life-")); cleanup.push(dir);
+    const sourceFile = join(dir, "source");
+    const held = join(dir, "held");
+    const failRm = join(dir, "fail-rm");
+    const fake = join(dir, "docker");
+    writeFileSync(fake, `#!/bin/bash
+case "$1" in
+create|run) for arg; do case "$arg" in rovara.egress.resolver=*) printf '%s' "\${arg#*=}" >"${sourceFile}" ;; esac; done; [[ " $* " == *" --rm "* ]] || touch "${held}" ;;
+ps) [[ -f "${held}" ]] && echo container1; exit 0 ;;
+inspect) cat "${sourceFile}" ;;
+rm) [[ -f "${failRm}" ]] && exit 1; rm -f "${held}" ;;
+start|restart) [[ -f "${held}" ]] || exit 1 ;;
+esac
+exit 0
+`);
+    chmodSync(fake, 0o755);
+    const script = join(dir, "wrapper.sh");
+    writeFileSync(script, wrapper.split("/usr/local/bin/docker").join(fake).split("/var/lib/rovara-egress/runs").join(join(dir, "runs")));
+    const call = (...args: string[]) => spawnSync("bash", [script, ...args], { encoding: "utf8", env: { PATH: process.env.PATH, ...GATEWAY } });
+    expect(call("create", "image").status).toBe(0);
+    const source = readFileSync(sourceFile, "utf8");
+    const inode = statSync(source).ino;
+    for (const command of ["start", "restart"]) {
+      expect(call(command, "container1").status).toBe(0);
+      expect(statSync(source).ino).toBe(inode);
+      expect(readFileSync(source, "utf8")).toContain("nameserver 172.28.250.2\n");
+    }
+    writeFileSync(failRm, "");
+    expect(call("rm", "--force", "container1").status).toBe(1);
+    expect(existsSync(source)).toBe(true);
+    rmSync(failRm);
+    expect(call("container", "rm", "--force", "container1").status).toBe(0);
+    expect(existsSync(source)).toBe(false);
+    expect(call("run", "--rm", "image").status).toBe(0);
+    expect(existsSync(readFileSync(sourceFile, "utf8"))).toBe(false);
   });
 
   // Lane L4-NETG2 (DEC 254zzz90): the image build (Dockerfile RUN, features' install.sh) is walled the same way.

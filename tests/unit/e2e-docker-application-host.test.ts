@@ -232,8 +232,8 @@ describe("docker application host", () => {
       for (const args of builds) {
         const index = Number(args[args.indexOf("--name") + 1]!.split("-").at(-1));
         expect(args.filter((value, at) => args[at - 1] === "--network")).toEqual([index === 0 ? "none" : egress.network]);
-        if (index === 0) expect(args).not.toContain("--dns");
-        else expect(args.filter((value, at) => args[at - 1] === "--dns")).toEqual([egress.dns]);
+        expect(args).not.toContain("--dns");
+        if (index > 0) expect(args.filter((value, at) => args[at - 1] === "--mount").some((mount) => mount.includes("dst=/etc/resolv.conf,readonly"))).toBe(true);
         expect(args).toEqual(expect.arrayContaining(["--cap-drop=ALL", "--security-opt", "no-new-privileges"]));
         expect(args.join(" ")).not.toContain(`rovara-e2e-build-${s.runId}`);
       }

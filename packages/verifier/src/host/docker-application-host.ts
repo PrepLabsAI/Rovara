@@ -325,7 +325,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   /** What the recipe's build commands are put on: the gateway's network with the gateway as name server, or the run's own build bridge. */
   const buildDns = deps.buildDns ?? [];
   if (buildDns.length > 3 || !buildDns.every((address) => IPV4.test(address))) throw new Error("the build name servers are not valid");
-  const buildNetworkArgs = buildEgress === undefined ? ["--network", buildNetwork, ...buildDns.flatMap((address) => ["--dns", address])] : ["--network", buildEgress.network, "--dns", buildEgress.dns];
+  const buildNetworkArgs = buildEgress === undefined ? ["--network", buildNetwork, ...buildDns.flatMap((address) => ["--dns", address])] : ["--network", buildEgress.network, "--mount", `type=bind,src=${join(deps.runRoot, runId, "gateway-resolv.conf")},dst=/etc/resolv.conf,readonly`];
   const appName = `rovara-app-${runId}`;
   const executorName = `rovara-executor-${runId}`;
   const seedName = `rovara-seed-${runId}`;
@@ -335,7 +335,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const workspace = join(deps.runRoot, runId);
   // The mock fixtures (read-only to the mocks) and the mock ledgers (written by the mocks alone) sit apart from the executor's out directory, which the executor and the app never see.
   const dirs = { app: join(workspace, "app"), owned: join(workspace, "owned"), out: join(workspace, "out"), plan: join(workspace, "plan.json"),
-    mock: join(workspace, "mock"), mockOut: join(workspace, "mock-out"), resolv: join(workspace, "resolv.conf"), model: join(workspace, "model") };
+    mock: join(workspace, "mock"), mockOut: join(workspace, "mock-out"), resolv: join(workspace, "resolv.conf"), buildResolv: join(workspace, "gateway-resolv.conf"), model: join(workspace, "model") };
   /** Where the worker's proxy listens for this run; only the executor container gets it, at `E2E_MODEL_CHANNEL_SOCKET_PATH`. */
   const modelSocket = e2eModelSocketPath(deps.runRoot, runId);
   // A unix socket path is limited to 107 bytes on Linux and 103 on macOS. The worker's run root leaves this one 97, so a deeper root is a configuration error to say at once, not an
@@ -741,6 +741,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       if ((root.mode & 0o077) !== 0) throw new Error("the run root is open to group or others");
       await sweepStaleRovaraRuns(docker, STALE_RUN_SWEEP_AGE_MS, { now: deps.now, runRoot: deps.runRoot }).catch(() => 0);
       await mkdir(workspace, { mode: 0o700 });
+      // Docker 25 drops embedded-resolver forwarding for internal-only containers. Candidate build commands use the same run-owned, read-only direct resolver as apps do.
+      if (buildEgress !== undefined) await writeFile(dirs.buildResolv, `nameserver ${buildEgress.dns}\noptions ndots:0 timeout:3 attempts:1\n`, { flag: "wx", mode: 0o644 });
       await mkdir(dirs.owned, { mode: 0o755 }); await mkdir(dirs.out, { mode: 0o755 });
       await mkdir(dirs.mock, { mode: 0o755 }); await mkdir(dirs.mockOut, { mode: 0o755 });
       for (const mock of mockContainers) {

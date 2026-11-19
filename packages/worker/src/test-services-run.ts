@@ -607,13 +607,15 @@ export function environmentFor(sandbox: "working" | "check", resolved: readonly 
  * The working sandbox joins the run's network at .3 and leaves it at the end. the sealed round takes it off the network again for every official check round
  * (`withDetachedWorking`, with proof), so `enterCheckRound` has nothing to do.
  */
-function workingSandboxAttachment(docker: DockerCli, sandboxName: string): SandboxAttachment {
+function workingSandboxAttachment(docker: DockerCli, sandbox: TaskSandbox): SandboxAttachment {
+  const sandboxName = sandbox.name;
   let joined: { network: string; ip: string } | undefined;
   return {
-    async attach(view) {
+    async attach(view, helpers) {
       const connected = await docker.run(["network", "connect", "--ip", view.workingSandboxIp, view.name, sandboxName], { timeoutMs: DOCKER_CALL_TIMEOUT_MS }).catch(() => undefined);
       if (connected === undefined || connected.exitCode !== 0) throw agentXError("RUNTIME_UNAVAILABLE", SENTENCES.start_failed);
       joined = { network: view.name, ip: view.workingSandboxIp };
+      await sandbox.setServiceHosts(helpers);
     },
     async detach() {
       if (joined === undefined) return;
@@ -958,7 +960,7 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
 
       const startedAt = now();
       try {
-        workSession = await trackedStart(startInput(runId, working, files, { sandboxes: workingSandboxAttachment(docker, input.sandbox.name), ...(input.signal === undefined ? {} : { signal: input.signal }) }));
+        workSession = await trackedStart(startInput(runId, working, files, { sandboxes: workingSandboxAttachment(docker, input.sandbox), ...(input.signal === undefined ? {} : { signal: input.signal }) }));
       } catch (error) {
         const failure = failureOf(error);
         for (const id of ids) if (!failure.failures.has(id)) failures.set(id, failure.reason === "not_healthy" ? "not_healthy" : "start_failed");
