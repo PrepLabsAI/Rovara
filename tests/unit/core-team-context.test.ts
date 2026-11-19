@@ -174,17 +174,17 @@ it("keeps configured MCP and connection tools refused with fixed words", async (
 it("does not advertise Team search when the company's record is off", async () => {
   const { root, a } = await setup({ teamOff: true });
   const runtime = await root.app.runtimeFor(A);
-  expect(await runtime.flow.deps.contextSources?.stageHasSources({ project: "payments" }, "PLAN") ?? false).toBe(false);
+  expect(runtime.flow.deps.contextSources).toBeUndefined();
   const answer = await root.callback({ method: "GET", path, headers: a.headers });
   expect(ContextToolCatalogSchema.parse(JSON.parse(answer!.body)).searchTeamKnowledge).toBe(false);
   expect((await root.callback(a.request()))?.body).not.toContain("only-alpha");
 });
 
-it("advertises only eligible stages for a company with its Team record", async () => {
+it("advertises no stage at all on the hosted core while the stopgap holds (hotfix 0.5.33), for a company with its Team record or without", async () => {
   const { root, b } = await setup({ teamCompany: A });
   const runtime = await root.app.runtimeFor(A);
-  for (const stage of ["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "REVIEW"]) expect(await runtime.flow.deps.contextSources?.stageHasSources({ project: "payments" }, stage)).toBe(true);
-  for (const stage of ["IMPLEMENT", "invalid"]) expect(await runtime.flow.deps.contextSources?.stageHasSources({ project: "payments" }, stage)).toBe(false);
+  // The Team record is built, but no flow-level source list is wired, so no stage asks the worker for it.
+  expect(runtime.flow.deps.contextSources).toBeUndefined();
   expect((await root.app.runtimeFor(B)).flow.deps.contextSources).toBeUndefined();
   expect((await root.callback({ method: "GET", path, headers: b.headers }))?.body)
     .toBe(JSON.stringify({ sources: [], tools: [], searchTeamKnowledge: false, unavailable: [], disabled: [] }));
