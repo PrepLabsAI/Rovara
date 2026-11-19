@@ -1,5 +1,5 @@
 // DEC 254zzz80 (R2-F1): a NAMED company's Slack channel bindings live only in its own partition, `ORG#<company>#SLACK_BINDING#<team>` / `CHANNEL#<channel>` (the staging shape:
-// org_jckf…'s binding of T0BSHLLUGBD/C0CCBS6BBU3 to demo-tasklog, and SLACK_TEAM#T0BSHLLUGBD/BINDING naming that company). The Slack Lambda reads the binding there, for the install
+// org_demo…'s binding of T0BSHLLUGBD/C0DEMOCHAN1 to demo-tasklog, and SLACK_TEAM#T0BSHLLUGBD/BINDING naming that company). The Slack Lambda reads the binding there, for the install
 // team (its legacy view knows the team's company: installTeamCompany) and for a company-mode team (the verified request's company). The built-in company, and company mode off,
 // read the legacy key exactly as before. A NAMED company's typed @mention in an unbound channel is answered once in its thread, never dropped in silence.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,11 +11,11 @@ import {
   SLACK_CHANNEL_NOT_BOUND_NOTICE, awsSlackRouterDependencies, createSlackMentionRouter, type SlackMention, type SlackRouterTransport,
 } from "../../packages/broker/src/aws/slack-ingress.js";
 
-const A = "org_jckf8av6ri11rszcdjsa" as OrgId; // the staging company
+const A = "org_demoaaaaaaaaaaaaaaaa" as OrgId; // the staging company
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
 const TEAM = "T0BSHLLUGBD";
 const OTHER_TEAM = "T0OTHERTEAM";
-const CHANNEL = "C0CCBS6BBU3";
+const CHANNEL = "C0DEMOCHAN1";
 const UNBOUND = "C0UNBOUND00";
 const STATE = "state";
 

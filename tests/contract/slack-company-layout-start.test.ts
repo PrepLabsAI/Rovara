@@ -1,6 +1,6 @@
 // DEC 254zzz80 (R2-F1): the broker's Slack start (startSlackWorkflow) reads the channel's binding in the team's company's layout. A NAMED company's binding is only its own row,
 // `ORG#<company>#SLACK_BINDING#<team>` / `CHANNEL#<channel>`; a leftover legacy row binds nothing for it. The install team whose operator binding names a NAMED company (staging:
-// T0BSHLLUGBD -> org_jckf…) starts as that company: its linked person, its own binding, the core. The built-in company keeps the single-workspace start exactly.
+// T0BSHLLUGBD -> org_demo…) starts as that company: its linked person, its own binding, the core. The built-in company keeps the single-workspace start exactly.
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
@@ -11,7 +11,7 @@ import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, ensureWorkspace, loadSlackBroker } from "../support/slack-broker.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 
-const A = "org_jckf8av6ri11rszcdjsa"; // the staging company
+const A = "org_demoaaaaaaaaaaaaaaaa"; // the staging company
 const B = "org_bbbbbbbbbbbbbbbbbbbb";
 const OTHER_TEAM = "T0OTHER0001";
 const USER = "U0SHARED00";

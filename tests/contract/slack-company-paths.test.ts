@@ -96,6 +96,14 @@ import { bindSlackChannelInCompany, createDeveloperTaskBroker, grantProject } fr
 import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/links.js";
 import { createSlackChannelEventsHandler } from "../../packages/broker/src/aws/slack-adapter.js";
 
+/**
+ * DEC 254zzz98 (delta review H1): make the workflow's legacy revision of "payments" company A's own (pre-R2-F1 company data, stamped A). Unstamped, it is the built-in company's
+ * same-named project, which A's Slack thread is refused before anything else (slack-company-layout-start.test.ts covers that refusal); tests of a later check stamp it.
+ */
+function legacyRevisionIsA(h: { db: { find(p: (item: Record<string, unknown>) => boolean): Array<Record<string, unknown>>; set(item: Record<string, unknown>): void } }): void {
+  for (const row of h.db.find((item) => item.pk === "PROJECT#payments" && String(item.sk).startsWith("REV#"))) h.db.set({ ...row, companyId: A });
+}
+
 async function brokerWorld(installTeam = OTHER) {
   const h = await createDeveloperTaskBroker({ channelMembers: async (r) => ({ ok: true, memberOf: r.channelIds }) });
   const currentThread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: TS };
@@ -141,7 +149,7 @@ describe("company broker authority on execution", () => {
     expect(foreign).toEqual(missing); expect(foreign.statusCode).not.toBe(200);
   });
   it("service model writer refuses with the fixed web sentence", async () => {
-    const h = await brokerWorld();
+    const h = await brokerWorld(); legacyRevisionIsA(h);
     const result = await call(h.handler, { method: "PUT", path: "/v1/service/project/model", service: { principal: orchestratorPrincipal,
       thread: `${SLACK_TEAM}/${SLACK_CHANNEL}/${TS}`, slackUser: USER }, body: { provider: "amazon-bedrock", modelId: "private-model" } });
     expect(JSON.stringify(result.body)).toContain(WEB);
@@ -272,7 +280,7 @@ describe("company execution seam controls", () => {
     expect(response.body).toContain(WEB); expect(h.db.find(() => true)).toEqual(before);
   });
   it("service rechecks the company of an existing shared task", async () => {
-    const h = await brokerWorld(); h.db.set({ ...h.db.get(`DEVTASK#${h.taskId}`, "META")!, companyId: B });
+    const h = await brokerWorld(); legacyRevisionIsA(h); h.db.set({ ...h.db.get(`DEVTASK#${h.taskId}`, "META")!, companyId: B });
     const response = await call(h.handler, { method: "GET", path: "/v1/service/project/models", service: { principal: orchestratorPrincipal, thread: `${SLACK_TEAM}/${SLACK_CHANNEL}/${TS}`, slackUser: USER } });
     expect(JSON.stringify(response.body)).toContain("no task here that you can see");
   });

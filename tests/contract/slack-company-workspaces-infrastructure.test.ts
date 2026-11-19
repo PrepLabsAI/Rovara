@@ -105,9 +105,9 @@ describe("Slack company mode's switch (18a)", () => {
     // What the pattern lets in, as DynamoDB's LeadingKeys StringLike matches it (? one character, * any run): the staging company's binding partition and no other family.
     const glob = (pattern: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/gu, "\\$&").replaceAll("*", ".*").replaceAll("?", ".")}$`, "u");
     const allowed = (key: string) => glob("ORG#org_????????????????????#SLACK_BINDING#*").test(key);
-    expect(allowed("ORG#org_jckf8av6ri11rszcdjsa#SLACK_BINDING#T0BSHLLUGBD")).toBe(true);
-    for (const key of ["SLACK_BINDING#T0BSHLLUGBD", "ORG#org_jckf8av6ri11rszcdjsa#PROJECT#demo-tasklog", "ORG#org_jckf8av6ri11rszcdjsa#MEMBER#e46d", "ORG#org_short#SLACK_BINDING#T0BSHLLUGBD",
-      "ORG#org_jckf8av6ri11rszcdjsa#CHANNEL_LINK#slack/T0BSHLLUGBD", "ORG#org_jckf8av6ri11rszcdjsaX#SLACK_BINDING#T0BSHLLUGBD", "SLACK_TEAM#T0BSHLLUGBD"]) expect(allowed(key), key).toBe(false);
+    expect(allowed("ORG#org_demoaaaaaaaaaaaaaaaa#SLACK_BINDING#T0BSHLLUGBD")).toBe(true);
+    for (const key of ["SLACK_BINDING#T0BSHLLUGBD", "ORG#org_demoaaaaaaaaaaaaaaaa#PROJECT#demo-tasklog", "ORG#org_demoaaaaaaaaaaaaaaaa#MEMBER#e46d", "ORG#org_short#SLACK_BINDING#T0BSHLLUGBD",
+      "ORG#org_demoaaaaaaaaaaaaaaaa#CHANNEL_LINK#slack/T0BSHLLUGBD", "ORG#org_demoaaaaaaaaaaaaaaaaX#SLACK_BINDING#T0BSHLLUGBD", "SLACK_TEAM#T0BSHLLUGBD"]) expect(allowed(key), key).toBe(false);
     // No other consumer gets it, and the legacy deployment has none of it.
     const others = Object.entries(named.Resources).filter(([id, r]) => r.Type === "AWS::IAM::Policy" && !id.startsWith("SlackCompanyModeSlackIngressCompanyBindings") && JSON.stringify(r.Properties).includes("#SLACK_BINDING#"));
     expect(others.map(([id]) => id)).toEqual([]);
@@ -126,8 +126,8 @@ describe("Slack company mode's switch (18a)", () => {
     }
     const glob = (pattern: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/gu, "\\$&").replaceAll("*", ".*").replaceAll("?", ".")}$`, "u");
     const allowed = (key: string) => glob("ORG#org_????????????????????#PROJECT#*").test(key);
-    expect(allowed("ORG#org_jckf8av6ri11rszcdjsa#PROJECT#demo-tasklog")).toBe(true);
-    for (const key of ["PROJECT#demo-tasklog", "ORG#org_jckf8av6ri11rszcdjsa#PROJECT_CATALOG", "ORG#org_jckf8av6ri11rszcdjsa#PROJECT_MEMBERS#demo-tasklog", "ORG#org_jckf8av6ri11rszcdjsa#MEMBER#e46d",
+    expect(allowed("ORG#org_demoaaaaaaaaaaaaaaaa#PROJECT#demo-tasklog")).toBe(true);
+    for (const key of ["PROJECT#demo-tasklog", "ORG#org_demoaaaaaaaaaaaaaaaa#PROJECT_CATALOG", "ORG#org_demoaaaaaaaaaaaaaaaa#PROJECT_MEMBERS#demo-tasklog", "ORG#org_demoaaaaaaaaaaaaaaaa#MEMBER#e46d",
       "ORG#org_short#PROJECT#demo-tasklog"]) expect(allowed(key), key).toBe(false);
     expect(JSON.stringify(legacy)).not.toContain("ReadCompanyProjectRevisions");
   });

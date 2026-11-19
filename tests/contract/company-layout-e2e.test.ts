@@ -1,5 +1,5 @@
 // R2-F1 acceptance (owner DEC 254zzz80, 2026-11-18): the whole customer journey on the EXACT staging shape, end to end.
-// Staging: company org_jckf8av6ri11rszcdjsa ("Rovara Demo"), its owner e46d… signed in through the install's shared OIDC method (session with companyId +
+// Staging: company org_demoaaaaaaaaaaaaaaaa ("Rovara Demo"), its owner a1b2… signed in through the install's shared OIDC method (session with companyId +
 // installMethod), 15 `ORG#<c>#MEMBER#<owner>` / `PROJECT#<p>` grants (role developer, projectRole maintainer) and 15 projects in the company layout
 // (`ORG#<c>#PROJECT#<p>` META + REV rows, `ORG#<c>#PROJECT_CATALOG` rows), the Slack binding at `ORG#<c>#SLACK_BINDING#<team>` / `CHANNEL#<ch>`, and NO legacy
 // `MEMBER#` / `PROJECT#` / `PROJECT_MEMBERS#` / `SLACK_BINDING#` rows at all. Company sign-in (Code's company layer) is on.
@@ -30,12 +30,12 @@ import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 const NOW = Date.parse("2026-11-18T19:56:52.000Z");
 const TIME = "2026-10-26T21:34:55.126Z";
 /** Staging's company, and a second company holding a project of the same name. */
-const DEMO = "org_jckf8av6ri11rszcdjsa";
+const DEMO = "org_demoaaaaaaaaaaaaaaaa";
 const BETA = COMPANY_B.orgId;
-const OWNER = "e46d0c0a".padEnd(64, "e"), ADMIN = "a".repeat(64), MEMBER = "d".repeat(64), BOB = "b".repeat(64), LEGACY = "c".repeat(64);
+const OWNER = "a1b2c3d4".padEnd(64, "e"), ADMIN = "a".repeat(64), MEMBER = "d".repeat(64), BOB = "b".repeat(64), LEGACY = "c".repeat(64);
 const PEOPLE = [[OWNER, "Owner"], [ADMIN, "Admin"], [MEMBER, "Member"], [BOB, "Bob"], [LEGACY, "Legacy"]] as const;
 const SECRET = ["web", "app", "secret", "for", "tests"].join("-");
-const TEAM = "T0BSHLLUGBD", CHANNEL = "C0CCBS6BBU3";
+const TEAM = "T0BSHLLUGBD", CHANNEL = "C0DEMOCHAN1";
 const LEGACY_TEAM = "T0LEGACY01", LEGACY_CHANNEL = "C0LEGACY01";
 /** The 15 projects of staging's company (demo-tasklog has 4 revisions there). */
 const DEMO_PROJECTS = [
@@ -288,7 +288,7 @@ describe("R2-F1 e2e: the staging shape, company sign-in on, the whole journey", 
     const bob = await w.access(BOB);
     expect(bob.body).toMatchObject({ companyId: BETA });
     expect(bob.body.projects).toEqual([{ name: "demo-tasklog", access: "granted" }]);
-    expect(JSON.stringify(bob.body)).not.toMatch(/Rovara Demo|org_jckf|demo-shop/);
+    expect(JSON.stringify(bob.body)).not.toMatch(/Rovara Demo|org_demo|demo-shop/);
     // Bob reads BETA's demo-tasklog (revision 1, the canary's repository), never DEMO's revision 4.
     const read = await w.read(BOB, "demo-tasklog");
     expect(read.body).toMatchObject({ latestRevision: 1, repositories: [expect.objectContaining({ fullName: `${BETA_CANARY}/rovara-demo-tasklog`, defaultBranch: "branch-r1" })] });
