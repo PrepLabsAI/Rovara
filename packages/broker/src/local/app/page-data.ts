@@ -134,11 +134,11 @@ async function costAndModelsOfPlanPage(deps: PageDataDeps, task: TaskRecord): Pr
   const lines: string[] = [];
   const estimate = task.runEstimate;
   if (estimate !== undefined) {
-    lines.push(`Expected cost: about ${formatRunLimitUsd(estimate.lowUsd)} to ${formatRunLimitUsd(estimate.highUsd)} (${estimate.basis === "history" ? `from ${String(estimate.samples)} earlier runs of this kind` : "the default for this kind of task, until there are enough earlier runs"}). Run limit: ${formatRunLimitUsd(estimate.runLimitUsd)}.`);
+    lines.push(`Expected cost: about ${formatRunLimitUsd(estimate.lowUsd)} to ${formatRunLimitUsd(estimate.highUsd)} (${estimate.basis === "history" ? `from ${String(estimate.samples)} earlier runs of this kind` : "the default for this kind of task, until there are enough earlier runs"}). Task limit: ${formatRunLimitUsd(estimate.runLimitUsd)}.`);
   }
   if (deps.cost !== undefined) {
     const money = await readTaskMoney({ store: deps.flow.store, companyId: deps.companyId, task, revealPayer: true });
-    lines.push(`Spent so far: ${taskMoneyWords(money)}.`);
+    lines.push(`${taskMoneyWords(money)}.`);
   }
   const newest = new Map<string, string>();
   for (const operation of await workspaceOperations(deps.flow, task.workspaceId).catch(() => [])) {
