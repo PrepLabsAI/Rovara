@@ -19,12 +19,13 @@ type Body = Record<string, any>;
 type ErrorBody = { error: { code: string; message: string } };
 
 /** The fake host, counting the merges sent to it (and able to refuse them). */
-function countingHost(model: FakeHostModel, calls: Array<{ revision: string }>, refuse: { value: boolean; from?: number }): CodeHost {
+function countingHost(model: FakeHostModel, calls: Array<{ revision: string }>, refuse: { value: boolean; from?: number; lost?: boolean }): CodeHost {
   const fake = new FakeCodeHost(model);
   return Object.create(fake, {
     kind: { value: "github" },
     merge: { value: async (...args: Parameters<NonNullable<CodeHost["merge"]>>) => {
       calls.push({ revision: args[1].revision });
+      if (refuse.lost === true) throw new Error("socket hang up ghs_secret");
       if (refuse.value || (refuse.from !== undefined && calls.length >= refuse.from)) return { outcome: "refused" as const, reason: "forbidden" as const, hostMessage: "Resource not accessible by integration ghs_secret" };
       return fake.merge(...args);
     } },
@@ -35,7 +36,8 @@ interface Options { minApprovers?: number; mergeWait?: string; changeAfterPrepar
 
 async function hosted(options: Options = {}) {
   const merges: Array<{ revision: string }> = [];
-  const refuse: { value: boolean; from?: number } = { value: false };
+  const refuse: { value: boolean; from?: number; lost?: boolean } = { value: false };
+  const grantAsks: Array<[string, string, string]> = [];
   const world: MergeWorld = await mergeWorld({ allowSelfApproval: options.allowSelfApproval ?? true, codeHost: (model) => countingHost(model, merges, refuse), ...(options.pullRequests === undefined ? {} : { pullRequests: options.pullRequests }) });
   await world.seedTracking();
   // The flow reads the task as the hosted core keeps it: its company and its own person.
@@ -52,7 +54,8 @@ async function hosted(options: Options = {}) {
     },
   } as never;
   const wiring: HostedMergeWiring = {
-    projectGrantRole: async (personId, project) => (project !== "web" ? undefined : personId === MAINTAINER ? "administrator" : personId === DEVELOPER ? "developer" : undefined),
+    // The company-layout reader: a grant is read for the membership's company only (DEC 254zzz98).
+    projectGrantRole: async (personId, project, companyId) => { grantAsks.push([personId, project, companyId]); return project !== "web" || companyId !== ORG ? undefined : personId === MAINTAINER ? "administrator" : personId === DEVELOPER ? "developer" : undefined; },
     merge: (given) => {
       auditsGiven.push(given);
       if (options.mergeThrows === true) throw new Error("no ci mode");
@@ -85,7 +88,7 @@ async function hosted(options: Options = {}) {
   // What the page shows and sends back with a press (DEC 254zzz104: required): the heads tracking holds and the task's risk level.
   const shown = { expectedHeads: world.prs.map((pr) => ({ repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head })), risk: riskOfTask((await world.task()).workflow, await readMergeTracking(world.store, TASK_ID, ORG)).level };
   const press = (requestId: string = randomUUID()) => ({ requestId, ...shown });
-  return { world, call, merges, refuse, audited, woken, audit, auditsGiven, press, shown };
+  return { world, call, merges, refuse, audited, woken, audit, auditsGiven, press, shown, grantAsks };
 }
 const lockOf = (world: MergeWorld) => world.store.get({ pk: `ORG#${ORG}#HOSTED_MERGE`, sk: `${TASK_ID}#LOCK` });
 
@@ -117,6 +120,12 @@ describe("hosted Merge button: who may merge", () => {
       expect(h.auditsGiven).toEqual([h.audit]);
     });
   }
+
+  it("the project-admin grant is read for the membership's own company (the company-layout reader)", async () => {
+    const h = await hosted();
+    expect((await h.call("POST", h.press(), { person: MAINTAINER })).status).toBe(200);
+    expect(h.grantAsks).toEqual([[MAINTAINER, "web", ORG]]);
+  });
 
   it("a developer who may read the task is refused in fixed words, and nothing is sent", async () => {
     const h = await hosted();
@@ -286,6 +295,17 @@ describe("hosted Merge button: every merge-core gate holds (H1)", () => {
     expect((answer.body as ErrorBody).error.message).toContain(" merged, but ");
     expect(h.merges).toHaveLength(2);
     expect(h.woken).toEqual([TASK_ID]);
+  });
+
+  it("a merge whose answer was lost says the outcome is not confirmed yet (never 'nothing was merged') and wakes tracking", async () => {
+    const h = await hosted();
+    h.refuse.lost = true;
+    const answer = await h.call("POST", h.press());
+    expect(answer).toEqual({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE", message: HOSTED_MERGE_WORDS.outcomeUnknown } } });
+    expect(JSON.stringify(answer)).not.toContain("ghs_");
+    expect(h.merges).toHaveLength(1);
+    expect(h.woken).toEqual([TASK_ID]);
+    expect(await lockOf(h.world)).toBeUndefined();
   });
 
   it("a refusal from GitHub is told in the core's words and the lock is given back", async () => {
