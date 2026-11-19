@@ -13073,7 +13073,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     },
     "build": {
       "commands": [
-        "npm run release:prod -- --region \\"$AWS_REGION\\" --reuse-unchanged-worker --require-existing-foundation"
+        "if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; npm run release:prod -- --region \\"$AWS_REGION\\" --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS"
       ]
     }
   },

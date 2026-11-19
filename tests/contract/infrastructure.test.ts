@@ -480,9 +480,13 @@ describe("production release pipeline", () => {
     }>;
     const buildSpec = project?.Properties.Source.BuildSpec ?? "";
     expect(buildSpec).toContain("npm run release:prod");
+    // #1145: --skip-checks only behind the CI proof; without it every check runs.
+    expect(buildSpec).toContain("if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; ");
+    expect(buildSpec).toContain("--require-existing-foundation $RELEASE_CHECKS");
+    expect(buildSpec.match(/--skip-checks/gu)).toHaveLength(1);
     expect(buildSpec).toContain("--reuse-unchanged-worker");
     expect(buildSpec).toContain("--require-existing-foundation");
-    expect(buildSpec).not.toMatch(/--skip-checks|--allow-dirty/);
+    expect(buildSpec).not.toMatch(/--allow-dirty/);
     expect(buildSpec).toContain("sha256sum -c");
     expect(buildSpec).toContain("awscli-exe-linux-aarch64-${AWS_CLI_VERSION}.zip");
     // The port guard's tests run the real secret scan: the release machine has the same pinned gitleaks as CI, checked before use.
