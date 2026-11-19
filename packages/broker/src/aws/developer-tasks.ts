@@ -282,8 +282,6 @@ export interface DeveloperTaskRouteDependencies extends Pick<TaskPeopleEffectsDe
   actions: DeveloperTaskActions;
   /** Recollects every linked PR from GitHub; required before feedback decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;
-  /** Set only by server wiring when the install has no company layer; never derived from a task or request. */
-  implicitCompanyOnly?: boolean;
   /** The company this call is for; absent is the implicit company. A row of another company reads as missing (developer/company-rows.ts). */
   companyId?: string;
   /** Lane W: the merge core wired for this deployment's tasks (lane E2); absent, `POST .../merge` answers a fixed "not set up". */
@@ -359,7 +357,7 @@ async function e2ePublicationContext(deps: DeveloperTaskRouteDependencies, calle
     || subject.projectName !== task.project || subject.projectRevision !== task.startingRevision) return unknown("current_task_scope_unavailable");
   const candidate = CandidateManifestSchema.safeParse(task.workflow.candidate);
   if (!candidate.success) return unknown("current_candidate_unavailable");
-  const project = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision), deps.implicitCompanyOnly === true);
+  const project = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision));
   if (project === undefined || project.definition.revision !== subject.projectRevision) return unknown("registered_project_revision_unavailable");
   const candidateRepositories = candidate.data.repositories.filter((item) => item.commitSha === subject.commitSha && item.treeSha === subject.treeSha);
   if (candidateRepositories.length !== 1) return unknown("candidate_commit_tree_or_base_mismatch");
@@ -1186,7 +1184,7 @@ function approvedFix(proposal: { summary: string; fileChanges: Array<{ repositor
 
 /** The task's repository folders, from the project revision it started from: where a corrected check may run. */
 async function taskRepositoryPaths(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<string[]> {
-  const project = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision), deps.implicitCompanyOnly === true);
+  const project = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision));
   if (project === undefined) throw agentXError("CONFIG_INVALID", "this task's project revision is no longer registered; ask an admin");
   return project.definition.repositories.map(repository => repository.path);
 }
@@ -2067,7 +2065,7 @@ export async function decideTaskWorkflow(
   let workBreakdownDigest: string | undefined;
   if (planGraph !== undefined && request.decision === "APPROVE") {
     if (prior === undefined && deps.workflowDependenciesEnabled !== true) throw agentXError("CONFIG_INVALID", "ordered work plans are saved but this broker is not enabled to start them");
-    const pinnedProject = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision), deps.implicitCompanyOnly === true);
+    const pinnedProject = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision));
     if (pinnedProject === undefined || pinnedProject.definition.repositories.length !== 1) {
       throw agentXError("CONFIG_INVALID", "ordered work is available only when this task is pinned to one registered repository");
     }
@@ -2120,7 +2118,7 @@ export async function decideTaskWorkflow(
     ? boundDecisionRequest : { ...boundDecisionRequest, includedCommentIds: included.map((comment) => comment.commentId) };
   let next = transition(decisionRequest, decisions, workBreakdownDigest);
   if (request.decision === "APPROVE" && documentType === "plan" && !(loaded?.format === "structured" && loaded.plan.e2e !== undefined)) {
-    const pinnedProject = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision), deps.implicitCompanyOnly === true);
+    const pinnedProject = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision));
     if (pinnedProject === undefined) throw agentXError("CONFIG_INVALID", WORKFLOW_ACTIONABLE_REFUSALS.pinnedProjectUnavailable);
     if (pinnedProject.definition.e2e !== undefined && E2EPolicySchema.parse(pinnedProject.definition.e2e).baselineScenarioIds.length > 0) {
       throw agentXError("CONFIG_INVALID", WORKFLOW_ACTIONABLE_REFUSALS.baselineIntentMissing);
@@ -2133,7 +2131,7 @@ export async function decideTaskWorkflow(
   /** M1.3 Task 3.7b: whether the project wants the baseline round, so the coding run is asked to export the unchanged code. */
   let baselineSource = false;
   if (request.decision === "APPROVE" && documentType === "plan" && loaded?.format === "structured" && loaded.plan.e2e !== undefined) {
-    const pinnedProject = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision), deps.implicitCompanyOnly === true);
+    const pinnedProject = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision));
     if (pinnedProject?.definition.e2e === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the approved feature E2E intent has no pinned project policy");
     const intent = loaded.plan.e2e;
     const policy = E2EPolicySchema.parse(pinnedProject.definition.e2e);
@@ -4578,7 +4576,7 @@ function workflowPublicationMaterialDigest(pinned: LoadedPublicationProject, lat
 }
 
 async function workflowPublicationAuthority(
-  deps: Pick<DeveloperTaskRouteDependencies, "implicitCompanyOnly" | "actions" | "tableName">,
+  deps: Pick<DeveloperTaskRouteDependencies, "actions" | "tableName">,
   task: DeveloperTaskRecord,
   workflow: WorkflowSnapshot,
   approvedPlan: LoadedDocument | undefined,
@@ -4591,8 +4589,8 @@ async function workflowPublicationAuthority(
   if (ownerDecision === undefined || ownerDecision.artifactDigest === undefined || ownerDecision.actorRole === "AGENTX") return undefined;
   if (task.startingRevision === undefined) return undefined;
   const [pinned, latest] = await Promise.all([
-    readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision), deps.implicitCompanyOnly === true),
-    readTaskLegacyProject(task, () => deps.actions.latestProject(task.project), deps.implicitCompanyOnly === true),
+    readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision)),
+    readTaskLegacyProject(task, () => deps.actions.latestProject(task.project)),
   ]);
   if (pinned === undefined || latest === undefined || pinned.definition.name !== task.project || latest.definition.name !== task.project
     || pinned.definition.revision !== task.startingRevision || latest.definition.revision < pinned.definition.revision) return undefined;
@@ -4641,7 +4639,7 @@ async function workflowPublicationAuthority(
 
 /** Recollects current task/project material and policy before a worker receives workflow push credentials. */
 export async function currentWorkflowPublicationAuthorityForTask(
-  deps: Pick<DeveloperTaskRouteDependencies, "implicitCompanyOnly" | "actions" | "tableName" | "workflowE2EPresentation" | "workflowE2EPublicationChecks">,
+  deps: Pick<DeveloperTaskRouteDependencies, "actions" | "tableName" | "workflowE2EPresentation" | "workflowE2EPublicationChecks">,
   task: DeveloperTaskRecord,
 ): Promise<WorkflowPublicationAuthority | undefined> {
   const workflow = task.workflow;
@@ -4661,7 +4659,7 @@ export async function currentWorkflowPublicationAuthorityForTask(
 
 /** Compatibility projection for callers that only need the selected protocol. */
 export async function currentWorkflowPublicationModeForTask(
-  deps: Pick<DeveloperTaskRouteDependencies, "implicitCompanyOnly" | "actions" | "tableName" | "workflowE2EPresentation" | "workflowE2EPublicationChecks">,
+  deps: Pick<DeveloperTaskRouteDependencies, "actions" | "tableName" | "workflowE2EPresentation" | "workflowE2EPublicationChecks">,
   task: DeveloperTaskRecord,
 ): Promise<"COMMITTED_HEAD" | "CHECKED_TREE" | undefined> {
   return (await currentWorkflowPublicationAuthorityForTask(deps, task))?.mode;
@@ -5655,7 +5653,7 @@ async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: Dev
   if (repository === undefined) {
     // The revision the workspace was prepared from, which the publication pushes from: a
     // repository a newer revision added is not in this workspace.
-    const pinned = await readTaskLegacyProject(task, () => deps.actions.projectRevision(workspace.projectName, workspace.projectRevision), deps.implicitCompanyOnly === true);
+    const pinned = await readTaskLegacyProject(task, () => deps.actions.projectRevision(workspace.projectName, workspace.projectRevision));
     if (pinned === undefined) throw agentXError("CONFIG_INVALID", "this task's project revision is no longer registered; ask an admin");
     const repositories = pinned.definition.repositories.map((entry) => entry.name);
     if (repositories.length > 1) throw agentXError("CONFIG_INVALID", `this project has several repositories; name one of: ${repositories.join(", ")}`);
@@ -6240,7 +6238,7 @@ async function nextShare(
   request: { shareMode?: "view" | "continue" | undefined; channel?: string | undefined },
   now: string,
 ): Promise<TaskShare | "unchanged"> {
-  const project = await readTaskLegacyProject(task, () => deps.actions.latestProject(task.project), deps.implicitCompanyOnly === true);
+  const project = await readTaskLegacyProject(task, () => deps.actions.latestProject(task.project));
   if (project === undefined) throw agentXError("CONFIG_INVALID", "this task's project is no longer registered; ask an admin");
   const policy = developerTaskPolicy(project.definition);
   if (task.share === undefined) {
@@ -6276,7 +6274,7 @@ function withMode(current: TaskShare, mode: { mode: "view" | "continue"; modeRea
 
 /** An AgentX admin who changed a task's share mode (C25), named on the audit record. */
 export interface ShareAdmin { issuer: string; subject: string; displayName?: string }
-export type ShareModeDependencies = Pick<DeveloperTaskRouteDependencies, "implicitCompanyOnly" | "documentClient" | "tableName" | "actions" | "now" | "log">;
+export type ShareModeDependencies = Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName" | "actions" | "now" | "log">;
 
 /**
  * C1, C5, C25: one share change's items: the task's whole share map under shareVersion, the index
@@ -6402,7 +6400,7 @@ export async function adminShareMode(deps: ShareModeDependencies, admin: ShareAd
   for (let attempt = 0; attempt < SHARE_ATTEMPTS; attempt += 1) {
     if (current.closedAt !== undefined) throw agentXError("CONFIG_INVALID", "this task is closed, so its share mode can no longer change");
     if (current.share === undefined) throw agentXError("CONFIG_INVALID", "this task is private; only its developer can share it");
-    const project = await readTaskLegacyProject(current, () => deps.actions.latestProject(current.project), deps.implicitCompanyOnly === true);
+    const project = await readTaskLegacyProject(current, () => deps.actions.latestProject(current.project));
     if (project === undefined) throw agentXError("CONFIG_INVALID", "this task's project is no longer registered; register it again first");
     const share = withMode(current.share, decideMode(developerTaskPolicy(project.definition), request.shareMode));
     if (share === "unchanged") return answer();

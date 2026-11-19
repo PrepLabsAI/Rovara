@@ -1307,7 +1307,7 @@ describe("native developer task workflow", () => {
     const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: WorkflowSnapshot };
     const workflow = record.workflow;
     // This fixture calls the route directly on an install with no company layer.
-    const routeDeps = { implicitCompanyOnly: true, documentClient: harness.db, tableName: "state", actions: harness.actions, now: () => Date.now() };
+    const routeDeps = { documentClient: harness.db, tableName: "state", actions: harness.actions, now: () => Date.now() };
     const expected = { workflowRevision: workflow.revision, candidateDigest: candidate.digest };
     const origin = { taskPageUrl: taskPageUrl(DEV_ISSUER, taskId), ownerAccess: { peopleRevision: 1 } };
     await expect(startTaskWorkflowPublicationFromSystem(routeDeps as never, taskId, expected, origin)).resolves.toBe("DUPLICATE");
@@ -4717,7 +4717,7 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
       return commentId;
     };
     const ids = [comment(1), comment(2)];
-    const deps = { implicitCompanyOnly: true, documentClient: harness.db, tableName: "state", actions: harness.actions, checkAccess: async () => ({ revision: 1, policy: {} as never, access: "channel" as const, channelIds: [SLACK_CHANNEL] }),
+    const deps = { documentClient: harness.db, tableName: "state", actions: harness.actions, checkAccess: async () => ({ revision: 1, policy: {} as never, access: "channel" as const, channelIds: [SLACK_CHANNEL] }),
       projectChannelIds: async () => [SLACK_CHANNEL], now: () => Date.now(), log: () => undefined };
     const caller = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId! };
     const workflow = taskWorkflow(harness, taskId);

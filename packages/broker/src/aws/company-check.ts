@@ -77,24 +77,23 @@ export function recordInCompany(record: unknown, companyId: string | undefined):
 }
 
 function taskProjectCompany(task: { companyId?: unknown }): string {
-  const company = OrgIdSchema.safeParse(task.companyId);
+  const company = OrgIdSchema.safeParse(task.companyId === undefined ? IMPLICIT_COMPANY_ID : task.companyId);
   if (!company.success) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
   return company.data;
 }
 
-/** A task's legacy project read must match the task's persisted, valid company, never a same-name row from another layout. */
+/** A task's legacy project read must match its stored company (absent means built-in), never a same-name row from another layout. */
 export function assertTaskProjectCompany(task: { companyId?: unknown }, projectRow: unknown): void {
   if (!recordInCompany(projectRow, taskProjectCompany(task))) {
     throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
   }
 }
 
-/** Read one legacy revision for a persisted task. Only server wiring with no company layer may recover an unstamped task as built-in; named-company wiring stays strict. */
-export async function readTaskLegacyProject<T>(task: { companyId?: unknown }, read: () => Promise<T>, implicitCompanyOnly = false): Promise<T> {
-  const scopedTask = implicitCompanyOnly && task.companyId === undefined ? { companyId: IMPLICIT_COMPANY_ID } : task;
-  taskProjectCompany(scopedTask); // Invalid or absent named-company scope refuses before model/integration reads.
+/** Read one legacy revision for a persisted task. Old unstamped tasks belong to the fixed built-in company on every install. */
+export async function readTaskLegacyProject<T>(task: { companyId?: unknown }, read: () => Promise<T>): Promise<T> {
+  taskProjectCompany(task); // Malformed stored scope refuses before model/integration reads.
   const project = await read();
-  if (project !== undefined) assertTaskProjectCompany(scopedTask, project);
+  if (project !== undefined) assertTaskProjectCompany(task, project);
   return project;
 }
 

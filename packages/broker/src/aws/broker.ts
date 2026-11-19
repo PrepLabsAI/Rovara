@@ -3436,18 +3436,9 @@ async function workspaceTaskScope(dependencies: AwsBrokerDependencies, task: Dev
   return taskLegacyScope(dependencies, task);
 }
 
-/** Recover an old task only from the operator-bound built-in install; missing named scope stays missing for the helper to refuse. */
-async function taskLegacyScope<T extends { companyId?: unknown; share?: { teamId?: string } }>(dependencies: AwsBrokerDependencies, task: T): Promise<T> {
-  if (task.companyId !== undefined) return task;
-  const refuse = () => agentXError("FORBIDDEN", "Slack channel is not bound to a project");
-  const companyOfTeam = dependencies.workspaces?.requireCompany.bind(dependencies.workspaces) ?? dependencies.installTeamCompany;
-  if (companyOfTeam === undefined) return dependencies.companies === undefined && dependencies.slackCompanies === undefined && dependencies.developer?.companies === undefined
-    ? { ...task, companyId: IMPLICIT_COMPANY_ID } : task;
-  const team = task.share?.teamId;
-  if (team === undefined || team !== (dependencies.slackWorkspaceLegacyTeamId ?? dependencies.slackInstallTeamOnly ?? dependencies.developer?.slackTeamId)) return task;
-  let company: unknown;
-  try { company = await companyOfTeam(team); } catch { throw refuse(); }
-  return company === IMPLICIT_COMPANY_ID ? { ...task, companyId: IMPLICIT_COMPANY_ID } : task;
+/** Unstamped persisted tasks belong to the built-in company, including on hosted installs. The project read still refuses named-company rows. */
+async function taskLegacyScope<T extends { companyId?: unknown; share?: { teamId?: string } }>(_dependencies: AwsBrokerDependencies, task: T): Promise<T> {
+  return task.companyId === undefined ? { ...task, companyId: IMPLICIT_COMPANY_ID } : task;
 }
 
 async function getLegacySlackBinding(
@@ -15358,7 +15349,7 @@ async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity:
   if (membership?.role !== "administrator" || !await administratorOfTaskCompany(dependencies, identity, task)) throw agentXError("FORBIDDEN", "administrator project membership is required");
   const claimed = [identity.claims.name, identity.claims.email].find((claim): claim is string => typeof claim === "string" && claim.trim() !== "");
   return adminShareMode(
-    { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: tasks, now: Date.now, implicitCompanyOnly: dependencies.workspaces === undefined && dependencies.installTeamCompany === undefined && dependencies.companies === undefined && dependencies.slackCompanies === undefined && dependencies.developer.companies === undefined },
+    { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: tasks, now: Date.now },
     { issuer: identity.issuer, subject: identity.subject, ...(claimed === undefined ? {} : { displayName: claimed.trim() }) },
     await taskLegacyScope(dependencies, task),
     value,

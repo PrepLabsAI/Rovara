@@ -1,14 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createCandidateManifest, WorkflowSnapshotSchema, type WorkflowSnapshot } from "@agentx/contracts";
+import { createCandidateManifest, IMPLICIT_COMPANY_ID, WorkflowSnapshotSchema, type WorkflowSnapshot } from "@agentx/contracts";
+import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
+import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
 import { developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
-import { startTaskWorkflowPublicationFromSystem, taskPageUrl } from "../../packages/broker/src/aws/developer-tasks.js";
+import { currentWorkflowPublicationAuthorityForTask, startTaskWorkflowPublicationFromSystem, taskPageUrl } from "../../packages/broker/src/aws/developer-tasks.js";
 import type { workflowE2ECurrentAuthorityIsValid as AuthorityIsValid, WorkflowE2EVerificationDiagnostic } from "../../packages/broker/src/aws/broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
 import { createTaskWebApi } from "../../packages/broker/src/aws/task-web-api.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { startApplicationRound } from "../support/e2e-application-round-harness.js";
-import { DEV_ISSUER, MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
+import { clientBearer, DEV_ISSUER, MAYA, WEB_CLIENT, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown, planAnswer, planDocument } from "../support/plan-documents.js";
 
 // A project registered before the catalog carried `latestRevision` (the live TEST project the-mentor-test) has a
@@ -82,6 +84,83 @@ const brokerLogs = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.fla
 });
 
 afterEach(async () => { vi.restoreAllMocks(); await disposeRealCandidates(); });
+
+// T1–T7 mirror the persisted Slack matrix through the real hosted web dispatcher.
+// T8–T10 also cover malformed stored scope and a crossing between two named companies.
+describe("persisted web workflow company matrix", () => {
+  it.each([
+    { id: "T1", hosted: true, share: "legacy", allowed: true },
+    { id: "T2", hosted: true, share: "none", allowed: true },
+    { id: "T3", hosted: true, share: "other", allowed: true },
+    { id: "T4", hosted: true, share: "web", allowed: true },
+    { id: "T5", hosted: true, share: "web", taskCompany: "org_aaaaaaaaaaaaaaaaaaaa", allowed: false },
+    { id: "T6", hosted: true, share: "web", projectCompany: "org_aaaaaaaaaaaaaaaaaaaa", allowed: false },
+    { id: "T7", hosted: false, share: "web", allowed: true },
+    { id: "T8", hosted: true, share: "web", taskCompany: "bad-company", allowed: false },
+    { id: "T9", hosted: true, share: "web", projectCompany: "bad-company", allowed: false },
+    { id: "T10", hosted: true, share: "web", taskCompany: "org_aaaaaaaaaaaaaaaaaaaa", projectCompany: "org_bbbbbbbbbbbbbbbbbbbb", allowed: false },
+  ])("$id hosted=$hosted share=$share", async ({ hosted, share, taskCompany, projectCompany, allowed }) => {
+    // Persist through the real web writer before enabling hosted reads of old records.
+    const h = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const started = await h.client("web", MAYA, "POST", "/v1/dev/tasks", {
+      requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK",
+    });
+    expect(started.status, JSON.stringify(started.body)).toBe(200);
+    const taskId = String((started.body.task as { taskId: string }).taskId);
+    const record = h.db.get(`DEVTASK#${taskId}`, "META")!;
+    expect(record.companyId).toBeUndefined();
+    const workspaceId = String(record.workspaceId);
+    await h.finish(workspaceId, String(operations(h, workspaceId).find(row => row.kind === "prepare")!.id), "SUCCEEDED", PREPARED);
+    const plan = "# Plan\n\n1. Fix retry handling.\n2. Add a regression test.\n";
+    const digest = await finishPlanningWithMarkdown(h, workspaceId, String(operations(h, workspaceId).find(row => row.workflowMode === "PLAN")!.id), plan);
+    const task = { ...h.db.get(`DEVTASK#${taskId}`, "META")! };
+    if (taskCompany !== undefined) task.companyId = taskCompany;
+    if (share === "legacy" || share === "other") task.share = {
+      teamId: share === "legacy" ? SLACK_TEAM : "T0OTHER00", channelId: SLACK_CHANNEL, threadTs: "1700000000.000001",
+    };
+    h.db.set(task);
+    const project = h.db.get("PROJECT#payments", "REV#000000000001")!;
+    if (projectCompany !== undefined) h.db.set({ ...project, companyId: projectCompany });
+    // Live membership is read from the actual store. No request supplies company authority.
+    h.db.set({ pk: `COMPANY_MEMBER#${MAYA.developerId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: MAYA.developerId,
+      companyId: taskCompany?.startsWith("org_") === true ? taskCompany : IMPLICIT_COMPANY_ID, role: "member", joinedAt: new Date().toISOString() });
+    // The hosted web client is install-wide, as on an actual hosted install.
+    h.db.set({ ...h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!, installLevel: true });
+    const companies = companyMembershipFromDynamo(h.db, "state");
+    const module = await loadSlackBroker();
+    const handler = hosted ? module.createAwsBrokerHandler({ ...h.brokerInput, companies, developer: { ...h.brokerInput.developer!, companies } } as never) : h.handler;
+    // Use the web app's signed token and registered session on the hosted dispatcher.
+    const before = structuredClone(h.db.find(row => row.entityType === "OPERATION" || row.entityType === "OUTBOX"));
+    const response = await handler({ version: "2.0", rawPath: `/v1/dev/tasks/${taskId}/workflow/decision`, rawQueryString: "",
+      headers: { authorization: await clientBearer(MAYA, WEB_CLIENT, `${WEB_CLIENT.clientId}-${MAYA.sessionId}`) },
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: taskWorkflow(h, taskId).revision, decision: "APPROVE", reason: "Approved", artifactDigest: digest }),
+      requestContext: { requestId: randomUUID(), http: { method: "POST" } },
+    });
+    const result = JSON.parse(response.body) as Record<string, unknown>;
+    if (allowed) {
+      expect(response.statusCode, response.body).toBe(200);
+      expect(operations(h, workspaceId).filter(row => row.workflowMode === "IMPLEMENT")).toHaveLength(1);
+      // Publication recollects both pinned and latest project ownership under the same rule.
+      const current = h.db.get(`DEVTASK#${taskId}`, "META") as unknown as DeveloperTaskRecord;
+      const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "d".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
+      const authority = await currentWorkflowPublicationAuthorityForTask({ actions: h.actions, tableName: "state" }, { ...current, workflow: { ...current.workflow!, candidate } });
+      expect(authority?.mode).toBe("CHECKED_TREE");
+      expect(h.db.get(`DEVTASK#${taskId}`, "META")).not.toHaveProperty("companyId");
+    } else {
+      expect(response.statusCode, response.body).toBe(403);
+      expect(result.error).toEqual({ code: "FORBIDDEN", message: "Slack channel is not bound to a project" });
+      expect(h.db.find(row => row.entityType === "OPERATION" || row.entityType === "OUTBOX")).toEqual(before);
+      // The system publication path must independently refuse the same stored scope.
+      const current = h.db.get(`DEVTASK#${taskId}`, "META") as unknown as DeveloperTaskRecord;
+      const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "d".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
+      const approved = { requestId: randomUUID(), workflowRevision: current.workflow!.revision, decision: "APPROVE" as const, actorId: current.ownerKey,
+        actorRole: "TASK_OWNER" as const, reason: "Previously approved", artifactDigest: digest, at: new Date().toISOString() };
+      await expect(currentWorkflowPublicationAuthorityForTask({ actions: h.actions, tableName: "state" }, {
+        ...current, workflow: { ...current.workflow!, candidate, decisions: [...current.workflow!.decisions, approved] },
+      })).rejects.toThrow("Slack channel is not bound to a project");
+    }
+  });
+});
 
 describe("publication of a project whose catalog row predates latestRevision", () => {
   it("starts the automatic publication, repairing the pointer from the revision history", async () => {

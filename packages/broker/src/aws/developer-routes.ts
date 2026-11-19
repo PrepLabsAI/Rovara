@@ -2061,7 +2061,6 @@ export function developerTaskRouteDependencies(
   return {
     documentClient: deps.documentClient,
     tableName: deps.tableName,
-    implicitCompanyOnly: !companySlackMode(deps),
     taskMoneyVisible: async (task) => {
       const own = taskOwnerView(task)?.developerId === caller.developerId;
       const reader = deps.companies ?? deps.developer.companies;

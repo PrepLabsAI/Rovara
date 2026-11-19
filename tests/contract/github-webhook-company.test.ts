@@ -106,7 +106,8 @@ function seedLinkedProject(db: FakeDynamoDb, companyId?: string) {
   const url = "https://github.com/example/demo/pull/1";
   db.set({ pk: "GITHUB_PR#example/demo", sk: "PR#0000000001", entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: "example/demo", repositoryId: "demo", number: 1,
     url, taskId: "task", workspaceId: "workspace", candidateDigest: "a".repeat(64) });
-  db.set({ pk: "DEVTASK#task", sk: "META", project: "demo", startingRevision: 1, workflow: { stage: "WAIT_FOR_MERGE",
+  // A linked task belongs to the same company as its project; only built-in rows may be unstamped.
+  db.set({ pk: "DEVTASK#task", sk: "META", ...(companyId === undefined ? {} : { companyId }), project: "demo", startingRevision: 1, workflow: { stage: "WAIT_FOR_MERGE",
     pullRequests: [{ repositoryId: "demo", number: 1, url, candidateDigest: "a".repeat(64) }] } });
   db.set({ pk: "PROJECT#demo", sk: "REV#000000000001", ...(companyId === undefined ? {} : { companyId }), definition: { repositories: [{ name: "demo", url: "https://github.com/example/demo.git" }] } });
 }
