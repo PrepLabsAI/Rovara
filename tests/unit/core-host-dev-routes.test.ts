@@ -1018,9 +1018,10 @@ it("shows task money only to its stored owner or a live company admin, never a r
  const admin = remember(FAKE_COMPANY, "admin", "admin");
  const foreign = remember(OTHER, "member", "task-owner");
  const runtime = await app.runtimeFor(FAKE_COMPANY);
- const { task } = await runtime.flow.start({ principal: owner.principal, origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Owned task", workflow: true, workflowPath: "QUICK" });
+ const { task } = await runtime.flow.start({ principal: owner.principal, origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Owned task", workflow: true, workflowPath: "FULL" });
  const runEstimate = { lowUsd: 4.37, highUsd: 10.19, runLimitUsd: 12.71, stopAtUsd: 12.71, basis: "default" as const, samples: 0 };
- await world.store.put({ item: { ...await world.store.get(taskKey(task.taskId)), runEstimate, spentUsd: 1.23, spentRuns: 1 } as never });
+ const stored = await world.store.get(taskKey(task.taskId));
+ await world.store.put({ item: { ...stored, runEstimate, spentUsd: 1.23, spentRuns: 1, workflow: { ...stored?.["workflow"] as Record<string, unknown>, designReview: fullMoneyReview() } } as never });
  runtime.flow.deps.access.canRead = async () => true;
  runtime.flow.deps.access.canAct = async principal => principal.personId !== "reader";
  // Use the ledger's real partition and an engine aggregate, just as worker accounting does.
@@ -1043,7 +1044,7 @@ it("shows task money only to its stored owner or a live company admin, never a r
   const body = JSON.parse(answer!.body) as { task: { money?: unknown } };
   expect(body.task.money).toBeUndefined();
   const walk = (value: unknown): number[] => typeof value === "number" ? [value] : value !== null && typeof value === "object" ? Object.values(value).flatMap(walk) : [];
-  for (const figure of [4.37, 10.19, 12.71, 1.23, 1_230_000, 12_000_000]) expect(walk(body)).not.toContain(figure);
+  for (const figure of [4.37, 10.19, 12.71, 1.23, 1_230_000, 12_000_000, ...REVIEW_MONEY]) expect(walk(body)).not.toContain(figure);
   expect(body.task).not.toHaveProperty("runEstimate");
   expect(body.task).not.toHaveProperty("spent");
   expect(query.mock.calls.filter(([input]) => input.pk === costPk)).toEqual([]);
@@ -1053,4 +1054,52 @@ it("shows task money only to its stored owner or a live company admin, never a r
  }
  expect((await read(foreign))?.statusCode).toBe(404);
  expect(await routes.taskMoney(foreign, task.taskId)).toBeUndefined();
+});
+
+const REVIEW_MONEY = [2.83, 17.43, 3.91, 0.87, 5.67, 9.73, 18.61, 1.81];
+function fullMoneyReview() {
+ const reviewer = { role: "critic", promptId: "design-review-critic", promptVersion: 1, promptDigest: "a".repeat(64), model: { provider: "anthropic", modelId: "claude-opus-5-5" }, sourceId: "src", sessionId: "review-1", modelKeyId: "key", packetDigest: "b".repeat(64), packet: [], filesRead: [], verified: true, inputProof: "digest_only", tokensIn: 100, tokensOut: 20, costUsd: 0.87, startedAt: "2026-11-19T00:00:00.000Z", endedAt: "2026-11-19T00:00:01.000Z" };
+ return { decidedBy: "auto", reasons: [], status: "done", tier: "light", spentUsd: 2.83, capUsd: 17.43, estimateUsd: 3.91,
+  rounds: [{ round: 1, designDigest: "c".repeat(64), reviewers: [reviewer], findings: [], resolutions: [] }],
+  approvals: [{ kind: "spend", by: { actorId: "owner" }, at: "2026-11-19T00:00:00.000Z", approvedUsd: 5.67 }, { kind: "raise_cap", by: { actorId: "owner" }, at: "2026-11-19T00:00:00.000Z", fromUsd: 9.73, capUsd: 18.61 }],
+  earlierReviews: [{ sentBackBy: { actorId: "owner" }, sentBackAt: "2026-11-19T00:00:00.000Z", spentUsd: 1.81, rounds: [{ round: 1, designDigest: "c".repeat(64), reviewers: [{ role: reviewer.role, model: reviewer.model, sessionId: reviewer.sessionId, modelKeyId: reviewer.modelKeyId, packetDigest: reviewer.packetDigest, verified: true, tokensIn: 100, tokensOut: 20, costUsd: 0.87 }], findings: [] }] }] };
+}
+
+it("hosted session read and list keep FULL task figures private even when a reader or co-owner owns the session", async () => {
+ const { world, app, companyOf, remember } = await world2();
+ const owner = remember(FAKE_COMPANY, "member", "stored-owner");
+ const reader = remember(FAKE_COMPANY, "member", "reader");
+ const coOwner = remember(FAKE_COMPANY, "member", "co-owner");
+ const admin = remember(FAKE_COMPANY, "admin", "admin");
+ const foreign = remember(OTHER, "admin", "foreign");
+ const runtime = await app.runtimeFor(FAKE_COMPANY);
+ const { task } = await runtime.flow.start({ principal: owner.principal, origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Full task", workflow: true, workflowPath: "FULL" });
+ const { agentSessionKey, mySessionsKey } = await import("@agentx/contracts");
+ const { taskSessionHeader, taskSessionId } = await import("../../packages/broker/src/core/sessions/create.js");
+ const sessionId = taskSessionId(task.taskId);
+ const { record: session } = taskSessionHeader({ orgId: FAKE_COMPANY, sessionId, taskId: task.taskId, project: task.project, title: task.title, owner: owner.principal, agent: { agentId: "agt_aaaaaaaaaaaaaaaaaaaa", name: "Planner", version: 1 }, origin: "app", payer: { kind: "project", project: "payments" }, now: task.createdAt });
+ expect(session).toBeDefined();
+ const runEstimate = { lowUsd: 4.37, highUsd: 10.19, runLimitUsd: 12.71, stopAtUsd: 12.71, basis: "default", samples: 0 };
+ const stored = await world.store.get(taskKey(task.taskId));
+ await world.store.put({ item: { ...stored, runEstimate, workflow: { ...stored?.["workflow"] as Record<string, unknown>, designReview: fullMoneyReview() } } as never });
+ await world.store.put({ item: { pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, people: [{ developerId: developerIdOf(coOwner.principal), role: "owner" }, { developerId: developerIdOf(reader.principal), role: "viewer" }] } });
+ const members = { companyRole: async (person: { principal?: DeployedCaller["principal"] | undefined }) => person.principal === undefined ? undefined : (await companyOf({ principal: person.principal }))?.role, projectGrant: (person: { principal?: DeployedCaller["principal"] | undefined }) => person.principal?.personId === "reader" ? "viewer" as const : "contributor" as const };
+ const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, members }) });
+ const walk = (value: unknown): number[] => typeof value === "number" ? [value] : value !== null && typeof value === "object" ? Object.values(value).flatMap(walk) : [];
+ for (const caller of [owner, admin, reader, coOwner]) {
+  // Deliberately differ session owner from stored task owner. A session owner is not a financial owner.
+  const changed = { ...session, owner: { developerId: developerIdOf(caller.principal), name: caller.principal.displayName }, summary: { ...session.summary, costUsd: 1.23, runLimitUsd: 12.71, stopAtUsd: 12.71 } };
+  // A stored copy, as the table would hold it (no undefined fields).
+  await world.store.put({ item: JSON.parse(JSON.stringify({ ...changed, ...agentSessionKey(FAKE_COMPANY, sessionId, "META") })) as Parameters<typeof world.store.put>[0]["item"] });
+  await world.store.put({ item: { ...mySessionsKey(FAKE_COMPANY, developerIdOf(caller.principal), changed.createdAt, changed.sessionId), sessionId: changed.sessionId } });
+  for (const path of [`/v1/app/sessions/${sessionId}`, "/v1/app/sessions"]) {
+   const answer = await routes.route(get(path), caller);
+   expect(answer?.statusCode).toBe(200);
+   const body: unknown = JSON.parse(answer!.body);
+   if (path.endsWith(sessionId)) { const { SessionResponseReaderSchema } = await import("@agentx/contracts");const parsed = SessionResponseReaderSchema.safeParse(body);expect(parsed.success, parsed.success ? undefined : JSON.stringify(parsed.error.issues)).toBe(true); }
+   if (caller === owner || caller === admin) { expect(walk(body)).toContain(1.23); if (path.endsWith(sessionId)) expect(walk(body)).toContain(2.83); }
+   else { for (const figure of [1.23, 12.71, 4.37, 10.19, ...REVIEW_MONEY]) expect(walk(body), path).not.toContain(figure); }
+  }
+ }
+ expect((await routes.route(get(`/v1/app/sessions/${sessionId}`), foreign))?.statusCode).toBe(404);
 });

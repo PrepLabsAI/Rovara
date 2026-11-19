@@ -1,3 +1,4 @@
+import { withoutDesignReviewMoney } from "../core/task-flow/money-view.js";
 import { proofIndexOf, type ProofIndexResponse } from "../local/app/proof-index.js";
 import { rowInCompany } from "../developer/company-rows.js";
 import type { SlackWorkspaceScope } from "@agentx/contracts";
@@ -1399,7 +1400,7 @@ export async function taskView(
     title: task.title,
     project: task.project,
     status: derived.status,
-    ...(workflow === undefined ? {} : { workflow }),
+    ...(workflow === undefined ? {} : { workflow: withoutDesignReviewMoney(workflow, revealMoney) }),
     ...(e2ePresentation === undefined ? {} : { e2ePresentation }),
     ...(derived.failure === undefined ? {} : { failure: derived.failure }),
     startingRevision: task.startingRevision,

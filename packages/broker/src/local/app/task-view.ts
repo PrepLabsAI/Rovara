@@ -6,6 +6,7 @@ import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
 import { waitingDocumentDigest } from "../../core/decisions/workflow-subject.js";
 import type { TaskView } from "../../core/task-flow/reads.js";
+import { withoutDesignReviewMoney } from "../../core/task-flow/money-view.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 
 /** The plan text a client may read: the waiting document, cut to what the tools carry (the whole document is on the local page). */
@@ -29,7 +30,7 @@ export async function developerTaskView(task: TaskRecord, view: TaskView, blobs:
     taskId: task.taskId, ...(!revealMoney || money === undefined ? {} : { money }), ...(view.owner === undefined ? {} : { owner: view.owner }), title: task.title, project: task.project, status: view.status, startingRevision: task.startingRevision, client: task.client, shared: false,
     ...(view.feature === undefined ? {} : { feature: view.feature }),
     ...(view.closing ? { closing: true } : {}), createdAt: task.createdAt, updatedAt: task.updatedAt, events: [],
-    ...(workflow === undefined ? {} : { workflow: { ...workflow, ...(planContent === undefined ? {} : { planContent }) } }),
+    ...(workflow === undefined ? {} : { workflow: { ...withoutDesignReviewMoney(workflow, revealMoney), ...(planContent === undefined ? {} : { planContent }) } }),
     ...(view.failure === undefined ? {} : { failure: view.failure }),
     ...(view.setupRecheck === undefined ? {} : { setupRecheck: view.setupRecheck }),
     ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }),

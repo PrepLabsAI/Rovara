@@ -421,15 +421,15 @@ describe("no developer task code reads the deployment mode (FR-024)", () => {
 });
 
 // A People co-owner is still a viewer of the stored owner's money.
-it("withholds legacy spend from reader and co-owner views while retaining the owner's spend", async () => {
- const h = await running();
- const task = { ...h.db.get(`DEVTASK#${h.taskId}`, "META"), spentUsd: 28.4812, spentRuns: 1 } as Parameters<typeof taskView>[1];
- const deps = { documentClient: h.db, tableName: "test", actions: h.actions, now: Date.now } as unknown as Parameters<typeof taskView>[0];
- expect(await taskView(deps, task, { events: 0, details: false, actor: "owner" })).toMatchObject({ spent: { usd: 28.4812 } });
- for (const role of ["reader", "co-owner"]) {
-  const view = await taskView(deps, task, { events: 0, details: false, actor: "viewer" });
-  expect(view, role).not.toHaveProperty("spent");
-  expect(JSON.stringify(view)).not.toContain("28.4812");
+it("withholds legacy spend from real reader and co-owner roles while retaining the owner's spend", async () => {
+ const h = await running(), companyId = "org_aaaaaaaaaaaaaaaaaaaa";
+ const task = { ...h.db.get(`DEVTASK#${h.taskId}`, "META"), companyId, spentUsd: 28.4812, spentRuns: 1, workflow: { path: "FULL", decisions: [], artifacts: [], reviews: [], designReview: { status: "done", spentUsd: 2.83, capUsd: 17.43, estimateUsd: 3.91, rounds: [{ reviewers: [{ costUsd: 0.87 }] }], approvals: [{ kind: "spend", approvedUsd: 5.67 }, { kind: "raise_cap", fromUsd: 9.73, capUsd: 18.61 }], earlierReviews: [{ spentUsd: 1.81 }] } } } as unknown as Parameters<typeof taskView>[1];
+ for (const [developerId, actor, visible] of [[MAYA.developerId, "owner", true], [OMAR.developerId, "viewer", false], [OMAR.developerId, "owner", false]] as const) {
+  const caller = { ...MAYA, developerId, amr: "slack" as const };
+  const deps = developerTaskRouteDependencies({ documentClient: h.db, tableName: "test", tasks: h.actions, now: Date.now, developer: { issuer: "https://example.test", signInTableName: "signin" }, companies: { membershipOf: async () => ({ companyId, role: "member" }) } } as unknown as Parameters<typeof developerTaskRouteDependencies>[0], caller);
+  const view = await taskView(deps, task, { events: 0, details: false, actor });
+  if (visible) expect(view).toMatchObject({ spent: { usd: 28.4812 }, workflow: { designReview: { spentUsd: 2.83 } } });
+  else { expect(view).not.toHaveProperty("spent"); for (const figure of [28.4812, 2.83, 17.43, 3.91, 0.87, 5.67, 9.73, 18.61, 1.81]) expect(JSON.stringify(view)).not.toContain(String(figure)); }
  }
 });
 

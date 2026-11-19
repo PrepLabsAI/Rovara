@@ -57,7 +57,7 @@ export const SessionViewSchema = z
     errorRef: ErrorRefSchema.optional(),
     cost: z
       .object({
-        spentUsd: z.number().min(0),
+        spentUsd: z.number().min(0).optional(),
         runLimitUsd: z.number().min(0).optional(),
         stopAtUsd: z.number().min(0).optional(),
         payer: PayerNameSchema,
@@ -228,7 +228,7 @@ export const LiveTileSchema = z
     step: SessionSummarySchema.shape.step,
     peek: SessionSummarySchema.shape.peek,
     lastRunFailed: SessionSummarySchema.shape.lastRunFailed,
-    costUsd: SessionSummarySchema.shape.costUsd,
+    costUsd: SessionSummarySchema.shape.costUsd.optional(),
     viewingNow: z.array(SessionOwnerSchema).max(LIVE_VIEWING_MAX),
     viewingNowCount: CountSchema,
     needsYou: z.boolean(),
