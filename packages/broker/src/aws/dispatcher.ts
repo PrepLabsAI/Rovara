@@ -344,13 +344,15 @@ export function taskPersonProofInvokeCommand(functionName: string, payload: Uint
   return new InvokeCommand({ FunctionName: functionName, Payload: payload, InvocationType: "RequestResponse" });
 }
 
-function taskPersonRuntimePorts(input: {
+/** The task-person runtime's bounded State reads. `client`: the dispatcher's own DynamoDB client; tests pass a fake (R2-F1 review round 4). */
+export function taskPersonRuntimePorts(input: {
   admission: ReturnType<typeof createTaskAuthorityAdmission>;
   stateTableName: string;
   signInTableName: string | undefined;
   proofArn: string;
   slackTeamId: string;
-}): TaskPersonRuntimePorts {
+}, client: Pick<DynamoDBDocumentClient, "send"> = taskAuthorityDocumentClient): TaskPersonRuntimePorts {
+  const taskAuthorityDocumentClient = client;
   const projection = (attributes: readonly string[]) => ({
     ProjectionExpression: attributes.map((_, index) => `#p${index}`).join(", "),
     ExpressionAttributeNames: Object.fromEntries(attributes.map((attribute, index) => [`#p${index}`, attribute])),

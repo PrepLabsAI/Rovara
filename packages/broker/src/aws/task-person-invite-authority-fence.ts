@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { orgOfProjectPk } from "@agentx/contracts";
-import { grantsPkFor, revisionPkFor, slackChannelBindingKeyMatches } from "./company-layout.js";
+import { grantsPkFor, namedCompany, revisionPkFor, slackChannelBindingKeyMatches } from "./company-layout.js";
 import { mayUseProject, type ProjectAuthorityWitness, type ProjectUseRole } from "../developer/task-project-access.js";
 
 export type TaskPersonProjectAuthorityWitness = ProjectAuthorityWitness & {
@@ -63,12 +63,17 @@ function positiveRowCondition(
 /** Derives the exact positive State predicates required alongside an invitation receipt CAS. */
 export function taskPersonInviteStateConditions(input: {
   taskId: string;
+  /** The task's company (taskCompanyId): the witnesses' revision must be of this company's own partition (a NAMED company) or the legacy rows (the built-in company). */
+  companyId: string;
   project: string;
   teamId: string;
   actor: TaskPersonProjectAuthorityWitness;
   target: TaskPersonProjectAuthorityWitness;
 }): readonly TaskPersonInviteStateCondition[] | undefined {
   const { taskId, project, teamId, actor, target } = input;
+  // Review round 4: both witnesses' revisions name the task's own company (another company's same-named project never fences this task's invitation).
+  const company = namedCompany(input.companyId);
+  if (orgOfProjectPk(actor.projectRevision.pk) !== company || orgOfProjectPk(target.projectRevision.pk) !== company) return undefined;
   if (actor.taskId !== taskId || target.taskId !== taskId || actor.project !== project || target.project !== project
     || !/^[a-f0-9]{64}$/.test(actor.developerId) || !/^[a-f0-9]{64}$/.test(target.developerId)) return undefined;
   const actorRevision = projectRevisionCondition(actor, project);

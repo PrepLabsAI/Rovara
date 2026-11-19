@@ -121,8 +121,11 @@ async function currentTask(deps: TaskPersonIdentityDependencies, taskId: string)
   return item as unknown as DeveloperTaskRecord;
 }
 
-/** The task's company, the way every stored record names it (`slackRecordScope`, `recordInCompany`): absent is the implicit company; anything malformed refuses. */
-function taskCompanyId(task: DeveloperTaskRecord): string {
+/**
+ * The task's company, the way every stored record names it (`slackRecordScope`, `recordInCompany`): absent is the implicit company; anything malformed refuses. The one helper
+ * for it: the identity check, the runtime's partition reads, the dispatch guard and the invite fence all use it (R2-F1 review round 4).
+ */
+export function taskCompanyId(task: DeveloperTaskRecord): string {
   const row = task as unknown as { companyId?: unknown; orgId?: unknown };
   if (row.companyId === null || row.orgId === null) return refuse();
   const company = OrgIdSchema.safeParse(row.companyId ?? row.orgId ?? IMPLICIT_COMPANY_ID);

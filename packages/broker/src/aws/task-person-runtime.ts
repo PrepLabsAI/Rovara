@@ -13,6 +13,7 @@ import {
 } from "@agentx/contracts";
 import {
   checkTaskPersonIdentity,
+  taskCompanyId,
   type ProjectAccessSubject,
   type TaskPersonIdentityDependencies,
 } from "../developer/task-person-identity.js";
@@ -193,8 +194,8 @@ function identityDependencies(input: {
 }): TaskPersonIdentityDependencies {
   const { task, developerId, slackTeamId, admission, ports } = input;
   // R2-F1 review round 3: the task's NAMED company (the company the task record names), whose own revision, grants and bindings the checks read; else the legacy rows.
-  const taskRow = task as unknown as { companyId?: unknown; orgId?: unknown };
-  const taskCompany = namedCompany(typeof taskRow.companyId === "string" ? taskRow.companyId : typeof taskRow.orgId === "string" ? taskRow.orgId : undefined);
+  // A task naming a malformed company refuses (taskCompanyId), as the identity check does.
+  const taskCompany = namedCompany(taskCompanyId(task));
   const readBindings = async (project: string): Promise<readonly string[]> => {
     admission.assertOpen();
     const result = await ports.projectAuthorityReader.bindings(slackTeamId, admission, admission.admitStateRead(), taskCompany);

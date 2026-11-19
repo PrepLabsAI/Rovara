@@ -624,3 +624,15 @@ describe("R2-F1 review round 3: the web proof pairs a named company's revision w
       .toEqual([grant(`ORG#${B}#MEMBER#${dev}`), grant(`ORG#${B}#MEMBER#${dev}`)]);
   });
 });
+
+describe("R2-F1 review round 4: one task-company rule", () => {
+  it("a task naming a malformed company refuses on the runtime path too, before any project read", async () => {
+    for (const companyId of ["not-a-company", null, 7]) {
+      const task = { ...nativeTask(), companyId } as unknown as DeveloperTaskRecord;
+      const injected = ports({ task });
+      await expect(runtime(createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 }), injected).checkTaskPerson(task, nativeDeveloperId), String(companyId)).rejects.toThrow();
+      expect(injected.projectAuthorityReader.latestRevision.mock.calls, String(companyId)).toHaveLength(0);
+      expect(injected.projectAuthorityReader.bindings.mock.calls, String(companyId)).toHaveLength(0);
+    }
+  });
+});

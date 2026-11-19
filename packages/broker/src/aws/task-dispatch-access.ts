@@ -1,6 +1,7 @@
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { agentXError, orgOfProjectPk } from "@agentx/contracts";
-import { grantsPkFor, revisionPkFor, slackChannelBindingKeyMatches } from "./company-layout.js";
+import { grantsPkFor, namedCompany, revisionPkFor, slackChannelBindingKeyMatches } from "./company-layout.js";
+import { taskCompanyId } from "../developer/task-person-identity.js";
 import type { DurableOutboxRecord } from "./lambda.js";
 import { taskOpen } from "../developer/task-access.js";
 import { resolveTaskDispatchPeople, type CheckTaskPerson } from "../developer/task-people.js";
@@ -147,6 +148,10 @@ async function allowedStillCurrent(
     const expectedRevisionSk = `REV#${String(witness.projectRevision.revision).padStart(12, "0")}`;
     // R2-F1 review round 3: the company the witness's revision key names (a NAMED company's own `ORG#<company>#PROJECT#<name>`); its grant and binding keys are that company's too.
     const company = orgOfProjectPk(witness.projectRevision.pk);
+    // Review round 4: and that company must be the task's own (a witness of another company's same-named project never dispatches this task); a malformed task company refuses.
+    let ownCompany: string | undefined;
+    try { ownCompany = namedCompany(taskCompanyId(task)); } catch { return false; }
+    if (company !== ownCompany) return false;
     if (witness.taskId !== task.taskId || witness.project !== task.project || witness.projectRevision.pk !== revisionPkFor(company, task.project)
       || witness.projectRevision.sk !== expectedRevisionSk || !Number.isSafeInteger(witness.projectRevision.revision)
       || witness.projectRevision.revision < 0 || (witness.access !== "granted" && witness.access !== "channel")) return false;

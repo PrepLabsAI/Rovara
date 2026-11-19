@@ -146,38 +146,53 @@ describe("task dispatch access", () => {
   });
 
   it("R2-F1 review round 3: a NAMED company's witness (its own revision, grant and binding keys) dispatches; a legacy grant paired with its revision never does", async () => {
-    const B = `org_${"b".repeat(20)}`;
-    const revision = { pk: `ORG#${B}#PROJECT#payments`, sk: "REV#000000000007", definition: { revision: 7, developerTasks: { enabled: true, channelMembersMayUse: true } } };
-    const witnessFor = (membershipPk: string): ProjectAuthorityWitness & { taskId: string; developerId: string; project: string } => ({
-      taskId: TASK_ID, developerId: OWNER, project: "payments", access: "granted",
-      projectRevision: { pk: revision.pk, sk: revision.sk, revision: 7, developerTasksPresent: true, developerTasks: revision.definition.developerTasks },
-      membership: { pk: membershipPk, sk: "PROJECT#payments", projectName: "payments", role: "developer" },
-    });
-    const run = async (membershipPk: string) => {
-      const h = harness();
-      h.db.set(revision);
-      h.db.set({ pk: membershipPk, sk: "PROJECT#payments", projectName: "payments", role: "developer" });
-      const witness = witnessFor(membershipPk);
-      // A witness the guard cannot fence is never allowed: it requalifies (here the person stays eligible, so the guard gives up with its retry error).
-      const answer = await guardTaskDispatch({ documentClient: h.db, tableName: "state", checkTaskPerson: h.checkTaskPerson,
-        stateAuthorityWitnessForOwnerActor: async (_task, actorId) => actorId === taskOwnerKey(OWNER, TASK_ID) ? witness : undefined }, h.outbox).catch((error: unknown) => error);
-      return { answer, h };
+    const B = `org_${"b".repeat(20)}`, A = `org_${"a".repeat(20)}`;
+    const revisionOf = (company: string) => ({ pk: `ORG#${company}#PROJECT#payments`, sk: "REV#000000000007", definition: { revision: 7, developerTasks: { enabled: true, channelMembersMayUse: true } } });
+    type Witness = ProjectAuthorityWitness & { taskId: string; developerId: string; project: string };
+    const grantWitness = (company: string, membershipPk: string): Witness => {
+      const revision = revisionOf(company);
+      return { taskId: TASK_ID, developerId: OWNER, project: "payments", access: "granted",
+        projectRevision: { pk: revision.pk, sk: revision.sk, revision: 7, developerTasksPresent: true, developerTasks: revision.definition.developerTasks },
+        membership: { pk: membershipPk, sk: "PROJECT#payments", projectName: "payments", role: "developer" } };
     };
-    expect((await run(`ORG#${B}#MEMBER#${OWNER}`)).answer).toBe("ALLOWED");
-    for (const stale of [`MEMBER#${OWNER}`, `ORG#org_${"a".repeat(20)}#MEMBER#${OWNER}`]) {
-      const { answer, h } = await run(stale);
-      expect(answer, stale).not.toBe("ALLOWED");
-      expect(h.checkTaskPerson.mock.calls.length, stale).toBeGreaterThan(1);
-    }
-    // A channel witness: the named company's own binding key.
+    const channelWitness = (company: string, bindingPk: string): Witness => {
+      const revision = revisionOf(company);
+      return { taskId: TASK_ID, developerId: OWNER, project: "payments", access: "channel",
+        projectRevision: { pk: revision.pk, sk: revision.sk, revision: 7, developerTasksPresent: true, developerTasks: revision.definition.developerTasks },
+        binding: { pk: bindingPk, sk: "CHANNEL#C0PEOPLE1", teamId: "T0PEOPLE1", channelId: "C0PEOPLE1", projectName: "payments", updatedAt: "2026-10-11T10:00:00.000Z" } };
+    };
+    /** The task belongs to company B (as a named company's task names it); every row the witness names exists, so only the key rules decide. */
+    const run = async (witness: Witness) => {
+      const h = harness();
+      h.db.set({ ...(h.current as unknown as Record<string, unknown>), companyId: B });
+      h.db.set(revisionOf(B)); h.db.set(revisionOf(A));
+      if (witness.membership !== undefined) h.db.set({ ...witness.membership });
+      if (witness.binding !== undefined) h.db.set({ ...witness.binding });
+      // A witness the guard cannot fence is never allowed: it requalifies (here the person stays eligible, so the guard gives up with its retry error).
+      return guardTaskDispatch({ documentClient: h.db, tableName: "state", checkTaskPerson: h.checkTaskPerson,
+        stateAuthorityWitnessForOwnerActor: async (_task, actorId) => actorId === taskOwnerKey(OWNER, TASK_ID) ? witness : undefined }, h.outbox).catch((error: unknown) => error);
+    };
+    expect(await run(grantWitness(B, `ORG#${B}#MEMBER#${OWNER}`))).toBe("ALLOWED");
+    expect(await run(channelWitness(B, `ORG#${B}#SLACK_BINDING#T0PEOPLE1`))).toBe("ALLOWED");
+    // A grant at the legacy key or at A's key, beside B's revision: refused.
+    for (const stale of [`MEMBER#${OWNER}`, `ORG#${A}#MEMBER#${OWNER}`]) expect(await run(grantWitness(B, stale)), stale).not.toBe("ALLOWED");
+    // A binding at the legacy key or at A's key, beside B's revision: refused (review round 4, L4).
+    for (const stale of ["SLACK_BINDING#T0PEOPLE1", `ORG#${A}#SLACK_BINDING#T0PEOPLE1`]) expect(await run(channelWitness(B, stale)), stale).not.toBe("ALLOWED");
+    // A whole witness of company A (A's revision, grant and binding), on B's task: refused (review round 4, L1).
+    expect(await run(grantWitness(A, `ORG#${A}#MEMBER#${OWNER}`))).not.toBe("ALLOWED");
+    expect(await run(channelWitness(A, `ORG#${A}#SLACK_BINDING#T0PEOPLE1`))).not.toBe("ALLOWED");
+  });
+
+  it("R2-F1 review round 4: a task naming a malformed company never dispatches on a witness", async () => {
     const h = harness();
-    h.db.set(revision);
-    const binding = { pk: `ORG#${B}#SLACK_BINDING#T0PEOPLE1`, sk: "CHANNEL#C0PEOPLE1", teamId: "T0PEOPLE1", channelId: "C0PEOPLE1", projectName: "payments", updatedAt: "2026-10-11T10:00:00.000Z" };
-    h.db.set(binding);
-    const channel: ProjectAuthorityWitness & { taskId: string; developerId: string; project: string } = { ...witnessFor(""), access: "channel", membership: undefined, binding } as never;
-    delete (channel as { membership?: unknown }).membership;
-    await expect(guardTaskDispatch({ documentClient: h.db, tableName: "state", checkTaskPerson: h.checkTaskPerson,
-      stateAuthorityWitnessForOwnerActor: async (_task, actorId) => actorId === taskOwnerKey(OWNER, TASK_ID) ? channel : undefined }, h.outbox)).resolves.toBe("ALLOWED");
+    h.db.set({ ...(h.current as unknown as Record<string, unknown>), companyId: "not-a-company" });
+    const revision = { pk: "PROJECT#payments", sk: "REV#000000000007", definition: { revision: 7, developerTasks: { enabled: true, channelMembersMayUse: false } } };
+    const membership = { pk: `MEMBER#${OWNER}`, sk: "PROJECT#payments", projectName: "payments", role: "developer" as const };
+    h.db.set(revision); h.db.set(membership);
+    const witness: ProjectAuthorityWitness & { taskId: string; developerId: string; project: string } = { taskId: TASK_ID, developerId: OWNER, project: "payments", access: "granted",
+      projectRevision: { pk: revision.pk, sk: revision.sk, revision: 7, developerTasksPresent: true, developerTasks: revision.definition.developerTasks }, membership };
+    expect(await guardTaskDispatch({ documentClient: h.db, tableName: "state", checkTaskPerson: h.checkTaskPerson,
+      stateAuthorityWitnessForOwnerActor: async (_task, actorId) => actorId === taskOwnerKey(OWNER, TASK_ID) ? witness : undefined }, h.outbox).catch((error: unknown) => error)).not.toBe("ALLOWED");
   });
 
   it.each(["binding", "policy"] as const)("requalifies after the qualifying channel %s changes before the final State fence", async (changedWitness) => {
