@@ -3,7 +3,7 @@
 //
 //   plan ready      the plan waits for review. When the host has a decision gate, this is the plan's approval card (`cards.ts`): it shows the plan's risk, and for a low or medium risk plan it has Approve and Request changes buttons that go
 //                   through the same decision gate as the web app (the owner's link, the risk rules, the stale-revision refusal and the repeat answer are the gate's and the sink's). A high risk plan, or one whose approvers do
-//                   not take a decision made in this chat, has no button: the card links to the task page, where approval needs a fresh sign-in (owner decision of 2026-11-12). With no gate, a plain line with the link.
+//                   not take a decision made in this chat, has no button: the card links to the task page, where the signed-in owner decides (owner decision of 2026-11-12; DEC 254zzz73: no step-up). With no gate, a plain line with the link.
 //   pull request    the pull request was marked ready for review: one line with its link.
 //   done            the task merged or was closed: one line.
 //   setup paused    (L4-U5) the task paused before Build because the project's setup stopped working: one message, in the page's own fixed words and where to go, once per re-check (so a task paused twice by the same break says it once). It is a

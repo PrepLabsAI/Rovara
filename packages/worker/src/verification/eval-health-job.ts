@@ -6,12 +6,13 @@
 //   - the cache it hands `runEvalHealth` keeps nothing: it only catches the record the three runs made, which is returned to the broker. The broker checks it against its own plan and keeps it under its own key. This
 //     worker never writes a baseline, and its result has no key, company, project, cost or payer in it.
 // Never throws. Words are the broker's (`evalHealthNotRunWords`); nothing a repository or a provider said is in the result but the measured record itself.
-import { EVAL_HEALTH_WORKER_REASONS, EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, type BaseScoreCache, type EvalBaseRecord, type EvalHealthResultBody, type EvalSpendGrant, type PrepareEvalHealth } from "@agentx/contracts";
+import { isStandInSetVersion, EVAL_HEALTH_WORKER_REASONS, EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, type BaseScoreCache, type EvalBaseRecord, type EvalBlockedReach, type EvalHealthResultBody, type EvalSpendGrant, type PrepareEvalHealth } from "@agentx/contracts";
 import { EVAL_PLAN_QUESTIONS_CHANGED, validPlan, type EvalFinalCheckPorts } from "./eval-final-check.js";
 import { runEvalHealth, type EvalHealthInput } from "./eval-health.js";
 import { readEvalMeasures } from "./eval-round.js";
+import { runFailureOf } from "./eval-run-diagnostic.js";
 
-export type EvalHealthJobPorts = Pick<EvalFinalCheckPorts, "plan" | "approval" | "meter" | "runner">;
+export type EvalHealthJobPorts = Pick<EvalFinalCheckPorts, "plan" | "approval" | "meter" | "runner" | "standInSetVersion">;
 const WORKER_REASONS: ReadonlySet<string> = new Set(EVAL_HEALTH_WORKER_REASONS);
 const whole = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
 
@@ -27,23 +28,34 @@ export async function runEvalHealthJob(job: PrepareEvalHealth, ports: EvalHealth
     if (answered === EVAL_PLAN_QUESTIONS_CHANGED) return notRun("questions_changed");
     const plan = validPlan(answered);
     if (plan === undefined || !plan.evalConfigured) return notRun("not_connected");
+    let version: string | undefined;
+    if (ports.standInSetVersion !== undefined) {
+      try { version = await ports.standInSetVersion(); } catch { return notRun("not_connected"); }
+      if (version !== undefined && !isStandInSetVersion(version)) return notRun("not_connected");
+    }
     let grant: EvalSpendGrant | undefined;
     try { grant = await ports.approval.read(); } catch { grant = undefined; }
     if (grant === undefined) return notRun("not_confirmed");
     // What the grant allows is the limit of the three runs; nothing else (the request's own estimate is not here at all).
     const limits = { maxCalls: whole(grant.maxCalls) ? grant.maxCalls : EVAL_DEFAULT_CALL_BUDGET, maxCostMicros: whole(grant.maxCostMicros) ? grant.maxCostMicros : EVAL_DEFAULT_COST_BUDGET_MICROS };
     let caught: EvalBaseRecord | undefined;
+    // TH1: the first run that stopped because the eval tried to reach something other than the model: what it tried to reach (fixed shape, host names only; never a cause or a log line).
+    let blocked: EvalBlockedReach | undefined;
     // Catches the record the three runs made; keeps nothing. Reading finds nothing, so no earlier baseline stands in for the measurement.
     const cache: BaseScoreCache = { read: async () => undefined, write: async (_parts, record) => { caught = record; return "stored"; } };
     const ids = plan.questions.map(q => q.id);
     const input: EvalHealthInput = {
-      key: { ...plan.key, evalSetHash: plan.baseEvalSetHash ?? plan.evalSetHash, hiddenSetHash: "none", judgePin: plan.judgePin }, settings: plan.settings, selection: plan.selection,
+      key: { ...plan.key, evalSetHash: plan.baseEvalSetHash ?? plan.evalSetHash, hiddenSetHash: "none", judgePin: plan.judgePin, ...(version === undefined ? {} : { standInSetVersion: version }) }, settings: plan.settings, selection: plan.selection,
       questionIds: ids, maxCallsPerQuestion: plan.maxCallsPerQuestion, maxCostMicrosPerQuestion: plan.maxCostMicrosPerQuestion, limits,
       approval: { read: async () => grant }, meter: ports.meter, cache,
       run: async ({ call }) => {
         if (signal.aborted) throw new Error("eval stage stopped");
         const started = Date.now();
-        const output = await ports.runner({ side: "old", ids, runs: 1, call, signal });
+        const output = await ports.runner({ side: "old", ids, runs: 1, call, signal }).catch((error: unknown) => {
+          const failure = runFailureOf(error);
+          if (blocked === undefined && failure?.code === "blocked_connection") blocked = failure.blocked;
+          throw error;
+        });
         const read = await readEvalMeasures(output.report);
         if (!read.ok || output.attestation === undefined) throw new Error("eval baseline unavailable");
         return { measures: read.measures, attestation: output.attestation, seconds: (Date.now() - started) / 1000 };
@@ -51,7 +63,8 @@ export async function runEvalHealthJob(job: PrepareEvalHealth, ports: EvalHealth
     };
     const outcome = await runEvalHealth(input);
     if (signal.aborted) return notRun("stopped");
+    if (outcome.status === "not_run" && outcome.reason === "unavailable" && blocked !== undefined) return result({ status: "not_run", reason: "blocked_connection", blocked });
     if (outcome.status === "not_run") return notRun(WORKER_REASONS.has(outcome.reason) ? outcome.reason : "unavailable");
-    return caught === undefined ? notRun("unavailable") : result({ status: "measured", record: caught });
+    return caught === undefined ? notRun("unavailable") : result({ status: "measured", record: caught, ...(version === undefined ? {} : { standInSetVersion: version }) });
   } catch { return notRun("unavailable"); }
 }

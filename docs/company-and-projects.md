@@ -51,5 +51,8 @@ Use the project lifecycle API to preview an archive or restore before confirming
 Any company member can read the company's AI model. An owner or admin can choose a model from the offered list. If the company does not choose one, Rovara uses the default for the installation. If a chosen model is no longer offered, new tasks are refused until an owner or admin chooses another.
 <!-- Source: packages/broker/src/company-engine-model-routes.ts; PrepLabsAI/Rovara#835. -->
 
+An owner or admin can also choose the Claude model the company's lessons learn with, from the Claude models offered to the company. If the company does not choose one, Rovara uses the installation's learning model, Claude Haiku 5.5 by default. Lessons never learn with the company's task model. They learn on the company's own Anthropic account, within its limits.
+<!-- Source: packages/broker/src/aws/company-learning-model-routes.ts; DEC 254zzz63. -->
+
 Rovara stores a per-task limit on a project when a project admin saves one, but tasks do not use that setting yet. If your company has set a per-task cap, a project limit cannot be higher than it. The Code API does not provide a company monthly spending limit.
 <!-- Source: packages/broker/src/aws/project-settings.ts; packages/broker/src/core/cost/limits.ts; PrepLabsAI/Rovara#835. -->

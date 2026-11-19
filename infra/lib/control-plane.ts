@@ -32,12 +32,13 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, EGRESS_ADDRESSES_PARAMETER_PATTERN, EGRESS_ADDRESSES_VARIABLE, NAT_EGRESS_ADDRESSES_OUTPUT } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, EGRESS_ADDRESSES_PARAMETER_PATTERN, EGRESS_ADDRESSES_VARIABLE, NAT_EGRESS_ADDRESSES_OUTPUT, WORKER_SANDBOX_EGRESS_DEFAULT, WORKER_SANDBOX_EGRESS_SETTING_VARIABLE, WORKER_SANDBOX_EGRESS_VALUES } from "@agentx/contracts";
 import { EgressAlarms } from "./egress-alarms.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
 import { CoreEngine, TEST_SERVICES_PARAMETER, TEST_SERVICE_IMAGES_PARAMETER } from "./core-engine.js";
 import { CompanySecrets } from "./company-secrets.js";
+import { SavedEnvImages } from "./saved-env-images.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { TaskPersonProof } from "./task-person-proof.js";
 import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerNamesParameterArn } from "./broker-names.js";
@@ -1069,6 +1070,18 @@ export class ControlPlaneStack extends Stack {
           principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
           actions: ["kms:Encrypt", "kms:Decrypt"], resources: ["*"],
         }));
+        // L4-HARD (owner 2026-11-18): the Deny the other keys have. The default key policy lets the account's root delegate to IAM, so without this any account admin with
+        // kms:Decrypt in their own IAM policy could open developers' ChatGPT tokens. Now only the broker uses the key (like the invoke signing key and the sign-in token keys).
+        // The broker's sealer and the Linear token wrapper always pass an encryption context; requiring one in the policy is deferred (it would change the headroom pins' evaluator
+        // contexts). Named environments only, like the Allow above.
+        chatGptConnectionKey.addToResourcePolicy(new iam.PolicyStatement({
+          sid: "UseOnlyAsBroker",
+          effect: iam.Effect.DENY,
+          principals: [new iam.AnyPrincipal()],
+          actions: ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*"],
+          resources: ["*"],
+          conditions: { ArnNotEquals: { "aws:PrincipalArn": broker.role!.roleArn } },
+        }));
       } else chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
       addBrokerName(broker, naming, "chatGptConnectionKey", chatGptConnectionKey.keyId, chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
@@ -1082,6 +1095,10 @@ export class ControlPlaneStack extends Stack {
         const companySecretsRole = new CompanySecrets(this, "CompanySecrets", { env: naming.env, brokerRole: broker.role! }).role;
         addBrokerName(broker, naming, "companySecretsRole", companySecretsRole.roleName, companySecretsRole.roleArn);
       }
+      // L4-SE6 (owner-approved 2026-11-18): the saved environment images' registry side: ONE repository creation template for `rovara-env/<env>` and the three roles (push, pull, manage) that trust only
+      // the broker. Named environments only (the legacy template is unchanged). It publishes the output contract (briefs/lead4/L4-SE-OUTPUT-CONTRACT.md) and gives the broker the three role ARNs and the prefix; the broker gets no new policy statement
+      // (the trust names its role and the boundary allows the AssumeRole). Nothing assumes a role until the broker's switch is on.
+      if (naming.env !== undefined) new SavedEnvImages(this, "SavedEnvImages", { env: naming.env, brokerRole: broker.role! }).expose(this, broker);
       // Spec 025 A13: the admin health route reads the environment's alarms, by name, and
       // the depths of its dead-letter queues. Read-only, and on exactly these resources.
       const alarmPrefix = naming.alarmName("");
@@ -1245,6 +1262,14 @@ export class ControlPlaneStack extends Stack {
     if (naming.env !== undefined) {
       sessions.steps.addEnvironment(TEST_SERVICES_SETTING_VARIABLE, foundationParameter(TEST_SERVICES_PARAMETER));
       sessions.steps.addEnvironment(TEST_SERVICE_IMAGES_SETTING_VARIABLE, foundationParameter(TEST_SERVICE_IMAGES_PARAMETER));
+      // L4-NETG (DEC 254zzz77): how a worker host's sandboxes and devcontainers reach the internet. `bridge` (the default) is today's behaviour; `gateway` walls them behind the host's egress gateway and a launch carries
+      // AGENTX_SANDBOX_EGRESS=gateway (the boot fails closed if the gateway cannot start). Only the session steps build the boot configuration, so only they read it: a plain variable, no packed setting, no IAM. A stack parameter,
+      // so an upgrade keeps it (OPERATOR_PARAMETERS); `agentx config set workerSandboxEgress gateway|bridge`.
+      const workerSandboxEgress = new CfnParameter(this, "WorkerSandboxEgress", {
+        type: "String", default: WORKER_SANDBOX_EGRESS_DEFAULT, allowedValues: [...WORKER_SANDBOX_EGRESS_VALUES],
+        description: "How a worker host's task sandboxes and devcontainers reach the internet: bridge (the default, today's behaviour) or gateway (an internal network whose only exit is the host's egress gateway; the worker boot fails if the gateway cannot start)",
+      });
+      sessions.steps.addEnvironment(WORKER_SANDBOX_EGRESS_SETTING_VARIABLE, workerSandboxEgress.valueAsString);
     }
     // L4-EGR: Rovara's fixed outbound addresses (the foundation's NatEgressAddresses output, which the release and `agentx deploy` pass when the foundation has it), shown to a company's owners
     // and admins (aws/company-egress-routes.ts). Empty until then. A plain variable, not a packed setting: a packed value cannot hold the commas, and the broker has the room.

@@ -160,8 +160,11 @@ export function createAnswerService(deps: AnswerServiceDeps) {
     let earlier: WikiAnswerRecord | undefined;
     try { earlier = await deps.wiki.readAnswer(project, answerId); } catch { throw unavailable(); }
     if (earlier !== undefined) {
+      const outcome = fromRecordOutcome(earlier.outcome);
+      // The same shape as the first reply (B8): a "not found" answer holds no text, and its record keeps its fixed words (the honesty line), which the repeat gives back as honesty.
+      const notFound = outcome === "not_found";
       return AnswerResponseSchema.parse({
-        answerId, threadId: request.threadId ?? answerId, outcome: fromRecordOutcome(earlier.outcome), text: earlier.answer, unconfirmed: [],
+        answerId, threadId: request.threadId ?? answerId, outcome, text: notFound ? "" : earlier.answer, ...(notFound && earlier.answer !== "" ? { honesty: earlier.answer } : {}), unconfirmed: [],
         sources: earlier.sources.map((source, index) => ({ n: index + 1, repo: source.repo, path: source.path, line: source.line, ...(source.lineEnd === undefined ? {} : { lineEnd: source.lineEnd }), commit: source.commit })), wikiPages: [],
       });
     }

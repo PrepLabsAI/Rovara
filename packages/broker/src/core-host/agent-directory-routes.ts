@@ -13,8 +13,8 @@
 //  - The answer is built field by field and parsed with the contract's strict schema; one unreadable record is a fixed 503, never a shorter list. A directory larger than the bound is a fixed 503 too.
 //  - Refusals are fixed words; nothing a caller sent is echoed.
 import {
-  AgentDirectoryResponseSchema, AgentScopeSchema, AgentXError, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, agentDirectoryKey, agentXError, builtinDefaultPin, currentBuiltinVersion,
-  type AgentDirectoryResponse, type AgentView, type AuditSink, type DocumentStore, type OrgId, type OrgRole,
+  AgentDirectoryResponseSchema, AgentOwnerSchema, AgentScopeSchema, AgentXError, BUILTIN_AGENTS, BUILTIN_AGENT_IDS, agentDirectoryKey, agentXError, builtinDefaultPin, currentBuiltinVersion,
+  type AgentDirectoryResponse, type AgentOwner, type AgentView, type AuditSink, type DocumentStore, type OrgId, type OrgRole,
 } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { readGuardrails } from "../core/agents/guardrails.js";
@@ -82,10 +82,20 @@ function builtinView(id: (typeof BUILTIN_AGENT_IDS)[number], disabled: boolean):
   };
 }
 
+/**
+ * The agent's owner as stored: one member, or a project (the contract's two kinds). Hosted agents made before the hosted directory are project-owned (live test run 2, 2026-11-18:
+ * every one of the pilot company's agents), so a project owner is listed as such. Anything else is unreadable: the whole answer is the fixed 503, never a shorter list.
+ */
+function ownerOf(record: AgentRecord): AgentOwner {
+  const owner = AgentOwnerSchema.safeParse((record as { owner?: unknown }).owner);
+  if (!owner.success) throw unavailable();
+  return owner.data;
+}
+
 function customView(record: AgentRecord): AgentView {
   return {
     agentId: record.agentId, name: record.name, description: record.description, builtin: false, access: "manage", status: record.status,
-    owner: { kind: "member", developerId: record.owner.developerId },
+    owner: ownerOf(record),
     ...(record.currentVersion === undefined ? {} : { currentVersion: record.currentVersion }), latestVersion: record.latestVersion, draftRevision: record.draftRevision,
     createdBy: record.createdBy, createdAt: record.createdAt, updatedAt: record.updatedAt,
     needsLaterConnectors: AGENT_CANT_RUN_ON_HOSTED,
@@ -123,7 +133,7 @@ export async function routeHostedAgentDirectory(input: HostedAgentDirectoryInput
     }
     if (scope === "all" || scope === "mine") {
       for (const record of await guarded(async () => await customAgents(input))) {
-        if (scope === "mine" && record.owner.developerId !== input.developerId) continue;
+        if (scope === "mine") { const owner = ownerOf(record); if (owner.kind !== "member" || owner.developerId !== input.developerId) continue; }
         views.push(customView(record));
       }
     }

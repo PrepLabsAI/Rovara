@@ -1,6 +1,6 @@
 // A spent AI budget, as the model proxy reports it (docs/learnings/model-proxy-spike.md, question 3) and as the task
 // ends because of it. Pi's own error drops the proxy's body, so the body is read once, classified and discarded here.
-import { BUDGET_EXHAUSTED_FAILURE_MESSAGE } from "@agentx/contracts";
+import { budgetExhaustedWords } from "@agentx/contracts";
 
 /**
  * Whose budget ran out: the organisation's (Team=), the member's (User=) or the task's own key (Key=) as the proxy reports them; the control plane's refusal
@@ -8,10 +8,10 @@ import { BUDGET_EXHAUSTED_FAILURE_MESSAGE } from "@agentx/contracts";
  */
 export type ModelBudgetScope = "org" | "member" | "task" | "project" | "agent" | "chain" | "test";
 
-/** The model's budget ran out; a task that hits it ends, and the owner can raise the budget and continue. */
+/** The model's budget ran out; a task that hits it ends with the words of the limit it reached (the generic words when the scope is not one a customer sets), and the owner can raise the budget and continue. */
 export class ModelBudgetExhaustedError extends Error {
   constructor(readonly scope: ModelBudgetScope) {
-    super(BUDGET_EXHAUSTED_FAILURE_MESSAGE);
+    super(budgetExhaustedWords(scope));
     this.name = "ModelBudgetExhaustedError";
   }
 }

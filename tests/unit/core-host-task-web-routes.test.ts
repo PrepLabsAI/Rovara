@@ -1,6 +1,6 @@
 // Core task web routes (Cloud #188's Code gaps): the routes the web app needs for a task the core engine owns, each with the old task routes' access rules.
 //   - DEC 254zzz39 (6): `POST /v1/app/tasks/{id}/review-findings`, the task owner's Accept findings on the web page, the one route that accepts a SECURITY finding on a core task: only the web app's own client, only
-//     after a fresh step-up checked against the company's window, only for the task's owner; anyone else is refused and nothing is written.
+//     for the task's owner or a People co-owner (DEC 254zzz73: no step-up); anyone else is refused and nothing is written.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { WorkflowSnapshotSchema, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
@@ -25,7 +25,6 @@ const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session
 const get = (path: string) => ({ method: "GET", path, headers: {}, body: "" });
 const post = (path: string, body: unknown = {}) => ({ method: "POST", path, headers: {}, body: JSON.stringify(body) });
 const errorOf = (answer: { body: string } | undefined) => (JSON.parse(answer!.body) as { error: { code: string; message: string } }).error;
-const minutesAgo = (world: FakeWorld, minutes: number) => new Date(world.clock.now - minutes * 60_000).toISOString();
 
 /** The company's owner rule as a deployment wires it: only the person the task runs for acts on it (and so reads its money) as its owner here. */
 const isOwner = (principal: { personId: string; provider: string }, task: { developerId: string }) => principal.personId === task.developerId || developerIdOf(principal) === task.developerId;
@@ -77,10 +76,10 @@ const acceptSecurity = (expectedRevision: number) => ({ requestId: randomUUID(),
 const PAGE = (taskId: string) => `/v1/app/tasks/${taskId}/review-findings`;
 
 describe("DEC 254zzz39 (6): the task owner accepts a SECURITY finding on the web page", () => {
-  it("accepts it for the task owner on the web app's client with a fresh step-up, as the page; the same request through the API-token route is refused", async () => {
+  it("accepts it for the task owner on the web app's client with no step-up, as the page; the same request through the API-token route is refused", async () => {
     const { world, routes, own, taskId } = await started();
     const revision = await blockOnSecurity(world, taskId);
-    const page: DeployedCaller = { ...own, webApp: true, stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const page: DeployedCaller = { ...own, webApp: true };
     // The old workflow route is an API token's: it never accepts a security finding, whoever calls it.
     const token = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/review-findings`, acceptSecurity(revision)), page);
     expect(token?.statusCode).toBe(403);
@@ -94,12 +93,12 @@ describe("DEC 254zzz39 (6): the task owner accepts a SECURITY finding on the web
     expect(stored.workflow.revision).toBeGreaterThan(revision);
   });
 
-  it("refuses a caller that is not the web app's client, with nothing read or written, whatever step-up it carries", async () => {
+  it("refuses a caller that is not the web app's client, with nothing read or written", async () => {
     const { world, routes, own, taskId } = await started();
     const revision = await blockOnSecurity(world, taskId);
     const before = JSON.stringify(await world.store.get(taskKey(taskId)));
     const read = vi.spyOn(world.store, "get");
-    for (const caller of [{ ...own, stepUp: { at: minutesAgo(world, 1), method: "passkey" } }, { ...own, webApp: undefined }, { ...own, webApp: "true" as never, stepUp: { at: minutesAgo(world, 1), method: "passkey" } }] as DeployedCaller[]) {
+    for (const caller of [{ ...own }, { ...own, webApp: undefined }, { ...own, webApp: "true" as never }] as DeployedCaller[]) {
       const answer = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), caller);
       expect(answer?.statusCode).toBe(403);
       expect(errorOf(answer)).toEqual({ code: "FORBIDDEN", message: SECURITY_ACCEPT_ON_THE_PAGE });
@@ -110,59 +109,46 @@ describe("DEC 254zzz39 (6): the task owner accepts a SECURITY finding on the web
     expect(JSON.stringify(await world.store.get(taskKey(taskId)))).toBe(before);
   });
 
-  it("needs a FRESH step-up with Code's own factor, within the company's window: none, an old one, a Slack round trip, a future one or one past a shorter company window is refused, with nothing written", async () => {
+  it("needs no step-up (DEC 254zzz73): a caller carrying no sign-in time at all is the page for the task's owner", async () => {
     const { world, routes, own, taskId } = await started();
     const revision = await blockOnSecurity(world, taskId);
-    const before = JSON.stringify(await world.store.get(taskKey(taskId)));
-    for (const stepUp of [undefined, { at: minutesAgo(world, 11), method: "passkey" }, { at: minutesAgo(world, 1), method: "slack" }, { at: minutesAgo(world, 1), method: "oidc" }, { at: minutesAgo(world, -5), method: "passkey" }, { at: "yesterday", method: "passkey" }]) {
-      const answer = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...own, webApp: true, ...(stepUp === undefined ? {} : { stepUp }) });
-      expect(answer?.statusCode, JSON.stringify(stepUp)).toBe(403);
-      expect(errorOf(answer), JSON.stringify(stepUp)).toEqual({ code: "REAUTH_REQUIRED", message: SECURITY_ACCEPT_ON_THE_PAGE });
-    }
-    expect(JSON.stringify(await world.store.get(taskKey(taskId)))).toBe(before);
-    // The company's own (shorter) window: two minutes old is too old for a one-minute window; a window that cannot be read refuses.
-    for (const [window, refusal] of [[async () => 60, "REAUTH_REQUIRED"], [async () => { throw new Error("rules down"); }, "RUNTIME_UNAVAILABLE"]] as const) {
-      const shorter = await started({ wiring: { stepUpWindowSeconds: window } });
-      const shorterRevision = await blockOnSecurity(shorter.world, shorter.taskId);
-      const answer = await shorter.routes.route(post(PAGE(shorter.taskId), acceptSecurity(shorterRevision)), { ...shorter.own, webApp: true, stepUp: { at: minutesAgo(shorter.world, 2), method: "passkey" } });
-      expect(errorOf(answer).code).toBe(refusal);
-      expect(JSON.stringify(await shorter.world.store.get(taskKey(shorter.taskId)))).toContain(`"revision":${shorterRevision},`);
-    }
+    const answer = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { principal: own.principal, client: own.client, webApp: true });
+    expect(answer?.statusCode, answer?.body).toBe(200);
   });
 
   it("refuses a company member who is not the task's owner, another company's caller and a script token as no such task; nothing is written", async () => {
     const { world, routes, remember, taskId } = await started();
     const revision = await blockOnSecurity(world, taskId);
     const before = JSON.stringify(await world.store.get(taskKey(taskId)));
-    const fresh = { webApp: true as const, stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const page = { webApp: true as const };
     // A member (even a company admin) of the same company who is not the task's owner.
     for (const role of ["member", "admin"] as const) {
-      const colleague = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(FAKE_COMPANY, role, `person-${role}-000000000002`), ...fresh });
+      const colleague = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(FAKE_COMPANY, role, `person-${role}-000000000002`), ...page });
       expect(colleague?.statusCode, role).toBe(404);
       expect(errorOf(colleague).code).toBe("TASK_NOT_FOUND");
     }
     // Another company's owner: exactly the answer for an id with no task.
-    const theirs = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(OTHER), ...fresh });
-    const missing = await routes.route(post(PAGE(randomUUID()), acceptSecurity(revision)), { ...remember(OTHER), ...fresh });
+    const theirs = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(OTHER), ...page });
+    const missing = await routes.route(post(PAGE(randomUUID()), acceptSecurity(revision)), { ...remember(OTHER), ...page });
     expect(theirs?.statusCode).toBe(404);
     expect(errorOf(theirs)).toEqual(errorOf(missing));
     expect(theirs!.body).not.toContain(FAKE_COMPANY);
     // A script token never reaches it.
-    const token = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(FAKE_COMPANY), ...fresh, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
+    const token = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(FAKE_COMPANY), ...page, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
     expect(token?.statusCode).toBe(404);
     expect(JSON.stringify(await world.store.get(taskKey(taskId)))).toBe(before);
   });
 
   it("is served only with the owner moves' wiring and the company's owner rule, for POST only", async () => {
     const unwired = await started({ wiring: { taskActions: undefined } });
-    const fresh = { webApp: true as const, stepUp: { at: minutesAgo(unwired.world, 1), method: "passkey" } };
-    const answer = await unwired.routes.route(post(PAGE(unwired.taskId), acceptSecurity(1)), { ...unwired.own, ...fresh });
+    const page = { webApp: true as const };
+    const answer = await unwired.routes.route(post(PAGE(unwired.taskId), acceptSecurity(1)), { ...unwired.own, ...page });
     expect(answer?.statusCode).toBe(404);
     expect(errorOf(answer).message).toBe(NOT_ON_THE_CORE_YET);
     const laptopRule = await started({ access: createOwnerTaskAccess() });
-    expect(errorOf(await laptopRule.routes.route(post(PAGE(laptopRule.taskId), acceptSecurity(1)), { ...laptopRule.own, webApp: true, stepUp: { at: minutesAgo(laptopRule.world, 1), method: "passkey" } })).message).toBe(NOT_ON_THE_CORE_YET);
+    expect(errorOf(await laptopRule.routes.route(post(PAGE(laptopRule.taskId), acceptSecurity(1)), { ...laptopRule.own, webApp: true })).message).toBe(NOT_ON_THE_CORE_YET);
     const wired = await started();
-    expect(await wired.routes.route(get(PAGE(wired.taskId)), { ...wired.own, ...fresh })).toBeUndefined();
+    expect(await wired.routes.route(get(PAGE(wired.taskId)), { ...wired.own, ...page })).toBeUndefined();
   });
 });
 
@@ -170,8 +156,8 @@ describe("DEC 254zzz39 (6): a body the move would refuse tells someone who may n
   it("another company's caller and a non-owner get no such task for any body (the task is read before the body)", async () => {
     const { world, routes, remember, taskId } = await started();
     await blockOnSecurity(world, taskId);
-    const fresh = { webApp: true as const, stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
-    for (const caller of [{ ...remember(OTHER), ...fresh }, { ...remember(FAKE_COMPANY, "member", "person-member-000000000003"), ...fresh }]) {
+    const page = { webApp: true as const };
+    for (const caller of [{ ...remember(OTHER), ...page }, { ...remember(FAKE_COMPANY, "member", "person-member-000000000003"), ...page }]) {
       for (const raw of ["not json", "[1]", "null"]) expect((await routes.route({ ...post(PAGE(taskId)), body: raw }, caller))?.statusCode, raw).toBe(404);
     }
   });
@@ -196,6 +182,40 @@ describe("Cloud #188 item 5: the task list's money read for a core task", () => 
     expect(await failing.routes.taskMoney(failing.own, failing.taskId)).toBeUndefined();
     const unwired = await started({ wiring: { taskActions: undefined } });
     expect(await unwired.routes.taskMoney(unwired.own, unwired.taskId)).toBeUndefined();
+  });
+});
+
+describe("the task list's readable check for a core task (Understand's round on ?detail=1)", () => {
+  it("is true exactly where the core's own task read shows the caller the task: the owner; a reader the company's read rule lets in; never another company's caller, a script token, a bad or missing id", async () => {
+    const { routes, own, remember, taskId } = await started();
+    expect(await routes.taskReadable(own, taskId)).toBe(true);
+    // A member who is not the owner (the owner rule is the only one wired): the task read says "no such task", so the check says no.
+    const member = remember(FAKE_COMPANY, "member", "person-member-000000000003");
+    expect(await routes.taskReadable(member, taskId)).toBe(false);
+    expect((await routes.route(get(`/v1/dev/tasks/${taskId}`), member))?.statusCode).toBe(404);
+    // Another company's caller (a member of OTHER), a script token, a malformed id and a missing one.
+    expect(await routes.taskReadable(remember(OTHER), taskId)).toBe(false);
+    expect(await routes.taskReadable({ ...own, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } }, taskId)).toBe(false);
+    expect(await routes.taskReadable(own, "not-a-task")).toBe(false);
+    expect(await routes.taskReadable(own, randomUUID())).toBe(false);
+    // A caller with no member company at all.
+    expect(await routes.taskReadable({ principal: localOwnerPrincipal({ companyId: FAKE_COMPANY, personId: "person-nobody-000000000009" }), client: "cli" }, taskId)).toBe(false);
+    // The company's read rule (the People list's viewers): a reader who may read but not act reads it, exactly as the task read says.
+    const readers = await started({ access: { ...ownerRule(), canRead: async (principal) => principal.personId === "person-reader-000000000005" } });
+    const reader = readers.remember(FAKE_COMPANY, "member", "person-reader-000000000005");
+    expect(await readers.routes.taskReadable(reader, readers.taskId)).toBe(true);
+    expect((await readers.routes.route(get(`/v1/dev/tasks/${readers.taskId}`), reader))?.statusCode).toBe(200);
+    expect(await readers.routes.taskReadable(readers.remember(FAKE_COMPANY, "member", "person-other-0000000000006"), readers.taskId)).toBe(false);
+  });
+
+  it("is false when the membership cannot be read or the read fails, never a throw", async () => {
+    const { routes, own, taskId, companyOf } = await started();
+    companyOf.mockRejectedValueOnce(new Error("sign-in table down"));
+    expect(await routes.taskReadable(own, taskId)).toBe(false);
+    companyOf.mockResolvedValueOnce({ companyId: "not-a-company", role: "owner" });
+    expect(await routes.taskReadable(own, taskId)).toBe(false);
+    companyOf.mockResolvedValueOnce(undefined);
+    expect(await routes.taskReadable(own, taskId)).toBe(false);
   });
 });
 

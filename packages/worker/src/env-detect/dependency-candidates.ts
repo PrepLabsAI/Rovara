@@ -1,6 +1,6 @@
 // Shared helpers of the dependency detectors (test services D1-D7): the image/driver name tables, safe names, and the merge that turns many sightings of one family into one candidate.
 // Everything a detector puts in a candidate is a family id, a kind, a fixed word, a number or an environment variable NAME. A value read from a file (a password, a host, a token) is never copied.
-import { awsSeededKinds, awsServiceKeyFromSdkName, awsEmulatorServiceRow, looksLikeSecretValue, normaliseAwsServiceKey, type AwsSdkNameKind, type TestEnvDependencyKind } from "@agentx/contracts";
+import { GCP_PACK, GCP_PACK_FAMILIES, awsSeededKinds, awsServiceKeyFromSdkName, awsEmulatorServiceRow, looksLikeSecretValue, normaliseAwsServiceKey, type AwsSdkNameKind, type TestEnvDependencyKind } from "@agentx/contracts";
 import { DEPENDENCY_REFUSED_FIELDS, type DependencyCandidate, type DependencyEvidence, type DependencyHints, type DependencyStrength } from "./types.js";
 
 export const MAX_EVIDENCE = 8;
@@ -14,7 +14,19 @@ const STRENGTH_RANK: Record<DependencyStrength, number> = { declared: 3, used: 2
 /** What each recognised family is. The family id is the catalog's: one entry per software, with every image or driver that stands for it listed in the tables below. */
 export const FAMILY_KINDS: Readonly<Record<string, TestEnvDependencyKind>> = {
   postgres: "database", mysql: "database", mariadb: "database", mongodb: "database", redis: "cache", memcached: "cache", rabbitmq: "queue", kafka: "stream", elasticsearch: "search", opensearch: "search", smtp: "email",
+  // The GCP pack (L4-E8): pubsub, firestore, datastore, bigtable, spanner, gcs, bigquery; the kind is the pack table's.
+  ...Object.fromEntries(GCP_PACK_FAMILIES.map((family) => [family, GCP_PACK[family].kind])),
 };
+
+/**
+ * The Google Cloud client libraries of the GCP pack, by the part of the name after `google-cloud-` (Python, Java), `@google-cloud/` (Node) or `cloud.google.com/go/` (Go), to the pack family they talk to. A library not listed (Vision,
+ * Secret Manager, ...) is not a pack service and is left alone: it is never read as one.
+ */
+export const GCP_CLIENT_FAMILIES: Readonly<Record<string, string>> = {
+  pubsub: "pubsub", firestore: "firestore", datastore: "datastore", ndb: "datastore", bigtable: "bigtable", spanner: "spanner", storage: "gcs", bigquery: "bigquery", "bigquery-storage": "bigquery",
+};
+/** The pack family of a Google client library's short name, or undefined. */
+export const gcpClientFamily = (name: string): string | undefined => (Object.hasOwn(GCP_CLIENT_FAMILIES, name) ? GCP_CLIENT_FAMILIES[name] : undefined);
 
 export function kindOfFamily(family: string): TestEnvDependencyKind {
   if (family.startsWith("aws:")) {
@@ -58,6 +70,9 @@ const IMAGE_NAMES: ReadonlyArray<{ names: readonly string[]; family: string }> =
   { names: ["opensearch"], family: "opensearch" },
   { names: ["mailhog", "mailpit", "maildev"], family: "smtp" },
   { names: ["minio"], family: "aws:s3" },
+  // The GCP pack's community images by name (Google's own SDK image runs any of several emulators, so its name says none).
+  { names: ["fake-gcs-server"], family: "gcs" },
+  { names: ["bigquery-emulator"], family: "bigquery" },
 ];
 
 /** What a container image reference stands for. Reads the NAME and the major version only: a registry, a tag suffix, a digest or a credential in the reference is dropped, never kept. */

@@ -506,6 +506,54 @@ describe('the "Make this a skill?" card', () => {
     const deps: SkillDeps = { ...w.deps, access: { mayRead: async (_org, _viewer, places) => places.map(() => true), taskVisibility: hidden } };
     expect(await skillOffers(deps, KEY)).toEqual([]);
   });
+  describe("a bounded scan: the visible lessons are filtered from up to 200 candidates before 50 are counted (b18 Low 1)", () => {
+    const ACL = { source: "slack" as const, scope: "slack:CPRIVATE", principals: ["ann"], capturedAt: "2026-11-01T00:00:00Z", liveCheck: "none" as const };
+    const privateLesson = (w: World, n: number): Lesson => procedure(w, { id: `les_a${String(n).padStart(4, "0")}`, title: `Private ${String(n)}`, provenance: { ...draft().provenance, authors: ["ann", "bob"], supportTasks: [], measured: false, audience: { kind: "restricted", acl: ACL } } });
+    const placed = (scope: string): Lesson["provenance"] => ({ ...draft().provenance, authors: ["ann", "bob"], supportTasks: [], measured: false, audience: { kind: "project" }, sourceScopes: [scope] });
+    const putMany = async (w: World, list: Lesson[]): Promise<void> => { for (let at = 0; at < list.length; at += 20) await put(w, ...list.slice(at, at + 20)); };
+    type Places = Parameters<SkillDeps["access"]["mayRead"]>[2];
+    const answering = (w: World, answer: (places: Places) => boolean[]): SkillDeps["access"] => ({ ...w.deps.access, mayRead: async (_org, _viewer, places) => answer(places) });
+
+    it("60 private lessons come first, then a visible proven one: the visible one is offered and no private one ever is", async () => {
+      const w = await world();
+      const privates = Array.from({ length: 60 }, (_, n) => privateLesson(w, n));
+      const visible = procedure(w, { id: "les_zvisible", title: "Visible procedure" });
+      await putMany(w, [...privates, visible]);
+      for (const lesson of [...privates.slice(0, 3), visible]) await used(w, lesson.id, 10);
+      const offers = await skillOffers(w.deps, KEY);
+      expect(offers.map((offer) => offer.lessonId)).toEqual(["les_zvisible"]);
+      expect(offers.some((offer) => offer.title.startsWith("Private"))).toBe(false);
+    });
+
+    it("a lesson the whole project may not read through a record is never offered, even among the first 50", async () => {
+      const w = await world();
+      const hidden = procedure(w, { id: "les_a0001", title: "Hidden place", provenance: placed("slack:CDENIED") });
+      const open = procedure(w, { id: "les_b0001", title: "Open place", provenance: placed("slack:COPEN") });
+      await putMany(w, [hidden, open]);
+      await used(w, hidden.id, 10);
+      await used(w, open.id, 10);
+      const access = answering(w, (places) => places.map((place) => !place.scopes.includes("slack:CDENIED")));
+      expect((await skillOffers({ ...w.deps, access }, KEY)).map((offer) => offer.lessonId)).toEqual(["les_b0001"]);
+    });
+
+    it("the whole-project check reads at most 200 candidates and counts at most 50 lessons, however many there are", async () => {
+      const w = await world();
+      const all = Array.from({ length: 260 }, (_, n) => procedure(w, { id: `les_c${String(n).padStart(4, "0")}`, title: `Open ${String(n)}`, provenance: placed(`slack:C${String(n)}`) }));
+      await putMany(w, all);
+      const checked: string[] = [];
+      const access = answering(w, (places) => { checked.push(...places.flatMap((entry) => entry.scopes)); return places.map(() => true); });
+      const counted = new Set<string>();
+      const documents = new Proxy(w.deps.documents, { get: (target, name) => {
+        const value = Reflect.get(target, name, target) as unknown;
+        if (name !== "query" || typeof value !== "function") return value;
+        return (request: { pk: string }) => { if (request.pk.includes("LESSON_USE#")) counted.add(request.pk); return (value as (r: unknown) => unknown).call(target, request); };
+      } });
+      await skillOffers({ ...w.deps, access, documents }, KEY);
+      expect(checked).toHaveLength(200);
+      expect(checked).not.toContain("slack:C200");
+      expect(counted.size).toBe(50);
+    });
+  });
   it("is not offered while phase 2 has weight against the lesson or has it under question: the card and the button read the one proven band (L4-INT)", async () => {
     const w = await world();
     const lesson = await proven(w);

@@ -84,6 +84,16 @@ export function isCoreAgentModelId(value: string): boolean {
   return /claude|anthropic/u.test(value) ? CORE_CLAUDE_AGENT_MODEL.test(value) : true;
 }
 /**
+ * DEC 254n(1), 243c (live switches check 2026-11-18): the per-company agent model CHOICE (setup's "AI and spending" model picker). The broker reads ROVARA_CORE_AGENT_MODEL_CHOICE and offers the
+ * choice only where it is exactly `on` (core-host/offered-models-http.ts); nothing in infra set it, so no hosted install could turn it on (the runbook's template overlay was dropped by every
+ * upgrade). It is now the stack parameter `CoreAgentModelChoice` (`off`, the default, or `on`), packed for the BROKER only (`mx`; the dispatcher reads no choice setting), kept across upgrades
+ * and set with `agentx config set coreEngine.agentModelChoice on`. Default off: DEC 254n(1) does not say default on, and the runbook keeps it off until the offered-models route is qualified.
+ */
+export const CORE_AGENT_MODEL_CHOICE_VARIABLE = "ROVARA_CORE_AGENT_MODEL_CHOICE";
+export const CORE_AGENT_MODEL_CHOICE_PARAMETER = "CoreAgentModelChoice";
+export const CORE_AGENT_MODEL_CHOICE_VALUES = ["off", "on"] as const;
+export const CORE_AGENT_MODEL_CHOICE_DEFAULT = "off";
+/**
  * DEC 254zzn(2) (lead 4, L4-AM): the hosted ANSWERS model, a stack parameter of its own (`CoreAnswersModel`, the broker's ROVARA_CORE_ANSWERS_MODEL, packed `aa`). Empty (the default) means
  * hosted answers and the hosted start-box classifier run on the install's agent model exactly as before; set, they run on this model and ONLY they do (a coding task or any other core step
  * keeps ROVARA_CORE_AGENT_MODEL). The gateway's answers purpose runs on the company's own Anthropic account, so the value is a Claude engine name (never a Bedrock `us.anthropic....` id, never a
@@ -99,6 +109,23 @@ export function isCoreAnswersModelId(value: string): boolean {
   return typeof value === "string" && value.length <= CORE_ANSWERS_MODEL_MAX_LENGTH && new RegExp(CORE_ANSWERS_MODEL_PATTERN, "u").test(value) && value !== "" && isCoreAgentModelId(value);
 }
 /**
+ * DEC 254zzz58, 254zzz63: the hosted lessons' LEARNING model, a stack parameter of its own (`CoreLearningModel`, the broker's ROVARA_CORE_LEARNING_MODEL, packed `lm`), separate from the task
+ * agent model. It is the INSTALL default; a company may choose its own (contracts company-learning-model.ts), which wins for that company. Empty (the default) means
+ * CORE_LEARNING_MODEL_DEFAULT (Claude Haiku 5.5); set, it is ONE Claude engine name. Only the learning calls (the reflector, the curator's judge, the outcome judge) use it (every task step keeps
+ * ROVARA_CORE_AGENT_MODEL). The gateway's learning route used here is Anthropic Messages on the company's own Anthropic account, so the value is a Claude engine name, never a Bedrock id and
+ * never a non-Claude model: the same rule and length as the answers model.
+ */
+export const CORE_LEARNING_MODEL_VARIABLE = "ROVARA_CORE_LEARNING_MODEL";
+export const CORE_LEARNING_MODEL_PARAMETER = "CoreLearningModel";
+export const CORE_LEARNING_MODEL_PATTERN = CORE_ANSWERS_MODEL_PATTERN;
+export const CORE_LEARNING_MODEL_MAX_LENGTH = CORE_ANSWERS_MODEL_MAX_LENGTH;
+/** DEC 254zzz63: the learning model when neither the company nor the install chose one: Claude Haiku 5.5, by the model gateway's own name for it. */
+export const CORE_LEARNING_MODEL_DEFAULT = "claude-haiku-5-5";
+/** Whether `value` is a well-formed learning model id: a Claude engine name (the answers model's rule). Empty is not an id (it means CORE_LEARNING_MODEL_DEFAULT). */
+export function isCoreLearningModelId(value: string): boolean {
+  return isCoreAnswersModelId(value);
+}
+/**
  * DEC 254g: the broker's admin read of the models the model gateway offers the caller's company (`OfferedAgentModels`), for `agentx config set coreEngine.agentModel`. Only the broker
  * may sign the gateway's service token (the task key's policy permits only its role), so the CLI asks the broker with its admin sign-in.
  */
@@ -112,6 +139,16 @@ export const CORE_DISPATCH_MAX_RECEIVES = CORE_DISPATCH_ATTEMPTS_MAX + 1;
 /** The core's dispatch queue and its dead letters, by fixed per-environment names (named environments only). */
 export const coreDispatchQueueName = (env: string): string => `agentx-${env}-core-dispatch`;
 export const coreDispatchDeadLetterName = (env: string): string => `agentx-${env}-core-dispatch-dead`;
+
+/**
+ * L4-SQS (journey audit B3c): the lessons reflection queue and its dead letters, by fixed per-environment names (named environments only), so the broker builds both URLs from AGENTX_ENV and its
+ * 4 KB grows by nothing (DERIVED_BROKER_VARIABLES). The queue's visibility timeout and redrive limit are the core's own constants (LESSONS_REFLECT_VISIBILITY_SECONDS, LESSONS_REFLECT_MAX_RECEIVES).
+ */
+export const coreLessonsReflectQueueName = (env: string): string => `agentx-${env}-lessons-reflect`;
+export const coreLessonsReflectDeadLetterName = (env: string): string => `agentx-${env}-lessons-reflect-dead`;
+/** The variables the broker reads the reflection queue's URLs as (derived; the dispatcher is given neither: it neither sends to nor reads this queue). */
+export const CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE = "CORE_LESSONS_REFLECT_QUEUE_URL";
+export const CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE = "CORE_LESSONS_REFLECT_DEAD_LETTER_URL";
 
 /**
  * Web task channel C8 (option b, DEC 254zm(3)): the attention email's own small sender function, by a fixed per-environment name, so the broker builds it from AGENTX_ENV and its 4 KB grows by nothing.

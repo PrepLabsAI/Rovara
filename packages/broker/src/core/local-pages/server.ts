@@ -635,7 +635,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       if (!verified(request, { action: "second-review.act", subject: op })) return redirect(`${back}?n=form`);
       const parsed = secondReviewActionOf(op, request.form);
       if (parsed === undefined) return redirect(`${back}?n=invalid`);
-      // A change that needs a recent sign-in (lowering, withdrawing, the evidence) is good only in a page session opened within the last ten minutes (the same check as making a script token).
+      // A change that needs a recent sign-in (lowering, withdrawing, the evidence) is good only in a page session opened within the last ten minutes (the laptop page rule).
       return redirect(`${back}?n=${outcomeCode(await act(parsed, { fresh: tokenPageIsFresh(request) }), "saved")}`);
     } },
     { method: "GET", pattern: /^\/models$/, handle: async (request) => {
@@ -651,7 +651,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       if (!verified(request, { action: "models.act", subject: `${op}:${stage}` })) return redirect(`${back}?n=form`);
       const parsed = modelSelectionActionOf(op, request.form);
       if (parsed === undefined) return redirect(`${back}?n=invalid`);
-      // Every change of the model setting is good only in a page session opened within the last ten minutes (the same check as making a script token).
+      // Every change of the model setting is good only in a page session opened within the last ten minutes (the laptop page rule).
       const result = await act(parsed, { fresh: tokenPageIsFresh(request) });
       return redirect(`${back}?n=${!result.ok && result.reason === "reauth" ? "modelreauth" : outcomeCode(result, "saved")}`);
     } },
@@ -757,7 +757,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
         if (username !== "" && password !== "") input = { op, project, username, password };
       } else input = { op, project } as BrowserEvidencePageAction;
       if (input === undefined) return redirect(`${back}?n=invalid`);
-      // Every change is good only in a page session opened within the last ten minutes (the same check as making a script token).
+      // Every change is good only in a page session opened within the last ten minutes (the laptop page rule).
       if (!tokenPageIsFresh(request)) return redirect(`${back}?n=bevfresh`);
       const result = await act(input, { fresh: tokenPageIsFresh(request) });
       return redirect(`${back}?n=${!result.ok && result.reason === "reauth" ? "bevfresh" : outcomeCode(result, op === "save" ? "bevsaved" : op === "turn-off" ? "bevoff" : op === "save-sign-in" ? "bevsignin" : "bevsigninoff")}`);

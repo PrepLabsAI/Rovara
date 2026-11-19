@@ -17,9 +17,12 @@
 //     `AWS_ENDPOINT_URL_*` name the repository's own settings set (`repoEndpointNames`), so a value of the repository cannot point a service elsewhere. The other ~430 services are not given a variable: a call to one reaches
 //     the emulator through the global endpoint, where its ledger counts it as out of the plan, so the broker flags it (a literal sinkhole host is never looked up, so nothing would count a call to it). Without an
 //     emulator (slice 1) there is no AWS block at all and the sealed name server counts the names that are looked up.
+//   - The GCP pack (L4-E8): a dependency of a pack family points Google's client libraries at its emulator through its own connection variables (`PUBSUB_EMULATOR_HOST`, `FIRESTORE_EMULATOR_HOST`, `DATASTORE_EMULATOR_HOST`,
+//     `BIGTABLE_EMULATOR_HOST`, `SPANNER_EMULATOR_HOST`, `STORAGE_EMULATOR_HOST`, `BIGQUERY_EMULATOR_HOST`, from the catalog's templates). The `gcp` block adds the made-up project id (`GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`,
+//     `CLOUDSDK_CORE_PROJECT`) and nothing else: no key file, no token, no impersonation. A name that carries a Google credential is refused from any dependency (`GCP_CREDENTIAL_VARIABLES`), and the block never sets one.
 import { lstat, mkdir, open, rm, chmod } from "node:fs/promises";
 import { join, isAbsolute } from "node:path";
-import { CONNECT_TEMPLATE_PLACEHOLDERS, EnvNameSchema, awsEndpointVariableSuffix, connectTemplateProblem, e2eSecretSpellings, redactText, reservedDependencyEnvName } from "@agentx/contracts";
+import { CONNECT_TEMPLATE_PLACEHOLDERS, EnvNameSchema, GCP_CREDENTIAL_VARIABLES, GCP_FAKE_PROJECT_ID, awsEndpointVariableSuffix, connectTemplateProblem, e2eSecretSpellings, redactText, reservedDependencyEnvName } from "@agentx/contracts";
 import { HELPER_CREDENTIAL_PATTERNS, type HelperFiles } from "./service-helpers.js";
 
 export const AWS_FAKE_ACCESS_KEY_ID = "ROVARATESTKEY";
@@ -91,7 +94,15 @@ export interface ServiceEnvInput {
   sinkholeUrl: string;
   dependencies: readonly ServiceEnvDependency[];
   aws?: ServiceEnvAws;
+  /** The run has a dependency of the GCP pack: the sandboxes are told a made-up project id. Absent: no Google variable is set. */
+  gcp?: ServiceEnvGcp;
 }
+
+export interface ServiceEnvGcp {
+  /** The made-up project id (`GCP_FAKE_PROJECT_ID` when absent): six to thirty lower-case letters, digits and hyphens, as a project id is. */
+  projectId?: string;
+}
+const GCP_PROJECT_ID = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u;
 
 export interface ServiceEnvironment {
   /** `[name, value]` in the order they are written. */
@@ -148,7 +159,7 @@ export function buildServiceEnvironment(input: ServiceEnvInput): ServiceEnvironm
     const values = { user, password, db, region, host, port: String(port), endpoint: `http://${host}:${String(port)}` };
     for (const variable of dependency.connect.env) {
       // Rovara and the system own their names; a dependency (a repository's proposal) may not take one, `AWS_*` included.
-      if (reservedDependencyEnvName(variable.name)) refuse();
+      if (reservedDependencyEnvName(variable.name) || GCP_CREDENTIAL_VARIABLES.includes(variable.name)) refuse();
       add(variable.name, fill(variable.template, values));
     }
   }
@@ -176,6 +187,13 @@ export function buildServiceEnvironment(input: ServiceEnvInput): ServiceEnvironm
     add("AWS_CONFIG_FILE", "/dev/null");
     add("AWS_SHARED_CREDENTIALS_FILE", "/dev/null");
     for (const value of SERVICE_ENV_EXEMPT_VALUES) secrets.add(value);
+  }
+  if (input.gcp !== undefined) {
+    // A made-up project id and nothing else: the Google clients read the emulator variables above and send no credential. Never a key file, a token or an impersonation.
+    const project = plain(input.gcp.projectId ?? GCP_FAKE_PROJECT_ID, GCP_PROJECT_ID);
+    add("GOOGLE_CLOUD_PROJECT", project);
+    add("GCLOUD_PROJECT", project);
+    add("CLOUDSDK_CORE_PROJECT", project);
   }
   return { entries, secretValues: [...secrets] };
 }

@@ -152,7 +152,7 @@ const installArgsOf = (calls: string[][]) => calls.filter((c) => c[0] === "run" 
 const flag = (args: readonly string[], name: string): string[] => args.flatMap((arg, index) => (args[index - 1] === name ? [arg] : []));
 const PIP: EvalEnvironment = { kind: "install", commands: [{ executable: "python3", args: ["-m", "pip", "install", "-r", "requirements.txt"], cwd: "." }] };
 const junit = (cases: Array<[string, boolean]>): string => `<testsuites><testsuite name="pytest">${cases.map(([name, pass]) => (pass ? `<testcase name="${name}"/>` : `<testcase name="${name}"><failure message="x"/></testcase>`)).join("")}</testsuite></testsuites>`;
-const roundNetworks = (daemon: ReturnType<typeof fakeDaemon>) => daemon.networks.filter((n) => n.name !== "agentx-task");
+const roundNetworks = (daemon: ReturnType<typeof fakeDaemon>) => daemon.networks.filter((n) => n.name !== "agentx-task" && n.name !== "rovara-snet");
 
 describe("no environment: today's run, byte for byte", () => {
   it("runs no install, makes no extra variable, and starts the helper and the eval as before", async () => {
@@ -203,6 +203,24 @@ describe("install steps", () => {
     expect(roundNetworks(w.daemon)).toEqual([]);
   });
 
+  it("L4-NETG: on a gateway-mode worker the install box joins the gateway's internal network with the gateway as its ONE name server, and never the open bridge; a half-configured gateway worker refuses before any install box starts", async () => {
+    const gatewayEnvironment: NodeJS.ProcessEnv = { ...OFFERED, AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "172.28.250.2" };
+    const daemon = fakeDaemon();
+    // The gateway's internal network is made by the boot, not by the worker: it is there before any sandbox starts.
+    daemon.networks.push({ name: "rovara-snet", labels: {} });
+    const w = await world(daemon, { evalEnvironment: PIP, environment: gatewayEnvironment });
+    await w.sandbox.run(w.input());
+    const [install] = installArgsOf(w.daemon.calls);
+    expect(flag(install!, "--network")).toEqual(["rovara-snet"]);
+    expect(flag(install!, "--dns")).toEqual(["172.28.250.2"]);
+    expect(install).not.toContain("agentx-task");
+    // The sealed run is unchanged: the round network only.
+    expect(flag(runArgsOf(w.daemon.calls, "-eval")!, "--network")[0]).not.toBe("rovara-snet");
+    const half = await world(fakeDaemon(), { evalEnvironment: PIP, environment: { ...OFFERED, AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_NETWORK: "rovara-snet" } });
+    await expect(half.sandbox.run(half.input())).rejects.toBeTruthy();
+    expect(installArgsOf(half.daemon.calls)).toEqual([]);
+  });
+
   it("carry the task sandbox labels (the worker's own leftover sweep finds a box a crash left) and are removed even when the run fails later", async () => {
     const daemon = fakeDaemon({ play: async (kind) => (kind === "install" ? { code: 0 } : { code: 1, log: "boom" }) });
     const w = await world(daemon, { evalEnvironment: PIP });
@@ -228,6 +246,15 @@ describe("install steps", () => {
     expect(w.daemon.containers).toEqual([]);
     expect(roundNetworks(w.daemon)).toEqual([]);
     expect(w.daemon.working.paused).toBe(false);
+  });
+
+  it("L4-TH1: a sealed eval that tried to reach a database and an outside host is named; a model host the sandbox pinned to the helper is not", async () => {
+    const log = ["Error: getaddrinfo ENOTFOUND api.openai.com", "Error: connect ECONNREFUSED 172.30.1.7:5432", "Error: getaddrinfo ENOTFOUND api.stripe.com"].join("\n");
+    const w = await world(fakeDaemon({ play: async (kind) => (kind === "install" ? { code: 0 } : { code: 1, log }) }));
+    const diagnostic = runFailureOf(await w.sandbox.run(w.input({ side: "old" })).catch((e: unknown) => e))!;
+    expect(diagnostic).toMatchObject({ code: "blocked_connection", phase: "run", exitCode: 1, blocked: { items: [{ kind: "database", port: 5432 }, { kind: "service", host: "api.stripe.com" }] } });
+    const only = await world(fakeDaemon({ play: async (kind) => (kind === "install" ? { code: 0 } : { code: 1, log: "Error: getaddrinfo ENOTFOUND api.openai.com" }) }));
+    expect(runFailureOf(await only.sandbox.run(only.input({ side: "old" })).catch((e: unknown) => e))).toMatchObject({ code: "exited" });
   });
 
   it("an install that ran out of time, or a box that did not start, is its own named failure", async () => {

@@ -16,7 +16,7 @@ import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointe
 // good and is kept (bounded) per state table client. A verdict about an id with no task behind it is never kept, except `core` (a stamp, once there, stays).
 import { randomUUID } from "node:crypto";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { AgentXErrorCodeSchema, OrgIdSchema, agentXError, type ActorRef, type ConversationRef } from "@agentx/contracts";
+import { AgentXErrorCodeSchema, OrgIdSchema, agentXError, type ActorRef, type ConversationRef, type DeveloperSignInMethod } from "@agentx/contracts";
 import { workspaceKey, taskPointerKey as scopedTaskPointerKey } from "../core/task-flow/keys.js";
 import { engineStampKey, stampOf, type Engine, type EngineStamp } from "../core-host/engine-stamp.js";
 import type { CoreArea } from "../core-host/flags.js";
@@ -178,6 +178,11 @@ export interface CoreTaskEntry {
    */
   taskMoney?(caller: CoreEntryCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined>;
   /**
+   * Understand's round on the task list's detail: whether the core's own task read would show this caller the task (the owner, a co-owner or a reader of its People list, in their live company). `false` for anything else
+   * and for any failure. Absent: the deployment gives the list no round for core tasks.
+   */
+  taskReadable?(caller: CoreEntryCaller, taskId: string): Promise<boolean>;
+  /**
    * HW5b: a press of Approve (or the words typed for Request changes) on the plan card a core task's chat thread was given, as a request to the company's approval gate (`core-host/chat-decision.ts`): the caller is the person the broker
    * resolved from the chat account, and the core checks the account, the workspace, the card, the risk and the person's authority again. A refusal writes nothing and is an answer, not a throw; a throw means nothing was decided (the chat
    * may try again). Absent: the deployment takes no decision from a chat (the card is the sign-in card).
@@ -197,14 +202,14 @@ export async function stopCoreTaskAs(entry: CoreTaskEntry | undefined, caller: C
 }
 
 /**
- * The broker's signed-in caller as the core entry takes it. `stepUp` is the step-up the VERIFIED access token states (`stepUpOf`), set only by the broker's token sign-in; `clientId` is the
+ * The broker's signed-in caller as the core entry takes it. `amr` is how the person signed in, as the VERIFIED access token states it, set only by the broker's token sign-in; `clientId` is the
  * registered sign-in client whose token made the call (absent for the Rovara CLI).
  */
 export interface CoreEntryCaller {
   developerId: string;
   sessionId: string;
   name: string;
-  stepUp?: { at: string; method: string } | undefined;
+  amr?: DeveloperSignInMethod | undefined;
   clientId?: string | undefined;
   /** DEC 236h: set by the broker's sign-in only for the Rovara web app's own sign-in client (`DeveloperCaller.webApp`), never from a request. Everything else that reads the wiki is a tool outside Rovara (L4-WKS). */
   webApp?: true | undefined;
@@ -220,7 +225,7 @@ const isStart = (request: BrokerRequest): boolean => request.method === "POST" &
  * routes take it from membership.
  */
 export function coreTaskEntryFrom(
-  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>; taskMoney?(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined> },
+  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>; taskMoney?(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined>; taskReadable?(caller: DeployedCaller, taskId: string): Promise<boolean> },
   deployedCallerOf: (caller: CoreEntryCaller) => Promise<DeployedCaller | undefined>,
   /** L4-U5b: the deployment's thread recording, asked with the caller as the core knows them (`deployedCallerOf`). Absent: the entry has no `recordThread`. */
   recordThread?: (deployed: DeployedCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }) => Promise<boolean>,
@@ -230,7 +235,16 @@ export function coreTaskEntryFrom(
   chatDecision?: (deployed: DeployedCaller, press: ChatDecisionPress) => Promise<ChatDecisionResult>,
 ): CoreTaskEntry {
   const taskMoney = routes.taskMoney?.bind(routes);
+  const taskReadable = routes.taskReadable?.bind(routes);
   return {
+    ...(taskReadable === undefined ? {} : {
+      async taskReadable(caller: CoreEntryCaller, taskId: string) {
+        let deployed: DeployedCaller | undefined;
+        try { deployed = await deployedCallerOf(caller); } catch { return false; }
+        if (deployed === undefined) return false;
+        try { return (await taskReadable(deployed, taskId)) === true; } catch { return false; }
+      },
+    }),
     ...(chatDecision === undefined ? {} : {
       async chatDecision(caller: CoreEntryCaller, press: ChatDecisionPress): Promise<ChatDecisionResult> {
         // No membership is the same refusal as a person who may not: nothing is written.

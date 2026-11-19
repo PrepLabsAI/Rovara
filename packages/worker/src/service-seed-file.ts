@@ -186,3 +186,26 @@ export async function loadSeedFile(docker: Pick<DockerCli, "execBytes" | "run">,
   }
   if (failure !== undefined) throw failure;
 }
+
+/** The most one read of the database may print (exact bytes, never cut: a longer answer is a failure, not a partial schema). */
+export const DATABASE_READ_MAX_BYTES = 1_048_576;
+
+/**
+ * L4-E34 (E3): reads ONE text answer from the helper's database, as the database's own owner over the container's local socket (no host, port or password): `psql -t -A -c <statement>`, in a session set read-only first (`default_transaction_read_only`). The statement is one of Rovara's fixed,
+ * read-only statements (the schema read, the key sample), never text from a repository: it must start with SELECT, hold no NUL and be at most 64 KiB. The answer is the exact stdout (`execBytes`), at most
+ * `DATABASE_READ_MAX_BYTES`. Any failure (a non-zero exit, a timeout, a cancel, too large an answer) is a `SeedFileError` with a fixed reason; the statement and the output never go in it.
+ */
+export async function readDatabaseText(docker: Pick<DockerCli, "execBytes">, target: SeedFileTarget, statement: string, signal: AbortSignal, options: { timeoutMs?: number } = {}): Promise<string> {
+  if (FILE_SEED_FAMILIES[target.family] === undefined) throw new SeedFileError("unsupported");
+  const { user, database } = target;
+  if (user === undefined || database === undefined || !HELPER_CREDENTIAL_PATTERNS.user.test(user) || !HELPER_CREDENTIAL_PATTERNS.database.test(database) || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u.test(target.container)) throw new SeedFileError("unsupported");
+  if (!/^\s*SELECT\b/iu.test(statement) || statement.includes("\0") || statement.length > 65_536) throw new SeedFileError("unsupported");
+  const execBytes = docker.execBytes;
+  if (execBytes === undefined) throw new SeedFileError("unsupported");
+  const timeoutMs = options.timeoutMs ?? CONTROL_TIMEOUT_MS;
+  const result = await execBytes.call(docker, ["exec", target.container, "psql", "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-U", user, "-d", database, "-c", "SET default_transaction_read_only = on", "-c", statement], { signal, timeoutMs, maxStdoutBytes: DATABASE_READ_MAX_BYTES }).catch(() => undefined);
+  if (result === undefined || result.aborted === true || signal.aborted) throw new SeedFileError("load_failed");
+  if (result.timedOut === true) throw new SeedFileError("timeout");
+  if (result.exitCode !== 0 || result.tooLarge === true) throw new SeedFileError("load_failed");
+  return result.stdout.toString("utf8").trim();
+}

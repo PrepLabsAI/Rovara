@@ -9,15 +9,17 @@
 //   POST /v1/app/projects/{project}/setup-agent/confirm    "Use this setup": a candidate revision from the run's verified commands, and its check on a fresh workspace (L4-D)
 //   POST /v1/app/projects/{project}/setup-agent/discard    drop the waiting candidate ({ requestId })
 //   GET  /v1/app/projects/{project}/setup-agent/eval          L4-EVC: the project's ONE eval card, in dollars (eval-card.ts)
-//   POST /v1/app/projects/{project}/setup-agent/eval-approve  ONE approval: confirm the eval AND approve its spend in the same act (a fresh step-up, the live approver rule, the dollars the person saw)
+//   POST /v1/app/projects/{project}/setup-agent/eval-approve  ONE approval: confirm the eval AND approve its spend in the same act (the live approver rule, the dollars the person saw)
+//   POST /v1/app/projects/{project}/setup-agent/eval-wrapper   L4-EVW4 (DEC 254zzz43): a person's act on the wrapper card ({ requestId, action: open_pull_request | dismiss | reopen | check, selection? }). ONLY a person's POST opens a pull
+//                                                         (one new file on a new branch, never merged by Rovara; owner, admin or project maintainer); `check` (look for the file on the default branch) is a read any member may ask
 //   GET  /v1/app/projects/{project}/setup-agent/updates    L4-SC (DEC 254z c): the "Update setup" offers a merged plan's setup changes left (managers only; a reader sees none)
 //   POST /v1/app/projects/{project}/setup-agent/updates/prepare   "Update setup": a candidate from the offer's items and its check (the same flow as confirm; approves nothing)
 //   POST /v1/app/projects/{project}/setup-agent/updates/dismiss   "Not now" ({ requestId, taskId })
 //   POST /v1/app/projects/{project}/setup-agent/eval-decide   approve or reject a waiting eval spend item (a changed eval that grew past its approved limit asks again)
 //   POST /v1/app/projects/{project}/setup-agent/eval-health   the OPT-IN "Check my evals now": records the person's yes; nothing runs without it (eval-health-request.ts)
-//   POST /v1/app/projects/{project}/setup-agent/decide     approve or reject the waiting candidate once its check passed (L4-D, setup-approval.ts): a fresh step-up, then the risk-based
+//   POST /v1/app/projects/{project}/setup-agent/decide     approve or reject the waiting candidate once its check passed (L4-D, setup-approval.ts): the risk-based
 //                                                         approver rule (DEC 254z b), through the approval gate, bound to the candidate's digest and revision
-//   POST /v1/app/projects/{project}/setup-agent/host-decide  allow or refuse a website a setup run asked for (L4-SF d): the high-risk rule (a company owner or admin, either answer), a fresh step-up, through
+//   POST /v1/app/projects/{project}/setup-agent/host-decide  allow or refuse a website a setup run asked for (L4-SF d): the high-risk rule (a company owner or admin, either answer), through
 //                                                         the approval gate, bound to the exact ask (its host and when it was asked); the journal lists each open ask's `approval` and `canDecide`
 //
 // Confirm, discard and decide are served only where the deployment wires the hosted approval (`approval`): without it a confirm would leave a candidate nothing can approve.
@@ -38,11 +40,15 @@ import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { TaskFlowDeps, TaskStartCaller } from "../core/task-flow/deps.js";
 import { startTask } from "../core/task-flow/start.js";
 import { cancelTask } from "../core/task-flow/cancel.js";
-import { EvalDiscoveryConfirmBodySchema } from "@agentx/contracts";
+import { EvalDiscoveryConfirmBodySchema, EvalWrapperActionBodySchema } from "@agentx/contracts";
 import { readEvalCard } from "../core/setup-agent/eval-card.js";
 import { confirmEvalDiscovery, type EvalDiscoveryConfirmDeps } from "../core/setup-agent/eval-discovery.js";
 import { EvalHealthRequestBodySchema, requestEvalHealthCheck } from "../core/setup-agent/eval-health-request.js";
-import { EVAL_SPEND_KIND, readEvalSpendRecord } from "../core/setup-agent/eval-spend.js";
+import { EVAL_SPEND_KIND, readEvalSpendRecord, roleFor as evalRoleFor } from "../core/setup-agent/eval-spend.js";
+import { detectEvalWrappers, dismissEvalWrapper, openEvalWrapperPullRequest, refreshEvalWrappers, reopenEvalWrapper, type EvalWrapperDeps } from "../core/setup-agent/eval-wrapper.js";
+import { readEvalWrapperCards } from "../core/setup-agent/eval-wrapper-card.js";
+import { readEvalDiscovery } from "../core/setup-agent/eval-discovery.js";
+import { developerIdOf } from "../core/sessions/create.js";
 import { SetupAgentStartBodySchema, SetupAgentStopBodySchema, getSetupAgent, readState, startSetupAgent, stopSetupAgent, type SetupAgentDeps } from "../core/setup-agent/agent.js";
 import type { SetupApplyDeps } from "../core/setup-agent/apply.js";
 import { SETUP_APPLY_KIND, SetupConfirmBodySchema, confirmSetupAgent, discardSetupApply, readSetupApply, setupCandidateRisk, waitingSetupApply } from "../core/setup-agent/apply.js";
@@ -68,7 +74,10 @@ export const SETUP_RUN_UNREADABLE = "The project's setup could not be read just 
 export const SETUP_RUN_AUDIT_UNAVAILABLE = "The record of this change could not be written, so nothing was done. Try again.";
 export const SETUP_APPROVAL_UNAVAILABLE = "Approving a project's setup isn't available on this install yet.";
 export const SETUP_NOTHING_WAITING = "There is no setup waiting for a decision. Open the project's setup again.";
-export const SETUP_DECIDE_ON_A_PAGE = "A setup is decided right after you confirm it's you on the sign-in page: a tool that holds an API token cannot approve or reject. Confirm it's you, then try again within a few minutes.";
+export const EVAL_WRAPPER_UNAVAILABLE = "Setting up the file Rovara needs to read your eval isn't available on this install yet.";
+/** "Check now" looks at the code host at most once in this long per eval (any member may press it; the host's quota is the company's). */
+const CHECK_NOW_FLOOR_MS = 15_000;
+export const EVAL_WRAPPER_ROLE = "Only a company owner, admin or project maintainer can ask Rovara to open a pull request for the eval's file, set it aside, or approve its test run.";
 export const EVAL_DECIDE_STALE = "That eval approval changed since you looked. Read it again.";
 export const EVAL_APPROVAL_UNAVAILABLE = "Approving an eval's spend isn't available on this install yet.";
 export const SETUP_NO_HOST_WAITING = "That website is not waiting for a decision any more. Open the project's setup again.";
@@ -96,9 +105,15 @@ export interface HostedSetupRunWiring {
    * L4-EVC: the eval card (DEC 254zzz20). The company's monthly eval cap (the bound `eval-reservation` adapter's source; absent: no eval can be confirmed here) and the code host's file read for the
    * broker's own hashing of the confirmed files. Served only together with `approval` (whose gate decides the eval spend item and whose members read the live roles).
    */
-  eval?: { monthlyCap?: EvalDiscoveryConfirmDeps["monthlyCap"]; readFile?: EvalDiscoveryConfirmDeps["readFile"];
+  eval?: { monthlyCap?: EvalDiscoveryConfirmDeps["monthlyCap"];
+    /** L4-T3: whether the project's own AI provider is connected (the bound adapter's answer). Absent: the card says neither, as before. */
+    providerConnected?: (scope: { company: string; project: string }) => Promise<boolean | undefined>; readFile?: EvalDiscoveryConfirmDeps["readFile"];
+    /** L4-EVW4: the project's repositories as code host targets (`createEvalWrapperTargets`), for the wrapper file's detection on the default branch and the pull request a person asks for. Absent: nothing is read from or written to a host. */
+    wrapperTargets?: EvalWrapperDeps["targets"];
     /** D5: true only where a health runner reads the person's yes (`readEvalHealthRequest`). Absent: the card shows no health button and `eval-health` is not served. No deployment wires one yet. */
     healthRuns?: boolean;
+    /** L4-E12: whether this install's test services are off right now (the hosted broker's `!testServicesEnabled(env)`), for the free dry run's words. Absent: read as on. */
+    testServicesOff?: () => boolean;
     /** L4-EVH: starts the health run for the project's waiting yes (the broker claims it and hands it to a worker). Best effort; never throws, and the person's answer does not wait on the worker. Absent: nothing starts here (the card shows no button). */
     healthRun?: (project: string) => Promise<unknown> } | undefined;
   /** A person's display name, for "stopped by". Absent or unknown: "Unknown". */
@@ -119,8 +134,6 @@ export interface HostedSetupRunInput {
   /** Whether the switch sends this company's NEW tasks to the core. False: a start is refused. */
   startsNewTasks: boolean;
   now: () => number;
-  /** The dev routes' step-up check (fresh for this company now), with the refusal's words; it throws the refusal. Absent: nothing is decided. */
-  freshStepUp?: (refusal: string) => Promise<{ at: string; method: string }>;
 }
 
 const DecideBodySchema = z.object({
@@ -150,7 +163,7 @@ const EvalDecideBodySchema = z.object({
 /** L4-SC: the task whose offer the person pressed (a task id, as every key names one). */
 const UpdateBodySchema = z.object({ requestId: z.string().uuid(), taskId: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/u) }).strict();
 
-const SETUP_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-agent(?:\/(stop|journal|confirm|discard|decide|eval|eval-approve|eval-decide|eval-health|updates|updates\/prepare|updates\/dismiss|host-decide))?$/u;
+const SETUP_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-agent(?:\/(stop|journal|confirm|discard|decide|eval|eval-approve|eval-decide|eval-health|eval-wrapper|updates|updates\/prepare|updates\/dismiss|host-decide))?$/u;
 const PROJECT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
 
 /** Whether this method and path is the hosted setup run's. */
@@ -159,7 +172,7 @@ export function isSetupRunPath(path: string, method: string): boolean {
   if (match === null) return false;
   const tail = match[2];
   if (method === "GET") return tail === undefined || tail === "journal" || tail === "updates" || tail === "eval";
-  if (method === "POST") return tail === undefined || tail === "stop" || tail === "confirm" || tail === "discard" || tail === "decide" || tail === "updates/prepare" || tail === "updates/dismiss" || tail === "host-decide" || tail === "eval-approve" || tail === "eval-decide" || tail === "eval-health";
+  if (method === "POST") return tail === undefined || tail === "stop" || tail === "confirm" || tail === "discard" || tail === "decide" || tail === "updates/prepare" || tail === "updates/dismiss" || tail === "host-decide" || tail === "eval-approve" || tail === "eval-decide" || tail === "eval-health" || tail === "eval-wrapper";
   return false;
 }
 
@@ -228,17 +241,15 @@ async function applyView(input: HostedSetupRunInput, deps: SetupApplyDeps, proje
 function gateRefusal(result: Extract<GateResult, { status: "refused" }>): AgentXError {
   switch (result.reason) {
     case "stale": case "not_waiting": case "not_found": case "link_gone": return agentXError("CHANGE_STALE", result.detail);
-    case "sign_in_not_fresh": case "expired": return agentXError("REAUTH_REQUIRED", result.detail);
+    case "expired": return agentXError("REAUTH_REQUIRED", result.detail);
     case "proof_already_used": case "request_id_reused": return agentXError("IDEMPOTENCY_CONFLICT", result.detail);
     case "invalid": case "unsupported": case "invalid_outcome": return agentXError("CONFIG_INVALID", result.detail);
     default: return agentXError("FORBIDDEN", result.detail);
   }
 }
 
-/** Approve or reject the waiting candidate: a fresh step-up, the live risk rule, the point's proof, then the gate (which loads the candidate again and re-checks the rule). */
+/** Approve or reject the waiting candidate: the live risk rule, the point's proof, then the gate (which loads the candidate again and re-checks the rule). */
 async function decide(input: HostedSetupRunInput, approval: HostedSetupApproval, project: string, raw: unknown): Promise<BrokerResponse> {
-  if (input.freshStepUp === undefined) throw agentXError("NOT_FOUND", SETUP_APPROVAL_UNAVAILABLE);
-  const stepUp = await input.freshStepUp(SETUP_DECIDE_ON_A_PAGE);
   const body = parsed(DecideBodySchema, raw);
   const { flow, companyId } = input;
   const personId = input.principal.personId;
@@ -251,7 +262,7 @@ async function decide(input: HostedSetupRunInput, approval: HostedSetupApproval,
   const card = setupCardOf(project, body.seen.artifactDigest);
   let credential: { method: string; token: string };
   try {
-    credential = await approval.issue({ companyId, personId, stepUp, requestId: body.requestId, kind: "setup", project, revision: body.seen.revision, artifactDigest: body.seen.artifactDigest, outcome: body.outcome, card });
+    credential = await approval.issue({ companyId, personId, requestId: body.requestId, kind: "setup", project, revision: body.seen.revision, artifactDigest: body.seen.artifactDigest, outcome: body.outcome, card });
   } catch {
     throw agentXError("FORBIDDEN", SETUP_PROOF_UNAVAILABLE);
   }
@@ -268,12 +279,10 @@ async function decide(input: HostedSetupRunInput, approval: HostedSetupApproval,
 }
 
 /**
- * Allow or refuse a website the setup run asked for (L4-SF d): a fresh step-up, the high-risk rule on the person's live standing (a company owner or admin, either answer), the point's proof bound to the
+ * Allow or refuse a website the setup run asked for (L4-SF d): the high-risk rule on the person's live standing (a company owner or admin, either answer), the point's proof bound to the
  * exact ask, then the gate (which loads the ask again, re-checks the rule and the host's own refusal list on approval). The ask is found by the project and host the person named, in THIS company only.
  */
 async function decideHost(input: HostedSetupRunInput, approval: HostedSetupApproval, project: string, raw: unknown): Promise<BrokerResponse> {
-  if (input.freshStepUp === undefined) throw agentXError("NOT_FOUND", SETUP_APPROVAL_UNAVAILABLE);
-  const stepUp = await input.freshStepUp(SETUP_DECIDE_ON_A_PAGE);
   const body = parsed(HostDecideBodySchema, raw);
   const { flow, companyId } = input;
   const personId = input.principal.personId;
@@ -289,7 +298,7 @@ async function decideHost(input: HostedSetupRunInput, approval: HostedSetupAppro
   const card = setupHostCardOf(subjectId, body.seen.artifactDigest);
   let credential: { method: string; token: string };
   try {
-    credential = await approval.issueHost({ companyId, personId, stepUp, requestId: body.requestId, kind: "setup_host", subjectId, revision: body.seen.revision, artifactDigest: body.seen.artifactDigest, outcome: body.outcome, card });
+    credential = await approval.issueHost({ companyId, personId, requestId: body.requestId, kind: "setup_host", subjectId, revision: body.seen.revision, artifactDigest: body.seen.artifactDigest, outcome: body.outcome, card });
   } catch {
     throw agentXError("FORBIDDEN", SETUP_PROOF_UNAVAILABLE);
   }
@@ -302,15 +311,15 @@ async function decideHost(input: HostedSetupRunInput, approval: HostedSetupAppro
 }
 
 /**
- * L4-EVC: one decision on the project's eval spend item, as the person: the proof of this one act (a fresh step-up bound to the item's request id, revision, digest, the answer and its card), then the
+ * L4-EVC: one decision on the project's eval spend item, as the person: the proof of this one act (bound to the item's request id, revision, digest, the answer and its card), then the
  * ONE approval gate, whose eval subject re-reads the person's live role inside the decision. Throws the gate's fixed refusal.
  */
-async function decideEvalItem(input: HostedSetupRunInput, approval: HostedSetupApproval, project: string, act: { requestId: string; outcome: "approve" | "reject"; seen: { revision: number; artifactDigest: string } }, stepUp: { at: string; method: string }, principal: { personId: string }): Promise<void> {
+async function decideEvalItem(input: HostedSetupRunInput, approval: HostedSetupApproval, project: string, act: { requestId: string; outcome: "approve" | "reject"; seen: { revision: number; artifactDigest: string } }, principal: { personId: string }): Promise<void> {
   const { companyId } = input;
   const card = evalSpendCardOf(project, act.seen.artifactDigest);
   let credential: { method: string; token: string };
   try {
-    credential = await approval.issueEval({ companyId, personId: principal.personId, stepUp, requestId: act.requestId, kind: EVAL_SPEND_KIND, project, revision: act.seen.revision, artifactDigest: act.seen.artifactDigest, outcome: act.outcome, card });
+    credential = await approval.issueEval({ companyId, personId: principal.personId, requestId: act.requestId, kind: EVAL_SPEND_KIND, project, revision: act.seen.revision, artifactDigest: act.seen.artifactDigest, outcome: act.outcome, card });
   } catch {
     throw agentXError("FORBIDDEN", SETUP_PROOF_UNAVAILABLE);
   }
@@ -319,6 +328,50 @@ async function decideEvalItem(input: HostedSetupRunInput, approval: HostedSetupA
     credentials: [{ method: credential.method, token: credential.token }], card, ...(act.outcome === "reject" ? { reason: "Not now (eval)" } : {}),
   });
   if (result.status === "refused") throw gateRefusal(result);
+}
+
+/** L4-EVW4: the wrapper card's seams for this request: the host's targets, and the audit record written before any write (the PERSON who asked, and why they were allowed). */
+function wrapperDeps(input: HostedSetupRunInput, project: string, basis: SetupRunBasis, requestId?: string): EvalWrapperDeps {
+  const targets = input.wiring.eval!.wrapperTargets!;
+  return {
+    store: input.flow.store, companyId: input.companyId, now: input.now, targets,
+    audit: async (event) => { await recorded(input, auditEvent(input, event.action, `${event.action}:${input.companyId}:${project}:${input.principal.personId}:${requestId ?? input.now()}:${event.details["digest"] ?? ""}`, project, basis, event.details)); },
+  };
+}
+
+/**
+ * L4-EVW4 (DEC 254zzz43): a person's act on the wrapper card. `basis` is the manager's standing (absent: a member who may only look). ONLY `open_pull_request` writes to the repository, and only for the person's own click:
+ * the audit (written before the host write) names them. `dismiss` and `reopen` set the card aside or back (audited). `check` looks for the file on the default branch (a read; any member may ask it).
+ */
+async function evalWrapperAct(input: HostedSetupRunInput, project: string, basis: SetupRunBasis | undefined, raw: unknown): Promise<BrokerResponse> {
+  const { flow, companyId } = input;
+  const approval = input.wiring.approval;
+  const targets = input.wiring.eval?.wrapperTargets;
+  if (approval === undefined || targets === undefined) throw agentXError("NOT_FOUND", EVAL_WRAPPER_UNAVAILABLE);
+  const body = parsed(EvalWrapperActionBodySchema, raw);
+  const found = await readEvalDiscovery({ store: flow.store, companyId }, project);
+  if (found === undefined) throw agentXError("NOT_FOUND", "There is no eval report for this project's latest setup run.");
+  // The same people who confirm an eval (read live): a company owner or admin, or a maintainer of this project.
+  const manager = basis !== undefined && await evalRoleFor({ members: approval.evalMembers }, project, { companyId, developerId: developerIdOf(input.principal), principal: input.principal }) !== undefined;
+  if (body.action !== "check" && !manager) throw agentXError("FORBIDDEN", EVAL_WRAPPER_ROLE);
+  const deps = wrapperDeps(input, project, basis ?? "project-admin", body.requestId);
+  let outcome: Awaited<ReturnType<typeof openEvalWrapperPullRequest>> | undefined;
+  if (body.action === "check") {
+    await refreshEvalWrappers(deps, project);
+    await detectEvalWrappers(deps, project, found.report, { force: true, floorMs: CHECK_NOW_FLOOR_MS });
+  } else if (body.action === "dismiss") {
+    await dismissEvalWrapper(deps, project, { reportDigest: found.reportDigest, by: input.principal.personId });
+  } else if (body.action === "reopen") {
+    await reopenEvalWrapper(deps, project, { by: input.principal.personId });
+  } else {
+    // The person's click is the ONLY thing that opens a pull request, and the audit (written before the host write) names them.
+    outcome = await openEvalWrapperPullRequest(deps, project, { report: found.report, selection: body.selection!, taskId: found.taskId, by: input.principal.personId });
+  }
+  return json(200, {
+    project, action: body.action,
+    ...(outcome === undefined ? {} : { outcome: { selection: outcome.selection, state: outcome.state, ...(outcome.failure === undefined ? {} : { failure: outcome.failure }), ...(outcome.number === undefined ? {} : { number: outcome.number }), ...(outcome.url === undefined ? {} : { url: outcome.url }) } }),
+    wrappers: await readEvalWrapperCards({ store: flow.store, companyId }, project, { reportDigest: found.reportDigest, report: found.report }, manager),
+  });
 }
 
 /** One request on a hosted setup-run path (`isSetupRunPath`), after the dev routes checked the company from membership. Always answers. */
@@ -383,7 +436,14 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
     if (input.request.method === "GET" && tail === "eval") {
       const approval = input.wiring.approval;
       if (approval === undefined || input.wiring.eval === undefined) throw agentXError("NOT_FOUND", EVAL_APPROVAL_UNAVAILABLE);
-      return json(200, { project, ...(await readEvalCard({ store: flow.store, companyId, members: approval.evalMembers, monthlyCap: input.wiring.eval.monthlyCap, healthRuns: input.wiring.eval.healthRuns, now: input.now }, project, input.principal)) });
+      // L4-EVW4: where each wrapper pull request stands, and whether the file is on the default branch (whoever put it there), is READ from the host first (bounded, a young check is left as it is; a failed read changes nothing).
+      if (input.wiring.eval.wrapperTargets !== undefined) {
+        const reads = { store: flow.store, companyId, now: input.now, targets: input.wiring.eval.wrapperTargets };
+        await refreshEvalWrappers(reads, project);
+        const latest = await readEvalDiscovery({ store: flow.store, companyId }, project);
+        if (latest !== undefined) await detectEvalWrappers(reads, project, latest.report);
+      }
+      return json(200, { project, ...(await readEvalCard({ store: flow.store, companyId, members: approval.evalMembers, monthlyCap: input.wiring.eval.monthlyCap, providerConnected: input.wiring.eval.providerConnected, healthRuns: input.wiring.eval.healthRuns, testServicesOff: input.wiring.eval.testServicesOff, now: input.now }, project, input.principal)) });
     }
     if (input.request.method === "GET" && tail === undefined) {
       const apply = input.wiring.approval === undefined ? undefined : await applyView(input, deps, project);
@@ -414,7 +474,8 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       return json(200, { status: state.view.status, entries: await readSetupJournal({ store: flow.store }, { orgId: companyId, project, taskId: state.pointer.taskId }, after), hostAsks: asks });
     }
     if (input.request.method !== "POST") throw agentXError("NOT_FOUND", "route not found");
-    // Every change: only a person who manages the project's setup.
+    // Every change: only a person who manages the project's setup. The one exception is the wrapper card's "Check now" (a read of the default branch, which writes nothing): any member who can see the project may ask it.
+    if (standing.access !== "manage" && tail === "eval-wrapper") return await evalWrapperAct(input, project, undefined, bodyOf(input.request));
     if (standing.access !== "manage") throw agentXError("FORBIDDEN", SETUP_RUN_NOT_ALLOWED);
     const basis = standing.basis;
     const raw = bodyOf(input.request);
@@ -451,6 +512,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       if (tail === "host-decide") return await decideHost(input, approval, project, raw);
       return await decide(input, approval, project, raw);
     }
+    if (tail === "eval-wrapper") return await evalWrapperAct(input, project, basis, raw);
     if (tail === "eval-approve" || tail === "eval-decide" || tail === "eval-health") {
       const approval = input.wiring.approval;
       const evalWiring = input.wiring.eval;
@@ -466,15 +528,13 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
         if (!asked.duplicate) await Promise.resolve(evalWiring.healthRun?.(project)).catch(() => undefined);
         return json(200, { project, ...asked });
       }
-      if (input.freshStepUp === undefined) throw agentXError("NOT_FOUND", EVAL_APPROVAL_UNAVAILABLE);
-      const stepUp = await input.freshStepUp(SETUP_DECIDE_ON_A_PAGE);
       if (tail === "eval-decide") {
         const body = parsed(EvalDecideBodySchema, raw);
         // The offer is the waiting item's own (its digest and revision), never an id the card did not show.
         const waiting = await readEvalSpendRecord({ store: flow.store, companyId }, project);
         if (waiting === undefined || body.requestId !== `eval-${waiting.digest.slice(0, 40)}-${String(waiting.revision)}`) throw agentXError("CHANGE_STALE", EVAL_DECIDE_STALE);
         await recorded(input, auditEvent(input, "eval.spend_decision_requested", `eval.decide:${companyId}:${project}:${personId}:${stamp}`, project, basis, { outcome: body.outcome }));
-        await decideEvalItem(input, approval, project, body, stepUp, input.principal);
+        await decideEvalItem(input, approval, project, body, input.principal);
         return json(200, { project, decision: body.outcome === "approve" ? "approved" : "rejected" });
       }
       // ONE approval: confirm the eval and approve its spend in the same act. The body names the dollars the person saw; the broker holds them against its own figures.
@@ -483,7 +543,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       await recorded(input, auditEvent(input, "eval.approve_requested", `eval.approve:${companyId}:${project}:${personId}:${stamp}`, project, basis, { taskId: body.taskId }));
       const answer = await confirmEvalDiscovery({
         store: flow.store, companyId, now: input.now, members: approval.evalMembers, monthlyCap: evalWiring.monthlyCap, readFile: evalWiring.readFile, latest: (name) => deps.latest(name),
-        approve: (offer, principal) => decideEvalItem(input, approval, project, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }, stepUp, principal),
+        approve: (offer, principal) => decideEvalItem(input, approval, project, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }, principal),
       }, project, body, input.principal);
       return json(200, { project, state: answer.evalSpend?.state, ...(answer.evalSpend?.card === undefined ? {} : { perPr: answer.evalSpend.card.perPr, monthly: answer.evalSpend.card.monthly, carried: answer.evalSpend.card.carried === true }) });
     }

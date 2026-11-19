@@ -5,7 +5,7 @@
 //   POST /v1/dev/company/github/claim     { state, code?, installationId?, setupAction? }  owner/admin: spend the state, check GitHub, bind or list
 //   POST /v1/dev/company/github/choose    { ticket, installationId }                      owner/admin: bind one installation from a claim's checked list
 //   GET  /v1/dev/company/github                                                           any member: the company's bound installations (no tokens), each with its status
-//   DELETE /v1/dev/company/github/{installationId}                                        owner + fresh step-up: unbind (guided onboarding PR 3)
+//   DELETE /v1/dev/company/github/{installationId}                                        owner: unbind (guided onboarding PR 3)
 //
 // Rules (design section 3, the common brief's shared security rules):
 //   - The company and role are the caller's LIVE membership (sign-in table), read at every call; never a body, query, header or token claim.
@@ -18,17 +18,16 @@
 //     After it: 409 when the installation is another company's; idempotent 200 when it is already this company's.
 //   - Binding: GithubInstallationBindings.claimPerson (conditional, first binder wins, audit row naming the person) plus a company log line.
 //   - Guided onboarding PR 3 (design section 3a "Wrong org", "Uninstalled or suspended"; DEC 254l item 2): each installation's status (active, suspended, uninstalled: GitHub's
-//     webhook marks it, github-lifecycle.ts); a claim of this company's uninstalled or suspended installation reconnects it. Disconnect: a LIVE owner with a fresh step-up
-//     (step-up-check.ts, as the member routes), refused (409, naming only this company's projects) while any of the company's projects uses a repository on it; another
+//     webhook marks it, github-lifecycle.ts); a claim of this company's uninstalled or suspended installation reconnects it. Disconnect: a LIVE owner
+//     (as the member routes), refused (409, naming only this company's projects) while any of the company's projects uses a repository on it; another
 //     company's installation and an unknown one are the same 404; otherwise one conditional transaction unbinds it with an audit row naming the person, and the answer carries
 //     GitHub's page where the installation itself is removed.
 import { createHash, randomBytes } from "node:crypto";
 import { GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { agentXError, companyLog, OrgIdSchema } from "@agentx/contracts";
+import { agentXError, companyLog, ON_THE_WEBSITE_MESSAGE, OrgIdSchema } from "@agentx/contracts";
 import { Membership, membershipKey } from "./company-check.js";
 import { githubUninstallUrl, projectsUsingInstallation } from "./github-lifecycle.js";
-import { requireFreshStepUp, type CallerStepUp } from "./step-up-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import type { ControlledInstallation } from "../plugins/code-host/github/user-authorization.js";
@@ -42,7 +41,6 @@ export const CONNECT_NOT_SET_UP = "Connecting GitHub isn't set up on this Rovara
 export const CONNECT_UNAVAILABLE = "GitHub could not be connected just now. Start again from Rovara.";
 export const CONNECTIONS_UNAVAILABLE = "The company's GitHub connections could not be read just now; try again.";
 export const DISCONNECT_OWNER_ONLY = "Only a company owner can disconnect GitHub.";
-export const DISCONNECT_STEP_UP = "Disconnecting GitHub needs a fresh sign-in check; sign in again and retry.";
 export const CONNECTION_NOT_FOUND = "That GitHub connection was not found.";
 export const DISCONNECT_UNAVAILABLE = "GitHub could not be disconnected just now; try again.";
 /** The 409 when projects still use the installation: their names (this company's only; project names are lowercase letters, digits and hyphens). */
@@ -181,14 +179,14 @@ async function bind(ctx: GithubConnectContext, companyId: string, personId: stri
  * The routes. The caller is authenticated and its route row (`full`) applied; `companyId` is its live membership's company (resolveCompany). The membership
  * row is read again here, so a role or company that changed since is what counts.
  */
-export async function routeGithubConnect(ctx: GithubConnectContext, caller: DeveloperCaller, companyId: string, request: AdaptedHttpRequest, url: URL, stepUp?: CallerStepUp): Promise<unknown> {
+export async function routeGithubConnect(ctx: GithubConnectContext, caller: DeveloperCaller, companyId: string, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   const member = await liveMembership(ctx, caller, companyId);
   const who = { companyId: member.companyId, personId: caller.developerId, sessionId: caller.sessionId };
 
   const one = INSTALLATION_PATH.exec(url.pathname);
   if (one !== null && url.pathname !== CONNECT && url.pathname !== CLAIM && url.pathname !== CHOOSE) {
     if (request.method !== "DELETE") throw agentXError("NOT_FOUND", "not found");
-    return disconnect(ctx, member, caller.developerId, one[1]!, stepUp);
+    return disconnect(ctx, member, caller.developerId, one[1]!, caller.webApp === true);
   }
 
   if (url.pathname === GITHUB_CONNECT_PATH) {
@@ -279,13 +277,14 @@ async function readConnections(ctx: GithubConnectContext, companyId: string): Pr
 }
 
 /**
- * Guided onboarding PR 3: an owner disconnects one of the company's installations. In order, so nothing is read for anyone who may not do it: a live owner (403), a fresh step-up
- * (403 REAUTH_REQUIRED), the installation is this company's (else the one 404, the same for another company's and for none), no project of this company uses it (409 naming
+ * Guided onboarding PR 3: an owner disconnects one of the company's installations. In order, so nothing is read for anyone who may not do it: a live owner (403),
+ * the installation is this company's (else the one 404, the same for another company's and for none), no project of this company uses it (409 naming
  * them), then the conditional unbind with its audit row. The answer: GitHub's page where the installation itself is removed.
  */
-async function disconnect(ctx: GithubConnectContext, member: z.infer<typeof Membership>, personId: string, rawId: string, stepUp: CallerStepUp | undefined): Promise<unknown> {
+async function disconnect(ctx: GithubConnectContext, member: z.infer<typeof Membership>, personId: string, rawId: string, webApp: boolean): Promise<unknown> {
   if (member.role !== "owner") throw agentXError("FORBIDDEN", DISCONNECT_OWNER_ONLY);
-  requireFreshStepUp(stepUp, ctx.now(), DISCONNECT_STEP_UP);
+  // Owner DEC 254zzz99: a disconnect is made only from the Rovara website's own client (never the CLI's or an AI tool's token), after the owner rule.
+  if (!webApp) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
   const parsed = /^[1-9][0-9]{0,15}$/.test(rawId) ? InstallationId.safeParse(Number(rawId)) : undefined;
   if (parsed?.success !== true) throw agentXError("NOT_FOUND", CONNECTION_NOT_FOUND);
   const installationId = parsed.data;

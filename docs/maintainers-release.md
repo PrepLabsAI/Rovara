@@ -54,8 +54,11 @@ One-time setup, with an administrator's credentials:
 npm run build --workspace @agentx/infra
 npx cdk deploy AgentXReleasePipeline --app 'node infra/dist/bin/agentx.js' \
   --profile agentx-deployer -c agentxRegion=us-east-1 \
-  --parameters GitHubConnectionArn=arn:aws:codeconnections:us-east-1:944937319445:connection/7e76074b-e840-439f-b94c-6806a2bf9513
+  --parameters GitHubConnectionArn=<codeconnections-arn>
 ```
+
+`<codeconnections-arn>` is the ARN of the already-authorized GitHub connection in the release account.
+Find the value in the private release runbook (kept outside this repository).
 
 Protect `mainline` in GitHub. The build role can deploy through the CDK bootstrap roles, so push
 access to `mainline` is deploy access. To roll back, revert the change on `mainline`, or run

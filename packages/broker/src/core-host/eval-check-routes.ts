@@ -10,7 +10,7 @@
 //     the project's own, keyed by that company AND the project.
 //   - Anyone with no role on the project, another company's project, a missing one and a malformed name all answer the same 404 "project not found". A reader's change is 403 in fixed words.
 //   - The audit record (naming the person and why they were allowed) is written BEFORE the row: nothing changes when it cannot be written. Refusals are fixed words; nothing a caller sent is echoed.
-//   - Advisory: the check only decides which result Rovara SAYS on its pull requests. It is never a gate, a fix or a payer, so it needs no fresh step-up.
+//   - Advisory: the check only decides which result Rovara SAYS on its pull requests. It is never a gate, a fix or a payer, so it needs nothing more than the role rule.
 import { AgentXError, agentXError, type AuditEvent, type AuditSink, type OrgId } from "@agentx/contracts";
 import { createHash } from "node:crypto";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";

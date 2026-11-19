@@ -68,12 +68,13 @@ export function customSourceLimitProblem(existing: number, adding = 1): string |
 export const BEDROCK_ROLE_ARN_PATTERN = /^arn:aws[a-z-]*:iam::\d{12}:role\/[\w+=,.@/-]{1,512}$/;
 const REGION_PATTERN = /^[a-z]{2}(?:-[a-z]+)+-\d$/;
 const SOURCE_ID_PATTERN = /^src_[0-9a-z]{20}$/;
-const EXTERNAL_ID_PATTERN = /^rovara-org_[0-9a-z]{20}$/;
-
-/** The STS external id the org's trust policy must require: server-set, never sent by a client. */
-export function bedrockExternalId(orgId: OrgId): string {
-  return `rovara-${orgId}`;
-}
+/**
+ * The ONE Bedrock external id scheme (L4-HARD, owner 2026-11-18): `rvb-` + 40 hex characters, an HMAC of (install, company) under the
+ * gateway's own KMS key (the model gateway, a separate service). It cannot be made here: only the gateway holds the key. The old `rovara-<orgId>`
+ * helper and its trust-policy template were deleted: that id could be guessed from a company id alone.
+ */
+export const BEDROCK_EXTERNAL_ID_PATTERN = /^rvb-[0-9a-f]{40}$/u;
+const EXTERNAL_ID_PATTERN = BEDROCK_EXTERNAL_ID_PATTERN;
 
 /** The Pi catalog provider that serves a kind's models. */
 const CATALOG_PROVIDER = {
@@ -228,9 +229,14 @@ export function modelSourceSchema(options: ModelSourceOptions = {}) {
 /** The shape-only schemas; a caller with Pi's catalog uses `modelSourceInputSchema({ isKnownCatalog })`. */
 export const ModelSourceInputSchema = modelSourceInputSchema();
 export const ModelSourceSchema = modelSourceSchema();
-/** The refusal when a stored source is not this org's: a Bedrock source's external id must be `rovara-<orgId>`. */
-export function modelSourceOrgProblem(orgId: OrgId, source: ModelSource): string | undefined {
-  if (source.kind === "bedrock" && source.externalId !== bedrockExternalId(orgId)) return "the external id does not belong to this organization";
+/**
+ * The refusal when a stored source is not this org's: a Bedrock source's external id must be the one the gateway derived for this org
+ * (`expectedBedrockExternalId`, from its KMS HMAC; the caller asks the gateway). With none given, a Bedrock source is refused: nothing
+ * here can say what an org's id is, so it never guesses one.
+ */
+export function modelSourceOrgProblem(source: ModelSource, expectedBedrockExternalId: string | undefined): string | undefined {
+  if (source.kind !== "bedrock") return undefined;
+  if (expectedBedrockExternalId === undefined || !BEDROCK_EXTERNAL_ID_PATTERN.test(expectedBedrockExternalId) || source.externalId !== expectedBedrockExternalId) return "the external id does not belong to this organization";
   return undefined;
 }
 
@@ -302,19 +308,3 @@ export const MODEL_SOURCES_NEED_PROXY = "company AI sources need Rovara's model 
 export const BEDROCK_NOT_TESTED_NOTE = "NOT TESTED: Bedrock in your own AWS account hasn't been tested yet.";
 /** An endpoint's host was approved, but the DNS firewall does not serve it yet. */
 export const MODEL_SOURCE_STILL_APPLYING = "Rovara is still applying this address; try again in 5 minutes.";
-
-/**
- * The trust policy an admin pastes into the role a Bedrock source names: the proxy's own roles may assume it, and only with the org's external
- * id. `principals` are Rovara's role ARNs (the model proxy's task role and the function that probes the policy).
- */
-export function bedrockTrustPolicy(orgId: OrgId, principals: readonly string[]): Record<string, unknown> {
-  return {
-    Version: "2012-10-17",
-    Statement: [{
-      Effect: "Allow",
-      Principal: { AWS: [...principals] },
-      Action: "sts:AssumeRole",
-      Condition: { StringEquals: { "sts:ExternalId": bedrockExternalId(orgId) } },
-    }],
-  };
-}

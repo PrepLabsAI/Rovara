@@ -1,9 +1,10 @@
 import { withWorkspaceGuard } from "./workspace-quarantine.js";
 import {taskFallbackAuthorizer} from "./model-fallback-authority.js";
-import type { WorkerInvocation } from "@agentx/contracts";
+import { evalStandInsOn, type WorkerInvocation } from "@agentx/contracts";
 import { CONTAINED_RUNTIME_PROFILE, inspectContainedRuntimeReadiness, type ContainedRuntimeReadiness } from "@agentx/verifier";
 import { OperationJournal } from "./journal.js";
 import { prepareWorkspace, preparedBaseResult } from "./prepare.js";
+import { publishEgressS3Allow } from "./sandbox-egress-allow.js";
 import { createWorkerCallbackSinks } from "./callback-client.js";
 import { createRepositoryCredentialProvider } from "./repository-credentials.js";
 import { createRegistryCredentialProvider } from "./registry-credentials.js";
@@ -42,7 +43,9 @@ import { rememberCredentials, runSavedEnvRebuild } from "./saved-env/rebuild.js"
 import { savedEnvOptionsOf } from "./saved-env/use.js";
 import { createDockerCli } from "./swebench/containers.js";
 import { assertWorkerScratchReady, checkWorkerScratch, workerBootFailureOf } from "./worker-scratch.js";
-import { collectTestServicesUsage, testServicesAdvertisedFeatures, testServicesAtWorkerBoot } from "./test-services-run.js";
+import { collectTestServicesUsage, testServicesAdvertisedFeatures, testServicesAtWorkerBoot, testServicesConfigFromEnvironment } from "./test-services-run.js";
+import { createEvalServicesStarter } from "./verification/eval-services.js";
+import { evalDatabaseSeed } from "./eval-stand-in-plan.js";
 import { createApplicationChecksFeatureMonitor, createWorkflowE2EApplicationRuntime } from "./workflow-e2e-application-runtime.js";
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
@@ -125,6 +128,8 @@ const state = createWorkerServerState(
         const cloneCredentials = rememberCredentials(createRepositoryCredentialProvider({ controlPlaneUrl, invocation }));
         // Test services (Prove): a candidate check that carries a dependency plan reports its usage record in the result, under the contract's key `testServicesUsage`.
         const testServicesUsage = collectTestServicesUsage();
+        // L4-NETG follow-up: the project's exact S3 hosts for the host's egress gateway (gateway-mode workers only), before any setup command runs in a sandbox.
+        await publishEgressS3Allow(invocation.payload.egressS3Allow);
         const manifest = await prepareWorkspace({
           rootPath,
           project: invocation.payload.project,
@@ -193,9 +198,14 @@ const state = createWorkerServerState(
         const missingKeyAuthority=taskMissingKeyAuthorizer(invocation.payload,authorizeModelFallback,proxy,process.env);
         // Plan v3.2 row 20.2: the final-check eval's ports, for a task that asks for it, only when the host switched it on (ROVARA_EVAL_GATEWAY_URL) and the trusted sources are delivered. Otherwise none: the request reads "not connected" with zero calls.
         const evalRequested = invocation.payload.evalRequest !== undefined;
+        const evalDocker = evalRequested ? createDockerCli() : undefined;
         const evalFinalCheck = evalFinalCheckForTask({ requested: evalRequested, environment: evalEnvironmentWithGateway(process.env, invocation.payload.evalGatewayUrl), controlPlaneUrl, capability: invocation.callbackCapability, sources: evalRequested ? evalHostSourcesFor(invocation, { controlPlaneUrl,
           // DEC 253n(2): the fresh check sandbox (TE-B1), built per check from the delivered plan's confirmed command and the check's pinned candidate.
-          fresh: { environment: process.env, docker: createDockerCli(), workspaceKey: () => setupWorkspaceKey(rootPath) } }) : undefined });
+          fresh: { environment: process.env, docker: evalDocker ?? createDockerCli(), workspaceKey: () => setupWorkspaceKey(rootPath),
+          // L4-E12 (E1): the task's own dependency plan, started as this eval round's services when this worker offers test services. L4-EINT (E3): with the operator's switch on, each side's services are seeded from the base commit's seed files and generated rows.
+          services: (context) => createEvalServicesStarter({ config: testServicesConfigFromEnvironment(process.env), dependencies: invocation.payload.testEnvironment?.dependencies, ...(context.prepared === undefined ? {} : { seed: evalDatabaseSeed({ docker: evalDocker ?? createDockerCli(), side: context.side, prepared: context.prepared }) }) }),
+          // L4-EINT: the production stand-ins (the round, the seeds, the version), only with AGENTX_EVAL_STAND_INS=1 (default off: nothing here is read).
+          ...(evalStandInsOn(process.env) ? { standIns: { dependencies: invocation.payload.testEnvironment?.dependencies } } : {}) } }) : undefined });
         return runTaskInvocation(invocation, {
           rootPath,
           model: session.model,

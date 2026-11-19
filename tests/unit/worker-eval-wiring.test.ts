@@ -126,7 +126,9 @@ describe("off by default", () => {
     expect(main).toMatch(/const evalRequested = invocation\.payload\.evalRequest !== undefined;/u);
     expect(main).toMatch(/evalFinalCheckForTask\(\{ requested: evalRequested, environment: evalEnvironmentWithGateway\(process\.env, invocation\.payload\.evalGatewayUrl\), controlPlaneUrl, capability: invocation\.callbackCapability, sources: evalRequested \? evalHostSourcesFor\(invocation, \{ controlPlaneUrl,/u);
     // DEC 253n(2): the fresh check sandbox is the worker's own (its environment, Docker and workspace key), built per check from the delivered plan.
-    expect(main).toMatch(/fresh: \{ environment: process\.env, docker: createDockerCli\(\), workspaceKey: \(\) => setupWorkspaceKey\(rootPath\) \} \}\) : undefined \}\)/u);
+    // L4-E12 (E1): the fresh sandbox also gets the task's own services, from the task's dependency plan, only through the starter (undefined without a configuration or a local plan).
+    // L4-EINT: the services starter is told the side and the prepared stand-in set (seeds only with the switch), and the production stand-ins are asked for only with AGENTX_EVAL_STAND_INS=1.
+    expect(main).toMatch(/fresh: \{ environment: process\.env, docker: evalDocker \?\? createDockerCli\(\), workspaceKey: \(\) => setupWorkspaceKey\(rootPath\),\s*\/\/[^\n]*\n\s*services: \(context\) => createEvalServicesStarter\(\{ config: testServicesConfigFromEnvironment\(process\.env\), dependencies: invocation\.payload\.testEnvironment\?\.dependencies, \.\.\.\(context\.prepared === undefined \? \{\} : \{ seed: evalDatabaseSeed\(\{ docker: evalDocker \?\? createDockerCli\(\), side: context\.side, prepared: context\.prepared \}\) \}\) \}\),\s*\/\/[^\n]*\n\s*\.\.\.\(evalStandInsOn\(process\.env\) \? \{ standIns: \{ dependencies: invocation\.payload\.testEnvironment\?\.dependencies \} \} : \{\}\) \} \}\) : undefined \}\)/u);
     expect(main).toMatch(/\.\.\.\(evalFinalCheck === undefined \? \{\} : \{ evalFinalCheck \}\)/u);
   });
 });
@@ -358,4 +360,19 @@ describe("the gateway origin the broker delivers (hosted worker)", () => {
     for (const r of net.sent) expect(JSON.stringify(r)).not.toContain(TOKEN_A);
     expect(b.runs).toEqual([]);
   });
+});
+
+
+it("carries the internal fill capability through host sources and re-asks both sides exactly once", async () => {
+  const b = await sources(); const net = network(); const asked: Array<readonly string[]> = [];
+  const fillMissingRows = async (r: { readonly ids: readonly string[] }) => { asked.push(r.ids); return ["q1"]; };
+  const check = { sandbox: b.sources.sandbox, runDir: b.runDir, modelAllowed: b.sources.modelAllowed, fillMissingRows };
+  expect(evalHostSourcesFor({ workspaceId: SCOPE, operationId: SCOPE, callbackCapability: CAP_A }, { controlPlaneUrl: CONTROL, check })?.fillMissingRows).toBe(fillMissingRows);
+  const ports = bind(b, net, { sources: { ...b.sources, fillMissingRows } })!;
+  expect(ports.fillMissingRows).toBe(fillMissingRows);
+  // The host-to-round seam can be exercised without opening a real Unix socket.
+  ports.runner = b.w.ports.runner; ports.meter = b.w.ports.meter;
+  expect(evalResultFromArtifact(await run(ports)).outcome).toBe("ran");
+  expect(asked).toHaveLength(1);
+  expect(b.w.stages.map(r => [r.side, r.ids, r.runs])).toEqual([["new", ["q0", "q1", "q2", "q3"], 1], ["old", ["q1"], 3], ["new", ["q1"], 1]]);
 });

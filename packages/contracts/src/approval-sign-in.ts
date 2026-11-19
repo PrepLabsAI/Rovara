@@ -1,10 +1,10 @@
-// Lane P3, item A1 and owner decision 62: how recent an approver's sign-in must be is a COMPANY SETTING. Two choices: a window (default ten minutes, `FRESH_SIGN_IN_SECONDS`), or "trust any active company sign-in", which only a
+// Lane P3, item A1 and owner decision 62: how recent an approver's sign-in must be, as an approvers plug-in may state it (`ApprovalRequirement.signIn`). DEC 254zzz73: Code's own adapters state none (no step-up,
+// no company re-sign-in window); the rule stays a port capability for a plug-in. Two choices: a window, or "trust any active company sign-in", which only a
 // company on its own single sign-on may choose (its identity provider already asks for a fresh proof, so a high-risk approval needs no extra step). Code ignores the sign-in time (the local owner has none and the
 // approvers default sets no rule); an approvers plug-in puts the company's choice into `ApprovalRequirement.signIn`, and the decision gate and the merge press then enforce it for high-risk approvals and rejections.
 //
-// Pure and browser-safe: the setting's shape, its validation, and the one check. The stored copy and its edit are in the broker (`core/decisions/sign-in-setting.ts`).
+// Pure and browser-safe: the rule's shape and the one check.
 import { z } from "zod";
-import { FRESH_SIGN_IN_SECONDS } from "./developer.js";
 import type { ApprovalAnswer, ApprovalRequirement, ApprovalRisk, ApprovalSignInRule, Principal } from "./ports/policy.js";
 
 export const APPROVAL_SIGN_IN_WINDOW_MIN_SECONDS = 60;
@@ -20,22 +20,6 @@ export type ApprovalSignInSetting = z.infer<typeof ApprovalSignInSettingSchema>;
 
 type SameShape<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
 export const APPROVAL_SIGN_IN_SHAPES_MATCH: SameShape<ApprovalSignInSetting, ApprovalSignInRule> = true;
-
-/** What a company has when it chose nothing: the ten minute window. */
-export const DEFAULT_APPROVAL_SIGN_IN_SETTING: ApprovalSignInSetting = { mode: "window", seconds: FRESH_SIGN_IN_SECONDS };
-
-export type ApprovalSignInSettingCheck = { ok: true; setting: ApprovalSignInSetting } | { ok: false; reason: "invalid" | "needs_company_sign_in" };
-
-/**
- * Whether a company may save this setting. "Trust any active company sign-in" needs `companyOwnSignIn`: the identity adapter signs people in through the company's own single sign-on (`IdentityCapabilities.companySignIn`).
- * Without it the choice is refused, so a company on a shared or local sign-in cannot switch the extra step off.
- */
-export function checkApprovalSignInSetting(input: unknown, context: { companyOwnSignIn: boolean }): ApprovalSignInSettingCheck {
-  const parsed = ApprovalSignInSettingSchema.safeParse(input);
-  if (!parsed.success) return { ok: false, reason: "invalid" };
-  if (parsed.data.mode === "any-active" && !context.companyOwnSignIn) return { ok: false, reason: "needs_company_sign_in" };
-  return { ok: true, setting: parsed.data };
-}
 
 export type ApprovalSignInVerdict = { ok: true } | { ok: false; reason: "invalid_rule" | "no_company_sign_in" | "no_sign_in_time" | "sign_in_too_old" | "sign_in_in_future" };
 

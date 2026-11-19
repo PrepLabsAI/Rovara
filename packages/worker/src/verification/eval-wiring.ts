@@ -23,7 +23,9 @@ import { createEvalGatewayAccess } from "./eval-gateway-access.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EVAL_VERTEX_ROW, evalImageDigestOf, type EvalEnvironment } from "@agentx/contracts";
+import { EVAL_VERTEX_ROW, evalImageDigestOf, evalStandInsOn, type EvalEnvironment, type EvalStandInDescriptor, type TaskDependencyPlan } from "@agentx/contracts";
+import { prepareEvalStandIns, type PreparedEvalStandIns } from "../eval-stand-in-plan.js";
+import type { EvalServicesStarter } from "./eval-services.js";
 import { createBridgedEvalExec, createFreshEvalSandbox, freshEvalSandboxOffered, FRESH_EVAL_RUN_MAX_MS, type FreshEvalSandbox, type FreshEvalSandboxConfig } from "./eval-bridged-exec.js";
 import { createProcessCandidateGit } from "../e2e-candidate-source.js";
 import type { DockerCli } from "../swebench/containers.js";
@@ -81,6 +83,9 @@ export interface EvalHostSources {
   /** The worker's own pin of the model, from the trusted plan: true only for a frame that calls the plan's model (and judge). Required: the repository's eval code must not choose the model. */
   readonly modelAllowed: (frame: ModelEgressFrame) => boolean;
   readonly meter?: EvalMeterOptions;
+  /** L4-EINT (E4): the stand-in set's version for the base-cache key (present only when stand-ins are on). */
+  readonly standInSetVersion?: (() => Promise<string | undefined>) | undefined;
+  readonly fillMissingRows?: EvalFinalCheckPorts["fillMissingRows"] | undefined;
 }
 
 /** The longest the one eval-plan ask may take. */
@@ -96,6 +101,8 @@ export interface EvalCheckHost {
   readonly modelAllowed: (frame: ModelEgressFrame) => boolean;
   readonly changedPrompt?: (frame: ModelEgressFrame) => boolean;
   readonly meter?: EvalMeterOptions;
+  readonly standInSetVersion?: (() => Promise<string | undefined>) | undefined;
+  readonly fillMissingRows?: EvalFinalCheckPorts["fillMissingRows"] | undefined;
 }
 
 /**
@@ -103,7 +110,7 @@ export interface EvalCheckHost {
  * capability). The plan is the broker's stored plan completed with this check's own per-task hashes from the pinned candidate (`pinnedEvalPlan`, inside `withEvalPinnedCandidate`);
  * the approval and the cache are read-only views of the delivered answer. A refused or failed ask gives no plan, no grant and a cache that misses: "not connected", zero calls.
  */
-export function evalPlanSourcesFor(invocation: EvalSourceInvocation, options: { readonly controlPlaneUrl: string; readonly fetch?: typeof fetch }): Pick<EvalHostSources, "plan" | "approval" | "cache" | "baselines"> & { readonly deliveredPlan: () => Promise<unknown>; readonly deliveredEnvironment: () => Promise<EvalEnvironment | undefined> } {
+export function evalPlanSourcesFor(invocation: EvalSourceInvocation, options: { readonly controlPlaneUrl: string; readonly fetch?: typeof fetch }): Pick<EvalHostSources, "plan" | "approval" | "cache" | "baselines"> & { readonly deliveredPlan: () => Promise<unknown>; readonly deliveredEnvironment: () => Promise<EvalEnvironment | undefined>; readonly deliveredStandIns: () => Promise<EvalStandInDescriptor | undefined> } {
   let delivery: Promise<DeliveredEvalSources | undefined> | undefined;
   const delivered = (): Promise<DeliveredEvalSources | undefined> => delivery ??= fetchEvalPlanDelivery({
     controlPlaneUrl: options.controlPlaneUrl, workspaceId: invocation.workspaceId, operationId: invocation.operationId, capability: invocation.callbackCapability,
@@ -125,7 +132,19 @@ export function evalPlanSourcesFor(invocation: EvalSourceInvocation, options: { 
     deliveredPlan: async () => { try { const found = await delivered(); return found === undefined ? undefined : await found.plan(); } catch { return undefined; } },
     // L4-EVS: the environment of the same one ask (saved image or install steps), or undefined (the bare image, as before).
     deliveredEnvironment: async () => { try { const found = await delivered(); return found === undefined ? undefined : await found.environment(); } catch { return undefined; } },
+    // L4-EINT: what the project's evals reach, when the broker delivered it (the operator's switch is on there).
+    deliveredStandIns: async () => { try { const found = await delivered(); return found === undefined ? undefined : await found.standIns(); } catch { return undefined; } },
   };
+}
+
+/** L4-E12: the operator's off switch for the sealed name server on eval rounds (exactly "0" is off; anything else is on). */
+export const EVAL_SEALED_DNS_VARIABLE = "ROVARA_EVAL_SEALED_DNS";
+export const evalSealedDnsOn = (environment: NodeJS.ProcessEnv): boolean => environment[EVAL_SEALED_DNS_VARIABLE] !== "0";
+
+/** What a run's services starter is told (L4-EINT): the side it starts for, and the prepared stand-in set (the seed files of the base commit), when stand-ins are on. */
+export interface EvalServicesContext {
+  readonly side: "old" | "new";
+  readonly prepared: PreparedEvalStandIns | undefined;
 }
 
 /** The worker's own image variable: the model helper and the fresh check sandbox run it (pinned by digest). */
@@ -137,6 +156,13 @@ export interface EvalFreshHost {
   readonly docker: DockerCli;
   /** `setupWorkspaceKey(rootPath)`: the round network's labels and sweep. */
   readonly workspaceKey: () => Promise<string>;
+  /** L4-E12 (E1): the project's test services for the eval (the starter `createEvalServicesStarter` makes from the task's dependency plan), read at each run. Absent or undefined: the box gets no service, exactly as before. */
+  readonly services?: ((context: EvalServicesContext) => EvalServicesStarter | undefined) | undefined;
+  /**
+   * L4-EINT: the PRODUCTION stand-ins, behind the operator's switch `AGENTX_EVAL_STAND_INS` (exactly "1" in `environment`; anything else and the whole feature is off, byte for byte). Present: the check prepares ONE stand-in set
+   * from the BASE commit (the descriptor the broker delivered, the repository's recordings and descriptions, the seed files of `dependencies`): the outside-HTTP round, the seed step of each side's services and the version in the cache key.
+   */
+  readonly standIns?: { readonly dependencies: readonly TaskDependencyPlan[] | undefined } | undefined;
   /** Test seam; default `createFreshEvalSandbox`. */
   readonly make?: (config: FreshEvalSandboxConfig) => FreshEvalSandbox;
   /** Test seam: the tree of a commit in a repository. Default: the safe git path (`createProcessCandidateGit(...).treeOf`). */
@@ -160,10 +186,24 @@ export function evalModelPathPattern(rowId: string, model: string): RegExp {
  * DEC 253n(2): the check round's fresh sandbox and model pin, built per run from the delivered plan (`deliveredPlan`) and this check's pin. `available()` answers only what the host can know before
  * the plan is read (a pinned worker image and the model helper's walls); everything else is checked at `run`, which throws (Not run) before anything starts when it does not hold.
  */
-export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<EvalSourceInvocation, "operationId">, deliveredPlan: () => Promise<unknown>, deliveredEnvironment: () => Promise<EvalEnvironment | undefined> = async () => undefined): Pick<EvalCheckHost, "sandbox" | "runDir" | "modelAllowed"> {
+export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<EvalSourceInvocation, "operationId"> & { readonly workspaceId?: string }, deliveredPlan: () => Promise<unknown>, deliveredEnvironment: () => Promise<EvalEnvironment | undefined> = async () => undefined, deliveredStandIns: () => Promise<EvalStandInDescriptor | undefined> = async () => undefined): Pick<EvalCheckHost, "sandbox" | "runDir" | "modelAllowed" | "standInSetVersion" | "fillMissingRows"> {
   const image = host.environment[EVAL_WORKER_IMAGE_VARIABLE]?.trim();
   // The model the running plan pins (set when a run has read its plan): a frame for another row or model is refused before the stage.
   let pinned: { row: string; path: RegExp } | undefined;
+  // L4-EINT: the stand-in set of this check, prepared ONCE from the base commit (the version needs it before the first run, the runs need it after). Off unless the switch is "1" and the host asked for it.
+  const standInsOn = host.standIns !== undefined && evalStandInsOn(host.environment);
+  let prepared: Promise<PreparedEvalStandIns | undefined> | undefined;
+  const prepare = (stop?: AbortSignal): Promise<PreparedEvalStandIns | undefined> => {
+    if (!standInsOn) return Promise.resolve(undefined);
+    return prepared ??= (async () => {
+      const check = pinnedEvalFreshCheck(await deliveredPlan());
+      if (check === undefined) return undefined;
+      return await prepareEvalStandIns({
+        descriptor: await deliveredStandIns().catch(() => undefined), dependencies: host.standIns?.dependencies, repositoryDirectory: check.repository.directory, baseCommit: check.repository.baseCommit,
+        scratchDir: check.round.scratchDir, workspaceId: invocation.workspaceId ?? "", operationId: invocation.operationId, signal: stop === undefined ? AbortSignal.timeout(120_000) : AbortSignal.any([stop, AbortSignal.timeout(120_000)]),
+      });
+    })().catch(() => undefined);
+  };
   const sandbox: FreshEvalSandbox = {
     available(): boolean {
       try { return evalImageDigestOf(image) !== undefined && typeof host.docker?.run === "function" && freshEvalSandboxOffered(host.environment); } catch { return false; }
@@ -182,12 +222,19 @@ export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<Ev
       } finally { await rm(scratch, { recursive: true, force: true }).catch(() => undefined); }
       // L4-EVS: the environment of this plan's ask (an unreadable one is no environment: the bare image, as before).
       const evalEnvironment = await deliveredEnvironment().catch(() => undefined);
+      const stand = await prepare(input.signal);
+      const services = (() => { try { return host.services?.({ side: input.side, prepared: stand }); } catch { return undefined; } })();
       const config: FreshEvalSandboxConfig = {
         ...(evalEnvironment === undefined ? {} : { evalEnvironment }),
         docker: host.docker, image, workspace: await host.workspaceKey(), taskId: invocation.operationId,
         roundBudgetMs: Math.min(Math.max(1, Math.floor(check.round.roundBudgetMs)), FRESH_EVAL_RUN_MAX_MS),
         repository: { directory: check.repository.directory, baseCommit: check.repository.baseCommit, candidateCommit: check.repository.candidateCommit },
         command: check.command, report: check.report, rowId: check.rowId, scratchDir: check.round.scratchDir, workingSandbox: check.round.workingSandbox, environment: host.environment,
+        // L4-E12: this run's own services (E1) and the sealed name server (E2: on with services, off for a plain round as before; the operator's switch can force it off).
+        ...(services === undefined ? {} : { services }), ...(evalSealedDnsOn(host.environment) ? {} : { sealedDns: false }),
+        // L4-EINT: the outside-HTTP stand-in round (one per check: both sides, every re-ask and the second look share its answer book).
+        ...(stand?.round === undefined ? {} : { standIns: { round: stand.round } }),
+        ...(standInsOn ? { reportStandInDatabases: true } : {}),
       };
       pinned = { row: check.rowId, path: evalModelPathPattern(check.rowId, check.model) };
       return await (host.make ?? createFreshEvalSandbox)(config).run(input);
@@ -198,6 +245,7 @@ export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<Ev
     // Short and the worker's own: each run makes a private (0700) folder in it for the bridge socket and removes it.
     runDir: tmpdir(),
     modelAllowed: (frame) => pinned !== undefined && frame.row === pinned.row && pinned.path.test(frame.path),
+    ...(standInsOn ? { standInSetVersion: async () => (await prepare())?.version, fillMissingRows: async request => (await prepare())?.databases?.fillMissingRows(request) ?? [] } : {}),
   };
 }
 
@@ -208,10 +256,10 @@ export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<Ev
 export function evalHostSourcesFor(invocation: EvalSourceInvocation, host: { readonly controlPlaneUrl: string; readonly fetch?: typeof fetch; readonly check?: EvalCheckHost | undefined; readonly fresh?: EvalFreshHost | undefined }): EvalHostSources | undefined {
   try {
     if (typeof host.controlPlaneUrl !== "string" || host.controlPlaneUrl === "") return undefined;
-    const { deliveredPlan, deliveredEnvironment, ...sources } = evalPlanSourcesFor(invocation, { controlPlaneUrl: host.controlPlaneUrl, ...(host.fetch === undefined ? {} : { fetch: host.fetch }) });
+    const { deliveredPlan, deliveredEnvironment, deliveredStandIns, ...sources } = evalPlanSourcesFor(invocation, { controlPlaneUrl: host.controlPlaneUrl, ...(host.fetch === undefined ? {} : { fetch: host.fetch }) });
     // DEC 253n(2): without a given check host, the fresh sandbox is built per run from the same delivered plan (production).
     const fresh = host.check === undefined ? host.fresh : undefined;
-    const check: EvalCheckHost | undefined = host.check ?? (fresh === undefined ? undefined : plannedFreshEvalSandbox(fresh, invocation, deliveredPlan, deliveredEnvironment));
+    const check: EvalCheckHost | undefined = host.check ?? (fresh === undefined ? undefined : plannedFreshEvalSandbox(fresh, invocation, deliveredPlan, deliveredEnvironment, deliveredStandIns));
     if (check === undefined) return undefined;
     // A plan this worker's fresh sandbox can never run (no confirmed command, as before 253n; another image than the worker's) is no plan: "not connected", before any hold.
     const plan: EvalHostSources["plan"] = fresh === undefined ? sources.plan : async () => {
@@ -224,7 +272,7 @@ export function evalHostSourcesFor(invocation: EvalSourceInvocation, host: { rea
     };
     return { ...sources, plan,
       sandbox: check.sandbox, runDir: check.runDir, modelAllowed: check.modelAllowed,
-      ...(check.changedPrompt === undefined ? {} : { changedPrompt: check.changedPrompt }), ...(check.meter === undefined ? {} : { meter: check.meter }) };
+      ...(check.changedPrompt === undefined ? {} : { changedPrompt: check.changedPrompt }), ...(check.meter === undefined ? {} : { meter: check.meter }), ...(check.standInSetVersion === undefined ? {} : { standInSetVersion: check.standInSetVersion }), ...(check.fillMissingRows === undefined ? {} : { fillMissingRows: check.fillMissingRows }) };
   } catch { return undefined; }
 }
 
@@ -280,6 +328,8 @@ export function evalFinalCheckForTask(input: EvalTaskBindingInput): EvalFinalChe
       modelAccess,
       exec: createBridgedEvalExec({ sandbox: sources.sandbox, runDir: sources.runDir, modelAllowed: sources.modelAllowed, changedPrompt, ...(input.now === undefined ? {} : { now: input.now }) }),
       ...(sources.meter === undefined ? {} : { meter: sources.meter }),
+      ...(sources.standInSetVersion === undefined ? {} : { standInSetVersion: sources.standInSetVersion }),
+      ...(sources.fillMissingRows === undefined ? {} : { fillMissingRows: sources.fillMissingRows }),
     });
   } catch { return undefined; }
 }

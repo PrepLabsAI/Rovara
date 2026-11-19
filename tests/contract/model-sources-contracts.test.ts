@@ -1,5 +1,7 @@
 // Plan 3 Task 24a: company AI source contracts. The kinds stay off until each one's real-key checklist passes.
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import * as contracts from "../../packages/contracts/src/index.js";
 import { canonicalModelName } from "../../packages/contracts/src/models-node.js";
 import {
   BEDROCK_ROLE_ARN_PATTERN,
@@ -11,7 +13,7 @@ import {
   OrgModelSourcesSchema,
   SOURCE_KINDS_AT_LAUNCH,
   TRANSPORTS_AT_LAUNCH,
-  bedrockExternalId,
+  BEDROCK_EXTERNAL_ID_PATTERN,
   customSourceLimitProblem,
   defaultModelSourceOrder,
   modelSourceOrgProblem,
@@ -22,6 +24,9 @@ import {
 
 const ORG = "org_abcdefghij0123456789";
 const SRC = "src_abcdefghij0123456789";
+/** What the gateway derives for a company: `rvb-` + 40 hex (an HMAC under its KMS key); a test has to write one down. */
+const EXT = `rvb-${"a1".repeat(20)}`;
+const OTHER_EXT = `rvb-${"b2".repeat(20)}`;
 const ROLE = "arn:aws:iam::123456789012:role/rovara/proxy-access";
 
 const claude = { provider: "anthropic", modelId: "claude-sonnet-4-5" };
@@ -153,7 +158,7 @@ describe("stored source", () => {
   it("accepts a server-completed source of each kind", () => {
     expect(ModelSourceSchema.safeParse({ ...anthropicInput, sourceId: SRC }).success).toBe(true);
     expect(ModelSourceSchema.safeParse({ ...endpointInput, sourceId: SRC }).success).toBe(true);
-    expect(ModelSourceSchema.safeParse({ ...bedrockInput, sourceId: SRC, externalId: bedrockExternalId(ORG), tested: false }).success).toBe(true);
+    expect(ModelSourceSchema.safeParse({ ...bedrockInput, sourceId: SRC, externalId: EXT, tested: false }).success).toBe(true);
   });
 
   it("needs a server-generated source id, and for Bedrock the server-set external id and tested flag", () => {
@@ -167,19 +172,34 @@ describe("stored source", () => {
   });
 
   it("defaults a stored Bedrock source to not tested", () => {
-    const parsed = ModelSourceSchema.parse({ ...bedrockInput, sourceId: SRC, externalId: bedrockExternalId(ORG) });
+    const parsed = ModelSourceSchema.parse({ ...bedrockInput, sourceId: SRC, externalId: EXT });
     expect(parsed.kind === "bedrock" && parsed.tested).toBe(false);
   });
 
-  it("checks a stored Bedrock external id against the org", () => {
-    const own = ModelSourceSchema.parse({ ...bedrockInput, sourceId: SRC, externalId: bedrockExternalId(ORG) });
-    expect(modelSourceOrgProblem(ORG, own)).toBeUndefined();
-    expect(modelSourceOrgProblem("org_zzzzzzzzzz0123456789", own)).toMatch(/external id/);
-    expect(modelSourceOrgProblem(ORG, ModelSourceSchema.parse({ ...anthropicInput, sourceId: SRC }))).toBeUndefined();
+  it("refuses the old guessable `rovara-<org>` form: a stored Bedrock source's external id is the rvb- HMAC form only", () => {
+    for (const old of [`rovara-${ORG}`, "rovara-x", `rvb-${"A1".repeat(20)}`, `rvb-${"a1".repeat(19)}`, `${EXT}0`, ` ${EXT}`]) {
+      expect(ModelSourceSchema.safeParse({ ...bedrockInput, sourceId: SRC, externalId: old, tested: false }).success, old).toBe(false);
+    }
   });
 
-  it("derives the external id from the org", () => {
-    expect(bedrockExternalId(ORG)).toBe(`rovara-${ORG}`);
+  it("checks a stored Bedrock external id against the one the gateway derived for the org, and never derives one itself", () => {
+    const own = ModelSourceSchema.parse({ ...bedrockInput, sourceId: SRC, externalId: EXT });
+    expect(modelSourceOrgProblem(own, EXT)).toBeUndefined();
+    expect(modelSourceOrgProblem(own, OTHER_EXT)).toMatch(/external id/);
+    // Nothing here can say what an org's id is: with none given, a Bedrock source is refused, never accepted on a guess.
+    expect(modelSourceOrgProblem(own, undefined)).toMatch(/external id/);
+    expect(modelSourceOrgProblem(own, `rovara-${ORG}`)).toMatch(/external id/);
+    expect(modelSourceOrgProblem(ModelSourceSchema.parse({ ...anthropicInput, sourceId: SRC }), undefined)).toBeUndefined();
+  });
+
+  it("has ONE external id scheme (rvb-): no `rovara-<org>` helper or trust template left to hand out", () => {
+    expect(BEDROCK_EXTERNAL_ID_PATTERN.test(EXT)).toBe(true);
+    expect(BEDROCK_EXTERNAL_ID_PATTERN.test(`rovara-${ORG}`)).toBe(false);
+    expect("bedrockExternalId" in contracts).toBe(false);
+    expect("bedrockTrustPolicy" in contracts).toBe(false);
+    const source = readFileSync(new URL("../../packages/contracts/src/model-sources.ts", import.meta.url), "utf8");
+    expect(source).not.toMatch(/`rovara-\$\{/u);
+    expect(source).not.toMatch(/rovara-org_/u);
   });
 });
 

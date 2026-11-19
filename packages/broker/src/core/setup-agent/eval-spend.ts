@@ -260,17 +260,26 @@ export function createEvalSpendCapabilities(options: Table & { project: string; 
     const current = parsed.data;
     if (current.selection !== row.plan.selection || evalSpendInputsDigest(current.inputs) !== row.inputsDigest || canonicalJson(current.budget) !== canonicalJson(row.plan.budget) || current.estimate.calls > row.plan.estimate.calls || current.estimate.costMicros > row.plan.estimate.costMicros) return undefined;
     const authority = await options.adapter.authority({ company: row.company, project: row.project, approver: row.approvedBy });
-    if (authority === undefined || authority.company !== row.company || authority.project !== row.project || authority.principal.companyId !== row.company || authority.principal.personId !== row.approvedBy.personId || authority.principal.provider !== row.approvedBy.provider || authority.provider !== "customer" || authority.connected !== true) return undefined;
+    if (authority === undefined) {
+      // L4-T3: the gateway answers "no" the same way for a withdrawn approval and for a provider that is not connected. Only an adapter that says outright the project's own AI provider is NOT connected turns this into
+      // the "not connected" reading; the approval itself is still Code's own, standing row, its approver's role read live. Anything else (no answer, "connected", no such source) stays "not approved".
+      const asked = options.adapter.providerConnected === undefined ? undefined : await options.adapter.providerConnected({ company: row.company, project: row.project }).catch(() => undefined);
+      const standing = asked === false ? await approvedRole(options, row) : undefined;
+      return standing === undefined ? undefined : { row, role: standing, connected: false as const };
+    }
+    if (authority.company !== row.company || authority.project !== row.project || authority.principal.companyId !== row.company || authority.principal.personId !== row.approvedBy.personId || authority.principal.provider !== row.approvedBy.provider || authority.provider !== "customer") return undefined;
     const role = await roleFor(options, row.project, sessionPerson(authority.principal));
     if (role === undefined) return undefined;
-    return { row, role };
+    return { row, role, connected: authority.connected === true };
   };
   const approval: EvalSpendApproval = { async read() {
     try {
       const found = await resolve(); if (found === undefined) return undefined;
-      const { row, role } = found;
-      const grant: EvalSpendGrant = Object.freeze({ company: row.company, project: row.project, selection: row.plan.selection, inputsDigest: row.inputsDigest, role, provider: "customer", connected: true, maxCalls: row.plan.estimate.calls, maxCostMicros: row.plan.estimate.costMicros });
-      issued.set(grant, row); return grant;
+      const { row, role, connected } = found;
+      const grant: EvalSpendGrant = Object.freeze({ company: row.company, project: row.project, selection: row.plan.selection, inputsDigest: row.inputsDigest, role, provider: "customer", connected, maxCalls: row.plan.estimate.calls, maxCostMicros: row.plan.estimate.costMicros });
+      // A grant whose provider is not connected is only ever a reading: it is not issued, so the meter holds nothing under it and no call is made.
+      if (connected) issued.set(grant, row);
+      return grant;
     } catch { return undefined; }
   } };
   const meter: MonthlyMeter = { async reserve(request) {
@@ -279,7 +288,7 @@ export function createEvalSpendCapabilities(options: Table & { project: string; 
       if (options.adapter === undefined || row === undefined) return undefined;
       if (![request.calls, request.costMicros].every(n => Number.isSafeInteger(n) && n > 0) || request.calls > row.plan.estimate.calls || request.costMicros > row.plan.estimate.costMicros) return undefined;
       const revalidate = async (): Promise<boolean> => {
-        try { const found = await resolve(); return found !== undefined && canonicalJson(found.row) === canonicalJson(row); } catch { return false; }
+        try { const found = await resolve(); return found !== undefined && found.connected && canonicalJson(found.row) === canonicalJson(row); } catch { return false; }
       };
       if (!await revalidate()) return undefined;
       // Whole-estimate atomic hold and dispatch scope belong to the adapter, never to a repository/caller.

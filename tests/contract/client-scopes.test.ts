@@ -99,7 +99,7 @@ function session(id: string, developerId: string, extra: Record<string, unknown>
 beforeEach(async () => {
   vi.useFakeTimers({ now: T0, toFake: ["Date"] });
   const linking: DeveloperApiConfiguration = {
-    issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
+    issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(),
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };
   ({ db, handler } = await createAdminBroker({ linking, channelAdapters: true }));
@@ -182,8 +182,8 @@ describe("a project the signed-in person may use (spec 065)", () => {
   });
 });
 
-describe("the client routes are off unless the host turns them on (controller guidance, 2026-11-13)", () => {
-  it("answers 404 for every /v1/dev/client route without clientRoutes, even for a valid token", async () => {
+describe("the client routes are always on (DEC 254zzz81: the SIGN_IN_CLIENT_ROUTES switch is gone)", () => {
+  it("serves the /v1/dev/client routes with no host switch: a valid token reads the project and its members", async () => {
     const linking: DeveloperApiConfiguration = {
       issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(),
       verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
@@ -195,9 +195,12 @@ describe("the client routes are off unless the host turns them on (controller gu
     db.set({ pk: "PROJECT#payments", sk: "REV#000000000001", entityType: "PROJECT", definition: { name: "payments", revision: 1 } });
     session("s-ada", ADA, { administrator: true });
     const bearer = await token({ scope: "projects:members projects:create" });
-    for (const [method, path] of [["GET", "/v1/dev/client/projects/payments"], ["GET", "/v1/dev/client/projects/payments/members"], ["PUT", `/v1/dev/client/projects/payments/members/${ADA}`], ["POST", "/v1/dev/client/projects"], ["GET", "/v1/dev/client/repositories"]] as const) {
-      expect((await call(method, path, bearer)).status, `${method} ${path}`).toBe(404);
-    }
+    // No route answers the old switch's "route not found": the project read reaches the project check, the members list answers.
+    const read = await call("GET", "/v1/dev/client/projects/payments", bearer);
+    expect(JSON.stringify(read.body)).not.toContain("route not found");
+    expect((await call("GET", "/v1/dev/client/projects/payments/members", bearer)).status).toBe(200);
+    // Without a token every row still refuses (401), switch or not.
+    expect((await call("GET", "/v1/dev/client/projects/payments", "Bearer not-a-token")).status).toBe(401);
   });
 });
 
@@ -206,7 +209,7 @@ describe("creating a project from a repository (spec 065b)", () => {
   async function creating() {
     const looked: string[] = [];
     const linking: DeveloperApiConfiguration = {
-      issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
+      issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(),
       verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
     };
     const clientProjects = {

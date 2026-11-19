@@ -68,6 +68,7 @@ describe("the core root wires the core task web routes", () => {
     const depsFor = vi.fn((): DeveloperTaskRouteDependencies => { throw agentXError("RUNTIME_UNAVAILABLE", "rules reached"); });
     const { root: built } = root(depsFor);
     expect(typeof built.coreTasks?.taskMoney).toBe("function");
+    expect(typeof built.coreTasks?.taskReadable).toBe("function");
     const taskId = await coreTask(built);
     const ask = (developerId: string, rest: string) => built.coreTasks!.route({ method: "GET", path: `/v1/dev/tasks/${taskId}/${rest}`, headers: {} }, { developerId, sessionId: "s", name: developerId === MAYA ? "Maya" : "Omar" });
     const reached = await ask(MAYA, "people");

@@ -5,8 +5,8 @@
 // contract's is "not_available", and `evalSourcesFromDelivery` then gives nothing (the eval reads "not connected", zero calls). The cache answers only for the exact key the broker read
 // (another key is a miss) and never writes: base rounds are not saved from a worker through this route. Nothing here logs, stores or echoes the answer.
 import {
-  EVAL_PLAN_DELIVERY_ACTION, EVAL_PLAN_DELIVERY_MAX_BYTES, EvalPlanDeliverySchema, evalBaseCacheKey,
-  type BaseScoreCache, type EvalEnvironment, type EvalPlanDelivery, type EvalSpendApproval,
+  EVAL_PLAN_DELIVERY_ACTION, EVAL_PLAN_DELIVERY_MAX_BYTES, EvalPlanDeliverySchema, EvalStandInDescriptorSchema, evalBaseCacheKey,
+  type BaseScoreCache, type EvalEnvironment, type EvalPlanDelivery, type EvalSpendApproval, type EvalStandInDescriptor,
 } from "@agentx/contracts";
 
 const NOT_AVAILABLE: EvalPlanDelivery = Object.freeze({ status: "not_available" });
@@ -52,8 +52,12 @@ export async function fetchEvalPlanDelivery(input: EvalPlanDeliveryRequest): Pro
     if (text === undefined) return NOT_AVAILABLE;
     const reply: unknown = JSON.parse(text);
     if (typeof reply !== "object" || reply === null || Array.isArray(reply)) return NOT_AVAILABLE;
-    const answer = EvalPlanDeliverySchema.safeParse(Object.fromEntries(Object.entries(reply).filter(([key]) => key !== "requestId")));
+    // L4-EINT (review L1): the stand-in descriptor is optional and parsed on its own, so a descriptor this worker cannot read (a newer broker's) is dropped, never a reason to lose the plan (version skew).
+    const { standIns: rawStandIns, ...rest } = Object.fromEntries(Object.entries(reply).filter(([key]) => key !== "requestId")) as Record<string, unknown>;
+    const answer = EvalPlanDeliverySchema.safeParse(rest);
     if (!answer.success || Buffer.byteLength(JSON.stringify(answer.data), "utf8") > EVAL_PLAN_DELIVERY_MAX_BYTES) return NOT_AVAILABLE;
+    const descriptor = rawStandIns === undefined ? undefined : EvalStandInDescriptorSchema.safeParse(rawStandIns);
+    if (answer.data.status === "ready" && descriptor?.success === true) return { ...answer.data, standIns: descriptor.data };
     return answer.data;
   } catch {
     return NOT_AVAILABLE;
@@ -64,6 +68,8 @@ export interface DeliveredEvalSources {
   plan(): Promise<unknown>;
   /** L4-EVS: the environment the sealed eval runs in (saved image or install steps), when the broker delivered one. A fresh copy per read; the login in it is for one pull and is never stored or logged. */
   environment(): Promise<EvalEnvironment | undefined>;
+  /** L4-EINT: what the project's evals reach (the dry run's outside hosts, the writer's set), when the broker delivered it (the operator's switch is on). A fresh copy per read. */
+  standIns(): Promise<EvalStandInDescriptor | undefined>;
   readonly approval: EvalSpendApproval;
   readonly cache: BaseScoreCache;
 }
@@ -71,7 +77,7 @@ export interface DeliveredEvalSources {
 /** The plan, approval and cache of a delivered answer, or undefined for "not_available". Each read returns a fresh copy; the cache answers only the key the broker read and never writes. */
 export function evalSourcesFromDelivery(answer: EvalPlanDelivery): DeliveredEvalSources | undefined {
   if (answer.status !== "ready") return undefined;
-  const { plan, approval, baseline, environment } = structuredClone(answer);
+  const { plan, approval, baseline, environment, standIns } = structuredClone(answer);
   const sameKey = (parts: Parameters<BaseScoreCache["read"]>[0]): boolean => {
     if (baseline === null) return false;
     try { return evalBaseCacheKey(parts) === baseline.key; } catch { return false; }
@@ -79,6 +85,7 @@ export function evalSourcesFromDelivery(answer: EvalPlanDelivery): DeliveredEval
   return {
     plan: async () => structuredClone(plan),
     environment: async () => (environment === undefined ? undefined : structuredClone(environment)),
+    standIns: async () => (standIns === undefined ? undefined : structuredClone(standIns)),
     approval: { read: async () => approval === null ? undefined : Object.freeze({ ...approval }) },
     cache: {
       read: async (parts) => sameKey(parts) && baseline?.record != null ? structuredClone(baseline.record) : undefined,

@@ -4,24 +4,22 @@
 //   GET    /v1/dev/me/sign-ins                                    the caller's sign-in methods (the first, and each connected one)
 //   POST   /v1/dev/me/sign-ins/link                               start connecting a method: { method, challenge, returnTo, state } -> { authorizeUrl, linkId }
 //   POST   /v1/dev/me/sign-ins/link/finish                        finish it in the SAME session: { linkId, linkCode, verifier } -> { method }
-//   DELETE /v1/dev/me/sign-ins/{method}                           remove a connected method (fresh step-up)
+//   DELETE /v1/dev/me/sign-ins/{method}                           remove a connected method
 //   GET    /v1/dev/company/members/{personId}/sign-ins            a company owner or admin: a person's methods
-//   DELETE /v1/dev/company/members/{personId}/sign-ins/{method}   a company owner or admin: remove one (fresh step-up)
-//   GET    /v1/dev/me/sign-in-factors                             L4-MF4: the caller's OWN confirmation email (masked) and passkeys, for the web account page. No path or
-//                                                                 parameter names a person: nobody (an admin included) reads another person's factors through it.
+//   DELETE /v1/dev/company/members/{personId}/sign-ins/{method}   a company owner or admin: remove one
 //
 // The broker may not write the sign-in table: every route forwards to DeveloperIdentity (sign-in-links.ts), naming the caller ONLY by the developer
-// id and session id of the verified token, and DeveloperIdentity checks that session, the step-up, the company and every link rule itself. Bodies
+// id and session id of the verified token, and DeveloperIdentity checks that session, the company and every link rule itself. Bodies
 // are validated strictly here first; every refusal is fixed words that never echo what was sent.
 import { z } from "zod";
 import {
-  LinkableSignInMethodSchema, SIGN_IN_LINK_TEXT, SignInFactorsAnswerSchema, SignInLinkFinishBodySchema, SignInLinkStartBodySchema, agentXError,
-  type ListSignInFactorsRequest, type SignInLinkFinishRequest, type SignInLinkFinishResponse, type SignInLinkRefusal, type SignInLinkStartRequest, type SignInLinkStartResponse,
-  type ListSignInFactorsResponse, type SignInLinksListRequest, type SignInLinksListResponse, type SignInUnlinkRequest, type SignInUnlinkResponse,
+  LinkableSignInMethodSchema, SIGN_IN_LINK_TEXT, SignInLinkFinishBodySchema, SignInLinkStartBodySchema, agentXError,
+  type SignInLinkFinishRequest, type SignInLinkFinishResponse, type SignInLinkRefusal, type SignInLinkStartRequest, type SignInLinkStartResponse,
+  type SignInLinksListRequest, type SignInLinksListResponse, type SignInUnlinkRequest, type SignInUnlinkResponse,
 } from "@agentx/contracts";
 import type { AdaptedHttpRequest } from "./lambda.js";
 
-export type SignInLinkRequest = SignInLinkStartRequest | SignInLinkFinishRequest | SignInLinksListRequest | SignInUnlinkRequest | ListSignInFactorsRequest;
+export type SignInLinkRequest = SignInLinkStartRequest | SignInLinkFinishRequest | SignInLinksListRequest | SignInUnlinkRequest;
 export type SignInLinkReply = SignInLinkStartResponse | SignInLinkFinishResponse | SignInLinksListResponse | SignInUnlinkResponse;
 /** One call to DeveloperIdentity; a refusal of its own (`unavailable`) when it cannot be reached or answers something that does not read. */
 export type SignInLinkForward = (request: SignInLinkRequest) => Promise<SignInLinkReply>;
@@ -40,7 +38,6 @@ function body(request: AdaptedHttpRequest): unknown {
 function refused(answer: { error: string }): never {
   switch (answer.error) {
     case "signed_out": throw agentXError("AUTH_REQUIRED", SIGN_IN_LINK_TEXT.signedOut);
-    case "reauth": throw agentXError("REAUTH_REQUIRED", SIGN_IN_LINK_TEXT.reauth);
     case "refused": throw agentXError("FORBIDDEN", SIGN_IN_LINK_TEXT.refused);
     case "forbidden": throw agentXError("FORBIDDEN", SIGN_IN_LINK_TEXT.forbidden);
     case "last_method": throw agentXError("FORBIDDEN", SIGN_IN_LINK_TEXT.lastMethod);
@@ -95,25 +92,6 @@ export async function routeSignInLinks(forward: SignInLinkForward | undefined, c
     return { removed: true };
   }
   throw agentXError("NOT_FOUND", "route not found");
-}
-
-const SIGN_IN_FACTORS = "/v1/dev/me/sign-in-factors";
-
-/**
- * L4-MF4: GET /v1/dev/me/sign-in-factors. The caller is the developer id and session id of the VERIFIED token and nothing else: the request's query, headers and body are never read,
- * so no value of the request can name a person. The Lambda's reply is read into the fixed shape (a masked email of the one allowed form, at most DEVELOPER_PASSKEYS_MAX passkeys of an
- * opaque id and times): anything else it carried is dropped, and a reply that does not read is `unavailable`, never passed through.
- */
-export async function routeSignInFactors(forward: SignInLinkForward | undefined, caller: { developerId: string; sessionId: string }, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
-  if (url.pathname !== SIGN_IN_FACTORS || request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
-  if (forward === undefined) throw agentXError("NOT_FOUND", NOT_SET_UP);
-  // A session that is not a sign-in session (a registered service's own token has none) never reaches DeveloperIdentity.
-  if (caller.sessionId === "") throw agentXError("AUTH_REQUIRED", SIGN_IN_LINK_TEXT.signedOut);
-  const answer = await forward({ kind: "list-sign-in-factors", developerId: caller.developerId, sessionId: caller.sessionId }) as ListSignInFactorsResponse;
-  if (answer.ok !== true) refused(answer);
-  const read = SignInFactorsAnswerSchema.safeParse(answer);
-  if (!read.success) throw agentXError("RUNTIME_UNAVAILABLE", SIGN_IN_LINK_TEXT.unavailable);
-  return read.data;
 }
 
 /** The forward through the sign-in Lambda (as the other DeveloperIdentity requests): a fault or a reply that does not read is `unavailable`. */

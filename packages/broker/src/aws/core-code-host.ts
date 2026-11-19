@@ -201,6 +201,10 @@ export function companyScopedGitHubProvider(client: GitHubCodeHostProvider, opti
   // The optional methods, only where the client has them (the adapter then offers the matching CodeHost method), each with the same check.
   const getPathKindAtCommit = client.getPathKindAtCommit?.bind(client);
   if (getPathKindAtCommit !== undefined) scoped.getPathKindAtCommit = async (url, path, commit, scope, kindOptions) => getPathKindAtCommit(url, path, commit, await companyScope(url, scope), kindOptions);
+  const openEvalWrapperPullRequest = client.openEvalWrapperPullRequest?.bind(client);
+  if (openEvalWrapperPullRequest !== undefined) scoped.openEvalWrapperPullRequest = async (url, request, scope) => openEvalWrapperPullRequest(url, request, await companyScope(url, scope));
+  const findEvalWrapperPullRequest = client.findEvalWrapperPullRequest?.bind(client);
+  if (findEvalWrapperPullRequest !== undefined) scoped.findEvalWrapperPullRequest = async (url, branch, scope) => findEvalWrapperPullRequest(url, branch, await companyScope(url, scope));
   const listTreeAtCommit = client.listTreeAtCommit?.bind(client);
   if (listTreeAtCommit !== undefined) scoped.listTreeAtCommit = async (url, commit, scope, treeOptions) => listTreeAtCommit(url, commit, await companyScope(url, scope), treeOptions);
   const listDirectoryAtCommit = client.listDirectoryAtCommit?.bind(client);

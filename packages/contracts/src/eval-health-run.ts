@@ -2,9 +2,10 @@
 // times (`runEvalHealth`), in a fresh sandbox, through the model gateway, and the broker keeps the result as the project's baseline and tells the person pass or fail per case, or why it did not run.
 //
 // What crosses the wire (the worker's one post, `eval-health-result`): which request and claim it answers, and either the measured baseline record or a closed reason. Nothing else: no cost, no company, no project, no
-// key parts. The broker holds the claim (its own random id, written when the run was claimed), derives the cache key from ITS OWN plan, and reads the questions from ITS OWN plan; a body can only fill in answers.
+// key parts beyond the optional stand-in digest. The broker holds the claim (its own random id, written when the run was claimed), derives the cache key from ITS OWN plan, and reads the questions from ITS OWN plan; a body can only fill in answers.
 import { z } from "zod";
 import { EvalBaseRecordSchema } from "./eval-base-cache.js";
+import { EvalBlockedReachSchema, evalBlockedReachClause, type EvalBlockedReach } from "./eval-run-diagnostic.js";
 import { MEASURES_FILE_MAX_BYTES } from "./measures-file.js";
 
 /** A yes older than this is not run (a person asked a day ago; the eval, the approval or the people may all have changed since). */
@@ -34,24 +35,25 @@ export type PrepareEvalHealth = z.infer<typeof PrepareEvalHealthSchema>;
  * refuses before a worker is asked: "expired", "requester_not_allowed", "approval_changed", "main_unreadable", "already_measuring", "could_not_start" and "no_report" (a claim that never reported).
  */
 export const EVAL_HEALTH_NOT_RUN_REASONS = [
-  "not_connected", "invalid_questions", "over_cap", "invalid_identity", "not_confirmed", "monthly_cap", "provider_incomplete", "invalid_results", "incomplete_questions", "unavailable", "questions_changed", "stopped",
+  "not_connected", "invalid_questions", "over_cap", "invalid_identity", "not_confirmed", "provider_not_connected", "monthly_cap", "provider_incomplete", "invalid_results", "incomplete_questions", "unavailable", "questions_changed", "stopped", "blocked_connection",
   "expired", "requester_not_allowed", "approval_changed", "main_unreadable", "already_measuring", "could_not_start", "no_report",
 ] as const;
 export type EvalHealthNotRunReason = (typeof EVAL_HEALTH_NOT_RUN_REASONS)[number];
 export const EvalHealthNotRunReasonSchema = z.enum(EVAL_HEALTH_NOT_RUN_REASONS);
 
 /** The reasons a WORKER may report (the rest are the broker's own: a worker cannot say a request expired or a claim never reported). */
-export const EVAL_HEALTH_WORKER_REASONS = ["not_connected", "invalid_questions", "over_cap", "invalid_identity", "not_confirmed", "monthly_cap", "provider_incomplete", "invalid_results", "incomplete_questions", "unavailable", "questions_changed", "stopped"] as const satisfies readonly EvalHealthNotRunReason[];
+export const EVAL_HEALTH_WORKER_REASONS = ["not_connected", "invalid_questions", "over_cap", "invalid_identity", "not_confirmed", "provider_not_connected", "monthly_cap", "provider_incomplete", "invalid_results", "incomplete_questions", "unavailable", "questions_changed", "stopped", "blocked_connection"] as const satisfies readonly EvalHealthNotRunReason[];
 
 /** What the worker posts. `measured` carries the baseline the three runs made, exactly as the cache would hold it; the broker checks it against its own plan before it keeps anything. */
 export const EvalHealthResultBodySchema = z.object({
   requestId: z.string().uuid(),
   claimId: z.string().uuid(),
   result: z.discriminatedUnion("status", [
-    z.object({ status: z.literal("measured"), record: EvalBaseRecordSchema }).strict(),
-    z.object({ status: z.literal("not_run"), reason: z.enum(EVAL_HEALTH_WORKER_REASONS) }).strict(),
+    z.object({ status: z.literal("measured"), record: EvalBaseRecordSchema, standInSetVersion: z.string().regex(/^[a-f0-9]{64}$/u).optional() }).strict(),
+    /** TH1: `blocked` names what the sealed eval tried to reach (fixed shape, host names only), and only with `blocked_connection`. */
+    z.object({ status: z.literal("not_run"), reason: z.enum(EVAL_HEALTH_WORKER_REASONS), blocked: EvalBlockedReachSchema.optional() }).strict(),
   ]),
-}).strict();
+}).strict().refine(b => b.result.status !== "not_run" || b.result.blocked === undefined || b.result.reason === "blocked_connection", "a blocked list belongs to a blocked connection");
 export type EvalHealthResultBody = z.infer<typeof EvalHealthResultBodySchema>;
 
 const WORDS: Readonly<Record<EvalHealthNotRunReason, string>> = {
@@ -60,6 +62,7 @@ const WORDS: Readonly<Record<EvalHealthNotRunReason, string>> = {
   over_cap: "Not run: the three runs would cost more than the approved limit.",
   invalid_identity: "Not run: the eval could not be matched to your code.",
   not_confirmed: "Not run: the eval's spend is not approved by someone who can approve it now.",
+  provider_not_connected: "Not run: the AI your evals call is not connected for this project. Connect it in Company settings, then check again.",
   monthly_cap: "Not run: the monthly AI spending limit cannot fit these runs.",
   provider_incomplete: "Not run: the AI provider did not answer every question.",
   invalid_results: "Not run: your eval's results could not be read in full.",
@@ -67,6 +70,7 @@ const WORDS: Readonly<Record<EvalHealthNotRunReason, string>> = {
   unavailable: "Not run: the eval could not be run.",
   questions_changed: "Not run: your eval questions changed since you approved them. Approve them again.",
   stopped: "Not run: the check was stopped.",
+  blocked_connection: "Not run: your eval tried to reach something other than the model. Rovara's sealed check can't reach that yet.",
   expired: "Not run: your yes is more than a day old. Say yes again to run it.",
   requester_not_allowed: "Not run: the person who asked can no longer approve eval spending. Ask again.",
   approval_changed: "Not run: the eval's approval changed. Check it again.",
@@ -76,6 +80,6 @@ const WORDS: Readonly<Record<EvalHealthNotRunReason, string>> = {
   no_report: "Not run: the check did not report back. Say yes again to retry.",
 };
 /** The fixed words for a reason. Never echoes a cause, a path or a provider word. */
-export const evalHealthNotRunWords = (reason: EvalHealthNotRunReason): string => WORDS[reason];
+export const evalHealthNotRunWords = (reason: EvalHealthNotRunReason, blocked?: EvalBlockedReach): string => (reason === "blocked_connection" && blocked !== undefined ? `Not run: ${evalBlockedReachClause(blocked)}.` : WORDS[reason]);
 /** Said beside a measured result whose baseline could not be kept (the numbers are still shown). */
 export const EVAL_HEALTH_NOT_SAVED_WORDS = "Measured, but the result could not be saved as your baseline." as const;
