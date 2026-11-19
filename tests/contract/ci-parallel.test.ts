@@ -140,6 +140,15 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     const job = (await workflow()).jobs["linux-runtime"] as Job & { steps: { name?: string; run?: string; env?: Record<string, string> }[] };
     const generic = job.steps.find((step) => (step.run ?? "").startsWith("npx vitest run tests/linux"))!;
     expect(generic.run).toContain("--exclude tests/linux/e2e-docker25-dns.test.ts");
+    // L4-NETG: the sandbox-egress boot stage restarts Docker and walls docker0, so it never runs beside another Linux test file: out of the generic step, in a step of its own that comes after every other Docker step of the job.
+    expect(generic.run).toContain("--exclude tests/linux/worker-sandbox-egress.test.ts");
+    const egress = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/linux/worker-sandbox-egress.test.ts") && candidate !== generic)!;
+    expect(egress.run).toBe("npx vitest run tests/linux/worker-sandbox-egress.test.ts");
+    expect(egress.name).toMatch(/Sandbox egress gateway/);
+    expect(egress.env).toEqual({ ROVARA_DOCKER: "1", ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:ci" });
+    // It only isolates: no step is removed or made optional, and the generic step still runs every other Linux test.
+    expect(job.steps.some((candidate) => (candidate as { "continue-on-error"?: unknown })["continue-on-error"] !== undefined)).toBe(false);
+    expect(job.steps.indexOf(egress)).toBe(job.steps.length - 1);
     // Task 4.3a: the model channel test has a step of its own too (it builds a derived executor image), so the generic step does not run it a second time.
     expect(generic.run).toContain("--exclude tests/linux/e2e-model-channel.test.ts");
     // Task 4.3b: the agent step tests (twenty real runs of one case among them) have a step of their own, so the generic step does not run them a second time.

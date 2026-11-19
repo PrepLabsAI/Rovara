@@ -11,8 +11,9 @@
 //   - a dev container's image build (the classic builder through the wrapper) has no way to a raw address or a registry name, and reaches an allowed name through the gateway; a build on an ordinary user bridge (the control) does reach the raw address;
 //   - the verifier's contained E2E build commands (createDockerApplicationHost with `buildEgress`) the same, and no rvb build bridge is made;
 //   - docker0 and a left-over agentx-task bridge cannot forward (the stage's walls), while an ordinary user bridge (the control) can.
-// Lane L4-NETG3 (DEC 254zzz105) adds: the Docker DAEMON's own fetches go through the gateway's daemon proxy (ADD <url> to a raw address is refused, a base image from an allowed registry pulls, a dev container feature from an allowed host downloads
-// through the CLI with the proxy in its environment), judged by the gateway's own refusal log.
+// Lane L4-NETG3 (DEC 254zzz105) adds: the Docker DAEMON's own fetches go through the gateway's daemon proxy (ADD <url> to a raw address is refused and the proxy's log names it, an ADD of an allowed name works, a TLS GET of the registry API
+// of the registries the sandbox side is denied works through the proxy's tunnel, an image on a raw address is refused, the dev container CLI sends a feature download through the proxy), judged by the gateway's own refusal log.
+// THIS FILE RUNS ALONE (its own CI step, last): it restarts Docker twice, sets the daemon-wide name server and proxy and walls docker0, and its afterAll takes back every firewall rule the stage added.
 // The stage runs its REAL daemon step here: /etc/docker/daemon.json gets the gateway as default name server and Docker is restarted (the original file is put back after).
 // Needs ROVARA_DOCKER=1, passwordless sudo, and the container firewall of boot.sh (the CI job installs it first, as for the other network-wall tests).
 import { execFile } from "node:child_process";
@@ -53,6 +54,24 @@ let failureFile = "";
 let stageFile = "";
 let firewallScript = "";
 let daemonBefore: string | undefined;
+let agentxDirExisted = false;
+let rulesBefore: Record<string, string[]> = {};
+
+const RULE_CHAINS: ReadonlyArray<readonly [string, string]> = [["iptables", "DOCKER-USER"], ["iptables", "INPUT"], ["ip6tables", "INPUT"]];
+/** The rules in each chain the stage touches, as `-S` prints them (`-A CHAIN ...`). */
+async function ruleSnapshot(): Promise<Record<string, string[]>> {
+  const found: Record<string, string[]> = {};
+  for (const [tool, chain] of RULE_CHAINS) found[`${tool} ${chain}`] = (await sudo(tool, "-S", chain)).stdout.split("\n").filter((line) => line.startsWith("-A "));
+  return found;
+}
+/** Deletes every rule that is there now and was not before the stage (the stage's walls), so a later step of the job sees the firewall it had. */
+async function takeBackRules(): Promise<void> {
+  const now = await ruleSnapshot();
+  for (const [tool, chain] of RULE_CHAINS) {
+    const before = new Set(rulesBefore[`${tool} ${chain}`] ?? []);
+    for (const line of now[`${tool} ${chain}`] ?? []) if (!before.has(line)) await sudo(tool, "-D", ...line.slice(3).split(" "));
+  }
+}
 
 /** The stage, as boot.sh runs it, with the worker-image reads replaced by files. `program` is the gateway program the container runs. */
 async function stage(program: string, names: readonly string[] = SANDBOX_REGISTRY_DENY): Promise<{ code: number; failure: string; output: string }> {
@@ -111,6 +130,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     if (firewallScript === join(dir, "noop-firewall.sh")) await writeFile(firewallScript, "#!/bin/bash\nexit 0\n");
     stageFile = join(dir, "sandbox-egress.sh");
     await writeFile(stageFile, (await readFile(stagePath, "utf8")).split("/usr/local/libexec/rovara-container-firewall").join(firewallScript));
+    agentxDirExisted = existsSync("/etc/agentx");
+    rulesBefore = await ruleSnapshot();
     const had = await sudo("test", "-f", DAEMON_JSON);
     daemonBefore = had.code === 0 ? (await sudo("cat", DAEMON_JSON)).stdout : undefined;
     if (daemonBefore !== undefined) await writeFile(join(dir, "daemon.before"), daemonBefore);
@@ -118,7 +139,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     // A user bridge with a way out (the control), and a left-over agentx-task network that something still holds, as a bridge-mode session leaves it.
     await docker("network", "create", CONTROL_NETWORK);
     await docker("network", "create", "agentx-task");
-    const held = await docker("run", "-d", "--name", HELD_CONTAINER, "--pull=never", "--network", "agentx-task", APP_NODE_IMAGE, "sleep", "3600");
+    // --restart always: the stage restarts Docker before it removes the left-over network, and a stopped container holds no endpoint; the daemon brings this one back while it restores state, so the network stays held (as it is on a worker whose old sandbox is still running).
+    const held = await docker("run", "-d", "--name", HELD_CONTAINER, "--restart", "always", "--pull=never", "--network", "agentx-task", APP_NODE_IMAGE, "sleep", "3600");
     expect(held.code, held.stderr).toBe(0);
     await writeFile(join(dir, "worker.env"), "AWS_REGION=us-west-2\n");
     const made = await stage(EGRESS_GATEWAY_SOURCE);
@@ -132,7 +154,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     await docker("network", "rm", NETWORK);
     await docker("network", "rm", "rovara-xnet");
     await sudo("rm", "-f", "/etc/agentx/worker-dns");
-    await sudo("rmdir", "/etc/agentx");
+    if (!agentxDirExisted) await sudo("rmdir", "/etc/agentx");
+    await takeBackRules();
     // Docker's own configuration is put back, and Docker restarted on it with the runner's container firewall.
     await sudo("rm", "-f", "/etc/systemd/system/docker.service.d/30-rovara-build-proxy.conf");
     await sudo("systemctl", "daemon-reload");
@@ -400,6 +423,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
 
   it("registries reach the daemon through the proxy (a TLS GET of the registry API through the tunnel answers), and an image on a raw address:port is refused by it", async () => {
     // The daemon creating a container from an image it does not hold fetches it: from a raw address that is refused, and the proxy's own log says so.
+    // (Not a pull the CI image guard governs: an unroutable TEST-NET address that only the proxy ever sees; never copy this for a real image.)
     const refused = await docker("create", RAW_ADDRESS_IMAGE);
     expect(refused.code).not.toBe(0);
     expect(await gatewayLog()).toMatch(/"event":"proxy_refused"[^\n]*"host":"203\.0\.113\.7"|"event":"proxy_refused"[^\n]*"reason":"port"/u);

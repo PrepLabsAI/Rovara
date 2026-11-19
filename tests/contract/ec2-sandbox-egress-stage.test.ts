@@ -20,7 +20,7 @@ interface Options {
   failRuleInsert?: boolean; noMetadataBlock?: boolean; failInnerCreate?: boolean; failOuterCreate?: boolean; emptyProgram?: boolean; fewNames?: boolean; badName?: boolean; fewS3?: boolean; badS3?: boolean;
   failCreate?: boolean; failConnect?: boolean; failStart?: boolean; ghostNetworks?: boolean; failProbe?: boolean; innerNotInternal?: boolean; innerExistsRight?: boolean;
   // L4-NETG2: the Docker daemon's name server, the container firewall script, and the old agentx-task bridge.
-  otherDaemonDns?: boolean; failDockerRestart?: boolean; failFirewall?: boolean; dockerNotReady?: boolean; staleTaskNetwork?: boolean; taskNetworkHeld?: boolean; loopbackResolver?: boolean; dnsAlreadySet?: boolean; emptyDaemonJson?: boolean; notJsonDaemon?: boolean; noResolvers?: boolean; noAgentxDir?: boolean; proxyDead?: boolean; proxyOpen?: boolean; noRegion?: boolean;
+  otherDaemonDns?: boolean; failDockerRestart?: boolean; failFirewall?: boolean; dockerNotReady?: boolean; staleTaskNetwork?: boolean; taskNetworkHeld?: boolean; loopbackResolver?: boolean; dnsAlreadySet?: boolean; emptyDaemonJson?: boolean; notJsonDaemon?: boolean; noResolvers?: boolean; noAgentxDir?: boolean; installFailsForAgentx?: boolean; proxyDead?: boolean; proxyOpen?: boolean; noRegion?: boolean;
 }
 const DAEMON_BEFORE = '{"data-root": "/mnt/workspace/.docker", "default-address-pools": [{"base":"172.28.0.0/16","size":24}]}\n';
 const TASK_NETWORK_ID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -57,7 +57,7 @@ esac`;
   fake("iptables", table(h.rules, options.failRuleInsert === true));
   fake("ip6tables", table(h.rules6, false));
   fake("timeout", 'while [[ "$1" == -* ]]; do shift; done; shift; exec "$@"');
-  fake("install", 'dir=0; for last; do [[ "$last" == -d ]] && dir=1; done; [[ "$dir" == 1 ]] && mkdir -p "$last"; exit 0');
+  fake("install", options.installFailsForAgentx === true ? 'dir=0; for last; do [[ "$last" == -d ]] && dir=1; done; [[ "$dir" == 1 && "$last" == */agentx ]] && exit 1; [[ "$dir" == 1 ]] && mkdir -p "$last"; exit 0' : 'dir=0; for last; do [[ "$last" == -d ]] && dir=1; done; [[ "$dir" == 1 ]] && mkdir -p "$last"; exit 0');
   // A restart of Docker on the new file (the one with the gateway as name server) fails; on the old file it works.
   fake("systemctl", options.failDockerRestart === true ? `[[ "$*" == "restart docker.service" ]] && grep -q '"dns"' "${h.daemon}" && exit 1\nexit 0` : "exit 0");
   fake("sleep", "exit 0");
@@ -259,6 +259,12 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     expect(runStage(missing).status).toBe(0);
     expect(calls(missing)).toContain(`install -d -m 0700 ${join(missing.dir, "agentx")}`);
     expect(readFileSync(join(missing.dir, "agentx", "worker-dns"), "utf8")).toBe("10.42.0.2\n169.254.169.253\n");
+    // The directory cannot be made: the boot fails (closed), and nothing is handed to the worker.
+    const cannot = host({ noAgentxDir: true, installFailsForAgentx: true });
+    const failed = runStage(cannot);
+    expect(failed.status).not.toBe(0);
+    expect(failed.failure).toContain("host's name servers");
+    expect(envLines(cannot)).toEqual(NO_SANDBOX_ENV);
     const present = host();
     expect(runStage(present).status).toBe(0);
     expect(calls(present).some((line) => line.startsWith("install -d -m 0700") && line.endsWith("/agentx"))).toBe(false);
