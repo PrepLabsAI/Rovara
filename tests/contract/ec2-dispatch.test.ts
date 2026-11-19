@@ -1613,8 +1613,9 @@ describe("ec2-ebs delivery through the real session manager", () => {
       return { status: 200, body: "{}" };
     });
     const { deliver } = delivery({ sessions: world.sessions, sign: (message) => world.sign(message), post });
-    const recordA = recordFor(workspaceA);
-    const recordB = recordFor(workspaceB);
+    // Workspace ids are UUIDs; the helper types them as plain strings.
+    const recordA = recordFor(workspaceA as `${string}-${string}-${string}-${string}-${string}`);
+    const recordB = recordFor(workspaceB as `${string}-${string}-${string}-${string}-${string}`);
     for (const record of [recordA, recordB]) world.db.set({ pk: `OUTBOX#${record.id}`, sk: "OUTBOX", ...record });
     expect(await deliver(recordA, recordA.invocation)).toBe("WAITING_FOR_SESSION");
     await world.settle();
