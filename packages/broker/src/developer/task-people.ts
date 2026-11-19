@@ -802,3 +802,71 @@ export async function takeTaskOwnership(
 
 /** C4: the task People reads and writes are about, read strongly (the add and candidates routes load it after the owner check). */
 export const loadTaskPeopleTask = (deps: TaskPeopleDependencies, taskId: string): Promise<DeveloperTaskRecord> => loadTask(deps, taskId);
+
+/** DEC 254zzz84 (5): why one of a removed person's open tasks is not handed over (it then waits for someone with access to take it over, as any task that lost its owner). */
+export type TaskHandOverSkip = "people_off" | "no_people_list" | "not_their_task" | "successor_cannot_own";
+
+/**
+ * Member removal with hand-over (DEC 254zzz84 (5)): the steps that make `successorId` an owner of an open task the removed person owns, for the removal's own
+ * transaction (company-member-handover.ts adds them to its single commit). The removed person's entry becomes `denied` (a removed person is no longer
+ * eligible; reconcile would demote them the same way) and the successor's an owner, under the People revision read here, the task's META as read here and
+ * its open state. The successor must already be registered on the task and pass their proof NOW (eligible and present: a live member of the task's company
+ * with a live grant on its project): a task they cannot own is skipped with a reason, never handed to someone who could not open it. Read-only until committed.
+ */
+export async function taskOwnershipHandOverSteps(
+  deps: TaskPeopleDependencies,
+  task: DeveloperTaskRecord,
+  input: { leaverId: string; successorId: string; removalId: string; by: string; preview?: boolean },
+): Promise<{ items: TransactItem[]; steps: number } | { skipped: TaskHandOverSkip }> {
+  if (!HEX64.test(input.leaverId) || !HEX64.test(input.successorId) || !HEX64.test(input.by) || !REQUEST_ID.test(input.removalId) || input.leaverId === input.successorId) return denied();
+  if (!enabled(deps) || !open(task) || !Number.isSafeInteger(task.workflow?.revision) || typeof task.workflow?.stage !== "string") return { skipped: "people_off" };
+  // A People list or a person row that does not read is skipped, never a reason to keep a removed person in the company.
+  let people: TaskPeople | undefined;
+  try { people = await loadPeople(deps, task.taskId); } catch { people = undefined; }
+  if (people === undefined) return { skipped: "no_people_list" };
+  const leaver = people.people.find((person) => person.developerId === input.leaverId);
+  if (leaver?.role !== "owner") return { skipped: "not_their_task" };
+  let mapping: { personId: string; identity: TaskPersonIdentity } | undefined;
+  try { mapping = await personByDeveloper(deps, task.taskId, input.successorId); } catch { mapping = undefined; }
+  let proof: TaskPersonCheck;
+  try { proof = await checkedFresh(deps, task, input.successorId); } catch { return { skipped: "successor_cannot_own" }; }
+  if (!proof.eligible || !taskPersonPresent(proof) || (mapping !== undefined && !samePrincipal(mapping.identity, proof.identity))) return { skipped: "successor_cannot_own" };
+  const before = people.people.find((person) => person.developerId === input.successorId);
+  if (before?.role === "denied") return { skipped: "successor_cannot_own" };
+  // The preview writes nothing: a successor who passes the proof now is registered on the task when the removal is made. It still counts the steps the
+  // commit will write (People, META check, event, and each involved row), so the size check made BEFORE anyone is removed holds for the commit too.
+  if (input.preview === true) {
+    const involved = [input.successorId, input.leaverId].filter((developerId) => involvedStep(deps, task, developerId, developerId === input.successorId ? "owner" : "denied") !== undefined).length;
+    return { items: [], steps: 3 + involved };
+  }
+  if (mapping === undefined) return { skipped: "successor_cannot_own" };
+  const owner: PersonEntry = taskPeopleEntryOf({ ...mapping.identity, name: proof.identity.name }, "owner");
+  const entries = people.people.map((person) => person.developerId === input.leaverId ? { ...person, role: "denied" as const } : person.developerId === input.successorId ? owner : person);
+  const nextEntries = before === undefined ? [...entries, owner] : entries;
+  const next: TaskPeople = { schemaVersion: 1, revision: people.revision + 1, orphaned: false, people: nextEntries };
+  const createdAt = new Date(deps.now()).toISOString();
+  const event = { ...eventKey(task.taskId, input.removalId), entityType: "TASK_PEOPLE_EVENT", schemaVersion: 1, requestId: input.removalId, actorDeveloperId: input.by,
+    targetDeveloperId: input.successorId, beforeRole: before?.role ?? implicitRole(task, proof), afterRole: "owner", createdAt };
+  const items: TransactItem[] = [
+    { Update: {
+      TableName: deps.tableName, Key: peopleKey(task.taskId),
+      UpdateExpression: "SET #revision = :nextRevision, #orphaned = :orphaned, #people = :people",
+      ConditionExpression: "#revision = :expectedRevision",
+      ExpressionAttributeNames: { "#revision": "revision", "#orphaned": "orphaned", "#people": "people" },
+      ExpressionAttributeValues: { ":nextRevision": next.revision, ":orphaned": next.orphaned, ":people": next.people, ":expectedRevision": people.revision },
+    } },
+    { ConditionCheck: {
+      TableName: deps.tableName, Key: taskKey(task.taskId),
+      ConditionExpression: "#developerId = :developerId AND workflow.#revision = :taskRevision AND workflow.#stage = :taskStage AND attribute_not_exists(closedAt)",
+      ExpressionAttributeNames: { "#developerId": "developerId", "#revision": "revision", "#stage": "stage" },
+      ExpressionAttributeValues: { ":developerId": task.developerId, ":taskRevision": task.workflow.revision, ":taskStage": task.workflow.stage },
+    } },
+    { Put: { TableName: deps.tableName, Item: event, ConditionExpression: "attribute_not_exists(pk)" } },
+  ];
+  for (const [developerId, role] of [[input.successorId, "owner"], [input.leaverId, "denied"]] as const) {
+    const row = involvedStep(deps, task, developerId, role);
+    if (row !== undefined) items.push(row);
+  }
+  preflight([{ Put: { TableName: deps.tableName, Item: { ...peopleKey(task.taskId), ...next } } }, ...items]);
+  return { items, steps: items.length };
+}

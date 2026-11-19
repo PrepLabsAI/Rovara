@@ -173,3 +173,6 @@ describe("the knowledge routes at the developer router", () => {
 const OTHER_ROWS_DIGEST_BEFORE_JA7 = "92a6f4a931aee9473b4c31f499fed7dcb27001e364222587d19996e0d61f2333";
 // Batch b20 (rule D): with #1095 (the 4 local-tools rows) and #1104 (GET /v1/dev/projects/{project}/lessons/weekly, full) both added: removing the 4 rows gives the BEFORE_JA7 pin, and removing the weekly row too gives def66b83.
 const OTHER_ROWS_DIGEST = "5d5d7ca658cc0ec8f58dd8eee5d0525bec4fcfb3a713b7330e0350567e713d85";
+// (#1108) DEC 254zzz101 (rule D): #1100 stacks on #1086, whose own table (step-up removed) gives ff498627c2c192b3cb3ea56aa4fb04369cb6b6f2957598952f4b96d7ea4c128a here (the earlier pin was
+// 94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0); #1100 adds two rows (GET company/members/handovers, POST company/members/{personId}/handover), none changed: removing
+// exactly those 2 rows gives back ff498627....

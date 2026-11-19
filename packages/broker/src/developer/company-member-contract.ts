@@ -13,9 +13,13 @@ export const CompanyMember = Membership.extend({
 export const MEMBER_LAST_OWNER = "a company must keep at least one active owner";
 export const MEMBER_ONLY_OWNER = "only an owner can change or remove an owner";
 export const MEMBER_REVOKED = "restore this member before changing their role";
+/** DEC 254zzz84 (5): a removal's successor is no longer a live member of the company (checked inside the removal's own transaction). */
+export const MEMBER_SUCCESSOR_INVALID = "pick someone who is still in the company to take over";
+/** DEC 254zzz84 (5): the person's role is not the one the remover saw (`expectedRole`), checked inside the removal's own transaction. */
+export const MEMBER_CHANGED = "this person's role changed; review the removal again";
 export const MemberFailure = z.union([
   z.object({ ok: z.literal(false), error: z.enum(["invalid_request", "unavailable", "not_found"]) }).strict(),
-  z.object({ ok: z.literal(false), error: z.literal("unavailable"), message: z.enum([MEMBER_LAST_OWNER, MEMBER_REVOKED, MEMBER_ONLY_OWNER]) }).strict(),
+  z.object({ ok: z.literal(false), error: z.literal("unavailable"), message: z.enum([MEMBER_LAST_OWNER, MEMBER_REVOKED, MEMBER_ONLY_OWNER, MEMBER_SUCCESSOR_INVALID, MEMBER_CHANGED]) }).strict(),
 ]);
 export class CompanyMemberRefusal extends Error {
   constructor(readonly response: z.infer<typeof MemberFailure>) { super("company member request refused"); }

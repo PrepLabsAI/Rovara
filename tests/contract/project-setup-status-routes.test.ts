@@ -1309,6 +1309,8 @@ describe("what did not change", () => {
 const EXISTING_ROUTES_DIGEST_BEFORE_JA7 = "ee181ef4c705b6726861ae5aa145e130adef38a4e247bce68f77dcdbaf60ad8b";
 // Batch b20 (rule D): with #1095 (the 4 local-tools rows) and #1104 (GET /v1/dev/projects/{project}/lessons/weekly, full) both added: removing the 4 rows gives the BEFORE_JA7 pin, and removing the weekly row too gives a3cfc661.
 const EXISTING_ROUTES_DIGEST = "9716249e9fd88c072f6459ad6c5a414acf4a3a86877530a977cb4c297bff056e";
+// (#1108) DEC 254zzz101 (rule D): plus #1100's two new rows (GET company/members/handovers, POST company/members/{personId}/handover). Added, none changed: removing exactly those 2 rows gives back
+// f116b191b61148567f889eb123e054dae473e9d80c3a61b601445af9d6e081b8.
 // L4-WK (rule D): re-pinned for the one new row GET /v1/dev/projects/{project}/lessons/tuning (full; added, none changed; removing exactly that row still gives e585a614...).
 
 // Audit gap 11c (2026-11-18): the checklist's Linear row reads the project's picked Linear team where the install wires Linear (it was a seam nobody filled, so the row never turned done).
