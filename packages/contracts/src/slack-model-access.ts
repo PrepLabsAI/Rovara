@@ -14,9 +14,9 @@ import { z } from "zod";
 export const SLACK_MODEL_ACCESS_SERVICE_PATH = "/v1/model-access";
 
 /** The gateway's own pause header on the answers route (cloud docs/model-gateway-spend-limits.md), as the Slack service reads a refusal. */
-export const SLACK_GATEWAY_PAUSE_HEADER = "x-rovara-answers-pause";
+export const GATEWAY_PAUSE_HEADER = "x-rovara-answers-pause";
 /** The reasons the gateway gives for pausing a company's calls. Anything else reads as `paused`. */
-export const SLACK_GATEWAY_PAUSE_REASONS = ["no_provider", "monthly_limit", "no_budget", "cost_too_high"] as const;
+export const GATEWAY_PAUSE_REASONS = ["no_provider", "monthly_limit", "no_budget", "cost_too_high"] as const;
 
 const ModelName = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u);
 
@@ -44,10 +44,12 @@ export const SLACK_MODEL_WORDS = {
   /** Anything else (a gateway fault, a timeout). */
   unavailable: "I couldn't reach your company's AI just now. Please try again in a minute.",
 } as const;
-export type SlackModelRefusal = keyof typeof SLACK_MODEL_WORDS;
+/** The fixed refusal kinds (generic: the conversation core reads a gateway refusal as one of these and names nothing of Slack). */
+export type ModelRefusal = keyof typeof SLACK_MODEL_WORDS;
+export type SlackModelRefusal = ModelRefusal;
 
 /** The words for a gateway pause reason (`no_provider`, or any limit reason) as the Slack service says them. */
-export function slackModelRefusalFor(reason: string | undefined): SlackModelRefusal {
+export function modelRefusalFor(reason: string | undefined): ModelRefusal {
   if (reason === "no_provider") return "noProvider";
-  return reason !== undefined && (SLACK_GATEWAY_PAUSE_REASONS as readonly string[]).includes(reason) ? "paused" : "unavailable";
+  return reason !== undefined && (GATEWAY_PAUSE_REASONS as readonly string[]).includes(reason) ? "paused" : "unavailable";
 }

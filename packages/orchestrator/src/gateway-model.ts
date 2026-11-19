@@ -3,10 +3,10 @@
 // cap; there is no key here, no Rovara-paid Bedrock and no fallback to it.
 //
 //  - `token()` is asked before EVERY request (a token lasts two minutes and a chat turn can run longer); it names exactly one company, which the caller of `token` bound, never the model.
-//  - The gateway's own refusals are read from the response (a pause header on a 403/422, or any other failure status) and kept as one of the fixed `SlackModelRefusal` kinds, never the gateway's or a
+//  - The gateway's own refusals are read from the response (a pause header on a 403/422, or any other failure status) and kept as one of the fixed `ModelRefusal` kinds, never the gateway's or a
 //    model's words. The Slack service says its fixed words for that kind when the turn fails; this module never sends them.
 //  - A token that cannot be had, or a runtime that cannot be made, throws; nothing is sent.
-import { SLACK_GATEWAY_PAUSE_HEADER, slackModelRefusalFor, type SlackModelRefusal } from "@agentx/contracts";
+import { GATEWAY_PAUSE_HEADER, modelRefusalFor, type ModelRefusal } from "@agentx/contracts";
 import { ROUTE_PROVIDER, createModelRuntimeWithFallback } from "@agentx/model-runtime";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
@@ -15,7 +15,7 @@ export interface CompanyGatewayRuntime {
   /** The model as the runtime names it (a routed model). */
   model: { provider: string; modelId: string };
   /** The first fixed refusal the gateway gave on this runtime's requests, or undefined (none yet). */
-  refusal(): SlackModelRefusal | undefined;
+  refusal(): ModelRefusal | undefined;
 }
 
 export async function createCompanyGatewayRuntime(input: {
@@ -26,7 +26,7 @@ export async function createCompanyGatewayRuntime(input: {
   token: () => Promise<string>;
   fetch?: typeof fetch;
 }): Promise<CompanyGatewayRuntime> {
-  let refusal: SlackModelRefusal | undefined;
+  let refusal: ModelRefusal | undefined;
   const send = input.fetch ?? fetch;
   const observed: typeof fetch = async (target, init) => {
     // Pi's Anthropic client calls `<base>/v1/messages?beta=true`; the gateway's answers route takes the path with no query (an unknown query is no route), so the one query the client adds is dropped.
@@ -35,8 +35,8 @@ export async function createCompanyGatewayRuntime(input: {
     const response = await send(url.toString(), init);
     if (!response.ok && refusal === undefined) {
       // The gateway's pause (no connected account, no room): its fixed header on a 403 or 422. Anything else that failed is "unavailable".
-      refusal = (response.status === 403 || response.status === 422) && response.headers.get(SLACK_GATEWAY_PAUSE_HEADER) !== null
-        ? slackModelRefusalFor(response.headers.get(SLACK_GATEWAY_PAUSE_HEADER) ?? undefined)
+      refusal = (response.status === 403 || response.status === 422) && response.headers.get(GATEWAY_PAUSE_HEADER) !== null
+        ? modelRefusalFor(response.headers.get(GATEWAY_PAUSE_HEADER) ?? undefined)
         : "unavailable";
     }
     return response;
