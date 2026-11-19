@@ -46,7 +46,7 @@ export const CALLBACK_HEADERS: Record<string, string> = {
   "x-frame-options": "DENY",
 };
 export const CALLBACK_PAGE = (text: string, nonce?: string) =>
-  `<!doctype html><meta charset="utf-8"><title>Install AgentX</title><p>${text}</p>${nonce === undefined ? "" : `<script nonce="${nonce}">window.close()</script>`}`;
+  `<!doctype html><meta charset="utf-8"><title>Install Rovara</title><p>${text}</p>${nonce === undefined ? "" : `<script nonce="${nonce}">window.close()</script>`}`;
 
 interface ManifestRoute {
   state: string;
@@ -151,15 +151,15 @@ export async function startWizardServer(input: { hub: WizardHub; port?: number; 
       response.writeHead(status, { ...CALLBACK_HEADERS, "content-security-policy": csp ?? "", "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(body) });
       response.end(body);
     };
-    if (!tokensMatch(url.searchParams.get("state") ?? undefined, route.state)) return answer(400, "This page is from a different agentx init run.");
+    if (!tokensMatch(url.searchParams.get("state") ?? undefined, route.state)) return answer(400, "This page is from a different Rovara install.");
     const code = url.searchParams.get("code");
-    if (code === null || code === "") return answer(400, "GitHub sent no code. Go back to the Install AgentX tab.");
+    if (code === null || code === "") return answer(400, "GitHub sent no code. Go back to the Install Rovara tab.");
     manifest = undefined;
     clearTimeout(route.timer);
     route.resolve(code);
     // GitHub has not converted the code yet; the Install AgentX tab says whether that worked. It
     // claims only what is true so far: GitHub sent the code, not that AgentX already has the app.
-    return answer(200, "GitHub sent AgentX the new app. You can close this tab and go back to the Install AgentX tab.", true);
+    return answer(200, "GitHub sent Rovara the new app. You can close this tab and go back to the Install Rovara tab.", true);
   };
 
   const handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {

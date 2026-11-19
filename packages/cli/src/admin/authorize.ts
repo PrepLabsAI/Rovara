@@ -354,18 +354,18 @@ async function listenForCallback(options: { redirectUri: URL; redirectRequiremen
     if (request.method !== "GET" || url.pathname !== redirectUri.pathname) { response.writeHead(404).end(); return; }
     if (settled) { response.writeHead(410, { "content-type": "text/plain" }).end("This sign-in has already finished. You can close this tab."); return; }
     if (!matches(url.searchParams.get("state"))) {
-      response.writeHead(400, { "content-type": "text/plain" }).end("This sign-in link is not the one AgentX is waiting for. Use the link the command printed.");
+      response.writeHead(400, { "content-type": "text/plain" }).end("This Rovara sign-in link is no longer valid. Close this tab and start sign-in again.");
       return;
     }
     const error = url.searchParams.get("error");
     const authorizationCode = url.searchParams.get("code");
     if (error !== null || !authorizationCode) {
-      response.writeHead(200, { "content-type": "text/plain" }).end("Sign-in was not completed. You can close this tab and run the command again.");
+      response.writeHead(200, { "content-type": "text/plain" }).end("Rovara sign-in did not finish. Close this tab and start sign-in again.");
       const shown = error !== null && /^[a-z_]{1,64}$/.test(error) ? ` (${error})` : "";
       finish({ error: agentXError("AUTH_REQUIRED", `the sign-in was refused or cancelled${shown}; nothing was stored`) });
       return;
     }
-    response.writeHead(200, { "content-type": "text/plain" }).end("AgentX received the sign-in. You can close this tab.");
+    response.writeHead(200, { "content-type": "text/plain" }).end("Rovara received the sign-in. You can close this tab.");
     finish({ code: authorizationCode });
   });
   await new Promise<void>((resolve, reject) => {

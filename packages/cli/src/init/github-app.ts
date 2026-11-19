@@ -52,10 +52,10 @@ const escapeHtml = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<
 export function manifestFormPage(input: { actionUrl: string; manifest: GitHubManifest; nonce?: string }): string {
   const script = input.nonce === undefined ? "<script>" : `<script nonce="${escapeHtml(input.nonce)}">`;
   return [
-    "<!doctype html><meta charset=\"utf-8\"><title>Create the AgentX GitHub App</title>",
+    "<!doctype html><meta charset=\"utf-8\"><title>Create the Rovara GitHub App</title>",
     `<form id="manifest-form" method="post" action="${escapeHtml(input.actionUrl)}">`,
     `<input type="hidden" name="manifest" value="${escapeHtml(JSON.stringify(input.manifest))}">`,
-    "<p>Opening GitHub with the AgentX GitHub App filled in.</p><button type=\"submit\">Continue to GitHub</button></form>",
+    "<p>Opening GitHub with the Rovara GitHub App filled in.</p><button type=\"submit\">Continue to GitHub</button></form>",
     `${script}document.getElementById("manifest-form").submit()</script>`,
   ].join("\n");
 }
@@ -92,11 +92,11 @@ export async function startManifestListener(input: { state: string; page: (redir
     if (request.headers.host !== `127.0.0.1:${port}`) return send(403, "<p>Forbidden.</p>");
     if (request.method === "GET" && url.pathname === "/github/start") return send(200, input.page(redirectUrl));
     if (request.method === "GET" && url.pathname === "/github/created") {
-      if (url.searchParams.get("state") !== input.state) return send(400, "<p>This page is from a different agentx init run.</p>");
+      if (url.searchParams.get("state") !== input.state) return send(400, "<p>This GitHub App setup link is no longer valid. Close this tab and start setup again.</p>");
       const received = url.searchParams.get("code");
       if (received === null || received === "") return send(400, "<p>GitHub sent no code.</p>");
       resolveCode(received);
-      return send(200, "<p>AgentX has the new GitHub App. You can close this tab and return to the terminal.</p>");
+      return send(200, "<p>Rovara has the new GitHub App. You can close this tab.</p>");
     }
     return send(404, "<p>Not found.</p>");
   });

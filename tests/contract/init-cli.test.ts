@@ -327,7 +327,7 @@ describe("agentx init", () => {
     const prompter = scriptedPrompter([]);
     expect(await h.run([], { prompter })).toBe(0);
     const rerun = h.printedSince(mark);
-    expect(rerun).toContain("already done: Sign in to AgentX");
+    expect(rerun).toContain("already done: Sign in to Rovara");
     expect(rerun).toContain("already done: Set up your first project");
     expect(rerun).toContain("AgentX environment staging is ready.");
     expect(h.cognito.created).toEqual([ADMIN_EMAIL]);
@@ -339,7 +339,7 @@ describe("agentx init", () => {
     const h = await harness();
     h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).not.toBe(0);
-    expect(h.printed()).toContain('init stopped at "Start the AgentX service": Resource limit exceeded. Run agentx init --env staging --region us-east-1 again to continue from this step.');
+    expect(h.printed()).toContain('init stopped at "Start the Rovara service": Resource limit exceeded. Run agentx init --env staging --region us-east-1 again to continue from this step.');
     expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
     h.deployer.fail.clear();
     h.deployer.requests.length = 0;
@@ -356,7 +356,7 @@ describe("agentx init", () => {
     const h = await harness();
     h.deployer.fail.set(environmentStackName("staging", "control-plane"), markOperatorStop(new Error("the person chose not to continue")));
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).not.toBe(0);
-    expect(h.printed()).toContain('init stopped at "Start the AgentX service": the person chose not to continue. Run agentx init --env staging --region us-east-1 again to continue from this step.');
+    expect(h.printed()).toContain('init stopped at "Start the Rovara service": the person chose not to continue. Run agentx init --env staging --region us-east-1 again to continue from this step.');
   });
 
   it("changes nothing when run again after it finished", async () => {
@@ -632,7 +632,7 @@ describe("agentx init", () => {
       cleanup: async () => { throw new Error("directory busy"); },
     });
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN), prepareDeployment: prepare })).not.toBe(0);
-    expect(h.printed()).toContain('init stopped at "Start the AgentX service": Resource limit exceeded.');
+    expect(h.printed()).toContain('init stopped at "Start the Rovara service": Resource limit exceeded.');
     expect(h.printed()).toContain("could not remove temporary files: directory busy");
   });
 

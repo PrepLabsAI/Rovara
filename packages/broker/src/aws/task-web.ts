@@ -420,11 +420,11 @@ function decideDialog(view: TaskDocumentView): string {
   if (view.waiting === undefined || view.access?.canDecide !== true) return "";
   const section = (id: string, heading: string, extra = "") => `<section id="${id}" hidden><h3 id="${id}-title">${heading}</h3><ul id="${id}-list"></ul>${extra}</section>`;
   return '<dialog id="decide-dialog" aria-labelledby="decide-title"><h2 id="decide-title"></h2>'
-    + section("decide-changed", "Your answers that differ from AgentX's")
-    + section("decide-unanswered", "Not answered yet, so AgentX's answer is used")
+    + section("decide-changed", "Your answers that differ from Rovara's")
+    + section("decide-unanswered", "Not answered yet, so Rovara's answer is used")
     + section("decide-comments", "Comments to send", '<p id="decide-cap" class="muted" hidden>You can send up to 25 comments at a time; the rest stay open for the next version.</p>')
     + section("decide-checks", "Optional checks")
-    + '<label for="decide-note" id="decide-note-label">Note for AgentX (optional)</label><textarea id="decide-note" maxlength="500"></textarea>'
+    + '<label for="decide-note" id="decide-note-label">Note for Rovara (optional)</label><textarea id="decide-note" maxlength="500"></textarea>'
     + '<p id="decide-error" class="error" role="alert" hidden></p><p id="decide-status" role="status" aria-live="polite"></p>'
     + '<p class="dialog-actions"><button type="button" id="decide-submit">Approve and continue</button> <button type="button" id="decide-cancel">Cancel</button></p></dialog>';
 }
@@ -445,7 +445,7 @@ async function page(view: TaskDocumentView, nonce: string, request: TaskPageRequ
     : view.checks.length > 0 && currentCodingPlan?.format === "structured"
       ? `${note}<p><a href="#${escapeHtml(checksAnchor(currentCodingPlan.version))}">See the checks in the coding plan.</a></p>`
       : view.checks.length === 0 ? note
-      : `${note}<ul>${view.checks.map((check) => `<li>${escapeHtml(check.label)}${check.proposed === true ? " (proposed by AgentX)" : ""}: ${checkWords(check)}</li>`).join("")}</ul>`;
+      : `${note}<ul>${view.checks.map((check) => `<li>${escapeHtml(check.label)}${check.proposed === true ? " (proposed by Rovara)" : ""}: ${checkWords(check)}</li>`).join("")}</ul>`;
   const introduced = view.findings.filter((finding) => finding.origin === "INTRODUCED" && finding.advisory !== true);
   const notes = view.findings.filter((finding) => finding.origin === "INTRODUCED" && finding.advisory === true);
   const older = view.findings.filter((finding) => finding.origin === "PRE_EXISTING");
@@ -479,7 +479,7 @@ async function page(view: TaskDocumentView, nonce: string, request: TaskPageRequ
   const movedOn = `<div id="moved-on" class="moved-on" role="status" hidden data-version="${escapeHtml(view.revision ?? 0)}" data-stage="${escapeHtml(view.stage)}"`
     + ` data-check="/review/${escapeHtml(view.taskId)}/task/status"><p>This task has moved on. Refresh to see the latest.</p>`
     + `<button type="button" id="moved-on-refresh">Refresh</button></div>`;
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>AgentX task · ${escapeHtml(view.title)}</title>`
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Rovara task · ${escapeHtml(view.title)}</title>`
     + `<style nonce="${nonce}">${TASK_PAGE_STYLE}</style></head><body>${movedOn}`
     + `<header><h1>${escapeHtml(view.title)}</h1><p class="muted">${role}</p>${progressStrip(view, { checks: checks !== undefined && checks !== "" })}`
     + `<p><strong>${escapeHtml(view.status)}</strong></p><p>Next: ${escapeHtml(view.nextStep)}</p>${featureSection(view)}${slackOnly}</header>`
@@ -527,7 +527,7 @@ export function plainName(name: unknown): string | undefined {
 
 function messagePage(statusCode: number, heading: string, text: string): WebResponse {
   const nonce = randomBytes(18).toString("base64url");
-  return htmlResponse(statusCode, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AgentX</title>`
+  return htmlResponse(statusCode, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Rovara</title>`
     + `<style nonce="${nonce}">:root{color-scheme:light dark;font-family:system-ui,sans-serif}body{max-width:40rem;margin:0 auto;padding:2rem 1rem}</style></head>`
     + `<body><main><h1>${escapeHtml(heading)}</h1><p>${escapeHtml(text)}</p></main></body></html>`, nonce);
 }
@@ -630,7 +630,7 @@ export function createTaskWeb(deps: TaskWebDependencies): (request: AdaptedHttpR
       }
       // Not yours, and no such task, read the same: the page never confirms that a task exists.
       if (code === "TASK_ACCESS_DENIED" || HIDDEN.has(code)) return messagePage(404, NO_ACCESS_HEADING, NO_ACCESS);
-      return messagePage(503, "Task page unavailable", "AgentX couldn't load this task right now. Try again shortly.");
+      return messagePage(503, "Task page unavailable", "Rovara couldn't load this task right now. Try again shortly.");
     }
   };
 }

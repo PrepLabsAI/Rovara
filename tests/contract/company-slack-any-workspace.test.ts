@@ -197,7 +197,7 @@ describe("a merged sign-in is seated as its survivor (company layer on)", () => 
     if (cause === "missing survivor") merge(w, merged, hop);
     if (cause === "malformed") merge(w, merged, "not-an-id");
     const sessions = w.db.find((row) => row.entityType === "SESSION").length;
-    expect((await w.signIn("U0MERGED1", { slackTeam: TEAM })).refused).toBe("your AgentX sign-in was turned off by an admin; contact an admin");
+    expect((await w.signIn("U0MERGED1", { slackTeam: TEAM })).refused).toBe("your Rovara sign-in was turned off by an administrator; contact an administrator");
     expect(w.db.find((row) => row.entityType === "SESSION")).toHaveLength(sessions);
     expect(w.db.find((row) => row.entityType === "AUTH_CODE" && row.developerId !== person("owner"))).toEqual([]);
   });

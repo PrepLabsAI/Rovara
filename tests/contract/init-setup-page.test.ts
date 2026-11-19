@@ -219,7 +219,7 @@ describe("the GitHub App from the setup page", () => {
     expect((await handle(github({ code: "c0de", state: "b".repeat(32) }))).status).toBe(400);
     expect((await handle(github({ state: FORM.state }))).status).toBe(400);
     const sent = await handle(github({ code: "c0de", state: FORM.state }));
-    expect(sent).toMatchObject({ status: 200, body: expect.stringContaining("GitHub sent AgentX the new app") as unknown });
+    expect(sent).toMatchObject({ status: 200, body: expect.stringContaining("GitHub sent Rovara the new app") as unknown });
     expect(await store.takeGitHubCode(FORM.state)).toBe("c0de");
     expect((await handle(github({ code: "again", state: FORM.state }))).status).toBe(400);
   });
@@ -239,7 +239,7 @@ describe("the GitHub App from the setup page", () => {
 });
 
 describe("agentx init --setup-table", () => {
-  it("runs a whole install with every question answered on the setup page, through the table", async () => {
+  it.each([false, true])("runs a whole install through the table (Cloud address supplied: %s)", async (withCloud) => {
     const h = await harness();
     const store = memorySetupStore();
     const slack = fakeSlackApi();
@@ -248,7 +248,7 @@ describe("agentx init --setup-table", () => {
     // bootstrap stack passes and the defaults answer the settings and the plan.
     // Add to Slack: the operator pastes one configuration token; Slack's page and its redirect back
     // are played by the operator, and nobody confirms the request URL by hand.
-    const operator = setupPageOperator({ script: ["token", CONFIG_TOKEN, ...SIGNIN, ...FINISH], handle, token: TOKEN });
+    const operator = setupPageOperator({ script: [...(withCloud ? ["cloud", "https://cloud.example.test/app"] : []), "token", CONFIG_TOKEN, ...SIGNIN, ...FINISH], handle, token: TOKEN });
     // The admin signed in on the setup page, which left their sign-in for the job (setup-auth.ts).
     await store.putAdminToken(`sealed:${accessToken({ "cognito:groups": ["agentx-admin"] })}`, Date.now() + 3_600_000);
     const running = operator.run();
@@ -271,7 +271,8 @@ describe("agentx init --setup-table", () => {
     expect(slack.manifests.map((each) => each.method)).toEqual(["create", "update"]);
     expect(slack.manifests[0]?.manifest.settings.event_subscriptions).toBeUndefined();
     expect(slack.manifests[1]?.manifest.settings.event_subscriptions?.request_url).toMatch(/\/slack\/events$/);
-    expect(slack.manifests[0]?.manifest.oauth_config.redirect_urls).toContain(`${SETUP_ORIGIN}/slack/callback`);
+    expect(slack.manifests[0]?.manifest.oauth_config.redirect_urls).toEqual(expect.arrayContaining([`${SETUP_ORIGIN}/slack/callback`, ...(withCloud ? ["https://cloud.example.test/api/connect/slack/callback"] : [])]));
+    expect(slack.manifests[0]?.manifest.oauth_config.redirect_urls).not.toContain(`${SETUP_ORIGIN}/api/connect/slack/callback`);
     expect(slack.exchanged).toEqual(["slack-code-0123"]);
     expect(operator.asked).not.toContain("Does Slack show the Request URL as Verified?");
     const stored = JSON.parse(h.secrets.values.get("agentx/staging/slack") ?? "{}") as Record<string, string>;
