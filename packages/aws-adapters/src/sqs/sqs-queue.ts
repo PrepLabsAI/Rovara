@@ -285,7 +285,8 @@ export class SqsQueueService implements QueueService {
     if (deadLetterUrl !== undefined) {
       // The dead-letter queue is read back whether or not the queue has a redrive policy: `deadLetter` and the by-id calls send to and read
       // from this URL, so it must be a queue that exists, of the queue's kind, and (when there is a policy) the one the policy names.
-      const dead = await this.#attributes(deadLetterUrl, ["QueueArn", "FifoQueue"], "GetQueueAttributes (dead letters)");
+      // `All` omits FIFO-only attributes on standard queues; explicitly requesting FifoQueue there is invalid.
+      const dead = await this.#attributes(deadLetterUrl, ["All"], "GetQueueAttributes (dead letters)");
       if (dead?.QueueArn === undefined || (dead.FifoQueue === "true") !== facts.fifo) throw new Error(`the dead-letter URL declared for queue ${JSON.stringify(name)} is not a queue of the same kind`);
       if (facts.deadLetterArn !== undefined && dead.QueueArn !== facts.deadLetterArn) throw new Error(`the dead-letter URL declared for queue ${JSON.stringify(name)} is not the queue its redrive policy names`);
     }
@@ -305,7 +306,7 @@ export class SqsQueueService implements QueueService {
     return { queue, facts };
   }
 
-  async #attributes(url: string, names: ("All" | "QueueArn" | "FifoQueue")[], operation: string): Promise<Record<string, string> | undefined> {
+  async #attributes(url: string, names: ("All" | "QueueArn")[], operation: string): Promise<Record<string, string> | undefined> {
     try {
       const out = (await this.#client.send(new GetQueueAttributesCommand({ QueueUrl: url, AttributeNames: names }))) as GetQueueAttributesCommandOutput;
       return out.Attributes;
