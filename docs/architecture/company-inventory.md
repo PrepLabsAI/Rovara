@@ -1,4 +1,4 @@
-503 record kinds: 136 company-scoped, 19 install-wide, 348 needs-company. 264 routes: 86 company-scoped, 9 install-wide, 169 needs-company.
+504 record kinds: 137 company-scoped, 19 install-wide, 348 needs-company. 264 routes: 86 company-scoped, 9 install-wide, 169 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -213,6 +213,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:APPROVAL_PROOF_SPENT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:APPROVAL_PROOF_USED | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:APPROVAL_STEP_UP_CLAIM | company-scoped | State table | no | - | Switch-on lane L2a: written, read and settled only under companyScoped(company, APPROVAL_STEP_UP_CLAIM); a claim id names its company and a random part that must match the row (core-host-hosted-approvers two-company test). |
+| record | entity:HOSTED_MERGE_LOCK; entity:HOSTED_MERGE_RESULT | company-scoped | State table | no | - | DEC 254zzz94 Merge button (core-host/hosted-merge-routes.ts): the task's merge lock and each press's answer, written and read only under companyScoped(company, HOSTED_MERGE) for the member company (the runtime's), sort key <task uuid>#LOCK or <task uuid>#REQUEST#<request uuid>; each row names its company, task and person. Ids and numbers only. Two-company tests: tests/unit/hosted-merge-routes.test.ts, core-host-task-web-routes.test.ts. |
 | record | entity:MOCK_SPEC_SLICE | company-scoped | State table | no | - | C-SPEC: key is ORG#<company>#MOCK_SPEC#<project>#<digest>; separate versioned test catalog excerpt row, while the approved mock row carries only its slice digest. tests/unit/test-env-fixture-store.test.ts covers two companies and two projects. |
 | record | entity:ARTIFACT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:ASK | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |

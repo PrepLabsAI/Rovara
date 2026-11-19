@@ -150,7 +150,7 @@ function codeOwnerRefusal(verdict: CodeOwnerVerdict | undefined): string | undef
   return "unreadable" in verdict ? M.codeOwnersUnreadable : M.needsCodeOwner(verdict.owners);
 }
 
-function workflowRefusal(workflow: ReadinessWorkflow): string | undefined {
+export /* the hosted Merge button reuses it (DEC 254zzz94) */ function workflowRefusal(workflow: ReadinessWorkflow): string | undefined {
   if (workflow.stage === "MERGED" || workflow.stage === "CLOSED") return M.taskClosed;
   // The base branch was merged in and the merged code needs its checks and reviews again: the owner's Retry checks, not "still changing".
   if (workflow.stage === "VERIFY" && workflow.state === "BLOCKED" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.baseMergedRecheck) return M.baseMerged;
