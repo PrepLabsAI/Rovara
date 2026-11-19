@@ -319,9 +319,7 @@ describe("no callers yet (TE-F1b is additive: only task-sandbox.ts takes the blo
       // TE-F1c reads F1-b's evidence words (the Azure sentence and the block facts) in its ledger: exact files.
       && !["packages/worker/src/model-bridge-ledger.ts", "tests/unit/model-bridge-ledger.test.ts"].includes(file)
       // BYO Bedrock S2 (#795): its bridge test builds the sandbox env with model-sandbox-env to prove the Bedrock endpoint and dummy keys are set only when configured. A test, not a caller.
-      && file !== "tests/unit/product-bedrock-bridge.test.ts"
-      // L4-E12 (#1073): its eval-services test builds the block plan with planModelHostBlock to check the sealed box's service entries next to the model-host block. A test, not a caller. Exact file.
-      && file !== "tests/unit/worker-eval-services.test.ts");
+      && file !== "tests/unit/product-bedrock-bridge.test.ts");
     expect(importers).toEqual(["packages/worker/src/task-sandbox.ts"]);
   });
   it("the worker's entry points do not start a model helper, advertise its feature, or call the gate", () => {

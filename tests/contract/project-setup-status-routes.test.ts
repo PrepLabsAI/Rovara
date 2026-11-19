@@ -1306,9 +1306,10 @@ describe("what did not change", () => {
 // Batch b20 (rule D): #1075 adds GET/PUT /v1/dev/company/learning-model (full). Removing exactly those two rows gives #1086's pin f116b191b61148567f889eb123e054dae473e9d80c3a61b601445af9d6e081b8.
 // L4-JA7 (rule D): re-pinned for the 4 new knowledge-switch rows (GET and PUT company/lessons/local-tools, GET and PUT projects/{project}/lessons/local-tools; all full, added, none changed, order of every earlier row kept):
 // removing exactly those 4 rows gives back the pin below.
-const EXISTING_ROUTES_DIGEST_BEFORE_JA7 = "ee181ef4c705b6726861ae5aa145e130adef38a4e247bce68f77dcdbaf60ad8b";
+const EXISTING_ROUTES_DIGEST_BEFORE_JA7 = "4b0f394e66e38d3893d41b95bfd4a1c2f1f3dc6cb9ac0e9d9082086c90997852";
 // Batch b20 (rule D): with #1095 (the 4 local-tools rows) and #1104 (GET /v1/dev/projects/{project}/lessons/weekly, full) both added: removing the 4 rows gives the BEFORE_JA7 pin, and removing the weekly row too gives a3cfc661.
-const EXISTING_ROUTES_DIGEST = "9716249e9fd88c072f6459ad6c5a414acf4a3a86877530a977cb4c297bff056e";
+// Batch b20 (rule D): plus #1108's 2 hand-over rows; removing exactly those gives 9716249e (the pin before #1108).
+const EXISTING_ROUTES_DIGEST = "8145868a423d0fba18874b42e09323e82155cb658bb034d4b736421ea3026467";
 // (#1108) DEC 254zzz101 (rule D): plus #1100's two new rows (GET company/members/handovers, POST company/members/{personId}/handover). Added, none changed: removing exactly those 2 rows gives back
 // f116b191b61148567f889eb123e054dae473e9d80c3a61b601445af9d6e081b8.
 // L4-WK (rule D): re-pinned for the one new row GET /v1/dev/projects/{project}/lessons/tuning (full; added, none changed; removing exactly that row still gives e585a614...).
