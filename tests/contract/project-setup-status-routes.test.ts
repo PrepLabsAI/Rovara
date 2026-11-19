@@ -1423,8 +1423,9 @@ describe("a project's members, for a live company owner or admin without a proje
       expect(await h.call("PUT", `${MEMBERS(project)}/${CAT}`), project).toEqual(NOT_FOUND);
       expect(await h.call("DELETE", `${MEMBERS(project)}/${ADA}`), project).toEqual(NOT_FOUND);
     }
-    expect(h.db.find((item) => item.pk === `MEMBER#${CAT}`)).toEqual([]);
-    expect(h.db.find((item) => item.pk === `MEMBER#${ADA}` && item.sk === "PROJECT#beta")).toHaveLength(1);
+    // Batch b20 (DEC 254zzz80 layout): a grant row is MEMBER#<person> or ORG#<company>#MEMBER#<person>; both layouts are checked.
+    expect(h.db.find((item) => String(item.pk).endsWith(`MEMBER#${CAT}`))).toEqual([]);
+    expect(h.db.find((item) => String(item.pk).endsWith(`MEMBER#${ADA}`) && item.sk === "PROJECT#beta")).toHaveLength(1);
     // A project that does not exist reads the same (a 404 never tells another company's name apart from a missing one).
     expect(await h.call("GET", MEMBERS("nothing"))).toEqual(NOT_FOUND);
     // The same grant on the caller's own company's project still works.
