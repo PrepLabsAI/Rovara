@@ -11,6 +11,7 @@
 //
 // What changed from Cloud: spend is the `Admission` seam's answer (the caller binds `admit`), the scheduler is a port instead of the hosted product's own scheduler, the rows are written through `DocumentStore` (same keys), and the
 // fire arrives as a `DueSchedule`. Every decision of the fire is the same.
+import { createKnownFailing } from "./known-failing.js";
 import { createHash } from "node:crypto";
 import {
   CoverageMapSchema,
@@ -370,6 +371,11 @@ export async function recordNightlyResult(
       if (mayPass(error)) throw error;
     }
   }
+  const knownFailing = createKnownFailing({ ...deps, mayMaintain: async () => false, evidenceOf: async () => undefined });
+  const coverage = CoverageMapSchema.safeParse(input.coverageMap);
+  const passedNames = coverage.success && Date.parse(coverage.data.builtAt) >= Date.parse(result.startedAt) ? [...new Set(Object.values(coverage.data.files).flat())] : [];
+  await knownFailing.nightly(input.orgId, input.project, baseline, passedNames);
+  await knownFailing.health(input.orgId, input.project, baseline, health);
   // Before the run is released: a listener that fails leaves the run claimed, so the worker's retry records the same result again (every write above and in the listener is repeatable).
   if (onRecorded !== undefined) {
     try {

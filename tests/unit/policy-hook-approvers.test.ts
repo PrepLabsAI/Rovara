@@ -186,3 +186,16 @@ describe("policy hook: decisions", () => {
     expect(typeof world(() => loose, baseApprovers({ approved: false, reason: "x" })).approvers.commitClaim).toBe("function");
   });
 });
+
+it("KF uses one current approver even when the company hook returns its retired second-person rule", async () => {
+  const verdict = { approved: true as const, approver: asker, method: "local-session", proofId: "p1" };
+  const w = world(() => ({ ...loose, minApprovers: 2, secondPerson: true, selfApproval: false }), baseApprovers(verdict));
+  const kf: ApprovalRequest = { ...request(), kind: "known_failing", subject: { type: "known_failing", id: "bound-record" } };
+  expect(await w.approvers.requirement(kf)).toMatchObject({ minApprovers: 1, selfApprovalAllowed: true });
+  expect(await w.approvers.verify(kf, proof)).toEqual(verdict);
+});
+
+it("KF still obeys the company hook's refusal", async () => {
+  const w = world(() => ({ ...loose, allow: false }), baseApprovers({ approved: true, approver: asker, method: "local-session", proofId: "p1" }));
+  expect(await w.approvers.verify({ ...request(), kind: "known_failing", subject: { type: "known_failing", id: "bound-record" } }, proof)).toEqual({ approved: false, reason: "company_rules_refused" });
+});

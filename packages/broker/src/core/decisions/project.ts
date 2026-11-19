@@ -9,7 +9,7 @@
 // Anything an item says in words (a title, a question, a path) is flattened to plain text and cut; fixed words come from this file.
 import {
   CI_STATE_WORDS, SETUP_CHANGE_CHIP, DECISION_LABELS, DECISION_REJECT_REASONS, decisionFocusPath, DESIGN_SOURCE_ONLY_LABEL, DecisionCardIdSchema, DecisionCardSchema, DecisionPlanChoicesSchema, DecisionTabsSchema, PlanFeatureSchema, decisionFriction, canonicalJson,
-  type CardAction, type PlanFeature, type DecisionPlanChoices, type DecisionCard, type DecisionKind, type DecisionDetailGroup, type DecisionRejectReason, type DecisionRisk, type DecisionTab, type DecisionTabId, type EvidenceChip,
+  isValidTestId, type CardAction, type PlanFeature, type DecisionPlanChoices, type DecisionCard, type DecisionKind, type DecisionDetailGroup, type DecisionRejectReason, type DecisionRisk, type DecisionTab, type DecisionTabId, type EvidenceChip,
 } from "@agentx/contracts";
 import { DECISION_SPEND_LOW_MAX_USD, riskTierOf, type DecisionLocks, type TierInputs, type TierResult } from "./risk-tier.js";
 import { reviewCoverage, type DesignCardFacts } from "./design-facts.js";
@@ -114,7 +114,7 @@ export type DecisionItem =
    * in the card's words, `blockedResult` the fixed result label. `knownFailingTests` is how many tests "Mark as known failing" would add (0: the card has no such action). All of it is the broker's own record,
    * never a worker's, a model's or a repository's words.
    */
-  | (ItemBase & { kind: "fix_setup"; cause: string; step: string; taskCount: number; knownFailingTests: number; unconfirmedFailing: number })
+  | (ItemBase & { kind: "fix_setup"; cause: string; step: string; taskCount: number; knownFailingTests: number; unconfirmedFailing: number; eligibleTests: readonly { name: string; checkId: string }[] })
   /**
    * Test services (TS24): a fake (fixture set) for one dependency, pinned by `contentVersion` (its digest). Counts and fixed words only; the sample pairs, schema, ignored paths and faults are the item's `details`, the
    * broker's own redacted summary (`test-env/fixture-store.ts`). `schemaSynth` and `firstFromTestAccount` raise the card to high (no Approve, a full page with a fresh sign-in).
@@ -371,7 +371,7 @@ function actionsOf(item: DecisionItem, cardId: string, risk: DecisionRisk): { ac
   if (item.kind === "fix_setup") {
     const reject: CardAction = { kind: "reject", label: DECISION_LABELS.notNow, href: `${base}/reject`, method: "POST" };
     const mark: CardAction = { kind: "approve", label: "Mark as known failing", href: `${base}/approve`, method: "POST" };
-    return { actions: item.knownFailingTests > 0 ? [{ ...open, label: "Open the setup" }, reject, mark] : [{ ...open, label: "Open the setup" }, reject], recommended: "open" };
+    return { actions: completeFixSetupTests(item) ? [{ ...open, label: "Open the setup" }, reject, mark] : [{ ...open, label: "Open the setup" }, reject], recommended: "open" };
   }
   // A design review's cost gate (DR8): the choices the gate allowed are the card's actions. None allowed: the card only opens the page.
   if (item.kind === "approve_spend" && item.design !== undefined) {
@@ -435,12 +435,20 @@ const listed = (values: readonly string[], max = 20): string[] => {
   return values.length > max ? [...lines, `and ${String(values.length - max)} more`] : lines;
 };
 
+function completeFixSetupTests(item: Extract<DecisionItem, { kind: "fix_setup" }>): boolean {
+  return item.eligibleTests.length === item.knownFailingTests && item.eligibleTests.length > 0 && item.eligibleTests.length <= 20
+    && item.eligibleTests.every((test) => isValidTestId(test.name) && /^[A-Za-z0-9_.:-]{1,64}$/u.test(test.checkId));
+}
+
 /**
  * The evidence a medium card makes the person open: names, which the front does not carry. From the item's own `details`, the files a plan or design changes and the reasons behind a merge's
  * risk, then the card's risk reasons. A card with none of these gets one line saying why it needs a look, so the panel is never empty.
  */
 export function detailsOfItem(item: DecisionItem, card: DecisionCard, tab?: DecisionTabId): DecisionDetailGroup[] {
   const groups: Array<{ title: string; lines: string[] }> = [];
+  if (item.kind === "fix_setup" && completeFixSetupTests(item)) {
+    groups.push({ title: "Tests and checks this mark will cover", lines: item.eligibleTests.map((test) => `${test.checkId} :: ${test.name}`) });
+  }
   if (item.kind === "approve_plan" || item.kind === "approve_design") groups.push({ title: "Files that change", lines: listed(item.files) });
   if (item.kind === "merge") groups.push({ title: "Why the pull request has this risk", lines: listed(item.prReasons) });
   // The design review's findings the approver must weigh (DR9): blockers that are still open (approving needs a reason) and the places the planner and a reviewer disagree.

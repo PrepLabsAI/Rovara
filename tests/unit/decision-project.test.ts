@@ -25,7 +25,7 @@ const ITEMS: Record<DecisionKind, DecisionItem> = {
   approve_test_env: { ...base("env1"), kind: "approve_test_env", risk: "medium", riskReasons: [], tier: "sandbox", expectedRevision: 1 },
   confirm_env_change: { ...base("chg1"), kind: "confirm_env_change", what: "accounts" },
   spec_choice: { ...base("spc1"), kind: "spec_choice", message: "The spec changed. Re-plan or keep?" },
-  fix_setup: { ...base("fix1"), kind: "fix_setup", cause: "setup-failed-in-task", step: "Setup", taskCount: 2, knownFailingTests: 0, unconfirmedFailing: 0 },
+  fix_setup: { ...base("fix1"), kind: "fix_setup", cause: "setup-failed-in-task", step: "Setup", taskCount: 2, knownFailingTests: 0, unconfirmedFailing: 0, eligibleTests: [] },
   setup_host: { ...base("hst1"), kind: "setup_host", host: "artifactory.corp.example", from: { path: "pip.conf", line: 2 }, journalN: 3, staffStep: true },
   second_review_notice: { ...base("srn1"), kind: "second_review_notice", message: "The second-opinion model your company chose no longer qualifies." },
   approve_fixture_set: { ...base("fxs1"), kind: "approve_fixture_set", dependency: "payments-api", origin: "recorded", entries: 4, faults: 1, scanClean: true, schemaSynth: false, firstFromTestAccount: false },
@@ -360,12 +360,19 @@ describe("fix_setup (setup and test health SH17)", () => {
   });
 
   it("offers Mark as known failing as the one approve only when the record has tests to mark, and says how many", () => {
-    const card = cardOf(fix({ knownFailingTests: 3 }));
+    const eligibleTests = [
+      { name: "src/cart.test.ts::cart rejects stale prices", checkId: "unit" },
+      { name: "src/cart.test.ts::cart rejects missing prices", checkId: "unit" },
+      { name: "tests/cart.py::test_rejects_stale", checkId: "pytest" },
+    ];
+    const card = cardOf(fix({ knownFailingTests: 3, eligibleTests }));
     expect(card.actions.map((action) => [action.kind, action.label])).toEqual([["open", "Open the setup"], ["reject", "Not now"], ["approve", "Mark as known failing"]]);
     expect(card.actions.find((action) => action.kind === "approve")!.href).toBe("/v1/app/decisions/fix_setup/fix1/approve");
     expect(card.evidence.some((chip) => chip.label === "Failing before this change" && chip.value === "3 tests, confirmed by the nightly run")).toBe(true);
     expect(card.friction.expandEvidenceFirst).toBe(true);
     expect(card.riskReasons).toContain("Marking tests as already failing changes how later results are judged.");
+    const projected = projectDecisionCards([fix({ knownFailingTests: 3, eligibleTests })]);
+    expect(projected.details[card.id]?.some(group => group.title === "Tests and checks this mark will cover" && group.lines.join("\n") === "unit :: src/cart.test.ts::cart rejects stale prices\nunit :: src/cart.test.ts::cart rejects missing prices\npytest :: tests/cart.py::test_rejects_stale")).toBe(true);
   });
 
   it("says apart, and never as older, the failing tests of those checks that the nightly run does not confirm", () => {
