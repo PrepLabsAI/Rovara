@@ -354,8 +354,12 @@ const planGrant: Planner = async (deps, identity, input) => {
   if (input.kind !== "grant_project_access") throw new Error("wrong planner");
   await projectMustExist(deps, identity, input.project);
   await deps.handlers.requireAdministrator(identity, input.project);
-  const resolved = await resolveDeveloper(deps.actions, input.developer, await resolveAdminCompany(deps.actions.companies, identity.ownerKey));
-  const current = await projectGrant(deps.actions, input.project, resolved.developerId);
+  const adminCompany = await resolveAdminCompany(deps.actions.companies, identity.ownerKey);
+  const resolved = await resolveDeveloper(deps.actions, input.developer, adminCompany);
+  // DEC 254zzz98 (one rule): a grant lives where its project's revision lives. These admin routes find the project by its legacy revision (projectMustExist) and check the
+  // administrator's legacy grant, so the grant they read and change is the legacy row too, never one keyed by the administrator's own company (review M2).
+  const grantCompany = undefined;
+  const current = await projectGrant(deps.actions, input.project, resolved.developerId, grantCompany);
   if (current?.role === "developer") throw agentXError("CONFIG_INVALID", `${describeDeveloper(resolved)} already has a grant for ${input.project}; there is nothing to change`);
   if (current?.role === "administrator") throw agentXError("CONFIG_INVALID", `${describeDeveloper(resolved)} already administers ${input.project}; there is nothing to change`);
   const project = input.project;
@@ -367,7 +371,7 @@ const planGrant: Planner = async (deps, identity, input) => {
     apply: async (applier) => {
       // E6, FR-015: the applier must still administer the project.
       await deps.handlers.requireAdministrator(applier, project);
-      return grantProjectAccess(deps.actions, { issuer: applier.issuer, subject: applier.subject }, project, resolved.developerId);
+      return grantProjectAccess(deps.actions, { issuer: applier.issuer, subject: applier.subject }, project, resolved.developerId, grantCompany);
     },
   };
 };
@@ -376,8 +380,12 @@ const planRevoke: Planner = async (deps, identity, input) => {
   if (input.kind !== "revoke_project_access") throw new Error("wrong planner");
   const latest = await projectMustExist(deps, identity, input.project);
   await deps.handlers.requireAdministrator(identity, input.project);
-  const resolved = await resolveDeveloper(deps.actions, input.developer, await resolveAdminCompany(deps.actions.companies, identity.ownerKey));
-  const current = await projectGrant(deps.actions, input.project, resolved.developerId);
+  const adminCompany = await resolveAdminCompany(deps.actions.companies, identity.ownerKey);
+  const resolved = await resolveDeveloper(deps.actions, input.developer, adminCompany);
+  // DEC 254zzz98 (one rule): a grant lives where its project's revision lives. These admin routes find the project by its legacy revision (projectMustExist) and check the
+  // administrator's legacy grant, so the grant they read and change is the legacy row too, never one keyed by the administrator's own company (review M2).
+  const grantCompany = undefined;
+  const current = await projectGrant(deps.actions, input.project, resolved.developerId, grantCompany);
   // An administrator row is never a grant: revoking never removes an administrator.
   if (current?.role !== "developer") throw agentXError("NOT_FOUND", `${describeDeveloper(resolved)} has no grant for ${input.project}, so there is nothing to revoke`);
   const project = input.project;
@@ -389,7 +397,7 @@ const planRevoke: Planner = async (deps, identity, input) => {
     snapshot: { grant: current, channelMembersMayUse, profile: resolved.profile === undefined ? null : { displayName: resolved.profile.displayName, provider: resolved.profile.provider } },
     apply: async (applier) => {
       await deps.handlers.requireAdministrator(applier, project);
-      return revokeProjectAccess(deps.actions, project, resolved.developerId);
+      return revokeProjectAccess(deps.actions, project, resolved.developerId, grantCompany);
     },
   };
 };

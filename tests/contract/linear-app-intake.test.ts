@@ -16,6 +16,7 @@ import { startFromTrackerDelivery } from "../../packages/broker/src/core/intake/
 import { createLinearApiAccess } from "../../packages/broker/src/plugins/tracker/linear/api.js";
 import { linearTracker } from "../../packages/broker/src/plugins/tracker/linear/index.js";
 import { COMPANY_A_ID as A, COMPANY_B_ID as B } from "../../packages/testing/src/isolation/two-company.js";
+import { companyProjectRow } from "../support/company-layout-projects.js";
 
 const PERSON_B = "e".repeat(64);
 const MEMBER_A = "a".repeat(64);
@@ -80,6 +81,7 @@ async function world() {
   };
   const project = async (name: string, companyId: string, teamId: string) => {
     h.db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", definition: { name, revision: 1 }, companyId });
+    h.db.set(companyProjectRow(companyId, name, 1)); // DEC 254zzz80: a named company's project readers read its own partition
     expect((await call("PUT", `${BASE}/projects/${name}`, { teamId })).status).toBe(200);
   };
   as(PERSON, A); await connect(WORKSPACE_A); await project("alpha", A, "team-a-eng");

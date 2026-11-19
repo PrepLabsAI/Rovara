@@ -2,7 +2,8 @@ import "./broker-environment-init.js"; import { companyMembershipFromDynamo, res
 import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
-import { createSlackLinkCodes, createSlackPersonResolver, slackCompanyPerson, slackCompanyProject, type SlackCompanyDependencies, type SlackWorkspaceAccess } from "./slack-person.js";
+import { createSlackLinkCodes, createSlackPersonResolver, slackBindingCompany, slackCompanyPerson, slackCompanyProject, type SlackCompanyDependencies, type SlackWorkspaceAccess } from "./slack-person.js";
+import { latestRevisionRowFor, namedCompanySlackBinding, slackChannelBindingKeyFor } from "./company-layout.js";
 import { companyThenInstallLinkCodes, installAdapterLinkCodes, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
 import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { askSlackAnswerForIdentity } from "./slack-answers.js";
@@ -231,6 +232,8 @@ import {
   type ModelSelection,
   type ProjectModelOptions,
   projectCatalogKey,
+  orgProjectCatalogKey,
+  type OrgId,
   type ChannelMembersRequest,
   isAdminChangePressEvent,
   type AdminChangeOutcome,
@@ -298,7 +301,8 @@ import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepositor
 import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, githubDisconnectedRefusal, GithubInstallationBindings, isGithubDisconnected } from "./github-credentials.js"; import { handleGithubInstallationWebhook, isGithubInstallationEvent } from "./github-lifecycle.js"; import { GitHubAppCredentialProvider as GitHubAppClient } from "../plugins/code-host/github/client.js"; import { bulkCreate, COMMIT_DEADLINE_MS, companyProjectCreatorOf, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js"; import { companyNameClaimWrites, companyNameTaken, companyProjectNaming, type ClientProjectNaming } from "./company-project-names.js";
 import { handleLinearAppWebhook, LINEAR_WEBHOOK_PATH, linearWebhookResponse, type LinearWebhookWiring } from "./linear-app-webhook.js";
 import { linearCompanyWiring } from "./linear-wiring.js";
-import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js"; import { OFFERED_MODELS_COMPANY_PARAMETER, offeredModelsCompany } from "./admin-offered-models.js";
+import { boundedCompanyReads, ownPartitionRow, recordInCompany, type CompanyMembershipReader } from "./company-check.js"; import { OFFERED_MODELS_COMPANY_PARAMETER, offeredModelsCompany } from "./admin-offered-models.js";
+import { grantKeyFor, namedCompany, revisionKeyFor } from "./company-layout.js";
 import { refuseNamedCompanyName } from "./admin-name-collision.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -602,6 +606,18 @@ interface AwsBrokerDependencies {
   slackCompanies?: CompanyMembershipReader;
   /** Install workspace for the additive operator backfill; independent of sign-in being enabled. */
   slackWorkspaceLegacyTeamId?: string;
+  /** L2-2 PR 18b: set only on the install team's legacy view (withoutSlackCompanyMode): another team's binding is "not bound" there. */
+  slackInstallTeamOnly?: string;
+  /**
+   * DEC 254zzz80 (R2-F1): set only on the install team's legacy view while Slack company mode is on. The install team's company (its operator binding) picks where its channel
+   * bindings are read (slack-person.ts slackBindingCompany): a NAMED company's own partition, else the legacy keys.
+   */
+  installTeamCompany?: (teamId: string) => Promise<string>;
+  /**
+   * DEC 254zzz80 (R2-F1): with `installTeamCompany`, the company path's own dependencies. A Slack start in the install team whose company is NAMED is that company's start
+   * (startSlackWorkflow: the linked person, the company's binding and the core), never the single-workspace start, whose unscoped keys that company has none of.
+   */
+  installTeamCompanyMode?: { workspaces: SlackWorkspaceAccess; companies?: CompanyMembershipReader };
   /** Guided onboarding PR 4: Add to Slack's wiring (named environments with the company layer); absent, a Slack removal event is refused. */
   slackInstall?: SlackInstallWiring;
   /** Guided onboarding PR 5: channel links and /rovara (named environments with the company layer); absent, /rovara answers "not set up". */
@@ -812,7 +828,9 @@ function adminChangeHandlers(dependencies: AwsBrokerDependencies): AdminChangeHa
         const issue = error.issues[0];
         throw agentXError("CONFIG_INVALID", `the project definition is invalid: ${issue?.path.join(".") || "definition"}: ${issue?.message ?? "invalid"}; fix it and plan again`);
       }
-      if (await getItem(dependencies, projectKey(definition.name, definition.revision)) !== undefined) {
+      // DEC 254zzz80: the revision's key in the company registration will write to (registerProject's own company rule: no developer, no company).
+      const planCompany = identity.developer === undefined ? undefined : await githubCallerCompany(dependencies, identity.developer.developerId, boundedCompanyReads(dependencies.documentClient));
+      if (await getItem(dependencies, revisionKeyFor(planCompany, definition.name, definition.revision)) !== undefined) {
         throw agentXError("CONFIG_INVALID", `revision ${definition.revision} of ${definition.name} is already registered; use a newer revision number`);
       }
       // C8: the vendor preflight runs here, at planning, and never again at apply: neither in the
@@ -1037,7 +1055,18 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   // naming no team get a handler built without `workspaces` (today's legacy path); every other team gets the company path.
   const company = dependencies.workspaces === undefined ? undefined
     : brokerEventHandler(core, { ...dependencies, ...(dependencies.companies === undefined && dependencies.slackCompanies !== undefined ? { companies: dependencies.slackCompanies } : {}) });
-  return splitBySlackTeam(brokerEventHandler(core, company === undefined ? dependencies : withoutSlackCompanyMode(dependencies, dependencies.slackWorkspaceLegacyTeamId ?? "")), company, dependencies.slackWorkspaceLegacyTeamId);
+  return splitBySlackTeam(brokerEventHandler(core, company === undefined ? dependencies : installTeamView(dependencies)), company, dependencies.slackWorkspaceLegacyTeamId);
+}
+
+/**
+ * The install team's legacy view (withoutSlackCompanyMode), which also knows the install team's company (DEC 254zzz80, R2-F1): its channel bindings are read in a NAMED company's
+ * own partition, and its Slack start becomes that company's start (installTeamCompanyMode). The built-in company keeps today's legacy view exactly.
+ */
+function installTeamView(dependencies: AwsBrokerDependencies): AwsBrokerDependencies {
+  const workspaces = dependencies.workspaces!;
+  const companies = dependencies.companies ?? dependencies.slackCompanies;
+  return { ...withoutSlackCompanyMode(dependencies, dependencies.slackWorkspaceLegacyTeamId ?? ""), installTeamCompany: (team: string) => workspaces.requireCompany(team),
+    installTeamCompanyMode: { workspaces, ...(companies === undefined ? {} : { companies }) } };
 }
 
 function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBrokerDependencies) {
@@ -1180,9 +1209,18 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
+    // DEC 254zzz95 (owner, R2-F1): the install team's Slack actions (Stop, task people, presses, intake, core presses, thread and feedback notes, the start) run as its
+    // NAMED company when its operator binding names one: the same switch as the start (namedInstallTeamView). Every other case keeps `dependencies` exactly.
+    let slackView = dependencies;
+    const slackTeam = slackIngressThreadTeam(event);
+    if (slackTeam !== undefined) {
+      try { slackView = await namedInstallTeamView(dependencies, slackTeam); }
+      catch { return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "This Slack workspace is not available." } }, "slack-ingress", 503); }
+    }
+    const slackTasks = slackView === dependencies ? tasks : developerTaskActions(slackView);
     if (isSlackStopTaskEvent(event)) {
       try {
-        return json(await stopSlackThreadTask(dependencies, event), "slack-ingress");
+        return json(await stopSlackThreadTask(slackView, event), "slack-ingress");
       } catch (error) {
         if (error instanceof AgentXError) {
           return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
@@ -1191,21 +1229,21 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
       }
     }
     if (isSlackTaskAuthorizationEvent(event)) {
-      try { return json(await authorizeSlackTaskAction(dependencies, tasks, event), "slack-ingress"); }
+      try { return json(await authorizeSlackTaskAction(slackView, slackTasks, event), "slack-ingress"); }
       catch (error) {
         if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
     if (isSlackTaskPeopleConfirmEvent(event)) {
-      try { return json(await confirmSlackTaskPeople(dependencies, tasks, event), "slack-ingress"); }
+      try { return json(await confirmSlackTaskPeople(slackView, slackTasks, event), "slack-ingress"); }
       catch (error) {
         if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
     if (isSlackTaskPeopleReadEvent(event) || isSlackTaskPeopleChangeEvent(event) || isSlackTaskPeopleTakeOwnershipEvent(event)) {
-      try { return json(await handleSlackTaskPeople(dependencies, tasks, event), "slack-ingress"); }
+      try { return json(await handleSlackTaskPeople(slackView, slackTasks, event), "slack-ingress"); }
       catch (error) {
         if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         return unexpectedErrorAnswer(error, "slack-ingress");
@@ -1213,7 +1251,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
     }
     if (isSlackWorkflowStartEvent(event)) {
       try {
-        const task = await startSlackWorkflow(dependencies, tasks, event);
+        const task = await startSlackWorkflow(slackView, slackTasks, event);
         return json({ taskId: task.task.taskId }, "slack-ingress");
       } catch (error) {
         if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
@@ -1223,31 +1261,31 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
     // Task 19: every Slack press the interactivity hands over asynchronously; a refusal is told to the presser privately.
     const approval = { outOfDate: SLACK_APPROVAL_OUT_OF_DATE, awsRequestId: context?.awsRequestId };
     const button = { outOfDate: SLACK_BUTTON_OUT_OF_DATE, awsRequestId: context?.awsRequestId };
-    if (isSlackWorkflowDecisionEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "decision", () => decideSlackWorkflow(dependencies, tasks, event), approval);
-    if (isSlackWorkflowRetryEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "verification_retry", () => retrySlackWorkflowChecks(dependencies, tasks, event), button);
-    if (isSlackWorkflowReviewRetryEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "review_retry", () => retrySlackWorkflowReviews(dependencies, tasks, event), button);
-    if (isSlackWorkflowPublishRetryEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "publish_retry", () => retrySlackWorkflowPublication(dependencies, tasks, event), button);
-    if (isSlackWorkflowKeepPullRequestsEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "keep_pull_requests", () => keepSlackWorkflowPullRequests(dependencies, tasks, event), button);
-    if (isSlackWorkflowSendBackEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "send_back", () => sendSlackWorkflowBack(dependencies, tasks, event), button);
-    if (isSlackWorkflowResolveFindingsEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "resolve_findings", () => resolveSlackWorkflowFindings(dependencies, tasks, event), button);
-    if (isSlackWorkflowCloseEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "close", () => closeSlackWorkflowTask(dependencies, tasks, event), button);
+    if (isSlackWorkflowDecisionEvent(event)) return answerSlackWorkflowEvent(slackView, event, "decision", () => decideSlackWorkflow(slackView, slackTasks, event), approval);
+    if (isSlackWorkflowRetryEvent(event)) return answerSlackWorkflowEvent(slackView, event, "verification_retry", () => retrySlackWorkflowChecks(slackView, slackTasks, event), button);
+    if (isSlackWorkflowReviewRetryEvent(event)) return answerSlackWorkflowEvent(slackView, event, "review_retry", () => retrySlackWorkflowReviews(slackView, slackTasks, event), button);
+    if (isSlackWorkflowPublishRetryEvent(event)) return answerSlackWorkflowEvent(slackView, event, "publish_retry", () => retrySlackWorkflowPublication(slackView, slackTasks, event), button);
+    if (isSlackWorkflowKeepPullRequestsEvent(event)) return answerSlackWorkflowEvent(slackView, event, "keep_pull_requests", () => keepSlackWorkflowPullRequests(slackView, slackTasks, event), button);
+    if (isSlackWorkflowSendBackEvent(event)) return answerSlackWorkflowEvent(slackView, event, "send_back", () => sendSlackWorkflowBack(slackView, slackTasks, event), button);
+    if (isSlackWorkflowResolveFindingsEvent(event)) return answerSlackWorkflowEvent(slackView, event, "resolve_findings", () => resolveSlackWorkflowFindings(slackView, slackTasks, event), button);
+    if (isSlackWorkflowCloseEvent(event)) return answerSlackWorkflowEvent(slackView, event, "close", () => closeSlackWorkflowTask(slackView, slackTasks, event), button);
     if (isSlackWorkflowFeedbackFindingsDecisionEvent(event)) {
-      return answerSlackWorkflowEvent(dependencies, event, "feedback_findings_decision", () => decideSlackWorkflowFeedbackFindings(dependencies, tasks, event), approval);
+      return answerSlackWorkflowEvent(slackView, event, "feedback_findings_decision", () => decideSlackWorkflowFeedbackFindings(slackView, slackTasks, event), approval);
     }
     if (isSlackWorkflowFeedbackReviewRetryEvent(event)) {
-      return answerSlackWorkflowEvent(dependencies, event, "feedback_review_retry", () => retrySlackWorkflowFeedbackReview(dependencies, tasks, event), button);
+      return answerSlackWorkflowEvent(slackView, event, "feedback_review_retry", () => retrySlackWorkflowFeedbackReview(slackView, slackTasks, event), button);
     }
     // Decision 134: the broker's own record of a routed request, from the ingress (never the Slack service).
     if (isSlackIntakeRecordEvent(event)) {
-      try { return json(await recordSlackIntake(dependencies, event), "slack-ingress"); }
+      try { return json(await recordSlackIntake(slackView, event), "slack-ingress"); }
       catch (error) {
         if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
-    if (isSlackCorePressEvent(event)) return await answerSlackCorePress(dependencies.developer?.coreTasks, event, (thread, userId) => companySlackCaller(dependencies, thread, userId)); if (isSlackThreadNoteEvent(event)) {
+    if (isSlackCorePressEvent(event)) return await answerSlackCorePress(slackView.developer?.coreTasks, event, (thread, userId) => companySlackCaller(slackView, thread, userId)); if (isSlackThreadNoteEvent(event)) {
       try {
-        const result = await recordSlackThreadNote(dependencies, tasks, event);
+        const result = await recordSlackThreadNote(slackView, slackTasks, event);
         // Never the note's text: only who and where.
         console.log(JSON.stringify({ component: "broker", event: "slack.thread_note", taskId: event.taskId, eventId: event.eventId, outcome: result.outcome }));
         // Exactly the outcome: the ingress reads nothing else.
@@ -1260,7 +1298,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
     }
     if (isSlackWorkflowFeedbackNoteEvent(event)) {
       try {
-        return json(await captureSlackWorkflowFeedbackNote(dependencies, tasks, event), "slack-ingress");
+        return json(await captureSlackWorkflowFeedbackNote(slackView, slackTasks, event), "slack-ingress");
       } catch (error) {
         if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         // The ingress reads a 4xx as a refusal; an unexpected failure must make Slack retry instead.
@@ -2102,7 +2140,7 @@ async function authorizeWorkspaceConnectors(dependencies: AwsBrokerDependencies,
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
   // The policy and the scopes it may address come from the project's latest registered revision,
   // so enabling, narrowing or revoking a tool reaches an existing thread at once.
-  const project = await requireLatestProject(dependencies, workspace.projectName);
+  const project = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
   const integrations = project.definition.integrations;
   if (!integrations?.githubMcp && !integrations?.connectors?.length) throw agentXError("FORBIDDEN", "GitHub MCP is not enabled for this project revision");
   return { workspace, project };
@@ -2200,6 +2238,8 @@ async function githubCallerCompany(dependencies: AwsBrokerDependencies, personId
 }
 
 async function checkRegistrationCompany(dependencies: AwsBrokerDependencies, name: string, companyId: string | undefined, budget: ReturnType<typeof boundedCompanyReads>) {
+  // DEC 254zzz80: a named company registers in its own partition; this legacy check stays for it too, so an id another company (or the built-in one) holds in the install's
+  // rows is still refused: project ids stay unique against the legacy namespace.
   if (companyId === undefined) return;
   const response = await budget.client.send(new QueryCommand({ TableName: dependencies.tableName,
     KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)", ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":revision": "REV#" },
@@ -2256,6 +2296,12 @@ async function registerProject(
   const { definition, runtimeBinding, wantsPreflight, setupApproval, takeover } = parseRegistrationInput(value);
   const companyBudget = checked?.githubCompany?.budget ?? boundedCompanyReads(dependencies.documentClient);
   const companyId = checked?.githubCompany === undefined ? await githubCallerCompany(dependencies, identity.developer?.developerId ?? "", companyBudget) : checked.githubCompany.companyId;
+  // DEC 254zzz80: a named company's revision, catalog pointer and checks live in its own partition (company-layout.ts); the built-in company and no company keep the legacy rows.
+  const ownCompany = namedCompany(companyId);
+  // The admin setup-approval run (its execution, dispatch and terminal checks) reads only the legacy revision row: a named company's setup goes through the project setup flow instead.
+  if (ownCompany !== undefined && (definition.e2e !== undefined || setupApproval !== undefined)) throw agentXError("FORBIDDEN", NAMED_COMPANY_SETUP_APPROVAL_REFUSED);
+  /** A stored revision is this registration's company's: by its own partition for a named company (a row there may leave its company out), else by its stored company. */
+  const inCompany = (row: unknown) => ownCompany !== undefined ? row !== null && typeof row === "object" && ownPartitionRow(row as Record<string, unknown>, ownCompany) : recordInCompany(row, companyId);
   await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
   let setupRuntimeAdmission: ReturnType<typeof admitProjectSetupRuntime>;
   let setupExecutionCreated = false;
@@ -2314,20 +2360,23 @@ async function registerProject(
    * registrant to administer the project already; an instance administrator who does not can take it over only by asking explicitly, with a reason.
    * Judged against the project as it is now, and again on every attempt, so a registrant who lost a race for the first revision is refused on the next one.
    */
+  // DEC 254zzz98 (one rule; review L1): the registrant's grant lives where this revision is stored. The revision's key is `revisionKeyFor(companyId, …)`, so the grant's is
+  // `grantKeyFor(companyId, …)`: never the company a stamped legacy row names (a registration with no company writes the legacy revision, so its grant is the legacy row).
+  const grantCompanyId = grantCompany(dependencies, companyId);
   const judgeAuthority = async (newestRevision: number): Promise<"first" | "administrator" | "takeover"> => {
     await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
     if (newestRevision === 0) return "first";
-    const authority = await getItem<{ role?: unknown }>(dependencies, { pk: `MEMBER#${identity.ownerKey}`, sk: `PROJECT#${definition.name}` });
+    const authority = await getItem<{ role?: unknown }>(dependencies, grantKeyFor(grantCompanyId, identity.ownerKey, definition.name));
     if (authority?.role === "administrator") return "administrator";
     if (takeover !== undefined) return "takeover";
     throw agentXError("FORBIDDEN", `only an administrator of project ${definition.name} can register a new revision of it. An instance administrator who is not one can take the project over by asking explicitly: send takeOwnership: true with a takeOwnershipReason (agentx admin project register --take-ownership --ownership-reason <why>); the takeover is recorded`);
   };
-  const key = projectKey(definition.name, definition.revision);
-  const readCatalogSnapshot = () => readProjectCatalogSnapshot(dependencies, definition.name);
-  const repairCatalogPointerFromHistory = () => repairProjectCatalogPointerFromHistory(dependencies, definition.name);
+  const key = revisionKeyFor(companyId, definition.name, definition.revision);
+  const readCatalogSnapshot = () => ownCompany !== undefined ? readNamedCompanyCatalogSnapshot(dependencies, ownCompany, definition.name) : readProjectCatalogSnapshot(dependencies, definition.name);
+  const repairCatalogPointerFromHistory = () => ownCompany !== undefined ? repairNamedCompanyCatalogPointer(dependencies, ownCompany, definition.name, definition.revision) : repairProjectCatalogPointerFromHistory(dependencies, definition.name);
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);
   if (existing) {
-    if (!recordInCompany(existing, companyId)) throw agentXError("NOT_FOUND", "registered project not found");
+    if (!inCompany(existing)) throw agentXError("NOT_FOUND", "registered project not found");
     for (const repository of definition.repositories) await checkCompanyRepository(dependencies, companyId, repository.url, companyBudget);
     // The stored revision is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
     if (!sameJsonContent(existing.definition, definition) || !sameJsonContent(existing.runtimeBinding, runtimeBinding) || !sameJsonContent(existing.setupApproval, setupApprovalBinding)) {
@@ -2340,7 +2389,8 @@ async function registerProject(
     return respond(withoutKeys(existing), true, preflight);
   }
   // Refused before any vendor is contacted for a registrant who may not store this revision; the commit judges it again.
-  await judgeAuthority((await readCatalogSnapshot()).newestRevision);
+  const firstSnapshot = await readCatalogSnapshot();
+  await judgeAuthority(firstSnapshot.newestRevision);
   const preflight = await registrationChecks(dependencies, identity, definition, wantsPreflight, { companyId, budget: companyBudget });
   const now = new Date().toISOString(); const nameClaimWrites = checked?.nameClaim === undefined ? [] : companyNameClaimWrites(dependencies.tableName, { companyId, name: checked.nameClaim.name, projectId: definition.name, revision: definition.revision, by: identity.ownerKey, at: now }); // L2-1: in the same transaction
   const record: RegisteredProjectRecord = {
@@ -2353,8 +2403,9 @@ async function registerProject(
     registeredAt: now,
     ...(setupApprovalBinding === undefined ? {} : { setupApproval: setupApprovalBinding }),
   };
-  const membership = membershipRecord(identity.ownerKey, definition.name, "administrator");
-  const membershipKey = { pk: membership.pk, sk: membership.sk };
+  // DEC 254zzz80: the registrant's grant row and key, set on each attempt for the company the revision is stored for.
+  let membership: MembershipRecord;
+  let membershipKey: { pk: string; sk: string };
   const setupAdmissionRows = setupRuntimeAdmission && setupApprovalBinding?.decision === "approve" && definition.e2e !== undefined
     ? await createProjectSetupAdmissionRows(dependencies, identity, record, setupApprovalBinding, setupRuntimeAdmission)
     : undefined;
@@ -2384,19 +2435,23 @@ async function registerProject(
     const snapshot = await readCatalogSnapshot();
     const latestRevision = Math.max(definition.revision, snapshot.newestRevision);
     const updateCatalog = snapshot.catalog?.latestRevision !== latestRevision;
-    // An existing project changes (its test accounts included) only at the hand of one of its administrators, or of an instance administrator who takes it over explicitly.
-    // Judged against the project as it is on this attempt: an administrator who raced a first registration and lost finds the project there on the next one.
-    const authority = await judgeAuthority(snapshot.newestRevision);
-    const accounts = await planAccounts();
     // Ownership may be carried forward only from the stored legacy revision (or the checked membership already used above).
     const storedCompany = snapshot.newest?.companyId;
     if (storedCompany !== undefined) {
       if (!OrgIdSchema.safeParse(storedCompany).success || (record.companyId !== undefined && storedCompany !== record.companyId)) throw agentXError("PROJECT_REVISION_MISMATCH", "core project ownership conflict");
       record.companyId = storedCompany;
     } else if (record.companyId !== undefined && companyId === undefined) throw agentXError("PROJECT_REVISION_MISMATCH", "core project ownership conflict");
+    // DEC 254zzz98: the grant this attempt reads and writes is beside the revision (grantCompanyId, from the revision key's company).
+    membership = membershipRecord(identity.ownerKey, definition.name, "administrator", grantCompanyId);
+    membershipKey = grantKeyFor(grantCompanyId, identity.ownerKey, definition.name);
+    // An existing project changes (its test accounts included) only at the hand of one of its administrators, or of an instance administrator who takes it over explicitly.
+    // Judged against the project as it is on this attempt: an administrator who raced a first registration and lost finds the project there on the next one.
+    const authority = await judgeAuthority(snapshot.newestRevision);
+    const accounts = await planAccounts();
     let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
     try {
-      corePlan = await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record);
+      // A named company's record IS its own-partition row (no legacy source to copy from).
+      corePlan = ownCompany !== undefined ? { status: "existing", writes: [] } : await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record);
       if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
       if (snapshot.newest !== undefined) corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest, corePlan.writes);
     }
@@ -2414,7 +2469,7 @@ async function registerProject(
           ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":administrator": "administrator" } } }]
         : [{ Put: { TableName: dependencies.tableName, Item: membership } },
           // Spec 065: the project's side of the membership, so its members can be listed.
-          { Put: { TableName: dependencies.tableName, Item: { ...projectMemberKey(definition.name, identity.ownerKey), entityType: "PROJECT_MEMBER", role: "administrator", grantedAt: now } } }]),
+          { Put: { TableName: dependencies.tableName, Item: { ...projectMemberKey(definition.name, identity.ownerKey, grantCompanyId), entityType: "PROJECT_MEMBER", role: "administrator", grantedAt: now } } }]),
       ...(authority === "takeover" && takeover !== undefined ? [{ Put: { TableName: dependencies.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
         pk: `PROJECT_TAKEOVER#${definition.name}`, sk: `AT#${now}#${randomUUID()}`, entityType: "PROJECT_OWNERSHIP_TAKEOVER",
         projectName: definition.name, revision: definition.revision, takenBy: identity.ownerKey, subject: identity.subject, reason: takeover.reason, at: now,
@@ -2422,13 +2477,16 @@ async function registerProject(
       // Spec 025 A3: the admin project list reads this row instead of scanning the table.
       ...(updateCatalog ? [{ Update: {
         TableName: dependencies.tableName,
-        Key: projectCatalogKey(definition.name),
-        UpdateExpression: "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+        Key: ownCompany !== undefined ? orgProjectCatalogKey(ownCompany, definition.name) : projectCatalogKey(definition.name),
+        UpdateExpression: ownCompany !== undefined
+          ? "SET entityType = :entity, #name = :name, companyId = :company, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)"
+          : "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
         ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)"
           : snapshot.catalog.latestRevision === undefined ? "attribute_not_exists(latestRevision)"
             : "latestRevision = :observed AND latestRevision < :revision",
         ExpressionAttributeNames: { "#name": "name" },
         ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":revision": latestRevision, ":now": now,
+          ...(ownCompany === undefined ? {} : { ":company": ownCompany }),
           ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
       } }] : []),
       ...(setupAdmissionRows?.transactionItems ?? []),
@@ -2447,7 +2505,7 @@ async function registerProject(
       // catalog before returning duplicate success; otherwise retry only a catalog/history advance.
       const winner = await getItem<RegisteredProjectRecord>(dependencies, key);
       if (winner !== undefined) {
-        if (!recordInCompany(winner, companyId)) throw agentXError("NOT_FOUND", "registered project not found");
+        if (!inCompany(winner)) throw agentXError("NOT_FOUND", "registered project not found");
         if (!sameJsonContent(winner.definition, definition) || !sameJsonContent(winner.runtimeBinding, runtimeBinding)
           || !sameJsonContent(winner.setupApproval, setupApprovalBinding)) {
           throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
@@ -2491,6 +2549,68 @@ async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, p
     throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is ahead of registered revision history");
   }
   return { catalog, newestRevision, ...(newest === undefined ? {} : { newest }) };
+}
+
+/** R2-F1 review M1: a named company's project with a setup change waiting for approval takes no other revision until that change is decided. */
+export const NAMED_COMPANY_CANDIDATE_WAITING = "a setup change for this project is waiting for approval; approve or decline it before registering another revision";
+
+/** Why a named company's registration may not carry the admin setup approval (DEC 254zzz80). */
+export const NAMED_COMPANY_SETUP_APPROVAL_REFUSED = "a company's project takes its setup through the project's setup flow, not a setup approval sent with registration";
+
+/**
+ * DEC 254zzz80: registerProject's snapshot for a named company, from its own partition: the catalog row (`orgProjectCatalogKey`; a row written by the core may leave its name and
+ * company out, but one that names another project or company is refused) and the newest stored revision of any kind (a candidate occupies its revision number too).
+ */
+async function readNamedCompanyCatalogSnapshot(dependencies: AwsBrokerDependencies, company: OrgId, projectName: string, options: { waitingCandidate?: "allow" } = {}): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number; newest?: RegisteredProjectRecord }> {
+  const catalogKey = orgProjectCatalogKey(company, projectName);
+  const catalog = await getItem<{ pk?: unknown; sk?: unknown; entityType?: string; name?: string; latestRevision?: number }>(dependencies, catalogKey);
+  if (catalog !== undefined && (catalog.pk !== catalogKey.pk || catalog.sk !== catalogKey.sk || catalog.entityType !== "PROJECT_CATALOG" || (catalog.name !== undefined && catalog.name !== projectName)
+    || !ownPartitionRow(catalog, company) || (catalog.latestRevision !== undefined && (!Number.isSafeInteger(catalog.latestRevision) || catalog.latestRevision < 1)))) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is unavailable or invalid");
+  }
+  const pk = revisionKeyFor(company, projectName, 1).pk;
+  const response = await dependencies.documentClient.send(new QueryCommand({ TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
+    ExpressionAttributeValues: { ":pk": pk, ":revision": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true })) as { Items?: Array<Record<string, unknown>> };
+  const raw = response.Items?.[0];
+  // L1: the newest row is parsed, never assumed: a row with no readable definition is refused in fixed words (no TypeError, no 500).
+  const definition = raw?.definition as { name?: unknown; revision?: unknown } | null | undefined;
+  if (raw !== undefined && (raw.pk !== pk || !ownPartitionRow(raw, company) || typeof definition !== "object" || definition === null || definition.name !== projectName
+    || typeof definition.revision !== "number" || !Number.isSafeInteger(definition.revision) || definition.revision < 1)) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is invalid");
+  }
+  const newest = raw as RegisteredProjectRecord | undefined;
+  const newestRevision = newest?.definition.revision ?? 0;
+  // M1: a setup change waiting for approval (a candidate revision the catalog does not point at) holds the project: no other revision is registered meanwhile, as the
+  // core's own setup flow refuses (core/setup-agent/apply.ts), so the catalog pointer is never moved onto or past an unapproved candidate.
+  const waiting = raw !== undefined && raw.candidate === true && (catalog?.latestRevision ?? 0) < newestRevision;
+  if (waiting && options.waitingCandidate !== "allow") throw agentXError("PROJECT_REVISION_MISMATCH", NAMED_COMPANY_CANDIDATE_WAITING);
+  if (catalog?.latestRevision !== undefined && catalog.latestRevision > newestRevision) throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is ahead of registered revision history");
+  // A waiting candidate (allowed only for the duplicate path's pointer repair) is never the newest the pointer may move to.
+  return waiting ? { catalog, newestRevision: catalog?.latestRevision ?? 0 } : { catalog, newestRevision, ...(newest === undefined ? {} : { newest }) };
+}
+
+/**
+ * A named company's duplicate registration: the catalog points at least at the revision just found stored (a candidate is never made the latest here: only its approval does that).
+ * Moves the pointer forward only, conditionally on what was read.
+ */
+async function repairNamedCompanyCatalogPointer(dependencies: AwsBrokerDependencies, company: OrgId, projectName: string, revision: number): Promise<void> {
+  const stored = await getItem<Record<string, unknown>>(dependencies, revisionKeyFor(company, projectName, revision));
+  if (stored === undefined || stored.candidate === true) return;
+  const snapshot = await readNamedCompanyCatalogSnapshot(dependencies, company, projectName, { waitingCandidate: "allow" });
+  if ((snapshot.catalog?.latestRevision ?? 0) >= revision) return;
+  try {
+    await dependencies.documentClient.send(new UpdateCommand({
+      TableName: dependencies.tableName, Key: orgProjectCatalogKey(company, projectName),
+      UpdateExpression: "SET entityType = :entity, #name = :name, companyId = :company, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+      ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)" : snapshot.catalog.latestRevision === undefined ? "attribute_not_exists(latestRevision)" : "latestRevision = :observed",
+      ExpressionAttributeNames: { "#name": "name" },
+      ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": projectName, ":company": company, ":revision": revision, ":now": new Date().toISOString(),
+        ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
+    }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer changed without revision history advancing");
+  }
 }
 
 async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDependencies, projectName: string, options: { createCatalogRow?: boolean } = {}): Promise<void> {
@@ -2810,7 +2930,7 @@ async function retryProjectSetupAsAdministrator(
     setupExecutionId: nextExecution.setupExecutionId, operationId: nextOperation.operationId, retryActorKey: identity.ownerKey,
     originalCreatorKey: parked.data.ownerKey, createdAt: new Date().toISOString() };
   const now = new Date().toISOString();
-  const terminalAuthorityChecks = projectSetupTerminalAuthorityChecks(dependencies.tableName, parked.data, runtime.data, session.data);
+  const terminalAuthorityChecks = projectSetupTerminalAuthorityChecks(dependencies.tableName, parked.data, runtime.data, session.data, LEGACY_REVISION_GRANT);
   const parkResult = { domain: "project-setup-source-interface/v1", candidateDigest: parked.data.candidateDigest,
     processStatus: "UNKNOWN", qualification: "UNKNOWN", cleanupConfirmed: false, parkReason: "setup-deadline-expired" };
   const priorExecutionMutation = expiredDispatchRetry
@@ -2920,7 +3040,7 @@ async function prepareWorkspace(
         { Put: { TableName: dependencies.tableName, Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#ADMIN`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", operationId: preparation.operationId, workspaceId: preparation.workspace.id }, ConditionExpression: "attribute_not_exists(pk)" } },
       ] }));
     } catch (error) {
-      if (!isConditional(error) || !await membershipMovedSince(dependencies, targetOwnerKey, project.definition.name, preparation.membership)) throw error;
+      if (!isConditional(error) || !await membershipMovedSince(dependencies, targetOwnerKey, project.definition.name, preparation.membership, LEGACY_REVISION_GRANT)) throw error;
       continue;
     }
     return { operationId: preparation.operationId, workspace: publicWorkspace(preparation.workspace), alreadyReady: false };
@@ -2932,8 +3052,8 @@ async function prepareWorkspace(
 const MEMBERSHIP_PREPARATION_ATTEMPTS = 3;
 
 /** True when the membership row is no longer the one a transaction was built from: gone, created, or another role or grantId. */
-async function membershipMovedSince(dependencies: AwsBrokerDependencies, ownerKey: string, projectName: string, observed: MembershipRecord | undefined): Promise<boolean> {
-  const current = await getMembership(dependencies, ownerKey, projectName);
+async function membershipMovedSince(dependencies: AwsBrokerDependencies, ownerKey: string, projectName: string, observed: MembershipRecord | undefined, companyId: string | undefined): Promise<boolean> {
+  const current = await getMembership(dependencies, ownerKey, projectName, companyId);
   return current?.role !== observed?.role || current?.grantId !== observed?.grantId;
 }
 
@@ -2947,13 +3067,15 @@ function membershipPreparationItem(
   ownerKey: string,
   projectName: string,
   observed: MembershipRecord | undefined,
+  companyId: string | undefined,
   grantedBy?: { issuer: string; subject: string },
 ): TransactItems[number] {
+  // DEC 254zzz98: `companyId` is where the grant beside the revision is (LEGACY_REVISION_GRANT for the legacy revisions every caller here reads).
   if (observed === undefined) {
-    const created: MembershipRecord = { ...membershipRecord(ownerKey, projectName, "developer"), ...(grantedBy === undefined ? {} : { grantedBy, grantedAt: new Date().toISOString() }) };
+    const created: MembershipRecord = { ...membershipRecord(ownerKey, projectName, "developer", companyId), ...(grantedBy === undefined ? {} : { grantedBy, grantedAt: new Date().toISOString() }) };
     return { Put: { TableName: dependencies.tableName, Item: created, ConditionExpression: "attribute_not_exists(pk)" } };
   }
-  const key = { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}` };
+  const key = grantKeyFor(companyId, ownerKey, projectName);
   // A row from before grants were versioned has no grantId. It gets one here, in the same transaction, and keeps everything else it has;
   // the condition lets it happen only to the row that was read, and never replaces a grantId that exists.
   if (typeof observed.grantId !== "string") {
@@ -3033,7 +3155,7 @@ async function newWorkspacePreparation(
     },
   };
   const outbox = outboxRecord(workspace, invocation, project.runtimeBinding);
-  const existingMembership = await getMembership(dependencies, targetOwnerKey, projectName);
+  const existingMembership = await getMembership(dependencies, targetOwnerKey, projectName, LEGACY_REVISION_GRANT);
   return {
     workspace,
     operationId,
@@ -3043,7 +3165,7 @@ async function newWorkspacePreparation(
       { Put: { TableName: dependencies.tableName, Item: { pk: `OWNER#${targetOwnerKey}`, sk: `PROJECT#${projectName}`, entityType: "DEFAULT_WORKSPACE", workspaceId }, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
-      membershipPreparationItem(dependencies, targetOwnerKey, projectName, existingMembership, options.grantedBy),
+      membershipPreparationItem(dependencies, targetOwnerKey, projectName, existingMembership, LEGACY_REVISION_GRANT, options.grantedBy),
     ],
   };
 }
@@ -3073,6 +3195,7 @@ async function slackServiceIdentity(
   await companySlackCaller(dependencies, context.thread, context.requester.userId);
   const binding = await getSlackBinding(dependencies, context.thread.teamId, context.thread.channelId);
   if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  await refuseForeignLegacyNamesake(dependencies, binding);
   const subject = slackThreadSubject(context.thread);
   const own: AuthenticatedIdentity = {
     issuer: SLACK_THREAD_OWNER_ISSUER,
@@ -3240,7 +3363,11 @@ async function putSlackBinding(
     updatedAt: new Date().toISOString(),
   });
   await requireAdministrator(dependencies, identity, binding.projectName);
-  if (!await slackCompanyProject(dependencies, binding.teamId, binding.projectName)) throw agentXError("NOT_FOUND", "Slack channel binding not found");
+  // DEC 254zzz80 (R2-F1): a NAMED company's binding is written in its own partition, for a project of its own partition; the built-in company as before.
+  const named = await slackBindingCompany(dependencies, binding.teamId);
+  if (!(named === undefined ? await slackCompanyProject(dependencies, binding.teamId, binding.projectName) : await latestRevisionRowFor(dependencies.documentClient, dependencies.tableName, named, binding.projectName) !== undefined)) {
+    throw agentXError("NOT_FOUND", "Slack channel binding not found");
+  }
   const existing = await getSlackBinding(dependencies, binding.teamId, binding.channelId);
   if (existing && existing.projectName !== binding.projectName) {
     await requireAdministrator(dependencies, identity, existing.projectName);
@@ -3248,7 +3375,7 @@ async function putSlackBinding(
   const latest = await requireLatestProject(dependencies, binding.projectName);
   await dependencies.documentClient.send(new PutCommand({
     TableName: dependencies.tableName,
-    Item: { ...slackBindingKey(binding.teamId, binding.channelId), ...channelBindingAttributes(channelBindingFromSlack(binding)), updatedBy: identity.ownerKey },
+    Item: { ...slackChannelBindingKeyFor(named, binding.teamId, binding.channelId), ...channelBindingAttributes(channelBindingFromSlack(binding)), updatedBy: identity.ownerKey },
   }));
   return { binding, latestRevision: latest.definition.revision };
 }
@@ -3264,20 +3391,66 @@ async function deleteSlackBinding(
   const binding = await getSlackBinding(dependencies, teamId, channelId);
   if (!binding) throw agentXError("NOT_FOUND", "Slack channel binding not found");
   await requireAdministrator(dependencies, identity, binding.projectName);
+  // DEC 254zzz80 (R2-F1): the row the read found: a NAMED company's own (its binding carries companyId), else the legacy one.
   await dependencies.documentClient.send(new DeleteCommand({
     TableName: dependencies.tableName,
-    Key: slackBindingKey(teamId, channelId),
+    Key: slackChannelBindingKeyFor((binding as { companyId?: string }).companyId, teamId, channelId),
   }));
   return { deleted: true, binding };
 }
 
-async function getSlackBinding(
+/**
+ * DEC 254zzz98 (delta review H1): the workflow thread routes a Slack thread reaches (the thread workspace, its preparation and close, the GitHub MCP and connector routes,
+ * the model settings) read the project's LEGACY revision `PROJECT#<name>` by name. A NAMED company's binding (read from its own partition; it carries `companyId`) names its
+ * project only by name, and names are not unique between a named company's own partition and the legacy namespace. So a legacy revision of that name that is not this
+ * company's (the built-in company's, unstamped, or another company's) must never serve this thread: the request is refused as unbound. Checked on every Slack service
+ * request (this is the thread identity), so a legacy namesake registered after the thread started is refused at the next request. The built-in company: unchanged.
+ */
+async function refuseForeignLegacyNamesake(dependencies: AwsBrokerDependencies, binding: SlackChannelBinding): Promise<void> {
+  const company = namedCompany((binding as { companyId?: unknown }).companyId as string | undefined);
+  if (company === undefined) return;
+  const response = await dependencies.documentClient.send(new QueryCommand({
+    TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${binding.projectName}`, ":revision": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+  })) as { Items?: unknown[] };
+  const legacy = response.Items?.[0];
+  if (legacy !== undefined && !recordInCompany(legacy, company)) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+}
+
+/**
+ * DEC 254zzz98 (re-review M): the row a Slack thread's route actually read. When the thread's binding is a NAMED company's (it carries `companyId`), the legacy revision the route
+ * loaded by name must be that company's own (recordInCompany); any other is refused as unbound, so a namesake registered between the identity check and this read never serves
+ * the thread, and a pinned older revision of another company neither. Any other identity (no Slack binding, or the built-in company's): the row, unchanged.
+ */
+function slackThreadOwnRow<T>(identity: AuthenticatedIdentity, row: T): T {
+  const company = namedCompany((identity.slack?.binding as { companyId?: unknown } | undefined)?.companyId as string | undefined);
+  if (company !== undefined && !recordInCompany(row, company)) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  return row;
+}
+
+async function getLegacySlackBinding(
   dependencies: AwsBrokerDependencies,
   teamId: string,
   channelId: string,
 ): Promise<SlackChannelBinding | undefined> {
   const binding = await getChannelBinding(dependencies, { channel: SLACK_CHANNEL, tenant: teamId, space: channelId });
   return binding === undefined || !await slackCompanyProject(dependencies, teamId, binding.projectName) ? undefined : slackBindingOf(binding);
+}
+
+/**
+ * DEC 254zzz80 (R2-F1): a Slack channel's binding for the team's company. A NAMED company's bindings live only in its own partition (`ORG#<company>#SLACK_BINDING#<team>`), read
+ * by key under the team's company as resolved now; the built-in company and no company layer keep the legacy read above, unchanged.
+ */
+async function getSlackBinding(
+  dependencies: AwsBrokerDependencies,
+  teamId: string,
+  channelId: string,
+): Promise<SlackChannelBinding | undefined> {
+  const named = await slackBindingCompany(dependencies, teamId);
+  if (named === undefined) return getLegacySlackBinding(dependencies, teamId, channelId);
+  const binding = await namedCompanySlackBinding(dependencies.documentClient, dependencies.tableName, named, teamId, channelId);
+  // The bound project must be a project of the company's own partition (the core's order; a row naming another company is absent).
+  return binding !== undefined && await latestRevisionRowFor(dependencies.documentClient, dependencies.tableName, named, binding.projectName) !== undefined ? binding : undefined;
 }
 
 /** Spec 062 FR-010: one space's binding on any channel. Rows written before channels followed the latest revision also carry projectRevision; it is ignored. */
@@ -3758,7 +3931,7 @@ async function ensureThreadWorkspace(
   }
 
   // New threads use the latest revision; an existing thread keeps the revision its workspace was prepared with.
-  const project = await requireLatestProject(dependencies, projectName);
+  const project = slackThreadOwnRow(identity, await requireLatestProject(dependencies, projectName));
   if (lazyPreparation) {
     return createUnpreparedThreadWorkspace(dependencies, identity, requestId, project, include, includeSettingsRevision);
   }
@@ -3786,7 +3959,7 @@ async function ensureThreadWorkspace(
     } catch (error) {
       if (!isConditional(error)) throw error;
       // The membership changed since it was read: decide again from the row as it now is, never over it.
-      if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, attempted.membership)) continue;
+      if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, attempted.membership, LEGACY_REVISION_GRANT)) continue;
       const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
       if (concurrent) {
         return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision, input.includeOpenTaskCount === true);
@@ -3827,7 +4000,7 @@ async function createUnpreparedThreadWorkspace(
   let workspace: WorkspaceInstance | undefined;
   for (let attempt = 0; attempt < MEMBERSHIP_PREPARATION_ATTEMPTS; attempt += 1) {
     const attempted = unpreparedWorkspace(project, identity.ownerKey);
-    const existingMembership = await getMembership(dependencies, identity.ownerKey, projectName);
+    const existingMembership = await getMembership(dependencies, identity.ownerKey, projectName, LEGACY_REVISION_GRANT);
     try {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
         { Put: { TableName: dependencies.tableName, Item: workspaceItem(attempted), ConditionExpression: "attribute_not_exists(pk)" } },
@@ -3837,7 +4010,7 @@ async function createUnpreparedThreadWorkspace(
           ConditionExpression: "attribute_not_exists(pk)",
         } },
         // Created only when absent; an existing row is required to be as it was read, never rewritten.
-        membershipPreparationItem(dependencies, identity.ownerKey, projectName, existingMembership),
+        membershipPreparationItem(dependencies, identity.ownerKey, projectName, existingMembership, LEGACY_REVISION_GRANT),
         { Put: {
           TableName: dependencies.tableName,
           Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#THREAD`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", workspaceId: attempted.id },
@@ -3857,7 +4030,7 @@ async function createUnpreparedThreadWorkspace(
     } catch (error) {
       if (!isConditional(error)) throw error;
       // The membership changed since it was read: decide again from the row as it now is, never over it.
-      if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, existingMembership)) continue;
+      if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, existingMembership, LEGACY_REVISION_GRANT)) continue;
       // Another first message in this thread created the record.
       const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
       if (concurrent) return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision);
@@ -3974,7 +4147,7 @@ async function startThreadPreparation(
   const charging = threadCharging(dependencies, identity);
   if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {
     // #213: a released failed workspace a lazy turn was told is UNPREPARED; prepared again, charged afresh.
-    const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+    const pinned = slackThreadOwnRow(identity, await requireProject(dependencies, workspace.projectName, workspace.projectRevision));
     const retried = await retryThreadPreparation(dependencies, identity, requestId, pinned, workspace, includeOpenTaskCount);
     if ("outcome" in retried) {
       if (retried.outcome === "LIMIT_REACHED") return retried;
@@ -3989,7 +4162,7 @@ async function startThreadPreparation(
   await charging.heal(effective);
   // One read of the latest revision feeds every field below, so a revision registered meanwhile
   // cannot mix in. The fence condition refuses the write if the workspace changed since it was read.
-  const latest = await requireLatestProject(dependencies, workspace.projectName);
+  const latest = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
   const projectRevision = latest.definition.revision;
   const now = new Date().toISOString();
   const operationId = randomUUID();
@@ -4305,7 +4478,7 @@ async function sharedThreadWorkspace(
       ? { outcome: "VIEW_ONLY", taskId: shared.taskId, closed: true }
       : { outcome: "CLOSED", workspaceId: workspace.id, closedAt: workspace.closedAt };
   }
-  const settings = await requireLatestProject(dependencies, workspace.projectName);
+  const settings = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
   const active = await activeOperationForChannel(dependencies, workspace);
   return {
     outcome: "WORKSPACE",
@@ -4351,8 +4524,8 @@ async function existingThreadWorkspace(
   // Preparation rebuilds the workspace's disk, so it keeps the revision recorded on the workspace
   // (for a Slack thread, the latest revision when its compute was first prepared). Everything the
   // model is told comes from the project's latest registered revision.
-  const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
-  const settings = await requireLatestProject(dependencies, workspace.projectName);
+  const pinned = slackThreadOwnRow(identity, await requireProject(dependencies, workspace.projectName, workspace.projectRevision));
+  const settings = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
   const applied = {
     orchestratorInstructions: settings.definition.orchestratorInstructions,
     ...await threadIntegrations(settings.definition, include, dependencies),
@@ -6306,9 +6479,12 @@ export function isSlackWorkflowStartEvent(event: unknown): event is SlackWorkflo
     && typeof value.requestId === "string" && (value.workflowPath === "QUICK" || value.workflowPath === "FULL");
 }
 
-async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowStartEvent) {
-  if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
+async function startSlackWorkflow(view: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowStartEvent) {
+  if (view.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
   const thread = SlackThreadSchema.parse(event.thread);
+  // DEC 254zzz80 (R2-F1): the install team of a NAMED company starts as that company (its linked person, its own binding, the core); the built-in company as before.
+  const dependencies = await namedInstallTeamView(view, thread.teamId);
+  if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
   const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
   const caller = await companySlackCaller(dependencies, thread, userId);
   const requestId = randomUUIDSchema.parse(event.requestId);
@@ -6335,6 +6511,38 @@ async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: De
     body: JSON.stringify({ requestId, project: binding.projectName, instructions, client: "slack", workflow: true, workflowPath: event.workflowPath, shareToChannel: true, channel: thread.channelId }),
   };
   return await routeDeveloperTaskRequest(routeDeps, caller, request, new URL(request.path, "https://agentx.invalid")) as { task: { taskId: string } };
+}
+
+/**
+ * The Slack team of a Slack Lambda direct invoke (`source: agentx.slack-ingress`, never an HTTP request): its thread's team, or a core plan press's conversation tenant when the
+ * press's actor names the same tenant (slackCorePress refuses any other press). Undefined for anything else.
+ */
+function slackIngressThreadTeam(event: unknown): string | undefined {
+  if (event === null || typeof event !== "object" || Array.isArray(event)) return undefined;
+  const value = event as { source?: unknown; requestContext?: unknown; thread?: unknown; press?: unknown };
+  if (value.source !== "agentx.slack-ingress" || value.requestContext !== undefined) return undefined;
+  if (value.thread !== null && typeof value.thread === "object") {
+    const team = (value.thread as { teamId?: unknown }).teamId;
+    return typeof team === "string" ? team : undefined;
+  }
+  if (value.press === null || typeof value.press !== "object") return undefined;
+  const press = value.press as { conversation?: { tenant?: unknown } | null; actor?: { tenant?: unknown } | null };
+  const tenant = press.conversation?.tenant;
+  return typeof tenant === "string" && press.actor?.tenant === tenant ? tenant : undefined;
+}
+
+/**
+ * DEC 254zzz80 (R2-F1), DEC 254zzz95: the dependencies a Slack start, and every install-team Slack action, runs with. In the install team's legacy view, when the team's operator binding names a NAMED company, the start is that
+ * company's: the company path's own `workspaces` and membership reader (installTeamCompanyMode), so the caller is the linked Rovara person, the binding is the company's own row
+ * and the task starts on the core for that company. Every other case (the company handler, another team, the built-in company, company mode off) is returned unchanged.
+ */
+async function namedInstallTeamView(dependencies: AwsBrokerDependencies, teamId: string): Promise<AwsBrokerDependencies> {
+  const mode = dependencies.installTeamCompanyMode;
+  if (dependencies.workspaces !== undefined || mode === undefined || dependencies.slackInstallTeamOnly === undefined || teamId !== dependencies.slackInstallTeamOnly) return dependencies;
+  if (await slackBindingCompany(dependencies, teamId) === undefined) return dependencies;
+  const { slackInstallTeamOnly: _only, installTeamCompany: _company, installTeamCompanyMode: _mode, ...rest } = dependencies;
+  void _only; void _company; void _mode;
+  return { ...rest, workspaces: mode.workspaces, ...(mode.companies === undefined ? {} : { companies: mode.companies }) };
 }
 
 /** How many times Stop decides again after another write moved the task under it. */
@@ -7974,7 +8182,7 @@ async function readSetupChunk(dependencies: AwsBrokerDependencies, key: string):
 async function requireProjectSetupCapability(
   dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string, action: "read-execution" | "write-evidence" | "result",
 ): Promise<{ execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>; claims: NonNullable<ReturnType<typeof verifyProjectSetupCapability>>;
-  runtime: ReturnType<typeof ProjectSetupRuntimeRecordSchema.parse>; session: ReturnType<typeof ProjectSetupSessionSchema.parse> }> {
+  runtime: ReturnType<typeof ProjectSetupRuntimeRecordSchema.parse>; session: ReturnType<typeof ProjectSetupSessionSchema.parse>; companyId: string | undefined }> {
   const token = request.headers["x-agentx-callback-capability"];
   const claims = token ? verifyProjectSetupCapability(dependencies.callbackSigningKey, token) : undefined;
   if (!claims || claims.setupExecutionId !== setupExecutionId || !claims.actions.includes(action)) throw agentXError("CALLBACK_FORBIDDEN", "setup capability does not authorize this artifact action");
@@ -8005,7 +8213,9 @@ async function requireProjectSetupCapability(
     || approval.decision !== "approve" || approval.proposalRef !== execution.data.proposalRef || approval.policyDigest !== execution.data.policyDigest) {
     throw agentXError("CALLBACK_FORBIDDEN", "current project setup approval is no longer valid");
   }
-  const member = await getItem<{ role?: unknown }>(dependencies, { pk: `MEMBER#${execution.data.ownerKey}`, sk: `PROJECT#${execution.data.projectName}` });
+  // DEC 254zzz98 (one rule): `project` is the legacy revision (requireProject), so the owner's grant is the legacy row beside it.
+  const companyId = LEGACY_REVISION_GRANT;
+  const member = await getMembership(dependencies, execution.data.ownerKey, execution.data.projectName, companyId);
   const catalogId = dependencies.projectSetupRuntimeCatalogId;
   if (member?.role !== "administrator" || !catalogId) throw agentXError("CALLBACK_FORBIDDEN", "project setup owner authority or runtime catalog is unavailable");
   const catalogItem = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName,
@@ -8018,7 +8228,7 @@ async function requireProjectSetupCapability(
     || !admitProjectSetupRuntime(runtime.data, { runtimeCatalogId: catalogId, binding: project.runtimeBinding, scope: "source-interface", now: Date.now() })) {
     throw agentXError("STALE_FENCE", "current configured setup runtime is no longer qualified");
   }
-  return { execution: execution.data, claims, runtime: runtime.data, session: session.data };
+  return { execution: execution.data, claims, runtime: runtime.data, session: session.data, companyId };
 }
 
 async function setupAdmissionMatchesExecution(
@@ -8083,7 +8293,7 @@ async function handleProjectSetupCallback(
       cleanupConfirmed: false, reportedCandidateDigest: body.candidateDigest, reportedProcessStatus: body.processStatus, reportedQualification: body.qualification,
       reportedCleanupConfirmed: body.cleanupConfirmed, parkReason: "worker-failure-without-candidate" };
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session),
+      ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session, authorized.companyId),
       { Update: { TableName: dependencies.tableName, Key: projectSetupExecutionKey(setupExecutionId),
         UpdateExpression: "SET #state = :parked, updatedAt = :now, completedAt = :now, #result = :result",
         ConditionExpression: "#state = :dispatching AND operationId = :operationId AND subjectId = :subjectId AND fence = :fence AND approvalRevision = :approvalRevision AND transportCorrelationId = :correlation",
@@ -8119,7 +8329,7 @@ async function handleProjectSetupCallback(
     throw agentXError("STALE_FENCE", "qualified setup runtime expired before terminal persistence");
   }
   const terminalItems = [
-    ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session),
+    ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session, authorized.companyId),
     { Update: { TableName: dependencies.tableName, Key: projectSetupExecutionKey(setupExecutionId),
       UpdateExpression: "SET #state = :state, completedAt = :now, #result = :result",
       ConditionExpression: "#state = :dispatching AND operationId = :operationId AND fence = :fence",
@@ -8674,6 +8884,16 @@ async function loadCurrentProjectAuthority(dependencies: AwsBrokerDependencies, 
  * The creator's current authority over the project (an unrevoked identity with a versioned direct grant or locally bound channels), which must be exactly the proof the
  * round was admitted under (`admittedProof`): a grant re-issued, a role changed or a channel rebound during the round refuses.
  */
+/**
+ * DEC 254zzz80: the creator's grant row, in the company checkProjectAccess reads it in (the creator's LIVE membership through the same reader): a named company's own
+ * partition, else the legacy row. So the proof and the transaction fence watch the very grant the access check used.
+ */
+async function creatorGrantKey(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord): Promise<{ pk: string; sk: string }> {
+  const reader = dependencies.companies ?? dependencies.developer?.companies;
+  const company = reader === undefined ? undefined : namedCompany(await resolveCompany(reader, task.developerId));
+  return grantKeyFor(company, task.developerId, task.project);
+}
+
 async function loadCurrentCreatorAuthority(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, admittedProof: unknown, mark: AuthorityMark, reject: AuthorityReject) {
   mark("creator-project-access");
   const creator = await getWorkflowE2ECreatorIdentity(dependencies, task.developerId);
@@ -8684,7 +8904,7 @@ async function loadCurrentCreatorAuthority(dependencies: AwsBrokerDependencies, 
       developer: dependencies.developer, now: Date.now },
     { developerId: task.developerId, ...(creator.slackUserId === undefined ? {} : { slackUserId: creator.slackUserId }) }, task.project);
   } catch { reject("current-creator-project-access-unavailable"); return undefined; }
-  const creatorMembershipKey = { pk: `MEMBER#${task.developerId}`, sk: `PROJECT#${task.project}` };
+  const creatorMembershipKey = await creatorGrantKey(dependencies, task);
   const creatorMembership = await getItem<Record<string, unknown>>(dependencies, creatorMembershipKey);
   const creatorAuthority = await workflowE2ECreatorAuthorityProof(dependencies, task, creatorMembership, creatorAccess);
   if (creatorAuthority === undefined || canonicalJson(admittedProof) !== canonicalJson(creatorAuthority)) { reject("creator-membership-proof-changed-or-unavailable"); return undefined; }
@@ -11424,7 +11644,7 @@ async function requireWorkflowE2ECreatorAuthority(dependencies: AwsBrokerDepende
     }
     throw agentXError("RUNTIME_UNAVAILABLE", "the original creator's current project access is unavailable");
   }
-  const creatorMembership = await getItem<Record<string, unknown>>(dependencies, { pk: `MEMBER#${task.developerId}`, sk: `PROJECT#${task.project}` });
+  const creatorMembership = await getItem<Record<string, unknown>>(dependencies, await creatorGrantKey(dependencies, task));
   const creatorAuthority = await workflowE2ECreatorAuthorityProof(dependencies, task, creatorMembership, creatorAccess);
   if (creatorAuthority === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the creator has no versioned direct or locally bound channel access proof for this E2E round");
   return creatorAuthority;
@@ -14592,10 +14812,14 @@ function clientProjectRouteDependencies(brokerDependencies_: AwsBrokerDependenci
   const clientProjects = dependencies.clientProjects; if (clientProjects === undefined) return dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads };
   const rules = { ...(dependencies.githubBindings === undefined ? {} : { bindings: dependencies.githubBindings }),
     ...(clientProjects.repositoryInstallation === undefined ? {} : { live: (url: string) => clientProjects.repositoryInstallation!(url) }) };
-  const projectExists = async (name: string) => ((await dependencies.documentClient.send(new QueryCommand({
+  const revisionIn = async (pk: string) => ((await dependencies.documentClient.send(new QueryCommand({
     TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-    ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
-  })) as { Items?: unknown[] }).Items ?? []).length > 0; const names = companyProjectNaming(projectExists, (company, name) => companyNameTaken(dependencies.documentClient, dependencies.tableName, company, name)); // L2-1
+    ExpressionAttributeValues: { ":pk": pk, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
+  })) as { Items?: unknown[] }).Items ?? []).length > 0;
+  // DEC 254zzz80: a named company's fresh id must be free in its own partition (any revision, a candidate too) as well as globally.
+  const projectExists = async (name: string, owner?: string) => await revisionIn(`PROJECT#${name}`) || (namedCompany(owner) !== undefined && await revisionIn(revisionKeyFor(owner, name, 1).pk)); const names = companyProjectNaming(projectExists, (company, name) => companyNameTaken(dependencies.documentClient, dependencies.tableName, company, name)); // L2-1
+  // DEC 254zzz80: today's global names (id == name) created for a named company are registered in its own partition, so a name it already holds there is taken too.
+  const nameTaken_ = async (owner: string | undefined, companyId: string | undefined, name: string) => await names.taken(owner, name) || (owner === undefined && namedCompany(companyId) !== undefined && await projectExists(name, companyId));
   /**
    * Guided onboarding PR 6: one project from `repositories`, for `companyId` (the caller's, from membership). Every repository is checked against the
    * company's bindings with GitHub's live answer before any token is made for any of them; one that fails refuses the whole create, in one fixed answer.
@@ -14612,7 +14836,7 @@ function clientProjectRouteDependencies(brokerDependencies_: AwsBrokerDependenci
     }
     const repositoryNames = uniqueRepositoryNames(found.map((entry) => entry.name));
     const name = options.name ?? repositoryNames[0]!; const nameOwner = names.owner(naming, companyId);
-    if (await names.taken(nameOwner, name)) throw nameTaken(name); const id = await names.idFor(nameOwner, name);
+    if (await nameTaken_(nameOwner, companyId, name)) throw nameTaken(name); const id = await names.idFor(nameOwner, name);
     const cwd = `repo/${repositoryNames[0]!}`;
     // One argument list each, split on spaces: no shell, so quotes and pipes are not interpreted. They run in the first repository.
     const command = (text: string) => { const [executable, ...args] = text.trim().split(/\s+/); return { cwd, executable: executable!, args, timeoutSeconds: 1_800 }; };
@@ -14630,11 +14854,11 @@ function clientProjectRouteDependencies(brokerDependencies_: AwsBrokerDependenci
       // Registration checks every repository's binding once more (its own budget), in the transaction's company; DEC 254zzz81: with the registration preflight on, as any other registration.
       await registerProject(dependencies, identity, { definition, runtimeBinding, preflight: true }, { githubCompany: { companyId, budget: boundedCompanyReads(dependencies.documentClient) }, ...names.claim(nameOwner, name) });
     } catch (error) {
-      if (await names.taken(nameOwner, name).catch(() => false)) throw nameTaken(name); if (nameOwner !== undefined && (error as { code?: unknown }).code === "NOT_FOUND") throw unavailable();
+      if (await nameTaken_(nameOwner, companyId, name).catch(() => false)) throw nameTaken(name); if (nameOwner !== undefined && (error as { code?: unknown }).code === "NOT_FOUND") throw unavailable();
       if ((error as { code?: unknown }).code === "CONFIG_INVALID" && /^CONFIG_INVALID: the GitHub App cannot access /.test((error as Error).message)) throw notAvailable();
       throw error;
     }
-    return { name: id, latestRevision: 1 };
+    return { name: id, latestRevision: 1, ...(companyId === undefined ? {} : { companyId }) };
   };
   const unboundRepositories = async () => { if (((dependencies.developer ?? dependencies.linking)?.companies ?? dependencies.companies) !== undefined) throw githubBindingRefusal(); return clientProjects.repositories(); }; return { // DEC 254zzz81 (CLIENT-ROUTES-BEFORE-ON 3): without the company GitHub bindings the App's installations cannot be filtered to a company: with a company layer, refused (never unfiltered); without one, as before. One line, so the line-keyed inventory sites below do not move.
     ...(dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads }), ...companyProjectCreatorOf(dependencies.githubBindings !== undefined, dependencies.companies),
@@ -14675,7 +14899,7 @@ function clientProjectRouteDependencies(brokerDependencies_: AwsBrokerDependenci
       const found = companyId === undefined ? await clientProjects.repositoryDefaults(url) : await budget.read(() => clientProjects.repositoryDefaults(url));
       const repositoryName = projectRepositoryName(found.name);
       const name = input.name ?? repositoryName; const nameOwner = names.owner(naming, companyId);
-      if (await names.taken(nameOwner, name)) throw agentXError("CONFIG_INVALID", `a project named ${name} already exists; choose another name`); const id = await names.idFor(nameOwner, name);
+      if (await nameTaken_(nameOwner, companyId, name)) throw agentXError("CONFIG_INVALID", `a project named ${name} already exists; choose another name`); const id = await names.idFor(nameOwner, name);
       const cwd = `repo/${repositoryName}`;
       // One argument list each, split on spaces: no shell, so quotes and pipes are not interpreted.
       const command = (text: string) => { const [executable, ...args] = text.trim().split(/\s+/); return { cwd, executable: executable!, args, timeoutSeconds: 1_800 }; };
@@ -14688,7 +14912,7 @@ function clientProjectRouteDependencies(brokerDependencies_: AwsBrokerDependenci
       // As the person: their developer ID owns the project, so they administer it and it is listed for them.
       const identity: AuthenticatedIdentity = { issuer: "sign-in-client", subject: developerId, ownerKey: developerId, isAdministrator: true, claims: {} };
       try { await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: true }, { githubCompany: { companyId, budget }, ...names.claim(nameOwner, name) }); } catch (error) { if (nameOwner !== undefined && await names.taken(nameOwner, name).catch(() => false)) throw nameTaken(name); if (nameOwner !== undefined && (error as { code?: unknown }).code === "NOT_FOUND") throw unavailable(); throw error; } // L2-1
-      return { name: id, latestRevision: 1 };
+      return { name: id, latestRevision: 1, ...(companyId === undefined ? {} : { companyId }) };
     },
     async createClientProjects(developerId, input, naming) {
       const commitBy = Date.now() + COMMIT_DEADLINE_MS;
@@ -14795,7 +15019,7 @@ async function getProjectModels(
 ): Promise<ProjectModelOptions> {
   const projectName = conversationProjectName(identity);
   if (!projectName) throw agentXError("FORBIDDEN", "a conversation's project binding is required");
-  const project = await requireLatestProject(dependencies, projectName);
+  const project = slackThreadOwnRow(identity, await requireLatestProject(dependencies, projectName));
   const policy = project.definition.models;
   if (!policy) throw agentXError("CONFIG_INVALID", "this project has no approved coding models; ask an administrator to configure models");
   const selection = await getItem<ProjectModelSelectionRecord>(dependencies, projectModelSelectionKey(projectName));
@@ -14821,7 +15045,7 @@ async function putProjectModel(
   const requester = identity.slack?.requester ?? (identity.channel === undefined ? undefined : channelRequester(identity.channel));
   if (!projectName || !requester) throw agentXError("FORBIDDEN", "a conversation's project binding and requester are required");
   const requested = ProjectModelSelectionRequestSchema.parse(value);
-  const project = await requireLatestProject(dependencies, projectName);
+  const project = slackThreadOwnRow(identity, await requireLatestProject(dependencies, projectName));
   const policy = project.definition.models;
   if (!policy) throw agentXError("CONFIG_INVALID", "this project has no approved coding models; ask an administrator to configure models");
   const selected = policy.approved.find((candidate) => modelKey(candidate) === modelKey(requested));
@@ -14930,14 +15154,45 @@ async function requireMembership(
   ownerKey: string,
   projectName: string,
 ): Promise<MembershipRecord> {
-  const membership = await getMembership(dependencies, ownerKey, projectName);
+  // DEC 254zzz98 (one rule; review M1, the feature 007 and connector MCP routes): a grant is read beside the revision the route reads. Every caller here (the workflow
+  // workspace routes: resolveWorkspace's requireProject, the MCP routes' requireLatestProject, the workspace actions) reads the project's LEGACY revision `PROJECT#<name>`,
+  // so the grant is the legacy `MEMBER#<person>` row, whatever company a stamped legacy row names (as requireAdministratorGrant reads it). A named company's own-partition
+  // grant never opens a legacy revision here; a named company's revoke also removes its legacy row (admin-actions.ts revokeProjectAccess).
+  const membership = await getMembership(dependencies, ownerKey, projectName, undefined);
   if (!membership) throw agentXError("NOT_FOUND", "project not found");
   return membership;
 }
 
-async function getMembership(dependencies: AwsBrokerDependencies, ownerKey: string, projectName: string) {
-  return getItem<MembershipRecord>(dependencies, { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}` });
+/** DEC 254zzz80: a person's grant row, where `companyId` keeps grants (company-layout.ts: a named company's own partition, else the legacy row). A row naming another company is none. */
+async function getMembership(dependencies: AwsBrokerDependencies, ownerKey: string, projectName: string, companyId: string | undefined) {
+  const key = grantKeyFor(companyId, ownerKey, projectName);
+  const row = await getItem<MembershipRecord>(dependencies, key);
+  const company = namedCompany(companyId);
+  return row === undefined || company === undefined || (row.pk === key.pk && row.sk === key.sk && ownPartitionRow(row as unknown as Record<string, unknown>, company)) ? row : undefined;
 }
+
+/**
+ * DEC 254zzz98 (one rule): a project's grants live where its revisions live. Where the revision's key is picked by a company (registration's `revisionKeyFor(companyId)`,
+ * a task of a named company), that company picks the grant's layout too: a NAMED company's own partition, else the legacy keys (company-layout.ts `grantKeyFor`). A LEGACY
+ * revision's grant is always the legacy row (LEGACY_REVISION_GRANT), whatever company a stamped legacy row names. No separate company-layer check here.
+ */
+/**
+ * DEC 254zzz98 (one rule; delta review M1): the grant beside a LEGACY revision (`PROJECT#<name>`, read by requireProject / requireLatestProject / the workflow paths) is the
+ * legacy `MEMBER#<person>` row, whatever company a stamped legacy row names. Every legacy-revision reader, writer and fence (workspace preparation, thread workspaces, the
+ * setup run's owner checks and terminal fence, requireMembership) keys its grant with this.
+ */
+const LEGACY_REVISION_GRANT: undefined = undefined;
+
+function grantCompany(_dependencies: AwsBrokerDependencies, companyId: string | undefined): string | undefined {
+  return companyId;
+}
+
+/** The company a stored record names (`companyId`), or undefined (unstamped: the built-in company's). */
+function storedCompanyOf(record: unknown): string | undefined {
+  const company = (record as { companyId?: unknown } | undefined)?.companyId;
+  return typeof company === "string" ? company : undefined;
+}
+
 
 /**
  * A name-only admin project route's check: the claim, the name-keyed administrator grant, then (DEC 254zzz6 D2) a refusal when a named company also has a project of
@@ -14959,7 +15214,10 @@ async function requireAdministratorGrant(
   projectName: string,
 ): Promise<void> {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-  const membership = await requireMembership(dependencies, identity.ownerKey, projectName);
+  // The name-keyed (legacy) grant, as DEC 254zzz6 D2 describes these name-only admin routes: a named company's own-partition grant is never read here, and a name a named
+  // company uses is refused by the collision check (requireAdministrator), never served.
+  const membership = await getMembership(dependencies, identity.ownerKey, projectName, undefined);
+  if (!membership) throw agentXError("NOT_FOUND", "project not found");
   if (membership.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
 }
 
@@ -15059,7 +15317,7 @@ async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity:
   if (task === undefined) throw agentXError("TASK_NOT_FOUND", `no task ${taskId}`);
   // FR-015's membership check, answered FORBIDDEN (requireAdministrator's missing-membership answer
   // is NOT_FOUND, which would read as "no such task").
-  const membership = await getMembership(dependencies, identity.ownerKey, task.project);
+  const membership = await getMembership(dependencies, identity.ownerKey, task.project, grantCompany(dependencies, storedCompanyOf(task)));
   if (membership?.role !== "administrator" || !await administratorOfTaskCompany(dependencies, identity, task)) throw agentXError("FORBIDDEN", "administrator project membership is required");
   const claimed = [identity.claims.name, identity.claims.email].find((claim): claim is string => typeof claim === "string" && claim.trim() !== "");
   return adminShareMode(
@@ -15115,7 +15373,7 @@ async function adminTaskE2EReplay(dependencies: AwsBrokerDependencies, identity:
   if (!TASK_ID_PATTERN.test(taskId)) throw agentXError("TASK_NOT_FOUND", "that is not a task ID");
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
   if (task === undefined) throw agentXError("TASK_NOT_FOUND", `no task ${taskId}`);
-  const membership = await getMembership(dependencies, identity.ownerKey, task.project);
+  const membership = await getMembership(dependencies, identity.ownerKey, task.project, grantCompany(dependencies, storedCompanyOf(task)));
   if (membership?.role !== "administrator" || !await administratorOfTaskCompany(dependencies, identity, task)) throw agentXError("FORBIDDEN", "administrator project membership is required");
   const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
   if (method === "GET") {
@@ -15183,8 +15441,9 @@ function workspaceItem(workspace: WorkspaceInstance) {
   };
 }
 
-function membershipRecord(ownerKey: string, projectName: string, role: MembershipRecord["role"]): MembershipRecord {
-  return { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}`, entityType: "MEMBERSHIP", ownerKey, projectName, role, grantId: randomUUID() };
+/** DEC 254zzz80: a named company's grant row is in its own partition (company-layout.ts); otherwise the legacy key. */
+function membershipRecord(ownerKey: string, projectName: string, role: MembershipRecord["role"], companyId?: string): MembershipRecord {
+  return { ...grantKeyFor(companyId, ownerKey, projectName), entityType: "MEMBERSHIP", ownerKey, projectName, role, grantId: randomUUID() };
 }
 
 function githubRepositoryFullName(repositoryUrl: string): string {
@@ -15837,6 +16096,20 @@ async function administratorOfTaskCompany(dependencies: AwsBrokerDependencies, i
   let companyId: string | undefined;
   try { companyId = await companies.companyOf(identity.ownerKey); } catch { return false; }
   return companyId !== undefined && recordInCompany(task, companyId);
+}
+
+/** R2-F1 review M3: the admin change plan's handlers (its revision check reads the registering company's key), for tests. */
+export function adminChangeHandlersForTests(input: AwsBrokerInput): AdminChangeHandlers {
+  const brokerInput: Omit<AwsBrokerInput, "core"> = { ...input };
+  delete (brokerInput as AwsBrokerInput).core;
+  return adminChangeHandlers(brokerDependencies(brokerInput));
+}
+
+/** R2-F1 review M3: registerProject itself, so tests drive a named company's registration (second revision, duplicate, pending candidate) directly. */
+export function registerProjectForTests(input: AwsBrokerInput, identity: AuthenticatedIdentity, value: unknown, companyId: string | undefined): ReturnType<typeof registerProject> {
+  const brokerInput: Omit<AwsBrokerInput, "core"> = { ...input };
+  delete (brokerInput as AwsBrokerInput).core;
+  return registerProject(brokerDependencies(brokerInput), identity, value, { githubCompany: { companyId, budget: boundedCompanyReads(input.documentClient) } });
 }
 
 /** Guided onboarding L2-1: the client create's dependencies, so tests can call it with per-company naming before any route does (PR 19 wires the route). */

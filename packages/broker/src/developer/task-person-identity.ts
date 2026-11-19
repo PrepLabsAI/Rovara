@@ -109,7 +109,7 @@ export interface TaskPersonWebProofReaders {
    * C4 (plan 4.2 "Add a person from the web"): the developer ids holding a grant on the project (its PROJECT_MEMBERS# rows), at most `limit` of them
    * (`complete` false when there are more). Each id is only a lead: every one is proved live before it is offered or registered. A throw: unreadable.
    */
-  projectMemberIds?(project: string, limit: number): Promise<{ ids: readonly string[]; complete: boolean }>;
+  projectMemberIds?(project: string, limit: number, companyId: string): Promise<{ ids: readonly string[]; complete: boolean }>;
 }
 
 async function currentTask(deps: TaskPersonIdentityDependencies, taskId: string): Promise<DeveloperTaskRecord> {
@@ -121,8 +121,11 @@ async function currentTask(deps: TaskPersonIdentityDependencies, taskId: string)
   return item as unknown as DeveloperTaskRecord;
 }
 
-/** The task's company, the way every stored record names it (`slackRecordScope`, `recordInCompany`): absent is the implicit company; anything malformed refuses. */
-function taskCompanyId(task: DeveloperTaskRecord): string {
+/**
+ * The task's company, the way every stored record names it (`slackRecordScope`, `recordInCompany`): absent is the implicit company; anything malformed refuses. The one helper
+ * for it: the identity check, the runtime's partition reads, the dispatch guard and the invite fence all use it (R2-F1 review round 4).
+ */
+export function taskCompanyId(task: DeveloperTaskRecord): string {
   const row = task as unknown as { companyId?: unknown; orgId?: unknown };
   if (row.companyId === null || row.orgId === null) return refuse();
   const company = OrgIdSchema.safeParse(row.companyId ?? row.orgId ?? IMPLICIT_COMPANY_ID);
@@ -565,7 +568,7 @@ export async function listTaskWebCandidates(
   if (stored.project !== task.project || stored.developerId !== task.developerId) return refuse();
   let leads: { ids: readonly string[]; complete: boolean };
   try {
-    leads = await deps.projectMemberIds(stored.project, limit);
+    leads = await deps.projectMemberIds(stored.project, limit, taskCompanyId(stored));
   } catch {
     return unavailable();
   }

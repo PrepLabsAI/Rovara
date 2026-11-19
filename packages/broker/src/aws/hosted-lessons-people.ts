@@ -85,7 +85,9 @@ export function createHostedLessonsPeople(base: HostedLessonsPeopleBase): (compa
       return use(table);
     };
     const membershipOf = (personId: string) => withTable((signIn) => membershipWithRoleFromDynamo(base.documentClient, signIn)(personId));
-    const grantOf = projectGrantRoleFromDynamo(base.documentClient, base.stateTableName);
+    // DEC 254zzz80: every grant is read in THIS company (a named company's own partition, company-layout.ts).
+    const grantRole = projectGrantRoleFromDynamo(base.documentClient, base.stateTableName);
+    const grantOf = (personId: string, project: string) => grantRole(personId, project, company);
     const checkedProject = (project: string): string => {
       if (typeof project !== "string" || !PROJECT_NAME.test(project)) return unreadable();
       return project;

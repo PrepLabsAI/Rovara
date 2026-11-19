@@ -25,6 +25,7 @@ import { visibleSlackText } from "../../support/strict-slack.js";
 import { SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { EDITS, MERGED, PLAN, PUSHED_FIX, actionIds, atPlanReview, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
 import { PAGE_ORIGIN } from "../../support/page-browser.js";
+import { taskCompanyId } from "../../../packages/broker/src/developer/task-person-identity.js";
 
 const WAITING_FOR_MERGE = "Waiting for the pull request to be merged. Review and merge it on GitHub; the task finishes when it's merged.";
 const FEEDBACK_READY = (revision: number) => `PR feedback is ready for your decision. Read it with agentx_get_pr_feedback, then approve, request changes or dismiss it with agentx_decide_pr_feedback and expected_revision ${revision}. Nothing changes in the code until you approve.`;
@@ -165,7 +166,7 @@ function actualInviteComposition(e2e: WorkflowE2E, directory: ReturnType<typeof 
       const task = e2e.db.get(`DEVTASK#${receipt.taskId}`, "META");
       const people = e2e.db.get(`DEVTASK#${receipt.taskId}`, "PEOPLE");
       const proposal = e2e.db.get(`DEVTASK#${receipt.taskId}`, `PEOPLE_PROPOSAL#${receipt.requestId}`);
-      const conditions = taskPersonInviteStateConditions({ taskId: receipt.taskId, project: stateFence.task.project,
+      const conditions = taskPersonInviteStateConditions({ taskId: receipt.taskId, companyId: taskCompanyId(stateFence.task), project: stateFence.task.project,
         teamId: receipt.teamId, actor: stateFence.actorAuthority, target: stateFence.targetAuthority });
       if (task === undefined || people === undefined || proposal === undefined
         || !isDeepStrictEqual(stateFence.task, task) || !isDeepStrictEqual(stateFence.people, people)

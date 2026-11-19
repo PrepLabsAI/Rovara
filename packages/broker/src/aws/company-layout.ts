@@ -9,8 +9,8 @@
 // The company always comes from the caller's LIVE membership (or, for a stored record, the company the record itself names), never from a request.
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  IMPLICIT_COMPANY_ID, OrgIdSchema, PROJECT_REVISION_SK_PREFIX, ProjectDefinitionSchema, memberGrantsPk, orgProjectCatalogKey, orgScoped, projectPk, projectRevisionKey,
-  type OrgId,
+  ChannelSpaceRefSchema, IMPLICIT_COMPANY_ID, channelBindingKey, channelBindingPartition, slackBindingPk, OrgIdSchema, PROJECT_REVISION_SK_PREFIX, ProjectDefinitionSchema, SLACK_CHANNEL, SlackChannelBindingSchema, memberGrantsPk, orgProjectCatalogKey, orgScoped, projectMetaKey, projectPk,
+  projectRevisionKey, readChannelBindingItem, slackBindingKey, slackBindingOf, type OrgId, type SlackChannelBinding,
 } from "@agentx/contracts";
 import { ownPartitionRow } from "./company-check.js";
 
@@ -60,12 +60,14 @@ export function projectMemberRowKeyFor(companyId: string | undefined, project: s
 
 /**
  * A named company's project's latest revision row, in the core's own order (core/task-flow/project-source.ts): the catalog row's pointer, else the newest
- * revision that is not a candidate (a setup waiting for approval). A row that does not parse as a project, or that names another company, is absent.
+ * revision that is not a candidate (a setup waiting for approval). The pointer's row is taken even when it still says `candidate`: an approved setup moves
+ * the catalog onto its candidate revision and leaves that flag on the row (core/setup-agent/apply.ts), and the core reads it the same way. A row that does
+ * not parse as a project, or that names another company, is absent.
  */
 export async function namedCompanyLatestRevisionRow(client: Client, tableName: string, company: OrgId, project: string): Promise<Record<string, unknown> | undefined> {
   const pk = projectPk(company, project);
   const usable = (row: Record<string, unknown> | undefined) =>
-    row !== undefined && row.pk === pk && row.candidate !== true && ownPartitionRow(row, company) && ProjectDefinitionSchema.safeParse(row.definition).success
+    row !== undefined && row.pk === pk && ownPartitionRow(row, company) && ProjectDefinitionSchema.safeParse(row.definition).success
     && typeof (row.definition as { revision?: unknown }).revision === "number" ? row : undefined;
   const get = async (key: Key) => (await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined)?.Item;
   const catalogKey = orgProjectCatalogKey(company, project);
@@ -83,6 +85,18 @@ export async function namedCompanyLatestRevisionRow(client: Client, tableName: s
 }
 
 /**
+ * Whether a named company's project is archived: its META row (`projectMetaKey`) says `archived`, as the core's own project source reads it
+ * (core/task-flow/project-source.ts). An archived project stays readable (so it can be restored) but takes no new work. A META row that names
+ * another company is drift and counts as archived (fail closed). The legacy layout has no archive state.
+ */
+export async function namedCompanyProjectArchived(client: Client, tableName: string, company: OrgId, project: string): Promise<boolean> {
+  const key = projectMetaKey(company, project);
+  const row = (await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined)?.Item;
+  if (row === undefined) return false;
+  return row.status === "archived" || !ownPartitionRow(row, company);
+}
+
+/**
  * The latest revision row of a project for this company: a named company's own partition (namedCompanyLatestRevisionRow), else the legacy partition's newest row
  * (unchanged: the caller still applies its own company check to it, `recordInCompany`). `projection` is passed only to the legacy read, as before.
  */
@@ -94,4 +108,46 @@ export async function latestRevisionRowFor(client: Client, tableName: string, co
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
   })) as { Items?: Array<Record<string, unknown>> } | undefined;
   return response?.Items?.[0];
+}
+
+/** The partition of a Slack team's channel bindings for this company: a NAMED company's own (`ORG#<c>#SLACK_BINDING#<team>`), else the legacy `SLACK_BINDING#<team>`. */
+export function slackChannelBindingPkFor(companyId: string | undefined, teamId: string): string {
+  const company = namedCompany(companyId);
+  return company === undefined ? channelBindingPartition(SLACK_CHANNEL, teamId) : slackBindingPk(company, teamId);
+}
+
+/** One Slack channel's binding key for this company (the ref is checked as the legacy key checks it). */
+export function slackChannelBindingKeyFor(companyId: string | undefined, teamId: string, channelId: string): Key {
+  const legacy = channelBindingKey({ channel: SLACK_CHANNEL, tenant: teamId, space: channelId });
+  const company = namedCompany(companyId);
+  return company === undefined ? legacy : slackBindingKey(company, teamId, channelId);
+}
+
+/**
+ * A Slack channel's binding for a NAMED company, from the company's own partition only: `ORG#<company>#SLACK_BINDING#<team>` / `CHANNEL#<channel>` (slackBindingKey). Absent when
+ * there is no row. A row whose key is not exactly that key, that names another team or channel, that names another company, or that does not parse, is absent too (never a guess,
+ * never another company's row). The result names the company it was read for, so a caller can tell a company-scoped binding from a legacy one.
+ */
+export async function namedCompanySlackBinding(client: Client, tableName: string, company: OrgId, teamId: string, channelId: string): Promise<(SlackChannelBinding & { companyId: OrgId }) | undefined> {
+  if (namedCompany(company) !== company) return undefined;
+  const ref = { channel: SLACK_CHANNEL, tenant: teamId, space: channelId };
+  if (!ChannelSpaceRefSchema.safeParse(ref).success) return undefined;
+  const key: Key = slackChannelBindingKeyFor(company, teamId, channelId);
+  const response = await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined;
+  const row = response?.Item;
+  if (row === undefined || row.pk !== key.pk || row.sk !== key.sk || !ownPartitionRow(row, company)) return undefined;
+  try {
+    const binding = slackBindingOf(readChannelBindingItem(ref, row)!);
+    return SlackChannelBindingSchema.safeParse(binding).success ? { ...binding, companyId: company } : undefined;
+  } catch { return undefined; }
+}
+
+/**
+ * Whether a Slack channel binding row sits at its key for this company (R2-F1 review round 3): a NAMED company's own `ORG#<company>#SLACK_BINDING#<team>` /
+ * `CHANNEL#<channel>`, else the legacy key exactly as `isChannelBindingKeyOf` checks it. A team or channel that is not a valid ref never matches.
+ */
+export function slackChannelBindingKeyMatches(item: { pk?: unknown; sk?: unknown }, companyId: string | undefined, teamId: string, channelId: string): boolean {
+  if (!ChannelSpaceRefSchema.safeParse({ channel: SLACK_CHANNEL, tenant: teamId, space: channelId }).success) return false;
+  const key = slackChannelBindingKeyFor(companyId, teamId, channelId);
+  return item.pk === key.pk && item.sk === key.sk;
 }
