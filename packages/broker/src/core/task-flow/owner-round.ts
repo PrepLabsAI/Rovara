@@ -36,7 +36,6 @@ export const WAITING_FOR_SPEND = "This task is waiting for more spend to be appr
 export const SPEND_UNKNOWN = "Rovara cannot tell what this task has spent, so it does not start more work on it. Try again in a moment.";
 export const TASK_PROJECT_GONE = (project: string): string => `project \`${project}\` no longer exists, so no new work starts on this task`;
 export const TASK_ARCHIVED = (project: string): string => `project \`${project}\` is archived; unarchive it to start new work`;
-const usd = (value: number): string => `$${value.toFixed(2)}`;
 
 /** What a host tells the actions about money. Optional: an install that holds no run limit (`ROVARA_RUN_LIMIT=0`) leaves `roundCap` out, and no round is refused for money by it (Admission still is asked). */
 export interface TaskActionsOptions {
@@ -127,6 +126,6 @@ async function requireRoomUnderCap(options: TaskActionsOptions, task: TaskRecord
   if (cap === undefined) return;
   if (cap.spentUsd === undefined || !Number.isFinite(cap.spentUsd) || !Number.isFinite(cap.limitUsd)) throw agentXError("BUDGET_EXCEEDED", SPEND_UNKNOWN);
   if (cap.spentUsd >= cap.limitUsd) {
-    throw agentXError("BUDGET_EXCEEDED", `This task has used its run limit (${usd(cap.spentUsd)} of ${usd(cap.limitUsd)}), so Rovara will not start more work on it. Start a new task.`);
+    throw agentXError("BUDGET_EXCEEDED", "This task has used its run limit, so Rovara will not start more work on it. Start a new task.");
   }
 }

@@ -61,7 +61,17 @@ describe("the Details modal (spec 014 FR-024)", () => {
     expect(all).toContain("*Model* amazon-bedrock / us.anthropic.claude-sonnet-4-6");
     expect(all).toContain("*Tools offered* 2");
     expect(all).toContain("*Tool calls* 1");
-    expect(all).toContain("*Usage* 12,345 input, 678 output, 1,000 cache-read tokens; $0.0123");
+    expect(all).toContain("*Usage* 12,345 input, 678 output, 1,000 cache-read tokens");
+  });
+
+  it.each([
+    { costUsd: 0.0123 },
+    { costUsd: 0.0123, costSource: "estimated" },
+    { costUsd: null },
+  ])("keeps token usage without money in Slack details: %j", (cost) => {
+    const all = texts(turnDetailsView(details({ usage: { ...base.usage, ...cost } }))).join("\n");
+    expect(all).toContain("*Usage* 12,345 input, 678 output, 1,000 cache-read tokens");
+    expect(all).not.toMatch(/\$|0\.0123|cost unavailable|estimated/);
   });
 
   it("lists each call with its tool, connector, outcome, duration, validation, reason and redacted arguments", () => {

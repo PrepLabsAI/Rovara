@@ -2356,7 +2356,8 @@ describe("the blocked card carries what Rovara tried and why it asks (AUTOFIX)",
     const card = h.posts.at(-1)!;
     expect(h.posts).toHaveLength(before + 1);
     expect(card.text).toContain("Reviews found 1 issue in this change.");
-    expect(card.text).toContain("Why I'm asking you:* Another automatic round would go over the $15 per-task cap on automatic fixing.");
+    expect(card.text).toContain("Why I'm asking you:* The automatic-fix limit was reached.");
+    expect(card.text).not.toContain("$15");
     // The ask arriving also queued a notice of its own: the card already carries it, so nothing more is posted.
     await h.pump();
     await h.pump();
@@ -2378,7 +2379,8 @@ describe("the blocked card carries what Rovara tried and why it asks (AUTOFIX)",
     await h.pump();
     await h.pump();
     expect(h.posts).toHaveLength(before + 2);
-    expect(h.posts.at(-1)!.text).toContain("Why I'm asking you:* Another automatic round would go over the $15 per-task cap on automatic fixing.");
+    expect(h.posts.at(-1)!.text).toContain("Why I'm asking you:* The automatic-fix limit was reached.");
+    expect(h.posts.at(-1)!.text).not.toContain("$15");
     expect(h.posts.at(-1)!.blocks?.some((block) => (block as { type: string }).type === "actions")).toBeFalsy();
     await h.pump();
     expect(h.posts).toHaveLength(before + 2);

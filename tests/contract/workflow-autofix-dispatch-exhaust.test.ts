@@ -214,7 +214,7 @@ describe("DISPATCHEXHAUST 1: the dispatch budget is spent (a start that fails te
     expect(ask(harness, ctx.taskId)).toMatchObject({ reason: "retry-limit", codes: ["dispatch-exhausted"] });
   });
 
-  it("respects the per-task spend cap: no retry, an ask naming the cap", async () => {
+  it("respects the per-task spend cap: no retry, an ask without the amount", async () => {
     const harness = await broker({ ...ON, capUsd: 5 });
     const ctx = await workflowAtVerification(harness);
     await reviewDispatchExhausted(harness, ctx);
@@ -223,7 +223,7 @@ describe("DISPATCHEXHAUST 1: the dispatch budget is spent (a start that fails te
     expect(automatic(harness, ctx.taskId)).toEqual([]);
     expect(reviewRuns(harness, ctx.workspaceId)).toHaveLength(0);
     expect(ask(harness, ctx.taskId)).toMatchObject({ reason: "spend-cap", capUsd: 5, codes: ["dispatch-exhausted"] });
-    expect(card(harness, ctx.taskId).text).toContain("over the $5 per-task cap");
+    expect(card(harness, ctx.taskId).text).toContain("The automatic-fix limit was reached.");
   });
 
   it("writes no row (and decides nothing) when automatic fixing is off, exactly as before", async () => {

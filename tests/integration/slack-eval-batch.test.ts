@@ -43,7 +43,7 @@ function batch(overrides: Partial<EvalBatchWatched> = {}): EvalBatchWatched {
 }
 
 const START_LINES = [
-  "8 runs of SEC-bench patch task: 2 tasks × 2 models × 2 repeats, with a cost cap of $20.00 (each run's ceiling is $2.00).",
+  "8 runs of SEC-bench patch task: 2 tasks × 2 models × 2 repeats.",
   "Models: `openrouter/z-ai/glm-5.3` (thinking high, via fireworks), `openrouter/minimax/minimax-m3` (thinking medium)",
   "I'll post progress here and a summary table when it ends; say `stop` in this thread to stop the batch.",
 ];
@@ -102,6 +102,7 @@ describe("the eval batch form in Slack (spec 052 FR-002)", () => {
     expect(h.posts).toEqual([[`Started eval batch \`${batchId}\`: ${START_LINES[0]}`, START_LINES[1], START_LINES[2]].join("\n")]);
     // The start message is recorded on the batch, so a redelivery knows it was posted.
     expect(h.updateEvalBatchWatch).toHaveBeenCalledWith(batchId, 0, { startPostedAt: "2026-10-02T12:00:00.000Z" });
+    for (const post of h.posts) expect(post).not.toMatch(/\$|\bUSD\b|20\.00|2\.00/);
     expect(h.ensureWorkspace).not.toHaveBeenCalled();
     expect(h.runTurn).not.toHaveBeenCalled();
   });
@@ -125,7 +126,9 @@ describe("the eval batch form in Slack (spec 052 FR-002)", () => {
   it("posts the broker's refusal with its reason (FR-003)", async () => {
     const h = formHarness({ outcome: "REFUSED", message: "the cost cap of $2 is below one run's reservation of $5.5" });
     await processSlackRequest(message(FORM), h.dependencies, { finalAttempt: false });
-    expect(h.posts).toEqual(["I couldn't start this batch: the cost cap of $2 is below one run's reservation of $5.5"]);
+    expect(h.posts[0]).toContain("cost cap");
+    expect(h.posts[0]).toContain("below one run's reservation");
+    expect(h.posts[0]).not.toMatch(/\$|\bUSD\b|5\.5|\b2\b/);
   });
 
   it("refuses a model the project does not approve, listing the approved ones, and starts nothing", async () => {
@@ -237,11 +240,10 @@ const ended = (overrides: Partial<EvalBatchWatched> = {}) => batch({
 
 const SUMMARY_TABLE = [
   "```",
-  "Model                                       Graded  Resolved  Rate (95% CI)  Failed  Cost    Per solved",
-  "openrouter/z-ai/glm-5.3 high via fireworks  4       3         75% (30-95%)   0       $6.10   $2.03",
-  "openrouter/minimax/minimax-m3 medium        3       0         0% (0-56%)     1       $8.10*  -",
+  "Model                                       Graded  Resolved  Rate (95% CI)  Failed",
+  "openrouter/z-ai/glm-5.3 high via fireworks  4       3         75% (30-95%)   0",
+  "openrouter/minimax/minimax-m3 medium        3       0         0% (0-56%)     1",
   "```",
-  "* includes runs that reported no cost, charged at their ceiling.",
   `Results: \`evals/batches/${batchId}/results.csv\` in the artifact bucket; \`agentx admin eval batch results ${batchId} --csv <path>\` downloads it.`,
 ].join("\n");
 
@@ -257,7 +259,8 @@ describe("the batch watcher's thread for a batch started from the CLI (spec 052 
       text: [`Eval batch \`${batchId}\` started from the CLI: ${START_LINES[0]}`, START_LINES[1], START_LINES[2]].join("\n"),
     });
     expect(w.events).toEqual(["open 1695700000.000001", "record 1695700000.000001", "post 1695700000.000001"]);
-    expect(w.posts[1]).toEqual({ channelId: thread.channelId, threadTs: "1695700000.000001", text: "Batch progress: 1/8 done, 1 resolved, $1.50 spent of the $20.00 cap." });
+    for (const post of w.posts) expect(post.text).not.toMatch(/\$|\bUSD\b|1\.50|20\.00|2\.00/);
+    expect(w.posts[1]).toEqual({ channelId: thread.channelId, threadTs: "1695700000.000001", text: "Batch progress: 1/8 done, 1 resolved." });
     // The thread is recorded: the next pass opens nothing more.
     w.advance(EVAL_BATCH_WATCH_POLL_MS);
     await w.once();
@@ -291,7 +294,7 @@ describe("the batch watcher's progress posts (spec 052 Task 6)", () => {
     expect(w.posts).toEqual([]);
     w.set(batchId, { finished: 1, resolved: 1, spentUsd: 1.5 });
     await w.once();
-    expect(w.posts.map((post) => post.text)).toEqual(["Batch progress: 1/8 done, 1 resolved, $1.50 spent of the $20.00 cap."]);
+    expect(w.posts.map((post) => post.text)).toEqual(["Batch progress: 1/8 done, 1 resolved."]);
     expect(w.posts[0]!.threadTs).toBe(thread.threadTs);
     // A minute later the counts change again: too soon.
     w.advance(60_000);
@@ -306,7 +309,7 @@ describe("the batch watcher's progress posts (spec 052 Task 6)", () => {
     });
     await w.once();
     expect(w.posts[1]!.text).toBe([
-      "Batch progress: 4/8 done, 3 resolved, $6.10 spent of the $20.00 cap.",
+      "Batch progress: 4/8 done, 3 resolved.",
       "`openrouter/z-ai/glm-5.3` (thinking high, via fireworks) is done: 4 runs, 3 resolved.",
     ].join("\n"));
     // The model's finish is posted once; other changes wait out the 5 minutes since the last post.
@@ -316,7 +319,7 @@ describe("the batch watcher's progress posts (spec 052 Task 6)", () => {
     expect(w.posts).toHaveLength(2);
     w.advance(EVAL_BATCH_PROGRESS_INTERVAL_MS - 60_000);
     await w.once();
-    expect(w.posts[2]!.text).toBe("Batch progress: 5/8 done, 3 resolved, $6.10 spent of the $20.00 cap.");
+    expect(w.posts[2]!.text).toBe("Batch progress: 5/8 done, 3 resolved.");
     // Unchanged counts are never posted, however long it has been.
     w.advance(EVAL_BATCH_PROGRESS_INTERVAL_MS * 3);
     await w.once();
@@ -353,7 +356,8 @@ describe("the batch watcher's summary (spec 052 FR-010, Ruling 11)", () => {
     expect(w.posts).toEqual([]);
     w.set(batchId, { resultsWritten: true, summary });
     await w.once();
-    expect(w.posts.map((post) => post.text)).toEqual([`Eval batch \`${batchId}\` is done: 8/8 runs finished, 3 resolved, $14.20 spent of the $20.00 cap.\n${SUMMARY_TABLE}`]);
+    expect(w.posts.map((post) => post.text)).toEqual([`Eval batch \`${batchId}\` is done: 8/8 runs finished, 3 resolved.\n${SUMMARY_TABLE}`]);
+    for (const post of w.posts) expect(post.text).not.toMatch(/\$|\bUSD\b|14\.20|20\.00|6\.10|8\.10|Per solved/);
     expect(w.state.get(batchId)!.watch).toMatchObject({ summaryPostedAt: "2026-10-02T12:00:00.000Z" });
     w.advance(EVAL_BATCH_WATCH_POLL_MS);
     await w.once();
@@ -364,10 +368,10 @@ describe("the batch watcher's summary (spec 052 FR-010, Ruling 11)", () => {
   it("says when a stop or the cost cap ended the batch, and how many runs did not start", async () => {
     const stopped = watcher([ended({ status: "STOPPED", finished: 5 })]);
     await stopped.once();
-    expect(stopped.posts[0]!.text.split("\n")[0]).toBe(`Eval batch \`${batchId}\` was stopped: 5/8 runs finished, 3 resolved, $14.20 spent of the $20.00 cap.`);
+    expect(stopped.posts[0]!.text.split("\n")[0]).toBe(`Eval batch \`${batchId}\` was stopped: 5/8 runs finished, 3 resolved.`);
     const capped = watcher([ended({ status: "CAPPED", finished: 6, notStarted: 2, spentUsd: 19.1 })]);
     await capped.once();
-    expect(capped.posts[0]!.text.split("\n")[0]).toBe(`Eval batch \`${batchId}\` stopped at its cost cap: 6/8 runs finished, 3 resolved, $19.10 spent of the $20.00 cap; 2 runs did not start.`);
+    expect(capped.posts[0]!.text.split("\n")[0]).toBe(`Eval batch \`${batchId}\` stopped at its cost cap: 6/8 runs finished, 3 resolved; 2 runs did not start.`);
   });
 
   it("leaves a summary another watcher claimed recently, and takes over a claim that went stale", async () => {
@@ -387,7 +391,7 @@ describe("the batch watcher fails loudly (spec 052 Task 6)", () => {
     const w = watcher([batch({ finished: 1 }), batch({ batchId: other, finished: 2 })]);
     vi.mocked(w.api.updateWatch).mockRejectedValueOnce(new Error("broker unavailable"));
     await w.once();
-    expect(w.posts.map((post) => post.text)).toEqual(["Batch progress: 2/8 done, 0 resolved, $0.00 spent of the $20.00 cap."]);
+    expect(w.posts.map((post) => post.text)).toEqual(["Batch progress: 2/8 done, 0 resolved."]);
     expect(w.logError).toHaveBeenCalledWith("eval_batch_watch.batch_failed", { batchId, error: "broker unavailable" });
   });
 
@@ -511,7 +515,7 @@ describe("the batch watcher drops a batch it cannot post for (spec 052 Ruling 24
     expect(w.slack.post).not.toHaveBeenCalled();
     w.advance(1);
     await w.once();
-    expect(w.posts.map((post) => post.text)).toEqual(["Batch progress: 1/8 done, 0 resolved, $0.00 spent of the $20.00 cap."]);
+    expect(w.posts.map((post) => post.text)).toEqual(["Batch progress: 1/8 done, 0 resolved."]);
     expect(EVAL_BATCH_FAILURE_BACKOFF_MS).toBeGreaterThanOrEqual(10 * 60_000);
   });
 
