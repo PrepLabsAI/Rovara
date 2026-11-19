@@ -97,6 +97,33 @@ describe("each side's services are seeded the same way", () => {
     expect(sides[1]!.map((bytes) => bytes.toString("utf8"))).toEqual(sides[0]!.map((bytes) => bytes.toString("utf8")));
   });
 
+  it("runs migrations before ordered seed files and commands through the round runner", async () => {
+    const migrate = { cwd: ".", executable: "alembic", args: ["upgrade", "head"], timeoutSeconds: 30 };
+    const seed = { cwd: ".", executable: "node", args: ["seed.js"], timeoutSeconds: 30 };
+    const prepared = await prepare(await repo(), [plan({ seeds: [{ command: seed }, { fixturePath: "seeds/dev.sql" }, { command: migrate }] })]);
+    for (const side of ["old", "new"] as const) {
+      const d = docker(); const commands: unknown[] = [];
+      const run = async (command: unknown) => { commands.push(command); if (command === seed) expect(d.loads).toHaveLength(0); return { exitCode: 0, timedOut: false }; };
+      await evalDatabaseSeed({ docker: d.fake, side, prepared })(started([pg]), {} as never, new AbortController().signal, run);
+      expect(commands).toEqual([migrate, seed]);
+      expect(d.loads[0]!.toString()).toBe(SEED);
+    }
+  });
+
+  it("refuses a failed migration, rollback, missing runner or timed out seed before generation", async () => {
+    const command = { cwd: ".", executable: "alembic", args: ["upgrade", "head"], timeoutSeconds: 30 };
+    const prepared = await prepare(await repo(), [plan({ seeds: [{ command }] })]);
+    for (const run of [undefined, async () => ({ exitCode: 1, timedOut: false }), async () => ({ exitCode: null, timedOut: true })]) {
+      const d = docker();
+      await expect(evalDatabaseSeed({ docker: d.fake, side: "new", prepared })(started([pg]), {} as never, new AbortController().signal, run)).rejects.toThrow(EVAL_SERVICES_FAILURE_SENTENCE);
+      expect(d.reads).toEqual([]);
+    }
+    const rollback = await prepare(await repo(), [plan({ seeds: [{ command: { ...command, args: ["downgrade", "base"] } }] })]);
+    const calls: unknown[] = [];
+    await expect(evalDatabaseSeed({ docker: docker().fake, side: "old", prepared: rollback })(started([pg]), {} as never, new AbortController().signal, async c => { calls.push(c); return { exitCode: 0, timedOut: false }; })).rejects.toThrow(EVAL_SERVICES_FAILURE_SENTENCE);
+    expect(calls).toEqual([]);
+  });
+
   it("a seed that does not load, or a stop, ends the start with the fixed sentence and never repeats Docker's words", async () => {
     const prepared = await prepare(await repo(), [plan()]);
     const failing = docker({ fail: true });
@@ -114,4 +141,13 @@ describe("each side's services are seeded the same way", () => {
     expect(d.loads).toEqual([]);
     expect(d.reads.length).toBeGreaterThan(0);
   });
+});
+
+
+it("runs command seeds for local engines without a Postgres file loader", async () => {
+  const command = { cwd: ".", executable: "node", args: ["seed-cache.js"], timeoutSeconds: 30 };
+  const prepared = await prepare(await repo(), [plan({ id: "cache", family: "redis", seeds: [{ command }] })]);
+  const calls: unknown[] = [];
+  await evalDatabaseSeed({ docker: { run: async () => { throw new Error("no SQL for Redis"); } }, side: "new", prepared })({ hosts: [], env: [], secrets: [], started: [], targets: [{ id: "cache", container: "rovara-cache", family: "redis", user: undefined, database: undefined }], unsupported: [] }, {} as never, new AbortController().signal, async c => { calls.push(c); return { exitCode: 0, timedOut: false }; });
+  expect(calls).toEqual([command]);
 });

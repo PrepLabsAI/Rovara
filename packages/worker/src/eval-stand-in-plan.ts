@@ -6,6 +6,8 @@
 // stand-in. Everything read is data (parsed, never run), within `EVAL_STAND_IN_READ_LIMITS`, never through a link.
 //
 // NEVER STOPS THE EVAL. A plan that cannot be made (no checkout, no host and no recording, an id that is not a UUID) is "no stand-in round": the eval runs exactly as it would without the switch.
+import { seedPathInRepository } from "./eval-repository-path.js";
+export { seedPathInRepository } from "./eval-repository-path.js";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, opendir, realpath, rm } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
@@ -14,11 +16,12 @@ import { parse } from "yaml";
 import { STAND_IN_ROW_GENERATOR_VERSION, STAND_IN_SET_LIMITS, evalTelemetryEntryOf, isEvalStandInPlanHost, standInPoolRoutes, standInSetDigest, standInSetVersion, type EvalStandInDescriptor, type EvalStandInPlan, type StandInWriterSet, type TaskDependencyPlan } from "@agentx/contracts";
 import { createProcessCandidateGit } from "./e2e-candidate-source.js";
 import { EVAL_STAND_IN_READ_LIMITS, EvalStandInRound, buildEvalStandInPlan, readRepositoryRecordings } from "./eval-standin-round.js";
+import { createEvalDatabaseRound, observePostgresLookups, type EvalDatabaseRound } from "./verification/eval-database-observer.js";
 import { openApiHostOf } from "./standin-readers.js";
 import type { DockerCli } from "./swebench/containers.js";
 import { readSeedFile, seedFileDigest } from "./service-seed-file.js";
 import { EVAL_SERVICES_FAILURE_SENTENCE, type EvalServicesInput } from "./verification/eval-services.js";
-import { postgresStandInDatabase, prepareStandInDatabase } from "./verification/eval-database-prep.js";
+import { postgresStandInDatabase, prepareStandInDatabase, seedCommandDigest, type StandInStep } from "./verification/eval-database-prep.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const OPENAPI_NAME = /^(?:openapi|swagger)[^/]*\.(?:ya?ml|json)$/iu;
@@ -114,26 +117,14 @@ export async function planEvalStandIns(input: {
 
 // ---- the whole preparation of one eval check: the round, the seed files and the version
 
-/**
- * The path of a seed inside ONE repository's checkout, from its workspace-relative path: the first `k` folders (k = 0 to 4) must be the last `k` folders of the repository's own directory on the worker, the rest is the path in the
- * checkout (never empty, never `..`). Undefined when the seed is not this repository's. Pure.
- */
-export function seedPathInRepository(fixturePath: string, repositoryDirectory: string): string | undefined {
-  const parts = fixturePath.split("/").filter((part) => part !== "" && part !== ".");
-  if (parts.length === 0 || parts.includes("..")) return undefined;
-  const folders = repositoryDirectory.split("/").filter((part) => part !== "");
-  for (let k = Math.min(4, parts.length - 1); k >= 0; k -= 1) {
-    const prefix = parts.slice(0, k);
-    if (k === 0 || (folders.length >= k && prefix.every((part, i) => folders[folders.length - k + i] === part))) return parts.slice(k).join("/");
-  }
-  return undefined;
-}
-
 export interface PreparedEvalStandIns {
   /** The outside-HTTP round (absent: no host and no recording, or no descriptor). */
   readonly round?: EvalStandInRound | undefined;
   /** The seed files of each local dependency (by the plan's id), read from the BASE commit once: both sides load the same bytes. */
   readonly seeds: ReadonlyMap<string, readonly Buffer[]>;
+  /** Internal preparation only: ordered commands and base seed bytes; never transported. */
+  readonly steps?: ReadonlyMap<string, readonly StandInStep[]>;
+  readonly databases?: EvalDatabaseRound;
   /** E4: the stand-in set's version for the base-cache key, or undefined when nothing is stood in. */
   readonly version?: string | undefined;
 }
@@ -159,13 +150,19 @@ export async function prepareEvalStandIns(input: {
     if (input.signal.aborted) return { seeds: new Map() };
     const planned = input.descriptor === undefined ? undefined : await planEvalStandInsFromCheckout({ descriptor: input.descriptor, checkoutRoot: checkout, workspaceId: input.workspaceId, operationId: input.operationId });
     const seeds = new Map<string, Buffer[]>();
+    const steps = new Map<string, StandInStep[]>();
     const seedDigests: string[] = [];
     const images: string[] = [];
     for (const plan of locals) {
       if (typeof plan.digest === "string" && /^[A-Za-z0-9._:/@+-]{1,2000}$/u.test(plan.digest)) images.push(plan.digest);
       const files: Buffer[] = [];
+      const ordered: StandInStep[] = [];
       for (const seed of plan.seeds) {
-        if (!("fixturePath" in seed)) continue;
+        if ("command" in seed) {
+          ordered.push({ kind: "command", command: seed.command, ...(seed.lock === undefined ? {} : { lock: seed.lock }) });
+          seedDigests.push(seedCommandDigest(seed.command));
+          continue;
+        }
         try {
           // A seed's path is WORKSPACE-relative (`<repository path>/<file>`); the checkout is this one repository. The seed belongs to this repository only when the path's folder prefix is the end of the repository's own directory
           // (so a file of another repository is never read from this tree); the rest is the path inside the checkout.
@@ -174,35 +171,45 @@ export async function prepareEvalStandIns(input: {
           const bytes = await readSeedFile({ rootPath: checkout, repositoryPaths: [checkout], hiddenPaths: [], fixturePath: inside, family: plan.family });
           // An approved plan names the content its approval bound: a file that differs is not loaded.
           if (seed.sha256 !== undefined && seed.sha256 !== seedFileDigest(bytes)) continue;
-          files.push(bytes); seedDigests.push(seedFileDigest(bytes));
+          files.push(bytes); ordered.push({ kind: "file", bytes }); seedDigests.push(seedFileDigest(bytes));
         } catch { /* no seed for this entry, on both sides */ }
       }
       if (files.length > 0) seeds.set(plan.id, files);
+      steps.set(plan.id, ordered);
     }
     const stoodIn = planned !== undefined || locals.length > 0;
     const version = !stoodIn ? undefined : (() => { try { return standInSetVersion({ images, seeds: seedDigests.slice(0, STAND_IN_SET_LIMITS.seeds), generatorVersion: STAND_IN_ROW_GENERATOR_VERSION, answerSets: planned?.answerSetDigests.slice(0, STAND_IN_SET_LIMITS.answerSets) ?? [] }); } catch { return undefined; } })();
-    return { ...(planned === undefined ? {} : { round: planned.round }), seeds, ...(version === undefined ? {} : { version }) };
+    return { ...(planned === undefined ? {} : { round: planned.round }), seeds, steps, databases: createEvalDatabaseRound(), ...(version === undefined ? {} : { version }) };
   } catch { return { seeds: new Map() }; } finally {
     if (folder !== undefined) await rm(folder, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
-/**
- * The seed step of ONE side's services (`EvalServicesInput.seed`, E3): for each started service whose family has a file loader (Postgres), the base commit's seed files in the plan's order, then generated rows for the tables
- * still empty (`prepareStandInDatabase`). The side's own database, built the same way on both sides. A failing seed ends the start with a fixed sentence (the starter retries once, then the eval is Not run). Project COMMANDS
- * (migrations, seed commands) are not run here (they need a box with the checkout on the round's network): the services start with the files and the generated rows only. Never reads a value, never throws anything but the fixed sentence.
- */
-export function evalDatabaseSeed(input: { docker: Pick<DockerCli, "execBytes" | "run">; side: "old" | "new"; prepared: Pick<PreparedEvalStandIns, "seeds"> }): NonNullable<EvalServicesInput["seed"]> {
-  return async (started, _net, signal) => {
+/** Commands run in the side's sealed checkout on its round network, then files and generated rows.
+ * The returned observer reads only this disposable database; its in-memory ledger never leaves the worker. */
+export function evalDatabaseSeed(input: { docker: Pick<DockerCli, "execBytes" | "run">; side: "old" | "new"; prepared: Pick<PreparedEvalStandIns, "seeds" | "steps" | "databases"> }): NonNullable<EvalServicesInput["seed"]> {
+  return async (started, _net, signal, runCommand) => {
+    const observers: Array<(ids: readonly string[], signal: AbortSignal) => Promise<void>> = [];
     for (const target of started.targets) {
-      if (target.family !== "postgres") continue;
       const files = input.prepared.seeds.get(target.id) ?? [];
       const database = postgresStandInDatabase({
-        docker: input.docker, target: { container: target.container, family: target.family, user: target.user, database: target.database },
-        // A project command is not run in the eval round's services: a step that is one would fail the side, so none is given (see above).
-        runCommand: async () => { throw new Error("no commands"); },
+        docker: input.docker, target,
+        runCommand: async (command, stop) => {
+          if (runCommand === undefined) throw new Error(EVAL_SERVICES_FAILURE_SENTENCE);
+          const step = input.prepared.steps?.get(target.id)?.find(s => s.kind === "command" && s.command === command);
+          return await runCommand(command, stop, step?.kind === "command" ? step.lock : undefined);
+        },
       });
-      try { await prepareStandInDatabase({ side: input.side, database, steps: files.map((bytes) => ({ kind: "file" as const, bytes })), signal }); } catch { throw new Error(EVAL_SERVICES_FAILURE_SENTENCE); }
+      try {
+        await prepareStandInDatabase({ side: input.side, database, steps: input.prepared.steps?.get(target.id) ?? files.map((bytes) => ({ kind: "file" as const, bytes })), signal });
+        const replay = input.prepared.databases?.replay(input.side, target.id);
+        if (replay !== undefined && replay.sql !== "") {
+          await database.loadSql(Buffer.from(replay.sql), signal);
+          if (await database.readText(replay.verify, signal) !== "t") throw new Error(EVAL_SERVICES_FAILURE_SENTENCE);
+        }
+      } catch { throw new Error(EVAL_SERVICES_FAILURE_SENTENCE); }
+      if (target.family === "postgres" && input.prepared.databases !== undefined) observers.push(await observePostgresLookups({ docker: input.docker, target, database, round: input.prepared.databases, side: input.side, signal }));
     }
+    if (observers.length > 0) return { observe: async (ids, stop) => { for (const observe of observers) await observe(ids, stop); } };
   };
 }

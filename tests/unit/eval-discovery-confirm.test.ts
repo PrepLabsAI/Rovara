@@ -513,9 +513,11 @@ describe("happy path: setup report -> confirm -> approval -> task -> final-check
       expect("standIns" in config).toBe(false);
       expect(contexts.at(-1)).toEqual({ side: "new", prepared: undefined });
       expect("standInSetVersion" in planned).toBe(false);
+      expect("fillMissingRows" in planned).toBe(false);
     }
     // ON: one round for the whole check (both sides share it), a version, and the services are told the prepared set.
     const on = plannedFreshEvalSandbox(host({ AGENTX_EVAL_STAND_INS: "1" }, { dependencies: undefined }), { operationId, workspaceId: "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11" }, sources.deliveredPlan, async () => undefined, async () => descriptor);
+    expect(on.fillMissingRows).toBeTypeOf("function");
     const before = configs.length;
     await pinned(() => on.sandbox.run(input("old")));
     await pinned(() => on.sandbox.run(input("new")));
@@ -525,6 +527,7 @@ describe("happy path: setup report -> confirm -> approval -> task -> final-check
     expect(oldConfig.standIns?.round.plannedHosts()).toEqual(["api.tiktok.com"]);
     expect(contexts.slice(-2).map((context) => (context as { side: string }).side)).toEqual(["old", "new"]);
     expect(await pinned(() => on.standInSetVersion!())).toMatch(/^[a-f0-9]{64}$/u);
+    expect(await pinned(() => on.fillMissingRows!({ ids: ["q1"] }))).toEqual([]);
     // A descriptor that names nothing (and no recording) is no round, and the eval runs as it did.
     const quiet = plannedFreshEvalSandbox(host({ AGENTX_EVAL_STAND_INS: "1" }, { dependencies: undefined }), { operationId, workspaceId: "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11" }, sources.deliveredPlan, async () => undefined, async () => undefined);
     await pinned(() => quiet.sandbox.run(input("new")));
