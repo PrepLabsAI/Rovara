@@ -210,7 +210,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(made.code, `${made.failure}\n${made.output}`).toBe(0);
     await ordinarySandbox(ICC_PEER, ICC_PEER_IP);
     await ordinarySandbox(ICC_CLIENT);
-    const peer = await docker("exec", "--detach", ICC_PEER, "node", "-e", "require('net').createServer(s=>s.end('peer')).listen(4567,'0.0.0.0')");
+    const peer = await docker("exec", "--detach", ICC_PEER, "node", "-e", "require('net').createServer(s=>{s.on('error',()=>{});s.end('peer')}).listen(4567,'0.0.0.0')");
     expect(peer.code, peer.stderr).toBe(0);
     for (let attempt = 0; attempt < 40; attempt += 1) {
       if ((await docker("exec", ICC_PEER, "node", "-e", connectOutcome("127.0.0.1", 4567))).stdout.trim() === "open") break;
@@ -914,7 +914,7 @@ const h=Buffer.alloc(12);m.copy(h,0,0,2);h.writeUInt16BE(nx?0x8183:0x8180,2);h.w
     await cli("start", gateway);
     // Same TCP server for the raw-IP control and local-service alias. Its external-side address is outside the internal subnet.
     await cli("create", "--name", service, "--network", outer, "--ip", rawIp, "--cap-drop", "ALL", "--user", "1000:1000", "--pull=never", APP_NODE_IMAGE, "node", "-e",
-      "require('net').createServer(s=>s.end('ready')).listen(8080,'0.0.0.0',()=>console.log('ready'))");
+      "require('net').createServer(s=>{s.on('error',()=>{});s.end('ready')}).listen(8080,'0.0.0.0',()=>console.log('ready'))");
     await cli("network", "connect", "--ip", serviceIp, inner, service);
     await cli("start", service);
     files = await createGatewayNameFiles("/worker/dns25", gatewayIp, join(root, "names"));
@@ -957,7 +957,14 @@ const h=Buffer.alloc(12);m.copy(h,0,0,2);h.writeUInt16BE(nx?0x8183:0x8180,2);h.w
   });
   it("cannot write either name-file mount, even as container root, with a passing writable-file control", async () => {
     const script = `const fs=require('fs');fs.writeFileSync('/tmp/write-control','ok');console.log('control:'+fs.readFileSync('/tmp/write-control','utf8'));for(const p of ['/etc/resolv.conf','/etc/hosts']){try{fs.appendFileSync(p,'bad');console.log(p+':WRITABLE')}catch(e){console.log(p+':'+e.code)}}`;
-    expect(await client(inner, script, "0:0")).toBe("control:ok\n/etc/resolv.conf:EROFS\n/etc/hosts:EROFS");
+    // Root with every capability dropped (no CAP_DAC_OVERRIDE) meets the file's owner and mode BEFORE the read-only mount, so the same refusal is EACCES or EROFS by who owns the bind-mounted file (the runner's user here): either one proves it cannot be
+    // written, and nothing else is accepted. What makes it not writable for ANY user is the read-only mount, which the second part reads from the container's own mount table, and the file's unchanged content below.
+    const mounts = `const fs=require('fs');for(const p of ['/etc/resolv.conf','/etc/hosts']){const line=fs.readFileSync('/proc/self/mountinfo','utf8').split('\\n').find(l=>l.split(' ')[4]===p);console.log(p+':mount-options='+(line?line.split(' ')[5]:'none'))}`;
+    const written = await client(inner, script, "0:0");
+    expect(written).toMatch(/^control:ok\n\/etc\/resolv\.conf:(EROFS|EACCES)\n\/etc\/hosts:(EROFS|EACCES)$/u);
+    expect(written).not.toContain("WRITABLE");
+    expect(await client(inner, mounts, "0:0")).toMatch(/^\/etc\/resolv\.conf:mount-options=(?:\S*,)?ro(?:,\S*)?\n\/etc\/hosts:mount-options=(?:\S*,)?ro(?:,\S*)?$/u);
+    expect(await readFile(files.hostsPath, "utf8")).toBe(`127.0.0.1 localhost\n${serviceIp} test-db\n`);
     expect(await readFile(files.resolvConfPath, "utf8")).toContain(`nameserver ${gatewayIp}\n`);
   });
 });
