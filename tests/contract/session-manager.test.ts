@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { Ec2RuntimeBinding } from "../../packages/contracts/src/session.js";
 import { SessionManager, sessionFromItem, type SessionManagerDependencies } from "../../packages/broker/src/aws/sessions.js";
+import { createSessionStepsHandler } from "../../packages/broker/src/aws/session-steps.js";
 import { sessionMachineId } from "../../packages/broker/src/aws/worker-machines/session-worker-machines.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { BINDING, COMPANY_A, COMPANY_B, createSessionMachinesWorld } from "../support/session-machines-world.js";
@@ -58,6 +59,31 @@ async function provisionToReady(sessions: SessionManager, workspaceId: string) {
 }
 
 describe("session manager: first provisioning", () => {
+  // Catches a Lambda-local first-instance cache in either recordInstance branch.
+  it.each([false, true])("one session-steps handler records each workspace/generation's own identity (typed launch: %s)", async (typed) => {
+    const { sessions, workspaceId: workspaceA } = setup();
+    const workspaceB = randomUUID();
+    const unused = () => { throw new Error("recording must not use launch/probe dependencies"); };
+    const handler = createSessionStepsHandler({
+      sessions, workerSettings: unused, invokePublicKey: unused, bootScript: unused,
+      controlPlaneUrl: "https://control.example.invalid", logGroupName: "/test/worker", ping: unused,
+    });
+    const launched = typed ? { instanceType: "m6g.large", machineFallback: null } : {};
+    await sessions.ensureSession({ workspaceId: workspaceA, binding });
+    await sessions.ensureSession({ workspaceId: workspaceB, binding });
+    await handler({ action: "recordInstance", workspaceId: workspaceA, generation: 1, instanceId: "i-aaaaaaaaaaaaaaaaa", privateIp: "10.42.0.11", ...launched });
+    await handler({ action: "recordInstance", workspaceId: workspaceB, generation: 1, instanceId: "i-bbbbbbbbbbbbbbbbb", privateIp: "10.42.0.12", ...launched });
+    expect(await sessions.get(workspaceA)).toMatchObject({ workspaceId: workspaceA, generation: 1, instanceId: "i-aaaaaaaaaaaaaaaaa", privateIp: "10.42.0.11" });
+    const recordedB = await sessions.get(workspaceB);
+    expect(recordedB).toMatchObject({ workspaceId: workspaceB, generation: 1, instanceId: "i-bbbbbbbbbbbbbbbbb", privateIp: "10.42.0.12" });
+
+    await sessions.markFailed(workspaceA, 1, "retry with a new generation");
+    await sessions.ensureSession({ workspaceId: workspaceA, binding });
+    await handler({ action: "recordInstance", workspaceId: workspaceA, generation: 2, instanceId: "i-ccccccccccccccccc", privateIp: "10.42.0.13", ...launched });
+    expect(await sessions.get(workspaceA)).toMatchObject({ workspaceId: workspaceA, generation: 2, instanceId: "i-ccccccccccccccccc", privateIp: "10.42.0.13" });
+    expect(await sessions.get(workspaceB)).toEqual(recordedB);
+  });
+
   it("keeps each workspace's session and provisioning idempotency name separate", async () => {
     const { db, sessions, startExecution, workspaceId } = setup();
     const otherWorkspaceId = randomUUID();

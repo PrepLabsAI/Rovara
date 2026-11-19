@@ -4,6 +4,7 @@
 import { generateKeyPairSync, randomUUID, sign as signBytes } from "node:crypto";
 import { AGENTX_PROTOCOL_VERSION, WorkerInvocationSchema, type Ec2RuntimeBinding, type OrgId, type WorkerInvocation } from "@agentx/contracts";
 import { SessionManager, type ProvisioningInput, type DeletionInput } from "../../packages/broker/src/aws/sessions.js";
+import { createSessionStepsHandler } from "../../packages/broker/src/aws/session-steps.js";
 import { SessionWorkerFleet, type SessionWorkerMachines, type SessionWorkerMachinesDependencies, type SessionWorkerPing } from "../../packages/broker/src/aws/worker-machines/session-worker-machines.js";
 import { workspaceCompanyReader } from "../../packages/broker/src/aws/worker-machines/workspace-company.js";
 import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
@@ -105,6 +106,19 @@ export function createSessionMachinesWorld(options: { startedAt?: number } = {})
     },
   });
 
+  // One Lambda handler serves every workspace and generation in this world.
+  // Fail if recording unexpectedly depends on boot configuration or a health probe.
+  const unusedStepDependency = () => { throw new Error("recordInstance must not use launch/probe dependencies"); };
+  const sessionSteps = createSessionStepsHandler({
+    sessions,
+    workerSettings: unusedStepDependency,
+    invokePublicKey: unusedStepDependency,
+    bootScript: unusedStepDependency,
+    controlPlaneUrl: "https://control.example.invalid",
+    logGroupName: "/test/worker",
+    ping: unusedStepDependency,
+  });
+
   // The provisioner: a volume when there is none, an instance from the launch template, then READY once the worker answers.
   async function provision(input: ProvisioningInput): Promise<void> {
     while (world.provisionerHolds) await new Promise((resolve) => setTimeout(resolve, 1));
@@ -116,7 +130,7 @@ export function createSessionMachinesWorld(options: { startedAt?: number } = {})
     const result: RunInstancesResult = { Instances: [{ InstanceId: instanceId, PrivateIpAddress: privateIp, InstanceType: input.machine?.instanceType ?? "m6g.large" }] };
     const launch = input.machine === undefined ? "RunInstance" : input.machine.chip === "x86_64" ? "RunInstanceX86" : "RunInstanceSized";
     const payload = await provisionerRecordInstancePayload(input, launch, result);
-    await sessions.markInstance(payload.workspaceId, payload.generation, payload.instanceId, payload.privateIp);
+    await sessionSteps(payload);
     await sessions.markReady(input.workspaceId, input.generation);
   }
 
