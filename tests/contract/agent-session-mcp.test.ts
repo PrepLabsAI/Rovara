@@ -76,6 +76,28 @@ it("lists hosted sessions through the HTTP client and MCP tool when money is omi
   await mcp.close();
 });
 
+describe.each(["agentx_get_session", "agentx_stop_session"])("%s hosted money visibility", (name) => {
+  it.each(["reader", "co-owner", "owner"])("accepts the %s view through the HTTP client", async (role) => {
+    const owner = role === "owner";
+    const session = sessionView({
+      status: name === "agentx_stop_session" ? "stopped" : "running",
+      cost: { payer: { kind: "member", name: "Priya" }, ...(owner ? { spentUsd: 1.25, runLimitUsd: 10, stopAtUsd: 8 } : {}) },
+      you: { level: role === "reader" ? "use" : "edit", owner, following: false, actions: ["watch", "stop"] },
+    });
+    const { mcp, calls } = await overHttp(() => Response.json({ session }));
+    try {
+      await mcp.listTools();
+      const result = await mcp.callTool({ name, arguments: { session_id: SES } });
+      expect(isError(result), text(result)).toBe(false);
+      expect(structured(result)).toMatchObject({ id: SES, status: session.status, cost: owner ? { spent_usd: 1.25, run_limit_usd: 10, stop_at_usd: 8 } : {} });
+      if (!owner) expect(structured(result).cost).toEqual({});
+      expect(calls).toEqual([{ method: name === "agentx_get_session" ? "GET" : "POST", path: `/v1/app/sessions/${SES}${name === "agentx_get_session" ? "" : "/stop"}`, query: "", body: name === "agentx_get_session" ? undefined : { requestId: REQ } }]);
+    } finally {
+      await mcp.close();
+    }
+  });
+});
+
 describe("the session tools in the list", () => {
   it("adds exactly the five session tools", async () => {
     const names = (await (await connect({})).listTools()).tools.map((tool) => tool.name);
