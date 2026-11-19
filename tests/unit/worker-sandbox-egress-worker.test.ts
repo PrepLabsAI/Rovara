@@ -121,9 +121,9 @@ describe("the task sandbox on a gateway-mode worker", () => {
     await expect(sandbox.exec(["repository-command"], {})).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     expect(repositoryExecs).toEqual(["101", "202"]);
     const before = byteExecs;
-    const target = sandbox.fileOpsTarget();
-    expect(target).toBeDefined();
-    await expect(target!.docker.execBytes!(["exec", sandbox.name, "node"], { maxStdoutBytes: 1 })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    const opsDocker = sandbox.fileOpsTarget().docker;
+    if (opsDocker?.execBytes === undefined) throw new Error("expected a Docker exec for the sandbox");
+    await expect(opsDocker.execBytes(["exec", sandbox.name, "node"], { maxStdoutBytes: 1 })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     expect(byteExecs).toBe(before);
   });
 
