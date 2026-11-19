@@ -365,7 +365,8 @@ export class ControlPlaneStack extends Stack {
     // trigger, never a third reader.
     new lambda.EventSourceMapping(this, "OutboxStreamMapping", {
       // Keep the legacy activity-index reader, excluding core company rows (no extra reader).
-      ...(naming.env === undefined ? {} : { filters: [lambda.FilterCriteria.filter({ dynamodb: { NewImage: { pk: { S: [{ "anything-but": { prefix: "ORG#" } }] } } } })] }),
+      // #1148: the legacy install too, now that it has the core engine.
+      filters: [lambda.FilterCriteria.filter({ dynamodb: { NewImage: { pk: { S: [{ "anything-but": { prefix: "ORG#" } }] } } } })],
       target: outboxPublisher,
       eventSourceArn: state.tableStreamArn!,
       startingPosition: lambda.StartingPosition.LATEST,
@@ -393,7 +394,8 @@ export class ControlPlaneStack extends Stack {
     // L4-IAMR (owner decision 2026-11-18, DEC 254zzz26), named environments only (the core engine's): the dispatcher's company-bound artifact reader (createCompanyArtifactReader, for the
     // second eval pass and the like) reads a company's stored artifacts. Read only: GetObject on the two prefixes the reader's keys live under, no List, no Put, no other prefix, no other
     // bucket. The bucket is S3-managed encrypted (no KMS key), so no kms grant. Every read is still checked in code against company, workspace owner and the ARTIFACT row.
-    if (naming.env !== undefined) {
+    // #1148: the legacy install (production) too, with the core engine.
+    {
       dispatcher.addToRolePolicy(new iam.PolicyStatement({ sid: DISPATCHER_ARTIFACTS_READ_SID, actions: ["s3:GetObject"], resources: DISPATCHER_ARTIFACTS_READ_PREFIXES.map((prefix) => artifacts.arnForObjects(prefix)) }));
     }
     // EC2 workers (#76): the idle reaper and reconciler find sessions by state through this sparse index.
@@ -418,8 +420,9 @@ export class ControlPlaneStack extends Stack {
       sortKey: { name: "webhookRecoverySk", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
-    // Lane E2 step 4: the core's outbox relay reads its pending messages through this sparse index (only a core outbox row carries `outboxState`). Named environments only.
-    if (naming.env !== undefined) {
+    // Lane E2 step 4: the core's outbox relay reads its pending messages through this sparse index (only a core outbox row carries `outboxState`). #1148: the legacy install too
+    // (an in-place index add on its State table; empty until the core writes an outbox row).
+    {
       if (OUTBOX_PENDING_INDEX.sortAttribute === undefined) throw new Error("the outbox pending index has a sort key");
       state.addGlobalSecondaryIndex({
         indexName: OUTBOX_PENDING_INDEX.name,
@@ -1092,11 +1095,12 @@ export class ControlPlaneStack extends Stack {
       } else chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
       addBrokerName(broker, naming, "chatGptConnectionKey", chatGptConnectionKey.keyId, chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
-      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, ...(naming.env === undefined ? {} : { coreBroker: broker }), controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
+      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, coreBroker: broker, controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
       if (companySignIn !== undefined) companySignIn.addTo(notifier.function);
       // Migration plan v3.2 lane E2: the core engine's switch (stack parameter CoreEngine, default off), its dispatch queue and its scheduled jobs (core-engine.ts).
       // Named environments only: the legacy (production) template has none of it, and this block now also runs for the legacy deployment.
-      if (naming.env !== undefined) new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env, broker, dispatcher, notifyOperator });
+      // #1148: the legacy install (production) too, under "production", with CoreEngine off by default.
+      new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env ?? "production", broker, dispatcher, notifyOperator });
       // Lane T6 (DEFERRED T6-SECRETS-IAM-20261114-v2): the role the broker will assume for one company's secrets; nothing assumes it yet. #1129: the legacy deployment
       // (production) too, its secrets under agentx/production/.
       {
@@ -1106,7 +1110,8 @@ export class ControlPlaneStack extends Stack {
       // L4-SE6 (owner-approved 2026-11-18): the saved environment images' registry side: ONE repository creation template for `rovara-env/<env>` and the three roles (push, pull, manage) that trust only
       // the broker. Named environments only (the legacy template is unchanged). It publishes the output contract (briefs/lead4/L4-SE-OUTPUT-CONTRACT.md) and gives the broker the three role ARNs and the prefix; the broker gets no new policy statement
       // (the trust names its role and the boundary allows the AssumeRole). Nothing assumes a role until the broker's switch is on.
-      if (naming.env !== undefined) new SavedEnvImages(this, "SavedEnvImages", { env: naming.env, brokerRole: broker.role! }).expose(this, broker);
+      // #1148: the legacy install too (its repositories under rovara-env/production; the feature stays off until SavedEnvironments is on).
+      new SavedEnvImages(this, "SavedEnvImages", { env: naming.env ?? "production", brokerRole: broker.role! }).expose(this, broker);
       // Spec 025 A13: the admin health route reads the environment's alarms, by name, and
       // the depths of its dead-letter queues. Read-only, and on exactly these resources.
       const alarmPrefix = naming.alarmName("");
@@ -1267,7 +1272,8 @@ export class ControlPlaneStack extends Stack {
     const foundationParameter = (name: string) => (this.node.findChild(name) as CfnParameter).valueAsString;
     // DEC 254z-amend3: the session steps read the test services switch whole (named environments, where CoreEngine declares it): on, a launch's boot configuration carries `testServices`.
     // DEC 254zm: and whether the starter copies are in place; only with both does a launch carry `testServices` (aws/hosted-test-services.ts).
-    if (naming.env !== undefined) {
+    // #1148: the legacy install too, now that CoreEngine declares these there.
+    {
       sessions.steps.addEnvironment(TEST_SERVICES_SETTING_VARIABLE, foundationParameter(TEST_SERVICES_PARAMETER));
       sessions.steps.addEnvironment(TEST_SERVICE_IMAGES_SETTING_VARIABLE, foundationParameter(TEST_SERVICE_IMAGES_PARAMETER));
       // L4-NETG (DEC 254zzz77): how a worker host's sandboxes and devcontainers reach the internet. `bridge` (the default) is today's behaviour; `gateway` walls them behind the host's egress gateway and a launch carries
@@ -1394,9 +1400,9 @@ export class ControlPlaneStack extends Stack {
     sessions.connectDispatcher(dispatcher);
     sessions.connectBroker(broker);
     if (naming.env !== undefined) broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [sessions.deleter.stateMachineArn, swebenchStateMachineArn] }));
-    // Lane E2 step 4: the dispatcher is the core dispatch queue's consumer (named environments only: the core engine construct exists only there, so the legacy template is unchanged).
+    // Lane E2 step 4: the dispatcher is the core dispatch queue's consumer (#1148: in the legacy install too, ENABLED only while CoreEngine is not off).
     const coreEngine = this.node.tryFindChild("CoreEngineJobs");
-    if (naming.env !== undefined && coreEngine instanceof CoreEngine) {
+    if (coreEngine instanceof CoreEngine) {
       coreEngine.connectDispatcher(dispatcher, {
         deleterArn: sessions.deleter.stateMachineArn, callbackSigningKeySecret: { secretName: callbackSigningKeySecretName, secretArn: callbackSigningKeySecret.secretArn },
         workerSubnets: foundationParameter("Ec2WorkerSubnets"), workerLaunchTemplateId: foundationParameter("Ec2WorkerLaunchTemplateId"),

@@ -156,9 +156,9 @@ describe("the lessons reflection queue (L4-SQS, B3c)", () => {
     for (const statement of sqs) expect(list(statement.Action)).not.toContain("sqs:SendMessage");
   });
 
-  it("is not in the legacy template, which keeps its queues, its policies and its variables", () => {
-    expect(JSON.stringify(legacy)).not.toMatch(/lessons-reflect|REFLECT_QUEUE|LessonsReflect/u);
-    expect(resourcesOf(legacy, "AWS::SQS::Queue").some(([, resource]) => /reflect/u.test(String(resource.Properties.QueueName)))).toBe(false);
+  it("is in the legacy template too since #1148 (the core engine there), under production's fixed names", () => {
+    const names = resourcesOf(legacy, "AWS::SQS::Queue").map(([, resource]) => String(resource.Properties.QueueName));
+    expect(names).toEqual(expect.arrayContaining(["agentx-production-lessons-reflect", "agentx-production-lessons-reflect-dead"]));
   });
 
   describe("widening mutants fail the exact check", () => {

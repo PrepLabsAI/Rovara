@@ -252,8 +252,8 @@ export type DerivedBrokerVariable =
 /**
  * #1149: the legacy install (production, the un-named template) packs its broker's names and settings as a named environment does, with AGENTX_ENV=production, but its resources
  * are not named the way a named environment's are. So its broker derives only the variables marked `legacy`: those whose derivation for "production" is exactly the value the
- * legacy install has always passed (infra/lib/broker-names.ts checks it at synthesis). Every other derived variable is either passed whole by the legacy template or, as before,
- * not set at all; a derivation never adds one.
+ * legacy install has always passed (infra/lib/broker-names.ts checks it at synthesis), and (#1148) what the core engine brought there under the same fixed names: its dispatch and
+ * lessons queues, the attention email's sender and the company reads. Every other derived variable is either passed whole by the legacy template or not set at all.
  */
 export const LEGACY_INSTALL_LAYOUT = "legacy";
 
@@ -270,13 +270,13 @@ export const DERIVED_BROKER_VARIABLES: readonly DerivedBrokerVariable[] = [
   { variable: "CHANNEL_ADAPTER_SECRET_PREFIX", kind: "text", value: environmentChannelAdapterSecretPrefix, legacy: true },
   // DEC 254h (room for GitHub sign-in): every named broker has the company reads on (infra/lib/developer-signin.ts, hosted wiring (d)); a named environment always deploys the
   // tasks, so the value is the same for every name, and the broker sets it itself. The legacy install, which is never packed, is given none, as before.
-  { variable: "COMPANY_READS", kind: "text", value: () => "enabled" },
+  { variable: "COMPANY_READS", kind: "text", value: () => "enabled", legacy: true },
   // Core switch-on lane L1a: the core dispatch queue and its dead letters have fixed names (core-engine-infra.ts), so the broker builds their URLs; nothing is passed.
-  { variable: CORE_DISPATCH_QUEUE_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchQueueName },
-  { variable: CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchDeadLetterName },
+  { variable: CORE_DISPATCH_QUEUE_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchQueueName, legacy: true },
+  { variable: CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchDeadLetterName, legacy: true },
   // L4-SQS (journey audit B3c): the lessons reflection queue and its dead letters, fixed names too (core-engine-infra.ts): derived, so the broker's 4 KB grows by nothing.
-  { variable: CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, kind: "queueUrl", queueName: coreLessonsReflectQueueName },
-  { variable: CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, kind: "queueUrl", queueName: coreLessonsReflectDeadLetterName },
+  { variable: CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, kind: "queueUrl", queueName: coreLessonsReflectQueueName, legacy: true },
+  { variable: CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, kind: "queueUrl", queueName: coreLessonsReflectDeadLetterName, legacy: true },
   // Web task channel C8 (option b): the attention email's sender function has a fixed name, so the broker builds it; nothing is passed (the function exists only while the email is on).
-  { variable: ATTENTION_EMAIL_FUNCTION_VARIABLE, kind: "text", value: coreAttentionEmailFunctionName },
+  { variable: ATTENTION_EMAIL_FUNCTION_VARIABLE, kind: "text", value: coreAttentionEmailFunctionName, legacy: true },
 ];

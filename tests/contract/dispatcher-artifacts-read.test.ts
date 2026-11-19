@@ -121,12 +121,12 @@ describe("the dispatcher's read of company artifacts (L4-IAMR)", () => {
     expect(JSON.stringify(dispatcherStatements(namedJson))).not.toContain("kms:Decrypt");
   });
 
-  it("leaves the legacy template as it was: only the admission read", () => {
+  it("gives the legacy template the same read since #1148 (the core engine there): the admission read and the company artifact reader, nothing else", () => {
     const statements = dispatcherStatements(legacyJson);
-    expect(statements.some((statement) => statement.Sid === DISPATCHER_ARTIFACTS_READ_SID)).toBe(false);
-    expect(JSON.stringify(legacyJson)).not.toContain("/workspaces/*");
+    expect(statements.filter((statement) => statement.Sid === DISPATCHER_ARTIFACTS_READ_SID)).toHaveLength(1);
     const touching = statements.filter((statement) => list(statement.Action).some((action) => /^s3:/u.test(String(action))));
-    expect(touching).toEqual([admissionStatement(legacyJson)]);
+    expect(touching).toHaveLength(2);
+    expect(touching).toContainEqual(admissionStatement(legacyJson));
   });
 
   describe("widening mutants fail the exact check", () => {

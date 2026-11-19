@@ -88,8 +88,9 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
       "/agentx/production/worker-prompt-cache-retention",
     ]);
     // Spec 064: the legacy deployment's developer sign-in key, for account linking.
+    // #1148: and the core engine's task-token and policy-hook keys.
     expect(all("AWS::KMS::Alias").map((r) => r.Properties.AliasName).sort()).toEqual([
-      "alias/agentx/developer-tokens", "alias/agentx/production-workspaces", "alias/agentx/production/invoke-signing",
+      "alias/agentx/developer-tokens", "alias/agentx/production-workspaces", "alias/agentx/production/invoke-signing", "alias/agentx/production/policy-questions", "alias/agentx/production/task-tokens",
     ]);
     const logGroups = all("AWS::Logs::LogGroup").map((r) => r.Properties.LogGroupName).filter((name) => typeof name === "string");
     expect(logGroups).toContain("/agentx/production/worker");

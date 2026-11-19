@@ -49,9 +49,10 @@ describe("hosted Slack control-plane infrastructure", () => {
   it("lets the dispatcher read only the immutable E2E admission objects, to hold a reference's kind to its admission", () => {
     const statements = statementsForRole(template, "DispatcherServiceRole");
     const reads = statements.filter((statement) => actionsOf(statement).some((action) => action === "s3:GetObject*" || action === "s3:GetObject"));
-    expect(reads).toHaveLength(1);
-    expect(JSON.stringify(reads[0]!.Resource)).toContain("/workflow-e2e-admissions/*");
-    expect(actionsOf(reads[0]!).some((action) => /Put|Delete/.test(action))).toBe(false);
+    // #1148: plus the core engine's company-bound artifact reader (DISPATCHER_ARTIFACTS_READ_SID), read only.
+    expect(reads).toHaveLength(2);
+    expect(JSON.stringify(reads.map((statement) => statement.Resource))).toContain("/workflow-e2e-admissions/*");
+    for (const read of reads) expect(actionsOf(read).some((action) => /Put|Delete/.test(action))).toBe(false);
     const dispatcher = Object.values(template.findResources("AWS::Lambda::Function")).find((fn) => JSON.stringify(fn).includes("MAX_DISPATCH_ATTEMPTS")) as { Properties: { Environment: { Variables: Record<string, unknown> } } };
     expect(dispatcher.Properties.Environment.Variables).toHaveProperty("ARTIFACT_BUCKET_NAME");
   });
@@ -271,8 +272,9 @@ describe("control-plane infrastructure", () => {
 
     // Broker, outbox publisher, dispatcher, Slack ingress, the EC2 session steps (#83), idle
     // reaper (#85) and reconciler (#86), the eval batch tick (spec 052), and the channel API and its event sender
-    // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064).
-    template.resourceCountIs("AWS::Lambda::Function", 12);
+    // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064). #1148: and the core engine's attention email sender
+    // (which exists only while CoreAttentionEmail is on).
+    template.resourceCountIs("AWS::Lambda::Function", 13);
     expect(json).not.toContain("ZipFile");
     expect(json).not.toContain("not packaged");
     expect(json).toContain("STATE_TABLE_NAME");
@@ -317,8 +319,8 @@ describe("control-plane infrastructure", () => {
     const stack = new ControlPlaneStack(app, "LoggedControlPlane");
     const template = Template.fromStack(stack);
 
-    // One per Lambda, plus the EC2 session provisioner's and deleter's (#83).
-    template.resourceCountIs("AWS::Logs::LogGroup", 14);
+    // One per Lambda, plus the EC2 session provisioner's and deleter's (#83). #1148: the attention email sender's too.
+    template.resourceCountIs("AWS::Logs::LogGroup", 15);
     template.allResourcesProperties("AWS::Logs::LogGroup", {
       RetentionInDays: 30,
     });
@@ -554,8 +556,9 @@ describe("Slack interactivity infrastructure (spec 014)", () => {
     template.hasOutput("SlackInteractivityUrl", {});
     // Broker, outbox publisher, dispatcher, Slack ingress, the EC2 session steps (#83), idle
     // reaper (#85) and reconciler (#86), the eval batch tick (spec 052), and the channel API and its event sender
-    // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064).
-    template.resourceCountIs("AWS::Lambda::Function", 12);
+    // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064). #1148: and the core engine's attention email sender
+    // (which exists only while CoreAttentionEmail is on).
+    template.resourceCountIs("AWS::Lambda::Function", 13);
   });
 });
 

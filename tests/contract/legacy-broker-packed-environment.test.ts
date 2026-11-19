@@ -5,7 +5,8 @@ import { loadBrokerNamesParameter } from "../../packages/broker/src/aws/broker-n
 
 // #1149: production's (the legacy template's) broker packs its environment as a named environment does, with NO change to what the broker runs with. This synthesizes the legacy
 // control plane, fills every CloudFormation value in with a stand-in physical name, runs the broker's own boot (the names parameter read, then hydrateBrokerEnvironment) and pins
-// the result: exactly the 45 variables production's broker had before #1149 (as live on 2026-11-19), each rebuilt to the value the old template gave it, plus the packing's own six.
+// the result: exactly the 45 variables production's broker had before #1149 (as live on 2026-11-19), each rebuilt to the value the old template gave it, plus the packing's own six,
+// plus (#1148) what the core engine brought, its switch off.
 
 /** The variables production's broker had before #1149 (AgentXControlPlane, 2026-11-19), every one of them passed whole. */
 const BEFORE = [
@@ -20,6 +21,14 @@ const BEFORE = [
 ];
 /** What packing adds, and nothing else: the account (ARNs and URLs are built from it), the names parameter's pointer and revision (and the names read from it), the settings, and the layout. */
 const PACKING = ["AGENTX_ACCOUNT_ID", "AGENTX_INSTALL_LAYOUT", "AGENTX_NAMES", "AGENTX_NAMES_PARAMETER", "AGENTX_NAMES_REVISION", "AGENTX_SETTINGS"];
+/** #1148: what the core engine brought to the legacy install, on purpose: its switches and model settings, its queues and attention email (derived), the keys and the saved environments' roles. */
+const CORE = [
+  "ATTENTION_EMAIL_FUNCTION_NAME", "COMPANY_READS", "CORE_DISPATCH_DEAD_LETTER_URL", "CORE_DISPATCH_QUEUE_URL", "CORE_LESSONS_REFLECT_DEAD_LETTER_URL", "CORE_LESSONS_REFLECT_QUEUE_URL",
+  "POLICY_HOOK_KEY_ARN", "ROVARA_ATTENTION_EMAIL", "ROVARA_CORE_AGENT_MODEL", "ROVARA_CORE_AGENT_MODEL_CHOICE", "ROVARA_CORE_ALLOWED_COMPANIES", "ROVARA_CORE_ANSWERS_MODEL",
+  "ROVARA_CORE_COMPANY_DAY_CAP_USD", "ROVARA_CORE_ENGINE", "ROVARA_CORE_LEARNING_MODEL", "ROVARA_CORE_LESSONS", "ROVARA_CORE_MODEL_GATEWAY_URL", "ROVARA_CORE_SYSTEM_RUNS",
+  "ROVARA_CORE_TASK_CAP_USD", "ROVARA_POLICY_HOOK", "ROVARA_SAVED_ENVIRONMENTS", "ROVARA_SAVED_ENV_MANAGE_ROLE_ARN", "ROVARA_SAVED_ENV_PULL_ROLE_ARN", "ROVARA_SAVED_ENV_PUSH_ROLE_ARN",
+  "ROVARA_SAVED_ENV_REPO_PREFIX", "ROVARA_TEST_SERVICES", "ROVARA_TEST_SERVICES_HOSTED_IMAGES", "TASK_TOKEN_KEY_ARN",
+];
 
 const REGION = "us-east-1", ACCOUNT = "944937319445";
 type Json = Record<string, unknown>;
@@ -100,7 +109,7 @@ describe("production's broker, packed (#1149)", () => {
       const { env, reads, parameterName } = await bootedBroker(template, { CompanySignIn: companySignIn, CompanySelfServe: companySignIn });
       expect(parameterName).toBe("/agentx/production/broker-names");
       expect(reads).toEqual(["/agentx/production/broker-names"]);
-      expect(Object.keys(env).sort()).toEqual([...BEFORE, ...PACKING].sort());
+      expect(Object.keys(env).sort()).toEqual([...BEFORE, ...PACKING, ...CORE].sort());
       expect(env.AGENTX_INSTALL_LAYOUT).toBe("legacy");
       expect(env.AGENTX_ENV).toBe("production");
       expect(env.COMPANY_SIGNIN).toBe(companySignIn);
@@ -122,9 +131,12 @@ describe("production's broker, packed (#1149)", () => {
     }, 120_000);
   }
 
-  it("derives nothing production did not have (no metrics namespace, connector prefix, company reads, core queues or attention email)", async () => {
+  it("derives nothing a named environment's name would decide differently (no metrics namespace, connector prefix or AI navigation prefix), and the core's queues under production's names", async () => {
     const { env } = await bootedBroker(template, {});
-    for (const variable of ["AGENTX_METRICS_NAMESPACE", "CONNECTOR_SECRET_PREFIX", "AGENTX_E2E_AGENT_SETTINGS_PREFIX", "COMPANY_READS", "CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL",
-      "CORE_LESSONS_REFLECT_QUEUE_URL", "CORE_LESSONS_REFLECT_DEAD_LETTER_URL", "ATTENTION_EMAIL_FUNCTION_NAME"]) expect(env[variable], variable).toBeUndefined();
+    for (const variable of ["AGENTX_METRICS_NAMESPACE", "CONNECTOR_SECRET_PREFIX", "AGENTX_E2E_AGENT_SETTINGS_PREFIX"]) expect(env[variable], variable).toBeUndefined();
+    expect(env.CORE_DISPATCH_QUEUE_URL).toBe("https://sqs.us-east-1.amazonaws.com/944937319445/agentx-production-core-dispatch");
+    expect(env.CORE_LESSONS_REFLECT_QUEUE_URL).toBe("https://sqs.us-east-1.amazonaws.com/944937319445/agentx-production-lessons-reflect");
+    expect(env.ATTENTION_EMAIL_FUNCTION_NAME).toBe("agentx-production-attention-email");
+    expect(env.ROVARA_CORE_ENGINE).toBe("off");
   }, 120_000);
 });
