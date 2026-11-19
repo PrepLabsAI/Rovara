@@ -22,7 +22,8 @@ const secretOf = (template: typeof named, name: string) => Object.entries(templa
 
 const READERS = {
   named: ["Broker", "EvalBatchTick", "SessionsReconciler"],
-  legacy: ["Broker", "EvalBatchTick"],
+  // #1131: production's reconciler signs stuck-cancel retries and the idle Slack backstop's cancels too.
+  legacy: ["Broker", "EvalBatchTick", "SessionsReconciler"],
 };
 const roleIdOf = (template: typeof named, logicalPrefix: string): string => {
   const [, fn] = functions(template).find(([id]) => new RegExp(`^${logicalPrefix}[0-9A-F]{8}$`, "u").test(id))!;

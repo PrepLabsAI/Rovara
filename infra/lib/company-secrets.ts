@@ -1,5 +1,5 @@
 // Company separation for secrets (lane T6; DEFERRED T6-SECRETS-IAM-20261114-v2): the role the broker assumes, tagged with ONE company, to read and write that company's secrets.
-// Named environments only: the legacy template has none of it. Nothing assumes it yet (the T6 code that does is a later step); it is created now so the IAM can be reviewed, simulated and
+// The legacy deployment (production) has it too since #1129. Nothing assumes it yet (the T6 code that does is a later step); it is created now so the IAM can be reviewed, simulated and
 // previewed before any staging run.
 //
 // The shape, and why:
@@ -29,7 +29,7 @@ export const COMPANY_SECRET_FAMILIES = ["org-connectors", "org-hooks"] as const;
 export const COMPANY_SECRET_USE_ACTIONS = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret", "secretsmanager:PutSecretValue"] as const;
 
 export interface CompanySecretsProps {
-  /** The environment's name (a named environment only). */
+  /** The environment's name ("production" for the legacy deployment). */
   readonly env: string;
   /** The broker's role: the only principal that may assume the role. */
   readonly brokerRole: iam.IRole;
