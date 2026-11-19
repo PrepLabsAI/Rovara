@@ -32,7 +32,7 @@ type Setup = Awaited<ReturnType<typeof setup>>;
 async function setup(options: { fake: FakeDockerCli; imagePullRetryMs?: number; deadlineMs?: number; recipeBuild?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeBuild"];
   recipeStart?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeStart"]; runRoot?: string; role?: "owner" | "viewer"; probe?: Parameters<typeof createOrdersExecutorPlan>[0]["probe"]; mock?: boolean; mockReadyMs?: number;
   onRunOutput?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["onRunOutput"]>; fixture?: OrdersExecutorFixture; ownedFiles?: Record<string, string>;
-  modelChannel?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["modelChannel"]> }) {
+  modelChannel?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["modelChannel"]>; buildEgress?: { network: string; dns: string }; buildDns?: string[] }) {
   const fixture: OrdersExecutorFixture = options.fixture ?? createOrdersExecutorPlan({ probe: options.probe ?? "web-csv-positive-v1", ...(options.mock ? { mock: true } : {}), ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}),
     ...(options.recipeBuild ? { recipeBuild: options.recipeBuild } : {}), ...(options.recipeStart ? { recipeStart: options.recipeStart } : {}), ...(options.role ? { role: options.role } : {}) });
   const source = await temp("candidate-source-"); await writeFile(join(source, "package.json"), "{}");
@@ -41,7 +41,7 @@ async function setup(options: { fake: FakeDockerCli; imagePullRetryMs?: number; 
   const assembleCollectionInputs = vi.fn<(input: unknown) => never>(() => collectionSentinel as never);
   const host = createDockerApplicationHost({ docker: options.fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, now: () => Date.now(),
     admission: fixture.plan.admission, groupId: fixture.plan.groupId, candidateSourceDir: source, appPollMs: 10, deadlineGraceMs: 60, ...(options.mockReadyMs ? { mockReadyMs: options.mockReadyMs } : {}), assemble, assembleCollectionInputs, ...(options.imagePullRetryMs ? { imagePullRetryMs: options.imagePullRetryMs } : {}),
-    ...(options.onRunOutput ? { onRunOutput: options.onRunOutput } : {}), ...(options.ownedFiles ? { ownedFiles: options.ownedFiles } : {}), ...(options.modelChannel ? { modelChannel: options.modelChannel } : {}) });
+    ...(options.onRunOutput ? { onRunOutput: options.onRunOutput } : {}), ...(options.ownedFiles ? { ownedFiles: options.ownedFiles } : {}), ...(options.modelChannel ? { modelChannel: options.modelChannel } : {}), ...(options.buildEgress ? { buildEgress: options.buildEgress } : {}), ...(options.buildDns ? { buildDns: options.buildDns } : {}) });
   const { compiled, plan } = fixture;
   const binding = plan.admission.round.groupBindings[0]!;
   const ref = compiled.runtimeAdmissionContext.selectionInput.intent.applicationRuntimeRefs[0]!;
@@ -219,6 +219,49 @@ describe("docker application host", () => {
     expect(fake.buildTimeouts().slice(1)).toEqual([45_000, 60_000]);
     // The app runs the built tree, and the network was created before anything used it.
     expect(fake.calls.findIndex((args) => args[0] === "network" && args[1] === "create")).toBeLessThan(fake.calls.indexOf(builds[0]!));
+  });
+
+  // Lane L4-NETG2 (DEC 254zzz90): on a gateway-mode worker the build commands run on the gateway's internal network with the gateway as name server, and the run's own `rvb*` bridge is never made.
+  describe("buildEgress (a gateway-mode worker)", () => {
+    const egress = { network: "rovara-snet", dns: "172.28.250.2" };
+    it("runs every build command on the gateway network with the gateway as its only name server, makes no rvb build network, and still gives the source copy no network", async () => {
+      const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep, buildEgress: egress }); fake.onExecutor = okOutput(s);
+      await runWith(s);
+      const builds = fake.calls.filter((args) => args[0] === "run" && args[args.indexOf("--name") + 1]!.startsWith("rovara-build-"));
+      expect(builds).toHaveLength(3);
+      for (const args of builds) {
+        const index = Number(args[args.indexOf("--name") + 1]!.split("-").at(-1));
+        expect(args.filter((value, at) => args[at - 1] === "--network")).toEqual([index === 0 ? "none" : egress.network]);
+        if (index === 0) expect(args).not.toContain("--dns");
+        else expect(args.filter((value, at) => args[at - 1] === "--dns")).toEqual([egress.dns]);
+        expect(args).toEqual(expect.arrayContaining(["--cap-drop=ALL", "--security-opt", "no-new-privileges"]));
+        expect(args.join(" ")).not.toContain(`rovara-e2e-build-${s.runId}`);
+      }
+      // Only the run's internal network exists: no build bridge was created.
+      expect(fake.calls.filter((args) => args[0] === "network" && args[1] === "create").map((args) => args.at(-1))).toEqual([e2eRunNetworks(s.runId).internal]);
+      expect(fake.calls.some((args) => args.some((value) => /^com\.docker\.network\.bridge\.name=rvb/u.test(value)))).toBe(false);
+    });
+    it("buildDns (trusted fixture builds on a gateway-mode worker) keeps the run's own build bridge and adds only --dns for each resolver; invalid values are refused", async () => {
+      const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep, buildDns: ["10.42.0.2", "169.254.169.253"] }); fake.onExecutor = okOutput(s);
+      await runWith(s);
+      const builds = fake.calls.filter((args) => args[0] === "run" && args[args.indexOf("--name") + 1]!.startsWith("rovara-build-") && !args[args.indexOf("--name") + 1]!.endsWith("-0"));
+      expect(builds.length).toBeGreaterThan(0);
+      for (const args of builds) {
+        expect(args[args.indexOf("--network") + 1]).toBe(`rovara-e2e-build-${s.runId}`);
+        expect(args.filter((value, at) => args[at - 1] === "--dns")).toEqual(["10.42.0.2", "169.254.169.253"]);
+      }
+      for (const bad of [["--privileged"], ["10.0.0.1 --privileged"], ["a", "b", "c", "d"].map(() => "10.0.0.1")]) await expect(setup({ fake: new FakeDockerCli(), buildDns: bad })).rejects.toThrow(/name servers/u);
+    });
+    it("without it (a laptop, qualification, a bridge-mode worker) the build commands keep the run's own build bridge and no --dns", async () => {
+      const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep }); fake.onExecutor = okOutput(s);
+      await runWith(s);
+      const builds = fake.calls.filter((args) => args[0] === "run" && args[args.indexOf("--name") + 1]!.startsWith("rovara-build-") && !args[args.indexOf("--name") + 1]!.endsWith("-0"));
+      expect(builds.length).toBeGreaterThan(0);
+      for (const args of builds) { expect(args[args.indexOf("--network") + 1]).toBe(`rovara-e2e-build-${s.runId}`); expect(args).not.toContain("--dns"); }
+    });
+    it.each([{ network: "--privileged", dns: "172.28.250.2" }, { network: "rovara-snet", dns: "dns.example.com" }, { network: "a b", dns: "172.28.250.2" }, { network: "rovara-snet", dns: "172.28.250.2 --privileged" }, { network: "", dns: "172.28.250.2" }])("refuses a build egress that could become a docker option (%j)", async (bad) => {
+      await expect(setup({ fake: new FakeDockerCli(), buildEgress: bad })).rejects.toThrow(/build egress/u);
+    });
   });
 
   it("puts builds and the app on bridges with fixed names the host firewall keys on, labels both networks and removes both", async () => {

@@ -10,6 +10,10 @@
 #   - rovara-xnet (bridge rvx0): the way out of the gateway alone.
 #   - rovara-egw: the egress gateway (the laptop's program, "host" mode: contracts egress-gateway-source.ts). On both networks. It is the sandboxes' only name server and forwards HTTPS by the name in the TLS hello to PUBLIC
 #     addresses it resolved itself, for the names the install's VPC resolver (the DNS firewall's allow lists) answers, EXCEPT the push-capable registries (contracts sandbox-deny-domains.ts), which only the sandbox side loses.
+# BUILDS (lane L4-NETG2, DEC 254zzz90): the dev container's IMAGE BUILD (`docker build`: Dockerfile RUN, features' install.sh) and the verifier's contained E2E build commands run task-controlled code too. They now join rovara-snet as well:
+#   - the wrapper (devcontainer-docker.sh) puts `--network rovara-snet` on `docker build` (the classic builder takes a named network; buildx cannot, so the wrapper refuses it) and the verifier puts `--network rovara-snet --dns <gateway>` on its build containers
+#     (verifier docker-application-host.ts `buildEgress`). A `docker build` has no `--dns` option, so the DAEMON's default name server is the gateway (`"dns"` in /etc/docker/daemon.json, written and activated here): a build container on rovara-snet then asks the gateway.
+#   - Docker's default bridge (docker0) and the old `agentx-task` bridge are walled: nothing forwarded from them, nothing to the host. What still runs on docker0 is trusted and needs no network (the saved-environment builder: `FROM scratch`, `--network none`).
 # The HOST's own Docker, the worker container (`--network host`), the sealed rvi*/rvb* test-service and check networks, and Rovara's own services are unchanged: the host keeps registry access for its image pulls.
 #
 # FAIL CLOSED: unlike the test-services stage, any failure here FAILS THE BOOT (`fail`): the worker never starts with sandboxes that could still reach the internet some other way. After a reboot or a Docker restart a unit puts the
@@ -30,13 +34,67 @@ readonly SE_OUTER_BRIDGE=rvx0
 readonly SE_OUTER_SUBNET=172.28.251.0/24
 readonly SE_OUTER_IP=172.28.251.2
 readonly SE_NODE=/usr/local/bin/node
+# Where the worker (never a sandbox: no sandbox mounts this folder, and it is not under the workspace) publishes the exact S3 hosts the project's allowed websites lifted from the sandbox S3 deny, at every prepare. Owned by the worker's user,
+# read-only in the gateway. On the root volume, so a stop and start keeps it; the restore unit makes the folder again before the gateway starts. A missing or unreadable file means no lift (the S3 stays denied).
+readonly SE_ALLOW_DIR=/var/lib/rovara-egress
+readonly SE_ALLOW_FILE=/var/lib/rovara-egress/project-allow.json
 readonly SE_PROGRAM_BYTES_MIN=20000
+
+readonly SE_FIREWALL=/usr/local/libexec/rovara-container-firewall
+readonly SE_DAEMON_JSON=/etc/docker/daemon.json
+readonly SE_TASK_NETWORK=agentx-task
+readonly SE_WORKER_DNS_FILE=/etc/agentx/worker-dns
+
+# The host's own resolvers, one per line (the VPC resolver; systemd-resolved's loopback stub is no use inside a container).
+se_host_resolvers() { awk '$1=="nameserver"&&$2~/^[0-9.]+$/&&$2!~/^127\./{print $2}' /etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null | sort -u || true; }
+# The worker container runs on the HOST network, so the daemon's default name server (the gateway) would be its only one, and the host has no route to it: the worker's launcher (boot.sh) gives it `--dns` for each line of this file.
+se_worker_dns() {
+  local resolvers
+  resolvers=$(se_host_resolvers) && [[ -n "$resolvers" ]] || return 1
+  # (/etc/agentx exists: boot.sh made it for the launcher; only the file is made here, so the directory keeps its mode.)
+  install -m 0644 /dev/null "$SE_WORKER_DNS_FILE" && printf '%s\n' "$resolvers" >"$SE_WORKER_DNS_FILE"
+}
+# The gateway is the Docker DAEMON's default name server. A container with its own `--dns` is not affected; a container that has none (a `docker build` step, which has no such option) asks the gateway, which is reachable only from rovara-snet: on any other
+# network (docker0, a stale bridge) a name lookup now fails, which is the point. Idempotent. Docker is restarted only when the file changes, then the container firewall is put back (a restart rebuilds Docker's chains).
+se_daemon_dns_is() { grep -q "\"dns\": \[\"${SE_INNER_IP//./\\.}\"\]" "$SE_DAEMON_JSON" 2>/dev/null; }
+se_daemon_dns() {
+  local content
+  se_daemon_dns_is && return 0
+  grep -q '"dns"' "$SE_DAEMON_JSON" 2>/dev/null && return 1
+  cp -p "$SE_DAEMON_JSON" "$SE_DAEMON_JSON.before-sandbox-egress" || return 1
+  # The file is one JSON object (boot.sh and the test-services stage write it so); the key goes in right after the opening brace. Anything else is left alone and the boot fails.
+  content=$(<"$SE_DAEMON_JSON")
+  if [[ "${content//[[:space:]]/}" == "{}" ]]; then printf '{"dns": ["%s"]}\n' "$SE_INNER_IP" >"$SE_DAEMON_JSON"
+  elif [[ "$content" == \{* ]]; then printf '%s\n' "{\"dns\": [\"$SE_INNER_IP\"], ${content:1}" >"$SE_DAEMON_JSON"
+  else mv -f "$SE_DAEMON_JSON.before-sandbox-egress" "$SE_DAEMON_JSON"; return 1; fi
+  if se_daemon_dns_is && systemctl restart docker.service && bash "$SE_FIREWALL" && se_after_restart_walls && se_docker_ready; then rm -f "$SE_DAEMON_JSON.before-sandbox-egress"; return 0; fi
+  mv -f "$SE_DAEMON_JSON.before-sandbox-egress" "$SE_DAEMON_JSON"
+  systemctl reset-failed docker.service 2>/dev/null || true
+  systemctl restart docker.service
+  return 1
+}
+# A Docker restart may rebuild Docker's chains. The test-services stage (boot.sh sources it, so its functions are defined here when it ran) walls the rvi bridges from each other and closes them on IPv6; put those back.
+se_after_restart_walls() {
+  declare -F ts_wall_run_networks >/dev/null || return 0
+  ts_run_walls_present || ts_wall_run_networks || return 1
+  ! declare -F ts_wall_ipv6 >/dev/null || ts_wall_ipv6 || true
+}
+se_docker_ready() { local i; for i in 1 2 3 4 5 6 7 8 9 10; do docker info >/dev/null 2>&1 && return 0; sleep 2; done; return 1; }
+
+# The bridge interface of the old `agentx-task` network, when one is left from a bridge-mode session (the data root lives on the workspace volume): br-<first 12 characters of the network id>. Empty when there is none.
+se_task_bridge() {
+  local id
+  id=$(docker network inspect --format '{{.Id}}' "$SE_TASK_NETWORK" 2>/dev/null) || return 0
+  [[ "$id" =~ ^[a-f0-9]{12,} ]] && printf 'br-%s' "${id:0:12}"
+  return 0
+}
 
 # One rule, once: -C finds it, else -I puts it at the top.
 se_rule() { local tool=$1; shift; "$tool" -C "$@" 2>/dev/null || "$tool" -I "$@"; }
 
 # The walls around the two networks (the same shape as the rvb*/rvi* walls of wall_off_containers, which this does not touch). Idempotent; also run by the restore unit after a reboot or a Docker restart.
 #   rvs+  (sandboxes): nothing leaves the bridge (DROP anything forwarded to another interface), and nothing reaches a service of the host (INPUT).
+#   docker0 and the old agentx-task bridge (gateway mode only, scope 4.2.2): nothing is forwarded from them and nothing reaches a service of the host. Task code no longer runs there: sandboxes and dev containers are on rvs0, builds too.
 #   rvx+  (the gateway's way out): the private ranges and the metadata range are dropped, except the host's own resolvers on port 53 (the VPC resolver is a private address); the host's INPUT is dropped.
 # The metadata address stays dropped for every container by wall_off_containers' own rule.
 se_walls() {
@@ -50,6 +108,12 @@ se_walls() {
     for proto in udp tcp; do se_rule iptables DOCKER-USER -i rvx+ -d "$resolver" -p "$proto" --dport 53 -j RETURN || return 1; done
   done
   se_rule iptables INPUT -i rvx+ -j DROP || return 1
+  for bridge in docker0 "$(se_task_bridge)"; do
+    [[ -n "$bridge" ]] || continue
+    se_rule iptables DOCKER-USER -i "$bridge" -j DROP || return 1
+    se_rule iptables INPUT -i "$bridge" -j DROP || return 1
+    ! command -v ip6tables >/dev/null || se_rule ip6tables INPUT -i "$bridge" -j DROP || echo "ip6tables $bridge rule failed" >&2
+  done
   for bridge in rvs+ rvx+; do
     ! command -v ip6tables >/dev/null || se_rule ip6tables INPUT -i "$bridge" -j DROP || echo "ip6tables $bridge rule failed" >&2
   done
@@ -86,28 +150,44 @@ se_program() {
 se_denied_names() {
   se_image_node "import { SANDBOX_REGISTRY_DENY as d } from '@agentx/contracts'; process.stdout.write(d.join('\n'))"
 }
-# The gateway's configuration: host mode, its two networks, and the deny list (each name checked here too: lower-case letters, digits, dots, hyphens and a `*` label).
-se_config() {
-  local names=() name list=""
-  # The list has no newline after its last name (`|| [[ -n $name ]]` keeps that last line).
+se_denied_s3_names() {
+  se_image_node "import { SANDBOX_S3_DENY as d } from '@agentx/contracts'; process.stdout.write(d.join('\n'))"
+}
+# Each name is checked here too (lower-case letters, digits, dots, hyphens and `*` labels), and a list that is too short to be the list refuses.
+se_name_list() {
+  local min=$1 name list="" count=0
   while IFS= read -r name || [[ -n "$name" ]]; do
     [[ "$name" =~ ^(\*\.)?[a-z0-9*]([a-z0-9*.-]{0,250}[a-z0-9*])?$ ]] || return 1
-    names+=("$name")
-  done < <(se_denied_names)
-  ((${#names[@]} >= 10)) || return 1
-  for name in "${names[@]}"; do list+="${list:+,}\"$name\""; done
-  printf '{"mode":"host","sandboxDenied":[%s],"nets":{"sandbox":"%s","external":"%s"}}' "$list" "$SE_INNER_SUBNET" "$SE_OUTER_SUBNET"
+    list+="${list:+,}\"$name\""
+    count=$((count + 1))
+  done
+  ((count >= min)) || return 1
+  printf '%s' "$list"
 }
+# The gateway's configuration: host mode, its two networks, the hard deny list (registries), the S3 deny list (lifted host by host from the project file) and where that file is.
+se_config() {
+  local hard soft
+  hard=$(se_denied_names | se_name_list 10) || return 1
+  soft=$(se_denied_s3_names | se_name_list 10) || return 1
+  printf '{"mode":"host","sandboxDenied":[%s],"sandboxDeniedS3":[%s],"projectAllowFile":"%s","nets":{"sandbox":"%s","external":"%s"}}' "$hard" "$soft" "$SE_ALLOW_FILE" "$SE_INNER_SUBNET" "$SE_OUTER_SUBNET"
+}
+# The folder for the project file: the worker's user owns it (the worker container writes it), nothing else can.
+se_allow_dir() { install -d -o 1000 -g 1000 -m 0700 "$SE_ALLOW_DIR"; }
 
 # The gateway container: no capability (it binds 53, 80 and 443 only because the namespace's unprivileged port start is 53), read-only, bounded, no forwarding, restarted by Docker if it dies. Created on the outer network, joined to the
 # inner one at a fixed address, then started (so the program finds both its addresses).
 se_gateway() {
-  local program config
+  local program config resolver dns=()
+  # The gateway asks the host's own resolvers (the VPC resolver), by name: the daemon's default name server is the gateway itself, which would loop.
+  # (Loopback stubs such as systemd-resolved's 127.0.0.53 are no use inside a container; the real resolver is in /run/systemd/resolve/resolv.conf.)
+  for resolver in $(se_host_resolvers); do dns+=(--dns "$resolver"); done
+  ((${#dns[@]} > 0)) || return 1
   program=$(se_program) && ((${#program} >= SE_PROGRAM_BYTES_MIN)) && [[ "$program" == '"use strict";'* ]] || return 1
   config=$(se_config) || return 1
+  se_allow_dir || return 1
   docker rm --force "$SE_GATEWAY" >/dev/null 2>&1 || true
   docker create --name "$SE_GATEWAY" --label rovara.sandbox-egress=gateway --restart unless-stopped \
-    --network "$SE_OUTER_NET" --ip "$SE_OUTER_IP" --user 1000:1000 \
+    --network "$SE_OUTER_NET" --ip "$SE_OUTER_IP" "${dns[@]}" --user 1000:1000 --volume "$SE_ALLOW_DIR:$SE_ALLOW_DIR:ro" \
     --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
     --sysctl net.ipv4.ip_forward=0 --sysctl net.ipv4.ip_unprivileged_port_start=53 --pids-limit 512 --memory 512m \
     --env "ROVARA_GW_CONFIG=$config" --entrypoint "$SE_NODE" "$AGENTX_WORKER_IMAGE" -e "$program" >/dev/null || return 1
@@ -124,7 +204,7 @@ se_gateway_running() {
 readonly SE_PROBE='
 const dns = require("dns"), net = require("net");
 const resolver = new dns.promises.Resolver({ timeout: 4000, tries: 2 });
-resolver.setServers([process.argv[1]]);
+if (process.argv[1] !== "default") resolver.setServers([process.argv[1]]);
 const done = (ok, why) => { console.log(JSON.stringify({ ok, why })); process.exit(ok ? 0 : 1); };
 resolver.resolve4("ghcr.io").then(() => done(false, "a registry name resolved"), (error) => {
   if (error.code !== "ENOTFOUND") return done(false, "the gateway did not answer: " + error.code);
@@ -136,14 +216,19 @@ resolver.resolve4("ghcr.io").then(() => done(false, "a registry name resolved"),
 });'
 se_probe() {
   timeout --foreground --kill-after=10s "$(try_seconds 60)s" docker run --rm --network "$SE_INNER_NET" --dns "$SE_INNER_IP" --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 \
-    --entrypoint "$SE_NODE" "$AGENTX_WORKER_IMAGE" -e "$SE_PROBE" "$SE_INNER_IP" >/dev/null
+    --entrypoint "$SE_NODE" "$AGENTX_WORKER_IMAGE" -e "$SE_PROBE" "$SE_INNER_IP" >/dev/null || return 1
+  # The same from a container with NO `--dns` of its own, as a docker build step is: its name server is the daemon's default, which must be the gateway (a daemon that was not restarted on the new file fails here).
+  timeout --foreground --kill-after=10s "$(try_seconds 60)s" docker run --rm --network "$SE_INNER_NET" --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 \
+    --entrypoint "$SE_NODE" "$AGENTX_WORKER_IMAGE" -e "$SE_PROBE" default >/dev/null
 }
 
 # After a reboot or a Docker restart: the walls and the gateway again, before the worker starts. Any miss exits non-zero, and the worker (which Requires this unit) does not start.
 se_install_restore_unit() {
   { printf 'readonly SE_GATEWAY=%s SE_INNER_NET=%s SE_OUTER_NET=%s\n' "$SE_GATEWAY" "$SE_INNER_NET" "$SE_OUTER_NET"
-    declare -f se_rule se_walls se_gateway_running
-    printf 'se_walls || exit 1\n'
+    declare -f se_rule se_task_bridge se_walls se_gateway_running se_daemon_dns_is se_allow_dir
+    printf 'readonly SE_DAEMON_JSON=%s SE_INNER_IP=%s SE_TASK_NETWORK=%s SE_ALLOW_DIR=%s\n' "$SE_DAEMON_JSON" "$SE_INNER_IP" "$SE_TASK_NETWORK" "$SE_ALLOW_DIR"
+    printf 'se_daemon_dns_is || exit 1\n'
+    printf 'se_walls || exit 1\nse_allow_dir || exit 1\n'
     printf 'se_gateway_running || { docker start "$SE_GATEWAY" >/dev/null 2>&1; sleep 3; }\n'
     printf 'se_gateway_running || exit 1\n'
   } >"$SE_RESTORE" || return 1
@@ -167,10 +252,16 @@ UNIT
 }
 
 sandbox_egress_main() {
+  BOOT_STEP="make the gateway the Docker name server"
+  se_daemon_dns || fail "could not make the sandbox egress gateway the Docker daemon's default name server"
+  BOOT_STEP="give the worker the host's resolvers"
+  se_worker_dns || fail "could not give the worker container the host's name servers"
   BOOT_STEP="wall the sandbox network"
   se_walls || fail "could not wall the sandbox network off from the host and private networks"
   BOOT_STEP="make the sandbox networks"
   se_ensure_network "$SE_INNER_NET" true true "$SE_INNER_BRIDGE" "$SE_INNER_SUBNET" || fail "could not make the internal sandbox network"
+  # A stale `agentx-task` network is removed when nothing holds it; if one does, the wall above (by its bridge) still holds.
+  docker network rm "$SE_TASK_NETWORK" >/dev/null 2>&1 || true
   se_ensure_network "$SE_OUTER_NET" false "" "$SE_OUTER_BRIDGE" "$SE_OUTER_SUBNET" || fail "could not make the gateway's outer network"
   BOOT_STEP="start the sandbox egress gateway"
   se_gateway || fail "could not start the sandbox egress gateway"
