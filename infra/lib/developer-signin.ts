@@ -427,8 +427,9 @@ export class DeveloperSignIn extends Construct {
     broker.addEnvironment("DEVELOPER_OIDC_ISSUER", p.oidcIssuer.valueAsString);
     addBrokerSetting(broker, props.naming, "signInSlackSince", p.slackSince.valueAsString);
     addBrokerSetting(broker, props.naming, "oidcSince", p.oidcSince.valueAsString);
-    // DEC 254zg (a): the broker's COMPANY_SIGNIN (packed), from the same switch. #1129: the legacy broker takes the variable whole, so it gets "enabled" or "disabled".
-    if (company !== undefined) addBrokerSetting(broker, props.naming, "companySignIn", named ? company.flag : company.value);
+    // DEC 254zg (a): the broker's COMPANY_SIGNIN (packed, a switch flag "1" or "0" the broker reads as "enabled" or "disabled"), from the same switch. #1149: the legacy broker packs
+    // it too, so it gets the flag as well (it took the variable whole, "enabled" or "disabled", since #1129).
+    if (company !== undefined) addBrokerSetting(broker, props.naming, "companySignIn", company.flag);
     if (tasks !== undefined) {
       addBrokerSetting(broker, props.naming, "mcpConfirmElicitation", tasks.mcpConfirmElicitation.valueAsString);
       // Hosted wiring (d), named environments only: the company audit and event reads (the /v1/dev/client/* routes are always on since DEC 254zzz81). Membership is read from

@@ -1,13 +1,14 @@
 // The broker's environment, compacted in a named environment (ENV-ROOM; core switch-on blocker, 2026-11-15). packages/contracts/src/broker-environment.ts
 // says what is packed, what is derived and why; packages/broker/src/aws/broker-environment.ts puts it back. Since ENV-ROOM 2 (2026-11-17) the packed names are written to one SSM
-// String parameter, not the function's environment, and packages/broker/src/aws/broker-handler.ts reads them before the broker loads. The legacy install passes every variable whole, as before: its
-// template does not change.
+// String parameter, not the function's environment, and packages/broker/src/aws/broker-handler.ts reads them before the broker loads. Since #1149 the legacy install (production) packs
+// its broker's environment the same way, under LEGACY_BROKER_ENV, with a layout marker so it derives only values identical to its own; a role's ARN and a value that would derive
+// differently stay whole.
 import { createHash } from "node:crypto";
 import { Aws, CfnParameter, Fn, Lazy, Stack, Token } from "aws-cdk-lib";
 import { aws_ssm as ssm, type aws_lambda as lambda } from "aws-cdk-lib";
 import {
   BROKER_ACCOUNT_VARIABLE, BROKER_NAMES, BROKER_NAMES_PARAMETER_VARIABLE, BROKER_NAMES_REVISION_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, BROKER_SETTING_VALUE,
-  DERIVED_BROKER_VARIABLES, brokerNamesParameterName, encodeBrokerNamesParameterPrefix, type BrokerNameKey, type BrokerSettingKey,
+  DERIVED_BROKER_VARIABLES, LEGACY_INSTALL_LAYOUT, brokerNamesParameterName, encodeBrokerNamesParameterPrefix, type BrokerNameKey, type BrokerSettingKey,
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 
@@ -123,10 +124,12 @@ class BrokerEnvironment {
   readonly settings: PackedList<BrokerSettingKey>;
   private written?: { revision: string; value: string };
   private readonly stack: Stack;
+  private readonly legacy: boolean;
 
-  private constructor(broker: lambda.Function, env: string | undefined) {
+  private constructor(broker: lambda.Function, env: string | undefined, legacy: boolean) {
     const stack = Stack.of(broker);
     this.stack = stack;
+    this.legacy = legacy;
     this.names = new PackedList<BrokerNameKey>(stack, "the broker's name", (key) => BROKER_NAMES[key].code, LITERAL_NAME);
     this.settings = new PackedList<BrokerSettingKey>(stack, "the broker's setting", (key) => BROKER_SETTINGS[key].code, BROKER_SETTING_VALUE);
     if (env !== undefined) {
@@ -147,6 +150,8 @@ class BrokerEnvironment {
       (broker.node.defaultChild as lambda.CfnFunction).addDependency(parameter);
       // The read grant is this parameter's ARN (brokerNamesParameterArn) in the broker's one ssm:GetParameters statement (control-plane.ts): no path reads, no history, no other parameter.
     }
+    // #1149: the legacy install's broker says so, so it derives only the variables identical to its own (contracts LEGACY_INSTALL_LAYOUT).
+    if (legacy) this.settings.add("installLayout", LEGACY_INSTALL_LAYOUT);
     broker.addEnvironment(BROKER_SETTINGS_VARIABLE, Lazy.string({ produce: () => this.settings.joined() }));
   }
 
@@ -160,35 +165,50 @@ class BrokerEnvironment {
     return this.written;
   }
 
-  static of(broker: lambda.Function, env: string | undefined): BrokerEnvironment {
+  static of(broker: lambda.Function, env: string | undefined, legacy = false): BrokerEnvironment {
     const existing = BrokerEnvironment.byBroker.get(broker);
-    if (existing !== undefined) return existing;
-    const created = new BrokerEnvironment(broker, env);
+    if (existing !== undefined) {
+      if (existing.legacy !== legacy) throw new Error("the broker's environment is packed once, as one layout");
+      return existing;
+    }
+    const created = new BrokerEnvironment(broker, env, legacy);
     BrokerEnvironment.byBroker.set(broker, created);
     return created;
   }
 }
 
+/** #1149: the name the legacy install's (production's) packed broker environment is under: its names parameter is brokerNamesParameterName of it, and AGENTX_ENV is it. */
+export const LEGACY_BROKER_ENV = "production";
+
+/** #1149: the broker's packed environment, a named environment's own or, for the legacy install, under LEGACY_BROKER_ENV with the legacy layout marker. */
+function packedBroker(broker: lambda.Function, naming: AgentXNaming): BrokerEnvironment {
+  return naming.env === undefined ? BrokerEnvironment.of(broker, LEGACY_BROKER_ENV, true) : BrokerEnvironment.of(broker, naming.env);
+}
+
+/** The environment name the broker's packed names are under: a named environment's own, or the legacy install's LEGACY_BROKER_ENV (#1149). */
+export function brokerEnvironmentName(naming: AgentXNaming): string {
+  return naming.env ?? LEGACY_BROKER_ENV;
+}
+
 /**
- * A name the broker reads as `BROKER_NAMES[key].variable`. Named environment: `bare` (the name or id CloudFormation gives the resource) goes in AGENTX_NAMES and the broker builds
- * the variable's value from it. Legacy: the variable is `whole`, as it always was.
+ * A name the broker reads as `BROKER_NAMES[key].variable`: `bare` (the name or id CloudFormation gives the resource) goes in AGENTX_NAMES and the broker builds the variable's
+ * value from it. #1149: the legacy install packs its names too, except a role's ARN, which the broker would build with a named environment's role path (/agentx/<env>/) that the
+ * legacy install's roles do not have: that one stays `whole`, as it always was.
  */
 export function addBrokerName(broker: lambda.Function, naming: AgentXNaming, key: BrokerNameKey, bare: string, whole: string): void {
-  if (naming.env === undefined) broker.addEnvironment(BROKER_NAMES[key].variable, whole);
-  else BrokerEnvironment.of(broker, naming.env).names.add(key, bare);
+  if (naming.env === undefined && BROKER_NAMES[key].kind === "roleArn") broker.addEnvironment(BROKER_NAMES[key].variable, whole);
+  else packedBroker(broker, naming).names.add(key, bare);
 }
 
-/** The broker's dead-letter queues for the health route: named, each queue's name in AGENTX_NAMES; legacy, the one JSON variable of URLs, as before. */
-export function addBrokerDeadLetterQueues(broker: lambda.Function, naming: AgentXNaming, queues: ReadonlyArray<readonly [BrokerNameKey, { queueName: string; queueUrl: string }]>, legacyJson: () => string): void {
+/** The broker's dead-letter queues for the health route: each queue's name in AGENTX_NAMES (the legacy install's too since #1149; the broker rebuilds the same JSON of URLs). */
+export function addBrokerDeadLetterQueues(broker: lambda.Function, naming: AgentXNaming, queues: ReadonlyArray<readonly [BrokerNameKey, { queueName: string; queueUrl: string }]>): void {
   for (const [key] of queues) if (BROKER_NAMES[key].kind !== "deadLetterQueue") throw new Error(`the broker's name ${key} is not a dead-letter queue`);
-  if (naming.env === undefined) broker.addEnvironment("HEALTH_DEAD_LETTER_QUEUES", legacyJson());
-  else for (const [key, queue] of queues) BrokerEnvironment.of(broker, naming.env).names.add(key, queue.queueName);
+  for (const [key, queue] of queues) packedBroker(broker, naming).names.add(key, queue.queueName);
 }
 
-/** A constrained setting the broker reads as `BROKER_SETTINGS[key].variable`: named, in AGENTX_SETTINGS; legacy, the variable whole. */
+/** A constrained setting the broker reads as `BROKER_SETTINGS[key].variable`, in AGENTX_SETTINGS (the legacy install's too since #1149). */
 export function addBrokerSetting(broker: lambda.Function, naming: AgentXNaming, key: BrokerSettingKey, value: string): void {
-  if (naming.env === undefined) broker.addEnvironment(BROKER_SETTINGS[key].variable, value);
-  else BrokerEnvironment.of(broker, naming.env).settings.add(key, value);
+  packedBroker(broker, naming).settings.add(key, value);
 }
 
 /** Add a setting to the packed list on any named Lambda without adding the broker-only name/account variables. */
@@ -198,10 +218,16 @@ export function addPackedSetting(fn: lambda.Function, key: BrokerSettingKey, val
 
 /**
  * A variable the broker derives from the environment's name (DERIVED_BROKER_VARIABLES). Named: nothing is passed, and synthesis stops unless the derivation gives exactly `value`,
- * the value this would have passed (so the code and the infrastructure cannot drift apart). Legacy: the variable whole.
+ * the value this would have passed (so the code and the infrastructure cannot drift apart). #1149, legacy: nothing is passed only where the entry is marked `legacy` and its
+ * derivation for LEGACY_BROKER_ENV is exactly `value`; otherwise the variable whole, as before (the broker derives nothing else for the legacy layout).
  */
 export function addDerivedBrokerVariable(broker: lambda.Function, naming: AgentXNaming, variable: string, value: string): void {
-  if (naming.env === undefined) { broker.addEnvironment(variable, value); return; }
+  if (naming.env === undefined) {
+    const legacyEntry = DERIVED_BROKER_VARIABLES.find((candidate) => candidate.variable === variable);
+    if (legacyEntry?.kind === "text" && legacyEntry.legacy === true && !Token.isUnresolved(value) && legacyEntry.value(LEGACY_BROKER_ENV) === value) packedBroker(broker, naming);
+    else broker.addEnvironment(variable, value);
+    return;
+  }
   const entry = DERIVED_BROKER_VARIABLES.find((candidate) => candidate.variable === variable);
   if (entry === undefined || entry.kind !== "text") throw new Error(`${variable} is not a variable the broker derives as text`);
   if (Token.isUnresolved(value) || entry.value(naming.env) !== value) throw new Error(`the broker would derive ${variable} differently from the value the infrastructure has for it`);

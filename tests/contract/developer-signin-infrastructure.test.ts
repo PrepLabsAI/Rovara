@@ -362,9 +362,11 @@ describe("the legacy deployment (production)", () => {
   it("has the full developer sign-in and tasks, as named environments do, under its legacy names", () => {
     const text = JSON.stringify(legacy);
     for (const present of ["TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "WorkflowDependenciesEnabled", "McpConfirmElicitation",
-      "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED", "MCP_CONFIRM_ELICITATION", "ChatGptConnectionKey", "DeveloperTaskNotifier"]) {
+      "ChatGptConnectionKey", "DeveloperTaskNotifier"]) {
       expect(text, present).toContain(present);
     }
+    // #1149: the legacy broker packs these two settings (AGENTX_WORKFLOW_DEPENDENCIES_ENABLED as `wd`, MCP_CONFIRM_ELICITATION as `mc`); the sign-in function still has its own whole.
+    for (const packed of [",wd=", ",mc=", "MCP_CONFIRM_ELICITATION"]) expect(text, packed).toContain(packed);
     for (const present of ["SlackTeamId", "DeveloperSignInSlack", "DeveloperOidcIssuer", "DeveloperOidcClientId", "DeveloperOidcSince"]) expect(legacy.Parameters[present], present).toBeDefined();
     expect(legacy.Parameters.DeveloperSignInSlack).toMatchObject({ Default: "disabled" });
     expect(legacy.Parameters.DeveloperOidcIssuer).toMatchObject({ Default: "" });

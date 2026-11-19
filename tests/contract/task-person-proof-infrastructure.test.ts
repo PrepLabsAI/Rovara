@@ -258,7 +258,8 @@ describe("the named TEST proof-only installation gate", () => {
     const legacyBrokers = workflowDependencyEnvironmentEntries(legacy);
     expect(legacyBrokers, "legacy has its Broker Lambda").toHaveLength(1);
     const legacyVariables = legacyBrokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
-    expect(legacyVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy wires only the parameter reference").toEqual({ Ref: "WorkflowDependenciesEnabled" });
+    // #1149: the legacy Broker packs it as well.
+    expect(unpackedBrokerVariables(legacyVariables.Variables, legacy as never).AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy wires only the parameter reference").toEqual({ Ref: "WorkflowDependenciesEnabled" });
 
     // Named/foreign pins include the reviewed destination identity grant and dependency; legacy pins are unchanged. Named/foreign re-pinned for lane E2 (the core engine construct, #663,
     // and R2 step 4: the dispatcher's core queue mapping, its reads, the conditional deleter policy, its variables and the outbox pending index); legacy unchanged.
@@ -308,8 +309,9 @@ describe("the named TEST proof-only installation gate", () => {
         label: "legacy",
         template: legacy,
         // #1129, #1131: the company layer, GitHub sign-in, the company-secrets role and the reliability parts in the legacy (production) template too (no step-up: DEC 254zzz73).
-        withRoute: "2ada0f3ccfc2635f4dcfebf6c33131171c6fd5cf49c48d8db1d0accc34f1bdd6",
-        withoutRoute: "0ffd303eea90c1ff34aed6104fa581546de67abeb76d3d5ce6cfb17aaf81f55b",
+        // #1149: re-pinned for the legacy broker's packed environment (names parameter, AGENTX_SETTINGS, the names parameter's read).
+        withRoute: "871803865ffc4448b6f6fe6bb6f2fe0487c677d041b003da1c173afbebdfe2a8",
+        withoutRoute: "dc9e554596ca1fcee0519ce2a625012945c783607cb2b56a15649d977b481a8b",
         beforeStepUpRemoval: undefined,
       },
     ] as const;

@@ -16,6 +16,7 @@ import {
 } from "../../infra/lib/release-pipeline.js";
 import { SlackOrchestratorStack } from "../../infra/lib/slack-orchestrator.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -159,21 +160,19 @@ describe("hosted Slack control-plane infrastructure", () => {
   });
 
   it("tells the broker which role is the orchestrator and which limits apply", () => {
-    template.hasResourceProperties("AWS::Lambda::Function", {
-      Environment: {
-        Variables: Match.objectLike({
-          SLACK_ORCHESTRATOR_ROLE_ARN: { "Fn::GetAtt": [Match.stringLikeRegexp("^SlackOrchestratorTaskRole"), "Arn"] },
-          SLACK_MEMBER_WORKSPACE_LIMIT: { Ref: "SlackMemberWorkspaceLimit" },
-          SLACK_ORGANIZATION_WORKSPACE_LIMIT: { Ref: "SlackOrganizationWorkspaceLimit" },
-        }),
-      },
-    });
+    // #1149: the legacy broker packs the limits (and keeps the role's ARN whole); read them as the broker does.
+    const [, broker] = Object.entries(template.findResources("AWS::Lambda::Function")).find(([id]) => /^Broker[0-9A-F]{8}$/.test(id))!;
+    const variables = unpackedBrokerVariables((broker as { Properties: { Environment: { Variables: Record<string, unknown> } } }).Properties.Environment.Variables, template.toJSON() as never);
+    expect(variables.SLACK_ORCHESTRATOR_ROLE_ARN).toEqual({ "Fn::GetAtt": [expect.stringMatching(/^SlackOrchestratorTaskRole/u) as unknown, "Arn"] });
+    expect(variables.SLACK_MEMBER_WORKSPACE_LIMIT).toEqual({ Ref: "SlackMemberWorkspaceLimit" });
+    expect(variables.SLACK_ORGANIZATION_WORKSPACE_LIMIT).toEqual({ Ref: "SlackOrganizationWorkspaceLimit" });
   });
 
   it("the broker can send to the Slack request queue and knows its URL", () => {
     const [, broker] = Object.entries(template.findResources("AWS::Lambda::Function")).find(([id]) => /^Broker[0-9A-F]{8}$/.test(id))!;
-    expect((broker as { Properties: { Environment: { Variables: Record<string, unknown> } } }).Properties.Environment.Variables.SLACK_REQUEST_QUEUE_URL)
-      .toEqual({ Ref: expect.stringMatching(/^SlackRequestQueue[0-9A-F]{8}$/) as unknown });
+    // #1149: packed as the queue's name; the broker builds the URL from it (tests/contract/legacy-broker-packed-environment.test.ts).
+    expect(unpackedBrokerVariables((broker as { Properties: { Environment: { Variables: Record<string, unknown> } } }).Properties.Environment.Variables, template.toJSON() as never).SLACK_REQUEST_QUEUE_URL)
+      .toEqual({ "Fn::GetAtt": [expect.stringMatching(/^SlackRequestQueue[0-9A-F]{8}$/) as unknown, "QueueName"] });
     const statements = statementsForRole(template, "BrokerServiceRole");
     const send = statements.find((statement) => actionsOf(statement).includes("sqs:SendMessage") && JSON.stringify(statement.Resource).includes("SlackRequestQueue"));
     expect(send).toBeDefined();
