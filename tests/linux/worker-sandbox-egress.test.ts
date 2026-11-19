@@ -516,8 +516,9 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     await cli("network", "create", "--driver", "bridge", "--ipv6=false", "--internal", "--subnet", "172.29.245.0/24",
       "-o", "com.docker.network.bridge.inhibit_ipv4=true", "-o", "com.docker.network.bridge.name=dns25in", inner);
     await cli("network", "create", "--subnet", "172.29.246.0/24", outer);
-    // A worker/VPC resolver stand-in: only the allowed name has a public answer. The real gateway applies its own deny list.
-    const dnsProgram = `const s=require('dgram').createSocket('udp4');s.on('message',(m,r)=>{let at=12,n=[];while(m[at]){n.push(m.toString('latin1',at+1,at+1+m[at]));at+=m[at]+1}at++;const nx=n.join('.')!=='allowed.gate.test',a=!nx&&m.readUInt16BE(at)===1;
+    // A worker/VPC resolver stand-in: the allowed name AND the registry both have public answers here, so a blocked registry
+    // lookup can only come from the real gateway's own deny list (not from upstream NXDOMAIN).
+    const dnsProgram = `const s=require('dgram').createSocket('udp4');s.on('message',(m,r)=>{let at=12,n=[];while(m[at]){n.push(m.toString('latin1',at+1,at+1+m[at]));at+=m[at]+1}at++;const nx=!['allowed.gate.test',${JSON.stringify(REGISTRY_HOST)}].includes(n.join('.')),a=!nx&&m.readUInt16BE(at)===1;
 const h=Buffer.alloc(12);m.copy(h,0,0,2);h.writeUInt16BE(nx?0x8183:0x8180,2);h.writeUInt16BE(1,4);h.writeUInt16BE(a?1:0,6);s.send(Buffer.concat([h,m.subarray(12,at+4),a?Buffer.from([0xc0,0x0c,0,1,0,1,0,0,0,5,0,4,93,184,216,34]):Buffer.alloc(0)]),r.port,r.address)});s.bind(53,'0.0.0.0',()=>console.log('ready'));`;
     await cli("run", "-d", "--name", upstream, "--network", outer, "--ip", upstreamIp, "--cap-drop", "ALL", "--read-only", "--user", "1000:1000",
       "--sysctl", "net.ipv4.ip_unprivileged_port_start=53", "--pull=never", APP_NODE_IMAGE, "node", "-e", dnsProgram);
