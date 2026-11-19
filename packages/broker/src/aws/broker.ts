@@ -1071,18 +1071,19 @@ function installTeamView(dependencies: AwsBrokerDependencies): AwsBrokerDependen
 }
 
 /**
- * #1161: the GitHub binding operator events (backfill, claim) need a bindings store over the State table. The deployed broker gives the broker-wide
- * `githubBindings` only where the host set it (it never does: `withClientGithubBindings` gives bindings to the client project routes only), so these
- * events built nothing and always refused. They use the host's store when there is one, else one of their own over the same table; nothing else changes.
+ * #1161: the GitHub binding operator events (backfill, claim) need the bindings store over the State table. The deployed broker gives the broker-wide
+ * `githubBindings` only where the host set it (it never does), but it always gives the client project routes theirs (`clientProjects.bindings`, the same
+ * table): the events use the host's when there is one, else that one. Neither: refused, as before.
  */
 function operatorGithubBindings(dependencies: AwsBrokerDependencies): GithubInstallationBindings {
-  return dependencies.githubBindings ?? new GithubInstallationBindings(dependencies.documentClient, dependencies.tableName);
+  const bindings = dependencies.githubBindings ?? dependencies.clientProjects?.bindings;
+  if (bindings === undefined) throw githubBindingRefusal();
+  return bindings;
 }
 
 /** #1161: an operator event's refusal is logged with its reason (the error's name and a bounded message; the answer itself stays the fixed words). */
 function operatorEventRefused(event: string, error: unknown): void {
-  const reason = error instanceof Error ? `${error.name}: ${error.message}`.replace(/\s+/gu, " ").slice(0, 200) : "unknown";
-  process.stderr.write(`${JSON.stringify({ component: "broker", event, reason })}\n`);
+  brokerLogLine({ event, reason: error instanceof Error ? `${error.name}: ${error.message}`.replace(/\s+/gu, " ").slice(0, 200) : "unknown" });
 }
 
 function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBrokerDependencies) {

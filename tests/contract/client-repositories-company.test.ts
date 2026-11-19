@@ -326,7 +326,8 @@ it("registers every client-created project with the registration preflight on", 
 it("runs the operator claim and the backfill without a broker-wide githubBindings, as the deployed broker is composed", async () => {
   const h = await world(false);
   h.db.delete("GITHUB_INSTALLATION_BINDING", "BACKFILL");
-  const extra = { ...h.extra, githubBindingInstallations: {
+  // As deployed: no broker-wide githubBindings, but the client project routes' own store over the same table.
+  const extra = { ...h.extra, clientProjects: { ...h.clientProjects, bindings: new GithubInstallationBindings(h.db, "state") }, githubBindingInstallations: {
     get: async (id: number) => (id === 123 ? { installationId: 123, accountLogin: "new-org" } : undefined),
     page: async () => ({ installations: [{ installationId: 124, accountLogin: "existing-org" }], more: false }),
   } };
@@ -349,11 +350,11 @@ it("runs the operator claim and the backfill without a broker-wide githubBinding
 it("logs an operator event's refusal reason without putting it in the answer", async () => {
   const h = await world(false);
   const { handler } = createBroker({ extra: { ...h.extra, githubBindingInstallations: { get: async () => undefined, page: async () => ({ installations: [], more: false }) } } });
-  const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
   try {
     const refused = await handler({ source: "agentx.github-binding-claim", installationId: 555, companyId: B });
     expect(refused.statusCode).toBe(403);
     expect(refused.body).not.toContain("reason");
-    expect(stderr.mock.calls.map(([line]) => String(line)).some((line) => line.includes("github.binding_claim_refused") && line.includes("\"reason\""))).toBe(true);
-  } finally { stderr.mockRestore(); }
+    expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes("github.binding_claim_refused") && line.includes("\"reason\""))).toBe(true);
+  } finally { log.mockRestore(); }
 });
