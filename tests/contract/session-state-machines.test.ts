@@ -8,7 +8,7 @@ import {
   provisionerDefinition,
 } from "../../infra/lib/session-state-machines.js";
 
-type State = { Type: string; Next?: string; Default?: string; Choices?: Array<{ Next: string }>; Catch?: Array<{ Next: string }>; Retry?: unknown[]; Resource?: string; Arguments?: Record<string, unknown> };
+type State = { Type: string; Next?: string; Default?: string; Choices?: Array<{ Next: string }>; Catch?: Array<{ Next: string }>; Retry?: unknown[]; Resource?: string; Arguments?: Record<string, unknown>; Assign?: Record<string, unknown> };
 type Definition = { StartAt: string; QueryLanguage: string; States: Record<string, State> };
 
 const props = { stepsFunctionArn: "arn:aws:lambda:us-east-1:111122223333:function:steps", workspaceKeyArn: "arn:aws:kms:us-east-1:111122223333:key/k", environmentTag: "production", resourcePrefix: "agentx-production", workerAmiParameterName: "/agentx/production/worker-qualified-ami" };
@@ -57,7 +57,23 @@ describe("provisioner", () => {
     expect(states.HasVolume!.Default).toBe("LaunchConfiguration");
     expect(states.CreateVolume!.Arguments).toMatchObject({ Encrypted: true, KmsKeyId: props.workspaceKeyArn, ClientToken: "{% $clientToken %}" });
     expect(states.RunInstance!.Arguments).toMatchObject({ ClientToken: "{% $clientToken %}", MinCount: 1, MaxCount: 1 });
-    expect(JSON.stringify(states.Start)).toContain("'ws-' & $states.input.workspaceId & '-gen-'");
+  });
+
+  it("uses the exact workspace and generation in the EC2 client token, stably across retries", async () => {
+    const token = states.Start!.Assign!.clientToken;
+    expect(typeof token).toBe("string");
+    const expression = /^\{% (.*) %\}$/s.exec(token as string)![1]!;
+    const evaluate = (workspaceId: string, generation: number) => jsonata(expression).evaluate({}, { states: { input: { workspaceId, generation } } });
+    const tokens: unknown[] = [];
+    for (const workspaceId of ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]) {
+      for (const generation of [1, 2]) {
+        const actual: unknown = await evaluate(workspaceId, generation);
+        expect(actual).toBe(`ws-${workspaceId}-gen-${generation}`);
+        expect(await evaluate(workspaceId, generation)).toBe(actual);
+        tokens.push(actual);
+      }
+    }
+    expect(new Set(tokens).size).toBe(4);
   });
 
   it("attaches after launch, without retrying a call that is not idempotent", () => {

@@ -10,8 +10,9 @@ import type { FeatureE2EPlanningContext } from "../../packages/broker/src/e2e/fe
 import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import { appendOperationEvent } from "../../packages/broker/src/aws/operation-events.js";
 import { SessionManager, workspaceBinding } from "../../packages/broker/src/aws/sessions.js";
-import { verifyInvokeAuthorization, invocationMatchesClaims } from "../../packages/worker/src/invoke-auth.js";
+import { verifyInvokeAuthorization, invocationMatchesClaims, invokePublicKey } from "../../packages/worker/src/invoke-auth.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { COMPANY_A, COMPANY_B, createSessionMachinesWorld } from "../support/session-machines-world.js";
 
 const NOW = Date.parse("2026-09-27T12:00:00.000Z");
 const keys = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
@@ -1596,6 +1597,47 @@ describe("the dispatcher with ec2-ebs records", () => {
 });
 
 describe("ec2-ebs delivery through the real session manager", () => {
+  it.each([COMPANY_A, COMPANY_B])("provisions a separate legacy delivery instance when another workspace is already READY (%s)", async (companyOfB) => {
+    const world = createSessionMachinesWorld({ startedAt: NOW });
+    const workspaceA = world.workspace(COMPANY_A);
+    const workspaceB = world.workspace(companyOfB);
+    const publicKey = invokePublicKey(world.publicKey);
+    const post = vi.fn<Ec2DeliveryDependencies["post"]>(async (url, init) => {
+      const instance = [...world.instances.values()].find((candidate) => candidate.privateIp === new URL(url).hostname);
+      expect(instance).toBeDefined();
+      const verified = verifyInvokeAuthorization(init.authorization, {
+        publicKey, workspaceId: instance!.workspaceId, generation: instance!.generation, now: () => Math.floor(NOW / 1_000),
+      });
+      expect(verified.ok).toBe(true);
+      expect(verified.ok && invocationMatchesClaims(WorkerInvocationSchema.parse(JSON.parse(init.body)), verified.claims)).toBe(true);
+      return { status: 200, body: "{}" };
+    });
+    const { deliver } = delivery({ sessions: world.sessions, sign: (message) => world.sign(message), post });
+    const recordA = recordFor(workspaceA);
+    const recordB = recordFor(workspaceB);
+    for (const record of [recordA, recordB]) world.db.set({ pk: `OUTBOX#${record.id}`, sk: "OUTBOX", ...record });
+    expect(await deliver(recordA, recordA.invocation)).toBe("WAITING_FOR_SESSION");
+    await world.settle();
+    const sessionA = (await world.sessions.get(workspaceA))!;
+    expect(sessionA.state).toBe("READY");
+    expect(await deliver(recordA, recordA.invocation)).toBe("DELIVERED");
+
+    expect(await deliver(recordB, recordB.invocation)).toBe("WAITING_FOR_SESSION");
+    expect(post).toHaveBeenCalledTimes(1);
+    await world.settle();
+    const sessionB = (await world.sessions.get(workspaceB))!;
+    expect(sessionB).toMatchObject({ workspaceId: workspaceB, state: "READY", generation: 1 });
+    expect(sessionB.instanceId).toBeTruthy();
+    expect(sessionB.instanceId).not.toBe(sessionA.instanceId);
+    expect(sessionB.privateIp).not.toBe(sessionA.privateIp);
+    expect(await deliver(recordB, recordB.invocation)).toBe("DELIVERED");
+    expect(post.mock.calls.map(([url]) => url)).toEqual([
+      `http://${sessionA.privateIp}:8080/invocations`,
+      `http://${sessionB.privateIp}:8080/invocations`,
+    ]);
+    expect(world.executions.map(({ name }) => name)).toEqual([`ws-${workspaceA}-gen-1`, `ws-${workspaceB}-gen-1`]);
+  });
+
   it("parks the first delivery with one event, re-queues it when ready, then delivers it", async () => {
     const db = new FakeDynamoDb();
     const start = vi.fn(async ({ name }: { name: string }) => `arn:aws:states:us-east-1:111122223333:execution:provisioner:${name}`);

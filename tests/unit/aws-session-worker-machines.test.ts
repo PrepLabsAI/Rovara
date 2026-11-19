@@ -41,16 +41,36 @@ runWorkerMachinesConformance("EC2 workspace sessions (Code's AWS deployment)", {
 });
 
 describe("Code's EC2 session machines, company by company", () => {
-  it("refuses to deliver one workspace's invocation to another workspace's machine", async () => {
+  it.each([COMPANY_A, COMPANY_B])("allocates distinct backing instances and delivers only to each workspace's own machine (%s)", async (companyOfB) => {
     const world = createSessionMachinesWorld();
-    const machines = world.machinesFor(COMPANY_A);
-    const machineWorkspaceId = world.workspace(COMPANY_A);
-    const otherWorkspaceId = world.workspace(COMPANY_A);
-    const machine = await machines.start({ machineKey: machineWorkspaceId, companyId: COMPANY_A });
+    const machinesA = world.machinesFor(COMPANY_A);
+    const machinesB = world.machinesFor(companyOfB);
+    const workspaceA = world.workspace(COMPANY_A);
+    const workspaceB = world.workspace(companyOfB);
+    const machineA = await machinesA.start({ machineKey: workspaceA, companyId: COMPANY_A });
     await world.settle();
+    expect((await machinesA.health(machineA.machineId)).state).toBe("ready");
+    const machineB = await machinesB.start({ machineKey: workspaceB, companyId: companyOfB });
+    await world.settle();
+    expect((await machinesB.health(machineB.machineId)).state).toBe("ready");
+    expect(machineA.machineId).not.toBe(machineB.machineId);
+    const sessionA = (await world.sessions.get(workspaceA))!;
+    const sessionB = (await world.sessions.get(workspaceB))!;
+    expect(sessionA.instanceId).toBeTruthy();
+    expect(sessionB.instanceId).toBeTruthy();
+    expect(sessionB.instanceId).not.toBe(sessionA.instanceId);
+    expect(sessionB.privateIp).not.toBe(sessionA.privateIp);
+    expect(world.instances.get(sessionA.instanceId!)).toMatchObject({ workspaceId: workspaceA });
+    expect(world.instances.get(sessionB.instanceId!)).toMatchObject({ workspaceId: workspaceB });
 
-    await expect(machines.deliver(machine.machineId, invocationFor(otherWorkspaceId))).rejects.toMatchObject({ code: "rejected" });
+    await expect(machinesA.deliver(machineA.machineId, invocationFor(workspaceB))).rejects.toMatchObject({ code: "rejected" });
     expect(world.posts).toEqual([]);
+    await machinesA.deliver(machineA.machineId, invocationFor(workspaceA));
+    await machinesB.deliver(machineB.machineId, invocationFor(workspaceB));
+    expect(world.posts).toMatchObject([
+      { url: `http://${sessionA.privateIp}:8080/invocations`, workspaceId: workspaceA, status: 200 },
+      { url: `http://${sessionB.privateIp}:8080/invocations`, workspaceId: workspaceB, status: 200 },
+    ]);
   });
 
   it("never starts, stops, ends, asks about or hands a job to another company's workspace, and tells it apart from no workspace at all only by nothing", async () => {
