@@ -10,7 +10,7 @@ import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot
 import { RISK_SENSITIVE_PATH_PATTERNS, assessRisk, isSensitivePath, type RiskInput } from "../../packages/broker/src/core/proof/risk.js";
 import { parseChangedFiles } from "../../packages/broker/src/core/proof/changed-files.js";
 import { recomputeRisk, withLinearCloseLine } from "../../packages/broker/src/core/proof/pull-request-body.js";
-import { pullRequestTitle, workflowPullRequestBody, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
+import { pullRequestTitle, workflowPullRequestBody, workflowPullRequestCheckVerdict, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
 import { rewriteAttributionBody } from "../../packages/contracts/src/attribution.js";
 import { feedbackFixesSection, withFeedbackFixes, withStatusLines } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
 
@@ -1010,6 +1010,20 @@ describe("the version 2 description carries the test proof", () => {
     const lines = workflowPullRequestStatusLines(workflowWith(), context(), [PROOF]);
     expect(lines).toContain(`- ${PROOF}`);
     expect(workflowPullRequestStatusLines(workflowWith(), context())).not.toContain(`- ${PROOF}`);
+  });
+});
+
+describe("failed reviews in pull request text", () => {
+  it("does not write a passed status line or verdict when a required review could not run", () => {
+    const reviews = workflowWith().reviews!.map((review) => review.role === "CRITIC"
+      ? { ...review, status: "UNKNOWN" as const, failureReason: "SESSION_FAILED" as const }
+      : review);
+    const workflow = { ...workflowWith(), reviews } as WorkflowSnapshot;
+    const lines = workflowPullRequestStatusLines(workflow);
+    expect(lines.join("\n")).toContain("The required reviews did not finish");
+    expect(lines.join("\n")).not.toContain("code review passed");
+    expect(workflowPullRequestBody(task, workflow, planOf, SESSION, context())).toContain("The required reviews did not finish");
+    expect(workflowPullRequestCheckVerdict(task, workflow, planOf, context())).toBeUndefined();
   });
 });
 

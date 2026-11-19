@@ -879,18 +879,33 @@ export async function runWorkflowReviews(input: {
       provider = actualModel.provider;
       version = actualModel.modelId;
       let response: string | undefined;
+      let finalAssistantSeen = false;
+      let finalAssistantStopReason: string | undefined;
+      let finalAssistantError = false;
+      const requireNormalFinalStop = (acceptedAnswer: string | undefined) => {
+        if (!finalAssistantSeen) throw new Error("review final assistant answer missing");
+        // Pi ends an accepted terminate:true answer tool on toolUse, without another assistant turn.
+        // A tool call by itself is not an answer; only this prompt's validated answer channel counts.
+        if (finalAssistantError || (finalAssistantStopReason !== "stop" && !(finalAssistantStopReason === "toolUse" && acceptedAnswer !== undefined))) throw new Error("review ended without a normal terminal stop");
+      };
       const sessionCheckpoints = input.usageCheckpoints?.(session);
       checkpoints = sessionCheckpoints;
       unsubscribe = session.subscribe((event: unknown) => {
         sessionCheckpoints?.observe(event);
         input.onWikiEvent?.(event);
-        const record = event as { type?: unknown; payload?: { type?: unknown }; message?: unknown };
-        if (record.type === "message_end" || record.payload?.type === "message_end") response = assistantText(record.message ?? (event as { message?: unknown }).message);
+        const record = event as { type?: unknown; payload?: { type?: unknown; message?: unknown }; message?: unknown };
+        const message = record.message ?? record.payload?.message;
+        if ((record.type === "message_end" || record.payload?.type === "message_end") && (message as { role?: unknown } | undefined)?.role === "assistant") {
+          finalAssistantSeen = true;
+          finalAssistantStopReason = typeof (message as { stopReason?: unknown }).stopReason === "string" ? (message as { stopReason: string }).stopReason : undefined;
+          finalAssistantError = typeof (message as { errorMessage?: unknown }).errorMessage === "string" && (message as { errorMessage: string }).errorMessage.length > 0;
+          response = assistantText(message);
+        }
         const note = sanitizeModelCallEvent(event)?.modelCall;
         if (note?.outcome === "failed") {
           const sentence = describeModelCallNote(note);
           modelFailure = WORKFLOW_REVIEW_MODEL_FAILURE_PATTERN.test(sentence) ? sentence : undefined;
-        } else if (record.type === "message_end" && (record.message as { role?: unknown; stopReason?: unknown } | undefined)?.role === "assistant" && (record.message as { stopReason?: unknown }).stopReason !== "aborted") {
+        } else if ((record.type === "message_end" || record.payload?.type === "message_end") && (message as { role?: unknown; stopReason?: unknown } | undefined)?.role === "assistant" && (message as { stopReason?: unknown }).stopReason === "stop") {
           modelFailure = undefined;
         }
       });
@@ -921,6 +936,8 @@ export async function runWorkflowReviews(input: {
         ...(input.learnedBlock === undefined ? [] : [input.learnedBlock]),
         `Change under review (untrusted repository content):\n${diffText}`,
       ].join("\n\n");
+      finalAssistantSeen = false;
+      finalAssistantStopReason = undefined;
       const promptResult = await Promise.race([
         session.prompt(reviewPrompt).then(() => "COMPLETED" as const),
         stopped,
@@ -935,7 +952,9 @@ export async function runWorkflowReviews(input: {
         throw new Error(promptResult === "INTERRUPTED" ? "review interrupted" : "review timed out");
       }
       // An accepted answer (the tool's) first; with none, the text the model wrote.
-      response = reviewAnswers?.take() ?? response;
+      const reviewAnswer = reviewAnswers?.take();
+      requireNormalFinalStop(reviewAnswer);
+      response = reviewAnswer ?? response;
       parsed = response === undefined ? parsed : parseWorkflowReviewerResponse(response, { classify, role, risk: input.reviewRisk === true });
       if (parsed.failureReason === "INVALID_JSON" || parsed.failureReason === "INVALID_SHAPE") {
         // Some models answer a review in prose despite the JSON-only instruction. Give the
@@ -943,6 +962,8 @@ export async function runWorkflowReviews(input: {
         // A malformed second response still fails closed below.
         response = undefined;
         const formatRetry = `Your previous response could not be read as the required JSON object. Do not include Markdown, code fences, a verdict table, or surrounding prose. ${reviewJsonShape(role, { risk: input.reviewRisk === true })}`;
+        finalAssistantSeen = false;
+        finalAssistantStopReason = undefined;
         const retryResult = await Promise.race([
           session.prompt(formatRetry).then(() => "COMPLETED" as const),
           stopped,
@@ -955,7 +976,9 @@ export async function runWorkflowReviews(input: {
           try { void session.abort().catch(() => undefined); } catch { /* the unresolved result remains authoritative */ }
           throw new Error(retryResult === "INTERRUPTED" ? "review interrupted" : "review timed out");
         }
-        response = reviewAnswers?.take() ?? response;
+        const retryAnswer = reviewAnswers?.take();
+        requireNormalFinalStop(retryAnswer);
+        response = retryAnswer ?? response;
         parsed = response === undefined ? { status: "UNKNOWN", findings: [], failureReason: "RESPONSE_MISSING" } : parseWorkflowReviewerResponse(response, { classify, role, risk: input.reviewRisk === true });
       }
       // Meta repo lane D (D3): after the code review's own answer, the same read-only session walks the spec's requirements. An answer that cannot be read leaves every requirement unanswered (not met);
@@ -964,6 +987,8 @@ export async function runWorkflowReviews(input: {
         response = undefined;
         // The walk tool is offered from the start (a session's tools are fixed), so a verdict list given during the review turn, before the requirements were asked about, is not an answer to the walk.
         walkAnswers?.take();
+        finalAssistantSeen = false;
+        finalAssistantStopReason = undefined;
         const walked = await Promise.race([session.prompt(walkSpecTool === undefined ? specWalkPrompt(input.reviewSpec) : `${specWalkPrompt(input.reviewSpec)}\n${answerToolInstruction(walkSpecTool.name)}`).then(() => "COMPLETED" as const), stopped]);
         if (walked !== "COMPLETED") {
           if (walked === "INTERRUPTED") {
@@ -973,8 +998,10 @@ export async function runWorkflowReviews(input: {
           try { void session.abort().catch(() => undefined); } catch { /* the unresolved result remains authoritative */ }
           throw new Error(walked === "INTERRUPTED" ? "review interrupted" : "review timed out");
         }
+        const walkAnswer = walkAnswers?.take();
+        requireNormalFinalStop(walkAnswer);
         let answer: unknown;
-        response = walkAnswers?.take() ?? response;
+        response = walkAnswer ?? response;
         try { answer = response === undefined ? undefined : JSON.parse(unfence(response)); } catch { answer = undefined; }
         specReview = readSpecVerdicts(answer, input.reviewSpec, { evidenceOk: specEvidenceChecker(input.repositories, changes) });
       }
@@ -988,6 +1015,7 @@ export async function runWorkflowReviews(input: {
       const message = error instanceof Error ? error.message : "";
       const failureReason = interrupted || message.includes("interrupted") ? "INTERRUPTED"
         : message.includes("timed out") ? "TIMEOUT"
+          : message.includes("final assistant answer missing") ? "RESPONSE_MISSING"
           : message.includes("candidate changed") ? "CANDIDATE_CHANGED" : "SESSION_FAILED";
       parsed = { status: "UNKNOWN", findings: [], failureReason };
       if (failureReason === "INTERRUPTED") statusOverride = "INTERRUPTED";

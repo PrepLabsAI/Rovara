@@ -70,8 +70,9 @@ export function proofReportOf(task: TaskRecord, workflow: WorkflowSnapshot, pack
   for (const review of (workflow.reviews ?? []).filter((entry) => entry.candidateDigest === workflow.candidate?.digest)) {
     const accepted = (workflow.acceptedFindings ?? []).filter((finding) => finding.candidateDigest === workflow.candidate?.digest && finding.role === review.role).length;
     rows.push({
-      claim: review.role === "SECURITY" ? "Security review" : "Code review", check: "independent review", status: review.status === "PASS" ? "passed" : review.status === "FINDINGS" ? "failed" : "not_run",
-      ...(review.findings.length === 0 ? {} : { detail: `${String(review.findings.length)} finding${review.findings.length === 1 ? "" : "s"}${accepted > 0 ? `, ${String(accepted)} accepted by the owner` : ""}` }),
+      claim: review.role === "SECURITY" ? "Security review" : "Code review", check: "independent review", status: review.status === "PASS" && review.failureReason === undefined ? "passed" : review.status === "FINDINGS" ? "failed" : "not_run",
+      ...(review.status === "UNKNOWN" || review.status === "FAILED" || review.status === "INTERRUPTED" || review.failureReason !== undefined ? { detail: "the review could not finish" }
+        : review.findings.length === 0 ? {} : { detail: `${String(review.findings.length)} finding${review.findings.length === 1 ? "" : "s"}${accepted > 0 ? `, ${String(accepted)} accepted by the owner` : ""}` }),
     });
   }
   // What the evidence pack kept for this code adds: the test counts, and what was not tested.

@@ -76,6 +76,18 @@ describe("test proof lines for the pull request", () => {
     expect(workflowPullRequestStatusLines(workflow, ["Test proof: 1 check fails on the original code and passes now"])).toEqual([...plain, "Test proof: 1 check fails on the original code and passes now"]);
   });
 
+  it("does not count a review that could not run as passed in the pull request text", () => {
+    const now = new Date().toISOString();
+    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
+    const workflow = WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId: randomUUID(), ownerId: "b".repeat(64), now }), revision: 5, stage: "PULL_REQUEST", state: "READY", candidate,
+      verification: { candidateDigest: candidate.digest, producer: "t", environmentId: "w", recordedAt: now, results: [{ checkId: "required-1", status: "PASS" }] },
+      reviews: ["CRITIC", "SECURITY"].map((role) => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "t", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now })) });
+    const failed = { ...workflow, reviews: workflow.reviews!.map((review) => review.role === "CRITIC" ? { ...review, status: "UNKNOWN", failureReason: "SESSION_FAILED" } : review) } as never;
+    const lines = workflowPullRequestStatusLines(failed);
+    expect(lines.join("\n")).toContain("code review could not finish");
+    expect(lines.join("\n")).not.toContain("code review passed");
+  });
+
   it("reads the newest test-proof.json bound to the current candidate from the task's own operations, and no other task's", async () => {
     const task = { ownerKey: "owner", workspaceId: "ws" };
     const objects = new Map<string, string>([

@@ -67,7 +67,7 @@ function model(id: string, script: string[], prompts: string[], options: { delay
               await new Promise(() => undefined);
             }
             if (answer === "throw") throw new Error("the session failed");
-            listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: answer }] } });
+            listener?.({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: answer }] } });
           },
           async abort() {},
           getModel: () => ({ provider: "test", modelId: id }),

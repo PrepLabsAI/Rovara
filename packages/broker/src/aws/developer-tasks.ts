@@ -25,6 +25,8 @@ import {
   CanvasCloseoutRetryRequestSchema,
   AgentXError,
   workflowReviewsSawPartialDiff,
+  workflowReviewRoles,
+  reviewCleared,
   blockWorkflowPullRequestUpdate,
   nextWorkflowPullRequestUpdate,
   startWorkflowPullRequestUpdate,
@@ -4431,6 +4433,13 @@ async function pageDecidingView(
 }
 
 const WORKFLOW_PULL_REQUEST_BODY_MAX_BYTES = 30_000;
+function requiredReviewsDidNotClear(workflow: WorkflowSnapshot): boolean {
+  const current = (workflow.reviews ?? []).filter((review) => review.candidateDigest === workflow.candidate?.digest);
+  if (current.length === 0) return ["PULL_REQUEST", "WAIT_FOR_MERGE", "MERGED"].includes(workflow.stage);
+  return current.some((review) => !reviewCleared(review, workflow.acceptedFindings))
+    || (["PULL_REQUEST", "WAIT_FOR_MERGE", "MERGED"].includes(workflow.stage)
+      && workflowReviewRoles(workflow).some((role) => !current.some((review) => review.role === role)));
+}
 const WORKFLOW_PLAN_SUMMARY_LINE_MAX = 500;
 /** At most this many accepted findings are listed in the pull request description. */
 const WORKFLOW_PULL_REQUEST_ACCEPTED_LISTED = 20;
@@ -4481,6 +4490,7 @@ export function workflowPullRequestBody(task: DeveloperTaskRecord, workflow: Wor
     : documentSummaryLines((typeof plan === "string" ? plan : plan?.markdown ?? "").split("\n").map(inertPlanLine).join("\n")))
     .map((line) => line.slice(0, WORKFLOW_PLAN_SUMMARY_LINE_MAX));
   const reviewOnly = workflow.verification?.reviewOnly === true && workflowIsReviewOnly(workflow.checkPolicy);
+  const reviewDidNotClear = requiredReviewsDidNotClear(workflow);
   // Model-written: one line, redacted and made inert like a plan line.
   const noneReason = workflow.checkPolicy?.noneReason === undefined ? "" : inertPlanLine(redactText(workflow.checkPolicy.noneReason).replace(/\s+/gu, " ")).trim();
   const lines = [
@@ -4493,7 +4503,8 @@ export function workflowPullRequestBody(task: DeveloperTaskRecord, workflow: Wor
     PULL_REQUEST_STATUS_END,
     ...(pageUrl === undefined ? [] : [`AgentX task: ${pageUrl}`]),
     "",
-    `Opened as a draft by AgentX after the owner-approved plan${reviewOnly ? " and reviews" : ", checks and reviews"} passed${!reviewOnly && workflow.verification?.results.some((result) => result.madeByRovara === true) === true ? " (" + GENERAL_FAKE_MADE_NOTE + ")" : ""}. Merge it on GitHub.`,
+    ...(reviewDidNotClear ? ["The required reviews did not finish. Nothing was sent to GitHub. See the task page for review results."]
+      : [`Opened as a draft by AgentX after the owner-approved plan${reviewOnly ? " and reviews" : ", checks and reviews"} passed${!reviewOnly && workflow.verification?.results.some((result) => result.madeByRovara === true) === true ? " (" + GENERAL_FAKE_MADE_NOTE + ")" : ""}. Merge it on GitHub.`]),
   ];
   const body = lines.join("\n");
   if (Buffer.byteLength(body, "utf8") <= WORKFLOW_PULL_REQUEST_BODY_MAX_BYTES) return body;
@@ -4515,13 +4526,18 @@ export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot, proof
   const reviewOnly = workflow.verification?.reviewOnly === true && workflowIsReviewOnly(workflow.checkPolicy);
   // The issues noted are those nobody had to resolve: the findings the owner accepted are listed on their own.
   const noted = (workflow.reviews ?? []).reduce((count, review) => count + review.findings.filter((finding) => !workflowFindingAccepted(workflow, review.role, finding)).length, 0);
-  const reviewWord = (role: "CRITIC" | "SECURITY") => (workflow.reviews ?? []).some((review) => review.role === role
-    && review.candidateDigest === workflow.candidate?.digest && review.status === "FINDINGS") ? "passed after the owner accepted its findings" : "passed";
+  const reviewWord = (role: "CRITIC" | "SECURITY") => {
+    const review = (workflow.reviews ?? []).find((entry) => entry.role === role && entry.candidateDigest === workflow.candidate?.digest);
+    if (review === undefined || !reviewCleared(review, workflow.acceptedFindings)) return review?.status === "FINDINGS" ? "did not pass" : "could not finish";
+    return review.status === "FINDINGS" ? "passed after the owner accepted its findings" : "passed";
+  };
+  const reviewDidNotClear = requiredReviewsDidNotClear(workflow);
   const accepted = (workflow.acceptedFindings ?? []).filter((finding) => finding.candidateDigest === workflow.candidate?.digest);
   const partial = workflowReviewsSawPartialDiff(workflow);
   return [
     ...(reviewOnly ? [] : [`Checks: ${passed.length > 0 ? passed.join(", ") : "none recorded"}`]),
     `Reviews: code review ${reviewWord("CRITIC")}; security review ${reviewWord("SECURITY")}${noted > 0 ? `; ${noted} earlier issue${noted === 1 ? "" : "s"} noted` : ""}`,
+    ...(reviewDidNotClear ? ["The required reviews did not finish. Nothing was sent to GitHub. See the task page for review results."] : []),
     ...(accepted.length === 0 ? [] : [
       `Owner accepted ${accepted.length} review finding${accepted.length === 1 ? "" : "s"}:`,
       // Reviewer text and the owner's reason, each on one line, redacted and made inert for GitHub like a plan line.

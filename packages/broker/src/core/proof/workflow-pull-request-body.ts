@@ -11,8 +11,10 @@ import {
   type RovaraCheckVerdict,
   type WorkflowSnapshot,
   workflowIsReviewOnly,
+  workflowReviewRoles,
   planSummaryLines,
   workflowFindingAccepted,
+  reviewCleared,
 } from "@agentx/contracts";
 import { GENERAL_FAKE_MADE_NOTE } from "@agentx/contracts";
 import { PULL_REQUEST_PARTIAL_REVIEW_LINE, PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START, ROVARA_STATUS_END, ROVARA_STATUS_START } from "../../developer/pull-request-feedback-section.js";
@@ -31,6 +33,14 @@ export interface PullRequestBodyTask {
 }
 
 const WORKFLOW_PULL_REQUEST_BODY_MAX_BYTES = 30_000;
+function requiredReviewDidNotClear(workflow: WorkflowSnapshot): boolean {
+  const digest = workflow.candidate?.digest;
+  const current = (workflow.reviews ?? []).filter((entry) => entry.candidateDigest === digest);
+  if (current.length === 0) return ["PULL_REQUEST", "WAIT_FOR_MERGE", "MERGED"].includes(workflow.stage);
+  return current.some((review) => !reviewCleared(review, workflow.acceptedFindings))
+    || (["PULL_REQUEST", "WAIT_FOR_MERGE", "MERGED"].includes(workflow.stage)
+      && workflowReviewRoles(workflow).some((role) => !current.some((review) => review.role === role)));
+}
 /** The closing drawer of a version 2 description, which holds the plan summary and the record (pull-request-body.ts). */
 const RECORD_DRAWER_START = "<details>";
 const RECORD_DRAWER_END = "</details>";
@@ -104,6 +114,8 @@ function rovaraContextOf(task: PullRequestBodyTask, workflow: WorkflowSnapshot, 
 export function workflowPullRequestCheckVerdict(task: PullRequestBodyTask, workflow: WorkflowSnapshot, plan: LoadedDocument | string | undefined, context?: PullRequestBodyContext, proofLines: readonly string[] = []): RovaraCheckVerdict | undefined {
   void plan;
   if (workflow.definitionVersion !== "1.1.0") return undefined;
+  // The versioned PR verdict has only passed and passed-after-accepted review states. It cannot honestly describe a review that did not run.
+  if (requiredReviewDidNotClear(workflow)) return undefined;
   const merged = rovaraContextOf(task, workflow, context, proofLines);
   const verdict = rovaraPullRequestVerdict(workflow, merged, (listed) => workflowReviewLines(workflow, listed, context?.acceptedBy));
   const forCheck = prVerdictForCheck(verdict);
@@ -128,6 +140,7 @@ function buildWorkflowPullRequestBody(task: PullRequestBodyTask, workflow: Workf
     : documentSummaryLines((typeof plan === "string" ? plan : plan?.markdown ?? "").split("\n").map(inertPlanLine).join("\n")))
     .map((line) => line.slice(0, WORKFLOW_PLAN_SUMMARY_LINE_MAX));
   const reviewOnly = workflow.verification?.reviewOnly === true && workflowIsReviewOnly(workflow.checkPolicy);
+  const reviewDidNotClear = requiredReviewDidNotClear(workflow);
   // Model-written: one line, redacted and made inert like a plan line.
   const noneReason = workflow.checkPolicy?.noneReason === undefined ? "" : inertPlanLine(redactText(workflow.checkPolicy.noneReason).replace(/\s+/gu, " ")).trim();
   const lines = [
@@ -142,7 +155,8 @@ function buildWorkflowPullRequestBody(task: PullRequestBodyTask, workflow: Workf
     ...attributionBodyLines(context?.attribution),
     ...(pageUrl === undefined ? [] : [`AgentX task: ${pageUrl}`]),
     "",
-    `Opened as a draft by AgentX after the owner-approved plan${reviewOnly ? " and reviews" : ", checks and reviews"} passed${!reviewOnly && workflow.verification?.results.some((result) => result.madeByRovara === true) === true ? " (" + GENERAL_FAKE_MADE_NOTE + ")" : ""}. Merge it on GitHub.`,
+    ...(reviewDidNotClear ? ["The required reviews did not finish. Nothing was sent to GitHub. See the task page for review results."]
+      : [`Opened as a draft by AgentX after the owner-approved plan${reviewOnly ? " and reviews" : ", checks and reviews"} passed${!reviewOnly && workflow.verification?.results.some((result) => result.madeByRovara === true) === true ? " (" + GENERAL_FAKE_MADE_NOTE + ")" : ""}. Merge it on GitHub.`]),
   ];
   return fitPullRequestBody(lines.join("\n"));
 }
@@ -155,7 +169,10 @@ function buildWorkflowPullRequestBody(task: PullRequestBodyTask, workflow: Workf
  */
 export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot, context?: PullRequestBodyContext, proofLines: readonly string[] = []): string[] {
   // Rovara Code version 2 rewrites its whole block (what changed, tests, reviews and risk); version 1's lines are as they were.
-  if (workflow.definitionVersion === "1.1.0") return rovaraStatusLines(workflow, proofLines.length === 0 ? context ?? {} : { ...context, proofLines }, (listed) => workflowReviewLines(workflow, listed, context?.acceptedBy)).map((line) => hideEmailAddresses(line));
+  if (workflow.definitionVersion === "1.1.0") {
+    if (requiredReviewDidNotClear(workflow)) return ["The required reviews did not finish. Nothing was sent to GitHub. See the task page for review results."];
+    return rovaraStatusLines(workflow, proofLines.length === 0 ? context ?? {} : { ...context, proofLines }, (listed) => workflowReviewLines(workflow, listed, context?.acceptedBy)).map((line) => hideEmailAddresses(line));
+  }
   const checks = [...(workflow.checkPolicy?.required ?? []), ...(workflow.checkPolicy?.proposed ?? []), ...(workflow.checkPolicy?.optional ?? [])];
   const passed = (workflow.verification?.results ?? []).filter((result) => result.status === "PASS")
     // A proposed check's label is model-written: one line, redacted and made inert like a plan line, as every label is.
@@ -181,12 +198,17 @@ export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot, conte
 function workflowReviewLines(workflow: WorkflowSnapshot, listed: number, acceptedBy?: Readonly<Record<string, string>>): string[] {
   // The issues noted are those nobody had to resolve: the findings the owner accepted are listed on their own.
   const noted = (workflow.reviews ?? []).reduce((count, review) => count + review.findings.filter((finding) => !workflowFindingAccepted(workflow, review.role, finding)).length, 0);
-  const reviewWord = (role: "CRITIC" | "SECURITY") => (workflow.reviews ?? []).some((review) => review.role === role
-    && review.candidateDigest === workflow.candidate?.digest && review.status === "FINDINGS") ? "passed after the owner accepted its findings" : "passed";
+  const reviewWord = (role: "CRITIC" | "SECURITY") => {
+    const review = (workflow.reviews ?? []).find((entry) => entry.role === role && entry.candidateDigest === workflow.candidate?.digest);
+    if (review === undefined || !reviewCleared(review, workflow.acceptedFindings)) return review?.status === "FINDINGS" ? "did not pass" : "could not finish";
+    return review.status === "FINDINGS" ? "passed after the owner accepted its findings" : "passed";
+  };
   const accepted = (workflow.acceptedFindings ?? []).filter((finding) => finding.candidateDigest === workflow.candidate?.digest);
   const partial = workflowReviewsSawPartialDiff(workflow);
+  const reviewDidNotClear = requiredReviewDidNotClear(workflow);
   return [
     `Reviews: code review ${reviewWord("CRITIC")}; security review ${reviewWord("SECURITY")}${noted > 0 ? `; ${noted} earlier issue${noted === 1 ? "" : "s"} noted` : ""}`,
+    ...(reviewDidNotClear ? ["The required reviews did not finish. Nothing was sent to GitHub. See the task page for review results."] : []),
     ...(accepted.length === 0 ? [] : [
       `Owner accepted ${accepted.length} review finding${accepted.length === 1 ? "" : "s"}:`,
       // Reviewer text and the owner's reason, each on one line, redacted and made inert for GitHub like a plan line.

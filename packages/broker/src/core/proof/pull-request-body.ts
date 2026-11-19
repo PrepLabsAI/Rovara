@@ -2,7 +2,7 @@
 // code is, between markers that Rovara rewrites after every fix or sync, and it ends with the line that says a person approves and a person merges. The description is public to the repository's
 // readers: every line that a model, a file name or a branch name wrote goes through `inertLine` (redacted, one line, no mention, link, image, cross-reference or hidden comment), every list is bounded,
 // and the whole body stays under the byte cap with its markers, risk and closing line intact so it can always be regenerated in place.
-import { EVAL_CI_LINE_PATTERN, attributionBodyLines, hideEmailAddresses, type ActingAttribution, type PrVerdict, type RiskAssessment, type TestingView, type VerdictSecondReview, type VerificationReport, type WorkflowSnapshot } from "@agentx/contracts";
+import { EVAL_CI_LINE_PATTERN, attributionBodyLines, hideEmailAddresses, reviewCleared, workflowReviewRoles, type ActingAttribution, type PrVerdict, type RiskAssessment, type TestingView, type VerdictSecondReview, type VerificationReport, type WorkflowSnapshot } from "@agentx/contracts";
 import { ROVARA_STATUS_END, ROVARA_STATUS_START } from "../../developer/pull-request-feedback-section.js";
 import { inertLine } from "./inert-text.js";
 import { reviewModelLines } from "./review-model-lines.js";
@@ -255,6 +255,13 @@ export function browserEvidenceSection(lines: readonly string[] | undefined): st
 }
 
 export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullRequestBodyContext, reviewLines: (listed: number) => string[], budgetBytes = PULL_REQUEST_BODY_MAX_BYTES - SUMMARY_MAX_BYTES - 2_000): string[] {
+  const digest = workflow.candidate?.digest;
+  const currentReviews = (workflow.reviews ?? []).filter((entry) => entry.candidateDigest === digest);
+  const published = ["PULL_REQUEST", "WAIT_FOR_MERGE", "MERGED"].includes(workflow.stage);
+  const requiredReviewDidNotClear = currentReviews.length === 0 ? published
+    : currentReviews.some((review) => !reviewCleared(review, workflow.acceptedFindings))
+      || (published && workflowReviewRoles(workflow).some((role) => !currentReviews.some((review) => review.role === role)));
+  if (requiredReviewDidNotClear) return ["The required reviews did not finish. Nothing was sent to GitHub. See the task page for review results."];
   const risk = riskShown(workflow, context);
   const linearKey = normalizeIssueKey(context.linearIssueKey);
   const parts = proofParts(workflow, context.proof);
