@@ -1,5 +1,5 @@
 // DEC 254o (b), guided onboarding L2-2 PR 18a: the infrastructure half of Slack company mode (per-company bot tokens for every workspace but the install's own).
-// One stack parameter, SlackCompanyWorkspaces (default "disabled"), named environments only. Every grant here is a separate IAM policy resource carrying the
+// One stack parameter, SlackCompanyWorkspaces (default "disabled"); #1171: in the legacy deployment (production) too, as `production`. Every grant here is a separate IAM policy resource carrying the
 // SlackCompanyWorkspacesOn condition, so with the switch off CloudFormation creates none of them and no role gains anything; each Slack consumer only gets the
 // switch's value as SLACK_COMPANY_WORKSPACES ("disabled" while off; the code also requires COMPANY_SIGNIN=enabled before it acts on it).
 import { ArnFormat, CfnCondition, CfnParameter, Fn, Stack, Token, aws_iam as iam } from "aws-cdk-lib";
@@ -39,8 +39,8 @@ export class SlackCompanyWorkspaces extends Construct {
 
   constructor(scope: Construct, id: string, props: SlackCompanyWorkspacesProps) {
     super(scope, id);
-    if (props.naming.env === undefined) throw new Error("Slack company mode exists only in named environments");
-    this.env = props.naming.env;
+    // #1171: the legacy deployment (production) too; its secret family is agentx/production/slack-workspaces/*, the path DeveloperIdentity writes there (developer-signin.ts props.env).
+    this.env = props.naming.env ?? "production";
     const stack = Stack.of(this);
     // Written out (SLACK_COMPANY_WORKSPACES_PARAMETER): tests/contract/config-keys.test.ts reads the declaration for agentx config set slack.companyWorkspaces.
     this.parameter = new CfnParameter(stack, "SlackCompanyWorkspaces", {

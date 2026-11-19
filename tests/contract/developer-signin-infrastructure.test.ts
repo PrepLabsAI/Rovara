@@ -387,7 +387,7 @@ describe("the legacy deployment (production)", () => {
     // The routes and their throttle, as in named environments; still only the one admin JWT authorizer.
     expect(ofType(legacy, "AWS::ApiGatewayV2::Route").map(([, r]) => r.Properties.RouteKey)).toEqual(expect.arrayContaining(["ANY /v1/auth/{proxy+}", "ANY /v1/dev/{proxy+}", "ANY /review/{proxy+}"]));
     expect(ofType(legacy, "AWS::ApiGatewayV2::Authorizer")).toHaveLength(1);
-    // Lane L12, #1148: the core's /v1/app/* route, in the legacy (production) template too (Rovara Cloud's project page and Inbox call it).
+    // Lane L12, #1148: the core's /v1/app/* route, in the legacy (production) template too (the web app's project page and Inbox call it).
     expect(ofType(legacy, "AWS::ApiGatewayV2::Route").map(([, r]) => r.Properties.RouteKey)).toContain("ANY /v1/app/{proxy+}");
   });
 });

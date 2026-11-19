@@ -2,8 +2,8 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 
 // #1148: production (the legacy template) has Code's core engine as a named environment does, switched OFF by default: the CoreEngine switch, the core dispatch and lessons
-// queues under production's fixed names, the job schedules (disabled while the switch is off), the dispatcher's core consumer (disabled while off), the /v1/app/* route Rovara
-// Cloud's project page and Inbox call, the saved environment images' registry side, the outbox stream's ORG# filter, and the task-token and policy-hook keys.
+// queues under production's fixed names, the job schedules (disabled while the switch is off), the dispatcher's core consumer (disabled while off), the /v1/app/* route the web
+// app's project page and Inbox call, the saved environment images' registry side, the outbox stream's ORG# filter, and the task-token and policy-hook keys.
 
 type Resource = { Type: string; Properties: Record<string, unknown>; Condition?: string };
 interface Template { Resources: Record<string, Resource>; Parameters: Record<string, { Default?: unknown; AllowedPattern?: string }>; Conditions: Record<string, unknown> }

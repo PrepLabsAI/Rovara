@@ -110,6 +110,21 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
       ],
     },
+    "SlackCompanyModeOnBF1D0D56": {
+      "Fn::And": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "SlackCompanyWorkspaces",
+            },
+            "enabled",
+          ],
+        },
+        {
+          "Condition": "CompanySignInSwitchOn6E5AE93A",
+        },
+      ],
+    },
   },
   "Description": "AgentX authenticated control plane and durable dispatch foundation",
   "Outputs": {
@@ -249,6 +264,16 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
     },
     "SlackAdapterSecretName": {
       "Value": "agentx/production/channel-adapter/slack",
+    },
+    "SlackCompanyStateTableName": {
+      "Value": {
+        "Ref": "State1C20CC9A",
+      },
+    },
+    "SlackCompanyTeamId": {
+      "Value": {
+        "Ref": "SlackTeamId",
+      },
     },
     "SlackEventsUrl": {
       "Value": {
@@ -644,6 +669,15 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Description": "accept: answer mentions a person posts through another app with their own Slack token; ignore: answer only typed mentions",
       "Type": "String",
     },
+    "SlackCompanyWorkspaces": {
+      "AllowedValues": [
+        "enabled",
+        "disabled",
+      ],
+      "Default": "disabled",
+      "Description": "enabled: Slack workspaces other than SlackTeamId use their company's own bot token and company checks (needs company sign-in); disabled: only the install's workspace is served, as before",
+      "Type": "String",
+    },
     "SlackMemberWorkspaceLimit": {
       "Default": 3,
       "Description": "Maximum Slack thread workspaces one channel member may start",
@@ -953,6 +987,14 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                   ",ct=",
                   {
                     "Ref": "CoreTaskCapUsd",
+                  },
+                  ",cw=",
+                  {
+                    "Fn::If": [
+                      "SlackCompanyModeOnBF1D0D56",
+                      "1",
+                      "0",
+                    ],
                   },
                   ",gh=",
                   {
@@ -2658,6 +2700,13 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "Environment": {
           "Variables": {
             "ADMIN_CHANGES": "enabled",
+            "AGENTX_ENV": {
+              "Fn::If": [
+                "SlackCompanyModeOnBF1D0D56",
+                "production",
+                "",
+              ],
+            },
             "BROKER_FUNCTION_NAME": {
               "Ref": "BrokerE1355FD6",
             },
@@ -2719,12 +2768,28 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                 "disabled",
               ],
             },
+            "DEVELOPER_SIGNIN_TABLE_NAME": {
+              "Fn::If": [
+                "SlackCompanyModeOnBF1D0D56",
+                {
+                  "Ref": "DeveloperSignInTable26CE739E",
+                },
+                "",
+              ],
+            },
             "SHARED_TASKS": "disabled",
             "SLACK_ADAPTER_TEAM_ID": {
               "Ref": "SlackTeamId",
             },
             "SLACK_APP_POSTED_MESSAGES": {
               "Ref": "SlackAppPostedMessages",
+            },
+            "SLACK_COMPANY_WORKSPACES": {
+              "Fn::If": [
+                "SlackCompanyModeOnBF1D0D56",
+                "enabled",
+                "disabled",
+              ],
             },
             "SLACK_THREADS_TABLE_NAME": {
               "Ref": "SlackThreads36E14C1E",
@@ -5424,6 +5489,13 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "SLACK_ADAPTER_TEAM_ID": {
               "Ref": "SlackTeamId",
             },
+            "SLACK_COMPANY_WORKSPACES": {
+              "Fn::If": [
+                "SlackCompanyModeOnBF1D0D56",
+                "enabled",
+                "disabled",
+              ],
+            },
             "SLACK_SECRET_ARN": {
               "Ref": "SlackSecretEA96F13F",
             },
@@ -5432,6 +5504,15 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "SLACK_VIA_CHANNEL": {
               "Ref": "SlackViaChannel",
+            },
+            "STATE_TABLE_NAME": {
+              "Fn::If": [
+                "SlackCompanyModeOnBF1D0D56",
+                {
+                  "Ref": "State1C20CC9A",
+                },
+                "",
+              ],
             },
             "TASK_TOKEN_KEY_ARN": {
               "Fn::GetAtt": [
@@ -6154,6 +6235,13 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
         "Environment": {
           "Variables": {
+            "AGENTX_ENV": {
+              "Fn::If": [
+                "SlackCompanyModeOnBF1D0D56",
+                "production",
+                "",
+              ],
+            },
             "AGENTX_METRICS_NAMESPACE": "AgentX",
             "AGENTX_TASK_PEOPLE_CHANGES_ENABLED": {
               "Ref": "TaskPeopleChangesEnabled",
@@ -6215,6 +6303,13 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "SLACK_ADAPTER_TEAM_ID": {
               "Ref": "SlackTeamId",
+            },
+            "SLACK_COMPANY_WORKSPACES": {
+              "Fn::If": [
+                "SlackCompanyModeOnBF1D0D56",
+                "enabled",
+                "disabled",
+              ],
             },
             "SLACK_SECRET_ARN": {
               "Ref": "SlackSecretEA96F13F",
@@ -10578,6 +10673,13 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
         "Environment": {
           "Variables": {
+            "AGENTX_ENV": {
+              "Fn::If": [
+                "SlackCompanyModeOnBF1D0D56",
+                "production",
+                "",
+              ],
+            },
             "AGENTX_METRICS_NAMESPACE": "AgentX",
             "BUILT_IN_ADAPTER": {
               "Ref": "SlackViaChannel",
@@ -10629,6 +10731,13 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "SLACK_ADAPTER_TEAM_ID": {
               "Ref": "SlackTeamId",
+            },
+            "SLACK_COMPANY_WORKSPACES": {
+              "Fn::If": [
+                "SlackCompanyModeOnBF1D0D56",
+                "enabled",
+                "disabled",
+              ],
             },
             "SLACK_SECRET_ARN": {
               "Ref": "SlackSecretEA96F13F",
@@ -11782,6 +11891,674 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::CloudWatch::Alarm",
     },
+    "SlackCompanyModeBroker5AF74ADF": {
+      "Condition": "SlackCompanyModeOnBF1D0D56",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/production/slack-workspaces/*",
+                  ],
+                ],
+              },
+              "Sid": "ReadSlackWorkspaceTokens",
+            },
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "SlackSecretEA96F13F",
+              },
+              "Sid": "ReadInstallSlackToken",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "slack-company-workspaces-broker",
+        "Roles": [
+          {
+            "Ref": "BrokerServiceRole1938BCC9",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SlackCompanyModeChannelApi057978C5": {
+      "Condition": "SlackCompanyModeOnBF1D0D56",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/production/slack-workspaces/*",
+                  ],
+                ],
+              },
+              "Sid": "ReadSlackWorkspaceTokens",
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "SLACK_TEAM#*",
+                    "SLACK_WORKSPACE_BINDING",
+                    "ORG#*#CHANNEL_LINK#slack/*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+              "Sid": "ReadSlackWorkspaceBindingsAndLinks",
+            },
+            {
+              "Action": "dynamodb:Query",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "companyId",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "PROJECT#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                  "dynamodb:LeadingKeys": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+              "Sid": "ReadProjectCompany",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "slack-company-workspaces-channelapi",
+        "Roles": [
+          {
+            "Ref": "ChannelApiIngressServiceRole2BBC113A",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SlackCompanyModeChannelApiCompanyProjects22DDBD31": {
+      "Condition": "SlackCompanyModeOnBF1D0D56",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "dynamodb:Query",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "companyId",
+                    "candidate",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "ORG#org_????????????????????#PROJECT#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                  "dynamodb:LeadingKeys": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+              "Sid": "ReadCompanyProjectRevisions",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "slack-company-workspaces-channelapicompanyprojects",
+        "Roles": [
+          {
+            "Ref": "ChannelApiIngressServiceRole2BBC113A",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SlackCompanyModeChannelApiMembers684C47C2": {
+      "Condition": "SlackCompanyModeOnBF1D0D56",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "COMPANY_MEMBER#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+              "Sid": "ReadCompanyMemberships",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "slack-company-workspaces-channelapimembers",
+        "Roles": [
+          {
+            "Ref": "ChannelApiIngressServiceRole2BBC113A",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SlackCompanyModeDeveloperIdentity8A474833": {
+      "Condition": "SlackCompanyModeOnBF1D0D56",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "SLACK_TEAM#*",
+                    "SLACK_WORKSPACE_BINDING",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+              "Sid": "ReadSlackWorkspaceBindings",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "slack-company-workspaces-developeridentity",
+        "Roles": [
+          {
+            "Ref": "DeveloperSignInFunctionServiceRole47322E59",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SlackCompanyModeDeveloperTaskNotifierF02DDC6F": {
+      "Condition": "SlackCompanyModeOnBF1D0D56",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/production/slack-workspaces/*",
+                  ],
+                ],
+              },
+              "Sid": "ReadSlackWorkspaceTokens",
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "SLACK_TEAM#*",
+                    "SLACK_WORKSPACE_BINDING",
+                    "ORG#org_????????????????????#WORKSPACE#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+              "Sid": "ReadSlackWorkspaceBindings",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "slack-company-workspaces-developertasknotifier",
+        "Roles": [
+          {
+            "Ref": "DeveloperTaskNotifierFunctionServiceRole7247721D",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SlackCompanyModeSessionReconciler15C78111": {
+      "Condition": "SlackCompanyModeOnBF1D0D56",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/production/slack-workspaces/*",
+                  ],
+                ],
+              },
+              "Sid": "ReadSlackWorkspaceTokens",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "slack-company-workspaces-sessionreconciler",
+        "Roles": [
+          {
+            "Ref": "SessionsReconcilerServiceRole4A19455A",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SlackCompanyModeSlackIngress20718FF7": {
+      "Condition": "SlackCompanyModeOnBF1D0D56",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/production/slack-workspaces/*",
+                  ],
+                ],
+              },
+              "Sid": "ReadSlackWorkspaceTokens",
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "SLACK_TEAM#*",
+                    "SLACK_WORKSPACE_BINDING",
+                    "ORG#*#CHANNEL_LINK#slack/*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+              "Sid": "ReadSlackWorkspaceBindingsAndLinks",
+            },
+            {
+              "Action": "dynamodb:Query",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "companyId",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "PROJECT#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                  "dynamodb:LeadingKeys": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+              "Sid": "ReadProjectCompany",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "slack-company-workspaces-slackingress",
+        "Roles": [
+          {
+            "Ref": "SlackIngressServiceRole8DA92EC7",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SlackCompanyModeSlackIngressCompanyBindingsFE0B0B1B": {
+      "Condition": "SlackCompanyModeOnBF1D0D56",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "ORG#org_????????????????????#SLACK_BINDING#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+              "Sid": "ReadCompanySlackChannelBindings",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "slack-company-workspaces-slackingresscompanybindings",
+        "Roles": [
+          {
+            "Ref": "SlackIngressServiceRole8DA92EC7",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SlackCompanyModeSlackIngressCompanyProjects229C896B": {
+      "Condition": "SlackCompanyModeOnBF1D0D56",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "dynamodb:Query",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "companyId",
+                    "candidate",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "ORG#org_????????????????????#PROJECT#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                  "dynamodb:LeadingKeys": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+              "Sid": "ReadCompanyProjectRevisions",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "slack-company-workspaces-slackingresscompanyprojects",
+        "Roles": [
+          {
+            "Ref": "SlackIngressServiceRole8DA92EC7",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SlackCompanyModeSlackIngressMembers394B4740": {
+      "Condition": "SlackCompanyModeOnBF1D0D56",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "COMPANY_MEMBER#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+              "Sid": "ReadCompanyMemberships",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "slack-company-workspaces-slackingressmembers",
+        "Roles": [
+          {
+            "Ref": "SlackIngressServiceRole8DA92EC7",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SlackCompanyModeSlackOrchestratorF6E6A0DD": {
+      "Condition": "SlackCompanyModeOnBF1D0D56",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/production/slack-workspaces/*",
+                  ],
+                ],
+              },
+              "Sid": "ReadSlackWorkspaceTokens",
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "SLACK_TEAM#*",
+                    "SLACK_WORKSPACE_BINDING",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+              "Sid": "ReadSlackWorkspaceBindings",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "slack-company-workspaces-slackorchestrator",
+        "Roles": [
+          {
+            "Ref": "SlackOrchestratorTaskRole2372FE40",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
     "SlackDeadLettersAlarm9EF9F079": {
       "Properties": {
         "AlarmActions": [
@@ -11889,6 +12666,13 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "Environment": {
           "Variables": {
             "ADMIN_CHANGES": "enabled",
+            "AGENTX_ENV": {
+              "Fn::If": [
+                "SlackCompanyModeOnBF1D0D56",
+                "production",
+                "",
+              ],
+            },
             "BROKER_FUNCTION_NAME": {
               "Ref": "BrokerE1355FD6",
             },
@@ -11905,16 +12689,41 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                 "disabled",
               ],
             },
+            "DEVELOPER_SIGNIN_TABLE_NAME": {
+              "Fn::If": [
+                "SlackCompanyModeOnBF1D0D56",
+                {
+                  "Ref": "DeveloperSignInTable26CE739E",
+                },
+                "",
+              ],
+            },
             "SHARED_TASKS": "enabled",
             "SLACK_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
             "SLACK_APP_POSTED_MESSAGES": {
               "Ref": "SlackAppPostedMessages",
+            },
+            "SLACK_COMPANY_WORKSPACES": {
+              "Fn::If": [
+                "SlackCompanyModeOnBF1D0D56",
+                "enabled",
+                "disabled",
+              ],
             },
             "SLACK_REQUEST_QUEUE_URL": {
               "Ref": "SlackRequestQueueCC82C864",
             },
             "SLACK_SECRET_ARN": {
               "Ref": "SlackSecretEA96F13F",
+            },
+            "SLACK_TEAM_ID": {
+              "Fn::If": [
+                "SlackCompanyModeOnBF1D0D56",
+                {
+                  "Ref": "SlackTeamId",
+                },
+                "",
+              ],
             },
             "SLACK_THREADS_TABLE_NAME": {
               "Ref": "SlackThreads36E14C1E",
@@ -15354,7 +16163,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     },
     "build": {
       "commands": [
-        "if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; npm run release:prod -- --region \\"$AWS_REGION\\" --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS"
+        "if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara --github-app-stack AgentXControlPlane --region \\"$AWS_REGION\\"; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; npm run release:prod -- --region \\"$AWS_REGION\\" --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS"
       ]
     }
   },
@@ -15574,6 +16383,27 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                 },
               ],
               "Sid": "ProductionWorkerRepository",
+            },
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/github-apps/*",
+                  ],
+                ],
+              },
+              "Sid": "ReadGithubAppKeyForCiProof",
             },
             {
               "Action": "cloudformation:DescribeStacks",
@@ -15925,6 +16755,15 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
       "Default": "",
       "Type": "String",
     },
+    "CompanySignIn": {
+      "AllowedValues": [
+        "enabled",
+        "disabled",
+      ],
+      "Default": "disabled",
+      "Description": "The control plane's CompanySignIn switch, for the Slack service: enabled or disabled (agentx config set company.signIn sets both)",
+      "Type": "String",
+    },
     "ControlPlaneUrl": {
       "AllowedPattern": "^https://.+$",
       "Type": "String",
@@ -16002,6 +16841,27 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
     "SlackAdapterSecretName": {
       "AllowedPattern": "^$|^agentx/[a-z0-9-]+/channel-adapter/slack$",
       "Default": "",
+      "Type": "String",
+    },
+    "SlackCompanyStateTableName": {
+      "AllowedPattern": "^$|^[A-Za-z0-9_.-]{3,255}$",
+      "Default": "",
+      "Description": "SlackCompanyStateTableName output of the control plane (Slack company mode)",
+      "Type": "String",
+    },
+    "SlackCompanyTeamId": {
+      "AllowedPattern": "^$|^T[A-Z0-9]{2,31}$",
+      "Default": "",
+      "Description": "SlackCompanyTeamId output of the control plane (Slack company mode)",
+      "Type": "String",
+    },
+    "SlackCompanyWorkspacesState": {
+      "AllowedValues": [
+        "enabled",
+        "disabled",
+      ],
+      "Default": "disabled",
+      "Description": "Slack company mode for the Slack service, set with the control plane's SlackCompanyWorkspaces (agentx config set slack.companyWorkspaces); the service also needs CompanySignIn",
       "Type": "String",
     },
     "SlackRequestQueueUrl": {
@@ -16646,6 +17506,34 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
                 "Name": "AGENTX_MODEL_FALLBACK",
                 "Value": {
                   "Ref": "ModelFallback",
+                },
+              },
+              {
+                "Name": "SLACK_COMPANY_WORKSPACES",
+                "Value": {
+                  "Ref": "SlackCompanyWorkspacesState",
+                },
+              },
+              {
+                "Name": "STATE_TABLE_NAME",
+                "Value": {
+                  "Ref": "SlackCompanyStateTableName",
+                },
+              },
+              {
+                "Name": "SLACK_TEAM_ID",
+                "Value": {
+                  "Ref": "SlackCompanyTeamId",
+                },
+              },
+              {
+                "Name": "AGENTX_ENV",
+                "Value": "production",
+              },
+              {
+                "Name": "COMPANY_SIGNIN",
+                "Value": {
+                  "Ref": "CompanySignIn",
                 },
               },
             ],

@@ -33,12 +33,15 @@ function policyStatements(template: Template): PolicyStatement[] {
   }>).flatMap((policy) => policy.Properties.PolicyDocument.Statement);
 }
 
-function statementsForRole(template: Template, roleLogicalIdPrefix: string): PolicyStatement[] {
-  return (Object.values(template.findResources("AWS::IAM::Policy")) as Array<{
-    Properties: { PolicyDocument: { Statement: PolicyStatement[] }; Roles: Array<{ Ref?: string }> };
-  }>)
-    .filter((policy) => policy.Properties.Roles.some((role) => role.Ref?.startsWith(roleLogicalIdPrefix)))
-    .flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+function statementsForRole(template: Template, roleLogicalIdPrefix: string, options: { switchedOff?: boolean } = {}): PolicyStatement[] {
+  return (Object.entries(template.findResources("AWS::IAM::Policy")) as Array<[string, {
+    Condition?: string; Properties: { PolicyDocument: { Statement: PolicyStatement[] }; Roles: Array<{ Ref?: string }> };
+  }]>)
+    // #1171: with `switchedOff`, the grants that exist only under a switch's CloudFormation condition (Slack company mode's, slack-company-workspaces.ts) are left out:
+    // with the switch off (its default) CloudFormation creates none of them. They are pinned on their own in slack-company-workspaces-infrastructure.test.ts.
+    .filter(([id, policy]) => !(options.switchedOff === true && policy.Condition !== undefined && id.startsWith("SlackCompanyMode")))
+    .filter(([, policy]) => policy.Properties.Roles.some((role) => role.Ref?.startsWith(roleLogicalIdPrefix)))
+    .flatMap(([, policy]) => policy.Properties.PolicyDocument.Statement);
 }
 
 const actionsOf = (statement: PolicyStatement) => [statement.Action].flat();
@@ -187,7 +190,8 @@ describe("hosted Slack control-plane infrastructure", () => {
         Statement: Match.arrayWith([Match.objectLike({ Principal: { Service: "ecs-tasks.amazonaws.com" } })]),
       }),
     });
-    const statements = statementsForRole(template, "SlackOrchestratorTaskRole");
+    // Slack company mode off (its default): its read of the team's binding (#1171) exists only under the switch's condition.
+    const statements = statementsForRole(template, "SlackOrchestratorTaskRole", { switchedOff: true });
     const invoke = statements.find((statement) => actionsOf(statement).includes("execute-api:Invoke"));
     expect(JSON.stringify(invoke?.Resource)).toContain("/*/*/v1/service/*");
     expect(JSON.stringify(statements)).not.toMatch(/"State[0-9A-F]{8}"/);
@@ -195,7 +199,8 @@ describe("hosted Slack control-plane infrastructure", () => {
   });
 
   it("limits the ingress Lambda to reading items by key from the state table: channel bindings, shared threads and task buttons", () => {
-    const statements = statementsForRole(template, "SlackIngress");
+    // Slack company mode off (its default): its project-company Query (#1171) exists only under the switch's condition.
+    const statements = statementsForRole(template, "SlackIngress", { switchedOff: true });
     const stateAccess = statements.filter((statement) => JSON.stringify(statement.Resource).match(/"State[0-9A-F]{8}"/));
     for (const statement of stateAccess) expect(actionsOf(statement)).toEqual(["dynamodb:GetItem"]);
     const keys = stateAccess.map((statement) => (statement.Condition as Record<string, Record<string, unknown>>)["ForAllValues:StringLike"]?.["dynamodb:LeadingKeys"]);
@@ -482,7 +487,8 @@ describe("production release pipeline", () => {
     const buildSpec = project?.Properties.Source.BuildSpec ?? "";
     expect(buildSpec).toContain("npm run release:prod");
     // #1145: --skip-checks only behind the CI proof; without it every check runs.
-    expect(buildSpec).toContain("if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; ");
+    expect(buildSpec).toContain("if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara --github-app-stack AgentXControlPlane --region ");
+    expect(buildSpec).toContain("; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; ");
     expect(buildSpec).toContain("--require-existing-foundation $RELEASE_CHECKS");
     expect(buildSpec.match(/--skip-checks/gu)).toHaveLength(1);
     expect(buildSpec).toContain("--reuse-unchanged-worker");
