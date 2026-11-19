@@ -91,14 +91,23 @@ export function createMilestoneService(options: Parameters<typeof createDocument
 // ---- the task as the merge core reads it
 
 /** The part of the task record the merge core reads. A task of another company reads as absent. */
-function mergeTaskOf(record: TaskRecord, companyId: OrgId): (MergeTask & { orgId: OrgId }) | undefined {
+export function mergeTaskOf(record: TaskRecord, companyId: OrgId): (MergeTask & { orgId: OrgId }) | undefined {
   if (record.companyId !== companyId) return undefined;
   return {
     taskId: record.taskId, orgId: companyId, project: record.project, startingRevision: record.startingRevision, workspaceId: record.workspaceId,
     ...(record.sessionId === undefined ? {} : { sessionId: record.sessionId }), ...(record.closedAt === undefined ? {} : { closedAt: record.closedAt }),
     ...(record.releasedAt === undefined ? {} : { releasedAt: record.releasedAt }), ...(record.workflow === undefined ? {} : { workflow: record.workflow }),
     ownerId: record.workflow?.ownerId ?? record.ownerKey, ownerName: record.developerName ?? "the owner", creatorId: record.developerId,
+    ...(record.secondOpinion === undefined ? {} : { secondOpinion: record.secondOpinion }), ...(record.secondReviewAcknowledged === undefined ? {} : { secondReviewAcknowledged: record.secondReviewAcknowledged }),
   };
+}
+
+/**
+ * DEC 254zzz94/104: makes a task's tracking row due now (as the service's `wake`), for a caller that has no service at hand: the hosted Merge button, right after a merge, so the next sweep records the
+ * merge in the task's workflow (MERGED, with its milestone), and when the merge core asks for a branch to be brought up to date. Does nothing for a task with no tracking row. Best effort.
+ */
+export async function wakeMergeTracking(store: Pick<TaskFlowDeps["store"], "update">, taskId: string, now: number): Promise<void> {
+  await store.update({ key: recoveryRowKey(taskId), ops: [change.set("nextAttemptAt", now), change.set("quiet", 0)], condition: when.and(when.present(), when.eq("kind", "tracking")) }).catch(() => undefined);
 }
 
 /** A budget for one sweep: a request allowance and a deadline shared by everything it reads. `stop` ends its timer. */

@@ -128,6 +128,8 @@ export interface ReadinessInput {
   codeOwners?: ReadonlyMap<string, CodeOwnerVerdict> | undefined;
   /** SR-1: the words of the refusal while an `on` second review that did not run waits for the task owner to acknowledge it (`secondReviewMergeWait`). Absent: nothing waits. */
   secondReviewWait?: string | undefined;
+  /** DEC 254zzz94/104: the checks must have PASSED ("no CI" is not enough). The hosted Merge button sets it; absent: today's rule (`ciAllowsMerge`). */
+  requirePassingCi?: boolean | undefined;
 }
 
 export type Readiness = { ready: true } | { ready: false; message: string };
@@ -150,7 +152,7 @@ function codeOwnerRefusal(verdict: CodeOwnerVerdict | undefined): string | undef
   return "unreadable" in verdict ? M.codeOwnersUnreadable : M.needsCodeOwner(verdict.owners);
 }
 
-function workflowRefusal(workflow: ReadinessWorkflow): string | undefined {
+export /* the hosted Merge button reuses it (DEC 254zzz94) */ function workflowRefusal(workflow: ReadinessWorkflow): string | undefined {
   if (workflow.stage === "MERGED" || workflow.stage === "CLOSED") return M.taskClosed;
   // The base branch was merged in and the merged code needs its checks and reviews again: the owner's Retry checks, not "still changing".
   if (workflow.stage === "VERIFY" && workflow.state === "BLOCKED" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.baseMergedRecheck) return M.baseMerged;
@@ -186,7 +188,7 @@ export function mergeReadiness(input: ReadinessInput): Readiness {
       : pr.ci === "unreadable" ? M.ciNotReadable
       : pr.ci === "required_missing" ? M.requiredMissing
       : pr.draft ? (pr.ci === "none" ? M.draftNoCi : M.draft)
-      : !ciAllowsMerge(pr.ci) ? M.checks
+      : !ciAllowsMerge(pr.ci) || (input.requirePassingCi === true && pr.ci !== "passing") ? M.checks
       : pr.branch === "conflicted" ? M.conflicted(pr.baseBranch)
       : !approval.approved ? approvalMessage(approval.reason, pr.repositoryId, input)
       : owner !== undefined ? owner
@@ -255,6 +257,8 @@ export interface MergeDependencies {
    * it. An install turns it on one release after the readers shipped.
    */
   orderInView?: boolean;
+  /** DEC 254zzz94/104: readiness needs the checks to have PASSED, never "no CI" (`ReadinessInput.requirePassingCi`). The hosted Merge button sets it; absent: today's rule. */
+  requirePassingCi?: boolean;
 }
 
 const byRepository = <T extends { repositoryId: string; number: number }>(list: readonly T[]): T[] =>
@@ -332,7 +336,7 @@ async function readinessFromItems(
   const wait = deps.mergeWait?.(task);
   const readiness = mergeReadiness({
     pullRequests: facts, approvals, workflow: task.workflow, recordedBases: bases, presser, requirePresserAccount: deps.requirePresserAccount ?? true,
-    allowSelfApproval: settings.allowSelfApproval, requesterName: requesterNameOf(task), ...(wait === undefined ? {} : { secondReviewWait: wait }),
+    allowSelfApproval: settings.allowSelfApproval, requesterName: requesterNameOf(task), ...(wait === undefined ? {} : { secondReviewWait: wait }), ...(deps.requirePassingCi === true ? { requirePassingCi: true } : {}),
   });
   return { readiness, items: [...items], settings, entries };
 }
@@ -566,6 +570,40 @@ export async function pressMerge(
   return { status: "MERGED", pullRequests: merged };
 }
 
+/** DEC 254zzz104: the method the audit names for a press made by a person on the Rovara website, whose standing the caller checked (no approver proof). */
+export const WEBSITE_PRESS_METHOD = "rovara-website-press";
+
+/**
+ * Owner DEC 254zzz94/104: a person's press of Merge with NO approver proof. The CALLER has already decided the person may merge (the hosted Merge button: the website's own client, and the task owner, a co-owner,
+ * a project admin or a company admin, read live) and holds the task's merge lock. Every other gate is the merge core's own, exactly as `pressMerge` runs them: the request made again from what tracking stored
+ * now (closed or released task, scope hold, stored readiness with approvals, self-approval, code owners, the recorded base, the second-review wait, the merge order), the task read again at the revision just
+ * prepared, the scope hold read again, then the single merge path (`mergeTask`: the linked pull request, a FRESH host read of every pull request with Rovara's own Check left out, readiness for the exact
+ * heads, the tier gate, a claim per pull request with its audit fact, the merge at the checked head). Only `Approvers.verify` is not asked: there is no proof to verify.
+ */
+export async function pressMergeAsPerson(
+  deps: MergeDependencies,
+  input: {
+    taskId: string; requestId: string; presserPersonId: string; orderOverride?: boolean | undefined;
+    /** What the person was SHOWN: the heads (a push since is "it changed", never merged) and the risk level (a different level now is "it changed"). */
+    expectedHeads?: ReadonlyArray<{ repositoryId: string; number: number; headSha: string }> | undefined; risk?: MergeRisk["level"] | undefined;
+  },
+): Promise<MergePressResult> {
+  const prepared = await prepareMerge(deps, input);
+  if (input.risk !== undefined && input.risk !== prepared.risk.level) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
+  // The approvers point's own count still holds: a merge that needs more than one approver is never one person's press.
+  if (prepared.requirement.minApprovers !== 1) throw agentXError("FORBIDDEN", NEEDS_MORE_APPROVERS);
+  const task = await deps.host.loadTask(input.taskId);
+  if (task === undefined || task.orgId === undefined || !tracksMerge(task.workflow)) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
+  if (task.closedAt !== undefined || task.releasedAt !== undefined) throw agentXError("MERGE_NOT_READY", M.taskClosed);
+  if (task.workflow.revision !== prepared.request.revision) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
+  if (await scopeHoldOf({ store: deps.store }, task)) throw agentXError("MERGE_NOT_READY", SCOPE_HELD);
+  const merged = await mergeTask(deps, task as MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, prepared.subject, {
+    decidedBy: input.presserPersonId, occurrence: input.requestId, proof: undefined, method: WEBSITE_PRESS_METHOD, mergeMethod: prepared.mergeMethod, requestId: input.requestId, tier: prepared.tier,
+    ...(prepared.mergeOrder === undefined ? {} : { mergeOrder: prepared.mergeOrder }),
+  });
+  return { status: "MERGED", pullRequests: merged };
+}
+
 // ---- merging it
 
 const REFUSAL_REASONS = {
@@ -634,7 +672,7 @@ async function mergeableNow(
   const wait = deps.mergeWait?.(task);
   const readiness = mergeReadiness({
     pullRequests: facts, approvals, workflow: task.workflow, recordedBases: bases, presser, requirePresserAccount: deps.requirePresserAccount ?? true,
-    allowSelfApproval: settings.allowSelfApproval, requesterName: requesterNameOf(task), codeOwners, ...(wait === undefined ? {} : { secondReviewWait: wait }),
+    allowSelfApproval: settings.allowSelfApproval, requesterName: requesterNameOf(task), codeOwners, ...(wait === undefined ? {} : { secondReviewWait: wait }), ...(deps.requirePassingCi === true ? { requirePassingCi: true } : {}),
   });
   if (!readiness.ready) throw agentXError("MERGE_NOT_READY", readiness.message);
   // The change tier is computed again, from the host's view of the change as it is now: a change that has grown past the tier the person approved at is not merged.
@@ -643,7 +681,7 @@ async function mergeableNow(
   return { plan: plan.filter((_, index) => facts[index]!.state !== "merged"), settings, alreadyMerged: false, mergedBefore, entries };
 }
 
-const SCOPE_HELD = "This change grew from small to risky, so it waits for a person to keep, remove or stop it, and for the code and security reviews to pass.";
+export const SCOPE_HELD = "This change grew from small to risky, so it waits for a person to keep, remove or stop it, and for the code and security reviews to pass.";
 const FLOOR_OWED = "A reviewer has not yet answered the security questions for the current version of this change, so it can't be merged yet.";
 const HEAD_UNBOUND = "Rovara couldn't tell exactly which version of the code this is, so nothing was merged.";
 const TIER_UNREADABLE = "Rovara couldn't read the changed files from the code host just now, so nothing was merged. Try again in a moment.";
@@ -846,7 +884,7 @@ const hashNumber = (seed: string): number => Number.parseInt(createHash("sha256"
  */
 async function mergeTask(
   deps: MergeDependencies, tracked: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, subject: MergeSubject,
-  who: { decidedBy: string; occurrence: string; proof: ApprovalProof; method: string; mergeMethod: CodeSettings["mergeMethod"]; requestId: string; tier?: TierLevel | undefined; mergeOrder?: readonly string[] },
+  who: { decidedBy: string; occurrence: string; proof: ApprovalProof | undefined; method: string; mergeMethod: CodeSettings["mergeMethod"]; requestId: string; tier?: TierLevel | undefined; mergeOrder?: readonly string[] },
 ): Promise<Array<{ repositoryId: string; number: number }>> {
   const { plan: checkedPlan, settings, alreadyMerged, mergedBefore, entries } = await mergeableNow(deps, tracked, subject, who.decidedBy, who.tier);
   // MR3: the order the person approved (bound into the digest the proof verified): providers first, so a pull request is never merged before one it depends on.
