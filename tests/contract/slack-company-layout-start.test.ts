@@ -217,6 +217,26 @@ describe("DEC 254zzz98 (delta review H1): a named company's Slack thread never r
     expect(w.db.get(`MEMBER#${ownerKeyForSubject("slack-thread", THREAD)}`, "PROJECT#demo-tasklog")).toMatchObject({ role: "developer" });
   });
 
+  it("round-3 M1: a built-in namesake never blocks the company's routes that read no legacy revision (the core's quick start, Slack answers, thread notes)", async () => {
+    const w = await world({ installCompany: A });
+    w.db.set(companyBinding(A));
+    const service = { principal: (await import("../support/slack-broker.js")).orchestratorPrincipal, thread: THREAD, slackUser: USER };
+    const routes = [
+      { method: "POST", path: "/v1/service/workflows/quick-start", body: { requestId: randomUUID(), instructions: "fix it" } },
+      { method: "POST", path: "/v1/service/slack/answer", body: { requestId: randomUUID(), text: "hello" } },
+      { method: "POST", path: "/v1/service/tasks/thread-notes/answered", body: { taskId: randomUUID(), messageTs: "1695500000.000009" } },
+    ];
+    const answers = async () => Promise.all(routes.map(async (route) => JSON.stringify((await call(w.handler, { ...route, service })).body)));
+    const without = await answers();
+    w.db.set(builtInNamesake());
+    const withNamesake = await answers();
+    for (const [index, answer] of withNamesake.entries()) {
+      expect(answer, routes[index]!.path).not.toContain("Slack channel is not bound to a project");
+      // The same answer as with no namesake at all (request ids aside).
+      expect(answer.replace(/"requestId":"[^"]*"/, ""), routes[index]!.path).toBe(without[index]!.replace(/"requestId":"[^"]*"/, ""));
+    }
+  });
+
   it("the built-in company's thread (legacy binding) is unchanged: no company, no check", async () => {
     const w = await world({ installCompany: IMPLICIT_COMPANY_ID });
     w.db.set(builtInNamesake());
