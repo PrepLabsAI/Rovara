@@ -258,7 +258,9 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(created.code, created.stderr).toBe(0);
     try {
       const facts = await docker("inspect", "--format", "{{.HostConfig.NetworkMode}}|{{.HostConfig.Dns}}|{{.HostConfig.CapDrop}}|{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}", "rovara-dc-probe");
-      expect(facts.stdout.trim()).toBe(`${NETWORK}|[${GATEWAY_IP}]|[NET_RAW]|${NETWORK} `);
+      // Docker prints a capability as given (NET_RAW) or normalised (CAP_NET_RAW) by version: the same capability either way (the worker's own check, devcontainer-policy.ts dropsNetRaw, accepts both).
+      const [mode, dnsServers, capDrop, networks] = facts.stdout.trim().split("|");
+      expect([mode, dnsServers, (capDrop ?? "").replace(/CAP_/gu, ""), (networks ?? "").trim()]).toEqual([NETWORK, `[${GATEWAY_IP}]`, "[NET_RAW]", NETWORK]);
     } finally {
       await docker("rm", "--force", "rovara-dc-probe");
     }
@@ -326,13 +328,14 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     // The production worker image has no buildx, so its docker CLI uses the classic builder; a runner that cannot run it must FAIL here, not pass without checking anything.
     expect(probe.code, `the classic builder must work through the wrapper: ${probe.stderr.slice(0, 400)}`).toBe(0);
     const raw = await context("raw", [mustNotConnect("1.1.1.1"), mustNotConnect("8.8.8.8")]);
-    const walled = await wrapperDocker(["build", "-t", "rovara-netg2-raw", raw]);
+    // --no-cache on every build here: a cached RUN layer would not run again, so a control build would "pass" without making its connection.
+    const walled = await wrapperDocker(["build", "--no-cache", "-t", "rovara-netg2-raw", raw]);
     expect(walled.code, `${walled.stdout}\n${walled.stderr}`).toBe(0);
     // The control: the very same build on an ordinary user bridge, with a way out, FAILS at the RUN line because the address connects.
-    const control = await run("docker", ["build", "--network", CONTROL_NETWORK, "-t", "rovara-netg2-control", raw], { env: { ...process.env, DOCKER_BUILDKIT: "0" }, maxBuffer: 10_000_000 }).then(() => 0, (error: { code?: number }) => error.code ?? 1);
-    expect(control, "the control build must reach the raw address, or this test proves nothing").not.toBe(0);
+    const control = await run("docker", ["build", "--no-cache", "--network", CONTROL_NETWORK, "-t", "rovara-netg2-control", raw], { env: { ...process.env, DOCKER_BUILDKIT: "0" }, maxBuffer: 10_000_000 }).then(() => ({ code: 0, err: "" }), (error: { code?: number; stderr?: string }) => ({ code: error.code ?? 1, err: error.stderr ?? "" }));
+    expect(control.code, `the control build must reach the raw address, or this test proves nothing: ${control.err.slice(-400)}`).not.toBe(0);
     const names = await context("names", ["ghcr.io", "registry-1.docker.io", "gcr.io", "123456789012.dkr.ecr.us-west-2.amazonaws.com"].map(mustNotResolve));
-    const named = await wrapperDocker(["build", "-t", "rovara-netg2-names", names]);
+    const named = await wrapperDocker(["build", "--no-cache", "-t", "rovara-netg2-names", names]);
     expect(named.code, `${named.stdout}\n${named.stderr}`).toBe(0);
     // A build that names its own network is refused and runs nothing.
     const own = await wrapperDocker(["build", "--network", "host", "-t", "rovara-netg2-own", raw]);
@@ -457,10 +460,10 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   it("the dev container CLI, given the proxy in its environment, sends its feature download through it: a feature on a raw address is refused by the proxy, and the proxy's log names it (the CLI honours the proxy variables)", async () => {
     const cli = new URL("../../node_modules/@devcontainers/cli/devcontainer.js", import.meta.url).pathname;
     const env = { ...process.env, HTTP_PROXY: `http://${PROXY_HOST}:3128`, HTTPS_PROXY: `http://${PROXY_HOST}:3128`, http_proxy: `http://${PROXY_HOST}:3128`, https_proxy: `http://${PROXY_HOST}:3128`, NO_PROXY: "localhost,127.0.0.1", no_proxy: "localhost,127.0.0.1" };
-    const features = (reference: string) => run(process.execPath, [cli, "features", "info", "manifest", reference, "--log-level", "error"], { env, timeout: 90_000, maxBuffer: 10_000_000 }).then((done) => ({ code: 0, out: done.stdout, err: done.stderr }), (error: { code?: number; stdout?: string; stderr?: string }) => ({ code: error.code ?? 1, out: error.stdout ?? "", err: error.stderr ?? "" }));
+    const features = (reference: string) => run(process.execPath, [cli, "features", "info", "manifest", reference], { env, timeout: 90_000, maxBuffer: 10_000_000 }).then((done) => ({ code: 0, out: done.stdout, err: done.stderr }), (error: { code?: number; stdout?: string; stderr?: string }) => ({ code: error.code ?? 1, out: error.stdout ?? "", err: error.stderr ?? "" }));
     const bad = await features("203.0.113.9/netg3/feature:1");
     expect(bad.code).not.toBe(0);
-    expect(await gatewayLog(), "the CLI must have gone through the proxy").toMatch(/"event":"proxy_refused"[^\n]*"host":"203\.0\.113\.9"/u);
+    expect(await gatewayLog(), `the CLI must have gone through the proxy (its own output: ${`${bad.out}${bad.err}`.slice(0, 400)})`).toMatch(/"event":"proxy_refused"[^\n]*"host":"203\.0\.113\.9"/u);
   }, 300_000);
 
   // LAST: it replaces the gateway with a broken one.
