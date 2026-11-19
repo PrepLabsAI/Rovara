@@ -4,7 +4,7 @@
 //     or could not be checked, is left out (see learned-context.ts);
 //   - the block is labelled, delimited advice (`renderLearnedBlock`); it grants no tool and no permission, and says so.
 // A read that cannot be verified is "not checked", never "stale": a broken object store must not push a good lesson toward retirement.
-import type { LessonStage, LoadReport } from "@agentx/contracts";
+import type { LearnedContext, LessonStage, LoadReport } from "@agentx/contracts";
 import { openBaseCommitSource, type KnowledgeFileSource } from "./knowledge/source.js";
 import { learnedContextSection, type BaseFile, type BaseFileReader } from "./learned-context.js";
 
@@ -50,7 +50,7 @@ export function createBaseFileReader(repositories: readonly LearnedRepository[],
   };
 }
 
-export interface PreparedLearning { section: string; report?: LoadReport }
+export interface PreparedLearning { section: string; report?: LoadReport; /** The lessons that survived the base-commit check (what the block shows), for the knowledge briefing that wraps them. */ context?: LearnedContext }
 
 export async function prepareLearnedContext(input: { raw: unknown; mode: string | undefined; repositories: readonly LearnedRepository[]; deadlineMs?: number; open?: typeof openBaseCommitSource }): Promise<PreparedLearning> {
   const stage = lessonStageOfMode(input.mode);

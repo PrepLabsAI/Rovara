@@ -7,9 +7,12 @@ import { defuseFrameTags, stripHiddenCharacters, SEARCH_TEAM_KNOWLEDGE_TOOL, typ
 const FRAME = /<source-result source="([^"]{0,120})" item="([^"]{0,120})"[^>]*>\n([\s\S]*?)\n<\/source-result>/gu;
 const MAX_ANSWER_CHARS = 220_000;
 
-/** Whether a tool name is one of the context tools (a source tool or the combined search). */
+/** Whether a tool name is one of the context tools (a source tool or the combined search), as the worker's own tool or as a tool of the rovara MCP server. */
 export function isContextToolName(name: unknown): boolean {
-  return typeof name === "string" && (name === SEARCH_TEAM_KNOWLEDGE_TOOL || /^src_[a-z][a-z0-9]{1,15}_/u.test(name));
+  if (typeof name !== "string") return false;
+  // Pi names an MCP tool `mcp__<server>__<tool>`, shortened with a hash past 64 characters: the prefix stays.
+  const bare = name.startsWith("mcp__rovara__") ? name.slice("mcp__rovara__".length) : name;
+  return bare === SEARCH_TEAM_KNOWLEDGE_TOOL || /^src_[a-z][a-z0-9]{1,15}_/u.test(bare);
 }
 
 /** What the model reads for an answer. Text of an `OK` answer that is not framed is framed here, as untrusted. */
@@ -38,6 +41,15 @@ export function stubFor(framedText: string): string {
   for (const match of framedText.matchAll(FRAME)) entries.push(`${match[1]} ${match[2]} · ${kib(Buffer.byteLength(match[3] ?? "", "utf8"))}`);
   if (entries.length === 0) return `[source answer · ${kib(Buffer.byteLength(framedText, "utf8"))} · see Sources]`;
   return `[${entries.join("; ")} · see Sources]`;
+}
+
+/**
+ * `text` with every source frame in it replaced by the stub of that frame, for text that is not a tool result (a conversation summary): the frame's body is gone, and a
+ * frame tag that is left over (a frame cut off in the middle) loses its angle bracket. Text with no frame comes back as it was. There is no pre-check for the word: the defuser reads look-alike spellings (fullwidth brackets, other hyphens) that a plain match would miss.
+ */
+export function stubSourceFrames(text: string): string {
+  const replaced = text.replace(FRAME, (_all, source: string, item: string, body: string) => `[${source} ${item} · ${kib(Buffer.byteLength(body, "utf8"))} · see Sources]`);
+  return neutralizeFrameTags(replaced);
 }
 
 /** The label of the project's first source, cleaned, for the example: the prompt is the same for every customer except for their own names. */

@@ -7,6 +7,7 @@ export * from "./endpoint.js";
 export * from "./engine.js";
 export * from "./generic.js";
 export * from "./github.js";
+export * from "./github-agent-guard.js";
 export * from "./jira.js";
 export * from "./jira-jql.js";
 export * from "./linear.js";

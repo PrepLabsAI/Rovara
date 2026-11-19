@@ -1,0 +1,9 @@
+{
+  "id": "refund-method",
+  "category": "ordinary",
+  "question": "Where does my refund go?",
+  "must_contain": [
+    "original payment method"
+  ],
+  "must_not_contain": []
+}

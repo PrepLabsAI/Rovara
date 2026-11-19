@@ -8,6 +8,8 @@ const APPROVED_ENV = "agentxlivetest123";
 const APPROVED_ACCOUNT = "944937319445";
 const APPROVED_REGION = "us-east-1";
 const DEVELOPER_ATTRIBUTES = ["pk", "sk", "developerId", "provider", "issuer", "subject", "slackUserId", "revoked", "displayName"];
+/** Web task channel C3 (plan 4.1 rule 3, DEC 254u): the reviewed Membership record's fields, exactly the runtime's TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES. */
+const COMPANY_MEMBER_ATTRIBUTES = ["pk", "sk", "entityType", "personId", "companyId", "role", "joinedAt", "joinedVia", "revokedAt", "revokedBy"];
 
 export interface TaskPersonProofProps {
   readonly naming: AgentXNaming;
@@ -16,10 +18,15 @@ export interface TaskPersonProofProps {
   readonly slackSecret: secretsmanager.Secret;
   readonly developerSignInTable: dynamodb.Table;
   readonly dispatcher: lambdaNodejs.NodejsFunction;
+  /** DEC 254zc (6): COMPANY_SIGNIN, SLACK_COMPANY_WORKSPACES and STATE_TABLE_NAME from the switches (company-signin.ts, slack-company-workspaces.ts). */
+  readonly companySwitches?: { readonly COMPANY_SIGNIN: string; readonly SLACK_COMPANY_WORKSPACES: string; readonly STATE_TABLE_NAME: string };
 }
 
 /** Isolated read-only proof workload for the owner-approved named TEST environment. */
 export class TaskPersonProof extends Construct {
+  /** L2-2 (18a): Slack company mode adds its token and binding reads to this role, under this condition too. */
+  readonly role: iam.IRole;
+  readonly install: CfnCondition;
   constructor(scope: Construct, id: string, props: TaskPersonProofProps) {
     super(scope, id);
     if (props.naming.env !== APPROVED_ENV) throw new Error("Task Person proof is available only in agentxlivetest123");
@@ -40,6 +47,8 @@ export class TaskPersonProof extends Construct {
     });
     const proofRoleResource = proofRole.node.defaultChild as iam.CfnRole;
     proofRoleResource.cfnOptions.condition = install;
+    this.role = proofRole;
+    this.install = install;
 
     const proof = new lambdaNodejs.NodejsFunction(this, "Function", {
       runtime: lambda.Runtime.NODEJS_22_X,
@@ -53,6 +62,7 @@ export class TaskPersonProof extends Construct {
         AGENTX_ENV: APPROVED_ENV,
         SLACK_TEAM_ID: props.slackTeamId.valueAsString,
         SLACK_SECRET_ARN: props.slackSecret.secretArn,
+        ...props.companySwitches,
       },
       bundling: {
         externalModules: [],
@@ -91,6 +101,16 @@ export class TaskPersonProof extends Construct {
         Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" },
       },
     };
+    const companyMemberRead = {
+      Effect: "Allow",
+      Action: ["dynamodb:GetItem"],
+      Resource: [props.developerSignInTable.tableArn],
+      Condition: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["COMPANY_MEMBER#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": COMPANY_MEMBER_ATTRIBUTES },
+        Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" },
+      },
+    };
     const denyUnprojectedDeveloperRead = {
       Sid: "DenyGetItemUnlessSpecificAttributes",
       Effect: "Deny",
@@ -108,7 +128,7 @@ export class TaskPersonProof extends Construct {
     const dispatcherPolicy = new iam.CfnPolicy(this, "DispatcherPolicy", {
       policyName: `${APPROVED_ENV}-task-person-proof-dispatcher`,
       roles: [props.dispatcher.role.roleName],
-      policyDocument: { Version: "2012-10-17", Statement: [developerRead, denyUnprojectedDeveloperRead, invokeProof] },
+      policyDocument: { Version: "2012-10-17", Statement: [developerRead, companyMemberRead, denyUnprojectedDeveloperRead, invokeProof] },
     });
     dispatcherPolicy.cfnOptions.condition = install;
 

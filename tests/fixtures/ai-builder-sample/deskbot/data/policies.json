@@ -1,0 +1,13 @@
+{
+  "policies": [
+    {"topic": "returns", "keywords": ["return", "refund window", "send back"], "text": "Unworn items can be returned within 30 days of delivery."},
+    {"topic": "refund-method", "keywords": ["refund", "money back", "reimburse"], "text": "Refunds go back to the original payment method within 5 business days of the return arriving."},
+    {"topic": "shipping-time", "keywords": ["shipping", "delivery", "arrive", "how long"], "text": "Standard shipping takes 5 business days."},
+    {"topic": "shipping-cost", "keywords": ["shipping cost", "free shipping", "delivery fee"], "text": "Shipping is free on orders over $50."},
+    {"topic": "warranty", "keywords": ["warranty", "defect", "broken"], "text": "Products carry a 1 year warranty against defects."}
+  ],
+  "orders": {
+    "1042": {"status": "shipped", "contact": "jane.doe@example.com"},
+    "1043": {"status": "processing", "contact": "sam.lee@example.com"}
+  }
+}

@@ -123,9 +123,9 @@ describe("judging a tsc run, so a crash or config error never passes as zero err
     if (!run.ok) expect(run.reason).not.toMatch(/out of memory/);
   });
 
-  it("runs tsc with a 6 GB heap, the same limit npm run lint gives ESLint, so the whole lint project fits", () => {
+  it("runs tsc with a 12 GB heap, so the whole lint project fits (it outgrew 6 GB)", () => {
     expect(tscArguments("/repo/node_modules/typescript/bin/tsc")).toEqual([
-      "--max-old-space-size=6144",
+      "--max-old-space-size=12288",
       "/repo/node_modules/typescript/bin/tsc",
       "-p",
       "tsconfig.lint.json",
@@ -378,13 +378,15 @@ describe("wiring", () => {
     expect(pkg.scripts["typecheck:baseline"]).toBe("tsc -b --pretty false && node scripts/typecheck-baseline.ts update");
   });
 
-  it("runs the ratchet in CI right after the typecheck, behind the docs-only check", async () => {
+  it("runs the ratchet in CI right after the typecheck, behind the plan's Markdown-only skip", async () => {
     const workflow = YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
-    const checks = workflow.jobs.checks!;
-    const typecheck = checks.steps.findIndex((step) => step.run === "npm run typecheck");
-    const ratchet = checks.steps.findIndex((step) => step.run === "npm run typecheck:all");
+    const quick = workflow.jobs.quick!;
+    const typecheck = quick.steps.findIndex((step) => step.run === "npm run typecheck");
+    const ratchet = quick.steps.findIndex((step) => step.run === "npm run typecheck:all");
     expect(ratchet).toBe(typecheck + 1);
-    expect(checks.if).toBe("needs.scope.outputs.docs_only != 'true'");
+    // Behind the plan's Markdown-only skip (the job's own condition), and never skipped otherwise: the typecheck stays full in every mode.
+    expect(quick.if).toBe("needs.plan.outputs.docs_only != 'true'");
+    expect(quick.steps[ratchet]!.if).toBeUndefined();
   });
 
   it("runs the ratchet in the release workflow's test job after the typecheck", async () => {

@@ -87,7 +87,15 @@ export class MachineError extends Error {
 export interface DeliveryReceipt {
   /** True when the worker had already accepted a job with this `operationId` (it does not run twice). */
   duplicate: boolean;
+  /**
+   * What the worker answered on the same request, for the two kinds it answers there and does not run as a job: a live `steer` (its `outcome`) and a `peek`. The caller parses it with the
+   * kind's own schema and trusts nothing else in it. Absent for every other job (their result comes back through the broker's callbacks).
+   */
+  answer?: Readonly<Record<string, unknown>>;
 }
+
+/** The invocation kinds a worker answers on the same request and does not journal or run (see `DeliveryReceipt.answer`). */
+export const ANSWERED_INVOCATION_KINDS = ["steer", "peek"] as const;
 
 export interface WorkerMachines {
   readonly capabilities: MachineCapabilities;

@@ -8,6 +8,7 @@ import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { startApplicationRound } from "../support/e2e-application-round-harness.js";
 import { call } from "../support/slack-broker.js";
 import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
+import { TEST_ORG, testProjectPk } from "../support/orgs.js";
 
 // The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
 assumeDrivingTestsPassed();
@@ -29,7 +30,7 @@ function fixture(overrides: { operation?: Partial<E2EModelBudgetOperation>; task
   if (overrides.task !== null) db.set({ pk: `DEVTASK#${TASK}`, sk: "META", entityType: "DEVTASK", workspaceId: "ws-1", project: "payments", ...overrides.task });
   const operation: E2EModelBudgetOperation = { id: "op-1", workspaceId: "ws-1", kind: "task", workflowMode: "CHECKS", status: "RUNNING",
     workflowE2EAdmission: { taskId: TASK, groupRunIds: [GROUP], agentSteps: true }, ...overrides.operation };
-  const dependencies: E2EModelBudgetDependencies = { documentClient: { send: db.send }, tableName: TABLE, now: () => NOW };
+  const dependencies: E2EModelBudgetDependencies = { documentClient: { send: db.send }, tableName: TABLE, now: () => NOW, orgOf: async () => TEST_ORG };
   const call = (body: unknown, as: E2EModelBudgetOperation = operation) => handleE2EModelBudgetCallback(dependencies, as, body);
   return { db, operation, dependencies, call };
 }
@@ -37,8 +38,8 @@ const base = (reservationId: string) => ({ schemaVersion: "rovara-e2e-model-budg
 const reserveBody = (reservationId: string, inputTokens = 4_000, groupRunId = GROUP): E2EModelDayBudgetRequest => ({ ...base(reservationId), stage: "reserve", groupRunId, inputTokens }) as E2EModelDayBudgetRequest;
 const settleBody = (reservationId: string, actualInputTokens: number): E2EModelDayBudgetRequest => ({ ...base(reservationId), stage: "settle", actualInputTokens }) as E2EModelDayBudgetRequest;
 const releaseBody = (reservationId: string): E2EModelDayBudgetRequest => ({ ...base(reservationId), stage: "release" }) as E2EModelDayBudgetRequest;
-const dayRow = (db: FakeDynamoDb) => db.get("PROJECT#payments", `E2E_MODEL_BUDGET#${DAY}`);
-const reservationRow = (db: FakeDynamoDb, id: string) => db.get("PROJECT#payments", `E2E_MODEL_BUDGET_RESERVATION#${id}`);
+const dayRow = (db: FakeDynamoDb) => db.get(testProjectPk("payments"), `E2E_MODEL_BUDGET#${DAY}`);
+const reservationRow = (db: FakeDynamoDb, id: string) => db.get(testProjectPk("payments"), `E2E_MODEL_BUDGET_RESERVATION#${id}`);
 const forbidden = { code: "CALLBACK_FORBIDDEN" };
 
 describe("reserve", () => {
@@ -48,7 +49,7 @@ describe("reserve", () => {
     expect(await call(reserveBody(id))).toEqual({ schemaVersion: "rovara-e2e-model-budget/v1", reservationId: id, status: "reserved" });
     expect(dayRow(db)).toMatchObject({ inputTokens: 4_000, calls: 1 });
     expect(reservationRow(db, id)).toMatchObject({ entityType: "E2E_MODEL_BUDGET_RESERVATION", status: "open", day: DAY, reservedInputTokens: 4_000, groupRunId: GROUP, operationId: "op-1" });
-    expect(e2eModelBudgetReservationKey("payments", id)).toEqual({ pk: "PROJECT#payments", sk: `E2E_MODEL_BUDGET_RESERVATION#${id}` });
+    expect(e2eModelBudgetReservationKey(TEST_ORG, "payments", id)).toEqual({ pk: testProjectPk("payments"), sk: `E2E_MODEL_BUDGET_RESERVATION#${id}` });
     expect(db.commandNames().filter((name) => name === "TransactWriteCommand")).toHaveLength(1);
   });
 
@@ -69,12 +70,12 @@ describe("reserve", () => {
     await expect(call({ ...reserveBody(randomUUID()), maxInputTokens: 1_000_000_000 })).rejects.toThrow();
     const id = randomUUID();
     await call(reserveBody(id), operation);
-    expect(db.find((item) => String(item.pk).startsWith("PROJECT#")).every((item) => item.pk === "PROJECT#payments")).toBe(true);
+    expect(db.find((item) => String(item.pk).includes("PROJECT#")).every((item) => item.pk === testProjectPk("payments"))).toBe(true);
     // Another project's task writes to its own partition.
     const other = fixture({ task: { project: "billing" } });
     await other.call(reserveBody(id));
-    expect(other.db.get("PROJECT#billing", `E2E_MODEL_BUDGET#${DAY}`)).toMatchObject({ calls: 1 });
-    expect(other.db.get("PROJECT#payments", `E2E_MODEL_BUDGET#${DAY}`)).toBeUndefined();
+    expect(other.db.get(testProjectPk("billing"), `E2E_MODEL_BUDGET#${DAY}`)).toMatchObject({ calls: 1 });
+    expect(other.db.get(testProjectPk("payments"), `E2E_MODEL_BUDGET#${DAY}`)).toBeUndefined();
   });
 
   it("a repeated reserve (a redelivery) returns the stored status and does not charge twice; the same id for another request is refused", async () => {
@@ -92,7 +93,7 @@ describe("reserve", () => {
 
   it("over the day's token cap or call cap it answers exhausted and writes no row", async () => {
     const { db, call } = fixture();
-    db.set({ pk: "PROJECT#payments", sk: `E2E_MODEL_BUDGET#${DAY}`, entityType: "E2E_MODEL_BUDGET", inputTokens: CAPS.tokens - 3_999, calls: 10 });
+    db.set({ pk: testProjectPk("payments"), sk: `E2E_MODEL_BUDGET#${DAY}`, entityType: "E2E_MODEL_BUDGET", inputTokens: CAPS.tokens - 3_999, calls: 10 });
     const tokens = randomUUID();
     expect(await call(reserveBody(tokens, 4_000))).toMatchObject({ status: "exhausted" });
     expect(reservationRow(db, tokens)).toBeUndefined();
@@ -100,7 +101,7 @@ describe("reserve", () => {
     // Exactly the room left is reserved (the boundary).
     const fits = randomUUID();
     expect(await call(reserveBody(fits, 3_999))).toMatchObject({ status: "reserved" });
-    db.set({ pk: "PROJECT#payments", sk: `E2E_MODEL_BUDGET#${DAY}`, entityType: "E2E_MODEL_BUDGET", inputTokens: 100, calls: CAPS.calls });
+    db.set({ pk: testProjectPk("payments"), sk: `E2E_MODEL_BUDGET#${DAY}`, entityType: "E2E_MODEL_BUDGET", inputTokens: 100, calls: CAPS.calls });
     const calls = randomUUID();
     expect(await call(reserveBody(calls, 1_000))).toMatchObject({ status: "exhausted" });
     expect(reservationRow(db, calls)).toBeUndefined();
@@ -112,13 +113,13 @@ describe("reserve", () => {
     // A caller that names its own limits is refused by the schema; the caps are the broker's.
     await expect(handleE2EModelBudgetCallback(dependencies, operation, { ...reserveBody(randomUUID()), limits: { maxInputTokens: 10 } })).rejects.toThrow();
     const withInstallation = { ...dependencies, e2eAgentInstallation: async () => ({ provider: "amazon-bedrock", region: "us-east-1" }) };
-    db.set({ pk: "PROJECT#payments", sk: `E2E_MODEL_BUDGET#${DAY}`, entityType: "E2E_MODEL_BUDGET", inputTokens: CAPS.tokens, calls: 1 });
+    db.set({ pk: testProjectPk("payments"), sk: `E2E_MODEL_BUDGET#${DAY}`, entityType: "E2E_MODEL_BUDGET", inputTokens: CAPS.tokens, calls: 1 });
     expect(await handleE2EModelBudgetCallback(withInstallation, operation, reserveBody(randomUUID(), 1))).toMatchObject({ status: "exhausted" });
   });
 
   it("two racing reserves never pass the cap together", async () => {
     const { db, call } = fixture();
-    db.set({ pk: "PROJECT#payments", sk: `E2E_MODEL_BUDGET#${DAY}`, entityType: "E2E_MODEL_BUDGET", inputTokens: CAPS.tokens - 10_000, calls: 0 });
+    db.set({ pk: testProjectPk("payments"), sk: `E2E_MODEL_BUDGET#${DAY}`, entityType: "E2E_MODEL_BUDGET", inputTokens: CAPS.tokens - 10_000, calls: 0 });
     const results = await Promise.all(Array.from({ length: 5 }, () => call(reserveBody(randomUUID(), 4_000))));
     expect(results.filter((result) => result.status === "reserved")).toHaveLength(2);
     expect(dayRow(db)).toMatchObject({ inputTokens: CAPS.tokens - 2_000, calls: 2 });
@@ -155,7 +156,7 @@ describe("settle and release", () => {
     const { db, call } = fixture();
     const second = randomUUID();
     // The day already holds all but 1000 tokens of its cap (other calls, as a row a long day would have built).
-    db.set({ ...e2eModelBudgetKey("payments", DAY), entityType: "E2E_MODEL_BUDGET", inputTokens: CAPS.tokens - 1_000, calls: 3 });
+    db.set({ ...e2eModelBudgetKey(TEST_ORG, "payments", DAY), entityType: "E2E_MODEL_BUDGET", inputTokens: CAPS.tokens - 1_000, calls: 3 });
     await call(reserveBody(second, 1_000));
     expect(dayRow(db)).toMatchObject({ inputTokens: CAPS.tokens });
     await call(settleBody(second, 60_000));
@@ -206,7 +207,7 @@ describe("settle and release", () => {
     const tomorrow = { ...dependencies, now: () => Date.parse("2026-10-22T00:00:05.000Z") };
     await handleE2EModelBudgetCallback(tomorrow, operation, settleBody(id, 1_000));
     expect(dayRow(db)).toMatchObject({ inputTokens: 1_000, calls: 1 });
-    expect(db.get("PROJECT#payments", "E2E_MODEL_BUDGET#2026-10-22")).toBeUndefined();
+    expect(db.get(testProjectPk("payments"), "E2E_MODEL_BUDGET#2026-10-22")).toBeUndefined();
   });
 
   it("refuses a reservation that does not exist, or that another operation made", async () => {
@@ -223,7 +224,7 @@ describe("settle and release", () => {
     const { db, call } = fixture();
     const id = randomUUID();
     await call(reserveBody(id, 4_000));
-    db.set({ pk: "PROJECT#payments", sk: `E2E_MODEL_BUDGET#${DAY}`, entityType: "E2E_MODEL_BUDGET", inputTokens: 100, calls: 1 });
+    db.set({ pk: testProjectPk("payments"), sk: `E2E_MODEL_BUDGET#${DAY}`, entityType: "E2E_MODEL_BUDGET", inputTokens: 100, calls: 1 });
     await expect(call(releaseBody(id))).rejects.toMatchObject(forbidden);
     expect(reservationRow(db, id)).toMatchObject({ status: "open" });
     expect(dayRow(db)).toMatchObject({ inputTokens: 100, calls: 1 });
@@ -243,13 +244,13 @@ describe("who may call it", () => {
   ])("refuses %s with CALLBACK_FORBIDDEN, and writes nothing", async (_what, overrides) => {
     const { db, call, operation } = fixture();
     await expect(call(reserveBody(randomUUID()), { ...operation, ...overrides })).rejects.toMatchObject(forbidden);
-    expect(db.find((item) => String(item.pk).startsWith("PROJECT#"))).toEqual([]);
+    expect(db.find((item) => String(item.pk).includes("PROJECT#"))).toEqual([]);
   });
 
   it("refuses a reservation for a group run the operation's admission does not list", async () => {
     const { db, call } = fixture();
     await expect(call(reserveBody(randomUUID(), 1_000, OTHER_GROUP))).rejects.toMatchObject(forbidden);
-    expect(db.find((item) => String(item.pk).startsWith("PROJECT#"))).toEqual([]);
+    expect(db.find((item) => String(item.pk).includes("PROJECT#"))).toEqual([]);
   });
 
   it("refuses an operation whose task is missing, in another workspace, or closed", async () => {
@@ -264,7 +265,7 @@ describe("who may call it", () => {
     db.injectFault({ command: "TransactWriteCommand", error: { name: "ProvisionedThroughputExceededException" } });
     const error = await call(reserveBody(randomUUID())).catch((caught: unknown) => caught);
     expect(isTransientAwsFault(error)).toBe(true);
-    expect(db.find((item) => String(item.pk).startsWith("PROJECT#"))).toEqual([]);
+    expect(db.find((item) => String(item.pk).includes("PROJECT#"))).toEqual([]);
     const id = randomUUID();
     await call(reserveBody(id));
     db.injectFault({ command: "TransactWriteCommand", error: { name: "InternalServerError" } });
@@ -277,7 +278,7 @@ describe("who may call it", () => {
     const { db, call } = fixture();
     db.injectFault({ command: "TransactWriteCommand", error: { name: "TransactionCanceledException", cancellationReasons: [{ Code: "TransactionConflict" }, { Code: "None" }] } });
     await expect(call(reserveBody(randomUUID()))).rejects.toMatchObject({ name: "TransactionCanceledException" });
-    expect(e2eModelBudgetKey("payments", DAY).sk).toBe("E2E_MODEL_BUDGET#2026-10-21");
+    expect(e2eModelBudgetKey(TEST_ORG, "payments", DAY).sk).toBe("E2E_MODEL_BUDGET#2026-10-21");
   });
 });
 
@@ -318,7 +319,7 @@ describe("through the broker's callback route", () => {
     expect(reserved.status, JSON.stringify(reserved.body)).toBe(200);
     expect(reserved.body).toMatchObject({ schemaVersion: "rovara-e2e-model-budget/v1", reservationId: id, status: "reserved" });
     const reservation = round.harness.db.find((item) => item.sk === `E2E_MODEL_BUDGET_RESERVATION#${id}`)[0]!;
-    expect(reservation).toMatchObject({ pk: "PROJECT#payments", status: "open", operationId: round.operationId, groupRunId: group });
+    expect(reservation).toMatchObject({ pk: testProjectPk("payments"), status: "open", operationId: round.operationId, groupRunId: group });
     expect((await route(round, round.operationId, capability, settleBody(id, 1_500))).body).toMatchObject({ status: "settled" });
     expect(round.harness.db.find((item) => String(item.sk).startsWith("E2E_MODEL_BUDGET#"))[0]).toMatchObject({ inputTokens: 1_500, calls: 1 });
     // A group run the reference does not list is forbidden through the route too.

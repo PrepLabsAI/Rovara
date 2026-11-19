@@ -1,0 +1,1104 @@
+[
+ {
+  "id": "a1",
+  "title": "Run migrations through the db:migrate script, not prisma migrate directly",
+  "description": "Schema changes in the API are applied with the workspace script so fixtures get seeded.",
+  "body": "In packages/api, schema changes must be applied with `pnpm --filter api db:migrate`, which wraps `prisma migrate deploy`, regenerates the Prisma client and seeds the test fixtures from test/fixtures/seed.ts. Running `npx prisma migrate dev` directly skips the fixture seed, so the integration tests in packages/api/test/integration fail with missing rows for `Tenant` and `PriceList`. Seen on task T-301 where the coder ran the CLI by hand and the reviewer sent it back twice.",
+  "scope": {
+   "paths": [
+    "packages/api/prisma/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/api/package.json",
+    "lines": "12-18"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a2",
+  "title": "Store money as integer minor units",
+  "description": "Billing amounts are whole cents in the Money type; never floats.",
+  "body": "In packages/billing all amounts are integers in minor units (cents) using the `Money` type from packages/billing/src/money.ts. Never use JavaScript number floats like 19.99 for prices: rounding errors showed up in invoice totals on task T-412. Convert user input at the edge with `Money.fromDecimalString(value, currency)` and format with `Money.format`.",
+  "scope": {
+   "paths": [
+    "packages/billing/src/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/billing/src/money.ts",
+    "lines": "1-60"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a3",
+  "title": "Build TanStack Query keys with the queryKeys factory",
+  "description": "Query keys come from lib/query-keys.ts so invalidation works.",
+  "body": "packages/web uses TanStack Query. Always build keys with the factory, e.g. `queryKeys.orders.detail(id)` from packages/web/src/lib/query-keys.ts. Hand-written arrays like ['order', id] are not invalidated when mutations call `queryClient.invalidateQueries({ queryKey: queryKeys.orders.all })`, so pages show stale data after a save.",
+  "scope": {
+   "paths": [
+    "packages/web/src/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/web/src/lib/query-keys.ts",
+    "lines": "1-40"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a4",
+  "title": "Start the test database before running e2e tests",
+  "description": "Playwright specs need the Postgres test container and TEST_DATABASE_URL.",
+  "body": "Playwright tests under packages/web/e2e need the Postgres container: run `docker compose -f docker-compose.test.yml up -d db` first and export TEST_DATABASE_URL=postgres://test@localhost:55432/shop. Without it every spec times out at the login step after 30 seconds and the failure message does not mention the database.",
+  "scope": {
+   "paths": [
+    "packages/web/e2e/**",
+    "docker-compose.test.yml"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "docker-compose.test.yml",
+    "lines": "1-20"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a5",
+  "title": "Use the structured logger, not console.log",
+  "description": "API code logs through the pino logger so request and tenant ids are attached.",
+  "body": "Services in packages/api must log with `log` from src/observability/logger.ts (pino), which attaches requestId and tenantId. console.log output is dropped by the log shipper and fails the `no-console` lint rule in CI.",
+  "scope": {
+   "paths": [
+    "packages/api/src/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/api/src/observability/logger.ts",
+    "lines": "1-35"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a6",
+  "title": "Run pricing-svc unit tests without the slow marker",
+  "description": "Use the pytest marker filter in the inner loop; the slow suite takes 40 minutes.",
+  "body": "In services/pricing-svc run `poetry run pytest -m \"not slow\"` while iterating. The slow-marked tests retrain the elasticity model and take about 40 minutes. CI runs the full suite nightly, so a task does not need to.",
+  "scope": {
+   "paths": [
+    "services/pricing-svc/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "services/pricing-svc/pyproject.toml",
+    "lines": "40-48"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a7",
+  "title": "Check feature flags with the tenant context",
+  "description": "flags.isEnabled must get the tenantId or it returns the global default.",
+  "body": "Use `flags.isEnabled('new-checkout', { tenantId })` from packages/api/src/flags/index.ts. Calling isEnabled without the tenant returns the global default, so tenant-level rollouts silently do nothing for the pilot tenants.",
+  "scope": {
+   "paths": [
+    "packages/api/src/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/api/src/flags/index.ts",
+    "lines": "10-42"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a8",
+  "title": "Do not edit the generated API client",
+  "description": "packages/web/src/api/generated is produced by codegen from openapi.yaml.",
+  "body": "Files in packages/web/src/api/generated/ are produced by `pnpm codegen` from packages/api/openapi.yaml. Manual edits are overwritten on the next build. To change a type, change openapi.yaml and run codegen.",
+  "scope": {
+   "paths": [
+    "packages/web/src/api/generated/**",
+    "packages/api/openapi.yaml"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/api/openapi.yaml",
+    "lines": "1-30"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a9",
+  "title": "Format dates in the tenant's time zone",
+  "description": "Stored times are UTC; render them with formatInTimeZone and tenant.timeZone.",
+  "body": "Order timestamps are stored in UTC. In the UI and in emails format them with `formatInTimeZone(date, tenant.timeZone, pattern)` from date-fns-tz. `new Date().toLocaleString()` uses the server zone and showed wrong delivery dates for Australian tenants.",
+  "scope": {
+   "paths": [
+    "packages/web/src/**",
+    "packages/web/emails/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "a10",
+  "title": "Batch line-item loads with the DataLoader",
+  "description": "Order.lineItems must use ctx.loaders.lineItemsByOrder to avoid N+1 queries.",
+  "body": "The GraphQL resolver Order.lineItems in packages/api/src/graphql/resolvers/order.ts must use `ctx.loaders.lineItemsByOrder.load(order.id)`. Fetching per order with `prisma.lineItem.findMany({ where: { orderId } })` caused 300 queries for one orders page.",
+  "scope": {
+   "paths": [
+    "packages/api/src/graphql/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/api/src/graphql/resolvers/order.ts",
+    "lines": "22-51"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a11",
+  "title": "Stripe webhook signature check must use the raw body",
+  "description": "Skip the JSON body parser on the Stripe webhook route.",
+  "body": "The Stripe webhook handler in packages/billing/src/webhooks/stripe.ts verifies with `stripe.webhooks.constructEvent(rawBody, sig, secret)`. Express `json()` middleware must not run for /webhooks/stripe, or verification fails with 'No signatures found matching the expected signature'.",
+  "scope": {
+   "paths": [
+    "packages/billing/src/webhooks/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/billing/src/webhooks/stripe.ts",
+    "lines": "18-40"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a12",
+  "title": "Dynamic Tailwind classes must be safelisted or mapped",
+  "description": "Interpolated class names are purged from the production CSS.",
+  "body": "packages/web builds badge colours from status names (`bg-${color}-100`). Tailwind cannot see such classes at build time and drops them. Either add them to the safelist in tailwind.config.ts or map each status to a full literal class string in src/components/StatusBadge.tsx.",
+  "scope": {
+   "paths": [
+    "packages/web/src/components/**",
+    "packages/web/tailwind.config.ts"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/web/src/components/StatusBadge.tsx",
+    "lines": "1-30"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a13",
+  "title": "Bump the cart cache version when the Cart shape changes",
+  "description": "Redis cart entries carry CART_CACHE_VERSION; change it with the type.",
+  "body": "Redis entries written by packages/api/src/cache/cart-cache.ts are JSON prefixed with CART_CACHE_VERSION. If you add, remove or rename a Cart field, increment CART_CACHE_VERSION; otherwise old entries deserialize into the new type and checkout throws for every shopper with a saved cart.",
+  "scope": {
+   "paths": [
+    "packages/api/src/cache/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/api/src/cache/cart-cache.ts",
+    "lines": "1-25"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a14",
+  "title": "Terraform changes go through the plan workflow",
+  "description": "Never apply infra/terraform locally; the tf-plan workflow plans and applies.",
+  "body": "Changes under infra/terraform/** must be applied by the `tf-plan` GitHub workflow (.github/workflows/tf-plan.yml), which posts the plan on the PR and applies on merge. Do not run `terraform apply` locally: the state lock in the S3 backend gets stuck and blocks everyone.",
+  "scope": {
+   "paths": [
+    "infra/terraform/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": ".github/workflows/tf-plan.yml",
+    "lines": "1-60"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a15",
+  "title": "Keep i18n keys in sync across locales",
+  "description": "Every new key in en.json also goes in de.json and fr.json.",
+  "body": "When adding a string to packages/web/src/i18n/en.json, add the same key to de.json and fr.json (the English text is fine as a placeholder until translators fill it). The `pnpm i18n:check` CI step fails on any missing key.",
+  "scope": {
+   "paths": [
+    "packages/web/src/i18n/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/web/src/i18n/en.json",
+    "lines": "1-5"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a16",
+  "title": "Call the pricing service through the retrying client",
+  "description": "Use pricingClient.quote(); raw fetch to PRICING_URL has no retries.",
+  "body": "Calls from packages/api to the pricing service go through `pricingClient.quote()` in src/clients/pricing.ts, which retries 429 and 503 responses with jittered backoff. A raw `fetch(PRICING_URL + '/quote')` bypasses this and fails under load tests.",
+  "scope": {
+   "paths": [
+    "packages/api/src/clients/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/api/src/clients/pricing.ts",
+    "lines": "1-48"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a17",
+  "title": "Update Vitest snapshots deliberately",
+  "description": "Run vitest -u only for the spec you changed and read the diff.",
+  "body": "Vitest snapshots in packages/web/src/**/__snapshots__ capture rendered emails. Run `pnpm vitest -u <path>` only for the file you changed and review the snapshot diff. Updating every snapshot at once hid a broken unsubscribe link on task T-388.",
+  "scope": {
+   "paths": [
+    "packages/web/src/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "a18",
+  "title": "Mock the pricing service in API unit tests",
+  "description": "Use vi.mock for the pricing client in unit tests.",
+  "body": "Unit tests in packages/api/test/unit should mock the pricing client with `vi.mock('../src/clients/pricing')`. The real pricing service is slow and flaky in CI, and unit tests should not depend on it.",
+  "scope": {
+   "paths": [
+    "packages/api/test/unit/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "a19",
+  "title": "Squash migrations before merging",
+  "description": "Combine a task's Prisma migrations into one before merge.",
+  "body": "If a task created several Prisma migrations, combine them into one with `prisma migrate diff` before merging, so packages/api/prisma/migrations stays readable and reviewers see one change.",
+  "scope": {
+   "paths": [
+    "packages/api/prisma/migrations/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "a20",
+  "title": "Use optimistic updates for cart quantity changes",
+  "description": "Update the query cache in onMutate and roll back on error.",
+  "body": "On the cart page in packages/web, update the TanStack Query cache optimistically in `onMutate` when a quantity changes and roll back in `onError`. Waiting for the server round trip made the stepper feel laggy.",
+  "scope": {
+   "paths": [
+    "packages/web/src/pages/cart/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "a21",
+  "title": "Use the @/ path alias for imports in web",
+  "description": "Import with @/... instead of long relative paths.",
+  "body": "In packages/web import with the @/ alias (for example `@/components/Button`), configured in tsconfig paths and vite.config.ts. Relative paths like ../../../components break when files move.",
+  "scope": {
+   "paths": [
+    "packages/web/src/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "a22",
+  "title": "Keep Playwright retries at two in CI",
+  "description": "retries: 2 in playwright.config.ts absorbs flaky network to the test db.",
+  "body": "packages/web/playwright.config.ts sets `retries: process.env.CI ? 2 : 0`. Keep it: the CI network to the test database is occasionally slow and the retries keep the pipeline green.",
+  "scope": {
+   "paths": [
+    "packages/web/playwright.config.ts"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/web/playwright.config.ts",
+    "lines": "8-14"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a23",
+  "title": "Cache pricing quotes for 60 seconds",
+  "description": "pricingClient.quote results may be cached in Redis briefly.",
+  "body": "Results of `pricingClient.quote()` can be cached in Redis for 60 seconds keyed by sku and tenant. It cuts load on the pricing service by about 70 percent on catalogue pages.",
+  "scope": {
+   "paths": [
+    "packages/api/src/clients/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "a24",
+  "title": "Use UUID v7 for new primary keys",
+  "description": "New tables use database-generated, time-ordered UUIDs.",
+  "body": "New tables in packages/api/prisma/schema.prisma use `@default(dbgenerated(\"uuid_generate_v7()\"))` for ids, so ids sort by creation time and indexes stay compact.",
+  "scope": {
+   "paths": [
+    "packages/api/prisma/schema.prisma"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "a25",
+  "title": "Add an index for every foreign key in schema.prisma",
+  "description": "Prisma does not index relation fields on Postgres for you.",
+  "body": "Prisma does not create indexes for relation scalar fields on Postgres. For every relation in packages/api/prisma/schema.prisma add `@@index([orderId])` (or the matching field). LineItem lookups by orderId were full table scans until this was added.",
+  "scope": {
+   "paths": [
+    "packages/api/prisma/schema.prisma"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/api/prisma/schema.prisma",
+    "lines": "80-120"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a26",
+  "title": "StatusBadge needs an aria-label for colour-only states",
+  "description": "Colour alone does not tell screen-reader users the status.",
+  "body": "packages/web/src/components/StatusBadge.tsx shows some states only as a coloured dot. Add `aria-label={t(`status.${status}`)}` so screen readers announce the status; the accessibility audit flagged it.",
+  "scope": {
+   "paths": [
+    "packages/web/src/components/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/web/src/components/StatusBadge.tsx",
+    "lines": "12-20"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "a27",
+  "title": "Make Stripe webhook handling idempotent",
+  "description": "Store event ids and skip events already processed.",
+  "body": "Stripe retries webhooks. In packages/billing/src/webhooks/stripe.ts record `event.id` in the processed_events table inside the same transaction as the side effect, and return 200 early if it is already there. Duplicate invoice.paid events double-credited accounts.",
+  "scope": {
+   "paths": [
+    "packages/billing/src/webhooks/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/billing/src/webhooks/stripe.ts",
+    "lines": "41-77"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "c13",
+  "title": "Set a TTL on cart cache entries",
+  "description": "Cart entries without expiry filled Redis.",
+  "body": "packages/api/src/cache/cart-cache.ts must write with `redis.set(key, value, { EX: 7 * 24 * 3600 })`. Entries written without a TTL filled the Redis instance in staging and evicted session keys.",
+  "scope": {
+   "paths": [
+    "packages/api/src/cache/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/api/src/cache/cart-cache.ts",
+    "lines": "26-40"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "c16",
+  "title": "Keep the pricing client timeout below the gateway timeout",
+  "description": "pricing.ts timeout must be under 10 seconds.",
+  "body": "The API gateway cuts requests at 10 seconds. Set the timeout in packages/api/src/clients/pricing.ts to 8 seconds (including retries) so the API can return a clean 503 instead of the gateway's 504.",
+  "scope": {
+   "paths": [
+    "packages/api/src/clients/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/api/src/clients/pricing.ts",
+    "lines": "5-9"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "c22",
+  "title": "Read the Playwright baseURL from the environment",
+  "description": "playwright.config.ts baseURL comes from E2E_BASE_URL.",
+  "body": "In packages/web/playwright.config.ts set `use.baseURL` from `process.env.E2E_BASE_URL ?? 'http://localhost:5173'` so the same specs run against preview deployments.",
+  "scope": {
+   "paths": [
+    "packages/web/playwright.config.ts"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/web/playwright.config.ts",
+    "lines": "15-20"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "c15",
+  "title": "Use ICU plural syntax in translation files",
+  "description": "Counts in en.json use {count, plural, ...}.",
+  "body": "Strings with counts in packages/web/src/i18n/en.json must use ICU plurals, e.g. `{count, plural, one {# item} other {# items}}`. String concatenation like count + ' items' cannot be translated correctly for German or French.",
+  "scope": {
+   "paths": [
+    "packages/web/src/i18n/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "c25",
+  "title": "Use Decimal for tax rates in schema.prisma",
+  "description": "Tax rates need four decimal places; Float loses precision.",
+  "body": "Declare tax rates in packages/api/prisma/schema.prisma as `Decimal @db.Decimal(6,4)`, not Float. Float rates produced 0.0699999 and failed the tax reconciliation report.",
+  "scope": {
+   "paths": [
+    "packages/api/prisma/schema.prisma"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "c12",
+  "title": "StatusBadge must handle unknown statuses",
+  "description": "A new status from the API crashed the badge switch.",
+  "body": "packages/web/src/components/StatusBadge.tsx switches on status. When the API added 'partially_refunded' the component threw. Keep a default branch that renders a grey badge with the raw status text.",
+  "scope": {
+   "paths": [
+    "packages/web/src/components/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/web/src/components/StatusBadge.tsx",
+    "lines": "31-50"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "r1",
+  "title": "Pass --skip-seed to db:migrate in preview environments",
+  "description": "The fixture seed collides with real data in preview deployments.",
+  "body": "`pnpm --filter api db:migrate` seeds test fixtures. In preview environments that already hold demo data, the seed fails on unique keys. There run `pnpm --filter api db:migrate -- --skip-seed`. Locally and in CI keep the default.",
+  "scope": {
+   "paths": [
+    "packages/api/prisma/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "r2",
+  "title": "Log per-item loops at debug level",
+  "description": "Info-level logging inside order item loops exceeded the log quota.",
+  "body": "Inside loops over order items in packages/api use `log.debug`, not `log.info`, from src/observability/logger.ts. Info lines per item pushed the log volume past the monthly quota during the holiday sale.",
+  "scope": {
+   "paths": [
+    "packages/api/src/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "r3",
+  "title": "Flag checks in background jobs take the tenant from the job payload",
+  "description": "Jobs have no request context; pass job.data.tenantId.",
+  "body": "Background jobs in packages/api/src/jobs have no request context, so `ctx.tenantId` is undefined there. Call `flags.isEnabled(name, { tenantId: job.data.tenantId })`. The order-confirmation email job ignored the new-checkout rollout because of this.",
+  "scope": {
+   "paths": [
+    "packages/api/src/jobs/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "r4",
+  "title": "Money: JPY and KRW have zero minor units",
+  "description": "Money.fromDecimalString needs the currency; yen has no cents.",
+  "body": "`Money.fromDecimalString` in packages/billing/src/money.ts must be given the currency. JPY and KRW have zero minor units, so multiplying by 100 overcharged Japanese customers a hundredfold on task T-455. Use `Money.minorUnits(currency)`.",
+  "scope": {
+   "paths": [
+    "packages/billing/src/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/billing/src/money.ts",
+    "lines": "61-80"
+   }
+  ],
+  "active": true
+ },
+ {
+  "id": "r5",
+  "title": "On Apple Silicon the test db service needs an arm64 image",
+  "description": "The postgis image in docker-compose.test.yml is amd64 only.",
+  "body": "On M-series Macs the `db` service in docker-compose.test.yml (postgis/postgis:15) runs under emulation and takes minutes to start, so e2e specs time out. Use the `postgres:16` image locally or set `platform: linux/arm64` with the arm build.",
+  "scope": {
+   "paths": [
+    "docker-compose.test.yml"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "r6",
+  "title": "Build the API before running codegen",
+  "description": "codegen reads the bundled openapi.yaml from packages/api/dist.",
+  "body": "`pnpm codegen` reads packages/api/dist/openapi.yaml, the bundled spec with $refs resolved. Run `pnpm --filter api build` first or the generated client in packages/web/src/api/generated is built from a stale spec.",
+  "scope": {
+   "paths": [
+    "packages/web/src/api/generated/**",
+    "packages/api/openapi.yaml"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "d1",
+  "title": "Use pnpm, not npm or yarn",
+  "description": "The repo is a pnpm workspace.",
+  "body": "Install and run scripts with pnpm. `npm install` creates a package-lock.json and breaks the workspace links; CI rejects any lockfile other than pnpm-lock.yaml.",
+  "scope": {
+   "paths": [
+    "**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "d2",
+  "title": "Commit messages follow Conventional Commits",
+  "description": "feat:, fix:, chore: prefixes drive the changelog.",
+  "body": "Use `feat(scope): ...`, `fix(scope): ...` and so on. The release workflow builds the changelog from these prefixes, and commitlint fails the PR otherwise.",
+  "scope": {
+   "paths": [
+    "**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "d3",
+  "title": "Resize product images in the upload worker",
+  "description": "Use sharp in the worker, not in the request.",
+  "body": "Product image uploads are resized with sharp in packages/api/src/jobs/image-resize.ts. Doing it inside the upload request blocked the event loop for seconds on large images.",
+  "scope": {
+   "paths": [
+    "packages/api/src/jobs/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "d4",
+  "title": "Rate limit public endpoints",
+  "description": "Wrap public routes with the rateLimit middleware.",
+  "body": "Every unauthenticated route in packages/api must use `rateLimit({ windowMs, max })` from src/middleware/rate-limit.ts. The password reset route was abused before this.",
+  "scope": {
+   "paths": [
+    "packages/api/src/routes/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "d5",
+  "title": "Email templates are MJML",
+  "description": "Write emails in MJML under packages/web/emails.",
+  "body": "Transactional emails are MJML files in packages/web/emails compiled at build time. Hand-written HTML tables broke in Outlook.",
+  "scope": {
+   "paths": [
+    "packages/web/emails/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "d6",
+  "title": "Pin numpy below 2 in pricing-svc",
+  "description": "The elasticity model pickle needs numpy 1.x.",
+  "body": "services/pricing-svc/pyproject.toml pins `numpy = \"<2\"`. The trained elasticity model is a pickle that fails to load with numpy 2. Do not bump it without retraining.",
+  "scope": {
+   "paths": [
+    "services/pricing-svc/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "d7",
+  "title": "GraphQL schema changes need a changelog entry",
+  "description": "Add a line to API-CHANGELOG.md for each schema change.",
+  "body": "Any change to packages/api/src/graphql/schema.graphql needs an entry in docs/API-CHANGELOG.md; the mobile team reads it before each release.",
+  "scope": {
+   "paths": [
+    "packages/api/src/graphql/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "d8",
+  "title": "Production secrets come from SSM through config.ts",
+  "description": "Never read .env files in production code paths.",
+  "body": "packages/api/src/config.ts loads secrets from SSM Parameter Store at boot. Do not add new `process.env` reads for secrets or ship .env files in the image.",
+  "scope": {
+   "paths": [
+    "packages/api/src/**"
+   ]
+  },
+  "citations": [],
+  "active": true
+ },
+ {
+  "id": "b1",
+  "title": "Use the pnpm migrate wrapper for schema changes",
+  "description": "Apply schema.prisma changes with the workspace script.",
+  "body": "When you change schema.prisma, apply it with the workspace script (pnpm --filter api db:migrate) instead of calling the prisma CLI yourself. The wrapper also refreshes the generated client and re-seeds fixtures; calling the CLI on its own leaves the seed out and the integration suite then breaks on absent tenant and price-list rows.",
+  "scope": {
+   "paths": [
+    "packages/api/prisma/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b2",
+  "title": "Prices must not be floating point",
+  "description": "Keep billing amounts as whole cents.",
+  "body": "A send-back on the invoice PR: totals were off by one cent because a price was kept as 19.99 in a float. Billing code represents amounts as whole cents through Money (src/money.ts) and parses user input with Money.fromDecimalString. Keep it that way.",
+  "scope": {
+   "paths": [
+    "packages/billing/src/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b3",
+  "title": "Hand-written cache keys break invalidation",
+  "description": "Use the central key factory for queries.",
+  "body": "After editing the order detail page, the list did not refresh after a save. Cause: a literal key array. Use the central key factory in lib/query-keys.ts so that invalidating the orders root also clears detail entries.",
+  "scope": {
+   "paths": [
+    "packages/web/src/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b4",
+  "title": "e2e login timeouts mean the database container is down",
+  "description": "Bring up the test Postgres before Playwright.",
+  "body": "If all Playwright specs hang on the sign-in step, the test Postgres is not running. Bring up the db service from the test compose file (port 55432) and set TEST_DATABASE_URL before running pnpm e2e.",
+  "scope": {
+   "paths": [
+    "packages/web/e2e/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b5",
+  "title": "console.log is stripped in production",
+  "description": "Use the pino logger in the API.",
+  "body": "Debug lines added with console.log never appeared in CloudWatch. The API's pino logger in observability/logger.ts adds requestId and tenantId and is the only output the shipper keeps; the CI lint also rejects console calls.",
+  "scope": {
+   "paths": [
+    "packages/api/src/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b6",
+  "title": "Skip slow-marked tests when iterating on pricing",
+  "description": "Filter out the slow marker during a task.",
+  "body": "Full pytest in the pricing service retrains the elasticity model, about 40 minutes. During a task use the marker filter so only fast tests run; the nightly job covers the slow ones.",
+  "scope": {
+   "paths": [
+    "services/pricing-svc/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b7",
+  "title": "Per-tenant flag rollouts need the tenant id passed",
+  "description": "Pass tenantId in the flag context.",
+  "body": "The new-checkout rollout looked broken for the pilot tenant; the code called the flag helper with only the flag name. Pass the tenant id in the context object every time you check a flag.",
+  "scope": {
+   "paths": [
+    "packages/api/src/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b8",
+  "title": "Regenerate the client instead of patching it",
+  "description": "Generated client edits are lost.",
+  "body": "I patched a type in the web app's generated API folder and the next codegen run wiped it. The source of truth is the API's openapi.yaml; edit that and run codegen.",
+  "scope": {
+   "paths": [
+    "packages/web/src/api/generated/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b9",
+  "title": "Delivery dates shown a day off for Australian shops",
+  "description": "toLocaleString uses the server zone.",
+  "body": "toLocaleString picks the server's time zone. Render stored UTC times with date-fns-tz formatInTimeZone and the tenant's configured timeZone.",
+  "scope": {
+   "paths": [
+    "packages/web/src/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b10",
+  "title": "Order list page made hundreds of queries",
+  "description": "Use the request-scoped loader for line items.",
+  "body": "Each order fetched its line items with its own findMany call. Use the request-scoped loader on the context (lineItemsByOrder) in the order resolver.",
+  "scope": {
+   "paths": [
+    "packages/api/src/graphql/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b11",
+  "title": "billing/src/webhooks/stripe.ts: constructEvent fails",
+  "description": "400 on /webhooks/stripe.",
+  "body": "Mounted bodyParser.json globally, then 400s on /webhooks/stripe. Fix: express.raw({type:'application/json'}) on that route only. See stripe.ts L18-L40.",
+  "scope": {
+   "paths": [
+    "packages/billing/src/webhooks/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/billing/src/webhooks/stripe.ts",
+    "lines": "18-40"
+   }
+  ],
+  "active": false
+ },
+ {
+  "id": "b12",
+  "title": "StatusBadge colours missing in prod build",
+  "description": "StatusBadge.tsx classes purged.",
+  "body": "StatusBadge.tsx interpolated class names; purge removed them. Used a STATUS_CLASSES map with literal strings. tailwind.config.ts safelist also works.",
+  "scope": {
+   "paths": [
+    "packages/web/src/components/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/web/src/components/StatusBadge.tsx",
+    "lines": "1-30"
+   }
+  ],
+  "active": false
+ },
+ {
+  "id": "b13",
+  "title": "cart-cache.ts CART_CACHE_VERSION",
+  "description": "Increment on Cart shape changes.",
+  "body": "Renamed Cart.items to Cart.lines; prod checkout 500s for an hour from stale redis. Increment the constant on shape changes.",
+  "scope": {
+   "paths": [
+    "packages/api/src/cache/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/api/src/cache/cart-cache.ts",
+    "lines": "1-25"
+   }
+  ],
+  "active": false
+ },
+ {
+  "id": "b14",
+  "title": "infra/terraform: no local apply",
+  "description": "Use tf-plan.yml.",
+  "body": "State lock stuck after a local `terraform apply`. Use .github/workflows/tf-plan.yml; it plans on the PR and applies on merge.",
+  "scope": {
+   "paths": [
+    "infra/terraform/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": ".github/workflows/tf-plan.yml",
+    "lines": "1-60"
+   }
+  ],
+  "active": false
+ },
+ {
+  "id": "b15",
+  "title": "i18n:check failing",
+  "description": "en.json key missing elsewhere.",
+  "body": "Added checkout.summary.taxNote to en.json only. de.json and fr.json need the key too.",
+  "scope": {
+   "paths": [
+    "packages/web/src/i18n/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b16",
+  "title": "src/clients/pricing.ts quote()",
+  "description": "Load test failures from raw fetch.",
+  "body": "Load test failures from raw fetch(PRICING_URL + '/quote'). Route through pricingClient.quote; it has backoff on 429/503.",
+  "scope": {
+   "paths": [
+    "packages/api/src/clients/**"
+   ]
+  },
+  "citations": [
+   {
+    "repo": "acme/shop",
+    "path": "packages/api/src/clients/pricing.ts",
+    "lines": "1-48"
+   }
+  ],
+  "active": false
+ },
+ {
+  "id": "b17",
+  "title": "__snapshots__ / vitest -u scope",
+  "description": "Do not update all snapshots.",
+  "body": "`vitest -u` across the repo masked email regressions. Limit it to the touched spec path and read the snapshot diff.",
+  "scope": {
+   "paths": [
+    "packages/web/src/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b18",
+  "title": "Do not mock the pricing client in API tests",
+  "description": "Use the contract stub instead of vi.mock.",
+  "body": "A mocked pricingClient hid a contract change in the quote response (the currency field was renamed). In packages/api tests use the pricing-svc contract stub started by `pnpm test:stubs` instead of vi.mock for the pricing client.",
+  "scope": {
+   "paths": [
+    "packages/api/test/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b19",
+  "title": "Never squash or rewrite committed migrations",
+  "description": "Leave each migration folder as created.",
+  "body": "Squashing Prisma migrations that were already applied in staging broke `migrate deploy` with a checksum mismatch. Leave each folder in packages/api/prisma/migrations as created; add a new migration to fix mistakes.",
+  "scope": {
+   "paths": [
+    "packages/api/prisma/migrations/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b20",
+  "title": "Avoid optimistic updates for cart quantity",
+  "description": "Wait for the server before changing totals.",
+  "body": "Optimistic quantity updates showed prices the server then rejected because of stock limits, which confused shoppers. On the cart page wait for the mutation response before changing cart totals.",
+  "scope": {
+   "paths": [
+    "packages/web/src/pages/cart/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b21",
+  "title": "Use relative imports in packages/web, not the @ alias",
+  "description": "The alias breaks the Storybook build.",
+  "body": "The @/ alias is not resolved by the Storybook builder and broke stories. Use relative imports in packages/web/src.",
+  "scope": {
+   "paths": [
+    "packages/web/src/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b22",
+  "title": "Set Playwright retries to zero",
+  "description": "Retries hide real races.",
+  "body": "Retries hid a real race in checkout: the spec passed on the second attempt. Set `retries: 0` in packages/web/playwright.config.ts and fix flaky tests instead.",
+  "scope": {
+   "paths": [
+    "packages/web/playwright.config.ts"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b23",
+  "title": "Never cache pricing quotes at checkout",
+  "description": "Checkout must use the live price.",
+  "body": "Cached quotes served stale promotional prices after a promotion ended; legal requires the live price at checkout. Always call pricingClient.quote fresh in the checkout flow.",
+  "scope": {
+   "paths": [
+    "packages/api/src/clients/**"
+   ]
+  },
+  "citations": [],
+  "active": false
+ },
+ {
+  "id": "b24",
+  "title": "Use cuid() for primary keys, not database-generated UUIDs",
+  "description": "uuid_generate_v7 is missing in the test container.",
+  "body": "`dbgenerated(\"uuid_generate_v7()\")` needs a Postgres extension that the test container lacks. Use `@default(cuid())` in schema.prisma for new tables.",
+  "scope": {
+   "paths": [
+    "packages/api/prisma/schema.prisma"
+   ]
+  },
+  "citations": [],
+  "active": false
+ }
+]

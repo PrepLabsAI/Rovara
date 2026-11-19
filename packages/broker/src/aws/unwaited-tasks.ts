@@ -1,3 +1,6 @@
+import { slackRecordScope } from "./slack-workspace-tokens.js";
+import type { SlackWorkspaceBindings } from "./slack-workspace-binding.js";
+import type { SlackWorkspaceScope } from "./slack-workspace-tokens.js";
 // Issue 173: the reconciler backstop. Issue 167 cancels a Slack worker task when its turn gives up
 // for good, but a task can still run with nobody waiting on it when the Slack service crashes
 // first, or when a message goes to the dead-letter queue with no final attempt.
@@ -28,6 +31,8 @@ import { WorkspaceInstanceSchema, workspaceRecordFields } from "@agentx/contract
 import { taskPointerKey } from "../developer/task-records.js";
 import { requestCancellation } from "./cancellation.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
+import { slackNoteIsInstalls } from "./slack-company-notices.js";
+import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 
 /** Owner decision, 2026-10-01: a task idle this long with nobody waiting is stopped. */
 export const UNWAITED_TASK_IDLE_LIMIT_MS = 24 * 60 * 60_000;
@@ -42,7 +47,7 @@ const LIVE: ReadonlySet<string> = new Set(["ACCEPTED", "DISPATCHING", "RUNNING"]
 
 type Client = { send(command: unknown): Promise<unknown> };
 
-export interface SlackThreadPlace { channelId: string; threadTs: string }
+export interface SlackThreadPlace { channelId: string; threadTs: string; workspace?: SlackWorkspaceScope }
 
 const time = (value: unknown): number | undefined => {
   const parsed = typeof value === "string" ? Date.parse(value) : Number.NaN;
@@ -61,6 +66,9 @@ export function lastActivityAt(
 }
 
 export interface UnwaitedTaskSweepDependencies {
+  workspaces?: Pick<SlackWorkspaceBindings, "requireCompany">;
+  /** L2-2 PR 18d: the install's team; its own threads keep today's path in company mode. */
+  slackLegacyTeamId?: string;
   client: Client;
   tableName: string;
   /** The Slack threads table, read for the thread's activeTurn. */
@@ -186,7 +194,11 @@ export async function sweepUnwaitedTasks(
     result.cancelled.push(operationId);
     dependencies.log({ event: "unwaited_task.cancelled", ...fields, cancelOperationId: answer.operation.id });
     try {
-      await dependencies.postNote({ channelId: thread.channelId, threadTs: thread.threadTs }, UNWAITED_TASK_NOTE);
+      // L2-2 PR 18d: the install's own thread keeps today's path while company mode is on (slack-company-notices.ts).
+      const installs = dependencies.workspaces !== undefined && slackNoteIsInstalls(dependencies.slackLegacyTeamId, found.workspace, thread.teamId);
+      const workspace = dependencies.workspaces === undefined ? undefined : installs ? { companyId: IMPLICIT_COMPANY_ID, teamId: thread.teamId } : slackRecordScope(found.workspace, thread.teamId);
+      if (workspace !== undefined && !installs && await dependencies.workspaces!.requireCompany(workspace.teamId) !== workspace.companyId) throw new Error("This Slack workspace is not available.");
+      await dependencies.postNote({ channelId: thread.channelId, threadTs: thread.threadTs, ...(workspace === undefined ? {} : { workspace }) }, UNWAITED_TASK_NOTE);
     } catch (error) {
       result.noteFailures += 1;
       dependencies.log({ event: "unwaited_task.note_failed", ...fields, errorName: errorName(error) });
@@ -195,7 +207,7 @@ export async function sweepUnwaitedTasks(
   return result;
 }
 
-const BACKSTOP_SETTINGS = ["SLACK_THREADS_TABLE_NAME", "SLACK_SECRET_ARN", "CALLBACK_SIGNING_KEY"] as const;
+const BACKSTOP_SETTINGS = ["SLACK_THREADS_TABLE_NAME", "SLACK_SECRET_ARN", "CALLBACK_SIGNING_KEY_SECRET_ID"] as const;
 
 /**
  * Whether the infrastructure named the threads table, the Slack secret and the signing key (named

@@ -8,7 +8,10 @@ import { E2E_PROJECT_CHECK_ID, E2EWorkflowProgressSchema } from "./e2e.js";
 import { WorkflowDependencyApprovalSchema, WorkItemProgressV1Schema } from "./workflow-dependencies.js";
 import { NO_CODE_CHANGED_REASON, NoChangeFindingsSchema } from "./no-change-findings.js";
 import { CheckKindSchema } from "./evidence.js";
+import { FLAKY_ON_RERUN_MAX } from "./test-flaky.js";
+import { TestIdSchema } from "./test-id.js";
 import { WorkflowDesignReviewSchema } from "./design-review.js";
+import { FindingScaleSchema, WorkflowFlowSchema } from "./task-flow-tier.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 
@@ -22,6 +25,17 @@ export const WORKFLOW_NOT_RUN_PREFIX = "Rovara didn't start";
 export const isStepNotRunReason = (reason: string | undefined): boolean => reason !== undefined && reason.startsWith(WORKFLOW_NOT_RUN_PREFIX);
 
 export const WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE = "AgentX couldn't open the pull request automatically. Use Retry opening the pull request to try again.";
+
+/**
+ * Decision 70(c): the reason an automatic re-run of the checks after a merge of the base records. A decision with exactly this reason is a "base-merged" retry: it counts for its candidate (one per
+ * candidate) but not in the task's lifetime limit of automatic actions; it has its own allowance per task per day (`BASE_MERGED_RETRIES_PER_DAY`).
+ */
+export const BASE_MERGED_RETRY_REASON = "Rovara re-ran the checks by itself after the base branch was merged into the pull request.";
+/** How many automatic re-runs after a merge of the base one task gets in 24 hours. */
+export const BASE_MERGED_RETRIES_PER_DAY = 3;
+/** The milestone lines: Rovara is re-checking by itself (information), or the task waits for the owner to re-check (needs you). */
+export const BASE_MERGED_RECHECKING_MILESTONE = "The base branch was merged into the pull request. Rovara is re-checking the merged code.";
+export const BASE_MERGED_NEEDS_YOU_MILESTONE = "The base branch was merged into the pull request. The merged code needs its checks again: open the task and choose Retry checks.";
 
 export const WORKFLOW_BLOCK_REASONS = {
   checksUnconfirmed: "AgentX couldn't confirm the selected checks ran on the final code. Choose checks and retry.",
@@ -63,6 +77,12 @@ export const WORKFLOW_BLOCK_REASONS = {
   /** An approved PR feedback fix left every repository's code as its open pull request holds it: nothing was pushed. */
   fixChangedNothing: "The approved fix didn't change any code, so nothing was pushed.",
   codeChangedAfterChecks: "The code changed after its checks ran. Run the checks again on the latest code.",
+  /** The base branch was merged into the pull request's branch: the merged code is a new candidate, so its checks and reviews run again before the task waits for the merge (a merge is not trusted on its parents alone). */
+  baseMergedRecheck: "The base branch was merged into this pull request, so the merged code needs its checks and reviews again before it is called ready.",
+  /** The company's limit on how far Rovara may act on its own was lowered while the merged code's checks re-ran: the reviews (paid) did not start. */
+  recheckAutonomyLowered: "Rovara is no longer set to act on its own here, so it stopped before the reviews of the merged code. Choose Retry reviews to run them.",
+  /** A rerun of the checks of code a pull request already holds ran on other code than the code the pull request shows. */
+  checkedOtherCode: "The checks ran on other code than the code on the pull request. Send the task back to coding, or close it.",
   startUnrecorded: "AgentX could not record where this change started. Close the task and start a new one.",
   startUnconfirmed: "AgentX could not confirm the task's starting commit on GitHub.",
   startChanged: "The code's starting point changed. Send the task back to coding or close it.",
@@ -140,6 +160,8 @@ export const VerificationResultsSchema = z.object({
     broken: z.literal(true).optional(),
     /** The check's process never started (the worker failed to start it, EAGAIN say): nothing is wrong with it, and a retry may run it. */
     neverStarted: z.literal(true).optional(),
+    /** General fakes (DEC 234, slice 2): a Rovara-made fake answered an outside call of this check. The check is never change proof (the proof table reads it as a `made_by_rovara` dependency). Absent on every other result. */
+    madeByRovara: z.literal(true).optional(),
   }).strict()).max(100),
   /** No check was selected for this task: the candidate was validated and goes to review with no check results. */
   reviewOnly: z.boolean().optional(),
@@ -171,6 +193,8 @@ export const WorkflowReviewFindingSchema = z.object({
   file: z.string().trim().min(1).max(500).optional(),
   line: z.number().int().positive().optional(),
   advisory: z.boolean().optional(),
+  /** The lighter flow (0.5.18 reader): how serious the finding is in three words. Nothing writes it yet; `severity` stays as it is. */
+  scale: FindingScaleSchema.optional(),
 }).strict();
 
 export type WorkflowReviewFinding = z.infer<typeof WorkflowReviewFindingSchema>;
@@ -278,7 +302,7 @@ export const WORKFLOW_SECOND_REVIEW_LINE_MAX = 10_000_000;
 
 export const WorkflowSecondReviewBlockSchema = z.object({
   candidateDigest: DigestSchema,
-  findings: z.array(z.object({ text: z.string().trim().min(1).max(600), file: z.string().max(500).optional(), line: z.number().int().positive().max(WORKFLOW_SECOND_REVIEW_LINE_MAX).optional() }).strict()).min(1).max(20),
+  findings: z.array(z.object({ text: z.string().trim().min(1).max(600), file: z.string().max(500).optional(), line: z.number().int().positive().max(WORKFLOW_SECOND_REVIEW_LINE_MAX).optional(), scale: FindingScaleSchema.optional() }).strict()).min(1).max(20),
 }).strict();
 export type WorkflowSecondReviewBlock = z.infer<typeof WorkflowSecondReviewBlockSchema>;
 
@@ -849,6 +873,15 @@ export const WorkflowSnapshotShapeSchema = z.object({
    */
   regressedChecks: z.array(z.string().trim().min(1).max(WORKFLOW_REGRESSED_CHECK_MAX)).min(1).max(WORKFLOW_REGRESSED_CHECKS_MAX).optional(),
   /**
+   * TE-C6: tests that failed once in the checks and passed on the rerun, and that the base was not already flaky on (count, and up to 50 ids, for the code in `candidateDigest`). Written only when the broker's
+   * flaky-rerun switch is on, with the verification that recorded the checks as passed because of them; B5's `flaky_on_change` hold reads it (`flakyOnChangeHoldInput`). Absent otherwise.
+   */
+  flakyOnChange: z.object({
+    candidateDigest: DigestSchema,
+    count: z.number().int().min(1).max(100_000_000),
+    ids: z.array(TestIdSchema).max(FLAKY_ON_RERUN_MAX),
+  }).strict().refine((fact) => fact.count >= fact.ids.length, "the count is at least the ids listed").optional(),
+  /**
    * A coding run that ended with no code change: the commands the agent ran, what they printed and the agent's own conclusion, redacted and bounded (`NoChangeFindingsSchema`), kept while the step is
    * blocked with `noCodeChanged` and shown with it. Absent from an older worker's result and from every other block.
    */
@@ -910,6 +943,8 @@ export const WorkflowSnapshotShapeSchema = z.object({
   designReview: WorkflowDesignReviewSchema.optional(),
   /** Rovara Code v2 (1.1.0 only): the risk level of the pull request's code. */
   risk: RiskAssessmentSchema.optional(),
+  /** The lighter flow (0.5.18 reader, both versions; nothing writes it yet): the tier of the change, the steps skipped and the quick checks. See `WorkflowFlowSchema`. */
+  flow: WorkflowFlowSchema.optional(),
   /** Both versions: how many fix rounds of each kind ran, and which kind the round now running is. */
   fixRounds: WorkflowFixRoundsSchema.optional(),
   /** SR-1 (switch `cr`, `on`): the second review's blocking findings for one candidate; see `WorkflowSecondReviewBlockSchema`. */
@@ -953,6 +988,8 @@ export const WorkflowSnapshotShapeSchema = z.object({
     if (workflow.outcome === "ANSWERED") context.addIssue({ code: "custom", path: ["outcome"], message: "this outcome needs definition version 1.1.0" });
     if (workflow.artifacts.some((artifact) => artifact.type === "answer")) context.addIssue({ code: "custom", path: ["artifacts"], message: "an answer needs definition version 1.1.0" });
     for (const field of ["intent", "critique", "risk", "designReview"] as const) {
+      // The lighter flow's record lets a design review sit on a task of either version: only the one that carries `flow`.
+      if (field === "designReview" && workflow.flow !== undefined) continue;
       if (workflow[field] !== undefined) context.addIssue({ code: "custom", path: [field], message: `${field} needs definition version 1.1.0` });
     }
     if (workflow.program?.steps.some((step) => step.kind === "plan_critic") === true) {
@@ -961,7 +998,8 @@ export const WorkflowSnapshotShapeSchema = z.object({
     if (workflow.reviews?.some((review) => review.risk !== undefined) === true) context.addIssue({ code: "custom", path: ["reviews"], message: "a review's risk level needs definition version 1.1.0" });
   }
   if (workflow.designReview !== undefined) {
-    if (workflow.path !== "FULL") context.addIssue({ code: "custom", path: ["designReview"], message: "design review runs on the Full path" });
+    // The lighter flow may ask for a design review on a Quick path: only a task that carries its `flow` record.
+    if (workflow.path !== "FULL" && workflow.flow === undefined) context.addIssue({ code: "custom", path: ["designReview"], message: "design review runs on the Full path" });
     if (new TextEncoder().encode(JSON.stringify(workflow.designReview)).length > 150_000) context.addIssue({ code: "custom", path: ["designReview"], message: "the design review record is too large to keep" });
   }
   if (workflow.fixProblems !== undefined && workflow.fixSource === undefined) {

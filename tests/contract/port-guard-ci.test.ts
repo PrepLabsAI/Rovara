@@ -12,13 +12,16 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
   it("keeps the pull request and manual triggers as they were and adds a push to code/next only", async () => {
     const { on } = await workflow();
     expect(Object.keys(on).sort()).toEqual(["pull_request", "push", "workflow_dispatch"]);
-    expect(on.pull_request).toEqual({ types: ["opened", "synchronize", "reopened", "ready_for_review"] });
+    expect(on.pull_request).toEqual({ types: ["opened", "synchronize", "reopened", "ready_for_review", "labeled"] });
     expect(on.push).toEqual({ branches: ["code/next"] });
   });
 
-  it("leaves the `local` gate waiting for exactly the jobs it waited for", async () => {
+  it("keeps the port guard a check of its own, outside `quick` and the `local` gate, with nothing waiting on it", async () => {
     const { jobs } = await workflow();
-    expect(jobs.local!.needs).toEqual(["scope", "checks", "test", "release", "linux-runtime"]);
+    expect(jobs.local!.needs).toEqual(["plan", "quick", "build", "test", "linux-runtime", "ci-mode"]);
+    expect(Object.keys(jobs).sort()).toEqual(["build", "ci-mode", "device-runtime", "linux-runtime", "live-aws", "local", "plan", "port-guard", "quick", "test"]);
+    for (const [name, job] of Object.entries(jobs)) expect(JSON.stringify(job.needs ?? []), name).not.toContain("port-guard");
+    expect(jobs.quick!.steps.map((step) => step.run ?? "").join("\n")).not.toContain("port-guard");
   });
 
   it("runs the guard over the commits code/next holds beyond mainline, on a push to code/next or a pull request into it, with no secret", async () => {
@@ -33,6 +36,20 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
     // on a pull request the base branch's copy of the guard judges, and a second strict run flags edits to the guard itself
     expect(run).toContain("git show origin/code/next:scripts/port-guard.ts");
     expect(run).toContain('node "$RUNNER_TEMP/port-guard.ts" --range origin/code/next..HEAD');
+    // the strict run skips private-name findings only on commits already public on mainline (plan v3.2), and names no other public base
+    const strict = job.steps.find((step) => /^Edits to the guard/.test(step.name ?? ""))?.run ?? "";
+    expect(strict.trim()).toBe('node "$RUNNER_TEMP/port-guard.ts" --range origin/code/next..HEAD --public-base refs/remotes/origin/mainline');
+    expect([...run.matchAll(/--public-base (\S+)/g)].map((match) => match[1])).toEqual(["refs/remotes/origin/mainline"]);
+    // the guard reads its boundary data from beside itself, so the base branch's copy of that file travels with it
+    expect(run).toContain('git show origin/code/next:scripts/boundary-allowlist.json > "$RUNNER_TEMP/boundary-allowlist.json"');
+    // and it fails closed: no `|| cp` falls back to the checkout's own copy of the data
+    expect(run).not.toMatch(/boundary-allowlist\.json[^\n]*\|\|/);
+    expect(run).not.toMatch(/cp scripts\/boundary-allowlist/);
+    expect(run).not.toMatch(/cp scripts\/port-guard/);
+    // the accepted findings travel from code/next the same way, never from the pull request's checkout
+    expect(run).toContain('git show origin/code/next:scripts/port-guard-accepted.json > "$RUNNER_TEMP/port-guard-accepted.json"');
+    expect(run).not.toMatch(/--accepted/);
+    expect(run).not.toMatch(/port-guard\.ts"? *\|\|/);
     const checkout = job.steps.find((step) => step.uses?.startsWith("actions/checkout"));
     expect(checkout?.with?.["fetch-depth"]).toBe(0);
     expect(JSON.stringify(job)).not.toContain("secrets.");
@@ -51,5 +68,24 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
   it("gives no other job a secret or a wider permission than before", async () => {
     const source = await readFile(".github/workflows/ci.yml", "utf8");
     expect([...source.matchAll(/secrets\.([A-Z_]+)/g)].map((match) => match[1])).toEqual(["GITHUB_TOKEN"]);
+  });
+
+  it("plans the device emulator job like linux-runtime, keeps it out of the local gate until its first run has been read, and gives it no secret, no token and no permission beyond the workflow's contents: read (DEC 248)", async () => {
+    const { jobs, permissions } = await workflow();
+    const job = jobs["device-runtime"]!;
+    expect(job.needs).toBe("plan");
+    expect(job.if).toBe("needs.plan.outputs.device == 'true'");
+    // quarantine (DEC 254zn): non-blocking unless the change touches device files
+    expect((job as { "continue-on-error"?: string })["continue-on-error"]).toBe("${{ needs.plan.outputs.device_required != 'true' }}");
+    expect(jobs["linux-runtime"]!.if).toBe("needs.plan.outputs.linux == 'true'");
+    expect(jobs.local!.needs).not.toContain("device-runtime");
+    expect(permissions).toEqual({ contents: "read" });
+    expect(job.permissions).toBeUndefined();
+    expect(JSON.stringify(job)).not.toMatch(/secrets\.|GITHUB_TOKEN|docker login|id-token|aws-actions|AWS_/u);
+    const runs = job.steps.map((step) => step.run ?? "").join("\n");
+    expect(runs).toContain("node scripts/ci-images.ts pull --github-env node-build");
+    expect(job.steps.map((step) => step.run).filter((run) => run?.includes("vitest"))).toEqual(['JAVA_HOME="$JAVA_HOME_17_X64" npx vitest run tests/linux/device-evidence-emulator.test.ts']);
+    // the ARM Linux job leaves the emulator test to this one
+    expect(jobs["linux-runtime"]!.steps.map((step) => step.run ?? "").join("\n")).toContain("--exclude tests/linux/device-evidence-emulator.test.ts");
   });
 });

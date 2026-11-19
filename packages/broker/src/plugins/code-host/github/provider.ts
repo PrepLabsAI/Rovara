@@ -1,0 +1,216 @@
+// Port lane L2: the GitHub client surface the GitHub adapters (code host and GitHub Actions check runner) are written against.
+//
+// In Cloud the adapters take `Pick<GitHubAppCredentialProvider, ...>` from `broker/src/github-app.ts`. This tree's `github-app.ts` is the older
+// public client, which lacks about two thirds of these methods (status, feedback, merge, working branches, code owners, standing, path kinds)
+// and has older result types. Porting Cloud's 2.8k-line client is the job of the task-flow and merge lanes (L6, L7), so the adapters are bound
+// to THIS interface instead. Anything that implements it can sit under the adapters: Cloud's `GitHubAppCredentialProvider`, a client built on
+// `gh` or a personal token for the local runtime (L4), or a test fixture. The types below are copies of Cloud's declarations in `github-app.ts`
+// (same names, same fields); when a lane brings that client in, replace them with `export type { ... } from "../../../github-app.js"`.
+import type { EvalWrapperPullRequestInput, HostScope, ReadBudget, RovaraCheckPayload } from "@agentx/contracts";
+import type { PullRequestStatus } from "../../../github-pull-status.js";
+import type { CheckRunFacts, LatestCheckRun, SeenCheckName } from "../../../github-check-facts.js";
+
+export type { PullRequestCheck, PullRequestStatus } from "../../../github-pull-status.js";
+
+export interface GitHubRepositoryIdentity { repositoryId: number; fullName: string; defaultBranch?: string; private?: boolean }
+
+export interface GitHubPullRequestInput {
+  repositoryUrl: string;
+  headBranch: string;
+  baseBranch: string;
+  title: string;
+  body?: string;
+  draft?: boolean;
+}
+
+export interface GitHubPullRequestResult {
+  number: number;
+  url: string;
+  reconciled: boolean;
+  /** Set when the pull request was asked to be a draft, GitHub refused drafts for this repository, and it was opened once as a normal pull request instead. */
+  draftRefused?: true;
+}
+
+export interface GitHubPullRequestDetails {
+  number: number;
+  url: string;
+  state: "open" | "closed" | "merged";
+  headBranch: string;
+  baseBranch: string;
+  headCommit: string;
+  mergeCommit?: string;
+  /** When GitHub says it merged (a merged pull request only). */
+  mergedAt?: string;
+  /** The login of the account that merged it, when GitHub says (a merged pull request only). */
+  mergedBy?: string;
+  title: string;
+  body: string;
+}
+
+export interface GitHubPullRequestUpdate {
+  title?: string;
+  body?: string;
+  state?: "open" | "closed";
+}
+
+/** One account of a commit's author or committer as GitHub linked it. */
+export interface GitHubCommitAccount { login: string; id: number | undefined; type: string | undefined }
+/** Who GitHub says wrote a commit (L4-LM1c): the accounts it linked (absent when it linked none), and whether the committer is GitHub's own web committer. */
+export interface GitHubCommitIdentity { author?: GitHubCommitAccount; committer?: GitHubCommitAccount; webFlow: boolean }
+
+export interface GitHubPullRequestChangedFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string;
+}
+
+/** What a merge came to: merged (by the method asked, or the other one when the repository does not allow it), merged already, or refused for a fixed reason. */
+export type MergePullRequestResult =
+  | { outcome: "merged"; method: "squash" | "merge"; fellBack: boolean; mergeCommitSha?: string }
+  | { outcome: "already_merged" }
+  | { outcome: "refused"; reason: "head_changed" | "not_mergeable" | "closed" | "forbidden"; githubMessage?: string };
+
+export interface GitHubFeedbackComment {
+  id: string;
+  threadId?: string;
+  kind: "REVIEW" | "REVIEW_COMMENT" | "DISCUSSION";
+  /** In-memory identity only; never part of feedback bundles or refs. */
+  authorId?: string;
+  authorType?: string;
+  url: string;
+  author: string;
+  updatedAt: string;
+  body: string;
+  path?: string;
+  line?: number;
+}
+/** A comment on a pull request's conversation as GitHub reports it (lane L12): the facts only. */
+export interface GitHubIssueComment {
+  id: string;
+  /** The repository and the pull request (issue) number GitHub says it is on. */
+  onRepositoryUrl: string;
+  number: number;
+  body: string;
+  authorLogin: string;
+  authorId?: string;
+  isBot: boolean;
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+}
+export interface GitHubFeedbackThread { id: string; resolved: boolean; commentIds: string[] }
+export interface GitHubPullRequestFeedback {
+  pullRequest: GitHubPullRequestDetails & { headTreeSha: string };
+  comments: GitHubFeedbackComment[];
+  threads: GitHubFeedbackThread[];
+  /** Comment id to whether the host records an edit of it. A comment not listed is unknown. */
+  edits?: Readonly<Record<string, boolean>>;
+}
+
+export interface WorkingBranchPage { branches: string[]; page: number; mayHaveMore: boolean; omittedUnsupported: boolean }
+
+/** The credential a clone or push gets: the account name and a token, with the time GitHub stops accepting it. */
+export interface GitHubRepositoryCredential { username?: string; password?: string; expiresAt?: string }
+
+/** Whose work a call is made for. The same shape as the neutral `HostScope`. */
+export type GitHubTokenScope = HostScope;
+
+/**
+ * The rules a GitHub client must keep. The adapter cannot enforce these from above, so a client is held to them by a conformance suite that the lane bringing the client must run
+ * (DEFERRED-CHECKS.md, "L2 GitHub client conformance"). Cloud's client keeps all of them:
+ *  - **Tenant binding.** Every call is bound to `scope`: an organization scope reaches only the repositories of that organization's installation, checked on every call, not once. A call
+ *    for a repository outside it throws; it never answers for another tenant.
+ *  - **Least privilege.** A token minted for `clone` carries `contents: read`, one for `push` carries `contents: write`, nothing else, for the one repository asked for. A token is never
+ *    reused across repositories, and `resolveWithExpiry` reports the expiry GitHub stated (none stated: no `expiresAt`, which the adapter refuses).
+ *  - **No redirects, bounded requests.** Every request refuses redirects, has a timeout, and reads a bounded body. A branch or path is never placed in an address without being checked.
+ *  - **Rate limits** are signalled with the neutral `HostRateLimitError`, never as a failure of the pull request.
+ *  - **Untrusted text** (comments, logs, bodies) is returned as data; the client never follows an instruction in it.
+ */
+export interface GitHubCodeHostProvider {
+  getRepositoryIdentity(repositoryUrl: string, scope: GitHubTokenScope): Promise<GitHubRepositoryIdentity | undefined>;
+  checkRepository(repository: { credentialRef: string; url: string }, scope: GitHubTokenScope): Promise<void>;
+  getRepositoryStanding(repositoryUrl: string, login: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<{ permission: "admin" | "write" | "read" | "none"; userType?: string }>;
+  resolveWithExpiry(credentialRef: string, repositoryUrl: string, access: "clone" | "push", scope: GitHubTokenScope): Promise<GitHubRepositoryCredential>;
+  getFileAtCommit(repositoryUrl: string, path: string, commitSha: string, scope: GitHubTokenScope, options?: { untilLine?: number; timeoutMs?: number; maxBytes?: number }): Promise<string | undefined>;
+  /** Optional: a client that cannot tell a file from a directory leaves it out, and the adapter then has no `pathKind`. */
+  getPathKindAtCommit?(repositoryUrl: string, path: string, commitSha: string, scope: GitHubTokenScope, options?: { timeoutMs?: number }): Promise<"file" | "dir" | "symlink" | "none">;
+  /** Optional (L4-EVW6): the eval wrapper pull request (a new branch, one new file at a fixed path, one pull request; see `eval-wrapper-pr.ts`). A client without it leaves the adapter without `evalWrapperPullRequest`. */
+  openEvalWrapperPullRequest?(repositoryUrl: string, request: EvalWrapperPullRequestInput, scope: GitHubTokenScope): Promise<{ revision: string; number: number; url: string }>;
+  /** Optional (L4-EVW6): the pull request (any state) made from one of Rovara's eval wrapper branches. */
+  findEvalWrapperPullRequest?(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<{ number: number; url: string } | undefined>;
+  /** Optional immutable tree read. Truncation is explicit; failures and rate limits throw. */
+  listTreeAtCommit?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, options?: { timeoutMs?: number }): Promise<{ truncated: boolean; entries: Array<{ path: string; mode: string; type: string; sha: string }> }>;
+  /** Optional (wiki W0): the direct children of one directory at a commit, names and kinds only (`complete` false when GitHub cut the 1,000-entry listing). */
+  listDirectoryAtCommit?(repositoryUrl: string, path: string, commitSha: string, scope: GitHubTokenScope, options?: { timeoutMs?: number }): Promise<{ entries: Array<{ name: string; type: string }>; complete: boolean }>;
+  /** Optional (wiki W0): the commits of a commit's history that touched a path since a time, from one page of at most `cap`; `latestAt` is the newest one's time (else the newest that ever touched the path). */
+  listCommitActivity?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, options: { since: string; path?: string; cap: number; timeoutMs?: number }): Promise<{ count: number; capped: boolean; latestAt?: string }>;
+  /** Promote only errors observed by the file-details port reads; existing client methods retain their error codes. */
+  fileDetailsError?(error: unknown): unknown;
+  /** Optional PR head and merge base from a fresh PR/compare read, never the target branch tip. */
+  getPullRequestFileRevisions?(repositoryUrl: string, number: number, scope: GitHubTokenScope): Promise<{ head: string; base: string }>;
+  getCommitTree(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope): Promise<string>;
+  getBranchHead(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<string>;
+  listWorkingBranches(repositoryUrl: string, expected: { installationId: number; repositoryId: number }, scope: GitHubTokenScope, page?: number): Promise<WorkingBranchPage>;
+  getCommitParents(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope): Promise<string[]>;
+  /** Optional (DEC 213): one commit's own changes, its parents, and whether GitHub gave the whole list. A client without it leaves the adapter without `commitChanges`. */
+  getCommitChanges?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, beforePage?: () => void): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean; parents: string[]; /** L4-LM1c: who GitHub says wrote the commit (optional: a client that does not say leaves it out). */ identity?: GitHubCommitIdentity }>;
+  /** Optional (DEC 213): a commit's changes against a commit it builds on (a merge against its second parent), and whether GitHub gave the whole list. A client without it leaves the adapter without `compareChanges`. */
+  getCompareChanges?(repositoryUrl: string, baseSha: string, headSha: string, scope: GitHubTokenScope, beforePage?: () => void): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean }>;
+  /** Optional (M7 slice 2, decision 252b): the latest state of each deployment of a commit, read only and bounded, with a token that asks for `deployments: read`. A client without it leaves the adapter without `deploymentStatuses`. */
+  getDeploymentStatuses?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, beforeRequest?: () => void): Promise<{ statuses: Array<{ environment: string; state: "success" | "failure" | "in_progress" }>; complete: boolean }>;
+  /**
+   * Optional (lane L4-LM1b, revert detection): the newest commits of a branch with what a revert check needs, from ONE request, with a contents-read token. `isWebFlow` is true only for the host's own web committer, decided from
+   * its account id. An entry GitHub gave without a usable sha is left out and `complete` is false. A client without it leaves the adapter without `recentCommits`.
+   */
+  listRecentCommits?(repositoryUrl: string, branch: string, max: number, scope: GitHubTokenScope, beforeRequest?: () => void): Promise<{ commits: Array<{ sha: string; message: string; parents: number; verified: boolean; author?: { login: string; id?: string; isBot: boolean }; committer?: { login: string; id?: string; isWebFlow: boolean }; }>; complete: boolean }>;
+  getDefaultBranchHead(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<string>;
+  getPullRequestMergeObservation(repositoryUrl: string, number: number, budget: ReadBudget, scope: GitHubTokenScope): Promise<GitHubPullRequestDetails & { headTreeSha: string }>;
+  installationForRepository(owner: string, name: string, options?: { fresh?: boolean }): Promise<{ installationId: number } | undefined>;
+  readCodeOwners(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<string | undefined>;
+  reconcilePullRequest(input: GitHubPullRequestInput, scope: GitHubTokenScope): Promise<GitHubPullRequestResult>;
+  getPullRequest(repositoryUrl: string, number: number, scope: GitHubTokenScope): Promise<GitHubPullRequestDetails>;
+  updatePullRequest(repositoryUrl: string, number: number, update: GitHubPullRequestUpdate, scope: GitHubTokenScope): Promise<GitHubPullRequestDetails>;
+  getPullRequestStatus(repositoryUrl: string, number: number, scope: GitHubTokenScope, budget?: ReadBudget): Promise<PullRequestStatus>;
+  listPullRequestFiles(repositoryUrl: string, number: number, options: { page: number }, scope: GitHubTokenScope): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; nextPage?: number }>;
+  getPullRequestFeedback(repositoryUrl: string, number: number, scope: GitHubTokenScope): Promise<GitHubPullRequestFeedback>;
+  replyToReviewThread(repositoryUrl: string, number: number, commentId: string, body: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<"replied" | "gone">;
+  /** Optional (lane L12): the comments on a pull request's conversation, fetch only. A client that cannot leaves it out and the adapter has no `comments`. */
+  listPullRequestComments?(repositoryUrl: string, number: number, options: { since?: string; page?: number }, scope: GitHubTokenScope, budget?: ReadBudget): Promise<{ comments: GitHubIssueComment[]; nextPage?: number }>;
+  /** Optional (lane L12): one comment of Rovara's own fixed text on a pull request's conversation. */
+  postPullRequestComment?(repositoryUrl: string, number: number, text: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<"posted" | "gone">;
+  markPullRequestReady(repositoryUrl: string, number: number, scope: GitHubTokenScope, budget?: ReadBudget): Promise<"ready" | "already_ready">;
+  /** Optional (TE-B4): the source word of the App's own checks (the App's id). */
+  summaryCheckSource?(): Promise<string>;
+  /** Optional (TE-B4): creates or updates the one "Rovara" Check Run on a head with a `checks: write` token of its own (see the client). */
+  upsertRovaraCheck?(repositoryUrl: string, input: { headSha: string; runId?: string | undefined; payload: RovaraCheckPayload; detailsUrl?: string | undefined }, scope: GitHubTokenScope, budget?: ReadBudget): Promise<{ runId: string } | "no_permission">;
+  requestReviewers(repositoryUrl: string, number: number, reviewers: readonly string[], scope: GitHubTokenScope, budget?: ReadBudget): Promise<"requested" | "refused">;
+  mergePullRequest(repositoryUrl: string, number: number, input: { sha: string; method: "squash" | "merge" }, scope: GitHubTokenScope): Promise<MergePullRequestResult>;
+  /** The tail of a GitHub Actions job's log (untrusted text). Used by the GitHub Actions check runner. */
+  getJobLogTail(repositoryUrl: string, jobId: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<string | undefined>;
+  /** TE-E0 option A: one check run's times and, for an Actions job, its run attempt. Optional: a client without it gives no run number, and the evidence says so. */
+  getCheckRunFacts?(repositoryUrl: string, checkRunId: string, scope: GitHubTokenScope, budget?: ReadBudget, options?: { actionsJob?: boolean }): Promise<CheckRunFacts | undefined>;
+  /** TE-E0 option A: the latest run of a named check on a commit or a branch's head. */
+  getLatestCheckRun?(repositoryUrl: string, at: { revision: string } | { branch: string }, check: { name: string; appId?: number | undefined }, scope: GitHubTokenScope, budget?: ReadBudget): Promise<LatestCheckRun | undefined>;
+  /** TE-E0 option B: the per-test report files of one GitHub Actions workflow run. */
+  getRunReportFiles?(repositoryUrl: string, workflowRunId: string, scope: GitHubTokenScope, budget?: ReadBudget, options?: { since?: string }): Promise<{ kind: "read"; files: Array<{ name: string; text: string }> } | { kind: "none" } | { kind: "unreadable" } | { kind: "ambiguous" }>;
+  /** TE-E0 option A, setup: the check names seen on recent pull requests. */
+  listSeenCheckNames?(repositoryUrl: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<{ checks: SeenCheckName[]; complete: boolean }>;
+}
+
+/** What the GitHub Actions check runner needs of the client (the TE-E0 reads are optional). */
+export type GitHubActionsProvider = Pick<GitHubCodeHostProvider, "getPullRequestStatus" | "getJobLogTail"> & Partial<Pick<GitHubCodeHostProvider, "getCheckRunFacts" | "getLatestCheckRun" | "listSeenCheckNames" | "getRunReportFiles">>;
+
+/** The methods a client must have before an adapter is built over it: a client built from an older tree is refused at start-up, not at its first call. */
+export const GITHUB_CODE_HOST_PROVIDER_METHODS = [
+  "getRepositoryIdentity", "checkRepository", "getRepositoryStanding", "resolveWithExpiry", "getFileAtCommit", "getCommitTree", "getBranchHead", "listWorkingBranches", "getCommitParents",
+  "getDefaultBranchHead", "getPullRequestMergeObservation", "installationForRepository", "readCodeOwners", "reconcilePullRequest", "getPullRequest", "updatePullRequest", "getPullRequestStatus",
+  "listPullRequestFiles", "getPullRequestFeedback", "replyToReviewThread", "markPullRequestReady", "requestReviewers", "mergePullRequest", "getJobLogTail",
+] as const satisfies readonly (keyof GitHubCodeHostProvider)[];
+
+/** The names of the required methods the client lacks (empty when it is complete). Values are never read, only the method names. */
+export function missingGitHubProviderMethods(provider: unknown): string[] {
+  const holder = provider as Record<string, unknown> | null | undefined;
+  return GITHUB_CODE_HOST_PROVIDER_METHODS.filter((name) => typeof holder?.[name] !== "function");
+}

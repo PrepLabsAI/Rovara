@@ -8,18 +8,40 @@
 // contracts call `PluginKind`.
 import { isBuiltin } from "node:module";
 import { z } from "zod";
+import { AGENTX_NAME_PATTERN } from "../names.js";
+import { BrowserEvidenceRecipeSchema } from "../browser-evidence.js";
 import { PluginKindSchema } from "../plugins/common.js";
-import type { ChannelCapabilities, ChannelDecision, ChannelEvent, StepUpKind } from "../channel-adapter.js";
+import { ExternalAccountRefSchema } from "../outside-account.js";
+import { PolicyHookSettingsSchema } from "../policy-hook.js";
+import type { ChannelCapabilities, ChannelCommand, ChannelDecision, ChannelEvent, StepUpKind } from "../channel-adapter.js";
 import type { InboundMessage } from "../conversation.js";
+import type { CodeHost } from "../plugins/code-host.js";
+import type { Tracker } from "../plugins/tracker.js";
 import type { DocumentStore } from "./document-store.js";
 import type { JsonObject } from "./json.js";
 import type { ModelKeyStore } from "./model-keys.js";
+import { MODEL_PROVIDER_ID_PATTERN, MODEL_REQUEST_FORMATS, type ModelProviderAdapter } from "./model-provider.js";
+import type { ImageRegistry } from "./image-registry.js";
+import type { ObjectStorage } from "./object-storage.js";
+import type { OutboundEventsAdapter } from "./outbound-events.js";
+import type { SecretStore } from "./secrets.js";
+import type { CloudAccount } from "./cloud-account.js";
+import type { MonitoringAdapter } from "./monitoring.js";
+import type { CheckRunnerAdapter } from "./plugin-adapters.js";
 import type { Admission, Approvers, IdentityProvider, Metering } from "./policy.js";
 import type { AuditSink } from "./audit-sink.js";
+import type { BuildSystem } from "./build-system.js";
+import type { CompanyInstructionsSource } from "./company-instructions.js";
+import type { LearningAdapter } from "./learning.js";
 import type { QueueService } from "./queue.js";
+import type { Scheduler } from "./scheduler.js";
+import type { RealtimePublisher } from "./realtime.js";
+import type { EmailSender } from "./email.js";
+import type { TeamRecordSource } from "./record-source.js";
 import type { WorkerMachines } from "./worker-machines.js";
+import type { EvalReservationAdapter } from "./eval-health.js";
 
-/** Every place an adapter can plug in. A new point is an interface change (both owners). */
+/** Every place an adapter can plug in. A new point is an interface change: the owner decides it (decision 63). */
 export const PLUGIN_POINTS = [
   "code-host",
   "tracker",
@@ -38,6 +60,31 @@ export const PLUGIN_POINTS = [
   "approvers",
   "metering",
   "model-keys",
+  /** Provisional (owner decision 58): files too big for the document store, behind `ObjectStorage`. */
+  "object-storage",
+  /** Owner decisions 57 and 60 (item L1): the company's standing rules, read-only. Code: a local file; Cloud: its store. */
+  "company-instructions",
+  /** Owner decisions 40 and 61 (item R3): signed events out, in the format of the channel events. */
+  "outbound-events",
+  /** Item K2 (owner decisions 60 and 61): where a model is, how to sign in to it, the request format it speaks and its prices. */
+  "model-provider",
+  /** Owner decision 60 (R2): where an adapter's secrets are read (`read(ref)` returns a `SecretValue`). */
+  "secrets",
+  /** Company-scoped, short-lived credentials for one purpose; owner-configured only, with broker rights. */
+  "cloud-account",
+  /** Where a project's saved environment image lives (login for one repository, list, delete). Code: a registry container on the owner's Docker; Cloud: its cloud registry. */
+  "image-registry",
+  /** When something is due (the nightly test run). The scheduler only says when; the core decides what starts. Code: a local timer; Cloud: its cloud scheduler. */
+  "scheduler",
+  /** Lane K1: tells an open page that something it shows changed (a hint of ids and numbers, never the data). Code: the install's own pages, in the process; Cloud: its cloud events service. */
+  "realtime",
+  /** Lane K1: sends one plain notice to one address, from the sender the owner set. Code: none (notices go through the channel adapters); Cloud: its cloud email service. */
+  "email",
+  /**
+   * DEC 253k: whether an approved eval may spend (`EvalReservationAdapter.authority`: the stored approval plus the project's own connected customer key). Code: none, so no eval spends;
+   * a deployed install with the model gateway: the gateway's `POST /v1/product/eval/authority` (`core-host/eval-authority-http.ts`). Never a repository plug-in.
+   */
+  "eval-reservation",
 ] as const;
 export const PluginPointSchema = z.enum(PLUGIN_POINTS);
 export type PluginPoint = z.infer<typeof PluginPointSchema>;
@@ -64,6 +111,17 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
   approvers: "one",
   metering: "one",
   "model-keys": "one",
+  "object-storage": "one",
+  "company-instructions": "one",
+  "outbound-events": "many",
+  "model-provider": "many",
+  secrets: "one",
+  "cloud-account": "one",
+  "image-registry": "one",
+  scheduler: "one",
+  realtime: "one",
+  email: "one",
+  "eval-reservation": "one",
 };
 
 /**
@@ -95,15 +153,26 @@ export interface ChannelAdapter {
   readonly projects: readonly string[];
   /** Decision kinds that must be made on the task page, not through this adapter (`ChannelAdapterRecord.stepUp`). */
   readonly stepUp: readonly StepUpKind[];
+  /**
+   * Optional. The thread id this adapter reads as "no thread": a message to a space itself, at its top, not a reply in one. A notice to a person's own space (a direct message) has no thread to name, and a conversation
+   * reference always carries one; an adapter whose tool has threads names here the id that stands for none. Absent: the adapter has no such id, and a notice to it names a real thread.
+   */
+  readonly noThread?: string;
   /** Rovara to the channel. At least once: `event.id` is stable across retries, so an adapter drops a repeat. */
   deliver(event: ChannelEvent): Promise<void>;
   /** In-process adapters begin listening here. Webhook adapters need no listener: they post to the channel API. */
   start?(sink: ChannelInboundSink): Promise<{ stop(): Promise<void> }>;
+  /**
+   * Optional. Spec 062 FR-072 in process: a command the core sends and waits for (post a message and learn its id, the directory, documents). It is the in-process form of a webhook adapter's `commandsUrl`, and answers
+   * the same `ChannelCommandAnswer` (`{ ok: true, result }` or `{ ok: false, error }`). The core sends a kind only when the adapter declares its capability (`COMMAND_CAPABILITY`), and only through
+   * `core/channel/commands.ts`, which keeps every command and every answer inside the asking company.
+   */
+  command?(command: ChannelCommand): Promise<unknown>;
 }
 
 /**
- * The thing an adapter of a point not yet specified in W0 must be. The lane that defines the point's port (L1 brings code host,
- * tracker and check runner) narrows its line in `PluginPointTypes` to the real interface. Until then only the name is known.
+ * The thing an adapter of a point that has no port yet must be. Every point has a port now (lane K1 defined the last ones); a lane that adds a new point
+ * without its interface types it with this until the interface is agreed.
  */
 export interface UnspecifiedAdapter {
   readonly kind?: string;
@@ -111,23 +180,34 @@ export interface UnspecifiedAdapter {
 
 /** The adapter type for each point. A lane that adds a port edits its own line here. */
 export interface PluginPointTypes {
-  "code-host": UnspecifiedAdapter;
-  tracker: UnspecifiedAdapter;
-  "check-runner": UnspecifiedAdapter;
+  "code-host": CodeHost;
+  tracker: Tracker;
+  "check-runner": CheckRunnerAdapter;
   channel: ChannelAdapter;
   "worker-machines": WorkerMachines;
   storage: DocumentStore;
   queue: QueueService;
-  monitoring: UnspecifiedAdapter;
-  learning: UnspecifiedAdapter;
-  "team-record-source": UnspecifiedAdapter;
+  monitoring: MonitoringAdapter;
+  learning: LearningAdapter;
+  "team-record-source": TeamRecordSource;
   identity: IdentityProvider;
-  "build-system": UnspecifiedAdapter;
+  "build-system": BuildSystem;
   admission: Admission;
   "audit-sink": AuditSink;
   approvers: Approvers;
   metering: Metering;
   "model-keys": ModelKeyStore;
+  "object-storage": ObjectStorage;
+  "company-instructions": CompanyInstructionsSource;
+  "outbound-events": OutboundEventsAdapter;
+  "model-provider": ModelProviderAdapter;
+  secrets: SecretStore;
+  "cloud-account": CloudAccount;
+  "image-registry": ImageRegistry;
+  scheduler: Scheduler;
+  realtime: RealtimePublisher;
+  email: EmailSender;
+  "eval-reservation": EvalReservationAdapter;
 }
 
 export type AdapterOf<P extends PluginPoint> = PluginPointTypes[P];
@@ -192,10 +272,12 @@ export interface PluginModule<P extends PluginPoint = PluginPoint> {
 export interface PluginContext {
   /** The company Code runs as. Cloud serves many companies, so an adapter takes the company from each call, not from here. */
   defaultCompanyId: string;
-  /** This adapter's block of the config file. Never holds a secret in clear: name where to read it (a file, an environment variable). */
+  /** This adapter's block of the config file. Never holds a secret in clear: name where to read it (a file, an environment variable: a `SecretRef`), and read it through the `secrets` point. */
   settings: JsonObject;
   registry: RegistryView;
   now: () => Date;
+  /** Port lane P6: the folder the install keeps its own files in (Code: the state folder, `~/.rovara` by default). A plug-in that keeps a file puts its default there, not in the home folder. Absent for an install with no such folder (Cloud). */
+  stateDirectory?: string;
 }
 
 export const PLUGIN_CONFIG_VERSION = 1;
@@ -222,6 +304,21 @@ export const PluginModuleSpecifierSchema = z.string().min(1).max(256).refine(
 
 const JsonSettingSchema: z.ZodType<JsonObject> = z.record(z.string(), z.json());
 
+/**
+ * FIX-0518 (laptop only, owner-set): what one project's task sandbox may do beyond the install-wide rules. `sandboxModelHosts: "allow"` lets that project's sandboxes reach the model hosts (api.openai.com, api.anthropic.com, ...); absent or "deny" blocks
+ * them, which is the default. Read only from the owner's own config file: a project, a repository or an agent cannot set it.
+ */
+export const LocalProjectSettingsSchema = z.object({
+  sandboxModelHosts: z.enum(["allow", "deny"]).optional(),
+  /**
+   * TE-H1 browser evidence (DEC 241c, laptop only, owner-set): the project's start command and port (run in its sandbox), its pages, and the elements to paint over. A recipe that is there and valid turns browser evidence on for that project;
+   * absent or one that does not parse means off (`browserEvidenceRecipeOf` reads it fail-closed). Read only from the owner's own config file, until the company setting (TE-D1) can be read in production.
+   */
+  browserEvidence: BrowserEvidenceRecipeSchema.optional(),
+}).strict();
+export type LocalProjectSettings = z.infer<typeof LocalProjectSettingsSchema>;
+export const LOCAL_PROJECT_SETTINGS_MAX = 200;
+
 export const PluginConfigEntrySchema = z.object({
   point: PluginPointSchema,
   name: PluginNameSchema,
@@ -234,10 +331,42 @@ export type PluginConfigEntry = z.infer<typeof PluginConfigEntrySchema>;
 /** The config file's content. Entries are created in order, so list a queue's store before the queue. */
 export const PluginConfigSchema = z.object({
   version: z.literal(PLUGIN_CONFIG_VERSION),
-  /** The company Code runs as (decision 45.6). Absent: the implicit company. */
-  companyId: z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/).optional(),
+  /** The company Code runs as (decision 45.6). Absent: the implicit company. It has the shape of an organization id (`org_` and 20 characters), because plug-in calls carry it as their scope (`HostScope`). */
+  companyId: z.string().regex(/^org_[0-9a-z]{20}$/, "a company id looks like org_ and 20 lower-case letters or digits (the same shape a hosted install uses; code-host and tracker calls are scoped by it)").optional(),
+  /**
+   * Port lane L11 (laptop only, owner-set): a worker may be given the owner's own code-host token even when that token reaches every repository its owner can (a classic token, the GitHub CLI's).
+   * Absent or false: such a token is refused for a worker, and a fine-grained token limited to the project's repositories is required. A cloud install ignores it.
+   */
+  allowBroadTokenForWorker: z.boolean().optional(),
+  /**
+   * Laptop only, owner-set: the outside accounts that are the owner's own, in the neutral shape (`provider`, `tenant`, `accountId`): a Linear user id (`{ "provider": "linear", "tenant": "", "accountId": "..." }`), a Jira account id
+   * (`tenant` is the site, `acme.atlassian.net`). A ticket asks for work as the owner only when its tracker says an account listed here made the act (a label put on it, an assignment); anyone else's act makes the ticket wait for the
+   * owner to say "Start". Absent: no tracker account is the owner's, and every ticket waits.
+   */
+  linkedAccounts: z.array(ExternalAccountRefSchema).max(50).optional(),
+  /**
+   * Port lane L13 (laptop only, owner-set): the model a task step calls, e.g. `{ "provider": "openrouter", "id": "anthropic/claude-sonnet-4.6" }`; the provider is any registered `model-provider` (item K2). Absent: the install's first provider with a key
+   * (Anthropic, then OpenAI, then OpenRouter) and that provider's default model. Read only from the owner's own config; a project or a task cannot set it.
+   */
+  model: z.object({
+    provider: z.string().regex(MODEL_PROVIDER_ID_PATTERN, "a provider id is lower-case letters, digits and hyphens (anthropic, openai, openrouter, or a `model-provider` plug-in's id)"),
+    /** The request format, when the provider speaks several and the owner wants one other than its first (Bedrock: Claude through anthropic-messages, an open model through openai-completions). */
+    api: z.enum(MODEL_REQUEST_FORMATS).optional(),
+    id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@~-]{0,199}$/u, "a model id is plain characters, as the provider lists it (for OpenRouter, vendor/model)"),
+  }).strict().optional(),
+  /**
+   * Lane H (plan v3.2 section 7.5, owner-set): the company rules service this install asks before a task starts, on approvals and for company values, and the public key(s) its answers are signed with
+   * (two while one is rotated). The hook can only make things stricter, and no answer is a refusal. Absent: no hook, and the install behaves exactly as before.
+   */
+  policyHook: PolicyHookSettingsSchema.optional(),
+  /**
+   * FIX-0518 (laptop only, owner-set): per-project settings, by project name, for example `{ "my-app": { "sandboxModelHosts": "allow" } }` for a project whose tests really call a model with the repository's own key. Absent: every project's sandbox is denied the model hosts.
+   * A cloud install ignores it.
+   */
+  projectSettings: z.record(z.string().regex(AGENTX_NAME_PATTERN, "a project name is lower-case letters, digits and hyphens"), LocalProjectSettingsSchema).optional(),
   plugins: z.array(PluginConfigEntrySchema).max(64),
 }).strict().superRefine((config, context) => {
+  if (config.projectSettings !== undefined && Object.keys(config.projectSettings).length > LOCAL_PROJECT_SETTINGS_MAX) context.addIssue({ code: "custom", path: ["projectSettings"], message: `at most ${String(LOCAL_PROJECT_SETTINGS_MAX)} projects` });
   const seen = new Set<string>();
   const one = new Set<string>();
   config.plugins.forEach((entry, index) => {

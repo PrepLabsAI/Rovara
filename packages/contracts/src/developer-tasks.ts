@@ -10,7 +10,7 @@ import { E2ESharedViewSchema } from "./e2e-view.js";
 import { RunEstimateSchema } from "./run-estimate.js";
 import { SessionIdSchema } from "./agent-sessions.js";
 import { TestingViewSchema } from "./verification-result.js";
-import { EvidenceViewSchema } from "./evidence.js";
+import { EvidenceViewReadSchema } from "./evidence.js";
 import { PlanOneScreenSchema } from "./plan-one-screen.js";
 import { MergeTrackingItemSchema, MergeViewSchema, ProofTableViewSchema, VerificationReportSchema } from "./rovara-code.js";
 import { readsAsUnknown } from "./forward-reader-unknown.js";
@@ -105,9 +105,12 @@ export const DeveloperTaskViewSchema = z.object({
   /** Actual audited fallback history; absent only on older servers. Current broker emits [] when none. */
   modelFallbacks:ModelFallbacksSchema.optional(),
   taskId: z.string().uuid(),
+  feature: z.object({ id: z.string().min(1), name: z.string().max(320), source: z.enum(["moved", "chosen", "tracker", "inherited", "confirmed_at_plan"]) }).strict().nullable().optional(),
   title: z.string(),
   project: z.string(),
   status: DeveloperTaskStatusSchema,
+  /** Web task channel (Q7): the task's own person, the sign-in id it was started under and its name (the owner a client shows without guessing from People). Absent from older servers and for a task with no sign-in owner. */
+  owner: z.object({ developerId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/), name: z.string().min(1).max(80) }).strict().optional(),
   /** UX2 slice 2: where the task stands in the one status model (state, reason, next step), the words every surface shows instead of `status`. Absent from older servers. */
   statusView: TaskStatusSchema.optional(),
   /**
@@ -196,7 +199,7 @@ export const DeveloperTaskViewSchema = z.object({
   /** Playbook P3 (version 2 only, full reads only, like `verificationReport`): the proof table of the approved plan's requirements, as the pull request's Proof section has it. Absent when there is no approved plan with claims. */
   proofTable: ProofTableViewSchema.optional(),
   /** Proof and evidence P1 (version 2 only, full reads only, like `proofTable`): the evidence of the code now on the task, with every artifact as a link behind sign-in. Absent until the broker has built one for the current candidate. */
-  evidence: EvidenceViewSchema.optional(),
+  evidence: EvidenceViewReadSchema.optional(),
   /** Setup and test health SH19 (version 2 only, full reads only, only while the four-results switch is on): one of Verified, Code failed, Partially verified or Blocked by environment for the code now on the task, with one row per check. Absent while the switch is off or the result is not decided yet. */
   testing: TestingViewSchema.optional(),
   /** Design review (DR11, version 2 only): the Design first and Skip buttons for the person reading, decided by the broker. Absent when design review is not offered for the task. */
@@ -222,6 +225,11 @@ export const DeveloperTaskViewSchema = z.object({
    * `needsAcknowledgement` is true for an `on` review that did not run until the task owner acknowledges it, and `acknowledged` says they have. Absent when there is nothing to show (shadow that did not run is silent).
    */
   secondReview: z.object({ lines: z.array(z.string().min(1).max(320)).min(1).max(7), needsAcknowledgement: z.boolean(), acknowledged: z.boolean(), /** True for the task's owner while an acknowledgement is asked for: the page offers "I've seen it". */ canAcknowledge: z.boolean().optional() }).strict().optional(),
+  /**
+   * L4-U5: the one evidence line when Rovara re-checked the project's setup for this task (design 1, steps 3b to 3d): "Checking setup again...", "Setup re-checked after dependency files changed: still works.",
+   * "Setup may be out of date after ... changed.", "Couldn't re-check setup ...". Fixed words (only the check's own redacted failing step is repository text); absent when there was no drift.
+   */
+  setupRecheck: z.string().min(1).max(600).optional(),
   /** Plan 6, Task 12 (version 2 only, like `verificationReport`): the review round whose problems are being fixed, with the sentence the thread says. */
   reviewRound: z.object({ round: z.number().int().min(1).max(100), max: z.number().int().min(1).max(5), message: z.string().min(1).max(200) }).strict().optional(),
   /**

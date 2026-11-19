@@ -10,7 +10,7 @@ import { readEnvironmentSettings, writeEnvironmentSettings, type EnvironmentSett
 import { installOrder, OPERATOR_PARAMETERS, SECRET_PARAMETERS, stackParameters, upgradeOrder, type DeployPart, type InstallAnswers, type StackOutputs } from "./parameters.js";
 import type { LoadedRelease } from "./release.js";
 import { callbackSigningKey, type SecretValueStore } from "./signing-key.js";
-import { readStoredDeveloperSignIn, SIGN_IN_PARAMETER_NAMES } from "../signin/settings.js";
+import { GITHUB_SIGN_IN_PARAMETER_NAMES, readStoredDeveloperSignIn, SIGN_IN_PARAMETER_NAMES } from "../signin/settings.js";
 
 export type { SecretValueStore } from "./signing-key.js";
 
@@ -103,7 +103,7 @@ export function withDeclaredSignIn(parameters: Record<string, string>, declared:
   // function silently resetting stored sign-in settings on the operator's behalf.
   if (declared === undefined) return parameters;
   const filtered = { ...parameters };
-  for (const name of SIGN_IN_PARAMETER_NAMES) {
+  for (const name of [...SIGN_IN_PARAMETER_NAMES, ...GITHUB_SIGN_IN_PARAMETER_NAMES]) {
     if (!declared.has(name)) delete filtered[name];
   }
   return filtered;
@@ -152,6 +152,23 @@ export function keptOperatorParameters(input: {
  */
 export function upgradeKeptParameterNames(part: DeployPart): ReadonlySet<string> {
   return new Set([...OPERATOR_PARAMETERS[part], ...SECRET_PARAMETERS]);
+}
+
+/** The control plane's deployed GitHubAppId, which an upgrade keeps when its answers name none.
+ * Refused when the deployed stack has no such parameter: nothing to keep, so the answers must name one. */
+async function deployedGitHubAppId(read: DeployEnvironmentInput["deployedParameters"], stackName: string): Promise<string> {
+  if (read === undefined) {
+    throw agentXError("CONFIG_INVALID", "an upgrade must read the deployed stacks' parameters to keep what the operator set; this is an AgentX bug, so report it");
+  }
+  const value = (await read(stackName))?.GitHubAppId;
+  if (value === undefined) {
+    throw agentXError("CONFIG_INVALID", `stack ${stackName} has no GitHubAppId parameter to keep; name the GitHub App id (github.appId) in the answers`);
+  }
+  // Empty (read the id from the secret) or a GitHub App id; anything else is not carried forward.
+  if (value !== "" && !/^\d+$/.test(value)) {
+    throw agentXError("CONFIG_INVALID", `stack ${stackName}'s GitHubAppId parameter is not a GitHub App id (a number); name the GitHub App id (github.appId) in the answers`);
+  }
+  return value;
 }
 
 /** Throws the exact message a missing stack output must report, naming the real (`environment`-naming) stack name. */
@@ -213,6 +230,16 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
   if (mode === "upgrade" && input.deployedParameters === undefined && [...deploySet].some((part) => OPERATOR_PARAMETERS[part].length > 0)) {
     throw agentXError("CONFIG_INVALID", "an upgrade must read the deployed stacks' parameters to keep what the operator set; this is an AgentX bug, so report it");
   }
+  // Only an upgrade may leave the GitHub App id out (it keeps the deployed one); an install must name it.
+  if (mode === "install" && answers.github.appId === undefined) {
+    throw agentXError("CONFIG_INVALID", "an install needs the GitHub App id (github.appId in the answers)");
+  }
+
+  // An upgrade whose answers leave github.appId out keeps the control plane's deployed GitHubAppId,
+  // even an empty one (the broker then reads the App id from the private-key secret). Checked here,
+  // before the lock and the signing key, so a control plane with no such parameter refuses the run.
+  const needsKeptAppId = mode === "upgrade" && answers.github.appId === undefined && deploySet.has("control-plane");
+  if (needsKeptAppId) await deployedGitHubAppId(input.deployedParameters, environmentStackName(env, "control-plane"));
 
   const work = async (): Promise<DeployEnvironmentResult> => {
     // Settings may have changed in the window between the check above and taking the lock (or, with
@@ -232,7 +259,10 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
     const environmentNamed = existing === undefined || existing.naming === "environment";
     // R7: a control-plane deploy always carries the stored developer sign-in, so no deploy resets it.
     const developerSignIn = answers.developerSignIn ?? (deploySet.has("control-plane") && environmentNamed ? await readStoredDeveloperSignIn(store, env) : undefined);
-    const fullAnswers: InstallAnswers = { ...answers, ...(developerSignIn === undefined ? {} : { developerSignIn }), release: release.manifest, callbackSigningKey: key };
+    // Read again under the lock: the deploy sends this value, not the one checked before the lock.
+    const keptAppId = needsKeptAppId ? await deployedGitHubAppId(input.deployedParameters, environmentStackName(env, "control-plane")) : undefined;
+    const github = keptAppId === undefined ? answers.github : { ...answers.github, appId: keptAppId };
+    const fullAnswers: InstallAnswers = { ...answers, github, ...(developerSignIn === undefined ? {} : { developerSignIn }), release: release.manifest, callbackSigningKey: key };
 
     const outputs: Partial<Record<DeployPart, StackOutputs>> = {};
     const droppedParameters: DeployEnvironmentResult["droppedParameters"] = [];
@@ -295,7 +325,10 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
         const { kept, dropped } = keptOperatorParameters({ part, computed: parameters, deployed, declared });
         parameters = { ...kept, ...parameters };
         droppedParameters.push(...dropped.map((entry) => ({ stackName, ...entry })));
-        if (candidates.length > 0) input.onEvent?.({ kind: "kept", stackName, kept: Object.keys(kept), dropped: dropped.map((entry) => entry.parameter) });
+        const keptFromAnswers = part === "control-plane" && keptAppId !== undefined ? ["GitHubAppId"] : [];
+        if (candidates.length > 0 || keptFromAnswers.length > 0) {
+          input.onEvent?.({ kind: "kept", stackName, kept: [...Object.keys(kept), ...keptFromAnswers], dropped: dropped.map((entry) => entry.parameter) });
+        }
       }
       const roleArn = part === "access" ? undefined : requiredOutput(outputs, "access", "CloudFormationRoleArn", env);
       const request: DeployRequest = {
@@ -361,7 +394,7 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
           }),
       updatedAt: new Date(now()).toISOString(),
     };
-    await writeEnvironmentSettings(store, settings);
+    await writeEnvironmentSettings(store, settings, { onLegacyKeysDropped: (keys) => input.onEvent?.({ kind: "settings-legacy-keys-dropped", env, keys }) });
     return { outputs, settingsWritten: true, droppedParameters };
   };
 

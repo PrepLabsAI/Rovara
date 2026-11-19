@@ -2,6 +2,7 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import { createLocalJWKSet, decodeProtectedHeader, jwtVerify } from "jose";
 import { describe, expect, it } from "vitest";
 import { issueAccessToken, kmsTokenSigner, pkceChallengeMatches, randomToken, sha256Hex } from "../../packages/broker/src/developer/tokens.js";
+import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { ISSUER, T0, fakeKms, rsaKeyPair } from "../support/developer-fakes.js";
 
 const KEY = "arn:aws:kms:us-east-1:123456789012:key/k1";
@@ -111,5 +112,27 @@ describe("PKCE, random tokens and hashes", () => {
 
   it("hashes to lowercase hex SHA-256", () => {
     expect(sha256Hex("abc")).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  });
+});
+
+
+describe("developer key purpose", () => {
+  it("refuses complete developer claims signed by a task or unknown-purpose key with the same fixed refusal", async () => {
+    const signer = kmsTokenSigner({ kms: fakeKms(), keyId: KEY });
+    const { token } = await issue(signer);
+    const jwk = await signer.publicJwk();
+    const verify = (keys: unknown[]) => developerTokenVerifier({ issuer: ISSUER, keys: async () => keys, now: () => T0 });
+    const authorization = `Bearer ${token}`;
+    for (const key of [jwk, { ...jwk, rovara_purpose: "developer" }]) {
+      await expect(verify([key])(authorization)).resolves.toMatchObject({ sid: "s-1", aud: "agentx-developer" });
+    }
+    const refusal = await verify([])(authorization).catch((error: unknown) => error);
+    for (const purpose of ["task", "policy-question", "future", "", null, false, 42, {}, [], undefined]) {
+      const result = await verify([{ ...jwk, rovara_purpose: purpose }])(authorization).catch((error: unknown) => error);
+      expect(result).toEqual(refusal);
+      expect(result).toMatchObject({ code: "AUTH_REQUIRED" });
+      expect(JSON.stringify(result)).not.toContain(token);
+      expect(JSON.stringify(result)).not.toContain(jwk.kid);
+    }
   });
 });

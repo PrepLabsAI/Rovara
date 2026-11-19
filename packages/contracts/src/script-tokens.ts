@@ -20,9 +20,11 @@ export const SCRIPT_TOKEN_NAME_MAX = 60;
 
 /**
  * What a token may do. `read`: read the creator's own tasks on the token's projects (a task, its events, the list). `start`: start a task on one of them.
+ * `lessons` (decision 46b): read the project-wide team lessons for a repository of the token's project, for a local coding tool. A token made before it has `read` and `start` only and cannot read lessons. It is shown as "Team knowledge" and ALSO allows sending team suggestions (`team_propose`: a suggestion waits for a second sighting and a person decides; at most 10 a person a day): the token screen says so, in one line.
+ * `wiki`: list and read the wiki of a named project. Never implied by `read`, and never permits wiki writes or model calls.
  * Nothing else is a permission: a token never makes tokens, changes members, roles, billing, company settings or secrets, and never decides anything a person must.
  */
-export const SCRIPT_TOKEN_PERMISSIONS = ["read", "start"] as const;
+export const SCRIPT_TOKEN_PERMISSIONS = ["read", "start", "lessons", "wiki"] as const;
 export const ScriptTokenPermissionSchema = z.enum(SCRIPT_TOKEN_PERMISSIONS);
 export type ScriptTokenPermission = z.infer<typeof ScriptTokenPermissionSchema>;
 
@@ -76,8 +78,8 @@ export const ScriptTokenViewSchema = z
   .strict();
 export type ScriptTokenView = z.infer<typeof ScriptTokenViewSchema>;
 
-/** `GET /v1/app/script-tokens`. */
-export const ScriptTokenListSchema = z.object({ tokens: z.array(ScriptTokenViewSchema).max(1000) }).strict();
+/** `GET /v1/app/script-tokens`. `canCreate` is true only for a live company owner or admin. */
+export const ScriptTokenListSchema = z.object({ tokens: z.array(ScriptTokenViewSchema).max(1000), canCreate: z.boolean() }).strict();
 export type ScriptTokenList = z.infer<typeof ScriptTokenListSchema>;
 
 /** `POST /v1/app/script-tokens`: the token itself, this once. The broker never shows it again: a repeat of the request is refused, not answered with it. */

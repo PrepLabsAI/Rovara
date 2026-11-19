@@ -7,13 +7,14 @@ import { chromium, type Browser } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tellBrowserState } from "../../packages/verifier/src/executor/browser-state-secrets.js";
 import { classifyString, isTokenShape, type ClassifiedValue } from "../../packages/verifier/src/executor/credential-classifier.js";
-import { MASK_BUCKET_CAP, createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
+import { MASK_BUCKET_CAP, MASK_ONLY_LIMIT, createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { headerSecrets, oversizedTokens, urlSecrets } from "../../packages/verifier/src/executor/request-secrets.js";
 import { createSessionSecretRegistry } from "../../packages/verifier/src/executor/session-secret-registry.js";
 import { readCaseContextAtClose, wireCaseContext } from "../../packages/verifier/src/executor/session-context-wiring.js";
 import type { E2ESessionSyncSource } from "../../packages/verifier/src/executor/session-sync.js";
 import { classifyStorageEntry } from "../../packages/verifier/src/executor/storage-entry-classifier.js";
 import { analyticsCookieName, cookieTier } from "../../packages/verifier/src/executor/visitor-cookie.js";
+import { expectLinearScaling } from "../support/scaling.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 
 // MIDSTEP-2, last scoped round (task-midstep2-finalfix-recheck2.md): analytics cookies and dotted words are not credentials, the wiring is tested for a signed-in context too, a JWT in an oversized URL value
@@ -99,11 +100,21 @@ describe("a JWT inside an oversized neutral value is found", () => {
     expect(headerSecrets([{ name: "referer", value: `https://app.test/${"y".repeat(20_000)}` }])).toEqual([]);
   });
   it("the scan is bounded and linear: a megabyte of separators and dotted pieces takes well under a second, a JWT past the first MiB is not looked for, at most 100 are kept", () => {
-    const started = Date.now();
+    // Scaling checks: each shape is timed at a size and at eight times it (the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 1.2 MB, 1.35 MB and 1.2 MB inputs are checked once, un-timed, below); the cost must grow no faster than the text.
+    const shapes: Array<[string, number, number, (size: number) => string]> = [
+      ["separators", 16_000, 2, (size) => ".-".repeat(size)],
+      ["dotted pieces", 3_500, 9, (size) => "aaaaaaaa.".repeat(size)],
+      ["spaces then a JWT", 16_000, 2, (size) => `${"z ".repeat(size)}${JWT}`],
+    ];
+    for (const [label, n, unitBytes, build] of shapes) {
+      expectLinearScaling((size) => {
+        const text = build(size);
+        return () => oversizedTokens(text);
+      }, { n, unitBytes, label: `oversizedTokens on ${label}` });
+    }
     expect(oversizedTokens(".-".repeat(600_000))).toEqual([]);
     expect(oversizedTokens("aaaaaaaa.".repeat(150_000))).toEqual([]);
     expect(oversizedTokens(`${"z ".repeat(600_000)}${JWT}`)).toEqual([]);
-    expect(Date.now() - started).toBeLessThan(1_000);
     // A run longer than 64 KiB is not tested, whatever its shape.
     const huge = `${JWT.split(".")[0]!}.${"A".repeat(70_000)}.${"B".repeat(20)}`;
     expect(isTokenShape(huge)).toBe(true);
@@ -114,31 +125,59 @@ describe("a JWT inside an oversized neutral value is found", () => {
 
 describe("the mask has a hard time and size bound; past it the view fails closed and the run goes on", () => {
   it("20,000 nine-character values that share a 6-character start, and a 200 KB text made of it: registered and masked in under a second, nothing of the start left readable", () => {
-    const registry = createSessionSecretRegistry({ redactor: createCredentialRedactor([]) });
-    const started = Date.now();
-    for (let index = 0; index < 20_000; index += 1) registry.register(`Zq8LmW${String(index).padStart(3, "0")}`, { maskOnly: true });
-    const out = registry.maskForModel("Zq8LmWxxx ".repeat(20_000));
-    expect(Date.now() - started).toBeLessThan(1_000);
+    // Scaling check: registering the values and masking a text made of them must cost no more than linear in their number (200 values and a 2 KB text, then 1,600 and 16 KB; the 8N input, about 19 bytes a value, stays at or under 256 KiB so it stays in CPU cache). The full 20,000 values and 200 KB text run once, un-timed, below.
+    const registerAndMask = (count: number) => {
+      const text = "Zq8LmWxxx ".repeat(count);
+      const registry = createSessionSecretRegistry({ redactor: createCredentialRedactor([]) });
+      for (let index = 0; index < count; index += 1) registry.register(`Zq8LmW${String(index).padStart(3, "0")}`, { maskOnly: true });
+      return { out: registry.maskForModel(text), overflowed: registry.maskOverflowed() };
+    };
+    expectLinearScaling((count) => () => { registerAndMask(count); }, { n: 200, unitBytes: 20, label: "registering values with a shared start and masking a text of them" });
+    const { out, overflowed } = registerAndMask(20_000);
     expect(out).not.toContain("Zq8LmW");
-    expect(registry.maskOverflowed()).toBe(true);
+    expect(overflowed).toBe(true);
   });
-  it("20 values of 32 KB that share their first 32,000 characters, and a 200 KB text of that periodic start: under a second, masked", () => {
+  // The values are held in memory the whole run, so they count toward the 256 KiB cache limit with the 8N text (`fixedBytes`): the timed scaling checks use values of 4 KB sharing their first 4,000 characters and a text of 8,000 then 64,000
+  // characters (8 x 4 KB + 20 x 4.1 KB = under the limit); the full size (values of 32 KB sharing their first 32,000 characters, a 200 KB text) runs once, un-timed, with a generous bound on the time.
+  const COMMON_SMALL = "ab".repeat(2_000);
+  const COMMON_FULL = "ab".repeat(16_000);
+  const valuesOf = (common: string, count: number): string[] => Array.from({ length: count }, (_unused, index) => `${common}${String(index).padStart(4, "0")}${"z".repeat(100)}`);
+  const heldBytes = (values: readonly string[]): number => values.reduce((total, value) => total + value.length, 0);
+  const periodic = (length: number): string => "ab".repeat(length / 2);
+  const GENEROUS_MS = 5_000;
+  it("20 values that share their first characters, and a periodic text: the cost grows with the text, not faster; at full size (32 KB values, 200 KB text) it is masked in good time", () => {
+    const small = valuesOf(COMMON_SMALL, 20);
     const registry = createSessionSecretRegistry({ redactor: createCredentialRedactor([]) });
-    const common = "ab".repeat(16_000);
-    const started = Date.now();
-    for (let index = 0; index < 20; index += 1) registry.register(`${common}${String(index).padStart(4, "0")}${"z".repeat(100)}`, { maskOnly: true });
-    const out = registry.maskForModel("ab".repeat(100_000));
-    expect(Date.now() - started).toBeLessThan(1_000);
+    for (const value of small) registry.register(value, { maskOnly: true });
+    let out = "";
+    expectLinearScaling((length) => {
+      const text = periodic(length);
+      return () => { out = registry.maskForModel(text); };
+    }, { n: 8_000, fixedBytes: heldBytes(small), label: "masking a periodic text against 20 long values" });
     expect(out).not.toContain("ababab");
+    const full = createSessionSecretRegistry({ redactor: createCredentialRedactor([]) });
+    for (const value of valuesOf(COMMON_FULL, 20)) full.register(value, { maskOnly: true });
+    const started = performance.now();
+    const masked = full.maskForModel(periodic(200_000));
+    expect(performance.now() - started).toBeLessThan(GENEROUS_MS);
+    expect(masked).not.toContain("ababab");
   });
-  it("5 values of 32 KB sharing their first 32,000 characters (too few to split the tree) against a 200 KB periodic text: cut short by the work bound, under a second", () => {
+  it("5 values (too few to split the tree) and a periodic text: cut short by the work bound, the cost grows with the text, not faster; at full size (32 KB values, 200 KB text) it is cut short in good time", () => {
+    const small = valuesOf(COMMON_SMALL, 5);
     const registry = createSessionSecretRegistry({ redactor: createCredentialRedactor([]) });
-    const common = "ab".repeat(16_000);
-    for (let index = 0; index < 5; index += 1) registry.register(`${common}${String(index).padStart(4, "0")}${"z".repeat(100)}`, { maskOnly: true });
-    const started = Date.now();
-    const out = registry.maskForModel("ab".repeat(100_000));
-    expect(Date.now() - started).toBeLessThan(1_000);
+    for (const value of small) registry.register(value, { maskOnly: true });
+    let out = "";
+    expectLinearScaling((length) => {
+      const text = periodic(length);
+      return () => { out = registry.maskForModel(text); };
+    }, { n: 8_000, fixedBytes: heldBytes(small), label: "masking a periodic text against 5 long values" });
     expect(out).not.toContain("ababab");
+    const full = createSessionSecretRegistry({ redactor: createCredentialRedactor([]) });
+    for (const value of valuesOf(COMMON_FULL, 5)) full.register(value, { maskOnly: true });
+    const started = performance.now();
+    const masked = full.maskForModel(periodic(200_000));
+    expect(performance.now() - started).toBeLessThan(GENEROUS_MS);
+    expect(masked).not.toContain("ababab");
   });
   it("a bucket that fills through weak evidence values degrades the mask too, and the registry reports it", () => {
     const registry = createSessionSecretRegistry({ redactor: createCredentialRedactor([]) });
@@ -148,15 +187,64 @@ describe("the mask has a hard time and size bound; past it the view fails closed
   });
   it("the work bound: a text that costs more than the budget is cut short and reported, a normal text is not", () => {
     const redactor = createCredentialRedactor([]);
-    const common = "ab".repeat(16_000);
-    for (let index = 0; index < 20; index += 1) redactor.addMaskOnly(`${common}${String(index).padStart(4, "0")}${"z".repeat(100)}`);
-    const started = Date.now();
-    expect(redactor.maskEvidenceOnlyBounded("ab".repeat(100_000)).exceeded).toBe(true);
-    expect(Date.now() - started).toBeLessThan(1_000);
+    const small = valuesOf(COMMON_SMALL, 20);
+    for (const value of small) redactor.addMaskOnly(value);
+    let exceeded = false;
+    expectLinearScaling((length) => {
+      const text = periodic(length);
+      return () => { exceeded = redactor.maskEvidenceOnlyBounded(text).exceeded; };
+    }, { n: 8_000, fixedBytes: heldBytes(small), label: "the work bound on a periodic text against 20 long values" });
+    expect(exceeded).toBe(true);
     expect(redactor.maskEvidenceOnlyBounded("an ordinary page with no registered value").exceeded).toBe(false);
     const normal = createCredentialRedactor([]);
     normal.addMaskOnly("Dk3pQ9xW2mV7cL4nR8tY");
     expect(normal.maskEvidenceOnlyBounded("doc Dk3pQ9xW2mV7cL4nR8tY here")).toEqual({ text: "doc <session> here", exceeded: false });
+  });
+  // SCALING-CAP-BLIND: the scaling checks above stay under the caps (a bucket of 4,096 forms; 20,000 mask-only values). These pin each cap exactly: the last value that fits is taken, the first one past it is refused, and a refused
+  // value costs the same however long the refusals go on (they do not grow with the number of values already refused).
+  it("the value-count bound is exact: the 20,000th value is taken, the 20,001st and every one after it is refused without being stored, and a refusal costs no more as refusals pile up", () => {
+    expect(MASK_ONLY_LIMIT).toBe(20_000);
+    const redactor = createCredentialRedactor([]);
+    // A distinct value per index, whose first 6 characters vary fastest so no bucket fills (the bucket bound is the next test).
+    const valueOf = (index: number): string => `${index.toString(36).split("").reverse().join("").padEnd(6, "-")}Zk8mWx`;
+    let taken = 0;
+    for (let index = 0; index < MASK_ONLY_LIMIT; index += 1) if (redactor.addMaskOnly(valueOf(index))) taken += 1;
+    expect(taken).toBe(MASK_ONLY_LIMIT);
+    expect(redactor.maskDegraded()).toBe(false);
+    expect(redactor.addMaskOnly(valueOf(MASK_ONLY_LIMIT))).toBe(false);
+    expect(redactor.addMaskOnly(valueOf(MASK_ONLY_LIMIT + 1))).toBe(false);
+    // Control: a value already taken is still accepted (it is not a new one), so the refusal is about new values only.
+    expect(redactor.addMaskOnly(valueOf(0))).toBe(true);
+    expect(redactor.maskEvidenceOnlyBounded(`see ${valueOf(5)} and ${valueOf(MASK_ONLY_LIMIT)}`).text).toBe(`see <session> and ${valueOf(MASK_ONLY_LIMIT)}`);
+    // Refusals: n of them, then 8n, cost about 8 times, not 64. The 20,000 held values count toward the working set.
+    const heldValueBytes = MASK_ONLY_LIMIT * valueOf(0).length;
+    expectLinearScaling((count) => {
+      const refusedValues = Array.from({ length: count }, (_unused, index) => valueOf(MASK_ONLY_LIMIT + 10 + index));
+      return () => { for (const value of refusedValues) redactor.addMaskOnly(value); };
+    }, { n: 100, unitBytes: 12, fixedBytes: heldValueBytes, label: "refusing mask-only values past the count bound" });
+  });
+  it("the bucket bound holds: values are taken until the bucket of forms that share a start is full, then each one is refused and degrades the mask, and a refusal costs no more as refusals pile up", () => {
+    const redactor = createCredentialRedactor([]);
+    const valueOf = (index: number): string => `Zq8LmW${String(index).padStart(5, "0")}`;
+    // The bucket counts FORMS (each value brings several spellings, and the base64 ones of values like these share a start), so the point where it fills is found, not assumed: every value before it is taken and leaves the
+    // mask whole, the first one that does not fit is refused and degrades the mask, and so is every one after it.
+    let firstRefused = -1;
+    for (let index = 0; index < 2 * MASK_BUCKET_CAP && firstRefused < 0; index += 1) {
+      const degradedBefore = redactor.maskDegraded();
+      if (!redactor.addMaskOnly(valueOf(index))) firstRefused = index;
+      else expect(degradedBefore || redactor.maskDegraded(), `value ${String(index)}`).toBe(false);
+    }
+    expect(firstRefused).toBeGreaterThan(0);
+    expect(firstRefused).toBeLessThanOrEqual(MASK_BUCKET_CAP);
+    expect(redactor.maskDegraded()).toBe(true);
+    expect(redactor.addMaskOnly(valueOf(firstRefused + 1))).toBe(false);
+    expect(redactor.addMaskOnly(valueOf(firstRefused + 2))).toBe(false);
+    // Control: a value with another start still fits.
+    expect(redactor.addMaskOnly("Dk3pQ9xW2mV7cL4nR8tY")).toBe(true);
+    expectLinearScaling((count) => {
+      const refusedValues = Array.from({ length: count }, (_unused, index) => valueOf(MASK_BUCKET_CAP + 10 + index));
+      return () => { for (const value of refusedValues) redactor.addMaskOnly(value); };
+    }, { n: 100, unitBytes: 11, fixedBytes: MASK_BUCKET_CAP * 40, label: "refusing forms past the bucket bound" });
   });
   it("the size bound: a bucket of forms that share their first 6 characters is full at MASK_BUCKET_CAP; the value that does not fit is refused and the mask is degraded", () => {
     const redactor = createCredentialRedactor([]);

@@ -10,7 +10,7 @@ import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
 
-type Resource = { Type: string; DeletionPolicy?: string; UpdateReplacePolicy?: string };
+type Resource = { Type: string; DeletionPolicy?: string; UpdateReplacePolicy?: string; Properties?: { Name?: unknown; RepositoryName?: unknown } };
 type Templates = Record<string, Record<string, Resource>>;
 
 function templates(context: Record<string, string>): Templates {
@@ -35,10 +35,18 @@ describe("retained resources in a named environment", () => {
     const expected: Record<string, string[]> = {
       "agentx-staging-access": ["ArtifactBucket AWS::S3::Bucket"],
       "agentx-staging-control-plane": [
-        "Artifacts AWS::S3::Bucket", "DeveloperSignInTable AWS::DynamoDB::Table", "SlackSecret AWS::SecretsManager::Secret", "SlackThreadSessions AWS::S3::Bucket",
+        // DEC 254za (#872): the callback signing key's own secret, kept like the Slack secret (its name is checked below).
+        "Artifacts AWS::S3::Bucket", "CallbackSigningKeySecret AWS::SecretsManager::Secret", "DeveloperSignInTable AWS::DynamoDB::Table", "SlackSecret AWS::SecretsManager::Secret", "SlackThreadSessions AWS::S3::Bucket",
         "SlackThreads AWS::DynamoDB::Table", "State AWS::DynamoDB::Table", "TurnRecords AWS::DynamoDB::Table",
       ],
-      "agentx-staging-foundation": ["VpcFlowLogs AWS::Logs::LogGroup", "WorkspaceKey AWS::KMS::Key"],
+      // Batch 13 (#906, DEC 254zm): the five test-service starter copy repositories, kept so a pinned copy outlives a replacement (their names are checked below).
+      "agentx-staging-foundation": [
+        "Ec2WorkersTestServiceMirrorRepository0 AWS::ECR::Repository", "Ec2WorkersTestServiceMirrorRepository1 AWS::ECR::Repository", "Ec2WorkersTestServiceMirrorRepository2 AWS::ECR::Repository",
+        "Ec2WorkersTestServiceMirrorRepository3 AWS::ECR::Repository", "Ec2WorkersTestServiceMirrorRepository4 AWS::ECR::Repository",
+        // Batch 17 (#994, owner DEC 254zzz18): the two NAT addresses are kept, so Rovara's outbound addresses survive a replacement.
+        "NatEip1 AWS::EC2::EIP", "NatEip2 AWS::EC2::EIP",
+        "VpcFlowLogs AWS::Logs::LogGroup", "WorkspaceKey AWS::KMS::Key",
+      ],
       "agentx-staging-identity": [],
       "agentx-staging-runtime": [],
       "agentx-staging-slack": [],
@@ -49,6 +57,15 @@ describe("retained resources in a named environment", () => {
         if (resource.DeletionPolicy === "RetainExceptOnCreate") expect(resource.UpdateReplacePolicy, `${stackName} ${id}`).toBe("Retain");
       }
     }
+    // DEC 254za: the one retained secret #872 adds is exactly agentx/<env>/callback-key.
+    const callbackSecrets = Object.entries(named["agentx-staging-control-plane"]!).filter(([id]) => id.startsWith("CallbackSigningKeySecret") && !id.includes("Policy"));
+    expect(callbackSecrets.map(([, resource]) => resource.Properties?.Name)).toEqual(["agentx/staging/callback-key"]);
+    // Batch 13 (#906): exactly the five starter copy repositories, outside the environment's pull-through prefix.
+    const mirrors = Object.entries(named["agentx-staging-foundation"]!).filter(([id]) => id.startsWith("Ec2WorkersTestServiceMirrorRepository"));
+    expect(mirrors.map(([, resource]) => resource.Properties?.RepositoryName).sort()).toEqual([
+      "agentx-staging--test-services/mongo-7/mongo", "agentx-staging--test-services/mysql-8/mysql", "agentx-staging--test-services/postgres-16/postgres",
+      "agentx-staging--test-services/postgres-17/postgres", "agentx-staging--test-services/redis-7/redis",
+    ]);
   });
 
   it("retains the Cognito user pool and attempt-specific Slack diagnostic records", () => {
@@ -67,11 +84,14 @@ describe("retained resources in a named environment", () => {
     const retained = Object.entries(legacy).flatMap(([stackName, resources]) => kept(resources, "Retain").map((entry) => `${stackName} ${entry}`));
     expect(retained).toEqual([
       // Spec 064: developer records and session history outlive the stack, as in named environments.
-      "AgentXControlPlane Artifacts AWS::S3::Bucket", "AgentXControlPlane DeveloperSignInTable AWS::DynamoDB::Table", "AgentXControlPlane SlackSecret AWS::SecretsManager::Secret", "AgentXControlPlane SlackThreadSessions AWS::S3::Bucket",
+      // DEC 254za (#872): the callback signing key's own secret (agentx/production/callback-key, checked below), Retain like the Slack secret.
+      "AgentXControlPlane Artifacts AWS::S3::Bucket", "AgentXControlPlane CallbackSigningKeySecret AWS::SecretsManager::Secret", "AgentXControlPlane DeveloperSignInTable AWS::DynamoDB::Table", "AgentXControlPlane SlackSecret AWS::SecretsManager::Secret", "AgentXControlPlane SlackThreadSessions AWS::S3::Bucket",
       "AgentXControlPlane SlackThreads AWS::DynamoDB::Table", "AgentXControlPlane State AWS::DynamoDB::Table", "AgentXControlPlane TurnRecords AWS::DynamoDB::Table",
       "AgentXProductionFoundation VpcFlowLogs AWS::Logs::LogGroup", "AgentXProductionFoundation WorkspaceKey AWS::KMS::Key",
       "AgentXReleasePipeline Artifacts AWS::S3::Bucket",
     ]);
     for (const resources of Object.values(legacy)) expect(kept(resources, "RetainExceptOnCreate")).toEqual([]);
+    const callbackSecrets = Object.entries(legacy.AgentXControlPlane!).filter(([id]) => id.startsWith("CallbackSigningKeySecret") && !id.includes("Policy"));
+    expect(callbackSecrets.map(([, resource]) => resource.Properties?.Name)).toEqual(["agentx/production/callback-key"]);
   }, 300_000);
 });

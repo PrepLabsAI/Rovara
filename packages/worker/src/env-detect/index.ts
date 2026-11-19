@@ -11,6 +11,7 @@ import { detectIac } from "./iac.js";
 import { detectJava } from "./java.js";
 import { detectNode } from "./node.js";
 import { detectPython } from "./python.js";
+import { detectSageMaker } from "./sagemaker.js";
 import { detectSdkCalls, detectServices } from "./services.js";
 import { detectSeedFiles } from "./seed-files.js";
 import { emptyDetection, type DependencyCandidate, type Detection, type Detector, type RepositoryReader } from "./types.js";
@@ -26,13 +27,17 @@ export const DETECTORS: ReadonlyArray<{ name: string; run: Detector }> = [
   { name: "ci", run: detectCiServices },
   { name: "env", run: detectEnvConfig },
   { name: "sdk", run: detectSdkCalls },
+  { name: "sagemaker", run: detectSageMaker },
   { name: "test-fakes", run: detectTestFakes },
   { name: "iac-resources", run: detectIacResources },
   { name: "seed-files", run: detectSeedFiles },
 ];
 
 /** The detectors that only report dependency candidates (test services D1-D7). The language detectors also report their manifests' drivers, which `legacyOnly` drops. */
-export const DEPENDENCY_DETECTOR_NAMES: ReadonlySet<string> = new Set(["compose", "ci", "env", "sdk", "test-fakes", "iac-resources", "seed-files"]);
+export const DEPENDENCY_DETECTOR_NAMES: ReadonlySet<string> = new Set(["compose", "ci", "env", "sdk", "sagemaker", "test-fakes", "iac-resources", "seed-files"]);
+
+/** The names of the built-in detectors: a build-system plug-in's detector may not use one. */
+export const BUILT_IN_DETECTOR_NAMES: ReadonlySet<string> = new Set(DETECTORS.map((detector) => detector.name));
 
 export const ENV_DETECT_MAX_PATHS = 5_000;
 export const ENV_DETECT_MAX_FILE_BYTES = 256 * 1_024;
@@ -94,12 +99,21 @@ function freeId(id: string, detector: string, taken: ReadonlySet<string>): strin
  * one's citation; a check whose id is taken by a different command is KEPT under `<id>-<detector>` rather than silently replaced; setup commands, globs, services, notes and questions are de-duplicated; and the
  * environment's limits hold, each cut saying so. `legacyOnly` runs the detectors that existed before test services, without any dependency candidate (used when the full pass was stopped for taking too long).
  */
-export async function runDetectors(reader: RepositoryReader, cwd: string, options: { legacyOnly?: boolean; /** Run only the detectors with these names (a caller that wants one kind of finding). */ only?: readonly string[] } = {}): Promise<Detection> {
+export async function runDetectors(reader: RepositoryReader, cwd: string, options: {
+  legacyOnly?: boolean;
+  /** Run only the detectors with these names (a caller that wants one kind of finding). */
+  only?: readonly string[];
+  /** Port lane P6 (item B1): detectors a build-system plug-in supplies. They run after the built-in ones, so a built-in's check wins a tie. */
+  extraDetectors?: ReadonlyArray<{ name: string; run: Detector }>;
+  /** Statements to add to the detection's notes first (a plug-in detector that could not be loaded). */
+  extraNotes?: readonly string[];
+} = {}): Promise<Detection> {
   const merged = emptyDetection();
+  merged.notes.push(...(options.extraNotes ?? []));
   const candidates: DependencyCandidate[] = [];
   const ids = new Set<string>();
   let cutChecks = false;
-  for (const detector of DETECTORS) {
+  for (const detector of [...DETECTORS, ...(options.extraDetectors ?? [])]) {
     if (options.only !== undefined && !options.only.includes(detector.name)) continue;
     if (options.legacyOnly === true && DEPENDENCY_DETECTOR_NAMES.has(detector.name)) continue;
     let part: Partial<Detection>;
@@ -129,6 +143,10 @@ export async function runDetectors(reader: RepositoryReader, cwd: string, option
   merged.services = dedupe(merged.services, (item) => `${item.value.kind}:${item.value.target}`);
   // Dependency candidates (test services D1-D7): present only when a detector found one, so a repository with none gives today's detection byte for byte.
   if (candidates.length > 0) merged.dependencies = mergeCandidates(candidates);
+  // An AWS service no seed handler creates resources for still gets a candidate: its emulator starts empty and the tests create their resources. One fixed sentence names them, in a full detection only (a run that asks
+  // for named detectors, the seed's reading of one file, treats any note as a refusal).
+  const empty = options.only !== undefined ? [] : (merged.dependencies ?? []).filter((item) => item.hints.startsEmpty === true).map((item) => item.family.slice(4));
+  if (empty.length > 0) merged.notes.push(`Some AWS services start empty in the test services, and the tests create their resources: ${empty.slice(0, 12).join(", ")}${empty.length > 12 ? `, and ${String(empty.length - 12)} more` : ""}.`);
   if (reader.budgetExhausted?.() === true) merged.notes.push("Some files were not read: the read budget ran out.");
   if (cutChecks) merged.notes.push(`More than ${String(ENV_DETECT_MAX_CHECKS)} checks were found; the first ${String(ENV_DETECT_MAX_CHECKS)} are proposed.`);
   if (merged.setupCommands.length > ENV_DETECT_MAX_SETUP_COMMANDS) { merged.setupCommands = merged.setupCommands.slice(0, ENV_DETECT_MAX_SETUP_COMMANDS); merged.notes.push(`More than ${String(ENV_DETECT_MAX_SETUP_COMMANDS)} setup commands were found; the first ${String(ENV_DETECT_MAX_SETUP_COMMANDS)} are proposed.`); }

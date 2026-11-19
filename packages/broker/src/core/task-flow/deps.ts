@@ -1,0 +1,472 @@
+import type { AgentXError, ScriptTokenPermission, WorkOrigin } from "@agentx/contracts";
+// Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
+// EC2, a chat tool or a code host (decision 51).
+import type { MoneyStop } from "./money-stop.js";
+import type { TierReviewCall, TierReviewMeter } from "../build-step/tier-review-calls.js";
+import type { TaskTestEnvironment } from "../test-env/seam.js";
+import type {
+  Admission,
+  AgentXErrorCode,
+  Autonomy,
+  AuditSink,
+  BrowserEvidenceRecipe,
+  CheckEntry,
+  DocumentStore,
+  OrgId,
+  PlanDocument,
+  InvocationModelRoute,
+  ModelIdentifier,
+  Principal,
+  ProjectDefinition,
+  QueueService,
+  RegistryView,
+  StandingInstructionsPayload,
+  TransactItem,
+  TransactionalOutbox,
+  WorkerMachines,
+  WorkflowPath,
+  WorkflowIntent,
+  WorkflowOwnerAuthority,
+  WorkflowReviewPhase,
+  WorkflowSnapshot,
+} from "@agentx/contracts";
+import type { TaskLogHooks } from "../task-log/hooks.js";
+import type { RepositoryGrantService } from "../../repository-access.js";
+import type { OperationRecord, DispatchRowRecord, TaskRecord } from "./records.js";
+import type { StepOutcome } from "./outcome.js";
+import type { CodeMilestones, SessionBindingsReader } from "../merge/seams.js";
+import type { PlaybookMode } from "../playbook/service.js";
+import type { PinnedStanding } from "../instructions/pinned.js";
+import type { CiDefinitionReader } from "../../rovara-code/ci-checks.js";
+import type { StructuredPlanContext, StructuredPlanInput } from "../plan/prompts.js";
+import type { SecondReview } from "../second-review/service.js";
+import type { ModelSelectionService } from "../model-selection/service.js";
+import type { UsableModels } from "../model-selection/usable-models.js";
+import type { ProofContext } from "../proof/proof-section.js";
+import type { E2EVerificationDeps } from "../e2e/authority.js";
+import type { KnowledgeContext, LearnedContext, RovaraSkillFile, WikiContext } from "@agentx/contracts";
+import type { LessonsUsedSection } from "../proof/pull-request-body.js";
+
+/** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
+export interface TaskCaller {
+  /** Server start surface. Set by the route/adapter, never copied from request data. */
+  origin?: WorkOrigin;
+  principal: Principal;
+  client?: string | undefined;
+  /**
+   * Set only by intake, never by a request body: the task starts from this ticket, so the request text is the ticket's (the plan's "why" credits it to the ticket, not to the person who started the task).
+   */
+  ticket?: { system: string; id: string; url: string; parent?: { kind: "project" | "parent_issue" | "epic"; id: string; title: string; url?: string | undefined } } | undefined;
+  /**
+   * Set only by the script token check: the request is a script token's, scoped to these projects and permissions. The start gives such a task the fixed client "Script token", whatever
+   * the body says. It is never an approval proof: nothing that decides anything reads it as one, and no route a token may reach decides anything.
+   */
+  scriptToken?: { tokenId: string; name: string; permissions: readonly ScriptTokenPermission[]; projects: readonly string[] } | undefined;
+  /**
+   * The person's last step-up (a fresh sign-in with a factor Code owns) as the VERIFIED access token states it (`step_up_at`, `step_up_amr`), set only by the host's sign-in, never from a header, a query or a body.
+   * `at` is an ISO time. Only an act that needs a fresh sign-in reads it (accepting a security finding, `security-accept.ts`), and its age is checked there against the company's window.
+   */
+  stepUp?: { at: string; method: string } | undefined;
+  /**
+   * DEC 236h: set only by the host's sign-in, from the verified client's registration, when the request comes from the Rovara web app's own sign-in client (the one the operator marked; never an administrator's
+   * registration, and never another full-access client such as an AI tool's). Only the act that is the web page's alone (accepting a security finding, `security-accept.ts`) reads it.
+   */
+  webApp?: true | undefined;
+}
+
+/** Starting work always names the trusted server surface; other task actions need no origin. */
+export interface TaskStartCaller extends TaskCaller { origin: WorkOrigin }
+
+/** A registered project revision, as the flow needs it. */
+export interface ProjectRevision {
+  definition: ProjectDefinition;
+  /** The project is archived: it accepts no new work (Cloud's PROJECT_ARCHIVED). */
+  archived?: boolean;
+}
+
+/** Where registered projects are read from. `createStoreProjectSource` reads them from the document store. */
+export interface ProjectSource {
+  latest(project: string): Promise<ProjectRevision | undefined>;
+  revision(project: string, revision: number): Promise<ProjectRevision | undefined>;
+}
+
+export type StartVerdict = { allowed: true } | { allowed: false; code: AgentXErrorCode; message: string };
+
+/**
+ * The answer to "may the system start this task's next step now". `items` are steps the adapter needs in the step's own transaction (Cloud's
+ * People-revision fence), so a change of who may act between the check and the commit refuses the step.
+ */
+export type StepVerdict = { allowed: true; items?: readonly TransactItem[] } | { allowed: false; message: string };
+
+/**
+ * Who may start work and who may act on a task. Code's default is the local owner (`createOwnerTaskAccess`); a hosted product fills it with
+ * project roles. The flow asks `checkStart` at a start and `checkStep` before every step the system starts on its own, and never takes a caller's word for a role.
+ */
+export interface TaskAccess {
+  /**
+   * `origin` is the work origin of the start (`nightly` only for upkeep AI): a system owner's wiki refresh is accepted only with it. `purpose` is what a TASK start is for (`setup_agent`, `wiki_build`, ...): absent for an ordinary task. Only the hosted rule reads it, and only for a project's system owner (L4-P1): the system owner is accepted for
+   * a listed system purpose and for nothing else.
+   */
+  checkStart(principal: Principal, project: string, purpose?: string, origin?: string): Promise<StartVerdict>;
+  /** Whether this principal may read and drive the task. A task of someone else is "not found" to a principal who may not (no leak). */
+  canAct(principal: Principal, task: { developerId: string; project: string }): Promise<boolean>;
+  /**
+   * Whether this principal may only READ the task (web task channel C6): its owners, and the commenters and viewers its People list gives a role to, each under the same live proof. Used for reads and nothing else:
+   * every move, answer and decision still asks `canAct` or `ownerActing`. Absent: `canAct` (Code's own rule, where reading and driving are the same).
+   */
+  canRead?(principal: Principal, task: { taskId: string; developerId: string; project: string }): Promise<boolean>;
+  /** Asked before the system starts any step of a task with no one asking (a dispatch row, the first run): the person it runs for must still be allowed. */
+  checkStep(task: { taskId: string; developerId: string; project: string }): Promise<StepVerdict>;
+  /**
+   * The owner moves that decide or start paid work on a task already running (send back, review findings, continue): who the engine records as acting when this principal is the task's owner or a co-owner.
+   * `authority` is what the workflow engine checks the actor against (a hosted product's co-owners). `items` are steps for the move's own transaction (a hosted product's live access fence, as `checkStep`'s `items`): a change of who may act between the check and the commit refuses the move. Undefined: not an owner, so the move is refused as a task they cannot see. Absent: Code's own rule,
+   * where the owner of the install, or the person the task runs for, acts as the task's owner (`ownerActingOf`).
+   */
+  ownerActing?(principal: Principal, task: { taskId: string; developerId: string; project: string; ownerKey: string }): Promise<{ actorId: string; authority?: WorkflowOwnerAuthority; items?: readonly TransactItem[] } | undefined>;
+}
+
+/**
+ * The text of the first request to each step. Understand's is Cloud's (`rovara-code/understand.ts`, ported); the plan's asks for the Markdown document Code keeps (`step-prompts.ts`).
+ * `intent` is the workflow's stored understanding (its answers and what Understand found); `phase` is the Full path's current document.
+ */
+export interface StepPrompts {
+  understand(input: { requestText: string; intent?: WorkflowIntent | undefined }): string;
+  plan(input: {
+    requestText: string; path: WorkflowPath; phase?: WorkflowReviewPhase | undefined; restatement?: string; assumptions?: readonly string[];
+    /** What the owner asked to change in the earlier plans, oldest first (lane L9-wire writes them with the decision). */ feedback?: readonly string[];
+    intent?: WorkflowIntent | undefined;
+    /** The documents of earlier phases the owner approved (a Full task's design is written from its requirements), oldest first. */ earlier?: ReadonlyArray<{ kind: "requirements" | "design" | "plan"; markdown: string }>;
+    /** The earlier version of the document being written again after the owner asked for changes. */ previous?: string | undefined;
+    /** Present when the planner is asked for a structured plan document (the default): the rules and the document it builds on, as data (`core/plan/prompts.ts`). */
+    structured?: { rules: StructuredPlanInput; previous?: StructuredPlanContext | undefined } | undefined;
+    /** The planner's automatic second run: what is wrong with its last answer (said by Rovara, from fixed words and plan ids), after the rules. */ revision?: string | undefined;
+  }): string;
+}
+
+/**
+ * What the wiring lane adds to a start: more steps for the start's own transaction (the task's session, whose records must exist if and only if the task does)
+ * and the session's id, which the task record then carries so the projector can find it.
+ */
+export interface StartExtras {
+  items: readonly TransactItem[];
+  sessionId?: string;
+}
+
+export interface StartExtrasInput {
+  taskId: string;
+  /** The task's workspace (made with the task): a row written in the start's own transaction that has to name it. */
+  workspaceId: string;
+  project: string;
+  title: string;
+  principal: Principal;
+  client: string;
+  receivedAt: string;
+  /** The ticket the task starts from (intake only): the session is bound to it in the same transaction, so the task and its ticket follow each other or the start does not commit. */
+  ticket?: { system: string; id: string; url: string; parent?: { kind: "project" | "parent_issue" | "epic"; id: string; title: string; url?: string | undefined } } | undefined;
+  /** Where the task started (the surface that asked for it). */
+  origin?: WorkOrigin | undefined;
+  /** What the task is for when it is not ordinary work (a setup run); absent for ordinary work. */
+  purpose?: "setup_agent" | undefined;
+}
+
+/** Reads what a worker saved (a plan, a document) by its object key. At most `maxBytes` are read; undefined when it is not there. Lane L9a's object-storage port fills it. */
+export interface ArtifactReader {
+  get(objectKey: string, maxBytes: number): Promise<Uint8Array | undefined>;
+}
+
+/**
+ * The steps after the plan is approved (lane L10): coding, the checks, the reviews and the publication. The stage machine's own runner starts the steps that read (Understand, Plan);
+ * a row of any other kind, and the end of any other operation, is handed here. Kept behind this seam so the stage machine does not import the steps that import it.
+ */
+export interface BuildSteps {
+  /** Starts the step a dispatch row stands for. Same answers as the stage machine's own runner: STARTED, DUPLICATE, STALE (the row is no longer wanted), WAITING (try again). */
+  runRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind" | "firstEvent">): Promise<"STARTED" | "DUPLICATE" | "STALE" | "WAITING">;
+  /** After a coding run, a rerun of the checks, the reviews or a publication ended (the operation's result is committed). Idempotent; never throws for a task that moved on. */
+  onEnded(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<void>;
+}
+
+/**
+ * Standing instructions: the block one operation carries in its system prompt (the company's rules and the project's How we work). `core/instructions` fills it. Read at every dispatch, so a step
+ * started after the rules changed carries the newest ones. A rejection with `CONFIG_INVALID` or `PROCESS_UNAVAILABLE` ends the operation with its sentence; any other waits and tries again.
+ */
+export interface StandingInstructionsSeam {
+  forOperation(input: { project: string; mode: PlaybookMode | undefined; purpose?: string | undefined; playbookCommit?: string | undefined; pinned?: unknown }): Promise<StandingInstructionsPayload | undefined>;
+  /** The playbook commit a task starting now is pinned to, kept on its workspace; the task's steps read the file at it. Refuses (as `forOperation`) when the rules cannot be read, so a task does not start under rules it cannot be given. */
+  pin(project: string): Promise<string | undefined>;
+  /** Hosted: the copy of the rules kept on the task's workspace for the dispatcher (see `createStandingInstructions`). Absent on a laptop. */
+  pinContent?(project: string, playbookCommit: string | undefined): Promise<PinnedStanding | undefined>;
+}
+
+/**
+ * The design review stage: a fresh-context review of a Full task's design document, run in the plan-check stage (PLAN_CRITIQUE) with its own rows (`CRITIQUE`, `CRITIC_REPLAN`). Kept behind this seam so the
+ * stage machine does not import the review that imports it; `createDesignReviewSteps` (core/design-review/steps.ts) fills it, and a flow without it never enters the stage.
+ */
+export interface DesignReviewSteps {
+  /** Starts the step a `CRITIQUE` or `CRITIC_REPLAN` row stands for. Same answers as the stage machine's own runner. */
+  runRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind">): Promise<"STARTED" | "DUPLICATE" | "STALE" | "WAITING">;
+  /** After an operation of the review ended (a round, or the planner's answer to the findings). True when it was this review's (the stage machine then does nothing more). Idempotent; never throws for a task that moved on. */
+  onEnded(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<boolean>;
+  /** Understand answered `ready`: the workflow with the design review switched on when the mode says so (Full path forced), else as it was. */
+  afterUnderstand(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot, assessment: unknown, now: string): Promise<WorkflowSnapshot>;
+  /** The row the workflow's new state makes due (a design handed to the reviewers, the planner's turn to answer them), or undefined. */
+  rowFor(workflow: WorkflowSnapshot): "CRITIQUE" | "CRITIC_REPLAN" | undefined;
+  /** What the planner is told beside its prompt while the design review is on and the phase is the design (the fixed template), or undefined. */
+  planInstructions(workflow: WorkflowSnapshot): string | undefined;
+  /** The owner's Retry of a blocked review step. True when it was the review's (a round, or the planner's answer to the findings); false: not this review's, the ordinary retry applies. */
+  retryBlocked(deps: TaskFlowDeps, task: TaskRecord, expectedRevision: number | undefined): Promise<boolean>;
+  /** The `design first:` prefix of a request, read only while the stage exists for the company. `rest` is the request without it. */
+  designFirst(text: string): Promise<{ designFirst: boolean; rest: string }>;
+  /** Whether this operation is the planner's answer to the reviewers' findings (a PLAN run while the review is resolving): its saved file is read by `onEnded`, not as a plan. */
+  isResolveRun(workflow: WorkflowSnapshot | undefined, operation: Pick<OperationRecord, "workflowMode">): boolean;
+  /** The Proof section's input when the task's design was approved (the design line, and the links to the approved design), or undefined: the pull request is then described as for any task. Informational; never throws. */
+  proofContext?(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot): Promise<ProofContext | undefined>;
+}
+
+export interface TaskFlowDeps {
+  /** Code's one company (`IMPLICIT_COMPANY_ID`); every port call carries it. */
+  companyId: OrgId;
+  store: DocumentStore;
+  queues: QueueService;
+  outbox: TransactionalOutbox;
+  machines: WorkerMachines;
+  /**
+   * A deployed install's per-run dollar stop and usage flush (money-stop.ts): a Stop and a close let a running model run send its usage first, a run is stopped at its cap as its usage is
+   * booked, and each model run is admitted (`run.start`) before it is handed to a worker that reports usage while it runs. Absent (the laptop): today's Stop, close and dispatch.
+   */
+  moneyStop?: MoneyStop;
+  admission: Admission;
+  audit: AuditSink;
+  projects: ProjectSource;
+  access: TaskAccess;
+  /**
+   * L4-P1 (owner DEC 254zzl): whether this company's SYSTEM RUNS are on (the per-company `CoreSystemRuns` flag). Absent (the laptop): today's behaviour. Present and off: Rovara starts nothing by itself, the free
+   * re-check at task start included. A hosted install fills it from the flag, read for this company.
+   */
+  systemRuns?: { enabled(): boolean | Promise<boolean> } | undefined;
+  /**
+   * L4-U5: tells the project's admins ONCE that its setup broke (the re-check settled as broken). The host builds it over its own recipient read and the attention queue (`queueSetupBroken`); it never throws and says
+   * nothing twice for one re-check. Absent: nobody is told here (the setup page's card and the task's pause still say it).
+   */
+  setupBroken?: (input: { project: string; recheckKey: string }) => Promise<void>;
+  /**
+   * L4-SR2b: whole cents of a project's monthly upkeep cap still free, as the model gateway says NOW (core/upkeep/cap.ts `upkeepRoomCentsOf`: company, project and month checked, nothing cached). The model token of an
+   * AUTOMATIC repair draft is minted only while it answers a number above zero (read at every mint); absent, undefined, a throw, zero or less: no token. A hosted install fills it with the repair draft's wiring only.
+   */
+  upkeepRoomCents?: (project: string) => Promise<number | undefined>;
+  /** Issues the short-lived repository grant a prepare carries. Called when the invocation is built, so a retried delivery gets a fresh one. */
+  repositoryGrants: Pick<RepositoryGrantService, "issue">;
+  /** Signs the callback capability (HMAC-SHA256, the format the callback API checks). At least 32 bytes. */
+  callbackSigningKey: string | Buffer;
+  /** When present, a start is refused for a repository whose code host nobody registered. */
+  codeHosts?: RegistryView;
+  /** Open workspaces one person may hold, and all together. Default 10 and 100. */
+  limits?: { member: number; organization: number } | (() => Promise<{ member: number; organization: number }>);
+  /** Whether a workflow task starts by understanding the request (workflow 1.1.0). Default: Cloud's `ROVARA_CODE_V2_FOR_NEW_ORGS`. */
+  understandFirst?: boolean;
+  /**
+   * Whether a task on workflow version 1.0.0 may start its approved ordered plan (spec 059). Default off. A version 1.1.0 task (every task `rovara up` starts)
+   * does not need it: it exists only where the install started tasks on 1.1.0.
+   */
+  workflowDependenciesEnabled?: boolean;
+  /** The queue operations are dispatched on. Default `task-dispatch`. */
+  dispatchQueue?: string;
+  /**
+   * The project's read-only context sources (MCP servers and monitoring connections the owner has ticked). Asked when a workflow step starts: a stage that may read sources and has some is
+   * dispatched with the `context-tools` capability and `contextSources: true`, and so only on a worker that lists `task.contextSources.v1`. Absent: no stage has sources.
+   */
+  contextSources?: { stageHasSources(task: { project: string }, mode: string): Promise<boolean> };
+  /** Told, best effort, after a task was closed and its machines and allowances given back (what a task kept only for its own lifetime, such as live-only source text, goes now). Never fails the close. */
+  taskEnded?: (event: { orgId: OrgId; taskId: string }) => Promise<void>;
+  /** How long (seconds) a worker machine may be lost or unhealthy before the operation running on it is ended INTERRUPTED (`sweepLostRuns`). Default `RUN_LOST_GRACE_SECONDS`. */
+  runLostGraceSeconds?: number;
+  /**
+   * L4-RD: told, best effort, right after a free setup re-check settled as "setup broken" (once per failure, from `advanceRecheck`). The host wires the automatic repair draft here (`core/setup-agent/repair-draft.ts`):
+   * it starts one only when upkeep is on with cap room. Never decides anything itself; a fault is logged by its kind and never reaches the caller.
+   */
+  afterSetupBroken?: (project: string, recheckKey: string) => Promise<void>;
+  now?: () => Date;
+  newId?: () => string;
+  log?: (entry: Record<string, unknown>) => void;
+  prompts?: StepPrompts;
+  /**
+   * The document a planning run is asked to write: a structured plan (claims with evidence, decisions, checks; Cloud's format, the default) or the Markdown plan an older worker takes. A structured
+   * answer is read, judged and stored by `core/plan`; a Markdown one is kept as the worker wrote it.
+   */
+  planFormat?: "structured" | "markdown";
+  /** Whether a plan the planner wrote is held to Rovara's own checks before the owner sees it, and an unreadable one sent back once (Cloud's `planSelfCheck`). Default on. */
+  planSelfCheck?: boolean;
+  /**
+   * A read-only view of a repository's CI definition (its workflow files), when the install's code host can give one: the checks the CI requires then join a coding plan's proposed checks. The CodeHost
+   * port has file reads but no directory listing, so a host that cannot list leaves this out and the plan's checks stay as the planner proposed them.
+   */
+  ciDefinitionReader?: (repository: { name: string; path: string; url: string }) => Promise<CiDefinitionReader | undefined>;
+  /** Whether a coding plan is read by a second step before a person sees it (the plan check). Default on. */
+  planCheck?: boolean;
+  /** The model the install runs its steps on (every step runs on it, so the plan check says the same model checked the plan). Absent: the critique records it as unknown. */
+  installModel?: () => Promise<ModelIdentifier | undefined>;
+  /**
+   * Called once after a structured plan that cites code was committed: reads the cited code (through the code host of each repository) and attaches it beside the plan. Best effort; never throws into the flow.
+   * Absent: the plan page shows the citations as they are.
+   */
+  afterPlanStored?: (input: { task: TaskRecord; workflow: WorkflowSnapshot; artifactId: string; artifactSha256: string; plan: PlanDocument; prefix: string }) => Promise<void>;
+  /** Environment every worker machine of this install is started with (lane L9-wire: where the model proxy is). Never a secret. */
+  machineEnvironment?: Readonly<Record<string, string>>;
+  /** Lane L10: reads the documents workers saved (the approved plan the coding step is given, the plan the reviewers are shown). */
+  artifacts?: ArtifactReader;
+  /**
+   * Lane L10, Rovara's own fixing of a block (the owner's rule: a code fault is sent back to coding by itself at most twice, one hiccup of the checks is retried once, anything unclear is asked
+   * about). `capUsd` bounds what automatic rounds may add to a task whose spend is known; `taskSpendUsd` says what it is (undefined: nothing is priced, which Code treats as 0 so the
+   * count limits alone bound the rounds, and a Cloud install that cannot read it fills this with a function that throws, which asks the owner instead; the hosted roots fill it with `core-host/company-task-spend.ts`, which never answers undefined: anything not known to be complete, including a run whose usage is not booked yet, throws).
+   */
+  autofix?: { enabled?: boolean; capUsd?: number; roundEstimateUsd?: number };
+  taskSpendUsd?: (taskId: string) => Promise<number | undefined>;
+  /**
+   * Decision 70(c): how far Rovara may act on its own for this task NOW (the stricter of the task's frozen recipe and the company's limit), read again where a merged base's checks would be re-run by themselves and
+   * before the reviews that follow. `suggest` asks the owner instead; `unreadable` and `noCompany` say why a `suggest` is not the owner's setting, so the ask is true. Absent: `suggest` (nothing is re-run by
+   * itself) and the reviews are never stopped; an install that lets its owner's machine act on its own says so here (`rovara up` answers `prepare`, as merge tracking does).
+   */
+  autonomy?: (task: TaskRecord) => Promise<{ autonomy: Autonomy; unreadable?: true; noCompany?: true }>;
+  /** Lane L10: records a milestone ("fixing", "stuck") in the transaction of the change that caused it. Absent: none is recorded (the workflow change still is). */
+  milestones?: CodeMilestones;
+  /**
+   * The task log's hook (`core/task-log/hooks.ts`): told after a change that wrote log entries in its own transaction is committed (the answers to Understand's questions, the questions it asked), so the surfaces that draw the log
+   * catch up. Absent: nothing is told; the entries are written all the same.
+   */
+  taskLog?: Pick<TaskLogHooks, "changed">;
+  /**
+   * Lane L12: keeps the evidence of a run whose checks were just recorded for a candidate (the proof page and the pull request read it). Informational: called best effort after the verification is recorded, and
+   * a fault or a slow store changes nothing about the task. Absent: no evidence is kept.
+   */
+  keepEvidence?: (input: { task: TaskRecord; operation: OperationRecord; workflow: WorkflowSnapshot; candidateDigest: string; checks: readonly CheckEntry[] }) => Promise<unknown>;
+  /**
+   * TE-C6 (behind `ROVARA_FLAKY_RERUN`): the failed checks of a run that may be recorded as passed because every test that failed in them passed on the worker's one rerun, with those tests' ids, and the base's flaky set
+   * (undefined when it is not known: then no test is flaky on the base). Read BEFORE the verification is recorded; a fault, a missing answer or an empty one changes nothing (the check stays failed). Absent: nothing is excused.
+   */
+  flakyChecks?: (input: { task: TaskRecord; operation: OperationRecord; candidateDigest: string; checks: readonly CheckEntry[] }) => Promise<{ byCheck: ReadonlyMap<string, readonly string[]>; baseFlaky: readonly string[] | undefined } | undefined>;
+  /**
+   * TE-H1 browser evidence (DEC 241), Code only (Cloud leaves it absent: browser evidence is not on Cloud yet). `recipe`: the project's recipe from the owner's own settings, or undefined for off; it is read fail-closed, so anything
+   * unreadable is off. A rerun of the checks that carries it asks the worker for before and after screenshots of the changed pages. `linesOf`: the text lines the pull request description adds about them (never an image).
+   * Absent: nothing is asked, and the description is exactly what it was.
+   */
+  browserEvidence?: {
+    recipe(task: TaskRecord): Promise<BrowserEvidenceRecipe | undefined>;
+    linesOf(task: TaskRecord, candidateDigest: string): Promise<readonly string[]>;
+  };
+  /** The design review stage. Absent: no task enters it. */
+  designReview?: DesignReviewSteps;
+  /**
+   * The browser and API checks (E2E): what a finished round is verified with (the stored admission and evidence, and the install's authority over the owner, the project, the source and the runtime).
+   * Absent: a task that needs the checks cannot have a round verified, so it stays at the checks and never passes them.
+   */
+  e2e?: E2EVerificationDeps;
+  /** Lane L10: the steps after the plan is approved. `createTaskFlow` fills it with the build step when absent. */
+  buildSteps?: BuildSteps;
+  /**
+   * Lane L9a / L9-wire: the model a task step calls, through the install's model proxy (the worker holds no key). The route is what the worker is told (`modelRoute`); the capability it
+   * gets lists the `model-access` action. Undefined from `route()`: no provider key is set up, and the step gets neither (the worker then has no model access and fails with its own reason).
+   */
+  modelAccess?: { route(): Promise<InvocationModelRoute | undefined> };
+  /**
+   * The model gateway's https origin (the install's `ROVARA_CORE_MODEL_GATEWAY_URL`, already checked), set by the dispatcher only where the gateway is configured. A task step that carries an `evalRequest` and goes to a worker that lists
+   * EVAL_GATEWAY_FEATURE is sent it as `evalGatewayUrl`, so the hosted worker can bind the final-check eval with no setting of its own. Absent (a laptop, no gateway): nothing is sent and the eval reads "not connected", exactly as before.
+   */
+  evalGatewayUrl?: string;
+  /**
+   * DEC 254n (1): the company's engine model check, asked once before a task starts (after the access and project checks, before the limits, the admission and any write). An answer is the
+   * refusal (fixed words) and the start writes nothing but its refusal audit; undefined lets the start go on. Absent: no check, exactly as before.
+   */
+  startModelCheck?: () => Promise<AgentXError | undefined>;
+  /**
+   * The install's per-step model rule: the model each workflow step runs on, chosen as the step is handed to a worker and kept on the operation. Absent: every step runs on `modelAccess`'s one model, as before.
+   * Where it answers, its route replaces `modelAccess.route()` for that step (the worker is told that route, and the model proxy's grant names it).
+   */
+  stepModels?: Pick<ModelSelectionService, "choose">;
+  /** Called once after a task was closed (its machine and allowances went back): the install records what the run cost, for the estimates of the next runs. Never throws into the close. */
+  onTaskClosed?: (task: TaskRecord, closedAt: string) => Promise<void>;
+  /** The record of models a call to which was refused: told when a step fails for its model, so the next choice leaves it out. Absent: nothing is learned. */
+  usableModels?: UsableModels;
+  /** The model aliases an operation's calls went out on, from the model proxy (the second opinion counts only when its model was really called). Present: an operation the proxy saw no call for has an empty answer. Absent: the install cannot tell. */
+  modelCalls?: (operationId: string) => ReadonlySet<string> | undefined;
+  /** Called once an operation reached a terminal status (the model proxy frees its tokens and spend record). Never throws into the flow. */
+  onOperationEnded?: (operationId: string) => void;
+  /** The outside places a task's session follows, read when a pull request's description is made (the ticket a task started from is closed by the pull request that fixes it). A read that fails leaves the line out; the next rewrite adds it. */
+  sessionBindings?: SessionBindingsReader;
+  /**
+   * Second review by another AI company: asked when the REVIEW step starts (does this review carry a second reviewer?) and when it ends (what is the opinion of this code?). Absent: no second review, the
+   * review is exactly what it was. It only ADDS an opinion beside the reviews; it never changes what the first reviews decide, except that an `on` opinion that blocks holds the step.
+   */
+  secondReview?: Pick<SecondReview, "prepare" | "opinionOf" | "prLines" | "mergeWait" | "operationEnded" | "releaseHold"> & Partial<Pick<SecondReview, "prStatus">>;
+  /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */
+  startExtras?: (input: StartExtrasInput) => StartExtras;
+  /**
+   * Lead 4, slice A4: write work events (`work-events/flow-events.ts`) in the transactions of the flow's own workflow changes, so the cost report can split a task's time into working and waiting and count send-backs.
+   * Only `true` writes them (the core host turns it on); absent or false: every transaction is exactly what it was. A failure to make an event never fails a step.
+   */
+  workEvents?: boolean;
+  /**
+   * The project's approved test environment, as the flow uses it: a starting task pins the newest usable revision, and a coding or verification run is told the plan of the revision it pinned (its checks, selection,
+   * budget and dependencies). Absent: no task uses an environment and every payload is what it was.
+   */
+  testEnvironment?: TaskTestEnvironment;
+  /** The company's rules and the project's How we work, put in front of every step that reads them. Absent: no block (the step is exactly what it was before). */
+  standingInstructions?: StandingInstructionsSeam;
+  /** Whether a message to a running step is handed to the worker as it is sent (the kill switch, default on). Off: a message is a note, read by the next step. */
+  liveSteer?: boolean;
+  /** Whether the planning, understanding and coding steps read the people's notes (the flip-back setting, default on). Off: notes are saved and no step reads them. */
+  stepNotes?: boolean;
+  /**
+   * The "Lessons used" section of the description of the task's pull request in one repository: what the task was given and, where that repository's readers may read it, which lessons. `undefined`: no section. Absent: the
+   * install has no lessons, and the description says so.
+   */
+  lessonsUsed?: (task: { taskId: string; project: string; startingRevision: number }, repositoryId: string) => Promise<LessonsUsedSection | undefined>;
+  /**
+   * MR3b: the lines about the order a task's pull requests merge in (and what happened when one was merged ahead of the one it depends on), for the pull request descriptions and the task page (`mergeOrderLinesOfTask`).
+   * `undefined`, or an empty answer: the descriptions and the page are exactly what they were. Never throws into the flow (a read that fails leaves the lines out).
+   */
+  mergeOrderLines?: (task: TaskRecord, repositoryId?: string) => Promise<readonly string[]>;
+  /**
+   * MR4 (TE-R4): what the task page says about a pull request whose own CI is failing while a repository it depends on has not merged (`ciWaitLinesOfTask`): that CI tests the repository alone, and Rovara is not trying to fix the failure
+   * before then. `undefined`, or an empty answer: the page is exactly what it was. Never throws into the flow.
+   */
+  ciWaitLines?: (task: TaskRecord, repositoryId: string) => Promise<readonly string[]>;
+  /**
+   * The lessons a step is given: asked when the step's invocation is built, only for a task step. `features` are the worker's. The answer is the worker's `learnedContext` or none; it never throws into the dispatch, and a slow
+   * answer is none (the step then runs as it would without lessons). Absent: no step is given a lesson.
+   * Lead 4 L4-AK2: for a worker that lists "task.knowledgeContext.v1" the answer may also carry the `knowledgeContext` (facts, skill names, the "more" line, the look-up's pull set), and a fix round passes the correction's
+   * words in `fix` so the lessons are picked again by them (ranking only).
+   */
+  learned?: (input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }) => Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext; /** Lead 4 L4-AK3: the project's live Rovara skills for a plan or build step (absent: none). */ rovaraSkills?: RovaraSkillFile[] }>;
+  /**
+   * The project wiki a step is given (lead 4 A1): asked when the step's invocation is built, only for a task step whose worker lists "task.wikiContext.v1". The caller passes the task's OWN project (from the
+   * workspace record), its task id and the repositories of the revision it runs on; the answer is the worker's `wikiContext` or none, built from the company's wiki as it is at that moment. It never throws into the
+   * dispatch, and a slow answer is none (the step then runs as it would without the wiki). Absent: no step is given the wiki.
+   */
+  wiki?: (input: { companyId: string; project: string; taskId: string; operationId: string; workflowMode: string | undefined; repositories: readonly string[] }) => Promise<{ wikiContext?: WikiContext }>;
+  /**
+   * Learn on send-back: told after a PERSON's send-back of the task to coding is committed (the owner's send-back action calls it, best effort, after its own write). The lessons host queues one reflection of ids so the
+   * correction can help the next task while this one is open; it reads the task itself (company, the send-back's words, the switch and the project's mode), so the caller passes only the task's id. It never throws into the
+   * action. Absent: the install has no lessons, and the send-back is learned from only when the task ends.
+   */
+  lessonsSentBack?: (taskId: string) => Promise<void>;
+  /**
+   * Wiki build (W3b): told after a wiki build run's task ended and its end word was written (by the worker's own last answer, a Stop, or the operation's end), so the wiki store's build record can say how it ended.
+   * Best effort: it never throws into the flow. Absent: the build record keeps what the last page report wrote.
+   */
+  wikiBuildEnded?: (scope: { orgId: string; project: string; taskId: string }) => Promise<void>;
+  /**
+   * The lighter flow, install-wide: a change whose plan is estimated exactly small skips its planning steps (plan check, design review, the requirements, design and plan approvals) and gets, after each push, the
+   * reviewer's fixed questions and the quick checks of what it touched; one that grows after the build stops and gets the grown tier's reviews on its current head before it can merge. Off or absent: today's flow.
+   * Switching it on needs `tierReviewCall` (construction refuses it without one), and there is no way to switch the reviewer's questions off.
+   */
+  lighterFlow?: boolean;
+  /**
+   * The install's model call for the lighter flow's reviewers (the floor's questions, and the reviews of a tier a change grew to), on the model the checking stage's rule picks. Kept whether or not the switch is on:
+   * a task that skipped steps owes the questions after the switch went off. Absent: nothing can be asked, so such a task cannot merge.
+   */
+  tierReviewCall?: TierReviewCall;
+  /** Counts each lighter-flow reviewer call against the task's spend (Cloud's S3 wiring). A refusal makes the reviewer unavailable (the change fails closed). Absent: not metered. */
+  tierReviewMeter?: TierReviewMeter;
+}
+
+export const DEFAULT_DISPATCH_QUEUE = "task-dispatch";
+export const DEFAULT_LIMITS = { member: 10, organization: 100 } as const;

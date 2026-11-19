@@ -182,17 +182,28 @@ describe("resolveKnowledge: budgets", () => {
     for (const entry of skipped) expect(entry.path).toBeDefined();
   });
 
-  it("fails closed when locked company rules alone exceed the budget", async () => {
-    const company = externalRuleItem({ layer: "company", name: "Never log customer data", text: "y".repeat(130 * 1024), locked: true });
-    await expect(resolve("plan", [], { external: [company] })).rejects.toThrow(COMPANY_RULES_EXCEED_BUDGET_MESSAGE);
+  const companyRule = (index: number, length = 600) => externalRuleItem({ layer: "company", name: `Rule ${index}`, text: "y".repeat(length), locked: true });
+
+  it("fails closed, with a clear error and no cut, when the company rules are over the limits (30 rules, 600 characters each, 12,000 in all)", async () => {
+    await expect(resolve("plan", [], { external: Array.from({ length: 31 }, (_, index) => companyRule(index, 10)) })).rejects.toThrow(`${COMPANY_RULES_EXCEED_BUDGET_MESSAGE}: 31 rules, at most 30`);
+    await expect(resolve("plan", [], { external: [companyRule(0, 601)] })).rejects.toThrow(`${COMPANY_RULES_EXCEED_BUDGET_MESSAGE}: rule 1 has 601 characters, at most 600`);
+    await expect(resolve("plan", [], { external: Array.from({ length: 21 }, (_, index) => companyRule(index)) })).rejects.toThrow(`${COMPANY_RULES_EXCEED_BUDGET_MESSAGE}: 12600 characters in all, at most 12000`);
+    // Exactly at the limits is fine, and nothing is cut.
+    const atLimit = await resolve("plan", [], { external: Array.from({ length: 20 }, (_, index) => companyRule(index)) });
+    expect(atLimit.items).toHaveLength(20);
+    expect(atLimit.items.every((item) => item.text.length === 600)).toBe(true);
+  });
+
+  it("still fails closed when locked company rules alone exceed the always-on byte budget", async () => {
+    await expect(resolve("plan", [], { external: [companyRule(0), companyRule(1)], budgets: { ...DEFAULT_KNOWLEDGE_BUDGETS, alwaysOnBytes: 1_000 } })).rejects.toThrow(COMPANY_RULES_EXCEED_BUDGET_MESSAGE);
   });
 
   it("never drops a locked company rule to make room", async () => {
-    const company = externalRuleItem({ layer: "company", name: "Never log customer data", text: "z".repeat(100 * 1024), locked: true });
-    const result = await resolve("plan", [repo({ "AGENTS.md": "w".repeat(60 * 1024) })], { external: [company] });
-    expect(result.items.some((item) => item.locked === true)).toBe(true);
+    const company = Array.from({ length: 20 }, (_, index) => companyRule(index));
+    const result = await resolve("plan", [repo({ "AGENTS.md": "w".repeat(8_000) })], { external: company, budgets: { ...DEFAULT_KNOWLEDGE_BUDGETS, alwaysOnBytes: 14_000 } });
+    expect(result.items.filter((item) => item.locked === true)).toHaveLength(20);
     expect(record(result, "AGENTS.md")).toMatchObject({ status: "skipped", reason: "over_budget" });
-    expect(result.records.find((entry) => entry.locked === true)).toMatchObject({ status: "loaded", why: { kind: "required" } });
+    expect(result.records.filter((entry) => entry.locked === true).every((entry) => entry.status === "loaded" && entry.why?.kind === "required")).toBe(true);
   });
 
   it("budgets fileMatch additions apart from always-on rules", async () => {

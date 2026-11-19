@@ -1,3 +1,6 @@
+import { slackCompanyPerson, slackCompanyProject, SLACK_LINK_NOTICE, type SlackCompanyDependencies } from "./slack-person.js";
+import { slackActionClass, SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
+import { SlackWorkspaceRefused } from "./slack-workspace-binding.js";
 // Spec 062 Phase 7c3: Slack's button presses run by the channel API for the built-in Slack adapter. The adapter hands a
 // press on as a channel action, after Slack has its answer; the channel API runs the same handlers Slack's interactivity
 // runs (workflow retries, send back, keep the pull request, PR feedback decisions, Quick, Full and Just answer), and
@@ -29,7 +32,7 @@ import { detailsActionHandler, dynamoTurnDetailsReader } from "./slack-details.j
 import type { SlackIngressLog } from "./slack-ingress.js";
 import { queueItemIdentity, type ChannelActionSurface } from "./channel-ingress.js";
 import { requiredEnvironment } from "./lambda.js";
-import { slackChannelTransport } from "./slack-channel-router.js";
+import { channelItemOnInstallTeam, slackChannelTransport } from "./slack-channel-router.js";
 import { threadPendingCounter } from "./slack-ingress.js";
 import {
   ADMIN_CHANGE_CANCEL_RECEIVED_TEXT, ADMIN_CHANGE_PRESS_FAILED_TEXT, ADMIN_CHANGE_RECEIVED_TEXT, awsAdminChangePress, awsWorkflowSlackHandlers, chatGptActionHandler, createSlackPressDispatcher,
@@ -144,7 +147,30 @@ export function formAnswerOf(response: Record<string, unknown>): ChannelActionAn
 
 const answer = (body: ChannelActionAnswer) => ({ statusCode: 200, body: JSON.stringify(body) });
 
-export function createAwsSlackChannelPresses(): ChannelActionSurface {
+/** This runs after the channel queue as well as on synchronous form requests. */
+export function slackCompanyActionSurface(deps: SlackCompanyDependencies, next: ChannelActionSurface): ChannelActionSurface {
+  return async (action, context) => {
+    if (deps.workspaces === undefined) return next(action, context);
+    const refuse = (text: string) => ({ statusCode: 200, body: JSON.stringify({ error: text }) });
+    try {
+      const team = action.actor.tenant;
+      if (action.conversation !== undefined && action.conversation.tenant !== team) throw new SlackWorkspaceRefused();
+      const person = await slackCompanyPerson(deps, team, action.actor.userId);
+      if (person.kind !== "linked") return refuse(SLACK_LINK_NOTICE);
+      if (slackActionClass(action.actionId) !== "member") return refuse(SLACK_WEB_SIGNIN_NOTICE);
+      if (context.projectName === undefined || !await slackCompanyProject(deps, team, context.projectName)) throw new SlackWorkspaceRefused();
+      return await next(action, context);
+    } catch { return refuse(new SlackWorkspaceRefused().message); }
+  };
+}
+
+/** DEC 254y(3), L2-2 PR 18e: two press surfaces: the install's team (the presser's, and the conversation's where there is one) keeps today's; anything else goes to the company surface. */
+export function splitChannelActionSurfaceByTenant(legacy: ChannelActionSurface, company: ChannelActionSurface | undefined, legacyTeamId: string): ChannelActionSurface {
+  if (company === undefined) return legacy;
+  return (action, context) => (channelItemOnInstallTeam(action, legacyTeamId, false) ? legacy : company)(action, context);
+}
+
+export function createAwsSlackChannelPresses(company: SlackCompanyDependencies = {}): ChannelActionSurface {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   // Phase 7d: as the presser's own team, so a deployment that names none (the legacy one) still answers.
   const team = new AsyncLocalStorage<string>();
@@ -198,7 +224,7 @@ export function createAwsSlackChannelPresses(): ChannelActionSurface {
     }, payload),
   });
   const adminChange = process.env.ADMIN_CHANGES === "enabled" ? awsAdminChangePress(clientConfiguration, documentClient) : undefined;
-  return (action, context) => team.run(action.actor.tenant, () => press(action, context));
+  return slackCompanyActionSurface(company, (action, context) => team.run(action.actor.tenant, () => press(action, context)));
   async function press(action: ChannelAction, context: { projectName?: string }): Promise<{ statusCode: number; body: string } | undefined> {
     const pressed = () => slackPressOfChannelAction(action, Date.now());
     const inProject = <T>(work: () => Promise<T>) => (context.projectName === undefined ? work() : project.run(context.projectName, work));
@@ -232,7 +258,7 @@ export function createAwsSlackChannelPresses(): ChannelActionSurface {
 }
 
 /** Phase 7c3b: a ChatGPT connection finished in an asynchronous invoke of the channel API, its form updated through the adapter. */
-export function createAwsSlackChatGptFinish(): (event: HandedOffChatGptFinish) => Promise<"connected" | "refused"> {
+export function createAwsSlackChatGptFinish(company: SlackCompanyDependencies = {}): (event: HandedOffChatGptFinish) => Promise<"connected" | "refused"> {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const secretsManager = new SecretsManagerClient(clientConfiguration);
   const adapter = builtInAdapterFromEnvironment(process.env);
@@ -241,7 +267,7 @@ export function createAwsSlackChatGptFinish(): (event: HandedOffChatGptFinish) =
   const commandDeps = { getSecret: () => secret(), fetch, checkAddresses: (url: URL) => checkEndpointAddresses(url), now: Date.now };
   const lambda = new LambdaClient(clientConfiguration);
   const brokerFunctionName = requiredEnvironment("BROKER_FUNCTION_NAME");
-  return (event) => runHandedOffChatGptFinish({
+  return (event) => company.workspaces !== undefined ? Promise.resolve("refused") : runHandedOffChatGptFinish({
     async finish(input) {
       const response = await lambda.send(new InvokeCommand({ FunctionName: brokerFunctionName, InvocationType: "RequestResponse",
         Payload: Buffer.from(JSON.stringify({ source: "agentx.slack-ingress", action: "chatgpt-finish", ...input })) }), { abortSignal: AbortSignal.timeout(20_000) });
@@ -251,7 +277,7 @@ export function createAwsSlackChatGptFinish(): (event: HandedOffChatGptFinish) =
     async updateView(viewId, view) {
       const form = formOfSlackModal(view);
       if (form === undefined) throw new Error("the form cannot be shown through the channel API");
-      await sendChannelCommand(commandDeps, adapter, "update_form", { handle: viewId, form });
+      await sendChannelCommand(commandDeps, adapter, "update_form", { tenant: event.teamId, handle: viewId, form });
     },
     // As the connecting person's own team (Phase 7d: the legacy deployment names none).
     async postEphemeral(input) {

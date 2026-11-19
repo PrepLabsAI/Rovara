@@ -19,3 +19,5 @@ export * from "./tasks.js";
 export * from "./workspaces.js";
 export * from "./worker-callbacks.js";
 export * from "./ports/index.js";
+export * from "./plugins/index.js";
+export * from "./services/index.js";

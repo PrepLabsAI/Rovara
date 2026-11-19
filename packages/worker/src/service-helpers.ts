@@ -24,18 +24,20 @@
 // fixed sentence; Docker's own words are never repeated. Everything started is removed.
 import { createHash, randomBytes } from "node:crypto";
 import {
-  CATALOG_FIXED_ARGS, CatalogEntrySchema, FIXTURE_SET_MAX_BYTES, TEST_ENV_RESERVED_ALIASES, TestEnvDependencyIdSchema, agentXError, catalogFixedArgv, catalogIdName,
+  AWS_PLAN_SERVICES_MAX, CATALOG_FIXED_ARGS, TEST_SERVICES_CEILING_MARKER, TEST_SERVICES_OVER_LIMIT_SENTENCE, CatalogEntrySchema, FIXTURE_SET_MAX_BYTES, TEST_ENV_RESERVED_ALIASES, TestEnvDependencyIdSchema, agentXError, catalogFixedArgv, catalogIdName, normaliseAwsServiceKey,
   type CatalogEntry,
 } from "@agentx/contracts";
 import { DOCKER_CALL_TIMEOUT_MS } from "./setup-network.js";
-import { sweepServicesNetworks, type ServicesNetwork } from "./run-network.js";
+import { MODEL_HELPER_ALIAS, sweepServicesNetworks, type ServicesNetwork } from "./run-network.js";
 import type { DockerCli } from "./swebench/containers.js";
 
 /** The alias rule of TS-RN-3: 2 to 32 characters, lower-case letters, digits and hyphens, a letter first, not a hyphen last. */
 export const HELPER_ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,30}[a-z0-9]$/u;
 /** Names an alias may not take: the ones Rovara's helpers have, and the app's own name in the end-to-end checker's hosts files. */
-export const HELPER_RESERVED_ALIASES: readonly string[] = [...TEST_ENV_RESERVED_ALIASES, "app"];
+export const HELPER_RESERVED_ALIASES: readonly string[] = [...TEST_ENV_RESERVED_ALIASES, "app", MODEL_HELPER_ALIAS];
 export const MAX_HELPERS_PER_RUN = 12;
+/** The containers of a run that stay up besides its helpers: the name server and the sealed check sandbox. They count toward the guard's ceiling on service containers. */
+export const RUN_FIXED_CONTAINERS = 2;
 /** The most a whole start may wait for health, over all helpers (4.0.6). */
 export const RUN_HEALTH_LIMIT_S = 120;
 const HEALTH_POLL_MS = 500;
@@ -133,8 +135,10 @@ export interface HelperRequest {
   /** The AWS region of the emulator. Default us-east-1. */
   region?: string;
   /**
-   * Rovara local AWS only: the AWS services the run asked for (`s3`, `sqs`, `dynamodb`). Every OTHER service the emulator can serve is switched off in its env file (`ROVARA_AWS_SERVICES_<NAME>_ENABLED=false`, the fork's
-   * per-service switch, enforced by its `ServiceEnabledFilter`), so a call outside the plan is refused by the emulator itself and shows in the ledger. That only happens if the code's call REACHES the emulator: the worker points every non-plan `AWS_ENDPOINT_URL_<SERVICE>` and the global `AWS_ENDPOINT_URL` at it (service-env.ts), not at a sinkhole. The fork's ledger filter must run before the disable filter (fork: LedgerFilter priority). Absent: every service stays on (the development default).
+   * Rovara local AWS only: the AWS services the run asked for (keys of the emulator's table: `s3`, `sns`, `secrets-manager`, ...). They go to the emulator as `ROVARA_AWS_PLANNED_SERVICES=<csv of keys>`: the front serves every
+   * service but records a call to one outside the list as out of the plan in its ledger, which is how the broker flags it. THE OLD IMAGE (the fork, shipped until the front replaces it): the fork has no such variable and switches
+   * its own services off one by one, so for ONE MORE RELEASE the env file also holds `ROVARA_AWS_SERVICES_<NAME>_ENABLED=false` for every fork key the plan does not need (`LOCAL_AWS_FORK_KEYS_OF`), exactly as before. Remove
+   * that list when the front is the shipped image. Absent: every service stays on (the development default).
    */
   awsServices?: readonly string[];
   files?: readonly HelperFile[];
@@ -171,8 +175,18 @@ export interface StartHelpersInput {
   edition: "public" | "enterprise";
   /** The worker's own image: the health probe runs from it. */
   probeImage: string;
+  /**
+   * Owner-approved images (Code on a laptop): the digest reference to start for a catalog repository and digest (`svc/postgres@sha256:<digest>`). Present, a helper whose entry is not in the map is refused and the
+   * registry above is not used; absent, the install's registry names the image, as it always did.
+   */
+  imageReferences?: ReadonlyMap<string, string>;
   /** The most memory the run's helpers may add up to (company setting `services.maxMemMiB`, default 3072). */
   maxMemMiB: number;
+  /**
+   * DEC 254zm 2, what the broker told the worker the guard allows on this computer: the most service containers at once and the most memory for one helper. A run that cannot fit is refused here, before anything
+   * starts, with the one fixed sentence (the guard still enforces them, and says the same when a start is stopped by it). Absent: no check here, the guard decides.
+   */
+  limits?: { containers: number; helperMemMiB: number };
   helpers: readonly HelperRequest[];
   files: HelperFiles;
   signal?: AbortSignal;
@@ -219,8 +233,37 @@ function need(value: string | undefined, pattern: RegExp): string {
   return value;
 }
 
-/** The services the fork can switch on or off (`rovara-aws.services.<key>.enabled`, from its application.yml), by key. */
+/** The services the fork can switch on or off (`rovara-aws.services.<key>.enabled`, from its application.yml), by key. Only the OLD image reads them (see `HelperRequest.awsServices`). */
 export const LOCAL_AWS_SERVICE_KEYS: readonly string[] = ["ssm", "sqs", "s3", "dynamodb", "sns", "lambda", "apigateway", "apigatewayv2", "iam", "eventbridge", "eventbridgev2", "cloudwatchlogs", "secretsmanager", "kinesis", "kms", "cognito", "stepfunctions", "sagemaker"];
+
+/** The fork's switches that a service of the table needs on, by key of the table. A service the fork does not serve needs none (the old image refuses a plan for it anyway). */
+export const LOCAL_AWS_FORK_KEYS_OF: Readonly<Record<string, readonly string[]>> = {
+  s3: ["s3"], sqs: ["sqs"], dynamodb: ["dynamodb"], "dynamodb-streams": ["dynamodb"], sns: ["sns"], sts: ["iam"], iam: ["iam"], ssm: ["ssm"], kms: ["kms"], "secrets-manager": ["secretsmanager"], eventbridge: ["eventbridge", "eventbridgev2"],
+  lambda: ["lambda"], "api-gateway": ["apigateway"], apigatewayv2: ["apigatewayv2"], "cloudwatch-logs": ["cloudwatchlogs"], kinesis: ["kinesis"], "cognito-identity-provider": ["cognito"], sfn: ["stepfunctions"],
+  "sagemaker-runtime": ["sagemaker"], sagemaker: ["sagemaker"],
+};
+
+/** The env file lines of Rovara local AWS (the run contract above, then the planned services and, for the old image, its switches). Pure. */
+export function localAwsEnvLines(input: { credentials: HelperCredentials; address: string; region: string; aliases: readonly string[]; port: number; awsServices?: readonly string[] | undefined }): string[] {
+  const { credentials, address, region, aliases, port, awsServices } = input;
+    const presign = need(credentials.password, EMULATOR_SECRET);
+    const control = need(credentials.controlToken, EMULATOR_SECRET);
+    const receipt = need(credentials.sqsReceiptSecret, EMULATOR_SECRET);
+    if (new Set([presign, control, receipt]).size !== 3) throw new RangeError("control token");
+    const alias = aliases[0] ?? "aws";
+    // Every service is a key of the table (a legacy spelling is read as its key), listed once, at most as many as a plan may name.
+    const planned = awsServices?.map((service) => normaliseAwsServiceKey(service));
+    if (planned !== undefined && (planned.length === 0 || planned.length > AWS_PLAN_SERVICES_MAX || new Set(planned).size !== planned.length || planned.some((service) => service === undefined))) throw new RangeError("aws services");
+    const plannedKeys = planned as string[] | undefined;
+    // The old image's switches (see `HelperRequest.awsServices`): off for every fork key no planned service needs. The same lines as before for a plan of s3, sqs and dynamodb.
+    const forkKeysNeeded = plannedKeys === undefined ? undefined : new Set(plannedKeys.flatMap((service) => (Object.hasOwn(LOCAL_AWS_FORK_KEYS_OF, service) ? LOCAL_AWS_FORK_KEYS_OF[service]! : [])));
+    const switchedOff = forkKeysNeeded === undefined ? [] : LOCAL_AWS_SERVICE_KEYS.filter((key) => !forkKeysNeeded.has(key)).map((key) => `ROVARA_AWS_SERVICES_${key.toUpperCase()}_ENABLED=false`);
+    const plannedLine = plannedKeys === undefined ? [] : [`ROVARA_AWS_PLANNED_SERVICES=${plannedKeys.join(",")}`];
+  return [
+      `QUARKUS_HTTP_HOST=${address}`, `ROVARA_AWS_BASE_URL=http://${alias}:${String(port)}`, `ROVARA_AWS_AUTH_PRESIGN_SECRET=${presign}`, `ROVARA_AWS_SERVICES_SQS_RECEIPT_HANDLE_SECRET=${receipt}`,
+      `ROVARA_AWS_CONTROL_TOKEN=${control}`, `ROVARA_AWS_DEFAULT_REGION=${region}`, `ROVARA_AWS_HOSTNAME=${alias}`, ...plannedLine, ...switchedOff,
+  ];
+}
 
 /** The families a helper may be, and the one way each takes its per-run credentials. A family not listed here is refused: whatever its image does with no setup is not decided by this launcher. */
 const FAMILY_RULES: Record<string, FamilyRule> = {
@@ -233,20 +276,10 @@ const FAMILY_RULES: Record<string, FamilyRule> = {
   // Rovara local AWS (the fork's run contract, rovara-local-aws README "Run contract"): with a control token the emulator refuses to start unless it is given its run address, the URL the code reaches it at and two signing secrets.
   // QUARKUS_HTTP_HOST is the run address (never a wildcard); ROVARA_AWS_BASE_URL is `http://<first alias>:<port>`, so presigned URLs and queue URLs name something the other containers resolve; the presign secret is `password`.
   // Three secrets, three jobs, all different: a control token that equalled a signing secret would let anyone holding a presigned URL or a receipt handle drive the control API. All three go only into the 0600 env file.
-  "local-aws": { prepare: ({ credentials, address, region, aliases, port, awsServices }) => {
-    const presign = need(credentials.password, EMULATOR_SECRET);
-    const control = need(credentials.controlToken, EMULATOR_SECRET);
-    const receipt = need(credentials.sqsReceiptSecret, EMULATOR_SECRET);
-    if (new Set([presign, control, receipt]).size !== 3) throw new RangeError("control token");
-    const alias = aliases[0] ?? "aws";
-    if (awsServices !== undefined && (awsServices.length === 0 || new Set(awsServices).size !== awsServices.length || awsServices.some((service) => !LOCAL_AWS_SERVICE_KEYS.includes(service)))) throw new RangeError("aws services");
-    const switchedOff = awsServices === undefined ? [] : LOCAL_AWS_SERVICE_KEYS.filter((key) => !awsServices.includes(key)).map((key) => `ROVARA_AWS_SERVICES_${key.toUpperCase()}_ENABLED=false`);
-    return { env: [
-      `QUARKUS_HTTP_HOST=${address}`, `ROVARA_AWS_BASE_URL=http://${alias}:${String(port)}`, `ROVARA_AWS_AUTH_PRESIGN_SECRET=${presign}`, `ROVARA_AWS_SERVICES_SQS_RECEIPT_HANDLE_SECRET=${receipt}`,
-      `ROVARA_AWS_CONTROL_TOKEN=${control}`, `ROVARA_AWS_DEFAULT_REGION=${region}`, `ROVARA_AWS_HOSTNAME=${alias}`, ...switchedOff,
-    ] };
-  } },
+  "local-aws": { prepare: (input) => ({ env: localAwsEnvLines(input) }) },
   "fake-server": { prepare: () => ({ env: [] }) },
+  // The official image with no authentication (owner-image-list.ts says why): the run's network is sealed and nothing from the project is let in to it.
+  mongodb: { prepare: () => ({ env: [] }) },
 };
 
 /** The fixed commands of the `command` health checks, by catalog check id. A cache's client is named after the entry (Valkey's own, or Redis's). */
@@ -336,7 +369,9 @@ function planHelpers(net: ServicesNetwork, input: StartHelpersInput): Plan[] {
         const segments = file.to.split("/");
         if (!MOUNT_TARGET.test(file.to) || segments.includes("..") || FORBIDDEN_MOUNT_ROOTS.some((root) => file.to === `/${root}` || file.to.startsWith(`/${root}/`)) || file.to.endsWith(".sock")) throw new RangeError("file");
       }
-      plans.push({ request, index, entry, name: plainName(request.name), address, aliases, prepared, files, image: fake === undefined ? `${input.registry}/${entry.image.repository}@sha256:${entry.image.digest}` : input.probeImage, ...(fake === undefined ? {} : { program: fake.program }) });
+      const catalogImage = input.imageReferences === undefined ? `${input.registry}/${entry.image.repository}@sha256:${entry.image.digest}` : input.imageReferences.get(`${entry.image.repository}@sha256:${entry.image.digest}`);
+      if (catalogImage === undefined) throw new RangeError("image");
+      plans.push({ request, index, entry, name: plainName(request.name), address, aliases, prepared, files, image: fake === undefined ? catalogImage : input.probeImage, ...(fake === undefined ? {} : { program: fake.program }) });
     } catch (error) {
       if (error instanceof HelperStartError) throw error;
       throw refused(request);
@@ -347,6 +382,7 @@ function planHelpers(net: ServicesNetwork, input: StartHelpersInput): Plan[] {
   }
   const totalMemMiB = plans.reduce((sum, plan) => sum + plan.entry.resources.memMiB, 0);
   if (totalMemMiB > input.maxMemMiB) throw new HelperStartError("over_limit", `The test services need ${String(totalMemMiB)} MiB; this run may use ${String(input.maxMemMiB)} MiB`);
+  if (input.limits !== undefined && (plans.length + RUN_FIXED_CONTAINERS > input.limits.containers || plans.some((plan) => plan.entry.resources.memMiB > input.limits!.helperMemMiB))) throw new HelperStartError("over_limit", TEST_SERVICES_OVER_LIMIT_SENTENCE);
   return plans;
 }
 
@@ -554,6 +590,8 @@ export async function startHelpers(docker: DockerCli, net: ServicesNetwork, inpu
       attempted.push(container);
       const args = runArgs(net, plan, container, { ...(envPath === undefined ? {} : { env: envPath }), ...(configPath === undefined ? {} : { config: configPath }), files });
       const result = await call(args);
+      // The guard's own words when a ceiling stopped the start: say so (the fixed sentence, never the daemon's text) instead of "could not be started".
+      if (result.exitCode !== 0 && result.stderr.includes(TEST_SERVICES_CEILING_MARKER)) return await fail("over_limit", plan, TEST_SERVICES_OVER_LIMIT_SENTENCE);
       if (result.exitCode !== 0) return await fail("start_failed", plan, `${plan.name} could not be started`);
     } catch (error) {
       if (error instanceof HelperStartError) throw error;

@@ -15,9 +15,12 @@ import {
   endSessions, grantProjectAccess, projectGrant, resolveDeveloper, revokeProjectAccess, setWorkspaceLimits,
   type AdminActionDependencies, type ResolvedDeveloper,
 } from "./admin-actions.js";
-import { adminProjects, channelLabels, getStateItem, latestProjectRecord, privateChannelsFor, queryAllItems, workspaceOwner, type AdminReadDependencies } from "./admin-reads.js";
+import { adminSlackScope, adminProjects, channelLabels, getStateItem, latestProjectRecord, privateChannelsFor, queryAllItems, workspaceOwner, type AdminReadDependencies } from "./admin-reads.js";
 import { hashJson } from "./broker-shared.js";
 import type { CredentialRegistry } from "./credentials.js";
+import { COMPANY_IMPORT_MEMBERS_MAX, IMPLICIT_COMPANY_ID, companyInviteCodeId, type CompanyImportPreview } from "@agentx/contracts";
+import { resolveCompany } from "./company-check.js";
+import { planCompanyImport, planCompanyImportUndo, type CompanyImportReads } from "./install-company-import.js";
 
 export interface AdminChangeHandlers {
   requireAdministrator(identity: AuthenticatedIdentity, project: string): Promise<void>;
@@ -127,6 +130,7 @@ export interface ResolvedChannel { channelId: string; label: string; confirmatio
  * bindings, then through Slack. A private channel is never found by name.
  */
 export async function resolveChannel(deps: PlanDependencies, teamId: string, value: string, options: PlanOptions = {}): Promise<ResolvedChannel> {
+  if (deps.reads.slackWorkspaces !== undefined && (deps.reads.workspace === undefined || deps.reads.workspace.teamId !== teamId)) throw agentXError("SLACK_UNAVAILABLE", "This Slack workspace is not available.");
   const text = value.trim().replace(/^#/, "");
   if (SlackChannelIdSchema.safeParse(text).success) return labelled(deps, text, options);
   if (!CHANNEL_NAME.test(text)) throw agentXError("CONFIG_INVALID", "channel must be a Slack channel ID such as C0123456789, or a public channel's name such as #payments-dev");
@@ -136,7 +140,7 @@ export async function resolveChannel(deps: PlanDependencies, teamId: string, val
   for (const [channelId, label] of labels) {
     if (!label.private && label.name === text) return { channelId, label: `#${text} (${channelId})`, confirmationLabel: `#${text} (${channelId})` };
   }
-  const found = deps.channelByName === undefined ? undefined : await deps.channelByName({ kind: "channel-by-name", name: text });
+  const found = deps.channelByName === undefined ? undefined : await deps.channelByName({ kind: "channel-by-name", name: text, ...(deps.reads.workspace === undefined ? {} : { workspace: deps.reads.workspace }) });
   if (found !== undefined && !found.ok) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to find that channel; try again, or give the channel's ID");
   // Final review M6: the name the admin typed is never echoed; it may name a private channel.
   if (found?.channel === undefined) throw agentXError("NOT_FOUND", "no public channel with that name in this Slack workspace; give a private channel by its ID");
@@ -293,7 +297,7 @@ const planCredential: Planner = async (deps, identity, input) => {
 
 /** How a developer is named: by profile once they signed in, else by what the admin gave. */
 function describeDeveloper(resolved: ResolvedDeveloper): string {
-  if (resolved.profile !== undefined) return `${resolved.profile.displayName} (signs in with ${resolved.profile.provider === "slack" ? "Slack" : "the company sign-in"})`;
+  if (resolved.profile !== undefined) return `${resolved.profile.displayName} (signs in with ${resolved.profile.provider === "slack" ? "Slack" : resolved.profile.provider === "github" ? "GitHub" : "the company sign-in"})`;
   if (resolved.slackUserId !== undefined) return `Slack user ${resolved.slackUserId}`;
   return `developer ${resolved.developerId.slice(0, 12)}`;
 }
@@ -350,7 +354,7 @@ const planGrant: Planner = async (deps, identity, input) => {
   if (input.kind !== "grant_project_access") throw new Error("wrong planner");
   await projectMustExist(deps, identity, input.project);
   await deps.handlers.requireAdministrator(identity, input.project);
-  const resolved = await resolveDeveloper(deps.actions, input.developer);
+  const resolved = await resolveDeveloper(deps.actions, input.developer, await resolveCompany(deps.actions.companies, identity.ownerKey));
   const current = await projectGrant(deps.actions, input.project, resolved.developerId);
   if (current?.role === "developer") throw agentXError("CONFIG_INVALID", `${describeDeveloper(resolved)} already has a grant for ${input.project}; there is nothing to change`);
   if (current?.role === "administrator") throw agentXError("CONFIG_INVALID", `${describeDeveloper(resolved)} already administers ${input.project}; there is nothing to change`);
@@ -372,7 +376,7 @@ const planRevoke: Planner = async (deps, identity, input) => {
   if (input.kind !== "revoke_project_access") throw new Error("wrong planner");
   const latest = await projectMustExist(deps, identity, input.project);
   await deps.handlers.requireAdministrator(identity, input.project);
-  const resolved = await resolveDeveloper(deps.actions, input.developer);
+  const resolved = await resolveDeveloper(deps.actions, input.developer, await resolveCompany(deps.actions.companies, identity.ownerKey));
   const current = await projectGrant(deps.actions, input.project, resolved.developerId);
   // An administrator row is never a grant: revoking never removes an administrator.
   if (current?.role !== "developer") throw agentXError("NOT_FOUND", `${describeDeveloper(resolved)} has no grant for ${input.project}, so there is nothing to revoke`);
@@ -393,7 +397,7 @@ const planRevoke: Planner = async (deps, identity, input) => {
 const planEndSessions: Planner = async (deps, identity, input) => {
   if (input.kind !== "revoke_signin") throw new Error("wrong planner");
   requireAdminClaim(identity);
-  const resolved = await resolveDeveloper(deps.actions, input.developer);
+  const resolved = await resolveDeveloper(deps.actions, input.developer, await resolveCompany(deps.actions.companies, identity.ownerKey));
   if (resolved.profile === undefined) throw agentXError("NOT_FOUND", `${describeDeveloper(resolved)} has never signed in to AgentX, so there is no sign-in to end`);
   return {
     effect: `End every AgentX sign-in session of ${describeDeveloper(resolved)}. Their AI tools stop reaching AgentX at once; they may sign in again with agentx login. Their running tasks keep running.`,
@@ -414,16 +418,19 @@ const planRegisterSignInClient: Planner = async (deps, identity, input) => {
   if (input.kind !== "register_sign_in_client") throw new Error("wrong planner");
   requireAdminClaim(identity);
   const registry = signInClientRegistry(deps);
-  const clients = await registry.list();
+  const companyId = await resolveCompany(deps.actions.companies, identity.ownerKey);
+  const clients = await registry.list(companyId);
   const current = clients.find((client) => client.clientId === input.clientId);
   const { registration } = input;
   const clash = clients.find((client) => client.clientId !== input.clientId && client.audience === registration.audience);
   // An update that keeps the secret carries the stored hash over; the CLI never sees it.
   if (registration.keepSecret === true && current?.confidential !== true) {
+    if (companyId !== undefined) throw agentXError("NOT_FOUND", "sign-in client not found");
     throw agentXError("CONFIG_INVALID", `sign-in client ${input.clientId} has no secret to keep; give it a new one with --rotate-secret`);
   }
   const { keepSecret, ...settings } = registration;
   const confidential = keepSecret === true || settings.secretHash !== undefined;
+  if (clash !== undefined && companyId !== undefined) throw agentXError("NOT_FOUND", "sign-in client not found");
   if (clash !== undefined) throw agentXError("CONFIG_INVALID", `sign-in client ${clash.clientId} already uses the audience ${registration.audience}; give each client its own`);
   const where = [
     ...(registration.redirectUris.length === 0 ? [] : [`a browser returning to ${registration.redirectUris.join(", ")}`]),
@@ -449,7 +456,7 @@ const planRegisterSignInClient: Planner = async (deps, identity, input) => {
     snapshot: { client: current ?? null },
     apply: async (applier) => {
       const at = new Date(deps.actions.now()).toISOString();
-      await registry.put({ clientId: input.clientId, ...settings, createdAt: current?.createdAt ?? at, updatedAt: at, updatedBy: applier.ownerKey }, keepSecret === true ? { keepSecret } : {});
+      await registry.put({ clientId: input.clientId, ...settings, ...(companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? {} : { companyId }), createdAt: current?.createdAt ?? at, updatedAt: at, updatedBy: applier.ownerKey }, { ...(keepSecret === true ? { keepSecret } : {}), ...(companyId === undefined ? {} : { companyId }) });
       return { clientId: input.clientId, registered: true };
     },
   };
@@ -459,13 +466,155 @@ const planRemoveSignInClient: Planner = async (deps, identity, input) => {
   if (input.kind !== "remove_sign_in_client") throw new Error("wrong planner");
   requireAdminClaim(identity);
   const registry = signInClientRegistry(deps);
-  const current = (await registry.list()).find((client) => client.clientId === input.clientId);
-  if (current === undefined) throw agentXError("NOT_FOUND", `there is no sign-in client ${input.clientId}`);
+  const companyId = await resolveCompany(deps.actions.companies, identity.ownerKey);
+  const current = (await registry.list(companyId)).find((client) => client.clientId === input.clientId);
+  if (current === undefined) throw agentXError("NOT_FOUND", companyId === undefined ? `there is no sign-in client ${input.clientId}` : "sign-in client not found");
   return {
     effect: `Remove sign-in client ${input.clientId} (${current.name}): nobody can sign in to it, its refresh tokens stop working at once, and its access tokens stop working at the access check.`,
     details: { clientId: input.clientId },
     snapshot: { client: current },
-    apply: async () => ({ clientId: input.clientId, removed: await registry.remove(input.clientId) }),
+    apply: async () => ({ clientId: input.clientId, removed: await registry.remove(input.clientId, companyId) }),
+  };
+};
+
+/** DEC 254a: the install's invite codes, or NOT_FOUND where the company layer is off. */
+function companyInviteRegistry(deps: PlanDependencies) {
+  const registry = deps.actions.companyInvites;
+  if (registry === undefined) throw agentXError("NOT_FOUND", "company sign-up is not set up in this deployment");
+  return registry;
+}
+
+/** DEC 254a: a new single-use code. The CLI made it and holds it; the change carries only its hash, and shows only its id. */
+const planCreateCompanyInvite: Planner = async (deps, identity, input) => {
+  if (input.kind !== "create_company_invite") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  const registry = companyInviteRegistry(deps);
+  const codeId = companyInviteCodeId(input.codeHash);
+  return {
+    effect: `Make company invite code ${codeId}: one person may use it once, within ${input.expiresInHours} hours, to create their own company. Rovara keeps only its hash.`,
+    details: { codeId, expiresInHours: input.expiresInHours },
+    snapshot: { codeId },
+    apply: async (applier) => ({ codeId: await registry.create(input.codeHash, input.expiresInHours, applier.ownerKey) }),
+  };
+};
+
+const planRevokeCompanyInvite: Planner = async (deps, identity, input) => {
+  if (input.kind !== "revoke_company_invite") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  const registry = companyInviteRegistry(deps);
+  // No list read: a code beyond the first page, or an unreadable row elsewhere, never stops a revoke. The apply's conditional write decides.
+  return {
+    effect: `Revoke company invite code ${input.codeId}: nobody can use it.`,
+    details: { codeId: input.codeId },
+    snapshot: { codeId: input.codeId },
+    apply: async (applier) => {
+      if (!await registry.revoke(input.codeId, applier.ownerKey)) throw agentXError("NOT_FOUND", "no live company invite code has that id");
+      return { codeId: input.codeId, revoked: true };
+    },
+  };
+};
+
+const planCompanySelfServe: Planner = async (deps, identity, input) => {
+  if (input.kind !== "set_company_self_serve") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  const registry = companyInviteRegistry(deps);
+  // The switch must work even when the code list cannot be read (the operator's kill switch): the current state is shown when it can be.
+  let current: "open" | "closed" | "unknown";
+  try { current = (await registry.list()).selfServe; } catch { current = "unknown"; }
+  return {
+    effect: input.open
+      ? "Open self-serve company sign-up: a person with a live invite code can create their own company."
+      : "Close self-serve company sign-up: nobody can create a company, whatever code they hold. Codes are kept.",
+    details: { current, next: input.open ? "open" : "closed" },
+    snapshot: { selfServe: current },
+    apply: async (applier) => { await registry.setSelfServe(input.open, applier.ownerKey); return { selfServe: input.open ? "open" : "closed" }; },
+  };
+};
+
+/** DEC 254b (b): the reads an import's plan needs and the sign-in Lambda that writes it; NOT_FOUND where developer sign-in is not set up. */
+function companyImportSetup(deps: PlanDependencies): { reads: CompanyImportReads; registry: NonNullable<PlanDependencies["actions"]["companyImport"]> } {
+  const { companyImport: registry, signInTableName, documentClient, tableName } = deps.actions;
+  if (registry === undefined || signInTableName === undefined) throw agentXError("NOT_FOUND", "company import is not set up in this deployment");
+  return { reads: { documentClient, tableName, signInTableName }, registry };
+}
+/** People named in one line of an effect or a refusal; the preview lists them all. */
+const IMPORT_IDS_SHOWN = 4;
+const importIds = (people: string[]) => people.length <= IMPORT_IDS_SHOWN ? people.join(", ") : `${people.slice(0, IMPORT_IDS_SHOWN).join(", ")} and ${people.length - IMPORT_IDS_SHOWN} more`;
+const IMPORT_REFUSAL: Record<NonNullable<CompanyImportPreview["refusal"]>, string> = {
+  no_open_company: "the install has no open company with that id",
+  too_many_members: `it has more than ${COMPANY_IMPORT_MEMBERS_MAX} members, more than one import copies`,
+  no_owner: "nobody would be its owner afterwards",
+  unreadable: "a record it needs does not read",
+  built_in_company: "the built-in company is never imported",
+};
+const IMPORT_PERSON_REFUSAL: Record<CompanyImportPreview["refused"][number]["reason"], string> = {
+  unknown_role: "a role Code does not know",
+  member_of_another_company: "already in another company in Code's records",
+  unreadable_record: "records that do not read",
+  no_longer_member: "no longer members in the install's records but still live members in Code's",
+};
+/** Fixed words and opaque ids only. */
+export function companyImportRefusalText(preview: CompanyImportPreview): string {
+  const parts = preview.refusal === undefined ? [] : [IMPORT_REFUSAL[preview.refusal]];
+  for (const reason of Object.keys(IMPORT_PERSON_REFUSAL) as Array<keyof typeof IMPORT_PERSON_REFUSAL>) {
+    const people = preview.refused.filter((entry) => entry.reason === reason).map((entry) => entry.personId);
+    if (people.length > 0) parts.push(`${IMPORT_PERSON_REFUSAL[reason]}: ${importIds(people)}`);
+  }
+  return `Company ${preview.companyId} cannot be ${preview.mode === "undo" ? "un-imported" : "imported"}, and nothing was written: ${parts.join("; ")}. Run agentx admin company import --from-install ${preview.companyId}${preview.mode === "undo" ? " --undo" : ""} to see the whole preview.`;
+}
+const skippedText = (preview: CompanyImportPreview) => {
+  if (preview.skipped.length === 0) return "";
+  const counts = new Map<string, number>();
+  for (const entry of preview.skipped) counts.set(entry.reason, (counts.get(entry.reason) ?? 0) + 1);
+  return ` Leaves ${preview.skipped.length} as they are (${[...counts].map(([reason, count]) => `${count} ${reason.replaceAll("_", " ")}`).join(", ")}).`;
+};
+
+/** DEC 254b (b): copy one company of the install's old layout into Code's company records. The plan is the snapshot: anything that changes before the yes makes it stale. */
+const planImportInstallCompany: Planner = async (deps, identity, input) => {
+  if (input.kind !== "import_install_company") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  const { reads, registry } = companyImportSetup(deps);
+  const plan = await planCompanyImport(reads, input.companyId);
+  const { preview } = plan;
+  if (!preview.ready) throw agentXError("CONFIG_INVALID", companyImportRefusalText(preview));
+  const roles = (["owner", "admin", "member"] as const).flatMap((role) => {
+    const people = preview.members.filter((member) => member.role === role).map((member) => member.personId);
+    return people.length === 0 ? [] : [`${role}s ${importIds(people)}`];
+  });
+  const nothing = preview.company === "exists" && preview.members.length === 0;
+  return {
+    effect: nothing
+      ? `Nothing to import for company ${preview.companyId}: its company record and every member that would be copied are already in Code's records.${skippedText(preview)}`
+      : `Copy company ${preview.companyId} from the install's old records into Code's company records: ${preview.company === "write" ? "its company record and " : ""}${preview.members.length} members with their roles${roles.length === 0 ? "" : ` (${roles.join("; ")})`}.${skippedText(preview)} Every row is new and marked as imported; nothing is overwritten. agentx admin company import --from-install ${preview.companyId} --undo removes them.`,
+    details: { companyId: preview.companyId, companyRecord: preview.company, people: preview.members.length, skipped: preview.skipped.length },
+    snapshot: plan,
+    apply: async (applier) => {
+      const written = nothing ? { rows: 0, company: false } : await registry.importCompany(plan.write, applier.ownerKey);
+      return { companyId: preview.companyId, people: written.rows, companyRecord: written.company };
+    },
+  };
+};
+
+/** DEC 254b (b): remove exactly what an import wrote and nobody changed since. */
+const planUndoInstallCompanyImport: Planner = async (deps, identity, input) => {
+  if (input.kind !== "undo_install_company_import") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  const { reads, registry } = companyImportSetup(deps);
+  const plan = await planCompanyImportUndo(reads, input.companyId);
+  const { preview } = plan;
+  if (!preview.ready) throw agentXError("CONFIG_INVALID", companyImportRefusalText(preview));
+  const nothing = preview.company === "keep" && preview.members.length === 0;
+  const kept = preview.skipped.length === 0 ? "" : ` Keeps ${preview.skipped.length} whose rows changed since the import (${importIds(preview.skipped.map((entry) => entry.personId))}).`;
+  return {
+    effect: nothing
+      ? `Nothing to undo for company ${preview.companyId}: no row an import wrote is left unchanged.${kept}`
+      : `Remove what the import of company ${preview.companyId} wrote: ${preview.members.length} imported memberships${preview.members.length === 0 ? "" : ` (${importIds(preview.members.map((member) => member.personId))})`}${preview.company === "delete" ? " and its company record" : ""}.${kept} Nothing else is touched.`,
+    details: { companyId: preview.companyId, companyRecord: preview.company, people: preview.members.length, kept: preview.skipped.length },
+    snapshot: plan,
+    apply: async (applier) => {
+      const removed = nothing ? { rows: 0, company: false } : await registry.undoImport(plan.remove, applier.ownerKey);
+      return { companyId: preview.companyId, people: removed.rows, companyRecord: removed.company };
+    },
   };
 };
 
@@ -611,6 +760,11 @@ export const PLANNERS: Partial<Record<AdminChangeKind, Planner>> = {
   set_chatgpt: planChatGpt,
   register_sign_in_client: planRegisterSignInClient,
   remove_sign_in_client: planRemoveSignInClient,
+  create_company_invite: planCreateCompanyInvite,
+  revoke_company_invite: planRevokeCompanyInvite,
+  set_company_self_serve: planCompanySelfServe,
+  import_install_company: planImportInstallCompany,
+  undo_install_company_import: planUndoInstallCompanyImport,
 };
 
 /**
@@ -618,6 +772,11 @@ export const PLANNERS: Partial<Record<AdminChangeKind, Planner>> = {
  * admin's linked Slack user (B4); it changes only `confirmationEffect`, never the hash.
  */
 export async function planChange(deps: PlanDependencies, identity: AuthenticatedIdentity, input: AdminChangeInput, options: PlanOptions = {}): Promise<ChangePlan> {
+  if ((input.kind === "bind_channel" || input.kind === "unbind_channel") && (deps.reads.companies !== undefined || deps.reads.slackWorkspaces !== undefined)) {
+    const workspace = await adminSlackScope(deps.reads, identity);
+    if (workspace === undefined) throw agentXError("SLACK_UNAVAILABLE", "This Slack workspace is not available.");
+    deps = { ...deps, reads: { ...deps.reads, workspace, slackTeamId: workspace.teamId } };
+  }
   const planner = PLANNERS[input.kind];
   if (planner === undefined) throw agentXError("CONFIG_INVALID", `${input.kind} is not a change this AgentX can plan; update AgentX, or make the change with the agentx admin command`);
   return planner(deps, identity, input, options);

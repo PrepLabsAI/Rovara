@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -12,7 +12,8 @@ import { readBrowserState, type BrowserContextLike, type BrowserFrameLike } from
 import { BROWSER_STATE_MEMO_MAX, tellBrowserState } from "../../packages/verifier/src/executor/browser-state-secrets.js";
 import { classifyStorageEntry } from "../../packages/verifier/src/executor/storage-entry-classifier.js";
 import { headerSecrets, urlSecrets } from "../../packages/verifier/src/executor/request-secrets.js";
-import { classifyString } from "../../packages/verifier/src/executor/credential-classifier.js";
+import { classifyString, isPathLike } from "../../packages/verifier/src/executor/credential-classifier.js";
+import { cookieTier } from "../../packages/verifier/src/executor/visitor-cookie.js";
 import type { FormLoginDriver, FormLoginStorageState, FormRequestContext } from "../../packages/verifier/src/executor/form-login.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { createSessionSecretRegistry } from "../../packages/verifier/src/executor/session-secret-registry.js";
@@ -27,6 +28,17 @@ import { createMidstep2Harness } from "../support/e2e-midstep2-harness.js";
 
 const JWT = `${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${Buffer.from('{"sub":"user-1234567890"}').toString("base64url")}.c2lnbmF0dXJlLWJ5dGVzLWhlcmU`;
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+/** Deterministic bytes (SHA-256 of seed and counter): the same tokens on every run, so CI cannot flake on a rare random token. */
+function seededBytes(seed: string): (length: number) => Buffer {
+  let counter = 0;
+  return (length) => {
+    const chunks: Buffer[] = [];
+    for (let size = 0; size < length; size += 32) chunks.push(createHash("sha256").update(`${seed}:${counter++}`).digest());
+    return Buffer.concat(chunks).subarray(0, length);
+  };
+}
+/** An ordinary random token (no slash) for comparing the tier a neutral position gives. */
+const RANDOM_CONTROL = "k3JqZ8vR2mT9wXyB4nL7pQ1sD6fH0gA5eC8uV3iO2Yb";
 
 let dir: string;
 const closers: Array<() => Promise<unknown>> = [];
@@ -241,13 +253,14 @@ describe("fix round 3 (re-check 2)", () => {
     expect(classifyString("anything", token).map((item) => item.tier)).toContain("strong");
   });
 
-  it("N-7 / M3-1: random standard-base64 tokens with slashes stay strong (crypto.randomBytes, 10 000+ distinct tokens at each of 24, 32 and 40 bytes, with and without a leading slash)", () => {
+  it("N-7 / M3-1: random standard-base64 tokens with slashes stay strong (seeded: 200 000 distinct tokens at each of 24, 32 and 40 bytes, with and without a leading slash)", () => {
     for (const bytes of [24, 32, 40]) {
+      const next = seededBytes(`n7-m3-1-${bytes}`);
       const seen = new Set<string>();
       const misses: string[] = [];
       let checked = 0;
-      while (seen.size < 10_000) {
-        const token = randomBytes(bytes).toString("base64").replace(/=+$/, "");
+      while (seen.size < 200_000) {
+        const token = next(bytes).toString("base64").replace(/=+$/, "");
         if (!token.includes("/") || seen.has(token)) continue;
         seen.add(token);
         for (const value of [token, `/${token}`]) {
@@ -258,6 +271,46 @@ describe("fix round 3 (re-check 2)", () => {
       // The only tokens that are not strong are the ones without a digit (an opaque run needs a letter and a digit, as it always did): measured 0.5% at 24 bytes, 0.1% at 32, 0.02% at 40.
       expect(misses.filter((value) => /[0-9]/.test(value)), `${bytes} bytes`).toEqual([]);
       expect(misses.length / checked, `${bytes} bytes`).toBeLessThan(0.02);
+    }
+  }, 120_000);
+
+  // CRED-CLASSIFIER-DIGIT-PATH: a random token whose pieces between the slashes read as a digit id and 3-letter words was called a path (and so was not registered at all as a leaf, a URL parameter or a cookie).
+  const DIGIT_PATH_TOKENS = ["939/Qoy/vkv7zesoatRb5eCCFKuVPauoWV74ODe/fyk", "qwi/Ipt/ampea74/4e7m/iVGWf5hIwlr"];
+  describe.each(DIGIT_PATH_TOKENS.flatMap((token) => [token, `/${token}`]))("CRED-CLASSIFIER-DIGIT-PATH: %s", (value) => {
+    it("is not a path", () => { expect(isPathLike(value)).toBe(false); });
+    it("is strong at the top level under a neutral key", () => {
+      expect(classifyString("anything", value).some((item) => item.tier === "strong" && item.value === value)).toBe(true);
+    });
+    it("is strong as a JSON leaf under a neutral key (and as a stored JSON string)", () => {
+      expect(classifyStorageEntry({ name: "cache", value: JSON.stringify({ href: value }) }).some((item) => item.tier === "strong" && item.value === value)).toBe(true);
+      expect(classifyStorageEntry({ name: "cache", value: JSON.stringify({ nested: { list: [value] } }) }).some((item) => item.tier === "strong" && item.value === value)).toBe(true);
+      expect(classifyStorageEntry({ name: "cache", value: JSON.stringify(value) }).some((item) => item.tier === "strong" && item.value === value)).toBe(true);
+    });
+    it("is registered in a neutral URL parameter exactly as any other random token is (masked: weak)", () => {
+      const control = urlSecrets(`https://app.test/x?ref=${encodeURIComponent(RANDOM_CONTROL)}`).find((item) => item.value === RANDOM_CONTROL)?.tier;
+      expect(control).toBe("weak");
+      expect(urlSecrets(`https://app.test/x?ref=${encodeURIComponent(value)}`).find((item) => item.value === value)?.tier).toBe(control);
+    });
+    it("is registered as a neutral visitor cookie exactly as any other random token is (an HttpOnly one is strong)", () => {
+      const control = cookieTier({ name: "appstate", value: RANDOM_CONTROL, httpOnly: false }, true);
+      expect(control).toBe("weak");
+      expect(cookieTier({ name: "appstate", value, httpOnly: false }, true)).toBe(control);
+      expect(cookieTier({ name: "appstate", value, httpOnly: true }, true)).toBe("strong");
+    });
+  });
+
+  it("CRED-CLASSIFIER-DIGIT-PATH: real paths with ids, dates, files and 3-letter words are still paths: nothing strong or weak at the top level, as a leaf, a URL parameter or a visitor cookie", () => {
+    const REAL_PATHS = ["/api/v2/Users/8423/Orders/12345/Items/99882211", "/Api/Orders/2024/11/08/InvoiceItems/99882211", "/Users/8423/Documents/Reports/2024Q4/Summary", "/Api/Orders/12345/Items/Kx9mQ2vL7nR4tYbc",
+      "/Users/dev/Projects/App/src/Runner/path-rules.ts", "/api/orders/12345", "/api/get/all/orders/2024/Items/list", "/Users/8423/Orders/12345/Items/Kx9mQ2vL7nR4tYbc/Lines/99",
+      "/v1/app/org/mcp-servers/mcpone000001", "SampleApp/docs/guides/specs/2026-10-12-example-spec-e2e/", "/Users/8423/Orgs/Kx9mQ2vL7nR/Projects/Zp3mQ8vL1nR/Tasks/8423",
+      "/api/users/aB3dE5fG7hI9jK1lM2nO/posts", "/api/Orders/Kx9mQ2vL7nR4tYbc/Items", "/app/projects/V1StGXR8Z5jdHi6bmyT/settings", "/api/orgs/aB3dE5fG7hI9jK1lM2nO/members", "/api/docs/aB3dE5fG7hI9jK1lM2nO/edit",
+      "/users/V1StGXR8Z5jdHi6bmyT/posts/V1StGXR8Z5jdHi6bmyT/comments/list"];
+    for (const path of REAL_PATHS) {
+      expect(isPathLike(path), path).toBe(true);
+      expect(classifyString("lastRoute", path).filter((item) => item.tier === "strong" || item.tier === "weak"), path).toEqual([]);
+      expect(classifyStorageEntry({ name: "cache", value: JSON.stringify({ href: path }) }), path).toEqual([]);
+      expect(urlSecrets(`https://app.test/x?ref=${encodeURIComponent(path)}`), path).toEqual([]);
+      expect(cookieTier({ name: "appstate", value: path, httpOnly: false }, true), path).toBeNull();
     }
   });
 

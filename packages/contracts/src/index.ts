@@ -4,6 +4,7 @@ export * from "./cli-distribution.js";
 export * from "./action-policy-node.js";
 export * from "./action-class.js";
 export * from "./comment-commands.js";
+export * from "./rovara-comment.js";
 export * from "./item-paths.js";
 export * from "./mcp-connector.js";
 export * from "./models-node.js";
@@ -18,11 +19,14 @@ export * from "./developer-tasks-node.js";
 export * from "./task-workflow-node.js";
 export * from "./task-workflow-revise.js";
 export * from "./task-workflow-design-review.js";
+export * from "./task-flow-tier.js";
 export * from "./design-review-state.js";
 export * from "./no-change-findings.js";
 export * from "./workflow-autofix.js";
 export * from "./rovara-code.js";
+export * from "./person-erase.js";
 export * from "./project-playbook.js";
+export * from "./playbook-file.js";
 export * from "./design-review.js";
 export * from "./design-review-block.js";
 export * from "./design-review-packet.js";
@@ -33,10 +37,16 @@ export * from "./project-learning.js";
 export * from "./how-we-work.js";
 export * from "./how-we-work-track-record.js";
 export * from "./second-review.js";
+export * from "./app-diagnosis.js";
+export * from "./app-model-selection.js";
+export * from "./app-model-selection-lines.js";
+export * from "./app-second-review.js";
+export * from "./app-design-review.js";
 export * from "./rovara-code-node.js";
 export * from "./rovara-code-intent.js";
 export * from "./intake.js";
 export * from "./ticket-updates.js";
+export * from "./task-log.js";
 export * from "./rovara-code-understand.js";
 export * from "./plan-critique-block.js";
 export * from "./workflow-proposed-checks.js";
@@ -48,6 +58,8 @@ export * from "./plan-grounding.js";
 export * from "./workflow-dependencies-node.js";
 export * from "./display-name.js";
 export * from "./environments.js";
+export * from "./core-engine-infra.js";
+export * from "./broker-environment.js";
 export * from "./github-mcp.js";
 export * from "./oauth-profiles.js";
 export * from "./operation.js";
@@ -83,6 +95,9 @@ export * from "./channel-adapter.js";
 export * from "./channel-command-client.js";
 export * from "./channel-forms.js";
 export * from "./sign-in-clients.js";
+export * from "./project-setup-status.js";
+export * from "./company-invites.js";
+export * from "./company-import.js";
 export * from "./thread-service.js";
 export * from "./slack-details.js";
 export * from "./slack-confirmation.js";
@@ -101,6 +116,7 @@ export * from "./swebench.js";
 export * from "./eval-batch.js";
 export * from "./eval-stats.js";
 export * from "./eval-memory.js";
+export * from "./eval-replay-measure.js";
 export * from "./e2e-node.js";
 export * from "./e2e-runtime-capabilities.js";
 export * from "./e2e-runtime-registration.js";
@@ -138,9 +154,15 @@ export * from "./e2e-agent-models.js";
 export * from "./e2e-replay.js";
 export * from "./workflow-publication-context.js";
 export * from "./company-scope.js";
+export * from "./outside-account.js";
+export * from "./approval-sign-in.js";
+export * from "./approval-place.js";
 export * from "./run-estimate.js";
 export * from "./record-trust.js";
+export * from "./open-ids.js";
+export * from "./standing-instructions.js";
 export * from "./signing-key.js";
+export * from "./policy-hook.js";
 export * from "./task-budget.js";
 export * from "./model-not-enabled.js";
 export * from "./org-scoped-keys.js";
@@ -150,7 +172,9 @@ export * from "./connection-types-observability.js";
 export * from "./agent-recipe-node.js";
 export * from "./comment-triggers.js";
 export * from "./agent-run-node.js";
+export * from "./agent-guardrails.js";
 export * from "./agent-templates.js";
+export * from "./agent-directory-view.js";
 export * from "./app-projects.js";
 export * from "./public-suffix.js";
 export * from "./default-allow-domains.js";
@@ -180,6 +204,7 @@ export * from "./onboarding.js";
 export * from "./setup-draft.js";
 export * from "./seed-command.js";
 export * from "./setup-run.js";
+export * from "./setup-agent-web.js";
 export * from "./setup-proposal.js";
 export * from "./setup-proposal-read.js";
 
@@ -203,13 +228,30 @@ export { formatUsdMicrodollars } from "./money-format.js";
 
 // Lane A G1: versioned project intent, preserved but not set by legacy settings writes.
 export * from "./test-proof.js";
+export * from "./rovara-check.js";
+// TE-B5a: the one table of who may decide what (task owner, maintainer, admin).
+export * from "./can-decide.js";
+export * from "./real-model-check.js";
+export * from "./plugins/index.js";
 export * from "./ports/index.js";
 export * from "./outcomes.js";
 
 // Proof and evidence (W4/W5): the evidence pack, decision cards, the test environment and service mocks.
+export * from "./check-kinds.js";
+export * from "./browser-evidence.js";
+export * from "./browser-evidence-wire.js";
+export * from "./device-evidence.js";
+export * from "./device-evidence-android.js";
 export * from "./evidence.js";
 // TE-B9: the list of Rovara working files that are never committed.
 export * from "./never-commit.js";
+export * from "./evidence-inert.js";
+export * from "./evidence-ai.js";
+export * from "./evidence-public.js";
+export * from "./evidence-render.js";
+export * from "./ci-evidence.js";
+export * from "./rovara-problem.js";
+export * from "./evidence-weakening.js";
 export * from "./api-samples.js";
 export * from "./media-gate.js";
 
@@ -237,6 +279,8 @@ export * from "./app-service-status.js";
 // Learning v2 (L4): lesson text hygiene and the learnedContext payload.
 export * from "./lesson-text.js";
 export * from "./learned-context.js";
+export * from "./knowledge-context.js";
+export * from "./lessons-by-area.js";
 export * from "./lesson-citation.js";
 export * from "./code-identifiers.js";
 export * from "./decision-cards.js";
@@ -244,18 +288,72 @@ export * from "./decision-focus.js";
 export * from "./decision-card-tabs.js";
 export * from "./test-environment.js";
 export * from "./service-mocks.js";
+export * from "./mock-spec-slices.js";
 export * from "./test-services-aws-resources.js";
 export * from "./test-services-shared.js";
 export * from "./test-env-dependency.js";
+export * from "./sagemaker-fixtures.js";
+export * from "./sagemaker-endpoint.js";
+export * from "./sagemaker-words.js";
+export * from "./pii-scan.js";
+export * from "./sagemaker-recording.js";
+export * from "./test-answer-labels.js";
+// TE-A6 (DEC 254zt): which change most likely broke each failing test, the pure join.
+export * from "./failure-attribution.js";
+export * from "./failure-causes.js";
 export * from "./seed-script-lock.js";
+export * from "./generated/aws-emulator-services.js";
+export * from "./aws-emulator-service-keys.js";
+export * from "./test-services-limits.js";
 export * from "./test-services-usage.js";
 export * from "./service-catalog.js";
 export * from "./service-catalog-images.js";
 export * from "./catalog-trust.js";
+export * from "./owner-image-list.js";
+export * from "./owner-starter-images.js";
+export * from "./test-service-mirror.js";
 export * from "./service-catalog-verify.js";
-export * from "./test-account.js";
+// TE-F0a (M2): the model catcher foundation. Pure contracts and data with no callers yet; Rovara's own agent-model files (model-providers.ts, model-sources.ts, e2e-model-*.ts) are separate (DECISIONS 157).
 export * from "./model-catalog.js";
 export * from "./model-catalog-rows.js";
+// The unsigned parse (`parseModelCatalogBytes`) is deliberately NOT exported here: only `builtinModelCatalog()` may feed F1 and F2 until the rows are signed.
+export { MODEL_CATALOG_MAX_BYTES, modelCatalogDigest } from "./model-catalog-digest.js";
+// TE-F4: additive static prompt/model change detection; no production callers.
+export * from "./prompt-change.js";
+export * from "./prompt-change-detect.js";
+// EVAL-TRIGGER-NARROW: the worker's AI-related file set treats F4's prompt-file path rule as setup-discovered prompt files.
+export { promptFilePath } from "./prompt-change-rules.js";
+export * from "./model-family-common.js";
+export * from "./model-family-gemini.js";
+export * from "./model-family-openai.js";
+export * from "./model-egress-block.js";
+// TE-F1a (M2): the model-egress contracts and pure core (the `model-egress` port is in ports/model-egress.ts). Additive; depends on TE-F0a.
+export * from "./model-egress/index.js";
+// TE-F10 (0.5.20): old vs new prompt outputs side by side, with an independent judge (additive; no callers).
+export * from "./side-by-side.js";
+export * from "./side-by-side-judge.js";
+export * from "./side-by-side-judge-pin.js";
+export * from "./side-by-side-run.js";
+export * from "./side-by-side-render.js";
+// Option B (2026-11-16): the vendor-family check, moved out of the side-by-side lane so other contracts need not import it.
+export * from "./vendor-family.js";
+export * from "./model-serve.js";
+// TE-F2 part A (M2): scripted replies, provenance and the failure pack for the model catcher. Additive: new files and these lines, no callers yet (the helper is part B).
+export * from "./model-sse-named.js";
+export * from "./model-family-vectors.js";
+export * from "./model-family-openai-ops.js";
+export * from "./model-family-gemini-extra.js";
+export * from "./model-family-anthropic.js";
+export * from "./model-family-cohere.js";
+export * from "./model-served-family.js";
+export * from "./model-request-facts.js";
+export * from "./model-render.js";
+export * from "./model-failure-pack.js";
+export * from "./model-families.js";
+export * from "./model-reply-provenance.js";
+export * from "./model-reply-set.js";
+export * from "./model-serve-replies.js";
+export * from "./test-account.js";
 export * from "./test-account-model-hosts.js";
 export * from "./context-sources.js";
 export * from "./mcp-servers.js";
@@ -269,16 +367,46 @@ export * from "./test-environment-prod-deny.js";
 export * from "./test-environment-wire.js";
 export * from "./service-mock-additions.js";
 export * from "./test-env-nightly.js";
+export * from "./test-flaky.js";
+export * from "./test-env-baseline.js";
+export * from "./test-env-multi-repo.js";
 export * from "./nightly-run.js";
+export * from "./eval-files.js";
 export * from "./system-owner.js";
+export * from "./system-runs.js";
 export * from "./test-id.js";
 export * from "./verification-result.js";
+export * from "./pr-verdict.js";
 export * from "./e2e-model-spend.js";
 
 // Learning v2: the Team record and lessons (R1).
 export * from "./lessons.js";
 export * from "./app-lessons.js";
+export * from "./lessons-local-tools.js";
+export * from "./lesson-wording.js";
+export * from "./knowledge-propose.js";
+export * from "./rovara-skills.js";
+export * from "./lesson-keys.js";
+// Lead 4 W2: the project wiki store contract (rows keyed by company AND project).
+export * from "./wiki-store.js";
+// Lead 4 A1: what a task's agents are given of the project wiki, and the worker's report.
+export * from "./wiki-agents.js";
+// Lead 4 C1: the wiki corrections (notes, Mark wrong, approvals) routes contract.
+export * from "./wiki-corrections.js";
+// Lead 4 J1: the smart Just answer service (limits, request, answer object, fixed words).
+export * from "./answers.js";
+export * from "./answer-keys.js";
+export * from "./slack-answers.js";
+// Lead 4 J3: the web start box's path suggestion (the Slack intake's first look and classifier, for the web).
+export * from "./start-suggest.js";
+export * from "./answer-feedback.js";
 export * from "./spec-target.js";
+
+// Wiki W0: the free file map and forecast.
+export * from "./wiki-file-map.js";
+export * from "./wiki-build.js";
+// Lead 4 W4: the wiki build controls (bodies and fixed words).
+export * from "./wiki-controls.js";
 
 // Setup and test health: saved environments (SH3).
 export * from "./saved-env.js";
@@ -290,6 +418,8 @@ export * from "./app-design-review-company.js";
 
 // Setup and test health: setup recipes and their fingerprint (SH4).
 export * from "./setup-recipe.js";
+// L4-DR (DEC 254z c): the setup snapshot saved at approval and the drift check at task start.
+export * from "./setup-snapshot.js";
 
 // Setup and test health: the team build runner contract R3 (SH35). Contract only; no runner is built.
 export * from "./runner.js";
@@ -299,5 +429,60 @@ export * from "./runner.js";
 
 export * from "./task-status.js";
 export * from "./notification-prefs.js";
+export * from "./work-event.js";
+export * from "./work-event-node.js";
+export * from "./company-reads.js";
+export * from "./sign-in-links.js";
+// TE-F8 (M2, 0.5.19): record-then-replay for changed prompts. Additive, no callers; depends on TE-F1a (model-egress) and TE-F4 (prompt-change).
+export * from "./model-record-key.js";
+export * from "./model-record-policy.js";
+export * from "./model-recording-store.js";
+export * from "./model-record-replay.js";
+export * from "./policy.js";
+export * from "./presets.js";
 
+export * from "./measures-file.js";
+// TE-F3 (M2/M3a): the eval check. Pure and additive: the question-level exact verdict, the base score cache, pacing, the hidden eval set rules. Nothing outside tests and the worker's eval round calls these yet.
+export * from "./eval-hidden-set.js";
+export * from "./eval-pacing.js";
+export * from "./eval-base-cache.js";
+export * from "./eval-check.js";
+export type { EvalSpendGrant, EvalSpendApproval, EvalMeterCall, EvalMeterReservation, MonthlyMeter, EvalReservationAdapter } from "./ports/eval-health.js";
+
+export { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalSpendInputsSchema, EvalSpendDollarsSchema, EvalSpendPlanSchema, EvalSpendRoleSchema, EvalSpendApprovalRecordSchema, evalSpendInputsDigest, evalSpendDigest, type EvalSpendInputs, type EvalSpendDollars, type EvalSpendPlan, type EvalSpendApprovalRecord } from "./eval-spend.js";
+export { MUTATION_SPOT_LIMITS, MUTATION_NOT_RUN_WORDS, mutationLimits, mutationLanguage, mutationPathRefused, mutationPathFingerprint, planMutants, mutationSentence, mutationMeasureEntry, type MutationLimits, type MutationLines, type MutationOperator, type MutationReason, type MutationOutcome, type MutationMethod, type MutationSpotResult, type MutationPlan, type SpotMutant } from "./mutation-spot.js";
 export * from "./machine-size.js";
+export * from "./machine-setup.js";
+export * from "./machine-size-launch.js";
+export * from "./machine-size-price.js";
+
+export * from "./setup-prove.js";
+export * from "./eval-round-artifact.js";
+export * from "./eval-plan-delivery.js";
+export * from "./eval-environment.js";
+export * from "./eval-health-run.js";
+export * from "./eval-run-diagnostic.js";
+// DEC 253j(1): the trusted EVAL_PLAN record (stored next to EVAL_SPEND, bound by its digest).
+export * from "./eval-plan-record.js";
+export * from "./eval-discovery-report.js";
+export * from "./eval-wrapper.js";
+export * from "./eval-wrapper-templates.js";
+export * from "./eval-proof-basis.js";
+
+export * from "./model-gateway-token.js";
+export * from "./payer.js";
+export * from "./ports/company-log.js";
+export * from "./service-contract.js";
+export * from "./service-contract-mock.js";
+export * from "./general-fakes.js";
+export * from "./plan-setup-changes.js";
+export * from "./general-fakes-set.js";
+export * from "./openapi-fake.js";
+export * from "./agent-model-choice.js";
+export * from "./company-engine-model.js";
+export * from "./report-keys.js";
+export * from "./cost-report.js";
+export * from "./upkeep.js";
+export * from "./prompt-locations.js";
+export * from "./ai-markers.js";
+export * from "./company-egress-addresses.js";

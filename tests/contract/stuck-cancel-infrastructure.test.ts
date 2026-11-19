@@ -40,10 +40,11 @@ describe("the stuck-cancel retry's infrastructure (#195)", () => {
     expect(statements.map((statement) => statement.Sid)).not.toContain("RetryStuckCancels");
   });
 
-  it("never names the broker to the named reconciler, and signs the retried cancel with #173's key", () => {
+  it("never names the broker to the named reconciler, and signs the retried cancel with #173's key (read from its secret), never an environment value", () => {
     const { environment } = reconciler(named);
     expect(environment).not.toHaveProperty("BROKER_FUNCTION_NAME");
-    expect(environment).toMatchObject({ CALLBACK_SIGNING_KEY: { Ref: "CallbackSigningKey" } });
+    expect(environment).toMatchObject({ CALLBACK_SIGNING_KEY_SECRET_ID: "agentx/staging/callback-key" });
+    expect(environment).not.toHaveProperty("CALLBACK_SIGNING_KEY");
   });
 
   it("alarms the operator on any stuck cancel retried or ended, or any failure to do so", () => {

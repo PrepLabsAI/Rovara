@@ -38,6 +38,29 @@ export const EnvironmentSettingsSchema = z.object({
 
 export type EnvironmentSettings = z.infer<typeof EnvironmentSettingsSchema>;
 
+/**
+ * The only keys outside the schema that reading settings tolerates: the old monolith (before the
+ * Code/Cloud split) stored its cloud add-on's settings under them. Reading ignores exactly these two,
+ * whatever their value; the next write leaves them out and says so. Every other unknown key is
+ * still refused.
+ */
+export const LEGACY_SETTINGS_KEYS = ["cloud", "cloudSignIn"] as const;
+
+/** The legacy keys `json` holds, in LEGACY_SETTINGS_KEYS order. */
+function legacyKeysIn(json: unknown): string[] {
+  if (json === null || typeof json !== "object" || Array.isArray(json)) return [];
+  return LEGACY_SETTINGS_KEYS.filter((key) => Object.hasOwn(json, key));
+}
+
+/** `json` without the legacy keys; anything that is not a plain object is returned as-is for the schema to refuse. */
+function withoutLegacyKeys(json: unknown): unknown {
+  const keys = legacyKeysIn(json);
+  if (keys.length === 0) return json;
+  const copy: Record<string, unknown> = { ...(json as Record<string, unknown>) };
+  for (const key of keys) delete copy[key];
+  return copy;
+}
+
 export function settingsParameterName(env: string): string {
   return `${environmentSettingsPrefix(env)}settings`;
 }
@@ -56,17 +79,35 @@ export async function readEnvironmentSettings(store: ParameterStore, env: string
   } catch {
     throw agentXError("CONFIG_INVALID", `settings for environment ${env} are not valid JSON`);
   }
-  const parsed = EnvironmentSettingsSchema.safeParse(json);
+  const parsed = EnvironmentSettingsSchema.safeParse(withoutLegacyKeys(json));
   if (!parsed.success) throw agentXError("CONFIG_INVALID", firstIssueMessage(`settings for environment ${env} are invalid`, parsed.error));
   if (parsed.data.env !== env) throw agentXError("CONFIG_INVALID", `settings stored for environment ${env} name environment ${parsed.data.env}`);
   return parsed.data;
 }
 
-export async function writeEnvironmentSettings(store: ParameterStore, settings: EnvironmentSettings, options: { createOnly?: boolean } = {}): Promise<void> {
+/** The legacy keys the stored settings hold now; none when there are none, or they are not JSON. */
+async function storedLegacyKeys(store: ParameterStore, env: string): Promise<string[]> {
+  const stored = await store.get(settingsParameterName(env));
+  if (stored === undefined) return [];
+  try {
+    return legacyKeysIn(JSON.parse(stored.value));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Writes the settings, schema-checked. The written value never holds a legacy key (the schema has
+ * none). With `onLegacyKeysDropped`, an overwrite first looks at what is stored, and after the write
+ * reports the legacy keys it dropped (names only, never values).
+ */
+export async function writeEnvironmentSettings(store: ParameterStore, settings: EnvironmentSettings, options: { createOnly?: boolean; onLegacyKeysDropped?: (keys: string[]) => void } = {}): Promise<void> {
   const parsed = EnvironmentSettingsSchema.safeParse(settings);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", firstIssueMessage("environment settings are invalid", parsed.error));
+  const dropped = options.onLegacyKeysDropped === undefined || options.createOnly ? [] : await storedLegacyKeys(store, parsed.data.env);
   try {
     await store.put(settingsParameterName(parsed.data.env), JSON.stringify(parsed.data), options.createOnly ? { createOnly: true } : {});
+    if (dropped.length > 0) options.onLegacyKeysDropped?.(dropped);
   } catch (error) {
     if (options.createOnly && error instanceof ParameterExistsError) {
       throw agentXError("CONFIG_INVALID", `environment ${parsed.data.env} already has settings; nothing changed`);

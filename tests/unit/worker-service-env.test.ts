@@ -75,17 +75,26 @@ describe("connection variables", () => {
 });
 
 describe("AWS: endpoints, fake credentials and the sinkhole (4.0.5)", () => {
-  const aws = { alias: "aws", port: 4566, region: "us-west-2", emulatedServices: ["s3", "dynamodb", "secretsmanager", "sagemaker-runtime", "events"], unbackedServices: ["sqs"] };
-  it("working sandbox: per-service endpoints to the emulator, the unbacked one to the emulator too (it refuses and counts it), fake credentials, and the global endpoint at the emulator", () => {
+  const aws = { alias: "aws", port: 4566, region: "us-west-2", emulatedServices: ["s3", "dynamodb", "secretsmanager", "sagemaker-runtime", "events"] };
+  it("working sandbox: an endpoint per PLANNED service at the emulator (no variable for the others: they reach it through the global endpoint), fake credentials, and the global endpoint at the emulator", () => {
     const env = asObject(buildServiceEnvironment(input({ aws })).entries);
     expect(env).toMatchObject({
       AWS_ENDPOINT_URL_S3: "http://aws:4566", AWS_ENDPOINT_URL_DYNAMODB: "http://aws:4566", AWS_ENDPOINT_URL_SECRETS_MANAGER: "http://aws:4566", AWS_ENDPOINT_URL_SAGEMAKER_RUNTIME: "http://aws:4566", AWS_ENDPOINT_URL_EVENTBRIDGE: "http://aws:4566",
-      AWS_ENDPOINT_URL_SQS: "http://aws:4566", AWS_ENDPOINT_URL: "http://aws:4566",
+      AWS_ENDPOINT_URL: "http://aws:4566",
       AWS_ACCESS_KEY_ID: AWS_FAKE_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY: AWS_FAKE_SECRET_ACCESS_KEY,
       AWS_REGION: "us-west-2", AWS_DEFAULT_REGION: "us-west-2", AWS_EC2_METADATA_DISABLED: "true", AWS_CONFIG_FILE: "/dev/null", AWS_SHARED_CREDENTIALS_FILE: "/dev/null",
     });
     expect(env).not.toHaveProperty("AWS_SESSION_TOKEN");
     expect(env).not.toHaveProperty("AWS_PROFILE");
+    // Only the planned services get a variable of their own (not the table's 436): five here, the global endpoint, and the credentials and region.
+    expect(Object.keys(env).filter((name) => name.startsWith("AWS_ENDPOINT_URL_"))).toHaveLength(5);
+    expect(env).not.toHaveProperty("AWS_ENDPOINT_URL_SQS");
+  });
+  it("points every endpoint variable the repository's own settings set at the emulator too, once, and refuses a name that is not one", () => {
+    const env = asObject(buildServiceEnvironment(input({ aws: { ...aws, repoEndpointNames: ["AWS_ENDPOINT_URL_SNS", "AWS_ENDPOINT_URL_S3", "AWS_ENDPOINT_URL_NOT_A_SERVICE"] } })).entries);
+    expect(env).toMatchObject({ AWS_ENDPOINT_URL_SNS: "http://aws:4566", AWS_ENDPOINT_URL_NOT_A_SERVICE: "http://aws:4566", AWS_ENDPOINT_URL_S3: "http://aws:4566" });
+    expect(Object.keys(env).filter((name) => name.startsWith("AWS_ENDPOINT_URL_"))).toHaveLength(7);
+    for (const name of ["AWS_ENDPOINT_URL", "AWS_REGION", "PATH", "AWS_ENDPOINT_URL_s3", "AWS_ENDPOINT_URL_X"]) expect(() => buildServiceEnvironment(input({ aws: { ...aws, repoEndpointNames: [name] } })), name).toThrow(ServiceEnvError);
   });
   it("sealed sandbox: the same, and the global endpoint is the emulator, so a service nobody found is refused and counted by it", () => {
     const env = asObject(buildServiceEnvironment(input({ sandbox: "check", aws })).entries);
@@ -102,6 +111,10 @@ describe("AWS: endpoints, fake credentials and the sinkhole (4.0.5)", () => {
   });
   it("an endpoint variable name is the SDK's service id upper-cased; a service the table does not know is refused", () => {
     expect(awsEndpointVariableName("stepfunctions")).toBe("AWS_ENDPOINT_URL_SFN");
+    expect(awsEndpointVariableName("sfn")).toBe("AWS_ENDPOINT_URL_SFN");
+    expect(awsEndpointVariableName("apigatewayv2")).toBe("AWS_ENDPOINT_URL_APIGATEWAYV2");
+    expect(awsEndpointVariableName("api-gateway")).toBe("AWS_ENDPOINT_URL_API_GATEWAY");
+    expect(awsEndpointVariableName("ec2")).toBe("AWS_ENDPOINT_URL_EC2");
     expect(awsEndpointVariableName("logs")).toBe("AWS_ENDPOINT_URL_CLOUDWATCH_LOGS");
     expect(awsEndpointVariableName("cognito-idp")).toBe("AWS_ENDPOINT_URL_COGNITO_IDENTITY_PROVIDER");
     expect(() => awsEndpointVariableName("nonsense")).toThrow(ServiceEnvError);
@@ -110,12 +123,12 @@ describe("AWS: endpoints, fake credentials and the sinkhole (4.0.5)", () => {
     expect(() => awsEndpointVariableName("s3 --x")).toThrow(ServiceEnvError);
     expect(() => buildServiceEnvironment(input({ aws: { ...aws, emulatedServices: ["nonsense"] } }))).toThrow(ServiceEnvError);
   });
-  it("a service cannot be both emulated and unbacked; the emulator's address and the region are checked", () => {
-    expect(() => buildServiceEnvironment(input({ aws: { ...aws, unbackedServices: ["s3"] } }))).toThrow(ServiceEnvError);
+  it("a service is planned once (a legacy spelling and its key are one service); the emulator's address and the region are checked", () => {
+    expect(() => buildServiceEnvironment(input({ aws: { ...aws, emulatedServices: ["s3", "s3"] } }))).toThrow(ServiceEnvError);
+    expect(() => buildServiceEnvironment(input({ aws: { ...aws, emulatedServices: ["secretsmanager", "secrets-manager"] } }))).toThrow(ServiceEnvError);
     expect(() => buildServiceEnvironment(input({ aws: { ...aws, alias: "aws --x" } }))).toThrow(ServiceEnvError);
     expect(() => buildServiceEnvironment(input({ aws: { ...aws, alias: "Aws_x" } }))).toThrow(ServiceEnvError);
     expect(() => buildServiceEnvironment(input({ aws: { ...aws, region: "us_west_2" } }))).toThrow(ServiceEnvError);
-    expect(() => buildServiceEnvironment(input({ aws: { ...aws, unbackedServices: ["sqs", "sqs"] } }))).toThrow(ServiceEnvError);
     expect(() => buildServiceEnvironment(input({ aws: { ...aws, region: "us-west-2\nX=1" } }))).toThrow(ServiceEnvError);
     expect(() => buildServiceEnvironment(input({ aws: { ...aws, port: 0 } }))).toThrow(ServiceEnvError);
     expect(() => buildServiceEnvironment(input({ sinkholeUrl: "http://sink hole" }))).toThrow(ServiceEnvError);
@@ -261,7 +274,7 @@ describe("the run's directory (L4: mode 0700 or 0710, whatever the umask)", () =
 describe("the worker's own environment is never touched", () => {
   it("building and writing the environment leaves process.env exactly as it was", async () => {
     const before = JSON.stringify(Object.entries(process.env).sort());
-    const env = buildServiceEnvironment(input({ sandbox: "check", aws: { alias: "aws", port: 4566, region: "us-east-1", emulatedServices: ["s3"], unbackedServices: [] } }));
+    const env = buildServiceEnvironment(input({ sandbox: "check", aws: { alias: "aws", port: 4566, region: "us-east-1", emulatedServices: ["s3"] } }));
     await withServiceEnvFile({ write: () => Promise.resolve("/run/x/y.env"), remove: () => Promise.resolve() }, "run-a.check", env, (a) => Promise.resolve(a));
     expect(JSON.stringify(Object.entries(process.env).sort())).toBe(before);
     expect(process.env["AWS_ACCESS_KEY_ID"]).toBeUndefined();
@@ -335,7 +348,7 @@ describe("H1: the emulator's secrets are registered with the redactor and never 
   });
   it("neither secret is among the variables the channel builds for an AWS run", () => {
     const secrets = helperSecretValues([{ credentials: { password: presign, controlToken: control } }]);
-    const env = buildServiceEnvironment(input({ neverValues: secrets, aws: { alias: "aws", port: 4566, region: "us-east-1", emulatedServices: ["s3", "sqs"], unbackedServices: [] } }));
+    const env = buildServiceEnvironment(input({ neverValues: secrets, aws: { alias: "aws", port: 4566, region: "us-east-1", emulatedServices: ["s3", "sqs"] } }));
     const text = JSON.stringify(env);
     expect(text).not.toContain(presign);
     expect(text).not.toContain(control);

@@ -220,7 +220,7 @@ export const OperationSchema = z
     /** Explicit owner authorization to delete unpublished state during a close operation. */
     discardUnpublished: z.boolean().optional(),
     /** Server-selected task mode; absent on legacy operations and non-task operations. */
-    workflowMode: z.enum(["PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW", "CHECKS", "FEEDBACK_REVIEW", "UNDERSTAND", "SETUP_DRAFT", "SETUP_AGENT", "SPEC_WRITE"]).optional(),
+    workflowMode: z.enum(["PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW", "CHECKS", "FEEDBACK_REVIEW", "UNDERSTAND", "SETUP_DRAFT", "SETUP_AGENT", "WIKI_BUILD", "SPEC_WRITE"]).optional(),
     workflowE2EAdmission: E2EWorkflowAdmissionRefSchema.optional(),
     workflowE2EEvidenceRef: E2EWorkflowEvidenceRefSchema.optional(),
     /** Immutable evidence objects accepted for individual admitted groups; never a qualification signal by itself. */

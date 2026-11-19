@@ -1,5 +1,5 @@
 // #661: a task keeps its owner's name (`developerName`, copied when it started) and every reader shows that copy: the task view, the task page, Slack and
-// Rovara Cloud. When a person's name changes, their tasks take the new one, so a name chosen later (or a placeholder fixed) shows on tasks already started.
+// the web app. When a person's name changes, their tasks take the new one, so a name chosen later (or a placeholder fixed) shows on tasks already started.
 import { QueryCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 
 /** The most tasks one rename updates; a person with more keeps the old name on the oldest. */

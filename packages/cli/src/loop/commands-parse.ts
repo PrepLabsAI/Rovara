@@ -1,5 +1,6 @@
 // rovara loop (#355): what a comment asks for. Only a comment whose first line starts with `/rovara` is a
 // command; anything else from a collaborator is a reply to the loop running on that issue.
+import { parseRovaraComment } from "@agentx/contracts";
 import { LOOPS, skippablePhases, type LoopDefinition } from "./definitions.js";
 
 export type ParsedComment =
@@ -12,37 +13,21 @@ export type ParsedComment =
   | { kind: "invalid"; reason: string }
   | { kind: "reply"; text: string };
 
-const COMMAND = /^\/rovara(?:\s+(\S+))?([^\n]*)/u;
-
 export function parseComment(body: string): ParsedComment {
-  const text = body.replace(/\r\n/gu, "\n").trim();
-  const match = COMMAND.exec(text);
-  if (match === null) return { kind: "reply", text };
-  const keyword = (match[1] ?? "").toLowerCase();
-  if (keyword === "stop") return { kind: "stop" };
-  if (keyword === "file") {
-    const numbers = [...new Set((match[2] ?? "").split(/[\s,]+/u).filter((part) => part !== "").map(Number))];
-    if (numbers.length === 0 || numbers.length > 20 || numbers.some((number) => !Number.isInteger(number) || number <= 0)) {
-      return { kind: "invalid", reason: "Say which findings to file, by number: for example `/rovara file 2` or `/rovara file 2,4`." };
-    }
-    return { kind: "file", numbers };
+  // The shared grammar (contracts/rovara-comment.ts) reads stop, file, approve and changes; the keywords below are the loop's own.
+  const parsed = parseRovaraComment(body);
+  switch (parsed.kind) {
+    case "reply": case "stop": case "approve": case "changes": case "file": case "invalid": return parsed;
+    case "lesson": return { kind: "invalid", reason: "`/rovara lesson …` answers a pull request's \"Lessons used\" list, which a loop does not post." };
+    case "other": break;
   }
-  if (keyword === "approve") {
-    const repo = /^\s+`?([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})`?\s*$/u.exec(match[2] ?? "")?.[1];
-    return repo === undefined ? { kind: "approve" } : { kind: "approve", repo };
-  }
-  // `/rovara changes: <what>` (the colon is optional); the request is the rest of the comment.
-  if (keyword === "changes" || keyword === "changes:") {
-    const request = [match[2] ?? "", text.slice(match[0].length)].join("").replace(/^\s*:/u, "").trim();
-    if (request === "") return { kind: "invalid", reason: "Say what to change after `/rovara changes:`, for example `/rovara changes: keep the old API too`." };
-    return { kind: "changes", text: request };
-  }
+  const { keyword } = parsed;
   const loop = LOOPS.find((candidate) => candidate.keyword === keyword);
   if (loop === undefined) {
     return { kind: "invalid", reason: `\`/rovara ${keyword || "…"}\` is not a command I know. Start a loop with ${LOOPS.map((candidate) => `\`/rovara ${candidate.keyword} <instruction>\``).join(", ")}, answer a plan with \`/rovara approve\` or \`/rovara changes: …\`, or end a loop with \`/rovara stop\`.` };
   }
   // The instruction is the rest of the first line, and every line after it, after any `--skip <phase>[,<phase>]`.
-  let instruction = [match[2] ?? "", text.slice(match[0].length)].join("").trim();
+  let instruction = [parsed.rest, parsed.tail].join("").trim();
   const skip: string[] = [];
   for (let flag = /^--skip(?:\s+|=)(\S+)\s*/u.exec(instruction); flag !== null; flag = /^--skip(?:\s+|=)(\S+)\s*/u.exec(instruction)) {
     skip.push(...(flag[1] ?? "").toLowerCase().split(",").filter((phase) => phase !== ""));

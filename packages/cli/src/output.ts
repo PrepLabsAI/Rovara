@@ -11,10 +11,24 @@ export function formatSuccess(data: unknown, json: boolean): string {
   return typeof data === "string" ? `${data}\n` : `${JSON.stringify(data, null, 2)}\n`;
 }
 
+/**
+ * A command that ran to the end and found a problem it has already reported (a refusal in the broker's own words): the error line says it in a
+ * sentence and the exit code is the command's own.
+ */
+export class ReportedFailure extends Error {
+  constructor(readonly failureCode: string, message: string, readonly exitCode = 1) {
+    super(message);
+    this.name = "ReportedFailure";
+  }
+}
+
 export function formatError(error: unknown, json: boolean): FormattedError {
   // Issue #235: a stop the person chose is its own plain line, not an error.
   if (error instanceof StoppedByOperator) {
     return { text: json ? `${JSON.stringify({ ok: false, error: { code: "STOPPED", message: error.message } })}\n` : `${error.message}\n`, exitCode: error.exitCode };
+  }
+  if (error instanceof ReportedFailure) {
+    return { text: json ? `${JSON.stringify({ ok: false, error: { code: error.failureCode, message: error.message } })}\n` : `${error.message}\n`, exitCode: error.exitCode };
   }
   const normalized: { code: AgentXErrorCode | "INTERNAL_ERROR"; message: string } =
     error instanceof AgentXError

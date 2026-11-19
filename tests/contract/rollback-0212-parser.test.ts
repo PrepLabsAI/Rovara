@@ -116,6 +116,9 @@ describe("immutable 0.2.12 parser fixture", () => {
     const expectedFeatureStripped = structuredClone(outbox.invocation);
     if (expectedFeatureStripped.kind !== "task") throw new Error("accepted implementation outbox must carry a task invocation");
     delete expectedFeatureStripped.payload.chatgpt;
+    // The approved plan the coding run keeps through compaction is a new optional field: the broker sent it, and the delivery left it out for a worker that does not list it (the old strict parser would refuse it).
+    expect(outbox.invocation.payload.workflowApprovedPlan?.markdown).toContain("Keep the accepted task stable.");
+    delete expectedFeatureStripped.payload.workflowApprovedPlan;
     expect(sent).toEqual(expectedFeatureStripped);
     expect(expectedFeatureStripped.payload.model).toEqual(outbox.invocation.payload.model);
     expect(expectedFeatureStripped.payload.workflowBase).toEqual(outbox.invocation.payload.workflowBase);

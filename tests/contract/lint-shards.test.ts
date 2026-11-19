@@ -3,8 +3,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, chmodSyn
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { ESLint } from "eslint";
-import tseslint from "typescript-eslint";
+import { ESLint, type Linter } from "eslint";
 import type * as TypeScript from "typescript";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -22,6 +21,7 @@ import {
   writeShardTsconfig,
   type Shard,
   type ShardResult,
+  shardsForFiles,
 } from "../../scripts/lint-shards.js";
 
 // `eslint .` with the type-aware rules keeps one TypeScript program over the whole repository, and every file's lint state, in one heap.
@@ -34,13 +34,31 @@ const shards = planShards();
 const scratch = mkdtempSync(join(tmpdir(), "lint-shards-test-"));
 afterAll(() => { rmSync(scratch, { recursive: true, force: true }); });
 
+// A parser that reads every file as an empty program. Enumeration needs no syntax tree: which files ESLint lints is decided by the config's
+// `files` patterns and `ignores` before any file is parsed. Parsing and linting all ~3,800 files with the real parser and rules, twice (once
+// for the whole repository, once for the shards), took about 30 s on a fast laptop and 150 to 270 s on a loaded CI runner, which put this
+// file's setup within seconds of its 280 s cap and made it time out a few times a day. With this parser and every rule off it takes under a second.
+const emptyProgram = { type: "Program", body: [], comments: [], tokens: [], range: [0, 0], loc: { start: { line: 1, column: 0 }, end: { line: 1, column: 0 } }, sourceType: "module" };
+const enumerationParser = { meta: { name: "enumeration-only" }, parseForESLint: () => ({ ast: emptyProgram }) } as unknown as Linter.Parser;
+let rulesOff: Promise<Record<string, "off">> | undefined;
+/** Every rule the config turns on, set to "off": ESLint still enumerates the same files, and runs nothing on them. */
+function allRulesOff(): Promise<Record<string, "off">> {
+  rulesOff ??= new ESLint({ cwd: root }).calculateConfigForFile("tests/contract/lint-shards.test.ts").then((config: { rules?: Record<string, unknown> } | undefined) => Object.fromEntries(Object.keys(config?.rules ?? {}).map((rule) => [rule, "off" as const])));
+  return rulesOff;
+}
+
 /**
  * The files ESLint itself would lint for these command-line arguments: its own enumeration (config `files` patterns and `ignores`, read
- * from eslint.config.js), through the same API the command line uses. Type information is switched off, so this only parses; which files
- * are enumerated does not depend on it.
+ * from eslint.config.js), through the same API the command line uses. Nothing is parsed or checked (see above); which files are
+ * enumerated does not depend on that. The positive control in "lint, together, exactly the files that `eslint .` lints" fails if this finds nothing.
  */
 async function lintedBy(targets: readonly string[], ignorePatterns: readonly string[] = []): Promise<string[]> {
-  const eslint = new ESLint({ cwd: root, errorOnUnmatchedPattern: false, ignorePatterns: [...ignorePatterns], overrideConfig: [tseslint.configs.disableTypeChecked] });
+  const eslint = new ESLint({
+    cwd: root,
+    errorOnUnmatchedPattern: false,
+    ignorePatterns: [...ignorePatterns],
+    overrideConfig: [{ languageOptions: { parser: enumerationParser }, linterOptions: { reportUnusedDisableDirectives: "off" }, rules: await allRulesOff() }],
+  });
   const results = await eslint.lintFiles([...targets]);
   return results.map((result) => relative(root, result.filePath).replaceAll("\\", "/")).sort();
 }
@@ -50,9 +68,18 @@ const perShard = new Map<string, string[]>();
 beforeAll(async () => {
   wholeRepository = await lintedBy(["."]);
   for (const shard of shards) perShard.set(shard.name, await lintedBy(shard.targets, shard.ignore));
-}, 280_000);
+}, 60_000);
 
 describe("the lint shards: which files they lint", () => {
+  it("name every letter of the alphabet for tests/unit, so a new test file of any name has a shard and none falls to the last one", () => {
+    const named = new Set(SHARD_DIRECTORIES.flatMap((shard) => shard.directories).flatMap((directory) => (/^tests\/unit\/[a-z]\*\.ts$/u.test(directory) ? [directory.charAt(11)] : [])));
+    expect([..."abcdefghijklmnopqrstuvwxyz"].filter((letter) => !named.has(letter))).toEqual([]);
+  });
+
+  it("keep the folders of tests/unit in a shard of their own", () => {
+    expect(SHARD_DIRECTORIES.find((shard) => shard.name === "tests-unit-folders")?.directories).toEqual(["tests/unit/context-sources", "tests/unit/contracts", "tests/unit/intake", "tests/unit/knowledge", "tests/unit/knowledge-wiring", "tests/unit/lessons", "tests/unit/lessons-by-area", "tests/unit/support", "tests/unit/task-log"]);
+  });
+
   it("lint, together, exactly the files that `eslint .` lints, each file in exactly one shard", () => {
     expect(wholeRepository.length).toBeGreaterThan(1000); // positive control: the enumeration found the repository
     const owners = new Map<string, string[]>();
@@ -70,10 +97,21 @@ describe("the lint shards: which files they lint", () => {
     expect(new Set(shards.map((shard) => shard.name)).size).toBe(shards.length);
   });
 
+  it("name every test directory under tests/unit and tests/contract in a shard, so a new directory is not left to the catch-all's memory", () => {
+    const named = new Set(SHARD_DIRECTORIES.flatMap((shard) => shard.directories));
+    for (const parent of ["tests/unit", "tests/contract"]) {
+      for (const entry of readdirSync(join(root, parent), { withFileTypes: true })) {
+        if (entry.isDirectory() && entry.name !== "__snapshots__") expect(named.has(`${parent}/${entry.name}`), `${parent}/${entry.name} is in no shard of scripts/lint-shards.ts`).toBe(true);
+      }
+    }
+  });
+
   it("respect the ignores of eslint.config.js: an ignored fixture is in no shard", () => {
-    const ignoredFixture = "tests/fixtures/e2e-web-api-app/server.mjs";
-    expect(wholeRepository).not.toContain(ignoredFixture);
-    for (const files of perShard.values()) expect(files).not.toContain(ignoredFixture);
+    // a fixture .mjs sits outside every tsconfig, so the typed rules cannot parse it: it must be ignored, not linted (the model-helper ones broke the "rest" shard on CI)
+    for (const ignoredFixture of ["tests/fixtures/e2e-web-api-app/server.mjs", "tests/fixtures/model-helper/scripted-run/honours-redirect.mjs", "tests/fixtures/model-helper/scripted-run/ignores-redirect.mjs"]) {
+      expect(wholeRepository).not.toContain(ignoredFixture);
+      for (const files of perShard.values()) expect(files).not.toContain(ignoredFixture);
+    }
     for (const files of perShard.values()) expect(files.filter((file) => file.includes("/dist/") || file.includes("node_modules/"))).toEqual([]);
   });
 });
@@ -146,7 +184,7 @@ describe("the lint shards: one config, one command", () => {
   it("run through npm run lint, in CI, as one step", () => {
     const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { scripts: Record<string, string> };
     expect(manifest.scripts.lint).toBe("node scripts/lint-shards.ts");
-    expect(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8").match(/^\s+- run: npm run lint$/gm)).toHaveLength(1);
+    expect(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8").match(/^\s+run: npm run lint$/gm)).toHaveLength(1);
   });
 
   it("read their options", () => {
@@ -260,5 +298,36 @@ describe("the lint shards: a failing shard fails the command", () => {
     const file = writeShardTsconfig(shards[0]!, root);
     expect(JSON.parse(readFileSync(file, "utf8")) as unknown).toEqual(shardTsconfig(shards[0]!, root));
     expect(readdirSync(dirname(file)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+});
+
+describe("a pull request's lint (--files): the shards that hold the changed files, aimed at those files only", () => {
+  it("puts each changed file in the shard that holds it, with the group's own program, and the rest in the catch-all", () => {
+    const selected = shardsForFiles(["packages/broker/src/sample.ts", "tests/contract/alpha.test.ts", "tests/contract/tango.test.ts", "scripts/sample-tool.ts", "sample-root-file.ts", "tests/unit/9digit.test.ts"]);
+    const byName = Object.fromEntries(selected.map((shard) => [shard.name, shard]));
+    expect(byName.broker!.targets).toEqual(["packages/broker/src/sample.ts"]);
+    expect(byName.broker!.include).toEqual(["packages/broker/**/*.ts"]);
+    expect(byName["tests-contract-a-d"]!.targets).toEqual(["tests/contract/alpha.test.ts"]);
+    expect(byName["tests-contract-t-z"]!.targets).toEqual(["tests/contract/tango.test.ts"]);
+    expect(byName["infra-scripts"]!.targets).toEqual(["scripts/sample-tool.ts"]);
+    // a file no named shard holds (a root file, a unit test starting with a digit) goes to the catch-all, as in a whole run
+    expect(byName[REST]!.targets).toEqual(["sample-root-file.ts", "tests/unit/9digit.test.ts"]);
+    expect(byName[REST]!.ignore.length).toBeGreaterThan(0);
+  });
+
+  it("leaves out the shards no changed file is in, and does nothing for no file", () => {
+    expect(shardsForFiles([])).toEqual([]);
+    expect(shardsForFiles(["packages/worker/src/sample.ts"]).map((shard) => shard.name)).toEqual(["worker"]);
+  });
+
+  it("takes every file of the whole run's shards exactly once, whatever the file", () => {
+    const files = ["packages/cli/src/a.ts", "packages/gateway/src/b.ts", "tests/unit/context-sources/c.test.ts", "tests/integration/d.test.ts", "tests/support/e.ts", "infra/f.ts", "tests/unit/eslint-ish.test.ts"];
+    const selected = shardsForFiles(files);
+    expect(selected.flatMap((shard) => shard.targets).sort()).toEqual([...files].sort());
+  });
+
+  it("reads its option", () => {
+    expect(parseOptions(["--files", "changed.txt"])).toMatchObject({ filesList: "changed.txt" });
+    expect(parseOptions(["--files"])).toMatch(/--files needs/);
   });
 });

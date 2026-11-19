@@ -122,7 +122,7 @@ function answersJson(overrides: Record<string, unknown> = {}): Record<string, un
     // Testing-only override (parameters.ts): lets stackParameters resolve runtime/slack's image
     // parameters without needing a real release image digest, since `emptyReleaseDir` has none.
     images: {
-      worker: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/agentx/worker@sha256:${"a".repeat(64)}`,
+      worker: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/agentx-staging/worker@sha256:${"a".repeat(64)}`,
       slack: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/agentx/slack@sha256:${"b".repeat(64)}`,
     },
     ...overrides,
@@ -570,6 +570,26 @@ describe("agentx deploy", () => {
 
     expect(code).toBe(2);
     expect(io.err.join("")).toBe(`AgentX error [CONFIG_INVALID]: answers file ${answersPath} is invalid: region Invalid input: expected string, received undefined\n`);
+  });
+
+  it("install answers must name the GitHub App id; upgrade answers may leave it out, and neither accepts an empty one (switch-over gap 1)", async () => {
+    const github = (answersJson().github as Record<string, unknown>);
+    const withoutAppId = Object.fromEntries(Object.entries(github).filter(([key]) => key !== "appId"));
+    const missing = await writeAnswers({ github: withoutAppId });
+    const empty = await writeAnswers({ github: { ...github, appId: "" } });
+    const run = async (mode: string, path: string) => {
+      const io = capture();
+      const code = await executeCli(["deploy", "--mode", mode, "--release", "/nonexistent-release", "--answers", path, "--yes"], { ...io, deploy: safeDeployDeps() });
+      return { code, err: io.err.join("") };
+    };
+    expect(await run("install", missing)).toEqual({ code: 2, err: `AgentX error [CONFIG_INVALID]: answers file ${missing} is invalid: github.appId Invalid input: expected string, received undefined\n` });
+    expect((await run("install", empty)).err).toContain(`answers file ${empty} is invalid: github.appId`);
+    expect((await run("upgrade", empty)).err).toContain(`answers file ${empty} is invalid: github.appId`);
+    // Upgrade accepts the answers and goes on to the release (which does not exist here).
+    const upgrade = await run("upgrade", missing);
+    expect(upgrade.code).not.toBe(0);
+    expect(upgrade.err).not.toContain("is invalid");
+    expect(upgrade.err).toContain("/nonexistent-release");
   });
 
   it("--engine cdk requires --source", async () => {
@@ -1098,7 +1118,7 @@ describe("agentx deploy --mode upgrade keeps the deployed budget", () => {
     await writeFile(answersFile, JSON.stringify({
       env: ENV, region: REGION, account: ACCOUNT, models: { orchestrator: "o", classifier: "c", worker: "w" }, identity: { mode: "cognito" },
       github: { appId: "123", privateKeySecretArn: `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:agentx/staging/github-app-AbCdEf` },
-      images: { worker: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/w@sha256:${"b".repeat(64)}`, slack: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/s@sha256:${"c".repeat(64)}` },
+      images: { worker: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/agentx-staging/w@sha256:${"b".repeat(64)}`, slack: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/s@sha256:${"c".repeat(64)}` },
     }));
     const reads: string[] = [];
     const signingKey = "k".repeat(43);

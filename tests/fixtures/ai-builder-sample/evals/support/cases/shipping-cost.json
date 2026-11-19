@@ -1,0 +1,9 @@
+{
+  "id": "shipping-cost",
+  "category": "ordinary",
+  "question": "Is there free shipping?",
+  "must_contain": [
+    "over $50"
+  ],
+  "must_not_contain": []
+}

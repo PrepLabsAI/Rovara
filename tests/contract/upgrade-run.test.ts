@@ -101,6 +101,26 @@ async function harness(overrides: Partial<UpgradeDependencies> & { caller?: stri
 const options = { env: "staging", yes: true, allowReplace: [] as string[] };
 
 describe("agentx upgrade (FR-042 to FR-044)", () => {
+  it("keeps every core setting across an upgrade", async () => {
+    const coreSettings = {
+      CoreEngine: "on:org_aaaaaaaaaaaaaaaaaaaa",
+      CoreAllowedCompanies: "org_aaaaaaaaaaaaaaaaaaaa",
+      CoreTaskCapUsd: "500",
+      CoreCompanyDayCapUsd: "800",
+      CorePolicyHook: `{"address":"https://hook.example/answer","jwks":"https://hook.example/jwks.json","thumbprints":["${"a".repeat(43)}"]}`,
+      CoreLessons: "on:org_aaaaaaaaaaaaaaaaaaaa",
+      // Core switch-on blocker (2026-11-17): the model gateway settings an overlay used to carry, now kept like the rest.
+      CoreModelGatewayHost: "gateway.staging.example.dev",
+      CoreAgentModel: "claude-sonnet-4-6",
+      // L4-AM (DEC 254zzn(2)): the hosted answers model is kept across an upgrade too.
+      CoreAnswersModel: "claude-haiku-5-5",
+    };
+    const h = await harness({ controlPlane: { GitHubAppId: "123", GitHubAppPrivateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", BudgetMonthlyUsd: "250", CallbackSigningKey: "****", ...coreSettings }, loadRelease: async () => release("1.3.0", ["BudgetMonthlyUsd", ...Object.keys(coreSettings)]) });
+    await runUpgrade(options, h.deps);
+    const deployed = h.deployer.requests.find((request) => request.stackName === "agentx-staging-control-plane")?.parameters;
+    for (const [name, value] of Object.entries(coreSettings)) expect(deployed?.[name], name).toBe(value);
+  });
+
   it("shows the notes, deploys in upgrade order, records the new version, keeps the budget and runs doctor", async () => {
     const h = await harness();
     const result = await runUpgrade(options, h.deps);
@@ -499,7 +519,7 @@ describe("agentx upgrade with the cdk engine", () => {
       loadRelease: async () => { throw new Error("test setup: no release directory or download expected"); },
       sourceRelease: async (input) => { built.push(input); return release("1.3.0"); },
     });
-    const images = { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/w@sha256:${"d".repeat(64)}` };
+    const images = { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/w@sha256:${"d".repeat(64)}` };
     const result = await runUpgrade({ ...options, source: "/src", images }, h.deps);
     expect(built).toEqual([{ source: "/src", images }]);
     expect(result).toMatchObject({ from: "1.2.3", to: "1.3.0" });

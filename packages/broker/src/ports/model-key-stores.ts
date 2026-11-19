@@ -3,6 +3,7 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { SecretValue, type ModelKeyStore } from "@agentx/contracts";
+import { LocalSecretError } from "./secret-error.js";
 
 const PROVIDER = /^[a-z][a-z0-9-]{0,63}$/;
 
@@ -11,16 +12,27 @@ export function environmentVariableFor(provider: string): string {
   return `${provider.toUpperCase().replaceAll("-", "_")}_API_KEY`;
 }
 
-export function createEnvironmentModelKeyStore(environment: Readonly<Record<string, string | undefined>>, knownProviders: readonly string[]): ModelKeyStore {
+/** The providers whose environment variable keeps its long-standing name. */
+export const BUILTIN_KEY_PROVIDERS: readonly string[] = ["anthropic", "openai", "openrouter"];
+
+/**
+ * The environment variable a model provider's key is read from: the long-standing `<PROVIDER>_API_KEY` for the three built-ins, and `ROVARA_MODEL_<ID>_API_KEY` for any other provider id, so a
+ * provider a plug-in brings (say one called `linear`) can never read another component's variable (`LINEAR_API_KEY`).
+ */
+export function modelKeyVariable(provider: string): string {
+  return BUILTIN_KEY_PROVIDERS.includes(provider) ? environmentVariableFor(provider) : `ROVARA_MODEL_${provider.toUpperCase().replaceAll("-", "_")}_API_KEY`;
+}
+
+export function createEnvironmentModelKeyStore(environment: Readonly<Record<string, string | undefined>>, knownProviders: readonly string[], variableFor: (provider: string) => string = environmentVariableFor): ModelKeyStore {
   return {
     async get(_companyId, provider) {
       if (!PROVIDER.test(provider)) return undefined;
-      const value = environment[environmentVariableFor(provider)];
+      const value = environment[variableFor(provider)];
       return value === undefined || value.trim() === "" ? undefined : new SecretValue(value.trim());
     },
     async providers() {
       return knownProviders.filter((provider) => {
-        const value = environment[environmentVariableFor(provider)];
+        const value = environment[variableFor(provider)];
         return value !== undefined && value.trim() !== "";
       });
     },
@@ -37,22 +49,22 @@ export function createFileModelKeyStore(path: string): ModelKeyStore {
   async function read(): Promise<Record<string, string>> {
     let handle;
     try {
-      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-      throw new Error("the model key file could not be opened (it must be a plain file, not a link)", { cause: error });
+      throw new LocalSecretError("the model key file could not be opened (it must be a plain file, not a link)", (error as NodeJS.ErrnoException).code);
     }
     try {
       const details = await handle.stat();
-      if (!details.isFile()) throw new Error("the model key file must be a plain file");
-      if (process.platform !== "win32" && (details.mode & 0o077) !== 0) throw new Error("the model key file must not be readable by other users (chmod 600)");
+      if (!details.isFile()) throw new LocalSecretError("the model key file must be a plain file");
+      if (process.platform !== "win32" && (details.mode & 0o077) !== 0) throw new LocalSecretError("the model key file must not be readable by other users (chmod 600)");
       let parsed: unknown;
       try {
         parsed = JSON.parse(await handle.readFile("utf8"));
       } catch {
-        throw new Error("the model key file is not valid JSON");
+        throw new LocalSecretError("the model key file is not valid JSON");
       }
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("the model key file must hold a JSON object");
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new LocalSecretError("the model key file must hold a JSON object");
       return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim() !== "" && PROVIDER.test(entry[0])).map(([provider, key]) => [provider, key.trim()]));
     } finally {
       await handle.close();

@@ -143,7 +143,8 @@ describe("AWS CDK source", () => {
     ].join("\n");
     const detection = await detect({ "lib/stack.ts": ts });
     expect(family(detection, "aws:dynamodb")!.hints.resources).toEqual([{ kind: "table", name: "orders", keySchema: { partitionKey: { name: "pk", type: "S" }, sortKey: { name: "ts", type: "N" } } }]);
-    expect(family(detection, "aws:dynamodb")!.evidence).toEqual([{ path: "lib/stack.ts", line: 5 }]);
+    // The import of the CDK module is a sighting too (line 1), then the construct (line 5).
+    expect(family(detection, "aws:dynamodb")!.evidence).toEqual([{ path: "lib/stack.ts", line: 1 }, { path: "lib/stack.ts", line: 5 }]);
     expect(family(detection, "aws:s3")!.hints.resources).toEqual([{ kind: "bucket", name: "Files" }]);
     expect(family(detection, "aws:sqs")!.hints.resources).toEqual([{ kind: "queue", name: "Jobs" }]);
     expect(family(detection, "aws:sns")!.hints.resources).toEqual([{ kind: "topic", name: "alerts" }]);

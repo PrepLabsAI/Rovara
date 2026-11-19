@@ -3,8 +3,10 @@
 // sealed round, which has its own emulator), this module turns them into the emulator's seed document and sends it to `POST /_rovara/seed` with the run's control token (emulator-control.ts). The project's own seed commands
 // run afterwards, as they do for Postgres.
 //
-// The seed document is the fork's (`SeedService`): `{ region, s3: { buckets: [{ name }] }, dynamodb: { tables: [{ request: <CreateTable> }] }, sqs: { queues: [{ name, attributes }] } }`. Every request is built here from fixed
-// words and from names that passed the contract's strict forms again; nothing else of the repository is sent.
+// The seed document is the front's (the fork's `SeedService`): `{ region, s3: { buckets: [{ name }] }, dynamodb: { tables: [{ request: <CreateTable> }] }, sqs: { queues: [{ name, attributes }] },
+// sns: { topics: [{ name, subscriptions: [{ protocol, endpoint }] }] }, secretsmanager: { secrets: [{ name, value }] }, ssm: { parameters: [{ name, value, type }] }, kms: { keys: [{ alias, description }] },
+// events: { buses: [name], rules: [{ name, bus, pattern | schedule }] } }` (its sections keep the fork's service names, not the table's keys). Every request is built here from fixed words and from names that passed the
+// contract's strict forms again; nothing else of the repository is sent. A secret's value is NEVER read from the repository: the value is a placeholder made here for each seed (as is a String parameter's when the template builds it).
 //
 // Rules this module keeps, each with a test (tests/unit/worker-service-seed-aws.test.ts):
 //   - FAIL CLOSED. A resource that does not have its strict form, a duplicate, a region that is not one, a table without its key, an emulator that answers anything but a complete success: the seed fails with ONE fixed sentence
@@ -14,11 +16,13 @@
 import { constants as fsConstants } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
-import { TaskAwsResourcesSchema, type TaskAwsResource } from "@agentx/contracts";
+import { randomBytes } from "node:crypto";
+import { TaskAwsResourcesSchema, awsSeededKinds, type TaskAwsResource } from "@agentx/contracts";
 import { EmulatorControlError, emulatorControlCall, type EmulatorControlTarget } from "./emulator-control.js";
 import { boundedReader, ENV_DETECT_MAX_FILE_BYTES } from "./env-detect/index.js";
 import { runDetectorsGuarded, type GuardOptions } from "./env-detect/guarded.js";
 import { iacFileIsRead } from "./env-detect/iac-resources.js";
+import type { DependencyResource } from "./env-detect/types.js";
 import { hiddenWorkspaceDirectories } from "./workspace-state.js";
 
 export type EmulatorSeedFailure = "refused" | "failed" | "stopped";
@@ -61,13 +65,27 @@ export interface AwsSeedDocument {
   s3?: { buckets: Array<{ name: string }> };
   dynamodb?: { tables: Array<{ request: { TableName: string; KeySchema: DynamoKey[]; AttributeDefinitions: DynamoAttribute[]; BillingMode: "PAY_PER_REQUEST" } }> };
   sqs?: { queues: Array<{ name: string; attributes?: { FifoQueue: "true" } }> };
+  sns?: { topics: Array<{ name: string; subscriptions?: Array<{ protocol: "sqs"; endpoint: string }> }> };
+  secretsmanager?: { secrets: Array<{ name: string; value: string }> };
+  ssm?: { parameters: Array<{ name: string; value: string; type: "String" }> };
+  kms?: { keys: Array<{ alias?: string; description?: string }> };
+  events?: { buses?: string[]; rules?: Array<{ name: string; bus?: string; pattern?: string; schedule?: string }> };
+}
+
+/** The account the emulator names in the ARNs it makes (a queue's URL is `.../000000000000/<name>`), which a subscription's endpoint must use. */
+const EMULATOR_ACCOUNT_ID = "000000000000";
+
+/** A made-up value for a secret or a parameter whose value the template does not write: plain letters and digits, fresh for each seed, and nothing the repository wrote. */
+export function placeholderSecretValue(): string {
+  return `rovara-placeholder-${randomBytes(9).toString("base64url").replace(/[^A-Za-z0-9]/gu, "a")}`;
 }
 
 /**
- * The seed document for the resources. Pure. Refuses (`EmulatorSeedError("refused")`) a resource list the contract does not accept, and a region that is not one. A table is on-demand (no capacity to guess), its key schema is
- * the declared one and its attribute definitions are exactly its key attributes; a queue named `*.fifo` is a FIFO queue; a bucket is just created in the region.
+ * The seed document for the resources. Pure apart from the placeholder values (`placeholder`, a fresh one by default). Refuses (`EmulatorSeedError("refused")`) a resource list the contract does not accept, and a region that
+ * is not one. A table is on-demand (no capacity to guess), its key schema is the declared one and its attribute definitions are exactly its key attributes; a queue named `*.fifo` is a FIFO queue; a bucket is just created
+ * in the region; a topic is subscribed to the declared queues by ARN (a queue the document does not create is refused); a parameter keeps the literal default the template wrote, or gets a placeholder.
  */
-export function buildAwsSeedDocument(region: string, resources: readonly TaskAwsResource[]): AwsSeedDocument {
+export function buildAwsSeedDocument(region: string, resources: readonly TaskAwsResource[], placeholder: () => string = placeholderSecretValue): AwsSeedDocument {
   const parsed = TaskAwsResourcesSchema.safeParse(resources);
   if (!REGION.test(region) || !parsed.success) throw new EmulatorSeedError("refused");
   const document: AwsSeedDocument = { region };
@@ -80,13 +98,45 @@ export function buildAwsSeedDocument(region: string, resources: readonly TaskAws
     return [{ request: { TableName: resource.name, KeySchema: keys, AttributeDefinitions: definitions, BillingMode: "PAY_PER_REQUEST" as const } }];
   });
   const queues = parsed.data.flatMap((resource) => (resource.kind === "queue" ? [resource.name.endsWith(".fifo") ? { name: resource.name, attributes: { FifoQueue: "true" as const } } : { name: resource.name }] : []));
+  const queueNames = new Set(queues.map((queue) => queue.name));
+  const topics = parsed.data.flatMap((resource) => {
+    if (resource.kind !== "topic") return [];
+    const subscriptions = (resource.queues ?? []).map((name) => {
+      if (!queueNames.has(name)) throw new EmulatorSeedError("refused");
+      return { protocol: "sqs" as const, endpoint: `arn:aws:sqs:${region}:${EMULATOR_ACCOUNT_ID}:${name}` };
+    });
+    return [{ name: resource.name, ...(subscriptions.length === 0 ? {} : { subscriptions }) }];
+  });
+  const secrets = parsed.data.flatMap((resource) => (resource.kind === "secret" ? [{ name: resource.name, value: placeholder() }] : []));
+  const parameters = parsed.data.flatMap((resource) => (resource.kind === "parameter" ? [{ name: resource.name, value: resource.value ?? placeholder(), type: "String" as const }] : []));
+  const keys = parsed.data.flatMap((resource) => (resource.kind === "key" ? [resource.alias === undefined ? { description: resource.name } : { alias: resource.alias, description: resource.name }] : []));
+  const buses = parsed.data.flatMap((resource) => (resource.kind === "bus" ? [resource.name] : []));
+  const rules = parsed.data.flatMap((resource) => (resource.kind === "rule" ? [{ name: resource.name, ...(resource.bus === undefined ? {} : { bus: resource.bus }), ...(resource.pattern === undefined ? {} : { pattern: resource.pattern }), ...(resource.schedule === undefined ? {} : { schedule: resource.schedule }) }] : []));
   if (buckets.length > 0) document.s3 = { buckets };
   if (tables.length > 0) document.dynamodb = { tables };
   if (queues.length > 0) document.sqs = { queues };
+  if (topics.length > 0) document.sns = { topics };
+  if (secrets.length > 0) document.secretsmanager = { secrets };
+  if (parameters.length > 0) document.ssm = { parameters };
+  if (keys.length > 0) document.kms = { keys };
+  if (buses.length > 0 || rules.length > 0) document.events = { ...(buses.length > 0 ? { buses } : {}), ...(rules.length > 0 ? { rules } : {}) };
   return document;
 }
 
-const STEP_OF_KIND = { bucket: ["s3", "CreateBucket"], table: ["dynamodb", "CreateTable"], queue: ["sqs", "CreateQueue"] } as const;
+/** The step the front reports for each kind of resource (`service`, `action`), and the name it reports it under: a key is named by its alias, or by its description (the label) when it has none. */
+function stepOf(resource: TaskAwsResource): readonly [string, string, string] {
+  switch (resource.kind) {
+    case "bucket": return ["s3", "CreateBucket", resource.name];
+    case "table": return ["dynamodb", "CreateTable", resource.name];
+    case "queue": return ["sqs", "CreateQueue", resource.name];
+    case "topic": return ["sns", "CreateTopic", resource.name];
+    case "secret": return ["secretsmanager", "CreateSecret", resource.name];
+    case "parameter": return ["ssm", "PutParameter", resource.name];
+    case "key": return ["kms", "CreateKey", resource.alias ?? resource.name];
+    case "bus": return ["events", "CreateEventBus", resource.name];
+    case "rule": return ["events", "PutRule", resource.name];
+  }
+}
 
 /**
  * Checks the emulator's report of the document (`{ ok, failed, steps: [{ service, action, name, ok }] }`) against the resources sent: it must say `ok` with no failure, every step must be `ok`, and each resource must have
@@ -103,7 +153,7 @@ export function seedReportCovers(report: unknown, resources: readonly TaskAwsRes
     if (stepOk !== true || typeof service !== "string" || typeof action !== "string" || typeof name !== "string") return false;
     reported.add(`${service}\0${action}\0${name}`);
   }
-  return resources.every((resource) => reported.has(`${STEP_OF_KIND[resource.kind][0]}\0${STEP_OF_KIND[resource.kind][1]}\0${resource.name}`));
+  return resources.every((resource) => reported.has(stepOf(resource).join("\0")));
 }
 
 export interface SeedEmulatorInput {
@@ -134,19 +184,30 @@ export async function seedEmulator(input: SeedEmulatorInput): Promise<void> {
 
 // ---- the project's declared resources, read from its infrastructure code (D7)
 
-/** The AWS services Rovara local AWS serves in this slice, and the kind of resource each one is seeded with. */
-export const SEEDED_AWS_SERVICES: Readonly<Record<string, TaskAwsResource["kind"]>> = { s3: "bucket", sqs: "queue", dynamodb: "table" };
 const IAC_FILE = /\.(?:tf|ya?ml|json|ts|js|py)$/u;
 /** The detector reads no file past this (its own per-file cap); a larger pointer is refused rather than half read. */
 export const IAC_FILE_MAX_BYTES = ENV_DETECT_MAX_FILE_BYTES;
 /** The longest the detector may run over the one file (it runs in a thread that is ended at the limit). */
 export const IAC_DETECT_LIMIT_MS = 10_000;
 
+/** A detected resource in the form the contract accepts: the kind's own fields only (a parameter is always a `String`). */
+function seedResourceOf(resource: DependencyResource): Record<string, unknown> {
+  const { kind, name } = resource;
+  switch (kind) {
+    case "table": return { kind, name, keySchema: resource.keySchema };
+    case "topic": return { kind, name, ...(resource.queues === undefined ? {} : { queues: resource.queues }) };
+    case "parameter": return { kind, name, ...(resource.value === undefined ? {} : { value: resource.value }) };
+    case "key": return { kind, name, ...(resource.alias === undefined ? {} : { alias: resource.alias }) };
+    case "rule": return { kind, name, ...(resource.bus === undefined ? {} : { bus: resource.bus }), ...(resource.pattern === undefined ? {} : { pattern: resource.pattern }), ...(resource.schedule === undefined ? {} : { schedule: resource.schedule }) };
+    default: return { kind, name };
+  }
+}
+
 /**
- * The tables, buckets and queues the plan's infrastructure pointer declares, for the services the run serves. `ref.path` is the plan's pointer (the broker never read it): it must resolve, through every link, to a
+ * The resources the plan's infrastructure pointer declares, for the services the run serves. `ref.path` is the plan's pointer (the broker never read it): it must resolve, through every link, to a
  * regular file under one of the repositories' own folders, not under a hidden folder of the workspace, with a name the detector reads, small, opened without following a link and the very file that was resolved. It is read
- * as it is NOW (the candidate tree, not the base: the agent may have edited it). The D7 detector's reading is the one the setup used (names and key attributes only); a resource of a service the run does not serve (a topic,
- * a service not in `services`) is left out, a table the detector found no key for is a refusal (it cannot be created), and the result must pass the contract's strict forms. FAIL CLOSED: the pointer must be a path the
+ * as it is NOW (the candidate tree, not the base: the agent may have edited it). The D7 detector's reading is the one the setup used (names and key attributes only); a resource of a service the run does not serve (a service not in `services`, or one that
+ * starts empty) is left out, a table the detector found no key for is a refusal (it cannot be created), and the result must pass the contract's strict forms. FAIL CLOSED: the pointer must be a path the
  * detector reads, the file at most 256 KiB, the detector runs in a time-limited thread, ANY note it makes (a template the parser refused, a cut at its resource limit, a stop) refuses, and a file that gives no resource
  * for the plan's services refuses too. Every refusal is `EmulatorSeedError("refused")` with a fixed note (`IAC_REFUSAL_NOTES`).
  */
@@ -182,13 +243,22 @@ export async function readAwsResourcesFromIac(input: { ref: { path: string }; se
   const detection = await runDetectorsGuarded(reader, ".", { timeoutMs: IAC_DETECT_LIMIT_MS, ...input.guard, only: ["iac-resources"] }).catch(() => undefined);
   if (detection === undefined) return fail("stopped");
   if (detection.notes.length > 0) return fail(detection.notes.some((note) => /took too long/u.test(note)) ? "stopped" : "noted");
-  const kinds = new Set(input.services.flatMap((service) => (Object.hasOwn(SEEDED_AWS_SERVICES, service) ? [SEEDED_AWS_SERVICES[service]!] : [])));
+  // The kinds the plan's services have a seed handler for (`AWS_SEEDED_KINDS`); a resource of a service the plan does not name is left out, and so is one of a service that starts empty.
+  const kinds = new Set<string>(input.services.flatMap((service) => awsSeededKinds(service)));
   const found: unknown[] = [];
   for (const candidate of detection.dependencies ?? []) {
     for (const resource of candidate.hints.resources ?? []) {
-      if (resource.kind === "topic" || !kinds.has(resource.kind)) continue;
-      found.push(resource.kind === "table" ? { kind: "table", name: resource.name, keySchema: resource.keySchema } : { kind: resource.kind, name: resource.name });
+      if (!kinds.has(resource.kind)) continue;
+      found.push(seedResourceOf(resource));
     }
+  }
+  // A topic delivers only to queues this seed creates: a queue of a service the plan does not name is not there to subscribe.
+  const queueNames = new Set(found.flatMap((item) => ((item as { kind?: unknown }).kind === "queue" ? [(item as { name: string }).name] : [])));
+  for (const item of found as Array<{ kind?: unknown; queues?: string[] }>) {
+    if (item.kind !== "topic" || item.queues === undefined) continue;
+    const kept = item.queues.filter((name) => queueNames.has(name));
+    if (kept.length === 0) delete item.queues;
+    else item.queues = kept;
   }
   // Nothing found is a refusal too: the plan pointed at this file because setup saw resources in it, so an empty answer means the file moved on or the pointer is wrong, and a run with no resources would only fail later and less clearly.
   if (found.length === 0) return fail("none");

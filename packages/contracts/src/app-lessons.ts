@@ -22,7 +22,7 @@ export const LESSON_TIER_REASONS = [
  * Why learning cannot run for a project or its company right now (lessons in production, "never silent"). A fixed code and a time, nothing else: no model name, no amount, no provider text.
  * One current reason at most per project and per company; it is cleared when a learning call succeeds.
  */
-export const LESSONS_PAUSE_CODES = ["no_provider", "all_models_forbidden", "no_suitable_model", "monthly_limit", "no_budget", "cost_too_high", "model_failed"] as const;
+export const LESSONS_PAUSE_CODES = ["no_provider", "all_models_forbidden", "no_suitable_model", "monthly_limit", "no_budget", "cost_too_high", "model_failed", "lessons_off"] as const;
 export const LessonsPauseCodeSchema = z.enum(LESSONS_PAUSE_CODES);
 export type LessonsPauseCode = z.infer<typeof LessonsPauseCodeSchema>;
 /** The one line that says it, on the Lessons tab and on Home. */
@@ -34,6 +34,8 @@ export const LESSONS_PAUSE_TEXT: Record<LessonsPauseCode, string> = {
   no_budget: "Lessons paused: the AI budget has run out",
   cost_too_high: "Lessons paused: even the cheapest available model costs too much for one lesson",
   model_failed: "Lessons paused: the AI provider is not answering",
+  // The model gateway's learning route said lessons are off for this company (its `lessons_paused` refusal with this code).
+  lessons_off: "Lessons paused: lessons are turned off for this company",
 };
 export const lessonsPauseText = (code: string): string => (LESSONS_PAUSE_TEXT as Record<string, string | undefined>)[code] ?? "Lessons paused";
 /** The one line for a reason, with who it applies to: a company-wide reason (the monthly learning limit) says it is for every project of the company. */
@@ -66,7 +68,7 @@ export const LessonNeedsSchema = z.object({
   have: z.number().int().min(0).max(5),
   /** Who approved first, and when. */
   first: LessonPersonSchema.optional(), firstAt: z.number().optional(),
-  /** Named groups that must still be among the approvers (Enterprise). */
+  /** Named groups that must still be among the approvers (where the install has groups). */
   groups: z.array(z.string().min(1).max(100)).max(10),
 }).strict();
 
@@ -93,8 +95,14 @@ export const LessonViewSchema = z.object({
   /** The lesson this one may duplicate (kept apart from it, never merged): a person decides to merge, keep both or reject. */
   possibleDuplicate: z.string().max(64).optional(),
   rejectedReason: z.string().max(200).optional(),
+  /** Phase 4: a lesson a person made permanent is retired and says what it became: a team rule, a draft check task (`ref` is the draft's id) or a skill (`ref` is its name). */
+  became: z.object({ kind: z.enum(["rule", "check", "skill"]), ref: z.string().min(1).max(100), at: z.number() }).strict().optional(),
+  /** Set when the lesson began as a team SUGGESTION (L4-AK3) from an AI tool outside Rovara (`tool`) or one of Rovara's own agents (`agent`): the card says "proposed by an AI tool / a Rovara agent" and shows its text as untrusted. Absent: it did not. */
+  proposedBy: z.enum(["tool", "agent"]).optional(),
   /** What this viewer may do with it, worked out by the server (the routes check again when asked). */
   canApprove: z.boolean(), canReject: z.boolean(), canRetire: z.boolean(),
+  /** "Used in N tasks": the distinct tasks the lesson was given to in the last 180 days, at most 500 (`usedInTasksMore`: there were more). Absent: not counted (the Lessons tab, the proposed list), or it could not be counted. */
+  usedInTasks: z.number().int().min(0).max(500).optional(), usedInTasksMore: z.literal(true).optional(),
 }).strict();
 export type LessonView = z.infer<typeof LessonViewSchema>;
 
@@ -124,6 +132,8 @@ export const LessonsViewSchema = z.object({
   /** Whether this viewer may approve, reject, retire and roll back. A viewer who may not still reads the active lessons. */
   canDecide: z.boolean(),
   waiting: z.array(LessonViewSchema).max(100), active: z.array(LessonViewSchema).max(200), removed: z.array(LessonViewSchema).max(50),
+  /** For people who decide (L4-AK3): proven procedure lessons that could become a skill ("Make this a skill?"). Absent: none, or not looked for here. */
+  skillOffers: z.array(z.object({ lessonId: z.string().min(1).max(64), title: z.string().max(80), tasks: z.number().int().min(0).max(500), days: z.number().int().min(0) }).strict()).max(20).optional(),
   /** Candidates collected and not yet in front of people. Nothing is dropped. */
   queued: z.number().int().min(0),
   /** Lessons left out because this viewer cannot see their source (a count, never a name). */
@@ -151,6 +161,15 @@ const DigestItemSchema = z.object({
   /** Pull request links the lesson came from (https only). */
   links: z.array(z.string().url().max(300)).max(10),
 }).strict();
+/** One row of the weekly list (lessons phase 1): why it is there in plain words, never a score; a suggestion carries its band, a need-a-look card its cause. */
+const WeeklyRowSchema = z.object({
+  id: z.string().min(1).max(64), title: z.string().max(80), type: LessonTypeSchema,
+  band: z.enum(["direct_correction", "measured", "weak_twice"]).optional(),
+  cause: z.enum(["conflict", "retire_proposed", "revert_overlap", "area_gone", "area_rewritten", "asked_to_keep", "sent_back"]).optional(),
+  area: z.string().max(200), reason: z.string().max(500),
+  /** "Since this lesson: the correction came back `back` times in `matched` matching tasks." */
+  repeat: z.object({ matched: z.number().int().min(0), back: z.number().int().min(0) }).strict().optional(),
+}).strict();
 export const LessonsDigestSchema = z.object({
   since: z.number(),
   /** The most important lessons first: measured outcomes, then recurrence, then severity. */
@@ -159,6 +178,8 @@ export const LessonsDigestSchema = z.object({
   queued: z.number().int().min(0),
   /** Sources paused because they spiked, named only where the viewer can see every lesson that mentions them. */
   pausedSources: z.array(z.string().max(120)).max(50), pausedSourcesHidden: z.number().int().min(0), hidden: z.number().int().min(0),
+  /** The weekly list in bands with a reason per row: need-a-look cards first (not counted), then at most 5 suggestions. Absent from an older broker. */
+  weekly: z.object({ needLook: z.array(WeeklyRowSchema).max(3), picks: z.array(WeeklyRowSchema).max(5) }).strict().optional(),
 }).strict();
 export const LessonsDigestReaderSchema = forwardReader(LessonsDigestSchema);
 
@@ -197,7 +218,8 @@ export const LoadedLessonRowSchema = z.object({
   trial: z.enum(["trial", "stable"]).optional(),
 }).strict();
 /** `canThumbsDown`: the caller has a role in the project and may write, so the task page offers the one-tap thumbs-down only to someone it will work for. Absent (an older broker): offered, and the broker decides. */
-export const LoadedLessonsSchema = z.object({ lessons: z.array(LoadedLessonRowSchema).max(500), canThumbsDown: z.boolean().optional() }).strict();
+export const LoadedWikiUseSchema = z.object({ given: z.array(z.string().min(1).max(120)).max(80), read: z.array(z.string().min(1).max(120)).max(80) }).strict();
+export const LoadedLessonsSchema = z.object({ lessons: z.array(LoadedLessonRowSchema).max(500), canThumbsDown: z.boolean().optional(), wikiUse: LoadedWikiUseSchema.optional() }).strict();
 export const LoadedLessonsReaderSchema = forwardReader(LoadedLessonsSchema);
 
 // ---- request bodies

@@ -1,13 +1,18 @@
 // packages/broker/src/aws/admin-actions.ts
 // Spec 025 E8, E9, E19: the admin actions 25e's change tools apply that no admin command had. Each
 // is called only by a confirmed change (Task 7) or by the CLI's own change path (Tasks 14, 15).
-import type { SignInClientRegistry } from "./developer-routes.js";
+import type { CompanyInviteRegistry, SignInClientRegistry } from "./developer-routes.js";
+import type { CompanyImportRegistry } from "./company-import-forwarding.js";
 import { randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { z } from "zod";
 import { type DeveloperSignInMethod, SLACK_OIDC_ISSUER, SlackUserIdSchema, agentXError, type EndDeveloperSessionsRequest, type EndDeveloperSessionsResponse } from "@agentx/contracts";
 import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, WORKSPACE_LIMITS_KEY, isWholeLimit } from "../developer/limits.js";
 import { emailIndexKey } from "../developer/store.js";
+import { profileAvatarUrl, profileDisplayName } from "../developer/github-profile.js";
 import { ownerKeyForSubject } from "./lambda.js";
+import { recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
+import { OrgIdSchema } from "@agentx/contracts";
 
 export interface AdminActionDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -19,13 +24,19 @@ export interface AdminActionDependencies {
   endDeveloperSessions?: (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse>;
   /** Spec 063: the sign-in clients' registry; absent where developer sign-in is not set up. */
   signInClients?: SignInClientRegistry;
+  companies?: CompanyMembershipReader;
+  /** DEC 254a: the install's invite codes and self-serve switch, through the sign-in Lambda; absent without the company layer. */
+  companyInvites?: CompanyInviteRegistry;
+  /** DEC 254b (b): the operator's company import from the install's old layout, through the sign-in Lambda; with the company layer on or off. */
+  companyImport?: CompanyImportRegistry;
   now(): number;
 }
 export interface ResolvedDeveloper {
   developerId: string;
   via: "id" | "slack" | "email";
   slackUserId?: string;
-  profile?: { displayName: string; provider: DeveloperSignInMethod; slackUserId?: string; sessionsEndedAt?: string };
+  /** `avatarUrl`: a GitHub person's picture (DEC 254p (a)); built from their id, never taken from a stored or provided address. */
+  profile?: { displayName: string; provider: DeveloperSignInMethod; slackUserId?: string; sessionsEndedAt?: string; avatarUrl?: string };
 }
 
 const HEX64 = /^[a-f0-9]{64}$/;
@@ -47,17 +58,21 @@ async function signInItem(deps: AdminActionDependencies, key: { pk: string; sk: 
 }
 
 function profileFrom(item: Record<string, unknown> | undefined): ResolvedDeveloper["profile"] {
-  if (item === undefined || typeof item.displayName !== "string" || (item.provider !== "slack" && item.provider !== "oidc")) return undefined;
+  if (item === undefined || typeof item.displayName !== "string" || (item.provider !== "slack" && item.provider !== "oidc" && item.provider !== "github")) return undefined;
+  // DEC 254p (a): a GitHub person is named and pictured like a Slack person; the name is untrusted text (github-profile.ts), a Slack or company sign-in name is as stored.
+  const avatarUrl = profileAvatarUrl(item);
   return {
-    displayName: item.displayName, provider: item.provider,
+    displayName: profileDisplayName(item) ?? item.displayName, provider: item.provider,
     ...(typeof item.slackUserId === "string" ? { slackUserId: item.slackUserId } : {}),
     ...(typeof item.sessionsEndedAt === "string" ? { sessionsEndedAt: item.sessionsEndedAt } : {}),
+    ...(avatarUrl === undefined ? {} : { avatarUrl }),
   };
 }
 
 const developerItem = (deps: AdminActionDependencies, developerId: string) => signInItem(deps, { pk: `DEVELOPER#${developerId}`, sk: "META" });
 
-export async function resolveDeveloper(deps: AdminActionDependencies, reference: string): Promise<ResolvedDeveloper> {
+export async function resolveDeveloper(deps: AdminActionDependencies, reference: string, companyId?: string): Promise<ResolvedDeveloper> {
+  const read = async (): Promise<ResolvedDeveloper> => {
   const value = reference.trim();
   if (HEX64.test(value)) {
     const profile = profileFrom(await developerItem(deps, value));
@@ -69,7 +84,8 @@ export async function resolveDeveloper(deps: AdminActionDependencies, reference:
     return { developerId, via: "slack", slackUserId: value, ...(profile === undefined ? {} : { profile }) };
   }
   if (EMAIL.test(value)) {
-    const indexed = await signInItem(deps, emailIndexKey(value));
+    const indexed = await signInItem(deps, emailIndexKey(value, companyId));
+    if (companyId !== undefined && !z.object({ entityType: z.literal("DEVELOPER_EMAIL"), developerId: z.string().regex(HEX64), updatedAt: z.iso.datetime() }).safeParse(indexed).success) throw agentXError("NOT_FOUND", EMAIL_NOT_SIGNED_IN);
     // Q4: an email names only someone who signed in with it (from this release on).
     if (typeof indexed?.developerId !== "string" || !HEX64.test(indexed.developerId)) throw agentXError("NOT_FOUND", EMAIL_NOT_SIGNED_IN);
     const item = await developerItem(deps, indexed.developerId);
@@ -80,11 +96,20 @@ export async function resolveDeveloper(deps: AdminActionDependencies, reference:
     return { developerId: indexed.developerId, via: "email", ...(profile === undefined ? {} : { profile }) };
   }
   throw agentXError("CONFIG_INVALID", "developer must be a developer ID, an email or a Slack user ID such as U0123456789");
+  };
+  if (companyId === undefined) return read();
+  try {
+    if (!OrgIdSchema.safeParse(companyId).success) throw new Error("unreadable company");
+    const person = await read();
+    if (await resolveCompany(deps.companies, person.developerId) !== companyId) throw new Error("no such person");
+    return person;
+  } catch { throw agentXError("NOT_FOUND", EMAIL_NOT_SIGNED_IN); }
 }
 
 /** The membership row's role, and when it was granted (null for a row without that, such as an administrator's). */
-export async function projectGrant(deps: AdminActionDependencies, project: string, developerId: string): Promise<{ role: "developer" | "administrator"; grantedAt: string | null } | undefined> {
+export async function projectGrant(deps: Pick<AdminActionDependencies, "documentClient" | "tableName">, project: string, developerId: string, companyId?: string): Promise<{ role: "developer" | "administrator"; grantedAt: string | null } | undefined> {
   const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}` }, ConsistentRead: true })) as { Item?: { role?: unknown; grantedAt?: unknown } };
+  if (!recordInCompany(response.Item, companyId)) return undefined;
   const role = response.Item?.role;
   if (role !== "developer" && role !== "administrator") return undefined;
   return { role, grantedAt: typeof response.Item?.grantedAt === "string" ? response.Item.grantedAt : null };

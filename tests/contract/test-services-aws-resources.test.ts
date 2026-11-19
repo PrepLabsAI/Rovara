@@ -9,7 +9,7 @@ const table = { kind: "table", name: "orders", keySchema: { partitionKey: { name
 describe("TaskAwsResourcesSchema", () => {
   it("takes tables with their key schema, buckets and queues, and nothing else", () => {
     expect(TaskAwsResourcesSchema.safeParse([table, { kind: "bucket", name: "orders-archive" }, { kind: "queue", name: "events.fifo" }, { kind: "queue", name: "events" }]).success).toBe(true);
-    expect(TaskAwsResourceSchema.safeParse({ kind: "topic", name: "events" }).success).toBe(false);
+    expect(TaskAwsResourceSchema.safeParse({ kind: "stream", name: "events" }).success).toBe(false);
     expect(TaskAwsResourceSchema.safeParse({ kind: "bucket", name: "ok-bucket", region: "us-east-1" }).success).toBe(false);
   });
   it("is bounded, unique, and strict about each service's name rules", () => {

@@ -143,6 +143,8 @@ describe("endpoint addresses", () => {
     ["100.64.0.1", false], ["0.0.0.0", false], ["224.0.0.1", false], ["255.255.255.255", false],
     ["::1", false], ["::", false], ["fd00::1", false], ["fe80::1", false], ["ff02::1", false],
     ["::ffff:127.0.0.1", false], ["::ffff:169.254.169.254", false], ["64:ff9b::a9fe:a9fe", false], ["2002:a9fe:a9fe::1", false],
+    ["::10.0.0.1", false], ["::8.8.8.8", false], ["::a00:1", false], ["::ffff:8.8.8.8", true],
+    ["::ffff:0:7f00:1", false], ["::ffff:0:8.8.8.8", false], ["::ffff:0:a00:1", false],
     ["not-an-ip", false],
   ])("%s is public: %s", (address, expected) => {
     expect(isPublicAddress(address)).toBe(expected);

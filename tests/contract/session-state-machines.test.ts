@@ -15,6 +15,8 @@ const props = { stepsFunctionArn: "arn:aws:lambda:us-east-1:111122223333:functio
 const provisioner = provisionerDefinition(props) as unknown as Definition;
 const deleter = deleterDefinition(props) as unknown as Definition;
 
+const SIZED_LAUNCHES = ["RunInstanceSized", "RunInstancePinnedSized", "RunInstanceX86"];
+
 const targets = (state: State) => [state.Next, state.Default, ...(state.Choices ?? []).map((c) => c.Next), ...(state.Catch ?? []).map((c) => c.Next)].filter((t): t is string => t !== undefined);
 
 describe.each([["provisioner", provisioner], ["deleter", deleter]] as const)("%s state machine", (_name, definition) => {
@@ -89,7 +91,9 @@ describe("provisioner", () => {
     for (const [name, state] of Object.entries(states)) {
       if (state.Type !== "Task" || name === "MarkFailed" || name === "TerminateInstance") continue;
       // The AMI pin is optional: any fault in reading it launches from today's AMI (its own Catch is tested below).
-      if (name === "ReadQualifiedAmi") continue;
+      if (name === "ReadQualifiedAmi" || name === "ReadQualifiedAmiSized") continue;
+      // DEC 254zb: a sized launch's failure is first checked for "size unavailable" (tested below); every other one still reaches Cleanup from there.
+      if (SIZED_LAUNCHES.includes(name)) continue;
       expect(state.Catch?.map((c) => c.Next), name).toEqual(["Cleanup"]);
     }
     expect(states.Cleanup!.Choices![0]!.Next).toBe("TerminateInstance");
@@ -104,7 +108,9 @@ describe("provisioner: pinned worker AMI (AUTOREQUALIFY AR-4)", () => {
   const NOT_FOUND = "Ssm.ParameterNotFoundException";
 
   it("reads the pin after the launch configuration and before launching, by the environment's parameter name only", () => {
-    expect(states.LaunchConfiguration!.Next).toBe("ReadQualifiedAmi");
+    // DEC 254zb: with no chosen size (the SizeChosen default) the launch configuration goes straight to the pin read, as before.
+    expect(states.LaunchConfiguration!.Next).toBe("SizeChosen");
+    expect(states.SizeChosen!.Default).toBe("ReadQualifiedAmi");
     const read = states.ReadQualifiedAmi!;
     expect(read.Resource).toBe("arn:aws:states:::aws-sdk:ssm:getParameter");
     // Plain read: a pin is an AMI ID, never a secret, so no WithDecryption.
@@ -203,5 +209,112 @@ describe("deleter", () => {
     expect(JSON.stringify(states.InstanceAlreadyGone)).toContain("InvalidInstanceID.NotFound");
     expect(JSON.stringify(states.VolumeAlreadyGone)).toContain("InvalidVolume.NotFound");
     expect(states.VolumeAlreadyGone!.Default).toBe("DeletionFailed");
+  });
+});
+
+describe("provisioner: chosen machine size (DEC 254zb)", () => {
+  const states = provisioner.States as unknown as Record<string, State & { Assign?: Record<string, unknown>; Catch?: Array<{ ErrorEquals: string[]; Next: string; Assign?: Record<string, unknown> }>; Condition?: string }>;
+  const expression = (text: string) => /^\{% (.*) %\}$/s.exec(text)![1]!;
+  const run = (text: string, bindings: Record<string, unknown>, input: unknown = {}) => jsonata(expression(text)).evaluate(input, bindings);
+  const conditionOf = (name: string, index: number) => (states[name]!.Choices![index] as unknown as { Condition: string }).Condition;
+  const routeOf = async (machine: unknown) => {
+    for (const [index, choice] of states.SizeChosen!.Choices!.entries()) if (await run(conditionOf("SizeChosen", index), { machine }) === true) return choice.Next;
+    return states.SizeChosen!.Default;
+  };
+
+  it("starts with no size, no fallback and no type held, and reads the size only from the input's machine", async () => {
+    expect(states.Start!.Assign).toMatchObject({ machineFallback: null, instanceType: null });
+    const machine = (states.Start!.Assign as Record<string, string>).machine!;
+    expect(await run(machine, {}, { states: { input: { workspaceId: "w" } } })).toBe(null);
+    expect(await run(machine, { states: { input: { machine: { instanceType: "m6g.xlarge", chip: "arm64" } } } })).toEqual({ instanceType: "m6g.xlarge", chip: "arm64" });
+  });
+
+  it("takes today's path with no size, keeps the pin for arm64 sizes and never uses it for x86 sizes", async () => {
+    expect(await routeOf(null)).toBe("ReadQualifiedAmi");
+    expect(await routeOf(undefined)).toBe("ReadQualifiedAmi");
+    expect(await routeOf({})).toBe("ReadQualifiedAmi");
+    expect(await routeOf({ instanceType: "m6g.xlarge", chip: "arm64" })).toBe("ReadQualifiedAmiSized");
+    expect(await routeOf({ instanceType: "m6i.xlarge", chip: "x86_64" })).toBe("RunInstanceX86");
+    expect(await routeOf({ instanceType: "m6i.xlarge", chip: "mips" })).toBe("ReadQualifiedAmi");
+  });
+
+  it("leaves today's launches unchanged apart from recording the launched type", () => {
+    for (const name of ["RunInstance", "RunInstancePinned"]) {
+      expect(states[name]!.Arguments).not.toHaveProperty("InstanceType");
+      expect(states[name]!.Catch).toEqual([{ ErrorEquals: ["States.ALL"], Next: "Cleanup", Assign: { failure: "{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}" } }]);
+      expect(states[name]!.Assign).toMatchObject({ instanceType: "{% $states.result.Instances[0].InstanceType %}" });
+    }
+    expect(states.RunInstance!.Arguments).not.toHaveProperty("ImageId");
+  });
+
+  it("reads the pin for sized arm64 launches exactly as for the default one", () => {
+    const rename = (value: unknown): unknown => JSON.parse(JSON.stringify(value).replace(/(RunInstancePinned|RunInstance|QualifiedAmiReadFailed|QualifiedAmiWellFormed|QualifiedAmiMalformed)Sized/g, "$1"));
+    for (const name of ["ReadQualifiedAmi", "QualifiedAmiWellFormed", "QualifiedAmiReadFailed", "QualifiedAmiMalformed"]) expect(rename(states[`${name}Sized`]), name).toEqual(states[name]);
+    expect(states.QualifiedAmiWellFormedSized!.Choices![0]!.Next).toBe("RunInstancePinnedSized");
+  });
+
+  it("differs from today's launch by the chosen type alone (arm64) or the type and the x86 AMI (x86)", () => {
+    const without = (name: string, ...keys: string[]) => {
+      const state = JSON.parse(JSON.stringify(states[name])) as State & { Catch?: unknown };
+      for (const key of keys) delete (state.Arguments as Record<string, unknown>)[key];
+      delete state.Catch;
+      return state;
+    };
+    expect(states.RunInstanceSized!.Arguments).toMatchObject({ InstanceType: "{% $machine.instanceType %}" });
+    expect(states.RunInstanceSized!.Arguments).not.toHaveProperty("ImageId");
+    expect(without("RunInstanceSized", "InstanceType")).toEqual(without("RunInstance"));
+    expect(states.RunInstancePinnedSized!.Arguments).toMatchObject({ InstanceType: "{% $machine.instanceType %}", ImageId: "{% $qualifiedAmi %}" });
+    expect(without("RunInstancePinnedSized", "InstanceType")).toEqual(without("RunInstancePinned"));
+    expect(states.RunInstanceX86!.Arguments).toMatchObject({ InstanceType: "{% $machine.instanceType %}", ImageId: "resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64" });
+    expect(without("RunInstanceX86", "InstanceType", "ImageId")).toEqual(without("RunInstance"));
+  });
+
+  it("sends a sized launch's failure to the size check, keeping the failure text for cleanup", () => {
+    for (const name of SIZED_LAUNCHES) {
+      expect(states[name]!.Catch, name).toEqual([{ ErrorEquals: ["States.ALL"], Next: "SizedLaunchFailed", Assign: { failure: "{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}", lastError: "{% $states.errorOutput %}" } }]);
+      expect(states[name]!.Next).toBe("RecordInstance");
+    }
+    expect(states.SizedLaunchFailed!.Default).toBe("Cleanup");
+    expect(states.SizedLaunchFailed!.Choices![0]!.Next).toBe("SizeUnavailable");
+  });
+
+  const unavailable = (lastError: unknown) => run(conditionOf("SizedLaunchFailed", 0), { lastError });
+
+  it.each([
+    ["InsufficientInstanceCapacity", "We currently do not have sufficient m6i.2xlarge capacity in the Availability Zone you requested (InsufficientInstanceCapacity)"],
+    ["Unsupported", "Your requested instance type (m6g.2xlarge) is not supported in your requested Availability Zone (Service: Ec2, Status Code: 400, Error Code: Unsupported)"],
+    ["VcpuLimitExceeded", "You have requested more vCPU capacity than your current vCPU limit (Error Code: VcpuLimitExceeded)"],
+    ["InstanceLimitExceeded", "Your quota allows for 0 more running instance(s) (Error Code: InstanceLimitExceeded)"],
+  ])("falls back to the default size on %s", async (_code, cause) => {
+    expect(await unavailable({ Error: "Ec2.Ec2Exception", Cause: cause })).toBe(true);
+  });
+
+  it.each([
+    ["an IAM refusal", { Error: "Ec2.Ec2Exception", Cause: "You are not authorized to perform this operation. (Error Code: UnauthorizedOperation)" }],
+    ["a bad parameter", { Error: "Ec2.Ec2Exception", Cause: "Error Code: InvalidParameterValue" }],
+    ["a timeout", { Error: "States.Timeout", Cause: "" }],
+    ["no error output", undefined],
+  ])("fails as before on %s (an instance may exist, so no second launch)", async (_name, lastError) => {
+    expect(await unavailable(lastError)).toBe(false);
+  });
+
+  it("falls back once: no size, a fixed reason, no failure text and its own idempotency token, then today's path", async () => {
+    const fallback = states.SizeUnavailable!;
+    expect(fallback).toMatchObject({ Type: "Pass", Next: "ReadQualifiedAmi", Assign: { machine: null, machineFallback: "size-unavailable", failure: null } });
+    const token: unknown = await run((fallback.Assign as Record<string, string>).clientToken!, { clientToken: "ws-1-gen-2" });
+    expect(token).toBe("ws-1-gen-2-std");
+    // The default path has no sized state, so a second fallback cannot happen.
+    const reachable = new Set<string>();
+    const visit = (name: string) => {
+      if (reachable.has(name)) return;
+      reachable.add(name);
+      targets(states[name]!).forEach(visit);
+    };
+    visit("ReadQualifiedAmi");
+    expect([...reachable].filter((name) => SIZED_LAUNCHES.includes(name) || name === "SizeUnavailable")).toEqual([]);
+  });
+
+  it("records the launched type and any fallback reason with the instance", () => {
+    expect((states.RecordInstance!.Arguments!.Payload as Record<string, unknown>)).toMatchObject({ instanceType: "{% $instanceType %}", machineFallback: "{% $machineFallback %}" });
   });
 });

@@ -257,10 +257,10 @@ async function detectGradle(context: DetectorContext, hasTests: boolean): Promis
   // JaCoCo: coverage only when the build enables the XML report; the report task is added to the command unless the build already runs it after the tests.
   let coverage: { path: string; source: DetectedSource; extraTask: boolean } | undefined;
   if (gradlePluginLine(build, "jacoco") !== undefined) {
-    const xml = /xml\.required(?:\.set)?\s{0,40}(?:=|\()\s{0,40}true|xml\.enabled\s{0,40}(?:=\s{0,40})?true|xml\s{0,40}\{[^}]*required\s{0,40}(?:=|\.set\()\s{0,40}true/u.exec(build);
-    if (xml === null) notes.push("JaCoCo is configured but the build does not write an XML report, so changed-line coverage will show as not measured.");
+    const xmlAt = jacocoXmlReportAt(build);
+    if (xmlAt === undefined) notes.push("JaCoCo is configured but the build does not write an XML report, so changed-line coverage will show as not measured.");
     else if (multi) notes.push("JaCoCo writes one report per module, so no coverage path is proposed.");
-    else coverage = { path: "build/reports/jacoco/test/jacocoTestReport.xml", source: { path: buildPath, line: lineOf(build, xml.index) }, extraTask: !/finalizedBy[^\n]*jacocoTestReport/u.test(build) };
+    else coverage = { path: "build/reports/jacoco/test/jacocoTestReport.xml", source: { path: buildPath, line: lineOf(build, xmlAt) }, extraTask: !/finalizedBy[^\n]*jacocoTestReport/u.test(build) };
   }
   const ownLocation = /junitXml|testResultsDir/u.test(build);
   if (ownLocation) notes.push("The build sets its own test result location, which Rovara does not read; no report path is proposed until a maintainer sets one.");
@@ -339,7 +339,7 @@ function javaArtifactFamily(key: string): string | undefined {
   const v1 = /^com\.amazonaws:aws-java-sdk-([a-z0-9-]+)$/u.exec(key)?.[1];
   const raw = (v2 ?? v1)?.replace(AWS_SDK_SUFFIX, "");
   if (raw === undefined || (v2 !== undefined && AWS_SDK_NON_SERVICE.has(raw)) || (v1 !== undefined && AWS_V1_NON_SERVICE.has(raw))) return undefined;
-  const id = normalizeAwsService(raw);
+  const id = normalizeAwsService(raw, "java");
   return id === undefined || isOwnedElsewhere(`aws:${id}`) ? undefined : `aws:${id}`;
 }
 
@@ -381,12 +381,34 @@ export function javaCodeCandidates(path: string, text: string): DependencyCandid
   const found = scanDrivers(path, text, JAVA_DRIVERS);
   const builders = [...text.matchAll(/\b([A-Za-z0-9]+?)(?:Async)?Client\.builder\s{0,120}\(\s{0,120}\)([\s\S]{0,800}?)\.build\s{0,120}\(/gu)].map((match) => ({ name: match[1]!.toLowerCase(), explicit: /endpointOverride\s{0,120}\(\s{0,120}URI\.create\s{0,120}\(\s{0,120}"|EndpointConfiguration\s{0,120}\(\s{0,120}"/u.test(match[2]!) }));
   for (const match of text.matchAll(/^[ \t]*import\s{1,40}(?:software\.amazon\.awssdk\.services|com\.amazonaws\.services)\.([a-z0-9]+)\./gmu)) {
-    const id = normalizeAwsService(match[1]!);
+    const id = normalizeAwsService(match[1]!, "java");
     const explicit = id !== undefined && builders.some((builder) => builder.explicit && builder.name === id.replace(/-/gu, ""));
-    const item = awsClientCandidate(path, text, match.index, match[1]!, explicit);
+    const item = awsClientCandidate(path, text, match.index, match[1]!, explicit, "java");
     if (item !== undefined) found.push(item);
   }
   return found;
+}
+
+/**
+ * Where a Gradle build turns on JaCoCo's XML report (`xml.required = true`, `xml.enabled true`, or `xml { required.set(true) }`), or undefined: the leftmost, as one alternation found it.
+ * The block form is not a pattern: `xml\s{0,40}\{[^}]*required…` rescanned to the next `}` from every `xml {`, so a build of `xml{` repeated took seconds (quadratic). Here each `}` and
+ * each `required … true` is looked for once and reused while it is still ahead: a block with none before its `}` makes every later `xml {` before that `}` fail the same way.
+ */
+function jacocoXmlReportAt(build: string): number | undefined {
+  const direct = /xml\.required(?:\.set)?\s{0,40}(?:=|\()\s{0,40}true|xml\.enabled\s{0,40}(?:=\s{0,40})?true/u.exec(build)?.index;
+  const required = /required\s{0,40}(?:=|\.set\()\s{0,40}true/gu;
+  let close = -1;
+  let next = -1;
+  for (const opener of build.matchAll(/xml\s{0,40}\{/gu)) {
+    if (direct !== undefined && opener.index >= direct) break;
+    const inside = opener.index + opener[0].length;
+    if (inside <= close) continue;
+    close = build.indexOf("}", inside);
+    if (close === -1) close = build.length;
+    if (next < inside) { required.lastIndex = inside; next = required.exec(build)?.index ?? Number.POSITIVE_INFINITY; }
+    if (next < close) return opener.index;
+  }
+  return direct;
 }
 
 export const detectJava: Detector = async (context) => {

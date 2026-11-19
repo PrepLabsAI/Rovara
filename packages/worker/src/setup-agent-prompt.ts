@@ -74,8 +74,26 @@ export function setupAgentInstructions(input: SetupAgentInstructionsInput): stri
     "Your proposal is checked again in a fresh sandbox that you never touched, and then a person confirms it, so only propose what worked when you ran it. For a command that worked, add to its place `{ \"kind\": \"inferred\", \"repo\": <repository>, \"note\": \"worked when run\" }`.",
     "",
     ...setupProposalFormatLines(input.metaRepo),
+    "",
+    ...SETUP_AGENT_EVAL_LINES,
   ].filter((line, index, all) => line !== "" || all[index - 1] !== "").join("\n");
 }
+
+/**
+ * DEC 253q(a): how the agent DRAFTS the project's AI eval, as one more member of its proposal JSON. The worker checks the draft in code (`eval-discovery-producer.ts`) and a person confirms it
+ * on the setup page; these words are guidance only.
+ */
+export const SETUP_AGENT_EVAL_LINES: readonly string[] = [
+  "If the project has an eval for its AI features (a folder named evals or evaluations, a promptfoo or deepeval config, or a report of per-question results), add an \"eval\" member to the same JSON object:",
+  "  \"eval\": { \"suites\": [ { \"selection\": <a short name for the suite>, \"repository\": <repository name>, \"questions\": [ { \"id\": <question id>, \"category\": \"ordinary\" | \"safety\" | \"refusal\", \"path\": <the tracked file that holds the question> } ],",
+  "    \"command\": { \"executable\": <program>, \"args\": [<arguments>], \"cwd\": <folder in the repository, or \".\"> }, \"report\": { \"cwd\": <folder>, \"argument\": <the measures file the command writes> },",
+  "    \"provider\": \"vertex\" (only when the code calls Gemini through Vertex AI: vertexai=True, a Google Cloud project and location; leave it out for the Gemini API), \"model\": <the product model it calls>, \"modelVersion\": <its exact version>, \"judge\": { \"kind\": \"rule\", \"scoringPath\": <file> } or { \"kind\": \"model\", \"model\": <judge model>, \"version\": <exact version>, \"scoringPath\": <the file with its scoring prompt> },",
+  "    \"subsetSupported\": <whether the command can run only some questions>, \"maxCallsPerQuestion\": <1 to 20>, \"maxCostMicrosPerQuestion\": <micro-dollars, at most 1000000> } ] }",
+  "Name only files that are in the repository and questions inside the eval's own folder. Do not run the eval: it calls a paid model. Leave \"eval\" out when there is no eval.",
+  "Rovara reads a JUnit report (pytest --junitxml, DeepEval through pytest, Jest, Vitest), promptfoo's JSON results file and its own measures file. When the eval already writes one of them, add a suite member \"output\": { \"kind\": \"junit\" | \"promptfoo\" | \"measures\" } and point \"report\" at that file (for pytest, add --junitxml=<file> to the arguments).",
+  "When it writes something else, do not ask the customer for an adapter. Point \"report\" at the file it writes and describe it: \"output\": { \"kind\": \"rows\", \"format\": \"jsonl\" | \"json\" | \"csv\", \"language\": \"python\" | \"node\", \"idField\": <the field that holds the question id>, \"pass\": { \"field\": <field>, \"equals\": <the value that means passed> } or { \"field\": <score field>, \"atLeast\": <the project's own passing score> } }. Rovara then proposes a small file as a pull request that the customer's people review and merge.",
+  "Only when it fits no shape above, write the wrapper yourself: \"output\": { \"kind\": \"custom\", \"language\": \"python\" | \"node\", \"summary\": <one sentence on what it reads>, \"source\": <the whole script, at most 12000 characters> }. It must run the customer's command unchanged, read ROVARA_EVAL_IDS (comma separated question ids) and write a JUnit XML report (one testcase per question, named by its id, a <failure> for a failed one) at rovara/eval-wrapper-results.xml (\"report\" still names the file the customer's command writes).",
+];
 
 /** What a retry says when the answer could not be read. The same fixed words as the draft's. */
 export { setupProposalRetryPrompt as setupAgentRetryPrompt } from "./setup-draft.js";

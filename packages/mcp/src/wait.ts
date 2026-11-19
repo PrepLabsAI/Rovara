@@ -1,5 +1,5 @@
 // Spec 025 US2, D10, R21: waiting on a task. Ending first is not an error; a cancelled call stops at once.
-import { ENDED_TASK_STATUSES, type DeveloperTaskView } from "@agentx/contracts";
+import { ENDED_TASK_STATUSES, taskStatusText, type DeveloperTaskClientView } from "@agentx/contracts";
 import type { ControlPlaneClient } from "./client.js";
 
 const FIRST_INTERVAL_MS = 2_000;
@@ -11,14 +11,14 @@ export const WAIT_POLL_DEADLINE_MS = 10_000;
 export const WAIT_HEARTBEAT_MS = 10_000;
 
 export interface WaitResult {
-  task: DeveloperTaskView;
+  task: DeveloperTaskClientView;
   /** The wait ran its full time and the task had not ended. */
   timedOut: boolean;
   /** A read failed during the wait: `task` is the last view seen, and this is not a timeout. */
   failure?: unknown;
 }
 
-const messageOf = (task: DeveloperTaskView) => `${task.status}: ${task.events.at(-1)?.text ?? "working"}`;
+const messageOf = (task: DeveloperTaskClientView) => `${task.statusView === undefined ? "Working" : taskStatusText(task.statusView)}: ${task.events.at(-1)?.text ?? "working"}`;
 
 /**
  * Polls the task every 2 seconds, growing to 5, until it ends, the wait ends, or the call is
@@ -29,7 +29,7 @@ const messageOf = (task: DeveloperTaskView) => `${task.status}: ${task.events.at
 export async function waitForTask(options: {
   client: Pick<ControlPlaneClient, "getTask">;
   taskId: string;
-  first?: DeveloperTaskView;
+  first?: DeveloperTaskClientView;
   waitSeconds: number;
   events: number;
   signal: AbortSignal;

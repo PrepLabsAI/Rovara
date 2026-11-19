@@ -1,5 +1,6 @@
 // Spec 025 phase 25b: a developer task's records, owner key, status and failure rules, event text
 // and audit records. No I/O; aws/developer-tasks.ts and the broker's result hook call these.
+import type { StoredSecondOpinion } from "../core/second-review/store.js";
 import { createHash } from "node:crypto";
 import {
   inertName,
@@ -27,6 +28,7 @@ import {
   type DeveloperTaskShare,
   type DeveloperTaskStatus,
   type Operation,
+  type RunEstimate,
   type WorkflowSnapshot,
   type WorkflowReviewBase,
   type DeveloperSignInMethod,
@@ -112,6 +114,8 @@ closedAt?: string;
   workflow?: WorkflowSnapshot;
   /** The commit each repository's preparation checked out, from the prepare result; the task's base until one is pinned. */
   preparedBase?: WorkflowReviewBase;
+  /** The meta repository commit the task's stages read: the one the broker pinned when the task started, kept when the worker reports it back (`knowledgeCommitToStore`). Absent: no meta repository. */
+  knowledgeCommit?: string;
   /** Spec 061: why the planner's last answer could not be read, kept for Retry planning; `workflowRevision` is the blocked step's revision. */
   planUnreadable?: { workflowRevision: number; errors: string[]; /** The fixed category of the problem (never the validator's words), for the owner's message. */ category?: PlanUnreadableCategory; /** Whether AgentX already asked the planner once more by itself. */ autoRetried?: true };
   /** AUTOFIX: why Rovara asked the owner instead of fixing a blocked step by itself, for the blocked revision `workflowRevision` (see autofix-messages.ts). */
@@ -136,6 +140,21 @@ closedAt?: string;
   threadNotesFedFrom?: string;
   /** The owner's original request, redacted and cut to 4,000 characters; the first entry of each plan's "why". Tasks created earlier have none. */
   requestText?: string;
+  /**
+   * The ticket the task started from (set by intake only; no request can carry it). The task's request is then the ticket's words, so the plan's "why" credits them to the ticket and never to the owner.
+   * The tracker's name and the ticket's id, both checked characters.
+   */
+  ticket?: { system: string; id: string };
+  /**
+   * Second review by another AI company: kept BESIDE the workflow, never inside it, so a second review never reaches a first review's transition and an older build ignores these keys.
+   * `secondOpinion` is its result for one candidate; `secondReviewAcknowledged` holds the keys the task owner acknowledged (`secondReviewAcknowledgement`).
+   */
+  secondOpinion?: StoredSecondOpinion;
+  secondReviewAcknowledged?: string[];
+  /** What the run is expected to cost and the limit that follows, worked out when its coding plan was stored (Cloud's field, same shape). */
+  runEstimate?: RunEstimate;
+  /** When the run's cost was kept for the next estimate: a run is counted once however often its end is told. */
+  runCostRecordedAt?: string;
 }
 
 /** C1: a shared task's thread, as the task record keeps it. */

@@ -3,11 +3,14 @@
 // digest) lives in `rovara-code-node.ts`.
 import { z } from "zod";
 import { IntentDesignSchema } from "./design-review.js";
+import { FindingScaleSchema } from "./task-flow-tier.js";
 import { OrgIdSchema, SessionBindingSchema, SessionIdSchema } from "./browser-ids.js";
 import { forwardReader } from "./forward-reader.js";
+import { CommitIdSchema } from "./plugins/common.js";
 import { EVIDENCE_NOT_TESTED_KINDS, ProofDetailSchema } from "./evidence.js";
 import { MODEL_COMPANIES, ModelCompanySchema, ModelIdentifierSchema } from "./models.js";
 import { redactText } from "./redaction.js";
+import { CI_EVIDENCE_BLOCK_PREFIXES, CI_EVIDENCE_LIMITS } from "./ci-evidence.js";
 import { SetupApplyBodySchema, SetupProposalSchema, SetupReviewEntrySchema } from "./setup-proposal.js";
 
 // ---- limits (placeholder values, exact names)
@@ -76,7 +79,9 @@ export const TASK_VIEW_VERSION = "2";
 // ---- small pieces
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
-const GitShaSchema = z.string().regex(/^[a-f0-9]{40}$/);
+/** The commit id of a repository on any host, of any hash length (item C4). `WorkflowFixPayloadSchema.startFrom` keeps `WorkerGitShaSchema`: the worker job line older workers parse stays 40 hex (decision 65). */
+const GitShaSchema = CommitIdSchema;
+const WorkerGitShaSchema = z.string().regex(/^[a-f0-9]{40}$/);
 const InstantSchema = z.string().datetime();
 const QuestionIdSchema = z.string().regex(/^q[1-3]$/);
 const OptionIdSchema = z.string().regex(/^[a-d]$/);
@@ -249,7 +254,7 @@ export const PlanCritiqueSchema = z
   .object({
     verdict: z.enum(["ok", "revise"]),
     points: z
-      .array(z.object({ id: z.string().min(1).max(32), severity: z.enum(["blocking", "note"]), text: z.string().min(1).max(500), claimId: z.string().min(1).max(64).optional() }).strict())
+      .array(z.object({ id: z.string().min(1).max(32), severity: z.enum(["blocking", "note"]), text: z.string().min(1).max(500), claimId: z.string().min(1).max(64).optional(), scale: FindingScaleSchema.optional() }).strict())
       .max(PLAN_CRITIC_POINTS_MAX),
     // A stored critique is read leniently: a company name this build does not know reads as "other" rather than failing the whole workflow snapshot (a rollback must never strand a task).
     model: ModelIdentifierSchema.extend({ company: z.preprocess((value) => (typeof value === "string" && !(MODEL_COMPANIES as readonly string[]).includes(value) ? "other" : value), ModelCompanySchema) }).strict(),
@@ -295,7 +300,7 @@ export type WorkflowFixRounds = z.infer<typeof WorkflowFixRoundsSchema>;
 export const WorkflowFixPayloadSchema = z.object({
   source: FixSourceSchema,
   /** A run that starts a CI or feedback fix: the head the pull request has. The worker starts from it, so what an abandoned conflict round left (markers, a local merge commit) is not what the fix begins on. */
-  startFrom: GitShaSchema.optional(),
+  startFrom: WorkerGitShaSchema.optional(),
 }).strict();
 export type WorkflowFixPayload = z.infer<typeof WorkflowFixPayloadSchema>;
 
@@ -330,7 +335,9 @@ export function ciFixUnrelatedMessage(check: string): string {
 }
 /** Whether a workflow's block reason is one of the three above: the task is waiting for a person to retry the CI fix. */
 export function isCiFixBlockReason(reason: string | undefined): boolean {
-  return reason !== undefined && (reason.startsWith(CI_FIX_ASK_PREFIX) || reason.startsWith(CI_FIX_STOP_PREFIX) || reason.startsWith(CI_FIX_UNRELATED_PREFIX));
+  return reason !== undefined && (reason.startsWith(CI_FIX_ASK_PREFIX) || reason.startsWith(CI_FIX_STOP_PREFIX) || reason.startsWith(CI_FIX_UNRELATED_PREFIX)
+    // TE-E0 option A: a marked check that is the customer's environment, or that needs a person (no result in time, the rounds used, no detail, a fix that weakens a test).
+    || CI_EVIDENCE_BLOCK_PREFIXES.some((prefix) => reason.startsWith(prefix)));
 }
 
 // ---- keeping the branch up to date (Plan 6 Task 17)
@@ -419,6 +426,55 @@ export function feedbackFixedReply(commit: string): string {
 
 // ---- merge tracking
 
+/**
+ * TE-B2 (honest CI states): the CI states a person is told in words, never silently counted as a pass. `none`: nothing ever ran on the pull request and its head defines no workflows. `unreadable`: the checks could
+ * not be read for a whole wait (a missing `checks: read`, or a list that fails). The words are shared by the task page, the milestones, the merge refusals and the pull request's first line (the evidence level
+ * `no_ci` / `ci_not_readable` says the same, see `ciEvidenceLevel`).
+ */
+export const CI_STATE_WORDS = {
+  none: "No CI on this repository",
+  unreadable: "CI not readable: grant checks read, or set this project to 'do not read CI'",
+  /** TE-B5: the base branch requires a check that no app has reported on this head, so it can never pass: the repository's settings name a check nothing runs. */
+  required_missing: "A required check has not reported",
+} as const;
+/** The evidence level (`EVIDENCE_LEVELS`) a CI state stands for on the pull request's first line: `their_ci` when checks reported, `no_ci` and `ci_not_readable` for the two honest states; `undefined` while the checks run. */
+export function ciEvidenceLevel(ci: "none" | "pending" | "passing" | "failing" | "unreadable" | "required_missing"): "their_ci" | "no_ci" | "ci_not_readable" | undefined {
+  // `required_missing` has no level of its own in the pack's closed list (TE-A2's `EVIDENCE_LEVELS`): its words come from `CI_STATE_WORDS`, and the first line says nothing better than "waiting" until the check reports.
+  return ci === "none" ? "no_ci" : ci === "unreadable" ? "ci_not_readable" : ci === "pending" || ci === "required_missing" ? undefined : "their_ci";
+}
+
+/** TE-E0 option A: a marked check's state on one head, as the tracking item keeps it. `announced` says its result was told on the pull request. */
+export const MarkedCheckEntrySchema = z.object({
+  name: z.string().min(1).max(CI_EVIDENCE_LIMITS.checkNameMax),
+  source: z.string().min(1).max(CI_EVIDENCE_LIMITS.sourceMax).optional(),
+  state: z.enum(["waiting", "passed", "failed", "not_run"]),
+  reason: z.enum(["timed_out", "skipped", "neutral"]).optional(),
+  until: InstantSchema.optional(),
+  expectedMs: z.number().int().positive().max(CI_EVIDENCE_LIMITS.waitCapMinutesMax * 60_000).optional(),
+  afterMs: z.number().int().positive().max(CI_EVIDENCE_LIMITS.waitCapMinutesMax * 60_000).optional(),
+  runId: z.string().min(1).max(200).optional(),
+  attempt: z.number().int().min(1).max(1_000).optional(),
+  startedAt: InstantSchema.optional(),
+  completedAt: InstantSchema.optional(),
+  url: z.string().min(1).max(2_048).optional(),
+  announced: z.literal(true).optional(),
+  /** TE-E0 option B: the workflow run the check's run belongs to (where its reports are), and what its per-test report said. */
+  workflowRunId: z.string().min(1).max(200).optional(),
+  report: z.enum(["read", "none", "unreadable", "ambiguous"]).optional(),
+  /** How many times the report was read without an answer to keep (`none` or `unreadable` before the run's artifacts were all there): read again until the limit. */
+  reportTries: z.number().int().min(1).max(10).optional(),
+  counts: z.object({ passed: z.number().int().min(0), failed: z.number().int().min(0), skipped: z.number().int().min(0) }).strict().optional(),
+  /** Tests that passed here and failed by the same name on the base commit's run of this check: change proof, reported by the customer's pipeline. */
+  proven: z.number().int().min(0).optional(),
+  /** Tests the base run did not have (added by the change): their proof stays the sandbox one. */
+  added: z.number().int().min(0).optional(),
+  /** Tests that failed on an earlier run of this check on this head and pass on this one (flaky history; Rovara never re-runs). */
+  flaky: z.array(z.string().min(1).max(300)).max(20).optional(),
+  /** The failed tests and their capped failure text (untrusted), what a fix may be based on. */
+  failedTests: z.array(z.object({ id: z.string().min(1).max(300), text: z.string().min(1).max(CI_EVIDENCE_LIMITS.failureTextMax).optional() }).strict()).max(20).optional(),
+}).strict();
+export type MarkedCheckEntry = z.infer<typeof MarkedCheckEntrySchema>;
+
 /** The separate item that holds what GitHub says about one pull request of a task (`DEVTASK#<taskId>` / `MERGE_TRACKING#<repositoryId>#<number>`). `decisionDigest` hashes every field but `observedAt`, `version` and itself. */
 export const MergeTrackingItemSchema = z
   .object({
@@ -431,12 +487,26 @@ export const MergeTrackingItemSchema = z
     draft: z.boolean(),
     state: z.enum(["open", "closed", "merged"]),
     baseBranch: z.string().min(1).max(255),
-    ci: z.enum(["none", "pending", "passing", "failing"]),
+    ci: z.enum(["none", "pending", "passing", "failing", "unreadable", "required_missing"]),
     ciBasis: z.enum(["required", "all_checks"]),
     checksEverSeen: z.boolean(),
+    /** TE-B2: since when the head's checks could not be read (cleared when they read, or the head moves). Absent on every row written before: it reads as "not unreadable". */
+    ciUnreadableSince: InstantSchema.optional(),
+    /** TE-B5: the required checks no app has reported on this head (at most ten, plain, as the base branch's settings name them), while `ci` is `required_missing`. Absent on every row written before. */
+    /** TE-B5 (L1): since when a head a PERSON pushed has had a required check unreported (its own clock; Rovara's heads use `lastRovaraPushAt`). Absent on every row written before. */
+    ciMissingSince: InstantSchema.optional(),
+    ciMissingChecks: z.array(z.string().min(1).max(120)).max(10).optional(),
+    /** TE-E0 option A: one entry per check the customer marked as running in their test environment, for this head (absent on every row written before, and on every project with nothing marked). */
+    ciMarked: z.array(MarkedCheckEntrySchema).max(CI_EVIDENCE_LIMITS.markedChecksMax).optional(),
+    /** TE-E0 option A: since when a head a PERSON pushed has been waited on for its marked checks (Rovara's heads use `lastRovaraPushAt`). */
+    ciMarkedSince: InstantSchema.optional(),
+    /** L4-EVCI: the customer's own eval check on this head (one entry, the marked-check shape): what their CI said, kept so the description says it once. Absent on every row written before, and on every project with no eval check named. */
+    ciEval: MarkedCheckEntrySchema.optional(),
+    /** L4-EVCI: since when a head a PERSON pushed has been waited on for the eval check (Rovara's heads use `lastRovaraPushAt`). */
+    ciEvalSince: InstantSchema.optional(),
     failingChecks: z.array(z.string().min(1).max(200)).max(10),
     review: z.enum(["not_requested", "requested", "changes_requested", "approved"]),
-    approval: z.object({ githubUserId: z.string().min(1).max(40), login: z.string().min(1).max(100), commitId: GitShaSchema }).strict().optional(),
+    approval: z.object({ hostUserId: z.string().min(1).max(200), login: z.string().min(1).max(100), commitId: GitShaSchema }).strict().optional(),
     branch: z.enum(["up_to_date", "behind", "conflicted", "unknown"]),
     headByRovara: z.boolean(),
     lastRovaraPushAt: InstantSchema.optional(),
@@ -503,7 +573,14 @@ export const MERGE_VIEW_MESSAGE_MAX = 500;
 /** The risk of the pull request's code as the Merge section shows it (owner decision 2026-10-27): a level and the reasons in words. */
 export const MergeRiskSchema = z.object({ level: z.enum(["low", "medium", "high"]), reasons: z.array(z.string().min(1).max(200)).max(8) }).strict();
 export type MergeRisk = z.infer<typeof MergeRiskSchema>;
-export const MergeViewSchema = z.object({ ready: z.boolean(), message: z.string().min(1).max(MERGE_VIEW_MESSAGE_MAX).optional(), risk: MergeRiskSchema.optional() }).strict();
+/**
+ * MR3b (TE-R3): the order a multi-repository task's pull requests merge in, as the Merge section shows it: fixed words, at most 4 lines. `needsOverride` is true when no safe order could be found (a dependency cycle, or
+ * facts that could not be read): only a person's confirmation (`MergePressBody.orderOverride`) merges them, in repository order (DEC 209). Absent for a one-repository task, a task with no dependency facts and any install that
+ * has not turned it on: the field is added READERS FIRST (DEC 152a), and the writer (`MergeDependencies.orderInView`) is switched on one release after the readers shipped.
+ */
+export const MergeOrderViewSchema = z.object({ lines: z.array(z.string().min(1).max(MERGE_VIEW_MESSAGE_MAX)).min(1).max(4), needsOverride: z.literal(true).optional() }).strict();
+export type MergeOrderView = z.infer<typeof MergeOrderViewSchema>;
+export const MergeViewSchema = z.object({ ready: z.boolean(), message: z.string().min(1).max(MERGE_VIEW_MESSAGE_MAX).optional(), risk: MergeRiskSchema.optional(), order: MergeOrderViewSchema.optional() }).strict();
 export type MergeView = z.infer<typeof MergeViewSchema>;
 
 /** The exact texts of `MERGE_NOT_READY` (409). Words for a person: nothing here carries a title, a comment or a log. */
@@ -516,6 +593,12 @@ export const MERGE_NOT_READY_MESSAGES = {
   conflicted: (base: string): string => `The branch conflicts with ${base}. I'm resolving it.`,
   baseChanged: (branch: string): string => `The pull request's base changed to ${branch}. Change it back or close the task.`,
   draft: "The pull request is still a draft.",
+  /** TE-B2: a draft that has no CI to wait for. The default mode keeps it a draft (nothing checked it); a project in sandbox_only has it marked ready. */
+  draftNoCi: `${CI_STATE_WORDS.none}, so nothing checked this code. The pull request is still a draft: mark it ready on the code host when you are happy with it.`,
+  /** TE-B2: the checks could not be read for a whole wait. */
+  ciNotReadable: `${CI_STATE_WORDS.unreadable}.`,
+  /** TE-B5: a required check has not reported. */
+  requiredMissing: `${CI_STATE_WORDS.required_missing}: the base branch requires a check that nothing has run on this code. Add it, or ask an admin to take it off the branch's required list.`,
   notOpen: "The pull request isn't open.",
   changing: "I'm still changing this pull request.",
   repository: (repository: string, reason: string): string => `${repository}'s pull request isn't ready yet: ${reason}`,
@@ -523,6 +606,10 @@ export const MERGE_NOT_READY_MESSAGES = {
   changesRequested: "A reviewer asked for changes on this pull request.",
   staleApproval: "The approval was for earlier code. This pull request needs a new approval.",
   behind: (base: string): string => `The branch is behind ${base}, and GitHub needs it up to date. I'm bringing it up to date; press Merge again when that is done.`,
+  /** A branch that is behind a base GitHub needs it up to date with, on a task whose changes need browser or API checks: Rovara does not merge the base in for it (the merged code could not be checked again), so the person does. */
+  behindByHand: (base: string): string => `The branch is behind ${base}, and GitHub needs it up to date. This task's changes need browser or API checks, so I won't merge the base in myself: update the branch on GitHub, then press Merge again, or send the task back.`,
+  /** The base branch was merged into the pull request: the merged code is a new candidate that needs its checks and reviews again before the task waits for the merge. */
+  baseMerged: "The base branch was merged into this pull request, so the merged code needs its checks and reviews again before it can be merged.",
   taskClosed: "This task is closed.",
   presserLostRight: "You can no longer merge this task, so nothing was merged.",
   notTrackedYet: "I haven't finished reading this pull request from GitHub yet. Try again in a minute.",
@@ -539,7 +626,11 @@ export const MERGE_NOT_READY_MESSAGES = {
  * `POST /v1/app/sessions/{id}/merge` (and the same through the web boundary): the request id, and for the web app the risk level the person saw in the dialog. A medium or high risk press that did
  * not see the current level is refused. Nothing else is taken: a token cannot add a field that makes it a browser.
  */
-export const MergePressBodySchema = z.object({ requestId: z.string().uuid(), risk: z.enum(["low", "medium", "high"]).optional() }).strict();
+export const MergePressBodySchema = z.object({
+  requestId: z.string().uuid(), risk: z.enum(["low", "medium", "high"]).optional(),
+  /** MR3b (DEC 209): a PERSON confirms merging in repository order although no safe order could be found. Only the value `true` is read; it is bound into the approval's digest, so a proof for the ordered question never approves the override. */
+  orderOverride: z.literal(true).optional(),
+}).strict();
 export type MergePressBody = z.infer<typeof MergePressBodySchema>;
 
 /** What a web press answers when it merged (200): the pull requests Rovara merged. */
@@ -638,8 +729,11 @@ export type SetupDraftApplyBody = z.infer<typeof SetupDraftApplyBodySchema>;
 
 // ---- milestones
 
-/** `started` and `closed` (slice 5): the task began from a ticket, and the task ended without a merge; ticket updates are told them like any other milestone. */
-export const CODE_MILESTONE_KINDS = ["questions", "answered", "plan_ready", "pr_ready", "review_nudge", "fixing", "stuck", "approved", "merged", "started", "closed"] as const;
+/**
+ * `started` and `closed` (slice 5): the task began from a ticket, and the task ended without a merge; ticket updates are told them like any other milestone. `setup_paused` (L4-U5): the task paused before Build because
+ * the project's setup stopped working; the chat thread and the ticket it came from are told once, in fixed words (the handlers read the rest from the project's own re-check rows, never from the milestone's text).
+ */
+export const CODE_MILESTONE_KINDS = ["questions", "answered", "plan_ready", "pr_ready", "review_nudge", "fixing", "stuck", "approved", "merged", "started", "closed", "setup_paused"] as const;
 export const CodeMilestoneKindSchema = z.enum(CODE_MILESTONE_KINDS);
 export type CodeMilestoneKind = z.infer<typeof CodeMilestoneKindSchema>;
 /** The milestones that come before the pull request: written only for 1.1.0 tasks, so version 1 records stay as they were. */
@@ -653,6 +747,10 @@ export const CodeMilestoneSchema = z
     sessionId: SessionIdSchema.optional(),
     at: InstantSchema,
     text: z.string().min(1).max(500),
+    /** L4-EVCI: on a `pr_ready` milestone, the customer's own eval result as `evalCiLine` says it (fixed words, numbers and a plain https address), for the chat and ticket lines. Absent: nothing to say. */
+    evalLine: z.string().min(1).max(500).optional(),
+    /** L4-PRP: a `pr_ready` milestone's verdict heading (fixed words and counts: `Verified · Low risk · nothing extra to check`), the same words as the pull request's description, for the chat and the ticket. */
+    verdict: z.string().min(1).max(200).regex(/^[^\p{Cc}\p{Cf}<>@[\]`*_~#|!]*$/u).optional(),
     pullRequests: z.array(z.object({ repository: z.string().min(1).max(200), number: z.number().int().positive(), url: z.string().url().max(2048) }).strict()).max(32).optional(),
     bindings: z.array(SessionBindingSchema).max(2).optional(),
     to: z.array(z.string().min(1).max(200)).max(50).optional(),

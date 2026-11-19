@@ -4,6 +4,7 @@ import { connectMcp, McpUnauthorized, type McpConnection, type McpToolAnnotation
 import { CredentialUnavailable } from "./credentials.js";
 import {
   GuardRejection,
+  ToolRefusal,
   type Access,
   type CatalogTool,
   type ConnectorContext,
@@ -23,7 +24,7 @@ export interface SkippedTool { tool: string; reason: string }
 /** Derive schemas from discovery, narrow by admin policy, bind routing outside model arguments, and say why any approved tool is not offered. */
 export function reviewTools<Scope>(
   connection: Pick<McpConnection, "tools">,
-  connector: Pick<ConnectorDefinition<Scope>, "binder">,
+  connector: Pick<ConnectorDefinition<Scope>, "binder" | "unavailableTools">,
   context: ConnectorContext<Scope>,
 ): { tools: CatalogTool[]; skipped: SkippedTool[] } {
   const { tools, skipped } = review(connection, connector, context);
@@ -33,18 +34,21 @@ export function reviewTools<Scope>(
 /** reviewTools, keeping for each offered tool the bound properties a call on it sends. */
 function review<Scope>(
   connection: Pick<McpConnection, "tools">,
-  connector: Pick<ConnectorDefinition<Scope>, "binder">,
+  connector: Pick<ConnectorDefinition<Scope>, "binder" | "unavailableTools">,
   context: ConnectorContext<Scope>,
 ): { tools: Array<{ tool: CatalogTool; bound: string[] }>; skipped: SkippedTool[] } {
   const tools: Array<{ tool: CatalogTool; bound: string[] }> = [];
   const skipped: SkippedTool[] = [];
   const offered = new Set(connection.tools.map((tool) => tool.name));
+  const unavailable = new Map((connector.unavailableTools?.(context.scope) ?? []).map((entry) => [entry.tool, entry.reason]));
   for (const approval of context.policy.tools) {
-    if (!offered.has(approval.name)) skipped.push({ tool: approval.name, reason: "not offered by the vendor" });
+    const reason = unavailable.get(approval.name);
+    if (reason !== undefined) skipped.push({ tool: approval.name, reason });
+    else if (!offered.has(approval.name)) skipped.push({ tool: approval.name, reason: "not offered by the vendor" });
   }
   for (const upstream of connection.tools) {
     const policy = context.policy.tools.find((entry) => entry.name === upstream.name);
-    if (!policy) continue;
+    if (!policy || unavailable.has(upstream.name)) continue;
     if (JSON.stringify(upstream.inputSchema).length > 32_768) { skipped.push({ tool: upstream.name, reason: "schema exceeds 32768 characters" }); continue; }
     const flattened = flattenSchema(upstream.inputSchema);
     if ("unsupported" in flattened) { skipped.push({ tool: upstream.name, reason: flattened.unsupported }); continue; }
@@ -100,7 +104,7 @@ function toolHints(annotations: McpToolAnnotations | undefined): { hints: ToolHi
 
 export function approveTools<Scope>(
   connection: Pick<McpConnection, "tools">,
-  connector: Pick<ConnectorDefinition<Scope>, "binder">,
+  connector: Pick<ConnectorDefinition<Scope>, "binder" | "unavailableTools">,
   context: ConnectorContext<Scope>,
 ): CatalogTool[] {
   return reviewTools(connection, connector, context).tools;
@@ -114,6 +118,11 @@ export interface EngineOptions {
   attribution?: string;
   /** Called when a write is sent unsigned because the signed arguments failed the upstream schema. */
   onAttributionDropped?: (tool: string) => void;
+  /**
+   * Treat the call as a write for the ledger whatever the policy says: claim before the vendor is asked, record the result after, and answer UNKNOWN when the
+   * vendor call breaks. A call that a person approved to run (an approval of a tool the project approved for reading) is sent with this, so a retry replays it.
+   */
+  durable?: boolean;
 }
 
 /**
@@ -247,8 +256,10 @@ export async function executeTool<Scope>(
     throw agentXError("FORBIDDEN", `${label} routing arguments are server controlled`);
   }
   const write = policy.access === "write";
-  const durable = write || context.requestedBy !== undefined;
-  const pending = publicResult(request, "IN_PROGRESS", write
+  // A call told to be durable is held to a write's standard of evidence (it may have acted), though its footer and token follow the policy's access.
+  const mayAct = write || options.durable === true;
+  const durable = mayAct || context.requestedBy !== undefined;
+  const pending = publicResult(request, "IN_PROGRESS", mayAct
     ? `This write is running or its outcome is unknown. Inspect ${label} before issuing a new write; do not automatically retry.`
     : "This read is running or its result has not been recorded.");
   let record: Invocation = {
@@ -302,7 +313,7 @@ export async function executeTool<Scope>(
     const args = dropped ? unsigned : signed;
     for (const guard of connector.guards) await guard.check({ tool: request.tool, arguments: modelArgs, bound, scope: context.scope, connection });
     signal.throwIfAborted();
-    writeAttempted = write;
+    writeAttempted = mayAct;
     if (dropped) options.onAttributionDropped?.(request.tool);
     const result = await connection.call(request.tool, args);
     if (result.isError) throw new Error("MCP tool reported an error");
@@ -312,17 +323,20 @@ export async function executeTool<Scope>(
       ? publicResult(request, "FAILED", `${label} is not connected for this project: ${error.message}. An administrator must fix its credential.`, "not_connected")
       : error instanceof DefinitionChanged
         ? publicResult(request, "FAILED", error.message, "schema_changed")
-        : error instanceof PolicyFailure || error instanceof GuardRejection
-          ? publicResult(request, "FAILED", error.message, "policy_denied")
-          : writeAttempted
-            ? publicResult(request, "UNKNOWN", `${label} write outcome is unknown. Inspect ${label} before issuing another request. Do not automatically retry.`)
-            : publicResult(request, "FAILED", `${label} MCP request failed before any write. Check ${connector.permissionsHint} and MCP availability.`, "vendor_error");
+        // A native connector's own words (the connection already scrubbed the token from them) are the call's failure.
+        : error instanceof ToolRefusal
+          ? publicResult(request, "FAILED", error.message, error.reason)
+          : error instanceof PolicyFailure || error instanceof GuardRejection
+            ? publicResult(request, "FAILED", error.message, "policy_denied")
+            : writeAttempted
+              ? publicResult(request, "UNKNOWN", `${label} write outcome is unknown. Inspect ${label} before issuing another request. Do not automatically retry.`)
+              : publicResult(request, "FAILED", `${label} MCP request failed before any write. Check ${connector.permissionsHint} and MCP availability.`, "vendor_error");
   } finally { await connection?.close().catch(() => undefined); }
   if (durable) {
     record = { ...record, updatedAt: new Date().toISOString(), result: response };
     try { await options.ledger.finish(record); }
     catch {
-      return publicResult(request, write ? "UNKNOWN" : "FAILED", write
+      return publicResult(request, mayAct ? "UNKNOWN" : "FAILED", mayAct
         ? `Could not persist the ${label} write outcome. Inspect ${label}; retry only with the same request ID to recover its record.`
         : `Could not persist the ${label} read outcome.`);
     }

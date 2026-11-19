@@ -2,6 +2,7 @@
 // "deliver" records the job. The EC2, local Docker and this-machine adapters replace it, one lane each.
 import { randomUUID } from "node:crypto";
 import {
+  ANSWERED_INVOCATION_KINDS,
   MachineError,
   type DeliveryReceipt,
   type MachineCapabilities,
@@ -19,6 +20,8 @@ export interface FakeWorkerMachinesOptions {
   capabilities?: Partial<MachineCapabilities>;
   features?: readonly string[];
   now?: () => Date;
+  /** What the worker answers to a live steer or a peek, per invocation. Default: the step took the message (`steered`) and a peek is `unavailable`. */
+  answer?: (invocation: WorkerInvocation) => Record<string, unknown>;
 }
 
 interface Machine {
@@ -34,11 +37,13 @@ export class FakeWorkerMachines implements WorkerMachines {
   readonly capabilities: MachineCapabilities;
   readonly #machines = new Map<string, Machine>();
   readonly #byKey = new Map<string, string>();
-  readonly #options: Required<Pick<FakeWorkerMachinesOptions, "startingChecks" | "features">> & { now: () => Date };
+  readonly #options: Required<Pick<FakeWorkerMachinesOptions, "startingChecks" | "features">> & { now: () => Date; answer?: FakeWorkerMachinesOptions["answer"] };
+  /** The steer and peek invocations handed over (they are answered on the request and are not jobs), for tests. */
+  readonly answered: WorkerInvocation[] = [];
 
   constructor(options: FakeWorkerMachinesOptions = {}) {
     this.capabilities = { isolation: "none", persistentVolume: true, canStop: true, maxConcurrentMachines: null, ...options.capabilities };
-    this.#options = { startingChecks: options.startingChecks ?? 1, features: options.features ?? [], now: options.now ?? (() => new Date()) };
+    this.#options = { startingChecks: options.startingChecks ?? 1, features: options.features ?? [], now: options.now ?? (() => new Date()), ...(options.answer === undefined ? {} : { answer: options.answer }) };
   }
 
   /** The jobs a machine was given, for tests. */
@@ -106,6 +111,11 @@ export class FakeWorkerMachines implements WorkerMachines {
     const machine = this.#machines.get(machineId);
     if (machine === undefined || machine.handle.state === "terminated") throw new MachineError("not_found", "no such machine");
     if (machine.handle.state !== "ready" && machine.handle.state !== "busy") throw new MachineError("not_ready", `the machine is ${machine.handle.state}`);
+    // A live steer and a peek are answered on the request: they are not jobs, so they neither hold the machine nor use up an operation id.
+    if ((ANSWERED_INVOCATION_KINDS as readonly string[]).includes(invocation.kind)) {
+      this.answered.push(structuredClone(invocation));
+      return { duplicate: false, answer: this.#options.answer?.(invocation) ?? (invocation.kind === "steer" ? { accepted: true, outcome: "steered" } : { accepted: true, outcome: "unavailable" }) };
+    }
     if (machine.accepted.has(invocation.operationId)) return { duplicate: true };
     machine.accepted.add(invocation.operationId);
     machine.operations.set(invocation.operationId, structuredClone(invocation));

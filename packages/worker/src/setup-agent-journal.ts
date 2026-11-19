@@ -36,6 +36,13 @@ const GIT_READS = new Set(["status", "log", "diff", "show", "branch", "rev-parse
 /** Programs whose first words after the name (leaving out flags) say what step it is: `npm ci`, `uv sync`, `python -m pytest`. */
 const SUBCOMMAND_PROGRAMS = new Set(["npm", "pnpm", "yarn", "uv", "pip", "pip3", "poetry", "pipenv", "cargo", "go", "mvn", "gradle", "gradlew", "./gradlew", "./mvnw", "mvnw", "make", "git", "docker", "apt", "apt-get", "bundle", "gem", "dotnet", "bun", "npx", "python", "python3"]);
 
+/** Port lane P6 (item B1): programs a `build-system` profile adds to the list above. Set once at worker boot (`build-systems.ts`). */
+let extraSubcommandPrograms: ReadonlySet<string> = new Set();
+export function setExtraSubcommandPrograms(programs: readonly string[]): void {
+  extraSubcommandPrograms = new Set(programs);
+}
+const takesSubcommand = (program: string): boolean => SUBCOMMAND_PROGRAMS.has(program) || extraSubcommandPrograms.has(program);
+
 function tokensOf(command: string): string[] {
   return command.trim().replace(/\s+/gu, " ").split(" ").filter((token) => token !== "");
 }
@@ -55,7 +62,7 @@ export function stepKeyOf(command: string): string {
   const tokens = tokensOf(first).filter((token) => !/^[A-Za-z_][A-Za-z0-9_]*=/u.test(token));
   const program = tokens[0] ?? "";
   const rest = tokens.slice(1);
-  const parts = SUBCOMMAND_PROGRAMS.has(program) ? [program, ...rest.filter((token) => !token.startsWith("-")).slice(0, 2)] : [program, ...rest.filter((token) => !token.startsWith("-")).slice(0, 1)];
+  const parts = takesSubcommand(program) ? [program, ...rest.filter((token) => !token.startsWith("-")).slice(0, 2)] : [program, ...rest.filter((token) => !token.startsWith("-")).slice(0, 1)];
   return parts.join(" ").toLowerCase().slice(0, 120);
 }
 

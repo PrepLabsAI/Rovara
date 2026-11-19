@@ -1,6 +1,8 @@
 import {
+  Aws,
   CfnOutput,
   type CfnTag,
+  Fn,
   RemovalPolicy,
   Stack,
   type StackProps,
@@ -10,6 +12,9 @@ import {
   aws_logs as logs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
+import { NAT_EGRESS_ADDRESSES_OUTPUT } from "@agentx/contracts";
+import { AgentDnsFirewall, EGRESS_ALLOW_DOMAINS_CONTEXT_KEY, installAgentAllowDomains, parseExtraAllowDomains } from "./agent-dns-firewall.js";
+import { EgressAlarms, alertsTopicFromName } from "./egress-alarms.js";
 import { Ec2WorkerFoundation } from "./ec2-workers.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 
@@ -19,6 +24,8 @@ export const AGENTX_PRODUCTION_INSTANCE_TYPE = "m6g.large";
 
 const DEFAULT_AZ_IDS: Readonly<Record<string, readonly [string, string]>> = {
   "us-east-1": ["use1-az1", "use1-az2"],
+  // The zones the live staging foundation's subnets use (agentx-staging-foundation, 2026-11-15).
+  "us-west-2": ["usw2-az1", "usw2-az2"],
 };
 
 /**
@@ -99,6 +106,8 @@ export class ProductionFoundationStack extends Stack {
     const privateSubnets: ec2.CfnSubnet[] = [];
     const privateRouteTables: ec2.CfnRouteTable[] = [];
     const privateRoutes: ec2.CfnRoute[] = [];
+    const natGateways: Array<{ az: string; natGateway: ec2.CfnNatGateway }> = [];
+    const natAddresses: ec2.CfnEIP[] = [];
 
     for (const index of [0, 1] as const) {
       const suffix = index + 1;
@@ -126,6 +135,10 @@ export class ProductionFoundationStack extends Stack {
 
       const eip = new ec2.CfnEIP(this, `NatEip${suffix}`, { domain: "vpc" });
       eip.addResourceDependency(gatewayAttachment);
+      // L4-EGR: in a named environment the NAT gateways' Elastic IPs ARE Rovara's published outbound addresses (a customer allow-lists them), so a deleted stack or a replaced resource must never
+      // release one: Retain sets DeletionPolicy and UpdateReplacePolicy (a named environment's DeletionPolicy becomes RetainExceptOnCreate, infra/lib/retention.ts). The logical ids (NatEip1, NatEip2) never change: a new id would allocate a new address and drop the old one.
+      if (naming.env !== undefined) eip.applyRemovalPolicy(RemovalPolicy.RETAIN);
+      natAddresses.push(eip);
       const natGateway = new ec2.CfnNatGateway(this, `NatGateway${suffix}`, {
         allocationId: eip.attrAllocationId,
         connectivityType: "public",
@@ -133,6 +146,7 @@ export class ProductionFoundationStack extends Stack {
         tags: resourceTags(`${naming.resourcePrefix}-nat-${suffix}`, naming),
       });
       natGateway.addResourceDependency(publicRoute);
+      natGateways.push({ az: configuration.availabilityZoneIds[index], natGateway });
 
       const privateSubnet = new ec2.CfnSubnet(this, `PrivateSubnet${suffix}`, {
         availabilityZoneId: configuration.availabilityZoneIds[index],
@@ -204,12 +218,35 @@ export class ProductionFoundationStack extends Stack {
       instanceType: configuration.instanceType,
     });
 
+    // Named environments: the machines in the VPC resolve only an allowlist, and unusual egress raises an alarm. The legacy production template stays as it is.
+    if (naming.env !== undefined) {
+      const baseAllowDomains = installAgentAllowDomains(props.deploymentRegion, Aws.ACCOUNT_ID);
+      const dnsFirewall = new AgentDnsFirewall(this, "AgentDnsFirewall", {
+        env: naming.env,
+        vpcId: vpc.ref,
+        baseAllowDomains,
+        extraAllowDomains: parseExtraAllowDomains(this.node.tryGetContext(EGRESS_ALLOW_DOMAINS_CONTEXT_KEY), baseAllowDomains),
+      });
+      // The project list's id, for whatever keeps the approved project domains on it (the template never owns its contents).
+      new CfnOutput(this, "ProjectAllowListId", { value: dnsFirewall.projectAllowListId });
+      new EgressAlarms(this, "EgressAlarms", {
+        env: naming.env,
+        resourcePrefix: naming.resourcePrefix,
+        dnsFirewallLogGroup: dnsFirewall.logGroup,
+        natGateways,
+        alertsTopic: alertsTopicFromName(this, "OperatorAlerts", naming.alertsTopicName),
+      });
+    }
+
     new CfnOutput(this, "VpcId", { value: vpc.ref });
     new CfnOutput(this, "PrivateSubnetIds", {
       value: privateSubnets.map((subnet) => subnet.ref).join(","),
     });
     new CfnOutput(this, "WorkspaceKmsKeyArn", { value: workspaceKey.keyArn });
     new CfnOutput(this, "DeploymentMode", { value: AGENTX_PRODUCTION_DEPLOYMENT_MODE });
+    // L4-EGR: the addresses workers and the session functions leave the VPC from (one per zone), for the control plane's parameter of the same name and the company settings line. IPv4 only: the VPC has
+    // no IPv6 block and no egress-only gateway (tests/contract/egress-addresses-infrastructure.test.ts), so nothing leaves from another address.
+    if (naming.env !== undefined) new CfnOutput(this, NAT_EGRESS_ADDRESSES_OUTPUT, { value: Fn.join(",", natAddresses.map((eip) => eip.attrPublicIp)) });
   }
 }
 

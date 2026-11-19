@@ -24,7 +24,7 @@ import { SETUP_AGENT_MAX_OUTPUT_TOKENS } from "./setup-agent-journal.js";
 import { readSetupProposalAnswer, type SetupDraftRepository } from "./setup-draft.js";
 import type { SetupScan } from "./setup-scan.js";
 import type { TrackedPaths } from "./setup-citations.js";
-import { MASK_OPTIONS, SANDBOX_INIT, TASK_SANDBOX_NETWORK, TASK_SANDBOX_USER, TaskSandbox, type TaskSandboxOptions } from "./task-sandbox.js";
+import { MASK_OPTIONS, SANDBOX_INIT, TASK_SANDBOX_NETWORK, TASK_SANDBOX_USER, TaskSandbox, sandboxNetworkFromEnvironment, type TaskSandboxOptions } from "./task-sandbox.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 
 /** The agent's tools: read-only file tools and the shell. No write tool, no edit tool. Passed to the session as `agentTools`. */
@@ -83,7 +83,7 @@ const REFUSED_RUN = "AgentX refused to start the setup sandbox: its container op
  *   - flags the sandbox does not use (an environment variable in any spelling, `--privileged`, `--device`, `--pid`...) are refused as unknown.
  * Throws `RUNTIME_UNAVAILABLE` with a fixed sentence (no argument is repeated, since an argument could be a secret).
  */
-export function assertSetupSandboxRunArgs(args: readonly string[], options: { rootPath: string; network?: { name: string; ip: string; helperIp: string } | undefined }): void {
+export function assertSetupSandboxRunArgs(args: readonly string[], options: { rootPath: string; network?: { name: string; ip: string; helperIp: string } | undefined; sharedNetwork?: string | undefined }): void {
   const refuse = (): never => { throw agentXError("RUNTIME_UNAVAILABLE", REFUSED_RUN); };
   const root = resolve(options.rootPath);
   if (!isAbsolute(root) || root === "/" || args[0] !== "run") return refuse();
@@ -105,7 +105,8 @@ export function assertSetupSandboxRunArgs(args: readonly string[], options: { ro
   const exactly = (flag: string, value: string): boolean => only(flag) === value;
   // The network is the shared task network, or exactly the run's own network with exactly the one address the run gave the sandbox and no other.
   if (options.network === undefined ? seen.has("--ip") : !(exactly("--network", options.network.name) && exactly("--ip", options.network.ip))) return refuse();
-  if (options.network === undefined && !exactly("--network", TASK_SANDBOX_NETWORK)) return refuse();
+  // On a laptop the sandbox joins the machine's own sandbox network (`AGENTX_SANDBOX_NETWORK`), the only network its Docker socket guard lets a sandbox use; the run has no network of its own there.
+  if (options.network === undefined && !exactly("--network", TASK_SANDBOX_NETWORK) && !(options.sharedNetwork !== undefined && exactly("--network", options.sharedNetwork))) return refuse();
   // `--dns`: IP addresses only, at most three (a name out of a repository can never become a resolver).
   // On the run's own network the network's name has the run network's shape and the ONE resolver is the run's helper; on the shared network at most three addresses.
   const dnsServers = seen.get("--dns") ?? [];
@@ -167,7 +168,7 @@ export function assertSetupSandboxExecArgs(args: readonly string[]): void {
  * The Docker seam of a setup sandbox for the workspace `rootPath`. `run` must pass `assertSetupSandboxRunArgs`; `exec` (and the file tools' byte-exact exec) must pass `assertSetupSandboxExecArgs`.
  * Everything else (inspect, network, rm, ps) passes. Wraps the real Docker, or a fake in a test.
  */
-export function guardedSetupDocker(docker: DockerCli = createDockerCli(), options: { rootPath: string; network?: { name: string; ip: string; helperIp: string } | undefined }): DockerCli {
+export function guardedSetupDocker(docker: DockerCli = createDockerCli(), options: { rootPath: string; network?: { name: string; ip: string; helperIp: string } | undefined; sharedNetwork?: string | undefined }): DockerCli {
   return {
     async run(args: readonly string[], runOptions?: CollectedProcessOptions): Promise<CollectedProcess> {
       if (args[0] === "run") assertSetupSandboxRunArgs(args, options);
@@ -187,7 +188,7 @@ export function guardedSetupDocker(docker: DockerCli = createDockerCli(), option
 export function createSetupSandbox(options: Omit<TaskSandboxOptions, "docker"> & { docker?: DockerCli }): TaskSandbox {
   const helperIp = options.dns?.[0];
   if (options.network !== undefined && (options.dns?.length !== 1 || helperIp === undefined)) throw agentXError("CONFIG_INVALID", "a setup sandbox on a run network has exactly its helper as resolver");
-  return new TaskSandbox({ ...options, docker: guardedSetupDocker(options.docker, { rootPath: options.rootPath, network: options.network === undefined ? undefined : { ...options.network, helperIp: helperIp! } }) });
+  return new TaskSandbox({ ...options, docker: guardedSetupDocker(options.docker, { rootPath: options.rootPath, network: options.network === undefined ? undefined : { ...options.network, helperIp: helperIp! }, sharedNetwork: sandboxNetworkFromEnvironment(options.environment ?? process.env) }) });
 }
 
 // ---- tracked files are left alone

@@ -18,6 +18,7 @@ import type { binding} from "./e2e-application-plan-fixtures.js";
 import { PROFILE, ordersContractManifest, shaCanonical, snapshotOf, webApiRow } from "./e2e-application-plan-fixtures.js";
 import type { E2EApplicationReport } from "../../packages/verifier/src/application-report-schema.js";
 import { collectApplicationGroupEvidence, type ApplicationGroupEvidence, type ObservedApiOutcome } from "./e2e-application-evidence-fixture.js";
+import { TEST_ORG, testProjectPk } from "./orgs.js";
 
 /**
  * A whole application round on the real broker, short of the worker: a project whose repository holds several API applications that carry the orders project
@@ -138,7 +139,7 @@ async function prepareRound(options: RoundOptions = {}) {
   const planning = operationRows((row) => row.workflowMode === "PLAN")[0]!;
 
   // The accounts the setup approval registered, as the broker shows them to the planner.
-  const accountRegistry = accountRegistryEntriesFromRows("payments", harness.db.find((row) => row.pk === "PROJECT#payments"));
+  const accountRegistry = accountRegistryEntriesFromRows(TEST_ORG, "payments", harness.db.find((row) => row.pk === testProjectPk("payments")));
   const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_API], accountRegistry });
   if (context.status !== "available") throw new Error(context.reason);
   // (Every qualified web and API target also offers the signed-out visitor as a variant of its own; these rounds run the apps' own accounts.)

@@ -24,6 +24,13 @@ export interface Principal {
   roles: readonly string[];
   /** The identity adapter that vouched for this principal, such as `local-owner`. */
   provider: string;
+  /**
+   * When this person last signed in interactively (ISO time), when the identity adapter knows (lane P3, items I1 and A1). It is the adapter's own fact: a rule that wants a fresh sign-in (`ApprovalRequirement.signIn`) reads it,
+   * and Code's local owner has none. Never taken from anything a caller sends.
+   */
+  authTime?: string;
+  /** The sign-in methods the person used for this sign-in, as open ids in the adapter's words (`password`, `company-sso`). Informational: no core rule branches on a name. */
+  methods?: readonly string[];
 }
 
 /** An account at an outside system. `provider` is the adapter's id for that system; `accountId` is the system's own. */
@@ -36,6 +43,21 @@ export interface ExternalAccountRef {
 
 // ---- Admission ----
 
+/**
+ * What a `task.start` request is about to start, for an adapter that sets its allowance by the kind of task (a different minimum room for a Quick task than for a Full one). Optional on the
+ * request, so an adapter and a caller that do not know it keep working; Code's own admission ignores it.
+ */
+export interface AdmissionTaskStart {
+  /** The task runs Rovara's workflow (plan, coding, checks, reviews, pull request) and not one plain run. */
+  workflow: boolean;
+  /** The path the request named: `QUICK` or `FULL`. Absent when the workflow is not used, or when Understand chooses it after the start (`pathFrom` is then `understand`). */
+  path?: "QUICK" | "FULL";
+  /** Who chooses the path: the request itself, or the Understand step that reads it. Absent when the workflow is not used. */
+  pathFrom?: "request" | "understand";
+  /** The request opens with a design review before any plan (`designFirst`). */
+  designFirst?: boolean;
+}
+
 export interface AdmissionRequest {
   companyId: string;
   /** Names this request: asking twice with one key gives the same decision and holds the allowance once. */
@@ -47,12 +69,14 @@ export interface AdmissionRequest {
   subject?: PolicySubject;
   /** What the caller expects it to use. */
   estimate?: { tokens?: number; cost?: Cost };
+  /** Set on `task.start` only: the path and the flow options of the task about to start. Optional and additive; an adapter that does not read it behaves as before. */
+  taskStart?: AdmissionTaskStart;
 }
 
 export type AdmissionDecision =
   | {
       allowed: true;
-      /** Set when the decision holds some allowance back (a budget reservation). Pass it to `settle` or `release`. */
+      /** Set when the decision holds some allowance back (a budget reservation). Pass it to `settle` or `release`. An adapter that really holds one expires it by itself: a caller that crashes before it records the id cannot give it back. */
       reservationId?: string;
     }
   | {
@@ -65,6 +89,12 @@ export type AdmissionDecision =
     };
 
 export interface Admission {
+  /**
+   * Declares that this adapter REFUSES or holds back a request whose `estimate.cost` is more than its remaining allowance (a real dollar cap). Only an explicit `true` is believed: a missing value means
+   * `false`, and so does a name (`allow-all` or any other). Rovara starts work with no one present (triggers, schedules, chain steps) only where this is `true`. An adapter that ignores the estimate
+   * (an allow-list, a logger, a rate limiter) must leave it unset or `false`. Code's default allow-all declares `false`.
+   */
+  enforcesCost?: boolean;
   /** Decides on its own. For a decision that must commit with the caller's change, use `stage`. */
   admit(request: AdmissionRequest): Promise<AdmissionDecision>;
   /**
@@ -97,6 +127,63 @@ export interface ApprovalRequest {
   risk?: "low" | "medium" | "high";
   /** After this time (ISO) no proof is accepted. */
   expiresAt?: string;
+  /**
+   * Which answer the proof is for, when the caller is a decision gate (lane L12, owner decision 66): a comment that says "approve" is not a proof for "request changes", and the other way round. Absent: an approval
+   * (a merge press, the older callers).
+   */
+  outcome?: ApprovalAnswer;
+  /**
+   * The decision card the person answered on, and the version of it they were shown (owner decision 211, gap G4), when the caller knows it. An adapter that binds a proof to a card (a step-up issued for one card)
+   * checks it; one that does not ignores it. Absent: the caller names no card, and an adapter that needs one refuses. Check it with `isValidApprovalCardRef` before use.
+   * The card is the caller's word, never proof: an adapter that binds to it must also check that the card belongs to `subject` (the same task) and cross-check `contentVersion` against `artifactDigest`
+   * (for a plan card the version IS the digest), and refuse when either does not hold.
+   */
+  card?: ApprovalCardRef;
+  /**
+   * Set by a caller that will settle every claim a verdict hands back (decision 211, gap G3): `commitClaim` once its own commit has applied, `releaseClaim` when it did not. Only then may an adapter CLAIM a one-time
+   * part of the proof inside `verify` and answer a `claimId`. A method with a one-time part REFUSES a request without it (reason `needs_settling_caller`, `NEEDS_SETTLING_CALLER`): a read-only check of a one-time
+   * secret would leave it replayable. Methods without one-time parts are unaffected (`verify` stays single-shot and read-only).
+   */
+  settlesClaims?: true;
+}
+
+/** An answer to an approval request. */
+export type ApprovalAnswer = "approve" | "reject" | "request_changes";
+/** The risk a request is graded at. */
+export type ApprovalRisk = "low" | "medium" | "high";
+
+/** A decision card and the version of it the person was shown (decision 211, gap G4). Opaque to Code; both are short text with no control or format characters. */
+export interface ApprovalCardRef {
+  cardId: string;
+  contentVersion: string;
+}
+
+const CARD_TEXT = (max: number): RegExp => new RegExp(`^[^\\p{Cc}\\p{Cf}]{1,${String(max)}}$`, "u");
+const CARD_ID = CARD_TEXT(200);
+const CARD_VERSION = CARD_TEXT(100);
+
+/** Whether a value is a readable `ApprovalCardRef`. An adapter that binds proofs to cards treats anything else as no card named. */
+export function isValidApprovalCardRef(card: unknown): card is ApprovalCardRef {
+  if (typeof card !== "object" || card === null) return false;
+  const { cardId, contentVersion } = card as Record<string, unknown>;
+  return typeof cardId === "string" && typeof contentVersion === "string" && CARD_ID.test(cardId) && CARD_VERSION.test(contentVersion);
+}
+
+/**
+ * How recent an approver's sign-in must be (decision 62: a company setting, lane P3). `window`: the sign-in time (`Principal.authTime`) must be no older than `seconds`, and an approver with no sign-in time is refused.
+ * `any-active`: any active company sign-in counts (the person is signed in now; for a company on its own single sign-on, so a high-risk approval needs no extra step). Only an approver adapter sets it; Code's local owner does not.
+ */
+export type ApprovalSignInRule = { mode: "window"; seconds: number } | { mode: "any-active" };
+
+/**
+ * A sign-in rule for some answers only (decision 211, gap G1): the answers it covers, and optionally only some risks and only some methods (the places a person answers from, in the plug-in's words). It ADDS to
+ * `ApprovalRequirement.signIn`, never removes it. `risks` or `methods` absent: every risk or every method. An empty list is not allowed (`ApprovalSignInScopeSchema`): a rule set that cannot be read is refused whole.
+ */
+export interface ApprovalSignInScope {
+  outcomes: readonly ApprovalAnswer[];
+  risks?: readonly ApprovalRisk[];
+  methods?: readonly string[];
+  rule: ApprovalSignInRule;
 }
 
 /** What the approver adapter says is needed, so a surface can offer the right way to answer. */
@@ -106,6 +193,36 @@ export interface ApprovalRequirement {
   minApprovers: number;
   /** Whether the person who asked may also approve. */
   selfApprovalAllowed: boolean;
+  /**
+   * The methods that may approve a HIGH-risk request (lane P3, item A3: the plug-in that knows its methods names them). A subset of `methods` is used. Absent: only the local session, so a plug-in whose strong method has another name
+   * must say so. A method that proves one act by a code host comment is never strong, whatever is named here.
+   */
+  strongMethods?: readonly string[];
+  /** The methods that may reject. Rejecting needs a signed-in session: a comment method is never one, whatever is named here. Absent: the local session. */
+  rejectMethods?: readonly string[];
+  /**
+   * The methods that prove ONE act by a code host comment, in the plug-in's words (lane P3, review L1). The core never accepts a comment method as strong or for rejecting: the method `code-host-comment`, any method whose name starts with `code-host-`,
+   * and every method listed here. Absent: only the first two.
+   */
+  commentMethods?: readonly string[];
+  /** The methods that may ask for changes. Asking for changes by a comment is allowed (decision 62). Absent: the local session or a code host comment. */
+  changesMethods?: readonly string[];
+  /** How recent the approver's sign-in must be for a high-risk approval or a rejection (decision 62). Absent: no rule (Code). */
+  signIn?: ApprovalSignInRule;
+  /**
+   * More sign-in rules, each for some answers, risks and methods (decision 211, gap G1: a company window for a MEDIUM approval, a rejection or a request for changes from an outside place, and none from a browser).
+   * Every rule that applies must hold, together with `signIn` (`signInRulesFor`, `checkApprovalSignInFor`). Absent: only `signIn`. The rules read `Principal.authTime`, so an identity adapter that states them
+   * must set it from the person's last INTERACTIVE sign-in (never a refresh, a chat sign-in or a token's issue time).
+   * Not yet read by the decision gate or the merge press: until a later lane switches them in, an adapter that names rules here still enforces them in its own `verify`.
+   */
+  signInRules?: readonly ApprovalSignInScope[];
+  /**
+   * The adapter may mark a verdict `soleApprover` (decision 211, gap G2): the person may decide alone, as the company's only eligible approver under the adapter's own rule (a cool-off, say), even where
+   * `minApprovers` is above 1 and `selfApprovalAllowed` is false. The mark is honoured only for the person who asked (`ApprovalRequest.requestedBy`), and only an explicit `true` is believed, here and on the
+   * verdict; a mark without it is ignored (`checkApproverCount`). Absent: no exception. The adapter must put a `fence` on every sole-approver verdict and every verdict its second-person rule counts.
+   * Not yet read by the decision gate or the merge press: until a later lane switches them in, a sole approver is refused there as before.
+   */
+  soleApproverAllowed?: boolean;
 }
 
 /**
@@ -125,17 +242,77 @@ export interface ApprovalProof {
   token: string;
   /** The account the surface says answered. Checked against the token's issuer, never taken as given. */
   claimedAccount?: ExternalAccountRef;
+  /**
+   * More secrets for a method that needs more than one (decision 211, gap G3: a browser step-up carries the review session in `token` and the one-time sign-in in a named part), by the method's own names.
+   * Checked by the method's issuer like `token`, never logged. An adapter that does not use a part ignores it: a part never stands in for `token`. Not part of `approvalProofKey`: a one-time part is spent
+   * through the adapter's claim (`ApprovalRequest.settlesClaims`), not through the caller's marker.
+   */
+  parts?: Readonly<Record<string, string>>;
 }
 
 /**
  * The key a proof is used up under: the same session or comment token cannot be used again for the same request under a fresh
- * `proofId`. The caller stores this key (not `proofId`) with `when.absent()` in the decision transaction.
+ * `proofId`. The caller stores this key (not `proofId`) with `when.absent()` in the decision transaction. `parts` are deliberately left out, so every stored marker keeps its key.
  */
 export function approvalProofKey(proof: Pick<ApprovalProof, "method" | "token" | "requestId">): string {
   return createHash("sha256").update(JSON.stringify([proof.method, proof.token, proof.requestId])).digest("hex");
 }
 
-export type ApprovalVerdict = { approved: true; approver: Principal; method: string; proofId: string } | { approved: false; reason: string };
+/** The marker a method with a one-time part answers to a request without `settlesClaims`. */
+export const NEEDS_SETTLING_CALLER = "needs_settling_caller";
+
+/**
+ * What a verdict rested on that may change before the caller commits (decision 211, gap G2): the version of the company's membership the adapter read (who is an eligible approver, who owns what). The switch-in
+ * lane carries it into the decision's transaction as a condition, so a membership change between `verify` and the commit makes the commit fail instead of applying a sole or second-person approval that no longer
+ * holds. Opaque to Code beyond being a whole number the adapter compares.
+ */
+export interface ApprovalFence {
+  membershipVersion: number;
+}
+
+export type ApprovalVerdict =
+  | {
+      approved: true;
+      approver: Principal;
+      method: string;
+      proofId: string;
+      /** The approver may decide alone under the adapter's sole-approver rule (gap G2). Believed only when the requirement says `soleApproverAllowed: true` and the approver is the person who asked. */
+      soleApprover?: true;
+      /** What the verdict rested on (gap G2). Required from the adapter on a sole-approver verdict and on every verdict its second-person rule counts; the caller conditions its commit on it. */
+      fence?: ApprovalFence;
+      /**
+       * The adapter claimed a one-time part of the proof for this verdict (gap G3). Only for a request with `settlesClaims`. The caller passes it to `commitClaim` after its commit applied, or to `releaseClaim`
+       * when it did not (a later refusal, a lost race, a fault). A claim the caller does not settle in time LAPSES TO SPENT: the part stays used until the one-time secret itself expires, and is never given back
+       * by the clock, so a slow commit can never share the part with a second decision.
+       */
+      claimId?: string;
+    }
+  | { approved: false; reason: string };
+
+export type ApproverCountCheck = { ok: true } | { ok: false; reason: "needs_more_approvers" | "self_approval_not_allowed" | "invalid_requirement" };
+
+/**
+ * Whether verified approvals are enough (gap G2), by the rule the decision gate applies today plus the sole-approver exception: `minApprovers` distinct people (by provider and person id, at least one), and none of
+ * them the person who asked unless `selfApprovalAllowed`. A verdict marked `soleApprover` counts only when the requirement says `soleApproverAllowed: true` (an explicit `true` both times) and its approver is the
+ * person who asked (`requestedBy`); then that one approval is enough. An unmarked verdict never benefits. `minApprovers` must be a whole number of at least 1 (else `invalid_requirement`), so no verdict is never enough.
+ */
+export function checkApproverCount(
+  requirement: Pick<ApprovalRequirement, "minApprovers" | "selfApprovalAllowed" | "soleApproverAllowed">,
+  requestedBy: Pick<Principal, "provider" | "personId"> | undefined,
+  verdicts: ReadonlyArray<Extract<ApprovalVerdict, { approved: true }>>,
+): ApproverCountCheck {
+  if (!Number.isSafeInteger(requirement.minApprovers) || requirement.minApprovers < 1) return { ok: false, reason: "invalid_requirement" };
+  const exception = requirement.soleApproverAllowed === true;
+  const isRequester = (approver: Principal): boolean => requestedBy !== undefined && approver.provider === requestedBy.provider && approver.personId === requestedBy.personId;
+  const sole = (verdict: Extract<ApprovalVerdict, { approved: true }>): boolean => exception && verdict.soleApprover === true && isRequester(verdict.approver);
+  // The gate's order: the count first, then the person who asked.
+  if (!verdicts.some(sole)) {
+    const distinct = new Set(verdicts.map((verdict) => `${verdict.approver.provider}\u0000${verdict.approver.personId}`));
+    if (distinct.size < requirement.minApprovers) return { ok: false, reason: "needs_more_approvers" };
+  }
+  if (!requirement.selfApprovalAllowed && verdicts.some((verdict) => isRequester(verdict.approver) && !sole(verdict))) return { ok: false, reason: "self_approval_not_allowed" };
+  return { ok: true };
+}
 
 export interface Approvers {
   requirement(request: ApprovalRequest): Promise<ApprovalRequirement>;
@@ -146,6 +323,13 @@ export interface Approvers {
    * accepted and refuse a repeat; the caller's transaction is the guarantee.
    */
   verify(request: ApprovalRequest, proof: ApprovalProof): Promise<ApprovalVerdict>;
+  /**
+   * Spends a claim a verdict handed back (gap G3), once the caller's commit applied. Offered together with `releaseClaim` by an adapter that claims; an adapter that never claims offers neither. `applied` is
+   * true only when this call spent a live claim; an unknown, lapsed or already settled claim answers false and changes nothing (a lapsed part is already spent, never free).
+   */
+  commitClaim?(claimId: string): Promise<{ applied: boolean }>;
+  /** Gives a LIVE claim back unspent, when the caller's commit did not apply. An unknown, lapsed (still spent) or already settled claim is a no-op. */
+  releaseClaim?(claimId: string): Promise<void>;
 }
 
 // ---- Identity ----
@@ -162,10 +346,45 @@ export interface PresentedCredential {
 export type AuthResult = { ok: true; principal: Principal } | { ok: false; reason: "unknown" | "expired" | "refused" };
 
 export interface IdentityCapabilities {
-  /** The adapter signs people in itself (a login page, single sign-on). */
+  /** The adapter signs people in itself (a login page, single sign-on): it offers `beginSignIn`, `completeSignIn` and `signOut`. */
   interactiveSignIn: boolean;
-  /** The adapter can map an outside account to a person. */
+  /** The adapter can map an outside account to a person, and a person to their outside accounts (`accountsOf`). */
   externalAccounts: boolean;
+  /** The adapter can list the company's members (`listMembers`). Absent: it cannot. */
+  members?: boolean;
+  /** The adapter signs people in through the company's own single sign-on, so a company may choose "trust any active company sign-in" (`ApprovalSignInRule`). Absent: it does not. */
+  companySignIn?: boolean;
+}
+
+/** Starts a sign-in: the adapter answers with where to send the person. */
+export interface SignInStartRequest {
+  companyId: string;
+  /** Which of the adapter's sign-in methods, as an open id; absent: the adapter's default. */
+  method?: string;
+  /** Where the person returns to in Rovara afterwards. Rovara checks it is its own address; the adapter does not follow it. */
+  returnTo?: string;
+}
+export interface SignInStart {
+  /** The address the person is sent to. */
+  redirectUrl: string;
+  /** Names this attempt; `completeSignIn` gets it back with what the provider sent. Opaque. */
+  attemptId: string;
+  expiresAt: string;
+}
+/** Finishes a sign-in with what came back from the provider (query values). A value in it is a secret: do not log it. */
+export interface SignInCompleteRequest {
+  companyId: string;
+  attemptId: string;
+  params: Readonly<Record<string, string>>;
+}
+export type SignInResult =
+  | { ok: true; principal: Principal; /** The credential the surface presents from now on. A secret. */ credential: PresentedCredential; expiresAt?: string }
+  | { ok: false; reason: "unknown" | "expired" | "refused" };
+
+export interface IdentityMemberPage {
+  members: readonly Principal[];
+  /** Pass it back to read the next page; absent on the last. */
+  nextCursor?: string;
 }
 
 export interface IdentityProvider {
@@ -175,6 +394,17 @@ export interface IdentityProvider {
   resolveExternalAccount(companyId: string, account: ExternalAccountRef): Promise<Principal | undefined>;
   /** A person of this company by Rovara id, or undefined. */
   getPrincipal(companyId: string, personId: string): Promise<Principal | undefined>;
+  // ---- Optional abilities (lane P3, items I1 and I2; owner decision 60). An adapter offers only what its capability flag says; a caller checks the flag, never the adapter's name.
+  /** Needs `capabilities.interactiveSignIn`. */
+  beginSignIn?(request: SignInStartRequest): Promise<SignInStart>;
+  /** Needs `capabilities.interactiveSignIn`. */
+  completeSignIn?(request: SignInCompleteRequest): Promise<SignInResult>;
+  /** Ends the session a credential stands for. Needs `capabilities.interactiveSignIn`. Ending one that is already over succeeds. */
+  signOut?(credential: PresentedCredential): Promise<void>;
+  /** The company's members, a page at a time. Needs `capabilities.members`. */
+  listMembers?(companyId: string, page?: { cursor?: string; limit?: number }): Promise<IdentityMemberPage>;
+  /** The outside accounts a person is linked to in this company (the other way round from `resolveExternalAccount`). Needs `capabilities.externalAccounts`. */
+  accountsOf?(companyId: string, personId: string): Promise<readonly ExternalAccountRef[]>;
 }
 
 // ---- Metering ----

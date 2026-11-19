@@ -18,9 +18,9 @@ const IPV4_BLOCKED: ReadonlyArray<[string, number]> = [
   ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.88.99.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15],
   ["198.51.100.0", 24], ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4],
 ];
-/** Loopback, unspecified, IPv4-translated (NAT64, 6to4, Teredo), discard, documentation, ULA, link-local, site-local and multicast. */
+/** IPv4-compatible (::/96, which includes loopback and unspecified), loopback, unspecified, IPv4-translated (NAT64, 6to4, Teredo, and ::ffff:0:a.b.c.d), discard, documentation, ULA, link-local, site-local and multicast. */
 const IPV6_BLOCKED: ReadonlyArray<[string, number]> = [
-  ["::", 128], ["::1", 128], ["64:ff9b::", 96], ["64:ff9b:1::", 48], ["100::", 64], ["2001::", 32], ["2001:db8::", 32],
+  ["::", 96], ["::", 128], ["::1", 128], ["64:ff9b::", 96], ["64:ff9b:1::", 48], ["::ffff:0:0:0", 96], ["100::", 64], ["2001::", 32], ["2001:db8::", 32],
   ["2002::", 16], ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8],
 ];
 

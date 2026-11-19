@@ -8,6 +8,7 @@
 import { readFile, realpath } from "node:fs/promises";
 import { dirname, relative, resolve, isAbsolute, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { connectionProblems } from "../plugins/code-host/connections.js";
 import {
   IMPLICIT_COMPANY_ID,
   PLUGIN_POINT_CARDINALITY,
@@ -22,6 +23,9 @@ import {
   type PluginPoint,
   type RegistryView,
 } from "@agentx/contracts";
+
+/** The points whose adapters carry a `kind` that is also their registry name (a code host called `github` has kind `github`; a model provider's kind is its provider id). */
+const KIND_NAMED_POINTS: ReadonlySet<PluginPoint> = new Set<PluginPoint>(["code-host", "tracker", "check-runner", "model-provider"]);
 
 interface Entry {
   adapter: unknown;
@@ -46,6 +50,8 @@ export function createAdapterRegistry(): AdapterRegistry {
   return {
     register(point, name, adapter, registration: AdapterRegistration = {}) {
       mayChange(point);
+      // A caller never branches on an adapter's name, and a lookup by name must find the adapter that calls itself that.
+      if (KIND_NAMED_POINTS.has(point) && (adapter as { kind?: unknown } | null)?.kind !== name) throw new PluginRegistryError("bad_module", `a ${point} adapter's kind must be the name it is registered under (${name})`);
       const entries = entriesOf(point);
       const isDefault = registration.isDefault === true;
       const existing = entries.get(name);
@@ -150,6 +156,8 @@ export interface LoadAdaptersOptions {
   registry: AdapterRegistry;
   importModule: ModuleImporter;
   now?: () => Date;
+  /** The install's own folder, handed to every plug-in as `PluginContext.stateDirectory`. */
+  stateDirectory?: string;
 }
 
 /**
@@ -172,7 +180,7 @@ export async function loadAdapters(config: PluginConfig, options: LoadAdaptersOp
     if (module === undefined) throw new PluginRegistryError("bad_module", `the module for ${label} does not export a plug-in`);
     if (module.point !== entry.point || module.name !== entry.name) throw new PluginRegistryError("bad_module", `the module for ${label} is a plug-in for a different point or name`);
     const view: RegistryView = { get: (point, name) => options.registry.get(point, name), require: (point, name) => options.registry.require(point, name), names: (point) => options.registry.names(point) };
-    const context: PluginContext = { defaultCompanyId, settings: entry.settings, registry: view, now: options.now ?? (() => new Date()) };
+    const context: PluginContext = { defaultCompanyId, settings: entry.settings, registry: view, now: options.now ?? (() => new Date()), ...(options.stateDirectory === undefined ? {} : { stateDirectory: options.stateDirectory }) };
     let adapter: unknown;
     try {
       adapter = await module.create(context);
@@ -183,6 +191,9 @@ export async function loadAdapters(config: PluginConfig, options: LoadAdaptersOp
     }
     options.registry.register(entry.point, entry.name, adapter as never);
   }
+  // Item C2: several connections of one provider need exactly one default; a config that does not is refused when it loads, not when a repository first uses it.
+  const problems = connectionProblems(options.registry);
+  if (problems.length > 0) throw new PluginRegistryError("bad_config", `the code host connections are not valid: ${problems.join("; ")}`);
 }
 
 /** Convenience for a process start-up: register the defaults first, call this, then `registry.seal()`. */

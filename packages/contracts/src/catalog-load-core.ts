@@ -24,6 +24,8 @@ export function loadSignedCatalogWith(input: { catalogBytes: Uint8Array; signatu
   if (!checked.ok) return { ok: false, reason: checked.reason };
   try {
     const catalog = ServiceCatalogSchema.parse(JSON.parse(Buffer.from(input.catalogBytes).toString("utf8")));
+    // A signed catalog is the release's: it never holds an entry the owner approved on a laptop (owner-image-list.ts), so a signed file cannot make one count as reviewed.
+    if (catalog.entries.some((entry) => entry.ownerApproved === true)) return { ok: false, reason: "the catalog is signed but carries an owner-approved entry" };
     // The one place a catalog is marked verified (at run time, in a private registry, and frozen): the signature held over these exact bytes and the schema parsed them.
     return { ok: true, catalog: registerVerifiedCatalog(catalog), keyId: checked.keyId };
   } catch {

@@ -16,12 +16,16 @@ import { closeInvocationResult } from "./close-workspace.js";
 import { advertisedInvocationFeatures, anotherOperationActive, createWorkerServerState, startWorkerServer } from "./server.js";
 import { consoleWorkerLog, logWorkerStarted } from "./worker-log.js";
 import { invokeAuthenticationFromEnvironment } from "./invoke-auth.js";
+import { installBuildSystemProfiles } from "./build-systems.js";
 import { modelFallbackReporter, resolveTaskSessionModel, secondReviewerRuntimes, taskMissingKeyAuthorizer } from "./task-model.js";
 import { createDefaultPiSessionAdapter } from "./pi-session.js";
+import { evalEnvironmentWithGateway, evalFinalCheckForTask, evalHostSourcesFor } from "./verification/eval-wiring.js";
 import { chatGptTokenSource } from "./chatgpt-token.js";
 import { agentSkillsSource } from "./agent-step.js";
 import { brokerContextCall, contextToolsCatalogSource } from "./context-sources/bridge.js";
+import { piMcpEnabled } from "./context-sources/pi-mcp.js";
 import { designReviewBindingOf, designReviewDependencies, operationModelProxy } from "./design-review-sessions.js";
+import { lazyModelProxy, modelAccessSource } from "./model-access.js";
 import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRuntime } from "./project-setup-executor.js";
 import { postProjectSetupTerminalResult } from "./project-setup-callback.js";
 import { postWorkerTerminalResult } from "./terminal-callback.js";
@@ -32,6 +36,8 @@ import { removeLeftoverMaskVolumes } from "./devcontainer.js";
 import { removeLeftoverTaskSandboxes, taskShellSelection } from "./task-sandbox.js";
 import { removeLeftoverSetupRuns, setupWorkspaceKey } from "./setup-network.js";
 import { createSavedEnvFallbackReporter, createSavedEnvLoginProvider } from "./saved-env/login.js";
+import { runSetupProveJob } from "./setup-prove.js";
+import { runEvalHealthRider } from "./eval-health-run.js";
 import { rememberCredentials, runSavedEnvRebuild } from "./saved-env/rebuild.js";
 import { savedEnvOptionsOf } from "./saved-env/use.js";
 import { createDockerCli } from "./swebench/containers.js";
@@ -49,6 +55,9 @@ const trustedRuntimeBackingOwner = CONTAINED_RUNTIME_PROFILE?.id === "linux-arm6
 
 // Read first, so a partly configured EC2 boot fails before the port opens.
 const invokeAuthentication = invokeAuthenticationFromEnvironment();
+// Port lane P6 (item B1): the build systems this worker was started with (extra detectors and setup programs). A value that cannot be read stops the boot, so no task runs under a half-described build system.
+const buildSystems = installBuildSystemProfiles();
+if (buildSystems.length > 0) console.log(JSON.stringify({ component: "worker", event: "build-systems.installed", names: buildSystems.map((profile) => profile.name) }));
 // Pi installs no package for the worker (R56): a settings file's `packages` would otherwise make it run `npmCommand` here.
 process.env.PI_OFFLINE = "1";
 // Pi reports install telemetry and attributes provider requests to itself unless told not to (Pi 1.3+); the worker sends neither.
@@ -145,6 +154,22 @@ const state = createWorkerServerState(
             cloneCredentialValues: () => cloneCredentials.values(),
           });
         }
+        if (invocation.payload.setupProve !== undefined) {
+          const stop = new AbortController();
+          const unregister = cancellationController.register(invocation.operationId, { abort: async () => { stop.abort(); } });
+          try {
+            await runSetupProveJob({
+              rootPath, controlPlaneUrl, invocation, manifest, docker: createDockerCli(), signal: stop.signal,
+              otherOperations: async () => (anotherOperationActive(state, invocation.operationId) ? [{ id: "another-operation", rootPath }] : []),
+            });
+          } finally { unregister(); }
+        }
+        // L4-EVH: an opt-in eval health run measures the project's evals on this read-only, pinned preparation of main and posts the one result to the broker (eval-health-run.ts).
+        if (invocation.payload.evalHealth !== undefined) {
+          const stop = new AbortController();
+          const unregister = cancellationController.register(invocation.operationId, { abort: async () => { stop.abort(); } });
+          try { await runEvalHealthRider({ rootPath, controlPlaneUrl, invocation, manifest, docker: createDockerCli(), signal: stop.signal }); } finally { unregister(); }
+        }
         return {
           manifestPath: ".agentx/preparation-manifest.json",
           projectName: manifest.projectName,
@@ -157,6 +182,7 @@ const state = createWorkerServerState(
         const controlPlaneUrl = requiredEnvironment("AGENTX_CONTROL_PLANE_URL");
         const { chatGptToken, chatGptFallback, authorizeModelFallback, ...callbacks } = createWorkerCallbackSinks({ controlPlaneUrl, invocation });
         // #341: a task on its owner's ChatGPT plan; the token never leaves this process's memory.
+        // ANSWER-2: a core model route asks the broker even without a boot proxy URL.
         // Ruling R29: on an install with a model proxy the task calls models through it, with a key minted for this task;
         // the worker holds no provider secret. The key is asked for lazily, at the first request that needs the proxy (a ChatGPT
         // plan's own requests never do), so a task on a plan is not held up by a proxy it may never call.
@@ -165,11 +191,17 @@ const state = createWorkerServerState(
         const session = await resolveTaskSessionModel(invocation.payload,
           invocation.payload.chatgpt === undefined ? undefined : chatGptTokenSource(chatGptToken), process.env, chatGptFallback, proxy, taskFallbackAuthorizer(invocation.payload,authorizeModelFallback));
         const missingKeyAuthority=taskMissingKeyAuthorizer(invocation.payload,authorizeModelFallback,proxy,process.env);
+        // Plan v3.2 row 20.2: the final-check eval's ports, for a task that asks for it, only when the host switched it on (ROVARA_EVAL_GATEWAY_URL) and the trusted sources are delivered. Otherwise none: the request reads "not connected" with zero calls.
+        const evalRequested = invocation.payload.evalRequest !== undefined;
+        const evalFinalCheck = evalFinalCheckForTask({ requested: evalRequested, environment: evalEnvironmentWithGateway(process.env, invocation.payload.evalGatewayUrl), controlPlaneUrl, capability: invocation.callbackCapability, sources: evalRequested ? evalHostSourcesFor(invocation, { controlPlaneUrl,
+          // DEC 253n(2): the fresh check sandbox (TE-B1), built per check from the delivered plan's confirmed command and the check's pinned candidate.
+          fresh: { environment: process.env, docker: createDockerCli(), workspaceKey: () => setupWorkspaceKey(rootPath) } }) : undefined });
         return runTaskInvocation(invocation, {
           rootPath,
           model: session.model,
+          ...(evalFinalCheck === undefined ? {} : { evalFinalCheck }),
           // SR-1: the second reviewer's models, each with its own session (and proxy route).
-          ...(invocation.payload.workflowSecondReviewer === undefined ? {} : { secondReviewer: { candidates: secondReviewerRuntimes(invocation.payload, proxy, process.env) ?? [], ...(invocation.payload.workflowSecondReviewer.context === undefined ? {} : { context: invocation.payload.workflowSecondReviewer.context }) } }),
+          ...(invocation.payload.workflowSecondReviewer === undefined ? {} : { secondReviewer: { candidates: secondReviewerRuntimes(invocation.payload, proxy, process.env, (slot) => lazyModelProxy({ baseUrl: process.env.AGENTX_MODEL_PROXY_URL || controlPlaneUrl, source: modelAccessSource({ controlPlaneUrl, capability: invocation.callbackCapability, slot }) })) ?? [], ...(invocation.payload.workflowSecondReviewer.context === undefined ? {} : { context: invocation.payload.workflowSecondReviewer.context }) } }),
           // DR5: a design review's packet source and per-reviewer model keys (only an operation that carries the binding).
           ...(designReviewBindingOf(invocation.payload) === undefined ? {} : { designReview: designReviewDependencies({ controlPlaneUrl, capability: invocation.callbackCapability, proxyUrl: process.env.AGENTX_MODEL_PROXY_URL }) }),
           // MODEL3: a missing provider key that sent the task to the chosen fallback model is told to the task page, once, as a progress event.
@@ -183,6 +215,8 @@ const state = createWorkerServerState(
           contextSources: {
             catalog: contextToolsCatalogSource({ brokerUrl: controlPlaneUrl, capability: invocation.callbackCapability, onDiagnostic: (message) => console.log(JSON.stringify({ component: "worker", event: "context_sources", message })) }),
             call: brokerContextCall({ brokerUrl: controlPlaneUrl, capability: invocation.callbackCapability }),
+            // Pi's own MCP client, with the one server the egress gateway serves; ROVARA_PI_MCP=0 goes back to the worker's own tools for one release.
+            ...(piMcpEnabled(process.env) ? { mcp: { brokerUrl: controlPlaneUrl, capability: invocation.callbackCapability } } : {}),
           },
           ...(invocation.payload.workflowE2EAdmission === undefined ? {} : {
             workflowE2EEvidenceRoot: requiredEnvironment("CONTAINED_FOUNDATION_EVIDENCE_DIR"),

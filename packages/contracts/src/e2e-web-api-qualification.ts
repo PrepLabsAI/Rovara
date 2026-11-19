@@ -97,7 +97,7 @@ const requiredProbes: RequiredProbe[] = [
   // opens the model channel, so the guard goes on checking for the app's whole life: on a short interval (a socket mounted later ends the app) and before it answers each request. The last
   // step of the case loads the guard's own page, after the AI-navigated step, and asserts the marker the guard puts there once an earlier request was checked: the probe passes only if the
   // app started, stayed up while the executor drove it with the channel open, and the in-request checks ran. The `model-proxy` leg proves the name leads nowhere but the run's sinkhole.
-  { probeId: "web-agent-app-isolation-v1", assetDigest: "f383a9b102cd3d88d5377cbe4902b21b5a11ae1a960d7c93ba162fb2707bad4d", kind: "web", expectedOutcome: "PASS", cause: null, bundleDigest: "33716f10c5b021ec2845cc4e1fd8ab9d097ab897a066f2e8f23338d958dfd572", scenarioDigest: "efa380e5702e62cbbbd35acaff53f0a5766114368fa65183513485a43389d506",
+  { probeId: "web-agent-app-isolation-v1", assetDigest: "5d4d05074d74c0c91267e60a0ef095a47203380c9b1899a88591f6e612960c5a", kind: "web", expectedOutcome: "PASS", cause: null, bundleDigest: "33716f10c5b021ec2845cc4e1fd8ab9d097ab897a066f2e8f23338d958dfd572", scenarioDigest: "efa380e5702e62cbbbd35acaff53f0a5766114368fa65183513485a43389d506",
     buildCommandDigest: null, agent: { receipts: 2, verifiedReceipts: 2, downloads: 1, caseReasons: [] } },
 ];
 export const WEB_API_REQUIRED_PROBES: readonly RequiredProbe[] = Object.freeze(requiredProbes.map((probe) => Object.freeze(probe)));

@@ -17,11 +17,13 @@
 // (--outputFile, --junitxml): then it is per test, for the tests in the changed files. AgentX never alters a customer's command.
 import { lstat, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { isTestCommandHead, isValidTestId, redactText, testIdOf, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict } from "@agentx/contracts";
+import { TestProofWriteSchema, isTestCommandHead, isValidTestId, redactText, testIdOf, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict, type TestProofNotComparedReason, type TestProofWeakening } from "@agentx/contracts";
+import type { ScriptedReplyFacts } from "../model-helper-round.js";
+import type { GeneralFakeFacts } from "../general-fakes-round.js";
 import { runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
 import { isTestPath } from "./test-paths.js";
-import { testIdResolver } from "./test-ids.js";
-import { displayLine } from "./test-report.js";
+import { testIdResolver, withTestIds, type TestIdContext } from "./test-ids.js";
+import { absentOnNew, displayLine, originalRunLooksCut, parseTestReport, skipRise } from "./test-report.js";
 import { isUnconfirmedStop, isWorkspaceUnsafe, git, gitOriginalCode, type OriginalCode, type OriginalCodeRepository } from "./original-code.js";
 
 /** The whole run on the original code gets this long, inside what is left of the check round's budget. */
@@ -97,8 +99,9 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
   const now = options.now ?? Date.now;
   const started = now();
   const empty = { added: 0, changed: 0, deleted: 0 };
-  const result = (status: TestProof["status"], note: TestProof["note"], changedTests = empty, items: TestProofItem[] = []): TestProof => ({
-    schemaVersion: 1, candidateDigest: options.candidateDigest, status, note, changedTests, items, durationMs: Math.max(0, Math.round(now() - started)),
+  const result = (status: TestProof["status"], note: TestProof["note"], changedTests = empty, items: TestProofItem[] = [], weakening: Weakened = { compared: [], notCompared: [] }): TestProof => ({
+    schemaVersion: 1, candidateDigest: options.candidateDigest, status, note, changedTests, items,
+    ...(weakening.compared.length === 0 ? {} : { weakening: weakening.compared.slice(0, 64) }), ...(weakening.notCompared.length === 0 ? {} : { weakeningNotCompared: weakening.notCompared.slice(0, 64) }), durationMs: Math.max(0, Math.round(now() - started)),
   });
 
   // Showing the original code in only some repositories would mix two states: every repository needs a usable start commit (as defaultOriginalCode requires).
@@ -200,6 +203,13 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
       ? await perTestItems(base, reports.get(index), ran.oldReports.get(index), changedPresent, entry.after === "passed", testIdResolver({ root: options.rootPath, cwd: commands[index]!.cwd })) : undefined;
     if (tests !== undefined) perTest.set(base.checkId, tests);
   }
+  // TE-B3: what the run on the original code shows about the tests the change did not touch (skips that rose, tests that ran before and are gone now), from the same two reports.
+  const weakening: Weakened = { compared: [], notCompared: [] };
+  for (const { index, base, entry } of pending) {
+    const found = await weakeningOf(base.checkId, entry, reports.get(index), ran.oldReports.get(index), changedPresent, { root: options.rootPath, cwd: commands[index]!.cwd }, commands[index]!.args);
+    if ("reason" in found) weakening.notCompared.push({ checkId: base.checkId, reason: found.reason });
+    else weakening.compared.push(found);
+  }
   // Per test where a report allows it; past the item limit, one summary item per check instead (never dropped).
   const testCount = [...perTest.values()].reduce((total, tests) => total + tests.length, 0);
   const useTests = items.length + perCheck.length - perTest.size + testCount <= ITEMS_MAX;
@@ -209,7 +219,59 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
     : final.some((item) => item.reason === "timed_out" || item.reason === "budget") ? "timed_out" as const : "completed" as const;
   const verdicts = final.filter((item) => item.verdict !== "not_applicable");
   const status = stopped || verdicts.every((item) => item.verdict === "not_checked") ? "not_checked" as const : "checked" as const;
-  return result(status, note, changedTests, final.slice(0, ITEMS_MAX));
+  return result(status, note, changedTests, final.slice(0, ITEMS_MAX), weakening);
+}
+
+interface Weakened { compared: TestProofWeakening[]; notCompared: Array<{ checkId: string; reason: TestProofNotComparedReason }> }
+
+/**
+ * TE-B3: one check's skips among untouched tests (the original code's run, this code's run) and the tests that ran on the original code and are not in this code's report; or why they could not be compared. Only from two
+ * real reports: the run on the original code must have ended (a timed-out run leaves a partial report, which would name every test it did not reach), written a report of its own (not the very bytes the candidate's run
+ * wrote), and not look cut short (`originalRunLooksCut`: collection errors, a stop-at-first-failure option, far fewer untouched tests), because then a skip count or a missing test would only be the cut. Tests of the
+ * change's own test files are not compared: the original run shows them as the change wrote them, and in the usual test-first case the new test fails to load there.
+ */
+async function weakeningOf(checkId: string, oldEntry: CheckEntry, report: ReportFile | undefined, old: ReadResult | undefined, changedPaths: readonly string[], context: TestIdContext, args: readonly string[]): Promise<TestProofWeakening | { reason: TestProofNotComparedReason }> {
+  if (report === undefined || report.before.state !== "ok" || old === undefined || old.state !== "ok" || old.bytes.equals(report.before.bytes)) return { reason: "no_report" };
+  if (oldEntry.after !== "passed" && oldEntry.after !== "failed") return { reason: "original_run_incomplete" };
+  const was = parseTestReport(old.bytes.toString("utf8"), report.spec.kind);
+  const now = parseTestReport(report.before.bytes.toString("utf8"), report.spec.kind);
+  if (was === undefined || now === undefined) return { reason: "no_report" };
+  const [before, after] = [await withTestIds(was, context), await withTestIds(now, context)];
+  if (originalRunLooksCut(before, after, changedPaths, args)) return { reason: "original_run_truncated" };
+  const rise = skipRise(before, after, changedPaths);
+  const absent = absentOnNew(before, after, changedPaths);
+  if (rise === undefined || absent === undefined) return { reason: "no_report" };
+  return { checkId, skippedBefore: rise.before, skippedAfter: rise.after, absentOnNew: absent.ids, absentOnNewCount: absent.count };
+}
+
+/** Attach only the candidate's project-check facts; absent input preserves the legacy bytes exactly. */
+export function withScriptedReplyFacts(proof: TestProof, source: CheckPlan["source"], facts: ScriptedReplyFacts | undefined): TestProof {
+  if (source !== "project" || proof.status !== "checked" || facts === undefined) return proof;
+  const parsed = TestProofWriteSchema.shape.scriptedReplies.safeParse(facts);
+  const ids = new Set(proof.items.map((item) => item.checkId));
+  // 1 means "at least one, unknown", not a measured count. An unreadable part never becomes an absent marker.
+  const scriptedReplies = facts === "unknown" || !parsed.success
+    ? [...ids].map((checkId) => ({ checkId, taskMade: 1, counted: 0 }))
+    : (parsed.data ?? []).filter((entry) => ids.has(entry.checkId));
+  if (scriptedReplies.length === 0) return proof;
+  const written = { ...proof, scriptedReplies };
+  if (!TestProofWriteSchema.safeParse(written).success) throw new Error("unsupported scripted reply facts");
+  return written;
+}
+
+/**
+ * General fakes (DEC 234): the checks a Rovara-made fake answered, so the broker never counts them as change proof. Absent facts preserve the legacy bytes exactly. `unknown` (a call no check could be blamed for)
+ * marks every check the proof lists as fake-answered too. Facts that cannot be written throw, so the proof is not saved at all rather than saved without them.
+ */
+export function withGeneralFakeFacts(proof: TestProof, facts: GeneralFakeFacts | undefined): TestProof {
+  if (facts === undefined) return proof;
+  const served = new Map(facts.checks.map((entry) => [entry.checkId, entry.served]));
+  const ids = new Set(served.keys());
+  if (facts.unknown) for (const item of proof.items) ids.add(item.checkId);
+  if (ids.size === 0) return proof;
+  const written = { ...proof, madeByRovara: [...ids].map((checkId) => ({ checkId, served: Math.max(1, served.get(checkId) ?? 1) })) };
+  if (!TestProofWriteSchema.safeParse(written).success) throw new Error("unsupported general fake facts");
+  return written;
 }
 
 /**
@@ -220,8 +282,15 @@ export function serializeTestProof(proof: TestProof): string {
   let current = proof;
   const fits = () => Buffer.byteLength(JSON.stringify(current)) <= PROOF_MAX_BYTES;
   if (fits()) return JSON.stringify(current);
-  current = { ...proof, items: proof.items.map((item) => ({ ...item, label: item.label.slice(0, 120) || "check", ...(item.test === undefined ? {} : { test: item.test.slice(0, 80) }) })) };
-  while (!fits() && current.items.length > 0) current = { ...current, items: current.items.slice(0, Math.floor(current.items.length / 2)) };
+  // The weakening names go first (the counts stay), then the labels and test names.
+  if (proof.weakening !== undefined) current = { ...proof, weakening: proof.weakening.map((item) => ({ ...item, absentOnNew: item.absentOnNew.slice(0, 10).map((id) => id.slice(0, 120)) })) };
+  if (fits()) return JSON.stringify(current);
+  current = { ...current, items: proof.items.map((item) => ({ ...item, label: item.label.slice(0, 120) || "check", ...(item.test === undefined ? {} : { test: item.test.slice(0, 80) }) })) };
+  while (!fits() && current.items.length > 0) {
+    const items = current.items.slice(0, Math.floor(current.items.length / 2));
+    const ids = new Set(items.map((item) => item.checkId));
+    current = { ...current, items, ...(current.scriptedReplies === undefined ? {} : { scriptedReplies: current.scriptedReplies.filter((entry) => ids.has(entry.checkId)) }) };
+  }
   return JSON.stringify(current);
 }
 
@@ -260,10 +329,15 @@ const LOAD_FAILURE = [
   /cannot find symbol|cannot find name|undefined reference to|no required module provides package|error\[E\d{4}\]|could not compile|compilation (?:failed|error)|build failed|\[build failed\]/i,
   /\n# [\w./-]+\n[^\n]*\.go:\d+:\d+:/, /undefined: \w+/, /no such file or directory/i,
 ];
+// Output and report messages come from the customer's tests (a report may be 8 MiB), so each pattern here is linear in the text. `^\s*assert` with the `m` flag rescanned a run of blank lines from
+// every line of it; after a line start only blanks that are not line breaks are taken, which finds the same text (a match that ran over blank lines matches from the last of them).
+const ASSERT_THEN_WHERE = /^[^\S\n\r\u2028\u2029]*assert\b.+\n.*(?:where|AssertionError)/m;
+// `\bFAILED [^\n]*::[^\n]* - (?:assert|AssertionError)` rescanned a line from every `FAILED ` and every `::` on it. A line matches exactly when it does from its first `FAILED ` and the first
+// `::` after that, so only those are tried: each lookahead takes the shortest run and cannot give it back.
+const PYTEST_FAILED_ASSERT = /(?<![^\n])(?=([^\n]*?\bFAILED ))\1(?=([^\n]*?::))\2[^\n]* - (?:assert|AssertionError)/i;
 const ASSERTION_FAILURE = [
   /AssertionError/, /\bexpected\b[\s\S]{0,160}?\b(?:to be|to equal|to deeply equal|to strictly equal|to match|to contain|to have|to throw|to include|received|but got|but was|actual)\b/i,
-  /^E\s+assert\b/m, /^\s*assert\b.+\n.*(?:where|AssertionError)/m, /--- FAIL: /, /\bExpected:?[\s\S]{0,200}\b(?:Actual|Received|Got):?/i,
-  /\bFAILED [^\n]*::[^\n]* - (?:assert|AssertionError)/i, /Assertion (?:failed|error)/i,
+  /^E\s+assert\b/m, ASSERT_THEN_WHERE, /--- FAIL: /, /\bExpected:?[\s\S]{0,200}\b(?:Actual|Received|Got):?/i, PYTEST_FAILED_ASSERT, /Assertion (?:failed|error)/i,
 ];
 
 /** The verdict for a failure on the original code, from the check's output. See the heuristic at the top of this file. */
@@ -427,9 +501,10 @@ function parseJsonReport(text: string): TestRecord[] {
 /** JUnit XML: <testcase classname name file?> with a <failure>, <error> or <skipped> child when it did not pass. */
 function parseJunitReport(text: string): TestRecord[] {
   const records: TestRecord[] = [];
-  for (const match of text.matchAll(/<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g)) {
-    const attributes = new Map([...match[1]!.matchAll(/([\w:-]+)="([^"]*)"/g)].map((attribute) => [attribute[1]!, unescapeXml(attribute[2]!)] as const));
-    const body = match[2] ?? "";
+  for (const testcase of junitTestcases(text)) {
+    // A name starts where a run of name characters starts: from inside one, the old pattern rescanned the rest of the run from every character of it.
+    const attributes = new Map([...testcase.attributes.matchAll(/(?<![\w:-])([\w:-]+)="([^"]*)"/g)].map((attribute) => [attribute[1]!, unescapeXml(attribute[2]!)] as const));
+    const body = testcase.body ?? "";
     const status = /<(?:failure|error)\b/.test(body) ? "failed" : /<skipped\b/.test(body) ? "skipped" : "passed";
     const classname = attributes.get("classname");
     records.push({
@@ -439,6 +514,34 @@ function parseJunitReport(text: string): TestRecord[] {
     });
   }
   return records;
+}
+
+/**
+ * Each `<testcase …/>` and `<testcase …>…</testcase>` in order: what `/<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g` matched, in linear time. That pattern scanned to the end of
+ * the report from every opener with no `</testcase>` after it (quadratic: a report of `<testcase>` repeated took 50 ms at 64 KiB, and minutes at the 8 MiB a report may be). Here the
+ * next `>` and the next `</testcase>` are each found once and reused while they are still ahead.
+ */
+function* junitTestcases(text: string): Generator<{ attributes: string; body: string | undefined }> {
+  const OPEN = "<testcase";
+  const CLOSE = "</testcase>";
+  let at = 0;
+  let gt = -1;
+  let close = -1;
+  let noClose = false;
+  for (;;) {
+    const open = text.indexOf(OPEN, at);
+    if (open === -1) return;
+    const after = open + OPEN.length;
+    if (/\w/.test(text[after] ?? "")) { at = open + 1; continue; }
+    if (gt < after) gt = text.indexOf(">", after);
+    // No `>` after this opener: none after any later one.
+    if (gt === -1) return;
+    if (text[gt - 1] === "/") { yield { attributes: text.slice(after, gt - 1), body: undefined }; at = gt + 1; continue; }
+    if (!noClose && close <= gt) { close = text.indexOf(CLOSE, gt + 1); noClose = close === -1; }
+    if (noClose) { at = open + 1; continue; }
+    yield { attributes: text.slice(after, gt), body: text.slice(gt + 1, close) };
+    at = close + CLOSE.length;
+  }
 }
 
 function unescapeXml(text: string): string {

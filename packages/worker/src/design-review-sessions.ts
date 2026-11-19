@@ -2,7 +2,7 @@
 // Each reviewer is a NEW pi session made by `createWorkspacePiSession` as an agent-run session: its own system prompt (the role prompt), no repository context files and no coding preamble, the
 // read-only file tools (nothing for the merge step), and no history. The one user message is sent by `design-review.ts`; this file only wires pi to the port.
 import { randomUUID } from "node:crypto";
-import { DESIGN_REVIEW_ARTIFACT, MODEL_NOT_ENABLED_CODE, PACKET_DELIVERY_BYTES_MAX, agentXError, type DesignReviewBinding, type DesignReviewWorkerResult } from "@agentx/contracts";
+import { DESIGN_REVIEW_ARTIFACT, MODEL_NOT_ENABLED_CODE, PACKET_DELIVERY_BYTES_MAX, agentXError, type DesignReviewBinding, type DesignReviewWorkerResult, type InvocationModelRoute } from "@agentx/contracts";
 import type { ArtifactSink } from "./artifacts.js";
 import { runDesignReview, modelKeyIdOf, type DesignReviewOptions, type DesignReviewPorts, type DesignReviewSession, type OpenDesignReviewSession } from "./design-review.js";
 import type { FileOpsTarget } from "./file-ops-exec.js";
@@ -11,12 +11,20 @@ import { lazyModelProxy, modelAccessSource } from "./model-access.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type WorkspaceModelConfiguration } from "./pi-session.js";
 import { assistantOutcome, failedTurn, type AssistantOutcome } from "./session-events.js";
 import { designReviewRuntime } from "./task-model.js";
+import { designMergeAnswerSpec, designReviewAnswerSpec } from "./design-review-answers.js";
+import { answerToolInstruction, createAnswerChannel, structuredAnswersEnabled } from "./structured-answer.js";
+import { createTaskUsageTelemetry } from "./usage.js";
 import { assistantText } from "./verification/extension.js";
 
 const CAPABILITY_HEADER = "x-agentx-callback-capability";
 const PACKET_PATH = "/v1/internal/design-review/packet";
 const PACKET_TIMEOUT_MS = 60_000;
 const READ_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls"]);
+/**
+ * The most output tokens one reviewer turn may produce. A reviewer answers with findings, not a document; a limit of its own keeps the broker's worst-case reservation for a call (the output limit at the output price) inside the
+ * reviewer's key budget, so a model whose own limit is very high does not make its first call unaffordable.
+ */
+export const DESIGN_REVIEW_MAX_OUTPUT_TOKENS = 16_000;
 
 /** Whether this operation is the design-review form of the plan check. Plan check without the binding is unchanged. */
 export function designReviewBindingOf(payload: { workflowMode?: string | undefined; designReview?: DesignReviewBinding | undefined }): DesignReviewBinding | undefined {
@@ -31,13 +39,13 @@ export const DESIGN_REVIEW_NO_OPERATION_KEY = "design-review-operation-has-no-ke
  * only and refuses the operation's own (security S6). Its own session is still opened (its transcript and rule files) but never prompted, and opening a proxied session asks for its key at once, so
  * that session holds `DESIGN_REVIEW_NO_OPERATION_KEY` and never asks the broker. Each reviewer asks for its slot's key itself (`slotRuntimeFor`). Any other operation asks for its own key, as before.
  */
-export function operationModelProxy(input: { payload: { workflowMode?: string | undefined; designReview?: DesignReviewBinding | undefined }; proxyUrl: string | undefined; controlPlaneUrl: string; capability: string; fetch?: typeof fetch }): ModelProxyOptions | undefined {
-  if (input.proxyUrl === undefined || input.proxyUrl === "") return undefined;
+export function operationModelProxy(input: { payload: { workflowMode?: string | undefined; designReview?: DesignReviewBinding | undefined; modelRoute?: InvocationModelRoute | undefined }; proxyUrl: string | undefined; controlPlaneUrl: string; capability: string; fetch?: typeof fetch }): ModelProxyOptions | undefined {
+  if (!input.proxyUrl && input.payload.modelRoute === undefined) return undefined;
   if (designReviewBindingOf(input.payload) !== undefined) {
-    const baseUrl = input.proxyUrl;
+    const baseUrl = input.proxyUrl || input.controlPlaneUrl;
     return lazyModelProxy({ baseUrl, source: async () => ({ baseUrl, apiKey: DESIGN_REVIEW_NO_OPERATION_KEY, expiresAt: Number.MAX_SAFE_INTEGER }) });
   }
-  return lazyModelProxy({ baseUrl: input.proxyUrl, source: modelAccessSource({ controlPlaneUrl: input.controlPlaneUrl, capability: input.capability, ...(input.fetch === undefined ? {} : { fetch: input.fetch }) }) });
+  return lazyModelProxy({ baseUrl: input.proxyUrl || input.controlPlaneUrl, source: modelAccessSource({ ...(input.proxyUrl ? { fallbackBaseUrl: input.proxyUrl } : {}), controlPlaneUrl: input.controlPlaneUrl, capability: input.capability, ...(input.fetch === undefined ? {} : { fetch: input.fetch }) }) });
 }
 
 /** The reviewer's packet from the broker's route, with the operation's capability. Bounded; anything but a JSON answer is an error (the reviewer then gives no result). */
@@ -75,6 +83,15 @@ export interface ReviewSessionOptions {
   /** The model and adapter of one session. The default builds them from the binding's model and the key slot's proxy. */
   runtimeFor(open: OpenDesignReviewSession): { model: WorkspaceModelConfiguration; piAdapter?: PiSessionAdapter | undefined; keyId?: (() => Promise<string | undefined>) | undefined };
   onDiagnostic?: (message: string) => void;
+  /** Internal worker hook: ordinary usage events, booked by the existing task ledger writer. */
+  onUsage?: (payload: unknown) => void;
+  /**
+   * Standing instructions (decision 57.2): the company's rules (and the plan check's own layers) the broker sent, added to the system text AFTER the role prompt, so the text still BEGINS with the role
+   * prompt (`sentAsRendered`) and the addition is counted in `harnessSystemChars` like Pi's own sections.
+   */
+  standingInstructions?: string | undefined;
+  /** Structured answers: a reviewer and the merge step answer through a tool Pi checks (design-review-answers.ts). Default: on, unless ROVARA_STRUCTURED_ANSWERS=0. */
+  structuredAnswers?: boolean | undefined;
 }
 
 /** A new pi session for one reviewer or the merge step, behind the orchestration's port. */
@@ -82,6 +99,12 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
   return async (open) => {
     const runtime = options.runtimeFor(open);
     const sessionId = randomUUID();
+    // The answer tool's instruction goes in the system text, after the role prompt (the user message is the packet's, digest-checked, and cannot carry it); the text still BEGINS with the role prompt.
+    const answerSpec = options.structuredAnswers ?? structuredAnswersEnabled()
+      ? open.purpose === "merge" ? designMergeAnswerSpec() : open.role === undefined ? undefined : designReviewAnswerSpec(open.role, { withParaphrase: open.withParaphrase === true })
+      : undefined;
+    const answers = answerSpec === undefined ? undefined : createAnswerChannel(answerSpec);
+    const standing = options.standingInstructions === undefined || options.standingInstructions === "" ? open.system : `${open.system}\n\n${options.standingInstructions}`;
     const handle = await createWorkspacePiSession({
       rootPath: options.rootPath,
       model: runtime.model,
@@ -92,9 +115,12 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
       ...(options.fileTools === undefined ? {} : { fileTools: options.fileTools }),
       ...(options.localFileTools === undefined ? {} : { localFileTools: options.localFileTools }),
       agentTools: [...open.tools],
-      agentRun: { systemPrompt: open.system, tools: [] },
+      maxOutputTokens: DESIGN_REVIEW_MAX_OUTPUT_TOKENS,
+      agentRun: { systemPrompt: answerSpec === undefined ? standing : `${standing}\n\n${answerToolInstruction(answerSpec.name)}`, tools: [] },
+      ...(answers === undefined ? {} : { answerTools: [answers.tool] }),
     }, runtime.piAdapter);
     let lastOutcome: AssistantOutcome | undefined;
+    let finished = false, disposed = false;
     let lastText: string | undefined;
     let first: { system: string; user: string; messages: number; systemObserved: boolean } | undefined;
     const files = new Set<string>();
@@ -110,6 +136,7 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
     const session: DesignReviewSession = {
       sessionId,
       async prompt(text) {
+        finished = false;
         lastOutcome = undefined;
         lastText = undefined;
         // The first request of a session with no history is the system message and this one user message. A session that already holds messages would say so here.
@@ -122,18 +149,33 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
         await handle.prompt(text);
         const failure = failedTurn(lastOutcome);
         if (failure !== undefined) throw failure;
-        return lastText;
+        finished = true;
+        // An accepted answer reaches the orchestration as the block its reader reads; with none (the model wrote its answer as text) the text is what it was.
+        return answers?.take() ?? lastText;
       },
       firstRequest: () => first,
       filesRead: () => [...files],
-      tools: () => [...open.tools],
+      // The tools the session had: the read-only file tools and, when structured answers are on, the answer tool (it has no effect on the workspace; the broker's read-only check names it).
+      tools: () => [...open.tools, ...(answerSpec === undefined ? [] : [answerSpec.name])],
       keyId: async () => runtime.keyId?.(),
       usage: () => {
         const stats = handle.getSessionStats();
         return { tokensIn: Math.max(0, Math.trunc(stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite)), tokensOut: Math.max(0, Math.trunc(stats.tokens.output)), costUsd: Number.isFinite(stats.cost) ? Math.max(0, stats.cost) : 0 };
       },
       abort: () => handle.abort(),
-      dispose: () => { unsubscribe(); handle.dispose(); },
+      dispose: () => {
+        if (disposed) return;
+        disposed = true;
+        try {
+          if (options.onUsage !== undefined) {
+            let payload: unknown;
+            try {
+              payload = createTaskUsageTelemetry(handle.getSessionStats(), { ...handle.getModel(), ...(runtime.model.cacheRetention === undefined ? {} : { cacheRetention: runtime.model.cacheRetention }) }, finished ? "SUCCEEDED" : lastOutcome?.stopReason === "aborted" ? "CANCELLED" : "FAILED");
+            } catch { payload = {}; } // Unreadable usage makes the existing ledger refuse further spend.
+            options.onUsage(payload);
+          }
+        } finally { unsubscribe(); handle.dispose(); }
+      },
     };
     return session;
   };
@@ -148,10 +190,16 @@ export function slotRuntimeFor(input: { controlPlaneUrl: string; capability: str
     const declared = open.purpose === "merge" ? input.binding.merge : input.binding.reviewers.find((entry) => entry.keySlot === open.keySlot);
     // The model and route come from the binding, never from the port's caller: a slot the binding does not hold is refused.
     if (declared === undefined || declared.keySlot !== open.keySlot) throw agentXError("CONFIG_INVALID", "a design review session was asked for with a key slot the binding does not hold");
-    const proxy = input.proxyUrl === undefined ? undefined
-      : lazyModelProxy({ baseUrl: input.proxyUrl, source: modelAccessSource({ controlPlaneUrl: input.controlPlaneUrl, capability: input.capability, slot: declared.keySlot, ...(input.fetch === undefined ? {} : { fetch: input.fetch }) }) });
+    let firstKeyId: string | undefined;
+    const source = modelAccessSource({ ...(input.proxyUrl ? { fallbackBaseUrl: input.proxyUrl } : {}), controlPlaneUrl: input.controlPlaneUrl, capability: input.capability, slot: declared.keySlot, ...(input.fetch === undefined ? {} : { fetch: input.fetch }) });
+    const proxy = !input.proxyUrl && declared.modelRoute === undefined ? undefined
+      : lazyModelProxy({ baseUrl: input.proxyUrl || input.controlPlaneUrl, source: async () => {
+        const answer = await source();
+        firstKeyId ??= modelKeyIdOf(answer.apiKey);
+        return answer;
+      } });
     const runtime = designReviewRuntime({ model: declared.model, modelRoute: declared.modelRoute }, proxy, input.environment);
-    return { ...runtime, keyId: async () => (proxy === undefined ? undefined : modelKeyIdOf(await proxy.apiKey())) };
+    return { ...runtime, keyId: async () => (proxy === undefined ? undefined : firstKeyId ?? modelKeyIdOf(await proxy.apiKey())) };
   };
 }
 

@@ -59,6 +59,18 @@ export function savedEnvRepositoryName(input: { env: string; orgId: string; proj
   return `${savedEnvRepositoryPrefix(input.env)}/o${orgHash}/p${projectHash}`;
 }
 
+/** L4-EVS: whether `name` is the repository of THIS org's THIS project (its last two segments are the hashes `savedEnvRepositoryName` makes for them; the environment prefix is not compared). Never throws. */
+export function savedEnvRepositoryIsFor(name: string, input: { orgId: string; projectId: string }): boolean {
+  try {
+    if (!isSavedEnvRepositoryName(name)) return false;
+    const org = IdText.parse(input.orgId);
+    const project = IdText.parse(input.projectId);
+    const orgHash = sha256Hex(`rovara.saved-env.org\u0000${org}`).slice(0, 32);
+    const projectHash = sha256Hex(`rovara.saved-env.project\u0000${org}\u0000${project}`).slice(0, 32);
+    return name.endsWith(`/o${orgHash}/p${projectHash}`);
+  } catch { return false; }
+}
+
 /** Whether `name` is exactly the shape `savedEnvRepositoryName` makes (no wildcard, no policy variable, no extra segment). */
 export function isSavedEnvRepositoryName(name: string): boolean {
   return REPOSITORY_NAME.test(name);
@@ -70,7 +82,7 @@ export const savedEnvRolePrefix = (env: string): string => `agentx-${EnvName.par
 export const savedEnvPushRoleName = (env: string): string => `agentx-${EnvName.parse(env)}-img-push`;
 export const savedEnvPullRoleName = (env: string): string => `agentx-${EnvName.parse(env)}-img-pull`;
 export const savedEnvManageRoleName = (env: string): string => `agentx-${EnvName.parse(env)}-img-manage`;
-/** The role ECR assumes to create a repository from the creation template. Fixed too, so Enterprise can name it in its own key policy BEFORE the install is deployed (the ARN is `arn:<partition>:iam::<account>:role/agentx/<env>/<this name>`). */
+/** The role ECR assumes to create a repository from the creation template. Fixed too, so a company install can name it in its own key policy BEFORE the install is deployed (the ARN is `arn:<partition>:iam::<account>:role/agentx/<env>/<this name>`). */
 export const savedEnvCreateRoleName = (env: string): string => `agentx-${EnvName.parse(env)}-img-create`;
 
 export interface SavedEnvAccountScope { partition: string; region: string; account: string }
@@ -168,17 +180,40 @@ export function savedEnvLifecyclePolicy(keep: number): { rules: Array<Record<str
 
 // ---- what the worker gets and returns
 
-const REGISTRY_HOST = /^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?$/u;
+const ECR_REGISTRY_HOST = /^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?$/u;
+/**
+ * A registry on the owner's own machine (Code's local Docker adapter): the loopback name or address and a port, nothing else. The host goes into an image reference and a Docker login
+ * file, so it is held to a shape that can only name this machine: no other host, no path, no credential in it.
+ */
+const LOCAL_REGISTRY_HOST = /^(?:localhost|127\.0\.0\.1):(?:[1-9]\d{3,4})$/u;
+const isRegistryHost = (value: string): boolean => ECR_REGISTRY_HOST.test(value) || (LOCAL_REGISTRY_HOST.test(value) && Number(value.slice(value.lastIndexOf(":") + 1)) <= 65_535);
+/** The user name of a registry login: the cloud registry's fixed `AWS`, or the one a local registry container is given. */
+export const SAVED_ENV_REGISTRY_USERNAMES = ["AWS", "rovara-local"] as const;
 
-/** A registry login for ONE repository, short-lived. The worker uses it for one push or one pull and then forgets it. It is never logged and never in an image. */
-export const SavedEnvRegistryAuthSchema = z.object({
-  registry: z.string().regex(REGISTRY_HOST, "an ECR registry host"),
-  repository: z.string().refine(isSavedEnvRepositoryName, "a saved environment repository name"),
-  username: z.literal("AWS"),
-  password: z.string().min(16).max(8192),
-  expiresAt: z.string().datetime(),
-}).strict();
+/**
+ * A registry login for ONE repository, short-lived. The worker uses it for one push or one pull and then forgets it. It is never logged and never in an image.
+ * The schema is made by a factory so a hosted install can hold itself to one registry kind: `allowLocal: false` takes only the cloud registry's host and its fixed user name, so a worker of a hosted install is
+ * never told to log in to a loopback address. Code's own use (the laptop's local registry) is the default, `SavedEnvRegistryAuthSchema`; a hosted install validates with `HostedSavedEnvRegistryAuthSchema`.
+ */
+export function savedEnvRegistryAuthSchema(options: { allowLocal: boolean }) {
+  return z.object({
+    registry: z.string().refine((value) => (options.allowLocal ? isRegistryHost(value) : ECR_REGISTRY_HOST.test(value)), options.allowLocal ? "a cloud registry host, or a registry on this machine (localhost or 127.0.0.1 with a port)" : "a cloud registry host"),
+    repository: z.string().refine(isSavedEnvRepositoryName, "a saved environment repository name"),
+    username: options.allowLocal ? z.enum(SAVED_ENV_REGISTRY_USERNAMES) : z.literal("AWS"),
+    password: z.string().min(16).max(8192),
+    expiresAt: z.string().datetime(),
+  }).strict();
+}
+export const SavedEnvRegistryAuthSchema = savedEnvRegistryAuthSchema({ allowLocal: true });
+export const HostedSavedEnvRegistryAuthSchema = savedEnvRegistryAuthSchema({ allowLocal: false });
 export type SavedEnvRegistryAuth = z.infer<typeof SavedEnvRegistryAuthSchema>;
+/**
+ * What the parse sites in the broker's core ask of a registry login's schema: they take it as a setting, defaulting to `SavedEnvRegistryAuthSchema`. A hosted install passes `HostedSavedEnvRegistryAuthSchema`, so
+ * a login that names a loopback registry is refused where the core reads it, not only where an adapter makes it.
+ */
+export interface SavedEnvRegistryAuthParser {
+  safeParse(value: unknown): { success: true; data: SavedEnvRegistryAuth } | { success: false };
+}
 
 /** The worker feature (listed on /ping) that takes the prepare payload's `savedEnv`. A worker without it is sent no field and sets up fresh. */
 export const PREPARE_SAVED_ENV_FEATURE = "prepare.savedEnv.v1" as const;

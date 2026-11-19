@@ -296,7 +296,7 @@ export function sourceAlias(orgId: OrgId, sourceId: string, model: ModelIdentifi
 
 // ---- the texts the admin routes show (Task 24b)
 
-/** What every company AI source route answers on an install with no model proxy (private installs today). */
+/** What every company AI source route answers on an install with no model proxy (single-company installs today). */
 export const MODEL_SOURCES_NEED_PROXY = "company AI sources need Rovara's model proxy, which this install doesn't run";
 /** Shown beside every Bedrock source until Task 37's live test has passed. */
 export const BEDROCK_NOT_TESTED_NOTE = "NOT TESTED: Bedrock in your own AWS account hasn't been tested yet.";

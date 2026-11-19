@@ -1,0 +1,160 @@
+// The lessons library's audit events written to the install's `audit-sink` point. The library names more actions than a ledger keeps (`lesson.*`), each with a fixed list of facts. This maps the ones that
+// have a ledger name and keeps only the facts that action allows, and never writes an event under another action's name.
+// An action with no ledger name is either listed in BOOKKEEPING (counters, pauses, votes: it grants nothing, and is skipped for `emitAudit`) or unknown. Under `requireAudit` (the event grants something:
+// an approval, a go-live, a rollback, a promotion, a setting loosened) an action with no ledger name THROWS, so the change is refused instead of passing with no record. A test holds that every
+// action of the library is either mapped or listed, so a new action cannot be added without a decision.
+//
+// `rovara up` registers the document audit sink, which keeps every event this maps; an adapter that keeps a ledger commits the event with the change (`stage`).
+import { createHash } from "node:crypto";
+import type { AuditActor, AuditEvent, AuditSink, TransactItem } from "@agentx/contracts";
+
+type AuditAction = string;
+import type { LessonAuditEvent, LessonAuditSink } from "./ports.js";
+import type { LessonAuditAction } from "./types.js";
+
+type Mapped = { action: AuditAction; facts: (event: LessonAuditEvent) => Record<string, string | number | boolean> };
+const num = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+const word = (value: unknown, fallback: string): string => (typeof value === "string" && /^[a-z_]{1,40}$/u.test(value) ? value : fallback);
+
+const modelWord = (value: unknown): string => (typeof value === "string" && /^[A-Za-z0-9:_\-.#@/]{1,128}$/u.test(value) ? value : "default");
+
+/**
+ * How the audit chain names a project: `p_` and 24 hex characters of a hash of the company and the project's name. The same project always gets the same reference (a reader that knows the name can find its
+ * events), and the name itself is never written into the chain, which is kept for good and never erased.
+ */
+export function auditProjectRef(companyId: string, project: string): string {
+  return `p_${createHash("sha256").update(`lessons-audit-project\u0000${companyId}\u0000${project}`).digest("hex").slice(0, 24)}`;
+}
+
+/** The unit ids of a knowledge read as `u1`..`u10` (a fact holds one short value): only values shaped like a lesson id, at most ten. */
+const unitFacts = (e: LessonAuditEvent): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (let i = 1; i <= 10; i += 1) {
+    const value = e.facts[`u${String(i)}`];
+    if (typeof value === "string" && /^[A-Za-z0-9_-]{4,64}$/u.test(value)) out[`u${String(i)}`] = value;
+  }
+  return out;
+};
+
+/** The id of the script token that asked (`stk_` and 20 characters): an id, never a secret. */
+const tokenFact = (e: LessonAuditEvent): Record<string, string> => (typeof e.facts["tokenId"] === "string" && /^stk_[0-9a-z]{20}$/u.test(e.facts["tokenId"]) ? { tokenId: e.facts["tokenId"] } : {});
+
+const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
+  "lesson.candidate_created": { action: "lesson.proposed", facts: (e) => ({ lessonType: word(e.facts["type"], "unknown"), tier: 1 }) },
+  "lesson.pending": { action: "lesson.proposed", facts: (e) => ({ lessonType: "unknown", tier: num(e.facts["tier"]) }) },
+  "lesson.approved": { action: "lesson.approved", facts: (e) => ({ tier: num(e.facts["tier"]), approvals: num(e.facts["count"]), soleOwner: false }) },
+  "lesson.sole_owner_exception": { action: "lesson.approved", facts: (e) => ({ tier: num(e.facts["tier"]), approvals: 1, soleOwner: true }) },
+  "lesson.activated": { action: "lesson.activated", facts: (e) => ({ lessonType: word(e.facts["type"], "unknown"), tier: num(e.facts["tier"]), auto: false }) },
+  "lesson.auto_applied": { action: "lesson.activated", facts: (e) => ({ lessonType: word(e.facts["type"], "unknown"), tier: num(e.facts["tier"]), auto: true }) },
+  "lesson.updated": { action: "lesson.edited", facts: (e) => ({ tier: num(e.facts["tier"]), fromTier: num(e.facts["fromTier"]) }) },
+  "lesson.rejected": { action: "lesson.rejected", facts: (e) => ({ tier: num(e.facts["tier"]) }) },
+  // A person asked, in a pull request comment, for a lesson to be retired: the ledger names who. The owner retires it on their page (`lesson.retired`).
+  "lesson.retire_requested": { action: "lesson.retire_requested", facts: (e) => ({ pullRequest: num(e.facts["pullRequest"]) }) },
+  "lesson.retired": { action: "lesson.retired", facts: (e) => ({ cause: word(e.facts["cause"], "person"), tier: num(e.facts["tier"]) }) },
+  "lesson.auto_retired": { action: "lesson.retired", facts: (e) => ({ cause: "harmful", tier: num(e.facts["tier"]) }) },
+  "lesson.expired": { action: "lesson.expired", facts: (e) => ({ tier: num(e.facts["tier"]) }) },
+  "lesson.withdrawn": { action: "lesson.withdrawn", facts: (e) => ({ cause: word(e.facts["cause"], "source_deleted") }) },
+  "lesson.refused": { action: "lesson.refused", facts: (e) => ({ refusal: word(e.facts["reason"], "refused") }) },
+  "lesson.promoted": { action: "lesson.promoted", facts: (e) => ({ tier: num(e.facts["tier"]) }) },
+  // Phase 4: a lesson made permanent as a rule, a draft check task or a skill. The ledger line is the promotion (its target is in the lesson's `became` link, not in the chain).
+  "lesson.graduated": { action: "lesson.promoted", facts: (e) => ({ tier: num(e.facts["tier"]) }) },
+  "lesson.rolled_back": { action: "lesson.rolled_back", facts: (e) => ({ fromSetVersion: num(e.facts["from"]), toSetVersion: num(e.facts["to"]) }) },
+  // A citation that moved, and a duplicate that was merged in, each commit a new version of the lesson's text or lines: recorded as an edit by the system.
+  "lesson.citation_moved": { action: "lesson.edited", facts: (e) => ({ tier: num(e.facts["tier"]), fromTier: num(e.facts["tier"]) }) },
+  "lesson.merged": { action: "lesson.edited", facts: (e) => ({ tier: num(e.facts["tier"]), fromTier: num(e.facts["tier"]) }) },
+  // Loosening the tier-0 approval setting and the company sole-owner switch (a proposal for a second person, then the change; the exception is audited as such).
+  "lesson.tier0_setting_proposed": { action: "lesson.tier0_setting_proposed", facts: (e) => ({ scope: word(e.facts["scope"], "project"), fromLevel: word(e.facts["from"], "unknown"), toLevel: word(e.facts["to"], "unknown") }) },
+  "lesson.tier0_setting_changed": { action: "lesson.tier0_setting_changed", facts: (e) => ({ scope: word(e.facts["scope"], "project"), fromLevel: word(e.facts["from"], "unknown"), toLevel: word(e.facts["to"], "unknown"), mode: word(e.facts["mode"], "second_person") }) },
+  // A fenced refusal that leaves the proposal open: recorded as a refusal (the contract's `lesson.refused`) with a fixed word.
+  "lesson.tier0_setting_refused_retryable": { action: "lesson.refused", facts: () => ({ refusal: "membership_changed_retry" }) },
+  // Approve by exception: a lesson that went live on trial is a go-live with no person (`auto: true`); a trial lesson retired by a thumbs-down or a contradicting correction is a retire with a fixed cause.
+  "lesson.trial_started": { action: "lesson.activated", facts: (e) => ({ lessonType: word(e.facts["type"], "unknown"), tier: num(e.facts["tier"]), auto: true }) },
+  "lesson.trial_retired": { action: "lesson.retired", facts: (e) => ({ cause: word(e.facts["reason"], "thumbs_down"), tier: num(e.facts["tier"]) }) },
+  "lesson.preset_changed": { action: "lesson.preset_changed", facts: (e) => ({ scope: word(e.facts["scope"], "project"), fromPreset: word(e.facts["from"], "unknown"), toPreset: word(e.facts["to"], "unknown"), mode: word(e.facts["mode"], "direct") }) },
+  // A project's learning mode set by a project or company admin through the developer API (off, suggest or auto; `collect` is the laptop's).
+  // `via`: "trial_offer" when it is the answer to the earned-trust offer (with the tally that earned it), else "direct".
+  "lesson.mode_changed": { action: "lesson.mode_changed", facts: (e) => ({ fromMode: word(e.facts["from"], "unknown"), toMode: word(e.facts["to"], "unknown"), via: word(e.facts["via"], "direct"), ...(e.facts["via"] === "trial_offer" ? { approvals: num(e.facts["approvals"]), drops: num(e.facts["drops"]) } : {}) }) },
+  // A project or company admin said "not now" to the earned-trust offer ("let low-risk lessons go live on trial?"), with the tally that earned it. An accept is recorded as the mode change (`via: trial_offer`).
+  "lesson.trial_offer_answered": { action: "lesson.trial_offer_answered", facts: (e) => ({ answer: word(e.facts["answer"], "unknown"), approvals: num(e.facts["approvals"]), drops: num(e.facts["drops"]) }) },
+  // A project or company admin turned the weekly lessons summary in the chats on or off (developer API).
+  "lesson.digest_switched": { action: "lesson.digest_switched", facts: (e) => ({ enabled: e.facts["enabled"] === true }) },
+  // A project or company admin paused or resumed one source of learning on "Where Rovara learns from" (`learning-sources.ts`): which row (a fixed key) and whether it is now paused. Written BEFORE the change.
+  "lesson.learning_source_switched": { action: "lesson.learning_source_switched", facts: (e) => ({ source: word(e.facts["source"], "unknown"), paused: e.facts["paused"] === true }) },
+  // A person who decides lessons answered "Keep it?" on a lesson nobody had needed for a long time: it is renewed for a window (the lesson and the person; no words).
+  "lesson.kept": { action: "lesson.kept", facts: () => ({}) },
+  "lesson.preset_proposed": { action: "lesson.preset_proposed", facts: (e) => ({ scope: word(e.facts["scope"], "project"), fromPreset: word(e.facts["from"], "unknown"), toPreset: word(e.facts["to"], "unknown") }) },
+  // Erasing a commenter took back the harmful mark that retired a lesson, and the rest no longer justify it: the lesson goes back to a person as a pending card (never live by itself), recorded as a proposal.
+  "lesson.harm_reversed": { action: "lesson.proposed", facts: (e) => ({ lessonType: word(e.facts["type"], "unknown"), tier: num(e.facts["tier"]) }) },
+  "lesson.local_tools_switched": { action: "lesson.local_tools_switched", facts: (e) => ({ scope: word(e.facts["scope"], "project"), enabled: e.facts["enabled"] === true }) },
+  // An operator starts a replay copy of a past task (ids, fixed words and counts only; written BEFORE the copy is started), and a frozen snapshot is created for it.
+  "lesson.replay_started": { action: "lesson.replay_started", facts: (e) => ({ operator: modelWord(e.facts["operator"]), memory: word(e.facts["memory"], "off"), snapshotLessons: num(e.facts["snapshotLessons"]), maxCents: num(e.facts["maxCents"]), sourceTask: modelWord(e.facts["sourceTask"]) }) },
+  "lesson.replay_read": { action: "lesson.replay_read", facts: (e) => ({ operator: modelWord(e.facts["operator"]), what: word(e.facts["what"], "subject"), maxCents: num(e.facts["maxCents"]), target: modelWord(e.facts["target"]) }) },
+  "lesson.snapshot_created": { action: "lesson.snapshot_created", facts: (e) => ({ lessonSetVersion: num(e.facts["lessonSetVersion"]), lessonCount: num(e.facts["lessonCount"]) }) },
+  // Team knowledge read by a tool outside Rovara (the lessons route, `agentx mcp`): one event per call with the tool's fixed name, how it asked, the number of units and the unit IDS (u1..u10). Ids and numbers only, never text.
+  "lesson.knowledge_read": { action: "lesson.knowledge_read", facts: (e) => ({ tool: word(e.facts["tool"], "unknown"), via: word(e.facts["via"], "person"), units: num(e.facts["units"]), ...tokenFact(e), ...unitFacts(e) }) },
+  // One person's tools were served more than the line of distinct units in a day: written once a day, numbers only.
+  "lesson.knowledge_read_alert": { action: "lesson.knowledge_read_alert", facts: (e) => ({ distinct: num(e.facts["distinct"]), line: num(e.facts["line"]) }) },
+  // A team suggestion from an AI tool outside Rovara or from one of Rovara's own agents (L4-AK3): written BEFORE it is stored. Who proposed (tool or agent) and the lesson type, never the text.
+  "lesson.knowledge_proposed": { action: "lesson.knowledge_proposed", facts: (e) => ({ by: word(e.facts["by"], "tool"), lessonType: word(e.facts["type"], "unknown") }) },
+  // Skills made from a proven procedure lesson (L4-AK3): the skill's name and version and fixed words, never its text. An activation is the second person's approval going live, so it is on the ledger with who approved.
+  "lesson.skill_drafted": { action: "lesson.skill_drafted", facts: (e) => ({ skill: modelWord(e.facts["skill"]), version: num(e.facts["version"]) }) },
+  "lesson.skill_edited": { action: "lesson.skill_edited", facts: (e) => ({ skill: modelWord(e.facts["skill"]), version: num(e.facts["version"]) }) },
+  "lesson.skill_approved": { action: "lesson.skill_approved", facts: (e) => ({ skill: modelWord(e.facts["skill"]), version: num(e.facts["version"]), approvals: num(e.facts["approvals"]) }) },
+  "lesson.skill_activated": { action: "lesson.skill_activated", facts: (e) => ({ skill: modelWord(e.facts["skill"]), version: num(e.facts["version"]), approvals: num(e.facts["approvals"]) }) },
+  "lesson.skill_retired": { action: "lesson.skill_retired", facts: (e) => ({ skill: modelWord(e.facts["skill"]), version: num(e.facts["version"]) }) },
+  // Stable is what lets a lesson leave Rovara (to a local coding tool), so it is on the ledger.
+  "lesson.trial_stable": { action: "lesson.trial_stable", facts: (e) => ({ tier: num(e.facts["tier"]) }) },
+  "lesson.sole_owner_switch_proposed": { action: "lesson.sole_owner_switch_proposed", facts: (e) => ({ fromEnabled: e.facts["from"] === true, toEnabled: e.facts["to"] === true }) },
+  "lesson.sole_owner_switch_changed": { action: "lesson.sole_owner_switch_changed", facts: (e) => ({ fromEnabled: e.facts["from"] === true, toEnabled: e.facts["to"] === true, mode: word(e.facts["mode"], "second_person") }) },
+  // The company's choice of the model its lesson learning runs on (or back to the default). Model names are `provider/modelId`, which the safe-fact filter already allows.
+  "lesson.model_set": { action: "lesson.model_set", facts: (e) => ({ fromModel: modelWord(e.facts["from"]), toModel: modelWord(e.facts["to"]) }) },
+};
+
+/** Actions with no ledger name on purpose: bookkeeping that grants nothing. Under `emitAudit` they are skipped; under `requireAudit` they would fail, so a grant never uses one. */
+export const BOOKKEEPING: readonly LessonAuditAction[] = [
+  "lesson.stale", "lesson.retire_proposed", "lesson.wrong_here", "lesson.helpful", "lesson.source_paused", "lesson.source_resumed", "lesson.volume_spike",
+  "lesson.contradiction", "lesson.promote_failed", "lesson.held_source_paused", "lesson.tier0_setting_cancelled", "lesson.proposal_withdrawn",
+];
+/** The actions that have a ledger name. */
+export const LEDGERED: readonly LessonAuditAction[] = Object.keys(MAP) as LessonAuditAction[];
+
+/** The ids the ledger accepts for an actor: a person's id as it is, anything else is the system. */
+const actorOf = (actor: string | undefined): AuditActor => (actor !== undefined && /^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$/u.test(actor) ? { type: "person", id: actor } : { type: "system", id: "rovara" });
+
+/** A stable event id: the same occurrence names the same id, a different one never does. */
+const eventIdOf = (...parts: readonly string[]): string => createHash("sha256").update(parts.join("\u0000")).digest("hex").slice(0, 40);
+
+/** The lessons audit sink over the `audit-sink` point. `stage` hands the caller the steps for its own `DocumentStore.transact`, so a change and its record commit together. */
+export function lessonAuditSink(sink: AuditSink, now: () => number, companyId: string): LessonAuditSink {
+  let counter = 0;
+  /** The ledger event for a lessons event, or undefined for bookkeeping that is skipped. */
+  const eventOf = (event: LessonAuditEvent, required: boolean): AuditEvent | undefined => {
+    const mapped = MAP[event.action];
+    if (mapped === undefined) {
+      // An event that grants something and cannot be recorded must not pass; bookkeeping may be skipped.
+      if (required || !BOOKKEEPING.includes(event.action)) throw new Error(`the ledger has no name for ${event.action}`);
+      return undefined;
+    }
+    const at = new Date(now()).toISOString();
+    // One event per occurrence: the time and a process counter keep two approvals of one lesson apart.
+    counter += 1;
+    // The audit chain is never erased, so a project's NAME never enters it: the project is named by a reference made from the company and the name (LESSONS-AUDIT-PROJECT-NAME-IN-CHAIN).
+    const project = auditProjectRef(companyId, event.project);
+    const lessonId = event.lessonId ?? project;
+    return {
+      eventId: eventIdOf(mapped.action, event.workspaceId, lessonId, at, String(counter), event.actor ?? "system"), companyId, at, actor: actorOf(event.actor), action: mapped.action,
+      subject: { type: "lesson", id: lessonId.slice(0, 100) }, details: { project, ...mapped.facts(event) },
+    };
+  };
+  return {
+    async emit(event, options) {
+      const built = eventOf(event, options?.required === true);
+      if (built !== undefined) await sink.record(built);
+    },
+    stage(event) {
+      const built = eventOf(event, true);
+      const items: readonly TransactItem[] = built === undefined ? [] : sink.stage(built);
+      return { items, async sent() { /* the steps committed with the change; nothing is sent afterwards */ } };
+    },
+  };
+}

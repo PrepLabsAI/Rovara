@@ -16,6 +16,7 @@ import { call, loadSlackBroker } from "../support/slack-broker.js";
 import { contractSnapshot } from "../support/e2e-application-plan-fixtures.js";
 import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
 import { SECRET_ARN } from "../support/e2e-model-fixtures.js";
+import { testProjectPk } from "../support/orgs.js";
 
 // The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
 assumeDrivingTestsPassed();
@@ -372,7 +373,7 @@ describe("dispatch re-derives the route before an AI navigation round starts", (
   it("refuses with model-route-budget-exhausted before the run starts when the project's day has no room for the round", async () => {
     const { dependencies, db, revision } = await approved(anthropic);
     const day = new Date().toISOString().slice(0, 10);
-    db.set({ pk: "PROJECT#payments", sk: `E2E_MODEL_BUDGET#${day}`, inputTokens: 1_990_000, calls: 10 });
+    db.set({ pk: testProjectPk("payments"), sk: `E2E_MODEL_BUDGET#${day}`, inputTokens: 1_990_000, calls: 10 });
     const error = await refusal(requireAgentRouteStillCurrent(dependencies(async () => anthropic) as never, "payments", agentIntent, policyAt(revision)));
     expect(error).toBeInstanceOf(ApplicationDispatchRefusal);
     expect(error?.message).toMatch(/^model-route-budget-exhausted:/);

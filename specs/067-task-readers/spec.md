@@ -2,7 +2,7 @@
 
 ## Why
 
-Rovara Cloud is moving onto Rovara's developer API (PrepLabsAI/Rovara-cloud#1). Its session page shares a session with a
+A web app is moving onto Rovara's developer API. Its session page shares a session with a
 person, and shows who follows it and who is viewing it. Each needs that person to read the task. Until now
 `GET /v1/dev/tasks/{id}` answered only the task's owner, and Code's task roles (spec 061) cover only people in a task's
 shared Slack thread. A task stays private until its owner shares it with a named person: there is no project-wide

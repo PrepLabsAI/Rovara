@@ -1,11 +1,12 @@
 // Spec 025 phase 25a: the developer sign-in's shared names and wire shapes. The CLI parses server
 // responses with the non-strict schemas here, so a newer control plane can add fields.
 import { z } from "zod";
+import { OrgIdSchema } from "./browser-ids.js";
 import { ProjectRoleSchema } from "./app-projects.js";
 import { EnvironmentNameSchema } from "./environments.js";
 export { normalizeEmail } from "./email.js";
 import { looseCopy } from "./loose.js";
-import { OrgRoleSchema } from "./company-scope.js";
+import { OrgRoleNameSchema } from "./company-scope.js";
 import { DeveloperTaskPolicySchema } from "./project-node.js";
 import { SlackChannelIdSchema, SlackTeamIdSchema, SlackUserIdSchema } from "./slack.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
@@ -24,8 +25,30 @@ export const DEVELOPER_AUTH_REQUEST_SECONDS = 600;
 export const FRESH_SIGN_IN_SECONDS = 600;
 export const SLACK_OIDC_ISSUER = "https://slack.com";
 
+// ---- Lane ID part 2 (plan v3.2 section 7.2 change 2, DEC 214 decision 7): the fresh sign-in ("step-up") Code checks, with a factor Code owns ----
+/**
+ * How a person proved it was them again, as the access token's `step_up_amr` says it. Never the round trip through Slack, Google or GitHub: those can send a person straight back
+ * without asking anything. `email_code`: a one-time code Code emailed. `passkey`: a passkey registered with Code. `company_reauth`: the company's own sign-in asked again and said when
+ * (its `auth_time`), inside the window.
+ */
+export const DEVELOPER_STEP_UP_METHODS = ["email_code", "passkey", "company_reauth"] as const;
+export type DeveloperStepUpMethod = (typeof DEVELOPER_STEP_UP_METHODS)[number];
+/** The `acr_values` word a client sends to `/v1/auth/authorize` to ask for a step-up (OpenID Connect Core 3.1.2.1). */
+export const DEVELOPER_STEP_UP_ACR = "step-up";
+/** How long a step-up page, and an emailed code on it, lasts. */
+export const DEVELOPER_STEP_UP_SECONDS = 600;
+/** The window a step-up counts for when the company states none (its own may only be shorter). */
+export const DEVELOPER_STEP_UP_WINDOW_SECONDS = FRESH_SIGN_IN_SECONDS;
+/** Codes emailed per step-up page, and wrong codes tried on it, before it must be started again. */
+export const DEVELOPER_STEP_UP_EMAILS_MAX = 3;
+export const DEVELOPER_STEP_UP_ATTEMPTS_MAX = 5;
+/** Step-up pages one person may start in an hour: bounds the emails (x3) and the guesses (x5) anyone holding their Slack session can cause. */
+export const DEVELOPER_STEP_UP_PAGES_PER_HOUR = 5;
+/** Passkeys one person may register with Code (lane ID part 2b). */
+export const DEVELOPER_PASSKEYS_MAX = 10;
+
 export { DeveloperSignInMethodSchema, type DeveloperSignInMethod } from "./developer-web.js";
-import { DeveloperSignInMethodSchema } from "./developer-web.js";
+import { ExternalAccountRefSchema, SignInMethodIdSchema, readExternalAccount } from "./outside-account.js";
 
 const LOOPBACK_REDIRECT = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/callback$/;
 
@@ -60,7 +83,7 @@ export const AgentXConfigurationSchema = z.object({
   methods: z.object({
     slack: z.boolean(),
     oidc: z.object({ displayName: z.string().min(1).max(40) }).nullable(),
-    /** SAML single sign-on, on Enterprise installs whose administrator saved and enabled the identity provider's settings; absent from an older server. */
+    /** SAML single sign-on, on installs whose administrator saved and enabled the identity provider's settings; absent from an older server. */
     saml: z.object({ displayName: z.string().min(1).max(40) }).nullable().optional(),
     /** The hosted Rovara sign-in, which creates an org on first sign-in; absent from an older server. */
     cloud: z.object({ displayName: z.string().min(1).max(40) }).nullable().optional(),
@@ -81,11 +104,17 @@ export type DeveloperTokenResponse = z.infer<typeof DeveloperTokenResponseSchema
 export const DeveloperSummarySchema = z.object({
   id: z.string().regex(/^[a-f0-9]{64}$/),
   name: z.string().min(1).max(200),
-  provider: DeveloperSignInMethodSchema,
+  provider: SignInMethodIdSchema,
+  /** Legacy alias of `account` for a Slack-linked developer: read with `readExternalAccount`; new code writes `account`. */
   slackUserId: SlackUserIdSchema.optional(),
+  /** The developer's outside account in the neutral shape (lane P3, item I2). */
+  account: ExternalAccountRefSchema.optional(),
   email: z.string().email().optional(),
   /** The developer's role in their org; absent from a control plane that predates it. */
-  orgRole: OrgRoleSchema.optional(),
+  orgRole: OrgRoleNameSchema.optional(),
+}).refine((summary) => (summary.account === undefined || summary.slackUserId === undefined) || readExternalAccount(summary) !== undefined, {
+  // The neutral account and the legacy id must name one account: a reader never has to guess which of two was meant (lane P3, review L6).
+  message: "account and slackUserId name different accounts", path: ["account"],
 });
 export type DeveloperSummary = z.infer<typeof DeveloperSummarySchema>;
 
@@ -171,9 +200,16 @@ export const DEVELOPER_WORKSPACES_PER_PROJECT = 200;
  * cold channels fits, with room for a second page of members each. */
 export const CHANNEL_MEMBERS_MAX_CHANNELS = 50;
 
+/** Internal Slack authority context. Receivers recheck the workspace binding before credentials. */
+export const SlackWorkspaceScopeSchema = z.object({
+  companyId: OrgIdSchema,
+  teamId: SlackTeamIdSchema.refine((team) => team.startsWith("T")),
+}).strict();
+export type SlackWorkspaceScope = z.infer<typeof SlackWorkspaceScopeSchema>;
+
 export const ChannelMembersRequestSchema = z
   .object({
-    kind: z.literal("channel-members"),
+    kind: z.literal("channel-members"), workspace: SlackWorkspaceScopeSchema.optional(),
     slackUserId: SlackUserIdSchema,
     channelIds: z.array(SlackChannelIdSchema).max(CHANNEL_MEMBERS_MAX_CHANNELS),
   })
@@ -188,7 +224,7 @@ export type ChannelMembersResponse =
 /** Internal, fresh identity and membership proof for a task person. It is never an HTTP route. */
 export const TaskPersonProofRequestSchema = z
   .object({
-    kind: z.literal("task-person-proof"),
+    kind: z.literal("task-person-proof"), workspace: SlackWorkspaceScopeSchema.optional(),
     slackUserId: SlackUserIdSchema,
     channelIds: z.array(SlackChannelIdSchema).max(CHANNEL_MEMBERS_MAX_CHANNELS),
   })
@@ -207,7 +243,7 @@ export type TaskPersonProofResponse = z.infer<typeof TaskPersonProofResponseSche
 
 /** Bounded internal Lambda envelope for fresh task-dispatch proof. Never an HTTP request shape. */
 export const TaskDispatchProofRequestSchema = z.object({
-  kind: z.literal("task-dispatch-person-proof"),
+  kind: z.literal("task-dispatch-person-proof"), workspace: SlackWorkspaceScopeSchema.optional(),
   request: TaskPersonProofRequestSchema,
   admission: z.object({
     version: z.literal(1),
@@ -328,7 +364,7 @@ export type TaskPersonInviteExecutionReceipt = z.infer<typeof TaskPersonInviteEx
 
 /** Internal complete fresh channel directory for Task People. It is never an HTTP route. */
 export const TaskChannelPeopleRequestSchema = z.object({
-  kind: z.literal("task-channel-people"),
+  kind: z.literal("task-channel-people"), workspace: SlackWorkspaceScopeSchema.optional(),
   channelIds: z.array(SlackChannelIdSchema).min(1).max(CHANNEL_MEMBERS_MAX_CHANNELS),
 }).strict();
 export type TaskChannelPeopleRequest = z.infer<typeof TaskChannelPeopleRequestSchema>;
@@ -370,7 +406,7 @@ export type TaskPeopleDisplayReadResponse = z.infer<typeof TaskPeopleDisplayRead
 /** R10: the names and privacy of bound channels, read by DeveloperIdentity with the bot token. */
 export const ChannelInfoRequestSchema = z
   .object({
-    kind: z.literal("channel-info"),
+    kind: z.literal("channel-info"), workspace: SlackWorkspaceScopeSchema.optional(),
     channelIds: z.array(SlackChannelIdSchema).max(CHANNEL_MEMBERS_MAX_CHANNELS),
   })
   .strict();
@@ -419,12 +455,12 @@ export const MemberChannelsRequestSchema = z.object({
 export type MemberChannelsRequest = z.infer<typeof MemberChannelsRequestSchema>;
 
 /** Spec 025 A12: the broker asks DeveloperIdentity which Slack user owns a verified email (FR-012's lookup). */
-export const SlackUserByEmailRequestSchema = z.object({ kind: z.literal("slack-user-by-email"), email: z.string().email().max(254) }).strict();
+export const SlackUserByEmailRequestSchema = z.object({ kind: z.literal("slack-user-by-email"), workspace: SlackWorkspaceScopeSchema.optional(), email: z.string().email().max(254) }).strict();
 export type SlackUserByEmailRequest = z.infer<typeof SlackUserByEmailRequestSchema>;
 export type SlackUserByEmailResponse = { ok: true; userId?: string } | { ok: false; error: "slack_unavailable" | "invalid_request" };
 
 /** Spec 025 A13: the health route's Slack token check (auth.test), through DeveloperIdentity. */
-export const SlackAuthCheckRequestSchema = z.object({ kind: z.literal("slack-auth-check") }).strict();
+export const SlackAuthCheckRequestSchema = z.object({ kind: z.literal("slack-auth-check"), workspace: SlackWorkspaceScopeSchema.optional() }).strict();
 export type SlackAuthCheckRequest = z.infer<typeof SlackAuthCheckRequestSchema>;
 export type SlackAuthCheckResponse = { ok: true; teamId: string } | { ok: false; error: string };
 
@@ -462,6 +498,54 @@ export type UnlinkIdentityRequest = z.infer<typeof UnlinkIdentityRequestSchema>;
  */
 export type UnlinkIdentityResponse = { ok: true } | { ok: false; error: "refused" | "reauth"; message: string } | { ok: false; error: "not_found" | "invalid_request" | "unavailable" };
 
+// ---- Lane ID part 2 follow-ups (ID-STEPUP-FOLLOWUPS): the factor email and passkeys, managed through DeveloperIdentity ----
+// Each request names the CALLER by the developer id and session id of their verified access token (never body values of a public route). DeveloperIdentity reads that session from its
+// own table: it must be live, and, for a change, carry a step-up younger than the window (a fresh step-up). The step-up time is never taken from the request.
+const DeveloperIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
+/** A passkey's credential id as Code stores it (base64url, at most 512 characters). */
+export const PasskeyCredentialIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,512}$/);
+/** The caller's own passkeys: when each was added and last used. Needs a live session, not a fresh step-up. */
+export const ListPasskeysRequestSchema = z.object({ kind: z.literal("list-passkeys"), developerId: DeveloperIdSchema, sessionId: SessionIdSchema }).strict();
+export type ListPasskeysRequest = z.infer<typeof ListPasskeysRequestSchema>;
+/**
+ * L4-MF4: the caller's own sign-in factors for the web account page: the confirmation email, already MASKED by the sign-in Lambda (the broker never holds the full address), and the
+ * passkeys (opaque credential id and times only: never a key, a counter or a transport). A live session is enough. The request cannot name a second person (strict): the caller is the
+ * developer id and session id of their verified token.
+ */
+export const ListSignInFactorsRequestSchema = z.object({ kind: z.literal("list-sign-in-factors"), developerId: DeveloperIdSchema, sessionId: SessionIdSchema }).strict();
+export type ListSignInFactorsRequest = z.infer<typeof ListSignInFactorsRequestSchema>;
+/** A masked address as `maskedEmail` makes it: one character, three stars, then the domain ("m***@example.com"). Anything else (a full address, a longer local part) does not match. */
+export const MaskedFactorEmailSchema = z.string().max(254).regex(/^[^\s@]\*\*\*@[^\s@]+$/u);
+/** What the broker answers, and the shape it reads the Lambda's reply into (anything beyond it is dropped). */
+export const SignInFactorsAnswerSchema = z.object({
+  factorEmail: MaskedFactorEmailSchema.optional(),
+  passkeys: z.array(z.object({ credentialId: PasskeyCredentialIdSchema, createdAt: z.iso.datetime(), lastUsedAt: z.iso.datetime().optional() })).max(DEVELOPER_PASSKEYS_MAX),
+});
+export type SignInFactorsAnswer = z.infer<typeof SignInFactorsAnswerSchema>;
+/** Removes one of the caller's own passkeys. Needs a fresh step-up. */
+export const RemovePasskeyRequestSchema = z.object({ kind: z.literal("remove-passkey"), developerId: DeveloperIdSchema, sessionId: SessionIdSchema, credentialId: PasskeyCredentialIdSchema }).strict();
+export type RemovePasskeyRequest = z.infer<typeof RemovePasskeyRequestSchema>;
+/** A company admin removes every passkey of another person (`personDeveloperId`). Needs the admin's own fresh step-up; the person is told at their factor email. */
+export const RemovePersonPasskeysRequestSchema = z.object({ kind: z.literal("remove-person-passkeys"), developerId: DeveloperIdSchema, sessionId: SessionIdSchema, personDeveloperId: DeveloperIdSchema }).strict();
+export type RemovePersonPasskeysRequest = z.infer<typeof RemovePersonPasskeysRequestSchema>;
+/**
+ * A company admin sets the email a person's step-up codes go to (their "factor email"). Needs the admin's own fresh step-up. The old address, when there is one, is told BEFORE the change,
+ * and the change is refused when it cannot be told.
+ */
+export const SetFactorEmailRequestSchema = z.object({ kind: z.literal("set-factor-email"), developerId: DeveloperIdSchema, sessionId: SessionIdSchema, personDeveloperId: DeveloperIdSchema, email: z.string().email().max(254) }).strict();
+export type SetFactorEmailRequest = z.infer<typeof SetFactorEmailRequestSchema>;
+/**
+ * The refusals of these requests. `reauth`: the caller's step-up is missing or older than the window (a fresh step-up fixes it). `signed_out`: the caller's session is not live. `forbidden`:
+ * the caller is not a company admin over that person. `not_set_up`: this install has no admin rule, or no email sender. `notice_failed`: the old address could not be told, so nothing changed.
+ * `conflict`: the factor email changed meanwhile. Each carries fixed words only.
+ */
+export type DeveloperFactorRefusal = { ok: false; error: "reauth" | "signed_out" | "forbidden" | "not_found" | "not_set_up" | "notice_failed" | "conflict" | "invalid_request" | "unavailable"; message: string };
+export type ListSignInFactorsResponse = ({ ok: true } & SignInFactorsAnswer) | DeveloperFactorRefusal;
+export type ListPasskeysResponse = { ok: true; passkeys: Array<{ credentialId: string; createdAt: string; lastUsedAt?: string }> } | DeveloperFactorRefusal;
+export type RemovePasskeyResponse = { ok: true } | DeveloperFactorRefusal;
+export type RemovePersonPasskeysResponse = { ok: true; removed: number; notified: boolean } | DeveloperFactorRefusal;
+export type SetFactorEmailResponse = { ok: true; changed: boolean } | DeveloperFactorRefusal;
+
 /**
  * Plan 2, Task 8b: starts adding a sign-in method the person removed earlier back to their own account. It is made under a fresh session
  * of the caller, which must be fresh again when the person finishes at the provider. The result is the sign-in link to open.
@@ -477,6 +561,6 @@ export type StartIdentityLinkRequest = z.infer<typeof StartIdentityLinkRequestSc
 export type StartIdentityLinkResponse = { ok: true; authorizeUrl: string } | { ok: false; error: "refused" | "reauth"; message: string } | { ok: false; error: "invalid_request" | "unavailable" };
 
 /** Spec 025 E12 (Q8): a public channel of the environment's team, by its name. */
-export const ChannelByNameRequestSchema = z.object({ kind: z.literal("channel-by-name"), name: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,79}$/) }).strict();
+export const ChannelByNameRequestSchema = z.object({ kind: z.literal("channel-by-name"), workspace: SlackWorkspaceScopeSchema.optional(), name: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,79}$/) }).strict();
 export type ChannelByNameRequest = z.infer<typeof ChannelByNameRequestSchema>;
 export type ChannelByNameResponse = { ok: true; channel?: { channelId: string; name: string } } | { ok: false; error: "slack_unavailable" | "invalid_request" };

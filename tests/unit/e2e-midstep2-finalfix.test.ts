@@ -16,6 +16,7 @@ import { classifyStorageEntry } from "../../packages/verifier/src/executor/stora
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 import { RUN_ID, TOOLS } from "../support/e2e-model-fixtures.js";
 import { MIDSTEP2_POSITION as POSITION, createMidstep2Harness } from "../support/e2e-midstep2-harness.js";
+import { expectLinearScaling } from "../support/scaling.js";
 
 // MIDSTEP-2 final-review fixes: F-1 (ordinary top-level values are scrub-only, never masked), F-2 (the caps do not stop the mask), F-3 (a signed-out visitor's context is read), F-4 (one-time sign-in
 // URL parameters are credentials). Real worker proxy, redactor, registry, session source, channel client and adapter; the F-3 browser test is a real Chromium.
@@ -108,18 +109,22 @@ describe("F-2: the caps do not stop the mask", () => {
     expect(classifyStorageEntry({ name: "session", value: "word ".repeat(20_000) }).some((item) => item.tier === "overflow")).toBe(true);
     expect(classifyStorageEntry({ name: "blob", value: "plain words ".repeat(8_000) }).some((item) => item.tier === "overflow")).toBe(false);
   });
-  it("one combined matcher: 20,000 values that share a start (JWT-like) and a 200 KB text full of that start are masked in well under two seconds, the view failing closed past the bucket bound", () => {
-    const registry = createSessionSecretRegistry({ redactor: createCredentialRedactor([]) });
+  it("one combined matcher: 20,000 values that share a start (JWT-like) and a 200 KB text full of that start are masked in bounded time (cost scales with the input), the view failing closed past the bucket bound", () => {
     const head = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.";
-    const started = Date.now();
-    for (let index = 0; index < 20_000; index += 1) registry.register(`${head}${String(index).padStart(8, "0")}.sig${String(index * 7).padStart(8, "0")}`, { maskOnly: true });
-    const target = `${head}${String(12_345).padStart(8, "0")}.sig${String(12_345 * 7).padStart(8, "0")}`;
-    const text = `${`${head}unregistered `.repeat(1_500)}${target} end`;
-    const out = registry.maskForModel(text);
-    expect(Date.now() - started).toBeLessThan(2_000);
+    const secretAt = (index: number) => `${head}${String(index).padStart(8, "0")}.sig${String(index * 7).padStart(8, "0")}`;
+    const target = secretAt(12_345);
+    // Register `values` values that share a start, then mask a text of `repeats` runs of that start. Returns the registry and the masked text.
+    const registerAndMask = (values: number, repeats: number, text: string = `${`${head}unregistered `.repeat(repeats)}${target} end`) => {
+      const registry = createSessionSecretRegistry({ redactor: createCredentialRedactor([]) });
+      for (let index = 0; index < values; index += 1) registry.register(secretAt(index), { maskOnly: true });
+      return { registry, out: registry.maskForModel(text) };
+    };
+    const { registry, out } = registerAndMask(20_000, 1_500);
     expect(out.endsWith(" end")).toBe(true);
     expect(out).not.toContain(target);
     expect(registry.maskOverflowed()).toBe(true);
+    // The cost must not grow faster than the number of values and the text length together (500 values and 37 runs -> 4,000 and 300; the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 20,000 and 1,500 ran once above).
+    expectLinearScaling((values) => { const text = `${`${head}unregistered `.repeat(Math.round(values * 0.075))}${target} end`; return () => { registerAndMask(values, 0, text); }; }, { n: 500, unitBytes: 64, label: "mask registration and lookup by value count" });
   }, 60_000);
 });
 

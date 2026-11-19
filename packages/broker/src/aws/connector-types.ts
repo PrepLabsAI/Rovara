@@ -1,10 +1,16 @@
 import { GitHubConnectorSchema, githubConnectorOf, type CredentialType, type ProjectDefinition, type RepositoryDefinition } from "@agentx/contracts";
 import { githubConnector, type ConnectorDefinition, type ConnectorPolicy, type PresentationApproval, type connectMcp } from "@agentx/gateway";
+import type { McpEndpointGuard } from "../connections/pinned-endpoint.js";
 import type { GitHubMcpDependencies } from "../github-mcp.js";
 import { GITHUB_LEDGER } from "./connector-ledger.js";
 import { asanaConnectorType } from "./asana-connector-type.js";
 import { mcpConnectorType } from "./connector-presets.js";
-import type { CredentialRegistry, HostPin } from "./credentials.js";
+import { datadogConnectorType } from "../connectors/native/datadog-connector-type.js";
+import { grafanaConnectorType } from "../connectors/native/grafana-connector-type.js";
+import { pagerdutyConnectorType } from "../connectors/native/pagerduty-connector-type.js";
+import { sentryConnectorType } from "../connectors/native/sentry-connector-type.js";
+import { vercelConnectorType } from "../connectors/native/vercel-connector-type.js";
+import type { ConnectorCredentials, HostPin } from "./credentials.js";
 import { jiraConnectorType } from "./jira-connector-type.js";
 import { linearConnectorType } from "./linear-connector-type.js";
 
@@ -37,9 +43,19 @@ export interface ResolvedConnector<Scope = unknown> {
 
 export interface ConnectorTypeContext {
   githubMcp?: GitHubMcpDependencies;
-  credentialRegistry?: CredentialRegistry;
+  credentialRegistry?: ConnectorCredentials;
   /** A vendor connection override, for a connector type with no deployment connect of its own. Only test types use this today. */
   connect?: typeof connectMcp;
+  /**
+   * Checks a company's MCP endpoint before every request and pins the connection to the addresses it checked (`mcpEndpointGuard`). Only
+   * the types whose address a person typed (`HOST_TYPED_CONNECTOR_TYPES`: `mcp`, and Grafana's runtime connector) go through it; a vendor's own endpoint (Linear, Jira, Asana, GitHub) does not.
+   */
+  endpointGuard?: McpEndpointGuard;
+  /**
+   * The fetch under every native connector's vendor requests, which hold it to the vendor's one host and refuse a redirect
+   * (`connectors/native/vendor-fetch.ts`). Absent, the connectors use the lookup-checked fetch that refuses a non-public address at connect time; a test passes a fake.
+   */
+  nativeFetch?: typeof fetch;
 }
 
 /** A stored connectors entry. Only its name and type are known before its type validates the rest. */
@@ -97,6 +113,9 @@ export const githubConnectorType: ConnectorType = {
  */
 export const BUILT_IN_CONNECTOR_TYPES: Readonly<Record<string, ConnectorType>> = {
   github: githubConnectorType, linear: linearConnectorType, jira: jiraConnectorType, asana: asanaConnectorType, mcp: mcpConnectorType,
+  // The native read-only connectors.
+  sentry: sentryConnectorType, datadog: datadogConnectorType, grafana: grafanaConnectorType,
+  pagerduty: pagerdutyConnectorType, vercel: vercelConnectorType,
 };
 
 /**

@@ -7,14 +7,19 @@ cdk.out/
 # docs/ stays ignored except the trees the-loop records into (they must be committed).
 docs/*
 !docs/npm-package.md
+!docs/company-and-projects.md
 !docs/ordered-work.md
 !docs/porting.md
 !docs/ports.md
+!docs/local.md
+!docs/core-switch-on-runbook.md
 !docs/specs/
 !docs/decisions/
 !docs/learnings/
 !docs/capabilities/
 !docs/architecture/
+!docs/schemas/
+!docs/bedrock/
 .DS_Store
 Thumbs.db
 *.log

@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { ActorRefSchema, ChannelIdSchema, ChannelOpaqueIdSchema, ConversationRefSchema, InboundMessageSchema, SLACK_CHANNEL, type ActorRef, type ConversationRef } from "./conversation.js";
+import { orgScoped, type OrgId, type OrgKey } from "./company-scope.js";
 import { publicHttpsUrlSchema } from "./mcp-connector.js";
 import { ChannelFormSchema, ChannelFormSubmissionSchema } from "./channel-forms.js";
 import { AgentXNameSchema } from "./names.js";
@@ -10,8 +11,17 @@ import { AgentXNameSchema } from "./names.js";
  * posts to Rovara and Rovara signs what it sends back, both with Standard Webhooks (https://www.standardwebhooks.com).
  */
 
-/** A registered adapter's channel: any channel ID except `slack`, which is the built-in adapter. */
-export const AdapterChannelIdSchema = ChannelIdSchema.refine((channel) => channel !== SLACK_CHANNEL, "slack is the built-in adapter and cannot be registered");
+/**
+ * An adapter's channel: any channel ID, `slack` included (owner decision 58: a chat tool is an ordinary adapter, and the id of the chat tool Rovara shipped first is not special). An in-process adapter of
+ * any id is named by the plug-in config; the hosted product's own path for that tool is a separate matter (`RegisteredChannelIdSchema`).
+ */
+export const AdapterChannelIdSchema = ChannelIdSchema;
+
+/**
+ * The channel of an adapter REGISTERED OVER HTTP (a webhook adapter, `ChannelAdapterRecord`): any ID except `slack`. The hosted product still serves that chat tool on its own built-in path, whose rows and
+ * workspace owner keys a registered webhook adapter must not be able to pose as; until the hosted product moves onto the in-process adapter, a registration cannot take the id.
+ */
+export const RegisteredChannelIdSchema = ChannelIdSchema.refine((channel) => channel !== SLACK_CHANNEL, "slack is served by its own adapter and cannot be registered over HTTP");
 
 /** FR-023: what the adapter's surface can show. The core never sends a part it cannot. */
 export const ChannelCapabilitiesSchema = z.object({
@@ -35,6 +45,8 @@ export const ChannelCapabilitiesSchema = z.object({
   directory: z.boolean().optional(),
   /** `start_conversation` commands. */
   startConversations: z.boolean().optional(),
+  /** `thread_messages` commands: one read of a thread's replies (Lead 4, the lessons' Slack source). */
+  history: z.boolean().optional(),
 }).strict();
 export type ChannelCapabilities = z.infer<typeof ChannelCapabilitiesSchema>;
 
@@ -59,7 +71,7 @@ export type ChannelAdapterRegistration = z.infer<typeof ChannelAdapterRegistrati
 
 /** A registered adapter as the state table stores it. The signing secret is in Secrets Manager under `secretName`. */
 export const ChannelAdapterRecordSchema = z.object({
-  channel: AdapterChannelIdSchema,
+  channel: RegisteredChannelIdSchema,
   callbackUrl: publicHttpsUrlSchema("callbackUrl"),
   commandsUrl: publicHttpsUrlSchema("commandsUrl").optional(),
   capabilities: ChannelCapabilitiesSchema,
@@ -79,10 +91,10 @@ export type ChannelAdapterRecord = z.infer<typeof ChannelAdapterRecordSchema>;
 
 /**
  * FR-073: what the built-in adapter can show and do: threads, buttons, edits, private and direct messages, documents
- * and the directory (Phase 7c).
+ * and the directory (Phase 7c), and one read of a thread's replies (`history`, Lead 4's lessons source).
  */
 export const BUILT_IN_ADAPTER_CAPABILITIES: ChannelCapabilities = {
-  threads: true, buttons: 5, edits: true, maxTextLength: 40_000, proactive: true, ephemeral: true, direct: true, documents: true, directory: true, forms: true,
+  threads: true, buttons: 5, edits: true, maxTextLength: 40_000, proactive: true, ephemeral: true, direct: true, documents: true, directory: true, forms: true, history: true,
 };
 
 /** FR-073: the built-in adapter's record, made from the deployment's settings rather than read from the registry. */
@@ -98,11 +110,11 @@ export function builtInAdapterRecord(input: { channel: string; callbackUrl: stri
 
 export const CHANNEL_ADAPTERS_PK = "CHANNEL_ADAPTERS";
 export function channelAdapterKey(channel: string): { pk: string; sk: string } {
-  return { pk: CHANNEL_ADAPTERS_PK, sk: `CHANNEL#${AdapterChannelIdSchema.parse(channel)}` };
+  return { pk: CHANNEL_ADAPTERS_PK, sk: `CHANNEL#${RegisteredChannelIdSchema.parse(channel)}` };
 }
 /** The adapter's signing secret's name, under this deployment's secret prefix (for example `agentx/prod/`). */
 export function channelAdapterSecretName(prefix: string, channel: string): string {
-  return `${prefix}channel-adapter/${AdapterChannelIdSchema.parse(channel)}`;
+  return `${prefix}channel-adapter/${RegisteredChannelIdSchema.parse(channel)}`;
 }
 
 /** What an adapter sees once, at registration: the record and the secret it signs with. */
@@ -281,7 +293,11 @@ const eventData = {
    * parts, actions, a key that a later message replaces, and an audience of one.
    */
   message: z.object({ ...richMessage, audience: MessageAudienceSchema.optional() }).strict(),
-  progress: z.object({ text: Text }).strict(),
+  /**
+   * `onlyTo`: the id of the one account (of the conversation's tenant) that may see the text, for what must not be read by the others in the conversation (a one-use link code). An adapter that cannot show a message to one
+   * person must not post it at all.
+   */
+  progress: z.object({ text: Text, onlyTo: ChannelOpaqueIdSchema.optional() }).strict(),
   question: z.object({ text: Text, choices: z.array(z.string().min(1).max(200)).max(10).optional() }).strict(),
   approval_request: z.object({
     text: Text,
@@ -311,6 +327,8 @@ const eventData = {
     baseBranch: z.string().min(1).max(255).optional(),
     draft: z.boolean().optional(),
     action: z.enum(["opened", "updated", "replaced", "closed", "reopened"]).optional(),
+    /** L4-PRP: the pull request's verdict heading (fixed words and counts, the description's own: `Verified · Low risk · nothing extra to check`), said under the title. */
+    verdict: z.string().min(1).max(200).regex(/^[^\p{Cc}\p{Cf}<>@[\]`*_~#|!]*$/u).optional(),
   }).strict(),
   /**
    * The request finished; everything it said came before as `message` events. `text` is an optional closing line.
@@ -420,6 +438,7 @@ export const COMMAND_CAPABILITY = {
   space: "directory",
   spaces: "directory",
   check: "directory",
+  thread_messages: "history",
 } as const;
 export type ChannelCommandKind = keyof typeof COMMAND_CAPABILITY;
 
@@ -445,12 +464,12 @@ export const ChannelCommandSchema = z.discriminatedUnion("kind", [
   /** A message to one person outside any conversation; answers where it went and its ID. */
   z.object({ ...commandBase, kind: z.literal("direct_message"), to: ActorRefSchema, message: z.object(richMessage).strict() }).strict(),
   /** Phase 7c3b: replaces a form still open, by the handle its submission gave. */
-  z.object({ ...commandBase, kind: z.literal("update_form"), handle: z.string().min(1).max(255), form: ChannelFormSchema }).strict(),
+  z.object({ ...commandBase, kind: z.literal("update_form"), tenant: ChannelOpaqueIdSchema.optional(), handle: z.string().min(1).max(255), form: ChannelFormSchema }).strict(),
   /** Replaces a message the adapter posted for the core. */
   z.object({ ...commandBase, kind: z.literal("update_message"), tenant: ChannelOpaqueIdSchema.optional(), space: ChannelOpaqueIdSchema, messageId: ChannelOpaqueIdSchema, message: z.object(richMessage).strict() }).strict(),
   /** A titled Markdown document people in the space can read, such as a task's plan; answers its ID and link. */
   z.object({ ...commandBase, kind: z.literal("create_document"), tenant: ChannelOpaqueIdSchema.optional(), space: ChannelOpaqueIdSchema, title: z.string().trim().min(1).max(150), markdown: z.string().min(1).max(100_000) }).strict(),
-  z.object({ ...commandBase, kind: z.literal("delete_document"), documentId: ChannelOpaqueIdSchema }).strict(),
+  z.object({ ...commandBase, kind: z.literal("delete_document"), tenant: ChannelOpaqueIdSchema.optional(), documentId: ChannelOpaqueIdSchema }).strict(),
   /** One page of the people in a space. */
   z.object({ ...commandBase, kind: z.literal("space_members"), tenant: ChannelOpaqueIdSchema.optional(), space: ChannelOpaqueIdSchema, cursor: z.string().min(1).max(500).optional() }).strict(),
   z.object({ ...commandBase, kind: z.literal("user"), tenant: ChannelOpaqueIdSchema.optional(), userId: ChannelOpaqueIdSchema }).strict(),
@@ -460,7 +479,12 @@ export const ChannelCommandSchema = z.discriminatedUnion("kind", [
   /** One page of the tenant's public, open spaces, to find one by name. */
   z.object({ ...commandBase, kind: z.literal("spaces"), tenant: ChannelOpaqueIdSchema.optional(), cursor: z.string().min(1).max(500).optional() }).strict(),
   /** Whether the adapter can reach its surface, and the tenant it serves (Rovara's health check). */
-  z.object({ ...commandBase, kind: z.literal("check") }).strict(),
+  z.object({ ...commandBase, kind: z.literal("check"), tenant: ChannelOpaqueIdSchema.optional() }).strict(),
+  /**
+   * One read of the replies in one thread (the first message is not one of them), oldest first, at most one page. The adapter answers the facts the core needs to decide what may be learned from them: whether the space is
+   * private, shared with another organisation or a direct message, and for each reply who wrote it, whether that was an app or a person of another organisation, and the words. Nothing is stored by the adapter.
+   */
+  z.object({ ...commandBase, kind: z.literal("thread_messages"), tenant: ChannelOpaqueIdSchema, space: ChannelOpaqueIdSchema, thread: ChannelOpaqueIdSchema }).strict(),
 ]);
 export type ChannelCommand = z.infer<typeof ChannelCommandSchema>;
 
@@ -482,6 +506,22 @@ export const DirectoryUserSchema = z.object({
 }).strict();
 export type DirectoryUser = z.infer<typeof DirectoryUserSchema>;
 
+/** The most replies one `thread_messages` answer carries. */
+export const THREAD_MESSAGES_MAX = 200;
+/** One reply of a thread as `thread_messages` answers it. `userId` is absent for a message no person wrote. */
+export const ThreadMessageSchema = z.object({
+  id: ChannelOpaqueIdSchema,
+  userId: ChannelOpaqueIdSchema.optional(),
+  /** An app or a bot wrote it. */
+  bot: z.boolean(),
+  /** A person of another organisation wrote it (a shared space). */
+  external: z.boolean(),
+  /** The message is a plain message (no join, topic or file notice, and not an edit notice). */
+  plain: z.boolean(),
+  text: z.string().max(4_000),
+}).strict();
+export type ThreadMessage = z.infer<typeof ThreadMessageSchema>;
+
 /** What each command answers on success. */
 export const ChannelCommandResultSchemas = {
   start_conversation: z.object({ thread: ChannelOpaqueIdSchema }).strict(),
@@ -502,6 +542,12 @@ export const ChannelCommandResultSchemas = {
     nextCursor: z.string().min(1).max(500).optional(),
   }).strict(),
   check: z.object({ tenant: ChannelOpaqueIdSchema }).strict(),
+  thread_messages: z.object({
+    space: z.object({ private: z.boolean(), shared: z.boolean(), direct: z.boolean() }).strict(),
+    messages: z.array(ThreadMessageSchema).max(THREAD_MESSAGES_MAX),
+    /** The thread has more replies than one page: these are the first ones. */
+    truncated: z.boolean(),
+  }).strict(),
 } as const;
 export type ChannelCommandResult<K extends ChannelCommandKind> = z.infer<(typeof ChannelCommandResultSchemas)[K]>;
 
@@ -628,7 +674,7 @@ export type ChannelLink = z.infer<typeof ChannelLinkSchema>;
 
 function actorParts(actor: z.infer<typeof ActorRefSchema>) {
   const parsed = ActorRefSchema.parse(actor);
-  if (parsed.channel === SLACK_CHANNEL) throw new Error("Slack actors are not linked; Slack verifies them itself");
+  if (parsed.channel === SLACK_CHANNEL) throw new Error("Slack actors are not linked under these unscoped keys: the hosted product verifies them itself (an in-process adapter links through the company-scoped keys below)");
   return parsed;
 }
 export function channelLinkKey(actor: z.infer<typeof ActorRefSchema>): { pk: string; sk: string } {
@@ -638,6 +684,23 @@ export function channelLinkKey(actor: z.infer<typeof ActorRefSchema>): { pk: str
 export function developerChannelLinkKey(developerId: string, actor: z.infer<typeof ActorRefSchema>): { pk: string; sk: string } {
   const parsed = actorParts(actor);
   return { pk: `DEVELOPER_CHANNEL_LINKS#${developerId}`, sk: `${parsed.channel}/${parsed.tenant}/${parsed.userId}` };
+}
+
+/**
+ * Owner decision 58 and 45.6: the same link keys under the company scope (`ORG#<company>#...`), for the in-process adapters, whose people are linked to a person of one company. The unscoped
+ * keys above are the registered (webhook) adapters' stored layout and keep refusing `slack` (the hosted product's own path serves that tool); an in-process adapter of any id, `slack` included, links through these.
+ */
+export function orgChannelLinkKey(orgId: OrgId, actor: z.infer<typeof ActorRefSchema>): OrgKey {
+  const parsed = ActorRefSchema.parse(actor);
+  return { pk: orgScoped(orgId, `CHANNEL_LINK#${parsed.channel}/${parsed.tenant}`), sk: `USER#${parsed.userId}` };
+}
+export function orgDeveloperChannelLinkKey(orgId: OrgId, developerId: string, actor: z.infer<typeof ActorRefSchema>): OrgKey {
+  const parsed = ActorRefSchema.parse(actor);
+  return { pk: orgScoped(orgId, `DEVELOPER_CHANNEL_LINKS#${developerId}`), sk: `${parsed.channel}/${parsed.tenant}/${parsed.userId}` };
+}
+export function orgChannelLinkCodeKey(orgId: OrgId, codeHash: string): OrgKey {
+  if (!/^[a-f0-9]{64}$/.test(codeHash)) throw new Error("link code hash must be a sha256 hex digest");
+  return { pk: orgScoped(orgId, `CHANNEL_LINK_CODE#${codeHash}`), sk: "META" };
 }
 
 /** FR-031: a channel user ID as the confirmation shows it, such as `+91 ••• 4821`. */

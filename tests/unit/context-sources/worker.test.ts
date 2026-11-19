@@ -56,6 +56,12 @@ describe("stubFor", () => {
     expect(isContextToolName("search_team_knowledge")).toBe(true);
     expect(isContextToolName("read")).toBe(false);
     expect(isContextToolName("src_")).toBe(false);
+    // The same tools as tools of the rovara MCP server (Pi's names), including one Pi shortened with a hash; another server's are not.
+    expect(isContextToolName("mcp__rovara__src_sim_get_ticket")).toBe(true);
+    expect(isContextToolName("mcp__rovara__search_team_knowledge")).toBe(true);
+    expect(isContextToolName("mcp__rovara__src_sim_a_very_long_tool_name_that_pi_cut_6f1e2d3c")).toBe(true);
+    expect(isContextToolName("mcp__other__src_sim_get_ticket")).toBe(false);
+    expect(isContextToolName("mcp__rovara__read")).toBe(false);
   });
   it("tells the model how to cite in the exact form the plan page matches, with an example from the project's own first source", () => {
     const note = contextSourcesNote({ ...catalog, sources: [{ sourceId: "wiki", label: "Team wiki", quotes: "citations_only" }] });
@@ -98,6 +104,17 @@ describe("the saved transcript", () => {
     expect((await stat(file)).mode & 0o777).toBe(0o600);
     // Doing it again changes nothing.
     expect(await stubPersistedContextResults(file)).toBe(0);
+  });
+  it("stubs a rovara MCP tool's result and drops the structured copy of the answer Pi keeps beside it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ctx-transcript-mcp-"));
+    const file = join(dir, "s.jsonl");
+    const secret = "TOP-SECRET-MCP-BODY";
+    const framed = FRAMED("SIM", "P7", secret);
+    await writeFile(file, `${line({ role: "toolResult", toolCallId: "1", toolName: "mcp__rovara__src_sim_search_tickets", content: [{ type: "text", text: framed }], structuredContent: { content: [{ type: "text", text: framed }] }, details: { server: "rovara" }, isError: false })}\n`);
+    expect(await stubPersistedContextResults(file)).toBe(1);
+    const text = await readFile(file, "utf8");
+    expect(text).not.toContain(secret);
+    expect(text).toContain("[SIM P7 · 0.0 KB · see Sources]");
   });
   it("leaves a file it cannot read", async () => {
     expect(await stubPersistedContextResults(join(tmpdir(), "does-not-exist-ctx.jsonl"))).toBe(0);

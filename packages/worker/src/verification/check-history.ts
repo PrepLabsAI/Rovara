@@ -143,7 +143,8 @@ function projectUpdates(
   for (const entry of entries) {
     const match = /^readiness:(\d+)$/.exec(entry.id);
     const command = match === null ? undefined : plan.readiness[Number(match[1])];
-    if (command === undefined || entry.source !== "project" || !isKnown(entry.after)) continue;
+    // A result a Rovara-made fake answered (general fakes) is not a real one: it never becomes the next task's "before", so the old outcome stays, as for a check that did not run.
+    if (command === undefined || entry.source !== "project" || !isKnown(entry.after) || entry.madeByRovara === true) continue;
     updates[projectCheckKey(command)] = entry.after;
   }
   return updates;

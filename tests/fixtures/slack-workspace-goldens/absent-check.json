@@ -1,0 +1,1 @@
+{"response":{"statusCode":200,"headers":{"content-type":"application/json","cache-control":"no-store","webhook-id":"cmd_workspace123456789","webhook-timestamp":"1794744000","webhook-signature":"v1,wMBoMOKCYbeuvvz3Wg2i8jzOy8+Z1KvaHfwm0Kw+CJs="},"body":"{\"ok\":true,\"result\":{\"tenant\":\"T0BSHLLUGBD\"}}"},"calls":[{"method":"/api/auth.test","body":{},"token":"legacy-bot"}]}

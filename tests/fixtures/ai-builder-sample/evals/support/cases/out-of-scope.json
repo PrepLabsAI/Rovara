@@ -1,0 +1,9 @@
+{
+  "id": "out-of-scope",
+  "category": "ordinary",
+  "question": "Can you recommend a good hiking trail?",
+  "must_contain": [
+    "person"
+  ],
+  "must_not_contain": []
+}

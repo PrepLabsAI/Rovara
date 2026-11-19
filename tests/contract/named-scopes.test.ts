@@ -4,11 +4,12 @@
 // refused; the Rovara CLI's own token reaches every row, as before.
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CLIENT_SCOPES, SignInClientRegistrationSchema, type ClientScope } from "@agentx/contracts";
+import { CLIENT_SCOPES, IMPLICIT_COMPANY_ID, SignInClientRegistrationSchema, type ClientScope } from "@agentx/contracts";
 import { signInClientRegistration, signInClientUpdate } from "../../packages/cli/src/admin/sign-in-clients.js";
 import { DEV_ROUTES, devRouteOf, type DevRoute } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import type { DeveloperApiConfiguration, DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { routeDeveloperTaskRequest } from "../../packages/broker/src/aws/developer-tasks.js";
+import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import { localSigner } from "../support/developer-fakes.js";
@@ -16,7 +17,7 @@ import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NAMED: readonly ClientScope[] = ["profile:name", "projects:members", "projects:create", "tasks:read", "tasks:start", "tasks:act", "tasks:share", "decisions:decide"];
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
-const sample = (path: string) => path.replace(/\{[A-Za-z]+\}/g, "x1");
+const sample = (path: string) => path.replaceAll("{emailHash}", "a".repeat(64)).replace(/\{[A-Za-z]+\}/g, "x1");
 
 // ---- The table ----
 
@@ -29,6 +30,10 @@ describe("the route table", () => {
   it("lets only the access check and the per-person project read need no scope", () => {
     expect(DEV_ROUTES.filter((route) => route.requires === "none").map((route) => `${route.method} ${route.path}`).sort())
       .toEqual(["GET /v1/dev/client/projects/{project}", "POST /v1/dev/access"]);
+  });
+
+  it("settings reads and writes require full access, with no new named scope", () => {
+    for (const method of ["GET", "PUT"]) expect(devRouteOf(method, "/v1/dev/projects/web/settings")?.requires).toBe("full");
   });
 
   it("has one row per method and path", () => {
@@ -75,9 +80,9 @@ describe("the route table", () => {
 
 // ---- Every route the broker registers has a row (and every row is a route) ----
 
-/** The concrete paths a router regex literal matches, each `([^/]+)` as `{}`. */
+/** The concrete paths a router regex literal matches, each `([^/]+)` or bare `[^/]+` (R4's grouped task-read pattern) as `{}`. */
 function expandRegex(source: string): string[] {
-  const body = source.replace(/^\^/, "").replace(/\$$/, "").replace(/\\\//g, "/").replaceAll("([^/]+)", "{}");
+  const body = source.replace(/^\^/, "").replace(/\$$/, "").replace(/\\\//g, "/").replaceAll("([^/]+)", "{}").replaceAll("[^/]+", "{}").replaceAll("([a-f0-9]{64})", "{}").replaceAll("([a-z0-9_]{1,40})", "{}");
   const expand = (text: string): string[] => {
     const start = text.search(/\((\?:)?/);
     if (start < 0) return [text];
@@ -107,7 +112,8 @@ function expandRegex(source: string): string[] {
 /** Every /v1/dev path the routers name: string literals, a named path constant with suffixes, and regex literals. */
 function routerPaths(): Set<string> {
   const paths = new Set<string>();
-  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts"]) {
+  // The company reads' paths are constants of their contract (#649), which the router imports.
+  for (const file of ["packages/broker/src/aws/developer-routes.ts", "packages/broker/src/aws/developer-tasks.ts", "packages/contracts/src/company-reads.ts", "packages/contracts/src/company-egress-addresses.ts", "packages/broker/src/aws/company-member-routes.ts", "packages/broker/src/aws/github-connect-routes.ts", "packages/broker/src/aws/github-account-link-routes.ts", "packages/broker/src/aws/slack-company-install.ts", "packages/broker/src/aws/slack-channel-link.ts", "packages/broker/src/aws/linear-connect-routes.ts", "packages/broker/src/aws/company-engine-model-routes.ts"]) {
     const code = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8").split("\n").filter((line) => !/^\s*(\/\/|\*|\/\*\*)/.test(line)).join("\n");
     for (const [, path] of code.matchAll(/"(\/v1\/dev\/[^"]*)"/g)) if (!path!.endsWith("/")) paths.add(path!);
     for (const [, name, path] of code.matchAll(/const (\w+) = "(\/v1\/dev\/[^"]*)"/g)) {
@@ -119,7 +125,8 @@ function routerPaths(): Set<string> {
 }
 
 describe("every /v1/dev route the broker registers", () => {
-  const normal = (path: string) => path.replace(/\{[A-Za-z]*\}/g, "{}");
+  // A strictly typed id in a router pattern (a skill name, L4-AK3) is a path parameter like any other.
+  const normal = (path: string) => path.replace(/\{[A-Za-z]*\}/g, "{}").replace(/\[a-z0-9\]\[a-z0-9-\]\{0,63\}/g, "{}");
   const tablePaths = new Set(DEV_ROUTES.map((route) => normal(route.path)));
 
   it("has a row, by path, and every row's path is a route", () => {
@@ -190,12 +197,30 @@ const refusedForScope = (response: Awaited<ReturnType<typeof call>>) => response
 async function setUp(mode: "linking" | "developer") {
   vi.useFakeTimers({ now: T0, toFake: ["Date"] });
   const config: DeveloperApiConfiguration = {
-    issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(),
+    companies: { companyOf: async () => IMPLICIT_COMPANY_ID },
+    // Lane W part 4: the company admin routes need the member helper to exist; this one finds nobody, so only the route table's answer is tested here.
+    companyMembers: { list: async () => ({ ok: false, error: "not_found" }), revoke: async () => ({ ok: false, error: "not_found" }), setRole: async () => ({ ok: false, error: "not_found" }) },
+    // Guided onboarding PR 1: the GitHub connect routes need their wiring to exist; this one connects nothing, so only the route table's answer is tested here.
+    githubConnect: { bindings: { claimPerson: async () => "taken", companyInstallations: async () => [], ownersOf: async () => [], disconnect: async () => ({ outcome: "not_found" }) }, github: { appSlug: async () => "app", oauthClient: async () => undefined, userControlledInstallations: async () => { throw new Error("none"); } }, log: () => undefined },
+    githubLink: { store: new MemoryDocumentStore(), github: { oauthClient: async () => undefined, githubUserOfCode: async () => { throw new Error("none"); } }, log: () => undefined },
+    // Guided onboarding PR 4: the Add to Slack routes need their wiring to exist; this one connects nothing, so only the route table's answer is tested here.
+    slackInstall: { slack: { clientId: async () => undefined, exchange: async () => "not_set_up" as const, revoke: async () => false, store: async () => undefined, revokeStored: async () => undefined, drop: async () => undefined }, log: () => undefined },
+    // Guided onboarding PR 5: a project's Slack channel routes need their wiring to exist; this one sees no channel, so only the route table's answer is tested here.
+    slackChannels: { slack: { channels: async () => ({ channels: [] }), channel: async () => "not_found" as const, join: async () => false }, log: () => undefined },
+    // Guided onboarding PR 7: the Linear connect routes need their wiring to exist; this one connects nothing, so only the route table's answer is tested here.
+    linearConnect: { connections: {} as never, app: async () => undefined, fetch: vi.fn() as never, log: () => undefined },
+    // L2-4: the waiting-ticket routes need the core's intake to exist; this one holds no tickets, so only the route table's answer is tested here.
+    coreIntake: { intakeFor: async () => undefined, waiting: async () => ({ items: [], sources: [] }), start: async () => ({ outcome: "not_found" }), seedTicketUpdates: async () => "no_intake", dismiss: async () => false },
+    // Guided onboarding PR 14: the company engine model route needs its wiring to exist; this gateway offers nothing readable, so only the route table's answer is tested here.
+    companyEngineModel: { offered: async () => { throw new Error("none"); }, installModel: () => undefined, log: () => undefined },
+    companyEgress: { addresses: () => "203.0.113.195,198.51.100.187" },
+    issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };
   ({ db, handler } = await createAdminBroker(mode === "linking" ? { linking: config, channelAdapters: true } : { developer: config, channelAdapters: true }));
   db.set({ pk: `DEVELOPER#${ADA}`, sk: "META", developerId: ADA, provider: "oidc", issuer: "https://idp.example.test", subject: "ada", displayName: "Ada", email: "ada@example.com", firstSignInAt: "x", lastSignInAt: "x", revoked: false });
   const started = new Date(T0).toISOString();
+  db.set({ pk: `COMPANY_MEMBER#${ADA}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: ADA, companyId: IMPLICIT_COMPANY_ID, role: "admin", joinedAt: started });
   db.set({ pk: "SESSION#s-cloud", sk: "META", sessionId: "s-cloud", developerId: ADA, amr: "oidc", clientId: "web-app", administrator: true, startedAt: started, endsAt: T0 / 1000 + 604_800 });
   db.set({ pk: "SESSION#s-cli", sk: "META", sessionId: "s-cli", developerId: ADA, amr: "oidc", startedAt: started, endsAt: T0 / 1000 + 604_800 });
   db.set({ pk: "PROJECT#payments", sk: "REV#000000000003", entityType: "PROJECT", definition: { name: "payments", revision: 3 } });

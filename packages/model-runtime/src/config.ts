@@ -9,11 +9,17 @@ export const DEFAULT_BEDROCK_MODELS = {
   classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
 } as const;
 
-/** Init's suggested models when one direct provider runs every role (spec 054, D3). OpenRouter has none. */
+/** Init's suggested models when one direct provider runs every role (spec 054, D3). OpenRouter has none for init; the laptop flow's default is below. */
 export const DEFAULT_DIRECT_MODELS = {
   anthropic: { worker: "claude-sonnet-4-6", orchestrator: "claude-sonnet-4-6", classifier: "claude-haiku-4-5" },
   openai: { worker: "gpt-5.4", orchestrator: "gpt-5.4", classifier: "gpt-5.4-mini" },
 } as const satisfies Record<Exclude<KeyedModelProvider, "openrouter">, Record<ModelRole, string>>;
+
+/**
+ * Port lane L13: the model a laptop install calls through OpenRouter when the owner names none: the same Claude Sonnet that is the Anthropic default (`claude-sonnet-4-6`), under OpenRouter's own id.
+ * The id is the one in the installed Pi catalog and in the generated model list (`anthropic/claude-sonnet-4.6`); a test keeps it there.
+ */
+export const DEFAULT_OPENROUTER_WORKER_MODEL = "anthropic/claude-sonnet-4.6";
 
 // The small model the AI browser-test agent uses on each provider lives with the route derivation (it is read without pi-ai there).
 export { DEFAULT_E2E_AGENT_MODELS } from "./e2e-route-derive.js";

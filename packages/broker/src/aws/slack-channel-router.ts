@@ -1,3 +1,4 @@
+import type { SlackCompanyDependencies } from "./slack-person.js";
 // Spec 062 Phase 7c2: Slack's request routing, run by the channel API for the built-in Slack adapter. The router is the
 // one Slack's own ingress runs (slack-ingress.ts): stops, ChatGPT commands, task threads' notes, Quick or Full answers,
 // new tasks, the per-thread limit, and requests for the orchestrator. Here what it says goes through the adapter's
@@ -39,6 +40,7 @@ export interface SlackChannelTransportDependencies {
   changePending(threadSubject: string, delta: 1 | -1): Promise<number>;
   /** The bound project of the message being routed. */
   projectName(): string;
+  teamId?: () => string | undefined;
   now?: () => number;
 }
 
@@ -58,7 +60,8 @@ export function slackChannelTransport(deps: SlackChannelTransportDependencies): 
     postEphemeral: (input) => deps.notices.postEphemeral(input),
     // Spec 014 FR-008, as Slack's own check: a person is a known user who is not a bot, not deleted and not Slackbot.
     async checkMember(userId) {
-      const cached = members.get(userId);
+      const memberKey = deps.teamId === undefined ? userId : `${deps.teamId()}/${userId}`;
+      const cached = members.get(memberKey);
       if (cached !== undefined && now() - cached.at < MEMBER_TTL_MS) return cached.check;
       let user: DirectoryUser | undefined;
       try {
@@ -69,7 +72,7 @@ export function slackChannelTransport(deps: SlackChannelTransportDependencies): 
       if (user === undefined || user.userId !== userId) return { outcome: "failed", error: "user_not_found" };
       const check: SlackMemberCheck = !user.bot && !user.deleted && userId !== "USLACKBOT" ? { outcome: "person" } : { outcome: "not_person" };
       if (members.size >= MEMBER_CACHE_CAP) members.delete(members.keys().next().value as string);
-      members.set(userId, { check, at: now() });
+      members.set(memberKey, { check, at: now() });
       return check;
     },
     enqueue: (message, _groupId, queuedBehind) => queue(message, { queuedBehind }),
@@ -99,8 +102,27 @@ export function slackChannelSurface(route: ReturnType<typeof createSlackMentionR
   };
 }
 
+/**
+ * DEC 254y(3), L2-2 PR 18e: whether a channel item (a message, or a press) is the install's own: its actor's tenant, and its conversation's tenant where it has one (a message
+ * always does), are each exactly the install's team. Read at run time, whatever the types say: a missing, non-string or different value is not the install's.
+ */
+export function channelItemOnInstallTeam(item: unknown, legacyTeamId: string, conversationRequired: boolean): boolean {
+  if (item === null || typeof item !== "object") return false;
+  const tenant = (ref: unknown) => (ref !== null && typeof ref === "object" ? (ref as { tenant?: unknown }).tenant : undefined);
+  const { actor, conversation } = item as { actor?: unknown; conversation?: unknown };
+  if (tenant(actor) !== legacyTeamId) return false;
+  if (conversation === undefined) return !conversationRequired;
+  return tenant(conversation) === legacyTeamId;
+}
+
+/** Two surfaces for channel `slack`: the install's team keeps today's; any other tenant, or one that cannot be read, goes to the company surface. No company surface: today's, as it is. */
+export function splitChannelSurfaceByTenant(legacy: ChannelSurface, company: ChannelSurface | undefined, legacyTeamId: string): ChannelSurface {
+  if (company === undefined) return legacy;
+  return (message, context) => (channelItemOnInstallTeam(message, legacyTeamId, true) ? legacy : company)(message, context);
+}
+
 /** The AWS surface: the Slack adapter's commands, Slack's threads table, the broker, and the channel request queue. */
-export function createAwsSlackChannelRouter(): ChannelSurface {
+export function createAwsSlackChannelRouter(company: SlackCompanyDependencies = {}): ChannelSurface {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const secretsManager = new SecretsManagerClient(clientConfiguration);
   const project = new AsyncLocalStorage<{ projectName: string; teamId: string }>();
@@ -115,6 +137,7 @@ export function createAwsSlackChannelRouter(): ChannelSurface {
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
   const transport = slackChannelTransport({
     notices,
+    teamId: () => project.getStore()?.teamId,
     async user(userId) {
       const tenant = project.getStore()?.teamId;
       return (await sendChannelCommand(commandDeps, adapter, "user", { ...(tenant === undefined ? {} : { tenant }), userId })).user;
@@ -132,5 +155,5 @@ export function createAwsSlackChannelRouter(): ChannelSurface {
       return name;
     },
   });
-  return slackChannelSurface(createSlackMentionRouter(awsSlackRouterDependencies(transport)), project);
+  return slackChannelSurface(createSlackMentionRouter(awsSlackRouterDependencies(transport, company)), project);
 }

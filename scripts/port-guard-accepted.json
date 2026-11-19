@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "comment": "Findings the port guard accepts, each pinned to one file's exact content (its git blob id at the tip): any change to the file flags it again, and an entry whose file changed or is gone is itself a finding (accepted-stale). Only cloud-aws and secret findings can be listed. CI reads this file from code/next, never from the pull request. Editing it is a guard edit, reviewed by hand.",
+  "accepted": [
+    {
+      "path": "packages/broker/src/aws/channel-api-lambda.ts",
+      "rule": "cloud-aws",
+      "blob": "811304eece37c3e7306b3c0a459c4bf14cba1832",
+      "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
+    },
+    {
+      "path": "packages/broker/src/aws/channel-commands.ts",
+      "rule": "cloud-aws",
+      "blob": "11d7bf99d9030d0fcdd131f5aa28adc4c326b0ca",
+      "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
+    },
+    {
+      "path": "packages/broker/src/aws/channel-conversation-state.ts",
+      "rule": "cloud-aws",
+      "blob": "174d140a6a3f64ba35a409740fce6cb7a4349037",
+      "reason": "owner decision 2026-11-12: AWS files already public on mainline (DEC 137; byte-identical to mainline 508fea812, brought in by the mainline sync)"
+    },
+    {
+      "path": "packages/broker/src/aws/channel-conversation.ts",
+      "rule": "cloud-aws",
+      "blob": "4c1d53d1eec46e703206a27ce378f2de89cb2852",
+      "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
+    },
+    {
+      "path": "packages/broker/src/aws/slack-adapter.ts",
+      "rule": "cloud-aws",
+      "blob": "eb4c09255d3468bfb08d4b16d183f5444dcb59b1",
+      "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync); re-pinned to #1036's version (the Slack thread_messages read, L4-SRC-SL) by owner DEC 254zzz44"
+    },
+    {
+      "path": "packages/broker/src/aws/slack-channel-presses.ts",
+      "rule": "cloud-aws",
+      "blob": "ed147f056d653eb616216b30120900bc8f685e90",
+      "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
+    },
+    {
+      "path": "packages/broker/src/aws/slack-channel-router.ts",
+      "rule": "cloud-aws",
+      "blob": "f8c7fb40a21cd1801304ef538261435b107f543f",
+      "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
+    },
+    {
+      "path": "packages/broker/src/aws/slack-directory-channel.ts",
+      "rule": "cloud-aws",
+      "blob": "af6d9e7e5deb7f9ef76909a1f8a9b64e743bcdc4",
+      "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
+    },
+    {
+      "path": "packages/broker/src/aws/slack-notice-channel.ts",
+      "rule": "cloud-aws",
+      "blob": "5da62bf68ee95b3b93233a4313d56fa78ec0d7f2",
+      "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
+    },
+    {
+      "path": "packages/broker/src/aws/slack-press-routing.ts",
+      "rule": "cloud-aws",
+      "blob": "c80d0134ab3bf09b6683084961151909e270ce92",
+      "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
+    },
+    {
+      "path": "packages/broker/src/aws/worker-binding.ts",
+      "rule": "cloud-aws",
+      "blob": "df84de61d56d36b8e1cd50a69b186f1e0a1ab439",
+      "reason": "owner decision 2026-11-12: AWS files already public on mainline (DEC 137; byte-identical to mainline 508fea812, brought in by the mainline sync)"
+    },
+    {
+      "path": "tests/contract/sign-in-access-check.test.ts",
+      "rule": "secret",
+      "blob": "2530860d0d828fd43418779257bfd2524f1130e9",
+      "reason": "mainline commit fcc0206a, fake test value"
+    },
+    {
+      "path": "tests/contract/sign-in-client-flows.test.ts",
+      "rule": "secret",
+      "blob": "8935a9c3d467ad3b73bba1f8a182f2951d6e23eb",
+      "reason": "mainline commit f435d777, fake test value"
+    }
+  ]
+}

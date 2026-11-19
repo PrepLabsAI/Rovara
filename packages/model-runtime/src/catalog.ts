@@ -31,6 +31,11 @@ function loadCatalogs(): Map<string, ReadonlyMap<string, Model<Api>>> {
   return catalogs;
 }
 
+/** The ids of the models the installed Pi catalog lists for one provider (`anthropic`, `openai`, `openrouter`, `amazon-bedrock`); none for a provider it does not know. For choosing among the models an install could call. */
+export function catalogModelIds(provider: string): string[] {
+  return [...(loadCatalogs().get(provider)?.keys() ?? [])];
+}
+
 /** The provider whose entry names a routed model, first: the model's own maker, then Bedrock's profiles, then the aggregator. */
 const ROUTE_CATALOG_ORDER = ["anthropic", "openai", "amazon-bedrock", "openrouter"] as const;
 let canonicalIndex: Map<string, { identity: ModelIdentifier; model: Model<Api> }> | undefined;

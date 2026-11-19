@@ -12,7 +12,9 @@ describe("config keys (FR-048)", () => {
       "models.orchestrator", "models.classifier", "models.worker", "models.e2eAgent", "models.fallback", "models.chatgpt.enabled", "models.chatgpt.preferredModel",
       "limits.workspacesPerMember", "limits.workspacesPerOrg", "limits.threadTurnsPerMinute",
       "slack.appPostedMessages", "alerts.address", "alerts.slowTurnMinutes",
-      "budget.monthlyUsd", "budget.scope", "channels.adapters", "slack.viaChannel", "mcp.confirmElicitation",
+      "budget.monthlyUsd", "budget.scope", "channels.adapters", "slack.viaChannel", "coreEngine.switch", "coreEngine.modelGatewayUrl", "coreEngine.agentModel", "testServices.images", "coreEngine.answersModel", "mcp.confirmElicitation",
+      // DEC 254zg (a), 254zk: Code's company layer, self-serve create and per-company Slack bots.
+      "company.signIn", "company.selfServe", "slack.companyWorkspaces",
     ]);
   });
 

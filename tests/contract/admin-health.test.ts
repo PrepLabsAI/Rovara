@@ -30,6 +30,10 @@ describe("GET /v1/admin/health (FR-030, A13)", () => {
       alarmsCheck: { status: "warn", detail: "1 alarm in ALARM" },
       deadLetterQueues: [{ name: "dispatch", depth: 0 }, { name: "slack-requests", depth: 2 }],
       deadLetterQueuesCheck: { status: "warn", detail: "1 queue holds messages" },
+      plugins: [
+        { point: "channel", name: "slack", status: "ok", detail: "the bot token works for team T0BSHLLUGBD" },
+        { point: "code-host", name: "github", status: "ok", detail: "installed on 1 account" },
+      ],
       slack: { status: "ok", detail: "the bot token works for team T0BSHLLUGBD" },
       github: { status: "ok", detail: "installed on 1 account" },
       workerModes: [{ mode: "ec2-ebs", configured: true, latestDispatchFailure: { at, operationId: "11111111-1111-4111-8111-111111111111", error: "RUNTIME_UNAVAILABLE: no capacity" } }],
@@ -48,7 +52,10 @@ describe("GET /v1/admin/health (FR-030, A13)", () => {
       deadLetterQueues: [], deadLetterQueuesCheck: { status: "unknown", detail: "not set up in this deployment" },
       slack: { status: "failed", detail: "Slack refused the bot token (token_revoked)" },
       github: { status: "unknown", detail: "not set up in this deployment" },
+      // A plug-in row is there only for an adapter that is set up: the chat probe is, the code-host one is not.
+      plugins: [{ point: "channel", name: "slack", status: "failed", detail: "Slack refused the bot token (token_revoked)" }],
     });
+    expect((answer.body as { plugins: unknown[] }).plugins).toHaveLength(1);
     expect(answer.body.version).not.toHaveProperty("release");
   });
 
@@ -134,4 +141,47 @@ describe("GET /v1/admin/health, each check's other answers", () => {
     await expect(provider(new Response("no", { status: 401 })).installationCount()).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: "RUNTIME_UNAVAILABLE: GitHub App installations lookup failed with HTTP 401" });
     await expect(provider(Response.json({ installations: [] })).installationCount()).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: "RUNTIME_UNAVAILABLE: GitHub returned an invalid installations response" });
   });
+});
+
+it("health probes only the authenticated company's explicit workspaces and keeps one aggregate row", async () => {
+  const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";
+  for (const companyId of [A, B]) {
+    const teamId = companyId === A ? "T0AAAAAAA" : "T0BBBBBBB";
+    const probe = vi.fn(async (workspace?: { companyId: string; teamId: string }) => ({ ok: true as const, teamId: workspace?.teamId ?? "T0INSTALL" }));
+    const { admin } = await createAdminReadBroker({ brokerExtra: { adminReads: {
+      companies: { companyOf: async () => companyId },
+      slackWorkspaces: { scopesForCompany: async (company: string) => company === companyId ? [{ companyId, teamId }] : [], requireCompany: async () => companyId },
+      health: { slackAuthCheck: probe },
+    } } });
+    const answer = await admin("GET", "/v1/admin/health");
+    expect(answer.body.slack).toEqual({ status: "ok", detail: "Slack works for this company." });
+    expect(probe).toHaveBeenCalledExactlyOnceWith({ companyId, teamId });
+    expect(JSON.stringify(answer.body.slack)).not.toContain(teamId);
+  }
+});
+it.each(["foreign", "missing", "over-budget", "throws"])("company health refuses %s without install fallback or partial success", async (failure) => {
+  const companyId = "org_aaaaaaaaaaaaaaaaaaaa", teamId = "T0AAAAAAA";
+  const probe = vi.fn(async () => ({ ok: true as const, teamId }));
+  const { admin } = await createAdminReadBroker({ brokerExtra: { adminReads: {
+    companies: { companyOf: async () => companyId },
+    slackWorkspaces: { scopesForCompany: async () => {
+      if (failure === "throws") throw Error("private marker");
+      return failure === "missing" ? [] : Array.from({ length: failure === "over-budget" ? 33 : 1 }, (_, index) => ({ companyId, teamId: failure === "over-budget" ? `T${String(index).padStart(8, "0")}` : teamId }));
+    }, requireCompany: async () => failure === "foreign" ? "org_bbbbbbbbbbbbbbbbbbbb" : companyId },
+    health: { slackAuthCheck: probe },
+  } } });
+  expect((await admin("GET", "/v1/admin/health")).body.slack).toEqual({ status: "unknown", detail: "Slack is not available for this company." });
+  expect(probe).not.toHaveBeenCalled();
+});
+
+it("company health succeeds at the total 32-workspace limit", async () => {
+  const companyId = "org_aaaaaaaaaaaaaaaaaaaa";
+  const scopes = Array.from({ length: 32 }, (_, index) => ({ companyId, teamId: `T${String(index).padStart(8, "0")}` }));
+  const probe = vi.fn(async (workspace?: { teamId: string }) => ({ ok: true as const, teamId: workspace!.teamId }));
+  const { admin } = await createAdminReadBroker({ brokerExtra: { adminReads: {
+    companies: { companyOf: async () => companyId },
+    slackWorkspaces: { scopesForCompany: async () => scopes, requireCompany: async () => companyId }, health: { slackAuthCheck: probe },
+  } } });
+  expect((await admin("GET", "/v1/admin/health")).body.slack).toEqual({ status: "ok", detail: "Slack works for this company." });
+  expect(probe).toHaveBeenCalledTimes(32);
 });

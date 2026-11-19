@@ -1,6 +1,7 @@
 // A coding run that ends with no code change keeps what it found: the commands the agent ran, their output and its own conclusion. This is the shape, its bounds and its redaction
 // (the worker builds it before it leaves; the broker rebuilds whatever arrives before it is stored or shown).
 import { describe, expect, it } from "vitest";
+import { expectLinearScaling } from "../support/scaling.js";
 import {
   NO_CHANGE_FINDINGS_COMMANDS_MAX, NO_CHANGE_FINDINGS_COMMAND_MAX, NO_CHANGE_FINDINGS_CONCLUSION_MAX, NO_CHANGE_FINDINGS_OUTPUT_MAX, NO_CHANGE_FINDINGS_TOTAL_MAX,
   NO_CODE_CHANGED_LEGACY_REASONS, NO_CODE_CHANGED_REASON, NoChangeFindingsSchema, buildNoChangeFindings, isNoCodeChangedReason, noChangeFindingsFrom, noChangeFindingsSize,
@@ -186,9 +187,8 @@ describe("secret-looking values are hidden", () => {
   });
 
   it("is linear in the size of a hostile output", () => {
-    const started = performance.now();
-    maskSecretValues(`${"a_".repeat(50_000)}\n${"KEY".repeat(30_000)}`);
-    expect(performance.now() - started).toBeLessThan(2_000);
+    // A scaling check, not a wall-clock bound: the output is timed at N and at 8N (8N, about 3.8 bytes a unit, stays at or under 256 KiB so it stays in CPU cache).
+    expectLinearScaling((n) => { const output = `${"a_".repeat(n)}\n${"KEY".repeat(n * 3 / 5)}`; return () => maskSecretValues(output); }, { n: 6_250, unitBytes: 4, label: "maskSecretValues on a hostile output" });
   });
 });
 

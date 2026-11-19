@@ -2,7 +2,8 @@ import { MissingProviderSecret, type ModelRole } from "./config.js";
 import { openRouterRouting, readProviderKey, requireKeyedModel } from "./config.js";
 import { ROUTE_PROVIDER, bedrockClaudeModelIds, catalogModel, catalogModelByName, proxyGeographyOfModelId } from "./catalog.js";
 export { ROUTE_PROVIDER };
-import { TRANSPORTS, requestCompat } from "./transport.js";
+import { TRANSPORTS, carriesUnsignedReasoning, requestCompat } from "./transport.js";
+import { TOOL_DECLARATIONS_MISSING_WORDS, toolBlocksWithoutTools } from "./tool-history.js";
 import { ModelBudgetExhaustedError, ModelNotAllowedError, budgetExhaustedMarker, budgetScopeOfProxyBody, modelNotAllowedMarker, type ModelBudgetScope } from "./budget.js";
 export { ModelBudgetExhaustedError, ModelNotAllowedError, budgetExhaustedFromMarker, modelNotAllowedFromMarker, type ModelBudgetScope } from "./budget.js";
 export { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, requireKeyedModel } from "./config.js";
@@ -14,9 +15,9 @@ export { createE2EProviderInvoke } from "./e2e-provider-invoke.js";
 export type { E2EProviderInvoke, E2EProviderInvokeDependencies } from "./e2e-provider-invoke.js";
 export * from "./e2e-environment-guard.js";
 export * from "./e2e-route-derive.js";
-export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL } from "./provider-failure.js";
+export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_SIGNAL } from "./provider-failure.js";
 export type { ProviderFailureFacts } from "./provider-failure.js";
-import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, isKeyedModelProvider, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
+import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, isClaudeAgentModel, isKeyedModelProvider, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { streamSimple as openAICompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
@@ -242,7 +243,7 @@ async function createProxiedModelRuntime(selected: ModelIdentifier & { thinkingL
   const model = runtime.getModel(selected.provider, selected.modelId);
   if (model === undefined) throw agentXError("CONFIG_INVALID", `model ${selected.modelId} is not available on this install`);
   if (!model.reasoning && selected.thinkingLevel && selected.thinkingLevel !== "off") throw agentXError("CONFIG_INVALID", "the selected model does not support reasoning; set thinkingLevel to off");
-  const requestKey = typeof proxy.apiKey === "function" ? proxy.apiKey : undefined;
+  const requestKey = typeof proxy.apiKey === "function" ? () => (proxy.apiKey as () => Promise<string>).call(proxy) : undefined;
   const initialKey = requestKey === undefined ? proxy.apiKey as string : await requestKey().catch((error: unknown) => {
     // A spent budget is the task's to end on, not a proxy fault.
     if (error instanceof ModelBudgetExhaustedError || error instanceof ModelNotAllowedError) throw error;
@@ -253,12 +254,34 @@ async function createProxiedModelRuntime(selected: ModelIdentifier & { thinkingL
     baseUrl: proxy.baseUrl, api,
     models: runtime.getModels(selected.provider).filter((entry) => served.has(entry.id))
       .map((entry) => ({ ...entry, api, baseUrl: proxy.baseUrl, compat: requestCompat("anthropic", undefined) })),
-    streamSimple: (entry, context, streamOptions) => safeProviderStream("anthropic", entry, context, streamOptions, undefined, options.fetch, options.onUsage, undefined, requestKey),
+    streamSimple: (entry, context, streamOptions) => safeProviderStream("anthropic", entry, context, streamOptions, undefined, options.fetch, options.onUsage, undefined, proxyRequestKey(proxy)),
   });
   try { await runtime.setRuntimeApiKey(selected.provider, initialKey); }
   catch { throw agentXError("RUNTIME_UNAVAILABLE", "the model proxy key could not be initialized"); }
   return runtime;
 }
+
+/** Resolve the existing proxy key method against a request-local receiver; never mix a refreshed key with another answer's URL. */
+function proxyRequestKey(proxy: ModelProxyOptions, api?: InvocationModelRoute["api"]): ((model: Model<Api>) => Promise<string>) | undefined {
+  if (typeof proxy.apiKey !== "function") return undefined;
+  const key = proxy.apiKey;
+  return async (model) => {
+    const request = { ...proxy };
+    const apiKey = await key.call(request);
+    model.baseUrl = api === undefined || api === "anthropic-messages" ? request.baseUrl : `${request.baseUrl.replace(/\/+$/u, "")}/v1`;
+    return apiKey;
+  };
+}
+
+/**
+ * DEC 254f/254g: the most output tokens a routed call to a model other than Claude on the Anthropic Messages route (the model gateway's agent route, which translates it to Bedrock
+ * Converse) may ask for. The gateway holds every non-Anthropic model name to its default output limit (64,000) unless it knows the model's own, and Pi asks for the catalog's whole limit
+ * (zai.glm-5: 131,072). The gateway's offered-models answer carries no output limit (OfferedAgentModels is a list of names), so this default stands; a lower catalog limit stays. Claude
+ * and every route on another API keep their catalog limit.
+ */
+export const GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS = 64_000;
+/** Claude by any of its names: the engine name (`claude-...`) or a Bedrock id or profile (`anthropic.claude-...`, `us.anthropic.claude-...`). Claude keeps its catalog limit on every route. */
+const isClaudeFamilyCatalog = (catalog: string): boolean => isClaudeAgentModel(catalog) || /(?:^|[./])claude-/u.test(catalog);
 
 /** What a model the installed catalogs do not know (a company's own) is given: no reasoning, no images, a modest window. */
 const UNLISTED_ROUTED_MODEL = { reasoning: false, input: ["text"] as ("text" | "image")[], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128_000, maxTokens: 16_384 };
@@ -271,7 +294,7 @@ const UNLISTED_ROUTED_MODEL = { reasoning: false, input: ["text"] as ("text" | "
 async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLevel?: string }, options: ModelRuntimeOptions, proxy: ModelProxyOptions, route: InvocationModelRoute): Promise<ModelRuntime> {
   const catalog = catalogModelByName(route.catalog)?.model;
   const runtime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null, credentials: new InMemoryCredentialStore() });
-  const requestKey = typeof proxy.apiKey === "function" ? proxy.apiKey : undefined;
+  const requestKey = typeof proxy.apiKey === "function" ? () => (proxy.apiKey as () => Promise<string>).call(proxy) : undefined;
   const initialKey = requestKey === undefined ? proxy.apiKey as string : await requestKey().catch((error: unknown) => {
     if (error instanceof ModelBudgetExhaustedError || error instanceof ModelNotAllowedError) throw error;
     throw proxyKeyUnavailable(error);
@@ -285,21 +308,25 @@ async function createRoutedModelRuntime(selected: ModelIdentifier & { thinkingLe
     baseUrl, api: route.api,
     models: [{
       id: route.alias, name: route.alias, api: route.api, baseUrl,
-      reasoning: base.reasoning, input: base.input, cost: base.cost, contextWindow: base.contextWindow, maxTokens: base.maxTokens,
+      reasoning: base.reasoning, input: base.input, cost: base.cost, contextWindow: base.contextWindow,
+      maxTokens: route.api === "anthropic-messages" && !isClaudeFamilyCatalog(route.catalog) ? Math.min(base.maxTokens, GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS) : base.maxTokens,
       ...(catalog?.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: catalog.thinkingLevelMap }),
       ...(catalog?.promptCache === undefined ? {} : { promptCache: catalog.promptCache }),
-      compat: routeCompat(route.api, catalog?.api === route.api ? catalog.compat : undefined),
+      compat: routeCompat(route.api, catalog?.api === route.api ? catalog.compat : undefined, route.catalog),
     }],
-    streamSimple: (entry, context, streamOptions) => safeProviderStream(route.api === "anthropic-messages" ? "anthropic" : "openai", entry, context, streamOptions, undefined, options.fetch, options.onUsage, undefined, requestKey, { api: route.api, identity }),
+    streamSimple: (entry, context, streamOptions) => safeProviderStream(route.api === "anthropic-messages" ? "anthropic" : "openai", entry, context, streamOptions, undefined, options.fetch, options.onUsage, undefined, proxyRequestKey(proxy, route.api), { api: route.api, identity }),
   });
   try { await runtime.setRuntimeApiKey(ROUTE_PROVIDER, initialKey); }
   catch { throw agentXError("RUNTIME_UNAVAILABLE", "the model proxy key could not be initialized"); }
   return runtime;
 }
 
-/** The request a routed model gets: the shared rules of requestCompat, and no session-affinity header for a company's endpoint. */
-function routeCompat(api: InvocationModelRoute["api"], compat: unknown) {
-  if (api === "anthropic-messages") return requestCompat("anthropic", compat);
+/**
+ * The request a routed model gets: the shared rules of requestCompat, and no session-affinity header for a company's endpoint. A routed Anthropic-format model that
+ * needs its earlier reasoning sent back (carriesUnsignedReasoning) also keeps its unsigned thinking blocks as thinking blocks.
+ */
+function routeCompat(api: InvocationModelRoute["api"], compat: unknown, catalogName: string) {
+  if (api === "anthropic-messages") return { ...requestCompat("anthropic", compat), ...(carriesUnsignedReasoning(catalogName) ? { allowEmptySignature: true } : {}) };
   if (api === "openai-responses") return requestCompat("openai", compat);
   return { ...(compat as OpenAICompletionsCompat | undefined), sendSessionAffinityHeaders: false, supportsMidConvoSystemMessages: false };
 }
@@ -325,9 +352,13 @@ function eventModel(data: { model?: unknown; message?: { model?: unknown }; resp
   return data.model ?? data.message?.model ?? data.response?.model;
 }
 
-function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, context: TranscriptContext, options: SimpleStreamOptions | undefined, routing: Record<string, unknown> | undefined, transport: typeof fetch = fetch, onUsage = (record: Record<string, unknown>) => console.info(JSON.stringify(record)), plan?: ChatGptPlan, proxyKey?: () => Promise<string>,
+/** A routed call that holds tool calls or results and declares no tools (tool-history.ts). Never sent. */
+class ToolDeclarationsMissing extends Error {}
+
+function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, context: TranscriptContext, options: SimpleStreamOptions | undefined, routing: Record<string, unknown> | undefined, transport: typeof fetch = fetch, onUsage = (record: Record<string, unknown>) => console.info(JSON.stringify(record)), plan?: ChatGptPlan, proxyKey?: (model: Model<Api>) => Promise<string>,
   /** A routed model (Task 27): its API, which picks the client, and the catalog identity its usage is reported under. */
   route?: { api: InvocationModelRoute["api"]; identity: ModelIdentifier }) {
+  model = { ...model };
   const output = createAssistantMessageEventStream();
   const chatgpt = plan !== undefined;
   let failureStatus: number | undefined;
@@ -337,6 +368,8 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
   let refusal: ChatGptFallbackReason | undefined;
   // Set when the model proxy answered 403 because Amazon Bedrock refused the model for this account (not a key or permission problem): the error then says so in its own fixed words.
   let notEnabled = false;
+  // Set when the model gateway answered 400 because it does not offer the routed model (DEC 254g).
+  let notOffered = false;
   let returnedModel: string | undefined;
   let returnedProvider: string | undefined;
   const observedFetch: typeof fetch = async (input, init) => {
@@ -348,6 +381,8 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
     if (!response.ok && plan?.fallback !== undefined) refusal = chatGptRefusal(response.status, (await response.clone().text().catch(() => "")).slice(0, 65_536));
     // DR-KEY-1 (B): the model proxy's 403 body is read (matched, never kept) to tell a model the account cannot use from a refused key.
     if (response.status === 403 && proxyKey !== undefined && plan === undefined) notEnabled = modelNotEnabledBody((await response.clone().text().catch(() => "")).slice(0, 65_536)) || notEnabled;
+    // DEC 254g: the model gateway is the authority on which models it offers. Its 400 for a model it does not offer is read (matched against its fixed words, never kept) so the step fails as "model not offered".
+    if (response.status === 400 && route?.api === "anthropic-messages" && plan === undefined) notOffered = gatewayModelNotOfferedBody((await response.clone().text().catch(() => "")).slice(0, 65_536)) || notOffered;
     if (!response.ok || !response.body) return response;
     // Observe only the serving model and router provider identifiers; never record request/response bodies.
     const decoder = new TextDecoder();
@@ -397,6 +432,8 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
   };
   void (async () => {
     try {
+      // DEC 243c: a routed model may be served through Converse, which refuses tool calls and results without declared tools. Such a call is refused here, before a key is asked for or anything is sent.
+      if (route !== undefined && toolBlocksWithoutTools(context)) throw new ToolDeclarationsMissing();
       if (plan?.fallback?.reason !== undefined) return await fallBack(plan.fallback, plan.fallback.reason);
       // A ChatGPT task's token is asked for each time, so a refreshed one replaces an expiring one. A token the
       // control plane will not give (the connection was revoked) sends the request to the fallback.
@@ -409,7 +446,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
         }
       }
       // A proxy key is asked for each time too: it is minted for an hour, and a task can run longer.
-      if (proxyKey !== undefined) key = { apiKey: await proxyKey() };
+      if (proxyKey !== undefined) key = { apiKey: await proxyKey(model) };
       // ChatGPT requests are not retried here: a plan's limit does not lift in seconds, and the fallback is ready.
       // Pi 1.4+ hands each request an identity: a detailed User-Agent and, while install telemetry is on, attribution to Pi (OpenRouter's HTTP-Referer and X-OpenRouter-Title, and the like). Rovara's settings turn
       // telemetry off, and the attribution is dropped here as well, so no request announces Pi whatever a caller's settings say.
@@ -423,7 +460,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
           return await fallBack(plan.fallback, refusal);
         }
         started = true;
-        if (event.type === "error") event.error.errorMessage = safeError(provider, event.reason === "aborted", failureStatus, chatgpt, exhausted, route !== undefined, notEnabled);
+        if (event.type === "error") event.error.errorMessage = safeError(provider, event.reason === "aborted", failureStatus, chatgpt, exhausted, route !== undefined, notEnabled, notOffered);
         if (event.type === "done" || event.type === "error") {
           const message = event.type === "done" ? event.message : event.error;
           // Pi retains the response in the transcript. This record also identifies the serving model
@@ -443,7 +480,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
     } catch (error) {
       const aborted = options?.signal?.aborted === true;
       const message: AssistantMessage = { role: "assistant", api: model.api, provider, model: model.id,
-        content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: error instanceof ModelNotAllowedError && !aborted ? modelNotAllowedMarker(error.text) : safeError(provider, aborted, failureStatus, chatgpt, exhausted ?? (error instanceof ModelBudgetExhaustedError ? error.scope : undefined), route !== undefined, notEnabled),
+        content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: error instanceof ToolDeclarationsMissing ? TOOL_DECLARATIONS_MISSING_WORDS : error instanceof ModelNotAllowedError && !aborted ? modelNotAllowedMarker(error.text) : safeError(provider, aborted, failureStatus, chatgpt, exhausted ?? (error instanceof ModelBudgetExhaustedError ? error.scope : undefined), route !== undefined, notEnabled, notOffered),
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       };
       output.push({ type: "error", reason: aborted ? "aborted" : "error", error: message });
@@ -464,16 +501,37 @@ const MODEL_NOT_ENABLED_SHAPE = [
   /\byou don't have access to the model with the specified model id\b/iu,
   /\bmodel use case details have not been submitted for this account\b/iu,
 ];
+/**
+ * The model proxy's own 403 for a model it has no price for, on a budgeted key (`model_not_priced`). The model cannot be used on this install any more than one Bedrock refused, so it is read the same way and the broker
+ * learns it. Only the error TYPE token counts, as a JSON member (on the Anthropic route it sits inside an escaped message, hence the optional backslashes).
+ */
+const MODEL_NOT_PRICED_TYPE = /\\?"type\\?"\s*:\s*\\?"model_not_priced\\?"/u;
 /** Whether a proxy 403 body says the account cannot use the model. Only matched; nothing of the body is kept. */
 export function modelNotEnabledBody(body: string): boolean {
-  return MODEL_NOT_ENABLED_CLASS.test(body) && MODEL_NOT_ENABLED_SHAPE.some((pattern) => pattern.test(body));
+  return (MODEL_NOT_ENABLED_CLASS.test(body) && MODEL_NOT_ENABLED_SHAPE.some((pattern) => pattern.test(body))) || MODEL_NOT_PRICED_TYPE.test(body);
 }
 
 /** The fixed sentence for a model the account cannot use (the worker reads it as `key-rejected ModelNotEnabled`, which the broker learns from). */
 export const MODEL_NOT_ENABLED_DETAIL = "the model is not available for this account";
 
+/**
+ * DEC 254g: the model gateway's own fixed refusals of a model it does not offer the company (Cloud model-gateway ROVARA_AI_MODEL and BYO_BEDROCK_MODEL), as the `error.message` of its
+ * 400 JSON answer. Matched whole, never kept.
+ */
+export const GATEWAY_MODEL_NOT_OFFERED_ANSWERS: readonly string[] = Object.freeze(["This model is not offered on Rovara's AI.", "This model is not one your company picked for its Bedrock connection."]);
+/** Whether a gateway 400 body says it does not offer the model: exactly `{ error: { message: <one of its fixed sentences>, ... } }`. Only matched; nothing of the body is kept. */
+export function gatewayModelNotOfferedBody(body: string): boolean {
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { return false; }
+  const error = parsed !== null && typeof parsed === "object" ? (parsed as { error?: unknown }).error : undefined;
+  const message = error !== null && typeof error === "object" ? (error as { message?: unknown }).message : undefined;
+  return typeof message === "string" && GATEWAY_MODEL_NOT_OFFERED_ANSWERS.includes(message);
+}
+/** The fixed sentence for a model the gateway does not offer (the worker reads it as `model-not-found ModelNotOffered`). */
+export const MODEL_NOT_OFFERED_DETAIL = "the model gateway does not offer this model";
+
 /** A diagnostic chosen from the HTTP status alone, so provider error bodies (which can echo prompts) never surface. */
-function safeError(provider: KeyedModelProvider, aborted: boolean, status?: number, chatgpt = false, exhausted?: ModelBudgetScope, routed = false, notEnabled = false): string {
+function safeError(provider: KeyedModelProvider, aborted: boolean, status?: number, chatgpt = false, exhausted?: ModelBudgetScope, routed = false, notEnabled = false, notOffered = false): string {
   // A routed model is a company's source, whichever API it speaks: it is not named after a provider it may not be.
   const label = routed ? "Model source" : KEYED_MODEL_PROVIDERS[provider].label;
   if (aborted) return `${label} request cancelled`;
@@ -486,6 +544,7 @@ function safeError(provider: KeyedModelProvider, aborted: boolean, status?: numb
   // 401 is a key the provider does not accept (invalid, expired, not yet live); 403 is a key that may not use this model or call. Told apart so a person can be sent to the right place (QA6-14).
   // A 403 that Bedrock words as unentitled is MODEL_NOT_ENABLED (DR-KEY-1).
   const detail = status === 403 && notEnabled ? MODEL_NOT_ENABLED_DETAIL
+    : status === 400 && notOffered ? MODEL_NOT_OFFERED_DETAIL
     : status === 401 ? "the API key was refused; check that it is valid and has not expired"
     : status === 403 ? "check the API key and its permissions"
     : status === 402 ? "check the key's credit balance and spending limit"

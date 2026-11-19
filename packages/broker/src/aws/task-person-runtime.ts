@@ -1,3 +1,6 @@
+import { slackRecordScope } from "./slack-workspace-tokens.js";
+import type { SlackWorkspaceBindings } from "./slack-workspace-binding.js";
+import type { SlackWorkspaceScope } from "@agentx/contracts";
 import { isDeepStrictEqual } from "node:util";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
@@ -11,12 +14,12 @@ import {
   type ProjectAccessSubject,
   type TaskPersonIdentityDependencies,
 } from "../developer/task-person-identity.js";
-import type { ProjectAuthorityReader, ProjectAuthorityWitness } from "../developer/task-project-access.js";
-import { readProjectAuthority } from "../developer/task-project-access.js";
+import { evaluateProjectAuthority, readProjectAuthority, type ProjectAuthorityReader, type ProjectAuthorityRevision, type ProjectAuthorityWitness } from "../developer/task-project-access.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { taskOwnerKey } from "../developer/task-records.js";
 import { META, type DeveloperRecord } from "../developer/store.js";
 import type { TaskAuthorityAdmission } from "./task-authority-admission.js";
+import { membershipKey, recordInCompany, strictLiveMembership } from "./company-check.js";
 
 export const TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES = [
   "pk", "sk", "developerId", "provider", "issuer", "subject", "slackUserId", "revoked", "displayName",
@@ -25,7 +28,7 @@ export const TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES = [
 export type TaskPersonDeveloperRecordProjection = { pk: string; sk: string } & Pick<DeveloperRecord,
   "developerId" | "provider" | "issuer" | "subject" | "slackUserId" | "revoked" | "displayName">;
 
-export interface TaskPersonRuntimePorts {
+export interface TaskPersonRuntimePorts extends TaskPersonRuntimeWebPorts {
   /** Reads only a task-partition META, PERSON_SUBJECT#<developerId>, or PERSON#<UUID> row. */
   readTaskRecord(input: { taskId: string; sortKey: string; abortSignal: AbortSignal }): Promise<Record<string, unknown> | undefined>;
   /** Strong DEVELOPER#<developerId>/META read with the exact projected fields named here. */
@@ -63,6 +66,51 @@ function projectedDeveloperRecord(record: TaskPersonDeveloperRecordProjection | 
   } as unknown as DeveloperRecord;
 }
 
+/**
+ * The dispatcher's latest-revision Query for the runtime proof: the revision's key, its company (`companyId`, row 3654 #3: the web proof's second company lock) and only the two definition fields
+ * the policy needs. The dispatcher's role reads the State table without an attribute limit, so naming `companyId` needs no new grant.
+ */
+export function taskPersonLatestRevisionQuery(stateTableName: string, project: string) {
+  return {
+    TableName: stateTableName,
+    KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":prefix": "REV#" },
+    ProjectionExpression: "#pk, #sk, #companyId, #definition.#revision, #definition.#developerTasks",
+    ExpressionAttributeNames: { "#pk": "pk", "#sk": "sk", "#companyId": "companyId", "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks" },
+    ConsistentRead: true as const,
+    Limit: 1,
+    ScanIndexForward: false,
+  };
+}
+
+/** The reader's answer for that Query's response: the newest revision with its company as stored (absent stays absent, anything else is carried as is for the company check to refuse), or none. */
+export function taskPersonRevisionFromResponse(response: unknown): { revision?: ProjectAuthorityRevision; complete: boolean } {
+  const item = (response as { Items?: Array<{ pk?: string; sk?: string; companyId?: unknown; definition?: { revision?: number; developerTasks?: unknown } }> }).Items?.[0];
+  if (item?.definition === undefined) return { complete: true };
+  return { revision: { ...(item.pk === undefined ? {} : { pk: item.pk }), ...(item.sk === undefined ? {} : { sk: item.sk }), ...(item.companyId === undefined ? {} : { companyId: item.companyId }), revision: item.definition.revision as number,
+    definition: Object.hasOwn(item.definition, "developerTasks") ? { developerTasks: item.definition.developerTasks } : {} }, complete: true };
+}
+
+/** C2: the fields of a `COMPANY_MEMBER#<developerId>` / `COMPANY` row the web proof reads (the reviewed `Membership` record, company-check.ts). */
+export const TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES = [
+  "pk", "sk", "entityType", "personId", "companyId", "role", "joinedAt", "joinedVia", "revokedAt", "revokedBy",
+] as const;
+
+/** C2 (plan 4.1 rule 3): the bounded read set's addition for a `web` identity. */
+export interface TaskPersonRuntimeWebPorts {
+  /**
+   * Strong `COMPANY_MEMBER#<developerId>` / `COMPANY` read from the sign-in table with exactly the projected fields named here, for the checked `web`
+   * identity only. It counts as one state read and is never asked for a `slack` identity. Absent (the dispatcher today: its role may read only
+   * `DEVELOPER#*` on the sign-in table): every `web` identity is unavailable, so a system-started step parks and nothing is reconciled.
+   */
+  readCompanyMembership?(input: {
+    developerId: string;
+    consistentRead: true;
+    projection: typeof TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES;
+    abortSignal: AbortSignal;
+  }): Promise<Record<string, unknown> | undefined>;
+}
+
 function identityDocumentClient(input: {
   taskId: string;
   developerId: string;
@@ -96,6 +144,7 @@ function identityDocumentClient(input: {
 }
 
 function identityDependencies(input: {
+  workspace?: SlackWorkspaceScope;
   task: DeveloperTaskRecord;
   developerId: string;
     stateTableName: string;
@@ -119,6 +168,7 @@ function identityDependencies(input: {
     documentClient: identityDocumentClient({ taskId: task.taskId, developerId, stateTableName: input.stateTableName, admission, ports }),
     tableName: input.stateTableName,
     slackTeamId,
+    ...(input.workspace === undefined ? {} : { workspace: input.workspace }),
     now: () => input.now(),
     uuid: () => input.uuid(),
     taskPersonProof: async (request) => {
@@ -141,6 +191,44 @@ function identityDependencies(input: {
       });
       admission.assertOpen();
       return projectedDeveloperRecord(record, targetDeveloperId);
+    },
+    // C2 (plan 4.1 rules 3 and 4): the web proof's live reads, bounded like every other read here (state reads, zero Slack calls), for the checked person only.
+    ...(ports.readCompanyMembership === undefined ? {} : { companyMembership: async (targetDeveloperId: string) => {
+      if (targetDeveloperId !== developerId || ports.readCompanyMembership === undefined) throw unavailable();
+      const key = membershipKey(targetDeveloperId);
+      admission.assertOpen();
+      const item = await ports.readCompanyMembership({
+        developerId: targetDeveloperId,
+        consistentRead: true,
+        projection: TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES,
+        abortSignal: admission.admitStateRead(),
+      });
+      admission.assertOpen();
+      if (item !== undefined && (item.pk !== key.pk || item.sk !== key.sk)) throw unavailable();
+      return strictLiveMembership(item, targetDeveloperId);
+    } }),
+    projectGrant: async (targetDeveloperId, project, taskCompanyId) => {
+      if (targetDeveloperId !== developerId) throw unavailable();
+      // The project's latest revision and the person's own grants only: no channel bindings and no Slack user id, so the answer can only be
+      // `access: "granted"` (a developer or administrator grant). The company is bound by rule 3 (membership in the task's company) AND, as a second lock
+      // (row 3654 #3), by the revision itself: the revision row must name the task's company (an unstamped row is the implicit company's, as everywhere else).
+      admission.assertOpen();
+      const latest = await ports.projectAuthorityReader.latestRevision(project, admission, admission.admitStateRead());
+      admission.assertOpen();
+      if (!latest.complete || latest.revision === undefined) throw unavailable();
+      // Fail closed and without a verdict: a revision of another company (or of an unreadable company) is never read as "no grant", which would demote a person; the step parks like any unavailable proof.
+      if (typeof taskCompanyId !== "string" || !recordInCompany({ companyId: latest.revision.companyId }, taskCompanyId)) throw unavailable();
+      const grants = await ports.projectAuthorityReader.memberships(targetDeveloperId, admission, admission.admitStateRead());
+      admission.assertOpen();
+      if (!grants.complete) throw unavailable();
+      const result = evaluateProjectAuthority({ project, developerId: targetDeveloperId, teamId: slackTeamId, revision: latest.revision, memberships: grants.items, bindings: [] });
+      if (result.kind === "allowed") {
+        if (result.access !== "granted" || result.witness === undefined) throw unavailable();
+        input.onProjectAuthority(result.witness);
+        return true;
+      }
+      if (result.kind === "denied" && result.reason === "project-access") return false;
+      throw unavailable();
     },
     projectChannelIds: readBindings,
     targetProjectAccess: async (subject: ProjectAccessSubject, project: string, freshMemberOf: readonly string[]) => {
@@ -176,6 +264,7 @@ export interface TaskPersonRuntime {
 
 /** Creates a guard-local checker. Its injected ports expose only the bounded People read set. */
 export function createTaskPersonRuntime(input: {
+  workspaces?: Pick<SlackWorkspaceBindings, "requireCompany">;
   admission: TaskAuthorityAdmission;
   ports: TaskPersonRuntimePorts;
   stateTableName: string;
@@ -208,10 +297,14 @@ export function createTaskPersonRuntime(input: {
       witnesses.delete(witnessKey(task.taskId, developerId));
       input.admission.admitIdentity(developerId);
       input.admission.assertOpen();
-      if (!UUID.test(task.taskId) || !SlackTeamIdSchema.safeParse(input.slackTeamId).success) throw refused();
+      const workspace = input.workspaces === undefined ? undefined : slackRecordScope(task, task.share?.teamId);
+      if (workspace !== undefined && await input.workspaces!.requireCompany(workspace.teamId) !== workspace.companyId) throw unavailable();
+      const teamId = workspace?.teamId ?? input.slackTeamId;
+      if (!UUID.test(task.taskId) || !SlackTeamIdSchema.safeParse(teamId).success) throw refused();
       let projectWitness: ProjectAuthorityWitness | undefined;
       const dependencies = identityDependencies({
-        task, developerId, stateTableName: input.stateTableName, slackTeamId: input.slackTeamId,
+        task, developerId, stateTableName: input.stateTableName, slackTeamId: teamId,
+        ...(workspace === undefined ? {} : { workspace }),
         now: () => input.now(), uuid: () => input.uuid(),
         ...(input.trustedCaller === undefined ? {} : { trustedCaller: input.trustedCaller }),
         admission: input.admission,
@@ -235,6 +328,32 @@ export function createTaskPersonRuntime(input: {
       const witness = witnesses.get(witnessKey(task.taskId, developerId));
       if (witness?.eligible !== true) return undefined;
       return currentWitness(task, developerId, witness);
+    },
+  };
+}
+
+/**
+ * Web task channel C3 (plan 4.1 rule 3, plan 4.2 "Dispatch"): the dispatcher's `readCompanyMembership` port. It is one strong, projected
+ * `COMPANY_MEMBER#<developerId>` / `COMPANY` GetItem on the sign-in table (the dispatcher role's grant names exactly this key and these fields).
+ * Without a sign-in table no port is added, so every `web` identity stays unavailable.
+ */
+export function withTaskPersonMembershipRead(
+  client: { send(command: GetCommand, options?: { abortSignal?: AbortSignal }): Promise<unknown> },
+  signInTableName: string | undefined,
+  ports: TaskPersonRuntimePorts,
+): TaskPersonRuntimePorts {
+  if (signInTableName === undefined || signInTableName.trim() === "") return ports;
+  return {
+    ...ports,
+    async readCompanyMembership({ developerId, projection, abortSignal }) {
+      const response = await client.send(new GetCommand({
+        TableName: signInTableName,
+        Key: membershipKey(developerId),
+        ConsistentRead: true,
+        ProjectionExpression: projection.map((_, index) => `#p${index}`).join(", "),
+        ExpressionAttributeNames: Object.fromEntries(projection.map((attribute, index) => [`#p${index}`, attribute])),
+      }), { abortSignal });
+      return (response as { Item?: Record<string, unknown> }).Item;
     },
   };
 }

@@ -10,11 +10,13 @@
 //   - the data file is either unpinned (no digest, scan or SBOM anywhere: the v1 state, until the pin task TS19) or pinned (at least one entry, and every pinned entry that is not retired has an image digest, an SBOM
 //     and a scan with no critical finding open; an entry not pinned yet carries none of the three); a half-pinned ENTRY does not parse;
 //   - at most one entry is the default of a family;
-//   - Rovara local AWS (the emulator entry) lists its services in four tiers, each service in one tier, IAM is not enforced and storage is memory only.
+//   - Rovara local AWS (the emulator entry) lists the services it OVERRIDES in four tiers, each service in one tier; every other service of the generated table (`AWS_EMULATOR_SERVICES`) is `available`.
+//     IAM is not enforced and storage is memory only.
 // Nothing here imports a Node module.
 import { z } from "zod";
 import { AwsServiceIdSchema, CatalogIdSchema, ConnectTemplateSchema, DnsLabelSchema, EnvNameSchema, TEST_ENV_HELPER_CATALOG_NAMES, TEST_ENV_RESERVED_ALIASES, catalogIdName } from "./test-env-dependency.js";
 import { reservedDependencyEnvName } from "./test-services-shared.js";
+import { AWS_PLAN_SERVICES_MAX, awsEmulatorServiceRow, awsServiceKeyOrSelf } from "./aws-emulator-service-keys.js";
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 
@@ -52,31 +54,41 @@ export function catalogFixedArgv(ids: readonly CatalogFixedArgId[]): string[] {
 // ---- Rovara local AWS: the services it supports (5.2)
 
 /**
- * The four tiers of 5.2. `supported`: tested in Rovara's compatibility suite. `functions`: Lambda through Rovara's function runner. `model_endpoint_front`: SageMaker Runtime routed to a fake or a model
- * helper. `available`: present but never chosen by default. The chooser (3.4) may pick the first three.
+ * The four tiers of 5.2. `supported`: tested in Rovara's compatibility suite and seedable. `functions`: Lambda through Rovara's function runner. `model_endpoint_front`: SageMaker Runtime routed to a fake or a model
+ * helper. `available`: present but never chosen by default. The chooser (3.4) may pick the first three. An entry lists the services it puts in a tier on purpose (an override); a service of the generated table that no
+ * list names is `available` (`emulatorServiceTier`), so the entry never has to list the engine's whole catalogue.
  */
 export const EMULATOR_SERVICE_TIERS = ["supported", "functions", "model_endpoint_front", "available"] as const;
 export type EmulatorServiceTier = (typeof EMULATOR_SERVICE_TIERS)[number];
 export const EMULATOR_CHOOSER_TIERS: readonly EmulatorServiceTier[] = ["supported", "functions", "model_endpoint_front"];
 
-const ServiceList = z.array(AwsServiceIdSchema).max(24);
+const ServiceList = z.array(AwsServiceIdSchema).max(AWS_PLAN_SERVICES_MAX);
 export const EmulatorSchema = z
   .object({
-    services: z.object({ supported: ServiceList.min(1), functions: ServiceList, model_endpoint_front: ServiceList, available: ServiceList }).strict(),
+    services: z.object({ supported: ServiceList.min(1), functions: ServiceList, model_endpoint_front: ServiceList, available: ServiceList.default([]) }).strict(),
+    /** The engine release the entry runs (`AWS_EMULATOR_ENGINE_VERSION` of the table): `checkEmulatorEngine` refuses an entry whose version differs. Optional so an entry made before the pin still parses. */
+    engineVersion: z.string().regex(/^\d{1,3}\.\d{1,3}\.\d{1,5}$/u).optional(),
     /** The evidence says "permissions were not checked": the emulator does not enforce IAM, and the data file says so. */
     iamEnforced: z.literal(false),
     storage: z.literal("memory"),
   })
   .strict()
   .superRefine((emulator, context) => {
-    const all = EMULATOR_SERVICE_TIERS.flatMap((tier) => emulator.services[tier]);
+    // A legacy id and its key are one service.
+    const all = EMULATOR_SERVICE_TIERS.flatMap((tier) => emulator.services[tier].map(awsServiceKeyOrSelf));
     if (new Set(all).size !== all.length) context.addIssue({ code: "custom", path: ["services"], message: "a service is in one tier only" });
   });
 export type Emulator = z.infer<typeof EmulatorSchema>;
 
-/** The tier a service is in on an emulator entry, or undefined when the emulator does not have it. */
+/**
+ * The tier a service is in on an emulator entry: the tier that lists it (a legacy id and its key are the same service), `available` when the service is in the generated table and no tier lists it, and undefined
+ * for anything the engine does not have.
+ */
 export function emulatorServiceTier(emulator: Emulator, serviceId: string): EmulatorServiceTier | undefined {
-  return EMULATOR_SERVICE_TIERS.find((tier) => emulator.services[tier].includes(serviceId));
+  const key = awsServiceKeyOrSelf(serviceId);
+  const listed = EMULATOR_SERVICE_TIERS.find((tier) => emulator.services[tier].some((id) => awsServiceKeyOrSelf(id) === key));
+  if (listed !== undefined) return listed;
+  return awsEmulatorServiceRow(key) === undefined ? undefined : "available";
 }
 
 /** Whether the chooser may pick the emulator for a service (the service is in a tier the chooser uses). */
@@ -122,7 +134,7 @@ export const CatalogEntrySchema = z
     status: z.enum(CATALOG_STATUSES),
     image: z
       .object({
-        /** The repository name under the registry Rovara (or an Enterprise install) serves it from; the registry host is the install's, not the catalog's. */
+        /** The repository name under the registry Rovara (or a company's own install) serves it from; the registry host is the install's, not the catalog's. */
         repository: z.string().regex(/^svc\/[a-z0-9][a-z0-9._-]{0,62}$/u),
         digest: Sha256Schema.optional(),
         platforms: z.array(z.enum(CATALOG_PLATFORMS)).min(1).max(2),
@@ -146,6 +158,11 @@ export const CatalogEntrySchema = z
      * pin (the worker image is the release's), the catalog build carries it over untouched, and it is never in the pre-pull list. Absent on every other entry.
      */
     workerImage: z.literal(true).optional(),
+    /**
+     * Code on a laptop only (owner-image-list.ts): the entry was made from an image THE OWNER approved on their own page, pinned to the digest their Docker resolved, not from a signed catalog. It has a digest and no SBOM or scan
+     * (nothing reviewed it but the owner). `loadSignedCatalog` refuses any catalog that carries one, so a signed catalog never holds an owner-approved entry; only `ownerCatalogOf` makes a catalog of them.
+     */
+    ownerApproved: z.literal(true).optional(),
   })
   .strict()
   .superRefine((entry, context) => {
@@ -157,6 +174,7 @@ export const CatalogEntrySchema = z
     if (entry.backing === "fake" && name !== "fake-server") problem(["backing"], "the fake entry is the fake server");
     if (entry.backing === "helper" && name !== "test-account-proxy" && name !== "dns-helper") problem(["backing"], "a helper entry is the proxy or the DNS helper");
     if (entry.workerImage === true && name !== "fake-server" && name !== "dns-helper" && name !== "test-account-proxy") problem(["workerImage"], "only Rovara's own helpers run from the worker image");
+    if (entry.ownerApproved === true && (entry.backing !== "local" || entry.image.digest === undefined || entry.sbomRef !== undefined || entry.scan !== undefined || entry.process !== undefined || entry.status === "retired" || entry.workerImage === true || entry.emulator !== undefined)) problem(["ownerApproved"], "an owner-approved entry is real software pinned to a digest, with no SBOM, scan or process of its own");
     if (entry.workerImage === true && (entry.image.digest !== undefined || entry.sbomRef !== undefined || entry.scan !== undefined || entry.process !== undefined)) problem(["workerImage"], "a helper that runs from the worker image has no image of its own to pin");
     if ((entry.backing === "emulated") !== (entry.emulator !== undefined)) problem(["emulator"], "the emulator block is on the emulated entry and nowhere else");
     if (entry.status === "default" && entry.backing === "helper") problem(["status"], "a helper is started by Rovara, never chosen: it has no default");
@@ -205,12 +223,14 @@ export const ServiceCatalogSchema = z
     const defaults = catalog.entries.filter((entry) => entry.status === "default").map((entry) => entry.family);
     if (new Set(defaults).size !== defaults.length) problem(["entries"], "a family has one default");
     catalog.entries.forEach((entry, index) => {
+      const ownerPinned = entry.ownerApproved === true;
+      if (ownerPinned && !catalog.pinned) problem(["entries", index], "an owner-approved entry must be in a pinned catalog");
       const carriesPin = entry.image.digest !== undefined || entry.sbomRef !== undefined || entry.scan !== undefined || entry.process !== undefined;
       if (!catalog.pinned && carriesPin) problem(["entries", index], "an unpinned catalog has no digest, SBOM, scan or process artifact");
       // Slice 1: a pinned catalog may hold entries that are not pinned YET (a release that pins one image at a time, `catalog-build --entries`). An entry is wholly pinned (digest, SBOM and scan) or carries none of the
       // three: a half-pinned ENTRY never parses. Nothing starts an unpinned entry (`catalogPins` leaves it out, `resolveCatalogImage` refuses it as `not_pinned`).
       const pinnedParts = [entry.image.digest, entry.sbomRef, entry.scan].filter((part) => part !== undefined).length;
-      if (catalog.pinned && entry.status !== "retired" && pinnedParts !== 0 && pinnedParts !== 3) problem(["entries", index], "a pinned entry has a digest, an SBOM and a scan");
+      if (catalog.pinned && !ownerPinned && entry.status !== "retired" && pinnedParts !== 0 && pinnedParts !== 3) problem(["entries", index], "a pinned entry has a digest, an SBOM and a scan");
       if (catalog.pinned && entry.status !== "retired" && pinnedParts === 0 && entry.process !== undefined) problem(["entries", index], "an entry that is not pinned yet has no process artifact");
     });
     if (catalog.pinned && !catalog.entries.some((entry) => entry.status !== "retired" && entry.image.digest !== undefined)) problem(["entries"], "a pinned catalog pins at least one image");

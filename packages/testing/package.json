@@ -1,0 +1,25 @@
+{
+  "name": "@agentx/testing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The conformance suites for Rovara Code's plug-in ports, the fakes they run on, and the two-company isolation kit. A new provider package runs these against its adapter (docs/architecture/testing-package.md).",
+  "exports": {
+    ".": "./dist/index.js",
+    "./ports/*": "./dist/ports/*.js",
+    "./isolation": "./dist/isolation/index.js",
+    "./channel": "./dist/channel/index.js",
+    "./fakes": "./dist/fakes/index.js"
+  },
+  "types": "./dist/index.d.ts",
+  "engines": {
+    "node": ">=22.19.0 <23"
+  },
+  "dependencies": {
+    "@agentx/broker": "0.1.0",
+    "@agentx/contracts": "0.1.0"
+  },
+  "devDependencies": {
+    "vitest": "5.0.3"
+  }
+}

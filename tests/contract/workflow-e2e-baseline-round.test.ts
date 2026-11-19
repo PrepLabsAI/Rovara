@@ -13,6 +13,7 @@ import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS } from "@agentx/contracts";
 import { e2eModelBudgetKey } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { issueCapability } from "../../packages/broker/src/aws/cancellation.js";
 import { assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
+import { TEST_ORG } from "../support/orgs.js";
 
 // The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
 assumeDrivingTestsPassed();
@@ -526,7 +527,7 @@ describe("the baseline round on a project whose policy pins a model route", () =
 // The AI day budget belongs to the candidate's AI navigation steps. A baseline round has none, so it is never refused by the budget precheck and never charged by the callback.
 describe("the baseline round and the project's AI day budget", () => {
   it("still dispatches when the project's day budget is spent: the baseline path never asks the budget's precheck", async () => {
-    const exhausted = { ...e2eModelBudgetKey("payments", new Date().toISOString().slice(0, 10)), entityType: "E2E_MODEL_BUDGET",
+    const exhausted = { ...e2eModelBudgetKey(TEST_ORG, "payments", new Date().toISOString().slice(0, 10)), entityType: "E2E_MODEL_BUDGET",
       inputTokens: E2E_MODEL_ROUTE_DEFAULT_BUDGETS.maxInputTokensPerProjectDay, calls: E2E_MODEL_ROUTE_DEFAULT_BUDGETS.maxCallsPerProjectDay };
     const round = await startApplicationRound({ baseline: "source", beforeDispatch: (harness) => harness.db.set(exhausted) });
     expect(round.admissionRef.purpose).toBe("baseline");

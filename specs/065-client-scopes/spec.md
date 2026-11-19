@@ -2,7 +2,7 @@
 
 **Created**: 2026-11-13
 **Status**: Draft
-**Input**: "We should go with scoped permissions for Cloud." The Rovara Cloud web app (PrepLabsAI/Rovara-cloud#1) signs
+**Input**: "We should go with scoped permissions for Cloud." The web app signs
 people in through Rovara Code as a sign-in client (spec 063). It must also create projects and manage who may use them,
 from its own screens, as the signed-in person.
 
@@ -15,7 +15,7 @@ and would audit everything as the service.
 
 ## User scenarios
 
-1. **An administrator allows Cloud specific actions.** `agentx admin sign-in-client add rovara-cloud … --scope
+1. **An administrator allows Cloud specific actions.** `agentx admin sign-in-client add web-app … --scope
    projects:members,projects:create` registers or changes it, as an admin change.
 2. **A person signs in to Cloud.** Cloud asks for those scopes when it starts the sign-in. Its token carries the scopes
    it asked for that its registration allows, and no others.

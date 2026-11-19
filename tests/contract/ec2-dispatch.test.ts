@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, agentXError, taskGraphDigest, workflowPublicationContext, workflowPublicationContextDigest, workspaceSessionKey, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
 import { guardTaskDispatch as coreGuardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
-import { STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
+import { MACHINE_FALLBACK_MESSAGES, STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
 import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
 import type { FeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
 import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
@@ -343,6 +343,25 @@ describe("ec2-ebs delivery", () => {
       expect(postedPayload(older.post).workflowBase).toEqual(workflowBase);
       expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
         event: "dispatch.review_checks_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
+    it("gives a coding run the approved plan it keeps through compaction only on a worker that lists it; an older worker runs without it and keeps the other fields", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const workflowBase = [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }];
+      const workflowApprovedPlan = { markdown: "# Plan\n\nDo the thing.", sha256: "b".repeat(64), ownerInstructions: ["Do not touch package.json"] };
+      const record = taskRecord({ workflowMode: "IMPLEMENT", workflowBase, workflowApprovedPlan });
+      const base = ["task.workflowMode", "task.workflowBase"];
+      const capable = delivery({ workerFeatures: async () => [...base, "task.workflowApprovedPlan.v1"] });
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post).workflowApprovedPlan).toEqual(workflowApprovedPlan);
+      const older = delivery({ workerFeatures: async () => base });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post)).not.toHaveProperty("workflowApprovedPlan");
+      expect(postedPayload(older.post).workflowBase).toEqual(workflowBase);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.approved_plan_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
       }));
       log.mockRestore();
     });
@@ -1418,6 +1437,43 @@ describe("ec2-ebs delivery", () => {
     expect(await deliver(record, record.invocation)).toBe("WAITING_FOR_SESSION");
     expect(progress).toHaveBeenCalledExactlyOnceWith(record, STARTING_COMPUTE_MESSAGE);
     expect(post).not.toHaveBeenCalled();
+  });
+
+  // DEC 254zb: a task step on a worker that runs on the default size instead of the project's chosen one says so, in fixed words, once per record.
+  describe("machine size note", () => {
+    const taskRecord = (): Ec2OutboxRecord => {
+      const record = recordFor();
+      return { ...record, invocation: { ...record.invocation, kind: "task", payload: { conversationId: randomUUID(), prompt: "test it" } } };
+    };
+    const ready = (machineFallback?: "size-unavailable" | "x86-unavailable") => ({ ensureSession: async () => ({ ready: true as const, generation: 3, privateIp: "10.42.128.10", ...(machineFallback === undefined ? {} : { machineFallback }) }) });
+
+    it.each(["size-unavailable", "x86-unavailable"] as const)("notes %s on a task step and still delivers it", async (reason) => {
+      const machineNote = vi.fn<NonNullable<Ec2DeliveryDependencies["machineNote"]>>(async () => undefined);
+      const { deliver, post } = delivery({ sessions: ready(reason), machineNote });
+      const record = taskRecord();
+      expect(await deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(machineNote).toHaveBeenCalledExactlyOnceWith(record, MACHINE_FALLBACK_MESSAGES[reason]);
+      expect(post).toHaveBeenCalledTimes(1);
+    });
+
+    it("says nothing without a fallback, on a non-task step, or without the recorder; a failing note never stops the step", async () => {
+      const machineNote = vi.fn<NonNullable<Ec2DeliveryDependencies["machineNote"]>>(async () => undefined);
+      const record = taskRecord();
+      await delivery({ sessions: ready(), machineNote }).deliver(record, record.invocation);
+      const resume = recordFor();
+      await delivery({ sessions: ready("size-unavailable"), machineNote }).deliver(resume, resume.invocation);
+      expect(machineNote).not.toHaveBeenCalled();
+      expect(await delivery({ sessions: ready("size-unavailable") }).deliver(record, record.invocation)).toBe("DELIVERED");
+      const failing = delivery({ sessions: ready("size-unavailable"), machineNote: async () => { throw new Error("store down"); } });
+      expect(await failing.deliver(record, record.invocation)).toBe("DELIVERED");
+    });
+
+    it("words each reason in fixed text that names the standard size", () => {
+      expect(MACHINE_FALLBACK_MESSAGES).toEqual({
+        "size-unavailable": "The chosen machine size wasn't available, so this task runs on the standard size (ARM, 2 vCPU, 8 GB).",
+        "x86-unavailable": "x86 machines aren't available on this install yet, so this task runs on the standard size (ARM, 2 vCPU, 8 GB).",
+      });
+    });
   });
 
   it("fails an attempt when the worker refuses, and when the workspace has no ec2-ebs binding", async () => {

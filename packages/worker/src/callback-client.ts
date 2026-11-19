@@ -2,6 +2,9 @@ import {TaskModelFallbackRequestSchema,type TaskModelFallbackRequest,type TaskMo
 import {parseTaskModelFallbackAuthorization,taskModelPolicyBindingsMatch} from "./model-fallback-authority.js";
 import { createHash } from "node:crypto";
 import {
+  BROWSER_EVIDENCE_SIGN_IN_ACTION,
+  BROWSER_EVIDENCE_UPLOAD_MAX_BYTES,
+  BrowserEvidenceSignInAnswerSchema,
   CodeBuildCheckResultSchema,
   E2EModelDayBudgetRequestSchema,
   E2EModelDayBudgetResponseSchema,
@@ -16,6 +19,7 @@ import {
   type E2EModelDayBudgetRequest,
   type E2EModelDayBudgetResponse,
   type E2EWorkflowAdmissionRef,
+  type BrowserEvidenceSignInAnswer,
 } from "@agentx/contracts";
 import type { ArtifactSink } from "./artifacts.js";
 import type { EventBatchSink } from "./events.js";
@@ -100,6 +104,13 @@ export function createWorkerCallbackSinks(input: {
   baselineSourceSink: (source: BaselineSourceExport) => Promise<void>;
   workflowE2EAdmissionReader: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
   workflowE2EEvidenceSink: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
+  /** TE-H1 browser evidence (DEC 241b): the run's before and after screenshots as ONE chunked upload (`encodeBrowserEvidenceUpload`), judged and kept by the broker. Throws when the broker does not accept it. */
+  browserEvidenceSink: (bytes: Uint8Array) => Promise<void>;
+  /**
+   * TE-H1 browser evidence, slice 3: the project's saved sign-in for the run's recipe, read by the broker from the company's secret store at this moment (never from this request) and answered once to this run. The values are
+   * held in memory for the run and handed to the capture container in its environment; nothing here logs, stores or echoes them, and a failure is one fixed sentence. Throws when the broker does not answer a valid answer.
+   */
+  browserEvidenceSignIn: () => Promise<BrowserEvidenceSignInAnswer>;
   /** M1.4 Task 4.3a: one reserve, settle or release of the project's day budget for a model call (the broker keeps the rows). Only a round whose admission has AI navigation steps holds the claim. */
   workflowE2EModelBudget: (body: E2EModelDayBudgetRequest, signal?: AbortSignal) => Promise<E2EModelDayBudgetResponse>;
   feedbackBundleReader: FeedbackBundleReader;
@@ -108,6 +119,8 @@ export function createWorkerCallbackSinks(input: {
   chatGptToken: () => Promise<unknown>;
   /** SH14: the setup run's one callback action (journal, host ask, poll, command done). The reply is the broker's, unparsed. */
   setupAgent: (body: unknown) => Promise<unknown>;
+  /** W3b: the wiki build run's one callback (`POST .../wiki-build`). */
+  wikiBuild: (body: unknown) => Promise<unknown>;
   /** NH-1: the nightly run's one callback action (its result and coverage map). The reply is the broker's, unparsed. */
   nightlyResult: (body: unknown) => Promise<unknown>;
   /** Test services (slice 3): a fresh read address of an approved fixture set the run's plan names (`{ digest }` in, the broker's answer out, unparsed). The address is a credential for 15 minutes: only fixture-delivery.ts handles the answer. */
@@ -247,6 +260,33 @@ export function createWorkerCallbackSinks(input: {
       || (finalized as { sha256?: unknown }).sha256 !== sha256) throw agentXError("RUNTIME_UNAVAILABLE", "native E2E evidence finalization is invalid");
     return { key: (finalized as { key: string }).key, sha256 };
   };
+  const browserEvidenceSink = async (bytes: Uint8Array): Promise<void> => {
+    if (bytes.byteLength <= 0 || bytes.byteLength > BROWSER_EVIDENCE_UPLOAD_MAX_BYTES) throw agentXError("CONFIG_INVALID", "browser evidence exceeds its limit");
+    const chunkBytes = 64 * 1024;
+    const chunkCount = Math.ceil(bytes.byteLength / chunkBytes);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const initialized = await postForResult("browser-evidence", { stage: "init", totalBytes: bytes.byteLength, chunkCount, sha256 });
+    if (!initialized || typeof initialized !== "object" || typeof (initialized as { uploadId?: unknown }).uploadId !== "string"
+      || (initialized as { chunkBytes?: unknown }).chunkBytes !== chunkBytes || (initialized as { chunkCount?: unknown }).chunkCount !== chunkCount) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "browser evidence upload initialization is invalid");
+    }
+    const uploadId = (initialized as { uploadId: string }).uploadId;
+    for (let index = 0; index < chunkCount; index += 1) {
+      const chunk = Buffer.from(bytes).subarray(index * chunkBytes, Math.min((index + 1) * chunkBytes, bytes.byteLength));
+      await postForResult("browser-evidence", { stage: "chunk", uploadId, index, bytesBase64: chunk.toString("base64"), sha256: createHash("sha256").update(chunk).digest("hex") });
+    }
+    const finalized = await postForResult("browser-evidence", { stage: "finalize", uploadId, sha256 });
+    if (!finalized || typeof finalized !== "object" || (finalized as { complete?: unknown }).complete !== true || (finalized as { sha256?: unknown }).sha256 !== sha256) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "browser evidence upload finalization is invalid");
+    }
+  };
+  const browserEvidenceSignIn = async (): Promise<BrowserEvidenceSignInAnswer> => {
+    const reply = await postForResult(BROWSER_EVIDENCE_SIGN_IN_ACTION, {});
+    // The broker's reply carries its request id beside the answer, as every callback reply does; the answer is the rest. A reply that is not exactly an answer is refused in one fixed sentence (never the parser's own words).
+    const answer = BrowserEvidenceSignInAnswerSchema.safeParse(typeof reply === "object" && reply !== null && !Array.isArray(reply) ? Object.fromEntries(Object.entries(reply).filter(([key]) => key !== "requestId")) : undefined);
+    if (!answer.success) throw agentXError("RUNTIME_UNAVAILABLE", "browser evidence sign-in answer is invalid");
+    return answer.data;
+  };
   const workflowE2EModelBudget = async (body: E2EModelDayBudgetRequest, signal?: AbortSignal): Promise<E2EModelDayBudgetResponse> => {
     const response = await fetchImplementation(`${prefix}/e2e-model-budget`, { method: "POST", ...(signal === undefined ? {} : { signal }),
       headers: { "content-type": "application/json", "x-agentx-callback-capability": input.invocation.callbackCapability }, body: JSON.stringify(E2EModelDayBudgetRequestSchema.parse(body)) });
@@ -259,6 +299,7 @@ export function createWorkerCallbackSinks(input: {
     eventSink: async (events) => post("events", { events }),
     chatGptToken: async () => postForResult("chatgpt-token", {}),
     setupAgent: async (body) => postForResult("setup-agent", body),
+    wikiBuild: async (body) => postForResult("wiki-build", body),
     nightlyResult: async (body) => postForResult("nightly-result", body),
     fixtureSet: async (body) => postForResult("fixture-set", body),
     authorizeModelFallback:async(raw)=>{
@@ -352,6 +393,8 @@ export function createWorkerCallbackSinks(input: {
     baselineSourceSink,
     workflowE2EAdmissionReader,
     workflowE2EEvidenceSink,
+    browserEvidenceSink,
+    browserEvidenceSignIn,
     workflowE2EModelBudget,
   };
 }

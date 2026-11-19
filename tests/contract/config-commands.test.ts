@@ -40,7 +40,14 @@ describe("agentx config list and get", () => {
     // Spec 062: Slack through the channel API, and channel adapters, both off until set.
     expect(rows.find((row) => row.key === "slack.viaChannel")).toMatchObject({ where: "stack parameter SlackViaChannel on agentx-staging-control-plane" });
     expect(rows.find((row) => row.key === "channels.adapters")).toMatchObject({ where: "stack parameter ChannelAdapters on agentx-staging-control-plane" });
-    expect(rows).toHaveLength(18);
+    // Migration plan v3.2 lane E2: the core engine switch, off until set.
+    expect(rows.find((row) => row.key === "coreEngine.switch")).toMatchObject({ where: "stack parameter CoreEngine on agentx-staging-control-plane" });
+    // Core switch-on blocker (2026-11-17): the model gateway settings, empty until set.
+    expect(rows.find((row) => row.key === "coreEngine.modelGatewayUrl")).toMatchObject({ value: "", where: "stack parameter CoreModelGatewayHost on agentx-staging-control-plane" });
+    expect(rows.find((row) => row.key === "coreEngine.agentModel")).toMatchObject({ value: "", where: "stack parameter CoreAgentModel on agentx-staging-control-plane" });
+    // Batch 13 (#906, DEC 254zm): the hosted test service images setting, none until the starter copies are checked.
+    expect(rows.find((row) => row.key === "testServices.images")).toMatchObject({ where: "stack parameter TestServiceImages on agentx-staging-control-plane" });
+    expect(rows).toHaveLength(26);
   });
 
   it("never shows the alert address itself, only that it is set", async () => {

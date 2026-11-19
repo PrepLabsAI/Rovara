@@ -53,6 +53,9 @@ export interface OpenDesignReviewSession {
   system: string;
   /** READ_ONLY_TOOLS for a reviewer, none for the merge step. */
   tools: readonly string[];
+  /** A reviewer's role, and whether its block carries the paraphrase: what its answer tool's schema is made from (structured answers). Absent for the merge step. */
+  role?: ReviewerRole;
+  withParaphrase?: boolean;
 }
 
 export interface DesignReviewPorts {
@@ -207,7 +210,10 @@ export async function runDesignReview(binding: DesignReviewBinding, ports: Desig
       delivery = parsed.data;
       if (delivery.role !== entry.role || packetDigestOf(delivery) !== entry.packetDigest) throw Object.assign(new Error("packet_changed"), { packetChanged: true });
       const messages = reviewerMessagesOf(delivery);
-      session = await within(ports.openSession({ purpose: "reviewer", keySlot: entry.keySlot, model: entry.model, ...(entry.modelRoute === undefined ? {} : { modelRoute: entry.modelRoute }), system: messages.system, tools: READ_ONLY_TOOLS }), own.promise);
+      // The Light tier's Critic has its own registered prompt that asks for the paraphrase; the prompt id is part of the packet digest checked above, so the worker reads with the paraphrase for that
+      // prompt and no other (every other reviewer must not write one).
+      const readOptions = { withParaphrase: lightCriticWritesParaphrase(entry.role, delivery.rolePrompt.id) };
+      session = await within(ports.openSession({ purpose: "reviewer", keySlot: entry.keySlot, model: entry.model, ...(entry.modelRoute === undefined ? {} : { modelRoute: entry.modelRoute }), system: messages.system, tools: READ_ONLY_TOOLS, role: entry.role, withParaphrase: readOptions.withParaphrase }), own.promise);
       sessions.add(session);
       opening = false;
       answer = await within(session.prompt(messages.user), own.promise);
@@ -215,9 +221,6 @@ export async function runDesignReview(binding: DesignReviewBinding, ports: Desig
       if (!sentAsRendered(first, messages)) {
         failure = "sent_mismatch";
       } else {
-        // The Light tier's Critic has its own registered prompt that asks for the paraphrase; the prompt id is part of the packet digest checked above, so the worker reads with the paraphrase for that
-        // prompt and no other (every other reviewer must not write one).
-        const readOptions = { withParaphrase: lightCriticWritesParaphrase(entry.role, delivery.rolePrompt.id) };
         let read = readDesignReview(answer ?? "", entry.role, readOptions);
         // One more ask when the block cannot be read, AND when it can but findings in it were lost (an unreadable severity or section, no valid citation): a lost finding must not read as "found nothing".
         // The better of the two answers is kept, with ITS answer: the broker reads only the stored answer again.

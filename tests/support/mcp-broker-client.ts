@@ -84,8 +84,8 @@ export async function signedInClient(harness: Harness, who: Developer | undefine
   await server.connect(serverSide);
   const client = new Client({ name: "claude-code", version: "2.1.0" });
   await client.connect(clientSide);
-  // Ruling F3: listing first makes the client validate every structuredContent it gets back.
-  expect((await client.listTools()).tools).toHaveLength(26);
+  // The workflow tools plus the agent, approval, session and read tools. Ruling F3: listing first makes the client validate every structuredContent it gets back.
+  expect((await client.listTools()).tools).toHaveLength(52); // Batch b18 (rule D): + team_propose (#1034), added; no tool removed or changed.
   const answers: string[] = [];
   const tool = async (name: string, args: Record<string, unknown> = {}): Promise<ToolAnswer> => {
     const result = await client.callTool({ name, arguments: args });

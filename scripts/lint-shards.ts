@@ -16,7 +16,7 @@
 // through their built declarations):
 //   node scripts/lint-shards.ts [--list] [--only <shard>[,<shard>...]] [--jobs <n>] [--heap <MB>] [--timeout <seconds>]
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { availableParallelism, totalmem } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,9 +35,10 @@ export const PROGRAM_DIRECTORY = "node_modules/.cache/lint-shards";
 /**
  * The shards before the catch-all. A shard is a group of paths linted together, and a path is a directory ("packages/broker") or, to
  * split a big directory, a glob over the files directly in it ("tests/contract/a*.ts"; only `*` and `?`, which eslint, the ignore
- * patterns and a tsconfig `include` all read the same way). tests/contract is split by the first letter of the file name: the
- * biggest shard bounds the memory of the whole run, and one process over all of tests/contract peaked at 4.5 GB. Anything in no
- * group (a file in tests/contract that starts with a digit, a new directory, files at the root) is linted by the last shard.
+ * patterns and a tsconfig `include` all read the same way). tests/contract and tests/unit are split by the first letter of the file name: the
+ * biggest shard bounds the memory of the whole run, and one process over all of tests/contract peaked at 4.5 GB (all of tests/unit passed the 4 GB cap
+ * of one shard). Anything in no group (a file in tests/contract or tests/unit that starts with a digit, a file in a folder of tests/unit that no shard names (the three there now are in tests-unit-folders; a big new one gets a shard of its own), a new directory, files
+ * at the root) is linted by the last shard.
  */
 export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly string[] }[] = [
   { name: "tests-contract-a-d", directories: ["tests/contract/a*.ts", "tests/contract/b*.ts", "tests/contract/c*.ts", "tests/contract/d*.ts"] },
@@ -45,7 +46,14 @@ export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly s
   { name: "tests-contract-l-p", directories: ["tests/contract/l*.ts", "tests/contract/m*.ts", "tests/contract/n*.ts", "tests/contract/o*.ts", "tests/contract/p*.ts"] },
   { name: "tests-contract-r-s", directories: ["tests/contract/r*.ts", "tests/contract/s*.ts"] },
   { name: "tests-contract-t-z", directories: ["tests/contract/t*.ts", "tests/contract/u*.ts", "tests/contract/v*.ts", "tests/contract/w*.ts"] },
-  { name: "tests-unit", directories: ["tests/unit"] },
+  // Batch 13: a-d-f outgrew the 4 GB heap on CI (the batch's new core-host, citation and wiki test files), so it is split in two.
+  { name: "tests-unit-a-b-d-f", directories: ["tests/unit/a*.ts", "tests/unit/b*.ts", "tests/unit/d*.ts", "tests/unit/f*.ts"] },
+  { name: "tests-unit-c", directories: ["tests/unit/c*.ts"] },
+  { name: "tests-unit-e", directories: ["tests/unit/e*.ts"] },
+  { name: "tests-unit-g-q", directories: ["tests/unit/g*.ts", "tests/unit/h*.ts", "tests/unit/i*.ts", "tests/unit/j*.ts", "tests/unit/k*.ts", "tests/unit/l*.ts", "tests/unit/m*.ts", "tests/unit/n*.ts", "tests/unit/o*.ts", "tests/unit/p*.ts", "tests/unit/q*.ts"] },
+  { name: "tests-unit-r-v", directories: ["tests/unit/r*.ts", "tests/unit/s*.ts", "tests/unit/t*.ts", "tests/unit/u*.ts", "tests/unit/v*.ts"] },
+  { name: "tests-unit-w-z", directories: ["tests/unit/w*.ts", "tests/unit/x*.ts", "tests/unit/y*.ts", "tests/unit/z*.ts"] },
+  { name: "tests-unit-folders", directories: ["tests/unit/context-sources", "tests/unit/contracts", "tests/unit/intake", "tests/unit/knowledge", "tests/unit/knowledge-wiring", "tests/unit/lessons", "tests/unit/lessons-by-area", "tests/unit/support", "tests/unit/task-log"] },
   { name: "tests-integration", directories: ["tests/integration"] },
   { name: "tests-support", directories: ["tests/support"] },
   { name: "broker", directories: ["packages/broker"] },
@@ -53,7 +61,7 @@ export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly s
   { name: "worker", directories: ["packages/worker"] },
   { name: "verifier", directories: ["packages/verifier"] },
   { name: "contracts", directories: ["packages/contracts"] },
-  { name: "small-packages", directories: ["packages/gateway", "packages/mcp", "packages/model-runtime", "packages/orchestrator", "packages/slack-service"] },
+  { name: "small-packages", directories: ["packages/gateway", "packages/mcp", "packages/model-runtime", "packages/orchestrator", "packages/slack-service", "packages/testing"] },
   { name: "infra-scripts", directories: ["infra", "scripts"] },
 ];
 
@@ -87,6 +95,33 @@ export function planShards(): Shard[] {
     })),
     { name: REST, targets: ["."], ignore: named.map(everything), include: ["**/*.ts"], exclude: named.map(everything) },
   ];
+}
+
+/** A shard directory entry as a test: a directory means everything under it; a glob over the files directly in a folder ("tests/contract/a*.ts") takes `*` and `?`. */
+function entryMatches(entry: string, file: string): boolean {
+  if (!isGlob(entry)) return file.startsWith(`${entry}/`);
+  const pattern = entry.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]");
+  return new RegExp(`^${pattern}$`).test(file);
+}
+
+/**
+ * The shards that hold these files (repository-relative, forward slashes), each aimed at only those files: the shard's own TypeScript program and rules, but eslint
+ * is given the files, not the whole group. A file no named shard holds goes to the catch-all, as it does in a whole run. Used by `--files` for a pull request's lint.
+ */
+export function shardsForFiles(files: readonly string[]): Shard[] {
+  const all = planShards();
+  const named = all.filter((shard) => shard.name !== REST);
+  const rest = all.find((shard) => shard.name === REST)!;
+  const taken = new Set<string>();
+  const selected: Shard[] = [];
+  for (const shard of named) {
+    const mine = files.filter((file) => shard.targets.some((entry) => entryMatches(entry, file)));
+    mine.forEach((file) => taken.add(file));
+    if (mine.length > 0) selected.push({ ...shard, targets: mine });
+  }
+  const others = files.filter((file) => !taken.has(file));
+  if (others.length > 0) selected.push({ ...rest, targets: others });
+  return selected;
 }
 
 /** The tsconfig of a shard's program. It extends tsconfig.lint.json and changes nothing but which files are in it. */
@@ -131,7 +166,7 @@ export function defaultJobs(totalMemoryBytes: number, cores: number): number {
   return totalMemoryBytes >= 14 * 1024 ** 3 && cores >= 4 ? 2 : 1;
 }
 
-export interface Options { list: boolean; heapMb: number; timeoutSeconds?: number; jobs?: number; only?: ReadonlySet<string>; eslintBin?: string }
+export interface Options { list: boolean; heapMb: number; timeoutSeconds?: number; jobs?: number; only?: ReadonlySet<string>; eslintBin?: string; filesList?: string }
 
 export function parseOptions(argv: readonly string[]): Options | string {
   const options: Options = { list: false, heapMb: DEFAULT_HEAP_MB };
@@ -154,11 +189,15 @@ export function parseOptions(argv: readonly string[]): Options | string {
       const value = argv[++index];
       if (value === undefined || value === "") return "--only needs a comma-separated list of shard names";
       options.only = new Set(value.split(","));
+    } else if (arg === "--files") {
+      const value = argv[++index];
+      if (value === undefined || value === "") return "--files needs the path of a file listing the changed paths, one per line";
+      options.filesList = value;
     } else if (arg === "--eslint-bin") {
       const value = argv[++index];
       if (value === undefined || value === "") return "--eslint-bin needs a path";
       options.eslintBin = value;
-    } else return `Unknown option ${arg}. Usage: node scripts/lint-shards.ts [--list] [--only <shard>[,<shard>...]] [--jobs <n>] [--heap <MB>] [--timeout <seconds>]`;
+    } else return `Unknown option ${arg}. Usage: node scripts/lint-shards.ts [--list] [--only <shard>[,<shard>...]] [--jobs <n>] [--heap <MB>] [--timeout <seconds>] [--files <changed-paths list>]`;
   }
   return options;
 }
@@ -243,7 +282,13 @@ async function main(): Promise<void> {
   const all = planShards();
   const unknown = [...(options.only ?? [])].filter((name) => !all.some((shard) => shard.name === name));
   if (unknown.length > 0) { console.error(`No such shard: ${unknown.join(", ")}. Shards: ${all.map((shard) => shard.name).join(", ")}`); process.exitCode = 2; return; }
-  const selected = all.filter((shard) => options.only === undefined || options.only.has(shard.name));
+  let selected = all.filter((shard) => options.only === undefined || options.only.has(shard.name));
+  if (options.filesList !== undefined) {
+    // A pull request's lint: only the changed TypeScript files that still exist, each in its own shard's program (see shardsForFiles).
+    const listed = readFileSync(options.filesList, "utf8").split("\n").map((line) => line.trim()).filter((line) => /\.ts$/.test(line) && existsSync(join(root, line)));
+    selected = shardsForFiles(listed).filter((shard) => options.only === undefined || options.only.has(shard.name));
+    if (selected.length === 0) { console.log("No changed TypeScript file to lint."); return; }
+  }
   if (options.list) { console.log(selected.map((shard) => `${shard.name}: ${shard.targets.join(" ")}${shard.ignore.length > 0 ? ` (leaving out ${shard.ignore.length} directories the other shards lint)` : ""}`).join("\n")); return; }
 
   const jobs = options.jobs ?? defaultJobs(totalmem(), availableParallelism());

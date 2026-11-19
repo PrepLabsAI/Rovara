@@ -13,12 +13,13 @@
 //     value (`SERVICE_ENV_EXEMPT_VALUES`), never by name; any other `AWS_*` value is still a secret.
 //   - FOR TS30 (the wiring): this channel's variables must be passed to a command LAST, after anything the project or the task sets, or a name that clashes must be refused: otherwise a repository's own `AWS_ENDPOINT_URL` or
 //     `DATABASE_URL` would win over Rovara's. The module itself only refuses a dependency's own clashing names (`reservedDependencyEnvName`).
-//   - A per-service endpoint (`AWS_ENDPOINT_URL_<SERVICE>`) is used, not one global endpoint, so a service backed elsewhere can point elsewhere. With an emulator in the run (slice 2), every AWS service the plan did not ask
-//     for, and the global `AWS_ENDPOINT_URL` in both sandboxes, point at the EMULATOR: it has them switched off, refuses the call and records it in its ledger, so the broker flags it (a literal sinkhole host is never looked up,
-//     so nothing would count a call to it). Without an emulator (slice 1) there is no AWS block at all and the sealed name server counts the names that are looked up.
+//   - With an emulator in the run, the global `AWS_ENDPOINT_URL` points at the EMULATOR in both sandboxes, and so does `AWS_ENDPOINT_URL_<SERVICE>` of every service the PLAN names (from the emulator's table) and of every
+//     `AWS_ENDPOINT_URL_*` name the repository's own settings set (`repoEndpointNames`), so a value of the repository cannot point a service elsewhere. The other ~430 services are not given a variable: a call to one reaches
+//     the emulator through the global endpoint, where its ledger counts it as out of the plan, so the broker flags it (a literal sinkhole host is never looked up, so nothing would count a call to it). Without an
+//     emulator (slice 1) there is no AWS block at all and the sealed name server counts the names that are looked up.
 import { lstat, mkdir, open, rm, chmod } from "node:fs/promises";
 import { join, isAbsolute } from "node:path";
-import { CONNECT_TEMPLATE_PLACEHOLDERS, EnvNameSchema, connectTemplateProblem, e2eSecretSpellings, redactText, reservedDependencyEnvName } from "@agentx/contracts";
+import { CONNECT_TEMPLATE_PLACEHOLDERS, EnvNameSchema, awsEndpointVariableSuffix, connectTemplateProblem, e2eSecretSpellings, redactText, reservedDependencyEnvName } from "@agentx/contracts";
 import { HELPER_CREDENTIAL_PATTERNS, type HelperFiles } from "./service-helpers.js";
 
 export const AWS_FAKE_ACCESS_KEY_ID = "ROVARATESTKEY";
@@ -42,16 +43,15 @@ const FILE_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 /** The sinkhole's address: a one-label name (`http://sinkhole`) or an address in the run networks' range, with an optional port. */
 const SINKHOLE_URL = /^http:\/\/(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?|172\.30\.\d{1,3}\.\d{1,3})(?::(\d{1,5}))?$/u;
 
-/** The AWS SDK's name for each service Rovara local AWS can serve (`AWS_ENDPOINT_URL_<NAME>`), by catalog service id. A service not listed here is refused: a wrong name would silently not redirect. */
-const AWS_SDK_ENDPOINT_NAMES: Readonly<Record<string, string>> = {
-  s3: "S3", dynamodb: "DYNAMODB", sqs: "SQS", sns: "SNS", sts: "STS", secretsmanager: "SECRETS_MANAGER", ssm: "SSM", kms: "KMS", events: "EVENTBRIDGE", lambda: "LAMBDA",
-  "sagemaker-runtime": "SAGEMAKER_RUNTIME", dynamodbstreams: "DYNAMODB_STREAMS", kinesis: "KINESIS", stepfunctions: "SFN", apigateway: "API_GATEWAY", "cognito-idp": "COGNITO_IDENTITY_PROVIDER", logs: "CLOUDWATCH_LOGS",
-};
+/** The names of the variables that point one AWS service at an address (`AWS_ENDPOINT_URL_<SUFFIX>`): the suffix is the SDK's, from the emulator's table. */
+const ENDPOINT_VARIABLE = /^AWS_ENDPOINT_URL_[A-Z0-9_]{2,60}$/u;
+/** The most names of the repository's own settings one run points at the emulator (a plan names at most 64 services; the reader of the settings keeps no more than this). */
+export const REPO_ENDPOINT_NAMES_MAX = 128;
 
-/** The environment variable that points one AWS service at another address. Refuses a service id the table does not know. */
+/** The environment variable that points one AWS service at another address: from the table, a key or a legacy key. Refuses a service id the table does not know (a wrong name would silently not redirect). */
 export function awsEndpointVariableName(serviceId: string): string {
-  const name = Object.hasOwn(AWS_SDK_ENDPOINT_NAMES, serviceId) ? AWS_SDK_ENDPOINT_NAMES[serviceId] : undefined;
-  return name === undefined ? refuse() : `AWS_ENDPOINT_URL_${name}`;
+  const suffix = awsEndpointVariableSuffix(serviceId);
+  return suffix === undefined ? refuse() : `AWS_ENDPOINT_URL_${suffix}`;
 }
 
 export interface ServiceEnvDependency {
@@ -70,14 +70,13 @@ export interface ServiceEnvAws {
   alias: string;
   port: number;
   region: string;
-  /** Catalog service ids Rovara local AWS serves for this run. */
+  /** The AWS services the plan names (keys of the emulator's table; a legacy spelling is read as its key): each gets its own endpoint variable. */
   emulatedServices: readonly string[];
   /**
-   * AWS services the code uses that the plan did not ask the emulator for. With an emulator in the run they point at the EMULATOR (not at a sinkhole): it has them switched off, so it refuses the call AND writes it to its
-   * request ledger, which the broker reads and flags as "called AWS services that are not in the plan". A static sinkhole name would be refused too, but nothing would count it (the sealed name server counts only names it is asked
-   * to resolve, and a literal endpoint host is not one), so a call whose error the code swallowed would pass unseen.
+   * `AWS_ENDPOINT_URL_*` names the repository's own settings set (`env-detect`'s `env` detector reads them from its files). Each is pointed at the emulator too, so a value in the repository's `.env` file or settings can
+   * not send a service somewhere else. A name that is not an endpoint variable is refused.
    */
-  unbackedServices: readonly string[];
+  repoEndpointNames?: readonly string[];
 }
 
 export interface ServiceEnvInput {
@@ -159,12 +158,15 @@ export function buildServiceEnvironment(input: ServiceEnvInput): ServiceEnvironm
     const alias = plain(aws.alias, DNS_LABEL);
     const port = portOf(aws.port);
     const region = plain(aws.region, REGION);
-    const emulated = new Set(aws.emulatedServices);
-    if (emulated.size !== aws.emulatedServices.length || aws.unbackedServices.some((service) => emulated.has(service)) || new Set(aws.unbackedServices).size !== aws.unbackedServices.length) refuse();
-    for (const service of aws.emulatedServices) add(awsEndpointVariableName(service), `http://${alias}:${String(port)}`);
-    // Every other service, and the GLOBAL endpoint (for a service no per-service variable names), point at the emulator in both sandboxes: it refuses what it has switched off and counts it in its ledger.
-    for (const service of aws.unbackedServices) add(awsEndpointVariableName(service), `http://${alias}:${String(port)}`);
-    add("AWS_ENDPOINT_URL", `http://${alias}:${String(port)}`);
+    const emulated = new Set(aws.emulatedServices.map(awsEndpointVariableName));
+    if (emulated.size !== aws.emulatedServices.length) refuse();
+    const repoNames = new Set(aws.repoEndpointNames ?? []);
+    if (repoNames.size > REPO_ENDPOINT_NAMES_MAX || (aws.repoEndpointNames?.length ?? 0) > REPO_ENDPOINT_NAMES_MAX || [...repoNames].some((name) => !ENDPOINT_VARIABLE.test(name))) refuse();
+    const endpoint = `http://${alias}:${String(port)}`;
+    // The planned services, then the names the repository sets that no planned service already took, then the GLOBAL endpoint (for every service no variable names): all at the emulator, in both sandboxes.
+    for (const name of emulated) add(name, endpoint);
+    for (const name of [...repoNames].sort()) if (!emulated.has(name)) add(name, endpoint);
+    add("AWS_ENDPOINT_URL", endpoint);
     add("AWS_ACCESS_KEY_ID", AWS_FAKE_ACCESS_KEY_ID);
     add("AWS_SECRET_ACCESS_KEY", AWS_FAKE_SECRET_ACCESS_KEY);
     add("AWS_REGION", region);
@@ -184,16 +186,6 @@ export function buildServiceEnvironment(input: ServiceEnvInput): ServiceEnvironm
  */
 export function helperSecretValues(helpers: ReadonlyArray<{ credentials?: { password?: string; controlToken?: string; sqsReceiptSecret?: string } }>): string[] {
   return helpers.flatMap((helper) => [helper.credentials?.password, helper.credentials?.controlToken, helper.credentials?.sqsReceiptSecret]).filter((value): value is string => value !== undefined && value !== "");
-}
-
-/**
- * The AWS services of a run that Rovara local AWS does NOT serve: every service the endpoint table knows except the emulated ones. Hand it to `ServiceEnvAws.unbackedServices` so each of them points at the emulator, which refuses and counts it (a call to a
- * service nobody backed fails loudly instead of reaching real AWS). Refuses an emulated id the table does not know.
- */
-export function unbackedAwsServices(emulated: readonly string[]): string[] {
-  const known = Object.keys(AWS_SDK_ENDPOINT_NAMES);
-  if (emulated.some((service) => !Object.hasOwn(AWS_SDK_ENDPOINT_NAMES, service))) refuse();
-  return known.filter((service) => !emulated.includes(service));
 }
 
 /**

@@ -8,6 +8,7 @@ import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { INDEX_EXPIRY_ATTRIBUTE } from "@agentx/contracts";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -62,7 +63,7 @@ describe("admin change infrastructure", () => {
   type Fn = { Properties: { Environment?: { Variables?: Record<string, unknown> }; Role?: { "Fn::GetAtt": [string, string] } } };
   const functionNamed = (template: Template, prefix: string) => Object.entries(template.findResources("AWS::Lambda::Function") as Record<string, Fn>)
     .find(([id]) => id.replace(/[0-9A-F]{8}$/, "") === prefix)![1];
-  const variablesOf = (template: Template, prefix: string) => functionNamed(template, prefix).Properties.Environment?.Variables ?? {};
+  const variablesOf = (template: Template, prefix: string) => unpackedBrokerVariables(functionNamed(template, prefix).Properties.Environment?.Variables ?? {}, template.toJSON() as never);
   const keysOf = (statement: Statement) => leading(statement) as string[] | undefined;
   const tableRef = (template: Template, prefix: string) => {
     const [id] = Object.keys(template.findResources("AWS::DynamoDB::Table")).filter((logicalId) => logicalId.replace(/[0-9A-F]{8}$/, "") === prefix);
@@ -79,8 +80,9 @@ describe("admin change infrastructure", () => {
     const broker = statementsOf(named, "BrokerServiceRole");
     const changes = broker.filter((statement) => JSON.stringify(keysOf(statement) ?? []).includes("CHANGE#"));
     expect(changes).toEqual([{ Effect: "Allow", Action: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"], Resource: tableRef(named, "TurnRecords"), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANGE#*"] } } }]);
-    const emails = broker.filter((statement) => JSON.stringify(keysOf(statement) ?? []).includes("EMAIL#"));
-    expect(emails).toEqual([{ Effect: "Allow", Action: "dynamodb:GetItem", Resource: tableRef(named, "DeveloperSignInTable"), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS"] } } }]);
+    // Batch 16+17 (#1014, owner DEC 254zzz32): the company import read's ORG#<org>#EMAIL#* key is its own statement (pinned in developer-signin-infrastructure); this is the broker's own sign-in table read.
+    const emails = broker.filter((statement) => ((keysOf(statement) ?? []) as unknown[]).includes("EMAIL#*"));
+    expect(emails).toEqual([{ Effect: "Allow", Action: "dynamodb:GetItem", Resource: tableRef(named, "DeveloperSignInTable"), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS", "COMPANY_MEMBER#*"] } } }]);
   });
 
   it("gives the ingress's ADMIN_CHANGE statement the State table only, with the projection pinned", () => {

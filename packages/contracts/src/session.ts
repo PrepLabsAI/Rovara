@@ -51,6 +51,17 @@ export const WorkspaceSessionStateSchema = z.enum([
 export const WORKER_FEATURES_MAX = 300;
 export const WORKER_FEATURE_MAX_CHARS = 100;
 
+/** An EC2 instance type name (`m7g.large`). */
+export const InstanceTypeSchema = z.string().regex(/^[a-z][a-z0-9-]*\.[a-z0-9]+$/, "invalid instance type");
+/**
+ * DEC 254zb: why a generation runs on the default size instead of its project's chosen one. `size-unavailable`: the provisioner could not launch the size here
+ * (capacity, not offered in the zone, quota). `x86-unavailable`: the install's worker image does not run on x86 yet.
+ */
+export const MachineFallbackSchema = z.enum(["size-unavailable", "x86-unavailable"]);
+export type MachineFallback = z.infer<typeof MachineFallbackSchema>;
+/** The only reason the provisioner itself reports. */
+export const ProvisionerMachineFallbackSchema = z.literal("size-unavailable");
+
 /**
  * The compute state of one ec2-ebs workspace, stored at `workspaceSessionKey(workspaceId)` in the
  * same partition as the workspace's OPERATION# items. `generation` counts provisioning attempts and
@@ -66,7 +77,9 @@ export const WorkspaceSessionSchema = z
     subnetId: SubnetIdSchema.optional(),
     instanceId: z.string().regex(/^i-[0-9a-f]{8,17}$/, "invalid instance ID").optional(),
     /** The type the instance launched as (`m7g.large`); kept, like `launchedAt`, once the instance is gone, for the machine time it used. */
-    instanceType: z.string().regex(/^[a-z][a-z0-9-]*\.[a-z0-9]+$/, "invalid instance type").optional(),
+    instanceType: InstanceTypeSchema.optional(),
+    /** DEC 254zb: set when this generation's chosen machine size could not launch and the default size launched instead (the task says so). */
+    machineFallback: MachineFallbackSchema.optional(),
     privateIp: z.ipv4().optional(),
     launchedAt: z.string().datetime().optional(),
     readyAt: z.string().datetime().optional(),
@@ -443,7 +456,10 @@ export const Ec2WorkerBootConfigSchema = z
     modelProxyUrl: z.string().url().max(512).regex(/^https?:\/\//).regex(SHELL_SAFE, "model proxy URL has unsafe characters").optional(),
     /** AGENTX_ENVIRONMENT_KIND: set for a named environment's worker, whose launcher keeps it off the host network and away from the metadata service. Absent for the legacy deployment. */
     environmentKind: z.literal("named").optional(),
-    /** AGENTX_TEST_SERVICES=1: test services (`tx`) are on for this install, so the boot pre-pulls the catalog images. Absent when they are off (no list read, no registry login, no pull). Named environments only. */
+    /**
+     * AGENTX_TEST_SERVICES=1: test services are on for this install, so the boot pre-pulls the service images. Absent when they are off (no list read, no registry login, no pull). A named-environment launch pulls its
+     * catalog in stage 2; Code's own launch (DEC 254zm) runs the test-services stage its worker image carries (packages/worker/ec2/test-services-stage.sh) and pulls the install's copies of the starter images.
+     */
     testServices: z.literal(true).optional(),
     /**
      * AGENTX_BOOT_STAGE2_SHA256: the SHA-256 of the stage 2 boot script (`boot-stage2.sh`) that the worker image carries at /opt/agentx/boot/stage2.sh.
@@ -490,7 +506,7 @@ export function ec2WorkerBootScript(config: Ec2WorkerBootConfig, bootScript: str
   if (parsed.openaiSecretArn) variables.push([KEYED_MODEL_PROVIDERS.openai.secretArnVariable, parsed.openaiSecretArn]);
   if (parsed.modelProxyUrl) variables.push(["AGENTX_MODEL_PROXY_URL", parsed.modelProxyUrl]);
   if (parsed.environmentKind) variables.push(["AGENTX_ENVIRONMENT_KIND", parsed.environmentKind]);
-  if (parsed.testServices && parsed.environmentKind === "named") variables.push(["AGENTX_TEST_SERVICES", "1"]);
+  if (parsed.testServices) variables.push(["AGENTX_TEST_SERVICES", "1"]);
   if (parsed.bootStage2Sha256) variables.push([AGENTX_BOOT_STAGE2_SHA256, parsed.bootStage2Sha256]);
   if (parsed.executorImage) variables.push(["EXECUTOR_IMAGE", parsed.executorImage]);
   if (parsed.modelFallback) variables.push(["AGENTX_MODEL_FALLBACK", parsed.modelFallback]);

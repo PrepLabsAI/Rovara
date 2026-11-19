@@ -1,3 +1,4 @@
+import { createEvalFinalCheckWorld } from "../support/eval-final-check.js";
 // Spec 051 Task 4 (FR-006, FR-007, SC-001): AgentX reruns the checks when the agent finishes, gives it exactly one
 // extra try on a regression, and puts its report in the task result. Every task runs runTaskInvocation on the worker's
 // real Pi session (createDefaultPiSessionAdapter) on the faux model, so the real extension and Pi's real
@@ -13,6 +14,10 @@ import {
   agentxPreambleSha256,
   AGENTX_PREAMBLE_VERSION,
   CheckReportSchema,
+  EvalRoundArtifactSchema,
+  EvidenceRawSchema,
+  FlakyRerunFileSchema,
+  TestProofSchema,
   createCandidateManifest,
   lastAssistantResponse,
   type CheckReport,
@@ -29,7 +34,7 @@ import { markWorkspaceUnsafe } from "../../packages/worker/src/workspace-safety.
 import { WorkerCancellationController, WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
 import { createDefaultPiSessionAdapter, type PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
-import { runTaskInvocation, type TaskInvocationResult } from "../../packages/worker/src/run-task.js";
+import { runTaskInvocation, type TaskInvocationDependencies, type TaskInvocationResult } from "../../packages/worker/src/run-task.js";
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import { createCheckRunners, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { runWorkflowFeedbackReview } from "../../packages/worker/src/verification/review.js";
@@ -37,8 +42,10 @@ import { commitCandidateWorktree, readCandidateRepositories } from "../../packag
 import { CHECKS_MESSAGE_TYPE, checksArtifactContent, compactCheckReport } from "../../packages/worker/src/verification/extension.js";
 import { AgentFilesRestoreError, type OriginalCode } from "../../packages/worker/src/verification/original-code.js";
 import * as buildSourceExport from "../../packages/worker/src/e2e-build-source-export.js";
+import * as baselineAncestry from "../../packages/worker/src/verification/baseline-ancestry.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
+import { evalPinnedCandidateActive } from "../../packages/worker/src/verification/eval-plan-source.js";
 
 const toolUse = (...calls: ReturnType<typeof fauxToolCall>[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
 const bash = (command: string, id: string) => toolUse(fauxToolCall("bash", { command }, { id }));
@@ -105,12 +112,23 @@ vi.mock("../../packages/worker/src/e2e-build-source-export.js", async (importOri
   return { ...original, exportCandidateBuildSourceInScratch: vi.fn(original.exportCandidateBuildSourceInScratch) };
 });
 
+vi.mock("../../packages/worker/src/verification/baseline-ancestry.js", async (importOriginal) => {
+  const original: typeof baselineAncestry = await importOriginal();
+  return { ...original, findBaselineAncestor: vi.fn(original.findBaselineAncestor) };
+});
+
 /** One model request: the conversation the model was given, without the system message. */
 type Request = Array<{ role: string; content: unknown }>;
 
 async function runTask(options: {
   steps: FauxResponseStep[];
+  stopBeforeReading?: TaskInvocationDependencies["stopBeforeReading"];
+  evalRequest?: Extract<WorkerInvocation, { kind: "task" }>["payload"]["evalRequest"];
+  evalFinalCheck?: TaskInvocationDependencies["evalFinalCheck"];
   readiness?: ProjectCommand[];
+  /** TE-C6: the test environment's plan, as the broker sends it (`flakyRerun` asks for the rerun). */
+  testEnvironment?: NonNullable<Extract<WorkerInvocation, { kind: "task" }>["payload"]["testEnvironment"]>;
+  evidenceCapture?: true;
   workflowMode?: "CHECKS" | "IMPLEMENT";
   prepared?: ProjectCommand[];
   runners?: CheckRunners;
@@ -131,6 +149,8 @@ async function runTask(options: {
   originalCode?: OriginalCode;
   /** The scripted model's context window. Pi 1.5 compacts a long transcript on its own, and a compaction asks the scripted model for a summary, which would use up the script; a run with huge outputs gives the model room. */
   contextWindow?: number;
+  /** More payload fields (TE-C1: the test environment's plan and the evidence request). */
+  payloadExtra?: Record<string, unknown>;
 }) {
   const { modelRuntime, faux } = await fauxModelRuntime(options.contextWindow === undefined ? {} : { contextWindow: options.contextWindow });
   const requests: Request[] = [];
@@ -147,7 +167,7 @@ async function runTask(options: {
   const invocation: Extract<WorkerInvocation, { kind: "task" }> = {
     protocolVersion: 1, kind: "task", operationId: options.operationId ?? randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1,
     callbackCapability: "c".repeat(64),
-    payload: { conversationId: randomUUID(), prompt: "fix it", ...(options.readiness === undefined ? {} : { readiness: options.readiness }), ...(options.workflowMode === undefined ? {} : { workflowMode: options.workflowMode }) },
+    payload: { conversationId: randomUUID(), prompt: "fix it", ...(options.evalRequest === undefined ? {} : { evalRequest: options.evalRequest }), ...(options.readiness === undefined ? {} : { readiness: options.readiness }), ...(options.testEnvironment === undefined ? {} : { testEnvironment: options.testEnvironment }), ...(options.evidenceCapture === undefined ? {} : { evidenceCapture: true as const }), ...(options.workflowMode === undefined ? {} : { workflowMode: options.workflowMode }), ...(options.payloadExtra ?? {}) },
   };
   const rootPath = options.rootPath ?? await workspaceRoot(options.prepared ?? options.readiness ?? []);
   const events: WorkerEvent[] = [];
@@ -158,6 +178,8 @@ async function runTask(options: {
   try {
     result = await runTaskInvocation(invocation, {
       rootPath, model: FAUX_MODEL, piAdapter,
+      ...(options.evalFinalCheck === undefined ? {} : { evalFinalCheck: options.evalFinalCheck }),
+      ...(options.stopBeforeReading === undefined ? {} : { stopBeforeReading: options.stopBeforeReading }),
       ...(options.runners === undefined ? {} : { checkRunners: options.runners }),
       ...(options.budgets === undefined ? {} : { checkBudgetMs: budgetSequence(options.budgets) }),
       ...(options.cancellation === undefined ? {} : { cancellationController: options.cancellation }),
@@ -1202,6 +1224,97 @@ describe("AgentX checks the agent's work when it finishes (spec 051 Task 4)", ()
     expect(lastAssistantResponse(run.events)).toBe(`All good now.\n${DONE}`);
   });
 
+  describe("TE-C6: a failing test that passes on its one rerun (the plan's flakyRerun)", () => {
+    const pytestCheck: ProjectCommand = { cwd: "app", executable: "pytest", args: ["--junitxml=../report.xml"], timeoutSeconds: 60 };
+    const plan = () => ({
+      revision: 1, digest: "d".repeat(64), roundBudgetMin: 30, selection: { method: "full" as const, alwaysRun: [], fullSuiteOn: [] },
+      checks: [{ id: "unit", kind: "test" as const, selectArgs: ["{tests}"] }], flakyRerun: true as const,
+    });
+    const report = (state: "passed" | "failed") => `<?xml version="1.0"?><testsuites><testsuite name="pytest" tests="1"><testcase classname="tests.test_a" name="test_b" file="tests/test_a.py">${state === "failed" ? '<failure message="x">x</failure>' : ""}</testcase></testsuite></testsuites>`;
+    /** The check's runner: the round's own run fails; each rerun (an id argument) answers `onRerun`. */
+    function runnersFor(rootPath: string, onRerun: "passed" | "failed") {
+      const calls: ProjectCommand[] = [];
+      const runners: CheckRunners = {
+        async runAgentCommand() { throw new Error("no agent commands"); },
+        async runProjectCommand(command) {
+          calls.push(command);
+          const state = command.args.some((arg) => arg.includes("::")) ? onRerun : "failed";
+          await writeFile(join(rootPath, "report.xml"), report(state));
+          return { exitCode: state === "failed" ? 1 : 0, timedOut: false, stdout: "", stderr: "" };
+        },
+      };
+      return { runners, calls };
+    }
+
+    it("flaky: no extra turn, the model is never told, and the report still says regression", async () => {
+      const rootPath = await gitWorkspaceRoot([pytestCheck]);
+      const fake = runnersFor(rootPath, "passed");
+      const run = await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`)], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "IMPLEMENT", testEnvironment: plan() });
+      expect(run.failure).toBeUndefined();
+      expect(run.report).toMatchObject({ status: "regression", extraTry: "not_needed" });
+      expect(run.report!.checks).toEqual([expect.objectContaining({ id: "readiness:0", before: "passed", after: "failed", class: "regression" })]);
+      expect(fake.calls).toHaveLength(2);
+      expect(run.requests.flatMap(checksMessages)).toEqual([]);
+      expect(run.requests).toHaveLength(2);
+    });
+
+    it("a verification run that asked for evidence reruns once and names the flaky test in evidence-raw.json; the report is untouched and the raw file reads the round's own report", async () => {
+      const rootPath = await gitWorkspaceRoot([pytestCheck]);
+      const fake = runnersFor(rootPath, "passed");
+      const run = await runTask({ steps: [], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "CHECKS", testEnvironment: plan(), evidenceCapture: true });
+      expect(run.failure).toBeUndefined();
+      expect(run.report).toMatchObject({ status: "regression" });
+      expect(run.report!.checks[0]).toMatchObject({ class: "regression", after: "failed" });
+      expect(fake.calls).toHaveLength(2);
+      const raw = EvidenceRawSchema.parse(JSON.parse(run.artifacts.find((artifact) => artifact.name === "evidence-raw.json")!.content));
+      expect(raw.checks[0]?.tests).toMatchObject({ total: 1, failed: 1, flakyOnRerun: ["tests/test_a.py::test_b"], flakyOnRerunCount: 1 });
+    });
+
+    it("saves the broker's flaky-rerun file for a fully flaky check, from a coding run (no extra turn) and from a checks run with no evidence asked for", async () => {
+      const fileOf = (run: Awaited<ReturnType<typeof runTask>>) => run.artifacts.filter((artifact) => artifact.name === "flaky-rerun.json").map((artifact) => FlakyRerunFileSchema.parse(JSON.parse(artifact.content)));
+      const coding = await gitWorkspaceRoot([pytestCheck]);
+      const codingRun = await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`)], readiness: [pytestCheck], runners: runnersFor(coding, "passed").runners, rootPath: coding, workflowMode: "IMPLEMENT", testEnvironment: plan() });
+      expect(fileOf(codingRun)).toEqual([{ schemaVersion: 1, checks: [{ checkId: "readiness:0", flaky: ["tests/test_a.py::test_b"] }] }]);
+      const checks = await gitWorkspaceRoot([pytestCheck]);
+      const checksRun = await runTask({ steps: [], readiness: [pytestCheck], runners: runnersFor(checks, "passed").runners, rootPath: checks, workflowMode: "CHECKS", testEnvironment: plan() });
+      expect(fileOf(checksRun)).toHaveLength(1);
+    });
+
+    it("saves no such file when the test fails again (control run), when the extra turn is given, or without the plan's flag", async () => {
+      const count = (run: Awaited<ReturnType<typeof runTask>>) => run.artifacts.filter((artifact) => artifact.name === "flaky-rerun.json").length;
+      const again = await gitWorkspaceRoot([pytestCheck]);
+      expect(count(await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`), fauxAssistantMessage("Tried.\nAgentX result: not done")], readiness: [pytestCheck], runners: runnersFor(again, "failed").runners, rootPath: again, workflowMode: "IMPLEMENT", testEnvironment: plan() }))).toBe(0);
+      const off = await gitWorkspaceRoot([pytestCheck]);
+      expect(count(await runTask({ steps: [], readiness: [pytestCheck], runners: runnersFor(off, "passed").runners, rootPath: off, workflowMode: "CHECKS" }))).toBe(0);
+    });
+
+    it("the same run without the flag reruns nothing and writes no flaky key", async () => {
+      const rootPath = await gitWorkspaceRoot([pytestCheck]);
+      const fake = runnersFor(rootPath, "passed");
+      const run = await runTask({ steps: [], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "CHECKS", evidenceCapture: true });
+      expect(fake.calls).toHaveLength(1);
+      const raw = EvidenceRawSchema.parse(JSON.parse(run.artifacts.find((artifact) => artifact.name === "evidence-raw.json")!.content));
+      expect(raw.checks[0]?.tests).not.toHaveProperty("flakyOnRerun");
+    });
+
+    it("control run: a test that fails again still gives the extra turn, with the failure in what the model reads", async () => {
+      const rootPath = await gitWorkspaceRoot([pytestCheck]);
+      const fake = runnersFor(rootPath, "failed");
+      const run = await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`), fauxAssistantMessage("I could not fix it.\nAgentX result: not done")], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "IMPLEMENT", testEnvironment: plan() });
+      expect(run.report).toMatchObject({ status: "regression", extraTry: "given" });
+      expect(run.requests.flatMap(checksMessages)).toHaveLength(1);
+    });
+
+    it("without the plan (the broker sends none for a coding run unless it asks for the rerun) nothing is rerun and the extra turn is given as it always was", async () => {
+      const rootPath = await gitWorkspaceRoot([pytestCheck]);
+      const fake = runnersFor(rootPath, "passed");
+      const run = await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`), fauxAssistantMessage("Tried.\nAgentX result: not done")], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "IMPLEMENT" });
+      expect(run.report).toMatchObject({ extraTry: "given" });
+      expect(fake.calls.some((call) => call.args.some((arg) => arg.includes("::")))).toBe(false);
+      expect(run.requests.flatMap(checksMessages)).toHaveLength(1);
+    });
+  });
+
   it("5. a model error on the last turn: not_verified/error, and no checks ran (Review Focus 3)", async () => {
     const shell = scriptedShell({ pytest: { exitCode: 0, output: "3 passed\n" } });
     const fake = fakeRunners();
@@ -1746,6 +1859,114 @@ describe("AgentX measures the before result on the original code (spec 051 D-16,
   });
 });
 
+/**
+ * Structured answers (Pi feature audit, recommendation 2): the PR-feedback reviewer delivers its findings through the answer tool. This adapter plays Pi's part: it offers the session's answer tools, and for
+ * each prompt calls the first one with the next scripted arguments until a call is accepted (a refused call throws, as in Pi, and the model "tries again"). With no scripted call it writes `text` instead.
+ */
+function feedbackToolAdapter(script: { calls: unknown[]; text?: string; prompts?: Array<{ calls: unknown[]; text?: string }> }, record: { prompts: string[]; refusals: string[]; toolNames: string[] }): PiSessionAdapter {
+  return {
+    async create(input) {
+      let notify: ((event: unknown) => void) | undefined;
+      const sessionFile = join(input.sessionDirectory, "feedback-review.json");
+      record.toolNames.push(...(input.answerTools ?? []).map((tool) => tool.name));
+      return {
+        conversationId: randomUUID(), sessionFile,
+        async prompt(prompt) {
+          record.prompts.push(prompt);
+          // A script for each prompt in turn, when it has them; otherwise one for all.
+          const now = script.prompts?.[record.prompts.length - 1] ?? script;
+          const tool = input.answerTools?.[0];
+          let accepted = false;
+          while (tool !== undefined && now.calls.length > 0 && !accepted) {
+            try { await tool.execute("call", now.calls.shift(), undefined, undefined, {} as never); accepted = true; } catch (error) { record.refusals.push(error instanceof Error ? error.message : String(error)); }
+          }
+          if (!accepted) notify?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: now.text ?? "" }] } });
+        }, async abort() {},
+        getModel: () => ({ provider: "test-provider", modelId: "read-only-critic-v1" }),
+        getSessionStats: () => ({ sessionFile, sessionId: "feedback-review", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0,
+          totalMessages: 2, tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 }),
+        subscribe(listener) { notify = listener; return () => { notify = undefined; }; },
+        dispose() {},
+      };
+    },
+  };
+}
+
+describe("PR-feedback review through the answer tool", () => {
+  async function structuredReview(fixture: Awaited<ReturnType<typeof feedbackReviewFixture>>, adapter: PiSessionAdapter, structuredAnswers?: boolean) {
+    return runWorkflowFeedbackReview({
+      ruleFileBaseCommits: [], operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
+      taskRequirements: "Return a safe result for empty input.", candidateDigest: fixture.bundle.candidateDigest, rootPath: fixture.rootPath, model: FAUX_MODEL,
+      candidate: fixture.candidate, repositories: fixture.repositories, bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }],
+      piAdapter: adapter, artifactSink: async () => undefined, ...(structuredAnswers === undefined ? {} : { structuredAnswers }),
+    });
+  }
+  const goodFinding = (digest: string) => implementFinding(digest, { summary: "Guard empty input.",
+    fileChanges: [{ repositoryId: "app", path: "src.ts", operation: "MODIFY", change: "Return early for empty input." }],
+    tests: [{ repositoryId: "app", path: "src.test.ts", operation: "ADD", behavior: "Empty input returns an empty result." }] });
+
+  it("takes a valid answer from the tool in one prompt, with the tool's instruction in the prompt", async () => {
+    const fixture = await feedbackReviewFixture();
+    const record = { prompts: [] as string[], refusals: [] as string[], toolNames: [] as string[] };
+    const review = await structuredReview(fixture, feedbackToolAdapter({ calls: [{ findings: [goodFinding(fixture.bundleRef.sha256)] }] }, record));
+    expect(review.report.status).toBe("COMPLETE");
+    expect(review.report.findings).toHaveLength(1);
+    expect(record.toolNames).toEqual(["submit_feedback_review"]);
+    expect(record.prompts).toHaveLength(1);
+    expect(record.prompts[0]).toContain("calling the submit_feedback_review tool");
+    expect(record.refusals).toEqual([]);
+  });
+
+  it("refuses an answer the contract's check refuses, inside the tool, so the model retries in the same run and no text retry prompt is sent", async () => {
+    const fixture = await feedbackReviewFixture({ "src.ts": "export const parse = (input: string) => input.trim();\n", "src.test.ts": "// existing test\n" });
+    const changes = [{ repositoryId: "app", path: "src.ts", operation: "MODIFY", change: "Return early for empty input." }];
+    const noTests = implementFinding(fixture.bundleRef.sha256, { summary: "Guard empty input.", fileChanges: changes, tests: [] });
+    const withTests = implementFinding(fixture.bundleRef.sha256, { summary: "Guard empty input.", fileChanges: changes,
+      tests: [{ repositoryId: "app", path: "src.test.ts", operation: "MODIFY", behavior: "Empty input returns an empty result." }] });
+    const record = { prompts: [] as string[], refusals: [] as string[], toolNames: [] as string[] };
+    const review = await structuredReview(fixture, feedbackToolAdapter({ calls: [{ findings: [noTests] }, { findings: [withTests] }] }, record));
+    expect(review.report.status).toBe("COMPLETE");
+    expect(review.report.findings[0]?.fixProposal?.tests).toHaveLength(1);
+    expect(record.refusals).toHaveLength(1);
+    expect(record.refusals[0]).toContain("fixProposal.tests is empty");
+    expect(record.prompts).toHaveLength(1);
+  });
+
+  it("falls back to the text answer, and to its one text retry, when the tool is not used", async () => {
+    const fixture = await feedbackReviewFixture();
+    const record = { prompts: [] as string[], refusals: [] as string[], toolNames: [] as string[] };
+    const review = await structuredReview(fixture, feedbackToolAdapter({ calls: [], text: JSON.stringify({ findings: [goodFinding(fixture.bundleRef.sha256)] }) }, record));
+    expect(review.report.status).toBe("COMPLETE");
+    expect(review.report.findings).toHaveLength(1);
+    expect(record.prompts).toHaveLength(1);
+    const unreadable = feedbackToolAdapter({ calls: [], text: "All fine." }, { prompts: [], refusals: [], toolNames: [] });
+    const failed = await structuredReview(fixture, unreadable);
+    expect(failed.report.status).toBe("FAILED");
+  });
+
+  it("takes a tool answer given on the retry prompt, after a first answer written as text that could not be read", async () => {
+    const fixture = await feedbackReviewFixture();
+    const record = { prompts: [] as string[], refusals: [] as string[], toolNames: [] as string[] };
+    const review = await structuredReview(fixture, feedbackToolAdapter({ calls: [], prompts: [
+      { calls: [], text: "All fine, nothing to report." },
+      { calls: [{ findings: [goodFinding(fixture.bundleRef.sha256)] }] },
+    ] }, record));
+    expect(record.prompts).toHaveLength(2);
+    expect(record.prompts[1]).toContain("reviewer output: not valid JSON");
+    expect(review.report.status).toBe("COMPLETE");
+    expect(review.report.findings).toHaveLength(1);
+  });
+
+  it("flips back with structuredAnswers off: no tool is offered and the prompt does not mention one", async () => {
+    const fixture = await feedbackReviewFixture();
+    const record = { prompts: [] as string[], refusals: [] as string[], toolNames: [] as string[] };
+    const review = await structuredReview(fixture, feedbackToolAdapter({ calls: [], text: JSON.stringify({ findings: [goodFinding(fixture.bundleRef.sha256)] }) }, record), false);
+    expect(review.report.status).toBe("COMPLETE");
+    expect(record.toolNames).toEqual([]);
+    expect(record.prompts[0]).not.toContain("submit_feedback_review");
+  });
+});
+
 describe("a stop that could not be confirmed ends the run and touches nothing (FIX-RUNNER-ABORT-JOIN, review H1)", () => {
   const touched = (run: Awaited<ReturnType<typeof runTask>>) => run.artifacts.map((artifact) => artifact.name).filter((name) => name === "workspace.diff" || name === "test-and-tool-evidence.json");
 
@@ -1789,4 +2010,207 @@ describe("a stop that could not be confirmed ends the run and touches nothing (F
     expect(run.failure).toBeDefined();
     await expect(readFile(join(rootPath, ".agentx/last-checks.json"), "utf8")).rejects.toThrow(/ENOENT/u);
   });
+});
+
+const evalWireRequest = { aiChange: true as const, reason: "eval_hint" as const, evalPass: 1 as const, callsAlreadyUsed: 0, costAlreadyUsedMicros: 0 };
+const evalWireStopped = { stopWorkspaceProcesses: async () => ({ stopped: 0 }), sweepWorkspaceContainers: async () => ({ removed: 0 }) };
+describe("CHECKS eval hook", () => {
+  it("writes checks_failed with zero holds when the CHECKS round fails", async () => {
+    const w = await createEvalFinalCheckWorld();
+    try {
+      const fake = fakeRunners({ project: [{ exitCode: 1, timedOut: false, stdout: "failed", stderr: "" }] });
+      const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", evalRequest: evalWireRequest, evalFinalCheck: w.ports, readiness: [lint], runners: fake.runners, rootPath: await gitWorkspaceRoot([lint]) });
+      expect(run.failure).toBeUndefined(); expect(run.result?.checks?.status).toBe("regression");
+      expect(JSON.parse(run.artifacts.find(a => a.name === "eval-round.json")!.content)).toMatchObject({ outcome: "not_run", notRunReason: "checks_failed", usage: { calls: 0, costMicros: 0 } });
+      expect(w.holds).toEqual([]); expect(w.calls).toEqual([]); expect(w.stages).toEqual([]);
+    } finally { await w.cleanup(); }
+  });
+  it("binds the written eval to the test proof candidate even when checks change files", async () => {
+    const w = await createEvalFinalCheckWorld(); const rootPath = await gitWorkspaceRoot([lint]);
+    const fake = fakeRunners(); const runProjectCommand = fake.runners.runProjectCommand.bind(fake.runners);
+    fake.runners.runProjectCommand = async (...args) => { await writeFile(join(rootPath, "app", "checks-left.txt"), "changed by checks"); return runProjectCommand(...args); };
+    try {
+      const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", evalRequest: evalWireRequest, evalFinalCheck: w.ports, readiness: [lint], runners: fake.runners, rootPath });
+      expect(run.failure).toBeUndefined(); expect(w.holds.length).toBeGreaterThan(0); expect(w.calls.length).toBeGreaterThan(0);
+      // The eval and the changed-prompt classifier share ONE plan read.
+      expect(w.planned()).toBe(1);
+      const before = createCandidateManifest(run.result!.workflowCandidateRepositories!).digest;
+      const after = createCandidateManifest(run.result!.workflowCheckCandidateRepositories!).digest;
+      expect(before).not.toBe(after);
+      const saved = EvalRoundArtifactSchema.parse(JSON.parse(run.artifacts.find(a => a.name === "eval-round.json")!.content));
+      expect(saved).toMatchObject({ outcome: "done", candidateDigest: before });
+      const proof = TestProofSchema.parse(JSON.parse(run.artifacts.find(a => a.name === "test-proof.json")!.content));
+      expect(saved.candidateDigest).toBe(proof.candidateDigest);
+    } finally { await w.cleanup(); }
+  });
+  it("the one shared plan read happens inside the pinned candidate, so the pin wraps the changed-prompt classifier", async () => {
+    // The classifier makes the first plan read. The pinned plan reader (#809) works only inside the pin, so a read outside it is not runnable. Either order
+    // looks the same when the plan is a plain fake, which is why the read itself records whether the pin is active.
+    const w = await createEvalFinalCheckWorld(); const pinned: boolean[] = []; const read = w.ports.plan.bind(w.ports);
+    w.ports.plan = async () => { pinned.push(evalPinnedCandidateActive()); return read(); };
+    try {
+      const fake = fakeRunners();
+      const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", evalRequest: evalWireRequest, evalFinalCheck: w.ports, readiness: [lint], runners: fake.runners, rootPath: await gitWorkspaceRoot([lint]) });
+      expect(run.failure).toBeUndefined(); expect(w.calls.length).toBeGreaterThan(0);
+      expect(pinned).toEqual([true]);
+    } finally { await w.cleanup(); }
+  });
+  it("a working round reads no plan at all: the classifier is not started", async () => {
+    const w = await createEvalFinalCheckWorld(); w.ports.roundKind = "working";
+    try {
+      const fake = fakeRunners({ project: [{ exitCode: 0, timedOut: false, stdout: "passed", stderr: "" }] });
+      const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", evalRequest: evalWireRequest, evalFinalCheck: w.ports, readiness: [lint], runners: fake.runners, rootPath: await gitWorkspaceRoot([lint]) });
+      expect(run.failure).toBeUndefined(); expect(w.planned()).toBe(0);
+      expect(JSON.parse(run.artifacts.find(a => a.name === "eval-round.json")!.content)).toMatchObject({ outcome: "not_run", notRunReason: "needs_fresh_sandbox" });
+    } finally { await w.cleanup(); }
+  });
+  it("does not reread or report success after an unconfirmed eval stop", async () => {
+    const w = await createEvalFinalCheckWorld(); w.ports.runner = async () => { throw new RunnerKillUnconfirmedError({ kind: "devcontainer" }); };
+    try {
+      const fake = fakeRunners({ project: [{ exitCode: 0, timedOut: false, stdout: "passed", stderr: "" }] });
+      const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", evalRequest: evalWireRequest, evalFinalCheck: w.ports, readiness: [lint], runners: fake.runners, rootPath: await gitWorkspaceRoot([lint]) });
+      expect(run.failure).toBeDefined(); expect(run.result).toBeUndefined(); expect(w.closed).toHaveLength(1); expect(run.artifacts.some(a => a.name === "eval-round.json")).toBe(false);
+    } finally { await w.cleanup(); }
+  });
+  it("keeps an ordinary checks run unchanged with no eval artifact", async () => {
+    const fake = fakeRunners({ project: [{ exitCode: 0, timedOut: false, stdout: "passed", stderr: "" }] });
+    const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", readiness: [lint], runners: fake.runners, rootPath: await gitWorkspaceRoot([lint]) });
+    expect(run.failure).toBeUndefined(); expect(run.artifacts.some(a => a.name === "eval-round.json")).toBe(false);
+  });
+  it("writes a digest-bound not_connected artifact before the result event", async () => {
+    const fake = fakeRunners({ project: [{ exitCode: 0, timedOut: false, stdout: "passed", stderr: "" }] });
+    const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", evalRequest: evalWireRequest, readiness: [lint], runners: fake.runners, rootPath: await gitWorkspaceRoot([lint]) });
+    expect(run.failure).toBeUndefined();
+    const saved = run.artifacts.find(a => a.name === "eval-round.json"); expect(saved).toBeDefined();
+    expect(JSON.parse(saved!.content)).toMatchObject({ candidateDigest: createCandidateManifest(run.result!.workflowCandidateRepositories!).digest, notRunReason: "not_connected", usage: { calls: 0, costMicros: 0 } });
+    expect(run.result?.checks?.status).toBe("verified");
+  });
+  it("a failed eval artifact upload is informational and uses fixed progress text", async () => {
+    const fake = fakeRunners({ project: [{ exitCode: 0, timedOut: false, stdout: "passed", stderr: "" }] });
+    const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", evalRequest: evalWireRequest, readiness: [lint], runners: fake.runners, rootPath: await gitWorkspaceRoot([lint]), failArtifact: "eval-round.json" });
+    expect(run.failure).toBeUndefined(); expect(run.result?.checks?.status).toBe("verified");
+    expect(JSON.stringify(run.events)).toContain("Eval result could not be saved.");
+  });
+  it("re-reads candidate drift after the eval hook before reporting the checked candidate", async () => {
+    const fake = fakeRunners({ project: [{ exitCode: 0, timedOut: false, stdout: "passed", stderr: "" }] });
+    const rootPath = await gitWorkspaceRoot([lint]);
+    const w = await createEvalFinalCheckWorld(); const runner = w.ports.runner;
+    try {
+      w.ports.runner = async r => { await writeFile(join(rootPath, "app", "eval-left.txt"), "changed by eval"); return runner(r); };
+      const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", evalRequest: evalWireRequest, evalFinalCheck: w.ports, readiness: [lint], runners: fake.runners, rootPath });
+      expect(run.failure).toBeUndefined(); expect(w.stages.length).toBeGreaterThan(0);
+      expect(createCandidateManifest(run.result!.workflowCheckCandidateRepositories!).digest).not.toBe(createCandidateManifest(run.result!.workflowCandidateRepositories!).digest);
+    } finally { await w.cleanup(); }
+  });
+});
+
+it("the eval shares the CHECKS deadline and joins the runner before reporting stopped", async () => {
+  const w = await createEvalFinalCheckWorld(); let joined = false;
+  w.ports.runner = async r => {
+    await new Promise<void>(resolve => {
+      const timer = setTimeout(resolve, 3000);
+      if (r.signal.aborted) { clearTimeout(timer); resolve(); }
+      else r.signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
+    joined = true; throw new Error("aborted-provider-secret");
+  };
+  try {
+    const fake = fakeRunners({ project: [{ exitCode: 0, timedOut: false, stdout: "passed", stderr: "" }] });
+    const run = await runTask({ steps: [], stopBeforeReading: evalWireStopped, workflowMode: "CHECKS", evalRequest: evalWireRequest, evalFinalCheck: w.ports, readiness: [lint], runners: fake.runners, rootPath: await gitWorkspaceRoot([lint]), budgets: [1500] });
+    expect(run.failure).toBeUndefined(); expect(joined).toBe(true); expect(w.closed).toHaveLength(1);
+    expect(JSON.parse(run.artifacts.find(a => a.name === "eval-round.json")!.content)).toMatchObject({ notRunReason: "stopped" });
+    expect(run.elapsed).toBeLessThan(7000);
+  } finally { await w.cleanup(); }
+}, 10_000);
+
+describe("TE-C1: the baseline claim of a verification run", () => {
+  const BASE_PLAN = { revision: 1, digest: "d".repeat(64), roundBudgetMin: 30, selection: { method: "full", alwaysRun: [], fullSuiteOn: [] }, checks: [{ id: "lint", kind: "lint" }] };
+  const git = (directory: string, ...args: string[]): string => execFileSync("git", ["-C", directory, "-c", "user.name=AgentX Test", "-c", "user.email=test@example.invalid", ...args], { encoding: "utf8" }).trim();
+  /** A workspace whose repository has two commits; the task's base (the manifest's resolved commit) is the second. */
+  async function twoCommitWorkspace(): Promise<{ rootPath: string; first: string; second: string; repository: string }> {
+    const rootPath = await gitWorkspaceRoot([lint]);
+    const repository = join(rootPath, "app");
+    const first = git(repository, "rev-parse", "HEAD");
+    await writeFile(join(repository, "second.txt"), "two\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "second");
+    const second = git(repository, "rev-parse", "HEAD");
+    const manifestPath = join(rootPath, ".agentx/preparation-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { repositories: Array<Record<string, unknown>> };
+    manifest.repositories[0]!["resolvedCommit"] = second;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    return { rootPath, first, second, repository };
+  }
+  const rawOf = (run: Awaited<ReturnType<typeof runTask>>) => {
+    const artifact = run.artifacts.find((item) => item.name === "evidence-raw.json");
+    return artifact === undefined ? undefined : (JSON.parse(artifact.content) as { baseline?: unknown; checks: unknown[] });
+  };
+  /** What an agent (or a check) can do to a repository's .git: a rewritten ref, a replace ref, a shallow file and grafts. */
+  async function tamper(repository: string, first: string, second: string, stranger: string): Promise<void> {
+    git(repository, "update-ref", "refs/heads/rewritten", first);
+    await writeFile(join(repository, ".git", "shallow"), `${second}\n`);
+    await writeFile(join(repository, ".git", "info", "grafts"), `${second} ${stranger}\n`).catch(() => undefined);
+    await writeFile(join(repository, ".git", "packed-refs"), `${stranger} refs/heads/main\n`);
+  }
+
+  it("writes the nearest ancestor of the base into evidence-raw.json when the plan carried candidates, found BEFORE any check runs, and what the agent or a check did to .git changes nothing", async () => {
+    const { rootPath, first, second, repository } = await twoCommitWorkspace();
+    const stranger = "9".repeat(40);
+    // The agent's sandbox did this before the checks round started.
+    await tamper(repository, first, second, stranger);
+    const gitDirectory = join(repository, ".git");
+    expect(await readFile(join(gitDirectory, "shallow"), "utf8")).toContain(second);
+    const order: string[] = [];
+    vi.mocked(baselineAncestry.findBaselineAncestor).mockClear();
+    vi.mocked(baselineAncestry.findBaselineAncestor).mockImplementationOnce(async (input) => { order.push("ancestry"); return (await vi.importActual<typeof baselineAncestry>("../../packages/worker/src/verification/baseline-ancestry.js")).findBaselineAncestor(input); });
+    const fake = fakeRunners();
+    const tampering: CheckRunners = { ...fake.runners, runProjectCommand: async (command, ...rest) => {
+      order.push("check");
+      // The check itself (project code) does it again, and adds a replace ref.
+      git(repository, "update-ref", "refs/heads/rewritten-by-check", first);
+      return fake.runners.runProjectCommand(command, ...rest);
+    } };
+    const run = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: tampering, rootPath, payloadExtra: { evidenceCapture: true, testEnvironment: { ...BASE_PLAN, baselineCandidates: [{ sha: stranger }, { sha: first }] } } });
+    expect(run.failure).toBeUndefined();
+    // Positive controls: the ancestry step ran once, before the first check, and the check really ran.
+    expect(vi.mocked(baselineAncestry.findBaselineAncestor)).toHaveBeenCalledTimes(1);
+    expect(order[0]).toBe("ancestry");
+    expect(order).toContain("check");
+    expect(rawOf(run)?.baseline).toEqual({ sha: first, commitsBack: 1 });
+  }, 60_000);
+
+  it("writes nothing for a plan with no candidates (an old engine), and for a task with more than one repository", async () => {
+    const { rootPath } = await twoCommitWorkspace();
+    const plain = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: fakeRunners().runners, rootPath, payloadExtra: { evidenceCapture: true, testEnvironment: BASE_PLAN } });
+    expect(plain.failure).toBeUndefined();
+    expect(rawOf(plain)).toBeUndefined();
+    const two = await twoCommitWorkspace();
+    const manifestPath = join(two.rootPath, ".agentx/preparation-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { repositories: Array<Record<string, unknown>> };
+    await mkdir(join(two.rootPath, "second-app"));
+    manifest.repositories.push({ ...manifest.repositories[0]!, name: "second-app", path: "second-app" });
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await writeFile(join(two.rootPath, "second-app", "README.md"), "second\n");
+    execFileSync("git", ["init", "-q", join(two.rootPath, "second-app")]);
+    git(join(two.rootPath, "second-app"), "add", ".");
+    git(join(two.rootPath, "second-app"), "commit", "-qm", "second app");
+    manifest.repositories[1]!["resolvedCommit"] = git(join(two.rootPath, "second-app"), "rev-parse", "HEAD");
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const many = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: fakeRunners().runners, rootPath: two.rootPath, payloadExtra: { evidenceCapture: true, testEnvironment: { ...BASE_PLAN, baselineCandidates: [{ sha: two.first }] } } });
+    expect(many.failure).toBeUndefined();
+    expect(rawOf(many)?.baseline).toBeUndefined();
+    // TE-MR2b: a claim of only some of the repositories is no claim at all (the second repository has no offered ancestor).
+    expect((rawOf(many) as { baselines?: unknown } | undefined)?.baselines).toBeUndefined();
+    // Positive control: with an offered commit in EVERY repository, one claim per repository is written (sorted by repository id), and no single-repository claim.
+    const secondHead = manifest.repositories[1]!["resolvedCommit"] as string;
+    const both = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: fakeRunners().runners, rootPath: two.rootPath, payloadExtra: { evidenceCapture: true, testEnvironment: { ...BASE_PLAN, baselineCandidates: [{ sha: two.first }, { sha: secondHead }], repositoryBaselines: true } } });
+    // Without the engine's ask the worker claims nothing, whatever it could find.
+    const unasked = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: fakeRunners().runners, rootPath: two.rootPath, payloadExtra: { evidenceCapture: true, testEnvironment: { ...BASE_PLAN, baselineCandidates: [{ sha: two.first }, { sha: secondHead }] } } });
+    expect((rawOf(unasked) as { baselines?: unknown } | undefined)?.baselines).toBeUndefined();
+    expect(both.failure).toBeUndefined();
+    const claims = (rawOf(both) as { baselines?: Array<{ repositoryId: string; sha: string; commitsBack: number }> } | undefined)?.baselines;
+    expect(claims?.map((claim) => claim.sha).sort()).toEqual([two.first, secondHead].sort());
+    expect(claims?.map((claim) => claim.repositoryId)).toEqual([...(claims ?? []).map((claim) => claim.repositoryId)].sort());
+    expect(rawOf(both)?.baseline).toBeUndefined();
+  }, 60_000);
 });

@@ -5,6 +5,7 @@ import { failActiveOperation } from "../../packages/broker/src/aws/outbox-failur
 import { SessionManager } from "../../packages/broker/src/aws/sessions.js";
 import {
   createReconcilerHandler,
+  createSlackThreadPoster,
   type ExecutionStatus,
   type InstanceView,
   type ReconcilerDependencies,
@@ -26,7 +27,7 @@ const hex = () => randomUUID().replaceAll("-", "").slice(0, 17);
 
 type Start = (input: { stateMachineArn: string; name: string; input: string }) => Promise<string>;
 
-type SetupOptions = { instances?: InstanceView[]; volumes?: VolumeView[]; executions?: Record<string, ExecutionStatus>; ping?: ReconcilerDependencies["ping"]; sweepStuckSetups?: ReconcilerDependencies["sweepStuckSetups"]; sweepStuckCancels?: ReconcilerDependencies["sweepStuckCancels"]; expireIndexDays?: ReconcilerDependencies["expireIndexDays"]; sweepUnwaitedTasks?: ReconcilerDependencies["sweepUnwaitedTasks"]; qualifiedWorkerAmi?: ReconcilerDependencies["qualifiedWorkerAmi"]; log?: ReconcilerDependencies["log"] };
+type SetupOptions = { instances?: InstanceView[]; volumes?: VolumeView[]; executions?: Record<string, ExecutionStatus>; ping?: ReconcilerDependencies["ping"]; closedAt?: ReconcilerDependencies["closedAt"]; sweepStuckSetups?: ReconcilerDependencies["sweepStuckSetups"]; sweepStuckCancels?: ReconcilerDependencies["sweepStuckCancels"]; expireIndexDays?: ReconcilerDependencies["expireIndexDays"]; sweepUnwaitedTasks?: ReconcilerDependencies["sweepUnwaitedTasks"]; qualifiedWorkerAmi?: ReconcilerDependencies["qualifiedWorkerAmi"]; log?: ReconcilerDependencies["log"] };
 
 function setup(options: SetupOptions = {}) {
   const db = new FakeDynamoDb();
@@ -49,10 +50,10 @@ function setup(options: SetupOptions = {}) {
     ping: options.ping ?? (async () => "Healthy"),
     terminate, deleteVolume, quarantine,
     failActiveOperation: (workspaceId, error) => failActiveOperation(db, "state", workspaceId, error),
-    closedAt: async (workspaceId) => {
+    closedAt: options.closedAt ?? (async (workspaceId) => {
       const item = db.get(`WORKSPACE#${workspaceId}`, "META");
       return item?.status === "CLOSED" ? item.closedAt as string : undefined;
-    },
+    }),
     binding: async () => binding,
     emit,
     now: () => NOW,
@@ -145,6 +146,30 @@ describe("reconciler: instances", () => {
     const third = await reconcile();
     expect(third.unresponsiveInstances).toEqual([worker.instanceId]);
     expect(terminate).toHaveBeenCalledExactlyOnceWith(worker.instanceId);
+  });
+});
+
+describe("reconciler: pointer faults", () => {
+  it("skips an integrity-faulted volume while processing a healthy volume and running the setup sweep", async () => {
+    const brokenWorkspace = randomUUID();
+    const healthyWorkspace = randomUUID();
+    const sweep = vi.fn(async () => ({ failed: [] }));
+    const { state, reconcile, deleteVolume, quarantine } = setup({
+      closedAt: async (workspaceId) => {
+        if (workspaceId === brokenWorkspace) throw Object.assign(new Error("workspace unavailable"), { code: "NOT_FOUND" });
+        return minutesAgo(120);
+      },
+      sweepStuckSetups: sweep,
+    });
+    state.volumes = [
+      { volumeId: "vol-0000000000000aa01", state: "available", workspaceId: brokenWorkspace, createdAt: minutesAgo(120), quarantined: false },
+      { volumeId: "vol-0000000000000aa02", state: "available", workspaceId: healthyWorkspace, createdAt: minutesAgo(120), quarantined: false },
+    ];
+    const report = await reconcile();
+    expect(report.closedVolumesDeleted).toEqual(["vol-0000000000000aa02"]);
+    expect(deleteVolume).toHaveBeenCalledExactlyOnceWith("vol-0000000000000aa02");
+    expect(quarantine).not.toHaveBeenCalled();
+    expect(sweep).toHaveBeenCalledOnce();
   });
 });
 
@@ -617,4 +642,38 @@ describe("reconciler: unwaited Slack tasks (#173)", () => {
     expect(report).not.toHaveProperty("unwaitedTasks");
     expect(Object.keys(emit.mock.calls[0]![0]).filter((name) => name.includes("Unwaited"))).toEqual([]);
   });
+});
+
+it("posts concurrent identical thread addresses with their company tokens, never the install token", async () => {
+  const legacy = vi.fn(async () => ["xoxb", "legacy"].join("-"));
+  const calls: boolean[] = [];
+  const post = createSlackThreadPoster({ legacyToken: legacy, workspaces: {
+    requireCompany: async (team) => team === "T0AAAAAAA" ? "org_aaaaaaaaaaaaaaaaaaaa" : "org_bbbbbbbbbbbbbbbbbbbb",
+    tokenForCompany: async (company) => ["xoxb", company === "org_aaaaaaaaaaaaaaaaaaaa" ? "a" : "b"].join("-"),
+  }, fetch: async (_url, init) => { calls.push((init?.headers as Record<string, string>).authorization === `Bearer ${["xoxb", "a"].join("-")}`); return new Response(JSON.stringify({ ok: true, ts: "1695500000.000001" })); } });
+  const place = { channelId: "C0SHARED", threadTs: "1695500000.000001" };
+  await Promise.all([post({ ...place, workspace: { companyId: "org_aaaaaaaaaaaaaaaaaaaa", teamId: "T0AAAAAAA" } }, "a"), post({ ...place, workspace: { companyId: "org_bbbbbbbbbbbbbbbbbbbb", teamId: "T0BBBBBBB" } }, "b")]);
+  expect(calls).toEqual([true, false]); expect(legacy).not.toHaveBeenCalled();
+  await expect(post(place, "private")).rejects.toThrow("This Slack workspace is not available.");
+  await expect(post({ ...place, workspace: { companyId: "org_aaaaaaaaaaaaaaaaaaaa", teamId: "T0BBBBBBB" } }, "private")).rejects.toThrow("This Slack workspace is not available.");
+  expect(calls).toHaveLength(2); expect(legacy).not.toHaveBeenCalled();
+});
+
+it("L2-2 18d: in company mode only the install's own scope (implicit company, install team) posts the way it does today; unscoped stays refused", async () => {
+  const legacyPost = vi.fn(async () => ({ ts: "1695500000.000001" }));
+  const company = vi.fn(async () => new Response(JSON.stringify({ ok: true, ts: "1695500000.000001" })));
+  const post = createSlackThreadPoster({ legacyToken: async () => ["xoxb", "legacy"].join("-"), legacyPost, legacyTeamId: "T0INSTALL0", workspaces: {
+    requireCompany: async (team) => (team === "T0INSTALL0" ? "org_00000000000000000000" : "org_bbbbbbbbbbbbbbbbbbbb"),
+    tokenForCompany: async () => ["xoxb", "b"].join("-"),
+  }, fetch: company });
+  const place = { channelId: "C0SHARED", threadTs: "1695500000.000001" };
+  await post({ ...place, workspace: { companyId: "org_00000000000000000000", teamId: "T0INSTALL0" } }, "own");
+  expect(legacyPost).toHaveBeenCalledExactlyOnceWith({ channel: "C0SHARED", threadTs: "1695500000.000001", text: "own" });
+  expect(company).not.toHaveBeenCalled();
+  await post({ ...place, workspace: { companyId: "org_bbbbbbbbbbbbbbbbbbbb", teamId: "T0BBBBBBB" } }, "other");
+  expect(company).toHaveBeenCalledTimes(1);
+  await expect(post(place, "unscoped")).rejects.toThrow("This Slack workspace is not available.");
+  // The install's team under another company is not the install's.
+  await expect(post({ ...place, workspace: { companyId: "org_bbbbbbbbbbbbbbbbbbbb", teamId: "T0INSTALL0" } }, "x")).rejects.toThrow();
+  expect(legacyPost).toHaveBeenCalledTimes(1);
 });

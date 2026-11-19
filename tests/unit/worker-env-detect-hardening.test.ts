@@ -23,6 +23,8 @@ const FILES = [
   "application.properties", "application.yml", "application-test.yml", "appsettings.json", "config/a.yaml", "app/settings.py", ".env", ".env.example",
   "docker-compose.yml", ".devcontainer/devcontainer.json", ".github/workflows/ci.yml", ".gitlab-ci.yml", ".circleci/config.yml",
   "template.yaml", "cdk.out/a.template.json", "main.tf", "lib/stack.ts", "infra/app_stack.py", "README.md", "docs/runbook.md", ".kiro/steering/a.md", "cdk.json", "mvnw",
+  // the SageMaker detector's model signs (a cubic Dockerfile pattern hung this suite on PR #485)
+  "Dockerfile", "inference.py",
 ];
 const BODIES: Record<string, string> = {
   newlines: fill("\n"), "space-newline": fill(" \n"), "tab-newline": fill("\t\n"), spaces: fill(" "), dots: fill("."), "word-dot": fill("a."), "word-slash": fill("aa/"), word: fill("a"),
@@ -158,11 +160,11 @@ describe("limits that need their own test", () => {
 
 describe("infrastructure resource names are carried, but never a key-shaped one", () => {
   const keyName = ["AK", "IA", "ABCDEFGHIJKLMNOP"].join("");
-  it("falls back from a key-shaped physical name to the template's id, and drops a resource with neither", async () => {
+  it("falls back from a key-shaped physical name to the template's id, and drops a resource with neither (its service stays a candidate with no resource)", async () => {
     const template = `Resources:\n  Orders:\n    Type: AWS::SQS::Queue\n    Properties:\n      QueueName: ${keyName}\n  ${keyName}:\n    Type: AWS::SNS::Topic\n    Properties:\n      TopicName: ${keyName}\n`;
     const detection = await detect({ "template.yaml": template });
     expect(family(detection, "aws:sqs")!.hints.resources).toEqual([{ kind: "queue", name: "Orders" }]);
-    expect(family(detection, "aws:sns")).toBeUndefined();
+    expect(family(detection, "aws:sns")!.hints.resources).toBeUndefined();
     expect(JSON.stringify(detection)).not.toContain(keyName);
   });
   it("applies the same rule to Terraform and CDK names", async () => {

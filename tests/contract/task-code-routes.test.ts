@@ -8,6 +8,7 @@ import { COMMENT_RATE, WORKFLOW_THREAD_NOTES_MAX } from "@agentx/contracts";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { routeDeveloperTaskRequest } from "../../packages/broker/src/aws/developer-tasks.js";
 import { createPlanComment, DIFF_PATCH_MAX_CHARS, DIFF_PATCH_TOO_LONG, listPlanComments, listTaskMessages, MESSAGES_PAGE_MAX, readTaskDiff, sendTaskMessage } from "../../packages/broker/src/developer/task-code-routes.js";
+import { expectLinearScalingAsync } from "../support/scaling.js";
 import { OMAR, PRIYA, SAM, START, pagePlan, pageTask, type PageTaskFixture } from "../support/page-tasks.js";
 
 // ---- the contract's shapes, by hand
@@ -322,13 +323,25 @@ describe("the pull request diff", () => {
 
   it("bounds a page: 30 files, and a patch that is too long is said to be, never cut", async () => {
     const fixture = withPlan();
-    const huge = "+".repeat(10_000_000);
-    withPullRequests(fixture, async () => ({
-      files: Array.from({ length: 30 }, (_, index) => ({ filename: `src/f${index}.ts`, additions: 5, deletions: 0, patch: index % 2 === 0 ? huge : "+small" })), more: true,
-    }));
-    const started = Date.now();
-    const diff = await readTaskDiff(fixture.deps, SAM, fixture.taskId, at(fixture, "/diff?repository=demo&number=7"));
-    expect(Date.now() - started).toBeLessThan(2_000);
+    const readDiff = (from: PageTaskFixture) => readTaskDiff(from.deps, SAM, from.taskId, at(from, "/diff?repository=demo&number=7"));
+    // The work does not grow with the length of a too-long patch: it is refused by its length, never read.
+    // The 15 long patches share one string, so one unit of n is one byte. N stays above the patch limit (30,000) and 8N at 256 KiB so it stays in CPU cache; the full 2,000,000-character patch is read once below.
+    const diffs = new Map<number, Awaited<ReturnType<typeof readDiff>>>();
+    const sizedFixture = (length: number) => {
+      const sized = withPlan();
+      const huge = "+".repeat(length);
+      withPullRequests(sized, async () => ({
+        files: Array.from({ length: 30 }, (_, index) => ({ filename: `src/f${index}.ts`, additions: 5, deletions: 0, patch: index % 2 === 0 ? huge : "+small" })), more: true,
+      }));
+      return sized;
+    };
+    await expectLinearScalingAsync((length) => {
+      const sized = sizedFixture(length);
+      return async () => { diffs.set(length, await readDiff(sized)); };
+    }, { n: 32_768, label: "task diff: too-long patches" });
+    const diff = diffs.get(32_768)!;
+    expect(diffs.get(262_144)).toEqual(diff);
+    expect(await readDiff(sizedFixture(2_000_000))).toEqual(diff);
     expect(diff.files).toHaveLength(30);
     expect(diff.files.filter((file) => file.patch === DIFF_PATCH_TOO_LONG)).toHaveLength(15);
     expect(JSON.stringify(diff).length).toBeLessThan(30 * DIFF_PATCH_MAX_CHARS + 10_000);

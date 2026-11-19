@@ -5,10 +5,10 @@ describe("AgentX executable command surface", () => {
   it("exposes administration and developer sign-in; developer tasks come from AI tools", () => {
     const program = createCliProgram();
 
-    expect(program.commands.map((command) => command.name())).toEqual(["login", "logout", "whoami", "workspaces", "chatgpt", "signin", "config", "loop", "doctor", "upgrade", "destroy", "admin", "project", "channel", "adapter", "connector", "alerts", "env", "deploy", "init", "mcp"]);
+    expect(program.commands.map((command) => command.name())).toEqual(["login", "logout", "whoami", "workspaces", "chatgpt", "signin", "config", "loop", "doctor", "up", "open", "test-env", "token", "lessons", "playbook", "second-review", "connections", "models", "design-review", "diagnosis", "intake", "chat", "setup-agent", "upgrade", "destroy", "admin", "project", "channel", "adapter", "connector", "alerts", "env", "deploy", "init", "sessions", "session", "record", "mcp"]);
 
     const admin = program.commands.find((command) => command.name() === "admin");
-    expect(admin?.commands.map((command) => command.name())).toEqual(["project", "runtime-installation", "sign-in-client", "workspace", "slack", "eval", "credential", "turns", "task", "changes"]);
+    expect(admin?.commands.map((command) => command.name())).toEqual(["project", "runtime-installation", "sign-in-client", "company-invite", "company", "workspace", "slack", "eval", "credential", "turns", "task", "changes"]);
     expect(subcommands(admin, "project")).toEqual(["register", "grant", "revoke"]);
     expect(subcommands(admin, "workspace")).toEqual(["list", "cancel", "stop"]);
     expect(subcommands(admin, "slack")).toEqual(["bind", "unbind"]);
@@ -19,9 +19,14 @@ describe("AgentX executable command surface", () => {
     expect(subcommands(admin, "task")).toEqual(["share-mode", "e2e-replay"]);
     expect(subcommands(admin, "runtime-installation")).toEqual(["challenge", "register"]);
     expect(subcommands(admin, "sign-in-client")).toEqual(["add", "update", "list", "remove"]);
+    expect(subcommands(admin, "company-invite")).toEqual(["create", "list", "revoke", "self-serve"]);
+    expect(subcommands(admin, "company")).toEqual(["import"]);
 
     expect(subcommands(program, "signin")).toEqual(["show", "enable", "disable", "check"]);
+    expect(subcommands(program, "lessons")).toEqual(["replay"]);
     expect(subcommands(program, "loop")).toEqual(["init", "add", "enroll", "remove", "start", "stop", "status", "run", "do", "quick", "full", "review", "contribute", "check", "mcp"]);
+    // Lane L8: a session is started, shown, followed, commented on, told, answered, stopped, retried, taken over and shared from the command line.
+    expect(subcommands(program, "session")).toEqual(["start", "show", "follow", "unfollow", "comment", "tell", "answer", "stop", "retry", "take-over", "share"]);
     expect(subcommands(program, "chatgpt")).toEqual(["connect", "status", "disconnect"]);
     expect(subcommands(program, "mcp")).toEqual(["install"]);
     expect(subcommands(program, "project")).toEqual(["add", "setup-approve", "model-check"]);

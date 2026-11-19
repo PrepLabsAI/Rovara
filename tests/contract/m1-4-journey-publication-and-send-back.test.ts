@@ -6,6 +6,7 @@ import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import type { ObservedApiOutcome } from "../support/e2e-application-evidence-fixture.js";
 import { MAYA } from "../support/developer-task-broker.js";
 import { apiRowKey, startApplicationRound, type ApplicationRound } from "../support/e2e-application-round-harness.js";
+import { testProjectPk } from "../support/orgs.js";
 
 // JOURNEY46 (M1.4 Task 4.4a review, m6), Docker-free. The agent journeys (agent-renamed-export, agent-wrong-action) end in two broker decisions that their own asserts never checked:
 // a passing round leaves the final-effect checks publication will take (journey 32), and a failing round records its failed round so Send back is offered (journey 33).
@@ -61,7 +62,7 @@ function expectedFenceKeys(round: ApplicationRound): { required: string[]; accou
   const latest = projects.reduce((best, row) => (row.sk > best.sk ? row : best));
   // The creator's authority (the Slack channel binding the task was started from) and the project's account row, as the store holds them.
   const channelBindings = round.harness.db.find((row) => String(row.pk).startsWith("SLACK_BINDING#") && row.projectName === "payments") as Array<{ pk: string; sk: string }>;
-  const accounts = round.harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#")) as Array<{ pk: string; sk: string }>;
+  const accounts = round.harness.db.find((row) => row.pk === testProjectPk("payments") && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#")) as Array<{ pk: string; sk: string }>;
   expect(channelBindings.length, "the fixture's creator has a channel binding").toBeGreaterThan(0);
   expect(accounts.length, "the fixture's project has an account row").toBeGreaterThan(0);
   const keys = [

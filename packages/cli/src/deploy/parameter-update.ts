@@ -4,7 +4,7 @@
 import { CreateChangeSetCommand, DeleteChangeSetCommand, DescribeChangeSetCommand, DescribeStacksCommand, ExecuteChangeSetCommand, type Change, type Stack } from "@aws-sdk/client-cloudformation";
 import { agentXError } from "@agentx/contracts";
 import { ADOPTED_STACK_NAMES } from "../environments/adopt.js";
-import { SIGN_IN_SINCE_PARAMETER_NAMES } from "../signin/settings.js";
+import { GITHUB_SIGN_IN_PARAMETER_NAMES, SIGN_IN_SINCE_PARAMETER_NAMES } from "../signin/settings.js";
 import type { ChangeSetChange } from "./deployer.js";
 
 export interface ParameterChange { name: string; from: string; to: string }
@@ -18,7 +18,7 @@ export interface ParameterUpdateInput {
 }
 
 /** Parameters only named environments' templates declare (spec 025 E16): the legacy deployment never has them, so no upgrade adds them. */
-const NAMED_ENVIRONMENT_ONLY_PARAMETERS: ReadonlySet<string> = new Set(["McpConfirmElicitation", "ChannelAdapters"]);
+const NAMED_ENVIRONMENT_ONLY_PARAMETERS: ReadonlySet<string> = new Set(["McpConfirmElicitation", "ChannelAdapters", "CoreEngine", "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreSystemRuns", "CoreModelGatewayHost", "CoreAgentModel", "CoreAnswersModel", "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender", "StepUpEmailSender", "TestServices", "TestServiceImages"]);
 const LEGACY_STACK_NAMES: ReadonlySet<string> = new Set(Object.values(ADOPTED_STACK_NAMES));
 
 const NO_CHANGES = ["didn't contain changes", "No updates are to be performed"];
@@ -61,7 +61,7 @@ export async function updateStackParameters(input: ParameterUpdateInput): Promis
   if (missing.length > 0 && label === "config") {
     throw agentXError("CONFIG_INVALID", `stack ${stackName} has no ${missing.join(", ")} parameter; it runs an older AgentX release, so upgrade it with agentx upgrade, then run this again`);
   }
-  if (missing.length > 0 && missing.every((name) => SIGN_IN_SINCE_PARAMETER_NAMES.has(name))) {
+  if (missing.length > 0 && missing.every((name) => SIGN_IN_SINCE_PARAMETER_NAMES.has(name) || (GITHUB_SIGN_IN_PARAMETER_NAMES as readonly string[]).includes(name))) {
     throw agentXError("CONFIG_INVALID", `stack ${stackName} was deployed from an older AgentX release (it has no ${missing.join(", ")} parameter); upgrade the environment with agentx deploy, then run this again`);
   }
   if (missing.length > 0) {

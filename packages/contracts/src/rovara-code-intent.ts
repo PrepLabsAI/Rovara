@@ -17,7 +17,7 @@ const Hex64 = z.string().regex(/^[a-f0-9]{64}$/);
 const RequestIdSchema = z.string().uuid();
 
 /**
- * Enterprise foundations P9: the sources that are a ticket in an outside tracker. `tracker` is the one neutral source (its binding names the tracker and the item); `linear`, `jira` and
+ * Plug-in foundations P9: the sources that are a ticket in an outside tracker. `tracker` is the one neutral source (its binding names the tracker and the item); `linear`, `jira` and
  * `github_issue` are older spellings that stay valid (dual read, no migration): a stored intent, session or task that says `linear` is read as the `linear` tracker's.
  */
 export const TRACKER_INTENT_SOURCES = ["tracker", "linear", "jira", "github_issue"] as const;

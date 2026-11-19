@@ -108,8 +108,28 @@ export const AgentXErrorCodeSchema = z.enum([
   "LEARNING_OFF",
   // The same read when the company's lock is what keeps learning off for the project.
   "LEARNING_LOCKED",
+  // The same read when the install's lessons switch (`ll`) is off: nothing is loaded or recorded here, so the task page says so plainly (a 404, as before).
+  "LESSONS_SWITCHED_OFF",
   // Lessons in production: a lesson change met an unfinished earlier change to the project's lessons that could not be finished just now (409, try again).
   "LESSON_BUSY",
+  // The feature is not on this install (Rovara on a laptop does not have it yet). A 404, so an older client that does not know the code treats it as an answer it has no words for. Appended: no code changes meaning.
+  "NOT_AVAILABLE_HERE",
+  // Guided onboarding PR 3: a company's GitHub connection can't be disconnected while its projects use repositories on it (409; the message names those projects, only the company's own). Appended: no code changes meaning.
+  "GITHUB_IN_USE",
+  // Guided onboarding PR 4 (409): the Slack workspace is another Rovara company's; this company already holds a different Slack workspace.
+  "SLACK_WORKSPACE_TAKEN",
+  "SLACK_COMPANY_HAS_WORKSPACE",
+  // Guided onboarding PR 5 (409): the company has no connected Slack workspace (or Rovara holds no token for it); the channel is another project's; the channel can't be
+  // linked (shared with another organization, or archived).
+  "SLACK_NOT_CONNECTED",
+  "SLACK_CHANNEL_TAKEN",
+  "SLACK_CHANNEL_REFUSED",
+  // Guided onboarding PR 7: the Linear workspace is already connected to another Rovara company (409), and the company's Linear connection is missing or needs reconnecting (409). Appended: no code changes meaning.
+  "LINEAR_WORKSPACE_TAKEN",
+  "LINEAR_NOT_CONNECTED",
+  // L4-GH (409): the GitHub account a person tries to connect to themselves is another member's of the company; the person already has a different GitHub account connected. Appended: no code changes meaning.
+  "GITHUB_ACCOUNT_TAKEN",
+  "GITHUB_ACCOUNT_LINK_EXISTS",
 ]);
 
 export const CSRF_STALE_MESSAGE = "Your sign-in changed in another tab. Trying again.";
@@ -161,7 +181,7 @@ export function errorStatus(code: AgentXErrorCode): number {
   if (code === "AUTH_REQUIRED") return 401;
   // The sign-in is valid but too old, or the wrong kind, for this change: 403, so a client does not treat it as a sign-in that ended.
   if (code === "CSRF_STALE" || code === "REAUTH_REQUIRED" || code === "FORBIDDEN" || code === "SLACK_TEAM_NOT_BOUND" || code === "SLACK_ACCOUNT_NOT_LINKED" || code === "PROJECT_ACCESS_DENIED" || code === "PROJECT_TASKS_DISABLED" || code === "TASK_ACCESS_DENIED" || code === "TRIAL_LOCKED" || code === "AGENT_NOT_ON_PROJECT" || code === "AGENT_TOOL_NOT_GRANTED" || code === "MODEL_NOT_ALLOWED" || code === "REMOVED_FROM_ORG" || code === "GITHUB_NOT_CONNECTED" || code === "SESSION_LEVEL_REQUIRED" || code === "LOCAL_AGENT_NOT_ALLOWED" || code === "PROCESS_SELF_CONFIRM") return 403;
-  if (code === "NOT_FOUND" || code === "PROJECT_NOT_FOUND" || code === "TASK_NOT_FOUND" || code === "LEARNING_OFF" || code === "LEARNING_LOCKED") return 404;
+  if (code === "NOT_FOUND" || code === "PROJECT_NOT_FOUND" || code === "TASK_NOT_FOUND" || code === "LEARNING_OFF" || code === "LEARNING_LOCKED" || code === "LESSONS_SWITCHED_OFF" || code === "NOT_AVAILABLE_HERE") return 404;
   if (code === "BUDGET_EXCEEDED" || code === "ORG_BUDGET_EXCEEDED" || code === "MACHINE_TIME_EXCEEDED" || code === "PROJECT_BUDGET_EXCEEDED" || code === "AGENT_BUDGET_EXCEEDED" || code === "TEST_ALLOWANCE_USED" || code === "CHAIN_BUDGET_EXCEEDED") return 402;
   if (code === "CONFIG_INVALID" || code === "PROCESS_UNAVAILABLE" || code === "AUDIT_RANGE_INVALID" || code === "AUDIT_REASON_REQUIRED" || code === "AUDIT_FILTER_TOO_WIDE") return 400;
   if (code === "TOO_MANY_REQUESTS") return 429;
@@ -173,6 +193,12 @@ export function errorStatus(code: AgentXErrorCode): number {
 export function agentXError(code: AgentXErrorCode, message: string): AgentXError {
   return new AgentXError(code, message, errorStatus(code));
 }
+
+/**
+ * Guided onboarding PR 3: what GITHUB_NOT_CONNECTED (403) says when the company's own GitHub App installation was uninstalled or suspended on GitHub, or a token for it is asked
+ * for after that (design section 3a). Said only to the company that installation is bound to; anyone else gets the ordinary refusal.
+ */
+export const GITHUB_DISCONNECTED_MESSAGE = "GitHub disconnected. Reconnect it in Company settings, Connections.";
 
 /** What a refusal to reach a repository through the org's GitHub connection says (GITHUB_NOT_CONNECTED, Plan 2). */
 export const githubNotConnectedMessage = (fullName: string) => `Rovara can't reach ${fullName} through your organization's GitHub connection. Connect it with: agentx github connect`;

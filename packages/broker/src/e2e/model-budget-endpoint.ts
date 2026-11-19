@@ -1,16 +1,17 @@
 import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
   E2EModelDayBudgetRequestSchema, E2E_MODEL_BUDGET_SCHEMA_VERSION, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, INDEX_EXPIRY_ATTRIBUTE, agentXError, indexExpiresAt,
-  type E2EModelDayBudgetRequest, type E2EModelDayBudgetResponse,
+  type E2EModelDayBudgetRequest, type E2EModelDayBudgetResponse, type OrgId,
 } from "@agentx/contracts";
 import { taskKey } from "../developer/task-records.js";
-import { deriveE2EAgentRoute, e2eModelBudgetKey, e2eModelBudgetReservationKey, isTransientAwsFault, type E2EAgentInstallation } from "./model-route-registry.js";
+import { LEGACY_KEY_SCOPE, legacyScopeOf, type KeyScope } from "./legacy-key-scope.js";
+import { deriveE2EAgentRoute, e2eModelBudgetKey, e2eModelBudgetReservationKey, isTransientAwsFault, legacyDayUsage, type E2EAgentInstallation } from "./model-route-registry.js";
 
 /**
  * The worker's callback for the project's day budget (M1.4 Task 4.3a, Ruling DB-8): `e2e-model-budget`, one reserve, settle or release at a time. The worker has no database access,
  * so this is where a model call is charged, and everything that decides what it may be charged is the broker's:
  *
- * - The project is the one the operation's task belongs to. A body names a reservation and a group run, never a project, a day or a cap.
+ * - The project is the one the operation's task belongs to, in the task's org: the day and its reservations are keyed by both, so two orgs' same-named projects never share a budget. A body names a reservation and a group run, never a project, a day or a cap.
  * - The day caps are the route's, derived here from the installation's settings; the worker's limits are never read.
  * - Only a running CHECKS operation whose admission reference says `agentSteps: true` (and is not a baseline) may call it, for a group run of that reference.
  *
@@ -27,6 +28,8 @@ export interface E2EModelBudgetDependencies {
   e2eAgentInstallation?: () => Promise<E2EAgentInstallation>;
   /** Milliseconds since the epoch. */
   now(): number;
+  /** The org of a stored record (the task's own `orgId`, else the org its owner belongs to), as the broker places every other record. */
+  orgOf(record: { orgId?: unknown; ownerKey?: unknown; developerId?: unknown }): Promise<OrgId>;
   /** Where fixed event codes go (never a value from a request). */
   log?(entry: { event: string; code: string }): void;
 }
@@ -40,6 +43,9 @@ export interface E2EModelBudgetOperation {
   workflowMode?: string | undefined;
   workflowE2EAdmission?: { taskId: string; groupRunIds: readonly string[]; agentSteps?: true | undefined; purpose?: string | undefined } | undefined;
 }
+
+/** The project a budget row belongs to: its org and its name. */
+type BudgetScope = { orgId: OrgId; project: string };
 
 type Stored = { status?: unknown; day?: unknown; reservedInputTokens?: unknown; groupRunId?: unknown; operationId?: unknown; entityType?: unknown };
 
@@ -71,42 +77,61 @@ export async function handleE2EModelBudgetCallback(dependencies: E2EModelBudgetD
   if (body.stage === "reserve" && !reference.groupRunIds.includes(body.groupRunId)) throw forbidden("the model budget reservation is for a group this operation does not run");
   // The project comes from the task the operation belongs to, and from nothing the worker said.
   const task = (await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName, Key: taskKey(reference.taskId), ConsistentRead: true }))).Item as
-    { workspaceId?: unknown; project?: unknown; closedAt?: unknown } | undefined;
+    { workspaceId?: unknown; project?: unknown; closedAt?: unknown; orgId?: unknown; ownerKey?: unknown; developerId?: unknown } | undefined;
   if (task === undefined || task.workspaceId !== operation.workspaceId || typeof task.project !== "string" || task.project === "" || task.closedAt !== undefined) {
     throw forbidden("the model budget is not available for this operation's task");
   }
-  const project = task.project;
-  if (body.stage === "reserve") return reserve(dependencies, operation, project, body);
-  return correct(dependencies, operation, project, body);
+  const scope = { orgId: await dependencies.orgOf(task), project: task.project };
+  if (body.stage === "reserve") return reserve(dependencies, operation, scope, body);
+  return correct(dependencies, operation, scope, body);
 }
 
-async function readReservation(dependencies: E2EModelBudgetDependencies, project: string, reservationId: string): Promise<Stored | undefined> {
-  const response = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName, Key: e2eModelBudgetReservationKey(project, reservationId), ConsistentRead: true }));
-  const item = response.Item as Stored | undefined;
-  return item?.entityType === "E2E_MODEL_BUDGET_RESERVATION" ? item : undefined;
+/**
+ * The reservation with this id and the partition it is in: the company's own first, and, for the implicit company only, the old unscoped one (a reservation made before
+ * the key move stays where it is and settles there). Another company never reads the old key.
+ */
+async function readReservation(dependencies: E2EModelBudgetDependencies, scope: BudgetScope, reservationId: string): Promise<{ stored: Stored; at: KeyScope } | undefined> {
+  const candidates: KeyScope[] = [scope.orgId, ...(legacyScopeOf(scope.orgId) === undefined ? [] : [LEGACY_KEY_SCOPE])];
+  for (const at of candidates) {
+    const response = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName, Key: e2eModelBudgetReservationKey(at, scope.project, reservationId), ConsistentRead: true }));
+    const item = response.Item as Stored | undefined;
+    if (item?.entityType === "E2E_MODEL_BUDGET_RESERVATION") return { stored: item, at };
+  }
+  return undefined;
 }
 
 type Cancelled = Error & { CancellationReasons?: Array<{ Code?: string }> };
 const cancelledReasons = (error: unknown): Array<{ Code?: string }> | undefined => (error instanceof Error && error.name === "TransactionCanceledException" ? (error as Cancelled).CancellationReasons ?? [] : undefined);
 
-async function reserve(dependencies: E2EModelBudgetDependencies, operation: E2EModelBudgetOperation, project: string, body: Extract<E2EModelDayBudgetRequest, { stage: "reserve" }>): Promise<E2EModelDayBudgetResponse> {
+async function reserve(dependencies: E2EModelBudgetDependencies, operation: E2EModelBudgetOperation, scope: BudgetScope, body: Extract<E2EModelDayBudgetRequest, { stage: "reserve" }>): Promise<E2EModelDayBudgetResponse> {
   const limits = await dayCaps(dependencies);
   // Without room for even this call on an empty day, nothing could ever be reserved, and nothing is written.
   if (body.inputTokens > limits.maxInputTokens) return answer(body.reservationId, "exhausted");
   const day = utcDay(dependencies.now());
   const expires = indexExpiresAt(`${day}T23:59:59.000Z`);
-  const reservationKey = e2eModelBudgetReservationKey(project, body.reservationId);
+  const reservationKey = e2eModelBudgetReservationKey(scope.orgId, scope.project, body.reservationId);
   const sameRequest = (stored: Stored) => stored.groupRunId === body.groupRunId && stored.reservedInputTokens === body.inputTokens && stored.operationId === operation.id;
+  const answerFromStored = (found: { stored: Stored }) => {
+    const status = statusOf(found.stored.status);
+    if (status === undefined || !sameRequest(found.stored)) throw forbidden("the model budget reservation id is already used by another request");
+    return answer(body.reservationId, status);
+  };
+  // A reservation this request already made under the old key (a redelivery that arrives after the key move) is answered from it, never taken a second time.
+  const earlierReservation = legacyScopeOf(scope.orgId) === undefined ? undefined : await readReservation(dependencies, scope, body.reservationId);
+  if (earlierReservation !== undefined) return answerFromStored(earlierReservation);
+  // Spending recorded under the old key before the move still counts against the day.
+  const earlier = await legacyDayUsage(dependencies, scope.orgId, scope.project, day);
+  if (earlier.inputTokens + body.inputTokens > limits.maxInputTokens || earlier.calls + 1 > limits.maxCalls) return answer(body.reservationId, "exhausted");
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Put: { TableName: dependencies.tableName, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)", Item: { ...reservationKey, entityType: "E2E_MODEL_BUDGET_RESERVATION",
         schemaVersion: 1, status: "open", day, reservedInputTokens: body.inputTokens, groupRunId: body.groupRunId, operationId: operation.id, [INDEX_EXPIRY_ATTRIBUTE]: expires } } },
-      { Update: { TableName: dependencies.tableName, Key: e2eModelBudgetKey(project, day),
+      { Update: { TableName: dependencies.tableName, Key: e2eModelBudgetKey(scope.orgId, scope.project, day),
         UpdateExpression: "ADD #tokens :reserved, #calls :one SET entityType = :entityType, #expires = :expires",
         ConditionExpression: "(attribute_not_exists(#tokens) OR #tokens <= :tokenRoom) AND (attribute_not_exists(#calls) OR #calls <= :callRoom)",
         ExpressionAttributeNames: { "#tokens": "inputTokens", "#calls": "calls", "#expires": INDEX_EXPIRY_ATTRIBUTE },
-        ExpressionAttributeValues: { ":reserved": body.inputTokens, ":one": 1, ":entityType": "E2E_MODEL_BUDGET", ":tokenRoom": limits.maxInputTokens - body.inputTokens,
-          ":callRoom": limits.maxCalls - 1, ":expires": expires } } },
+        ExpressionAttributeValues: { ":reserved": body.inputTokens, ":one": 1, ":entityType": "E2E_MODEL_BUDGET", ":tokenRoom": limits.maxInputTokens - earlier.inputTokens - body.inputTokens,
+          ":callRoom": limits.maxCalls - earlier.calls - 1, ":expires": expires } } },
     ] }));
     return answer(body.reservationId, "reserved");
   } catch (error) {
@@ -114,10 +139,9 @@ async function reserve(dependencies: E2EModelBudgetDependencies, operation: E2EM
     if (reasons === undefined) throw error;
     if (reasons[0]?.Code === "ConditionalCheckFailed") {
       // A repeated reserve (a redelivery): the stored row answers, if it is this very request.
-      const stored = await readReservation(dependencies, project, body.reservationId);
-      const status = stored === undefined ? undefined : statusOf(stored.status);
-      if (stored === undefined || status === undefined || !sameRequest(stored)) throw forbidden("the model budget reservation id is already used by another request");
-      return answer(body.reservationId, status);
+      const found = await readReservation(dependencies, scope, body.reservationId);
+      if (found === undefined) throw forbidden("the model budget reservation id is already used by another request");
+      return answerFromStored(found);
     }
     if (reasons[1]?.Code === "ConditionalCheckFailed") return answer(body.reservationId, "exhausted");
     // Anything else (a conflicting transaction, an unreadable reason) is not an answer about the budget.
@@ -125,10 +149,11 @@ async function reserve(dependencies: E2EModelBudgetDependencies, operation: E2EM
   }
 }
 
-async function correct(dependencies: E2EModelBudgetDependencies, operation: E2EModelBudgetOperation, project: string,
+async function correct(dependencies: E2EModelBudgetDependencies, operation: E2EModelBudgetOperation, scope: BudgetScope,
   body: Extract<E2EModelDayBudgetRequest, { stage: "settle" | "release" }>): Promise<E2EModelDayBudgetResponse> {
-  const stored = await readReservation(dependencies, project, body.reservationId);
-  if (stored === undefined || stored.operationId !== operation.id || typeof stored.day !== "string" || !Number.isSafeInteger(stored.reservedInputTokens)) {
+  const found = await readReservation(dependencies, scope, body.reservationId);
+  const stored = found?.stored;
+  if (found === undefined || stored === undefined || stored.operationId !== operation.id || typeof stored.day !== "string" || !Number.isSafeInteger(stored.reservedInputTokens)) {
     throw forbidden("the model budget reservation is not this operation's");
   }
   const reserved = stored.reservedInputTokens as number;
@@ -136,14 +161,15 @@ async function correct(dependencies: E2EModelBudgetDependencies, operation: E2EM
   // A second settle (or release) of the same reservation is a no-op; the other of the two after the first is refused.
   if (stored.status === (settling ? "settled" : "released")) return answer(body.reservationId, settling ? "settled" : "released");
   if (stored.status !== "open") throw forbidden(`the model budget reservation was already ${String(stored.status)}`);
-  const dayKey = e2eModelBudgetKey(project, stored.day);
+  // The reservation corrects the day row of the partition it is in (an old reservation, the old day row).
+  const dayKey = e2eModelBudgetKey(found.at, scope.project, stored.day);
   // The reservation was taken against the day's cap, so a settle charges at most what was reserved: an actual above it is clamped (and logged as a code), never added on top.
   const charged = settling ? Math.min(body.actualInputTokens, reserved) : 0;
   const delta = settling ? charged - reserved : -reserved;
   const names = { "#tokens": "inputTokens", "#calls": "calls", "#status": "status" };
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      { Update: { TableName: dependencies.tableName, Key: e2eModelBudgetReservationKey(project, body.reservationId),
+      { Update: { TableName: dependencies.tableName, Key: e2eModelBudgetReservationKey(found.at, scope.project, body.reservationId),
         UpdateExpression: settling ? "SET #status = :next, settledInputTokens = :actual" : "SET #status = :next",
         ConditionExpression: "attribute_exists(pk) AND #status = :open", ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: { ":next": settling ? "settled" : "released", ":open": "open", ...(settling ? { ":actual": charged } : {}) } } },
@@ -160,7 +186,7 @@ async function correct(dependencies: E2EModelBudgetDependencies, operation: E2EM
     const reasons = cancelledReasons(error);
     if (reasons === undefined) throw error;
     // A racing settle or release moved the reservation first: what stands is answered, or refused when it is the other kind.
-    const now = await readReservation(dependencies, project, body.reservationId);
+    const now = (await readReservation(dependencies, scope, body.reservationId))?.stored;
     if (now?.status === (settling ? "settled" : "released")) return answer(body.reservationId, settling ? "settled" : "released");
     if (now !== undefined && now.status !== "open") throw forbidden(`the model budget reservation was already ${String(now.status)}`);
     if (reasons.some((reason) => reason.Code === "TransactionConflict")) throw error;

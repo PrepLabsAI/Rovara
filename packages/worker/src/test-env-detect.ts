@@ -212,6 +212,16 @@ function inWorkspace(candidates: unknown, repositoryPath: string): { candidates:
   return { candidates: kept, dropped };
 }
 
+/**
+ * A candidate as the wire carries it: its resources are a kind, a name and a table's key schema. What the worker reads again at run time (a topic's queues, a parameter's literal default, a rule's pattern) stays out of
+ * the draft: the broker has no use for it, and a parameter's value is the repository's text.
+ */
+function forWire(item: DependencyCandidate): DependencyCandidate {
+  const resources = item.hints?.resources;
+  if (!Array.isArray(resources)) return item;
+  return { ...item, hints: { ...item.hints, resources: resources.map(({ kind, name, keySchema }) => ({ kind, name, ...(keySchema === undefined ? {} : { keySchema }) })) } };
+}
+
 /** The merged candidates the contract accepts, at most TEST_ENV_CANDIDATE_MAX, and a fixed sentence when some were left out. */
 function listableDependencies(candidates: readonly DependencyCandidate[], notPlaced: number): { dependencies: TestEnvDependencyCandidate[]; note?: string } {
   if (candidates.length === 0 && notPlaced === 0) return { dependencies: [] };
@@ -219,7 +229,7 @@ function listableDependencies(candidates: readonly DependencyCandidate[], notPla
   const dependencies: TestEnvDependencyCandidate[] = [];
   let refused = 0;
   for (const item of merged) {
-    const parsed = TestEnvDependencyCandidateSchema.safeParse(item);
+    const parsed = TestEnvDependencyCandidateSchema.safeParse(forWire(item));
     if (parsed.success && dependencies.length < TEST_ENV_CANDIDATE_MAX) dependencies.push(parsed.data);
     else refused += 1;
   }

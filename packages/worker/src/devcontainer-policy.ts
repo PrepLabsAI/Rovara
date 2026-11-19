@@ -18,6 +18,10 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 export const DOCKER_DATA_DIRECTORY = ".docker";
 /** The verifier's private runtime on an EC2 worker's workspace volume (boot.sh): the worker's, never the project's. */
 export const RUNTIME_BACKING_DIRECTORY = ".agentx-runtime";
+/** The container problem a dev container that is not on the walled network is reported as (the one problem, with the two masks below, that is cured by creating the container again). */
+export const DEVCONTAINER_NETWORK_UNWALLED = "a network that the worker firewall does not wall (it must be the worker's task network, and only that)";
+/** The problem a dev container that kept the capability to craft raw packets is reported as (the worker's docker wrapper drops it). */
+export const DEVCONTAINER_NET_RAW = "the NET_RAW capability (raw packets on the task network)";
 /** The container problem a missing mask over the Docker data folder is reported as. */
 export const DOCKER_DATA_VISIBLE = "the workspace's Docker data folder (.docker) visible inside it";
 /** The problem a missing mask over one of the worker's own folders of the workspace is reported as (workspace-state.ts). */
@@ -34,12 +38,32 @@ export interface DevcontainerPolicyContext {
   configFolder?: string;
   /** How a host path is resolved before it is checked (hostPathResolver), so a link out of the workspace counts. */
   resolvePath?: (path: string) => string;
+  /**
+   * The walled network every dev container joins on a cloud worker: the worker puts `--network <name>` on the container's `docker run` and `docker create`, so a `runArgs` network of the repository's own would attach the
+   * container to a second network as well (Docker 25 and later attach every `--network` given; older ones took the last), and in `build.options` it would replace the walled network of the build's containers. With this set,
+   * any `--network` / `--net` in `runArgs` or `build.options` is refused, whatever its value. Unset (a laptop, `rovara up`): nothing is walled by the worker, and the refusals of a network that reaches the host stay as they were.
+   */
+  walledNetwork?: string;
 }
 
 /** The one added capability allowed: tracing the container's own processes, which debuggers need. */
 const ALLOWED_CAPABILITY = /^(?:CAP_)?SYS_PTRACE$/iu;
 const onlyAllowedCapabilities = (value: unknown) =>
   Array.isArray(value) && value.every((entry) => typeof entry === "string" && ALLOWED_CAPABILITY.test(entry));
+
+/**
+ * What a dev container may be on a laptop (`rovara up`): an image that is ready to run. Anything that needs an image BUILD (a Dockerfile, a build section, features, which the dev container tool builds on top of the image) is
+ * refused there, because the Docker socket guard cannot read a build's own instructions and so does not allow one; the same dev container works on a cloud worker. Returns the first such setting, or undefined.
+ */
+export function localDevcontainerRefusal(config: unknown): string | undefined {
+  if (config === null || typeof config !== "object" || Array.isArray(config)) return undefined;
+  const settings = config as Record<string, unknown>;
+  const present = (value: unknown): boolean => value !== undefined && value !== null && !(typeof value === "object" && Object.keys(value).length === 0);
+  if (present(settings.build)) return "build";
+  if (settings.dockerFile !== undefined || settings.context !== undefined) return "dockerFile";
+  if (present(settings.features)) return "features";
+  return undefined;
+}
 
 /** A plain reason naming the first setting AgentX does not allow, or undefined. */
 export function devcontainerConfigRefusal(config: unknown, context: DevcontainerPolicyContext): string | undefined {
@@ -92,7 +116,7 @@ export function devcontainerConfigRefusal(config: unknown, context: Devcontainer
   }
   if (build.options !== undefined) {
     if (!Array.isArray(build.options) || !build.options.every((arg) => typeof arg === "string")) return "build.options that are not a list of strings";
-    const reason = buildOptionsRefusal(build.options);
+    const reason = buildOptionsRefusal(build.options, context);
     if (reason !== undefined) return `build.options ${reason}`;
   }
   // A reference to the worker's own environment would copy its variables into the container; it is refused wherever it is.
@@ -146,7 +170,7 @@ const isBuildKitArgument = (name: string) => /^buildkit_/iu.test(name);
 const BUILD_REFUSED = new Set(["--output", "--iidfile", "--metadata-file", "--allow", "--security-opt", "--secret", "--ssh", "--build-context", "--cache-to", "--file", "--push"]);
 const BUILD_SHORT = new Map([["o", "--output"], ["f", "--file"]]);
 
-function buildOptionsRefusal(args: readonly string[]): string | undefined {
+function buildOptionsRefusal(args: readonly string[], context: DevcontainerPolicyContext): string | undefined {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (arg.startsWith("--")) {
@@ -165,6 +189,7 @@ function buildOptionsRefusal(args: readonly string[]): string | undefined {
       }
       if (name === "--network" || name === "--net") {
         const given = equals === -1 ? args[++index] ?? "" : arg.slice(equals + 1);
+        if (context.walledNetwork !== undefined) return `${name} (the containers of a dev container build on this worker join the ${context.walledNetwork} network)`;
         if (given === "host") return "--network=host";
         if (given.startsWith("container:")) return "--network=container:";
       }
@@ -214,6 +239,8 @@ function runArgsRefusal(args: readonly string[], context: DevcontainerPolicyCont
         return name;
       } else if (name === "--cap-add") {
         if (!ALLOWED_CAPABILITY.test(value())) return "--cap-add";
+      } else if (context.walledNetwork !== undefined && (name === "--network" || name === "--net")) {
+        return `${name} (dev containers on this worker join the ${context.walledNetwork} network)`;
       } else if (HOST_VALUE.has(name)) {
         const given = value();
         const label = name === "--net" ? "--network" : name;
@@ -252,10 +279,28 @@ function runArgsRefusal(args: readonly string[], context: DevcontainerPolicyCont
   return undefined;
 }
 
+/**
+ * The source runs to the first colon outside a `${…}` variable (an unclosed `${` is plain text). A loop, not the pattern `^(?:\$\{[^}]*\}|[^:])*`: that one scanned to the end
+ * of the text from every unclosed `${`, so a repository's devcontainer.json with a long run of them took seconds (quadratic). Once no `}` is left, none is looked for again.
+ */
+function volumeSourceOf(spec: string): string {
+  let at = 0;
+  let closed = true;
+  while (at < spec.length) {
+    if (closed && spec.startsWith("${", at)) {
+      const close = spec.indexOf("}", at + 2);
+      if (close !== -1) { at = close + 1; continue; }
+      closed = false;
+    }
+    if (spec[at] === ":") break;
+    at += 1;
+  }
+  return spec.slice(0, at);
+}
+
 /** `-v SOURCE:TARGET[:OPTIONS]`: a source that is a path is a bind mount; anything else names a volume. */
 function volumeRefusal(spec: string, context: DevcontainerPolicyContext): string | undefined {
-  // The source runs to the first colon outside a `${…}` variable.
-  const source = /^(?:\$\{[^}]*\}|[^:])*/u.exec(spec)?.[0] ?? "";
+  const source = volumeSourceOf(spec);
   if (source.length === spec.length) return undefined;
   const named = substituteVolumeName(source, context);
   if (!/^[/.~]/u.test(named) && !named.includes("${")) return namedVolumeRefusal(source, context);
@@ -368,6 +413,7 @@ export interface ContainerInspection {
     PidMode?: string;
     IpcMode?: string;
     NetworkMode?: string;
+    CapDrop?: readonly string[] | null;
     UsernsMode?: string;
     UTSMode?: string;
     CgroupnsMode?: string;
@@ -376,6 +422,19 @@ export interface ContainerInspection {
     DeviceRequests?: readonly unknown[] | null;
   };
   Mounts?: ReadonlyArray<{ Type?: string; Name?: string; Source?: string; Destination?: string }> | null;
+  /** Every network the container is attached to, by name. */
+  NetworkSettings?: { Networks?: Readonly<Record<string, unknown>> | null };
+}
+
+/** Whether a container was started without the NET_RAW capability (dropped by name, or with all of them). */
+export function dropsNetRaw(inspection: ContainerInspection): boolean {
+  return (inspection.HostConfig?.CapDrop ?? []).some((capability) => /^(?:CAP_)?(?:NET_RAW|ALL)$/iu.test(capability));
+}
+
+/** Whether a container is anywhere but on the walled network alone: its mode, and every network it is attached to (a second network would be a way round the wall). */
+export function walledNetworkProblem(inspection: ContainerInspection, walledNetwork: string): boolean {
+  const attached = Object.keys(inspection.NetworkSettings?.Networks ?? {});
+  return inspection.HostConfig?.NetworkMode !== walledNetwork || attached.length !== 1 || attached[0] !== walledNetwork;
 }
 
 /**
@@ -386,19 +445,22 @@ export interface ContainerInspection {
  */
 export function containerProblems(
   inspection: ContainerInspection,
-  context: { rootPath: string; dockerDataPath?: string; maskedPaths?: readonly string[]; resolvePath?: (path: string) => string },
+  context: { rootPath: string; dockerDataPath?: string; maskedPaths?: readonly string[]; resolvePath?: (path: string) => string; walledNetwork?: string },
 ): string[] {
   const host = inspection.HostConfig ?? {};
   const problems: string[] = [];
   const nonEmpty = (value: readonly unknown[] | null | undefined) => (value?.length ?? 0) > 0;
   if (host.Privileged === true) problems.push("privileged");
   if (nonEmpty(host.CapAdd) && !onlyAllowedCapabilities(host.CapAdd)) problems.push("--cap-add");
-  if (nonEmpty(host.SecurityOpt)) problems.push("--security-opt");
+  // The one option AgentX itself asks for on a laptop (the Docker guard forces it): a dev container cannot gain privileges.
+  if (nonEmpty(host.SecurityOpt) && !host.SecurityOpt!.every((entry) => /^no-new-privileges(?:[:=]true)?$/u.test(entry))) problems.push("--security-opt");
   if (host.PidMode !== undefined && host.PidMode !== "" && host.PidMode !== "private") problems.push("--pid");
   for (const [mode, flag, containers] of [[host.IpcMode, "--ipc", true], [host.NetworkMode, "--network", true], [host.UsernsMode, "--userns", false], [host.UTSMode, "--uts", false], [host.CgroupnsMode, "--cgroupns", false]] as const) {
     if (mode === "host") problems.push(`${flag}=host`);
     else if (containers && mode?.startsWith("container:") === true) problems.push(`${flag}=container:`);
   }
+  if (context.walledNetwork !== undefined && walledNetworkProblem(inspection, context.walledNetwork)) problems.push(DEVCONTAINER_NETWORK_UNWALLED);
+  if (context.walledNetwork !== undefined && !dropsNetRaw(inspection)) problems.push(DEVCONTAINER_NET_RAW);
   if (nonEmpty(host.Devices)) problems.push("--device");
   if (nonEmpty(host.DeviceRequests)) problems.push("--gpus");
   if (nonEmpty(host.VolumesFrom)) problems.push("--volumes-from");

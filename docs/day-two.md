@@ -137,7 +137,8 @@ agentx --env <env> upgrade --region <region> --to <version> --source <checkout o
 
 `--to` or `--release`, when given, must be the checkout's tag. An `agentx` built from source needs
 neither: it upgrades to the checkout's tag, and reads the images from `--worker-image` and
-`--slack-image`, or else from that tag's `release.json` on GitHub.
+`--slack-image`, or else from that tag's `release.json` on GitHub. A `--worker-image` must be in
+the install's account and region under `agentx-<env>/` (the worker role reads only that prefix).
 
 **For a pipeline: `upgrade --export`.** This writes the upgrade as files and changes nothing:
 
@@ -198,7 +199,15 @@ set` (the CloudFormation console, say) are not recorded. Each key lives in exact
 | `budget.scope` | stack parameter BudgetScope on agentx-<env>-control-plane | tag | tag or account |
 | `channels.adapters` | stack parameter ChannelAdapters on agentx-<env>-control-plane | disabled | enabled or disabled; enabled lets administrators register channel adapters (named environments only) |
 | `slack.viaChannel` | stack parameter SlackViaChannel on agentx-<env>-control-plane | disabled | enabled or disabled; enabled routes Slack through the channel API as the built-in Slack adapter (named environments only). Switch it off once the channel queues are empty |
+| `coreEngine.switch` | stack parameter CoreEngine on agentx-<env>-control-plane | off | off, on, drain, or on:<company id>[:<company id>]; which engine new tasks start on (off: the spec 056 workflow; on: the core engine). A running task keeps its engine; set drain and wait until none is in flight before off (named environments only). **Not active yet:** only `off` is accepted until the broker runs the core engine |
+| `coreEngine.modelGatewayUrl` | stack parameter CoreModelGatewayHost on agentx-<env>-control-plane | empty | empty (or none), or the Cloud model gateway's https origin, with no user name, password, path, query or fragment and a host of at most 56 characters (the stack holds the host); the core engine's agents call AI through it. Needs `coreEngine.agentModel` too: with either empty the core engine refuses work by name. Kept across upgrades (named environments only) |
+| `coreEngine.agentModel` | stack parameter CoreAgentModel on agentx-<env>-control-plane | empty | empty (or none), an Anthropic model id this Rovara knows, such as claude-sonnet-4-6 (not a Bedrock `us.anthropic.` id), or any model the Cloud model gateway offers, by its exact id, such as zai.glm-5 (checked live against the gateway's offered models for your company before any deploy: needs the admin sign-in and `coreEngine.modelGatewayUrl` set first; fails closed); every core engine step runs on it through the gateway. Needs `coreEngine.modelGatewayUrl` too. Kept across upgrades (named environments only) |
+| `testServices.images` | stack parameter TestServiceImages on agentx-<env>-control-plane | none | none or mirrored; mirrored only once the five test service starter copies are in this install's ECR repositories and checked by digest (scripts/test-services-mirror.ts). Until then hosted test services stay "not available here" (named environments only) |
+| `coreEngine.answersModel` | stack parameter CoreAnswersModel on agentx-<env>-control-plane | empty | empty (or none: the hosted Just answer and the start-box classifier run on `coreEngine.agentModel`, exactly as before), or an Anthropic model id this Rovara knows, such as claude-haiku-5-5 (not a Bedrock `us.anthropic.` id, and not a model other than Claude: the answers run on the company's own Anthropic account). Only the hosted answers and the classifier use it; coding tasks and every other core step keep `coreEngine.agentModel`. Needs the gateway set (`coreEngine.modelGatewayUrl` and `coreEngine.agentModel`); alone it does nothing, and a value the answers path cannot use leaves answers "not set up" rather than falling back. Kept across upgrades (named environments only) |
 | `mcp.confirmElicitation` | stack parameter McpConfirmElicitation on agentx-<env>-control-plane | enabled | enabled or disabled; disabled leaves only the Slack Confirm button or the CLI to confirm an admin change |
+| `company.signIn` | stack parameter CompanySignIn on agentx-<env>-control-plane and agentx-<env>-slack | disabled | enabled or disabled; Code's company layer (company membership sign-in, invites, Add to Slack, Slack company mode). The one source of COMPANY_SIGNIN for every function that reads it; while disabled the template holds no company-only grant. Switch-on order: keep `company.selfServe` disabled, migrate the members, then enable this (named environments only) |
+| `company.selfServe` | stack parameter CompanySelfServe on agentx-<env>-control-plane | disabled | enabled or disabled; a person with an operator's invite code may create their own company, only while `company.signIn` is enabled too. While disabled every self-serve create is refused, whatever the stored self-serve setting says (named environments only) |
+| `slack.companyWorkspaces` | stack parameter SlackCompanyWorkspaces on agentx-<env>-control-plane, and SlackCompanyWorkspacesState on agentx-<env>-slack | disabled | enabled or disabled; per-company Slack bots: workspaces other than the install's own use their company's bot token and company checks. Served only while `company.signIn` is enabled too: its grants and variables need both (named environments only) |
 
 - **Models.** A new model must answer a one-token call before anything changes. `set` then
   updates the stack, the settings and the install answers, so `upgrade` and `init --resume` keep
@@ -293,3 +302,7 @@ agentx --env <env> admin task share-mode --task <task-id> --mode view|continue
 The mode stays within the project's settings: with continue not allowed, the task stays view only.
 An admin cannot share a private task or move a shared one to another channel. `agentx --env <env>
 admin turns export --since 7d` shows task IDs.
+
+## Outbound addresses
+
+Companies that allow-list Rovara read its fixed outbound addresses in Company settings. You read them from the foundation stack output `NatEgressAddresses`. See [Rovara's outbound addresses](outbound-addresses.md). The Elastic IPs behind them are retained when a stack is deleted (billed until released by hand); never release one a customer may have allowed. Building the environment again allocates NEW addresses unless you import the kept ones, so give companies the 30 days' notice before a rebuild.

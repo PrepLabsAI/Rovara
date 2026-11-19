@@ -1,3 +1,5 @@
+import type { ContextMcpSession } from "../context-sources/pi-mcp.js";
+import type { UsageCheckpointer } from "../usage.js";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
@@ -43,6 +45,10 @@ import { withIsolatedGit } from "../isolated-git.js";
 import type { LoadedKnowledgeManifest } from "@agentx/contracts";
 import { isRuleFilesUnverified } from "../repository-context.js";
 import { isTestPath } from "./test-paths.js";
+import { z } from "zod";
+import { answerSchemaOf, answerToolInstruction, createAnswerChannel, structuredAnswersEnabled, type AnswerChannel } from "../structured-answer.js";
+import { reviewAnswerSpec, specWalkAnswerSpec } from "../structured-answer-specs.js";
+import type { SessionCompactionOptions } from "../compaction.js";
 
 export { isTestPath };
 
@@ -109,6 +115,8 @@ export async function runWorkflowFeedbackReview(input: {
   fileTools?: FileOpsTarget;
   /** A coding step's instruction section: added after this review's own rules, before the data it judges. */
   promptSection?: string;
+  /** Standing instructions: the broker-built block, placed in the reviewer's SYSTEM prompt (the company's rules, and the step's layers a reviewing stage may see). */
+  standingInstructions?: string;
   /** The step's skills, which the reviewer reads through read_skill. */
   skills?: readonly AgentSkillFile[];
   /** The step's tool list, which only narrows the reviewer's read-only tools. */
@@ -118,6 +126,8 @@ export async function runWorkflowFeedbackReview(input: {
   timeoutMs?: number;
   now?: () => string;
   onProgress?: (message: string) => void;
+  /** Structured answers: the reviewer answers through a tool Pi checks, the text parse being the fallback. Default: on, unless ROVARA_STRUCTURED_ANSWERS=0. */
+  structuredAnswers?: boolean;
 }): Promise<WorkflowFeedbackReviewExecution> {
   // Refused up front: the session's own refusal below would be reported as a failed review, not as a task that did not start.
   assertFileToolsContained(input.fileTools === undefined ? {} : { fileTools: input.fileTools });
@@ -167,12 +177,34 @@ export async function runWorkflowFeedbackReview(input: {
     }
     if (status === "COMPLETE") {
       input.onProgress?.("AgentX is independently reviewing the current PR feedback.");
+      const inputs = bundles.map(({ ref, bundle }) => ({ ref, bundle }));
+      const check = (answer: string | undefined): WorkflowFeedbackFinding[] | FeedbackReviewerOutputError => {
+        try {
+          if (answer === undefined) throw outputError("no answer", "Answer with the JSON object.");
+          const checked = parseFeedbackCriticResponse(answer, inputs, taskChecks);
+          validateFixProposals(checked, candidateFiles);
+          return checked;
+        } catch (error) {
+          return error instanceof FeedbackReviewerOutputError ? error : outputError("not the expected shape", "Answer with exactly the JSON object described.");
+        }
+      };
+      // Structured answers: the reviewer delivers its findings through a tool whose schema is the contract's finding schema; this same check runs on every accepted answer, so a refused one is retried by Pi in the
+      // same run. The text parse below stays as the fallback (no answer tool offered, or none accepted).
+      const answers: AnswerChannel | undefined = (input.structuredAnswers ?? structuredAnswersEnabled()) ? createAnswerChannel({
+        name: FEEDBACK_ANSWER_TOOL,
+        description: "Submit the PR-feedback review, once: the object described in your instructions, with every comment ID accounted for exactly once across the findings.",
+        parameters: answerSchemaOf(z.object({ findings: z.array(WorkflowFeedbackFindingSchema).max(128) }).strict()),
+        render: (args) => JSON.stringify(args),
+        check: (text) => { const checked = check(text); return checked instanceof FeedbackReviewerOutputError ? `${checked.reason}. ${checked.rule}` : undefined; },
+      }) : undefined;
       session = await createWorkspacePiSession({ rootPath: input.rootPath, model: input.model,
         workflowMode: "REVIEW", conversationId: randomUUID(), contextFilesAt: "base-commit",
         baseCommits: input.ruleFileBaseCommits,
+        ...(answers === undefined ? {} : { answerTools: [answers.tool] }),
         ...(input.fileTools === undefined ? {} : { fileTools: input.fileTools }),
         ...(input.tools === undefined ? {} : { agentTools: input.tools }),
-        ...(input.skills === undefined ? {} : { skills: input.skills }) }, input.piAdapter);
+        ...(input.skills === undefined ? {} : { skills: input.skills }),
+        ...(input.standingInstructions === undefined ? {} : { standingInstructions: input.standingInstructions }) }, input.piAdapter);
       const actualModel = session.getModel();
       provider = actualModel.provider;
       version = actualModel.modelId;
@@ -208,26 +240,17 @@ export async function runWorkflowFeedbackReview(input: {
           abortListener = undefined;
         }
       };
-      const inputs = bundles.map(({ ref, bundle }) => ({ ref, bundle }));
-      const check = (answer: string | undefined): WorkflowFeedbackFinding[] | FeedbackReviewerOutputError => {
-        try {
-          if (answer === undefined) throw outputError("no answer", "Answer with the JSON object.");
-          const checked = parseFeedbackCriticResponse(answer, inputs, taskChecks);
-          validateFixProposals(checked, candidateFiles);
-          return checked;
-        } catch (error) {
-          return error instanceof FeedbackReviewerOutputError ? error : outputError("not the expected shape", "Answer with exactly the JSON object described.");
-        }
-      };
-      let promptResult = await ask(feedbackReviewPrompt(input.taskRequirements, input.candidateDigest, inputs, taskChecks, input.promptSection));
-      let outcome = promptResult === "COMPLETED" ? check(response) : undefined;
+      let promptResult = await ask(feedbackReviewPrompt(input.taskRequirements, input.candidateDigest, inputs, taskChecks, input.promptSection, answers === undefined ? undefined : FEEDBACK_ANSWER_TOOL));
+      let answered = answers?.take() ?? response;
+      let outcome = promptResult === "COMPLETED" ? check(answered) : undefined;
       if (outcome instanceof FeedbackReviewerOutputError) {
         // Some answers miss one rule (a code fence is already tolerated). The same read-only reviewer gets one bounded
         // chance to fix exactly the check that failed; a second unusable answer fails closed below.
         promptResult = await ask(feedbackReviewRetryPrompt(outcome, inputs));
-        outcome = promptResult === "COMPLETED" ? check(response) : undefined;
+        answered = answers?.take() ?? response;
+        outcome = promptResult === "COMPLETED" ? check(answered) : undefined;
       }
-      finalAnswer = response;
+      finalAnswer = answered;
       if (promptResult !== "COMPLETED") {
         status = promptResult === "INTERRUPTED" ? "INTERRUPTED" : "BLOCKED";
         blockReason = promptResult === "INTERRUPTED" ? "review was cancelled" : "review timed out";
@@ -317,8 +340,11 @@ function feedbackChecksSection(taskChecks: WorkflowFeedbackTaskChecks): string {
   ].join("\n");
 }
 
+/** The feedback reviewer's answer tool. */
+const FEEDBACK_ANSWER_TOOL = "submit_feedback_review";
+
 function feedbackReviewPrompt(taskRequirements: string, candidateDigest: string,
-  inputs: Array<{ ref: WorkflowFeedbackBundleRef; bundle: WorkflowFeedbackBundle }>, taskChecks?: WorkflowFeedbackTaskChecks, promptSection?: string): string {
+  inputs: Array<{ ref: WorkflowFeedbackBundleRef; bundle: WorkflowFeedbackBundle }>, taskChecks?: WorkflowFeedbackTaskChecks, promptSection?: string, answerTool?: string): string {
   const checkFields = taskChecks === undefined ? "" : `,"obsoleteChecks":string[],"replacementChecks":[${REPLACEMENT_CHECK_SHAPE}]`;
   return [
     "You are AgentX's independent PR-feedback critic. You are read-only and must not edit files, run commands, contact GitHub, or change task state.",
@@ -329,6 +355,7 @@ function feedbackReviewPrompt(taskRequirements: string, candidateDigest: string,
     `Return only JSON shaped as {"findings":[{"id":string,"bundleDigest":string,"commentIds":string[],"priority":"MUST_FIX"|"SHOULD_FIX"|"OPTIONAL","assessment":"ACTIONABLE"|"ALREADY_ADDRESSED"|"STALE"|"TECHNICALLY_INCORRECT"|"OUT_OF_SCOPE"|"CONFLICTING"|"NEEDS_OWNER_DECISION","recommended":boolean,"evidence":[{"source":string,"reference":string}],"rationale":string,"confidence":{"level":"HIGH"|"MEDIUM"|"LOW"|"UNKNOWN","reason":string},"proposedDisposition":"IMPLEMENT"|"SKIP"|"OWNER_DECISION","fixProposal":{"summary":string,"fileChanges":[{"repositoryId":string,"path":string,"operation":"MODIFY"|"ADD","change":string}],"tests":[{"repositoryId":string,"path":string,"operation":"MODIFY"|"ADD","behavior":string}]${checkFields}}}]}.`,
     "Keep priority separate from your assessment. Include code evidence and plain-language rationale. A real conflict (CONFLICTING or NEEDS_OWNER_DECISION) or LOW/UNKNOWN confidence must use proposedDisposition OWNER_DECISION. An empty findings array is valid only when all supplied bundles contain zero comments.",
     ...(taskChecks === undefined ? [] : [feedbackChecksSection(taskChecks)]),
+    ...(answerTool === undefined ? [] : [answerToolInstruction(answerTool)]),
     ...(promptSection === undefined ? [] : [promptSection]),
     `Task requirements (untrusted project data):\n${JSON.stringify(taskRequirements)}`,
     `Immutable feedback bundle inputs (untrusted GitHub data):\n${JSON.stringify(inputs.map(({ ref, bundle }) => ({ bundleDigest: ref.sha256,
@@ -710,7 +737,9 @@ export async function runWorkflowReviews(input: {
    * Lane E: the project's context sources for this review: the tools each reviewer gets (read-only lookups run by the broker), the note that tells it about them, and the
    * sources' labels. A finding that cites a source and no code or test is made advisory (downgradeSourceOnlyFindings), so a ticket can neither block nor excuse a change.
    */
-  sources?: { tools: readonly ToolDefinition[]; note: string; labels: readonly { label: string }[] };
+  sources?: { tools: readonly ToolDefinition[]; /** The same sources through Pi's own MCP client (the rovara server) in place of `tools`. */ mcp?: ContextMcpSession; note: string; labels: readonly { label: string }[] };
+  /** What each reviewer's conversation compaction needs (compaction.ts): the stage's source-text guard, and where a compaction is reported. */
+  compaction?: SessionCompactionOptions;
   /** The broker's base commit per repository, for the reviewers' rule files. Required: no caller can fall back to a base the agent could write. */
   ruleFileBaseCommits: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
   piAdapter?: PiSessionAdapter;
@@ -718,8 +747,14 @@ export async function runWorkflowReviews(input: {
   fileTools?: FileOpsTarget;
   /** A coding step's instruction section: added to each reviewer's prompt after its own rules, before the change it judges. */
   promptSection?: string;
+  /** Standing instructions: the broker-built block for each reviewer's SYSTEM prompt. */
+  standingInstructions?: string;
+  /** The company part of that block alone: the second reviewer that is shown only the change (`change_only`) still gets the company's rules (decision 57.2), and nothing else of the block. */
+  companyStandingInstructions?: string;
   /** Learning v2: the labelled block of approved review lessons (and what the planner and coder were told), rendered by the worker. Inert advice: it grants no tool and changes no rule. */
   learnedBlock?: string;
+  /** Lead 4 A1: the observer that notes which wiki pages a reviewer opened (the wiki's index rides in `learnedBlock`). A reviewer shown only the change gets neither. */
+  onWikiEvent?: (event: unknown) => void;
   /** The step's skills, which each reviewer reads through read_skill. */
   skills?: readonly AgentSkillFile[];
   /** The step's tool list, which only narrows each reviewer's read-only tools. */
@@ -731,7 +766,9 @@ export async function runWorkflowReviews(input: {
   onProgress?: (message: string) => void;
   /** Called once per reviewer session with what it loaded and left out, as references only (K1 C5a). */
   onLoadedKnowledge?: (manifest: LoadedKnowledgeManifest, role: "CRITIC" | "SECURITY") => void;
-  onUsage?: (usage: { role: "CRITIC" | "SECURITY"; stats: ReturnType<PiSessionHandle["getSessionStats"]>; model: WorkspaceModelConfiguration; outcome: "SUCCEEDED" | "FAILED"; secondReviewTry?: number }) => Promise<void>;
+  onUsage?: (usage: { role: "CRITIC" | "SECURITY"; stats: ReturnType<PiSessionHandle["getSessionStats"]>; model: WorkspaceModelConfiguration; outcome: "SUCCEEDED" | "FAILED"; secondReviewTry?: number; checkpoints?: UsageCheckpointer }) => Promise<void>;
+  /** Per-run dollar stop: the checkpoints of one reviewer session (usage.ts `createUsageCheckpointer`), handed back to `onUsage` for its end report. Absent: none. */
+  usageCheckpoints?: (session: PiSessionHandle) => UsageCheckpointer;
   /**
    * SR-1: the second reviewer (another AI company's model), run CONCURRENTLY with the reviews above in this same operation, as an extra code review with its own model: a bounded loop of at most 3 tries in all (the same model
    * once more, then the next candidate; a context-length rejection is no answer, never an unusable model). Its report is handed to `onSecondReview` only, never added to the reports returned here.
@@ -740,6 +777,8 @@ export async function runWorkflowReviews(input: {
   onSecondReview?: (result: SecondReviewResult) => void;
   /** Internal: this call is one try of the second reviewer (its number, from 1). */
   secondReviewTry?: number;
+  /** Structured answers: each reviewer (and the spec walk) answers through a tool Pi checks, the text parse and its retry being the fallback. Default: on, unless ROVARA_STRUCTURED_ANSWERS=0. */
+  structuredAnswers?: boolean;
 }): Promise<Array<ReturnType<typeof WorkflowReviewReportSchema.parse>>> {
   assertFileToolsContained(input.fileTools === undefined ? {} : { fileTools: input.fileTools });
   const manifest = createCandidateManifest(input.candidate);
@@ -767,7 +806,7 @@ export async function runWorkflowReviews(input: {
   const linkStop = () => secondStop.abort();
   if (input.secondReviewer !== undefined) { if (input.signal?.aborted === true) secondStop.abort(); else input.signal?.addEventListener("abort", linkStop, { once: true }); }
   const secondRun: Promise<{ result: SecondReviewResult; fatal?: unknown }> | undefined = input.secondReviewer === undefined || !roles.includes("CRITIC") ? undefined : (async () => {
-    const { secondReviewer, onSecondReview: _onSecond, reviewSpec: _spec, onSpecReview: _onSpec, reviewers: _reviewers, model: _model, piAdapter: _adapter, onUsage, sources, learnedBlock, promptSection, skills, ...rest } = input;
+    const { secondReviewer, onSecondReview: _onSecond, reviewSpec: _spec, onSpecReview: _onSpec, reviewers: _reviewers, model: _model, piAdapter: _adapter, onUsage, sources, learnedBlock, onWikiEvent, promptSection, skills, standingInstructions, companyStandingInstructions, ...rest } = input;
     void _onSecond; void _spec; void _onSpec; void _reviewers; void _model; void _adapter;
     const deadline = Date.now() + timeoutMs;
     const tries: SecondReviewTry[] = [];
@@ -778,7 +817,8 @@ export async function runWorkflowReviews(input: {
       const number = tries.length + 1;
       let report: (typeof reports)[number] | undefined;
       try {
-        [report] = await runWorkflowReviews({ ...rest, ...(secondReviewer!.context === "same_as_first" ? { ...(sources === undefined ? {} : { sources }), ...(learnedBlock === undefined ? {} : { learnedBlock }), ...(promptSection === undefined ? {} : { promptSection }), ...(skills === undefined ? {} : { skills }) } : {}), model: chosen.model, ...(chosen.piAdapter === undefined ? {} : { piAdapter: chosen.piAdapter }),
+        const secondStanding = secondReviewer!.context === "same_as_first" ? standingInstructions : companyStandingInstructions;
+        [report] = await runWorkflowReviews({ ...rest, ...(secondStanding === undefined ? {} : { standingInstructions: secondStanding }), ...(secondReviewer!.context === "same_as_first" ? { ...(sources === undefined ? {} : { sources }), ...(learnedBlock === undefined ? {} : { learnedBlock }), ...(onWikiEvent === undefined ? {} : { onWikiEvent }), ...(promptSection === undefined ? {} : { promptSection }), ...(skills === undefined ? {} : { skills }) } : {}), model: chosen.model, ...(chosen.piAdapter === undefined ? {} : { piAdapter: chosen.piAdapter }),
           reviewers: ["CRITIC"], secondReviewTry: number, signal: secondStop.signal, timeoutMs: Math.max(1, deadline - Date.now()),
           ...(onUsage === undefined ? {} : { onUsage: (usage) => onUsage({ ...usage, secondReviewTry: number }) }) });
       } catch (error) {
@@ -804,6 +844,7 @@ export async function runWorkflowReviews(input: {
     let usageStats: ReturnType<PiSessionHandle["getSessionStats"]> | undefined;
     let specReview: SpecReviewResult | undefined;
     let usageOutcome: "SUCCEEDED" | "FAILED" = "FAILED";
+    let checkpoints: UsageCheckpointer | undefined;
     let statusOverride: "INTERRUPTED" | undefined = interrupted ? "INTERRUPTED" : undefined;
     // The reviewer's last model call, when it failed: a fixed sentence from the model-call monitor's note (never the provider's text), cleared when a later call answers.
     let modelFailure: string | undefined;
@@ -812,6 +853,12 @@ export async function runWorkflowReviews(input: {
       input.onProgress?.(`AgentX is running the ${role === "CRITIC" ? "code" : "security"} review on this candidate.`);
       const before = createCandidateManifest(await readCandidateRepositories(repositories));
       if (before.digest !== manifest.digest) throw new Error("candidate changed before review");
+      // Structured answers: the review (and, for the code review, the spec walk) is delivered through a tool whose schema Pi checks; the text answer, its parse and its one retry stay as the fallback.
+      const structured = input.structuredAnswers ?? structuredAnswersEnabled();
+      const reviewSpecTool = structured ? reviewAnswerSpec(role, { risk: input.reviewRisk === true }) : undefined;
+      const reviewAnswers = reviewSpecTool === undefined ? undefined : createAnswerChannel(reviewSpecTool);
+      const walkSpecTool = structured && role === "CRITIC" && input.reviewSpec !== undefined ? specWalkAnswerSpec() : undefined;
+      const walkAnswers = walkSpecTool === undefined ? undefined : createAnswerChannel(walkSpecTool);
       session = await createWorkspacePiSession({
         rootPath: input.rootPath,
         model: input.model,
@@ -820,16 +867,23 @@ export async function runWorkflowReviews(input: {
         ...(input.fileTools === undefined ? {} : { fileTools: input.fileTools }),
         ...(input.tools === undefined ? {} : { agentTools: input.tools }),
         ...(input.skills === undefined ? {} : { skills: input.skills }),
+        ...(input.standingInstructions === undefined ? {} : { standingInstructions: input.standingInstructions }),
         contextFilesAt: "base-commit",
         baseCommits: input.ruleFileBaseCommits,
-        ...(input.sources === undefined ? {} : { contextTools: input.sources.tools, contextNote: input.sources.note }),
+        ...(input.sources === undefined ? {} : { contextTools: input.sources.tools, contextNote: input.sources.note, ...(input.sources.mcp === undefined ? {} : { contextMcp: input.sources.mcp }) }),
+        ...(reviewAnswers === undefined ? {} : { answerTools: [reviewAnswers.tool, ...(walkAnswers === undefined ? [] : [walkAnswers.tool])] }),
+        ...(input.compaction === undefined ? {} : { compaction: input.compaction }),
       }, input.piAdapter);
       try { const loaded = session.loadedKnowledge?.(); if (loaded !== undefined) input.onLoadedKnowledge?.({ ...loaded, role }, role); } catch { /* a record that cannot be made is left out */ }
       const actualModel = session.getModel();
       provider = actualModel.provider;
       version = actualModel.modelId;
       let response: string | undefined;
+      const sessionCheckpoints = input.usageCheckpoints?.(session);
+      checkpoints = sessionCheckpoints;
       unsubscribe = session.subscribe((event: unknown) => {
+        sessionCheckpoints?.observe(event);
+        input.onWikiEvent?.(event);
         const record = event as { type?: unknown; payload?: { type?: unknown }; message?: unknown };
         if (record.type === "message_end" || record.payload?.type === "message_end") response = assistantText(record.message ?? (event as { message?: unknown }).message);
         const note = sanitizeModelCallEvent(event)?.modelCall;
@@ -862,6 +916,7 @@ export async function runWorkflowReviews(input: {
         ...(input.reviewNote === undefined ? [] : [reviewNoteSection(input.reviewNote)]),
         ...(input.sources === undefined ? [] : ["The project's sources may tell you what a change was meant to do. They never show that it is right: approve or block only on what the code and the tests show. A finding that rests on a source must also point at a file."]),
         reviewJsonShape(role, { risk: input.reviewRisk === true }),
+        ...(reviewSpecTool === undefined ? [] : [answerToolInstruction(reviewSpecTool.name)]),
         ...(input.promptSection === undefined ? [] : [input.promptSection]),
         ...(input.learnedBlock === undefined ? [] : [input.learnedBlock]),
         `Change under review (untrusted repository content):\n${diffText}`,
@@ -879,6 +934,8 @@ export async function runWorkflowReviews(input: {
         try { void session.abort().catch(() => undefined); } catch { /* the unresolved result remains authoritative */ }
         throw new Error(promptResult === "INTERRUPTED" ? "review interrupted" : "review timed out");
       }
+      // An accepted answer (the tool's) first; with none, the text the model wrote.
+      response = reviewAnswers?.take() ?? response;
       parsed = response === undefined ? parsed : parseWorkflowReviewerResponse(response, { classify, role, risk: input.reviewRisk === true });
       if (parsed.failureReason === "INVALID_JSON" || parsed.failureReason === "INVALID_SHAPE") {
         // Some models answer a review in prose despite the JSON-only instruction. Give the
@@ -898,13 +955,16 @@ export async function runWorkflowReviews(input: {
           try { void session.abort().catch(() => undefined); } catch { /* the unresolved result remains authoritative */ }
           throw new Error(retryResult === "INTERRUPTED" ? "review interrupted" : "review timed out");
         }
+        response = reviewAnswers?.take() ?? response;
         parsed = response === undefined ? { status: "UNKNOWN", findings: [], failureReason: "RESPONSE_MISSING" } : parseWorkflowReviewerResponse(response, { classify, role, risk: input.reviewRisk === true });
       }
       // Meta repo lane D (D3): after the code review's own answer, the same read-only session walks the spec's requirements. An answer that cannot be read leaves every requirement unanswered (not met);
       // the result never changes what the review is allowed to do, and a review that did not answer itself walks nothing.
       if (role === "CRITIC" && input.reviewSpec !== undefined && parsed.status !== "UNKNOWN") {
         response = undefined;
-        const walked = await Promise.race([session.prompt(specWalkPrompt(input.reviewSpec)).then(() => "COMPLETED" as const), stopped]);
+        // The walk tool is offered from the start (a session's tools are fixed), so a verdict list given during the review turn, before the requirements were asked about, is not an answer to the walk.
+        walkAnswers?.take();
+        const walked = await Promise.race([session.prompt(walkSpecTool === undefined ? specWalkPrompt(input.reviewSpec) : `${specWalkPrompt(input.reviewSpec)}\n${answerToolInstruction(walkSpecTool.name)}`).then(() => "COMPLETED" as const), stopped]);
         if (walked !== "COMPLETED") {
           if (walked === "INTERRUPTED") {
             interrupted = true;
@@ -914,6 +974,7 @@ export async function runWorkflowReviews(input: {
           throw new Error(walked === "INTERRUPTED" ? "review interrupted" : "review timed out");
         }
         let answer: unknown;
+        response = walkAnswers?.take() ?? response;
         try { answer = response === undefined ? undefined : JSON.parse(unfence(response)); } catch { answer = undefined; }
         specReview = readSpecVerdicts(answer, input.reviewSpec, { evidenceOk: specEvidenceChecker(input.repositories, changes) });
       }
@@ -938,7 +999,7 @@ export async function runWorkflowReviews(input: {
       session?.dispose();
     }
     if (usageStats !== undefined && input.onUsage !== undefined) {
-      try { await input.onUsage({ role, stats: usageStats, model: { provider, modelId: version }, outcome: usageOutcome }); }
+      try { await input.onUsage({ role, stats: usageStats, model: { provider, modelId: version }, outcome: usageOutcome, ...(checkpoints === undefined ? {} : { checkpoints }) }); }
       catch { parsed = { status: "UNKNOWN", findings: [], failureReason: "USAGE_UNAVAILABLE" }; }
     } else if (input.onUsage !== undefined) {
       parsed = { status: "UNKNOWN", findings: [], failureReason: "USAGE_UNAVAILABLE" };

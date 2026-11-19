@@ -43,6 +43,36 @@ function sshCommand(keyPath: string, knownHostsPath: string): string {
   return [sshProgram, ...options].map(shellQuote).join(" ");
 }
 
+/**
+ * The hosts a credential may be answered for: github.com, and the host of any https address among the command's arguments. A command that names its remote (`git fetch origin`) has no address
+ * here, so it is answered for github.com only: Cloud and Code reach GitHub alone today, and a second host will need its address passed (or `credential.host`) before it gets a password.
+ */
+function askPassHosts(args: readonly string[]): string[] {
+  const hosts = new Set<string>(["github.com"]);
+  for (const argument of args) {
+    try {
+      const url = new URL(argument);
+      if (url.protocol === "https:" && /^[a-z0-9.-]{1,253}$/u.test(url.hostname)) hosts.add(url.hostname);
+    } catch { /* not an address */ }
+  }
+  return [...hosts];
+}
+
+/**
+ * The askpass helper: git asks `Username for 'https://host[:port]'` and `Password for 'https://user@host[:port]'` (the host as typed in the address, so any case). It answers only when the whole prompt
+ * is one of those for one of `hosts` (case folded, an explicit port allowed), so a command that ends up talking to another host (a redirect, a rewritten address) gets nothing, not the token.
+ * Hosts are `[a-z0-9.-]` and the user name is checked to be `[a-z0-9._-]`, so nothing in the script can be shell or pattern syntax; a user name outside that gets a helper that refuses every prompt.
+ */
+function askPassScript(hosts: readonly string[], username: string): string {
+  const escape = (value: string): string => value.replace(/[.]/gu, "\\.");
+  const user = username.toLowerCase();
+  const alternatives = hosts.map(escape).join("|");
+  const check = /^[a-z0-9._-]{1,200}$/u.test(user)
+    ? `printf '%s' "$p" | grep -Eq "^(username for 'https://(${alternatives})(:[0-9]{1,5})?'(: ?)?$|password for 'https://${escape(user)}@(${alternatives})(:[0-9]{1,5})?'(: ?)?$)" || exit 1\n`
+    : "exit 1\n";
+  return `#!/bin/sh\np=$(printf '%s' "$1" | tr 'A-Z' 'a-z')\n${check}case "$p" in\n  username*) printf '%s\\n' "$AGENTX_GIT_USERNAME" ;;\n  password*) cat -- "$AGENTX_GIT_PASSWORD_FILE" ;;\n  *) exit 1 ;;\nesac\n`;
+}
+
 /** How a credentialed Git command is run; a seam for tests, which see its environment. */
 export type CredentialedGitRunner = (
   args: readonly string[],
@@ -89,11 +119,7 @@ export async function runGitWithCredential(input: {
       const askPassPath = join(askPassDirectory, "askpass.sh");
       const passwordPath = join(askPassDirectory, "password");
       await writeFile(passwordPath, `${password}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-      await writeFile(
-        askPassPath,
-        "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' \"$AGENTX_GIT_USERNAME\" ;;\n  *Password*) cat -- \"$AGENTX_GIT_PASSWORD_FILE\" ;;\n  *) exit 1 ;;\nesac\n",
-        { encoding: "utf8", mode: 0o700, flag: "wx" },
-      );
+      await writeFile(askPassPath, askPassScript(askPassHosts(input.args), username), { encoding: "utf8", mode: 0o700, flag: "wx" });
       Object.assign(environment, {
         GIT_ASKPASS: askPassPath,
         AGENTX_GIT_USERNAME: username,

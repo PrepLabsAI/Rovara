@@ -25,6 +25,7 @@ export function chainScheduleGroupName(env: string): string {
 
 // ---- event sources, types and filters
 
+// CLOSED ON PURPOSE (owner decision 62, item E1): this list, `EVENT_TYPES` and `EVENT_FILTER_KEYS` take no new entry. A tracker or monitoring source that is not here registers itself (`Tracker.eventSource`, `open-ids.ts`).
 export const EVENT_SOURCES = ["github", "linear", "jira", "pagerduty", "sentry", "datadog", "grafana", "vercel", "cloudwatch"] as const;
 export const EventSourceSchema = z.enum(EVENT_SOURCES);
 export type EventSource = z.infer<typeof EventSourceSchema>;

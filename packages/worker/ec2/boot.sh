@@ -1,7 +1,5 @@
 #!/bin/bash
 # EC2 worker user data: mount the workspace EBS volume and start the worker (#81).
-# The provisioner validates the prepended configuration and gzip-compresses this script (#229).
-# Boot failures exit non-zero and report on /ping so the provisioner can stop the session (#211).
 set -euo pipefail
 
 readonly MOUNT_PATH=/mnt/workspace
@@ -14,28 +12,20 @@ readonly CONTAINED_TMP_ROOT=$RUNTIME_ROOT/tmp
 readonly CONTAINED_IMAGE=node@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9
 CONTAINED_RUNTIME_AVAILABLE_BOOT=false
 readonly FILESYSTEM_LABEL=agentx-workspace
-# The node user of environments/base/Dockerfile, which the worker container runs as.
 readonly WORKER_UID=1000
 readonly WORKER_GID=1000
 readonly WORKER_ENV_FILE=/etc/agentx/worker.env
 readonly WORKER_UNIT=agentx-worker.service
 readonly WORKER_CONTAINER=agentx-worker
-# Docker's data root, on the workspace volume: it survives an idle stop (#121).
 readonly DOCKER_DATA_ROOT=$MOUNT_PATH/.docker
 readonly DOCKER_SOCKET=/var/run/docker.sock
-# The provisioner attaches the volume after the instance is running, so it may appear late.
 readonly DEVICE_WAIT_SECONDS=${AGENTX_DEVICE_WAIT_SECONDS:-120}
-# Where /sys and /dev/disk are; tests set it.
 readonly HOST_ROOT=${AGENTX_HOST_ROOT:-}
-# Network steps try 5 times (2, 4, 8, 16 s waits plus jitter): at most 45 s per step.
 readonly RETRY_ATTEMPTS=5
 readonly RETRY_BASE_SECONDS=2
 readonly RETRY_MAX_SECONDS=30
-# No try runs past this many seconds from boot start, so failures show within /ping's 10 minutes.
 readonly BOOT_DEADLINE=$((SECONDS + ${AGENTX_BOOT_DEADLINE_SECONDS:-480}))
-# The worker's port, which the provisioner probes; a failed boot answers there instead.
 readonly WORKER_PORT=8080
-# Where fail records its reason, since it may run in a command substitution's subshell.
 readonly FAILURE_FILE=/run/agentx-boot-failure
 
 log() { printf 'agentx-boot: %s\n' "$*" >&2; }
@@ -45,7 +35,6 @@ fail() {
   exit 1
 }
 
-# The time limit for one network try: LIMIT seconds, or less when the boot deadline is closer.
 try_seconds() {
   local remaining=$((BOOT_DEADLINE - SECONDS))
   ((remaining > 1)) || remaining=1
@@ -54,8 +43,6 @@ try_seconds() {
 
 tries() { if (($1 == 1)); then printf '1 try'; else printf '%s tries' "$1"; fi; }
 
-# retry DESCRIPTION COMMAND... retries with bounded backoff, then fails with DESCRIPTION.
-# Commands in an until condition must return their own failures under set -e.
 retry() {
   local description=$1 attempt=1 delay wait
   shift
@@ -99,7 +86,6 @@ server.serve_forever()
 ' "$WORKER_PORT" "$FAILURE_FILE" >/dev/null 2>&1 || log "could not start the boot failure report on port $WORKER_PORT"
 }
 
-# Reports any non-zero exit: fail's reason, or the step that stopped (set -e).
 BOOT_STEP="start"
 on_exit() {
   local status=$? reason
@@ -112,7 +98,6 @@ on_exit() {
   fi
   report_boot_failure
 }
-# A reason left by an earlier run of this script in the same boot is not this run's.
 rm -f "$FAILURE_FILE"
 trap on_exit EXIT
 
@@ -127,7 +112,6 @@ require_configuration() {
     || fail "AGENTX_EXPECT_NEW_VOLUME must be true or false"
 }
 
-# Prints the value only once whole, so a failed try leaves nothing behind.
 imds_once() {
   local token value
   token=$(curl -fsS --connect-timeout 2 --max-time 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300') \
@@ -137,7 +121,6 @@ imds_once() {
 
 imds() { retry "could not read the instance's $1 from instance metadata" imds_once "$1"; }
 
-# Prints "NAME SERIAL" for each NVMe disk in sysfs, without the serial's padding.
 sysfs_disks() {
   local file name
   for file in "$HOST_ROOT"/sys/block/nvme*/device/serial; do
@@ -226,7 +209,6 @@ prepare_contained_runtime_directories() {
   CONTAINED_RUNTIME_AVAILABLE_BOOT=true
 }
 
-# A failed try may leave stale mirror metadata (#211): dropped before the next try.
 install_docker_package() {
   timeout "$(try_seconds 120)" dnf install -y docker && return 0
   dnf clean metadata >/dev/null 2>&1 || true
@@ -244,7 +226,6 @@ ensure_docker() {
 }
 
 # Untrusted containers (rvb*, rvi*) cannot reach IMDS, the host or private ranges; only VPC DNS stays open.
-# A oneshot unit re-applies the rules after Docker rebuilds its chains.
 readonly FIREWALL_UNIT=rovara-container-firewall.service
 wall_off_containers() {
   install -d -o root -g root -m 0755 /usr/local/libexec
@@ -290,7 +271,6 @@ pull_worker_image() {
   retry "could not download the worker image" pull_image_once "$AGENTX_WORKER_IMAGE"
 }
 
-# This optional preload is bounded; failure leaves ordinary worker service available.
 pull_contained_image() {
   local attempt
   for ((attempt=1; attempt<=RETRY_ATTEMPTS && SECONDS<BOOT_DEADLINE; attempt++)); do
@@ -301,7 +281,6 @@ pull_contained_image() {
   return 1
 }
 
-# Optional until EXECUTOR_IMAGE is set; without it only end-to-end checks are withheld.
 pull_executor_image() {
   [[ -n "${EXECUTOR_IMAGE:-}" ]] || return 0
   local attempt
@@ -337,7 +316,6 @@ AGENTX_SANDBOX_IMAGE=$AGENTX_WORKER_IMAGE
 AGENTX_RUNTIME=ec2
 EOF
   printf 'TMPDIR=/tmp\n' >>"$WORKER_ENV_FILE"
-  # The web/API runtime's browser executor; docker exec agentx-worker processes read it here too.
   [[ -z "${EXECUTOR_IMAGE:-}" ]] || printf 'EXECUTOR_IMAGE=%s\n' "$EXECUTOR_IMAGE" >>"$WORKER_ENV_FILE"
 }
 
@@ -398,6 +376,7 @@ else
   log 'verifier unavailable; worker continues with /tmp'
   args+=(--env TMPDIR=/tmp)
 fi
+t=/run/agentx-test-services; ! mountpoint -q $t || args+=(--volume $t:$t --env AGENTX_TEST_SERVICES_RUN_DIR=$t)
 args+=(--volume "$DOCKER_SOCKET:$DOCKER_SOCKET" --group-add "$docker_gid" --log-driver awslogs --log-opt awslogs-region="$(sed -n 's/^AWS_REGION=//p' "$WORKER_ENV_FILE")" --log-opt awslogs-group="$(cat /etc/agentx/log-group)" --log-opt awslogs-stream="$(sed -n 's/^AGENTX_WORKSPACE_ID=//p' "$WORKER_ENV_FILE")/$(sed -n 's/^AGENTX_SESSION_GENERATION=//p' "$WORKER_ENV_FILE")/$(cat /etc/agentx/instance-id)" "$worker_image")
 exec "$docker" "${args[@]}"
 LAUNCHER
@@ -431,6 +410,12 @@ WantedBy=multi-user.target
 EOF
 }
 
+# DEC 254zm: the test-services stage is in the worker image pulled by digest; it never stops the boot.
+test_services_stage() {
+  local f=/run/agentx-ts-stage.sh
+  timeout "$(try_seconds 60)" docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint cat "$AGENTX_WORKER_IMAGE" /opt/agentx/packages/worker/ec2/test-services-stage.sh >"$f" && . "$f" && test_services_stage_main "$1"
+}
+
 # Opt-in TEST qualification (AGENTX_E2E_QUALIFICATION_*): its own unit, so it cannot fail the boot.
 write_e2e_qualification_script() {
   install -d -o root -g root -m 0755 /usr/local/libexec
@@ -461,7 +446,6 @@ refuse() { log "refused: $1"; exit 2; }
 readonly PREFIX="e2e-runtime/$ROLE_ID:$INSTANCE_ID/"
 STAGE=$(mktemp -d) || exit 1
 readonly STAGE
-# Status objects also carry the executor image and /ping's features (test-deploy --check).
 EXTRA=",\"executorImage\":\"$EXECUTOR\""
 upload() { aws s3api put-object --bucket "$BUCKET" --key "$PREFIX$1" --body "$2" --server-side-encryption AES256 --region "$REGION" --no-cli-pager >/dev/null; }
 publish_status() {
@@ -484,7 +468,6 @@ until PING=$(curl -fsS --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/pi
   sleep "$POLL"
 done
 features=$(tr -d ' \n\r\t' <<<"$PING" | grep -oE '"invocationFeatures":\[("[A-Za-z0-9.]+"(,"[A-Za-z0-9.]+")*)?\]' | head -n1) && [[ -n "$features" ]] && EXTRA+=",$features"
-# The preload is optional but the qualification needs the executor image: pull it if missing.
 if ! docker image inspect "$EXECUTOR" >/dev/null 2>&1; then
   log "the executor image is not on this host; pulling it"
   { timeout --foreground --kill-after=10s "${PULL_SECONDS}s" aws ecr get-login-password --region "$REGION" \
@@ -521,7 +504,6 @@ timeout --foreground --kill-after=10s 7d docker exec --user node agentx-worker /
 QUALIFICATION
 }
 
-# The instance ID is the one boot read from instance metadata.
 start_e2e_qualification() {
   local region=$1 instance_id=$2
   [[ -n "${AGENTX_E2E_QUALIFICATION_ROLE_ID:-}" && -n "${AGENTX_E2E_QUALIFICATION_PROFILE:-}" ]] || return 0
@@ -554,6 +536,7 @@ main() {
   BOOT_STEP="start the worker"
   write_worker_environment "$region"
   write_worker_unit "$region" "$instance_id"
+  [[ ${AGENTX_TEST_SERVICES:-} != 1 ]] || test_services_stage "$region" || log "no test services on this worker (not fatal)"
   systemctl daemon-reload
   systemctl enable --now "$WORKER_UNIT"
   log "worker started"

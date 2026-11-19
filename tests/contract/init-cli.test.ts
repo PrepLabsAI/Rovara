@@ -669,7 +669,7 @@ describe("agentx init", () => {
   // Issue 152: a source-built agentx with --engine cdk --source needs no release directory.
   describe("a source-built agentx with --engine cdk --source (issue 152)", () => {
     const HEAD = "e".repeat(40);
-    const WORKER = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/worker@sha256:${"d".repeat(64)}`;
+    const WORKER = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/worker@sha256:${"d".repeat(64)}`;
     const SLACK_IMAGE = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/slack@sha256:${"e".repeat(64)}`;
     const IMAGES = ["--worker-image", WORKER, "--slack-image", SLACK_IMAGE];
     const MANIFEST_URL = "https://github.com/PrepLabsAI/Rovara/releases/download/v1.4.0/release.json";
@@ -728,7 +728,7 @@ describe("agentx init", () => {
     it("takes the region from the AWS configuration when there is no release.json to list regions", async () => {
       const h = await harness();
       const prompter = scriptedPrompter([...CDK_FIRST_RUN]);
-      const code = await h.runWithoutRelease(["--engine", "cdk", "--source", "/src", ...IMAGES, "--stop-after", "prerequisites"], {
+      const code = await h.runWithoutRelease(["--engine", "cdk", "--source", "/src", "--worker-image", WORKER.replace("us-east-1", "eu-west-1"), "--slack-image", SLACK_IMAGE, "--stop-after", "prerequisites"], {
         releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter, processEnv: { AWS_REGION: "eu-west-1" }, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
       });
       expect(h.printed()).not.toContain("AgentX error");

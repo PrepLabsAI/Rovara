@@ -1,13 +1,20 @@
 import { GetCommand, PutCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { E2EDisplayBaselineSchema, INDEX_EXPIRY_ATTRIBUTE, PlanQualityFindingSchema, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, indexExpiresAt, type E2EDisplayBaseline, type PlanQualityFinding } from "@agentx/contracts";
+import { E2EDisplayBaselineSchema, INDEX_EXPIRY_ATTRIBUTE, PlanQualityFindingSchema, indexExpiresAt } from "@agentx/contracts";
 import { z } from "zod";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
-import { groundingFindingsOf } from "../developer/plan-grounding-findings.js";
-import { baselineOf, scrubScenarioResults, type DisplayArtifact } from "../e2e/application-display.js";
-import { ApplicationBaselineSkipped, ApplicationDispatchRefusal } from "../e2e/application-dispatch-check.js";
-import { verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../e2e/application-evidence.js";
 import { isConditional } from "./broker-shared.js";
 import { resultsWithStoredArtifacts, storeWorkflowE2EArtifacts, type WorkflowE2EArtifactStore } from "./workflow-e2e-artifacts.js";
+import {
+  E2E_GROUNDING_PURPOSE, GROUNDING_UNAVAILABLE_REASONS, VERIFIED_GROUNDING, type GroundingUnavailableReason, type GroundingRef, type GroundingRecord, type VerifiedGrounding,
+} from "../e2e/grounding-round.js";
+export {
+  E2E_GROUNDING_PURPOSE, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_RUN_GRACE_MS, GROUNDING_UNAVAILABLE_REASONS, groundingStartFailureReason, VERIFIED_GROUNDING, verifyGroundingEvidence, groundingRoundLapsed,
+  type GroundingState, type GroundingUnavailableReason, type GroundingRef, type GroundingRecord, type VerifiedGrounding,
+} from "../e2e/grounding-round.js";
+
+const keyOf = (ref: GroundingRef) => ({ pk: `DEVTASK#${ref.taskId}`, sk: `E2E_GROUNDING#${ref.planArtifactSha256}#${ref.attempt}` });
+const expiryOf = (at: string) => indexExpiresAt(at);
+const SCENARIO_IDS = z.array(z.string().min(1).max(120)).min(1).max(32);
 
 /**
  * T7b PLANGROUNDING: the grounding round. Before the owner is asked to approve a coding plan, the plan's must-not-change scenarios (the ones that prove a "Not changing" entry and
@@ -22,43 +29,7 @@ import { resultsWithStoredArtifacts, storeWorkflowE2EArtifacts, type WorkflowE2E
  *  - What it records is the broker's own verification of the evidence it accepted, never rows a caller supplies. It expires with the table's time to live, 30 days after it was last written.
  */
 
-export const E2E_GROUNDING_PURPOSE = "grounding" as const;
-/** The first grounding round of a plan version; the second (of the corrected plan) is a different artifact and so a different record, but the attempt is signed too. */
-export const E2E_GROUNDING_ATTEMPT = 1;
-/** How long after its deadline a started grounding round is waited for before it is read as one that could not be run. */
-export const E2E_GROUNDING_RUN_GRACE_MS = 5 * 60_000;
-
 export type WorkflowE2EGroundingStore = Readonly<{ documentClient: Pick<DynamoDBDocumentClient, "send">; tableName: string }>;
-export type GroundingState = "REQUESTED" | "STARTED" | "RECORDED" | "UNAVAILABLE";
-/**
- * Why a grounding round has no result, as a fixed code. These are the only reasons that are ever stored or shown; free text from a worker, git or an error never is.
- * `worker-too-old` / `not-exported` / `runtime-not-ready` / `accounts-not-ready` / `refused` / `start-failed` / `run-failed` / `unverified` / `timed-out` / `ai-only` / `disabled` are the
- * design's codes; `stopped` is a round someone stopped.
- */
-export const GROUNDING_UNAVAILABLE_REASONS = ["worker-too-old", "not-exported", "runtime-not-ready", "accounts-not-ready", "refused", "start-failed", "run-failed", "unverified", "timed-out", "ai-only", "disabled", "stopped"] as const;
-export type GroundingUnavailableReason = (typeof GROUNDING_UNAVAILABLE_REASONS)[number];
-
-/** The reason a grounding round could not be started, from what building its admission threw. Only a fixed code comes out; the error's text is never kept. */
-export function groundingStartFailureReason(error: unknown): GroundingUnavailableReason {
-  if (error instanceof ApplicationBaselineSkipped) return "ai-only";
-  if (error instanceof ApplicationDispatchRefusal) {
-    // The scope of a refusal is its fixed prefix (the rest of the message is never kept).
-    return error.message.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) ? "runtime-not-ready" : error.message.startsWith(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX) ? "accounts-not-ready" : "refused";
-  }
-  return "start-failed";
-}
-
-/** What a grounding record is keyed by: the task, the proposed plan artifact (by digest) and the attempt. */
-export type GroundingRef = Readonly<{ taskId: string; planArtifactSha256: string; attempt: number }>;
-const keyOf = (ref: GroundingRef) => ({ pk: `DEVTASK#${ref.taskId}`, sk: `E2E_GROUNDING#${ref.planArtifactSha256}#${ref.attempt}` });
-const expiryOf = (at: string) => indexExpiresAt(at);
-const SCENARIO_IDS = z.array(z.string().min(1).max(120)).min(1).max(32);
-
-export type GroundingRecord = Readonly<{
-  taskId: string; planArtifactSha256: string; planArtifactId: string; attempt: number; state: GroundingState; requestedAt: string; scenarioIds: string[];
-  baseCommitSha?: string; operationId?: string; roundId?: string; admissionSha256?: string; startedAt?: string; deadlineAt?: string; selectionDigest?: string;
-  recordedAt?: string; reason?: GroundingUnavailableReason; results?: E2EDisplayBaseline; findings?: PlanQualityFinding[];
-}>;
 
 /** Asks for the grounding round of a held plan, at most once per plan artifact and attempt: the REQUESTED record is written only if there is none. Never changes the task. */
 export async function requestWorkflowE2EGroundingRound(store: WorkflowE2EGroundingStore, ref: GroundingRef, input: { scenarioIds: readonly string[]; planArtifactId: string }): Promise<"REQUESTED" | "ALREADY"> {
@@ -113,24 +84,6 @@ export async function markWorkflowE2EGroundingUnavailable(store: WorkflowE2EGrou
   }
 }
 
-const VERIFIED = Symbol("verified-grounding");
-/** What the broker made of the evidence of a grounding round; only `verifyGroundingEvidence` makes one. */
-export type VerifiedGrounding = Readonly<{ [VERIFIED]: true; roundId: string; admissionSha256: string; results: E2EDisplayBaseline; findings: PlanQualityFinding[]; artifacts: readonly DisplayArtifact[] }>;
-
-/**
- * Verifies the evidence of a grounding round exactly as a candidate round's is verified (the admission the broker stored, the evidence it accepted, recollected and requalified by the
- * broker), for the purpose it was signed with: the plan digest and base commit the caller recomputed from the record. The rows are the verification's own display and nothing a worker
- * says about itself. Undefined when the evidence verifies to no rows at all.
- */
-export function verifyGroundingEvidence(input: Omit<ApplicationEvidenceInput, "purpose" | "grounding"> & { grounding: NonNullable<ApplicationEvidenceInput["grounding"]> }): VerifiedGrounding | undefined {
-  const verification = verifyApplicationE2EEvidence({ ...input, purpose: E2E_GROUNDING_PURPOSE });
-  const display = verification.display;
-  if (display === undefined || display.scenarios.length === 0 || verification.round === undefined) return undefined;
-  const scrubbed = scrubScenarioResults({ scenarios: [], baseline: baselineOf(display.scenarios) })?.baseline;
-  if (scrubbed === undefined) return undefined;
-  return { [VERIFIED]: true, roundId: verification.round.roundId, admissionSha256: input.subject.admissionSha256, results: scrubbed, findings: groundingFindingsOf(scrubbed).findings, artifacts: display.artifacts };
-}
-
 /**
  * Records the verified result for the round that was started, stores the screenshots behind its rows (a row whose screenshot was not stored loses its link) and writes the record
  * conditionally: only if it still says this plan, this base commit, this attempt, this operation, this round and this admission, and is still STARTED. Returns whether it was written.
@@ -138,7 +91,7 @@ export function verifyGroundingEvidence(input: Omit<ApplicationEvidenceInput, "p
 export async function recordWorkflowE2EGrounding(deps: WorkflowE2EGroundingStore & WorkflowE2EArtifactStore, task: Pick<DeveloperTaskRecord, "ownerKey" | "workspaceId">, ref: GroundingRef,
   input: { verified: VerifiedGrounding; expected: { operationId: string; roundId: string; admissionSha256: string; baseCommitSha: string } }): Promise<boolean> {
   const { verified, expected } = input;
-  if (verified[VERIFIED] !== true || verified.roundId !== expected.roundId || verified.admissionSha256 !== expected.admissionSha256) throw new Error("the verification is not of the round that was started");
+  if (verified[VERIFIED_GROUNDING] !== true || verified.roundId !== expected.roundId || verified.admissionSha256 !== expected.admissionSha256) throw new Error("the verification is not of the round that was started");
   const stored = await storeWorkflowE2EArtifacts(deps, task, verified.artifacts);
   const results = resultsWithStoredArtifacts({ scenarios: [], baseline: verified.results }, stored).baseline!;
   const at = new Date().toISOString();
@@ -176,11 +129,4 @@ export async function readWorkflowE2EGroundingRecord(store: WorkflowE2EGrounding
   return { taskId: ref.taskId, planArtifactSha256: ref.planArtifactSha256, planArtifactId: item.planArtifactId, attempt: ref.attempt, state, requestedAt: item.requestedAt, scenarioIds: scenarioIds.data,
     ...text("baseCommitSha"), ...text("operationId"), ...text("roundId"), ...text("admissionSha256"), ...text("startedAt"), ...text("deadlineAt"), ...text("selectionDigest"), ...text("recordedAt"),
     ...reason, ...(results?.success === true ? { results: results.data } : {}), ...(findings?.success === true ? { findings: findings.data } : {}) };
-}
-
-/** Whether a started round has run out of time (its deadline plus the grace); a started record whose deadline cannot be read is late (it fails open). */
-export function groundingRoundLapsed(record: GroundingRecord, nowMs: number): boolean {
-  if (record.state !== "STARTED") return false;
-  const limit = Date.parse(record.deadlineAt ?? "") + E2E_GROUNDING_RUN_GRACE_MS;
-  return !Number.isFinite(limit) || nowMs > limit;
 }

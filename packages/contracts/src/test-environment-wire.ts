@@ -8,6 +8,8 @@
 // The feature strings are what a worker advertises on /ping: an older worker is refused the run at dispatch (a strict parse would refuse the field), never mis-run.
 import { z } from "zod";
 import { CoverageMapSchema } from "./test-env-nightly.js";
+import { BASELINE_CANDIDATES_MAX, BaselineCandidateSchema } from "./test-env-baseline.js";
+import { RepositoryCoverageMapSchema, RepositoryIdSchema } from "./test-env-multi-repo.js";
 import { CheckKindSchema } from "./evidence.js";
 import { ProjectCommandSchema, RelativeWorkspacePathSchema } from "./project.js";
 import { SeedScriptLockSchema } from "./seed-script-lock.js";
@@ -16,12 +18,19 @@ import {
   IacSeedRefSchema, TestEnvDependencyIdSchema, TestEnvDependencyKindSchema, TestEnvRegionSchema, catalogIdName, testEnvStartedCount,
 } from "./test-env-dependency.js";
 import { reservedDependencyEnvName } from "./test-services-shared.js";
+import { SAGEMAKER_DETECTION_SIGNALS, SageMakerEndpointNameSchema } from "./sagemaker-endpoint.js";
+import { AWS_PLAN_SERVICES_MAX, AwsPlanServiceSchema, normaliseAwsServiceKey } from "./aws-emulator-service-keys.js";
 import { TEST_ENV_ROUND_BUDGET_MIN, TEST_ENV_SELECTION_METHODS, TEST_ENV_SELECT_PLACEHOLDER, TestEnvValueSourceSchema, TestEnvironmentBodySchema, type TestEnvironmentBody } from "./test-environment.js";
 
 export const TEST_ENV_DETECT_FEATURE = "task.testEnvDetect.v1";
 export const TEST_ENV_PLAN_FEATURE = "task.testEnvironment.v1";
 /** A worker that lists this reads `checks[].coveragePath` of the plan (the approved report to read changed-line coverage from). A worker that does not is sent the plan without that field (informational only), because its strict parse would refuse it. */
 export const TEST_ENV_COVERAGE_PATH_FEATURE = "task.testEnvCoveragePath.v1";
+/**
+ * TE-C6: a worker that lists this reads the plan's `flakyRerun: true`: a failing test of a test check that passed before is rerun once, and one that passes on the rerun is flaky (not sent to the agent as a regression, and named in the
+ * evidence). A worker that does not is never sent the flag (its strict parse would refuse it): the broker never plans the flag for it (`seam.ts` adds this feature to the step's `requires`). Off (the default) means no rerun and no evidence field.
+ */
+export const TASK_FLAKY_RERUN_FEATURE = "task.flakyRerun.v1";
 /**
  * Test services (slice 1): a worker that lists this reads `testEnvironment.dependencies` of the plan (the dependencies to start, pinned by digest) and runs the check rounds sealed. A worker that does not is never sent a plan with
  * the field (its strict parse would refuse it): the broker refuses the run to such a worker at dispatch (`ec2-delivery.ts`). Also in `WORKER_INVOCATION_FEATURES`; the worker lists it in `implemented-features.ts` when it can do both.
@@ -39,14 +48,37 @@ export const TEST_SERVICES_AWS_PLAN_FEATURE = "task.testServices.aws.v1";
  */
 export const TEST_SERVICES_FAKE_PLAN_FEATURE = "task.testServices.fake.v1";
 /**
+ * Company-approved extra images (switch `pj`): a worker that lists this reads a plan dependency with `backing: "company"` and its `company` block (an image a company admin approved, by registry, repository and digest) and can
+ * start exactly that digest. No worker lists it yet, so the broker never sends such a plan to any worker (`ec2-delivery.ts`); a worker that does not know the backing refuses it by its strict parse, and one that knows it and
+ * cannot serve it refuses it by name. In `WORKER_INVOCATION_FEATURES`.
+ */
+export const TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE = "task.testServices.companyImage.v1";
+/**
  * TS-UX-1 item 9: a worker that lists this loads a dependency's seed FILE (`seeds[].fixturePath`) into its test database. An older worker failed such a seed ("not available yet"); the broker never sends it a plan with a
  * file seed (`ec2-delivery.ts`). In `WORKER_INVOCATION_FEATURES`.
  */
 export const TEST_SERVICES_FILE_SEED_FEATURE = "task.testServices.fileSeed.v1";
 /** SEED-RISK-1: a worker that checks a seed command's `lock` (re-hashes the repository's seed script from its checkout, refuses on a difference). A plan with a locked seed goes only to such a worker. */
 export const TEST_SERVICES_SEED_LOCK_FEATURE = "task.testServices.seedLock.v1";
-/** The AWS services a plan may ask Rovara local AWS for in slice 2. The broker's rule and the worker's contract are this one list. */
-export const TEST_SERVICES_AWS_PLAN_SERVICES = ["s3", "sqs", "dynamodb"] as const;
+/**
+ * A worker that lists this reads a plan whose `aws.services` names any service of the generated table (`AWS_EMULATOR_SERVICES`). A worker without it only accepts the three services of `SEEDED_AWS_SERVICES`, so the
+ * broker adds this feature to a plan with any other service (`featuresForTestPlan`, which the delivery guard reads) and the run goes only to a worker that lists it. It is in `WORKER_INVOCATION_FEATURES`; a worker
+ * advertises it with the other test-services features (`testServicesAdvertisedFeatures`), when it can run an emulated plan at all.
+ */
+export const TEST_SERVICES_AWS_ALL_SERVICES_FEATURE = "task.testServices.aws.allServices.v1";
+/**
+ * The three AWS services a worker WITHOUT `TEST_SERVICES_AWS_ALL_SERVICES_FEATURE` accepts in a plan (what could be seeded before that feature). This is the old worker's list, kept for the feature check; the services Rovara
+ * now seeds are `AWS_SEEDED_KINDS`, and any other service of the table starts empty.
+ */
+export const SEEDED_AWS_SERVICES = ["s3", "sqs", "dynamodb"] as const;
+/**
+ * Whether a plan's services need `TEST_SERVICES_AWS_ALL_SERVICES_FEATURE`: any of them is not one a worker without the feature accepts, or the list is longer than the three such a worker takes (so a list of repeated
+ * names cannot slip past it; the environment's own schema lists a service once, but the plan's does not). Legacy spellings are read as their keys. This is the broker's fence for the wider environment cap
+ * (`TEST_ENV_DEPENDENCY_LIMITS.awsServices`): a plan that is not wide never goes to a worker that would refuse it, and a wide one goes only to a worker that lists the feature.
+ */
+export function awsPlanNeedsAllServices(services: readonly string[]): boolean {
+  return services.length > SEEDED_AWS_SERVICES.length || services.some((service) => !(SEEDED_AWS_SERVICES as readonly string[]).includes(normaliseAwsServiceKey(service) ?? service));
+}
 
 const NO_HIDDEN = /^[^\p{Cc}\p{Cf}]*$/u;
 const line = (max: number) => z.string().min(1).max(max).regex(NO_HIDDEN, "one plain line");
@@ -72,7 +104,7 @@ export const TEST_ENV_SEED_COMMANDS_MAX = 8;
 const CandidateKeyAttribute = z.object({ name: line(255), type: z.enum(["S", "N", "B"]) }).strict();
 const CandidateResource = z
   .object({
-    kind: z.enum(["table", "bucket", "queue", "topic"]),
+    kind: z.enum(["table", "bucket", "queue", "topic", "secret", "parameter", "key", "bus", "rule"]),
     name: line(300),
     keySchema: z.object({ partitionKey: CandidateKeyAttribute, sortKey: CandidateKeyAttribute.optional() }).strict().optional(),
   })
@@ -104,7 +136,12 @@ export const TestEnvDependencyCandidateSchema = z
         testcontainers: z.boolean().optional(),
         /** The settings that name it, parsed down to the scheme and the host FAMILY; never the host. */
         url: z.object({ scheme: line(32), hostFamily: z.enum(["local", "private", "cloud", "unknown"]) }).strict().optional(),
-        resources: z.array(CandidateResource).max(TEST_ENV_DEPENDENCY_LIMITS.awsServices).optional(),
+        resources: z.array(CandidateResource).max(TEST_ENV_DEPENDENCY_LIMITS.candidateResources).optional(),
+        /** An AWS service no seed handler creates resources for: its emulator starts empty and the tests create their resources. */
+        startsEmpty: z.boolean().optional(),
+        /** SM4: the SageMaker endpoint names the code, its settings or its infrastructure code write as literals (SageMaker's own name pattern), and fixed words for what else a detector saw. */
+        endpointNames: z.array(SageMakerEndpointNameSchema).max(16).optional(),
+        sagemakerSignals: z.array(z.enum(SAGEMAKER_DETECTION_SIGNALS)).max(SAGEMAKER_DETECTION_SIGNALS.length).optional(),
         seenBy: z.array(line(40)).max(8).optional(),
       })
       .strict(),
@@ -171,7 +208,7 @@ export const TaskDependencyPlanSchema = z
      * `local`: real software from the catalog. `emulated` (slice 2): Rovara local AWS, with the `aws` block below; every emulated entry of one plan names the same image, and all of them share one helper.
      * `fake` (slice 3): the fake server, from the worker's own image, serving the approved fixture set the `fake` block names.
      */
-    backing: z.enum(["local", "emulated", "fake"]),
+    backing: z.enum(["local", "emulated", "fake", "company"]),
     catalogId: CatalogIdSchema,
     /** The repository under the install's registry (`svc/postgres`); the registry host is the install's. */
     repository: z.string().regex(/^svc\/[a-z0-9][a-z0-9._-]{0,62}$/u),
@@ -183,6 +220,12 @@ export const TaskDependencyPlanSchema = z
      * recording is answered with an error and counted (a made-up answer is not available yet).
      */
     fake: z.object({ fixtureSetRef: Sha256, unmatched: z.literal("fail") }).strict().optional(),
+    /**
+     * Only on a `company` entry (switch `pj`): the image a company admin approved, so a company image is never dressed as one of Rovara's catalog images. `imageId` is the approval's id (it names the digest), `registry` and
+     * `repository` say where the image comes from, and `digest` is the approved digest (equal to the plan's `digest`). `catalogId` is then only the catalog entry whose RUN PROFILE the image runs with (user, memory, ports,
+     * health check, reset), never the source of the image.
+     */
+    company: z.object({ imageId: z.string().regex(/^img_[a-f0-9]{20}$/u), registry: z.string().min(4).max(253), repository: z.string().min(1).max(250), digest: Sha256 }).strict().optional(),
     /** Names and files carried over from the project (database, user, extensions, init files); no password. */
     config: CatalogConfigSchema,
     aliases: z.array(DnsLabelSchema).max(TEST_ENV_DEPENDENCY_LIMITS.hostAliases),
@@ -195,13 +238,19 @@ export const TaskDependencyPlanSchema = z
     seeds: z.array(z.union([z.object({ command: ProjectCommandSchema, lock: SeedScriptLockSchema.optional() }).strict(), z.object({ fixturePath: RelativeWorkspacePathSchema, sha256: Sha256.optional() }).strict()])).max(TEST_ENV_DEPENDENCY_LIMITS.seeds),
     reset: z.enum(TEST_ENV_DEPENDENCY_RESETS),
     /** Only on an `emulated` entry: the AWS services this dependency needs from Rovara local AWS, the region the code is told, and where the project declares its resources (a file, never read by the broker). */
-    aws: z.object({ services: z.array(z.enum(TEST_SERVICES_AWS_PLAN_SERVICES)).min(1).max(TEST_SERVICES_AWS_PLAN_SERVICES.length), region: TestEnvRegionSchema, resources: IacSeedRefSchema.optional() }).strict().optional(),
+    aws: z.object({ services: z.array(AwsPlanServiceSchema).min(1).max(AWS_PLAN_SERVICES_MAX), region: TestEnvRegionSchema, resources: IacSeedRefSchema.optional() }).strict().optional(),
   })
   .strict()
   .superRefine((plan, context) => {
     const problem = (path: (string | number)[], message: string) => context.addIssue({ code: "custom", path, message });
     if (plan.backing === "local" && (TEST_ENV_HELPER_CATALOG_NAMES as readonly string[]).includes(catalogIdName(plan.catalogId))) problem(["catalogId"], "a local dependency is real software from the catalog, not one of Rovara's helpers");
     if (plan.backing === "local" && plan.aws !== undefined) problem(["aws"], "only an emulated dependency has AWS services");
+    if (plan.backing === "company") {
+      if ((TEST_ENV_HELPER_CATALOG_NAMES as readonly string[]).includes(catalogIdName(plan.catalogId))) problem(["catalogId"], "a company image runs with the profile of real software from the catalog, not of one of Rovara's helpers");
+      if (plan.company === undefined) problem(["company"], "a company image names the approval it runs");
+      else if (plan.company.digest !== plan.digest) problem(["company", "digest"], "a company image runs exactly the digest that was approved");
+      if (plan.aws !== undefined) problem(["aws"], "only an emulated dependency has AWS services");
+    } else if (plan.company !== undefined) problem(["company"], "only a company image names an approval");
     if (plan.backing === "fake") {
       if (catalogIdName(plan.catalogId) !== "fake-server") problem(["catalogId"], "a fake dependency runs the fake server");
       if (plan.fake === undefined) problem(["fake"], "a fake dependency names its fixture set");
@@ -217,7 +266,7 @@ export const TaskDependencyPlanSchema = z
       if (plan.aws === undefined) problem(["aws"], "an emulated dependency names its AWS services");
       else {
         if (new Set(plan.aws.services).size !== plan.aws.services.length) problem(["aws", "services"], "a service is listed once");
-        if (plan.family.startsWith("aws:") && !(plan.aws.services as readonly string[]).includes(plan.family.slice(4))) problem(["aws", "services"], "the services include the family's own service");
+        if (plan.family.startsWith("aws:") && !(plan.aws.services as readonly string[]).includes(normaliseAwsServiceKey(plan.family.slice(4)) ?? plan.family.slice(4))) problem(["aws", "services"], "the services include the family's own service");
       }
     }
     if (new Set(plan.aliases).size !== plan.aliases.length) problem(["aliases"], "an alias is listed once");
@@ -249,10 +298,12 @@ export const TestEnvTaskPlanSchema = z
       })
       .strict(),
     /** Readiness command `i` of the run is the environment's check `checks[i]`, for `i < checks.length`: the run's first commands are the environment's checks, in order. */
-    checks: z.array(z.object({ id: Id, kind: CheckKindSchema, coveragePath: RelativeWorkspacePathSchema.optional(), selectArgs: z.array(z.string().min(1).max(256)).max(8).optional() }).strict()
+    checks: z.array(z.object({ id: Id, kind: CheckKindSchema, /** TE-MR2b: the repository whose tests this check runs. Present only with `repositoryCoverageMap` (or by a producer that will send it); a worker without `TEST_ENV_MULTI_REPO_FEATURE` is never sent it. */ repositoryId: RepositoryIdSchema.optional(), coveragePath: RelativeWorkspacePathSchema.optional(), selectArgs: z.array(z.string().min(1).max(256)).max(8).optional() }).strict()
       .superRefine((check, context) => {
         if (check.selectArgs !== undefined && check.selectArgs.filter((arg) => arg === TEST_ENV_SELECT_PLACEHOLDER).length !== 1) context.addIssue({ code: "custom", path: ["selectArgs"], message: "selectArgs holds {tests} exactly once" });
       })).min(1).max(32),
+    /** TE-C6: the worker reruns a failing test of a check that passed before, once, and reports the ones that passed on the rerun. Absent = today's behaviour, byte for byte. Sent only to a worker that lists `TASK_FLAKY_RERUN_FEATURE`. */
+    flakyRerun: z.literal(true).optional(),
     /** The tests that failed in the last nightly: they always run. */
     lastNightlyFailures: z.array(z.string().min(1).max(500)).max(TEST_ENV_PLAN_FAILURES_MAX).optional(),
     /** The nightly's coverage map, only when it fits (`TEST_ENV_PLAN_MAP_MAX_BYTES`); without it a coverage-map selection runs the whole check, with its reason. */
@@ -262,9 +313,28 @@ export const TestEnvTaskPlanSchema = z
      * refused before dispatch, never sent half a plan); absent otherwise, so a plan without test services is today's plan byte for byte. Sent only to a worker whose /ping lists `TEST_SERVICES_PLAN_FEATURE`. Never empty.
      */
     dependencies: z.array(TaskDependencyPlanSchema).min(1).max(TASK_DEPENDENCY_PLAN_MAX).optional(),
+    /**
+     * TE-C1: the newest trusted baseline commits on the task's base branch (shas only), for the worker to find the nearest one that is an ancestor of the task's base commit. Present only when the switch `ROVARA_BASELINE_CACHE`
+     * is on and there is at least one; sent only to a worker that lists `TEST_ENV_BASELINE_FEATURE`. Absent: today's plan byte for byte. Never empty.
+     */
+    baselineCandidates: z.array(BaselineCandidateSchema).min(1).max(BASELINE_CANDIDATES_MAX).optional(),
+    /**
+     * TE-MR2b: the coverage map across repositories (every path and every test names its repository). Never beside the repository-less `coverageMap`, and only with a repository on every check. Absent: today's plan byte for byte.
+     * Sent only to a worker that lists `TEST_ENV_MULTI_REPO_FEATURE`. Nothing sends it yet: the nightly is single-repository; a producer comes with the multi-repository nightly.
+     */
+    repositoryCoverageMap: RepositoryCoverageMapSchema.optional(),
+    /**
+     * TE-MR2b: this engine reads a combined baseline claim (`EvidenceRaw.baselines`) for a task with several repositories. Only with `baselineCandidates`; a worker writes the claim only when it is set, so an engine without it
+     * never receives a raw file with the field (its strict parse would refuse the whole file). Sent only to a worker that lists `TEST_ENV_MULTI_REPO_FEATURE`. Absent: today's plan byte for byte.
+     */
+    repositoryBaselines: z.literal(true).optional(),
   })
   .strict()
   .refine((plan) => plan.coverageMap === undefined || JSON.stringify(plan.coverageMap).length <= TEST_ENV_PLAN_MAP_MAX_BYTES, { message: "an inline coverage map is at most 256 KiB", path: ["coverageMap"] })
+  .refine((plan) => plan.repositoryCoverageMap === undefined || JSON.stringify(plan.repositoryCoverageMap).length <= TEST_ENV_PLAN_MAP_MAX_BYTES, { message: "an inline coverage map is at most 256 KiB", path: ["repositoryCoverageMap"] })
+  .refine((plan) => plan.repositoryBaselines === undefined || plan.baselineCandidates !== undefined, { message: "combined baselines need baseline candidates", path: ["repositoryBaselines"] })
+  .refine((plan) => plan.repositoryCoverageMap === undefined || plan.coverageMap === undefined, { message: "one coverage map, not two", path: ["repositoryCoverageMap"] })
+  .refine((plan) => plan.repositoryCoverageMap === undefined || plan.checks.every((check) => check.repositoryId !== undefined), { message: "a repository-qualified map needs a repository on every check", path: ["checks"] })
   .superRefine((plan, context) => {
     const dependencies = plan.dependencies ?? [];
     const unique = <T>(values: readonly T[]) => new Set(values).size === values.length;
@@ -399,8 +469,14 @@ export const TestEnvCheckBodySchema = z.object({ digest: Sha256.optional(), requ
 export type TestEnvCheckBody = z.infer<typeof TestEnvCheckBodySchema>;
 export const TestEnvApproveBodySchema = z.object({ digest: Sha256, expectedRevision: z.number().int().min(0), requestId: z.string().min(8).max(100).optional() }).strict();
 
-/** A maintainer's edited proposal: the whole body, validated like any other (the broker checks it again and refuses production, recordings in the shared tier and unsafe selection). */
-export const TestEnvEditBodySchema = z.object({ environment: TestEnvironmentBodySchema }).strict();
+/**
+ * A maintainer's edited proposal: the whole body, validated like any other (the broker checks it again and refuses production, recordings in the shared tier and unsafe selection). `digest` is the digest of the proposal
+ * the person was editing: when it is given and that is no longer the project's current proposal (someone proposed or edited since), the broker refuses the edit with `TEST_ENV_EDIT_STALE_MESSAGE` (409) instead of
+ * replacing the newer one. Optional, so a client that does not send it behaves as before.
+ */
+export const TestEnvEditBodySchema = z.object({ environment: TestEnvironmentBodySchema, digest: Sha256.optional() }).strict();
+/** The fixed sentence of a refused stale edit (never the digests). */
+export const TEST_ENV_EDIT_STALE_MESSAGE = "The proposal you edited has changed since you opened it. Reload it and make your edit again.";
 /** The longest seed command line the field takes (the same bound a command line has in the settings). */
 export const TEST_ENV_SEED_COMMAND_MAX_CHARS = 500;
 /**

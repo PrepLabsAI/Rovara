@@ -1,0 +1,584 @@
+// Plug-in foundations, task P2: the in-memory host the fakes (and the GitHub fixture server in the tests) stand on. One model holds one repository: its
+// revisions and branches, change requests with their reviews, comments and threads, the checks that reported on each revision, and the accounts that may
+// act. It is deterministic (no clock, no randomness unless given) so a test and a fixture agree on every id.
+//
+// A bare git repository on disk is not modelled here: the worker-side fake git server belongs to P10 (the end-to-end task), which needs a real clone.
+import { createHash } from "node:crypto";
+import {
+  agentXError, EVAL_WRAPPER_BRANCH_PATTERN, EVAL_WRAPPER_CONFLICT_MESSAGE, EVAL_WRAPPER_PATH_TAKEN_MESSAGE, EVAL_WRAPPER_WRITE_PATHS, type EvalWrapperPullRequestInput, type FileEntryType, type ChangeRequestFile, type CommitIdentity, type Check, type HostAccountKind, type HostPermission, type MergeMethod, type MergeResult, type ReviewState, type Review,
+} from "@agentx/contracts";
+
+export interface FakeAccount { login: string; permission: HostPermission; accountType: HostAccountKind; hostUserId: string }
+export interface FakeComment {
+  id: string; kind: "review" | "review_comment" | "discussion"; author: string; body: string; updatedAt: string; createdAt?: string;
+  path?: string; line?: number; threadId?: string; reviewState?: ReviewState;
+}
+export interface FakeThread { id: string; resolved: boolean; commentIds: string[] }
+export interface FakeRevision { entries: ReadonlyMap<string, FileEntryType>; sha: string; tree: string; parents: string[]; files: ReadonlyMap<string, string>; /** Paths that are symbolic links at this revision (the fake keeps no link target). */ symlinks: ReadonlySet<string> }
+export interface FakeChangeRequest {
+  id: string; sourceBranch: string; targetBranch: string; title: string; body: string; draft: boolean; draftRefused: boolean;
+  state: "open" | "closed" | "merged"; author: string; frozenHead?: string; mergeRevision?: string; mergedAt?: string; mergedBy?: string;
+  reviews: Review[];
+  /** What each review also holds (parallel to `reviews`): the host's id for it and its summary text. */
+  reviewMeta: Array<{ id: string; body: string }>;
+  comments: FakeComment[]; threads: FakeThread[]; requestedReviewers: string[]; conflicts: boolean;
+}
+export interface FakeModelOptions {
+  url: string; id: string; fullName: string; defaultBranch?: string; initialFiles?: Record<string, string>;
+  /** Whether the host can open drafts. Default true. */
+  drafts?: boolean;
+  /** The host's web address, for the links it gives. Default `https://host.example.test`. */
+  webBase?: string;
+}
+
+const sha1 = (text: string) => createHash("sha1").update(text).digest("hex");
+const lines = (text: string) => (text === "" ? 0 : text.split("\n").length);
+/** Rovara's replies in a thread are its own fixed text: short, one line, no mentions. */
+export const REPLY_MAX_CHARS = 200;
+export const REPLY_REFUSED_MESSAGE = "the reply is not Rovara's fixed text";
+
+/** TE-B4: the source word the fake's own "Rovara" Check carries (GitHub's is the App's id). */
+export const FAKE_ROVARA_SOURCE = "fake-rovara-app";
+/** TE-B4: one "Rovara" Check the fake host holds. */
+export interface FakeSummaryCheck {
+  runId: string;
+  revision: string;
+  payload: { status: "in_progress" | "completed"; conclusion?: "success" | "failure" | "neutral" | undefined; title: string; summary: string; text: string };
+  detailsUrl?: string;
+}
+
+export class FakeHostModel {
+  readonly url: string;
+  readonly id: string;
+  readonly fullName: string;
+  readonly defaultBranch: string;
+  readonly drafts: boolean;
+  readonly webBase: string;
+  /** Fixtures can model a host that cut a tree listing short. */
+  readonly incompleteTrees = new Set<string>();
+  /** Wiki W0: when each revision was committed (an ISO time). A revision with none reads as the epoch, so the model's own clock is untouched. */
+  readonly commitTimes = new Map<string, string>();
+  readonly revisions = new Map<string, FakeRevision>();
+  readonly branches = new Map<string, string>();
+  readonly accounts = new Map<string, FakeAccount>();
+  readonly changeRequests: FakeChangeRequest[] = [];
+  /** Names the target branch requires before a merge. */
+  requiredChecks: string[] = [];
+  /** TE-B4: the "Rovara" Checks Rovara posted, in order of creation (each update rewrites its entry). */
+  readonly summaryChecks: FakeSummaryCheck[] = [];
+  /** TE-B4: whether the install granted the Check write (false: every write answers `no_permission`). */
+  summaryCheckPermission = true;
+  /** TE-B4: how many Check writes reached the host (creates and updates), so a test can see an unchanged Check was not written again. */
+  summaryCheckWrites = 0;
+  /** P6: when set, the host answers every budgeted read as rate limited until this time (milliseconds). A test sets it; nothing in the model reads the real clock. */
+  rateLimitedUntil: number | undefined;
+  /** Gitlink targets are revision identities, never ordinary file text. */
+  private readonly gitlinks = new Map<string, ReadonlyMap<string, string>>();
+  private readonly checksByRevision = new Map<string, Check[]>();
+  private readonly deployments = new Map<string, Map<string, "success" | "failure" | "in_progress">>();
+  private readonly logs = new Map<string, string>();
+  private serial = 0;
+  private clock = Date.parse("2026-10-30T09:00:00.000Z");
+
+  /** M7 slice 2: a deployment of a revision to an environment is now in this state (the newest answer for an environment replaces the older one). */
+  setDeployment(revision: string, environment: string, state: "success" | "failure" | "in_progress"): void {
+    const known = this.deployments.get(revision) ?? new Map<string, "success" | "failure" | "in_progress">();
+    known.set(environment, state);
+    this.deployments.set(revision, known);
+  }
+
+  deploymentStates(revision: string): Array<{ environment: string; state: "success" | "failure" | "in_progress" }> {
+    return [...(this.deployments.get(revision)?.entries() ?? [])].map(([environment, state]) => ({ environment, state }));
+  }
+
+  constructor(options: FakeModelOptions) {
+    this.url = options.url;
+    this.id = options.id;
+    this.fullName = options.fullName;
+    this.defaultBranch = options.defaultBranch ?? "main";
+    this.drafts = options.drafts ?? true;
+    this.webBase = options.webBase ?? "https://host.example.test";
+    const root = this.addRevision([], new Map(Object.entries(options.initialFiles ?? { "README.md": "# demo\n" })));
+    this.branches.set(this.defaultBranch, root.sha);
+  }
+
+  /** Sets the model's own clock (a test lines it up with the app's), so the next time it hands out is `iso` plus one second. */
+  setNow(iso: string): void {
+    this.clock = Date.parse(iso);
+  }
+
+  /** An ISO time that moves forward by one second each call, so ordering is visible and nothing reads the real clock. */
+  now(): string {
+    this.clock += 1_000;
+    return new Date(this.clock).toISOString();
+  }
+
+  private contentsOf(revision: FakeRevision): Map<string, string> {
+    return new Map([...revision.files, ...(this.gitlinks.get(revision.sha) ?? [])]);
+  }
+
+  private addRevision(parents: string[], files: Map<string, string>, symlinks: ReadonlySet<string> = new Set(), types?: ReadonlyMap<string, FileEntryType>): FakeRevision {
+    const entries = new Map<string, FileEntryType>([...files.keys()].map(path => [path, (types?.get(path) === "symlink" ? "file" : types?.get(path)) ?? "file"]));
+    for (const path of symlinks) entries.set(path, "symlink");
+    const sorted = [...files.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const tree = sha1(`tree\n${JSON.stringify(sorted)}\ntypes ${JSON.stringify([...entries].sort(([a], [b]) => a.localeCompare(b)))}`);
+    this.serial += 1;
+    const sha = sha1(`commit\n${parents.join(",")}\n${tree}\n${this.serial}`);
+    this.gitlinks.set(sha, new Map([...files].filter(([path]) => entries.get(path) === "submodule")));
+    const textFiles = new Map([...files].filter(([path]) => entries.get(path) !== "submodule"));
+    const revision: FakeRevision = { sha, tree, parents, files: textFiles, symlinks: new Set(symlinks), entries };
+    this.revisions.set(sha, revision);
+    return revision;
+  }
+
+  /** A revision made directly (a host that builds commits from blobs and trees): its parents, its files and the paths that are symbolic links. */
+  makeRevision(parents: string[], files: ReadonlyMap<string, string>, symlinks: ReadonlySet<string> = new Set()): FakeRevision {
+    return this.addRevision(parents, new Map(files), symlinks);
+  }
+
+  /** Removes a branch; the open change requests made from it are closed, as a real host does. False when there was no such branch. */
+  removeBranch(branch: string): boolean {
+    if (!this.branches.has(branch)) return false;
+    for (const entry of this.changeRequests) if (entry.sourceBranch === branch && entry.state === "open") this.update(entry.id, { state: "closed" });
+    this.branches.delete(branch);
+    return true;
+  }
+
+  headOf(branch: string): string {
+    const head = this.branches.get(branch);
+    if (head === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `the host has no branch ${branch}`);
+    return head;
+  }
+
+  revision(sha: string): FakeRevision {
+    const found = this.revisions.get(sha);
+    if (found === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the host has no such revision");
+    return found;
+  }
+
+  /** A new revision on `branch` (made from the default branch's head when the branch is new). A `null` value deletes a path. */
+  commit(branch: string, changes: Record<string, string | null>): string {
+    const parentSha = this.branches.get(branch) ?? this.headOf(this.defaultBranch);
+    const parent = this.revision(parentSha);
+    const files = this.contentsOf(parent);
+    const symlinks = new Set(parent.symlinks);
+    const entries = new Map(parent.entries);
+    for (const [path, content] of Object.entries(changes)) {
+      symlinks.delete(path);
+      if (entries.get(path) === "submodule") entries.delete(path);
+      if (content === null) files.delete(path);
+      else files.set(path, content);
+    }
+    const made = this.addRevision([parentSha], files, symlinks, entries);
+    this.branches.set(branch, made.sha);
+    return made.sha;
+  }
+
+  /** A new revision on `branch` in which `path` is a symbolic link (the fake keeps no target). A path that held a file stops being one. */
+  commitSymlink(branch: string, path: string): string {
+    return this.commitEntry(branch, path, "symlink", "");
+  }
+
+  commitExecutable(branch: string, path: string, content: string): string {
+    return this.commitEntry(branch, path, "executable", content);
+  }
+
+  commitSubmodule(branch: string, path: string, revision: string): string {
+    return this.commitEntry(branch, path, "submodule", revision);
+  }
+
+  commitEntry(branch: string, path: string, type: FileEntryType, content: string): string {
+    const parentSha = this.branches.get(branch) ?? this.headOf(this.defaultBranch);
+    const parent = this.revision(parentSha);
+    const files = this.contentsOf(parent);
+    const symlinks = new Set(parent.symlinks);
+    const entries = new Map(parent.entries);
+    symlinks.delete(path);
+    if (type === "symlink") { files.delete(path); symlinks.add(path); }
+    else files.set(path, content);
+    entries.set(path, type);
+    const made = this.addRevision([parentSha], files, symlinks, entries);
+    this.branches.set(branch, made.sha);
+    return made.sha;
+  }
+
+  commitRename(branch: string, previousPath: string, path: string): string {
+    const parentSha = this.headOf(branch);
+    const parent = this.revision(parentSha);
+    const type = parent.entries.get(previousPath);
+    if (type === undefined) throw agentXError("CONFIG_INVALID", "the rename source is absent");
+    const files = this.contentsOf(parent), entries = new Map(parent.entries), symlinks = new Set(parent.symlinks);
+    const content = files.get(previousPath);
+    files.delete(previousPath); entries.delete(previousPath); symlinks.delete(previousPath);
+    entries.set(path, type);
+    if (type === "symlink") symlinks.add(path);
+    else files.set(path, content ?? "");
+    const made = this.addRevision([parentSha], files, symlinks, entries);
+    this.branches.set(branch, made.sha);
+    return made.sha;
+  }
+
+  /** A common ancestor that is not older than another common ancestor, including merge commits with shortcut parent edges. */
+  mergeBase(head: string, target: string): string {
+    const ancestors = (start: string): Set<string> => {
+      const seen = new Set<string>(), pending = [start];
+      for (let i = 0; i < pending.length; i += 1) {
+        const sha = pending[i]!;
+        if (seen.has(sha)) continue;
+        seen.add(sha); pending.push(...this.revision(sha).parents);
+      }
+      return seen;
+    };
+    const targetAncestors = ancestors(target);
+    const common = [...ancestors(head)].filter(sha => targetAncestors.has(sha));
+    const older = new Set(common.flatMap(sha => this.revision(sha).parents));
+    const best = common.find(sha => !older.has(sha));
+    if (best === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the revisions have no shared ancestor");
+    return best;
+  }
+
+  setAccount(login: string, permission: HostPermission, accountType: HostAccountKind = "person"): FakeAccount {
+    const account: FakeAccount = { login, permission, accountType, hostUserId: String(1_000 + this.accounts.size + 1) };
+    this.accounts.set(login, account);
+    return account;
+  }
+
+  // ---- the eval wrapper pull request (L4-EVW6)
+
+  /**
+   * The rules a real host's adapter holds for the eval wrapper pull request, and no others: a new branch `rovara/eval-wrapper-<12 hex>` that nobody has, one of the two fixed paths, the default branch still where the caller read it,
+   * NOTHING at the path (a file, a folder, a symbolic link, a submodule, or a file where its folder would be), one commit with the one new file, one change request against the base. A failure removes the branch it made.
+   */
+  openEvalWrapper(input: EvalWrapperPullRequestInput): { revision: string; cr: FakeChangeRequest } {
+    if (!EVAL_WRAPPER_BRANCH_PATTERN.test(input.branch) || input.branch === input.baseBranch) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    if (!EVAL_WRAPPER_WRITE_PATHS.includes(input.path)) throw agentXError("CONFIG_INVALID", "file path is not one Rovara writes an eval wrapper to");
+    const baseHead = this.headOf(input.baseBranch);
+    if (baseHead !== input.baseRevision || this.branches.has(input.branch)) throw agentXError("CONFIG_INVALID", EVAL_WRAPPER_CONFLICT_MESSAGE);
+    const at = this.revision(baseHead);
+    const names = [...at.entries.keys(), ...at.files.keys(), ...at.symlinks];
+    // The path itself (a file, a link, a submodule) or anything below it (a folder), and a file, link or submodule where a folder on the way would be.
+    const parents = input.path.split("/").slice(0, -1).map((_, index, all) => all.slice(0, index + 1).join("/"));
+    const taken = names.some((name) => name === input.path || name.startsWith(`${input.path}/`) || parents.includes(name));
+    if (taken) throw agentXError("CONFIG_INVALID", EVAL_WRAPPER_PATH_TAKEN_MESSAGE);
+    const changes: Record<string, string> = {};
+    changes[input.path] = input.content;
+    const revision = this.commit(input.branch, changes);
+    try {
+      return { revision, cr: this.reconcile({ sourceBranch: input.branch, targetBranch: input.baseBranch, title: input.title, body: input.body }).cr };
+    } catch (error) {
+      this.removeBranch(input.branch);
+      throw error;
+    }
+  }
+
+  /** The change request (any state) made from an eval wrapper branch; any other branch name is refused. */
+  evalWrapperChangeRequest(branch: string): FakeChangeRequest | undefined {
+    if (!EVAL_WRAPPER_BRANCH_PATTERN.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    return [...this.changeRequests].reverse().find((entry) => entry.sourceBranch === branch);
+  }
+
+  // ---- change requests
+
+  private cr(id: string): FakeChangeRequest {
+    const found = this.changeRequests.find((entry) => entry.id === id);
+    if (found === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the host has no such change request");
+    return found;
+  }
+
+  getChangeRequest(id: string): FakeChangeRequest {
+    return this.cr(id);
+  }
+
+  crUrl(id: string): string {
+    return `${this.webBase}/${this.fullName}/pull/${id}`;
+  }
+
+  headRevisionOf(cr: FakeChangeRequest): string {
+    return cr.frozenHead ?? this.headOf(cr.sourceBranch);
+  }
+
+  /** The one open change request of a source and target branch, if any. */
+  findOpen(sourceBranch: string, targetBranch: string): FakeChangeRequest | undefined {
+    return this.changeRequests.find((entry) => entry.state === "open" && entry.sourceBranch === sourceBranch && entry.targetBranch === targetBranch);
+  }
+
+  /** Idempotent: the same open source and target make no second change request. A draft is refused (once) by a host that has none. */
+  reconcile(input: { sourceBranch: string; targetBranch: string; title: string; body?: string; draft?: boolean }, author = "rovara-app[bot]"): { cr: FakeChangeRequest; reconciled: boolean } {
+    const existing = this.findOpen(input.sourceBranch, input.targetBranch);
+    if (existing !== undefined) return { cr: existing, reconciled: true };
+    this.headOf(input.sourceBranch);
+    this.headOf(input.targetBranch);
+    const draftRefused = input.draft === true && !this.drafts;
+    const cr: FakeChangeRequest = {
+      id: String(this.changeRequests.length + 1), sourceBranch: input.sourceBranch, targetBranch: input.targetBranch, title: input.title,
+      body: draftRefused ? `Draft change requests are not available here, so this one is open for review. Do not merge it until it has been reviewed.\n\n${input.body ?? ""}`.trimEnd() : input.body ?? "",
+      draft: input.draft === true && this.drafts, draftRefused, state: "open", author, reviews: [], reviewMeta: [], comments: [], threads: [], requestedReviewers: [], conflicts: false,
+    };
+    this.changeRequests.push(cr);
+    return { cr, reconciled: false };
+  }
+
+  update(id: string, update: { title?: string; body?: string; state?: "open" | "closed" }): FakeChangeRequest {
+    const cr = this.cr(id);
+    if (cr.state === "merged") throw agentXError("RUNTIME_UNAVAILABLE", "a merged change request cannot be updated");
+    if (update.title !== undefined) cr.title = update.title;
+    if (update.body !== undefined) cr.body = update.body;
+    if (update.state !== undefined) {
+      if (update.state === "closed" && cr.state === "open") cr.frozenHead = this.headOf(cr.sourceBranch);
+      if (update.state === "open") delete cr.frozenHead;
+      cr.state = update.state;
+    }
+    return cr;
+  }
+
+  markReady(id: string): "ready" | "already_ready" {
+    const cr = this.cr(id);
+    if (!cr.draft) return "already_ready";
+    cr.draft = false;
+    return "ready";
+  }
+
+  requestReviewers(id: string, reviewers: readonly string[]): "requested" | "refused" {
+    const cr = this.cr(id);
+    // A host refuses to ask the author, an unknown account, or a closed change request.
+    if (cr.state !== "open" || reviewers.some((name) => name === cr.author || (!name.includes("/") && !this.accounts.has(name)))) return "refused";
+    for (const name of reviewers) if (!cr.requestedReviewers.includes(name)) cr.requestedReviewers.push(name);
+    return "requested";
+  }
+
+  // ---- reviews and comments
+
+  addReview(id: string, input: { login: string; state: ReviewState; body?: string; revision?: string }): Review {
+    const cr = this.cr(id);
+    const account = this.accounts.get(input.login) ?? this.setAccount(input.login, "write");
+    const review: Review = { reviewer: { login: account.login, hostUserId: account.hostUserId }, accountType: account.accountType, state: input.state, revision: input.revision ?? this.headRevisionOf(cr), submittedAt: this.now() };
+    const reviewId = this.nextCommentId();
+    cr.reviews.push(review);
+    cr.reviewMeta.push({ id: reviewId, body: input.body ?? "" });
+    cr.requestedReviewers = cr.requestedReviewers.filter((name) => name !== input.login);
+    // A review with a summary is feedback; one with none, or one still pending, is not.
+    if (input.body !== undefined && input.body.trim() !== "" && input.state !== "PENDING") {
+      cr.comments.push({ id: reviewId, kind: "review", author: input.login, body: input.body, updatedAt: review.submittedAt, reviewState: input.state });
+    }
+    return review;
+  }
+
+  private nextCommentId(): string {
+    this.serial += 1;
+    return String(9_000_000 + this.serial);
+  }
+
+  addDiscussionComment(id: string, author: string, body: string): FakeComment {
+    const cr = this.cr(id);
+    const at = this.now();
+    const comment: FakeComment = { id: this.nextCommentId(), kind: "discussion", author, body, updatedAt: at, createdAt: at };
+    cr.comments.push(comment);
+    return comment;
+  }
+
+  /** The author edits a comment of the conversation: its text changes and the host records the edit (`updatedAt` moves, `createdAt` does not). */
+  editDiscussionComment(id: string, commentId: string, body: string): FakeComment {
+    const comment = this.cr(id).comments.find((entry) => entry.id === commentId && entry.kind === "discussion");
+    if (comment === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the host has no such comment");
+    comment.body = body;
+    comment.updatedAt = this.now();
+    return comment;
+  }
+
+  /** A comment on a line of the diff, which opens a thread. */
+  addReviewComment(id: string, author: string, body: string, path: string, line: number): FakeComment {
+    const cr = this.cr(id);
+    const comment: FakeComment = { id: this.nextCommentId(), kind: "review_comment", author, body, updatedAt: this.now(), path, line };
+    comment.threadId = `thread-${comment.id}`;
+    cr.comments.push(comment);
+    cr.threads.push({ id: comment.threadId, resolved: false, commentIds: [comment.id] });
+    return comment;
+  }
+
+  resolveThread(id: string, threadId: string, resolved = true): void {
+    const thread = this.cr(id).threads.find((entry) => entry.id === threadId);
+    if (thread === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the host has no such thread");
+    thread.resolved = resolved;
+  }
+
+  /** Rovara's reply in a thread: only fixed, short, one-line text with no mention goes out; a comment that is not in a thread (or is gone) is "gone". */
+  reply(id: string, commentId: string, body: string, author = "rovara-app[bot]"): "replied" | "gone" {
+    if (body.length === 0 || body.length > REPLY_MAX_CHARS || /[\p{Cc}@]/u.test(body)) throw agentXError("CONFIG_INVALID", REPLY_REFUSED_MESSAGE);
+    const cr = this.cr(id);
+    const target = cr.comments.find((entry) => entry.id === commentId && entry.kind === "review_comment");
+    if (target?.threadId === undefined) return "gone";
+    const reply: FakeComment = { id: this.nextCommentId(), kind: "review_comment", author, body, updatedAt: this.now(), threadId: target.threadId, ...(target.path === undefined ? {} : { path: target.path }), ...(target.line === undefined ? {} : { line: target.line }) };
+    cr.comments.push(reply);
+    cr.threads.find((entry) => entry.id === target.threadId)!.commentIds.push(reply.id);
+    return "replied";
+  }
+
+  // ---- checks
+
+  setChecks(revision: string, checks: Check[]): void {
+    this.revision(revision);
+    this.checksByRevision.set(revision, checks.map((check) => ({ ...check })));
+  }
+
+  /** TE-B4: creates or updates the "Rovara" Check of a revision, and shows it among the revision's checks with Rovara's own source. */
+  upsertSummaryCheck(post: { headRevision: string; runId?: string | undefined; detailsUrl?: string | undefined; payload: FakeSummaryCheck["payload"] }): { runId: string } | "no_permission" {
+    if (!this.summaryCheckPermission) return "no_permission";
+    this.revision(post.headRevision);
+    this.summaryCheckWrites += 1;
+    const existing = this.summaryChecks.find((entry) => (post.runId !== undefined ? entry.runId === post.runId : entry.revision === post.headRevision));
+    if (existing !== undefined && existing.revision !== post.headRevision) throw agentXError("RUNTIME_UNAVAILABLE", "the check run belongs to another revision");
+    const entry: FakeSummaryCheck = existing ?? { runId: `rovara-${String(this.summaryChecks.length + 1)}`, revision: post.headRevision, payload: post.payload };
+    entry.payload = post.payload;
+    if (post.detailsUrl !== undefined) entry.detailsUrl = post.detailsUrl; else delete entry.detailsUrl;
+    if (existing === undefined) this.summaryChecks.push(entry);
+    const others = (this.checksByRevision.get(post.headRevision) ?? []).filter((check) => !(check.name === "Rovara" && check.source === FAKE_ROVARA_SOURCE));
+    const shown: Check = {
+      name: "Rovara", state: post.payload.status === "completed" ? "completed" : "pending", ...(post.payload.conclusion === undefined ? {} : { conclusion: post.payload.conclusion }),
+      required: this.requiredChecks.includes("Rovara"), url: "", source: FAKE_ROVARA_SOURCE,
+    };
+    this.checksByRevision.set(post.headRevision, [...others, shown]);
+    return { runId: entry.runId };
+  }
+
+  checksOf(revision: string): Check[] {
+    return (this.checksByRevision.get(revision) ?? []).map((check) => ({ ...check }));
+  }
+
+  /** A run (a build, a job) by its id, wherever it reported. */
+  findRun(runId: string): { revision: string; check: Check } | undefined {
+    for (const [revision, checks] of this.checksByRevision) {
+      const check = checks.find((entry) => entry.runId === runId);
+      if (check !== undefined) return { revision, check: { ...check } };
+    }
+    return undefined;
+  }
+
+  /** Adds a check to a revision, or replaces the one with the same run id. */
+  upsertCheck(revision: string, check: Check): void {
+    this.revision(revision);
+    const list = this.checksByRevision.get(revision) ?? [];
+    const index = check.runId === undefined ? -1 : list.findIndex((entry) => entry.runId === check.runId);
+    if (index >= 0) list[index] = { ...check };
+    else list.push({ ...check });
+    this.checksByRevision.set(revision, list);
+  }
+
+  setLog(runId: string, text: string): void {
+    this.logs.set(runId, text);
+  }
+
+  logOf(runId: string): string | undefined {
+    return this.logs.get(runId);
+  }
+
+  // ---- reads
+
+  changedFiles(id: string): ChangeRequestFile[] {
+    const cr = this.cr(id);
+    const source = this.revision(this.headRevisionOf(cr));
+    const targetSha = cr.state === "merged" && cr.mergeRevision !== undefined ? this.revision(cr.mergeRevision).parents[0]! : this.headOf(cr.targetBranch);
+    const target = this.revision(this.mergeBase(source.sha, targetSha));
+    return this.diffOfRevisions(target, source);
+  }
+
+  /** The changed files from `base` to `source` (`base` undefined: nothing, as for a root commit). Entry types are given only where both trees are known whole. */
+  private diffOfRevisions(base: FakeRevision | undefined, source: FakeRevision): ChangeRequestFile[] {
+    const target: FakeRevision = base ?? { entries: new Map(), sha: "", tree: "", parents: [], files: new Map(), symlinks: new Set() };
+    // Like a real host the fake gives the text of each change (every line of the old file removed, every line of the new one added), so what reads it sees a patch.
+    const textLines = (text: string): string[] => text.split("\n").filter((line, index, all) => !(index === all.length - 1 && line === ""));
+    const patchOf = (before: string | undefined, after: string): string => {
+      const old = before === undefined ? [] : textLines(before);
+      const now = textLines(after);
+      return `@@ -${old.length === 0 ? "0,0" : `1,${String(old.length)}`} +1,${String(now.length)} @@\n${[...old.map((line) => `-${line}`), ...now.map((line) => `+${line}`)].join("\n")}`;
+    };
+    const known = !this.incompleteTrees.has(source.sha) && !this.incompleteTrees.has(target.sha);
+    const directories = (revision: FakeRevision): Set<string> => {
+      const found = new Set<string>();
+      for (const path of revision.entries.keys()) {
+        let slash = path.indexOf("/");
+        while (slash !== -1) { found.add(path.slice(0, slash)); slash = path.indexOf("/", slash + 1); }
+      }
+      return found;
+    };
+    const sourceFiles = this.contentsOf(source), targetFiles = this.contentsOf(target);
+    const sourceDirs = directories(source), targetDirs = directories(target);
+    const knownAt = (path: string, basePath: string) => known && !sourceDirs.has(path) && !targetDirs.has(basePath);
+    const removed = new Set([...target.entries.keys()].filter(path => !source.entries.has(path)));
+    const out: ChangeRequestFile[] = [];
+    for (const [path, type] of [...source.entries].sort(([a], [b]) => a.localeCompare(b))) {
+      const content = sourceFiles.get(path) ?? "";
+      const before = targetFiles.get(path);
+      if (target.entries.get(path) === type && (before ?? "") === content) continue;
+      // Exact renames only, like a host fixture with no similarity heuristic.
+      const previousPath = target.entries.has(path) ? undefined : [...removed].find(old => target.entries.get(old) === type && (targetFiles.get(old) ?? "") === content);
+      if (previousPath !== undefined) removed.delete(previousPath);
+      const basePath = previousPath ?? path;
+      const baseType = target.entries.get(basePath) ?? "none";
+      out.push({ path, status: previousPath !== undefined ? "renamed" : baseType === "none" ? "added" : "modified", additions: lines(content), deletions: before === undefined ? 0 : lines(before), ...(previousPath !== undefined ? { previousPath } : before !== content ? { patch: patchOf(before, content) } : {}),
+        ...(knownAt(path, basePath) ? { entry: { head: type, base: baseType } } : {}) });
+    }
+    for (const path of [...removed].sort()) {
+      out.push({ path, status: "removed", additions: 0, deletions: lines(targetFiles.get(path) ?? ""), ...(knownAt(path, path) ? { entry: { head: "none", base: target.entries.get(path)! } } : {}) });
+    }
+    return out;
+  }
+
+  /** Who the host says wrote a commit (L4-LM1c): a test sets it for the revisions it wants a person, a bot or an unlinked identity on. A commit with none is read with no identity. */
+  readonly commitIdentities = new Map<string, CommitIdentity>();
+
+  /** One commit's own changes (DEC 213): its files against its FIRST parent (a root commit against nothing), as GitHub's commit read lists them. */
+  commitChangedFiles(sha: string): ChangeRequestFile[] {
+    const revision = this.revision(sha);
+    const parent = revision.parents[0];
+    return this.diffOfRevisions(parent === undefined ? undefined : this.revision(parent), revision);
+  }
+
+  /** DEC 213: `head`'s files against `base`, a revision `head` builds on (a merge against its second parent), as GitHub's compare read lists them. Throws when `base` is not an ancestor of `head` (or is `head`). */
+  compareChangedFiles(base: string, head: string): ChangeRequestFile[] {
+    const from = this.revision(base);
+    const to = this.revision(head);
+    const queue = [...to.parents];
+    const visited = new Set<string>();
+    let found = false;
+    while (queue.length > 0 && !found) {
+      const next = queue.shift()!;
+      if (visited.has(next)) continue;
+      visited.add(next);
+      if (next === from.sha) found = true;
+      else queue.push(...this.revision(next).parents);
+    }
+    if (!found) throw new Error("the base is not a revision the head builds on");
+    return this.diffOfRevisions(from, to);
+  }
+
+  /** The host's word on whether the change request can merge: draft, conflicts, a required check failing or pending, else clean. */
+  mergeableState(cr: FakeChangeRequest): "clean" | "conflicted" | "blocked" | "draft" {
+    if (cr.draft) return "draft";
+    if (cr.conflicts) return "conflicted";
+    const checks = this.checksOf(this.headRevisionOf(cr));
+    for (const name of this.requiredChecks) {
+      const found = checks.find((check) => check.name === name);
+      if (found === undefined || found.state !== "completed" || found.conclusion !== "success") return "blocked";
+    }
+    return "clean";
+  }
+
+  // ---- merge
+
+  merge(id: string, input: { revision: string; method: MergeMethod }, mergedBy = "rovara-user"): MergeResult {
+    const cr = this.cr(id);
+    if (cr.state === "merged") return { outcome: "already_merged" };
+    if (cr.state === "closed") return { outcome: "refused", reason: "closed" };
+    if (this.headRevisionOf(cr) !== input.revision) return { outcome: "refused", reason: "head_changed" };
+    if (this.mergeableState(cr) !== "clean") return { outcome: "refused", reason: "not_mergeable", hostMessage: "Required checks have not passed." };
+    const files = this.contentsOf(this.revision(input.revision));
+    const merged = this.addRevision([this.headOf(cr.targetBranch)], files, this.revision(input.revision).symlinks, this.revision(input.revision).entries);
+    this.branches.set(cr.targetBranch, merged.sha);
+    cr.state = "merged";
+    cr.frozenHead = input.revision;
+    cr.mergeRevision = merged.sha;
+    cr.mergedAt = this.now();
+    cr.mergedBy = mergedBy;
+    return { outcome: "merged", method: input.method, fellBack: false, mergeRevision: merged.sha };
+  }
+}

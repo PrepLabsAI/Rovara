@@ -27,8 +27,8 @@ function walk(value: unknown, depth: number): unknown {
   if (record.role === "toolResult" && isContextToolName(record.toolName)) {
     const content = stubbed(record.content);
     if (content === undefined) return value;
-    const { details: _details, ...rest } = record;
-    void _details;
+    const { details: _details, structuredContent: _structured, ...rest } = record;
+    void _details; void _structured;
     return { ...rest, content };
   }
   // A tool-execution event: { toolName, result: { content, details } }
@@ -36,8 +36,8 @@ function walk(value: unknown, depth: number): unknown {
     const result = record.result as Record<string, unknown>;
     const content = stubbed(result.content);
     if (content !== undefined) {
-      const { details: _details, ...inner } = result;
-      void _details;
+      const { details: _details, structuredContent: _structured, ...inner } = result;
+      void _details; void _structured;
       return { ...record, result: { ...inner, content } };
     }
   }

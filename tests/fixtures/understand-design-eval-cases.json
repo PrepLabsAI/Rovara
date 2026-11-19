@@ -1,0 +1,15 @@
+{
+  "note": "Understand eval cases for the design review stage. The repository has no Understand eval runner yet (tests/eval holds tool-calling cases only), so these are fixtures: each case is a request and the reading a correct Understand answer must contain in its `design` field. tests/contract/design-review-mode.test.ts checks that every expected reading is accepted by the intent reader and resolves to the expected ON/OFF under the auto setting. A live-model run can use `request` as the prompt and compare `expect` to the model's `design` field.",
+  "cases": [
+    { "id": "needs-new-endpoint", "request": "Add a GET /partners/ranking endpoint that returns the top partners for a region.", "expect": { "needed": true, "reasonsInclude": ["new_api"] } },
+    { "id": "needs-data-model", "request": "Partners should belong to a region. Add a region column and backfill it from the address table.", "expect": { "needed": true, "reasonsInclude": ["data_model"] } },
+    { "id": "needs-cross-service", "request": "When an order ships, the orders service must tell the notifications service so customers get an email.", "expect": { "needed": true, "reasonsInclude": ["cross_repo_or_service"] } },
+    { "id": "needs-new-dependency", "request": "Use the zod-to-openapi package to generate our API docs from the schemas.", "expect": { "needed": true, "reasonsInclude": ["new_dependency"] } },
+    { "id": "needs-api-change-and-auth", "request": "Change the /login response to include a refresh token, and require it on /sessions/renew.", "expect": { "needed": true, "reasonsInclude": ["api_change", "auth"] } },
+    { "id": "not-bug-fix", "request": "The retry helper retries forever when the server returns 429. Make it stop after 5 tries.", "expect": { "needed": false, "reasonsInclude": ["bug_fix"] } },
+    { "id": "not-typo", "request": "Fix the typo in the error message on the billing page: \"recieved\" should be \"received\".", "expect": { "needed": false, "reasonsInclude": ["small_change"] } },
+    { "id": "not-rename-in-module", "request": "Rename the private function parseRow to parseCsvRow in src/import/csv.ts and update its callers in that file.", "expect": { "needed": false, "reasonsInclude": ["small_change"] } },
+    { "id": "not-off-by-one", "request": "The pager shows one page too many when the total is an exact multiple of the page size. Fix it.", "expect": { "needed": false, "reasonsInclude": ["bug_fix"] } },
+    { "id": "not-copy-change", "request": "Change the empty-state text on the projects list to say \"No projects yet\".", "expect": { "needed": false, "reasonsInclude": ["small_change"] } }
+  ]
+}

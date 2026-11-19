@@ -1,4 +1,4 @@
-// Enterprise foundations N9 (INTG2): a project's private package registries (npm, PyPI, Maven; CodeArtifact first, kept generic).
+// Plug-in foundations N9 (INTG2): a project's private package registries (npm, PyPI, Maven; CodeArtifact first, kept generic).
 //
 // What is stored is only WHERE a registry is and WHICH credential reference reaches it, never a token. At `prepare` the worker asks the broker for a short-lived, read-only
 // token by registry NAME (`/registry-credentials`), writes the package manager's config outside every repository, runs the project's setup and readiness commands, and removes
@@ -6,7 +6,7 @@
 //
 // Public edition: none yet (the install is shared by many companies; a CodeArtifact domain is install-wide until a per-org binding exists). The public registries (npmjs, PyPI, Maven
 // Central) need no entry and no credential: they stay reachable under the default allow-list.
-// Enterprise: CodeArtifact (a domain and repositories the install bound to the org), or a generic registry (npm, pypi, maven) the customer runs, reached with a credential reference the
+// Company installs: CodeArtifact (a domain and repositories the install bound to the org), or a generic registry (npm, pypi, maven) the customer runs, reached with a credential reference the
 // broker resolves.
 import { z } from "zod";
 import { AgentXNameSchema } from "./names.js";

@@ -1,3 +1,11 @@
+import { slackCompanyPerson, slackCompanyProject, slackCompanyToken, slackLinkNotice, slackRequestWorkspace, type SlackCompanyDependencies } from "./slack-person.js";
+import { slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
+import { splitBySlackIngressTeam } from "./slack-company-split.js";
+import { slackWorkspaceToken } from "./slack-workspace-tokens.js";
+import { slackWorkspaceRemovalOf, type SlackWorkspaceRemovedEvent } from "./slack-workspace-removal.js";
+import { awsRovaraHandOffRunner, isRovaraHandOff, type RovaraHandOff } from "./slack-rovara-front.js";
+import { SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
+import { THREAD_INPUT_WORDS, isThreadInputNotice, type ThreadInputNotice } from "./slack-thread-input-words.js";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
@@ -94,8 +102,24 @@ export interface SlackSecrets {
 
 export type SlackIngressLog = (event: string, fields: Readonly<Record<string, string | number | boolean>>) => void;
 
-export interface SlackIngressDependencies {
+/** Guided onboarding PR 4: hands a verified app_uninstalled / tokens_revoked to the broker; throws when the broker did not take it (Slack then retries). */
+export type SlackWorkspaceRemovedHandOff = (removal: SlackWorkspaceRemovedEvent) => Promise<void>;
+
+/** Guided onboarding PR 4: the answer to a verified removal. Without a hand-off (no broker here) it is ignored, as before. */
+async function answerRemoval(handOff: SlackWorkspaceRemovedHandOff | undefined, removal: SlackWorkspaceRemovedEvent, log: SlackIngressLog): Promise<HttpResponse> {
+  if (handOff === undefined) return ignore(log, "workspace_removal_not_handled");
+  try { await handOff(removal); }
+  catch (error) {
+    log("workspace.removal_failed", { reason: removal.reason, errorName: errorName(error) });
+    return respond(500, { error: "removal could not be handed on" });
+  }
+  log("workspace.removal_handed_off", { reason: removal.reason });
+  return respond(200, { ok: true });
+}
+
+export interface SlackIngressDependencies extends SlackCompanyDependencies {
   secrets: () => Promise<SlackSecrets>;
+  workspaceRemoved?: SlackWorkspaceRemovedHandOff;
   getBinding: (teamId: string, channelId: string) => Promise<SlackChannelBinding | undefined>;
   claimEvent: (eventId: string, expiresAtSeconds: number) => Promise<boolean>;
   releaseEvent: (eventId: string) => Promise<void>;
@@ -158,7 +182,7 @@ export interface SlackIngressDependencies {
    * the task's next step. "refused" is an expected answer (the task closed, or its note limit is reached); a
    * throw means the reply could not be saved, and Slack retries it. Absent: such replies are not read.
    */
-  recordThreadNote?: (input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string; smallTalk?: true }) => Promise<{ outcome: ThreadNoteOutcome }>;
+  recordThreadNote?: (input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string; smallTalk?: true; mention?: true }) => Promise<ThreadNoteAnswer>;
   /** A message only `user` sees in the thread (chat.postEphemeral). Absent: such acknowledgements are skipped. */
   postEphemeral?: (input: { channel: string; threadTs: string; user: string; text: string; blocks?: Array<Record<string, unknown>> }) => Promise<void>;
   /**
@@ -275,18 +299,21 @@ export async function recordIntakeThroughBroker(invoke: (event: Record<string, u
 
 /** What the broker did with a task-thread reply; `small_talk` (decision 134): not saved, the reply is small talk. */
 export type ThreadNoteOutcome = "captured" | "duplicate" | "refused" | "small_talk";
+/** L4-U5d: for a task the core owns the broker also names the notice to say back (`notice`: a code, the words are `THREAD_INPUT_WORDS`'s) and says it is the core's (`core`). */
+export interface ThreadNoteAnswer { outcome: ThreadNoteOutcome; notice?: ThreadInputNotice; core?: true }
 
 export async function recordThreadNoteThroughBroker(
   invoke: (event: Record<string, unknown>) => Promise<BrokerReply>,
-  input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string; smallTalk?: true },
-): Promise<{ outcome: ThreadNoteOutcome }> {
+  input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string; smallTalk?: true; mention?: true },
+): Promise<ThreadNoteAnswer> {
   const reply = await invoke({ source: "agentx.slack-ingress", action: "thread-note", ...input });
   const status = reply.statusCode ?? 500;
   if (status >= 400 && status < 500) return { outcome: "refused" };
   if (status !== 200) throw new Error("broker thread note failed");
   const body = asRecord(JSON.parse(reply.body ?? "{}"));
   if (body.outcome !== "captured" && body.outcome !== "duplicate" && body.outcome !== "refused" && body.outcome !== "small_talk") throw new Error("broker thread note failed");
-  return { outcome: body.outcome };
+  // The core's answers also say which fixed words to use; anything that is not one of ours is not a notice.
+  return { outcome: body.outcome, ...(body.core === true && isThreadInputNotice(body.notice) ? { notice: body.notice, core: true as const } : body.core === true ? { core: true as const } : {}) };
 }
 
 export function createSlackIngressHandler(dependencies: SlackIngressDependencies) {
@@ -315,6 +342,8 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       return respond(200, { challenge: typeof payload.challenge === "string" ? payload.challenge : "" });
     }
     if (payload.type !== "event_callback") return ignore(log, "not_event_callback");
+    const removal = slackWorkspaceRemovalOf(payload);
+    if (removal !== undefined) return answerRemoval(dependencies.workspaceRemoved, removal, log);
 
     const mention = parseMention(payload);
     if ("reason" in mention) return ignore(log, mention.reason);
@@ -330,12 +359,15 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
  */
 export function createSlackAdapterFront(deps: {
   secrets: () => Promise<Pick<SlackSecrets, "signingSecret">>;
+  getBinding?: SlackIngressDependencies["getBinding"];
   isRovaraThread: (thread: SlackThread) => Promise<boolean>;
   /** Hands the message on; it reaches the channel API after this request is answered. Throws when it cannot. */
   handOff: (message: InboundMessage) => Promise<void>;
   now?: () => number;
   log?: SlackIngressLog;
-}) {
+  postEphemeral?: SlackIngressDependencies["postEphemeral"];
+  workspaceRemoved?: SlackWorkspaceRemovedHandOff;
+} & SlackCompanyDependencies) {
   const now = deps.now ?? Date.now;
   const log: SlackIngressLog = deps.log ?? (() => undefined);
   return async (event: HttpApiV2Event): Promise<HttpResponse> => {
@@ -354,6 +386,8 @@ export function createSlackAdapterFront(deps: {
     }
     if (payload.type === "url_verification") return respond(200, { challenge: typeof payload.challenge === "string" ? payload.challenge : "" });
     if (payload.type !== "event_callback") return ignore(log, "not_event_callback");
+    const removal = slackWorkspaceRemovalOf(payload);
+    if (removal !== undefined) return answerRemoval(deps.workspaceRemoved, removal, log);
     const mention = parseMention(payload);
     if ("reason" in mention) return ignore(log, mention.reason);
     if (mention.kind === "message") {
@@ -366,6 +400,20 @@ export function createSlackAdapterFront(deps: {
         return respond(500, { error: "thread could not be checked" });
       }
       if (!ours) return ignore(log, "not_rovara_thread");
+    }
+    if (deps.workspaces !== undefined) {
+      try {
+        const binding = await deps.getBinding?.(mention.thread.teamId, mention.thread.channelId);
+        if (binding === undefined || !await slackCompanyProject(deps, mention.thread.teamId, binding.projectName)) return ignore(log, "channel_not_bound");
+        await deps.workspaces.requireCompany(mention.thread.teamId);
+        const token = await slackWorkspaceToken(deps.workspaces, mention.thread.teamId);
+        const person = await slackCompanyPerson(deps, mention.thread.teamId, mention.userId);
+        if (person.kind !== "linked") {
+          const text = await slackLinkNotice(deps, mention.thread.teamId, mention.userId);
+          if (text !== undefined) await slackRequestWorkspace.run({ teamId: mention.thread.teamId, companyId: person.companyId, token }, () => deps.postEphemeral?.({ channel: mention.thread.channelId, threadTs: mention.thread.threadTs, user: mention.userId, text }));
+          return respond(200, { ok: true });
+        }
+      } catch { return ignore(log, "channel_not_bound"); }
     }
     try {
       await deps.handOff(inboundOfSlackMention(mention, now()));
@@ -423,11 +471,29 @@ export function createSlackMentionRouter(dependencies: SlackRouterDependencies):
   const now = dependencies.now ?? Date.now;
   const log: SlackIngressLog = dependencies.log ?? (() => undefined);
   return async (incoming) => {
-    let mention: SlackMention = incoming;
+    const mention: SlackMention = incoming;
     if (mention.appPosted && !dependencies.appPosted) return ignore(log, "bot_or_edited_message");
     if (mention.appPosted && !dependencies.appPosted?.accept) return ignore(log, "app_posted_disabled");
     const { thread } = mention;
+    if (dependencies.workspaces !== undefined) {
+      try {
+        const companyId = await dependencies.workspaces.requireCompany(thread.teamId);
+        const token = await slackWorkspaceToken(dependencies.workspaces, thread.teamId);
+        return await slackRequestWorkspace.run({ teamId: thread.teamId, companyId, token }, () => companyRoute(mention));
+      } catch { return ignore(log, "channel_not_bound"); }
+    }
+    return route(mention);
+  };
+  async function companyRoute(mention: SlackMention): Promise<HttpResponse> {
+    const { thread } = mention;
     const binding = await dependencies.getBinding(thread.teamId, thread.channelId);
+    if (binding === undefined || !await slackCompanyProject(dependencies, thread.teamId, binding.projectName)) return ignore(log, "channel_not_bound");
+    return route(mention, binding);
+  }
+  async function route(incoming: SlackMention, checkedBinding?: SlackChannelBinding): Promise<HttpResponse> {
+    let mention = incoming;
+    const { thread } = mention;
+    const binding = checkedBinding ?? await dependencies.getBinding(thread.teamId, thread.channelId);
     if (!binding) return ignore(log, "channel_not_bound", { channelId: thread.channelId });
     // Gap 2: a plain message is read only in a Slack-started task's own open thread. Every other channel
     // message is left alone before it is claimed, checked or stored.
@@ -477,6 +543,19 @@ export function createSlackMentionRouter(dependencies: SlackRouterDependencies):
         toAssistant = addressed.assistant;
         mention = { ...mention, kind: "mention" };
         log("thread.continued", { eventId: mention.eventId });
+      }
+    }
+    if (dependencies.workspaces !== undefined) {
+      const person = await slackCompanyPerson(dependencies, thread.teamId, mention.userId);
+      if (person.kind !== "linked") {
+        const text = await slackLinkNotice(dependencies, thread.teamId, mention.userId);
+        if (text !== undefined) await dependencies.postEphemeral?.({ channel: thread.channelId, threadTs: thread.threadTs, user: mention.userId, text });
+        return respond(200, { ok: true });
+      }
+      const text = slackRequestText(mention.text, mention.botUserId);
+      if (/^use(?:\s|$)/i.test(text) || chatGptSlackCommand(text) !== undefined) {
+        await dependencies.postEphemeral?.({ channel: thread.channelId, threadTs: thread.threadTs, user: mention.userId, text: SLACK_WEB_SIGNIN_NOTICE });
+        return respond(200, { ok: true });
       }
     }
     let memberCheckError: string | undefined;
@@ -792,9 +871,11 @@ async function workflowThreadReply(
     return respond(200, { ok: true });
   }
   let outcome: ThreadNoteOutcome;
+  let answer: ThreadNoteAnswer;
   try {
-    ({ outcome } = await dependencies.recordThreadNote({ taskId, thread, userId: mention.userId, messageTs: mention.messageTs, eventId, text: replyText,
-      ...(smallTalk === undefined ? {} : { smallTalk: true as const }) }));
+    answer = await dependencies.recordThreadNote({ taskId, thread, userId: mention.userId, messageTs: mention.messageTs, eventId, text: replyText,
+      ...(smallTalk === undefined ? {} : { smallTalk: true as const }), ...(mention.kind === "mention" ? { mention: true as const } : {}) });
+    outcome = answer.outcome;
   } catch (error) {
     await releaseQuietly(dependencies, log, eventId, "thread_note.release_failed");
     log("thread_note.failed", { eventId, errorName: errorName(error) });
@@ -812,6 +893,11 @@ async function workflowThreadReply(
   // Only a mention asked AgentX something, so only a mention is answered, and only its sender sees it. A
   // duplicate here is the plain-message copy of this same mention, saved first.
   if (mention.kind === "mention") {
+    // L4-U5d: a task the core owns says its own fixed words, privately, and is never sent on as a question: the question reader answers from the old task records, which a core task does not have.
+    if (answer.core === true) {
+      if (outcome !== "duplicate") await ephemeral(dependencies, log, thread, mention.userId, THREAD_INPUT_WORDS[isThreadInputNotice(answer.notice) ? answer.notice : outcome === "captured" ? "note_saved" : "not_saved"]);
+      return respond(200, { ok: true });
+    }
     // The note is saved. A mention that could be a question is sent to the Slack service to decide; it answers or
     // leaves the note as an instruction, so no acknowledgement is posted here unless it could not be sent.
     if (outcome !== "refused" && await routeTaskQuestion(dependencies, log, mention, taskId, replyText)) return respond(200, { ok: true });
@@ -1196,7 +1282,7 @@ export interface SlackRouterTransport {
 }
 
 /** The router's AWS dependencies (Slack's threads table, the state table, the broker, the settings), over `transport`. */
-export function awsSlackRouterDependencies(transport: SlackRouterTransport): SlackRouterDependencies {
+export function awsSlackRouterDependencies(transport: SlackRouterTransport, company: SlackCompanyDependencies = {}): SlackRouterDependencies {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration), {
     marshallOptions: { removeUndefinedValues: true },
@@ -1229,6 +1315,7 @@ export function awsSlackRouterDependencies(transport: SlackRouterTransport): Sla
   const changePending = threadPendingCounter(documentClient, threadsTableName);
   const enqueueAnswer = (answer: Parameters<SlackRouterTransport["enqueueAnswer"]>[0]) => transport.enqueueAnswer(answer);
   return {
+    ...company,
     appPosted: { accept: settings.acceptAppPosted, checkMember },
     turnLimit: {
       perMinute: settings.turnsPerMinute,
@@ -1347,7 +1434,7 @@ export function awsSlackRouterDependencies(transport: SlackRouterTransport): Sla
         async startWorkflow(input: SlackWorkflowStartInput) {
           await invokeWorkflow(input);
         },
-        async recordThreadNote(input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string; smallTalk?: true }) {
+        async recordThreadNote(input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string; smallTalk?: true; mention?: true }) {
           return recordThreadNoteThroughBroker(invokeBroker, input);
         },
         async recordIntake(input: SlackIntakeRecordInput) {
@@ -1368,18 +1455,19 @@ export function awsSlackRouterDependencies(transport: SlackRouterTransport): Sla
 }
 
 /** Slack's own transport: the bot token for Slack, and Slack's request queue. */
-function slackDirectTransport(secrets: () => Promise<SlackSecrets>): SlackRouterTransport {
+export function slackDirectTransport(secrets: () => Promise<SlackSecrets>, company: SlackCompanyDependencies = {}): SlackRouterTransport {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
   const sqs = new SQSClient(clientConfiguration);
   const queueUrl = requiredEnvironment("SLACK_REQUEST_QUEUE_URL");
   const enqueueAnswer = createAnswerQueue({ sqs, queueUrl, changePending: threadPendingCounter(documentClient, requiredEnvironment("SLACK_THREADS_TABLE_NAME")) });
-  const checkMember = createSlackMemberCheck({ token: async () => (await secrets()).botToken });
+  const checkMember = createSlackMemberCheck({ token: async () => await slackCompanyToken(company, async () => (await secrets()).botToken) });
   return {
-    postMessage: async (input) => postSlackMessage((await secrets()).botToken, input),
-    update: async (input) => chatUpdate((await secrets()).botToken, input),
-    postEphemeral: async (input) => chatPostEphemeral((await secrets()).botToken, input),
-    checkMember,
+    postMessage: async (input) => postSlackMessage(await slackCompanyToken(company, async () => (await secrets()).botToken), input),
+    update: async (input) => chatUpdate(await slackCompanyToken(company, async () => (await secrets()).botToken), input),
+    postEphemeral: async (input) => chatPostEphemeral(await slackCompanyToken(company, async () => (await secrets()).botToken), input),
+    // The legacy checker caches raw user IDs; company requests must never share that cache.
+    checkMember: company.workspaces === undefined ? checkMember : (userId) => createSlackMemberCheck({ token: () => slackCompanyToken(company, async () => (await secrets()).botToken) })(userId),
     async enqueue(message, messageGroupId, queuedBehind) {
       await sqs.send(new SendMessageCommand({
         QueueUrl: queueUrl,
@@ -1418,21 +1506,30 @@ function cachedSlackSecrets(): () => Promise<SlackSecrets> {
   };
 }
 
-function createAwsSlackIngressHandler() {
+/** Guided onboarding PR 4: a verified removal goes to the broker by a direct invoke (it already lets this Lambda invoke it); none without a broker. */
+/** Exported for tests (L2-2 PR 18c): the cache is dropped only after the broker accepted the removal. */
+export function brokerWorkspaceRemoved(onRemoved?: (teamId: string) => void, lambda: Pick<LambdaClient, "send"> = new LambdaClient(process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION })): { workspaceRemoved?: SlackWorkspaceRemovedHandOff } {
+  const functionName = process.env.BROKER_FUNCTION_NAME;
+  if (functionName === undefined || functionName === "") return {};
+  return {
+    async workspaceRemoved(removal) {
+      const response = await lambda.send(new InvokeCommand({ FunctionName: functionName, InvocationType: "RequestResponse", Payload: Buffer.from(JSON.stringify(removal)) }));
+      if (response.FunctionError !== undefined || response.Payload === undefined) throw new Error("broker removal failed");
+      const reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as BrokerReply;
+      if (reply.statusCode !== 200) throw new Error("broker removal failed");
+      // L2-2 PR 18c: this process's cached token for the removed workspace goes at once (other processes' copies expire within five minutes).
+      onRemoved?.(removal.teamId);
+    },
+  };
+}
+
+export function createAwsSlackIngressHandler(company: SlackCompanyDependencies = {}) {
   const secrets = cachedSlackSecrets();
-  return createSlackIngressHandler({ secrets, ...awsSlackRouterDependencies(slackDirectTransport(secrets)) });
+  return createSlackIngressHandler({ secrets, ...awsSlackRouterDependencies(slackDirectTransport(secrets, company), company), ...brokerWorkspaceRemoved(company.onWorkspaceRemoved) });
 }
 
 /** Slack's interactivity request URL path (spec 014): button presses, and 14d's Details view. */
 export const SLACK_INTERACTIONS_PATH = "/v1/slack/interactions";
-
-let awsHandler: ReturnType<typeof createSlackIngressHandler> | undefined;
-let awsInteractivityHandler: ReturnType<typeof createAwsSlackInteractivityHandler> | undefined;
-let awsChannelEventsHandler: ReturnType<typeof createAwsSlackChannelEventsHandler> | undefined;
-let awsChannelCommandsHandler: ReturnType<typeof createAwsSlackChannelCommandsHandler> | undefined;
-let awsAdapterBotToken: (() => Promise<string>) | undefined;
-let awsAdapterFront: ReturnType<typeof createSlackAdapterFront> | undefined;
-let awsForward: ((message: InboundMessage | ChannelAction) => Promise<void>) | undefined;
 
 /** Phase 7c2: a message the adapter's front handed to an asynchronous invoke of this Lambda, for the channel API. */
 interface HandedOffSlackMessage { source: "agentx.slack-adapter"; kind: "forward"; message: unknown }
@@ -1442,13 +1539,18 @@ function isHandedOffSlackMessage(event: unknown): event is HandedOffSlackMessage
 }
 
 /** The adapter's front, with its hand-off to this same Lambda and the record of Rovara's threads. */
-function createAwsSlackAdapterFront(): ReturnType<typeof createSlackAdapterFront> {
+export function createAwsSlackAdapterFront(company: SlackCompanyDependencies = {}): ReturnType<typeof createSlackAdapterFront> {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const lambda = new LambdaClient(clientConfiguration);
   const threads = rovaraThreads(DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration)), requiredEnvironment("SLACK_THREADS_TABLE_NAME"));
   const functionName = requiredEnvironment("AWS_LAMBDA_FUNCTION_NAME");
+  const secrets = cachedSlackSecrets();
   return createSlackAdapterFront({
-    secrets: cachedSlackSecrets(),
+    ...company,
+    ...brokerWorkspaceRemoved(company.onWorkspaceRemoved),
+    postEphemeral: async (input) => chatPostEphemeral(await slackCompanyToken(company, async () => (await secrets()).botToken), input),
+    secrets,
+    ...(company.workspaces === undefined ? {} : { getBinding: awsSlackRouterDependencies(slackDirectTransport(secrets, company), company).getBinding }),
     isRovaraThread: (thread) => threads.has(thread.channelId, thread.threadTs),
     async handOff(message) {
       const payload: HandedOffSlackMessage = { source: "agentx.slack-adapter", kind: "forward", message };
@@ -1484,37 +1586,93 @@ function awsBotToken(): () => Promise<string> {
  * The Events API and, since spec 014, Slack's interactivity request URL share this Lambda. Task 19: so does the
  * asynchronous start of a Quick or Full choice, which the interactivity handler hands to this same Lambda.
  */
-export const handler = async (event: HttpApiV2Event | HandedOffWorkflowStart | HandedOffChatGptFinish | HandedOffSlackMessage): Promise<HttpResponse> => {
+export function createAwsSlackHandler(company: SlackCompanyDependencies = {}) {
+let awsHandler: ReturnType<typeof createSlackIngressHandler> | undefined;
+let awsInteractivityHandler: ReturnType<typeof createAwsSlackInteractivityHandler> | undefined;
+let awsChannelEventsHandler: ReturnType<typeof createAwsSlackChannelEventsHandler> | undefined;
+let awsChannelCommandsHandler: ReturnType<typeof createAwsSlackChannelCommandsHandler> | undefined;
+let awsAdapterBotToken: (() => Promise<string>) | undefined;
+let awsAdapterFront: ReturnType<typeof createSlackAdapterFront> | undefined;
+let awsForward: ((message: InboundMessage | ChannelAction) => Promise<void>) | undefined;
+let awsRovara: ((handOff: RovaraHandOff) => Promise<void>) | undefined;
+
+return async (event: HttpApiV2Event | HandedOffWorkflowStart | HandedOffChatGptFinish | HandedOffSlackMessage | RovaraHandOff): Promise<HttpResponse> => {
+  // Guided onboarding PR 5: a verified `/rovara` command or press the interactivity front handed on; the broker answers, then the person is answered privately.
+  if (isRovaraHandOff(event)) {
+    awsRovara ??= awsRovaraHandOffRunner();
+    await awsRovara(event);
+    return respond(200, { ok: true });
+  }
   // Phase 7c2: a handed-off message goes to the channel API; a throw has Lambda try it again (then its failure queue).
   if (isHandedOffSlackMessage(event)) {
     awsForward ??= slackChannelForwarderFromEnvironment(new SecretsManagerClient(process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION }));
     if (awsForward === undefined) throw new Error("Slack does not go through the channel API here");
     // Phase 7c3: a press is an action.
     const handed = event.message as { actionId?: unknown };
-    await awsForward(typeof handed.actionId === "string" ? ChannelActionSchema.parse(event.message) : InboundMessageSchema.parse(event.message));
+    const message = typeof handed.actionId === "string" ? ChannelActionSchema.parse(event.message) : InboundMessageSchema.parse(event.message);
+    if (company.workspaces !== undefined) {
+      try {
+        const person = await slackCompanyPerson(company, message.actor.tenant, message.actor.userId);
+        if (person.kind !== "linked") return respond(200, { error: SLACK_WEB_SIGNIN_NOTICE });
+        if (message.conversation !== undefined && message.conversation.tenant !== message.actor.tenant) return respond(200, { error: SLACK_WEB_SIGNIN_NOTICE });
+      } catch { return respond(200, { error: SLACK_WEB_SIGNIN_NOTICE }); }
+    }
+    await awsForward(message);
     return respond(200, { ok: true });
   }
   // Spec 062 Phase 7b: the core's events for Slack, when Slack goes through the channel API.
   if (!isHandedOffWorkflowStart(event) && !isHandedOffChatGptFinish(event) && event.rawPath === SLACK_CHANNEL_EVENTS_PATH) {
     awsAdapterBotToken ??= awsBotToken();
-    awsChannelEventsHandler ??= createAwsSlackChannelEventsHandler(awsAdapterBotToken);
+    awsChannelEventsHandler ??= createAwsSlackChannelEventsHandler(awsAdapterBotToken, company.workspaces);
     return awsChannelEventsHandler(event);
   }
   // Phase 7c: the core's commands for Slack (posts it must know the result of, Canvases).
   if (!isHandedOffWorkflowStart(event) && !isHandedOffChatGptFinish(event) && event.rawPath === SLACK_CHANNEL_COMMANDS_PATH) {
     awsAdapterBotToken ??= awsBotToken();
-    awsChannelCommandsHandler ??= createAwsSlackChannelCommandsHandler(awsAdapterBotToken);
+    awsChannelCommandsHandler ??= createAwsSlackChannelCommandsHandler(awsAdapterBotToken, company.workspaces);
     return awsChannelCommandsHandler(event);
   }
   if (isHandedOffWorkflowStart(event) || isHandedOffChatGptFinish(event) || event.rawPath === SLACK_INTERACTIONS_PATH) {
-    awsInteractivityHandler ??= createAwsSlackInteractivityHandler();
+    awsInteractivityHandler ??= createAwsSlackInteractivityHandler(company);
     return awsInteractivityHandler(event);
   }
   // Phase 7c2: with SlackViaChannel on, Slack's events go to the channel API, which decides what they are.
   if (process.env.SLACK_VIA_CHANNEL === "enabled") {
-    awsAdapterFront ??= createAwsSlackAdapterFront();
+    awsAdapterFront ??= createAwsSlackAdapterFront(company);
     return awsAdapterFront(event);
   }
-  awsHandler ??= createAwsSlackIngressHandler();
+  awsHandler ??= createAwsSlackIngressHandler(company);
   return awsHandler(event);
 };
+
+}
+
+/**
+ * L2-2 PR 18c: Slack company mode (slack-company-wiring.ts). Off (either switch, or a half-configured Lambda), this is today's handler itself. On, two handlers: the install's
+ * team, and anything naming no team, keeps today's handler; another team's request goes to the company handler (its binding, token and link checks). The team is read from the
+ * request only to choose; each handler verifies Slack's signature itself. Link notices are written by the broker through the existing invoke (this Lambda has no State write).
+ */
+export function createAwsSlackHandlerFromEnvironment(env: NodeJS.ProcessEnv = process.env, make: (company: SlackCompanyDependencies) => ReturnType<typeof createAwsSlackHandler> = createAwsSlackHandler) {
+  const clientConfiguration = env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION };
+  const dynamo = new DynamoDBClient(clientConfiguration);
+  const functionName = env.BROKER_FUNCTION_NAME ?? "";
+  const lambda = new LambdaClient(clientConfiguration);
+  const wiring = functionName === "" ? undefined : slackCompanyDependenciesFromEnvironment(env, {
+    documentClient: DynamoDBDocumentClient.from(dynamo), dynamo, secrets: new SecretsManagerClient(clientConfiguration),
+    async linkNotice(teamId, userId) {
+      const response = await lambda.send(new InvokeCommand({ FunctionName: functionName, InvocationType: "RequestResponse", Payload: Buffer.from(JSON.stringify({ source: "agentx.slack-link-notice", teamId, userId })) }));
+      if (response.FunctionError !== undefined || response.Payload === undefined) return undefined;
+      const reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as BrokerReply;
+      if (reply.statusCode !== 200) return undefined;
+      const text = (JSON.parse(reply.body ?? "{}") as { text?: unknown }).text;
+      return typeof text === "string" && text.length <= 2_000 ? text : undefined;
+    },
+  });
+  if (wiring === undefined) return make({});
+  // Defence in depth, as in the broker's legacy view: another team's channel binding is "not bound" in today's handler while company mode is on.
+  const legacy = make({ slackInstallTeamOnly: wiring.legacyTeamId });
+  const company = make({ workspaces: wiring.workspaces, ...(wiring.companies === undefined ? {} : { companies: wiring.companies }), onWorkspaceRemoved: (team) => wiring.forget(team) });
+  return splitBySlackIngressTeam(legacy, company, wiring.legacyTeamId);
+}
+
+export const handler = createAwsSlackHandlerFromEnvironment();

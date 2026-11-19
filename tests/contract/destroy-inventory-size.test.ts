@@ -32,6 +32,8 @@ function physicalId(stackName: string, logicalId: string, resource: Resource): s
     case "AWS::KMS::Key": return "1234abcd-12ab-34cd-56ef-1234567890ab";
     case "AWS::SecretsManager::Secret": return `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:${named("Name") ?? generated(256)}-AbCdEf`;
     case "AWS::Cognito::UserPool": return `${REGION}_AbCdEfGhI`;
+    // Batch 17 (#994): an Elastic IP's physical ID is its public IPv4 address (at most 15 characters).
+    case "AWS::EC2::EIP": return "255.255.255.255";
     default: return generated(255);
   }
 }

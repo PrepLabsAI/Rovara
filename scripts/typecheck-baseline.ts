@@ -205,8 +205,8 @@ const LINT_CONFIG = "tsconfig.lint.json";
 const require = createRequire(import.meta.url);
 
 /** Node's arguments for the tsc run. The lint project covers every test file, which outgrows Node's
- * default heap on a CI runner, so it gets a 6 GB heap. */
-export function tscArguments(tscPath: string, heapMb = 6144): string[] {
+ * default heap on a CI runner. It gets a 12 GB heap: the project outgrew 6 GB as the core grew (a public CI runner has 16 GB). */
+export function tscArguments(tscPath: string, heapMb = 12288): string[] {
   return [`--max-old-space-size=${heapMb}`, tscPath, "-p", LINT_CONFIG, "--noEmit", "--pretty", "false"];
 }
 

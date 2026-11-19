@@ -1,8 +1,11 @@
-import { AgentXError, itemPathProblems, type ConnectorPreflight, type ProjectDefinition, type RegistrationPreflight } from "@agentx/contracts";
+import { AgentXError, ConnectionIdSchema, itemPathProblems, type ConnectorPreflight, type ProjectDefinition, type RegistrationPreflight } from "@agentx/contracts";
 import { ConnectorNotConnected, isObject, presentCatalog, TARGET_CONFLICT_REASON, type CatalogTool, type GuardedItemTools, type SkippedTool } from "@agentx/gateway";
 import { discoverScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
 import type { ResolvedConnector } from "./connector-types.js";
-import { credentialSetupCommand, hostPinProblem, type CredentialRegistry } from "./credentials.js";
+import { credentialSetupCommand, hostPinProblem, type ConnectorCredentials } from "./credentials.js";
+
+/** The connector types that are built in, run in the broker and never write. */
+const READ_ONLY_NATIVE_TYPES: ReadonlySet<string> = new Set(["sentry", "datadog", "cloudwatch", "github-actions", "grafana", "vercel", "pagerduty"]);
 
 const MAX_SKIPPED = 64;
 const MAX_PROBLEM = 512;
@@ -54,7 +57,10 @@ async function preflightConnector(
   // Item argument paths are the connector's own data (feature 014, R7). This check runs only when
   // the caller asks for preflight, after the connector definition resolves and before discovery
   // contacts the vendor; if a malformed declaration were ever served anyway, it is served as none.
-  const pathProblems = itemPathProblems(resolved.itemArguments);
+  // A native connector (Sentry, Datadog, CloudWatch, GitHub Actions, Grafana, Vercel, PagerDuty) only reads, so it declares no item argument on purpose (`itemArguments: []`); every other
+  // connector can write, and must say which arguments name an item.
+  const declaresNoneOnPurpose = resolved.itemArguments?.length === 0 && READ_ONLY_NATIVE_TYPES.has(connector.type);
+  const pathProblems = declaresNoneOnPurpose ? [] : itemPathProblems(resolved.itemArguments);
   if (pathProblems.length > 0) {
     return {
       entry: { name: connector.name, status: "unavailable", problem: `connector ${connector.name} declares unusable item arguments`, offered: [], skipped: [] },
@@ -130,14 +136,17 @@ export function registrationWarnings(budgetWarning: string | undefined, prefligh
  * registry, an unregistered reference, or a provider type the connector does not accept.
  * Only the reference and type are named, never a secret.
  */
-export async function credentialRefusals(connectors: readonly ResolvedConnector[], registry: CredentialRegistry | undefined): Promise<string[]> {
+export async function credentialRefusals(connectors: readonly ResolvedConnector[], registry: ConnectorCredentials | undefined): Promise<string[]> {
   const refusals: string[] = [];
   for (const connector of connectors) {
     const credential = connector.credential;
     if (!credential) continue;
     if (!registry) { refusals.push(`connector ${connector.name}: connector credentials are not configured in this deployment`); continue; }
     const type = await registry.typeOf(credential.ref);
-    if (type === undefined) refusals.push(`connector ${connector.name}: credential ${credential.ref} is not registered; run ${credentialSetupCommand(credential.accepts)} first`);
+    // A connection the owner added on the Connections page is not set up with a command: they have to remove the connector or pick another connection.
+    if (type === undefined) refusals.push(ConnectionIdSchema.safeParse(credential.ref).success
+      ? `${connector.name}: its connection was removed; remove this connector or pick another connection first`
+      : `connector ${connector.name}: credential ${credential.ref} is not registered; run ${credentialSetupCommand(credential.accepts)} first`);
     else if (!credential.accepts.includes(type)) refusals.push(`connector ${connector.name}: credential ${credential.ref} is ${type}; ${/^[AEIOU]/.test(connector.vendor) ? "an" : "a"} ${connector.vendor} connector needs ${credential.accepts.join(" or ")}`);
     else {
       const pinned = hostPinProblem(credential.ref, (await registry.registration(credential.ref))?.host, credential.pin);

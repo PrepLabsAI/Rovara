@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  SLACK_THREAD_OWNER_ISSUER, SlackChannelIdSchema, SlackMessageTimestampSchema, SlackRequestMessageSchema, SlackTeamIdSchema,
+  SLACK_THREAD_OWNER_ISSUER, SlackMessageTimestampSchema, SlackRequestMessageSchema, SlackTeamIdSchema,
   SlackUserIdSchema, type SlackRequestMessage,
 } from "./slack.js";
 
@@ -22,6 +22,12 @@ function checkSlack(context: z.RefinementCtx, schema: z.ZodType, value: string, 
   if (!schema.safeParse(value).success) context.addIssue({ code: "custom", path: [field], message: `not a Slack ${field}` });
 }
 
+/**
+ * A Slack conversation's space: a public or private channel, or a direct message (`D...`: where a person is told, and a message from them is heard). A binding of a space to a project (channel-binding.ts) stays
+ * on channels only.
+ */
+const SlackConversationSpaceSchema = z.string().regex(/^[CGD][A-Z0-9]{2,31}$/);
+
 export const ConversationRefSchema = z.object({
   channel: ChannelIdSchema,
   tenant: ChannelOpaqueIdSchema,
@@ -30,7 +36,7 @@ export const ConversationRefSchema = z.object({
 }).strict().superRefine((ref, context) => {
   if (ref.channel !== SLACK_CHANNEL) return;
   checkSlack(context, SlackTeamIdSchema, ref.tenant, "tenant");
-  checkSlack(context, SlackChannelIdSchema, ref.space, "space");
+  checkSlack(context, SlackConversationSpaceSchema, ref.space, "space");
   checkSlack(context, SlackMessageTimestampSchema, ref.thread, "thread");
 });
 export type ConversationRef = z.infer<typeof ConversationRefSchema>;

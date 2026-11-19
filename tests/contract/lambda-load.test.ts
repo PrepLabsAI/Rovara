@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { IMPORT_META_ALLOWLIST, checkLambdaBundles, classifyLoad, importMetaProblems, lambdaLoadError } from "../../scripts/lambda-load-check.js";
-import { CONTROL_PLANE_LAMBDAS } from "../../scripts/test-deploy.js";
+import { CONTROL_PLANE_LAMBDAS, lambdaLoadEntries } from "../../scripts/test-deploy.js";
 import { REQUALIFY_LAMBDA } from "../../scripts/test-deploy-requalify.js";
 
 const repoRoot = join(import.meta.dirname, "..", "..");
@@ -28,7 +28,15 @@ async function check(name: string, files: Record<string, string>, allowlist: Par
 }
 
 describe("the real control-plane Lambdas (I-1 LAMBDALOAD gate)", () => {
-  const entries = Object.entries(CONTROL_PLANE_LAMBDAS).map(([name, lambda]) => ({ name, entry: lambda.entry }));
+  // Each entry, and each module an entry loads only at its first invocation (ENV-ROOM 2: the broker's broker.ts), so an init-time crash there is caught too.
+  const entries = lambdaLoadEntries(Object.keys(CONTROL_PLANE_LAMBDAS) as Array<keyof typeof CONTROL_PLANE_LAMBDAS>);
+
+  it("loads the broker's broker.ts as well as its entry", () => {
+    expect(entries.filter((entry) => entry.name.startsWith("broker"))).toEqual([
+      { name: "broker", entry: "packages/broker/src/aws/broker-handler.ts" },
+      { name: "broker:broker.ts", entry: "packages/broker/src/aws/broker.ts" },
+    ]);
+  });
 
   it("every CONTROL_PLANE_LAMBDAS bundle loads, or stops at init on a missing environment variable only", async () => {
     const report = await checkLambdaBundles({ root: repoRoot, entries });

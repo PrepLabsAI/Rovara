@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { describe, expect, it, vi } from "vitest";
+import { expectLinearScalingAsync } from "../support/scaling.js";
 import { boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 import { detectWorkspacePackages, detectWorkspacePackagesInThread } from "../../packages/worker/src/env-detect/packages.js";
 import { discoverWorkspaceRoots } from "../../packages/worker/src/env-detect/workspace-roots.js";
@@ -31,15 +32,9 @@ describe("workspace call limits", () => {
   });
 
   it("keeps a unit reader from reading files owned by nested units", async () => {
-    // On code/next this probes with a plug-in detector (step 5's build-system plug-ins, not on mainline yet). Here the built-in
-    // compose detector, which reads every compose file its reader lists, shows the same thing: a file owned by a nested unit is
-    // seen by that unit only, never by the unit around it.
-    const files: Files = { "package.json": '{"workspaces":["a","a/nested"]}', "a/package.json": node, "a/nested/package.json": node, "a/nested/docker-compose.yml": "services:\n  db:\n    image: postgres:16\n" };
-    const result = await detectWorkspacePackagesInThread(boundedReader(Object.keys(files), (path) => Promise.resolve(files[path])).reader, "repo", { only: ["compose"] });
-    const unit = (root: string) => result.units.find((entry) => entry.root === root)!;
-    expect(unit("a/nested").detection.dependencies?.length ?? 0).toBeGreaterThan(0);
-    expect(unit("a").detection.dependencies ?? []).toEqual([]);
-    expect(unit(".").detection.dependencies ?? []).toEqual([]);
+    const files: Files = { "package.json": '{"workspaces":["a","a/nested"]}', "a/package.json": node, "a/nested/package.json": node };
+    const result = await detectWorkspacePackagesInThread(boundedReader(Object.keys(files), (path) => Promise.resolve(files[path])).reader, "repo", { only: ["ownership"], extraDetectors: [{ name: "ownership", run: async ({ repo, cwd }) => ({ notes: [cwd === "repo/a" && await repo.read("nested/package.json") !== undefined ? "leaked" : "isolated"] }) }] });
+    expect(result.units.find((unit) => unit.root === "a")!.detection.notes).toEqual(["isolated"]);
   });
 
   it("accepts exactly 5000 inventory paths", async () => {
@@ -123,30 +118,48 @@ describe("workspace call limits", () => {
 
 describe("bounded workspace patterns", () => {
   it("rejects the review's 127 KiB pattern bomb quickly", async () => {
-    const files: Files = {};
-    const patterns: string[] = [];
-    for (let n = 0; n < 4000; n += 1) { files[`d/x${String(n)}/package.json`] = node; patterns.push(`  - 'd/x${String(n)}'`); }
-    for (let n = 0; n < 4000; n += 1) patterns.push(`  - '!d/zz${String(n)}/**'`);
-    files["pnpm-workspace.yaml"] = `packages:\n${patterns.join("\n")}\n`;
-    const started = performance.now();
-    await expect(declaration(files)).rejects.toThrow();
-    expect(performance.now() - started).toBeLessThan(2000);
-  }, 4000);
+    // A scaling check, not a wall-clock bound: the same bomb (n folders, n positive and n negative patterns; both sizes are over the 256-pattern limit) at 130 folders and at eight times that
+    // (about 190 bytes a folder, so the 8N input stays at or under 256 KiB and stays in CPU cache) may take about eight times as long to refuse, never sixty-four. The review's full size (4000) is refused once, un-timed.
+    let outcome: unknown;
+    const bomb = (count: number) => {
+      const files: Files = {};
+      const patterns: string[] = [];
+      for (let n = 0; n < count; n += 1) { files[`d/x${String(n)}/package.json`] = node; patterns.push(`  - 'd/x${String(n)}'`); }
+      for (let n = 0; n < count; n += 1) patterns.push(`  - '!d/zz${String(n)}/**'`);
+      files["pnpm-workspace.yaml"] = `packages:\n${patterns.join("\n")}\n`;
+      return async () => { outcome = await declaration(files).then(() => undefined, (error: unknown) => error); };
+    };
+    await expectLinearScalingAsync(bomb, { n: 130, unitBytes: 190, label: "pattern bomb refusal" });
+    expect(outcome).toBeInstanceOf(Error);
+    outcome = undefined;
+    await bomb(4000)();
+    expect(outcome).toBeInstanceOf(Error);
+  }, 60_000);
 
   it("matches 256 compiled prefix-pruned patterns against 4000 folders quickly", async () => {
-    const files: Files = {};
-    const patterns: string[] = [];
-    for (let n = 0; n < 4000; n += 1) files[`d/x${String(n)}/package.json`] = node;
-    for (let n = 0; n < 128; n += 1) patterns.push(`d/x${String(n)}`, `!d/z${String(n)}/**`);
-    files["pnpm-workspace.yaml"] = `packages: ${JSON.stringify(patterns)}`;
-    const started = performance.now();
+    const filesOf = (folders: number): Files => {
+      const files: Files = {};
+      const patterns: string[] = [];
+      for (let n = 0; n < folders; n += 1) files[`d/x${String(n)}/package.json`] = node;
+      for (let n = 0; n < 128; n += 1) patterns.push(`d/x${String(n)}`, `!d/z${String(n)}/**`);
+      files["pnpm-workspace.yaml"] = `packages: ${JSON.stringify(patterns)}`;
+      return files;
+    };
+    // The time must grow about eight times from 300 to 2400 folders (about 100 bytes a folder, so the 8N input stays at or under 256 KiB and stays in CPU cache), never sixty-four (a scaling check, not a wall-clock bound). The full 4000 folders run once below.
+    let roots: string[] | undefined;
+    await expectLinearScalingAsync((folders) => {
+      const files = filesOf(folders);
+      return async () => { roots = await declaration(files); };
+    }, { n: 300, unitBytes: 100, label: "prefix-pruned patterns against folders" });
+    expect(roots).toHaveLength(128);
+    // The work counter: with the prefix seek, 4000 folders cost far fewer than 20000 pattern tests.
+    const files = filesOf(4000);
     const tests = vi.spyOn(RegExp.prototype, "test");
     try {
       expect(await declaration(files)).toHaveLength(128);
       expect(tests.mock.calls.length).toBeLessThan(20000);
-      expect(performance.now() - started).toBeLessThan(500);
     } finally { tests.mockRestore(); }
-  });
+  }, 60_000);
 
   it("counts exclusions and patterns across declarations in the same cap", async () => {
     const files: Files = { "package.json": JSON.stringify({ workspaces: Array(128).fill("a") }), "a/package.json": node, "pyproject.toml": `[tool.uv.workspace]\nmembers = ["a"]\nexclude = ${JSON.stringify(Array(128).fill("b"))}` };

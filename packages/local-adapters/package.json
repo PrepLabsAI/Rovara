@@ -1,0 +1,21 @@
+{
+  "name": "@agentx/local-adapters",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./storage": "./dist/storage-plugin.js",
+    "./queue": "./dist/queue-plugin.js",
+    "./object-storage": "./dist/object-storage-plugin.js",
+    "./audit-sink": "./dist/audit-sink-plugin.js",
+    "./company-instructions": "./dist/company-instructions-plugin.js"
+  },
+  "types": "./dist/index.d.ts",
+  "engines": {
+    "node": ">=22.19.0 <23"
+  },
+  "dependencies": {
+    "@agentx/contracts": "0.1.0"
+  }
+}

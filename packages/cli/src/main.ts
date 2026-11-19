@@ -20,6 +20,9 @@ import {
   CLIENT_SCOPES,
   type SignInClientRegistration,
   type SignInClientView,
+  CompanyInviteCodeIdSchema,
+  newCompanyInviteCode,
+  type AdminChangeInput,
 } from "@agentx/contracts";
 import { DEFAULT_DIRECT_MODELS } from "@agentx/model-runtime/config";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
@@ -37,6 +40,8 @@ import { setTaskShareMode } from "./admin/task-share-mode.js";
 import { showTaskE2EReplays, startTaskE2EReplay } from "./admin/task-e2e-replay.js";
 import { cancelWorkspaceTask } from "./admin/cancel.js";
 import { askToApply, exportChanges, runCliChange } from "./admin/changes.js";
+import { describeCompanyInvite, inviteExpiryHours, listCompanyInvites } from "./admin/company-invites.js";
+import { companyImportId, describeCompanyImport, previewCompanyImport } from "./admin/company-import.js";
 import { describeSignInClient, listSignInClients, newClientSecret, signInClientId, signInClientRegistration, signInClientUpdate, type SignInClientAddOptions, type SignInClientUpdateOptions } from "./admin/sign-in-clients.js";
 import { batchResultsOutput, evalBatchShowText, evalBatchStartText, fetchEvalBatchResults, showEvalBatch, startEvalBatch, stopEvalBatch } from "./admin/eval-batch.js";
 import { disableEvalChannel, enableEvalChannel, parseMaxCostUsd, showEvalChannel } from "./admin/eval.js";
@@ -47,8 +52,11 @@ import { developerLogout, fetchDeveloperProjects, logoutText, whoamiText } from 
 import { resolveDeveloperEnvironment } from "./developer/config.js";
 import { chatGptConnect, chatGptConnectionText, chatGptDisconnect, chatGptDisconnectText, chatGptStatus } from "./developer/chatgpt.js";
 import { developerLogin } from "./developer/login.js";
+import { registerLessonsReplayCommand } from "./developer/lessons-replay.js";
 import { fetchDeveloperWorkspaces, type DeveloperWorkspacesResult } from "./developer/workspaces.js";
 import { runWorkspacesCommand } from "./workspaces-ui/index.js";
+import { registerRecordCommands, type RecordCommandContext } from "./record/register.js";
+import { registerSessionCommands } from "./session/register.js";
 import { listAdminWorkspaces } from "./admin/workspaces.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
 import { installMcp, MCP_CLIENTS, runCommand, type McpClientKind, type McpInstallDeps } from "./mcp/install.js";
@@ -78,6 +86,12 @@ import { registerDoctorCommand } from "./doctor/cli.js";
 import type { DoctorServices } from "./doctor/checks.js";
 import { addSignInOptions, definedEntries, registerSigninCommands, secretSource, signInFlags, type SignInCommandOptions } from "./signin/cli.js";
 import { registerDestroyCommand } from "./destroy/cli.js";
+import { registerDesignReviewCommand, registerConnectionsCommand, registerModelsCommand, registerDiagnosisCommand, registerIntakeCommand, registerOpenCommand, registerSecondReviewCommand, registerUpCommand, type UpCommandContext } from "./up/cli.js";
+import { registerTestEnvCommand } from "./up/test-env-command.js";
+import { registerTokenCommands } from "./up/token.js";
+import { registerPlaybookCommands } from "./up/playbook.js";
+import { registerChatCommands } from "./up/chat.js";
+import { registerSetupAgentCommands } from "./up/setup-agent.js";
 import type { DestroyDependencies } from "./destroy/run.js";
 import { registerUpgradeCommand } from "./upgrade/cli.js";
 import type { UpgradeDependencies } from "./upgrade/run.js";
@@ -113,6 +127,8 @@ export interface CliDependencies {
    */
   cliInvocation?: CliInvocation;
   fetchImplementation?: typeof fetch;
+  /** `record sagemaker`, for tests: the invoker that stands in for the customer's AWS CLI, the clock and the fetch a Presidio analyzer is asked through. */
+  record?: Pick<RecordCommandContext, "invoker" | "now" | "fetch">;
   tokenStore?: TokenStore;
   stdout?: TextWriter;
   stderr?: TextWriter;
@@ -148,6 +164,8 @@ export interface CliDependencies {
   doctor?: { store?: ParameterStore; services?: (settings: EnvironmentSettings) => DoctorServices };
   /** `agentx upgrade` overrides, for tests: never touch AWS or GitHub. */
   upgrade?: Partial<UpgradeDependencies>;
+  /** `rovara up` overrides, for tests: never start a server, touch Docker or reach GitHub. */
+  up?: Partial<UpCommandContext>;
   /** `agentx destroy` overrides, for tests: never touch AWS. */
   destroy?: Partial<DestroyDependencies>;
   /** `agentx workspaces` overrides, for tests: never reach the control plane or open a browser. */
@@ -477,6 +495,22 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       return session === undefined ? undefined : { controlPlaneUrl: session.baseUrl, accessToken: session.accessToken };
     },
   });
+  registerUpCommand(program, {
+    home, version: CLI_VERSION, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr, ...dependencies.up,
+  });
+  registerOpenCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerTestEnvCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerTokenCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerLessonsReplayCommand(program, { home, tokenStore: services.tokenStore, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerPlaybookCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerSecondReviewCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerConnectionsCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerModelsCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerDesignReviewCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerDiagnosisCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerIntakeCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerChatCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerSetupAgentCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerUpgradeCommand(program, {
     ...(dependencies.upgrade === undefined ? {} : { overrides: dependencies.upgrade }),
     ...(dependencies.deploy === undefined ? {} : { deploy: dependencies.deploy }),
@@ -747,6 +781,86 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         write: (line) => { services.stderr.write(`${line}\n`); },
       }, services.fetchImplementation);
       services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, clientId }, globals.json));
+    });
+
+  // DEC 254a: company invite codes for self-serve company sign-up. A change shows its effect and asks first, as sign-in clients do.
+  const adminCompanyInvite = admin.command("company-invite").description("invite codes that let one person create their own company (self-serve sign-up)");
+  const runInviteChange = async (command: Command, change: AdminChangeInput, yes: boolean) => {
+    const globals = globalOptions(command);
+    const confirm = changeConfirmer(yes);
+    const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+    const result = await runCliChange({
+      controlPlaneUrl: settings.controlPlaneUrl, accessToken, cliVersion: CLI_VERSION, change,
+      confirm: () => confirm("Apply this change?"),
+      write: (line) => { services.stderr.write(`${line}\n`); },
+    }, services.fetchImplementation);
+    return { globals, result };
+  };
+  adminCompanyInvite
+    .command("create")
+    .description("make a single-use invite code; it is shown once, and Rovara keeps only its hash; shows the change and asks first")
+    .requiredOption("--expires-in-hours <hours>", "how long it can be used, from 1 to 720 hours")
+    .option("--yes", "apply without asking; the change is still printed", false)
+    .action(async (options: { expiresInHours: string; yes: boolean }, command: Command) => {
+      const expiresInHours = inviteExpiryHours(options.expiresInHours);
+      const made = newCompanyInviteCode();
+      const { globals, result } = await runInviteChange(command, { kind: "create_company_invite", codeHash: made.codeHash, expiresInHours }, options.yes);
+      const applied = result.outcome === "applied";
+      // The code goes to the operator's own terminal only once the change applied, and never into a record.
+      if (applied && !globals.json) services.stderr.write(`Invite code (shown once; give it to the person, Rovara keeps only its hash):\n${made.code}\n`);
+      services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, codeId: made.codeId, ...(applied && globals.json ? { inviteCode: made.code } : {}) }, globals.json));
+    });
+  adminCompanyInvite
+    .command("list")
+    .description("list the invite codes (their ids, status and times, never the codes) and whether self-serve sign-up is open")
+    .action(async (_options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const list = await listCompanyInvites({ controlPlaneUrl: settings.controlPlaneUrl, accessToken }, services.fetchImplementation);
+      services.stdout.write(globals.json ? formatSuccess(list, true)
+        : `Self-serve company sign-up is ${list.selfServe}.\n${list.invites.length === 0 ? "No invite codes.\n" : `${list.invites.map(describeCompanyInvite).join("\n")}\n`}${list.more ? "More codes are not shown.\n" : ""}`);
+    });
+  adminCompanyInvite
+    .command("revoke <code-id>")
+    .description("revoke a live invite code by the id list shows; shows the change and asks first")
+    .option("--yes", "apply without asking; the change is still printed", false)
+    .action(async (codeId: string, options: { yes: boolean }, command: Command) => {
+      if (!CompanyInviteCodeIdSchema.safeParse(codeId).success) throw agentXError("CONFIG_INVALID", "give the code id agentx admin company-invite list shows (16 characters, 0-9 and a-f)");
+      const { globals, result } = await runInviteChange(command, { kind: "revoke_company_invite", codeId }, options.yes);
+      services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, codeId }, globals.json));
+    });
+  adminCompanyInvite
+    .command("self-serve <state>")
+    .description("open or close self-serve company sign-up (on or off); closed refuses every code; shows the change and asks first")
+    .option("--yes", "apply without asking; the change is still printed", false)
+    .action(async (state: string, options: { yes: boolean }, command: Command) => {
+      if (state !== "on" && state !== "off") throw agentXError("CONFIG_INVALID", "say on or off");
+      const { globals, result } = await runInviteChange(command, { kind: "set_company_self_serve", open: state === "on" }, options.yes);
+      services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, selfServe: state === "on" ? "open" : "closed" }, globals.json));
+    });
+
+  // DEC 254b (b): copy one company of the install's old layout into Code's company records, before Code's company sign-in is switched on.
+  const adminCompany = admin.command("company").description("Code's company records, for an install administrator");
+  adminCompany
+    .command("import")
+    .description("copy one company's members and roles from the install's old records into Code's company records; previews only, unless --apply (which shows the change and asks first)")
+    .requiredOption("--from-install <company-id>", "the install's company id (org_...); it stays the same in Code's records")
+    .option("--undo", "remove exactly the rows an import wrote and nobody changed since", false)
+    .option("--apply", "make the change; without it nothing is written", false)
+    .option("--yes", "with --apply: apply without asking; the change is still printed", false)
+    .action(async (options: { fromInstall: string; undo: boolean; apply: boolean; yes: boolean }, command: Command) => {
+      const companyId = companyImportId(options.fromInstall);
+      if (options.yes && !options.apply) throw agentXError("CONFIG_INVALID", "--yes works only with --apply");
+      const globals = globalOptions(command);
+      if (!options.apply) {
+        const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+        const preview = await previewCompanyImport({ controlPlaneUrl: settings.controlPlaneUrl, accessToken }, companyId, options.undo ? "undo" : "import", services.fetchImplementation);
+        services.stdout.write(globals.json ? formatSuccess(preview, true) : describeCompanyImport(preview));
+        return;
+      }
+      const change: AdminChangeInput = options.undo ? { kind: "undo_install_company_import", companyId } : { kind: "import_install_company", companyId };
+      const { result } = await runInviteChange(command, change, options.yes);
+      services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, companyId }, globals.json));
     });
 
   const adminWorkspace = admin.command("workspace").description("administer AgentX workspaces");
@@ -1445,6 +1559,12 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     const stored = await storedAdminSignIn(name);
     return stored === undefined ? undefined : { env: name, expiresAt: stored.expiresAt };
   };
+
+  // Lane L8: `sessions` and `session *`.
+  registerSessionCommands(program, { developerSession, developerEnv, globalOptions, write: (text) => services.stdout.write(text) });
+
+  // SM5: `record sagemaker`. Runs on the customer's own computer against their own endpoint; no sign-in.
+  registerRecordCommands(program, { write: (text) => services.stdout.write(text), json: (command) => globalOptions(command).json, version: CLI_VERSION, ...(dependencies.record ?? {}) });
 
   const mcp = program
     .command("mcp")

@@ -6,11 +6,12 @@ import { gunzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 import { createSessionStepsHandler, pingWorker, type SessionStepsDependencies } from "../../packages/broker/src/aws/session-steps.js";
 import { ec2WorkerBootScript } from "../../packages/contracts/src/session.js";
+import { hostedWorkersRunTestServices } from "../../packages/broker/src/aws/hosted-test-services.js";
 
 const bootScript = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
 const workspaceId = randomUUID();
 
-function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "Healthy" }), extraSettings: Partial<Awaited<ReturnType<SessionStepsDependencies["workerSettings"]>>> = {}) {
+function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "Healthy" }), extraSettings: Partial<Awaited<ReturnType<SessionStepsDependencies["workerSettings"]>>> = {}, more: Pick<SessionStepsDependencies, "testServices"> = {}) {
   const sessions = {
     markVolume: vi.fn(async () => undefined),
     markInstance: vi.fn(async () => undefined),
@@ -38,6 +39,7 @@ function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "
     controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com",
     logGroupName: "/agentx/production/worker",
     ping: pingSpy,
+    ...more,
   });
   return { handler, sessions, ping: pingSpy };
 }
@@ -90,6 +92,35 @@ describe("session steps", () => {
     expect(await launch({})).not.toContain("export EXECUTOR_IMAGE=");
   });
 
+  it("DEC 254zm: only when this install's workers run test services does a launch carry `testServices`, rendered as AGENTX_TEST_SERVICES=1 for Code's launch; otherwise the user data is byte-identical", async () => {
+    const launch = async (testServices: boolean | undefined) => {
+      const { handler } = setup(undefined, {}, testServices === undefined ? {} : { testServices });
+      const result = await handler({ action: "launchConfiguration", workspaceId, generation: 2, volumeId: "vol-0123456789abcdef0", expectNewVolume: false }) as { userData: string };
+      return gunzipSync(Buffer.from(result.userData, "base64")).toString("utf8");
+    };
+    const off = await launch(false);
+    expect(off).toBe(await launch(undefined));
+    expect(off).not.toContain("export AGENTX_TEST_SERVICES=");
+    const on = await launch(true);
+    expect(on).toContain("export AGENTX_TEST_SERVICES='1'");
+    expect(on.replace("export AGENTX_TEST_SERVICES='1'\n", "")).toBe(off);
+    // A named launch renders it the same way.
+    const named = { workspaceId, generation: 2, volumeId: "vol-0123456789abcdef0", expectNewVolume: false, workerImage: `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${"a".repeat(64)}`, invokePublicKey: "QUJD", controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com", modelProvider: "amazon-bedrock", modelId: "m", promptCacheRetention: "long" as const, logGroupName: "/agentx/x/worker", environmentKind: "named" as const, bootStage2Sha256: "b".repeat(64), testServices: true as const };
+    expect(ec2WorkerBootScript(named, bootScript)).toContain("export AGENTX_TEST_SERVICES='1'");
+  });
+
+  it("DEC 254zm: the deployed handler reads whether workers run test services from the switch AND the TestServiceImages setting (exactly mirrored)", () => {
+    expect(hostedWorkersRunTestServices({})).toBe(false);
+    expect(hostedWorkersRunTestServices({ ROVARA_TEST_SERVICES: "1" })).toBe(false);
+    expect(hostedWorkersRunTestServices({ ROVARA_TEST_SERVICES_HOSTED_IMAGES: "none" })).toBe(false);
+    expect(hostedWorkersRunTestServices({ ROVARA_TEST_SERVICES_HOSTED_IMAGES: "Mirrored" })).toBe(false);
+    expect(hostedWorkersRunTestServices({ ROVARA_TEST_SERVICES_HOSTED_IMAGES: "mirrored " })).toBe(false);
+    expect(hostedWorkersRunTestServices({ ROVARA_TEST_SERVICES: "0", ROVARA_TEST_SERVICES_HOSTED_IMAGES: "mirrored" })).toBe(false);
+    expect(hostedWorkersRunTestServices({ ROVARA_TEST_SERVICES_HOSTED_IMAGES: "mirrored" })).toBe(true);
+    expect(hostedWorkersRunTestServices({ ROVARA_TEST_SERVICES: "1", ROVARA_TEST_SERVICES_HOSTED_IMAGES: "mirrored" })).toBe(true);
+    expect(readFileSync(new URL("../../packages/broker/src/aws/session-steps.ts", import.meta.url), "utf8")).toContain("testServices: hostedWorkersRunTestServices(process.env),");
+  });
+
   it("records the volume and instance, and marks the session ready, failed or deleted", async () => {
     const { handler, sessions } = setup();
     await handler({ action: "recordVolume", workspaceId, generation: 1, volumeId: "vol-0123456789abcdef0" });
@@ -101,6 +132,21 @@ describe("session steps", () => {
     expect(sessions.markInstance).toHaveBeenCalledWith(workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10");
     expect(sessions.markFailed).toHaveBeenCalledWith(workspaceId, 1, "boom");
     expect(sessions.markDeleted).toHaveBeenCalledWith(workspaceId);
+  });
+
+  // DEC 254zb: the provisioner reports the launched type and, when a chosen size fell back, the fixed reason. An older provisioner reports neither (call unchanged).
+  it("records the launched type and the size fallback reason, and only the one fixed reason", async () => {
+    const { handler, sessions } = setup();
+    const base = { action: "recordInstance", workspaceId, generation: 2, instanceId: "i-0123456789abcdef0", privateIp: "10.42.128.10" };
+    await handler({ ...base, instanceType: "m6g.xlarge", machineFallback: null });
+    expect(sessions.markInstance).toHaveBeenLastCalledWith(workspaceId, 2, "i-0123456789abcdef0", "10.42.128.10", { instanceType: "m6g.xlarge" });
+    await handler({ ...base, instanceType: "m6g.large", machineFallback: "size-unavailable" });
+    expect(sessions.markInstance).toHaveBeenLastCalledWith(workspaceId, 2, "i-0123456789abcdef0", "10.42.128.10", { instanceType: "m6g.large", machineFallback: "size-unavailable" });
+    const calls = sessions.markInstance.mock.calls.length;
+    for (const bad of [{ machineFallback: "anything" }, { machineFallback: "x86-unavailable" }, { instanceType: "M6G LARGE" }, { instanceType: "" }, { instanceType: 7 }, { extra: 1 }]) {
+      await expect(handler({ ...base, instanceType: "m6g.large", ...bad })).rejects.toThrow();
+    }
+    expect(sessions.markInstance.mock.calls.length).toBe(calls);
   });
 
   const pingCases: ReadonlyArray<[string, SessionStepsDependencies["ping"], { healthy: boolean; status: string }]> = [

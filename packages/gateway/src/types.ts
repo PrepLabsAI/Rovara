@@ -86,6 +86,14 @@ export interface Guard {
 /** A guard's refusal. Its message is returned to the model as a FAILED result. */
 export class GuardRejection extends Error {}
 
+/**
+ * A native connector's refusal of a call, in words the connector wrote itself (never a vendor's response body): the engine returns the message to the model as the
+ * call's failure, with `reason`. Only a connection built in the broker throws it; a vendor's MCP server cannot, so a remote server's text is never shown this way.
+ */
+export class ToolRefusal extends Error {
+  constructor(message: string, readonly reason: "policy_denied" | "vendor_error" = "policy_denied") { super(message); this.name = "ToolRefusal"; }
+}
+
 export interface ConnectorDefinition<Scope> {
   /** Vendor name used in messages, such as "GitHub". */
   label: string;
@@ -117,6 +125,11 @@ export interface ConnectorDefinition<Scope> {
    * a CredentialUnavailable, reads as not connected). Generic connectors check resolved addresses.
    */
   verifyEndpoint?: () => Promise<void>;
+  /**
+   * tools this scope cannot use, each with the reason shown to the administrator (a Grafana scope with no data source cannot run queries). They are
+   * left out of the scope's catalog and listed among the skipped tools, and a call to one is refused as an unavailable tool.
+   */
+  unavailableTools?(scope: Scope): ReadonlyArray<{ tool: string; reason: string }>;
 }
 
 /** The tools a connector's guard covers, and the argument names that address an item (issue #49). */

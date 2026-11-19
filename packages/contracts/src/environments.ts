@@ -62,6 +62,11 @@ export function environmentConnectorSecretPrefix(env: string): string {
   return `agentx/${checked(env)}/connectors/`;
 }
 
+/** Where a channel adapter's secrets live (`agentx/<env>/`, then `channel-adapter/<name>`): the broker derives it rather than being given it (ENV-ROOM). */
+export function environmentChannelAdapterSecretPrefix(env: string): string {
+  return `agentx/${checked(env)}/`;
+}
+
 /**
  * What a named environment's Lambda functions can derive from its name, so that no environment variable has to carry it (a function's
  * variables, keys and values together, are held to 4 KB, and the broker's were over it). The infrastructure and the broker both take

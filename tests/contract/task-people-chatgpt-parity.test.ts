@@ -118,7 +118,7 @@ describe("PEOPLE and ChatGPT task identity parity", () => {
     };
     const pausedWorkerFeatures = vi.fn(async () => {
       dispatchProof = false;
-      return ["task.workflowMode", "task.workflowBase", "model.chatgpt"];
+      return ["task.workflowMode", "task.workflowBase", "model.chatgpt", "task.workflowApprovedPlan.v1"];
     });
     const pausedDelivery = createEc2Delivery({
       applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
@@ -149,7 +149,7 @@ describe("PEOPLE and ChatGPT task identity parity", () => {
     expect(view).toHaveBeenCalledTimes(1);
     expect(accessToken).not.toHaveBeenCalled();
 
-    const workerFeatures = vi.fn(async () => ["task.workflowMode", "task.workflowBase", "model.chatgpt"]);
+    const workerFeatures = vi.fn(async () => ["task.workflowMode", "task.workflowBase", "model.chatgpt", "task.workflowApprovedPlan.v1"]);
     const delivered = createEc2Delivery({
       applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true, generation: 1, privateIp: "127.0.0.1" }) },

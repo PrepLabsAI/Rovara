@@ -4,7 +4,9 @@
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import { FailureIndexRecordSchema, UsageIndexRecordSchema } from "../../packages/contracts/src/index.js";
+import { IMPLICIT_COMPANY_ID } from "../../packages/contracts/src/index.js";
 import { indexActivity, type IndexStore } from "../../packages/broker/src/aws/activity-index.js";
+import { taskPointerKey as scopedTaskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import type { StreamRecord } from "../../packages/broker/src/developer/notifications.js";
 
 const WORKSPACE = "22222222-2222-4222-8222-222222222222";
@@ -93,6 +95,7 @@ describe("the failure index (FR-038, A5)", () => {
     await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
     expect(index.puts[0]).toMatchObject({ project: "unknown", origin: "slack", requester: { kind: "none" } });
   });
+
 });
 
 describe("the usage index (A5, A9)", () => {
@@ -116,6 +119,101 @@ describe("the usage index (A5, A9)", () => {
       requester: { kind: "slack", teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" }, thread: "T0BSHLLUGBD/C0123456789/1695500000.000100",
       at: "2026-09-30T08:10:00.000Z", durationMs: 600_000, inputTokens: 1_050, outputTokens: 200, costUsd: 0.42,
     });
+  });
+
+  it("follows a company pointer for project and core operation requester", async () => {
+    const companyId = IMPLICIT_COMPANY_ID;
+    const scopedPk = `ORG#${companyId}#WORKSPACE#${WORKSPACE}`;
+    const index = store([
+      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId },
+      { pk: scopedPk, sk: "META", entityType: "WORKSPACE", companyId, orgId: companyId, projectName: "core-payments" },
+      { ...operation({ requestedBy: { teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" } }), pk: scopedPk },
+    ]);
+    await indexActivity([usageEvent(telemetry)], index, vi.fn());
+    expect(index.puts[0]).toMatchObject({ project: "core-payments", requester: { kind: "slack", teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" } });
+  });
+
+  it("follows the workspace company's task pointer and never reads another company's partition", async () => {
+    // A non-implicit company: an implementation that reads under the implicit company must fail this test.
+    const companyA = "org_aaaaaaaaaaaaaaaaaaaa";
+    const companyB = "org_11111111111111111111";
+    const items = [
+      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId: companyA },
+      { ...workspaceKey(companyA, WORKSPACE), entityType: "WORKSPACE", companyId: companyA, orgId: companyA, projectName: "core-payments" },
+      { ...scopedTaskPointerKey(companyA, WORKSPACE), entityType: "DEVELOPER_TASK_POINTER", taskId: TASK },
+      { ...scopedTaskPointerKey(companyB, WORKSPACE), entityType: "DEVELOPER_TASK_POINTER", taskId: "44444444-4444-4444-8444-444444444444" },
+      { pk: `DEVTASK#${TASK}`, sk: "META", taskId: TASK, developerName: "Maya Chen" },
+    ];
+    const index = store(items);
+    const get = vi.spyOn(index, "get");
+    await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
+    expect(index.puts[0]).toMatchObject({ project: "core-payments", origin: "ai_tool", taskId: TASK });
+    expect(get).toHaveBeenCalledWith(scopedTaskPointerKey(companyA, WORKSPACE), expect.anything());
+    expect(get).not.toHaveBeenCalledWith(scopedTaskPointerKey(companyB, WORKSPACE), expect.anything());
+  });
+
+  it("keeps a dangling workspace pointer soft and logs the fixed integrity event", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const companyId = IMPLICIT_COMPANY_ID;
+    const index = store([
+      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId },
+      { pk: `WORKSPACE#${WORKSPACE}`, sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId: TASK },
+    ]);
+    const result = await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
+    expect(result).toEqual({ failures: 1, usage: 0, failed: 0 });
+    expect(index.puts[0]).toMatchObject({ project: "unknown", origin: "slack" });
+    expect(index.puts[0]).not.toHaveProperty("taskId");
+    expect(warn).toHaveBeenCalledWith({ component: "broker", event: "workspace.pointer_integrity" });
+    warn.mockRestore();
+  });
+
+  it("fails soft when the scoped workspace names another company than its pointer, and reads no task pointer", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const companyA = "org_aaaaaaaaaaaaaaaaaaaa";
+    const companyB = "org_11111111111111111111";
+    const index = store([
+      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId: companyA },
+      { ...workspaceKey(companyA, WORKSPACE), entityType: "WORKSPACE", companyId: companyB, projectName: "core-payments" },
+      { ...scopedTaskPointerKey(companyA, WORKSPACE), entityType: "DEVELOPER_TASK_POINTER", taskId: TASK },
+    ]);
+    const get = vi.spyOn(index, "get");
+    await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
+    expect(index.puts[0]).toMatchObject({ project: "unknown", origin: "slack" });
+    expect(index.puts[0]).not.toHaveProperty("taskId");
+    expect(get).not.toHaveBeenCalledWith(scopedTaskPointerKey(companyA, WORKSPACE), expect.anything());
+    expect(warn).toHaveBeenCalledWith({ component: "broker", event: "workspace.pointer_integrity" });
+    warn.mockRestore();
+  });
+
+  it("fails soft when the scoped workspace orgId differs from its pointer, and reads no task pointer", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const companyA = "org_aaaaaaaaaaaaaaaaaaaa";
+    const companyB = "org_11111111111111111111";
+    const index = store([
+      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId: companyA },
+      { ...workspaceKey(companyA, WORKSPACE), entityType: "WORKSPACE", companyId: companyA, orgId: companyB, projectName: "core-payments" },
+      { ...scopedTaskPointerKey(companyA, WORKSPACE), entityType: "DEVELOPER_TASK_POINTER", taskId: TASK },
+    ]);
+    const get = vi.spyOn(index, "get");
+    await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
+    expect(index.puts[0]).toMatchObject({ project: "unknown" });
+    expect(index.puts[0]).not.toHaveProperty("taskId");
+    expect(get).not.toHaveBeenCalledWith(scopedTaskPointerKey(companyA, WORKSPACE), expect.anything());
+    expect(warn).toHaveBeenCalledWith({ component: "broker", event: "workspace.pointer_integrity" });
+    warn.mockRestore();
+  });
+
+  it("fails soft on a broken company pointer without reading the legacy operation", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const companyId = IMPLICIT_COMPANY_ID;
+    const index = store([
+      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId },
+      operation({ requestedBy: { teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" } }),
+    ]);
+    await indexActivity([usageEvent(telemetry)], index, vi.fn());
+    expect(index.puts[0]).toMatchObject({ project: "unknown", requester: { kind: "none" } });
+    expect(warn).toHaveBeenCalledWith({ component: "broker", event: "workspace.pointer_integrity" });
+    warn.mockRestore();
   });
 
   it("records a task's usage on the task too, under the usage record's own key; a Slack thread's usage and a store without it record nothing more (#651)", async () => {

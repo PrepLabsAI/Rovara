@@ -1,0 +1,1 @@
+{"statusCode":403,"headers":{"content-type":"application/json","cache-control":"no-store"},"body":"{\"error\":{\"code\":\"FORBIDDEN\",\"message\":\"GitHub webhook repository is outside the registered installation and repository scope\"},\"requestId\":\"golden\"}"}

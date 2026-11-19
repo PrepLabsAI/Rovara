@@ -13,6 +13,8 @@ import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { consoleWorkerLog, logEnvDetectGuardUnavailable, type WorkerLogSink } from "../worker-log.js";
 import { runDetectors } from "./index.js";
+import { PLUGIN_NOT_LOADED_NOTE, vetDetectorModules } from "./plugin-detectors.js";
+import { installedDetectorModules } from "../build-systems.js";
 import { emptyDetection, type Detection, type RepositoryReader } from "./types.js";
 
 export const ENV_DETECT_TIMEOUT_MS = 60_000;
@@ -33,6 +35,8 @@ export interface GuardOptions {
   log?: WorkerLogSink | undefined;
   /** Run only the detectors with these names (see `runDetectors`). */
   only?: readonly string[] | undefined;
+  /** Port lane P6 (item B1): the detector modules of the worker's build-system profiles; by default the installed profiles'. They are vetted here and imported by the thread. */
+  detectorModules?: readonly string[] | undefined;
 }
 
 export function defaultThreadEntry(): ThreadEntry {
@@ -43,12 +47,12 @@ export function defaultThreadEntry(): ThreadEntry {
 
 type Attempt<T> = { kind: "done"; detection: T } | { kind: "stopped" } | { kind: "unavailable"; code: string };
 
-function attempt<T = Detection>(reader: RepositoryReader, cwd: string, legacyOnly: boolean, timeoutMs: number, entry: ThreadEntry, only?: readonly string[], workspace = false): Promise<Attempt<T>> {
+function attempt<T = Detection>(reader: RepositoryReader, cwd: string, legacyOnly: boolean, timeoutMs: number, entry: ThreadEntry, only?: readonly string[], detectorModules?: readonly string[], workspace = false): Promise<Attempt<T>> {
   return new Promise((resolve) => {
     let worker: Worker;
     try {
       worker = new Worker(entry.url, {
-        workerData: { workspace, paths: [...reader.paths], truncated: reader.truncated === true, cwd, legacyOnly, ...(only === undefined ? {} : { only: [...only] }) },
+        workerData: { workspace, paths: [...reader.paths], truncated: reader.truncated === true, cwd, legacyOnly, ...(only === undefined ? {} : { only: [...only] }), ...(detectorModules === undefined || detectorModules.length === 0 ? {} : { detectorModules: [...detectorModules] }) },
         execArgv: entry.execArgv,
         env: {},
         resourceLimits: { maxOldGenerationSizeMb: THREAD_MEMORY_MB, maxYoungGenerationSizeMb: 64 },
@@ -91,20 +95,24 @@ function attempt<T = Detection>(reader: RepositoryReader, cwd: string, legacyOnl
 export async function runDetectorsGuarded(reader: RepositoryReader, cwd: string, options: GuardOptions = {}): Promise<Detection> {
   const timeoutMs = options.timeoutMs ?? ENV_DETECT_TIMEOUT_MS;
   const entry = options.entry ?? defaultThreadEntry();
-  const full = await attempt(reader, cwd, false, timeoutMs, entry, options.only);
-  if (full.kind === "done") return full.detection;
+  // Port lane P6 (item B1): a build system's detectors, from the operator's profile (never from the repository), checked before a thread is asked to import them.
+  // A caller that asks for named detectors only (`only`) wants none of a plug-in's.
+  const vetted = await vetDetectorModules(options.only !== undefined ? [] : options.detectorModules ?? installedDetectorModules(), process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace");
+  const full = await attempt(reader, cwd, false, timeoutMs, entry, options.only, vetted.modules);
+  if (full.kind === "done") return vetted.notes.length === 0 ? full.detection : { ...full.detection, notes: [...new Set([...vetted.notes, ...full.detection.notes])] };
   if (full.kind === "unavailable") {
     logEnvDetectGuardUnavailable(options.log ?? consoleWorkerLog, full.code);
-    return runDetectors(reader, cwd, options.only === undefined ? {} : { only: options.only });
+    // No thread to hold a plug-in detector to its clock and memory limit: only the built-in detectors run here, in this thread, and a missing plug-in is said so. Plug-in code is never imported into the main thread.
+    return runDetectors(reader, cwd, { ...(options.only === undefined ? {} : { only: options.only }), extraNotes: [...vetted.notes, ...(vetted.modules.length > 0 ? [PLUGIN_NOT_LOADED_NOTE] : [])] });
   }
-  const legacy = await attempt(reader, cwd, true, Math.min(ENV_DETECT_FALLBACK_TIMEOUT_MS, timeoutMs), entry, options.only);
+  const legacy = await attempt(reader, cwd, true, Math.min(ENV_DETECT_FALLBACK_TIMEOUT_MS, timeoutMs), entry, options.only, vetted.modules);
   const base = legacy.kind === "done" ? legacy.detection : emptyDetection();
-  return { ...base, notes: [...new Set([...base.notes, ENV_DETECT_TIMEOUT_NOTE])] };
+  return { ...base, notes: [...new Set([...vetted.notes, ...base.notes, ENV_DETECT_TIMEOUT_NOTE])] };
 }
 
 /** Package discovery and all unit passes share one attempt; a stopped workspace is never partial success. */
 export async function runWorkspacePackagesGuarded(reader: RepositoryReader, cwd: string, options: Pick<GuardOptions, "timeoutMs" | "entry" | "only"> = {}): Promise<WorkspaceDetection> {
-  const result = await attempt<WorkspaceDetection>(reader, cwd, false, options.timeoutMs ?? ENV_DETECT_TIMEOUT_MS, options.entry ?? defaultThreadEntry(), options.only, true);
+  const result = await attempt<WorkspaceDetection>(reader, cwd, false, options.timeoutMs ?? ENV_DETECT_TIMEOUT_MS, options.entry ?? defaultThreadEntry(), options.only, [], true);
   if (result.kind === "done") return result.detection;
   return { kind: "unavailable", units: [], reason: result.kind === "unavailable" ? "Workspace detection guard could not start." : "Workspace detection did not finish within its limit." };
 }

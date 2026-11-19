@@ -9,7 +9,7 @@
 //   - a name must be an upper-case variable name and must not be shaped like a key (the contracts' secret-shape rule), or it is dropped;
 //   - http(s) URLs are not read here: outside API hosts are the services detector's (D8).
 // Nothing is run; a file is read only if the reader was given its path.
-import { candidate, DEPENDENCY_SKIP_DIRS, FAMILY_KINDS, kindOfFamily, mergeCandidates, safeEnvName, slug } from "./dependency-candidates.js";
+import { candidate, DEPENDENCY_SKIP_DIRS, FAMILY_KINDS, kindOfFamily, mergeCandidates, normalizeAwsService, safeEnvName, slug } from "./dependency-candidates.js";
 import { blocksBetween, lineOf, type DependencyCandidate, type DependencyHints, type Detector } from "./types.js";
 
 const DOTENV = /(?:^|\/)\.env(?:\.[A-Za-z0-9_-]{1,32})?$/u;
@@ -42,11 +42,10 @@ const NAME_RULES: ReadonlyArray<{ pattern: RegExp; family: string | ((match: Reg
   { pattern: /^KINESIS_/u, family: "aws:kinesis" },
   { pattern: /^SAGEMAKER_(?:RUNTIME_)?ENDPOINT/u, family: "aws:sagemaker-runtime" },
 ];
-const AWS_SERVICE_ALIASES: Record<string, string> = { dynamodb_streams: "dynamodbstreams", cognito_identity_provider: "cognito-idp", sagemaker_runtime: "sagemaker-runtime" };
+/** The service `AWS_ENDPOINT_URL_<suffix>` is for: the table's variable suffix (`SECRETS_MANAGER`), else any other spelling the table knows, else the suffix as an id. */
 function awsService(suffix: string): string | undefined {
-  const lower = suffix.toLowerCase();
-  const id = AWS_SERVICE_ALIASES[lower] ?? lower.replace(/_/gu, "-");
-  return /^[a-z][a-z0-9-]{1,39}$/u.test(id) ? `aws:${id}` : undefined;
+  const id = normalizeAwsService(suffix, "endpointVariable");
+  return id === undefined ? undefined : `aws:${id}`;
 }
 
 /** Prefixes that say nothing about WHICH outside service a key belongs to. */
@@ -249,9 +248,18 @@ const MAX_CODE_REFERENCES = 60;
 /** The text with every comment replaced by spaces (newlines kept, so lines still line up). One pass per kind of block: no pattern rescans to the end of the text. */
 function withoutComments(text: string, python: boolean): string {
   const blank = (value: string): string => value.replace(/[^\n]/gu, " ");
-  let out = text;
-  const blocks = python ? [...blocksBetween(out, '"""', '"""'), ...blocksBetween(out, "'''", "'''")] : blocksBetween(out, "/*", "*/");
-  for (const block of blocks.sort((a, b) => b.index - a.index)) out = out.slice(0, block.index) + blank(block.text) + out.slice(block.end);
+  const blocks = python ? [...blocksBetween(text, '"""', '"""'), ...blocksBetween(text, "'''", "'''")] : blocksBetween(text, "/*", "*/");
+  // One pass over the text: the blocks in order (the two docstring kinds may overlap, and an overlap is one blanked stretch), each blanked once. Rebuilding the whole text per block cost n^1.7 on a file of thousands of tiny blocks.
+  const pieces: string[] = [];
+  let cursor = 0;
+  for (const block of blocks.sort((a, b) => a.index - b.index || a.end - b.end)) {
+    if (block.end <= cursor) continue;
+    const from = Math.max(block.index, cursor);
+    pieces.push(text.slice(cursor, from), blank(text.slice(from, block.end)));
+    cursor = block.end;
+  }
+  pieces.push(text.slice(cursor));
+  const out = pieces.join("");
   return out.split("\n").map((line) => {
     if (python) { const at = line.indexOf("#"); return at < 0 ? line : line.slice(0, at); }
     const trimmed = line.trimStart();

@@ -10,6 +10,7 @@ import {
   INDEX_EXPIRY_ATTRIBUTE,
   TaskUsageTelemetrySchema,
   UsageIndexRecordSchema,
+  OrgIdSchema,
   failureIndexKey,
   indexExpiresAt,
   redactAndCap,
@@ -20,6 +21,8 @@ import {
 } from "@agentx/contracts";
 import { failureCategory, taskKey, taskPointerKey, type TaskRunSpend } from "../developer/task-records.js";
 import type { StreamRecord } from "../developer/notifications.js";
+import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointer.js";
+import { taskPointerKey as scopedTaskPointerKey, workspaceKey } from "../core/task-flow/keys.js";
 
 /** A4: aborted at the index's deadline; a store passes it to each request it sends. */
 export interface IndexStoreOptions { signal?: AbortSignal }
@@ -80,24 +83,44 @@ const text = (value: unknown): string | undefined => (typeof value === "string" 
 const record = (value: unknown): Record<string, unknown> | undefined => (value && typeof value === "object" ? (value as Record<string, unknown>) : undefined);
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
 
-interface Context { project: string; origin: "slack" | "ai_tool"; taskId?: string; thread?: string; developerName?: string }
+interface Context { project: string; origin: "slack" | "ai_tool"; taskId?: string; thread?: string; developerName?: string; operationPk?: string | null }
 
 /** A5: the project, the origin and the turn record link, from the workspace's own records. */
 async function contextOf(store: IndexStore, workspaceId: string): Promise<Context> {
-  const workspace = await store.get({ pk: `WORKSPACE#${workspaceId}`, sk: "META" });
+  const legacyKey = { pk: `WORKSPACE#${workspaceId}`, sk: "META" };
+  let workspace = await store.get(legacyKey);
+  let operationPk: string | undefined;
+  let companyId: string | undefined;
+  let operationReadable = true;
+  if (workspace?.entityType === "WORKSPACE_COMPANY_POINTER") {
+    const company = OrgIdSchema.safeParse(workspace.companyId);
+    const scopedKey = company.success ? workspaceKey(company.data, workspaceId) : undefined;
+    const scoped = scopedKey === undefined ? undefined : await store.get(scopedKey);
+    if (scopedKey === undefined || scoped === undefined || scoped.entityType === "WORKSPACE_COMPANY_POINTER" || scoped.companyId !== company.data || (scoped.orgId !== undefined && scoped.orgId !== company.data)) {
+      logWorkspacePointerIntegrity();
+      workspace = undefined;
+      operationReadable = false;
+    } else {
+      workspace = scoped;
+      operationPk = scopedKey.pk;
+      companyId = company.data;
+    }
+  }
   const project = text(workspace?.projectName)?.slice(0, PROJECT_MAX) ?? "unknown";
-  const pointer = await store.get(taskPointerKey(workspaceId));
+  // The task pointer lives in the workspace's own partition: the company's (through the workspace pointer) or the legacy one.
+  const taskPointerAt = !operationReadable ? undefined : companyId === undefined ? taskPointerKey(workspaceId) : scopedTaskPointerKey(companyId, workspaceId);
+  const pointer = taskPointerAt === undefined ? undefined : await store.get(taskPointerAt);
   const taskId = text(pointer?.taskId);
   if (taskId !== undefined) {
     const task = await store.get(taskKey(taskId));
     const developerName = text(task?.developerName);
-    return { project, origin: "ai_tool", taskId, ...(developerName === undefined ? {} : { developerName }) };
+    return { project, origin: "ai_tool", taskId, ...(developerName === undefined ? {} : { developerName }), operationPk: operationReadable ? operationPk ?? `WORKSPACE#${workspaceId}` : null };
   }
   const ownerKey = text(workspace?.ownerKey);
   const stored = ownerKey === undefined ? undefined : text((await store.get({ pk: `SLACK_THREAD#${ownerKey}`, sk: "META" }))?.thread);
   // A thread subject too long to parse is left out: the failure is still listed, without its link.
   const thread = stored !== undefined && stored.length <= THREAD_MAX ? stored : undefined;
-  return { project, origin: "slack", ...(thread === undefined ? {} : { thread }) };
+  return { project, origin: "slack", ...(thread === undefined ? {} : { thread }), operationPk: operationReadable ? operationPk ?? `WORKSPACE#${workspaceId}` : null };
 }
 
 /** The operation's requestedBy as the strict requester schema accepts it; anything else is none. */
@@ -141,7 +164,8 @@ async function usageItem(store: IndexStore, event: Record<string, unknown>): Pro
   const workspaceId = String(event.workspaceId);
   const operationId = String(event.operationId);
   const at = new Date(text(event.timestamp) ?? Date.now()).toISOString();
-  const [context, operation] = await Promise.all([contextOf(store, workspaceId), store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` })]);
+  const context = await contextOf(store, workspaceId);
+  const operation = context.operationPk === null ? undefined : await store.get({ pk: context.operationPk ?? `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` });
   const created = Date.parse(text(operation?.createdAt) ?? at);
   const indexed: UsageIndexRecord = {
     operationId, workspaceId, project: context.project, origin: context.origin,

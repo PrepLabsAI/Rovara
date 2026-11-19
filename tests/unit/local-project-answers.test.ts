@@ -1,0 +1,102 @@
+// The answer route on `rovara up` (lead 4, J1): the owner of this install only (no script token); the same answer service; the code on the project's registered code host at its head; a project that is not
+// there and anyone else read the same.
+import { describe, expect, it } from "vitest";
+import { ANSWER_WORDS, AnswerResponseSchema, IMPLICIT_COMPANY_ID } from "@agentx/contracts";
+import { createLocalProjectAnswers } from "../../packages/broker/src/local/app/project-answers.js";
+import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
+import { A, HEAD, OLD, page, REFUND_TS, T0, answer, goodSentence, scriptedModel } from "../support/answer-world.js";
+
+const url = "https://github.com/acme/app.git";
+const reads: string[] = [];
+const host = {
+  kind: "github",
+  baseBranchHead: async () => HEAD,
+  fileAtRevision: async (_repo: unknown, path: string, revision: string) => { reads.push(`${path}@${revision.slice(0, 4)}`); return path === "src/refund.ts" ? REFUND_TS : undefined; },
+};
+const registry = { names: () => ["github"], get: (_kind: string, name: string) => (name === "github" ? host : undefined), require: () => host } as never;
+const flow = { projects: { latest: async (name: string) => {
+  if (name === "app") return { definition: { name: "app", repositories: [{ name: "web", url, path: "repo/web", defaultBranch: "main" }] } };
+  // A project with a second repository whose code host is not registered here.
+  if (name === "mixed") return { definition: { name: "mixed", repositories: [{ name: "web", url, path: "repo/web", defaultBranch: "main" }, { name: "api", url: "https://gitlab.example/acme/api.git", path: "repo/api", defaultBranch: "main", host: { kind: "gitlab" } }] } };
+  return undefined;
+} } } as never;
+const principal = { provider: "local", personId: "owner", companyId: IMPLICIT_COMPANY_ID, roles: ["owner"] };
+const owner = { principal } as never;
+const request = (method = "POST", path = "/v1/app/projects/app/answers", body: unknown = { requestId: "request-0001", question: "How long do refunds last?" }) => ({ method, path, headers: {}, body: JSON.stringify(body) });
+
+function make(model = scriptedModel([answer([goodSentence])])) {
+  const store = new MemoryDocumentStore();
+  return { store, model, routes: createLocalProjectAnswers({ flow, registry, store, model, now: () => T0 }) };
+}
+
+describe("the local answer route", () => {
+  it("lets the owner ask: the model seam, the code at the head of the default branch, the answer object", async () => {
+    const { routes, model, store } = make();
+    const result = await routes.routes(request(), owner);
+    expect(result?.statusCode).toBe(200);
+    expect(AnswerResponseSchema.parse(JSON.parse(result!.body))).toMatchObject({ outcome: "answered", sources: [{ n: 1, repo: "web", path: "src/refund.ts", line: 3, commit: HEAD }] });
+    expect(model.opened[0]).toMatchObject({ companyId: IMPLICIT_COMPANY_ID, project: "app" });
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((read) => read.endsWith("@1111"))).toBe(true);
+    const keys: string[] = [];
+    const page = await store.scanPage({ limit: 1_000 });
+    keys.push(...page.items.map((item) => item.pk));
+    expect(keys.length).toBeGreaterThan(0);
+    expect(keys.every((pk) => pk.startsWith(`ORG#${IMPLICIT_COMPANY_ID}#`))).toBe(true);
+    void A;
+  });
+
+  it("a script token, a caller who is not the owner and a project that is not there all read 'project not found', and nothing is opened", async () => {
+    const { routes, model } = make();
+    const same = { error: { code: "NOT_FOUND", message: ANSWER_WORDS.projectNotFound } };
+    for (const [caller, path] of [[{ principal, scriptToken: { id: "t" } }, undefined], [{ principal: { ...principal, roles: ["developer"] } }, undefined], [owner, "/v1/app/projects/nope/answers"]] as const) {
+      const answered = await routes.routes(request("POST", path), caller as never);
+      expect(answered?.statusCode).toBe(404);
+      expect(JSON.parse(answered!.body)).toEqual(same);
+    }
+    expect(model.opened).toHaveLength(0);
+  });
+
+  it("leaves other paths and methods to other routes, and a bad body is one fixed 400", async () => {
+    const { routes } = make();
+    expect(await routes.routes(request("GET"), owner)).toBeUndefined();
+    expect(await routes.routes(request("POST", "/v1/app/projects/app/setup-agent"), owner)).toBeUndefined();
+    expect(await routes.routes(request("POST", "/v1/app/projects/app/answers/x"), owner)).toBeUndefined();
+    const bad = await routes.routes(request("POST", undefined, { question: "" }), owner);
+    expect(bad?.statusCode).toBe(400);
+    expect(JSON.parse(bad!.body)).toEqual({ error: { code: "CONFIG_INVALID", message: ANSWER_WORDS.badRequest } });
+  });
+
+  it("a repository whose code host is not registered here is not read and is not deleted: its wiki pages stay", async () => {
+    const { routes, store } = make();
+    const wiki = createWikiStore({ store, companyId: IMPLICIT_COMPANY_ID, now: () => T0 });
+    await wiki.writePage("mixed", page("mixed", { repos: [{ repo: "api", commit: OLD }], claims: [{ claimId: "c0001", text: "api claim text", citations: [{ repo: "api", path: "a.ts", commit: OLD, line: 1, quote: "export const A = 1;" }], source: "found", checkedAt: "2026-11-17T09:00:00.000Z" }] }));
+    const answered = await routes.routes(request("POST", "/v1/app/projects/mixed/answers"), owner);
+    expect(answered?.statusCode).toBe(200);
+    expect((await wiki.readIndex("mixed")).map((entry) => entry.pageId)).toEqual(["billing"]);
+  });
+
+  it("with no model set up it answers the fixed 'not set up' outcome", async () => {
+    const store = new MemoryDocumentStore();
+    const routes = createLocalProjectAnswers({ flow, registry, store, model: scriptedModel([], { available: false }), now: () => T0 });
+    const answered = await routes.routes(request(), owner);
+    expect(JSON.parse(answered!.body)).toMatchObject({ outcome: "not_set_up", honesty: ANSWER_WORDS.notSetUp });
+  });
+});
+
+describe("the local answer route: the team knowledge briefing (lead 4 L4-AK2b)", () => {
+  it("the owner's answer is briefed by this install's seam with the project and its repositories; a non-owner never reaches it; no seam means no block", async () => {
+    const model = scriptedModel([answer([goodSentence])]);
+    const asked: Array<{ project: string; repos: readonly string[] }> = [];
+    const routes = createLocalProjectAnswers({ flow, registry, store: new MemoryDocumentStore(), model, now: () => T0, briefing: async (input) => { asked.push({ project: input.project, repos: input.repos }); return "<<team-knowledge>> local notes <</team-knowledge>>"; } });
+    expect((await routes.routes(request(), owner))?.statusCode).toBe(200);
+    expect(asked).toEqual([{ project: "app", repos: ["web"] }]);
+    expect(model.turns[0]!.transcript).toContain("local notes");
+    await routes.routes(request(), { principal: { ...principal, roles: ["developer"] } } as never);
+    expect(asked).toHaveLength(1);
+    const bare = make();
+    await bare.routes.routes(request(), owner);
+    expect(bare.model.turns[0]!.transcript).not.toContain("team-knowledge");
+  });
+});

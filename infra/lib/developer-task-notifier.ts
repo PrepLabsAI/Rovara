@@ -7,6 +7,8 @@ import type { AgentXNaming } from "./naming.js";
 
 export interface DeveloperTaskNotifierProps {
   naming: AgentXNaming;
+  /** Named environments only: forward core outbox INSERTs to this broker. */
+  coreBroker?: lambda.Function;
   /** Same-origin AgentX control plane, used only to construct authenticated review links. */
   controlPlaneUrl: string;
   /** The concrete Table: its stream ARN is read here. */
@@ -72,6 +74,10 @@ export class DeveloperTaskNotifier extends Construct {
       AGENTX_METRICS_NAMESPACE: props.naming.metricsNamespace,
       AGENTX_TASK_PEOPLE_CHANGES_ENABLED: props.taskPeopleChangesEnabled.valueAsString,
     }, Duration.seconds(30));
+    if (props.coreBroker !== undefined) {
+      this.function.addEnvironment("BROKER_FUNCTION_NAME", props.coreBroker.functionName);
+      this.function.addToRolePolicy(new iam.PolicyStatement({ sid: "RelayCoreOutboxToBroker", actions: ["lambda:InvokeFunction"], resources: [props.coreBroker.functionArn] }));
+    }
     props.slackSecret.grantRead(this.function);
     this.function.addToRolePolicy(new iam.PolicyStatement({
       actions: ["s3:GetObject"],
@@ -132,12 +138,13 @@ export class DeveloperTaskNotifier extends Construct {
       startingPosition: lambda.StartingPosition.LATEST,
       batchSize: 100,
       retryAttempts: 10,
+      ...(props.coreBroker === undefined ? {} : { reportBatchItemFailures: true }),
       bisectBatchOnError: true,
       maxRecordAge: Duration.hours(1),
       onFailure: new eventSources.SqsDlq(this.streamFailures),
       filters: [
-        lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entityType: { S: equals("DEVELOPER_TASK") } } } }),
-        lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entityType: { S: equals("DEVELOPER_TASK_POINTER") } } } }),
+        lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entityType: { S: props.coreBroker === undefined ? equals("DEVELOPER_TASK") : oneOf(["DEVELOPER_TASK", "DEVELOPER_TASK_POINTER"]) } } } }),
+        ...(props.coreBroker === undefined ? [lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entityType: { S: equals("DEVELOPER_TASK_POINTER") } } } })] : []),
         // Every operation that ended: a developer's own get their notices, and (#342) any that left its owner's
         // ChatGPT plan says so in its thread. The code drops the rest (notifications.ts).
         lambda.FilterCriteria.filter({ dynamodb: { NewImage: {
@@ -149,6 +156,7 @@ export class DeveloperTaskNotifier extends Construct {
         // Task 19: a Slack press the broker refused, told privately to whoever pressed. Spec 061 FR-044: a commenter's
         // nudge window, on the same filter (a mapping takes five filters by default).
         lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entityType: { S: oneOf(["WORKFLOW_ACTION_REFUSAL", "TASK_COMMENT_NUDGE", "TASK_PEOPLE_NOTIFICATION"]) } } } }),
+        ...(props.coreBroker === undefined ? [] : [lambda.FilterCriteria.filter({ eventName: ["INSERT"], dynamodb: { NewImage: { entityType: { S: ["OUTBOX"] }, pk: { S: [{ prefix: "ORG#" }] }, outboxState: { S: [{ exists: true }] } } } })]),
       ],
     });
     new lambda.EventSourceMapping(this, "NoticeQueueMapping", {

@@ -1,8 +1,16 @@
 import { Stack } from "aws-cdk-lib";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { withoutCoreEngine } from "../support/core-engine-template.js";
+import { removePackedPieces, unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
+import { withoutBrokerSlackPoster } from "../support/broker-slack-poster-template.js";
+import { withoutCompanyImportReads } from "../support/company-import-reads-template.js";
+import { withoutNatEgressAddresses, withoutNatEgressControlPlane } from "../support/egress-addresses-template.js";
+import { withoutGithubSignIn } from "../support/github-signin-template.js";
+import { withoutDnsFirewall, withoutDnsFirewallAccess, withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { normalizedTemplate } from "../support/template-snapshot.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { withoutSlackCompanyMode, withoutSlackCompanyService } from "../support/slack-company-template.js";
 
 skipLambdaBundling();
 
@@ -61,7 +69,7 @@ function withoutUnwaitedTaskBackstop(template: unknown): unknown {
   expect(threadsId).toBeDefined();
   expect(slackSecretId).toBeDefined();
   expect(topicId).toBeDefined();
-  const added = { SLACK_THREADS_TABLE_NAME: { Ref: threadsId }, SLACK_SECRET_ARN: { Ref: slackSecretId }, CALLBACK_SIGNING_KEY: { Ref: "CallbackSigningKey" } };
+  const added = { SLACK_THREADS_TABLE_NAME: { Ref: threadsId }, SLACK_SECRET_ARN: { Ref: slackSecretId }, CALLBACK_SIGNING_KEY_SECRET_ID: "agentx/staging/callback-key" };
   expect(Object.fromEntries(Object.keys(added).map((name) => [name, variables[name]]))).toStrictEqual(added);
   for (const name of Object.keys(added)) delete variables[name];
   const roleId = (reconciler.Properties.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"][0];
@@ -208,8 +216,11 @@ function withoutTaskPeopleControls(template: unknown): unknown {
     AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED: { Ref: "TaskPeoplePublicInvitationsEnabled" },
     AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED: { Ref: "TaskPeoplePrivateInvitationsEnabled" },
   };
-  expect(Object.fromEntries(brokerEnvironmentNames.map((name) => [name, brokerVariables[name]]))).toStrictEqual(expectedBrokerReferences);
-  for (const name of brokerEnvironmentNames) delete brokerVariables[name];
+  // ENV-ROOM: the named Broker gets them as pieces of AGENTX_SETTINGS (codes tc, tu, tv).
+  const unpacked = unpackedBrokerVariables(brokerVariables);
+  expect(Object.fromEntries(brokerEnvironmentNames.map((name) => [name, unpacked[name]]))).toStrictEqual(expectedBrokerReferences);
+  for (const name of brokerEnvironmentNames) expect(brokerVariables).not.toHaveProperty(name);
+  removePackedPieces(brokerVariables, "AGENTX_SETTINGS", ["tc", "tu", "tv"]);
 
   const notifierFunctions = functions.filter(([id]) => id.startsWith("DeveloperTaskNotifier"));
   expect(notifierFunctions).toHaveLength(1);
@@ -222,14 +233,26 @@ function withoutTaskPeopleControls(template: unknown): unknown {
 // Issue 157 changes the Slack service's code only. These snapshots were recorded from mainline
 // 4a605fd (re-recorded there when mainline merged in), so a named environment's templates must stay
 // as they were, apart from issue 46's dispatch dead-letter alarm, issue 173's reconciler backstop,
-// issue 195's stuck-cancel alarm, and the false-default Task People controls, each checked and taken
-// out above.
+// issue 195's stuck-cancel alarm, the false-default Task People controls and the staging switch-over parity additions (DNS firewall, evidence expiry, broker
+// names; tests/support/switchover-parity-template.ts), each checked and taken out.
 describe("named environment templates", () => {
   const stacks = buildAgentXApp({ agentxEnv: "staging" }).node.children.filter((child): child is Stack => Stack.isStack(child));
+  it("pins L1a's broker core dispatch queue references", () => {
+    const stack = stacks.find((candidate) => candidate.stackName === "agentx-staging-control-plane")!;
+    const template = normalizedTemplate(stack) as { Resources: Record<string, Resource> };
+    const broker = Object.entries(template.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")![1];
+    const variables = (broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect({ CORE_DISPATCH_QUEUE_URL: variables.CORE_DISPATCH_QUEUE_URL, CORE_DISPATCH_DEAD_LETTER_URL: variables.CORE_DISPATCH_DEAD_LETTER_URL }).toMatchSnapshot();
+  });
   for (const stack of stacks) {
     it(`${stack.stackName} is unchanged`, () => {
       const template = normalizedTemplate(stack);
-      expect(stack.stackName === "agentx-staging-control-plane" ? withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(template)))) : template).toMatchSnapshot();
+      const parity = stack.stackName === "agentx-staging-foundation" ? withoutNatEgressAddresses(withoutDnsFirewall(template))
+        : stack.stackName === "agentx-staging-access" ? withoutDnsFirewallAccess(template)
+        // ENV-ROOM 2 (2026-11-17): the broker's names parameter is checked and the names put back in its environment first, as the rest was recorded.
+        : stack.stackName === "agentx-staging-control-plane" ? withoutNatEgressControlPlane(withoutGithubSignIn(withoutSwitchoverControlPlaneParity(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutSlackCompanyMode(withoutBrokerSlackPoster(template, "staging"))))), "staging"))
+        : stack.stackName === "agentx-staging-slack" ? withoutSlackCompanyService(template) : template;
+      expect(stack.stackName === "agentx-staging-control-plane" ? withoutCoreEngine(withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(parity))))) : parity).toMatchSnapshot();
     }, 120_000);
   }
 });

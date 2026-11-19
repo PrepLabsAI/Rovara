@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, indexExpiresAt, plannerReplyCommentId, planQualityFinding } from "@agentx/contracts";
 import { developerTaskIdentity, plannerRepliesKey } from "../../packages/broker/src/developer/task-records.js";
 import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
-import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
+import { cachedSlackClient, cachedSlackPoster, createNotifierHandler, retryDelaySeconds, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import { noticesOf, type Notice } from "../../packages/broker/src/developer/notifications.js";
 import { MAYA, createSingleAnswerPlanBroker, recordStream } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown, planAnswer, planDocument } from "../support/plan-documents.js";
@@ -151,6 +151,7 @@ function checkedWorkflowCandidate(h: { db: FakeDynamoDb; taskId: string; workspa
 
 async function notifierHarness(body: Record<string, unknown> = { shareToChannel: true }, options: {
   post?: Post;
+  workspaces?: NotifierDependencies["workspaces"];
   documentClient?: (db: FakeDynamoDb) => Client;
   readArtifact?: (key: string) => Promise<string>;
   update?: (input: { channel: string; ts: string; text: string; blocks: unknown[] }) => Promise<void>;
@@ -174,6 +175,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   const retryLater = vi.fn<NotifierDependencies["retryLater"]>(async () => undefined);
   const handle = createNotifierHandler({
     documentClient: options.documentClient?.(harness.db) ?? harness.db, tableName: "state",
+    ...(options.workspaces === undefined ? {} : { workspaces: options.workspaces }),
     enqueue: async (notices) => { for (const notice of notices) queue.push({ notice, attempt: 0 }); },
     retryLater,
     post: postOverride ?? (async (input) => {
@@ -2522,4 +2524,54 @@ describe("a task-state card is not dropped after the hour (LIVEFIX-1 item 5)", (
     expect(h.deliveryFailed).toHaveBeenCalledTimes(1);
     expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.delivery_failed", kind: "start", reason: "channel_not_found" }));
   });
+});
+
+describe("L9 notifier stream relay", () => {
+  const company = "org_staging0000000000001";
+  const coreRecord = (sequence: string, eventName = "INSERT") => ({ eventSource: "aws:dynamodb", eventName, dynamodb: { SequenceNumber: sequence, NewImage: { pk: { S: `ORG#${company}#OUTBOX` }, outboxState: { S: "pending" } } } });
+  function setup(relayCoreOutbox: (records: unknown[]) => Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }>) {
+    return createNotifierHandler({ documentClient: new FakeDynamoDb(), tableName: "state", enqueue: async () => undefined, retryLater: async () => undefined,
+      post: async () => ({ ts: "1.0" }), now: () => Date.now(), log: () => undefined, deliveryFailed: () => undefined, relayCoreOutbox });
+  }
+  it("forwards only core INSERTs and propagates sequence failures", async () => {
+    const relay = vi.fn(async () => ({ batchItemFailures: [{ itemIdentifier: "11" }] }));
+    const inserted = coreRecord("11");
+    const answer = await setup(relay)({ Records: [inserted, coreRecord("12", "MODIFY"), { ...coreRecord("13"), dynamodb: { SequenceNumber: "13", NewImage: { pk: { S: "OUTBOX#legacy" } } } }] });
+    expect(relay).toHaveBeenCalledExactlyOnceWith([inserted]);
+    expect(answer).toEqual({ batchItemFailures: [{ itemIdentifier: "11" }] });
+  });
+  it("reports notice enqueue failures independently of successful core work", async () => {
+    const relay = vi.fn(async () => ({ batchItemFailures: [] }));
+    const handler = createNotifierHandler({ documentClient: new FakeDynamoDb(), tableName: "state", enqueue: async () => { throw new Error("private queue detail"); }, retryLater: async () => undefined,
+      post: async () => ({ ts: "1.0" }), now: () => Date.now(), log: () => undefined, deliveryFailed: () => undefined, relayCoreOutbox: relay });
+    const notice = { eventSource: "aws:dynamodb", eventName: "INSERT", eventID: "event-99", dynamodb: { SequenceNumber: "99", NewImage: { entityType: { S: "DEVELOPER_TASK_POINTER" }, taskId: { S: "task-1" }, cancelledAt: { S: "2026-11-15T00:00:00.000Z" } } } };
+    expect(await handler({ Records: [notice, coreRecord("11")] })).toEqual({ batchItemFailures: [{ itemIdentifier: "99" }] });
+    expect(relay).toHaveBeenCalledExactlyOnceWith([coreRecord("11")]);
+  });
+  it("returns every core sequence for a failed invocation without leaking its error", async () => {
+    const answer = await setup(async () => { throw new Error("private invocation detail"); })({ Records: [coreRecord("11"), coreRecord("12")] });
+    expect(answer).toEqual({ batchItemFailures: [{ itemIdentifier: "11" }, { itemIdentifier: "12" }] });
+    expect(JSON.stringify(answer)).not.toContain("private invocation detail");
+  });
+});
+
+it("notifier derives company/workspace from the task and never shares the install token", async () => {
+  const legacy = vi.fn(async () => ["xoxb", "legacy"].join("-")); const used: string[] = [];
+  const workspaces = { requireCompany: async (team: string) => team === "T0AAAAAAA" ? "org_aaaaaaaaaaaaaaaaaaaa" : "org_bbbbbbbbbbbbbbbbbbbb",
+    tokenForCompany: async (company: string) => ["xoxb", company === "org_aaaaaaaaaaaaaaaaaaaa" ? "a" : "b"].join("-") };
+  const slack = cachedSlackClient(legacy, Date.now, async (_url, init) => {
+    used.push(new Headers(init?.headers).get("authorization") === `Bearer ${["xoxb", "a"].join("-")}` ? "a" : "b");
+    return new Response(JSON.stringify({ ok: true, ts: "1695500000.000001" }));
+  }, workspaces);
+  for (const [companyId, teamId] of [["org_aaaaaaaaaaaaaaaaaaaa", "T0AAAAAAA"], ["org_bbbbbbbbbbbbbbbbbbbb", "T0BBBBBBB"]]) {
+    const h = await notifierHarness({ shareToChannel: true }, { workspaces, post: slack.post });
+    const task = h.db.get(`DEVTASK#${h.taskId}`, "META")!;
+    task.companyId = companyId; (task.share as { teamId: string }).teamId = teamId!;
+    await h.pump();
+    expect(h.queue).toHaveLength(0);
+  }
+  expect(used).toEqual(["a", "b"]); expect(legacy).not.toHaveBeenCalled();
+  await expect(slack.post({ channel: SLACK_CHANNEL, text: "private" })).rejects.toThrow("This Slack workspace is not available.");
+  await expect(slack.post({ channel: SLACK_CHANNEL, text: "private", workspace: { companyId: "org_aaaaaaaaaaaaaaaaaaaa", teamId: "T0BBBBBBB" } })).rejects.toThrow("This Slack workspace is not available.");
+  expect(used).toHaveLength(2); expect(legacy).not.toHaveBeenCalled();
 });

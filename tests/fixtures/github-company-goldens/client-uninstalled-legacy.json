@@ -1,0 +1,1 @@
+{"statusCode":400,"headers":{"content-type":"application/json","cache-control":"no-store"},"body":"{\"error\":{\"code\":\"CONFIG_INVALID\",\"message\":\"the GitHub App cannot access example/demo; install it on example with access to that repository\"},\"requestId\":\"golden\"}"}

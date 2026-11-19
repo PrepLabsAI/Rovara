@@ -6,6 +6,7 @@ import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
 import { resolveTaskPeopleAccess, type TaskRole } from "./task-people.js";
 import { taskKey, taskOwnerKey, type DeveloperTaskRecord } from "./task-records.js";
+import { ownerOfExistingTask } from "../aws/engine-boundary.js";
 
 export type { TaskRole } from "./task-people.js";
 export type TaskAction = "read" | "peopleRead" | "comment" | "suggest" | "decide" | "ask" | "peopleManage" | "takeOwnership" | "retry" | "publish" | "feedback" | "close" | "control";
@@ -40,8 +41,8 @@ export interface TaskAccess {
 
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-type AccessDependencies = Pick<DeveloperTaskRouteDependencies,
-  "documentClient" | "tableName" | "checkAccess" | "channelMember" | "slackTeamId" | "log" | "now" | "taskPeopleConfiguration" | "checkTaskPerson">;
+export type AccessDependencies = Pick<DeveloperTaskRouteDependencies,
+  "documentClient" | "tableName" | "checkAccess" | "channelMember" | "slackTeamId" | "log" | "now" | "taskPeopleConfiguration" | "checkTaskPerson" | "workspaceForTask">;
 
 const log = (deps: Pick<DeveloperTaskRouteDependencies, "log">, entry: Record<string, unknown>) =>
   (deps.log ?? ((line) => console.log(JSON.stringify({ component: "broker", ...line }))))(entry);
@@ -59,6 +60,22 @@ export async function resolveTaskAccess(deps: AccessDependencies, caller: Develo
   const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: taskKey(taskId), ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
   const task = response.Item;
   if (task === undefined) throw notFound();
+  // Lane E2: a task the core owns is never acted on through the workflow's access (engine-boundary.ts); it reads exactly like a missing one.
+  if (await ownerOfExistingTask(deps, taskId) === "core") throw notFound();
+  return await taskAccessOfRecord(deps, caller, task, action, taskId);
+}
+
+/**
+ * Core task web routes (Cloud #188 item 3): the very same rule as `resolveTaskAccess`, for a core task's record that the CORE has already read and checked against the caller's live company (aws/core-task-rule-routes.ts).
+ * The core's routes mirror the old task routes' access exactly by calling this one function; nothing here knows which engine runs the task.
+ */
+export async function resolveCoreTaskAccess(deps: AccessDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, action?: TaskAction): Promise<TaskAccess> {
+  if (!TASK_ID.test(task.taskId)) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+  return await taskAccessOfRecord(deps, caller, task, action, task.taskId);
+}
+
+async function taskAccessOfRecord(deps: AccessDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, action: TaskAction | undefined, taskId: string): Promise<TaskAccess> {
+  const notFound = () => agentXError("TASK_NOT_FOUND", "no task here that you can see");
   try {
     const people = await resolveTaskPeopleAccess(deps, task, caller.developerId);
     if (people !== undefined) {
@@ -91,15 +108,18 @@ export async function resolveTaskAccess(deps: AccessDependencies, caller: Develo
   const share = task.share;
   if (!usesProject || share === undefined || caller.slackUserId === undefined || deps.channelMember === undefined) throw notFound();
   let member: boolean;
+  let scopedTeam: string | undefined;
   try {
-    member = await deps.channelMember(caller.slackUserId, share.channelId);
+    const workspace = await deps.workspaceForTask?.(task);
+    scopedTeam = workspace?.teamId;
+    member = workspace === undefined ? await deps.channelMember(caller.slackUserId, share.channelId) : await deps.channelMember(caller.slackUserId, share.channelId, workspace);
   } catch (error) {
     log(deps, { event: "developer.task_page_membership_unavailable", taskId, errorName: error instanceof Error ? error.name : "unknown" });
     throw notFound();
   }
   if (!member) {
     // Only someone on the task's own Slack workspace who may use the project is told whom to ask.
-    if (deps.slackTeamId === undefined || share.teamId !== deps.slackTeamId) throw notFound();
+    if ((scopedTeam ?? deps.slackTeamId) === undefined || share.teamId !== (scopedTeam ?? deps.slackTeamId)) throw notFound();
     throw Object.assign(agentXError("TASK_ACCESS_DENIED", "you can't open this task yet"), { owners: [ownerNameForReaders(task.developerName)] });
   }
   if (legacyPeopleAction || (action !== undefined && (!can("commenter", action)

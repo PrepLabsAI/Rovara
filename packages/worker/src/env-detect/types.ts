@@ -1,6 +1,6 @@
 // Environment detectors (E2, design proof-test-env section 4.1): CODE reads the repository first and says what it found, with where (file and line) or which detector. The read-only setup agent then fills only the gaps.
 // Detectors are pure over a bounded reader: they never run a command and never read outside the file list they are given.
-import type { CheckKind, ProjectCommand, TestEnvDependencyKind } from "@agentx/contracts";
+import type { CheckKind, ProjectCommand, SageMakerDetectionSignal, TestEnvDependencyKind } from "@agentx/contracts";
 
 /** Where a detected value came from: a file and line, or a detector's name. */
 export type DetectedSource = { path: string; line: number } | `detector:${string}` | `recipe:${string}@${string}`;
@@ -45,10 +45,20 @@ export type DependencyRefusedField = (typeof DEPENDENCY_REFUSED_FIELDS)[number];
 
 export interface DependencyKeyAttribute { name: string; type: "S" | "N" | "B" }
 export interface DependencyResource {
-  kind: "table" | "bucket" | "queue" | "topic";
+  kind: "table" | "bucket" | "queue" | "topic" | "secret" | "parameter" | "key" | "bus" | "rule";
   /** The physical name when the code writes one as a plain identifier, else the template's own id for it. */
   name: string;
   keySchema?: { partitionKey: DependencyKeyAttribute; sortKey?: DependencyKeyAttribute };
+  /** A topic: the names of the declared queues that subscribe to it. */
+  queues?: string[];
+  /** A `String` parameter: the template's literal default when it writes one (a secret's value is never read at all). */
+  value?: string;
+  /** A key: its alias (`alias/name`). */
+  alias?: string;
+  /** A rule: its bus (absent: the default bus), and its event pattern (JSON text) or schedule. */
+  bus?: string;
+  pattern?: string;
+  schedule?: string;
 }
 
 /**
@@ -78,6 +88,11 @@ export interface DependencyHints {
   url?: { scheme: string; hostFamily: "local" | "private" | "cloud" | "unknown" };
   /** Resources infrastructure code declares (tables with their key schema, buckets, queues, topics), at most 24: what Rovara local AWS creates when it starts. */
   resources?: DependencyResource[];
+  /** An AWS service of the emulator's table that no seed handler creates resources for: it starts empty and the tests create their resources. */
+  startsEmpty?: boolean;
+  /** SM4: the SageMaker endpoint names the code, its settings or its infrastructure code write as literals (at most 16), and fixed words for the signs of SageMaker use a detector saw. */
+  endpointNames?: string[];
+  sagemakerSignals?: SageMakerDetectionSignal[];
   /** Which detector families saw it (`compose`, `ci`, `env`, `driver`, `sdk`, `test`, `iac`). */
   seenBy?: string[];
 }

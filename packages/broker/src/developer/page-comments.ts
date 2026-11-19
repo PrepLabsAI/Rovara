@@ -14,7 +14,7 @@ import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
 import { isConditional } from "../aws/broker-shared.js";
 import { plainName } from "../aws/task-web.js";
-import { loadWorkflowDocument, type LoadedDocument } from "./plan-artifacts.js";
+import { loadWorkflowDocument, type LoadedDocument } from "./plan-document-reader.js";
 import { can, taskOpen, type TaskAccess } from "./task-access.js";
 import { taskAccessFence } from "./task-people.js";
 import { plannerRepliesKey, taskKey, type DeveloperTaskRecord } from "./task-records.js";

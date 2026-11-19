@@ -2,7 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { ChangeMessageVisibilityCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
-import { ChannelEventSchema, publicHttpsUrlProblem, steppedUpNote, usableWebhookSecret, webhookHeaders, type ChannelAdapterRecord, type ChannelEvent, type MessagePart } from "@agentx/contracts";
+import { ChannelEventSchema, RegisteredChannelIdSchema, publicHttpsUrlProblem, steppedUpNote, usableWebhookSecret, webhookHeaders, type ChannelAdapterRecord, type ChannelEvent, type MessagePart } from "@agentx/contracts";
 import { checkEndpointAddresses, EndpointRefused } from "@agentx/gateway";
 import { adapterForChannel, builtInAdapterFromEnvironment } from "./channel-adapters.js";
 import { lastEventItem } from "./channel-conversation-state.js";
@@ -91,6 +91,8 @@ function fitActionParts(parts: Extract<ChannelEvent, { type: "message" }>["data"
 export function unsendableReason(event: ChannelEvent, adapter: Pick<ChannelAdapterRecord, "capabilities">): string | undefined {
   if (event.type === "direct" && adapter.capabilities.direct !== true) return "direct_unsupported";
   if (event.type === "message" && event.data.audience?.kind === "ephemeral" && adapter.capabilities.ephemeral !== true) return "ephemeral_unsupported";
+  // code/next's one-person progress note (a one-use link code) is the same: never posted for everyone.
+  if (event.type === "progress" && event.data.onlyTo !== undefined && adapter.capabilities.ephemeral !== true) return "ephemeral_unsupported";
   return undefined;
 }
 
@@ -101,6 +103,7 @@ export function createChannelEventSender(deps: ChannelEventSenderDependencies) {
     let event: ChannelEvent;
     try {
       const parsed = ChannelEventSchema.safeParse(JSON.parse(record.body));
+      // An event labelled `slack` reaches only the deployment's built-in adapter (FR-073); with none configured, `getAdapter` finds no registered adapter for that id and it is dropped below.
       if (!parsed.success) { log({ event: "dropped", reason: "invalid_event" }); return "dropped"; }
       event = parsed.data;
     } catch {
@@ -109,6 +112,8 @@ export function createChannelEventSender(deps: ChannelEventSenderDependencies) {
     }
     const adapter = await deps.getAdapter(event.channel);
     if (adapter === undefined) { log({ event: "dropped", reason: "adapter_removed", channel: event.channel, eventId: event.id }); return "dropped"; }
+    // The hosted product serves `slack` on its own path: only the deployment's built-in adapter (FR-073) may take an event with that id, never a registered webhook adapter's record, however one was found.
+    if (!RegisteredChannelIdSchema.safeParse(event.channel).success && adapter.builtIn !== true) { log({ event: "dropped", reason: "invalid_event" }); return "dropped"; }
     // Recorded whether it is then delivered, retried or dropped: a read shows what Rovara sent, so a gap is visible.
     if (event.type !== "direct" && adapter.builtIn !== true && deps.recordLastEvent !== undefined) {
       try {

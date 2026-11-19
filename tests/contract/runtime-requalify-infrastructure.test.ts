@@ -98,7 +98,11 @@ describe("the renewal's infrastructure", () => {
     expect([resolve[0]!.Resource].flat()).toHaveLength(1);
     expect(resolve[0]!.Condition).toBeUndefined();
     const provisioner = provisionerStatements().find((statement) => statement.Sid === "ResolveWorkerAmi")!;
-    expect(JSON.stringify(resolve[0]!.Resource)).toBe(JSON.stringify(provisioner.Resource));
+    // Machine size (#877): the provisioner also resolves the public x86_64 parameter (x86 sizes); the arm64 one is exactly ours, and nothing else is added.
+    const provisionerParameters = [provisioner.Resource].flat().map((resource) => JSON.stringify(resource));
+    expect(provisionerParameters).toHaveLength(2);
+    expect(provisionerParameters[0]).toBe(JSON.stringify(resolve[0]!.Resource));
+    expect(provisionerParameters[1]).toContain("::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64");
   });
 
   it("holds every launch permission the session provisioner needs to start a worker from the same template (parity, so a missing one fails here and not live)", () => {
@@ -189,8 +193,8 @@ describe("the renewal's infrastructure", () => {
       Sid: "DrainRead", Effect: "Allow", Action: ["dynamodb:Query", "dynamodb:GetItem"],
       Resource: [expect.anything(), expect.anything()],
       Condition: {
-        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*"] },
-        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["createdAt", "entityType", "pk", "sessionState", "setupExecutionId", "sk", "state", "status", "until", "updatedAt", "workflowE2EAdmission", "workflowMode", "workspaceId"] },
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*", "CORE_ENGINE_IN_USE", "ORG#*#WORKSPACE#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["companyId", "createdAt", "entityType", "orgId", "pk", "sessionState", "setupExecutionId", "sk", "state", "status", "until", "updatedAt", "workflowE2EAdmission", "workflowMode", "workspaceId"] },
         StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
       },
     });

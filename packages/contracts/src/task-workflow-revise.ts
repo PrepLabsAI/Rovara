@@ -11,10 +11,25 @@ import { WorkflowSnapshotSchema, WorkflowTransitionError, workflowOwnerAuthorize
 /** The reason the owner's request for changes carries in the workflow's decision history (fixed words, never the message). Later coding rounds read it as one of the owner's plan instructions, so it says what holds. */
 export const WORKFLOW_REVISE_PLAN_DECISION_REASON = "The plan was revised to include a change the owner sent as a live message while coding ran.";
 
-/** What the plan can take in: a workflow with no custom sequence, no pull request opened, no fix round in flight and an approved coding plan to revise. Anything else keeps the round-2 words (Retry coding, or a new task). */
+/** Whether a workflow's step sequence is Rovara Code's own (plan, plan check, coding, checks, reviews, pull request) and so not a custom one: the plan can still take a change in. */
+function standardSequence(program: unknown): boolean {
+  if (program === undefined) return true;
+  const steps: unknown = (program as { steps?: unknown }).steps;
+  if (!Array.isArray(steps)) return false;
+  const kinds = (steps as Array<{ kind?: string }>).map((step) => step.kind ?? "");
+  return kinds.join(",") === "plan,plan_critic,build,check,review,pull_request";
+}
+
+/** What the plan can take in: a workflow with no custom sequence (Rovara Code's own sequence is not custom), no pull request opened, no fix round in flight and an approved coding plan to revise. Anything else keeps the round-2 words (Retry coding, or a new task). */
 export function workflowReviseShapeOk(workflow: Pick<WorkflowSnapshot, "path" | "reviewPhase" | "artifacts"> & { program?: unknown; pullRequests?: readonly unknown[] | undefined; fixSource?: unknown }): boolean {
-  return workflow.program === undefined && (workflow.pullRequests?.length ?? 0) === 0 && workflow.fixSource === undefined
+  return standardSequence(workflow.program) && (workflow.pullRequests?.length ?? 0) === 0 && workflow.fixSource === undefined
     && (workflow.path !== "FULL" || workflow.reviewPhase === "IMPLEMENTATION_PLAN") && workflow.artifacts.some((artifact) => artifact.type === "plan");
+}
+
+/** The program step a workflow sent back to planning stands at: the plan step (the sequence's first). Nothing for a workflow with no sequence. */
+function planningStepOf(current: { program?: { steps: ReadonlyArray<{ id: string; kind: string }> } | undefined }): { programStepId?: string } {
+  const step = current.program?.steps.find((candidate) => candidate.kind === "plan");
+  return step === undefined ? {} : { programStepId: step.id };
 }
 
 /** The block reason coding stops with when the owner's live message asked for a change outside the approved plan: the one that offers Revise the plan when the plan can take the change in. */
@@ -66,7 +81,7 @@ export function revisePlanWithLiveChange(
   void _operation;
   void _progress;
   return WorkflowSnapshotSchema.parse({
-    ...kept, revision: current.revision + 1, stage: "PLAN", state: "READY", outcome: "CHANGES_REQUESTED", decisions: [...current.decisions, decision], updatedAt: input.now,
+    ...kept, revision: current.revision + 1, stage: "PLAN", state: "READY", ...planningStepOf(current), outcome: "CHANGES_REQUESTED", decisions: [...current.decisions, decision], updatedAt: input.now,
   });
 }
 
@@ -108,6 +123,6 @@ export function replanForChangedSpec(
   const { blockReason: _blockReason, critique: _critique, e2e: _e2e, workflowDependenciesApproval: _approval, workflowDependenciesOperationId: _operation, workflowDependenciesProgress: _progress, ...kept } = current;
   void _blockReason; void _critique; void _e2e; void _approval; void _operation; void _progress;
   return WorkflowSnapshotSchema.parse({
-    ...kept, revision: current.revision + 1, stage: "PLAN", state: "READY", outcome: "CHANGES_REQUESTED", decisions: [...current.decisions, decision], updatedAt: input.now,
+    ...kept, revision: current.revision + 1, stage: "PLAN", state: "READY", ...planningStepOf(current), outcome: "CHANGES_REQUESTED", decisions: [...current.decisions, decision], updatedAt: input.now,
   });
 }

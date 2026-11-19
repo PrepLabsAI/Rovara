@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { CreateSecretCommand, PutSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
-  AdapterChannelIdSchema,
+  RegisteredChannelIdSchema,
   AgentXNameSchema,
   CHANNEL_ADAPTERS_PK,
   ChannelAdapterRecordSchema,
@@ -56,7 +56,7 @@ function requireAdminClaim(identity: AuthenticatedIdentity): void {
 }
 
 function parseChannel(value: string): string {
-  const parsed = AdapterChannelIdSchema.safeParse(decodeURIComponent(value));
+  const parsed = RegisteredChannelIdSchema.safeParse(decodeURIComponent(value));
   if (!parsed.success) throw agentXError("CONFIG_INVALID", "channel must be a lowercase ID such as whatsapp, and not slack");
   return parsed.data;
 }
@@ -109,7 +109,7 @@ export async function adapterForChannel(
   options: { builtIn?: ChannelAdapterRecord | undefined; registry: boolean },
 ): Promise<ChannelAdapterRecord | undefined> {
   if (options.builtIn !== undefined && channel === options.builtIn.channel) return options.builtIn;
-  if (!options.registry || !AdapterChannelIdSchema.safeParse(channel).success) return undefined;
+  if (!options.registry || !RegisteredChannelIdSchema.safeParse(channel).success) return undefined;
   return getChannelAdapter(deps, channel);
 }
 

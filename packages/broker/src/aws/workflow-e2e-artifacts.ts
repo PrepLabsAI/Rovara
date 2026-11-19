@@ -3,6 +3,13 @@ import { GetObjectCommand, PutObjectCommand, type S3Client } from "@aws-sdk/clie
 import { E2E_ARTIFACT_RETENTION_TAG, E2E_DISPLAY_SCREENSHOT_MAX_BYTES, type E2EDisplayBaseline, type E2EScenarioResults } from "@agentx/contracts";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { readWorkflowE2ENotifierProjection, workflowE2EArtifactKey } from "./workflow-e2e-notifier-projection.js";
+import {
+  type WorkflowE2EArtifact,
+} from "../e2e/stored-artifacts.js";
+export {
+  resultsWithStoredArtifacts,
+  type WorkflowE2EArtifact,
+} from "../e2e/stored-artifacts.js";
 
 /**
  * M1.3 Task 3.7: the screenshots behind the rows of a browser and API round. Each is a private object by its SHA-256 under the task's own owner and workspace, written when
@@ -10,7 +17,6 @@ import { readWorkflowE2ENotifierProjection, workflowE2EArtifactKey } from "./wor
  */
 
 export type WorkflowE2EArtifactStore = Readonly<{ s3: Pick<S3Client, "send">; artifactBucketName: string }>;
-export type WorkflowE2EArtifact = Readonly<{ sha256: string; bytes: Uint8Array; contentType: "image/jpeg" }>;
 
 const sha256Of = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const isJpeg = (bytes: Uint8Array) => bytes.byteLength >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
@@ -31,17 +37,6 @@ export async function storeWorkflowE2EArtifacts(store: WorkflowE2EArtifactStore,
     stored.add(artifact.sha256);
   }
   return stored;
-}
-
-/** The results with a screenshot link kept only where its object was stored. */
-export function resultsWithStoredArtifacts(results: E2EScenarioResults, stored: ReadonlySet<string>): E2EScenarioResults {
-  const keep = (row: E2EScenarioResults["scenarios"][number]) => {
-    if (row.screenshotRef === undefined || stored.has(row.screenshotRef.sha256)) return row;
-    const { screenshotRef: _dropped, ...rest } = row;
-    void _dropped;
-    return rest;
-  };
-  return { scenarios: results.scenarios.map(keep), ...(results.baseline === undefined ? {} : { baseline: { ...results.baseline, scenarios: results.baseline.scenarios.map(keep) } }) };
 }
 
 async function readPrivateObject(store: WorkflowE2EArtifactStore, key: string, maxBytes: number): Promise<Uint8Array | undefined> {
@@ -87,3 +82,4 @@ export async function loadWorkflowE2EArtifact(store: WorkflowE2EArtifactStore, t
   if (bytes === undefined || bytes.byteLength !== ref.bytes || sha256Of(bytes) !== sha256 || !isJpeg(bytes)) return undefined;
   return { contentType: ref.contentType, bytes };
 }
+

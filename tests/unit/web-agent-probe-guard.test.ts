@@ -118,13 +118,43 @@ describe("the app-start guard of web-agent-app-isolation-v1", () => {
     });
 
     it("checks before it answers a request: a socket visible then answers 500 and ends the app, and an app that answered before is not asked again", async () => {
-      const run = await start();
+      // The checks that repeat are switched off, so the request check is the only one that can see the socket: the answer is exactly the 500, never a closed connection and never the app's own 200.
+      const run = await start({ intervalOff: true, loopOff: true });
       expect((await run.get("/")).status).toBe(200);
       run.mountSocket();
-      const late = await run.get("/orders").then((reply) => reply.status, () => "closed");
-      // Either the interval ended the app first (the connection is closed) or the request check answered 500; never the app's own 200.
-      expect(late === "closed" || late === 500).toBe(true);
+      expect((await run.get("/orders")).status).toBe(500);
       expect(await run.exited(5_000)).toBe(3);
+    });
+
+    it("answers a refused request before it ends the app: the 500 reaches the caller every time, never a reset (PROBE-GUARD-EXIT-RACE)", async () => {
+      // The app ended in the same breath as it answered, so a caller could see ECONNRESET instead of the 500. It now ends after the response has finished (or the connection closed, or two seconds).
+      // The checks that repeat are off, so the request check is the only one that ends the app; every run must give the caller the 500 and then end with code 3.
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        // The socket is mounted after the app is up (one visible from the start would stop the guard before it serves).
+        const run = await start({ intervalOff: true, loopOff: true });
+        run.mountSocket();
+        const reply = await run.get("/");
+        expect({ attempt, status: reply.status }).toEqual({ attempt, status: 500 });
+        expect({ attempt, code: await run.exited(5_000) }).toEqual({ attempt, code: 3 });
+      }
+    });
+
+    it("refuses requests in flight at the same time while the socket is mounted: none is passed to the app or served the guard page (the latch itself is pinned by the script check below and the asset digest)", async () => {
+      const run = await start({ intervalOff: true, loopOff: true });
+      expect((await run.get("/")).status).toBe(200);
+      run.mountSocket();
+      const replies = await Promise.all([run.get("/orders"), run.get(GUARD_PAGE_PATH), run.get("/orders")].map((reply) => reply.then((answer) => answer.status, () => "closed")));
+      // Each is the guard's 500 or a connection the ending app closed; never a 200 (the app's, or the guard page with its marker).
+      for (const reply of replies) expect([500, "closed"]).toContain(reply);
+      expect(replies).toContain(500);
+      expect(await run.exited(5_000)).toBe(3);
+    });
+
+    it("ends the app only after the response has finished: the pinned script does not exit in the same step as the 500", () => {
+      expect(script).toContain("u.once('finish',x)");
+      expect(script).toContain("u.once('close',x)");
+      expect(script).toContain("if(z||h){z=1;");
+      expect(script).not.toMatch(/\.end\(\);x\(\)/);
     });
 
     it("also checks before it answers a request, with the checks that repeat switched off: a socket mounted since the start answers 500 to the very first request and ends the app, never the app's 200", async () => {

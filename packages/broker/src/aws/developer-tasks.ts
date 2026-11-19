@@ -1,8 +1,20 @@
+import { proofIndexOf, type ProofIndexResponse } from "../local/app/proof-index.js";
+import { rowInCompany } from "../developer/company-rows.js";
+import type { SlackWorkspaceScope } from "@agentx/contracts";
+import { routeTaskMerge, type TaskMergeWiring } from "./task-merge.js";
+import type { CallerStepUp } from "./step-up-check.js";
+import { CompanyReadItemLimit, recordInCompany } from "./company-check.js";
 // Spec 025 FR-016 to FR-021: the developer task routes. Every task has its own workspace, reached
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
 // reads the deployment mode (FR-024).
 import { WORKFLOW_ACTIONABLE_REFUSALS } from "../developer/workflow-actions.js";
+import { taskOwnerView } from "../developer/task-owner-view.js";
 import { createHash, randomUUID } from "node:crypto";
+import { DynamoDocumentStore } from "@rovara/aws-adapters";
+import { DocumentAuditSink } from "@agentx/local-adapters";
+import { confirmPlanFeature } from "../core/report/confirm-plan-feature.js";
+import { createFeatureStore, type FeatureStoreDeps } from "../core/report/feature-store.js";
+import { mayReplaceTaskFeature, planFeatureChoices, planFeatureLine, readPlanFeature } from "../core/report/plan-feature.js";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
   CHANNEL_PRIVACY_NOT_SET_UP,
@@ -41,7 +53,7 @@ import {
   SlackUserIdSchema,
   StartDeveloperTaskRequestSchema,
   WorkspaceClosePreflightResultSchema,
-  agentXError,
+  agentXError, IMPLICIT_COMPANY_ID, INTENT_NOT_WAITING_MESSAGE, TASK_FEATURE_NEEDS_MAINTAINER, type PlanFeature,
   cleanClientName,
   developerTaskPolicy,
   diffStat,
@@ -52,6 +64,9 @@ import {
   type DeveloperCloseResponse,
   type DeveloperPullRequestResponse,
   type DeveloperTaskListItem,
+  DeveloperTaskListDetailSchema,
+  type DeveloperTaskListDetail,
+  understandRoundOf,
   type DeveloperTaskPolicy,
   type DeveloperTaskShare,
   type DeveloperTaskStatus,
@@ -78,6 +93,8 @@ import {
   type ProjectCommand,
   type WorkflowReviewBase,
   type WorkflowReviewChecks,
+  ownerPlanInstructions,
+  type WorkflowApprovedPlan,
   type WorkflowReviewPlan,
   type WorkflowReviewFeedback,
   type WorkflowFeedbackReviewReport,
@@ -155,7 +172,7 @@ import {
   type E2EWorkflowAdmissionRef,
   workflowDependencyAttemptTerminalProgress,
   WorkflowResolveFindingsInputSchema,
-  TaskPeopleRoleRequestSchema,
+  TaskPeopleAddRequestSchema, TaskPeopleRoleRequestSchema,
   TaskPeopleTakeOwnershipRequestSchema,
   type TaskPersonInviteClaimRequest,
   type TaskPersonInviteOutcome,
@@ -163,7 +180,7 @@ import {
   openReviewFindings,
   resolveWorkflowReviewFindings,
   workflowFindingAccepted,
-  workflowFindingProblem,
+  workflowFindingProblem, GENERAL_FAKE_MADE_NOTE,
   type DeveloperSignInMethod,
 } from "@agentx/contracts";
 import { z } from "zod";
@@ -198,13 +215,14 @@ import {
   type TaskShare,
   type TurnParty,
   type WorkspaceCharge,
-} from "../developer/task-records.js";
+} from "../developer/task-records.js"; import { PAGE_CHANGES_DEFAULT_REASON } from "../developer/gate-default-reasons.js";
 import { recoverStrandedPlanning, stoppedStepReason, strandedPlanningRun } from "./workflow-cancel-reconcile.js";
 import { GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, WORKFLOW_DISPATCH_PK, hashJson, isConditional, planDocumentKindName, previousPlanDocumentBlock, workflowDispatchItem, type WorkflowDispatchRecord } from "./broker-shared.js";
 import { planEvidencePointerKey, type PlanEvidencePointer } from "../developer/plan-evidence-jobs.js";
 import { loadPlanEvidence, loadWorkflowDocument, shortenMarkdown, type LoadedDocument } from "../developer/plan-artifacts.js";
 import type { DeveloperTaskActions, TransactItems } from "./developer-task-actions.js";
 import type { DeveloperCaller } from "./developer-routes.js";
+import { requireWebPageForSecurityAccept } from "./security-accept.js";
 import { grantTaskReader, listTaskReaders, readsAsReader, revokeTaskReader, type TaskReaderPerson } from "./task-readers.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { setupWatchKey } from "./stuck-setup.js";
@@ -223,7 +241,7 @@ import { createPlanComment, listPlanComments, listTaskMessages, readTaskDiff, se
 import { can, pageAccess, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
 import { getTaskPeoplePresentation, resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
 import { getTaskPeople as readTaskPeople, getTaskPeopleCapabilities as readTaskPeopleCapabilities, type TaskPersonCheck } from "../developer/task-people.js";
-import { confirmTaskPeopleProposal as confirmPeopleProposal, getTaskPeopleProposal as readPeopleProposal, getTaskPeopleProposalMetadata as readPeopleProposalMetadata, proposeTaskOwnership, proposeTaskPeopleRole,
+import { addTaskWebPerson, confirmTaskPeopleProposal as confirmPeopleProposal, getTaskPeopleCandidates, getTaskPeopleProposal as readPeopleProposal, getTaskPeopleProposalMetadata as readPeopleProposalMetadata, proposeTaskOwnership, proposeTaskPeopleRole, type TaskPeopleEffectsDependencies,
   submitSlackTaskOwnership as commitSlackTaskOwnership, submitSlackTaskPeopleRole as commitSlackTaskPeopleRole } from "../developer/task-people-effects.js";
 import { inertReplyText } from "../developer/prompt-text.js";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
@@ -239,8 +257,9 @@ import {
 } from "../developer/owner-answers.js";
 import type { TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { loadTestProofLines } from "../developer/test-proof-lines.js";
+import { TASK_ENTRY_AREAS, involvedOnCore, ownerOfExistingTask, ownerOfTaskId, serveCoreTask, startOnCore, taskEntryOperation, type CoreTaskEntry } from "./engine-boundary.js";
 
-export interface DeveloperTaskRouteDependencies {
+export interface DeveloperTaskRouteDependencies extends Pick<TaskPeopleEffectsDependencies, "registerTaskWebPerson" | "listTaskWebCandidates"> {
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   slackTeamId?: string;
@@ -251,7 +270,7 @@ export interface DeveloperTaskRouteDependencies {
   /** C: trusted exact-principal eligibility and bound-channel proof; never supplied by a request body. */
   checkTaskPerson?: (task: DeveloperTaskRecord, developerId: string, admission?: TaskPeopleDisplayAdmission) => Promise<{
     subject: { developerId: string; slackUserId?: string };
-    identity: { developerId: string; slackUserId: string; name: string; method: DeveloperSignInMethod; issuer: string; subject: string };
+    identity: { developerId: string; slackUserId?: string; name: string; method: DeveloperSignInMethod; issuer: string; subject: string };
     eligible: boolean;
     channelMember: boolean;
   }>;
@@ -262,6 +281,10 @@ export interface DeveloperTaskRouteDependencies {
   refreshTaskFeedback?(taskId: string): Promise<void>;
   /** The company this call is for; absent is the implicit company. A row of another company reads as missing (developer/company-rows.ts). */
   companyId?: string;
+  /** Lane W: the merge core wired for this deployment's tasks (lane E2); absent, `POST .../merge` answers a fixed "not set up". */
+  taskMerge?: TaskMergeWiring;
+  /** Lane W: the caller's step-up as the verified token states it (step-up-check.ts); the merge route checks its age. Never from a header, a query or a body. */
+  stepUp?: CallerStepUp;
   /** One page (30 files) of a pull request's changed files, from GitHub; absent answers RUNTIME_UNAVAILABLE on the diff route. */
   readPullRequestDiff?(repositoryUrl: string, number: number, page: number): Promise<{ files: Array<{ filename: string; additions: number; deletions: number; patch?: string }>; more: boolean }>;
   /** Present only for a Slack-signed internal task start; the existing thread becomes the task thread. */
@@ -270,16 +293,20 @@ export interface DeveloperTaskRouteDependencies {
   /** Spec 067: a registered, not removed person and whether they are a member of `project` (for task readers); without it, tasks can't be shared. */
   taskReaderPerson?(developerId: string, project: string): Promise<TaskReaderPerson | undefined>;
   /** C3: bound channels' names and privacy, best effort (R10). */
-  boundChannels?(channelIds: readonly string[]): Promise<BoundChannel[]>;
+  workspaceForTask?(task: DeveloperTaskRecord): Promise<SlackWorkspaceScope | undefined>;
+  workspaceForProject?(project: string): Promise<SlackWorkspaceScope | undefined>;
+  boundChannels?(channelIds: readonly string[], workspace?: SlackWorkspaceScope): Promise<BoundChannel[]>;
   /**
    * Q10: whether this Slack user is a member of this channel, through the access check's own Slack
    * lookup; SLACK_UNAVAILABLE when the lookup fails. Without it no private-channel share is allowed.
    */
-  channelMember?(slackUserId: string, channelId: string): Promise<boolean>;
+  channelMember?(slackUserId: string, channelId: string, workspace?: SlackWorkspaceScope): Promise<boolean>;
   /** C5: the project's bound channel IDs, sorted, for sharing a task that already exists (R11: no access check). */
   projectChannelIds(project: string): Promise<string[]>;
   /** The developer sign-in issuer; the task page the draft pull request links to is on its origin. */
   issuer?: string;
+  /** Lane E2: the core's own handlers, for a task stamped `core` (engine-boundary.ts). Absent: a core task reads exactly like a missing one here. */
+  coreTasks?: CoreTaskEntry;
   /** Spec 061 slice 2: the Slack service's request queue, for "Ask AgentX to reply to this comment"; without it the page says AgentX can't answer here. */
   slackRequestQueue?: SlackRequestQueue;
   now(): number;
@@ -560,10 +587,12 @@ async function refuse(deps: DeveloperTaskRouteDependencies, turns: string, party
 /** The developer's own task, or TASK_NOT_FOUND for anyone else and for a malformed ID (FR-036). */
 export async function loadOwnedTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<DeveloperTaskRecord> {
   const task = TASK_ID.test(taskId) ? await get<DeveloperTaskRecord>(deps, taskKey(taskId)) : undefined;
-  if (task === undefined || task.developerId !== caller.developerId) {
+  if (task === undefined || task.developerId !== caller.developerId || !recordInCompany(task, deps.companyId)) {
     // A malformed ID is never echoed back: it could be long or carry markup.
     throw agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours` : "that is not a task ID of yours");
   }
+  // Lane E2: a task the core owns is never read here (engine-boundary.ts); it answers exactly like a missing one.
+  if (await ownerOfExistingTask(deps, taskId) === "core") throw agentXError("TASK_NOT_FOUND", `no task ${taskId} of yours`);
   return task;
 }
 
@@ -577,7 +606,7 @@ async function loadReadableTask(deps: DeveloperTaskRouteDependencies, caller: De
   } catch (error) {
     if (!TASK_ID.test(taskId) || !(error instanceof AgentXError) || error.code !== "TASK_NOT_FOUND") throw error;
     const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
-    if (task !== undefined && await readsAsReader(deps, task, caller.developerId)) return { task, actor: "viewer" };
+    if (task !== undefined && recordInCompany(task, deps.companyId) && await ownerOfExistingTask(deps, taskId) === "workflow" && await readsAsReader(deps, task, caller.developerId)) return { task, actor: "viewer" };
     throw error;
   }
 }
@@ -1361,8 +1390,10 @@ export async function taskView(
     catch (error) { log(deps, { event: "developer.task_e2e_view_unavailable", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }); }
   }
   const spent = taskSpent(task);
+  const owner = taskOwnerView(task);
   return {
     taskId: task.taskId,
+    ...(owner === undefined ? {} : { owner }),
     title: task.title,
     project: task.project,
     status: derived.status,
@@ -1434,10 +1465,11 @@ async function shareFor(
   wanted: { shareToChannel: boolean; shareMode?: "view" | "continue" | undefined; channel?: string | undefined },
 ): Promise<ShareDecision | undefined> {
   if (!wanted.shareToChannel && access.policy.share !== "required") return undefined;
+  const workspace = await deps.workspaceForProject?.(project);
   const linked = caller.slackUserId !== undefined;
   const looked: BoundChannel[] = deps.boundChannels === undefined
     ? access.channelIds.map((channelId) => ({ channelId }))
-    : await deps.boundChannels(access.channelIds);
+    : workspace === undefined ? await deps.boundChannels(access.channelIds) : await deps.boundChannels(access.channelIds, workspace);
   // R10: a caller with no Slack link keeps each channel's privacy, never its name.
   const bound: BoundChannel[] = linked ? looked : looked.map(({ channelId, isPrivate }) => (isPrivate === undefined ? { channelId } : { channelId, isPrivate }));
   let decision: ShareDecision | undefined;
@@ -1456,7 +1488,7 @@ async function shareFor(
     }
     throw error;
   }
-  if (decision !== undefined) await confirmMayShareInto(deps, caller, bound.find((channel) => channel.channelId === decision.channelId) ?? { channelId: decision.channelId });
+  if (decision !== undefined) await confirmMayShareInto(deps, caller, bound.find((channel) => channel.channelId === decision.channelId) ?? { channelId: decision.channelId }, workspace);
   return decision;
 }
 
@@ -1470,14 +1502,14 @@ const PRIVACY_NOT_SET_UP = CHANNEL_PRIVACY_NOT_SET_UP;
  * channel-info lookup is configured) is treated as private unless the caller is a member, and a
  * failed membership lookup refuses: nothing here lets a share through on doubt.
  */
-async function confirmMayShareInto(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, channel: BoundChannel): Promise<void> {
+async function confirmMayShareInto(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, channel: BoundChannel, workspace?: SlackWorkspaceScope): Promise<void> {
   if (channel.isPrivate === false) return;
   const refusal = () => channel.isPrivate === true
     ? agentXError("CHANNEL_REQUIRED", NOT_A_MEMBER)
     : agentXError("SLACK_UNAVAILABLE", deps.boundChannels === undefined ? PRIVACY_NOT_SET_UP : PRIVACY_UNKNOWN);
   // A caller with no Slack link cannot be confirmed as a member.
   if (caller.slackUserId === undefined || deps.channelMember === undefined) throw refusal();
-  if (!(await deps.channelMember(caller.slackUserId, channel.channelId))) throw refusal();
+  if (!(workspace === undefined ? await deps.channelMember(caller.slackUserId, channel.channelId) : await deps.channelMember(caller.slackUserId, channel.channelId, workspace))) throw refusal();
 }
 
 async function startTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, value: unknown): Promise<{ task: DeveloperTaskView }> {
@@ -1529,11 +1561,12 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   }
   let share: TaskShare | undefined;
   if (decision !== undefined) {
+    const teamId = (await deps.workspaceForProject?.(request.project))?.teamId ?? deps.slackTeamId;
     // Bindings exist only under a team ID, so this cannot happen; refuse rather than write a half share.
-    if (deps.slackTeamId === undefined) return refused(agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared"));
+    if (teamId === undefined) return refused(agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared"));
     share = {
-      ...taskShare(decision, deps.slackTeamId, receivedAt),
-      ...(deps.initialSlackThread !== undefined && deps.initialSlackThread.teamId === deps.slackTeamId
+      ...taskShare(decision, teamId, receivedAt),
+      ...(deps.initialSlackThread !== undefined && deps.initialSlackThread.teamId === teamId
         && deps.initialSlackThread.channelId === decision.channelId ? { threadTs: deps.initialSlackThread.threadTs } : {}),
     };
   }
@@ -1708,55 +1741,109 @@ function decodeCursor(value: string | null): string | undefined {
   return fields.sk;
 }
 
-async function listTasks(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, url: URL): Promise<{ tasks: DeveloperTaskListItem[]; nextCursor?: string }> {
+/**
+ * Core task web routes (Cloud #188 item 5): a listed row's detail (`?detail=1`), from the task record the list already read: the workflow's stage, state, revision, path and block reason (the workflow
+ * task's own view when the list worked it out, which reads a stranded planning run as blocked, as the task read does), the pull requests the workflow recorded, what it has cost and its limit, the workflow's outcome and, for a core task, Understand's current round (its questions and whether each is answered). A workflow
+ * task's cost is its own spend totals; a core task's cost and limit are the core's (its owner round's money read), asked as this caller. A part that is not known is left out.
+ */
+async function listRowDetail(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, engine: "core" | "workflow", viewWorkflow: DeveloperTaskView["workflow"] | undefined): Promise<DeveloperTaskListDetail> {
+  const workflow = viewWorkflow ?? task.workflow;
+  const pulls = (task.workflow?.pullRequests ?? []).slice(0, 32).map((pull) => ({ repository: pull.repositoryId, number: pull.number, url: pull.url, state: pull.state }));
+  const money = engine === "core" ? await deps.coreTasks?.taskMoney?.(caller, task.taskId).catch(() => undefined) : undefined;
+  const spent = engine === "workflow" ? taskSpent(task)?.usd : money?.costUsd;
+  // Understand's round is a core task's (a workflow task never asks questions). It is built from the workflow the list already has, and shown only when the core's own task read would show this caller the task.
+  const asked = engine === "core" ? understandRoundOf(workflow) : undefined;
+  const round = asked !== undefined && (await deps.coreTasks?.taskReadable?.(caller, task.taskId).catch(() => false)) === true ? asked : undefined;
+  const detail: DeveloperTaskListDetail = {
+    ...(workflow === undefined ? {} : { workflow: { stage: workflow.stage, state: workflow.state, revision: workflow.revision, path: workflow.path, ...(workflow.blockReason === undefined ? {} : { blockReason: workflow.blockReason }) } }),
+    ...(pulls.length === 0 ? {} : { pullRequests: pulls }),
+    ...(spent === undefined ? {} : { costUsd: spent }),
+    ...(money === undefined ? {} : { runLimitUsd: money.runLimitUsd }),
+    ...(round === undefined ? {} : { round }),
+    ...(workflow?.outcome === undefined ? {} : { outcome: workflow.outcome }),
+  };
+  // Only a detail the contract holds goes out (a stored value outside it is left out whole, never cut).
+  const parsed = DeveloperTaskListDetailSchema.safeParse(detail);
+  return parsed.success ? parsed.data : {};
+}
+
+async function listTasks(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, url: URL): Promise<{ tasks: Array<DeveloperTaskListItem & DeveloperTaskListDetail>; nextCursor?: string }> {
   const limit = whole(url.searchParams.get("limit"), DEVELOPER_TASK_LIST_DEFAULT, 1, DEVELOPER_TASK_LIST_MAX, "limit");
+  // `detail=1` (exactly) asks for each row's detail; anything else is the ordinary list, byte for byte.
+  const detailed = url.searchParams.get("detail") === "1";
   const project = url.searchParams.get("project");
   const statusParam = url.searchParams.get("status");
   const status = statusParam === null ? undefined : DeveloperTaskStatusSchema.safeParse(statusParam);
   if (status !== undefined && !status.success) throw agentXError("CONFIG_INVALID", `status must be one of ${DeveloperTaskStatusSchema.options.join(", ")}`);
   const pk = `DEVELOPER#${caller.developerId}`;
   const after = decodeCursor(url.searchParams.get("cursor"));
-  const tasks: DeveloperTaskListItem[] = [];
+  const tasks: Array<DeveloperTaskListItem & DeveloperTaskListDetail> = [];
   let start: Record<string, unknown> | undefined = after === undefined ? undefined : { pk, sk: after };
   let scanned = 0;
-  do {
-    const response = await deps.documentClient.send(new QueryCommand({
-      TableName: deps.tableName,
-      KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
-      ExpressionAttributeValues: { ":pk": pk, ":prefix": "TASK#" },
-      ScanIndexForward: false,
-      Limit: 50,
-      ConsistentRead: true,
-      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
-    })) as { Items?: DeveloperTaskIndexRecord[]; LastEvaluatedKey?: Record<string, unknown> };
-    const rows = response.Items ?? [];
-    for (const [position, row] of rows.entries()) {
-      scanned += 1;
-      let current: DeveloperTaskStatus = row.status;
-      let updatedAt = row.updatedAt;
-      // A closed task never changes again, so only open rows are derived afresh.
-      if (row.status !== "CLOSED") {
-        const task = await get<DeveloperTaskRecord>(deps, taskKey(row.taskId));
-        if (task !== undefined && task.developerId === caller.developerId) {
-          const view = await taskView(deps, task, { events: 0, details: false });
-          current = view.status;
-          if (current !== row.status) {
-            updatedAt = view.updatedAt;
-            await syncIndex(deps, task, current, updatedAt);
+  const scanMax = deps.companyId === undefined ? LIST_SCAN_MAX : limit;
+  let completed = after;
+  try {
+    do {
+      const response = await deps.documentClient.send(new QueryCommand({
+        TableName: deps.tableName,
+        KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+        ExpressionAttributeValues: { ":pk": pk, ":prefix": "TASK#" },
+        ScanIndexForward: false,
+        Limit: 50,
+        ConsistentRead: true,
+        ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+      })) as { Items?: DeveloperTaskIndexRecord[]; LastEvaluatedKey?: Record<string, unknown> };
+      const rows = response.Items ?? [];
+      for (const [position, row] of rows.entries()) {
+        scanned += 1;
+        let current: DeveloperTaskStatus = row.status;
+        let updatedAt = row.updatedAt;
+        // With membership enabled, even closed index rows need the canonical task's company.
+        // At most the requested page size is loaded; a filtered page retains its continuation.
+        const task = row.status !== "CLOSED" || deps.companyId !== undefined ? await get<DeveloperTaskRecord>(deps, taskKey(row.taskId)) : undefined;
+        const visible = deps.companyId === undefined || (task !== undefined && task.developerId === caller.developerId && recordInCompany(task, deps.companyId));
+        let viewWorkflow: DeveloperTaskView["workflow"] | undefined;
+        let engine: "core" | "workflow" | undefined;
+        if ((row.status !== "CLOSED" || deps.companyId !== undefined) && visible) {
+          // Lane E2: a core task's row is listed as its index row says; the workflow never works out (or rewrites) its status.
+          if (task !== undefined && task.developerId === caller.developerId && (engine = await ownerOfExistingTask(deps, row.taskId)) === "workflow") {
+            // Checked lists finish each read before starting the next, so a budget
+            // continuation leaves no unfinished reads or partially rendered task.
+            const loaded = deps.companyId === undefined ? undefined : {
+              workspace: await deps.actions.workspace(task.workspaceId),
+              operations: await deps.actions.operations(task.workspaceId),
+            };
+            const view = await taskView(deps, task, { events: 0, details: false, ...(loaded === undefined ? {} : { loaded }) });
+            viewWorkflow = view.workflow;
+            current = view.status;
+            if (deps.companyId !== undefined) updatedAt = view.updatedAt;
+            if (current !== row.status) {
+              updatedAt = view.updatedAt;
+              await syncIndex(deps, task, current, updatedAt);
+            }
           }
         }
+        completed = row.sk;
+        const more = position < rows.length - 1 || response.LastEvaluatedKey !== undefined;
+        const data = deps.companyId === undefined ? row : task;
+        const matches = visible && data !== undefined && (project === null || data.project === project) && (status === undefined || !status.success || current === status.data);
+        if (matches && data !== undefined) {
+          // The detail only from the task record itself (the caller's own, in their company), never from an index row alone.
+          const detail = detailed && task !== undefined && task.developerId === caller.developerId && visible ? await listRowDetail(deps, caller, task, engine ?? await ownerOfExistingTask(deps, row.taskId), viewWorkflow) : {};
+          tasks.push({ taskId: data.taskId, title: data.title, project: data.project, status: current, shared: data.shared, createdAt: data.createdAt, updatedAt, ...detail });
+          if (tasks.length >= limit) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
+        }
+        // One page of the list reads at most LIST_SCAN_MAX index rows; the cursor carries on from there.
+        if (scanned >= scanMax) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
       }
-      const more = position < rows.length - 1 || response.LastEvaluatedKey !== undefined;
-      const matches = (project === null || row.project === project) && (status === undefined || !status.success || current === status.data);
-      if (matches) {
-        tasks.push({ taskId: row.taskId, title: row.title, project: row.project, status: current, shared: row.shared, createdAt: row.createdAt, updatedAt });
-        if (tasks.length >= limit) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
-      }
-      // One page of the list reads at most LIST_SCAN_MAX index rows; the cursor carries on from there.
-      if (scanned >= LIST_SCAN_MAX) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
-    }
-    start = response.LastEvaluatedKey;
-  } while (start !== undefined);
+      start = response.LastEvaluatedKey;
+    } while (start !== undefined);
+  } catch (error) {
+    // Exclusive-start cursor stays at the last fully examined row, including
+    // filtered rows. An individual oversized task still refuses with fixed words.
+    if (error instanceof CompanyReadItemLimit && completed !== after && completed !== undefined) return { tasks, nextCursor: encodeCursor(completed) };
+    throw error;
+  }
   return { tasks };
 }
 
@@ -2155,7 +2242,7 @@ export async function decideTaskWorkflow(
           ...applicationConditions,
           accessFence(deps, access),
         ];
-      }, { sharedTask: task.shared === true, workflowMode: mode, ...(retired.length === 0 ? {} : { retiredClaimIds: retired }), ...(mode === "PLAN" && nextPhase !== undefined ? { workflowPhase: nextPhase } : {}), ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }), ...(mode === "IMPLEMENT" ? taskBaseOption(task, next) : {}), ...(workflowDependencies === undefined ? {} : { workflowDependencies }),
+      }, { sharedTask: task.shared === true, workflowMode: mode, ...(retired.length === 0 ? {} : { retiredClaimIds: retired }), ...(mode === "PLAN" && nextPhase !== undefined ? { workflowPhase: nextPhase } : {}), ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }), ...(mode === "IMPLEMENT" ? taskBaseOption(task, next) : {}), ...(mode === "IMPLEMENT" ? approvedPlanOf(workflow, plan, currentPlan.sha256) : {}), ...(workflowDependencies === undefined ? {} : { workflowDependencies }),
         // M1.3 Task 3.7b (owner decision D2): the coding run also exports the unchanged code, for the approved application plan's baseline round.
         ...(mode === "IMPLEMENT" && baselineSource ? { workflowE2EBaselineSource: true as const } : {}) });
     });
@@ -2172,6 +2259,10 @@ export async function decideTaskWorkflow(
       throw Object.assign(agentXError("IDEMPOTENCY_CONFLICT", COMMENT_CHANGED_MESSAGE), { pageReason: "comment_changed" });
     }
     return busyOrClosing(deps, task, error);
+  }
+  if (request.decision === "APPROVE" && documentType === "plan") {
+    const store = new DynamoDocumentStore({ client: deps.documentClient, tableName: deps.tableName });
+    await confirmPlanFeature({ store, companyId: deps.companyId ?? IMPLICIT_COMPANY_ID, audit: new DocumentAuditSink({ store: () => store }), now: () => deps.now(), log: (entry) => log(deps, entry) }, taskId, caller.developerId);
   }
   const fresh = (await authorizeTaskAction(deps, caller, taskId, "decide")).task;
   // M1.3 Task 3.7 (owner decision D2): the approved application plan asks for its informational baseline round. Best effort and after the approval is committed: whatever
@@ -2668,9 +2759,6 @@ async function approvedCodingPlan(deps: DeveloperTaskRouteDependencies, workflow
     ...(loaded.format === "structured" ? { notChanging: loaded.plan.notChanging } : {}) };
 }
 
-/** How many of the owner's plan-review instructions a coding prompt repeats (the newest): each is at most 500 characters. */
-const OWNER_PLAN_INSTRUCTIONS_MAX = 5;
-
 /**
  * What every later round of the coder must keep to, whoever sent the work back (the owner's Send back, a finding to fix, a restart, or Rovara by itself): the owner's own instructions from
  * plan review (their Request changes reasons) and the approved plan's Not changing list. A fix prompted only by "the app stopped" cannot then undo what the owner told the planner, as
@@ -2678,9 +2766,7 @@ const OWNER_PLAN_INSTRUCTIONS_MAX = 5;
  * Empty when there is nothing to carry.
  */
 function ownerConstraintsSection(workflow: WorkflowSnapshot, plan: { notChanging?: string[] }): string {
-  const instructions = workflow.decisions
-    .filter((decision) => decision.decision === "REQUEST_CHANGES" && decision.actorRole !== "AGENTX" && (decision.source === undefined || decision.source === "GATE"))
-    .slice(-OWNER_PLAN_INSTRUCTIONS_MAX).map((decision) => decision.reason);
+  const instructions = ownerPlanInstructions(workflow);
   // A plan with nothing that stays as it is says "None".
   const staying = (plan.notChanging ?? []).filter((entry) => entry.trim().toLowerCase() !== "none");
   const lines = [
@@ -2783,6 +2869,7 @@ async function queueWorkflowCoding(
   const { task } = access;
   const { workflow } = task;
   const receivedAt = iso(deps);
+  const approvedPlan = await workflowApprovedPlanOption(deps, workflow);
   try {
     await withCurrentThreadNotes(deps, task, input.requestId, (current, notes) => {
       const fed = fedThroughUpdate(notes);
@@ -2815,7 +2902,7 @@ async function queueWorkflowCoding(
           request: input.request, response: `${input.response} as operation ${operation.id}.`, operationId: operation.id,
         })),
         accessFence(deps, access),
-      ], { sharedTask: task.shared === true, workflowMode: "IMPLEMENT", ...selectedCheckCommands(input.next), ...taskBaseOption(task, input.next), ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }) });
+      ], { sharedTask: task.shared === true, workflowMode: "IMPLEMENT", ...selectedCheckCommands(input.next), ...taskBaseOption(task, input.next), ...approvedPlan, ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }) });
     });
   } catch (error) {
     if (isConditional(error)) await authorizeTaskAction(deps, caller, task.taskId, "control");
@@ -2918,6 +3005,8 @@ export async function resolveTaskWorkflowFindings(deps: DeveloperTaskRouteDepend
     if (prior.source !== "FINDINGS") throw agentXError("IDEMPOTENCY_CONFLICT", "this request ID was already used for another decision on this task; use a new one");
     return { task: await taskView(deps, task, { events: 0, details: false }) };
   }
+  // DEC 236h: accepting a security finding is the web page's, the Rovara web app's own sign-in client with a fresh step-up; a token of the CLI, an AI tool, a scoped client or another full-access client may accept only the code review's findings.
+  await requireWebPageForSecurityAccept(caller, workflow, request, deps.now());
   if (request.expectedRevision !== workflow.revision || workflow.candidate?.digest !== request.candidateDigest) {
     throw agentXError("IDEMPOTENCY_CONFLICT", "these findings are out of date; refresh the task and try again");
   }
@@ -3128,6 +3217,26 @@ async function workflowReviewPlanOption(deps: DeveloperTaskRouteDependencies, wo
     markdown: shortenMarkdown(approved.text, WORKFLOW_PLAN_MAX_BYTES), sha256: approved.sha256,
     ...(approved.e2eIntent === undefined ? {} : { e2eIntent: approved.e2eIntent }),
   } };
+}
+
+/**
+ * The approved plan as structured data for the coding worker's conversation compaction (it keeps the plan's key facts in every summary): the Markdown copy, its digest and the owner's
+ * own plan-review instructions. The worker reads the plan from here and never out of the prompt, which can hold a teammate's reply or a page comment. Absent when the plan cannot be read.
+ */
+async function workflowApprovedPlanOption(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot): Promise<{ workflowApprovedPlan?: WorkflowApprovedPlan }> {
+  let approved: Awaited<ReturnType<typeof approvedCodingPlan>>;
+  try {
+    approved = await approvedCodingPlan(deps, workflow);
+  } catch (error) {
+    if (error instanceof AgentXError && error.code === "WORKSPACE_NOT_READY") return {};
+    throw error;
+  }
+  return approvedPlanOf(workflow, approved.text, approved.sha256);
+}
+
+/** The approved plan as the worker's own field: the Markdown copy (cut to the plan limit), its digest and the owner's own plan-review instructions. */
+function approvedPlanOf(workflow: Pick<WorkflowSnapshot, "decisions">, markdown: string, sha256: string): { workflowApprovedPlan: WorkflowApprovedPlan } {
+  return { workflowApprovedPlan: { markdown: shortenMarkdown(markdown, WORKFLOW_PLAN_MAX_BYTES), sha256, ownerInstructions: ownerPlanInstructions(workflow) } };
 }
 
 /**
@@ -3857,7 +3966,7 @@ export async function decideOnPage(deps: DeveloperTaskRouteDependencies, caller:
   if (!can(access.role, "decide")) throw Object.assign(agentXError("FORBIDDEN", "Only owners decide."), { pageReason: "owners_only" });
   await decideTaskWorkflow(deps, caller, taskId, {
     requestId: input.requestId, expectedRevision: input.expectedRevision, decision: input.decision, artifactDigest: input.artifactDigest,
-    reason: input.note ?? (input.decision === "APPROVE" ? "Approved on the task page." : "See the included comments."),
+    reason: input.note ?? (input.decision === "APPROVE" ? "Approved on the task page." : PAGE_CHANGES_DEFAULT_REASON),
     answers: input.answers, includedCommentIds: input.includedCommentIds,
     ...(input.selectedOptionalCheckIds === undefined ? {} : { selectedOptionalCheckIds: input.selectedOptionalCheckIds }),
   }, { via: "PAGE", ...(input.note === undefined ? {} : { note: input.note }) });
@@ -3881,6 +3990,45 @@ export async function retryApplicationRoundOnPage(deps: DeveloperTaskRouteDepend
   await retryTaskWorkflow(deps, caller, taskId, { requestId: input.requestId, expectedRevision: input.expectedRevision, instructions: "Retried the browser and API checks from the task page." });
   const stored = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: taskKey(taskId), ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
   return { revision: stored.Item?.workflow?.revision ?? input.expectedRevision };
+}
+
+/** The feature store over this deployment's task table, in the task's company (the same store the plan approval confirms into). */
+function pageFeatureDeps(deps: DeveloperTaskRouteDependencies): FeatureStoreDeps {
+  const store = new DynamoDocumentStore({ client: deps.documentClient, tableName: deps.tableName });
+  return { store, companyId: deps.companyId ?? IMPLICIT_COMPANY_ID, audit: new DocumentAuditSink({ store: () => store }), now: () => deps.now() };
+}
+
+/** Lead 4 PCF: the plan card's feature line for the task page. Only the owner who decides gets `canChange` (the page's own decide permission); anyone else reads the line alone. A read that fails gives no line. */
+async function pagePlanFeature(deps: DeveloperTaskRouteDependencies, access: TaskAccess): Promise<PlanFeature | undefined> {
+  return await readPlanFeature(pageFeatureDeps(deps), { taskId: access.task.taskId, project: access.task.project }, { mayFile: pageAccess(access).canDecide, manager: false, admin: false });
+}
+
+/** The person who decides this task's documents: the page's existing decide permission, checked again on every call. */
+async function featureDecider(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskAccess> {
+  const access = await resolveTaskAccess(deps, caller, taskId);
+  if (!pageAccess(access).canDecide) throw Object.assign(agentXError("FORBIDDEN", "Only owners decide."), { pageReason: "owners_only" });
+  return access;
+}
+
+/** The open features the task's owner may pick from (the page's "Change"). */
+export async function pageFeatureChoices(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<{ features: Array<{ id: string; name: string }> }> {
+  await featureDecider(deps, caller, taskId);
+  return { features: await planFeatureChoices(pageFeatureDeps(deps)) };
+}
+
+/**
+ * "Change" and "No feature" from the task page: the same filing `POST /v1/app/tasks/{id}/feature` makes (source `chosen`, the starter's rule: a first filing or a suggestion is replaced, a deliberate filing is a
+ * maintainer's), by the person who may decide the task. Answers the new line the page shows.
+ */
+export async function setPageFeature(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: { feature: string | null }): Promise<{ line: string; featureId?: string }> {
+  const access = await featureDecider(deps, caller, taskId);
+  const featureDeps = pageFeatureDeps(deps);
+  const store = createFeatureStore(featureDeps);
+  const existing = await store.taskFeature(taskId);
+  if (!mayReplaceTaskFeature(false, existing?.source)) throw Object.assign(agentXError("FORBIDDEN", TASK_FEATURE_NEEDS_MAINTAINER), { pageReason: "not_allowed" });
+  await store.setTaskFeature({ taskId, project: access.task.project, featureId: input.feature, source: "chosen" }, { type: "person", id: caller.developerId });
+  const now = await readPlanFeature(featureDeps, { taskId, project: access.task.project }, { mayFile: true, manager: false, admin: false });
+  return { line: now?.line ?? planFeatureLine(null), ...(now?.feature == null ? {} : { featureId: now.feature.id }) };
 }
 
 /** Where the task stands now, for the open task page's "moved on" check: the same access rule as the page, two values only. */
@@ -3976,8 +4124,9 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
   const proves = currentPlan?.format === "structured" ? currentPlan.plan.checks?.proves : undefined;
   const checks = workflowSelectedChecks(checkPolicy)
     .map((check) => {
-      const status = results.find((result) => result.checkId === check.id)?.status;
-      return { id: check.id, label: check.label, passed: status === "PASS" ? true : status === "FAILED" ? false : undefined, ...(status === "UNKNOWN" ? { unclear: true as const } : {}),
+      const recorded = results.find((result) => result.checkId === check.id);
+      const status = recorded?.status;
+      return { id: check.id, label: check.label, passed: status === "PASS" ? true : status === "FAILED" ? false : undefined, ...(status === "UNKNOWN" ? { unclear: true as const } : {}), ...(recorded?.madeByRovara === true ? { madeByRovara: true as const } : {}),
         ...(proposedIds.has(check.id) ? { proposed: true as const } : {}), ...(proves?.[check.id] === undefined ? {} : { proves: proves[check.id]! }) };
     });
   // Model-written: the page escapes it. Review only is said once a coding plan exists to have proposed nothing.
@@ -4150,6 +4299,7 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
     history, access: pageAccess(access), ...(capabilities.peopleRevision === undefined ? {} : { peopleRevision: capabilities.peopleRevision }), canManagePeople: capabilities.canManagePeople,
     canTakeOwnership: capabilities.canTakeOwnership, comments, suggestions: shownSuggestions, askAvailable: await commentAnswersAvailable(deps, task),
     ...await pageDecidingView(deps, { task, caller, comments, suggestions: shownSuggestions, citations, claimIds }),
+    ...await (async () => { const planFeature = await pagePlanFeature(deps, access); return planFeature === undefined ? {} : { planFeature }; })(),
   };
 }
 
@@ -4332,7 +4482,7 @@ export function workflowPullRequestBody(task: DeveloperTaskRecord, workflow: Wor
     PULL_REQUEST_STATUS_END,
     ...(pageUrl === undefined ? [] : [`AgentX task: ${pageUrl}`]),
     "",
-    `Opened as a draft by AgentX after the owner-approved plan${reviewOnly ? " and reviews" : ", checks and reviews"} passed. Merge it on GitHub.`,
+    `Opened as a draft by AgentX after the owner-approved plan${reviewOnly ? " and reviews" : ", checks and reviews"} passed${!reviewOnly && workflow.verification?.results.some((result) => result.madeByRovara === true) === true ? " (" + GENERAL_FAKE_MADE_NOTE + ")" : ""}. Merge it on GitHub.`,
   ];
   const body = lines.join("\n");
   if (Buffer.byteLength(body, "utf8") <= WORKFLOW_PULL_REQUEST_BODY_MAX_BYTES) return body;
@@ -4350,7 +4500,7 @@ export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot, proof
   const checks = [...(workflow.checkPolicy?.required ?? []), ...(workflow.checkPolicy?.proposed ?? []), ...(workflow.checkPolicy?.optional ?? [])];
   const passed = (workflow.verification?.results ?? []).filter((result) => result.status === "PASS")
     // A proposed check's label is model-written: one line, redacted and made inert like a plan line, as every label is.
-    .map((result) => `${inertPlanLine(redactText(checks.find((check) => check.id === result.checkId)?.label ?? result.checkId).replace(/\s+/gu, " "))} passed`);
+    .map((result) => `${inertPlanLine(redactText(checks.find((check) => check.id === result.checkId)?.label ?? result.checkId).replace(/\s+/gu, " "))} passed${result.madeByRovara === true ? " (" + GENERAL_FAKE_MADE_NOTE + ")" : ""}`);
   const reviewOnly = workflow.verification?.reviewOnly === true && workflowIsReviewOnly(workflow.checkPolicy);
   // The issues noted are those nobody had to resolve: the findings the owner accepted are listed on their own.
   const noted = (workflow.reviews ?? []).reduce((count, review) => count + review.findings.filter((finding) => !workflowFindingAccepted(workflow, review.role, finding)).length, 0);
@@ -6082,8 +6232,9 @@ async function nextShare(
   if (task.share === undefined) {
     // R11: sharing an existing task does not recheck project access; it uses the latest policy.
     const decision = await shareFor(deps, caller, task.project, { revision: project.definition.revision, policy, access: "granted", channelIds: await deps.projectChannelIds(task.project) }, { shareToChannel: true, shareMode: request.shareMode, channel: request.channel });
-    if (decision === undefined || deps.slackTeamId === undefined) throw agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared");
-    return taskShare(decision, deps.slackTeamId, now);
+    const teamId = (await deps.workspaceForProject?.(task.project))?.teamId ?? deps.slackTeamId;
+    if (decision === undefined || teamId === undefined) throw agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared");
+    return taskShare(decision, teamId, now);
   }
   const current = task.share;
   if (request.channel !== undefined) {
@@ -6278,9 +6429,71 @@ async function retryTaskWorkflowFeedback(deps: DeveloperTaskRouteDependencies, c
 }
 
 /** Every developer task route answers 200 with its body; errors are AgentXErrors. */
+const TASK_PATH_PREFIX = "/v1/dev/tasks/";
+
+/**
+ * Lane E2: what this route answers for an id with no task behind it, said for a core task the caller may not see here. The same request is routed with a fresh id that has no rows (so
+ * nothing of the core task is read), and the real id is put back in the answer: its input checks, wrong-method answer and words are exactly a missing task's.
+ */
+async function answerAsMissing(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL, taskId: string, rest: string): Promise<unknown> {
+  const stand = randomUUID();
+  const swap = (text: string) => text.replaceAll(stand, taskId);
+  // Rebuilt from the parts the route matched (never a search for the id in the raw path, which may be percent-encoded): the stand-in path always names the stand-in id.
+  const path = `/v1/dev/tasks/${stand}${rest}${url.search}`;
+  const standUrl = new URL(path, url);
+  // The stand-in has no stamp, so this can never come back here; checked anyway, failing closed.
+  if (await ownerOfTaskId(deps, stand) !== "workflow") throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+  try {
+    const value = await routeDeveloperTaskRequest(deps, caller, { ...request, path, ...(request.body === undefined ? {} : { body: request.body.replaceAll(taskId, stand) }) }, standUrl);
+    return JSON.parse(swap(JSON.stringify(value ?? null))) as unknown;
+  } catch (error) {
+    if (error instanceof Error) error.message = swap(error.message);
+    throw error;
+  }
+}
+
+/**
+ * S3: answers to Understand's questions are a core task's (the core host serves them on this path, by the engine boundary). A workflow task never asks any, so one the caller may read
+ * answers "not waiting" in fixed words, and nothing is read from the body or written; anyone else reads the missing task's answer, as on every task route.
+ */
+async function answerWorkflowTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<never> {
+  await loadReadableTask(deps, caller, taskId);
+  throw agentXError("INTENT_NOT_WAITING", INTENT_NOT_WAITING_MESSAGE);
+}
+
+/**
+ * Cloud's Proof tab (`GET /v1/dev/tasks/{id}/evidence`): the task read's own rule (`loadReadableTask`: the owner, or a reader it is shared with; anyone else, another company's task and a core task read
+ * as missing; the company rule of the sibling task routes as well), then the proof index of what the workflow recorded for its current code. This engine keeps no evidence pack, so there are no failing-test causes here (proof-index.ts).
+ */
+async function taskProofIndex(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<ProofIndexResponse> {
+  const { task } = await loadReadableTask(deps, caller, taskId);
+  // The sibling task routes' company rule too (task-code-routes.ts): a row naming another company by `orgId` reads as missing, in the owner check's own words.
+  if (!rowInCompany(task as unknown as Record<string, unknown>, deps.companyId)) throw agentXError("TASK_NOT_FOUND", `no task ${task.taskId} of yours`);
+  return proofIndexOf(task.taskId, task.workflow, undefined);
+}
+
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
-  if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
-  if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
+  if (request.method === "POST" && url.pathname === "/v1/dev/tasks") {
+    // Lane E2 step 6: where the switch sends the caller's company to the core, the core starts the task; anywhere else (and with no core entry, the default) the start below, unchanged.
+    const core = await startOnCore(deps.coreTasks, request, caller);
+    if (core !== undefined) return core.value;
+    return startTask(deps, caller, body(request));
+  }
+  if (request.method === "GET" && url.pathname === "/v1/dev/tasks") {
+    // Web task channel C5: exactly `?involved=1` lists the tasks the caller was added to, through the core (every task re-checked there). Any other query is the ordinary list, unchanged.
+    if (url.searchParams.get("involved") === "1") return involvedOnCore(deps.coreTasks, request, caller);
+    return listTasks(deps, caller, url);
+  }
+  // Lane E2: a task's route goes by the task's stored engine. A task the core owns is answered by the core's own handlers (or refused), never by the readers below.
+  // Matched by string, not by a path pattern, so the route inventory (named-scopes) reads no new route here.
+  const entryPath = url.pathname.startsWith(TASK_PATH_PREFIX) ? url.pathname.slice(TASK_PATH_PREFIX.length) : undefined;
+  const entrySlash = entryPath === undefined ? -1 : entryPath.indexOf("/");
+  const entry = entryPath === undefined || entryPath === "" ? null : [url.pathname, entrySlash < 0 ? entryPath : entryPath.slice(0, entrySlash), entrySlash < 0 ? "" : entryPath.slice(entrySlash)] as const;
+  const operation = entry === null ? undefined : taskEntryOperation(entry[2]);
+  if (entry !== null && operation !== undefined) {
+    const entryTaskId = safeDecode(entry[1]);
+    if (await ownerOfTaskId(deps, entryTaskId, TASK_ENTRY_AREAS[operation]) === "core") return serveCoreTask(deps.coreTasks, request, caller, entryTaskId, () => answerAsMissing(deps, caller, request, url, entryTaskId, entry[2]));
+  }
   const publicationContextRoute = /^\/v1\/dev\/tasks\/([^/]+)\/e2e-publication-context$/.exec(url.pathname);
   if (publicationContextRoute !== null && request.method === "POST") {
     return e2ePublicationContext(deps, caller, safeDecode(publicationContextRoute[1]!), body(request));
@@ -6293,11 +6506,13 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   }
   const readersRoute = /^\/v1\/dev\/tasks\/([^/]+)\/readers(?:\/([^/]+))?$/.exec(url.pathname);
   if (readersRoute !== null) return routeTaskReaders(deps, caller, request, safeDecode(readersRoute[1]!), readersRoute[2] === undefined ? undefined : safeDecode(readersRoute[2]));
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|people\/candidates|people\/add|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan|messages|diff|comments|merge|answers|evidence))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "answers") return answerWorkflowTask(deps, caller, taskId);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "plan") return getTaskPlan(deps, caller, taskId, url);
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "evidence") return taskProofIndex(deps, caller, taskId);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "messages") return listTaskMessages(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "messages") return sendTaskMessage(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "diff") return readTaskDiff(deps, caller, taskId, url);
@@ -6307,6 +6522,12 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/role") {
     const input = parse(TaskPeopleRoleRequestSchema, body(request), deps, "people/role");
     return { change: await proposeTaskPeopleRole(taskPeopleEffectsDependencies(deps), caller, taskId, input) };
+  }
+  // C4 (plan 4.2 "Add a person from the web"): owner only; the candidates are proved live, and an add goes through the same propose -> confirm step.
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "people/candidates") return { candidates: await getTaskPeopleCandidates(taskPeopleEffectsDependencies(deps), caller, taskId) };
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/add") {
+    const input = parse(TaskPeopleAddRequestSchema, body(request), deps, "people/add");
+    return { change: await addTaskWebPerson(taskPeopleEffectsDependencies(deps), caller, taskId, input) };
   }
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/take-ownership") {
     const input = parse(TaskPeopleTakeOwnershipRequestSchema, body(request), deps, "people/take-ownership");
@@ -6328,5 +6549,15 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "close") return closeTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "pull-requests") return openPullRequest(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "share") return shareTask(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "merge") {
+    // Lane W: every merge rule is the merge core's (task-merge.ts); this only refuses earlier.
+    return routeTaskMerge({ wiring: deps.taskMerge, companyId: deps.companyId ?? IMPLICIT_COMPANY_ID, taskId, personId: caller.developerId, stepUp: deps.stepUp, body: body(request), now: deps.now() });
+  }
   throw agentXError("NOT_FOUND", "route not found");
 }
+
+/** C4: the task page's candidates read and web addition, through the same owner-only People effects as the developer routes. */
+export const getTaskPeopleCandidatesForPage = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string) =>
+  getTaskPeopleCandidates(taskPeopleEffectsDependencies(deps), caller, taskId);
+export const addTaskWebPersonForPage = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: z.infer<typeof TaskPeopleAddRequestSchema>) =>
+  addTaskWebPerson(taskPeopleEffectsDependencies(deps), caller, taskId, input);

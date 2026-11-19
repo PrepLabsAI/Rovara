@@ -111,6 +111,14 @@ export function logEnvDetectGuardUnavailable(sink: WorkerLogSink, code: unknown)
   });
 }
 
+/**
+ * A run's usage could not be worked out or kept: `usage.baseline_unavailable` (the conversation's earlier usage could not be read, so the run reports none rather than the whole running total again)
+ * or `usage.reported_not_kept` (the event was sent but the figure the next run takes off could not be written, so a retry may report this spend twice). Fixed text and the operation's id only.
+ */
+export function logUsageNote(sink: WorkerLogSink, event: "usage.baseline_unavailable" | "usage.reported_not_kept", operationId: string): void {
+  write(sink, "error", () => ({ component: "worker", event, invocationId: /^[0-9a-f-]{36}$/iu.test(operationId) ? operationId : "unknown" }));
+}
+
 /** One line, every boot, whatever the runtime state: an empty stream then means the worker never started, not that it was quiet. */
 export function logWorkerStarted(sink: WorkerLogSink, input: WorkerStartedInput): void {
   write(sink, "info", () => {

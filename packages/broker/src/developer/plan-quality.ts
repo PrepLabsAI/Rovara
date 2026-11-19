@@ -1,7 +1,8 @@
 import {
-  E2E_MODEL_ROUTE_DEFAULT_BUDGETS, PLAN_QUALITY_LINTS, builtinFileCheckOf, notChangingReference, planQualityFinding, planQualityTargetReason,
+  E2E_MODEL_ROUTE_DEFAULT_BUDGETS, PLAN_ONE_SCREEN_MAX_CHARS, PLAN_QUALITY_LINTS, builtinFileCheckOf, notChangingReference, planQualityFinding, planQualityTargetReason,
   type PlanDocument, type PlanDocumentKind, type PlanQualityFinding, type PlanQualityLint, type WorkflowCheck,
 } from "@agentx/contracts";
+import { planFullCharacters } from "./plan-one-screen.js";
 
 /**
  * Plan self-check rules: pure functions of a parsed coding plan and what the planner was told about the project (the
@@ -396,5 +397,12 @@ export function planQualityFindings(plan: PlanDocument, input: { kind: PlanDocum
     ...agentBudgetFindings(plan, needs),
     ...commandLintFindings(plan),
     ...coverageFindings(plan),
+    ...sizeFindings(plan),
   ];
+}
+
+/** `plan-too-big`: the plan would not read on one screen. Shown on the card, never revised by itself, never blocks; the same plan always gives the same finding. */
+function sizeFindings(plan: PlanDocument): PlanQualityFinding[] {
+  const characters = planFullCharacters(plan);
+  return characters > PLAN_ONE_SCREEN_MAX_CHARS ? [planQualityFinding({ code: "plan-too-big", count: characters })] : [];
 }

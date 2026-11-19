@@ -9,6 +9,14 @@ export type { CatalogSigningKey, CatalogTrustContext };
 
 export const CATALOG_TRUSTED_SIGNING_KEYS: readonly CatalogSigningKey[] = [];
 
+/**
+ * Whether this build compiles in a catalog signing key at all, valid or not. A build with any is a signed-catalog build (Cloud's): it uses the signed catalog and nothing else, and one whose keys none validate has no catalog
+ * and refuses. Decided from the compiled-in LIST, never from the keys that validate (a mistyped key must not turn a signed build into one that reads the owner's list, owner-image-list.ts).
+ */
+export function catalogSigningKeysCompiledIn(list: readonly CatalogSigningKey[] = CATALOG_TRUSTED_SIGNING_KEYS): boolean {
+  return list.length > 0;
+}
+
 /** The account id in an ARN (`arn:aws:lambda:us-west-2:123456789012:function:...`), or nothing. */
 export function accountIdOfArn(arn: string | undefined): string | undefined {
   const match = typeof arn === "string" ? /^arn:aws[a-z-]*:[a-z0-9-]+:[a-z0-9-]*:([0-9]{12}):/u.exec(arn) : null;

@@ -1,6 +1,8 @@
 // Spec 062 Phase 7b (FR-073): the built-in Slack adapter's channel side. Slack's ingress hands an ordinary conversation
 // request to the channel API, signed with the adapter's own secret, as any adapter does; the core's events for Slack
 // come back, signed the same way, to POST /v1/slack/channel-events, where they are posted to Slack.
+import { slackWorkspaceToken, type SlackWorkspaceDelivery } from "./slack-workspace-tokens.js";
+import { SlackWorkspaceRefused } from "./slack-workspace-binding.js";
 import { randomUUID } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
@@ -16,6 +18,7 @@ import {
   conversationFromSlackThread,
   inboundFromSlackRequest,
   ChannelActionAnswerSchema,
+  THREAD_MESSAGES_MAX,
   slackBlocksOf,
   slackModalOf,
   slackThreadOf,
@@ -102,6 +105,7 @@ export function createSlackChannelForwarder(deps: SlackChannelForwarderDependenc
 }
 
 export interface SlackChannelEventsDependencies {
+  workspaces?: SlackWorkspaceDelivery;
   /** The adapter's signing secret, or undefined when it cannot be read. */
   secret(): Promise<string | undefined>;
   botToken(): Promise<string>;
@@ -136,8 +140,8 @@ export function createSlackChannelEventsHandler(deps: SlackChannelEventsDependen
   const log: Log = deps.log ?? (() => undefined);
   const fetchFn = deps.fetch ?? fetch;
 
-  async function post(input: { channel: string; threadTs: string; text: string; blocks?: unknown[] | undefined }): Promise<string> {
-    const token = await deps.botToken();
+  async function post(token: string | undefined, input: { channel: string; threadTs: string; text: string; blocks?: unknown[] | undefined }): Promise<string> {
+    token ??= await deps.botToken();
     try {
       return (await chatPostMessage(token, input, fetchFn)).ts;
     } catch (error) {
@@ -148,26 +152,26 @@ export function createSlackChannelEventsHandler(deps: SlackChannelEventsDependen
     }
   }
 
-  async function message(event: Extract<ChannelEvent, { type: "message" }>): Promise<void> {
+  async function message(token: string | undefined, event: Extract<ChannelEvent, { type: "message" }>): Promise<void> {
     const thread = slackThreadOf(event.conversation);
     const { data } = event;
     const blocks = blocksOf(data.text, data.parts, data.actions);
     if (data.audience?.kind === "ephemeral") {
-      await chatPostEphemeral(await deps.botToken(), { channel: thread.channelId, threadTs: thread.threadTs, user: data.audience.actor.userId, text: data.text, blocks }, fetchFn);
+      await chatPostEphemeral(token ?? await deps.botToken(), { channel: thread.channelId, threadTs: thread.threadTs, user: data.audience.actor.userId, text: data.text, blocks }, fetchFn);
       return;
     }
     if (data.key === undefined) {
-      await post({ channel: thread.channelId, threadTs: thread.threadTs, text: data.text, blocks });
+      await post(token, { channel: thread.channelId, threadTs: thread.threadTs, text: data.text, blocks });
       return;
     }
     // A keyed message (a progress note) is edited in place once posted; events of a conversation arrive in order.
     const subject = slackThreadSubject(thread);
     const ts = await deps.messageTs.get(subject, data.key);
     if (ts !== undefined) {
-      await chatUpdate(await deps.botToken(), { channel: thread.channelId, ts, text: data.text, blocks }, fetchFn);
+      await chatUpdate(token ?? await deps.botToken(), { channel: thread.channelId, ts, text: data.text, blocks }, fetchFn);
       return;
     }
-    const posted = await post({ channel: thread.channelId, threadTs: thread.threadTs, text: data.text, blocks });
+    const posted = await post(token, { channel: thread.channelId, threadTs: thread.threadTs, text: data.text, blocks });
     try {
       await deps.messageTs.put(subject, data.key, posted, Math.floor(now() / 1_000) + MESSAGE_KEY_SECONDS);
     } catch (error) {
@@ -176,20 +180,28 @@ export function createSlackChannelEventsHandler(deps: SlackChannelEventsDependen
     }
   }
 
-  async function render(event: ChannelEvent): Promise<"posted" | "ignored"> {
+  async function render(token: string | undefined, event: ChannelEvent): Promise<"posted" | "ignored"> {
     if (event.type === "direct") return "ignored";
     const thread = slackThreadOf(event.conversation);
-    const text = (value: string) => post({ channel: thread.channelId, threadTs: thread.threadTs, text: value });
+    const text = (value: string) => post(token, { channel: thread.channelId, threadTs: thread.threadTs, text: value });
     switch (event.type) {
       case "message":
-        await message(event);
+        await message(token, event);
         return "posted";
       case "approval_request":
         // Slack's own Approve and Cancel buttons, which its interactivity answers as a typed reply would be.
-        await post({ channel: thread.channelId, threadTs: thread.threadTs, text: event.data.text,
+        await post(token, { channel: thread.channelId, threadTs: thread.threadTs, text: event.data.text,
           ...(event.data.actions === undefined ? {} : { blocks: confirmationBlocks(event.data.text, event.data.requestId) }) });
         return "posted";
-      case "progress": case "question": case "check_report": case "error":
+      case "progress":
+        // code/next's `onlyTo`: one person only (a one-use link code), never posted for the whole thread.
+        if (event.data.onlyTo !== undefined) {
+          await chatPostEphemeral(token ?? await deps.botToken(), { channel: thread.channelId, threadTs: thread.threadTs, user: event.data.onlyTo, text: event.data.text }, fetchFn);
+          return "posted";
+        }
+        await text(event.data.text);
+        return "posted";
+      case "question": case "check_report": case "error":
         await text(event.data.text);
         return "posted";
       case "pr":
@@ -227,9 +239,18 @@ export function createSlackChannelEventsHandler(deps: SlackChannelEventsDependen
       return respond(400, { error: "invalid_json" });
     }
     if (event.channel !== SLACK_CHANNEL || event.id !== verified.id) return respond(400, { error: "invalid_event" });
+    let token: string | undefined;
+    try {
+      if (deps.workspaces !== undefined) {
+        if (event.type === "direct") throw new SlackWorkspaceRefused();
+        const tenant = event.conversation.tenant;
+        if (event.type === "message" && event.data.audience?.kind === "ephemeral" && event.data.audience.actor.tenant !== tenant) throw new SlackWorkspaceRefused();
+        token = await slackWorkspaceToken(deps.workspaces, tenant);
+      }
+    } catch { return respond(422, { error: new SlackWorkspaceRefused().message }); }
     if (!await deps.claim(event.id, Math.floor(now() / 1_000) + EVENT_CLAIM_SECONDS)) return respond(200, { status: "duplicate" });
     try {
-      const outcome = await render(event);
+      const outcome = await render(token, event);
       log("slack_adapter.event", { eventId: event.id, type: event.type, outcome });
       if (outcome === "posted" && event.type !== "direct" && deps.markThread !== undefined) {
         const thread = slackThreadOf(event.conversation);
@@ -254,6 +275,7 @@ export function createSlackChannelEventsHandler(deps: SlackChannelEventsDependen
 }
 
 export interface SlackChannelCommandsDependencies {
+  workspaces?: SlackWorkspaceDelivery;
   secret(): Promise<string | undefined>;
   /** Phase 7c2: remembers a thread Rovara posted in. Best effort. */
   markThread?: (channelId: string, threadTs: string, expiresAtSeconds: number) => Promise<void>;
@@ -340,7 +362,10 @@ export function createSlackChannelCommandsHandler(deps: SlackChannelCommandsDepe
 
   async function run(command: ChannelCommand): Promise<unknown> {
     // Nothing reached Slack without a token.
-    const token = await deps.botToken().catch(() => { throw new Refused("token_unavailable", "the Slack bot token could not be read"); });
+    const tenant = command.kind === "direct_message" ? command.to.tenant : command.tenant;
+    const token = deps.workspaces === undefined
+      ? await deps.botToken().catch(() => { throw new Refused("token_unavailable", "the Slack bot token could not be read"); })
+      : await slackWorkspaceToken(deps.workspaces, tenant).catch(() => { throw new Refused("workspace_unavailable", new SlackWorkspaceRefused().message); });
     switch (command.kind) {
       case "post_message": {
         const blocks = slackBlocksOf(command.message);
@@ -427,8 +452,34 @@ export function createSlackChannelCommandsHandler(deps: SlackChannelCommandsDepe
         const nextCursor = cursorOf(body);
         return { spaces, ...(nextCursor === undefined ? {} : { nextCursor }) };
       }
+      // Lead 4: one read of a thread's replies for the lessons' Slack source. The space's facts come from the same call's own `conversations.info` (private unless Slack says it is public; shared when Slack says it is
+      // shared with another organisation or workspace; a direct or group direct message when Slack says so), then one page of `conversations.replies`. Nothing is kept here.
+      case "thread_messages": {
+        if (!/^[CG][A-Z0-9]{8,}$/.test(command.space)) throw new Refused("invalid_input", "only a channel's thread can be read");
+        const info = (await slackRead(token, "conversations.info", { channel: command.space }, fetchFn)).channel as { is_private?: unknown; is_im?: unknown; is_mpim?: unknown; is_shared?: unknown; is_ext_shared?: unknown; is_org_shared?: unknown; is_pending_ext_shared?: unknown } | undefined;
+        if (info === undefined || typeof info !== "object") throw new Refused("malformed_channel", "Slack's channel cannot be read");
+        const direct = info.is_im === true || info.is_mpim === true;
+        const shared = info.is_shared === true || info.is_ext_shared === true || info.is_org_shared === true || info.is_pending_ext_shared === true;
+        const body = await slackRead(token, "conversations.replies", { channel: command.space, ts: command.thread, limit: String(THREAD_MESSAGES_MAX + 1) }, fetchFn);
+        if (!Array.isArray(body.messages)) throw new Refused("malformed_messages", "Slack's thread cannot be read");
+        const replies = (body.messages as Array<Record<string, unknown>>).filter((message) => typeof message.ts === "string" && message.ts !== command.thread && message.thread_ts === command.thread);
+        const messages = replies.slice(0, THREAD_MESSAGES_MAX).flatMap((message) => {
+          const id = String(message.ts);
+          if (!/^[0-9]{6,12}\.[0-9]{3,8}$/.test(id)) return [];
+          const userId = typeof message.user === "string" && /^[UW][A-Z0-9]{2,}$/.test(message.user) ? message.user : undefined;
+          const bot = message.bot_id !== undefined || message.app_id !== undefined || message.subtype === "bot_message" || userId === undefined;
+          // A reply that names no team at all is not proved to be this organisation's: it is external (fail closed).
+          const teams = [message.user_team, message.team].filter((team): team is string => typeof team === "string");
+          const external = teams.length === 0 || teams.some((team) => team !== command.tenant);
+          // A plain message has no subtype (a "thread_broadcast" is a plain reply that was also shown in the channel).
+          const plain = message.subtype === undefined || message.subtype === "thread_broadcast";
+          return [{ id, ...(userId === undefined ? {} : { userId }), bot, external, plain, text: typeof message.text === "string" ? message.text.slice(0, 4_000) : "" }];
+        });
+        return { space: { private: info.is_private !== false, shared, direct }, messages, truncated: replies.length > THREAD_MESSAGES_MAX || body.has_more === true };
+      }
       case "check": {
         const body = await slackRead(token, "auth.test", {}, fetchFn);
+        if (deps.workspaces !== undefined && body.team_id !== tenant) throw new Refused("workspace_unavailable", new SlackWorkspaceRefused().message);
         if (typeof body.team_id !== "string") throw new Refused("no_team", "Slack named no team for the bot token");
         return { tenant: body.team_id };
       }
@@ -574,13 +625,14 @@ export function rovaraThreads(documentClient: Pick<DynamoDBDocumentClient, "send
 }
 
 /** The AWS handler for POST /v1/slack/channel-commands; nothing is reachable unless Slack goes through the channel API. */
-export function createAwsSlackChannelCommandsHandler(botToken: () => Promise<string>): (request: HttpApiV2Event) => Promise<HttpResponse> {
+export function createAwsSlackChannelCommandsHandler(botToken: () => Promise<string>, workspaces?: SlackWorkspaceDelivery): (request: HttpApiV2Event) => Promise<HttpResponse> {
   if (process.env.SLACK_VIA_CHANNEL !== "enabled" || !process.env.SLACK_ADAPTER_SECRET_NAME) return async () => respond(404, { error: "not_found" });
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const threads = rovaraThreads(DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration)), requiredEnvironment("SLACK_THREADS_TABLE_NAME"));
   return createSlackChannelCommandsHandler({
     secret: slackAdapterSecretReader(new SecretsManagerClient(clientConfiguration), requiredEnvironment("SLACK_ADAPTER_SECRET_NAME")),
     botToken,
+    ...(workspaces === undefined ? {} : { workspaces }),
     markThread: (channelId, threadTs, expiresAtSeconds) => threads.mark(channelId, threadTs, expiresAtSeconds),
     log(event, fields) {
       console.log(JSON.stringify({ component: "slack-adapter", event, ...fields }));
@@ -589,7 +641,7 @@ export function createAwsSlackChannelCommandsHandler(botToken: () => Promise<str
 }
 
 /** The AWS handler for POST /v1/slack/channel-events; nothing is reachable unless Slack goes through the channel API. */
-export function createAwsSlackChannelEventsHandler(botToken: () => Promise<string>): (request: HttpApiV2Event) => Promise<HttpResponse> {
+export function createAwsSlackChannelEventsHandler(botToken: () => Promise<string>, workspaces?: SlackWorkspaceDelivery): (request: HttpApiV2Event) => Promise<HttpResponse> {
   if (process.env.SLACK_VIA_CHANNEL !== "enabled" || !process.env.SLACK_ADAPTER_SECRET_NAME) return async () => respond(404, { error: "not_found" });
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
@@ -600,6 +652,7 @@ export function createAwsSlackChannelEventsHandler(botToken: () => Promise<strin
     markThread: (channelId, threadTs, expiresAtSeconds) => threads.mark(channelId, threadTs, expiresAtSeconds),
     secret: slackAdapterSecretReader(secretsManager, requiredEnvironment("SLACK_ADAPTER_SECRET_NAME")),
     botToken,
+    ...(workspaces === undefined ? {} : { workspaces }),
     async claim(eventId, expiresAtSeconds) {
       try {
         await documentClient.send(new PutCommand({ TableName: tableName, Item: { pk: `CHANNEL_EVENT#${eventId}`, sk: "META", expiresAt: expiresAtSeconds }, ConditionExpression: "attribute_not_exists(pk)" }));

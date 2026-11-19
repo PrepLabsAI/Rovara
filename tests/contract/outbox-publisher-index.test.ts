@@ -2,6 +2,7 @@
 // Spec 025 A4: the outbox publisher dispatches as before and indexes after; the index never fails the batch.
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { relayCoreOutboxStream } from "../../packages/broker/src/aws/core-outbox-stream.js";
 import { indexActivity } from "../../packages/broker/src/aws/activity-index.js";
 import { INDEX_SAFETY_MARGIN_MS, createOutboxPublisherHandler, taskUsageWriter } from "../../packages/broker/src/aws/outbox-publisher.js";
 import { taskSpent } from "../../packages/broker/src/developer/task-records.js";
@@ -11,6 +12,33 @@ import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 const outbox = { eventName: "INSERT", dynamodb: { NewImage: marshall({ pk: "OUTBOX#o1", sk: "OUTBOX", entityType: "OUTBOX", status: "PENDING", id: "o1", operationId: "op", workspaceId: "ws" }) } };
 
 describe("the outbox publisher with the index (A4)", () => {
+
+  it.each(["INSERT", "MODIFY"])("L9 excludes core rows on %s while legacy dispatch stays identical", async (eventName) => {
+    const company = "org_staging0000000000001";
+    const core = { eventSource: "aws:dynamodb", eventName, dynamodb: { SequenceNumber: "17", NewImage: marshall({ pk: `ORG#${company}#OUTBOX#o1`, sk: "OUTBOX", entityType: "OUTBOX", status: "PENDING", id: "o1", outboxState: `PENDING#${company}` }) } };
+    const send = vi.fn(async () => undefined);
+    const markQueued = vi.fn(async () => undefined);
+    const index = vi.fn(async () => undefined);
+    const publisher = createOutboxPublisherHandler({ send, markQueued, index });
+    expect(await publisher({ Records: [core] })).toEqual({ published: 0 });
+    expect(send).not.toHaveBeenCalled();
+    expect(markQueued).not.toHaveBeenCalled();
+    expect(index).toHaveBeenCalledWith([core]);
+    const relay = vi.fn(async (companies: readonly string[]) => companies.map((companyId) => ({ companyId, outcome: "ran" as const })));
+    expect(await relayCoreOutboxStream({ Records: [core] }, relay)).toEqual({ batchItemFailures: [] });
+    expect(relay.mock.calls).toEqual([[eventName === "INSERT" ? [company] : []]]);
+    expect(await publisher({ Records: [{ ...outbox, eventName }] })).toEqual({ published: 1 });
+    expect(send.mock.calls).toEqual([[{ pk: "OUTBOX#o1", sk: "OUTBOX", entityType: "OUTBOX", status: "PENDING", id: "o1", operationId: "op", workspaceId: "ws" }]]);
+    expect(markQueued.mock.calls).toEqual([["o1"]]);
+  });
+
+  it.each([undefined, "OUTBOX#wrong", "OUTBOX#o1#extra", "OTHER#o1"])("L9 refuses a non-exact legacy key %s", async (pk) => {
+    const send = vi.fn(async () => undefined);
+    const image = { entityType: "OUTBOX", status: "PENDING", id: "o1", ...(pk === undefined ? {} : { pk }) };
+    expect(await createOutboxPublisherHandler({ send, markQueued: async () => undefined })({ Records: [{ eventName: "INSERT", dynamodb: { NewImage: marshall(image) } }] })).toEqual({ published: 0 });
+    expect(send).not.toHaveBeenCalled();
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();

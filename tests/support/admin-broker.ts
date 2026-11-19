@@ -7,6 +7,7 @@ import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp
 import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
 import type { ConnectorCredentialsConfiguration, CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
 import type { TurnRecordExport } from "../../packages/broker/src/aws/turns.js";
+import type { BrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
 import { FakeDynamoDb, type FakeDynamoDbOptions } from "./fake-dynamodb.js";
 
@@ -33,7 +34,6 @@ function loadBroker(): Promise<BrokerModules> {
       STATE_TABLE_NAME: "unused",
       ARTIFACT_BUCKET_NAME: "unused",
       OIDC_ISSUER: adminIssuer,
-      CALLBACK_SIGNING_KEY: "c".repeat(64),
       GITHUB_APP_PRIVATE_KEY_SECRET_ARN: `arn:aws:secretsmanager:us-east-1:${account}:secret:test`,
       GITHUB_APP_CREDENTIAL_REF: "github-app",
       GITHUB_APP_ACCOUNT: "example",
@@ -59,8 +59,14 @@ export async function createAdminBroker(options: {
   channelAdapters?: boolean;
   /** Spec 065b: what a sign-in client's project is built from. */
   clientProjects?: unknown;
+  /** Lanes AU and EV: the company audit and event reads (a document store, and the company resolver). */
+  companyReads?: unknown;
   /** Sign in with ChatGPT (#338): built over the same fake table when given. */
   chatgpt?: (db: FakeDynamoDb) => ChatGptConnections;
+  /** Lane E2: inject the core root for broker-level route isolation checks. */
+  core?: BrokerCoreRoot;
+  /** DEC 254g: the gateway's offered models for an administrator's config set (`adminOfferedModelsFromEnvironment`). */
+  coreOfferedModels?: unknown;
   /** The fake table's realism (all on by default); see FakeDynamoDbOptions. An opt-out needs a comment saying why. */
   realism?: FakeDynamoDbOptions["realism"];
   /** "eventual": a read without ConsistentRead may see an item's previous version once after a write. */
@@ -80,6 +86,7 @@ export async function createAdminBroker(options: {
     adminClaim: "groups",
     adminValues: ["admins"],
     callbackSigningKey: "c".repeat(64),
+    ...(options.core === undefined ? {} : { core: options.core }),
     repositoryGrants: new RepositoryGrantService(Buffer.alloc(32, 4), async () => ({ token: "unused" })),
     githubPullRequests: { reconcilePullRequest: vi.fn(), getPullRequest: vi.fn(), updatePullRequest: vi.fn() },
     codeBuild: { start: vi.fn(), status: vi.fn() },
@@ -91,8 +98,10 @@ export async function createAdminBroker(options: {
     ...(options.developer ? { developer: options.developer } : {}),
     ...(options.linking ? { linking: options.linking } : {}),
     ...(options.clientProjects === undefined ? {} : { clientProjects: options.clientProjects }),
+    ...(options.companyReads === undefined ? {} : { companyReads: options.companyReads }),
     ...(options.channelAdapters ? { channelAdapters: { secretPrefix: "agentx/production/", secrets: { put: vi.fn() } } } : {}),
     ...(options.chatgpt ? { chatgpt: options.chatgpt(db) } : {}),
+    ...(options.coreOfferedModels === undefined ? {} : { coreOfferedModels: options.coreOfferedModels }),
   } as never);
   return { db, handler, registry };
 }

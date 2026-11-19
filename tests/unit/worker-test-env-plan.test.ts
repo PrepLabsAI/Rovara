@@ -1,4 +1,4 @@
-// Test environment (wire-testenv): the worker applies the environment's plan to a verification run: test selection by the diff the worker computes itself, the round's budget, and what it reports of the selection.
+// Test environment: the worker applies the environment's plan to a verification run: test selection by the diff the worker computes itself, the round's budget, and what it reports of the selection.
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

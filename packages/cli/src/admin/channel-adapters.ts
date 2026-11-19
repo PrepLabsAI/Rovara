@@ -1,7 +1,7 @@
 // Spec 062 FR-051: the CLI side of the channel adapter admin routes. Every call is an administrator's; the broker checks
 // they administer each project named.
 import {
-  AdapterChannelIdSchema,
+  RegisteredChannelIdSchema,
   ChannelAdapterRecordSchema,
   ChannelAdapterRegistrationSchema,
   ChannelOpaqueIdSchema,
@@ -32,7 +32,7 @@ async function call(session: AdminCall, method: "GET" | "PUT" | "DELETE", path: 
 }
 
 const segment = (value: string) => encodeURIComponent(value);
-const channelOf = (value: string) => AdapterChannelIdSchema.parse(value);
+const channelOf = (value: string) => RegisteredChannelIdSchema.parse(value);
 const idOf = (value: string, what: string) => {
   const parsed = ChannelOpaqueIdSchema.safeParse(value);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", `${what} must be 1–128 characters from letters, digits and . _ : + @ = -`);

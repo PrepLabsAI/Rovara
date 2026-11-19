@@ -77,6 +77,19 @@ describe("fitting an event to the adapter", () => {
   });
 });
 
+describe("code/next's one-person progress note (onlyTo)", () => {
+  it("is never sent to an adapter that cannot keep it private, and is sent to one that can", async () => {
+    const note = { ...message({}), type: "progress", data: { text: "Your link code is 123456.", onlyTo: actor.userId } } as ChannelEvent;
+    expect(unsendableReason(note, adapter())).toBe("ephemeral_unsupported");
+    expect(unsendableReason(note, adapter({ ephemeral: true }))).toBeUndefined();
+    expect(unsendableReason({ ...note, data: { text: "Working." } } as ChannelEvent, adapter())).toBeUndefined();
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(null, { status: 200 }));
+    const sender = createChannelEventSender({ getAdapter: async () => adapter(), getSecret: async () => SECRET, fetch: fetchFn, checkAddresses: async () => undefined, now: () => NOW, log: () => undefined });
+    expect(await sender({ Records: [{ messageId: "m", body: JSON.stringify(note) }] })).toEqual({ batchItemFailures: [] });
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+});
+
 describe("actions (FR-071)", () => {
   it("carry the press or the form, for the adapter's own channel only", () => {
     const action = { version: 1, channel: "chatops", eventId: "a1", conversation, actor, actionId: "workflow.changes", value: "42", form: { note: "keep the old menu" }, messageKey: "task:42:plan", receivedAt: "2026-11-10T10:00:00.000Z" };

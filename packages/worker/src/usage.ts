@@ -1,11 +1,13 @@
 // Moved to @agentx/contracts in feature 013 so the Slack orchestrator's turn records share the shape.
-import { SECOND_REVIEW_OPERATION_TAG } from "@agentx/contracts";
+import { SECOND_REVIEW_OPERATION_TAG, createTaskUsageTelemetry as telemetryOf, type TaskUsageOutcome as Outcome, type UsageStats } from "@agentx/contracts";
+import { redactCredentials } from "./events.js";
 export {
   createTaskUsageTelemetry,
   effectiveCacheRetention,
   type PiCacheRetention,
   type TaskUsageOutcome,
   type TaskUsageTelemetry,
+  type UsageStats,
 } from "@agentx/contracts";
 
 /**
@@ -24,4 +26,100 @@ export function usageForControlPlane<T>(usage: T, requested: { thinkingLevel?: u
   const rest: Record<string, unknown> = { ...usage };
   delete rest.thinkingLevel;
   return rest as T;
+}
+
+/**
+ * What a session spent since `baseline`. A reopened conversation's Pi session adds up every message of the saved transcript, the earlier operations' too, so its raw stats are the
+ * conversation's running total. A usage event is one operation's own spend, so a run that reopened a session reports its stats minus the stats it opened with (a session made new for
+ * the run has no baseline). Never below zero.
+ */
+export function statsSince<T extends UsageStats>(stats: T, baseline: UsageStats | undefined): T {
+  if (baseline === undefined) return stats;
+  const tokens = (now: number, before: number) => Math.max(0, now - before);
+  return {
+    ...stats,
+    tokens: {
+      input: tokens(stats.tokens.input, baseline.tokens.input), output: tokens(stats.tokens.output, baseline.tokens.output),
+      cacheRead: tokens(stats.tokens.cacheRead, baseline.tokens.cacheRead), cacheWrite: tokens(stats.tokens.cacheWrite, baseline.tokens.cacheWrite),
+      total: tokens(stats.tokens.total, baseline.tokens.total),
+    },
+    cost: Math.max(0, Math.round((stats.cost - baseline.cost) * 1e9) / 1e9),
+  };
+}
+
+/** Whether a session did nothing since its baseline: no tokens and no cost. A run that only read a reopened session's transcript spent nothing and sends no usage event. */
+export const spentNothing = (stats: UsageStats): boolean => stats.tokens.total === 0 && stats.tokens.input === 0 && stats.tokens.output === 0 && stats.tokens.cacheRead === 0 && stats.tokens.cacheWrite === 0 && stats.cost === 0;
+
+/**
+ * Per-run dollar stop (core money stop): a run asked for usage checkpoints reports what it spent since its last report at most this often, after a model call ends. A deployed install books
+ * each one and stops the run at its cap, so a run can spend past a cap by at most what it spends in this time plus the call that was going.
+ */
+export const USAGE_CHECKPOINT_MS = 15_000;
+
+/** The model a usage report names (a session's own, with the configured cache retention). */
+export type UsageModel = Parameters<typeof telemetryOf>[1];
+
+/**
+ * Usage checkpoints of one model session (per-run dollar stop): every session of a run asked for `usageCheckpoints` (the main run, each parallel part, each reviewer, an agent step) reports
+ * what it spent since its last report after a model call ends, at most every `intervalMs`, as a `usage` event marked `checkpoint`; at its end it reports what is left, marked `final`
+ * when checkpoints went before (so an end with nothing left is still told, as a zero). Off: nothing is sent until the end, which reports everything since the baseline, unmarked (as before).
+ */
+export interface UsageCheckpointer {
+  /** A session event: after an assistant message ends, a checkpoint when one is due. */
+  observe(event: unknown): void;
+  /** A checkpoint now, whatever the wait (a stop: what was spent leaves before anything else the ending does). */
+  checkpointNow(): void;
+  /** The end's report of `stats` (the session's stats now): what is left since the last checkpoint. Undefined when there is nothing to tell (no checkpoint went before and nothing was spent). */
+  endReport(stats: UsageStats, model: UsageModel, outcome: Outcome, requested: { thinkingLevel?: unknown }): Record<string, unknown> | undefined;
+  readonly checkpointed: boolean;
+}
+
+export function createUsageCheckpointer(input: {
+  enabled: boolean;
+  intervalMs?: number;
+  /** What the session's stats held before this run (a reopened conversation); undefined: a session made new. */
+  baseline: UsageStats | undefined;
+  stats: () => UsageStats;
+  model: () => UsageModel;
+  requested: { thinkingLevel?: unknown };
+  send: (payload: Record<string, unknown>) => void;
+  now?: () => number;
+}): UsageCheckpointer {
+  const now = input.now ?? Date.now;
+  const interval = input.intervalMs ?? USAGE_CHECKPOINT_MS;
+  let reported: UsageStats | undefined = input.baseline;
+  let checkpointed = false;
+  let last = now();
+  const report = (): void => {
+    try {
+      const stats = input.stats();
+      const spent = statsSince(stats, reported);
+      if (spentNothing(spent)) return;
+      const usage = redactCredentials(telemetryOf(spent, input.model(), "SUCCEEDED")) as Record<string, unknown>;
+      reported = stats;
+      checkpointed = true;
+      last = now();
+      // `checkpoint`: the spend so far, not the session's end (its outcome is not known yet).
+      input.send({ ...usageForControlPlane(usage, input.requested), checkpoint: true });
+    } catch { /* stats that cannot be read now are reported at the end */ }
+  };
+  return {
+    get checkpointed() { return checkpointed; },
+    observe(event) {
+      if (!input.enabled) return;
+      const value = event as { type?: unknown; message?: { role?: unknown } } | null | undefined;
+      if (value?.type !== "message_end" || value.message?.role !== "assistant") return;
+      if (now() - last < interval) return;
+      report();
+    },
+    checkpointNow() {
+      if (input.enabled) report();
+    },
+    endReport(stats, model, outcome, requested) {
+      const left = statsSince(stats, reported);
+      if (!checkpointed && spentNothing(left)) return undefined;
+      const usage = redactCredentials(telemetryOf(left, model, outcome)) as Record<string, unknown>;
+      return { ...usageForControlPlane(usage, requested), ...(checkpointed ? { final: true } : {}) };
+    },
+  };
 }

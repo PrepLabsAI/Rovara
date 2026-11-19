@@ -132,7 +132,7 @@ threads (3 at a time unless your admin changed it).
 
 You can share a task into one of its project's Slack channels, so your team can follow it. Ask
 your AI tool to "share my AgentX task in Slack", or to share it when it starts. It calls
-`agentx_share_task` (or `agentx_start_task` with `share_to_channel`). If the project has more than
+`agentx_share_task` (or `agentx_start_task` with `share: true`; the older name `share_to_channel` works for one more release). If the project has more than
 one channel, say which one.
 
 There are two modes:

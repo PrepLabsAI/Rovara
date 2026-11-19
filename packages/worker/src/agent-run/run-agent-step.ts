@@ -17,7 +17,7 @@ import type { FileOpsTarget } from "../file-ops-exec.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "../pi-session.js";
 import { assistantOutcome, eventType, failedTurn, type AssistantOutcome } from "../session-events.js";
 import { ToolLoopGuard, toolLoopGuardExtension } from "../tool-loop-guard.js";
-import { usageForControlPlane } from "../usage.js";
+import { createUsageCheckpointer, usageForControlPlane, type UsageCheckpointer } from "../usage.js";
 import { assistantText } from "../verification/extension.js";
 import { withStepTimeout, type AgentSkillFile } from "../agent-step.js";
 import { ToolCallRecorder, checkGrounding, cleanGrounding } from "./grounding.js";
@@ -44,6 +44,8 @@ export interface AgentStepResult {
 
 export interface RunAgentStepInput {
   payload: AgentRunStepPayload;
+  /** Per-run dollar stop: the step reports its usage as it goes (usage.ts `createUsageCheckpointer`). Absent: once, at its end. */
+  usageCheckpoints?: { intervalMs?: number };
   /** The operation the step is, for the connector requests and the session's conversation. */
   operationId: string;
   workspaceId: string;
@@ -62,6 +64,8 @@ export interface RunAgentStepInput {
   modelAccess: { model: WorkspaceModelConfiguration; piAdapter?: PiSessionAdapter };
   /** The step's pinned skills, from the broker's snapshot. */
   skills?: readonly AgentSkillFile[];
+  /** The broker-built standing-instructions block for this step (company rules); placed in the system prompt after the preamble, before the agent's own instructions. */
+  standingInstructions?: string;
   eventSink: EventBatchSink;
   artifactSink: ArtifactSink;
   cancellationController?: WorkerCancellationController;
@@ -71,9 +75,13 @@ export interface RunAgentStepInput {
   call?: ConnectorBridgeCall;
 }
 
-/** The system prompt: the preamble, then the step's instruction block when it has one (the skills list follows, from the session). */
-export function agentStepSystemPrompt(instructions: string): string {
-  return instructions.trim() === "" ? AGENT_STEP_PREAMBLE : `${AGENT_STEP_PREAMBLE}\n\n${instructions}`;
+/**
+ * The system prompt: the preamble, then the standing-instructions block when the broker sent one (the company's rules rank above the agent's own instructions), then the step's instruction block when it
+ * has one (the skills list follows, from the session).
+ */
+export function agentStepSystemPrompt(instructions: string, standingInstructions?: string): string {
+  const standing = standingInstructions === undefined || standingInstructions.trim() === "" ? [] : [standingInstructions];
+  return [AGENT_STEP_PREAMBLE, ...standing, ...(instructions.trim() === "" ? [] : [instructions])].join("\n\n");
 }
 
 /**
@@ -127,6 +135,8 @@ export async function runAgentStep(input: RunAgentStepInput): Promise<AgentStepR
   let failure: Error | undefined;
   let result: AgentStepResult | undefined;
   let reportingFailure: unknown;
+  let checkpoints: UsageCheckpointer | undefined;
+  const usageModelOf = (open: PiSessionHandle) => ({ ...open.getModel(), ...(input.modelAccess.model.cacheRetention === undefined ? {} : { cacheRetention: input.modelAccess.model.cacheRetention }) });
   // Ends every broker request when the step does: its time limit, which covers the whole step, or a cancellation. Registered
   // before anything else, so a cancel that arrives while the tools are being read is honoured and no session starts.
   const stepEnds = new AbortController();
@@ -134,7 +144,7 @@ export async function runAgentStep(input: RunAgentStepInput): Promise<AgentStepR
   let timer: ReturnType<typeof setTimeout> | undefined;
   const cancelled = (): boolean => input.cancellationController?.isCancelled(input.operationId) === true;
   try {
-    unregister = input.cancellationController?.register(input.operationId, { abort: async () => { stepEnds.abort(); await session?.abort(); } });
+    unregister = input.cancellationController?.register(input.operationId, { abort: async () => { stepEnds.abort(); await session?.abort(); checkpoints?.checkpointNow(); } });
     if (payload.timeoutMs !== undefined) {
       timer = setTimeout(() => { stepTimedOut = true; stepEnds.abort(); void Promise.resolve(session?.abort()).catch(() => undefined); }, payload.timeoutMs);
     }
@@ -165,7 +175,7 @@ export async function runAgentStep(input: RunAgentStepInput): Promise<AgentStepR
       ...(workspace.localFileTools === undefined ? {} : { localFileTools: workspace.localFileTools }),
       agentTools: payload.workspace === "read" ? [...READ_ONLY_TOOLS] : [],
       ...(input.skills === undefined || input.skills.length === 0 ? {} : { skills: input.skills }),
-      agentRun: { systemPrompt: agentStepSystemPrompt(payload.instructions), tools },
+      agentRun: { systemPrompt: agentStepSystemPrompt(payload.instructions, input.standingInstructions), tools },
     }, input.modelAccess.piAdapter);
 
     const handle = session;
@@ -173,7 +183,14 @@ export async function runAgentStep(input: RunAgentStepInput): Promise<AgentStepR
     loopGuard.onLimit = (error) => { if (loopStop === undefined) { loopStop = error; void handle.abort().catch(() => undefined); } };
     let lastAssistant: AssistantOutcome | undefined;
     let finalText: string | undefined;
+    const stepCheckpoints = createUsageCheckpointer({
+      enabled: input.usageCheckpoints !== undefined, ...(input.usageCheckpoints?.intervalMs === undefined ? {} : { intervalMs: input.usageCheckpoints.intervalMs }),
+      baseline: undefined, stats: () => handle.getSessionStats(), model: () => usageModelOf(handle), requested: input.modelAccess.model,
+      send: (payload) => { void events.append("usage", payload, { urgent: true }).catch(() => undefined); },
+    });
+    checkpoints = stepCheckpoints;
     unsubscribe = handle.subscribe((event) => {
+      stepCheckpoints.observe(event);
       // A streaming update repeats the whole message so far; the finished message and the finished call are what the log keeps.
       const streamed = (event as { type?: unknown } | undefined)?.type;
       if (streamed !== "message_update" && streamed !== "tool_execution_update") void events.append(eventType(event), event).catch(() => undefined);
@@ -242,11 +259,11 @@ export async function runAgentStep(input: RunAgentStepInput): Promise<AgentStepR
   }
   try {
     if (session !== undefined) {
-      const usage = redactCredentials(createTaskUsageTelemetry(session.getSessionStats(), {
-        ...session.getModel(),
-        ...(input.modelAccess.model.cacheRetention === undefined ? {} : { cacheRetention: input.modelAccess.model.cacheRetention }),
-      }, outcome));
-      await events.append("usage", usageForControlPlane(usage, input.modelAccess.model));
+      const stats = session.getSessionStats();
+      const usage = redactCredentials(createTaskUsageTelemetry(stats, usageModelOf(session), outcome));
+      // With checkpoints, the end tells only what is left (marked final); without, the whole step as before.
+      const endReport = checkpoints?.checkpointed === true ? checkpoints.endReport(stats, usageModelOf(session), outcome, input.modelAccess.model) : usageForControlPlane(usage, input.modelAccess.model);
+      if (endReport !== undefined) await events.append("usage", endReport);
       await input.artifactSink({ name: "usage.json", mediaType: "application/json", content: JSON.stringify(usage, null, 2) });
     }
   } catch (error) {

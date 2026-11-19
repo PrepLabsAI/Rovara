@@ -45,12 +45,16 @@ const MIN_CHECK_START_MS = 1_000;
 export const ABORT_JOIN_MS = CONTAINER_STOP_BOUND_MS + 10_000;
 
 export interface CheckRunners {
+  /** The actual planned id, after all skip guards and immediately before its command. */
+  beginCheck?(checkId: string): void;
   /** Worker-owned reports for the most recent round; absent means the ordinary workspace reports. */
   reportRoot?(): string;
   /** Worker-owned execution scope (multi-repo): creates and releases the round's checkout. */
   scopeRound?(plan: CheckPlan, signal: AbortSignal, run: (runners: CheckRunners) => Promise<CheckRound>, remainingMs: () => number): Promise<CheckRound>;
   /** Applies old-code phases inside that execution scope, leaving the candidate directories alone. */
   originalCode?(this: void, repositories: readonly OriginalCodeRepository[]): OriginalCode;
+  /** Attributes commands issued by prepareRound separately from planned checks. */
+  scopeSetup?(run: () => Promise<void>): Promise<void>;
   /** Setup inside the round, after its service helpers are ready. */
   prepareRound?(signal: AbortSignal): Promise<void>;
   /**
@@ -83,6 +87,11 @@ export interface CheckRunners {
    * network) is always closed and the working sandbox put back, also for the TESTPROOF rerun and the baseline scans, which call `runChecks` themselves. Its rejection is ignored. Absent: nothing changes.
    */
   endRound?(): Promise<void>;
+  /**
+   * General fakes (slice 2): the entries `runChecks` just built, after `endRound` ran, with the checks a Rovara-made fake answered marked `madeByRovara`. Called once per `runChecks`, right after `endRound`, only for a
+   * round that ran to its end. It never throws and never changes an entry it does not mark. Absent: nothing changes.
+   */
+  markEntries?(entries: readonly CheckEntry[]): CheckEntry[];
 }
 
 export interface CheckPlan {
@@ -218,11 +227,19 @@ export async function runChecks(
       options.signal.removeEventListener("abort", cancel);
     }
   }
-  if (runners.endRound === undefined) return runChecksRound(plan, runners, options);
+  if (runners.endRound === undefined && runners.markEntries === undefined) return runChecksRound(plan, runners, options);
+  let round: CheckRound;
   try {
-    return await runChecksRound(plan, runners, options);
+    round = await runChecksRound(plan, runners, options);
   } finally {
     await Promise.resolve().then(() => runners.endRound?.()).catch(() => undefined);
+  }
+  if (runners.markEntries === undefined) return round;
+  try {
+    return { ...round, entries: runners.markEntries(round.entries) };
+  } catch {
+    // A marker that failed cannot say which checks a fake answered: fail closed, every check that ran to a result is labelled (a label too many is honest; a label too few is not).
+    return { ...round, entries: round.entries.map((entry) => (entry.after === "passed" || entry.after === "failed" || entry.after === "timed_out" ? { ...entry, madeByRovara: true as const } : entry)) };
   }
 }
 
@@ -244,7 +261,8 @@ async function runChecksRound(
     }
   }
   if (runners.prepareRound !== undefined && !signal.aborted) {
-    const ready = await untilAborted(Promise.resolve().then(() => runners.prepareRound?.(signal)), signal, joinMs, runners.kind ?? "local").then(() => true, unlessUnconfirmed);
+    const prepare = async () => { await runners.prepareRound?.(signal); };
+    const ready = await untilAborted(Promise.resolve().then(() => runners.scopeSetup === undefined ? prepare() : runners.scopeSetup(prepare)), signal, joinMs, runners.kind ?? "local").then(() => true, unlessUnconfirmed);
     if (!ready) return { entries: plannedChecks(plan, runners).map((check) => ({ id: check.id, label: check.label, source: check.source, before: check.before, after: "not_run", class: classifyCheck(check.before, "not_run"), output: signal.aborted ? "AgentX stopped before this check ran." : "AgentX did not run this check: multi-repository setup failed.", durationMs: 0 })), stopped: signal.aborted };
   }
   let resetFailed = false;
@@ -287,6 +305,7 @@ async function runChecksRound(
     const timeoutMs = capped ? remaining : check.ownTimeoutMs;
     const began = now();
     try {
+      runners.beginCheck?.(check.id);
       const result = await untilAborted(check.run(timeoutMs, signal), signal, joinMs, runners.kind ?? "local");
       const duration = now() - began;
       if (result.timedOut) {
@@ -355,7 +374,7 @@ function unlessUnconfirmed(error: unknown): false {
  * runner that has not reported within `joinMs`, or that reports a stop it could not confirm, rejects with RunnerKillUnconfirmedError.
  * A runner that finishes, or fails, after the abort counts as stopped; the check is still `not_run`.
  */
-function untilAborted<T>(running: Promise<T>, signal: AbortSignal, joinMs: number, kind: UnconfirmedKind): Promise<T> {
+export function untilAborted<T>(running: Promise<T>, signal: AbortSignal, joinMs: number, kind: UnconfirmedKind): Promise<T> {
   // The task that asked for this work: the join timer fires in whatever context aborted the signal (a cancel from another invocation, another task's), and the unconfirmed stop
   // belongs to THIS task's latch, never to the canceller's or to nobody's.
   const task = currentWorkspaceSafety();

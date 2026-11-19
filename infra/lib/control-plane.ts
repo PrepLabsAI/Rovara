@@ -9,6 +9,7 @@ import {
   Duration,
   Fn,
   RemovalPolicy,
+  SecretValue,
   Stack,
   type StackProps,
   Token,
@@ -31,18 +32,30 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { E2E_ARTIFACT_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, EGRESS_ADDRESSES_PARAMETER_PATTERN, EGRESS_ADDRESSES_VARIABLE, NAT_EGRESS_ADDRESSES_OUTPUT } from "@agentx/contracts";
+import { EgressAlarms } from "./egress-alarms.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
+import { CoreEngine, TEST_SERVICES_PARAMETER, TEST_SERVICE_IMAGES_PARAMETER } from "./core-engine.js";
+import { CompanySecrets } from "./company-secrets.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { TaskPersonProof } from "./task-person-proof.js";
+import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerNamesParameterArn } from "./broker-names.js";
+import { CompanySignInSwitch } from "./company-signin.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
 import { REQUALIFY_CONTEXT_KEY, REQUALIFY_DEFAULT_HOUR_UTC, RuntimeRequalify } from "./runtime-requalify.js";
 import { swebenchNames } from "./swebench-eval.js";
+import { SLACK_BINDING_READ_KEYS, SLACK_COMPANY_WORKSPACES_VARIABLE, SlackCompanyWorkspaces } from "./slack-company-workspaces.js";
 import { SWEBENCH_DEPLOYMENT_MODE } from "./swebench-eval-definition.js";
 
 const MAX_DISPATCH_ATTEMPTS = 5;
+/** Days an evidence pack stored under the `evidence-record` tag value is kept before the bucket expires it. */
+export const EVIDENCE_RECORD_RETENTION_DAYS = 365;
+
+/** L4-IAMR: the one statement that lets the dispatcher read a company's stored artifacts (named environments): its Sid and the two key prefixes it names, tests/contract/dispatcher-artifacts-read.test.ts pins them. */
+export const DISPATCHER_ARTIFACTS_READ_SID = "ReadCompanyArtifacts";
+export const DISPATCHER_ARTIFACTS_READ_PREFIXES = ["private/*", "workspaces/*"] as const;
 // Matches MAX_RECEIVE_COUNT in packages/slack-service, which reports the final attempt in the thread.
 export const SLACK_MAX_RECEIVE_COUNT = 5;
 // What the ingress Lambda may read of a turn record for the Details view (spec 014 FR-024):
@@ -71,7 +84,12 @@ function unlistedAlarms(scope: Construct, prefix: string): string[] {
     // CloudWatch returns a composite alarm only to a DescribeAlarms grant on *, which the broker has not.
     if (construct instanceof cloudwatch.CfnCompositeAlarm) return [`the health probe cannot read composite alarm ${construct.node.path}`];
     if (!(construct instanceof cloudwatch.CfnAlarm)) return [];
+    // The foundation's egress alarms keep the live names agentx-<env>-blocked-dns-spike and agentx-<env>-nat-egress-spike-<az>, which the probe's single-word suffixes
+    // cannot list. They notify the alerts topic and are not on the admin health route.
+    // Only those names: any other alarm inside EgressAlarms is still refused.
     const name = construct.alarmName;
+    if (name !== undefined && !Token.isUnresolved(name) && name.startsWith(prefix) && construct.node.scopes.some((parent) => parent instanceof EgressAlarms)
+      && (name === `${prefix}blocked-dns-spike` || /^nat-egress-spike-[a-z0-9]+-az[0-9]+$/.test(name.slice(prefix.length)))) return [];
     if (name !== undefined && !Token.isUnresolved(name) && listed.has(name)) return [];
     return [`the health probe does not read alarm ${construct.node.path} (${String(name)}): name it ${prefix}<suffix> and add the suffix to HEALTH_ALARM_SUFFIXES`];
   });
@@ -81,6 +99,10 @@ export class ControlPlaneStack extends Stack {
   constructor(scope: Construct, id: string, props?: ControlPlaneStackProps) {
     super(scope, id, props);
     const naming = props?.naming ?? legacyNaming();
+    // Approved headroom fallback: 144 is the largest integer ARN estimate that keeps
+    // the broker's 1,000-character reserve under 8,500 after restoring its destination grant.
+    // The longest-environment resolved aggregate is pinned separately against IAM's quota.
+    if (naming.env !== undefined) this.node.setContext("@aws-cdk/aws-iam.arnSizeEstimate", 144);
     const projectSetupRuntimeCatalogId = `${naming.resourcePrefix}-project-setup-runtime-v1`;
     const e2eFeatureRuntimeCatalogId = `${naming.resourcePrefix}-e2e-mock-runtime-v1`;
 
@@ -92,6 +114,21 @@ export class ControlPlaneStack extends Stack {
       minLength: 32,
       description: "Random secret used to scope and authenticate worker callbacks",
     });
+    // The callback signing key as a secret, so no Lambda's environment holds it: the stack creates this secret from the NoEcho parameter's value (an upgrade passes the parameter's previous
+    // value, so the key carries over without anyone reading or printing it). Each function gets only the secret's NAME (shorter than the key, so no environment grows) and a GetSecretValue on
+    // exactly this secret's ARN. A named environment's name is under agentx/<env>/, so the operator role's secrets scope covers it, and it is not agentx/<env>/callback-signing-key, which the CLI
+    // keeps as its own copy and a stack cannot take over. Retained, as the Slack secret is: `agentx destroy` removes a retained secret under agentx/<env>/ that carries the environment's tag.
+    const callbackSigningKeySecretName = `agentx/${naming.env ?? "production"}/callback-key`;
+    const callbackSigningKeySecret = new secretsmanager.Secret(this, "CallbackSigningKeySecret", {
+      secretName: callbackSigningKeySecretName,
+      description: "The callback signing key (a copy the stack made from its CallbackSigningKey parameter); Lambdas read it by name",
+      secretStringValue: SecretValue.cfnParameter(callbackSigningKey),
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    // Who reads it: the broker, the eval tick and (named environments) the reconciler, by the secret's own resource policy, which costs no byte of the functions' role policies (the broker's has
+    // no room left: tests/contract/developer-signin-infrastructure.test.ts). The dispatcher's read is an identity statement under the core switch's condition (core-engine.ts). The one
+    // statement is added after the functions exist, at the end of this constructor's wiring.
+    const callbackSigningKeyReaders: iam.IRole[] = [];
     const adminClaim = new CfnParameter(this, "AdminClaim", {
       type: "String",
       default: "cognito:groups",
@@ -119,7 +156,7 @@ export class ControlPlaneStack extends Stack {
     });
     // Spec 025 phase 25a: declared on the stack itself so the names are exact. The legacy deployment (production) has
     // the developer task settings too, so it runs tasks as named environments do.
-    const signInParameters = developerSignInParameters(this, { tasks: true });
+    const signInParameters = developerSignInParameters(this, { tasks: true, named: naming.env !== undefined });
     const taskPersonProofEnabled = naming.env === "agentxlivetest123" ? new CfnParameter(this, "TaskPersonProofEnabled", {
       type: "String",
       default: "false",
@@ -151,7 +188,19 @@ export class ControlPlaneStack extends Stack {
       // M1.3 Task 3.7b, owner decision D4: a browser or API round's screenshots expire 30 days after they are written. A lifecycle filter matches the start of a key, and a screenshot's
       // key starts like every other private object's, so the rule matches the tag the broker puts on a screenshot and on nothing else. The bucket is not versioned: expiry deletes.
       // Named environments only: the legacy production template stays as it is.
-      ...(naming.env === undefined ? {} : { lifecycleRules: [{ id: "ExpireE2EScreenshots", expiration: Duration.days(E2E_ARTIFACT_RETENTION_DAYS), tagFilters: { [E2E_ARTIFACT_RETENTION_TAG_KEY]: E2E_ARTIFACT_RETENTION_TAG_VALUE } }] }),
+      ...(naming.env === undefined ? {} : { lifecycleRules: [
+        { id: "ExpireE2EScreenshots", expiration: Duration.days(E2E_ARTIFACT_RETENTION_DAYS), tagFilters: { [E2E_ARTIFACT_RETENTION_TAG_KEY]: E2E_ARTIFACT_RETENTION_TAG_VALUE } },
+        // Stored evidence expires by class, on the same tag key: evidence-short is video and trace (14 days), evidence-std is screenshots, API samples, output tails and the stored pack
+        // (30 days). The days are the live rules' exactly and are not configurable here: S3 applies a lifecycle rule to objects already stored, so a shorter rule would delete older
+        // evidence. Prefix AND tag (S3 reads that as an `And` filter): an object outside the private evidence keys that happens to carry the tag never matches.
+        ...(["evidence-short", "evidence-std"] as const).map((retentionClass) => ({ id: retentionClass === "evidence-short" ? "ExpireEvidenceShort" : "ExpireEvidenceStd",
+          expiration: Duration.days(EVIDENCE_RETENTION_DAYS[retentionClass].default), prefix: "private/", tagFilters: { [E2E_ARTIFACT_RETENTION_TAG_KEY]: retentionClass } })),
+        // A pack an earlier release stored with its own tag value, `evidence-record`, is kept for a year, then expires (a constant). Nothing in this bucket outside
+        // these tagged evidence objects and the nightly maps expires (DEC 222: the cost ledger, approvals and decisions are kept forever, and none of them is stored here).
+        { id: "ExpireEvidenceRecord", expiration: Duration.days(EVIDENCE_RECORD_RETENTION_DAYS), prefix: "private/", tagFilters: { [E2E_ARTIFACT_RETENTION_TAG_KEY]: "evidence-record" } },
+        // The nightly run's coverage maps (`nightly-maps/<company>/<project>/<digest>.json`, NIGHTLY_MAPS_PREFIX) expire after 30 days; selection reads a map no older than 7 days.
+        { id: "ExpireNightlyMaps", prefix: "nightly-maps/", expiration: Duration.days(30) },
+      ] }),
       // Retained: the broker's operation artifacts must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
@@ -166,29 +215,57 @@ export class ControlPlaneStack extends Stack {
       visibilityTimeout: Duration.minutes(2),
     });
 
-    const broker = packagedFunction(this, "Broker", "packages/broker/src/aws/broker.ts", {
-      STATE_TABLE_NAME: state.tableName,
-      AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID: projectSetupRuntimeCatalogId,
-      AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: e2eFeatureRuntimeCatalogId,
-      ARTIFACT_BUCKET_NAME: artifacts.bucketName,
+    // ENV-ROOM (infra/lib/broker-names.ts): a named environment's broker gets its generated names packed (AGENTX_NAMES) and derives what the environment's name decides; the legacy
+    // template passes every variable whole, as before.
+    // ENV-ROOM 2: the entry reads a named environment's broker names from their SSM parameter before it loads broker.ts (packages/broker/src/aws/broker-handler.ts).
+    const broker = packagedFunction(this, "Broker", "packages/broker/src/aws/broker-handler.ts", {
+      ...(naming.env !== undefined ? {} : {
+        STATE_TABLE_NAME: state.tableName,
+        AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID: projectSetupRuntimeCatalogId,
+        AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: e2eFeatureRuntimeCatalogId,
+        ARTIFACT_BUCKET_NAME: artifacts.bucketName,
+      }),
       OIDC_ISSUER: oidcIssuer.valueAsString,
       ADMIN_CLAIM: adminClaim.valueAsString,
       ADMIN_VALUES: adminValues.valueAsString,
-      CALLBACK_SIGNING_KEY: callbackSigningKey.valueAsString,
+      CALLBACK_SIGNING_KEY_SECRET_ID: callbackSigningKeySecretName,
       GITHUB_APP_CREDENTIAL_REF: githubAppCredentialRef.valueAsString,
       GITHUB_APP_ID: githubAppId.valueAsString,
       GITHUB_APP_PRIVATE_KEY_SECRET_ARN: githubAppPrivateKeySecretArn.valueAsString,
     });
-    state.grantReadWriteData(broker);
-    artifacts.grantReadWrite(broker);
-    broker.addToRolePolicy(new iam.PolicyStatement({
-      actions: ["secretsmanager:GetSecretValue"],
-      resources: [githubAppPrivateKeySecretArn.valueAsString],
-    }));
-    broker.addToRolePolicy(new iam.PolicyStatement({
-      actions: ["secretsmanager:GetSecretValue"],
-      resources: [this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${naming.connectorSecretPrefix}*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
-    }));
+    // Named environments: the broker's role and function keep the fixed names a named environment has always had (agentx-<env>-broker-role, agentx-<env>-broker), so an
+    // install already running under them updates them in place instead of replacing them, and operator tools and other stacks that name them keep working. A resource with a
+    // fixed name cannot be replaced by CloudFormation: a later change that needs a new role or function must change the name in the same release. The legacy template is unchanged.
+    if (naming.env !== undefined) {
+      (broker.role!.node.defaultChild as iam.CfnRole).roleName = brokerRoleName(naming);
+      (broker.node.defaultChild as lambda.CfnFunction).functionName = brokerFunctionName(naming);
+      addBrokerName(broker, naming, "stateTable", state.tableName, state.tableName);
+      addBrokerName(broker, naming, "artifactBucket", artifacts.bucketName, artifacts.bucketName);
+      addDerivedBrokerVariable(broker, naming, "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID", projectSetupRuntimeCatalogId);
+      addDerivedBrokerVariable(broker, naming, "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID", e2eFeatureRuntimeCatalogId);
+    }
+    const connectorSecretsArn = this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${naming.connectorSecretPrefix}*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
+    if (naming.env !== undefined) {
+      // The two grantReadWriteData statements' action/resource cross product, less dynamodb:GetRecords and dynamodb:GetShardIterator (ENV-ROOM 2, IAM room for the names
+      // parameter): those act only on a stream ARN (`table/<name>/stream/<label>`), which neither resource here is, so on these resources they granted nothing.
+      broker.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:ConditionCheckItem", "dynamodb:BatchWriteItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:DescribeTable"],
+        resources: [state.tableArn, `${state.tableArn}/index/*`],
+      }));
+      // Keep the existing grantReadWrite action strings and both resources verbatim.
+      artifacts.addToResourcePolicy(new iam.PolicyStatement({
+        principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
+        actions: ["s3:GetObject*", "s3:GetBucket*", "s3:List*", "s3:DeleteObject*", "s3:PutObject", "s3:PutObjectLegalHold", "s3:PutObjectRetention", "s3:PutObjectTagging", "s3:PutObjectVersionTagging", "s3:Abort*"],
+        resources: [artifacts.bucketArn, artifacts.arnForObjects("*")],
+      }));
+      broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [githubAppPrivateKeySecretArn.valueAsString, connectorSecretsArn] }));
+    } else {
+      state.grantReadWriteData(broker);
+      artifacts.grantReadWrite(broker);
+      broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [githubAppPrivateKeySecretArn.valueAsString] }));
+      broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [connectorSecretsArn] }));
+    }
+    callbackSigningKeyReaders.push(broker.role!);
     // A rotated OAuth refresh token is written back to its own secret. Only secrets that
     // `agentx admin credential authorize` tagged for it are writable, never other connector secrets.
     broker.addToRolePolicy(new iam.PolicyStatement({
@@ -200,14 +277,14 @@ export class ControlPlaneStack extends Stack {
       actions: ["codebuild:StartBuild", "codebuild:BatchGetBuilds"],
       resources: [this.formatArn({ service: "codebuild", resource: "project", resourceName: "agentx-*" })],
     }));
-    if (naming.env !== undefined) broker.addEnvironment("CONNECTOR_SECRET_PREFIX", naming.connectorSecretPrefix);
+    if (naming.env !== undefined) addDerivedBrokerVariable(broker, naming, "CONNECTOR_SECRET_PREFIX", naming.connectorSecretPrefix);
     // Spec 043: SWE-bench runs. The broker reads the optional eval stack's settings, the runner image
     // and the worker model per request, and starts the eval state machine by its fixed name; both
     // exist only once the eval stack is deployed, and until then a run is refused as not installed.
-    broker.addEnvironment("SWEBENCH_SETTINGS_PREFIX", naming.ec2.workerSettingsPrefix);
+    addDerivedBrokerVariable(broker, naming, "SWEBENCH_SETTINGS_PREFIX", naming.ec2.workerSettingsPrefix);
     // M1.4 Task 4.10 (PREFIXGAP): the broker derives the AI navigation route from the installation's worker settings only when it knows where they are. Nothing ever set this, so setup
     // approval said "AI navigation steps will not run" and dispatch offered none. Named environments only: the legacy production template stays as it is. The read grant below covers it.
-    if (naming.env !== undefined) broker.addEnvironment("AGENTX_E2E_AGENT_SETTINGS_PREFIX", naming.ec2.workerSettingsPrefix);
+    if (naming.env !== undefined) addDerivedBrokerVariable(broker, naming, "AGENTX_E2E_AGENT_SETTINGS_PREFIX", naming.ec2.workerSettingsPrefix);
     const swebenchParameterArns = [
       swebenchNames(naming).settingsParameterName,
       swebenchNames(naming).runnerImageParameterName,
@@ -222,14 +299,18 @@ export class ControlPlaneStack extends Stack {
       ...Object.entries(WORKER_SETTING_PARAMETERS).filter(([key]) => key !== "e2eAgentModel" && key !== "modelFallback").map(([, name]) => `${naming.ec2.workerSettingsPrefix}${name}`),
     ].map((name) => `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${name}`);
     const swebenchStateMachineArn = this.formatArn({ service: "states", resource: "stateMachine", resourceName: swebenchNames(naming).stateMachineName, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
-    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: swebenchParameterArns }));
-    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
+    // ENV-ROOM 2: a named broker reads its names from their one SSM parameter (infra/lib/broker-names.ts) with this same action, so the parameter's ARN joins this statement
+    // rather than adding one (the broker's inline policy has little room: tests/contract/developer-signin-infrastructure.test.ts, broker IAM headroom).
+    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: naming.env === undefined ? swebenchParameterArns : [...swebenchParameterArns, brokerNamesParameterArn(naming.env)] }));
+    // Named: the broker's two StartExecution grants (this and the session deleter's, sessions.connectBroker) are one statement, for the same room. Legacy: as before.
+    if (naming.env === undefined) broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
 
     // Spec 061: a stored plan's cited code is read from GitHub in the background, with retries, so a slow or failing
     // GitHub never holds up the plan. The broker starts the job right after the plan commits (an async invoke), and
     // its recovery sweep starts any row that is due; the job needs nothing from the broker. 150 seconds: the code is
     // read inside 120, and the rest is for attaching the bundle and cleaning up. 1,024 MB: files are read in memory.
     // Developer tasks, and so their plans, exist only in named environments; the legacy templates gain nothing.
+    let planEvidenceFunction: lambda.Function | undefined;
     if (naming.env !== undefined) {
       const planEvidence = packagedFunction(this, "PlanEvidence", "packages/broker/src/aws/plan-evidence-handler.ts", {
         STATE_TABLE_NAME: state.tableName,
@@ -265,8 +346,9 @@ export class ControlPlaneStack extends Stack {
       planEvidence.addToRolePolicy(new iam.PolicyStatement({ sid: "WriteEvidenceBundles", actions: ["s3:PutObject"], resources: [artifacts.arnForObjects("private/*/plan-documents/*.evidence.*.json")] }));
       // The GitHub App's key, to read files as the broker does.
       planEvidence.addToRolePolicy(new iam.PolicyStatement({ sid: "GitHubAppKey", actions: ["secretsmanager:GetSecretValue"], resources: [githubAppPrivateKeySecretArn.valueAsString] }));
-      planEvidence.grantInvoke(broker);
-      broker.addEnvironment("PLAN_EVIDENCE_FUNCTION_NAME", planEvidence.functionName);
+      // Named only (this block): the broker's invoke of this function and of the sign-in function are one statement, added with the sign-in function below (ENV-ROOM 2 room).
+      planEvidenceFunction = planEvidence;
+      addBrokerName(broker, naming, "planEvidenceFunction", planEvidence.functionName, planEvidence.functionName);
     }
 
     const outboxPublisher = packagedFunction(
@@ -286,6 +368,8 @@ export class ControlPlaneStack extends Stack {
     // recommends: later phases (such as 25e's Slack Confirm DMs) add filters to an existing
     // trigger, never a third reader.
     new lambda.EventSourceMapping(this, "OutboxStreamMapping", {
+      // Keep the legacy activity-index reader, excluding core company rows (no extra reader).
+      ...(naming.env === undefined ? {} : { filters: [lambda.FilterCriteria.filter({ dynamodb: { NewImage: { pk: { S: [{ "anything-but": { prefix: "ORG#" } }] } } } })] }),
       target: outboxPublisher,
       eventSourceArn: state.tableStreamArn!,
       startingPosition: lambda.StartingPosition.LATEST,
@@ -310,6 +394,12 @@ export class ControlPlaneStack extends Stack {
     state.grantReadWriteData(dispatcher);
     // The dispatcher holds a CHECKS reference's kind to the admission it names; it reads only the immutable admission objects.
     dispatcher.addToRolePolicy(new iam.PolicyStatement({ actions: ["s3:GetObject"], resources: [artifacts.arnForObjects("workflow-e2e-admissions/*")] }));
+    // L4-IAMR (owner decision 2026-11-18, DEC 254zzz26), named environments only (the core engine's): the dispatcher's company-bound artifact reader (createCompanyArtifactReader, for the
+    // second eval pass and the like) reads a company's stored artifacts. Read only: GetObject on the two prefixes the reader's keys live under, no List, no Put, no other prefix, no other
+    // bucket. The bucket is S3-managed encrypted (no KMS key), so no kms grant. Every read is still checked in code against company, workspace owner and the ARTIFACT row.
+    if (naming.env !== undefined) {
+      dispatcher.addToRolePolicy(new iam.PolicyStatement({ sid: DISPATCHER_ARTIFACTS_READ_SID, actions: ["s3:GetObject"], resources: DISPATCHER_ARTIFACTS_READ_PREFIXES.map((prefix) => artifacts.arnForObjects(prefix)) }));
+    }
     // EC2 workers (#76): the idle reaper and reconciler find sessions by state through this sparse index.
     state.addGlobalSecondaryIndex({
       indexName: WORKSPACE_SESSION_STATE_INDEX.name,
@@ -332,6 +422,16 @@ export class ControlPlaneStack extends Stack {
       sortKey: { name: "webhookRecoverySk", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
+    // Lane E2 step 4: the core's outbox relay reads its pending messages through this sparse index (only a core outbox row carries `outboxState`). Named environments only.
+    if (naming.env !== undefined) {
+      if (OUTBOX_PENDING_INDEX.sortAttribute === undefined) throw new Error("the outbox pending index has a sort key");
+      state.addGlobalSecondaryIndex({
+        indexName: OUTBOX_PENDING_INDEX.name,
+        partitionKey: { name: OUTBOX_PENDING_INDEX.partitionAttribute, type: dynamodb.AttributeType.STRING },
+        sortKey: { name: OUTBOX_PENDING_INDEX.sortAttribute, type: dynamodb.AttributeType.STRING },
+        projectionType: dynamodb.ProjectionType.ALL,
+      });
+    }
     // Gap 6: sparse due-time index over workflow dispatch rows, so the recovery sweep reads due rows first.
     state.addGlobalSecondaryIndex({
       indexName: WORKFLOW_DISPATCH_DUE_INDEX.name,
@@ -435,8 +535,14 @@ export class ControlPlaneStack extends Stack {
     });
     slackRequestQueue.grantConsumeMessages(slackOrchestratorRole);
     // Spec 061 slice 2: "Ask AgentX to reply to this comment" on the task page queues the comment for the Slack service (send only).
-    slackRequestQueue.grantSendMessages(broker);
-    broker.addEnvironment("SLACK_REQUEST_QUEUE_URL", slackRequestQueue.queueUrl);
+    if (naming.env !== undefined) {
+      slackRequestQueue.addToResourcePolicy(new iam.PolicyStatement({
+        principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
+        actions: ["sqs:SendMessage", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"],
+        resources: [slackRequestQueue.queueArn],
+      }));
+    } else slackRequestQueue.grantSendMessages(broker);
+    addBrokerName(broker, naming, "slackRequestQueue", slackRequestQueue.queueName, slackRequestQueue.queueUrl);
     slackThreads.grantReadWriteData(slackOrchestratorRole);
     threadSessions.grantReadWrite(slackOrchestratorRole);
     slackSecret.grantRead(slackOrchestratorRole);
@@ -475,7 +581,7 @@ export class ControlPlaneStack extends Stack {
       actions: ["dynamodb:Query"],
       resources: [turnRecords.tableArn, `${turnRecords.tableArn}/index/byTime`],
     }));
-    broker.addEnvironment("TURN_RECORDS_TABLE_NAME", turnRecords.tableName);
+    addBrokerName(broker, naming, "turnRecordsTable", turnRecords.tableName, turnRecords.tableName);
 
     // No subscription by default: the deployer subscribes an email address or connects AWS Chatbot.
     const operatorAlerts = new sns.Topic(this, "OperatorAlerts", {
@@ -546,7 +652,7 @@ export class ControlPlaneStack extends Stack {
     // per-connector one; the alarms read the dimensionless series, so they cover every connector.
     const agentxSum = (metricName: string, period: Duration) =>
       new cloudwatch.Metric({ namespace: naming.metricsNamespace, metricName, statistic: "Sum", period });
-    if (naming.env !== undefined) broker.addEnvironment("AGENTX_METRICS_NAMESPACE", naming.metricsNamespace);
+    if (naming.env !== undefined) addDerivedBrokerVariable(broker, naming, "AGENTX_METRICS_NAMESPACE", naming.metricsNamespace);
     new cloudwatch.Alarm(this, "ConnectorBrokenAlarm", {
       alarmName: naming.alarmName("ConnectorBroken"),
       alarmDescription: "A connector's discovery failed or a vendor changed an approved tool's schema. Check the broker logs for connector metrics and connector.* events.",
@@ -630,9 +736,9 @@ export class ControlPlaneStack extends Stack {
       }).addAlarmAction(notifyOperator);
     }
 
-    broker.addEnvironment("SLACK_ORCHESTRATOR_ROLE_ARN", slackOrchestratorRole.roleArn);
-    broker.addEnvironment("SLACK_MEMBER_WORKSPACE_LIMIT", memberWorkspaceLimit.valueAsString);
-    broker.addEnvironment("SLACK_ORGANIZATION_WORKSPACE_LIMIT", organizationWorkspaceLimit.valueAsString);
+    addBrokerName(broker, naming, "slackOrchestratorRole", slackOrchestratorRole.roleName, slackOrchestratorRole.roleArn);
+    addBrokerSetting(broker, naming, "memberWorkspaceLimit", memberWorkspaceLimit.valueAsString);
+    addBrokerSetting(broker, naming, "organizationWorkspaceLimit", organizationWorkspaceLimit.valueAsString);
 
     const appPostedMessages = new CfnParameter(this, "SlackAppPostedMessages", {
       type: "String",
@@ -727,12 +833,29 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
+    // Logical ID "ModelAccessRoute" on purpose (switch-over incident 2026-11-16): the 0.5.18 staging stack already holds this
+    // route key under that ID. A new ID made CloudFormation create a second GET /v1/internal/model-access route before its
+    // cleanup deleted the old one, and the update failed with 409 AlreadyExists. Keeping the ID updates it in place.
+    // Pinned by tests/unit/collision-check.test.ts; check new previews with scripts/collision-check.ts.
+    if (props?.naming !== undefined) new apigwv2.CfnRoute(this, "ModelAccessRoute", {
+      apiId: api.ref,
+      routeKey: "GET /v1/internal/model-access",
+      target: `integrations/${integration.ref}`,
+      authorizationType: "NONE",
+    });
     // The setup worker authenticates this one source read with its short-lived project-setup
     // capability, which the broker verifies. Keep the API Gateway exception limited to this GET;
     // the generic internal callback route remains POST-only.
     new apigwv2.CfnRoute(this, "ProjectSetupExecutionReadRoute", {
       apiId: api.ref,
       routeKey: "GET /v1/internal/project-setups/{setupExecutionId}/execution",
+      target: `integrations/${integration.ref}`,
+      authorizationType: "NONE",
+    });
+    // Guided onboarding PR 7: the Linear OAuth app signs its webhook bodies itself; the broker verifies the HMAC, the timestamp and the workspace's binding. Named environments only.
+    if (naming.env !== undefined) new apigwv2.CfnRoute(this, "LinearWebhookRoute", {
+      apiId: api.ref,
+      routeKey: "POST /v1/linear/webhooks",
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
@@ -855,28 +978,81 @@ export class ControlPlaneStack extends Stack {
     new CfnOutput(this, "ChannelEventQueueUrl", { value: channelAdapters.events.queueUrl });
     // Spec 025 phase 25a: developer sign-in and tasks, in every deployment; the legacy one is named production.
     const taskParameters = signInParameters.tasks;
+    // DEC 254zg (a): the company layer's switch (CompanySignIn), named environments only; every function that reads COMPANY_SIGNIN gets it from here, and every company-only
+    // grant is a policy under its condition (company-signin.ts).
+    const companySignIn = naming.env === undefined || signInParameters.company === undefined ? undefined : new CompanySignInSwitch(this, "CompanySignInSwitch", signInParameters.company);
+    // DEC 254o (b), L2-2 PR 18a: Slack company mode's switch (stack parameter SlackCompanyWorkspaces, default disabled). Named environments only; every grant it adds is a
+    // separate policy under its condition, so nothing is granted while it is off (slack-company-workspaces.ts). DEC 254zg (a), 254zk: its condition also requires company
+    // sign-in, so its grants and its "enabled" exist only with both switches on.
+    const slackCompany = companySignIn === undefined ? undefined : new SlackCompanyWorkspaces(this, "SlackCompanyMode", { naming, requires: companySignIn.isOn });
+    if (slackCompany !== undefined) {
+      // The Slack Lambda and the channel API's Slack router: the team's binding and company, the linked person (company-scoped link row, sign-in membership below), the
+      // project's revisions (company check) and the company's token. Reads only: link notices and codes are written by the broker (#126 holds).
+      for (const [id, fn] of [["SlackIngress", slackIngress], ["ChannelApi", channelAdapters.ingress]] as const) {
+        slackCompany.grant(id, fn.role!, [
+          slackCompany.tokenRead(),
+          slackCompany.stateReads(state, "ReadSlackWorkspaceBindingsAndLinks", [...SLACK_BINDING_READ_KEYS, "ORG#*#CHANNEL_LINK#slack/*"]),
+          // Only a revision's company (company-check.ts recordInCompany): never a project's definition or runtime binding.
+          new iam.PolicyStatement({ sid: "ReadProjectCompany", actions: ["dynamodb:Query"], resources: [state.tableArn],
+            conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PROJECT#*"] }, "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "companyId"] },
+              StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" }, Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" } } }),
+        ]);
+        fn.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
+      }
+      // L2-2 PR 18c: the Slack Lambda's company factory needs the environment's name (the token path) and the install's team (always the legacy path); "" while off.
+      slackIngress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+      slackIngress.addEnvironment("SLACK_TEAM_ID", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, signInParameters.slackTeamId.valueAsString, "")));
+      // DEC 254zk: the switch's conditioned value (enabled only with company sign-in on too), as every other consumer gets it.
+      addBrokerSetting(broker, naming, "slackCompanyWorkspaces", slackCompany.flag);
+      // DEC 254zzz32: the broker reads a company's own bot token (slack-company-wiring.ts readSecret: the hosted core's Slack task threads, link notices), as the other
+      // Slack consumers do. Read-only, the token family only, its own policy under the switch's condition (nothing while it is off; never the broker's DefaultPolicy).
+      // DEC 254zzz35: and the install's own Slack app secret (agentx/<env>/slack), read-only, for the install's own workspace (built-in company), which has no company token: its
+      // bot token is that secret's (the broker's Slack company wiring passes it as legacyToken). Same policy, same condition: nothing while company mode is off.
+      slackCompany.grant("Broker", broker.role!, [slackCompany.tokenRead(),
+        new iam.PolicyStatement({ sid: "ReadInstallSlackToken", actions: ["secretsmanager:GetSecretValue"], resources: [slackSecret.secretArn] })]);
+      // DEC 254zk: the channel API's company factory needs the environment's name too (it already has STATE_TABLE_NAME and SLACK_ADAPTER_TEAM_ID); "" while off.
+      channelAdapters.ingress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+    }
     if (taskParameters !== undefined) {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
-        naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
+        naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, dispatcher, slackSecret, parameters: signInParameters, turnRecords,
+        ...(companySignIn === undefined ? {} : { company: companySignIn }),
       });
+      // Named: one statement for the broker's two invokes (the plan evidence job and the sign-in function; developer-signin.ts leaves its grant to this), ENV-ROOM 2's IAM room.
+      // The same resources CDK's grantInvoke gives each: the function and its versions and aliases.
+      if (naming.env !== undefined) {
+        if (planEvidenceFunction === undefined) throw new Error("a named control plane has the plan evidence function");
+        const invoked = [planEvidenceFunction, developerSignIn.function];
+        broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["lambda:InvokeFunction"], resources: invoked.flatMap((fn) => [fn.functionArn, `${fn.functionArn}:*`]) }));
+      }
+      // The Slack Lambda and the channel API Lambda (Slack company mode reads it: lead 2, #873).
+      if (companySignIn !== undefined) for (const fn of [slackIngress, channelAdapters.ingress]) companySignIn.addTo(fn);
       // Spec 063 FR-005: the admin client's own rule for who is an administrator, read at company sign-in.
       developerSignIn.function.addEnvironment("ADMIN_OIDC_ISSUER", oidcIssuer.valueAsString);
       developerSignIn.function.addEnvironment("ADMIN_CLAIM", adminClaim.valueAsString);
       developerSignIn.function.addEnvironment("ADMIN_VALUES", adminValues.valueAsString);
       if (naming.env === "agentxlivetest123" && taskPersonProofEnabled !== undefined) {
-        new TaskPersonProof(this, "TaskPersonProof", {
+        const proof = new TaskPersonProof(this, "TaskPersonProof", {
           naming,
           enabled: taskPersonProofEnabled,
           slackTeamId: signInParameters.slackTeamId,
           slackSecret,
           developerSignInTable: developerSignIn.table,
           dispatcher,
+          // DEC 254zc (6): the proof's switch variables come with the infrastructure switch (they change the version the dispatcher pins).
+          ...(companySignIn === undefined || slackCompany === undefined ? {} : { companySwitches: {
+            COMPANY_SIGNIN: companySignIn.value, SLACK_COMPANY_WORKSPACES: slackCompany.value,
+            STATE_TABLE_NAME: Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, state.tableName, "")),
+          } }),
         });
+        if (slackCompany !== undefined) {
+          slackCompany.grant("TaskPersonProof", proof.role, [slackCompany.tokenRead(), slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)], proof.install);
+        }
       }
-      broker.addEnvironment("AGENTX_TASK_PEOPLE_CHANGES_ENABLED", taskParameters.taskPeopleChangesEnabled.valueAsString);
-      broker.addEnvironment("AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED", taskParameters.taskPeoplePublicInvitationsEnabled.valueAsString);
-      broker.addEnvironment("AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED", taskParameters.taskPeoplePrivateInvitationsEnabled.valueAsString);
-      broker.addEnvironment("AGENTX_WORKFLOW_DEPENDENCIES_ENABLED", taskParameters.workflowDependenciesEnabled.valueAsString);
+      addBrokerSetting(broker, naming, "taskPeopleChanges", taskParameters.taskPeopleChangesEnabled.valueAsString);
+      addBrokerSetting(broker, naming, "taskPeoplePublicInvitations", taskParameters.taskPeoplePublicInvitationsEnabled.valueAsString);
+      addBrokerSetting(broker, naming, "taskPeoplePrivateInvitations", taskParameters.taskPeoplePrivateInvitationsEnabled.valueAsString);
+      addBrokerSetting(broker, naming, "workflowDependencies", taskParameters.workflowDependenciesEnabled.valueAsString);
       // Sign in with ChatGPT (#338): seals each developer's ChatGPT tokens in the State table. A
       // connection belongs to a signed-in developer, so it exists only where developer sign-in
       // does. Only the broker encrypts and decrypts with it, always under an encryption context
@@ -887,14 +1063,29 @@ export class ControlPlaneStack extends Stack {
         pendingWindow: Duration.days(7),
         removalPolicy: RemovalPolicy.DESTROY,
       });
-      chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
-      broker.addEnvironment("CHATGPT_CONNECTION_KEY_ARN", chatGptConnectionKey.keyArn);
+      // Named environments only: the legacy (production) template keeps the grant on the broker's role, as mainline deploys it.
+      if (naming.env !== undefined) {
+        chatGptConnectionKey.addToResourcePolicy(new iam.PolicyStatement({
+          principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
+          actions: ["kms:Encrypt", "kms:Decrypt"], resources: ["*"],
+        }));
+      } else chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
+      addBrokerName(broker, naming, "chatGptConnectionKey", chatGptConnectionKey.keyId, chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
-      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
+      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, ...(naming.env === undefined ? {} : { coreBroker: broker }), controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
+      if (companySignIn !== undefined) companySignIn.addTo(notifier.function);
+      // Migration plan v3.2 lane E2: the core engine's switch (stack parameter CoreEngine, default off), its dispatch queue and its scheduled jobs (core-engine.ts).
+      // Named environments only: the legacy (production) template has none of it, and this block now also runs for the legacy deployment.
+      if (naming.env !== undefined) new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env, broker, dispatcher, notifyOperator });
+      // Lane T6 (DEFERRED T6-SECRETS-IAM-20261114-v2): the role the broker will assume for one company's secrets. Named environments only; nothing assumes it yet.
+      if (naming.env !== undefined) {
+        const companySecretsRole = new CompanySecrets(this, "CompanySecrets", { env: naming.env, brokerRole: broker.role! }).role;
+        addBrokerName(broker, naming, "companySecretsRole", companySecretsRole.roleName, companySecretsRole.roleArn);
+      }
       // Spec 025 A13: the admin health route reads the environment's alarms, by name, and
       // the depths of its dead-letter queues. Read-only, and on exactly these resources.
       const alarmPrefix = naming.alarmName("");
-      broker.addEnvironment("AGENTX_ALARM_PREFIX", alarmPrefix);
+      addDerivedBrokerVariable(broker, naming, "AGENTX_ALARM_PREFIX", alarmPrefix);
       // Issue 206: the probe reads them by exact name (HEALTH_ALARM_SUFFIXES), since a prefix listing
       // is authorized against * while a call naming its alarms is authorized against each alarm's
       // ARN, which this grant covers. A CDK alarm missing from that list would go unreported, so the
@@ -907,22 +1098,56 @@ export class ControlPlaneStack extends Stack {
         resources: [`arn:${this.partition}:cloudwatch:${this.region}:${this.account}:alarm:${alarmPrefix}*`],
       }));
       channelAdapters.connectSlackPoster(notifier.function, signInParameters.slackTeamId.valueAsString);
+      if (slackCompany !== undefined) {
+        // The notifier: binding and token for each post; a ChatGPT fallback's workspace pointer row (ORG#<c>#WORKSPACE#<id>).
+        // L2-2 PR 18d: the pointer row's key narrowed to a company id's exact shape (org_ + 20 characters), so the pattern cannot match another key that merely contains #WORKSPACE#.
+        slackCompany.grant("DeveloperTaskNotifier", notifier.function.role!, [slackCompany.tokenRead(),
+          slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", [...SLACK_BINDING_READ_KEYS, "ORG#org_????????????????????#WORKSPACE#*"])]);
+        notifier.function.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
+        notifier.function.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+        // DeveloperIdentity already reads the token family (Add to Slack); its directory needs the team's binding, on the State table it otherwise never reads.
+        slackCompany.grant("DeveloperIdentity", developerSignIn.function.role!, [slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)]);
+        developerSignIn.function.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
+        developerSignIn.function.addEnvironment("STATE_TABLE_NAME", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, state.tableName, "")));
+        // The Slack Lambda and the channel API resolve the linked person's company membership on the sign-in table (company-check.ts membershipKey), reads only.
+        for (const [id, fn] of [["SlackIngressMembers", slackIngress], ["ChannelApiMembers", channelAdapters.ingress]] as const) {
+          slackCompany.grant(id, fn.role!, [slackCompany.stateReads(developerSignIn.table, "ReadCompanyMemberships", ["COMPANY_MEMBER#*"])]);
+          fn.addEnvironment("DEVELOPER_SIGNIN_TABLE_NAME", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, developerSignIn.table.tableName, "")));
+        }
+      }
       // Phase 7c1b: sign-in's Slack directory reads (task access, channel names, the health check).
       channelAdapters.connectSlackPoster(developerSignIn.function, signInParameters.slackTeamId.valueAsString);
       // Phase 7c2: the channel API's Slack router posts through the adapter too.
       channelAdapters.connectSlackPoster(channelAdapters.ingress, signInParameters.slackTeamId.valueAsString, { readsAdapterSecrets: true });
+      // L4-HW8b (DEC 254zzz42 (a)): the broker's hosted lessons source sends Slack `thread_messages` commands through the adapter (aws/hosted-slack-thread.ts). Environment as the other posters have it;
+      // the secret read is in the SECRET's policy (the broker's role policy has no room), so the identity grant is skipped here. Named environments only: the legacy (production) template does not change.
+      if (naming.env !== undefined) {
+        channelAdapters.connectSlackPoster(broker, signInParameters.slackTeamId.valueAsString, { readsAdapterSecrets: true });
+        channelAdapters.allowBrokerToReadSlackAdapterSecret(broker.role!);
+      }
 
-      // The channel request dead-letter queue is reported by its alarm only: one more queue ARN here pushes the broker
-      // role's policy past IAM's inline size limit.
+      // Preserve the health probe's existing five-queue inventory. Channel request failures remain alarm-only.
       const deadLetterQueues = {
         dispatch: deadLetterQueue, "slack-requests": slackDeadLetterQueue, "developer-notices": notifier.deadLetters, "developer-notice-stream": notifier.streamFailures,
         "channel-events": channelAdapters.eventDeadLetters,
       };
-      broker.addEnvironment("HEALTH_DEAD_LETTER_QUEUES", this.toJsonString(Object.fromEntries(Object.entries(deadLetterQueues).map(([name, queue]) => [name, queue.queueUrl]))));
-      broker.addToRolePolicy(new iam.PolicyStatement({
-        actions: ["sqs:GetQueueAttributes"],
-        resources: Object.values(deadLetterQueues).map((queue) => queue.queueArn),
-      }));
+      addBrokerDeadLetterQueues(broker, naming, [
+        ["dispatchDeadLetters", deadLetterQueues.dispatch], ["slackRequestDeadLetters", deadLetterQueues["slack-requests"]], ["developerNoticeDeadLetters", deadLetterQueues["developer-notices"]],
+        ["developerNoticeStreamFailures", deadLetterQueues["developer-notice-stream"]], ["channelEventDeadLetters", deadLetterQueues["channel-events"]],
+      ], () => this.toJsonString(Object.fromEntries(Object.entries(deadLetterQueues).map(([name, queue]) => [name, queue.queueUrl]))));
+      // Named environments only: the legacy (production) template keeps one statement on the broker's role, as mainline deploys it.
+      if (naming.env !== undefined) {
+        for (const queue of Object.values(deadLetterQueues)) queue.addToResourcePolicy(new iam.PolicyStatement({
+          principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
+          actions: ["sqs:GetQueueAttributes"],
+          resources: [queue.queueArn],
+        }));
+      } else {
+        broker.addToRolePolicy(new iam.PolicyStatement({
+          actions: ["sqs:GetQueueAttributes"],
+          resources: Object.values(deadLetterQueues).map((queue) => queue.queueArn),
+        }));
+      }
       // C10: the ingress reads shared thread records by key; its SLACK_BINDING# statement is unchanged.
       slackIngress.addEnvironment("SHARED_TASKS", "enabled");
       slackIngress.addToRolePolicy(new iam.PolicyStatement({
@@ -958,7 +1183,18 @@ export class ControlPlaneStack extends Stack {
         encryption: sqs.QueueEncryption.SQS_MANAGED,
         retentionPeriod: Duration.days(14),
       });
+      // Lambda validates destination permissions when creating EventInvokeConfig. Keep this
+      // grant on the execution role, and explicitly order both grant and any queue policy first.
+      // SqsDestination repeats the identical grant; CDK deduplicates it in DefaultPolicy.
+      // Named environments only: the legacy (production) template is unchanged.
+      const handOffGrant = naming.env !== undefined ? handOffFailures.grantSendMessages(broker) : undefined;
       broker.configureAsyncInvoke({ onFailure: new lambdaDestinations.SqsDestination(handOffFailures) });
+      if (handOffGrant !== undefined) {
+        const brokerInvokeConfig = broker.node.findChild("EventInvokeConfig");
+        handOffGrant.applyBefore(brokerInvokeConfig);
+        const handOffQueuePolicy = handOffFailures.node.tryFindChild("Policy");
+        if (handOffQueuePolicy) brokerInvokeConfig.node.addDependency(handOffQueuePolicy);
+      }
       slackIngress.configureAsyncInvoke({ onFailure: new lambdaDestinations.SqsDestination(handOffFailures) });
       new cloudwatch.Alarm(this, "SlackHandOffFailuresAlarm", {
         alarmName: naming.alarmName("SlackHandOffFailures"),
@@ -992,7 +1228,7 @@ export class ControlPlaneStack extends Stack {
         },
       }));
       // C14: TASK_BUSY counts the shared thread's waiting messages.
-      broker.addEnvironment("SLACK_THREADS_TABLE_NAME", slackThreads.tableName);
+      addBrokerName(broker, naming, "slackThreadsTable", slackThreads.tableName, slackThreads.tableName);
       broker.addToRolePolicy(new iam.PolicyStatement({
         actions: ["dynamodb:GetItem"],
         resources: [slackThreads.tableArn],
@@ -1004,6 +1240,21 @@ export class ControlPlaneStack extends Stack {
     // Spec 065b: a project a sign-in client creates runs on the foundation's workers: the broker builds its binding from
     // the zone=subnet pairs and the launch template, with no AWS call.
     const foundationParameter = (name: string) => (this.node.findChild(name) as CfnParameter).valueAsString;
+    // DEC 254z-amend3: the session steps read the test services switch whole (named environments, where CoreEngine declares it): on, a launch's boot configuration carries `testServices`.
+    // DEC 254zm: and whether the starter copies are in place; only with both does a launch carry `testServices` (aws/hosted-test-services.ts).
+    if (naming.env !== undefined) {
+      sessions.steps.addEnvironment(TEST_SERVICES_SETTING_VARIABLE, foundationParameter(TEST_SERVICES_PARAMETER));
+      sessions.steps.addEnvironment(TEST_SERVICE_IMAGES_SETTING_VARIABLE, foundationParameter(TEST_SERVICE_IMAGES_PARAMETER));
+    }
+    // L4-EGR: Rovara's fixed outbound addresses (the foundation's NatEgressAddresses output, which the release and `agentx deploy` pass when the foundation has it), shown to a company's owners
+    // and admins (aws/company-egress-routes.ts). Empty until then. A plain variable, not a packed setting: a packed value cannot hold the commas, and the broker has the room.
+    if (naming.env !== undefined) {
+      const natEgressAddresses = new CfnParameter(this, NAT_EGRESS_ADDRESSES_OUTPUT, {
+        type: "String", default: "", allowedPattern: EGRESS_ADDRESSES_PARAMETER_PATTERN, maxLength: 64,
+        description: "The foundation's NAT gateway Elastic IPs, comma-separated: the addresses Rovara's machines connect from. Empty on an install whose foundation does not output them yet.",
+      });
+      broker.addEnvironment(EGRESS_ADDRESSES_VARIABLE, natEgressAddresses.valueAsString);
+    }
     broker.addEnvironment("EC2_WORKER_SUBNETS", foundationParameter("Ec2WorkerSubnets"));
     broker.addEnvironment("EC2_WORKER_LAUNCH_TEMPLATE_ID", foundationParameter("Ec2WorkerLaunchTemplateId"));
     // A6: where the State table expires index items itself, the reconciler's legacy sweep is off.
@@ -1014,8 +1265,20 @@ export class ControlPlaneStack extends Stack {
     if (naming.env !== undefined) sessions.connectStuckCancelAlarm();
     // Issue 173: the backstop for idle Slack tasks nobody waits on. Named environments only: the
     // legacy template is unchanged.
-    if (naming.env !== undefined) sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKey.valueAsString);
+    if (naming.env !== undefined) sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKeySecretName);
     if (naming.env !== undefined) channelAdapters.connectSlackPoster(sessions.reconciler, signInParameters.slackTeamId.valueAsString);
+    if (slackCompany !== undefined) {
+      // The reconciler already reads and writes the State table; it needs only the company's token for its thread notes.
+      slackCompany.grant("SessionReconciler", sessions.reconciler.role!, [slackCompany.tokenRead()]);
+      sessions.reconciler.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
+      sessions.reconciler.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+      // The hosted Slack service (ECS): the team's binding and the company's token for its posts. Its container gets the switch from the slack stack.
+      slackCompany.grant("SlackOrchestrator", slackOrchestratorRole, [slackCompany.tokenRead(), slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)]);
+      // L2-2 PR 18d: the Slack service's inputs, handed to the slack stack by the deploy (parameters.ts optionalOutputs). DEC 254zk: always there, so that agentx config set
+      // slack.companyWorkspaces, which sets the slack stack's own switch (SlackCompanyWorkspacesState), finds them in place from the last deploy.
+      for (const [id, value] of [["SlackCompanyStateTableName", state.tableName], ["SlackCompanyTeamId", signInParameters.slackTeamId.valueAsString]] as const) new CfnOutput(this, id, { value });
+    }
+    if (companySignIn !== undefined) companySignIn.addTo(sessions.reconciler);
     // Own both attachments in this releasable stack. Secret changes must never mutate the
     // protected foundation template or require a separate foundation change set.
     grantProviderKeySecrets(this, [slackOrchestratorRole.roleName, sessions.instanceRoleName]);
@@ -1099,6 +1362,15 @@ export class ControlPlaneStack extends Stack {
     sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
     sessions.connectDispatcher(dispatcher);
     sessions.connectBroker(broker);
+    if (naming.env !== undefined) broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [sessions.deleter.stateMachineArn, swebenchStateMachineArn] }));
+    // Lane E2 step 4: the dispatcher is the core dispatch queue's consumer (named environments only: the core engine construct exists only there, so the legacy template is unchanged).
+    const coreEngine = this.node.tryFindChild("CoreEngineJobs");
+    if (naming.env !== undefined && coreEngine instanceof CoreEngine) {
+      coreEngine.connectDispatcher(dispatcher, {
+        deleterArn: sessions.deleter.stateMachineArn, callbackSigningKeySecret: { secretName: callbackSigningKeySecretName, secretArn: callbackSigningKeySecret.secretArn },
+        workerSubnets: foundationParameter("Ec2WorkerSubnets"), workerLaunchTemplateId: foundationParameter("Ec2WorkerLaunchTemplateId"),
+      });
+    }
 
     // Spec 052 FR-006, FR-011: the eval batch tick. Every 2 minutes it records run ends the broker
     // missed, reconciles the eval slot counter, fills free slots through the broker's own run path
@@ -1111,10 +1383,19 @@ export class ControlPlaneStack extends Stack {
     const evalBatchTick = packagedFunction(this, "EvalBatchTick", "packages/broker/src/aws/eval-batch-tick.ts", {
       STATE_TABLE_NAME: state.tableName,
       ARTIFACT_BUCKET_NAME: artifacts.bucketName,
-      CALLBACK_SIGNING_KEY: callbackSigningKey.valueAsString,
+      CALLBACK_SIGNING_KEY_SECRET_ID: callbackSigningKeySecretName,
       SWEBENCH_SETTINGS_PREFIX: naming.ec2.workerSettingsPrefix,
     }, Duration.seconds(90));
     state.grantReadWriteData(evalBatchTick);
+    callbackSigningKeyReaders.push(evalBatchTick.role!);
+    if (naming.env !== undefined) callbackSigningKeyReaders.push(sessions.reconciler.role!);
+    callbackSigningKeySecret.addToResourcePolicy(new iam.PolicyStatement({
+      sid: "ReadCallbackSigningKey",
+      principals: callbackSigningKeyReaders.map((role) => new iam.ArnPrincipal(role.roleArn)),
+      actions: ["secretsmanager:GetSecretValue"],
+      // In a secret's own policy, "*" is this secret.
+      resources: ["*"],
+    }));
     // A run's launch.json (evals/<runId>/) and a batch's results (evals/batches/<id>/); it reads nothing there.
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "WriteEvalObjects", actions: ["s3:PutObject"], resources: [artifacts.arnForObjects("evals/*")] }));
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "ReadEvalSettings", actions: ["ssm:GetParameters"], resources: evalSettingArns }));
@@ -1203,6 +1484,16 @@ export class ControlPlaneStack extends Stack {
     new CfnOutput(this, "TurnRecordsTableName", { value: turnRecords.tableName });
     new CfnOutput(this, "OperatorAlertsTopicArn", { value: operatorAlerts.topicArn });
   }
+}
+
+/** A named environment's broker role name. */
+export function brokerRoleName(naming: AgentXNaming): string {
+  return `${naming.resourcePrefix}-broker-role`;
+}
+
+/** A named environment's broker function name. */
+export function brokerFunctionName(naming: AgentXNaming): string {
+  return `${naming.resourcePrefix}-broker`;
 }
 
 export function packagedFunction(

@@ -5,6 +5,8 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { CONVERSATION_STATE_WORKSPACE_ATTRIBUTES } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
+import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
 
 skipLambdaBundling();
 
@@ -29,7 +31,7 @@ function statementsOf(template: TemplateJson, roleId: string): Statement[] {
 const actions = (statement: Statement) => [statement.Action].flat();
 
 beforeAll(() => {
-  named = controlPlane(buildAgentXApp({ agentxEnv: "staging" }), "agentx-staging-control-plane");
+  named = withoutSlackCompanyMode(controlPlane(buildAgentXApp({ agentxEnv: "staging" }), "agentx-staging-control-plane")) as TemplateJson;
   legacy = controlPlane(buildAgentXApp(), "AgentXControlPlane");
 }, 300_000);
 
@@ -39,7 +41,10 @@ describe("channel adapters infrastructure", () => {
     const ingress = functionNamed(named, "ChannelApiIngress")![1];
     expect((ingress.Properties.Environment as { Variables: Record<string, unknown> }).Variables.CHANNEL_ADAPTERS).toEqual({ Ref: "ChannelAdapters" });
     const broker = ofType(named, "AWS::Lambda::Function").find(([id]) => withoutHash(id).startsWith("Broker"))![1];
-    expect((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables.CHANNEL_ADAPTERS).toEqual({ Ref: "ChannelAdapters" });
+    // DEC 254h: a named broker has the flag packed in AGENTX_SETTINGS (ca), not as a variable of its own.
+    const brokerVariables = (broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(brokerVariables).not.toHaveProperty("CHANNEL_ADAPTERS");
+    expect(unpackedBrokerVariables(brokerVariables, named as never).CHANNEL_ADAPTERS).toEqual({ Ref: "ChannelAdapters" });
   });
 
   it("gives the legacy stack the built-in Slack adapter and (spec 064) the registry behind ChannelAdapters, off by default", () => {

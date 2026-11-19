@@ -250,7 +250,7 @@ export async function publishWorkspace(
     });
   }
 
-  // A workflow publication of an already-committed head is checked against the workflow's base; any other publication is one commit on the latest base, so its first parent is the base.
+  // A workflow publication's commits are the task's own on its pinned base; any other publication is one commit on the latest base, so its first parent is the base.
   const publicationBase = candidateTreeSha !== undefined && invocation.payload.publicationMode === "COMMITTED_HEAD" ? (invocation.payload.workflowBaseCommit ?? manifestRepository.resolvedCommit) : undefined;
   // TE-B9 (O38): the same moment, the same commit: none of Rovara's own working files (`ROVARA_NEVER_COMMIT`) is in what is about to go, whatever the workspace layout. Fails closed, before any check, credential or push.
   // A retry of a committed publication is HEAD as the task (or an earlier attempt) left it, possibly several commits on the preparation commit, so its first parent is not the base: check against the commit preparation

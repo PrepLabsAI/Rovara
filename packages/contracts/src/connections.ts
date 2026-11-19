@@ -9,6 +9,7 @@ import { McpAuthSchema, McpEndpointSchema } from "./mcp-connector.js";
 import { type OrgId } from "./company-scope.js";
 import { orgScoped, type OrgKey } from "./company-scope.js";
 
+// CLOSED ON PURPOSE (owner decision 62, item E1): no new connection type. Opening this union (a connection for a tracker that registers itself) is built when chains and triggers are switched on (decision 45.10).
 export const ConnectionTypeSchema = z.enum(["linear", "jira", "mcp", "sentry", "datadog", "cloudwatch", "grafana", "vercel", "pagerduty"]);
 export type ConnectionType = z.infer<typeof ConnectionTypeSchema>;
 

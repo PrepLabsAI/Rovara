@@ -5,9 +5,9 @@
 // in memory for the rest of the turn; a session opened again from the file (a resume) reads the stubs.
 import { randomUUID } from "node:crypto";
 import { readFile, rename, writeFile } from "node:fs/promises";
-import { isContextToolName, stubFor } from "./frame.js";
+import { isContextToolName, stubFor, stubSourceFrames } from "./frame.js";
 
-interface Entry { type?: unknown; message?: { role?: unknown; toolName?: unknown; content?: unknown; details?: unknown } }
+interface Entry { type?: unknown; summary?: unknown; message?: { role?: unknown; toolName?: unknown; content?: unknown; details?: unknown; structuredContent?: unknown } }
 
 function textOf(content: unknown): string {
   return Array.isArray(content) ? content.map((block) => (typeof block === "object" && block !== null && typeof (block as { text?: unknown }).text === "string" ? (block as { text: string }).text : "")).join("\n") : "";
@@ -19,9 +19,17 @@ export async function stubPersistedContextResults(sessionFile: string): Promise<
   try { raw = await readFile(sessionFile, "utf8"); } catch { return 0; }
   let replaced = 0;
   const lines = raw.split("\n").map((line) => {
-    if (line.trim() === "" || !line.includes("toolResult")) return line;
+    if (line.trim() === "" || !(line.includes("toolResult") || line.includes("compaction"))) return line;
     let entry: Entry;
     try { entry = JSON.parse(line) as Entry; } catch { return line; }
+    // A conversation summary (a `compaction` entry) is not a tool result, but a frame in it is a source's text all the same (compaction.ts keeps it out; this is the file's own check).
+    if (entry.type === "compaction") {
+      if (typeof entry.summary !== "string") return line;
+      const stubbed = stubSourceFrames(entry.summary);
+      if (stubbed === entry.summary) return line;
+      replaced += 1;
+      return JSON.stringify({ ...entry, summary: stubbed });
+    }
     const message = entry.type === "message" ? entry.message : undefined;
     if (message === undefined || message.role !== "toolResult" || !isContextToolName(message.toolName)) return line;
     const text = textOf(message.content);
@@ -30,6 +38,8 @@ export async function stubPersistedContextResults(sessionFile: string): Promise<
     replaced += 1;
     const next = { ...entry, message: { ...message, content: [{ type: "text", text: stubFor(text) }] } };
     delete next.message.details;
+    // An MCP tool's result keeps the whole answer in its structured content too (Pi's rovara server tools).
+    delete next.message.structuredContent;
     return JSON.stringify(next);
   });
   if (replaced === 0) return 0;

@@ -94,7 +94,7 @@ export function orgLearningSettingsKey(orgId: OrgId): OrgKey {
   return { pk: orgPk(orgId), sk: "LEARNING_SETTINGS" };
 }
 
-export type OrgSettingName = "WORKSPACE_LIMITS" | "MODEL_SELECTION_POLICY" | "REVIEW_DEFAULT_NOTICE";
+export type OrgSettingName = "WORKSPACE_LIMITS" | "MODEL_SELECTION_POLICY" | "REVIEW_DEFAULT_NOTICE" | "PROJECT_CATALOG_INDEX" | "ENGINE_MODEL";
 
 export function orgSettingsKey(orgId: OrgId, name: OrgSettingName): OrgKey {
   return { pk: orgScoped(orgId, "SETTINGS"), sk: name };
@@ -268,6 +268,11 @@ export function approverIndexKey(orgId: OrgId, developerId: string, approvalId: 
  */
 export function agentRequestKey(orgId: OrgId, developerId: string, requestId: string): OrgKey {
   return { pk: orgScoped(orgId, `AGENT_REQUEST#${developerId}`), sk: requestId };
+}
+
+/** A company's agent guardrails: one row holding the document and its revision. */
+export function agentGuardrailsKey(orgId: OrgId): OrgKey {
+  return { pk: orgScoped(orgId, "AGENT_GUARDRAILS"), sk: "META" };
 }
 
 /** An org's company AI sources (Plan 3 Task 24b): one item holding the sources, their order and its revision. */
@@ -1006,4 +1011,17 @@ export function intakeOwnWriteKey(orgId: OrgId, ticketItemId: string, kind: Inta
   if (!(INTAKE_OWN_WRITE_KINDS as readonly string[]).includes(kind)) throw new Error("an own write is a label, an assignee or a touch");
   const part = kind === "touch" ? "-" : createHash("sha256").update(value.normalize("NFC").trim().toLowerCase(), "utf8").digest("hex").slice(0, 32);
   return { pk: orgScoped(orgId, "INTAKE_OWN"), sk: `${ticketItemId}#${kind}#${part}` };
+}
+
+/** TE-H1 browser evidence, slice 3: the project's recipe as its owner saved it on the recipe page (which pages to photograph, the app's start command, the sign-in's form). One row per project in one company; holds no secret. */
+export function projectBrowserEvidenceRecipeKey(orgId: OrgId, name: string): OrgKey {
+  return { pk: projectPk(orgId, name), sk: "BROWSER_EVIDENCE_RECIPE" };
+}
+
+/**
+ * Guided onboarding L2-1 (DEC 254o a): a company's claim on a project NAME it chose, beside the project's globally unique id. Only the company's
+ * own partition is ever read or written for a name, so whether another company uses the same name is never asked.
+ */
+export function orgProjectNameClaimKey(orgId: OrgId, name: string): OrgKey {
+  return { pk: orgScoped(orgId, "PROJECT_NAME"), sk: `NAME#${name}` };
 }

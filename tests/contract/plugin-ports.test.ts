@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ActingIdentityPolicySchema, AttributionSchema, ChangeRequestFeedbackSchema, ChangeRequestInputSchema, ChangeRequestStatusSchema, ChangeRequestUpdateSchema, CheckSchema,
   CheckStartRequestSchema, CheckTargetSchema, DELEGATED_GRANT_MAX_LIFETIME_MS, GIT_CREDENTIAL_HELPERS, GIT_CREDENTIAL_MAX_LIFETIME_MS, workerGitCredentialUsable, CodeHostCapabilitiesSchema, CodeHostEventSchema, CODE_HOST_EVENT_TYPES, DelegatedGrantSchema, GitCredentialSchema,
+  COMMIT_ID_PATTERN, isCommitId,
   HostScopeSchema, MergeResultSchema, PluginKindSchema, TrackerEventSchema, TrackerItemSchema, actingIdentityModeAllowed, delegatedUseAllowed,
 } from "../../packages/contracts/src/plugins/index.js";
 
@@ -113,10 +114,15 @@ describe("change requests", () => {
       id: "7", state: "open", draft: false, headRevision: sha, targetBranch: "main", mergeableState: "clean", mergeable: true,
       checks: [{ name: "ci", state: "completed", conclusion: "success", required: true, url: "" }], requiredChecks: [{ name: "ci" }], targetHasRequiredChecks: true,
       headDefinesChecks: true, requestedReviewers: 0,
-      reviews: [{ reviewer: { login: "pat" }, accountType: "User", state: "APPROVED", revision: sha, submittedAt: "2026-10-30T00:00:00Z" }],
+      reviews: [{ reviewer: { login: "pat" }, accountType: "person", state: "APPROVED", revision: sha, submittedAt: "2026-10-30T00:00:00Z" }],
     };
     expect(ChangeRequestStatusSchema.parse(status)).toEqual(status);
     expect(ChangeRequestStatusSchema.safeParse({ ...status, mergeableState: "fine" }).success).toBe(false);
+    // Item C4: Rovara's own words for the merge state and the account kind; a host's words (`dirty`, `has_hooks`, `User`) are mapped by its adapter and are not accepted here.
+    for (const state of ["clean", "conflicted", "behind", "blocked", "unstable", "draft", "unknown"]) expect(ChangeRequestStatusSchema.safeParse({ ...status, mergeableState: state }).success, state).toBe(true);
+    for (const state of ["dirty", "has_hooks"]) expect(ChangeRequestStatusSchema.safeParse({ ...status, mergeableState: state }).success, state).toBe(false);
+    for (const kind of ["person", "bot", "other"]) expect(ChangeRequestStatusSchema.safeParse({ ...status, reviews: [{ ...status.reviews[0], accountType: kind }] }).success, kind).toBe(true);
+    expect(ChangeRequestStatusSchema.safeParse({ ...status, reviews: [{ ...status.reviews[0], accountType: "User" }] }).success).toBe(false);
     expect(ChangeRequestStatusSchema.safeParse({ ...status, reviews: [{ ...status.reviews[0], state: "LGTM" }] }).success).toBe(false);
   });
 
@@ -139,12 +145,22 @@ describe("change requests", () => {
 describe("neutral events", () => {
   const base = { eventId: "d-1", host: "github" };
   it("covers the neutral event types of the design, and each parses", () => {
-    expect([...CODE_HOST_EVENT_TYPES].sort()).toEqual(["change_request.closed", "change_request.merged", "change_request.opened", "change_request.updated", "check.completed", "comment.created", "review.submitted", "revision.pushed"]);
+    expect([...CODE_HOST_EVENT_TYPES].sort()).toEqual(["change_request.closed", "change_request.merged", "change_request.opened", "change_request.updated", "check.completed", "comment.created", "deployment.status", "review.submitted", "revision.pushed"]);
     expect(CodeHostEventSchema.safeParse({ ...base, type: "change_request.opened", ref }).success).toBe(true);
     expect(CodeHostEventSchema.safeParse({ ...base, type: "review.submitted", ref, state: "APPROVED" }).success).toBe(true);
     expect(CodeHostEventSchema.safeParse({ ...base, type: "comment.created", ref, commentId: "9" }).success).toBe(true);
     expect(CodeHostEventSchema.safeParse({ ...base, type: "check.completed", repository: ref.repository, revision: sha, name: "ci", conclusion: "failure" }).success).toBe(true);
     expect(CodeHostEventSchema.safeParse({ ...base, type: "revision.pushed", repository: ref.repository, branch: "main", revision: sha }).success).toBe(true);
+    expect(CodeHostEventSchema.safeParse({ ...base, type: "deployment.status", repository: ref.repository, revision: sha, environment: "staging", state: "success" }).success).toBe(true);
+  });
+  it("refuses a deployment event with a state, an environment or a field the port does not name (M7 slice 2)", () => {
+    const event = { ...base, type: "deployment.status", repository: ref.repository, revision: sha, environment: "staging", state: "success" };
+    expect(CodeHostEventSchema.safeParse({ ...event, state: "inactive" }).success).toBe(false);
+    expect(CodeHostEventSchema.safeParse({ ...event, state: "error" }).success).toBe(false);
+    expect(CodeHostEventSchema.safeParse({ ...event, environment: "" }).success).toBe(false);
+    expect(CodeHostEventSchema.safeParse({ ...event, environment: "e".repeat(65) }).success).toBe(false);
+    expect(CodeHostEventSchema.safeParse({ ...event, environment: undefined }).success).toBe(false);
+    expect(CodeHostEventSchema.safeParse({ ...event, url: "https://example.test" }).success).toBe(false);
   });
   it("refuses an event with no delivery id, an unknown type or a field it does not know", () => {
     expect(CodeHostEventSchema.safeParse({ host: "github", type: "change_request.opened", ref }).success).toBe(false);
@@ -231,5 +247,19 @@ describe("acting identity", () => {
     expect(() => grantOf({ expiresAt: 1_000 })).toThrow();
     expect(() => grantOf({ purpose: "approve" })).toThrow();
     expect(() => grantOf({ grantedBy: "short" })).toThrow();
+  });
+});
+
+describe("item C4: revision ids and check logs", () => {
+  it("takes any hash length as a revision id", () => {
+    expect(COMMIT_ID_PATTERN.test("a".repeat(40))).toBe(true);
+    expect(COMMIT_ID_PATTERN.test("b".repeat(64))).toBe(true);
+    expect(COMMIT_ID_PATTERN.test("abc")).toBe(false);
+    expect(COMMIT_ID_PATTERN.test("A".repeat(40))).toBe(false);
+    expect(isCommitId("0".repeat(64))).toBe(true);
+  });
+
+  it("marks a check whose log can be read by the host", () => {
+    expect(CheckSchema.parse({ name: "ci", state: "completed", conclusion: "failure", required: false, url: "", runId: "9", logReadable: true }).logReadable).toBe(true);
   });
 });

@@ -13,11 +13,12 @@
 import { isAllowedDomain } from "./app-projects.js";
 import { FILE_PROVENANCE_KINDS, PROVENANCE_NOTE_MAX, PROVENANCE_QUOTE_MAX, PROVENANCE_PER_ITEM_MAX, ProvenanceSchema, type Provenance, type ProposalRisk } from "./provenance.js";
 import { RelativeWorkspacePathSchema } from "./project.js";
+import { PromptLocationSchema, promptLocationKey } from "./prompt-locations.js";
 import { IntakeSystemSchema } from "./intake.js";
 import { redactText } from "./redaction.js";
 import {
   DEVCONTAINER_PATH_PATTERN, SETUP_COMMANDS_MAX, SETUP_DEVCONTAINER_MAX_BYTES, SETUP_INTAKE_CHANNELS, SETUP_ITEM_LIMITS, SETUP_KNOWLEDGE_ACTIVATIONS, SETUP_KNOWLEDGE_KINDS, SETUP_PROPOSAL_VERSION, SETUP_SOURCE_FOUND_IN,
-  SETUP_SPEC_FORMATS, SetupProposalSchema, SetupRepositoryValueSchema, setupItemRisk, type SetupItemKind, type SetupProposal,
+  SETUP_SPEC_FORMATS, SetupBrowserEvidenceValueSchema, SetupProposalSchema, SetupRepositoryValueSchema, setupItemRisk, type SetupItemKind, type SetupProposal,
 } from "./setup-proposal.js";
 import { isObject, oneLineText, readCommand, readCommands, remoteCodeReason, secretNameOf, utf8Bytes } from "./setup-draft.js";
 
@@ -48,7 +49,7 @@ const MODEL_CITATION_KINDS = ["file", "ci", "readme", "manifest", "inferred"] as
 const CONFIDENCES = ["high", "medium", "low"] as const;
 const ID_PREFIX: Record<SetupItemKind, string> = {
   repository: "repo", setup: "setup", tests: "tests", check: "check", test_environment: "env", devcontainer: "devcontainer", knowledge: "knowledge",
-  spec_target: "spec", source: "source", intake: "intake", allowed_domain: "domain", secret: "secret",
+  spec_target: "spec", source: "source", intake: "intake", allowed_domain: "domain", secret: "secret", browser_evidence: "browser", prompt_location: "prompt",
 };
 
 const slugOf = (key: string): string => key.toLowerCase().replace(/[^a-z0-9._-]+/gu, "-").replace(/^[^a-z0-9]+|-+$/gu, "").slice(0, 48);
@@ -264,6 +265,31 @@ export function sanitizeSetupProposal(raw: unknown, context: SetupProposalContex
     return path?.success === true && path.data.split("/")[0] !== ".git" && format !== undefined ? { key: "spec", value: { format, path: path.data } } : undefined;
   });
 
+  // TE-H1 slice 3: the pages and the start command for browser evidence. One item, whole or nothing: a start command that is not a plain single command, fetches code and runs it, or carries a secret-shaped value, a port or a
+  // page or a glob that is not valid, or any page the schema refuses leaves the WHOLE suggestion out (never a recipe with a page quietly missing). The citation is required like any other item's.
+  const browserEvidence = reader.collect(raw["browserEvidence"] === undefined ? [] : [raw["browserEvidence"]], "browser_evidence", 1, (entry, from) => {
+    const written = typeof entry["startCommand"] === "string" ? entry["startCommand"].trim() : undefined;
+    const command = written === undefined ? undefined : readCommand(written);
+    // A command that changes under the redactor holds a secret-shaped value: it is no start command.
+    if (written === undefined || command?.kind !== "kept" || redactText(written) !== written) return undefined;
+    const reason = remoteCodeReason(command.text) ?? (modelFlags.has(command.text) ? "Rovara flagged this command." : undefined);
+    if (reason !== undefined) { if (!flagged.has(command.text)) flagged.set(command.text, { reason, from }); return undefined; }
+    const value = SetupBrowserEvidenceValueSchema.safeParse({
+      startCommand: command.text, port: entry["port"], routes: entry["routes"],
+      ...(entry["readyPath"] === undefined ? {} : { readyPath: entry["readyPath"] }), ...(entry["framework"] === undefined ? {} : { framework: entry["framework"] }),
+    });
+    return value.success ? { key: "recipe", value: value.data } : undefined;
+  });
+
+  // L4-EVP: where the project's AI prompts live inside code. A location is a tracked file of a known repository plus (for a region) a function, variable, decorator or YAML key; the item must cite a place IN THAT FILE, so the
+  // broker's re-read of the citation is also a check that the file is there. Anything the schema refuses is left out (never a location with a part quietly missing).
+  const promptLocations = reader.collect(raw["promptLocations"], "prompt_location", SETUP_ITEM_LIMITS.promptLocations, (entry, from) => {
+    const repo = reader.knownRepo(entry["repo"]);
+    const value = PromptLocationSchema.safeParse({ repo, path: entry["path"], kind: entry["kind"], ...(entry["symbol"] === undefined ? {} : { symbol: entry["symbol"] }) });
+    if (repo === undefined || !value.success || !from.some((citation) => citation.repo === repo && citation.path === value.data.path)) return undefined;
+    return { key: promptLocationKey(value.data), value: value.data };
+  });
+
   const nameLike = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/u;
   const sources = reader.collect(raw["sources"], "source", SETUP_ITEM_LIMITS.sources, (entry) => {
     const name = typeof entry["name"] === "string" ? entry["name"].trim() : "";
@@ -365,13 +391,15 @@ export function sanitizeSetupProposal(raw: unknown, context: SetupProposalContex
     intake: idsFor("intake", intake, used),
     allowedDomains: idsFor("allowed_domain", allowedDomains, used),
     secretsNeeded: idsFor("secret", secretsNeeded, used),
+    ...(browserEvidence[0] === undefined ? {} : { browserEvidence: idsFor("browser_evidence", browserEvidence, used)[0]! }),
+    ...(promptLocations.length === 0 ? {} : { promptLocations: idsFor("prompt_location", promptLocations, used) }),
     flaggedCommands: [...flagged].slice(0, SETUP_ITEM_LIMITS.flagged).map(([command, entry]) => ({ command, reason: entry.reason, from: entry.from.slice(0, PROVENANCE_PER_ITEM_MAX) })),
     foundNotUsed,
     notes: [...allNotes].slice(0, 2000).join(""),
   };
   const empty = proposal.repositories.length + proposal.setup.length + proposal.tests.length + proposal.checks.length + proposal.testEnvironment.length + proposal.knowledge.length
     + proposal.sources.length + proposal.intake.length + proposal.allowedDomains.length + proposal.secretsNeeded.length + proposal.flaggedCommands.length + proposal.foundNotUsed.length === 0
-    && proposal.devcontainer === undefined && proposal.specTarget === undefined;
+    && proposal.devcontainer === undefined && proposal.specTarget === undefined && proposal.browserEvidence === undefined && proposal.promptLocations === undefined;
   if (empty) return { ok: false, errors: ["the answer has nothing in it a person could use"] };
   const checked = SetupProposalSchema.safeParse(proposal);
   return checked.success ? { ok: true, proposal: checked.data } : { ok: false, errors: [`the proposal is not valid: ${checked.error.issues[0]?.path.join(".") ?? "proposal"}`] };

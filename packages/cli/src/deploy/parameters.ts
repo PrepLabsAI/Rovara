@@ -2,7 +2,7 @@
 // It turns the operator's answers, a release manifest, and the stack outputs collected so far into
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
-import { CONTROL_PLANE_FOUNDATION_PARAMETERS, ImageDigest, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentStackName } from "@agentx/contracts";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS, EGRESS_ADDRESSES_PARAMETER_PATTERN, ImageDigest, NAT_EGRESS_ADDRESSES_OUTPUT, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentPullThroughPrefix, environmentStackName } from "@agentx/contracts";
 import type { ReleaseManifest, StackPart } from "@agentx/contracts";
 import { signInStackParameters, type StoredDeveloperSignIn } from "../signin/settings.js";
 
@@ -34,7 +34,9 @@ export interface InstallAnswers {
         clientId?: string;
       };
   // account and installationId are what `agentx init` set up; the control plane no longer takes them (#123).
-  github: { account?: string; appId: string; installationId?: string; privateKeySecretArn: string; credentialRef?: string };
+  // appId absent: only an upgrade's answers may leave it out, and deployEnvironment then fills in the
+  // control plane's deployed GitHubAppId (possibly "") before any parameters are computed.
+  github: { account?: string; appId?: string; installationId?: string; privateKeySecretArn: string; credentialRef?: string };
   /** The value; the caller reads it from Secrets Manager, never logs it. */
   callbackSigningKey: string;
   permissionsBoundaryArn?: string;
@@ -74,8 +76,29 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
   runtime: ["E2eAgentModelId", "ModelFallback"],
   "control-plane": ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit", "McpConfirmElicitation", "TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "TaskPersonProofEnabled", "WorkflowDependenciesEnabled",
     // Spec 062: channel adapters and Slack through the channel API, as the operator set them (agentx config set).
-    "ChannelAdapters", "SlackViaChannel"],
-  slack: ["SlowTurnMinutes", "ModelFallback"],
+    "ChannelAdapters", "SlackViaChannel",
+    // Migration plan v3.2 lane E2: the core engine switch (agentx config set coreEngine.switch).
+    "CoreEngine",
+    // Migration plan v3.2 lane E2: retain every core setting the operator may tune across upgrades.
+    "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreSystemRuns",
+    // Core switch-on blocker (2026-11-17): the model gateway's origin and the agent model (agentx config set coreEngine.modelGatewayUrl / coreEngine.agentModel).
+    "CoreModelGatewayHost", "CoreAgentModel",
+    // DEC 254z-amend3: the test services switch (default on); an operator's opt-out survives every upgrade.
+    "TestServices",
+    // DEC 254zm: whether the starter copies are in place (none | mirrored); set by the operator after the copy, kept across upgrades.
+    "TestServiceImages",
+    // Web task channel C8 (option b): the attention email switch, the web app's host and the attention email's own SES identity, as the operator set them.
+    "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender",
+    // L4-AM (DEC 254zzn(2)): the hosted answers model (agentx config set coreEngine.answersModel), empty = the agent model.
+    "CoreAnswersModel",
+    // Hosted wiring (a): the verified SES identity that sends step-up codes, as the operator set it.
+    "StepUpEmailSender",
+    // DEC 254zg (a): Code's company layer and self-serve create (agentx config set company.signIn / company.selfServe).
+    "CompanySignIn", "CompanySelfServe",
+    // DEC 254zk: per-company Slack bots (agentx config set slack.companyWorkspaces).
+    "SlackCompanyWorkspaces"],
+  // DEC 254zg (a): the Slack service's copy of CompanySignIn, set together with the control plane's.
+  slack: ["SlowTurnMinutes", "ModelFallback", "CompanySignIn", "SlackCompanyWorkspacesState"],
 };
 
 /** Fresh install order: the control plane needs the GitHub App. The `runtime` part is the EC2 worker settings (#117); the control plane reads them only when it boots a worker. */
@@ -139,6 +162,12 @@ function optionalOutputs(outputs: Partial<Record<DeployPart, StackOutputs>>, par
   }));
 }
 
+/** The control plane's NatEgressAddresses parameter from the foundation's output of the same name, or nothing. */
+function egressAddressesParameter(foundation: StackOutputs | undefined): Record<string, string> {
+  const value = foundation?.[NAT_EGRESS_ADDRESSES_OUTPUT];
+  return typeof value === "string" && value.length > 0 && new RegExp(EGRESS_ADDRESSES_PARAMETER_PATTERN, "u").test(value) ? { [NAT_EGRESS_ADDRESSES_OUTPUT]: value } : {};
+}
+
 function required(outputs: Partial<Record<DeployPart, StackOutputs>>, part: DeployPart, name: string, env: string): string {
   const value = outputs[part]?.[name];
   if (value === undefined) throw new MissingStackOutputError(environmentStackName(env, part), name);
@@ -158,6 +187,27 @@ function checkedImageOverride(uri: string, which: "worker" | "slack"): string {
   return uri;
 }
 
+/** L4-IAM: the one sentence every refusal of an off-prefix worker image uses (fixed words, no echo). */
+export const WORKER_IMAGE_OFF_PREFIX = "the worker image override must be in this account's ECR, in this region, in a repository under the environment's image prefix (agentx-<env>/): the worker role reads only that prefix";
+
+/**
+ * L4-IAM: the worker role reads images only under the environment's ECR pull-through prefix (`agentx-<env>/`) and its test-service copies, so a worker image anywhere else
+ * would deploy cleanly and then fail every instance boot ("could not download the worker image"). Returns the fixed refusal, or undefined when the image is inside.
+ * `init` and `upgrade` call this when they read `--worker-image` (before anything is deployed); `stackParameters` repeats it as a backstop.
+ */
+export function workerImageProblem(uri: string, scope: Pick<InstallAnswers, "env" | "account" | "region" | "partition">): string | undefined {
+  const suffix = ECR_HOST_SUFFIX[scope.partition ?? "aws"];
+  if (suffix === undefined) throw new Error(`unknown AWS partition ${scope.partition}`);
+  return uri.startsWith(`${scope.account}.dkr.ecr.${scope.region}.${suffix}/${environmentPullThroughPrefix(scope.env)}/`) ? undefined : WORKER_IMAGE_OFF_PREFIX;
+}
+
+function checkedWorkerOverride(uri: string, answers: Pick<InstallAnswers, "env" | "account" | "region" | "partition">): string {
+  checkedImageOverride(uri, "worker");
+  const problem = workerImageProblem(uri, answers);
+  if (problem !== undefined) throw new Error(problem);
+  return uri;
+}
+
 /**
  * The image URI for `which`: the answers' override when given (validated to be a digest
  * reference, used as-is), otherwise the release's public image mapped through the account's
@@ -166,7 +216,7 @@ function checkedImageOverride(uri: string, which: "worker" | "slack"): string {
  */
 function resolvedImage(answers: InstallAnswers, which: "worker" | "slack", outputs: Partial<Record<DeployPart, StackOutputs>>): string {
   const override = answers.images?.[which];
-  if (override !== undefined) return checkedImageOverride(override, which);
+  if (override !== undefined) return which === "worker" ? checkedWorkerOverride(override, answers) : checkedImageOverride(override, which);
   const prefix = required(outputs, "access", "PullThroughPrefix", answers.env);
   return privateImageUri(requiredImage(answers.release, which), imageTarget(answers, prefix));
 }
@@ -279,6 +329,9 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         // Never include the value: it is a secret.
         throw new Error(`the callback signing key must be at least ${MIN_CALLBACK_SIGNING_KEY_LENGTH} characters`);
       }
+      if (answers.github.appId === undefined) {
+        throw new Error("the answers name no GitHub App id (github.appId); an install needs one, and an upgrade keeps the deployed one");
+      }
       const oidc =
         answers.identity.mode === "cognito"
           ? { issuer: required(outputs, "identity", "Issuer", answers.env), audience: required(outputs, "identity", "Audience", answers.env) }
@@ -295,6 +348,9 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         ...(answers.github.credentialRef === undefined ? {} : { GitHubAppCredentialRef: answers.github.credentialRef }),
         // The EC2 session lifecycle (#83) runs in the foundation's network with its key and role.
         ...Object.fromEntries(CONTROL_PLANE_FOUNDATION_PARAMETERS.map((name) => [name, required(outputs, "foundation", name, answers.env)])),
+        // L4-EGR: Rovara's outbound addresses, once the foundation outputs them (named environments only: the legacy foundation never does, and CloudFormation refuses a parameter its template
+        // does not declare). A value that is not a short comma-separated list of addresses is not passed (the template's AllowedPattern would stop the deploy); the parameter keeps its default, empty.
+        ...egressAddressesParameter(outputs.foundation),
         ...(answers.slackAppPostedMessages === undefined ? {} : { SlackAppPostedMessages: answers.slackAppPostedMessages }),
         ...(answers.budget === undefined ? {} : { BudgetMonthlyUsd: String(answers.budget.monthlyUsd), BudgetScope: answers.budget.scope }),
         // F24: only when a stored sign-in choice is actually given; the template's own defaults
@@ -326,6 +382,10 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         SlackRequestQueueUrl: required(outputs, "control-plane", "SlackRequestQueueUrl", answers.env),
         // Spec 062: present once the control plane has the channel API.
         ...optionalOutputs(outputs, "control-plane", ["ChannelRequestQueueUrl", "ChannelEventQueueUrl", "SlackAdapterCommandsUrl", "SlackAdapterSecretName"]),
+        // L2-2 PR 18d: Slack company mode's inputs (the control plane always outputs them, DEC 254zk). The switch itself (SlackCompanyWorkspacesState) is the operator's, set with
+        // agentx config set slack.companyWorkspaces and kept across upgrades (OPERATOR_PARAMETERS), so an upgrade never turns it off behind the control plane's back.
+        SlackCompanyStateTableName: "", SlackCompanyTeamId: "",
+        ...optionalOutputs(outputs, "control-plane", ["SlackCompanyStateTableName", "SlackCompanyTeamId"]),
         SlackThreadsTableName: required(outputs, "control-plane", "SlackThreadsTableName", answers.env),
         TurnRecordsTableName: required(outputs, "control-plane", "TurnRecordsTableName", answers.env),
         ThreadSessionBucketName: required(outputs, "control-plane", "SlackThreadSessionBucketName", answers.env),

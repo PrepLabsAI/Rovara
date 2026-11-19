@@ -1,0 +1,298 @@
+// Port lane L7a: Cloud's GitHub App client (plugins/code-host/github/client.ts) under the GitHub adapters, run over a fake GitHub HTTP server
+// (tests/support/ports/github-fixture-api.ts, never the real GitHub). The same CodeHost and CheckRunner contract suites that the fakes pass run through the real
+// client, so its request choreography and its parsing run for real; the adapter specifics that only the real client can show (what a token is minted with, which
+// branches are read, what a system scope may do) are checked here; and the client conformance suite (tenant binding, least privilege, no redirects) closes the
+// DEFERRED-CHECKS entry written by lane L2.
+import { generateKeyPairSync } from "node:crypto";
+import { describe, expect, it } from "vitest";
+import { githubActionsCheckRunner } from "../../packages/broker/src/plugins/check-runner/github-actions/index.js";
+import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
+import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
+import { githubAppClient } from "../../packages/broker/src/plugins/code-host/github/app-client.js";
+import { missingGitHubProviderMethods } from "../../packages/broker/src/plugins/code-host/github/provider.js";
+import { FakeHostModel } from "@agentx/broker/fakes";
+import { checkRunnerChecks, type CheckRunnerWorld } from "../support/ports/check-runner-conformance.js";
+import { codeHostChecks, type CodeHostWorld } from "../support/ports/code-host-conformance.js";
+import { runContract } from "../support/ports/plugin-contract-kit.js";
+import { githubDelivery, githubPayloads, signGithubBody, webhookSecretReader } from "../support/ports/github-deliveries.js";
+import { githubClientChecks, runGitHubClientConformance, RecordingNetwork, TenantBinding, type GitHubClientWorld } from "../support/ports/github-client-conformance.js";
+import { GITHUB_ORG_SCOPE, GITHUB_OTHER_URL, GITHUB_REPO_URL, GitHubFixtureApi, providerOver } from "../support/ports/github-fixture-api.js";
+
+const GITHUB_NOW = Date.parse("2026-10-30T10:00:00.000Z");
+const WORKING_BRANCH = (n: number) => `agentx/00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+
+function githubModel(): FakeHostModel {
+  return new FakeHostModel({ url: GITHUB_REPO_URL, id: "4242", fullName: "acme/app", webBase: "https://github.com" });
+}
+
+function codeHostWorld(): CodeHostWorld & { api: GitHubFixtureApi } {
+  const model = githubModel();
+  const api = new GitHubFixtureApi(model);
+  const host = githubCodeHost(providerOver(api), { credentialRef: "github", now: () => GITHUB_NOW, webhookSecret: webhookSecretReader() });
+  return {
+    fileEntries: true, host, model, api, repository: { url: GITHUB_REPO_URL }, unregistered: { url: GITHUB_OTHER_URL }, scope: GITHUB_ORG_SCOPE, now: () => GITHUB_NOW, branch: WORKING_BRANCH,
+    signedDelivery: (event) => event.kind === "change_request.opened"
+      ? githubDelivery("pull_request", githubPayloads.pullRequest("opened", Number(event.id)))
+      : githubDelivery("push", githubPayloads.push(`refs/heads/${event.branch}`, event.revision)),
+    forgedDelivery: () => githubDelivery("pull_request", githubPayloads.pullRequest("opened"), { signature: signGithubBody("{}") }),
+    limitReads: (retryAt) => { api.limitReadsFor((retryAt - GITHUB_NOW) / 1_000); },
+  };
+}
+
+function actionsWorld(): CheckRunnerWorld {
+  const model = githubModel();
+  const api = new GitHubFixtureApi(model);
+  const runner = githubActionsCheckRunner(providerOver(api));
+  return {
+    runner, model, repository: { url: GITHUB_REPO_URL }, unregistered: { url: GITHUB_OTHER_URL }, scope: GITHUB_ORG_SCOPE, project: "unit",
+    changeRequest: () => {
+      const revision = model.commit(WORKING_BRANCH(1), { "src/a.ts": "export const a = 1;\n" });
+      const { cr } = model.reconcile({ sourceBranch: WORKING_BRANCH(1), targetBranch: "main", title: "t" });
+      return { ref: { repository: { url: GITHUB_REPO_URL }, id: cr.id, url: model.crUrl(cr.id) }, revision };
+    },
+    finishRun: () => { throw new Error("GitHub Actions runs are not started by Rovara"); },
+  };
+}
+
+runContract("GitHub CodeHost adapter over the real GitHub client passes the CodeHost contract", codeHostChecks, codeHostWorld);
+runContract("GitHub Actions CheckRunner over the real GitHub client passes the CheckRunner contract", checkRunnerChecks, actionsWorld);
+
+describe("the real GitHub client under the adapters", () => {
+  it("has every method the adapters need", () => {
+    expect(missingGitHubProviderMethods(providerOver(new GitHubFixtureApi(githubModel())))).toEqual([]);
+  });
+
+  it("DEC 213: reads one commit's changes over every page with a contents-read token, and says the list is cut when GitHub cut anything", async () => {
+    const world = codeHostWorld();
+    const changes: Record<string, string> = {};
+    for (let index = 0; index < 5; index += 1) changes[`src/f${String(index)}.ts`] = `export const f = ${String(index)};\n`;
+    const commit = world.model.commit("feature/x", changes);
+    // Two files a page: three pages, read in full.
+    world.api.commitReads.pageSize = 2;
+    const whole = await world.host.commitChanges!(world.repository, commit, world.scope);
+    expect(whole.complete).toBe(true);
+    expect(whole.files.map((file) => file.path).sort()).toEqual(Object.keys(changes).sort());
+    expect(whole.files.every((file) => file.patch !== undefined)).toBe(true);
+    expect(whole.parents).toEqual([world.model.headOf("main")]);
+    expect(world.api.requests.filter((request) => request.path.endsWith(`/commits/${commit}`))).toHaveLength(3);
+    expect(world.api.tokens.at(-1)?.permissions).toEqual({ contents: "read" });
+    // One a page: more pages than the read takes.
+    world.api.commitReads.pageSize = 1;
+    expect((await world.host.commitChanges!(world.repository, commit, world.scope)).complete).toBe(false);
+    world.api.commitReads.pageSize = 100;
+    // A changed file without its patch (too large for GitHub to show).
+    world.api.commitReads.withoutPatch = "src/f2.ts";
+    expect((await world.host.commitChanges!(world.repository, commit, world.scope)).complete).toBe(false);
+    delete world.api.commitReads.withoutPatch;
+    // Totals that the listed files do not add up to (GitHub's 3,000-file limit).
+    world.api.commitReads.extraAdditions = 7;
+    expect((await world.host.commitChanges!(world.repository, commit, world.scope)).complete).toBe(false);
+    delete world.api.commitReads.extraAdditions;
+    expect((await world.host.commitChanges!(world.repository, commit, world.scope)).complete).toBe(true);
+    await expect(world.host.commitChanges!(world.repository, "not-a-sha", world.scope)).rejects.toThrow();
+  });
+
+  it("DEC 213 (review of #608): the commit read's own guards: exactly three pages, the answer must be the commit asked for, parents may not change between pages, one budget unit a page", async () => {
+    const world = codeHostWorld();
+    const three = world.model.commit("feature/three", { "src/a.ts": "a\n", "src/b.ts": "b\n", "src/c.ts": "c\n" });
+    const four = world.model.commit("feature/four", { "src/a.ts": "a\n", "src/b.ts": "b\n", "src/c.ts": "c\n", "src/d.ts": "d\n" });
+    world.api.commitReads.pageSize = 1;
+    let pages = 0;
+    const budget = { beforeRequest: () => { pages += 1; } };
+    // Three pages: whole, three requests, three units.
+    expect((await world.host.commitChanges!(world.repository, three, world.scope, budget)).complete).toBe(true);
+    expect(world.api.requests.filter((request) => request.path.endsWith(`/commits/${three}`))).toHaveLength(3);
+    expect(pages).toBe(3);
+    // Four pages: the fourth is never asked for, and the list is cut.
+    pages = 0;
+    expect((await world.host.commitChanges!(world.repository, four, world.scope, budget)).complete).toBe(false);
+    expect(world.api.requests.filter((request) => request.path.endsWith(`/commits/${four}`))).toHaveLength(3);
+    expect(pages).toBe(3);
+    // A pass that is used up before a page: that page is not asked for, and the read stops with the pass's error.
+    const asked = world.api.requests.length;
+    let left = 1;
+    await expect(world.host.commitChanges!(world.repository, three, world.scope, { beforeRequest: () => { if (left === 0) throw new Error("used up"); left -= 1; } })).rejects.toThrow("used up");
+    expect(world.api.requests.slice(asked).filter((request) => request.path.endsWith(`/commits/${three}`))).toHaveLength(1);
+    world.api.commitReads.pageSize = 100;
+    // An answer for another commit.
+    world.api.commitReads.answerSha = four;
+    await expect(world.host.commitChanges!(world.repository, three, world.scope)).rejects.toThrow();
+    delete world.api.commitReads.answerSha;
+    // Parents that change between pages.
+    world.api.commitReads.pageSize = 1;
+    world.api.commitReads.parentsAfterFirstPage = [four];
+    await expect(world.host.commitChanges!(world.repository, three, world.scope)).rejects.toThrow();
+    delete world.api.commitReads.parentsAfterFirstPage;
+    expect((await world.host.commitChanges!(world.repository, three, world.scope)).parents).toEqual([world.model.headOf("main")]);
+  });
+
+  it("L4-LM1c: a commit's read says who GitHub linked as its author and committer, by id, with the account's kind; an unlinked identity says nothing and the web committer is told by its id, never its login", async () => {
+    const world = codeHostWorld();
+    const read = async (identity: Parameters<typeof world.model.commitIdentities.set>[1] | undefined) => {
+      const sha = world.model.commit(`feature/${String(world.model.revisions.size)}`, { [`src/f${String(world.model.revisions.size)}.ts`]: "export const f = 1;\n" });
+      if (identity !== undefined) world.model.commitIdentities.set(sha, identity);
+      return (await world.host.commitChanges!(world.repository, sha, world.scope)).identity;
+    };
+    const rae = { login: "rae", hostUserId: "1001", accountType: "person" as const };
+    expect(await read({ author: rae, committer: rae, webFlow: false })).toEqual({ author: rae, committer: rae, webFlow: false });
+    expect(await read({ author: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" }, committer: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" }, webFlow: false }))
+      .toEqual({ author: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" }, committer: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" }, webFlow: false });
+    expect(await read({ author: { login: "acme-org", hostUserId: "5", accountType: "other" }, webFlow: false })).toEqual({ author: { login: "acme-org", hostUserId: "5", accountType: "other" }, webFlow: false });
+    // An unlinked identity (GitHub gives `null`, as it does for Rovara's own git identity) is no account at all.
+    expect(await read(undefined)).toEqual({ webFlow: false });
+    // The host's web committer, by its id: an edit made on the web pages.
+    expect(await read({ author: rae, committer: rae, webFlow: true })).toEqual({ author: rae, committer: { login: "web-flow", hostUserId: "19864447", accountType: "person" }, webFlow: true });
+    // A malformed author is no account: a record with no login, a login that is not text or is over 200 characters, a non-object; and an id that is not a positive whole number is no id.
+    for (const raw of [{}, "someone", 42, { login: "" }, { login: 7, id: 5, type: "User" }, { login: "x".repeat(201), id: 5, type: "User" }]) {
+      world.api.commitReads.rawAuthor = raw;
+      expect(await read(undefined), JSON.stringify(raw)).toEqual({ webFlow: false });
+    }
+    for (const id of [-5, 0, 1.5, "7"]) {
+      world.api.commitReads.rawAuthor = { login: "rae", id, type: "User" };
+      expect(await read(undefined), String(id)).toEqual({ author: { login: "rae", accountType: "person" }, webFlow: false });
+    }
+    delete world.api.commitReads.rawAuthor;
+    // An account that only CALLS itself web-flow is not the host's web committer.
+    expect((await read({ author: rae, committer: { login: "web-flow", hostUserId: "42", accountType: "person" }, webFlow: false }))?.webFlow).toBe(false);
+  });
+
+  it("DEC 213 (review of #608): a merge's changes against its second parent (GitHub's compare), with a contents-read token, one page, and a cut list said to be cut", async () => {
+    const world = codeHostWorld();
+    const mine = world.model.commit("feature/mine", { "src/mine.ts": "export const mine = 1;\n" });
+    const main = world.model.commit("main", { "docs/main.md": "Main.\n" });
+    const files = new Map(world.model.revision(mine).files);
+    files.set("docs/main.md", "Main.\n");
+    files.set("src/merge.ts", "export const merged = 1;\n");
+    const merge = world.model.makeRevision([mine, main], files).sha;
+    let pages = 0;
+    const read = await world.host.compareChanges!(world.repository, main, merge, world.scope, { beforeRequest: () => { pages += 1; } });
+    expect(read.complete).toBe(true);
+    expect(read.files.map((file) => file.path).sort()).toEqual(["src/merge.ts", "src/mine.ts"]);
+    expect(read.files.every((file) => file.patch !== undefined)).toBe(true);
+    expect(pages).toBe(1);
+    expect(world.api.requests.filter((request) => request.path.includes(`/compare/${main}...${merge}`))).toHaveLength(1);
+    expect(world.api.tokens.at(-1)?.permissions).toEqual({ contents: "read" });
+    // A file without its patch: cut.
+    world.api.compareReads.withoutPatch = "src/merge.ts";
+    expect((await world.host.compareChanges!(world.repository, main, merge, world.scope)).complete).toBe(false);
+    delete world.api.compareReads.withoutPatch;
+    // Another page after a short list (more commits, not files): whole. A base that is not the merge base: refused.
+    world.api.compareReads.nextLink = true;
+    expect((await world.host.compareChanges!(world.repository, main, merge, world.scope)).complete).toBe(true);
+    world.api.compareReads.nextLink = false;
+    world.api.compareReads.mergeBase = mine;
+    await expect(world.host.compareChanges!(world.repository, main, merge, world.scope)).rejects.toThrow();
+    delete world.api.compareReads.mergeBase;
+    // A base the head does not build on: refused.
+    const other = world.model.commit("feature/other", { "src/other.ts": "export const other = 1;\n" });
+    await expect(world.host.compareChanges!(world.repository, other, merge, world.scope)).rejects.toThrow();
+    await expect(world.host.compareChanges!(world.repository, "not-a-sha", merge, world.scope)).rejects.toThrow();
+    // GitHub's 300-file limit on a comparison: a list that long may be cut, and so may a full page with another after it.
+    const many: Record<string, string> = {};
+    for (let index = 0; index < 300; index += 1) many[`gen/f${String(index)}.ts`] = `export const f = ${String(index)};\n`;
+    const big = world.model.commit("feature/big", many);
+    const bigBase = world.model.revision(big).parents[0]!;
+    expect((await world.host.compareChanges!(world.repository, bigBase, big, world.scope)).complete).toBe(false);
+    world.api.compareReads.filesMax = 100;
+    world.api.compareReads.nextLink = true;
+    expect((await world.host.compareChanges!(world.repository, bigBase, big, world.scope)).complete).toBe(false);
+    world.api.compareReads.nextLink = false;
+    world.api.compareReads.filesMax = 300;
+  });
+
+  it("mints a clone credential with read access to contents and a push credential with write, for this repository only", async () => {
+    const world = codeHostWorld();
+    await world.host.issueGitCredential(world.repository, "clone", world.scope);
+    await world.host.issueGitCredential(world.repository, "push", world.scope);
+    const mints = world.api.tokens.filter((token) => token.permissions.contents !== undefined && Object.keys(token.permissions).length === 1);
+    expect(mints.map((mint) => mint.permissions.contents)).toEqual(["read", "write"]);
+    expect(mints.every((mint) => mint.repositories?.join() === "app")).toBe(true);
+  });
+
+  it("only reads Rovara's own working branches", async () => {
+    const world = codeHostWorld();
+    world.model.commit("feature/x", { "x.txt": "x\n" });
+    await expect(world.host.branchHead(world.repository, "feature/x", world.scope)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+  });
+
+  it("refuses to list branches under a system scope (the listing is org-scoped)", async () => {
+    const world = codeHostWorld();
+    await expect(world.host.listBranches(world.repository, 1, { system: "install" })).rejects.toBeDefined();
+  });
+
+  it("hands over the expiry GitHub stated for the token, not one of its own; no stated expiry is refused", async () => {
+    const world = codeHostWorld();
+    const stated = new Date(Date.now() + 50 * 60_000).toISOString();
+    world.api.tokenExpiry = stated;
+    expect(await world.host.issueGitCredential(world.repository, "clone", world.scope)).toMatchObject({ kind: "basic", expiresAt: stated });
+    world.api.tokenExpiry = null;
+    await expect(world.host.issueGitCredential(world.repository, "clone", world.scope)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    world.api.tokenExpiry = "2020-01-01T00:00:00Z";
+    expect(await world.host.issueGitCredential(world.repository, "clone", world.scope)).toMatchObject({ expiresAt: "2020-01-01T00:00:00.000Z" });
+  });
+
+  it("refuses the credential when the client does not serve the reference (an empty answer is never a credential)", async () => {
+    const world = codeHostWorld();
+    const stub = githubCodeHost({ ...providerOver(world.api), resolveWithExpiry: async () => ({}) } as never, { credentialRef: "other" });
+    await expect(stub.issueGitCredential(world.repository, "clone", world.scope)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+  });
+
+  it("is built as the narrow provider by githubAppClient", () => {
+    const client = githubAppClient({ credentialRef: "github", appId: "5002502", getPrivateKey: async () => "unused" });
+    expect(missingGitHubProviderMethods(client)).toEqual([]);
+  });
+});
+
+// ---- the client conformance suite, over a recording wrapper of the fake GitHub
+
+/** The request options as a client that never set a redirect mode would pass them. */
+function withoutRedirectMode(init: RequestInit | undefined): RequestInit | undefined {
+  if (init === undefined) return undefined;
+  const copy = { ...init };
+  delete copy.redirect;
+  return copy;
+}
+
+function conformanceWorld(options: { binding?: boolean; stripRedirectMode?: boolean } = {}): GitHubClientWorld {
+  const model = githubModel();
+  const api = new GitHubFixtureApi(model);
+  const net = new RecordingNetwork(api.fetch);
+  const binding = new TenantBinding();
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const client = new GitHubAppCredentialProvider({
+    credentialRef: "github", appId: "5002502", getPrivateKey: async () => privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    fetchImplementation: options.stripRedirectMode === true ? ((input, init) => net.fetch(input, withoutRedirectMode(init))) : net.fetch,
+    now: () => GITHUB_NOW, ...(options.binding === false ? {} : { requireInstallationBound: binding.hook }),
+  });
+  return {
+    client, net, binding, repositoryUrl: GITHUB_REPO_URL, strangerUrl: GITHUB_OTHER_URL, credentialRef: "github", scope: GITHUB_ORG_SCOPE, otherScope: { orgId: "org_bbbbbbbbbbbbbbbbbbbb" },
+    installationId: 77, repositoryId: 4242,
+    async prepare() {
+      const headSha = model.commit(WORKING_BRANCH(1), { "src/a.ts": "export const a = 1;\n", "src/big.txt": "x".repeat(4_000) });
+      model.setAccount("priya", "write");
+      const { cr } = model.reconcile({ sourceBranch: WORKING_BRANCH(1), targetBranch: "main", title: "Add a", draft: true });
+      const comment = model.addReviewComment(cr.id, "priya", "Please rename this.", "src/a.ts", 1);
+      let fresh = 100;
+      return {
+        number: Number(cr.id), headSha, commentId: comment.id, largeFile: "src/big.txt",
+        freshBranch: () => { fresh += 1; const branch = `agentx/00000000-0000-4000-8000-${String(fresh).padStart(12, "0")}`; model.commit(branch, { [`src/${String(fresh)}.ts`]: "export const b = 1;\n" }); return branch; },
+      };
+    },
+  };
+}
+
+runGitHubClientConformance("the Cloud GitHub client passes the GitHub client conformance suite", conformanceWorld, { describe, it });
+
+describe("the client conformance suite can fail", () => {
+  const find = (prefix: string) => githubClientChecks.find((check) => check.name.startsWith(prefix))!;
+
+  it("catches a client that never asks the tenant binding", async () => {
+    await expect(find("tenant: every call").run(conformanceWorld({ binding: false }))).rejects.toThrow();
+    await expect(find("tenant: a refused binding").run(conformanceWorld({ binding: false }))).rejects.toThrow();
+  });
+
+  it("catches a client whose requests would follow a redirect", async () => {
+    await expect(find("network: every request refuses redirects").run(conformanceWorld({ stripRedirectMode: true }))).rejects.toThrow();
+    await expect(find("network: a redirect answer is never followed to another host").run(conformanceWorld({ stripRedirectMode: true }))).rejects.toThrow();
+  });
+});

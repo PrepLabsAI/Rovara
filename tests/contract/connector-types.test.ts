@@ -201,11 +201,11 @@ describe("connector resolution", () => {
   it("has a built-in entry for every type ConnectorConfigSchema accepts, so none is silently dropped", () => {
     const schemaTypes = ConnectorConfigSchema.options.map((option) => option.shape.type.value as string);
     expect(schemaTypes).toEqual(["github", "linear", "jira", "asana", "mcp", "sentry", "datadog", "cloudwatch", "github-actions", "grafana", "vercel", "pagerduty"]);
-    // The contracts (lane L1) now accept the seven monitoring types Cloud added; this broker registers none of them yet (they come with the connections lane, L12),
-    // which takes each off this list as it registers it: the test fails if a type is registered and still listed, or is neither.
-    const notBuiltYet: string[] = ["sentry", "datadog", "cloudwatch", "github-actions", "grafana", "vercel", "pagerduty"];
+    // Every type the contracts accept is registered unless it is named below: the test fails if one is missing or listed and registered, so none is silently dropped.
+    // CloudWatch is an AWS service and GitHub Actions mints a GitHub App's installation tokens: neither is part of Code, so a project that names one is told the connector is not available here.
+    const notBuilt: string[] = ["cloudwatch", "github-actions"];
     for (const type of schemaTypes) {
-      expect(Object.hasOwn(BUILT_IN_CONNECTOR_TYPES, type), type).toBe(!notBuiltYet.includes(type));
+      expect(Object.hasOwn(BUILT_IN_CONNECTOR_TYPES, type), type).toBe(!notBuilt.includes(type));
     }
   });
 

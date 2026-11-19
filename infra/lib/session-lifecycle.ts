@@ -20,10 +20,11 @@ import {
   aws_stepfunctions as sfn,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
-import { WORKER_SETTING_PARAMETERS } from "@agentx/contracts";
+import { MACHINE_LAUNCH_AMI_PARAMETERS, MACHINE_LAUNCH_INSTANCE_TYPES, WORKER_SETTING_PARAMETERS } from "@agentx/contracts";
 import { packagedFunction } from "./control-plane.js";
 import { EC2_WORKER_AMI_PARAMETER } from "./ec2-workers.js";
 import type { AgentXNaming } from "./naming.js";
+import { addBrokerName } from "./broker-names.js";
 import { deleterDefinition, provisionerDefinition } from "./session-state-machines.js";
 
 export interface SessionLifecycleProps {
@@ -128,7 +129,11 @@ export class SessionLifecycle extends Construct {
         sid: "LaunchFromTemplate",
         actions: ["ec2:RunInstances"],
         resources: [ec2Arn("instance/*")],
-        conditions: { ArnEquals: { "ec2:LaunchTemplate": ec2Arn(`launch-template/${launchTemplateId.valueAsString}`) } },
+        // DEC 254zb: a worker launches only as one of the machine size rows' types (the template's own m6g.large among them), whatever the input says.
+        conditions: {
+          ArnEquals: { "ec2:LaunchTemplate": ec2Arn(`launch-template/${launchTemplateId.valueAsString}`) },
+          StringEquals: { "ec2:InstanceType": [...MACHINE_LAUNCH_INSTANCE_TYPES] },
+        },
       }),
       new iam.PolicyStatement({
         sid: "LaunchResources",
@@ -142,7 +147,8 @@ export class SessionLifecycle extends Construct {
       new iam.PolicyStatement({
         sid: "ResolveWorkerAmi",
         actions: ["ssm:GetParameters", "ssm:GetParameter"],
-        resources: [`arn:${Aws.PARTITION}:ssm:${Aws.REGION}::parameter${EC2_WORKER_AMI_PARAMETER}`],
+        // The x86 public AMI parameter: an x86 machine size boots `resolve:ssm:` of it, which EC2 resolves with the caller's permission.
+        resources: [EC2_WORKER_AMI_PARAMETER, MACHINE_LAUNCH_AMI_PARAMETERS.x86_64].map((name) => `arn:${Aws.PARTITION}:ssm:${Aws.REGION}::parameter${name}`),
       }),
       new iam.PolicyStatement({
         sid: "ReadQualifiedWorkerAmi",
@@ -333,10 +339,10 @@ export class SessionLifecycle extends Construct {
    * callbacks with the callback signing key, as the broker does. It reads the thread's activeTurn by
    * key (THREAD# items only) and posts the thread's note with the bot token (the Slack secret alone).
    */
-  connectUnwaitedTaskBackstop(slackThreads: dynamodb.Table, slackSecret: secretsmanager.Secret, callbackSigningKey: string): void {
+  connectUnwaitedTaskBackstop(slackThreads: dynamodb.Table, slackSecret: secretsmanager.Secret, callbackSigningKeySecretName: string): void {
     this.reconciler.addEnvironment("SLACK_THREADS_TABLE_NAME", slackThreads.tableName);
     this.reconciler.addEnvironment("SLACK_SECRET_ARN", slackSecret.secretArn);
-    this.reconciler.addEnvironment("CALLBACK_SIGNING_KEY", callbackSigningKey);
+    this.reconciler.addEnvironment("CALLBACK_SIGNING_KEY_SECRET_ID", callbackSigningKeySecretName);
     this.reconciler.addToRolePolicy(new iam.PolicyStatement({
       sid: "ReadThreadWaiters",
       actions: ["dynamodb:GetItem"],
@@ -372,8 +378,11 @@ export class SessionLifecycle extends Construct {
 
   /** The broker starts the deleter when an ec2-ebs workspace closes (#84). */
   connectBroker(broker: lambda.Function): void {
-    this.connectExecutions(broker);
-    this.deleter.grantStartExecution(broker);
+    // ENV-ROOM (broker-names.ts): a named environment's broker gets the two state machines' names packed; the legacy template passes the ARNs whole, as before.
+    addBrokerName(broker, this.naming, "provisionerStateMachine", this.provisioner.stateMachineName, this.provisioner.stateMachineArn);
+    addBrokerName(broker, this.naming, "deleterStateMachine", this.deleter.stateMachineName, this.deleter.stateMachineArn);
+    // Named: the control plane grants this with the broker's other StartExecution, in one statement (control-plane.ts, ENV-ROOM 2's IAM room). Legacy: as before.
+    if (this.naming.env === undefined) this.deleter.grantStartExecution(broker);
   }
 
   private connectExecutions(fn: lambda.Function): void {

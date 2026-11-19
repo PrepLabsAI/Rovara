@@ -7,7 +7,7 @@ import { INTENT_NOT_WAITING_MESSAGE } from "./errors.js";
 import { designReviewActive, designReviewAwaitsDesign, rearmedDesignReview, workflowIsDesignReviewing } from "./design-review-state.js";
 import { redactText } from "./redaction.js";
 import type { WorkflowFeedbackShownSchema, WorkflowAcceptedFindingSchema, WorkflowFeedbackBundleRefSchema, WorkflowFeedbackReviewRefSchema, WorkflowFeedbackApprovalBindingSchema, WorkflowFeedbackThreadObservationSchema, WorkflowStageSchema, WorkflowStateSchema, WorkflowProgramSchema, WorkflowCheckPolicySchema, WorkflowPathSchema, WorkflowReviewPhaseSchema, WorkflowCanvasLineageSchema, WorkflowCanvasCloseoutSchema, WorkflowCanvasCloseoutAttemptSchema, WORKFLOW_PULL_REQUEST_UPDATE_CAUSES, WorkflowReviewBaseSchema} from "./task-workflow.js";
-import { WORKFLOW_AGENTX_ACTOR_ID, WORKFLOW_AUTO_ACTION_LIMIT, WORKFLOW_AUTO_RETRY_LIMIT, WORKFLOW_AUTO_SEND_BACK_LIMIT, type WORKFLOW_AUTO_STAGES, WorkflowDecisionRecordSchema } from "./task-workflow.js";
+import { BASE_MERGED_RETRIES_PER_DAY, BASE_MERGED_RETRY_REASON, WORKFLOW_AGENTX_ACTOR_ID, WORKFLOW_AUTO_ACTION_LIMIT, WORKFLOW_AUTO_RETRY_LIMIT, WORKFLOW_AUTO_SEND_BACK_LIMIT, type WORKFLOW_AUTO_STAGES, WorkflowDecisionRecordSchema } from "./task-workflow.js";
 import { FEEDBACK_SHOWN_MAX_ROUNDS, FEEDBACK_SHOWN_MAX_IDS, WORKFLOW_METADATA_BUDGET_BYTES, workflowMetadataBytes, openSecondReviewFindings, ActorIdSchema, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, isStepNotRunReason, CandidateRepositorySchema, CandidateManifestSchema, VerificationResultsSchema, WorkflowPullRequestSchema, FeedbackCommentRefSchema, WorkflowFeedbackBundleMetadataSchema, FeedbackIdSchema, WorkflowFeedbackFindingRefSchema, WorkflowFeedbackReviewMetadataSchema, WorkflowFeedbackNoteSchema, WorkflowFeedbackDecisionSchema, WorkflowArtifactSchema, WorkflowDecisionSchema, WorkflowCheckProposalSchema, WorkflowCheckSchema, WORKFLOW_PROPOSED_CHECKS_MAX, type WorkflowCheck, type WorkflowCheckPolicy, WorkflowSnapshotShapeSchema, WorkflowAnswerSchema, WORKFLOW_DECISION_ANSWERS_MAX, WORKFLOW_DECISION_COMMENTS_MAX, workflowIsReviewOnly, WORKFLOW_BLOCK_REASONS, WorkflowReviewReportSchema, reviewCleared, PROGRAM_ROUNDS_MAX, WorkflowPullRequestUpdateFailureSchema, WorkflowFeedbackReviewSchema, ReviewedWorkflowFeedbackSchema, findingBlocks, findingAccepted, blockingFindings, workflowFindingFingerprint, WORKFLOW_ACCEPTED_FINDINGS_MAX , type WorkflowDefinitionVersion } from "./task-workflow.js";
 import { isRunLimitBlockReason } from "./run-estimate.js";
 import { createHash } from "node:crypto";
@@ -778,7 +778,7 @@ function validatedCandidate(input: unknown): CandidateManifest {
 
 export function recordWorkflowVerification(
   currentInput: unknown,
-  input: { candidate: CandidateManifest; checks: WorkflowVerificationResults; now: string; e2eQualification?: unknown },
+  input: { candidate: CandidateManifest; checks: WorkflowVerificationResults; now: string; e2eQualification?: unknown; flakyOnChange?: { count: number; ids: readonly string[] } | undefined },
 ): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
   if (current.stage !== "VERIFY" || (current.state !== "BLOCKED" && current.state !== "WAITING")) {
@@ -813,9 +813,10 @@ export function recordWorkflowVerification(
   // Every failed check could not run: coding again would not help, so the owner is told that, not "checks failed".
   const allBroken = failedResults.length > 0 && failedResults.every(workflowCheckResultBroken);
   const candidateChanged = current.candidate?.digest !== candidate.digest;
-  const { blockReason: _priorBlockReason, regressedChecks: _priorRegressions, ...withoutBlockReason } = current;
+  const { blockReason: _priorBlockReason, regressedChecks: _priorRegressions, flakyOnChange: _priorFlaky, ...withoutBlockReason } = current;
   void _priorBlockReason;
   void _priorRegressions;
+  void _priorFlaky;
   const { qualifiedRound: _priorQualifiedRound, ...unqualifiedE2E } = current.e2e ?? {};
   void _priorQualifiedRound;
   // A program places the workflow: on its check step (or the build's own step) while the checks stand, and past that
@@ -836,12 +837,24 @@ export function recordWorkflowVerification(
     candidate,
     ...(reviewBase === undefined ? {} : { reviewBase }),
     verification: checks.data,
+    // TE-C6: the fact only goes with a verification that passed (it is why a check counted as passed), and it names the code it is for.
+    ...(!passed || input.flakyOnChange === undefined || input.flakyOnChange.count < 1 ? {} : { flakyOnChange: { candidateDigest: candidate.digest, count: input.flakyOnChange.count, ids: [...input.flakyOnChange.ids] } }),
     ...(current.e2e === undefined ? {} : { e2e: { ...unqualifiedE2E, ...(e2eRequired && passed && e2eQualified && e2eQualification !== undefined ? { qualifiedRound: e2eQualification } : {}) } }),
     // A new candidate invalidates every prior review report.
     reviews: candidateChanged ? [] : current.reviews ?? [],
     updatedAt: input.now,
     ...placed,
   });
+}
+
+/**
+ * TE-C6 -> B5: the tests the workflow's current code has as flaky on the change (they failed once and passed on the rerun, and the base was not already flaky on them), as `ProofHoldFacts.flakyOnChange` takes them.
+ * Undefined when there are none or the fact is for other code. B5's host adds this one call to its `ProofHoldSource.facts`: `flakyOnChange: flakyOnChangeHoldInput(task.workflow)`.
+ */
+export function flakyOnChangeHoldInput(workflow: { candidate?: { digest: string } | undefined; flakyOnChange?: { candidateDigest: string; ids: readonly string[] } | undefined } | undefined): string[] | undefined {
+  const fact = workflow?.flakyOnChange;
+  if (workflow === undefined || fact === undefined || workflow.candidate === undefined || fact.candidateDigest !== workflow.candidate.digest || fact.ids.length === 0) return undefined;
+  return [...fact.ids];
 }
 
 /**
@@ -982,7 +995,8 @@ export function observeWorkflowPullRequest(currentInput: unknown, observationInp
     number: z.number().int().positive(),
     candidateDigest: DigestSchema,
     state: z.enum(["OPEN", "CLOSED", "MERGED", "UNKNOWN"]),
-    source: z.literal("GITHUB_API"),
+    /** Where the observation came from: `GITHUB_API` (Cloud's webhook path) or `CODE_HOST` (any code host's adapter, polled). */
+    source: z.enum(["GITHUB_API", "CODE_HOST"]),
     observedAt: z.string().datetime(),
   }).strict().safeParse(observationInput);
   // A merge is tracked from the first pull request on, in every stage after it opened (an approved fix being coded,
@@ -1109,6 +1123,26 @@ export function startWorkflowPullRequestUpdate(currentInput: unknown, now: strin
     throw new WorkflowTransitionError("workflow has no reviewed fix to push to its pull requests");
   }
   return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, state: "RUNNING", updatedAt: now });
+}
+
+/**
+ * Every open pull request already holds the current candidate (its digest and, per repository, its tree): a merge of the base that was checked and reviewed again (decision 67b), or a fix whose push
+ * landed before its result. There is nothing to push, so the task waits for the merge, its fix round finished and any publication block lifted. Allowed where a publication step stands: PULL_REQUEST/READY,
+ * or the owner's Retry at a publication block. Refused when a merge of the base is marked, when no pull request is open, or when any open one holds other code.
+ */
+export function holdWorkflowCandidateOnPullRequests(currentInput: unknown, now: string): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  const candidate = current.candidate;
+  const open = (current.pullRequests ?? []).filter((pullRequest) => pullRequest.state === "OPEN" || pullRequest.state === "UNKNOWN");
+  if (candidate === undefined || !workflowPublicationRetryable(current) || current.branchSync !== undefined || open.length === 0
+    || !open.every((pullRequest) => pullRequest.candidateDigest === candidate.digest
+      && pullRequest.headTreeSha !== undefined && pullRequest.headTreeSha === candidate.repositories.find((repository) => repository.repositoryId === pullRequest.repositoryId)?.treeSha)) {
+    throw new WorkflowTransitionError("the pull requests do not all hold the workflow's candidate");
+  }
+  const { blockReason: _blockReason, pullRequestUpdateFailure: _failure, ...unblocked } = current;
+  void _blockReason;
+  void _failure;
+  return WorkflowSnapshotSchema.parse({ ...withoutFix(unblocked), revision: current.revision + 1, stage: "WAIT_FOR_MERGE", state: "WAITING", updatedAt: now });
 }
 
 /**
@@ -1463,7 +1497,8 @@ export function recordWorkflowSyncConflict(currentInput: unknown, input: { paths
 /**
  * The base branch is merged into a pull request's branch and the merge is on GitHub. The pull request holds the merge, and the candidate is the same change on the new base: its repository entry has the
  * merge commit, its tree and the new base commit, so the next review and the next fix see only Rovara's change (Finding 8). Everything bound to the old candidate's digest (checks, reviews, accepted
- * findings, risk, the pull requests that held it) is kept for the new one: a merge of the base changes none of what they judged. Two ways to get here:
+ * findings, risk, the pull requests that held it) is renamed to the new one here; the caller that makes a merge of the base a NEW CANDIDATE (decision 67b) drops the checks, reviews and accepted findings again, so
+ * a merge is checked and reviewed before the task waits for it. Two ways to get here:
  * - a clean merge, which the worker pushed (WAIT_FOR_MERGE/RUNNING with the merge marked): `previousHeadSha` is the head before it, and the pull request's `syncedFrom` names the head before the run of
  *   clean merges, so a person's approval of that head can carry (the rule is Task 19's). The reviewed tree is the merge's;
  * - a conflict round's fix, which was pushed as a merge commit and recorded as any fix (`recordWorkflowPullRequestUpdate`): the pull request already holds the head. It was code Rovara wrote, so
@@ -1830,6 +1865,16 @@ export function startWorkflowUnderstand(currentInput: unknown, now: string): Wor
 export function startWorkflowPlanAfterUnderstand(currentInput: unknown, now: string): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
   if (current.definitionVersion !== "1.1.0" || current.stage !== "PLAN" || current.state !== "READY") throw new WorkflowTransitionError("the workflow is not ready to plan");
+  return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, state: "RUNNING", updatedAt: now });
+}
+
+/**
+ * A version 1.0.0 task (Understand off: the start named the path and the request went straight to planning): the plan step runs again after the owner asked for changes, PLAN/READY becomes RUNNING.
+ * There is no assessment to plan from; the planner is given the request and the owner's words instead.
+ */
+export function startWorkflowPlanWithoutUnderstand(currentInput: unknown, now: string): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  if (current.definitionVersion !== "1.0.0" || current.stage !== "PLAN" || current.state !== "READY") throw new WorkflowTransitionError("the workflow is not ready to plan");
   return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, state: "RUNNING", updatedAt: now });
 }
 
@@ -2201,6 +2246,9 @@ export function workflowSendBackOffered(workflow: {
   if (workflow.stage === "VERIFY") {
     // Review only: a rerun of the agent's own tests regressed, and no result was recorded for it.
     if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.regressionFound) return true;
+    // The base branch was merged into the pull request and the merged code needs its checks again: a coding run on the workspace that holds the merge may leave the code as it is, and exports it so the checks (a
+    // required E2E round included) can run on it. It is the way on where Retry checks cannot.
+    if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.baseMergedRecheck) return true;
     // Blocks that only an administrator qualifying the runtime, or approving the plan again, can fix: new code cannot, even for a task with no checks.
     if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX) === true
       || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX) === true || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX) === true) return false;
@@ -2308,13 +2356,22 @@ export interface WorkflowAutoFixCounts {
   retriesFor: (stage: (typeof WORKFLOW_AUTO_STAGES)[number], candidateDigest: string | undefined) => number;
 }
 
+/** Whether a decision is an automatic re-run after a merge of the base (decision 70(c)): a retry with exactly that reason. It has its own daily allowance and does not use the task's lifetime automatic actions. */
+export const isBaseMergedRetry = (decision: WorkflowDecision): boolean => decision.source === "AUTO_RETRY" && decision.reason === BASE_MERGED_RETRY_REASON;
+
+/** How many automatic re-runs after a merge of the base the decisions hold that were made in the 24 hours before `nowMs`. */
+export function baseMergedRetriesToday(decisions: readonly WorkflowDecision[], nowMs: number): number {
+  return decisions.filter((decision) => isBaseMergedRetry(decision) && nowMs - Date.parse(decision.at) < 24 * 3_600_000).length;
+}
+
 export function workflowAutoFixCounts(decisions: readonly WorkflowDecision[]): WorkflowAutoFixCounts {
   let lastApproval = -1;
   decisions.forEach((decision, index) => { if (decision.decision === "APPROVE" && (decision.source ?? "GATE") === "GATE") lastApproval = index; });
   const automatic = decisions.map((decision, index) => ({ decision, index })).filter(({ decision }) => decision.source === "AUTO_FIX" || decision.source === "AUTO_RETRY");
   return {
     sendBacksSincePlanApproval: automatic.filter(({ decision, index }) => decision.source === "AUTO_FIX" && index > lastApproval).length,
-    actions: automatic.length,
+    // A re-run after a merge of the base has its own daily allowance: it is not one of the task's lifetime automatic actions.
+    actions: automatic.filter(({ decision }) => !isBaseMergedRetry(decision)).length,
     retriesFor: (stage, candidateDigest) => automatic.filter(({ decision }) => decision.source === "AUTO_RETRY" && decision.auto?.stage === stage
       && decision.auto.candidateDigest === candidateDigest).length,
   };
@@ -2392,7 +2449,10 @@ export function workflowAutomaticRetryDecision(
   if (current.decisions.length >= 100) throw new WorkflowTransitionError("workflow decision history is full");
   const counts = workflowAutoFixCounts(current.decisions);
   if (counts.retriesFor(input.stage, current.candidate?.digest) >= WORKFLOW_AUTO_RETRY_LIMIT) throw new WorkflowTransitionError("this stage was already retried automatically for this code");
-  if (counts.actions >= WORKFLOW_AUTO_ACTION_LIMIT) throw new WorkflowTransitionError("the automatic action limit for this task is reached");
+  const baseMerged = input.reason === BASE_MERGED_RETRY_REASON;
+  if (baseMerged ? baseMergedRetriesToday(current.decisions, Date.parse(input.now)) >= BASE_MERGED_RETRIES_PER_DAY : counts.actions >= WORKFLOW_AUTO_ACTION_LIMIT) {
+    throw new WorkflowTransitionError(baseMerged ? "the automatic re-runs after a merge of the base for this task are used up for today" : "the automatic action limit for this task is reached");
+  }
   if (workflowAutoSpendRefusal(input.spend) !== undefined) throw new WorkflowTransitionError("the whole-task spend is unknown or over the automatic fixing cap");
   return WorkflowDecisionRecordSchema.parse({
     requestId, workflowRevision: current.revision, decision: "REQUEST_CHANGES", actorId: WORKFLOW_AGENTX_ACTOR_ID, actorRole: "AGENTX",
@@ -2495,6 +2555,22 @@ export interface WorkflowSendBackProblem { source: "code review" | "security rev
 export function workflowFindingProblem(role: "CRITIC" | "SECURITY", finding: { text: string; file?: string | undefined; line?: number | undefined }): WorkflowSendBackProblem {
   const where = finding.file === undefined ? "" : ` (${finding.file}${finding.line === undefined ? "" : `:${finding.line}`})`;
   return { source: REVIEW_ROLE_NAMES[role], text: `${finding.text}${where}` };
+}
+
+/** How many of the owner's plan-review instructions a coding run is given (the newest). */
+export const OWNER_PLAN_INSTRUCTIONS_MAX = 5;
+/** The longest one of them, in characters. */
+export const OWNER_PLAN_INSTRUCTION_MAX_CHARS = 500;
+
+/**
+ * The owner's own instructions from plan review: the reasons of their Request changes decisions at the plan gate, the newest few, each cut to 500 characters. Only those: not the
+ * owner's page comments, thread replies, check or review output, Rovara's own decisions (actor AGENTX) or a decision made another way than the gate (a send-back, a feedback decision).
+ * The coding prompt repeats them as the owner's words, and the worker keeps them through conversation compaction (the `workflowApprovedPlan` field), so what counts as one is decided here, once.
+ */
+export function ownerPlanInstructions(workflow: Pick<WorkflowSnapshot, "decisions">): string[] {
+  return workflow.decisions
+    .filter((decision) => decision.decision === "REQUEST_CHANGES" && decision.actorRole !== "AGENTX" && (decision.source === undefined || decision.source === "GATE"))
+    .slice(-OWNER_PLAN_INSTRUCTIONS_MAX).map((decision) => decision.reason.slice(0, OWNER_PLAN_INSTRUCTION_MAX_CHARS));
 }
 
 /**
@@ -2875,4 +2951,4 @@ export function decideWorkflow(
 
 export { workflowCheckCommandText } from "./workflow-check-input.js";
 
-export { WORKFLOW_NOT_RUN_PREFIX, isStepNotRunReason, openSecondReviewFindings, secondReviewBlockFinding, WORKFLOW_SECOND_REVIEW_LINE_MAX, WorkflowSecondReviewBlockSchema, type WorkflowSecondReviewBlock, ActorIdSchema, WORKFLOW_PLAN_MAX_BYTES, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_REGRESSED_CHECKS_MAX, WORKFLOW_REGRESSED_CHECK_MAX, CandidateRepositorySchema, CandidateManifestSchema, VerificationResultsSchema, WorkflowVerificationRetrySchema, WorkflowReviewFindingSchema, type WorkflowReviewFinding, WORKFLOW_REVIEW_FAILURE_REASONS, WORKFLOW_REVIEW_MODEL_FAILURE_PATTERN, WorkflowReviewReportSchema, type WorkflowReviewReport, findingBlocks, workflowFindingFingerprint, WorkflowAcceptedFindingSchema, WORKFLOW_ACCEPTED_FINDINGS_MAX, type AcceptedFindingRef, findingAccepted, blockingFindings, reviewCleared, WorkflowPullRequestSchema, FeedbackIdSchema, FeedbackObjectKeySchema, FeedbackCommentRefSchema, WorkflowFeedbackBundleMetadataSchema, WorkflowFeedbackBundleRefSchema, WorkflowFeedbackPrioritySchema, WorkflowFeedbackAssessmentSchema, WorkflowFeedbackFindingRefSchema, WorkflowFeedbackCandidateBindingSchema, WorkflowFeedbackReviewMetadataSchema, WorkflowFeedbackReviewRefSchema, WorkflowFeedbackNoteSchema, WorkflowFeedbackDecisionSchema, WorkflowFeedbackApprovalBindingSchema, ReviewedWorkflowFeedbackSchema, WorkflowFeedbackThreadObservationSchema, FeedbackThreadObservationsSchema, WorkflowFeedbackReviewSchema, WorkflowFeedbackShownSchema, FEEDBACK_SHOWN_MAX_ROUNDS, FEEDBACK_SHOWN_MAX_IDS, WorkflowStageSchema, WorkflowStateSchema, WorkflowProgramStepSchema, WorkflowProgramSchema, WorkflowObjectKeySchema, WorkflowArtifactSchema, WORKFLOW_DECISION_ANSWERS_MAX, WORKFLOW_DECISION_COMMENTS_MAX, PlanDecisionIdSchema, PlanOptionIdSchema, WorkflowAnswerSchema, WorkflowDecisionSchema, WorkflowDecisionRecordSchema, WORKFLOW_AGENTX_ACTOR_ID, WORKFLOW_AUTO_STAGES, WORKFLOW_AUTO_SEND_BACK_LIMIT, WORKFLOW_AUTO_RETRY_LIMIT, WORKFLOW_AUTO_ACTION_LIMIT, WorkflowAutoActionSchema, WorkflowCheckSchema, type WorkflowCheck, WORKFLOW_PROPOSED_CHECKS_MAX, WorkflowCheckProposalSchema, WorkflowCheckPolicySchema, type WorkflowCheckPolicy, workflowSelectedChecks, workflowIsReviewOnly, WorkflowPathSchema, WorkflowReviewPhaseSchema, WorkflowCanvasLineageSchema, WorkflowCanvasCloseoutSchema, WorkflowCanvasCloseoutAttemptSchema, WorkflowReviewBaseSchema, PROGRAM_ROUNDS_MAX, WORKFLOW_PULL_REQUEST_UPDATE_CAUSES, WORKFLOW_FIX_DROPS_BASE_CHANGES, WorkflowPullRequestUpdateFailureSchema, WorkflowSnapshotShapeSchema, WorkflowSnapshotViewSchema } from "./task-workflow.js";
+export { BASE_MERGED_RETRIES_PER_DAY, BASE_MERGED_RETRY_REASON, BASE_MERGED_RECHECKING_MILESTONE, BASE_MERGED_NEEDS_YOU_MILESTONE, WORKFLOW_NOT_RUN_PREFIX, isStepNotRunReason, openSecondReviewFindings, secondReviewBlockFinding, WORKFLOW_SECOND_REVIEW_LINE_MAX, WorkflowSecondReviewBlockSchema, type WorkflowSecondReviewBlock, ActorIdSchema, WORKFLOW_PLAN_MAX_BYTES, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_REGRESSED_CHECKS_MAX, WORKFLOW_REGRESSED_CHECK_MAX, CandidateRepositorySchema, CandidateManifestSchema, VerificationResultsSchema, WorkflowVerificationRetrySchema, WorkflowReviewFindingSchema, type WorkflowReviewFinding, WORKFLOW_REVIEW_FAILURE_REASONS, WORKFLOW_REVIEW_MODEL_FAILURE_PATTERN, WorkflowReviewReportSchema, type WorkflowReviewReport, findingBlocks, workflowFindingFingerprint, WorkflowAcceptedFindingSchema, WORKFLOW_ACCEPTED_FINDINGS_MAX, type AcceptedFindingRef, findingAccepted, blockingFindings, reviewCleared, WorkflowPullRequestSchema, FeedbackIdSchema, FeedbackObjectKeySchema, FeedbackCommentRefSchema, WorkflowFeedbackBundleMetadataSchema, WorkflowFeedbackBundleRefSchema, WorkflowFeedbackPrioritySchema, WorkflowFeedbackAssessmentSchema, WorkflowFeedbackFindingRefSchema, WorkflowFeedbackCandidateBindingSchema, WorkflowFeedbackReviewMetadataSchema, WorkflowFeedbackReviewRefSchema, WorkflowFeedbackNoteSchema, WorkflowFeedbackDecisionSchema, WorkflowFeedbackApprovalBindingSchema, ReviewedWorkflowFeedbackSchema, WorkflowFeedbackThreadObservationSchema, FeedbackThreadObservationsSchema, WorkflowFeedbackReviewSchema, WorkflowFeedbackShownSchema, FEEDBACK_SHOWN_MAX_ROUNDS, FEEDBACK_SHOWN_MAX_IDS, WorkflowStageSchema, WorkflowStateSchema, WorkflowProgramStepSchema, WorkflowProgramSchema, WorkflowObjectKeySchema, WorkflowArtifactSchema, WORKFLOW_DECISION_ANSWERS_MAX, WORKFLOW_DECISION_COMMENTS_MAX, PlanDecisionIdSchema, PlanOptionIdSchema, WorkflowAnswerSchema, WorkflowDecisionSchema, WorkflowDecisionRecordSchema, WORKFLOW_AGENTX_ACTOR_ID, WORKFLOW_AUTO_STAGES, WORKFLOW_AUTO_SEND_BACK_LIMIT, WORKFLOW_AUTO_RETRY_LIMIT, WORKFLOW_AUTO_ACTION_LIMIT, WorkflowAutoActionSchema, WorkflowCheckSchema, type WorkflowCheck, WORKFLOW_PROPOSED_CHECKS_MAX, WorkflowCheckProposalSchema, WorkflowCheckPolicySchema, type WorkflowCheckPolicy, workflowSelectedChecks, workflowIsReviewOnly, WorkflowPathSchema, WorkflowReviewPhaseSchema, WorkflowCanvasLineageSchema, WorkflowCanvasCloseoutSchema, WorkflowCanvasCloseoutAttemptSchema, WorkflowReviewBaseSchema, PROGRAM_ROUNDS_MAX, WORKFLOW_PULL_REQUEST_UPDATE_CAUSES, WORKFLOW_FIX_DROPS_BASE_CHANGES, WorkflowPullRequestUpdateFailureSchema, WorkflowSnapshotShapeSchema, WorkflowSnapshotViewSchema } from "./task-workflow.js";

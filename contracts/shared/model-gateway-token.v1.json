@@ -1,0 +1,128 @@
+{
+  "constants": {
+    "typ": "rovara-task+jwt",
+    "aud": "rovara-model-gateway",
+    "alg": "RS256",
+    "lifetime": 900,
+    "keyPurpose": "task",
+    "keyPurposeMember": "rovara_purpose"
+  },
+  "claims": [
+    {
+      "name": "iss",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "aud",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "jti",
+      "type": "UUID",
+      "required": true
+    },
+    {
+      "name": "iat",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "name": "nbf",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "name": "exp",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "name": "cid",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "pid",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "per",
+      "type": "string",
+      "required": false
+    },
+    {
+      "name": "pay",
+      "type": "Payer",
+      "required": true
+    },
+    {
+      "name": "tid",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "ws",
+      "type": "UUID",
+      "required": true
+    },
+    {
+      "name": "op",
+      "type": "UUID",
+      "required": true
+    },
+    {
+      "name": "stp",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "src",
+      "type": "WorkOrigin",
+      "required": false
+    },
+    {
+      "name": "mdl",
+      "type": "string[]",
+      "required": true
+    },
+    {
+      "name": "reviewer",
+      "type": "ReviewerGrant",
+      "required": false
+    }
+  ],
+  "testVector": {
+    "header": {
+      "alg": "RS256",
+      "typ": "rovara-task+jwt",
+      "kid": "runtime-generated"
+    },
+    "claims": {
+      "iss": "https://install-a.example/v1/auth",
+      "aud": "rovara-model-gateway",
+      "jti": "00000000-0000-4000-8000-000000000001",
+      "iat": 1800000000,
+      "nbf": 1799999970,
+      "exp": 1800000900,
+      "cid": "org_aaaaaaaaaaaaaaaaaaaa",
+      "pid": "web",
+      "per": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pay": {
+        "kind": "member",
+        "developerId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "tid": "task_1",
+      "ws": "00000000-0000-4000-8000-000000000002",
+      "op": "00000000-0000-4000-8000-000000000003",
+      "stp": "build",
+      "src": "app",
+      "mdl": [
+        "claude-sonnet-4-5"
+      ]
+    },
+    "expectedVerifyResult": true
+  }
+}

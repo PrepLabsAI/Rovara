@@ -27,7 +27,8 @@ describe("Python", () => {
     expect(family(detection, "aws:s3")).toMatchObject({ strength: "used", evidence: [{ path: "app/aws.py", line: 3 }], hints: { explicitEndpoint: true } });
     expect(family(detection, "aws:dynamodb")!.hints.explicitEndpoint).toBeUndefined();
     expect(family(detection, "aws:sqs")!.hints.explicitEndpoint).toBeUndefined();
-    expect(family(detection, "aws:sagemaker-runtime")).toBeUndefined();
+    // the SDK rules leave SageMaker Runtime to the SageMaker detector (SM4), which is the one that reports it
+    expect(family(detection, "aws:sagemaker-runtime")?.hints.seenBy).toEqual(["sagemaker"]);
     expect(detection.notes.join(" ")).toContain("writes the address of a service into the source");
   });
   it("finds drivers and flags a literal host or URL but not a setting", async () => {
@@ -40,14 +41,15 @@ describe("Python", () => {
 });
 
 describe("Node", () => {
-  it("leaves SageMaker Runtime to the model-endpoint rule in every language", async () => {
+  it("leaves SageMaker Runtime to the SageMaker detector in every language: the SDK and driver rules report none of it", async () => {
     const detection = await detect({
       "package.json": JSON.stringify({ dependencies: { "@aws-sdk/client-sagemaker-runtime": "3" } }),
       "src/a.ts": 'import { SageMakerRuntimeClient } from "@aws-sdk/client-sagemaker-runtime";\n',
       "go.mod": "module x\n\nrequire github.com/aws/aws-sdk-go-v2/service/sagemakerruntime v1.0.0\n",
       "A.java": "import software.amazon.awssdk.services.sagemakerruntime.SageMakerRuntimeClient;\n",
     });
-    expect(detection.dependencies).toBeUndefined();
+    expect(detection.dependencies?.map((item) => [item.family, item.hints.seenBy])).toEqual([["aws:sagemaker-runtime", ["sagemaker"]]]);
+    expect(detection.dependencies![0]!.evidence.map((item) => item.path)).toEqual(["src/a.ts"]);
   });
   it("lists drivers and AWS SDK packages from package.json, including workspace packages", async () => {
     const detection = await detect({

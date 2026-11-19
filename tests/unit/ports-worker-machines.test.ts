@@ -20,10 +20,13 @@ function invocation(operationId: string): WorkerInvocation {
 
 runWorkerMachinesConformance("fake", {
   async create() {
+    const machines = new FakeWorkerMachines({ startingChecks: 2 });
     return {
-      machines: new FakeWorkerMachines({ startingChecks: 2 }),
+      machines,
       invocation,
       spec: (machineKey) => ({ machineKey, companyId: "org_aaaaaaaaaaaaaaaaaaaa" }),
+      // The fake serves every company from one object, keyed by company and machine key.
+      otherCompany: { machines, spec: (machineKey) => ({ machineKey, companyId: "org_bbbbbbbbbbbbbbbbbbbb" }) },
     };
   },
 });

@@ -22,21 +22,27 @@ export interface ModelAccessSourceInput {
   now?: () => number;
   /** DR5: the key slot of one design reviewer. The broker mints a key for that slot alone; without it the request is the operation's own key, as always. */
   slot?: string;
+  /** Boot proxy used only when this answer has no usable address. */
+  fallbackBaseUrl?: string;
 }
 
 const KEY_PATTERN = /^[^\s]{1,16384}$/u;
 
 /** The answer from the control plane; anything else is refused without echoing it. */
-function parseModelAccess(body: unknown): ModelAccess {
+function parseModelAccess(body: unknown, fallbackBaseUrl?: string): ModelAccess {
   const value = body !== null && typeof body === "object" ? body as Record<string, unknown> : {};
   const { baseUrl, apiKey, expiresAt } = value;
   let origin: URL | undefined;
   try { origin = typeof baseUrl === "string" ? new URL(baseUrl) : undefined; } catch { origin = undefined; }
-  if (origin === undefined || !/^https?:$/u.test(origin.protocol) || typeof apiKey !== "string" || !KEY_PATTERN.test(apiKey)
-    || typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) {
+  const loopback = origin !== undefined && ["localhost", "127.0.0.1", "[::1]"].includes(origin.hostname);
+  const valid = origin !== undefined && (origin.protocol === "https:" || (origin.protocol === "http:" && loopback && process.env.NODE_ENV === "test"))
+    && origin.username === "" && origin.password === "" && !String(baseUrl).includes("?") && !String(baseUrl).includes("#");
+  if (typeof apiKey !== "string" || !KEY_PATTERN.test(apiKey) || typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) {
     throw agentXError("RUNTIME_UNAVAILABLE", "the control plane answered the model access request with something unexpected");
   }
-  return { baseUrl: baseUrl as string, apiKey, expiresAt };
+  const address = valid ? baseUrl as string : fallbackBaseUrl;
+  if (address === undefined || address === "") throw agentXError("RUNTIME_UNAVAILABLE", "model access has no usable proxy address");
+  return { baseUrl: address, apiKey, expiresAt };
 }
 
 /** The budget level each refusal code of the control plane names; BUDGET_EXCEEDED is the member's or, by its message, the task's. */
@@ -84,7 +90,13 @@ export function lazyModelProxy(input: { baseUrl: string; source: () => Promise<M
   let origin: URL | undefined;
   try { origin = new URL(input.baseUrl); } catch { origin = undefined; }
   if (origin === undefined || !/^https?:$/u.test(origin.protocol)) throw agentXError("CONFIG_INVALID", "the worker's model proxy address is not an http or https URL");
-  return { baseUrl: input.baseUrl, apiKey: async () => (await input.source()).apiKey };
+  return { baseUrl: input.baseUrl, async apiKey(this: { baseUrl: string }) {
+    const answer = await input.source();
+    // The runtime binds this method to a fresh request-local proxy object. URL and key are taken from ONE answer,
+    // before returning either to the transport; simultaneous requests cannot overwrite each other's address.
+    this.baseUrl = answer.baseUrl;
+    return answer.apiKey;
+  } };
 }
 
 /** The current model access, fetched when there is none or it is about to expire; concurrent callers share one fetch. */
@@ -110,7 +122,7 @@ export function modelAccessSource(input: ModelAccessSourceInput): () => Promise<
           const code = refusalCodeOf(body);
           throw agentXError("RUNTIME_UNAVAILABLE", `model access request failed with HTTP ${response.status}${code === undefined ? "" : ` (${code})`}`);
         }
-        current = parseModelAccess(await response.json().catch(() => undefined));
+        current = parseModelAccess(await response.json().catch(() => undefined), input.fallbackBaseUrl);
         return current;
       } finally {
         pending = undefined;

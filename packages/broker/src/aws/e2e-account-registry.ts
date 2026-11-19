@@ -1,14 +1,15 @@
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
-import { inspectE2ERepository, readE2EApplicationProjectContract, type E2EApplicationAccountDefinition, type E2EApplicationProjectContract, type E2ERuntimeAccountRef, type E2ESourceSnapshot } from "@agentx/contracts";
+import { inspectE2ERepository, readE2EApplicationProjectContract, type E2EApplicationAccountDefinition, type E2EApplicationProjectContract, type E2ERuntimeAccountRef, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
 import {
   E2EAccountRegistryError, accountDefinitionRow, accountLatestRow, e2eAccountDefinitionKey, e2eAccountLatestKey, e2eAccountRevisionPrefix, parseAccountDefinitionRow,
   parseAccountEntry, planSyntheticAccountWrites, type E2EAccountRegistryEntry, type E2EAccountRegistryWrite,
 } from "../e2e/application-account-registry.js";
 import { getItem, type StateTable } from "./cancellation.js";
 import type { TransactItems } from "./developer-task-actions.js";
+import { LEGACY_KEY_SCOPE, legacyScopeOf, type KeyScope } from "../e2e/legacy-key-scope.js";
 
 /**
- * The reads and writes of the account registry (`e2e/application-account-registry.ts` names the rows). It lives in the broker's one table: no table and no index of its own.
+ * The reads and writes of the account registry (`e2e/application-account-registry.ts` names the rows). It lives in the broker's one table: no table and no index of its own. Every row is under the org's project partition (`projectPk`), so two orgs' same-named projects share no account.
  */
 
 /** How many older revisions of an account are read when the latest was registered for a different contract than the caller's. */
@@ -22,28 +23,41 @@ export type CorruptAccount = { applicationId: string; profileId: string; setupAp
  * cannot be read is listed in `corrupt` and nowhere else, so one bad row never hides the other accounts. `earlierFor` says whether a latest definition is for a different
  * contract than the caller's, in which case the older revisions are read too (`entry.earlier`).
  */
-export async function readAccountRegistryEntries(dependencies: StateTable, projectId: string, pairs: readonly { applicationId: string; profileId: string }[],
+export async function readAccountRegistryEntries(dependencies: StateTable, orgId: OrgId, projectId: string, pairs: readonly { applicationId: string; profileId: string }[],
   options: { earlierFor?: (latest: E2EApplicationAccountDefinition) => boolean } = {}): Promise<{ entries: E2EAccountRegistryEntry[]; corrupt: CorruptAccount[] }> {
   const unique = [...new Map(pairs.map((pair) => [`${pair.applicationId}\0${pair.profileId}`, pair])).values()];
   const entries: E2EAccountRegistryEntry[] = [];
   const corrupt: CorruptAccount[] = [];
   for (const { applicationId, profileId } of unique) {
-    const latestRow = await getItem<Record<string, unknown>>(dependencies, e2eAccountLatestKey(projectId, applicationId, profileId));
+    // The company's own rows first. Only when it has none, the implicit company's rows from before the key move are read (never for another company).
+    let scope: KeyScope = orgId;
+    let latestRow = await getItem<Record<string, unknown>>(dependencies, e2eAccountLatestKey(scope, projectId, applicationId, profileId));
+    const legacyScope = legacyScopeOf(orgId);
+    if (latestRow === undefined && legacyScope !== undefined) {
+      scope = legacyScope;
+      latestRow = await getItem<Record<string, unknown>>(dependencies, e2eAccountLatestKey(scope, projectId, applicationId, profileId));
+    }
     if (latestRow === undefined) continue;
+    const found = latestRow;
     try {
-      const definitionRow = await getItem<Record<string, unknown>>(dependencies, e2eAccountDefinitionKey(projectId, applicationId, profileId, Number(latestRow.revision)));
-      const entry = parseAccountEntry(projectId, applicationId, profileId, latestRow, definitionRow);
+      const definitionRow = await getItem<Record<string, unknown>>(dependencies, e2eAccountDefinitionKey(scope, projectId, applicationId, profileId, Number(found.revision)));
+      const entry = { ...parseAccountEntry(scope, projectId, applicationId, profileId, found, definitionRow), ...(scope === LEGACY_KEY_SCOPE ? { legacy: true as const } : {}) };
       if (options.earlierFor?.(entry.definition) !== true) { entries.push(entry); continue; }
       const earlier: E2EApplicationAccountDefinition[] = [];
       for (let revision = entry.definition.revision - 1; revision >= 1 && revision >= entry.definition.revision - EARLIER_REVISIONS_READ; revision -= 1) {
-        const definition = parseAccountDefinitionRow(projectId, applicationId, profileId, revision,
-          await getItem<Record<string, unknown>>(dependencies, e2eAccountDefinitionKey(projectId, applicationId, profileId, revision)));
+        let definition = parseAccountDefinitionRow(scope, projectId, applicationId, profileId, revision,
+          await getItem<Record<string, unknown>>(dependencies, e2eAccountDefinitionKey(scope, projectId, applicationId, profileId, revision)));
+        // An older revision is written once and never moved: after the account's newest revision went under the company's key, the older ones are still under the old key.
+        if (definition === undefined && scope !== LEGACY_KEY_SCOPE && legacyScopeOf(orgId) !== undefined) {
+          definition = parseAccountDefinitionRow(LEGACY_KEY_SCOPE, projectId, applicationId, profileId, revision,
+            await getItem<Record<string, unknown>>(dependencies, e2eAccountDefinitionKey(LEGACY_KEY_SCOPE, projectId, applicationId, profileId, revision)));
+        }
         if (definition !== undefined) earlier.push(definition);
       }
       entries.push({ ...entry, earlier });
     } catch (error) {
       if (!(error instanceof E2EAccountRegistryError)) throw error;
-      const recorded = latestRow.setupApprovedAt;
+      const recorded = found.setupApprovedAt;
       corrupt.push({ applicationId, profileId, ...(typeof recorded === "string" && !Number.isNaN(Date.parse(recorded)) ? { setupApprovedAt: recorded } : {}) });
     }
   }
@@ -54,31 +68,39 @@ export async function readAccountRegistryEntries(dependencies: StateTable, proje
  * The conditions that keep each account ref an approval (or a verdict) stands on as it was read, until the transaction that records it commits: the account's pointer must
  * still name exactly that revision and digest. A ref with no registered account (an M1.2 record) has nothing to fence.
  */
-export function accountRegistryFences(input: { tableName: string; projectId: string; refs: readonly E2ERuntimeAccountRef[]; entries: readonly E2EAccountRegistryEntry[] }): TransactItems {
+export function accountRegistryFences(input: { orgId: OrgId; tableName: string; projectId: string; refs: readonly E2ERuntimeAccountRef[]; entries: readonly E2EAccountRegistryEntry[] }): TransactItems {
   return input.refs.flatMap((ref) => {
     const entry = input.entries.find((item) => item.definition.applicationId === ref.applicationId && item.definition.profileId === ref.profileId);
     if (entry === undefined) return [];
-    return [{ ConditionCheck: { TableName: input.tableName, Key: e2eAccountLatestKey(input.projectId, ref.applicationId, ref.profileId),
+    const matches = (key: { pk: string; sk: string }) => ({ ConditionCheck: { TableName: input.tableName, Key: key,
       ConditionExpression: "entityType = :entity AND revision = :revision AND definitionDigest = :digest",
-      ExpressionAttributeValues: { ":entity": "E2E_ACCOUNT_LATEST", ":revision": entry.latest.revision, ":digest": entry.latest.definitionDigest } } }];
+      ExpressionAttributeValues: { ":entity": "E2E_ACCOUNT_LATEST", ":revision": entry.latest.revision, ":digest": entry.latest.definitionDigest } } });
+    if (entry.legacy !== true) return [matches(e2eAccountLatestKey(input.orgId, input.projectId, ref.applicationId, ref.profileId))];
+    // Read from the old key: it must still be as it was read, and the account must still have no row under the company's key (a registration that moved it makes this read stale).
+    return [matches(e2eAccountLatestKey(LEGACY_KEY_SCOPE, input.projectId, ref.applicationId, ref.profileId)),
+      { ConditionCheck: { TableName: input.tableName, Key: e2eAccountLatestKey(input.orgId, input.projectId, ref.applicationId, ref.profileId), ConditionExpression: "attribute_not_exists(pk)" } }];
   });
 }
 
-function writeItems(tableName: string, projectId: string, write: E2EAccountRegistryWrite, setup: { approvedAt: string; proposalSha256: string }): TransactItems {
+/**
+ * The rows of one write, always under the company's key. An account read from the old key has no pointer there to replace, so its new pointer (and, for a pointer raise, the
+ * definition it names, which the company's partition does not hold yet) is written as a new row: a second registration racing for it fails the condition and plans again.
+ */
+function writeItems(tableName: string, orgId: OrgId, projectId: string, write: E2EAccountRegistryWrite, setup: { approvedAt: string; proposalSha256: string }, fromLegacy: boolean): TransactItems {
   const { definition, latest, previousRevision } = write;
-  const row = accountLatestRow(projectId, definition.applicationId, definition.profileId, latest, { approvedAt: write.setupApprovedAt ?? setup.approvedAt, proposalSha256: setup.proposalSha256 });
+  const row = accountLatestRow(orgId, projectId, definition.applicationId, definition.profileId, latest, { approvedAt: write.setupApprovedAt ?? setup.approvedAt, proposalSha256: setup.proposalSha256 });
   const pointer = { Put: { TableName: tableName, Item: row,
       ...(write.repair === true ? {}
-        : previousRevision === null ? { ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }
+        : previousRevision === null || fromLegacy ? { ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }
           : { ConditionExpression: "revision = :previous", ExpressionAttributeValues: { ":previous": previousRevision } }) } };
-  // A raised pointer writes no definition: the one it names is already there.
-  if (write.touch === true) return [pointer];
-  return [{ Put: { TableName: tableName, Item: accountDefinitionRow(projectId, definition), ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } }, pointer];
+  // A raised pointer writes no definition: the one it names is already there (unless it is only under the old key).
+  if (write.touch === true && !fromLegacy) return [pointer];
+  return [{ Put: { TableName: tableName, Item: accountDefinitionRow(orgId, projectId, definition), ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } }, pointer];
 }
 
 /** The highest revision with a definition row for an account, and the revision an unreadable pointer claims (if it claims a whole number); 0 for neither. */
-async function highestRevision(dependencies: StateTable, projectId: string, applicationId: string, profileId: string): Promise<number> {
-  const { pk, prefix } = e2eAccountRevisionPrefix(projectId, applicationId, profileId);
+async function highestRevision(dependencies: StateTable, orgId: OrgId, projectId: string, applicationId: string, profileId: string): Promise<number> {
+  const { pk, prefix } = e2eAccountRevisionPrefix(orgId, projectId, applicationId, profileId);
   let highest = 0;
   let start: Record<string, unknown> | undefined;
   do {
@@ -87,7 +109,7 @@ async function highestRevision(dependencies: StateTable, projectId: string, appl
     for (const item of response.Items ?? []) highest = Math.max(highest, Number(String(item.sk).slice(prefix.length)) || 0);
     start = response.LastEvaluatedKey;
   } while (start !== undefined);
-  const raw = await getItem<Record<string, unknown>>(dependencies, e2eAccountLatestKey(projectId, applicationId, profileId));
+  const raw = await getItem<Record<string, unknown>>(dependencies, e2eAccountLatestKey(orgId, projectId, applicationId, profileId));
   const claimed = Number(raw?.revision);
   return Math.max(highest, Number.isSafeInteger(claimed) && claimed > 0 ? claimed : 0);
 }
@@ -99,7 +121,7 @@ async function highestRevision(dependencies: StateTable, projectId: string, appl
  * revision it replaces, so two registrations racing for one account write one revision between them; the loser plans again and finds nothing left to write. An account
  * whose rows cannot be read is written over, which is how it is repaired. `planKey` identifies the plan, so a caller can tell a conflict that changed it from one that did not.
  */
-export async function planSetupAccountWrites(dependencies: StateTable, input: { projectId: string; snapshot: E2ESourceSnapshot; setup: { approvedAt: string; proposalSha256: string }; now: number }):
+export async function planSetupAccountWrites(dependencies: StateTable, input: { orgId: OrgId; projectId: string; snapshot: E2ESourceSnapshot; setup: { approvedAt: string; proposalSha256: string }; now: number }):
   Promise<{ items: TransactItems; written: number; planKey: string }> {
   const inspection = inspectE2ERepository(input.snapshot, input.snapshot.candidate).inspection;
   const items: TransactItems = [];
@@ -110,12 +132,13 @@ export async function planSetupAccountWrites(dependencies: StateTable, input: { 
     try { contract = readE2EApplicationProjectContract(input.snapshot, application.applicationId); } catch { continue; }
     if (contract === null) continue;
     const pairs = contract.accountProfiles.filter((profile) => profile.scope === "synthetic-test").map((profile) => ({ applicationId: application.applicationId, profileId: profile.profileId }));
-    const read = await readAccountRegistryEntries(dependencies, input.projectId, pairs);
+    const read = await readAccountRegistryEntries(dependencies, input.orgId, input.projectId, pairs);
     const repairs: Array<{ applicationId: string; profileId: string; nextRevision: number }> = [];
-    for (const pair of read.corrupt) repairs.push({ ...pair, nextRevision: (await highestRevision(dependencies, input.projectId, pair.applicationId, pair.profileId)) + 1 });
+    for (const pair of read.corrupt) repairs.push({ ...pair, nextRevision: (await highestRevision(dependencies, input.orgId, input.projectId, pair.applicationId, pair.profileId)) + 1 });
     const writes = planSyntheticAccountWrites({ contract, applicationId: application.applicationId, prior: read.entries, now: input.now, setup: { approvedAt: input.setup.approvedAt }, repairs });
+    const fromLegacy = new Set(read.entries.filter((entry) => entry.legacy === true).map((entry) => entry.definition.profileId));
     for (const write of writes) {
-      items.push(...writeItems(dependencies.tableName, input.projectId, write, input.setup));
+      items.push(...writeItems(dependencies.tableName, input.orgId, input.projectId, write, input.setup, write.repair !== true && fromLegacy.has(write.definition.profileId)));
       planned.push(`${write.definition.applicationId}\0${write.definition.profileId}\0${write.definition.revision}${write.touch === true ? "\0touch" : ""}`);
     }
   }

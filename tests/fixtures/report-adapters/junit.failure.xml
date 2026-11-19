@@ -1,0 +1,1 @@
+<testsuite><testcase classname="cart" name="same"><failure><![CDATA[traceback src/cart.py:8 expected]]></failure></testcase></testsuite>

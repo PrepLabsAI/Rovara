@@ -14,7 +14,7 @@ beforeAll(async () => {
 describe("loading a release for install", () => {
   it("renders a part's template for an environment in a covered region", async () => {
     const release = await loadRelease(dir);
-    expect(release.regions()).toEqual(["us-east-1"]);
+    expect(release.regions()).toEqual(["us-east-1", "us-west-2"]);
     const text = release.template("access", "us-east-1", "staging");
     expect(text).toContain("agentx-staging");
     expect(text).not.toContain("qqenv");

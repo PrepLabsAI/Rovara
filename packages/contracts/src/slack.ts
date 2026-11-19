@@ -6,14 +6,13 @@ import { ModelIdentifierSchema } from "./models.js";
 import { OrgIdSchema } from "./company-scope.js";
 import { AgentXNameSchema } from "./project-node.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
-import { SlackChannelIdSchema, SlackMessageTimestampSchema, SlackTeamIdSchema } from "./browser-ids.js";
+import { SlackChannelIdSchema, SlackMessageTimestampSchema, SlackTeamIdSchema, SlackUserIdSchema } from "./browser-ids.js";
 
 // Thread owner keys hash this issuer; OIDC issuers are https URLs, so the key spaces never overlap.
 export const SLACK_THREAD_OWNER_ISSUER = "slack-thread";
 
 // Defined in browser-ids.ts, which browser-safe contracts import.
-export { SlackTeamIdSchema, SlackChannelIdSchema, SlackMessageTimestampSchema };
-export const SlackUserIdSchema = z.string().regex(/^[UW][A-Z0-9]{2,31}$/);
+export { SlackTeamIdSchema, SlackChannelIdSchema, SlackMessageTimestampSchema, SlackUserIdSchema };
 
 export const SlackThreadSchema = z
   .object({

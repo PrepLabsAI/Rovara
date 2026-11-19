@@ -3,7 +3,7 @@
 // requests and its history. GET only, no forms, and one small script (by nonce) that opens and scrolls to a deep
 // link and, while the page is open, asks this origin's `/task/status` whether the task moved on. Every value is escaped; model and reviewer text is plain text in the page, so a link in it is never a link.
 import { randomBytes } from "node:crypto";
-import { redactText, taskGraphDigest, type E2EScenarioResults, type PlanDocument, type PlanEvidenceBundle, type TaskComment, type TaskPeopleChangeResult, type TaskPeopleProposal, type TaskSuggestion, type WorkItemProgressV1 } from "@agentx/contracts";
+import { GENERAL_FAKE_MADE_NOTE, redactText, taskGraphDigest, type E2EScenarioResults, type PlanFeature, type PlanDocument, type PlanEvidenceBundle, type TaskComment, type TaskPeopleChangeResult, type TaskPeopleProposal, type TaskSuggestion, type WorkItemProgressV1 } from "@agentx/contracts";
 import { renderE2EScenarioRowsHtml } from "../e2e-presentation.js";
 import type { TaskRole } from "../developer/task-access.js";
 import type { TaskPeopleView } from "../developer/task-people.js";
@@ -49,7 +49,7 @@ export interface TaskDocumentView {
   /** Documents whose saved copy failed its check: named, never shown. */
   unverified?: TaskDocumentKind[];
   /** `unclear`: the check ran but its result couldn't be told; `proposed`: AgentX proposed it in the coding plan; `proves`: the claims a structured coding plan says it proves. */
-  checks: Array<{ /** The check's ID, so comments can name it. */ id?: string; label: string; passed: boolean | undefined; unclear?: true; proposed?: true; proves?: string[] }>;
+  checks: Array<{ /** The check's ID, so comments can name it. */ id?: string; label: string; passed: boolean | undefined; unclear?: true; proposed?: true; proves?: string[]; /** General fakes: a Rovara-made fake answered it, so "passed" is never said alone. */ madeByRovara?: true }>;
   /** One plain sentence about the checks: that none apply (review only), or that the proposed ones could not be read. */
   checksNote?: string;
   /** Whether the checks have run on the current code. When left out, the page reads it from the checks' own results. */
@@ -79,6 +79,8 @@ export interface TaskDocumentView {
   pageSuggestions?: Array<PageSuggestionView & { document: "requirements" | "design" | "plan" }>;
   /** The document waiting for its owner's decision, when one is. */
   waiting?: { kind: TaskDocumentKind; version: number; artifactDigest: string };
+  /** Lead 4 PCF: while a coding plan waits, the task's feature as one line, and whether this reader may change it (`canChange`: the owner who decides; the page also checks on every press). Absent otherwise. */
+  planFeature?: PlanFeature;
   /** Moves whenever a comment, reply or suggestion is written; the page's script compares it. */
   commentSeq?: number;
   /** The coding plan's optional checks, and whether each is chosen now. */
@@ -144,7 +146,7 @@ export function safeFindingPath(file: string | undefined): string | undefined {
 }
 
 const PULL_REQUEST_STATES: Record<string, string> = { OPEN: "open", CLOSED: "closed", MERGED: "merged" };
-const checkWords = (check: TaskDocumentView["checks"][number]) => (check.passed === true ? "Passed" : check.passed === false ? "Didn't pass" : check.unclear === true ? "Couldn't tell" : "Not run yet");
+const checkWords = (check: TaskDocumentView["checks"][number]) => (check.passed === true ? (check.madeByRovara === true ? "Passed (" + GENERAL_FAKE_MADE_NOTE + ")" : "Passed") : check.passed === false ? "Didn't pass" : check.unclear === true ? "Couldn't tell" : "Not run yet");
 
 function findingItem(finding: TaskDocumentView["findings"][number]): string {
   const file = safeFindingPath(finding.file);
@@ -364,7 +366,21 @@ function pageData(view: TaskDocumentView, csrf: string): Record<string, unknown>
     ...(view.askAvailable === undefined ? {} : { askAvailable: view.askAvailable }),
     ...(current === undefined ? {} : { current }), commentSeq: view.commentSeq ?? 0,
     ...(view.applicationRetry?.canRetry === true ? { canRetry: true } : {}),
+    // The feature controls are drawn only for the one who may decide AND may change it; a reader sees the line without them. The script offers a press only when this says so.
+    ...(view.planFeature?.canChange === true && access.canDecide ? { canFeature: true, featureNow: view.planFeature.feature?.id ?? null } : {}),
   };
+}
+
+/** Lead 4 PCF: the coding plan's feature line, and for the one who may change it the controls the script turns on ("Change" lists the company's open features, "No feature" files none). */
+function featureSection(view: TaskDocumentView): string {
+  const feature = view.planFeature;
+  if (feature === undefined || view.waiting?.kind !== "coding plan") return "";
+  const controls = feature.canChange && view.access?.canDecide === true
+    ? ' <button type="button" id="decide-feature-change" hidden>Change</button> <button type="button" id="decide-feature-none" hidden>No feature</button>'
+      + '</p><p id="plan-feature-pick" hidden><label for="decide-feature-select">Feature</label> <select id="decide-feature-select"></select> <button type="button" id="decide-feature-save">Save</button>'
+      + '</p><p id="plan-feature-error" class="error" role="alert" hidden></p>'
+    : "";
+  return `<section id="plan-feature" aria-label="Feature"><p><span id="plan-feature-line">${escapeHtml(feature.line)}</span><span id="plan-feature-status" role="status" aria-live="polite"></span>${controls === "" ? "</p>" : controls}</section>`;
 }
 
 /** The bar at the bottom of the page while a document waits: the owner's answer count and buttons (on with the script), or who decides. */
@@ -466,7 +482,7 @@ async function page(view: TaskDocumentView, nonce: string, request: TaskPageRequ
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>AgentX task · ${escapeHtml(view.title)}</title>`
     + `<style nonce="${nonce}">${TASK_PAGE_STYLE}</style></head><body>${movedOn}`
     + `<header><h1>${escapeHtml(view.title)}</h1><p class="muted">${role}</p>${progressStrip(view, { checks: checks !== undefined && checks !== "" })}`
-    + `<p><strong>${escapeHtml(view.status)}</strong></p><p>Next: ${escapeHtml(view.nextStep)}</p>${slackOnly}</header>`
+    + `<p><strong>${escapeHtml(view.status)}</strong></p><p>Next: ${escapeHtml(view.nextStep)}</p>${featureSection(view)}${slackOnly}</header>`
     + `<main>${unverified}${documents}${noDocuments}`
     + (checks === undefined || checks === "" ? "" : `<section id="checks" aria-label="Checks"><h2>Checks</h2>${checks}</section>`)
     + (view.e2eResults === undefined ? "" : renderE2EScenarioRowsHtml(view.e2eResults, { artifactPath: (sha256) => `/review/${encodeURIComponent(view.taskId)}/task/api/e2e/artifacts/${sha256}` }))

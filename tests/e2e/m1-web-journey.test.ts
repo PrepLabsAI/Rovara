@@ -38,6 +38,7 @@ import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 import type { binding as projectBinding} from "../support/e2e-application-plan-fixtures.js";
 import { PROFILE, shaCanonical, webApiRow } from "../support/e2e-application-plan-fixtures.js";
+import { TEST_ORG, testProjectPk } from "../support/orgs.js";
 
 // The whole browser path of an application round, natively: Rovara plans and approves a real web scenario, the worker (the same code the EC2 worker runs) implements it
 // into a real git commit, the broker admits a round for that commit, the worker runs it through the production Docker application host (the hardened containers: no
@@ -168,7 +169,7 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
     const readyWeb = { kind: "web" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedSteps,
       supportedAssertions: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedAssertions };
     const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [readyWeb],
-      accountRegistry: accountRegistryEntriesFromRows("payments", harness.db.find((row) => row.pk === "PROJECT#payments")) });
+      accountRegistry: accountRegistryEntriesFromRows(TEST_ORG, "payments", harness.db.find((row) => row.pk === testProjectPk("payments"))) });
     if (context.status !== "available") throw new Error(context.reason);
     const targetOf = (profileId: string) => context.targets.find((item) => item.kind === "web" && item.accountProfileId === profileId);
     const target = targetOf("orders-owner");

@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -26,7 +27,7 @@ function brokerStatements(template: Template): Statement[] {
 function brokerEnvironment(template: Template): Record<string, unknown> {
   const functions = Object.entries(template.findResources("AWS::Lambda::Function") as Record<string, LambdaFunction>);
   const broker = functions.find(([id]) => /^Broker[0-9A-F]{8}$/.test(id));
-  return broker?.[1].Properties.Environment?.Variables ?? {};
+  return unpackedBrokerVariables(broker?.[1].Properties.Environment?.Variables ?? {}, template.toJSON() as never);
 }
 
 describe("the health route's grants (A13)", () => {
@@ -45,7 +46,13 @@ describe("the health route's grants (A13)", () => {
   it("names every alarm a named app creates in the probe's list, and lists no alarm the app never creates (issue 206)", () => {
     const alarmNamesOf = (context: Record<string, unknown>) => buildAgentXApp({ agentxEnv: "live25d", ...context }).node.children.filter((child): child is Stack => Stack.isStack(child))
       .flatMap((stack) => Object.values(Template.fromStack(stack).findResources("AWS::CloudWatch::Alarm") as Record<string, { Properties: { AlarmName?: unknown } }>))
-      .map((alarm) => alarm.Properties.AlarmName);
+      .map((alarm) => alarm.Properties.AlarmName)
+      // The foundation's egress alarms keep their live hyphenated names and are not on the health route (control-plane.ts unlistedAlarms); pinned here exactly.
+      .filter((name) => !egressAlarmNames.includes(name as string));
+    const egressAlarmNames = ["agentx-live25d-blocked-dns-spike", "agentx-live25d-nat-egress-spike-use1-az1", "agentx-live25d-nat-egress-spike-use1-az2"];
+    const allNames = buildAgentXApp({ agentxEnv: "live25d" }).node.children.filter((child): child is Stack => Stack.isStack(child))
+      .flatMap((stack) => Object.values(Template.fromStack(stack).findResources("AWS::CloudWatch::Alarm") as Record<string, { Properties: { AlarmName?: unknown } }>)).map((alarm) => alarm.Properties.AlarmName);
+    expect(egressAlarmNames.every((name) => allNames.includes(name))).toBe(true);
     const stacks = buildAgentXApp({ agentxEnv: "live25d" }).node.children.filter((child): child is Stack => Stack.isStack(child));
     // The automatic renewal's alarms exist only where its CDK context is on (AR-2).
     expect([...alarmNamesOf({})].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.filter((suffix) => !suffix.startsWith("RuntimeRequalify")).map((suffix) => `agentx-live25d-${suffix}`).sort());
@@ -76,12 +83,18 @@ describe("the health route's grants (A13)", () => {
     }, 120_000);
 
   it("lets the broker read the attributes of exactly the five dead-letter queues", () => {
-    const queues = brokerStatements(named).filter((statement) => statement.Action === "sqs:GetQueueAttributes");
-    expect(queues).toHaveLength(1);
-    expect(queues[0]?.Resource).toHaveLength(5);
+    expect(brokerStatements(named).filter((statement) => statement.Action === "sqs:GetQueueAttributes")).toEqual([]);
+    const brokerRole = Object.keys(named.findResources("AWS::IAM::Role")).find((id) => /^BrokerServiceRole[0-9A-F]{8}$/.test(id))!;
+    const policies = Object.values(named.findResources("AWS::SQS::QueuePolicy")) as Array<{ Properties: { PolicyDocument: { Statement: Array<Statement & { Effect: string; Principal: unknown }> } } }>;
+    const queues = policies.flatMap((policy) => policy.Properties.PolicyDocument.Statement).filter((s) => s.Action === "sqs:GetQueueAttributes");
+    expect(queues).toHaveLength(5);
+    for (const statement of queues) {
+      expect(statement.Effect).toBe("Allow");
+      expect(statement.Principal).toEqual({ AWS: { "Fn::GetAtt": [brokerRole, "Arn"] } });
+    }
     // Exactly the five queues' own ARNs, one each: no wildcard, no other queue. Spec 062 added the channel event one.
     const queueIds = [/^DispatchDeadLetterQueue[0-9A-F]{8}$/, /^SlackRequestDeadLetterQueue[0-9A-F]{8}$/, /^DeveloperTaskNotifierNoticeDeadLetterQueue[0-9A-F]{8}$/, /^DeveloperTaskNotifierStreamFailureQueue[0-9A-F]{8}$/, /^ChannelApiEventDeadLetters[0-9A-F]{8}$/];
-    const resources = queues[0]?.Resource as Array<{ "Fn::GetAtt"?: [string, string] }>;
+    const resources = queues.map((statement) => statement.Resource) as Array<{ "Fn::GetAtt"?: [string, string] }>;
     for (const resource of resources) {
       expect(resource).toEqual({ "Fn::GetAtt": [expect.any(String), "Arn"] });
       expect(Object.keys(named.findResources("AWS::SQS::Queue"))).toContain(resource["Fn::GetAtt"]?.[0]);
@@ -129,10 +142,100 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/aws/workflow-e2e-replay.ts",
       // The marker a project setup run leaves for the test machine renewal's drain (AUTOREQUALIFY AR-3) ends at the run's deadline and expires on it a day later.
       "packages/broker/src/e2e/requalify-hold.ts",
+      // TE-C3: the full-suite follow-up, its task pointer (30 days) and the project's day count (3 days) expire on it.
+      "packages/broker/src/core/proof/full-suite-followup.ts",
       // Spec 062 FR-031: a channel link code, one-time and dead after 10 minutes.
       "packages/broker/src/aws/channel-links.ts",
-      // A steering note sent on the deployed API (`POST /v1/dev/tasks/{id}/messages`) is the same NOTE# item the workflow reads (an AppNote), with a 400-day expiry; it reads that item back too.
+      // The Code port lanes' core (packages/broker/src/core, on the document store port). Each file was read for it: every one writes a row that is meant to expire after a named retention, none a durable record.
+      // L6b: the notice batch rows (pending and sent), the run cost estimate history and the cost ledger's entry and once-markers, the approval proofs and their used/spent markers, the decision records, and the task sessions' events, requests, messages and ended summaries.
+      "packages/broker/src/core/notify/attention.ts", "packages/broker/src/core/cost/estimate.ts", "packages/broker/src/core/cost/ledger.ts",
+      "packages/broker/src/core/decisions/approval-gate.ts", "packages/broker/src/core/decisions/store.ts",
+      "packages/broker/src/core/sessions/read.ts", "packages/broker/src/core/sessions/summary.ts", "packages/broker/src/core/sessions/control.ts", "packages/broker/src/core/sessions/store.ts",
+      // L6a: the workflow dispatch row (RETENTION_SECONDS) and its record type, the same row broker-shared.ts defines for the AWS broker.
+      "packages/broker/src/core/task-flow/dispatch-rows.ts", "packages/broker/src/core/task-flow/records.ts",
+      // L7a: the pull request head and branch index rows (90 days). L7b: the merge commit index (MERGE_COMMIT_INDEX_KEPT_DAYS), the proof evidence blobs (their retention class) and the CI fix record (EVIDENCE_RETENTION_SECONDS).
+      "packages/broker/src/core/merge/store.ts", "packages/broker/src/core/proof/revert/merge-commit-index.ts", "packages/broker/src/core/proof/evidence-blob-store.ts", "packages/broker/src/core/ci-fix/ci-fix.ts",
+      // L9-wire: a worker's event rows (14 days), the message bucket (2 hours) and the saved message rows (30 days), and the store's own `ttlAttribute`, which must be this attribute for any of them to expire.
+      "packages/broker/src/services/callbacks.ts", "packages/broker/src/local/app/host.ts", "packages/broker/src/local/runtime.ts",
+      // L12: the milestone rows (30 days) merge tracking writes with a session line, and the comment poll's thread and cursor rows (30 days).
+      "packages/broker/src/services/merge-tracking.ts", "packages/broker/src/local/app/comments.ts",
+      // Chat on a laptop: a link code (10 minutes), the once-claims of an adapter's events and notices (a day, an hour), a card Rovara posted (a day) and the conversation a task started from (the session's retention).
+      "packages/broker/src/core/channel/links.ts", "packages/broker/src/core/channel/sink.ts", "packages/broker/src/core/channel/cards.ts", "packages/broker/src/core/channel/threads.ts",
+      // Thread notices (2026-11-12): the once-claim of each plan card and milestone line sent to a task's chat thread, kept for the session retention (SESSION_RETENTION_DAYS) and then expired; none a durable record.
+      "packages/broker/src/core/channel/thread-notices.ts",
+      // Lessons: the rows that record a lesson's source events expire after a named retention (SOURCE_EVENT_TTL_DAYS), none a durable record.
+      "packages/broker/src/lessons/document-store.ts",
+      // Lane EV (#649): the company event read only READS the work events' expiry (an expired row is skipped before the store sweeps it); it writes none.
+      "packages/broker/src/core/work-events/read.ts",
+      // Team record (#724, LM7): every record row carries the retention expiry the lessons rows use, and a reader checks it itself; none a durable record.
+      "packages/broker/src/team-record/record.ts",
+      // Lessons for local coding tools (decision 46b): the day counter of a person's reads of one project (LESSON_LOCAL_DAY, numbers only) is a per-day row that must expire after the index retention, never a durable record.
+      "packages/broker/src/local/app/lessons-routes.ts",
+      // Parallel parts: the first progress line of a coding run (event rows, kept as long as the other event rows) and the milestone rows (their retention).
+      "packages/broker/src/core/task-flow/accept.ts", "packages/broker/src/core/milestones/milestones.ts",
+      // Design review: the reviewers' stored packets and a slot's key record and budget, which expire after the stage's retention (SLOT_PACKET_TTL_SECONDS).
+      "packages/broker/src/core/design-review/packet-store.ts", "packages/broker/src/core/design-review/slot-keys.ts", "packages/broker/src/core/design-review/round-start.ts",
+      // Script tokens: the rate window rows, and a token's rows and request marks, which expire after the token's life plus a grace period.
+      "packages/broker/src/core/script-tokens/rate.ts", "packages/broker/src/core/script-tokens/store.ts",
+      // Sessions: thread notes and the live-message counters (session retention), followers and presence rows, and Ask's records, locks, request marks and rate rows.
+      "packages/broker/src/core/sessions/followers.ts", "packages/broker/src/core/sessions/notes.ts", "packages/broker/src/core/sessions/ask.ts", "packages/broker/src/core/sessions/steer.ts",
+      // The browser and API checks on the ports: the baseline, replay and grounding records expire 30 days after they were last written, as the hosted product's do.
+      "packages/broker/src/core/e2e/baseline.ts", "packages/broker/src/core/e2e/replay.ts", "packages/broker/src/core/e2e/grounding.ts",
+      // Second review: the track record rows (one per answered second opinion, and a pointer per task) expire after their retention (400 days).
+      "packages/broker/src/core/second-review/track.ts",
+      // Fix with agent: a diagnosis's request (a day while it waits, 30 days once settled), result and person rows, the open-place row and the rate rows all expire after a named retention.
+      "packages/broker/src/core/diagnosis/store.ts",
+      // The setup agent: a run's journal, a person's commands and their request marks, the website asks (with their counters and index rows) and the per-run refusal counts, which are kept 31 days like Cloud's setup rows; and the check's record (31 days).
+      "packages/broker/src/core/setup-agent/keys.ts", "packages/broker/src/core/setup-agent/check.ts", "packages/broker/src/core/setup-agent/command.ts", "packages/broker/src/core/setup-agent/host-ask.ts",
+      // The project's test environment: the proposal and approval bookkeeping, the saved-environment markers (a closed workspace's row and the rebuild-due marker), the candidate setup check's row and the nightly status rows expire after their own retention.
+      "packages/broker/src/core/test-env/deps.ts", "packages/broker/src/core/test-env/saved-env-markers.ts", "packages/broker/src/core/test-env/candidate-check.ts", "packages/broker/src/core/test-env/night-status.ts",
+      // Tickets that ask for work: a ticket's item (30 days while it waits, 400 once started), the event and change claims (30 and 7 days), the owner's notices (30 days), the poll's hourly read counts (2 hours), Rovara's notes of its own writes, and the ticket updates' claims and counts.
+      "packages/broker/src/core/intake/store.ts", "packages/broker/src/core/intake/poll.ts", "packages/broker/src/core/intake/notices.ts", "packages/broker/src/core/intake/own-writes.ts", "packages/broker/src/core/ticket-updates/handler.ts",
+      // L4-LP: the ticket updates' claims and counts moved unchanged into claims.ts; the ticket thread's state row (400 days) and the task log's rows (400 days) are new rows with their own retention.
+      "packages/broker/src/core/ticket-updates/claims.ts", "packages/broker/src/core/ticket-updates/thread.ts", "packages/broker/src/core/task-log/store.ts",
+      // Context sources: a project's pending and decided changes (90 days), the usage counters of one stage (3 days), the text a task kept from a source and its citations (14 days), and the request item of a
+      // connection change (7 days). A connection's own record, a project's source document and a registered server are durable and carry no expiry.
+      "packages/broker/src/context-sources/store.ts", "packages/broker/src/context-sources/usage.ts", "packages/broker/src/context-sources/quotes.ts", "packages/broker/src/context-sources/citations.ts",
+      "packages/broker/src/connections/request-marks.ts",
+      // Automation: a request row (7 days), a trigger's activity (30 days), its hourly and daily counters and its subject note (2 hours to 2 days), the automatic runs' month and claim rows, started and paused markers and the run watch (62 days at most, 14 days for the watch) and the open record of an unattended run with its reservation (62 days).
+      "packages/broker/src/core/automation/kit.ts", "packages/broker/src/core/automation/run-seam.ts", "packages/broker/src/core/triggers/store.ts", "packages/broker/src/core/triggers/dispatch.ts",
+      "packages/broker/src/core/automatic-runs/cap.ts", "packages/broker/src/core/automatic-runs/start.ts", "packages/broker/src/core/automatic-runs/end.ts",
+      // Nightly upkeep (lead 4 N1): the last-night, per-night and pause-notice marker rows expire after 62 days (`upkeepExpiryOf`); the switch row (SETTINGS) is durable and carries no expiry.
+      "packages/broker/src/core/upkeep/keys.ts",
+      // Work events (U3): one row per flow fact of a task, kept 13 months after its month (WORK_EVENT_RETENTION_MONTHS), then expired. Not a durable record of the work itself.
+      "packages/broker/src/core/work-events/work-events.ts",
+      // Spend holds (switch-on lane L8): a hold's row and its open-hold index row expire 30 days after the hold's own expiry (the sweep gives an open one back first). The day row and the task
+      // total carry no expiry.
+      "packages/broker/src/core/cost/holds.ts",
+      // Engine host (E2): the State table's TTL attribute is named to strip the core's expiries (retention.ts) and to tell the deployed store which attribute it is (code-modules.ts). Neither writes one.
+      "packages/broker/src/core-host/retention.ts", "packages/broker/src/core-host/code-modules.ts",
+      // A steering note sent on the deployed API (`POST /v1/dev/tasks/{id}/messages`) is the same NOTE# item core/sessions/notes.ts writes, with the same 400-day expiry; it reads that item back too.
       "packages/broker/src/developer/task-code-routes.ts",
+      // Task actions (decision 198): the owner's own words for a round they sent back, one OWNER_NOTE row per decision, kept 400 days (KEEP_SECONDS) and then expired. Not a durable record: the decision itself is.
+      "packages/broker/src/core/task-flow/owner-note.ts",
+      // Task actions (decision 201): who accepted a review finding and by what way (one FINDING_ACCEPT row per decision, read when the pull request description is made), kept 400 days like the decision records and then expired.
+      "packages/broker/src/core/task-flow/finding-accept.ts",
+      // Batch merge (#733 L2a, #754 M7): a step-up claim row expires after its token's own expiry plus a short keep (hosted-approvers.ts); the after-merge watcher's watch and action rows
+      // expire after their kept days (after-merge/watch.ts names the store's TTL attribute, defaulting to this one). Neither is a durable record.
+      "packages/broker/src/core-host/hosted-approvers.ts", "packages/broker/src/core/after-merge/watch.ts",
+      // After-merge reporter (#787 M7 slice 2): its own AFTER_MERGE_SENT claim rows (one per report and surface, kept WATCH_KEPT_DAYS, then expired) and nothing else; no other record shares the key.
+      "packages/broker/src/core/after-merge/reporter.ts",
+      // Guided onboarding PR 7 (DEC 254y (1)): two short-lived records only. A Linear app webhook delivery's dedupe row (LINEAR_DELIVERY#<sha256 of the body>), kept one day so a replay
+      // inside the 60-second window is a no-op, then expired; and a connect start's state row (10-minute single-use state), expired one day after its expiry. Nothing else in that
+      // file carries the attribute (the connection, binding, picks and audit rows are durable).
+      "packages/broker/src/aws/linear-connections.ts",
+      // Wiki build run (#892, #905; DEC 254zzd, owner-approved): a run's own rows (WIKI_BUILD_NOTES, WIKI_BUILD_PAGE_DONE and the WIKI_CHECK verdict cache, in the company's
+      // ORG#<company>#WIKI_BUILD#<project> partition), each kept WIKI_BUILD_KEEP_SECONDS (31 days) through wikiExpiryOf, then expired. The wiki pages themselves (wiki-store) carry no expiry.
+      "packages/broker/src/core/wiki-build/keys.ts",
+      // Wiki for agents (#896; DEC 254zzd, owner-approved): the WIKI_AGENT_USE_REF row (an operation's pointer to its task, 30 days) and the WIKI_AGENT_USE row (which pages a step was
+      // given and read, 180 days), then expired. The project's "Give the wiki to agents" switch row carries no expiry.
+      "packages/broker/src/core/wiki/agent-context.ts",
+      // Web task channel C8 (option b): the attention email's reverse index, one ATTENTION_PERSON row per company and hashed person id, kept 90 days after it was last written, then expired. Not a
+      // durable record (each new attention row for the person writes it again).
+      "packages/broker/src/core/notify/person-index.ts",
+      // L4-HW5b (#1047), owner DEC 254zzz45: the hosted chat decision's CHANNEL_CLAIM row, one per pressed button event, kept EVENT_DEDUPE_SECONDS so a replayed press is a no-op, then expired.
+      // The hosted twin of the core/channel rows above; not a durable record (the decision itself is stored by the approval gate, with no expiry).
+      "packages/broker/src/core-host/chat-decision.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
@@ -162,7 +265,7 @@ describe("the health route's grants (A13)", () => {
     const dispatchItem = shared.slice(shared.indexOf("export function workflowDispatchItem("));
     expect(dispatchItem).toContain('entityType: "WORKFLOW_DISPATCH"');
     expect(shared.split("\n").filter((line) => /indexExpiresAt|INDEX_EXPIRY_ATTRIBUTE/.test(line)).map((line) => line.trim())).toEqual([
-      'import { INDEX_EXPIRY_ATTRIBUTE, OPERATION_PROMPT_MAX_BYTES, PLAN_DOCUMENT_INFO_STRING, type PlanDocumentKind } from "@agentx/contracts";',
+      'import { INDEX_EXPIRY_ATTRIBUTE, OPERATION_PROMPT_MAX_BYTES } from "@agentx/contracts";',
       "indexExpiresAt: number;",
       "[INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + WORKFLOW_DISPATCH_RETENTION_SECONDS,",
     ]);

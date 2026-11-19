@@ -1,4 +1,4 @@
-import { DESIGN_REVIEW_WORKER_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
+import { PREPARE_EVAL_HEALTH_FEATURE, DESIGN_REVIEW_WORKER_FEATURE, ROVARA_SKILLS_FEATURE, EVAL_PROMPT_LOCATIONS_FEATURE, KNOWLEDGE_CONTEXT_FEATURE, WIKI_AGENT_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, TASK_FLAKY_RERUN_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, WIKI_BUILD_FEATURE, TEST_ENV_BASELINE_FEATURE, USAGE_CHECKPOINTS_FEATURE, TEST_ENV_MULTI_REPO_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
 
 /**
  * The optional invocation fields this worker implements, listed by hand and advertised on /ping. WORKER_INVOCATION_FEATURES
@@ -7,6 +7,11 @@ import { DESIGN_REVIEW_WORKER_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEAT
  * contracts adds it here when the worker implements it ("task.agentRun" was added by Task 23).
  */
 export const WORKER_IMPLEMENTED_FEATURES = [
+  "task.evalRound.v1",
+  // The model gateway's address delivered with an eval request (`evalGatewayUrl`), used when the host sets no `ROVARA_EVAL_GATEWAY_URL` of its own (verification/eval-wiring.ts `evalEnvironmentWithGateway`).
+  "task.evalGateway.v1",
+  // L4-EVH: the opt-in eval health run on a read-only, pinned preparation of main (eval-health-run.ts).
+  PREPARE_EVAL_HEALTH_FEATURE,
   "task.modelPolicy",
   "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview",
   "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode",
@@ -41,6 +46,7 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   "task.liveSteer.v1",
   // SH14: the setup run that runs commands (setup-agent-run.ts), on the run's own network with the DNS-watch helper. Listed only by a worker image that carries the helper script and the setup sandbox guard.
   SETUP_AGENT_FEATURE,
+  WIKI_BUILD_FEATURE,
   // SH30: company recipes offered to the detectors (test-env-detect.ts `recipes`).
   SETUP_RECIPES_FEATURE,
   // Meta repo lane A3: the prepare invocation's `meta` request (the project's meta repository, read-only and sparse; meta-checkout.ts).
@@ -54,18 +60,30 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   "task.ownerRedirect.v1",
   // Live interaction A2: a read-only look at the working tree for an Ask (peek-invocation.ts).
   "task.peek.v1",
-  // Enterprise foundations I3: the commit a publication makes carries a random attribution reference, and the description names who asked and who approved (publish.ts).
+  // Plug-in foundations I3: the commit a publication makes carries a random attribution reference, and the description names who asked and who approved (publish.ts).
   "publish.attribution",
   // Live interaction F3: a deep diagnosis, the read-only look answered with the diagnosis JSON (diagnosis.ts).
   "task.diagnosis.v1",
   // Proof and evidence (wire-proof): a CHECKS run writes evidence-raw.json when the invocation carries `evidenceCapture` (verification/evidence-raw.ts).
   "task.evidenceCapture.v1",
+  // TE-H1 browser evidence (DEC 241): a CHECKS run that carries `browserEvidence` starts the app in its sandbox and photographs the changed pages in the executor image (browser-evidence-run.ts).
+  "task.browserEvidence.v1",
+  // TE-H1 slice 4: the same run also records each page of the candidate's side and keeps the video of a page that failed, for a recipe with `video` (the project says its app shows fixture data only; browser-evidence-chromium.ts).
+  "task.browserEvidenceVideo.v1",
   // Learning v2 (L4): approved lessons arrive as `learnedContext`, are re-checked against the base commit and framed as inert advice (learned-run.ts, learned-context.ts).
   "task.learnedContext.v1",
+  // Lead 4 A1: the project wiki as read-only files outside the repositories, with an index in the step's context and a report of the pages read (wiki-agent.ts).
+  WIKI_AGENT_FEATURE,
+  // Lead 4 L4-AK2: the knowledge briefing and the pull set, with `knowledge_for` and `knowledge_report` (knowledge-run.ts, knowledge-tools.ts).
+  KNOWLEDGE_CONTEXT_FEATURE,
+  // L4-AK3: the project's Rovara skills for a plan or build step (read_skill; digest-checked, execution lines removed).
+  ROVARA_SKILLS_FEATURE,
   // Test environment (wire-testenv): a setup draft run that is told `testEnvDetect` also reports the environment the detectors would propose (test-env-detect.ts).
   "task.testEnvDetect.v1",
   // Test environment (wire-testenv): a verification run that carries the environment's plan applies its test selection and round budget and reports the selection (verification/test-env-plan.ts).
   "task.testEnvironment.v1",
+  // TE-C6: the plan's `flakyRerun: true` (a failing test of a check that passed before is rerun once; verification/flaky-rerun.ts).
+  TASK_FLAKY_RERUN_FEATURE,
   // Evidence (S-2): the plan's `checks[].coveragePath` (the approved report) is read as a named coverage report (verification/evidence-raw.ts).
   "task.testEnvCoveragePath.v1",
   // N9 (INTG2): the prepare invocation's `registries` (a project's private package registries for the setup and readiness commands; registry-config.ts).
@@ -76,7 +94,7 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   "prepare.savedEnvBuild.v1",
   // P1: a prepare invocation's `pins` (the heads the broker read) are checked against what the worker resolves (prepare.ts).
   "prepare.pins.v1",
-  // Enterprise foundations P8: the repository credential exchange takes an ssh key as well as a token or a password (repository-credentials.ts, git-auth.ts).
+  // Plug-in foundations P8: the repository credential exchange takes an ssh key as well as a token or a password (repository-credentials.ts, git-auth.ts).
   "repository.credentialKinds.v1",
   // SR-1 (switch `cr`): the second reviewer inside a review operation (verification/review.ts `secondReviewer`).
   SECOND_REVIEWER_FEATURE,
@@ -84,5 +102,21 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   DESIGN_REVIEW_WORKER_FEATURE,
   // NH-1: the nightly run (nightly-run.ts): the Prove sequence over the approved environment, with one rerun of failures and the coverage map, reported through the nightly action.
   NIGHTLY_RUN_FEATURE,
+  // Standing instructions: the broker-built block of company rules and "How we work", placed in the system prompt of every session (pi-session.ts, run-agent-step.ts, verification/review.ts).
+  STANDING_INSTRUCTIONS_FEATURE,
+  // Lessons replay, the file arm: places a replay copy's lessons file and pointer in its checkout, out of the candidate (eval-files.ts).
+  EVAL_FILES_FEATURE,
+  // General fakes (DEC 234): a CHECKS round answers the configured outside services with Rovara-made fakes from their OpenAPI descriptions, on the local shell (general-fakes-round.ts).
+  GENERAL_FAKES_FEATURE,
+  // The approved plan a coding run keeps in its conversation summaries (compaction.ts).
+  "task.workflowApprovedPlan.v1",
+  // Per-run dollar stop: a run asked for `usageCheckpoints` reports its usage while it runs, not only at its end (run-task.ts `checkpointUsage`).
+  USAGE_CHECKPOINTS_FEATURE,
+  // TE-C1: a verification run whose plan carries `baselineCandidates` finds the nearest one that is an ancestor of the task's base commit, before any check runs, and reports it in evidence-raw.json (verification/baseline-ancestry.ts).
+  TEST_ENV_BASELINE_FEATURE,
+  // TE-MR2b: a plan with `repositoryCoverageMap` and a repository on each check is read (verification/multi-repo-selection.ts); selection across repositories stays off (the whole check runs) until it is proven live.
+  TEST_ENV_MULTI_REPO_FEATURE,
+  // L4-EVP: the eval's changed-prompt classifier reads the project's confirmed prompt locations, region by region where it can (verification/eval-changed-prompt.ts).
+  EVAL_PROMPT_LOCATIONS_FEATURE,
   // Test services (`task.testServices.v1`) is NOT listed here: it is advertised only by a worker that has a test-services configuration (test-services-run.ts `testServicesAdvertisedFeatures`, added in main.ts).
 ] as const satisfies readonly WorkerInvocationFeature[];
