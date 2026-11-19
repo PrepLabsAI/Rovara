@@ -272,7 +272,7 @@ export class CompanySignInStore {
     if (owner && actor?.role !== "owner") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_ONLY_OWNER });
     if (actor === undefined || actor.companyId !== companyId || actor.revokedAt !== undefined || (actor.role !== "admin" && actor.role !== "owner")) throw unavailable();
   }
-  private async writeMember(previous: Member, next: Member, event: string, createdBy?: string, fence: RemovalFence = {}): Promise<void> {
+  private async writeMember(previous: Member, next: Member, event: string, createdBy?: string, fence: RemovalFence = {}, retryWitness = true): Promise<void> {
     // A self-actor's target snapshot must itself still be authorized. The earlier
     // actor read alone can race with this read; the snapshot CAS then fences it.
     if (createdBy === previous.personId && (previous.revokedAt !== undefined || (previous.role !== "admin" && previous.role !== "owner"))) throw unavailable();
@@ -313,7 +313,13 @@ export class CompanySignInStore {
         ...(ownerChange && createdBy === undefined ? { ownerOverride: true } : {}), ...(fence.successorId === undefined ? {} : { successorId: fence.successorId }) });
     } catch (error) {
       const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> } | null)?.CancellationReasons;
-      if (witness !== undefined && conditional(error) && reasons?.[witnessIndex]?.Code === "ConditionalCheckFailed") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_LAST_OWNER });
+      if (witness !== undefined && conditional(error) && reasons?.[witnessIndex]?.Code === "ConditionalCheckFailed") {
+        // Another owner may have stepped down after the roster read while a third
+        // live owner still exists. Refresh the witness once and retry the same
+        // target snapshot transaction; if no witness remains, the retry refuses.
+        if (retryWitness) return this.writeMember(previous, next, event, createdBy, fence, false);
+        throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_LAST_OWNER });
+      }
       if (successorChecked && conditional(error) && reasons?.[successorIndex]?.Code === "ConditionalCheckFailed") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_SUCCESSOR_INVALID });
       // The target's snapshot (index 0) moved: with an expected role, that is "the person changed", in fixed words.
       if (fence.expectedRole !== undefined && conditional(error) && reasons?.[0]?.Code === "ConditionalCheckFailed") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_CHANGED });
@@ -341,6 +347,10 @@ export class CompanySignInStore {
     const member = await this.membership(personId);
     if (member === undefined || member.companyId !== companyId) return "not_found";
     if (member.revokedAt !== undefined) throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_REVOKED });
+    // A caller may change another member's role under the ordinary owner/admin
+    // rules. Self-change is narrower: only a live owner may step down, and the
+    // witness condition in writeMember keeps another live owner at commit time.
+    if (createdBy === personId && (member.role !== "owner" || role === "owner")) throw unavailable();
     if (member.role === role) return "unchanged";
     await this.writeMember(member, { ...member, role, updatedAt: this.iso(), updatedBy: createdBy ?? "operator" }, "company-member-role-set", createdBy);
     return "changed";

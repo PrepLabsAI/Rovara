@@ -13,7 +13,8 @@
 //     ONLY through T3b's companyMemberActionsThroughLambda, which re-reads that membership and builds the identity request itself; this module never names a request kind.
 //   - A plain member, and anyone whose membership does not read, gets the same answers as the invitation routes (404 "not found" / 401 sign in again).
 //   - A person of another company, a missing person and an id that does not read all answer the same "member not found".
-//   - Only an owner may change or remove an owner, or make someone an owner (DEC 232e). Nobody changes their own role or removes themselves here.
+//   - Only an owner may change or remove an owner, or make someone an owner (DEC 232e). A live owner may step down in their own role, but cannot leave their company without another live owner.
+//     Self-removal and an admin's self-change are refused.
 //   - DEC 254zzz73: there is no step-up; a removal or a role change needs the signed-in admin's live membership and the role rules above, read now, and (DEC 254zzz91)
 //     the Rovara website's own client (`webApp`): the CLI's token or an AI tool's is refused with ON_THE_WEBSITE_MESSAGE.
 //   - DEC 254zzz84 (5), removal with a hand-over (company-member-handover.ts): the remover picks a successor (default: themselves), a live member of the same company.
@@ -182,7 +183,8 @@ export async function routeCompanyMembers(ctx: CompanyMemberRouteContext, input:
     if (query.some(([key]) => key !== "successorId") || query.length > 1) throw agentXError("CONFIG_INVALID", PREVIEW_QUERY);
     return removalPreview(ctx, me, target, query[0]?.[1] ?? me.personId);
   }
-  if (targetId === caller.developerId) throw agentXError("FORBIDDEN", OWN_MEMBERSHIP);
+  const selfStepDown = targetId === caller.developerId && target.role === "owner" && me.role === "owner" && match[2] === "role";
+  if (targetId === caller.developerId && !selfStepDown) throw agentXError("FORBIDDEN", OWN_MEMBERSHIP);
   // Owner DEC 254zzz91: a role change or a removal is made only from the Rovara website's own client (never the CLI's or an AI tool's token); reads and the preview are not.
   if (input.webApp !== true) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
   if (match[2] === "handover") {
@@ -193,6 +195,7 @@ export async function routeCompanyMembers(ctx: CompanyMemberRouteContext, input:
   if (match[2] === "role") {
     const parsed = RoleBody.safeParse(body(request));
     if (!parsed.success) throw agentXError("CONFIG_INVALID", ROLE_BODY);
+    if (selfStepDown && parsed.data.role === "owner") throw agentXError("FORBIDDEN", OWN_MEMBERSHIP);
     if ((target.role === "owner" || parsed.data.role === "owner") && me.role !== "owner") throw agentXError("FORBIDDEN", OWNER_ONLY);
     unwrap(await ctx.members.setRole(caller, { companyId: me.companyId, personId: targetId, role: parsed.data.role }));
     return { ok: true };

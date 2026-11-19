@@ -36,6 +36,7 @@ import { attentionOf, retryableBlock } from "./attention.js";
 import { createLocalSessionControl } from "./host.js";
 import { NOTHING_TO_RETRY_STEP, retryBlockedStep } from "./retry.js";
 import { stepOf } from "./facts.js";
+import { getModeChange, modeApprovalRequest } from "../../core/second-review/mode.js";
 import { loadDesignProof } from "../../core/design-review/design-proof.js";
 import { designProofLine } from "../../core/design-review/proof-line.js";
 import { designChoiceDigest } from "../../core/design-review/choice-subject.js";
@@ -323,7 +324,14 @@ export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "compan
     async secondReview(input, context): Promise<LocalActionResult> {
       if (deps.secondReview === undefined) return { ok: false, reason: "not_found", message: "That is no longer there." };
       try {
-        await deps.secondReview.apply(deps.owner, input.action === "mode" && input.scope === "company" ? { action: "mode", scope: "company", mode: input.mode } : input, { fresh: context.fresh });
+        if (input.action === "approve-mode") {
+          const pending = await getModeChange(deps.secondReview.deps.store, deps.companyId, input.changeId);
+          if (pending === undefined || pending.orgId !== deps.companyId) return { ok: false, reason: "not_found", message: "No such proposal." };
+          const request = modeApprovalRequest(deps.secondReview.deps, pending);
+          await deps.secondReview.apply(deps.owner, { ...input, proof: context.proof(request) });
+        } else {
+          await deps.secondReview.apply(deps.owner, input.action === "mode" && input.scope === "company" ? { action: "mode", scope: "company", mode: input.mode } : input, { fresh: context.fresh });
+        }
         return { ok: true, message: "Saved." };
       } catch (error) {
         return refusalOf(error);
