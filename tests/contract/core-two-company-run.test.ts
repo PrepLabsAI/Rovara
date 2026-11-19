@@ -51,7 +51,9 @@ async function world(options: { noSigner?: boolean; offeredModels?: OfferedModel
       const personId = key.pk.slice("COMPANY_MEMBER#".length), companyId = members.get(personId);
       return { Item: companyId === undefined ? undefined : { ...key, entityType: "COMPANY_MEMBERSHIP", personId, companyId, role: "member", joinedAt: new Date(w.clock.now).toISOString() } };
     }
-    if (key.pk.startsWith("MEMBER#")) return { Item: { ...key, projectName: "payments", role: "developer" } };
+    // DEC 254zzz80: each person's "payments" grant sits in their own company's partition (`ORG#<company>#MEMBER#<person>`), as a named company keeps its grants.
+    const grant = /^ORG#(org_[0-9a-z]{20})#MEMBER#(.+)$/u.exec(key.pk);
+    if (grant !== null) return { Item: members.get(grant[2]!) === grant[1] ? { ...key, projectName: "payments", role: "developer" } : undefined };
     return { Item: await w.store.get(key) };
   } };
   const key = makeKey("t".repeat(16));

@@ -66,7 +66,9 @@ async function world() {
       const personId = key.pk.slice("COMPANY_MEMBER#".length), found = members.get(personId);
       return { Item: found === undefined ? undefined : { ...key, entityType: "COMPANY_MEMBERSHIP", personId, companyId: found.companyId, role: found.role, joinedAt: new Date(w.clock.now).toISOString() } };
     }
-    if (key.pk.startsWith("MEMBER#")) return { Item: { ...key, projectName: PROJECT, role: grants.get(key.pk.slice("MEMBER#".length)) ?? "developer" } };
+    // DEC 254zzz80: a person's grant sits in their own company's partition (`ORG#<company>#MEMBER#<person>`), as a named company keeps its grants.
+    const grant = /^ORG#(org_[0-9a-z]{20})#MEMBER#(.+)$/u.exec(key.pk);
+    if (grant !== null) return { Item: members.get(grant[2]!)?.companyId === grant[1] ? { ...key, projectName: PROJECT, role: grants.get(grant[2]!) ?? "developer" } : undefined };
     return { Item: await w.store.get(key) };
   } };
   // The gateway's authority answer: it confirms the approver and the connected customer key, and names roles the broker must NOT use.

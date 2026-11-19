@@ -15,6 +15,7 @@ import {
   type TaskReadersResponse,
 } from "@agentx/contracts";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
+import { taskCompanyId } from "../developer/task-person-identity.js";
 
 export interface TaskReaderPerson {
   /** The person's display name now. */
@@ -28,8 +29,11 @@ export interface TaskReaderDependencies {
   tableName: string;
   now(): number;
   log?(entry: Record<string, unknown>): void;
-  /** A registered, not removed person and whether they are a member of `project`; undefined for anyone else. Without it, tasks can't be shared. */
-  taskReaderPerson?(developerId: string, project: string): Promise<TaskReaderPerson | undefined>;
+  /**
+   * A registered, not removed person and whether they are a member of `project` in the task's company (`taskCompany`, DEC 254zzz98 review L2: a live member of that company, with
+   * its grant); undefined for anyone else. Without it, tasks can't be shared.
+   */
+  taskReaderPerson?(developerId: string, project: string, taskCompany?: string): Promise<TaskReaderPerson | undefined>;
 }
 
 interface ReaderRecord {
@@ -56,9 +60,9 @@ function developerIdOf(value: string): string {
   return value;
 }
 
-function person(deps: TaskReaderDependencies): (developerId: string, project: string) => Promise<TaskReaderPerson | undefined> {
+function person(deps: TaskReaderDependencies): (developerId: string, task: DeveloperTaskRecord) => Promise<TaskReaderPerson | undefined> {
   if (deps.taskReaderPerson === undefined) throw agentXError("NOT_FOUND", "sharing tasks is not set up in this deployment");
-  return (developerId, project) => deps.taskReaderPerson!(developerId, project);
+  return (developerId, task) => deps.taskReaderPerson!(developerId, task.project, taskCompanyId(task));
 }
 
 async function readerRecord(deps: TaskReaderDependencies, taskId: string, developerId: string): Promise<ReaderRecord | undefined> {
@@ -93,7 +97,7 @@ const view = (record: ReaderRecord, now: TaskReaderPerson | undefined): TaskRead
 export async function readsAsReader(deps: TaskReaderDependencies, task: DeveloperTaskRecord, developerId: string): Promise<boolean> {
   if (deps.taskReaderPerson === undefined) return false;
   if (await readerRecord(deps, task.taskId, developerId) === undefined) return false;
-  const now = await deps.taskReaderPerson(developerId, task.project);
+  const now = await deps.taskReaderPerson(developerId, task.project, taskCompanyId(task));
   if (now?.projectMember !== true) {
     log(deps, { event: "developer.task_reader_refused", taskId: task.taskId, reason: now === undefined ? "not_registered" : "not_project_member" });
     return false;
@@ -105,7 +109,7 @@ export async function readsAsReader(deps: TaskReaderDependencies, task: Develope
 export async function listTaskReaders(deps: TaskReaderDependencies, task: DeveloperTaskRecord): Promise<TaskReadersResponse> {
   const lookup = person(deps);
   const records = await readerRecords(deps, task.taskId);
-  return { readers: await Promise.all(records.slice(0, TASK_READERS_MAX).map(async (record) => view(record, await lookup(record.developerId, task.project)))) };
+  return { readers: await Promise.all(records.slice(0, TASK_READERS_MAX).map(async (record) => view(record, await lookup(record.developerId, task)))) };
 }
 
 /** `PUT …/readers/{developerId}`: the owner shares the task with a member of its project. Sharing again changes nothing. */
@@ -114,7 +118,7 @@ export async function grantTaskReader(deps: TaskReaderDependencies, task: Develo
   if (!parsed.success) throw agentXError("CONFIG_INVALID", "send a requestId (a UUID) and the role viewer");
   const developerId = developerIdOf(rawDeveloperId);
   if (developerId === ownerId) throw agentXError("CONFIG_INVALID", "you own this task, so you already read it");
-  const now = await person(deps)(developerId, task.project);
+  const now = await person(deps)(developerId, task);
   // Not a person and not a member of the project are worded alike, so the answer doesn't say who is registered.
   if (now === undefined || !now.projectMember) throw agentXError("CONFIG_INVALID", `that person isn't a member of ${task.project}; add them to the project first`);
   const existing = await readerRecord(deps, task.taskId, developerId);

@@ -7,6 +7,7 @@ import { Membership, membershipKey, recordInCompany } from "./company-check.js";
 import { GithubInstallationBindings } from "./github-credentials.js";
 import { projectKey } from "./project-records.js";
 import { projectMemberKey } from "./admin-actions.js";
+import { grantKeyFor } from "./company-layout.js";
 
 type Row = Record<string, unknown>;
 type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
@@ -152,7 +153,8 @@ function parseRequest(value: unknown, deps: CoreBackfillDependencies) {
   return { mapping, dryRun, limit, cursor, runId };
 }
 const encode = (cursor: Cursor) => Buffer.from(JSON.stringify(cursor)).toString("base64url");
-function grantKey(personId: string, projectName: string) { return { pk: `MEMBER#${personId}`, sk: `PROJECT#${projectName}` }; }
+/** DEC 254zzz80: the grant in the mapped company's own layout (company-layout.ts: a named company's own partition; the built-in company: the legacy row). */
+function grantKey(companyId: string, personId: string, projectName: string) { return grantKeyFor(companyId, personId, projectName); }
 function personKey(personId: string) { return { pk: `DEVELOPER#${personId}`, sk: "META" }; }
 async function person(deps: CoreBackfillDependencies, personId: string) {
   const row = await get(deps, personKey(personId), deps.signInTableName);
@@ -202,8 +204,8 @@ async function processGrant(deps: CoreBackfillDependencies, mapping: Mapping, in
   const memberKey = membershipKey(g.personId), member = await get(deps, memberKey, deps.signInTableName);
   // Preview may use the explicitly planned membership only; real writes require the durable row.
   if (member === undefined ? !dryRun : !memberMatches(member, mapping.companyId, g.personId, expectedRole)) throw conflict();
-  const key = grantKey(g.personId, g.projectName), existing = await get(deps, key);
-  const reverseKey = projectMemberKey(g.projectName, g.personId), reverse = await get(deps, reverseKey);
+  const key = grantKey(mapping.companyId, g.personId, g.projectName), existing = await get(deps, key);
+  const reverseKey = projectMemberKey(g.projectName, g.personId, mapping.companyId), reverse = await get(deps, reverseKey);
   if (reverse !== undefined && (reverse["entityType"] !== "PROJECT_MEMBER" || reverse["role"] !== g.role)) throw conflict();
   if (existing !== undefined) {
     if (existing["entityType"] !== "MEMBERSHIP" || existing["ownerKey"] !== g.personId || existing["projectName"] !== g.projectName || existing["role"] !== g.role || !owned(existing, mapping.companyId)) throw conflict();
@@ -289,7 +291,7 @@ export async function checkCorePeople(dependencies: CoreBackfillDependencies, va
       else if (!memberMatches(row, mapping.companyId, p.personId, p.role)) gaps.push({ person: index, reason: "membership_conflict" });
     }
     for (const [index, g] of mapping.grants.entries()) {
-      const row = await get(deps, grantKey(g.personId, g.projectName));
+      const row = await get(deps, grantKey(mapping.companyId, g.personId, g.projectName));
       if (row === undefined) gaps.push({ grant: index, reason: "grant_missing" });
       else if (row["entityType"] !== "MEMBERSHIP" || row["projectName"] !== g.projectName || row["ownerKey"] !== g.personId || row["role"] !== g.role || !owned(row, mapping.companyId)) gaps.push({ grant: index, reason: "grant_conflict" });
     }

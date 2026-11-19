@@ -4,14 +4,14 @@
 // Mutants are listed in briefs/lead4/L4-U5d-MUTANTS-20261118.md with the test that kills each.
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { SLACK_CHANNEL as SLACK, sharedTaskKey } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, SLACK_CHANNEL as SLACK, sharedTaskKey } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/links.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
 import type { CoreEntryCaller, CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import type { ChatThreadInput, ChatThreadInputResult } from "../../packages/broker/src/core-host/chat-thread-input.js";
-import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { bindSlackChannelInCompany, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa";
@@ -27,18 +27,22 @@ const CORE = { engine: "core", areas: { flow: "core", build: "core", merge: "cor
 beforeAll(async () => { await loadSlackBroker(); });
 
 /** A company-mode broker (one Slack workspace of company A, one linked person) over a fake core entry that records each reply it is given. */
-async function world(options: { entry?: "none" | "no-thread-input"; stamp?: boolean; guard?: Record<string, unknown> | null; company?: string } = {}) {
+async function world(options: { entry?: "none" | "no-thread-input"; stamp?: boolean; guard?: Record<string, unknown> | null; company?: string; installTeam?: true } = {}) {
   const h = await createDeveloperTaskBroker({ channelMembers: async (r) => ({ ok: true, memberOf: r.channelIds }) });
   const store = new MemoryDocumentStore();
   const company = options.company ?? A;
+  // DEC 254zzz80: a NAMED company's channel binding lives in its own partition.
+  bindSlackChannelInCompany(h.db, company);
   const workspaces = { store, getProject: async () => ({ companyId: company }), linkUrl: (code: string) => `https://example.test/review/link/${code}`,
     requireCompany: async (team: string): Promise<string> => { if (team !== SLACK_TEAM) throw Error("private"); return company; }, tokenForEvent: vi.fn(async () => ({ companyId: company, token: "x" })) };
   const code = await issueChannelLinkCode({ store, orgId: company, now: Date.now }, { channel: "slack", tenant: SLACK_TEAM, userId: USER });
   await redeemChannelLinkCode({ store, orgId: company, now: Date.now }, PERSON, code.code);
   const calls: Array<{ caller: unknown; input: Record<string, unknown> }> = [];
   const answerWith: { value: ChatThreadInputResult | Error } = { value: { outcome: "captured", notice: "note_saved" } };
+  const decisions: unknown[] = [];
   const entry: CoreTaskEntry = {
     route: vi.fn(async () => undefined),
+    chatDecision: vi.fn(async (caller: CoreEntryCaller) => { decisions.push(caller); return { outcome: "decided" as const }; }),
     ...(options.entry === "no-thread-input" ? {} : {
       threadInput: vi.fn(async (caller: CoreEntryCaller, input: ChatThreadInput) => {
         calls.push({ caller, input: { ...input } });
@@ -49,7 +53,9 @@ async function world(options: { entry?: "none" | "no-thread-input"; stamp?: bool
   };
   const module = await loadSlackBroker();
   const handler = module.createAwsBrokerHandler({ ...h.brokerInput, store, workspaces, companies: { companyOf: async (id: string) => (id === PERSON ? company : undefined) },
-    developer: { ...h.brokerInput.developer!, slackTeamId: "T0OTHER000", ...(options.entry === "none" ? {} : { coreTasks: entry }) } } as never);
+    // DEC 254zzz95: `installTeam`: SLACK_TEAM is the install's own team (its legacy view), as on staging.
+    ...(options.installTeam === true ? { slackWorkspaceLegacyTeamId: SLACK_TEAM } : {}),
+    developer: { ...h.brokerInput.developer!, slackTeamId: options.installTeam === true ? SLACK_TEAM : "T0OTHER000", ...(options.entry === "none" ? {} : { coreTasks: entry }) } } as never);
   if (options.stamp !== false) h.db.set({ ...engineStampKey(TASK), coreEngine: CORE });
   if (options.guard !== null) {
     h.db.set({
@@ -60,8 +66,59 @@ async function world(options: { entry?: "none" | "no-thread-input"; stamp?: bool
   const note = (extra: Record<string, unknown> = {}) => handler({
     source: "agentx.slack-ingress", action: "thread-note", taskId: TASK, userId: USER, thread, eventId: "EvNote0001", messageTs: "1700000001.000100", text: "Also cover the 404 case.", ...extra,
   });
-  return { ...h, handler, entry, calls, answerWith, note, store };
+  /** A core plan press (the interactivity Lambda's invoke), APPROVE in this thread. */
+  const press = (actorTenant = SLACK_TEAM) => handler({ source: "agentx.slack-ingress", action: "core-plan-press", press: {
+    conversation: { channel: SLACK, tenant: SLACK_TEAM, space: SLACK_CHANNEL, thread: thread.threadTs }, actor: { channel: SLACK, tenant: actorTenant, userId: USER },
+    eventId: "EvPress0001", requestId: randomUUID(), expectedRevision: 1, artifactDigest: "c".repeat(64), decision: "APPROVE", reason: "",
+  } });
+  return { ...h, handler, entry, calls, answerWith, note, press, decisions, store, workspaces };
 }
+
+describe("DEC 254zzz95: the install team of a NAMED company runs its thread follow-ups as that company", () => {
+  it("a reply in the install team's thread reaches the core's input as the linked person, as in company mode", async () => {
+    const w = await world({ installTeam: true });
+    const result = await w.note({ mention: true });
+    expect(result.statusCode, result.body).toBe(200);
+    expect(JSON.parse(result.body)).toEqual({ outcome: "captured", notice: "note_saved", core: true });
+    expect(w.calls).toHaveLength(1);
+    expect(w.calls[0]!.caller).toMatchObject({ developerId: PERSON });
+  });
+
+  it("a core plan press in the install team's thread reaches the core's decision as the linked person", async () => {
+    const w = await world({ installTeam: true });
+    const result = await w.press();
+    expect(result.statusCode, result.body).toBe(200);
+    expect(JSON.parse(result.body)).toEqual({ status: "decided" });
+    expect(w.decisions).toEqual([expect.objectContaining({ developerId: PERSON })]);
+  });
+
+  it("a core plan press whose actor names another workspace is not switched, and is refused before the core", async () => {
+    const w = await world({ installTeam: true });
+    const result = await w.press("T0ELSEWHERE");
+    expect(JSON.parse(result.body)).toEqual({ status: "refused", reason: "not_allowed" });
+    expect(w.decisions).toEqual([]);
+  });
+
+  it("an install team whose company cannot be read answers a retryable error and reaches nothing (never the legacy view's guess)", async () => {
+    const w = await world({ installTeam: true });
+    w.workspaces.requireCompany = async () => { throw new Error("refused"); };
+    const result = await w.note({ mention: true });
+    expect(result.statusCode).toBe(503);
+    expect(w.calls).toEqual([]);
+    expect((await w.press()).statusCode).toBe(503);
+    expect(w.decisions).toEqual([]);
+  });
+
+  it("the built-in company's install team keeps the legacy view: the core's input is never reached as a linked person", async () => {
+    const w = await world({ installTeam: true, company: IMPLICIT_COMPANY_ID });
+    await w.note({ mention: true });
+    expect(w.calls.filter((call) => (call.caller as { developerId?: string }).developerId === PERSON)).toEqual([]);
+    // The legacy view did run: a core press there is decided as the Slack account's own (legacy) caller, never the linked person.
+    expect((await w.press()).statusCode).toBe(200);
+    expect(w.decisions).toHaveLength(1);
+    expect(w.decisions).not.toEqual([expect.objectContaining({ developerId: PERSON })]);
+  });
+});
 
 describe("a reply in the thread of a task the core owns", () => {
   it("reaches the core's input as the linked person, with the thread, the sender, the message's own id and the flags; the answer carries the core's notice", async () => {
