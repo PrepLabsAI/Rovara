@@ -15,7 +15,7 @@ export function projectSetupTerminalAuthorityChecks(
   execution: TerminalExecutionAuthority,
   runtime: TerminalRuntimeIdentity,
   session: TerminalSessionIdentity,
-  /** DEC 254zzz80: the company the project's stored revision names; a named company's grant is in its own partition (company-layout.ts). */
+  /** DEC 254zzz98: where the grant beside the project's revision is (undefined: the legacy row beside a legacy revision, as the broker's setup paths pass it). */
   companyId: string | undefined,
 ) {
   return [

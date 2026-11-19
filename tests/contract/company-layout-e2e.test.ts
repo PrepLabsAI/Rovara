@@ -396,9 +396,9 @@ describe("R2-F1 follow-up (DEC 254zzz106): the review's legacy-row and race find
     // Bob holds a grant on demo-tasklog only in BETA. Membership answers DEMO to the first read (the start's member check), BETA after that.
     let reads = 0;
     const membershipOf = async () => (reads++ === 0 ? { companyId: DEMO, role: "member" as const } : { companyId: BETA, role: "member" as const });
-    const grantRole = live(membershipOf as never, role(w.db, "State"));
+    const grantRole = live(membershipOf, role(w.db, "State"));
     const projectGrant = async (personId: string, name: string, checkedCompany?: string) => mayUseProject(await grantRole(personId, name, checkedCompany));
-    const verdict = await access({ companyId: DEMO, membershipOf: membershipOf as never, projectGrant }).checkStart({ companyId: DEMO, personId: BOB, displayName: "b", roles: [], provider: "cloud" }, "demo-tasklog", undefined, undefined);
+    const verdict = await access({ companyId: DEMO, membershipOf, projectGrant }).checkStart({ companyId: DEMO, personId: BOB, displayName: "b", roles: [], provider: "cloud" }, "demo-tasklog", undefined, undefined);
     expect(verdict).toEqual({ allowed: false, code: "FORBIDDEN", message: NO_PROJECT_GRANT });
     expect(reads).toBe(1);
   });

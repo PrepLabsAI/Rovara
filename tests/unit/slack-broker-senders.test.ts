@@ -50,7 +50,11 @@ it("project senders retain the verified thread; a named company's project is the
     db.delete(String(own.pk), String(own.sk));
     db.set({ ...own, pk: `SLACK_BINDING#${teamId}` });
     await expect(deps.workspaceForProject!("payments")).rejects.toThrow("This Slack workspace is not available.");
-    db.delete(`SLACK_BINDING#${teamId}`, "CHANNEL#C0SHARED"); db.set(own);
+    db.delete(`SLACK_BINDING#${teamId}`, "CHANNEL#C0SHARED");
+    // A row in the company's own partition that names another company is drift, never this company's binding (delta review L3).
+    db.set({ ...own, companyId: companyId === A ? B : A });
+    await expect(deps.workspaceForProject!("payments")).rejects.toThrow("This Slack workspace is not available.");
+    db.set(own);
     // The legacy lookup (T4a's, `PROJECT#<name>`) is not this company's partition: what it says no longer decides.
     getProject.mockResolvedValue({ companyId: companyId === A ? B : A });
     expect(await deps.workspaceForProject!("payments")).toEqual({ companyId, teamId });

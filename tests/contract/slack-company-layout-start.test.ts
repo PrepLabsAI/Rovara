@@ -8,7 +8,8 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/links.js";
 import type { CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
-import { SLACK_CHANNEL, SLACK_TEAM, call, loadSlackBroker } from "../support/slack-broker.js";
+import { SLACK_CHANNEL, SLACK_TEAM, call, ensureWorkspace, loadSlackBroker } from "../support/slack-broker.js";
+import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 
 const A = "org_jckf8av6ri11rszcdjsa"; // the staging company
 const B = "org_bbbbbbbbbbbbbbbbbbbb";
@@ -155,5 +156,71 @@ describe("the Slack start reads the binding in the company's own layout", () => 
     expect(on.calls).toEqual(off.calls);
     expect(JSON.stringify(on.calls)).toContain('"project":"payments"');
     expect(JSON.stringify(on.calls)).not.toContain(PERSON);
+  });
+});
+
+describe("DEC 254zzz98 (delta review H1): a named company's Slack thread never reaches a legacy project of the same name that is not its own", () => {
+  const THREAD = `${SLACK_TEAM}/${SLACK_CHANNEL}/1758240000.000300`;
+  /** The built-in company's own project of the same name (legacy, unstamped), with its own repository and GitHub MCP tools. */
+  const builtInNamesake = (companyId?: string) => ({ pk: "PROJECT#demo-tasklog", sk: "REV#000000000001", entityType: "PROJECT", ...(companyId === undefined ? {} : { companyId }),
+    registeredBy: "c".repeat(64), registeredAt: "2026-11-18T00:00:00.000Z", runtimeBinding: { deploymentMode: "ec2-ebs" },
+    definition: { name: "demo-tasklog", revision: 1, orchestratorInstructions: "built-in", setup: [], readiness: [],
+      repositories: [{ name: "builtin", url: "https://github.com/builtin/secret.git", defaultBranch: "main", path: "repo/builtin", credentialRef: "github" }],
+      integrations: { githubMcp: { tools: [{ name: "get_me", access: "read" }] } } } });
+
+  it("the thread workspace, the GitHub MCP route and the connector route are refused; nothing is created or granted", async () => {
+    const w = await world({ installCompany: A });
+    w.db.set(companyBinding(A));
+    w.db.set(builtInNamesake());
+    const before = w.db.find(() => true).length;
+    const workspace = await ensureWorkspace(w.handler, THREAD, USER);
+    expect(workspace.status).toBe(403);
+    expect(JSON.stringify(workspace.body)).not.toMatch(/builtin|secret/);
+    expect(w.db.find(() => true).length).toBe(before);
+    // A workspace of the thread's owner on that name (made before the namesake existed, say) and a legacy grant: the MCP routes refuse too.
+    const ownerKey = ownerKeyForSubject("slack-thread", THREAD);
+    const workspaceId = "550e8400-e29b-41d4-a716-446655440077";
+    w.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "META", deploymentMode: "ec2-ebs", id: workspaceId, ownerKey, projectName: "demo-tasklog", projectRevision: 1,
+      environmentDigest: `example.test/agentx@sha256:${"a".repeat(64)}`, rootPath: "/mnt/workspace", status: "READY", fence: 1, createdAt: "2026-11-18T00:00:00.000Z", updatedAt: "2026-11-18T00:00:00.000Z" });
+    w.db.set({ pk: `MEMBER#${ownerKey}`, sk: "PROJECT#demo-tasklog", entityType: "MEMBERSHIP", ownerKey, projectName: "demo-tasklog", role: "developer" });
+    for (const path of ["github/tools?repository=builtin", "connectors/github/tools"]) {
+      const answer = await call(w.handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/${path}`, service: { principal: (await import("../support/slack-broker.js")).orchestratorPrincipal, thread: THREAD, slackUser: USER } });
+      expect(answer.status, path).toBe(403);
+      expect(JSON.stringify(answer.body)).not.toMatch(/get_me|builtin|secret/);
+    }
+  });
+
+  it("another named company's stamped legacy row of that name is refused the same way; only a legacy row of the thread's own company could serve it", async () => {
+    const w = await world({ installCompany: A });
+    w.db.set(companyBinding(A));
+    w.db.set(builtInNamesake(B));
+    expect((await ensureWorkspace(w.handler, THREAD, USER)).status).toBe(403);
+    // Control: the thread's own company's (pre-R2-F1, stamped A) legacy row is not refused by this check (whatever the workflow route then answers).
+    w.db.set(builtInNamesake(A));
+    const own = await ensureWorkspace(w.handler, THREAD, USER);
+    expect(JSON.stringify(own.body)).not.toContain("Slack channel is not bound to a project");
+    // Delta review M1: whatever the workflow wrote beside that legacy revision is the legacy grant, never one in A's own partition.
+    expect(w.db.find((item) => String(item.pk).startsWith(`ORG#${A}#MEMBER#`))).toEqual([]);
+    if (own.status === 200) expect(w.db.get(`MEMBER#${ownerKeyForSubject("slack-thread", THREAD)}`, "PROJECT#demo-tasklog")).toBeDefined();
+  });
+
+  it("delta review M1: a lazily prepared thread workspace beside the company's own stamped legacy revision writes the legacy grant, never one in A's partition", async () => {
+    const w = await world({ installCompany: A });
+    w.db.set(companyBinding(A));
+    w.db.set(builtInNamesake(A));
+    const answer = await call(w.handler, { method: "POST", path: "/v1/service/threads/workspace",
+      service: { principal: (await import("../support/slack-broker.js")).orchestratorPrincipal, thread: THREAD, slackUser: USER },
+      body: { requestId: randomUUID(), includeIntegrations: true, includeSettingsRevision: true, lazyPreparation: true } });
+    expect(answer.status, JSON.stringify(answer.body)).toBe(200);
+    expect(w.db.find((item) => String(item.pk).startsWith(`ORG#${A}#MEMBER#`))).toEqual([]);
+    expect(w.db.get(`MEMBER#${ownerKeyForSubject("slack-thread", THREAD)}`, "PROJECT#demo-tasklog")).toMatchObject({ role: "developer" });
+  });
+
+  it("the built-in company's thread (legacy binding) is unchanged: no company, no check", async () => {
+    const w = await world({ installCompany: IMPLICIT_COMPANY_ID });
+    w.db.set(builtInNamesake());
+    // The broker's registered legacy binding names "payments" (createDeveloperTaskBroker); the namesake of another name is never read for it.
+    const answer = await ensureWorkspace(w.handler, THREAD, USER);
+    expect(JSON.stringify(answer.body)).not.toContain("Slack channel is not bound to a project");
   });
 });

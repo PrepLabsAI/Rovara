@@ -2918,7 +2918,7 @@ async function retryProjectSetupAsAdministrator(
     setupExecutionId: nextExecution.setupExecutionId, operationId: nextOperation.operationId, retryActorKey: identity.ownerKey,
     originalCreatorKey: parked.data.ownerKey, createdAt: new Date().toISOString() };
   const now = new Date().toISOString();
-  const terminalAuthorityChecks = projectSetupTerminalAuthorityChecks(dependencies.tableName, parked.data, runtime.data, session.data, grantCompany(dependencies, storedCompanyOf(project)));
+  const terminalAuthorityChecks = projectSetupTerminalAuthorityChecks(dependencies.tableName, parked.data, runtime.data, session.data, LEGACY_REVISION_GRANT);
   const parkResult = { domain: "project-setup-source-interface/v1", candidateDigest: parked.data.candidateDigest,
     processStatus: "UNKNOWN", qualification: "UNKNOWN", cleanupConfirmed: false, parkReason: "setup-deadline-expired" };
   const priorExecutionMutation = expiredDispatchRetry
@@ -3028,7 +3028,7 @@ async function prepareWorkspace(
         { Put: { TableName: dependencies.tableName, Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#ADMIN`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", operationId: preparation.operationId, workspaceId: preparation.workspace.id }, ConditionExpression: "attribute_not_exists(pk)" } },
       ] }));
     } catch (error) {
-      if (!isConditional(error) || !await membershipMovedSince(dependencies, targetOwnerKey, project.definition.name, preparation.membership, grantCompany(dependencies, project.companyId))) throw error;
+      if (!isConditional(error) || !await membershipMovedSince(dependencies, targetOwnerKey, project.definition.name, preparation.membership, LEGACY_REVISION_GRANT)) throw error;
       continue;
     }
     return { operationId: preparation.operationId, workspace: publicWorkspace(preparation.workspace), alreadyReady: false };
@@ -3058,7 +3058,7 @@ function membershipPreparationItem(
   companyId: string | undefined,
   grantedBy?: { issuer: string; subject: string },
 ): TransactItems[number] {
-  // DEC 254zzz80: in the project's company (the stored revision's `companyId`): a named company's grant lives in its own partition (company-layout.ts).
+  // DEC 254zzz98: `companyId` is where the grant beside the revision is (LEGACY_REVISION_GRANT for the legacy revisions every caller here reads).
   if (observed === undefined) {
     const created: MembershipRecord = { ...membershipRecord(ownerKey, projectName, "developer", companyId), ...(grantedBy === undefined ? {} : { grantedBy, grantedAt: new Date().toISOString() }) };
     return { Put: { TableName: dependencies.tableName, Item: created, ConditionExpression: "attribute_not_exists(pk)" } };
@@ -3143,7 +3143,7 @@ async function newWorkspacePreparation(
     },
   };
   const outbox = outboxRecord(workspace, invocation, project.runtimeBinding);
-  const existingMembership = await getMembership(dependencies, targetOwnerKey, projectName, grantCompany(dependencies, project.companyId));
+  const existingMembership = await getMembership(dependencies, targetOwnerKey, projectName, LEGACY_REVISION_GRANT);
   return {
     workspace,
     operationId,
@@ -3153,7 +3153,7 @@ async function newWorkspacePreparation(
       { Put: { TableName: dependencies.tableName, Item: { pk: `OWNER#${targetOwnerKey}`, sk: `PROJECT#${projectName}`, entityType: "DEFAULT_WORKSPACE", workspaceId }, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
-      membershipPreparationItem(dependencies, targetOwnerKey, projectName, existingMembership, project.companyId, options.grantedBy),
+      membershipPreparationItem(dependencies, targetOwnerKey, projectName, existingMembership, LEGACY_REVISION_GRANT, options.grantedBy),
     ],
   };
 }
@@ -3183,6 +3183,7 @@ async function slackServiceIdentity(
   await companySlackCaller(dependencies, context.thread, context.requester.userId);
   const binding = await getSlackBinding(dependencies, context.thread.teamId, context.thread.channelId);
   if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  await refuseForeignLegacyNamesake(dependencies, binding);
   const subject = slackThreadSubject(context.thread);
   const own: AuthenticatedIdentity = {
     issuer: SLACK_THREAD_OWNER_ISSUER,
@@ -3384,6 +3385,24 @@ async function deleteSlackBinding(
     Key: slackChannelBindingKeyFor((binding as { companyId?: string }).companyId, teamId, channelId),
   }));
   return { deleted: true, binding };
+}
+
+/**
+ * DEC 254zzz98 (delta review H1): the workflow thread routes a Slack thread reaches (the thread workspace, its preparation and close, the GitHub MCP and connector routes,
+ * the model settings) read the project's LEGACY revision `PROJECT#<name>` by name. A NAMED company's binding (read from its own partition; it carries `companyId`) names its
+ * project only by name, and names are not unique between a named company's own partition and the legacy namespace. So a legacy revision of that name that is not this
+ * company's (the built-in company's, unstamped, or another company's) must never serve this thread: the request is refused as unbound. Checked on every Slack service
+ * request (this is the thread identity), so a legacy namesake registered after the thread started is refused at the next request. The built-in company: unchanged.
+ */
+async function refuseForeignLegacyNamesake(dependencies: AwsBrokerDependencies, binding: SlackChannelBinding): Promise<void> {
+  const company = namedCompany((binding as { companyId?: unknown }).companyId as string | undefined);
+  if (company === undefined) return;
+  const response = await dependencies.documentClient.send(new QueryCommand({
+    TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${binding.projectName}`, ":revision": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+  })) as { Items?: unknown[] };
+  const legacy = response.Items?.[0];
+  if (legacy !== undefined && !recordInCompany(legacy, company)) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
 }
 
 async function getLegacySlackBinding(
@@ -3917,7 +3936,7 @@ async function ensureThreadWorkspace(
     } catch (error) {
       if (!isConditional(error)) throw error;
       // The membership changed since it was read: decide again from the row as it now is, never over it.
-      if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, attempted.membership, grantCompany(dependencies, project.companyId))) continue;
+      if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, attempted.membership, LEGACY_REVISION_GRANT)) continue;
       const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
       if (concurrent) {
         return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision, input.includeOpenTaskCount === true);
@@ -3958,7 +3977,7 @@ async function createUnpreparedThreadWorkspace(
   let workspace: WorkspaceInstance | undefined;
   for (let attempt = 0; attempt < MEMBERSHIP_PREPARATION_ATTEMPTS; attempt += 1) {
     const attempted = unpreparedWorkspace(project, identity.ownerKey);
-    const existingMembership = await getMembership(dependencies, identity.ownerKey, projectName, grantCompany(dependencies, project.companyId));
+    const existingMembership = await getMembership(dependencies, identity.ownerKey, projectName, LEGACY_REVISION_GRANT);
     try {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
         { Put: { TableName: dependencies.tableName, Item: workspaceItem(attempted), ConditionExpression: "attribute_not_exists(pk)" } },
@@ -3968,7 +3987,7 @@ async function createUnpreparedThreadWorkspace(
           ConditionExpression: "attribute_not_exists(pk)",
         } },
         // Created only when absent; an existing row is required to be as it was read, never rewritten.
-        membershipPreparationItem(dependencies, identity.ownerKey, projectName, existingMembership, grantCompany(dependencies, project.companyId)),
+        membershipPreparationItem(dependencies, identity.ownerKey, projectName, existingMembership, LEGACY_REVISION_GRANT),
         { Put: {
           TableName: dependencies.tableName,
           Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#THREAD`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", workspaceId: attempted.id },
@@ -3988,7 +4007,7 @@ async function createUnpreparedThreadWorkspace(
     } catch (error) {
       if (!isConditional(error)) throw error;
       // The membership changed since it was read: decide again from the row as it now is, never over it.
-      if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, existingMembership, grantCompany(dependencies, project.companyId))) continue;
+      if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, existingMembership, LEGACY_REVISION_GRANT)) continue;
       // Another first message in this thread created the record.
       const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
       if (concurrent) return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision);
@@ -8171,8 +8190,8 @@ async function requireProjectSetupCapability(
     || approval.decision !== "approve" || approval.proposalRef !== execution.data.proposalRef || approval.policyDigest !== execution.data.policyDigest) {
     throw agentXError("CALLBACK_FORBIDDEN", "current project setup approval is no longer valid");
   }
-  // DEC 254zzz80: the owner's grant in the company the project's stored revision names (a named company's own partition, company-layout.ts).
-  const companyId = grantCompany(dependencies, storedCompanyOf(project));
+  // DEC 254zzz98 (one rule): `project` is the legacy revision (requireProject), so the owner's grant is the legacy row beside it.
+  const companyId = LEGACY_REVISION_GRANT;
   const member = await getMembership(dependencies, execution.data.ownerKey, execution.data.projectName, companyId);
   const catalogId = dependencies.projectSetupRuntimeCatalogId;
   if (member?.role !== "administrator" || !catalogId) throw agentXError("CALLBACK_FORBIDDEN", "project setup owner authority or runtime catalog is unavailable");
@@ -15130,14 +15149,17 @@ async function getMembership(dependencies: AwsBrokerDependencies, ownerKey: stri
 }
 
 /**
- * DEC 254zzz80: the company whose own partition holds a grant, as the developer routes read it. Only with Code's company layer (the developer or linking sign-in's live
- * membership reader, or Slack company mode's): a broker without one keeps the legacy grant rows for every reader and writer, as before (company-layout.ts then picks the
- * legacy key for the built-in company and none).
+ * DEC 254zzz98 (one rule): a project's grants live where its revisions live. Where the revision's key is picked by a company (registration's `revisionKeyFor(companyId)`,
+ * a task of a named company), that company picks the grant's layout too: a NAMED company's own partition, else the legacy keys (company-layout.ts `grantKeyFor`). A LEGACY
+ * revision's grant is always the legacy row (LEGACY_REVISION_GRANT), whatever company a stamped legacy row names. No separate company-layer check here.
  */
 /**
- * DEC 254zzz98 (one rule): a project's grants live where its revisions live. The company that resolved for the caller (or the company a stored record names) picks the layout for
- * both: a NAMED company's own partition, else (the built-in company, or none) the legacy keys (company-layout.ts `grantKeyFor` decides). No separate company-layer check here.
+ * DEC 254zzz98 (one rule; delta review M1): the grant beside a LEGACY revision (`PROJECT#<name>`, read by requireProject / requireLatestProject / the workflow paths) is the
+ * legacy `MEMBER#<person>` row, whatever company a stamped legacy row names. Every legacy-revision reader, writer and fence (workspace preparation, thread workspaces, the
+ * setup run's owner checks and terminal fence, requireMembership) keys its grant with this.
  */
+const LEGACY_REVISION_GRANT: undefined = undefined;
+
 function grantCompany(_dependencies: AwsBrokerDependencies, companyId: string | undefined): string | undefined {
   return companyId;
 }
