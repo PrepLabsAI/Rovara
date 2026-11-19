@@ -9,6 +9,7 @@ import { workspaceCompanyReader } from "../../packages/broker/src/aws/worker-mac
 import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 import { invocationMatchesClaims, verifyInvokeAuthorization } from "../../packages/worker/src/invoke-auth.js";
 import { FakeDynamoDb } from "./fake-dynamodb.js";
+import { provisionerRecordInstancePayload, type RunInstancesResult } from "./session-provisioner-payload.js";
 
 export const COMPANY_A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 export const COMPANY_B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -112,7 +113,10 @@ export function createSessionMachinesWorld(options: { startedAt?: number } = {})
     const instanceId = `i-${randomUUID().replace(/-/g, "").slice(0, 17)}`;
     const privateIp = `10.42.0.${ipCounter++}`;
     instances.set(instanceId, { instanceId, privateIp, workspaceId: input.workspaceId, generation: input.generation, running: true, accepted: new Set(), active: new Set() });
-    await sessions.markInstance(input.workspaceId, input.generation, instanceId, privateIp);
+    const result: RunInstancesResult = { Instances: [{ InstanceId: instanceId, PrivateIpAddress: privateIp, InstanceType: input.machine?.instanceType ?? "m6g.large" }] };
+    const launch = input.machine === undefined ? "RunInstance" : input.machine.chip === "x86_64" ? "RunInstanceX86" : "RunInstanceSized";
+    const payload = await provisionerRecordInstancePayload(input, launch, result);
+    await sessions.markInstance(payload.workspaceId, payload.generation, payload.instanceId, payload.privateIp);
     await sessions.markReady(input.workspaceId, input.generation);
   }
 

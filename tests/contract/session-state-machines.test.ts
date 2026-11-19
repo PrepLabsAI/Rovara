@@ -1,6 +1,7 @@
 import jsonata from "jsonata";
 import { describe, expect, it } from "vitest";
 import { WORKER_AMI_ID_PATTERN } from "../../packages/broker/src/aws/worker-ami.js";
+import { INSTANCE_LAUNCH_STATES, provisionerRecordInstancePayload } from "../support/session-provisioner-payload.js";
 import {
   PROBE_ATTEMPTS,
   PROBE_INTERVAL_SECONDS,
@@ -330,7 +331,38 @@ describe("provisioner: chosen machine size (DEC 254zb)", () => {
     expect([...reachable].filter((name) => SIZED_LAUNCHES.includes(name) || name === "SizeUnavailable")).toEqual([]);
   });
 
-  it("records the launched type and any fallback reason with the instance", () => {
-    expect((states.RecordInstance!.Arguments!.Payload as Record<string, unknown>)).toMatchObject({ instanceType: "{% $instanceType %}", machineFallback: "{% $machineFallback %}" });
+  it("sends exactly the execution and launch identity, type and fallback in RecordInstance", () => {
+    expect(states.RecordInstance!.Arguments!.Payload).toEqual({
+      action: "recordInstance",
+      workspaceId: "{% $workspaceId %}",
+      generation: "{% $generation %}",
+      instanceId: "{% $instanceId %}",
+      privateIp: "{% $privateIp %}",
+      instanceType: "{% $instanceType %}",
+      machineFallback: "{% $machineFallback %}",
+    });
+  });
+
+  it.each(INSTANCE_LAUNCH_STATES)("%s binds each execution's own workspace, generation and RunInstances result to RecordInstance", async (launch) => {
+    const executions = [
+      { workspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation: 2, InstanceId: "i-0aaaaaaaaaaaaaaaa", PrivateIpAddress: "10.42.0.21", InstanceType: "m6g.large" },
+      { workspaceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", generation: 7, InstanceId: "i-0bbbbbbbbbbbbbbbb", PrivateIpAddress: "10.42.0.37", InstanceType: "m6i.2xlarge" },
+    ];
+    expect(states[launch]!.Resource).toBe("arn:aws:states:::aws-sdk:ec2:runInstances");
+    expect(states[launch]!.Next).toBe("RecordInstance");
+    for (const [index, execution] of executions.entries()) {
+      const { workspaceId, generation, ...instance } = execution;
+      // A second instance is a decoy: only Instances[0] of THIS call may supply the identity.
+      const other = executions[1 - index]!;
+      // A capacity fallback returns to the default or pinned-default launch, never a sized launch.
+      for (const sizeUnavailable of launch === "RunInstance" || launch === "RunInstancePinned" ? [false, true] : [false]) {
+        const payload = await provisionerRecordInstancePayload({ workspaceId, generation }, launch, { Instances: [instance, other] }, sizeUnavailable);
+        expect(payload).toEqual({
+          action: "recordInstance", workspaceId, generation,
+          instanceId: instance.InstanceId, privateIp: instance.PrivateIpAddress, instanceType: instance.InstanceType,
+          machineFallback: sizeUnavailable ? "size-unavailable" : null,
+        });
+      }
+    }
   });
 });
