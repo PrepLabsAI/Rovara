@@ -1,0 +1,5 @@
+{
+  "packages/contracts/src/audit-record-v1.ts": "312a11b0602799f718f7c0fc34ceb4f33a6cebb8ff9416bdb6d7ebc64b5b559d",
+  "tests/unit/audit-record-v1.test.ts": "bbcff46630b4caf6225dd9574755227fd9f51204009631b67ba3be6d20bf8c85",
+  "tests/fixtures/audit-v1-golden.json": "de892482b8966cdb3d2c99ee915de6da7bb72a663c81deda84df92af292f330b"
+}
