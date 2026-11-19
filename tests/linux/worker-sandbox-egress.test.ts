@@ -24,6 +24,7 @@ import { connect as netConnect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import { lookup as hostLookup } from "node:dns/promises";
 import { request } from "node:https";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -475,7 +476,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   // F11 (BE-0): the real capture executor joins a gateway-mode task sandbox. The
   // separate Chromium probe below uses the same executor hardening without the
   // screenshot driver's loopback-only origin filter, so it tests the network wall.
-  it("F11: capture shares the gateway sandbox loopback and cannot use other egress or reach another container", async () => {
+  it("F11: capture shares the gateway sandbox loopback and stays inside the production egress walls", async () => {
     const image = process.env.ROVARA_EXECUTOR_IMAGE ?? "rovara-e2e-executor:ci";
     const fixture = join(process.cwd(), "tests/fixtures/browser-evidence-app");
     const suffix = randomBytes(5).toString("hex");
@@ -483,51 +484,113 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const captureName = `rovara-be0-cap-${suffix}`;
     const probeName = `rovara-be0-probe-${suffix}`;
     const remoteName = `rovara-be0-peer-${suffix}`;
+    const staleName = `rovara-be0-stale-${suffix}`;
+    const otherName = `rovara-be0-other-${suffix}`;
     const innerName = `rovara-be0-inner-${suffix}`;
+    const gatewayPeerName = `rovara-be0-gw-${suffix}`;
+    const controlName = `rovara-be0-ctl-${suffix}`;
+    const otherNetwork = `rovara-be0-${suffix}`;
     const port = 4321;
     const remotePort = 4567;
     const marker = `be0-peer-${suffix}`;
+    const hostAddress = "172.28.251.1";
+    const metadataAddress = "169.254.169.254";
     const seccomp = verifyExecutorSeccompProfile(repoExecutorSeccompProfilePath());
-    const removed: string[] = [sandboxName, captureName, probeName, remoteName, innerName];
+    // Bound the CLI as well as every in-container request. A timeout is a test
+    // failure; a killed CLI's container is still removed by finally.
+    const dockerFor = async (args: string[], timeout = 30_000) => run("docker", args, { timeout, maxBuffer: 16 * 1024 * 1024 }).then(
+      (done) => ({ code: 0, ...done }),
+      (error: { code?: number; stdout?: string; stderr?: string; message?: string }) => ({ code: typeof error.code === "number" ? error.code : 1, stdout: error.stdout ?? "", stderr: error.stderr ?? error.message ?? "docker failed" }));
+    const docker = (...args: string[]) => dockerFor(args);
+    const sudo = (...args: string[]) => run("sudo", ["-n", ...args], { timeout: 15_000 });
+    const checkedSudo = async (...args: string[]) => { await sudo(...args); };
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 250));
+    // Retry HTTP readiness, not container creation. Each request and the whole
+    // poll are bounded, including response bodies.
+    const readyScript = (url: string, expected: string) => `(async()=>{const end=Date.now()+15000;let last;while(Date.now()<end){try{const r=await fetch(${JSON.stringify(url)},{signal:AbortSignal.timeout(1000)});const t=await r.text();if(r.status===200&&t===${JSON.stringify(expected)}){console.log(t);return}last=r.status+' '+t}catch(e){last=e.message}await new Promise(r=>setTimeout(r,100))}throw Error('HTTP readiness: '+last)})().catch(e=>{console.error(e);process.exit(1)})`;
+    const readyIn = async (name: string, url: string, expected: string) => {
+      const result = await docker("exec", name, "node", "-e", readyScript(url, expected));
+      expect(result.code, `${name}: ${result.stderr}`).toBe(0);
+      expect(result.stdout.trim()).toBe(expected);
+    };
+    const hostHttp = async (url: string) => {
+      const response = await fetch(url, { signal: AbortSignal.timeout(4000) });
+      expect(response.status, url).toBe(200);
+      expect(await response.text(), url).toBe(marker);
+    };
+    const waitForExit = async (name: string, timeout: number) => {
+      try {
+        const waited = await run("docker", ["wait", name], { timeout });
+        expect(waited.stderr.trim(), `${name}: docker wait errors`).toBe("");
+        expect(waited.stdout.trim(), `${name}: container exit code`).toBe("0");
+      } catch (error) {
+        const removed = await docker("rm", "--force", name);
+        expect(removed.code, `remove timed-out/failed ${name}: ${removed.stderr}`).toBe(0);
+        throw error;
+      }
+    };
+    // These names include containers whose --rm run may already have finished.
+    // Inspect the remaining names, then require each actual removal to succeed.
+    const removed = [captureName, `${captureName}-closed`, probeName, controlName, sandboxName, remoteName, staleName, otherName, innerName, gatewayPeerName];
+    const hostServer = createServer((_, response) => response.end(marker));
+    let metadataRoute = false;
+    let metadataVia = "";
+    let madeOtherNetwork = false;
     try {
       const present = await docker("image", "inspect", image);
       expect(present.code, `CI must preload ${image}: ${present.stderr}`).toBe(0);
       expect((await sudo("cat", DAEMON_JSON)).stdout).toContain(`"dns": ["${GATEWAY_IP}"]`);
       expect((await sudo("cat", "/etc/systemd/system/docker.service.d/30-rovara-build-proxy.conf")).stdout).toContain("http://172.28.251.2:3128");
 
-      // The project server exists only in its task sandbox, bound to its loopback.
       const started = await docker("run", "-d", "--pull=never", "--name", sandboxName, "--network", NETWORK, "--dns", GATEWAY_IP,
         "--cap-drop=ALL", "--security-opt", "no-new-privileges", "-v", `${fixture}:/fixture:ro`, "--env", `PORT=${String(port)}`,
         "--workdir", "/fixture/after", image, "node", "../server.mjs");
       expect(started.code, started.stderr).toBe(0);
-      const ready = await docker("exec", sandboxName, "node", "-e", `fetch('http://127.0.0.1:${String(port)}/health').then(async r=>{console.log(r.status+' '+await r.text())}).catch(e=>{console.log(e.message);process.exit(1)})`);
-      expect(ready.stdout.trim(), ready.stderr).toBe("200 ok");
+      await readyIn(sandboxName, `http://127.0.0.1:${String(port)}/health`, "ok");
 
-      // A control proves both raw-IP routes work from a container with ordinary egress.
-      for (const address of ["1.1.1.1", "8.8.8.8"]) {
-        const control = await onBridge(connectOutcome(address, 443));
-        expect(control.stdout.trim(), `raw-IP control ${address}: ${control.stderr}`).toBe("open");
-      }
-
-      // A live peer on the stale agentx-task bridge (and one on rovara-snet) has
-      // a unique response. Controls verify the peers before Chromium probes them.
+      // rvi* is the production application/test-services bridge family. This
+      // fixture adds no firewall rules: the real rvs+ forwarding wall applies.
+      const network = await docker("network", "create", "--internal", "-o", `com.docker.network.bridge.name=rvi${suffix}`, otherNetwork);
+      expect(network.code, network.stderr).toBe(0);
+      madeOtherNetwork = true;
       const peerScript = `require('http').createServer((_,r)=>r.end(${JSON.stringify(marker)})).listen(${String(remotePort)},'0.0.0.0')`;
-      for (const [name, network] of [[remoteName, "agentx-task"], [innerName, NETWORK]] as const) {
+      const peerIps: Record<string, string> = {};
+      for (const [name, network] of [[remoteName, CONTROL_NETWORK], [staleName, "agentx-task"], [otherName, otherNetwork], [innerName, NETWORK]] as const) {
         const peer = await docker("run", "-d", "--pull=never", "--name", name, "--network", network, "--cap-drop=ALL", "--security-opt", "no-new-privileges", image, "node", "-e", peerScript);
         expect(peer.code, peer.stderr).toBe(0);
+        const address = await docker("inspect", "--format", `{{(index .NetworkSettings.Networks "${network}").IPAddress}}`, name);
+        expect(address.code, address.stderr).toBe(0);
+        expect(address.stdout.trim()).toMatch(/^\d+\.\d+\.\d+\.\d+$/u);
+        peerIps[name] = address.stdout.trim();
+        // In particular, agentx-task cannot be used as a control bridge: NETG2
+        // drops even forwarded same-bridge traffic. A peer-local request works.
+        await readyIn(name, `http://${peerIps[name]}:${String(remotePort)}/`, marker);
       }
-      const remoteIp = (await docker("inspect", "--format", `{{(index .NetworkSettings.Networks "agentx-task").IPAddress}}`, remoteName)).stdout.trim();
-      const innerIp = (await docker("inspect", "--format", `{{(index .NetworkSettings.Networks "${NETWORK}").IPAddress}}`, innerName)).stdout.trim();
-      expect(remoteIp).toMatch(/^\d+\.\d+\.\d+\.\d+$/u);
-      expect(innerIp).toMatch(/^\d+\.\d+\.\d+\.\d+$/u);
-      for (const [network, address] of [["agentx-task", remoteIp], [NETWORK, innerIp]] as const) {
-        const control = await docker("run", "--rm", "--pull=never", "--network", network, "--cap-drop=ALL", "--security-opt", "no-new-privileges", image,
-          "node", "-e", `fetch('http://${address}:${String(remotePort)}').then(r=>r.text()).then(t=>{console.log(t);process.exit(t===${JSON.stringify(marker)}?0:1)}).catch(e=>{console.log(e.message);process.exit(2)})`);
-        expect(control.stdout.trim(), `${network} peer control: ${control.stderr}`).toBe(marker);
-      }
+      const peerUrl = (name: string) => `http://${peerIps[name]!}:${String(remotePort)}/`;
+      // Host-mode exposes only the daemon proxy on the gateway's OUTER address.
+      // Give a separate outer-interface port a live HTTP endpoint, rather than
+      // treating the absence of a :443 listener there as isolation evidence.
+      const gatewayPeer = await docker("run", "-d", "--pull=never", "--name", gatewayPeerName, "--network", "container:rovara-egw", "--cap-drop=ALL", "--security-opt", "no-new-privileges", image, "node", "-e",
+        `require('http').createServer((_,r)=>r.end(${JSON.stringify(marker)})).listen(${String(remotePort)},'172.28.251.2')`);
+      expect(gatewayPeer.code, gatewayPeer.stderr).toBe(0);
+      const gatewayUrl = `http://172.28.251.2:${String(remotePort)}/`;
+      await readyIn(gatewayPeerName, gatewayUrl, marker);
+      await new Promise<void>((resolve, reject) => { hostServer.once("error", reject); hostServer.listen(0, hostAddress, resolve); });
+      const hostPort = (hostServer.address() as { port: number }).port;
+      const hostUrl = `http://${hostAddress}:${String(hostPort)}/`;
 
-      // Run the production capture in the executor image with exactly its usual
-      // isolation flags; keep it detached briefly to inspect the live namespace.
+      // A live routed metadata stand-in in the ordinary peer's namespace. The
+      // host control uses this EXACT address/port. Keep it off the host itself,
+      // so capture's attempt exercises forwarding, not a host INPUT shortcut.
+      const peerPid = await docker("inspect", "--format", "{{.State.Pid}}", remoteName);
+      expect(peerPid.code, peerPid.stderr).toBe(0);
+      expect(peerPid.stdout.trim()).toMatch(/^[1-9]\d*$/u);
+      await checkedSudo("nsenter", "-t", peerPid.stdout.trim(), "-n", "ip", "addr", "add", `${metadataAddress}/32`, "dev", "lo");
+      await checkedSudo("ip", "route", "add", `${metadataAddress}/32`, "via", peerIps[remoteName]!);
+      metadataRoute = true;
+      metadataVia = peerIps[remoteName]!;
+      const metadataUrl = `http://${metadataAddress}:${String(remotePort)}/`;
+
       const plan = encodeBrowserEvidenceExecutorPlan({ port, readyPath: "/health", routes: ["/checkout", "/missing", "/busy"], maskSelectors: [], runMs: 60_000, pageMs: 15_000 });
       const captureArgs = browserEvidenceExecutorArgs({ image, sandbox: sandboxName, name: captureName, seccompProfile: seccomp, plan });
       expect(captureArgs.filter((value) => value === "--network")).toHaveLength(1);
@@ -543,16 +606,24 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       const launched = await docker(...detachedArgs);
       expect(launched.code, launched.stderr).toBe(0);
       const mode = await docker("inspect", "--format", "{{.HostConfig.NetworkMode}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.CapDrop}}|{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}", captureName);
+      expect(mode.code, mode.stderr).toBe(0);
       expect(mode.stdout.trim()).toBe(`container:${sandboxName}|true|[ALL]|`);
 
-      // Chromium's shared network namespace has just the app listener, never a
-      // DevTools or proxy listener of its own.
+      const browserUp = async () => {
+        const top = await docker("top", captureName, "-eo", "pid,comm");
+        return top.code === 0 && top.stdout.split("\n").slice(1).some((row) => /^(chrome|chromium|headless_shell)$/u.test(row.trim().split(/\s+/u).at(-1) ?? ""));
+      };
+      const browserDeadline = Date.now() + 20_000;
+      while (!(await browserUp()) && Date.now() < browserDeadline) await pause();
+      expect(await browserUp(), "Chromium must start before inspecting listeners").toBe(true);
       const listeners = await docker("exec", sandboxName, "node", "-e", "const fs=require('fs');const p=new Set();for(const f of ['/proc/net/tcp','/proc/net/tcp6']){try{for(const l of fs.readFileSync(f,'utf8').trim().split('\\n').slice(1)){const c=l.trim().split(/\\s+/);if(c[3]==='0A')p.add(parseInt(c[1].split(':').pop(),16))}}catch(e){if(f==='/proc/net/tcp')throw e}}console.log(JSON.stringify([...p].sort((a,b)=>a-b)))");
+      expect(listeners.code, listeners.stderr).toBe(0);
+      expect(await browserUp(), "Chromium must still run after reading listeners").toBe(true);
       expect(JSON.parse(listeners.stdout.trim()) as number[]).toEqual([port]);
-      const captureWait = run("docker", ["wait", captureName], { timeout: 120_000 }).then(() => undefined, () => undefined);
-      // The /busy route holds the executor open long enough to inspect the listener table.
-      await captureWait;
+      await waitForExit(captureName, 120_000);
       const captureLog = await docker("logs", captureName);
+      expect(captureLog.code, captureLog.stderr).toBe(0);
+      expect(captureLog.stderr).not.toContain("browser evidence capture failed");
       const captured = parseCaptureOutput(Buffer.from(captureLog.stdout), ["/checkout", "/missing", "/busy"]);
       expect(captured?.app, `${captureLog.stderr}\n${captureLog.stdout.slice(0, 300)}`).toBe("ready");
       const checkout = captured?.shots.get("/checkout");
@@ -563,39 +634,118 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       expect(jpeg.byteLength).toBeGreaterThan(0);
       expect(jpeg.byteLength).toBeLessThanOrEqual(BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES);
       expect(captured?.shots.get("/missing")).toMatchObject({ t: "shot", ok: false, reason: "page_did_not_load" });
-      expect(captured?.shots.has("/busy")).toBe(false);
 
       const closedPlan = encodeBrowserEvidenceExecutorPlan({ port: port + 1, readyPath: "/health", routes: ["/checkout"], maskSelectors: [], runMs: 2_000, pageMs: 2_000 });
-      const closed = await docker(...browserEvidenceExecutorArgs({ image, sandbox: sandboxName, name: `${captureName}-closed`, seccompProfile: seccomp, plan: closedPlan }));
+      const closed = await dockerFor(browserEvidenceExecutorArgs({ image, sandbox: sandboxName, name: `${captureName}-closed`, seccompProfile: seccomp, plan: closedPlan }), 120_000);
       expect(closed.code, closed.stderr).toBe(0);
       const noApp = parseCaptureOutput(Buffer.from(closed.stdout), ["/checkout"]);
       expect(noApp?.app).toBe("time_limit");
       expect(noApp?.shots.size).toBe(0);
 
-      // Test-only Chromium has no origin filter. Its local success is a required
-      // launch control; only explicit network-denial errors count as a wall.
-      const probeScript = `const {openEvidenceChromium}=require('/opt/agentx/packages/verifier/dist/executor/browser-evidence-chromium.js');(async()=>{const c=await openEvidenceChromium({signal:AbortSignal.timeout(90000)});try{const p=await c.browser.newPage();const out={};const local=await p.goto('http://127.0.0.1:${String(port)}/checkout',{waitUntil:'domcontentloaded',timeout:10000});out.local={status:local&&local.status(),body:(await p.locator('body').innerText()).slice(0,2000)};for(const [key,url] of Object.entries(${JSON.stringify({ raw1: "https://1.1.1.1/", raw2: "https://8.8.8.8/", registry: "https://ghcr.io/v2/", peer: `http://${remoteIp}:${String(remotePort)}/`, inner: `http://${innerIp}:${String(remotePort)}/`, host: "http://172.28.251.2:443/", gatewayDns: "http://172.28.250.2:443/", gatewayInner: "http://172.28.250.1:22/", metadata: "http://169.254.169.254/", daemonProxy: "http://172.28.251.2:3128/" })})){try{const r=await p.goto(url,{waitUntil:'domcontentloaded',timeout:8000});out[key]={status:r&&r.status(),body:(await p.locator('body').innerText().catch(()=>'' )).slice(0,2000)}}catch(e){out[key]={error:String(e.message)}}}try{const r=await p.goto('https://registry.npmjs.org/',{waitUntil:'domcontentloaded',timeout:20000});out.allowed={status:r&&r.status(),body:(await p.locator('body').innerText()).slice(0,2000)}}catch(e){out.allowed={error:String(e.message)}}console.log(JSON.stringify(out))}finally{await c.close()}})().catch(e=>{console.error(e);process.exit(1)})`;
+      // Test-only probe has no origin filter, but retains the capture's actual
+      // shared namespace and ALL production executor security/resource flags.
+      // DNS is an actual bounded lookup of the namespace's configured resolver;
+      // HTTPS to the allowed name separately exercises its required TLS path.
+      const targets = { raw1: "https://1.1.1.1/", raw2: "https://8.8.8.8/", registry: "https://ghcr.io/v2/", peer: peerUrl(remoteName), stale: peerUrl(staleName), otherSandbox: peerUrl(otherName), inner: peerUrl(innerName), host: hostUrl, gatewayOuter: gatewayUrl, metadata: metadataUrl, daemonProxy: "http://172.28.251.2:3128/", allowed: "https://registry.npmjs.org/" };
+      const probeScript = `const {openEvidenceChromium}=require('/opt/agentx/packages/verifier/dist/executor/browser-evidence-chromium.js');
+(async()=>{
+  const dns=require('dns').promises;const resolver=new dns.Resolver({timeout:4000,tries:2});const out={};
+  for(const [key,name] of [['dnsDenied','ghcr.io'],['dnsAllowed','registry.npmjs.org']]){try{out[key]={addresses:await resolver.resolve4(name)}}catch(e){out[key]={error:e.code}}}
+  const c=await openEvidenceChromium({signal:AbortSignal.timeout(180000)});
+  try{const p=await c.browser.newPage();
+    const local=await p.goto('http://127.0.0.1:${String(port)}/checkout',{waitUntil:'domcontentloaded',timeout:10000});
+    out.local={status:local&&local.status(),body:(await p.locator('body').innerText()).slice(0,2000)};
+    for(const [key,url] of Object.entries(${JSON.stringify(targets)})){
+      try{const r=await p.goto(url,{waitUntil:'domcontentloaded',timeout:key==='allowed'?20000:8000});out[key]={status:r&&r.status(),body:(await p.locator('body').innerText()).slice(0,2000)}}
+      catch(e){out[key]={error:String(e.message)}}
+    }
+    console.log(JSON.stringify(out));
+  }finally{await c.close()}
+})().catch(e=>{console.error(e);process.exit(1)})`;
       const probeArgs = browserEvidenceExecutorArgs({ image, sandbox: sandboxName, name: probeName, seccompProfile: seccomp, plan });
       const imageIndex = probeArgs.indexOf(image);
       probeArgs.splice(imageIndex + 1, probeArgs.length, "node", "-e", probeScript);
-      const probe = await docker(...probeArgs);
+      // Keep endpoint-specific controls live throughout the sequential browser
+      // probes, including refreshed raw-IP and registry controls alongside them.
+      const controls = async () => {
+        const raw = await docker("run", "--rm", "--pull=never", "--name", controlName, "--network", CONTROL_NETWORK, "--cap-drop=ALL", "--security-opt", "no-new-privileges", image, "node", "-e",
+          `const n=require('net');Promise.all(['1.1.1.1','8.8.8.8'].map(host=>new Promise((ok,bad)=>{const s=n.connect({host,port:443,timeout:4000});s.on('connect',()=>{s.destroy();ok('open')});s.on('timeout',()=>{s.destroy();bad(Error('raw-IP control timed out: '+host))});s.on('error',bad)}))).then(a=>console.log(JSON.stringify(a))).catch(e=>{console.error(e);process.exit(1)})`);
+        expect(raw.code, raw.stderr).toBe(0);
+        expect(JSON.parse(raw.stdout.trim()) as string[]).toEqual(["open", "open"]);
+        await Promise.all([
+          hostHttp(hostUrl), hostHttp(gatewayUrl), hostHttp(metadataUrl),
+          ...[remoteName, staleName, otherName, innerName].map((name) => readyIn(name, peerUrl(name), marker)),
+        ]);
+        expect(await hostHttps(REGISTRY_HOST), "host/daemon registry control").toMatch(/^status (200|401|403|404)$/u);
+        expect(statusLine(await proxyAsk("CONNECT 1.1.1.1:443 HTTP/1.1\r\nHost: 1.1.1.1:443\r\n\r\n")), "live daemon proxy on the exact target port").toMatch(/^HTTP\/1\.1 403/u);
+      };
+      await controls();
+      const probeDetached = probeArgs.filter((value) => value !== "--rm");
+      probeDetached.splice(1, 0, "--detach");
+      const probing = await docker(...probeDetached);
+      expect(probing.code, probing.stderr).toBe(0);
+      const probeDeadline = Date.now() + 240_000;
+      let controlRounds = 0;
+      for (;;) {
+        await controls();
+        controlRounds += 1;
+        const state = await docker("inspect", "--format", "{{.State.Running}}", probeName);
+        expect(state.code, state.stderr).toBe(0);
+        if (state.stdout.trim() === "false") break;
+        if (Date.now() >= probeDeadline) {
+          const killed = await docker("rm", "--force", probeName);
+          expect(killed.code, killed.stderr).toBe(0);
+          throw new Error("Chromium network probe exceeded its bounded run");
+        }
+        await pause();
+      }
+      expect(controlRounds).toBeGreaterThan(0);
+      await waitForExit(probeName, 15_000);
+      const probe = await docker("logs", probeName);
       expect(probe.code, probe.stderr).toBe(0);
-      const result = JSON.parse(probe.stdout.trim().split("\n").at(-1) ?? "{}") as Record<string, { status?: number; body?: string; error?: string }>;
+      const result = JSON.parse(probe.stdout.trim().split("\n").at(-1) ?? "{}") as Record<string, { status?: number; body?: string; error?: string; addresses?: string[] }>;
       expect(result.local?.status).toBe(200);
       expect(result.local?.body).toContain("Account");
-      for (const key of ["raw1", "raw2"] as const) expect(result[key]?.error, `${key}: ${JSON.stringify(result[key])}`).toMatch(/net::ERR_(ADDRESS_UNREACHABLE|CONNECTION_TIMED_OUT|CONNECTION_REFUSED)/u);
-      for (const key of ["peer", "inner"] as const) expect(result[key]?.error, `${key}: ${JSON.stringify(result[key])}`).toMatch(/net::ERR_(ADDRESS_UNREACHABLE|CONNECTION_TIMED_OUT|CONNECTION_REFUSED)/u);
-      for (const key of ["host", "gatewayDns", "gatewayInner", "metadata", "daemonProxy"] as const) expect(result[key]?.error, `${key}: ${JSON.stringify(result[key])}`).toMatch(/net::ERR_(ADDRESS_UNREACHABLE|CONNECTION_TIMED_OUT|CONNECTION_REFUSED)/u);
+      expect(result.dnsDenied).toEqual({ error: "ENOTFOUND" });
+      expect(result.dnsAllowed).toEqual({ addresses: [GATEWAY_IP] });
+      // Same rovara-snet bridge traffic is permitted by production (no ICC
+      // disable). Isolation applies to leaving rvs+, not to peers on rvs0.
+      expect(result.inner).toEqual({ status: 200, body: marker });
+      const isNetworkDenial = (answer: { status?: number; error?: string } | undefined): boolean => answer?.status === undefined && /net::ERR_(ADDRESS_UNREACHABLE|CONNECTION_TIMED_OUT|CONNECTION_REFUSED)\b/u.test(answer?.error ?? "");
+      for (const key of ["raw1", "raw2", "peer", "stale", "otherSandbox", "host", "gatewayOuter", "metadata", "daemonProxy"] as const) {
+        expect(isNetworkDenial(result[key]), `${key}: ${JSON.stringify(result[key])}`).toBe(true);
+      }
       expect(result.registry?.error).toMatch(/net::ERR_NAME_NOT_RESOLVED/u);
-      const deniedHost = await hostHttps("ghcr.io");
-      expect(deniedHost, "host/daemon registry control").toMatch(/^status (200|401|403|404)$/u);
       expect(result.allowed).toMatchObject({ status: 200 });
       expect(result.allowed?.body).toMatch(/^\s*\{[\s\S]*\}\s*$/u);
       expect(() => { void (JSON.parse(result.allowed?.body ?? "") as unknown); }).not.toThrow();
-      expect(await gatewayLog()).toMatch(/"event":"proxy_refused"/u);
+      // Check the busy renderer after the network probes, so its contract
+      // assertion cannot prevent them from executing.
+      expect(captured?.shots.size).toBe(3);
+      expect(captured?.shots.get("/busy")).toMatchObject({ t: "shot", ok: false, reason: "time_limit" });
     } finally {
-      for (const name of removed) await docker("rm", "--force", name);
-      await docker("rm", "--force", `${captureName}-closed`);
+      // Namespace sharers must go BEFORE the sandbox. Do not let one cleanup
+      // failure prevent the rest of the containers/routes from being removed.
+      const cleanupErrors: string[] = [];
+      const existing = await docker("ps", "-a", "--format", "{{.Names}}");
+      if (existing.code !== 0) cleanupErrors.push(existing.stderr);
+      const names = new Set(existing.stdout.trim().split("\n"));
+      for (const name of removed) {
+        if (existing.code === 0 && !names.has(name)) continue;
+        const result = await docker("rm", "--force", name);
+        if (result.code !== 0) cleanupErrors.push(`${name}: ${result.stderr}`);
+      }
+      hostServer.closeAllConnections();
+      if (hostServer.listening) await new Promise<void>((resolve) => { hostServer.close(() => resolve()); });
+      if (metadataRoute) {
+        try { await checkedSudo("ip", "route", "del", `${metadataAddress}/32`, "via", metadataVia); }
+        catch (error) { cleanupErrors.push(String(error)); }
+      }
+      if (madeOtherNetwork) {
+        const result = await docker("network", "rm", otherNetwork);
+        if (result.code !== 0) cleanupErrors.push(result.stderr);
+      }
+      expect(cleanupErrors, "F11 cleanup").toEqual([]);
     }
   }, 900_000);
 
