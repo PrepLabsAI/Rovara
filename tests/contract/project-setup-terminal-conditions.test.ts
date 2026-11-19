@@ -2,9 +2,7 @@ import { describe, expect, it } from "vitest";
 import { projectSetupTerminalAuthorityChecks } from "../../packages/broker/src/aws/project-setup-terminal-conditions.js";
 import { assertDynamoExpressionAttributes } from "../support/validating-document-client.js";
 
-describe("project setup terminal authority transaction checks", () => {
-  it("binds terminal writes to the admitted creator and exact current qualified runtime row", () => {
-    const checks = projectSetupTerminalAuthorityChecks("state", {
+const checksFor = (companyId: string | undefined) => projectSetupTerminalAuthorityChecks("state", {
       setupExecutionId: "00000000-0000-4000-8000-000000000002",
       ownerKey: "OWNER#1", projectName: "orders", projectRevision: 3, runtimeCatalogId: "catalog-1", runtimeCatalogRevision: 4,
       bindingDigest: "a".repeat(64), runtimeGeneration: 9, transportCorrelationId: "00000000-0000-4000-8000-000000000001",
@@ -20,7 +18,16 @@ describe("project setup terminal authority transaction checks", () => {
       endpoint: "https://verifier.example.test", generation: 9, transportCorrelationId: "00000000-0000-4000-8000-000000000001",
       supportedSetupScopes: ["source-interface"], state: "READY", qualifiedAt: "2026-10-13T10:00:00.000Z", expiresAt: "2026-10-13T11:00:00.000Z",
     }, { setupExecutionId: "00000000-0000-4000-8000-000000000002", subjectId: "00000000-0000-4000-8000-000000000003",
-      generation: 9, transportCorrelationId: "00000000-0000-4000-8000-000000000001", bindingDigest: "a".repeat(64), approvalRevision: 1 });
+      generation: 9, transportCorrelationId: "00000000-0000-4000-8000-000000000001", bindingDigest: "a".repeat(64), approvalRevision: 1 }, companyId);
+
+describe("project setup terminal authority transaction checks", () => {
+  it("DEC 254zzz80: a named company's project checks the owner's grant in the company's own partition; the built-in company keeps the legacy key", () => {
+    expect(checksFor("org_aaaaaaaaaaaaaaaaaaaa")[0]?.ConditionCheck.Key).toEqual({ pk: "ORG#org_aaaaaaaaaaaaaaaaaaaa#MEMBER#OWNER#1", sk: "PROJECT#orders" });
+    expect(checksFor("org_00000000000000000000")[0]?.ConditionCheck.Key).toEqual({ pk: "MEMBER#OWNER#1", sk: "PROJECT#orders" });
+  });
+
+  it("binds terminal writes to the admitted creator and exact current qualified runtime row", () => {
+    const checks = checksFor(undefined);
 
     expect(checks).toHaveLength(5);
     for (const check of checks) assertDynamoExpressionAttributes(check.ConditionCheck);

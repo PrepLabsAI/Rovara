@@ -12,7 +12,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import { AgentXNameSchema, OrgIdSchema, orgProjectCatalogPk, SLACK_OIDC_ISSUER, SlackChannelIdSchema, SlackUserIdSchema } from "@agentx/contracts";
-import { Membership, membershipKey, recordInCompany } from "./company-check.js";
+import { Membership, membershipKey, ownPartitionRow, recordInCompany } from "./company-check.js";
+import { grantsPkFor, namedCompany } from "./company-layout.js";
 import { ownerKeyForSubject } from "./lambda.js";
 import {
   CHANNEL_ARCHIVED, CHANNEL_NO_TOKEN, CHANNEL_NOT_CONNECTED, CHANNEL_SHARED, CHANNEL_UNAVAILABLE, linkChannel, linkedProjectOf, mayLinkProject, projectInCompany,
@@ -167,11 +168,14 @@ async function linkableProjects(ctx: SlackRovaraContext, linker: ChannelLinker):
       if (item.pk === pk && AgentXNameSchema.safeParse(name).success) candidates.add(name);
     }
   }
+  // DEC 254zzz80: the linker's grants where their company keeps them (a named company's own partition, company-layout.ts; a row there naming another company is not one).
+  const grantsPk = grantsPkFor(linker.companyId, linker.personId), named = namedCompany(linker.companyId);
   const own = await ctx.documentClient.send(new QueryCommand({ TableName: ctx.tableName, ConsistentRead: true, Limit: 50, KeyConditionExpression: "pk = :pk AND begins_with(sk, :project)",
-    ExpressionAttributeValues: { ":pk": `MEMBER#${linker.personId}`, ":project": "PROJECT#" } })) as { Items?: Array<Record<string, unknown>> };
+    ExpressionAttributeValues: { ":pk": grantsPk, ":project": "PROJECT#" } })) as { Items?: Array<Record<string, unknown>> };
   for (const item of own.Items ?? []) {
     const name = typeof item.sk === "string" ? item.sk.slice("PROJECT#".length) : "";
-    if (item.role === "administrator" && recordInCompany(item, linker.companyId) && AgentXNameSchema.safeParse(name).success) candidates.add(name);
+    const inCompany = named === undefined ? recordInCompany(item, linker.companyId) : item.pk === grantsPk && ownPartitionRow(item, named);
+    if (item.role === "administrator" && inCompany && AgentXNameSchema.safeParse(name).success) candidates.add(name);
   }
   const names: string[] = [];
   for (const name of [...candidates].sort().slice(0, 25)) {

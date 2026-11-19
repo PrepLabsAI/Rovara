@@ -28,7 +28,8 @@ import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import { AgentXError, ON_THE_WEBSITE_MESSAGE, OrgIdSchema, agentXError, companyLog, type DocumentStore, type OrgRole } from "@agentx/contracts";
 import type { AdaptedHttpRequest } from "./lambda.js";
-import { Membership, membershipKey, recordInCompany } from "./company-check.js";
+import { Membership, membershipKey, ownPartitionRow, recordInCompany } from "./company-check.js";
+import { grantsPkFor, namedCompany } from "./company-layout.js";
 import { unlinkGithubAccount } from "../core/people/github-links.js";
 import { profileDisplayName } from "../developer/github-profile.js";
 import type { DeveloperCaller } from "./developer-routes.js";
@@ -442,10 +443,13 @@ async function removalPreview(ctx: CompanyMemberRouteContext, me: z.infer<typeof
   // Nobody removes themselves here, so there is nothing to preview for them.
   if (personId === me.personId) throw agentXError("FORBIDDEN", OWN_MEMBERSHIP);
   await liveSuccessor(ctx, companyId, successorId, personId);
-  const grants = await rowsBounded(ctx, `MEMBER#${personId}`, "PROJECT#", COMPANY_MEMBER_ROUTE_LIMITS.projectRows);
+  // DEC 254zzz80: the person's grants in THIS company (a named company's own partition, company-layout.ts); a row there naming another company is not one.
+  const grantsPk = grantsPkFor(companyId, personId), named = namedCompany(companyId);
+  const grants = await rowsBounded(ctx, grantsPk, "PROJECT#", COMPANY_MEMBER_ROUTE_LIMITS.projectRows);
   const administered: string[] = [], used: string[] = [];
   for (const row of grants) {
     if (typeof row["projectName"] !== "string" || row["sk"] !== `PROJECT#${row["projectName"]}`) continue;
+    if (named !== undefined && (row["pk"] !== grantsPk || !ownPartitionRow(row, named))) continue;
     if (row["role"] === "administrator") administered.push(row["projectName"]);
     else if (row["role"] === "developer") used.push(row["projectName"]);
   }

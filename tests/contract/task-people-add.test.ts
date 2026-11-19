@@ -17,6 +17,7 @@ import { addTaskWebPerson, confirmTaskPeopleProposal, getTaskPeopleCandidates, t
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import type { DeveloperRecord } from "../../packages/broker/src/developer/store.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { companyProjectRow } from "../support/company-layout-projects.js";
 import { T0, TEAM } from "../support/developer-fakes.js";
 
 const TASK_A = "44444444-4444-4444-8444-444444444444";
@@ -112,7 +113,7 @@ describe("candidates (GET people/candidates)", () => {
   it("lists only live members of the task's company with a grant and a current web sign-in, never the caller, another company, a revoked or a Slack sign-in", async () => {
     const h = harness();
     await expect(getTaskPeopleCandidates(h.deps, GALE_CALLER, TASK_A)).resolves.toStrictEqual({ candidates: [{ developerId: WREN_ID, name: "Wren Cloud" }], complete: true });
-    expect(h.projectMemberIds).toHaveBeenCalledWith("payments", 200);
+    expect(h.projectMemberIds).toHaveBeenCalledWith("payments", 200, COMPANY_A);
     expect(h.proof).not.toHaveBeenCalled();
   });
 
@@ -168,7 +169,7 @@ describe("candidates: the read budget on the route wiring", () => {
     const db = new FakeDynamoDb();
     const meta = webTask();
     db.set(meta as unknown as Record<string, unknown>);
-    db.set({ pk: "PROJECT#payments", sk: "REV#000000000007", companyId: COMPANY_A, definition: { revision: 7 } });
+    db.set(companyProjectRow(COMPANY_A, "payments", 7)); // DEC 254zzz80: the project in its company's own partition
     const KAI_ID = ownerKeyForSubject(GH, "gh-kai");
     const people = [
       record(WREN_ID, "cloud", CLOUD, "wren-7", "Wren Cloud"),
@@ -179,10 +180,11 @@ describe("candidates: the read budget on the route wiring", () => {
       const developerId = person.developerId;
       db.set({ pk: `DEVELOPER#${developerId}`, sk: "META", ...person });
       db.set({ pk: `COMPANY_MEMBER#${developerId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: developerId, companyId: COMPANY_A, role: "member", joinedAt: CREATED });
-      db.set({ pk: `MEMBER#${developerId}`, sk: "PROJECT#payments", projectName: "payments", role: "developer" });
-      db.set({ pk: "PROJECT_MEMBERS#payments", sk: `DEVELOPER#${developerId}`, projectName: "payments", developerId });
+      // DEC 254zzz80: company A is a named company, so its grants (and their reverse rows) live in its own partition.
+      db.set({ pk: `ORG#${COMPANY_A}#MEMBER#${developerId}`, sk: "PROJECT#payments", projectName: "payments", role: "developer" });
+      db.set({ pk: `ORG#${COMPANY_A}#PROJECT_MEMBERS#payments`, sk: `DEVELOPER#${developerId}`, projectName: "payments", developerId });
     }
-    for (let index = 0; index < extraGrantRows; index += 1) db.set({ pk: `MEMBER#${WREN_ID}`, sk: `PROJECT#extra-${String(index).padStart(4, "0")}`, projectName: `extra-${index}`, role: "viewer" });
+    for (let index = 0; index < extraGrantRows; index += 1) db.set({ pk: `ORG#${COMPANY_A}#MEMBER#${WREN_ID}`, sk: `PROJECT#extra-${String(index).padStart(4, "0")}`, projectName: `extra-${index}`, role: "viewer" });
     const queries: Array<{ pk: unknown; prefix: unknown }> = [];
     const counting = { send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
       if (command.constructor.name === "QueryCommand") queries.push({ pk: (command.input.ExpressionAttributeValues as Record<string, unknown>)[":pk"], prefix: (command.input.ExpressionAttributeValues as Record<string, unknown>)[":prefix"] });
@@ -197,7 +199,7 @@ describe("candidates: the read budget on the route wiring", () => {
     const { deps, meta, queries } = routeWorld();
     const listed = await deps.listTaskWebCandidates!(meta, 200);
     expect(listed.candidates.length).toBeGreaterThanOrEqual(2);
-    expect(queries.filter((query) => query.pk === "PROJECT#payments")).toHaveLength(1);
+    expect(queries.filter((query) => query.pk === `ORG#${COMPANY_A}#PROJECT#payments`)).toHaveLength(1);
   });
 
   it("leaves out a person whose grant rows exceed the cap, and keeps the others", async () => {

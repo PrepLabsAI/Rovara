@@ -37,6 +37,7 @@ import {
 import { taskOwnerKey, type DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import type { DeveloperRecord } from "../../packages/broker/src/developer/store.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { companyProjectRow } from "../support/company-layout-projects.js";
 import { T0, TEAM } from "../support/developer-fakes.js";
 
 const TASK_A = "44444444-4444-4444-8444-444444444444";
@@ -444,9 +445,10 @@ describe("the route wiring (developerTaskRouteDependencies)", () => {
     db.set({ pk: `DEVELOPER#${GALE_ID}`, sk: "META", ...galeRecord() });
     const membershipRow = { pk: `COMPANY_MEMBER#${GALE_ID}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: GALE_ID, companyId: options.membershipCompany ?? COMPANY_A, role: "member", joinedAt: CREATED };
     if (options.membership !== null) db.set({ ...membershipRow, ...(options.membership ?? {}) });
-    db.set({ pk: "PROJECT#payments", sk: "REV#000000000007", companyId: options.projectCompany ?? COMPANY_A,
-      definition: { revision: 7, ...(options.channelPolicy === true ? { developerTasks: { enabled: true, channelMembersMayUse: true } } : {}) } });
-    if (options.grantRole !== "none") db.set({ pk: `MEMBER#${GALE_ID}`, sk: "PROJECT#payments", projectName: "payments", role: options.grantRole ?? "developer" });
+    // DEC 254zzz80: the project in its company's own partition.
+    db.set(companyProjectRow(options.projectCompany ?? COMPANY_A, "payments", 7, options.channelPolicy === true ? { developerTasks: { enabled: true, channelMembersMayUse: true } } : {}));
+    // DEC 254zzz80: the task's company (A) is a named company: its grants live in its own partition.
+    if (options.grantRole !== "none") db.set({ pk: `ORG#${COMPANY_A}#MEMBER#${GALE_ID}`, sk: "PROJECT#payments", projectName: "payments", role: options.grantRole ?? "developer" });
     if (options.channelPolicy === true) db.set({ pk: `SLACK_BINDING#${TEAM}`, sk: `CHANNEL#${CHANNEL}`, teamId: TEAM, channelId: CHANNEL, projectName: "payments", updatedAt: CREATED });
     const developer = {
       signInTableName: SIGNIN, issuer: "https://code.example.test", ...(options.noCompanies === true ? {} : { companies: companyMembershipFromDynamo(db, SIGNIN) }),

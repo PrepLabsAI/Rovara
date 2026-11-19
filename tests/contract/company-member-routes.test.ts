@@ -15,6 +15,7 @@ import { CompanySignInStore } from "../../packages/broker/src/developer/company-
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
 import { MEMBER_LAST_OWNER, MEMBER_ONLY_OWNER, MEMBER_REVOKED } from "../../packages/broker/src/developer/company-member-contract.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { companyProjectRow } from "../support/company-layout-projects.js";
 
 const NOW = Date.parse("2026-11-15T12:00:00.000Z");
 const TIME = "2026-11-01T09:00:00.000Z";
@@ -332,10 +333,14 @@ describe("no step-up (DEC 254zzz73)", () => {
 describe("the removal preview", () => {
   it("counts the person's open tasks in this company, those waiting on their decision, and their projects here", async () => {
     const h = world();
-    const project = (name: string, companyId: string) => h.db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", companyId, definition: { name, revision: 1 } });
-    const grant = (name: string, role: string) => h.db.set({ pk: `MEMBER#${MEMBER}`, sk: `PROJECT#${name}`, entityType: "MEMBERSHIP", projectName: name, role });
-    project("alpha", A); project("beta", A); project("gamma", B);
+    const project = (name: string, companyId: string) => h.db.set(companyProjectRow(companyId, name, 1)); // DEC 254zzz80: a named company's project in its own partition
+    // DEC 254zzz80: a named company's grants live in its own partition.
+    const grant = (name: string, role: string, extra: Record<string, unknown> = {}) => h.db.set({ pk: `ORG#${A}#MEMBER#${MEMBER}`, sk: `PROJECT#${name}`, entityType: "MEMBERSHIP", projectName: name, role, ...extra });
+    project("alpha", A); project("beta", A); project("gamma", B); project("delta", A); project("epsilon", A);
     grant("alpha", "administrator"); grant("beta", "developer"); grant("gamma", "administrator");
+    // Neither a legacy grant row nor a row in the company's partition that names another company is one of its grants.
+    h.db.set({ pk: `MEMBER#${MEMBER}`, sk: "PROJECT#delta", entityType: "MEMBERSHIP", projectName: "delta", role: "administrator", companyId: A });
+    grant("epsilon", "developer", { companyId: B });
     const task = (id: string, extra: Record<string, unknown>, status = "RUNNING") => {
       h.db.set({ pk: `DEVTASK#${id}`, sk: "META", entityType: "DEVELOPER_TASK", taskId: id, developerId: MEMBER, companyId: A, ...extra });
       h.db.set({ pk: `DEVELOPER#${MEMBER}`, sk: `TASK#${TIME}#${id}`, entityType: "DEVELOPER_TASK_INDEX", taskId: id, status });

@@ -73,7 +73,8 @@ async function world(company: string = A, options: { live?: boolean; administrat
   const token = `Bearer ${Buffer.from("{}").toString("base64url")}.${Buffer.from(JSON.stringify({ azp: "web-app" })).toString("base64url")}.test`;
   const call = (path: string, body?: unknown) => broker.handler({ rawPath: path.split("?")[0], rawQueryString: path.split("?")[1] ?? "", headers: { authorization: token, "x-company": B },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }), requestContext: { requestId: "golden", http: { method: body === undefined ? "GET" : "POST" } } });
-  const projectRows = () => h.db.find((item) => typeof item.pk === "string" && (item.pk.startsWith("PROJECT#") || item.pk === "PROJECT_CATALOG" || item.pk.includes("#PROJECT_CATALOG") || item.pk.startsWith("MEMBER#")));
+  // DEC 254zzz80: a named company's revisions are in its own partition (`ORG#<company>#PROJECT#<id>`).
+  const projectRows = () => h.db.find((item) => typeof item.pk === "string" && (item.pk.startsWith("PROJECT#") || item.pk.includes("#PROJECT#") || item.pk === "PROJECT_CATALOG" || item.pk.includes("#PROJECT_CATALOG") || item.pk.startsWith("MEMBER#")));
   return { ...h, bindings, companyOf, membershipOf, clientProjects, repositoryInstallation, extra, call, projectRows };
 }
 const json = (response: { body: string }) => JSON.parse(response.body) as Record<string, unknown>;
@@ -85,7 +86,7 @@ describe("one project from several repositories", () => {
     const response = await h.call("/v1/dev/client/projects", { repositories: ["acme-a/web", "acme-a/api", "acme-a2/web"], setupCommands: ["npm ci"] });
     expect(response.statusCode).toBe(200);
     expect(json(response)).toMatchObject({ name: "web", latestRevision: 1, access: "administrator" });
-    const stored = h.db.get("PROJECT#web", "REV#000000000001")!;
+    const stored = h.db.get(`ORG#${A}#PROJECT#web`, "REV#000000000001")!;
     expect(stored.companyId).toBe(A);
     const definition = stored.definition as { repositories: Array<{ name: string; url: string; path: string }>; setup: Array<{ cwd: string; executable: string }> };
     expect(definition.repositories.map((entry) => [entry.name, entry.url, entry.path])).toEqual([
@@ -97,7 +98,7 @@ describe("one project from several repositories", () => {
   it("names the project when asked", async () => {
     const h = await world();
     expect(json(await h.call("/v1/dev/client/projects", { repositories: ["acme-a/web", "acme-a/api"], name: "storefront" })).name).toBe("storefront");
-    expect(h.db.get("PROJECT#storefront", "REV#000000000001")?.companyId).toBe(A);
+    expect(h.db.get(`ORG#${A}#PROJECT#storefront`, "REV#000000000001")?.companyId).toBe(A);
   });
 
   it("A cannot use B's repository, an unbound, a suspended or an unknown one: one answer, nothing written, no token made", async () => {
@@ -120,7 +121,7 @@ describe("one project from several repositories", () => {
     expect(json(await b.call("/v1/dev/client/projects", { repositories: ["acme-a/web"] }))).toEqual({ error: REFUSED, requestId: "golden" });
     const created = await b.call("/v1/dev/client/projects", { repositories: ["acme-b/secret", "acme-b/web"] });
     expect(created.statusCode).toBe(200);
-    expect(b.db.get("PROJECT#secret", "REV#000000000001")?.companyId).toBe(B);
+    expect(b.db.get(`ORG#${B}#PROJECT#secret`, "REV#000000000001")?.companyId).toBe(B);
   });
 
   it("the company comes from membership, never the request", async () => {
@@ -137,7 +138,7 @@ describe("one project from several repositories", () => {
     expect(json(await h.call("/v1/dev/client/projects", { repositories: ["acme-a/api"] }))).toEqual({ error: REFUSED, requestId: "golden" });
     h.repositoryInstallation.mockImplementation(async () => ({ installationId: 88, suspended: false }));
     expect(json(await h.call("/v1/dev/client/projects", { repositories: ["acme-a/api"] }))).toEqual({ error: REFUSED, requestId: "golden" });
-    expect(h.db.get("PROJECT#api", "REV#000000000001")).toBeUndefined();
+    expect(h.db.get(`ORG#${A}#PROJECT#api`, "REV#000000000001")).toBeUndefined(); expect(h.db.get(`PROJECT#api`, "REV#000000000001")).toBeUndefined();
   });
 
   it("fails closed without the live lookup, and on malformed lookups", async () => {
@@ -148,7 +149,7 @@ describe("one project from several repositories", () => {
       m.repositoryInstallation.mockResolvedValueOnce(value as never);
       expect(json(await m.call("/v1/dev/client/projects", { repositories: ["acme-a/web"] }))).toEqual({ error: REFUSED, requestId: "golden" });
     }
-    expect(m.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
+    expect(m.db.get(`ORG#${A}#PROJECT#web`, "REV#000000000001")).toBeUndefined(); expect(m.db.get(`PROJECT#web`, "REV#000000000001")).toBeUndefined();
   });
 
   it("refuses a repository GitHub's App cannot see in the same words, and a GitHub outage in fixed words", async () => {
@@ -159,7 +160,7 @@ describe("one project from several repositories", () => {
     const outage = await h.call("/v1/dev/client/projects", { repositories: ["acme-a/web", "acme-a/api"] });
     expect(outage.statusCode).toBe(503);
     expect(outage.body).not.toContain("canary");
-    expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
+    expect(h.db.get(`ORG#${A}#PROJECT#web`, "REV#000000000001")).toBeUndefined(); expect(h.db.get(`PROJECT#web`, "REV#000000000001")).toBeUndefined();
   });
 
   it("keeps the rule that a project name is taken, and today's rule that a repository may be in several projects", async () => {
@@ -180,9 +181,9 @@ describe("one project from several repositories", () => {
       h.clientProjects.workerBinding = async () => { skew += 16_000; return binding(); };
       const late = await h.call("/v1/dev/client/projects", { repositories: ["acme-a/web", "acme-a/api"] });
       expect(late.statusCode).toBe(503);
-      expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
+      expect(h.db.get(`ORG#${A}#PROJECT#web`, "REV#000000000001")).toBeUndefined(); expect(h.db.get(`PROJECT#web`, "REV#000000000001")).toBeUndefined();
       expect(json(await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-a/web"] })).results).toEqual([{ repository: "acme-a/web", outcome: "refused", reason: "unavailable" }]);
-      expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
+      expect(h.db.get(`ORG#${A}#PROJECT#web`, "REV#000000000001")).toBeUndefined(); expect(h.db.get(`PROJECT#web`, "REV#000000000001")).toBeUndefined();
     } finally { now.mockRestore(); }
   });
 
@@ -197,7 +198,7 @@ describe("one project from several repositories", () => {
     }
     expect(h.repositoryInstallation).not.toHaveBeenCalled();
     expect((await h.call("/v1/dev/client/projects", { repositories: Array.from({ length: 32 }, (_, index) => `acme-a/r${index}`) })).statusCode).toBe(200);
-    expect((h.db.get("PROJECT#r0", "REV#000000000001")!.definition as { repositories: unknown[] }).repositories).toHaveLength(32);
+    expect((h.db.get(`ORG#${A}#PROJECT#r0`, "REV#000000000001")!.definition as { repositories: unknown[] }).repositories).toHaveLength(32);
   });
 });
 
@@ -216,9 +217,9 @@ describe("one project per repository (bulk)", () => {
       { repository: "acme-a/api", outcome: "created", project: "api" },
       { repository: "acme-a/docs", outcome: "refused", reason: "name_taken" },
     ], requestId: "golden" });
-    expect(h.db.get("PROJECT#web", "REV#000000000001")?.companyId).toBe(A);
-    expect(h.db.get("PROJECT#api", "REV#000000000001")?.companyId).toBe(A);
-    expect(h.db.get("PROJECT#secret", "REV#000000000001")).toBeUndefined();
+    expect(h.db.get(`ORG#${A}#PROJECT#web`, "REV#000000000001")?.companyId).toBe(A);
+    expect(h.db.get(`ORG#${A}#PROJECT#api`, "REV#000000000001")?.companyId).toBe(A);
+    expect(h.db.get(`ORG#${A}#PROJECT#secret`, "REV#000000000001")).toBeUndefined(); expect(h.db.get(`PROJECT#secret`, "REV#000000000001")).toBeUndefined();
     expect(response.body).not.toContain("canary");
     expect(h.clientProjects.repositoryDefaults.mock.calls.map(([url]) => url).sort()).toEqual(["https://github.com/acme-a/api.git", "https://github.com/acme-a/docs.git", "https://github.com/acme-a/web.git"]);
   });
@@ -244,7 +245,7 @@ describe("one project per repository (bulk)", () => {
     const h = await world(B);
     expect(json(await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-a/web", "acme-b/web"] })).results).toEqual([
       { repository: "acme-a/web", outcome: "refused", reason: "not_available" }, { repository: "acme-b/web", outcome: "created", project: "web" }]);
-    expect(h.db.get("PROJECT#web", "REV#000000000001")?.companyId).toBe(B);
+    expect(h.db.get(`ORG#${B}#PROJECT#web`, "REV#000000000001")?.companyId).toBe(B);
   });
 });
 
@@ -364,7 +365,7 @@ describe("the single-repository create", () => {
     const h = await world();
     const refused = await h.call("/v1/dev/client/projects", { repository: "paused/y" });
     expect(json(refused)).toEqual({ error: { code: "CONFIG_INVALID", message: "the GitHub App cannot access paused/y; install it on paused with access to that repository" }, requestId: "golden" });
-    expect(h.db.get("PROJECT#y", "REV#000000000001")).toBeUndefined();
+    expect(h.db.get(`ORG#${A}#PROJECT#y`, "REV#000000000001")).toBeUndefined(); expect(h.db.get(`PROJECT#y`, "REV#000000000001")).toBeUndefined();
     const created = await h.call("/v1/dev/client/projects", { repository: "acme-a/web" });
     expect(json(created)).toEqual({ name: "web", latestRevision: 1, access: "administrator", repositories: [{ name: "web", url: "https://github.com/acme-a/web.git", defaultBranch: "main", fullName: "acme-a/web" }], requestId: "golden" });
   });
@@ -387,10 +388,12 @@ describe("company owners and admins create projects", () => {
     expect(json(many)).toMatchObject({ name: expect.stringMatching(/^both-[a-z0-9]{6}$/) as unknown, access: "administrator" });
     const bulk = json(await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-a/docs"] })).results as Array<{ project: string }>;
     expect(bulk).toEqual([{ repository: "acme-a/docs", outcome: "created", project: expect.stringMatching(/^docs-[a-z0-9]{6}$/) as unknown }]);
-    expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
+    expect(h.db.get(`ORG#${A}#PROJECT#web`, "REV#000000000001")).toBeUndefined(); expect(h.db.get(`PROJECT#web`, "REV#000000000001")).toBeUndefined();
     for (const name of [json(single).name as string, json(many).name as string, bulk[0]!.project]) {
-      expect(h.db.get(`PROJECT#${name}`, "REV#000000000001")?.companyId).toBe(A);
-      expect(h.db.get(`MEMBER#${PERSON}`, `PROJECT#${name}`)).toMatchObject({ role: "administrator" });
+      expect(h.db.get(`ORG#${A}#PROJECT#${name}`, "REV#000000000001")?.companyId).toBe(A);
+      // DEC 254zzz80: the creator's administrator grant is in the company's own partition, and only there.
+      expect(h.db.get(`ORG#${A}#MEMBER#${PERSON}`, `PROJECT#${name}`)).toMatchObject({ role: "administrator" });
+      expect(h.db.get(`MEMBER#${PERSON}`, `PROJECT#${name}`)).toBeUndefined();
     }
     const picker = await h.call("/v1/dev/client/repositories/available");
     expect(picker.statusCode).toBe(200);
@@ -408,8 +411,8 @@ describe("company owners and admins create projects", () => {
     expect(json(single)).toEqual({ error: { code: "CONFIG_INVALID", message: "the GitHub App cannot access acme-b/secret; install it on acme-b with access to that repository" }, requestId: "golden" });
     expect(json(await h.call("/v1/dev/client/projects", { repositories: ["acme-a/web", "acme-b/secret"] }))).toEqual({ error: REFUSED, requestId: "golden" });
     expect(json(await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-b/secret"] })).results).toEqual([{ repository: "acme-b/secret", outcome: "refused", reason: "not_available" }]);
-    expect(h.db.get("PROJECT#secret", "REV#000000000001")).toBeUndefined();
-    expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
+    expect(h.db.get(`ORG#${A}#PROJECT#secret`, "REV#000000000001")).toBeUndefined(); expect(h.db.get(`PROJECT#secret`, "REV#000000000001")).toBeUndefined();
+    expect(h.db.get(`ORG#${A}#PROJECT#web`, "REV#000000000001")).toBeUndefined(); expect(h.db.get(`PROJECT#web`, "REV#000000000001")).toBeUndefined();
     for (const path of ["/v1/dev/client/repositories/available", "/v1/dev/client/repositories"]) {
       const response = await h.call(path);
       expect(response.statusCode).toBe(200);
@@ -420,7 +423,7 @@ describe("company owners and admins create projects", () => {
     expect(json(await b.call("/v1/dev/client/projects", { repositories: ["acme-a/web"] }))).toEqual({ error: REFUSED, requestId: "golden" });
     const bWeb = await b.call("/v1/dev/client/projects", { repositories: ["acme-b/web"] });
     expect(bWeb.statusCode).toBe(200);
-    expect(b.db.get(`PROJECT#${json(bWeb).name as string}`, "REV#000000000001")?.companyId).toBe(B);
+    expect(b.db.get(`ORG#${B}#PROJECT#${json(bWeb).name as string}`, "REV#000000000001")?.companyId).toBe(B);
   });
 
   // L2-1 (DEC 254o a), through the routes: one store, A's admin and B's admin.
@@ -435,8 +438,8 @@ describe("company owners and admins create projects", () => {
     expect(aWeb.statusCode).toBe(200);
     expect(json(aWeb).name).not.toBe(bWeb.name);
     for (const leak of [bWeb.name as string, B, "acme-b"]) expect(aWeb.body).not.toContain(leak);
-    expect(h.db.get(`PROJECT#${json(aWeb).name as string}`, "REV#000000000001")?.companyId).toBe(A);
-    expect(h.db.get(`PROJECT#${bWeb.name as string}`, "REV#000000000001")?.companyId).toBe(B);
+    expect(h.db.get(`ORG#${A}#PROJECT#${json(aWeb).name as string}`, "REV#000000000001")?.companyId).toBe(A);
+    expect(h.db.get(`ORG#${B}#PROJECT#${bWeb.name as string}`, "REV#000000000001")?.companyId).toBe(B);
     // A takes, through the single and bulk routes, names B holds: B's claimed "web" (above) and an older B project whose id IS its name.
     h.db.set({ ...orgProjectCatalogKey(B, "docs"), entityType: "PROJECT_CATALOG", companyId: B, name: "docs", latestRevision: 1 });
     h.db.set({ pk: "PROJECT#docs", sk: "REV#000000000001", entityType: "PROJECT", companyId: B, definition: { name: "docs", revision: 1 } });
@@ -474,7 +477,7 @@ describe("company owners and admins create projects", () => {
         expect(response.statusCode).toBe(401);
         expect((json(response).error as { code: string }).code).toBe("AUTH_REQUIRED");
       }
-      expect(h.projectRows().filter((row) => String(row.pk).startsWith("PROJECT#"))).toHaveLength(0);
+      expect(h.projectRows().filter((row) => /^(ORG#[^#]+#)?PROJECT#/.test(String(row.pk)))).toHaveLength(0);
       const gone = await signedIn({ companyId: A, role });
       gone.db.set({ ...gone.db.get(`DEVELOPER#${PERSON}`, "META")!, revoked: true });
       for (const [path, body] of ROUTES) expect(json(await gone.call(path, body))).toEqual({ error: FORBIDDEN, requestId: "golden" });
@@ -491,7 +494,7 @@ describe("company owners and admins create projects", () => {
     expect((await h.call("/v1/dev/client/projects", { repositories: ["acme-a/web"] })).statusCode).toBe(200);
     h.db.set({ ...h.db.get(`COMPANY_MEMBER#${PERSON}`, "COMPANY")!, role: "member" });
     expect(json(await h.call("/v1/dev/client/projects", { repositories: ["acme-a/api"] }))).toEqual({ error: FORBIDDEN, requestId: "golden" });
-    expect(h.db.get("PROJECT#api", "REV#000000000001")).toBeUndefined();
+    expect(h.db.get(`ORG#${A}#PROJECT#api`, "REV#000000000001")).toBeUndefined(); expect(h.db.get(`PROJECT#api`, "REV#000000000001")).toBeUndefined();
   });
 
   it("is refused when the company isolation reads another company than the sign-in did", async () => {

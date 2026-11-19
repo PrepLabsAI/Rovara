@@ -9,6 +9,7 @@ import { intakeItemIdOf, type AuditEvent, type OrgId, type Principal } from "@ag
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
 import { fakeLinear, LINEAR_APP, LINEAR_WEBHOOK_SECRET, testSealer, WORKSPACE_A, type FakeWorkspace } from "../support/fake-linear-oauth.js";
 import { RecordingStore } from "../support/intake-world.js";
+import { companyProjectRow } from "../support/company-layout-projects.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { LinearConnections, type LinearAppSettings } from "../../packages/broker/src/aws/linear-connections.js";
 import { handleLinearAppWebhook } from "../../packages/broker/src/aws/linear-app-webhook.js";
@@ -56,7 +57,8 @@ async function world(options: { onCore?: readonly string[] } = {}) {
     h.db.set({ pk: `SESSION#${sid}`, sk: "META", developerId: personId, amr: "slack", startedAt: TIME, endsAt: now / 1000 + 86_400 });
     h.claims.sub = personId; h.claims.sid = sid;
   };
-  const grant = (personId: string, project: string, companyId: string, role: "developer" | "administrator") => h.db.set({ pk: `MEMBER#${personId}`, sk: `PROJECT#${project}`, projectName: project, role, companyId });
+  // DEC 254zzz80: a named company's grants live in its own partition.
+  const grant = (personId: string, project: string, companyId: string, role: "developer" | "administrator") => h.db.set({ pk: `ORG#${companyId}#MEMBER#${personId}`, sk: `PROJECT#${project}`, projectName: project, role, companyId });
   const call = async (method: string, path: string, body?: unknown) => {
     const answer = await h.read(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { status: answer.statusCode, body: JSON.parse(answer.body) as Record<string, unknown> };
@@ -67,7 +69,7 @@ async function world(options: { onCore?: readonly string[] } = {}) {
     expect((await call("POST", `${BASE}/complete`, { state: started.body.state, code })).status).toBe(200);
   };
   const project = async (name: string, companyId: string) => {
-    h.db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", definition: { name, revision: 1 }, companyId });
+    h.db.set(companyProjectRow(companyId, name, 1)); // DEC 254zzz80: a named company's project in its own partition
     expect((await call("PUT", `${BASE}/projects/${name}`, { teamId: "team-a-eng" })).status).toBe(200);
   };
   member(PERSON, A, "admin"); as(PERSON); await connect(WORKSPACE_A); await project("alpha", A);
@@ -92,7 +94,7 @@ async function world(options: { onCore?: readonly string[] } = {}) {
     } },
     access: { checkStart: async (principal, name) => {
       const m = await membershipOf(principal.personId);
-      const row = h.db.get(`MEMBER#${principal.personId}`, `PROJECT#${name}`) as Record<string, unknown> | undefined;
+      const row = h.db.get(`ORG#${companyId}#MEMBER#${principal.personId}`, `PROJECT#${name}`) as Record<string, unknown> | undefined;
       return m?.companyId === companyId && principal.companyId === companyId && row?.["companyId"] === companyId ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: "no" };
     } },
     // The flow's start as the hosted runtime runs it for a ticket: its session and ticket binding in the start's own transaction (`ticketSessionStartExtras`), once per request id.

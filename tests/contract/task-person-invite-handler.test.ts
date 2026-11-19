@@ -8,6 +8,8 @@ import { taskPersonInviteClaimDigest } from "../../packages/broker/src/developer
 import type { TaskPersonCheck } from "../../packages/broker/src/developer/task-people.js";
 
 const taskId = "11111111-1111-4111-8111-111111111111";
+/** The built-in company: a task that names no company is its (taskCompanyId). */
+const IMPLICIT = "org_00000000000000000000";
 const requestId = "22222222-2222-4222-8222-222222222222";
 const personId = "33333333-3333-4333-8333-333333333333";
 const actorId = "a".repeat(64);
@@ -64,7 +66,7 @@ function fixture(overrides: Partial<TaskPersonInviteHandlerPorts> = {}) {
     taskId, developerId: targetId, project: "project-alpha", access: "channel", projectRevision,
     binding: { pk: `SLACK_BINDING#${teamId}`, sk: "CHANNEL#C0OTHER001", teamId, channelId: "C0OTHER001", projectName: "project-alpha", updatedAt: "2026-10-12T11:59:00.000Z" },
   };
-  const authorityConditions = taskPersonInviteStateConditions({ taskId, project: "project-alpha", teamId, actor: actorAuthority, target: targetAuthority })!;
+  const authorityConditions = taskPersonInviteStateConditions({ taskId, companyId: IMPLICIT, project: "project-alpha", teamId, actor: actorAuthority, target: targetAuthority })!;
   const authorityRows = new Map<string, Record<string, unknown>>([
     ["PROJECT#project-alpha/REV#000000000007", { pk: "PROJECT#project-alpha", sk: "REV#000000000007", definition: { revision: 7 } }],
     [`MEMBER#${actorId}/PROJECT#project-alpha`, { pk: `MEMBER#${actorId}`, sk: "PROJECT#project-alpha", projectName: "project-alpha", role: "developer" }],
@@ -230,9 +232,9 @@ describe("Task Person invite handler", () => {
   it("refuses a stale or conflicting project revision between actor and target witnesses", () => {
     const f = fixture();
     const staleTarget = { ...f.targetAuthority, projectRevision: { ...f.targetAuthority.projectRevision, revision: 8, sk: "REV#000000000008" } };
-    expect(taskPersonInviteStateConditions({ taskId, project: "project-alpha", teamId, actor: f.actorAuthority, target: staleTarget })).toBeUndefined();
+    expect(taskPersonInviteStateConditions({ taskId, companyId: IMPLICIT, project: "project-alpha", teamId, actor: f.actorAuthority, target: staleTarget })).toBeUndefined();
     const malformedTarget = { ...f.targetAuthority, binding: { ...f.targetAuthority.binding!, pk: "MEMBER#wrong" } };
-    expect(taskPersonInviteStateConditions({ taskId, project: "project-alpha", teamId, actor: f.actorAuthority, target: malformedTarget })).toBeUndefined();
+    expect(taskPersonInviteStateConditions({ taskId, companyId: IMPLICIT, project: "project-alpha", teamId, actor: f.actorAuthority, target: malformedTarget })).toBeUndefined();
   });
 
   it("refuses the effect when a captured target binding is deleted before receipt CAS", async () => {
@@ -521,5 +523,36 @@ describe("Task Person invite handler", () => {
     const retryRequest = { ...f.request, admission: { ...f.request.admission, id: randomUUID(), deadlineAt: now + 25_000 } };
     expect((await handler(retryRequest)).status).toBe("unknown");
     expect(f.send).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("R2-F1 review round 3: the invite fence for a NAMED company's witnesses", () => {
+  const B = `org_${"b".repeat(20)}`, A = `org_${"a".repeat(20)}`;
+  const revisionOf = (company: string) => ({ pk: `ORG#${company}#PROJECT#project-alpha`, sk: "REV#000000000007", revision: 7, developerTasksPresent: false });
+  const witness = (developerId: string, membershipPk: string, company = B): TaskPersonProjectAuthorityWitness => ({
+    taskId, developerId, project: "project-alpha", access: "granted", projectRevision: revisionOf(company),
+    membership: { pk: membershipPk, sk: "PROJECT#project-alpha", projectName: "project-alpha", role: "developer" },
+  });
+  const channel = (developerId: string, bindingPk: string, company = B): TaskPersonProjectAuthorityWitness => ({
+    taskId, developerId, project: "project-alpha", access: "channel", projectRevision: revisionOf(company),
+    binding: { pk: bindingPk, sk: `CHANNEL#${channelId}`, teamId, channelId, projectName: "project-alpha", updatedAt: new Date(now).toISOString() },
+  });
+  const conditions = (actor: TaskPersonProjectAuthorityWitness, target: TaskPersonProjectAuthorityWitness, companyId = B) =>
+    taskPersonInviteStateConditions({ taskId, companyId, project: "project-alpha", teamId, actor, target });
+  const actor = witness(actorId, `ORG#${B}#MEMBER#${actorId}`);
+
+  it("derives the company's own revision and grant predicates, and refuses a legacy or another company's grant beside them", () => {
+    expect(conditions(actor, witness(targetId, `ORG#${B}#MEMBER#${targetId}`))?.map((condition) => condition.pk)).toEqual([revisionOf(B).pk, `ORG#${B}#MEMBER#${actorId}`, `ORG#${B}#MEMBER#${targetId}`]);
+    for (const stale of [`MEMBER#${targetId}`, `ORG#${A}#MEMBER#${targetId}`]) expect(conditions(actor, witness(targetId, stale)), stale).toBeUndefined();
+  });
+
+  it("a channel witness: the company's own binding key passes; a binding at the legacy key or at A's key, beside B's revision, is refused", () => {
+    expect(conditions(actor, channel(targetId, `ORG#${B}#SLACK_BINDING#${teamId}`))?.map((condition) => condition.pk)).toEqual([revisionOf(B).pk, `ORG#${B}#MEMBER#${actorId}`, `ORG#${B}#SLACK_BINDING#${teamId}`]);
+    for (const stale of [`SLACK_BINDING#${teamId}`, `ORG#${A}#SLACK_BINDING#${teamId}`]) expect(conditions(actor, channel(targetId, stale)), stale).toBeUndefined();
+  });
+
+  it("witnesses of company A on B's task are refused, as are B's witnesses on a built-in company's task", () => {
+    expect(conditions(witness(actorId, `ORG#${A}#MEMBER#${actorId}`, A), witness(targetId, `ORG#${A}#MEMBER#${targetId}`, A))).toBeUndefined();
+    expect(conditions(actor, witness(targetId, `ORG#${B}#MEMBER#${targetId}`), IMPLICIT)).toBeUndefined();
   });
 });

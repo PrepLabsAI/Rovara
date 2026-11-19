@@ -10,6 +10,7 @@ import { createPolicyHookClient, policyHookValuesAsker, type PolicyHookClientOpt
 import { createHostedPolicyHookClient } from "../core/policy-hook/hosted.js";
 import { projectGrant } from "./admin-actions.js";
 import { Membership, boundedCompanyReads, membershipKey, ownPartitionRow, recordInCompany, resolveCompany } from "./company-check.js";
+import { grantKeyFor } from "./company-layout.js";
 import type { DeveloperCaller, DeveloperRouteDependencies } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 
@@ -180,13 +181,11 @@ async function selectedRevisionHolds(client: Sender, tableName: string, companyI
     && typeof definition === "object" && definition !== null && definition.name === name && definition.revision === revision;
 }
 
-/** The person's grant on a project of a company that keeps its projects in its own partition. The grant row is the broker's (`MEMBER#<person>` / `PROJECT#<id>`, written without a
- * company by registration and the core backfill); the project id is globally unique and was just proven to be this company's, so the row is this company's grant unless it names
- * another company (or a malformed one), which is refused. Rows of the implicit company's legacy path keep `projectGrant`'s stored-company rule.
- * INVARIANT this relies on: project ids are globally unique (registration's conditional write of the shared catalog key; L2-1 keeps company-created ids unique with a random
- * suffix). If ids ever stop being unique across companies, grant rows must carry their company and this exception must go. */
+/** The person's grant on a project of a company that keeps its projects in its own partition. DEC 254zzz80: a NAMED company's grant lives in its own partition too
+ * (`ORG#<company>#MEMBER#<person>` / `PROJECT#<id>`, company-layout.ts) and is the only one read for it; the implicit company's marked partition keeps the legacy grant row
+ * (`MEMBER#<person>` / `PROJECT#<id>`). A row that names another company (or a malformed one), or another project, is refused. */
 async function partitionProjectGrant(client: Sender, tableName: string, project: string, personId: string, companyId: string): Promise<{ role: "developer" | "administrator" } | undefined> {
-  const key = { pk: `MEMBER#${personId}`, sk: `PROJECT#${project}` };
+  const key = grantKeyFor(companyId, personId, project);
   const response = await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
   const row = response.Item;
   if (row === undefined || row["pk"] !== key.pk || row["sk"] !== key.sk || !ownPartitionRow(row, companyId) || (Object.hasOwn(row, "projectName") && row["projectName"] !== project)) return undefined;
