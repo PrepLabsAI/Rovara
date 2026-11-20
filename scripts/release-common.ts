@@ -29,6 +29,7 @@ export interface ReleaseManifest {
 }
 
 export interface StackDescription {
+  StackId?: string;
   Parameters?: Array<{ ParameterKey?: string; ParameterValue?: string }>;
   Outputs?: Array<{ OutputKey?: string; OutputValue?: string }>;
 }
@@ -499,8 +500,10 @@ export function optionalControlPlaneParameters(): string[] {
 /** The environment variable that carries the legacy saved environment roles switch (CDK context `agentxLegacySavedEnvRoles`: root, none or path; infra/lib/saved-env-images.ts) into the production release. */
 export const LEGACY_SAVED_ENV_ROLES_ENVIRONMENT = "AGENTX_LEGACY_SAVED_ENV_ROLES";
 const LEGACY_SAVED_ENV_ROLES_VALUES = ["root", "none", "path"];
-/** The deployed stack's saved environment role ARN output; a path-style ARN means the install already moved its roles under `/agentx/production/`. */
-const SAVED_ENV_PUSH_ROLE_ARN_OUTPUT = "SavedEnvImgPushRoleArn";
+/** The deployed stack's three saved environment role ARN outputs (infra/lib/saved-env-images.ts), by role. A path-style ARN means the install moved that role under `/agentx/production/`. */
+const SAVED_ENV_ROLE_ARN_OUTPUTS = { push: "SavedEnvImgPushRoleArn", pull: "SavedEnvImgPullRoleArn", manage: "SavedEnvImgManageRoleArn" } as const;
+const SAVED_ENV_ROLE_ARN = /^arn:(aws|aws-cn|aws-us-gov):iam::(\d{12}):role\/((?:agentx\/production\/)?)agentx-production-img-(push|pull|manage)$/;
+const STACK_ID = /^arn:(aws|aws-cn|aws-us-gov):cloudformation:[a-z0-9-]+:(\d{12}):stack\//;
 
 /**
  * The `-c` flags that carry the switch to `cdk deploy`. Unset: none, so the default (today's template) holds, unless the release derives `path` from the deployed control plane ({@link resolveLegacySavedEnvRolesContext}). An unknown value throws.
@@ -514,11 +517,28 @@ export function legacySavedEnvRolesContext(environment: Readonly<Record<string, 
   return ["-c", `agentxLegacySavedEnvRoles=${value}`];
 }
 
-/** Where the deployed control plane's saved environment roles are: under `/agentx/production/` (`path`), at the root path (`root`), or not at all (`none`: the stack exists but has no saved role output, as between the two deploys of the move). */
+/**
+ * Where the deployed control plane's saved environment roles are: under `/agentx/production/` (`path`), at the root path (`root`), or not at all (`none`: the stack exists but has none of the three saved role
+ * outputs, as between the two deploys of the move). The state is read from all three outputs, and each must be exactly `arn:<partition>:iam::<account>:role/<path>agentx-production-img-<push|pull|manage>` for
+ * its own role, in the partition and account of the stack itself (its StackId), with the path `/` or `/agentx/production/`. Anything else throws: a partial set, a mix of paths, a malformed or foreign ARN
+ * is not evidence of where the roles are, so the release refuses instead of guessing.
+ */
 export function deployedSavedEnvRolesState(deployed: StackDescription): "root" | "path" | "none" {
-  const arn = deployed.Outputs?.find((output) => output.OutputKey === SAVED_ENV_PUSH_ROLE_ARN_OUTPUT)?.OutputValue;
-  if (arn === undefined) return "none";
-  return arn.includes(":role/agentx/production/") ? "path" : "root";
+  const roles = Object.entries(SAVED_ENV_ROLE_ARN_OUTPUTS).map(([role, key]) => ({ role, key, arn: deployed.Outputs?.find((output) => output.OutputKey === key)?.OutputValue }));
+  const present = roles.filter((entry) => entry.arn !== undefined);
+  if (present.length === 0) return "none";
+  const unrecognized = (detail: string): Error => new Error(`the deployed control plane's saved environment role outputs are not recognized (${detail}); refusing to guess where the roles are, so inspect the stack`);
+  if (present.length !== roles.length) throw unrecognized(`only ${present.map((entry) => entry.key).join(", ")} present of the three`);
+  const stack = STACK_ID.exec(deployed.StackId ?? "");
+  if (!stack) throw unrecognized("the stack's own ARN is missing or malformed, so the account cannot be checked");
+  const paths = new Set<string>();
+  for (const { role, key, arn } of roles) {
+    const parts = SAVED_ENV_ROLE_ARN.exec(arn!);
+    if (!parts || parts[1] !== stack[1] || parts[2] !== stack[2] || parts[4] !== role) throw unrecognized(`${key} is not the ${role} role of this stack's account`);
+    paths.add(parts[3]!);
+  }
+  if (paths.size !== 1) throw unrecognized("the three roles are not all at the same path");
+  return paths.has("agentx/production/") ? "path" : "root";
 }
 
 /**

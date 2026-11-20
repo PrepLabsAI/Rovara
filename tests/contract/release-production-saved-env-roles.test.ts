@@ -4,6 +4,7 @@
 //       roles under /agentx/production/ + unset: the release derives `path` and the control plane deploy carries it (no pipeline change needed after the move);
 //       roles under /agentx/production/ + none or root: refused (it would revert the move);
 //       no saved role outputs (between the two deploys, or after a failed second one) + unset or root: refused (it would create the deleted roles again); `path` and `none` go through;
+//   - a partial, mixed, malformed or foreign set of role outputs is refused whatever the mode (explicit none included), so an invalid output is never taken as evidence of where the roles are;
 //   - no control plane at all (a fresh install): nothing derived, the explicit value only.
 // The pure helpers are unit tested in legacy-saved-env-role-path.test.ts; this file pins that releaseProduction actually calls them, and in which order.
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
@@ -42,7 +43,7 @@ vi.mock("../../scripts/release-common.js", async (importOriginal) => {
         const query = args.includes("--query");
         if (stack === "AgentXControlPlane") {
           if (recorded.controlPlane === undefined) return { status: 254, stdout: "", stderr: "Stack with id AgentXControlPlane does not exist" };
-          return ok(query ? JSON.stringify({ Outputs: recorded.controlPlane }) : "");
+          return ok(query ? JSON.stringify({ StackId: "arn:aws:cloudformation:us-east-1:111122223333:stack/AgentXControlPlane/00000000-0000-0000-0000-000000000000", Outputs: recorded.controlPlane }) : "");
         }
         if (stack === "AgentXProductionFoundation") {
           return ok(query ? JSON.stringify({ Outputs: recorded.foundationParameters.map((OutputKey) => ({ OutputKey, OutputValue: `${OutputKey}-value` })) }) : "");
@@ -58,11 +59,14 @@ vi.mock("../../scripts/release-common.js", async (importOriginal) => {
 
 const { releaseProduction, parseProductionReleaseArgs } = await import("../../scripts/release-production.js");
 
-const MOVED_ARN = "arn:aws:iam::111122223333:role/agentx/production/agentx-production-img-push";
-const ROOT_ARN = "arn:aws:iam::111122223333:role/agentx-production-img-push";
+const arn = (role: "push" | "pull" | "manage", path: string, account = "111122223333") => `arn:aws:iam::${account}:role/${path}agentx-production-img-${role}`;
 const SWITCH = "AGENTX_LEGACY_SAVED_ENV_ROLES";
 const WORKER_IMAGE = `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${"a".repeat(64)}`;
-const pushRole = (arn: string): Output[] => [{ OutputKey: "SavedEnvImgPushRoleArn", OutputValue: arn }];
+const KEYS = { push: "SavedEnvImgPushRoleArn", pull: "SavedEnvImgPullRoleArn", manage: "SavedEnvImgManageRoleArn" } as const;
+const roles = (build: (role: keyof typeof KEYS) => string | undefined): Output[] =>
+  (Object.keys(KEYS) as Array<keyof typeof KEYS>).flatMap((role) => { const value = build(role); return value === undefined ? [] : [{ OutputKey: KEYS[role], OutputValue: value }]; });
+const rootRoles = () => roles((role) => arn(role, ""));
+const movedRoles = () => roles((role) => arn(role, "agentx/production/"));
 
 describe("releaseProduction and the legacy saved environment roles switch", () => {
   let stdout: MockInstance<typeof process.stdout.write>;
@@ -107,7 +111,7 @@ describe("releaseProduction and the legacy saved environment roles switch", () =
   });
 
   it("the fake release reaches the control plane deploy on a default install, with no mode flag", async () => {
-    recorded.controlPlane = pushRole(ROOT_ARN);
+    recorded.controlPlane = rootRoles();
     await expect(release()).rejects.toThrow(StoppedAtControlPlane);
     expect(controlPlaneContext()).toEqual([]);
   });
@@ -117,13 +121,13 @@ describe("releaseProduction and the legacy saved environment roles switch", () =
     ["root", "root"],
   ])("refuses a release carrying %s against an install whose roles moved, using describe-stacks alone", async (_name, value) => {
     process.env[SWITCH] = value;
-    recorded.controlPlane = pushRole(MOVED_ARN);
+    recorded.controlPlane = movedRoles();
     await expect(release()).rejects.toThrow(/would revert them/);
     onlyDescribeStacks();
   });
 
   it("derives path from the deployed control plane when the mode is unset, and the deploy carries it", async () => {
-    recorded.controlPlane = pushRole(MOVED_ARN);
+    recorded.controlPlane = movedRoles();
     await expect(release()).rejects.toThrow(StoppedAtControlPlane);
     expect(controlPlaneContext()).toEqual(["agentxLegacySavedEnvRoles=path"]);
   });
@@ -147,6 +151,21 @@ describe("releaseProduction and the legacy saved environment roles switch", () =
     recorded.controlPlane = [];
     await expect(release()).rejects.toThrow(StoppedAtControlPlane);
     expect(controlPlaneContext()).toEqual([flag]);
+  });
+
+  it.each([
+    ["a partial set (push output missing) with an explicit none", () => roles((role) => (role === "push" ? undefined : arn(role, "agentx/production/"))), "none"],
+    ["a partial set (push output missing), mode unset", () => roles((role) => (role === "push" ? undefined : arn(role, "agentx/production/"))), undefined],
+    ["a mixed set (one role moved)", () => roles((role) => arn(role, role === "pull" ? "agentx/production/" : "")), undefined],
+    ["a mixed set with an explicit path", () => roles((role) => arn(role, role === "pull" ? "agentx/production/" : "")), "path"],
+    ["an empty push output", () => roles((role) => (role === "push" ? "" : arn(role, ""))), "root"],
+    ["a well formed path ARN in a foreign account", () => roles((role) => arn(role, "agentx/production/", "444455556666")), undefined],
+    ["a role that is not a saved environment role", () => roles((role) => arn(role, "agentx/production/").replace("agentx-production-img", "unrelated-role")), undefined],
+  ])("refuses %s, using describe-stacks alone", async (_name, outputs, value) => {
+    if (value !== undefined) process.env[SWITCH] = value;
+    recorded.controlPlane = outputs();
+    await expect(release()).rejects.toThrow(/not recognized/);
+    onlyDescribeStacks();
   });
 
   it("derives nothing on a fresh install (no control plane yet): the explicit value only", async () => {

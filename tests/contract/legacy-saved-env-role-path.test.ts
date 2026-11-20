@@ -112,9 +112,17 @@ describe("legacy saved environment roles switch", () => {
 });
 
 describe("the production release carries the switch", () => {
-  const moved = { Outputs: [{ OutputKey: "SavedEnvImgPushRoleArn", OutputValue: "arn:aws:iam::111122223333:role/agentx/production/agentx-production-img-push" }] };
-  const root = { Outputs: [{ OutputKey: "SavedEnvImgPushRoleArn", OutputValue: "arn:aws:iam::111122223333:role/agentx-production-img-push" }] };
-  const noRoles = { Outputs: [{ OutputKey: "ApiEndpoint", OutputValue: "https://example.invalid" }] };
+  const STACK_ID = "arn:aws:cloudformation:us-east-1:111122223333:stack/AgentXControlPlane/00000000-0000-0000-0000-000000000000";
+  const KEYS = { push: "SavedEnvImgPushRoleArn", pull: "SavedEnvImgPullRoleArn", manage: "SavedEnvImgManageRoleArn" } as const;
+  const arnFor = (role: keyof typeof KEYS, rolePath: string, account = "111122223333", partition = "aws") => `arn:${partition}:iam::${account}:role/${rolePath}agentx-production-img-${role}`;
+  /** A control plane description whose three saved role outputs are built per role by `arn`; a role mapped to undefined is left out. */
+  const described = (arn: (role: keyof typeof KEYS) => string | undefined, stackId: string | null = STACK_ID) => ({
+    ...(stackId === null ? {} : { StackId: stackId }),
+    Outputs: (Object.keys(KEYS) as Array<keyof typeof KEYS>).flatMap((role) => { const value = arn(role); return value === undefined ? [] : [{ OutputKey: KEYS[role], OutputValue: value }]; }),
+  });
+  const moved = described((role) => arnFor(role, "agentx/production/"));
+  const root = described((role) => arnFor(role, ""));
+  const noRoles = { StackId: STACK_ID, Outputs: [{ OutputKey: "ApiEndpoint", OutputValue: "https://example.invalid" }] };
 
   it("passes the context to the control plane deploy only when the variable is set", () => {
     expect(legacySavedEnvRolesContext({})).toEqual([]);
@@ -131,6 +139,68 @@ describe("the production release carries the switch", () => {
     expect(deployedSavedEnvRolesState(root)).toBe("root");
     expect(deployedSavedEnvRolesState(noRoles)).toBe("none");
     expect(deployedSavedEnvRolesState({})).toBe("none");
+  });
+
+  it("refuses to classify malformed or foreign role ARNs, whatever the mode (an invalid output is no evidence of where the roles are)", () => {
+    const refused = /not recognized/;
+    const all = (arn: string) => described(() => arn);
+    for (const [name, deployed] of [
+      ["empty", all("")],
+      ["garbage", all("garbage")],
+      ["not an arn, path-shaped", all("not-an-arn:role/agentx/production/not-the-push-role")],
+      ["wrong service", described((role) => arnFor(role, "agentx/production/").replace(":iam::", ":s3::"))],
+      ["foreign account, moved", described((role) => arnFor(role, "agentx/production/", "444455556666"))],
+      ["foreign account, root", described((role) => arnFor(role, "", "444455556666"))],
+      ["other partition", described((role) => arnFor(role, "agentx/production/", "111122223333", "aws-cn"))],
+      ["wrong role name", described((role) => arnFor(role, "agentx/production/").replace("agentx-production-img", "unrelated-role"))],
+      ["wrong environment", described((role) => arnFor(role, "agentx/production/").replace("agentx-production-img", "agentx-staging-img"))],
+      ["wrong path", described((role) => arnFor(role, "agentx/staging/"))],
+      ["nested path", described((role) => arnFor(role, "other/agentx/production/"))],
+      ["trailing text", described((role) => `${arnFor(role, "")}-extra`)],
+      ["push output holds the pull role", described((role) => arnFor(role === "push" ? "pull" : role, ""))],
+      ["moved roles but the stack's own ARN is missing", described((role) => arnFor(role, "agentx/production/"), null)],
+      ["moved roles but the stack's own ARN is malformed", described((role) => arnFor(role, "agentx/production/"), "garbage")],
+      ["stack in another account than its roles", described((role) => arnFor(role, "agentx/production/"), STACK_ID.replace("111122223333", "444455556666"))],
+    ] as const) {
+      for (const value of [undefined, "root", "none", "path"]) {
+        expect(() => assertSavedEnvRolesNotReverted(deployed, { AGENTX_LEGACY_SAVED_ENV_ROLES: value }), `${name} / ${String(value)}`).toThrow(refused);
+        expect(() => resolveLegacySavedEnvRolesContext(deployed, { AGENTX_LEGACY_SAVED_ENV_ROLES: value }), `${name} / ${String(value)}`).toThrow(refused);
+      }
+    }
+  });
+
+  it("a partial set of role outputs is refused, including an explicit none over roles that are still there", () => {
+    const partials = [
+      described((role) => (role === "push" ? undefined : arnFor(role, "agentx/production/"))),
+      described((role) => (role === "push" ? arnFor(role, "agentx/production/") : undefined)),
+      described((role) => (role === "manage" ? undefined : arnFor(role, ""))),
+      described((role) => (role === "pull" ? arnFor(role, "") : undefined)),
+    ];
+    for (const deployed of partials) {
+      expect(() => deployedSavedEnvRolesState(deployed)).toThrow(/only .* present of the three/);
+      for (const value of [undefined, "root", "none", "path"]) {
+        expect(() => resolveLegacySavedEnvRolesContext(deployed, { AGENTX_LEGACY_SAVED_ENV_ROLES: value }), String(value)).toThrow(/not recognized/);
+      }
+    }
+  });
+
+  it("a mix of root and moved roles is refused", () => {
+    for (const movedRole of ["push", "pull", "manage"] as const) {
+      const mixed = described((role) => arnFor(role, role === movedRole ? "agentx/production/" : ""));
+      expect(() => deployedSavedEnvRolesState(mixed), movedRole).toThrow(/not all at the same path/);
+      for (const value of [undefined, "root", "none", "path"]) {
+        expect(() => resolveLegacySavedEnvRolesContext(mixed, { AGENTX_LEGACY_SAVED_ENV_ROLES: value }), `${movedRole} / ${String(value)}`).toThrow(/not recognized/);
+      }
+    }
+  });
+
+  it("accepts every partition with the stack's own account, and today's production (all three roles at the root path)", () => {
+    for (const partition of ["aws", "aws-cn", "aws-us-gov"]) {
+      const stackId = STACK_ID.replace(":aws:", `:${partition}:`);
+      expect(deployedSavedEnvRolesState(described((role) => arnFor(role, "", "111122223333", partition), stackId)), partition).toBe("root");
+      expect(deployedSavedEnvRolesState(described((role) => arnFor(role, "agentx/production/", "111122223333", partition), stackId)), partition).toBe("path");
+    }
+    expect(resolveLegacySavedEnvRolesContext(root, {})).toEqual([]);
   });
 
   it("an install whose roles moved accepts only path, or an unset value", () => {
