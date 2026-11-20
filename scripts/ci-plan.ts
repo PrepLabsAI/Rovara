@@ -82,13 +82,18 @@ export interface PlanInput {
   packages: readonly PackageInfo[];
   /** A manual run asked for the Linux runtime check (workflow_dispatch input `linux`). */
   forceLinux?: boolean;
+  /** #1189: the pull request's base branch (github.base_ref); empty or absent outside a pull request. */
+  baseRef?: string;
 }
 
 export const FULL_LABEL = "full-ci";
 /** #1185: a pull request labelled like this runs the Linux runtime check whatever it changes. */
 export const LINUX_LABEL = "linux-ci";
-/** #1185: runs that always run the Linux runtime check: a push (CI runs on pushes to code/next only, so once per batch) and the nightly scheduled run. */
-export const LINUX_EVENTS: readonly string[] = ["push", "schedule"];
+/** #1185, #1189: runs that always run the Linux runtime check: the nightly scheduled run on mainline. Not a push: CI's pushes are code/next's, and the owner
+ * decided (2026-11-19) the check guards what goes into mainline (which deploys), not code/next. */
+export const LINUX_EVENTS: readonly string[] = ["schedule"];
+/** #1189: the branch whose pull requests run the Linux runtime check when they reach its area. */
+export const LINUX_BASE_BRANCH = "mainline";
 export const FULL_TITLE_PREFIXES = ["Batch ", "Sync mainline"] as const;
 export const FULL_SHARDS = 8;
 export const AFFECTED_SHARDS = 2;
@@ -224,10 +229,12 @@ export function relatedTests(changed: readonly string[], packages: readonly Pack
  * #1185: whether the Linux runtime check runs: once per batch and every night (LINUX_EVENTS), on request (the `linux-ci` or `full-ci` label, a manual run's
  * input), and when the change reaches its area (LINUX_PATTERNS), including a pull request whose changed-file list is empty (unknown, so it runs).
  */
-export function linuxRuns(input: Pick<PlanInput, "event" | "labels" | "changed" | "forceLinux">): boolean {
+export function linuxRuns(input: Pick<PlanInput, "event" | "labels" | "changed" | "forceLinux" | "baseRef">): boolean {
   if (LINUX_EVENTS.includes(input.event) || input.forceLinux === true) return true;
   if (input.labels.includes(LINUX_LABEL) || input.labels.includes(FULL_LABEL)) return true;
   if (input.event !== "pull_request") return false;
+  // #1189: only a pull request into mainline (an unknown base runs it: never skip on doubt), never one into code/next.
+  if (input.baseRef !== undefined && input.baseRef !== "" && input.baseRef !== LINUX_BASE_BRANCH) return false;
   return input.changed.length === 0 || input.changed.some((file) => anyMatch(file, LINUX_PATTERNS));
 }
 
@@ -326,7 +333,7 @@ if (process.argv[1]?.endsWith("ci-plan.ts")) {
     try { return (JSON.parse(process.env.CI_LABELS || "[]") as unknown[]).filter((label): label is string => typeof label === "string"); } catch { return []; }
   })();
   const changed = readFileSync(listed, "utf8").split("\n").map((line) => line.trim()).filter((line) => line !== "");
-  const plan = planCi({ event, labels, title: process.env.CI_TITLE ?? "", changed, testSources: new Map([...testFiles("tests"), ...testFiles("packages")]), packages: readPackages("."), forceLinux: process.env.CI_FORCE_LINUX === "true" });
+  const plan = planCi({ event, labels, title: process.env.CI_TITLE ?? "", changed, testSources: new Map([...testFiles("tests"), ...testFiles("packages")]), packages: readPackages("."), forceLinux: process.env.CI_FORCE_LINUX === "true" , baseRef: process.env.CI_BASE_REF ?? "" });
   console.log(`CI mode: ${plan.mode} (${plan.modeReason}).`);
   console.log(plan.docsOnly
     ? `Markdown-only change: ${plan.testsReason}; nothing but this plan runs.`

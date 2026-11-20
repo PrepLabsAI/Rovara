@@ -23,8 +23,8 @@ describe("which runs are FULL", () => {
   it("is every run that is not a pull request: a push to code/next and a manual run (the emulator check runs in a push, not in a manual run: DEC 254zn)", () => {
     for (const event of ["push", "workflow_dispatch"]) {
       const plan = planCi(input({ event, changed: [] }));
-      // #1185: a push to code/next runs the Linux runtime check (once per batch); a manual run only when asked (its `linux` input).
-      expect(plan, event).toMatchObject({ mode: "full", tests: "all", lint: "all", linux: event === "push", device: event === "push", release: true, docsOnly: false, shards: FULL_SHARDS });
+      // #1189: neither a push to code/next nor a manual run runs the Linux runtime check by itself (a manual run only when asked: its `linux` input).
+      expect(plan, event).toMatchObject({ mode: "full", tests: "all", lint: "all", linux: false, device: event === "push", release: true, docsOnly: false, shards: FULL_SHARDS });
     }
   });
 
@@ -168,9 +168,19 @@ describe("when the Linux runtime check runs", () => {
       expect(planCi(input({ title: "Batch 3: things", changed: [area] })).linux, `Batch ${area}`).toBe(true);
     }
   });
-  it("runs on each push to code/next and on the nightly schedule, whatever changed", () => {
-    expect(planCi(input({ event: "push", changed: [] })).linux).toBe(true);
+  it("runs on the nightly schedule whatever changed, and never on a push to code/next (#1189)", () => {
+    expect(planCi(input({ event: "push", changed: [] })).linux).toBe(false);
+    expect(planCi(input({ event: "push", changed: ["packages/worker/src/x.ts"] })).linux).toBe(false);
     expect(planCi(input({ event: "schedule", changed: [] })).linux).toBe(true);
+  });
+  it("runs for a pull request into mainline that reaches its area, never for one into code/next unless asked (#1189)", () => {
+    expect(planCi(input({ baseRef: "mainline", changed: ["packages/worker/src/x.ts"] })).linux).toBe(true);
+    expect(planCi(input({ baseRef: "mainline", changed: ["packages/other-d/src/x.ts"] })).linux).toBe(false);
+    expect(planCi(input({ baseRef: "code/next", changed: ["packages/worker/src/x.ts"] })).linux).toBe(false);
+    expect(planCi(input({ baseRef: "code/next", title: "Batch 4: things", changed: ["tests/linux/x.test.ts"] })).linux).toBe(false);
+    expect(planCi(input({ baseRef: "code/next", labels: ["linux-ci"] })).linux).toBe(true);
+    // An unknown base never skips it.
+    expect(planCi(input({ baseRef: "", changed: ["packages/worker/src/x.ts"] })).linux).toBe(true);
   });
   it("runs on request: the linux-ci or full-ci label, or a manual run's linux input", () => {
     expect(planCi(input({ labels: ["linux-ci"] })).linux).toBe(true);
