@@ -38,7 +38,8 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(quick.permissions).toBeUndefined();
     expect(JSON.stringify(quick)).not.toContain("secrets.");
     // A Markdown-only change (the plan says so) skips the job whole; a manual run and a push never do.
-    expect(quick.if).toBe("needs.plan.outputs.docs_only != 'true'");
+    // #1181: a reuse skips it too (the code already passed a full run).
+    expect(quick.if).toBe("needs.plan.outputs.docs_only != 'true' && needs.plan.outputs.mode != 'reuse'");
     expect(quick.steps.filter((step) => (step.uses ?? "").startsWith("actions/checkout"))).toHaveLength(1);
     expect(quick.steps.filter((step) => step.name === "checks: npm ci")).toHaveLength(1);
     const parts = quick.steps.filter((step) => step.run !== undefined).map((step) => [step.name, step.if, step["timeout-minutes"], step.run] as const);
@@ -84,10 +85,11 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(changed.run).toContain("xargs npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
   });
 
-  it("reports a check called `ci-mode (full)` only in a full run, for the merge to require", async () => {
+  it("reports a check called `ci-mode (full)` only in a full run or a reuse of one, for the merge to require", async () => {
     const mode = (await workflow()).jobs["ci-mode"]!;
     expect(mode.name).toBe("ci-mode (full)");
-    expect(mode.if).toBe("needs.plan.outputs.mode == 'full'");
+    // #1181: a reuse stands on a full run of byte-identical code, so it reports the check too.
+    expect(mode.if).toBe("needs.plan.outputs.mode == 'full' || needs.plan.outputs.mode == 'reuse'");
   });
 
   it("makes the plan the first job: from the event, the labels, the title and the changed files, with no install", async () => {
@@ -103,7 +105,11 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
       CI_FORCE_LINUX: "${{ github.event.inputs.linux }}",
       CI_BASE_REF: "${{ github.base_ref }}",
       BASE_SHA: "${{ github.event.pull_request.base.sha }}",
+      // #1181: the reuse proof reads the head's check runs with the run's own token (read-only permissions on this job only).
+      CI_HEAD_SHA: "${{ github.event.pull_request.head.sha }}",
+      GH_TOKEN: "${{ github.token }}",
     });
+    expect(plan.permissions).toEqual({ contents: "read", checks: "read", actions: "read" });
     expect(step.run).toContain("git diff --name-only HEAD^1 HEAD");
     expect(step.run).toContain('node "$PLAN_SCRIPT"');
     // Untrusted text (the title) reaches the script through the environment, never spliced into the shell.

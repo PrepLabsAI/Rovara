@@ -39,6 +39,8 @@ concurrency:
 #   typecheck only), or on request: the `linux-ci` or `full-ci` label, or a manual run's `linux` input.
 # The job called `local` waits for every job and is the one check a pull request needs (scripts/ci-gate.ts). It knows from `plan` which jobs must have run, so a job
 # skipped by design counts as a pass but a job that should have run and did not fails it. `port-guard` is a check of its own. A draft skips every job.
+# REUSE (#1181): a pull request (not labelled `full-ci`) whose code is byte-for-byte what an earlier FULL push run of this workflow tested and passed runs only the plan,
+#   `ci-mode (full)`, `port-guard` and `local`, which names the reused run. Anything the plan cannot prove plans as above.
 #
 # Build once: the `build` job builds the packages and hands the output to the test shards as an artifact, so the shards do not each build it again.
 jobs:
@@ -47,6 +49,11 @@ jobs:
     if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # #1181: reading this commit's check runs and their workflow runs is how a reuse is proven (scripts/ci-plan.ts findReuse).
+    permissions:
+      contents: read
+      checks: read
+      actions: read
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       docs_only: ${{ steps.plan.outputs.docs_only }}
@@ -57,6 +64,7 @@ jobs:
       device: ${{ steps.plan.outputs.device }}
       device_required: ${{ steps.plan.outputs.device_required }}
       release: ${{ steps.plan.outputs.release }}
+      reuse_run: ${{ steps.plan.outputs.reuse_run }}
     steps:
       # Depth 2 keeps the pull request's merge commit and its first parent, the base branch.
       - uses: actions/checkout@v5
@@ -74,6 +82,9 @@ jobs:
           CI_FORCE_LINUX: ${{ github.event.inputs.linux }}
           CI_BASE_REF: ${{ github.base_ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # #1181: what a reuse is proven against (the pull request's head) and the token that reads the check runs.
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           # On a pull request the script is the base branch's copy, never the pull request's own: a change to ci-plan.ts cannot change how its own run is judged (scripts/port-guard.ts also lists it as a guard file).
           # The base branch has the file unless this is the pull request that adds it, which no pull request can fake, so only then does the checkout's copy run. A failed fetch fails the step.
@@ -96,18 +107,23 @@ jobs:
   ci-mode:
     name: ci-mode (full)
     needs: plan
-    if: needs.plan.outputs.mode == 'full'
+    # #1181: also a reuse, which stands on a full run of exactly this code (the plan job names it).
+    if: needs.plan.outputs.mode == 'full' || needs.plan.outputs.mode == 'reuse'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - run: echo "FULL run - every job runs in full (the plan job says why)."
+      - env:
+          MODE: ${{ needs.plan.outputs.mode }}
+          REUSED: ${{ needs.plan.outputs.reuse_run }}
+        run: |
+          if [ "$MODE" = reuse ]; then echo "REUSE - this code is byte-for-byte what $REUSED tested in full and passed."; else echo "FULL run - every job runs in full (the plan job says why)."; fi
 
   # What the old `scope`, `checks` and `release` jobs did, in one job: one checkout, one install, one runner.
   # Each part keeps its own condition and its own step time limit; the job's limit is the sum of the old ones (5 + 15 + 15). A failed step
   # fails the job, and its name starts with the part it belongs to (checks, release). A Markdown-only change skips the job (the plan says so).
   quick:
     needs: plan
-    if: needs.plan.outputs.docs_only != 'true'
+    if: needs.plan.outputs.docs_only != 'true' && needs.plan.outputs.mode != 'reuse'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:

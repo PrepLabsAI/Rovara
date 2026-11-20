@@ -13,14 +13,22 @@ export const GATED_JOBS = ["quick", "build", "test", "linux-runtime", "ci-mode"]
 
 /** The shard list of a run that executes the whole suite (scripts/ci-plan.ts FULL_SHARDS). */
 export const FULL_SHARD_LIST = "[1,2,3,4,5,6,7,8]";
-const MODES = ["full", "affected"];
+const MODES = ["full", "affected", "reuse"];
+/** #1181: the run a reuse stands on (scripts/ci-plan.ts findReuse). */
+const REUSED_RUN = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/actions\/runs\/\d+$/u;
 const SCOPES = ["all", "changed", "none"];
 const BOOLEANS = ["true", "false"];
 
 /** What each job's result must be, from the plan: "success" when the plan needs the job, "skipped" when it skipped the job by design. Or a reason the plan itself is not trusted. */
 export function expectedResults(plan: PlanOutputs): { expected: Record<string, "success" | "skipped"> } | { problem: string } {
   const { mode, docs_only: docsOnly, tests, lint, linux, release } = plan;
-  if (mode === undefined || !MODES.includes(mode)) return { problem: `the plan's mode is ${JSON.stringify(mode)}, not full or affected` };
+  if (mode === undefined || !MODES.includes(mode)) return { problem: `the plan's mode is ${JSON.stringify(mode)}, not full, affected or reuse` };
+  // #1181: a reuse runs nothing but the plan, ci-mode (full), port-guard and this gate, and must name the full run it stands on.
+  if (mode === "reuse") {
+    if (!(tests === "none" && lint === "none" && linux === "false" && release === "false" && docsOnly === "false")) return { problem: `the plan says reuse but still runs part of the suite (tests ${tests}, lint ${lint}, linux ${linux}, release ${release}, docs_only ${docsOnly})` };
+    if (plan.reuse_run === undefined || !REUSED_RUN.test(plan.reuse_run)) return { problem: `the plan says reuse but names no run (${JSON.stringify(plan.reuse_run)})` };
+    return { expected: { quick: "skipped", build: "skipped", test: "skipped", "linux-runtime": "skipped", "ci-mode": "success" } };
+  }
   if (tests === undefined || !SCOPES.includes(tests)) return { problem: `the plan's tests is ${JSON.stringify(tests)}, not all, changed or none` };
   if (lint === undefined || !SCOPES.includes(lint)) return { problem: `the plan's lint is ${JSON.stringify(lint)}, not all, changed or none` };
   for (const [name, value] of [["docs_only", docsOnly], ["linux", linux], ["release", release]] as const) {
@@ -62,7 +70,7 @@ export function gateVerdict(input: { plan: PlanOutputs; results: Readonly<Record
   }
   const ran = GATED_JOBS.filter((job) => decided.expected[job] === "success");
   const skipped = GATED_JOBS.filter((job) => decided.expected[job] === "skipped");
-  const mode = plan.mode === "full" ? "FULL run" : plan.docs_only === "true" ? "Markdown-only change" : "affected run";
+  const mode = plan.mode === "full" ? "FULL run" : plan.mode === "reuse" ? `reuse of the full pass of ${plan.reuse_run ?? "?"} (byte-identical code)` : plan.docs_only === "true" ? "Markdown-only change" : "affected run";
   return { ok: true, reason: `${mode}; ${ran.length} jobs succeeded${skipped.length > 0 ? `, ${skipped.length} skipped by design (${skipped.join(", ")})` : ""}` };
 }
 

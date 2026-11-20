@@ -46,7 +46,7 @@ describe("the docs-only check (CI skips the heavy steps for a Markdown-only pull
 
   it("skips the heavy jobs through the plan: `quick` and the shards by their own condition, never by a step that leaves the job green", async () => {
     const workflow = YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
-    expect(workflow.jobs.quick!.if).toBe("needs.plan.outputs.docs_only != 'true'");
+    expect(workflow.jobs.quick!.if).toBe("needs.plan.outputs.docs_only != 'true' && needs.plan.outputs.mode != 'reuse'");
     for (const job of ["build", "test"]) expect(workflow.jobs[job]!.if, job).toBe("needs.plan.outputs.tests != 'none'");
     expect(workflow.jobs["linux-runtime"]!.if).toBe("needs.plan.outputs.linux == 'true'");
   });

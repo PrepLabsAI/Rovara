@@ -15,6 +15,7 @@
 //
 // Node runs this file directly, before `npm ci`, so it imports only Node's own modules and uses only erasable syntax. (The docs-only rule that lived in
 // scripts/ci-docs-only.ts is here now.)
+import { spawnSync } from "node:child_process";
 import { appendFileSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -296,6 +297,107 @@ export function planOutputs(plan: Plan): Record<string, string> {
   };
 }
 
+// ---- #1181: reuse a full pass of byte-identical code -------------------------------------------------------------------------------------------------------
+//
+// A pull request whose code is exactly what an earlier FULL push run of this workflow tested and passed (a pinned code/next -> mainline pull request, a sync) does not
+// run the suite again. The proof, all of it required, everything else plans as before:
+//   - this is a pull request without the `full-ci` label, and the tree this run tests (the merge commit) is byte-for-byte the pull request head's tree (the pull request is up to date);
+//   - a DIFFERENT run of this workflow (.github/workflows/ci.yml), triggered by a push of exactly that head commit (so it tested exactly that tree), has, among its own
+//     GitHub Actions check runs on that commit, the latest `local`, `ci-mode (full)` and every `test (n/8)` completed with success: a full run that passed as a whole
+//     (a run that itself reused something has no test shards, so a reuse is never reused);
+//   - GitHub answers every read in time. Any refusal, rate limit, timeout or doubt: no reuse.
+// Reuse runs the plan, `ci-mode (full)`, port-guard and the gate; quick, build, the test shards and the runtime checks are skipped. The gate names the reused run.
+
+export interface ReuseCheckRun { id: number; name: string; status: string; conclusion: string | null; html_url?: string | null; app?: { slug?: string } | null }
+export interface ReuseRun { id: number; event: string; head_sha: string; path: string }
+export type Reuse = { runUrl: string; runId: number } | undefined;
+const RUN_OF_JOB = /^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/(\d+)\/job\/\d+$/u;
+const SHA_PATTERN = /^[0-9a-f]{40}$/u;
+export const REUSE_REQUIRED_CHECKS = ["local", "ci-mode (full)", ...Array.from({ length: FULL_SHARDS }, (_, index) => `test (${index + 1}/${FULL_SHARDS})`)];
+
+/** The runs (ids) among these check runs whose own latest `local`, `ci-mode (full)` and test shards all completed with success; never `currentRunId`. Newest first. */
+export function passedFullRuns(runs: readonly ReuseCheckRun[], currentRunId: number): number[] {
+  const byRun = new Map<number, Map<string, ReuseCheckRun>>();
+  for (const run of runs) {
+    if (run.app?.slug !== "github-actions") continue;
+    const match = RUN_OF_JOB.exec(run.html_url ?? "");
+    if (match === null) continue;
+    const runId = Number(match[1]);
+    if (!Number.isSafeInteger(runId) || runId === currentRunId) continue;
+    const latest = byRun.get(runId) ?? new Map<string, ReuseCheckRun>();
+    const seen = latest.get(run.name);
+    if (seen === undefined || run.id > seen.id) latest.set(run.name, run);
+    byRun.set(runId, latest);
+  }
+  return [...byRun.entries()]
+    .filter(([, latest]) => REUSE_REQUIRED_CHECKS.every((name) => { const run = latest.get(name); return run !== undefined && run.status === "completed" && run.conclusion === "success"; }))
+    .map(([runId]) => runId)
+    .sort((a, b) => b - a);
+}
+
+export interface ReuseInput {
+  event: string;
+  labels: readonly string[];
+  headSha: string;
+  currentRunId: number;
+  repository: string;
+  treeOf: (rev: string) => string | undefined;
+  checkRuns: (sha: string) => Promise<ReuseCheckRun[] | undefined>;
+  workflowRun: (runId: number) => Promise<ReuseRun | undefined>;
+}
+
+/** A full pass of byte-identical code this pull request's run may stand on, or undefined (then the run plans as before). Never throws. */
+export async function findReuse(input: ReuseInput): Promise<Reuse> {
+  try {
+    if (input.event !== "pull_request" || input.labels.includes("full-ci")) return undefined;
+    if (!SHA_PATTERN.test(input.headSha) || !Number.isSafeInteger(input.currentRunId) || input.currentRunId <= 0 || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(input.repository)) return undefined;
+    const tested = input.treeOf("HEAD"); const head = input.treeOf(input.headSha);
+    if (tested === undefined || head === undefined || tested !== head) return undefined;
+    const runs = await input.checkRuns(input.headSha);
+    if (runs === undefined) return undefined;
+    for (const runId of passedFullRuns(runs, input.currentRunId)) {
+      const run = await input.workflowRun(runId);
+      if (run !== undefined && run.id === runId && run.event === "push" && run.head_sha === input.headSha && run.path === ".github/workflows/ci.yml") {
+        return { runId, runUrl: `https://github.com/${input.repository}/actions/runs/${runId}` };
+      }
+    }
+    return undefined;
+  } catch { return undefined; }
+}
+
+/** The plan of a reuse: only the plan, `ci-mode (full)`, port-guard and the gate run. */
+export function reusePlanOutputs(reuse: NonNullable<Reuse>): Record<string, string> {
+  return { mode: "reuse", docs_only: "false", tests: "none", shards: "[1]", lint: "none", linux: "false", device: "false", device_required: "false", release: "false", reuse_run: reuse.runUrl };
+}
+
+/** GitHub's REST API with the run's own token; ten seconds a read, then unknown. */
+function githubReads(repository: string, token: string): Pick<ReuseInput, "checkRuns" | "workflowRun"> {
+  const read = async (path: string): Promise<unknown> => {
+    const response = await fetch(`https://api.github.com/repos/${repository}/${path}`, {
+      headers: { accept: "application/vnd.github+json", authorization: `Bearer ${token}`, "user-agent": "rovara-ci-plan", "x-github-api-version": "2022-11-28" },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`GitHub answered ${response.status}`);
+    return await response.json();
+  };
+  return {
+    checkRuns: async (sha) => {
+      const runs: ReuseCheckRun[] = [];
+      for (let page = 1; page <= 3; page++) {
+        const body = await read(`commits/${sha}/check-runs?per_page=100&page=${page}`) as { check_runs?: unknown; total_count?: unknown };
+        if (!Array.isArray(body.check_runs)) return undefined;
+        runs.push(...body.check_runs as ReuseCheckRun[]);
+        if (typeof body.total_count !== "number" || runs.length >= body.total_count) return runs;
+      }
+      return undefined;
+    },
+    workflowRun: async (runId) => {
+      const body = await read(`actions/runs/${runId}`) as Partial<ReuseRun>;
+      return typeof body.id === "number" && typeof body.event === "string" && typeof body.head_sha === "string" && typeof body.path === "string" ? body as ReuseRun : undefined;
+    },
+  };
+}
+
 function testFiles(dir: string): Map<string, string> {
   const sources = new Map<string, string>();
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -330,6 +432,19 @@ if (process.argv[1]?.endsWith("ci-plan.ts")) {
   const labels = ((): string[] => {
     try { return (JSON.parse(process.env.CI_LABELS || "[]") as unknown[]).filter((label): label is string => typeof label === "string"); } catch { return []; }
   })();
+  // #1181: a pull request whose exact code already passed a full push run stands on that run.
+  const token = process.env.GH_TOKEN ?? "", repository = process.env.GITHUB_REPOSITORY ?? "";
+  const reuse = token === "" ? undefined : await findReuse({
+    event, labels, headSha: process.env.CI_HEAD_SHA ?? "", currentRunId: Number(process.env.GITHUB_RUN_ID ?? "0"), repository,
+    treeOf: (rev) => { const out = spawnSync("git", ["rev-parse", "--verify", "--quiet", `${rev}^{tree}`], { encoding: "utf8" }); return out.status === 0 ? out.stdout.trim() : undefined; },
+    ...githubReads(repository, token),
+  });
+  if (reuse !== undefined) {
+    console.log(`CI mode: reuse (this code is byte-for-byte what ${reuse.runUrl} tested in full and passed; only the plan, ci-mode (full), port-guard and the gate run).`);
+    if (process.env.GITHUB_OUTPUT !== undefined) appendFileSync(process.env.GITHUB_OUTPUT, `${Object.entries(reusePlanOutputs(reuse)).map(([key, value]) => `${key}=${value}`).join("\n")}\n`);
+    if (process.env.CI_EXTRA_TESTS !== undefined) writeFileSync(process.env.CI_EXTRA_TESTS, "");
+    process.exit(0);
+  }
   const changed = readFileSync(listed, "utf8").split("\n").map((line) => line.trim()).filter((line) => line !== "");
   const plan = planCi({ event, labels, title: process.env.CI_TITLE ?? "", changed, testSources: new Map([...testFiles("tests"), ...testFiles("packages")]), packages: readPackages("."), forceLinux: process.env.CI_FORCE_LINUX === "true" , baseRef: process.env.CI_BASE_REF ?? "" });
   console.log(`CI mode: ${plan.mode} (${plan.modeReason}).`);
