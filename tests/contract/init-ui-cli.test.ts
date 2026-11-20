@@ -527,14 +527,14 @@ describe("agentx init --ui", () => {
     expect(await h.run(["--ui", "--stop-after", "prerequisites"], { openBrowser: operator.open, github })).toBe(0);
     await operator.settled();
     const plans = operator.states.map((state) => state.plan).filter((plan): plan is WizardPlan => plan !== undefined);
-    expect(plans[0]?.sections[1]?.lines[0]).toContain("\"AgentX acme (staging)\" owned by acme.");
-    expect(plans.at(-1)?.sections[1]?.lines[0]).toContain("\"AgentX acme-labs (staging)\" owned by acme-labs.");
+    expect(plans[0]?.sections[1]?.lines[0]).toContain("\"Rovara acme (staging)\" owned by acme.");
+    expect(plans.at(-1)?.sections[1]?.lines[0]).toContain("\"Rovara acme-labs (staging)\" owned by acme-labs.");
     const second = operator.states.map((state) => state.question).filter((question) => question?.text === "Your settings")[1];
     expect(second?.fields?.find((field) => field.name === "email")?.value).toBe(ADMIN_EMAIL);
     expect(second?.fields?.find((field) => field.name === "alertEmail")?.value).toBe("ops@example.com");
     expect(second?.fields?.find((field) => field.name === "appName")?.value).toBe("");
     const answers = JSON.parse(h.store.values.get(installAnswersParameterName("staging")) ?? "{}") as InitAnswers;
-    expect(answers.github).toEqual({ account: "acme-labs", accountType: "organization", appName: "AgentX acme-labs (staging)" });
+    expect(answers.github).toEqual({ account: "acme-labs", accountType: "organization", appName: "Rovara acme-labs (staging)" });
   });
 
   it("FR-020: a new install name is the install's name from then on, and a used one is refused", async () => {
@@ -599,11 +599,11 @@ describe("agentx init --ui", () => {
     expect(operator.clicked).toContain(`${wizardOrigin}/github/start?t=${new URL(operator.opened[0] ?? "").searchParams.get("t") ?? ""}`);
     expect(h.github.conversions).toEqual(["0123456789abcdef0123"]);
     const stages = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "github").map((card) => card.lines[0]) ?? []);
-    // The app's name is the first run's default ("AgentX <account> (<env>)"); its slug is GitHub's,
+    // The app's name is the first run's default ("Rovara <account> (<env>)"); its slug is GitHub's,
     // kept in the card's details rather than its words.
-    expect(stages).toContain('Create the GitHub app "AgentX acme (staging)" for acme.');
-    expect(stages).toContain('Install "AgentX acme (staging)" on acme. Choose only the repositories Rovara should work on.');
-    expect(stages.at(-1)).toBe('"AgentX acme (staging)" is installed on acme.');
+    expect(stages).toContain('Create the GitHub app "Rovara acme (staging)" for acme.');
+    expect(stages).toContain('Install "Rovara acme (staging)" on acme. Choose only the repositories Rovara should work on.');
+    expect(stages.at(-1)).toBe('"Rovara acme (staging)" is installed on acme.');
   });
 
   it("FR-040: the Slack app is created from a button, and a wrong token is refused on the field", async () => {
@@ -620,7 +620,7 @@ describe("agentx init --ui", () => {
     expect(JSON.stringify(operator.states)).not.toContain("USERtokenVALUE");
     expect(await h.everywhere()).not.toContain("USERtokenVALUE");
     const slack = operator.states.at(-1)?.cards?.find((card) => card.id === "slack");
-    expect(slack).toMatchObject({ status: "ok", lines: ['"AgentX acme (staging)" is installed in the Acme workspace.'] });
+    expect(slack).toMatchObject({ status: "ok", lines: ['"Rovara acme (staging)" is installed in the Acme workspace.'] });
   });
 
   it("Q8: when Slack refuses a token that looks right, the page asks for both again and saves nothing until one works", async () => {
