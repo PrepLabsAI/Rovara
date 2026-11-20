@@ -15,6 +15,7 @@ import { EnvironmentRolePath } from "./role-path.js";
 import { SlackOrchestratorStack } from "./slack-orchestrator.js";
 import { SwebenchEvalStack, swebenchNames } from "./swebench-eval.js";
 import { CiRunnerStack } from "./ci-runner.js";
+import { StagingReleaseAccessStack } from "./staging-release-access.js";
 import { WorkerSettingsStack } from "./worker-settings.js";
 
 export function buildAgentXApp(context: Record<string, unknown> = {}): App {
@@ -168,6 +169,14 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
   if (app.node.tryGetContext("agentxCiRunner") === "enabled") {
     new CiRunnerStack(app, "AgentXCiRunner", {
       description: "CodeBuild-hosted GitHub Actions runner for CI's test shards on pull requests into mainline",
+      env: { region: deploymentRegion ?? "us-east-1" },
+    });
+  }
+  // #1242: the staging account's release role, only when asked for (-c agentxStagingAccess=enabled) and deployed into the staging account by hand;
+  // the release pipeline's staging build assumes it. No release deploys it.
+  if (naming.env === undefined && app.node.tryGetContext("agentxStagingAccess") === "enabled") {
+    new StagingReleaseAccessStack(app, "AgentXStagingReleaseAccess", {
+      description: "The release pipeline's staging build role in the staging account",
       env: { region: deploymentRegion ?? "us-east-1" },
     });
   }
