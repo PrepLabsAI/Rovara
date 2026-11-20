@@ -65,12 +65,20 @@ describe("the gate behind the local check: what each job must have done, from th
     expect(gateVerdict({ plan: { ...AFFECTED, mode: "sometimes" }, results: affectedRan }).ok).toBe(false);
     expect(gateVerdict({ plan: { ...AFFECTED, tests: "most" }, results: affectedRan }).ok).toBe(false);
     expect(gateVerdict({ plan: { ...AFFECTED, linux: "maybe" }, results: affectedRan }).ok).toBe(false);
-    for (const thinner of [{ tests: "changed" }, { lint: "changed" }, { release: "false" }, { docs_only: "true" }]) {
+    for (const thinner of [{ tests: "changed" }, { release: "false" }, { docs_only: "true" }]) {
       const verdict = gateVerdict({ plan: { ...FULL, ...thinner }, results: fullRan });
       expect(verdict.ok, JSON.stringify(thinner)).toBe(false);
       expect(verdict.reason).toMatch(/the plan says full but also skips|says Markdown-only/);
     }
     expect(gateVerdict({ plan: { ...DOCS, tests: "changed" }, results: docsRan }).ok).toBe(false);
+  });
+
+  // #1246: a Batch or Sync mainline pull request lints only its changed files (ci-plan.ts fullLint); every job is still held to the full run's results.
+  it("accepts a full run that lints only the changed files, or none, with every job still required", () => {
+    for (const lint of ["changed", "none"]) {
+      expect(gateVerdict({ plan: { ...FULL, lint }, results: fullRan }).ok, lint).toBe(true);
+      expect(gateVerdict({ plan: { ...FULL, lint }, results: { ...fullRan, quick: "skipped" } }).ok, lint).toBe(false);
+    }
   });
 
   // #1185: a FULL run (a Batch or Sync mainline pull request whose change does not reach the Linux runtime area) may skip linux-runtime by design.
