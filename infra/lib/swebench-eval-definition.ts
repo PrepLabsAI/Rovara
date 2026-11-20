@@ -88,7 +88,7 @@ export function swebenchEvalDefinition(props: SwebenchEvalDefinitionProps): Stat
         Type: "Task",
         Resource: ec2("runInstances"),
         Arguments: {
-          LaunchTemplate: { LaunchTemplateId: props.launchTemplateId, Version: "$Default" },
+          LaunchTemplate: { LaunchTemplateId: props.launchTemplateId, Version: "$Latest" },
           MinCount: 1,
           MaxCount: 1,
           SubnetId: "{% $subnetId %}",

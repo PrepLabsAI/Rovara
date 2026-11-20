@@ -646,7 +646,7 @@ describe("L1a broker environment derivation", () => {
     // #1149: re-pinned. The legacy broker packs its environment (the names parameter /agentx/production/broker-names, AGENTX_SETTINGS with the legacy layout marker, the
     // names parameter's read in its ssm:GetParameters statement); tests/contract/legacy-broker-packed-environment.test.ts proves it boots with the same values.
     // #1148: re-pinned for the core engine in the legacy template (CoreEngine off by default).
-    expect(digest(legacy.toJSON())).toBe("339034b1f7bc4a12dbdd877f98b90f6dc05a15e170185fd007afe273df217558");
+    expect(digest(legacy.toJSON())).toBe("d83033611a45d30fb4b9162de323935d1b91ed6f8a200cbc8be10165d8cb4e8f");
   });
 });
 import { createHash } from "node:crypto";

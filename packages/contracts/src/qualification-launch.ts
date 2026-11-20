@@ -126,7 +126,7 @@ export function buildRunInstancesInput(
     MinCount: 1,
     MaxCount: 1,
     ...(run.imageId === undefined ? {} : { ImageId: run.imageId }),
-    LaunchTemplate: { LaunchTemplateId: facts.launchTemplateId, Version: "$Default" },
+    LaunchTemplate: { LaunchTemplateId: facts.launchTemplateId, Version: "$Latest" },
     SubnetId: facts.subnet.subnetId,
     UserData: run.userData,
     TagSpecifications: [{

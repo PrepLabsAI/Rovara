@@ -234,7 +234,7 @@ describe("buildRunInstancesInput", () => {
     const request = buildRunInstancesInput(facts, { env: ENV, runId: RUN_ID, revision: "0123456789ab", userData: "dXNlcmRhdGE=" });
     expect(request).toMatchObject({
       MinCount: 1, MaxCount: 1, ClientToken: RUN_ID, UserData: "dXNlcmRhdGE=",
-      LaunchTemplate: { LaunchTemplateId: facts.launchTemplateId, Version: "$Default" },
+      LaunchTemplate: { LaunchTemplateId: facts.launchTemplateId, Version: "$Latest" },
       SubnetId: facts.subnet.subnetId,
     });
     expect(request).not.toHaveProperty("InstanceType");
