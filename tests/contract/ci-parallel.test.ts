@@ -115,7 +115,6 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(job["runs-on"]).toBe("ubuntu-24.04-arm");
     // Only when the plan says its area changed (always in a full run).
     expect(job.if).toBe("needs.plan.outputs.linux == 'true'");
-    expect(job.steps.every((step) => step.if === undefined)).toBe(true);
     const run = job.steps.map((step) => step.run ?? "").join("\n");
     // The job installs the firewall by running the heredoc inside boot.sh as it is (never a copy of the rules), before anything builds or runs a container.
     const firewall = job.steps.map((step) => step.run ?? "").find((text) => text.includes("<<'FIREWALL'"))!;
@@ -136,6 +135,39 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(run.indexOf("executor-smoke.ts")).toBeLessThan(run.indexOf("npx vitest run tests/linux"));
     expect(run).not.toMatch(/seccomp=unconfined|--privileged|--cap-add|--no-sandbox/);
     expect(run).toContain("npx vitest run tests/linux");
+  });
+
+  it("runs independent Linux checks after a failed check, only after setup and the executor smoke check succeed", async () => {
+    const job = (await workflow()).jobs["linux-runtime"]!;
+    const firstTest = job.steps.findIndex((step) => (step.run ?? "").startsWith("npx vitest run"));
+    expect(firstTest).toBeGreaterThan(0);
+    const setup = job.steps.slice(0, firstTest);
+    // Setup remains sequential: failed checkout, firewall, image build or package build skips the smoke check.
+    expect(setup.every((step) => step.if === undefined)).toBe(true);
+    expect(setup.filter((step) => step.id !== undefined).map((step) => step.id)).toEqual(["runtime_setup"]);
+    expect(setup.at(-1)).toMatchObject({
+      id: "runtime_setup",
+      run: "npx tsx scripts/executor-smoke.ts rovara-e2e-executor:ci",
+    });
+    const checks = job.steps.slice(firstTest);
+    expect(checks.map((step) => step.name)).toEqual([
+      "Linux runtime tests",
+      "Docker 25 DNS regression (dind 25.0.5)",
+      "Model channel (scripted route)",
+      "Agent steps (scripted route)",
+      "Agent qualification probes (scripted route)",
+      "Mid-step values never reach the model (scripted route)",
+      "Native browser journey",
+      "Native M1.3 journeys",
+      "Native M1.4 journeys",
+      "Sandbox egress gateway (boot stage on real Docker)",
+    ]);
+    for (const step of checks) {
+      expect(step.run, step.name).toMatch(/^npx vitest run /u);
+      // The status functions remove Actions' implicit success() gate; the outcome keeps failed/skipped setup closed.
+      // Neither status function is true after cancellation, unlike always().
+      expect(step.if, step.name).toBe("(success() || failure()) && steps.runtime_setup.outcome == 'success'");
+    }
   });
 
   it("runs the Docker 25 DNS regression test once, in its own step under the same gate as the other Linux tests, and keeps it out of the generic step", async () => {
