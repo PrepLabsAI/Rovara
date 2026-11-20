@@ -3,6 +3,10 @@
 // the configured rounds (or a review that could not be read) a person decides. What collaborators say on the pull
 // request reaches the agent, like a reply on the issue.
 import { afterEach, describe, expect, it } from "vitest";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { agentReviewerRun, reviewsReport, runReviews } from "../../packages/cli/src/loop/reviews.js";
 import { createLoopHarness, LOOP_ISSUE, NO_FINDINGS, removeAll, type ReviewerAnswer } from "../support/loop-harness.js";
 
 const dirs: string[] = [];
@@ -36,6 +40,53 @@ describe("the agent's self-review (#358)", () => {
 });
 
 describe("the loop's reviews (#358)", () => {
+  it("reports a reviewer that exits before reading its prompt, with no unhandled pipe error (EPIPE)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rovara-epipe-review-"));
+    const bin = join(root, "bin");
+    await mkdir(bin);
+    await writeFile(join(bin, "claude"), "#!/bin/sh\nexit 3\n", { mode: 0o755 });
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}${previousPath === undefined ? "" : `:${previousPath}`}`;
+    const unhandled: unknown[] = [];
+    const onError = (error: unknown) => { unhandled.push(error); };
+    process.on("uncaughtException", onError);
+    try {
+      const answer = await agentReviewerRun({ harness: "claude-code", cwd: root, prompt: "x".repeat(4 * 1024 * 1024), model: undefined, timeoutMs: 30_000 });
+      expect(answer.ok).toBe(false);
+      expect(answer.ok ? "" : answer.reason).toMatch(/^claude exited 3/u);
+      await new Promise((settle) => setTimeout(settle, 50));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("uncaughtException", onError);
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not use stdout when Codex omits its designated last-message file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rovara-codex-review-"));
+    const bin = join(root, "bin");
+    await mkdir(bin);
+    const executable = join(bin, "codex");
+    await writeFile(executable, "#!/bin/sh\nprintf '%s' '{\"findings\":[]}'\n", { mode: 0o755 });
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}${previousPath === undefined ? "" : `:${previousPath}`}`;
+    try {
+      const results = await runReviews({
+        exec: async () => ({ code: 0, stdout: "diff --git a/a.ts b/a.ts", stderr: "" }), worktree: root, base: "main", plan: undefined,
+        config: { enabled: true, harness: "codex", security: true, maxRounds: 1, timeoutSeconds: 60 }, run: agentReviewerRun,
+      });
+      expect(results.map(({ status }) => status)).toEqual(["UNKNOWN", "UNKNOWN"]);
+      expect(reviewsReport(results)).toContain("could not be used");
+      expect(reviewsReport(results)).not.toContain("passed");
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("sends a blocking finding back to the agent, then publishes once it is fixed, with what does not block in the report", async () => {
     const advice = JSON.stringify({ findings: [
       { text: "A jittered backoff would spread the retries", origin: "INTRODUCED", severity: "LOW", advisory: true },

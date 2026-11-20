@@ -41,8 +41,8 @@ describe("spec 048 FR-009: the download's progress", () => {
     const seen: Array<{ receivedBytes: number; totalBytes?: number }> = [];
     await readWithProgress(new Response(streamOf([1_500_000, 1_500_000])), (progress) => seen.push(progress));
     expect(seen.every((progress) => progress.totalBytes === undefined)).toBe(true);
-    expect(releaseCard({ stage: "downloading", ...seen.at(-1)! }).lines).toEqual(["Downloading AgentX: 3.0 MB so far."]);
-    expect(releaseCard({ stage: "downloading", receivedBytes: 5_000_000, totalBytes: 4_000_000 }).lines).toEqual(["Downloading AgentX (about 4.0 MB): 100% done."]);
+    expect(releaseCard({ stage: "downloading", ...seen.at(-1)! }).lines).toEqual(["Downloading Rovara: 3.0 MB so far."]);
+    expect(releaseCard({ stage: "downloading", receivedBytes: 5_000_000, totalBytes: 4_000_000 }).lines).toEqual(["Downloading Rovara (about 4.0 MB): 100% done."]);
     for (const line of releaseCard({ stage: "downloading", receivedBytes: 0, totalBytes: 0 }).lines) expect(line).not.toMatch(/NaN|Infinity/);
   });
 });

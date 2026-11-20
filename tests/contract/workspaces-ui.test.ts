@@ -113,15 +113,15 @@ describe("the workspaces page's server (FR-010, FR-011, FR-012)", () => {
       [uuid("01"), "ready"],
     ]);
 
-    const refusing = await serve(async () => { throw agentXError("AUTH_REQUIRED", "your AgentX sign-in for staging has ended; run agentx login <url>"); });
+    const refusing = await serve(async () => { throw agentXError("AUTH_REQUIRED", "your Rovara sign-in for staging has ended; run agentx login <url>"); });
     const refusal = await (await get(refusing, "/data")).json() as UiDataReply;
-    expect(refusal).toEqual({ ok: false, error: "your AgentX sign-in for staging has ended; run agentx login <url>" });
+    expect(refusal).toEqual({ ok: false, error: "Your Rovara sign-in has ended. Start signing in again." });
   });
 
   it("does not repeat an unexpected failure back to the page", async () => {
     const server = await serve(async () => { throw new Error("connect ECONNREFUSED 10.0.0.1:443"); });
     const reply = await (await get(server, "/data")).json() as UiDataReply;
-    expect(reply).toEqual({ ok: false, error: "AgentX could not be read; check the terminal" });
+    expect(reply).toEqual({ ok: false, error: "Rovara could not load your projects. Try again shortly." });
   });
 });
 
@@ -250,7 +250,7 @@ describe("agentx workspaces", () => {
       isInteractive: () => true,
       openBrowser,
       waitForExit: async () => undefined,
-      read: async () => { throw agentXError("AUTH_REQUIRED", "your AgentX sign-in for staging has ended; run agentx login <url>"); },
+      read: async () => { throw agentXError("AUTH_REQUIRED", "your Rovara sign-in for staging has ended; run agentx login <url>"); },
     });
     expect(code).not.toBe(0);
     expect(openBrowser).not.toHaveBeenCalled();

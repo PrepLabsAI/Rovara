@@ -157,7 +157,7 @@ it("the server administrator guard alone rejects an admin-like company provider 
 });
 
 
-it.each([false, true])("implicit callback error bytes stay golden with company mode %s", async (companyMode) => {
+it.each([false, true])("implicit callback error gives customer guidance with company mode %s", async (companyMode) => {
   const h = identityHarness({ slackUsers: [{ userId: "UFAIL", name: "Person", email: "person@example.test" }] });
   if (companyMode) {
     h.deps.company = new CompanySignInStore({ documentClient: h.db, tableName: "signin", now: h.now });
@@ -166,7 +166,7 @@ it.each([false, true])("implicit callback error bytes stay golden with company m
   const error = new Error("secret-email-canary@example.test"); error.name = "secret-name-canary";
   vi.spyOn(h.deps.store, "upsertDeveloper").mockRejectedValue(error);
   const answer = await h.signIn("slack", "UFAIL");
-  expect(answer.search).toBe("?error=server_error&error_description=sign-in+failed+on+the+AgentX+server%3B+run+agentx+login+again&state=cli-state");
+  expect(answer.search).toBe("?error=server_error&error_description=Rovara+could+not+finish+signing+you+in%3B+start+signing+in+again&state=cli-state");
   if (companyMode) {
     expect(h.logs).toContainEqual({ event: "signin.error", path: "/v1/auth/callback/slack", error: "sign_in_failed" });
     expect(JSON.stringify(h.logs)).not.toMatch(/secret-email-canary|secret-name-canary/);
@@ -209,14 +209,14 @@ it.each([false, true])("implicit browser callback error bytes stay golden with c
 });
 
 
-it.each([false, true])("implicit provider configuration error keeps its golden text with company mode %s", async (companyMode) => {
+it.each([false, true])("implicit provider configuration error gives customer guidance with company mode %s", async (companyMode) => {
   const h = identityHarness({ slackUsers: [{ userId: "UFAIL", name: "Person" }] });
   if (companyMode) h.deps.company = new CompanySignInStore({ documentClient: h.db, tableName: "signin", now: h.now });
   const error = new ProviderNotConfiguredError("the Slack secret has no bot token yet; ask an admin to run agentx signin check");
   error.name = "secret-name-canary";
   vi.spyOn(h.deps.providers.slack!, "complete").mockRejectedValue(error);
   const answer = await h.signIn("slack", "UFAIL");
-  expect(answer.search).toBe("?error=access_denied&state=cli-state&error_description=Slack+sign-in+is+not+finished%3A+the+Slack+secret+has+no+bot+token+yet%3B+ask+an+admin+to+run+agentx+signin+check");
+  expect(answer.search).toBe("?error=access_denied&state=cli-state&error_description=Slack+sign-in+is+not+finished.+Ask+a+Rovara+administrator+to+check+the+sign-in+settings.");
   if (companyMode) {
     expect(h.logs).toContainEqual({ event: "signin.not_configured", method: "slack", detail: "sign_in_not_configured" });
     expect(JSON.stringify(h.logs)).not.toMatch(/secret-name-canary|the Slack secret/);

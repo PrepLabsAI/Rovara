@@ -209,6 +209,7 @@ export function createSecondReview(deps: SecondReviewDeps): SecondReview {
     async apply(principal, body, options = {}) {
       const fresh = options.fresh !== false;
       if (!isSecondReviewEnabled(deps)) throw agentXError("NOT_FOUND", "route not found");
+      if (principal.companyId !== deps.companyId) throw agentXError("NOT_FOUND", "route not found");
       const admin = may(principal);
       // Everything here is the owner's: Code has one company and one person who administers it (a project's maintainer is that person).
       if (!admin) throw agentXError("FORBIDDEN", "Only the company's owner can change this.");

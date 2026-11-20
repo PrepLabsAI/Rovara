@@ -5,7 +5,7 @@
 // Every text is the proof page's own plain words (`proofWords`: redacted, one line, made inert); ids are fixed shapes made here, never input. Bounded: at most `PROOF_INDEX_ITEMS_MAX` items and
 // `PROOF_INDEX_FAILURES_MAX` failing tests, the rest counted.
 import { FAILURE_CAUSES_LISTED_MAX, workflowSelectedChecks, type EvidencePack, type WorkflowSnapshot } from "@agentx/contracts";
-import { failuresOf, proofWords } from "./proof-report.js";
+import { failuresOf, proofWords, reviewDidNotFinish } from "./proof-report.js";
 
 /** The most items one index answers (a pack has at most 64 checks; a candidate's results and two reviews come on top). */
 export const PROOF_INDEX_ITEMS_MAX = 100;
@@ -59,7 +59,7 @@ export function proofIndexOf(taskId: string, workflow: WorkflowSnapshot | undefi
     const security = review.role === "SECURITY";
     const id = security ? "review:security" : "review:code";
     if (items.some((item) => item.id === id)) continue;
-    items.push({ id, title: security ? "Security review" : "Code review", kind: "review", verdict: REVIEW_VERDICT[review.status] ?? "unknown", criterionIds: [] });
+    items.push({ id, title: security ? "Security review" : "Code review", kind: "review", verdict: reviewDidNotFinish(review) ? "unknown" : REVIEW_VERDICT[review.status] ?? "unknown", criterionIds: [] });
   }
   (kept?.checks ?? []).forEach((check, index) => {
     const sha256 = check.outputTailRef?.sha256;

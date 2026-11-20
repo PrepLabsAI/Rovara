@@ -43,6 +43,23 @@ describe("the steps, read from ci.yml", () => {
     expect(() => linuxRuntimeSteps(job("      - run: echo hi\n        if: always()\n"))).toThrow(/if/u);
     expect(() => linuxRuntimeSteps("jobs: {}\n")).toThrow(/no linux-runtime job/u);
   });
+
+  it("reproduces only CI-REL-LAYOUT's after-setup condition: each check runs after the named setup step passed, even after a sibling failed", () => {
+    const plan = linuxRuntimeSteps(WORKFLOW);
+    const setup = plan.steps.findIndex((step) => step.run.includes("scripts/executor-smoke.ts"));
+    const checks = plan.steps.filter((step) => step.run.startsWith("npx vitest run"));
+    expect(checks.length).toBe(10);
+    for (const check of checks) expect(check.afterStep, check.name).toBe(setup);
+    expect(plan.steps.slice(0, setup + 1).every((step) => step.afterStep === undefined)).toBe(true);
+    const gated = "      - name: setup\n        id: s1\n        run: echo setup\n      - name: check\n        if: (success() || failure()) && steps.s1.outcome == 'success'\n        run: echo check\n";
+    expect(linuxRuntimeSteps(job(gated)).steps.map((step) => step.afterStep)).toEqual([undefined, 0]);
+    // Every other condition still refuses: other expressions, an unknown id, a later step's id, and the other unsupported keys.
+    for (const condition of ["always()", "success() || failure()", "(success() || failure()) && steps.nope.outcome == 'success'", "(success() || failure()) && steps.s1.outcome == 'failure'", "failure()"]) {
+      expect(() => linuxRuntimeSteps(job(`      - name: setup\n        id: s1\n        run: echo setup\n      - name: check\n        if: ${JSON.stringify(condition)}\n        run: echo check\n`)), condition).toThrow(/does not reproduce/u);
+    }
+    expect(() => linuxRuntimeSteps(job("      - name: check\n        if: (success() || failure()) && steps.s1.outcome == 'success'\n        run: echo check\n      - name: setup\n        id: s1\n        run: echo setup\n"))).toThrow(/does not reproduce/u);
+    expect(() => linuxRuntimeSteps(job("      - name: setup\n        id: s1\n        run: echo setup\n      - name: check\n        if: (success() || failure()) && steps.s1.outcome == 'success'\n        continue-on-error: true\n        run: echo check\n"))).toThrow(/does not reproduce/u);
+  });
 });
 
 describe("what the instance runs", () => {
@@ -71,6 +88,16 @@ describe("what the instance runs", () => {
     expect(stepsScript([{ name: "two", run: "false", env: {} }], true)).not.toContain("skipped");
     expect(() => stepsScript([{ name: "x", run: "ROVARA_STEP_01_EOF", env: {} }], false)).toThrow(/delimiter/u);
     expect(() => stepsScript([{ name: "x", run: "true", env: { "A-B": "1" } }], false)).toThrow(/env name/u);
+  });
+
+  it("runs a gated check when its setup step passed, whatever its siblings did, and skips it when setup failed", () => {
+    const script = stepsScript([{ name: "setup", run: "true", env: {} }, { name: "a", run: "false", env: {}, afterStep: 0 }, { name: "b", run: "true", env: {}, afterStep: 0 }, { name: "plain", run: "true", env: {} }], false);
+    expect(script).toContain("st=passed; ok_01=1;");
+    // Gated checks test the setup step's own result, not the shared failed flag, so check b still runs after check a fails.
+    expect(script.match(/if \[ "\$\{ok_01:-0\}" = 1 \]; then echo "::rovara-step-begin 0[23] /gu)).toHaveLength(2);
+    // An ungated step keeps Actions' default: it is skipped after any failure.
+    expect(script).toContain('if [ "$failed" = 0 ]; then echo "::rovara-step-begin 04 ');
+    expect(stepsScript([{ name: "setup", run: "true", env: {} }, { name: "a", run: "true", env: {}, afterStep: 0 }], true)).not.toContain("ok_01:-0");
   });
 
   it("sends the script base64-encoded, so no quoting reaches SSM's shell", () => {

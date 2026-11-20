@@ -128,7 +128,7 @@ describe("signing in to the setup page", () => {
   it("refuses someone who is not an administrator, and a sign-in started elsewhere", async () => {
     const outsider = signedInHandler({ token: accessToken({ "cognito:groups": ["developers"] }) });
     const refused = (await outsider.signIn()).callback;
-    expect(refused).toMatchObject({ status: 403, body: "This account is not an AgentX administrator, so it cannot set AgentX up.\n" });
+    expect(refused).toMatchObject({ status: 403, body: "This account is not a Rovara administrator, so it cannot set Rovara up.\n" });
     expect(outsider.store.sessions.size).toBe(0);
     expect(await outsider.store.takeAdminToken()).toBeUndefined();
 

@@ -105,8 +105,10 @@ export function createHostedReviewers(options: HostedReviewerOptions) {
     async describeReviewer(scope, records, slot) {
       const { operation, task, workspace } = records;
       if (operation.kind !== "task" || operation.companyId !== companyId || task.companyId !== companyId || workspace.companyId !== companyId) return undefined;
+      // Core delivery durably claims DISPATCHING before issuing the worker capability.
+      // Its callback service stores lifecycle events without changing that status.
       if (scope.workspaceId !== workspace.id || scope.operationId !== operation.id || operation.workspaceId !== workspace.id || task.workspaceId !== workspace.id || task.project !== workspace.projectName
-        || operation.status !== "RUNNING" || task.closedAt !== undefined || task.releasedAt !== undefined || task.stopRequest !== undefined || workspace.closedAt !== undefined
+        || !["DISPATCHING", "RUNNING"].includes(operation.status) || task.closedAt !== undefined || task.releasedAt !== undefined || task.stopRequest !== undefined || workspace.closedAt !== undefined
         || ["CLOSING", "CLOSED", "STOPPED"].includes(workspace.status) || ["CLOSED", "MERGED"].includes(task.workflow?.stage ?? "")) return undefined;
       const keyScope = { orgId: companyId, operationId: operation.id, slot };
       const exists = await slotKeyRowExists(flow.store, keyScope);

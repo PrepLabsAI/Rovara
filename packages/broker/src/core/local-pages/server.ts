@@ -210,7 +210,7 @@ function secondReviewActionOf(op: string, form: URLSearchParams | undefined): Se
       if (scope === "company") return { action: "mode", scope, mode };
       return scope === "project" && /^[A-Za-z0-9_.-]{1,64}$/u.test(get("project")) ? { action: "mode", scope, project: get("project"), mode } : undefined;
     }
-    case "cancel-mode": return /^[A-Za-z0-9_-]{1,100}$/u.test(get("changeId")) ? { action: "cancel-mode", changeId: get("changeId") } : undefined;
+    case "approve-mode": case "cancel-mode": return /^[A-Za-z0-9_-]{1,100}$/u.test(get("changeId")) ? { action: op, changeId: get("changeId") } : undefined;
     case "withdraw": { const model = modelRefOf(get("model")); return model === undefined ? undefined : { action: "withdraw", model }; }
     case "replay": {
       const text = get("run");
@@ -632,11 +632,12 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       const op = request.form?.get("op") ?? "";
       const act = options.actions.secondReview?.bind(options.actions);
       if (act === undefined || !/^[a-z-]{1,20}$/u.test(op)) return redirect(`${back}?n=invalid`);
-      if (!verified(request, { action: "second-review.act", subject: op })) return redirect(`${back}?n=form`);
+      const subject = op === "approve-mode" ? `approve-mode:${request.form?.get("changeId") ?? ""}` : op;
+      if (!verified(request, { action: "second-review.act", subject })) return redirect(`${back}?n=form`);
       const parsed = secondReviewActionOf(op, request.form);
       if (parsed === undefined) return redirect(`${back}?n=invalid`);
       // A change that needs a recent sign-in (lowering, withdrawing, the evidence) is good only in a page session opened within the last ten minutes (the laptop page rule).
-      return redirect(`${back}?n=${outcomeCode(await act(parsed, { fresh: tokenPageIsFresh(request) }), "saved")}`);
+      return redirect(`${back}?n=${outcomeCode(await act(parsed, { fresh: tokenPageIsFresh(request), proof: (binding) => proofFor(request, binding) }), "saved")}`);
     } },
     { method: "GET", pattern: /^\/models$/, handle: async (request) => {
       const state = await options.data.getModelSelection?.();

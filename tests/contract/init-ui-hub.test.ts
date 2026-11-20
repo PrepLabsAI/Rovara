@@ -20,7 +20,7 @@ describe("the hub's journey", () => {
     const state = hub.state();
     expect(state.header).toEqual({ installName: "staging" });
     expect(state.journey.stepNumber).toBe(1);
-    expect(state.welcome?.[0]).toBe("AgentX installs into your AWS account and connects to GitHub and Slack, in five parts:");
+    expect(state.welcome?.[0]).toBe("Rovara installs into your AWS account and connects to GitHub and Slack, in five parts:");
     expect(state.steps[4]).toMatchObject({ id: "control-plane", phase: "build", usualSeconds: 780, usualText: "usually 13 minutes" });
     expect(state.logPath).toBe("/home/a/.agentx/logs/init-staging.log");
   });
@@ -77,7 +77,7 @@ describe("the hub's journey", () => {
     hub.applyEvent({ kind: "step-started", id: "prerequisites", title: STEP_PLAN.prerequisites.title });
     hub.applyEvent({ kind: "step-done", id: "prerequisites", title: STEP_PLAN.prerequisites.title });
     hub.applyEvent({ kind: "step-started", id: "access", title: STEP_PLAN.access.title });
-    expect(hub.state().pageTitle).toBe("Install AgentX (step 3 of 5)");
+    expect(hub.state().pageTitle).toBe("Install Rovara (step 3 of 5)");
     hub.showCard({ id: "github", title: "GitHub app", status: "waiting", lines: ["Create it."] });
     expect(hub.state().pageTitle).toBe(ACTION_NEEDED_TITLE);
   });
@@ -89,7 +89,7 @@ describe("the hub's journey", () => {
     expect(hub.state().waitingOnYou).toBe(true);
     hub.finish("The install is paused. Your progress is saved.", "paused");
     expect(hub.state().waitingOnYou).toBe(false);
-    expect(hub.state().pageTitle).toBe("Install AgentX (step 1 of 5)");
+    expect(hub.state().pageTitle).toBe("Install Rovara (step 1 of 5)");
     hub.close();
     expect(hub.state().waitingOnYou).toBe(false);
   });
@@ -104,7 +104,7 @@ describe("the hub's journey", () => {
   it("FR-037: every link says it opens in a new tab and to come back", () => {
     const { hub } = clocked();
     hub.showCard({ id: "github", title: "GitHub app", status: "waiting", lines: [], link: { url: "https://github.com/settings/apps/new", label: "Open GitHub" } });
-    hub.showLink({ url: "https://auth.example.com/login", label: "Sign in to AgentX" });
+    hub.showLink({ url: "https://auth.example.com/login", label: "Sign in to Rovara" });
     expect(hub.state().cards?.[0]?.link?.note).toBe(NEW_TAB_NOTE);
     expect(hub.state().link?.note).toBe(NEW_TAB_NOTE);
   });

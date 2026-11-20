@@ -76,7 +76,7 @@ export type PlanAction = "create" | "change";
 
 /** The plan's opening sentence for "In AWS": what the build creates, named plainly rather than by
  * stack (the stacks themselves are "Show every resource" only). */
-const BUILD_PARTS = "The network and sign-in, the AgentX service and the Slack connection";
+const BUILD_PARTS = "The network and sign-in, the Rovara service and the Slack connection";
 
 /** FR-029 and FR-030: what the plan says, in plain words, for the page's review screen. The full
  * text (`installPlanText`) still goes to the log file; its stack, role and secret lines become
@@ -89,11 +89,11 @@ export function planSummary(answers: InitAnswers, estimate: CostEstimate, notes:
     ? `Alerts go to ${answers.alert.address}. AWS sends a confirmation email there while the build runs.`
     : answers.alert.kind === "webhook"
       ? `Alerts go to ${answers.alert.display}. It is subscribed while the build runs.`
-      : "Alerts go nowhere for now. Nobody is told when AgentX stops working.";
+      : "Alerts go nowhere for now. Nobody is told when Rovara stops working.";
   const missing = notCounted(estimate);
   const full = installPlanText(answers, estimate, notes, extras).split("\n");
   return {
-    intro: "Here is what AgentX will create. Nothing is created until you press Create AgentX.",
+    intro: "Here is what Rovara will create. Nothing is created until you press Create Rovara.",
     sections: [
       {
         title: "In AWS",
@@ -107,7 +107,7 @@ export function planSummary(answers: InitAnswers, estimate: CostEstimate, notes:
         title: "In Slack",
         lines: [
           `An app named "${answers.slack.appName}" in the Slack workspace you choose.`,
-          `Developers sign in to AgentX ${signinWords}. It is turned on with the Slack connection, with no separate approval.`,
+          `Developers sign in to Rovara ${signinWords}. It is turned on with the Slack connection, with no separate approval.`,
         ],
       },
       {
@@ -116,7 +116,7 @@ export function planSummary(answers: InitAnswers, estimate: CostEstimate, notes:
           answers.budget === undefined
             ? "No budget alert."
             : answers.budget.scope === "tag"
-              ? `A budget alert at $${answers.budget.monthlyUsd} a month for AgentX's own costs, counted once someone with billing rights turns on its billing tag (up to a day later).`
+              ? `A budget alert at $${answers.budget.monthlyUsd} a month for Rovara's own costs, counted once someone with billing rights turns on its billing tag (up to a day later).`
               : `A budget alert at $${answers.budget.monthlyUsd} a month for the whole account.`,
           alerts,
         ],
@@ -130,7 +130,7 @@ export function planSummary(answers: InitAnswers, estimate: CostEstimate, notes:
     },
     resources: full
       .filter((line) => line.startsWith("- Stacks") || line.startsWith("- IAM roles") || line.startsWith("- Secrets") || line.startsWith("- Settings"))
-      .map((line) => line.slice(2)),
+      .map((line) => line.slice(2).replaceAll("AgentX", "Rovara")),
   };
 }
 
@@ -148,7 +148,7 @@ export async function confirmInstallPlan(input: {
     input.show?.(planSummary(input.answers, estimate, input.notes, input.extras));
     // FR-029: Create AgentX is the primary button; Change answers goes back with every answer kept.
     return input.prompter.choose<PlanAction>("Create all of this?", [
-      { value: "create", label: "Create AgentX" },
+      { value: "create", label: "Create Rovara" },
       { value: "change", label: "Change answers" },
     ], { flag: "--plan", defaultValue: "create" });
   }

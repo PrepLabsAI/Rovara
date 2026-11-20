@@ -234,6 +234,42 @@ function withoutTaskPeopleControls(template: unknown): unknown {
   return template;
 }
 
+function withoutHostedContextRoutes(template: unknown): unknown {
+  const resources = (template as { Resources: Record<string, Resource> }).Resources;
+  const model = resources.ModelAccessRoute!;
+  for (const [id, path] of [["ContextToolsListRoute", "/v1/internal/context-tools"], ["DesignReviewPacketRoute", "/v1/internal/design-review/packet"]]) {
+    expect(resources[id!]).toStrictEqual({ ...model, Properties: { ...model.Properties, RouteKey: `GET ${path}` } });
+    expect(resources[id!]!.Properties.AuthorizationType).toBe("NONE");
+    expect(resources[id!]!.Properties).not.toHaveProperty("AuthorizerId");
+    delete resources[id!];
+  }
+  return template;
+}
+
+// SIGNIN-AUDIT (#1188, DEC 254zzz202): the sign-in role's one conditional State PutItem on the AUDIT key family, checked exactly and taken out.
+function withoutSigninAuditWriter(template: unknown): unknown {
+  const resources = (template as { Resources: Record<string, Resource> }).Resources;
+  const found: Array<{ statements: unknown[]; at: number }> = [];
+  for (const resource of Object.values(resources)) {
+    if (resource.Type !== "AWS::IAM::Policy") continue;
+    const statements = ((resource.Properties.PolicyDocument as { Statement: unknown[] }).Statement);
+    statements.forEach((statement, at) => {
+      const s = statement as { Action?: unknown; Condition?: unknown };
+      if (s.Action === "dynamodb:PutItem" && JSON.stringify(s.Condition ?? {}).includes("#AUDIT")) found.push({ statements, at });
+    });
+  }
+  expect(found).toHaveLength(1);
+  const { statements, at } = found[0]!;
+  expect(statements[at]).toStrictEqual({
+    Action: "dynamodb:PutItem",
+    Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#AUDIT"] }, Null: { "dynamodb:LeadingKeys": "false" } },
+    Effect: "Allow",
+    Resource: { "Fn::GetAtt": [expect.stringMatching(/^State[0-9A-F]{8}$/u), "Arn"] },
+  });
+  statements.splice(at, 1);
+  return template;
+}
+
 // Issue 157 changes the Slack service's code only. These snapshots were recorded from mainline
 // 4a605fd (re-recorded there when mainline merged in), so a named environment's templates must stay
 // as they were, apart from issue 46's dispatch dead-letter alarm, issue 173's reconciler backstop,
@@ -256,7 +292,7 @@ describe("named environment templates", () => {
         // ENV-ROOM 2 (2026-11-17): the broker's names parameter is checked and the names put back in its environment first, as the rest was recorded.
         : stack.stackName === "agentx-staging-control-plane" ? withoutWorkerSandboxEgress(withoutNatEgressControlPlane(withoutGithubSignIn(withoutSwitchoverControlPlaneParity(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutSlackCompanyMode(withoutChatGptKeyDeny(withoutBrokerSlackPoster(withoutSavedEnvSwitch(withoutSavedEnvImages(template, "staging")), "staging")))))), "staging")))
         : stack.stackName === "agentx-staging-slack" ? withoutSlackCompanyService(template) : template;
-      expect(stack.stackName === "agentx-staging-control-plane" ? withoutCoreEngine(withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(parity))))) : parity).toMatchSnapshot();
+      expect(stack.stackName === "agentx-staging-control-plane" ? withoutSigninAuditWriter(withoutCoreEngine(withoutHostedContextRoutes(withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(parity))))))) : parity).toMatchSnapshot();
     }, 120_000);
   }
 });

@@ -46,6 +46,17 @@ describe("two companies, both routes: each administrator sees their own company 
     expect(new Set(bo.records.map((record) => record.actor.name))).toEqual(new Set(["Bo"]));
   });
 
+  it("keeps sign-ins in the existing audit route's separate filtered view", async () => {
+    const { config, store } = await world();
+    await seedAudit(store, COMPANY_A, { eventId: "signin_a", at: "2026-11-10T10:03:00.000Z", action: "signin.refused", actor: { type: "person", id: ADA.developerId }, details: { method: "slack", cause: "not_invited" } });
+    const changeLog = await read(config, ADA, url(AUDIT)) as { records: Array<{ eventId: string }> };
+    const signIns = await read(config, ADA, url(AUDIT, { kind: "sign-in" })) as { records: Array<{ eventId: string; method?: string; cause?: string }> };
+    expect(changeLog.records.some((record) => record.eventId === "signin_a")).toBe(false);
+    expect(signIns.records).toContainEqual(expect.objectContaining({ eventId: "signin_a", method: "slack", cause: "not_invited" }));
+    expect(await failure(read(config, NOBODY, url(AUDIT, { kind: "sign-in" })))).toMatchObject({ code: "FORBIDDEN" });
+    expect((await failure(read(config, ADA, url(AUDIT, { kind: "unknown" })))).code).toBe("CONFIG_INVALID");
+  });
+
   it("the event read answers each administrator their own company's events", async () => {
     const { config, a, b } = await world();
     const window = { from: "2026-11-01T00:00:00.000Z", to: "2026-11-30T00:00:00.000Z" };
@@ -151,7 +162,7 @@ describe("who may read: a live owner or admin of the caller's own company", () =
     const { config, store } = await live({ membershipOf: async (developerId) => (developerId === "7".repeat(64) ? { companyId: COMPANY_A, role: "stranger" as never } : roles[developerId]) });
     const probe = countingReadOnly(store);
     for (const caller of [MEMBER, NOBODY, { developerId: "7".repeat(64), administrator: false }]) {
-      for (const target of [url(AUDIT), url(EVENTS, { from: "2026-11-01T00:00:00.000Z" })]) {
+      for (const target of [url(AUDIT), url(AUDIT, { kind: "sign-in" }), url(EVENTS, { from: "2026-11-01T00:00:00.000Z" })]) {
         expect(await failure(read({ ...config, store: probe.store }, caller, target))).toMatchObject({ code: "FORBIDDEN", message: "FORBIDDEN: only a company administrator can read this" });
       }
     }

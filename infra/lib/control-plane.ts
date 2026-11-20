@@ -842,6 +842,22 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
+    // Worker capabilities authenticate these exact reads in the broker, before company discovery.
+    // Keep ContextToolsListRoute: the recorded 0.5.18 template already used this ID for the catalog GET.
+    if (naming.env !== undefined) {
+      new apigwv2.CfnRoute(this, "ContextToolsListRoute", {
+        apiId: api.ref,
+        routeKey: "GET /v1/internal/context-tools",
+        target: `integrations/${integration.ref}`,
+        authorizationType: "NONE",
+      });
+      new apigwv2.CfnRoute(this, "DesignReviewPacketRoute", {
+        apiId: api.ref,
+        routeKey: "GET /v1/internal/design-review/packet",
+        target: `integrations/${integration.ref}`,
+        authorizationType: "NONE",
+      });
+    }
     // The setup worker authenticates this one source read with its short-lived project-setup
     // capability, which the broker verifies. Keep the API Gateway exception limited to this GET;
     // the generic internal callback route remains POST-only.
@@ -1026,7 +1042,7 @@ export class ControlPlaneStack extends Stack {
     }
     if (taskParameters !== undefined) {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
-        naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, dispatcher, slackSecret, parameters: signInParameters, turnRecords,
+        naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, dispatcher, slackSecret, parameters: signInParameters, turnRecords, stateTable: state,
         ...(companySignIn === undefined ? {} : { company: companySignIn }),
       });
       // Named: one statement for the broker's two invokes (the plan evidence job and the sign-in function; developer-signin.ts leaves its grant to this), ENV-ROOM 2's IAM room.
@@ -1138,7 +1154,7 @@ export class ControlPlaneStack extends Stack {
         // DeveloperIdentity already reads the token family (Add to Slack); its directory needs the team's binding, on the State table it otherwise never reads.
         slackCompany.grant("DeveloperIdentity", developerSignIn.function.role!, [slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)]);
         developerSignIn.function.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
-        developerSignIn.function.addEnvironment("STATE_TABLE_NAME", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, state.tableName, "")));
+        // STATE_TABLE_NAME is the sign-in function's own, always the real State table (developer-signin.ts: the company audit write needs it with CompanySignIn on, Slack company mode on or off). The Slack company switch is SLACK_COMPANY_WORKSPACES above, never this variable.
         // The Slack Lambda and the channel API resolve the linked person's company membership on the sign-in table (company-check.ts membershipKey), reads only.
         for (const [id, fn] of [["SlackIngressMembers", slackIngress], ["ChannelApiMembers", channelAdapters.ingress]] as const) {
           slackCompany.grant(id, fn.role!, [slackCompany.stateReads(developerSignIn.table, "ReadCompanyMemberships", ["COMPANY_MEMBER#*"])]);

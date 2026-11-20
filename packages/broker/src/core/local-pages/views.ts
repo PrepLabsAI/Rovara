@@ -527,6 +527,7 @@ export type SecondReviewPageAction =
   | { action: "context"; context: SecondReviewContext }
   | { action: "mode"; scope: "company" | "project"; project?: string; mode: SecondReviewMode | "inherit" }
   | { action: "narrow"; project: string; models: SecondReviewModelRef[] | null }
+  | { action: "approve-mode"; changeId: string }
   | { action: "cancel-mode"; changeId: string }
   | { action: "withdraw"; model: SecondReviewModelRef }
   | { action: "replay"; run: unknown }
@@ -599,7 +600,7 @@ export interface LocalPageActions {
   /** A change of the per-step model setting. Refused (with its fixed words) when the owner may not, the page was not opened lately, or the setting moved. */
   modelSelection?(input: ModelSelectionPageAction, context: { fresh: boolean }): Promise<LocalActionResult>;
   /** A change of the second review's settings. Refused (with its fixed words) when the owner may not or the setting moved. */
-  secondReview?(input: SecondReviewPageAction, context: { fresh: boolean }): Promise<LocalActionResult>;
+  secondReview?(input: SecondReviewPageAction, context: { fresh: boolean; proof: (request: Pick<ApprovalOffer, "requestId" | "revision" | "artifactDigest">) => ApprovalProof }): Promise<LocalActionResult>;
   /** Fix with agent: the owner asks for a diagnosis of the error the task page showed (`errorKey` names the error as shown; `requestId` is this press). Spends the owner's own model key, so it is the owner's act on a page. */
   diagnose?(input: { taskId: string; requestId: string; errorKey: string }): Promise<LocalActionResult>;
   /** The owner's acts on the Connections and Sources pages (see `ConnectionPageAction`). `fresh`: the page session was opened in the last ten minutes. */

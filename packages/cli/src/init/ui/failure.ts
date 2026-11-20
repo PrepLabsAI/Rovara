@@ -29,7 +29,7 @@ const capitalize = (text: string): string => (/^[a-z][a-z0-9+.-]*:\/\//i.test(te
 export function plainReason(error: unknown): string | undefined {
   const mapped = cliErrorFor(error);
   const message = mapped instanceof Error ? messageWithoutCode(mapped) : String(mapped);
-  const first = onPageProblem(message.replace(RESUME_TAIL, "")).split(/\r?\n/, 1)[0]?.trim().replace(/^init stopped at "[^"]+": /, "").replace(/[:;,]$/, "") ?? "";
+  const first = onPageProblem(message.replace(RESUME_TAIL, "")).replaceAll("AgentX", "Rovara").split(/\r?\n/, 1)[0]?.trim().replace(/^init stopped at "[^"]+": /, "").replace(/[:;,]$/, "") ?? "";
   // Keep a safe leading clause when only later instructions contain a flag or internal name. The
   // complete line remains in technical details; this lets the page still say what failed.
   const plain = TECHNICAL.test(first) ? (first.split(/[;,]/, 1)[0]?.trim() ?? "") : first;
@@ -39,9 +39,9 @@ export function plainReason(error: unknown): string | undefined {
 
 export function failureScreen(input: { env: string; region: string; stepTitle?: string; stepId?: InitStepId; error: unknown; logPath?: string }): WizardFailure {
   const mapped = cliErrorFor(input.error);
-  const raw = mapped instanceof Error ? messageWithoutCode(mapped) : String(mapped);
+  const raw = onPageProblem((mapped instanceof Error ? messageWithoutCode(mapped) : String(mapped)).replace(RESUME_TAIL, "")).replaceAll("AgentX", "Rovara");
   const reason = plainReason(input.error);
-  const head = input.stepTitle === undefined ? "The install could not go on." : `${input.stepTitle} did not finish.`;
+  const head = input.stepTitle === undefined ? "The install could not go on." : `${input.stepTitle.replaceAll("AgentX", "Rovara")} did not finish.`;
   const stacks = input.stepId !== undefined && isRetryableStep(input.stepId) ? DEPLOY_STEP_PARTS[input.stepId].map((part) => environmentStackName(input.env, part)) : [];
   const retry = input.stepId !== undefined && isRetryableStep(input.stepId);
   return {

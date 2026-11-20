@@ -33,6 +33,16 @@ describe("the audit read: what a record looks like", () => {
     expect(Object.fromEntries(records.map((record) => [record.eventId, record.outcome]))).toEqual({ evt_1: "refused", evt_2: "ok" });
   });
 
+  it("projects the fixed sign-in method and cause only when the sign-in filter is selected", async () => {
+    const store = newStore();
+    await seedAudit(store, COMPANY_A, { eventId: "signin_1", at: T(3), action: "signin.refused", details: { method: "slack", cause: "not_invited", token: "never-return-this" } });
+    await seedAudit(store, COMPANY_A, { eventId: "evt_1", at: T(2), action: "task.approved" });
+    const signIns = await readCompanyAudit(store, COMPANY_A, { kind: "sign-in" });
+    expect(signIns.records).toEqual([expect.objectContaining({ eventId: "signin_1", method: "slack", cause: "not_invited" })]);
+    expect(JSON.stringify(signIns)).not.toContain("never-return-this");
+    expect((await readCompanyAudit(store, COMPANY_A, {})).records.some((record) => record.eventId === "signin_1")).toBe(false);
+  });
+
   it("lists a page newest first", async () => {
     const store = newStore();
     for (const [index, minute] of [[1, 5], [2, 9], [3, 1]] as const) await seedAudit(store, COMPANY_A, { eventId: `evt_${String(index)}`, at: T(minute) });
@@ -63,6 +73,18 @@ describe("the audit read: one company only", () => {
     const page = await readCompanyAudit(store, COMPANY_A, {});
     expect(ids(page)).toEqual(["evt_a0", "evt_a1", "evt_a2", "evt_a3"]);
     expect(page.skipped).toBe(1);
+  });
+
+  it("fails closed if the store's company query returns another company's sign-in row", async () => {
+    const store = await twoCompanies();
+    const mutant = { query: async (request: { pk: string; limit: number; [key: string]: unknown }) => {
+      const page = await store.query(request);
+      const foreign = await store.query({ ...request, pk: companyScoped(COMPANY_B, "AUDIT") });
+      return { ...page, items: [...page.items, ...foreign.items] };
+    } };
+    const page = await readCompanyAudit(mutant, COMPANY_A, { kind: "sign-in" });
+    expect(page.records.every((record) => record.eventId.startsWith("evt_a"))).toBe(true);
+    expect(page.skipped).toBe(4);
   });
 
   it("gives an old row with no company to the implicit company only", async () => {

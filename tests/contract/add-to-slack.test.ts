@@ -5,7 +5,7 @@ import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import type { OpenSlackInstallHost } from "../../packages/cli/src/init/context.js";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
-import { slackAppManifest, slackAppStep, slackSecretName, verifySlackUrls } from "../../packages/cli/src/init/slack-app.js";
+import { slackAppManifest, slackAppStep, slackSecretName, verifySlackUrls, SLACK_HOW_QUESTION } from "../../packages/cli/src/init/slack-app.js";
 import { slackAuthorizeUrl, slackManifestForAddToSlack, SLACK_CONFIG_TOKEN_QUESTION } from "../../packages/cli/src/init/slack-install.js";
 import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
 import { setupPageHandler } from "../../packages/cli/src/init/ui/setup-handler.js";
@@ -52,9 +52,9 @@ function setupContext(prompts: Array<string | boolean>, options: { code?: string
 }
 
 describe("Add to Slack", () => {
-  it("makes the app with one pasted token, keeps its credentials before the install, and takes the bot token Slack's redirect brought", async () => {
+  it.each([false, true])("makes the app with one pasted token and takes Slack's redirect (Cloud address supplied: %s)", async (withCloud) => {
     const slack = fakeSlackApi();
-    const { context, cards, opened, states, stored } = setupContext(["token", CONFIG_TOKEN], { code: "slack-code" });
+    const { context, cards, opened, states, stored } = setupContext([...(withCloud ? ["cloud", "https://cloud.example.test/app"] : []), "token", CONFIG_TOKEN], { code: "slack-code" });
     const progress = progressHandle();
     expect(await slackAppStep(slack).run(context, progress)).toMatchObject({ status: "done" });
 
@@ -62,7 +62,10 @@ describe("Add to Slack", () => {
     const made = slack.manifests[0]!;
     expect(made).toMatchObject({ method: "create", token: CONFIG_TOKEN });
     expect(made.manifest.settings.event_subscriptions).toBeUndefined();
-    expect(made.manifest.oauth_config.redirect_urls).toContain(`${SETUP}/slack/callback`);
+    expect(made.manifest.oauth_config.redirect_urls).toEqual([
+      "https://abc123.execute-api.us-east-1.amazonaws.com/v1/auth/callback/slack", ...(withCloud ? ["https://cloud.example.test/api/connect/slack/callback"] : []), `${SETUP}/slack/callback`,
+    ]);
+    expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked.slice(0, withCloud ? 4 : 2)).toEqual([...(withCloud ? [SLACK_HOW_QUESTION, "Hosted web app address (optional)"] : []), SLACK_HOW_QUESTION, SLACK_CONFIG_TOKEN_QUESTION]);
     const add = new URL(opened.at(-1) ?? "");
     expect(`${add.origin}${add.pathname}`).toBe("https://slack.com/oauth/v2/authorize");
     expect(Object.fromEntries(add.searchParams)).toMatchObject({ client_id: FAKE_SLACK_CLIENT.clientId, redirect_uri: `${SETUP}/slack/callback`, state: states[0] });
@@ -174,7 +177,7 @@ describe("Slack's redirect back to the setup page", () => {
     expect((await handle(back({ code: "c", state: "s" }))).status).toBe(400);
     await store.putSlackInstall("s".repeat(32));
     expect((await handle(back({ code: "c", state: "x".repeat(32) }))).status).toBe(400);
-    expect((await handle(back({ code: "c", state: "s".repeat(32) }))).body).toContain("Slack sent AgentX the app's install");
+    expect((await handle(back({ code: "c", state: "s".repeat(32) }))).body).toContain("Slack sent Rovara the app's install");
     expect(await store.takeSlackCode("s".repeat(32))).toBe("c");
     expect((await handle(back({ code: "again", state: "s".repeat(32) }))).status).toBe(400);
   });

@@ -291,7 +291,7 @@ export function blockingFindings(report: WorkflowReviewReport, accepted?: readon
 }
 
 export function reviewCleared(review: WorkflowReviewReport, accepted: readonly AcceptedFindingRef[] | undefined): boolean {
-  return review.status === "PASS" || (review.status === "FINDINGS" && blockingFindings(review, accepted).length === 0);
+  return review.failureReason === undefined && (review.status === "PASS" || (review.status === "FINDINGS" && blockingFindings(review, accepted).length === 0));
 }
 
 /**

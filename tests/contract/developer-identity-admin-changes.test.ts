@@ -47,7 +47,7 @@ describe("ending a developer's sessions (E9, Q3)", () => {
     harness.tick(1_000);
     expect(await harness.handler({ kind: "end-developer-sessions", developerId, at: new Date(harness.now()).toISOString() } as never)).toEqual({ ok: true });
     const refresh = await harness.refresh(String(tokens.body.refresh_token));
-    expect(refresh).toMatchObject({ status: 400, body: { error: "invalid_grant", error_description: "an AgentX admin ended your sign-in; sign in again with agentx login" } });
+    expect(refresh).toMatchObject({ status: 400, body: { error: "invalid_grant", error_description: "a Rovara administrator ended your sign-in; sign in again" } });
     harness.tick(1_000);
     const again = await harness.signIn("slack", "U0ADA00001");
     expect((await harness.exchange(again.searchParams.get("code")!)).status).toBe(200);

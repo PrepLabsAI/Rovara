@@ -205,9 +205,9 @@ function quoteText(context: Context, item: Extract<PlanEvidenceInput, { kind: "q
 function quoteAuthor(context: Context, item: Extract<PlanEvidenceInput, { kind: "quote" }>): string {
   if (!creditsPageComment(item.author)) return t(item.author);
   const credited = creditedComment(context, item);
-  if (credited === undefined) return "A comment (paraphrased by AgentX)";
+  if (credited === undefined) return "A comment (paraphrased by Rovara)";
   const link = `href="#comment-${escapeHtml(credited.id)}"`;
-  if (!credited.matches) return `<a ${link}>A comment (paraphrased by AgentX)</a>`;
+  if (!credited.matches) return `<a ${link}>A comment (paraphrased by Rovara)</a>`;
   return `<a ${link}>${credited.you ? "Your comment" : `${t(credited.name)}'s comment`}</a>`;
 }
 
@@ -230,12 +230,12 @@ async function evidenceHtml(context: Context, claim: PlanClaim, index: number, i
   }
 }
 
-const product = (context: Context): string => (context.input.local === true ? "Rovara" : "AgentX");
+const product = (): string => "Rovara";
 
 function decisionHtml(context: Context, decision: PlanDecision, withLink: boolean): string {
   const where = withLink ? `<p class="decision-claim">On claim ${claimLink(context, decision.claimId)}</p>` : "";
   const id = escapeHtml(decisionAnchor(context, decision.id));
-  const note = context.input.local === true ? "" : '<p class="decision-note">Approve in Slack uses AgentX\'s answer.</p>';
+  const note = context.input.local === true ? "" : '<p class="decision-note">Approve in Slack uses Rovara\'s answer.</p>';
   const key = `decision:${decision.id}`;
   const suggestions = context.input.current ? (context.input.suggestions ?? []).filter((suggestion) => suggestion.decisionId === decision.id) : [];
   const after = `${note}${suggestionLines(suggestions, decision.options)}${threadsHtml(context, key, { controlLabel: "Comment on this decision" })}`;
@@ -245,7 +245,7 @@ function decisionHtml(context: Context, decision: PlanDecision, withLink: boolea
       const recommended = option.id === decision.recommended;
       const inputId = escapeHtml(`answer-${decisionAnchor(context, decision.id)}-${option.id}`);
       return `<li class="option${recommended ? " recommended" : ""}" data-option="${t(option.id)}"><input type="radio" name="answer-${t(decision.id)}" value="${t(option.id)}" id="${inputId}"${recommended ? " checked" : ""}>`
-        + `<label for="${inputId}"><span class="option-label">${t(option.label)}</span>${recommended ? ` <span class="badge badge-recommended">${product(context)} recommends</span>` : ""} <span class="consequence">${t(option.consequence)}</span></label></li>`;
+        + `<label for="${inputId}"><span class="option-label">${t(option.label)}</span>${recommended ? ` <span class="badge badge-recommended">${product()} recommends</span>` : ""} <span class="consequence">${t(option.consequence)}</span></label></li>`;
     }).join("");
     return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><fieldset class="answer"><legend>${t(decision.question)}</legend>${where}<ul class="options">${options}</ul></fieldset>${after}</div>`;
   }
@@ -254,7 +254,7 @@ function decisionHtml(context: Context, decision: PlanDecision, withLink: boolea
   const options = decision.options.map((option) => {
     const recommended = option.id === decision.recommended;
     const suggest = !suggesting ? "" : ` <button type="button" class="suggest" data-decision="${t(decision.id)}" data-option="${t(option.id)}"${mine === option.id ? ' data-mine="true"' : ""} hidden>${mine === option.id ? "You suggest this · Undo" : "Suggest this"}</button>`;
-    return `<li class="option${recommended ? " recommended" : ""}" data-option="${t(option.id)}"><span class="option-label">${t(option.label)}</span>${recommended ? ` <span class="badge badge-recommended">${product(context)} recommends</span>` : ""} <span class="consequence">${t(option.consequence)}</span>${suggest}</li>`;
+    return `<li class="option${recommended ? " recommended" : ""}" data-option="${t(option.id)}"><span class="option-label">${t(option.label)}</span>${recommended ? ` <span class="badge badge-recommended">${product()} recommends</span>` : ""} <span class="consequence">${t(option.consequence)}</span>${suggest}</li>`;
   }).join("");
   return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><p class="decision-question">${t(decision.question)}</p>${where}<ul class="options">${options}</ul>${after}</div>`;
 }
@@ -437,10 +437,10 @@ const joinTargets = (targets: string[]): string => (targets.length <= 1 ? target
 function planSelfCheckHtml(context: Context): string {
   if (context.input.kind !== "plan") return "";
   const view = context.input.selfCheck;
-  const body = view === undefined || !view.checked ? `<p class="plan-check-not-checked">${t(context.input.local === true ? "Not checked by Rovara's plan check." : NOT_CHECKED_SENTENCE)}</p>`
-    : view.sentences.length === 0 ? `<p class="plan-check-clear">${product(context)}'s plan check found no problems.</p>`
+  const body = view === undefined || !view.checked ? `<p class="plan-check-not-checked">${t(NOT_CHECKED_SENTENCE.replaceAll("AgentX", "Rovara"))}</p>`
+    : view.sentences.length === 0 ? `<p class="plan-check-clear">${product()}'s plan check found no problems.</p>`
     : `<ul class="plan-check-findings">${view.sentences.map((sentence) => `<li>${t(sentence)}</li>`).join("")}</ul>`;
-  return `<section id="${escapeHtml(`${context.input.anchor}-v${context.input.version}-plan-check`)}" class="plan-check"><h3>${product(context)}'s plan check</h3>${body}</section>`;
+  return `<section id="${escapeHtml(`${context.input.anchor}-v${context.input.version}-plan-check`)}" class="plan-check"><h3>${product()}'s plan check</h3>${body}</section>`;
 }
 
 function planChecksAddedHtml(context: Context): string {

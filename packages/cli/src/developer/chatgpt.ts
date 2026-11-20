@@ -16,7 +16,7 @@ const CONNECTION_PATH = "/v1/dev/chatgpt/connection";
 export interface ChatGptCallbackValues { code: string; state: string; clientId: string }
 
 /** The page the browser shows once the callback has reached this computer. */
-const CAUGHT_PAGE = "<!doctype html><meta charset=\"utf-8\"><title>Rovara</title><p>Rovara has your ChatGPT sign-in. Return to your terminal to see it finish; you can close this tab.</p>";
+const CAUGHT_PAGE = "<!doctype html><meta charset=\"utf-8\"><title>Rovara</title><p>Rovara has your ChatGPT sign-in. You can close this tab.</p>";
 
 /**
  * Listens for OpenAI's callback on 127.0.0.1 at the callback's port and path. A callback carrying
@@ -42,7 +42,7 @@ export async function listenForChatGptCallback(expectedState: string, port: numb
     const code = url.searchParams.get("code");
     const clientId = url.searchParams.get("client_id");
     if (error !== null || !code || !clientId) {
-      response.writeHead(400, { "content-type": "text/plain" }).end("ChatGPT did not connect. Return to your terminal.");
+      response.writeHead(400, { "content-type": "text/plain" }).end("ChatGPT did not connect. Start connecting again from Rovara.");
       const word = error !== null && /^[a-z_]{1,40}$/.test(error) ? error : undefined;
       rejectValues(agentXError("CONFIG_INVALID", word === "access_denied"
         ? "ChatGPT was not connected: the sign-in was declined on OpenAI's page"

@@ -2,6 +2,7 @@
 // causes gives the report and page it always did.
 import { describe, expect, it } from "vitest";
 import { EVIDENCE_RENDER_LIMITS, type EvidencePack } from "../../packages/contracts/src/index.js";
+import { createCandidateManifest } from "../../packages/contracts/src/task-workflow-node.js";
 import { renderProof, type PageContext } from "../../packages/broker/src/core/local-pages/pages.js";
 import { failuresOf, proofReportOf } from "../../packages/broker/src/local/app/proof-report.js";
 import { v1Pack } from "../support/evidence-v2-fixtures.js";
@@ -27,6 +28,21 @@ const FAILING = ["tests/cart.test.ts::applies discount", "tests/cart.test.ts::ro
 const GOOD = [{ testId: FAILING[0]!, cause: change("src/cart.ts", SHA) }, { testId: FAILING[1]!, cause: { kind: "unknown" as const, reason: "weak_evidence" as const } }];
 
 describe("the failing tests on the task page", () => {
+  it("shows a review that could not run as not run, never passed", () => {
+    const candidate = createCandidateManifest([{ repositoryId: "payments", commitSha: SHA, treeSha: "b".repeat(40) }]);
+    const workflow = {
+      candidate,
+      verification: { candidateDigest: candidate.digest, results: [] },
+      reviews: [{ candidateDigest: candidate.digest, role: "CRITIC", status: "UNKNOWN", findings: [] }],
+    };
+    const view = proofReportOf({ taskId: "t", title: "T", workspaceId: "w" } as never, workflow as never, undefined);
+    expect(view.rows).toContainEqual({ claim: "Code review", check: "independent review", status: "not_run", detail: "the review could not finish" });
+    expect(view.rows.find((row) => row.claim === "Code review")?.status).not.toBe("passed");
+    const contradictory = { ...workflow, reviews: [{ ...workflow.reviews[0]!, status: "PASS", failureReason: "SESSION_FAILED" }] };
+    expect(proofReportOf({ taskId: "t", title: "T", workspaceId: "w" } as never, contradictory as never, undefined).rows.find((row) => row.claim === "Code review"))
+      .toMatchObject({ status: "not_run", detail: "the review could not finish" });
+  });
+
   it("lists each failing test of a failed check with its likely cause or unknown", () => {
     expect(report(packWith(FAILING, GOOD)).failures).toEqual({
       checks: [{ check: "pytest -q", tests: [

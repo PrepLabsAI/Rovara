@@ -17,6 +17,8 @@ import { SLACK_APPS_URL, slackAppCard, type SlackCardInput, slackUrlsCard, type 
 import { STEP_PLAN } from "./ui/journey.js";
 import { checkSlackClientId, checkSlackClientSecret, hasStoredSlackClient, SIGNIN_FLAG_NAMES, slackClientIdProblem, type SigninFlags } from "../signin/collect.js";
 
+const CLOUD_SLACK_CONNECT_CALLBACK_PATH = "/api/connect/slack/callback";
+
 // canvases:write creates task detail Canvases; files:read resolves each Canvas permalink. These
 // links appear in Slack workflow messages. channels:join, channels:read and groups:read serve
 // `channel add`; users:read.email and im:write serve developer sign-in (spec 025 FR-044).
@@ -390,24 +392,48 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
         throw agentXError("CONFIG_INVALID", `stack ${stackName} reports no ApiEndpoint; the control-plane step must finish first, so run agentx init again`);
       }
       const resuming = progress.current().steps["slack-app"]?.status === "waiting";
-      const url = slackCreateAppUrl(slackAppManifest({ appName, eventsUrl, interactivityUrl, signInCallbackUrl: slackSignInCallbackUrl(apiEndpoint) }));
+      const manifest = slackAppManifest({ appName, eventsUrl, interactivityUrl, signInCallbackUrl: slackSignInCallbackUrl(apiEndpoint) });
       const show = (card: SlackCardInput) => context.surface?.card(slackAppCard(card));
       // The setup page: Add to Slack, with one configuration token (slack-install.ts), unless the
       // person would rather make the app by hand. A run that already made the app goes on with it.
       if (context.slackInstallHost !== undefined && context.setupPageUrl !== undefined) {
-        const how = progress.current().slackPending !== undefined ? "token" : await context.prompter.choose<"token" | "manual">(SLACK_HOW_QUESTION, [
+        const chooseHow = () => context.prompter.choose<"token" | "manual" | "cloud">(SLACK_HOW_QUESTION, [
           { value: "token", label: "With a Slack configuration token: AgentX makes and installs the app (recommended)" },
           { value: "manual", label: "By hand: make it from AgentX's manifest and paste its values" },
+          { value: "cloud", label: "Set the hosted web app address (optional)" },
         ], { flag: "--slack-create", defaultValue: "token" });
+        let how = progress.current().slackPending !== undefined ? "token" : await chooseHow();
+        // Existing token/manual/resume inputs keep their sequence; only this opt-in asks for Cloud.
+        // The installer and Cloud web app are different origins. Cloud sends its own origin to
+        // Code's Slack install endpoint; the setup address cannot stand in for that origin.
+        while (how === "cloud") {
+          const problem = "Use the https address of your hosted web app, or leave it empty if you do not use a hosted web app.";
+          const validate = (value: string): string | undefined => {
+            if (value.trim() === "") return undefined;
+            try {
+              const url = new URL(value.trim());
+              if (url.protocol === "https:" && url.username === "" && url.password === "" && url.search === "" && url.hash === "" && ["/", "/app", "/app/"].includes(url.pathname)) return undefined;
+            } catch { /* the same fixed guidance for an unreadable address */ }
+            return problem;
+          };
+          const address = (await context.prompter.ask("Hosted web app address (optional)", {
+            flag: "the hosted web app address on the setup page", defaultValue: "", validate,
+            help: { why: "If you use a hosted web app, paste the address you open in your browser so Slack can return there.", hint: "Leave empty if you do not use a hosted web app." },
+          })).trim();
+          if (validate(address) !== undefined) throw agentXError("CONFIG_INVALID", problem);
+          if (address !== "") manifest.oauth_config.redirect_urls.push(`${new URL(address).origin}${CLOUD_SLACK_CONNECT_CALLBACK_PATH}`);
+          how = await chooseHow();
+        }
         if (how === "token") {
           const added = await addToSlack({
             context, api, progress, show, appName,
-            manifest: slackAppManifest({ appName, eventsUrl, interactivityUrl, signInCallbackUrl: slackSignInCallbackUrl(apiEndpoint) }),
+            manifest,
             redirectUri: `${context.setupPageUrl}${SLACK_CALLBACK_PATH}`,
           });
           return finishSlackApp(context, progress, show, appName, added);
         }
       }
+      const url = slackCreateAppUrl(manifest);
       if (resuming) {
         context.write(`Continuing with the Slack app "${appName}". Once an admin approves it, install it from its Install App page.`);
         context.write(`If you have not created the app yet, open: ${url}`);

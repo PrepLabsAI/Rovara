@@ -61,7 +61,7 @@ describe("the sign-in Lambda's wiring", () => {
     [undefined, false], ["disabled", false], ["enabled", true],
   ])("COMPANY_SIGNIN=enabled, COMPANY_SELF_SERVE=%s: self-create served = %s", async (flag, served) => {
     vi.resetModules(); wiring.db = new FakeDynamoDb();
-    for (const [key, value] of Object.entries({ AGENTX_ENV: "test", AWS_REGION: "us-east-1", DEVELOPER_TOKEN_ISSUER: "https://signin.example.test/v1/auth", DEVELOPER_SIGNIN_TABLE_NAME: "signin", DEVELOPER_TOKEN_KEY_ARN: "test-key", SLACK_SECRET_ARN: "test-slack", TASK_TOKEN_KEY_ARN: "", DEVELOPER_OIDC_ISSUER: "", COMPANY_SIGNIN: "enabled" })) vi.stubEnv(key, value);
+    for (const [key, value] of Object.entries({ AGENTX_ENV: "test", AWS_REGION: "us-east-1", DEVELOPER_TOKEN_ISSUER: "https://signin.example.test/v1/auth", DEVELOPER_SIGNIN_TABLE_NAME: "signin", STATE_TABLE_NAME: "state", DEVELOPER_TOKEN_KEY_ARN: "test-key", SLACK_SECRET_ARN: "test-slack", TASK_TOKEN_KEY_ARN: "", DEVELOPER_OIDC_ISSUER: "", COMPANY_SIGNIN: "enabled" })) vi.stubEnv(key, value);
     vi.stubEnv("COMPANY_SELF_SERVE", flag);
     const { handler } = await import("../../packages/broker/src/aws/developer-identity.js");
     const code = newCompanyInviteCode();

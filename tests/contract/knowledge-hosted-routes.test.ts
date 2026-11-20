@@ -149,12 +149,15 @@ describe("the knowledge routes at the developer router", () => {
     expect(new Set(all).size).toBe(all.length);
     const added = all.filter((row) => row.includes("/knowledge/areas") || row.includes("/knowledge/propose") || row === "POST /v1/dev/projects/{project}/lessons full");
     expect(added).toEqual(["POST /v1/dev/projects/{project}/lessons full", "POST /v1/dev/projects/{project}/knowledge/areas full", "POST /v1/dev/projects/{project}/knowledge/propose full"]);
+    // INVITE-RESEND (DEC 254zzz184): pin this lane's additive route explicitly, then keep it out of the older route digest.
+    const inviteResend = "POST /v1/dev/company/preapprovals/{inviteId}/resend full";
+    expect(all.filter((row) => row === inviteResend)).toEqual([inviteResend]);
     // The digest of every other row (the order is the table's own).
     const preview = "POST /v1/dev/projects/{project}/start-estimates tasks:read";
     expect(all.filter((row) => row.includes("/start-estimates "))).toEqual([preview]);
-    const withPreview = all.filter((row) => !added.includes(row));
+    const withPreview = all.filter((row) => !added.includes(row) && row !== inviteResend);
     const others = withPreview.filter((row) => row !== preview);
-    expect(others).toHaveLength(DEV_ROUTES.length - 4);
+    expect(others).toHaveLength(DEV_ROUTES.length - 5);
     expect(createHash("sha256").update(others.join("\n")).digest("hex")).toBe(OTHER_ROWS_DIGEST);
     // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.
     const switchRows = others.filter((row) => row.includes("/lessons/local-tools "));

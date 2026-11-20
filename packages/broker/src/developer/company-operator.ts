@@ -12,6 +12,7 @@ const request = z.discriminatedUnion("kind", [
   // DEC 254h: `inviteHash`, the SHA-256 of the invite link secret the broker made for this pre-approval (never the secret).
   z.object({ kind: z.literal("company-preapprove"), companyId: OrgIdSchema, email: CompanyEmail, role: z.enum(["admin", "member"]), expiresInHours: CompanyExpiryHours, createdBy: CompanyPersonId.optional(), inviteHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict(),
   z.object({ kind: z.literal("company-preapproval-withdraw"), companyId: OrgIdSchema, email: CompanyEmail.optional(), emailHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), createdBy: CompanyPersonId.optional() }).strict().refine((value) => (value.email === undefined) !== (value.emailHash === undefined)),
+  z.object({ kind: z.literal("company-preapproval-resend"), companyId: OrgIdSchema, emailHash: z.string().regex(/^[a-f0-9]{64}$/), expiresInHours: CompanyExpiryHours, createdBy: CompanyPersonId, inviteHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   z.object({ kind: z.literal("company-preapprovals-list"), companyId: OrgIdSchema }).strict(),
   // DEC 254zzz84 (5): a removal with a hand-over fences the role the remover saw and a live successor inside its own transaction (both optional: an operator's revoke names neither).
   z.object({ kind: z.literal("company-member-revoke"), companyId: OrgIdSchema, personId: CompanyPersonId, createdBy: CompanyPersonId.optional(), expectedRole: z.enum(["member", "admin", "owner"]).optional(), successorId: CompanyPersonId.optional() }).strict(),
@@ -77,6 +78,11 @@ export async function companyOperator(deps: { store: CompanySignInStore; invites
         return input.inviteHash === undefined ? { ok: true } : { ok: true, expiresAt };
       }
       case "company-preapproval-withdraw": if (!await deps.store.withdraw(companyId, (input.emailHash ?? emailIndexKey(input.email!).pk.slice(6)), input.createdBy)) return { ok: false, error: "not_found" }; break;
+      case "company-preapproval-resend": {
+        const expiresAt = await deps.store.resend(companyId, input.emailHash, input.expiresInHours, input.createdBy, input.inviteHash);
+        deps.log({ event: input.kind, companyId });
+        return { ok: true, expiresAt };
+      }
       case "company-preapprovals-list": {
         const listed = await deps.store.list(companyId);
         await deps.store.operatorWrite(companyId, input.kind, []);

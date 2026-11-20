@@ -83,7 +83,7 @@ describe("the core root with the hosted people port", () => {
     expect(built.mock.calls.map(([company]) => company)).toEqual([A]);
   });
 
-  it("with the switch on, the team record and its knowledge search are built for the company too (defined, not 'not wired')", async () => {
+  it("with the switch on, the team record and its knowledge search are built for the company too; eligible context sources are wired on the hosted core", async () => {
     const { root } = await setup({ lessons: "on" });
     expect(root.lessons).toBeDefined();
     const runtime = await root.app.runtimeFor(A);

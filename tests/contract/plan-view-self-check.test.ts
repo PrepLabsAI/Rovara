@@ -243,7 +243,7 @@ describe("what the self-check found, on the task page", () => {
   it("lists every finding and note under its own heading, escaped", async () => {
     const view = readPlanSelfCheck(json({ findings: [uncovered, waived], notes: [{ code: "checks-not-tried", ownerSentence: "Proposed checks were not tried on the current code." }] }), SHA);
     const html = await page(view);
-    expect(html).toContain("AgentX's plan check");
+    expect(html).toContain("Rovara's plan check");
     for (const sentence of [uncovered.ownerSentence, waived.ownerSentence, "Proposed checks were not tried on the current code."]) expect(html).toContain(sentence);
     expect(html.indexOf(waived.ownerSentence)).toBeLessThan(html.indexOf(uncovered.ownerSentence));
     // A sentence is escaped, not trusted.
@@ -251,14 +251,14 @@ describe("what the self-check found, on the task page", () => {
   });
 
   it("says 'Not checked by AgentX's plan check.' for a plan that was not checked, and when the page was given no record at all", async () => {
-    expect(await page(readPlanSelfCheck(undefined, SHA))).toContain(NOT_CHECKED_SENTENCE);
-    expect(await page(undefined)).toContain(NOT_CHECKED_SENTENCE);
+    expect(await page(readPlanSelfCheck(undefined, SHA))).toContain(NOT_CHECKED_SENTENCE.replaceAll("AgentX", "Rovara"));
+    expect(await page(undefined)).toContain(NOT_CHECKED_SENTENCE.replaceAll("AgentX", "Rovara"));
   });
 
   it("says that the plan check ran and found nothing, when it did", async () => {
     const html = await page(readPlanSelfCheck(json(), SHA));
-    expect(html).toContain("AgentX's plan check found no problems.");
-    expect(html).not.toContain(NOT_CHECKED_SENTENCE);
+    expect(html).toContain("Rovara's plan check found no problems.");
+    expect(html).not.toContain(NOT_CHECKED_SENTENCE.replaceAll("AgentX", "Rovara"));
   });
 
   it("is shown for a coding plan only, not for requirements or a design", async () => {
