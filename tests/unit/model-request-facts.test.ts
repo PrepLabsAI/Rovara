@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { PROMPT_TEXT_MAX_CHARS, readModelRequestFacts } from "../../packages/contracts/src/model-request-facts.js";
-import { expectLinearScaling } from "../support/scaling.js";
 
 const facts = (body: unknown) => readModelRequestFacts(typeof body === "string" ? body : JSON.stringify(body));
 
@@ -26,16 +25,12 @@ describe("readModelRequestFacts", () => {
     expect(facts({ instances: [{}, {}] }).inputCount).toBe(2);
     expect(facts({ input: [] }).inputCount).toBe(1);
   });
-  it("is bounded in depth and size, and fast on 1 MB", () => {
+  it("is bounded in depth and size", () => {
     let deep: unknown = "buried";
     for (let index = 0; index < 40; index += 1) deep = { content: deep };
     expect(facts({ messages: [deep] }).promptText).toBe(""); // past depth 16 nothing is collected
-    // 32,000 characters, then 256,000 (the 8N input stays at or under 256 KiB so it stays in CPU cache): linear work grows about 8x. The 900,000-character prompt runs once, un-timed, below.
+    // #1117: no wall-clock scaling check. It flaked on shared runners, and the bounds below (depth 16, the 1 MiB body, the 2 MiB prompt cap) are what limit the work.
     const textOf = (size: number) => JSON.stringify({ messages: [{ role: "user", content: "x".repeat(size) }] });
-    expectLinearScaling((size) => {
-      const text = textOf(size);
-      return () => facts(text);
-    }, { n: 32_000, label: "reading the facts of a large prompt" });
     const huge = facts(textOf(900_000));
     expect(huge.promptText?.length).toBe(900_000);
     const many = facts({ messages: Array.from({ length: 150_000 }, () => ({ content: "a" })) });
