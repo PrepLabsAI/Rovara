@@ -35,7 +35,8 @@ describe("model access route", () => {
       expect(await w.call("", `/v1/internal/workspaces/${v.ws}/operations/${v.op}/${action}`, "POST"), action).toEqual(action.startsWith("e2e-") ? { statusCode: 404, headers: { "content-type": "application/json" }, body: '{"error":{"code":"NOT_FOUND","message":"route not found"}}' } : { statusCode: 409, headers: { "content-type": "application/json" }, body: '{"error":{"code":"CALLBACK_FORBIDDEN","message":"callback capability is required"}}' });
     }
     for (const [path, method] of [["/v1/internal/design-review/packet", "GET"], ["/v1/internal/context-tools", "GET"], ["/v1/internal/context-tools/call", "POST"], ["/v1/internal/mcp", "POST"]] as const) {
-      expect(await w.call("", path, method)).toEqual({ statusCode: 409, headers: { "content-type": "application/json" }, body: '{"error":{"code":"CALLBACK_FORBIDDEN","message":"callback capability is required"}}' });
+      // The packet route answers a refused credential with 403 (packet-route.ts); the other three keep the shared mapping's 409.
+      expect(await w.call("", path, method)).toEqual({ statusCode: path === "/v1/internal/design-review/packet" ? 403 : 409, headers: { "content-type": "application/json" }, body: '{"error":{"code":"CALLBACK_FORBIDDEN","message":"callback capability is required"}}' });
     }
     expect(await w.call("", `/v1/internal/workspaces/${v.ws}/operations/${v.op}/repository-credentials`, "POST")).toEqual({ statusCode: 403, headers: { "content-type": "application/json" }, body: '{"error":{"code":"FORBIDDEN","message":"a repository grant is required"}}' });
   });

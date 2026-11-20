@@ -2,7 +2,7 @@
 // affect, while a FULL run (everything, as before) stays available and is the one a merge needs.
 //
 // FULL mode: a push to code/next, a manual run, a pull request labelled `full-ci`, or one whose title starts with "Batch " or "Sync mainline". It runs every job
-// in full: all test shards, the whole lint and the release check (the device emulator check only on a push or a "Batch " pull request; see DEVICE_PATTERNS). The `ci-mode (full)` check exists only then.
+// in full: all test shards, the whole lint (a "Batch " or "Sync mainline" pull request lints only its changed files, as any pull request does; see fullLint) and the release check (the device emulator check only on a push or a "Batch " pull request; see DEVICE_PATTERNS). The `ci-mode (full)` check exists only then.
 // AFFECTED mode (a pull request, the default): the typecheck stays full; the tests are the ones the change can reach (vitest --changed plus the tests that name a
 // changed file or one of the packages it touches), in 2 shards; lint covers the lint shards that hold changed files; the Linux runtime, device emulator and release checks run only
 // when files in their area change (the device emulator check: only device code, DEC 254zn); a Markdown-only change that no test reads runs nothing but the plan. Anything shared (vitest config, package.json, the lockfile,
@@ -236,17 +236,33 @@ export function linuxRuns(input: Pick<PlanInput, "event" | "forceLinux">): boole
   return input.event === "workflow_dispatch" && input.forceLinux === true;
 }
 
+/** The lint of an ordinary pull request: the whole lint when its settings change (or no changed-file list exists), its changed TypeScript files otherwise. */
+export function changedLint(changed: readonly string[]): Scope {
+  return changed.length === 0 || changed.some((file) => anyMatch(file, SHARED_LINT_PATTERNS)) ? "all" : changed.some((file) => /\.ts$/.test(file)) ? "changed" : "none";
+}
+
+/**
+ * The lint of a FULL run. The whole lint takes about 10 minutes (22 shards, each with its own TypeScript program), and every file it checks was linted when
+ * it last changed, so a "Batch " or "Sync mainline" pull request lints its changed files like any pull request. A push to code/next, a manual run and the
+ * `full-ci` label (a request for everything) still lint everything, and so does the nightly run.
+ */
+export function fullLint(input: Pick<PlanInput, "event" | "labels" | "changed">): Scope {
+  if (input.event !== "pull_request" || input.labels.includes(FULL_LABEL)) return "all";
+  return changedLint(input.changed);
+}
+
 export function planCi(input: PlanInput): Plan {
   const deviceRequired = input.changed.some((file) => anyMatch(file, DEVICE_PATTERNS));
   const deviceFull = DEVICE_FULL_EVENTS.includes(input.event) || (input.event === "pull_request" && input.title.startsWith(DEVICE_FULL_TITLE_PREFIX));
   // #1185: the nightly run is the device emulator check (non-blocking, as DEC 254zn had it for a scheduled run), not a second full suite: the typecheck still runs in
-  // `quick`, but no tests, lint or release check. #1192: no Linux runtime check either (the production release runs it).
+  // `quick`, but no tests or release check (the slow tests run in their own nightly job). #1192: no Linux runtime check either (the production release runs it).
+  // The whole lint runs here: a "Batch " or "Sync mainline" pull request lints only its changed files (fullLint).
   if (input.event === "schedule") {
-    return { mode: "affected", modeReason: "the nightly run", docsOnly: false, tests: "none", testsReason: "the nightly run checks the device emulator only", shards: 1, lint: "none", linux: linuxRuns(input), device: true, deviceRequired: false, release: false, extraTests: [] };
+    return { mode: "affected", modeReason: "the nightly run", docsOnly: false, tests: "none", testsReason: "the nightly run checks the device emulator only", shards: 1, lint: "all", linux: linuxRuns(input), device: true, deviceRequired: false, release: false, extraTests: [] };
   }
   const reason = fullReason(input);
   if (reason !== undefined) {
-    return { mode: "full", modeReason: reason, docsOnly: false, tests: "all", testsReason: "FULL mode", shards: FULL_SHARDS, lint: "all", linux: linuxRuns(input), device: deviceRequired || deviceFull, deviceRequired, release: true, extraTests: [] };
+    return { mode: "full", modeReason: reason, docsOnly: false, tests: "all", testsReason: "FULL mode", shards: FULL_SHARDS, lint: fullLint(input), linux: linuxRuns(input), device: deviceRequired || deviceFull, deviceRequired, release: true, extraTests: [] };
   }
   const { changed } = input;
   const docs = docsOnlyChange(changed, input.testSources);
@@ -264,7 +280,7 @@ export function planCi(input: PlanInput): Plan {
       : tooMany
         ? `${extraTests.length} tests name the change, so the whole suite`
         : "the tests the change can reach";
-  const lint: Scope = changed.length === 0 || changed.some((file) => anyMatch(file, SHARED_LINT_PATTERNS)) ? "all" : changed.some((file) => /\.ts$/.test(file)) ? "changed" : "none";
+  const lint = changedLint(changed);
   return {
     mode: "affected",
     modeReason: "a pull request",

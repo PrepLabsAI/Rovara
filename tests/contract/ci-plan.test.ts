@@ -41,6 +41,17 @@ describe("which runs are FULL", () => {
     expect(fullReason({ event: "pull_request", labels: [], title: "batch 1" })).toBeUndefined();
   });
 
+  it("lints a Batch or Sync mainline pull request's changed files, as any pull request; the full-ci label, a push and a manual run lint everything", () => {
+    for (const title of ["Batch 7: things", "Sync mainline into code/next"]) {
+      expect(planCi(input({ title })), title).toMatchObject({ mode: "full", tests: "all", lint: "changed" });
+      expect(planCi(input({ title, changed: ["packages/other-d/src/x.ts", "eslint.config.js"] })).lint, title).toBe("all");
+      expect(planCi(input({ title, changed: ["docs/sample/guide.md"] })).lint, title).toBe("none");
+      expect(planCi(input({ title, changed: [] })).lint, title).toBe("all");
+    }
+    expect(planCi(input({ title: "Batch 7: things", labels: ["full-ci"] })).lint).toBe("all");
+    for (const event of ["push", "workflow_dispatch"]) expect(planCi(input({ event, changed: ["packages/other-d/src/x.ts"] })).lint, event).toBe("all");
+  });
+
   it("runs everything even when the change is Markdown only, so a full run is never thinner than a full run", () => {
     const plan = planCi(input({ labels: ["full-ci"], changed: ["docs/sample/guide.md"] }));
     expect(plan).toMatchObject({ mode: "full", docsOnly: false, tests: "all", lint: "all", linux: false, release: true, device: false, deviceRequired: false });
@@ -172,9 +183,9 @@ describe("when the Linux runtime check runs", () => {
     expect(planCi(input({ event: "workflow_dispatch", changed: [], forceLinux: true })).linux).toBe(true);
     expect(linuxRuns({ event: "workflow_dispatch", forceLinux: true })).toBe(true);
   });
-  it("keeps the nightly run cheap: no tests, lint, release or Linux check (it still runs the device emulator check, non-blocking)", () => {
+  it("keeps the nightly run cheap: no tests, release or Linux check (it still runs the device emulator check, non-blocking), and the whole lint", () => {
     const plan = planCi(input({ event: "schedule", changed: [] }));
-    expect(plan).toMatchObject({ mode: "affected", tests: "none", lint: "none", release: false, linux: false, docsOnly: false });
+    expect(plan).toMatchObject({ mode: "affected", tests: "none", lint: "all", release: false, linux: false, docsOnly: false });
     expect(planOutputs(plan)).toMatchObject({ linux: "false", tests: "none" });
   });
 });

@@ -109,7 +109,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
@@ -121,17 +121,14 @@ jobs:
       - name: "checks: npm ci"
         timeout-minutes: 15
         run: npm ci
-      - name: "checks: npm run typecheck"
-        timeout-minutes: 15
-        run: npm run typecheck
-      # The stricter type check (tsconfig.lint.json, which also covers tests/ and scripts/) may not
-      # add errors beyond tests/typecheck-baseline.json (issue #50, scripts/typecheck-baseline.ts).
+      # `npm run typecheck:all` is `npm run typecheck` (tsc -b) followed by the stricter type check (tsconfig.lint.json, which also covers tests/ and scripts/), which may
+      # not add errors beyond tests/typecheck-baseline.json (issue #50, scripts/typecheck-baseline.ts). A separate `npm run typecheck` step ran the same tsc -b first.
       - name: "checks: npm run typecheck:all"
         timeout-minutes: 15
         run: npm run typecheck:all
       # The whole repository with the rules of `eslint .`, but in shards (scripts/lint-shards.ts), two eslint processes at a time. One process
       # over the whole repository needed more than 6 GB; each shard stays under a 4 GB heap cap. It reads the packages' declarations that
-      # `npm run typecheck` just built. A pull request that changes no lint setting lints only its changed TypeScript files, each in its own shard's program.
+      # typecheck:all's tsc -b just built. A pull request that changes no lint setting lints only its changed TypeScript files, each in its own shard's program.
       - name: "checks: npm run lint"
         if: needs.plan.outputs.lint == 'all'
         timeout-minutes: 15
@@ -142,17 +139,32 @@ jobs:
         run: |
           git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
           node scripts/lint-shards.ts --files "$RUNNER_TEMP/changed.txt"
-      # The release check shares the install above (the old `release` job ran its own `npm ci`); the rest runs as before, when the release area changed (always in a FULL run).
+
+  # The release check, beside `quick` instead of after it: the packages built, the stacks synthesized, and two release builds that must be identical and
+  # verify. It runs when the release area changed (always in a FULL run).
+  release-check:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: "release: npm ci"
+        timeout-minutes: 15
+        run: npm ci
       - name: "release: npm run build"
-        if: needs.plan.outputs.release == 'true'
         timeout-minutes: 15
         run: npm run build
       - name: "release: npm run infra:synth"
-        if: needs.plan.outputs.release == 'true'
         timeout-minutes: 15
         run: npm run infra:synth
       - name: "release: Release builds are reproducible"
-        if: needs.plan.outputs.release == 'true'
         timeout-minutes: 15
         run: |
           npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-a"
@@ -330,7 +342,8 @@ jobs:
   nightly-tests:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # About 40 minutes of test time on a small runner (the eval simulation, the detectors' growth check, local-up-flow and the workflow-e2e suites).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -599,7 +612,7 @@ jobs:
 
   # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
   local:
-    needs: [plan, quick, build, test, linux-runtime, ci-mode]
+    needs: [plan, quick, build, test, linux-runtime, ci-mode, release-check]
     if: always() && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
