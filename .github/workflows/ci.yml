@@ -17,6 +17,10 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, labeled]
   push:
     branches: [code/next]
+  # #1259: the merge queue on mainline runs CI on each pull request merged onto the latest mainline; the queue merges only when `local` passes there, and the
+  # commit it fast-forwards mainline to carries that run, so the release's CI proof (scripts/release-ci-proof.ts) finds it.
+  merge_group:
+    types: [checks_requested]
   # #1185, #1192: the nightly run on mainline (the default branch): the non-blocking device emulator check and the typecheck. (The Linux runtime check runs in the release.)
   schedule:
     - cron: "0 6 * * *"
@@ -72,13 +76,15 @@ jobs:
           CI_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           CI_TITLE: ${{ github.event.pull_request.title }}
           CI_FORCE_LINUX: ${{ github.event.inputs.linux }}
-          CI_BASE_REF: ${{ github.base_ref }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # #1259: a merge-queue run's base is the queue's (merge_group.base_ref is refs/heads/mainline; ci-plan.ts drops the prefix).
+          CI_BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
           # On a pull request the script is the base branch's copy, never the pull request's own: a change to ci-plan.ts cannot change how its own run is judged (scripts/port-guard.ts also lists it as a guard file).
           # The base branch has the file unless this is the pull request that adds it, which no pull request can fake, so only then does the checkout's copy run. A failed fetch fails the step.
+          # #1259: a merge-queue run (merge_group) is judged like a pull request: by the base's copy of the script, on the files its group changes against the base.
           PLAN_SCRIPT=scripts/ci-plan.ts
-          if [ "$CI_EVENT" = pull_request ]; then
+          if [ "$CI_EVENT" = pull_request ] || [ "$CI_EVENT" = merge_group ]; then
             git fetch --no-tags --depth=1 origin "$BASE_SHA"
             if git cat-file -e "$BASE_SHA:scripts/ci-plan.ts" 2>/dev/null; then
               PLAN_SCRIPT="$RUNNER_TEMP/ci-plan.ts"
@@ -87,6 +93,8 @@ jobs:
           fi
           if [ "$CI_EVENT" = pull_request ]; then
             git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+          elif [ "$CI_EVENT" = merge_group ]; then
+            git diff --name-only "$BASE_SHA" HEAD > "$RUNNER_TEMP/changed.txt"
           else
             : > "$RUNNER_TEMP/changed.txt"
           fi
@@ -136,8 +144,14 @@ jobs:
       - name: "checks: lint the changed files"
         if: needs.plan.outputs.lint == 'changed'
         timeout-minutes: 15
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
-          git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+          # #1259: a merge-queue group is linted against the queue's base, which may be several merges back; a pull request's merge commit against its first parent.
+          DIFF_BASE=HEAD^1
+          if [ "$CI_EVENT" = merge_group ]; then git fetch --no-tags --depth=1 origin "$BASE_SHA"; DIFF_BASE="$BASE_SHA"; fi
+          git diff --name-only "$DIFF_BASE" HEAD > "$RUNNER_TEMP/changed.txt"
           node scripts/lint-shards.ts --files "$RUNNER_TEMP/changed.txt"
 
   # The release check, beside `quick` instead of after it: the packages built, the stacks synthesized, and two release builds that must be identical and
@@ -210,7 +224,7 @@ jobs:
     name: test (${{ matrix.shard }}/${{ strategy.job-total }})
     # #1200: a pull request into mainline from this repository runs its shards on the account's CodeBuild ARM runner (infra/lib/ci-runner.ts), where they
     # don't wait for a free GitHub runner; everything else (code/next, a fork's pull request) runs them on GitHub's free runner, as before.
-    runs-on: ${{ (github.event_name == 'pull_request' && github.base_ref == 'mainline' && github.event.pull_request.head.repo.full_name == github.repository) && format('codebuild-rovara-ci-tests-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'mainline' && github.event.pull_request.head.repo.full_name == github.repository)) && format('codebuild-rovara-ci-tests-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
     # 40, not 25: shard 2 passed 25 minutes on 2026-11-14 as code/next grew (PRs #612, #517 cancelled at the limit); shards 1, 3, 4 take 17-21.
     timeout-minutes: 40
     strategy:
@@ -319,22 +333,26 @@ jobs:
           CI_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           CI_TITLE: ${{ github.event.pull_request.title }}
           CI_EXTRA_TESTS: ${{ runner.temp }}/extra-tests.txt
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
           # On a pull request the script is the base branch's copy, never the pull request's own: a change to ci-plan.ts cannot change how its own run is judged (scripts/port-guard.ts also lists it as a guard file).
           # The base branch has the file unless this is the pull request that adds it, which no pull request can fake, so only then does the checkout's copy run. A failed fetch fails the step.
           PLAN_SCRIPT=scripts/ci-plan.ts
-          if [ "$CI_EVENT" = pull_request ]; then
+          if [ "$CI_EVENT" = pull_request ] || [ "$CI_EVENT" = merge_group ]; then
             git fetch --no-tags --depth=1 origin "$BASE_SHA"
             if git cat-file -e "$BASE_SHA:scripts/ci-plan.ts" 2>/dev/null; then
               PLAN_SCRIPT="$RUNNER_TEMP/ci-plan.ts"
               git show "$BASE_SHA:scripts/ci-plan.ts" > "$PLAN_SCRIPT"
             fi
           fi
-          git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+          # #1259: a pull request's merge commit is compared with its first parent (the base); a merge-queue group with the queue's base, which may be several merges back.
+          DIFF_BASE=HEAD^1
+          if [ "$CI_EVENT" = merge_group ]; then DIFF_BASE="$BASE_SHA"; fi
+          git diff --name-only "$DIFF_BASE" HEAD > "$RUNNER_TEMP/changed.txt"
           node "$PLAN_SCRIPT" "$RUNNER_TEMP/changed.txt"
           [ -f "$CI_EXTRA_TESTS" ] && chmod o+r "$CI_EXTRA_TESTS"
-          $AS_TESTER npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+          $AS_TESTER npm test -- --changed "$DIFF_BASE" --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}
           if [ -s "$CI_EXTRA_TESTS" ]; then xargs $AS_TESTER npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }} < "$CI_EXTRA_TESTS"; fi
 
   # The tests too slow for every pull request (nightlyOnlyFiles in tests/support/vitest-shared-config.ts), once a night. A pull request runs one only when its
@@ -625,12 +643,12 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
           CI_EVENT: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
           # On a pull request the script is the base branch's copy, never the pull request's own: a change to ci-gate.ts cannot change how its own run is judged (scripts/port-guard.ts also lists it as a guard file).
           # The base branch has the file unless this is the pull request that adds it, which no pull request can fake, so only then does the checkout's copy run. A failed fetch fails the step.
           GATE_SCRIPT=scripts/ci-gate.ts
-          if [ "$CI_EVENT" = pull_request ]; then
+          if [ "$CI_EVENT" = pull_request ] || [ "$CI_EVENT" = merge_group ]; then
             git fetch --no-tags --depth=1 origin "$BASE_SHA"
             if git cat-file -e "$BASE_SHA:scripts/ci-gate.ts" 2>/dev/null; then
               GATE_SCRIPT="$RUNNER_TEMP/ci-gate.ts"

@@ -75,16 +75,23 @@ export interface PlanInput {
   event: string;
   labels: readonly string[];
   title: string;
-  /** Repository paths changed by the pull request; unused outside a pull request. */
+  /** Repository paths changed by the pull request, or by the merge queue's group against its base (#1259); unused for any other event. */
   changed: readonly string[];
   /** Every test file's source, by repository path. */
   testSources: ReadonlyMap<string, string>;
   packages: readonly PackageInfo[];
   /** A manual run asked for the Linux runtime check (workflow_dispatch input `linux`). */
   forceLinux?: boolean;
-  /** #1189: the pull request's base branch (github.base_ref); empty or absent outside a pull request. */
+  /** #1189: the pull request's base branch (github.base_ref), or the merge queue's (merge_group.base_ref, without `refs/heads/`); empty or absent otherwise. */
   baseRef?: string;
 }
+
+/**
+ * #1259: the events that judge a change before it lands on mainline: a pull request, and the merge queue's run of a pull request merged onto the latest mainline
+ * (`merge_group`). A merge-queue run has no labels and no title, so only the changed files decide its plan, the same way as a pull request's.
+ */
+export const CHANGE_EVENTS: readonly string[] = ["pull_request", "merge_group"];
+export const isChangeEvent = (event: string): boolean => CHANGE_EVENTS.includes(event);
 
 export const FULL_LABEL = "full-ci";
 /** #1185: a pull request labelled like this runs the Linux runtime check whatever it changes. */
@@ -102,7 +109,7 @@ export const MAX_EXTRA_TESTS = 300;
 
 /** Why a run is FULL, or undefined when it is not. (The scheduled run is neither: it is the nightly Linux runtime run, see planCi.) */
 export function fullReason(input: Pick<PlanInput, "event" | "labels" | "title">): string | undefined {
-  if (input.event !== "pull_request") return `${input.event} runs everything`;
+  if (!isChangeEvent(input.event)) return `${input.event} runs everything`;
   if (input.labels.includes(FULL_LABEL)) return `the pull request has the ${FULL_LABEL} label`;
   const prefix = FULL_TITLE_PREFIXES.find((candidate) => input.title.startsWith(candidate));
   if (prefix !== undefined) return `the title starts with "${prefix.trim()}"`;
@@ -247,9 +254,11 @@ export function changedLint(changed: readonly string[]): Scope {
  * `full-ci` label (a request for everything) still lint everything, and so does the nightly run.
  */
 export function fullLint(input: Pick<PlanInput, "event" | "labels" | "changed">): Scope {
-  if (input.event !== "pull_request" || input.labels.includes(FULL_LABEL)) return "all";
+  if (!isChangeEvent(input.event) || input.labels.includes(FULL_LABEL)) return "all";
   return changedLint(input.changed);
 }
+
+const changeReason = (event: string): string => (event === "merge_group" ? "the merge queue's run of a pull request on the latest mainline" : "a pull request");
 
 export function planCi(input: PlanInput): Plan {
   const deviceRequired = input.changed.some((file) => anyMatch(file, DEVICE_PATTERNS));
@@ -267,7 +276,7 @@ export function planCi(input: PlanInput): Plan {
   const { changed } = input;
   const docs = docsOnlyChange(changed, input.testSources);
   if (docs.docsOnly) {
-    return { mode: "affected", modeReason: "a pull request", docsOnly: true, tests: "none", testsReason: docs.reason, shards: 1, lint: "none", linux: false, device: false, deviceRequired: false, release: false, extraTests: [] };
+    return { mode: "affected", modeReason: changeReason(input.event), docsOnly: true, tests: "none", testsReason: docs.reason, shards: 1, lint: "none", linux: false, device: false, deviceRequired: false, release: false, extraTests: [] };
   }
   const shared = changed.find((file) => anyMatch(file, SHARED_TEST_PATTERNS));
   const extraTests = shared === undefined && changed.length > 0 ? relatedTests(changed, input.packages, input.testSources) : [];
@@ -283,7 +292,7 @@ export function planCi(input: PlanInput): Plan {
   const lint = changedLint(changed);
   return {
     mode: "affected",
-    modeReason: "a pull request",
+    modeReason: changeReason(input.event),
     docsOnly: false,
     tests,
     testsReason,
@@ -347,7 +356,7 @@ if (process.argv[1]?.endsWith("ci-plan.ts")) {
     try { return (JSON.parse(process.env.CI_LABELS || "[]") as unknown[]).filter((label): label is string => typeof label === "string"); } catch { return []; }
   })();
   const changed = readFileSync(listed, "utf8").split("\n").map((line) => line.trim()).filter((line) => line !== "");
-  const plan = planCi({ event, labels, title: process.env.CI_TITLE ?? "", changed, testSources: new Map([...testFiles("tests"), ...testFiles("packages")]), packages: readPackages("."), forceLinux: process.env.CI_FORCE_LINUX === "true" , baseRef: process.env.CI_BASE_REF ?? "" });
+  const plan = planCi({ event, labels, title: process.env.CI_TITLE ?? "", changed, testSources: new Map([...testFiles("tests"), ...testFiles("packages")]), packages: readPackages("."), forceLinux: process.env.CI_FORCE_LINUX === "true" , baseRef: (process.env.CI_BASE_REF ?? "").replace(/^refs\/heads\//u, "") });
   console.log(`CI mode: ${plan.mode} (${plan.modeReason}).`);
   console.log(plan.docsOnly
     ? `Markdown-only change: ${plan.testsReason}; nothing but this plan runs.`
