@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCoverage, decodeMappings, executedUnion, globMatch, isTableCase, offsetLines, reduce, type TestRecord } from "../../scripts/test-coverage-map.js";
+import { buildCoverage, decodeMappings, executedUnion, globMatch, isTableCase, offsetLines, reduce, usesSnapshots, type TestRecord } from "../../scripts/test-coverage-map.js";
 import { executedIntervals, isProductScript } from "../support/coverage-map-core.js";
 
 // #1211: per-test coverage, and the smallest set of tests that keeps it.
@@ -82,5 +82,18 @@ describe("flagging table cases and matching keep rules", () => {
     expect(globMatch("tests/unit/a.test.ts", "tests/unit/ab.test.ts")).toBe(false);
     expect(globMatch("*sandbox*", "tests/unit/a.test.ts > Sandbox egress stays closed", true)).toBe(true);
     expect(globMatch("*sandbox*", "tests/unit/a.test.ts > Sandbox egress stays closed")).toBe(false);
+  });
+});
+
+// #1230: a snapshot checks content, so the cleanup never removes a test in a file that asserts with one.
+describe("files that assert with a snapshot (usesSnapshots)", () => {
+  it("finds every snapshot matcher, file and inline, and the thrown-error ones", () => {
+    for (const call of ["toMatchSnapshot()", "toMatchInlineSnapshot(`x`)", "toMatchFileSnapshot(\"a.txt\")", "toThrowErrorMatchingSnapshot()", "toThrowErrorMatchingInlineSnapshot(`y`)"]) {
+      expect(usesSnapshots(`expect(value).${call};`), call).toBe(true);
+    }
+  });
+  it("is false for a file with only ordinary assertions, or a matcher named in a comment without a call", () => {
+    expect(usesSnapshots("expect(a).toEqual(b); expect(c).toMatchObject({});")).toBe(false);
+    expect(usesSnapshots("// we no longer use toMatchSnapshot here")).toBe(false);
   });
 });
