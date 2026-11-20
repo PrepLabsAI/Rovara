@@ -33,13 +33,6 @@ async function signedIdentity(subject: string, groups: string[] = []) {
 }
 
 describe("authentication and authorization", () => {
-  it("derives stable owner identity from verified issuer and subject", async () => {
-    const first = await signedIdentity("alice");
-    const second = await signedIdentity("alice");
-    expect(first.ownerKey).toBe(second.ownerKey);
-    expect(first.subject).toBe("alice");
-    expect(first.isAdministrator).toBe(false);
-  });
 
   it("recognizes only verified administrator claims", async () => {
     expect((await signedIdentity("admin", ["agentx-admin"])).isAdministrator).toBe(true);

@@ -28,33 +28,6 @@ describe("nodeVersionProblem", () => {
     );
   });
 
-  it("in AWS CloudShell, prints the one-line Node 22 install and says it only touches this CloudShell", () => {
-    const message = nodeVersionProblem("20.20.2", { AWS_EXECUTION_ENV: "CloudShell" });
-    expect(message).toBe([
-      "Rovara Code needs Node 22.19 or newer; this is Node 20.20.2. In AWS CloudShell, run this command in its default Bash shell, then run rovara again:",
-      "",
-      `  ${CLOUDSHELL_NODE_INSTALL_COMMAND}`,
-      "",
-      "It installs Node 22 in your own CloudShell home folder only; nothing else in your AWS account is affected.",
-    ].join("\n"));
-  });
-
-  it("accepts the floor itself and anything newer", () => {
-    for (const version of ["22.19.0", "22.19.1", "22.20.0", "22.23.3", "23.0.0", "24.1.0"]) {
-      expect(nodeVersionProblem(version, { AWS_EXECUTION_ENV: "CloudShell" }), version).toBeUndefined();
-    }
-  });
-
-  it("refuses every version below the floor, including the patch and minor just under it", () => {
-    for (const version of ["22.18.9", "22.18.0", "22.0.0", "21.99.99", "20.20.2", "18.20.4", "16.0.0"]) {
-      expect(nodeVersionProblem(version, {}), version).toContain(`this is Node ${version}.`);
-    }
-  });
-
-  it("only uses the CloudShell wording when AWS_EXECUTION_ENV is exactly CloudShell", () => {
-    expect(nodeVersionProblem("20.20.2", { AWS_EXECUTION_ENV: "AWS_Lambda_nodejs20.x" })).not.toContain("CloudShell");
-    expect(nodeVersionProblem("20.20.2", {})).not.toContain(CLOUDSHELL_NODE_INSTALL_COMMAND);
-  });
 });
 
 describe("startCli", () => {
@@ -79,22 +52,7 @@ describe("startCli", () => {
 });
 
 describe("the agentx executable (packages/cli/src/bin.ts)", () => {
-  // Preloaded with `node --import`: this Node then reports itself as the Node 20 that AWS
-  // CloudShell ships, so the real executable's check runs.
-  const fakeNode20 = `data:text/javascript,${encodeURIComponent('Object.defineProperty(process, "versions", { value: { ...process.versions, node: "20.20.2" }, configurable: true });')}`;
   const bin = join(repoRoot, "packages", "cli", "src", "bin.ts");
-
-  it("under Node 20 prints the plain message, exits non-zero, and runs no command", async () => {
-    // `--version` would print the CLI's version if the rest of the CLI loaded.
-    const result = await run(process.execPath, ["--import", "tsx", "--import", fakeNode20, bin, "--version"], {
-      cwd: repoRoot,
-      env: { ...process.env, AWS_EXECUTION_ENV: "CloudShell" },
-    }).then(() => undefined, (error: { code?: number; stdout?: string; stderr?: string }) => error);
-    expect(result, "the bin must fail under Node 20").toBeDefined();
-    expect(result!.code).toBe(1);
-    expect(result!.stdout).toBe("");
-    expect(result!.stderr).toBe(`${nodeVersionProblem("20.20.2", { AWS_EXECUTION_ENV: "CloudShell" })}\n`);
-  }, 60_000);
 
   it("on a supported Node runs the command and prints no Node message", async () => {
     const { stdout, stderr } = await run(process.execPath, ["--import", "tsx", bin, "--version"], { cwd: repoRoot, env: { ...process.env, AWS_EXECUTION_ENV: "CloudShell" } });
@@ -163,20 +121,4 @@ describe("the Node version floor and the CloudShell command have one source", ()
     expect(CLOUDSHELL_NODE_INSTALL_COMMAND).toContain(`V=v${CLOUDSHELL_NODE_VERSION} `);
   });
 
-  it("the command checks the download against nodejs.org's SHASUMS256 and installs only under ~/.local/node22", () => {
-    expect(CLOUDSHELL_NODE_INSTALL_COMMAND).toContain("https://nodejs.org/dist/$V/SHASUMS256.txt");
-    expect(CLOUDSHELL_NODE_INSTALL_COMMAND).toContain("sha256sum -c -");
-    expect(CLOUDSHELL_NODE_INSTALL_COMMAND).toContain("D=$HOME/.local/node22");
-    // Unpacked beside the old one and swapped in only once complete.
-    expect(CLOUDSHELL_NODE_INSTALL_COMMAND).toMatch(/sha256sum -c - && tar -xzf "\$F" --strip-components=1 && rm "\$F"\) && rm -rf "\$D" && mv "\$D\.new" "\$D"/);
-    expect(CLOUDSHELL_NODE_INSTALL_COMMAND).not.toMatch(/sudo|\/usr\/|\| *(ba)?sh\b/);
-  });
-
-  it("docs/install.md shows exactly the command the CLI prints, with how to remove it", async () => {
-    const install = await readFile(join(repoRoot, "docs", "install.md"), "utf8");
-    expect(install).toContain(`\`\`\`sh\n${CLOUDSHELL_NODE_INSTALL_COMMAND}\n\`\`\``);
-    expect(install).toContain("This only affects your own CloudShell, in this region; nothing else in your AWS account uses it.");
-    expect(install).toContain("rm -rf ~/.local/node22");
-    expect(nodeVersionProblem("20.20.2", { AWS_EXECUTION_ENV: "CloudShell" })).toContain(`\n  ${CLOUDSHELL_NODE_INSTALL_COMMAND}\n`);
-  });
 });

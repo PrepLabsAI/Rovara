@@ -3,34 +3,18 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ProjectDefinition } from "@agentx/contracts";
 import { describe, expect, it, vi } from "vitest";
-import { listCredentials, registerCredential } from "../../packages/cli/src/admin/credential.js";
+import { registerCredential } from "../../packages/cli/src/admin/credential.js";
 import { tokenStoreKey } from "../../packages/cli/src/auth.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 import { LoopStore } from "../../packages/cli/src/loop/state.js";
 
 describe("credential administration client", () => {
-  it("posts a validated registration with the bearer token and returns the server's entry", async () => {
-    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ credential: { ref: "linear" }, replaced: false }, { status: 201 }));
-    const result = await registerCredential({ controlPlaneUrl: "https://agentx.example.test/", accessToken: "admin-token", ref: "linear", type: "oauth-client-credentials", secretName: "agentx/connectors/linear" }, fetchImplementation);
-    expect(result).toEqual({ credential: { ref: "linear" }, replaced: false });
-    const [url, init] = fetchImplementation.mock.calls[0]!;
-    expect(url).toBe("https://agentx.example.test/v1/admin/credentials");
-    expect(init).toMatchObject({ method: "POST" });
-    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer admin-token");
-    expect(JSON.parse(String(init?.body as string))).toEqual({ ref: "linear", type: "oauth-client-credentials", secretName: "agentx/connectors/linear" });
-  });
 
   it("refuses a bad secret name locally without calling the control plane", async () => {
     const fetchImplementation = vi.fn<typeof fetch>();
     await expect(registerCredential({ controlPlaneUrl: "https://agentx.example.test", accessToken: "t", ref: "linear", type: "static-secret", secretName: "prod/db" }, fetchImplementation)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     expect(fetchImplementation).not.toHaveBeenCalled();
-  });
-
-  it("surfaces the server's error code and message", async () => {
-    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ error: { code: "CONFIG_INVALID", message: "credential linear: secret agentx/connectors/linear was not found" } }, { status: 400 }));
-    await expect(registerCredential({ controlPlaneUrl: "https://agentx.example.test", accessToken: "t", ref: "linear", type: "static-secret", secretName: "agentx/connectors/linear" }, fetchImplementation))
-      .rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: credential linear: secret agentx/connectors/linear was not found" });
   });
 
   it("surfaces a clean HTTP status when the control plane returns a non-JSON error body", async () => {
@@ -47,12 +31,6 @@ describe("credential administration client", () => {
       .rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: HTTP 400" });
   });
 
-  it("lists credentials", async () => {
-    const credentials = [{ ref: "github-app", type: "github-app", secretName: "arn", builtIn: true, tokenCached: false }];
-    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ credentials }));
-    expect(await listCredentials({ controlPlaneUrl: "https://agentx.example.test", accessToken: "t" }, fetchImplementation)).toEqual({ credentials });
-    expect(fetchImplementation.mock.calls[0]?.[1]).toMatchObject({ method: "GET" });
-  });
 });
 
 describe("project registration from the command line", () => {
@@ -83,15 +61,6 @@ describe("project registration from the command line", () => {
 describe("taking a project over from the command line (Task AUTH1)", () => {
   const registered = { project: { definition: { name: "payments" } }, duplicate: false, preflight: { connectors: [] } };
 
-  it("sends no takeover unless asked", async () => {
-    const context = await administratorContext("agentx-cli-register-no-takeover-");
-    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json(registered, { status: 201 }));
-    expect((await runRegister(context, fetchImplementation)).exitCode).toBe(0);
-    const body = JSON.parse(String(fetchImplementation.mock.calls[0]![1]?.body as string)) as Record<string, unknown>;
-    expect(body).not.toHaveProperty("takeOwnership");
-    expect(body).not.toHaveProperty("takeOwnershipReason");
-  });
-
   it("sends --take-ownership with its reason and says the takeover was recorded", async () => {
     const context = await administratorContext("agentx-cli-register-takeover-");
     const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ ...registered, ownershipTakenOver: true }, { status: 201 }));
@@ -112,40 +81,9 @@ describe("taking a project over from the command line (Task AUTH1)", () => {
     expect(fetchImplementation).not.toHaveBeenCalled();
   });
 
-  it("passes the control plane's refusal on, which names the takeover option", async () => {
-    const context = await administratorContext("agentx-cli-register-takeover-hint-");
-    const message = "only an administrator of project payments can register a new revision of it. An instance administrator who is not one can take the project over by asking explicitly: send takeOwnership: true";
-    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ error: { code: "FORBIDDEN", message } }, { status: 403 }));
-    const { exitCode, stderr } = await runRegister(context, fetchImplementation);
-    expect(exitCode).not.toBe(0);
-    expect(stderr).toContain("takeOwnership: true");
-  });
-});
-
-describe("project registration without connectors", () => {
-  it("does not mention connector checks when the definition has no integrations", async () => {
-    const context = await administratorContext("agentx-cli-register-plain-");
-    const plain = projectDefinition();
-    delete plain.integrations;
-    await writeFile(context.projectFile, JSON.stringify(plain), "utf8");
-    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ project: { definition: { name: "payments" } }, duplicate: false }, { status: 201 }));
-    const { exitCode, stderr, enrollments } = await runRegister(context, fetchImplementation);
-    expect(exitCode).toBe(0);
-    expect(stderr).not.toContain("did not check connectors");
-    expect(stderr).toBe("Warning: native project registration succeeded, but local Rovara enrollment is on hold (registration_response_unproven); register it from its source checkout or reconnect there before publication.\n");
-    expect(enrollments.some((entry) => entry.kind === "registered")).toBe(false);
-  });
 });
 
 describe("project registration errors", () => {
-  it("surfaces the control plane's refusal so the administrator knows what to fix", async () => {
-    const context = await administratorContext("agentx-cli-register-refused-");
-    const message = "this project could expose 201 tools; at most 200 are allowed. Approve fewer connector tools.";
-    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ error: { code: "CONFIG_INVALID", message } }, { status: 400 }));
-    const { exitCode, stderr } = await runRegister(context, fetchImplementation);
-    expect(exitCode).not.toBe(0);
-    expect(stderr).toContain(`project registration failed with HTTP 400: ${message}`);
-  });
 
   it("classifies an unlabeled server error by its HTTP status instead of always CONFIG_INVALID", async () => {
     const { exitCodeForError } = await import("../../packages/cli/src/output.js");

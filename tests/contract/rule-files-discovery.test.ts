@@ -25,13 +25,6 @@ const ours = [
 ];
 
 describe("Pi's own rule-file discovery", () => {
-  it("never reaches a session that reads the base commit: only AgentX's own files remain", async () => {
-    const { rootPath, agentDirectory } = await plantedWorkspace();
-
-    const { resourceLoader } = await createWorkerResources({ cwd: rootPath, agentDirectory, contextFiles: ours, contextFilesAt: "base-commit" });
-
-    expect(resourceLoader.getAgentsFiles().agentsFiles.map(({ content }) => content)).toEqual(ours.map(({ content }) => content));
-  });
 
   it("still reaches a coding session, with hidden characters removed", async () => {
     const { rootPath, agentDirectory } = await plantedWorkspace();

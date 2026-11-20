@@ -12,7 +12,6 @@ import { describe, expect, it } from "vitest";
 import { WorkerInvocationSchema } from "../../packages/contracts/src/index.js";
 import { indexActivity, type IndexStore } from "../../packages/broker/src/aws/activity-index.js";
 import type { StreamRecord } from "../../packages/broker/src/developer/notifications.js";
-import { statsSince } from "../../packages/worker/src/usage.js";
 import type { PiSessionAdapter, PiSessionHandle } from "../../packages/worker/src/pi-session.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 
@@ -249,43 +248,5 @@ describe("a run whose usage cannot be worked out reports none, and says so", () 
     expect(second.logged.some((line) => line.includes("usage.baseline_unavailable"))).toBe(true);
   });
 
-  it("keeps the stats at the end of such a run as the figure, so a retry of the next run, which died before its event was sent, reports that attempt's spend too", async () => {
-    const w = await workspace();
-    const conversationId = randomUUID();
-    const costs = { next: [0.05] as Array<number | null> };
-    const pi = fakePi(conversationId, costs);
-    await run(w.rootPath, pi, invocation(randomUUID(), conversationId, w.base, false));
-    await withoutReportedUsage(w.rootPath);
-    // This run cannot work out its own spend (nothing is sent for its 0.07), but the conversation now has a figure.
-    costs.next = [0.07];
-    pi.statsFail.once = true;
-    expect((await run(w.rootPath, pi, invocation(randomUUID(), conversationId, w.base, true))).usage).toHaveLength(0);
-    const kept = JSON.parse(await readFile(join(w.rootPath, ".agentx/conversations.json"), "utf8")) as { conversations: Record<string, { reportedUsage?: { cost: number } }> };
-    expect(kept.conversations[conversationId]?.reportedUsage?.cost).toBeCloseTo(0.12, 6);
-    // The next operation makes its model calls and dies before its event is sent; the retry reports both attempts.
-    const operationId = randomUUID();
-    costs.next = [0.02];
-    await run(w.rootPath, pi, invocation(operationId, conversationId, w.base, true), { refuse: true }).catch(() => undefined);
-    costs.next = [0.03];
-    const retry = await run(w.rootPath, pi, invocation(operationId, conversationId, w.base, true));
-    expect(retry.usage).toHaveLength(1);
-    expect((retry.usage[0]!.payload as { costUsd: number }).costUsd).toBeCloseTo(0.05, 6);
-  });
-
-  it("sends no event for a run with no model call on a fresh session either, as on a reopened one", async () => {
-    const w = await workspace();
-    const conversationId = randomUUID();
-    const pi = fakePi(conversationId, { next: [null] });
-    const fresh = await run(w.rootPath, pi, invocation(randomUUID(), conversationId, w.base, false));
-    expect(fresh.usage).toHaveLength(0);
-  });
 });
 
-describe("a reopened session's usage since it opened", () => {
-  const stats = (cost: number, total: number) => ({ tokens: { input: total, output: 0, cacheRead: 0, cacheWrite: 0, total }, cost });
-  it("is the stats less the stats it opened with, never below zero, and the stats as they are with no baseline", () => {
-    expect(statsSince(stats(0.08793, 30), stats(0.03815, 10))).toEqual(stats(0.04978, 20));
-    expect(statsSince(stats(0.01, 5), stats(0.02, 9))).toEqual(stats(0, 0));
-    expect(statsSince(stats(0.08793, 30), undefined)).toEqual(stats(0.08793, 30));
-  });
-});

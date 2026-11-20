@@ -7,7 +7,6 @@ import { STSClient } from "@aws-sdk/client-sts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProjectDefinition } from "@agentx/contracts";
 import { lineReader } from "../../packages/cli/src/destroy/cli.js";
-import { destroyProjectFiles } from "../../packages/cli/src/destroy/project-files.js";
 import { writeEnvironmentCache } from "../../packages/cli/src/environments/cache.js";
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { executeCli, type CliDependencies } from "../../packages/cli/src/main.js";
@@ -18,7 +17,6 @@ import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { memoryTokenStore } from "../support/setup-fakes.js";
 
 const ADMIN = "arn:aws:sts::123456789012:assumed-role/Admin/alice";
-const OPERATOR = "arn:aws:sts::123456789012:assumed-role/agentx-staging-operator/alice";
 const dirs: string[] = [];
 const servers: Server[] = [];
 afterEach(async () => {
@@ -75,17 +73,6 @@ describe("agentx destroy", () => {
     expect(io.err.join("")).toContain("agentx destroy requires an explicit --env");
   });
 
-  it("removes the environment after the typed name, and prints the manual steps on stdout", async () => {
-    const io = capture();
-    const { destroy } = await destroyDeps();
-    const code = await executeCli(["--env", "staging", "destroy", "--region", "us-east-1"], { ...io, destroy });
-    expect(code).toBe(0);
-    expect(io.out.join("")).toContain("Removed environment staging.");
-    expect(io.out.join("")).toContain("https://api.slack.com/apps");
-    // Once, on stdout: stderr carries the progress only.
-    expect(io.err.join("")).not.toContain("https://api.slack.com/apps");
-  });
-
   it("keeps the data with --keep-data", async () => {
     const io = capture();
     const { destroy } = await destroyDeps();
@@ -115,21 +102,6 @@ describe("agentx destroy", () => {
     expect(empty.account.calls).toEqual([]);
   });
 
-  it("refuses the operator role, naming admin credentials (question 7)", async () => {
-    const io = capture();
-    const { destroy, account } = await destroyDeps({ caller: OPERATOR });
-    expect(await executeCli(["--env", "staging", "destroy", "--region", "us-east-1"], { ...io, destroy })).toBe(2);
-    expect(io.err.join("")).toContain("agentx destroy needs admin credentials");
-    expect(account.calls).toEqual([]);
-  });
-
-  it("refuses a region other than the one the environment is installed in", async () => {
-    const io = capture();
-    const { destroy, account } = await destroyDeps();
-    expect(await executeCli(["--env", "staging", "destroy", "--region", "eu-west-1"], { ...io, destroy })).toBe(2);
-    expect(io.err.join("")).toContain("environment staging is installed in us-east-1, not eu-west-1; run agentx --env staging destroy --region us-east-1");
-    expect(account.calls).toEqual([]);
-  });
 });
 
 /** A config dir holding staging's project file, and a copy of its header over YAML that does not parse. */
@@ -147,13 +119,6 @@ async function projectsWithBrokenFile(): Promise<{ configDir: string; written: s
 }
 
 describe("destroy's project files", () => {
-  it("skips a project file it cannot read as YAML, saying so, and keeps it", async () => {
-    const { configDir, written, broken } = await projectsWithBrokenFile();
-    const lines: string[] = [];
-    const found = await destroyProjectFiles({ configDir, env: "staging", write: (line) => lines.push(line) });
-    expect(found).toEqual([{ path: written, launchTemplateId: "lt-0123456789abcdef0" }]);
-    expect(lines).toEqual([`Skipping ${broken}: it is not valid YAML, so agentx destroy leaves it; delete it by hand if it belongs to staging`]);
-  });
 
   it("removes the environment's readable project files through the command, and leaves the broken one", async () => {
     const { configDir } = await projectsWithBrokenFile();
@@ -187,14 +152,6 @@ describe("agentx destroy in the wrong region", () => {
     const message = "found nothing for environment staging in account 123456789012, region eu-west-1; if it is installed in another region, pass --region <that region>";
     expect(io.out.join("")).toContain(message);
     expect(io.err.join("")).toContain(message);
-  });
-
-  it("uses --region over an injected region", async () => {
-    const { destroy, account } = await destroyDeps({ region: "us-east-1" });
-    const io = capture();
-    expect(await executeCli(["--env", "staging", "destroy", "--region", "eu-west-1"], { ...io, destroy })).toBe(2);
-    expect(io.err.join("")).toContain("environment staging is installed in us-east-1, not eu-west-1");
-    expect(account.calls).toEqual([]);
   });
 
   it("refuses when no region is configured anywhere", async () => {

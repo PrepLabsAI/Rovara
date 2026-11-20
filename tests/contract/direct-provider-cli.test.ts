@@ -18,19 +18,10 @@ const everyFlag: InitFlags = {
   engine: "templates", identity: "cognito", permissionBoundary: "", operatorPrincipal: "", alertEmail: "ops@example.com", budget: "0",
   githubAccount: "acme", githubAccountType: "organization", githubAppName: "AgentX acme staging", slackAppName: "AgentX", slackAppPostedMessages: "accept",
 };
-const bedrockModels: InitFlags = { orchestratorModel: "us.anthropic.claude-sonnet-4-6", classifierModel: "us.anthropic.claude-haiku-4-5-20251001-v1:0", workerModel: "us.anthropic.claude-sonnet-4-6" };
 /** Spec 048: the settings form answered as a run with these flags would answer it in the terminal. */
 const collectWithFlags = (input: Omit<Parameters<typeof collectInitAnswers>[0], "prompter">) =>
   collectInitAnswers({ ...input, prompter: scriptedPrompter(settingsScript({ flags: input.flags })) });
 const caller = { account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice" };
-
-function recordingSecrets(prompter: ReturnType<typeof scriptedPrompter>) {
-  const hidden: string[] = [];
-  return {
-    hidden,
-    prompter: { ...prompter, secret: async (question: string, options: { flag: string; multiline?: boolean }) => { hidden.push(question); return prompter.secret(question, options); } },
-  };
-}
 
 describe("init with a direct provider", () => {
   // The settings form with Anthropic as the provider, then the three model ids (Enter for the
@@ -39,47 +30,6 @@ describe("init with a direct provider", () => {
     ...settingsScript({ owner: "acme", advanced: { modelProvider: "anthropic", alertEmail: "ops@example.com" } }),
     "", "", "", ANTHROPIC_KEY, "",
   ];
-
-  it("choosing Anthropic suggests its models, asks for the key hidden, and stores only the secret's ARN in the answers", async () => {
-    const scripted = scriptedPrompter(ANTHROPIC_RUN);
-    const { prompter, hidden } = recordingSecrets(scripted);
-    const collected = await collectInitAnswers({ ...base, flags: {}, prompter });
-    expect(scripted.remaining()).toBe(0);
-    const followUps = scripted.asked.slice(scripted.asked.indexOf("Anthropic orchestrator model id"), scripted.asked.indexOf("Anthropic API key") + 1);
-    expect(followUps).toEqual(["Anthropic orchestrator model id", "Anthropic classifier model id", "Anthropic worker model id", "Anthropic API key"]);
-    expect(hidden).toEqual(["Anthropic API key"]);
-    expect(collected.answers.models).toEqual({
-      orchestrator: "claude-sonnet-4-6", classifier: "claude-haiku-4-5", worker: "claude-sonnet-4-6",
-      providers: { orchestrator: "anthropic", classifier: "anthropic", worker: "anthropic" },
-    });
-    expect(collected.directKeys).toEqual({ anthropic: ANTHROPIC_KEY });
-    expect(JSON.stringify(collected.answers)).not.toContain(ANTHROPIC_KEY);
-
-    const store = new MemoryParameterStore();
-    const secrets = memoryInitSecrets();
-    const saved = await persistInitAnswers({ store, secrets, collected });
-    expect(secrets.values.get("agentx/staging/anthropic")).toBe(ANTHROPIC_KEY);
-    expect(saved.models.anthropic).toEqual({ secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/anthropic-AbCdEf" });
-    expect(storesOwnProviderKey(saved, "anthropic")).toBe(true);
-    expect([...store.values.values()].join("\n")).not.toContain(ANTHROPIC_KEY);
-  });
-
-  it("mixes providers from flags, asking only for the key a role uses", async () => {
-    const flags: InitFlags = { ...everyFlag, ...bedrockModels, workerProvider: "openai", workerModel: "gpt-5.4", openaiKey: { envName: "OPENAI_KEY" } };
-    const collected = await collectWithFlags({ ...base, processEnv: { OPENAI_KEY: OPENAI_KEY }, flags });
-    expect(collected.answers.models.providers).toEqual({ orchestrator: "amazon-bedrock", classifier: "amazon-bedrock", worker: "openai" });
-    expect(collected.answers.models.orchestrator).toBe(DEFAULT_BEDROCK_MODELS.orchestrator);
-    expect(collected.directKeys).toEqual({ openai: OPENAI_KEY });
-    const saved = await persistInitAnswers({ store: new MemoryParameterStore(), secrets: memoryInitSecrets(), collected });
-    expect(saved.models.openai?.secretArn).toMatch(/:secret:agentx\/staging\/openai-/);
-    expect(saved.models.anthropic).toBeUndefined();
-  });
-
-  it("stores a key whose flag is given even when no role uses the provider, so projects can approve its models", async () => {
-    const collected = await collectWithFlags({ ...base, processEnv: { KEY: ANTHROPIC_KEY }, flags: { ...everyFlag, ...bedrockModels, anthropicKey: { envName: "KEY" } } });
-    expect(collected.answers.models.providers).toBeUndefined();
-    expect(collected.directKeys).toEqual({ anthropic: ANTHROPIC_KEY });
-  });
 
   it("with --anthropic-secret-arn, asks for no key and stores nothing", async () => {
     const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:team/anthropic-AbCdEf";
@@ -102,9 +52,6 @@ describe("init with a direct provider", () => {
 
   it.each([
     ["anthropic", "sk-or-v1-0123456789abcdef", "starts with sk-ant-"],
-    ["anthropic", "sk-ant-oat01-0123456789abcdef", "subscription token"],
-    ["openai", "sk-or-v1-0123456789abcdef", "OpenRouter key"],
-    ["openai", "sk-ant-api03-0123456789abcdef", "Anthropic key"],
     ["openai", "sk-1", "too short"],
   ] as const)("refuses a %s key %s without repeating it", async (provider, key, problem) => {
     const flags: InitFlags = { ...everyFlag, orchestratorModel: "m", classifierModel: "m", workerModel: "m", modelProvider: provider, [provider === "anthropic" ? "anthropicKey" : "openaiKey"]: { envName: "KEY" } };

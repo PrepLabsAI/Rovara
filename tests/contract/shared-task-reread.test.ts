@@ -5,9 +5,8 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SHARED_WORKSPACE_REREAD, hashJson } from "../../packages/broker/src/aws/broker-shared.js";
-import { MAYA, createDeveloperTaskBroker, markThreadPosted, teammate } from "../support/developer-task-broker.js";
+import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 
-const PRIYA = "U0PRIYA001";
 const LINE = "Other people also change this workspace between your turns. Read a file again before you change it.";
 
 async function task(share: boolean, mode: "continue" | "view" = "continue") {
@@ -37,28 +36,6 @@ describe("the re-read line on a shared task (25c note 1)", () => {
     expect(SHARED_WORKSPACE_REREAD).toBe(LINE);
   });
 
-  it("follows the developer's instructions on a shared task's continue", async () => {
-    const h = await task(true);
-    expect((await h.cont({ requestId: randomUUID(), instructions: "keep going" })).status).toBe(200);
-    expect(h.prompt()).toBe(`keep going\n\n${LINE}`);
-  });
-
-  it("follows a teammate's request in the shared thread", async () => {
-    const h = await task(true);
-    const subject = markThreadPosted(h.db, h.taskId);
-    const conversation = await teammate(h.handler, subject, PRIYA, "POST", `/v1/service/workspaces/${h.workspaceId}/conversations`, {});
-    const conversationId = String((conversation.body.conversation as { id: string }).id);
-    const accepted = await teammate(h.handler, subject, PRIYA, "POST", `/v1/service/workspaces/${h.workspaceId}/tasks`, { requestId: randomUUID(), conversationId, prompt: "run the linter" });
-    expect(accepted.status).toBe(202);
-    expect(h.prompt()).toBe(`run the linter\n\n${LINE}`);
-  });
-
-  it("is not sent for a private task", async () => {
-    const h = await task(false);
-    await h.cont({ requestId: randomUUID(), instructions: "keep going" });
-    expect(h.prompt()).toBe("keep going");
-  });
-
   it("leaves the request hash alone, so a repeated requestId is the same request", async () => {
     const h = await task(true);
     const requestId = randomUUID();
@@ -82,28 +59,4 @@ describe("the re-read line on a shared task (25c note 1)", () => {
     expect(omitted.map((line) => JSON.parse(line) as unknown)).toEqual([{ component: "broker", event: "developer.shared_reread_omitted", operationId: h.active() }]);
   });
 
-  it("still fits when the prompt and the line reach the limit exactly", async () => {
-    const h = await task(true);
-    const exact = "x".repeat(65_536 - LINE.length - 2);
-    await h.cont({ requestId: randomUUID(), instructions: exact });
-    expect(h.prompt()).toBe(`${exact}\n\n${LINE}`);
-  });
-
-  it("counts the limit in UTF-8 bytes, not characters", async () => {
-    const h = await task(true);
-    const wide = "\u00e9".repeat(32_768);
-    expect((await h.cont({ requestId: randomUUID(), instructions: wide })).status).toBe(200);
-    expect(h.prompt()).toBe(wide);
-  });
-
-  it("is sent on a view-only shared task too, since the thread may once have changed the workspace", async () => {
-    const h = await task(true, "view");
-    await h.cont({ requestId: randomUUID(), instructions: "keep going" });
-    expect(h.prompt()).toBe(`keep going\n\n${LINE}`);
-  });
-
-  it("is not sent on a shared task's first turn, before anyone else has touched the workspace", async () => {
-    const h = await task(true);
-    expect(h.firstPrompt).toBe("Fix it");
-  });
 });

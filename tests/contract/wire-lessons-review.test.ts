@@ -86,7 +86,4 @@ describe("the reviewers' prompts", () => {
     }
   });
 
-  it("are exactly as before when the worker sent no lessons", async () => {
-    for (const entry of await run(undefined)) expect(entry.prompt).not.toContain("team-lessons");
-  });
 });

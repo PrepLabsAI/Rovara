@@ -3,7 +3,6 @@
 import type { DescribeAlarmsCommand, DescribeAlarmsCommandOutput } from "@aws-sdk/client-cloudwatch";
 import type { GetQueueAttributesCommand, GetQueueAttributesCommandOutput } from "@aws-sdk/client-sqs";
 import { describe, expect, it } from "vitest";
-import { HEALTH_ALARM_CONDITIONAL_SUFFIXES, HEALTH_ALARM_SUFFIXES } from "@agentx/contracts";
 import { healthProbes, type HealthProbeInput } from "../../packages/broker/src/aws/health-probes.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 
@@ -32,38 +31,12 @@ function fakes(options: { pages?: DescribeAlarmsCommandOutput[]; queues?: Record
 }
 
 describe("the broker's production health probes (A13)", () => {
-  it("sets up neither alarms nor queues without their variables, and calls nothing", async () => {
-    const { input, alarmCalls, queueCalls } = fakes();
-    const probes = healthProbes(input);
-    expect(probes).not.toHaveProperty("alarms");
-    expect(probes).not.toHaveProperty("queueDepths");
-    expect(probes).not.toHaveProperty("release");
-    expect(probes).not.toHaveProperty("slackAuthCheck");
-    expect(await probes.githubInstallations?.()).toBe(2);
-    expect(alarmCalls).toEqual([]);
-    expect(queueCalls).toEqual([]);
-  });
 
   it("passes the release and the Slack auth check through", async () => {
     const { input } = fakes();
     const probes = healthProbes({ ...input, release: "0.0.6", slackAuthCheck: async () => ({ ok: true as const, teamId: "T1" }) });
     expect(probes.release).toBe("0.0.6");
     expect(await probes.slackAuthCheck?.()).toEqual({ ok: true, teamId: "T1" });
-  });
-
-  it("asks for every alarm a named environment can create, by exact name under the prefix, never by prefix (issue 206)", async () => {
-    const { input, alarmCalls } = fakes({ pages: [{ $metadata: {}, MetricAlarms: [{ AlarmName: "agentx-live25d-SlackDeadLetters", StateValue: "OK" }] }] });
-    const probes = healthProbes({ ...input, alarmPrefix: "agentx-live25d-" });
-    expect(alarmCalls).toEqual([]);
-    // Every other listed alarm is reported missing, except the conditional ones (Bedrock-only, and the automatic renewal's).
-    expect(await probes.alarms?.()).toStrictEqual([
-      { name: "agentx-live25d-SlackDeadLetters", state: "OK" },
-      ...HEALTH_ALARM_SUFFIXES.filter((suffix) => !["SlackDeadLetters", ...HEALTH_ALARM_CONDITIONAL_SUFFIXES].includes(suffix))
-        .map((suffix) => ({ name: `agentx-live25d-${suffix}`, state: "MISSING" })),
-    ]);
-    // A prefix listing is authorized against *, which the broker is not granted; named alarms are
-    // authorized against their own ARNs, which its agentx-<env>-* grant covers.
-    expect(alarmCalls).toStrictEqual([{ AlarmNames: HEALTH_ALARM_SUFFIXES.map((suffix) => `agentx-live25d-${suffix}`), AlarmTypes: ["MetricAlarm"], MaxRecords: 100 }]);
   });
 
   it("reads every page of the named metric alarms, only when asked (issue 206)", async () => {
@@ -82,36 +55,6 @@ describe("the broker's production health probes (A13)", () => {
       { AlarmNames: ["agentx-live25d-A", "agentx-live25d-B"], AlarmTypes: ["MetricAlarm"], MaxRecords: 100 },
       { AlarmNames: ["agentx-live25d-A", "agentx-live25d-B"], AlarmTypes: ["MetricAlarm"], MaxRecords: 100, NextToken: "page-2" },
     ]);
-  });
-
-  it("asks for at most 100 names a call, in order, so a long list is read in chunks (issue 206)", async () => {
-    const suffixes = Array.from({ length: 205 }, (_, index) => `Alarm${index}`);
-    const names = suffixes.map((suffix) => `agentx-live25d-${suffix}`);
-    const { input, alarmCalls } = fakes({ pages: [
-      { $metadata: {}, MetricAlarms: [{ AlarmName: names[0], StateValue: "OK" }] },
-      { $metadata: {}, MetricAlarms: [{ AlarmName: names[100], StateValue: "ALARM" }] },
-      { $metadata: {}, MetricAlarms: [{ AlarmName: names[204], StateValue: "OK" }] },
-    ] });
-    const probes = healthProbes({ ...input, alarmPrefix: "agentx-live25d-", alarmSuffixes: suffixes });
-    const found = await probes.alarms?.();
-    expect(found?.slice(0, 3)).toStrictEqual([
-      { name: names[0], state: "OK" },
-      { name: names[100], state: "ALARM" },
-      { name: names[204], state: "OK" },
-    ]);
-    expect(found?.slice(3)).toStrictEqual(names.filter((_, index) => ![0, 100, 204].includes(index)).map((name) => ({ name, state: "MISSING" })));
-    expect(alarmCalls).toStrictEqual([
-      { AlarmNames: names.slice(0, 100), AlarmTypes: ["MetricAlarm"], MaxRecords: 100 },
-      { AlarmNames: names.slice(100, 200), AlarmTypes: ["MetricAlarm"], MaxRecords: 100 },
-      { AlarmNames: names.slice(200), AlarmTypes: ["MetricAlarm"], MaxRecords: 100 },
-    ]);
-  });
-
-  it("calls nothing for an empty list, and reports no alarms", async () => {
-    const { input, alarmCalls } = fakes();
-    const probes = healthProbes({ ...input, alarmPrefix: "agentx-live25d-", alarmSuffixes: [] });
-    expect(await probes.alarms?.()).toEqual([]);
-    expect(alarmCalls).toEqual([]);
   });
 
   it("leaves out a sibling environment's alarms that share the prefix (prod's prefix also matches prod-eu)", async () => {

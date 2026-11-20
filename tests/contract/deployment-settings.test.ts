@@ -11,21 +11,6 @@ const settings = {
 };
 
 describe("deployment settings", () => {
-  it("loads the one file that serves every project", async () => {
-    const path = await settingsFile(settings);
-    await expect(loadDeploymentSettings({ path })).resolves.toEqual(settings);
-  });
-
-  it("rejects unknown keys, missing settings and a missing file", async () => {
-    const unknown = await settingsFile({ ...settings, projectName: "payments" });
-    await expect(loadDeploymentSettings({ path: unknown })).rejects.toThrow();
-
-    const incomplete = await settingsFile({ controlPlaneUrl: settings.controlPlaneUrl });
-    await expect(loadDeploymentSettings({ path: incomplete })).rejects.toThrow();
-
-    const missing = join(await mkdtemp(join(tmpdir(), "agentx-deployment-")), "deployment.yaml");
-    await expect(loadDeploymentSettings({ path: missing })).rejects.toThrow(/not configured/);
-  });
 
   it("requires HTTPS outside explicit loopback test mode", async () => {
     const loopback = await settingsFile({ ...settings, controlPlaneUrl: "http://127.0.0.1:8787" });

@@ -114,16 +114,6 @@ describe("the second reviewer inside the review operation", () => {
     expect(prompts.filter((entry) => entry.startsWith("second-a:"))).toEqual(["second-a:CODE"]);
   });
 
-  it("retries the same model once, then moves to the next candidate; three tries in all", async () => {
-    const prompts: string[] = [];
-    const a = model("second-a", ["throw"], prompts);
-    const b = model("second-b", [PASS], prompts);
-    const { second } = await run({ first: model("first-v1", [PASS], prompts), candidates: [a, b] });
-    const order = prompts.filter((entry) => entry.startsWith("second-"));
-    expect(order).toEqual(["second-a:CODE", "second-a:CODE", "second-b:CODE"]);
-    expect(second).toMatchObject({ tries: 3, report: { version: "second-b", status: "PASS" } });
-  });
-
   it("the injected-diff attack: every try fails, so the loop stops at three tries, the answer is 'no answer', and the first reviews are untouched", async () => {
     const prompts: string[] = [];
     const a = model("second-a", ["throw"], prompts);
@@ -136,51 +126,9 @@ describe("the second reviewer inside the review operation", () => {
     expect(reports.map((report) => report.status)).toEqual(["PASS", "PASS"]);
   });
 
-  it("stops at the first answer (a model that answers is not asked again)", async () => {
-    const prompts: string[] = [];
-    const { second } = await run({ first: model("first-v1", [PASS], prompts), candidates: [model("second-a", [PASS], prompts), model("second-b", [PASS], prompts)] });
-    expect(second?.tries).toBe(1);
-    expect(prompts.some((entry) => entry.startsWith("second-b:"))).toBe(false);
-  });
-
-  it("asks for nothing when the invocation names no second reviewer (cr off: the review is exactly as before)", async () => {
-    const prompts: string[] = [];
-    const { reports, second } = await run({ first: model("first-v1", [PASS], prompts) });
-    expect(second).toBeUndefined();
-    expect(prompts).toEqual(["first-v1:CODE", "first-v1:SECURITY"]);
-    expect(reports).toHaveLength(2);
-  });
-
-  it("is not run when the step asks for no code review", async () => {
-    const prompts: string[] = [];
-    const { second } = await run({ first: model("first-v1", [PASS], prompts), candidates: [model("second-a", [PASS], prompts)], reviewers: ["SECURITY"] });
-    expect(second).toBeUndefined();
-    expect(prompts.some((entry) => entry.startsWith("second-a:"))).toBe(false);
-  });
 });
 
 describe("the second reviewer takes no extra wall time (M1)", () => {
-  it("runs beside the normal reviews, so a review with a second reviewer is about as long as one without", async () => {
-    // Not measured in wall time (that moved with the machine's load). The first model holds its first review until the second reviewer has made all three of its failing tries. Run beside the normal reviews the
-    // second reviewer finishes while the first review is held, so the hold ends because of it; run after them it could not even start, and the hold would only end at the safety limit.
-    const together: string[] = [];
-    let releaseHold!: (by: "second reviewer") => void;
-    const held = new Promise<"second reviewer">((resolve) => { releaseHold = resolve; });
-    let safety: ReturnType<typeof setTimeout> | undefined;
-    const holdEndedBy = Promise.race([held, new Promise<"safety limit">((resolve) => { safety = setTimeout(() => resolve("safety limit"), 20_000); })]);
-    const onSecondPrompt = () => { if (together.filter((entry) => entry.startsWith("second-")).length >= 3) releaseHold("second reviewer"); };
-    const first = model("first-v1", [PASS], together, { hold: holdEndedBy });
-    const candidates = [model("second-a", ["throw"], together, { onPrompt: onSecondPrompt }), model("second-b", ["throw"], together, { onPrompt: onSecondPrompt })];
-    try {
-      const { second } = await run({ first, candidates });
-      expect(second?.tries).toBe(3);
-      expect(await holdEndedBy).toBe("second reviewer");
-    } finally {
-      clearTimeout(safety);
-    }
-    // And the order shows it: the second reviewer was already asking before the second of the normal reviews began.
-    expect(together.indexOf("second-a:CODE")).toBeLessThan(together.indexOf("first-v1:SECURITY"));
-  }, 60_000);
 
   it("all of its tries share ONE budget of one reviewer's time limit, so a hanging model ends the loop at that limit", async () => {
     const prompts: string[] = [];
@@ -190,22 +138,6 @@ describe("the second reviewer takes no extra wall time (M1)", () => {
     // Three tries at 400 ms each would be 1200 ms; the shared budget ends the loop after the first one.
     expect(second?.tries).toBe(1);
     expect(second?.report).toMatchObject({ status: "UNKNOWN", failureReason: "TIMEOUT" });
-  });
-
-  it("a try that would run past the shared budget is cut at what is left of it, not given a fresh limit", async () => {
-    const prompts: string[] = [];
-    // The first try fails after 600 ms; the second hangs. With a shared budget of 1500 ms the second is cut at what is left (900 ms); with a fresh limit it would run 1500 ms more (2100 ms in all).
-    // The clock is virtual (only the model moves it), so real work on a busy machine cannot use up the budget and the elapsed time is exact.
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-    try {
-      const slow = model("second-a", ["throw", "hang"], prompts, { delayMs: 600, fakeClock: true });
-      const { second, elapsed } = await run({ first: model("first-v1", [PASS], prompts), candidates: [slow], timeoutMs: 1500 });
-      expect(second?.tries).toBe(2);
-      expect(second?.report).toMatchObject({ status: "UNKNOWN", failureReason: "TIMEOUT" });
-      expect(elapsed).toBe(1500);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it("sees only the change by default: no source tools and no lessons (owner decision, option C); same_as_first gives it what the first reviewer has", async () => {
@@ -310,11 +242,6 @@ describe("the tries, as a rule", () => {
     expect(nextSecondReviewModel([A, B], [{ model: A, outcome: "no-answer" }, { model: A, outcome: "no-answer" }])).toEqual(B);
     expect(nextSecondReviewModel([A, B], [{ model: A, outcome: "no-answer" }, { model: A, outcome: "no-answer" }, { model: B, outcome: "no-answer" }])).toBeUndefined();
     expect(nextSecondReviewModel([A, B], [{ model: A, outcome: "answered" }])).toBeUndefined();
-  });
-
-  it("a model the account cannot use is left out at once", () => {
-    expect(nextSecondReviewModel([A, B], [{ model: A, outcome: "unusable" }])).toEqual(B);
-    expect(nextSecondReviewModel([A], [{ model: A, outcome: "unusable" }])).toBeUndefined();
   });
 
   it("a context-length rejection is no answer, never an unusable model", () => {

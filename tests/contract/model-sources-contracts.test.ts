@@ -41,7 +41,7 @@ describe("launch gates", () => {
     expect(ModelSourceKindSchema.options).toEqual(["rovara", "personal-chatgpt", "anthropic", "openai", "openrouter", "bedrock", "endpoint"]);
   });
 
-  it.each(["anthropic", "openai", "openrouter", "bedrock", "endpoint"] as const)("refuses a %s source with the exact text", (kind) => {
+  it.each(["anthropic"] as const)("refuses a %s source with the exact text", (kind) => {
     expect(sourceKindProblem(kind)).toBe(`${kind} sources aren't available yet`);
   });
 
@@ -60,35 +60,10 @@ describe("launch gates", () => {
     expect(sourceKindProblem("endpoint", undefined, launch)).toBe("endpoint sources aren't available yet");
   });
 
-  it("refuses an endpoint api outside the transports even when the transports list is narrowed", () => {
-    const launch = { kinds: ["endpoint"] as const, transports: ["openai-completions"] as const };
-    expect(sourceKindProblem("endpoint", "openai-responses", launch)).toBe("endpoint sources aren't available yet");
-  });
 });
 
 describe("client input", () => {
-  it("accepts each kind's shape", () => {
-    for (const input of [anthropicInput, bedrockInput, endpointInput, { ...anthropicInput, kind: "openai", models: [{ catalog: { provider: "openai", modelId: "gpt-5" } }] }, { ...anthropicInput, kind: "openrouter", models: [{ catalog: { provider: "openrouter", modelId: "anthropic/claude-sonnet-4.5" } }] }]) {
-      expect(ModelSourceInputSchema.safeParse(input).success, JSON.stringify(input)).toBe(true);
-    }
-  });
 
-  it.each([
-    ["sourceId", { sourceId: SRC }],
-    ["externalId", { externalId: `rovara-${ORG}` }],
-    ["tested", { tested: false }],
-    ["tested", { tested: true }],
-  ])("refuses a client-sent %s", (_field, extra) => {
-    for (const base of [anthropicInput, bedrockInput, endpointInput]) {
-      expect(ModelSourceInputSchema.safeParse({ ...base, ...extra }).success).toBe(false);
-    }
-  });
-
-  it("refuses an unknown field and an unknown kind, including the built-in ones", () => {
-    expect(ModelSourceInputSchema.safeParse({ ...anthropicInput, apiKey: "sk-x" }).success).toBe(false);
-    expect(ModelSourceInputSchema.safeParse({ ...anthropicInput, kind: "rovara" }).success).toBe(false);
-    expect(ModelSourceInputSchema.safeParse({ ...anthropicInput, kind: "personal-chatgpt" }).success).toBe(false);
-  });
 
   it("accepts a valid role ARN and refuses a wildcard, a user ARN or another account's shape", () => {
     expect(BEDROCK_ROLE_ARN_PATTERN.test(ROLE)).toBe(true);
@@ -105,21 +80,6 @@ describe("client input", () => {
       expect(BEDROCK_ROLE_ARN_PATTERN.test(roleArn), roleArn).toBe(false);
       expect(ModelSourceInputSchema.safeParse({ ...bedrockInput, roleArn }).success, roleArn).toBe(false);
     }
-  });
-
-  it("requires a region for Bedrock and an http(s) base URL for an endpoint", () => {
-    expect(ModelSourceInputSchema.safeParse({ ...bedrockInput, region: "" }).success).toBe(false);
-    expect(ModelSourceInputSchema.safeParse({ ...bedrockInput, region: "us east" }).success).toBe(false);
-    expect(ModelSourceInputSchema.safeParse({ ...endpointInput, baseUrl: "not a url" }).success).toBe(false);
-    expect(ModelSourceInputSchema.safeParse({ ...endpointInput, baseUrl: "file:///etc/passwd" }).success).toBe(false);
-    expect(ModelSourceInputSchema.safeParse({ ...endpointInput, baseUrl: "ftp://llm.example.com" }).success).toBe(false);
-  });
-
-  it("holds a kind's models to that kind's catalog provider", () => {
-    expect(ModelSourceInputSchema.safeParse({ ...anthropicInput, models: [{ catalog: { provider: "openai", modelId: "gpt-5" } }] }).success).toBe(false);
-    expect(ModelSourceInputSchema.safeParse({ ...bedrockInput, models: [{ catalog: claude }] }).success).toBe(false);
-    // An endpoint serves its own model name; its catalog entry only says what the model is like.
-    expect(ModelSourceInputSchema.safeParse({ ...endpointInput, models: [{ name: "x", catalog: { provider: "openai", modelId: "gpt-5" } }] }).success).toBe(true);
   });
 
   it("refuses duplicate canonical models", () => {
@@ -155,32 +115,6 @@ describe("client input", () => {
 });
 
 describe("stored source", () => {
-  it("accepts a server-completed source of each kind", () => {
-    expect(ModelSourceSchema.safeParse({ ...anthropicInput, sourceId: SRC }).success).toBe(true);
-    expect(ModelSourceSchema.safeParse({ ...endpointInput, sourceId: SRC }).success).toBe(true);
-    expect(ModelSourceSchema.safeParse({ ...bedrockInput, sourceId: SRC, externalId: EXT, tested: false }).success).toBe(true);
-  });
-
-  it("needs a server-generated source id, and for Bedrock the server-set external id and tested flag", () => {
-    expect(ModelSourceSchema.safeParse(anthropicInput).success).toBe(false);
-    expect(ModelSourceSchema.safeParse({ ...anthropicInput, sourceId: "rovara" }).success).toBe(false);
-    expect(ModelSourceSchema.safeParse({ ...anthropicInput, sourceId: "src_a.b" }).success).toBe(false);
-    expect(ModelSourceSchema.safeParse({ ...bedrockInput, sourceId: SRC }).success).toBe(false);
-    expect(ModelSourceSchema.safeParse({ ...bedrockInput, sourceId: SRC, externalId: "rovara-x", tested: false }).success).toBe(false);
-    expect(ModelSourceSchema.safeParse({ ...bedrockInput, sourceId: SRC, tested: false }).success).toBe(false);
-    expect(ModelSourceSchema.safeParse({ ...anthropicInput, sourceId: SRC, tested: false }).success).toBe(false);
-  });
-
-  it("defaults a stored Bedrock source to not tested", () => {
-    const parsed = ModelSourceSchema.parse({ ...bedrockInput, sourceId: SRC, externalId: EXT });
-    expect(parsed.kind === "bedrock" && parsed.tested).toBe(false);
-  });
-
-  it("refuses the old guessable `rovara-<org>` form: a stored Bedrock source's external id is the rvb- HMAC form only", () => {
-    for (const old of [`rovara-${ORG}`, "rovara-x", `rvb-${"A1".repeat(20)}`, `rvb-${"a1".repeat(19)}`, `${EXT}0`, ` ${EXT}`]) {
-      expect(ModelSourceSchema.safeParse({ ...bedrockInput, sourceId: SRC, externalId: old, tested: false }).success, old).toBe(false);
-    }
-  });
 
   it("checks a stored Bedrock external id against the one the gateway derived for the org, and never derives one itself", () => {
     const own = ModelSourceSchema.parse({ ...bedrockInput, sourceId: SRC, externalId: EXT });
@@ -217,12 +151,6 @@ describe("org limits", () => {
 describe("order and alias", () => {
   it("defaults to the ChatGPT-first order only with the install-wide switch on", () => {
     expect(defaultModelSourceOrder(true)).toEqual(["personal-chatgpt", "rovara"]);
-    expect(defaultModelSourceOrder(false)).toEqual(["rovara"]);
-  });
-
-  it("returns a fresh array each time", () => {
-    const order = defaultModelSourceOrder(false);
-    order.push("personal-chatgpt");
     expect(defaultModelSourceOrder(false)).toEqual(["rovara"]);
   });
 

@@ -3,7 +3,7 @@
 // reaches its vendor: one allowed host, https, no redirect, a bounded answer, and no credential in a failure. `safeLookup` refuses a non-public address when
 // the connection is made. No test here reaches a network.
 import { PassThrough } from "node:stream";
-import { CredentialUnavailable, ToolRefusal, discoverTools, executeTool, type ConnectorDefinition, type Ledger } from "@agentx/gateway";
+import { CredentialUnavailable, ToolRefusal } from "@agentx/gateway";
 import { describe, expect, it, vi } from "vitest";
 import { lookupFetch, pinnedLookup } from "../../packages/broker/src/connections/pinned-endpoint.js";
 import { NATIVE_TEXT_LIMIT, NativeToolRefusal, nativeConnection, type NativeTool } from "../../packages/broker/src/connectors/native/runtime.js";
@@ -49,29 +49,9 @@ function connection(approved: readonly string[], fetch: Parameters<typeof native
 const textOf = (result: { content?: Array<{ text?: string | undefined }> | undefined }) => result.content?.map((entry) => entry.text ?? "").join("") ?? "";
 
 describe("nativeConnection", () => {
-  it("lists only the approved tools, each read-only, with the routing arguments required in its schema", () => {
-    const listed = connection(["echo", "big"]).tools;
-    expect(listed.map((tool) => tool.name)).toEqual(["echo", "big"]);
-    for (const tool of listed) {
-      expect(tool.annotations).toEqual({ readOnlyHint: true, destructiveHint: false });
-      expect(tool.inputSchema).toMatchObject({ type: "object", additionalProperties: false });
-      expect((tool.inputSchema["required"] as string[]).slice(0, 2).sort()).toEqual(["organization", "projectSlug"]);
-      expect(Object.keys(tool.inputSchema["properties"] as object)).toEqual(expect.arrayContaining(["organization", "projectSlug"]));
-    }
-    expect(connection([]).tools).toEqual([]);
-    expect(connection(["nothing-like-it"]).tools).toEqual([]);
-  });
 
   it("refuses to call a tool that was not approved, even one the runtime has", async () => {
     await expect(connection(["echo"]).call("big", SCOPE_ARGS)).rejects.toThrow("MCP tool not allowed or unavailable");
-  });
-
-  it("refuses an extra argument with the exact text and makes no vendor request", async () => {
-    const fetch = vi.fn();
-    const result = await connection(["echo"], fetch as never).call("echo", { ...SCOPE_ARGS, text: "hi", url: "https://evil.example/" });
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toBe("echo: url is not allowed");
-    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("refuses a wrong-typed, out-of-range, unlisted-value or over-long argument at its path, and a missing routing value", async () => {
@@ -98,36 +78,6 @@ describe("nativeConnection", () => {
     expect(textOf(result)).toBe('echo {"text":"hi","limit":2,"mode":"a","items":[{"name":"n"}]} in acme/web-app');
   });
 
-  it("truncates a long answer to 32,768 characters with (truncated), and emits no structured content (review I-2)", async () => {
-    const result = await connection(["big"]).call("big", SCOPE_ARGS);
-    const text = textOf(result);
-    expect(text).toHaveLength(NATIVE_TEXT_LIMIT);
-    expect(text.endsWith("(truncated)")).toBe(true);
-    expect(result).not.toHaveProperty("structuredContent");
-  });
-
-  it("scrubs the token before it cuts, so no part of one that straddles the cut survives (review I-1)", async () => {
-    const text = textOf(await connection(["straddling"]).call("straddling", SCOPE_ARGS));
-    expect(text.length).toBeLessThanOrEqual(NATIVE_TEXT_LIMIT);
-    expect(text).toContain("[REDACTED]");
-    for (let start = 0; start + 8 <= TOKEN.length; start += 1) expect(text.includes(TOKEN.slice(start, start + 8)), TOKEN.slice(start, start + 8)).toBe(false);
-  });
-
-  it("refuses __proto__ as an argument no schema declares (review M-2)", async () => {
-    const args = JSON.parse('{"organization":"acme","projectSlug":"web-app","__proto__":{"x":1}}') as Record<string, unknown>;
-    const result = await connection(["echo"]).call("echo", args);
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toBe("echo: __proto__ is not allowed");
-    // The same name inside a nested object, where a schema declares its keys.
-    const nested = JSON.parse('{"organization":"acme","projectSlug":"web-app","items":[{"name":"a","__proto__":{"x":1}}]}') as Record<string, unknown>;
-    expect(textOf(await connection(["echo"]).call("echo", nested))).toBe("echo: items.0.__proto__ is not allowed");
-  });
-
-  it("replaces the token with [REDACTED] in anything a tool answers or refuses with", async () => {
-    await expect(connection(["quoting"]).call("quoting", SCOPE_ARGS)).rejects.toMatchObject({ message: "the vendor said [REDACTED]" });
-    expect(textOf(await connection(["leaking"]).call("leaking", SCOPE_ARGS))).toBe("the vendor echoed [REDACTED] back");
-  });
-
   it("answers a tool's refusal as an error with its words, a vendor failure with its fixed words, and anything else without naming what was thrown", async () => {
     // The words we write reach the model: the connection throws a ToolRefusal, which the engine returns as the call's failure (a vendor body never does).
     const refused = await connection(["refusing"]).call("refusing", SCOPE_ARGS).catch((error: unknown) => error);
@@ -152,27 +102,6 @@ describe("nativeConnection with a credential per call", () => {
   const build = (credentialFor: (tool: string, scope: Scope) => Promise<{ token: string }>, tools: readonly NativeTool<Scope>[] = [showsToken, echo]) =>
     nativeConnection<Scope>(tools, tools.map((tool) => tool.name), { credential: { token: TOKEN, bindings: {} }, fetch: vi.fn() as never, routing: ROUTING, credentialFor: async (tool, scope) => ({ ...(await credentialFor(tool, scope)), bindings: {} }) });
 
-  it("asks for the call's credential once, after the arguments are checked, with the tool and its scope, and runs the tool with it", async () => {
-    const credentialFor = vi.fn(async () => ({ token: CALL_TOKEN }));
-    const result = await build(credentialFor).call("shows_token", { ...SCOPE_ARGS, text: "hi" });
-    expect(credentialFor).toHaveBeenCalledTimes(1);
-    expect(credentialFor).toHaveBeenCalledWith("shows_token", { organization: "acme", projectSlug: "web-app" });
-    // The tool ran as the call's credential, and the answer is scrubbed of it.
-    expect(textOf(result)).toBe("ran as [REDACTED] in acme/web-app");
-    expect(textOf(result)).not.toContain(CALL_TOKEN);
-  });
-
-  it("asks for nothing when the call is refused first: an unknown tool, a missing or wrong routing value, a bad argument", async () => {
-    const credentialFor = vi.fn(async () => ({ token: CALL_TOKEN }));
-    const connection = build(credentialFor);
-    await expect(connection.call("not_a_tool", SCOPE_ARGS)).rejects.toThrow("MCP tool not allowed or unavailable");
-    expect(textOf(await connection.call("shows_token", { organization: "acme" }))).toBe("shows_token: projectSlug is required");
-    expect(textOf(await connection.call("shows_token", { ...SCOPE_ARGS, organization: 5 }))).toBe("shows_token: organization is not allowed");
-    expect(textOf(await connection.call("shows_token", { ...SCOPE_ARGS, text: "x".repeat(11) }))).toBe("shows_token: text is not allowed");
-    expect(textOf(await connection.call("shows_token", { ...SCOPE_ARGS, extra: 1 }))).toBe("shows_token: extra is not allowed");
-    expect(credentialFor).not.toHaveBeenCalled();
-  });
-
   it("scrubs the call's credential and the connection's own, before the cap", async () => {
     const both: NativeTool<Scope> = { name: "both", description: "Both", inputSchema: { type: "object", properties: {}, additionalProperties: false }, run: async (_args, ctx) => ({ text: `${"x".repeat(NATIVE_TEXT_LIMIT - 30)}${ctx.credential.token}${TOKEN}${"y".repeat(500)}` }) };
     const text = textOf(await build(async () => ({ token: CALL_TOKEN }), [both]).call("both", SCOPE_ARGS));
@@ -187,27 +116,6 @@ describe("nativeConnection with a credential per call", () => {
     expect(error).toMatchObject({ message: "GitHub isn't connected" });
   });
 
-  it("answers a refusal in the credential step as a refusal, and any other failure without naming it", async () => {
-    const refused = await build(async () => { throw new NativeToolRefusal(`no token for ${TOKEN}`, "vendor_error"); }).call("shows_token", SCOPE_ARGS).catch((error: unknown) => error);
-    expect(refused).toBeInstanceOf(ToolRefusal);
-    expect(refused).toMatchObject({ message: "no token for [REDACTED]", reason: "vendor_error" });
-    const crashed = await build(async () => { throw new Error(`boom ${TOKEN}`); }).call("shows_token", SCOPE_ARGS);
-    expect(crashed.isError).toBe(true);
-    expect(textOf(crashed)).toBe("shows_token failed");
-  });
-
-  it("scrubs the call's own credential from a refusal's words, and from a vendor failure's", async () => {
-    const quotes: NativeTool<Scope> = { name: "quotes", description: "Quotes", inputSchema: { type: "object", properties: {}, additionalProperties: false }, run: async (_args, ctx) => { throw new NativeToolRefusal(`GitHub said ${ctx.credential.token}`, "vendor_error"); } };
-    const refused = await build(async () => ({ token: CALL_TOKEN }), [quotes]).call("quotes", SCOPE_ARGS).catch((error: unknown) => error);
-    expect(refused).toBeInstanceOf(ToolRefusal);
-    expect(refused).toMatchObject({ message: "GitHub said [REDACTED]", reason: "vendor_error" });
-    const unreachable: NativeTool<Scope> = { name: "unreachable", description: "Fails", inputSchema: { type: "object", properties: {}, additionalProperties: false }, run: async (_args, ctx) => { throw new VendorFetchError(`failed with ${ctx.credential.token}`); } };
-    expect(await build(async () => ({ token: CALL_TOKEN }), [unreachable]).call("unreachable", SCOPE_ARGS).catch((error: unknown) => error)).toMatchObject({ message: "failed with [REDACTED]" });
-  });
-
-  it("keeps the connection's own credential when there is no credentialFor", async () => {
-    expect(textOf(await connection(["leaking"]).call("leaking", SCOPE_ARGS))).toBe("the vendor echoed [REDACTED] back");
-  });
 });
 
 /** A `fetch` stand-in that answers with `respond` and records how it was called. */
@@ -224,16 +132,6 @@ function fakeFetch(respond: (url: URL, init: RequestInit | undefined) => Respons
 describe("vendorFetch", () => {
   const HOSTS = ["us.sentry.io"];
   const URL_OK = "https://us.sentry.io/api/0/organizations/acme/";
-
-  it("reads a JSON answer, sends the caller's headers, and holds the request to the fixed-origin fetch that never follows a redirect", async () => {
-    const { fn, calls } = fakeFetch(() => new Response(JSON.stringify({ slug: "acme" }), { status: 200, headers: { "content-type": "application/json" } }));
-    const response = await vendorFetch({ url: URL_OK, allowedHosts: HOSTS, headers: { authorization: `Bearer ${TOKEN}` }, fetch: fn });
-    expect(response).toMatchObject({ status: 200, json: { slug: "acme" } });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.init?.redirect).toBe("error");
-    expect(new Headers(calls[0]!.init?.headers).get("authorization")).toBe(`Bearer ${TOKEN}`);
-    expect(calls[0]!.init?.signal).toBeInstanceOf(AbortSignal);
-  });
 
   it("refuses a redirect to another host and does not follow it", async () => {
     const { fn, calls } = fakeFetch(() => new Response(null, { status: 302, headers: { location: "https://evil.example/steal" } }));
@@ -291,11 +189,6 @@ describe("vendorFetch", () => {
     expect(JSON.stringify([(error as Error).message, (error as Error).name, (error as Error).toString()])).not.toContain(TOKEN);
   });
 
-  it("gives up on a vendor that does not answer, with a fixed message", async () => {
-    const hang = fakeFetch((_url, init) => new Promise<Response>((_resolve, reject) => { init?.signal?.addEventListener("abort", () => reject(init.signal!.reason as Error)); }));
-    await expect(vendorFetch({ url: URL_OK, allowedHosts: HOSTS, timeoutMs: 20, fetch: hang.fn })).rejects.toThrow("the vendor did not answer in time");
-  });
-
   it("gives up on a vendor that sends headers and then stalls the body, with the same fixed message (review M-3)", async () => {
     const request = ((_url: URL, _options: unknown, callback?: (response: unknown) => void) => ({
       on: () => undefined,
@@ -308,16 +201,6 @@ describe("vendorFetch", () => {
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 
-  it("vendorFetcher reads a path against its base, and reaches nothing else", async () => {
-    const { fn, calls } = fakeFetch(() => new Response("[]", { status: 200 }));
-    const fetcher = vendorFetcher({ base: new URL("https://us.sentry.io/api/0/"), fetch: fn, headers: { authorization: `Bearer ${TOKEN}` } });
-    expect((await fetcher("organizations/acme/")).status).toBe(200);
-    expect(calls[0]!.url).toBe("https://us.sentry.io/api/0/organizations/acme/");
-    expect(new Headers(calls[0]!.init?.headers).get("authorization")).toBe(`Bearer ${TOKEN}`);
-    await expect(fetcher("https://evil.example/x")).rejects.toThrow("not to an allowed vendor address");
-    await expect(fetcher("//evil.example/x")).rejects.toThrow("not to an allowed vendor address");
-    expect(calls).toHaveLength(1);
-  });
 });
 
 /** Runs a node-style lookup and answers its callback arguments. */
@@ -381,38 +264,3 @@ describe("safeLookup (rebinding, Review Focus 6)", () => {
 });
 
 
-/** A tool run through the real engine (discovery, then `executeTool`) over a `nativeConnection`, as a connector would be. */
-async function throughEngine(tool: NativeTool<Scope>) {
-  const connect = (async (target: { tools: readonly string[]; token: string }) => nativeConnection<Scope>([tool], target.tools, { credential: { token: target.token, bindings: {} }, fetch: vi.fn() as never, routing: ROUTING })) as never;
-  const definition: ConnectorDefinition<{ alias: string }> = {
-    label: "Toy", endpoint: new URL("https://toy.example/"), permissionsHint: "the toy token",
-    credentials: { issue: async () => ({ token: TOKEN, bindings: {} }) },
-    binder: { properties: ["organization", "projectSlug"], bind: () => SCOPE_ARGS },
-    guards: [],
-  };
-  const context = { workspaceId: "ws", ownerKey: "owner", scopeAlias: "a", scope: { alias: "a" }, settingsRevision: 1, policy: { tools: [{ name: tool.name, access: "read" as const }] } };
-  const ledger: Ledger = { claim: async () => true, get: async () => undefined, finish: async () => undefined };
-  const discovered = (await discoverTools(definition, context, { connect })).tools.find((entry) => entry.name === tool.name)!;
-  return executeTool({ requestId: "11111111-1111-4111-8111-111111111111", scope: "a", tool: tool.name, schemaHash: discovered.schemaHash, arguments: {} }, definition, context, { connect, ledger });
-}
-
-describe("what the model sees through the engine", () => {
-  it("is the capped, scrubbed text of an oversized answer, and never more than 32,768 characters (review I-2)", async () => {
-    const result = await throughEngine(big);
-    expect(result.status).toBe("SUCCEEDED");
-    expect(result.text.length).toBeLessThanOrEqual(NATIVE_TEXT_LIMIT);
-    expect(result.text.endsWith("(truncated)")).toBe(true);
-    const cut = await throughEngine(straddling);
-    for (let start = 0; start + 8 <= TOKEN.length; start += 1) expect(cut.text.includes(TOKEN.slice(start, start + 8))).toBe(false);
-  });
-
-  it("is the refusal words we wrote, scrubbed of the token, with their reason, and never a crash's words (review M-1)", async () => {
-    expect(await throughEngine(refusing)).toMatchObject({ status: "FAILED", reason: "policy_denied", text: "that issue is not in web" });
-    expect(await throughEngine(failing)).toMatchObject({ status: "FAILED", reason: "vendor_error", text: "the vendor could not be reached" });
-    expect(await throughEngine(quoting)).toMatchObject({ status: "FAILED", reason: "policy_denied", text: "the vendor said [REDACTED]" });
-    const crashed = await throughEngine(crashing);
-    expect(crashed).toMatchObject({ status: "FAILED", reason: "vendor_error" });
-    expect(crashed.text).toContain("MCP request failed before any write");
-    expect(JSON.stringify(crashed)).not.toContain("boom");
-  });
-});

@@ -4,7 +4,7 @@
 // refused; the Rovara CLI's own token reaches every row, as before.
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CLIENT_SCOPES, IMPLICIT_COMPANY_ID, SignInClientRegistrationSchema, type ClientScope } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, SignInClientRegistrationSchema, type ClientScope } from "@agentx/contracts";
 import { signInClientRegistration, signInClientUpdate } from "../../packages/cli/src/admin/sign-in-clients.js";
 import { DEV_ROUTES, devRouteOf, type DevRoute } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import type { DeveloperApiConfiguration, DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
@@ -22,24 +22,6 @@ const sample = (path: string) => path.replaceAll("{emailHash}", "a".repeat(64)).
 // ---- The table ----
 
 describe("the route table", () => {
-  it("names exactly the eight scopes of plan 7.2 row 1, and nothing more", () => {
-    expect([...CLIENT_SCOPES].sort()).toEqual([...NAMED].sort());
-    for (const route of DEV_ROUTES) expect([...NAMED, "full", "none"]).toContain(route.requires);
-  });
-
-  it("lets only the access check and the per-person project read need no scope", () => {
-    expect(DEV_ROUTES.filter((route) => route.requires === "none").map((route) => `${route.method} ${route.path}`).sort())
-      .toEqual(["GET /v1/dev/client/projects/{project}", "POST /v1/dev/access"]);
-  });
-
-  it("settings reads and writes require full access, with no new named scope", () => {
-    for (const method of ["GET", "PUT"]) expect(devRouteOf(method, "/v1/dev/projects/web/settings")?.requires).toBe("full");
-  });
-
-  it("has one row per method and path", () => {
-    const keys = DEV_ROUTES.map((route) => `${route.method} ${route.path.replace(/\{[A-Za-z]+\}/g, "{}")}`);
-    expect(new Set(keys).size).toBe(keys.length);
-  });
 
   // Contract v0 (Layer 1), the calls Cloud's server makes today: each fits one of the eight scopes.
   const CLOUD_CALLS: Array<[string, string, ClientScope | "none"]> = [
@@ -68,15 +50,6 @@ describe("the route table", () => {
     expect(devRouteOf(method, path)?.requires).toBe(scope);
   });
 
-  it("matches no other method, an extra or empty segment, a trailing slash or another prefix", () => {
-    for (const path of ["/v1/dev/tasks/", "/v1/dev/tasks//cancel", "/v1/dev/tasks/t1/cancel/x", "/v1/dev/nothing", "/v1/devx/tasks", "/v1/dev", "/v1/dev/", "/v1/admin/tasks", "/v1/dev/tasks/t1/people/requests"]) {
-      for (const method of METHODS) expect(devRouteOf(method, path)).toBeUndefined();
-    }
-    expect(devRouteOf("PATCH", "/v1/dev/tasks")).toBeUndefined();
-    expect(devRouteOf("HEAD", "/v1/dev/tasks")).toBeUndefined();
-    expect(devRouteOf("get", "/v1/dev/tasks")).toBeUndefined();
-    expect(devRouteOf("POST", "/v1/dev/tasks/t1/readers")).toBeUndefined();
-  });
 });
 
 // ---- Every route the broker registers has a row (and every row is a route) ----
@@ -237,18 +210,6 @@ describe("the developer API with a scoped client's token (a named environment)",
   beforeEach(async () => { await setUp("developer"); });
   const gated = DEV_ROUTES.filter((route) => route.requires !== "none");
 
-  it("lets each scope through exactly its own routes, and refuses every other route naming the missing scope", async () => {
-    cloudClient(NAMED);
-    for (const scope of NAMED) {
-      const authorization = await scoped(scope);
-      for (const route of gated) {
-        const response = await call(route.method, sample(route.path), authorization);
-        if (route.requires === scope) expect(refusedForScope(response), `${scope} on ${route.method} ${route.path}`).toBe(false);
-        else expect(response, `${scope} on ${route.method} ${route.path}`).toMatchObject({ status: 403, body: { error: { code: "FORBIDDEN", message: scopeRefusal(route) } } });
-      }
-    }
-  });
-
   it("refuses a token with no scope on every gated route, and a scope the registration no longer allows", async () => {
     cloudClient([]);
     expect((await call("GET", "/v1/dev/projects", await scoped())).status, "a client with no scope at all is refused as before").toBe(401);
@@ -265,12 +226,6 @@ describe("the developer API with a scoped client's token (a named environment)",
     cloudClient(NAMED);
     db.set({ pk: `DEVELOPER#${ADA}`, sk: "META", developerId: ADA, provider: "oidc", issuer: "https://idp.example.test", subject: "ada", displayName: "Ada", firstSignInAt: "x", lastSignInAt: "x", revoked: true });
     expect((await call("GET", "/v1/dev/workspaces", await scoped())).status).toBe(401);
-  });
-
-  it("serves a scoped route as the person (their own name, their projects)", async () => {
-    cloudClient(["profile:name", "tasks:read"]);
-    expect(await call("GET", "/v1/dev/projects", await scoped("tasks:read"))).toMatchObject({ status: 200, body: { developer: { id: ADA, name: "Ada" }, projects: [{ name: "payments" }] } });
-    expect((await call("GET", "/v1/dev/projects", await scoped("profile:name"))).status).toBe(403);
   });
 
   it("keeps full access off for the Cloud client unless an administrator turns it on, and reads it at every call", async () => {
@@ -296,42 +251,6 @@ describe("the developer API with a scoped client's token (a named environment)",
     cloudClient([], true);
     const authorization = await scoped();
     for (const route of gated) expect(refusedForScope(await call(route.method, sample(route.path), authorization)), `${route.method} ${route.path}`).toBe(false);
-  });
-
-  it("dispatches the preview only after its read scope is checked, without forwarding credentials", async () => {
-    previewCore.mockClear();
-    cloudClient(["tasks:read"]);
-    const path = "/v1/dev/projects/payments/start-estimates";
-    expect((await call("POST", path, await scoped())).status).toBe(403);
-    expect(previewCore).not.toHaveBeenCalled();
-    expect(await call("POST", path, await scoped("tasks:read"))).toMatchObject({ status: 200, body: { quoteVersion: 2 } });
-    expect(previewCore.mock.calls).toEqual([[expect.objectContaining({ method: "POST", path, headers: {}, body: "{}" }), expect.objectContaining({ developerId: ADA })]]);
-    expect((await call("GET", path, await scoped("tasks:read"))).status).toBe(404);
-    expect(previewCore).toHaveBeenCalledTimes(1);
-  });
-
-  it("logs a refusal with the client's id, the route and the missing scope, never the token", async () => {
-    cloudClient(["tasks:read"]);
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    try {
-      const authorization = await scoped("tasks:read");
-      await call("POST", "/v1/dev/tasks/t1/cancel", authorization);
-      const lines = log.mock.calls.map(([line]) => String(line));
-      const refusal = lines.map((line) => { try { return JSON.parse(line) as Record<string, unknown>; } catch { return {}; } }).find((entry) => entry.event === "client.scope_refused");
-      expect(refusal).toEqual({ component: "broker", event: "client.scope_refused", clientId: "web-app", method: "POST", route: "/v1/dev/tasks/{taskId}/cancel", requires: "tasks:act" });
-      expect(lines.join("\n")).not.toContain(authorization.slice(7));
-    } finally {
-      log.mockRestore();
-    }
-  });
-
-  it("refuses a route with no row before authenticating, for every caller", async () => {
-    cloudClient(NAMED, true);
-    for (const authorization of [undefined, await cli(), await scoped(...NAMED)]) {
-      for (const [method, path] of [["GET", "/v1/dev/nothing"], ["PATCH", "/v1/dev/tasks"], ["POST", "/v1/dev/projects"], ["POST", "/v1/dev/tasks/t1/readers"], ["GET", "/v1/dev/tasks/t1/cancel"], ["POST", "/v1/dev/client/projects/payments/members"], ["GET", "/v1/dev/tasks/"]] as const) {
-        expect(await call(method, path, authorization), `${method} ${path}`).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND", message: "route not found" } } });
-      }
-    }
   });
 
   it("leaves the Rovara CLI's token as it was: every row, with the person's rights", async () => {

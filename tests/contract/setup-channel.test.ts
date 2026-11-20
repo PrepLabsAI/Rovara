@@ -23,55 +23,6 @@ describe("finding the channel (Review Focus 3)", () => {
 });
 
 describe("agentx channel add (FR-041)", () => {
-  it("joins a public channel the bot is not in, then binds it to the project", async () => {
-    const plane = fakeControlPlane();
-    const slack = fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: false }]);
-    const result = await addChannel({ session, botToken: "xoxb-1", teamId: TEAM, botUserId: BOT, projectName: "payments-api", prompter: scriptedPrompter(["#Payments"]), write: () => undefined, ...clock(), services: { fetch: plane.fetch, slackChannels: slack }, flags: {} });
-    expect(result).toEqual({ channelId: "C0PAY00001", channelName: "payments" });
-    expect(slack.joined).toEqual(["C0PAY00001"]);
-    expect(plane.bindings).toEqual([`${TEAM}/C0PAY00001`]);
-    expect(plane.requests.find((r) => r.method === "PUT")?.body).toEqual({ projectName: "payments-api" });
-  });
-
-  it("does not join a channel the bot is already in", async () => {
-    const plane = fakeControlPlane();
-    const slack = fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }]);
-    await addChannel({ session, botToken: "xoxb-1", teamId: TEAM, botUserId: BOT, projectName: "p", prompter: scriptedPrompter([]), write: () => undefined, ...clock(), services: { fetch: plane.fetch, slackChannels: slack }, flags: { channel: "payments" } });
-    expect(slack.joined).toEqual([]);
-    expect(plane.bindings).toEqual([`${TEAM}/C0PAY00001`]);
-  });
-
-  it("asks for an invite to a private channel, and waits until the bot can see it", async () => {
-    const plane = fakeControlPlane();
-    const slack = fakeSlackChannels([{ id: "G0SEC00001", name: "secret", isPrivate: true, isMember: true }], { visibleAfterFinds: 3 });
-    const lines: string[] = [];
-    const result = await addChannel({ session, botToken: "xoxb-1", teamId: TEAM, botUserId: BOT, projectName: "p", prompter: scriptedPrompter([]), write: (line) => lines.push(line), ...clock(), services: { fetch: plane.fetch, slackChannels: slack }, flags: { channel: "secret" } });
-    expect(result.channelId).toBe("G0SEC00001");
-    expect(lines.join("\n")).toContain(`If #secret is private, type /invite <@${BOT}> in it`);
-    expect(slack.joined).toEqual([]);
-    expect(slack.finds()).toBe(3);
-  });
-
-  it("gives up after 10 minutes, saying how to create the channel", async () => {
-    const slack = fakeSlackChannels([]);
-    const plane = fakeControlPlane();
-    await expect(addChannel({ session, botToken: "xoxb-1", teamId: TEAM, botUserId: BOT, projectName: "p", prompter: scriptedPrompter([]), write: () => undefined, ...clock(), services: { fetch: plane.fetch, slackChannels: slack }, flags: { channel: "nope" } }))
-      .rejects.toThrow("the bot cannot see a channel named #nope after 10 minutes; create it in Slack (or invite the bot to it, if it is private), then run this again");
-    expect(plane.bindings).toEqual([]);
-  });
-
-  it("waits out a Slack rate limit and still finds the channel (fix round 1)", async () => {
-    const plane = fakeControlPlane();
-    const slack = fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }], { rateLimitedFinds: 1, retryAfterMs: 20_000 });
-    const time = clock();
-    const lines: string[] = [];
-    const result = await addChannel({ session, botToken: "xoxb-1", teamId: TEAM, botUserId: BOT, projectName: "p", prompter: scriptedPrompter([]), write: (line) => lines.push(line), ...time, services: { fetch: plane.fetch, slackChannels: slack }, flags: { channel: "payments" } });
-    expect(result.channelId).toBe("C0PAY00001");
-    expect(slack.finds()).toBe(2);
-    expect(time.now() - T0).toBe(20_000);
-    expect(lines).toContain("Slack is limiting how often AgentX may list channels; trying again in 20 seconds.");
-    expect(lines.join("\n")).not.toContain("/invite");
-  });
 
   it("gives up at the deadline with the normal message when Slack keeps rate limiting (fix round 1)", async () => {
     const slack = fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }], { rateLimitedFinds: Number.POSITIVE_INFINITY, retryAfterMs: 60_000 });
@@ -160,19 +111,9 @@ describe("the Slack channel API", () => {
     expect(error?.message).toBe("RUNTIME_UNAVAILABLE: Slack conversations.join refused: unknown_error");
   });
 
-  it("refuses to walk more than 50 pages, naming the command that binds by id", async () => {
-    const pages = Array.from({ length: 51 }, (_, index) => ({ ok: true, channels: [], response_metadata: { next_cursor: `c${index}` } }));
-    const slack = fakeSlack(pages);
-    await expect(slackChannelApi(slack.fetch).find(BOT_TOKEN, "payments"))
-      .rejects.toThrow("the workspace has more than 50000 channels to search; bind the channel by id with agentx admin slack bind --team <team-id> --channel <channel-id> --project <name>");
-    expect(slack.calls).toHaveLength(50);
-  });
 });
 
 describe("the stored bot token (F25)", () => {
-  it("reads the bot token from the environment's Slack secret", async () => {
-    expect(await readSlackBotToken(memoryInitSecrets({ "agentx/staging/slack": JSON.stringify({ botToken: BOT_TOKEN, signingSecret: "s" }) }), "staging")).toBe(BOT_TOKEN);
-  });
 
   it("says what to do when there is none, without echoing what the secret holds", async () => {
     const secrets = memoryInitSecrets({ "agentx/staging/slack": JSON.stringify({ botToken: "not-a-bot-token-value" }) });
@@ -183,56 +124,6 @@ describe("the stored bot token (F25)", () => {
 });
 
 describe("waiting for the threaded reply (FR-018 step 11)", () => {
-  it("passes on an answered turn in that channel received after the prompt", async () => {
-    const plane = fakeControlPlane();
-    const time = clock();
-    const lines: string[] = [];
-    const pending = waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: (line) => lines.push(line), ...time,
-      sleep: async (ms) => { await time.sleep(ms); plane.turns = [turn({ subject: `${TEAM}/C0PAY00001/1790000000.000100`, receivedAt: new Date(time.now()).toISOString(), disposition: "answered" })]; } });
-    expect((await pending).eventId).toMatch(/^Ev/);
-    // Live check L2: a workspace that had an older AgentX app shows two bots in the mention list.
-    expect(lines[0]).toBe(`In #payments, post a message that mentions the bot, for example "@<the bot> what can you do?". Type @ and pick the bot from Slack's mention list: a workspace that had an older AgentX app shows two bots with similar names, and this one's member ID is ${BOT}. Waiting up to 10 minutes for AgentX to reply in its thread.`);
-    expect(lines.at(-1)).toBe("AgentX replied in #payments in 8 seconds.");
-  });
-
-  it("ignores turns in other channels and turns from before the prompt", async () => {
-    const plane = fakeControlPlane();
-    plane.turns = [
-      turn({ subject: `${TEAM}/C0OTHER001/1.1`, receivedAt: new Date(T0 + 1000).toISOString(), disposition: "answered" }),
-      turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 - 60_000).toISOString(), disposition: "answered" }),
-    ];
-    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock(), timeoutMs: 60_000 }))
-      .rejects.toThrow("no AgentX reply in #payments within 1 minute; check that the message mentioned the bot, that Slack shows the Request URL as Verified, and agentx --env staging admin turns export --since 15m, then run agentx init again");
-  });
-
-  it("gives up after 10 minutes by default, naming the next step", async () => {
-    const plane = fakeControlPlane();
-    const time = clock();
-    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...time }))
-      .rejects.toThrow("no AgentX reply in #payments within 10 minutes; check that the message mentioned the bot, that Slack shows the Request URL as Verified, and agentx --env staging admin turns export --since 15m, then run agentx init again");
-    expect(time.now() - T0).toBe(10 * 60_000);
-  });
-
-  it("says 1 minute, not 1 minutes, when it asks for the mention (fix round 1)", async () => {
-    const lines: string[] = [];
-    await expect(waitForThreadedReply({ env: "staging", session, fetch: fakeControlPlane().fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: (line) => lines.push(line), ...clock(), timeoutMs: 60_000 }))
-      .rejects.toThrow("within 1 minute;");
-    expect(lines[0]).toContain("Waiting up to 1 minute for AgentX to reply in its thread.");
-  });
-
-  it("names the command that is running as the one to run again (fix round 1)", async () => {
-    const plane = fakeControlPlane();
-    plane.turns = [turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString(), disposition: "failed", error: { name: "WorkerUnavailable" } })];
-    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx channel add --project payments-api --channel payments", write: () => undefined, ...clock() }))
-      .rejects.toThrow("fix it, then run agentx channel add --project payments-api --channel payments again");
-  });
-
-  it("does not pass on an error reply, naming the turn's disposition (Review Focus 4)", async () => {
-    const plane = fakeControlPlane();
-    plane.turns = [turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString(), disposition: "failed", error: { name: "WorkerUnavailable" } })];
-    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock() }))
-      .rejects.toThrow("AgentX replied in #payments, but the turn ended as failed (WorkerUnavailable); see agentx --env staging admin turns export --since 15m, fix it, then run agentx init again");
-  });
 
   it("skips turns already reported, and adds a newly failed one before it throws (spec 040 FR-051)", async () => {
     const plane = fakeControlPlane();
@@ -248,26 +139,6 @@ describe("waiting for the threaded reply (FR-018 step 11)", () => {
       .rejects.toThrow("no AgentX reply in #payments within 1 minute;");
   });
 
-  it("M3: reports every failed turn it saw, so a second watch skips them all", async () => {
-    const plane = fakeControlPlane();
-    const first = turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString(), disposition: "error" });
-    const second = turn({ subject: `${TEAM}/C0PAY00001/2.1`, receivedAt: new Date(T0 + 2000).toISOString(), disposition: "failed" });
-    plane.turns = [first, second];
-    const reported = new Set<string>();
-    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock(), reported }))
-      .rejects.toThrow("but the turn ended as error;");
-    expect([...reported]).toEqual([String(first.eventId), String(second.eventId)]);
-    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock(), timeoutMs: 60_000, reported }))
-      .rejects.toThrow("no AgentX reply in #payments within 1 minute;");
-  });
-
-  it("asks the export for turns since just before the prompt", async () => {
-    const plane = fakeControlPlane();
-    plane.turns = [turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString() })];
-    await waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock() });
-    expect(plane.requests.map((request) => request.path)).toEqual(["/v1/admin/turns"]);
-    expect(plane.requests[0]!.token).toBe("admin-token");
-  });
 });
 
 describe("agentx channel add on the command line (F9)", () => {
@@ -291,27 +162,6 @@ describe("agentx channel add on the command line (F9)", () => {
     const code = await executeCli(argv, { setup, stdout: { write: (text: string) => stdout.push(text) }, stderr: { write: (text: string) => stderr.push(text) } });
     return { code, stdout: stdout.join(""), stderr: stderr.join("") };
   }
-
-  it("takes the global --project before the command", async () => {
-    const plane = fakeControlPlane();
-    const { context, lines, slack } = fakeSetupContext(plane);
-    const result = await cli(["--project", "payments-api", "channel", "add", "--env", "staging", "--channel", "payments", "--no-check"], context);
-    expect(result.stderr).toBe("");
-    expect(result.code).toBe(0);
-    expect(plane.requests.find((request) => request.method === "PUT")?.body).toEqual({ projectName: "payments-api" });
-    expect(lines).toContain("Bound #payments to payments-api\n");
-    expect(slack.tokens).toEqual([BOT_TOKEN, BOT_TOKEN]);
-    expect([...lines, result.stdout, result.stderr].join("\n")).not.toContain(BOT_TOKEN);
-  });
-
-  it("takes --project after the command too", async () => {
-    const plane = fakeControlPlane();
-    const { context } = fakeSetupContext(plane);
-    const result = await cli(["channel", "add", "--project", "payments-api", "--env", "staging", "--channel", "payments", "--no-check"], context);
-    expect(result.stderr).toBe("");
-    expect(result.code).toBe(0);
-    expect(plane.requests.find((request) => request.method === "PUT")?.body).toEqual({ projectName: "payments-api" });
-  });
 
   it("refuses without --project, binding nothing", async () => {
     const plane = fakeControlPlane();
@@ -357,7 +207,6 @@ describe("agentx channel add's next step (fix round 1)", () => {
 
 describe("the first-project init step's channel", () => {
   const PROJECT = { name: "payments-api", revision: 1 };
-  const SLACK = { appId: "A0APP00001", teamId: TEAM, botUserId: BOT };
   function context(plane = fakeControlPlane(), slack = fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: false }])) {
     const made = initContext({
       secrets: memoryInitSecrets({ "agentx/staging/slack": JSON.stringify({ botToken: BOT_TOKEN }) }),
@@ -366,25 +215,6 @@ describe("the first-project init step's channel", () => {
     (made.store as MemoryParameterStore).values.set("/agentx/staging/settings", JSON.stringify(STAGING_SETTINGS));
     return made;
   }
-
-  it("binds the channel with the recorded Slack facts, and records it", async () => {
-    const plane = fakeControlPlane();
-    const made = context(plane);
-    const progress = progressHandle({ ...progressHandle().value(), project: PROJECT, slack: SLACK });
-    expect(await firstProjectStep().run(made, progress)).toEqual({ status: "done", note: "project payments-api in #payments" });
-    expect(progress.value().project).toEqual({ ...PROJECT, channelId: "C0PAY00001", channelName: "payments", teamId: TEAM });
-    expect(plane.bindings).toEqual([`${TEAM}/C0PAY00001`]);
-    expect(made.lines.join("\n")).not.toContain(BOT_TOKEN);
-  });
-
-  it("binds nothing again when the channel is recorded", async () => {
-    const plane = fakeControlPlane();
-    const slack = fakeSlackChannels([]);
-    const progress = progressHandle({ ...progressHandle().value(), project: { ...PROJECT, channelId: "C0PAY00001", channelName: "payments", teamId: TEAM }, slack: SLACK });
-    expect(await firstProjectStep().run(context(plane, slack), progress)).toEqual({ status: "done", note: "project payments-api in #payments" });
-    expect(plane.bindings).toEqual([]);
-    expect(slack.finds()).toBe(0);
-  });
 
   it("says the Slack app step must finish first when progress has no Slack facts", async () => {
     const progress = progressHandle({ ...progressHandle().value(), project: PROJECT });

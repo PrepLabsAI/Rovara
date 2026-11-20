@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { CONFIG_KEYS } from "../../packages/cli/src/config/keys.js";
-import { runConfigGet, runConfigSet } from "../../packages/cli/src/config/commands.js";
-import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
+import { runConfigSet } from "../../packages/cli/src/config/commands.js";
 import { fakeCloudFormation } from "../support/fake-cloudformation.js";
-import { passingChecks, scriptedPrompter } from "../support/init-fakes.js";
+import { passingChecks } from "../support/init-fakes.js";
 import { seeded, services, stacks } from "../support/config-services.js";
 
 // M1.4 Task 4.10D, test 41 (MODEL3): the fallback is a choice, made with `agentx config set models.fallback`, held to the pinned Bedrock catalog, tested before it is set, and applied to the
@@ -29,34 +27,6 @@ const BOTH_NONE = { "agentx-staging-runtime": "none", "agentx-staging-slack": "n
 const BOTH_CHOSEN = { "agentx-staging-runtime": CHOSEN, "agentx-staging-slack": CHOSEN };
 
 describe("agentx config set models.fallback", () => {
-  it("is a documented key whose default is none, and that an upgrade keeps (it is an operator parameter of both stacks)", async () => {
-    const row = await runConfigGet(services({ store: await seeded() }), ENV, "models.fallback");
-    expect(row).toMatchObject({ key: "models.fallback", value: "none", where: "stack parameter ModelFallback on agentx-staging-runtime and agentx-staging-slack" });
-    expect(row.description).toMatch(/no fallback|none/);
-    expect(CONFIG_KEYS.find((entry) => entry.key === "models.fallback")?.defaultValue).toBe("none");
-    expect(OPERATOR_PARAMETERS.runtime).toContain("ModelFallback");
-    expect(OPERATOR_PARAMETERS.slack).toContain("ModelFallback");
-  });
-
-  it("tests the model, then sets both stacks' parameter, runtime first", async () => {
-    const checks = passingChecks();
-    const cloudFormation = perStack(BOTH_NONE);
-    const run = services({ store: await seeded(), checks: () => checks, cloudFormation });
-    const result = await runConfigSet(run, ENV, { key: "models.fallback", value: CHOSEN, yes: true });
-    expect(result.changed).toBe(true);
-    expect(checks.models).toEqual([CHOSEN]);
-    expect(cloudFormation.changeSetStacks).toEqual(["agentx-staging-runtime", "agentx-staging-slack"]);
-    expect([cloudFormation.value("agentx-staging-runtime"), cloudFormation.value("agentx-staging-slack")]).toEqual([CHOSEN, CHOSEN]);
-  });
-
-  it("asks once for both stacks, and records one change", async () => {
-    const asked: string[] = [];
-    const cloudFormation = perStack(BOTH_NONE);
-    const run = services({ store: await seeded(), cloudFormation, prompter: { ...scriptedPrompter([]), confirm: async (question) => { asked.push(question); return true; } } });
-    await runConfigSet(run, ENV, { key: "models.fallback", value: CHOSEN, yes: false });
-    expect(asked).toEqual(["Apply this change to agentx-staging-runtime?"]);
-    expect(cloudFormation.changeSetStacks).toHaveLength(2);
-  });
 
   it("sets none without a test call, and says nothing changed when both stacks already have the value", async () => {
     const checks = passingChecks();

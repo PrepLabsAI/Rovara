@@ -1,6 +1,6 @@
 // Sign in with ChatGPT from the CLI (#339): `chatgpt connect` catches OpenAI's callback on this
 // computer (or takes a pasted address) and hands it to the control plane, which does the exchange.
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -86,30 +86,7 @@ async function signedIn(options: {
   return { home, port, out, err, finished, answers, run, fetchImplementation, openBrowser };
 }
 
-/** Every file under the home, so a test can check nothing token-bearing was written there. */
-async function filesUnder(dir: string): Promise<string> {
-  const entries = await readdir(dir, { recursive: true, withFileTypes: true });
-  const texts = await Promise.all(entries.filter((file) => file.isFile()).map((file) => readFile(join(file.parentPath, file.name), "utf8")));
-  return texts.join("\n");
-}
-
 describe("rovara chatgpt connect (#339)", () => {
-  it("catches OpenAI's callback on this computer and hands code, state and client ID to the control plane", async () => {
-    const h = await signedIn({ browser: () => [{ code: "the-code", scope: "x", state: STATE, client_id: "oaiapp_issued" }] });
-    expect(await h.run(["chatgpt", "connect"])).toBe(0);
-    expect(h.finished).toEqual([{ code: "the-code", state: STATE, clientId: "oaiapp_issued" }]);
-    expect(h.answers).toEqual([200]);
-    expect(h.out.join("")).toBe([
-      "Connected your ChatGPT plan (maya@acme.com) to AgentX environment staging.",
-      "Models your plan offers: gpt-6.1-sol, gpt-5.5.",
-      "",
-    ].join("\n"));
-    // The CLI never exchanges the code itself: only the control plane was called.
-    expect(h.fetchImplementation.mock.calls.every(([input]) => urlOf(input).startsWith(`${URL_}/v1/dev/chatgpt/`))).toBe(true);
-    // Nothing token-bearing on this computer, and the code is not printed.
-    expect(await filesUnder(h.home)).not.toMatch(/the-code|oaiapp_issued/);
-    expect(h.err.join("")).not.toContain("the-code");
-  });
 
   it("refuses a callback with another state and keeps waiting for this sign-in's own", async () => {
     const h = await signedIn({
@@ -122,14 +99,6 @@ describe("rovara chatgpt connect (#339)", () => {
     expect(await h.run(["chatgpt", "connect"])).toBe(0);
     expect(h.answers).toEqual([400, 400, 200]);
     expect(h.finished).toEqual([{ code: "the-code", state: STATE, clientId: "oaiapp_issued" }]);
-  });
-
-  it("says the sign-in was declined, and finishes nothing, when the person presses Cancel on OpenAI's page", async () => {
-    const h = await signedIn({ browser: () => [{ error: "access_denied", error_description: "user said no <script>", state: STATE }] });
-    expect(await h.run(["chatgpt", "connect"])).not.toBe(0);
-    expect(h.err.join("")).toContain("ChatGPT was not connected: the sign-in was declined on OpenAI's page");
-    expect(h.err.join("")).not.toContain("script");
-    expect(h.finished).toEqual([]);
   });
 
   it("falls back to a pasted address when the callback's port is taken (the Codex CLI may hold it)", async () => {

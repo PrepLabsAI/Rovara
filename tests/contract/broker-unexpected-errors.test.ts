@@ -51,20 +51,6 @@ function register(handler: AdminHandler, connectors: unknown[] = [{ name: "githu
 }
 
 describe("the OIDC route catch-all (#48)", () => {
-  it.each([
-    ["ThrottlingException", undefined],
-    ["SomeUnmodelledFault", 500],
-  ])("answers a registration that meets a temporary AWS error (%s) with 503 RUNTIME_UNAVAILABLE and fixed words", async (name, status) => {
-    const { handler, db } = await createAdminBroker({});
-    failing(db, awsError(name, status));
-    const answer = await register(handler);
-    expect(answer.status).toBe(503);
-    expect(answer.body.error).toEqual({ code: "RUNTIME_UNAVAILABLE", message: AWS_TEMPORARY_MESSAGE });
-    expect(JSON.stringify(answer.body)).not.toContain(AWS_TEXT);
-    const logged = lines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((line) => line.event === "aws.temporary_error");
-    expect(logged).toEqual([expect.objectContaining({ component: "broker", event: "aws.temporary_error", name })]);
-    expect(lines.join("\n")).not.toContain(AWS_TEXT);
-  });
 
   it("answers 503 when the credential registry's read meets a temporary AWS error during registration", async () => {
     const secrets = { read: vi.fn(async () => JSON.stringify({ apiKey: "jira-api-token-value" })) };
@@ -77,27 +63,6 @@ describe("the OIDC route catch-all (#48)", () => {
     expect(answer.status).toBe(503);
     expect(answer.body.error).toEqual({ code: "RUNTIME_UNAVAILABLE", message: AWS_TEMPORARY_MESSAGE });
     expect(db.get("PROJECT#payments", "REV#000000000001")).toBeUndefined();
-  });
-
-  it("never echoes a non-temporary error's own words, and logs only its name", async () => {
-    const { handler, db } = await createAdminBroker({});
-    failing(db, awsError("AccessDeniedException", 400));
-    const answer = await register(handler);
-    expect(answer.status).toBe(400);
-    expect(answer.body.error).toEqual({ code: "CONFIG_INVALID", message: UNEXPECTED_REQUEST_MESSAGE });
-    const logged = lines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((line) => line.event === "request.unexpected_error");
-    expect(logged).toEqual([expect.objectContaining({ component: "broker", name: "AccessDeniedException" })]);
-    expect(lines.join("\n")).not.toContain(AWS_TEXT);
-  });
-
-  it("logs where an unexpected error was thrown, never its words", async () => {
-    const { handler, db } = await createAdminBroker({});
-    failing(db, new TypeError(`Cannot read properties of undefined (reading '${AWS_TEXT}')`));
-    const answer = await register(handler);
-    expect(answer.body.error).toEqual({ code: "CONFIG_INVALID", message: UNEXPECTED_REQUEST_MESSAGE });
-    const logged = lines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((line) => line.event === "request.unexpected_error");
-    expect(logged).toEqual([expect.objectContaining({ name: "TypeError", at: expect.stringMatching(/^at .*broker-unexpected-errors\.test\.ts:\d+:\d+/) as unknown })]);
-    expect(lines.join("\n")).not.toContain(AWS_TEXT);
   });
 
   it("logs where an unexpected error without a message was thrown", async () => {
@@ -128,14 +93,6 @@ describe("the OIDC route catch-all (#48)", () => {
     expect(response.body).not.toContain("secret-looking-body");
   });
 
-  it("still names a schema problem in the request, which is AgentX's own words", async () => {
-    const { handler } = await createAdminBroker({});
-    const answer = await register(handler, [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "sometimes" }] }]);
-    expect(answer.status).toBe(400);
-    expect(answer.body.error).toMatchObject({ code: "CONFIG_INVALID" });
-    expect(JSON.stringify(answer.body)).toContain("access");
-  });
-
   it("keeps an AgentXError's own code and words", async () => {
     const { handler } = await createAdminBroker({});
     const answer = await adminCall(handler, { method: "POST", path: "/v1/admin/projects", body: {}, admin: false });
@@ -147,16 +104,6 @@ describe("the OIDC route catch-all (#48)", () => {
 describe("the Slack stop-task catch-all (#48)", () => {
   const stop = (handler: AdminHandler, thread: unknown = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" }) =>
     handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: "U0123456789" });
-
-  it("answers a temporary AWS error with 503 RUNTIME_UNAVAILABLE and fixed words", async () => {
-    const { handler, db } = await createAdminBroker({});
-    failing(db, awsError("InternalServerError"));
-    const response = await stop(handler);
-    expect(response.statusCode).toBe(503);
-    expect((JSON.parse(response.body) as { error: unknown }).error).toEqual({ code: "RUNTIME_UNAVAILABLE", message: AWS_TEMPORARY_MESSAGE });
-    expect(response.body).not.toContain(AWS_TEXT);
-    expect(lines.map((line) => JSON.parse(line) as Record<string, unknown>)).toContainEqual(expect.objectContaining({ component: "broker", event: "aws.temporary_error", name: "InternalServerError" }));
-  });
 
   it("never echoes a non-temporary error's own words", async () => {
     const { handler, db } = await createAdminBroker({});

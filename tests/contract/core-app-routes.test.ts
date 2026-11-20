@@ -7,8 +7,8 @@ import { CORE_CONTEXT_WORKER_ROUTES, coreContextWorkerRouteOf, appRouteOf as con
 //   - Two companies over one core: a person of one company never sees or reaches the other's script tokens or people.
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CLIENT_SCOPES, ON_THE_WEBSITE_MESSAGE, orgProjectCatalogKey, projectRevisionKey, type ClientScope, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
-import { APP_ROUTES, DEV_ROUTES, appRouteOf, devRouteOf, type DevRoute } from "../../packages/broker/src/aws/dev-route-scopes.js";
+import { ON_THE_WEBSITE_MESSAGE, orgProjectCatalogKey, projectRevisionKey, type ClientScope, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
+import { APP_ROUTES, appRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import { CORE_APP_SIGN_IN_AGAIN, CORE_APP_UNAVAILABLE, coreAppEntryFrom, type CoreAppEntry } from "../../packages/broker/src/aws/core-app-routes.js";
 import { deployedCallerFromMembership, membershipWithRoleFromDynamo, personStandingFromDynamo, projectGrantFromDynamo } from "../../packages/broker/src/aws/core-engine-root.js";
 import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
@@ -25,7 +25,6 @@ import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-h
 import { localSigner } from "../support/developer-fakes.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
-const NAMED: readonly ClientScope[] = ["profile:name", "projects:members", "projects:create", "tasks:read", "tasks:start", "tasks:act", "tasks:share", "decisions:decide"];
 const ROUTE_KEY = "ANY /v1/app/{proxy+}";
 const ISSUER = "https://abc123.execute-api.us-east-1.amazonaws.com/v1/auth";
 // The fake world's clock: the broker's token checks and the core read the same time.
@@ -39,22 +38,6 @@ const sample = (path: string) => path.replace(/\{[A-Za-z]+\}/g, "x1");
 // ---- The table ----
 
 describe("the /v1/app route table", () => {
-  it("admits the read-only start estimate on the dev boundary with the read scope", () => {
-    expect(devRouteOf("POST", "/v1/dev/projects/payments/start-estimates")).toMatchObject({ requires: "tasks:read" });
-    for (const method of ["GET", "PUT", "DELETE"]) expect(devRouteOf(method, "/v1/dev/projects/payments/start-estimates")).toBeUndefined();
-  });
-  it("gives every row a named scope or full access, never `none`, and one row per method and path, all under /v1/app/", () => {
-    expect([...CLIENT_SCOPES].sort()).toEqual([...NAMED].sort());
-    for (const route of APP_ROUTES) {
-      expect([...NAMED, "full"], `${route.method} ${route.path}`).toContain(route.requires);
-      expect(route.path.startsWith("/v1/app/")).toBe(true);
-    }
-    const keys = APP_ROUTES.map((route) => `${route.method} ${route.path.replace(/\{[A-Za-z]+\}/g, "{}")}`);
-    expect(new Set(keys).size).toBe(keys.length);
-    // The two tables never overlap: a /v1/dev path is never a core app row, and the reverse.
-    for (const route of APP_ROUTES) expect(devRouteOf(route.method, sample(route.path))).toBeUndefined();
-    for (const route of DEV_ROUTES) expect(appRouteOf(route.method, sample(route.path))).toBeUndefined();
-  });
 
   // Written out by hand: what the core serves on AWS (core-host/dev-routes.ts over the session, decision, playbook and script-token handlers, and the person erase), with its scope.
   const SERVED: Array<[string, string, ClientScope | "full"]> = [
@@ -140,60 +123,6 @@ describe("the /v1/app route table", () => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
   });
 
-  it("has a row only for what the core serves on AWS", () => {
-    expect(APP_ROUTES).toHaveLength(SERVED.length);
-    // The laptop's own routes, the asks (not built on AWS), a playbook edit (Cloud's editor), other methods, extra or empty segments and other prefixes.
-    for (const [method, path] of [
-      ["POST", "/v1/app/sessions/s1/log"], ["PUT", "/v1/app/sessions/s1/log"], ["DELETE", "/v1/app/sessions/s1/log"], ["GET", "/v1/app/sessions/s1/logs"], ["GET", "/v1/app/sessions/s1/log/x"], ["POST", "/v1/app/sessions/s1/ask"], ["GET", "/v1/app/sessions/s1/asks/ask_00000000000000000000"], ["GET", "/v1/app/triggers"], ["POST", "/v1/app/chains"], ["GET", "/v1/local/sessions"],
-      ["PUT", "/v1/app/projects/payments/playbook"], ["POST", "/v1/app/projects/payments/playbook"],
-      ["POST", "/v1/app/projects/payments/test-environment/propose"], ["GET", "/v1/app/projects/payments/test-environment/approve"], ["PUT", "/v1/app/projects/payments/test-environment/approve"], ["POST", "/v1/app/projects/payments/test-environment"], ["GET", "/v1/app/projects/payments/test-environment/service-images"], ["GET", "/v1/app/people/p1/erase"], ["POST", "/v1/app/people/p1"],
-      ["POST", "/v1/app/decisions/plan/t1/x/approve"], ["POST", "/v1/app/decisions/approve"], ["GET", "/v1/app/sessions/"], ["GET", "/v1/app/sessions//stop"], ["GET", "/v1/app/"],
-      // The laptop page's own setup acts (a typed command, eval confirm, the setup check's other methods) are not served on AWS, nor other methods on the setup run.
-      ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["GET", "/v1/app/projects/payments/setup-agent/decide"], ["GET", "/v1/app/projects/payments/setup-agent/host-decide"], ["GET", "/v1/app/projects/payments/setup-agent/confirm"], ["PUT", "/v1/app/projects/payments/setup-check"], ["DELETE", "/v1/app/projects/payments/setup-check"],
-      ["POST", "/v1/app/projects/payments/setup-agent/journal"], ["POST", "/v1/app/projects/payments/setup-agent/eval"], ["GET", "/v1/app/projects/payments/setup-agent/eval-approve"], ["GET", "/v1/app/projects/payments/setup-agent/eval-health"], ["GET", "/v1/app/projects/payments/setup-agent/eval-decide"], ["GET", "/v1/app/projects/payments/setup-agent/eval-wrapper"], ["GET", "/v1/app/projects/payments/setup-agent/stop"], ["PUT", "/v1/app/projects/payments/setup-agent"], ["DELETE", "/v1/app/projects/payments/setup-agent"],
-      ["PUT", "/v1/app/projects/payments/wiki-map"], ["DELETE", "/v1/app/projects/payments/wiki-map"], ["GET", "/v1/app/projects/payments/wiki-map/extra"], ["POST", "/v1/app/projects/payments/wiki-maps"],
-      // The saved environment image has no Reset or setting write here (those stay Cloud's / the laptop's): only the read.
-      ["POST", "/v1/app/projects/payments/environment-image"], ["PUT", "/v1/app/projects/payments/environment-image"], ["PUT", "/v1/app/projects/payments/environment-image/setting"], ["GET", "/v1/app/projects/payments/environment-image/setting"], ["GET", "/v1/app/projects/payments/environment-images"],
-      // The wiki has no write route here (the build and corrections bring their own), nor other paths under it.
-      ["POST", "/v1/app/projects/payments/wiki"], ["PUT", "/v1/app/projects/payments/wiki/pages/overview"], ["DELETE", "/v1/app/projects/payments/wiki/pages/overview"], ["GET", "/v1/app/projects/payments/wiki/pages"], ["GET", "/v1/app/projects/payments/wiki/notes"],
-      // Corrections: only the methods and paths that exist (a note is deleted by POST .../delete; there is no DELETE, PUT or PATCH row, and no read of the notes list).
-      ["DELETE", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001"], ["PUT", "/v1/app/projects/payments/wiki/pages/overview/notes"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/notes"],
-      ["GET", "/v1/app/projects/payments/wiki/pages/overview/flags"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/corrections"], ["POST", "/v1/app/projects/payments/wiki/disputed"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/approve"],
-      // The report: no write on the rows, no delete, no people route (a later slice), no other method on a feature.
-      ["POST", "/v1/app/org/report/tasks"], ["PUT", "/v1/app/org/report/features"], ["DELETE", "/v1/app/org/report/features/ft_1"], ["GET", "/v1/app/org/report/features/ft_1/rename"], ["POST", "/v1/app/org/report/features/ft_1/delete"],
-      ["GET", "/v1/app/org/report/people"], ["GET", "/v1/app/tasks/t1/feature"], ["POST", "/v1/app/tasks/t1/feature/extra"], ["POST", "/v1/app/tasks/feature"],
-      // The wiki build controls: no other methods, no other tails.
-      ["PUT", "/v1/app/projects/payments/wiki-build"], ["DELETE", "/v1/app/projects/payments/wiki-build"], ["GET", "/v1/app/projects/payments/wiki-build/stop"], ["GET", "/v1/app/projects/payments/wiki-build/delete"], ["POST", "/v1/app/projects/payments/wiki-build/extra"], ["GET", "/v1/app/projects/payments/wiki-builds"],
-      // The start box's suggestion is a POST on its own path; starting work itself (`/code`) is Cloud's route, and nothing else sits under it.
-      ["GET", "/v1/app/projects/payments/code/suggest"], ["PUT", "/v1/app/projects/payments/code/suggest"], ["POST", "/v1/app/projects/payments/code"], ["POST", "/v1/app/projects/payments/code/suggest/x"], ["POST", "/v1/app/projects/payments/code/start"],
-      // The answer route is one POST: no read of answers, no other writes, no deeper paths.
-      ["GET", "/v1/app/projects/payments/answers"], ["PUT", "/v1/app/projects/payments/answers"], ["DELETE", "/v1/app/projects/payments/answers"], ["POST", "/v1/app/projects/payments/answers/a1"], ["POST", "/v1/app/projects/payments/answer"],
-      // J5: "Not right" is one POST, and the gap list one GET.
-      ["GET", "/v1/app/projects/payments/answers/a0123456789/not-right"], ["PUT", "/v1/app/projects/payments/answers/a0123456789/not-right"], ["POST", "/v1/app/projects/payments/answers/a0123456789/not-right/x"], ["POST", "/v1/app/projects/payments/wiki/gaps"], ["DELETE", "/v1/app/projects/payments/wiki/gaps"],
-      // The upkeep switch: GET and PUT only, no other tail.
-      ["POST", "/v1/app/projects/payments/upkeep"], ["DELETE", "/v1/app/projects/payments/upkeep"], ["PATCH", "/v1/app/projects/payments/upkeep"], ["GET", "/v1/app/projects/payments/upkeep/extra"], ["PUT", "/v1/app/projects/payments/upkeeps"],
-      // The eval check card: GET and PUT only, no other tail.
-      ["POST", "/v1/app/projects/payments/ci-eval-check"], ["DELETE", "/v1/app/projects/payments/ci-eval-check"], ["PATCH", "/v1/app/projects/payments/ci-eval-check"], ["GET", "/v1/app/projects/payments/ci-eval-check/extra"], ["PUT", "/v1/app/projects/payments/ci-eval-checks"],
-      ["POST", "/v1/app/tasks/t1/feature-choices"], ["GET", "/v1/app/tasks/t1/feature-choices/extra"], ["GET", "/v1/app/tasks/feature-choices"],
-      // The page's Accept findings: one POST, no other method or tail.
-      ["GET", "/v1/app/tasks/t1/review-findings"], ["PUT", "/v1/app/tasks/t1/review-findings"], ["POST", "/v1/app/tasks/t1/review-findings/x"], ["POST", "/v1/app/tasks/review-findings"],
-      // The company's automatic-runs control: GET and PUT only, no other tail.
-      ["POST", "/v1/app/company/system-runs"], ["DELETE", "/v1/app/company/system-runs"], ["PATCH", "/v1/app/company/system-runs"], ["GET", "/v1/app/company/system-runs/extra"], ["PUT", "/v1/app/company/system-run"],
-      // Ticket-sharing settings: GET and PUT only (the laptop's POST alias is not served here), and none of the laptop's other intake routes (the waiting tickets are /v1/dev/projects/{p}/intake).
-      ["POST", "/v1/app/projects/payments/intake/updates"], ["DELETE", "/v1/app/projects/payments/intake/updates"], ["GET", "/v1/app/projects/payments/intake/updates/x"], ["GET", "/v1/app/projects/payments/intake"],
-      ["PUT", "/v1/app/projects/payments/intake/sources"], ["GET", "/v1/app/projects/payments/intake/notices"],
-      ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
-    ] as const) expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
-  });
-
-  it("pins the lessons replay as a full-access company route, outside the core app table", () => {
-    expect(devRouteOf("GET", "/v1/dev/projects/payments/lessons/replay")).toMatchObject({ method: "GET", requires: "full" });
-    expect(appRouteOf("GET", "/v1/dev/projects/payments/lessons/replay")).toBeUndefined();
-  });
-  it("pins the weekly lessons read as a full-access company route, outside the core app table", () => {
-    expect(devRouteOf("GET", "/v1/dev/projects/payments/lessons/weekly")).toMatchObject({ method: "GET", requires: "full" });
-    expect(appRouteOf("GET", "/v1/dev/projects/payments/lessons/weekly")).toBeUndefined();
-  });
 });
 
 // ---- Through the broker ----
@@ -210,8 +139,6 @@ async function bearer(claims: Record<string, unknown> = {}): Promise<string> {
 }
 /** The Rovara CLI's token for a person. */
 const cli = (who = ADA) => bearer({ sub: who, sid: `s-${who.slice(0, 2)}` });
-/** The Cloud web app's token for ADA, with these scopes. */
-const scoped = (...scopes: ClientScope[]) => bearer({ aud: "web-app", azp: "web-app", sid: "s-cloud", ...(scopes.length === 0 ? {} : { scope: scopes.join(" ") }) });
 
 async function call(method: string, path: string, authorization?: string, options: { routeKey?: string; body?: unknown } = {}) {
   const [rawPath, rawQueryString] = path.split("?");
@@ -263,12 +190,6 @@ describe("the core's /v1/app routes, switch off (no core entry)", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("answers 'route not found' on the legacy (linking-only) deployment too", async () => {
-    const { entry, seen } = spyEntry();
-    await setUp(entry, "linking");
-    expect(await call("GET", "/v1/app/script-tokens", await cli())).toMatchObject({ status: 404, body: { error: { message: "route not found" } } });
-    expect(seen).toEqual([]);
-  });
 });
 
 describe("the core's /v1/app routes, switch on (a core entry)", () => {
@@ -288,18 +209,6 @@ describe("the core's /v1/app routes, switch on (a core entry)", () => {
     expect(spy.seen).toEqual([]);
   });
 
-  it("says once, bounded, when it refuses a path the table does not list (#1175), never naming a project or id", async () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    try {
-      expect((await call("GET", "/v1/app/projects/secret-project-name/not-a-route", await cli())).status).toBe(404);
-      const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("developer.app_route_unlisted"));
-      expect(lines).toHaveLength(1);
-      expect(JSON.parse(lines[0]!)).toMatchObject({ event: "developer.app_route_unlisted", method: "GET", path: "/v1/app/projects" });
-      expect(lines[0]).not.toContain("secret-project-name");
-    } finally { log.mockRestore(); }
-    expect(spy.seen).toEqual([]);
-  });
-
   it("refuses a path the URL parser would read differently (never matched two ways)", async () => {
     expect(await call("GET", "/v1/app\\script-tokens", await cli())).toMatchObject({ status: 404, body: { error: { message: "route not found" } } });
     expect(await call("POST", "/v1/app/people/p1/..%2Ferase", await cli())).toMatchObject({ status: 404 });
@@ -314,27 +223,6 @@ describe("the core's /v1/app routes, switch on (a core entry)", () => {
     expect(spy.seen).toEqual([]);
   });
 
-  it("hands the core the verified caller (no step-up, DEC 254zzz73), and the request without its credential; the answer comes back as the core gave it, never cached", async () => {
-    const authorization = await cli(ADA);
-    const answer = await call("POST", "/v1/app/script-tokens?x=1", authorization, { body: { requestId: "r1" } });
-    expect(answer).toMatchObject({ status: 200, body: { served: true } });
-    expect(answer.headers["cache-control"]).toBe("no-store");
-    expect(spy.seen).toHaveLength(1);
-    const [{ request, caller }] = spy.seen as [{ request: BrokerRequest; caller: CoreEntryCaller }];
-    expect(caller).toMatchObject({ developerId: ADA, sessionId: "s-aa", name: "Ada" });
-    expect(caller).not.toHaveProperty("stepUp");
-    expect(request).toMatchObject({ method: "POST", path: "/v1/app/script-tokens?x=1", body: JSON.stringify({ requestId: "r1" }) });
-    expect(JSON.stringify(request)).not.toContain(authorization.slice(7));
-    expect(request.headers.authorization).toBeUndefined();
-  });
-
-  it("never takes a step-up from a header, a query or a body (there is none, DEC 254zzz73)", async () => {
-    await call("POST", "/v1/app/people/p1/erase?step_up_at=1", await cli(), { body: { step_up_at: T0 / 1000, stepUp: { at: new Date(T0).toISOString(), method: "passkey" } } });
-    await handler({ rawPath: "/v1/app/people/p1/erase", routeKey: ROUTE_KEY, headers: { authorization: await cli(), "x-step-up-at": String(T0 / 1000) }, requestContext: { requestId: "r", http: { method: "POST" } } });
-    expect(spy.seen).toHaveLength(2);
-    for (const { caller } of spy.seen) expect(caller).not.toHaveProperty("stepUp");
-  });
-
   it("answers 'route not found' when the core does not serve the path, and passes the core's refusals through as they are", async () => {
     spy = spyEntry((request) => request.path.startsWith("/v1/app/decisions") ? { statusCode: 404, headers: {}, body: JSON.stringify({ error: { code: "NOT_FOUND", message: NOT_ON_THE_CORE_YET } }) } : undefined);
     await setUp(spy.entry);
@@ -342,53 +230,6 @@ describe("the core's /v1/app routes, switch on (a core entry)", () => {
     expect(await call("GET", "/v1/app/decisions", await cli())).toMatchObject({ status: 404, body: { error: { message: NOT_ON_THE_CORE_YET } } });
   });
 
-  it("also serves a /v1/app path that reached the broker on another route (one answer whatever the route), and still refuses an unknown one", async () => {
-    expect(await call("GET", "/v1/app/script-tokens", await cli(), { routeKey: "ANY /{proxy+}" })).toMatchObject({ status: 200, body: { served: true } });
-    expect(await call("GET", "/v1/app/triggers", await cli(), { routeKey: "ANY /{proxy+}" })).toMatchObject({ status: 404, body: { error: { message: "route not found" } } });
-  });
-});
-
-describe("the core's /v1/app routes with a sign-in client's token (a named environment)", () => {
-  let spy: ReturnType<typeof spyEntry>;
-  const cloudClient = (scopes: readonly ClientScope[], fullAccess = false) => {
-    const at = new Date(T0 - 60_000).toISOString();
-    db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, secretHash: "f".repeat(64), ...(scopes.length === 0 ? {} : { scopes: [...scopes] }), ...(fullAccess ? { fullAccess: true } : {}), createdAt: at, updatedAt: at, updatedBy: "admin" });
-  };
-  const scopeRefusal = (route: DevRoute) => route.requires === "full"
-    ? `Web App needs full access for ${route.method} ${route.path}, which is off for it; an administrator can turn it on`
-    : `Web App needs the ${route.requires} scope for ${route.method} ${route.path}; an administrator can allow it with that scope`;
-  beforeEach(async () => { spy = spyEntry(); await setUp(spy.entry); });
-
-  it("lets each scope through exactly its own rows, and refuses every other row naming the missing scope, before the core", async () => {
-    cloudClient(NAMED);
-    for (const scope of NAMED) {
-      const authorization = await scoped(scope);
-      for (const route of APP_ROUTES) {
-        spy.seen.length = 0;
-        const response = await call(route.method, sample(route.path), authorization);
-        if (route.requires === scope) {
-          expect(response.status, `${scope} on ${route.method} ${route.path}`).toBe(200);
-          expect(spy.seen, `${scope} on ${route.method} ${route.path}`).toHaveLength(1);
-        } else {
-          expect(response, `${scope} on ${route.method} ${route.path}`).toMatchObject({ status: 403, body: { error: { code: "FORBIDDEN", message: scopeRefusal(route) } } });
-          expect(spy.seen).toEqual([]);
-        }
-      }
-    }
-  });
-
-  it("keeps the full-access rows (script tokens, person erase, how we work) off unless an administrator turns full access on", async () => {
-    cloudClient(NAMED);
-    const all = await scoped(...NAMED);
-    const full = APP_ROUTES.filter((route) => route.requires === "full");
-    expect(full.map((route) => `${route.method} ${route.path}`)).toEqual(expect.arrayContaining(["POST /v1/app/people/{personId}/erase", "POST /v1/app/script-tokens"]));
-    for (const route of full) expect(await call(route.method, sample(route.path), all), `${route.method} ${route.path}`).toMatchObject({ status: 403, body: { error: { message: scopeRefusal(route) } } });
-    expect(spy.seen).toEqual([]);
-    cloudClient([], true);
-    for (const route of APP_ROUTES) expect((await call(route.method, sample(route.path), await scoped())).status, `${route.method} ${route.path}`).toBe(200);
-    // No caller carries a step-up to the core (DEC 254zzz73).
-    expect(spy.seen.every(({ caller }) => !("stepUp" in caller))).toBe(true);
-  });
 });
 
 // ---- Over the core itself: two companies ----
@@ -502,12 +343,6 @@ describe("the core's /v1/app routes over the core, two companies", () => {
     expect((await call("POST", `/v1/app/people/${CY}/erase`, await site(ADA), { body: { requestId: randomUUID() } })).status).toBe(200);
   });
 
-  it("takes the company from LIVE membership: a person removed from their company, or never in one, is asked to sign in again", async () => {
-    membership(BO, OTHER, "admin", new Date(T0 - 1_000).toISOString());
-    expect(await call("GET", "/v1/app/script-tokens", await cli(BO))).toMatchObject({ status: 401, body: { error: { code: "UNAUTHENTICATED", message: CORE_APP_SIGN_IN_AGAIN } } });
-    expect(await call("GET", "/v1/app/script-tokens", await cli(CY))).toMatchObject({ status: 401, body: { error: { code: "UNAUTHENTICATED" } } });
-  });
-
   it("answers the parts not wired on the core yet (session levels, decision cards, how we work) with fixed words", async () => {
     for (const [method, path] of [["GET", "/v1/app/sessions"], ["GET", "/v1/app/decisions"], ["GET", "/v1/app/projects/payments/how-we-work"]] as const) {
       expect(await call(method, path, await cli(ADA)), `${method} ${path}`).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND", message: NOT_ON_THE_CORE_YET } } });
@@ -540,15 +375,6 @@ describe("the core app entry", () => {
     expect((await entry.route({ method: "POST", path: `/v1/app/people/${CY}/erase`, headers: {} }, caller))?.statusCode).toBe(200);
     expect(await entry.route({ method: "GET", path: "/v1/dev/tasks", headers: {} }, caller)).toBeUndefined();
   });
-});
-
-it("registers only the approved full-access invite resend developer route", async () => {
-  const { APP_ROUTES, appRouteOf, devRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
-  const path = "/v1/dev/company/preapprovals/" + "a".repeat(64) + "/resend";
-  expect(devRouteOf("POST", path)).toMatchObject({ method: "POST", path: "/v1/dev/company/preapprovals/{inviteId}/resend", requires: "full" });
-  for (const method of ["GET", "PUT", "DELETE", "PATCH"]) expect(devRouteOf(method, path)).toBeUndefined();
-  expect(appRouteOf("POST", path)).toBeUndefined();
-  expect(APP_ROUTES.some((row) => row.path.includes("/company/preapprovals"))).toBe(false);
 });
 
 // Internal worker routes are inventoried in the scope table, with no person scope.

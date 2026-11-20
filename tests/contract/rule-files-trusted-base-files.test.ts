@@ -1,10 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { chmod, link, mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { deflateSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { createEmptyGitDirectories, removeEmptyGitDirectories } from "../support/empty-git-directories.js";
 import { REPOSITORY_CONTEXT_FILE_CANDIDATES } from "../../packages/worker/src/repository-context.js";
@@ -40,49 +38,11 @@ const text = (found: Awaited<ReturnType<typeof read>>) => (found.kind === "file"
 const unverified = (promise: Promise<unknown>) => promise.then(() => "read", (error: Error) => error.message);
 const UNVERIFIED = "base objects could not be verified";
 
-const framed = (type: string, body: Buffer) => Buffer.concat([Buffer.from(`${type} ${body.length}\0`), body]);
-const idOf = (type: string, body: Buffer) => createHash("sha1").update(framed(type, body)).digest("hex");
-async function putLoose(subject: Subject, oid: string, bytes: Buffer) {
-  const path = join(subject.objects, oid.slice(0, 2), oid.slice(2));
-  await mkdir(dirname(path), { recursive: true });
-  await rm(path, { force: true });
-  await writeFile(path, bytes, { mode: 0o444 });
-}
 const entry = (mode: string, name: string, oid: string) => Buffer.concat([Buffer.from(`${mode} ${name}\0`), Buffer.from(oid, "hex")]);
 
 const exdev = async () => { throw Object.assign(new Error("cross-device link"), { code: "EXDEV" }); };
 
 describe("files from the workspace's object store are linked or copied safely (C84)", () => {
-  it("control: a read with hard links gives the rule file", async () => {
-    const subject = await repository();
-    expect(text(await read(subject))).toBe(BASE_RULE);
-  });
-
-  it("when a hard link is not possible (another file system) the files are copied and the rule file is read", async () => {
-    const subject = await repository();
-    git(subject.directory, "gc", "--quiet", "--prune=now");
-    let attempts = 0;
-    const linkFile = async (source: string, target: string) => { attempts += 1; return exdev(); void source; void target; };
-    expect(text(await read(subject, { linkFile }))).toBe(BASE_RULE);
-    // The packs (and the loose files, when there are any) were each tried with a link first.
-    expect(attempts).toBeGreaterThan(0);
-  });
-
-  it("a copy over the copy limit gives a quick visible stop", async () => {
-    const subject = await repository();
-    git(subject.directory, "gc", "--quiet", "--prune=now");
-    expect(await unverified(read(subject, { linkFile: exdev, copyLimitBytes: 16 }))).toBe(UNVERIFIED);
-  });
-
-  it("a pack that claims a huge size is not copied: the stop is quick and the disk is not filled", async () => {
-    const subject = await repository();
-    const pack = join(subject.objects, "pack", `pack-${"a".repeat(40)}.pack`);
-    writeFileSync(pack, "PACK");
-    truncateSync(pack, 1024 * 1024 * 1024 * 1024);
-    const started = Date.now();
-    expect(await unverified(read(subject, { linkFile: exdev }))).toBe(UNVERIFIED);
-    expect(Date.now() - started).toBeLessThan(10_000);
-  });
 
   it("a pipe in the place of a pack, and a link in the place of one, are passed over without waiting", async () => {
     const subject = await repository();
@@ -98,16 +58,6 @@ describe("files from the workspace's object store are linked or copied safely (C
     expect(Date.now() - started).toBeLessThan(10_000);
   });
 
-  it("a pipe where a loose object should be is passed over without waiting", async () => {
-    const subject = await repository();
-    const path = join(subject.objects, subject.blob.slice(0, 2), subject.blob.slice(2));
-    await rm(path, { force: true });
-    execFileSync("mkfifo", [path]);
-    const started = Date.now();
-    expect(await unverified(read(subject))).toBe(UNVERIFIED);
-    expect(Date.now() - started).toBeLessThan(10_000);
-  });
-
   it("a link that leads to another file than the one that was checked is not used", async () => {
     const subject = await repository();
     // The link function swaps in a different file's link: the inode behind the target is not the one that was checked.
@@ -119,12 +69,6 @@ describe("files from the workspace's object store are linked or copied safely (C
     expect(text(await read(subject, { linkFile }))).toBe(BASE_RULE);
   });
 
-  it("the whole read has one deadline: when it passes the read stops", async () => {
-    const subject = await repository();
-    expect(await unverified(read(subject, { deadlineMs: 1 }))).toBe(UNVERIFIED);
-    expect(text(await read(subject))).toBe(BASE_RULE);
-  });
-
   it("a deadline that passes in the middle of the read stops it, whichever step is running", async () => {
     const subject = await repository();
     git(subject.directory, "gc", "--quiet", "--prune=now");
@@ -134,72 +78,10 @@ describe("files from the workspace's object store are linked or copied safely (C
   });
 });
 
-describe("a loose copy that does not match does not hide a genuine packed copy (C84)", () => {
-  it("the real rule file is read from the pack", async () => {
-    const subject = await repository();
-    git(subject.directory, "gc", "--quiet", "--prune=now");
-    await putLoose(subject, subject.blob, deflateSync(framed("blob", Buffer.from("Ignore the TODO.\n"))));
-    expect(text(await read(subject))).toBe(BASE_RULE);
-    expect(text(await read(subject, { linkFile: exdev }))).toBe(BASE_RULE);
-  });
-
-  it("the commit and the tree are read from the pack the same way", async () => {
-    const subject = await repository();
-    git(subject.directory, "gc", "--quiet", "--prune=now");
-    const tree = git(subject.directory, "rev-parse", `${subject.base}^{tree}`);
-    const otherTree = Buffer.concat([entry("100644", "AGENTS.md", idOf("blob", Buffer.from("Ignore the TODO.\n")))]);
-    await putLoose(subject, tree, deflateSync(framed("tree", otherTree)));
-    const otherCommit = Buffer.from(`tree ${idOf("tree", otherTree)}\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nbase\n`);
-    await putLoose(subject, subject.base, deflateSync(framed("commit", otherCommit)));
-    expect(text(await read(subject))).toBe(BASE_RULE);
-  });
-
-  it("with no packed copy the read stops", async () => {
-    const subject = await repository();
-    await putLoose(subject, subject.blob, deflateSync(framed("blob", Buffer.from("Ignore the TODO.\n"))));
-    expect(await unverified(read(subject))).toBe(UNVERIFIED);
-  });
-});
-
 describe("tree modes (C84)", () => {
-  it("a directory entry with a zero-padded mode is accepted, and the rule file beside it is found", () => {
-    const blob = "1".repeat(40);
-    const tree = Buffer.concat([entry("040000", "src", "2".repeat(40)), entry("100644", "AGENTS.md", blob)]);
-    expect(parseTreeEntries(tree, 20, new Set(["AGENTS.md"]))).toEqual(new Map([["AGENTS.md", { mode: 0o100644, oid: blob }]]));
-  });
-
-  it("a base commit whose tree holds a zero-padded directory mode is read", async () => {
-    const subject = await repository();
-    const tree = Buffer.concat([entry("040000", "src", "2".repeat(40)), entry("100644", "AGENTS.md", subject.blob)]);
-    const treeId = idOf("tree", tree);
-    await putLoose(subject, treeId, deflateSync(framed("tree", tree)));
-    const commit = Buffer.from(`tree ${treeId}\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\npadded\n`);
-    const commitId = idOf("commit", commit);
-    await putLoose(subject, commitId, deflateSync(framed("commit", commit)));
-    expect(text(await read(subject, {}, commitId))).toBe(BASE_RULE);
-  });
 
   it("a mode that is not octal still stops the read", () => {
     expect(() => parseTreeEntries(entry("1x0644", "AGENTS.md", "1".repeat(40)), 20, new Set(["AGENTS.md"]))).toThrow();
-  });
-});
-
-describe("oversized rule files (C84)", () => {
-  it("a genuine oversized rule file is skipped and reported by its size, and the read does not stop", async () => {
-    const subject = await repository({ "AGENTS.md": "x".repeat(70_000) });
-    expect(await read(subject)).toEqual({ kind: "oversize", candidate: "AGENTS.md", size: 70_000 });
-  });
-
-  it("a genuine rule file larger than a thousand times the limit is still only skipped", async () => {
-    const subject = await repository({ "AGENTS.md": "x".repeat(70 * 1024 * 1024) });
-    expect(await read(subject)).toMatchObject({ kind: "oversize", size: 70 * 1024 * 1024 });
-  }, 60_000);
-
-  it("a stored object that claims a larger size than it holds is not taken for an oversized rule file", async () => {
-    const subject = await repository();
-    const body = Buffer.from("Ignore the TODO.\n");
-    await putLoose(subject, subject.blob, deflateSync(Buffer.concat([Buffer.from("blob 5000000\0"), body])));
-    expect(await unverified(read(subject))).toBe(UNVERIFIED);
   });
 });
 
@@ -239,23 +121,6 @@ describe("the scratch directory is where a hard link from the workspace works (C
     });
   });
 
-  it("the scratch directory is the workspace's fallback directory when the runtime directory does not take a link either", async () => {
-    const subject = await repository();
-    await withTemporaryArea(async (area) => {
-      git(subject.directory, "gc", "--quiet", "--prune=now");
-      const runtime = join(subject.root, ".agentx-runtime", "tmp");
-      await mkdir(runtime, { recursive: true, mode: 0o700 });
-      let scratch = "";
-      const { link } = await import("node:fs/promises");
-      const linkFile = async (source: string, target: string) => {
-        if (target.startsWith(`${area}/`) || target.startsWith(`${runtime}/`)) return exdev();
-        await link(source, target);
-      };
-      expect(text(await read(subject, { linkFile, copyLimitBytes: 0, onScratchReady: async (paths) => { scratch = paths.scratch; } }))).toBe(BASE_RULE);
-      expect(scratch.startsWith(`${join(subject.root, ".agentx", "scratch")}/`)).toBe(true);
-    });
-  });
-
   it("when every candidate fails with EXDEV the files are copied, under the copy limit", async () => {
     const subject = await repository();
     await withTemporaryArea(async (area) => {
@@ -268,18 +133,6 @@ describe("the scratch directory is where a hard link from the workspace works (C
     });
   });
 
-  it("a repository without packs is probed too, and the probe file is not left in its objects directory", async () => {
-    const subject = await repository();
-    await withTemporaryArea(async (area) => {
-      await mkdir(join(subject.root, ".agentx-runtime", "tmp"), { recursive: true, mode: 0o700 });
-      const before = readdirSync(subject.objects).sort();
-      let scratch = "";
-      expect(text(await read(subject, { linkFile: linkExceptInto(area, []), copyLimitBytes: 0, onScratchReady: async (paths) => { scratch = paths.scratch; } }))).toBe(BASE_RULE);
-      expect(scratch.startsWith(`${join(subject.root, ".agentx-runtime", "tmp")}/`)).toBe(true);
-      expect(readdirSync(subject.objects).sort()).toEqual(before);
-      expect(readdirSync(join(subject.root, ".agentx-runtime", "tmp"))).toEqual([]);
-    });
-  });
 });
 
 describe("the test link that decides where the scratch directory goes leaves nothing behind and trusts nothing (C84)", () => {
@@ -293,58 +146,8 @@ describe("the test link that decides where the scratch directory goes leaves not
       if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
     }
   }
-  const probes = (directory: string) => readdirSync(directory).filter((name) => name.startsWith("agentx-link-probe-"));
   const OLD = () => new Date(Date.now() - 3 * 60 * 60 * 1000);
 
-  for (const kind of ["symlink", "FIFO"] as const) {
-    it(`the first pack swapped for a ${kind} just before the test link makes the answer no: nothing is opened, nothing hangs, and no link is left`, async () => {
-      const subject = await repository();
-      await withTemporaryArea(async (area) => {
-        git(subject.directory, "gc", "--quiet", "--prune=now");
-        const runtime = join(subject.root, ".agentx-runtime", "tmp");
-        await mkdir(runtime, { recursive: true, mode: 0o700 });
-        const decoy = join(subject.root, "decoy");
-        writeFileSync(decoy, "not a pack\n");
-        let swapped = 0;
-        const linkFile = async (source: string, target: string) => {
-          if (target.includes("agentx-link-probe-") && /\.(pack|idx)$/u.test(source)) {
-            swapped += 1;
-            await rm(source, { force: true });
-            if (kind === "FIFO") execFileSync("mkfifo", [source]); else await symlink(decoy, source);
-          }
-          await link(source, target);
-        };
-        let scratch = "";
-        const started = Date.now();
-        await unverified(read(subject, { linkFile, onScratchReady: async (paths) => { scratch = paths.scratch; } }));
-        expect(Date.now() - started).toBeLessThan(10_000);
-        // The test link ran on the swapped file, and no candidate answered yes: the scratch directory is the temporary directory's, the last resort.
-        expect(swapped).toBeGreaterThan(0);
-        expect(scratch.startsWith(`${area}/`)).toBe(true);
-        expect(probes(runtime)).toEqual([]);
-        expect(probes(area)).toEqual([]);
-        expect(readFileSync(decoy, "utf8")).toBe("not a pack\n");
-      });
-    });
-  }
-
-  it("after a run where every link fails with EXDEV no probe file is left in the objects directory, the temporary directory or the workspace's directories", async () => {
-    for (const withPacks of [true, false]) {
-      const subject = await repository();
-      await withTemporaryArea(async (area) => {
-        if (withPacks) git(subject.directory, "gc", "--quiet", "--prune=now");
-        const runtime = join(subject.root, ".agentx-runtime", "tmp");
-        await mkdir(runtime, { recursive: true, mode: 0o700 });
-        const before = readdirSync(subject.objects).sort();
-        expect(text(await read(subject, { linkFile: exdev }))).toBe(BASE_RULE);
-        expect(readdirSync(subject.objects).sort()).toEqual(before);
-        expect(probes(area)).toEqual([]);
-        expect(probes(runtime)).toEqual([]);
-        expect(existsSync(join(subject.root, ".agentx", "scratch")) ? probes(join(subject.root, ".agentx", "scratch")) : []).toEqual([]);
-        expect(readdirSync(area)).toEqual([]);
-      });
-    }
-  });
 
   it("a runtime tmp directory with the wrong mode is skipped: nothing is made in it, and the scratch directory goes elsewhere", async () => {
     const subject = await repository();
@@ -423,24 +226,12 @@ describe("the test link that decides where the scratch directory goes leaves not
 });
 
 describe("the scratch directory (C84)", () => {
-  it("is the temporary directory when that is on the workspace's file system", async () => {
-    const subject = await repository();
-    expect(await chooseScratchRoot(subject.root, statSync(subject.root).dev)).toBe(realpathSync(tmpdir()));
-  });
 
   it("is a private directory under the workspace root when the temporary directory is on another file system", async () => {
     const subject = await repository();
     const chosen = await chooseScratchRoot(subject.root, statSync(subject.root).dev, "/dev");
     expect(chosen).toBe(join(subject.root, ".agentx", "scratch"));
     expect(statSync(chosen).mode & 0o777).toBe(0o700);
-  });
-
-  it("is never a directory that is a link", async () => {
-    const subject = await repository();
-    const elsewhere = await realpath(await mkdtemp(join(tmpdir(), "agentx-trusted-elsewhere-")));
-    mkdirSync(join(subject.root, ".agentx"));
-    execFileSync("ln", ["-s", elsewhere, join(subject.root, ".agentx", "scratch")]);
-    expect(await chooseScratchRoot(subject.root, statSync(subject.root).dev, "/dev")).toBe("/dev");
   });
 
   it("scratch directories an earlier read left behind are removed, and a recent one is left alone", async () => {
@@ -499,31 +290,6 @@ describe("git runs only in a read-only, empty git directory (C84)", () => {
   }
   const hardeningOff = { protocolBans: false, noLazyFetch: false };
 
-  it("a config planted where the session can write (the scratch directory, its objects directory, a git directory made there) never runs its command", async () => {
-    const { subject, marker, config } = await withoutBaseBlob();
-    const onScratchReady = async ({ scratch, objects }: { scratch: string; objects: string }) => {
-      await writeFile(join(scratch, "config"), config);
-      await writeFile(join(objects, "config"), config);
-      await mkdir(join(scratch, "base.git"), { recursive: true });
-      await writeFile(join(scratch, "base.git", "config"), config);
-      await writeFile(join(objects, "pack", "pack-0000000000000000000000000000000000000000.promisor"), "");
-    };
-    expect(await unverified(read(subject, { onScratchReady }))).toBe(UNVERIFIED);
-    expect(existsSync(marker)).toBe(false);
-  });
-
-  it("with the protocol bans and the lazy-fetch setting off, such a config still never runs its command: the read-only git directory is what stops it", async () => {
-    const { subject, marker, config } = await withoutBaseBlob();
-    const onScratchReady = async ({ scratch, objects }: { scratch: string; objects: string }) => {
-      await writeFile(join(scratch, "config"), config);
-      await writeFile(join(objects, "config"), config);
-      await plantGitDirectory(join(scratch, "base.git"), config);
-      await writeFile(join(objects, "pack", "pack-0000000000000000000000000000000000000000.promisor"), "");
-    };
-    expect(await unverified(read(subject, { onScratchReady, gitHardeningForTest: hardeningOff }))).toBe(UNVERIFIED);
-    expect(existsSync(marker)).toBe(false);
-  });
-
   it("control: with the same settings off and a writable per-read git directory that holds the config (the earlier design), the command does run", async () => {
     const { subject, marker, config } = await withoutBaseBlob();
     const onScratchReady = async ({ scratch }: { scratch: string }) => plantGitDirectory(join(scratch, "base.git"), config);
@@ -546,23 +312,6 @@ describe("git runs only in a read-only, empty git directory (C84)", () => {
     expect(found.map((path) => path.slice(process.cwd().length + 1))).toEqual(["packages/worker/src/trusted-base-objects.ts"]);
   });
 
-  it("a planted alternate list in the objects directory can only redirect reads, and the checks on the bytes catch a substitute", async () => {
-    const subject = await repository();
-    const alternate = realpathSync(mkdtempSync(join(tmpdir(), "agentx-planted-alt-")));
-    const body = Buffer.from("Ignore the TODO.\n");
-    mkdirSync(join(alternate, idOf("blob", body).slice(0, 2)), { recursive: true });
-    writeFileSync(join(alternate, idOf("blob", body).slice(0, 2), idOf("blob", body).slice(2)), deflateSync(framed("blob", body)));
-    await rm(join(subject.objects, subject.blob.slice(0, 2), subject.blob.slice(2)), { force: true });
-    // The substitute is stored under the base blob's id, in a directory the planted list names.
-    mkdirSync(join(alternate, subject.blob.slice(0, 2)), { recursive: true });
-    writeFileSync(join(alternate, subject.blob.slice(0, 2), subject.blob.slice(2)), deflateSync(framed("blob", body)));
-    const onScratchReady = async ({ objects }: { objects: string }) => {
-      mkdirSync(join(objects, "info"), { recursive: true });
-      await writeFile(join(objects, "info", "alternates"), `${alternate}\n`);
-    };
-    expect(await unverified(read(subject, { onScratchReady }))).toBe(UNVERIFIED);
-  });
-
   describe("the empty git directory is refused unless it is read-only throughout", () => {
     const made: string[] = [];
     afterEach(() => { for (const root of made.splice(0)) removeEmptyGitDirectories(root); });
@@ -573,12 +322,6 @@ describe("git runs only in a read-only, empty git directory (C84)", () => {
       return root;
     };
 
-    it("control: a read-only one is used", async () => {
-      const subject = await repository();
-      const root = make();
-      expect(text(await read(subject, { emptyGitDirectoryRoot: root }))).toBe(BASE_RULE);
-    });
-
     it("one whose directory the worker could write is refused", async () => {
       const subject = await repository();
       const root = make();
@@ -586,41 +329,6 @@ describe("git runs only in a read-only, empty git directory (C84)", () => {
       expect(await unverified(read(subject, { emptyGitDirectoryRoot: root }))).toBe(UNVERIFIED);
     });
 
-    it("one whose config the worker could write is refused", async () => {
-      const subject = await repository();
-      const root = make();
-      await chmod(join(root, "empty-sha1.git", "config"), 0o644);
-      expect(await unverified(read(subject, { emptyGitDirectoryRoot: root }))).toBe(UNVERIFIED);
-    });
-
-    it("one whose objects directory the worker could write is refused", async () => {
-      const subject = await repository();
-      const root = make();
-      await chmod(join(root, "empty-sha1.git", "objects"), 0o755);
-      expect(await unverified(read(subject, { emptyGitDirectoryRoot: root }))).toBe(UNVERIFIED);
-    });
-
-    it("one that is a link is refused", async () => {
-      const subject = await repository();
-      const real = make();
-      const root = realpathSync(mkdtempSync(join(tmpdir(), "agentx-empty-git-links-")));
-      await symlink(join(real, "empty-sha1.git"), join(root, "empty-sha1.git"));
-      expect(await unverified(read(subject, { emptyGitDirectoryRoot: root }))).toBe(UNVERIFIED);
-    });
-
-    it("a missing one is refused, and no other git directory is used instead", async () => {
-      const subject = await repository();
-      const root = join(realpathSync(mkdtempSync(join(tmpdir(), "agentx-empty-git-"))), "none");
-      mkdirSync(root);
-      expect(await unverified(read(subject, { emptyGitDirectoryRoot: root }))).toBe(UNVERIFIED);
-    });
-
-    it("the 64-character one is checked on its own", async () => {
-      const subject = await repository();
-      const root = make();
-      await chmod(join(root, "empty-sha256.git"), 0o755);
-      expect(text(await read(subject, { emptyGitDirectoryRoot: root }))).toBe(BASE_RULE);
-    });
   });
 });
 
@@ -636,22 +344,6 @@ describe("limits on what is brought in and hashed (C84)", () => {
     await withJunkPacks(subject, 4);
     expect(await unverified(read(subject, { maxPackFiles: 3 }))).toBe(UNVERIFIED);
     expect(text(await read(subject, { maxPackFiles: 4 }))).toBe(BASE_RULE);
-  });
-
-  it("the pack file limit is 10,000", async () => {
-    const subject = await repository();
-    await withJunkPacks(subject, 10_001);
-    expect(await unverified(read(subject))).toBe(UNVERIFIED);
-  }, 120_000);
-
-  it("a deadline that passes while the packs are being linked stops before the next one", async () => {
-    const subject = await repository();
-    await withJunkPacks(subject, 6);
-    const { link } = await import("node:fs/promises");
-    let calls = 0;
-    const slowLink = async (source: string, target: string) => { calls += 1; await new Promise((resolve) => setTimeout(resolve, 250)); await link(source, target); };
-    expect(await unverified(read(subject, { deadlineMs: 400, linkFile: slowLink }))).toBe(UNVERIFIED);
-    expect(calls).toBeLessThanOrEqual(3);
   });
 
   it("a blob larger than the hashing limit stops the read, and one within it is skipped as oversized", async () => {

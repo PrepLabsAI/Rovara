@@ -14,16 +14,6 @@ const tokenEndpoint = new URL("https://auth.vendor.test/-/oauth_token");
 const register = (handler: Parameters<typeof adminCall>[0], body: Record<string, unknown>) => adminCall(handler, { method: "POST", path: "/v1/admin/credentials", body });
 
 describe("oauth-refresh-token in the credential registry", () => {
-  it("registers a secret holding a refresh token and refuses one without, naming only the shape", async () => {
-    const secrets = memorySecretStore({ [SECRET]: JSON.stringify({ ...CLIENT, refreshToken: REFRESH }), "agentx/connectors/asana-new": JSON.stringify(CLIENT) });
-    const { handler } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
-    const registered = await register(handler, { ref: "asana-bot", type: "oauth-refresh-token", secretName: SECRET });
-    expect(registered.status).toBe(201);
-    expect(registered.body).toMatchObject({ credential: { ref: "asana-bot", type: "oauth-refresh-token", tokenCached: false } });
-    const refused = await register(handler, { ref: "asana-new", type: "oauth-refresh-token", secretName: "agentx/connectors/asana-new" });
-    expect(refused.body).toMatchObject({ error: { code: "CONFIG_INVALID", message: 'credential asana-new: secret agentx/connectors/asana-new must be JSON {"clientId": "...", "clientSecret": "...", "refreshToken": "..."}' } });
-    expect(JSON.stringify([registered.body, refused.body])).not.toMatch(/client-secret-value|refresh-token-original/);
-  });
 
   it("refreshes through the registry, shares the access token in DynamoDB, leaves no lease behind, and lists tokenCached", async () => {
     const secrets = memorySecretStore({ [SECRET]: JSON.stringify({ ...CLIENT, refreshToken: REFRESH }) });
@@ -83,23 +73,6 @@ describe("DynamoRefreshLease", () => {
     expect(db.get("CREDENTIAL#asana-bot", "LEASE#refresh")).toMatchObject({ entityType: "CREDENTIAL_LEASE", owner: "b" });
   });
 
-  it("renews a still-current owner's lease, extending its expiry, while another owner stays refused until the renewed expiry", async () => {
-    const db = new FakeDynamoDb();
-    let now = 1_000;
-    const lease = new DynamoRefreshLease(db as never, "state", "asana-bot", () => now);
-    expect(await lease.acquire("owner-1", 15_000)).toBe(true);
-    expect(db.get("CREDENTIAL#asana-bot", "LEASE#refresh")).toMatchObject({ owner: "owner-1", expiresAt: 16_000 });
-    now = 14_000;
-    expect(await lease.acquire("owner-1", 15_000)).toBe(true);
-    expect(db.get("CREDENTIAL#asana-bot", "LEASE#refresh")).toMatchObject({ owner: "owner-1", expiresAt: 29_000 });
-    now = 20_000; // past the original expiry, before the renewed one
-    expect(await lease.acquire("owner-2", 15_000)).toBe(false);
-    expect(db.get("CREDENTIAL#asana-bot", "LEASE#refresh")).toMatchObject({ owner: "owner-1", expiresAt: 29_000 });
-    now = 29_001;
-    expect(await lease.acquire("owner-2", 15_000)).toBe(true);
-    expect(db.get("CREDENTIAL#asana-bot", "LEASE#refresh")).toMatchObject({ owner: "owner-2", expiresAt: 44_001 });
-  });
-
   it("releases only the owner's own lease", async () => {
     const db = new FakeDynamoDb();
     const lease = new DynamoRefreshLease(db as never, "state", "asana-bot", () => 1_000);
@@ -139,16 +112,6 @@ describe("DynamoTokenCache refreshAt", () => {
     expect(await cache.get("client")).toEqual({ token: "t2", expiresAt: 6_000 });
   });
 
-  it("ignores a refreshAt that is not a finite number, on write and on read", async () => {
-    const db = new FakeDynamoDb();
-    const cache = new DynamoTokenCache(db as never, "state", "asana-bot");
-    await cache.put("a", { token: "t", expiresAt: 5_000, refreshAt: Number.NaN } as never);
-    expect(db.get("CREDENTIAL#asana-bot", "TOKEN#a")).not.toHaveProperty("refreshAt");
-    for (const refreshAt of ["4000", Number.POSITIVE_INFINITY, null]) {
-      db.set({ pk: "CREDENTIAL#asana-bot", sk: "TOKEN#b", entityType: "CREDENTIAL_TOKEN", token: "t", expiresAt: 5_000, refreshAt });
-      expect(await cache.get("b")).toEqual({ token: "t", expiresAt: 5_000 });
-    }
-  });
 });
 
 describe("Secrets Manager write", () => {

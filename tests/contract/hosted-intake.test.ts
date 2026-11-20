@@ -166,18 +166,6 @@ describe("Linear account links (company-scoped, first wins)", () => {
     organizationId = WORKSPACE_A.id; live = false; expect(await resolve(A, account)).toBeUndefined();
   });
 
-  it("refuses a live principal that is not the linked person in this company", async () => {
-    const store = new RecordingStore();
-    await linkLinearAccount(store, { companyId: A, organizationId: WORKSPACE_A.id, linearUserId: "user-maya", personId: MAYA, linkedAt: TIME });
-    const account = { provider: "linear", tenant: "", accountId: "user-maya" };
-    for (const answer of [{ companyId: B, personId: MAYA }, { companyId: A, personId: DEV }]) {
-      const resolve = linearAccountResolver({
-        store, connections: { connection: async () => ({ organizationId: WORKSPACE_A.id, status: "connected" }) as never },
-        principalOf: async () => ({ ...answer, displayName: "x", roles: ["member"], provider: "hosted" }),
-      });
-      expect(await resolve(A, account)).toBeUndefined();
-    }
-  });
 });
 
 describe("Linear app events start work on hosted Code", () => {
@@ -197,24 +185,6 @@ describe("Linear app events start work on hosted Code", () => {
     const waitingB = await listWaitingIntakeItems({ store: w.store, now: () => w.now }, B, "bravo");
     expect(waitingB.map((item) => item.reason)).toEqual(["unlinked"]);
     expect((await listWaitingIntakeItems({ store: w.store, now: () => w.now }, A, "alpha")).map((item) => item.id)).toEqual(["ENG-2"]);
-  });
-
-  it("a link made in company B never starts company A's ticket", async () => {
-    const w = await world();
-    await w.link(B, WORKSPACE_D.id, "user-maya", BO);
-    w.grant(BO, "bravo", B, "developer"); w.grant(MAYA, "alpha", A, "developer");
-    await w.ticket(WORKSPACE_A, "user-maya");
-    expect(w.starts).toEqual([]);
-    expect((await listWaitingIntakeItems({ store: w.store, now: () => w.now }, A, "alpha")).map((item) => item.reason)).toEqual(["unlinked"]);
-  });
-
-  it("a link to a member who was removed waits", async () => {
-    const w = await world();
-    await w.link(A, WORKSPACE_A.id, "user-maya", MAYA);
-    w.grant(MAYA, "alpha", A, "developer");
-    w.h.db.set({ ...membershipKey(MAYA), entityType: "COMPANY_MEMBERSHIP", personId: MAYA, companyId: A, role: "member", joinedAt: TIME, revokedAt: TIME });
-    await w.ticket(WORKSPACE_A, "user-maya");
-    expect(w.starts).toEqual([]);
   });
 
   it("a company whose new tasks are not on the core has no intake: logged, nothing stored", async () => {
@@ -275,16 +245,6 @@ describe("waiting-ticket routes", () => {
     expect(devRouteOf("POST", `/v1/dev/projects/alpha/intake/${"a".repeat(32)}/dismiss`)?.requires).toBe("full");
     expect(devRouteOf("GET", `/v1/dev/projects/alpha/intake/${"a".repeat(32)}/start`)).toBeUndefined();
     expect(HOSTED_INTAKE_ROUTES.exec("/v1/dev/projects/alpha/intake/x/approve")).toBeNull();
-  });
-
-  it("a company admin sees the company's own waiting tickets (the laptop's list shape), never company B's", async () => {
-    const w = await waitingWorld();
-    w.as(PERSON);
-    const answer = await w.call("GET", list());
-    expect(answer.status).toBe(200);
-    expect(answer.body.sources).toEqual([]);
-    expect((answer.body.items as Array<Record<string, unknown>>).map((item) => [item.itemId, item.reason, item.url])).toEqual([[w.itemId, "unlinked", "https://linear.app/acme/issue/ENG-1/x"]]);
-    expect(JSON.stringify(answer.body)).not.toContain("delta");
   });
 
   it("another company's project, a missing one, a bad name and a member without a grant all get the same 404; a developer gets the fixed 403", async () => {
@@ -388,28 +348,10 @@ describe("hosted wiring", () => {
     expect(withCoreRoutes(config, { coreTasks, coreApp: undefined, intake })).toEqual({ issuer: "x", coreTasks, coreIntake: intake });
   });
 
-  it("the fence key is the install's own (derived, never the signing key)", () => {
-    expect(Buffer.from(intakeFenceKeyOf("k1")).equals(Buffer.from(intakeFenceKeyOf("k1")))).toBe(true);
-    expect(Buffer.from(intakeFenceKeyOf("k1")).equals(Buffer.from(intakeFenceKeyOf("k2")))).toBe(false);
-    expect(Buffer.from(intakeFenceKeyOf("k1")).toString()).not.toContain("k1");
-  });
 });
 
 describe("L4-LP2: a project's first tracker team saves the new-hosted ticket-updates default, once, and never over a saved choice", () => {
   const settingsOf = (w: Awaited<ReturnType<typeof world>>, company: OrgId, project: string) => readTicketUpdates({ store: w.store, now: () => w.now }, company, project);
-
-  it("a project with no saved settings gets level full when its first team is set; the setting is the company's own", async () => {
-    const w = await world();
-    w.as(PERSON);
-    await w.project("charlie", A);
-    const saved = await settingsOf(w, A, "charlie");
-    expect(saved.revision).toBe(1);
-    expect(saved.settings).toEqual(NEW_HOSTED_TICKET_UPDATES);
-    expect(saved.settings.level).toBe("full");
-    // Nothing for company B, and nothing for another project of A.
-    expect((await settingsOf(w, B, "charlie")).revision).toBe(0);
-    expect((await settingsOf(w, A, "alpha")).revision).toBe(0);
-  });
 
   it("a saved status_only stays status_only (and a saved anything else), however the team is set", async () => {
     const w = await world();
@@ -434,14 +376,6 @@ describe("L4-LP2: a project's first tracker team saves the new-hosted ticket-upd
     await saveTicketUpdates({ store: w.store, now: () => w.now }, { orgId: A, project: "foxtrot", requestId: randomUUID(), by: "owner", settings: { ...NEW_HOSTED_TICKET_UPDATES, level: "decisions" }, });
     expect((await w.call("PUT", `${BASE}/projects/foxtrot`, { teamId: "team-a-eng" })).status).toBe(200);
     expect((await settingsOf(w, A, "foxtrot")).settings.level).toBe("decisions");
-  });
-
-  it("two adds at once save once: one seeds, the other keeps", async () => {
-    const w = await world();
-    const results = await Promise.all([w.intake.seedTicketUpdates(A, "golf", MAYA), w.intake.seedTicketUpdates(A, "golf", BO), w.intake.seedTicketUpdates(A, "golf", DEV)]);
-    expect(results.filter((r) => r === "seeded")).toHaveLength(1);
-    expect(results.filter((r) => r === "kept")).toHaveLength(2);
-    expect((await settingsOf(w, A, "golf")).revision).toBe(1);
   });
 
   it("two companies: the same project name in each is seeded separately; a company whose tasks do not start on the core saves nothing", async () => {

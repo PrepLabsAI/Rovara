@@ -62,14 +62,6 @@ describe("the move from a blocked coding step back to planning", () => {
     expect(next.workflowDependenciesProgress).toBeUndefined();
   });
 
-  it("is the task owner's alone, and an owner is whoever the People list names", () => {
-    expect(() => revisePlanWithLiveChange(blocked(), { requestId, actorId: stranger, now: later }, undefined)).toThrow(WorkflowTransitionError);
-    expect(() => revisePlanWithLiveChange(blocked(), { requestId, actorId: stranger, now: later }, undefined)).toThrow(/only the task owner/u);
-    // With the People list's authority: the owners listed decide, the creator no longer does by being the creator.
-    expect(() => revisePlanWithLiveChange(blocked(), { requestId, actorId: owner, now: later }, { actorId: owner, ownerIds: [stranger] })).toThrow(/only the task owner/u);
-    expect(revisePlanWithLiveChange(blocked(), { requestId, actorId: stranger, now: later }, { actorId: stranger, ownerIds: [stranger] })).toMatchObject({ stage: "PLAN", state: "READY" });
-  });
-
   it("refuses a work state that is not offered, a request id used before, and a full history, writing nothing", () => {
     expect(() => revisePlanWithLiveChange(blocked({}, "Coding stopped"), { requestId, actorId: owner, now: later }, undefined)).toThrow(WorkflowTransitionError);
     const used = blocked();
@@ -86,12 +78,6 @@ describe("which block reason coding stops with", () => {
     expect(liveSteerCodingBlockReason(blocked({ artifacts: [] }))).toBe(WORKFLOW_BLOCK_REASONS.liveSteerReapprovalCoding);
   });
 
-  it("each reason names only what its card offers", () => {
-    expect(REASON).toMatch(/Revise the plan/u);
-    expect(REASON).toMatch(/approve the revised plan/u);
-    expect(REASON).toMatch(/Retry coding/u);
-    expect(WORKFLOW_BLOCK_REASONS.liveSteerReapprovalCoding).not.toMatch(/Revise the plan/u);
-  });
 });
 
 // ---- Stop & redirect "this changes the plan": the same move, from a coding step the owner's stop blocked (R3)

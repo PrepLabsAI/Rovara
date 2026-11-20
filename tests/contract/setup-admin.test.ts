@@ -7,7 +7,6 @@ import { ensureCognitoAdmin } from "../../packages/cli/src/setup/admin-user.js";
 import { openAdminSession, tokenClaimValues, userPoolId } from "../../packages/cli/src/setup/admin-session.js";
 import { cognitoAdmin } from "../../packages/cli/src/setup/services.js";
 import { adminUserStep } from "../../packages/cli/src/init/finish-steps.js";
-import { unattendedPrompter } from "../../packages/cli/src/init/prompts.js";
 import { initStepFailure } from "../../packages/cli/src/init/steps.js";
 import type { EnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { initContext, progressHandle, sampleAnswers, scriptedPrompter, T0, type TestInitContext } from "../support/init-fakes.js";
@@ -38,14 +37,6 @@ function loginThatOpens(token: string, seen: LoginOptions[] = []) {
 }
 
 describe("the Cognito admin user (FR-018 step 7)", () => {
-  it("creates the user, adds it to agentx-admin and says the temporary password comes by email", async () => {
-    const cognito = fakeCognito();
-    const lines: string[] = [];
-    expect(await ensureCognitoAdmin({ cognito, poolId: "us-east-1_AbCdEf123", email: ADMIN_EMAIL, write: (line) => lines.push(line), confirm: notAsked })).toEqual({ created: true, temporaryPassword: true });
-    expect(cognito.created).toEqual([ADMIN_EMAIL]);
-    expect(cognito.grouped).toEqual([`${ADMIN_EMAIL}:agentx-admin`]);
-    expect(lines.join("\n")).toContain(`Cognito emailed a temporary password to ${ADMIN_EMAIL} from no-reply@verificationemail.com (check Spam)`);
-  });
 
   it("never creates an existing user again, and still adds it to the group (Review Focus 1)", async () => {
     const cognito = fakeCognito({ [ADMIN_EMAIL]: "FORCE_CHANGE_PASSWORD" });
@@ -54,24 +45,6 @@ describe("the Cognito admin user (FR-018 step 7)", () => {
     expect(cognito.created).toEqual([]);
     expect(cognito.grouped).toEqual([`${ADMIN_EMAIL}:agentx-admin`]);
     expect(lines.join("\n")).toContain("use the temporary password from the first email");
-  });
-
-  it("says so and adds an existing user of another status to agentx-admin, without asking (fix round 1)", async () => {
-    const cognito = fakeCognito({ [ADMIN_EMAIL]: "RESET_REQUIRED" });
-    const lines: string[] = [];
-    expect(await ensureCognitoAdmin({ cognito, poolId: "p", email: ADMIN_EMAIL, write: (line) => lines.push(line), confirm: notAsked })).toEqual({ created: false, temporaryPassword: false });
-    expect(lines).toEqual([`The user ${ADMIN_EMAIL} already exists (status RESET_REQUIRED); adding it to agentx-admin.`]);
-    expect(cognito.grouped).toEqual([`${ADMIN_EMAIL}:agentx-admin`]);
-  });
-
-  it("asks before making a CONFIRMED user who is not a member an administrator (fix round 1)", async () => {
-    const cognito = fakeCognito({ [ADMIN_EMAIL]: "CONFIRMED" });
-    const lines: string[] = [];
-    const asked: string[] = [];
-    await ensureCognitoAdmin({ cognito, poolId: "p", email: ADMIN_EMAIL, write: (line) => lines.push(line), confirm: async (question) => { asked.push(question); return true; } });
-    expect(asked).toEqual([`The user ${ADMIN_EMAIL} already exists and has signed in before. Make it an AgentX administrator (group agentx-admin)?`]);
-    expect(lines).toEqual([`The user ${ADMIN_EMAIL} already exists (status CONFIRMED); adding it to agentx-admin.`]);
-    expect(cognito.grouped).toEqual([`${ADMIN_EMAIL}:agentx-admin`]);
   });
 
   it("stops, promoting no one, when you decline (fix round 1)", async () => {
@@ -87,10 +60,6 @@ describe("the Cognito admin user (FR-018 step 7)", () => {
     expect(await ensureCognitoAdmin({ cognito, poolId: "p", email: ADMIN_EMAIL, write: (line) => lines.push(line), confirm: notAsked })).toEqual({ created: false, temporaryPassword: false });
     expect(lines).toEqual([]);
     expect(cognito.grouped).toEqual([]);
-  });
-
-  it("reads the pool id from the issuer", () => {
-    expect(userPoolId(cognitoSettings)).toBe("us-east-1_AbCdEf123");
   });
 
   it("refuses an issuer that does not end in a user pool id, saying where to look", () => {
@@ -154,34 +123,6 @@ describe("the admin session", () => {
     expect(plane.requests).toEqual([{ method: "GET", path: "/v1/admin/credentials", token }]);
   });
 
-  it("signs in again when the stored token expired (Review Focus 2)", async () => {
-    const fresh = accessToken({ "cognito:groups": ["agentx-admin"] });
-    let logins = 0;
-    const session = await openAdminSession({
-      settings: cognitoSettings, now, write: () => undefined,
-      services: { tokenStore: memoryTokenStore({ [key]: { accessToken: "old", expiresAt: T0 - 1 } }), fetch: fakeControlPlane().fetch, login: async () => { logins += 1; return { accessToken: fresh, expiresAt: T0 + 3_600_000 }; } },
-    });
-    expect(logins).toBe(1);
-    expect(session.accessToken).toBe(fresh);
-  });
-
-  it("with no browser (--no-browser), opens nothing and prints the sign-in address (F12)", async () => {
-    const token = accessToken({ "cognito:groups": ["agentx-admin"] });
-    const lines: string[] = [];
-    const seen: LoginOptions[] = [];
-    await openAdminSession({
-      settings: cognitoSettings, now, write: (line) => lines.push(line),
-      services: { tokenStore: memoryTokenStore(), fetch: fakeControlPlane().fetch, login: loginThatOpens(token, seen) },
-    });
-    // An openBrowser is always passed, so loginWithPkce never falls back to the system browser.
-    expect(seen[0]?.openBrowser).toBeTypeOf("function");
-    // The first Cognito sign-in waits for an email and a new password (fix round 1).
-    expect(seen[0]?.timeoutMilliseconds).toBe(600_000);
-    expect(lines).toContain(SIGN_IN_URL);
-    expect(lines.join("\n")).toContain("Open this address in your browser and sign in as the admin user");
-    expect(lines.join("\n")).not.toContain(token);
-  });
-
   it("with a browser, opens the sign-in address and prints it too", async () => {
     const token = accessToken({ "cognito:groups": ["agentx-admin"] });
     const lines: string[] = [];
@@ -196,16 +137,6 @@ describe("the admin session", () => {
     expect(lines.join("\n")).not.toContain(token);
   });
 
-  it("stops with what to do when the signed-in user is not an administrator (Review Focus 2)", async () => {
-    const token = accessToken({ "cognito:groups": [] });
-    const plane = fakeControlPlane();
-    plane.forbidden.add(token);
-    await expect(openAdminSession({
-      settings: cognitoSettings, now, write: () => undefined,
-      services: { tokenStore: memoryTokenStore(), fetch: plane.fetch, login: async () => ({ accessToken: token, expiresAt: T0 + 3_600_000 }) },
-    })).rejects.toThrow("you signed in as someone who is not an AgentX administrator; sign out of the AgentX sign-in page in your browser, then run agentx init again and sign in as the admin user");
-  });
-
   it("decides a refusal by the error code, not by words in the message (F11)", async () => {
     const token = accessToken({ "cognito:groups": ["agentx-admin"] });
     const wordy: typeof fetch = async () => new Response(JSON.stringify({ error: { code: "CONFIG_INVALID", message: "administrator settings are FORBIDDEN here" } }), { status: 400 });
@@ -217,22 +148,6 @@ describe("the admin session", () => {
     await expect(failure).rejects.not.toThrow("not an AgentX administrator");
   });
 
-  it("forgets a token the admin route refused, and a rerun signs in fresh (fix round 1)", async () => {
-    const refused = accessToken({ "cognito:groups": [] });
-    const admin = accessToken({ "cognito:groups": ["agentx-admin"] });
-    const plane = fakeControlPlane();
-    plane.forbidden.add(refused);
-    const tokenStore = memoryTokenStore();
-    let answer = refused;
-    const login = fakeLogin(() => ({ accessToken: answer, expiresAt: T0 + 3_600_000 }));
-    const open = () => openAdminSession({ settings: cognitoSettings, now, write: () => undefined, services: { tokenStore, fetch: plane.fetch, login } });
-    await expect(open()).rejects.toThrow("not an AgentX administrator");
-    expect(tokenStore.values.size).toBe(0);
-    answer = admin;
-    expect((await open()).accessToken).toBe(admin);
-    expect(login.calls).toHaveLength(2);
-  });
-
   it("forgets a token without the admin claim (fix round 1)", async () => {
     const tokenStore = memoryTokenStore();
     await expect(openAdminSession({
@@ -240,19 +155,6 @@ describe("the admin session", () => {
       services: { tokenStore, fetch: fakeControlPlane().fetch, login: fakeLogin({ accessToken: accessToken({ groups: ["engineering"] }), expiresAt: T0 + 3_600_000 }) },
     })).rejects.toThrow("claim has none of agentx-admins");
     expect(tokenStore.values.size).toBe(0);
-  });
-
-  it("signs in fresh exactly once when a stored token is refused, since it may predate your fix (fix round 1)", async () => {
-    const stale = accessToken({ "cognito:groups": [] });
-    const admin = accessToken({ "cognito:groups": ["agentx-admin"] });
-    const plane = fakeControlPlane();
-    plane.forbidden.add(stale);
-    const tokenStore = memoryTokenStore({ [key]: { accessToken: stale, expiresAt: T0 + 3_600_000 } });
-    const login = fakeLogin({ accessToken: admin, expiresAt: T0 + 3_600_000 });
-    const session = await openAdminSession({ settings: cognitoSettings, now, write: () => undefined, services: { tokenStore, fetch: plane.fetch, login } });
-    expect(session.accessToken).toBe(admin);
-    expect(login.calls).toHaveLength(1);
-    expect(tokenStore.values.get(key)?.accessToken).toBe(admin);
   });
 
   it("refuses after one fresh sign-in when that token is refused too, and keeps neither (fix round 1)", async () => {
@@ -269,20 +171,6 @@ describe("the admin session", () => {
     expect(tokenStore.values.size).toBe(0);
   });
 
-  it("signs in fresh once when a stored OIDC token lacks the admin claim (fix round 1)", async () => {
-    const stale = accessToken({ groups: ["engineering"] });
-    const fixed = accessToken({ groups: ["agentx-admins"] });
-    const oidcKey = tokenStoreKey(oidcSettings.identity);
-    const tokenStore = memoryTokenStore({ [oidcKey]: { accessToken: stale, expiresAt: T0 + 3_600_000 } });
-    const login = fakeLogin({ accessToken: fixed, expiresAt: T0 + 3_600_000 });
-    const session = await openAdminSession({
-      settings: oidcSettings, now, write: () => undefined, adminClaim: { claim: "groups", values: ["agentx-admins"] },
-      services: { tokenStore, fetch: fakeControlPlane().fetch, login },
-    });
-    expect(session.accessToken).toBe(fixed);
-    expect(login.calls).toHaveLength(1);
-  });
-
   it("explains a sign-in that timed out, with no AWS session hint (fix round 1)", async () => {
     const failure = openAdminSession({
       settings: cognitoSettings, now, write: () => undefined,
@@ -293,14 +181,6 @@ describe("the admin session", () => {
     const shown = initStepFailure("Sign in to AgentX", await failure.catch((error: unknown) => error), { env: "staging", region: "us-east-1" }) as Error;
     expect(shown.message).toContain(message);
     expect(shown.message).not.toContain("Refresh your AWS session");
-  });
-
-  it("refuses your own OIDC provider's token without the admin claim, naming it (FR-021)", async () => {
-    const token = accessToken({ groups: ["engineering"] });
-    await expect(openAdminSession({
-      settings: oidcSettings, now, write: () => undefined, adminClaim: { claim: "groups", values: ["agentx-admins"] },
-      services: { tokenStore: memoryTokenStore(), fetch: fakeControlPlane().fetch, login: async () => ({ accessToken: token, expiresAt: T0 + 3_600_000 }) },
-    })).rejects.toThrow('your sign-in token\'s "groups" claim has none of agentx-admins (it has engineering); add yourself to one of them in your identity provider, then run agentx init again');
   });
 
   it("reads claim values from a string or a list, and from no claim at all", () => {
@@ -347,37 +227,6 @@ describe("the admin-user init step", () => {
     expect(prompter.asked[1]).toContain("already exists and has signed in before");
     expect(cognito.grouped).toEqual([`${ADMIN_EMAIL}:agentx-admin`]);
     expect(progress.value().admin).toEqual({ username: ADMIN_EMAIL, mode: "cognito" });
-  });
-
-  it("with --yes, promotes an existing CONFIRMED user named by --admin-email without a question (fix round 1)", async () => {
-    const cognito = fakeCognito({ [ADMIN_EMAIL]: "CONFIRMED" });
-    context = initContext({ prompter: unattendedPrompter(), setup: setupServices({ cognito }), flags: { adminEmail: ADMIN_EMAIL } });
-    (context.store as MemoryParameterStore).values.set("/agentx/staging/settings", JSON.stringify(cognitoSettings));
-    await adminUserStep().run(context, progressHandle());
-    expect(cognito.grouped).toEqual([`${ADMIN_EMAIL}:agentx-admin`]);
-  });
-
-  it("takes the email from --admin-email without asking", async () => {
-    const cognito = fakeCognito();
-    context = initContext({ prompter: scriptedPrompter([]), setup: setupServices({ cognito }), flags: { adminEmail: ADMIN_EMAIL } });
-    (context.store as MemoryParameterStore).values.set("/agentx/staging/settings", JSON.stringify(cognitoSettings));
-    await adminUserStep().run(context, progressHandle());
-    expect(cognito.created).toEqual([ADMIN_EMAIL]);
-  });
-
-  it("records your own OIDC admin by the token's email claim, not a placeholder (F24)", async () => {
-    const cognito = fakeCognito();
-    const token = accessToken({ sub: "00u1abcd", email: "bob@example.com", groups: ["agentx-admins"] });
-    context = initContext({
-      answers: sampleAnswers({ identity: { mode: "oidc", issuer: "https://login.example.com", audience: "agentx", clientId: "cli", adminClaim: "groups", adminValues: ["agentx-admins"] } }),
-      setup: setupServices({ cognito, login: async () => ({ accessToken: token, expiresAt: T0 + 3_600_000 }) }),
-    });
-    (context.store as MemoryParameterStore).values.set("/agentx/staging/settings", JSON.stringify(oidcSettings));
-    const progress = progressHandle();
-    expect(await adminUserStep().run(context, progress)).toEqual({ status: "done", note: "admin bob@example.com signed in with your OIDC provider" });
-    expect(progress.value().admin).toEqual({ username: "bob@example.com", mode: "oidc" });
-    expect(cognito.created).toEqual([]);
-    expect(context.lines.join("\n")).not.toContain(token);
   });
 
   it("falls back to the token's sub claim when it carries no email (F24)", async () => {

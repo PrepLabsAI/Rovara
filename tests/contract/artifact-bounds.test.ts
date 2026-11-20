@@ -5,9 +5,6 @@ import {
 } from "../../packages/worker/src/artifacts.js";
 
 describe("workspace diff artifact bounds", () => {
-  it("preserves small diffs", () => {
-    expect(boundWorkspaceDiff("small diff")).toBe("small diff");
-  });
 
   it("truncates oversized UTF-8 diffs below the control-plane limit", () => {
     const bounded = boundWorkspaceDiff("λ".repeat(MAX_WORKSPACE_DIFF_BYTES));

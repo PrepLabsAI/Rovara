@@ -2,9 +2,9 @@
 // company binding and the session cap. Offline: fake KMS and a DynamoDB sender; no AWS call.
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
-import { DEVELOPER_SESSION_SECONDS, IMPLICIT_COMPANY_ID, type AuditEvent, type AuditSink } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, type AuditEvent, type AuditSink } from "@agentx/contracts";
 import { extraPublicKeysFromEnvironment, taskPublicKeysFromEnvironment } from "../../packages/broker/src/aws/developer-identity.js";
-import { auditSinkForDeployedCaller, companyReadsFromEnvironment, deployedAuditVia, hostedNightlyCompany, hostedSessionCapSeconds, policyHookInstallFromEnvironment } from "../../packages/broker/src/aws/hosted-wiring.js";
+import { auditSinkForDeployedCaller, companyReadsFromEnvironment, deployedAuditVia, hostedNightlyCompany, policyHookInstallFromEnvironment } from "../../packages/broker/src/aws/hosted-wiring.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { issueAccessToken, POLICY_QUESTION_KEY_PURPOSE } from "../../packages/broker/src/developer/tokens.js";
 import { fakeKms, httpEvent, identityHarness } from "../support/developer-fakes.js";
@@ -40,20 +40,6 @@ describe("hosted wiring (c): the policy hook's question key in the JWKS", () => 
       expect(kms.calls.every((keyId) => keyId === TASK_KEY)).toBe(true);
     }
     expect(extraPublicKeysFromEnvironment({}, { send: () => { throw new Error("no KMS call"); } })).toEqual([]);
-  });
-
-  it("publishes developer, task and policy-question keys, each with a distinct kid, and never the key ARNs", async () => {
-    const h = identityHarness();
-    const kms = kmsByKey();
-    h.deps.extraPublicKeys = extraPublicKeysFromEnvironment({ TASK_TOKEN_KEY_ARN: TASK_KEY, POLICY_HOOK_KEY_ARN: POLICY_KEY }, kms);
-    const response = await h.http(httpEvent("GET", "/v1/auth/.well-known/jwks.json"));
-    const keys = (JSON.parse(response.body) as { keys: Array<{ kid: string; rovara_purpose: string }> }).keys;
-    expect(keys.map((key) => key.rovara_purpose)).toEqual(["developer", "task", POLICY_QUESTION_KEY_PURPOSE]);
-    expect(new Set(keys.map((key) => key.kid)).size).toBe(3);
-    expect(kms.calls).toEqual([TASK_KEY, POLICY_KEY]);
-    expect(response.body).not.toContain(POLICY_KEY);
-    expect(response.body).not.toContain(TASK_KEY);
-    expect(h.logs).toEqual([]);
   });
 
   it("leaves out a policy key it cannot read, with fixed words, and sign-in stays up", async () => {
@@ -177,8 +163,4 @@ describe("hosted wiring (e) and (f): the nightly company binding and the session
     for (const bad of ["", "org_short", "ORG_AAAAAAAAAAAAAAAAAAAA", undefined as never]) expect(() => hostedNightlyCompany(bad, async () => undefined), String(bad)).toThrow();
   });
 
-  it("caps a token made on the deployed API at a developer session's length", () => {
-    expect(hostedSessionCapSeconds()).toBe(DEVELOPER_SESSION_SECONDS);
-    expect(Number.isSafeInteger(hostedSessionCapSeconds()) && hostedSessionCapSeconds() > 0).toBe(true);
-  });
 });

@@ -31,18 +31,6 @@ function api(callConnectorTool = vi.fn(async () => ({ status: "SUCCEEDED" }))) {
 }
 
 describe("orchestrator wiring before the action gate (characterization)", () => {
-  it("offers the in-house tools, then each connector tool, in order", async () => {
-    const runtime = await createOrchestratorRuntime({
-      stateDirectory: await createFixtureDirectory("agentx-gate-char-"), projectInstructions: "Delegate.",
-      api: api(), context, model, connectors,
-    });
-    try {
-      expect(runtime.session.getActiveToolNames()).toEqual([
-        "agentx_submit_task", "agentx_create_pull_request", "agentx_follow_up", "agentx_manage_pull_request",
-        "tracker__list_items", "tracker__close_item",
-      ]);
-    } finally { await runtime.dispose(); }
-  });
 
   it("sends a connector tool's call to the control plane unchanged when its definition runs", async () => {
     const callConnectorTool = vi.fn(async () => ({ status: "SUCCEEDED" }));

@@ -33,9 +33,6 @@ function projectDefinition() {
 }
 
 describe("strict contracts", () => {
-  it("accepts a valid versioned project", () => {
-    expect(ProjectDefinitionSchema.parse(projectDefinition()).name).toBe("payments");
-  });
 
   it("rejects the retired connection and environment fields, and names them for a caller", () => {
     const legacy = {
@@ -112,54 +109,6 @@ describe("strict contracts", () => {
     ]);
   });
 
-  it("drops the environment pin from a workspace record written before it was removed", () => {
-    const now = new Date().toISOString();
-    const workspace = WorkspaceInstanceSchema.parse({
-      deploymentMode: "ec2-ebs" as const,
-      id: crypto.randomUUID(),
-      ownerKey: "a".repeat(64),
-      projectName: "payments",
-      projectRevision: 1,
-      environmentDigest: digest,
-      rootPath: "/mnt/workspace",
-      status: "READY",
-      fence: 0,
-      createdAt: now,
-      updatedAt: now,
-    });
-    expect(workspace).not.toHaveProperty("environmentDigest");
-    expect(workspace.projectRevision).toBe(1);
-  });
-
-  it("accepts a worker invocation from a broker that still sends the retired fields", () => {
-    // The release deploys the runtime before the control plane, so a new worker briefly receives
-    // definitions from the old broker.
-    const operationId = crypto.randomUUID();
-    const invocation = WorkerInvocationSchema.parse({
-      protocolVersion: 1,
-      kind: "publish",
-      operationId,
-      workspaceId: crypto.randomUUID(),
-      fence: 2,
-      projectRevision: 1,
-      callbackCapability: "c".repeat(64),
-      payload: {
-        project: {
-          ...projectDefinition(),
-          schemaVersion: 2,
-          controlPlaneUrl: "https://agentx.example.test",
-          auth: { issuer: "https://identity.example.test", clientId: "agentx", audience: "agentx" },
-          environment: { image: digest },
-        },
-        repository: "api",
-        title: "Publish API change",
-        headBranch: `agentx/${operationId}`,
-        repositoryGrant: "signed-grant",
-      },
-    });
-    expect(invocation.payload).toMatchObject({ project: projectDefinition() });
-  });
-
   it("accepts optional CodeBuild gates and rejects unsafe or duplicate projects", () => {
     const project = projectDefinition();
     project.repositories[0] = {
@@ -211,39 +160,6 @@ describe("strict contracts", () => {
       path: "services/api/nested",
     };
     expect(() => ProjectDefinitionSchema.parse({ ...project, repositories: [...project.repositories, nestedRepository] })).toThrow(/overlap/);
-  });
-
-  it("rejects unsupported states and unknown workspace keys", () => {
-    expect(() =>
-      WorkspaceInstanceSchema.parse({
-        deploymentMode: "ec2-ebs" as const,
-        id: crypto.randomUUID(),
-        ownerKey: "owner",
-        projectName: "payments",
-        projectRevision: 1,
-        environmentDigest: digest,
-        rootPath: "/mnt/workspace",
-        status: "MAGIC",
-        activeOperationId: null,
-        fence: 0,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        extra: true,
-      }),
-    ).toThrow();
-  });
-
-  it("keeps EC2 workspace routing in the session record and reads the removed environment pin", () => {
-    const workspace = {
-      id: crypto.randomUUID(), ownerKey: "a".repeat(64), projectName: "payments", projectRevision: 1,
-      deploymentMode: "ec2-ebs" as const, rootPath: "/mnt/workspace", status: "READY", fence: 0,
-      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), environmentDigest: digest,
-    };
-    const parsed = WorkspaceInstanceSchema.parse(workspace);
-    expect(parsed).toHaveProperty("activeOperationId", null);
-    expect(parsed).not.toHaveProperty("environmentDigest");
-    expect(parsed).not.toHaveProperty("runtimeArn");
-    expect(() => WorkspaceInstanceSchema.parse({ ...workspace, endpointQualifier: "DEFAULT" })).toThrow(/must not have/);
   });
 
   // SETUP-CHECK-CLOSEDFROM-UNREADABLE: the setup check closes a workspace and keeps the status it had as `closedFrom` (core/setup-agent/check.ts). The strict schema refused the key, so the

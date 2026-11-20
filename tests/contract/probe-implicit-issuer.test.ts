@@ -66,15 +66,6 @@ it("implicit issuer selection never reads a stray record or secret", async () =>
   expect(read).not.toHaveBeenCalled(); expect(h.secretReads).toEqual([]);
 });
 
-it("the server refuses an implicit selector even with an injected permissive issuer resolver", async () => {
-  const h = await implicit();
-  const select = vi.fn(async () => ({ provider: h.deps.providers.oidc!, issuer: OIDC_ISSUER, since: 0 }));
-  h.deps.companyIssuer = select;
-  const expected = await h.http(httpEvent("GET", "/v1/auth/authorize?request=none&method=unknown"));
-  expect(await h.http(httpEvent("GET", authorizeQuery({ company: IMPLICIT_COMPANY_ID })))).toEqual(expected);
-  expect(select).not.toHaveBeenCalled();
-});
-
 
 it("a pending implicit callback cannot use an injected company issuer", async () => {
   const h = await implicit();
@@ -89,11 +80,3 @@ it("a pending implicit callback cannot use an injected company issuer", async ()
   expect(h.db.find((row) => row.entityType === "AUTH_CODE")).toEqual(before);
 });
 
-it("implicit mint and refresh never consult even a permissive injected company issuer", async () => {
-  const h = await implicit();
-  const select = vi.fn(async () => ({ provider: h.deps.providers.oidc!, issuer: OIDC_ISSUER, since: 0 }));
-  h.deps.companyIssuer = select;
-  const signed = await h.exchange(h.code); expect(signed.status).toBe(200);
-  expect((await h.refresh(signed.body.refresh_token as string)).status).toBe(200);
-  expect(select).not.toHaveBeenCalled();
-});

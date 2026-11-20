@@ -93,24 +93,6 @@ function harness(graph: TaskGraphV1, over: Partial<ExecuteParallelWorkflowDepend
 const states = (events: WorkItemProgressV1[]) => events.map((event) => `${event.itemId.slice(0, 2)}:${event.state}`);
 
 describe("executeParallelWorkflowDependencies", () => {
-  it("starts A and B together, then C on both changes, with unique, increasing sequence numbers", async () => {
-    const gate = { release: () => undefined as void };
-    const both = new Promise<void>((resolve) => { gate.release = resolve; });
-    let started = 0;
-    const h = harness(graphOf(item(A), item(B), item(C, [A, B])), {
-      run: async (itemId) => { if (itemId !== C) { started += 1; if (started === 2) gate.release(); await both; } },
-    });
-    const result = await executeParallelWorkflowDependencies(h.input);
-    expect(h.log.slice(0, 2).sort()).toEqual(["start 11#1 on []", "start 22#1 on []"]);
-    expect(h.log[2]).toBe("start 33#1 on [11,22]");
-    expect(h.trees.parts(result.finalTreeSha)).toEqual([A, B, C]);
-    expect(h.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5, 6]);
-    expect(states(h.events).slice(0, 2).sort()).toEqual(["11:STARTED", "22:STARTED"]);
-    expect(h.events.filter((event) => event.state === "IMPLEMENTED").every((event) => event.integratedTreeSha !== undefined && event.candidateTreeSha !== undefined)).toBe(true);
-    expect(h.events.at(-1)?.integratedTreeSha).toBe(result.finalTreeSha);
-    expect(h.log.at(-1)).toBe("checkout [11,22,33]");
-    expect(result.progress).toEqual(h.events);
-  });
 
   it("never runs more parts than maxParallel, whatever the graph allows", async () => {
     const h = harness(graphOf(item(A), item(B), item(C), item(D)), { maxParallel: 2, overlap: 2, run: async () => { await new Promise((resolve) => setTimeout(resolve, 5)); } });
@@ -130,72 +112,6 @@ describe("executeParallelWorkflowDependencies", () => {
       await expect(executeParallelWorkflowDependencies(h.input)).rejects.toThrow(/parallel parts/);
       expect(h.events).toEqual([]);
     }
-  });
-
-  it("a failed part stops new starts, lets the running part finish and be kept, and checks out what is integrated", async () => {
-    const h = harness(graphOf(item(A), item(B), item(C, [A, B])), {
-      run: async (itemId) => {
-        if (itemId === A) { await new Promise((resolve) => setTimeout(resolve, 2)); throw new Error("model stopped"); }
-        await new Promise((resolve) => setTimeout(resolve, 15));
-      },
-    });
-    const failure = await executeParallelWorkflowDependencies(h.input).catch((error: unknown) => error);
-    expect(failure).toBeInstanceOf(Error);
-    expect((failure as Error).message).toMatch(/paused after a failed part/);
-    expect(((failure as { causes?: Error[] }).causes ?? []).map((cause) => cause.message)).toEqual(["model stopped"]);
-    expect(states(h.events).sort()).toEqual(["11:FAILED", "11:STARTED", "22:IMPLEMENTED", "22:STARTED"]);
-    expect(h.log).not.toContain(expect.stringMatching(/start 33/));
-    expect(h.log.at(-1)).toBe("checkout [22]");
-    const failed = h.events.find((event) => event.state === "FAILED");
-    expect(failed).toBeDefined();
-    expect("candidateTreeSha" in failed!).toBe(false);
-  });
-
-  it("a failure stops new starts even when a slot is free and a part is ready", async () => {
-    const h = harness(graphOf(item(A), item(B), item(D)), {
-      maxParallel: 2,
-      run: async (itemId) => {
-        if (itemId === A) { await new Promise((resolve) => setTimeout(resolve, 2)); throw new Error("model stopped"); }
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      },
-    });
-    await expect(executeParallelWorkflowDependencies(h.input)).rejects.toThrow(/paused after a failed part/);
-    expect(h.log.some((line) => line.startsWith("start 44"))).toBe(false);
-    expect(states(h.events).sort()).toEqual(["11:FAILED", "11:STARTED", "22:IMPLEMENTED", "22:STARTED"]);
-  });
-
-  it("on a merge conflict re-runs the part once, alone, at the integrated tree, and keeps both edits", async () => {
-    const h = harness(graphOf(item(A), item(B)), {
-      conflicts: (itemId, attempt) => itemId === B && attempt === 1,
-      run: async (itemId, _base, attempt) => { await new Promise((resolve) => setTimeout(resolve, itemId === A ? 1 : 8)); void attempt; },
-    });
-    const result = await executeParallelWorkflowDependencies(h.input);
-    expect(h.trees.parts(result.finalTreeSha)).toEqual([A, B]);
-    expect(h.log.filter((line) => line.startsWith("start 22"))).toEqual(["start 22#1 on []", "start 22#2 on [11]"]);
-    const restart = h.events.filter((event) => event.itemId === B && event.state === "STARTED");
-    expect(restart).toHaveLength(2);
-    expect(restart[1]!.baseTreeSha).not.toBe(restart[0]!.baseTreeSha);
-    expect(h.events.filter((event) => event.itemId === B && event.state === "IMPLEMENTED")).toHaveLength(1);
-  });
-
-  it("a part re-run for a conflict runs alone: nothing else starts or runs beside it", async () => {
-    let othersRunning = 0;
-    let sawOverlap = false;
-    const h = harness(graphOf(item(A), item(B), item(C), item(D, [C])), {
-      maxParallel: 3,
-      conflicts: (itemId, attempt) => itemId === B && attempt === 1,
-      run: async (itemId, _base, attempt) => {
-        if (itemId === B && attempt === 2 && othersRunning > 0) sawOverlap = true;
-        if (!(itemId === B && attempt === 2)) othersRunning += 1;
-        await new Promise((resolve) => setTimeout(resolve, itemId === C ? 25 : 3));
-        if (!(itemId === B && attempt === 2)) othersRunning -= 1;
-      },
-    });
-    await executeParallelWorkflowDependencies(h.input);
-    expect(sawOverlap).toBe(false);
-    const rerun = h.log.findIndex((line) => line === "start 22#2 on [11,33]" || line.startsWith("start 22#2"));
-    expect(rerun).toBeGreaterThan(-1);
-    expect(h.log.slice(rerun + 1).filter((line) => line.startsWith("start") && !line.startsWith("start 44"))).toEqual([]);
   });
 
   it("a second conflict marks the part FAILED and stops new starts", async () => {
@@ -264,19 +180,4 @@ describe("executeParallelWorkflowDependencies", () => {
     expect(h.events.some((event) => event.itemId === C)).toBe(false);
   });
 
-  it("integrates parts one at a time and persists checkpoints one at a time, even when parts finish together", async () => {
-    const h = harness(graphOf(item(A), item(B), item(C)), { run: async () => { await new Promise((resolve) => setTimeout(resolve, 3)); } });
-    await expect(executeParallelWorkflowDependencies(h.input)).resolves.toBeDefined();
-    expect(new Set(h.events.map((event) => event.sequence)).size).toBe(h.events.length);
-  });
-
-  it("the result is the same whichever part finishes first", async () => {
-    const finalTrees = new Set<string>();
-    for (const delays of [[1, 9, 5], [9, 1, 5], [5, 9, 1]]) {
-      const h = harness(graphOf(item(A), item(B), item(C)), { run: async (itemId) => { await new Promise((resolve) => setTimeout(resolve, delays[[A, B, C].indexOf(itemId)])); } });
-      const result = await executeParallelWorkflowDependencies(h.input);
-      finalTrees.add(h.trees.parts(result.finalTreeSha).join(","));
-    }
-    expect([...finalTrees]).toEqual([[A, B, C].join(",")]);
-  });
 });

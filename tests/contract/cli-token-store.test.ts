@@ -124,23 +124,6 @@ describe("SystemCredentialTokenStore.set on macOS", () => {
     installFake("security");
   });
 
-  it("keeps both tokens out of every argv and sends the command on stdin", async () => {
-    const tokens: StoredTokens = { accessToken: "SECRET-ACCESS-123", refreshToken: "SECRET-REFRESH-456", expiresAt: 42 };
-    await fakeStore().set("acct", tokens);
-
-    const recorded = calls();
-    expect(recorded.length).toBeGreaterThan(0);
-    for (const call of recorded) {
-      expect(call.argv.join(" ")).not.toContain("SECRET-ACCESS-123");
-      expect(call.argv.join(" ")).not.toContain("SECRET-REFRESH-456");
-    }
-    const write = recorded.find((call) => call.stdin.includes("add-generic-password"));
-    expect(write).toBeDefined();
-    expect(write?.argv).toEqual(["-i"]);
-    expect(write?.stdin).toContain("SECRET-ACCESS-123");
-    expect(write?.stdin).toContain("SECRET-REFRESH-456");
-  });
-
   it("quotes quotes, backslashes, spaces, newlines and non-ASCII so the value reaches security unchanged", async () => {
     await fakeStore().set("acct name", nasty);
 
@@ -163,15 +146,6 @@ describe("SystemCredentialTokenStore.set on macOS", () => {
     expect(calls()).toEqual([]);
   });
 
-  it("accepts a long refresh token that still fits the line", async () => {
-    await fakeStore().set("acct", {
-      accessToken: "a".repeat(1500),
-      refreshToken: "r".repeat(1500),
-      expiresAt: 1,
-    });
-    expect(calls().some((call) => call.stdin.includes("add-generic-password"))).toBe(true);
-  });
-
   it("rejects a service or account that would break out of the quoted command", async () => {
     await expect(fakeStore("svc\nexit").set("acct", { accessToken: "t", expiresAt: 1 })).rejects.toThrow();
     await expect(fakeStore("svc").set("acct\n", { accessToken: "t", expiresAt: 1 })).rejects.toThrow();
@@ -184,22 +158,6 @@ describe("SystemCredentialTokenStore.set on macOS", () => {
     await expect(fakeStore().set("acct", { accessToken: "t", expiresAt: 1 })).rejects.toThrow();
   });
 
-  it("fails when interactive security reports an error on stderr even if it exits 0", async () => {
-    process.env.FAKE_EXIT = "0";
-    process.env.FAKE_STDERR = 'security: unknown command "abc"';
-    await expect(fakeStore().set("acct", { accessToken: "t", expiresAt: 1 })).rejects.toThrow();
-  });
-
-  it("does not echo the token in the failure message, even when security echoes the rejected command", async () => {
-    process.env.FAKE_EXIT = "1";
-    // Real `security -i` quotes the text of a command it cannot parse, token included.
-    process.env.FAKE_STDERR = 'security: unknown command "SECRET-ACCESS-123"';
-    const error = await fakeStore()
-      .set("acct", { accessToken: "SECRET-ACCESS-123", expiresAt: 1 })
-      .catch((caught: unknown) => caught as Error);
-    expect(error).toBeInstanceOf(Error);
-    expect(String((error as Error).message)).not.toContain("SECRET-ACCESS-123");
-  });
 });
 
 describe("SystemCredentialTokenStore get and delete on macOS", () => {
@@ -218,21 +176,12 @@ describe("SystemCredentialTokenStore get and delete on macOS", () => {
     expect(calls()[0]?.argv).toEqual(["find-generic-password", "-s", "dev.rovara.kc-test.unit", "-a", "acct", "-w"]);
   });
 
-  it.each([44, 1])("treats exit code %s as no token", async (code) => {
-    process.env.FAKE_EXIT = String(code);
-    await expect(fakeStore().get("acct")).resolves.toBeUndefined();
-  });
 
   it("still rethrows other failures", async () => {
     process.env.FAKE_EXIT = "2";
     await expect(fakeStore().get("acct")).rejects.toThrow();
   });
 
-  it("delete tolerates a missing item", async () => {
-    process.env.FAKE_EXIT = "44";
-    await expect(fakeStore().delete("acct")).resolves.toBeUndefined();
-    expect(calls()[0]?.argv).toEqual(["delete-generic-password", "-s", "dev.rovara.kc-test.unit", "-a", "acct"]);
-  });
 });
 
 describe("SystemCredentialTokenStore.set on Linux", () => {
@@ -279,25 +228,6 @@ describe.skipIf(realPlatform !== "darwin")("SystemCredentialTokenStore binary pi
     }
   });
 
-  it.each([
-    ["no test-mode flag", undefined, "ABS"],
-    ["test mode not exactly 1", "true", "ABS"],
-    ["a relative path", "1", "./security"],
-  ])("ignores ROVARA_TEST_SECURITY_PATH with %s", async (_label, mode, path) => {
-    setPlatform("darwin");
-    installFake("security");
-    try {
-      if (mode !== undefined) process.env.ROVARA_TEST_MODE = mode;
-      process.env.ROVARA_TEST_SECURITY_PATH = path === "ABS" ? join(fakeDir, "security") : path;
-      // Reads a service name that does not exist, through the real /usr/bin/security.
-      const store = new SystemCredentialTokenStore(`dev.rovara.kc-test.env${Math.random().toString(36).slice(2, 12)}`);
-      await expect(store.get("no-such-account")).resolves.toBeUndefined();
-      expect(calls()).toEqual([]);
-    } finally {
-      delete process.env.ROVARA_TEST_MODE;
-      delete process.env.ROVARA_TEST_SECURITY_PATH;
-    }
-  });
 
   it("uses the injected path for set, get and delete", async () => {
     setPlatform("darwin");

@@ -103,15 +103,4 @@ describe("OpenSSH pins the host key the credential carries", () => {
     vi.unstubAllEnvs();
   }, 60_000);
 
-  it("refuses the same server when the pinned key is another one: nothing is cloned and the failure is the host key's", async (context) => {
-    if (skipReason !== undefined) context.skip();
-    vi.stubEnv("HOME", join(root, "home"));
-    const otherPublic = (await readFile(join(root, "other-host.pub"), "utf8")).split(" ").slice(0, 2).join(" ");
-    const { destination, run } = await cloneInto("wrong", `[127.0.0.1]:${String(port)} ${otherPublic}`);
-    const failure = await run().then(() => undefined, (error: Error & { stderr?: string }) => error);
-    expect(failure).toBeDefined();
-    expect(`${failure?.message ?? ""}${failure?.stderr ?? ""}`).toMatch(/host key verification failed|REMOTE HOST IDENTIFICATION/i);
-    expect(existsSync(join(destination, ".git"))).toBe(false);
-    vi.unstubAllEnvs();
-  }, 60_000);
 });

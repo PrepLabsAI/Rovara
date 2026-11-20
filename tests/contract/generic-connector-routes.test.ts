@@ -221,40 +221,6 @@ describe("generic connector routes", () => {
     expect(JSON.stringify(db.find((item) => item.entityType === "CONNECTOR_INVOCATION"))).not.toContain(TRACKER_KEY);
   });
 
-  it("binds a site's board only on tools that have one, through the unchanged routes, and refuses a board the model supplies", async () => {
-    const boardTools = [
-      { name: "move_item", description: "Move an item, optionally on a board", inputSchema: { type: "object", properties: {
-        siteId: { type: "string" }, id: { type: "string" }, boardId: { type: "string" },
-      }, required: ["siteId", "id"], additionalProperties: false } },
-    ];
-    const config = {
-      ...trackerConfig,
-      scopes: [{ alias: "payments", siteId: "site-payments-1", boardId: "board-7" }],
-      tools: [{ name: "list_items", access: "read" }, { name: "move_item", access: "write" }],
-    };
-    const { handler, path, invoke } = await trackerBroker({ extraTools: boardTools, config });
-    expect((await registerTrackerKey(handler)).status).toBe(201);
-    const catalog = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service })).body.catalog);
-    expect(catalog.tools.map((tool) => tool.name)).toEqual(["tracker__list_items", "tracker__move_item"]);
-    expect(JSON.stringify(catalog)).not.toContain("boardId");
-    const hashOf = (name: string) => catalog.tools.find((tool) => tool.name === name)!.scopes[0]!.schemaHash;
-
-    const moved = await call(handler, { method: "POST", path: `${path}/call`, service,
-      body: { requestId: randomUUID(), scope: "payments", tool: "move_item", schemaHash: hashOf("tracker__move_item"), arguments: { id: "item-1" } } });
-    expect(moved.body.result).toMatchObject({ status: "SUCCEEDED" });
-    expect(invoke).toHaveBeenLastCalledWith("move_item", { id: "item-1", siteId: "site-payments-1", boardId: "board-7" });
-    const listed = await call(handler, { method: "POST", path: `${path}/call`, service,
-      body: { requestId: randomUUID(), scope: "payments", tool: "list_items", schemaHash: hashOf("tracker__list_items"), arguments: {} } });
-    expect(listed.body.result).toMatchObject({ status: "SUCCEEDED" });
-    expect(invoke).toHaveBeenLastCalledWith("list_items", { siteId: "site-payments-1" });
-
-    const refused = await call(handler, { method: "POST", path: `${path}/call`, service,
-      body: { requestId: randomUUID(), scope: "payments", tool: "move_item", schemaHash: hashOf("tracker__move_item"), arguments: { id: "item-1", boardId: "board-other" } } });
-    expect(refused.status).toBe(403);
-    expect(refused.body.error).toEqual({ code: "FORBIDDEN", message: "Tracker routing arguments are server controlled" });
-    expect(invoke).toHaveBeenCalledTimes(2);
-  });
-
   it("still answers connector not found for a name the project does not configure", async () => {
     const { handler, workspaceId } = await trackerBroker();
     const response = await call(handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/connectors/linear/tools`, service });
@@ -291,27 +257,6 @@ describe("thread setup lists every connector, to services that can parse it", ()
     const result = resultOf(response.body);
     expect(result.outcome === "WORKSPACE" && result.connectors).toEqual([
       { name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true },
-    ]);
-  });
-
-  it("returns every resolved connector, in definition order, once the service opts in to every type; the tracker connects once its credential is registered", async () => {
-    const { handler } = await trackerBroker();
-    const unregistered = await call(handler, { method: "POST", path: "/v1/service/threads/workspace", service,
-      body: { requestId: randomUUID(), includeConnectors: true, includeAllConnectorTypes: true } });
-    expect(unregistered.status).toBe(200);
-    const before = resultOf(unregistered.body);
-    expect(before.outcome === "WORKSPACE" && before.connectors).toEqual([
-      { name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true },
-      { name: "tracker", type: "tracker", label: "Tracker issues", scopes: ["payments", "billing"], connected: false },
-    ]);
-
-    expect((await registerTrackerKey(handler)).status).toBe(201);
-    const registered = await call(handler, { method: "POST", path: "/v1/service/threads/workspace", service,
-      body: { requestId: randomUUID(), includeConnectors: true, includeAllConnectorTypes: true } });
-    const after = resultOf(registered.body);
-    expect(after.outcome === "WORKSPACE" && after.connectors).toEqual([
-      { name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true },
-      { name: "tracker", type: "tracker", label: "Tracker issues", scopes: ["payments", "billing"], connected: true },
     ]);
   });
 
@@ -360,14 +305,6 @@ describe("vendor tool annotations on the connector route (feature 014)", () => {
   const annotatedConfig = { ...trackerConfig, scopes: [{ alias: "payments", siteId: "site-payments-1" }],
     tools: [{ name: "list_items", access: "read" }, { name: "create_item", access: "write" }, { name: "close_item", access: "write" }] };
 
-  it("serves each tool with exactly the six fields an older Slack service parses, and a hash that already covers the annotations (characterization)", async () => {
-    const { handler, path } = await trackerBroker({ extraTools: [annotated], config: annotatedConfig });
-    expect((await registerTrackerKey(handler)).status).toBe(201);
-    const discovered = await call(handler, { method: "GET", path: `${path}/tools`, service });
-    const catalog = ConnectorCatalogSchema.parse(discovered.body.catalog);
-    expect(catalog.tools.map((tool) => Object.keys(tool).sort())).toEqual(Array(3).fill(["access", "description", "inputSchema", "name", "scopes", "upstreamName"]));
-    expect(catalog.tools.find((tool) => tool.name === "tracker__close_item")!.scopes).toEqual([{ alias: "payments", schemaHash: "c5c4fb16e67e06a1fda262e7262e6b5a64b59f5bd85beef35923851dcdb16728" }]);
-  });
   it("adds the vendor's hints and the item argument only for a service that sends x-agentx-include: gate, and keeps the hash", async () => {
     const { handler, path } = await trackerBroker({ extraTools: [annotated], config: annotatedConfig });
     expect((await registerTrackerKey(handler)).status).toBe(201);

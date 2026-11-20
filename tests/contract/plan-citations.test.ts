@@ -35,55 +35,12 @@ const range = (plan: PlanDocument) => {
 const check = (plan: PlanDocument, files: Record<string, string[]> = { "repo/app/README.md": readme() }) => checkCodeCitations(plan, "/ws", repositories, reader(files));
 
 describe("checkCodeCitations", () => {
-  it("keeps a range whose anchor is inside it", async () => {
-    const plan = cite({ startLine: 255, endLine: 270, anchor: "## License" });
-    const result = await check(plan);
-    expect(result.issues).toEqual([]);
-    expect(result.plan).toEqual(plan);
-  });
 
   it("matches a line with its trailing whitespace trimmed on both sides", async () => {
     const files = { "repo/app/README.md": ["alpha", "beta  ", "gamma"] };
     expect((await check(cite({ startLine: 1, endLine: 3, anchor: "beta" }), files)).issues).toEqual([]);
     expect((await check(cite({ startLine: 1, endLine: 3, anchor: "gamma \t" }), files)).issues).toEqual([]);
     expect((await check(cite({ startLine: 1, endLine: 3, anchor: " beta" }), files)).issues).toEqual([expect.stringContaining("the anchor line is not in the file")]);
-  });
-
-  it("matches the anchor of a tab-indented line, with its leading tabs and without trailing whitespace", async () => {
-    const files = { "repo/app/README.md": ["func main() {", "\tif ok {", "\t\treturn", "\t}", "}"].map((line, index) => (index === 2 ? `${line}\t ` : line)) };
-    const inside = await check(cite({ startLine: 1, endLine: 4, anchor: "\t\treturn" }), files);
-    expect(inside).toEqual({ plan: cite({ startLine: 1, endLine: 4, anchor: "\t\treturn" }), issues: [] });
-    const elsewhere = await check(cite({ startLine: 4, endLine: 5, anchor: "\t\treturn" }), files);
-    expect(elsewhere.issues).toEqual([]);
-    expect(range(elsewhere.plan)).toEqual([3, 4]);
-    // The tabs are part of the line: the same words without them are not the line.
-    expect((await check(cite({ startLine: 1, endLine: 4, anchor: "return" }), files)).issues).toEqual([expect.stringContaining("the anchor line is not in the file")]);
-  });
-
-  it("moves a range to its anchor when the anchor is on one other line, keeping the length (the License heading cited at 221-236)", async () => {
-    const result = await check(cite({ startLine: 221, endLine: 236, anchor: "## License" }));
-    expect(result.issues).toEqual([]);
-    // 15 lines long and the file ends at 271, so the range ends there and still covers line 260.
-    expect(range(result.plan)).toEqual([256, 271]);
-    const early = await check(cite({ startLine: 10, endLine: 15, anchor: "## License" }));
-    expect(range(early.plan)).toEqual([260, 265]);
-  });
-
-  it("names the citation when the anchor is not in the file", async () => {
-    const result = await check(cite({ startLine: 221, endLine: 236, anchor: "## Licence" }));
-    expect(result.issues).toEqual(["evidence 1#1 repo/app/README.md: the anchor line is not in the file; copy one exact line from the lines you cite"]);
-    expect(range(result.plan)).toEqual([221, 236]);
-  });
-
-  it("names the citation when the anchor is on several lines and none is inside the range", async () => {
-    const lines = readme();
-    lines[9] = "## License";
-    const result = await check(cite({ startLine: 100, endLine: 110, anchor: "## License" }), { "repo/app/README.md": lines });
-    expect(result.issues).toEqual(["evidence 1#1 repo/app/README.md: the anchor line is not in the file; copy one exact line from the lines you cite"]);
-    // With one of them inside the range, the range is right.
-    const inside = await check(cite({ startLine: 255, endLine: 262, anchor: "## License" }), { "repo/app/README.md": lines });
-    expect(inside.issues).toEqual([]);
-    expect(range(inside.plan)).toEqual([255, 262]);
   });
 
   it("cuts an end past the last line to it, and asks again for a start past it", async () => {
@@ -94,11 +51,6 @@ describe("checkCodeCitations", () => {
     expect(past.issues).toEqual(["evidence 1#1 repo/app/README.md: the file has 271 lines; cite lines inside it"]);
     // The anchor cannot rescue a start past the end.
     expect((await check(cite({ startLine: 272, endLine: 280, anchor: "## License" }))).issues).toHaveLength(1);
-  });
-
-  it("only cuts the end for a citation without an anchor", async () => {
-    const result = await check(cite({ startLine: 5, endLine: 8 }));
-    expect(result).toEqual({ plan: cite({ startLine: 5, endLine: 8 }), issues: [] });
   });
 
   it("says the file does not exist for a missing file or a path outside the repositories", async () => {

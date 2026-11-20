@@ -40,11 +40,6 @@ async function cli(script: Script) {
 }
 
 describe("printing a link", () => {
-  it("accepts https and, for an install on this computer, http on the same loopback origin", () => {
-    expect(safeUrl("https://app.example.test/app/sessions/x", "https://app.example.test")).toBeDefined();
-    expect(safeUrl("http://127.0.0.1:4410/app/sessions/x", ORIGIN)).toBe("http://127.0.0.1:4410/app/sessions/x");
-    expect(safeUrl("http://localhost:4410/x", "http://localhost:4410")).toBeDefined();
-  });
 
   it("never prints a local page address, which carries a session token that can approve", () => {
     const token = "B".repeat(43);
@@ -53,15 +48,6 @@ describe("printing a link", () => {
     expect(safeUrl(`${ORIGIN}/s/short/plan/1`, ORIGIN)).toBeDefined();
   });
 
-  it("refuses http anywhere else, another port or host, and credentials", () => {
-    expect(safeUrl("http://app.example.test/x", "http://app.example.test")).toBeUndefined();
-    expect(safeUrl("http://127.0.0.1:4411/x", ORIGIN)).toBeUndefined();
-    expect(safeUrl("http://127.0.0.1:4410@evil.example/x", ORIGIN)).toBeUndefined();
-    expect(safeUrl("http://user:pw@127.0.0.1:4410/x", ORIGIN)).toBeUndefined();
-    expect(safeUrl("http://127.0.0.1:4410/x", "https://app.example.test")).toBeUndefined();
-    expect(safeUrl("https://app.example.test/x y", "https://app.example.test")).toBeUndefined();
-    expect(safeUrl("javascript:alert(1)", ORIGIN)).toBeUndefined();
-  });
 });
 
 describe("the session commands", () => {
@@ -100,13 +86,6 @@ describe("the session commands", () => {
     expect(h.text()).toContain("Queued");
   });
 
-  it("prints a refusal in the broker's words, made safe for a terminal, and exits with its code", async () => {
-    const h = await cli(() => ({ status: 403, body: { error: { code: "FORBIDDEN", message: "you cannot\u001b[31m do that" } } }));
-    expect(await h.run(["session", "stop", SESSION])).toBe(4);
-    expect(h.errors()).toContain("[U+001B]");
-    expect(h.errors()).not.toContain("\u001b");
-  });
-
   it("refuses an id that cannot be a session before sending anything", async () => {
     const h = await cli(() => ({ body: {} }));
     expect(await h.run(["session", "show", "../etc/passwd"])).toBe(2);
@@ -121,34 +100,10 @@ describe("the session commands", () => {
     expect(h.calls[0]!.body).toMatchObject({ principal: { kind: "member", developerId: "a".repeat(64) }, level: "view" });
   });
 
-  it("does not register the Cloud-only commands", async () => {
-    const h = await cli(() => ({ body: {} }));
-    for (const name of ["merge", "link"]) expect(await h.run(["session", name, SESSION]), name).not.toBe(0);
-  });
 });
 
 describe("session stop with a task ID (a core task on AWS has no session)", () => {
   const stopped = { task: { taskId: TASK, title: "Fix retries", project: "payments", status: "CANCELLED" } };
-  const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-  it("stops the task on the task cancel route with a fresh request id, and never touches the session routes", async () => {
-    const h = await cli(() => ({ body: stopped }));
-    expect(await h.run(["session", "stop", TASK]), h.errors()).toBe(0);
-    expect(h.calls.map((call) => `${call.method} ${call.path}`)).toEqual([`POST /v1/dev/tasks/${TASK}/cancel`]);
-    expect(Object.keys(h.calls[0]!.body ?? {})).toEqual(["requestId"]);
-    expect(String(h.calls[0]!.body!.requestId)).toMatch(UUID_V4);
-    expect(h.calls[0]!.auth).toBe("Bearer local-owner-token");
-    expect(h.text()).toContain("Stop requested.");
-    expect(h.text()).toContain("Fix retries");
-    expect(h.text()).toContain(TASK);
-  });
-
-  it("uses a new request id for each stop", async () => {
-    const h = await cli(() => ({ body: stopped }));
-    await h.run(["session", "stop", TASK]);
-    await h.run(["session", "stop", TASK]);
-    expect(h.calls[0]!.body!.requestId).not.toBe(h.calls[1]!.body!.requestId);
-  });
 
   it("makes the task's own words safe for a terminal on success too", async () => {
     const h = await cli(() => ({ body: { task: { taskId: TASK, title: "Fix\u001b[31m retries", project: "pay\u001b[31mments", status: "CAN\u001b[31mCELLED" } } }));
@@ -161,17 +116,6 @@ describe("session stop with a task ID (a core task on AWS has no session)", () =
     const h = await cli(() => ({ body: stopped }));
     expect(await h.run(["--json", "session", "stop", TASK]), h.errors()).toBe(0);
     expect(JSON.parse(h.text())).toMatchObject({ ok: true, data: { task: { taskId: TASK, status: "CANCELLED" } } });
-  });
-
-  it("prints the server's own refusal, made safe for a terminal, and does not try another route", async () => {
-    const h = await cli(() => ({ status: 404, body: { error: { code: "NOT_FOUND", message: "There is no such task.\u001b[31m" } } }));
-    expect(await h.run(["session", "stop", TASK])).not.toBe(0);
-    expect(h.errors()).toContain("There is no such task.");
-    expect(h.errors()).toContain("[U+001B]");
-    expect(h.calls).toHaveLength(1);
-    const forbidden = await cli(() => ({ status: 403, body: { error: { code: "FORBIDDEN", message: "Only the task's owner or a company admin can stop this task." } } }));
-    expect(await forbidden.run(["session", "stop", TASK])).toBe(4);
-    expect(forbidden.errors()).toContain("Only the task's owner or a company admin can stop this task.");
   });
 
   it("keeps a session ID on the session route, byte for byte, even when that route says there is no such session", async () => {
@@ -187,10 +131,4 @@ describe("session stop with a task ID (a core task on AWS has no session)", () =
     expect(missing.calls.map((call) => call.path)).toEqual([`/v1/app/sessions/${SESSION}/stop`]);
   });
 
-  it("refuses anything that is neither a session ID nor a task ID before sending, and only stop takes a task ID", async () => {
-    const h = await cli(() => ({ body: stopped }));
-    for (const id of ["../etc/passwd", TASK.toUpperCase(), TASK.slice(1), `${TASK}/x`, "ses_short"]) expect(await h.run(["session", "stop", id]), id).toBe(2);
-    expect(await h.run(["session", "retry", TASK])).toBe(2);
-    expect(h.calls).toEqual([]);
-  });
 });

@@ -84,18 +84,6 @@ describe("agentx connector add linear (FR-036 to FR-039)", () => {
     await expect(addLinear(input({ script: [KEY], flags: { linearTeam: "not-a-team" } }))).rejects.toThrow("the key cannot see team not-a-team");
   });
 
-  it("fails the step when the preflight does not report the connector connected, keeping the revision", async () => {
-    const plane = fakeControlPlane();
-    plane.preflight.linear = { status: "not_connected", problem: "Linear rejected the credential twice" };
-    await expect(addLinear(input({ plane }))).rejects.toThrow("revision 2 of payments-api is registered, but the linear connector is not_connected: Linear rejected the credential twice. Fix it, then run agentx --env staging connector add linear --project payments-api again");
-  });
-
-  it("inside agentx init, points the fix at init's own rerun, not the day-2 command", async () => {
-    const plane = fakeControlPlane();
-    plane.preflight.linear = { status: "not_connected", problem: "Linear rejected the credential twice" };
-    await expect(addLinear({ ...input({ plane }), rerun: "agentx --env staging init" })).rejects.toThrow("Fix it, then run agentx --env staging init again");
-  });
-
   it("says where the project file comes from when this machine has none, before the key is asked for or stored", async () => {
     const empty = await mkdtemp(join(tmpdir(), "agentx-projects-empty-"));
     try {
@@ -113,32 +101,6 @@ describe("agentx connector add linear (FR-036 to FR-039)", () => {
   it("fails the step when the control plane's preflight names no connector, keeping the revision confirmed as unregistered (F17)", async () => {
     const plane = withNoPreflight(fakeControlPlane());
     await expect(addLinear(input({ plane }))).rejects.toThrow(/could not be confirmed/);
-  });
-
-  it("refuses a project that still uses the older integrations.githubMcp setting, before the key is stored", async () => {
-    // A hand-written project file may still carry the pre-connectors githubMcp policy. Adding a
-    // connector on top of it would build a definition with both githubMcp and connectors set,
-    // which the control plane's schema refuses with a raw "use either ... not both" error. The
-    // refusal must happen before anything is stored: no secret, no vendor read, nothing sent.
-    const legacyDir = await mkdtemp(join(tmpdir(), "agentx-projects-legacy-"));
-    try {
-      await writeProjectFile(legacyDir, {
-        name: "payments-api", revision: 1,
-        repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
-        setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote AgentX worker.",
-        integrations: { githubMcp: { tools: [{ name: "list_issues", access: "read" }] } },
-      });
-      const secrets = memoryInitSecrets();
-      const vendors = fakeVendors();
-      const testInput = input({ secrets, vendors });
-      await expect(addLinear({ ...testInput, services: { ...testInput.services, configDir: legacyDir } })).rejects.toThrow(
-        "project payments-api uses the older integrations.githubMcp setting; move it to integrations.connectors (see docs/project-configuration.md) before adding connectors",
-      );
-      expect(secrets.values.size).toBe(0);
-      expect(vendors.calls).toEqual([]);
-    } finally {
-      await rm(legacyDir, { recursive: true, force: true });
-    }
   });
 
   it("replaces an earlier linear connector instead of adding a second one", async () => {

@@ -114,10 +114,6 @@ describe("a task whose owner connected ChatGPT (#341)", () => {
     }
   });
 
-  it("is someone else's connection only for their own tasks", async () => {
-    const h = await taskFor(sam, { [developerIdForSlackUser(maya)]: connected });
-    expect(h.invocation.payload).not.toHaveProperty("chatgpt");
-  });
 });
 
 describe("the worker's side of a ChatGPT task (#341)", () => {

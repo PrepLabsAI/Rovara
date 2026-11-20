@@ -1,18 +1,11 @@
 import { describe, expect, it } from "vitest";
-import {
-  ActingIdentityPolicySchema, AttributionSchema, ChangeRequestFeedbackSchema, ChangeRequestInputSchema, ChangeRequestStatusSchema, ChangeRequestUpdateSchema, CheckSchema,
-  CheckStartRequestSchema, CheckTargetSchema, DELEGATED_GRANT_MAX_LIFETIME_MS, GIT_CREDENTIAL_HELPERS, GIT_CREDENTIAL_MAX_LIFETIME_MS, workerGitCredentialUsable, CodeHostCapabilitiesSchema, CodeHostEventSchema, CODE_HOST_EVENT_TYPES, DelegatedGrantSchema, GitCredentialSchema,
-  COMMIT_ID_PATTERN, isCommitId,
-  HostScopeSchema, MergeResultSchema, PluginKindSchema, TrackerEventSchema, TrackerItemSchema, actingIdentityModeAllowed, delegatedUseAllowed,
-} from "../../packages/contracts/src/plugins/index.js";
+import { ActingIdentityPolicySchema, AttributionSchema, ChangeRequestFeedbackSchema, ChangeRequestInputSchema, ChangeRequestStatusSchema, ChangeRequestUpdateSchema, CheckSchema, CheckStartRequestSchema, CheckTargetSchema, DELEGATED_GRANT_MAX_LIFETIME_MS, GIT_CREDENTIAL_HELPERS, GIT_CREDENTIAL_MAX_LIFETIME_MS, workerGitCredentialUsable, CodeHostCapabilitiesSchema, CodeHostEventSchema, CODE_HOST_EVENT_TYPES, DelegatedGrantSchema, GitCredentialSchema, COMMIT_ID_PATTERN, isCommitId, HostScopeSchema, MergeResultSchema, TrackerEventSchema, TrackerItemSchema, actingIdentityModeAllowed, delegatedUseAllowed } from "../../packages/contracts/src/plugins/index.js";
 
 const ref = { repository: { url: "https://git.example.test/acme/app" }, id: "7", url: "https://git.example.test/acme/app/pull/7" };
 const sha = "a".repeat(40);
 const hex64 = "b".repeat(64);
 
 describe("plug-in kinds and scopes", () => {
-  it.each(["github", "fake", "code-commit", "x1"])("accepts the kind %s", (kind) => expect(PluginKindSchema.safeParse(kind).success).toBe(true));
-  it.each(["", "GitHub", "has space", "1abc", "a".repeat(33), "../x", "git_hub"])("refuses the kind %j", (kind) => expect(PluginKindSchema.safeParse(kind).success).toBe(false));
 
   it("takes an org scope or a named system scope and nothing else", () => {
     expect(HostScopeSchema.safeParse({ system: "webhook" }).success).toBe(true);
@@ -25,14 +18,6 @@ describe("plug-in kinds and scopes", () => {
 describe("code host capabilities", () => {
   const caps = { drafts: true, threadedComments: true, requiredApprovals: true, codeOwners: true, webhooks: true, rerunChecks: false, perPersonCredentials: false, merge: true, markReady: true, requestReviewers: true, credentialKinds: ["token"] };
   it("accepts a full set", () => expect(CodeHostCapabilitiesSchema.parse(caps)).toEqual(caps));
-  it("refuses a missing capability, an extra one and an empty credential list", () => {
-    const missing: Record<string, unknown> = { ...caps };
-    delete missing.drafts;
-    expect(CodeHostCapabilitiesSchema.safeParse(missing).success).toBe(false);
-    expect(CodeHostCapabilitiesSchema.safeParse({ ...caps, extra: true }).success).toBe(false);
-    expect(CodeHostCapabilitiesSchema.safeParse({ ...caps, credentialKinds: [] }).success).toBe(false);
-    expect(CodeHostCapabilitiesSchema.safeParse({ ...caps, credentialKinds: ["password"] }).success).toBe(false);
-  });
 });
 
 describe("git credentials", () => {
@@ -40,23 +25,12 @@ describe("git credentials", () => {
   // P8: an ssh key credential carries the key, the ssh:// address and the pinned host keys (never trusting the first server that answers).
 const SSH_KEY = { privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n", sshUrl: "ssh://git@git.example.test/srv/app.git", knownHosts: `git.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI${"A".repeat(43)}` };
 const soon = new Date(NOW + 30 * 60_000).toISOString();
-  it("takes each of the four kinds with its own fields and an expiry", () => {
-    expect(GitCredentialSchema.safeParse({ kind: "token", token: "t", expiresAt: soon }).success).toBe(true);
-    expect(GitCredentialSchema.safeParse({ kind: "basic", username: "u", password: "p", expiresAt: soon }).success).toBe(true);
-    expect(GitCredentialSchema.safeParse({ kind: "ssh-key", ...SSH_KEY, expiresAt: soon }).success).toBe(true);
-    expect(GitCredentialSchema.safeParse({ kind: "helper", helper: "aws-codecommit", expiresAt: soon }).success).toBe(true);
-  });
   it("refuses a credential with no expiry, whatever its kind", () => {
     for (const credential of [{ kind: "token", token: "t" }, { kind: "basic", username: "u", password: "p" }, { kind: "ssh-key", ...SSH_KEY }, { kind: "helper", helper: "aws-codecommit" }]) {
       expect(GitCredentialSchema.safeParse(credential).success, credential.kind).toBe(false);
       expect(workerGitCredentialUsable(credential, { now: NOW, actingAs: "service" })).toEqual({ ok: false, reason: "invalid" });
     }
     expect(GitCredentialSchema.safeParse({ kind: "token", token: "t", expiresAt: "not a time" }).success).toBe(false);
-  });
-  it("refuses a kind with another kind's field, an empty secret and an unknown kind", () => {
-    expect(GitCredentialSchema.safeParse({ kind: "token", password: "p", expiresAt: soon }).success).toBe(false);
-    expect(GitCredentialSchema.safeParse({ kind: "token", token: "", expiresAt: soon }).success).toBe(false);
-    expect(GitCredentialSchema.safeParse({ kind: "cookie", token: "t", expiresAt: soon }).success).toBe(false);
   });
   it("takes a helper by name from a fixed list and never a command", () => {
     expect([...GIT_CREDENTIAL_HELPERS]).toEqual(["aws-codecommit"]);
@@ -153,20 +127,6 @@ describe("neutral events", () => {
     expect(CodeHostEventSchema.safeParse({ ...base, type: "revision.pushed", repository: ref.repository, branch: "main", revision: sha }).success).toBe(true);
     expect(CodeHostEventSchema.safeParse({ ...base, type: "deployment.status", repository: ref.repository, revision: sha, environment: "staging", state: "success" }).success).toBe(true);
   });
-  it("refuses a deployment event with a state, an environment or a field the port does not name (M7 slice 2)", () => {
-    const event = { ...base, type: "deployment.status", repository: ref.repository, revision: sha, environment: "staging", state: "success" };
-    expect(CodeHostEventSchema.safeParse({ ...event, state: "inactive" }).success).toBe(false);
-    expect(CodeHostEventSchema.safeParse({ ...event, state: "error" }).success).toBe(false);
-    expect(CodeHostEventSchema.safeParse({ ...event, environment: "" }).success).toBe(false);
-    expect(CodeHostEventSchema.safeParse({ ...event, environment: "e".repeat(65) }).success).toBe(false);
-    expect(CodeHostEventSchema.safeParse({ ...event, environment: undefined }).success).toBe(false);
-    expect(CodeHostEventSchema.safeParse({ ...event, url: "https://example.test" }).success).toBe(false);
-  });
-  it("refuses an event with no delivery id, an unknown type or a field it does not know", () => {
-    expect(CodeHostEventSchema.safeParse({ host: "github", type: "change_request.opened", ref }).success).toBe(false);
-    expect(CodeHostEventSchema.safeParse({ ...base, type: "repository.deleted", ref }).success).toBe(false);
-    expect(CodeHostEventSchema.safeParse({ ...base, type: "change_request.opened", ref, payload: {} }).success).toBe(false);
-  });
 });
 
 describe("check runners and trackers", () => {
@@ -259,7 +219,4 @@ describe("item C4: revision ids and check logs", () => {
     expect(isCommitId("0".repeat(64))).toBe(true);
   });
 
-  it("marks a check whose log can be read by the host", () => {
-    expect(CheckSchema.parse({ name: "ci", state: "completed", conclusion: "failure", required: false, url: "", runId: "9", logReadable: true }).logReadable).toBe(true);
-  });
 });

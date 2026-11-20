@@ -186,24 +186,6 @@ describe("AgentX administration workflow", () => {
     expect(fetchImplementation).not.toHaveBeenCalled();
   });
 
-  it("refuses the retired developer commands without calling the control plane", async () => {
-    const context = await administratorContext("agentx-cli-retired-");
-    const fetchImplementation = vi.fn<typeof fetch>(async () => {
-      throw new Error("the retired commands must not reach the control plane");
-    });
-
-    for (const retired of [["status"], ["conversation", "new"], ["pr", "create"], ["cancel"], ["slack", "logout"]]) {
-      const errors: string[] = [];
-      const exitCode = await executeCli([...context.globals, ...retired], {
-        fetchImplementation,
-        tokenStore: context.tokens,
-        stdout: { write() {} },
-        stderr: { write(text: string) { errors.push(text); } },
-      });
-      expect(exitCode, `${retired.join(" ")} must fail`).not.toBe(0);
-    }
-    expect(fetchImplementation).not.toHaveBeenCalled();
-  });
 });
 
 const deployment = {

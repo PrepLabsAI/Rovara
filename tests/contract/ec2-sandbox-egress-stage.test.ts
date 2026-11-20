@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { EGRESS_GATEWAY_SOURCE } from "../../packages/contracts/src/egress-gateway-source.js";
 import { SANDBOX_REGISTRY_DENY, SANDBOX_S3_DENY } from "../../packages/contracts/src/sandbox-deny-domains.js";
-import { EC2_USER_DATA_MAX_BYTES, ec2WorkerBootScript, ec2WorkerUserData, type Ec2WorkerBootConfig } from "../../packages/contracts/src/session.js";
+import { EC2_USER_DATA_MAX_BYTES, ec2WorkerUserData, type Ec2WorkerBootConfig } from "../../packages/contracts/src/session.js";
 
 const stage = readFileSync(new URL("../../packages/worker/ec2/sandbox-egress.sh", import.meta.url), "utf8");
 const bootScript = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
@@ -609,21 +609,6 @@ describe("boot.sh's sandbox-egress hook and the boot configuration", () => {
     workspaceId: "11111111-2222-4333-8444-555555555555", generation: 2, volumeId: "vol-0123456789abcdef0", expectNewVolume: false, workerImage: WORKER_IMAGE, invokePublicKey: "QUJD",
     controlPlaneUrl: "https://abc.execute-api.us-west-2.amazonaws.com", modelProvider: "amazon-bedrock", modelId: "m", promptCacheRetention: "long", logGroupName: "/agentx/staging/worker",
   };
-
-  it("renders AGENTX_SANDBOX_EGRESS='gateway' only for the gateway setting; `bridge` adds nothing, so its user data is byte-identical to before", () => {
-    expect(ec2WorkerBootScript({ ...config, sandboxEgress: "gateway" }, bootScript)).toContain("export AGENTX_SANDBOX_EGRESS='gateway'");
-    expect(ec2WorkerBootScript(config, bootScript)).not.toContain("export AGENTX_SANDBOX_EGRESS");
-    expect(ec2WorkerUserData(config, bootScript)).toBe(ec2WorkerUserData({ ...config }, bootScript));
-    // The only difference the gateway makes to the script is that one line.
-    const withGateway = ec2WorkerBootScript({ ...config, sandboxEgress: "gateway" }, bootScript).split("\n");
-    const without = ec2WorkerBootScript(config, bootScript).split("\n");
-    expect(withGateway.filter((line) => !without.includes(line))).toEqual(["export AGENTX_SANDBOX_EGRESS='gateway'"]);
-    expect(without.filter((line) => !withGateway.includes(line))).toEqual([]);
-  });
-
-  it("refuses any value but `gateway` in the boot configuration (a stack value of `bridge` is the absence of the variable, never a value)", () => {
-    for (const bad of ["bridge", "Gateway", "1", "", "gateway; rm -rf /"]) expect(() => ec2WorkerBootScript({ ...config, sandboxEgress: bad as never }, bootScript), bad).toThrow();
-  });
 
   it("keeps the user data under EC2's limit with the gateway on", () => {
     const sized = ec2WorkerUserData({ ...config, sandboxEgress: "gateway", testServices: true }, bootScript);

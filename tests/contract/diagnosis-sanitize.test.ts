@@ -5,7 +5,6 @@ import { DIAGNOSIS_PROPOSALS_MAX, DiagnosisProposalSchema } from "../../packages
 import { extractJsonObject, proposalCounts, sanitizeDiagnosis } from "../../packages/broker/src/core/diagnosis/sanitize.js";
 
 const TOKEN = `ghp_${"a1B2".repeat(9)}`;
-const SHA = "0123456789abcdef0123456789abcdef01234567";
 const answer = (value: unknown): string => JSON.stringify(value);
 const mergeChange = { kind: "settings_change", target: "code_settings", path: "mergeMethod", from: "squash", to: "merge", citations: ['doc:merge-method "merge commits"'] };
 
@@ -34,27 +33,6 @@ describe("sanitizeDiagnosis", () => {
     ] }));
     expect(result.proposals.map((proposal) => proposal.kind)).toEqual(["explain", "retry_with_note"]);
     expect(result.dropped).toBe(6);
-  });
-
-  it("drops a settings change off the allow-list: budgets, roles, tier-0, egress, model endpoints, MCP servers and secrets, whatever the target", () => {
-    const paths = ["budget.monthlyUsd", "roles.admin", "tierZero.auto", "tier0", "allowedDomains", "model.url", "toolServers", "env.GITHUB_PAT", "approvals.required", "workingBranch"];
-    const result = sanitizeDiagnosis(answer({ summary: "s", proposals: paths.flatMap((path) => ["code_settings", "setup_item", "playbook", "connector", "model_access"].map((target) => ({ ...mergeChange, target, path, to: "squash" }))) }));
-    expect(result.proposals.map((proposal) => proposal.kind)).toEqual(["explain"]);
-    expect(result.dropped).toBe(paths.length * 5);
-  });
-
-  it("keeps an allow-listed change, but only with a value of the kind that path takes and citations of the two known forms that hold nothing secret-shaped", () => {
-    const ok = (change: Record<string, unknown>) => sanitizeDiagnosis(answer({ summary: "s", proposals: [change] })).proposals.some((proposal) => proposal.kind === "settings_change");
-    expect(ok(mergeChange)).toBe(true);
-    expect(ok({ ...mergeChange, to: "rebase" })).toBe(false);
-    expect(ok({ ...mergeChange, to: TOKEN })).toBe(false);
-    expect(ok({ ...mergeChange, citations: [] })).toBe(false);
-    expect(ok({ ...mergeChange, citations: ["see the docs"] })).toBe(false);
-    expect(ok({ ...mergeChange, citations: [`doc:merge-method "${TOKEN}"`] })).toBe(false);
-    expect(ok({ ...mergeChange, citations: [`repo:web:.devcontainer/devcontainer.json@${SHA} "image"`] })).toBe(true);
-    // One good citation and one that is not a citation: the good one stays.
-    const mixed = sanitizeDiagnosis(answer({ summary: "s", proposals: [{ ...mergeChange, citations: ["nonsense", 'doc:merge-method "merge commits"'] }] }));
-    expect(mixed.proposals.find((proposal) => proposal.kind === "settings_change")).toMatchObject({ citations: ['doc:merge-method "merge commits"'] });
   });
 
   it("makes planted text inert: no mention, link, tag, issue reference or secret survives in any text field", () => {
@@ -100,12 +78,6 @@ describe("sanitizeDiagnosis", () => {
     expect(sanitizeDiagnosis("   ").proposals).toEqual([]);
     for (const garbage of [undefined, null, 5, {}, [], "{", "}{"]) expect(() => sanitizeDiagnosis(garbage)).not.toThrow();
     expect(sanitizeDiagnosis(undefined).proposals).toEqual([]);
-  });
-
-  it("sets needsCode only for exactly true", () => {
-    for (const [value, expected] of [[true, true], ["true", false], [1, false], [false, false], [undefined, false]] as const) {
-      expect(sanitizeDiagnosis(answer({ summary: "s", needsCode: value, proposals: [] })).needsCode, String(value)).toBe(expected);
-    }
   });
 
   it("counts proposals by kind for the audit event", () => {

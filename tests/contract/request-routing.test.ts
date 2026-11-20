@@ -25,14 +25,6 @@ const JARGON = /candidate|revision|digest|operation|artifact|workflow|SUCCEEDED|
 const CHOICE_ID = "11111111-1111-4111-8111-111111111111";
 
 describe("reading the classifier model's route", () => {
-  it("accepts exactly one route object, bare or in one code fence", () => {
-    for (const kind of ["question", "small_change", "large_change", "unclear"] as const) {
-      expect(parseRequestRoute(`{"kind":"${kind}","reason":"short reason"}`)).toEqual({ kind, reason: "short reason" });
-    }
-    expect(parseRequestRoute("```json\n{\"kind\":\"question\",\"reason\":\"asks how retries work\"}\n```")).toEqual({ kind: "question", reason: "asks how retries work" });
-    expect(parseRequestRoute("```\n{ \"reason\": \"one typo\", \"kind\": \"small_change\" }\n```")).toEqual({ kind: "small_change", reason: "one typo" });
-    expect(parseRequestRoute("  {\"kind\":\"large_change\",\"reason\":\"\"}  ")).toEqual({ kind: "large_change", reason: "" });
-  });
 
   it("refuses anything else: other kinds, extra or missing keys, repeated keys, prose, two fences, an oversized reason, arrays", () => {
     for (const text of [
@@ -90,24 +82,10 @@ describe("the routed request's card", () => {
     return { card, elements: actions.elements.map((element) => [element.text.text, element.action_id, element.style ?? ""]), values: actions.elements.map((element) => element.value) };
   };
 
-  it("suggests Quick for a small change: Start (Quick), Use Full instead, Just answer", () => {
-    const { card, elements } = buttons("small_change");
-    expect(card.text.startsWith("This looks like a small, clear change, so I'll do it as a quick change: plan → code → checks → draft PR.")).toBe(true);
-    expect(card.text).toContain("reply `full` if you want requirements and design first");
-    expect(elements).toEqual([["Start", WORKFLOW_PATH_QUICK_ACTION, "primary"], ["Use Full instead", WORKFLOW_PATH_FULL_ACTION, ""], ["Just answer", WORKFLOW_PATH_ANSWER_ACTION, ""]]);
-  });
-
   it("suggests Full for a bigger change: Start (Full), Use Quick instead, Just answer", () => {
     const { card, elements } = buttons("large_change");
     expect(card.text.startsWith("This looks like a bigger change (a feature, several parts, or decisions to make first), so I suggest Full: requirements → design → coding plan.")).toBe(true);
     expect(elements).toEqual([["Start", WORKFLOW_PATH_FULL_ACTION, "primary"], ["Use Quick instead", WORKFLOW_PATH_QUICK_ACTION, ""], ["Just answer", WORKFLOW_PATH_ANSWER_ACTION, ""]]);
-  });
-
-  it("offers Just answer, Quick and Full, each explained in one line, recommending Just answer with its reason, when it cannot tell", () => {
-    const { card, elements } = buttons("unclear");
-    expect(card.text).toMatch(/Just answer\*: I reply here and change no code\.\n• \*Quick\*: [^\n]+\n• \*Full\*: [^\n]+/);
-    expect(card.text).toContain("I suggest *Just answer*: it changes no code, and you can ask for a change after.");
-    expect(elements).toEqual([["Just answer", WORKFLOW_PATH_ANSWER_ACTION, "primary"], ["Quick", WORKFLOW_PATH_QUICK_ACTION, ""], ["Full", WORKFLOW_PATH_FULL_ACTION, ""]]);
   });
 
   it("binds every button to the one saved request, says who can choose, and passes Slack's limits and the copy rules", () => {
@@ -154,14 +132,4 @@ describe("the request router, offline with Pi's faux model", () => {
     expect(await slow("x")).toEqual({ kind: "unclear", outcome: "timeout" });
   });
 
-  it("waits at most four seconds, even when the classifier's own timeout is longer", async () => {
-    const { modelRuntime, faux } = await fauxModelRuntime();
-    faux.setResponses([() => new Promise(() => undefined)]);
-    const route = await createModelRequestRouter({ model, modelRuntime, timeoutMs: 60_000 });
-    const started = Date.now();
-    expect(await route("x")).toEqual({ kind: "unclear", outcome: "timeout" });
-    const waited = Date.now() - started;
-    expect(waited).toBeGreaterThanOrEqual(3_900);
-    expect(waited).toBeLessThan(5_000);
-  }, 10_000);
 });

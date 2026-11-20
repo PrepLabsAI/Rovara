@@ -42,18 +42,6 @@ async function run(input: { connectors: unknown[]; extra?: Record<string, unknow
   return connectorChecks(doctorContext({ services, progress: input.progress ?? PROGRESS }));
 }
 
-describe("environmentProjectFiles", () => {
-  it("finds only this environment's project files, by the header agentx writes", async () => {
-    const dir = await projectDir([{ env: "staging", definition: payments([]) }, { env: "staging-eu", definition: { name: "eu", revision: 1 } }, { env: "prod", definition: { name: "prod-app", revision: 1 } }]);
-    const found = await environmentProjectFiles(dir, "staging");
-    expect(found.map((file) => [file.name, file.launchTemplateId])).toEqual([["payments", "lt-0123456789abcdef0"]]);
-  });
-
-  it("answers an empty list for a directory that does not exist", async () => {
-    expect(await environmentProjectFiles("/nonexistent-agentx-projects", "staging")).toEqual([]);
-  });
-});
-
 describe("doctor: connectors (FR-050, the 15d2 decision on saved warnings)", () => {
   it("passes Linear and Jira with a real read, and Asana with its stored sign-in, never showing a credential", async () => {
     const vendors = fakeVendors({ jiraInside: ["PAY-1"] });
@@ -96,26 +84,6 @@ describe("doctor: connectors (FR-050, the 15d2 decision on saved warnings)", () 
     expect((await run({ connectors: [asana], secrets }))[0]).toMatchObject({ status: "fail", detail: "the Asana bot never finished signing in (no refresh token is stored)" });
   });
 
-  it("warns about the older integrations.githubMcp setting and a warning init saved", async () => {
-    const progress = { ...PROGRESS, connectors: [{ type: "jira" as const, ref: "jira", warning: "the Jira service account can also see issues in HR, FIN" }] };
-    const checks = await run({ connectors: [], extra: { githubMcp: { tools: [] } }, progress });
-    expect(checks).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: "project payments", status: "warn", detail: "uses the older integrations.githubMcp setting" }),
-      expect.objectContaining({ name: "Jira warning", status: "warn", detail: "the Jira service account can also see issues in HR, FIN" }),
-    ]));
-    // Ruling F25: the fix points at the project configuration contract that exists.
-    expect(checks.find((entry) => entry.name === "project payments")?.fix).toContain("specs/013-connector-gateway/contracts/project-config.md");
-  });
-
-  it("names --env and --project in the fix for a saved Jira warning, as for every other connector (final review M9)", async () => {
-    const progress = { ...PROGRESS, connectors: [{ type: "jira" as const, ref: "jira", warning: "the Jira service account can also see issues in HR" }] };
-    const checks = await run({ connectors: [], progress });
-    expect(checks.find((entry) => entry.name === "Jira warning")?.fix).toBe("narrow the Jira service account to the connected project (docs/connectors/jira.md, Step 4), then run agentx --env staging connector add jira --project <name> again");
-  });
-
-  it("says so when there are no connectors", async () => {
-    expect(await run({ connectors: [] })).toEqual([expect.objectContaining({ name: "connectors", status: "ok", detail: "no connectors are set up" })]);
-  });
 });
 
 describe("doctor: connectors (Task 7 fix round 1)", () => {

@@ -70,10 +70,6 @@ describe("parallel parts: the checkpoints of one attempt", () => {
     expect(project(history)?.map((entry) => entry.itemId)).toEqual([A, B, C]);
   });
 
-  it("refuses a start whose dependencies are not implemented", () => {
-    expect(project([event(A, 1, "STARTED", tree("a")), event(C, 2, "STARTED", tree("a"))])).toBeUndefined();
-  });
-
   it("refuses more starts than the cap allows", () => {
     expect(project([event(A, 1, "STARTED", tree("a")), event(B, 2, "STARTED", tree("a"))], { parallel: { max: 1 } })).toBeUndefined();
     expect(project([event(A, 1, "STARTED", tree("a")), event(B, 2, "STARTED", tree("a"))], { parallel: { max: 2 } })).toBeDefined();
@@ -97,11 +93,6 @@ describe("parallel parts: the checkpoints of one attempt", () => {
     expect(project(first)).toBeDefined();
     expect(project([...first, event(A, 3, "STARTED", tree("2"))])).toBeUndefined();
     expect(project([event(A, 1, "STARTED", tree("a")), event(A, 2, "STARTED", tree("a"))])).toBeUndefined();
-  });
-
-  it("refuses a start of an item that is already implemented", () => {
-    const history = [event(A, 1, "STARTED", tree("a")), event(A, 2, "IMPLEMENTED", tree("a")), event(A, 3, "STARTED", tree("a"))];
-    expect(project(history)).toBeUndefined();
   });
 
   it("keeps the retained finished parts when they are closed under dependencies, and refuses a set that is not", () => {

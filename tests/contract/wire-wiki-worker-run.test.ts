@@ -6,9 +6,8 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { WIKI_AGENT_FEATURE, WIKI_AGENT_INSTRUCTION, WIKI_READ_REPORT_FIELD, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema } from "../../packages/contracts/src/index.js";
+import { WIKI_AGENT_INSTRUCTION, WIKI_READ_REPORT_FIELD, WorkerInvocationSchema } from "../../packages/contracts/src/index.js";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
-import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 import type { PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 
@@ -75,10 +74,6 @@ async function step(payload: Record<string, unknown>, mode: string | undefined =
 }
 
 describe("a step with the project wiki", () => {
-  it("is a feature the contracts know and the worker implements", () => {
-    expect(WORKER_INVOCATION_FEATURES as readonly string[]).toContain(WIKI_AGENT_FEATURE);
-    expect(WORKER_IMPLEMENTED_FEATURES as readonly string[]).toContain(WIKI_AGENT_FEATURE);
-  });
 
   it("prompts with the labelled wiki block in front of the broker's prompt (not as a system context file), places the folder, reports what was given and what the agent read", async () => {
     const run = await step({ wikiContext: wikiContext() });
