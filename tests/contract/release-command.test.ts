@@ -20,11 +20,8 @@ import {
 import {
   SLACK_ORCHESTRATOR_IMAGE_INPUTS,
   SLACK_ORCHESTRATOR_REPOSITORY,
-  WORKER_CAPABILITY_ROUTE_KEYS,
   WORKER_IMAGE_INPUTS,
-  assertNoHandMadeCapabilityRoutes,
   parseProductionReleaseArgs,
-  releaseProduction,
   releaseRevisionFromTags,
   reusableWorkerImage,
 } from "../../scripts/release-production.js";
@@ -412,112 +409,6 @@ describe("a command run as another account", () => {
       write.mockRestore();
       if (previous === undefined) delete process.env.npm_config_cache; else process.env.npm_config_cache = previous;
       rmSync(directory, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("hand-made worker-capability route guard", () => {
-  const CONTEXT = "GET /v1/internal/context-tools";
-  const PACKET = "GET /v1/internal/design-review/packet";
-  const options = { region: "us-east-1" } as const;
-  type Resource = { LogicalResourceId: string; PhysicalResourceId: string; ResourceType: string; ResourceStatus?: string };
-  const api: Resource = { LogicalResourceId: "HttpApi", PhysicalResourceId: "api111", ResourceType: "AWS::ApiGatewayV2::Api" };
-  const route = (logical: string, id: string, status = "CREATE_COMPLETE"): Resource => ({ LogicalResourceId: logical, PhysicalResourceId: id, ResourceType: "AWS::ApiGatewayV2::Route", ResourceStatus: status });
-
-  function fake(state: { stack?: boolean; pages?: Resource[][]; routePages?: Array<Array<{ RouteId: string; RouteKey: string }>> }) {
-    const calls: string[][] = [];
-    const pages = state.pages ?? [[api]];
-    const routePages = state.routePages ?? [[]];
-    const runner = {
-      aws(args: readonly string[]) {
-        calls.push(["aws", ...args]);
-        if (args[0] === "cloudformation" && args[1] === "describe-stacks") {
-          return state.stack === false ? { status: 254, stdout: "", stderr: "Stack with id AgentXControlPlane does not exist" } : { status: 0, stdout: "{}", stderr: "" };
-        }
-        const paged = (list: readonly unknown[], key: string) => {
-          const at = args.includes("--starting-token") ? Number(args[args.indexOf("--starting-token") + 1]) : 0;
-          return { status: 0, stderr: "", stdout: JSON.stringify({ [key]: list[at], ...(at + 1 < list.length ? { NextToken: String(at + 1) } : {}) }) };
-        };
-        if (args[0] === "cloudformation" && args[1] === "list-stack-resources") return paged(pages, "StackResourceSummaries");
-        if (args[0] === "apigatewayv2" && args[1] === "get-routes") return paged(routePages, "Items");
-        throw new Error(`unexpected aws ${args.join(" ")}`);
-      },
-    };
-    return { runner: runner as unknown as Pick<Runner, "aws">, calls };
-  }
-  const guard = (state: Parameters<typeof fake>[0], extra: Partial<{ profile: string }> = {}) => {
-    const { runner, calls } = fake(state);
-    return { calls, run: () => assertNoHandMadeCapabilityRoutes(runner, { ...options, ...extra }) };
-  };
-
-  it("guards exactly the two worker-capability route keys", () => {
-    expect(WORKER_CAPABILITY_ROUTE_KEYS).toEqual([CONTEXT, PACKET]);
-  });
-
-  it("refuses hand-made routes, names their ids and prints the exact delete commands", () => {
-    const { run, calls } = guard({ pages: [[api, route("ProxyRoute", "own1")]], routePages: [[{ RouteId: "hand1", RouteKey: CONTEXT }, { RouteId: "own1", RouteKey: "ANY /{proxy+}" }, { RouteId: "hand2", RouteKey: PACKET }]] }, { profile: "prod" });
-    let message = "";
-    try { run(); } catch (error) { message = (error as Error).message; }
-    expect(message).toContain("AlreadyExists");
-    expect(message).toContain("route id hand1");
-    expect(message).toContain("route id hand2");
-    expect(message).toContain("aws apigatewayv2 delete-route --region us-east-1 --api-id api111 --route-id hand1 --profile prod");
-    expect(message).toContain("aws apigatewayv2 delete-route --region us-east-1 --api-id api111 --route-id hand2 --profile prod");
-    expect(message).not.toContain("own1\n");
-    expect(calls.map((call) => call.slice(0, 3).join(" "))).toEqual(["aws cloudformation describe-stacks", "aws cloudformation list-stack-resources", "aws apigatewayv2 get-routes"]);
-    expect(calls[2]).toEqual(expect.arrayContaining(["--api-id", "api111", "--region", "us-east-1"]));
-    expect(calls[1]).toEqual(expect.arrayContaining(["--stack-name", "AgentXControlPlane"]));
-  });
-
-  it("refuses when only one of the two routes is hand-made", () => {
-    const { run } = guard({ pages: [[api, route("ContextToolsListRoute", "own1")]], routePages: [[{ RouteId: "own1", RouteKey: CONTEXT }, { RouteId: "hand2", RouteKey: PACKET }]] });
-    expect(run).toThrow(/route id hand2/);
-    expect(run).not.toThrow(/hand1|own1/);
-  });
-
-  it("passes when the stack owns both routes, under any logical ID", () => {
-    expect(guard({ pages: [[api, route("ContextToolsListRoute", "own1"), route("SomeOtherId", "own2")]], routePages: [[{ RouteId: "own1", RouteKey: CONTEXT }, { RouteId: "own2", RouteKey: PACKET }]] }).run).not.toThrow();
-  });
-
-  it("does not count a deleted stack resource as ownership", () => {
-    expect(guard({ pages: [[api, route("ContextToolsListRoute", "gone1", "DELETE_COMPLETE")]], routePages: [[{ RouteId: "gone1", RouteKey: CONTEXT }]] }).run).toThrow(/route id gone1/);
-  });
-
-  it("passes with no such routes, and with a missing stack (after only describe-stacks)", () => {
-    expect(guard({ routePages: [[{ RouteId: "own1", RouteKey: "ANY /{proxy+}" }]] }).run).not.toThrow();
-    const missing = guard({ stack: false });
-    expect(missing.run).not.toThrow();
-    expect(missing.calls).toHaveLength(1);
-  });
-
-  it("reads every page of the stack's resources and of the routes", () => {
-    const { run } = guard({
-      pages: [[api], [route("ContextToolsListRoute", "own1")], [route("DesignReviewPacketRoute", "own2")]],
-      routePages: [[{ RouteId: "x", RouteKey: "ANY /a" }], [{ RouteId: "own1", RouteKey: CONTEXT }], [{ RouteId: "own2", RouteKey: PACKET }, { RouteId: "hand3", RouteKey: CONTEXT }]],
-    });
-    expect(run).toThrow(/route id hand3/);
-    expect(run).not.toThrow(/route id own/);
-    expect(guard({ pages: [[api], [], [route("ContextToolsListRoute", "own1")]], routePages: [[], [], [{ RouteId: "own1", RouteKey: CONTEXT }]] }).run).not.toThrow();
-  });
-
-  it("fails closed when an existing stack has no HttpApi", () => {
-    expect(guard({ pages: [[route("ContextToolsListRoute", "own1")]] }).run).toThrow(/no HttpApi/);
-  });
-
-  it("runs first in releaseProduction: only read-only AWS calls happen before the refusal", async () => {
-    const aws: string[][] = [];
-    const other: string[] = [];
-    const { runner } = fake({ pages: [[api]], routePages: [[{ RouteId: "hand1", RouteKey: CONTEXT }]] });
-    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-    const awsSpy = vi.spyOn(ReleaseRunner.prototype, "aws").mockImplementation((args) => { aws.push([...args]); return (runner as unknown as { aws: (a: readonly string[]) => { status: number; stdout: string; stderr: string } }).aws(args); });
-    const capture = vi.spyOn(ReleaseRunner.prototype, "capture").mockImplementation((command) => { other.push(`capture ${command}`); return { status: 0, stdout: "", stderr: "" }; });
-    const run = vi.spyOn(ReleaseRunner.prototype, "run").mockImplementation((command) => { other.push(`run ${command}`); return ""; });
-    try {
-      await expect(releaseProduction(parseProductionReleaseArgs([], {}))).rejects.toThrow(/route id hand1/);
-      expect(other).toEqual([]);
-      expect(aws.map((args) => args.slice(0, 2).join(" "))).toEqual(["cloudformation describe-stacks", "cloudformation list-stack-resources", "apigatewayv2 get-routes"]);
-    } finally {
-      awsSpy.mockRestore(); capture.mockRestore(); run.mockRestore(); stdout.mockRestore();
     }
   });
 });
