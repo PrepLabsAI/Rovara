@@ -1,5 +1,5 @@
-// CI's gate. The `plan` job (scripts/ci-plan.ts) decides what a run needs; `quick`, `build`, the test shards, the Linux runtime check and the `ci-mode (full)` check run as
-// separate jobs; the job called `local` waits for all of them and is the one check a pull request needs. GitHub counts a skipped job as a pass, so a plain `needs` would let
+// CI's gate. The `plan` job (scripts/ci-plan.ts) decides what a run needs; `quick`, `build`, the test shards, the Linux runtime check, the `ci-mode (full)` check and the
+// release check run as separate jobs; the job called `local` waits for all of them and is the one check a pull request needs. GitHub counts a skipped job as a pass, so a plain `needs` would let
 // a pull request go green with a job missing. This reads the plan's answers and holds each job to them: a job the plan skipped by design must have been skipped (it counts as
 // a pass), a job the plan required must have succeeded, and a full run must have run everything. Node runs this file directly, so it imports only Node's own modules.
 
@@ -9,7 +9,7 @@ export interface GateVerdict { ok: boolean; reason: string }
 export type PlanOutputs = Readonly<Record<string, string | undefined>>;
 
 /** The jobs `local` judges besides `plan`, in the order they are reported. */
-export const GATED_JOBS = ["quick", "build", "test", "linux-runtime", "ci-mode"] as const;
+export const GATED_JOBS = ["quick", "build", "test", "linux-runtime", "ci-mode", "release-check"] as const;
 
 /** The shard list of a run that executes the whole suite (scripts/ci-plan.ts FULL_SHARDS). */
 export const FULL_SHARD_LIST = "[1,2,3,4,5,6,7,8]";
@@ -41,6 +41,7 @@ export function expectedResults(plan: PlanOutputs): { expected: Record<string, "
       test: tests === "none" ? "skipped" : "success",
       "linux-runtime": linux === "true" ? "success" : "skipped",
       "ci-mode": mode === "full" ? "success" : "skipped",
+      "release-check": release === "true" ? "success" : "skipped",
     },
   };
 }
