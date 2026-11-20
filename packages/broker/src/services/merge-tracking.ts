@@ -57,6 +57,9 @@ export const TRACKING_FAILURE_MAX_MS = TRACKING_HEARTBEAT_MINUTES * 60_000;
 export const SWEEP_MAX_ROWS = 10;
 export const SWEEP_MAX_REQUESTS = 256;
 export const SWEEP_MAX_MS = 20_000;
+/** Published-file verification includes instruction and docs-site probes, even for one README. Independent of the sweep scan and reconciliation. */
+const VERIFY_MAX_REQUESTS = 128;
+const VERIFY_MAX_MS = 15_000;
 /** One task's lighter-flow checks: their own allowance of requests, and at most this much of a pass's time (the reviewer calls are bounded on their own). */
 export const TIER_CHECKS_MAX_REQUESTS = 256;
 export const TIER_CHECKS_MAX_MS = 4 * 60_000;
@@ -464,13 +467,13 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     }
     if (rows.length === 0) return { attempted: 0 };
     const left = deadline - now();
-    if (left <= 0) return { attempted: 0 };
-    const { budget, stop } = createReadBudget(now, { requests: SWEEP_MAX_REQUESTS, ms: left });
+    const { budget, stop } = createReadBudget(now, { requests: SWEEP_MAX_REQUESTS, ms: Math.max(0, left) });
     let attempted = 0;
     try {
       for (const row of rows) {
-        // A code host that said "slow down" in this sweep pauses the rest of it.
-        if (cooldownUntil !== undefined || budget.signal.aborted || now() >= deadline) { scan.complete = false; break; }
+        // A selected row gets its own verification allowance even when the scan spent the sweep time.
+        // Later rows wait once the sweep is spent; a host cooldown always pauses every row.
+        if (cooldownUntil !== undefined || (attempted > 0 && (budget.signal.aborted || now() >= deadline))) { scan.complete = false; break; }
         if (await loadTask(row.taskId) === undefined) continue;
         attempted += 1;
         const versionBefore = await trackingVersions(row.taskId);
@@ -479,7 +482,19 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
         try {
           // The changed files are read from the code host once for the code the pull requests hold (review H3): until then the risk is high. A host that cannot answer now is asked again soon.
           const task = await readTask(flow, row.taskId);
-          if (task !== undefined) unverified = (await verifyPublishedChanges(flow, task, budget.beforeRequest)) === "unavailable";
+          if (task !== undefined) {
+            const startedAt = now();
+            let requests = 0;
+            const verification = createReadBudget(now, { requests: VERIFY_MAX_REQUESTS, ms: VERIFY_MAX_MS });
+            try {
+              unverified = (await verifyPublishedChanges({
+                ...flow,
+                log: (entry) => flow.log?.(entry["event"] === "build_step.changed_files_unavailable" ? { ...entry, ms: Math.max(0, now() - startedAt), requests } : entry),
+              }, task, () => { verification.budget.beforeRequest(); requests += 1; })) === "unavailable";
+            } finally {
+              verification.stop();
+            }
+          }
           // A task whose planning steps were skipped owes the lighter flow's checks on its current head. They take model calls, so they run in a pass of their own with an allowance of their own (`tierChecks`), never inside this sweep.
           if (task?.workflow !== undefined && skippedPlanning(task.workflow.flow)) await markTierDue(row.taskId);
           result = await reconcileTrackingTask(deps, row.taskId, budget);
