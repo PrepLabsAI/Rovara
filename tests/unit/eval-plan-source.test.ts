@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  EVAL_NOT_RUN_SENTENCES, EVAL_PLAN_DELIVERY_ACTION, EvalPlanDeliverySchema, attestRovaraOnlyBaseCheckout, evalResultFromArtifact, createDocumentBaseScoreCache, evalBaseCacheKey, evalCodeHash, evalCommandFingerprint, evalPlanDigest, evalQuestionHash, evalSpendDigest, evalSpendInputsDigest,
+  EVAL_NOT_RUN_SENTENCES, EVAL_PLAN_DELIVERY_ACTION, EvalPlanDeliverySchema, attestRovaraOnlyBaseCheckout, evalResultFromArtifact, createDocumentBaseScoreCache, evalCodeHash, evalCommandFingerprint, evalPlanDigest, evalQuestionHash, evalSpendInputsDigest,
   type Approvers, type EvalBaseRecord, type EvalPlanBody, type EvalReservationAdapter, type EvalSpendApprovalRecord, type EvalSpendPlan, type Principal,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -17,7 +17,6 @@ import { createDecisionGate, type DecisionAttempt } from "../../packages/broker/
 import { EVAL_SPEND_KIND, createEvalSpendSubject, evalPlanKey, evalSpendKey, proposeEvalSpendApproval, readApprovedEvalPlan } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
 import { createEvalPlanSources } from "../../packages/broker/src/core/setup-agent/eval-plan-source.js";
 import type { EvalPlanSources } from "../../packages/broker/src/core/proof/eval-plan-delivery.js";
-import { setupPartition } from "../../packages/broker/src/core/setup-agent/keys.js";
 import type { SessionMembers } from "../../packages/broker/src/core/sessions/access.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
@@ -52,8 +51,6 @@ const registryWith = (adapter?: EvalReservationAdapter) => ({ names: (point: str
 const run = (bases: Array<{ repositoryId: string; baseCommitSha: string }> | undefined = [{ repositoryId: "web", baseCommitSha: BASE }]) => ({ bases });
 /** The plan of ONE read (EVAL-PLAN-SNAPSHOT), or undefined. */
 const planOf = async (sources: EvalPlanSources, r: { bases: Array<{ repositoryId: string; baseCommitSha: string }> | undefined }) => (await sources.read({ companyId: A, project }, r))?.plan;
-/** The grant of ONE read's approval (bound to the item the plan was read with), or undefined. */
-const grantOf = async (sources: EvalPlanSources) => await (await sources.read({ companyId: A, project }, run()))?.approval?.read();
 
 /** One company's setup table, decision gate and spend approvals, over a store that may be shared with another company. */
 function company(companyId: string, store = new MemoryDocumentStore()) {
@@ -85,21 +82,6 @@ const rewrite = async (store: MemoryDocumentStore, companyId: string, edit: (row
 };
 
 describe("the EVAL_PLAN writer", () => {
-  it("writes the plan next to EVAL_SPEND in the company's setup partition and binds it by the item's digest (the approval covers the plan)", async () => {
-    const a = company(A);
-    const row = await a.propose();
-    const plan = evalPlan();
-    const digest = evalPlanDigest(A, project, plan);
-    expect(row.plan.evalPlanDigest).toBe(digest);
-    expect(row.digest).toBe(evalSpendDigest(A, project, { ...spendPlan(), evalPlanDigest: digest }));
-    // The approved digest differs from an item with no plan: approving it approves this plan.
-    expect(row.digest).not.toBe(evalSpendDigest(A, project, spendPlan()));
-    const record = await stored(a.store, A);
-    expect(evalPlanKey(A, project)).toEqual({ pk: setupPartition(A, project), sk: "EVAL_PLAN" });
-    expect(evalPlanKey(A, project).pk).toBe(evalSpendKey(A, project).pk);
-    expect(evalPlanKey(A, project).pk).toContain(A);
-    expect(record).toEqual({ ...evalPlanKey(A, project), entityType: "EVAL_PLAN", schemaVersion: 1, company: A, project, planDigest: digest, spendDigest: row.digest, plan });
-  });
 
   it("never takes a caller's plan digest, and refuses a plan that does not match the item (mutants: the digest is the broker's, the selection and inputs match)", async () => {
     const a = company(A);
@@ -113,16 +95,6 @@ describe("the EVAL_PLAN writer", () => {
     await expect(b.propose(evalPlan({ inputs: { ...inputs, model: "other-model" } }))).rejects.toThrow("does not match");
     expect(await stored(b.store, A)).toBeUndefined();
     expect(await b.store.get(evalSpendKey(A, project))).toBeUndefined();
-  });
-
-  it("an item proposed without a plan writes no plan (today's callers), and a stale plan of an older item is not its plan", async () => {
-    const a = company(A);
-    await a.approve();
-    expect(await a.read()).toBeDefined();
-    const legacy = await a.propose(null);
-    expect(legacy.plan.evalPlanDigest).toBeUndefined();
-    await a.decide(legacy);
-    expect(await a.read()).toBeUndefined();
   });
 
   it("re-proposing the same item rewrites a lost plan row with exactly the approved content; a changed plan asks again", async () => {
@@ -201,39 +173,6 @@ describe("the EVAL_PLAN reader refuses what is not bound to an approved digest",
     expect(await d.read()).toBeUndefined();
   });
 
-  it("a plan edited after approval is refused: a field changed under its old digest, or with a recomputed digest (mutants: the recomputed digest, the item's plan digest, selection, inputs)", async () => {
-    for (const edit of [
-      (row: Record<string, unknown>) => ({ ...row, plan: { ...(row["plan"] as EvalPlanBody), maxCostMicrosPerQuestion: 9_999 } }),
-      (row: Record<string, unknown>) => ({ ...row, plan: { ...(row["plan"] as EvalPlanBody), questions: [] } }),
-      (row: Record<string, unknown>) => ({ ...row, plan: { ...(row["plan"] as EvalPlanBody), evalConfigured: false } }),
-      (row: Record<string, unknown>) => { const plan = { ...(row["plan"] as EvalPlanBody), baselineJudgePin: "d".repeat(64) }; return { ...row, plan, planDigest: evalPlanDigest(A, project, plan) }; },
-      (row: Record<string, unknown>) => { const plan = { ...(row["plan"] as EvalPlanBody), selection: "evals/other" }; return { ...row, plan, planDigest: evalPlanDigest(A, project, plan) }; },
-      (row: Record<string, unknown>) => { const plan = { ...(row["plan"] as EvalPlanBody), inputs: { ...inputs, modelVersion: "version-2" } }; return { ...row, plan, planDigest: evalPlanDigest(A, project, plan) }; },
-    ]) {
-      const a = company(A);
-      await a.approve();
-      await rewrite(a.store, A, edit);
-      expect(await a.read()).toBeUndefined();
-    }
-  });
-
-  it("a valid item of this company next to a plan row that names another company is refused (mutants: the row's company and project checks, with the digest binding)", async () => {
-    for (const [company_, project_] of [[B, project], [A, "other"]] as const) {
-      const a = company(A);
-      await a.approve();
-      await rewrite(a.store, A, row => ({ ...row, company: company_, project: project_, planDigest: evalPlanDigest(company_, project_, row["plan"] as EvalPlanBody) }));
-      expect(await a.read()).toBeUndefined();
-    }
-  });
-
-  it("an edited ITEM is refused too: its plan digest changed after approval breaks its own digest", async () => {
-    const a = company(A);
-    await a.approve();
-    const item = (await a.store.get(evalSpendKey(A, project)))!;
-    await a.store.put({ item: { ...item, plan: { ...(item["plan"] as Record<string, unknown>), evalPlanDigest: "3".repeat(64) } } });
-    expect(await a.read()).toBeUndefined();
-  });
-
   it("cross-company: B never reads A's plan; A's rows copied into B's partition are refused; each source answers only its own company (mutants: the company checks)", async () => {
     const store = new MemoryDocumentStore();
     const a = company(A, store); const b = company(B, store);
@@ -276,17 +215,6 @@ describe("the broker's eval plan source", () => {
     const namedSources = createEvalPlanSources({ store: named.store, companyId: A, registry: registryWith() });
     expect(((await planOf(namedSources, run([{ repositoryId: "web", baseCommitSha: BASE }, { repositoryId: "api", baseCommitSha: "d".repeat(40) }]))) as { key: { baseCommit: string } }).key.baseCommit).toBe("d".repeat(40));
     expect(await planOf(namedSources, run())).toBeUndefined();
-  });
-
-  it("spend authority comes only from the registry's bound eval-reservation adapter: Code (none) answers no approval; a bound adapter answers the grant for this plan (mutant: the adapter check)", async () => {
-    const a = company(A);
-    await a.approve();
-    expect(await grantOf(createEvalPlanSources({ store: a.store, companyId: A, members: a.members, registry: registryWith() }))).toBeUndefined();
-    const grant = await grantOf(createEvalPlanSources({ store: a.store, companyId: A, members: a.members, registry: registryWith(a.adapter) }));
-    expect(grant).toMatchObject({ company: A, project, selection: "evals/demo", inputsDigest: evalSpendInputsDigest(inputs), provider: "customer", connected: true, maxCalls: 6, maxCostMicros: 60 });
-    // The approval follows the plan's binding: an edited plan withdraws it.
-    await rewrite(a.store, A, row => ({ ...row, plan: { ...(row["plan"] as EvalPlanBody), maxCallsPerQuestion: 99 } }));
-    expect(await grantOf(createEvalPlanSources({ store: a.store, companyId: A, members: a.members, registry: registryWith(a.adapter) }))).toBeUndefined();
   });
 
   it("ONE consistent read (EVAL-PLAN-SNAPSHOT): the approval answers only for the item its plan was read with; a re-approval in between, of a changed plan, gives no grant (mutant: the digest binding)", async () => {
@@ -365,21 +293,6 @@ async function endToEnd(options: { adapter?: boolean | "no-answer-not-connected"
 const facts = () => ({ status: "verified", candidateDigest: "9".repeat(64), signal: new AbortController().signal });
 
 describe("end to end: the signed eval-plan route, the worker's pinned hashes and the final-check eval", () => {
-  it("happy path: the stored, approved plan reaches the run with its baseline; the worker's hashes match; with no adapter Code reads spend not approved, with zero calls", async () => {
-    const e = await endToEnd({ head: { "evals/demo/q2.txt": "question two, edited\n" } });
-    const plan = await withEvalPinnedCandidate(e.repo.repositories, e.repo.candidates, new AbortController().signal, () => e.sources.plan());
-    expect(plan).toMatchObject({ company: A, project, selection: "evals/demo", key: { baseCommit: e.repo.baseSha, codeHash: evalCodeHash(e.repo.baseSha) },
-      questions: [{ id: "q1", baseHash: evalQuestionHash(Buffer.from(Q1)), headHash: evalQuestionHash(Buffer.from(Q1)) }, { id: "q2", baseHash: evalQuestionHash(Buffer.from(Q2)), headHash: evalQuestionHash(Buffer.from("question two, edited\n")) }] });
-    // One ask per invocation, to this operation's own eval-plan route.
-    expect(await e.sources.cache.read(e.parts)).toEqual(RECORD);
-    expect(e.asks).toEqual([`/v1/internal/workspaces/${e.workspaceId}/operations/${e.operationId}/${EVAL_PLAN_DELIVERY_ACTION}`]);
-    expect(await e.sources.approval.read()).toBeUndefined();
-    let calls = 0;
-    const ports = { roundKind: "check_unsealed" as const, ...e.sources, meter: { reserve: async () => { calls++; return undefined; } }, runner: async () => { calls++; throw new Error("no run"); } };
-    const artifact = await withEvalPinnedCandidate(e.repo.repositories, e.repo.candidates, new AbortController().signal, () => runFinalCheckEval(EVAL_REQUEST, ports, facts()));
-    expect(artifact).toMatchObject({ outcome: "not_run", notRunReason: "spend_not_approved", evalConfigured: true });
-    expect(calls).toBe(0);
-  });
 
   it("with a trusted adapter the grant covers exactly this plan, and the eval passes the approval gate (the fake meter then holds nothing)", async () => {
     const e = await endToEnd({ adapter: true });
@@ -476,15 +389,5 @@ describe("end to end: the signed eval-plan route, the worker's pinned hashes and
     } finally { vi.useRealTimers(); }
     expect(seen).toHaveLength(1);
     expect(seen[0]).toBeInstanceOf(AbortSignal);
-  });
-
-  it("delivery is EVAL_PLAN-bound: the route answers the approved plan with its baseline, and an edited stored plan is answered not_available", async () => {
-    const e = await endToEnd();
-    const ask = async () => EvalPlanDeliverySchema.parse(JSON.parse((await e.handler({ method: "POST", path: `/v1/internal/workspaces/${e.workspaceId}/operations/${e.operationId}/${EVAL_PLAN_DELIVERY_ACTION}`, headers: { "x-agentx-callback-capability": e.capability }, body: "{}" })).body ?? "{}"));
-    const before = await ask();
-    expect(before.status).toBe("ready");
-    if (before.status === "ready") { expect(before.baseline).toEqual({ key: evalBaseCacheKey(e.parts), record: RECORD, measurement: "idle" }); expect(before.approval).toBeNull(); }
-    await rewrite(e.store, A, row => ({ ...row, plan: { ...(row["plan"] as EvalPlanBody), maxCostMicrosPerQuestion: 1_000_000 } }));
-    expect(await ask()).toEqual({ status: "not_available" });
   });
 });

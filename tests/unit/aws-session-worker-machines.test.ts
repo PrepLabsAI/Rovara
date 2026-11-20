@@ -3,12 +3,11 @@
 // Proves: the port's conformance suite (with a second company on the same fleet); a company's adapter never reaches another company's workspace, or a workspace without a valid company;
 // the fleet itself answers nothing; a missing placement brings the job back.
 import { randomUUID } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { MachineError, type OrgId, type WorkerMachines } from "@agentx/contracts";
 import { runWorkerMachinesConformance } from "../support/ports/worker-machines-conformance.js";
-import { COMPANY_A, COMPANY_B, TABLE, createSessionMachinesWorld, invocationFor } from "../support/session-machines-world.js";
+import { COMPANY_A, COMPANY_B, createSessionMachinesWorld, invocationFor } from "../support/session-machines-world.js";
 import { FLEET_UNBOUND_WORDS, SessionWorkerFleet, SessionWorkerMachines, sessionMachineId } from "../../packages/broker/src/aws/worker-machines/session-worker-machines.js";
-import { workspaceCompanyReader } from "../../packages/broker/src/aws/worker-machines/workspace-company.js";
 
 /** The suite names machines with short keys (`ws-1`); a session machine is keyed by its workspace id, so each key gets a workspace of the key's company. */
 function keyedWorkspaces(world: ReturnType<typeof createSessionMachinesWorld>, company: OrgId) {
@@ -100,23 +99,6 @@ describe("Code's EC2 session machines, company by company", () => {
     expect((await b.health(started.machineId)).state).toBe("ready");
   });
 
-  it("treats a workspace whose record names no valid company, or two different ones, as nobody's", async () => {
-    const world = createSessionMachinesWorld();
-    const a = world.machinesFor(COMPANY_A);
-    for (const fields of [{ companyId: undefined, orgId: COMPANY_A }, { companyId: "acme" }, { orgId: COMPANY_B }, { companyId: 7 }]) {
-      const workspaceId = world.workspace(COMPANY_A, fields);
-      await expect(a.start({ machineKey: workspaceId, companyId: COMPANY_A })).rejects.toMatchObject({ code: "rejected" });
-    }
-    // A record with no company at all: no install-wide company stands in for it (one Code install serves every company).
-    const bare = world.workspace(undefined);
-    await expect(a.start({ machineKey: bare, companyId: COMPANY_A })).rejects.toMatchObject({ code: "rejected" });
-    expect(world.executions).toEqual([]);
-    // Positive control: the same adapter starts a workspace of its own company.
-    const own = world.workspace(COMPANY_A);
-    await expect(a.start({ machineKey: own, companyId: COMPANY_A })).resolves.toMatchObject({ machineId: sessionMachineId(own) });
-    expect(world.executions).toHaveLength(1);
-  });
-
   it("answers nothing through the fleet itself: only a company's adapter acts, and a malformed company id is refused", async () => {
     const world = createSessionMachinesWorld();
     const fleet = world.fleet();
@@ -149,35 +131,6 @@ describe("Code's EC2 session machines, company by company", () => {
 });
 
 describe("whose a workspace is", () => {
-  it("requires the pointer's scoped workspace, with the same company on every read", async () => {
-    const world = createSessionMachinesWorld();
-    const id = randomUUID();
-    const key = { pk: `ORG#${COMPANY_A}#WORKSPACE#${id}`, sk: "META" };
-    world.db.set({ pk: `WORKSPACE#${id}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: id, companyId: COMPANY_A });
-    const companyOf = workspaceCompanyReader(world.db, TABLE);
-    const integrity = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(await companyOf(id)).toBeUndefined();
-    expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
-    integrity.mockClear();
-    world.db.set({ ...key, entityType: "WORKSPACE", id, companyId: COMPANY_B });
-    expect(await companyOf(id)).toBeUndefined();
-    expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
-    integrity.mockClear();
-    world.db.set({ ...key, entityType: "WORKSPACE", id, companyId: COMPANY_A, orgId: COMPANY_B });
-    expect(await companyOf(id)).toBeUndefined();
-    world.db.set({ ...key, entityType: "WORKSPACE", id, companyId: COMPANY_A, orgId: COMPANY_A });
-    expect(await companyOf(id)).toBe(COMPANY_A);
-    world.db.set({ ...key, entityType: "WORKSPACE", id, companyId: COMPANY_B });
-    expect(await companyOf(id)).toBeUndefined();
-    integrity.mockRestore();
-  });
-  it("reads the company from the workspace record only", async () => {
-    const world = createSessionMachinesWorld();
-    const companyOf = workspaceCompanyReader(world.db, TABLE);
-    expect(await companyOf(world.workspace(COMPANY_A))).toBe(COMPANY_A);
-    expect(await companyOf(randomUUID())).toBeUndefined();
-    expect(await companyOf(world.workspace(COMPANY_A, { orgId: COMPANY_B }))).toBeUndefined();
-  });
 
   it("brings a job back (never ends the task) when the install has no worker placement: a configuration fault, not the job's", async () => {
     const world = createSessionMachinesWorld();

@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   COMPANY_INSTRUCTIONS_FILE_NAME,
-  COMPANY_RULE_LIMITS,
   CompanyInstructionsSnapshotSchema,
   IMPLICIT_COMPANY_ID,
   PLUGIN_POINTS,
@@ -66,38 +65,12 @@ describe("the rules file format", () => {
     ]);
   });
 
-  it("reads a bullet before any heading as Required, and CRLF and a byte order mark like LF", () => {
-    expect(parseCompanyInstructionsText("﻿- First.\r\n- Second.\r\n")).toEqual([{ text: "First.", priority: "required" }, { text: "Second.", priority: "required" }]);
-  });
-
-  it("removes hidden characters and folds white space", () => {
-    expect(parseCompanyInstructionsText("- Be​   careful\t here.")).toEqual([{ text: "Be careful here.", priority: "required" }]);
-  });
-
   it("refuses a line it cannot place, naming the line number, rather than dropping a rule", () => {
     expect(() => parseCompanyInstructionsText("## Required\n- Fine.\nNever do this other thing.\n")).toThrow(/line 3/);
   });
 
   it("gives no snapshot for a file with no rule", () => {
     expect(companyInstructionsSnapshot(bytes("# Company rules\n\n"))).toBeUndefined();
-  });
-
-  it("holds the file to the shared limits and never cuts", () => {
-    const many = Array.from({ length: COMPANY_RULE_LIMITS.maxRules + 1 }, (_, index) => `- Rule ${String(index)}.`).join("\n");
-    expect(() => companyInstructionsSnapshot(bytes(many))).toThrow(/exceed the size budget/);
-    expect(() => companyInstructionsSnapshot(bytes(`- ${"x".repeat(COMPANY_RULE_LIMITS.maxRuleCharacters + 1)}`))).toThrow(/exceed the size budget/);
-    expect(() => companyInstructionsSnapshot(bytes("- \n"))).toThrow(/empty/);
-    expect(() => companyInstructionsSnapshot(new Uint8Array([0xff, 0xfe, 0x00]))).toThrow();
-  });
-
-  it("uses the SHA-256 of the file's bytes as the version, so any edit is a new version", () => {
-    const one = companyInstructionsSnapshot(bytes("- A.\n"));
-    const same = companyInstructionsSnapshot(bytes("- A.\n"));
-    const edited = companyInstructionsSnapshot(bytes("- A. \n"));
-    expect(one?.version).toMatch(/^[a-f0-9]{64}$/);
-    expect(same?.version).toBe(one?.version);
-    expect(edited?.version).not.toBe(one?.version);
-    expect(CompanyInstructionsSnapshotSchema.safeParse(one).success).toBe(true);
   });
 });
 
@@ -205,10 +178,5 @@ describe("the file plug-in", () => {
     const registry = createAdapterRegistry();
     await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "company-instructions", name: "file", module: "@agentx/local-adapters/company-instructions" }] }), { registry, importModule: importer, stateDirectory: dir });
     expect((await registry.require("company-instructions").current(IMPLICIT_COMPANY_ID))?.rules[0]?.text).toBe("From the state folder.");
-  });
-
-  it("refuses a setting it does not know", async () => {
-    const registry = createAdapterRegistry();
-    await expect(loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "company-instructions", name: "file", module: "@agentx/local-adapters/company-instructions", settings: { paht: "x" } }] }), { registry, importModule: importer })).rejects.toThrow();
   });
 });

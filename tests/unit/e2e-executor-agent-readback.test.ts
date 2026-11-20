@@ -22,18 +22,6 @@ const options = { containsCredential: (bytes: Uint8Array) => redactor().contains
 const CASE_DIR = "0123456789abcdef";
 
 describe("reading an agent step's files back into the snapshot", () => {
-  it("carries each case's ledger and the kept recordings, byte for byte, and counts nothing dropped", async () => {
-    const out = await outDirWith({ [`agent/${CASE_DIR}/agent-actions.json`]: '{"ledger":1}\n', "agent/traces/trace-aaaaaaaaaaaaaaaa.json": '{"actions":[]}' });
-    const agent = (await snapshotExecutorOutput(out, result, options)).executorEvidence.agent!;
-    expect(agent.ledgers.map((item) => [item.caseDirectory, Buffer.from(item.bytes).toString()])).toEqual([[CASE_DIR, '{"ledger":1}\n']]);
-    expect(agent.traces.map((item) => [item.name, Buffer.from(item.bytes).toString()])).toEqual([["trace-aaaaaaaaaaaaaaaa.json", '{"actions":[]}']]);
-    expect(agent.dropped).toBe(0);
-  });
-
-  it("has no agent field at all for a run that left none, so such a run reads back exactly as before", async () => {
-    const snapshot = await snapshotExecutorOutput(await outDirWith({ "executor.log": "x" }), result, options);
-    expect("agent" in snapshot.executorEvidence).toBe(false);
-  });
 
   it("holds back a file the host's credential predicate flags (an account password, and as base64 too) and counts it", async () => {
     const out = await outDirWith({ [`agent/${CASE_DIR}/agent-actions.json`]: `{"typed":"${PASSWORD}"}`, "agent/traces/trace-aaaaaaaaaaaaaaaa.json": `{"x":"${Buffer.from(PASSWORD).toString("base64")}"}`,

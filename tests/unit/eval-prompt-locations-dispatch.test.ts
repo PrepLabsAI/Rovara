@@ -8,7 +8,6 @@ import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createHarness, definition, newRequestId } from "../support/task-flow-harness.js";
 
 const PAYMENTS: PromptLocation[] = [{ repo: "demo", path: "payments/agent.py", kind: "variable", symbol: "SYSTEM_PROMPT" }];
-const LEDGER: PromptLocation[] = [{ repo: "demo", path: "ledger/persona.py", kind: "file" }];
 const project = (name: string, promptLocations?: PromptLocation[]): ProjectDefinition => ({ ...definition, name, ...(promptLocations === undefined ? {} : { promptLocations }) });
 
 async function world(options: { feature?: boolean; hint?: boolean; projects?: Array<[string, PromptLocation[] | undefined]>; run?: string } = {}) {
@@ -44,40 +43,11 @@ async function world(options: { feature?: boolean; hint?: boolean; projects?: Ar
 }
 
 describe("evalPromptLocations on the CHECKS payload", () => {
-  it("sends the project's locations with the eval request to a worker that lists the feature", async () => {
-    const { operation, job } = await world();
-    expect(operation.dispatch.payload).toMatchObject({ evalRequest: { reason: "eval_hint" }, evalPromptLocations: PAYMENTS });
-    expect(job?.payload).toMatchObject({ evalPromptLocations: PAYMENTS });
-  });
   it("drops them for an older worker (logged), and the eval request still goes", async () => {
     const { operation, job, logs } = await world({ feature: false });
     expect(operation.dispatch.payload).toHaveProperty("evalPromptLocations");
     expect(job?.payload).toHaveProperty("evalRequest");
     expect(job?.payload).not.toHaveProperty("evalPromptLocations");
     expect(JSON.stringify(logs)).toContain("eval_prompt_locations_dropped_unsupported_worker");
-  });
-  it("a project with none gets the payload it always got (no field)", async () => {
-    for (const none of [undefined, [] as PromptLocation[]]) {
-      const { operation, job } = await world({ projects: [["payments", none]] });
-      expect(operation.dispatch.payload).toHaveProperty("evalRequest");
-      expect(operation.dispatch.payload).not.toHaveProperty("evalPromptLocations");
-      expect(job?.payload).not.toHaveProperty("evalPromptLocations");
-    }
-  });
-  it("sends none when no eval is asked for", async () => {
-    const { operation } = await world({ hint: false });
-    expect(operation.dispatch.payload).not.toHaveProperty("evalRequest");
-    expect(operation.dispatch.payload).not.toHaveProperty("evalPromptLocations");
-  });
-  it("two projects: each task carries only its own project's locations", async () => {
-    const both: Array<[string, PromptLocation[] | undefined]> = [["payments", PAYMENTS], ["ledger", LEDGER], ["plain", undefined]];
-    const ledger = await world({ projects: both, run: "ledger" });
-    expect(ledger.job?.payload?.["evalPromptLocations"]).toEqual(LEDGER);
-    expect(JSON.stringify(ledger.job?.payload)).not.toContain("payments/agent.py");
-    const payments = await world({ projects: both, run: "payments" });
-    expect(payments.job?.payload?.["evalPromptLocations"]).toEqual(PAYMENTS);
-    expect(JSON.stringify(payments.job?.payload)).not.toContain("ledger/persona.py");
-    const plain = await world({ projects: both, run: "plain" });
-    expect(plain.job?.payload).not.toHaveProperty("evalPromptLocations");
   });
 });

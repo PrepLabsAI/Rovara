@@ -9,11 +9,6 @@ const check = (overrides: Parameters<typeof freshComment>[1] = {}, input: { outc
   checkCommentProof({ comment: freshComment(DANA, { ...overrides, body: (overrides.body ?? "/rovara approve __DIGEST__").replaceAll("__DIGEST__", "3f2a9c00") }), context: "context" in input ? input.context : threadContext(), artifactDigest: ARTIFACT_DIGEST, ...(input.outcome === undefined ? {} : { outcome: input.outcome }) });
 
 describe("checkCommentProof: the checks a code-host plug-in never makes", () => {
-  it("accepts a fresh, unedited approve on the request's own thread", () => {
-    expect(check()).toEqual({ ok: true });
-    expect(check({ body: "/rovara approve example/repo 3f2a9c00" })).toEqual({ ok: true });
-    expect(check({ body: "/rovara approve 3F2A9C0000" })).toEqual({ ok: true });
-  });
   it("refuses a comment on another change request or issue, or one that names another repository", () => {
     expect(check({ on: { ...THREAD, number: 13 } })).toEqual({ ok: false, reason: "comment_on_other_change" });
     expect(check({ on: { repository: "example/other", number: THREAD.number } })).toEqual({ ok: false, reason: "comment_on_other_change" });

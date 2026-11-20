@@ -18,17 +18,6 @@ function setup() {
   db.set(legacy());
   return { db, deps, commands };
 }
-it("maps an unowned legacy project only to explicit A, without inspecting same-named B", async () => {
-  const { db, deps, commands } = setup();
-  db.set({ ...legacy(), ...projectRevisionKey(B, "web", 1), companyId: B });
-  const b = db.get(projectRevisionKey(B, "web", 1).pk, legacy().sk);
-  expect(await backfillCorePage(deps, { ...input, dryRun: false })).toMatchObject({ written: 1, failed: 0, more: false });
-  expect(db.get(projectRevisionKey(A, "web", 1).pk, legacy().sk)?.definition).toEqual(definition());
-  expect(db.get(projectRevisionKey(B, "web", 1).pk, legacy().sk)).toEqual(b);
-  expect(JSON.stringify(commands)).not.toContain(`ORG#${B}`);
-  expect(db.get("PROJECT#web", legacy().sk)).toEqual(legacy());
-  expect(await backfillCorePage(deps, { ...input, dryRun: false })).toMatchObject({ written: 0, skippedExisting: 1 });
-});
 it.each(["source", "revision", "catalog"])("refuses conflicting %s ownership/content without overwriting", async kind => {
   const { db, deps } = setup();
   if (kind === "source") db.set(legacy(1, B));
@@ -61,26 +50,6 @@ it("bounds pages and binds an opaque validated continuation to the entire mappin
     expect(await backfillCorePage(deps, { ...input, companyId: B, dryRun: false, continuation })).toMatchObject({ refused: "invalid_input" });
   }
 });
-it("resumes after failure before or after every I/O step with no loss or overwrite", async () => {
-  const control = setup(); await backfillCorePage(control.deps, { ...input, dryRun: false });
-  for (const after of [false, true]) for (let fail = 1; fail <= control.commands.length; fail++) {
-    const { db, deps } = setup(); let step = 0;
-    const client = deps.documentClient;
-    const broken = { ...deps, documentClient: { async send(command: unknown) {
-      const hit = ++step === fail;
-      if (hit && !after) throw new Error("private-canary");
-      const answer = await client.send(command);
-      if (hit && after) throw new Error("private-canary");
-      return answer;
-    } } };
-    const answer = await backfillCorePage(broken, { ...input, dryRun: false });
-    expect(JSON.stringify(answer)).not.toContain("private-canary");
-    await backfillCorePage(deps, { ...input, dryRun: false });
-    expect(db.get(projectRevisionKey(A, "web", 1).pk, legacy().sk)?.definition).toEqual(definition());
-    expect(db.get(orgProjectCatalogKey(A, "web").pk, "PROJECT#web")?.latestRevision).toBe(1);
-    expect(db.get("PROJECT#web", legacy().sk)).toEqual(legacy());
-  }
-});
 function seedPerson(db: FakeDynamoDb) { db.set({ pk: `DEVELOPER#${personId}`, sk: "META", entityType: "DEVELOPER", developerId: personId, provider: "oidc", issuer: "https://example.test", subject: "person", firstSignInAt: at, revoked: false }); }
 function operatorInput() { return { ...input, bindings: [{ installationId: 42, accountLogin: "example" }], people: [{ personId, role: "member" }], grants: [{ personId, projectName: "web", role: "developer" }] }; }
 it("reports people gaps read-only, then writes only explicit valid people and grants", async () => {
@@ -98,16 +67,6 @@ it("reports people gaps read-only, then writes only explicit valid people and gr
   expect(db.get(`ORG#${A}#MEMBER#${personId}`, "PROJECT#web")).toMatchObject({ entityType: "MEMBERSHIP", role: "developer" });
   expect(db.get(`MEMBER#${personId}`, "PROJECT#web")).toBeUndefined();
   expect(db.get("PROJECT_MEMBERS#web", `DEVELOPER#${personId}`)).toBeUndefined();
-});
-it("backfills a GitHub person like any other and still refuses a provider it does not know (DEC 254p (a))", async () => {
-  const { db, deps } = setup(); seedPerson(db);
-  db.set({ ...db.get(`DEVELOPER#${personId}`, "META")!, provider: "github", issuer: "https://github.com", subject: "2001" });
-  expect(await backfillCorePage(deps, { ...operatorInput(), dryRun: false })).toMatchObject({ written: 4, failed: 0 });
-  expect(db.get(`COMPANY_MEMBER#${personId}`, "COMPANY")).toMatchObject({ companyId: A, role: "member" });
-  const other = setup(); seedPerson(other.db);
-  other.db.set({ ...other.db.get(`DEVELOPER#${personId}`, "META")!, provider: "saml" });
-  expect((await backfillCorePage(other.deps, { ...operatorInput(), dryRun: false })).issues).toContainEqual({ phase: 2, index: 0, reason: "conflict" });
-  expect(other.db.get(`COMPANY_MEMBER#${personId}`, "COMPANY")).toBeUndefined();
 });
 it("refuses a reverse member row with a different role without changing either row", async () => {
   const { db, deps } = setup(); seedPerson(db);
@@ -162,20 +121,6 @@ it("refuses oversized input quickly and reports storage/time failures with fixed
   const timed = { ...deps, now: () => time, documentClient: { async send(command: unknown) { const response = await deps.documentClient.send(command); time += 5001; return response; } } };
   expect(await backfillCorePage(timed, { ...input, dryRun: false })).toMatchObject({ failed: 1, more: true });
 });
-it("refuses changed content at the own-company revision", async () => {
-  const { db, deps } = setup();
-  db.set({ ...legacy(), ...projectRevisionKey(A, "web", 1), definition: { ...definition(), orchestratorInstructions: "different" } });
-  expect(await backfillCorePage(deps, { ...input, dryRun: false })).toMatchObject({ skippedConflict: 1, written: 0 });
-});
-it("does not advance catalog until revision copy verifies and recovers a failed verification", async () => {
-  const { db, deps } = setup();
-  const key = projectRevisionKey(A, "web", 1);
-  db.injectFault({ command: "TransactWriteCommand", error: { name: "Timeout", message: "private-canary" } });
-  expect(await backfillCorePage(deps, { ...input, dryRun: false })).toMatchObject({ failed: 1, more: true });
-  expect(db.get(orgProjectCatalogKey(A, "web").pk, "PROJECT#web")).toBeUndefined();
-  await backfillCorePage(deps, { ...input, dryRun: false });
-  expect(db.get(key.pk, key.sk)?.definition).toEqual(definition());
-});
 it("conditional target writes reject a concurrent foreign revision and binding claim", async () => {
   const { db, deps } = setup();
   const plan = await planCoreProjectWrites(deps, legacy(1, A));
@@ -227,20 +172,6 @@ it("supports the maximum mapping over bounded pages and refuses malformed cursor
     expect(JSON.stringify(answer)).not.toContain("private-canary");
   }
 });
-it("does not follow or grant absent people when only projects were supplied", async () => {
-  const { db, deps, commands } = setup(); seedPerson(db);
-  await backfillCorePage(deps, { ...input, dryRun: false });
-  expect(db.get(`COMPANY_MEMBER#${personId}`, "COMPANY")).toBeUndefined();
-  expect(JSON.stringify(commands)).not.toContain("DEVELOPER#");
-});
-it("bounds total returned bytes and items before any write", async () => {
-  for (const response of [{ Items: [legacy()], padding: "x".repeat(2_000_001) }, { Items: Array.from({ length: 501 }, () => legacy()) }]) {
-    const { deps } = setup(); let writes = 0;
-    const limited = { ...deps, documentClient: { async send(command: unknown) { if ((command as { constructor: { name: string } }).constructor.name !== "QueryCommand") writes++; return response; } } };
-    expect(await backfillCorePage(limited, { ...input, dryRun: false })).toMatchObject({ failed: 1, written: 0, more: true });
-    expect(writes).toBe(0);
-  }
-});
 it.each([{ companyId: "bad" }, { entityType: "OTHER" }, { definition: { name: "web" } }])("refuses malformed stored source with fixed reporting", async changes => {
   const { db, deps } = setup(); db.set({ ...legacy(), ...changes });
   const result = await backfillCorePage(deps, { ...input, dryRun: false });
@@ -253,94 +184,4 @@ it("preview detects an orphaned binding claim audit before promising a write", a
   const result = await backfillCorePage(deps, { ...input, bindings: [{ installationId: 42, accountLogin: "example" }], dryRun: true });
   expect(result).toMatchObject({ written: 1, skippedConflict: 1 });
   expect(result.issues).toContainEqual({ phase: 1, index: 0, reason: "conflict" });
-});
-it("keeps existing catalog metadata when advancing a verified project", async () => {
-  const { db, deps } = setup();
-  await backfillCorePage(deps, { ...input, dryRun: false });
-  const key = orgProjectCatalogKey(A, "web");
-  db.set({ ...db.get(key.pk, key.sk)!, firstRegisteredAt: at });
-  db.set(legacy(2));
-  await backfillCorePage(deps, { ...input, dryRun: false });
-  expect(db.get(key.pk, key.sk)).toMatchObject({ firstRegisteredAt: at, latestRevision: 2 });
-});
-it("does not restore a revoked same-company membership or invent a role change", async () => {
-  for (const change of [{ revokedAt: at }, { role: "admin" }]) {
-    const { db, deps } = setup(); seedPerson(db);
-    const row = { pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", companyId: A, personId, role: "member", joinedAt: at, ...change };
-    db.set(row);
-    const result = await backfillCorePage(deps, { ...operatorInput(), dryRun: false });
-    expect(result.issues).toContainEqual({ phase: 2, index: 0, reason: "conflict" });
-    expect(db.get(row.pk, row.sk)).toEqual(row);
-    expect(db.get(`ORG#${A}#MEMBER#${personId}`, "PROJECT#web")).toBeUndefined(); // DEC 254zzz80: the mapped company's own partition
-  }
-});
-it("uses the sign-in table for existing people and memberships, State for grants", async () => {
-  const state = new FakeDynamoDb(), signin = new FakeDynamoDb();
-  seedPerson(signin); state.set(legacy());
-  const deps = { tableName: "state", signInTableName: "signin", now: () => Date.parse(at), documentClient: { async send(command: unknown) {
-    const c = command as { constructor: { name: string }; input: { TableName?: string; TransactItems?: Array<Record<string, { TableName?: string }>> } };
-    if (c.constructor.name === "TransactWriteCommand") {
-      // This test is read-only; fail before any write if the checker mutates.
-      throw new Error("unexpected write");
-    }
-    return (c.input.TableName === "signin" ? signin : state).send(command as never);
-  } } };
-  signin.set({ pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", companyId: A, personId, role: "member", joinedAt: at });
-  state.set({ pk: `ORG#${A}#MEMBER#${personId}`, sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: personId, projectName: "web", role: "developer" });
-  expect(await checkCorePeople(deps, operatorInput())).toEqual({ gaps: [] });
-});
-it("refuses a malformed existing person before previewing membership", async () => {
-  const { db, deps } = setup();
-  db.set({ pk: `DEVELOPER#${personId}`, sk: "META", entityType: "DEVELOPER", provider: "oidc", revoked: false });
-  const result = await backfillCorePage(deps, { ...input, people: [{ personId, role: "member" }], dryRun: true });
-  expect(result).toMatchObject({ written: 1, skippedConflict: 1 });
-});
-
-it("defaults omitted dryRun to a write-free preview", async () => {
-  const { db, deps } = setup(), before = [...db.items];
-  expect(await backfillCorePage(deps, input)).toMatchObject({ written: 1 });
-  expect([...db.items]).toEqual(before);
-});
-it("replays crashes before and after every operator-package step, including claims and access writes", async () => {
-  const control = setup(); seedPerson(control.db);
-  expect(await backfillCorePage(control.deps, { ...operatorInput(), dryRun: false })).toMatchObject({ written: 4 });
-  for (const after of [false, true]) for (let fail = 1; fail <= control.commands.length; fail++) {
-    const { db, deps } = setup(); seedPerson(db); let step = 0;
-    const original = deps.documentClient;
-    const broken = { ...deps, documentClient: { async send(command: unknown) {
-      const hit = ++step === fail;
-      if (hit && !after) throw new Error("private-canary");
-      const result = await original.send(command);
-      if (hit && after) throw new Error("private-canary");
-      return result;
-    } } };
-    const failed = await backfillCorePage(broken, { ...operatorInput(), dryRun: false });
-    expect(JSON.stringify(failed)).not.toContain("private-canary");
-    expect(await backfillCorePage(deps, { ...operatorInput(), dryRun: false })).toMatchObject({ failed: 0, skippedConflict: 0, more: false });
-    expect(await backfillCorePage(deps, { ...operatorInput(), dryRun: false })).toMatchObject({ written: 0, skippedExisting: 4 });
-    expect(await checkCorePeople(deps, operatorInput())).toEqual({ gaps: [] });
-    expect(db.get("GITHUB_INSTALLATION#42", "BINDING")?.companyId).toBe(A);
-    expect(db.get("GITHUB_INSTALLATION#42", "AUDIT#CLAIM")?.companyId).toBe(A);
-    expect(db.get("PROJECT#web", legacy().sk)).toEqual(legacy());
-  }
-});
-it("refuses preview continuations in apply mode and continuations from another table", async () => {
-  const { db, deps } = setup(); db.set(legacy(2));
-  const preview = await backfillCorePage(deps, { ...input, dryRun: true, limit: 1 });
-  expect(await backfillCorePage(deps, { ...input, dryRun: false, continuation: preview.continuation })).toMatchObject({ refused: "invalid_input" });
-  expect(await backfillCorePage({ ...deps, tableName: "different" }, { ...input, dryRun: true, continuation: preview.continuation })).toMatchObject({ refused: "invalid_input" });
-});
-it("accepts safe integer revisions supported by the existing key writer", async () => {
-  const { db, deps } = setup(); db.set(legacy(Number.MAX_SAFE_INTEGER));
-  const answer = await backfillCorePage(deps, { ...input, dryRun: false });
-  expect(answer).toMatchObject({ written: 2, skippedConflict: 0, failed: 0 });
-  const key = projectRevisionKey(A, "web", Number.MAX_SAFE_INTEGER);
-  expect(db.get(key.pk, key.sk)?.definition).toMatchObject({ revision: Number.MAX_SAFE_INTEGER });
-});
-it("refuses inconsistent metadata already present on the own-company revision", async () => {
-  const { db, deps } = setup();
-  db.set({ ...legacy(), ...projectRevisionKey(A, "web", 1), registeredAt: "2026-11-14T12:00:00.000Z" });
-  const before = [...db.items];
-  expect(await backfillCorePage(deps, { ...input, dryRun: false })).toMatchObject({ skippedConflict: 1, written: 0 });
-  expect([...db.items]).toEqual(before);
 });

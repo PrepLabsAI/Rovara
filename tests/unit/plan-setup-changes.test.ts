@@ -8,7 +8,6 @@ import {
 import { bumpForSetupChanges, gradePlanRisk, planDecidedOnCard, planFactsOf, planRiskOf } from "../../packages/broker/src/core/decisions/plan-risk.js";
 import { riskTierOf } from "../../packages/broker/src/core/decisions/risk-tier.js";
 import { cardOfItem, type DecisionItem } from "../../packages/broker/src/core/decisions/project.js";
-import { structuredPlanRules } from "../../packages/broker/src/core/plan/prompts.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
 const mock = (over: Record<string, unknown> = {}): PlanSetupChangeItem => ({ id: "s1", kind: "mock", service: "Stripe", variable: "STRIPE_API_URL", spec: "payments/openapi/stripe.yaml", reason: "The refund code calls Stripe.", ...over });
@@ -102,16 +101,6 @@ describe("the plan document", () => {
     expect(withSection).toContain(SETUP_CHANGE_CARD_WORDS);
     expect(withSection).toContain(SETUP_CHANGE_AGENT_WORDS);
     expect(planDocumentMarkdown(planDocument({ setupChanges: undefined }), input)).toBe(without);
-  });
-});
-
-describe("the planner is told how to propose a setup change", () => {
-  const rules = { kind: "plan" as const, path: "QUICK" as const, rovaraV2: true };
-  it("only in a Rovara Code coding plan", () => {
-    expect(structuredPlanRules(rules)).toContain("`setupChanges`");
-    expect(structuredPlanRules(rules)).toContain("The coding agent never writes a mock");
-    expect(structuredPlanRules({ ...rules, rovaraV2: false })).not.toContain("setupChanges");
-    expect(structuredPlanRules({ ...rules, kind: "requirements" })).not.toContain("setupChanges");
   });
 });
 

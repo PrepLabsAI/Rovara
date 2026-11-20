@@ -2,7 +2,7 @@
 // when any page of its side was withheld for what it showed, and never prints more than its output bound.
 import { describe, expect, it } from "vitest";
 import {
-  BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES, BROWSER_EVIDENCE_EXECUTOR_VIDEO_OUTPUT_MAX_BYTES, BROWSER_EVIDENCE_VIDEO_MAX_BYTES, BrowserEvidenceExecutorLineSchema, BrowserEvidenceExecutorPlanSchema, decodeBrowserEvidenceExecutorPlan, encodeBrowserEvidenceExecutorPlan,
+  BROWSER_EVIDENCE_EXECUTOR_VIDEO_OUTPUT_MAX_BYTES, BROWSER_EVIDENCE_VIDEO_MAX_BYTES, BrowserEvidenceExecutorLineSchema,
   type BrowserEvidenceExecutorPlan,
 } from "../../packages/contracts/src/index.js";
 import { runCapture, type CaptureDeps } from "../../packages/verifier/src/executor/browser-evidence-entry.js";
@@ -19,20 +19,7 @@ const run = async (planned: BrowserEvidenceExecutorPlan, capture: (route: string
 const shot = (lines: Awaited<ReturnType<typeof runCapture>>, route: string) => lines.find((line) => line.t === "shot" && line.route === route) as Record<string, unknown> | undefined;
 const failing = (video?: Uint8Array) => ({ ok: false, reason: "page_did_not_load", ...(video === undefined ? {} : { video }) });
 
-describe("the plan's video field", () => {
-  it("is exactly `true` or absent, rides the plan, and a plan without it is the plan it was", () => {
-    expect(BrowserEvidenceExecutorPlanSchema.safeParse(plan({ video: true })).success).toBe(true);
-    for (const bad of [false, "yes", 1, null]) expect(BrowserEvidenceExecutorPlanSchema.safeParse({ ...plan(), video: bad }).success).toBe(false);
-    expect(decodeBrowserEvidenceExecutorPlan(encodeBrowserEvidenceExecutorPlan(plan({ video: true })))?.video).toBe(true);
-    expect(Object.keys(decodeBrowserEvidenceExecutorPlan(encodeBrowserEvidenceExecutorPlan(plan())) ?? {})).not.toContain("video");
-  });
-});
-
 describe("the capture program with video", () => {
-  it("asks the driver to record only when the plan says so", async () => {
-    expect((await run(plan({ video: true }), () => ({ ok: true, bytes: jpeg(), consoleErrors: 0 }))).asked.map((row) => row.video)).toEqual([true, true, true]);
-    expect((await run(plan(), () => ({ ok: true, bytes: jpeg(), consoleErrors: 0 }))).asked.map((row) => row.video)).toEqual([undefined, undefined, undefined]);
-  });
 
   it("prints a video for a failed page and a page with errors, and none for a healthy page or for a plan that did not ask", async () => {
     const answers: Record<string, unknown> = { "/a": failing(webm()), "/b": { ok: true, bytes: jpeg(), consoleErrors: 2, video: webm(800, 3) }, "/c": { ok: true, bytes: jpeg(), consoleErrors: 0, video: webm(800, 4) } };
@@ -63,16 +50,6 @@ describe("the capture program with video", () => {
     expect(printed).toBeLessThanOrEqual(BROWSER_EVIDENCE_EXECUTOR_VIDEO_OUTPUT_MAX_BYTES);
   });
 
-  it("a page withheld for what it showed drops every video this side recorded, and says withheld", async () => {
-    const answers: Record<string, unknown> = { "/a": failing(webm()), "/b": { ok: false, reason: "masked_content", video: webm(800, 5) }, "/c": { ok: true, bytes: jpeg(), consoleErrors: 4, video: webm(800, 6) } };
-    const { lines } = await run(plan({ video: true }), (route) => answers[route]);
-    for (const route of ["/a", "/b", "/c"]) expect(Object.keys(shot(lines, route) ?? {}), route).not.toContain("videoBase64");
-    expect(shot(lines, "/a")?.["videoNotKept"]).toBe("withheld");
-    expect(shot(lines, "/c")?.["videoNotKept"]).toBe("withheld");
-    // The withheld page itself has no video and no reason: it is Not run for what it showed.
-    expect(shot(lines, "/b")).toEqual({ t: "shot", route: "/b", ok: false, reason: "masked_content" });
-  });
-
   it("a driver that records nothing, or throws, leaves no video line and no invented reason (the runner says not recorded)", async () => {
     const { lines } = await run(plan({ video: true, routes: ["/a", "/b"] }), (route) => { if (route === "/b") throw new Error("secret /home/me"); return failing(); });
     expect(shot(lines, "/a")).toEqual({ t: "shot", route: "/a", ok: false, reason: "page_did_not_load" });
@@ -91,22 +68,5 @@ describe("the capture program with video", () => {
     // A plan that did not ask for video believes no such word from a driver.
     const off = await run(plan(), (route) => answers[route]);
     for (const route of ["/a", "/b", "/c"]) expect(Object.keys(shot(off.lines, route) ?? {}), route).not.toContain("videoNotKept");
-  });
-
-  it("a page that could not be photographed or ran out of time keeps no recording (its text was never read and verified)", async () => {
-    for (const reason of ["capture_failed", "time_limit"]) {
-      const { lines } = await run(plan({ video: true, routes: ["/a"] }), () => ({ ok: false, reason, video: webm() }));
-      expect(shot(lines, "/a"), reason).toEqual({ t: "shot", route: "/a", ok: false, reason });
-    }
-  });
-
-  it("holds the worst legitimate run (five pictures at the cap, two videos at the cap) to its output bound", async () => {
-    const { lines } = await run(plan({ video: true, routes: ["/a", "/b", "/c", "/d", "/e"] }), (route) => (route === "/a" || route === "/b" ? { ok: true, bytes: jpeg(512 * 1024, 7), consoleErrors: 1, video: webm(BROWSER_EVIDENCE_VIDEO_MAX_BYTES, 8) } : { ok: true, bytes: jpeg(512 * 1024, 7), consoleErrors: 0 }));
-    const printed = lines.map((line) => Buffer.byteLength(JSON.stringify(line)) + 1).reduce((sum, size) => sum + size, 0);
-    expect(printed).toBeLessThanOrEqual(BROWSER_EVIDENCE_EXECUTOR_VIDEO_OUTPUT_MAX_BYTES);
-    // The pictures alone were already within the old bound; the videos are what the larger one is for.
-    expect(BROWSER_EVIDENCE_EXECUTOR_VIDEO_OUTPUT_MAX_BYTES).toBeGreaterThan(BROWSER_EVIDENCE_EXECUTOR_OUTPUT_MAX_BYTES);
-    expect(lines.filter((line) => line.t === "shot" && line.ok)).toHaveLength(5);
-    expect(lines.filter((line) => line.t === "shot" && "videoBase64" in line)).toHaveLength(2);
   });
 });

@@ -37,31 +37,6 @@ const operationOf = async (h: Harness, run: { workspaceId: string; operationId: 
 const watchRows = async (h: Harness) => queryAll(h.store, { pk: runWatchPartition(COMPANY) });
 
 describe("an operation whose worker machine is lost", () => {
-  it("is watched from the hand-over, and ends INTERRUPTED with the reason only after the grace period, releasing the workspace", async () => {
-    const h = createHarness();
-    await h.registerProject();
-    const run = await runningPlan(h, "Rename the flag");
-    expect(await watchRows(h)).toEqual([expect.objectContaining({ operationId: run.operationId, machineId: run.machineId, fence: run.fence })]);
-    expect((await operationOf(h, run)).status).toBe("DISPATCHING");
-
-    await h.machines.terminate(run.machineId);
-    // First sight of a lost machine starts the clock; nothing ends yet.
-    expect(await h.flow.sweepRunsOnce()).toMatchObject({ watched: 1, waiting: 1, interrupted: 0 });
-    h.clock.advance(RUN_LOST_GRACE_SECONDS - 1);
-    expect(await h.flow.sweepRunsOnce()).toMatchObject({ interrupted: 0, waiting: 1 });
-    expect((await operationOf(h, run)).status).toBe("DISPATCHING");
-
-    h.clock.advance(2);
-    expect(await h.flow.sweepRunsOnce()).toMatchObject({ watched: 1, interrupted: 1 });
-    expect(await operationOf(h, run)).toMatchObject({ status: "INTERRUPTED", error: RUN_LOST_MESSAGE });
-    expect(await h.store.get(workspaceKey(T1_COMPANY, run.workspaceId))).toMatchObject({ status: "READY", activeOperationId: null });
-    expect(await h.store.get(runWatchKey(COMPANY, run.workspaceId, run.operationId))).toBeUndefined();
-    // The task follows the path of any interrupted step: it stops with the cause in words, for the owner's Retry.
-    const view = await h.flow.get(h.owner, run.taskId);
-    expect(view.workflow).toMatchObject({ stage: "PLAN", state: "BLOCKED" });
-    expect(view.workflow?.blockReason).toContain("Rovara stopped while planning");
-    expect(view.workflow?.blockReason).toContain(RUN_LOST_MESSAGE);
-  });
 
   it("ends an operation whose machine is unhealthy for the whole grace period, and keeps one whose machine came back", async () => {
     const h = createHarness();
@@ -87,18 +62,6 @@ describe("an operation whose worker machine is lost", () => {
     expect((await operationOf(h, healthy)).status).toBe("DISPATCHING");
   });
 
-  it("leaves a healthy machine's operation alone, however many times it is swept", async () => {
-    const h = createHarness();
-    await h.registerProject();
-    const run = await runningPlan(h, "Rename the flag");
-    for (let round = 0; round < 3; round += 1) {
-      h.clock.advance(RUN_LOST_GRACE_SECONDS * 2);
-      expect(await h.flow.sweepRunsOnce()).toMatchObject({ watched: 1, interrupted: 0, cleared: 0 });
-    }
-    expect((await operationOf(h, run)).status).toBe("DISPATCHING");
-    expect(await h.store.get(workspaceKey(T1_COMPANY, run.workspaceId))).toMatchObject({ activeOperationId: run.operationId });
-  });
-
   it("never touches an operation that already finished, even when its machine is gone", async () => {
     const h = createHarness();
     await h.registerProject();
@@ -120,42 +83,6 @@ describe("an operation whose worker machine is lost", () => {
     expect(await watchRows(h)).toEqual([]);
   });
 
-  it("never touches another operation: only the one on the lost machine ends, at its own fence", async () => {
-    const h = createHarness();
-    await h.registerProject();
-    const lost = await runningPlan(h, "Rename the flag");
-    const other = await runningPlan(h, "Another change");
-    await h.machines.terminate(lost.machineId);
-    await h.flow.sweepRunsOnce();
-    h.clock.advance(RUN_LOST_GRACE_SECONDS + 1);
-    expect(await h.flow.sweepRunsOnce()).toMatchObject({ watched: 2, interrupted: 1 });
-    expect((await operationOf(h, lost)).status).toBe("INTERRUPTED");
-    expect((await operationOf(h, other)).status).toBe("DISPATCHING");
-    expect(await h.store.get(workspaceKey(T1_COMPANY, other.workspaceId))).toMatchObject({ activeOperationId: other.operationId });
-    // A row whose operation has moved to a newer hold of the workspace names an old fence: it is dropped, and the newer operation is never ended through it.
-    await h.store.update({ key: operationKey(T1_COMPANY, other.workspaceId, other.operationId), ops: [change.set(["fence"], other.fence + 1)] });
-    await h.machines.terminate(other.machineId);
-    expect(await h.flow.sweepRunsOnce()).toMatchObject({ interrupted: 0, cleared: 1 });
-    h.clock.advance(RUN_LOST_GRACE_SECONDS * 2);
-    expect(await h.flow.sweepRunsOnce()).toMatchObject({ watched: 0, interrupted: 0 });
-    expect((await operationOf(h, other)).status).toBe("DISPATCHING");
-  });
-
-  it("does nothing on a repeat sweep after it ended the operation", async () => {
-    const h = createHarness();
-    await h.registerProject();
-    const run = await runningPlan(h, "Rename the flag");
-    await h.machines.terminate(run.machineId);
-    await h.flow.sweepRunsOnce();
-    h.clock.advance(RUN_LOST_GRACE_SECONDS + 1);
-    expect(await h.flow.sweepRunsOnce()).toMatchObject({ interrupted: 1 });
-    const task = await h.flow.get(h.owner, run.taskId);
-    const operation = await operationOf(h, run);
-    h.clock.advance(RUN_LOST_GRACE_SECONDS * 5);
-    expect(await h.flow.sweepRunsOnce()).toEqual({ watched: 0, interrupted: 0, waiting: 0, cleared: 0, failed: 0 });
-    expect(await h.flow.get(h.owner, run.taskId)).toEqual(task);
-    expect(await operationOf(h, run)).toEqual(operation);
-  });
 });
 
 

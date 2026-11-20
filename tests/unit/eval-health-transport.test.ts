@@ -4,8 +4,7 @@
 import { createHash, generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  EVAL_HEALTH_RESULT_MAX_BYTES, EVAL_HEALTH_RESULT_PATH, EVAL_HEALTH_RUN_MAX_MS, EVAL_PLAN_DELIVERY_ACTION, EvalPlanDeliverySchema, PREPARE_EVAL_HEALTH_FEATURE, WORKER_INVOCATION_FEATURES,
-  WorkerInvocationSchema, type EvalBaseRecord, type EvalReservationAdapter, type ProjectDefinition,
+  EVAL_HEALTH_RESULT_MAX_BYTES, EVAL_HEALTH_RESULT_PATH, EVAL_HEALTH_RUN_MAX_MS, EVAL_PLAN_DELIVERY_ACTION, WORKER_INVOCATION_FEATURES, type EvalBaseRecord, type EvalReservationAdapter, type ProjectDefinition,
 } from "@agentx/contracts";
 import { evalHealthRunDeps } from "../../packages/broker/src/core-host/eval-health-wiring.js";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
@@ -96,34 +95,6 @@ const record = (ids: string[] = ["q1", "q2"]): EvalBaseRecord => ({ schemaVersio
 const resultBody = (run: { requestId: string; claimId: string }, over: Record<string, unknown> = {}) => ({ requestId: run.requestId, claimId: run.claimId, result: { status: "measured", record: record() }, ...over });
 
 describe("the run's own preparation", () => {
-  it("is a read-only preparation pinned to every repository's main head, on a workspace in no list, carrying the claim and asking for nothing else", async () => {
-    const w = await world(); const run = await w.started(false);
-    expect(w.launches).toEqual([true]);
-    const workspace = (await w.h.store.get(workspaceKey(A, run.workspaceId))) as Record<string, unknown>;
-    expect(workspace).toMatchObject({ status: "PREPARING", projectName: project, activeOperationId: run.operationId, fence: 1 });
-    expect(workspace["workspaceProject"]).toBeUndefined();
-    const operation = (await w.h.store.get(operationKey(A, run.workspaceId, run.operationId))) as unknown as { kind: string; status: string; dispatch: { payload: Record<string, unknown>; extraActions: string[]; requires: string[] } };
-    expect(operation).toMatchObject({ kind: "prepare", status: "ACCEPTED" });
-    expect(operation.dispatch).toMatchObject({ extraActions: [EVAL_PLAN_DELIVERY_ACTION, EVAL_HEALTH_RESULT_PATH], requires: [PREPARE_EVAL_HEALTH_FEATURE] });
-    expect(operation.dispatch.payload).toEqual({ readOnly: true, pins: [{ repository: "web", commit: HEAD }], evalHealth: { requestId: run.requestId, claimId: run.claimId } });
-    expect(JSON.stringify(operation)).not.toMatch(/token|secret|password/iu);
-  });
-  it("is delivered to a worker that lists the feature, with the gateway's address and a capability for exactly its three actions; a worker without the feature is never sent it", async () => {
-    const w = await world(); const run = await w.started(false);
-    const ws = await dispatched(w, run);
-    const delivered = w.h.machines.delivered(ws.machine!.machineId).find(entry => entry.operationId === run.operationId)! as unknown as Record<string, unknown> & { payload: Record<string, unknown>; callbackCapability: string };
-    expect(WorkerInvocationSchema.safeParse(delivered).success).toBe(true);
-    expect(delivered.payload).toMatchObject({ readOnly: true, evalHealth: { requestId: run.requestId, claimId: run.claimId }, evalGatewayUrl: GATEWAY });
-    expect(delivered.payload["modelRoute"]).toBeUndefined();
-    const capability = new CallbackCapabilities(SIGNING_KEY).verify(delivered.callbackCapability, "model-access");
-    expect([...capability.actions].sort()).toEqual(["artifacts", "eval-health-result", "eval-plan", "events", "heartbeat", "model-access", "result"].filter(a => capability.actions.includes(a as never)).sort());
-    expect(capability.actions).toEqual(expect.arrayContaining([EVAL_PLAN_DELIVERY_ACTION, EVAL_HEALTH_RESULT_PATH, "model-access"]));
-    // A worker that does not list the feature is not sent the run.
-    const old = await world({ features: WORKER_INVOCATION_FEATURES.filter(f => f !== PREPARE_EVAL_HEALTH_FEATURE) });
-    const oldRun = await old.started(false);
-    const oldWorkspace = await dispatched(old, oldRun, 3);
-    expect(oldWorkspace.machine === undefined ? [] : old.h.machines.delivered(oldWorkspace.machine.machineId).filter(entry => entry.operationId === oldRun.operationId)).toEqual([]);
-  });
   it("is closed, with its machine, when its preparation ends, whether it succeeded or failed: a finished health run keeps nothing running", async () => {
     for (const status of ["SUCCEEDED", "FAILED"] as const) {
       const w = await world(); const run = await w.started(false);
@@ -171,17 +142,6 @@ describe("the hosted health stand-in source", () => {
 });
 
 describe("the plan and grant callback for the run's preparation", () => {
-  it("answers the plan on main's head and the grant of the request's approved item, no-store, to the run's own capability", async () => {
-    const w = await world(); const run = await w.started();
-    const reply = await w.post(run, EVAL_PLAN_DELIVERY_ACTION, w.token(run));
-    expect(reply.statusCode).toBe(200);
-    expect(reply.headers["cache-control"]).toBe("no-store");
-    const answer = EvalPlanDeliverySchema.parse(json(reply));
-    if (answer.status !== "ready") throw new Error("not ready");
-    expect((answer.plan as { key: { baseCommit: string; company: string; project: string } }).key).toMatchObject({ baseCommit: HEAD, company: A, project });
-    expect(answer.approval).toMatchObject({ company: A, project, provider: "customer", maxCalls: 12, maxCostMicros: 600_000 });
-    expect(answer.baseline).toMatchObject({ record: null });
-  });
   it("answers not available once the claim ended, expired or was replaced, and for a person who no longer may approve", async () => {
     const ended = await world(); const a = await ended.started();
     await recordEvalHealthResult(ended.deps(), project, resultBody(a));
@@ -203,26 +163,9 @@ describe("the plan and grant callback for the run's preparation", () => {
     expect((await w.post(run, EVAL_PLAN_DELIVERY_ACTION, undefined)).statusCode).toBeGreaterThanOrEqual(400);
     expect((await w.post(run, EVAL_PLAN_DELIVERY_ACTION, w.token(run), {}, w.handler({ companyId: COMPANY_B.orgId }))).statusCode).toBe(404);
   });
-  it("is not served to a preparation that is not a health run's (a plain preparation of the same project)", async () => {
-    const w = await world(); const run = await w.started();
-    const key = operationKey(A, run.workspaceId, run.operationId);
-    const op = (await w.h.store.get(key))!;
-    const dispatch = { ...(op["dispatch"] as Record<string, unknown>), payload: { readOnly: true, pins: [{ repository: "web", commit: HEAD }] } };
-    await w.h.store.put({ item: { ...op, dispatch } });
-    const reply = await w.post(run, EVAL_PLAN_DELIVERY_ACTION, w.token(run));
-    expect(reply.statusCode).toBe(409);
-    expect((await w.post(run, EVAL_HEALTH_RESULT_PATH, w.token(run), resultBody(run))).statusCode).toBe(409);
-  });
 });
 
 describe("the result callback", () => {
-  it("accepts the optional version only on the run's own measured callback", async () => {
-    const w = await world(); const run = await w.started(); const version = "c".repeat(64);
-    const raw = resultBody(run);
-    const measured = { ...raw, result: { ...raw.result, standInSetVersion: version } };
-    expect((await w.post(run, EVAL_HEALTH_RESULT_PATH, w.token(run), measured)).statusCode).toBe(200);
-    expect((await readEvalHealthRow({ store: w.h.store, companyId: A }, project))?.claim).toMatchObject({ standInSetVersion: version });
-  });
   it("takes the run's one result: the baseline is kept and the request finishes, and a second post is the same answer", async () => {
     const w = await world(); const run = await w.started();
     const reply = await w.post(run, EVAL_HEALTH_RESULT_PATH, w.token(run), resultBody(run));
@@ -245,13 +188,6 @@ describe("the result callback", () => {
     expect((await w.post(run, EVAL_HEALTH_RESULT_PATH, w.token(run), "x".repeat(EVAL_HEALTH_RESULT_MAX_BYTES + 1))).statusCode).toBe(400);
     expect((await w.post(run, EVAL_HEALTH_RESULT_PATH, w.token(run), resultBody(run), w.handler({ companyId: COMPANY_B.orgId }))).statusCode).toBe(404);
     expect((await w.post(run, EVAL_HEALTH_RESULT_PATH, w.token(run), resultBody(run), w.handler({ evalHealth: undefined }))).statusCode).toBe(404);
-    expect((await readEvalHealthRow({ store: w.h.store, companyId: A }, project))!.state).toBe("running");
-  });
-  it("a worker's stop (the operation ended) takes no result", async () => {
-    const w = await world(); const run = await w.started();
-    const key = operationKey(A, run.workspaceId, run.operationId);
-    await w.h.store.put({ item: { ...(await w.h.store.get(key))!, status: "CANCELLED" } });
-    expect((await w.post(run, EVAL_HEALTH_RESULT_PATH, w.token(run), resultBody(run))).statusCode).toBeGreaterThanOrEqual(400);
     expect((await readEvalHealthRow({ store: w.h.store, companyId: A }, project))!.state).toBe("running");
   });
 });

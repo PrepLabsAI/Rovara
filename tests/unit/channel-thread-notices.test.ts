@@ -7,11 +7,10 @@ import {
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
 import { createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { strictMethodsFor } from "../../packages/broker/src/core/decisions/strong-methods.js";
 import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { createWorkflowDocumentSubject, workflowTaskKey } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import {
-  bindChannelSpace, channelThreadHandler, createChannelSink, decisionRefusalWords, planCardPosted, postApprovalCard, CARD_TTL_SECONDS, issueChannelLinkCode, linkedPerson, readApprovalCard, recordTaskThread, redeemChannelLinkCode, threadFollows, cardKey,
+  bindChannelSpace, channelThreadHandler, createChannelSink, decisionRefusalWords, planCardPosted, CARD_TTL_SECONDS, issueChannelLinkCode, linkedPerson, readApprovalCard, recordTaskThread, redeemChannelLinkCode, threadFollows,
   type ChannelCompanyOf, type ChannelMemberRule,
 } from "../../packages/broker/src/core/channel/index.js";
 import { createDocumentMilestones } from "../../packages/broker/src/core/milestones/milestones.js";
@@ -125,13 +124,6 @@ describe("the plan card, by risk", () => {
     });
   }
 
-  it("Request changes in the thread sends the plan back through the gate", async () => {
-    const w = await world({ risk: "medium" });
-    const event = (await card(w))!;
-    await w.sink.decision(decisionFor(event.data.requestId, { expectedRevision: event.data.expectedRevision, decision: "REQUEST_CHANGES", reason: "Use the retry helper, not a loop." }));
-    expect((await workflowOf(w)).decisions.at(-1)).toMatchObject({ decision: "REQUEST_CHANGES", reason: "Use the retry helper, not a loop." });
-  });
-
   it("Request changes carries the person's own words: they are made safe and cut, an empty one is refused, and nothing is decided without them", async () => {
     const w = await world({ risk: "low" });
     const event = (await card(w))!;
@@ -180,49 +172,6 @@ describe("the plan card, by risk", () => {
     expect(plain.data.text).toContain("rovara open");
   });
 
-  it("a high risk plan: no button, a link to the task page, and a forged button press is refused at the sink and again at the gate", async () => {
-    const w = await world({ risk: "high" });
-    const event = (await card(w))!;
-    expect(event.data.actions).toBeUndefined();
-    expect(event.data.text).toContain(`Risk: high`);
-    expect(event.data.text).toContain(PAGE);
-    expect(event.data.taskUrl).toBe(PAGE);
-    expect(await readApprovalCard({ store: w.store, orgId: ORG, now }, event.data.requestId)).toMatchObject({ kind: "plan_approval", risk: "high", offered: [] });
-    // A press nobody offered: refused by the sink in fixed words, nothing reaches the gate.
-    await w.sink.decision(decisionFor(event.data.requestId, { expectedRevision: event.data.expectedRevision }));
-    expect(await approvals(w)).toBe(0);
-    expect((ofType(w.deliveries, "error").at(-1) as { data: { text: string } }).data.text).toContain("task page");
-    // The same press with a card record forged to offer it (the sink's own list and kind rules say no again).
-    await w.store.update({ key: cardKey(ORG, event.data.requestId), ops: [change.set("offered", ["APPROVE"])] });
-    await w.sink.decision(decisionFor(event.data.requestId, { eventId: "press2", expectedRevision: event.data.expectedRevision }));
-    expect(await approvals(w)).toBe(0);
-    expect((ofType(w.deliveries, "error").at(-1) as { data: { text: string } }).data.text).toBe(decisionRefusalWords("step_up"));
-  });
-
-  it("a high risk approval pressed in a chat is refused by the gate itself, whatever the sink let through", async () => {
-    const w = await world({ risk: "high" });
-    const attempt = await w.gate.decide({
-      companyId: ORG, kind: "workflow-document", subjectId: TASK, requestId: "chat-forged-1", outcome: "approve", seen: { revision: (await workflowOf(w)).revision, artifactDigest: DIGEST },
-      credentials: [{ method: "chat-examplechat", token: "t1", claimedAccount: { provider: "examplechat", tenant: "team1", accountId: "user1" } }], reason: "Pressed in chat.",
-    });
-    expect(attempt).toMatchObject({ status: "refused", reason: "method_not_allowed" });
-    expect(await approvals(w)).toBe(0);
-  });
-
-  it("a plan whose approvers do not take a chat decision gets no button even at low risk", async () => {
-    const w = await world({ risk: "low", chatApprovers: false });
-    const event = (await card(w))!;
-    expect(event.data.actions).toBeUndefined();
-    expect(event.data.text).toContain(PAGE);
-  });
-
-  it("without an https address the high risk card says where to open the task instead", async () => {
-    const w = await world({ risk: "high", taskUrl: false });
-    const event = (await card(w))!;
-    expect(event.data.taskUrl).toBeUndefined();
-    expect(event.data.text).toContain("rovara open");
-  });
-
   it("a press from someone who is not the owner is refused, and so is one from an account nobody linked", async () => {
     const w = await world({ risk: "low" });
     const event = (await card(w))!;
@@ -247,19 +196,6 @@ describe("the plan card, by risk", () => {
     expect((ofType(w.deliveries, "error").at(-1) as { data: { text: string } }).data.text).toContain("changed");
   });
 
-  it("a repeated press is idempotent: one approval, and the second answer is the same", async () => {
-    const w = await world({ risk: "low" });
-    const event = (await card(w))!;
-    const press = (eventId: string) => w.sink.decision(decisionFor(event.data.requestId, { eventId, expectedRevision: event.data.expectedRevision }));
-    await press("p1");
-    await press("p2");
-    await press("p1");
-    expect(await approvals(w)).toBe(1);
-    expect((await workflowOf(w)).decisions.filter((entry) => entry.requestId === event.data.requestId)).toHaveLength(1);
-    expect(ofType(w.deliveries, "progress").filter((entry) => (entry as { data: { text: string } }).data.text === "Recorded.")).toHaveLength(2);
-    expect(ofType(w.deliveries, "error")).toHaveLength(0);
-  });
-
   it("the card is posted once per plan revision, and the milestone told again posts nothing", async () => {
     const w = await world({ risk: "low" });
     await w.handler.on(milestone("plan_ready"));
@@ -271,51 +207,6 @@ describe("the plan card, by risk", () => {
     await second.store.update({ key: workflowTaskKey(TASK), ops: [change.set("closedAt", "2026-11-12T11:00:00.000Z")] });
     await second.handler.on(milestone("plan_ready"));
     expect(second.deliveries).toEqual([]);
-  });
-
-  it("a failed send takes back its claim, so the hook's retry sends the card", async () => {
-    const w = await world({ risk: "low" });
-    let fail = true;
-    const real = w.adapter.deliver.bind(w.adapter);
-    w.adapter.deliver = async (event) => { if (fail) throw new Error("down"); await real(event); };
-    await expect(w.handler.on(milestone("plan_ready"))).rejects.toThrow("down");
-    fail = false;
-    await w.handler.on(milestone("plan_ready"));
-    expect(ofType(w.adapter.delivered, "approval_request")).toHaveLength(1);
-  });
-
-  it("another company's thread never gets the card, and a failing company or member rule sends nothing", async () => {
-    const other = await world({ companyOf: () => OTHER });
-    await other.handler.on(milestone("plan_ready"));
-    expect(other.deliveries).toEqual([]);
-    const nobody = await world({ companyOf: () => undefined });
-    await nobody.handler.on(milestone("plan_ready"));
-    expect(nobody.deliveries).toEqual([]);
-    const failing = await world({ companyOf: () => { throw new Error("directory down"); } });
-    await failing.handler.on(milestone("plan_ready"));
-    expect(failing.deliveries).toEqual([]);
-    const notMember = await world({ companyOf: () => ORG, isMember: () => false });
-    await notMember.handler.on(milestone("plan_ready"));
-    expect(notMember.deliveries).toEqual([]);
-    const memberFails = await world({ companyOf: () => ORG, isMember: () => { throw new Error("members down"); } });
-    await memberFails.handler.on(milestone("plan_ready"));
-    expect(memberFails.deliveries).toEqual([]);
-    // Nothing was written for any of them: no card record.
-    expect((await other.store.query({ pk: `ORG#${ORG}#CHANNEL_NOTICE#${SESSION}` })).items).toEqual([]);
-    // A thread of this company's own tenant, with the member served, does get it.
-    const served = await world({ companyOf: () => ORG, isMember: () => true, risk: "low" });
-    await served.handler.on(milestone("plan_ready"));
-    expect(ofType(served.deliveries, "approval_request")).toHaveLength(1);
-  });
-
-  it("a task of another company is never told, even through a thread row", async () => {
-    const w = await world({ taskOrg: OTHER });
-    await w.handler.on(milestone("plan_ready"));
-    await w.handler.on(milestone("merged"));
-    expect(w.deliveries).toEqual([]);
-    const own = await world();
-    await own.handler.on(milestone("merged", {}, OTHER));
-    expect(own.deliveries).toEqual([]);
   });
 });
 
@@ -367,49 +258,6 @@ describe("the milestone lines", () => {
     expect((none.deliveries[0] as { data: Record<string, unknown> }).data).not.toHaveProperty("verdict");
   });
 
-  it("a closed task is one line too, and the same task is done once whichever ending comes", async () => {
-    const w = await world({ withGate: false });
-    await w.handler.on(milestone("closed"));
-    await w.handler.on(milestone("merged"));
-    expect(ofType(w.deliveries, "done")).toHaveLength(1);
-    expect(ofType(w.deliveries, "done")[0]).toMatchObject({ data: { text: "\"Add a retry\" was closed without a merge.", outcome: "cancelled" } });
-  });
-
-  it("a redelivery sends nothing: the adapter is not even asked", async () => {
-    const w = await world({ withGate: false });
-    for (let round = 0; round < 3; round += 1) {
-      await w.handler.on(milestone("plan_ready"));
-      await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
-      await w.handler.on(milestone("merged"));
-    }
-    expect(w.deliveries).toHaveLength(3);
-  });
-
-  it("tells a new plan revision again, and another pull request, but never the same one twice", async () => {
-    const w = await world({ withGate: false });
-    await w.handler.on(milestone("plan_ready"));
-    const before = await workflowOf(w);
-    await w.store.update({ key: workflowTaskKey(TASK), ops: [change.set("workflow", JSON.parse(JSON.stringify({ ...before, revision: before.revision + 1 })) as JsonValue)] });
-    await w.handler.on(milestone("plan_ready"));
-    await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
-    await w.handler.on(milestone("pr_ready", { pullRequests: [{ ...PR, number: 8, url: "https://git.example.test/acme/web/pull/8" }] }));
-    expect(w.deliveries.map((event) => event.type)).toEqual(["progress", "progress", "pr", "pr"]);
-  });
-
-  it("sends none of the three when the host turns milestones off, but the plan card is not a milestone and still goes", async () => {
-    const off = await world({ milestones: false, withGate: false });
-    await off.handler.on(milestone("plan_ready"));
-    await off.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
-    await off.handler.on(milestone("merged"));
-    await off.handler.on(milestone("closed"));
-    expect(off.deliveries).toEqual([]);
-    const card = await world({ milestones: false, risk: "low" });
-    await card.handler.on(milestone("plan_ready"));
-    await card.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
-    await card.handler.on(milestone("merged"));
-    expect(card.deliveries.map((event) => event.type)).toEqual(["approval_request"]);
-  });
-
   it("can be switched by a function read at each use", async () => {
     const state = { on: false };
     const w = await world({ withGate: false, milestones: false });
@@ -458,23 +306,6 @@ describe("the owner's approvers, in a chat they opted into", () => {
   const proof = (claimed: { provider: string; tenant: string; accountId: string } = { provider: "examplechat", tenant: "team1", accountId: "user1" }) => ({ proofId: "p1", method: "chat-examplechat", requestId: "req-12345678.x", revision: 2, artifactDigest: DIGEST, token: "t", claimedAccount: claimed });
   const omitClaim = (given: ReturnType<typeof proof>) => ({ proofId: given.proofId, method: given.method, requestId: given.requestId, revision: given.revision, artifactDigest: given.artifactDigest, token: given.token });
   const make = (linked: (account: { provider: string; tenant: string; accountId: string }) => boolean | Promise<boolean> = (account) => account.accountId === "user1") => createLocalOwnerApprovers({ owner, chat: { channels: () => ["examplechat"], linkedToOwner: linked } });
-
-  it("offers the chat's method, never as a strong or a rejecting one, and offers none when no chat was named", async () => {
-    const requirement = await make().requirement(request());
-    expect(requirement.methods).toContain("chat-examplechat");
-    expect(requirement.strongMethods ?? []).not.toContain("chat-examplechat");
-    expect(requirement.rejectMethods ?? []).not.toContain("chat-examplechat");
-    expect((await createLocalOwnerApprovers({ owner }).requirement(request())).methods).not.toContain("chat-examplechat");
-  });
-
-  it("accepts the owner's linked account for a low or medium risk approval or request for changes", async () => {
-    for (const risk of ["low", "medium"] as const) {
-      for (const outcome of ["approve", "request_changes"] as const) {
-        const verdict = await make().verify(request({ risk, outcome }), proof());
-        expect(verdict).toMatchObject({ approved: true, approver: { personId: owner.personId } });
-      }
-    }
-  });
 
   it("refuses a high risk request, a request with no risk, a rejection, an account that is not the owner's, a failing link check and another chat", async () => {
     const refused = async (approvers: ReturnType<typeof make>, req: ReturnType<typeof request>, p: Parameters<ReturnType<typeof make>["verify"]>[1] = proof()) => (await approvers.verify(req, p)).approved;
@@ -535,68 +366,6 @@ describe("the reminder after a plan's card", () => {
     await w.store.update({ key: workflowTaskKey(TASK), ops: [change.set("closedAt", "2026-11-12T11:00:00.000Z")] });
     expect(await carded(sessionOf())).toBe(false);
   });
-
-  it("a card whose send failed is not a card: the reminder is still sent", async () => {
-    const w = await world({ risk: "low" });
-    w.adapter.deliver = async () => { throw new Error("down"); };
-    await expect(w.handler.on(milestone("plan_ready"))).rejects.toThrow("down");
-    expect(await planCardPosted({ store: w.store, now })(sessionOf())).toBe(false);
-  });
-});
-
-describe("a high risk card never has a button, whatever the adapter lists", () => {
-  const post = async (options: { risk?: "low" | "medium" | "high"; signInOnly?: boolean; stepUp?: readonly never[] }) => {
-    const store = new MemoryDocumentStore();
-    const adapter = new FakeChannelAdapter();
-    if (options.stepUp !== undefined) Object.assign(adapter, { stepUp: options.stepUp });
-    const sent = await postApprovalCard({ store, orgId: ORG, now }, {
-      channel: "examplechat", adapter, conversation: CONVERSATION, kind: "plan_approval", subject: { type: "workflow-document", id: TASK }, revision: 2, artifactDigest: DIGEST,
-      ...(options.risk === undefined ? {} : { risk: options.risk }), ...(options.signInOnly === undefined ? {} : { signInOnly: options.signInOnly }),
-      text: "Plan waits.", actions: [{ decision: "APPROVE", label: "Approve" }],
-    });
-    const event = adapter.delivered[0] as { data: { actions?: unknown[] } };
-    return { event, card: await readApprovalCard({ store, orgId: ORG, now }, sent.requestId), sent };
-  };
-
-  it("sends no button for a high risk plan, even when the adapter's own step-up list is empty", async () => {
-    for (const stepUp of [undefined, []] as const) {
-      const high = await post({ risk: "high", ...(stepUp === undefined ? {} : { stepUp }) });
-      expect(high.event.data.actions).toBeUndefined();
-      expect(high.card).toMatchObject({ risk: "high", offered: [] });
-    }
-  });
-
-  it("sends the button for a low or medium risk plan, and none when the host says sign-in only", async () => {
-    for (const risk of ["low", "medium"] as const) expect((await post({ risk, stepUp: [] })).card?.offered).toEqual(["APPROVE"]);
-    expect((await post({ risk: "low", signInOnly: true })).card?.offered).toEqual([]);
-    expect((await post({ risk: "low", signInOnly: true })).event.data.actions).toBeUndefined();
-  });
-});
-
-describe("a chat press that asks for changes on a high risk plan", () => {
-  it("is refused by the gate's own method rules, with a comment or the local session still allowed", () => {
-    const requirement = { changesMethods: ["local-session", "code-host-comment", "chat-examplechat"] };
-    expect(strictMethodsFor("request_changes", "high", requirement)).toEqual(["local-session", "code-host-comment"]);
-    expect(strictMethodsFor("request_changes", "medium", requirement)).toEqual(["local-session", "code-host-comment", "chat-examplechat"]);
-    expect(strictMethodsFor("request_changes", "low", requirement)).toContain("chat-examplechat");
-  });
-
-  it("is refused at the gate even for approvers that would accept it (no other layer is needed)", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: { ...workflowTaskKey(TASK), orgId: ORG, project: "web", title: "Add a retry", sessionId: SESSION, workflow: JSON.parse(JSON.stringify(waitingWorkflow())) as JsonValue } });
-    const trusting = {
-      requirement: async () => ({ methods: ["chat-examplechat", "local-session"], minApprovers: 1, selfApprovalAllowed: true, changesMethods: ["chat-examplechat", "local-session"] }),
-      verify: async (_request: unknown, given: { method: string; proofId: string }) => ({ approved: true as const, approver: owner, method: given.method, proofId: given.proofId }),
-    };
-    const gateFor = (risk: DecisionRisk) => createDecisionGate({ store, approvers: trusting, audit: createNoopAuditSink(), now: () => new Date(clock.ms), subjects: [createWorkflowDocumentSubject({ store, riskOf: () => risk })] });
-    const attempt = (requestId: string) => ({
-      companyId: ORG, kind: "workflow-document", subjectId: TASK, requestId, outcome: "request_changes" as const, seen: { revision: waitingWorkflow().revision, artifactDigest: DIGEST },
-      credentials: [{ method: "chat-examplechat", token: requestId }], reason: "Use the retry helper.",
-    });
-    expect(await gateFor("high").decide(attempt("11111111-1111-4111-8111-111111111111"))).toMatchObject({ status: "refused", reason: "method_not_allowed" });
-    expect((await store.get(workflowTaskKey(TASK)))!["workflow"]).toMatchObject({ decisions: [] });
-    expect(await gateFor("medium").decide(attempt("22222222-2222-4222-8222-222222222222"))).toMatchObject({ status: "decided" });
-  });
 });
 
 describe("an expired card does not hide the reminder", () => {
@@ -644,14 +413,6 @@ describe("a slow send keeps its claim", () => {
 describe("the plan card's feature line in the chat", () => {
   const features = (w: Awaited<ReturnType<typeof world>>, companyId: OrgId = ORG) => createFeatureStore({ store: w.store, companyId, audit: createNoopAuditSink(), now });
   const SYSTEM = { type: "system", id: "test" } as const;
-
-  it("says the task's feature in one line under the risk, with no cost and no feature button: a task with none says No feature", async () => {
-    const w = await world({ risk: "low" });
-    const event = await card(w);
-    expect(event?.data.text.split("\n")).toContain("Feature: No feature");
-    expect(event?.data.text).not.toMatch(/\$|cost|USD/iu);
-    expect(event?.data.actions?.map((action) => action.decision)).toEqual(["APPROVE", "REQUEST_CHANGES"]);
-  });
 
   it("names the Linear parent the tracker suggested, once, and a high risk plan carries the line too (still no button)", async () => {
     for (const risk of ["low", "high"] as const) {

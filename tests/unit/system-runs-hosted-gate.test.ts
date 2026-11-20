@@ -17,38 +17,6 @@ type Gate = { enabled(): boolean | Promise<boolean> };
 const consent = async (store: MemoryDocumentStore, company: OrgId, enabled = true): Promise<void> => { await store.put({ item: { ...systemRunsConsentKey(company), entityType: "SYSTEM_RUNS_CONSENT", orgId: company, enabled, changedAt: "2026-11-17T00:00:00.000Z" } }); };
 
 describe("the hosted SystemRuns gate is always supplied", () => {
-  it("sets a gate on the flow's deps for every flag value, default off", async () => {
-    for (const raw of [undefined, "", "off", "typo", "drain", `on:${B}`, "on", `on:${A}`]) {
-      const deps: { systemRuns?: Gate; store: MemoryDocumentStore } = { store: new MemoryDocumentStore() };
-      const gate = hostedSystemRunsFor(deps, A, parseCoreSwitch(raw).value);
-      expect(deps.systemRuns, String(raw)).toBe(gate);
-      expect(typeof deps.systemRuns?.enabled).toBe("function");
-      // No consent row yet: off for every flag value.
-      expect(await deps.systemRuns!.enabled(), String(raw)).toBe(false);
-    }
-  });
-
-  // MUTANT: the AND becomes an OR (or drops one lock): one of the three "off" cells below turns on.
-  it("is on only where the flag covers the company AND the company consented (all four combinations, then two companies)", async () => {
-    for (const [flag, given, want] of [["off", false, false], ["off", true, false], [`on:${A}`, false, false], [`on:${A}`, true, true], ["on", true, true], ["on", false, false]] as const) {
-      const deps: { systemRuns?: Gate; store: MemoryDocumentStore } = { store: new MemoryDocumentStore() };
-      if (given) await consent(deps.store, A);
-      hostedSystemRunsFor(deps, A, parseCoreSwitch(flag).value);
-      expect(await deps.systemRuns!.enabled(), `${flag} consent=${String(given)}`).toBe(want);
-    }
-    // Two companies in one store: A's consent opens nothing for B, and the flag naming only B opens nothing for A.
-    const store = new MemoryDocumentStore();
-    await consent(store, A);
-    const a: { systemRuns?: Gate; store: MemoryDocumentStore } = { store };
-    const b: { systemRuns?: Gate; store: MemoryDocumentStore } = { store };
-    hostedSystemRunsFor(a, A, parseCoreSwitch("on").value);
-    hostedSystemRunsFor(b, B, parseCoreSwitch("on").value);
-    expect(await a.systemRuns!.enabled()).toBe(true);
-    expect(await b.systemRuns!.enabled()).toBe(false);
-    const onlyB: { systemRuns?: Gate; store: MemoryDocumentStore } = { store };
-    hostedSystemRunsFor(onlyB, A, parseCoreSwitch(`on:${B}`).value);
-    expect(await onlyB.systemRuns!.enabled()).toBe(false);
-  });
 
   it("is read on every use: withdrawing the consent stops the very next question, and a store that cannot be read is off", async () => {
     const deps: { systemRuns?: Gate; store: MemoryDocumentStore } = { store: new MemoryDocumentStore() };

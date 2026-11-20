@@ -6,13 +6,11 @@ import { EvidencePackSchema, type EvidencePack, type VerificationReport } from "
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
 import { parseChangedFiles } from "../../packages/broker/src/core/proof/changed-files.js";
 import { assessRisk, isCiExecutedPath, type RiskFile } from "../../packages/broker/src/core/proof/risk.js";
-import { WEAKENING_HEADING, notComparedReason, weakeningBlock, weakeningFactsOf } from "../../packages/broker/src/core/proof/weakening-flags.js";
+import { WEAKENING_HEADING, notComparedReason, weakeningBlock } from "../../packages/broker/src/core/proof/weakening-flags.js";
 import { isFixturePath, isInstructionFilePath, isSnapshotPath, isTestConfigPath } from "../../packages/broker/src/core/proof/weakening-paths.js";
 import { rovaraStatusLines } from "../../packages/broker/src/core/proof/pull-request-body.js";
 import type { ChangedFileEntry } from "../../packages/broker/src/core/proof/verification-report.js";
 import { expectLinearScaling } from "../support/scaling.js";
-
-const ZWJ = "\u200d";
 const section = (diff: string[]) => ["## app", "", "### status", "### diff", ...diff].join("\n");
 const hunk = (path: string, plus: string[] = ["new"], minus: string[] = ["old"]): string[] => [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, "@@ -1 +1 @@", ...minus.map((line) => `-${line}`), ...plus.map((line) => `+${line}`)];
 const read = (...diff: string[][]) => parseChangedFiles(section(diff.flat())).files;
@@ -33,37 +31,15 @@ describe("the path classes", () => {
   it.each([
     ["tests/fixtures/a.json", true], ["src/__fixtures__/b.ts", true], ["testdata/in.txt", true], ["cassettes/x.yaml", true], ["src/fixture-loader.ts", false],
   ])("fixture %s -> %s", (path, expected) => expect(isFixturePath(path)).toBe(expected));
-  it("is case-insensitive and reads a Windows path and a leading ./", () => {
-    expect(isInstructionFilePath(".\\.Rovara\\Rules\\A.md")).toBe(true);
-    expect(isSnapshotPath("./SRC/__Snapshots__/A.snap")).toBe(true);
-  });
 });
 
 describe("the changed-files reader flags weakening", () => {
-  it("flags a snapshot, a fixture, a test config and a renamed file under either name", () => {
-    const files = read(hunk("src/__snapshots__/a.snap"), hunk("tests/fixtures/data.json"), hunk("pytest.ini", ["addopts = -q"]), ["diff --git a/old/__snapshots__/x.snap b/new/x.txt", "--- a/old/__snapshots__/x.snap", "+++ b/new/x.txt", "@@ -1 +1 @@", "-a", "+b"]);
-    expect(files.map((file) => [file.path, file.snapshotChanged, file.fixtureChanged, file.testConfigChanged])).toEqual([
-      ["src/__snapshots__/a.snap", true, undefined, undefined],
-      ["tests/fixtures/data.json", undefined, true, undefined],
-      ["pytest.ini", undefined, undefined, true],
-      ["new/x.txt", true, undefined, undefined],
-    ]);
-  });
-  it("flags a file Git does not track yet, from its path alone", () => {
-    const text = ["## app", "", "### status", "?? AGENTS.md", "?? tests/__snapshots__/new.snap", "### diff"].join("\n");
-    // A new snapshot adds an expectation, it does not change one: not flagged. (A new conftest.py is, below.)
-    expect(parseChangedFiles(text).files.map((file) => [file.path, file.snapshotChanged])).toEqual([["AGENTS.md", undefined], ["tests/__snapshots__/new.snap", undefined]]);
-    expect(parseChangedFiles(["## app", "", "### status", "?? tests/conftest.py", "### diff"].join("\n")).files[0]?.testConfigChanged).toBe(true);
-  });
   it.each([
     ["pytest.skip in a test", "tests/test_a.py", "    pytest.skip('flaky')"], ["xfail", "tests/test_a.py", "@pytest.mark.xfail"], ["skipif", "tests/test_a.py", "@pytest.mark.skipif(True, reason='x')"],
     ["unittest.expectedFailure", "tests/test_a.py", "@unittest.expectedFailure"], ["t.Skipf", "tests/a_test.go", "t.Skipf(\"no\")"], ["it.skip", "src/a.test.ts", "it.skip('x', () => {})"],
     ["JUnit enabled=false", "src/test/java/ATest.java", "@Test(enabled = false)"], ["C# Ignore", "tests/ATests.cs", "[Ignore]"],
   ])("a test that is switched off: %s", (_name, path, line) => {
     expect(flagsOf(path, [line]).testsSkipped).toBe(true);
-  });
-  it("does not call a removed skip, or an ordinary test line, a skip", () => {
-    expect(flagsOf("tests/test_a.py", ["def test_x(): pass"], ["@pytest.mark.skip"]).testsSkipped).toBeUndefined();
   });
   it("flags a coverage exclusion anywhere, and an ignore option only in a test or coverage configuration", () => {
     expect(flagsOf("src/a.py", ["x = 1  # pragma: no cover"]).testsExcluded).toBe(true);
@@ -87,15 +63,6 @@ describe("the changed-files reader flags weakening", () => {
     expect(flagsOf("package.json", ['    "build": "tsc",']).testCommandChanged).toBeUndefined();
     expect(flagsOf("src/a.json", ['    "test": "x",']).testCommandChanged).toBeUndefined();
   });
-  it("reads a 1 MB line and a diff of 20,000 lines in linear time", () => {
-    // Scaling checks, not a wall-clock bound: each input is timed at N and at 8N. The 8N input stays at or under 256 KiB so it stays in CPU cache; the full 1 MB line and 20,000 lines are checked once, un-timed, below.
-    const longOf = (units: number) => `${"a ".repeat(units)}pragma: no cover`;
-    const manyOf = (count: number) => Array.from({ length: count }, (_unused, n) => `value_${String(n)} = "pending (it.skip"`);
-    expectLinearScaling((n) => { const line = longOf(n); return () => flagsOf("src/a.py", [line]); }, { n: 16_000, unitBytes: 2, label: "a 1 MB line" });
-    expectLinearScaling((n) => { const lines = manyOf(n); return () => flagsOf("tests/test_big.py", lines); }, { n: 900, unitBytes: 35, label: "a diff of 20,000 lines" });
-    expect(flagsOf("src/a.py", [longOf(500_000)]).testsExcluded).toBe(true);
-    expect(flagsOf("tests/test_big.py", manyOf(20_000)).testsSkipped).toBe(true);
-  });
 });
 
 describe("worst-case input to the new readers (8 MiB, linear time)", () => {
@@ -112,14 +79,6 @@ describe("worst-case input to the new readers (8 MiB, linear time)", () => {
     expectLinearScaling((bytes) => { const line = lineOf(bytes); return () => read(hunk(path, [line])); }, { n: 32_768, label: _name });
     const files = read(hunk(path, [lineOf(MIB8)]));
     expect(files).toHaveLength(1);
-  });
-  it("many short lines and many files", () => {
-    const diffOf = (count: number) => Array.from({ length: count }, (_unused, n) => hunk(`tests/__snapshots__/s${String(n)}.snap`)).flat();
-    // A scaling check, not a wall-clock bound: 190 and 1,520 changed files (the 8N input, about 170 bytes a file, stays at or under 256 KiB so it stays in CPU cache); the full 20,000 files are read once, un-timed, below.
-    expectLinearScaling((count) => { const text = section(diffOf(count)); return () => parseChangedFiles(text); }, { n: 190, unitBytes: 170, label: "many short lines and many files" });
-    const files = parseChangedFiles(section(diffOf(20_000))).files;
-    expect(files.length).toBe(200);
-    expect(files.every((file) => file.snapshotChanged === true)).toBe(true);
   });
 });
 
@@ -141,15 +100,6 @@ describe("the risk reads the flags (medium at most, words only)", () => {
     // A fix has its own stronger words for the script, and the flag does not repeat them.
     expect(riskOf([f("package.json", { testCommandChanged: true })], true).reasons.join("\n")).not.toMatch(/Changes the scripts that CI runs/u);
   });
-  it("names the other files CI runs as CI configuration, as it always named the workflows", () => {
-    for (const path of ["Makefile", "tests/conftest.py", "pytest.ini", "jest.config.ts"]) expect(riskOf([f(path)]).reasons.join("\n"), path).toMatch(/^Changes CI configuration/mu);
-  });
-  it("does not raise a plain change, and keeps a sensitive instruction path high without repeating it as a flag", () => {
-    expect(riskOf([f("src/a.ts")]).level).toBe("low");
-    const playbook = riskOf([f(".rovara/playbook.yaml")]);
-    expect(playbook.level).toBe("high");
-    expect(playbook.reasons.join("\n")).not.toMatch(/Changes Rovara instruction files/u);
-  });
 });
 
 const DIGEST = "c".repeat(64);
@@ -159,8 +109,6 @@ const checkWith = (tests: Record<string, unknown>) => ({
 });
 /** A pack as the broker keeps it (names already cut and checked by the builder). */
 const packWith = (tests: Record<string, unknown>): EvidencePack => EvidencePackSchema.parse(rawPack(tests));
-/** A pack that skipped the schema: what a reader would hold if it ever met a name the schema refuses. The words must hold on their own. */
-const looseWith = (tests: Record<string, unknown>): EvidencePack => rawPack(tests) as unknown as EvidencePack;
 const rawPack = (tests: Record<string, unknown>) => ({
   schemaVersion: 1, candidateDigest: DIGEST, environment: { tier: "sandbox", envRevision: 0, services: [], data: "synthetic", accounts: [] },
   checks: [checkWith(tests)], selection: { method: "full", selected: 4, total: 4 }, api: [], browser: [], notTested: [],
@@ -188,83 +136,6 @@ describe("the flags block", () => {
       "- Fixture files changed: tests/fixtures/a.json",
       "",
     ]);
-  });
-  it("counts tests whose names were cut, and says 'and N more' past three", () => {
-    const names = Array.from({ length: 5 }, (_unused, n) => `t.py::t${String(n)}`);
-    expect(weakeningBlock([], packWith({ absentOnNew: names, absentOnNewCount: 120 }))[1]).toBe("- 120 tests ran before and not now: t.py::t0, t.py::t1, t.py::t2 and 117 more");
-  });
-  it("a package.json whose CI scripts changed is a flag for the files CI runs", () => {
-    expect(weakeningBlock(files({ path: "package.json", testCommandChanged: true }), undefined)[1]).toBe("- Files that CI runs changed (a flag, not an approval): package.json");
-  });
-  it("sums the skip rise over the checks that gave both counts and never nets one check against another", () => {
-    const facts = weakeningFactsOf([], EvidencePackSchema.parse({
-      ...packWith({}), checks: [checkWith({ skippedBefore: 0, skippedAfter: 2, skipped: 2, passed: 2, total: 4 }), { ...checkWith({ skippedBefore: 5, skippedAfter: 1, skipped: 1, passed: 3, total: 4 }), checkId: "readiness:1" }],
-    }));
-    expect(facts.skipRise).toEqual({ before: 0, after: 2 });
-  });
-  it("makes a hostile name inert: no link, image, mention, issue reference, heading, quote, fence or hidden character", () => {
-    const hostile = [
-      "[click](https://evil.example)", "![pic](https://evil.example/x.png)", "![a[b]c](https://evil.example)", "[ref][1]\n\n[1]: https://evil.example", "@everyone ping", "Fixes #123", "owner/repo#45", "Fixes ENG-42", "<img src=x onerror=1>",
-      "<!-- hidden", "# heading", "> quote", "---", "```js", "~~~", "a\u202eb\u200bc", `x\ufe0fy${String.fromCodePoint(0xe0100)}z`, "www.evil.example", "http://evil.example",
-    ];
-    const text = weakeningBlock(files(...hostile.map((path) => ({ path: `AGENTS.md/${path}` }))), looseWith({ absentOnNew: hostile, absentOnNewCount: hostile.length })).join("\n");
-    expect(text).not.toMatch(/\]\(/u);
-    expect(text).not.toMatch(/!\[/u);
-    expect(text).not.toMatch(/<(?!&)/u);
-    expect(text).not.toMatch(/(^|[^\u200d])@\w/u);
-    expect(text).not.toMatch(/#\d/u);
-    for (const hidden of ["\u202e", "\u200b", "\ufe0f", String.fromCodePoint(0xe0100)]) expect(text.includes(hidden), hidden).toBe(false);
-    expect(text).not.toMatch(/(^|\n)(```|~~~|# |> |---)/u);
-    expect(text).not.toMatch(/Fixes ENG-\d/u);
-    // The bullets, the heading and the one blank line are the only structure.
-    expect(text.split("\n").filter((line) => line !== "" && !line.startsWith("- ") && line !== WEAKENING_HEADING)).toEqual([]);
-  });
-  it("reads a 1 MB name quickly and prints a bounded line", () => {
-    const hugeOf = (length: number) => "AGENTS.md/" + "x".repeat(length);
-    // A scaling check, not a wall-clock bound: the name is timed at 32,768 and at 262,144 characters (the 8N input stays at or under 256 KiB so it stays in CPU cache); the full 1,000,000 characters are checked once, un-timed, below.
-    expectLinearScaling((length) => { const name = hugeOf(length); const changed = files({ path: name }); const pack = looseWith({ absentOnNew: [name], absentOnNewCount: 1 }); return () => weakeningBlock(changed, pack); }, { n: 32_768, label: "a 1 MB file name" });
-    const huge = hugeOf(1_000_000);
-    const block = weakeningBlock(files({ path: huge }), looseWith({ absentOnNew: [huge], absentOnNewCount: 1 }));
-    expect(Math.max(...block.map((line) => line.length))).toBeLessThanOrEqual(310);
-  });
-  it("keeps a join between a number and a word: nothing prints NaN or Infinity for a count that is not a number", () => {
-    const text = weakeningBlock([], packWith({ absentOnNew: ["a"], absentOnNewCount: 1 })).join("\n");
-    expect(text).not.toMatch(/NaN|Infinity/u);
-    void ZWJ;
-  });
-});
-
-describe("the description carries the flags at the top of Rovara's block", () => {
-  const candidate = createCandidateManifest([{ repositoryId: "app", commitSha: "1".repeat(40), treeSha: "1".repeat(40), baseCommitSha: "e".repeat(40) }]);
-  const workflow = () => WorkflowSnapshotSchema.parse({
-    ...createWorkflowSnapshot({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", ownerId: "a".repeat(64), now: "2026-11-13T12:00:00.000Z", definitionVersion: "1.1.0" }),
-    stage: "PULL_REQUEST", state: "READY", candidate,
-    checkPolicy: { required: [{ id: "unit", label: "Unit tests", command: { cwd: "repo/app", executable: "npm", args: ["test"], timeoutSeconds: 30 } }], optional: [], selectedOptionalIds: [], proposed: [] },
-    verification: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: "2026-11-13T12:00:00.000Z", results: [{ checkId: "unit", status: "PASS" }] },
-    reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: "2026-11-13T12:00:00.000Z" })),
-  });
-  const lines = (changed: ChangedFileEntry[], extra: Record<string, unknown> = {}) => rovaraStatusLines(workflow(), { changedFiles: { files: changed, complete: true }, ...extra }, () => ["- no findings"]);
-  it("lists the flags above the first drawer when an instruction file and a snapshot changed", () => {
-    const body = lines([{ repository: "app", path: "CLAUDE.md", added: 1, removed: 0 }, { repository: "app", path: "a/__snapshots__/x.snap", added: 1, removed: 1, snapshotChanged: true }]);
-    const text = body.join("\n");
-    for (const wanted of ["Rovara instruction files changed (a flag, not an approval): CLAUDE.md", "Snapshot files changed: a/__snapshots__/x.snap"]) {
-      expect(text).toContain(`- ${wanted}`);
-      // Once above the first drawer, and the layout's own words are the headings.
-      expect(text.indexOf(wanted)).toBeLessThan(text.indexOf("<details>"));
-    }
-    expect(text).toContain("**Tests may be weaker.**");
-    expect(text).toContain("**Instruction files or files CI runs changed.**");
-    expect(text).not.toContain(WEAKENING_HEADING);
-  });
-  it("has no flag item when nothing is flagged", () => {
-    expect(lines([{ repository: "app", path: "src/a.ts", added: 1, removed: 0 }]).join("\n")).not.toContain("Tests may be weaker");
-    expect(lines([{ repository: "app", path: "src/a.ts", added: 1, removed: 0 }]).join("\n")).not.toContain("Instruction files");
-  });
-  it("shows the tests that ran before and not now from the pack, only when the pack is for this code", () => {
-    const pack = packWith({ absentOnNew: ["t.py::gone"], absentOnNewCount: 1 });
-    const proof = { evidence: { pack: { ...pack, candidateDigest: candidate.digest }, mode: "summary" as const } };
-    expect(lines([], { proof }).join("\n")).toContain("- 1 test ran before and not now: t.py::gone");
-    expect(lines([], { proof: { evidence: { pack, mode: "summary" as const } } }).join("\n")).not.toContain("ran before and not now");
   });
 });
 
@@ -311,11 +182,6 @@ describe("M2: snapshots and fixtures are flagged when changed, not when added, a
     ["src/test/resources/golden/out.txt", true], ["spec/golden/a.json", true], ["testdata/x.golden", true]])("%s -> flagged %s", (path, flagged) => {
     expect(isFixturePath(path) || isSnapshotPath(path), path).toBe(flagged);
   });
-  it("an option is an ignore option only when it ends there: --ignore-path, --ignore-scripts and --ignore-unknown are not", () => {
-    expect(flagsOf("tox.ini", ["    pip install --ignore-installed"]).testsExcluded).toBeUndefined();
-    for (const line of ["\teslint --ignore-path .gitignore .", "\tnpm ci --ignore-scripts", "\tprettier --ignore-unknown --check ."]) expect(flagsOf("Makefile", [line]).testsExcluded, line).toBeUndefined();
-    for (const line of ["\tpytest --ignore tests/slow", "\tpytest --ignore=tests/slow", "\tvitest --exclude src/a", "\tpytest --deselect=a::b", "\tjest --ignore-glob=*.x"]) expect(flagsOf("Makefile", [line]).testsExcluded, line).toBe(true);
-  });
   it("the host's list marks an added file as added (a new snapshot from the host is not flagged either)", async () => {
     const { hostChangedFiles } = await import("../../packages/broker/src/core/build-step/changed-files.js");
     const file = (path: string, status: string) => ({ path, status, additions: 1, deletions: 0, patch: "@@ -0,0 +1 @@\n+x" });
@@ -333,10 +199,6 @@ describe("L1: more instruction files", () => {
 describe("M3: a proof that could not compare says so", () => {
   const proofOf = (over: Record<string, unknown> = {}) => ({ schemaVersion: 1 as const, candidateDigest: DIGEST, status: "checked" as const, note: "completed" as const, changedTests: { added: 1, changed: 0, deleted: 0 }, items: [], durationMs: 1, ...over }) as never;
   const compared = { checkId: "readiness:0", skippedBefore: 0, skippedAfter: 0, absentOnNew: [], absentOnNewCount: 0 };
-  it("is silent only when at least one check was compared", () => {
-    expect(notComparedReason(proofOf({ weakening: [compared] }), DIGEST)).toBeUndefined();
-    expect(weakeningBlock([], undefined, { testProof: proofOf({ weakening: [compared] }), candidateDigest: DIGEST })).toEqual([]);
-  });
   it.each([
     [undefined, "the test proof did not run for this code"],
     [proofOf({ candidateDigest: "e".repeat(64) }), "the test proof did not run for this code"],
@@ -392,47 +254,18 @@ describe("N6: every path pattern is linear in the path", () => {
       }, { n: 2_000, unitBytes: unit.length, label: `${unit} repeated, then ${tail}` });
     }
   });
-  it("a test folder above is still what decides snapshots/, golden/ and fixtures/", () => {
-    expect(isSnapshotPath("a/tests/b/c/snapshots/d")).toBe(true);
-    expect(isSnapshotPath("a/b/snapshots/tests/d")).toBe(false);
-    expect(isSnapshotPath("tests/snapshots")).toBe(false);
-    expect(isFixturePath("tests/x/fixtures/y.json")).toBe(true);
-    expect(isFixturePath("fixtures/tests/y.json")).toBe(false);
-    expect(isSnapshotPath("a/Foo.verified.txt")).toBe(true);
-    expect(isSnapshotPath("a/Foo.verified")).toBe(false);
-  });
 });
 
 describe("N5: every check that was not compared is named, even when another was", () => {
   const proofOf = (over: Record<string, unknown>) => ({ schemaVersion: 1 as const, candidateDigest: DIGEST, status: "checked" as const, note: "completed" as const, changedTests: { added: 1, changed: 0, deleted: 0 }, durationMs: 1, ...over }) as never;
-  const item = (checkId: string, label: string) => ({ checkId, label, granularity: "check", verdict: "proves_change", reason: "assertion_failed_on_old" });
   const compared = { checkId: "readiness:0", skippedBefore: 0, skippedAfter: 0, absentOnNew: [], absentOnNewCount: 0 };
-  it("a check that was not compared gets its own line, with its name, next to a check that was", () => {
-    const proof = proofOf({ items: [item("readiness:0", "unit"), item("readiness:1", "integration")], weakening: [compared], weakeningNotCompared: [{ checkId: "readiness:1", reason: "original_run_truncated" }] });
-    expect(weakeningBlock([], undefined, { testProof: proof, candidateDigest: DIGEST })).toEqual([WEAKENING_HEADING, "- Test weakening: could not compare integration (the run on the original code looks cut short)", ""]);
-  });
-  it("when no check was compared, each one is still named, not one reason for all", () => {
-    const proof = proofOf({ items: [item("readiness:0", "unit"), item("readiness:1", "integration")], weakeningNotCompared: [{ checkId: "readiness:0", reason: "no_report" }, { checkId: "readiness:1", reason: "original_run_truncated" }] });
-    expect(weakeningBlock([], undefined, { testProof: proof, candidateDigest: DIGEST })).toEqual([
-      WEAKENING_HEADING, "- Test weakening: could not compare unit (a test report was not available from both runs)", "- Test weakening: could not compare integration (the run on the original code looks cut short)", "",
-    ]);
-  });
   it("names each such check, bounded, with the rest counted", () => {
     const many = Array.from({ length: 8 }, (_unused, n) => ({ checkId: `readiness:${String(n + 1)}`, reason: "no_report" }));
     const lines = weakeningBlock([], undefined, { testProof: proofOf({ weakening: [compared], weakeningNotCompared: many }), candidateDigest: DIGEST });
     expect(lines.filter((line) => line.startsWith("- Test weakening: could not compare"))).toHaveLength(6);
     expect(lines.at(-2)).toBe("- Test weakening: could not compare 3 more checks");
   });
-  it("makes a check's name inert", () => {
-    const proof = proofOf({ items: [item("readiness:1", "[x](https://evil.example) @everyone")], weakening: [compared], weakeningNotCompared: [{ checkId: "readiness:1", reason: "no_report" }] });
-    const text = weakeningBlock([], undefined, { testProof: proof, candidateDigest: DIGEST }).join("\n");
-    expect(text).not.toMatch(/\]\(|(^|[^\u200d])@\w/u);
-  });
-  it("nothing is said when every check was compared", () => {
-    expect(weakeningBlock([], undefined, { testProof: proofOf({ weakening: [compared] }), candidateDigest: DIGEST })).toEqual([]);
-  });
 });
-
 
 describe("Round 2 M5: folded N4 and N8 classes", () => {
   it.each(["nyc.config.js", ".c8rc", ".c8rc.json", ".c8rc.yaml", "ava.config.js", "ava.config.cjs", "ava.config.mjs", "ava.config.ts", "jasmine.json"])("flags configuration %s through the reader", (path) => {

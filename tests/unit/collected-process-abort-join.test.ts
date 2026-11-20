@@ -7,10 +7,9 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { runCollected, type ProcessControl } from "../../packages/worker/src/collected-process.js";
+import { processAlive, processGroupAlive } from "../support/process-liveness.js";
 
-const alive = (pid: number): boolean => {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-};
+const alive = processAlive;
 const scratch: string[] = [];
 const spawned: number[] = [];
 afterEach(async () => {
@@ -151,7 +150,7 @@ describe("runCollected joins an abort", () => {
     const startedAt = Date.now();
     const control: ProcessControl = {
       signalGroup: (child, signal) => { signals.push({ signal, at: Date.now() - startedAt }); try { process.kill(-child.pid!, signal); } catch { child.kill(signal); } },
-      groupAlive: (pgid) => { try { process.kill(-pgid, 0); return true; } catch { return false; } },
+      groupAlive: processGroupAlive,
     };
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 100);

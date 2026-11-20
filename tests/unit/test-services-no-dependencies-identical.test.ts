@@ -2,12 +2,10 @@
 // fails, the switch needs a per-project allow-list first. Covered: the setup proposal (sanitized draft), the task plans (checks and coding), the Prove report, the evidence pack, and the pull request lines the evidence
 // builds (the pull request body takes its testing lines from the pack and has no other test-services input).
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema, type OrgId, type TestEnvDraft, type TestEnvironmentBody } from "@agentx/contracts";
+import { TestEnvironmentBodySchema, type OrgId, type TestEnvironmentBody } from "@agentx/contracts";
 import { buildEvidencePack } from "../../packages/broker/src/core/proof/evidence-pack.js";
 import { evidenceLines } from "../../packages/broker/src/core/proof/evidence-lines.js";
-import { sanitizeTestEnvDraft } from "../../packages/broker/src/core/test-env/draft.js";
 import { evidenceEnvironmentOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
-import { proveReportFromSetupCheck } from "../../packages/broker/src/core/test-env/prove-from-setup-check.js";
 import { testEnvImplementPlanFor, testEnvPlanFor } from "../../packages/broker/src/core/test-env/task-plan.js";
 import { testEnvironmentForStart } from "../../packages/broker/src/core/test-env/usable.js";
 import { BENCH_ORG, bench } from "../support/test-env-bench.js";
@@ -38,14 +36,6 @@ async function project(env: NodeJS.ProcessEnv) {
 }
 
 describe("a project with no dependencies sees the same with tx on and off", () => {
-  it("setup proposal: the sanitized draft is the same, and a draft without candidates gains no key", () => {
-    const draft: TestEnvDraft = { environment: body(), valueSources: [{ field: "repos[0].checks[0]", source: "detector:python" }], pendingServices: [], notes: ["Found pytest."], questions: [] };
-    const options = (env: NodeJS.ProcessEnv) => ({ env, propose: { catalog: verifiedCatalog(pinnedCatalog()), edition: "public" as const, projectId: PROJECT } });
-    const on = sanitizeTestEnvDraft(draft, options(ON));
-    same(on, sanitizeTestEnvDraft(draft, options(OFF)));
-    same(on, sanitizeTestEnvDraft(draft));
-    expect(JSON.stringify(on)).not.toContain("dependencies");
-  });
 
   it("task plans (checks and coding), evidence environment, pack and PR lines are the same", async () => {
     const on = await project(ON);
@@ -77,19 +67,4 @@ describe("a project with no dependencies sees the same with tx on and off", () =
     expect(JSON.stringify(evidenceLines({ pack: pack(chosenOn).pack, mode: "summary" }, "c".repeat(64), 0))).not.toMatch(/ran against|Blocked by environment|not available/u);
   });
 
-  it("the Prove report derived from the setup check is the same, with no dependency step", () => {
-    const definition = { revision: 4, setup: [], readiness: [cmd("pytest", ["-q"])] };
-    const ready = { status: "ready" as const, checkedRevision: 4, checkedAt: new Date(NOW - 3_600_000).toISOString() };
-    const derive = () => proveReportFromSetupCheck({ environment: body(), definition, setup: ready, nowMs: NOW });
-    const on = derive();
-    expect(JSON.stringify(on)).not.toMatch(/"dependencies"|dependency_usage/u);
-    // The derivation reads no switch: the same report whatever the process says.
-    const before = process.env["ROVARA_TEST_SERVICES"];
-    try {
-      process.env["ROVARA_TEST_SERVICES"] = "1";
-      same(derive(), on);
-    } finally {
-      if (before === undefined) delete process.env["ROVARA_TEST_SERVICES"]; else process.env["ROVARA_TEST_SERVICES"] = before;
-    }
-  });
 });

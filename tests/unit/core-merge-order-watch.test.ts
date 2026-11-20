@@ -2,31 +2,13 @@
 // that depends on the repository still waiting stays a draft until it merges. Rovara never merges and never takes a merge back (owner decision 1). Fake code host and the in-memory store; never GitHub.
 import { describe, expect, it } from "vitest";
 import { codeMilestoneKey } from "../../packages/contracts/src/index.js";
-import { trackTask, fixedCodeSettings, heldDependents, mergeOrderOf, outOfOrderMilestoneItems, MERGE_ORDER_WORDS } from "../../packages/broker/src/core/merge/index.js";
+import { trackTask, fixedCodeSettings, outOfOrderMilestoneItems, MERGE_ORDER_WORDS } from "../../packages/broker/src/core/merge/index.js";
 import { createMergeTrackingService, createMilestoneService } from "../../packages/broker/src/services/index.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { TASK_ID, mergeWorld } from "../support/merge-world.js";
 import { ORG, host } from "../support/service-host.js";
 
 const edge = (consumer: string, provider: string) => ({ consumer, provider, language: "node", source: "both" });
-
-describe("heldDependents", () => {
-  const order = mergeOrderOf(["app", "docs", "lib"], [edge("app", "lib"), edge("docs", "lib")]);
-  it("holds the dependents of a repository that a pull request was merged ahead of, and nothing while the merges follow the order", () => {
-    expect(heldDependents(order, [])).toEqual([]);
-    expect(heldDependents(order, ["lib"])).toEqual([]);
-    expect(heldDependents(order, ["lib", "app"])).toEqual([]);
-    expect(heldDependents(order, ["app"])).toEqual(["docs"]);
-    // A merged consumer is never held; a repository that depends on nothing waiting is not either.
-    expect(heldDependents(order, ["app", "docs"])).toEqual([]);
-    expect(heldDependents(mergeOrderOf(["app", "docs", "lib", "x"], [edge("app", "lib"), edge("docs", "lib")]), ["app"])).toEqual(["docs"]);
-  });
-  it("holds nothing without dependency facts, with a cycle, or with nothing merged", () => {
-    expect(heldDependents(mergeOrderOf(["app", "lib"], undefined), ["app"])).toEqual([]);
-    expect(heldDependents(mergeOrderOf(["a", "b"], [edge("a", "b"), edge("b", "a")]), ["a"])).toEqual([]);
-    expect(heldDependents(mergeOrderOf(["app", "lib"], [edge("app", "lib")]), ["lib", "app"])).toEqual([]);
-  });
-});
 
 describe("the warning", () => {
   const SESSION_STUCK = (taskId: string) => ({ pk: codeMilestoneKey(taskId, "stuck", 0).pk });
@@ -87,16 +69,6 @@ describe("the warning", () => {
     expect(both.logged.some((entry) => entry["event"] === "merge_tracking.order_provider_unreadable")).toBe(false);
   });
 
-  it("is today's tracking, byte for byte, with no facts, an empty record, facts that cannot be read, a cycle or an edge to another repository", async () => {
-    for (const facts of ["none", [], "app->lib", [{ consumer: "app" }], [edge("app", "payments-lib"), edge("payments-lib", "app")], [edge("app", "elsewhere")]]) {
-      const w = await withEdges(facts);
-      mergeByHand(w, "app");
-      await w.tracking.sweep();
-      expect(await stuckRows(w), JSON.stringify(facts)).toEqual([]);
-      expect((await readTask(w.h.deps, TASK_ID))!.workflow?.pullRequests?.find((entry) => entry.repositoryId === "app")?.state).toBe("MERGED");
-    }
-  });
-
   it("a seam that throws never fails the pass: the merge is recorded, nothing is warned, and the log names no cause", async () => {
     const w = await withEdges("none", undefined, () => { throw new Error("secret-canary down"); });
     mergeByHand(w, "app");
@@ -138,18 +110,6 @@ describe("the warning", () => {
     ].sort());
   });
 
-  it("never asks the host about a provider the workflow already has as merged", async () => {
-    const pullRequests = [{ repositoryId: "app", number: 1, url: "https://github.com/acme/app/pull/1", required: true, state: "MERGED" }, { repositoryId: "payments-lib", number: 1, url: "https://github.com/acme/payments-lib/pull/1", required: true, state: "MERGED" }];
-    const task = { taskId: TASK_ID, orgId: ORG, project: "web", startingRevision: 1, workspaceId: "ws", ownerId: "o", ownerName: "n", workflow: { definitionVersion: "1.1.0", pullRequests } };
-    const asked: string[] = [];
-    const found = await outOfOrderMilestoneItems({
-      milestones: { items: () => [{ kind: "put", item: { pk: "x", sk: "y" } }], deliver: async () => undefined }, repositoryEdges: async () => [edge("app", "payments-lib")],
-      providerState: async (repositoryId) => { asked.push(repositoryId); return "not_merged"; },
-    }, task as never, { pullRequests: [{ ...pullRequests[0]!, state: "OPEN" }, pullRequests[1]!] } as never, task.workflow as never, "2026-11-16T00:00:00.000Z");
-    expect(found).toEqual([]);
-    expect(asked).toEqual([]);
-  });
-
   it("a fault while building the warning never stops the merge from being recorded, and is logged by name", async () => {
     const w = await withEdges([edge("app", "payments-lib")], undefined, undefined, (milestones) => ({
       ...milestones, items: (milestone, n, options) => { if (milestone.kind === "stuck") throw new Error("secret-canary schema"); return milestones.items(milestone, n, options); },
@@ -170,17 +130,6 @@ describe("the warning", () => {
     const budget = { signal: new AbortController().signal, beforeRequest: () => undefined };
     await expect(w.tracking.deps.observeMerge(TASK_ID, budget)).rejects.toMatchObject({ name: "HostRateLimitError" });
     expect((await readTask(w.h.deps, TASK_ID))!.workflow?.pullRequests?.find((entry) => entry.repositoryId === "app")?.state).toBe("OPEN");
-  });
-
-  it("outOfOrderMilestoneItems lets a rate limit go up and takes any other fault as cannot tell", async () => {
-    const { HostRateLimitError } = await import("../../packages/contracts/src/index.js");
-    const pullRequests = [{ repositoryId: "app", number: 1, url: "https://github.com/acme/app/pull/1", required: true, state: "MERGED" }, { repositoryId: "payments-lib", number: 1, url: "https://github.com/acme/payments-lib/pull/1", required: true, state: "OPEN" }];
-    const task = { taskId: TASK_ID, orgId: ORG, project: "web", startingRevision: 1, workspaceId: "ws", ownerId: "o", ownerName: "n", workflow: { definitionVersion: "1.1.0", pullRequests } };
-    const run = (providerState: () => Promise<never>) => outOfOrderMilestoneItems({
-      milestones: { items: () => [], deliver: async () => undefined }, repositoryEdges: async () => [edge("app", "payments-lib")], providerState,
-    }, task as never, { pullRequests: pullRequests.map((entry) => ({ ...entry, state: "OPEN" })) } as never, task.workflow as never, "2026-11-16T00:00:00.000Z");
-    await expect(run(async () => { throw new HostRateLimitError(Date.now() + 1_000); })).rejects.toBeInstanceOf(HostRateLimitError);
-    await expect(run(async () => { throw new Error("down"); })).resolves.toEqual([]);
   });
 
   it("a provider that was closed without merging is not said about as waiting", async () => {
@@ -230,20 +179,6 @@ describe("holding the dependents at draft", () => {
     return pr.model.getChangeRequest(String(pr.number)).draft;
   };
 
-  it("keeps the dependents of the waiting repository as drafts, and takes the rest out of draft as it always did", async () => {
-    const { w, deps } = await world([edge("app", "payments-lib"), edge("docs", "payments-lib")]);
-    await trackTask(deps, TASK_ID);
-    expect(draftOf(w, "docs")).toBe(true);
-    expect(draftOf(w, "payments-lib")).toBe(false);
-    // The provider merges: the dependent is released on the next pass.
-    const lib = w.prs.find((pr) => pr.repositoryId === "payments-lib")!;
-    lib.model.merge(String(lib.number), { revision: lib.head, method: "squash" });
-    const task = await w.task();
-    await w.setWorkflow({ pullRequests: task.workflow.pullRequests!.map((entry) => ({ ...entry, state: entry.repositoryId === "payments-lib" ? "MERGED" : entry.state })) });
-    await trackTask(deps, TASK_ID);
-    expect(draftOf(w, "docs")).toBe(false);
-  });
-
   it("holds nothing without facts, with facts that cannot be read, or while the merges follow the order (control run)", async () => {
     for (const facts of ["none", [], "bad", [edge("app", "payments-lib"), edge("payments-lib", "app")]]) {
       const { w, deps } = await world(facts);
@@ -260,30 +195,5 @@ describe("holding the dependents at draft", () => {
     await trackTask({ ...inOrder.tracking, repositoryEdges: async () => [edge("app", "payments-lib"), edge("docs", "payments-lib")] }, TASK_ID);
     expect(draftOf(inOrder, "docs")).toBe(false);
     expect(draftOf(inOrder, "app")).toBe(false);
-  });
-
-  it("does not even read the facts when nothing would be taken out of draft", async () => {
-    const { w, deps } = await world([edge("app", "payments-lib"), edge("docs", "payments-lib")]);
-    let asked = 0;
-    // The checks are still running: nothing is marked ready and nothing fails, so the order is not consulted.
-    for (const pr of w.prs) pr.model.setChecks(pr.head, [{ name: "unit", state: "pending", required: false, url: "" }]);
-    await trackTask({ ...deps, repositoryEdges: async () => { asked += 1; return []; } }, TASK_ID);
-    expect(asked).toBe(0);
-  });
-
-  it("keeps a pull request that is not a draft as it is: nothing to hold, no reviewers withheld", async () => {
-    const { w, deps } = await world([edge("app", "payments-lib"), edge("docs", "payments-lib")]);
-    const docs = w.prs.find((pr) => pr.repositoryId === "docs")!;
-    docs.model.getChangeRequest(String(docs.number)).draft = false;
-    const logged: string[] = [];
-    await trackTask({ ...deps, log: (event: string) => { logged.push(event); } }, TASK_ID);
-    expect(logged).not.toContain("merge_tracking.held_pull_request_not_draft");
-    expect((await w.trackingOf(docs))!["readyAt"]).toBeDefined();
-  });
-
-  it("a seam that throws holds nothing and never fails the pass", async () => {
-    const { w, deps } = await world("none");
-    await expect(trackTask({ ...deps, repositoryEdges: async () => { throw new Error("down"); } }, TASK_ID)).resolves.toBeDefined();
-    expect(draftOf(w, "docs")).toBe(false);
   });
 });

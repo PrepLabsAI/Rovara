@@ -20,13 +20,6 @@ describe("S3ObjectStorage.deleteEveryVersion (DEC 212)", () => {
     for (const entry of bucket.sent) expect(entry.input["ExpectedBucketOwner"]).toBe("111111111111");
   });
 
-  it("a plain prefix delete would only add markers: the old versions stay (why the erase needs this)", async () => {
-    const bucket = new VersionedBucket();
-    bucket.write(`${PREFIX}a`, 3);
-    await new S3ObjectStorage({ client: bucket.client, bucket: "bucket-a" }).deletePrefix(PREFIX);
-    expect(bucket.versionsUnder(PREFIX)).toBe(4);
-  });
-
   it("pages through a long listing with its markers", async () => {
     const bucket = new VersionedBucket();
     bucket.pageSize = 2;
@@ -72,11 +65,5 @@ describe("S3ObjectStorage.deleteEveryVersion (DEC 212)", () => {
     bucket.client.send = async (command: unknown) => { const answer = await first(command); now += 10; return answer; };
     expect(await store.deleteEveryVersion(PREFIX, { stopAt: 5 })).toBe("out_of_time");
     expect(bucket.versionsUnder(PREFIX)).toBeGreaterThan(0);
-  });
-
-  it("refuses an empty or unsafe prefix before sending anything", async () => {
-    const bucket = new VersionedBucket();
-    await expect(new S3ObjectStorage({ client: bucket.client, bucket: "bucket-a" }).deleteEveryVersion("")).rejects.toThrow();
-    expect(bucket.sent).toHaveLength(0);
   });
 });

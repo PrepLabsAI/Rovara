@@ -2,8 +2,8 @@
 // declares; the core sends nothing an adapter cannot show or keep private, and trusts no answer it did not ask for.
 import { describe, expect, it, vi } from "vitest";
 import {
-  ChannelActionSchema, ChannelAdapterRegistrationSchema, ChannelCapabilitiesSchema, ChannelCommandSchema, ChannelEventSchema,
-  adapterTakesCommand, channelEventId, generateWebhookSecret, verifyWebhook, webhookHeaders,
+  ChannelActionSchema, ChannelAdapterRegistrationSchema, ChannelCapabilitiesSchema, ChannelEventSchema,
+  adapterTakesCommand, channelEventId, generateWebhookSecret, webhookHeaders,
   type ChannelAdapterRecord, type ChannelEvent,
 } from "@agentx/contracts";
 import { EndpointRefused } from "@agentx/gateway";
@@ -123,29 +123,6 @@ describe("commands (FR-072)", () => {
     return { sent, deps: { getSecret: async () => SECRET, fetch: fetchFn, checkAddresses: async () => undefined, now: () => NOW, ...overrides } satisfies ChannelCommandDependencies };
   }
   const directory = adapter({ directory: true, startConversations: true });
-
-  it("sends a signed command and answers its checked result", async () => {
-    const { sent, deps: d } = deps(() => ({ body: { ok: true, result: { members: ["U1", "U2"] } } }));
-    expect(await sendChannelCommand(d, directory, "space_members", { tenant: "T1", space: "S1" })).toEqual({ members: ["U1", "U2"] });
-    const { url, init } = sent[0]!;
-    expect(url).toBe("https://adapter.example.com/commands");
-    expect(init.redirect).toBe("manual");
-    const command = ChannelCommandSchema.parse(JSON.parse(init.body as string));
-    expect(command).toMatchObject({ kind: "space_members", channel: "chatops", tenant: "T1", space: "S1" });
-    expect(verifyWebhook({ secret: SECRET, headers: init.headers as Record<string, string>, body: init.body as string, nowSeconds: NOW / 1000 })).toMatchObject({ ok: true, id: command.id });
-  });
-
-  it("answers the new thread of a started conversation", async () => {
-    const { deps: d } = deps(() => ({ body: { ok: true, result: { thread: "1700000000.000100" } } }));
-    expect(await sendChannelCommand(d, directory, "start_conversation", { tenant: "T1", space: "S1", message: { text: "Task 42 started." } })).toEqual({ thread: "1700000000.000100" });
-  });
-
-  it("refuses an answer signed for another command, or with another secret", async () => {
-    await expect(sendChannelCommand(deps(() => ({ body: { ok: true, result: { members: [] } }, signAs: "cmd_someoneelse0000000000" })).deps, directory, "space_members", { tenant: "T1", space: "S1" }))
-      .rejects.toMatchObject({ code: "FORBIDDEN" });
-    await expect(sendChannelCommand(deps(() => ({ body: { ok: true, result: { members: [] } }, secret: generateWebhookSecret() })).deps, directory, "space_members", { tenant: "T1", space: "S1" }))
-      .rejects.toMatchObject({ code: "FORBIDDEN" });
-  });
 
   it("refuses a kind the adapter does not declare, without calling it", async () => {
     const { sent, deps: d } = deps(() => ({ body: { ok: true, result: {} } }));

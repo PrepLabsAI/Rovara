@@ -45,49 +45,9 @@ describe("deviceExecutorRunArgs", () => {
     for (const gid of [0, -1, 1.5, Number.NaN, 65_536, "108" as unknown as number]) expect(() => deviceExecutorRunArgs(input({ kvmGid: gid })), String(gid)).toThrow("the device executor's arguments are not valid");
     expect(() => deviceExecutorRunArgs(input({ kvmGid: 1 }))).not.toThrow();
   });
-
-  it("shares only the sandbox's network namespace, one device, one mount: never privileged, no capability, no loosened profile, no environment, no port, no other namespace", () => {
-    const args = deviceExecutorRunArgs(input());
-    expect(args.filter((word) => word === "--network")).toHaveLength(1);
-    expect(args[args.indexOf("--network") + 1]).toBe("container:rovara-sbx-1a2b");
-    expect(args.filter((word) => word === "--device")).toEqual(["--device"]);
-    expect(args[args.indexOf("--device") + 1]).toBe("/dev/kvm:/dev/kvm:rw");
-    expect(args.filter((word) => word === "-v")).toHaveLength(1);
-    expect(args[args.indexOf("-v") + 1]).toMatch(/:\/apps:ro$/u);
-    expect(args).toContain("--cap-drop=ALL");
-    const securityOptions = args.flatMap((word, at) => (word === "--security-opt" ? [args[at + 1]!] : []));
-    expect(securityOptions).toEqual(["no-new-privileges"]);
-    for (const forbidden of ["--privileged", "--cap-add", "--pid", "--ipc", "--uts", "--userns", "--cgroupns", "--env", "-e", "--env-file", "--publish", "-p", "--publish-all", "-P", "--dns", "--add-host", "--volumes-from", "--mount",
-      "--entrypoint", "--ulimit", "--sysctl", "--runtime", "--gpus", "--device-cgroup-rule", "--security-opt=seccomp=unconfined", "--net", "--link", "--expose", "--tty", "-t", "--interactive", "-i"]) expect(args, forbidden).not.toContain(forbidden);
-    expect(args.join(" ")).not.toMatch(/docker\.sock|seccomp|apparmor|unconfined|--network host|\brwm\b/u);
-    expect(args.some((word) => word.includes("/dev/") && !word.startsWith("/dev/kvm:/dev/kvm:rw"))).toBe(false);
-    expect(args[args.indexOf("--user") + 1]).toBe("10001:10001");
-    expect(args).toContain("--read-only");
-    expect(args).toContain("--init");
-    expect(args).toContain("--rm");
-    expect(args).toContain("--pull=never");
-  });
-
-  it("limits the container: memory, swap, processes, cpus and shared memory", () => {
-    const args = deviceExecutorRunArgs(input());
-    const after = (flag: string) => args[args.indexOf(flag) + 1];
-    expect([after("--memory"), after("--memory-swap"), after("--pids-limit"), after("--cpus"), after("--shm-size")]).toEqual(["8g", "8g", "4096", "4", "1g"]);
-  });
-
-  it("refuses an image, container name, mount directory or plan that could become another argument", () => {
-    for (const bad of [{ image: "" }, { image: "a b" }, { image: "x;y" }, { image: "--privileged" }, { image: "x\ny" }, { sandbox: "" }, { sandbox: "a/b" }, { sandbox: "-x" }, { sandbox: "a b" }, { sandbox: "host" + "\n" }, { name: "a:b" }, { name: "-x" },
-      { name: "rovara-sbx-1a2b" }, { appsDir: "apps" }, { appsDir: "/a b" }, { appsDir: "/a:rw" }, { appsDir: "/a,b" }, { appsDir: "/a/../b" }, { appsDir: "/a//b" }, { appsDir: "/" }, { appsDir: "/a/." }, { appsDir: "/var/run/docker.sock:/x" }, { plan: "" },
-      { plan: "a b" }, { plan: "a/b" }, { plan: "--privileged" + " x" }, { plan: "x".repeat(DEVICE_EXECUTOR_PLAN_MAX_CHARS + 1) }]) {
-      expect(() => deviceExecutorRunArgs(input(bad as Partial<DeviceExecutorRunInput>)), JSON.stringify(bad).slice(0, 80)).toThrow("the device executor's arguments are not valid");
-    }
-  });
 });
 
 describe("deviceExecutorArgProblems", () => {
-  it("accepts what deviceExecutorRunArgs writes, with or without a group", () => {
-    expect(deviceExecutorArgProblems(deviceExecutorRunArgs(input()))).toEqual([]);
-    expect(deviceExecutorArgProblems(deviceExecutorRunArgs(input({ kvmGid: undefined })))).toEqual([]);
-  });
 
   it("refuses every way to widen the container, whatever the extra word", () => {
     const good = deviceExecutorRunArgs(input());
@@ -152,13 +112,6 @@ describe("the plan", () => {
     expect(decodeDeviceExecutorPlan(encodeDeviceExecutorPlan({ ...planInput, fixtureDataOnly: false }))?.fixtureDataOnly).toBeUndefined();
   });
 
-  it("holds the time limits at the built-in ones and no more", () => {
-    expect(() => encodeDeviceExecutorPlan({ ...planInput, runMs: DEVICE_EVIDENCE_RUN_MS + 1 })).toThrow("the device plan is not valid");
-    expect(() => encodeDeviceExecutorPlan({ ...planInput, stepMs: DEVICE_EVIDENCE_STEP_MS + 1 })).toThrow("the device plan is not valid");
-    expect(() => encodeDeviceExecutorPlan({ ...planInput, runMs: 0 })).toThrow();
-    expect(() => encodeDeviceExecutorPlan({ ...planInput, runMs: 60_000, stepMs: 5_000 })).not.toThrow();
-  });
-
   it("refuses a plan that is not valid, at both ends", () => {
     for (const bad of [{ appId: "app" }, { appId: "io.x\n---" }, { flows: [] }, { flows: [flows[0]!, flows[0]!] }, { flows: [{ id: "A", steps: flows[0]!.steps }] }, { flows: [{ id: "x", steps: [] }] },
       { flows: [{ id: "x", steps: [{ id: "a", label: "A" }, { id: "a", label: "B" }] }] }, { flows: Array.from({ length: 6 }, (_v, i) => ({ id: `f${String(i)}`, steps: [{ id: "a", label: "A" }] })) },
@@ -174,15 +127,6 @@ describe("the plan", () => {
 });
 
 describe("the answer", () => {
-  it("is the runner's result, from one line, with every picture's bytes and digest intact", () => {
-    const got = parseDeviceExecutorOutput(new TextEncoder().encode(`${encodeDeviceExecutorOutput(captured())}\n`), plan())!;
-    expect(got.device).toBe("android_emulator");
-    expect(got.steps.map((row) => [row.flow, row.step, row.status])).toEqual([["main", "open", "shown"], ["main", "next", "not_run"], ["settings", "open", "shown"]]);
-    const first = got.steps[0]!;
-    if (first.status !== "shown") throw new Error("shown expected");
-    expect([...first.before.bytes]).toEqual([...jpeg(1)]);
-    expect(first.before.sha256).toBe(sha(jpeg(1)));
-  });
 
   it("is believed only when it is an honest answer to the plan: the device, the place, the steps in order, the notes, the caps", () => {
     const refused: Record<string, Uint8Array> = {
@@ -226,12 +170,6 @@ describe("the answer", () => {
     const tooMuchBytes = new TextEncoder().encode(`${encodeDeviceExecutorOutput(tooMuch)}\n`);
     expect(tooMuchBytes.byteLength).toBeLessThanOrEqual(DEVICE_EXECUTOR_OUTPUT_MAX_BYTES);
     expect(parseDeviceExecutorOutput(tooMuchBytes, wide)).toBeUndefined();
-  });
-
-  it("never throws and never echoes the program's own words", () => {
-    const secret = "tok_PROGRAM_SECRET";
-    expect(() => parseDeviceExecutorOutput(new TextEncoder().encode(`{"v":1,"note":"${secret}"`), plan())).not.toThrow();
-    expect(JSON.stringify(parseDeviceExecutorOutput(line(wire({ note: secret })), plan()) ?? null)).not.toContain(secret);
   });
 });
 

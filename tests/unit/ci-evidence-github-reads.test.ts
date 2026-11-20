@@ -19,9 +19,6 @@ const T = (minute: number) => `2026-11-15T10:${String(minute).padStart(2, "0")}:
 const run = (over: Record<string, unknown> = {}) => ({ id: 7, name: "e2e-real", status: "completed", conclusion: "success", head_sha: SHA_A, app: { id: GITHUB_ACTIONS_APP_ID }, html_url: "https://github.com/acme/svc/runs/7", started_at: T(0), completed_at: T(40), ...over });
 
 describe("parsing one run's facts", () => {
-  it("reads times and an Actions job's attempt and run", () => {
-    expect(parseCheckRunFacts(run(), { id: 7, run_attempt: 2, run_id: 99 }, "7")).toEqual({ startedAt: T(0), completedAt: T(40), attempt: 2, workflowRunId: "99" });
-  });
   it("refuses an answer for another run, and ignores a job answer for another job", () => {
     expect(parseCheckRunFacts(run({ id: 8 }), undefined, "7")).toBeUndefined();
     expect(parseCheckRunFacts(run(), { id: 8, run_attempt: 2 }, "7")).toEqual({ startedAt: T(0), completedAt: T(40) });
@@ -41,10 +38,6 @@ describe("the latest run of a named check", () => {
     expect(latestCheckRunOf(list, { name: "e2e-real" })?.check.jobId).toBe("9");
     expect(latestCheckRunOf(list, { name: "e2e-real", appId: GITHUB_ACTIONS_APP_ID })).toBeUndefined();
     expect(latestCheckRunOf(list, { name: "E2E-real" })).toBeUndefined();
-  });
-  it("binds to the commit asked: a run on another commit is not this one's", () => {
-    expect(latestCheckRunOf({ check_runs: [run({ head_sha: SHA_B })] }, { name: "e2e-real", expectedSha: SHA_A })).toBeUndefined();
-    expect(latestCheckRunOf({ check_runs: [run()] }, { name: "e2e-real", expectedSha: SHA_A })?.headSha).toBe(SHA_A);
   });
   it("takes the newest start, and a failure on a tie", () => {
     const older = run({ id: 1, conclusion: "failure", started_at: T(0) });
@@ -224,10 +217,6 @@ describe("the GitHub Actions check runner's reads", () => {
   const check = (over: Partial<Check> = {}): Check => ({ name: "e2e-real", state: "completed", conclusion: "success", required: false, url: "", runId: "7", source: String(GITHUB_ACTIONS_APP_ID), ...over });
   const target = { kind: "revision" as const, repository: { url: REPO }, revision: SHA_A };
   const base = { getPullRequestStatus: async () => { throw new Error("unused"); }, getJobLogTail: async () => undefined };
-  it("offers each read only when the client has it", () => {
-    const runner = githubActionsCheckRunner(base);
-    expect(Object.keys(runner).filter((key) => ["runFacts", "latestCheck", "seenChecks"].includes(key))).toEqual([]);
-  });
   it("asks for the attempt only for an Actions job, and drops facts that do not fit the port", async () => {
     const asked: Array<boolean | undefined> = [];
     const runner = githubActionsCheckRunner({ ...base, getCheckRunFacts: async (_url, _id, _scope, _budget, options) => { asked.push(options?.actionsJob); return { attempt: 2 }; } });

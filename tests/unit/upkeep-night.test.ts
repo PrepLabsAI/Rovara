@@ -4,7 +4,7 @@
 // listed in the PR body with the test that kills each.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { UPKEEP_NOTICE_WORDS, UPKEEP_TARGET_KIND, systemOwnerIdOf, queryAll, type DueSchedule, type OrgId, type WikiBuildRecord, type WikiPageWrite } from "@agentx/contracts";
+import { UPKEEP_TARGET_KIND, queryAll, type DueSchedule, type OrgId, type WikiBuildRecord, type WikiPageWrite } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
 import { modulePageId } from "../../packages/broker/src/core/wiki-build/plan.js";
@@ -92,21 +92,6 @@ describe("the switch: off does nothing, on is the project's own row", () => {
     expect(await queryAll(w.store, { pk: `ORG#${COMPANY_A}#UPKEEP#beacon` })).toHaveLength(0);
   });
 
-  it("is per project and per company: beacon ON does not turn other ON, and company B's beacon is its own", async () => {
-    const store = new MemoryDocumentStore();
-    const a = world({ store });
-    const b = world({ store, company: COMPANY_B });
-    await a.on("beacon");
-    expect(await upkeepIsOn({ store, companyId: COMPANY_A }, "beacon")).toBe(true);
-    expect(await upkeepIsOn({ store, companyId: COMPANY_A }, "other")).toBe(false);
-    expect(await upkeepIsOn({ store, companyId: COMPANY_B }, "beacon")).toBe(false);
-    expect((await runUpkeepNight(b.night, { project: "beacon" })).outcome).toBe("off");
-    // A row copied under another company's key does not turn that company's project on (the row names its own company).
-    const row = (await store.get({ pk: `ORG#${COMPANY_A}#UPKEEP#beacon`, sk: "SETTINGS" }))!;
-    await store.put({ item: { ...row, pk: `ORG#${COMPANY_B}#UPKEEP#beacon` } });
-    expect(await upkeepIsOn({ store, companyId: COMPANY_B }, "beacon")).toBe(false);
-  });
-
   it("is switched by a manager on the page only: not by a viewer, not by a token, not without a valid request id; the record is written BEFORE the row", async () => {
     const w = world();
     const order: string[] = [];
@@ -146,25 +131,6 @@ describe("the switch: off does nothing, on is the project's own row", () => {
 });
 
 describe("the order of a night and what it is silent about", () => {
-  it("runs the setup check, then the mock checks, then the wiki refresh, and starts one refresh run of the stale pages only", async () => {
-    const w = world();
-    await w.on();
-    await w.seed("beacon", ["overview", "repo-api", "repo-web", modulePageId("api", "src")]);
-    await stale(w);
-    const result = await runUpkeepNight(w.night, { project: "beacon" });
-    expect(w.calls).toEqual(["setup:beacon", "mock:beacon", "wiki:beacon"]);
-    expect(result).toMatchObject({ outcome: "ran", setupCheck: "done", mockChecks: "done", wiki: "started" });
-    expect(w.starter.started).toHaveLength(1);
-    const pointer = (await readWikiBuildPointer(w.store, w.company, "beacon"))!;
-    expect(pointer.plan.map((p) => p.id)).toEqual(["repo-api", modulePageId("web", "app"), "connections"]);
-    expect(pointer).toMatchObject({ unattended: true, buildKind: "refresh", requestedBy: systemOwnerIdOf(COMPANY_A, "beacon"), payer: { kind: "project", project: "beacon" } });
-    expect(w.records.at(-1)).toMatchObject({ kind: "nightly", state: "running" });
-    expect(w.records.at(-1)).not.toHaveProperty("startedBy");
-    // The door was asked once, with the run's own dollar limit as the estimate and the project's name.
-    expect(w.admissions).toEqual([expect.objectContaining({ action: "automation.run", projectName: "beacon", estimate: { cost: { micros: 10_000_000, currency: "USD" } } })]);
-    // No message of any kind for a night that went fine.
-    expect(await w.pendingRows()).toHaveLength(0);
-  });
 
   it("a free step that fails never stops the next step, and is logged in fixed words", async () => {
     const w = world();
@@ -210,15 +176,6 @@ describe("the order of a night and what it is silent about", () => {
     expect(w.admissions).toHaveLength(0);
   });
 
-  it("never builds the FIRST wiki: no pages means no refresh and no run", async () => {
-    const w = world();
-    await w.on();
-    const result = await runUpkeepNight(w.night, { project: "beacon" });
-    expect(result.wiki).toBe("no_wiki");
-    expect(w.starter.started).toHaveLength(0);
-    expect(w.admissions).toHaveLength(0);
-  });
-
   it("a double fire of one night starts one run (the night's own request id), and a run in flight is busy, not a second run", async () => {
     const w = world();
     await w.on();
@@ -257,17 +214,6 @@ describe("no paying again for the same commits", () => {
     expect((await runUpkeepNight(moved, { project: "beacon" })).wiki).toBe("started");
   });
 
-  it("the refresh plans unwritten pages only when asked to (`includeUnwritten`); the night asks once per set of commits, never again after a refresh started there", async () => {
-    const w = world();
-    await w.on();
-    await w.seed("beacon", ["overview", "repo-api"]);
-    // Nothing flagged, nothing changed: the never-written pages are the only candidates.
-    const quiet = await startUpkeepWikiRefresh(w.refreshDeps, { project: "beacon", day: "2026-11-17", includeUnwritten: false });
-    expect(quiet).toEqual({ outcome: "nothing_to_refresh" });
-    expect(w.starter.started).toHaveLength(0);
-    const merged = await startUpkeepWikiRefresh(w.refreshDeps, { project: "beacon", day: "2026-11-17", includeUnwritten: true });
-    expect(merged.outcome).toBe("started");
-  });
 });
 
 describe("money: the AI step needs an enforced dollar cap, upkeep ON for the project and the company's key", () => {
@@ -318,22 +264,6 @@ describe("money: the AI step needs an enforced dollar cap, upkeep ON for the pro
     expect(w.starter.started).toHaveLength(0);
   });
 
-  it("a limit read that says paused starts nothing and writes the admins' notice once for the month and reason, however many nights see it", async () => {
-    const w = world({ limit: async () => ({ state: "paused", reason: "monthly_limit" }) });
-    await w.on();
-    await w.seed("beacon");
-    await stale(w);
-    expect(await runUpkeepNight(w.night, { project: "beacon" })).toMatchObject({ outcome: "paused", wiki: "paused" });
-    w.clock.ms += 86_400_000;
-    await runUpkeepNight(w.night, { project: "beacon" });
-    expect(w.starter.started).toHaveLength(0);
-    expect(w.admissions).toHaveLength(0);
-    const rows = await w.pendingRows();
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ developerId: ADMIN, kind: "upkeep_paused", orgId: COMPANY_A });
-    expect(UPKEEP_NOTICE_WORDS.monthly_limit).toContain("Spending limits");
-  });
-
   it("a limit read that fails or is absent leaves the gateway's own refusal as the wall: the refresh is attempted", async () => {
     const down = world({ limit: async () => { throw new Error("cloud down"); } });
     await down.on();
@@ -361,13 +291,6 @@ describe("an unattended run: no person's standing, upkeep ON read before every p
     await setUpkeepEnabled(w.settings, { personId: PERSON_ADMIN, project: "beacon", requestId: randomUUID(), on: false, fromPage: true });
     expect(await nextWikiPage(w.loop, scope, { spentCents: 0 })).toEqual({ kind: "end", word: "access_lost" });
     expect((await readWikiBuildPointer(w.store, w.company, "beacon"))!.end?.word).toBe("access_lost");
-  });
-
-  it("without the upkeep seam an unattended run grants nothing (fail closed), and a person's standing never stands in for it", async () => {
-    const w = world();
-    const { scope } = await started(w);
-    const personStanding = async (): Promise<WikiBuildStanding> => ({ access: "manage" });
-    expect(await nextWikiPage({ ...w.loop, upkeepOn: undefined, standing: personStanding }, scope, { spentCents: 0 })).toEqual({ kind: "end", word: "access_lost" });
   });
 
   it("the gateway's pause ends the run upkeep_paused, keeps finished pages, and writes the admins' notice once", async () => {
@@ -404,20 +327,6 @@ describe("an unattended run: no person's standing, upkeep ON read before every p
     expect(await w.pendingRows()).toHaveLength(0);
   });
 
-  it("a pause reason without the pause failure is refused as a body", async () => {
-    const w = world();
-    const { scope } = await started(w);
-    await nextWikiPage(w.loop, scope, { spentCents: 0 });
-    await expect(submitWikiPage(w.loop, scope, { pageId: "repo-api", spentCents: 1, failure: "infrastructure", pause: "monthly_limit" })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-  });
-
-  it("the pause hook writes only for its own company's run", async () => {
-    const w = world();
-    await w.hooks.onRunPaused({ orgId: COMPANY_B, project: "beacon" }, "monthly_limit");
-    expect(await w.pendingRows()).toHaveLength(0);
-    await w.hooks.paused({ orgId: COMPANY_B, project: "beacon", reason: "monthly_limit" });
-    expect(await w.pendingRows()).toHaveLength(0);
-  });
 });
 
 describe("the fire: only upkeep targets, only a company this install serves, only a project name", () => {

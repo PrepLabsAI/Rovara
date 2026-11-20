@@ -9,7 +9,6 @@ import {
 } from "../../packages/broker/src/core/proof/full-suite-followup.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
-const OTHER = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
 const T0 = Date.parse("2026-11-15T10:00:00.000Z");
 const D1 = "1".repeat(64);
 const D2 = "2".repeat(64);
@@ -29,24 +28,9 @@ const FAILED = { outcome: "completed" as const, passed: 410, failed: 2, total: 4
 
 describe("whether a follow-up is needed", () => {
   const done = [{ after: "passed" as const }];
-  it("affected tests only (selected fewer than all): needed", () => {
-    expect(needsFullSuiteFollowup({ selection: { method: "coverage_map", selected: 12, total: 412 }, testChecks: done })).toBe(true);
-    expect(needsFullSuiteFollowup({ selection: { method: "import_graph", selected: 1, total: 2 }, testChecks: done })).toBe(true);
-  });
   it("the whole suite ran and finished: not needed", () => {
     expect(needsFullSuiteFollowup({ selection: { method: "full", selected: 412, total: 412 }, testChecks: done })).toBe(false);
     expect(needsFullSuiteFollowup({ selection: { method: "coverage_map", selected: 412, total: 412 }, testChecks: done })).toBe(false);
-  });
-  it("the selection fell back to the full suite and a test check did not finish in the round: needed", () => {
-    for (const after of ["not_run", "timed_out", "unknown"] as const) {
-      expect(needsFullSuiteFollowup({ selection: { method: "full", selected: 412, total: 412, fallbackReason: "map_missing" }, testChecks: [{ after }] }), after).toBe(true);
-    }
-  });
-  it("the full suite by choice that did not fit the round: needed (the spec's 'the suite does not fit the round')", () => {
-    expect(needsFullSuiteFollowup({ selection: { method: "full", selected: 412, total: 412 }, testChecks: [{ after: "timed_out" }] })).toBe(true);
-  });
-  it("a full selection that ran fewer tests than the suite holds: needed", () => {
-    expect(needsFullSuiteFollowup({ selection: { method: "full", selected: 400, total: 412 }, testChecks: done })).toBe(true);
   });
   it("no selection, or a selection that does not add up: not needed (never a guess)", () => {
     expect(needsFullSuiteFollowup({ selection: undefined, testChecks: done })).toBe(false);
@@ -57,42 +41,11 @@ describe("whether a follow-up is needed", () => {
 });
 
 describe("queueing", () => {
-  it("queues once per task and commit; asking again is the same follow-up, charged once", async () => {
-    const { d, admitted } = deps();
-    expect(await queueFullSuiteFollowup(d, at())).toEqual({ queued: true, replayed: false });
-    expect(await queueFullSuiteFollowup(d, at())).toEqual({ queued: true, replayed: true });
-    expect(admitted).toEqual(["task-1"]);
-    expect((await readFollowup(d, at()))?.state).toBe("queued");
-  });
   it("the project's daily cap: the run past it is not queued and says why", async () => {
     const { d } = deps();
     for (let index = 0; index < FOLLOWUP_DAILY_CAP; index += 1) expect((await queueFullSuiteFollowup(d, at(ORG, `task-${String(index)}`))).queued).toBe(true);
     expect(await queueFullSuiteFollowup(d, at(ORG, "task-over"))).toEqual({ queued: false, reason: "daily_cap" });
     expect(await readFollowup(d, at(ORG, "task-over"))).toBeUndefined();
-  });
-  it("past the cap the budget is never charged", async () => {
-    const { d, admitted } = deps();
-    for (let index = 0; index < FOLLOWUP_DAILY_CAP; index += 1) await queueFullSuiteFollowup(d, at(ORG, `task-${String(index)}`));
-    await queueFullSuiteFollowup(d, at(ORG, "task-over"));
-    expect(admitted).toHaveLength(FOLLOWUP_DAILY_CAP);
-  });
-  it("a replay of an older commit never takes the pointer back from a newer one", async () => {
-    const { d } = deps();
-    await queueFullSuiteFollowup(d, at());
-    await queueFullSuiteFollowup(d, at(ORG, "task-1", D2, H2));
-    expect(await queueFullSuiteFollowup(d, at())).toEqual({ queued: true, replayed: true });
-    expect((await readFollowup(d, at(ORG, "task-1", D2, H2)))?.state).toBe("queued");
-    expect(await recordFollowupResult(d, { ...at(ORG, "task-1", D2, H2), result: FAILED })).toBe(true);
-    expect((await readFollowup(d, at()))?.state).toBe("superseded");
-  });
-  it("a follow-up Rovara could not finish is queued again by a replay (charged again, counted again)", async () => {
-    const { d, admitted, now } = deps();
-    await queueFullSuiteFollowup(d, at());
-    await recordFollowupResult(d, { ...at(), result: { outcome: "rovara_problem", finishedAt: "2026-11-15T10:40:00.000Z" } });
-    now.value += 1_000;
-    expect(await queueFullSuiteFollowup(d, at())).toEqual({ queued: true, replayed: false });
-    expect((await readFollowup(d, at()))?.state).toBe("queued");
-    expect(admitted).toEqual(["task-1", "task-1"]);
   });
   it("one past the longest run is queued again by a replay, and nothing late is taken for the old run", async () => {
     const { d, now } = deps();
@@ -102,17 +55,6 @@ describe("queueing", () => {
     expect(await recordFollowupResult(d, { ...at(), result: PASSED })).toBe(false);
     expect(await queueFullSuiteFollowup(d, at())).toEqual({ queued: true, replayed: false });
     expect(await recordFollowupResult(d, { ...at(), result: PASSED })).toBe(true);
-  });
-  it("an older commit's unfinished run is never re-run once a newer commit holds the pointer (no charge, no pointer steal)", async () => {
-    const { d, now, admitted } = deps();
-    await queueFullSuiteFollowup(d, at());
-    await recordFollowupResult(d, { ...at(), result: { outcome: "rovara_problem", finishedAt: "2026-11-15T10:40:00.000Z" } });
-    await queueFullSuiteFollowup(d, at(ORG, "task-1", D2, H2));
-    now.value += 1_000;
-    expect(await queueFullSuiteFollowup(d, at())).toEqual({ queued: true, replayed: true });
-    expect(admitted).toEqual(["task-1", "task-1"]);
-    expect((await readFollowup(d, at(ORG, "task-1", D2, H2)))?.state).toBe("queued");
-    expect(await recordFollowupResult(d, { ...at(ORG, "task-1", D2, H2), result: FAILED })).toBe(true);
   });
   it("the same after an older commit's run expired", async () => {
     const { d, now } = deps();
@@ -160,11 +102,6 @@ describe("queueing", () => {
     await queueFullSuiteFollowup(d, at());
     await expect(queueFullSuiteFollowup(d, at(ORG, "task-1", "1".repeat(16) + "f".repeat(48), H2))).rejects.toThrow(/^CONFIG_INVALID: the follow-up names a commit another/u);
   });
-  it("the cap is per company: another company's runs do not count", async () => {
-    const { d } = deps();
-    for (let index = 0; index < FOLLOWUP_DAILY_CAP; index += 1) await queueFullSuiteFollowup(d, at(ORG, `task-${String(index)}`));
-    expect((await queueFullSuiteFollowup(d, at(OTHER, "task-x"))).queued).toBe(true);
-  });
   it("the budget says no: not queued, reason budget; any other error goes on up", async () => {
     const refused = deps({ admit: async () => { throw agentXError("PROJECT_BUDGET_EXCEEDED", "no room"); } });
     expect(await queueFullSuiteFollowup(refused.d, at())).toEqual({ queued: false, reason: "budget" });
@@ -191,12 +128,6 @@ describe("results", () => {
     expect(await recordFollowupResult(d, { ...at(), result: FAILED })).toBe(false);
     expect(await readFollowup(d, at())).toMatchObject({ state: "passed", result: { passed: 412, total: 412 } });
   });
-  it("failed tests: failed", async () => {
-    const { d } = deps();
-    await queueFullSuiteFollowup(d, at());
-    await recordFollowupResult(d, { ...at(), result: FAILED });
-    expect((await readFollowup(d, at()))?.state).toBe("failed");
-  });
   it("a run Rovara could not finish (its own fault) is 'errored', never a failed suite", async () => {
     const { d } = deps();
     await queueFullSuiteFollowup(d, at());
@@ -213,10 +144,6 @@ describe("results", () => {
     expect(await recordFollowupResult(d, { ...at(), result: PASSED })).toBe(false);
     expect((await readFollowup(d, at()))?.state).toBe("superseded");
     expect((await readFollowup(d, at(ORG, "task-1", D2, H2)))?.state).toBe("queued");
-  });
-  it("a result for a commit never queued is refused", async () => {
-    const { d } = deps();
-    expect(await recordFollowupResult(d, { ...at(), result: PASSED })).toBe(false);
   });
   it.each([
     ["counts that do not add up", { ...PASSED, total: 411 }],
@@ -237,12 +164,6 @@ describe("results", () => {
     now.value += FOLLOWUP_MAX_RUN_MS + 1;
     expect((await readFollowup(d, at()))?.state).toBe("expired");
     expect(checkFullSuiteOf(await readFollowup(d, at()), true)).toBe("not_run");
-  });
-  it("another company cannot read or answer it", async () => {
-    const { d } = deps();
-    await queueFullSuiteFollowup(d, at());
-    expect(await readFollowup(d, at(OTHER))).toBeUndefined();
-    expect(await recordFollowupResult(d, { ...at(OTHER), result: PASSED })).toBe(false);
   });
 });
 

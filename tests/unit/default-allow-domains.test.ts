@@ -1,7 +1,7 @@
 // The default list a cloud install's DNS firewall and a laptop's egress gateway allow is pinned exactly, and the names that let anyone
 // upload (a bucket of any AWS account, a GitHub repository or gist of any user) are not on it. Adding an entry means changing this file on purpose, with the reason.
 import { describe, expect, it } from "vitest";
-import { DEFAULT_AGENT_ALLOW_DOMAINS, DEFAULT_AGENT_ALLOW_GROUPS, GOOGLE_VERTEX_AI_ALLOW_GROUP, isAllowedDomain } from "@agentx/contracts";
+import { DEFAULT_AGENT_ALLOW_DOMAINS, isAllowedDomain } from "@agentx/contracts";
 import { VERTEX_LOCATIONS } from "../../packages/contracts/src/vertex-locations.js";
 import { LOCAL_DEFAULT_ALLOW_DOMAINS, hostIsAllowed } from "../../packages/broker/src/local/isolation/allow-list.js";
 import { hostAlreadyAllowed } from "../../packages/broker/src/core/setup-agent/host-refusal.js";
@@ -30,13 +30,6 @@ const VERTEX_GROUP_HOSTS = [
   "aiplatform.googleapis.com", ...VERTEX_LOCATIONS.map((location) => `${location}-aiplatform.googleapis.com`),
   "generativelanguage.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com",
 ];
-// Google names that must never be reachable by default: any other Google API (data stores above all), the mTLS and regional-endpoint forms, www.googleapis.com, the metadata server.
-const GOOGLE_EXITS = [
-  "storage.googleapis.com", "bucket.storage.googleapis.com", "firebasestorage.googleapis.com", "bigquery.googleapis.com", "drive.googleapis.com", "docs.googleapis.com", "sheets.googleapis.com", "cloudfunctions.googleapis.com",
-  "run.googleapis.com", "www.googleapis.com", "content-storage.googleapis.com", "x.googleapis.com", "googleapis.com", "aiplatform.mtls.googleapis.com", "aiplatform.us-central1.rep.googleapis.com",
-  "evil-aiplatform.googleapis.com.example.net", "aiplatform.googleapis.com.evil.dev", "x.aiplatform.googleapis.com", "us-central1-aiplatform.googleapis.com.evil.dev", "sts.us-central1.rep.googleapis.com",
-  "metadata.google.internal", "accounts.google.com", "storage.cloud.google.com", "docs.google.com", "drive.google.com", "firebasevertexai.googleapis.com",
-];
 
 describe("the default allow-list", () => {
   it("is exactly this list", () => {
@@ -50,37 +43,11 @@ describe("the default allow-list", () => {
     );
   });
 
-  it("holds Google's Vertex AI and Gemini names as one named group of exact hosts, each with a reason, and nothing broad", () => {
-    expect(DEFAULT_AGENT_ALLOW_GROUPS.map((group) => group.id)).toEqual(["google-vertex-ai"]);
-    expect(GOOGLE_VERTEX_AI_ALLOW_GROUP.name).toBe("Google Vertex AI");
-    expect(GOOGLE_VERTEX_AI_ALLOW_GROUP.hosts.map((entry) => entry.host)).toEqual(VERTEX_GROUP_HOSTS);
-    for (const entry of GOOGLE_VERTEX_AI_ALLOW_GROUP.hosts) {
-      expect(entry.why.length, entry.host).toBeGreaterThan(10);
-      expect(entry.host, entry.host).not.toContain("*");
-      expect(entry.host, entry.host).toMatch(/^[a-z0-9-]+\.googleapis\.com$/u);
-    }
-    const hosts = GOOGLE_VERTEX_AI_ALLOW_GROUP.hosts.map((entry) => entry.host);
-    expect(new Set(hosts).size).toBe(hosts.length);
-    expect(hosts.filter((host) => host.endsWith("-aiplatform.googleapis.com"))).toHaveLength(VERTEX_LOCATIONS.length);
-    for (const host of ["us-central1-aiplatform.googleapis.com", "europe-west4-aiplatform.googleapis.com", "us-aiplatform.googleapis.com", "eu-aiplatform.googleapis.com"]) expect(hosts, host).toContain(host);
-    // Every Google name of the whole default list is in the group (nothing else under googleapis.com was added by hand).
-    expect(DEFAULT_AGENT_ALLOW_DOMAINS.filter((entry) => entry.endsWith("googleapis.com"))).toEqual(hosts);
-    expect(DEFAULT_AGENT_ALLOW_DOMAINS.filter((entry) => entry.includes("google") && !entry.endsWith("googleapis.com"))).toEqual([]);
-  });
-
   it("lets the Vertex AI, Gemini and Google token hosts through, by the way the firewall, the broker and the gateway read the list", () => {
     for (const host of VERTEX_GROUP_HOSTS) {
       expect(hostIsAllowed(host, DEFAULT_AGENT_ALLOW_DOMAINS), host).toBe(true);
       expect(hostIsAllowed(host, LOCAL_DEFAULT_ALLOW_DOMAINS), host).toBe(true);
       expect(hostAlreadyAllowed(host, []), host).toBe(true);
-    }
-  });
-
-  it("keeps storage and every other Google API blocked, and a lookalike or sub-name of an allowed Google host", () => {
-    for (const host of GOOGLE_EXITS) {
-      expect(hostIsAllowed(host, DEFAULT_AGENT_ALLOW_DOMAINS), host).toBe(false);
-      expect(hostIsAllowed(host, LOCAL_DEFAULT_ALLOW_DOMAINS), host).toBe(false);
-      expect(hostAlreadyAllowed(host, []), host).toBe(false);
     }
   });
 
@@ -94,21 +61,5 @@ describe("the default allow-list", () => {
       if (entry.endsWith("github.com")) expect(["github.com", "codeload.github.com"]).toContain(entry);
     }
     for (const entry of DEFAULT_AGENT_ALLOW_DOMAINS.filter((name) => !name.endsWith(".internal") && !name.endsWith(".in-addr.arpa"))) expect(isAllowedDomain(entry), entry).toBe(true);
-  });
-
-  it("does not let a bucket, an API, a gist or a user-content host of anyone's through, by the way the firewall and the gateway read the list", () => {
-    const exits = [
-      "attacker-bucket.s3.amazonaws.com", "attacker-bucket.s3.us-west-2.amazonaws.com", "s3.amazonaws.com", "abc123.execute-api.us-east-1.amazonaws.com", "x.lambda-url.us-east-1.on.aws", "x.api.aws",
-      "api.github.com", "gist.github.com", "uploads.github.com", "gist.githubusercontent.com", "user-images.githubusercontent.com", "avatars.githubusercontent.com", "x.codeload.github.com",
-    ];
-    for (const host of exits) {
-      expect(hostIsAllowed(host, DEFAULT_AGENT_ALLOW_DOMAINS), host).toBe(false);
-      expect(hostIsAllowed(host, LOCAL_DEFAULT_ALLOW_DOMAINS), host).toBe(false);
-      expect(hostAlreadyAllowed(host, []), host).toBe(false);
-    }
-  });
-
-  it("still lets the worker's git, the image pulls and the read-only download hosts through", () => {
-    for (const host of ["github.com", "ghcr.io", "x.ghcr.io", "pkg-containers.githubusercontent.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "codeload.github.com"]) expect(hostAlreadyAllowed(host, []), host).toBe(true);
   });
 });

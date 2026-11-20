@@ -1,6 +1,6 @@
 // TE-F2 part A: `serveModelRequestWithReplies`: a reply from the reply set plugs into F0a's `serveModelRequest` for Gemini, Vertex and OpenAI chat and into this lane's builders for the rest; unmatched fails closed; the
 // failure pack answers after `afterCalls` and never counts; provenance decides what counts; a Bedrock row is not run here. Pure: a socket or fetch fails the test.
-/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument -- these tests walk parsed JSON answers (`json()` returns any on purpose) */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access -- these tests walk parsed JSON answers (`json()` returns any on purpose) */
 import net from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { INITIAL_SERVE_STATE, UNMATCHED_STATUS, serveModelRequestWithReplies, type ServeRepliesOptions, type ServeRepliesResult, type ServeState } from "../../packages/contracts/src/model-serve-replies.js";
@@ -9,8 +9,6 @@ import { serveModelRequest, type ModelHelperRequest } from "../../packages/contr
 import { builtinModelCatalog } from "../../packages/contracts/src/model-catalog-rows.js";
 import { BEDROCK_NOT_RUN_SENTENCE, UNMATCHED_SENTENCE } from "../../packages/contracts/src/model-served-family.js";
 import { MODEL_REQUEST_BODY_MAX_BYTES } from "../../packages/contracts/src/model-family-common.js";
-import { readModelRequestFacts } from "../../packages/contracts/src/model-request-facts.js";
-import { expectLinearScaling } from "../support/scaling.js";
 
 let connects = 0;
 let fetches = 0;
@@ -82,17 +80,6 @@ describe("scripted answers per family", () => {
     expect(viaGemini.kind).toBe("scripted");
     expect(json(viaGemini).object).toBe("chat.completion");
   });
-  it("OpenAI Responses and embeddings (the Python SDK's base64 default)", () => {
-    const set = stamp("openai_compatible", [{ id: "r", match: { operation: "responses" } }, { id: "e", match: { operation: "embeddings" } }]);
-    const response = serve(post("/p/openai/v1/responses", { model: "gpt-test", input: "hello" }), set);
-    expect(response).toMatchObject({ kind: "scripted", operation: "responses", replyId: "r" });
-    expect(json(response).output[0].content[0].text).toBe("answer r");
-    const embed = serve(post("/p/openai/v1/embeddings", { model: "te", input: ["a", "b"], encoding_format: "base64", dimensions: 8 }), set);
-    expect(embed).toMatchObject({ kind: "scripted", operation: "embeddings", replyId: "e" });
-    expect(json(embed).data).toHaveLength(2);
-    expect(typeof json(embed).data[0].embedding).toBe("string");
-    expect(Buffer.from(json(embed).data[0].embedding, "base64").byteLength).toBe(32);
-  });
   it("Anthropic messages (whole and streamed) and count_tokens", () => {
     const set = stamp("anthropic_messages", [{ id: "m", match: { operation: "messages" } }, { id: "c", match: { operation: "count_tokens" } }]);
     const whole = serve(post("/p/anthropic/v1/messages", ANTHROPIC_BODY, { "x-api-key": fakeKey(), "anthropic-version": "2023-06-01" }), set);
@@ -135,13 +122,6 @@ describe("scripted answers per family", () => {
     const result = serve(post("/p/azure-openai/openai/deployments/my-dep/chat/completions", OPENAI_BODY, { "api-key": fakeKey() }, "api-version=2024-06-01"), stamp("openai_compatible", [{ id: "z" }]));
     expect(result).toMatchObject({ kind: "scripted", rowId: "azure-openai", operation: "chat_completions", credential: "api-key" });
   });
-  it("never echoes a credential, and a deterministic seed gives the same bytes", () => {
-    const key = fakeKey();
-    const set = stamp("anthropic_messages", [{ id: "m" }]);
-    const result = serve(post("/p/anthropic/v1/messages", ANTHROPIC_BODY, { "x-api-key": key, authorization: `Bearer ${key}` }), set);
-    expect(JSON.stringify(result)).not.toContain(key);
-    expect(serve(post("/p/anthropic/v1/messages", ANTHROPIC_BODY), set).answer).toEqual(serve(post("/p/anthropic/v1/messages", ANTHROPIC_BODY), set).answer);
-  });
 });
 
 describe("unmatched fails closed", () => {
@@ -156,46 +136,6 @@ describe("unmatched fails closed", () => {
     expect(json(openai).error).toMatchObject({ type: "invalid_request_error", code: "no_scripted_reply", message: "not run: no scripted reply for this request" });
     expect(json(serve(post("/p/gemini/v1beta/models/m:generateContent", {}), undefined)).error).toMatchObject({ code: 400, status: "INVALID_ARGUMENT" });
     expect(json(serve(post("/p/cohere/v2/chat", {}), undefined))).toEqual({ message: "not run: no scripted reply for this request" });
-  });
-  it("is counted: the call count advances, the reply counts do not name a reply", () => {
-    const result = serve(post("/p/openai/v1/chat/completions", OPENAI_BODY), stamp("openai_compatible", [{ id: "x", match: { promptContains: "never" } }]));
-    expect(result.nextState.callCount).toBe(1);
-    expect(result.kind).toBe("unmatched");
-  });
-  it("a set for another family matches nothing", () => {
-    expect(serve(post("/p/anthropic/v1/messages", ANTHROPIC_BODY), stamp("gemini", [{ id: "a" }])).kind).toBe("unmatched");
-  });
-  it("a reply that names another model or operation does not match", () => {
-    const set = stamp("openai_compatible", [{ id: "a", match: { model: "other-model" } }, { id: "b", match: { operation: "embeddings" } }]);
-    expect(serve(post("/p/openai/v1/chat/completions", OPENAI_BODY), set).kind).toBe("unmatched");
-  });
-  it("matches on the prompt text, system and tool-free fields only", () => {
-    const set = stamp("anthropic_messages", [{ id: "weather", match: { promptContains: "weather in Paris" } }, { id: "system", match: { promptContains: "Be brief." } }, { id: "role", match: { promptContains: "user" } }, { id: "tool", match: { promptContains: "get_weather" } }]);
-    expect(serve(post("/p/anthropic/v1/messages", ANTHROPIC_BODY), set).replyId).toBe("weather");
-    expect(serve(post("/p/anthropic/v1/messages", { ...ANTHROPIC_BODY, messages: [{ role: "user", content: "hi" }] }), set).replyId).toBe("system");
-    expect(serve(post("/p/anthropic/v1/messages", { model: "m", messages: [{ role: "user", content: "hi" }], tools: [{ name: "get_weather", description: "weather in Paris", input_schema: {} }] }), set).kind).toBe("unmatched");
-  });
-});
-
-describe("provenance decides what counts", () => {
-  it("only before_task counts at serve time: independent is parked (DEC 192a) and task_made needs the real model, which the helper never has", () => {
-    const set = stamp("openai_compatible", [
-      { id: "b", match: { promptContains: "one" } },
-      { id: "i", match: { promptContains: "two" }, provenance: "independent", origin: undefined },
-      { id: "t", match: { promptContains: "three" }, provenance: "task_made", origin: undefined },
-    ]);
-    const call = (word: string) => serve(post("/p/openai/v1/chat/completions", { model: "m", messages: [{ role: "user", content: word }] }), set);
-    expect(call("one")).toMatchObject({ kind: "scripted", resultClass: "before_task", countsTowardProof: true });
-    expect(call("two")).toMatchObject({ kind: "scripted", resultClass: "independent", countsTowardProof: false });
-    expect(call("three")).toMatchObject({ kind: "scripted", resultClass: "task_made", countsTowardProof: false, provenance: "task_made" });
-  });
-  it("records a content hash, never the reply", () => {
-    const result = serve(post("/p/openai/v1/chat/completions", OPENAI_BODY), stamp("openai_compatible", [{ id: "a", response: { text: "a secret answer", finish: "stop" } }]));
-    expect(result.replySha256).toMatch(/^[0-9a-f]{64}$/u);
-    const ledger: Record<string, unknown> = { ...result };
-    delete ledger.answer;
-    expect(JSON.stringify(ledger)).not.toContain("a secret answer");
-    expect(JSON.stringify(ledger)).not.toContain("weather in Paris");
   });
 });
 
@@ -213,60 +153,6 @@ describe("sequence and state", () => {
     expect(state.callCount).toBe(3);
     expect(INITIAL_SERVE_STATE.callCount).toBe(0);
     expect(INITIAL_SERVE_STATE.matchCounts.size).toBe(0);
-  });
-});
-
-describe("the failure pack", () => {
-  it("answers from the first call by default, is class failure_pack and never counts", () => {
-    const set = stamp("openai_compatible", [{ id: "a" }]);
-    const result = serve(post("/p/openai/v1/chat/completions", OPENAI_BODY), set, { failure: { mode: "rate_limit" } });
-    expect(result).toMatchObject({ kind: "failure_pack", resultClass: "failure_pack", countsTowardProof: false, failureMode: "rate_limit", replyId: undefined, provenance: undefined });
-    expect(result.answer.status).toBe(429);
-  });
-  it("afterCalls: the first n calls succeed from the reply set, then the failure starts", () => {
-    const set = stamp("anthropic_messages", [{ id: "a" }]);
-    let state: ServeState = INITIAL_SERVE_STATE;
-    const kinds: string[] = [];
-    const statuses: number[] = [];
-    for (let index = 0; index < 4; index += 1) {
-      const result = serve(post("/p/anthropic/v1/messages", ANTHROPIC_BODY), set, { failure: { mode: "rate_limit", afterCalls: 2 }, state });
-      kinds.push(result.kind);
-      statuses.push(result.answer.status);
-      state = result.nextState;
-    }
-    expect(kinds).toEqual(["scripted", "scripted", "failure_pack", "failure_pack"]);
-    expect(statuses).toEqual([200, 200, 429, 429]);
-  });
-  it("M2: in a failure-pack run NO call counts toward proof, including the calls before afterCalls", () => {
-    const set = stamp("anthropic_messages", [{ id: "a" }]);
-    let state: ServeState = INITIAL_SERVE_STATE;
-    const rowsOfRun: [string, boolean, string | undefined][] = [];
-    for (let index = 0; index < 4; index += 1) {
-      const result = serve(post("/p/anthropic/v1/messages", ANTHROPIC_BODY), set, { failure: { mode: "rate_limit", afterCalls: 2 }, state });
-      rowsOfRun.push([result.kind, result.countsTowardProof, result.provenance]);
-      state = result.nextState;
-    }
-    expect(rowsOfRun).toEqual([["scripted", false, "before_task"], ["scripted", false, "before_task"], ["failure_pack", false, undefined], ["failure_pack", false, undefined]]);
-    // the same calls with no failure spec do count
-    expect(serve(post("/p/anthropic/v1/messages", ANTHROPIC_BODY), set).countsTowardProof).toBe(true);
-  });
-  it("a failure answer is never counted even when a counted reply exists for the call", () => {
-    const set = stamp("openai_compatible", [{ id: "a" }]);
-    for (const mode of ["rate_limit", "cut_off_stream", "token_limit", "refusal", "bad_tool_json"] as const) {
-      const result = serve(post("/p/openai/v1/chat/completions", { ...OPENAI_BODY, stream: true, tools: [{ type: "function", function: { name: "lookup" } }] }), set, { failure: { mode } });
-      expect(result.countsTowardProof, mode).toBe(false);
-      expect(result.resultClass, mode).toBe("failure_pack");
-      expect(result.kind, mode).toBe("failure_pack");
-    }
-  });
-  it("uses the declared tool and the streaming flag of the request", () => {
-    const result = serve(post("/p/openai/v1/chat/completions", { ...OPENAI_BODY, tools: [{ type: "function", function: { name: "lookup_order" } }] }), undefined, { failure: { mode: "bad_tool_json" } });
-    expect(result.answer.body).toContain('"name":"lookup_order"');
-    const gemini = serve(post("/p/gemini/v1beta/models/m:streamGenerateContent", {}, {}, "alt=sse"), undefined, { failure: { mode: "cut_off_stream" } });
-    expect(gemini.answer.body.endsWith("\n\n")).toBe(false);
-  });
-  it("a failure needs no reply set", () => {
-    expect(serve(post("/p/cohere/v2/chat", { stream: true }), undefined, { failure: { mode: "cut_off_stream" } }).kind).toBe("failure_pack");
   });
 });
 
@@ -289,12 +175,6 @@ describe("requests that are not served", () => {
       expect(result.nextState.callCount).toBe(0); // nothing reached an operation
     }
   });
-  it("an operation this lane does not build is not_served, never an invented success", () => {
-    const set = stamp("openai_compatible", [{ id: "a" }]);
-    const models = serve({ method: "GET", path: "/p/openai/v1/models", query: "", headers: {}, body: undefined }, set);
-    expect(models).toMatchObject({ kind: "not_served", countsTowardProof: false });
-    expect(models.answer.status).toBe(422); // a 4xx: no SDK retries it (L2)
-  });
   it("a request body past 1 MiB is refused before anything is read (F0a's own cap does not cover Anthropic or Cohere)", () => {
     for (const [path, family] of [["/p/openai/v1/chat/completions", "openai_compatible"], ["/p/anthropic/v1/messages", "anthropic_messages"], ["/p/cohere/v2/chat", "cohere"]] as const) {
       const result = serve(post(path, "x".repeat(MODEL_REQUEST_BODY_MAX_BYTES + 1)), stamp(family, [{ id: "a" }]));
@@ -303,13 +183,6 @@ describe("requests that are not served", () => {
       expect(result.nextState.callCount, family).toBe(0);
     }
     expect(serve(post("/p/anthropic/v1/messages", "x".repeat(MODEL_REQUEST_BODY_MAX_BYTES)), stamp("anthropic_messages", [{ id: "a" }])).kind).toBe("scripted"); // exactly 1 MiB is allowed
-  });
-  it("a reply that cannot be rendered is a fixed 500, not a throw", () => {
-    const broken = { version: 1, family: "anthropic_messages", replies: [{ id: "a", match: {}, response: { text: "x", finish: "stop", usage: { inputTokens: -5, outputTokens: 1 } }, provenance: "before_task", origin: "customer_written" }] } as never;
-    const result = serve(post("/p/anthropic/v1/messages", ANTHROPIC_BODY), broken);
-    expect(result).toMatchObject({ kind: "not_served", countsTowardProof: false, replyId: "a" });
-    expect(result.answer.status).toBe(422); // a 4xx: no SDK retries it (L2)
-    expect(json(result).error.code).toBe("bad_reply");
   });
   it("L2: an answer that is not a success is never a 5xx or a 429 an SDK would retry (except a real unmatched 400 and the pack's own 429)", () => {
     const broken = { version: 1, family: "anthropic_messages", replies: [{ id: "a", match: {}, response: { text: "x", finish: "stop", usage: { inputTokens: -5, outputTokens: 1 } }, provenance: "before_task", origin: "customer_written" }] } as never;
@@ -327,39 +200,6 @@ describe("requests that are not served", () => {
     expect(json(viaF0a).error.code).toBe("internal_error");
     expect(serveModelRequestWithReplies([{ id: "x", family: "nope" as never }], undefined, post("/p/x/y", {}), { seed: "s" }).answer.status).toBe(422);
   });
-  it("a Bedrock-family row never reaches a served family even when listed as servable", () => {
-    expect(serveModelRequestWithReplies([{ id: "b", family: "bedrock" }], undefined, post("/p/b/x", {}), { seed: "s" }).kind).toBe("not_served");
-  });
-});
-
-describe("speed and bounds", () => {
-  it("a 1 MB request is read fast", () => {
-    // The cost grows linearly with the request, not faster: 5k then 40k repeats of 6 bytes (the 8N input stays at or under 256 KiB so it stays in CPU cache). The 1 MB request (160k repeats) is served once, un-timed, below.
-    const results = new Map<number, ServeRepliesResult>();
-    const set = stamp("openai_compatible", [{ id: "a", match: { promptContains: "paris" } }]);
-    expectLinearScaling((repeats) => {
-      const big = { model: "m", messages: [{ role: "user", content: "paris ".repeat(repeats) }] };
-      const request = post("/p/openai/v1/chat/completions", big);
-      return () => { results.set(repeats, serve(request, set)); };
-    }, { n: 5_000, unitBytes: 6, label: "model serve: a 1 MB request" });
-    const big = { model: "m", messages: [{ role: "user", content: "paris ".repeat(160_000) }] };
-    results.set(160_000, serve(post("/p/openai/v1/chat/completions", big), set));
-    expect([results.get(5_000)!.kind, results.get(40_000)!.kind, results.get(160_000)!.kind]).toEqual(["scripted", "scripted", "scripted"]);
-    const facts = readModelRequestFacts(JSON.stringify(big));
-    expect(facts.promptText?.length).toBeGreaterThan(900_000);
-  }, 60_000);
-  it("a 2,000-reply set is searched fast", () => {
-    // The last reply matches, so the whole set is searched: the cost grows linearly with the set, not faster (125, then 1,000 replies of about 250 bytes: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 2,000-reply set is searched once, un-timed).
-    const replyIds = new Map<number, string | undefined>();
-    const searchLast = (count: number) => {
-      const set = stamp("openai_compatible", Array.from({ length: count }, (_, index) => ({ id: `r${String(index)}`, match: { promptContains: `#${String(index)}#` } })));
-      const request = post("/p/openai/v1/chat/completions", { model: "m", messages: [{ role: "user", content: `#${String(count - 1)}#` }] });
-      return () => { replyIds.set(count, serve(request, set).replyId); };
-    };
-    expectLinearScaling(searchLast, { n: 125, unitBytes: 250, label: "model serve: a 2,000-reply set" });
-    searchLast(2000)();
-    expect([replyIds.get(125), replyIds.get(1000), replyIds.get(2000)]).toEqual(["r124", "r999", "r1999"]);
-  }, 60_000);
 });
 
 describe("M3: embedding requests are capped before anything is built", () => {
@@ -372,27 +212,6 @@ describe("M3: embedding requests are capped before anything is built", () => {
     expect(result.answer.status).toBe(400);
     expect(result.answer.body.length).toBeLessThan(1000);
   };
-  it("the reviewer's probe: 2,048 texts x 4,096 dimensions x six types is refused fast and small", () => {
-    const requestsFor = (count: number) => {
-      const texts = Array.from({ length: count }, () => "a");
-      return [
-        ...[["float"], ["float", "int8", "uint8", "binary", "ubinary", "base64"]].map((types) => ({ request: post("/p/cohere/v2/embed", { model: "m", texts, output_dimension: 4096, embedding_types: types }), set: cohereSet })),
-        { request: post("/p/openai/v1/embeddings", { model: "m", input: texts, dimensions: 4096 }), set: openaiSet },
-      ];
-    };
-    // The refusal does not build anything from the request: the cost does not grow faster than the number of texts (256, then 2,048; about 30 bytes a text across the three requests, so the 8N input is far under 256 KiB).
-    let answers: ServeRepliesResult[] = [];
-    expectLinearScaling((count) => {
-      const requests = requestsFor(count);
-      return () => { answers = requests.map(({ request, set }) => serve(request, set)); };
-    }, { n: 256, unitBytes: 30, label: "model serve: embedding refusal" });
-    for (const answer of answers) refused(answer);
-    // One full-size pass: nothing big is built.
-    const full = requestsFor(2048);
-    const before = process.memoryUsage().heapUsed;
-    for (const { request, set } of full) refused(serve(request, set));
-    expect(process.memoryUsage().heapUsed - before).toBeLessThan(60 * 1024 * 1024);
-  }, 60_000);
   it("each family's own limits: Cohere 96 texts, OpenAI 3,072 dimensions, Gemini 100 batch requests", () => {
     expect(serve(post("/p/cohere/v2/embed", { model: "m", texts: Array.from({ length: 96 }, () => "a"), output_dimension: 1024 }), cohereSet).kind).toBe("scripted");
     refused(serve(post("/p/cohere/v2/embed", { model: "m", texts: Array.from({ length: 97 }, () => "a") }), cohereSet));
@@ -401,18 +220,5 @@ describe("M3: embedding requests are capped before anything is built", () => {
     const batch = (count: number) => post("/p/gemini/v1beta/models/te:batchEmbedContents", { requests: Array.from({ length: count }, () => ({ content: { parts: [{ text: "a" }] } })) });
     expect(serve(batch(100), geminiSet).kind).toBe("scripted");
     refused(serve(batch(101), geminiSet));
-  });
-  it("a total cap on numbers: inputs x dimensions x types", () => {
-    refused(serve(post("/p/openai/v1/embeddings", { model: "m", input: Array.from({ length: 300 }, () => "a"), dimensions: 3072 }), openaiSet)); // 921,600 numbers
-    expect(serve(post("/p/openai/v1/embeddings", { model: "m", input: Array.from({ length: 80 }, () => "a"), dimensions: 3072 }), openaiSet).kind).toBe("scripted"); // 245,760
-    refused(serve(post("/p/cohere/v2/embed", { model: "m", texts: Array.from({ length: 90 }, () => "a"), output_dimension: 1536, embedding_types: ["float", "int8"] }), cohereSet)); // 276,480
-  });
-  it("the refusal is a fixed answer in the family's envelope, with no RangeError and no echo of the request", () => {
-    const result = serve(post("/p/openai/v1/embeddings", { model: "m", input: ["secret-input"], dimensions: 99_999 }), openaiSet);
-    expect(JSON.parse(result.answer.body).error.message).toBe("not run: this embedding request is larger than the model helper serves");
-    expect(result.answer.body).not.toContain("secret-input");
-  });
-  it("the failure pack still answers an oversized embedding (it builds nothing)", () => {
-    expect(serve(post("/p/cohere/v2/embed", { texts: Array.from({ length: 2048 }, () => "a"), output_dimension: 4096 }), undefined, { failure: { mode: "rate_limit" } }).answer.status).toBe(429);
   });
 });

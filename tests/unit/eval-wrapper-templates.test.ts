@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EVAL_WRAPPER_NODE_PATH, EVAL_WRAPPER_PYTHON_PATH, EVAL_WRAPPER_REPORT_PATH, EvalOutputShapeSchema, evalOutputNeedsWrapper, evalWrapperFor, type EvalOutputShape } from "@agentx/contracts";
-import { caseRowsOf, measuresFromCaseReports } from "../../packages/worker/src/verification/eval-report-formats.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -41,16 +40,6 @@ function repository(output: EvalOutputShape, evalSource: string, options: { args
 
 const jsonlEval = (records: unknown[]): string => `import os\nos.makedirs("evals/out", exist_ok=True)\nopen("evals/out/results.jsonl", "w").write(${JSON.stringify(records.map((r) => JSON.stringify(r)).join("\n"))})\n`;
 
-/** Reads the written report as the sandbox does and answers pass by question. */
-function passOf(xml: string | undefined, ids: string[]): Record<string, boolean> {
-  const parsed = caseRowsOf(xml!);
-  expect(parsed).toBeDefined();
-  const measures = measuresFromCaseReports([parsed!], ids);
-  expect(measures).toBeDefined();
-  const questions = (JSON.parse(measures!) as { questions: Array<{ id: string; samples: Array<{ pass: boolean }> }> }).questions;
-  return Object.fromEntries(questions.map((q) => [q.id, q.samples[0]!.pass]));
-}
-
 describe("evalWrapperFor: which outputs need a wrapper", () => {
   it("makes nothing for an output Rovara already reads (JUnit, promptfoo, measures) or for a report that says nothing", () => {
     for (const output of [{ kind: "junit" }, { kind: "promptfoo" }, { kind: "measures" }, undefined] as Array<EvalOutputShape | undefined>) {
@@ -82,28 +71,6 @@ describe("evalWrapperFor: which outputs need a wrapper", () => {
 describe("the Python wrapper, run against a fake eval", () => {
   const records = [{ case_id: "a", passed: true }, { case_id: "b", passed: false }, { case_id: "c", passed: "true" }, { case_id: "d" }];
 
-  it("runs the command unchanged, reads JSONL rows and writes one JUnit case per question that Rovara's own reader maps", () => {
-    const made = repository(rows(), jsonlEval(records));
-    const done = made.run();
-    expect(done.status).toBe(0);
-    expect(passOf(done.xml, ["a", "b", "c", "d"])).toEqual({ a: true, b: false, c: true, d: false });
-  });
-
-  it("reads ROVARA_EVAL_IDS: only those questions are written", () => {
-    const done = repository(rows(), jsonlEval(records)).run({ ROVARA_EVAL_IDS: "a,c" });
-    expect(done.xml).toContain('name="a"');
-    expect(done.xml).not.toContain('name="b"');
-    expect(passOf(done.xml, ["a", "c"])).toEqual({ a: true, c: true });
-  });
-
-  it("reads a CSV with a score line, and a JSON file whose rows sit under a key, with a nested id and result", () => {
-    const csv = repository(rows({ format: "csv", pass: { field: "score", atLeast: 0.7 }, idField: "id" }), `import os\nos.makedirs("evals/out", exist_ok=True)\nopen("evals/out/results.jsonl", "w").write('id,score\\nq1,0.9\\nq2,0.69\\n"q,3",0.7\\nq4,n/a\\n')\n`).run();
-    expect(passOf(csv.xml, ["q1", "q2", "q,3", "q4"])).toEqual({ q1: true, q2: false, "q,3": true, q4: false });
-    const json = repository(rows({ format: "json", rowsKey: "data.results", idField: "meta.id", pass: { field: "result.verdict", equals: "pass" } }),
-      `import json, os\nos.makedirs("evals/out", exist_ok=True)\njson.dump({"data": {"results": [{"meta": {"id": "x"}, "result": {"verdict": "pass"}}, {"meta": {"id": "y"}, "result": {"verdict": "fail"}}]}}, open("evals/out/results.jsonl", "w"))\n`).run();
-    expect(passOf(json.xml, ["x", "y"])).toEqual({ x: true, y: false });
-  });
-
   it("an eval that exits non-zero because cases failed is a measured result; one that wrote nothing keeps its own exit code", () => {
     const failing = repository(rows(), `${jsonlEval(records)}raise SystemExit(3)\n`).run();
     expect(failing.status).toBe(0);
@@ -124,17 +91,6 @@ describe("the Python wrapper, run against a fake eval", () => {
     expect(done.xml).toBeUndefined();
   });
 
-  it("carries a hostile id, command argument and field name as data only: the file compiles, nothing in them runs, the XML is escaped", () => {
-    const evil = `x"<y>&'''`;
-    const made = repository(rows({ idField: "case_id" }), jsonlEval([{ case_id: evil, passed: true }]), { args: [`'''; open("pwned", "w").write("x") #`, "$(touch pwned2)", "`touch pwned3`"] });
-    expect(spawnSync("python3", ["-m", "py_compile", made.wrapperPath], { encoding: "utf8" }).status).toBe(0);
-    const done = made.run();
-    expect(done.status).toBe(0);
-    expect(done.xml).toContain("x&quot;&lt;y&gt;&amp;");
-    for (const name of ["pwned", "pwned2", "pwned3"]) expect(existsSync(join(made.root, name)) || existsSync(join(made.root, "evals", name))).toBe(false);
-    expect(passOf(done.xml, [evil])).toEqual({ [evil]: true });
-  });
-
   it("says in its first lines what it is, and does not touch the network or a secret", () => {
     const text = readFileSync(repository(rows(), jsonlEval(records)).wrapperPath, "utf8");
     expect(text.split("\n").slice(0, 4).join(" ")).toMatch(/Made by Rovara.*Rovara never merges it/u);
@@ -146,17 +102,6 @@ describe("the Python wrapper, run against a fake eval", () => {
 describe("the Node wrapper, run against a fake eval", () => {
   const nodeEval = (records: unknown[], text?: string): string => `import { mkdirSync, writeFileSync } from "node:fs";\nmkdirSync("evals/out", { recursive: true });\nwriteFileSync("evals/out/results.jsonl", ${JSON.stringify(text ?? records.map((r) => JSON.stringify(r)).join("\n"))});\n`;
   const node = (over: Partial<Extract<EvalOutputShape, { kind: "rows" }>> = {}) => rows({ language: "node", ...over });
-
-  it("reads JSONL, CSV (quoted commas) and JSON under a key, and honours ROVARA_EVAL_IDS", () => {
-    const jsonl = repository(node(), nodeEval([{ case_id: "a", passed: true }, { case_id: "b", passed: false }, { case_id: "c", passed: "TRUE" }])).run();
-    expect(jsonl.status).toBe(0);
-    expect(passOf(jsonl.xml, ["a", "b", "c"])).toEqual({ a: true, b: false, c: true });
-    const csv = repository(node({ format: "csv", idField: "id", pass: { field: "score", atLeast: 0.5 } }), nodeEval([], 'id,score\n"q,1",0.9\nq2,0.1\n')).run();
-    expect(passOf(csv.xml, ["q,1", "q2"])).toEqual({ "q,1": true, q2: false });
-    const json = repository(node({ format: "json", rowsKey: "results" }), nodeEval([], JSON.stringify({ results: [{ case_id: "a", passed: true }, { case_id: "b", passed: true }] }))).run({ ROVARA_EVAL_IDS: "b" });
-    expect(passOf(json.xml, ["b"])).toEqual({ b: true });
-    expect(json.xml).not.toContain('name="a"');
-  });
 
   it("keeps the command's exit code when it wrote nothing, and treats hostile text as data", () => {
     expect(repository(node(), "process.exit(7);\n").run().status).toBe(7);

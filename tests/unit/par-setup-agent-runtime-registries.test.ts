@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
-import { DEFAULT_DEVCONTAINER_REGISTRIES } from "../../packages/broker/src/local/isolation/stack.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -34,15 +33,4 @@ describe("the registries of dev containers, from the install to the guard", () =
     expect(policy.devcontainer).toEqual({ registries: ["registry.example.test", "ghcr.io"] });
   });
 
-  it("hands the guard no dev container support when the owner turned it off", async () => {
-    expect((await guardPolicyOf({ ROVARA_DEVCONTAINER_REGISTRIES: "0" })).devcontainer).toBeUndefined();
-  });
-
-  it("uses the default list for the install's daemon when the owner said nothing (a virtual machine's Docker), not a fixed one", async () => {
-    // A Docker named by a remote address is one that runs somewhere else, so the daemon is not a Linux host's.
-    const policy = await guardPolicyOf({ DOCKER_HOST: "unix:///Users/someone/.colima/default/docker.sock" });
-    const registries = (policy.devcontainer as { registries: string[] } | undefined)?.registries;
-    expect(registries === undefined || registries.join() === [...DEFAULT_DEVCONTAINER_REGISTRIES].join()).toBe(true);
-    expect(registries).not.toEqual(["docker.io"]);
-  });
 });

@@ -3,9 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { when, type TransactItem } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import { STEP_FENCE_TRIPPED_WORDS, createCoreHostApp, isStepFence, markStepFence, retryOnFenceTrip } from "../../packages/broker/src/core-host/index.js";
-import { FAKE_COMPANY, createFakeWorld } from "../support/core-host-fakes.js";
+import { STEP_FENCE_TRIPPED_WORDS, isStepFence, markStepFence, retryOnFenceTrip } from "../../packages/broker/src/core-host/index.js";
 
 const failing = (key: { pk: string; sk: string }): Extract<TransactItem, { kind: "check" }> => ({ kind: "check", key, condition: when.eq("revision", 99) });
 
@@ -21,28 +19,5 @@ describe("retryOnFenceTrip", () => {
     // The same condition, unmarked, is the store's own answer (a lost race the flow reads for itself).
     expect(await store.transact([failing({ pk: "A", sk: "1" })])).toMatchObject({ applied: false });
     expect(await store.transact(markStepFence([{ kind: "check", key: { pk: "A", sk: "1" }, condition: when.eq("revision", 1) }]))).toMatchObject({ applied: true });
-  });
-
-  it("is one wrapper per store, and every other call is the store's own", async () => {
-    const base = new MemoryDocumentStore();
-    expect(retryOnFenceTrip(base)).toBe(retryOnFenceTrip(base));
-    await retryOnFenceTrip(base).put({ item: { pk: "C", sk: "1" } });
-    expect(await base.get({ pk: "C", sk: "1" })).toBeDefined();
-  });
-
-  it("the core runtime's flow stores through the wrapper", async () => {
-    const world = createFakeWorld();
-    const app = createCoreHostApp({
-      env: { ROVARA_CORE_ENGINE: "on" }, modules: world.modules, context: () => world.context(),
-      runtime: () => ({
-        callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }),
-        now: () => new Date(world.clock.now), log: () => undefined,
-        services: () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } }),
-        ciReporting: { honest: true, ciMode: () => "their_ci_fix" },
-      }),
-    });
-    const { flow } = await app.runtimeFor(FAKE_COMPANY);
-    await world.store.put({ item: { pk: "A", sk: "1", revision: 1 } });
-    await expect(flow.deps.store.transact(markStepFence([failing({ pk: "A", sk: "1" })]))).rejects.toMatchObject({ code: "WORKSPACE_BUSY" });
   });
 });

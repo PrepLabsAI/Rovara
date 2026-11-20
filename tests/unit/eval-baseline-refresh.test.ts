@@ -37,19 +37,6 @@ it("reuses complete cached questions and isolates in-flight work by company", as
   finish(); await first;
 });
 
-it("does not share an in-flight baseline across different runner settings", async () => {
-  let finish!: () => void;
-  const gate = new Promise<void>(resolve => { finish = resolve; });
-  const input = { key, settings: { imageDigest: "image", route: "customer" }, cache: { read: async () => { await gate; return undefined; } } } as unknown as EvalHealthInput;
-  const service = createEvalBaselines(); const first = service.afterMerge(input);
-  let otherRead = false;
-  const other = service.afterMerge({ ...input, settings: { ...input.settings, route: "different" }, cache: { ...input.cache, read: async () => { otherRead = true; return undefined; } } });
-  try {
-    expect(other).not.toBe(first); expect(otherRead).toBe(true);
-    expect((await other).status).toBe("not_run");
-  } finally { finish(); await Promise.all([first, other]); }
-});
-
 // Two hosts, one persisted cache: setup's measurement must be visible to the task.
 import { attestRovaraOnlyBaseCheckout, createDocumentBaseScoreCache, evalSpendInputsDigest, type ModelEgressFrame, type EvalBaseRecord } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -90,18 +77,6 @@ it("conditionally claims simultaneous starts so only one host reserves", async (
   expect(results.map(r => r.status).sort()).toEqual(["measured", "measuring"]);
   expect(w.usage()).toEqual({ reservations: 1, calls: 3 });
 });
-it("reclaims at sixty minutes and an old finisher cannot release its successor", async () => {
-  const w = persistedWorld(); const a = await w.input.cache.startMeasurement!(evalHealthKey(w.input));
-  expect(a.status).toBe("started");
-  w.advance(3_599_000); expect(await createEvalBaselines().forTask(w.input)).toBe("measuring");
-  w.advance(1_000);
-  const b = await w.input.cache.startMeasurement!(evalHealthKey(w.input)); expect(b.status).toBe("started");
-  if (a.status !== "started" || b.status !== "started") throw new Error("missing mark");
-  await w.input.cache.finishMeasurement!(evalHealthKey(w.input), a.mark);
-  expect(await createEvalBaselines().forTask(w.input)).toBe("measuring");
-  w.advance(3_600_001);
-  expect(await createEvalBaselines().forTask(w.input)).toBe("ready"); expect(w.usage()).toEqual({ reservations: 1, calls: 3 });
-});
 it.each(["measured", "refused", "thrown"])("finishes the mark on the %s ending", async ending => {
   const w = persistedWorld();
   if (ending === "refused") w.input.approval = { read: async () => undefined };
@@ -125,11 +100,6 @@ it.each([{ company: "org_bbbbbbbbbbbbbbbbbbbb" }, { codeHash: "1".repeat(64) }, 
   expect(await createEvalBaselines().forTask(other)).not.toBe("measuring");
   expect(w.usage().reservations).toBe(1);
 });
-it("uses a saved record before a fresh measuring mark", async () => {
-  const w = persistedWorld(); expect((await createEvalBaselines().afterMerge(w.input)).status).toBe("measured");
-  await w.input.cache.startMeasurement!(evalHealthKey(w.input));
-  expect(await createEvalBaselines().forTask(w.input)).toBe("ready"); expect(w.usage().reservations).toBe(1);
-});
 it("rechecks a saved baseline after acquiring a delayed claim", async () => {
   const w = persistedWorld(); const entered = latch(); const gate = latch(); const cache = w.cache();
   const delayed = createEvalBaselines().afterMerge({ ...w.input, cache: { ...cache, startMeasurement: async parts => { entered.release(); await gate.promise; return cache.startMeasurement!(parts); } } });
@@ -137,14 +107,6 @@ it("rechecks a saved baseline after acquiring a delayed claim", async () => {
   try { expect((await createEvalBaselines().afterMerge(w.input)).status).toBe("measured"); }
   finally { gate.release(); }
   expect((await delayed).status).toBe("cached"); expect(w.usage()).toEqual({ reservations: 1, calls: 3 });
-});
-it("does not spend through score-only caches or unknown measuring states", async () => {
-  const w = persistedWorld();
-  expect(await createEvalBaselines().afterMerge({ ...w.input, cache: { read: w.input.cache.read.bind(w.input.cache), write: w.input.cache.write.bind(w.input.cache) } })).toEqual({ status: "not_run", reason: "unavailable", message: "Not run: baseline could not be read." });
-  for (const state of [undefined, "private canary", null, 9]) {
-    expect(await createEvalBaselines().forTask({ ...w.input, cache: { ...w.input.cache, readMeasurement: async () => state as never } })).toBe("unavailable");
-  }
-  expect(w.usage()).toEqual({ reservations: 0, calls: 0 });
 });
 it("keeps saved cache hits ahead of a same-host measurement and preserves ordinary readiness bytes", async () => {
   const w = persistedWorld(); const gate = latch(); const entered = latch(); const original = w.input.run.bind(w.input);

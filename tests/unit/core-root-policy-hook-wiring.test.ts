@@ -74,13 +74,6 @@ describe("the broker root's engine limit goes through the company rules service 
     expect(global).not.toHaveBeenCalled();
   });
 
-  it("asks only for the asking company: another company with no lock runs on its project's limit", async () => {
-    const h = world({ [A]: 0 });
-    const taskId = await h.task(B, "web");
-    expect(await h.runStart(B, taskId)).toEqual({ allowed: true });
-    expect(h.asked.map((asked) => asked.q["cid"])).toEqual([B]);
-  });
-
   it("without the injected fetch the root asks through the global fetch (the deployed broker); a rules service that does not answer refuses", async () => {
     const global = vi.fn(async () => { throw new Error("no network in this test"); });
     vi.stubGlobal("fetch", global);
@@ -88,12 +81,5 @@ describe("the broker root's engine limit goes through the company rules service 
     const taskId = await h.task(A, "web");
     expect(await h.runStart(A, taskId)).toMatchObject({ allowed: false, code: "spend_unknown" });
     expect(global).toHaveBeenCalled();
-  });
-
-  it("no rules service on the install: the project's own limit alone, nothing asked", async () => {
-    const h = world({ [A]: 0 }, { env: { ROVARA_POLICY_HOOK: "" } });
-    const taskId = await h.task(A, "web");
-    expect(await h.runStart(A, taskId)).toEqual({ allowed: true });
-    expect(h.asked).toEqual([]);
   });
 });

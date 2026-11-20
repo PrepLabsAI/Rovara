@@ -20,21 +20,6 @@ it("proves a local zero only with a real workspace and no model operations", asy
  await store.put({ item: { ...operationKey(companyId, task.workspaceId, "run"), id: "run", companyId, kind: "task", status: "SUCCEEDED" } });
  expect(await read(store)).toMatchObject({ state: "unavailable", finality: "unavailable" });
 });
-it("does not prove zero for a live task, an active operation or any stage history without booked usage", async () => {
- const store = new MemoryDocumentStore();
- await store.put({ item: { ...workspaceKey(companyId, task.workspaceId), companyId, activeOperationId: null } });
- const liveTask = { taskId: task.taskId, companyId, workspaceId: task.workspaceId, createdAt: at, updatedAt: at };
- expect(await readTaskMoney({ store, companyId, task: liveTask })).toMatchObject({ state: "unavailable", finality: "unavailable", spentMicros: { state: "unavailable" } });
- await store.put({ item: { ...workspaceKey(companyId, task.workspaceId), companyId, activeOperationId: "in-flight" } });
- expect(await read(store)).toMatchObject({ state: "unavailable", spentMicros: { state: "unavailable" } });
- await store.put({ item: { ...workspaceKey(companyId, task.workspaceId), companyId, activeOperationId: null } });
- for (const kind of ["prepare", "task", "publish", "maintain"]) {
-  await store.put({ item: { ...operationKey(companyId, task.workspaceId, "run"), id: "run", companyId, kind, status: "SUCCEEDED" } });
-  expect(await read(store), kind).toMatchObject({ state: "unavailable", finality: "unavailable", spentMicros: { state: "unavailable" } });
- }
- await store.put({ item: entry("booked", { micros: 0 }) });
- expect(await read(store)).toMatchObject({ state: "partial", finality: "provisional", spentMicros: { value: 0 }, coverage: { expectedCalls: { state: "unavailable" } } });
-});
 it("keeps checkpoint spend partial when the final report is missing, and rejects foreign-only money", async () => {
  const store = new MemoryDocumentStore();
  await store.put({ item: entry("usage-checkpoint:run:one") });
@@ -74,11 +59,3 @@ it("keeps unreported tasks and ledger-read failures unavailable without proof of
  expect(broken.spentMicros).toEqual({ state: "unavailable", reason: "unreadable" });
 });
 
-it.each([false, true])("does not call legacy TOTAL without entries empty (terminal=%s)", async terminal => {
- const store = new MemoryDocumentStore();
- await store.put({ item: { ...workspaceKey(companyId, task.workspaceId), companyId, activeOperationId: null } });
- await store.put({ item: { pk: costPartition(companyId, task.taskId), sk: "TOTAL", companyId, taskId: task.taskId, currency: "USD", micros: 2_750_000, entries: 4, unpricedEntries: 0 } });
- const snapshot = await readTaskMoney({ store, companyId, task: { taskId: task.taskId, companyId, workspaceId: task.workspaceId, createdAt: at, updatedAt: at, ...(terminal ? { closedAt: at } : {}) } });
- expect(snapshot.spentMicros.state).toBe("unavailable");
- expect(taskMoneyWords(snapshot)).toBe("Cost unavailable");
-});

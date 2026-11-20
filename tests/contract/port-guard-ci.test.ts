@@ -72,7 +72,9 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
     expect(JSON.stringify(job)).not.toContain("secrets.");
     // the downloaded scanner is pinned by version and checked against a checksum before it runs
     expect(run).toMatch(/gitleaks\/releases\/download\/v\d+\.\d+\.\d+\//);
-    expect(run).toMatch(/[0-9a-f]{64} {2}\S+gitleaks\.tar\.gz" \| sha256sum --check/);
+    // #1200: the arm64 or the x64 build, for the runner, each with its pinned checksum.
+    expect(run).toMatch(/arch=arm64; sum=[0-9a-f]{64}; else arch=x64; sum=[0-9a-f]{64}; fi/);
+    expect(run).toContain('echo "${sum}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -');
   });
 
   it("installs the same pinned gitleaks in the test job, so the secret-scan tests in port-guard.test.ts run there and do not fail for a missing scanner", async () => {

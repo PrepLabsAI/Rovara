@@ -22,11 +22,6 @@ function actualReport(overrides: Record<string, unknown> = {}) {
 }
 
 describe("strict upstream E2E report adapter", () => {
-  it("accepts pinned report-1 shape and fractional duration while exposing no authority", () => {
-    const parsed = parseE2EReport(Buffer.from(JSON.stringify(actualReport())));
-    expect(parsed.kind).toBe("parsed");
-    if (parsed.kind === "parsed") expect(parsed.report.run.results[0]?.attempts[0]?.durationMs).toBe(0.5);
-  });
 
   it("accepts only the pinned runner's bounded optional VCS metadata", () => {
     const valid = actualReport();

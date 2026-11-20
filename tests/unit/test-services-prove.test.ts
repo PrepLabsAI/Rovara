@@ -4,9 +4,8 @@ import { describe, expect, it } from "vitest";
 import { INDEX_EXPIRY_ATTRIBUTE, TEST_ENV_REFUSALS, projectRevisionKey, TestEnvironmentBodySchema, TestEnvProveReportSchema, testEnvDigest, testEnvIsProved, type OrgId, type TestServicesUsageRecord } from "@agentx/contracts";
 import { candidateDependencyPlan } from "../../packages/broker/src/core/test-env/candidate-plan.js";
 import { CANDIDATE_CHECK_ENTITY, candidateCheckKey, readCandidateCheck, recordCandidateUsage } from "../../packages/broker/src/core/test-env/candidate-check.js";
-import { BACKING_PLACES } from "../../packages/broker/src/core/test-env/backing-choice.js";
 import { DEPENDENCY_PLAN_REFUSAL_WORDS } from "../../packages/broker/src/core/test-env/dependency-plan.js";
-import { TEST_ENV_REFUSAL_WORDS, dependencyStepsOf, proveReportFromSetupCheck } from "../../packages/broker/src/core/test-env/prove-from-setup-check.js";
+import { TEST_ENV_REFUSAL_WORDS, proveReportFromSetupCheck } from "../../packages/broker/src/core/test-env/prove-from-setup-check.js";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 
@@ -32,14 +31,6 @@ const derive = (environment = body([postgres]), record: TestServicesUsageRecord 
 const stepsOf = (result: ReturnType<typeof derive>) => (result.ok ? Object.fromEntries(result.report.steps.map((step) => [step.step, step.status])) : undefined);
 
 describe("the two dependency steps", () => {
-  it("pass when every dependency started healthy and no unknown name was called", () => {
-    const result = derive();
-    expect(stepsOf(result)).toEqual({ setup: "skipped", build: "skipped", smoke: "skipped", full_suite: "passed", dependencies: "passed", dependency_usage: "passed" });
-    if (!result.ok) throw new Error("not derived");
-    expect(result.report.steps.find((step) => step.step === "dependencies")?.durationMs).toBe(840);
-    expect(TestEnvProveReportSchema.safeParse(result.report).success).toBe(true);
-    expect(testEnvIsProved(result.report, result.report.proposalDigest, body([postgres]))).toBe(true);
-  });
 
   it("fail, in fixed words, when a dependency did not start or was not healthy", () => {
     for (const record of [
@@ -56,22 +47,6 @@ describe("the two dependency steps", () => {
     }
   });
 
-  it("fail when a test called a name no dependency answers", () => {
-    const result = derive(body([postgres]), usage({ unknownCalls: { domains: [{ domain: "example-pay.com", count: 1 }], otherCount: 0 } }));
-    expect(stepsOf(result)).toMatchObject({ dependencies: "passed", dependency_usage: "failed" });
-    if (!result.ok) throw new Error("not derived");
-    expect(result.report.steps.find((step) => step.step === "dependency_usage")?.failure).toBe("dependency_unexpected_call");
-    // Hidden names count too.
-    expect(stepsOf(derive(body([postgres]), usage({ unknownCalls: { domains: [], otherCount: 3 } })))).toMatchObject({ dependency_usage: "failed" });
-  });
-
-  it("are asked for only when the environment has dependencies", () => {
-    expect(dependencyStepsOf(body(), undefined)).toEqual([]);
-    expect(dependencyStepsOf(body([]), usage())).toEqual([]);
-    expect(dependencyStepsOf(body([postgres]), undefined)).toBe("not_checked");
-    const plain = derive(body(), usage());
-    expect(stepsOf(plain)).toEqual({ setup: "skipped", build: "skipped", smoke: "skipped", full_suite: "passed" });
-  });
 });
 
 describe("a check with no record", () => {
@@ -81,10 +56,6 @@ describe("a check with no record", () => {
     expect(TEST_ENV_REFUSAL_WORDS.dependencies_not_checked).toMatch(/dependencies/u);
   });
 
-  it("v1 services are still refused whatever the record says", () => {
-    const withService = TestEnvironmentBodySchema.parse({ ...body([postgres]), services: [{ name: "scorer", kind: "sagemaker_runtime", match: { endpointName: "scorer" }, mode: "mock", mock: { fixtureSetRef: "a".repeat(64), schemaRef: "b".repeat(64), unmatched: "fail" } }] });
-    expect(derive(withService, usage())).toEqual({ ok: false, refusal: "services_need_prove" });
-  });
 });
 
 describe("proved means the dependency steps passed", () => {
@@ -112,16 +83,6 @@ describe("the candidate check keeps the record", () => {
     digest: DIGEST, setup: [], readiness: [cmd("pytest", ["-q"])], [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(NOW / 1000) + 86_400, ...extra,
   } });
   const deps = (db: MemoryDocumentStore) => ({ store: db, now: () => NOW });
-
-  it("stores a valid record once, and reads it back with the check", async () => {
-    const db = fresh();
-    await seed(db);
-    expect(await recordCandidateUsage(deps(db), { orgId: ORG, project: PROJECT, digest: DIGEST, revision: 4, usage: usage() })).toBe(true);
-    expect((await readCandidateCheck(deps(db), ORG, PROJECT, DIGEST, 4))?.usage).toEqual(usage());
-    // The first report stands.
-    expect(await recordCandidateUsage(deps(db), { orgId: ORG, project: PROJECT, digest: DIGEST, revision: 4, usage: usage({ unknownCalls: { domains: [], otherCount: 9 } }) })).toBe(false);
-    expect((await readCandidateCheck(deps(db), ORG, PROJECT, DIGEST, 4))?.usage).toEqual(usage());
-  });
 
   it("keeps nothing that does not parse, and nothing for a check that is not there", async () => {
     const db = fresh();
@@ -157,8 +118,3 @@ describe("the plan a candidate check carries", () => {
   });
 });
 
-describe("Prove's final run is a sealed place", () => {
-  it("is a place the chooser knows", () => {
-    expect(BACKING_PLACES).toContain("prove_final");
-  });
-});

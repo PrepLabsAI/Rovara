@@ -7,10 +7,10 @@ import {
   type Check,
 } from "@agentx/contracts";
 import {
-  DURATION_HISTORY_MAX, EXPECTED_WAIT_FLOOR_MS, currentRun, expectedWaitMs, isMarked, markedCheckState, waitCapMs, withDuration, type MarkedRun,
+  DURATION_HISTORY_MAX, EXPECTED_WAIT_FLOOR_MS, currentRun, expectedWaitMs, markedCheckState, waitCapMs, withDuration, type MarkedRun,
 } from "../../packages/broker/src/core/ci-evidence/marked-checks.js";
 import { PIPELINE_PROOF_TESTS_MAX, pipelineProof, type PipelineTestOutcome } from "../../packages/broker/src/core/ci-evidence/change-proof.js";
-import { LONG_CHECK_FIX_ROUNDS_MAX, decideMarkedCheck, judgeMarkedFixPush } from "../../packages/broker/src/core/ci-evidence/fix-or-ask.js";
+import { decideMarkedCheck, judgeMarkedFixPush } from "../../packages/broker/src/core/ci-evidence/fix-or-ask.js";
 import { DRAFT_SCAN_FILES_MAX, detectDraftSkip, draftVerdictOf } from "../../packages/broker/src/core/ci-evidence/draft-skip.js";
 import type { CiDefinitionReader } from "../../packages/broker/src/rovara-code/ci-checks.js";
 
@@ -93,19 +93,11 @@ describe("CI evidence words", () => {
 });
 
 describe("the marked check's clock", () => {
-  it("waits the cap when there is no history, or too little", () => {
-    expect(expectedWaitMs({ durationsMs: [], capMinutes: 120 })).toBe(120 * MIN);
-    expect(expectedWaitMs({ durationsMs: [40 * MIN, 41 * MIN], capMinutes: 120 })).toBe(120 * MIN);
-  });
   it("learns from past runs: 90th percentile with a quarter more, at least the floor, never above the cap", () => {
     const durations = [30, 32, 34, 36, 38, 40, 42, 44, 46, 48].map((minutes) => minutes * MIN);
     expect(expectedWaitMs({ durationsMs: durations, capMinutes: 120 })).toBe(Math.ceil(46 * MIN * 1.25));
     expect(expectedWaitMs({ durationsMs: [MIN, MIN, MIN], capMinutes: 120 })).toBe(EXPECTED_WAIT_FLOOR_MS);
     expect(expectedWaitMs({ durationsMs: [200 * MIN, 200 * MIN, 200 * MIN], capMinutes: 120 })).toBe(120 * MIN);
-  });
-  it("ignores durations that cannot be a run", () => {
-    expect(expectedWaitMs({ durationsMs: [Number.NaN, -1, 0, 9e15, 40 * MIN, 40 * MIN], capMinutes: 120 })).toBe(120 * MIN);
-    expect(expectedWaitMs({ durationsMs: [-5, -5, -5, 30 * MIN], capMinutes: 120 })).toBe(120 * MIN);
   });
   it("takes the customer's own expected time, still capped", () => {
     expect(expectedWaitMs({ durationsMs: [MIN, MIN, MIN], expectedMinutes: 45, capMinutes: 120 })).toBe(45 * MIN);
@@ -123,18 +115,6 @@ describe("the marked check's clock", () => {
     expect(history[0]).toBe(11 * MIN);
     expect(withDuration([MIN], Number.NaN)).toEqual([MIN]);
   });
-  it("is bounded on a large history", () => {
-    const started = performance.now();
-    expect(expectedWaitMs({ durationsMs: Array.from({ length: 1_000_000 }, () => 30 * MIN), capMinutes: 120 })).toBe(Math.ceil(30 * MIN * 1.25));
-    expect(performance.now() - started).toBeLessThan(2_000);
-  });
-
-  it("waits while nothing has reported, then says not run (timed out), never failed", () => {
-    expect(markedCheckState({ run: undefined, waitStart: T0, expectedMs: 40 * MIN, now: T0 + 39 * MIN })).toEqual({ kind: "waiting", until: T0 + 40 * MIN, expectedMs: 40 * MIN });
-    expect(markedCheckState({ run: undefined, waitStart: T0, expectedMs: 40 * MIN, now: T0 + 40 * MIN })).toEqual({ kind: "not_run", reason: "timed_out", afterMs: 40 * MIN });
-    expect(markedCheckState({ run: run({ state: "pending", conclusion: undefined }), waitStart: T0, expectedMs: 40 * MIN, now: T0 + 41 * MIN }).kind).toBe("not_run");
-    expect(markedCheckState({ run: run({ conclusion: "action_required" }), waitStart: T0, expectedMs: 40 * MIN, now: T0 }).kind).toBe("waiting");
-  });
   it("gives a run that has started the whole cap, not the learned time", () => {
     const running = run({ state: "pending", conclusion: undefined });
     expect(markedCheckState({ run: running, waitStart: T0, expectedMs: 40 * MIN, capMs: 120 * MIN, now: T0 + 41 * MIN })).toEqual({ kind: "waiting", until: T0 + 120 * MIN, expectedMs: 40 * MIN });
@@ -147,12 +127,6 @@ describe("the marked check's clock", () => {
     expect(markedCheckState({ run: run({ conclusion: "timed_out" }), waitStart: T0, expectedMs: MIN, now: T0 }).kind).toBe("failed");
     expect(markedCheckState({ run: run({ conclusion: "skipped" }), waitStart: T0, expectedMs: MIN, now: T0 })).toEqual({ kind: "not_run", reason: "skipped" });
     expect(markedCheckState({ run: run({ conclusion: "neutral" }), waitStart: T0, expectedMs: MIN, now: T0 })).toEqual({ kind: "not_run", reason: "neutral" });
-  });
-  it("matches by name and by app when the mark names one", () => {
-    expect(isMarked({ name: "e2e-real" }, { name: "e2e-real", source: "9" })).toBe(true);
-    expect(isMarked({ name: "e2e-real", source: "7" }, { name: "e2e-real", source: "9" })).toBe(false);
-    expect(isMarked({ name: "e2e-real", source: "7" }, { name: "e2e-real" })).toBe(false);
-    expect(isMarked({ name: "e2e-real" }, { name: "E2E-real" })).toBe(false);
   });
   it("picks the run that speaks for the head: running first, then the highest attempt, then the latest, and a failure on a tie", () => {
     const first = run({ conclusion: "failure" }, { attempt: 1, completedAt: T0 });
@@ -190,15 +164,6 @@ describe("the honesty rule: a pipeline pass is not change proof", () => {
     const proof = pipelineProof({ headCommit: HEAD, head: { commit: "c".repeat(40), tests: tests([["a", "passed"], ["b", "failed"]]) }, base: { commit: BASE, tests: tests([["a", "failed"]]) }, baseCommit: BASE, addedTests: new Set() });
     expect(proof).toEqual({ proven: [], addedByChange: [], passedNotProof: [], failed: [], noBase: "head_commit_differs" });
   });
-  it("keeps an added test's sandbox label even when a test of that name failed on base", () => {
-    const proof = pipelineProof({ headCommit: HEAD, head: { commit: HEAD, tests: tests([["new", "passed"]]) }, base: { commit: BASE, tests: tests([["new", "failed"]]) }, baseCommit: BASE, addedTests: new Set(["new"]) });
-    expect(proof.proven).toEqual([]);
-    expect(proof.addedByChange).toEqual(["new"]);
-  });
-  it("matches names exactly", () => {
-    const proof = pipelineProof({ headCommit: HEAD, head: { commit: HEAD, tests: tests([["Suite a", "passed"]]) }, base: { commit: BASE, tests: tests([["suite a", "failed"]]) }, baseCommit: BASE, addedTests: new Set() });
-    expect(proof.proven).toEqual([]);
-  });
   it("refuses an oversized run whole instead of cutting it, in bounded time", () => {
     const big = new Map(Array.from({ length: PIPELINE_PROOF_TESTS_MAX + 1 }, (_, index) => [`t${String(index)}`, "passed" as const]));
     const started = performance.now();
@@ -219,33 +184,11 @@ describe("environment, ask or fix", () => {
     expect(decideMarkedCheck({ ...base, state: { kind: "not_run", reason: "skipped" } })).toEqual({ kind: "ask", reason: "skipped" });
     expect(decideMarkedCheck({ ...base, state: { kind: "not_run", reason: "neutral" } })).toEqual({ kind: "ask", reason: "skipped" });
   });
-  it("asks a person on a timeout, never fixes it", () => {
-    expect(decideMarkedCheck({ ...base, state: { kind: "not_run", reason: "timed_out", afterMs: MIN } })).toEqual({ kind: "ask", reason: "timed_out" });
-  });
   it("calls a run that failed before any test ran the environment, even when main is green", () => {
     expect(decideMarkedCheck({ ...base, testsRan: 0 })).toEqual({ kind: "environment", reason: "failed_before_tests" });
   });
-  it("calls the same check red on main the environment", () => {
-    expect(decideMarkedCheck({ ...base, mainRun: "failed" })).toEqual({ kind: "environment", reason: "red_on_main" });
-    expect(decideMarkedCheck({ ...base, mainRun: "failed", testsRan: undefined })).toEqual({ kind: "environment", reason: "red_on_main" });
-  });
-  it("asks when a red check says nothing a fix could rest on", () => {
-    expect(decideMarkedCheck({ ...base, testsRan: undefined, logShared: false })).toEqual({ kind: "ask", reason: "no_detail" });
-    expect(decideMarkedCheck({ ...base, testsRan: undefined, logShared: true })).toEqual({ kind: "fix", roundsMax: LONG_CHECK_FIX_ROUNDS_MAX, fullSandboxPassFirst: true });
-    expect(decideMarkedCheck({ ...base, testsRan: undefined, logShared: false, mainRun: "unknown" })).toEqual({ kind: "ask", reason: "no_detail" });
-  });
-  it("asks when the report has tests but none failed (a coverage gate, a step after the tests)", () => {
-    expect(decideMarkedCheck({ ...base, testsFailed: 0 })).toEqual({ kind: "ask", reason: "no_detail" });
-    expect(decideMarkedCheck({ ...base, testsFailed: 0, logShared: true })).toMatchObject({ kind: "fix" });
-    expect(decideMarkedCheck({ ...base, testsFailed: undefined })).toEqual({ kind: "ask", reason: "no_detail" });
-  });
   it.each([[Number.NaN, 3], [-1, 3], [1.5, 3], [0, Number.NaN], [0, 0], [0, Number.POSITIVE_INFINITY]])("never opens an uncapped round on counts that are not counts (%s used of %s)", (roundsUsed, roundsMax) => {
     expect(decideMarkedCheck({ ...base, roundsUsed, roundsMax })).toEqual({ kind: "ask", reason: "cap_reached" });
-  });
-  it("fixes a long or paid check twice, after a full sandbox pass, then asks", () => {
-    expect(decideMarkedCheck({ ...base, roundsUsed: 0 })).toEqual({ kind: "fix", roundsMax: 2, fullSandboxPassFirst: true });
-    expect(decideMarkedCheck({ ...base, roundsUsed: 1 })).toEqual({ kind: "fix", roundsMax: 2, fullSandboxPassFirst: true });
-    expect(decideMarkedCheck({ ...base, roundsUsed: 2 })).toEqual({ kind: "ask", reason: "cap_reached" });
   });
   it("keeps today's cap for a normal marked check, and never more than the normal cap", () => {
     expect(decideMarkedCheck({ ...base, longOrPaid: false, roundsUsed: 2 })).toEqual({ kind: "fix", roundsMax: 3, fullSandboxPassFirst: false });

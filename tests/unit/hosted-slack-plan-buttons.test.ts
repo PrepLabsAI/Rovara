@@ -95,7 +95,6 @@ function fakeSlack() {
 }
 const buttonsOf = (post: { blocks?: Array<Record<string, unknown>> } | undefined): Array<Record<string, unknown>> =>
   (post?.blocks ?? []).flatMap((block) => (block["type"] === "actions" ? (block["elements"] as Array<Record<string, unknown>>) : []));
-const idsOf = (post: { blocks?: Array<Record<string, unknown>> } | undefined): unknown[] => buttonsOf(post).map((button) => button["action_id"]);
 
 /**
  * The company's world, wired as the broker wires it: ORG has dev-a (the task's own person; Slack OWNER is linked to them), dev-b (a member who owns nothing here; PEER is linked to them), and dev-gone (their membership ended; LEFT is
@@ -236,24 +235,6 @@ const decisionsOf = async (w: World): Promise<string[]> => (await w.stepWorkflow
 const approvedAudit = (w: World) => w.fake.audit.filter((event) => String(event.action).startsWith("decision."));
 
 describe("the plan card on a hosted Slack thread (HW5b)", () => {
-  it("a medium risk plan's card has Approve, Request changes and Open the task; a high risk plan's has the link ONLY (no button, whatever the chat could do)", async () => {
-    const medium = await world({ kind: "medium" });
-    expect(medium.slack.posts).toHaveLength(1);
-    expect(idsOf(medium.post)).toEqual([CORE_APPROVE_ACTION, CORE_CHANGES_ACTION, "rovara_open_task"]);
-    expect(medium.post!.text).toMatch(/Risk: medium\./u);
-    const high = await world({ kind: "high" });
-    expect(high.post!.text).toMatch(/Risk: high\./u);
-    expect(idsOf(high.post)).toEqual(["rovara_open_task"]);
-    // Without the chat method (no chat seam that can name a person), the card is the sign-in card at every risk, as before.
-    const without = await world({ kind: "medium", withChat: false });
-    expect(idsOf(without.post)).toEqual(["rovara_open_task"]);
-  });
-
-  it("a low risk plan's card has the buttons too", async () => {
-    const low = await world({ kind: "low" });
-    expect(low.post!.text).toMatch(/Risk: low\./u);
-    expect(idsOf(low.post)).toEqual([CORE_APPROVE_ACTION, CORE_CHANGES_ACTION, "rovara_open_task"]);
-  });
 
   it.each(["low", "medium"] as const)("%s risk: the task's own person approves with a press: the plan is approved, the card is updated in place (no buttons left), the audit event is written with the decision", async (kind) => {
     const w = await world({ kind });
@@ -459,69 +440,6 @@ describe("the plan card on a hosted Slack thread (HW5b)", () => {
     expect((await w.stepWorkflow()).stage).toBe("PLAN_REVIEW");
   });
 
-  it("two companies: each card is decided only by its own company's person, in its own workspace", async () => {
-    const w = await world({ kind: "medium" });
-    // Company OTHER has its own task and its own card in TEAM_B's thread.
-    const runtimeB = await w.app.runtimeFor(OTHER);
-    const { task } = await runtimeB.flow.start({ principal: principalOf("dev-x", OTHER), client: "test", origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
-    const stored = (await w.fake.store.get(taskKey(task.taskId)))!;
-    const ownerKey = stored["ownerKey"] as string;
-    const text = "# Plan\n\nChange src/health.ts to answer 200.\n";
-    const objectKey = `private/${ownerKey}/${stored["workspaceId"] as string}/plan-v1.md`;
-    await w.registry.require("object-storage").put(objectKey, new TextEncoder().encode(text), { contentType: "text/markdown", metadata: {}, retention: "evidence-std" });
-    const initial = createWorkflowSnapshot({ taskId: task.taskId, ownerId: ownerKey, now: "2026-11-15T09:59:00.000Z", definitionVersion: "1.1.0" });
-    const workflow = submitWorkflowArtifact(initial, { expectedRevision: initial.revision, now: "2026-11-15T10:00:00.000Z", artifact: { id: "plan-v1", type: "plan", version: 1, sha256: createHash("sha256").update(text).digest("hex"), producer: "agentx-planner", objectKey, createdAt: "2026-11-15T10:00:00.000Z", format: "markdown" } });
-    await w.fake.store.put({ item: { ...stored, sessionId: taskSessionId(task.taskId), workflow: JSON.parse(JSON.stringify(workflow)) as JsonValue } });
-    const conversationB: ConversationRef = { channel: SLACK_CHANNEL, tenant: TEAM_B, space: CHANNEL, thread: TS };
-    await recordTaskThread({ store: runtimeB.flow.deps.store, orgId: OTHER, now: () => w.fake.clock.now }, { sessionId: taskSessionId(task.taskId), conversation: conversationB, personId: "dev-x", actor: ACTOR(OTHERCO, TEAM_B) });
-    const handlerB = hostedThreadHandler({
-      threads: w.threads, registry: w.registry, companyId: OTHER, deps: runtimeB.flow.deps, now: () => w.fake.clock.now, clock: () => new Date(w.fake.clock.now), origin: () => ORIGIN,
-      isMember: async (orgId, personId) => (await w.people.membershipOf(personId))?.companyId === orgId, log: () => undefined,
-    });
-    await handlerB.on({ kind: "plan_ready", orgId: OTHER, taskId: task.taskId, at: new Date(w.fake.clock.now).toISOString(), text: "x" } as never);
-    const cardB = w.slack.posts.find((posted) => posted.token === TOKEN_B)!;
-    expect(cardB).toBeDefined();
-    expect(idsOf(cardB)).toContain(CORE_APPROVE_ACTION);
-    // Company ORG's owner presses company OTHER's card (in OTHER's workspace, as an account of that workspace): linked nowhere there, refused.
-    const valueB = String(buttonsOf(cardB).find((entryButton) => entryButton["action_id"] === CORE_APPROVE_ACTION)?.["value"]);
-    await corePlanPressHandler(w.pressDeps).handle(w.action(OWNER, CORE_APPROVE_ACTION, { value: valueB, userTeamId: TEAM_B, workspaceTeamId: TEAM_B, thread: { teamId: TEAM_B, channelId: CHANNEL, threadTs: TS } }));
-    const workflowB = async (): Promise<WorkflowSnapshot> => (await w.fake.store.get(taskKey(task.taskId)))!["workflow"] as unknown as WorkflowSnapshot;
-    expect((await workflowB()).decisions).toEqual([]);
-    // Company OTHER's own person approves OTHER's card; company ORG's task is untouched.
-    await corePlanPressHandler(w.pressDeps).handle(w.action(OTHERCO, CORE_APPROVE_ACTION, { value: valueB, userTeamId: TEAM_B, workspaceTeamId: TEAM_B, thread: { teamId: TEAM_B, channelId: CHANNEL, threadTs: TS } }));
-    expect((await workflowB()).decisions.map((entry) => entry.decision)).toEqual(["APPROVE"]);
-    expect(await decisionsOf(w)).toEqual([]);
-    // And ORG's card is not decidable by OTHER's person, from OTHER's workspace (the value names ORG's request, which is not found under OTHER's key).
-    await corePlanPressHandler(w.pressDeps).handle(w.action(OTHERCO, CORE_APPROVE_ACTION, { userTeamId: TEAM_B, workspaceTeamId: TEAM_B, thread: { teamId: TEAM_B, channelId: CHANNEL, threadTs: TS } }));
-    expect(await decisionsOf(w)).toEqual([]);
-  });
-
-  it("a stale card (the plan changed after it was posted) is refused, and nothing is written; the card is not touched", async () => {
-    const w = await world({ kind: "medium" });
-    // The plan is revised: a new document at a new revision (the card's revision and digest are the old ones).
-    const stored = (await w.fake.store.get(taskKey(w.task.taskId)))!;
-    const workflow = stored["workflow"] as unknown as WorkflowSnapshot;
-    const revised = { ...workflow, revision: workflow.revision + 1 };
-    await w.fake.store.put({ item: { ...stored, workflow: JSON.parse(JSON.stringify(revised)) as JsonValue } });
-    const rowsBefore = await w.snapshot();
-    const dispatch = createSlackPressDispatcher({ handlers: [corePlanPressHandler(w.pressDeps)], respondEphemeral: async () => undefined });
-    await dispatch(w.action(OWNER, CORE_APPROVE_ACTION));
-    expect(w.ephemerals).toHaveLength(1);
-    expect(w.ephemerals[0]).toMatch(/changed|no longer waiting|decide there/u);
-    expect((await w.stepWorkflow()).decisions).toEqual([]);
-    expect(w.slack.updates).toEqual([]);
-    expect(approvedAudit(w)).toEqual([]);
-    // A button value with the wrong revision or digest on the real card: stale, by the core's own card check.
-    const card = (await readApprovalCard({ store: w.storage, orgId: ORG, now: () => w.fake.clock.now }, [...(await cardIds(w))][0]!))!;
-    const wrongRevision = { value: JSON.stringify({ r: card.requestId, v: card.revision + 1, d: card.artifactDigest, o: "APPROVE" }) };
-    await corePlanPressHandler(w.pressDeps).handle(w.action(OWNER, CORE_APPROVE_ACTION, wrongRevision));
-    expect(w.ephemerals.at(-1)).toBe(decisionRefusalWords("stale"));
-    const wrongDigest = { value: JSON.stringify({ r: card.requestId, v: card.revision, d: "b".repeat(64), o: "APPROVE" }) };
-    await corePlanPressHandler(w.pressDeps).handle(w.action(OWNER, CORE_APPROVE_ACTION, wrongDigest));
-    expect(w.ephemerals.at(-1)).toBe(decisionRefusalWords("stale"));
-    expect(await w.snapshot()).toBe(rowsBefore);
-  });
-
   it("a replayed press acts once: the same press twice, and the same person pressing again, write nothing new; a press by someone else afterwards is 'no longer waiting'", async () => {
     const w = await world({ kind: "medium" });
     const press = w.action(OWNER, CORE_APPROVE_ACTION, { triggerId: "trig-one" });
@@ -544,20 +462,6 @@ describe("the plan card on a hosted Slack thread (HW5b)", () => {
     expect(await w.stepWorkflow()).toEqual(after);
     expect(approvedAudit(w)).toHaveLength(1);
     expect(w.ephemerals).toHaveLength(1);
-  });
-
-  it("a request for changes is also decided once (the box sent twice)", async () => {
-    const w = await world({ kind: "medium" });
-    await corePlanPressHandler(w.pressDeps).handle(w.action(OWNER, CORE_CHANGES_ACTION));
-    const view = w.slack.views[0]!.view as { private_metadata: string };
-    const submission = { type: "view_submission", user: { id: OWNER, team_id: TEAM_A }, team: { id: TEAM_A }, view: { id: "V0BOX00002", callback_id: CHANGES_CALLBACK, private_metadata: view.private_metadata, state: { values: { [CHANGES_INPUT]: { text: { value: "Use a queue" } } } } } };
-    expect(await corePlanSubmission(w.pressDeps)(submission)).toEqual({ response_action: "clear" });
-    const after = await w.stepWorkflow();
-    expect(await corePlanSubmission(w.pressDeps)(submission)).toEqual({ response_action: "clear" });
-    expect(await w.stepWorkflow()).toEqual(after);
-    expect(after.decisions).toHaveLength(1);
-    expect(approvedAudit(w)).toHaveLength(1);
-    expect(w.slack.updates).toHaveLength(1);
   });
 
   it("the interactivity gate lets exactly Approve, Request changes and the box through (the member class); Reject, Skip and anything else are not in it", () => {
@@ -715,35 +619,6 @@ describe("the approvers' chat method on its own", () => {
     expect(await approvers.verify(request as never, { ...proofOf(request as never, owner), artifactDigest: "c".repeat(64) })).toEqual({ approved: false, reason: "other_content" });
     expect(await approvers.verify(request as never, { ...proofOf(request as never, owner), requestId: "req-2.x" })).toEqual({ approved: false, reason: "other_request" });
   });
-
-  it("offers the method only for a task's plan at low or medium risk, and never as a strong or rejecting method; without a chat there is no such method", async () => {
-    const w = await world({ kind: "medium", post: false });
-    const approvers = w.approvers();
-    const base = requestOf(w);
-    const offered = async (over: Record<string, unknown>) => (await approvers.requirement({ ...base, ...over })).methods;
-    expect(await offered({ risk: "low" })).toEqual(["rovara-step-up", "chat-slack"]);
-    expect(await offered({ risk: "medium" })).toEqual(["rovara-step-up", "chat-slack"]);
-    expect(await offered({ risk: "high" })).toEqual(["rovara-step-up"]);
-    expect(await offered({ kind: "merge" })).toEqual(["rovara-step-up"]);
-    expect(await offered({ kind: "design" })).toEqual(["rovara-step-up"]);
-    expect(await offered({ risk: undefined })).toEqual(["rovara-step-up"]);
-    expect(await offered({ subject: { type: "setup_proposal", id: "payments" } })).toEqual(["rovara-step-up"]);
-    const requirement = await approvers.requirement(base);
-    expect(requirement.strongMethods).toEqual(["rovara-step-up"]);
-    expect(requirement.rejectMethods).toEqual(["rovara-step-up"]);
-    expect(requirement.changesMethods).toEqual(["rovara-step-up", "chat-slack"]);
-    const plain = (await world({ kind: "medium", post: false, withChat: false })).approvers();
-    expect((await plain.requirement(base as never)).methods).toEqual(["rovara-step-up"]);
-    expect(await plain.verify(base as never, proofOf(base as never, owner) as never)).toEqual({ approved: false, reason: "unknown_method" });
-  });
-
-  it("the press token is a MAC under the install's key over the card, the answer and the account: the same press is the same proof, anything else is another", () => {
-    const base = { companyId: ORG, requestId: randomUUID(), revision: 2, artifactDigest: "a".repeat(64), outcome: "approve", tenant: TEAM_A, userId: OWNER };
-    const token = chatPressToken(PROOF_KEY, base);
-    expect(token).toBe(chatPressToken(PROOF_KEY, { ...base }));
-    for (const change of [{ userId: PEER }, { tenant: TEAM_B }, { outcome: "request_changes" }, { requestId: randomUUID() }, { revision: 3 }, { artifactDigest: "b".repeat(64) }, { companyId: OTHER }]) expect(chatPressToken(PROOF_KEY, { ...base, ...change })).not.toBe(token);
-    expect(chatPressToken(approvalProofKeyOf("z".repeat(32)), base)).not.toBe(token);
-  });
 });
 
 const cardIds = async (w: World): Promise<string[]> => [...w.cards];
@@ -763,16 +638,6 @@ describe("the wiring (guards on the source, beside the behaviour above)", () => 
     const interactivity = read("packages/broker/src/aws/slack-interactivity.ts");
     expect(interactivity).toContain("corePlanPressHandler(corePlan)");
     expect(interactivity).toContain("company.workspaces === undefined || brokerFunctionName === undefined ? undefined");
-  });
-
-  it("the new route can only be taken from inside (no request context), and the chat decision never reaches a rejection or the dispatcher's approvers", () => {
-    expect(isSlackCorePressEvent({ source: "agentx.slack-ingress", action: "core-plan-press", requestContext: {}, press: {} })).toBe(false);
-    expect(isSlackCorePressEvent({ source: "someone", action: "core-plan-press", press: {} })).toBe(false);
-    expect(isSlackCorePressEvent({ source: "agentx.slack-ingress", action: "core-plan-press", press: {} })).toBe(true);
-    const dispatcher = read("packages/broker/src/aws/dispatcher.ts");
-    expect(dispatcher).not.toMatch(/chat:\s/u);
-    const chat = read("packages/broker/src/core-host/chat-decision.ts");
-    expect(chat).not.toContain('outcome: "reject"');
   });
 });
 

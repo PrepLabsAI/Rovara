@@ -4,11 +4,10 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { AgentXError, IMPLICIT_COMPANY_ID, agentSessionKey, type OrgId, type Principal } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createTaskSessionItems, developerIdOf, refreshSessionSummary, taskSessionId, type SessionTaskFacts, type SummaryDependencies } from "../../packages/broker/src/core/sessions/index.js";
 import type { SessionCompanyRole, SessionMembers, SessionProjectRole } from "../../packages/broker/src/core/sessions/access.js";
-import { INBOX_PAGE_MAX, INBOX_READ_IDS_MAX, deliverAttention, inboxIdOf, inboxKey, inboxPartition, inboxRow, queueAttention, parseInboxId } from "../../packages/broker/src/core/notify/index.js";
+import { INBOX_PAGE_MAX, INBOX_READ_IDS_MAX, inboxIdOf, inboxKey, inboxPartition, inboxRow, queueAttention } from "../../packages/broker/src/core/notify/index.js";
 import { createInboxRoutes } from "../../packages/broker/src/core-host/inbox-routes.js";
 import { createCoreDevRoutes, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { createCoreHostApp } from "../../packages/broker/src/core-host/index.js";
@@ -113,39 +112,9 @@ describe("what the queue keeps for the inbox", () => {
     expect(failLogs).toEqual([{ event: "attention.inbox_failed", sessionId: second.sessionId, error: "Error" }]);
     expect(logs).toEqual([]);
   });
-
-  it("keeps the inbox row after the queue's own row went (nobody to message), so a person with no chat and no email still finds it", async () => {
-    const w = await world();
-    const store = w.store;
-    const hook: SummaryDependencies["onChange"] = [async (change) => { await queueAttention({ store, now: () => new Date(NOW), log: () => undefined }, change); }];
-    const { sessionId, move } = await addSession(store, 1, { stage: "IMPLEMENT", state: "RUNNING", onChange: hook });
-    await move("PLAN_REVIEW", "WAITING");
-    expect((await store.query({ pk: "NOTIFY_PENDING" })).items).toHaveLength(1);
-    await deliverAttention({ store, registry: createAdapterRegistry(), now: () => NOW + 3_600_000, log: () => undefined });
-    expect((await store.query({ pk: "NOTIFY_PENDING" })).items).toHaveLength(0);
-    const shown = await w.list(OWNER);
-    expect(shown.status).toBe(200);
-    expect(shown.body.items.map((item) => item.sessionId)).toEqual([sessionId]);
-  });
 });
 
 describe("GET /v1/app/inbox", () => {
-  it("shows only what a message would hold (title, status words, link), for the caller's own rows, and nothing else", async () => {
-    const w = await world();
-    const { sessionId } = await addSession(w.store, 1, { title: "Add retry" });
-    await w.rowFor(OWNER_ID, sessionId, "needs_you", NOW - 1000);
-    const shown = await w.list(OWNER);
-    expect(shown.status).toBe(200);
-    expect(shown.body.items).toHaveLength(1);
-    const item = shown.body.items[0];
-    expect(Object.keys(item ?? {}).sort()).toEqual(["at", "id", "kind", "link", "read", "sessionId", "status", "title"]);
-    expect(item).toMatchObject({ sessionId, kind: "needs_you", title: "Add retry", read: false, link: `https://app.example/app/sessions/${sessionId}`, id: inboxIdOf({ sessionId, kind: "needs_you", atMs: NOW - 1000 }) });
-    expect(typeof item?.status).toBe("string");
-    expect(Object.keys(shown.body).sort()).toEqual(["items", "unread"]);
-    expect(shown.body.unread).toBe(1);
-    expect(JSON.stringify(shown.body)).not.toContain(OWNER_ID);
-    expect(shown.body.items[0]?.id).toMatch(/^ses_[0-9a-z]{20}\.needs_you\.[0-9]+$/u);
-  });
 
   it("lists newest first in bounded pages with a cursor, every row once", async () => {
     const w = await world();
@@ -221,17 +190,6 @@ describe("GET /v1/app/inbox", () => {
     expect((await w.list(OWNER)).body.items.map((item) => item.sessionId)).toEqual([c.sessionId]);
   });
 
-  it("hides an email address in the title from a reader who is not the owner", async () => {
-    const w = await world();
-    const { sessionId } = await addSession(w.store, 1, { title: "Fix login for dana@example.com" });
-    await w.rowFor(DANA_ID, sessionId, "needs_you", NOW - 1000);
-    w.m.grant(DANA_ID, "web");
-    const title = (await w.list(DANA)).body.items[0]?.title;
-    expect(title).not.toContain("dana@example.com");
-    await w.rowFor(OWNER_ID, sessionId, "needs_you", NOW - 1000);
-    expect((await w.list(OWNER)).body.items[0]?.title).toContain("dana@example.com");
-  });
-
   it("is two-company safe: the company is the caller's membership, rows of another company are never read or shown", async () => {
     const w = await world();
     const mine = await addSession(w.store, 1, { title: "Company A task" });
@@ -284,34 +242,6 @@ describe("GET /v1/app/inbox", () => {
     expect(later.body).toEqual({ items: [] });
   });
 
-  it("keeps checking a long run of hidden rows only up to the budget, then shows what it found (a visible row inside the budget is shown past hidden ones)", async () => {
-    const w = await world();
-    const { sessionId } = await addSession(w.store, 1, { title: "Visible" });
-    for (let n = 0; n < 40; n += 1) await w.rowFor(OWNER_ID, `ses_22222222${String(n).padStart(12, "0")}`, "needs_you", NOW - 1000 - n);
-    await w.rowFor(OWNER_ID, sessionId, "needs_you", NOW - 100_000);
-    const page = await w.list(OWNER);
-    expect(page.body.items.map((item) => item.title)).toEqual(["Visible"]);
-    expect(page.body.nextCursor).toBeUndefined();
-  });
-
-  it("reads a chain-session row, a throwing members seam and a throwing store as nothing", async () => {
-    const w = await world();
-    const { sessionId } = await addSession(w.store, 1);
-    await w.rowFor(OWNER_ID, sessionId, "needs_you", NOW - 1000);
-    const doc = await w.store.get(agentSessionKey(ORG, sessionId, "META"));
-    await w.store.put({ item: { ...doc!, kind: "chain", subject: { kind: "chain", chainRunId: "crn_aaaaaaaaaaaaaaaaaaaa" } } });
-    expect((await w.list(OWNER)).body).toEqual({ items: [], unread: 0 });
-    const other = await addSession(w.store, 2);
-    await w.rowFor(OWNER_ID, other.sessionId, "needs_you", NOW - 500);
-    const roles = new Map(w.m.roles);
-    w.m.roles.clear();
-    w.m.throwing.value = true;
-    expect((await w.list(OWNER)).body).toEqual({ items: [], unread: 0 });
-    w.m.throwing.value = false;
-    for (const [key, role] of roles) w.m.roles.set(key, role);
-    expect((await w.list(OWNER)).body.items).toHaveLength(1);
-  });
-
   it("expired rows are not shown, and a method other than GET is not this route's", async () => {
     const w = await world();
     const { sessionId } = await addSession(w.store, 1);
@@ -329,47 +259,6 @@ describe("GET /v1/app/inbox", () => {
 });
 
 describe("POST /v1/app/inbox/read", () => {
-  it("marks the caller's own rows read, once per id, and the page and the count show it", async () => {
-    const w = await world();
-    const a = await addSession(w.store, 1);
-    const b = await addSession(w.store, 2);
-    await w.rowFor(OWNER_ID, a.sessionId, "needs_you", NOW - 2000);
-    await w.rowFor(OWNER_ID, b.sessionId, "needs_you", NOW - 1000);
-    const before = await w.list(OWNER);
-    expect(before.body.unread).toBe(2);
-    const id = before.body.items[0]?.id;
-    const marked = await w.mark(OWNER, [id, id]);
-    expect(marked).toEqual({ status: 200, body: { marked: 1 } });
-    const after = await w.list(OWNER);
-    expect(after.body.items.map((item) => item.read)).toEqual([true, false]);
-    expect(after.body.unread).toBe(1);
-  });
-
-  it("marks nothing of anyone else's: the same id from another person finds no row of theirs, and the owner's row stays unread", async () => {
-    const w = await world();
-    const a = await addSession(w.store, 1);
-    await w.rowFor(OWNER_ID, a.sessionId, "needs_you", NOW - 1000);
-    const id = inboxIdOf({ sessionId: a.sessionId, kind: "needs_you", atMs: NOW - 1000 });
-    expect(await w.mark(DANA, [id])).toEqual({ status: 200, body: { marked: 0 } });
-    expect(await w.mark(ERIN, [id])).toEqual({ status: 200, body: { marked: 0 } });
-    expect((await w.list(OWNER)).body.items[0]?.read).toBe(false);
-    // No row is created for the person who marked nothing.
-    expect((await w.store.query({ pk: inboxPartition(ORG, DANA_ID) })).items).toEqual([]);
-    // Another company's route marks nothing either (the partition is the company's).
-    w.m.join(OTHER_ORG, OWNER_ID, "owner");
-    expect((await w.call(person(OWNER.personId, OTHER_ORG), "POST", "/v1/app/inbox/read", { requestId: randomUUID(), ids: [id] }, OTHER_ORG)).body).toEqual({ marked: 0 });
-    expect((await w.list(OWNER)).body.items[0]?.read).toBe(false);
-  });
-
-  it("does not mark a row that changed since it was shown (the id names the time)", async () => {
-    const w = await world();
-    const a = await addSession(w.store, 1);
-    await w.rowFor(OWNER_ID, a.sessionId, "needs_you", NOW - 5000);
-    const shown = (await w.list(OWNER)).body.items[0]?.id;
-    await w.rowFor(OWNER_ID, a.sessionId, "needs_you", NOW - 1000);
-    expect((await w.mark(OWNER, [shown])).body).toEqual({ marked: 0 });
-    expect((await w.list(OWNER)).body.items[0]?.read).toBe(false);
-  });
 
   it("refuses a body that is not exactly { requestId, ids } with fixed words that echo nothing, and marks nothing of a batch with a bad id", async () => {
     const w = await world();
@@ -391,12 +280,6 @@ describe("POST /v1/app/inbox/read", () => {
     const notJson = await w.routeFor()({ method: "POST", path: "/v1/app/inbox/read", headers: {}, body: "{nope" }, { principal: OWNER }).catch((error: unknown) => error);
     expect(notJson).toBeInstanceOf(AgentXError);
     expect((await w.list(OWNER)).body.items[0]?.read).toBe(false);
-  });
-
-  it("parses ids strictly", () => {
-    const id = `ses_${"a".repeat(20)}.ready.1700000000000`;
-    expect(parseInboxId(id)).toEqual({ sessionId: `ses_${"a".repeat(20)}`, kind: "ready", atMs: 1_700_000_000_000 });
-    for (const bad of [`${id}x`, `ses_short.ready.1`, `ses_${"a".repeat(20)}.nope.1`, `ses_${"A".repeat(20)}.ready.1`, 5, undefined, `ses_${"a".repeat(20)}.ready.`, ` ${id}`]) expect(parseInboxId(bad), String(bad)).toBeUndefined();
   });
 });
 

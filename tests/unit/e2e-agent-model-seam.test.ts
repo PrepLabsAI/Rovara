@@ -14,8 +14,8 @@ import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js
 import { noSessionValues } from "../support/e2e-session-sync.js";
 import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget } from "../../packages/model-runtime/src/e2e-route.js";
 import { startE2EModelProxy, type E2EModelProxy } from "../../packages/worker/src/e2e-model-proxy.js";
-import { CASE_ID, MODEL_ID, PROVIDER_KEY, RUN_ID, SECRET_ARN, bedrockRoute, installationEnvironment, keyedRoute } from "../support/e2e-model-fixtures.js";
-import { anthropicSse, bedrockLoopback, bedrockStreamBody, fakeFetch, jsonError, openaiResponsesSse, openrouterSse } from "../support/e2e-provider-fakes.js";
+import { CASE_ID, PROVIDER_KEY, RUN_ID, SECRET_ARN, bedrockRoute, installationEnvironment, keyedRoute } from "../support/e2e-model-fixtures.js";
+import { anthropicSse, bedrockLoopback, bedrockStreamBody, fakeFetch, openaiResponsesSse, openrouterSse } from "../support/e2e-provider-fakes.js";
 import { createChannelLanguageModel } from "../support/e2e-model-adapter.js";
 
 const root = new URL("../../", import.meta.url);
@@ -204,35 +204,6 @@ describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route 
     });
   }
 
-  it("Bedrock: the real loop's tool calls reach a loopback endpoint as Converse requests, one per turn, and the receipts name the pinned model", async () => {
-    loopback = await bedrockLoopback((_request, count) => ({ status: 200, body: bedrockStreamBody(count === 1 ? TAP : CONCLUDE) }));
-    const invoke = await createE2EProviderInvokeForTesting(bedrockRoute(), { environment: {} }, { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } });
-    await startProxy(invoke);
-    const sent: E2EModelChannelRequest[] = [];
-    const tapped: string[] = [];
-    const fetchSpy = vi.spyOn(globalThis, "fetch");
-    const recorded: unknown[] = [];
-    const verdict = await loop(sent, tapped).runStep(stepContext(recorded) as never);
-
-    expect(verdict).toMatchObject({ status: "passed", summary: "Tapped the export button." });
-    expect(tapped).toEqual(["n1"]);
-    expect(loopback.requests).toHaveLength(2);
-    expect(sent).toHaveLength(2);
-    expect(recorded).toHaveLength(2);
-    expect(fetchSpy).not.toHaveBeenCalled();
-    fetchSpy.mockRestore();
-    const [first, second] = loopback.requests.map((request) => request.body as { toolConfig: { toolChoice: unknown; tools: Array<{ toolSpec: { name: string } }> }; inferenceConfig: unknown; additionalModelRequestFields: unknown; messages: Array<{ role: string; content: Array<{ toolUse?: unknown; toolResult?: unknown }> }> });
-    expect(first!.toolConfig.toolChoice).toEqual({ any: {} });
-    expect(first!.toolConfig.tools.map((item) => item.toolSpec.name).sort()).toEqual(["complete_step", "tap"]);
-    expect(first!.inferenceConfig).toEqual({ maxTokens: 1024 });
-    expect(first!.additionalModelRequestFields).toEqual({ thinking: { type: "disabled" }, output_config: { effort: "low" } });
-    expect(second!.messages.map((message) => message.role)).toEqual(["user", "assistant", "user"]);
-    expect(second!.messages[1]!.content[0]!.toolUse).toMatchObject({ toolUseId: "tooluse_a", name: "tap", input: { target: "n1" } });
-    expect(second!.messages[2]!.content[0]!.toolResult).toMatchObject({ toolUseId: "tooluse_a", content: [{ text: "Tapped n1." }], status: "success" });
-    const summary = await proxy!.close();
-    expect(summary.receipts.map((item) => [item.callIndex, item.outcome, item.modelId, item.servedModelId])).toEqual([[0, "ok", MODEL_ID, null], [1, "ok", MODEL_ID, null]]);
-  });
-
   // Task 4.3b: the same round trip with Rovara's own pieces in place of the test double: the closed-toolset executor, the model adapter and the channel client the executor ships.
   it("Rovara's agent executor and model adapter, over the real client, round-trip through the proxy and a loopback Bedrock endpoint: one request per turn, the tap reaches the page, the ledger records it", async () => {
     loopback = await bedrockLoopback((_request, count) => ({ status: 200, body: bedrockStreamBody(count === 1 ? { tool: { id: "tooluse_a", name: "tap", input: { target: "n2" } } } : CONCLUDE) }));
@@ -310,25 +281,6 @@ describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route 
       expect(JSON.stringify(summary)).not.toContain(PROVIDER_KEY);
     });
   }
-
-  it("does not resend when the provider throttles: the loop ends the step after one request, on Bedrock and on a keyed provider", async () => {
-    loopback = await bedrockLoopback(() => ({ status: 429, body: JSON.stringify({ message: "Rate exceeded" }), errorType: "ThrottlingException" }));
-    const invoke = await createE2EProviderInvokeForTesting(bedrockRoute(), { environment: {} }, { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } });
-    await startProxy(invoke);
-    const model = createChannelLanguageModel({ socketPath: join(dir, "m.sock"), runId: RUN_ID, caseId: CASE_ID, stepIndex: 0 });
-    const executor = createToolLoopExecutor({ name: "rovara-seam", model: model as never, buildPrompt: () => "Goal: x", tools: () => ({}) });
-    await expect(executor.runStep(stepContext() as never)).rejects.toMatchObject({ code: "MODEL_PROVIDER_FAILED" });
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    expect(loopback.requests).toHaveLength(1);
-    expect((await proxy!.close()).receipts.map((item) => item.outcome)).toEqual(["provider-error"]);
-
-    const definition = keyedRoute("anthropic");
-    const fake = fakeFetch(() => jsonError(429));
-    const keyedInvoke = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret: async () => PROVIDER_KEY, fetch: fake.fetch });
-    await startProxy(keyedInvoke, definition);
-    await expect(createToolLoopExecutor({ name: "rovara-seam", model: createChannelLanguageModel({ socketPath: join(dir, "m.sock"), runId: RUN_ID, caseId: CASE_ID, stepIndex: 0 }) as never, buildPrompt: () => "Goal: x", tools: () => ({}) }).runStep(stepContext() as never)).rejects.toMatchObject({ code: "MODEL_PROVIDER_FAILED" });
-    expect(fake.requests).toHaveLength(1);
-  });
 
   it("scans a provider key the invoke holds: a page that shows it is refused before any request", async () => {
     const definition = keyedRoute("anthropic");

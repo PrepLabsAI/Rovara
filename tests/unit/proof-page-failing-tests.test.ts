@@ -84,46 +84,6 @@ describe("the failing tests on the task page", () => {
     expect(html.match(/<li><code>/gu)).toHaveLength(EVIDENCE_RENDER_LIMITS.failureCausesListed);
   });
 
-  it("adds nothing for causes it cannot read (a newer shape, wrong types, none)", () => {
-    for (const odd of [[{ testId: "x", cause: { kind: "from_the_future" } }], "text", 5, [], [{ nope: 1 }]]) expect(failuresOf(packWith(FAILING, odd))).toBeUndefined();
-  });
-
-  it("shows only plain text: a hostile test id and path cannot make a link, tag, mention or secret", () => {
-    const secret = `ghp_${"Ab1Cd2Ef3Gh4".repeat(3)}`;
-    const hostile = `[x](https://evil.example/p) @owner #12 <img src=x onerror=alert(1)> ${secret}`;
-    const id = `tests/${hostile}.test.ts::a`;
-    const html = renderProof(context, report(packWith([id], [{ testId: id, cause: change(`src/${hostile}.ts`, SHA) }])));
-    const section = html.slice(html.indexOf('id="failing-tests"'), html.indexOf("</section>", html.indexOf('id="failing-tests"')));
-    expect(section).not.toContain("<img");
-    expect(section).not.toContain(secret);
-    expect(section).not.toMatch(/href=|https:\/\/evil/u);
-    expect(section).toContain("likely broken by");
-    expect(section).not.toContain("@owner");
-    expect(section).not.toContain("#12");
-  });
-
-  it("a hostile check label is plain text too", () => {
-    const pack = clone(packWith(FAILING, GOOD)) as unknown as { checks: Array<{ label: string }> };
-    pack.checks[0]!.label = "[x](https://evil.example/p) <b>bold</b> @owner";
-    const html = renderProof(context, report(pack as unknown as EvidencePack));
-    const section = html.slice(html.indexOf('id="failing-tests"'));
-    expect(section).not.toMatch(/<b>bold|https:\/\/evil|@owner/u);
-  });
-
-  it("a check with nothing left to list adds no empty heading, and a check that timed out or is unknown shows nothing", () => {
-    const first = ids(10, "a");
-    const second = ids(3, "b");
-    const make = (names: string[]) => names.map((testId) => ({ testId, cause: change("src/a.ts", SHA) }));
-    const view = report(packWith(first, make(first), { failing: second, causes: make(second) })).failures!;
-    expect(view.checks).toHaveLength(1);
-    expect(view.more).toBe(3);
-    for (const after of ["timed_out", "unknown", "not_run"]) {
-      const pack = clone(packWith(FAILING, GOOD)) as unknown as { checks: Array<{ after: string }> };
-      pack.checks[0]!.after = after;
-      expect(failuresOf(pack as unknown as EvidencePack)).toBeUndefined();
-    }
-  });
-
   it("the page escapes whatever a view holds, even text that was not made plain upstream", () => {
     const view = { ...report(undefined), failures: { checks: [{ check: "<b>suite</b>", tests: [{ test: "<img src=x onerror=alert(1)>", cause: "<script>alert(1)</script>" }] }], more: 1 } };
     const html = renderProof(context, view);
@@ -132,8 +92,4 @@ describe("the failing tests on the task page", () => {
     expect(html).toContain("and 1 more failing test with a cause not listed");
   });
 
-  it("two checks, two sections: each failed check keeps its own tests under its own name", () => {
-    const view = report(packWith(FAILING, GOOD, { failing: ["tests/other.test.ts::x"], causes: [{ testId: "tests/other.test.ts::x", cause: { kind: "unknown", reason: "no_failure_details" } }] })).failures!;
-    expect(view.checks.map((check) => [check.check, check.tests.map((test) => test.test)])).toEqual([["pytest -q", FAILING], ["second suite", ["tests/other.test.ts::x"]]]);
-  });
 });

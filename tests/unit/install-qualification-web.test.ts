@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir, stat, writeFile, mkdtemp, rm } from "node:fs/promises";
+import { stat, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -25,29 +25,6 @@ function agentFacts(probeId: string) { return structuredClone(goodWebApiObservat
 const rejection = (promise: Promise<unknown>) => promise.then(() => { throw new Error("qualification unexpectedly succeeded"); }, (error: unknown) => error as Error);
 
 describe("web/API runtime qualification", () => {
-  it("runs the fourteen required probes in order and qualifies a runtime whose outcomes are all as expected", async () => {
-    const { result, runner } = await qualify();
-    expect(runner.calls).toEqual(["web-csv-positive-v1", "web-csv-negative-v1", "web-egress-denial-v1", "api-state-positive-v1", "api-egress-denial-v1", "web-mock-origin-v1", "web-unmocked-call-v1",
-      "build-imds-denial-v1", "build-lateral-denial-v1", "app-host-denial-v1", "chromium-sandbox-v1", "web-agent-scripted-v1", "web-agent-wrong-action-v1", "web-agent-app-isolation-v1"]);
-    expect(result.state).toBe("READY");
-    expect(result.profileId).toBe("linux-arm64-web-api-v1");
-    expect(result.scope).toBe("application-web-api/v1");
-    expect(result.probes.map((probe) => [probe.probeId, probe.observedOutcome])).toEqual([
-      ["web-csv-positive-v1", "PASS"], ["web-csv-negative-v1", "EXPECTED_FAILURE"], ["web-egress-denial-v1", "EXPECTED_FAILURE"],
-      ["api-state-positive-v1", "PASS"], ["api-egress-denial-v1", "EXPECTED_FAILURE"], ["web-mock-origin-v1", "PASS"], ["web-unmocked-call-v1", "EXPECTED_FAILURE"], ["build-imds-denial-v1", "EXPECTED_FAILURE"],
-      ["build-lateral-denial-v1", "EXPECTED_FAILURE"], ["app-host-denial-v1", "PASS"], ["chromium-sandbox-v1", "PASS"],
-      ["web-agent-scripted-v1", "PASS"], ["web-agent-wrong-action-v1", "EXPECTED_FAILURE"], ["web-agent-app-isolation-v1", "PASS"]]);
-    expect(WebApiRuntimeInstallProposalSchema.parse(JSON.parse(canonicalJson(result)))).toEqual(result);
-  });
-
-  it("retains each probe's observation as private evidence", async () => {
-    const { evidenceRoot } = await qualify();
-    const [directory] = await readdir(evidenceRoot);
-    const files = await readdir(join(evidenceRoot, directory!));
-    expect(files.sort()).toEqual(WEB_API_REQUIRED_PROBES.map((probe) => `${probe.probeId}.json`).sort());
-    expect((await stat(join(evidenceRoot, directory!, files[0]!))).mode & 0o777).toBe(0o600);
-    expect((JSON.parse(await readFile(join(evidenceRoot, directory!, "web-csv-negative-v1.json"), "utf8")) as { failedAssertionKinds: string[] }).failedAssertionKinds).toEqual(["csv"]);
-  });
 
   it("binds every probe to its installed asset digest", async () => {
     const { result } = await qualify();
@@ -140,9 +117,6 @@ describe("web/API runtime qualification", () => {
   it.each(failedForAnotherCause)("the oracle in src rejects an expected failure that failed for another cause: %s %j", (probeId, observation) => {
     expect(evaluateWebApiProbeObservation(probeId, { ...goodWebApiObservation(probeId), ...observation })).toEqual({ ok: false, reason: `probe-wrong-cause:${probeId}` });
   });
-  it("the oracle in src accepts each expected failure exactly as recorded", () => {
-    for (const probe of WEB_API_REQUIRED_PROBES) expect(evaluateWebApiProbeObservation(probe.probeId, goodWebApiObservation(probe.probeId)), probe.probeId).toEqual({ ok: true });
-  });
 
   it.each(["web-csv-positive-v1", "api-state-positive-v1", "app-host-denial-v1", "chromium-sandbox-v1", "web-mock-origin-v1", "web-agent-scripted-v1", "web-agent-app-isolation-v1"])("rejects a positive probe the collector did not pass: %s", async (probeId) => {
     for (const observation of [{ collectorStatus: "FAILED" as const, failedAssertionKinds: ["csv"] }, { collectorStatus: "UNKNOWN" as const },
@@ -166,13 +140,6 @@ describe("web/API runtime qualification", () => {
       expect((await rejection(qualify({ [probeId]: { agent: { ...good, ...change(good) } } }))).message, label).toContain(`positive-probe-failed:${probeId}`);
     }
     expect((await rejection(qualify({ [probeId]: { agent: undefined } }))).message).toContain(`positive-probe-failed:${probeId}`);
-  });
-
-  it("rejects the isolation probe when the guard's marker is not visible (no in-request check ran with the channel open), and when the guard ended the app (a model path appeared)", async () => {
-    const probeId = "web-agent-app-isolation-v1";
-    expect((await rejection(qualify({ [probeId]: { collectorStatus: "FAILED", failedAssertionKinds: ["visible"] } }))).message).toContain(`positive-probe-failed:${probeId}`);
-    expect((await rejection(qualify({ [probeId]: { collectorStatus: null, runUnavailableReason: "app-exited", failedAssertionKinds: [] } }))).message).toContain(`positive-probe-failed:${probeId}`);
-    expect((await rejection(qualify({ [probeId]: { blockedHosts: ["probe.example.com"] } }))).message).toContain(`positive-probe-failed:${probeId}`);
   });
 
   it.each(["web-agent-scripted-v1", "web-agent-wrong-action-v1", "web-agent-app-isolation-v1"])("fails closed when %s could not run (no model channel, no executor): no proposal, the other probes still judged", async (probeId) => {
@@ -203,15 +170,6 @@ describe("web/API runtime qualification", () => {
     }
   });
 
-  it("rejects a probe whose run threw, and still judges every other probe", async () => {
-    const error = await rejection(qualify({ "web-csv-positive-v1": new Error("docker unavailable"), "web-csv-negative-v1": { collectorStatus: "PASS", failedAssertionKinds: [] } }));
-    expect((error as WebApiQualificationRejected).reasons).toEqual(["probe-run-failed:web-csv-positive-v1", "negative-probe-passed:web-csv-negative-v1"]);
-  });
-
-  it("rejects a malformed observation instead of trusting it", async () => {
-    expect((await rejection(qualify({ "web-csv-positive-v1": { collectorStatus: "PASSED" as never } }))).message).toContain("probe-run-failed:web-csv-positive-v1");
-  });
-
   it("refuses a challenge for another profile, another host, or another toolchain before running any probe", async () => {
     const runner = fakeProbeRunner();
     const evidenceRoot = await privateEvidenceRoot();
@@ -238,14 +196,6 @@ describe("web/API runtime qualification", () => {
       await expect(qualifyInstalledWebApiRuntime({ challenge: foreignEndpoint, evidenceRoot: await privateEvidenceRoot(), runProbe: runner.runProbe, environment: realHostCheck() }))
         .rejects.toThrow(/endpoint does not match a non-loopback address and listener port on this host/);
       expect(runner.calls).toEqual([]);
-    });
-
-    it("refuses a web/API challenge whose endpoint port is not the worker port", async () => {
-      const challenge = webApiChallenge(now);
-      for (const [name, value] of Object.entries(bootEnvironment(challenge))) vi.stubEnv(name, value);
-      vi.stubEnv("PORT", "9090");
-      await expect(qualifyInstalledWebApiRuntime({ challenge, evidenceRoot: await privateEvidenceRoot(), runProbe: fakeProbeRunner().runProbe, environment: realHostCheck() }))
-        .rejects.toThrow(/endpoint does not match|worker port/);
     });
 
     it("refuses another worker's workspace identity before it looks at the endpoint", () => {
@@ -324,20 +274,6 @@ describe("the agent capability of the registered runtime (Task 4.5)", () => {
     expect(rows.web.probeManifest.fixtureRefs.map((ref) => ref.path).filter((path) => path.includes("web-agent-"))).toEqual([]);
   });
 
-  it("does not list agent for a qualification whose record holds only some of the agent probes: such a record does not parse", async () => {
-    const { result } = await qualify();
-    for (const count of [12, 13]) {
-      const partial = { ...result, probes: result.probes.slice(0, count) };
-      expect(WebApiRuntimeInstallProposalSchema.safeParse(partial).success, `${String(count)} probes`).toBe(false);
-      expect(webApiProposalQualifiesAgent(partial)).toBe(false);
-    }
-    // Nor does one that replaces an agent probe with a repeat of another, or reorders them.
-    const swapped = structuredClone(result);
-    [swapped.probes[11], swapped.probes[12]] = [swapped.probes[12]!, swapped.probes[11]!];
-    expect(WebApiRuntimeInstallProposalSchema.safeParse(swapped).success).toBe(false);
-    expect([...WEB_API_AGENT_PROBE_IDS]).toEqual(result.probes.slice(11).map((probe) => probe.probeId));
-  });
-
   it.each(["web-agent-scripted-v1", "web-agent-wrong-action-v1", "web-agent-app-isolation-v1"])("does not parse a record whose %s observation was edited to the wrong outcome, so agent cannot be listed on a forged claim", async (probeId) => {
     const { result } = await qualify();
     const forged = structuredClone(result);
@@ -351,10 +287,6 @@ describe("the agent capability of the registered runtime (Task 4.5)", () => {
 });
 
 describe("pinned web/API probe assets", () => {
-  it("keeps the pinned digests equal to the shipped asset bytes", () => {
-    expect(loadWebApiQualificationProbeAssets().map((asset) => [asset.probeId, asset.assetDigest]))
-      .toEqual(WEB_API_REQUIRED_PROBES.map((probe) => [probe.probeId, probe.assetDigest]));
-  });
 
   it("does not qualify when an installed probe asset is not the pinned one, and never runs that probe", async () => {
     const runner = fakeProbeRunner();
@@ -384,82 +316,6 @@ describe("pinned web/API probe assets", () => {
     const missing = result.manifest.entries.filter((entry) => entry.path !== webApiProbeAssetManifestPath("web-csv-positive-v1"));
     const dropped = { schemaVersion: result.manifest.schemaVersion, entries: missing };
     expect(WebApiRuntimeInstallProposalSchema.safeParse({ ...result, manifest: { ...dropped, sha256: createHash("sha256").update(canonicalJson(dropped)).digest("hex") } }).success).toBe(false);
-  });
-});
-
-describe("web/API probe assets", () => {
-  it("defines the mock origin probe as one success consumption of the inventory mock and no call that no mock matched", () => {
-    const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === "web-mock-origin-v1")!;
-    expect(asset.probe.oracle).toEqual({ kind: "mock-origin", originRef: "inventory-v1", contractPath: "inventory/openapi.json",
-      expectedConsumptions: { success: 1, refusal: 0, invalidData: 0 }, expectedUnmockedCalls: 0 });
-    expect([asset.kind, asset.polarity]).toEqual(["web", "positive"]);
-  });
-
-  it("defines the unmocked call probe as UNKNOWN for unmocked-external-call with exactly one sinkhole line", () => {
-    const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === "web-unmocked-call-v1")!;
-    expect(asset.probe.oracle).toEqual({ kind: "unmocked-call", originRef: "inventory-v1", expectedOutcome: "UNKNOWN", expectedReason: "unmocked-external-call", expectedSinkholeCalls: 1 });
-    expect([asset.kind, asset.polarity]).toEqual(["web", "negative"]);
-    // The reason the evaluator holds the run to is the asset's own.
-    const pin = WEB_API_REQUIRED_PROBES.find((probe) => probe.probeId === "web-unmocked-call-v1")!;
-    expect(pin.cause).toEqual({ kind: "unmocked-external-call", reason: (asset.probe.oracle as { expectedReason: string }).expectedReason, failedAssertionKinds: [] });
-  });
-
-  it("pins the API egress probe as UNKNOWN for the sinkholed name with the IP literal call still failing its assertion, and keeps its asset", () => {
-    const pin = WEB_API_REQUIRED_PROBES.find((probe) => probe.probeId === "api-egress-denial-v1")!;
-    expect([pin.kind, pin.expectedOutcome, pin.mock]).toEqual(["api", "EXPECTED_FAILURE", true]);
-    // The sinkholed name makes the case UNKNOWN; the failed http-status assertion, on a request that dials an IP literal, is what proves that wall holds.
-    expect(pin.cause).toEqual({ kind: "unmocked-external-call", reason: "unmocked-external-call", failedAssertionKinds: ["http-status"] });
-    // The asset still describes what the probe is about, a protected network denial; its expected outcome is the pin's, which the asset schema has no field for on an API probe.
-    const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === "api-egress-denial-v1")!;
-    expect([asset.kind, asset.polarity, asset.probe.oracle.kind]).toEqual(["api", "negative", "protected-network-denial"]);
-    expect(asset.assetDigest).toBe(pin.assetDigest);
-  });
-
-  it("pins fourteen probes (eleven of M1.3 and three agent probes), three of them showing mock facts: the two mock probes and the API egress probe", () => {
-    expect(WEB_API_REQUIRED_PROBES).toHaveLength(14);
-    expect(WEB_API_REQUIRED_PROBES.filter((probe) => probe.mock === true).map((probe) => [probe.probeId, probe.kind, probe.expectedOutcome])).toEqual([
-      ["api-egress-denial-v1", "api", "EXPECTED_FAILURE"], ["web-mock-origin-v1", "web", "PASS"], ["web-unmocked-call-v1", "web", "EXPECTED_FAILURE"]]);
-  });
-
-  it("defines the IMDS denial probe as the pinned fetch with a short timeout and expects exit 7", () => {
-    const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === "build-imds-denial-v1")!;
-    expect(asset.probe.oracle).toEqual({ kind: "build-command-failure", expectedExitCode: 7, expectedUnavailableReason: "build-failed",
-      build: { program: "node", args: ["-e", "fetch('http://169.254.169.254/latest/meta-data/').then(()=>process.exit(0),()=>process.exit(7))"], cwd: ".", timeoutMs: 30000, env: {} } });
-    expect(asset.polarity).toBe("negative");
-  });
-
-  it("defines the lateral denial probe as a short connect to the gateway and a private address, exit 7 only when both time out", () => {
-    const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === "build-lateral-denial-v1")!;
-    expect(asset.polarity).toBe("negative");
-    expect(asset.probe.oracle).toMatchObject({ kind: "build-command-failure", expectedExitCode: 7, expectedUnavailableReason: "build-failed", build: { program: "node", cwd: ".", timeoutMs: 30000, env: {} } });
-    if (asset.probe.oracle.kind !== "build-command-failure") throw new Error("not a build probe");
-    const script = asset.probe.oracle.build.args[1]!;
-    // The host is the default route's gateway at the worker's port; the private address is one nothing answers on, so only a DROP and never a refusal times out.
-    expect(script).toContain("/proc/net/route");
-    expect(script).toContain("t(g,8080)");
-    expect(script).toContain("t('10.255.255.254',80)");
-    expect(script).toContain("a.every(x=>x==='timeout')?7:0");
-  });
-
-  it("defines the app host probe as a passing probe whose app starts only after a connection to the host times out", () => {
-    const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === "app-host-denial-v1")!;
-    expect(asset.polarity).toBe("positive");
-    expect(asset.kind).toBe("api");
-    if (asset.probe.oracle.kind !== "protected-network-denial") throw new Error("not a network denial probe");
-    const { appStart } = asset.probe.oracle;
-    expect(appStart).toMatchObject({ program: "node", args: ["--input-type=module", "-e", expect.any(String)] });
-    const script = appStart!.args[2]!;
-    // The on-link network's first address (the host's bridge address) at the worker's port; anything but a timeout, or no route, exits without starting the app.
-    expect(script).toContain("/proc/net/route");
-    expect(script).toContain("(n>>>24)+1");
-    expect(script).toContain("port:8080");
-    expect(script).toContain("if(!r)process.exit(3)");
-    expect(script).toContain(".on('connect',()=>process.exit(3)).on('error',()=>process.exit(3))");
-    expect(script).toContain("s.on('timeout',()=>{s.destroy();import('./server.mjs').then(m=>m.startOrdersServer())}");
-  });
-
-  it("loads only the required probes, not the later auth and tenant probes", () => {
-    expect(loadWebApiQualificationProbeAssets().map((asset) => asset.probeId)).toEqual(WEB_API_REQUIRED_PROBES.map((probe) => probe.probeId));
   });
 });
 

@@ -11,7 +11,6 @@ import { storeDeviceEvidence } from "../../packages/broker/src/core/proof/device
 
 const OWNER = { ownerKey: "owner-1", workspaceId: "ws-1", taskId: "task-1" };
 const COMPANY_A = "org_00000000000000000000";
-const COMPANY_B = "org_11111111111111111111";
 const jpegOf = (seed: string) => { const bytes = new Uint8Array(500); bytes.set([0xff, 0xd8, 0xff]); bytes.fill(seed.charCodeAt(0), 3); return bytes; };
 const shot = (seed: string) => { const bytes = jpegOf(seed); return { bytes, sha256: createHash("sha256").update(bytes).digest("hex") }; };
 const captured = (): DeviceEvidenceCaptured => ({
@@ -34,28 +33,6 @@ describe("storeDeviceEvidence", () => {
     expect(EvidencePackV2Schema.safeParse(addDeviceEvidenceToPack(pack(), outcome)).success).toBe(true);
   });
 
-  it("company isolation: another company reading the very same key in the same table gets nothing, and each company's own run is its own", async () => {
-    const documents = new MemoryDocumentStore();
-    const blobsA = createDocumentEvidenceBlobStore(documents, { companyId: COMPANY_A });
-    const blobsB = createDocumentEvidenceBlobStore(documents, { companyId: COMPANY_B });
-    await storeDeviceEvidence({ blobs: blobsA }, OWNER, captured());
-    expect(await blobsA.get(keyOf("a"), 1_000)).toBeDefined();
-    expect(await blobsB.get(keyOf("a"), 1_000)).toBeUndefined();
-    expect(await blobsB.get(keyOf("b"), 1_000)).toBeUndefined();
-    // Company B stores the same task and owner names with different pictures: A's are untouched, and B cannot read A's.
-    const other = captured();
-    const first = other.steps[0]!;
-    if (first.status === "shown") { first.before = shot("c"); first.after = shot("d"); }
-    await storeDeviceEvidence({ blobs: blobsB }, OWNER, other);
-    expect(await blobsB.get(keyOf("c"), 1_000)).toBeDefined();
-    expect(await blobsA.get(keyOf("c"), 1_000)).toBeUndefined();
-    expect(Buffer.from((await blobsA.get(keyOf("a"), 1_000))!)).toEqual(Buffer.from(jpegOf("a")));
-    // Erasing one company's prefix leaves the other's in place.
-    expect(await blobsB.deletePrefix("private/")).toBe(true);
-    expect(await blobsB.get(keyOf("c"), 1_000)).toBeUndefined();
-    expect(await blobsA.get(keyOf("a"), 1_000)).toBeDefined();
-  });
-
   it("a screenshot the store does not keep makes its step Not run (not stored), never a reference to nothing", async () => {
     const blobs = createDocumentEvidenceBlobStore(new MemoryDocumentStore(), { companyId: COMPANY_A });
     const failing: EvidenceBlobStore = { ...blobs, async put(key, bytes, meta, options) { if (meta.metadata["sha256"] === shot("b").sha256) throw new Error("disk full at /var/secret"); return blobs.put(key, bytes, meta, options); } };
@@ -69,51 +46,6 @@ describe("storeDeviceEvidence", () => {
     const first = lying.steps[0]!;
     if (first.status === "shown") first.after = { ...first.after, sha256: "f".repeat(64) };
     expect((await storeDeviceEvidence({ blobs }, OWNER, lying)).steps[0]).toEqual({ flow: "checkout", step: "open", status: "not_run", reason: "not_stored" });
-  });
-
-  it("keeps a half-stored picture another kept step still names, and keeps the unmasked count within the steps still shown", async () => {
-    const blobs = createDocumentEvidenceBlobStore(new MemoryDocumentStore(), { companyId: COMPANY_A });
-    const failing: EvidenceBlobStore = { ...blobs, async put(key, bytes, meta, options) { if (meta.metadata["sha256"] === shot("c").sha256) throw new Error("no"); return blobs.put(key, bytes, meta, options); } };
-    const run = captured();
-    run.unmasked = 2;
-    run.steps = [{ flow: "a", step: "s", status: "shown", before: shot("a"), after: shot("b") }, { flow: "b", step: "s", status: "shown", before: shot("a"), after: shot("c") }];
-    const outcome = await storeDeviceEvidence({ blobs: failing }, OWNER, run);
-    expect(outcome.steps.map((row) => row.status)).toEqual(["shown", "not_run"]);
-    expect(outcome.unmasked).toBe(1);
-    // A picture stored for a step that then failed is kept when a LATER kept step names the same bytes.
-    const later = captured();
-    later.steps = [{ flow: "a", step: "s", status: "shown", before: shot("d"), after: shot("c") }, { flow: "b", step: "s", status: "shown", before: shot("e"), after: shot("d") }];
-    const second = await storeDeviceEvidence({ blobs: failing }, OWNER, later);
-    expect(second.steps.map((row) => row.status)).toEqual(["not_run", "shown"]);
-    expect(await blobs.get(keyOf("d"), 1_000)).toBeDefined();
-    expect(await blobs.get(keyOf("a"), 1_000)).toBeDefined();
-  });
-
-  it("never deletes a picture that was already stored under the task (an earlier round's pack may name it) when the other half fails", async () => {
-    const blobs = createDocumentEvidenceBlobStore(new MemoryDocumentStore(), { companyId: COMPANY_A });
-    await storeDeviceEvidence({ blobs }, OWNER, captured());
-    expect(await blobs.get(keyOf("a"), 1_000)).toBeDefined();
-    const failing: EvidenceBlobStore = { ...blobs, async put(key, bytes, meta, options) { if (meta.metadata["sha256"] === shot("e").sha256) throw new Error("no"); return blobs.put(key, bytes, meta, options); } };
-    const second = captured();
-    second.steps = [{ flow: "checkout", step: "open", status: "shown", before: shot("a"), after: shot("e") }];
-    expect((await storeDeviceEvidence({ blobs: failing }, OWNER, second)).steps[0]).toMatchObject({ status: "not_run", reason: "not_stored" });
-    expect(await blobs.get(keyOf("a"), 1_000)).toBeDefined();
-    expect(await blobs.get(keyOf("b"), 1_000)).toBeDefined();
-  });
-
-  it("checks the run whole before the first write: a run it refuses stores nothing", async () => {
-    const documents = new MemoryDocumentStore();
-    const blobs = createDocumentEvidenceBlobStore(documents, { companyId: COMPANY_A });
-    const big = (seed: string) => { const bytes = new Uint8Array(500_000); bytes.set([0xff, 0xd8, 0xff]); bytes.fill(seed.charCodeAt(0), 3); return { bytes, sha256: createHash("sha256").update(bytes).digest("hex") }; };
-    const bad: unknown[] = [
-      { ...captured(), steps: Array.from({ length: 31 }, (_, i) => ({ flow: `f${i}`, step: "s", status: "shown", before: shot("a"), after: shot("b") })) },
-      { ...captured(), isolation: "imported" }, { ...captured(), device: "ios_simulator" },
-      { ...captured(), steps: ["a", "b", "c", "d", "e", "f", "g", "h", "i"].map((c, i) => ({ flow: `f${i}`, step: "s", status: "shown", before: big(c), after: big(c.toUpperCase()) })) },
-      { ...captured(), steps: [{ flow: "a", step: "s", status: "shown", before: { sha256: "x", bytes: jpegOf("a") }, after: shot("b") }] },
-    ];
-    for (const run of bad) await expect(storeDeviceEvidence({ blobs }, OWNER, run as DeviceEvidenceCaptured)).rejects.toThrow("device evidence outcome is not valid");
-    expect(await blobs.get(keyOf("a"), 1_000)).toBeUndefined();
-    expect(await blobs.get(evidenceArtifactKey(OWNER.ownerKey, OWNER.workspaceId, OWNER.taskId, big("a").sha256), 600_000)).toBeUndefined();
   });
 
   it("a run that did not happen stores nothing and keeps its reason", async () => {

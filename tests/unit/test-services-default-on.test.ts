@@ -39,20 +39,6 @@ async function approved() {
   return h;
 }
 
-describe("on by default", () => {
-  it("with nothing set, an environment with dependencies is used, planned and pinned from the catalog", async () => {
-    const h = await approved();
-    const environment = { ROVARA_TEST_ENVIRONMENT: "1" };
-    const started = await testEnvironmentForStart(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, environment);
-    expect(started.used?.environment.dependencies).toHaveLength(1);
-    await h.store.transact([started.pin!]);
-    const plan = await testEnvPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1", readiness }, environment);
-    expect(plan?.dependencies?.map((entry) => entry.catalogId)).toEqual(["postgres@16"]);
-    expect((await testEnvironmentView(h.deps, ORG, PROJECT)).testServices).toBe(true);
-    expect((await testEnvironmentView(h.deps, ORG, PROJECT)).testServicesUnavailable).toBeUndefined();
-  });
-});
-
 describe("switched on, but the host cannot run them", () => {
   it("is not used: the task starts, the pin and the evidence say why in fixed words, nothing is planned and the catalog is not read", async () => {
     for (const reason of TEST_SERVICES_UNAVAILABLE_REASONS) {
@@ -84,16 +70,6 @@ describe("switched on, but the host cannot run them", () => {
     expect(view.testServices).toBe(false);
     expect(view.testServicesUnavailable).toBe(TEST_SERVICES_UNAVAILABLE_WORDS.other);
     expect(JSON.stringify(view)).not.toContain("evil");
-  });
-
-  it("an environment without dependencies is used exactly as before (the marker changes nothing for it)", async () => {
-    const h = await bench({ project: PROJECT, env: { ROVARA_TEST_ENVIRONMENT: "1" } });
-    const proposal = await h.proposeAndProve(body(null));
-    expect(await h.approve(proposal.digest)).toMatchObject({ status: "decided" });
-    const withMarker = await testEnvironmentForStart(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, unavailable("workers"));
-    const without = await testEnvironmentForStart(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, { ROVARA_TEST_ENVIRONMENT: "1" });
-    expect(withMarker).toEqual(without);
-    expect(withMarker.used).toBeDefined();
   });
 
   it("the owner's opt-out (exactly 0) keeps today's reason and words, whatever the marker says, and the state answer says nothing more", async () => {

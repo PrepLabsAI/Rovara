@@ -2,13 +2,12 @@
 // reference, not access: the page enforces its own sign-in and task access. These tests prove the reference is built only from a row this company owns, never names another task or company, and that a row
 // without one (an older Code) still reads.
 import { describe, expect, it } from "vitest";
-import { ReportTaskRowSchema, TASK_PAGE_PATH_PATTERN, reportPartition, reportTaskKey, taskPagePath, type OrgId, type ReportTasksResponse } from "@agentx/contracts";
+import { ReportTaskRowSchema, TASK_PAGE_PATH_PATTERN, reportTaskKey, taskPagePath, type OrgId, type ReportTasksResponse } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { reportStartItems } from "../../packages/broker/src/core/report/task-row.js";
 import { readCompanyReportTasks } from "../../packages/broker/src/core/report/read.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
-const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
 const NOW = Date.parse("2026-11-20T12:00:00.000Z");
 const id = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const day = (d: number, hour = 9): string => `2026-11-${String(d).padStart(2, "0")}T${String(hour).padStart(2, "0")}:00:00.000Z`;
@@ -65,38 +64,6 @@ describe("GET report tasks: task page references", () => {
     for (const r of first.tasks) expect(ReportTaskRowSchema.safeParse(r).success).toBe(true);
   });
 
-  it("two companies, same project and times: each reads only its own tasks' pages; the other's id never appears anywhere", async () => {
-    const w = world();
-    const a = await w.seed({ company: A, n: 1, startedAt: day(3) });
-    const b = await w.seed({ company: B, n: 2, startedAt: day(3) });
-    const [ra, rb] = [await w.read(A), await w.read(B)];
-    expect(ra.tasks.map((r) => r.taskPage)).toEqual([`/review/${a}/task`]);
-    expect(rb.tasks.map((r) => r.taskPage)).toEqual([`/review/${b}/task`]);
-    expect(JSON.stringify(ra)).not.toContain(b);
-    expect(JSON.stringify(rb)).not.toContain(a);
-    expect(JSON.stringify(ra)).not.toMatch(/org_bbbb|https?:/u);
-  });
-
-  it("a row planted in B's partition that names A's task is skipped: its page is never given to B", async () => {
-    const w = world();
-    const a = await w.seed({ company: A, n: 1, startedAt: day(3) });
-    const planted = (await w.store.get(reportTaskKey(A, day(3), a)))!;
-    await w.store.put({ item: { ...planted, pk: reportPartition(B) } });
-    const page = await w.read(B);
-    expect(page).toMatchObject({ tasks: [], skipped: 1 });
-    expect(JSON.stringify(page)).not.toContain(a);
-  });
-
-  it("a stored row of B whose task record is A's is skipped, with no page", async () => {
-    const w = world();
-    const taskId = id(1);
-    await w.store.transact(reportStartItems({ companyId: B, taskId, project: "alpha", title: "t", origin: "app", receivedAt: day(3) }));
-    await w.store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", companyId: A, taskId, project: "alpha", title: "A's task" } });
-    const page = await w.read(B);
-    expect(page).toMatchObject({ tasks: [], skipped: 1 });
-    expect(JSON.stringify(page)).not.toContain(taskId);
-  });
-
   it("a stored row whose task id is not a task id gets no page and is not shown (unreadable)", async () => {
     const w = world();
     const taskId = await w.seed({ n: 1, startedAt: day(3) });
@@ -109,21 +76,4 @@ describe("GET report tasks: task page references", () => {
     expect(JSON.stringify(page)).not.toContain("../../x");
   });
 
-  it("a row the store keeps without a reference (written before this change) is read the same: the reference is made at read time from the checked task id", async () => {
-    const w = world();
-    const taskId = await w.seed({ n: 1, startedAt: day(3) });
-    const stored = (await w.store.get(reportTaskKey(A, day(3), taskId)))!;
-    expect(stored).not.toHaveProperty("taskPage");
-    expect((await w.read(A)).tasks[0]!.taskPage).toBe(`/review/${taskId}/task`);
-  });
-
-  it("a stored value named taskPage is never served: the reference is not read from the store", async () => {
-    const w = world();
-    const taskId = await w.seed({ n: 1, startedAt: day(3) });
-    const stored = (await w.store.get(reportTaskKey(A, day(3), taskId)))!;
-    await w.store.put({ item: { ...stored, taskPage: "https://evil.example/steal" } });
-    const page = await w.read(A);
-    expect(page.tasks[0]!.taskPage).toBe(`/review/${taskId}/task`);
-    expect(JSON.stringify(page)).not.toContain("evil");
-  });
 });

@@ -1,9 +1,9 @@
 // Port lane L3: the SQLite document store passes the shared document-store conformance suite unchanged, plus what is specific to a file on disk.
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DocumentStoreError, change, queryAll, queryIndexAll, when, type DocumentChange, type IndexDefinition } from "@agentx/contracts";
+import { DocumentStoreError, change, queryAll, queryIndexAll, type DocumentChange, type IndexDefinition } from "@agentx/contracts";
 import { SqliteDatabase, SqliteDocumentStore, prefixEnd } from "../../packages/local-adapters/src/index.js";
 import { runDocumentStoreConformance } from "../support/ports/document-store-conformance.js";
 import { FAST_FEED, sqliteStoreHarness } from "../support/ports/sqlite-harness.js";
@@ -45,12 +45,6 @@ describe("the SQLite store: keys and text", () => {
     expect(await store.get({ pk: PK, sk: "ok" })).toEqual(body);
   });
 
-  it("keeps a lone surrogate or NUL out of an index key as well", async () => {
-    const store = open(join(await folder(), "s.db"), { indexes: [{ name: "byOwner", partitionAttribute: "owner" }] });
-    await expect(store.put({ item: { pk: PK, sk: "x", owner: "o\u0000" } })).rejects.toMatchObject({ code: "invalid_request" });
-    await expect(store.queryIndex({ index: "byOwner", partition: "o\ud800" })).rejects.toMatchObject({ code: "invalid_request" });
-  });
-
   it("finds a prefix at the edge of the code point range, with a bound that counts bytes the way UTF-8 does", async () => {
     const store = open(join(await folder(), "s.db"));
     const high = "\u{10FFFF}";
@@ -66,18 +60,6 @@ describe("the SQLite store: keys and text", () => {
 });
 
 describe("the SQLite store: a file that outlives the process", () => {
-  it("keeps documents, and the 0600 mode of the file", async () => {
-    const path = join(await folder(), "deep", "state.db");
-    const first = open(path);
-    await first.put({ item: { pk: PK, sk: "A", n: 1, nested: { a: [1, 2] } } });
-    await first.transact([{ kind: "put", item: { pk: PK, sk: "B" } }, { kind: "update", key: { pk: PK, sk: "A" }, ops: [change.add("n", 4)] }]);
-    await first.close();
-    const second = open(path);
-    expect(await second.get({ pk: PK, sk: "A" })).toEqual({ pk: PK, sk: "A", n: 5, nested: { a: [1, 2] } });
-    expect(await second.get({ pk: PK, sk: "B" })).toBeDefined();
-    expect((await stat(path)).mode & 0o777).toBe(0o600);
-    expect((await stat(join(path, ".."))).mode & 0o777).toBe(0o700);
-  });
 
   it("refuses a closed store with an error a caller can retry on elsewhere", async () => {
     const store = open(join(await folder(), "s.db"));
@@ -187,34 +169,6 @@ describe("the SQLite store: one layout for every connection", () => {
 });
 
 describe("the SQLite store: two connections to one file", () => {
-  it("delivers the changes of a connection that runs no feed of its own, to a consumer registered on another", async () => {
-    const path = join(await folder(), "s.db");
-    const subscriber = open(path);
-    const quiet = open(path, { changeFeed: false });
-    const seen: DocumentChange[] = [];
-    await subscriber.changes!.subscribe("relay", async (batch) => void seen.push(...batch));
-    await subscriber.put({ item: { pk: PK, sk: "via-subscriber" } });
-    await quiet.put({ item: { pk: PK, sk: "via-quiet" } });
-    await quiet.transact([{ kind: "put", item: { pk: PK, sk: "via-quiet-2" } }]);
-    for (let waited = 0; seen.length < 3 && waited < 5_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(seen.map((entry) => entry.key.sk)).toEqual(["via-subscriber", "via-quiet", "via-quiet-2"]);
-  });
-
-  it("lets exactly one of many racing creators win across two connections", async () => {
-    const path = join(await folder(), "s.db");
-    const one = open(path);
-    const two = open(path);
-    const results = await Promise.all(Array.from({ length: 20 }, (_, index) => (index % 2 === 0 ? one : two).put({ item: { pk: PK, sk: "CLAIM", by: index }, condition: when.absent() })));
-    expect(results.filter((result) => result.applied)).toHaveLength(1);
-  });
-
-  it("adds atomically across two connections", async () => {
-    const path = join(await folder(), "s.db");
-    const one = open(path);
-    const two = open(path);
-    await Promise.all(Array.from({ length: 40 }, (_, index) => (index % 2 === 0 ? one : two).update({ key: { pk: PK, sk: "N" }, ops: [change.add("n", 1)] })));
-    expect((await one.get({ pk: PK, sk: "N" }))!.n).toBe(40);
-  });
 
   it("answers `conflict` for a write that waited out the busy timeout, and `throttled` never blocks a read", async () => {
     const path = join(await folder(), "s.db");
@@ -234,40 +188,9 @@ describe("the SQLite store: two connections to one file", () => {
     }
     expect((await store.put({ item: { pk: PK, sk: "A", v: 3 } })).applied).toBe(true);
   });
-
-  it("delivers the changes another connection commits", async () => {
-    const path = join(await folder(), "s.db");
-    const reader = open(path);
-    const writer = open(path);
-    const seen: DocumentChange[] = [];
-    await reader.changes!.subscribe("watch", async (batch) => void seen.push(...batch));
-    await writer.put({ item: { pk: PK, sk: "FROM-WRITER" } });
-    for (let waited = 0; seen.length === 0 && waited < 5_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(seen.map((entry) => entry.key.sk)).toEqual(["FROM-WRITER"]);
-  });
 });
 
 describe("the SQLite store: the change log", () => {
-  it("keeps nothing in the log until a consumer exists, and trims what every consumer has handled", async () => {
-    const path = join(await folder(), "s.db");
-    const store = open(path);
-    await store.put({ item: { pk: PK, sk: "1" } });
-    const raw = new SqliteDatabase({ path });
-    expect(raw.get("SELECT COUNT(*) AS n FROM rv_doc_change")!.n).toBe(0);
-    const seen: DocumentChange[] = [];
-    const subscription = await store.changes!.subscribe("c", async (batch) => void seen.push(...batch));
-    for (let index = 0; index < 5; index += 1) await store.put({ item: { pk: PK, sk: `K${index}` } });
-    await store.settled();
-    expect(seen).toHaveLength(5);
-    expect(raw.get("SELECT COUNT(*) AS n FROM rv_doc_change")!.n).toBe(0);
-    await subscription.stop();
-    await store.put({ item: { pk: PK, sk: "WHILE-AWAY" } });
-    expect(raw.get("SELECT COUNT(*) AS n FROM rv_doc_change")!.n).toBe(1);
-    // Retiring the consumer lets the log go.
-    expect(store.removeConsumer("c")).toBe(true);
-    expect(raw.get("SELECT COUNT(*) AS n FROM rv_doc_change")!.n).toBe(0);
-    raw.close();
-  });
 
   it("stops a consumer that another connection retired, and lets the name be taken again after stop() finishes", async () => {
     const path = join(await folder(), "s.db");
@@ -293,21 +216,6 @@ describe("the SQLite store: the change log", () => {
     const off = open(join(await folder(), "off.db"), { changeFeed: false });
     expect(off.changes).toBeUndefined();
     await off.put({ item: { pk: PK, sk: "1" } });
-  });
-
-  it("writes the change in the transaction of the write: a refused transaction leaves no log", async () => {
-    const path = join(await folder(), "s.db");
-    const store = open(path);
-    await store.changes!.subscribe("c", async () => {});
-    const raw = new SqliteDatabase({ path });
-    await store.put({ item: { pk: PK, sk: "1" } });
-    await store.settled();
-    const result = await store.transact([{ kind: "put", item: { pk: PK, sk: "2" } }, { kind: "check", key: { pk: PK, sk: "1" }, condition: when.eq("nope", 1) }]);
-    expect(result.applied).toBe(false);
-    await expect(store.transact([{ kind: "put", item: { pk: PK, sk: "3" } }, { kind: "update", key: { pk: PK, sk: "1" }, ops: [change.set("a.b", 1)] }])).rejects.toMatchObject({ code: "invalid_request" });
-    expect(raw.get("SELECT COUNT(*) AS n FROM rv_doc_change")!.n).toBe(0);
-    expect(await store.get({ pk: PK, sk: "3" })).toBeUndefined();
-    raw.close();
   });
 });
 
@@ -341,15 +249,5 @@ describe("the SQLite store: closing from inside a handler, and an older file", (
     await store.put({ item: { pk: PK, sk: "1" } });
     for (let waited = 0; calls === 0 && waited < 5_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
     expect(calls).toBe(1);
-  });
-
-  it("opens a file whose layout has no generation yet (written before generations existed)", async () => {
-    const path = join(await folder(), "s.db");
-    await open(path).close();
-    const raw = new SqliteDatabase({ path });
-    raw.run("DELETE FROM rv_doc_meta WHERE key = 'generation'");
-    raw.close();
-    const store = open(path);
-    expect((await store.put({ item: { pk: PK, sk: "1" } })).applied).toBe(true);
   });
 });

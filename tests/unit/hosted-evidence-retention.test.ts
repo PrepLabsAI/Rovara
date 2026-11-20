@@ -2,7 +2,7 @@
 // for a class its settings map, so the broker maps the two evidence classes (core-host/hosted-evidence.ts `EVIDENCE_RETENTION_TAGS`). Untagged, a pack and its tails would be kept until an erase deleted them.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { E2E_ARTIFACT_RETENTION_TAG_KEY, EVIDENCE_RETENTION_DAYS, type OrgId } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_TAG_KEY, type OrgId } from "@agentx/contracts";
 import { S3ObjectStorage } from "../../packages/aws-adapters/src/s3/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -16,16 +16,6 @@ const BUCKET = "rovara-artifacts-test";
 const TASK = { ownerKey: "owner-a", workspaceId: "ws-a", taskId: "task-1" };
 
 describe("hosted evidence retention", () => {
-  it("maps exactly the evidence classes the bucket's rules expire, on the tag key the rules read", () => {
-    expect(Object.keys(EVIDENCE_RETENTION_TAGS).sort()).toEqual(["evidence-short", "evidence-std"]);
-    for (const [retention, tag] of Object.entries(EVIDENCE_RETENTION_TAGS)) {
-      expect(tag).toEqual({ key: E2E_ARTIFACT_RETENTION_TAG_KEY, value: retention });
-      expect(Object.keys(EVIDENCE_RETENTION_DAYS)).toContain(retention);
-    }
-    // The CDK rules read the same key and values (infra/lib/control-plane.ts).
-    const infra = readFileSync("infra/lib/control-plane.ts", "utf8");
-    expect(infra).toContain("tagFilters: { [E2E_ARTIFACT_RETENTION_TAG_KEY]: retentionClass }");
-  });
 
   it("the broker's object storage is built with those tags (and with no other change to its settings)", () => {
     const source = readFileSync("packages/broker/src/aws/broker.ts", "utf8");

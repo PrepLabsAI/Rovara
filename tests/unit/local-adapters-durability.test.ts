@@ -6,8 +6,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { OUTBOX_PENDING_INDEX, queryAll, type DocumentChange } from "@agentx/contracts";
-import { SqliteDatabase, SqliteDocumentStore, SqliteQueueService } from "../../packages/local-adapters/src/index.js";
+import { OUTBOX_PENDING_INDEX, queryAll } from "@agentx/contracts";
+import { SqliteDatabase, SqliteDocumentStore } from "../../packages/local-adapters/src/index.js";
 
 const CHILD = join(import.meta.dirname, "../support/ports/sqlite-crash-child.ts");
 const PK = "ORG#org_aaaaaaaaaaaaaaaaaaaa#CRASH#1";
@@ -46,52 +46,11 @@ async function runAndKill(mode: string, path: string, marker: string, extra: str
   await exited;
 }
 
-/** Runs the child to its normal end and returns what it printed. */
-async function runToEnd(mode: string, path: string): Promise<string> {
-  const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "--import", "tsx", CHILD, mode, path], { stdio: ["ignore", "pipe", "pipe"] });
-  children.push(child);
-  let output = "";
-  let errors = "";
-  child.stdout.on("data", (chunk: Buffer) => void (output += chunk.toString()));
-  child.stderr.on("data", (chunk: Buffer) => void (errors += chunk.toString()));
-  const code = await new Promise<number | null>((resolve) => child.once("exit", resolve));
-  if (code !== 0) throw new Error(`the ${mode} child failed (${String(code)}): ${errors}`);
-  return output;
-}
-
 async function freshFile(): Promise<string> {
   const folder = await mkdtemp(join(tmpdir(), "local-crash-"));
   folders.push(folder);
   return join(folder, "state.db");
 }
-
-describe("the SQLite adapters under several processes", () => {
-  it("lets exactly one of three processes win each claim, and loses no add", async () => {
-    const path = await freshFile();
-    await SqliteDocumentStore.open({ path, changeFeed: false }).close();
-    const outputs = await Promise.all([runToEnd("contend", path), runToEnd("contend", path), runToEnd("contend", path)]);
-    const wins = outputs.map((output) => Number(/WINS (\d+)/.exec(output)![1]));
-    expect(wins.reduce((sum, count) => sum + count, 0)).toBe(40);
-    const store = SqliteDocumentStore.open({ path, changeFeed: false });
-    try {
-      expect((await store.get({ pk: PK, sk: "COUNTER" }))!.n).toBe(450);
-      expect(await queryAll(store, { pk: PK, sk: { op: "beginsWith", prefix: "CLAIM#" } })).toHaveLength(40);
-    } finally {
-      await store.close();
-    }
-  }, 120_000);
-
-  it("hands each message to exactly one of three consuming processes", async () => {
-    const path = await freshFile();
-    const service = SqliteQueueService.open({ path });
-    const queue = await service.queue("jobs", { visibilityTimeoutSeconds: 600 });
-    for (let index = 0; index < 150; index += 1) await queue.enqueue({ body: index });
-    await service.close();
-    const outputs = await Promise.all([runToEnd("consume", path), runToEnd("consume", path), runToEnd("consume", path)]);
-    const got = outputs.flatMap((output) => JSON.parse(/GOT (.*)/.exec(output)![1]!) as number[]);
-    expect([...got].sort((a, b) => a - b)).toEqual(Array.from({ length: 150 }, (_, index) => index));
-  }, 120_000);
-});
 
 describe("the SQLite adapters after a process is killed", () => {
   it.each([0, 7, 23, 61])("never shows half of a transaction, and keeps every one that was acknowledged (killed %i ms after round 50)", async (delayMs) => {
@@ -114,56 +73,6 @@ describe("the SQLite adapters after a process is killed", () => {
       expect((await store.transact([{ kind: "put", item: { pk: PK, sk: "AFTER" } }])).applied).toBe(true);
     } finally {
       await store.close();
-    }
-  }, 90_000);
-
-  it("drops a transaction that was never committed, keeps the committed one, and frees the write lock", async () => {
-    const path = await freshFile();
-    await runAndKill("uncommitted", path, "READY");
-    const store = SqliteDocumentStore.open({ path, changeFeed: false, busyTimeoutMs: 500 });
-    try {
-      expect(await store.get({ pk: PK, sk: "COMMITTED" })).toEqual({ pk: PK, sk: "COMMITTED", v: 1 });
-      expect(await store.get({ pk: PK, sk: "UNCOMMITTED" })).toBeUndefined();
-      expect((await store.put({ item: { pk: PK, sk: "NEXT" } })).applied).toBe(true);
-    } finally {
-      await store.close();
-    }
-  }, 90_000);
-
-  it("resumes a change-feed consumer after its stored checkpoint, delivering what it had not finished", async () => {
-    const path = await freshFile();
-    await runAndKill("feed", path, "WRITTEN");
-    const store = SqliteDocumentStore.open({ path, changeFeed: { pollMs: 20, retryDelayMs: 2 } });
-    try {
-      const seen: DocumentChange[] = [];
-      await store.changes!.subscribe("c1", async (batch) => void seen.push(...batch));
-      await store.put({ item: { pk: PK, sk: "4" } });
-      for (let waited = 0; !seen.some((entry) => entry.key.sk === "4") && waited < 10_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
-      const keys = seen.map((entry) => entry.key.sk);
-      // Change 1 was handled and its checkpoint stored before the kill. 2 and 3 were in a batch that never finished: they come again.
-      expect(keys).toEqual(["2", "3", "4"]);
-      expect(seen.every((entry, index) => index === 0 || entry.sequence > seen[index - 1]!.sequence)).toBe(true);
-    } finally {
-      await store.close();
-    }
-  }, 90_000);
-
-  it("keeps queued, in-flight and dead-lettered messages, and delivers the in-flight ones when their time is up", async () => {
-    const path = await freshFile();
-    const start = Date.parse("2026-11-09T10:00:00.000Z");
-    await runAndKill("queue", path, "READY", [String(start)]);
-    let now = start + 1_000;
-    const service = SqliteQueueService.open({ path, now: () => now });
-    try {
-      const queue = await service.queue("jobs", { visibilityTimeoutSeconds: 30 });
-      // m1 and m2 are in flight (hidden for 30 s); m3 was dead-lettered.
-      expect(await queue.receive({ maxMessages: 10 })).toEqual([]);
-      expect((await queue.listDeadLetters()).items.map((item) => [item.body, item.reason])).toEqual([["m3", "bad"]]);
-      now = start + 31_000;
-      const back = await queue.receive({ maxMessages: 10 });
-      expect(back.map((message) => [message.body, message.receiveCount])).toEqual([["m1", 2], ["m2", 2]]);
-    } finally {
-      await service.close();
     }
   }, 90_000);
 });

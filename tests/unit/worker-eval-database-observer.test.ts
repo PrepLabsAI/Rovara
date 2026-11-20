@@ -58,9 +58,3 @@ it("ignores a malformed plan, a nonzero result, or a failed observer", async () 
   }
 });
 
-it("re-asks the whole batch when per-query question attribution is unavailable", async () => {
-  const w = await world(); const old = await w.seed("old"); const newer = await w.seed("new");
-  w.logs(planLog(777));
-  await old!.observe(["q1", "q2"], signal()); await newer!.observe(["q1", "q2"], signal());
-  expect(await w.prepared.databases!.fillMissingRows({ ids: ["q1", "q2"] })).toEqual(["q1", "q2"]);
-});

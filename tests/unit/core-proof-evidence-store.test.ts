@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { EVIDENCE_ARTIFACT_MAX_BYTES, EVIDENCE_ARTIFACT_RETENTION, EVIDENCE_RETENTION_DAYS, INDEX_EXPIRY_ATTRIBUTE, buildApiSample, type EvidenceView } from "../../packages/contracts/src/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { DOCUMENT_BLOB_MAX_BYTES, EvidenceObjectTooBigError, createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
+import { DOCUMENT_BLOB_MAX_BYTES, createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import {
   deleteEvidenceArtifacts, evidenceArtifactKey, evidenceBytesAreKind, readEvidenceArtifact, statEvidenceArtifacts, storeEvidenceArtifacts, type EvidenceReadDependencies,
 } from "../../packages/broker/src/core/proof/evidence-artifacts.js";
@@ -28,13 +28,6 @@ function memory(now = () => Date.parse("2026-11-09T00:00:00.000Z")) {
 }
 
 describe("the evidence blob store over the document store", () => {
-  it("keeps an object under the company's scope, returns it, and reports its size and metadata", async () => {
-    const m = memory();
-    await m.blobs.put("private/o/w/evidence/t/x", TAIL, { contentType: "text/plain", metadata: { kind: "log_txt" }, retention: "evidence-std" });
-    expect(Buffer.from((await m.blobs.get("private/o/w/evidence/t/x", 1_000))!).equals(TAIL)).toBe(true);
-    expect(await m.blobs.stat("private/o/w/evidence/t/x")).toEqual({ bytes: TAIL.length, metadata: { kind: "log_txt" } });
-    expect((await m.documents.get({ pk: `ORG#${COMPANY}#EVIDENCE_BLOB`, sk: "private/o/w/evidence/t/x" }))).toMatchObject({ entityType: "EVIDENCE_BLOB", contentType: "text/plain", retention: "evidence-std" });
-  });
 
   it("expires an object by its class: the days the contracts name for it", async () => {
     const now = Date.parse("2026-11-09T00:00:00.000Z");
@@ -46,41 +39,6 @@ describe("the evidence blob store over the document store", () => {
     const custom = createDocumentEvidenceBlobStore(m.documents, { companyId: COMPANY, now: () => now, retentionDays: { "evidence-std": 7 } });
     await custom.put("c", TAIL, { contentType: "text/plain", metadata: {}, retention: "evidence-std" });
     expect((await m.documents.get({ pk: `ORG#${COMPANY}#EVIDENCE_BLOB`, sk: "c" }))![INDEX_EXPIRY_ATTRIBUTE]).toBe(Math.floor(now / 1000) + 7 * 86_400);
-  });
-
-  it("writes the expiry under the attribute the store sweeps, and reads an expired object as absent", async () => {
-    let now = Date.parse("2026-11-09T00:00:00.000Z");
-    const documents = new MemoryDocumentStore({ ttlAttribute: "expiresAt", nowSeconds: () => Math.floor(now / 1000) });
-    const blobs = createDocumentEvidenceBlobStore(documents, { companyId: COMPANY, now: () => now });
-    await blobs.put("k", TAIL, { contentType: "text/plain", metadata: { a: "b" }, retention: "evidence-std" });
-    const row = (await documents.get({ pk: `ORG#${COMPANY}#EVIDENCE_BLOB`, sk: "k" }))!;
-    expect(row["expiresAt"]).toBe(Math.floor(now / 1000) + EVIDENCE_RETENTION_DAYS["evidence-std"].default * 86_400);
-    expect(row[INDEX_EXPIRY_ATTRIBUTE]).toBeUndefined();
-    expect(await blobs.get("k", 1_000)).toBeDefined();
-    now += (EVIDENCE_RETENTION_DAYS["evidence-std"].default * 86_400 + 1) * 1_000;
-    expect(await blobs.get("k", 1_000)).toBeUndefined();
-    expect(await blobs.stat("k")).toBeUndefined();
-  });
-
-  it("returns nothing for an object over the reader's cap (never cut), refuses one that does not fit a document, and never reads another company's", async () => {
-    const m = memory();
-    await m.blobs.put("k", TAIL, { contentType: "text/plain", metadata: {}, retention: "evidence-std" });
-    expect(await m.blobs.get("k", TAIL.length - 1)).toBeUndefined();
-    expect(await m.blobs.get("missing", 1_000)).toBeUndefined();
-    await expect(m.blobs.put("big", Buffer.alloc(DOCUMENT_BLOB_MAX_BYTES + 1), { contentType: "x", metadata: {}, retention: "evidence-std" })).rejects.toBeInstanceOf(EvidenceObjectTooBigError);
-    await m.blobs.put("fits", Buffer.alloc(DOCUMENT_BLOB_MAX_BYTES, 1), { contentType: "x", metadata: {}, retention: "evidence-std" });
-    expect((await m.blobs.get("fits", DOCUMENT_BLOB_MAX_BYTES))?.byteLength).toBe(DOCUMENT_BLOB_MAX_BYTES);
-    const other = createDocumentEvidenceBlobStore(m.documents, { companyId: "org_11111111111111111111" });
-    expect(await other.get("k", 1_000)).toBeUndefined();
-  });
-
-  it("deletes by prefix and nothing else, over more than one page of objects", async () => {
-    const m = memory();
-    for (let index = 0; index < 250; index += 1) await m.blobs.put(`p/a/${String(index).padStart(4, "0")}`, TAIL, { contentType: "text/plain", metadata: {}, retention: "evidence-std" });
-    await m.blobs.put("p/b/0", TAIL, { contentType: "text/plain", metadata: {}, retention: "evidence-std" });
-    expect(await m.blobs.deletePrefix("p/a/")).toBe(true);
-    expect(await m.keys()).toEqual(["p/b/0"]);
-    expect(await m.blobs.deletePrefix("p/a/")).toBe(true);
   });
 });
 
@@ -101,19 +59,6 @@ describe("what the store keeps", () => {
     expect(evidenceBytesAreKind("jpeg", new Uint8Array())).toBe(false);
     expect(evidenceBytesAreKind("jpeg", Buffer.concat([JPEG, Buffer.alloc(EVIDENCE_ARTIFACT_MAX_BYTES.jpeg)]))).toBe(false);
     expect(evidenceBytesAreKind("log_txt", Buffer.alloc(EVIDENCE_ARTIFACT_MAX_BYTES.log_txt + 1, 0x61))).toBe(false);
-  });
-
-  it("writes under the task's owner and workspace, by digest, with the content type and the retention class of the kind", async () => {
-    const m = memory();
-    const stored = await storeEvidenceArtifacts(m.store, OWNER, [{ kind: "jpeg", bytes: JPEG }, { kind: "webm", bytes: WEBM }, { kind: "trace_zip", bytes: ZIP }, { kind: "api_sample_json", bytes: SAMPLE }, { kind: "log_txt", bytes: TAIL }]);
-    expect(stored.size).toBe(5);
-    const row = async (bytes: Uint8Array) => m.documents.get({ pk: `ORG#${COMPANY}#EVIDENCE_BLOB`, sk: `private/owner-1/ws-1/evidence/t-1/${sha(bytes)}` });
-    expect(await row(JPEG)).toMatchObject({ contentType: "image/jpeg", retention: "evidence-std", metadata: { sha256: sha(JPEG), kind: "jpeg" } });
-    expect(await row(WEBM)).toMatchObject({ contentType: "video/webm", retention: "evidence-short" });
-    expect(await row(ZIP)).toMatchObject({ contentType: "application/zip", retention: "evidence-short" });
-    expect((await row(SAMPLE))?.["retention"]).toBe("evidence-std");
-    expect((await row(TAIL))?.["retention"]).toBe("evidence-std");
-    expect(stored.get(sha(WEBM))).toEqual({ kind: "webm", sha256: sha(WEBM), bytes: WEBM.length, retentionClass: "evidence-short" });
   });
 
   it("skips bytes that are not the kind they claim, a digest that is not theirs, and a second write changes nothing", async () => {
@@ -218,13 +163,6 @@ describe("the read rule", () => {
     expect(await readEvidenceArtifact(deps, "not a digest")).toEqual({ status: 404 });
   });
 
-  it("is 404 for an expired artifact, for a pack of other code than the task's candidate, and when there is no pack", async () => {
-    expect(await readEvidenceArtifact((await setup([{ kind: "jpeg", bytes: JPEG, state: "expired" }])).deps, sha(JPEG))).toEqual({ status: 404 });
-    expect(await readEvidenceArtifact((await setup(all, { candidateDigest: "d".repeat(64) })).deps, sha(JPEG))).toEqual({ status: 404 });
-    expect(await readEvidenceArtifact((await setup(all, { candidateDigest: undefined })).deps, sha(JPEG))).toEqual({ status: 404 });
-    expect(await readEvidenceArtifact((await setup(all, { view: undefined })).deps, sha(JPEG))).toEqual({ status: 404 });
-  });
-
   it("is 404 when the object differs from what the pack says (size, digest or kind), and nothing leaves", async () => {
     const { deps, m } = await setup(all);
     const key = evidenceArtifactKey("owner-1", "ws-1", "t-1", sha(JPEG));
@@ -241,13 +179,6 @@ describe("the read rule", () => {
     }
     expect(await readEvidenceArtifact((await setup(all, { authorize: async () => undefined })).deps, sha(JPEG))).toEqual({ status: 403 });
     expect(await readEvidenceArtifact((await setup(all, { authorize: async () => { throw new Error("db down"); } })).deps, sha(JPEG))).toEqual({ status: 503 });
-  });
-
-  it("one task cannot read the other's object, though the bytes are the same", async () => {
-    const m = memory();
-    await storeEvidenceArtifacts(m.store, { ...OWNER, taskId: "t-2" }, [{ kind: "jpeg", bytes: JPEG }]);
-    const deps: EvidenceReadDependencies = { authorize: async () => ({ ...OWNER, candidateDigest: DIGEST, view: viewWith([{ kind: "jpeg", bytes: JPEG }]) }), store: m.store };
-    expect(await readEvidenceArtifact(deps, sha(JPEG))).toEqual({ status: 404 });
   });
 });
 

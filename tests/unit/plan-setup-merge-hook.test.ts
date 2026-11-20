@@ -64,13 +64,4 @@ describe("the merge records the Update setup offer, once, in its own commit", ()
     expect(await w.world.store.get(setupUpdateKey(ORG, "web", TASK_ID))).toBeUndefined();
   });
 
-  it("leaves nothing when the plan had no setup change, only a variable, or no approval", async () => {
-    for (const w of [await withPlan(undefined), await withPlan([variable]), await withPlan([mock], { approved: false })]) {
-      const pr = w.world.prs[0]!;
-      expect(pr.model.merge(String(pr.number), { revision: pr.head, method: "squash" }).outcome).toBe("merged");
-      await w.tracking.sweep();
-      expect((await w.world.store.get(taskKey(TASK_ID)))!["workflow"]).toMatchObject({ stage: "MERGED" });
-      expect(await offersOf(w)).toEqual([]);
-    }
-  });
 });

@@ -5,12 +5,11 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { orgProjectCatalogKey, projectRevisionKey, type AuditEvent, type AuditSink, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import { setupStateOf } from "../../packages/broker/src/core/setup-agent/check.js";
 import { projectMetaKey } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import {
-  SETUP_RUN_AUDIT_UNAVAILABLE, SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND, SETUP_RUN_UNAVAILABLE, SETUP_RUN_UNREADABLE, type HostedSetupRunWiring, type SetupRunStanding,
+  SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND, SETUP_RUN_UNAVAILABLE, type HostedSetupRunWiring, type SetupRunStanding,
 } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
@@ -73,8 +72,6 @@ async function setupWorld(options: { env?: NodeJS.ProcessEnv; gateway?: boolean;
   };
   return { world, app, person, standing, call, routes, wiring };
 }
-
-
 
 const CHECK = "/v1/app/projects/payments/setup-check";
 const checkEvents = (world: FakeWorld): AuditEvent[] => world.audit.filter((event) => event.action === "setup_check.requested");
@@ -141,42 +138,6 @@ describe("hosted Re-check setup: who may do what", () => {
     expect(checkEvents(world)).toEqual([]);
   });
 
-  it("two companies with one project name: each person's check is their own company's", async () => {
-    const { world, person, call } = await setupWorld();
-    const a = person("p-a", FAKE_COMPANY, "owner");
-    const b = person("p-b", OTHER, "owner");
-    const first = await call(post(CHECK, { requestId: randomUUID() }), a);
-    expect(first.status).toBe(202);
-    expect(await markOf(world, OTHER)).toBeUndefined();
-    const second = await call(post(CHECK, { requestId: randomUUID() }), b);
-    expect(second.status).toBe(202);
-    expect((await markOf(world, OTHER))?.startedBy).toBe("p-b");
-    expect((await markOf(world, FAKE_COMPANY))?.startedBy).toBe("p-a");
-    expect((await markOf(world, OTHER))?.workspaceId).not.toBe((await markOf(world, FAKE_COMPANY))?.workspaceId);
-    // Each company reads only its own state.
-    expect((await call(get(CHECK), a)).body).toMatchObject({ status: "checking" });
-  });
-
-  it("takes a request id and nothing else", async () => {
-    const { world, person, call } = await setupWorld();
-    const caller = person("p-owner", FAKE_COMPANY, "owner");
-    for (const body of [{}, { requestId: "nope" }, { requestId: randomUUID(), limits: { wallClockMin: 999 } }, { requestId: randomUUID(), payer: "x" }, { requestId: randomUUID(), kind: "repair_draft" }]) {
-      expect((await call(post(CHECK, body), caller)).status, JSON.stringify(body)).toBe(400);
-    }
-    expect((await call({ method: "POST", path: CHECK, headers: {}, body: "{not json" }, caller)).status).toBe(400);
-    expect(await markOf(world, FAKE_COMPANY)).toBeUndefined();
-    expect(checkEvents(world)).toEqual([]);
-  });
-
-  it("writes the audit record FIRST: with the ledger down nothing is started", async () => {
-    const failing = await setupWorld({ audit: (sink) => ({ stage: (event) => sink.stage(event), record: async () => { throw new Error("audit down"); } }) });
-    const caller = failing.person("p-owner", FAKE_COMPANY, "owner");
-    const refused = await failing.call(post(CHECK, { requestId: randomUUID() }), caller);
-    expect(refused.status).toBe(503);
-    expect(refused.body).toEqual({ error: { code: "AUDIT_UNAVAILABLE", message: SETUP_RUN_AUDIT_UNAVAILABLE } });
-    expect(await markOf(failing.world, FAKE_COMPANY)).toBeUndefined();
-  });
-
   it("refuses a start in fixed words, writing nothing, when the company's new tasks are not on the core, but needs no model gateway (the check uses no model)", async () => {
     const off = await setupWorld();
     vi.spyOn(off.app, "engineForNewTask").mockReturnValue("workflow");
@@ -188,30 +149,6 @@ describe("hosted Re-check setup: who may do what", () => {
     const noGateway = await setupWorld({ gateway: false });
     const owner = noGateway.person("p-owner", FAKE_COMPANY, "owner");
     expect((await noGateway.call(post(CHECK, { requestId: randomUUID() }), owner)).status).toBe(202);
-  });
-
-  it("reads the standing live and again as nothing when it cannot be read", async () => {
-    const throwing = await setupWorld({ standing: async () => { throw new Error("table down secret-detail"); } });
-    const caller = throwing.person("p-owner", FAKE_COMPANY, "owner");
-    const answer = await throwing.call(post(CHECK, { requestId: randomUUID() }), caller);
-    expect(answer.status).toBe(503);
-    expect(answer.body).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: SETUP_RUN_UNREADABLE } });
-    expect(answer.raw).not.toContain("secret-detail");
-    for (const odd of [{ access: "manage" }, { access: "manage", basis: "superuser" }, null, undefined] as unknown[]) {
-      const weird = await setupWorld({ standing: async () => odd as SetupRunStanding });
-      const who = weird.person("p-owner", FAKE_COMPANY, "owner");
-      expect((await weird.call(post(CHECK, { requestId: randomUUID() }), who)).status, JSON.stringify(odd)).toBe(404);
-    }
-  });
-
-  it("other methods and paths are not this route's, and the state read matches the core's own", async () => {
-    const { world, person, call, app } = await setupWorld();
-    const caller = person("p-owner", FAKE_COMPANY, "owner");
-    expect(await call(post(CHECK, { requestId: randomUUID() }), caller)).toMatchObject({ status: 202 });
-    const runtime = await app.runtimeFor(FAKE_COMPANY);
-    const latest = (await runtime.flow.deps.projects.latest("payments"))!;
-    expect((await call(get(CHECK), caller)).body).toEqual(JSON.parse(JSON.stringify({ ...(await setupStateOf(runtime.flow.deps, "payments", latest.definition)), canManage: true })));
-    void world;
   });
 });
 

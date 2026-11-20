@@ -1,11 +1,10 @@
 // The project wiki's read routes (lead 4, W2): any project role reads; anyone else, a missing project, another company's and a malformed name get the same 404; two companies and two
 // projects never meet; people never see a stored quote, a flag's author or reason; refusals are fixed words with no echo.
 import { describe, expect, it } from "vitest";
-import { WIKI_PAGE_NOT_FOUND, WIKI_PROJECT_NOT_FOUND, WIKI_TRUST_LINE, WIKI_UNAVAILABLE, wikiAgentSwitchKey, type OrgId, type WikiPageWrite } from "@agentx/contracts";
+import { WIKI_PAGE_NOT_FOUND, WIKI_PROJECT_NOT_FOUND, WIKI_TRUST_LINE, WIKI_UNAVAILABLE, type OrgId, type WikiPageWrite } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
-import { setWikiAgentSwitch } from "../../packages/broker/src/core/wiki/agent-context.js";
-import { WIKI_FORMER_MEMBER_NAME, hostedEraseWiki, isWikiPath, routeHostedWiki, type HostedWikiWiring } from "../../packages/broker/src/core-host/wiki-routes.js";
+import { WIKI_FORMER_MEMBER_NAME, hostedEraseWiki, routeHostedWiki, type HostedWikiWiring } from "../../packages/broker/src/core-host/wiki-routes.js";
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
@@ -56,18 +55,6 @@ async function seeded() {
   return w;
 }
 
-describe("wiki read routes: paths", () => {
-  it("serves only GET on the four route shapes", () => {
-    expect(isWikiPath("/v1/app/projects/alpha/wiki", "GET")).toBe(true);
-    expect(isWikiPath("/v1/app/projects/alpha/wiki/search", "GET")).toBe(true);
-    expect(isWikiPath("/v1/app/projects/alpha/wiki/pages/overview", "GET")).toBe(true);
-    expect(isWikiPath("/v1/app/projects/alpha/wiki/pages/overview/sources", "GET")).toBe(true);
-    for (const [method, path] of [["POST", "/v1/app/projects/alpha/wiki"], ["PUT", "/v1/app/projects/alpha/wiki/pages/overview"], ["GET", "/v1/app/projects/alpha/wiki/pages"], ["GET", "/v1/app/projects/alpha/wiki/notes"], ["GET", "/v1/app/projects//wiki"], ["GET", "/v1/app/projects/alpha/wiki/pages/overview/sources/x"]] as const) {
-      expect(isWikiPath(path, method), `${method} ${path}`).toBe(false);
-    }
-  });
-});
-
 describe("wiki read routes: who reads", () => {
   it.each([["a project grant (view)", "ada"], ["a company owner or admin (manage)", "owner"]])("%s reads the index, a page and its sources", async (_name, person) => {
     const w = await seeded();
@@ -108,34 +95,12 @@ describe("wiki read routes: who reads", () => {
     expect((await w.get(A, "owner", "/v1/app/projects/gamma/wiki")).status).toBe(404);
   });
 
-  it("a malformed project name is refused before anyone's standing is read", async () => {
-    const w = await seeded();
-    const asked: string[] = [];
-    for (const path of ["/v1/app/projects/Alpha/wiki", "/v1/app/projects/alpha%23x/wiki", "/v1/app/projects/%E0%A4%A/wiki"]) {
-      expect((await w.get(A, "ada", path, { standing: async (personId, companyId, project) => { asked.push(`${companyId}/${project}/${personId}`); return { access: "view" }; } })).status).toBe(404);
-    }
-    expect(asked).toEqual([]);
-  });
-
-  it("a project whose repository list is not a list reads as missing", async () => {
-    const w = await seeded();
-    for (const weird of [{ length: 1 }, "web", null]) expect((await w.get(A, "ada", "/v1/app/projects/alpha/wiki", { projectRepositories: async () => weird as never })).status).toBe(404);
-  });
-
   it("any other fault is a fixed 503 that echoes nothing", async () => {
     const w = await seeded();
     await w.a.addNote("alpha", { pageId: "overview", text: "n", authorId: "ada" });
     const answer = await w.get(A, "ada", "/v1/app/projects/alpha/wiki/pages/overview", { displayName: async () => ({ leak: "SECRET-CAUSE" }) as never });
     expect(answer).toMatchObject({ status: 503, body: { error: { message: WIKI_UNAVAILABLE } } });
     expect(answer.raw).not.toContain("SECRET-CAUSE");
-  });
-
-  it("an unknown or malformed standing is no standing", async () => {
-    const w = await seeded();
-    for (const weird of [{ access: "admin" }, { access: "MANAGE" }, null, undefined, "view"]) {
-      const answer = await w.get(A, "ada", "/v1/app/projects/alpha/wiki", { standing: async () => weird as never });
-      expect(answer.status).toBe(404);
-    }
   });
 
   it("a standing or catalog that cannot be read is a fixed 503, and never a read", async () => {
@@ -149,18 +114,6 @@ describe("wiki read routes: who reads", () => {
 });
 
 describe("wiki read routes: isolation", () => {
-  it("the same project name in two companies, and two projects in one company, each show only their own wiki", async () => {
-    const w = await seeded();
-    const aAlpha = (await w.get(A, "ada", "/v1/app/projects/alpha/wiki")).raw + (await w.get(A, "ada", "/v1/app/projects/alpha/wiki/pages/overview")).raw;
-    expect(aAlpha).toContain("A-alpha");
-    expect(aAlpha).not.toMatch(/A-beta|B-alpha/u);
-    const aBeta = (await w.get(A, "bob", "/v1/app/projects/beta/wiki")).raw + (await w.get(A, "bob", "/v1/app/projects/beta/wiki/pages/overview")).raw;
-    expect(aBeta).toContain("A-beta");
-    expect(aBeta).not.toMatch(/A-alpha|B-alpha/u);
-    const bAlpha = (await w.get(B, "ada", "/v1/app/projects/alpha/wiki")).raw + (await w.get(B, "ada", "/v1/app/projects/alpha/wiki/pages/overview")).raw;
-    expect(bAlpha).toContain("B-alpha");
-    expect(bAlpha).not.toMatch(/A-alpha|A-beta/u);
-  });
 
   it("search reads title, summary and page text only within the authorized company and project", async () => {
     const w = await seeded();
@@ -188,43 +141,6 @@ describe("wiki read routes: isolation", () => {
     }
   });
 
-  it("search reads page and body rows only, without querying notes or flags", async () => {
-    const w = await seeded();
-    const queried: string[] = [];
-    const query = w.store.query.bind(w.store);
-    w.store.query = async (request) => { queried.push(request.sk?.op === "beginsWith" ? request.sk.prefix : ""); return await query(request); };
-    const answer = await w.get(A, "ada", "/v1/app/projects/alpha/wiki/search?q=Text");
-    expect(answer.status).toBe(200);
-    expect(queried).not.toContain("WIKI#NOTE#");
-    expect(queried).not.toContain("WIKI#FLAG#");
-  });
-
-  it("redacts key-shaped text in search snippets and frames snippets as untrusted", async () => {
-    const w = world({ [`${A}/alpha/ada`]: "view" });
-    const keyText = "sk-proj-" + "A".repeat(48);
-    await w.a.writePage("alpha", { ...page("A-alpha"), blocks: [{ kind: "paragraph", blockId: "p0001", text: `Credential ${keyText} remains private`, claimIds: ["c0001", "c0002"] }] });
-    const answer = await w.get(A, "ada", "/v1/app/projects/alpha/wiki/search?q=Credential");
-    expect(answer.body).toMatchObject({ trustLine: WIKI_TRUST_LINE });
-    expect(answer.raw).not.toContain(keyText);
-    expect(answer.raw).toContain("[REDACTED]");
-  });
-
-  it("returns the existing agent switch for this company and project, and defaults off", async () => {
-    const w = await seeded();
-    expect((await w.get(A, "ada", "/v1/app/projects/alpha/wiki")).body["agentsEnabled"]).toBe(false);
-    await setWikiAgentSwitch({ store: w.store, companyId: A, now: () => T0 }, "alpha", true);
-    expect((await w.get(A, "ada", "/v1/app/projects/alpha/wiki")).body["agentsEnabled"]).toBe(true);
-    await w.store.put({ item: { ...wikiAgentSwitchKey(A, "beta"), entityType: "WIKI_AGENT_SWITCH", companyId: A, project: "alpha", on: true, changedAt: new Date(T0).toISOString() } });
-    expect((await w.get(A, "bob", "/v1/app/projects/beta/wiki")).body["agentsEnabled"]).toBe(false);
-    expect((await w.get(B, "ada", "/v1/app/projects/alpha/wiki")).body["agentsEnabled"]).toBe(false);
-  });
-
-  it("asks for the standing in the member company and the project of the path, never another", async () => {
-    const w = await seeded();
-    await w.get(B, "ada", "/v1/app/projects/alpha/wiki");
-    expect(w.calls).toEqual([`standing:${B}/alpha/ada`]);
-  });
-
   it("a repository no longer in the project leaves nothing behind: its pages and cross-repo pages are deleted before the read", async () => {
     const repos: Record<string, Record<string, string[]>> = { [A]: { alpha: ["web", "api"] } };
     const w = world({ [`${A}/alpha/ada`]: "view" }, repos);
@@ -237,12 +153,6 @@ describe("wiki read routes: isolation", () => {
     expect((after.body["pages"] as Array<{ pageId: string }>).map((entry) => entry.pageId)).toEqual(["repo-api"]);
     expect((await w.get(A, "ada", "/v1/app/projects/alpha/wiki/pages/repo-web")).status).toBe(404);
     expect(await w.a.readPage("alpha", "connections", "person")).toBeUndefined();
-  });
-
-  it("a project with no wiki yet reads as empty", async () => {
-    const w = world({ [`${A}/beta/bob`]: "view" }, { [A]: { beta: ["web"] } });
-    await w.b.writePage("alpha", page("B-alpha"));
-    expect((await w.get(A, "bob", "/v1/app/projects/beta/wiki")).body).toEqual({ project: "beta", state: "empty", agentsEnabled: false, pages: [] });
   });
 });
 

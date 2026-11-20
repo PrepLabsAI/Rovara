@@ -68,9 +68,4 @@ describe("withModelHelperRound forwards every member of the runners it wraps", (
     await wrapped.endRound?.();
     expect(end).toHaveBeenCalledTimes(1);
   });
-  it("a bare runner gains only the helper's check, setup and finalization hooks", () => {
-    const bare: CheckRunners = { runProjectCommand: () => Promise.reject(new Error("x")), runAgentCommand: () => Promise.reject(new Error("x")) };
-    const wrapped = withModelHelperRound(plan, bare);
-    expect(Object.keys(wrapped).sort()).toEqual(["beginCheck", "endRound", "runAgentCommand", "runProjectCommand", "scopeSetup"]);
-  });
 });

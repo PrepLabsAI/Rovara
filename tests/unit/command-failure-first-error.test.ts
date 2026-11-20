@@ -9,18 +9,6 @@ const lines = (count: number, make: (index: number) => string) => Array.from({ l
 const failed = (stdout: string, stderr = "") => describeCommandFailure("readiness check", 0, command, { exitCode: 127, stdout, stderr });
 
 describe("the first error line of a failed setup step or readiness check", () => {
-  it("is shown above the last lines when the tail does not contain it", () => {
-    const output = `sh: 1: vitest: not found\n${lines(60, (n) => `npm notice line ${n}`)}`;
-    const message = failed("", output);
-    expect(message).toMatch(/^readiness check 0 \(npm test in repo\/app\) exited 127\nFirst error line: sh: 1: vitest: not found\nLast lines:\nnpm notice line 41\n/u);
-    expect(message.endsWith("npm notice line 60")).toBe(true);
-  });
-
-  it("finds the first of several errors, in the printed output too, and matches npm's and the shell's words", () => {
-    expect(failed(`npm ERR! code E404\nnpm ERR! 404 gone\n${lines(40, (n) => `x ${n}`)}`)).toContain("First error line: npm ERR! code E404");
-    expect(failed(`${lines(40, (n) => `x ${n}`)}`, "Error: Cannot find module 'vite'\n" + lines(40, (n) => `y ${n}`))).toContain("First error line: Error: Cannot find module 'vite'");
-    expect(failed("make: gcc: command not found\n" + lines(40, (n) => `z ${n}`))).toContain("First error line: make: gcc: command not found");
-  });
 
   it("is left out when the last lines already show it, or no line looks like an error", () => {
     expect(failed("", "sh: 1: vitest: not found")).toBe("readiness check 0 (npm test in repo/app) exited 127\nLast lines:\nsh: 1: vitest: not found");

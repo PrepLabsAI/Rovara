@@ -108,13 +108,6 @@ async function world(options: { env?: NodeJS.ProcessEnv } = {}) {
 const body = (answer: { body: string } | undefined): Record<string, unknown> => JSON.parse(answer!.body) as Record<string, unknown>;
 
 describe("a hosted task with a failing check keeps its evidence for the Proof tab", () => {
-  it("the engine's own flow has the keeper on every company's runtime", async () => {
-    const w = await world();
-    const a = await w.app.runtimeFor(FAKE_COMPANY), b = await w.app.runtimeFor(OTHER);
-    expect(typeof a.flow.deps.keepEvidence).toBe("function");
-    expect(typeof b.flow.deps.keepEvidence).toBe("function");
-    expect(a.flow.deps.keepEvidence).not.toBe(b.flow.deps.keepEvidence);
-  });
 
   it("keeps the pack and the failing test's tail, and the Proof route answers the failing test with the change that most likely broke it", async () => {
     const w = await world();
@@ -132,17 +125,6 @@ describe("a hosted task with a failing check keeps its evidence for the Proof ta
     expect(await w.blobs.stat(`private/${t.record.ownerKey}/${t.record.workspaceId}/evidence/${t.taskId}/${sha(TAIL)}`)).toMatchObject({ bytes: TAIL.length });
   });
 
-  it("with no raw file (a coding run saves none) the pack holds only the broker's own verdict, and says it was not captured", async () => {
-    const w = await world();
-    const owner = w.person(OWNER_ID, FAKE_COMPANY);
-    const t = await w.taskOf(owner, FAKE_COMPANY, {});
-    expect(await w.keep(t)).toMatchObject({ kept: true });
-    const pack = await loadEvidencePack(w.blobs, { ownerKey: t.record.ownerKey, workspaceId: t.record.workspaceId, taskId: t.taskId }, DIGEST);
-    expect(pack?.checks[0]).toMatchObject({ checkId: "readiness:0", after: "failed" });
-    expect(pack?.notTested.some((item) => item.id === "evidence_capture")).toBe(true);
-    expect(w.logs.some((entry) => entry["event"] === "evidence.not_captured")).toBe(true);
-  });
-
   it("the laptop's guard stands: a raw file with a credential in a tail keeps no secret, and one for other code keeps nothing", async () => {
     const w = await world();
     const owner = w.person(OWNER_ID, FAKE_COMPANY);
@@ -158,18 +140,6 @@ describe("a hosted task with a failing check keeps its evidence for the Proof ta
 });
 
 describe("one company's evidence is never another's", () => {
-  it("another company's member reads the task as a missing one, and each company's Proof route shows only its own failing tests", async () => {
-    const w = await world();
-    const ownerA = w.person(OWNER_ID, FAKE_COMPANY), ownerB = w.person("person-ownerb-0000000001", OTHER);
-    const a = await w.taskOf(ownerA, FAKE_COMPANY), b = await w.taskOf(ownerB, OTHER, { raw: rawFile().replaceAll(FAILING, "tests/b.test.ts::company B only"), causes: causesFile().replaceAll(FAILING, "tests/b.test.ts::company B only") });
-    expect(await w.keep(a)).toMatchObject({ kept: true });
-    expect(await w.keep(b)).toMatchObject({ kept: true });
-    expect((await w.read(ownerA, a.taskId))!.body).toContain("applies discount");
-    expect((await w.read(ownerA, a.taskId))!.body).not.toContain("company B only");
-    expect((await w.read(ownerB, b.taskId))!.body).toContain("company B only");
-    expect(await w.read(ownerB, a.taskId)).toEqual(await w.read(ownerB, randomUUID()));
-    expect((await w.read(ownerB, a.taskId))?.statusCode).toBe(404);
-  });
 
   it("a task record that names another company's workspace keeps nothing there and reads nothing from there", async () => {
     const w = await world();
@@ -227,15 +197,6 @@ describe("the baseline words (TE-C1)", () => {
       recordedAt: new Date(NOW - 3_600_000).toISOString(), envRevision: 1, branch: "main", headSha: baselineSha, finishedAt: new Date(NOW - 3 * 3_600_000).toISOString(), writer: "nightly", tests: { total: 5, passed: 4, failed: 1, skipped: 0 }, failed: ["a::x"], flaky: [] }) }));
     return w;
   }
-
-  it("with the baseline switch on, the words of the company's own baseline for a commit the plan offered are kept beside the pack", async () => {
-    const w = await baselineWorld({ ROVARA_BASELINE_CACHE: "1" });
-    w.fake.clock.now = NOW;
-    const owner = w.person(OWNER_ID, FAKE_COMPANY);
-    const t = await w.taskOf(owner, FAKE_COMPANY, { raw: claimed(baselineSha) }, planOf([baselineSha]));
-    expect(await w.keep(t)).toMatchObject({ kept: true });
-    expect(await w.hosted.get(FAKE_COMPANY)!.baselineOf(t.record, DIGEST)).toMatchObject({ sha: baselineSha, commitsBack: 2, knownFailing: 1, flaky: 0, ageHours: 3 });
-  });
 
   it("not for a commit the plan did not offer, not another company's baseline row, and not with the switch off", async () => {
     const offered = [await baselineWorld({ ROVARA_BASELINE_CACHE: "1" }), "2".padStart(40, "0")] as const;

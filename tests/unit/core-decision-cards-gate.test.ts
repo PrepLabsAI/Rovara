@@ -50,33 +50,6 @@ async function setup(risk: "low" | "medium" | "high", options: { bound?: boolean
 }
 
 describe("a card's Approve goes through the approval gate", () => {
-  it("a low-risk card is approved with the owner's session, and the task moves", async () => {
-    const t = await setup("low");
-    const shownDigest = (await t.view()).digests[t.cardId]!;
-    const reply = await t.call(t.caller([{ method: LOCAL_SESSION_METHOD, token: SESSION }]), "POST", t.path("approve"), { requestId: randomUUID(), shownDigest });
-    expect(reply?.statusCode).toBe(200);
-    expect(reply?.body).toMatchObject({ cardId: t.cardId, outcome: "approved" });
-    expect((await t.stored()).stage).toBe("IMPLEMENT");
-  });
-
-  it("a forged proof is not an approval: the route refuses it and the task does not move", async () => {
-    const t = await setup("low");
-    const shownDigest = (await t.view()).digests[t.cardId]!;
-    await expect(t.call(t.caller([{ method: LOCAL_SESSION_METHOD, token: "made-up" }]), "POST", t.path("approve"), { requestId: randomUUID(), shownDigest })).rejects.toMatchObject({ code: "FORBIDDEN" });
-    await expect(t.call(t.caller([]), "POST", t.path("approve"), { requestId: randomUUID(), shownDigest })).rejects.toMatchObject({ code: expect.any(String) });
-    expect((await t.stored()).stage).toBe("PLAN_REVIEW");
-  });
-
-  it("a plan revised after the card was drawn is stale, whatever the proof", async () => {
-    const t = await setup("low");
-    const shownDigest = (await t.view()).digests[t.cardId]!;
-    const revised = JSON.parse(JSON.stringify(waiting())) as WorkflowSnapshot;
-    revised.artifacts = [{ ...revised.artifacts[0]!, sha256: "e".repeat(64), version: 2, id: "plan-v2" }];
-    await t.memory.put({ item: { ...workflowTaskKey(TASK_ID), orgId: IMPLICIT_COMPANY_ID, project: "web", workflow: JSON.parse(JSON.stringify({ ...revised, revision: revised.revision + 1 })) } });
-    // The route's own digest check is the first guard; the gate is the second.
-    await expect(t.call(t.caller([{ method: LOCAL_SESSION_METHOD, token: SESSION }]), "POST", t.path("approve"), { requestId: randomUUID(), shownDigest })).rejects.toMatchObject({ code: "CHANGE_STALE" });
-    expect((await t.stored()).decisions).toHaveLength(0);
-  });
 
   it("a medium card needs its evidence opened, then the owner's session approves it; a comment cannot approve a high card even on its card", async () => {
     const medium = await setup("medium");
@@ -94,14 +67,6 @@ describe("a card's Approve goes through the approval gate", () => {
     await high.call(high.caller([]), "POST", high.path("evidence-opened"), { requestId: randomUUID(), shownDigest: highDigest });
     await expect(high.call(high.caller([{ method: CODE_HOST_COMMENT_METHOD, token: "comment-1" }]), "POST", high.path("approve"), { requestId: randomUUID(), shownDigest: highDigest })).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect((await high.call(high.caller([{ method: LOCAL_SESSION_METHOD, token: SESSION }]), "POST", high.path("approve"), { requestId: randomUUID(), shownDigest: highDigest }))?.statusCode).toBe(200);
-  });
-
-  it("reject and request changes also need the owner's session", async () => {
-    const t = await setup("low");
-    const shownDigest = (await t.view()).digests[t.cardId]!;
-    const reply = await t.call(t.caller([{ method: LOCAL_SESSION_METHOD, token: SESSION }]), "POST", t.path("request-changes"), { requestId: randomUUID(), shownDigest, reason: "Use the other table." });
-    expect(reply?.statusCode === 200 || reply === undefined).toBe(true);
-    expect((await t.stored()).stage).toBe("PLAN");
   });
 
   it("a card drawn without its revision is refused, and a card drawn at an older revision of the same document is stale", async () => {

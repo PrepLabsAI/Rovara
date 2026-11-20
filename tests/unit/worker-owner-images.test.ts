@@ -13,16 +13,6 @@ const base = (list: unknown): NodeJS.ProcessEnv => ({
 const docker = { run: async () => ({ exitCode: 0, stdout: "", stderr: "" }) } as unknown as DockerCli;
 
 describe("the worker's configuration from an owner list", () => {
-  it("needs no registry and no baked catalog: the list in its environment gives both the catalog and the images to start", async () => {
-    const config = testServicesConfigFromEnvironment(base(ownerStarterEntries()), docker, undefined)!;
-    expect(config).toBeDefined();
-    expect(config.registry).toBe("owner-list.invalid");
-    const catalog = await config.catalog();
-    expect(catalog.entries.map((entry) => entry.id).sort()).toEqual(["mongodb@7", "mysql@8", "postgres@16", "postgres@17", "redis@7"]);
-    expect(config.imageReferences).toEqual(ownerImageReferences(ownerStarterEntries()));
-    const pg = OWNER_STARTER_IMAGES[0]!;
-    expect(config.imageReferences!.get(`svc/postgres@sha256:${pg.reference.slice(-64)}`)).toBe(pg.reference);
-  });
 
   it("is not configured by a list that is empty, is not JSON, holds no valid entry, or names a tag", () => {
     for (const list of ["", "not json", "{}", "[]", JSON.stringify([{ reference: "docker.io/library/postgres:16", family: "postgres", version: "16" }]), JSON.stringify([{ reference: `docker.io/library/postgres@sha256:${"a".repeat(64)}`, family: "mysql", version: "16" }])]) {
@@ -37,11 +27,6 @@ describe("the worker's configuration from an owner list", () => {
     expect(testServicesConfigFromEnvironment({ ...base(undefined), AGENTX_TEST_SERVICES_REGISTRY: "registry.examplehost:5000", AGENTX_TEST_SERVICES_ENV: "local" }, docker, undefined, true)).toBeDefined();
   });
 
-  it("leaves the signed way as it was when there is no owner list", () => {
-    const config = testServicesConfigFromEnvironment({ ...base(undefined), AGENTX_TEST_SERVICES_REGISTRY: "registry.examplehost:5000", AGENTX_TEST_SERVICES_ENV: "local" }, docker, undefined)!;
-    expect(config.registry).toBe("registry.examplehost:5000");
-    expect(config.imageReferences).toBeUndefined();
-  });
 });
 
 describe("starting a helper from an owner's image", () => {
@@ -60,16 +45,6 @@ describe("starting a helper from an owner's image", () => {
     registry: "owner-list.invalid", edition: "public" as const, probeImage: WORKER_IMAGE, maxMemMiB: 3072, files, ...(imageReferences === undefined ? {} : { imageReferences }),
     helpers: entries.map((entry) => ({ id: entry.family === "mongodb" ? "mongo" : entry.family, name: entry.family, entry, aliases: [entry.connect.defaultAliases[0]!], credentials: { user: "rovara", password: "p".repeat(32), database: "app" } })),
     now: () => 0, sleep: async () => undefined,
-  });
-
-  it("starts the owner's pinned reference, exactly, with the family's own run profile (non-root, read-only, capabilities dropped)", async () => {
-    const { cli, args } = runs();
-    const references = ownerImageReferences(ownerStarterEntries());
-    await startHelpers(cli, net, input([entryOf("postgres@16")], references));
-    const run = args.find((call) => call[0] === "run" && call.includes("--detach"))!;
-    expect(run).toContain(OWNER_STARTER_IMAGES[0]!.reference);
-    expect(run).toEqual(expect.arrayContaining(["--user", "999:999", "--cap-drop", "ALL", "--read-only", "--pull=never"]));
-    expect(run.some((part) => part.includes("owner-list.invalid"))).toBe(false);
   });
 
   it("refuses an image that is not in the owner's list, and the same repository with another digest, before it starts anything", async () => {

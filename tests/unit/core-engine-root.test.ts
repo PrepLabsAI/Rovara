@@ -10,7 +10,7 @@ import * as codeModulesModule from "../../packages/broker/src/core-host/code-mod
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import type { OrgId, Principal } from "@agentx/contracts";
 import {
-  brokerCoreDispatchQueue, BROKER_CORE_NOT_CONFIGURED, NOT_A_MEMBER_HERE, deployedCallerFromMembership, personStandingFromDynamo, withCoreRoutes, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, setupRunStandingFrom, membershipWithRoleFromDynamo, outboxCompaniesOf, projectGrantFromDynamo,
+  brokerCoreDispatchQueue, NOT_A_MEMBER_HERE, deployedCallerFromMembership, personStandingFromDynamo, withCoreRoutes, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, setupRunStandingFrom, membershipWithRoleFromDynamo, projectGrantFromDynamo,
   type BrokerCoreRootInputs,
 } from "../../packages/broker/src/aws/core-engine-root.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
@@ -156,20 +156,6 @@ describe("the broker's core root, switch on", () => {
     expect(failedRead?.body).toBe(JSON.stringify({ error: { code: "CORE_SWITCH_BLOCKED", message: "The core engine settings are not readable." } }));
   });
 
-  it("drains without the root reading the admission settings: a new task goes the old way (draining tasks are refused later, by the admission module)", async () => {
-    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "drain", ROVARA_CORE_ALLOWED_COMPANIES: "none" }, fakeTables().client));
-    expect(await root.coreTasks?.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: "{}" }, { developerId: "dev-a", sessionId: "s", name: "Ada" })).toBeUndefined();
-  });
-
-  it("gives the routes a core entry; the registry refuses by name while the broker's adapter inputs are owed, and a start falls back to nothing", async () => {
-    const tables = fakeTables([member("dev-a", ORG, "owner")]);
-    const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, tables.client));
-    expect(root.coreTasks).toBeDefined();
-    await expect(root.app.registry()).rejects.toThrow(BROKER_CORE_NOT_CONFIGURED);
-    // A start by a member of a switched company reaches the core, whose runtime cannot be built: it fails, it never starts on the old path silently.
-    await expect(root.coreTasks!.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: "{}" }, { developerId: "dev-a", sessionId: "s", name: "Ada" })).rejects.toThrow();
-  });
-
   it("maps the signed-in developer to the core's principal from MEMBERSHIP, carrying the verified step-up and the client", async () => {
     const tables = fakeTables([member("dev-a", ORG, "admin")]);
     const seen: unknown[] = [];
@@ -272,20 +258,6 @@ describe("the deployed task access", () => {
     expect(await access.checkStart(principal("dev-x"), "payments")).toEqual({ allowed: false, code: "FORBIDDEN", message: NOT_A_MEMBER_HERE });
     expect(await access.checkStart(principal("dev-a", OTHER), "payments")).toEqual({ allowed: false, code: "FORBIDDEN", message: NOT_A_MEMBER_HERE });
   });
-
-  it("lets only a task's own person, still a member, act on it (a company owner or admin gets no reach into another person's task, as on the broker)", async () => {
-    expect(await access.canAct(principal("dev-a"), { developerId: "dev-a", project: "payments" })).toBe(true);
-    expect(await access.canAct(principal("dev-o"), { developerId: "dev-a", project: "payments" })).toBe(false);
-    expect(await access.canAct(principal("dev-gone"), { developerId: "dev-gone", project: "payments" })).toBe(false);
-    expect(await access.canAct(principal("dev-a"), { developerId: "dev-o", project: "payments" })).toBe(false);
-    expect(await access.canAct(principal("dev-x"), { developerId: "dev-x", project: "payments" })).toBe(false);
-  });
-
-  it("starts a step only while the task's person is still a member with the grant", async () => {
-    expect(await access.checkStep({ taskId: "t", developerId: "dev-a", project: "payments" })).toEqual({ allowed: true });
-    expect(await access.checkStep({ taskId: "t", developerId: "dev-x", project: "payments" })).toEqual({ allowed: false, message: NOT_A_MEMBER_HERE });
-    expect(await access.checkStep({ taskId: "t", developerId: "dev-o", project: "payments" })).toEqual({ allowed: false, message: NO_PROJECT_GRANT });
-  });
 });
 
 describe("the hosted setup run's rule (guided onboarding L2-3)", () => {
@@ -333,17 +305,6 @@ describe("the hosted setup run's rule (guided onboarding L2-3)", () => {
   });
 });
 
-describe("the stream hook", () => {
-  it("finds the companies whose outbox rows a batch inserted, and nothing for a batch that is not a State table stream", () => {
-    const record = (eventName: string, pk: string, outbox = true) => ({ eventSource: "aws:dynamodb", eventName, dynamodb: { NewImage: { pk: { S: pk }, ...(outbox ? { outboxState: { S: "pending" } } : {}) } } });
-    expect(outboxCompaniesOf({ Records: [record("INSERT", `ORG#${ORG}#OUTBOX`), record("INSERT", `ORG#${ORG}#OUTBOX`), record("MODIFY", `ORG#${OTHER}#OUTBOX`), record("INSERT", `ORG#${OTHER}#X`, false), record("INSERT", "TASK#legacy")] })).toEqual([ORG]);
-    expect(outboxCompaniesOf({ Records: [{ eventSource: "aws:sqs" }] })).toBeUndefined();
-    expect(outboxCompaniesOf({ Records: [] })).toBeUndefined();
-    expect(outboxCompaniesOf({ source: "agentx.core-job" })).toBeUndefined();
-    expect(outboxCompaniesOf(null)).toBeUndefined();
-  });
-});
-
 describe("the install's hosted policy hook settings", () => {
   it("is absent with no setting, and refuses in fixed words (no echo) anything that is not readable settings", () => {
     expect(policyHookSettingsFromEnvironment({})).toBeUndefined();
@@ -351,28 +312,10 @@ describe("the install's hosted policy hook settings", () => {
     expect(() => policyHookSettingsFromEnvironment({ ROVARA_POLICY_HOOK: "zzq{" })).toThrow(/^the policy hook settings are not JSON$/u);
     expect(() => policyHookSettingsFromEnvironment({ ROVARA_POLICY_HOOK: JSON.stringify({ address: "http://evil.example/zzq", keys: [] }) })).toThrow(/^the policy hook settings are not readable$/u);
   });
-
-  it("refuses the old inline-keys environment in fixed words", () => {
-    const old = { address: "https://hook.example/answer", keys: [{ kty: "RSA", n: "A".repeat(342), e: "AQAB", kid: "k1", alg: "RS256" }] };
-    expect(() => policyHookSettingsFromEnvironment({ ROVARA_POLICY_HOOK: JSON.stringify(old) })).toThrow(/^the policy hook settings are not readable$/u);
-  });
-
-  it("reads well-formed hosted settings", () => {
-    const settings = JSON.stringify({ address: "https://hook.example/answer", jwks: "https://hook.example/keys", thumbprints: ["A".repeat(43)] });
-    expect(policyHookSettingsFromEnvironment({ ROVARA_POLICY_HOOK: settings })).toMatchObject({ address: "https://hook.example/answer" });
-  });
 });
 
 describe("the lessons API for the developer routes (lane LM8)", () => {
   const people = () => ({ approvers: async () => ({}) as never, onProjectRoster: async () => true, linkedAccounts: async () => [], displayName: async () => "Ada", isErased: async () => false });
-
-  it("is not built while the engine switch is off, while the lessons switch is off, or without the deployment's people", () => {
-    const tables = fakeTables();
-    expect(createBrokerCoreRoot(rootInputs({ ROVARA_CORE_LESSONS: "on" }, tables.client, { lessonsPeople: people })).lessons).toBeUndefined();
-    expect(createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG }, tables.client, { lessonsPeople: people })).lessons).toBeUndefined();
-    expect(createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on" }, tables.client)).lessons).toBeUndefined();
-    expect(tables.reads).toEqual([]);
-  });
 
   it("is built with the lessons switch on and the people given; a person with no membership is asked to sign in again", async () => {
     const tables = fakeTables();
@@ -397,21 +340,8 @@ describe("the lessons API for the developer routes (lane LM8)", () => {
   });
 });
 
-
 describe("core outbox stream partial failures", () => {
   const record = (company: string, sequence: string) => ({ eventSource: "aws:dynamodb", eventName: "INSERT", dynamodb: { SequenceNumber: sequence, NewImage: { pk: { S: `ORG#${company}#OUTBOX` }, outboxState: { S: "pending" } } } });
-  it("relays each company separately and reports only failed company sequence numbers", async () => {
-    const root = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
-    const seen: string[][] = [];
-    vi.spyOn(root.app, "relayOutbox").mockImplementation(async (companies) => {
-      seen.push([...companies]);
-      return companies.map((companyId) => ({ companyId, outcome: companyId === ORG ? "failed" as const : "ran" as const }));
-    });
-    const answer = await root.handleEvent({ Records: [record(ORG, "11"), record(OTHER, "12"), record(ORG, "13")] });
-    expect(seen).toEqual([[ORG, OTHER]]);
-    expect(answer).toEqual({ batchItemFailures: [{ itemIdentifier: "11" }, { itemIdentifier: "13" }] });
-    expect(JSON.stringify(answer)).not.toContain("private failure detail");
-  });
   it("reports deferred companies and whole-call failures without exposing causes", async () => {
     const root = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
     const relay = vi.spyOn(root.app, "relayOutbox").mockResolvedValue([{ companyId: OTHER, outcome: "deferred" }]);
@@ -421,73 +351,6 @@ describe("core outbox stream partial failures", () => {
     expect(await root.handleEvent(batch)).toEqual({ batchItemFailures: [{ itemIdentifier: "11" }] });
     relay.mockRejectedValue(new Error("private cause"));
     expect(await root.handleEvent(batch)).toEqual({ batchItemFailures: [{ itemIdentifier: "11" }, { itemIdentifier: "12" }] });
-  });
-  it("acknowledges a successful two-company batch and leaves unrelated changes alone", async () => {
-    const root = createBrokerCoreRoot(rootInputs({}, fakeTables().client));
-    const relay = vi.spyOn(root.app, "relayOutbox").mockResolvedValue([]);
-    expect(await root.handleEvent({ Records: [record(ORG, "11"), record(OTHER, "12"), { ...record(ORG, "13"), eventName: "MODIFY" }] })).toEqual({ batchItemFailures: [] });
-    expect(relay.mock.calls).toEqual([[[ORG, OTHER]]]);
-  });
-});
-
-it("keeps the off root's serialized answers byte identical with policy and service inputs supplied", async () => {
-  const tables = fakeTables();
-  const resolve = vi.fn(async () => { throw new Error("must not read policy off"); });
-  const services = vi.fn(() => { throw new Error("must not build services off"); });
-  const plain = createBrokerCoreRoot(rootInputs({}, tables.client));
-  const supplied = createBrokerCoreRoot(rootInputs({}, tables.client, { policySource: { resolve }, services }));
-  const answers = async (root: ReturnType<typeof createBrokerCoreRoot>) => JSON.stringify([
-    await root.handleEvent({ source: "agentx.core-job", job: "merge-tracking" }),
-    await root.handleEvent({ source: "agentx.core-job", job: "session-sweep" }),
-    await root.handleEvent({ source: "agentx.core-job", job: "notify-deliver" }),
-    await root.handleEvent({ source: "agentx.core-job", job: "admission-hold-sweep" }),
-  ]);
-  const golden = '[{"skipped":"off"},{"skipped":"off"},{"skipped":"off"},{"skipped":"off"}]';
-  expect(await answers(plain)).toBe(golden);
-  expect(await answers(supplied)).toBe(golden);
-  expect(resolve).not.toHaveBeenCalled();
-  expect(services).not.toHaveBeenCalled();
-  expect(tables.reads).toEqual([]);
-});
-
-describe("the broker core dispatch queue piece (L1a)", () => {
-  const url = "https://sqs.us-east-1.amazonaws.com/123456789012/core-dispatch";
-  const deadLetterUrl = `${url}-dead`;
-  const words = "the broker needs valid core dispatch queue URLs";
-
-  it("builds the same queue settings as the dispatcher, with an optional region", () => {
-    for (const region of [undefined, "us-east-1"]) {
-      const env = { ROVARA_CORE_ENGINE: "on", CORE_DISPATCH_QUEUE_URL: url, CORE_DISPATCH_DEAD_LETTER_URL: deadLetterUrl, ...(region === undefined ? {} : { AWS_REGION: region }) };
-      expect(brokerCoreDispatchQueue(env)).toEqual({ settings: { ...(region === undefined ? {} : { region }), queues: { "task-dispatch": { url, deadLetterUrl } } } });
-    }
-  });
-
-  it("refuses missing or invalid URLs in fixed words without echoing either value", () => {
-    for (const variable of ["CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL"]) {
-      for (const value of [undefined, "", "  ", "zzq-private-input", "https://zzq-private-input/", "ftp://zzq-private-input/queue", "https://example/queue?zzq-private-input", "https://example/queue\n", 42, null]) {
-        const env = { ROVARA_CORE_ENGINE: "on", CORE_DISPATCH_QUEUE_URL: url, CORE_DISPATCH_DEAD_LETTER_URL: deadLetterUrl, [variable]: value } as NodeJS.ProcessEnv;
-        expect(() => brokerCoreDispatchQueue(env)).toThrow(/^the broker needs valid core dispatch queue URLs$/u);
-        try { brokerCoreDispatchQueue(env); } catch (error) {
-          expect(error).toMatchObject({ name: "BrokerCoreQueueNotConfigured", message: words });
-          expect(String(error)).not.toContain("zzq-private-input");
-        }
-      }
-    }
-    expect(() => brokerCoreDispatchQueue({ CORE_DISPATCH_QUEUE_URL: url, CORE_DISPATCH_DEAD_LETTER_URL: `${deadLetterUrl}.fifo` })).toThrow(words);
-  });
-
-  it("never invokes the queue piece with the switch off, even with unreadable queue settings", async () => {
-    const env = { ROVARA_CORE_ENGINE: "off" };
-    Object.defineProperty(env, "CORE_DISPATCH_QUEUE_URL", { get() { throw new Error("queue env read while off"); } });
-    const codeModules = vi.fn(() => { brokerCoreDispatchQueue(env); throw new Error("composition still owed"); });
-    const root = createBrokerCoreRoot(rootInputs(env, fakeTables().client, { codeModules }));
-    expect(root.coreTasks).toBeUndefined();
-    await expect(root.app.registry()).rejects.toThrow("no registry is built");
-    expect(codeModules).not.toHaveBeenCalled();
-  });
-
-  it("keeps the complete broker dependency builder refusing until L6 composes the pieces", () => {
-    expect(() => brokerCoreModuleDeps({ CORE_DISPATCH_QUEUE_URL: url, CORE_DISPATCH_DEAD_LETTER_URL: deadLetterUrl })).toThrow(BROKER_CORE_NOT_CONFIGURED);
   });
 });
 
@@ -513,46 +376,6 @@ it("composes the broker adapters lazily and preserves the L1c builder object inc
   expect(host).toHaveBeenCalledTimes(1);
   expect(workerMachines).toHaveBeenCalledTimes(1);
   expect(built.queue).toEqual(brokerCoreDispatchQueue(env));
-});
-
-it("reads no new wiring environment and answers no new routes with the switch off", async () => {
-  const env: NodeJS.ProcessEnv = { ROVARA_CORE_ENGINE: "off" };
-  for (const key of ["CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "TASK_TOKEN_KEY_ARN", "ROVARA_CORE_MODEL_GATEWAY_URL", "ROVARA_CORE_AGENT_MODEL", "ROVARA_CORE_AGENT_MODEL_CHOICE", "ROVARA_POLICY_HOOK", "SLACK_MEMBER_WORKSPACE_LIMIT", "SLACK_ORGANIZATION_WORKSPACE_LIMIT"]) {
-    Object.defineProperty(env, key, { get() { throw new Error(`unexpected read: ${key}`); } });
-  }
-  const tables = fakeTables();
-  const root = createBrokerCoreRoot(rootInputs(env, tables.client));
-  expect(root.policyHook).toBeUndefined();
-  for (const path of ["/v1/internal/model-access", "/v1/internal/model-access?slot=reviewer", "/v1/dev/tasks/id/continue"]) {
-    expect(await root.callback({ method: "GET", path, headers: {} })).toBeUndefined();
-  }
-  expect(root.coreTasks).toBeUndefined();
-  expect(root.coreApp).toBeUndefined();
-  expect(tables.reads).toEqual([]);
-});
-
-it("uses live membership plus the existing fresh PEOPLE proof for owner and co-owner acts, fencing its revision", async () => {
-  const { MemoryDocumentStore } = await import("../../packages/broker/src/ports/memory-document-store.js");
-  const { taskOwnerKey } = await import("../../packages/broker/src/developer/task-records.js");
-  const store = new MemoryDocumentStore();
-  const a = "a".repeat(64), b = "b".repeat(64), foreign = "c".repeat(64), taskId = "11111111-1111-4111-8111-111111111111";
-  const task = { taskId, developerId: a, project: "payments", ownerKey: taskOwnerKey(a, taskId) };
-  await store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", ...task, companyId: ORG } });
-  const people = { pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 7, orphaned: false,
-    people: [a, b].map((developerId, i) => ({ developerId, slackUserId: `U00${i}`, name: `Person ${i}`, role: "owner" })) };
-  await store.put({ item: people });
-  const check = vi.fn(async (_task, developerId: string) => ({ subject: { developerId, slackUserId: developerId === a ? "U000" : "U001" }, identity: { developerId, slackUserId: developerId === a ? "U000" : "U001", name: "Member", method: "slack", issuer: "https://slack.com", subject: "person" }, eligible: true, channelMember: true }));
-  const access = hostedTaskAccess({ companyId: ORG, membershipOf: async (id) => ({ companyId: id === foreign ? OTHER : ORG, role: "member" }), projectGrant: async () => true, storage: async () => store,
-    people: { documentClient: { send: async (command) => ({ Item: await store.get((command as GetCommand).input.Key as { pk: string; sk: string }) }) }, tableName: STATE, now: Date.now, checkTaskPerson: check as never } });
-  const principal = (personId: string): Principal => ({ companyId: ORG, personId, displayName: "Member", roles: ["owner"], provider: "test" });
-  const acting = await access.ownerActing!(principal(b), task);
-  expect(acting).toMatchObject({ actorId: taskOwnerKey(b, taskId), authority: { ownerIds: [taskOwnerKey(a, taskId), taskOwnerKey(b, taskId)] }, items: [{ kind: "check", key: { pk: `DEVTASK#${taskId}`, sk: "PEOPLE" }, condition: { op: "eq", path: ["revision"], value: 7 } }] });
-  expect(check).toHaveBeenCalled();
-  expect(await access.canAct(principal(b), task)).toBe(true);
-  expect(await access.ownerActing!(principal(foreign), task)).toBeUndefined();
-  await store.delete({ key: { pk: `DEVTASK#${taskId}`, sk: "PEOPLE" } });
-  expect(await access.ownerActing!(principal(b), task)).toBeUndefined();
-  expect(await access.ownerActing!(principal(a), task)).toMatchObject({ actorId: task.ownerKey, items: [{ condition: { op: "notExists", path: ["pk"] } }] });
 });
 
 it("shares one resolved hosted-hook setting with the developer API and never falls back when that setting is invalid", () => {

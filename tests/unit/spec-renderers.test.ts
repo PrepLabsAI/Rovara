@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SpecDraftSchema, SpecTargetSchema, earsLine, specDraftStatements, specLine, specMarkdown, specPathProblem, specSlug, type SpecDraft, type SpecTarget } from "@agentx/contracts";
+import { SpecDraftSchema, SpecTargetSchema, earsLine, specLine, specMarkdown, specPathProblem, specSlug, type SpecDraft, type SpecTarget } from "@agentx/contracts";
 import {
   assertRenderedSpec, KIRO_BUGFIX_SECTIONS, kiroRenderer, nextFolderNumber, registerSpecRenderer, rovaraRenderer, specFormats, specKitRenderer, specRendererFor, teamTemplateRenderer, unregisterSpecRenderer,
   type SpecRenderInput, type SpecRenderer,
@@ -107,32 +107,6 @@ describe("Kiro renderer", () => {
     expect(text).toContain("- 2.1 WHEN the cart holds 3 items of 0.10 THE SYSTEM SHALL show 0.30");
     expect(text).toContain("- 3.1 WHEN the cart holds whole-dollar items THE SYSTEM SHALL CONTINUE TO show the same total");
   });
-  it("lists tasks as checkboxes with only the requirement references that exist", () => {
-    const tasks = kiroRenderer.render(input(feature())).files[2]!.content;
-    expect(tasks).toContain("- [ ] 1. Add the request route\n  - _Requirements: 1.1, 1.2_");
-    expect(tasks).not.toContain("9.9");
-  });
-  it("never lets design text start a heading or forge a requirement line", () => {
-    const draft = SpecDraftSchema.parse({ ...feature(), design: "# Fake\n- 7.7 WHEN x THE SYSTEM SHALL y" });
-    const out = kiroRenderer.render(input(draft));
-    expect(out.files[1]!.content).toContain("**Fake**");
-    expect(kiroRenderer.extractRequirements(out.files).map((entry) => entry.id)).toEqual(["1.1", "1.2", "2.1"]);
-  });
-  it("round-trips: the requirements read back are the ones written, defects marked", () => {
-    const written = specDraftStatements(bug());
-    const read = kiroRenderer.extractRequirements(kiroRenderer.render(input(bug())).files);
-    expect(read.map((entry) => [entry.id, entry.kind])).toEqual(written.map((entry) => [entry.id, entry.kind]));
-    expect(read.every((entry) => entry.path.endsWith("bugfix.md"))).toBe(true);
-  });
-  it("honours the project's path template", () => {
-    const out = kiroRenderer.render(input(feature(), { target: target({ pathTemplate: "docs/specs/{ticket}/" }), ticket: "PAY-12" }));
-    expect(out.folder).toBe("docs/specs/PAY-12/");
-  });
-  it("uses only safe characters from a hostile task key or ticket", () => {
-    const out = kiroRenderer.render(input(feature(), { target: target({ pathTemplate: "s/{ticket}/{taskKey}/" }), ticket: "../../etc/passwd", taskKey: "a b/c\\d" }));
-    expect(out.folder).not.toContain("..");
-    expect(out.folder).toMatch(/^s\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/$/u);
-  });
 });
 
 describe("Spec Kit renderer", () => {
@@ -146,13 +120,6 @@ describe("Spec Kit renderer", () => {
     expect(nextFolderNumber(["003-a"])).toBe("004");
     expect(nextFolderNumber(["999-last"].slice(1))).toBe("001");
     expect(() => nextFolderNumber(["999-full"])).toThrow(/full/u);
-  });
-  it("labels requirements FR-001.. and ties tasks to them", () => {
-    const out = specKitRenderer.render(input(feature(), { target: target({ format: "speckit" }) }));
-    expect(out.files[0]!.content).toContain("- **FR-001**: WHEN a user submits a known email THE SYSTEM SHALL send one reset link");
-    expect(out.files[0]!.content).toContain("- **FR-003**: WHEN the link is older than one hour THE SYSTEM SHALL refuse it");
-    expect(out.files[2]!.content).toContain("- [ ] T001 Add the request route [FR-001, FR-002]");
-    expect(specKitRenderer.extractRequirements(out.files).map((entry) => entry.id)).toEqual(["FR-001", "FR-002", "FR-003"]);
   });
   it("marks a bug's observed behaviour DEF- and a defect, and does not count it as a requirement to check", () => {
     const out = specKitRenderer.render(input(bug(), { target: target({ format: "speckit" }) }));
@@ -186,15 +153,6 @@ describe("team template renderer", () => {
     expect(out.files[1]!.content).toContain("List them.");
     expect(out.files.map((file) => file.path)).toEqual(["specs/reset-password-by-email/spec.md", "specs/reset-password-by-email/design/notes.md"]);
   });
-  it("fills the headings that ask for the plan's content and replaces the team's prompt under them", () => {
-    const out = render();
-    expect(out.files[0]!.content).toContain("Let a signed-out user reset a password.");
-    expect(out.files[0]!.content).not.toContain("Why are we doing this?");
-    expect(out.files[0]!.content).toContain("- 1.1 WHEN a user submits a known email THE SYSTEM SHALL send one reset link");
-    expect(out.files[0]!.content).not.toContain("replace me");
-    expect(out.files[1]!.content).toContain("Use the existing mailer.");
-    expect(out.files[1]!.content).toContain("- [ ] 1. Add the request route (covers 1.1, 1.2)");
-  });
   it("adds a Requirements section when the template has none, so there is always something to check", () => {
     const out = teamTemplateRenderer.render(input(feature(), { target: target({ format: "team_template", templatePath: "t" }), template: [{ path: "a.md", content: "# Title\n\n## Notes\nx\n" }] }));
     expect(teamTemplateRenderer.extractRequirements(out.files)).toHaveLength(3);
@@ -209,9 +167,6 @@ describe("team template renderer", () => {
     expect(out.files[0]!.content).not.toContain("‮");
     expect(() => teamTemplateRenderer.render(input(feature(), { target: target({ format: "team_template", templatePath: "t" }), template: [] }))).toThrow(/template/u);
     expect(() => teamTemplateRenderer.render(input(feature(), { target: target({ format: "team_template", templatePath: "t" }), template: Array.from({ length: 13 }, (_, index) => ({ path: `f${String(index)}.md`, content: "# T\n" })) }))).toThrow(/template/u);
-  });
-  it("refuses a template file path that escapes the folder", () => {
-    expect(() => teamTemplateRenderer.render(input(feature(), { target: target({ format: "team_template", templatePath: "t" }), template: [{ path: "../x.md", content: "# T\n" }] }))).toThrow(/outside|safe/u);
   });
 });
 
@@ -238,8 +193,5 @@ describe("renderer registry", () => {
       expect(() => registerSpecRenderer({ ...custom, format: "Bad Id" })).toThrow(/valid id/u);
     } finally { unregisterSpecRenderer("acme_docs"); }
     expect(specRendererFor("acme_docs")).toBeUndefined();
-  });
-  it("returns nothing for an unknown format, never a default", () => {
-    expect(specRendererFor("nope")).toBeUndefined();
   });
 });

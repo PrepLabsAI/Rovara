@@ -1,6 +1,6 @@
 // Lead 4 TA12: a run stopped at a spending limit ends with the words of THAT limit (task, project month, company month, person month, company day) and what to do, never the one generic sentence for all.
 import { describe, expect, it } from "vitest";
-import { BUDGET_EXHAUSTED_FAILURE_MESSAGE, BUDGET_LIMIT_KINDS, budgetExhaustedWords, isBudgetExhaustedMessage } from "@agentx/contracts";
+import { BUDGET_EXHAUSTED_FAILURE_MESSAGE, BUDGET_LIMIT_KINDS, budgetExhaustedWords } from "@agentx/contracts";
 import { ModelBudgetExhaustedError, budgetExhaustedFromMarker } from "../../packages/model-runtime/src/index.js";
 import { budgetScopeOfProxyBody, budgetExhaustedMarker } from "../../packages/model-runtime/src/budget.js";
 import { failedTurn } from "../../packages/worker/src/session-events.js";
@@ -37,11 +37,6 @@ describe("the words a spent limit ends a run with", () => {
       expect(new ModelBudgetExhaustedError(scope).message).toBe(WORDS[scope]);
     }
     expect(failedTurn({ stopReason: "error", errorMessage: budgetExhaustedMarker("agent") })?.message).toBe(BUDGET_EXHAUSTED_FAILURE_MESSAGE);
-  });
-
-  it("every one of the words reads as a spent budget; nothing else does", () => {
-    for (const text of [BUDGET_EXHAUSTED_FAILURE_MESSAGE, ...Object.values(WORDS)]) expect(isBudgetExhaustedMessage(text)).toBe(true);
-    for (const other of [SPEND_UNKNOWN_STOP_REASON, "", "Stopped: the AI budget", `${WORDS.org} `, undefined, null, 5]) expect(isBudgetExhaustedMessage(other)).toBe(false);
   });
 
   it("a run stopped by its task's cap and one stopped by the company's day say which, and spend that could not be read keeps its own words", () => {

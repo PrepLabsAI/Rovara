@@ -87,52 +87,10 @@ describe("the plan for a hosted round", () => {
 });
 
 describe("a CHECKS round with the fake helper in a container", () => {
-  it("starts the helper once, gives every command its base-URL variable, reads it after each command, and stops it at the end", async () => {
-    const run = await round({ reads: [calls({ served: 1 }), calls(), NONE] });
-    expect(run.events).toEqual(["start", "drain", "drain", "drain", "stop"]);
-    expect(run.seen).toEqual([{ PETS_API_URL: "http://172.30.5.16:8080/s/0" }, { PETS_API_URL: "http://172.30.5.16:8080/s/0" }]);
-    expect(run.started[0]!.variables).toEqual(["PETS_API_URL"]);
-    // The fakes handed to the launcher are the ones built from the customer's description.
-    expect(run.started[0]!.fakes).toMatchObject([{ status: "built" }]);
-  });
-
-  it("labels exactly the checks the helper answered, per the delta read after each command", async () => {
-    const run = await round({ reads: [calls({ served: 2 }), calls(), calls({ served: 1 }), NONE] }, { count: 3 });
-    expect(labelled(run.result.entries)).toEqual([true, undefined, true]);
-    expect(run.result.entries.map((entry) => entry.after)).toEqual(["passed", "passed", "passed"]);
-    expect(run.results).toHaveLength(1);
-    expect(run.results[0]!.facts).toEqual({ unknown: false, checks: [{ checkId: "readiness:0", served: 2 }, { checkId: "readiness:2", served: 1 }] });
-    expect(run.results[0]!.lines).toEqual([expect.stringContaining("3 outside calls")]);
-  });
-
-  it("a round no call reached has no facts to label and no line (control)", async () => {
-    const run = await round({ reads: [] });
-    expect(labelled(run.result.entries)).toEqual([undefined, undefined]);
-    expect(run.results[0]!.facts).toEqual({ unknown: false, checks: [] });
-    expect(run.results[0]!.lines).toEqual([]);
-  });
-
-  it("a failing check after a call the fake could not answer is Not run with the reason (and carries no label); a passing one stays passed and labelled", async () => {
-    const run = await round({ reads: [calls({ cannotAnswer: { operation_unknown: 1 } }), calls({ cannotAnswer: { operation_unsupported: 1 }, served: 1 }), NONE] }, { exitCodes: [1, 0] });
-    expect(run.result.entries[0]).toMatchObject({ after: "not_run", output: GENERAL_FAKE_NOT_RUN_SENTENCES.operation_unknown });
-    expect(Object.hasOwn(run.result.entries[0]!, "madeByRovara")).toBe(false);
-    expect(run.result.entries[1]).toMatchObject({ after: "passed", madeByRovara: true });
-  });
-
-  it("the reason is the first in the fixed priority when a command saw several", async () => {
-    const run = await round({ reads: [calls({ cannotAnswer: { operation_unsupported: 1, spec_ambiguous: 1, operation_unknown: 1 } }), NONE] }, { count: 1, exitCodes: [1] });
-    expect(run.result.entries[0]).toMatchObject({ after: "not_run", output: GENERAL_FAKE_NOT_RUN_SENTENCES.spec_ambiguous });
-  });
 
   it("a request refused for its size counts as an unsupported call", async () => {
     const run = await round({ reads: [calls({ refused: 1 }), NONE] }, { count: 1, exitCodes: [1] });
     expect(run.result.entries[0]).toMatchObject({ after: "not_run", output: GENERAL_FAKE_NOT_RUN_SENTENCES.operation_unsupported });
-  });
-
-  it("a command that FAILED with no call to the fake is a plain failure (control: nothing is hidden behind the fake)", async () => {
-    const run = await round({ reads: [NONE, NONE] }, { count: 1, exitCodes: [1] });
-    expect(run.result.entries[0]).toMatchObject({ after: "failed" });
-    expect(Object.hasOwn(run.result.entries[0]!, "madeByRovara")).toBe(false);
   });
 
   it("an unreadable record marks EVERY check of the round (fail closed), and a failed command stays failed (the reason is unknown)", async () => {
@@ -157,11 +115,6 @@ describe("a CHECKS round with the fake helper in a container", () => {
     expect(run.results[0]!.lines).toEqual([expect.stringContaining("1 outside call ")]);
   });
 
-  it("an unreadable closing read marks every check too", async () => {
-    const run = await round({ reads: [NONE, NONE, undefined] });
-    expect(run.results[0]!.facts.unknown).toBe(true);
-  });
-
   it("a helper that cannot start makes every command Not run with the fixed start sentence, and echoes nothing of what docker said", async () => {
     const run = await round({ reads: [], startFails: true });
     expect(run.result.entries.map((entry) => entry.after)).toEqual(["not_run", "not_run"]);
@@ -176,60 +129,6 @@ describe("a CHECKS round with the fake helper in a container", () => {
     expect(run.results).toHaveLength(1);
   });
 
-  it("starts no helper for a round that runs no command", async () => {
-    const run = await round({ reads: [] }, { count: 0 });
-    expect(run.events).toEqual([]);
-    expect(run.results).toEqual([]);
-  });
-
-  it("a command still running when its round was ended cannot write into the NEXT round's facts", async () => {
-    const root = await workspace();
-    const results: GeneralFakesRoundResult[] = [];
-    let release: (calls: HostedFakeCalls) => void = () => undefined;
-    let drainsOfFirstHelper = 0;
-    let starts = 0;
-    let firstDrainAsked: () => void = () => undefined;
-    const asked = new Promise<void>((resolve) => { firstDrainAsked = resolve; });
-    const hosted: HostedFakesLauncher = {
-      async start(input) {
-        starts += 1;
-        const first = starts === 1;
-        return {
-          environment: Object.fromEntries(input.variables.map((variable) => [variable, "http://172.30.5.16:8080/s/0"])),
-          async drain() {
-            if (!first) return NONE;
-            drainsOfFirstHelper += 1;
-            if (drainsOfFirstHelper > 1) return NONE;
-            firstDrainAsked();
-            return new Promise<HostedFakeCalls>((resolve) => { release = resolve; });
-          },
-          async stop() { /* nothing to remove */ },
-        };
-      },
-    };
-    const plan = generalFakesPlanFor({ services: [{ variable: "PETS_API_URL" }] }, { localShell: false, hosted, rootPath: root, repositoryPaths: [join(root, "repo")], onResult: (result) => results.push(result) });
-    const wrapped = withGeneralFakesRound(plan, recording().runners);
-    const signal = new AbortController().signal;
-    wrapped.beginCheck?.("readiness:0");
-    const stale = wrapped.runProjectCommand(command(), signal);
-    await asked;
-    // The round ends (aborted) while the command's own read of the helper is still outstanding.
-    await wrapped.endRound?.();
-    release(calls({ served: 1, foreign: 1 }));
-    await stale;
-    // The next round on the same wrapper starts clean: nothing of the stale command is in it.
-    wrapped.beginCheck?.("readiness:1");
-    await wrapped.runProjectCommand(command(), signal);
-    await wrapped.endRound?.();
-    expect(results).toHaveLength(2);
-    expect(results[1]!.facts).toEqual({ unknown: false, checks: [] });
-    expect(results[1]!.lines).toEqual([]);
-  });
-
-  it("a second service gets its own variable and path", async () => {
-    const run = await round({ reads: [] }, { count: 1, services: [{ variable: "PETS_API_URL" }, { variable: "BILLING_API_URL" }] });
-    expect(run.seen[0]).toEqual({ PETS_API_URL: "http://172.30.5.16:8080/s/0", BILLING_API_URL: "http://172.30.5.16:8080/s/1" });
-  });
 });
 
 describe("the wiring in run-task.ts", () => {

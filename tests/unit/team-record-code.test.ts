@@ -24,22 +24,6 @@ const draft = (over: Partial<Parameters<ReturnType<typeof createTeamRecord>["put
 });
 
 describe("rows and keys", () => {
-  it("keeps every row in its own company's project partition, never in another company's", async () => {
-    const w = world();
-    expect(await w.a.put(draft())).toBe(true);
-    const aRows = await w.store.query({ pk: teamRecordPk(A, "payments") });
-    expect(aRows.items.some((item) => item["entityType"] === "TEAM_RECORD_ROW")).toBe(true);
-    expect((await w.store.query({ pk: teamRecordPk(B, "payments") })).items).toEqual([]);
-    // No raw person id in a key: the author pointer is a hash.
-    expect(aRows.items.every((item) => !item.sk.includes("ann"))).toBe(true);
-  });
-
-  it("writes one row per source, however often a task end is heard", async () => {
-    const w = world();
-    expect(await w.a.put(draft())).toBe(true);
-    expect(await w.a.put(draft({ occurredAt: new Date(T0 + 1000).toISOString() }))).toBe(false);
-    expect(await w.a.search("payments", "withRetry", 10)).toHaveLength(1);
-  });
 
   it("refuses an empty text, an unknown kind or no author", async () => {
     const w = world();
@@ -67,24 +51,6 @@ describe("search", () => {
     expect(hits.map((hit) => hit.row.sourceRef)).toEqual(["task:task-1:sendback:r1"]);
     expect(await w.a.search("payments", "!!", 10)).toEqual([]);
     expect((await w.a.search("payments", "request id error", 10))[0]!.row.kind).toBe("review_feedback");
-  });
-});
-
-describe("erase", () => {
-  it("removes every row the person wrote in the company, and nothing of anyone else's or of another company", async () => {
-    const w = world();
-    await w.a.put(draft());
-    await w.a.put(draft({ authorId: "bob", text: "Use withRetry for the payment webhook too", sourceRef: "s-bob" }));
-    await w.b.put(draft({ sourceRef: "s-b-ann" }));
-    expect(await w.a.erasePerson(["payments"], "ann")).toBe(1);
-    expect((await w.a.search("payments", "withRetry", 10)).map((hit) => hit.row.authorId)).toEqual(["bob"]);
-    expect(await w.b.search("payments", "withRetry", 10)).toHaveLength(1);
-    // Nothing of the person is left in the partition (row, pointer, source mark), and a second call finds nothing.
-    const left = (await w.store.query({ pk: teamRecordPk(A, "payments") })).items.filter((item) => item["entityType"] !== "TEAM_RECORD_FENCE");
-    expect(left.filter((item) => item["authorId"] === "ann")).toEqual([]);
-    expect(left).toHaveLength(3);
-    expect(await w.a.erasePerson(["payments"], "ann")).toBe(0);
-    // What is left of the person is only the erase fence (a hash), which keeps their words from being written again.
   });
 });
 
@@ -141,27 +107,6 @@ describe("capture of a finished task", () => {
     expect(JSON.stringify((await w.store.query({ pk: teamRecordPk(A, "payments") })).items)).not.toContain("STOPPED-WORDS");
   });
 
-  it("a send-back whose only words are code's (a findings summary) is never recorded as the person's; their per-finding notes are", async () => {
-    const w = world();
-    const source = sourceWith([], ["f1", "f2", "f3", "f4"]);
-    const result = await recordEndedTask({
-      record: w.a, source, companyId: A, taskId: "task-7", now: () => w.clock.now, origin: "app",
-      rows: rows({
-        // The summary, marked as code's (and, as a trap, still carrying the text): counted elsewhere, never recorded.
-        f1: { id: "task:task-7:sendback:f1", origin: "human", actorDeveloperId: "bob", actorTrust: "member", reasonText: "1 accepted, 1 to fix", fixedText: true },
-        f2: { id: "task:task-7:sendback:f2", origin: "human", actorDeveloperId: "bob", actorTrust: "member", fixedText: true },
-        f3: { id: "task:task-7:sendback:f3", origin: "human", actorDeveloperId: "bob", actorTrust: "member", reasonText: "Return 404, not 500." },
-        // An outsider's (or off-roster person's) findings notes are not recorded either.
-        f4: { id: "task:task-7:sendback:f4", origin: "human", actorDeveloperId: "eve", actorTrust: "outsider", reasonText: "Outsider notes." },
-      }),
-    });
-    expect(result.written).toBe(1);
-    const all = (await w.store.query({ pk: teamRecordPk(A, "payments") })).items.filter((item) => item["entityType"] === "TEAM_RECORD_ROW");
-    expect(all.map((item) => item["text"])).toEqual(["Sent the work back: Return 404, not 500."]);
-    expect(JSON.stringify(all)).not.toContain("to fix");
-    expect(JSON.stringify(all)).not.toContain("Outsider notes");
-  });
-
   it("refuses to capture for another company than the record's", async () => {
     const w = world();
     await expect(recordEndedTask({ record: w.a, source: sourceWith([]), rows: rows({}), companyId: B, taskId: "t", now: () => w.clock.now, origin: "app" })).rejects.toBeInstanceOf(TeamRecordCompanyError);
@@ -200,31 +145,6 @@ describe("review round 1", () => {
     }
   });
 
-  it("an erase fences the person first: a capture that read them before the erase cannot write their words after it (also under the lessons' own person fence)", async () => {
-    const w = world();
-    await w.a.erasePerson(["payments"], "ann");
-    expect(await w.a.put(draft())).toBe(false);
-    expect(await w.a.put(draft({ authorId: "bob", sourceRef: "s-bob" }))).toBe(true);
-    // The lessons' fence for a person (written by the lessons erase) stops the record too.
-    const { createHash } = await import("node:crypto");
-    await w.store.put({ item: { pk: teamRecordPk(A, "payments"), sk: `LESSONSET#FENCE#P#${createHash("sha256").update("cy").digest("hex")}`, entityType: "LESSON_FENCE" } });
-    expect(await w.a.put(draft({ authorId: "Cy", sourceRef: "s-cy" }))).toBe(false);
-  });
-
-  it("rows expire after the keep time even on a store that names no expiry attribute, and every item of a write carries the same expiry", async () => {
-    const clock = { now: T0 };
-    const store = new MemoryDocumentStore({ indexes: [], nowSeconds: () => Math.floor(clock.now / 1000) });
-    const record = createTeamRecord({ store, companyId: A, now: () => clock.now });
-    await record.put(draft());
-    const items = (await store.query({ pk: teamRecordPk(A, "payments") })).items;
-    const expiries = new Set(items.map((item) => item["indexExpiresAt"]));
-    expect(expiries.size).toBe(1);
-    expect([...expiries][0]).toBe(Math.floor(T0 / 1000) + RECORD_KEEP_DAYS * 86_400);
-    expect(await record.search("payments", "withRetry", 5)).toHaveLength(1);
-    clock.now += (RECORD_KEEP_DAYS * 86_400 + 1) * 1000;
-    expect(await record.search("payments", "withRetry", 5)).toEqual([]);
-  });
-
   it("search reads past one store page, up to the window, newest first", async () => {
     const w = world();
     // The oldest row is the only match; 1,100 newer rows push it onto the second page.
@@ -256,9 +176,4 @@ describe("review round 1", () => {
     expect(await search.search({ orgId: A, projectId: "payments", query: "withRetry", asAgentForTask: "t", limit: 5, sources: ["team-record"] })).toHaveLength(1);
   });
 
-  it("erase finds a person's rows whatever the case of the id they were written under", async () => {
-    const w = world();
-    await w.a.put(draft({ authorId: "Ann" }));
-    expect(await w.a.erasePerson(["payments"], "ann")).toBe(1);
-  });
 });

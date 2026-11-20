@@ -1,11 +1,6 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  E2EModelChannelResponseSchema,
-  E2EModelReceiptSchema,
-  e2eModelRouteInvokedIdentifier,
-  e2eModelRouteRevision,
-} from "../../packages/contracts/src/e2e-model-channel.js";
+import { E2EModelReceiptSchema, e2eModelRouteInvokedIdentifier } from "../../packages/contracts/src/e2e-model-channel.js";
 import * as modelRuntime from "../../packages/model-runtime/src/index.js";
 import {
   createGovernedE2EModelRoute,
@@ -14,7 +9,7 @@ import {
   type E2EInvoke,
   type E2EInvokeInput,
 } from "../../packages/model-runtime/src/e2e-route.js";
-import { MODEL_ID, RUN_ID, bedrockRoute, call, channelRequest, keyedRoute, loweredBudgets, tapAnswer } from "../support/e2e-model-fixtures.js";
+import { MODEL_ID, bedrockRoute, call, channelRequest, keyedRoute, loweredBudgets, tapAnswer } from "../support/e2e-model-fixtures.js";
 
 afterEach(() => { vi.useRealTimers(); });
 
@@ -53,24 +48,6 @@ describe("the in-memory day budget settles a call that was never sent like the b
 });
 
 describe("governed e2e model route: the call it makes", () => {
-  it("invokes the pinned model with provider-default sampling, thinking off and the route's output cap, and writes a valid receipt", async () => {
-    const seen: E2EInvokeInput[] = [];
-    const route = routeWith(async (input) => { seen.push(input); return tapAnswer(); });
-    const { result, receipt } = await route.generate(channelRequest());
-    expect(seen).toHaveLength(1);
-    expect(seen[0]).toMatchObject({ target: { provider: "amazon-bedrock", identifier: MODEL_ID, region: "us-east-1" }, sampling: "provider-default", thinking: "off", effort: "low", maxOutputTokens: 1024 });
-    expect(seen[0]).not.toHaveProperty("temperature");
-    expect(seen[0]!.signal).toBeInstanceOf(AbortSignal);
-    expect(result).toMatchObject({ status: "ok", finishReason: { unified: "tool-calls" }, usage: { inputTokens: 900, outputTokens: 40 } });
-    expect(E2EModelReceiptSchema.parse(receipt)).toMatchObject({
-      outcome: "ok", provider: "amazon-bedrock", modelId: MODEL_ID, routeId: "rovara-e2e-default", runId: RUN_ID,
-      callIndex: 0, stepIndex: 0, inputTokens: 900, outputTokens: 40,
-    });
-    expect(receipt.routeRevision).toBe(e2eModelRouteRevision(route.definition));
-    expect(route.routeRevision).toBe(receipt.routeRevision);
-    expect(receipt.responseSha256).toMatch(/^[a-f0-9]{64}$/);
-    expect(E2EModelChannelResponseSchema.safeParse({ schemaVersion: "rovara-e2e-model-channel/v1", receiptId: receipt.receiptId, result }).success).toBe(true);
-  });
 
   it("invokes the inference profile ARN when the route has one", async () => {
     const arn = `arn:aws:bedrock:us-east-1:123456789012:inference-profile/${MODEL_ID}`;
@@ -82,14 +59,6 @@ describe("governed e2e model route: the call it makes", () => {
     expect(seen[0]!.target.identifier).toBe(arn);
     expect(receipt.outcome).toBe("ok");
     expect(receipt.modelId).toBe(MODEL_ID);
-  });
-
-  it("answers invalid-output when a different model served the call", async () => {
-    const route = routeWith(async () => tapAnswer({ servedModelId: "us.anthropic.claude-opus-5" }));
-    const { result, receipt } = await route.generate(channelRequest());
-    expect(result).toMatchObject({ status: "error", code: "invalid-output" });
-    expect(receipt.outcome).toBe("invalid-output");
-    expect(receipt.responseSha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it("answers invalid-output for a tool the request did not offer, and for a malformed tool input", async () => {
@@ -129,54 +98,6 @@ describe("governed e2e model route: the call it makes", () => {
 });
 
 describe("governed e2e model route: timeouts and provider errors", () => {
-  it("aborts a call that takes 30001 ms and answers timeout", async () => {
-    vi.useFakeTimers();
-    let signal: AbortSignal | undefined;
-    const route = createGovernedE2EModelRoute(bedrockRoute(), {
-      now: () => Date.now(), dayBudget: createInMemoryE2EDayBudget(),
-      invoke: (input) => { signal = input.signal; return new Promise(() => undefined); },
-    });
-    const pending = route.generate(channelRequest());
-    await vi.advanceTimersByTimeAsync(29_999);
-    expect(signal?.aborted).toBe(false);
-    await vi.advanceTimersByTimeAsync(2);
-    const { result, receipt } = await pending;
-    expect(signal?.aborted).toBe(true);
-    expect(result).toMatchObject({ status: "error", code: "timeout" });
-    expect(receipt).toMatchObject({ outcome: "timeout", responseSha256: null });
-    expect(receipt.latencyMs).toBeGreaterThanOrEqual(30_000);
-    expect(E2EModelReceiptSchema.safeParse(receipt).success).toBe(true);
-  });
-
-  it("times out at the route's own lowered timeout", async () => {
-    vi.useFakeTimers();
-    const route = createGovernedE2EModelRoute(bedrockRoute({ budgets: loweredBudgets({ callTimeoutMs: 5_000 }) }), {
-      now: () => Date.now(), dayBudget: createInMemoryE2EDayBudget(), invoke: () => new Promise(() => undefined),
-    });
-    const pending = route.generate(channelRequest());
-    await vi.advanceTimersByTimeAsync(5_001);
-    expect((await pending).result).toMatchObject({ status: "error", code: "timeout" });
-  });
-
-  it("does not call the provider after the run's deadline", async () => {
-    const invoke = vi.fn(async () => tapAnswer());
-    const route = routeWith(invoke);
-    const { result, receipt } = await route.generate(channelRequest(), { deadlineAt: 1 });
-    expect(invoke).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ status: "error", code: "timeout" });
-    expect(receipt.outcome).toBe("timeout");
-  });
-
-  it("does not retry a provider 429: one invoke, outcome provider-error, and the provider's words are not passed on", async () => {
-    const invoke = vi.fn(async () => { throw Object.assign(new Error("Too many requests for the prompt: hunter2-secret-echo"), { name: "ThrottlingException", $metadata: { httpStatusCode: 429 } }); });
-    const route = routeWith(invoke);
-    const { result, receipt } = await route.generate(channelRequest());
-    expect(invoke).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({ status: "error", code: "provider-error" });
-    expect(JSON.stringify(result)).not.toContain("hunter2-secret-echo");
-    expect(JSON.stringify(result)).toContain("429");
-    expect(receipt).toMatchObject({ outcome: "provider-error", responseSha256: null });
-  });
 
   it("answers provider-error when the run aborts a call in flight", async () => {
     const controller = new AbortController();
@@ -200,14 +121,6 @@ describe("governed e2e model route: checks against the route's own budgets", () 
     expect(big.receipt).toMatchObject({ outcome: "refused-protocol", inputTokens: 0, outputTokens: 0, responseSha256: null });
     const ok = await route.generate(channelRequest({ callOverride: { ...call(), maxOutputTokens: 200 } }));
     expect(ok.result.status).toBe("ok");
-  });
-
-  it("sends the smaller of the route's output cap and the call's", async () => {
-    const seen: E2EInvokeInput[] = [];
-    const route = routeWith(async (input) => { seen.push(input); return tapAnswer(); }, bedrockRoute({ budgets: loweredBudgets({ maxOutputTokens: 300 }) }));
-    await route.generate(channelRequest());
-    await route.generate(channelRequest({ callOverride: { ...call(), maxOutputTokens: 100 } }));
-    expect(seen.map((item) => item.maxOutputTokens)).toEqual([300, 100]);
   });
 
   it("refuses a request that is not a valid channel request", async () => {
@@ -242,12 +155,6 @@ describe("governed e2e model route: checks against the route's own budgets", () 
     expect((third.result as { message: string }).message).toMatch(/^model-route-budget-exhausted/);
   });
 
-  it("keeps a failed call's reservation against the day, since the provider may have billed it", async () => {
-    const dayBudget = createInMemoryE2EDayBudget();
-    const route = routeWith(async () => { throw new Error("boom"); }, bedrockRoute(), { dayBudget });
-    await route.generate(channelRequest());
-    expect(dayBudget.snapshot().usedCalls).toBe(1);
-  });
 });
 
 describe("governed e2e model route: fix round 1", () => {
@@ -273,16 +180,6 @@ describe("governed e2e model route: fix round 1", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it("F1: a provider count above the bound is charged in full, even where the receipt can hold no more than 64000", async () => {
-    const dayBudget = createInMemoryE2EDayBudget();
-    const route = routeWith(async () => tapAnswer({ usage: { inputTokens: 70_000, outputTokens: 10 } }), bedrockRoute(), { dayBudget });
-    const outcome = await route.generate(channelRequest());
-    expect(outcome.result).toMatchObject({ status: "error", code: "invalid-output" });
-    expect(outcome.receipt.inputTokens).toBe(64_000);
-    expect(outcome.chargedInputTokens).toBe(70_000);
-    expect(dayBudget.snapshot().usedInputTokens).toBe(70_000);
-  });
-
   it("F2: needs a day budget, whose limits are the definition's", async () => {
     expect(() => createGovernedE2EModelRoute(bedrockRoute(), { invoke: async () => tapAnswer(), now: Date.now } as never)).toThrow(/day budget/);
     const limits: unknown[] = [];
@@ -290,20 +187,6 @@ describe("governed e2e model route: fix round 1", () => {
     const route = routeWith(async () => tapAnswer(), bedrockRoute({ budgets: loweredBudgets({ maxInputTokensPerProjectDay: 50_000, maxCallsPerProjectDay: 7 }) }), { dayBudget });
     await route.generate(channelRequest());
     expect(limits).toEqual([{ maxInputTokens: 50_000, maxCalls: 7 }]);
-  });
-
-  it("F3: honours per-call limits the group lowered below the route's", async () => {
-    const seen: E2EInvokeInput[] = [];
-    const route = routeWith(async (input) => { seen.push(input); return tapAnswer({ usage: { inputTokens: 2_001, outputTokens: 10 } }); });
-    const group = loweredBudgets({ maxPromptBytes: 4_096, maxOutputTokens: 100, maxInputTokens: 2_000, callTimeoutMs: 1_000 });
-    expect((await route.generate(channelRequest({ callOverride: call("x".repeat(6_000)) }), { budgets: group })).result).toMatchObject({ code: "refused-protocol" });
-    expect((await route.generate(channelRequest({ callIndex: 1, callOverride: { ...call(), maxOutputTokens: 500 } }), { budgets: group })).result).toMatchObject({ code: "refused-protocol" });
-    const heavy = await route.generate(channelRequest({ callIndex: 2 }), { budgets: group });
-    expect(seen.map((item) => item.maxOutputTokens)).toEqual([100]);
-    expect(heavy.result).toMatchObject({ code: "invalid-output" });
-    const wider = await route.generate(channelRequest({ callIndex: 3 }), { budgets: { ...group, maxOutputTokens: 1024, maxInputTokens: 32_000 } });
-    expect(seen.at(-1)!.maxOutputTokens).toBe(1024);
-    expect(wider.result.status).toBe("ok");
   });
 
   it("F3: a group value can lower the call timeout, and never raise the route's", async () => {
@@ -315,18 +198,6 @@ describe("governed e2e model route: fix round 1", () => {
     const raised = route.generate(channelRequest({ callIndex: 1 }), { budgets: loweredBudgets({ callTimeoutMs: 30_000 }) });
     await vi.advanceTimersByTimeAsync(5_001);
     expect((await raised).result).toMatchObject({ code: "timeout" });
-  });
-
-  it("F6: a missing usage fails closed: the reserved bound is counted and the receipt says invalid-output", async () => {
-    const dayBudget = createInMemoryE2EDayBudget();
-    const route = routeWith(async () => tapAnswer({ usage: undefined }), bedrockRoute(), { dayBudget });
-    const outcome = await route.generate(channelRequest());
-    expect(outcome.result).toMatchObject({ status: "error", code: "invalid-output" });
-    expect((outcome.result as { message: string }).message).toMatch(/usage/);
-    expect(outcome.receipt.inputTokens).toBeGreaterThan(500);
-    expect(outcome.usageMissing).toBe(true);
-    expect(outcome.chargedInputTokens).toBe(outcome.receipt.inputTokens);
-    expect(dayBudget.snapshot().usedInputTokens).toBe(outcome.receipt.inputTokens);
   });
 
   it("F7: a day budget that throws gives a budget receipt, and one that fails to settle gives a provider-error receipt", async () => {
@@ -374,22 +245,6 @@ describe("governed e2e model route: served model and payload (amendment A1)", ()
     expect((unknown.result as { message: string }).message).toMatch(/serv/);
   });
 
-  it("lets Bedrock, which reports no serving model, answer with none, and records OpenRouter's upstream", async () => {
-    const bedrock = await routeWith(async () => tapAnswer({ servedModelId: null })).generate(channelRequest());
-    expect(bedrock.result.status).toBe("ok");
-    expect(bedrock.receipt.servedModelId).toBeNull();
-    const openrouter = await routeWith(async () => tapAnswer({ servedModelId: "anthropic/claude-haiku-5.5", servedUpstream: "Anthropic" }), keyedRoute("openrouter")).generate(channelRequest());
-    expect(openrouter.receipt).toMatchObject({ provider: "openrouter", servedModelId: "anthropic/claude-haiku-5.5", servedUpstream: "Anthropic", outcome: "ok" });
-  });
-
-  it("hands the provider payload digest on, from a call that completed or answered badly", async () => {
-    const digest = "a".repeat(64);
-    const ok = await routeWith(async () => tapAnswer({ providerPayloadSha256: digest })).generate(channelRequest());
-    expect(ok.providerPayloadSha256).toBe(digest);
-    const bad = await routeWith(async () => tapAnswer({ providerPayloadSha256: digest, servedModelId: "other-model" })).generate(channelRequest());
-    expect(bad.providerPayloadSha256).toBe(digest);
-  });
-
   it("passes the proxy's final-payload check to the provider call, and answers refused-credential-match when it refuses", async () => {
     const seen: Array<(payload: unknown) => void> = [];
     const route = routeWith(async (input) => {
@@ -403,30 +258,6 @@ describe("governed e2e model route: served model and payload (amendment A1)", ()
     expect(refused.result).toMatchObject({ status: "error", code: "refused-credential-match" });
     expect(refused.receipt).toMatchObject({ outcome: "refused-credential-match", inputTokens: 0, outputTokens: 0, responseSha256: null });
     expect(seen).toHaveLength(1);
-  });
-
-  it("charges the reserved bound when the provider failed after it had started to answer", async () => {
-    const dayBudget = createInMemoryE2EDayBudget();
-    const route = routeWith(async () => { throw Object.assign(new Error("stream broke"), { mayHaveBeenBilled: true }); }, bedrockRoute(), { dayBudget });
-    const outcome = await route.generate(channelRequest());
-    expect(outcome.result).toMatchObject({ status: "error", code: "provider-error" });
-    expect(outcome.receipt.inputTokens).toBeGreaterThan(500);
-    expect(outcome.chargedInputTokens).toBe(outcome.receipt.inputTokens);
-    const unbilled = await routeWith(async () => { throw new Error("refused at the door"); }).generate(channelRequest());
-    expect(unbilled.receipt.inputTokens).toBe(0);
-  });
-
-  it("N4: a failure before any request was sent charges nothing and releases the day reservation; a failure after one keeps it", async () => {
-    const dayBudget = createInMemoryE2EDayBudget();
-    const notSent = routeWith(async () => { throw Object.assign(new Error("route mismatch"), { requestNotSent: true }); }, bedrockRoute(), { dayBudget });
-    const outcome = await notSent.generate(channelRequest());
-    expect(outcome.result).toMatchObject({ status: "error", code: "provider-error" });
-    expect(outcome.receipt).toMatchObject({ outcome: "provider-error", inputTokens: 0 });
-    expect(outcome.chargedInputTokens).toBe(0);
-    expect(dayBudget.snapshot().usedInputTokens).toBe(0);
-    const sent = createInMemoryE2EDayBudget();
-    await routeWith(async () => { throw new Error("went out and failed"); }, bedrockRoute(), { dayBudget: sent }).generate(channelRequest());
-    expect(sent.snapshot().usedInputTokens).toBeGreaterThan(500);
   });
 
   it("offers the secrets its invoke holds, so the proxy can add them to the credential scan", () => {

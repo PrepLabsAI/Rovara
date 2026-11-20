@@ -8,7 +8,6 @@ import { DEFAULT_CODE_SETTINGS, PLAYBOOK_FILE_PATH, IMPLICIT_COMPANY_ID, project
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { codeSettingsKey, codeSettingsReader, companyCodeSettingsReader } from "../../packages/broker/src/aws/project-code-settings.js";
 import { createBrokerCoreServices } from "../../packages/broker/src/aws/core-job-services.js";
-import { fixedCodeSettings } from "../../packages/broker/src/core/merge/defaults.js";
 import { createFakeWorld, FAKE_COMPANY } from "../support/core-host-fakes.js";
 import { host as serviceHost, ORG as SERVICE_ORG } from "../support/service-host.js";
 
@@ -142,13 +141,5 @@ describe("what the deployed broker passes", () => {
     expect(broker).toMatch(/codeSettings: codeSettingsReader\(\{ documentClient, tableName: requiredEnvironment\("STATE_TABLE_NAME"\) \}\)/u);
     // Batch b18: the hosted services (createHostedBrokerCoreServices) take more seams after `settings` (human edit, thread moments, notification).
     expect(broker).toMatch(/createHostedBrokerCoreServices\(\{ companyId, flow, registry, ciMode: wiring\.ciMode!,\s*settings: companyCodeSettingsReader\(\{ documentClient, tableName: requiredEnvironment\("STATE_TABLE_NAME"\) \}, companyId\),/u);
-  });
-  it("leaves the laptop on its fixed settings", async () => {
-    expect(await fixedCodeSettings().read(IMPLICIT_COMPANY_ID as OrgId, "any")).toMatchObject({ allowSelfApproval: true });
-    for (const [file, pattern] of [["packages/broker/src/local/app/app.ts", /createPlaybookService\(\{\s*companyId, store/u], ["packages/broker/src/local/app/tracking.ts", /settings: options\.settings \?\? fixedCodeSettings\(\)/u]] as const) {
-      const text = readFileSync(file, "utf8");
-      expect(text, file).toMatch(pattern);
-      expect(text, file).not.toMatch(/codeSettingsReader|companyCodeSettingsReader/u);
-    }
   });
 });

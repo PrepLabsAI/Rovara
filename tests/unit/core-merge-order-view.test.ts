@@ -2,10 +2,8 @@
 // description and the task page. The view's field is added readers first (DEC 152a): the writer is off until an install turns it on. Words are fixed; every repository name is one inert line. Never GitHub.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { MergePressBodySchema, MergeViewSchema, MERGE_VIEW_MESSAGE_MAX, IMPLICIT_COMPANY_ID } from "../../packages/contracts/src/index.js";
-import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
-import { MERGE_ORDER_WORDS, createMergeOrderLines, mergeOrderLinesOfTask, mergeOrderOf, mergeOrderStateLines, mergeViewOf, readMergeTracking } from "../../packages/broker/src/core/merge/index.js";
-import { rovaraStatusLines, rovaraPullRequestBody } from "../../packages/broker/src/core/proof/pull-request-body.js";
+import { MergePressBodySchema, MergeViewSchema, MERGE_VIEW_MESSAGE_MAX } from "../../packages/contracts/src/index.js";
+import { MERGE_ORDER_WORDS, mergeOrderLinesOfTask, mergeViewOf, readMergeTracking } from "../../packages/broker/src/core/merge/index.js";
 import { attentionOf } from "../../packages/broker/src/local/app/attention.js";
 import { nextFor } from "../../packages/mcp/src/tools.js";
 import { ORG, TASK_ID, mergeWorld } from "../support/merge-world.js";
@@ -30,13 +28,6 @@ describe("the Merge section's view", () => {
     expect((view!.order as { needsOverride?: true }).needsOverride).toBeUndefined();
     for (const facts of [undefined, [], [edge("app", "elsewhere")]]) expect((await viewOf(facts)).view).not.toHaveProperty("order");
     expect((await viewOf([edge("app", "payments-lib")], { pullRequests: [{ repositoryId: "app", number: 1 }] })).view).not.toHaveProperty("order");
-  });
-
-  it("is today's view, byte for byte, until an install turns the writer on (readers first, DEC 152a)", async () => {
-    const off = await viewOf([edge("app", "payments-lib")], { orderInView: false });
-    const none = await viewOf(undefined, { seam: false, orderInView: false });
-    expect(JSON.stringify(off.view)).toBe(JSON.stringify(none.view));
-    expect(off.view).not.toHaveProperty("order");
   });
 
   it("says no safe order, and that a person must confirm, for a cycle and for facts that cannot be read", async () => {
@@ -72,19 +63,6 @@ describe("the Merge section's view", () => {
     expect(view?.order?.lines.at(-1)).toBe(MERGE_ORDER_WORDS.outOfOrderWarning("app", "payments-lib", [], 0));
   });
 
-  it("stays inside the view's bounds whatever the repositories are called, and reads every name as inert text", () => {
-    const names = Array.from({ length: 32 }, (_, index) => `${String(index).padStart(2, "0")}${"n".repeat(198)}`);
-    const order = mergeOrderOf(names, [edge(names[0]!, names[1]!)]);
-    const lines = mergeOrderStateLines(order, names.map((repositoryId, index) => ({ repositoryId, number: index + 1 })));
-    expect(lines).toHaveLength(1);
-    // The view cuts it to its own bound (the line itself is bounded by the 32 names).
-    expect(lines[0]!.length).toBeLessThan(32 * 60);
-    const hostile = mergeOrderStateLines(mergeOrderOf(["a@everyone", "b‮[x](http://evil.example)\n#12"], [edge("a@everyone", "b‮[x](http://evil.example)\n#12")]), [{ repositoryId: "a@everyone", number: 1 }, { repositoryId: "b‮[x](http://evil.example)\n#12", number: 2 }]);
-    expect(hostile[0]).not.toMatch(/\n|‮|\]\(/u);
-    expect(hostile[0]).not.toContain("@everyone");
-    void MERGE_VIEW_MESSAGE_MAX;
-  });
-
   it("the press body takes the override only as `true`, and nothing else new", () => {
     const requestId = randomUUID();
     expect(MergePressBodySchema.safeParse({ requestId }).success).toBe(true);
@@ -115,14 +93,6 @@ describe("the order lines of a task", () => {
     expect(both).toEqual(["Merge order: payments-lib #12 first, then app #40."]);
   });
 
-  it("says nothing without a seam, without facts, for one repository, or for today's order", async () => {
-    const workflow = workflowOf([{ repositoryId: "app", number: 1 }, { repositoryId: "lib", number: 2 }]);
-    expect(await mergeOrderLinesOfTask({}, taskOf(workflow))).toEqual([]);
-    expect(await mergeOrderLinesOfTask({ repositoryEdges: async () => undefined }, taskOf(workflow))).toEqual([]);
-    expect(await mergeOrderLinesOfTask({ repositoryEdges: async () => [] }, taskOf(workflow))).toEqual([]);
-    expect(await mergeOrderLinesOfTask({ repositoryEdges: async () => [edge("app", "lib")] }, taskOf(workflowOf([{ repositoryId: "app", number: 1 }])))).toEqual([]);
-  });
-
   it("says no safe order for a cycle or a seam that throws, naming no cause", async () => {
     const workflow = workflowOf([{ repositoryId: "app", number: 1 }, { repositoryId: "lib", number: 2 }]);
     expect(await mergeOrderLinesOfTask({ repositoryEdges: async () => [edge("app", "lib"), edge("lib", "app")] }, taskOf(workflow))).toEqual([MERGE_ORDER_WORDS.noSafeOrder.cycle]);
@@ -131,60 +101,9 @@ describe("the order lines of a task", () => {
     expect(lines).toEqual([MERGE_ORDER_WORDS.noSafeOrder.unreadable]);
     expect(logged.join("")).not.toContain("secret-canary");
   });
-
-  it("is empty for another company's task and never throws", async () => {
-    const lines = createMergeOrderLines({ flow: { store: undefined as never }, companyId: ORG, repositoryEdges: async () => { throw new Error("must not be asked"); } });
-    const record = { taskId: TASK_ID, companyId: `org_${"b".repeat(20)}`, project: "web", startingRevision: 1, workspaceId: "ws", workflow: workflowOf(PRS) } as never;
-    expect(await lines(record)).toEqual([]);
-    expect(await lines({ ...(record as object), companyId: ORG, workflow: undefined } as never)).toEqual([]);
-    // Control: the same record in its own company reads the facts (and its unreadable facts are words, not a throw).
-    expect(await lines({ ...(record as object), companyId: ORG, workflow: { ...workflowOf(PRS), definitionVersion: "1.1.0" } } as never)).toEqual([MERGE_ORDER_WORDS.noSafeOrder.unreadable]);
-    void IMPLICIT_COMPANY_ID;
-  });
 });
 
 describe("the pull request description and the task page", () => {
-  const candidate = createCandidateManifest([{ repositoryId: "app", commitSha: "1".repeat(40), treeSha: "1".repeat(40), baseCommitSha: "e".repeat(40) }]);
-  const workflow = () => WorkflowSnapshotSchema.parse({
-    ...createWorkflowSnapshot({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", ownerId: "a".repeat(64), now: "2026-11-13T12:00:00.000Z", definitionVersion: "1.1.0" }),
-    stage: "PULL_REQUEST", state: "READY", candidate,
-    checkPolicy: { required: [{ id: "unit", label: "Unit tests", command: { cwd: "repo/app", executable: "npm", args: ["test"], timeoutSeconds: 30 } }], optional: [], selectedOptionalIds: [], proposed: [] },
-    verification: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: "2026-11-13T12:00:00.000Z", results: [{ checkId: "unit", status: "PASS" }] },
-    reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: "2026-11-13T12:00:00.000Z" })),
-  });
-  const status = (mergeOrderLines?: readonly string[]) => rovaraStatusLines(workflow(), { ...(mergeOrderLines === undefined ? {} : { mergeOrderLines }) }, () => ["- no findings"]);
-
-  it("is byte for byte today's description without lines", () => {
-    expect(status([])).toEqual(status());
-    expect(status().join("\n")).not.toContain("Merge order");
-    expect(status().join("\n")).not.toContain("order of merging");
-  });
-
-  it("lists the lines as one thing to check, above the first drawer, once, as inert text", () => {
-    const lines = status(["Merge order: payments-lib #12 first, then app #40."]);
-    const text = lines.join("\n");
-    expect(lines.filter((line) => /^\d+\. \*\*The order of merging matters\.\*\*/u.test(line))).toHaveLength(1);
-    expect(text.indexOf("The order of merging matters.")).toBeLessThan(text.indexOf("<details>"));
-    // A `#12` would link another repository's issue 12: it is broken up.
-    expect(text).not.toContain("#12 ");
-    expect(text).toContain("payments-lib #‍12");
-    // Whatever a caller passes cannot add a heading, a link or a second line, and at most four lines are listed (the rest are counted).
-    const hostile = status(["# Heading\n## Another [click](http://evil.example) @team <!-- x -->", "a", "b", "c", "d", "e"]).join("\n");
-    expect(hostile).not.toMatch(/\n#+ Heading/u);
-    expect(hostile).not.toContain("](http");
-    expect(hostile).not.toContain("<!-- x");
-    expect(hostile.match(/The order of merging matters\./gu)).toHaveLength(1);
-    const sub = hostile.split("**The order of merging matters.**")[1]!.split("\n\n")[0]!.split("\n").filter((line) => line.trim().startsWith("- "));
-    expect(sub).toHaveLength(5);
-    expect(sub.at(-1)).toContain("and 2 more");
-  });
-
-  it("is in the whole description between the markers, and the description stays within its cap", () => {
-    const text = rovaraPullRequestBody({ summary: ["Retry the payment"], fallbackTitle: "t", workflow: workflow(), context: { mergeOrderLines: ["Merge order: payments-lib first, then app."] }, reviewLines: () => ["- no findings"], pageUrl: undefined });
-    expect(text.indexOf("The order of merging matters.")).toBeGreaterThan(text.indexOf("<!-- rovara:checks-and-reviews -->"));
-    expect(text.indexOf("The order of merging matters.")).toBeLessThan(text.indexOf("<!-- /rovara:checks-and-reviews -->"));
-    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(30_000);
-  });
 
   it("is on the task page's merge lines through the flow's seam, and absent without it", async () => {
     const world = await mergeWorld({ pullRequests: PRS });

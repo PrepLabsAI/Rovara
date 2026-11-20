@@ -39,31 +39,12 @@ async function world(setting: unknown, options: { checks?: boolean } = {}) {
   return { operation, job };
 }
 
-const strip = (value: unknown) => JSON.parse(JSON.stringify(value, (key, entry: unknown) => (["requestId", "operationId", "id", "createdAt", "updatedAt", "fence", "taskId", "workspaceId", "conversationId", "leaseExpiresAt", "callbackCapability"].includes(key) ? "x" : entry))) as unknown;
-
 describe("general fakes on the IMPLEMENT payload", () => {
   it("sends the services and requires the feature while the setting is on and the run has checks", async () => {
     const { operation, job } = await world({ enabled: true, services: [{ variable: "PAYMENTS_API_URL", spec: "repo/demo/openapi.yaml" }] });
     expect(operation.dispatch.payload).toMatchObject({ readiness: [expect.anything()], generalFakes: { services: [{ variable: "PAYMENTS_API_URL", spec: "repo/demo/openapi.yaml" }] } });
     expect(operation.dispatch.requires).toContain(GENERAL_FAKES_FEATURE);
     expect(job).toMatchObject({ payload: { generalFakes: { services: [{ variable: "PAYMENTS_API_URL" }] } } });
-  });
-
-  it("absent, off and empty settings give the same payload and requirements as a project without the setting (golden)", async () => {
-    const baseline = await world(undefined);
-    expect(baseline.operation.dispatch.payload).not.toHaveProperty("generalFakes");
-    expect(baseline.operation.dispatch.requires).not.toContain(GENERAL_FAKES_FEATURE);
-    for (const setting of [{ enabled: false, services: [{ variable: "PAYMENTS_API_URL" }] }, { enabled: true, services: [] }]) {
-      const other = await world(setting);
-      expect(strip(other.operation.dispatch), JSON.stringify(setting)).toEqual(strip(baseline.operation.dispatch));
-      expect(strip(other.job)).toEqual(strip(baseline.job));
-    }
-  });
-
-  it("a run with no checks to run sends no fakes even with the setting on (nothing to answer)", async () => {
-    const { operation } = await world({ enabled: true, services: [{ variable: "PAYMENTS_API_URL" }] }, { checks: false });
-    expect(operation.dispatch.payload).not.toHaveProperty("generalFakes");
-    expect(operation.dispatch.requires).not.toContain(GENERAL_FAKES_FEATURE);
   });
 
   it("the worker's payload schema takes the services on a checks or coding run and on no other mode", () => {

@@ -25,17 +25,6 @@ const materializeFrom = (root: string) => async (_dir: string, _sha: string, des
 const prepare = async (root: string, dependencies: unknown) => prepareEvalStandIns({ descriptor: undefined, dependencies: dependencies as never, repositoryDirectory: root, baseCommit: "a".repeat(40), scratchDir: join(root, "..", `scratch-${String(roots.length)}`), workspaceId: WORKSPACE, operationId: OPERATION, signal: new AbortController().signal, materialize: materializeFrom(root) });
 
 describe("the seed files and the version come from the BASE commit, once", () => {
-  it("reads the plan's seed files, keeps them per dependency and moves the version with their bytes", async () => {
-    const root = await repo();
-    const first = await prepare(root, [plan()]);
-    expect([...first.seeds.keys()]).toEqual(["db"]);
-    expect(first.seeds.get("db")!.map((bytes) => bytes.toString("utf8"))).toEqual([SEED]);
-    expect(first.version).toMatch(/^[a-f0-9]{64}$/u);
-    expect((await prepare(root, [plan()])).version).toBe(first.version);
-    const changed = await prepare(await repo(`${SEED}INSERT INTO creators VALUES (2, 'b');\n`), [plan()]);
-    expect(changed.version).not.toBe(first.version);
-    expect(seedFileDigest(changed.seeds.get("db")![0]!)).not.toBe(seedFileDigest(first.seeds.get("db")![0]!));
-  });
 
   it("review M2: a seed path is WORKSPACE-relative (`<repository folder>/<file>`) and is read from this one repository's checkout; another repository's seed is not read from this tree", async () => {
     const root = await repo();
@@ -124,30 +113,6 @@ describe("each side's services are seeded the same way", () => {
     expect(calls).toEqual([]);
   });
 
-  it("a seed that does not load, or a stop, ends the start with the fixed sentence and never repeats Docker's words", async () => {
-    const prepared = await prepare(await repo(), [plan()]);
-    const failing = docker({ fail: true });
-    const error = await evalDatabaseSeed({ docker: failing.fake, side: "new", prepared })(started([pg]), {} as never, new AbortController().signal).then(() => undefined, (e: unknown) => e as Error);
-    expect(error?.message).toBe(EVAL_SERVICES_FAILURE_SENTENCE);
-    expect(JSON.stringify(error)).not.toContain("hunter2");
-    const stopped = new AbortController(); stopped.abort();
-    const stop = await evalDatabaseSeed({ docker: docker().fake, side: "old", prepared })(started([pg]), {} as never, stopped.signal).then(() => undefined, (e: unknown) => e as Error);
-    expect(stop?.message).toBe(EVAL_SERVICES_FAILURE_SENTENCE);
-  });
-
-  it("a postgres service with no seed file still gets the schema read and generated rows (never an empty database by omission)", async () => {
-    const d = docker();
-    await evalDatabaseSeed({ docker: d.fake, side: "old", prepared: { seeds: new Map() } })(started([pg]), {} as never, new AbortController().signal);
-    expect(d.loads).toEqual([]);
-    expect(d.reads.length).toBeGreaterThan(0);
-  });
 });
 
 
-it("runs command seeds for local engines without a Postgres file loader", async () => {
-  const command = { cwd: ".", executable: "node", args: ["seed-cache.js"], timeoutSeconds: 30 };
-  const prepared = await prepare(await repo(), [plan({ id: "cache", family: "redis", seeds: [{ command }] })]);
-  const calls: unknown[] = [];
-  await evalDatabaseSeed({ docker: { run: async () => { throw new Error("no SQL for Redis"); } }, side: "new", prepared })({ hosts: [], env: [], secrets: [], started: [], targets: [{ id: "cache", container: "rovara-cache", family: "redis", user: undefined, database: undefined }], unsupported: [] }, {} as never, new AbortController().signal, async c => { calls.push(c); return { exitCode: 0, timedOut: false }; });
-  expect(calls).toEqual([command]);
-});

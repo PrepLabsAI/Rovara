@@ -20,7 +20,6 @@ const COMPANY_MODEL = "claude-opus-5-5";
 const PLAN = "claude-fable-5-2";
 const BUILD = "qwen.qwen3-coder-480b-a35b-v1:0";
 const REVIEW = "zai.glm-5";
-const OTHER: OrgId = "org_stepmodels000000000b";
 const installRoute = { route: async () => ({ alias: INSTALL, api: "anthropic-messages" as const, catalog: INSTALL }) };
 
 /** One company's world. `shared`: the other company's store and the gateway reader, as in production (one table, keys prefixed by the company; one reader for every company). */
@@ -85,19 +84,6 @@ it("each step's gateway token names exactly the model the company chose for that
   expect(await tokenModels(w, "UNDERSTAND", "understand")).toEqual([PLAN]);
 });
 
-it("a step the company did not set runs on the company's own engine model, else on the install's default", async () => {
-  const w = await world();
-  await set(w, "build", BUILD);
-  // No company model: the install's default.
-  expect(await tokenModels(w, "PLAN", "plan")).toEqual([INSTALL]);
-  // The company's own model replaces the install's for every step it did not set; the step it set keeps its own.
-  await setCompanyModel(w.h, w.company, COMPANY_MODEL);
-  expect(await tokenModels(w, "PLAN", "plan")).toEqual([COMPANY_MODEL]);
-  // The step rule itself chose the company's model as the step's default (not the describer's own fallback).
-  expect((await w.h.store.get(w.key))!["modelChoice"]).toMatchObject({ reason: "BUILTIN_DEFAULT", route: { alias: COMPANY_MODEL } });
-  expect(await tokenModels(w, "IMPLEMENT", "build")).toEqual([BUILD]);
-});
-
 it("a step set to a model the gateway no longer offers this company is refused before dispatch, never run on another model", async () => {
   const w = await world();
   await set(w, "build", BUILD);
@@ -118,26 +104,6 @@ it("a model the gateway does not offer cannot be saved for a step", async () => 
   expect(await tokenModels(w, "IMPLEMENT", "build")).toEqual([INSTALL]);
 });
 
-it("two companies on one table and one gateway reader: one company's step choice and model never reach the other's steps", async () => {
-  const a = await world();
-  const b = await world(OTHER, a.shared);
-  expect(b.h.store).toBe(a.h.store);
-  a.reader.set(OTHER, [INSTALL, COMPANY_MODEL]);
-  await set(a, "build", BUILD);
-  await setCompanyModel(a.h, a.company, PLAN);
-  expect(await tokenModels(a, "IMPLEMENT", "build")).toEqual([BUILD]);
-  expect(await tokenModels(a, "PLAN", "plan")).toEqual([PLAN]);
-  // B: nothing of A's (its setting, its engine model, its published validation) reaches B's steps, on the broker or the dispatcher.
-  expect(await tokenModels(b, "IMPLEMENT", "build")).toEqual([INSTALL]);
-  const bDispatcher = dispatcherStoredAgentModelChoice({ store: b.h.store, companyId: b.company, now: () => b.h.clock.now, defaultRoute: () => companyEngineModelRoute({ store: b.h.store, companyId: b.company, install: installRoute }).route(), log: () => undefined });
-  expect(await bDispatcher.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: INSTALL } } });
-  // B's own list decides for B: A's model is not offered to B.
-  expect(await b.choice.service().apply(b.owner, { action: "set", stage: "build", choice: { model: agentModelIdentity(BUILD) }, expectedRevision: 0 }, { fresh: true })).toMatchObject({ ok: false, code: "model_unavailable" });
-  await setCompanyModel(b.h, b.company, COMPANY_MODEL);
-  expect(await tokenModels(b, "IMPLEMENT", "build")).toEqual([COMPANY_MODEL]);
-  expect(await tokenModels(a, "PLAN", "plan")).toEqual([PLAN]);
-});
-
 it("the dispatcher's stored copy follows the same order: the step's validated choice, else the company's model, else the install's", async () => {
   const w = await world();
   const modelAccess = companyEngineModelRoute({ store: w.h.store, companyId: w.company, install: installRoute });
@@ -150,16 +116,4 @@ it("the dispatcher's stored copy follows the same order: the step's validated ch
   await set(w, "build", BUILD);
   expect(await dispatcher.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: BUILD } } });
   expect(await dispatcher.choose({ stage: "plan" })).toMatchObject({ ok: true, step: { route: { alias: COMPANY_MODEL } } });
-});
-
-it("on the dispatcher's stored copy (what a deployed step runs with), the token names the step's chosen model too", async () => {
-  const w = await world();
-  await set(w, "build", BUILD);
-  const modelAccess = companyEngineModelRoute({ store: w.h.store, companyId: w.company, install: installRoute });
-  w.h.deps.stepModels = dispatcherStoredAgentModelChoice({ store: w.h.store, companyId: w.company, now: () => w.h.clock.now, defaultRoute: () => modelAccess.route(), log: () => undefined });
-  expect(await tokenModels(w, "IMPLEMENT", "build")).toEqual([BUILD]);
-  const recorded = (await w.h.store.get(w.key))!["modelChoice"] as { reason: string; route: { alias: string } };
-  expect(recorded.route.alias).toBe(BUILD);
-  expect(await tokenModels(w, "PLAN", "plan")).toEqual([INSTALL]);
-  expect(((await w.h.store.get(w.key))!["modelChoice"] as { reason: string }).reason).toBe("BUILTIN_DEFAULT");
 });

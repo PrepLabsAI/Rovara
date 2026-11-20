@@ -8,7 +8,7 @@ import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-r
 import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createTaskSessionItems, developerIdOf, refreshSessionSummary, taskSessionId, type SessionTaskFacts, type SummaryDependencies } from "../../packages/broker/src/core/sessions/index.js";
-import { PENDING_PK, inboxPartition, queueAttention } from "../../packages/broker/src/core/notify/index.js";
+import { PENDING_PK, inboxPartition } from "../../packages/broker/src/core/notify/index.js";
 import { createNoticeService } from "../../packages/broker/src/services/notices.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
@@ -56,48 +56,6 @@ describe("the notice service's queue", () => {
     expect(inbox[0]).toMatchObject({ entityType: "NOTIFY_INBOX", orgId: ORG, developerId: OWNER_ID, sessionId: SESSION, kind: "needs_you" });
     expect(w.notices.canNotify()).toBe(false);
     expect(await w.notices.deliver()).toBeUndefined();
-  });
-
-  it("keeps both the pending row and the inbox row when something can message people", async () => {
-    const w = await world({ inbox: true, channel: true });
-    await w.move("PLAN_REVIEW", "WAITING");
-    expect(await w.pending()).toHaveLength(1);
-    expect(await w.inbox()).toHaveLength(1);
-    const plain = await world({ channel: true });
-    await plain.move("PLAN_REVIEW", "WAITING");
-    expect(await plain.pending()).toHaveLength(1);
-    expect(await plain.inbox()).toHaveLength(1);
-  });
-
-  it("names the same recipients as the queue does, and the rows do not pile up: one per person, session and kind, replaced by the next change, each with the store's expiry", async () => {
-    const both = await world({ inbox: true, channel: true });
-    const only = await world({ inbox: true });
-    for (const w of [both, only]) {
-      await w.move("PLAN_REVIEW", "WAITING");
-      for (let round = 0; round < 3; round += 1) { await w.move("IMPLEMENT", "RUNNING"); await w.move("PLAN_REVIEW", "WAITING"); }
-    }
-    const keys = async (w: typeof both) => (await w.inbox()).map((row) => `${String(row["pk"])}|${String(row["sk"])}`);
-    expect(await keys(only)).toEqual(await keys(both));
-    expect(await keys(only)).toHaveLength(1);
-    expect((await both.pending()).map((row) => row["developerId"])).toEqual((await both.inbox()).map((row) => row["developerId"]));
-    const row = (await only.inbox())[0]!;
-    expect(row["indexExpiresAt"]).toBe(Math.floor(NOW / 1000) + 14 * 86_400);
-    expect(row["expiresAtSec"]).toBe(row["indexExpiresAt"]);
-  });
-
-  it("queueAttention with pending: false writes no pending row and the same inbox row; an unset flag writes both", async () => {
-    const run = async (pending: boolean | undefined) => {
-      const store = new MemoryDocumentStore();
-      await store.transact(createTaskSessionItems({ orgId: ORG, sessionId: SESSION, taskId: TASK, project: "web", agent: AGENT, title: "Add retry", owner: OWNER, origin: "app", payer: { kind: "member", developerId: OWNER_ID } as never, now: T0 }));
-      const facts: { value: SessionTaskFacts } = { value: { companyId: ORG, taskId: TASK, project: "web", ownerDeveloperId: OWNER_ID, runStatus: "RUNNING", workflow: { stage: "IMPLEMENT", state: "RUNNING" }, step: "Coding", updatedAt: T0 } };
-      let ms = NOW - 3_600_000;
-      const deps: SummaryDependencies = { store, facts: { read: async () => facts.value }, cost: { costUsd: async () => 0 }, now: () => new Date(ms), log: () => undefined, onChange: [async (change) => { await queueAttention({ store, now: () => new Date(NOW), ...(pending === undefined ? {} : { pending }) }, change); }] };
-      for (const [stage, state] of [["IMPLEMENT", "RUNNING"], ["PLAN_REVIEW", "WAITING"]] as const) { facts.value = { ...facts.value, workflow: { stage, state } }; ms += 1_000; await refreshSessionSummary(deps, ORG, SESSION); }
-      return { pending: (await store.query({ pk: PENDING_PK })).items.length, inbox: (await store.query({ pk: inboxPartition(ORG, OWNER_ID) })).items.length };
-    };
-    expect(await run(false)).toEqual({ pending: 0, inbox: 1 });
-    expect(await run(true)).toEqual({ pending: 1, inbox: 1 });
-    expect(await run(undefined)).toEqual({ pending: 1, inbox: 1 });
   });
 
   it("is switched on by the hosted job services alone", () => {

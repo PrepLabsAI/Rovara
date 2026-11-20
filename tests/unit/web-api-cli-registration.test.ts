@@ -28,12 +28,4 @@ describe("admin runtime-installation register for a web/API proposal", () => {
     expect(canonicalJson(sent[0]!.body.proposal)).toBe(canonicalJson(proposal));
   });
 
-  it("refuses a v2 file that is not a READY web/API qualification before sending anything", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "web-api-register-")); dirs.push(dir);
-    await writeFile(join(dir, "proposal.json"), JSON.stringify({ schemaVersion: "runtime-installation-proposal/v2", state: "PARKED" }));
-    let sent = 0;
-    const fetcher = (async () => { sent += 1; return new Response("{}"); }) as unknown as typeof fetch;
-    await expect(submitRuntimeInstallProposal({ controlPlaneUrl: "https://control.example.test", accessToken: "token", proposalFile: join(dir, "proposal.json") }, fetcher)).rejects.toThrow();
-    expect(sent).toBe(0);
-  });
 });

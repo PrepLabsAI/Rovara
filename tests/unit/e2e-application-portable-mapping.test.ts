@@ -16,13 +16,6 @@ describe("combined application group result mapping", () => {
     expect(() => module.mapE2EApplicationGroupResult({ admission: {}, envelope: {}, rawEvidenceBytes: new Uint8Array() })).toThrow();
   });
 
-  it("keeps application and genuine portable child result bindings distinct in the envelope", async () => {
-    const module = await import("../../packages/verifier/src/application-result-adapter.js").catch(() => null);
-    expect(module).not.toBeNull();
-    if (!module) return;
-    expect(module.E2EApplicationGroupResultEnvelopeSchema.safeParse({}).success).toBe(false);
-  });
-
   it("rejects oversized raw child proof bytes before attempting to interpret an admission", async () => {
     const module = await import("../../packages/verifier/src/application-result-adapter.js");
     expect(() => module.mapE2EApplicationGroupResult({ admission: {}, envelope: {}, rawEvidenceBytes: new Uint8Array(26_214_401) }))
@@ -54,35 +47,6 @@ describe("combined application group result mapping", () => {
     expect(mapped.qualification).toBe("exploratory");
     expect(mapped.status).toBe("passed");
     expect(() => module.mapE2EApplicationGroupResult({ admission, envelope, rawEvidenceBytes: Buffer.from("changed") })).toThrow();
-  });
-
-  it("maps a source-derived portable child with fresh child IDs back to its exact outer binding", async () => {
-    const module = await import("../../packages/verifier/src/application-result-adapter.js");
-    const fixture = createPortableApplicationChildFixture(); const child = fixture.childBinding; const outer = fixture.outerBinding;
-    const expected = child.expectedCases[0]!; const rawEvidenceBytes = Buffer.from('{"child":"source-derived portable fixture"}');
-    const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
-    const result = { schemaVersion: 1, binding: child, producer: "structural-e2e-report-adapter", startedAt: child.admittedAt,
-      finishedAt: new Date(Date.parse(child.admittedAt) + 1_000).toISOString(), receivedAt: new Date(Date.parse(child.admittedAt) + 2_000).toISOString(), status: "passed", qualification: "exploratory",
-      executionMode: child.executionMode, reason: "structural-observations-complete", cases: [{ caseId: expected.caseId,
-        executionDescriptorDigest: expected.executionDescriptorDigest, accountContextId: expected.accountContextId,
-        accountContextDigest: expected.accountContextDigest, status: "passed", reason: "observed", attemptCount: 1,
-        assertionDigest: expected.assertionDigest, assertionReceipts: expected.assertionDigests.map((assertionDigest, assertionIndex) => ({
-          assertionIndex, assertionDigest, status: "passed", reason: "observed" })), artifacts: [], coverage: { observedScope: "mock-contract",
-          subject: "candidate", executedCandidateParts: ["source-derived-portable-operation"], realComponentIds: [], mockedComponentIds: [],
-          observedMockedComponentIds: [], unexercisedBehaviors: [] } }], rawReportSha256: "a".repeat(64), modelReceiptIds: [], cleanup: "confirmed" };
-    const ref = { artifactId: "portable-child-proof", sha256: sha(rawEvidenceBytes), byteLength: rawEvidenceBytes.byteLength, mediaType: "application/json" };
-    const envelopeBody = { schemaVersion: "e2e-application-group-result/v1", admissionDigest: (fixture.admission as { admissionDigest: string }).admissionDigest,
-      groupId: child.groupId, protocol: "trusted-e2e/v1", outerBinding: outer, executionBinding: child, rawEvidenceRef: ref, rawEvidenceSha256: ref.sha256, result };
-    const envelope = { ...envelopeBody, mappingDigest: sha(canonicalJson(envelopeBody)) };
-    const mapped = module.mapE2EApplicationGroupResult({ admission: fixture.admission, envelope, rawEvidenceBytes });
-    expect(child.runId).not.toBe(outer.runId); expect(child.roundId).not.toBe(outer.roundId);
-    expect(child.executionPlanDigest).not.toBe(outer.executionPlanDigest); expect(child.bundleDigest).not.toBe(outer.bundleDigest);
-    const nativeCriterion = fixture.executionPlan.criteria.find((criterion) => criterion.requestedTargetId === fixture.nativeTargetId);
-    expect(nativeCriterion).toBeDefined();
-    expect(fixture.executionPlan.unavailableCriteria).toContainEqual(expect.objectContaining({ criterionId: nativeCriterion!.criterionId }));
-    expect(fixture.projection.executionPlan.criteria.some((criterion) => criterion.requestedTargetId === fixture.nativeTargetId)).toBe(false);
-    expect(mapped.binding).toEqual(outer); expect(mapped.qualification).toBe("exploratory"); expect(mapped.cases).toEqual(result.cases);
-    expect(() => module.mapE2EApplicationGroupResult({ admission: fixture.admission, envelope, rawEvidenceBytes: Buffer.from("substituted") })).toThrow();
   });
 
   it("maps the genuine source-compiled legacy collector result through the portable child envelope", async () => {

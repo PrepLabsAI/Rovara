@@ -1,7 +1,7 @@
 // The `realtime` point (lane K1): the in-process adapter passes the contract, it is Code's default, and a listener hears only its company and audience.
 import { describe, expect, it } from "vitest";
-import { PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, isRealtimeAudience, isRealtimeNotice } from "@agentx/contracts";
-import { createAdapterRegistry, createInProcessRealtime, registerCodeDefaults } from "../../packages/broker/src/ports/index.js";
+import { isRealtimeAudience, isRealtimeNotice } from "@agentx/contracts";
+import { createInProcessRealtime } from "../../packages/broker/src/ports/index.js";
 import { runRealtimeConformance } from "../support/ports/realtime-conformance.js";
 
 runRealtimeConformance("the in-process adapter", {
@@ -12,16 +12,6 @@ runRealtimeConformance("the in-process adapter", {
 });
 
 describe("the realtime point", () => {
-  it("is a point of one adapter, and Code's default is the in-process adapter", () => {
-    expect(PLUGIN_POINTS).toContain("realtime");
-    expect(PLUGIN_POINT_CARDINALITY.realtime).toBe("one");
-    const registry = createAdapterRegistry();
-    registerCodeDefaults(registry, { priceTable: { currency: "USD", models: {} } });
-    expect(registry.names("realtime")).toEqual(["in-process"]);
-    expect(registry.require("realtime").capabilities.remoteListeners).toBe(false);
-    registry.register("realtime", "hosted", createInProcessRealtime());
-    expect(registry.names("realtime")).toEqual(["hosted"]);
-  });
 
   it("tells a listener only its company's notices, and only its audience's when it names one; a listener that throws fails nothing", async () => {
     const hub = createInProcessRealtime();

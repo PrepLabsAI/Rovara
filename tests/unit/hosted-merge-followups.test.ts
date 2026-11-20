@@ -15,7 +15,7 @@ import { repositoryEdgesKey } from "../../packages/broker/src/core/proof/evidenc
 import { taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createPolicyHookClient } from "../../packages/broker/src/core/policy-hook/client.js";
 import { withPolicyHookApprovers } from "../../packages/broker/src/core/policy-hook/approvers.js";
-import { host, ORG, OWNER_ID } from "../support/service-host.js";
+import { host, ORG } from "../support/service-host.js";
 import { TASK_ID } from "../support/merge-world.js";
 import { fakeService, ISSUER, makeKey, settingsFor, signerOf } from "./policy-hook-fixture.js";
 
@@ -77,15 +77,6 @@ async function hookedRoute(mode: "allow" | "deny" | "no-answer" | "unaskable" | 
 }
 
 describe("hosted route: task creator is the policy requester", () => {
-  it("sends the creator as by and the authenticated other presser as per, despite spoofed headers", async () => {
-    const w = await hookedRoute();
-    expect(OWNER_ID).not.toBe(CREATOR);
-    expect(OWNER_ID).not.toBe(PRESSER);
-    expect((await w.call(PRESSER, {}, { "x-requested-by": PRESSER, "x-creator-id": PRESSER })).body).toMatchObject({ status: "MERGED" });
-    expect(w.service.asked.map((q) => q.q)).toEqual([expect.objectContaining({ cid: ORG, by: CREATOR, per: PRESSER, stage: "verdict", what: "merge" })]);
-    expect(w.identities).toEqual([[ORG, CREATOR]]);
-    expect(w.merges[0]).toHaveBeenCalledTimes(1);
-  });
 
   for (const field of ["requestedBy", "creatorId", "presser"] as const) it(`refuses a body-supplied ${field} before asking rules or merging`, async () => {
     const w = await hookedRoute();

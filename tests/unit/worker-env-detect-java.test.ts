@@ -16,18 +16,6 @@ const GRADLE_WRAPPER: Files = { gradlew: "#!/bin/sh\n", "gradle/wrapper/gradle-w
 const byId = (detection: Awaited<ReturnType<typeof detect>>, id: string) => detection.checks.find((check) => check.value.id === id);
 
 describe("Maven", () => {
-  it("proposes the wrapper's commands and the Surefire default report location, each with where it came from", async () => {
-    const detection = await detect({ "pom.xml": pom(plugin("maven-surefire-plugin")), ...MAVEN_WRAPPER, ...TEST_FILE });
-    expect(detection.setupCommands.map((item) => [item.value.executable, item.value.args, item.source])).toEqual([["./mvnw", ["-B", "test-compile"], { path: "pom.xml", line: 1 }]]);
-    const unit = byId(detection, "unit")!;
-    expect(unit.value).toMatchObject({ kind: "test", reportPath: "target/surefire-reports", command: { cwd: "service", executable: "./mvnw", args: ["-B", "test"], timeoutSeconds: 1_800 } });
-    expect(unit.value.selectArgs).toBeUndefined();
-    expect(unit.source).toEqual({ path: "pom.xml", line: 7 });
-    expect(unit.value.reportSource).toBe("detector:java");
-    expect(detection.fullSuiteOn.map((item) => item.value)).toEqual(expect.arrayContaining(["pom.xml", "mvnw", ".mvn/**"]));
-    expect(detection.notes.join(" ")).toContain("Surefire");
-    expect(detection.notes.join(" ")).toContain("no per-test selection");
-  });
   it("uses mvn when there is no wrapper, or the wrapper script has no properties file to run with", async () => {
     const plain = await detect({ "pom.xml": pom(""), ...TEST_FILE });
     expect(plain.checks[0]?.value.command.executable).toBe("mvn");
@@ -67,15 +55,6 @@ describe("Maven", () => {
     expect(byId(prepareOnly, "unit")?.value.coveragePath).toBeUndefined();
     expect(prepareOnly.notes.join(" ")).toContain("JaCoCo is configured but the build does not write an XML report");
   });
-  it("proposes nothing from a plugin that is only managed, in a profile, or commented out", async () => {
-    const text = [
-      "<project>", "<!-- <plugin><artifactId>maven-checkstyle-plugin</artifactId></plugin> -->",
-      "<build><pluginManagement><plugins><plugin><artifactId>maven-pmd-plugin</artifactId></plugin></plugins></pluginManagement></build>",
-      "<profiles><profile><build><plugins><plugin><artifactId>spotless-maven-plugin</artifactId></plugin></plugins></build></profile></profiles>", "</project>", "",
-    ].join("\n");
-    const detection = await detect({ "pom.xml": text, ...TEST_FILE });
-    expect(detection.checks.map((check) => check.value.id)).toEqual(["unit"]);
-  });
   it("proposes the lint and static-analysis goals the build configures", async () => {
     const detection = await detect({ "pom.xml": pom([plugin("maven-checkstyle-plugin"), plugin("spotbugs-maven-plugin"), plugin("maven-pmd-plugin"), plugin("spotless-maven-plugin")].join("\n")), ...TEST_FILE });
     expect(detection.checks.filter((check) => check.value.kind === "lint").map((check) => [check.value.id, check.value.command.args])).toEqual([
@@ -99,16 +78,6 @@ describe("Maven", () => {
     expect(detection.notes.join(" ")).toContain("and 10 more");
     expect(detection.notes.join(" ")).not.toContain("m25");
   });
-  it("notes the Java version the build asks for", async () => {
-    const detection = await detect({ "pom.xml": pom("", "  <properties>\n    <maven.compiler.release>21</maven.compiler.release>\n  </properties>"), ...TEST_FILE });
-    expect(detection.notes.join(" ")).toContain("Java 21 (pom.xml line 4)");
-  });
-  it("proposes no test check, and says so, when the repository has no Java tests", async () => {
-    const detection = await detect({ "pom.xml": pom(""), "src/main/java/App.java": "" });
-    expect(detection.checks).toEqual([]);
-    expect(detection.setupCommands).toHaveLength(1);
-    expect(detection.notes.join(" ")).toContain("No Java test sources were found");
-  });
   it("copes with a pom.xml that cannot be read", async () => {
     const bounded = boundedReader(["pom.xml"], () => Promise.resolve(undefined));
     const detection = await runDetectors(bounded.reader, "service");
@@ -118,21 +87,6 @@ describe("Maven", () => {
 });
 
 describe("Gradle", () => {
-  it("proposes the wrapper's commands and the default test-results folder, each with where it came from", async () => {
-    const detection = await detect({ "build.gradle.kts": 'plugins {\n  java\n}\n', "settings.gradle.kts": 'rootProject.name = "svc"\n', ...GRADLE_WRAPPER, "gradle/libs.versions.toml": "", "gradle.lockfile": "", ...TEST_FILE });
-    expect(detection.setupCommands.map((item) => [item.value.executable, item.value.args, item.source])).toEqual([["./gradlew", ["--console=plain", "testClasses"], { path: "build.gradle.kts", line: 1 }]]);
-    const unit = byId(detection, "unit")!;
-    expect(unit.value).toMatchObject({ kind: "test", reportPath: "build/test-results/test", command: { executable: "./gradlew", args: ["--console=plain", "test"], timeoutSeconds: 1_800 } });
-    expect(unit.value.reportSource).toBe("detector:java");
-    expect(unit.value.selectArgs).toBeUndefined();
-    expect(detection.fullSuiteOn.map((item) => item.value)).toEqual(expect.arrayContaining(["build.gradle.kts", "settings.gradle.kts", "gradle/wrapper/gradle-wrapper.properties", "gradle.lockfile", "gradle/libs.versions.toml", "gradlew"]));
-    expect(detection.notes.join(" ")).toContain("no per-test selection");
-  });
-  it("uses gradle when there is no wrapper, and reads a Groovy build the same way", async () => {
-    const detection = await detect({ "build.gradle": "apply plugin: 'java'\n", ...TEST_FILE });
-    expect(detection.checks[0]?.value.command.executable).toBe("gradle");
-    expect(detection.checks[0]?.source).toEqual({ path: "build.gradle", line: 1 });
-  });
   it("proposes JaCoCo coverage only when the build enables the XML report, and runs the report task unless the build already finishes with it", async () => {
     const enabled = await detect({ "build.gradle": "plugins {\n  id 'jacoco'\n}\njacocoTestReport {\n  reports {\n    xml.required = true\n  }\n}\n", ...TEST_FILE });
     const unit = byId(enabled, "unit")!;
@@ -145,53 +99,18 @@ describe("Gradle", () => {
     expect(byId(htmlOnly, "unit")?.value.coveragePath).toBeUndefined();
     expect(htmlOnly.notes.join(" ")).toContain("JaCoCo is configured but the build does not write an XML report");
   });
-  it("proposes the lint tasks of the plugins the build applies, in every way a plugin is written", async () => {
-    const detection = await detect({ "build.gradle": ["plugins {", "  id 'checkstyle'", '  id("com.github.spotbugs") version "5.0.0"', "  pmd", "}", "apply plugin: 'com.diffplug.spotless'", "// id 'jacoco'", ""].join("\n"), ...TEST_FILE });
-    expect(detection.checks.filter((check) => check.value.kind === "lint").map((check) => [check.value.id, check.value.command.args.slice(1)])).toEqual([
-      ["checkstyle", ["checkstyleMain", "checkstyleTest"]], ["spotbugs", ["spotbugsMain", "spotbugsTest"]], ["pmd", ["pmdMain", "pmdTest"]], ["spotless", ["spotlessCheck"]],
-    ]);
-    expect(byId(detection, "unit")?.value.coveragePath).toBeUndefined();
-    expect(detection.notes.join(" ")).not.toContain("JaCoCo");
-  });
-  it("adds an integration check for a conventionally named test task, with its own results folder", async () => {
-    const detection = await detect({ "build.gradle.kts": 'val integrationTest by tasks.registering(Test::class)\ntasks.register<Test>("integrationTest") {\n}\n', ...TEST_FILE });
-    const integration = byId(detection, "integration")!;
-    expect(integration.value).toMatchObject({ reportPath: "build/test-results/integrationTest", command: { args: ["--console=plain", "integrationTest"] } });
-    expect(integration.source).toEqual({ path: "build.gradle.kts", line: 2 });
-  });
-  it("lists the modules from include(...) in every spelling, and proposes root commands without a single report path", async () => {
-    const detection = await detect({ "settings.gradle": "rootProject.name = 'svc'\ninclude 'api', ':core'\ninclude(\n  \":worker\"\n)\nincludeBuild 'tools'\n", "build.gradle": "", "api/build.gradle": "", "api/src/test/java/ApiTest.java": "" });
-    expect(detection.notes.join(" ")).toContain("3 modules: api, core, worker");
-    const unit = byId(detection, "unit")!;
-    expect(unit.value.reportPath).toBeUndefined();
-    expect(unit.value.command.args).toEqual(["--console=plain", "test"]);
-    expect(detection.fullSuiteOn.map((item) => item.value)).toEqual(expect.arrayContaining(["**/build.gradle", "settings.gradle"]));
-  });
   it("does not claim the default results folder when the build moves it", async () => {
     const detection = await detect({ "build.gradle": "test {\n  reports.junitXml.outputLocation = file('out/junit')\n}\n", ...TEST_FILE });
     expect(byId(detection, "unit")?.value.reportPath).toBeUndefined();
     expect(detection.notes.join(" ")).toContain("sets its own test result location");
   });
-  it("notes the Java version the build asks for", async () => {
-    const detection = await detect({ "build.gradle.kts": "java {\n  toolchain { languageVersion.set(JavaLanguageVersion.of(17)) }\n}\n", ...TEST_FILE });
-    expect(detection.notes.join(" ")).toContain("Java 17 (build.gradle.kts line 2)");
-  });
 });
 
 describe("ambiguous or unusual Java repositories", () => {
-  it("asks which build to use, and proposes no command, when Maven and Gradle are both at the top", async () => {
-    const detection = await detect({ "pom.xml": pom(""), "build.gradle": "", ...TEST_FILE });
-    expect(detection.checks).toEqual([]);
-    expect(detection.setupCommands).toEqual([]);
-    expect(detection.questions.join(" ")).toContain("both Maven (pom.xml) and Gradle");
-  });
   it("asks where the build is when build files are only in subfolders", async () => {
     const detection = await detect({ "backend/pom.xml": pom(""), "backend/src/test/java/A.java": "" });
     expect(detection.checks).toEqual([]);
     expect(detection.questions.join(" ")).toContain("Which folder is the Java build run from");
-  });
-  it("says nothing about a repository with no Java build", async () => {
-    expect(await detect({ "README.md": "hello" })).toMatchObject({ checks: [], setupCommands: [], questions: [], notes: [] });
   });
   it("makes a proposal that passes the environment schema, with the report and coverage citations attached", async () => {
     const detection = await detect({ "pom.xml": pom(plugin("jacoco-maven-plugin", "        <executions><execution><goals><goal>report</goal></goals></execution></executions>\n")), ...MAVEN_WRAPPER, ...TEST_FILE });

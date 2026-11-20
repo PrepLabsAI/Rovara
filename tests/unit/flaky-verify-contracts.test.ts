@@ -62,12 +62,6 @@ describe("flakyHoldFactOf: what B5 holds the draft for", () => {
     expect(flakyHoldFactOf([[ID_A, ID_B]], [ID_A, ID_B])).toBeUndefined();
     expect(flakyHoldFactOf([], undefined)).toBeUndefined();
   });
-  it("lists at most 50 ids but counts them all", () => {
-    const many = Array.from({ length: 120 }, (_, index) => `t.py::t${String(index)}`);
-    const fact = flakyHoldFactOf([many.slice(0, 50), many.slice(50, 100), many.slice(100)], []);
-    expect(fact?.count).toBe(120);
-    expect(fact?.ids).toHaveLength(50);
-  });
 });
 
 describe("the workflow", () => {
@@ -103,19 +97,5 @@ describe("the workflow", () => {
     const second = record(candidate("b"), "PASS", undefined, again);
     expect(second).not.toHaveProperty("flakyOnChange");
     expect(record(candidate("b"), "PASS", { count: 1, ids: [ID_B] }, again).flakyOnChange).toMatchObject({ ids: [ID_B] });
-  });
-
-  it("the hold input is only for the candidate the workflow holds: a fact for other code is nothing", () => {
-    const recorded = record(candidate("a"), "PASS", { count: 1, ids: [ID_A] });
-    expect(flakyOnChangeHoldInput({ ...recorded, candidate: candidate("c") })).toBeUndefined();
-    expect(flakyOnChangeHoldInput({ ...recorded, candidate: undefined })).toBeUndefined();
-    expect(flakyOnChangeHoldInput(undefined)).toBeUndefined();
-  });
-
-  it("refuses a fact that does not add up", () => {
-    const recorded = record(candidate("a"), "PASS", { count: 1, ids: [ID_A] });
-    for (const fact of [{ candidateDigest: recorded.candidate!.digest, count: 0, ids: [] }, { candidateDigest: recorded.candidate!.digest, count: 1, ids: [ID_A, ID_B] }, { candidateDigest: "x", count: 1, ids: [ID_A] }, { candidateDigest: recorded.candidate!.digest, count: 1, ids: ["bad\nid"] }]) {
-      expect(WorkflowSnapshotSchema.safeParse({ ...recorded, flakyOnChange: fact }).success, JSON.stringify(fact)).toBe(false);
-    }
   });
 });

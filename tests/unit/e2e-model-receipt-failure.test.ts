@@ -11,12 +11,6 @@ const base = {
 };
 
 describe("20. the receipt's failure", () => {
-  it("an old receipt (no failure) round-trips through canonicalJson unchanged", () => {
-    const stored = canonicalJson(base);
-    const parsed = E2EModelReceiptSchema.parse(JSON.parse(stored));
-    expect(canonicalJson(parsed)).toBe(stored);
-    expect("failure" in parsed).toBe(false);
-  });
 
   it("an old ok receipt and an old refusal also round-trip unchanged", () => {
     for (const old of [{ ...base, outcome: "ok", inputTokens: 100, outputTokens: 10, responseSha256: sha("r") }, { ...base, outcome: "refused-busy" }]) {

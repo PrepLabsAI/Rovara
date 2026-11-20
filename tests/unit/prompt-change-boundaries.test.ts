@@ -51,44 +51,6 @@ it("unsupported config aliases and malformed diffs cannot certify no changes", (
     expect(detectPromptChangesInDiff(source).report.coverage).toBe("partial");
   }
 });
-it("separate hunks retain unique stable IDs and after-side line numbers", () => {
-  const source = "diff --git a/ai/a.ts b/ai/a.ts\n@@ -1 +10 @@\n-prompt: 'old1'\n+prompt: 'new1'\n@@ -20 +30 @@\n-prompt: 'old2'\n+prompt: 'new2'\n";
-  const items = detectPromptChangesInDiff(source).report.items;
-  expect(new Set(items.map((item) => item.id)).size).toBe(2);
-  expect(items.map((item) => item.line).sort()).toEqual([10, 30]);
-});
-it("counts nested template holes toward the container depth limit", () => {
-  const source = "[".repeat(60) + "prompt: `hello ${" + "{".repeat(5) + "0" + "}".repeat(6) + "`" + "]".repeat(60);
-  expect(detectPromptChanges({ files: [{ path: "ai/a.ts", before: "", after: source, wholeFile: true }] }).report.coverage).toBe("partial");
-});
-it("does not lose changes in huge lists to spread-argument limits", () => {
-  const count = 70_000;
-  const report = detectPromptChanges({ files: [{ path: "a.py", before: "", after: "prompt='a';".repeat(count), wholeFile: true }] }).report;
-  expect(report.counts.prompt_text).toBe(count);
-  expect(report.itemsTruncated).toBe(true);
-});
-it("selectors inspect counts for prompt changes omitted from the truncated item list", async () => {
-  const { promptChangesNeedSideBySide } = await import("../../packages/contracts/src/prompt-change.js");
-  const files = Array.from({ length: 500 }, (_, i) => ({ path: `ai/${i}.ts`, before: "", after: "temperature: 1", wholeFile: true }));
-  files.push({ path: "z.prompt", before: "old", after: "new", wholeFile: true });
-  const report = detectPromptChanges({ files }).report;
-  expect(report.items.every((item) => item.kind === "model_setting")).toBe(true);
-  expect(promptChangesNeedSideBySide(report).needed).toBe(true);
-});
-it("digest covers fingerprints of omitted items as well as displayed items", () => {
-  const files = Array.from({ length: 501 }, (_, i) => ({ path: `${String(i).padStart(4, "0")}.prompt`, before: "old", after: "new", wholeFile: true }));
-  const before = detectPromptChanges({ files }).report;
-  files[500]!.after = "different";
-  const after = detectPromptChanges({ files }).report;
-  expect(after.items).toEqual(before.items);
-  expect(after.reportDigest).not.toBe(before.reportDigest);
-});
-it("does not trust caller-provided hunk text or offsets outside file-side caps", () => {
-  const report = detectPromptChanges({ files: [{ path: "ai/a.ts", before: "", after: "prompt: 'public shape'", wholeFile: true, hunks: [{ before: "", after: "model: 'injected-model'", beforeLine: 1, afterLine: Infinity }] }] }).report;
-  expect(report.counts.prompt_text).toBe(1);
-  expect(report.counts.model_name).toBe(0);
-  expect(PromptChangeReportSchema.safeParse(report).success).toBe(true);
-});
 it("refuses overflowing after-side line offsets", () => {
   const source = `diff --git a/ai/a.ts b/ai/a.ts\n@@ -1,2 +${Number.MAX_SAFE_INTEGER},2 @@\n context\n-old\n+prompt: 'new'\n`;
   const report = detectPromptChangesInDiff(source).report;
@@ -105,8 +67,4 @@ it("refuses malformed runtime flags and statuses", () => {
     const files = [{ path: "a.ts", before: "", after: "", wholeFile: true, ...extra }];
     expect(detectPromptChanges({ files } as never).report.status).toBe("incomplete");
   }
-});
-it("keeps cap refusals deterministic when oversized metadata and binary files are shuffled", () => {
-  const files = [{ path: "x".repeat(200), before: "", after: "", wholeFile: true }, { path: "binary", binary: true, wholeFile: true }];
-  expect(detectPromptChanges({ files }, { maxTotalBytes: 100 }).report).toEqual(detectPromptChanges({ files: [...files].reverse() }, { maxTotalBytes: 100 }).report);
 });

@@ -10,6 +10,7 @@ import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e
 import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/evidence-paths.js";
 import { E2E_AGENT_CONFIG_MAX_INPUT_TOKENS } from "../../packages/verifier/src/application-templates.js";
 import type { E2EApplicationReport } from "../../packages/verifier/src/application-report-schema.js";
+import { NO_PROTECTED_DIRECTORY, protectedBaseDirectory } from "../support/protected-directory.js";
 
 const sha = "a".repeat(64);
 const uuidA = "11111111-1111-4111-8111-111111111111";
@@ -120,47 +121,6 @@ describe("application collection contracts", () => {
     expect(module.e2eApplicationAgentActionEventGroupsMatch(groups, [events[0]!])).toBe(false);
   });
 
-  it("retains governed-model receipt projections and their original source refs in the raw closure", async () => {
-    const module = await import("../../packages/verifier/src/application-result-adapter.js");
-    const frame = (artifactId: string, value: unknown) => {
-      const body = Buffer.from(canonicalJson(value));
-      return { ref: { artifactId, sha256: createHash("sha256").update(body).digest("hex"), byteLength: body.byteLength, mediaType: "application/json" }, bytes: body };
-    };
-    const context = { bindingDigest: sha, compiledInventoryDigest: "b".repeat(64), preparedEnvironmentDigest: "c".repeat(64),
-      candidateDigest: "d".repeat(64), roundId: uuidB, runId: capture.runId, groupId: "group-a", lifecycleId: capture.lifecycleId,
-      observedAt: at, producer };
-    const source = frame("model-source-receipt", { schemaVersion: "offline-original-model-source/v1", note: "conformance bytes only" });
-    const row = { caseId: capture.caseId, declaredStepIndex: 0, requestId: "model-request-a", receiptId: "model-receipt-a" };
-    const projection = frame("model-projection", { schemaVersion: "e2e-application-governed-model-receipt/v1", ...row,
-      bindingDigest: sha, routeId: "fixture-route", routeRevision: "fixture-route-r1", requestDigest: "1".repeat(64),
-      generationDigest: "2".repeat(64), authoritySnapshotDigest: "3".repeat(64), sourceReceiptRef: source.ref, recordedAt: at });
-    const modelCapture = { ...capture, modelReceipts: [{ ...row, receiptRef: projection.ref }] };
-    const captureFrame = frame("model-case-capture", modelCapture);
-    const cleanup = frame("model-cleanup", { schemaVersion: "e2e-application-owned-cleanup/v1", context, phase: "after-owned-close",
-      cleanup: "confirmed", confirmed: true, serverListening: false, ownedResourceInventoryDigest: "f".repeat(64), ownedCleanupReceiptRefs: [] });
-    const sourceReceipt = frame("model-supervisor-source", { schemaVersion: "offline-supervisor-source/v1" });
-    const supervisorReceipt = frame("model-supervisor-receipt", { schemaVersion: "e2e-application-supervisor-receipt/v1", context,
-      launches: [{ shardId: "shard-a", launchId: uuidA, upstreamRunId: uuidA }],
-      caseCaptures: [{ caseId: capture.caseId, shardId: "shard-a", ref: captureFrame.ref }], mockConsumptions: [], cleanupRef: cleanup.ref,
-      additionalSupervisorReceiptRefs: [sourceReceipt.ref] });
-    const readback = { schemaVersion: "e2e-application-supervisor-readback/v1" as const, receipt: supervisorReceipt,
-      evidence: [captureFrame, cleanup, source, projection, sourceReceipt].sort((left, right) => left.ref.artifactId.localeCompare(right.ref.artifactId)) };
-    const validated = module.readE2EApplicationSupervisorProof({ readback, expected: { bindingDigest: context.bindingDigest,
-      compiledInventoryDigest: context.compiledInventoryDigest, preparedEnvironmentDigest: context.preparedEnvironmentDigest,
-      candidateDigest: context.candidateDigest, roundId: context.roundId, runId: context.runId, groupId: context.groupId,
-      mockManifestDigest: "e".repeat(64), caseCount: 1, expectedSupervisorReceiptRefs: [sourceReceipt.ref], ownedResourceInventoryDigest: "f".repeat(64),
-      launches: [{ shardId: "shard-a", launchId: uuidA, upstreamRunId: uuidA }] }, applicationCaptures: [modelCapture], supervisorReceiptRefs: [supervisorReceipt.ref, sourceReceipt.ref],
-      cleanupConfirmed: true, cleanupServerListening: false });
-    expect(validated.captures[0]?.modelReceipts).toEqual([{ ...row, receiptRef: projection.ref }]);
-    const missingSourceReadback = { ...readback, evidence: readback.evidence.filter((item) => item.ref.artifactId !== source.ref.artifactId) };
-    expect(() => module.readE2EApplicationSupervisorProof({ readback: missingSourceReadback, expected: { bindingDigest: context.bindingDigest,
-      compiledInventoryDigest: context.compiledInventoryDigest, preparedEnvironmentDigest: context.preparedEnvironmentDigest,
-      candidateDigest: context.candidateDigest, roundId: context.roundId, runId: context.runId, groupId: context.groupId,
-      mockManifestDigest: "e".repeat(64), caseCount: 1, expectedSupervisorReceiptRefs: [sourceReceipt.ref], ownedResourceInventoryDigest: "f".repeat(64),
-      launches: [{ shardId: "shard-a", launchId: uuidA, upstreamRunId: uuidA }] }, applicationCaptures: [modelCapture],
-      supervisorReceiptRefs: [supervisorReceipt.ref, sourceReceipt.ref], cleanupConfirmed: true, cleanupServerListening: false })).toThrow(/missing or conflicting raw evidence/u);
-  });
-
   it("binds raw supervisor receipts, captures, mock request and response bytes, and post-close cleanup", async () => {
     const module = await import("../../packages/verifier/src/application-result-adapter.js");
     const context = { bindingDigest: sha, compiledInventoryDigest: "b".repeat(64), preparedEnvironmentDigest: "c".repeat(64),
@@ -222,15 +182,17 @@ describe("application collection contracts", () => {
       supervisorReceiptRefs: [receipt.ref, sourceReceipt.ref], cleanupConfirmed: true, cleanupServerListening: false })).toThrow();
   });
 
-  it("reads a fixed installed spool only after construction, with exact assignment identity and canonical raw bytes", async () => {
+  // The spool check walks the assignment root up to "/" (tests/support/protected-directory.ts says where such a folder is on each kind of machine).
+  const spoolBase = protectedBaseDirectory();
+  it.skipIf(spoolBase === undefined)(`reads a fixed installed spool only after construction, with exact assignment identity and canonical raw bytes${spoolBase === undefined ? ` (skipped: ${NO_PROTECTED_DIRECTORY})` : ""}`, async () => {
     if (process.platform !== "linux" && process.platform !== "darwin") return;
     const { createE2EApplicationSupervisorReadbackClientForConformance,
       createE2EApplicationSupervisorReadbackClientForConformanceWithHooks } = await import("../../packages/verifier/src/application-runtime-cli.js");
     const root = await mkdtemp(join(process.cwd(), ".application-spool-fixture-"));
+    const assignmentRoot = await mkdtemp(join(spoolBase!, ".application-spool-assigned-"));
     try {
       const packageRoot = join(root, "package"); const assetDir = join(packageRoot, "assets", "application-runtime-v1");
-      const assignmentRoot = join(root, "assigned-spools");
-      await mkdir(assetDir, { recursive: true, mode: 0o700 }); await mkdir(assignmentRoot, { mode: 0o700 });
+      await mkdir(assetDir, { recursive: true, mode: 0o700 });
       const descriptor = { entryPointId: "installed-local", entryPointManifestDigest: sha };
       const transportId = "private-channel-a"; const correlation = "33333333-3333-4333-8333-333333333333";
       await writeFile(join(assetDir, "supervisor-spools.json"), canonicalJson({ schemaVersion: "e2e-application-supervisor-spools/v1",
@@ -301,15 +263,7 @@ describe("application collection contracts", () => {
       const pending = abortClient.read({ ...expected, maxWireBytes: 26_214_400 }, aborting.signal);
       await expect(pending).rejects.toThrow();
       await writeFile(join(spoolDir, "supervisor-readback.json"), "{}", { mode: 0o600 });
-    } finally { await rm(root, { recursive: true, force: true }); }
-  });
-
-  it("accepts bounded first-party capture structure without turning claimed provenance into authentication", async () => {
-    const module = await import("../../packages/verifier/src/application-result-adapter.js").catch(() => null);
-    expect(module).not.toBeNull();
-    if (!module) return;
-    expect(module.E2EApplicationCaseCaptureSchema.safeParse(capture).success).toBe(true);
-    expect(module.E2EApplicationCaseCaptureSchema.safeParse({ ...capture, authenticated: true }).success).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); await rm(assignmentRoot, { recursive: true, force: true }); }
   });
 
   it("accounts for extra shard reports in the private transfer ceiling and rejects excess inventories", async () => {

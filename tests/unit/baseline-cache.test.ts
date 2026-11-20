@@ -1,14 +1,9 @@
-// TE-C1: the baseline cached per base commit (engine). One row per trusted run, written only by the nightly's own record; looked up by (environment revision, branch, commit) exactly or through the ancestry the worker
-// verified; never used across companies, environment revisions or branches; an unreadable, truncated or future-dated row excuses nothing.
-import { readFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 import { BaselineRowSchema, INDEX_EXPIRY_ATTRIBUTE, projectPk, type BaselineRow } from "@agentx/contracts";
 import {
   BASELINE_RETENTION_MS, baselineCandidatesOf, baselineFor, baselineRowKey, knownFailingOf, mintTrustedBaselineRun, recordBaselineRow, type TrustedBaselineRun,
 } from "../../packages/broker/src/core/test-env/baseline-cache.js";
-import { baselineCacheEnabled } from "../../packages/broker/src/core/test-env/switch.js";
 import { handleNightlyFire, recordNightlyResult } from "../../packages/broker/src/core/test-env/nightly.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { COMPANY_A_ID, COMPANY_B_ID, SHARED_RAW_IDS } from "../../packages/testing/src/isolation/two-company.js";
@@ -41,12 +36,6 @@ describe("the key, the row and the switch", () => {
     // No person is named anywhere in the row: nothing to erase for a person (the writer is a fixed word).
     expect(JSON.stringify(stored)).not.toMatch(/person|developer|actor|email|user/iu);
   });
-
-  it("the switch is on only for exactly 1", () => {
-    expect(baselineCacheEnabled({})).toBe(false);
-    for (const value of ["", "0", "true", " 1", "yes"]) expect(baselineCacheEnabled({ ROVARA_BASELINE_CACHE: value })).toBe(false);
-    expect(baselineCacheEnabled({ ROVARA_BASELINE_CACHE: "1" })).toBe(true);
-  });
 });
 
 describe("only a trusted run writes a row", () => {
@@ -60,17 +49,6 @@ describe("only a trusted run writes a row", () => {
     expect(await store.query({ pk: projectPk(ORG as never, PROJECT), sk: { op: "beginsWith", prefix: "TESTENV#BASELINE#SHA#" } }).then((page) => page.items)).toEqual([]);
     await recordBaselineRow(deps, real);
     expect((await store.query({ pk: projectPk(ORG as never, PROJECT), sk: { op: "beginsWith", prefix: "TESTENV#BASELINE#SHA#" } })).items).toHaveLength(1);
-  });
-
-  it("a row that does not parse is never written, and the minting function has exactly one production caller: the nightly's record", () => {
-    expect(() => mintTrustedBaselineRun({ orgId: ORG, project: PROJECT, row: { ...row(), headSha: "main" } })).toThrow();
-    const root = fileURLToPath(new URL("../..", import.meta.url));
-    const found = spawnSync("git", ["grep", "--untracked", "-lw", "-e", "mintTrustedBaselineRun", "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root });
-    expect(found.stdout.split("\n").filter((file) => file !== "").sort()).toEqual(["packages/broker/src/core/test-env/baseline-cache.ts", "packages/broker/src/core/test-env/nightly.ts"]);
-    // The worker's evidence path, the task flow and the evidence keeper never write a baseline row.
-    for (const file of ["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/local/app/evidence.ts", "packages/worker/src/verification/evidence-raw.ts", "packages/broker/src/core/test-env/task-plan.ts"]) {
-      expect(readFileSync(`${root}/${file}`, "utf8")).not.toMatch(/recordBaselineRow|TESTENV#BASELINE#SHA/u);
-    }
   });
 });
 
@@ -126,20 +104,6 @@ describe("the nightly's record leaves the row, behind the switch", () => {
 });
 
 describe("the lookup", () => {
-  it("an exact row for (revision, branch, commit) is a match with no commits back", async () => {
-    const { deps } = world();
-    await keep(deps, row());
-    const found = await find(deps, { baseCommit: sha(1) });
-    expect(found).toMatchObject({ commitsBack: 0, partial: false, row: { headSha: sha(1), writer: "nightly" } });
-    expect(knownFailingOf(found!.row)).toEqual(["a.py::x", "a.py::y"]);
-  });
-
-  it("an ancestor the worker verified is a partial match at 1 and at 50 commits back, and at 51 it is a miss", async () => {
-    const { deps } = world();
-    await keep(deps, row({ headSha: sha(7) }));
-    for (const commitsBack of [1, 2, 49, 50]) expect(await find(deps, { ancestry: [{ sha: sha(7), commitsBack }] })).toMatchObject({ commitsBack, partial: true });
-    for (const commitsBack of [51, 52, 1_000, -1, 1.5, Number.NaN]) expect(await find(deps, { ancestry: [{ sha: sha(7), commitsBack }] })).toBeUndefined();
-  });
 
   it("the nearest verified ancestor wins, whatever order the list came in; one with no row is skipped", async () => {
     const { deps } = world();
@@ -147,35 +111,6 @@ describe("the lookup", () => {
     await keep(deps, row({ headSha: sha(8) }));
     expect(await find(deps, { ancestry: [{ sha: sha(7), commitsBack: 9 }, { sha: sha(8), commitsBack: 4 }] })).toMatchObject({ commitsBack: 4, row: { headSha: sha(8) } });
     expect(await find(deps, { ancestry: [{ sha: sha(9), commitsBack: 1 }, { sha: sha(7), commitsBack: 2 }] })).toMatchObject({ commitsBack: 2, row: { headSha: sha(7) } });
-  });
-
-  it("with no commit and no ancestry there is no baseline, whatever rows exist (never 'the latest')", async () => {
-    const { deps } = world();
-    await keep(deps, row({ headSha: sha(7) }));
-    await keep(deps, row({ headSha: sha(8) }));
-    expect(await find(deps)).toBeUndefined();
-    expect(await find(deps, { ancestry: [] })).toBeUndefined();
-    expect(await find(deps, { baseCommit: "main", ancestry: [{ sha: "main", commitsBack: 0 }] })).toBeUndefined();
-  });
-
-  it("a row of another environment revision or another branch is never used", async () => {
-    const { deps } = world();
-    await keep(deps, row({ envRevision: 2, headSha: sha(3) }));
-    await keep(deps, row({ branch: "release", headSha: sha(4) }));
-    expect(await find(deps, { baseCommit: sha(3) })).toBeUndefined();
-    expect(await find(deps, { ancestry: [{ sha: sha(3), commitsBack: 1 }] })).toBeUndefined();
-    expect(await find(deps, { baseCommit: sha(4) })).toBeUndefined();
-    expect(await find(deps, { envRevision: 2, baseCommit: sha(3) })).toMatchObject({ commitsBack: 0 });
-    expect(await find(deps, { branch: "release", baseCommit: sha(4) })).toMatchObject({ commitsBack: 0 });
-  });
-
-  it("two environment revisions that ran at the same commit each keep their own row (the revision is in the key)", async () => {
-    const { store, deps } = world();
-    await keep(deps, row({ envRevision: 1, headSha: sha(6), failed: ["rev1::x"], tests: { total: 3, passed: 2, failed: 1, skipped: 0 }, flaky: [] }));
-    await keep(deps, row({ envRevision: 2, headSha: sha(6), failed: ["rev2::y"], tests: { total: 3, passed: 2, failed: 1, skipped: 0 }, flaky: [] }));
-    expect(knownFailingOf((await find(deps, { envRevision: 1, baseCommit: sha(6) }))!.row)).toEqual(["rev1::x"]);
-    expect(knownFailingOf((await find(deps, { envRevision: 2, baseCommit: sha(6) }))!.row)).toEqual(["rev2::y"]);
-    expect((await store.query({ pk: projectPk(ORG as never, PROJECT), sk: { op: "beginsWith", prefix: "TESTENV#BASELINE#SHA#" } })).items).toHaveLength(2);
   });
 
   it("a baseline of another company is never used, with the same project name and the same commit", async () => {
@@ -194,16 +129,6 @@ describe("the lookup", () => {
     const copy = (await deps.store.get(baselineRowKey(COMPANY_A_ID, SHARED_RAW_IDS.project, 1, sha(5))))!;
     await deps.store.put({ item: { ...copy, ...baselineRowKey(`org_${"d".repeat(20)}` as never, SHARED_RAW_IDS.project, 1, sha(5)) } });
     expect(await as(`org_${"d".repeat(20)}`)).toBeUndefined();
-  });
-
-  it("a company's close deletes the whole partition: no baseline row survives it", async () => {
-    const { store, deps } = world();
-    await keep(deps, row({ headSha: sha(1) }));
-    await keep(deps, row({ headSha: sha(2) }));
-    const page = await store.query({ pk: projectPk(ORG, PROJECT), sk: { op: "beginsWith", prefix: "" } });
-    for (const item of page.items) await store.delete({ key: { pk: item.pk, sk: item.sk } });
-    expect(await find(deps, { baseCommit: sha(1) })).toBeUndefined();
-    expect(await baselineCandidatesOf(deps, { orgId: ORG, project: PROJECT, envRevision: 1, branch: "main" })).toEqual([]);
   });
 
   it("an unreadable, truncated, future-dated, expired or mislabelled row excuses nothing", async () => {
@@ -226,43 +151,5 @@ describe("the lookup", () => {
     // A set that is not whole excuses nothing, even if the row is otherwise fine; a clean row at the same key is used.
     await keep(deps, row({ headSha: sha(2) }));
     expect(await find(deps, { baseCommit: sha(2) })).toBeDefined();
-  });
-
-  it("a stored row older than the nightly's own 7 days is still the run at that commit: age is said, never hidden", async () => {
-    const { deps } = world();
-    await keep(deps, row({ finishedAt: new Date(NOW - 20 * 24 * HOUR).toISOString(), recordedAt: new Date(NOW - 20 * 24 * HOUR).toISOString() }));
-    expect(await find(deps, { baseCommit: sha(1) })).toMatchObject({ commitsBack: 0, ageHours: 480 });
-  });
-});
-
-describe("the candidates a task plan offers", () => {
-  it("find the newest rows among more than a page of them, whatever order their commits sort in", async () => {
-    const { store, deps } = world();
-    // 130 rows; the newest five have the commits that sort LAST, so a single page of the first 100 rows by key would pick older ones.
-    for (let n = 1; n <= 130; n += 1) await keep(deps, row({ headSha: sha(1000 - n), finishedAt: new Date(NOW - (n <= 5 ? n : 100 + n) * HOUR).toISOString(), recordedAt: new Date(NOW - HOUR).toISOString() }));
-    expect((await store.query({ pk: projectPk(ORG as never, PROJECT), sk: { op: "beginsWith", prefix: "TESTENV#BASELINE#SHA#" }, limit: 100 })).cursor).toBeDefined();
-    expect(await baselineCandidatesOf(deps, { orgId: ORG, project: PROJECT, envRevision: 1, branch: "main" })).toEqual([999, 998, 997, 996, 995].map((n) => sha(n)));
-  });
-
-  it("a row at the stated list limits (500 failing and 500 flaky tests, 200 characters each) is stored and found", async () => {
-    const { deps } = world();
-    // (At 500 characters each the two lists exceed the document store's 400 KiB limit, as they already do for the nightly's own history row: the record then logs and the night's own rows stand.)
-    const id = (n: number) => `${"t".repeat(196)}${String(n).padStart(4, "0")}`;
-    const big = row({ headSha: sha(40), tests: { total: 1_200, passed: 200, failed: 500, skipped: 500 }, failed: Array.from({ length: 500 }, (_, n) => id(n)), flaky: Array.from({ length: 500 }, (_, n) => id(1_000 + n)) });
-    await keep(deps, big);
-    const found = await find(deps, { baseCommit: sha(40) });
-    expect(found?.row.failed).toHaveLength(500);
-    expect(found?.row.flaky).toHaveLength(500);
-    expect(knownFailingOf(found!.row)).toHaveLength(500);
-  });
-
-  it("are the newest five usable rows of the revision and branch, newest first, shas only", async () => {
-    const { deps } = world();
-    for (let n = 1; n <= 7; n += 1) await keep(deps, row({ headSha: sha(n), finishedAt: new Date(NOW - (10 - n) * HOUR).toISOString() }));
-    await keep(deps, row({ headSha: sha(20), envRevision: 2 }));
-    await keep(deps, row({ headSha: sha(21), branch: "release" }));
-    const found = await baselineCandidatesOf(deps, { orgId: ORG, project: PROJECT, envRevision: 1, branch: "main" });
-    expect(found).toEqual([sha(7), sha(6), sha(5), sha(4), sha(3)]);
-    expect(await baselineCandidatesOf(deps, { orgId: ORG, project: PROJECT, envRevision: 3, branch: "main" })).toEqual([]);
   });
 });

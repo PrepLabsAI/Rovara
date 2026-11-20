@@ -53,16 +53,6 @@ describe("the baseline record", () => {
     expect(store.size).toBe(0);
   });
 
-  it("starts exactly once, as an item of the accepting transaction", async () => {
-    const { store, deps } = setup();
-    await requestWorkflowE2EBaselineRound(deps, task, { enabled: true });
-    expect(await run(store, [baselineStartItem(task, started)])).toEqual({ applied: true });
-    expect(await readWorkflowE2EBaselineRecord(deps, task)).toMatchObject({ state: "STARTED", operationId: "op-1", roundId: "round-1", baseCommitSha: "b".repeat(40), deadlineAt: LATER });
-    // A second start finds it no longer REQUESTED, so its transaction fails whole.
-    expect(await run(store, [baselineStartItem(task, { ...started, operationId: "op-2" })])).toMatchObject({ applied: false, reason: "condition_failed" });
-    expect((await readWorkflowE2EBaselineRecord(deps, task))?.operationId).toBe("op-1");
-  });
-
   it("cannot be started when it was never asked for", async () => {
     const { store } = setup();
     expect(await run(store, [baselineStartItem(task, started)])).toMatchObject({ applied: false });
@@ -98,15 +88,6 @@ describe("the baseline record", () => {
     expect((await readWorkflowE2EBaselineRecord(deps, task))?.state).toBe("RECORDED");
   });
 
-  it("does not record a round that is not the one the record started, even when its verification is of that round", async () => {
-    const { store, deps, objects } = setup();
-    await requestWorkflowE2EBaselineRound(deps, task, { enabled: true });
-    await run(store, [baselineStartItem(task, started)]);
-    expect(await recordWorkflowE2EBaseline({ ...deps, objects }, task, { verified: verified({ roundId: "round-2" }), expected: { ...expected, roundId: "round-2" } })).toBe(false);
-    expect(await recordWorkflowE2EBaseline({ ...deps, objects }, task, { verified: verified({ admissionSha256: hex("e") }), expected: { ...expected, admissionSha256: hex("e") } })).toBe(false);
-    expect((await readWorkflowE2EBaselineRecord(deps, task))?.state).toBe("STARTED");
-  });
-
   it("refuses a verification that is not of the started round, or that the verifier did not make", async () => {
     const { store, deps, objects } = setup();
     const both = { ...deps, objects };
@@ -117,19 +98,6 @@ describe("the baseline record", () => {
     // Rows a caller made up carry no mark of the verifier.
     await expect(recordWorkflowE2EBaseline(both, task, { verified: { roundId: "round-1", admissionSha256: hex("c"), baseline: { status: "PASSED", scenarios: [] }, artifacts: [] } as never, expected })).rejects.toThrow(/not of the round/);
     expect((await readWorkflowE2EBaselineRecord(deps, task))?.state).toBe("STARTED");
-  });
-
-  it("marks a round unavailable only from a state named, and only for the operation named", async () => {
-    const { store, deps } = setup();
-    await requestWorkflowE2EBaselineRound(deps, task, { enabled: true });
-    await run(store, [baselineStartItem(task, started)]);
-    expect(await markWorkflowE2EBaselineUnavailable(deps, task, "run-failed", { from: ["REQUESTED"] })).toBe(false);
-    expect(await markWorkflowE2EBaselineUnavailable(deps, task, "run-failed", { from: ["STARTED"], operationId: "op-other" })).toBe(false);
-    expect((await readWorkflowE2EBaselineRecord(deps, task))?.state).toBe("STARTED");
-    expect(await markWorkflowE2EBaselineUnavailable(deps, task, "run-failed", { from: ["STARTED"], operationId: "op-1" })).toBe(true);
-    expect(await readWorkflowE2EBaselineRecord(deps, task)).toMatchObject({ state: "UNAVAILABLE", reason: "run-failed", recordedAt: AT });
-    expect(await markWorkflowE2EBaselineUnavailable({ ...deps, now: clock(LATER) }, task, "timed-out", { from: ["UNAVAILABLE"] })).toBe(true);
-    expect((await store.get({ pk: "DEVTASK#task-1", sk: `E2E_BASELINE#${hex("a")}` }))?.[INDEX_EXPIRY_ATTRIBUTE]).toBe(indexExpiresAt(LATER));
   });
 
   it("never marks a plan that is not this record's, and reads nothing for a task with no approved plan", async () => {

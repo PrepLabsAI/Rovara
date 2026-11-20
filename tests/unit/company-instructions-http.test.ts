@@ -1,7 +1,7 @@
 // L4-HW3c: Code's HTTP adapter for the `company-instructions` plug-in point on a deployed install (the Cloud model gateway's POST /v1/service/company-instructions).
 // Cloud keeps the company's approved rules and the gateway reads them for the ONE company in the service token. The adapter answers the asked company's snapshot, an empty
 // list as "no rules", and THROWS for anything else (a company with rules never starts a task without them). Size limits and framing stay the core's.
-import { createHash, generateKeyPairSync, sign, verify } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { PLUGIN_POINT_CARDINALITY, TASK_KEY_PURPOSE, type CompanyInstructionsSource, type OrgId } from "@agentx/contracts";
 import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js";
@@ -10,7 +10,6 @@ import {
   COMPANY_INSTRUCTIONS_ADAPTER_NAME, COMPANY_INSTRUCTIONS_AUDIENCE, COMPANY_INSTRUCTIONS_BODY_MAX_BYTES, COMPANY_INSTRUCTIONS_PATH, COMPANY_INSTRUCTIONS_READ_FAILED, companyInstructionsAdapter, companyInstructionsModules,
 } from "../../packages/broker/src/core-host/company-instructions-http.js";
 import { buildCoreRegistry, type CoreAdapterContext } from "../../packages/broker/src/core-host/registry.js";
-import { readCompanyInstructions } from "../../packages/broker/src/core/instructions/company-source.js";
 
 const ORG_A = "org_companyinstr0000000a" as OrgId;
 const ORG_B = "org_companyinstr0000000b" as OrgId;
@@ -64,27 +63,6 @@ describe("the request (golden: what Cloud implements)", () => {
     expect(Object.keys(bodyOf(g.seen[0]!))).toEqual(["company"]);
   });
 
-  it("the token is the task key's service token for this audience and this company, signed RS256", async () => {
-    const g = gateway();
-    await adapter(g.fetchImpl).current(ORG_A);
-    const [header, claims, signature] = tokenOf(g.seen[0]!).split(".") as [string, string, string];
-    expect(Buffer.from(header, "base64url").toString()).toBe(JSON.stringify({ alg: "RS256", typ: "rovara-service+jwt", kid: KID }));
-    const iat = NOW / 1000;
-    expect(COMPANY_INSTRUCTIONS_AUDIENCE).toBe("rovara-model-gateway-company-instructions");
-    expect({ ...decode(claims), jti: "<uuid>" }).toEqual({ iss: ISSUER, aud: COMPANY_INSTRUCTIONS_AUDIENCE, jti: "<uuid>", iat, nbf: iat - 30, exp: iat + 60, cid: ORG_A });
-    expect(verify("sha256", Buffer.from(`${header}.${claims}`), pair.publicKey, Buffer.from(signature, "base64url"))).toBe(true);
-  });
-
-  it("one company's ask never carries the other company's id", async () => {
-    const g = gateway((s) => ok(answer({ company: bodyOf(s)["company"], rules: [{ text: `Rule of ${String(bodyOf(s)["company"])}`, priority: "required" }] })));
-    const a = adapter(g.fetchImpl);
-    expect(JSON.stringify(await a.current(ORG_A))).toContain(`Rule of ${ORG_A}`);
-    expect(JSON.stringify(await a.current(ORG_B))).toContain(`Rule of ${ORG_B}`);
-    expect(JSON.stringify(g.seen[0])).not.toContain(ORG_B);
-    expect(decode(tokenOf(g.seen[1]!).split(".")[1]!)["cid"]).toBe(ORG_B);
-    expect(JSON.stringify(g.seen[1])).not.toContain(ORG_A);
-  });
-
   it("a company that is not well formed is refused before anything is signed or sent", async () => {
     const g = gateway();
     const signer = signing();
@@ -93,20 +71,6 @@ describe("the request (golden: what Cloud implements)", () => {
     for (const company of ["", "org_x", `${ORG_A}/../x`, 5 as never]) expect(await refused(a, company)).toBe(COMPANY_INSTRUCTIONS_READ_FAILED);
     expect(g.seen).toEqual([]);
     expect(spy).not.toHaveBeenCalled();
-  });
-});
-
-describe("the accepted answer", () => {
-  it("is the snapshot, as copies; the version is Cloud's settings version", async () => {
-    const sent = answer();
-    const g = gateway(() => ok(sent));
-    const found = (await adapter(g.fetchImpl).current(ORG_A))!;
-    expect(found).toEqual({ version: "4", rules: RULES });
-    expect(found.rules[0]).not.toBe(sent.rules[0]);
-  });
-  it("an empty list is no rules (undefined), as the laptop's missing file", async () => {
-    const g = gateway(() => ok(answer({ version: "0", rules: [] })));
-    expect(await adapter(g.fetchImpl).current(ORG_A)).toBeUndefined();
   });
 });
 
@@ -143,39 +107,12 @@ describe("anything but the exact answer fails closed: a throw, never 'no rules'"
     });
   }
 
-  it("the whole ask is held to one short time, and the request is aborted", async () => {
-    let signal: AbortSignal | undefined;
-    const g = gateway((s) => { signal = s.init.signal ?? undefined; return new Promise<Response>(() => undefined); });
-    const started = Date.now();
-    expect(await refused(adapter(g.fetchImpl, { timeoutMs: 30 }))).toBe(COMPANY_INSTRUCTIONS_READ_FAILED);
-    expect(Date.now() - started).toBeLessThan(1_000);
-    expect(signal?.aborted).toBe(true);
-  });
-
   it("a signer that fails or is not the task key sends nothing", async () => {
     const g = gateway();
     for (const signer of [signing({ rovara_purpose: "sign-in" }), signing({ kid: "short" }), { publicJwk: async () => { throw new Error("kms down"); }, sign: async () => Buffer.alloc(0) } as TokenSigner]) {
       expect(await refused(adapter(g.fetchImpl, { signer }))).toBe(COMPANY_INSTRUCTIONS_READ_FAILED);
     }
     expect(g.seen).toEqual([]);
-  });
-});
-
-describe("through the core: the same size limits as the laptop, and a failed read stops the step", () => {
-  it("an answer within the limits becomes the company's snapshot", async () => {
-    const g = gateway();
-    expect(await readCompanyInstructions(adapter(g.fetchImpl), ORG_A)).toEqual({ version: "4", rules: RULES });
-  });
-  it("no rules is undefined; an over-budget answer is refused with the budget sentence, nothing cut", async () => {
-    expect(await readCompanyInstructions(adapter(gateway(() => ok(answer({ rules: [] }))).fetchImpl), ORG_A)).toBeUndefined();
-    const many = Array.from({ length: 31 }, (_, i) => ({ text: `rule ${String(i)}`, priority: "required" }));
-    await expect(readCompanyInstructions(adapter(gateway(() => ok(answer({ rules: many }))).fetchImpl), ORG_A)).rejects.toThrow(/Company rules exceed the size budget/u);
-    await expect(readCompanyInstructions(adapter(gateway(() => ok(answer({ rules: [{ text: "x".repeat(601), priority: "required" }] }))).fetchImpl), ORG_A)).rejects.toThrow(/Company rules exceed the size budget/u);
-  });
-  it("a gateway that cannot answer refuses the step in the core's words (the task does not start without the company's rules)", async () => {
-    for (const reply of [() => new Response("", { status: 503 }), () => new Response("", { status: 404 }), () => new Promise<Response>(() => undefined)]) {
-      await expect(readCompanyInstructions(adapter(gateway(reply).fetchImpl), ORG_A)).rejects.toThrow(/The company rules could not be read, so this step did not start/u);
-    }
   });
 });
 

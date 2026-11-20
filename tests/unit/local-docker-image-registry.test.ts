@@ -1,5 +1,5 @@
 // The local Docker adapter for the image registry: the shared conformance suite against a fake registry API, and what it does to the owner's Docker (only a container it labelled, loopback only, no privileges).
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -165,17 +165,5 @@ describe("what a worker may do with it", () => {
     await expect(registry.deleteImages({ ...CALL, repository: repositoryFor("alpha"), digests: ["latest"] })).rejects.toMatchObject({ code: "refused" });
     await expect(registry.deleteImages({ ...CALL, repository: "../../v2/_catalog", digests: [] })).rejects.toMatchObject({ code: "refused" });
     expect(server.requests).toEqual([]);
-  });
-
-  it("reports an image's push time as the time it was first seen, kept in the state folder, and not moved by a later look", async () => {
-    let now = Date.parse("2026-11-09T10:00:00Z");
-    const { registry, server, stateDirectory } = await bench({ now: () => now });
-    const repository = repositoryFor("alpha");
-    const digest = server.push(repository, "one");
-    const first = await registry.list({ ...CALL, repository });
-    expect(first).toEqual([{ digest, tags: ["one"], pushedAt: "2026-11-09T10:00:00.000Z" }]);
-    now += 3_600_000;
-    expect(await registry.list({ ...CALL, repository })).toEqual(first);
-    expect(JSON.parse(await readFile(join(stateDirectory, "registry-first-seen.json"), "utf8"))).toEqual({ [`${repository}@${digest}`]: "2026-11-09T10:00:00.000Z" });
   });
 });

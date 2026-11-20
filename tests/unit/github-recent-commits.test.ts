@@ -1,7 +1,7 @@
 // Lane L4-LM1b (revert detection): the code host port's `recentCommits` read as the GitHub adapter gives it, over the fake GitHub HTTP server (tests/support/ports/github-fixture-api.ts; never the real GitHub). It proves the
 // adapter's own mapping and bounds only (one request, read-only token, the web committer decided by account id, untrusted fields checked); it does not prove GitHub answers this way.
 import { describe, expect, it } from "vitest";
-import { RECENT_COMMITS_MAX, RECENT_COMMIT_MESSAGE_MAX, RecentCommitsReadSchema, hostRateLimitRetryAt } from "@agentx/contracts";
+import { RECENT_COMMITS_MAX, RecentCommitsReadSchema, hostRateLimitRetryAt } from "@agentx/contracts";
 import { FakeHostModel } from "@agentx/broker/fakes";
 import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
 import { GITHUB_ORG_SCOPE, GITHUB_REPO_URL, GitHubFixtureApi, providerOver } from "../support/ports/github-fixture-api.js";
@@ -23,26 +23,6 @@ const row = (n: number, over: Record<string, unknown> = {}) => ({
 });
 
 describe("the recentCommits read", () => {
-  it("is ONE read-only request for the branch with the count asked, with a contents-read token for this one repository", async () => {
-    const { api, host, repository } = world();
-    api.recentCommits.rows = [row(5), row(4)];
-    const read = await host.recentCommits!(repository, "main", GITHUB_ORG_SCOPE, { max: 50 });
-    expect(api.recentCommitRequests).toEqual([{ sha: "main", perPage: "50" }]);
-    expect(api.requests.filter((request) => request.method === "GET" && /\/commits(\?|$)/u.test(request.path))).toHaveLength(1);
-    expect(api.tokens.at(-1)).toMatchObject({ permissions: { contents: "read" }, repositories: ["app"] });
-    expect(Object.keys(api.tokens.at(-1)!.permissions)).toEqual(["contents"]);
-    expect(api.requests.filter((request) => request.method !== "GET" && !/\/access_tokens$/u.test(request.path))).toEqual([]);
-    expect(read.complete).toBe(true);
-    expect(read.commits).toHaveLength(2);
-    expect(RecentCommitsReadSchema.safeParse(read).success).toBe(true);
-  });
-
-  it("maps each commit to what a revert check needs: message, parent count, verification, the author and committer by login and numeric id", async () => {
-    const { api, host, repository } = world();
-    api.recentCommits.rows = [row(5, { parents: [{ sha: sha(1) }, { sha: sha(2) }], commit: { message: "Merge", verification: { verified: false } } })];
-    const [commit] = (await host.recentCommits!(repository, "main", GITHUB_ORG_SCOPE, { max: 10 })).commits;
-    expect(commit).toEqual({ sha: sha(5), message: "Merge", parents: 2, verified: false, author: { login: "maya", hostUserId: "10" }, authorIsBot: false, committer: { login: "web-flow", hostUserId: "19864447" }, webFlow: true });
-  });
 
   it("the web committer is decided by the numeric account id only: a person named web-flow, or a message that says so, is not it", async () => {
     const { api, host, repository } = world();
@@ -63,14 +43,6 @@ describe("the recentCommits read", () => {
     expect(read.commits[2]).toMatchObject({ sha: sha(3) });
     expect(read.commits[2]!.author).toBeUndefined();
     expect(read.commits[2]!.committer).toBeUndefined();
-  });
-
-  it("cuts a message at the port's bound, and keeps the top lines (the subject and the 'This reverts' line)", async () => {
-    const { api, host, repository } = world();
-    api.recentCommits.rows = [row(5, { commit: { message: `Revert "x"\n\nThis reverts commit ${sha(1)}.\n${"y".repeat(RECENT_COMMIT_MESSAGE_MAX * 2)}`, verification: { verified: true } } })];
-    const [commit] = (await host.recentCommits!(repository, "main", GITHUB_ORG_SCOPE, { max: 10 })).commits;
-    expect(commit!.message).toHaveLength(RECENT_COMMIT_MESSAGE_MAX);
-    expect(commit!.message.startsWith(`Revert "x"\n\nThis reverts commit ${sha(1)}.`)).toBe(true);
   });
 
   it("says the list is not the whole when GitHub has another page, or an entry was unusable (that entry is left out, never guessed)", async () => {

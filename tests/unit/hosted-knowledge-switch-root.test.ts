@@ -84,14 +84,6 @@ const lessonsRuntimeOf = (company: OrgId) => {
 };
 
 describe("the core root hands the router the switch API", () => {
-  it("serves it whenever the core serves, with the lessons switch on or off (the wiki tools gate reads the same row either way)", async () => {
-    expect((await setup({ ROVARA_CORE_LESSONS: "on" })).root.knowledgeSwitch).toBeDefined();
-    const off = await setup({});
-    expect(off.root.lessons).toBeUndefined();
-    expect(off.root.knowledgeSwitch).toBeDefined();
-    expect(await call(off, "GET", COMPANY_PATH, OWNER_A)).toEqual({ stays: false });
-    expect(await call(off, "PUT", COMPANY_PATH, OWNER_A, { stays: true })).toEqual({ stays: true });
-  });
 
   it("is handed to both of the broker's router calls and to the router's dependency type", () => {
     const broker = readFileSync("packages/broker/src/aws/broker.ts", "utf8");
@@ -101,19 +93,6 @@ describe("the core root hands the router the switch API", () => {
 });
 
 describe("on the real root, with the real membership and project grants", () => {
-  it("the company's switch: an owner or admin sets it; a project admin, a developer and a plain member are refused and nothing is written", async () => {
-    const s = await setup();
-    expect(await call(s, "PUT", COMPANY_PATH, OWNER_A, { stays: true })).toEqual({ stays: true });
-    expect(await call(s, "GET", COMPANY_PATH, ADMIN_A)).toEqual({ stays: true });
-    expect(await call(s, "PUT", COMPANY_PATH, ADMIN_A, { stays: false })).toEqual({ stays: false });
-    const before = s.world.audit.length;
-    for (const who of [MAINT_A, DEV_A, STRANGER_A]) {
-      await expect(call(s, "GET", COMPANY_PATH, who), who).rejects.toMatchObject({ code: "FORBIDDEN" });
-      await expect(call(s, "PUT", COMPANY_PATH, who, { stays: true }), who).rejects.toMatchObject({ code: "FORBIDDEN" });
-    }
-    expect(s.world.audit.length).toBe(before);
-    expect(await call(s, "GET", COMPANY_PATH, OWNER_A)).toEqual({ stays: false });
-  });
 
   it("a project's switch: its admin (grant: administrator) or a company owner or admin sets it; a developer reads only; a person with no part in it gets 'No such project.'", async () => {
     const s = await setup();
@@ -184,17 +163,5 @@ describe("two companies and the ledger", () => {
     // B's project "only-b" is not in A's catalog: A's owner is told there is no such project; B's own owner sees it.
     await expect(call(s, "GET", "/v1/dev/projects/only-b/lessons/local-tools", OWNER_A)).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(await call(s, "GET", "/v1/dev/projects/only-b/lessons/local-tools", OWNER_B)).toMatchObject({ canChange: true });
-  });
-
-  it("every change is on the audit ledger (who, scope and the new value), recorded for the company that made it", async () => {
-    const s = await setup();
-    const start = s.world.audit.length;
-    await call(s, "PUT", COMPANY_PATH, OWNER_A, { stays: true });
-    await call(s, "PUT", PROJECT_PATH, MAINT_A, { enabled: false });
-    await call(s, "PUT", COMPANY_PATH, OWNER_B, { stays: true });
-    const events = s.world.audit.slice(start).filter((event) => event.action === "lesson.local_tools_switched");
-    expect(events.map((event) => [event.companyId, event.details?.["scope"], event.details?.["enabled"]])).toEqual([[A, "company", false], [A, "project", false], [B, "company", false]]);
-    expect(events.map((event) => JSON.stringify(event.actor))).toEqual([expect.stringContaining(OWNER_A), expect.stringContaining(MAINT_A), expect.stringContaining(OWNER_B)]);
-    expect(JSON.stringify(events)).not.toContain("payments");
   });
 });

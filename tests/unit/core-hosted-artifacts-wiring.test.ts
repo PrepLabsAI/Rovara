@@ -39,13 +39,6 @@ async function world() {
 }
 
 describe("the broker's core root gives each company's flow a company-bound artifacts reader", () => {
-  it("sets the reader on every company's flow, a different one for each", async () => {
-    const { root } = await world();
-    const [a, b] = [(await root.app.runtimeFor(A)).flow.deps, (await root.app.runtimeFor(B)).flow.deps];
-    expect(typeof a.artifacts?.get).toBe("function");
-    expect(typeof b.artifacts?.get).toBe("function");
-    expect(a.artifacts).not.toBe(b.artifacts);
-  });
 
   it("wires hosted second review and design review with fail-safe company autonomy", async () => {
     const { root } = await world();

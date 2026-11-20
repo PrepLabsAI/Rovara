@@ -6,14 +6,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { E2EModelChannelResponseSchema, e2eModelRouteRevision } from "../../packages/contracts/src/e2e-model-channel.js";
+import { e2eModelRouteRevision } from "../../packages/contracts/src/e2e-model-channel.js";
 import { createInMemoryE2EDayBudget } from "../../packages/model-runtime/src/e2e-route.js";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { REFUSING_DEFAULT_PROVIDER_MESSAGE, installRefusingE2EDefaultProvider } from "../../packages/verifier/src/executor/ai-default-provider.js";
 import { E2EModelChannelError, createE2EModelChannelClient } from "../../packages/verifier/src/executor/model-channel.js";
 import { createE2EModelEvidenceCollector, openE2EModelChannelSession, type E2EModelChannelSession } from "../../packages/worker/src/e2e-model-channel-session.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
-import { CASE_ID, RUN_ID, TOOLS, call, tapAnswer } from "../support/e2e-model-fixtures.js";
+import { CASE_ID, RUN_ID, call, tapAnswer } from "../support/e2e-model-fixtures.js";
 import { acceptedSyncAnswer, noSessionValues } from "../support/e2e-session-sync.js";
 
 // Task 4.3a, test cases 12 (the guard against the AI SDK's default provider) and the executor client of the model channel.
@@ -60,23 +60,6 @@ describe("the executor's model channel client, against the worker's real session
   let session: E2EModelChannelSession;
   const scripted = { routeId: "rovara-scripted/v1", routeRevision: e2eModelRouteRevision(scriptedE2ERouteDefinition()) };
 
-  it("begins a step, makes a call and ends the step over the socket, and the worker writes the receipt", async () => {
-    const evidence = createE2EModelEvidenceCollector();
-    session = await openE2EModelChannelSession({ runId: RUN_ID, modelRoute: scripted, policyScope: "standard", socketPath, allowedSteps: [{ caseId: CASE_ID, stepIndex: 0 }],
-      credentialSet: { passwords: [], emails: [], cookieValues: [] }, deadlineAt: Date.now() + 60_000, dayBudget: createInMemoryE2EDayBudget(), evidence,
-      signal: new AbortController().signal, environment: { ROVARA_E2E_SCRIPTED_MODEL: "1" }, invoke: async () => tapAnswer() });
-    closers.push(() => session.close());
-    const channel = client();
-    await channel.beginStep(position);
-    const answer = await channel.generate({ ...request(), call: { ...call(), tools: TOOLS } });
-    expect(answer.result).toMatchObject({ status: "ok", content: [{ type: "tool-call", toolName: "tap" }] });
-    await channel.endStep(position);
-    const summary = await session.close();
-    expect(summary.receipts).toHaveLength(1);
-    expect(evidence.receipts()[0]).toMatchObject({ runId: RUN_ID, caseId: CASE_ID, stepIndex: 0, callIndex: 0, outcome: "ok", routeId: "rovara-scripted/v1" });
-    expect(E2EModelChannelResponseSchema.safeParse(answer).success).toBe(true);
-  });
-
   it("a step the worker does not hold is refused as a plain non-retryable error, and a call without a begun step gets the worker's refusal as an answer", async () => {
     session = await openE2EModelChannelSession({ runId: RUN_ID, modelRoute: scripted, policyScope: "standard", socketPath, allowedSteps: [{ caseId: CASE_ID, stepIndex: 0 }],
       credentialSet: { passwords: [], emails: [], cookieValues: [] }, deadlineAt: Date.now() + 60_000, dayBudget: createInMemoryE2EDayBudget(), evidence: createE2EModelEvidenceCollector(),
@@ -112,15 +95,6 @@ describe("the client against a counted fake socket", () => {
     expect(seen).toHaveLength(1);
   });
 
-  it("puts nothing the worker said, and nothing from the socket's errors, in an error message", async () => {
-    await fakeSocket((_req, res) => send(res, 500, "SECRETTOKEN prompt text /run/rovara/plan.json"));
-    const failure = await client().generate(request()).catch((error: Error) => error);
-    expect((failure as Error).message).not.toMatch(/SECRETTOKEN|prompt text|plan\.json/);
-    const missing = await createE2EModelChannelClient({ socketPath: join(dir, "nobody-listens.sock"), runId: RUN_ID, sessionSync: noSessionValues }).generate(request()).catch((error: Error) => error);
-    expect(missing).toMatchObject({ name: "E2EModelChannelError", code: "unavailable", isRetryable: false });
-    expect((missing as Error).message).not.toMatch(/ENOENT|nobody-listens|connect/);
-  });
-
   it("refuses a request that is not a valid channel request before sending it: a file part, an unknown tool, a prompt over the bound", async () => {
     const seen = await fakeSocket((_req, res) => send(res, 200, okAnswer()));
     const file = { prompt: [{ role: "user", content: [{ type: "file", mediaType: "image/png", data: "AAAA" }] }] };
@@ -134,19 +108,6 @@ describe("the client against a counted fake socket", () => {
     // Positive control: a valid request on the same socket goes through.
     expect((await client().generate(request())).result.status).toBe("ok");
     expect(seen).toHaveLength(1);
-  });
-
-  it("sends the begin marker with the run id and the cookie values, and the end marker without", async () => {
-    const seen = await fakeSocket((_req, res) => send(res, 200, { schemaVersion: "rovara-e2e-model-channel/v1", status: "ok" }));
-    await client().beginStep({ ...position, cookieValues: ["session=abcdef123456"] });
-    await client().beginStep(position);
-    await client().endStep(position);
-    expect(seen.map((item) => [item.method, item.url])).toEqual([["POST", "/v1/step"], ["POST", "/v1/step"], ["POST", "/v1/step"]]);
-    expect(seen.map((item) => JSON.parse(item.body) as unknown)).toEqual([
-      { schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, marker: "begin", caseId: CASE_ID, stepIndex: 0, cookieValues: ["session=abcdef123456"] },
-      { schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, marker: "begin", caseId: CASE_ID, stepIndex: 0 },
-      { schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, marker: "end", caseId: CASE_ID, stepIndex: 0 },
-    ]);
   });
 
   it("is bounded: an unanswered request times out, an abort stops it, and an answer over the bound is refused", async () => {

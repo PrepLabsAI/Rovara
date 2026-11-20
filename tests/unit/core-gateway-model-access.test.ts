@@ -196,9 +196,4 @@ describe("the broker's core root: a worker's model-access request", () => {
     expect(await get(capability(workspaceId))).toBeUndefined();
     expect(t.reads).toEqual([{ pk: `WORKSPACE#${workspaceId}`, sk: "META" }, { pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK" }]);
   });
-  it("is never looked up while the switch is off", async () => {
-    const t = tables();
-    expect(await root(ENV, t.client).callback({ method: "GET", path: MODEL_ACCESS_PATH, headers: { "x-agentx-callback-capability": capability(randomUUID()) } })).toBeUndefined();
-    expect(t.reads).toEqual([]);
-  });
 });

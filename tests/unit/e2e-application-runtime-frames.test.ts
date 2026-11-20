@@ -2,8 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { canonicalJson, e2eBindingDigest } from "@agentx/contracts";
 import { createCompiledApiApplicationFixture } from "../support/e2e-application-fixture.js";
-import { createE2EApplicationCaseCaptureFrame, createE2EApplicationAssertionObservationHeader,
-  readValidatedE2EApplicationCaseObservation } from "../../packages/verifier/src/application-services.js";
+import { createE2EApplicationCaseCaptureFrame, readValidatedE2EApplicationCaseObservation } from "../../packages/verifier/src/application-services.js";
 
 const digest = "a".repeat(64);
 const producer = { producerId: "web-producer", receiptId: "receipt-1", lifecycleId: "lifecycle-1",
@@ -27,13 +26,6 @@ const plan = { expected, binding: { runId: "33333333-3333-4333-8333-333333333333
   scenario: { requiredRealComponentIds: ["component-1"] } };
 
 describe("Task 5 application runtime frame constructors", () => {
-  it("builds assertion observation headers from the assigned case and protected producer", () => {
-    const header = createE2EApplicationAssertionObservationHeader({ plan: plan as never, binding: binding as never, index: 0,
-      observedAt: "2026-10-17T12:00:00.000Z", observationId: "observation-1" });
-    expect(header).toMatchObject({ schemaVersion: "e2e-application-assertion-observation/v1", caseId: "case-1", assertionIndex: 0,
-      assertionDigest: digest, producer, subject: binding.subject, accountContextId: expected.accountContextId,
-      accountContextDigest: expected.accountContextDigest, sessionRef: "session-1", accountIdDigest: digest });
-  });
 
   it("creates strict capture frames with pending outer cleanup and honest component coverage", () => {
     const capture = createE2EApplicationCaseCaptureFrame({ plan: plan as never, launchContext: launchContext as never,

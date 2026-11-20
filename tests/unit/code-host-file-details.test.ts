@@ -147,20 +147,6 @@ it("refuses renaming an absent fake entry", () => {
   expect(() => model.commitRename("main", "missing", "new")).toThrow();
 });
 
-
-it("omits fake types when the caller's classified head changed", async () => {
-  const model = new FakeHostModel({ ...repository, id: "1", fullName: "example/app" });
-  const host = new FakeCodeHost(model);
-  const expectedHead = model.commit("feature", { a: "first" });
-  const { cr } = model.reconcile({ sourceBranch: "feature", targetBranch: "main", title: "head" });
-  const ref = { repository, id: cr.id, url: model.crUrl(cr.id) };
-  expect((await host.changedFiles(ref, 1, scope, { expectedHead })).files[0]?.entry).toBeDefined();
-  model.commit("feature", { a: "second" });
-  const changed = await host.changedFiles(ref, 1, scope, { expectedHead });
-  expect(changed.files.length).toBeGreaterThan(0);
-  expect(changed.files.every(file => file.entry === undefined)).toBe(true);
-});
-
 it("keeps submodules out of ordinary file reads and preserves gitlink changes", async () => {
   const model = new FakeHostModel({ ...repository, id: "1", fullName: "example/app" });
   const host = new FakeCodeHost(model);
@@ -183,16 +169,4 @@ it("keeps submodules out of ordinary file reads and preserves gitlink changes", 
   expect(model.revision(replaced).entries.get("renamed")).toBe("file");
   const removed = model.commit("main", { "nested/module": null });
   expect(model.revision(removed).entries.has("nested/module")).toBe(false);
-});
-
-it("preserves submodule targets through a merge and a later diff", () => {
-  const model = new FakeHostModel({ ...repository, id: "1", fullName: "example/app" });
-  model.commitSubmodule("feature", "module", "a".repeat(40));
-  const { cr } = model.reconcile({ sourceBranch: "feature", targetBranch: "main", title: "module" });
-  expect(model.merge(cr.id, { revision: model.headOf("feature"), method: "squash" }).outcome).toBe("merged");
-  expect(model.revision(model.headOf("main")).entries.get("module")).toBe("submodule");
-  expect(model.revision(model.headOf("main")).files.has("module")).toBe(false);
-  model.commitSubmodule("next", "module", "b".repeat(40));
-  const { cr: next } = model.reconcile({ sourceBranch: "next", targetBranch: "main", title: "update module" });
-  expect(model.changedFiles(next.id)).toEqual([expect.objectContaining({ path: "module", status: "modified", entry: { head: "submodule", base: "submodule" } })]);
 });

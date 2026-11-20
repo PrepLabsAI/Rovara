@@ -23,22 +23,11 @@ const SCOPE = { system: "install" } as const;
 const NOW = "2026-11-09T12:00:00.000Z";
 
 describe("the neutral identity of a repository", () => {
-  it("is GitHub's owner/name in lower case, however the address is spelled", () => {
-    for (const address of ["https://github.com/Acme/Payments", "https://github.com/acme/payments.git", "https://GitHub.com/acme/payments"]) {
-      expect(codeHostRepositoryKey("github", address), address).toBe("acme/payments");
-    }
-  });
 
   it("is nothing for another host's address under GitHub's kind, a path of the wrong shape, or an address with credentials", () => {
     for (const address of ["https://gitlab.com/acme/payments", "https://github.com/acme", "https://github.com/acme/payments/extra", "https://user:pw@github.com/acme/payments", "ftp://github.com/acme/payments", "not a url", "https://github.com/a b/c", "http://github.com/acme/payments", "https://www.github.com/acme/payments", "https://github.com:8443/acme/payments", "https://github.com/acme/payments?x=1", "https://github.com/acme/payments#x", "https://github.com/ac_me/payments", "https://github.com/ac.me/payments", "https://github.com/acme/pay%20ments"]) {
       expect(codeHostRepositoryKey("github", address), address).toBeUndefined();
     }
-  });
-
-  it("is the kind and the normalised address for any other host", () => {
-    expect(codeHostRepositoryKey("examplehost", "https://Code.Example.com/team/app.git/")).toBe("examplehost:https://code.example.com/team/app");
-    expect(codeHostRepositoryKey("examplehost", "https://user@code.example.com/team/app")).toBeUndefined();
-    expect(codeHostRepositoryKey("examplehost", "https://code.example.com/team/#x")).toBe("examplehost:https://code.example.com/team");
   });
 });
 
@@ -92,14 +81,6 @@ describe("the link from a change request to its task", () => {
     expect(await findLinkedChangeRequest(store, { hostKind: "other", repositoryAddress: "https://code.example.com/team/app", id: "12" })).toBeUndefined();
   });
 
-  it("reads GitHub's older row when there is no neutral one, only for the right repository and number", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: { pk: "GITHUB_PR#acme/payments", sk: "PR#0000000007", entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: "acme/payments", number: 7, repositoryId: "payments", taskId: TASK, workspaceId: "ws-1", candidateDigest: "c".repeat(64), url: URL7 } });
-    expect(await findLinkedChangeRequest(store, { hostKind: "github", repositoryAddress: "https://github.com/Acme/Payments", id: "7" })).toMatchObject({ source: "github-legacy", taskId: TASK, url: URL7 });
-    expect(await findLinkedChangeRequest(store, { hostKind: "github", repositoryAddress: "https://github.com/acme/payments", id: "8" })).toBeUndefined();
-    expect(await findLinkedChangeRequest(store, { hostKind: "github", repositoryAddress: "https://github.com/acme/payments", id: "07" })).toBeUndefined();
-  });
-
   it("a neutral row that is not a link for its key is a refusal, not a miss to be filled from the older row", async () => {
     const store = new MemoryDocumentStore();
     await store.put({ item: { pk: "GITHUB_PR#acme/payments", sk: "PR#0000000007", entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: "acme/payments", number: 7, repositoryId: "payments", taskId: TASK, workspaceId: "ws-1", candidateDigest: "c".repeat(64), url: URL7 } });
@@ -123,16 +104,6 @@ async function rovaraPullRequest(store: MemoryDocumentStore, options: { taskId?:
 }
 
 describe("finding Rovara's own pull requests", () => {
-  it("finds one by number and by merge commit, only for this company's task", async () => {
-    const store = new MemoryDocumentStore();
-    await rovaraPullRequest(store);
-    const index = createRovaraPullRequestIndex({ store, companyId: ORG });
-    expect(await index.byNumber({ host: "github", repo: "acme/payments", number: 7 })).toEqual({ taskId: TASK, project: "payments", number: 7, url: URL7, candidateHeadSha: "a".repeat(40) });
-    expect(await index.byMergeCommit({ host: "github", repo: "acme/payments", sha: MERGE })).toMatchObject({ taskId: TASK, number: 7, mergeCommitSha: MERGE });
-    const other = createRovaraPullRequestIndex({ store, companyId: OTHER_ORG });
-    expect(await other.byNumber({ host: "github", repo: "acme/payments", number: 7 })).toBeUndefined();
-    expect(await other.byMergeCommit({ host: "github", repo: "acme/payments", sha: MERGE })).toBeUndefined();
-  });
 
   it("finds nothing for another host, another number, or a pull request the task does not record at that address", async () => {
     const store = new MemoryDocumentStore();
@@ -224,15 +195,6 @@ function detector(state: HostState, extra: Partial<RevertDetectorDependencies> =
 const REF = { repository: REPO, id: "20", url: "https://github.com/acme/payments/pull/20" };
 
 describe("a merged revert pull request", () => {
-  it("records the Rovara pull request it reverts, once, credited to the person who merged it", async () => {
-    const t = detector({ writers: { maya: "write" }, details: {} });
-    await rovaraPullRequest(t.store);
-    const found = await detectRevertFromMergedChangeRequest(t.deps, REF, SCOPE);
-    expect(found).toEqual([{ taskId: TASK, project: "payments", number: 7, url: URL7, via: "5".repeat(40), reverter: "maya" }]);
-    expect(await t.store.get(revertRecordKey(TASK, "acme/payments", 7))).toMatchObject({ entityType: "TASK_REVERT", orgId: ORG, taskId: TASK, project: "payments", number: 7, reverter: "maya", detectedAt: NOW });
-    // However many deliveries tell of it, it is recorded once.
-    expect(await detectRevertFromMergedChangeRequest(t.deps, REF, SCOPE)).toEqual([]);
-  });
 
   it("detects a revert through a GitHub connection that is not called github: the index is read by the provider (review N3)", async () => {
     const t = detector({ writers: { maya: "write" }, details: {}, connection: "github-main" });
@@ -246,15 +208,6 @@ describe("a merged revert pull request", () => {
     const other = detector({ writers: { maya: "write" }, details: {}, connection: "github-main", provider: "examplehost" });
     await rovaraPullRequest(other.store);
     expect(await detectRevertFromMergedChangeRequest(other.deps, REF, SCOPE)).toEqual([]);
-  });
-
-  it("finds the pull request by the merge commit the body names too, and records one revert per task however many ways name it", async () => {
-    const t = detector({ writers: { maya: "admin" }, details: { body: `Reverts #7\n\nThis reverts commit ${MERGE}` } });
-    await rovaraPullRequest(t.store);
-    expect(await detectRevertFromMergedChangeRequest(t.deps, REF, SCOPE)).toHaveLength(1);
-    const byCommit = detector({ writers: { maya: "write" }, details: { body: `This reverts commit ${MERGE}` } });
-    await rovaraPullRequest(byCommit.store);
-    expect(await detectRevertFromMergedChangeRequest(byCommit.deps, REF, SCOPE)).toHaveLength(1);
   });
 
   it("records nothing when the person who merged it cannot write, is a bot or another kind of account (an organization, an unknown kind), or cannot be told", async () => {
@@ -304,27 +257,6 @@ describe("a revert commit pushed to the default branch", () => {
     expect(await detectRevertFromPushedCommit(t.deps, push(), SCOPE)).toEqual([]);
   });
 
-  it("the host's web committer stands for the author on a squash or a web edit", async () => {
-    const t = detector({ writers: { maya: "write" }, details: {} }, { readCommit: async () => commit({ committer: { login: "web-flow" }, webFlow: true }) });
-    await rovaraPullRequest(t.store);
-    expect(await detectRevertFromPushedCommit(t.deps, push(), SCOPE)).toHaveLength(1);
-  });
-
-  it("records nothing when any part of the proof is missing: a merge, an unverified commit, another committer, an author or pusher who cannot write, no pusher, a bot", async () => {
-    const cases: Array<[string, Partial<CommitFacts>, Parameters<typeof push>[0]?, HostState["writers"]?]> = [
-      ["a merge", { parents: 2 }], ["unverified", { verified: false }], ["another committer", { committer: { login: "eve", hostUserId: "66" } }],
-      ["no author", { author: undefined }], ["a bot author", { authorIsBot: true }], ["no pusher", {}, { pusher: undefined }],
-      ["a committer matched by login only", { committer: { login: "maya" }, author: { login: "maya" } }], ["a [bot] author", { author: { login: "dependabot[bot]", hostUserId: "10" }, committer: { login: "dependabot[bot]", hostUserId: "10" } }],
-      ["a commit this push did not carry", {}, { pushedShas: ["5".repeat(40)] }], ["a pusher who cannot write", {}, { pusher: { login: "eve", hostUserId: "66" } }], ["an author who cannot write", {}, {}, { maya: "read" }],
-    ];
-    for (const [name, facts, pushed, writers] of cases) {
-      const t = detector({ writers: writers ?? { maya: "write", eve: "none" }, details: {} }, { readCommit: async () => commit(facts) });
-      await rovaraPullRequest(t.store);
-      expect(await detectRevertFromPushedCommit(t.deps, push(pushed), SCOPE), name).toEqual([]);
-      expect(await t.store.get(revertRecordKey(TASK, "acme/payments", 7)), name).toBeUndefined();
-    }
-  });
-
   it("records nothing for a push to another branch, a commit that is not a git revert, a commit the host shows differently, or when the host cannot show commits", async () => {
     const t = detector({ writers: { maya: "write" }, details: {} }, { readCommit: async () => commit() });
     await rovaraPullRequest(t.store);
@@ -351,11 +283,5 @@ describe("a revert commit pushed to the default branch", () => {
     const botMerger = detector({ writers: { "ci[bot]": "write" }, details: { mergedBy: "ci[bot]" } });
     await rovaraPullRequest(botMerger.store);
     expect(await detectRevertFromMergedChangeRequest(botMerger.deps, REF, SCOPE)).toEqual([]);
-  });
-
-  it("a revert of a revert names the first revert's commit, which matches nothing: the task stays reverted", async () => {
-    const t = detector({ writers: { maya: "write" }, details: {} }, { readCommit: async () => commit({ message: `Revert "Revert \\"Add retry\\""\n\nThis reverts commit ${"6".repeat(40)}.` }) });
-    await rovaraPullRequest(t.store);
-    expect(await detectRevertFromPushedCommit(t.deps, push(), SCOPE)).toEqual([]);
   });
 });

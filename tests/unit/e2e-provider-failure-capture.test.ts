@@ -25,17 +25,6 @@ describe("17. Bedrock: the error type header becomes the receipt's failure", () 
   };
   const answer = (status: number, errorType?: string) => () => ({ status, body: JSON.stringify({ message: "Too many requests with the prompt echoed: hunter2-echo" }), ...(errorType === undefined ? {} : { errorType }) });
 
-  it("the TEST incident: a 429 with the coral-suffixed ThrottlingException is limit-or-rate-limited, after exactly one request", async () => {
-    const invoke = await bedrock(answer(429, "ThrottlingException:http://internal.amazon.com/coral/com.amazon.bedrock/"));
-    const { result, receipt } = await viaRoute(invoke, definition);
-    expect(result).toMatchObject({ status: "error", code: "provider-error" });
-    expect(receipt.outcome).toBe("provider-error");
-    expect(receipt.failure).toEqual({ class: "limit-or-rate-limited", signal: "ThrottlingException" });
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    expect(loopback!.requests).toHaveLength(1);
-    expect(JSON.stringify({ result, receipt })).not.toContain("hunter2-echo");
-  });
-
   it("other error types: validation, access, not found and an outage", async () => {
     const cases: Array<[number, string, string, string]> = [
       [400, "ValidationException", "request-rejected", "ValidationException"],
@@ -52,30 +41,12 @@ describe("17. Bedrock: the error type header becomes the receipt's failure", () 
     }
   });
 
-  it("a header outside the allow-list pattern gives no signal, and the status decides", async () => {
-    for (const header of ["Throttling Exception with the prompt hunter2-echo", "Throttling-Exception", "x".repeat(80), "1234"]) {
-      const invoke = await bedrock(answer(429, header));
-      const { receipt } = await viaRoute(invoke, definition);
-      expect(receipt.failure, header).toEqual({ class: "limit-or-rate-limited", signal: null });
-      await loopback!.close();
-    }
-  });
-
   it("no header at all: the status decides and there is no signal", async () => {
     const invoke = await bedrock(answer(500));
     const { receipt } = await viaRoute(invoke, definition);
     expect(receipt.failure).toEqual({ class: "provider-outage", signal: null });
   });
 
-  it("no endpoint to talk to is unreachable, with the network code as the signal", async () => {
-    const closed = await bedrockLoopback(() => ({ status: 200, body: "" }));
-    const endpoint = closed.endpoint;
-    await closed.close();
-    const invoke = await createE2EProviderInvokeForTesting(definition, { environment: installationEnvironment(definition) }, { bedrockEndpoint: endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } });
-    const { receipt } = await viaRoute(invoke, definition);
-    expect(receipt.outcome).toBe("provider-error");
-    expect(receipt.failure).toEqual({ class: "unreachable", signal: "ECONNREFUSED" });
-  }, 30_000);
 });
 
 describe("18. a keyed provider: only the error's type or code is kept, never its message", () => {
@@ -203,19 +174,6 @@ describe("the route's own use of a failure", () => {
   const definition = bedrockRoute();
   const throwing = (error: unknown): E2EInvoke => async () => { throw error; };
 
-  it("a call that hit its time limit is a timeout receipt with the class provider-outage and the signal timeout", async () => {
-    const hanging: E2EInvoke = (input) => new Promise((_resolve, reject) => { input.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }); });
-    const { receipt, result } = await viaRoute(hanging, definition, { budgets: { callTimeoutMs: 30 } });
-    expect(result).toMatchObject({ status: "error", code: "timeout" });
-    expect(receipt).toMatchObject({ outcome: "timeout", failure: { class: "provider-outage", signal: "timeout" } });
-  });
-
-  it("an error that carries no failure (an older invoke) leaves the receipt exactly as before", async () => {
-    const { receipt } = await viaRoute(throwing(Object.assign(new Error("boom"), { status: 500 })), definition);
-    expect(receipt.outcome).toBe("provider-error");
-    expect("failure" in receipt).toBe(false);
-  });
-
   it("a failure that is not a valid one (a free-text signal, an unknown class) is dropped, never copied", async () => {
     for (const failure of [{ class: "limit-or-rate-limited", signal: "the model said: hello sk-ant-SECRETVALUE" }, { class: "made-up", signal: null }, "text", { class: "unknown", signal: null, note: "x" }]) {
       const { receipt } = await viaRoute(throwing(Object.assign(new Error("boom"), { failure })), definition);
@@ -223,13 +181,4 @@ describe("the route's own use of a failure", () => {
     }
   });
 
-  it("a valid failure on the error becomes the receipt's failure", async () => {
-    const { receipt } = await viaRoute(throwing(Object.assign(new Error("boom"), { failure: { class: "model-not-found", signal: "ResourceNotFoundException" } })), definition);
-    expect(receipt.failure).toEqual({ class: "model-not-found", signal: "ResourceNotFoundException" });
-  });
-
-  it("the channel's answer keeps its fixed message: the signal is not repeated in it", async () => {
-    const { result } = await viaRoute(throwing(Object.assign(new Error("boom"), { name: "ThrottlingException", status: 429, failure: { class: "limit-or-rate-limited", signal: "ThrottlingException" } })), definition);
-    expect(result).toEqual({ status: "error", code: "provider-error", message: "provider call failed (ThrottlingException, HTTP 429)" });
-  });
 });

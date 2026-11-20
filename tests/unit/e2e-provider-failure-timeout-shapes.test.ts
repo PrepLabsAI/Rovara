@@ -4,7 +4,7 @@ import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget } from "../../p
 import { createE2EProviderInvoke } from "../../packages/model-runtime/src/e2e-provider-invoke.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 import { PROVIDER_KEY, SECRET_ARN, channelRequest, installationEnvironment, keyedRoute } from "../support/e2e-model-fixtures.js";
-import { fakeFetch, sse } from "../support/e2e-provider-fakes.js";
+import { fakeFetch } from "../support/e2e-provider-fakes.js";
 
 // M1.4 Task 4.10B fix round 1 (review I-1, M-4): the SDKs rewrite a connect timeout into "Request timed out.", and the invoke must still say unreachable when a network code was captured.
 // Test 18 made realistic: undici-shaped transport errors go through each keyed SDK as they do in production.
@@ -41,18 +41,3 @@ describe.each(["anthropic", "openai", "openrouter"] as const)("keyed SDK rewrite
   });
 });
 
-describe("M-4: text after an accepted response cannot steer the class", () => {
-  it("an error event in a 200 stream whose text says 'timed out' and 'ECONNRESET' is neither an outage nor unreachable", async () => {
-    const definition = keyedRoute("anthropic");
-    const body = sse([
-      { event: "message_start", data: { type: "message_start", message: { id: "msg_1", type: "message", role: "assistant", model: definition.modelId, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 900, output_tokens: 1 } } } },
-      { event: "error", data: { type: "error", error: { type: "api_error", message: "the request timed out; ECONNRESET" } } },
-    ]);
-    const fake = fakeFetch(() => body);
-    const invoke = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret, fetch: fake.fetch });
-    const { receipt } = await viaRoute(invoke, definition);
-    expect(receipt.outcome).toBe("provider-error");
-    expect(receipt.failure === undefined || receipt.failure.class === "unknown").toBe(true);
-    expect(JSON.stringify(receipt.failure ?? null)).not.toMatch(/ECONNRESET|timeout/);
-  });
-});

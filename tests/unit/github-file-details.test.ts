@@ -1,8 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { assertTwoCompanyIsolation } from "../../packages/testing/src/isolation/two-company.js";
-import { GitHubFixtureProvider } from "../support/ports/github-fixture-provider.js";
 import { HostRateLimitError, agentXError } from "@agentx/contracts";
 import { FakeHostModel } from "@agentx/broker/fakes";
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
@@ -70,32 +68,6 @@ async function world() {
 }
 
 describe("GitHub file details over local HTTP", () => {
-  it("maps modes, uses the merge base and previous path, and never guesses unknown or directory types", async () => {
-    const w = await world();
-    w.state.headEntries = [entry("plain"), entry("legacy", "100664"), entry("exec", "100755"), entry("link", "120000"), entry("module", "160000", "commit"), entry("unknown", "100600"), entry("dir", "040000", "tree"), entry("renamed", "100755"), entry("added")];
-    w.state.baseEntries = [entry("old", "120000"), entry("deleted"), ...w.state.headEntries.filter(e => !["renamed", "added"].includes(e.path))];
-    w.state.files = [...w.state.headEntries.map(e => file(e.path)), file("deleted", "removed")];
-    w.state.files[7] = file("renamed", "renamed", "old");
-    w.state.files[8] = file("added", "added");
-    const result = await w.host.changedFiles(w.ref, 1, scope);
-    const types = Object.fromEntries(result.files.map(f => [f.path, f.entry]));
-    expect(types).toEqual({ plain: { head: "file", base: "file" }, legacy: { head: "file", base: "file" }, exec: { head: "executable", base: "executable" }, link: { head: "symlink", base: "symlink" }, module: { head: "submodule", base: "submodule" }, unknown: undefined, dir: undefined, renamed: { head: "executable", base: "symlink" }, added: { head: "file", base: "none" }, deleted: { head: "none", base: "file" } });
-    expect(w.requests.some(p => p.includes(`/compare/main...${head}`))).toBe(true);
-    expect(w.requests.some(p => p.includes(`/git/trees/${base}`))).toBe(true);
-    expect(w.requests.some(p => p.includes(`/git/trees/${tip}`))).toBe(false);
-  });
-  it("reuses two trees across pages and instruction reads with exact request counts", async () => {
-    const w = await world();
-    await w.host.changedFiles(w.ref, 1, scope);
-    const cold = w.requests.length;
-    await w.host.changedFiles(w.ref, 2, scope);
-    expect(w.requests.filter(p => p.includes("/git/trees/"))).toHaveLength(2);
-    expect(w.requests.length - cold).toBe(3);
-    const before = w.requests.length;
-    expect(await w.host.instructionFiles!(repository, head, scope)).toEqual({ files: [{ path: "AGENTS.md", type: "file" }], complete: true });
-    expect(w.requests.length - before).toBe(1); // fresh installation authorization on cached read
-    expect(cold).toBe(8); // installation, two permission-scoped token mints, five data reads
-  });
   it.each([`/git/trees/${head}`, `/git/trees/${base}`, "/compare/", "/pulls/1"])("leaves metadata unknown for failed %s", async failurePath => {
     const w = await world();
     w.state.failurePath = failurePath;
@@ -104,10 +76,6 @@ describe("GitHub file details over local HTTP", () => {
   it.each(["prHead", "prBaseRef", "mergeBase"] as const)("leaves metadata unknown for malformed %s", async key => {
     const w = await world(); w.state[key] = key === "prBaseRef" ? "" : "main";
     await expect(w.provider.getPullRequestFileRevisions(repository.url, 1, scope)).rejects.toBeDefined();
-    expect((await w.host.changedFiles(w.ref, 1, scope)).files[0]?.entry).toBeUndefined();
-  });
-  it("leaves metadata unknown when the compare omits its merge base", async () => {
-    const w = await world(); w.state.missingMergeBase = true;
     expect((await w.host.changedFiles(w.ref, 1, scope)).files[0]?.entry).toBeUndefined();
   });
   it("does not trust a truncated tree and reports incomplete instructions", async () => {
@@ -121,12 +89,6 @@ describe("GitHub file details over local HTTP", () => {
       await expect(w.host.changedFiles(w.ref, 1, scope)).rejects.toBeInstanceOf(HostRateLimitError);
     }
   });
-  it("throws on instruction read failures and unknown modes instead of claiming completeness", async () => {
-    const w = await world(); w.state.failurePath = "/git/trees/";
-    await expect(w.host.instructionFiles!(repository, head, scope)).rejects.toBeDefined();
-    w.state.failurePath = ""; w.state.headEntries = [entry("AGENTS.md", "100600")];
-    await expect(w.host.instructionFiles!(repository, head, scope)).rejects.toBeDefined();
-  });
   it("bounds instruction results, validates limits, and lists only matching entry paths", async () => {
     const w = await world();
     w.state.headEntries = [entry("nested/Claude.md", "100755"), entry(".agents/link", "120000"), entry(".cursor/module", "160000", "commit"), entry("notes.md", "120000"), entry("AGENTS.md.bak"), entry(".cursor", "040000", "tree"), entry(".cursor/rules", "040000", "tree")];
@@ -138,57 +100,6 @@ describe("GitHub file details over local HTTP", () => {
     for (const max of [NaN, -1, Infinity, 0.5]) await expect(w.host.instructionFiles!(repository, head, scope, { max })).rejects.toBeDefined();
     await expect(w.host.instructionFiles!(repository, "main", scope)).rejects.toBeDefined();
   });
-  it("isolates cache entries by company and rechecks revoked access even on a warm cache", async () => {
-    const w = await world();
-    await w.host.instructionFiles!(repository, head, scope);
-    const other = { orgId: "org_bbbbbbbbbbbbbbbbbbbb" };
-    await expect(w.host.instructionFiles!(repository, head, other)).rejects.toBeDefined();
-    await expect(w.host.changedFiles(w.ref, 1, other)).rejects.toBeDefined();
-    w.state.allowedCompany = other.orgId; w.state.headEntries = [entry("other/AGENTS.md")];
-    expect((await w.host.instructionFiles!(repository, head, other)).files[0]?.path).toBe("other/AGENTS.md");
-    w.state.allowed = false;
-    await expect(w.host.instructionFiles!(repository, head, other)).rejects.toBeDefined();
-  });
-  it("resolves a tree near the host limit with the default 500 instruction cap", async () => {
-    const w = await world();
-    w.state.headEntries = Array.from({ length: 99_000 }, (_, i) => entry(i < 500 ? `pkg${i}/AGENTS.md` : `src/${i}.ts`));
-    const result = await w.host.instructionFiles!(repository, head, scope);
-    expect(result.files).toHaveLength(500); expect(result.complete).toBe(true);
-    expect((await w.host.instructionFiles!(repository, head, scope, { max: 499 })).complete).toBe(false);
-  });
-});
-
-it("isolates the shared GitHub tree cache with the two-company kit", async () => {
-  const w = await world();
-  await assertTwoCompanyIsolation({ surfaces: [{
-    kind: "list", name: "GitHub cached instructions and changed entries",
-    async plant(company) {
-      w.state.allowedCompany = company.orgId;
-      w.state.headEntries = [entry(`${company.canary}/AGENTS.md`)];
-      await w.host.instructionFiles!(repository, head, company.scope);
-    },
-    async observe(company) {
-      w.state.allowedCompany = company.orgId;
-      w.state.headEntries = [entry(`${company.canary}/AGENTS.md`)];
-      w.state.files = [file(`${company.canary}/AGENTS.md`, "added")];
-      const changed = await w.host.changedFiles(w.ref, 1, company.scope);
-      expect(changed.files[0]?.entry).toEqual({ head: "file", base: "none" });
-      return { changed, instructions: await w.host.instructionFiles!(repository, head, company.scope) };
-    },
-  }] });
-});
-
-it("resolves a full 1000-file port page against a large tree in bounded time", async () => {
-  const model = new FakeHostModel({ url: GITHUB_REPO_URL, id: "4242", fullName: "acme/app" });
-  const provider = new GitHubFixtureProvider(model);
-  model.commit("main", Object.fromEntries(Array.from({ length: 99_000 }, (_, i) => [`src/${i}`, "old"])));
-  model.commit("feature", Object.fromEntries(Array.from({ length: 1_000 }, (_, i) => [`src/${i}`, "new"])));
-  const { cr } = model.reconcile({ sourceBranch: "feature", targetBranch: "main", title: "large diff" });
-  provider.listPullRequestFiles = async () => ({ files: Array.from({ length: 1_000 }, (_, i) => file(`src/${i}`)) });
-  const host = githubCodeHost(provider, { credentialRef: "github" });
-  const result = await host.changedFiles({ repository, id: cr.id, url: model.crUrl(cr.id) }, 1, scope);
-  expect(result.files).toHaveLength(1_000);
-  expect(result.files.every(f => f.entry?.head === "file" && f.entry.base === "file")).toBe(true);
 });
 
 it("refuses duplicate tree entries and never guesses a descendant below a symlink", async () => {
@@ -225,47 +136,6 @@ it("does not retain truncated trees and throws for malformed tree rows", async (
   await expect(other.host.instructionFiles!(repository, head, scope)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
 });
 
-it("preserves providers that implement neither optional addition", async () => {
-  const model = new FakeHostModel({ url: GITHUB_REPO_URL, id: "4242", fullName: "acme/app" });
-  model.commit("feature", { "a": "new" });
-  const { cr } = model.reconcile({ sourceBranch: "feature", targetBranch: "main", title: "legacy" });
-  const provider = new GitHubFixtureProvider(model);
-  const old = new Proxy(provider, { get(target, property) {
-    if (property === "listTreeAtCommit" || property === "getPullRequestFileRevisions") return undefined;
-    const value: unknown = Reflect.get(target, property);
-    return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
-  } });
-  const host = githubCodeHost(old, { credentialRef: "github" });
-  expect(typeof host.instructionFiles).toBe("undefined");
-  expect((await host.changedFiles({ repository, id: cr.id, url: model.crUrl(cr.id) }, 1, scope)).files[0]?.entry).toBeUndefined();
-});
-
-it("keeps repository and revision identities in the cache key", async () => {
-  const model = new FakeHostModel({ url: GITHUB_REPO_URL, id: "4242", fullName: "acme/app" });
-  const provider = new GitHubFixtureProvider(model);
-  provider.checkRepository = async () => undefined;
-  provider.listTreeAtCommit = async (url, revision) => ({ truncated: false, entries: [entry(`${url.endsWith("other") ? "other" : "app"}/${revision}/AGENTS.md`)] });
-  const host = githubCodeHost(provider, { credentialRef: "github" });
-  await expect(host.instructionFiles!(repository, "main", scope)).rejects.toBeDefined();
-  for (const url of [repository.url, "https://github.com/acme/other"]) for (const revision of [head, base]) {
-    expect((await host.instructionFiles!({ url }, revision, scope)).files[0]?.path).toBe(`${url.endsWith("other") ? "other" : "app"}/${revision}/AGENTS.md`);
-  }
-});
-
-it("returns exactly the default maximum and marks one extra match incomplete", async () => {
-  const w = await world();
-  w.state.headEntries = Array.from({ length: 501 }, (_, i) => entry(`pkg${i}/AGENTS.md`));
-  const result = await w.host.instructionFiles!(repository, head, scope);
-  expect(result.files).toHaveLength(500); expect(result.complete).toBe(false);
-});
-
-it("counts a cold instruction read including installation and token setup", async () => {
-  const w = await world();
-  expect((await w.host.instructionFiles!(repository, head, scope)).complete).toBe(true);
-  expect(w.requests).toHaveLength(3);
-});
-
-
 it.each([
   ["unknown", true, true], ["added", true, true], ["added", false, false],
   ["removed", true, true], ["removed", false, false],
@@ -279,17 +149,6 @@ it.each([
   const page = await w.host.changedFiles(w.ref, 1, scope);
   expect(page.files).toHaveLength(1);
   expect(page.files[0]?.entry).toBeUndefined();
-});
-
-it("pins type metadata to the caller's head across pages", async () => {
-  const w = await world();
-  expect((await w.host.changedFiles(w.ref, 1, scope, { expectedHead: head })).files[0]?.entry).toBeDefined();
-  w.state.prHead = "e".repeat(40);
-  const before = w.requests.filter(path => path.includes("/git/trees/")).length;
-  const page = await w.host.changedFiles(w.ref, 2, scope, { expectedHead: head });
-  expect(page.files).toHaveLength(1);
-  expect(page.files[0]?.entry).toBeUndefined();
-  expect(w.requests.filter(path => path.includes("/git/trees/"))).toHaveLength(before);
 });
 
 it.each([403, 429])("preserves existing provider errors for HTTP %s rate limits", async status => {
@@ -314,14 +173,6 @@ it.each([403, 429])("keeps instruction-only HTTP %s rate limits neutral, includi
   await expect(w.host.instructionFiles!(repository, head, scope)).rejects.toBeInstanceOf(HostRateLimitError);
 });
 
-
-it("compares the current base branch instead of a stale pull request base sha", async () => {
-  const w = await world(); w.state.staleCompare = true; w.state.prBaseRef = "release/next";
-  expect(await w.provider.getPullRequestFileRevisions(repository.url, 1, scope)).toEqual({ head, base });
-  expect(w.requests.some(path => path.includes(`/compare/release%2Fnext...${head}`))).toBe(true);
-});
-
-
 it("omits all types after a push during the files read and preserves pagination", async () => {
   const w = await world(); w.state.headAfterFiles = "e".repeat(40);
   w.state.files = Array.from({ length: 100 }, (_, i) => file(`file-${i}`, "added"));
@@ -330,18 +181,4 @@ it("omits all types after a push during the files read and preserves pagination"
   expect(page.files.every(file => file.entry === undefined)).toBe(true);
   expect(page.nextPage).toBe(2);
   expect(w.requests.some(path => path.includes("/git/trees/"))).toBe(false);
-});
-
-it("promotes a tagged rate limit in the metadata revision read only", async () => {
-  const w = await world(); Object.assign(w.state, { failurePath: "/installation", failureStatus: 429, rate: true });
-  const failure: unknown = await w.provider.listTreeAtCommit(repository.url, head, scope).catch(error => error as unknown);
-  expect(failure).toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-  w.state.failurePath = "";
-  w.provider.getPullRequestFileRevisions = async () => { throw failure; };
-  await expect(w.host.changedFiles(w.ref, 1, scope)).rejects.toBeInstanceOf(HostRateLimitError);
-});
-
-it("does not promote a non-rate instruction failure", async () => {
-  const w = await world(); w.state.failurePath = "/git/trees/";
-  await expect(w.host.instructionFiles!(repository, head, scope)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
 });

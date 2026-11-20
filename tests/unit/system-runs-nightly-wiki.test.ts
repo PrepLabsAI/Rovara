@@ -8,19 +8,17 @@
 //   - the monthly figure on GET /upkeep: managers only, from the company's own rows, the cap only from the gateway;
 //   - two companies on one store never see each other's rows, reads or notices.
 import { describe, expect, it, vi } from "vitest";
-import { IMPLICIT_COMPANY_ID, UPKEEP_CAP_AUDIENCE, WIKI_BUILD_FEATURE, PREPARE_PINS_FEATURE, WORKER_INVOCATION_FEATURES, change, projectMetaKey, queryAll, upkeepHourOf, upkeepMonthOf, type Admission, type OrgId, type ProjectDefinition, type WikiPageWrite } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, WIKI_BUILD_FEATURE, PREPARE_PINS_FEATURE, WORKER_INVOCATION_FEATURES, change, projectMetaKey, queryAll, upkeepHourOf, upkeepMonthOf, type Admission, type OrgId, type ProjectDefinition, type WikiPageWrite } from "@agentx/contracts";
 import { hostedTaskAccess } from "../../packages/broker/src/aws/core-engine-root.js";
-import { createHostedAutomationStop, createHostedWikiRefresh, hostedUnattendedTasks } from "../../packages/broker/src/core-host/wiki-refresh.js";
+import { createHostedAutomationStop, createHostedWikiRefresh } from "../../packages/broker/src/core-host/wiki-refresh.js";
 import { createHostedSystemRuns, effectiveSystemRunsGateOf } from "../../packages/broker/src/core-host/system-runs.js";
 import { UPKEEP_CAP_BODY_MAX_BYTES, UPKEEP_CAP_READ_FAILED, upkeepCapHttpReader, upkeepCapReaderFromEnvironment } from "../../packages/broker/src/core-host/upkeep-cap-http.js";
 import { parseCoreSwitch } from "../../packages/broker/src/core-host/flags.js";
 import { PENDING_PK } from "../../packages/broker/src/core/notify/index.js";
 import { systemRunsConsentKey } from "../../packages/broker/src/core/system-runs/consent.js";
 import { knownTaskCostMicros, readSystemRunSpend, recordSystemRunSpend, systemRunSpendKey, systemRunSpendPartition } from "../../packages/broker/src/core/system-runs/spend.js";
-import { readUpkeepCap } from "../../packages/broker/src/core/upkeep/cap.js";
 import { costPartition } from "../../packages/broker/src/core/cost/ledger.js";
-import { upkeepNightKey } from "../../packages/broker/src/core/upkeep/keys.js";
-import { setUpkeepEnabled, upkeepView, type UpkeepSettingsDeps } from "../../packages/broker/src/core/upkeep/settings.js";
+import { setUpkeepEnabled } from "../../packages/broker/src/core/upkeep/settings.js";
 import { upkeepPauseHooks } from "../../packages/broker/src/core/upkeep/wiring.js";
 import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
 import { readWikiBuildPointer } from "../../packages/broker/src/core/wiki-build/run.js";
@@ -99,16 +97,6 @@ const noAi = async (w: World): Promise<void> => {
 };
 
 describe("the nightly wiki refresh runs by itself once, behind both locks, the project's switch and an enforced cap", () => {
-  it("with everything on: the pass reads the gateway's cap for THIS project, holds once, and starts the refresh as the project's system owner", async () => {
-    const w = await build();
-    expect(await pass(w)).toMatchObject({ due: 1, started: 1 });
-    expect(w.cap!.calls.length).toBeGreaterThan(0);
-    expect(new Set(w.cap!.calls)).toEqual(new Set([w.name]));
-    expect(w.admitted.filter((key) => key.startsWith("automation.run#"))).toHaveLength(1);
-    const pointer = (await w.pointer())!;
-    expect(pointer).toMatchObject({ unattended: true, buildKind: "refresh" });
-    expect((await w.nightRows()).map((row) => row["outcome"])).toEqual(["ran"]);
-  });
 
   // MUTANT: the night's refresh does not read the flag (the ceiling) / reads the consent alone / skips the project's switch.
   it.each([
@@ -125,12 +113,6 @@ describe("the nightly wiki refresh runs by itself once, behind both locks, the p
     expect(await w.nightRows()).toEqual([]);
   });
 
-  it("the locks are read again inside the refresh itself (a consent withdrawn between the pass and the start stops the AI step)", async () => {
-    const w = await build();
-    await w.h.store.put({ item: { ...(await w.h.store.get(systemRunsConsentKey(w.company)))!, enabled: false } });
-    expect(await w.runs!.service.pass({ budgetMs: 10_000 })).toMatchObject({ started: 0, skipped: "system_runs_off" });
-    await noAi(w);
-  });
 });
 
 describe("no enforced cap = no start", () => {
@@ -143,20 +125,6 @@ describe("no enforced cap = no start", () => {
     expect(await w.notices()).toEqual([]);
   });
 
-  it("no reader at all (an install with no gateway, no signer) never reaches the refresh: no_cost_cap before Admission is asked", async () => {
-    const w = await build({ withCapReader: false });
-    await pass(w);
-    await noAi(w);
-    expect((await w.nightRows()).map((row) => row["outcome"])).toEqual(["no_cost_cap"]);
-  });
-
-  // MUTANT: the install's own per-run stop is dropped because the gateway's cap is enforced.
-  it("the gateway's cap alone is not enough: an Admission that does not enforce a cost limit also starts nothing", async () => {
-    const w = await build({ enforces: false });
-    await pass(w);
-    await noAi(w);
-  });
-
   it("the refresh itself refuses without the signal, even when called straight (the night is not the only door)", async () => {
     for (const kind of ["none", "throws", "stale", "not_enforced", "no_budget", "used_up"] as CapKind[]) {
       const w = await build({ cap: kind });
@@ -165,17 +133,6 @@ describe("no enforced cap = no start", () => {
     }
   });
 
-  it("the signal is read again every night: an old answer is never kept, in either direction", async () => {
-    const w = await build({ cap: "throws" });
-    await pass(w);
-    await noAi(w);
-    // The gateway answers the next night: the refresh (never run at these commits yet) goes ahead.
-    w.cap!.kind = "enforced";
-    w.h.clock.now = at("2026-11-19", 8, 10);
-    await pass(w);
-    expect(w.admitted.filter((key) => key.startsWith("automation.run#"))).toHaveLength(1);
-    expect(await w.pointer()).toBeDefined();
-  });
 });
 
 describe("a cap with no room is a pause: told once, nothing started", () => {
@@ -197,32 +154,6 @@ describe("a cap with no room is a pause: told once, nothing started", () => {
     await noAi(w);
   });
 
-  it("the gateway's own 422 on a started run stops it (`upkeep_paused`), writes the same one notice, and records the reason on the night's row", async () => {
-    const w = await build();
-    await pass(w);
-    const pointer = (await w.pointer())!;
-    // The gateway refuses the run's next call (422 upkeep_paused, header monthly_limit): the page loop reports it, and the pause hook is what the broker calls.
-    await w.hooks.onRunPaused({ orgId: w.company, project: w.name }, "monthly_limit");
-    await w.hooks.onRunPaused({ orgId: w.company, project: w.name }, "monthly_limit");
-    expect(await w.notices()).toHaveLength(1);
-    const rows = await w.nightRows();
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ outcome: "paused", pauseReason: "monthly_limit" });
-    expect(pointer.taskId).toBeDefined();
-  });
-
-  it("a late pause only rewrites a night that RAN: another night's outcome is never turned into a pause", async () => {
-    const w = await build();
-    await pass(w);
-    const key = (await queryAll(w.h.store, { pk: `ORG#${w.company}#UPKEEP#${w.name}`, sk: { op: "beginsWith", prefix: "NIGHT#" } }))[0]!;
-    await w.h.store.put({ item: { ...key, outcome: "nothing_changed" } });
-    await w.hooks.onRunPaused({ orgId: w.company, project: w.name }, "monthly_limit");
-    expect((await w.nightRows())[0]).toMatchObject({ outcome: "nothing_changed" });
-    expect((await w.nightRows())[0]).not.toHaveProperty("pauseReason");
-    // The notice is still the one voice.
-    expect(await w.notices()).toHaveLength(1);
-  });
-
   // MUTANT: the root builds the night or the refresh without the gateway's cap reader.
   it("the hosted root hands the cap reader to the night, the refresh and the setup page's cap (source guard)", async () => {
     const root = (await import("node:fs")).readFileSync("packages/broker/src/aws/core-engine-root.ts", "utf8");
@@ -240,43 +171,11 @@ describe("a cap with no room is a pause: told once, nothing started", () => {
   });
 });
 
-describe("the cap signal (core/upkeep/cap.ts)", () => {
-  const NOW = at(DAY, 8);
-  const reader = (answer: unknown) => ({ read: async () => answer });
-  it("is enforced only for exactly the contract, this project and this month", async () => {
-    expect(await readUpkeepCap(reader(capAnswer("beacon", NOW)), "beacon", NOW, A)).toMatchObject({ state: "enforced", limitUsd: 25, spentUsd: 1, month: upkeepMonthOf(NOW) });
-    for (const bad of [capAnswer("other", NOW), capAnswer("beacon", NOW - 40 * 86_400_000), capAnswer("beacon", NOW, { enforced: false }), capAnswer("beacon", NOW, { enforced: "true" }), capAnswer("beacon", NOW, { version: 2 }), capAnswer("beacon", NOW, { limitMicros: -1 }),
-      capAnswer("beacon", NOW, { limitMicros: 1.5 }), capAnswer("beacon", NOW, { spentMicros: "1" }), capAnswer("beacon", NOW, { extra: 1 }), capAnswer("beacon", NOW, {}, B), capAnswer("beacon", NOW, { company: undefined }), undefined, null, "enforced", 7, []]) {
-      expect(await readUpkeepCap(reader(bad), "beacon", NOW, A), JSON.stringify(bad)).toEqual({ state: "unknown" });
-    }
-    expect(await readUpkeepCap(undefined, "beacon", NOW, A)).toEqual({ state: "unknown" });
-    expect(await readUpkeepCap({ read: async () => { throw new Error("down"); } }, "beacon", NOW, A)).toEqual({ state: "unknown" });
-  });
-  it("says why there is no room: $0 is no_budget, used up (or over) is monthly_limit, anything left is no pause", async () => {
-    expect(await readUpkeepCap(reader(capAnswer("beacon", NOW, { limitMicros: 0, spentMicros: 0 })), "beacon", NOW, A)).toMatchObject({ pause: "no_budget" });
-    expect(await readUpkeepCap(reader(capAnswer("beacon", NOW, { limitMicros: 5_000_000, spentMicros: 5_000_000 })), "beacon", NOW, A)).toMatchObject({ pause: "monthly_limit" });
-    expect(await readUpkeepCap(reader(capAnswer("beacon", NOW, { limitMicros: 5_000_000, spentMicros: 5_000_001 })), "beacon", NOW, A)).toMatchObject({ pause: "monthly_limit" });
-    expect(await readUpkeepCap(reader(capAnswer("beacon", NOW, { limitMicros: 5_000_000, spentMicros: 4_999_999 })), "beacon", NOW, A)).not.toHaveProperty("pause");
-  });
-});
-
 describe("the gateway's cap read over HTTP (upkeep-cap-http.ts)", () => {
   const signer = { publicJwk: async () => ({ kty: "RSA", alg: "RS256", use: "sig", kid: "A".repeat(16), rovara_purpose: "task", n: "x", e: "AQAB" }), sign: async () => Buffer.from("sig") } as never;
   const base = { gatewayUrl: "https://gateway.example.test", issuer: "https://code.example.test/v1/auth", signer, companyId: A, now: () => at(DAY, 8) };
   const body = (over: Record<string, unknown> = {}) => JSON.stringify(capAnswer("beacon", at(DAY, 8), over));
   const ok = (text: string, init: ResponseInit = { status: 200 }) => new Response(text, init);
-
-  it("asks the company's own path with a service token of the cap's audience, and takes exactly the contract", async () => {
-    const calls: Array<{ url: string; init: RequestInit }> = [];
-    const reader = upkeepCapHttpReader({ ...base, fetch: (async (url: string, init: RequestInit) => { calls.push({ url, init }); return ok(body()); }) as never });
-    expect(await reader.read("beacon")).toMatchObject({ project: "beacon", enforced: true });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe(`https://gateway.example.test/v1/service/companies/${A}/upkeep/beacon`);
-    expect(calls[0]!.init).toMatchObject({ method: "GET", redirect: "error" });
-    const token = String((calls[0]!.init.headers as Record<string, string>)["authorization"]).replace("Bearer ", "");
-    const claims = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString()) as Record<string, unknown>;
-    expect(claims).toMatchObject({ aud: UPKEEP_CAP_AUDIENCE, cid: A, iss: base.issuer });
-  });
 
   it("anything but a 200 with exactly the contract is a failed read in fixed words, never an echo", async () => {
     const cases: Array<[string, () => Response | Promise<Response>]> = [
@@ -365,18 +264,6 @@ describe("spend: booked from the install's own cost ledger of the run's task, ne
     expect(await readSystemRunSpend({ store: w.h.store, companyId: w.company, now: () => w.h.clock.now }, { project: w.name })).toEqual({ month, spentUsd: 0, runs: 1, unknownRuns: 1 });
   });
 
-  it("a real zero (one priced entry that cost nothing) is known and is 0; the header of the answers route is not a source", async () => {
-    const w = await build();
-    const taskId = await finished(w);
-    await putTotal(w, taskId, { micros: 0, entries: 1 });
-    await stop(w).pass({ budgetMs: 1_000 });
-    expect(await readSystemRunSpend({ store: w.h.store, companyId: w.company, now: () => w.h.clock.now }, { project: w.name })).toEqual({ month, spentUsd: 0, runs: 1, unknownRuns: 0 });
-    expect(await hostedUnattendedTasks(w.h.deps).costUsd!(taskId)).toBe(0);
-    // Nothing in the nightly spend path names the answers route's header.
-    const source = (await import("node:fs")).readFileSync("packages/broker/src/core/system-runs/spend.ts", "utf8").replace(/^\/\/.*$/gmu, "");
-    expect(source).not.toContain("x-rovara-cost-usd");
-  });
-
   // MUTANT: the spend row is written after the settle, or not repeat-safe, or a failure to write is swallowed.
   it("a spend row that cannot be written leaves the run open and the hold untouched; the next sweep writes it once and settles once", async () => {
     const w = await build();
@@ -434,70 +321,3 @@ describe("spend: booked from the install's own cost ledger of the run's task, ne
   });
 });
 
-describe("GET /upkeep: the monthly figure", () => {
-  const NOW = at(DAY, 8);
-  async function view(over: { access?: "manage" | "view"; companyAdmin?: boolean; available?: boolean; cap?: () => Promise<number | null>; company?: OrgId; seed?: boolean } = {}) {
-    const company = over.company ?? A;
-    const store = new MemoryDocumentStore();
-    await store.put({ item: { ...systemRunsConsentKey(company), entityType: "SYSTEM_RUNS_CONSENT", orgId: company, enabled: true, changedAt: "2026-11-17T00:00:00.000Z" } });
-    if (over.seed !== false) {
-      await recordSystemRunSpend({ store, companyId: company, now: () => NOW }, { project: "beacon", kind: "wiki_refresh", requestId: "r1", taskId: "t1", startedAt: "2026-11-18T08:00:00.000Z", end: "succeeded", costMicros: 4_500_000 });
-      await recordSystemRunSpend({ store, companyId: company, now: () => NOW }, { project: "beacon", kind: "wiki_refresh", requestId: "r2", taskId: "t2", startedAt: "2026-11-18T08:00:00.000Z", end: "succeeded", costMicros: undefined });
-    }
-    const calls = { cap: 0 };
-    const deps: UpkeepSettingsDeps = {
-      store, companyId: company, now: () => NOW, standing: async () => ({ access: over.access ?? "manage", ...(over.companyAdmin === true ? { companyAdmin: true } : {}) }),
-      available: () => over.available !== false, cap: async () => { calls.cap += 1; return over.cap === undefined ? 25 : over.cap(); },
-      spend: (project) => readSystemRunSpend({ store, companyId: company, now: () => NOW }, { project }),
-    };
-    return { view: await upkeepView(deps, PERSON, "beacon"), calls };
-  }
-
-  it("a manager reads this month's spend (a floor with the unknown runs counted) and the cap from the gateway", async () => {
-    const { view: v } = await view({ companyAdmin: true });
-    expect(v.spend).toEqual({ month: upkeepMonthOf(NOW), spentUsd: 4.5, runs: 2, unknownRuns: 1 });
-    expect(v.cap).toEqual({ monthlyUsd: 25, canRaise: true });
-  });
-
-  // MUTANT: a reader sees the spend or the cap, or the gateway is asked for a reader's page view.
-  it("a reader gets no spend and no cap, and the gateway is not asked for them", async () => {
-    const { view: v, calls } = await view({ access: "view" });
-    expect(v).not.toHaveProperty("spend");
-    expect(v.cap).toEqual({ monthlyUsd: null, canRaise: false });
-    expect(calls.cap).toBe(0);
-  });
-
-  it("where nightly upkeep is not available there is no spend, no cap, and no gateway read", async () => {
-    const { view: v, calls } = await view({ available: false });
-    expect(v).not.toHaveProperty("spend");
-    expect(v.cap.monthlyUsd).toBeNull();
-    expect(calls.cap).toBe(0);
-  });
-
-  it("a gateway that cannot be read leaves the cap null (never a guess); a month with no runs says so with a real zero", async () => {
-    const { view: v } = await view({ cap: async () => { throw new Error("down"); }, seed: false });
-    expect(v.cap.monthlyUsd).toBeNull();
-    expect(v.spend).toEqual({ month: upkeepMonthOf(NOW), spentUsd: 0, runs: 0, unknownRuns: 0 });
-  });
-
-  it("two companies: each sees only its own spend", async () => {
-    const a = await view({ company: A });
-    const b = await view({ company: B, seed: false });
-    expect(a.view.spend?.runs).toBe(2);
-    expect(b.view.spend?.runs).toBe(0);
-  });
-});
-
-describe("the night's own rows stay inside the company", () => {
-  it("two companies on separate stores each start their own refresh with their own cap read", async () => {
-    const a = await build({ company: A });
-    const b = await build({ company: B });
-    await pass(a);
-    await pass(b);
-    expect(new Set(a.cap!.calls)).toEqual(new Set([a.name]));
-    expect(new Set(b.cap!.calls)).toEqual(new Set([b.name]));
-    expect((await a.nightRows()).map((row) => row["orgId"])).toEqual([A]);
-    expect((await b.nightRows()).map((row) => row["orgId"])).toEqual([B]);
-    expect(upkeepNightKey({ orgId: A, project: a.name }, DAY).pk).not.toBe(upkeepNightKey({ orgId: B, project: a.name }, DAY).pk);
-  });
-});

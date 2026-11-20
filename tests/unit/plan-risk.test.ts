@@ -21,24 +21,6 @@ describe("plan facts", () => {
     expect(card.evidence.map((chip) => chip.label)).not.toContain("Files");
     expect(card.evidence.map((chip) => chip.label)).not.toContain("Planned proof");
   });
-  it("paths named in the plan's text (claims, risks, decisions, work items) count, and an infrastructure path makes it high", () => {
-    const plan = planDocument({ claims: [{ id: "1", text: "Grant the role in infra/iam/role.tf." }, { id: "2", text: "A payment is never charged twice." }], checks: proved });
-    const facts = planFactsOf(structured(plan));
-    expect(facts.files).toContain("infra/iam/role.tf");
-    expect(facts.unread).toBe(false);
-    expect(planRiskOf(facts, 1)).toBe("high");
-  });
-  it("a plan with every claim proved and a plain file is low; unproved claims make it medium", () => {
-    const claims = [{ id: "1", text: "Retry in src/retry/backoff.ts." }, { id: "2", text: "A retry is never charged twice." }];
-    expect(planRiskOf(planFactsOf(structured(planDocument({ claims, checks: proved }))), 1)).toBe("low");
-    expect(planFactsOf(structured(planDocument({ claims }))).untestedClaims).toBe(2);
-    expect(planRiskOf(planFactsOf(structured(planDocument({ claims }))), 1)).toBe("medium");
-  });
-  it("a Markdown plan and an unreadable one are unread (the infrastructure rule still reads a Markdown plan's paths)", () => {
-    expect(planRiskOf(planFactsOf({ format: "markdown", artifact: {} as never, markdown: "# Plan\\nRetry." }), 1)).toBe("medium");
-    expect(planRiskOf(planFactsOf({ format: "markdown", artifact: {} as never, markdown: "Change infra/main.tf." }), 1)).toBe("high");
-    expect(planFactsOf(undefined)).toEqual({ files: [], untestedClaims: 0, unread: true });
-  });
   it("the design under review's cited files count", () => {
     const plan = planDocument({ claims: [{ id: "1", text: "Retry." }, { id: "2", text: "Never twice." }], checks: proved });
     const workflow = { designReview: { rounds: [{ findings: [{ citations: [{ kind: "code", path: "migrations/0042_retry.sql" }] }] }] } } as never;

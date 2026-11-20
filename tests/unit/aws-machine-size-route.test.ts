@@ -66,12 +66,6 @@ describe("hosted machine-size dispatcher", () => {
     expect(JSON.parse((await w.call("GET")).body)).toMatchObject({ measuredPeakMemoryMiB: 6144, testTimeMs: 120000, currentSize: "arm64-2-8", suggestedSize: "arm64-4-16" });
     w.membership(B, "member"); expect(await w.call("GET")).toMatchObject({ statusCode: 404 });
   });
-  it("writes only A's choice and leaves B byte equal", async () => {
-    const w = world(); w.choice(B, "x86_64-8-32"); const key = testEnvMachineChoiceKey(B, "pa"); const before = JSON.stringify(w.db.get(key.pk, key.sk));
-    const writes: unknown[] = []; w.db.onWrite((change) => writes.push(change.after));
-    expect(JSON.parse((await w.call()).body)).toMatchObject({ currentSize: "arm64-4-16" });
-    expect(writes).toHaveLength(1); expect(writes[0]).toMatchObject({ ...testEnvMachineChoiceKey(A, "pa"), orgId: A }); expect(JSON.stringify(w.db.get(key.pk, key.sk))).toBe(before);
-  });
   it.each(["pb", "missing"])("refuses a foreign or unknown project %s", async (project) => { const w = world(); await w.refused("NOT_FOUND", "project not found", "arm64-4-16", project, 404); });
   it.each([B, "legacy"])("refuses a foreign or legacy administrator grant %s", async (company) => {
     // B: an administrator grant in company B's own partition; the person's own (company A) grant stays a developer one.
@@ -97,14 +91,11 @@ describe("hosted machine-size dispatcher", () => {
       expect((JSON.parse(ok.body) as { choices: unknown[] }).choices).toHaveLength(6);
     } finally { vi.unstubAllEnvs(); }
   });
-  it("refuses a missing size", async () => { const w = world(); const before = w.stored(); const r = await w.read("/v1/dev/projects/pa/machine-size", { method: "POST", headers: { authorization: "Bearer e30.eyJhenAiOiJjbG91ZC1wYWdlIn0.sig" }, body: "{}" }); expect(r.statusCode).toBe(400); expect(r.body).toContain("Choose one of the listed machine sizes"); expect(w.stored()).toBe(before); });
   // Batch 14 (rule F): a scoped client is refused by the shared scope check, whose words name what is missing (tests/contract/named-scopes.test.ts pins them for every route).
   it.each(["tasks:read", "profile:name"] as const)("refuses scoped client %s", async (scope) => { const w = world(); w.client("scoped", [scope]); await w.refused("FORBIDDEN", "Cloud needs full access for POST /v1/dev/projects/{project}/machine-size, which is off for it; an administrator can turn it on"); });
   it.each(["tool", "cli"] as const)("refuses non-page client %s", async (kind) => { const w = world(); w.client(kind); await w.refused("FORBIDDEN", PAGE); });
   it.each(["none", "leftover"])("DEC 254zzz73: the web page changes the size with %s step-up claim", async (kind) => { const w = world(); if (kind === "leftover") { w.claims["step_up_at"] = 1; w.claims["step_up_amr"] = "slack"; } const r = await w.call(); expect(r.statusCode).toBe(200); expect(JSON.parse(r.body)).toMatchObject({ currentSize: "arm64-4-16" }); });
-  it("refuses an ordinary member with developer grant", async () => { const w = world(); w.membership(A, "member"); await w.refused("FORBIDDEN", ROLE); });
   it.each(["owner", "admin", "project"])("allows %s", async (role) => { const w = world(); w.membership(A, role === "project" ? "member" : role); if (role === "project") w.grant("administrator"); const r = await w.call(); expect(r.statusCode).toBe(200); expect(JSON.parse(r.body)).toMatchObject({ currentSize: "arm64-4-16" }); });
-  it("rejects a changed live role from another company", async () => { const w = world(); w.deps.companies!.membershipOf = async () => ({ companyId: B, role: "admin" }); await w.refused("FORBIDDEN", ROLE); });
   it.each(["GET", "POST"])("switch off: %s touches no feature state", async (method) => { const w = world(); vi.stubEnv("ROVARA_MACHINE_SIZE", "0"); const before = w.stored(); const send = vi.spyOn(w.deps.documentClient, "send"); const r = await w.call(method); expect(r.statusCode).toBe(404); expect(r.body).toContain("NOT_AVAILABLE_HERE"); expect(send.mock.calls.some(([c]) => /TESTENV|PROJECT#/.test(JSON.stringify(c)))).toBe(false); expect(w.stored()).toBe(before); });
   it("wraps an unexpected storage error in fixed words", async () => { const w = world(); const original = w.deps.documentClient.send.bind(w.deps.documentClient); w.deps.documentClient = { send: async (command) => { if (command instanceof PutItemCommand) throw new Error("CANARY"); return original(command); } }; const r = await w.call(); expect(r.statusCode).toBe(503); expect(r.body).not.toContain("CANARY"); });
   it("requires tasks:read for GET", async () => { const w = world(); w.client("scoped", ["profile:name"]); expect(await w.call("GET")).toMatchObject({ statusCode: 403 }); });

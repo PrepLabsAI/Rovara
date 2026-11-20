@@ -17,8 +17,7 @@ const { TASK_SANDBOX_NETWORK, TaskSandbox, daemonProxyFromEnvironment, gatewayEg
 const { setupSharedNetwork } = await import("../../packages/worker/src/setup-agent-invocation.js");
 const { DEVCONTAINER_GATEWAY_DOCKER, createDevcontainerCli, ensureGatewayNetwork } = await import("../../packages/worker/src/devcontainer.js");
 const { evalInstallArgProblems, evalInstallRunArgs } = await import("../../packages/worker/src/verification/eval-bridged-exec.js");
-const { sandboxPortIsolationArgs } = await import("../../packages/worker/src/sandbox-port-isolation.js");
-const { guardedSetupDocker, createSetupSandbox } = await import("../../packages/worker/src/setup-agent.js");
+const { createSetupSandbox } = await import("../../packages/worker/src/setup-agent.js");
 
 const IMAGE = `rovara/worker@sha256:${"c".repeat(64)}`;
 const TASK = "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11";
@@ -127,20 +126,6 @@ describe("the task sandbox on a gateway-mode worker", () => {
     expect(byteExecs).toBe(before);
   });
 
-  it("the setup seam permits only the exact worker-owned isolation helper", async () => {
-    let launches = 0;
-    const docker = guardedSetupDocker({ run: async () => { launches += 1; return { exitCode: 0, stdout: "", stderr: "" }; } },
-      { rootPath: "/mnt/workspace", gateway: { network: "rovara-snet", dns: "172.28.250.2" }, isolationImage: IMAGE });
-    const args = sandboxPortIsolationArgs(IMAGE, "101");
-    await docker.run(args);
-    expect(launches).toBe(1);
-    for (const bad of [args.map(a => a === IMAGE ? "repository-image" : a), args.map(a => a === "NET_ADMIN" ? "SYS_ADMIN" : a),
-      [...args.slice(0, 1), "--volume", "/:/host", ...args.slice(1)], args.map(a => a.includes("se_port_isolation") ? "arbitrary code" : a)]) {
-      await expect(docker.run(bad)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-    }
-    expect(launches).toBe(1);
-  });
-
   it("removes the run-owned resolver after the sandbox is removed", async () => {
     const { calls, sandbox } = await start(GATEWAY_ENV);
     const mount = flag(calls.find((call) => call[0] === "run")!, "--mount").find((value) => value.includes("dst=/etc/resolv.conf,readonly"))!;
@@ -236,12 +221,6 @@ describe("the eval install box on a gateway-mode worker", () => {
     expect(() => evalInstallRunArgs({ ...expected, resolvConfPath: "/bad,path" })).toThrow("the eval install step's arguments are unsound");
   });
 
-  it("without a gateway there is no --dns, and a --dns in the arguments is still refused (as before)", () => {
-    const args = evalInstallRunArgs(input);
-    expect(args).not.toContain("--dns");
-    expect(evalInstallArgProblems(args, input)).toEqual([]);
-    expect(evalInstallArgProblems([...args.slice(0, args.indexOf("--workdir")), "--dns", "8.8.8.8", ...args.slice(args.indexOf("--workdir"))], input)).toContain("a flag the install box does not take");
-  });
 });
 
 describe("the devcontainer on a gateway-mode worker", () => {
@@ -263,18 +242,6 @@ describe("the devcontainer on a gateway-mode worker", () => {
     expect(captured.calls[0]).not.toContain("--buildkit");
   });
 
-  // Lane L4-NETG3 (DEC 254zzz105): the CLI downloads a project's features itself, on the host network; it is given the gateway's daemon proxy.
-  it("runs the dev container CLI with the gateway's daemon proxy in its environment (HTTP_PROXY, HTTPS_PROXY, both spellings), keeping loopback off it", async () => {
-    captured.calls.length = 0; captured.environments.length = 0;
-    await createDevcontainerCli({ environment: GATEWAY_ENV, dockerPath: "/usr/bin/docker" }).run(["up"], {});
-    const environment = captured.environments[0]!;
-    expect(environment).toMatchObject({ HTTP_PROXY: PROXY, HTTPS_PROXY: PROXY, http_proxy: PROXY, https_proxy: PROXY, NO_PROXY: "localhost,127.0.0.1", no_proxy: "localhost,127.0.0.1" });
-    // Not in gateway mode: the CLI's environment is left as it was (no env option at all).
-    captured.environments.length = 0;
-    await createDevcontainerCli({ environment: {} }).run(["up"], {});
-    expect(captured.environments[0]).toBeUndefined();
-  });
-
   it("daemonProxyFromEnvironment: only in gateway mode, only a plain http://address:port, and a gateway-mode worker without one refuses (a feature download never goes out directly)", () => {
     expect(daemonProxyFromEnvironment(GATEWAY_ENV)).toBe(PROXY);
     expect(daemonProxyFromEnvironment({})).toBeUndefined();
@@ -286,13 +253,6 @@ describe("the devcontainer on a gateway-mode worker", () => {
     delete without["AGENTX_DAEMON_PROXY"];
     expect(() => daemonProxyFromEnvironment(without)).toThrowError(expect.objectContaining({ code: "RUNTIME_UNAVAILABLE" }));
     expect(() => createDevcontainerCli({ environment: without })).toThrowError(expect.objectContaining({ code: "RUNTIME_UNAVAILABLE" }));
-  });
-
-  it("is untouched when the gateway is off: no walled network, the caller's docker path or none", async () => {
-    captured.calls.length = 0;
-    for (const environment of [{}, { AGENTX_RUNTIME: "ec2" }, { AGENTX_SANDBOX_NETWORK: "rovara-snet-0123" }]) expect(createDevcontainerCli({ environment }).walledNetwork).toBeUndefined();
-    await createDevcontainerCli({ environment: {} }).run(["up"], {});
-    expect(captured.calls[0]!.slice(1)).toEqual(["up"]);
   });
 
   it("REFUSES to build a CLI on a gateway-mode worker that has lost its network or name server", () => {

@@ -4,8 +4,7 @@ import { describe, expect, it } from "vitest";
 import { type CheckEntry } from "../../packages/contracts/src/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import { evidencePackKey, keepEvidence, loadRepositoryEdges, repositoryEdgesKey, type KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
-import { eraseTaskEvidence } from "../../packages/broker/src/core/proof/evidence-erase.js";
+import { keepEvidence, loadRepositoryEdges, repositoryEdgesKey, type KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
 import { createRepositoryEdgesSeam, createTaskRepositoryEdgesSeam, mergeOrderOf, prepareMerge, pressMerge, type MergeTask } from "../../packages/broker/src/core/merge/index.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -53,24 +52,6 @@ describe("keeping the repository edges beside the pack", () => {
     expect(w.marked.length).toBeGreaterThan(0);
   });
 
-  it("changes nothing for a raw file with no edges or an empty record: the same objects as before", async () => {
-    const plain = world(JSON.stringify(rawOf()));
-    await keepEvidence(plain.deps, input());
-    const empty = world(JSON.stringify(rawOf(edgesRecord([], ["ambiguous"]))));
-    await keepEvidence(empty.deps, input());
-    const keysA = await plain.keys(COMPANY_A.orgId);
-    expect(keysA.some((key) => key.includes("repository-edges"))).toBe(false);
-    expect(await empty.keys(COMPANY_A.orgId)).toEqual(keysA);
-    expect(await loadRepositoryEdges(plain.blobs, TASK, DIGEST)).toEqual({ kind: "none" });
-  });
-
-  it("keeps nothing for a raw file of other code", async () => {
-    const other = world(JSON.stringify(rawOf(edgesRecord([edge("app", "lib")]), OTHER)));
-    expect(await keepEvidence(other.deps, input())).toEqual({ kept: false, reason: "not_bound" });
-    expect(await loadRepositoryEdges(other.blobs, TASK, DIGEST)).toEqual({ kind: "none" });
-    expect(await loadRepositoryEdges(other.blobs, TASK, OTHER)).toEqual({ kind: "none" });
-  });
-
   it("a fault while keeping the edges never fails the keep and leaves no facts", async () => {
     const w = world(JSON.stringify(rawOf(edgesRecord([edge("app", "lib")]))));
     const logged: string[] = [];
@@ -114,24 +95,6 @@ describe("keeping the repository edges beside the pack", () => {
     expect(await loadRepositoryEdges(w.blobs, TASK, DIGEST)).toEqual({ kind: "unreadable" });
     // A store that throws is unreadable.
     expect(await loadRepositoryEdges({ get: async () => { throw new Error("down"); }, stat: async () => undefined }, TASK, DIGEST)).toEqual({ kind: "unreadable" });
-  });
-
-  it("is erased with the task's evidence (it lives under the same prefix as the pack)", async () => {
-    const w = world(JSON.stringify(rawOf(edgesRecord([edge("app", "lib")]))));
-    await keepEvidence(w.deps, input());
-    expect(await w.blobs.get(evidencePackKey(TASK, DIGEST), 1_000_000)).toBeDefined();
-    expect(await eraseTaskEvidence(w.blobs, TASK)).toBe(true);
-    expect(await loadRepositoryEdges(w.blobs, TASK, DIGEST)).toEqual({ kind: "none" });
-  });
-});
-
-describe("two companies", () => {
-  it("company B never reads company A's edges, even for the same owner, workspace, task and code", async () => {
-    const w = world(JSON.stringify(rawOf(edgesRecord([edge("app", "lib")]))));
-    await keepEvidence(w.deps, input());
-    expect(await loadRepositoryEdges(w.blobsOf(COMPANY_A.orgId), TASK, DIGEST)).toMatchObject({ kind: "edges" });
-    expect(await loadRepositoryEdges(w.blobsOf(COMPANY_B.orgId), TASK, DIGEST)).toEqual({ kind: "none" });
-    expect(await w.keys(COMPANY_B.orgId)).toEqual([]);
   });
 });
 

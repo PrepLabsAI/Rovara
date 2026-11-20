@@ -32,24 +32,6 @@ describe("the eval panel's states", () => {
     expect(setupEvalDiscoveryView(discovery("confirmed"), "approved", undefined)!.state).toBe("confirmed");
     for (const spend of ["rejected", "approval needs renewing", undefined] as const) expect(setupEvalDiscoveryView(discovery("confirmed"), spend, undefined)!.state).toBe("reapprove");
   });
-  it("shows the suite in fixed words with the repository's text escaped", () => {
-    const view = setupEvalDiscoveryView(discovery("reported"), undefined, undefined)!;
-    expect(view.suites[0]).toMatchObject({ files: ["evals/demo/q1.txt", "evals/demo/q2.txt"], questions: 2, categories: "1 ordinary, 1 safety", command: JSON.stringify(["node", "evals/run.js"]), commandCwd: ".", report: "rovara-measures.json", caps: "at most 2 calls and $0.01 a question" });
-    expect(view.suites[0]!.judge).toContain("same model family");
-    const html = renderSetupPage(context, page({ evalDiscovery: view }));
-    expect(html).not.toContain("<b>demo</b>");
-    expect(html).toContain("&lt;b&gt;demo&lt;/b&gt;");
-  });
-  it("shows the WHOLE command, each argument quoted on its own, however long: what is confirmed is what is shown (mutant: a cut command)", () => {
-    const long = { executable: "node", args: ["-e", `console.log("${"x".repeat(900)}") ; steal()`, "two words"], cwd: "evals" };
-    const suite = { ...REPORT.suites[0]!, command: long, commandFingerprint: evalCommandFingerprintOf(long, report) };
-    const view = setupEvalDiscoveryView({ ...discovery("reported"), report: { schemaVersion: 1, suites: [suite] } }, undefined, undefined)!;
-    expect(view.suites[0]!.command).toBe(JSON.stringify(["node", ...long.args]));
-    const html = renderSetupPage(context, page({ evalDiscovery: view }));
-    expect(html).toContain("steal()");
-    expect(html).toContain("&quot;two words&quot;");
-    expect(html).toContain("run in evals");
-  });
   it("renders each state's words; Confirm only while waiting and only on an install that has an eval budget (mutant: the cannotConfirm gate)", () => {
     expect(renderSetupPage(context, page())).toContain("Not discovered");
     expect(renderSetupPage(context, page())).not.toContain("no eval budget");

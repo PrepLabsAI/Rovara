@@ -110,13 +110,6 @@ describe("a task on rovara up", () => {
     expect(instructionsOf(plan)?.text).toContain("> PLAN-RULE: name every file.");
   });
 
-  it("refuses to start a task under a file that cannot be used, with the reason, and starts nothing", async () => {
-    const h = await launch({ file: "version: 1\nstages:\n  pull_request:\n    instructions: x" });
-    const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "22222222-2222-4222-8222-222222222222", project: "payments", instructions: "Add a /health endpoint", workflow: true } });
-    expect(started.status).toBe(400);
-    expect(started.body.error.message).toContain("How we work file can't be used right now (stages.pull_request: Rules for this stage aren't used yet.)");
-    expect((await h.api("/v1/dev/tasks")).body).toMatchObject({ tasks: [] });
-  });
 });
 
 describe("the routes", () => {

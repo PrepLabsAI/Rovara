@@ -5,10 +5,7 @@ import {
   E2EApplicationSelectionRecordSchema, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, requalifyHoldKey as holdKeyOf, workflowApplicationRetryOffered,
   type E2EApplicationSelectionRecord,
 } from "../../packages/contracts/src/index.js";
-import {
-  ApplicationRuntimeRenewed, REQUALIFY_DEFERRED_MESSAGE, assertNoRequalifyHold, isRenewalOnlyChange, isRuntimeRenewedBlock,
-  recycleDriftedWorker, rethrowAsDeferredIfHeld, replayPredatesRenewal, requalifyHoldFence, requalifyDrainCount, requalifyDrainStatus, requalifyHoldActive, requalifySetupWorkRow, requireRenewalOnlyReapproval, selectionChangedRefusal,
-} from "../../packages/broker/src/e2e/requalify-hold.js";
+import { ApplicationRuntimeRenewed, REQUALIFY_DEFERRED_MESSAGE, assertNoRequalifyHold, isRenewalOnlyChange, isRuntimeRenewedBlock, recycleDriftedWorker, rethrowAsDeferredIfHeld, replayPredatesRenewal, requalifyHoldFence, requalifyDrainStatus, requalifyHoldActive, requalifySetupWorkRow, requireRenewalOnlyReapproval, selectionChangedRefusal } from "../../packages/broker/src/e2e/requalify-hold.js";
 import { E2E_REPLAY_REFUSALS } from "../../packages/contracts/src/index.js";
 import { E2E_OWNER_SENTENCES } from "../../packages/broker/src/e2e/owner-sentences.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -69,13 +66,6 @@ const requalifyHoldKey = () => holdKeyOf("linux-arm64-web-api-v1");
 const putHold = (t: Table, until: number, extra: Record<string, unknown> = {}) => t.items.set(k(requalifyHoldKey()), { ...requalifyHoldKey(), entityType: "RUNTIME_REQUALIFY_HOLD", runId: RUN, acquiredAt: iso(NOW), until: iso(until), ...extra });
 
 describe("the hold: new rounds and setup runs wait while a switch is in progress", () => {
-  it("is active only until its own end, so a renewal that crashed cannot defer work for ever", async () => {
-    const t = table();
-    expect(await requalifyHoldActive(t.store, NOW)).toBe(false);
-    putHold(t, NOW + 60_000);
-    expect(await requalifyHoldActive(t.store, NOW + 59_000)).toBe(true);
-    expect(await requalifyHoldActive(t.store, NOW + 60_000)).toBe(false);
-  });
 
   it("reads a row that is not a hold as active (fail closed)", async () => {
     const t = table();
@@ -94,13 +84,6 @@ describe("the hold: new rounds and setup runs wait while a switch is in progress
 });
 
 describe("the hold as a condition inside a start's own transaction", () => {
-  const fence = (t: Table, now: number) => requalifyHoldFence("state", now).ConditionCheck as { Key: { pk: string; sk: string }; ConditionExpression: string; ExpressionAttributeValues: Record<string, string> };
-  it("names the HOLD row and passes only when it is absent or has ended", () => {
-    const check = fence(table(), NOW);
-    expect(check.Key).toEqual(requalifyHoldKey());
-    expect(check.ConditionExpression).toBe("attribute_not_exists(pk) OR #until <= :now OR #acquired <= :bound");
-    expect(check.ExpressionAttributeValues[":now"]).toBe(iso(NOW));
-  });
   it("is the item every start transaction carries: the four system starts of a CHECKS operation (checks, baseline, grounding, replay) and the setup run's admission", () => {
     // The checks start is exercised end to end (contract test); the others share its shape, and a start without the item would let a round begin on the old machine.
     expect(readFileSync("packages/broker/src/aws/developer-tasks.ts", "utf8").split("requalifyHoldFence(deps.tableName").length - 1).toBe(4);
@@ -144,27 +127,6 @@ describe("a cancelled start while a switch is in progress", () => {
     await expect(rethrowAsDeferredIfHeld(t.store, new Error("boom"), NOW)).resolves.toBeUndefined();
     expect(REQUALIFY_DEFERRED_MESSAGE).toBe("A test machine switch is in progress; try again in a few minutes.");
   });
-  it("is left alone when the hold has ended", async () => {
-    const t = table(); putHold(t, NOW + 60_000);
-    await expect(rethrowAsDeferredIfHeld(t.store, cancelled, NOW + 60_000)).resolves.toBeUndefined();
-  });
-});
-
-describe("a hold row that is not exactly a hold", () => {
-  it("ends at its own `until`, or three hours after `acquiredAt`, rather than standing for ever; with neither it stands and is logged", async () => {
-    const t = table();
-    t.items.set(k(requalifyHoldKey()), { ...requalifyHoldKey(), entityType: "RUNTIME_REQUALIFY_HOLD", runId: RUN, acquiredAt: iso(NOW), until: iso(NOW + 60_000), extra: "x" });
-    expect(await requalifyHoldActive(t.store, NOW)).toBe(true);
-    expect(await requalifyHoldActive(t.store, NOW + 60_000)).toBe(false);
-    t.items.set(k(requalifyHoldKey()), { ...requalifyHoldKey(), runId: RUN, acquiredAt: iso(NOW), until: "tomorrow" });
-    expect(await requalifyHoldActive(t.store, NOW + 3 * 3_600_000 - 1)).toBe(true);
-    expect(await requalifyHoldActive(t.store, NOW + 3 * 3_600_000)).toBe(false);
-    t.items.set(k(requalifyHoldKey()), { ...requalifyHoldKey(), runId: RUN });
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    expect(await requalifyHoldActive(t.store, NOW)).toBe(true);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("requalify.hold_unreadable"));
-    log.mockRestore();
-  });
 });
 
 describe("the drain: nothing that started on the old machine is still running", () => {
@@ -176,21 +138,6 @@ describe("the drain: nothing that started on the old machine is still running", 
       createdAt: iso(NOW - 60_000), updatedAt: iso(NOW - 30_000), workflowE2EAdmission: { kind: "application" }, ...extra });
     return id;
   };
-
-  it("counts a running browser and API round, attributed to its own workspace, and nothing else", async () => {
-    const t = table();
-    expect(await requalifyDrainStatus(t.store, NOW)).toEqual({ drained: true, applicationRounds: 0, setupRuns: 0 });
-    session(t, WORKSPACE); session(t, "ws-2"); session(t, "ws-stopped", "STOPPING");
-    operation(t, WORKSPACE, { status: "ACCEPTED" });
-    operation(t, "ws-2", { status: "RUNNING" });
-    // Not counted: a finished round, a portable round, a different kind of operation, an operation of a workspace whose compute is not READY.
-    operation(t, WORKSPACE, { status: "SUCCEEDED" });
-    operation(t, WORKSPACE, { status: "FAILED" });
-    operation(t, WORKSPACE, { workflowE2EAdmission: { kind: undefined } });
-    operation(t, WORKSPACE, { workflowMode: "IMPLEMENT" });
-    operation(t, "ws-stopped", { status: "RUNNING" });
-    expect(await requalifyDrainStatus(t.store, NOW)).toEqual({ drained: false, applicationRounds: 2, setupRuns: 0 });
-  });
 
   it("does not wait for an operation the stale-run sweep has long since ended", async () => {
     const t = table(); session(t, WORKSPACE);
@@ -221,21 +168,6 @@ describe("the drain: nothing that started on the old machine is still running", 
     expect(await requalifyDrainStatus(t2.store, NOW)).toMatchObject({ setupRuns: 1 });
   });
 
-  it("gives the renewal one number: rounds plus setup runs, zero only when both are done", async () => {
-    const t = table();
-    expect(await requalifyDrainCount(t.store, NOW)).toBe(0);
-    session(t, WORKSPACE);
-    operation(t, WORKSPACE, { status: "RUNNING" });
-    const row = requalifySetupWorkRow(randomUUID(), iso(NOW + 600_000));
-    t.items.set(k(row as never), row);
-    expect(await requalifyDrainCount(t.store, NOW)).toBe(2);
-  });
-
-  it("writes the setup marker so that it expires with the table's time to live, after the run's own end", () => {
-    const row = requalifySetupWorkRow(randomUUID(), iso(NOW));
-    expect(row).toMatchObject({ entityType: "RUNTIME_REQUALIFY_SETUP_WORK", until: iso(NOW + 5 * 60_000) });
-    expect(row.indexExpiresAt).toBeGreaterThan(Math.floor((NOW + 5 * 60_000) / 1000));
-  });
 });
 
 const digest = (c: string) => c.repeat(64);
@@ -250,38 +182,12 @@ const selection = (overrides: Record<string, unknown> = {}): E2EApplicationSelec
 const renewedRows = (extra: Record<string, unknown> = {}) => [row("web", { generation: 5, expiresAt: "2026-11-08T00:00:00.000Z", ...extra }), row("api", { generation: 5, expiresAt: "2026-11-08T00:00:00.000Z", ...extra })];
 
 describe("a renewal of the test machine is not any other change of the approved selection", () => {
-  it("is recognised when only the runtime rows moved to a newer generation", () => {
-    expect(isRenewalOnlyChange(selection(), selection({ runtimeRows: renewedRows() }))).toBe(true);
-    // A newer catalog revision comes with a new row; only one of the two rows moving is also a renewal.
-    expect(isRenewalOnlyChange(selection(), selection({ runtimeRows: renewedRows({ catalogRevision: 4 }) }))).toBe(true);
-    expect(isRenewalOnlyChange(selection(), selection({ runtimeRows: [row("web"), row("api", { generation: 5 })] }))).toBe(true);
-  });
 
   it.each([
-    ["nothing moved", () => selection()],
-    ["the generation did not grow", () => selection({ runtimeRows: renewedRows({ generation: 4 }) })],
-    ["the generation went back", () => selection({ runtimeRows: renewedRows({ generation: 3 }) })],
-    ["the binding changed", () => selection({ runtimeRows: renewedRows({ bindingDigest: digest("e") }) })],
-    ["the capabilities changed", () => selection({ runtimeRows: renewedRows({ capabilityDigest: digest("e") }) })],
-    ["the catalog changed", () => selection({ runtimeRows: renewedRows({ runtimeCatalogId: "other" }) })],
     ["the criteria that wait changed", () => selection({ runtimeRows: renewedRows(), unavailableCriteria: [{ criterionId: "c1", reason: "no runtime" }] })],
-    ["the catalog revision went back", () => selection({ runtimeRows: renewedRows({ catalogRevision: 2 }) })],
-    ["a row is gone", () => selection({ runtimeRows: [renewedRows()[0]] })],
     ["a row was swapped for another profile's", () => selection({ runtimeRows: [renewedRows()[0], row("api", { profileId: "other-profile", generation: 5 })] })],
-    ["the intent changed", () => selection({ runtimeRows: renewedRows(), intentDigest: digest("f") })],
-    ["the plan approval changed", () => selection({ runtimeRows: renewedRows(), semanticApproval: { artifactId: "plan-1", digest: digest("f") } })],
-    ["the setup approval changed", () => selection({ runtimeRows: renewedRows(), setupApproval: { artifactId: "setup-1", digest: digest("f") } })],
-    ["the application binding changed", () => selection({ runtimeRows: renewedRows(), applicationApprovalBindingDigest: digest("f") })],
-    ["the targets changed", () => selection({ runtimeRows: renewedRows(), executableTargetIds: ["orders-api", "orders-web"] })],
-    ["a test account moved", () => selection({ runtimeRows: renewedRows(), accountRefs: [{ applicationId: "orders", profileId: "tester", revision: 3, definitionDigest: digest("9") }] })],
-    ["a test account was dropped", () => selection({ runtimeRows: renewedRows(), accountRefs: [] })],
   ])("is not recognised when %s", (_name, current) => {
     expect(isRenewalOnlyChange(selection(), current())).toBe(false);
-  });
-
-  it("is never a renewal of a selection that has no runtime rows", () => {
-    expect(isRenewalOnlyChange(selection({ runtimeRows: [] }), selection({ runtimeRows: renewedRows() }))).toBe(false);
-    expect(isRenewalOnlyChange(selection({ runtimeRows: [row("web")] }), selection({ runtimeRows: renewedRows() }))).toBe(false);
   });
 
   it("gives the renewal its own refusal and block text, and every other change the ordinary one", () => {

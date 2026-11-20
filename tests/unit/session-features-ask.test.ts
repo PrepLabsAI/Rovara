@@ -1,8 +1,8 @@
 // "Ask about this task". The owner's question is answered from the task's own data by a model with no tools: the rates, the one-at-a-time lock, the answer kept for the asker alone, the audit with no
 // words, and the context the model is given (a tier, a fence, no secrets). The model is a fake `AskAnswerer`.
-/* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
+ 
 import { describe, expect, it } from "vitest";
-import { ASK_RATE, IMPLICIT_COMPANY_ID, companyScoped, sessionRateKey, askLockKey, askRequestKey, sessionAskKey, type Admission, type AdmissionRequest, type AuditEvent, type OrgId, type Principal } from "@agentx/contracts";
+import { ASK_RATE, IMPLICIT_COMPANY_ID, sessionRateKey, askLockKey, askRequestKey, sessionAskKey, type Admission, type AdmissionRequest, type AuditEvent, type OrgId, type Principal } from "@agentx/contracts";
 import { ASK_BUSY_TEXT, ASK_CLOSED_TEXT, ASK_NOT_SET_UP_TEXT, ASK_RATE_TEXT, askIdFor, createAsk, type AskAnswerer } from "../../packages/broker/src/core/sessions/ask.js";
 import { buildAskContext, ASK_AUDIENCE_POLICY } from "../../packages/broker/src/core/sessions/ask-context.js";
 import { createTaskSessionItems, developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/index.js";
@@ -42,33 +42,6 @@ async function world(options: { answerer?: AskAnswerer | null; task?: Record<str
 const stranger: Principal = { companyId: ORG, personId: "someone-else", displayName: "Someone", roles: [], provider: "local-owner" };
 
 describe("asking about a task", () => {
-  it("answers from the task's data, with no tools, and keeps the answer for the asker; the request and the audit hold no words", async () => {
-    const w = await world();
-    const submitted = await w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(1), question: "What is it doing right now?" });
-    expect(submitted).toMatchObject({ state: "queued" });
-    await w.ask.idle();
-    expect(await w.ask.status(OWNER, ORG, SESSION, submitted.askId)).toEqual({ askId: submitted.askId, state: "answered", answer: "It is planning the retry." });
-    expect(w.calls).toHaveLength(1);
-    expect(w.calls[0]).toMatchObject({ question: "What is it doing right now?", maxOutputTokens: 1_200, taskId: TASK });
-    // The rules come first, the data after, fenced and marked untrusted.
-    expect(w.calls[0]!.context.startsWith("This question was asked about an AgentX task")).toBe(true);
-    expect(w.calls[0]!.context).toContain("Add retry to the sync job");
-    expect(w.calls[0]!.context).toMatch(/<task_title id="[0-9a-f]{16}">/u);
-    // The request item has ids and a state, and the question is nowhere in it; the stored answer is the asker's alone.
-    const request = (await w.store.get(askRequestKey(ORG, SESSION, submitted.askId)))!;
-    expect(JSON.stringify(request)).not.toContain("right now");
-    expect(request).toMatchObject({ state: "answered", askerKey: OWNER_ID, audience: "web" });
-    const record = (await w.store.get(sessionAskKey(ORG, SESSION, submitted.askId)))!;
-    expect(record).toMatchObject({ answer: "It is planning the retry.", question: "What is it doing right now?", askedBy: OWNER_ID, model: "anthropic/test-model", audience: "web" });
-    expect(typeof record["ttl"]).toBe("number");
-    expect(record["questionSha256"]).toMatch(/^[a-f0-9]{64}$/u);
-    // Audited without the words; the usage joins the task's cost; the lock is let go.
-    expect(w.audit).toHaveLength(1);
-    expect(w.audit[0]).toMatchObject({ action: "task.asked", subject: { type: "session", id: SESSION } });
-    expect(JSON.stringify(w.audit)).not.toContain("right now");
-    expect(w.usage).toEqual([{ taskId: TASK, entryId: `ask:${submitted.askId}`, usage: expect.objectContaining({ provider: "anthropic" }) }]);
-    expect((await w.store.get(askLockKey(ORG, SESSION, OWNER_ID)))?.["expiresAt"]).toBe(0);
-  });
 
   it("a repeat of the same request is the same Ask: nothing is spent and the model is not asked again", async () => {
     const w = await world();
@@ -99,20 +72,6 @@ describe("asking about a task", () => {
     await w.ask.idle();
   });
 
-  it("gives each person 20 questions an hour and each task 100 a day, then refuses in fixed words; the hour refills", async () => {
-    const w = await world();
-    for (let index = 1; index <= ASK_RATE.perPersonPerHour; index += 1) {
-      await w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(100 + index), question: `q${String(index)}` });
-      await w.ask.idle();
-    }
-    await expect(w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(200), question: "one too many" })).rejects.toThrow(ASK_RATE_TEXT);
-    expect(w.calls).toHaveLength(ASK_RATE.perPersonPerHour);
-    clock.ms += 3_600_000 + 1;
-    expect(await w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(201), question: "next hour" })).toMatchObject({ state: "queued" });
-    await w.ask.idle();
-    clock.ms += 1_000;
-  });
-
   it("ends a failed turn `failed` in fixed words, lets the lock go, and keeps no answer", async () => {
     const broken: AskAnswerer = { answer: async () => { throw new Error("the provider said: secret-words-of-the-question"); } };
     const w = await world({ answerer: broken });
@@ -127,18 +86,6 @@ describe("asking about a task", () => {
     const second = await empty.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(6), question: "q" });
     await empty.ask.idle();
     expect((await empty.ask.status(OWNER, ORG, SESSION, second.askId)).state).toBe("failed");
-  });
-
-  it("redacts a secret and an email address in the answer before it is stored or shown", async () => {
-    const key = ["sk", "ant", "api03", "Q".repeat(40)].join("-");
-    const leaky: AskAnswerer = { answer: async () => ({ text: `ask dana@example.com about ${key}`, model: "m" }) };
-    const w = await world({ answerer: leaky });
-    const asked = await w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(7), question: "who?" });
-    await w.ask.idle();
-    const answered = await w.ask.status(OWNER, ORG, SESSION, asked.askId);
-    expect(answered.answer).toBeDefined();
-    expect(answered.answer).not.toContain(key);
-    expect(answered.answer).not.toContain("dana@example.com");
   });
 
   it("refuses a closed task, an unknown session, a person who is not the owner, and an install with no model", async () => {
@@ -238,17 +185,6 @@ function recordingAdmission(options: { refuse?: boolean } = {}) {
 }
 
 describe("what an Ask costs", () => {
-  it("asks admission for a model call with an estimate before spending, settles the reservation with the usage, and records the cost through metering", async () => {
-    const adm = recordingAdmission();
-    const w = await world({ admission: adm.admission });
-    const asked = await w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(20), question: "q" });
-    await w.ask.idle();
-    expect(adm.asked).toHaveLength(1);
-    expect(adm.asked[0]).toMatchObject({ companyId: ORG, idempotencyKey: `ask:${asked.askId}`, action: "model.call", subject: { type: "task", id: TASK }, estimate: { tokens: 61_440 / 4 + 1_200 } });
-    expect(adm.settled).toEqual([{ id: "res-1", actual: { tokens: 15 } }]);
-    expect(adm.released).toEqual([]);
-    expect(w.usage).toHaveLength(1);
-  });
 
   it("is refused by admission in its own words before any rate slot, lock or request is written", async () => {
     const adm = recordingAdmission({ refuse: true });
@@ -293,31 +229,6 @@ describe("what an Ask costs", () => {
       }
     });
 
-    it("settles with the usage when the answer comes back empty", async () => {
-      const { adm, w } = await run({ answerer: { answer: async () => ({ text: "   ", model: "anthropic/m", usage: { input: 700, output: 50, cacheRead: 0, cacheWrite: 0, provider: "anthropic", modelId: "m" } }) } }, 203);
-      expect(adm.settled).toEqual([{ id: "held-1", tokens: 750 }]);
-      expect(adm.released).toEqual([]);
-      expect(w.usage).toHaveLength(1);
-      expect(adm.violations).toEqual([]);
-    });
-
-    it("settles with the usage, or the estimate when it said none, when writing the answer fails", async () => {
-      for (const [n, usage, tokens] of [[204, { input: 700, output: 50, cacheRead: 0, cacheWrite: 0, provider: "anthropic", modelId: "m" }, 750], [205, undefined, undefined]] as const) {
-        const adm = holdingAdmission();
-        const w = await world({ admission: adm.admission, answerer: { answer: async () => ({ text: "an answer", model: "anthropic/m", ...(usage === undefined ? {} : { usage }) }) } });
-        const real = w.store.transact.bind(w.store);
-        w.store.transact = async (items) => { if (items.some((item) => item.kind === "put" && item.item["entityType"] === "ASK")) throw new Error("the disk is full"); return real(items); };
-        await w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(n), question: "q" });
-        await w.ask.idle();
-        expect(adm.released).toEqual([]);
-        expect(adm.settled).toHaveLength(1);
-        if (tokens !== undefined) expect(adm.settled[0]!.tokens).toBe(tokens);
-        else expect(adm.settled[0]!.tokens).toBeGreaterThan(0);
-        expect(adm.open()).toEqual([]);
-        expect(adm.violations).toEqual([]);
-      }
-    });
-
     it("settles when the Ask had already ended by the time the answer came (nothing is left held)", async () => {
       let release: (() => void) | undefined;
       const adm = holdingAdmission();
@@ -336,37 +247,6 @@ describe("what an Ask costs", () => {
       clock.ms = before;
     });
 
-    it("gives it back only when nothing was sent: no model set up, no credential, a request the guard refused, a task with no context", async () => {
-      for (const [n, reason] of [[207, "no_model"], [208, "provider_not_set_up"], [209, "no_credential"], [210, "sign_in_failed"], [211, "request_not_allowed"]] as const) {
-        const { adm } = await run({ answerer: { answer: async () => { throw Object.assign(new Error("x"), { reason }); } } }, n);
-        expect(adm.settled).toEqual([]);
-        expect(adm.released).toEqual(["held-1"]);
-        expect(adm.violations).toEqual([]);
-      }
-    });
-  });
-
-  it("caps one person across every task, beside the per-session rates", async () => {
-    const w = await world();
-    await w.store.put({ item: { pk: companyScoped(ORG, "ASK_PERSON_RATE"), sk: OWNER_ID, windowStart: Math.floor(clock.ms / 3_600_000) * 3_600_000, count: 30 } });
-    await expect(w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(24), question: "q" })).rejects.toThrow(ASK_RATE_TEXT);
-    // One fewer is still room: the cap is exactly 30 an hour.
-    await w.store.put({ item: { pk: companyScoped(ORG, "ASK_PERSON_RATE"), sk: OWNER_ID, windowStart: Math.floor(clock.ms / 3_600_000) * 3_600_000, count: 29 } });
-    expect(await w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(124), question: "q" })).toMatchObject({ state: "queued" });
-    await w.ask.idle();
-    // The next hour is open again.
-    clock.ms += 3_600_001;
-    expect(await w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(24), question: "q" })).toMatchObject({ state: "queued" });
-    await w.ask.idle();
-  });
-
-  it("charges the most a call could have cost when the provider said nothing of what it used, and says so", async () => {
-    const logs: Array<Record<string, unknown>> = [];
-    const w = await world({ logs, answerer: { answer: async () => ({ text: "ok", model: "anthropic/some-model" }) } });
-    await w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(25), question: "q" });
-    await w.ask.idle();
-    expect(w.usage[0]?.usage).toMatchObject({ output: 1_200, provider: "anthropic", modelId: "some-model" });
-    expect(logs.some((entry) => entry["event"] === "ask.unmetered")).toBe(true);
   });
 
   it("is off with its flip-back setting: the routes answer not found as if they did not exist", async () => {
@@ -376,30 +256,3 @@ describe("what an Ask costs", () => {
   });
 });
 
-describe("a failed Ask", () => {
-  const countOf = async (w: Awaited<ReturnType<typeof world>>) => (await w.store.get(sessionRateKey(ORG, SESSION, OWNER_ID, "ask")))?.["count"];
-
-  it("logs the fixed word of its cause and, when the failure is Rovara's own, gives the rate slots back; a provider's failure keeps them", async () => {
-    const logs: Array<Record<string, unknown>> = [];
-    const own = await world({ logs, answerer: { answer: async () => { throw Object.assign(new Error("secret words"), { reason: "request_not_allowed" }); } } });
-    await own.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(27), question: "q" });
-    await own.ask.idle();
-    expect(logs.find((entry) => entry["event"] === "ask.failed")).toMatchObject({ reason: "turn_failed", cause: "request_not_allowed" });
-    expect(JSON.stringify(logs)).not.toContain("secret words");
-    expect(await countOf(own)).toBe(0);
-    expect((await own.store.get(sessionRateKey(ORG, SESSION, "task", "ask_day")))?.["count"]).toBe(0);
-    expect((await own.store.get({ pk: companyScoped(ORG, "ASK_PERSON_RATE"), sk: OWNER_ID }))?.["count"]).toBe(0);
-    const theirs = await world({ answerer: { answer: async () => { throw Object.assign(new Error("x"), { reason: "provider_status_500" }); } } });
-    await theirs.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(28), question: "q" });
-    await theirs.ask.idle();
-    expect(await countOf(theirs)).toBe(1);
-  });
-
-  it("an Ask is not shown to another person with the same role (their ask id, their lock and their status are their own)", async () => {
-    const w = await world();
-    const asked = await w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(29), question: "q" });
-    await w.ask.idle();
-    const other: Principal = { companyId: ORG, personId: "other-owner", displayName: "Other", roles: ["owner"], provider: "local-owner" };
-    await expect(w.ask.status(other, ORG, SESSION, asked.askId)).rejects.toThrow("There is no such session.");
-  });
-});

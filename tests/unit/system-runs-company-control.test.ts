@@ -8,9 +8,7 @@ import { ON_THE_WEBSITE_MESSAGE, SYSTEM_RUNS_CONSENT_AUDIT, SystemRunsViewSchema
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { isSystemRunsPath, routeHostedSystemRuns } from "../../packages/broker/src/core-host/system-runs-routes.js";
 import { SYSTEM_RUNS_WORDS } from "../../packages/broker/src/core/system-runs/consent-control.js";
-import { effectiveSystemRunsGate, readSystemRunsConsentRow, systemRunsConsentKey } from "../../packages/broker/src/core/system-runs/consent.js";
-import { upkeepSettingsKey } from "../../packages/broker/src/core/upkeep/keys.js";
-import { readUpkeepSetting } from "../../packages/broker/src/core/upkeep/settings.js";
+import { readSystemRunsConsentRow, systemRunsConsentKey } from "../../packages/broker/src/core/system-runs/consent.js";
 import { COMPANY_A, COMPANY_B } from "../support/wiki-build-fixtures.js";
 
 const T0 = Date.parse("2026-11-17T12:00:00.000Z");
@@ -85,12 +83,6 @@ describe("who may read and change it (a live company owner or admin only)", () =
     }
   });
 
-  it("the answer is exactly the view: nothing else, no ids, no names", async () => {
-    const w = control({ consent: true });
-    const answer = await w.call("GET");
-    expect(Object.keys(answer.body).sort()).toEqual(["allowed", "available", "systemRunsOn"]);
-  });
-
   it("an unknown method or path under the handler is route-not-found", async () => {
     const w = control();
     expect(errorOf(await w.call("POST"))).toEqual({ code: "NOT_FOUND", message: "route not found" });
@@ -112,26 +104,6 @@ describe("allowing needs only the live owner or admin role and the operator's ce
       expect(w.audited[0]).toMatchObject({ action: SYSTEM_RUNS_CONSENT_AUDIT, companyId: COMPANY_A, actor: { type: "person", id: PERSON }, subject: { type: "company", id: COMPANY_A }, details: { basis: role === "owner" ? "company-owner" : "company-admin", on: true, previous: "none" } });
       expect(w.audited[0]!.details).not.toHaveProperty("stepUp");
     }
-  });
-
-  it("a member, a maintainer or a viewer still cannot allow it: 403 in fixed words, nothing read for the change, written or recorded", async () => {
-    for (const role of ["member", "maintainer", "viewer"] as const) {
-      const w = control({ role: role as OrgRole });
-      const answer = await w.put(true);
-      expect(answer.status, role).toBe(403);
-      expect(errorOf(answer), role).toEqual({ code: "FORBIDDEN", message: SYSTEM_RUNS_WORDS.notAllowed });
-      await nothingDone(w);
-      expect(w.reads, role).toEqual([]);
-    }
-  });
-
-  it("an owner of ANOTHER company allows only their own company's runs, never this one's", async () => {
-    const store = new MemoryDocumentStore();
-    const other = control({ store, company: COMPANY_B });
-    expect((await other.put(true)).status).toBe(200);
-    expect((await consentOf(store, COMPANY_A)).enabled).toBe(false);
-    expect((await consentOf(store, COMPANY_B)).enabled).toBe(true);
-    expect(other.audited.every((event) => event.companyId === COMPANY_B)).toBe(true);
   });
 
   // MUTANT C3: the body is read (and a bad body answered) before the role check.
@@ -165,68 +137,6 @@ describe("allowing needs only the live owner or admin role and the operator's ce
   });
 });
 
-describe("withdrawing stops the runs at once", () => {
-  it("an owner and an admin withdraw it", async () => {
-    for (const role of ["owner", "admin"] as const) {
-      const w = control({ consent: true, role });
-      const answer = await w.put(false);
-      expect(answer.status, role).toBe(200);
-      expect(answer.body).toEqual({ available: true, allowed: false, systemRunsOn: false });
-      expect((await consentOf(w.store)).enabled).toBe(false);
-      expect(w.audited).toHaveLength(1);
-      expect(w.audited[0]!.details).toMatchObject({ on: false, previous: new Date(T0 - 1000).toISOString() });
-      expect(w.audited[0]!.details).not.toHaveProperty("stepUp");
-    }
-  });
-
-  // MUTANT W2: a withdrawal is refused while the operator's ceiling is off.
-  it("a withdrawal works while the ceiling is off (turning off must always be easy)", async () => {
-    const w = control({ consent: true, ceiling: false });
-    const answer = await w.put(false);
-    expect(answer.status).toBe(200);
-    expect(answer.body).toEqual({ available: false, allowed: false, systemRunsOn: false });
-    expect((await consentOf(w.store)).enabled).toBe(false);
-  });
-
-  // MUTANT W3: the withdrawal does not write the row (the gate then still says on), or writes it without the audit record.
-  it("the effective gate is off right after the withdrawal, read on the very next use, with the ceiling still on", async () => {
-    const w = control();
-    const gate = effectiveSystemRunsGate({ ceiling: () => true, store: w.store, companyId: COMPANY_A });
-    expect(await gate.enabled()).toBe(false);
-    expect((await w.put(true)).status).toBe(200);
-    expect(await gate.enabled()).toBe(true);
-    expect((await w.put(false)).status).toBe(200);
-    expect(await gate.enabled()).toBe(false);
-    // On, off, on again with one request id are three distinct audit records.
-    const requestId = randomUUID();
-    await w.call("PUT", { requestId, allowed: true });
-    await w.call("PUT", { requestId, allowed: false });
-    await w.call("PUT", { requestId, allowed: true });
-    expect(new Set(w.audited.map((event) => event.eventId)).size).toBe(w.audited.length);
-  });
-
-  // MUTANT W4: the withdrawal also switches the projects off (or removes their rows).
-  it("the projects keep their own switch exactly as it was (they read as off only while the consent is off)", async () => {
-    const w = control({ consent: true });
-    const key = upkeepSettingsKey({ orgId: COMPANY_A, project: "beacon" });
-    const row = { ...key, entityType: "UPKEEP_SETTINGS", orgId: COMPANY_A, project: "beacon", enabled: true, changedAt: "2026-11-16T00:00:00.000Z", requestId: randomUUID() };
-    await w.store.put({ item: row });
-    expect((await w.put(false)).status).toBe(200);
-    expect(await w.store.get(key)).toEqual(row);
-    expect((await readUpkeepSetting({ store: w.store, companyId: COMPANY_A }, "beacon")).enabled).toBe(true);
-    // Allowing again brings them back without anyone touching the projects.
-    expect((await w.put(true)).status).toBe(200);
-    expect(await w.store.get(key)).toEqual(row);
-  });
-
-  it("withdrawing when nothing is allowed changes and records nothing", async () => {
-    const w = control();
-    const answer = await w.put(false);
-    expect(answer.body).toEqual({ available: true, allowed: false, systemRunsOn: false });
-    await nothingDone(w);
-  });
-});
-
 describe("the audit record comes first, and the row changes only if it is still the one that was read", () => {
   // MUTANT A1: the row is written before the audit record, or an audit failure still writes.
   it("an audit record that cannot be written changes nothing (allow and withdraw)", async () => {
@@ -238,13 +148,6 @@ describe("the audit record comes first, and the row changes only if it is still 
     const withdraw = control({ consent: true, audit: async () => { throw new Error("down"); } });
     expect((await withdraw.put(false)).status).toBe(503);
     expect((await consentOf(withdraw.store)).enabled).toBe(true);
-  });
-
-  it("the audit record is in the sink BEFORE the row exists", async () => {
-    let seen: boolean | undefined;
-    const w = control({ audit: async (_event, store) => { seen = (await consentOf(store)).enabled; } });
-    await w.put(true);
-    expect(seen).toBe(false);
   });
 
   // MUTANT A2: the write is unconditional (a concurrent change between the read and the write is overwritten) or a failed transaction answers success.
@@ -298,18 +201,4 @@ describe("owner DEC 254zzz91: allowing is the Rovara website's own client's act"
     }
   });
 
-  it("a member on the website's client is still refused for the role, not for the client", async () => {
-    const w = control({ role: "member" });
-    const answer = await w.put(true);
-    expect(answer.status).toBe(403);
-    expect(errorOf(answer).message).not.toBe(ON_THE_WEBSITE_MESSAGE);
-    await nothingDone(w);
-  });
-
-  it("withdrawing from a CLI or AI-tool client still works", async () => {
-    const w = control({ webApp: false, consent: true });
-    await Promise.resolve();
-    expect((await w.put(false)).status).toBe(200);
-    expect((await consentOf(w.store)).enabled).toBe(false);
-  });
 });

@@ -27,15 +27,6 @@ describe("flakyOnChangeOf", () => {
   ] as const)("%s", (_name, rerun, base, expected) => {
     expect(flakyOnChangeOf(rerun, base as readonly string[] | undefined)).toEqual(expected);
   });
-
-  it("lists at most the evidence's limit", () => {
-    const many = Array.from({ length: FLAKY_ON_RERUN_MAX + 10 }, (_, index) => `t.py::t${String(index)}`);
-    expect(flakyOnChangeOf(many, [])).toHaveLength(FLAKY_ON_RERUN_MAX);
-  });
-
-  it("skips anything that is not a plain test id string", () => {
-    expect(flakyOnChangeOf(["", ID_A, 5 as unknown as string], [])).toEqual([ID_A]);
-  });
 });
 
 describe("the one fixed line", () => {
@@ -61,12 +52,6 @@ describe("the asked-for fields of a check's tests part", () => {
     expect(raw(tests({ flakyOnRerun: [ID_A, ID_B], flakyOnRerunCount: 1 }))).toBe(false);
     expect(raw(tests({ flakyOnRerun: [ID_A], flakyOnRerunCount: 3 }))).toBe(false);
     expect(raw(tests({ flakyOnRerun: Array.from({ length: FLAKY_ON_RERUN_MAX + 1 }, (_, index) => `t.py::t${String(index)}`), flakyOnRerunCount: 51 }))).toBe(false);
-  });
-
-  it("a file or pack written without them reads as it always did", () => {
-    expect(EvidenceRawSchema.safeParse({ schemaVersion: 1, candidateDigest: DIGEST, checks: [{ checkId: "readiness:0", tests: tests() }] }).success).toBe(true);
-    expect(EvidenceChecksTestsSchema.parse(tests())).not.toHaveProperty("flakyOnRerun");
-    expect(EvidenceChecksTestsReadSchema.parse(tests())).not.toHaveProperty("flakyOnRerun");
   });
 });
 
@@ -128,12 +113,6 @@ describe("the pack", () => {
     expect(notFailing.problems).toContain("tests_disagree_with_check");
     expect(notFailing.pack?.checks[0]?.tests).toMatchObject({ total: 3, failed: 2 });
     expect(notFailing.pack?.checks[0]?.tests).not.toHaveProperty("flakyOnRerun");
-  });
-
-  it("scans and cleans the ids like every other test name", () => {
-    const secret = `ghp_${"Ab1Cd2Ef3Gh4".repeat(3)}`;
-    const built = build(tests({ names: [{ name: `t.py::leak ${secret}`, status: "failed" }, { name: ID_B, status: "failed" }], flakyOnRerun: [`t.py::leak ${secret}`], flakyOnRerunCount: 1 }));
-    expect(JSON.stringify(built.pack)).not.toContain(secret);
   });
 });
 

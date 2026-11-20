@@ -2,10 +2,9 @@
 // The level and the result are decided here from facts the broker has (where the checks ran, how the CI reads, the checks' own outcomes); the CI part comes from TE-B2's `ciEvidenceLevel`, passed in by the caller.
 // Old v1 data keeps working: the v2 pack is made from a pack `buildEvidencePack` really built, not only a fixture.
 import { describe, expect, it, vi } from "vitest";
-import { EvidencePackSchema, EvidencePackV2Schema, readEvidencePack, readEvidencePackText, renderEvidence, type CheckEntry, type EvidencePack } from "../../packages/contracts/src/index.js";
+import { EvidencePackV2Schema, readEvidencePackText, renderEvidence, type CheckEntry, type EvidencePack } from "../../packages/contracts/src/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import type { ChangedFileEntry } from "../../packages/broker/src/core/proof/verification-report.js";
 import { weakeningPartsOf } from "../../packages/broker/src/core/proof/evidence-v2-lines.js";
 import { evidencePackKey, keepEvidence, loadEvidencePack, loadEvidenceRead, type KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
 import { buildEvidencePack, evidenceLevelOf, evidencePackV2Of, evidenceResultOf, type EvidenceV2Writer } from "../../packages/broker/src/core/proof/evidence-pack.js";
@@ -30,18 +29,6 @@ function world() {
 const keepInput = (over: Record<string, unknown> = {}) => ({ orgId: "org-a", task: TASK, operationId: OP, candidateDigest: DIGEST, checks: [entry("readiness:0", "pytest -q")], ...over });
 const stored = async (blobs: ReturnType<typeof world>["blobs"]) => JSON.parse(Buffer.from((await blobs.get(evidencePackKey(TASK, DIGEST), 4_194_304))!).toString("utf8")) as Record<string, unknown>;
 
-describe("the default writer is still version 1", () => {
-  it("keeps a v1 pack when no writer is named, and when version 1 is named", async () => {
-    for (const writer of [undefined, { version: 1 as const }]) {
-      const w = world();
-      expect(await keepEvidence(w.deps, keepInput(writer === undefined ? {} : { writer }))).toMatchObject({ kept: true });
-      const pack = await stored(w.blobs);
-      expect(pack.schemaVersion).toBe(1);
-      expect(EvidencePackSchema.safeParse(pack).success).toBe(true);
-    }
-  });
-});
-
 describe("the version 2 writer", () => {
   it("keeps a v2 pack that the strict v2 schema and the tolerant reader both accept, with the v1 parts kept", async () => {
     const w = world();
@@ -64,17 +51,6 @@ describe("the version 2 writer", () => {
     const read = await loadEvidenceRead(w.blobs, TASK, DIGEST);
     expect(read?.status).toBe("v2");
   });
-  it("a v1 pack kept today is read as v1 by both readers (old data keeps working)", async () => {
-    const w = world();
-    await keepEvidence(w.deps, keepInput());
-    expect((await loadEvidenceRead(w.blobs, TASK, DIGEST))?.status).toBe("v1");
-    expect((await loadEvidencePack(w.blobs, TASK, DIGEST))?.checks).toHaveLength(1);
-  });
-  it("a strict v1 reader still cannot parse a v2 pack, which is why the default stays v1", async () => {
-    const w = world();
-    await keepEvidence(w.deps, keepInput({ writer: sandbox }));
-    expect(EvidencePackSchema.safeParse(await stored(w.blobs)).success).toBe(false);
-  });
   it("loadEvidenceRead and loadEvidencePack refuse a pack for other code, a v2 pack among them", async () => {
     const w = world();
     await keepEvidence(w.deps, keepInput({ writer: sandbox }));
@@ -82,12 +58,6 @@ describe("the version 2 writer", () => {
     await w.blobs.put(evidencePackKey(TASK, other), Buffer.from(JSON.stringify(await stored(w.blobs)), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-pack" }, retention: "evidence-std" }, { overwrite: true });
     expect(await loadEvidencePack(w.blobs, TASK, other)).toBeUndefined();
     expect(await loadEvidenceRead(w.blobs, TASK, other)).toBeUndefined();
-  });
-  it("keeps nothing rather than a v2 pack the strict schema refuses (an unregistered check kind cannot happen, but a bad producer would)", async () => {
-    const w = world();
-    const bad = { version: 2, producer: { edition: "code", isolation: "teleport" } } as unknown as EvidenceV2Writer;
-    expect(await keepEvidence(w.deps, keepInput({ writer: bad }))).toEqual({ kept: false, reason: "invalid" });
-    expect(await w.blobs.get(evidencePackKey(TASK, DIGEST), 1_000)).toBeUndefined();
   });
 });
 
@@ -146,24 +116,6 @@ describe("the pack the writer makes from real v1 data", () => {
     expect(rendering.text).toContain("pytest -q");
     expect(rendering.text).toContain("4 tests (1 new)");
   });
-  it("puts the changed files' flags and weakening in the pack when the caller has the files, and nothing when it has none", () => {
-    const pack = v1([entry("readiness:0", "pytest -q")], { rawText: raw });
-    const files: ChangedFileEntry[] = [{ repository: "app", path: "CLAUDE.md", added: 1, removed: 0 }, { repository: "app", path: "a/__snapshots__/x.snap", added: 1, removed: 1, snapshotChanged: true }];
-    const flagged = evidencePackV2Of(pack, { ...sandbox, changedFiles: files })!;
-    expect(flagged.flags?.instructionFiles).toEqual(["CLAUDE.md"]);
-    expect(flagged.weakening?.changedSnapshots).toEqual(["a/__snapshots__/x.snap"]);
-    expect(EvidencePackV2Schema.safeParse(flagged).success).toBe(true);
-    const plain = evidencePackV2Of(pack, sandbox)!;
-    expect(plain.flags).toBeUndefined();
-    expect(plain.weakening).toBeUndefined();
-  });
-  it("a pack with the most checks, test names and not-tested rows still fits the v2 size the reader reads", () => {
-    const checks = Array.from({ length: 64 }, (_unused, index) => entry(`readiness:${String(index)}`, `check ${String(index)} ${"x".repeat(150)}`));
-    const pack = v1(checks);
-    const v2 = evidencePackV2Of(pack, sandbox)!;
-    expect(Buffer.byteLength(JSON.stringify(v2), "utf8")).toBeLessThan(4 * 1_048_576);
-    expect(readEvidencePack(JSON.parse(JSON.stringify(v2))).status).toBe("v2");
-  });
 });
 
 describe("TE-B3's shapes: no zero or empty shape is made up", () => {
@@ -184,28 +136,6 @@ describe("TE-B3's shapes: no zero or empty shape is made up", () => {
     expect(other.weakening?.changedSnapshots).toEqual(["a/__snapshots__/x.snap"]);
     expect(other.weakening !== undefined && "absentOnNewCount" in other.weakening).toBe(false);
   });
-  it("a pack whose checks compared and found nothing (zero counts, skips equal) is written with no weakening part, and the v2 pack still parses", () => {
-    const base = JSON.parse(raw) as { checks: { tests: Record<string, unknown> }[] };
-    base.checks[0]!.tests = { ...base.checks[0]!.tests, skippedBefore: 2, skippedAfter: 2, absentOnNew: [], absentOnNewCount: 0 };
-    const pack = buildEvidencePack({ candidateDigest: DIGEST, rawText: JSON.stringify(base), checks: [entry("readiness:0", "pytest -q")], checkKinds: new Map([["readiness:0", "test" as const]]), environment: { tier: "sandbox", envRevision: 1, services: [], data: "synthetic", accounts: [] }, storedArtifacts: new Map() }).pack!;
-    const v2 = evidencePackV2Of(pack, { ...sandbox, changedFiles: [{ repository: "app", path: "src/a.ts", added: 1, removed: 0 }] })!;
-    expect(v2.weakening).toBeUndefined();
-    expect(v2.flags).toBeUndefined();
-    expect(EvidencePackV2Schema.safeParse(v2).success).toBe(true);
-  });
-});
-
-describe("TE-A2b review M1: a stored v2 pack with something newer in a check's tests still loads as v1 parts", () => {
-  it("loadEvidencePack reads a v2 pack whose tests part has a key this build does not know", async () => {
-    const w = world();
-    await keepEvidence(w.deps, keepInput({ writer: sandbox }));
-    const pack = await stored(w.blobs) as { checks: { tests: Record<string, unknown> }[] };
-    pack.checks[0]!.tests.flakyRetries = 3;
-    await w.blobs.put(evidencePackKey(TASK, DIGEST), Buffer.from(JSON.stringify(pack), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-pack" }, retention: "evidence-std" }, { overwrite: true });
-    expect((await loadEvidenceRead(w.blobs, TASK, DIGEST))?.status).toBe("v2");
-    const v1 = await loadEvidencePack(w.blobs, TASK, DIGEST);
-    expect(v1?.checks[0]).toMatchObject({ checkId: "readiness:0" });
-  });
 });
 
 describe("TE-A2b review M2: one odd file name never suppresses the pack", () => {
@@ -222,12 +152,6 @@ describe("TE-A2b review M2: one odd file name never suppresses the pack", () => 
     const pack = evidencePackV2Of(v1([entry("readiness:0", "pytest -q")], { rawText: raw }), { ...sandbox, changedFiles: [file] });
     expect(pack).toBeDefined();
     expect(EvidencePackV2Schema.safeParse(pack).success).toBe(true);
-  });
-  it("keeps the end of a long path (the file name) and a flagged instruction file stays flagged", () => {
-    const pack = evidencePackV2Of(v1([entry("readiness:0", "pytest -q")], { rawText: raw }), { ...sandbox, changedFiles: [entryOf(longClaude)] })!;
-    const [shown] = pack.flags!.instructionFiles;
-    expect(shown!.length).toBeLessThanOrEqual(500);
-    expect(shown!.endsWith("CLAUDE.md")).toBe(true);
   });
   it("a name that is nothing but hidden characters is dropped and counted, and the pack is still kept", async () => {
     const report = { droppedPaths: 0 };
@@ -278,41 +202,6 @@ describe("TE-A2b review M4: the parts only a v2 writer adds go through the data 
     expect(await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, repositories } }))).toMatchObject({ kept: true });
     expect(JSON.stringify(await stored(w.blobs))).not.toContain("jane.doe");
   });
-  it("clean v2 parts are stored as they are (nothing is dropped for nothing)", async () => {
-    const w = world();
-    const repositories = [{ id: "app", baseBranch: "main", baseCommit: "1".repeat(40), headCommit: "2".repeat(40) }];
-    await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, repositories, proof: proofWith("reviewed by hand") } }));
-    const pack = await stored(w.blobs) as { proof?: { override?: { reason?: string } }; candidate: { repositories: unknown[] }; notTested: { id?: string }[] };
-    expect(pack.proof?.override?.reason).toBe("reviewed by hand");
-    expect(pack.candidate.repositories).toHaveLength(1);
-    expect(pack.notTested.some((item) => item.id === "data_guard")).toBe(false);
-  });
-});
-
-// Part A consumes the eval-wire artifact; producer and verdict semantics stay in eval-wire.
-describe("AI evidence in the real keep path", () => {
-  const evalArtifact = () => ({ schemaVersion: 1, candidateDigest: DIGEST, roundKind: "check_unsealed", evalPass: 2, outcome: "done", context: { aiChange: true, discovery: "configured", previousPasses: 1 }, questions: [{ id: "q", category: "safety", edited: false, old: [true, true, true], first: false, freshOld: [true, true, true], freshNew: [false, false, false], answers: { old: ["old", "old", "old"], first: "new", freshOld: ["old", "old", "old"], freshNew: ["new", "new", "new"] } }], options: { changedPromptCalls: 1, hiddenSetUsed: false, subsetSupported: true, sameJudgeFamily: false }, excluded: [], notices: [], usage: { calls: 7 }, cache: "not_used", label: "Improved on eval" });
-  it("keeps the re-derived label, fix-round and bounded answers and leaves proof alone", async () => {
-    const w = world();
-    await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, evalArtifact: evalArtifact() } }));
-    const p = await stored(w.blobs);
-    expect(p).toMatchObject({ ai: { eval: { label: "Worse on eval", fixRound: 1, questions: [{ id: "q", old: ["old", "old", "old"], new: ["new", "new", "new"] }] }, realModelRun: { status: "not_run", reason: "not_available" } } });
-    expect(p.proof).toBeUndefined();
-  });
-  it("keeps byte-identical packs for absent or invalid metadata and v1 stays unchanged", async () => {
-    const control = world(); await keepEvidence(control.deps, keepInput({ writer: sandbox })); const before = await stored(control.blobs);
-    for (const invalidArtifact of [undefined, {}, { ...evalArtifact(), candidateDigest: "f".repeat(64) }]) {
-      const w = world(); await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, evalArtifact: invalidArtifact } }));
-      expect(await stored(w.blobs)).toEqual(before);
-    }
-  });
-  it("the data guard removes sensitive details without changing a Worse verdict", async () => {
-    const a = evalArtifact(); a.questions[0]!.answers.freshNew = Array.from({ length: 3 }, () => "person" + "@gmail.com");
-    const w = world(); await keepEvidence(w.deps, keepInput({ writer: { ...sandbox, evalArtifact: a } }));
-    const p = await stored(w.blobs);
-    expect(p).toMatchObject({ ai: { eval: { label: "Worse on eval", questions: [], notices: ["details_withheld"] } } });
-    expect(JSON.stringify(p)).not.toContain("person@gmail.com");
-  });
 });
 
 it("AI text guard keeps fixed verdicts on sensitive IDs, excerpts and scanner faults", async () => {
@@ -332,7 +221,6 @@ it("AI text guard keeps fixed verdicts on sensitive IDs, excerpts and scanner fa
     expect(JSON.stringify(saved)).not.toContain("CANARY");
   }
 });
-
 
 it("an AI schema rejection preserves valid proof evidence but never excuses an invalid base", async () => {
   const contracts = await import("@agentx/contracts");

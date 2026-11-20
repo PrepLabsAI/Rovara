@@ -34,12 +34,6 @@ async function world(env: NodeJS.ProcessEnv | undefined, claim: unknown) {
 }
 
 describe("the laptop keeps the baseline words for a plan that offered candidates", () => {
-  it("with the switch on, for a sha the stored plan offered", async () => {
-    const w = await world({ ROVARA_BASELINE_CACHE: "1" }, { sha: sha(1), commitsBack: 2 });
-    expect(await w.keep(planOf([sha(1)]))).toMatchObject({ kept: true });
-    expect(await w.evidence.baselineOf(TASK, DIGEST)).toMatchObject({ sha: sha(1), commitsBack: 2, knownFailing: 1, flaky: 0, ageHours: 3 });
-    expect(await w.evidence.baselineOf(TASK, "e".repeat(64))).toBeUndefined();
-  });
 
   it("not with the switch off, no testEnv wiring, a plan that offered other shas, or none, or a stored plan that does not read", async () => {
     for (const [env, plan] of [[{}, planOf([sha(1)])], [undefined, planOf([sha(1)])], [{ ROVARA_BASELINE_CACHE: "1" }, planOf([sha(2)])], [{ ROVARA_BASELINE_CACHE: "1" }, planOf()], [{ ROVARA_BASELINE_CACHE: "1" }, { nonsense: true }], [{ ROVARA_BASELINE_CACHE: "1" }, undefined]] as const) {

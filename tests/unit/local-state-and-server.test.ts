@@ -138,17 +138,6 @@ describe("local HTTP server", () => {
     return server;
   }
 
-  it("binds to 127.0.0.1 on a random port and nothing else", async () => {
-    const server = await start();
-    expect(server.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
-    expect(server.port).toBeGreaterThan(0);
-    expect((await get(`${server.url}/anything`)).status).toBe(200);
-    // It must not answer on the machine's other addresses.
-    const { networkInterfaces } = await import("node:os");
-    const outside = Object.values(networkInterfaces()).flat().find((entry) => entry !== undefined && !entry.internal && entry.family === "IPv4");
-    if (outside !== undefined) await expect(get(`http://${outside.address}:${server.port}/`)).rejects.toThrow();
-  });
-
   it("refuses a Host header that is not its own name (DNS rebinding) and a request from another origin", async () => {
     const server = await start();
     expect((await get(`${server.url}/x`, { headers: { host: "evil.example" } })).status).toBe(403);

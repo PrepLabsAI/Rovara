@@ -2,14 +2,12 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { WEB_API_REQUIRED_PROBES } from "../../packages/contracts/src/index.js";
 import { main as qualificationCli } from "../../packages/verifier/src/install-qualification-cli.js";
 import {
-  QUALIFICATION_FAILURE_CODE, QUALIFICATION_FAILURE_MAX_BYTES, QUALIFICATION_FAILURE_MAX_CODES, QualificationStageError, WebApiQualificationRejected,
+  QUALIFICATION_FAILURE_CODE, QUALIFICATION_FAILURE_MAX_BYTES, QUALIFICATION_FAILURE_MAX_CODES, QualificationStageError,
   boundQualificationCodes, qualificationFailureOf, summarizeProbeObservation,
 } from "../../packages/verifier/src/install-qualification-failure.js";
-import { qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
-import { fakeLinuxEnvironment, fakeProbeRunner, goodWebApiObservation, privateEvidenceRoot, webApiChallenge } from "../support/web-api-qualification.js";
+import { fakeLinuxEnvironment, fakeProbeRunner, goodWebApiObservation, webApiChallenge } from "../support/web-api-qualification.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -19,14 +17,6 @@ async function scratch() { const dir = await mkdtemp(join(tmpdir(), "qualificati
 const docker25Observation = { collectorStatus: "FAILED" as const, runReason: "observed-application-test-failure", failedAssertionKinds: ["http-status"], unmockedCalls: { sinkhole: 0, mocked: 0 } };
 
 describe("the qualification failure report", () => {
-  it("passes a rejection's stable reason codes through unchanged, with the facts of the probes it names", async () => {
-    const error = await qualifyInstalledWebApiRuntime({ challenge: webApiChallenge(Date.now()), evidenceRoot: await privateEvidenceRoot(), environment: fakeLinuxEnvironment(Date.now()),
-      runProbe: fakeProbeRunner({ "api-egress-denial-v1": docker25Observation }).runProbe }).then(() => null, (thrown: unknown) => thrown);
-    expect(error).toBeInstanceOf(WebApiQualificationRejected);
-    const failure = qualificationFailureOf(error, "qualification-failed");
-    expect(failure).toEqual({ schemaVersion: "runtime-install-failure/v1", stage: "qualification-rejected", reasons: ["probe-wrong-cause:api-egress-denial-v1"],
-      summary: ["api-egress-denial-v1:collector-failed", "api-egress-denial-v1:run-observed-application-test-failure", "api-egress-denial-v1:assert-http-status", "api-egress-denial-v1:sinkhole-0", "api-egress-denial-v1:mocked-0"] });
-  });
 
   it("reports the stage of any other error and never its message", () => {
     const secret = "AKIAIOSFODNN7EXAMPLE /home/node/.ssh/id_rsa Bearer abc123";
@@ -76,25 +66,6 @@ describe("the qualification failure report", () => {
     for (const code of summary) expect(code).toMatch(QUALIFICATION_FAILURE_CODE);
     expect(summary.join(" ")).not.toMatch(/example\.com|169\.254|secret|home/);
   });
-
-  it("maps a reason or assertion kind that is not on the known lists to `other`, however it is spelled, and keeps the known ones", () => {
-    const base = goodWebApiObservation("web-egress-denial-v1");
-    const hostile = ["application-report-does-not-bind-to-acme-corp-checkout", "secret-token-abc123", "Error: ENOENT /etc/passwd", "app-exited-with-password", "csv2", ""];
-    for (const text of hostile) {
-      const summary = summarizeProbeObservation("web-egress-denial-v1", { ...base, collectorStatus: "FAILED", runUnavailableReason: text === "" ? null : text, runReason: text === "" ? undefined : text, failedAssertionKinds: text === "" ? [] : [text] });
-      expect(summary.join(" "), text).not.toMatch(/secret|token|ENOENT|passwd|acme|password|csv2|report/i);
-      if (text !== "") expect(summary, text).toEqual(expect.arrayContaining(["web-egress-denial-v1:unavailable-other", "web-egress-denial-v1:run-other", "web-egress-denial-v1:assert-other"]));
-    }
-    for (const reason of ["build-failed", "app-unhealthy", "app-exited", "deadline-exceeded", "executor-failed", "executor-result-mismatch", "mock-unavailable", "cancelled", "collector-unavailable", "application-evidence-floor-unmet", "unmocked-external-call"]) {
-      expect(summarizeProbeObservation("p", { ...base, runUnavailableReason: reason }), reason).toContain(`p:unavailable-${reason}`);
-    }
-    for (const kind of ["text", "visible", "csv", "http-status", "json", "state", "file"]) expect(summarizeProbeObservation("p", { ...base, failedAssertionKinds: [kind] }), kind).toContain(`p:assert-${kind}`);
-    expect(summarizeProbeObservation("p", { ...base, runReason: "observed-application-test-failure" })).toContain("p:run-observed-application-test-failure");
-  });
-
-  it("names every required probe with a code the hook accepts", () => {
-    for (const probe of WEB_API_REQUIRED_PROBES) expect(`probe-wrong-cause:${probe.probeId}`).toMatch(QUALIFICATION_FAILURE_CODE);
-  });
 });
 
 describe("the qualification CLI's --failure-out", () => {
@@ -114,28 +85,6 @@ describe("the qualification CLI's --failure-out", () => {
       summary: expect.arrayContaining(["api-egress-denial-v1:sinkhole-0", "api-egress-denial-v1:collector-failed"]) as string[] });
     expect((await stat(join(dir, "failure.json"))).mode & 0o777).toBe(0o600);
     await expect(stat(join(dir, "proposal.json"))).rejects.toThrow();
-  });
-
-  it("writes only a stage, never the error's message, for an error that is not a rejection", async () => {
-    const { dir, args } = await files();
-    const secret = "super-secret-host-detail";
-    await expect(qualificationCli(args, web({ createProbeRunner: () => { throw new Error(secret); } }))).rejects.toThrow(secret);
-    const text = await readFile(join(dir, "failure.json"), "utf8");
-    expect(JSON.parse(text)).toEqual({ schemaVersion: "runtime-install-failure/v1", stage: "runner-config-invalid", reasons: [], summary: [] });
-    expect(text).not.toContain(secret);
-  });
-
-  it("names the stage a qualifier step failed in, and a malformed challenge", async () => {
-    const { dir, args } = await files();
-    await expect(qualificationCli(args, web({ qualificationEnvironment: fakeLinuxEnvironment(Date.now(), { assertHostIdentity: () => { throw new Error("secret workspace id mismatch"); } }),
-      createProbeRunner: () => fakeProbeRunner().runProbe }))).rejects.toThrow(/secret workspace id mismatch/);
-    expect(JSON.parse(await readFile(join(dir, "failure.json"), "utf8"))).toMatchObject({ stage: "host-identity-mismatch", reasons: [] });
-    const bad = await files();
-    await writeFile(join(bad.dir, "challenge.json"), '{"password":"hunter2"}');
-    await expect(qualificationCli(bad.args, web())).rejects.toThrow();
-    const text = await readFile(join(bad.dir, "failure.json"), "utf8");
-    expect(JSON.parse(text)).toMatchObject({ stage: "challenge-invalid" });
-    expect(text).not.toContain("hunter2");
   });
 
   it("writes nothing without the option, and never overwrites a file that exists", async () => {

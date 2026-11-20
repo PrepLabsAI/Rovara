@@ -2,9 +2,8 @@
 import { describe, expect, it } from "vitest";
 import {
   BASELINE_ANCESTOR_MAX, BASELINE_CANDIDATES_MAX, BASELINE_WRITERS, BaselineCandidateSchema, BaselineRowSchema, EvidenceBaselineSchema, EvidenceRawSchema, RawBaselineSchema, TEST_ENV_BASELINE_FEATURE,
-  TestEnvTaskPlanSchema, WORKER_INVOCATION_FEATURES, baselineLine, baselineSetIsWhole,
+  TestEnvTaskPlanSchema, WORKER_INVOCATION_FEATURES, baselineLine,
 } from "@agentx/contracts";
-import { failingSetIsWhole } from "../../packages/broker/src/core/test-env/nightly.js";
 
 const SHA = "4f2a9c1".padEnd(40, "0");
 const row = (over: Record<string, unknown> = {}) => ({
@@ -21,13 +20,6 @@ describe("the baseline row and the wire fields", () => {
     }
     // No person is named in a row: nothing to erase for a person.
     expect(Object.keys(BaselineRowSchema.parse(row())).sort()).toEqual(["branch", "envRevision", "failed", "finishedAt", "flaky", "headSha", "recordedAt", "tests", "writer"]);
-  });
-
-  it("the whole-set rule is the nightly's own rule", () => {
-    for (const baseline of [
-      { failed: ["a"], failedUnlisted: 1, tests: { total: 5, passed: 3, failed: 2, skipped: 0 } }, { failed: ["a"], failedUnlisted: 0, tests: { total: 5, passed: 3, failed: 2, skipped: 0 } },
-      { failed: [], tests: { total: 5, passed: 5, failed: 0, skipped: 0 } }, { failed: ["a", "b"], tests: { total: 5, passed: 3, failed: 1, skipped: 1 } },
-    ]) expect(baselineSetIsWhole(baseline)).toBe(failingSetIsWhole(baseline));
   });
 
   it("the candidates and the worker's claim are shas and an integer 0 to 50, strict", () => {

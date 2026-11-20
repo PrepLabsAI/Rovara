@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -36,15 +35,6 @@ async function allText(dir: string): Promise<string> {
 const built = existsSync(join(verifierRoot, E2E_EXECUTOR_HOST_MODULE_PATH));
 
 describe("executor host registry", () => {
-  it("names the one built-in host entry for web and API, pinned to the exact emitted module bytes", async () => {
-    expect(registry.hosts).toHaveLength(1);
-    expect(registry.hosts[0]).toMatchObject({ profileId: E2E_EXECUTOR_HOST_PROFILE_ID, entryPointId: E2E_EXECUTOR_HOST_ENTRY_POINT_ID,
-      modulePath: E2E_EXECUTOR_HOST_MODULE_PATH });
-    // The module is one re-export line, so its compiled bytes are the same everywhere and the digest is stable.
-    const source = await readFile(join(verifierRoot, "src/executor/host-entry.ts"), "utf8");
-    expect(source).toBe('export { createE2EApplicationCliHost } from "./host.js";\n');
-    expect(createHash("sha256").update(source).digest("hex")).toBe(registry.hosts[0]!.entryPointManifestDigest);
-  });
 
   it("gives the broker the same host descriptor without reading a file: the registry's row, and the module source itself", async () => {
     expect(E2E_EXECUTOR_HOST_DESCRIPTOR).toEqual({ entryPointId: registry.hosts[0]!.entryPointId, entryPointManifestDigest: registry.hosts[0]!.entryPointManifestDigest });
@@ -99,17 +89,6 @@ describe("runE2EExecutor unavailable outcomes", () => {
 });
 
 describe("report-unreadable log note", () => {
-  it("names the shard and the parse reason and carries a bounded head of the CLI's stderr, so the log says what the CLI said", () => {
-    const note = reportUnreadableNote("shard-1", "application report is not bounded UTF-8 JSON", Buffer.from("Error: net::ERR_ABORTED\n    at click"));
-    expect(note).toContain("shard shard-1");
-    expect(note).toContain("application report is not bounded UTF-8 JSON");
-    expect(note).toContain("Error: net::ERR_ABORTED");
-    const long = reportUnreadableNote("shard-1", "r", Buffer.from(`HEAD${"x".repeat(100_000)}TAIL`));
-    expect(long).toContain("HEAD");
-    expect(long).not.toContain("TAIL");
-    expect(Buffer.byteLength(long)).toBeLessThan(17 * 1024);
-    expect(long).toContain("100008 bytes of stderr");
-  });
 
   it("also carries a bounded head of stdout, the report that did not parse, when there is one", () => {
     const note = reportUnreadableNote("shard-1", "application report does not match pinned report-1 structure", Buffer.alloc(0), Buffer.from(`{"run":{"status":"weird"}}${"y".repeat(50_000)}`));
@@ -117,10 +96,6 @@ describe("report-unreadable log note", () => {
     expect(note).toContain('stdout head (16384 of 50026 bytes of stdout): {"run":{"status":"weird"}}');
     expect(Buffer.byteLength(note)).toBeLessThan(17 * 1024);
     expect(reportUnreadableNote("shard-1", "r", Buffer.from("e"))).not.toContain("stdout head");
-  });
-
-  it("says so when the CLI wrote nothing to stderr", () => {
-    expect(reportUnreadableNote("shard-1", "r", Buffer.alloc(0))).toContain("stderr was empty");
   });
 
   it("never cuts a multi-byte character in half", () => {

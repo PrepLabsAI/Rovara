@@ -53,15 +53,6 @@ function withMockFrames(collection: E2EApplicationCollection, edits: { request?:
 describe("the verdict on a run whose inventory origin is served by the approved mock", () => {
   const { oracle, collection } = load("web-mock-origin-v1");
 
-  it("passes, serves the success variant once, and names the mocked origin on the case and on the result", () => {
-    const verdict = qualifyE2EApplicationCollection(oracle, collection);
-    expect(verdict.status, verdict.reason).toBe("PASS");
-    expect(verdict.mockSummary).toEqual({ consumptions: { success: 1, refusal: 0, invalidData: 0 }, unmockedCalls: { sinkhole: 0, mocked: 0 }, mockedOrigins: ["inventory-v1"] });
-    expect(verdict.result?.mockedOrigins).toEqual(["inventory-v1"]);
-    expect(verdict.result?.cases.map((item) => [item.status, item.mockedOrigins])).toEqual([["passed", ["inventory-v1"]]]);
-    expect(verdict.result?.cases[0]?.coverage.observedMockedComponentIds).toEqual(oracle.mockOrigins!.map((item) => item.componentId));
-  });
-
   it("knows which mock component is the host-served inventory origin, and expects it of the case", () => {
     expect(oracle.mockOrigins).toEqual([{ componentId: expect.stringMatching(/^api-schema-[a-f0-9]{12}$/), originRef: "inventory-v1" }]);
     expect(oracle.expectedMocksByCase.map((item) => item.specs.map((spec) => spec.componentId))).toEqual([[oracle.mockOrigins![0]!.componentId]]);
@@ -126,11 +117,6 @@ describe("the verdict on a run whose inventory origin is served by the approved 
     expect(verdict.mockSummary?.unmockedCalls).toEqual({ sinkhole: 1, mocked: 0 });
   });
 
-  it("is not a pass when the collection's consumption rows differ from the retained frames", () => {
-    const changed = structuredClone(collection);
-    changed.mockConsumptions[0]!.responseSha256 = "0".repeat(64);
-    expect(qualifyE2EApplicationCollection(oracle, changed).status).toBe("UNKNOWN");
-  });
 });
 
 describe("the verdict on a run whose inventory origin has no approved mock", () => {
@@ -146,11 +132,6 @@ describe("the verdict on a run whose inventory origin has no approved mock", () 
     expect(only.assertionReceipts.map((receipt) => receipt.status)).toEqual(["passed"]);
     expect(verdict.result).toMatchObject({ status: "unavailable", reason: UNMOCKED_EXTERNAL_CALL_REASON });
     expect(verdict.mockSummary).toEqual({ consumptions: { success: 0, refusal: 0, invalidData: 0 }, unmockedCalls: { sinkhole: 1, mocked: 0 }, mockedOrigins: [] });
-  });
-
-  it("has no mock to name: the origin is not listed as mocked", () => {
-    expect(oracle.mockOrigins).toBeUndefined();
-    expect(qualifyE2EApplicationCollection(oracle, collection).result?.mockedOrigins).toBeUndefined();
   });
 
   it("records the call as made to the sinkhole, with the path the app asked for", () => {

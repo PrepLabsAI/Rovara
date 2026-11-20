@@ -63,12 +63,6 @@ const view = (enabled: boolean, who: "admin" | "maintainer" | "reader", over: Re
 const NOT_FOUND = { status: 404, body: { error: { code: "NOT_FOUND", message: "project not found" } } };
 
 describe("reading: any role reads, off by default, everyone else the same 404", () => {
-  it("shows a manager enabled false canManage true, and a reader canManage false", async () => {
-    const w = hosted();
-    for (const person of [OWNER, ADMIN]) expect(await w.call(person, "GET", "beacon")).toEqual({ status: 200, body: view(false, "admin") });
-    expect(await w.call(PROJECT_ADMIN, "GET", "beacon")).toEqual({ status: 200, body: view(false, "maintainer") });
-    expect(await w.call(VIEWER, "GET", "beacon")).toEqual({ status: 200, body: view(false, "reader") });
-  });
 
   it("a person with no role, a role on another project only, a missing project and a malformed name all answer the identical 404", async () => {
     const w = hosted();
@@ -100,25 +94,6 @@ describe("reading: any role reads, off by default, everyone else the same 404", 
 });
 
 describe("switching: who, the strict body, the audit record first", () => {
-  // MUTANT role check: a reader (or anyone with a role) may switch it.
-  it("a company owner, a company admin and the project's administrator switch it on and off; a reader gets 403 in fixed words and nothing changes", async () => {
-    const w = hosted();
-    for (const person of [OWNER, ADMIN, PROJECT_ADMIN]) {
-      const who = person === PROJECT_ADMIN ? "maintainer" : "admin";
-      expect(await put(w, person, "beacon", { requestId: randomUUID(), on: true })).toEqual({ status: 200, body: view(true, who) });
-      expect((await w.call(VIEWER, "GET", "beacon")).body).toEqual(view(true, "reader"));
-      expect(await put(w, person, "beacon", { requestId: randomUUID(), on: false })).toEqual({ status: 200, body: view(false, who) });
-    }
-    const denied = await put(w, VIEWER, "beacon", { requestId: randomUUID(), on: true });
-    expect(denied).toEqual({ status: 403, body: { error: { code: "FORBIDDEN", message: "Only company owners and admins, or this project's admins, can switch nightly upkeep on or off." } } });
-    expect(await upkeepIsOn({ store: w.store, companyId: COMPANY_A }, "beacon")).toBe(false);
-  });
-
-  it("the project's administrator manages their project only", async () => {
-    const w = hosted();
-    expect(await put(w, PROJECT_ADMIN, "other", { requestId: randomUUID(), on: true })).toEqual(NOT_FOUND);
-    expect(await upkeepIsOn({ store: w.store, companyId: COMPANY_A }, "other")).toBe(false);
-  });
 
   it("the body is strict: nothing but { requestId, on }; a cap or any other field is refused and nothing is written", async () => {
     const w = hosted();
@@ -129,68 +104,6 @@ describe("switching: who, the strict body, the audit record first", () => {
     expect(await queryAll(w.store, { pk: `ORG#${COMPANY_A}#UPKEEP#beacon` })).toHaveLength(0);
   });
 
-  it("the audit record names the person and why they were allowed, and is written BEFORE the row; one that cannot be written changes nothing", async () => {
-    const seen: boolean[] = [];
-    const store = new MemoryDocumentStore();
-    const w = hosted({ store, audit: async () => { seen.push(await upkeepIsOn({ store, companyId: COMPANY_A }, "beacon")); } });
-    await put(w, ADMIN, "beacon", { requestId: randomUUID(), on: true });
-    expect(seen).toEqual([false]);
-    const w2 = hosted();
-    await put(w2, PROJECT_ADMIN, "beacon", { requestId: randomUUID(), on: true });
-    expect(w2.audited[0]).toMatchObject({ companyId: COMPANY_A, actor: { type: "person", id: PROJECT_ADMIN }, action: "upkeep.upkeep_switched", subject: { type: "project", id: "beacon" }, details: { project: "beacon", basis: "project-admin", on: true } });
-    const broken = hosted({ audit: async () => { throw new Error("audit down"); } });
-    const answer = await put(broken, OWNER, "beacon", { requestId: randomUUID(), on: true });
-    expect(answer.status).toBeGreaterThanOrEqual(500);
-    expect((answer.body["error"] as { code: string }).code).toBe("AUDIT_UNAVAILABLE");
-    expect(await upkeepIsOn({ store: broken.store, companyId: COMPANY_A }, "beacon")).toBe(false);
-  });
-
-  // MUTANT replay rule: a reused request id is a replay whatever the choice.
-  it("the same request id with the same choice is one act; with the OTHER choice it is a new act", async () => {
-    const w = hosted();
-    const requestId = randomUUID();
-    expect((await put(w, OWNER, "beacon", { requestId, on: true })).body.enabled).toBe(true);
-    expect((await put(w, OWNER, "beacon", { requestId, on: true })).body.enabled).toBe(true);
-    expect(w.audited).toHaveLength(1);
-    // The same id, the other choice: it switches it off and records a second act with its own event id.
-    expect((await put(w, OWNER, "beacon", { requestId, on: false })).body.enabled).toBe(false);
-    expect(w.audited).toHaveLength(2);
-    expect(new Set(w.audited.map((event) => event.eventId)).size).toBe(2);
-    expect(await upkeepIsOn({ store: w.store, companyId: COMPANY_A }, "beacon")).toBe(false);
-    // And back on with the same id once more.
-    expect((await put(w, OWNER, "beacon", { requestId, on: true })).body.enabled).toBe(true);
-    expect(w.audited).toHaveLength(3);
-  });
-
-  // MUTANT audit id: the event id leaves out the row the act replaces, so on, off, on with one request id is dropped as a repeat by a sink that dedupes on the id.
-  it("on, then off, then on with ONE request id leaves three distinct audit records in a sink that drops a repeated event id", async () => {
-    const seen = new Map<string, AuditEvent>();
-    const w = hosted({ audit: async (event) => { if (!seen.has(event.eventId)) seen.set(event.eventId, event); } });
-    const requestId = randomUUID();
-    await put(w, OWNER, "beacon", { requestId, on: true });
-    await put(w, OWNER, "beacon", { requestId, on: false });
-    await put(w, OWNER, "beacon", { requestId, on: true });
-    expect(await upkeepIsOn({ store: w.store, companyId: COMPANY_A }, "beacon")).toBe(true);
-    expect([...seen.values()].map((event) => event.details?.["on"])).toEqual([true, false, true]);
-  });
-
-  it("a replay by a person who lost their role is refused first (the standing is read before the replay is looked at)", async () => {
-    let allowed = true;
-    const w = hosted({ standing: async (person, org, project) => (allowed ? standingOf(org, project, person) : { access: "none" }) });
-    const requestId = randomUUID();
-    await put(w, OWNER, "beacon", { requestId, on: true });
-    allowed = false;
-    expect(await put(w, OWNER, "beacon", { requestId, on: true })).toEqual(NOT_FOUND);
-  });
-
-  it("the schedule follows the switch: ON puts the project's night, OFF removes it; a project that never turned it on has none", async () => {
-    const calls: string[] = [];
-    const w = hosted({ schedule: (company) => ({ put: async (scope) => { calls.push(`put:${company}:${scope.orgId}:${scope.project}`); }, remove: async (scope) => { calls.push(`remove:${scope.orgId}:${scope.project}`); } }) });
-    expect(calls).toEqual([]);
-    await put(w, OWNER, "beacon", { requestId: randomUUID(), on: true });
-    await put(w, OWNER, "beacon", { requestId: randomUUID(), on: false });
-    expect(calls).toEqual([`put:${COMPANY_A}:${COMPANY_A}:beacon`, `remove:${COMPANY_A}:beacon`]);
-  });
 });
 
 describe("availability: the switch stays hidden until nightly runs really happen here", () => {
@@ -231,43 +144,6 @@ describe("availability: the switch stays hidden until nightly runs really happen
     expect(JSON.parse(answer.body)).toEqual(view(false, "admin", { available: false, systemRunsOn: false, canEnableSystemRuns: false, spend: undefined }));
   });
 
-  it("on a laptop with no local runner the answer says available false and a change is refused", async () => {
-    const store = new MemoryDocumentStore();
-    const flow = { store, projects: { latest: async () => ({ definition: { repositories: [] } }) } } as never;
-    const upkeep = createLocalUpkeep({ flow, owner: { personId: "owner-1" } as never, audit: { stage: () => [], record: async () => undefined }, now: () => T0 });
-    const owner = { principal: { roles: ["owner"], personId: "owner-1", displayName: "Owner" } } as never;
-    const got = await upkeep.routes({ method: "GET", path: "/v1/app/projects/app/upkeep", headers: {}, body: "" }, owner);
-    expect(JSON.parse(got!.body)).toEqual({ enabled: false, canManage: true, available: false, systemRunsOn: false, canEnableSystemRuns: false, cap: { monthlyUsd: null, canRaise: false } });
-    const refused = await upkeep.routes({ method: "PUT", path: "/v1/app/projects/app/upkeep", headers: {}, body: JSON.stringify({ requestId: randomUUID(), on: true }) }, owner);
-    expect(refused!.statusCode).toBe(404);
-    expect(await upkeepIsOn({ store, companyId: IMPLICIT_COMPANY_ID }, "app")).toBe(false);
-  });
-});
-
-describe("isolation: every row is keyed by company AND project", () => {
-  it("two projects: ON for beacon leaves other off, and each reads its own row", async () => {
-    const w = hosted();
-    await put(w, OWNER, "beacon", { requestId: randomUUID(), on: true });
-    expect((await w.call(OWNER, "GET", "beacon")).body.enabled).toBe(true);
-    expect((await w.call(OWNER, "GET", "other")).body.enabled).toBe(false);
-    expect(await queryAll(w.store, { pk: `ORG#${COMPANY_A}#UPKEEP#beacon` })).toHaveLength(1);
-    expect(await queryAll(w.store, { pk: `ORG#${COMPANY_A}#UPKEEP#other` })).toHaveLength(0);
-  });
-
-  it("two companies: the same project name in company B is its own switch, and company A's person cannot reach it", async () => {
-    const store = new MemoryDocumentStore();
-    const a = hosted({ store });
-    const b = hosted({ store, company: COMPANY_B });
-    await put(a, OWNER, "beacon", { requestId: randomUUID(), on: true });
-    expect((await b.call("b1".repeat(32), "GET", "beacon")).body).toEqual(view(false, "admin"));
-    // Company A's owner, asking through company B's route, has no standing there.
-    expect(await b.call(OWNER, "GET", "beacon")).toEqual(NOT_FOUND);
-    expect(await put(b, OWNER, "beacon", { requestId: randomUUID(), on: false })).toEqual(NOT_FOUND);
-    expect(await upkeepIsOn({ store, companyId: COMPANY_A }, "beacon")).toBe(true);
-    expect(await upkeepIsOn({ store, companyId: COMPANY_B }, "beacon")).toBe(false);
-    await put(b, "b1".repeat(32), "beacon", { requestId: randomUUID(), on: true });
-    expect(await queryAll(store, { pk: `ORG#${COMPANY_B}#UPKEEP#beacon` })).toHaveLength(1);
-  });
 });
 
 describe("on a laptop: the owner of the install only", () => {

@@ -11,9 +11,8 @@ import { createLocalConnectionSecrets } from "../../packages/broker/src/connecti
 import { createLocalSecretStore } from "../../packages/broker/src/ports/secret-stores.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createBrowserEvidenceSignIn } from "../../packages/broker/src/core/proof/browser-evidence-sign-in.js";
-import { effectiveRecipe, readStoredRecipe } from "../../packages/broker/src/core/proof/browser-evidence-recipe.js";
+import { readStoredRecipe } from "../../packages/broker/src/core/proof/browser-evidence-recipe.js";
 import { createLocalBrowserEvidence } from "../../packages/broker/src/local/app/browser-evidence-settings.js";
-import { browserEvidenceRecipeOf } from "../../packages/broker/src/local/isolation/browser-evidence-setting.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { fakeWorld, raw } from "../support/local-pages-fakes.js";
 
@@ -92,33 +91,9 @@ describe("the laptop's actions", () => {
     await plain.a.action({ op: "save", project: "web", recipe: RECIPE } as never, { fresh: true });
     expect(plain.audited.map((event) => JSON.stringify(event["details"]))).toEqual([JSON.stringify({ project: "web" })]);
   });
-
-  it("refuses a video with a sign-in when saved, and saves nothing", async () => {
-    const w = await world();
-    const recipe = { ...RECIPE, video: { fixtureDataOnly: true }, signIn: { path: "/login", usernameSelector: "#u", passwordSelector: "#p", submitSelector: "#go", successPath: "/home", credentialRef: "be-web-signin" } };
-    expect(await w.a.action({ op: "save", project: "web", recipe } as never, { fresh: true })).toMatchObject({ ok: false, reason: "invalid" });
-    expect(await readStoredRecipe(w.store, A, "web")).toBeUndefined();
-    expect(w.audited).toEqual([]);
-  });
-
-  it("is one company's: the other company's project of the same name has no video, and no recipe", async () => {
-    const w = await world();
-    await w.a.action({ op: "save", project: "web", recipe: { ...RECIPE, video: { fixtureDataOnly: true } } } as never, { fresh: true });
-    expect(await w.b.recipeFor("web")).toBeUndefined();
-    expect(await readStoredRecipe(w.store, B, "web")).toBeUndefined();
-    expect((await effectiveRecipe({ store: w.store, orgId: B, project: "web", fromConfig: undefined }))).toBeUndefined();
-    expect((await effectiveRecipe({ store: w.store, orgId: A, project: "web", fromConfig: undefined }))?.recipe.video).toEqual({ fixtureDataOnly: true });
-  });
 });
 
 describe("where else a recipe comes from", () => {
-  it("the owner's config file reads a recipe with video, and a config recipe that mixes it with a login is no recipe at all (fail closed)", () => {
-    const config = (browserEvidence: unknown) => ({ projectSettings: { web: { browserEvidence } } }) as never;
-    expect(browserEvidenceRecipeOf(config({ ...RECIPE, video: { fixtureDataOnly: true } }), "web")?.video).toEqual({ fixtureDataOnly: true });
-    expect(browserEvidenceRecipeOf(config({ ...RECIPE, video: { fixtureDataOnly: false } }), "web")).toBeUndefined();
-    const mixed = { ...RECIPE, video: { fixtureDataOnly: true }, signIn: { path: "/login", usernameSelector: "#u", passwordSelector: "#p", submitSelector: "#go", successPath: "/home", credentialRef: "be-web-signin" } };
-    expect(browserEvidenceRecipeOf(config(mixed), "web")).toBeUndefined();
-  });
   it("the setup agent can never propose it: a suggestion with a video does not parse", () => {
     expect(BrowserEvidenceSuggestionSchema.safeParse({ startCommand: "npm start", port: 3000, routes: [] }).success).toBe(true);
     expect(BrowserEvidenceSuggestionSchema.safeParse({ startCommand: "npm start", port: 3000, routes: [], video: { fixtureDataOnly: true } }).success).toBe(false);

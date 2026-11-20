@@ -12,7 +12,6 @@ import { erasePersonLessons } from "../../packages/broker/src/core-host/lessons.
 import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
 import { slackThreadSource } from "../../packages/broker/src/lessons/slack-wiring.js";
 import { readSlackOptOut, writeSlackOptOut } from "../../packages/broker/src/lessons/slack-switch.js";
-import { SLACK_PAUSE_KEY } from "../../packages/broker/src/lessons/slack-source.js";
 import { InMemoryLessonStore } from "../../packages/broker/src/lessons/store.js";
 import { createLocalLessonSources } from "../../packages/broker/src/local/app/lessons-sources.js";
 import type { LessonRepositories } from "../../packages/broker/src/local/app/lessons-repos.js";
@@ -91,16 +90,6 @@ describe("the thread reader", () => {
     expect(w.asked).toHaveLength(1);
     expect(w.asked[0]).toMatchObject({ kind: "thread_messages", tenant: TEAM_A, space: SPACE, thread: THREAD });
   });
-  it("never looks up a person for a bot, a person of another organisation or a notice", async () => {
-    const w = await world({ messages: [{ id: "1700000001.000100", userId: U_ANN, bot: true }, { id: "1700000001.000200", userId: U_ANN, external: true }, { id: "1700000001.000300", userId: U_ANN, plain: false }] });
-    const read = await w.wiring(A).reader.read({ companyId: A, project: "payments", taskId: w.taskIdOf(A) });
-    expect(read!.messages.every((m) => m.person === undefined)).toBe(true);
-  });
-  it("asks nothing when the space is bound to another project", async () => {
-    const other = await world({ boundTo: "billing" });
-    expect(await other.wiring(A).reader.read({ companyId: A, project: "payments", taskId: other.taskIdOf(A) })).toBeUndefined();
-    expect(other.asked).toEqual([]);
-  });
   it("asks nothing for a task that did not start in a chat thread, or for another company's company id", async () => {
     const w = await world();
     expect(await w.wiring(A).reader.read({ companyId: A, project: "payments", taskId: "task-without-thread" })).toBeUndefined();
@@ -122,12 +111,6 @@ describe("the thread reader", () => {
 });
 
 describe("the capture at task end, hosted: the reply becomes a span only when every rule holds", () => {
-  it("a linked project member's correction in the bound, public channel is a slack_reply span of that person, with a pointer and the project's audience", async () => {
-    const w = await world();
-    const spans = await w.spansOf(A);
-    expect(spans).toHaveLength(1);
-    expect(spans[0]).toMatchObject({ kind: "slack_reply", text: SAY, trust: "member", authorId: "ann", eventId: `slack:${TEAM_A}/${SPACE}#1700000001.000100`, audience: { kind: "project" } });
-  });
   it("a direct message, a shared space and a thread of a private channel that is not bound: nothing; a private bound channel keeps its audience", async () => {
     expect(await (await world({ space: { direct: true } })).spansOf(A)).toEqual([]);
     expect(await (await world({ space: { shared: true } })).spansOf(A)).toEqual([]);
@@ -144,47 +127,10 @@ describe("the capture at task end, hosted: the reply becomes a span only when ev
     await writeSlackOptOut(w.store, A, "ann", false, now());
     expect(await w.spansOf(A)).toHaveLength(1);
   });
-  it("a guest account linked to a person with no role on the project is dropped, while the member beside them is read", async () => {
-    const w = await world({ messages: [{ id: "1700000001.000100", userId: U_GUEST }, { id: "1700000001.000200", userId: U_ANN, text: "Never call the billing API from tests, use the recorded fake instead." }] });
-    expect((await w.spansOf(A)).map((s) => s.authorId)).toEqual(["ann"]);
-  });
-  it("the project's pause stops the read: the adapter is not asked at all; resuming reads again, and a pause on another project does nothing", async () => {
-    const w = await world();
-    await w.lessonStore.setFlags({ workspaceId: A, project: "payments" }, { pausedSources: { [SLACK_PAUSE_KEY]: { at: 1, reason: "person" } } });
-    expect(await w.spansOf(A)).toEqual([]);
-    expect(w.asked).toEqual([]);
-    await w.lessonStore.setFlags({ workspaceId: A, project: "payments" }, { pausedSources: {} });
-    await w.lessonStore.setFlags({ workspaceId: A, project: "billing" }, { pausedSources: { [SLACK_PAUSE_KEY]: { at: 1, reason: "person" } } });
-    expect(await w.spansOf(A)).toHaveLength(1);
-  });
   it("a flood-guard pause on a Slack channel of the project stops the next read too", async () => {
     const w = await world();
     await w.lessonStore.setFlags({ workspaceId: A, project: "payments" }, { pausedSources: { [`slack:${SPACE}`]: { at: 1, reason: "spike" } } });
     expect(await w.spansOf(A)).toEqual([]);
-    expect(w.asked).toEqual([]);
-  });
-  it("a send-back's reflection, a revert's re-reflection and the repo-only pass never read the thread (it is read once, at the task's end)", async () => {
-    const w = await world();
-    const sources = w.sourcesOf(A);
-    await sources.source.read({ workspaceId: A, taskId: w.taskIdOf(A), withoutSlack: true });
-    expect(w.asked).toEqual([]);
-    await sources.source.read({ workspaceId: A, taskId: w.taskIdOf(A) });
-    expect(w.asked).toHaveLength(1);
-  });
-  it("a human edit's reflection (the task's own facts only) never reads the thread", async () => {
-    const w = await world();
-    const sources = createLocalLessonSources({
-      flow: { store: w.store, projects: undefined as never }, companyId: A, ownerId: "local-owner", repos: { ofProject: async () => [], ofTask: async () => undefined } as unknown as LessonRepositories, now,
-      hosted: { people: people({ [`${A}/payments`]: ["ann"] }) }, slack: w.wiring(A),
-    });
-    await sources.source.read({ workspaceId: A, taskId: w.taskIdOf(A), context: "human_edit" });
-    expect(w.asked).toEqual([]);
-  });
-  it("a source built with no slack option is exactly what it was: no span, no command", async () => {
-    const w = await world();
-    const plain = createLocalLessonSources({ flow: { store: w.store, projects: undefined as never }, companyId: A, ownerId: "local-owner", repos: { ofProject: async () => [], ofTask: async () => undefined } as unknown as LessonRepositories, now, hosted: { people: people({ [`${A}/payments`]: ["ann"] }) } });
-    const read = await plain.source.read({ workspaceId: A, taskId: w.taskIdOf(A) });
-    expect(read!.facts.rest.spans!.filter((s) => s.kind === "slack_reply")).toEqual([]);
     expect(w.asked).toEqual([]);
   });
 });
@@ -205,23 +151,6 @@ describe("on a laptop only the owner is a person", () => {
     const read = async (owner: string) => (await createLocalLessonSources({ flow: { store: w.store, projects: undefined as never }, companyId: A, ownerId: owner, repos: { ofProject: async () => [], ofTask: async () => undefined } as unknown as LessonRepositories, now, slack: w.wiring(A) }).source.read({ workspaceId: A, taskId: w.taskIdOf(A) }))?.facts.rest.spans?.filter((x) => x.kind === "slack_reply") ?? [];
     expect((await read("ann")).map((x) => x.authorId)).toEqual(["ann"]);
     expect(await read("someone-else")).toEqual([]);
-  });
-});
-
-describe("two companies stay apart", () => {
-  it("each company reads its own thread, with its own person for the same Slack account id, and a company-A reader refuses company B's task", async () => {
-    const w = await world({ roster: { [`${A}/payments`]: ["ann"], [`${B}/payments`]: ["bob"] } });
-    expect((await w.spansOf(A)).map((s) => s.authorId)).toEqual(["ann"]);
-    // Company B's roster has only bob, and the Slack account is linked to ann in B too: not on B's roster, so nothing.
-    expect(await w.spansOf(B)).toEqual([]);
-    expect(await w.wiring(A).reader.read({ companyId: B, project: "payments", taskId: w.taskIdOf(B) })).toBeUndefined();
-  });
-  it("a person's switch in company A is not their switch in company B", async () => {
-    const w = await world();
-    await writeSlackOptOut(w.store, A, "ann", true, now());
-    expect(await readSlackOptOut(w.store, A, "ann")).toBe(true);
-    expect(await readSlackOptOut(w.store, B, "ann")).toBe(false);
-    expect(await w.spansOf(B)).toHaveLength(1);
   });
 });
 

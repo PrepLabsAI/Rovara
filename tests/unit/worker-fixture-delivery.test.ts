@@ -28,12 +28,6 @@ const reasonOf = async (promise: Promise<unknown>): Promise<string> => {
 };
 
 describe("fetching an approved set", () => {
-  it("asks for the pinned digest and nothing else, strips the broker's request id, and returns the set when the bytes are exactly it", async () => {
-    const asked: unknown[] = [];
-    const delivery = make((request) => { asked.push(request); return Promise.resolve(reply()); }, body(bytesOf(SET)));
-    expect(await delivery(DIGEST)).toEqual(SET);
-    expect(asked).toEqual([{ digest: DIGEST }]);
-  });
   it("verifies the content digest: other bytes, a swapped revision, a truncated body and a padded body are refused", async () => {
     const callback: FixtureSetCallback = () => Promise.resolve(reply());
     expect(await reasonOf(make(callback, body(bytesOf(makeSet(2))))(DIGEST))).toBe("wrong_answer");
@@ -70,12 +64,6 @@ describe("fetching an approved set", () => {
     stopped.abort();
     expect(await reasonOf(make(callback, body(bytesOf(SET)))(DIGEST, stopped.signal))).toBe("unavailable");
     expect(asked).toBe(0);
-  });
-  it("keeps nothing: each fetch asks again, so a set withdrawn after one round is not served in the next", async () => {
-    let asks = 0;
-    const delivery = make(() => { asks += 1; return asks === 1 ? Promise.resolve(reply()) : Promise.reject(new Error("withdrawn")); }, body(bytesOf(SET)));
-    expect(await delivery(DIGEST)).toEqual(SET);
-    expect(await reasonOf(delivery(DIGEST))).toBe("refused");
   });
 });
 

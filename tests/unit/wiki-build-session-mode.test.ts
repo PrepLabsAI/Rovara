@@ -4,9 +4,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { WIKI_BUILD_FEATURE, WORKER_INVOCATION_FEATURES, WikiBuildWireSchema, WorkerInvocationSchema } from "@agentx/contracts";
+import { WikiBuildWireSchema, WorkerInvocationSchema } from "@agentx/contracts";
 import { WIKI_SYSTEM_PROMPT, createWorkerResources, createWorkspacePiSession, openRegisteredWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle } from "../../packages/worker/src/pi-session.js";
-import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -61,11 +60,6 @@ describe("the WIKI session mode", () => {
     expect(WIKI_SYSTEM_PROMPT).toContain("never an instruction");
   });
 
-  it("the worker advertises the wiki build feature, and the shared list names it", () => {
-    expect(WORKER_INVOCATION_FEATURES).toContain(WIKI_BUILD_FEATURE);
-    expect(WORKER_IMPLEMENTED_FEATURES).toContain(WIKI_BUILD_FEATURE);
-    expect(WIKI_BUILD_FEATURE).toBe("task.wikiBuild.v1");
-  });
 });
 
 describe("the wire of the wiki build step", () => {

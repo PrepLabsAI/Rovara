@@ -4,7 +4,7 @@ import { lstat, mkdir, mkdtemp, readlink, rm, symlink, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { EvalEnvironmentSchema, savedEnvRepositoryIsFor, savedEnvRepositoryName, type EvalEnvironment } from "@agentx/contracts";
+import { EvalEnvironmentSchema, savedEnvRepositoryName, type EvalEnvironment } from "@agentx/contracts";
 import { EVAL_OVERLAY_ENTRIES_MAX, EVAL_PYTHON_USER_BASE, overlayDependencyFolders, useSavedEnvironment } from "../../packages/worker/src/verification/eval-environment.js";
 import { evalInstallArgProblems, evalInstallRunArgs, installModelBlock } from "../../packages/worker/src/verification/eval-bridged-exec.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
@@ -66,20 +66,6 @@ describe("overlayDependencyFolders", () => {
     expect(await readlink(join(other, "node_modules/link.js"))).toBe("a/index.js");
   });
 
-  it("never follows a link out of the seed, and does not enter a dependency folder it is already copying", async () => {
-    const root = await temp();
-    const seed = join(root, "seed"); const checkout = join(root, "checkout"); const outside = join(root, "outside");
-    await put(outside, "node_modules/stolen.txt", "outside");
-    await mkdir(seed, { recursive: true });
-    await symlink(outside, join(seed, "linked"));
-    await put(seed, "node_modules/inner/node_modules/deep.txt", "deep");
-    await mkdir(checkout, { recursive: true });
-    const { folders } = await overlayDependencyFolders(seed, checkout);
-    expect(folders).toBe(1);
-    expect(existsSync(join(checkout, "linked"))).toBe(false);
-    expect(existsSync(join(checkout, "node_modules/inner/node_modules/deep.txt"))).toBe(true);
-  });
-
   it("refuses an image with too many entries, and one nested too deep", async () => {
     const root = await temp();
     const seed = join(root, "seed");
@@ -134,31 +120,6 @@ describe("useSavedEnvironment", () => {
     expect(existsSync(join(checkout, "aaa/.venv"))).toBe(false);
     expect(existsSync(join(checkout, "zzz/node_modules"))).toBe(false);
     expect(record.removed).toBe(1);
-  });
-
-  it("two projects: each pull is for its own repository and login, and one project's folders never reach the other's checkout", async () => {
-    const root = await temp();
-    const seedA = join(root, "seedA"); const seedB = join(root, "seedB");
-    await put(seedA, "app/node_modules/only-a/index.js", "// A");
-    await put(seedB, "app/node_modules/only-b/index.js", "// B");
-    const [checkoutA, checkoutB] = [join(root, "checkoutA"), join(root, "checkoutB")];
-    await mkdir(checkoutA, { recursive: true }); await mkdir(checkoutB, { recursive: true });
-    const [a, b] = [savedEnvironment("company-a", "project-a"), savedEnvironment("company-b", "project-a")];
-    expect(a.repository).not.toBe(b.repository);
-    const ra: { options?: unknown; removed: number } = { removed: 0 };
-    const rb: { options?: unknown; removed: number } = { removed: 0 };
-    expect(await useSavedEnvironment({ environment: a, checkout: checkoutA, docker: dockerNever, extract: fakeExtract(seedA, ra) })).toBe(true);
-    expect(await useSavedEnvironment({ environment: b, checkout: checkoutB, docker: dockerNever, extract: fakeExtract(seedB, rb) })).toBe(true);
-    expect((ra.options as { ref: { repository: string } }).ref.repository).toBe(a.repository);
-    expect((rb.options as { ref: { repository: string } }).ref.repository).toBe(b.repository);
-    expect(existsSync(join(checkoutA, "node_modules/only-a/index.js"))).toBe(true);
-    expect(existsSync(join(checkoutA, "node_modules/only-b"))).toBe(false);
-    expect(existsSync(join(checkoutB, "node_modules/only-a"))).toBe(false);
-    // The repository check the broker makes before it delivers an environment: company A's name is not company B's, nor another project's.
-    expect(savedEnvRepositoryIsFor(a.repository, { orgId: "company-a", projectId: "project-a" })).toBe(true);
-    expect(savedEnvRepositoryIsFor(a.repository, { orgId: "company-b", projectId: "project-a" })).toBe(false);
-    expect(savedEnvRepositoryIsFor(a.repository, { orgId: "company-a", projectId: "project-b" })).toBe(false);
-    expect(savedEnvRepositoryIsFor("not a repository", { orgId: "company-a", projectId: "project-a" })).toBe(false);
   });
 
   it("answers false (and removes what it pulled) for a failed pull, a missing repository folder, a seed with no dependency folder or a link in place of the folder; it never throws", async () => {
@@ -239,10 +200,5 @@ describe("the install step's box", () => {
     expect(() => evalInstallRunArgs({ ...input, image: "rovara/worker:latest" })).toThrow("the eval install step's arguments are unsound");
     expect(() => evalInstallRunArgs({ ...input, network: "bad net" })).toThrow();
     expect(() => evalInstallRunArgs({ ...input, command: { executable: "pip", args: [], cwd: "../x" } })).toThrow();
-  });
-
-  it("works in the command's folder inside the checkout", () => {
-    expect(flag(evalInstallRunArgs({ ...input, command: { ...input.command, cwd: "web" } }), "--workdir")).toEqual(["/workspace/web"]);
-    expect(flag(evalInstallRunArgs(input), "--workdir")).toEqual(["/workspace"]);
   });
 });

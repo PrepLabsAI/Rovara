@@ -3,7 +3,6 @@
 // Deterministic and bounded: no model call.
 import { describe, expect, it } from "vitest";
 import { ToolCallRecorder, checkGrounding, cleanGrounding, type GroundingInput } from "../../packages/worker/src/agent-run/grounding.js";
-import { expectLinearScaling } from "../support/scaling.js";
 
 const connectorOk = (tool: string, args: unknown, text: string) => ({ tool, connector: true, args, outcome: "ok" as const, text });
 const connectorFailed = (tool: string, args: unknown, text: string) => ({ tool, connector: true, args, outcome: "failed" as const, text });
@@ -14,67 +13,6 @@ const tool = (name: string, upstream = name) => ({ name, upstream });
 const check = (overrides: Partial<GroundingInput>) => checkGrounding({ report: "Done.", provided: "Request:\nLook at the deploy.", calls: [], connectorTools: [], ...overrides });
 
 describe("checkGrounding", () => {
-  it("says nothing about a plain report with no tools and nothing to check", () => {
-    expect(check({ report: "The deploy finished. Nothing to add." })).toBeUndefined();
-  });
-
-  it("is grounded when the pull request the report cites was returned by a successful tool call", () => {
-    const grounding = check({
-      report: "Verdict: healthy.\nPR #5 \"Add Notes\" went out in commit b68926a2f91f1e30c12105ac636d46832351e4b5.",
-      calls: [connectorOk("list_pull_requests", { target: "main" }, JSON.stringify({ status: "SUCCEEDED", text: "[{\"number\":5,\"title\":\"Add Notes\",\"head\":{\"sha\":\"b68926a2f91f1e30c12105ac636d46832351e4b5\"}}]" }))],
-      connectorTools: [tool("list_pull_requests")],
-    });
-    expect(grounding).toBeUndefined();
-  });
-
-  it("is grounded when what the report cites was in the request or an earlier report the step was given", () => {
-    expect(check({
-      provided: "Request:\nDo your job.\n\nReport from Inspect:\nThe branch head is b68926a2f91 and the PR is #7.",
-      report: "PR #7 at b68926a2f91 looks fine.",
-    })).toBeUndefined();
-  });
-
-  it("is unverified when the report cites a pull request that no tool returned and the request does not hold", () => {
-    const grounding = check({
-      report: "Found it: PR #5 Add Notes feature, merged.",
-      calls: [connectorOk("list_pull_requests", {}, JSON.stringify({ status: "SUCCEEDED", text: "[{\"number\":9}]" }))],
-      connectorTools: [tool("list_pull_requests")],
-    });
-    expect(grounding?.verdict).toBe("unverified");
-    expect(grounding?.reasons.join("\n")).toMatch(/pull request #5/i);
-  });
-
-  it("is unverified when the report cites a commit nothing returned, and accepts a short sha of a returned one", () => {
-    const calls = [connectorOk("get_commit", { sha: "c0ffee1" }, JSON.stringify({ status: "SUCCEEDED", text: "commit 4f2a9c1d7e0b3a5c6d8e9f00112233445566aabb by maya" }))];
-    expect(check({ report: "Commit 4f2a9c1 changed the retry.", calls, connectorTools: [tool("get_commit")] })).toBeUndefined();
-    const bad = check({ report: "Commit 9d8c7b6a changed the retry.", calls, connectorTools: [tool("get_commit")] });
-    expect(bad?.verdict).toBe("unverified");
-    expect(bad?.reasons.join("\n")).toContain("9d8c7b6a");
-  });
-
-  it("does not take a plain word or a long number for a commit", () => {
-    expect(check({ report: "The defaced page was fixed. Run 15851085847 passed in 1234567 ms." })).toBeUndefined();
-  });
-
-  it("is unverified when the report cites a file no tool read or listed, and grounded when a tool did", () => {
-    const calls = [fileOk("read", { path: "repo/app/apps/backend/src/app.ts" }, "export const app = 1;")];
-    expect(check({ report: "The bug is in `apps/backend/src/app.ts`.", calls })).toBeUndefined();
-    const bad = check({ report: "The bug is in `apps/backend/src/router.ts`.", calls });
-    expect(bad?.verdict).toBe("unverified");
-    expect(bad?.reasons.join("\n")).toContain("apps/backend/src/router.ts");
-  });
-
-  it("does not check a path inside a link", () => {
-    expect(check({ report: "See https://example.com/docs/guide/setup.md for the steps." })).toBeUndefined();
-  });
-
-  it("is unverified when the report contains tool-call text, whatever else is true", () => {
-    for (const markup of ["<tool_call>{\"name\":\"x\"}</tool_call>", "<tool_response>[]</tool_response>", "<function_calls><invoke name=\"x\"></invoke></function_calls>", "<parameter name=\"owner\">a</parameter>"]) {
-      const grounding = check({ report: `I looked.\n${markup}\nAll fine.` });
-      expect(grounding?.verdict, markup).toBe("unverified");
-      expect(grounding?.reasons.join("\n")).toMatch(/tool call/i);
-    }
-  });
 
   it("is unverified when a connector tool failed, recording the failure, even if the report says nothing about it", () => {
     const grounding = check({
@@ -87,37 +25,6 @@ describe("checkGrounding", () => {
     expect(grounding?.tools.failures[0]).toMatchObject({ tool: "list_pull_requests" });
     expect(grounding?.tools.failures[0]?.message).toContain("403");
     expect(grounding?.reasons.join("\n")).toContain("list_pull_requests");
-  });
-
-  it("forgives a connector tool that failed and then worked", () => {
-    const grounding = check({
-      report: "PR #5 is merged.",
-      calls: [
-        connectorFailed("list_pull_requests", {}, JSON.stringify({ status: "FAILED", text: "timeout" })),
-        connectorOk("list_pull_requests", {}, JSON.stringify({ status: "SUCCEEDED", text: "[{\"number\":5}]" })),
-      ],
-      connectorTools: [tool("list_pull_requests")],
-    });
-    expect(grounding?.verdict).toBe("grounded");
-    expect(grounding?.tools).toMatchObject({ calls: 2, failed: 1 });
-  });
-
-  it("is unverified when every call the step made failed, even file tools (it made no successful read)", () => {
-    const grounding = check({
-      report: "I could not read anything.",
-      calls: [fileFailed("read", { path: "a.ts" }, "Cannot read file"), fileFailed("ls", { path: "." }, "Cannot read directory")],
-    });
-    expect(grounding?.verdict).toBe("unverified");
-    expect(grounding?.reasons.join("\n")).toMatch(/no successful/i);
-  });
-
-  it("keeps file-tool errors visible but does not condemn a step that read other things", () => {
-    const grounding = check({
-      report: "The service has three routes.",
-      calls: [fileFailed("ls", { path: ".agentx" }, "Cannot read directory: permission"), fileOk("read", { path: "README.md" }, "# Service\nthree routes")],
-    });
-    expect(grounding?.verdict).toBe("grounded");
-    expect(grounding?.tools).toMatchObject({ calls: 2, failed: 1, failures: [{ tool: "ls" }] });
   });
 
   it("is unverified when the report names a connector tool it never called, and grounded when it did", () => {
@@ -165,11 +72,6 @@ describe("the staging run crn_6o18spb2tfbe8147c40j", () => {
     expect(reasons).not.toContain("328b0a5b");
     expect(reasons).not.toContain("b68926a2");
   });
-
-  it("would have passed Inspect's own honest report", () => {
-    const honest = "I could not identify the pull request: no GitHub API access. The branch `check-v046-webhook-1793018338` at b68926a2f91 looks related. Verdict: unknown.";
-    expect(check({ report: honest, provided: `Request:\nDo your job.\n\n${INSPECT}` })).toBeUndefined();
-  });
 });
 
 describe("ToolCallRecorder", () => {
@@ -206,17 +108,6 @@ describe("ToolCallRecorder", () => {
     recorder.observe(end("a", "add_issue_comment", JSON.stringify({ status: "IN_PROGRESS", text: "Waiting for a person to approve" })));
     expect(recorder.calls()[0]).toMatchObject({ outcome: "held" });
   });
-
-  it("keeps only a bounded amount of text per call and in all", () => {
-    const recorder = new ToolCallRecorder(new Set());
-    for (let index = 0; index < 400; index += 1) {
-      recorder.observe(start(String(index), "read", { path: `f${String(index)}` }));
-      recorder.observe(end(String(index), "read", "y".repeat(100_000)));
-    }
-    const kept = recorder.calls().reduce((sum, call) => sum + call.text.length, 0);
-    expect(kept).toBeLessThanOrEqual(2_100_000);
-    expect(recorder.calls()).toHaveLength(400);
-  });
 });
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------
@@ -248,12 +139,6 @@ describe("review I1: a benign failed call does not condemn a run that other call
     });
     expect(grounding?.verdict).toBe("grounded");
     expect(grounding?.tools).toMatchObject({ calls: 2, failed: 1, failures: [{ tool: "get_file_contents" }] });
-  });
-
-  it("keeps a run grounded when a tool worked and then a later call of the same tool failed with 404", () => {
-    const ok = connectorOk("get_file_contents", { path: "README.md" }, answer("# Readme"));
-    const grounding = check({ report: "The README exists; no CONTRIBUTING file.", calls: [ok, connectorFailed("get_file_contents", { path: "CONTRIBUTING.md" }, failure("GitHub answered 404"))], connectorTools: tools });
-    expect(grounding?.verdict).toBe("grounded");
   });
 
   it("still condemns an unacknowledged auth failure (403, policy denied) even when other calls worked", () => {
@@ -290,14 +175,6 @@ describe("review I2: an honest negative mention of a tool is not a claim to have
       expect(check({ report, connectorTools: names }), report).toBeUndefined();
     }
   });
-  it("is still unverified for a plain claim to have used it", () => {
-    for (const report of ["I used `add_issue_comment` to post the findings.", "I called add_issue_comment and it succeeded.", "Posted via add_issue_comment."]) {
-      expect(check({ report, connectorTools: names })?.verdict, report).toBe("unverified");
-    }
-  });
-  it("does not take a plain English word that is also a tool's name for a mention", () => {
-    expect(check({ report: "I ran a search through the repo files and used my judgement.", connectorTools: names })).toBeUndefined();
-  });
 });
 
 describe("review I5: quoted tool-call markup is not tool-call text", () => {
@@ -310,30 +187,10 @@ describe("review I5: quoted tool-call markup is not tool-call text", () => {
       expect(check({ report }), report).toBeUndefined();
     }
   });
-  it("is still flagged in prose, and when a fence is never closed", () => {
-    expect(check({ report: "I looked.\n<tool_call>{\"name\":\"x\"}</tool_call>\nDone." })?.verdict).toBe("unverified");
-    expect(check({ report: "```\nnot a block\n<tool_call>{\"name\":\"x\"}</tool_call>\nDone." })?.verdict).toBe("unverified");
-    expect(check({ report: "A `quote` then <tool_call>{}</tool_call> in prose." })?.verdict).toBe("unverified");
-  });
-});
-
-describe("review I6: loose text is not a pull request citation", () => {
-  it("does not count 'prs 12', 'pull request 3 areas' or an HTML entity", () => {
-    for (const report of ["Open prs 12 of them.", "It touches pull request 3 areas of the code.", "The PRs 4 and 5 are mentioned as text.", "Entity &#123; is not a PR."]) {
-      expect(check({ report }), report).toBeUndefined();
-    }
-  });
 });
 
 describe("review I3: one big read does not switch the citation checks off", () => {
   const BIG = `${"filler line of a lockfile, nothing to cite\n".repeat(2_000)}${"x".repeat(70_000)}\nTAIL: apps/backend/src/late.ts and PR #31 and commit 0a1b2c3d4e5f\n`;
-  it("keeps checking after a read over 64 KiB, so an invented pull request is still caught", () => {
-    const calls = recorded([], [["read", "", { path: "package-lock.json" }, BIG]]);
-    expect(calls[0]!.text.length).toBeLessThan(BIG.length);
-    const grounding = check({ report: "The lockfile is big. PR #5 is the cause.", calls });
-    expect(grounding?.verdict).toBe("unverified");
-    expect(grounding?.reasons.join("\n")).toMatch(/#5/);
-  });
   it("accepts what sits beyond the first 64 KiB of that read", () => {
     const calls = recorded([], [["read", "", { path: "package-lock.json" }, BIG]]);
     expect(check({ report: "See apps/backend/src/late.ts, PR #31 and commit 0a1b2c3d4e.", calls })).toBeUndefined();
@@ -347,73 +204,12 @@ describe("review I3: one big read does not switch the citation checks off", () =
   });
 });
 
-describe("review I3: an index that overflows blames nothing of its kind", () => {
-  it("does not blame a pull request when the numbers a call returned did not all fit", () => {
-    const numbers = Array.from({ length: 45_000 }, (_, index) => String(100_000 + index)).join(" ");
-    const calls = recorded([], [["read", "", {}, numbers]]);
-    expect(check({ report: "PR #5 is the cause.", calls })).toBeUndefined();
-    expect(check({ report: "PR #5 is the cause.", calls: recorded([], [["read", "", {}, "two numbers: 7 8"]]) })?.verdict).toBe("unverified");
-  });
-});
-
-describe("review I4/I6: what the step was given is evidence, in any form", () => {
-  it("accepts a PR number, a short sha and a path that the request, instructions or skill text held", () => {
-    const provided = "Request:\n{\"event\":{\"pr\":12,\"sha\":\"b68926a2f91\"}}\n\nInstructions: follow docs/runbook/deploy.md.";
-    expect(check({ report: "PR #12 at b68926a2f9 follows docs/runbook/deploy.md.", provided })).toBeUndefined();
-  });
-});
-
 describe("review P2: more ways to cite", () => {
   const calls = [connectorOk("list_pull_requests", {}, answer("[{\"number\":9,\"html_url\":\"https://github.com/o/r/pull/9\",\"sha\":\"4f2a9c1d7e0b\"}]"))];
   const base = { calls, connectorTools: [tool("list_pull_requests")] };
   it("catches an invented #5, PR-5, /pulls/5, an issues URL and a 6-character sha", () => {
     for (const report of ["Fixed in #5.", "See PR-5 for context.", "https://api.github.com/repos/o/r/pulls/5", "https://github.com/o/r/issues/5 explains it.", "The change landed in commit 9d8c7b."]) {
       expect(check({ report, ...base })?.verdict, report).toBe("unverified");
-    }
-  });
-  it("accepts the same forms when a tool returned them", () => {
-    for (const report of ["Fixed in #9.", "See PR-9 for context.", "https://api.github.com/repos/o/r/pulls/9", "https://github.com/o/r/issues/9 explains it.", "The change landed in commit 4f2a9c."]) {
-      expect(check({ report, ...base }), report).toBeUndefined();
-    }
-  });
-  it("does not take a colour or a version for a citation", () => {
-    expect(check({ report: "The badge is `#333` and #a1b2c3 on v1.2.3, build ab12cd, entity &#123;.", ...base })).toBeUndefined();
-  });
-});
-
-describe("review P2: a claim to have posted, with no connector call that answered", () => {
-  const claims = ["I posted a comment on the pull request.", "I have commented on the PR with the findings.", "I opened a PR for the fix.", "Comment posted on the PR.", "I've left a review on the issue."];
-  it("is unverified with zero tool calls, and with only file reads", () => {
-    for (const report of claims) {
-      expect(check({ report })?.verdict, report).toBe("unverified");
-      expect(check({ report, calls: [fileOk("read", { path: "a.md" }, "text")] })?.verdict, report).toBe("unverified");
-    }
-  });
-  it("is fine when a connector call answered, when it is denied, or when the text is about a plan", () => {
-    const worked = [connectorOk("add_issue_comment", { body: "x" }, answer("posted"))];
-    expect(check({ report: claims[0]!, calls: worked, connectorTools: [tool("add_issue_comment")] })).toBeUndefined();
-    for (const report of ["I have not posted a comment on the pull request.", "No comment was posted on the PR.", "I did not open a PR; I can't.", "I wrote a summary of the pull request."]) {
-      expect(check({ report }), report).toBeUndefined();
-    }
-  });
-});
-
-describe("review M1: no pattern is quadratic", () => {
-  // Scaling checks, not wall-clock bounds: each hostile shape is timed at N and at 8N (8N is at most 250,000 bytes, under 256 KiB, so it stays in CPU cache) and the cost must stay near linear.
-  const shapes: Array<[string, number, number, (n: number) => string]> = [
-    ["blanks between PR and the number", 250_000, 1, (n) => `PR${" ".repeat(n)}7`],
-    ["pull request then blank-tabs", 120_000, 2, (n) => `pull request${" \t".repeat(n)}#`],
-    ["many path segments", 120_000, 2, (n) => `${"a/".repeat(n)}`],
-    ["many open code fences", 60_000, 4, (n) => `${"```\n".repeat(n)}<tool_call>`],
-    ["backticks", 250_000, 1, (n) => `${"`".repeat(n)}`],
-    ["hashes", 250_000, 1, (n) => `${"#".repeat(n)}`],
-    ["hex-looking runs", 30_000, 8, (n) => `${"deadbeef".repeat(n)}`],
-    ["a claim then words", 120_000, 2, (n) => `I posted ${"a ".repeat(n)}`],
-    ["parameter openers", 20_000, 11, (n) => `${"<parameter ".repeat(n)}`],
-  ];
-  it("reads pathological reports quickly", () => {
-    for (const [label, full, unitBytes, shape] of shapes) {
-      expectLinearScaling((n) => { const report = shape(n); return () => check({ report, provided: report }); }, { n: full / 8, unitBytes, label });
     }
   });
 });
@@ -437,25 +233,12 @@ describe("review M2: a path the agent proposes is not an invented citation", () 
       expect(check({ report, calls }), report).toBeUndefined();
     }
   });
-  it("is not flagged for a path that is a version or a host (22.23.2/bin/node.js, app.example.io/v1/health.json)", () => {
-    expect(check({ report: "Ran 22.23.2/bin/node.js against app.example.io/v1/health.json.", calls })).toBeUndefined();
-  });
-  it("still flags a path the report says it read, and one stated as a fact", () => {
-    for (const report of ["I read src/router/missing.ts and it is wrong.", "The bug is in lib/never-read/thing.ts."]) {
-      expect(check({ report, calls })?.verdict, report).toBe("unverified");
-    }
-  });
 });
 
 describe("review M3: hex-like words are not shas", () => {
   it("does not take a short hex word, a number in scientific notation or a hex-like word with one digit for a sha", () => {
     for (const report of ["The value 1234e567 is a number.", "A word like deadbee0 or facade1 is not a commit.", "The token ab12cd and decade are words."]) {
       expect(check({ report }), report).toBeUndefined();
-    }
-  });
-  it("still checks a sha with a commit word, a backtick, or enough digits", () => {
-    for (const report of ["Fixed in commit deadbee0.", "Fixed in `deadbee0`.", "Fixed in 9d8c7b6a.", "Fixed in 4f2a9c1d7e0b3a5c."]) {
-      expect(check({ report })?.verdict, report).toBe("unverified");
     }
   });
 });

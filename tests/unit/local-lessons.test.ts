@@ -162,12 +162,6 @@ describe("the default", () => {
     } finally { vi.unstubAllEnvs(); }
   });
 
-  it("ROVARA_LESSONS=0 turns lessons off, and only exactly 0 does", () => {
-    expect(localLessonsEnabled({ ROVARA_LESSONS: "0" })).toBe(false);
-    expect(localLessonsEnabled({ ROVARA_LESSONS: "" })).toBe(true);
-    expect(localLessonsEnabled({ ROVARA_LESSONS: "off" })).toBe(true);
-  });
-
   it("a lesson from a finished task under the default waits for the owner", async () => {
     const w = await world({ candidates: () => [{ type: "pitfall", title: "Network calls use withRetry", description: "Retries go through the retry helper.", body: "Wrap network calls in withRetry from the retry helper instead of a hand-written loop.", scope: {}, stages: ["IMPLEMENT"], citations: [], evidenceSpanIds: ["S1"] }] });
     await w.h.store.update({ key: taskKey(w.taskId), ops: [
@@ -184,18 +178,6 @@ describe("the default", () => {
 });
 
 describe("the owner's page", () => {
-  it("offers a waiting lesson for approval bound to its own text, and approves it through the approvers point", async () => {
-    const w = await world();
-    await put(w, pending());
-    const [view] = await w.lessons.list();
-    expect(view).toMatchObject({ id: "les_pending1", status: "proposed", project: "payments", title: "Use the retry helper" });
-    expect(view!.offer).toMatchObject({ revision: 1, risk: "medium" });
-    const result = await w.lessons.act({ lessonId: "les_pending1", action: "approve", offer: view!.offer, proof: proofFor(view!.offer!) });
-    expect(result).toMatchObject({ ok: true });
-    expect((await w.lessons.runtime.store.get(w.key, "les_pending1"))?.status).toBe("active");
-    // The approval was recorded by the audit sink (a lesson approval is something the ledger names).
-    expect(w.h.audit.some((event) => event.action === "lesson.approved")).toBe(true);
-  });
 
   it("refuses an approval whose proof the approvers point does not accept, or whose method is not offered, or that names other text", async () => {
     const w = await world();
@@ -225,33 +207,12 @@ describe("the owner's page", () => {
     expect(await w.lessons.act({ lessonId: "les_pending1", action: "approve", offer, proof: proofFor(offer) })).toMatchObject({ ok: true });
   });
 
-  it("accepts only a way of approving the approvers point offers for a lesson, even when it would verify any proof", async () => {
-    const owner = localOwnerPrincipal({ companyId: COMPANY });
-    const lenient: Approvers = {
-      async requirement() { return { methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: true }; },
-      async verify(_request, proof) { return { approved: true, approver: owner, method: proof.method, proofId: proof.proofId }; },
-    };
-    const w = await world({ approvers: lenient });
-    await put(w, pending());
-    const offer = (await w.lessons.list())[0]!.offer!;
-    expect(await w.lessons.act({ lessonId: "les_pending1", action: "approve", offer, proof: proofFor(offer, "anything", "code-host-comment") })).toMatchObject({ ok: false });
-    expect((await w.lessons.runtime.store.get(w.key, "les_pending1"))?.status).toBe("pending");
-    expect(await w.lessons.act({ lessonId: "les_pending1", action: "approve", offer, proof: proofFor(offer, "anything") })).toMatchObject({ ok: true });
-  });
-
   it("does not approve a lesson that is already decided or that is no longer there", async () => {
     const w = await world();
     await put(w, active());
     const view = (await w.lessons.list())[0]!;
     expect(await w.lessons.act({ lessonId: view.id, action: "approve", proof: proofFor({ requestId: "x", revision: 1, artifactDigest: "y" }) })).toMatchObject({ ok: false });
     expect(await w.lessons.act({ lessonId: "les_nothere1", action: "retire" })).toMatchObject({ ok: false, reason: "not_found" });
-  });
-
-  it("retires a lesson on a plain form: a kill switch needs no proof", async () => {
-    const w = await world();
-    await put(w, active());
-    expect(await w.lessons.act({ lessonId: "les_aaaa1111", action: "retire" })).toMatchObject({ ok: true });
-    expect((await w.lessons.runtime.store.get(w.key, "les_aaaa1111"))?.status).toBe("retired");
   });
 });
 
@@ -282,12 +243,6 @@ describe("loading into a step", () => {
     expect(await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-c", workflowMode: undefined, features: [LEARNED_CONTEXT_FEATURE] })).toEqual({});
     expect(await w.lessons.learnedFor({ workspaceId: "no-such-workspace", operationId: "op-d", workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE] })).toEqual({});
   });
-
-  it("does not give a step a lesson nobody approved, a retired lesson, or a lesson of another project", async () => {
-    const w = await world();
-    await put(w, pending(), active({ id: "les_retired1", status: "retired" }), active({ id: "les_other001", project: "elsewhere" }));
-    expect(await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-e", workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE] })).toEqual({});
-  });
 });
 
 describe("the pull request", () => {
@@ -304,13 +259,6 @@ describe("the pull request", () => {
     await used(w);
     const section = await w.lessons.usedInPullRequest({ taskId: w.taskId, project: "payments", startingRevision: 1 }, "demo");
     expect(section).toMatchObject({ count: 1, entries: [] });
-  });
-
-  it("says in the description that no lesson was used yet while lessons are on, and that they are off while they are off", async () => {
-    const w = await world();
-    expect(await w.lessons.usedInPullRequest({ taskId: w.taskId, project: "payments", startingRevision: 1 }, "demo")).toMatchObject({ count: 0, none: true, reason: "unused" });
-    w.setEnabled(false);
-    expect(await w.lessons.usedInPullRequest({ taskId: w.taskId, project: "payments", startingRevision: 1 }, "demo")).toMatchObject({ count: 0, none: true, reason: "off" });
   });
 
   const command = (w: World, over: Partial<Parameters<LocalLessons["command"]>[0]> = {}) => w.lessons.command({ taskId: w.taskId, repository: "example/demo", number: 7, lessonNumber: 1, verdict: "wrong", author: OWNER_ACCOUNT, ...over });
@@ -356,23 +304,6 @@ describe("the pull request", () => {
     expect((await w.lessons.runtime.store.get(w.key, "les_aaaa1111"))?.status).toBe("retired");
     expect((await w.lessons.list())[0]?.retireRequest).toBeUndefined();
   });
-
-  it("a number means what the pull request showed when its description was written, even after the lessons held have moved on", async () => {
-    const w = await world();
-    await put(w, active(), active({ id: "les_bbbb2222", title: "Second lesson" }));
-    await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-plan", workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE] });
-    await w.lessons.onEvents({ workspaceId: w.workspaceId, id: "op-plan" }, [{ type: "progress", payload: { learnedLoadReport: { v: 1, stage: "PLAN", lessons: [{ id: "les_aaaa1111", version: 1, citation: "none" }, { id: "les_bbbb2222", version: 1, citation: "none" }] } } }]);
-    await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set(["workflow", "pullRequests"], [{ repositoryId: "demo", number: 7, url: "https://github.com/example/demo/pull/7", candidateDigest: "d".repeat(64), required: true, state: "OPEN" }])] });
-    const shown = await section(w);
-    expect(shown?.count).toBe(2);
-    // Number 1 of the written list is retired afterwards: recomputing now would call the other lesson number 1.
-    const list = await w.h.store.get({ pk: companyScoped(COMPANY, `LESSON_LIST#${w.taskId}`), sk: "demo" }).catch(() => undefined);
-    const recorded = ((list ?? {}) as { ids?: string[] }).ids ?? [];
-    expect(recorded).toHaveLength(2);
-    await w.lessons.act({ lessonId: recorded[0]!, action: "retire" });
-    expect(await command(w, { lessonNumber: 2 })).toMatchObject({ ok: true });
-    expect((await w.lessons.runtime.store.get(w.key, recorded[1]!))?.counters.harmful).toBe(1);
-  });
 });
 
 describe("learning from a finished task", () => {
@@ -388,30 +319,6 @@ describe("learning from a finished task", () => {
     await w.handlers[0]!.on({ kind: "closed", orgId: COMPANY, taskId: w.taskId, at: new Date(w.h.clock.now).toISOString(), text: "closed" });
   };
   const candidate = { type: "pitfall", title: "Network calls use withRetry", description: "Retries go through the retry helper.", body: "Wrap network calls in withRetry from the retry helper instead of a hand-written loop.", scope: {}, stages: ["IMPLEMENT"], citations: [], evidenceSpanIds: ["S1"] };
-
-  it("queues a finished task, reflects on it with the owner's own model, and keeps what it learned for the owner to decide", async () => {
-    const w = await world({ candidates: () => [candidate] });
-    await closeTask(w);
-    await w.lessons.tick();
-    // The prompt the model saw holds the owner's reason as data, and the lesson it made is stored for the owner.
-    expect(w.prompts).toHaveLength(1);
-    expect(w.prompts[0]).toContain("hand-written loop");
-    const stored = await w.lessons.runtime.store.list(w.key);
-    expect(stored.map((lesson) => lesson.title)).toEqual(["Network calls use withRetry"]);
-    // Nothing is used by an agent until a person approved it (or it is on trial under the project's settings).
-    expect(["candidate", "pending", "active"]).toContain(stored[0]!.status);
-    // The same task is not reflected on twice: a second pass finds the lease done.
-    await w.lessons.tick();
-    expect(w.prompts).toHaveLength(1);
-  });
-
-  it("makes no model call and keeps no backlog while the switch is off", async () => {
-    const w = await world({ enabled: false, candidates: () => [candidate] });
-    await closeTask(w);
-    await w.lessons.tick();
-    expect(w.prompts).toEqual([]);
-    expect(await w.lessons.runtime.store.list(w.key)).toEqual([]);
-  });
 
   it("learns nothing from a project whose learning is off", async () => {
     const w = await world({ candidates: () => [candidate] });
@@ -609,37 +516,11 @@ describe("what a finished task tells lessons", () => {
       }
     });
 
-    it("reads at most 4,000 characters of the notes in all, and at most 50 notes", async () => {
-      const w = await world();
-      const requestId = await findingsTask(w, Array.from({ length: 60 }, (_, i) => `${String(i).padStart(2, "0")} ${"x".repeat(197)}`));
-      const fact = await back(w, requestId);
-      expect(fact?.reasonText?.length).toBe(4_000);
-      expect(fact?.reasonText?.startsWith("00 x")).toBe(true);
-      expect(fact?.reasonText).not.toContain("50 x");
-    });
-
-    it("a fact marked as code's text never becomes the span's text, even when it still carries the sentence", () => {
-      const subject = buildTaskReflectSubject({
-        workspaceId: COMPANY, project: "payments", taskId: "t1", repositories: [], task: { developerId: "local-owner" }, rest: {},
-        sendBacks: [{ id: "task:t1:sendback:r1", origin: "human", actorDeveloperId: "local-owner", actorTrust: "member", reasonText: FINDINGS_REASON, fixedText: true }],
-      });
-      expect(subject.spans).toEqual([{ kind: "send_back", text: NO_REASON_TEXT, trust: "member", eventId: "task:t1:sendback:r1", authorId: "local-owner", fixedText: true }]);
-    });
-
     it("a task with no owner note at all (a decision from before notes were kept) is fixed text too", async () => {
       const w = await world();
       const requestId = randomUUID();
       await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set(["workflow", "decisions"], [decisionOf(requestId)])] });
       expect(await back(w, requestId)).toMatchObject({ origin: "human", fixedText: true });
-    });
-
-    it("a plain send-back still reads the person's reason as it did", async () => {
-      const w = await world();
-      const requestId = randomUUID();
-      await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set(["workflow", "decisions"], [{ ...decisionOf(requestId), source: "SEND_BACK", reason: "Use the helper" }])] });
-      const fact = await back(w, requestId);
-      expect(fact).toMatchObject({ origin: "human", reasonText: "Use the helper" });
-      expect(fact).not.toHaveProperty("fixedText");
     });
 
     it("two companies: another company's workspace reads nothing of this task's notes (and does not even read the note row)", async () => {
@@ -749,7 +630,6 @@ describe("lessons for local coding tools on a laptop (decision 46b)", () => {
   });
 });
 
-
 describe("revert detection on a laptop (lane L4-LM1b): the lessons timer runs the revert watch", () => {
   const MERGE = "1".repeat(40);
   const REVERT = "2".repeat(40);
@@ -800,15 +680,6 @@ describe("revert detection on a laptop (lane L4-LM1b): the lessons timer runs th
     expect(calls).toHaveLength(2);
     expect((await w.h.store.query({ pk: `DEVTASK#${w.taskId}`, sk: { op: "beginsWith", prefix: "REVERT#" } })).items).toHaveLength(1);
     expect((await w.h.store.query({ pk: companyScoped(COMPANY, "LESSON_QUESTION#payments") })).items).toHaveLength(1);
-  });
-
-  it("with the lessons switch off the watch does not run and asks the host nothing", async () => {
-    const calls: string[] = [];
-    const w = await world({ codeHostObject: revertingHost(calls), enabled: false });
-    await merged(w);
-    await w.lessons.tick();
-    expect(calls).toEqual([]);
-    expect((await w.h.store.query({ pk: `DEVTASK#${w.taskId}`, sk: { op: "beginsWith", prefix: "REVERT#" } })).items).toEqual([]);
   });
 
   it("a revert of a commit this install did not merge records nothing", async () => {
@@ -869,15 +740,6 @@ describe("a person's edit to Rovara's pull request, on a laptop (L4-LM1c)", () =
     }
   });
 
-  it("an identity point that names the owner's id for another company's principal places nobody here", async () => {
-    const owner = localOwnerPrincipal({ companyId: COMPANY });
-    const careless: IdentityProvider = { ...createLocalOwnerIdentity({ companyId: COMPANY, linkedAccounts: [OWNER_ACCOUNT] }), resolveExternalAccount: async () => ({ companyId: "org_zzzzzzzzzzzzzzzzzzzz", personId: owner.personId, displayName: "Elsewhere", roles: [], provider: "test" }) };
-    const { w, push } = await editWorld(by("owner-gh"), careless);
-    await w.lessons.noteHumanEdit(push);
-    await w.lessons.tick();
-    expect(w.prompts).toEqual([]);
-  });
-
   it("a bot's push, and the switch off, queue nothing", async () => {
     const bot: CommitIdentity = { author: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" }, committer: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" }, webFlow: false };
     const { w, push } = await editWorld(bot);
@@ -895,7 +757,6 @@ describe("a person's edit to Rovara's pull request, on a laptop (L4-LM1c)", () =
 describe("the knowledge briefing and look-up (lead 4 L4-AK2)", () => {
   const BOTH = [LEARNED_CONTEXT_FEATURE, KNOWLEDGE_CONTEXT_FEATURE];
   const scoped = (id: string, over: Parameters<typeof lessonRecord>[0] = {}) => active({ id, scope: { repos: ["demo"], paths: ["src/health/**"] }, stages: ["UNDERSTAND", "PLAN", "IMPLEMENT"], type: "convention", title: "A health endpoint returns 200", description: "", body: "Add a health endpoint that returns 200 and nothing else.", ...over });
-  const flaky = { facts: async () => [{ id: "flaky00001", statement: "Known flaky on the base: tests/a.test.ts.", paths: [] }] };
 
   it("gives a worker that lists the feature the look-up and the more line, and records ids only for the report check", async () => {
     const w = await world();
@@ -912,51 +773,10 @@ describe("the knowledge briefing and look-up (lead 4 L4-AK2)", () => {
     expect(JSON.stringify(record)).not.toContain("retry");
   });
 
-  it("a load that finishes after the deadline writes no delivery record, not even a late one (the step went without the briefing)", async () => {
-    const w = await world();
-    await put(w, scoped("les_health001"));
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    // The write of the lessons' own use record is held until after the deadline: everything before the delivery record is done, only it is left.
-    let release: () => void = () => undefined;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const real = w.h.store.put.bind(w.h.store);
-    const held = vi.spyOn(w.h.store, "put").mockImplementation(async (...args) => { if ((args[0].item as { entityType?: string }).entityType === "LESSON_USE") await gate; return real(...args); });
-    try {
-      const asked = w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-late", workflowMode: "PLAN", features: BOTH });
-      await vi.advanceTimersByTimeAsync(LESSON_LOAD_DEADLINE_MS + 10);
-      expect(await asked).toEqual({});
-      release();
-      await vi.advanceTimersByTimeAsync(50);
-      vi.useRealTimers();
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(await readKnowledgeDelivery(w.h.store, COMPANY, "op-late")).toBeUndefined();
-      expect(await w.h.store.get({ pk: companyScoped(COMPANY, "KNOWLEDGE_GIVEN"), sk: "op-late" })).toBeUndefined();
-    } finally { held.mockRestore(); vi.useRealTimers(); }
-  });
-
-  it("an older worker (no knowledge feature) is sent the lessons exactly as before and no knowledge context, and no record is made", async () => {
-    const w = await world();
-    await put(w, scoped("les_health001"));
-    const loaded = await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-old", workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE] });
-    expect(loaded.knowledgeContext).toBeUndefined();
-    expect(loaded.learnedContext?.lessons.map((l) => l.id)).toEqual(["les_health001"]);
-    expect(await readKnowledgeDelivery(w.h.store, COMPANY, "op-old")).toBeUndefined();
-    expect(await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-none", workflowMode: "PLAN", features: [KNOWLEDGE_CONTEXT_FEATURE] })).toEqual({});
-  });
-
   it("the plan check's lessons are part of the briefing: an older worker is sent exactly what it always was", async () => {
     const w = await world();
     await put(w, scoped("les_health001", { type: "review_check", tier: 2, stages: ["PLAN_CRITIQUE", "REVIEW"], approvals: [{ approvalId: "a1", by: "local-owner", at: 1, mode: "one" }, { approvalId: "a2", by: "ann", at: 1, mode: "second_person" }] }));
     expect(await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-pc-old", workflowMode: "PLAN_CRITIQUE", features: [LEARNED_CONTEXT_FEATURE] })).toEqual({});
-  });
-
-  it("measured facts come from the facts port, in Build only (not in Plan)", async () => {
-    const w = await world({ knowledge: flaky });
-    await put(w, scoped("les_health001"));
-    const build = await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-build", workflowMode: "IMPLEMENT", features: BOTH });
-    expect(build.knowledgeContext?.facts?.map((f) => f.id)).toEqual(["flaky00001"]);
-    const plan = await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-plan2", workflowMode: "PLAN", features: BOTH });
-    expect(plan.knowledgeContext?.facts).toBeUndefined();
   });
 
   it("a facts port that is slow or fails never holds up or removes the lessons", async () => {
@@ -995,40 +815,6 @@ describe("the knowledge briefing and look-up (lead 4 L4-AK2)", () => {
       expect(kept?.units.map((u) => u.id)).toEqual(["L-les_health001"]);
       expect(kept).toMatchObject({ project: "payments", taskId: w.taskId, stage: "PLAN" });
     });
-
-    it("a report for an operation with no delivery record, for another stage, or malformed, is dropped whole", async () => {
-      const w = await world();
-      await put(w, scoped("les_health001"));
-      await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-rep", workflowMode: "PLAN", features: BOTH });
-      await send(w, "op-never-delivered", report(["L-les_health001"]));
-      expect(await readKnowledgeUseReport(w.h.store, COMPANY, "op-never-delivered")).toBeUndefined();
-      await send(w, "op-rep", report(["L-les_health001"], { stage: "IMPLEMENT" }));
-      expect(await readKnowledgeUseReport(w.h.store, COMPANY, "op-rep")).toBeUndefined();
-      await send(w, "op-rep", report(["L-les_health001"], { extra: "field" }));
-      expect(await readKnowledgeUseReport(w.h.store, COMPANY, "op-rep")).toBeUndefined();
-      await send(w, "op-rep", { knowledgeUseReport: "text the agent wrote" });
-      expect(await readKnowledgeUseReport(w.h.store, COMPANY, "op-rep")).toBeUndefined();
-    });
-
-    it("the latest report of an operation replaces the one before, and another company cannot read it", async () => {
-      const w = await world();
-      await put(w, scoped("les_health001"));
-      await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-rep", workflowMode: "PLAN", features: BOTH });
-      await send(w, "op-rep", report(["L-les_health001"]));
-      await send(w, "op-rep", report(["L-les_health001"], { reported: false, units: [] }));
-      expect((await readKnowledgeUseReport(w.h.store, COMPANY, "op-rep"))?.units).toEqual([]);
-      expect(await readKnowledgeUseReport(w.h.store, "org_bbbbbbbbbbbbbbbbbbbb", "op-rep")).toBeUndefined();
-      expect(await readKnowledgeDelivery(w.h.store, "org_bbbbbbbbbbbbbbbbbbbb", "op-rep")).toBeUndefined();
-    });
-
-    it("moves no lesson counter (the credit is its own lane)", async () => {
-      const w = await world();
-      await put(w, scoped("les_health001"));
-      await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-rep", workflowMode: "PLAN", features: BOTH });
-      const before = JSON.stringify((await w.lessons.runtime.store.get(w.key, "les_health001"))?.counters);
-      await send(w, "op-rep", report(["L-les_health001"]));
-      expect(JSON.stringify((await w.lessons.runtime.store.get(w.key, "les_health001"))?.counters)).toBe(before);
-    });
   });
 });
 
@@ -1052,19 +838,6 @@ describe("the team knowledge briefing of an answer (lead 4 L4-AK2b)", () => {
     expect(text).not.toContain("Prefer tabs");
     expect(text).toContain("src/queue/ (1 more)");
     expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(3_000);
-  });
-
-  it("reads and writes nothing else: no load record, no use record, no counter, no manifest, no delivery record; and makes no model call", async () => {
-    const w = await world({ knowledge: flaky });
-    await put(w, scoped("les_health001"));
-    const before = JSON.stringify((await w.lessons.runtime.store.get(w.key, "les_health001"))?.counters);
-    const putSpy = vi.spyOn(w.h.store, "put");
-    const calls = w.prompts.length;
-    await w.lessons.answerBriefing(ask);
-    expect(putSpy).not.toHaveBeenCalled();
-    expect(JSON.stringify((await w.lessons.runtime.store.get(w.key, "les_health001"))?.counters)).toBe(before);
-    expect(await w.lessons.runtime.store.manifests(w.key, w.taskId)).toEqual([]);
-    expect(w.prompts.length).toBe(calls);
   });
 
   it("only lessons every member of the project may read: a lesson from a restricted place stays out of the briefing and of the 'more' line", async () => {

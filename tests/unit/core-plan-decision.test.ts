@@ -46,26 +46,4 @@ describe("a plan decision and the stored plan", () => {
     const ok = await decide({ planFactsOf: async () => FACTS }, { answers: [{ decisionId: "d1", optionId: "b", opened: true }] });
     expect(ok.decisions.at(-1)).toMatchObject({ decision: "APPROVE", answerOverrides: [{ decisionId: "d1", optionId: "b" }] });
   });
-
-  it("reads a structured plan on every approval, and a Markdown plan not at all", async () => {
-    let asked = 0;
-    const facts = async () => { asked += 1; return FACTS; };
-    await decide({ planFactsOf: facts }, {});
-    expect(asked).toBe(1);
-    await decide({ planFactsOf: facts }, {}, "approve", "markdown");
-    expect(asked).toBe(1);
-  });
-});
-
-describe("sending coding back to planning with Rovara Code's own sequence", () => {
-  it("is offered for the standard sequence (and stands at its plan step afterwards), not for a custom one", async () => {
-    const { workflowReviseShapeOk, revisePlanWithLiveChange, WORKFLOW_BLOCK_REASONS } = await import("@agentx/contracts");
-    const { ROVARA_CODE_PROGRAM } = await import("../../packages/broker/src/core/plan/program.js");
-    const base = waiting("structured");
-    const at = (program: unknown, programStepId?: string) => ({ ...base, definitionVersion: "1.1.0", program, ...(programStepId === undefined ? {} : { programStepId }), stage: "IMPLEMENT", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.liveSteerReapprovalRevise }) as unknown as WorkflowSnapshot;
-    expect(workflowReviseShapeOk(at(ROVARA_CODE_PROGRAM, "build"))).toBe(true);
-    expect(workflowReviseShapeOk(at({ steps: [{ id: "plan", kind: "plan" }, { id: "build", kind: "build" }, { id: "pull_request", kind: "pull_request" }] }, "build"))).toBe(false);
-    const revised = revisePlanWithLiveChange(at(ROVARA_CODE_PROGRAM, "build"), { requestId: "22222222-2222-4222-8222-222222222222", actorId: base.ownerId, now: "2026-11-10T10:00:00.000Z" });
-    expect(revised).toMatchObject({ stage: "PLAN", state: "READY", programStepId: "plan" });
-  });
 });

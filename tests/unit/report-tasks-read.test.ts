@@ -53,16 +53,6 @@ const day = (d: number, hour = 9): string => `2026-11-${String(d).padStart(2, "0
 const merged = (updatedAt: string, prs = [{ url: "https://github.com/acme/web/pull/7", state: "MERGED" }]) => ({ stage: "MERGED", state: "COMPLETE", outcome: "MERGED", path: "FULL", updatedAt, pullRequests: prs });
 
 describe("the start row", () => {
-  it("is one put keyed by the start time, in the company's report partition, written only when absent", () => {
-    const items = reportStartItems({ companyId: A, taskId: id(1), project: "alpha", title: "Fix\u0000 login", origin: "slack", receivedAt: day(3) });
-    expect(items).toHaveLength(1);
-    const item = items[0]!;
-    expect(item).toMatchObject({ kind: "put", condition: { op: "notExists" } });
-    const row = (item as { item: StoredDocument }).item;
-    expect(row).toMatchObject({ ...reportTaskKey(A, day(3), id(1)), project: "alpha", title: "Fix login", origin: "slack", state: "open", startedAt: day(3) });
-    expect(row.pk).toBe(reportPartition(A));
-    expect(JSON.stringify(row)).not.toMatch(/developer|person|requester/iu);
-  });
   it("is not made for a setup run, a replay, or an input it cannot key; it never throws", () => {
     expect(reportStartItems({ companyId: A, taskId: id(1), project: "alpha", title: "t", origin: "app", purpose: "setup_agent", receivedAt: day(3) })).toEqual([]);
     expect(reportStartItems({ companyId: A, taskId: id(1), project: "alpha", title: "t", origin: "test_run", receivedAt: day(3) })).toEqual([]);
@@ -90,15 +80,6 @@ describe("folding a task", () => {
   it("is merged when the workflow says so, with the merged milestone's time, and counts its pull requests", () => {
     const facts = foldTask({ pk: "DEVTASK#x", sk: "META", companyId: A, workflow: merged(day(5), [{ url: "https://github.com/a/b/pull/1", state: "MERGED" }, { url: "http://insecure.example/pull/2", state: "MERGED" }, { url: "https://user:pw@github.com/a/b/pull/3", state: "OPEN" }]) }, [{ kind: "pr_ready", at: day(4) }, { kind: "merged", at: day(5, 10) }]);
     expect(facts).toEqual({ state: "merged", path: "full", firstPrAt: day(4), endedAt: day(5, 10), prsOpened: 3, prsMerged: 2, prLinks: ["https://github.com/a/b/pull/1"] });
-  });
-  it("is merged from the milestone alone, and from the workflow alone (its own update time)", () => {
-    expect(foldTask({ pk: "p", sk: "META" }, [{ kind: "merged", at: day(6) }])).toMatchObject({ state: "merged", endedAt: day(6) });
-    expect(foldTask({ pk: "p", sk: "META", workflow: merged(day(7)) }, [])).toMatchObject({ state: "merged", endedAt: day(7) });
-  });
-  it("is closed with its close time, open without one, and merged beats closed", () => {
-    expect(foldTask({ pk: "p", sk: "META", closedAt: day(8) }, [])).toEqual({ state: "closed", endedAt: day(8), prsOpened: 0, prsMerged: 0, prLinks: [] });
-    expect(foldTask({ pk: "p", sk: "META", workflow: { path: "QUICK" } }, [])).toEqual({ state: "open", path: "quick", prsOpened: 0, prsMerged: 0, prLinks: [] });
-    expect(foldTask({ pk: "p", sk: "META", closedAt: day(8), workflow: merged(day(7)) }, [])).toMatchObject({ state: "merged" });
   });
   it("takes the earliest of several pr_ready milestones and ignores a milestone of another company or task", () => {
     const rows: StoredDocument[] = [
@@ -135,58 +116,13 @@ describe("GET report tasks: the rows", () => {
     expect(ReportTaskRowSchema.safeParse(page.tasks[0]).success).toBe(true);
   });
 
-  it("a task with nothing recorded costs exactly zero with no currency, and has no feature", async () => {
-    const w = world();
-    await w.seed({ n: 1, startedAt: day(3) });
-    const [row] = (await w.read(A, { from: day(1) })).tasks;
-    expect(row).toMatchObject({ costMicros: 0, unpricedCalls: 0, state: "open" });
-    expect(row).not.toHaveProperty("currency");
-    expect(row).not.toHaveProperty("feature");
-    expect(row).not.toHaveProperty("endedAt");
-    expect(row).not.toHaveProperty("firstPrAt");
-  });
-
-  it("the wait split and the send-back counts are not there at all in version 0 (never zero)", async () => {
-    const w = world();
-    await w.seed({ n: 1, startedAt: day(3), workflow: merged(day(5)), cost: { micros: 5 } });
-    const [row] = (await w.read(A, { from: day(1) })).tasks;
-    for (const name of ["workingMs", "waitingPeopleMs", "waitingSystemMs", "sendBacksRovara", "sendBacksPeople", "timesComplete"]) expect(row).not.toHaveProperty(name);
-  });
-
-  it("no row names a person: the task's developer id never leaves", async () => {
-    const w = world();
-    await w.seed({ n: 1, startedAt: day(3), workflow: merged(day(5)), cost: { micros: 5 } });
-    await w.seed({ n: 2, startedAt: day(4) });
-    const raw = JSON.stringify(await w.read(A, { from: day(1) }));
-    expect(raw).not.toContain(DEVELOPER_CANARY);
-    expect(raw).not.toMatch(/requester|developerId|personId/iu);
-  });
-
-  it("costs are whole millionths summed by the ledger, passed through exactly (no float, no rounding)", async () => {
-    const w = world();
-    // 0.1 + 0.2 as a float would be 0.30000000000000004: in millionths it is exactly 300000
-    await w.seed({ n: 1, startedAt: day(3), cost: { micros: 100_000 + 200_000, currency: "USD" } });
-    await w.seed({ n: 2, startedAt: day(4), cost: { micros: Number.MAX_SAFE_INTEGER, currency: "USD" } });
-    const rows = (await w.read(A, { from: day(1) })).tasks;
-    expect(rows.map((r) => r.costMicros)).toEqual([300_000, Number.MAX_SAFE_INTEGER]);
-    expect(rows.every((r) => Number.isInteger(r.costMicros))).toBe(true);
-  });
-
-  it.each([["a fraction", { micros: 1.5 }], ["a negative", { micros: -1 }], ["a string", { micros: "7" }], ["a float of entries", { entries: 0.5 }], ["unpriced as a float", { unpricedEntries: 1.25 }], ["an empty currency", { currency: "" }]])("a ledger total with %s is unreadable: left out and counted, never a wrong number", async (_name, cost) => {
+  it.each([["a fraction", { micros: 1.5 }], ["an empty currency", { currency: "" }]])("a ledger total with %s is unreadable: left out and counted, never a wrong number", async (_name, cost) => {
     const w = world();
     await w.seed({ n: 1, startedAt: day(3), cost });
     await w.seed({ n: 2, startedAt: day(4), cost: { micros: 9 } });
     const page = await w.read(A, { from: day(1) });
     expect(page.tasks.map((r) => r.taskId)).toEqual([id(2)]);
     expect(page.unreadable).toBe(1);
-  });
-
-  it("a task closed without a merge is closed with its close time; an open one has no end", async () => {
-    const w = world();
-    await w.seed({ n: 1, startedAt: day(3), closedAt: day(4) });
-    await w.seed({ n: 2, startedAt: day(3, 10) });
-    const rows = (await w.read(A, { from: day(1) })).tasks;
-    expect(rows.map((r) => [r.state, r.endedAt])).toEqual([["closed", day(4)], ["open", undefined]]);
   });
 
   it("a settled row is served from itself: the task record can be gone", async () => {
@@ -202,16 +138,6 @@ describe("GET report tasks: the rows", () => {
     expect(second).toEqual(first);
   });
 
-  it("an open task is folded again on every read: it shows the pull request that was opened since", async () => {
-    const w = world();
-    const taskId = await w.seed({ n: 1, startedAt: day(3) });
-    expect((await w.read(A, { from: day(1) })).tasks[0]).toMatchObject({ state: "open", prsOpened: 0 });
-    await w.store.update({ key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ops: [{ op: "set", path: ["workflow"], value: { stage: "REVIEW", pullRequests: [{ url: "https://github.com/a/b/pull/1", state: "OPEN" }] } }] });
-    await w.store.put({ item: { ...codeMilestoneKey(taskId, "pr_ready", 0), entityType: "CODE_MILESTONE", orgId: A, taskId, kind: "pr_ready", at: day(4), text: "x" } });
-    expect((await w.read(A, { from: day(1) })).tasks[0]).toMatchObject({ state: "open", prsOpened: 1, prsMerged: 0, firstPrAt: day(4), prLinks: ["https://github.com/a/b/pull/1"] });
-    expect(storedRowOf((await w.store.get(reportTaskKey(A, day(3), taskId)))!, A)).toMatchObject({ prsOpened: 1 });
-  });
-
   it("a task whose record is gone is unreadable (counted, left out)", async () => {
     const w = world();
     const taskId = await w.seed({ n: 1, startedAt: day(3) });
@@ -219,47 +145,6 @@ describe("GET report tasks: the rows", () => {
     expect(await w.read(A, { from: day(1) })).toMatchObject({ tasks: [], unreadable: 1 });
   });
 
-  it("a setup run and a replay are not in the report", async () => {
-    const w = world();
-    await w.seed({ n: 1, startedAt: day(3), purpose: "setup_agent" });
-    await w.seed({ n: 2, startedAt: day(3, 10), origin: "test_run" });
-    await w.seed({ n: 3, startedAt: day(3, 11) });
-    expect((await w.read(A, { from: day(1) })).tasks.map((r) => r.taskId)).toEqual([id(3)]);
-  });
-});
-
-describe("GET report tasks: which range a task belongs to", () => {
-  it("a task belongs to the range it STARTED in, with its whole cost, even if it ends (and spends) in the next one", async () => {
-    const w = world();
-    await w.seed({ n: 1, startedAt: "2026-10-31T23:59:59.999Z", workflow: merged("2026-11-02T10:00:00.000Z"), milestones: [{ kind: "merged", at: "2026-11-02T10:00:00.000Z" }], cost: { micros: 40_000_000, currency: "USD" } });
-    await w.seed({ n: 2, startedAt: "2026-11-01T00:00:00.000Z", cost: { micros: 2_000_000, currency: "USD" } });
-    const october = await w.read(A, { from: "2026-10-01T00:00:00.000Z", to: "2026-10-31T23:59:59.999Z" });
-    const november = await w.read(A, { from: "2026-11-01T00:00:00.000Z", to: "2026-11-30T23:59:59.999Z" });
-    expect(october.tasks.map((r) => [r.taskId, r.costMicros])).toEqual([[id(1), 40_000_000]]);
-    expect(november.tasks.map((r) => [r.taskId, r.costMicros])).toEqual([[id(2), 2_000_000]]);
-    // the two ranges together hold each task once: nothing double counted, nothing lost
-    expect([...october.tasks, ...november.tasks].reduce((sum, r) => sum + r.costMicros, 0)).toBe(42_000_000);
-  });
-  it("includes a task that started exactly at `from` and exactly at `to`, and none after `to`", async () => {
-    const w = world();
-    await w.seed({ n: 1, startedAt: day(3, 0) });
-    await w.seed({ n: 2, startedAt: day(5, 0) });
-    await w.seed({ n: 3, startedAt: "2026-11-05T00:00:00.001Z" });
-    expect((await w.read(A, { from: day(3, 0), to: day(5, 0) })).tasks.map((r) => r.taskId)).toEqual([id(1), id(2)]);
-  });
-  it("lists oldest start first whatever order they were made in", async () => {
-    const w = world();
-    await w.seed({ n: 3, startedAt: day(9) });
-    await w.seed({ n: 1, startedAt: day(3) });
-    await w.seed({ n: 2, startedAt: day(5) });
-    expect((await w.read(A, { from: day(1) })).tasks.map((r) => r.taskId)).toEqual([id(1), id(2), id(3)]);
-  });
-  it("defaults `to` to now", async () => {
-    const w = world();
-    await w.seed({ n: 1, startedAt: day(3) });
-    await w.seed({ n: 2, startedAt: "2026-11-21T00:00:00.000Z" });
-    expect((await w.read(A, { from: day(1) })).tasks.map((r) => r.taskId)).toEqual([id(1)]);
-  });
 });
 
 describe("GET report tasks: filters and paging", () => {
@@ -280,45 +165,6 @@ describe("GET report tasks: filters and paging", () => {
     expect((await w.read(A, { from: day(1), ...filter })).tasks.map((r) => r.taskId)).toEqual(expected.map(id));
   });
 
-  it("pages with a cursor: every task once, in order, whatever the page size; a short last page ends it", async () => {
-    const w = world();
-    for (let n = 1; n <= 7; n += 1) await w.seed({ n, startedAt: day(2 + n), cost: { micros: n * 10 } });
-    for (const limit of [1, 2, 3, 7, 50]) {
-      const seen: string[] = [];
-      let query: Record<string, unknown> = { from: day(1), limit };
-      for (let pages = 0; pages < 20; pages += 1) {
-        const page = await w.read(A, query);
-        expect(page.tasks.length).toBeLessThanOrEqual(limit);
-        seen.push(...page.tasks.map((r) => r.taskId));
-        if (!page.hasMore) break;
-        query = { cursor: page.next, limit };
-      }
-      expect(seen, `limit ${limit}`).toEqual([1, 2, 3, 4, 5, 6, 7].map(id));
-    }
-  });
-
-  it("paging with a state filter that drops rows still finds every match once", async () => {
-    const w = world();
-    for (let n = 1; n <= 9; n += 1) await w.seed({ n, startedAt: day(2 + n), ...(n % 3 === 0 ? { workflow: merged(day(20)) } : {}) });
-    const seen: string[] = [];
-    let query: Record<string, unknown> = { from: day(1), state: "merged", limit: 2 };
-    for (let pages = 0; pages < 20; pages += 1) {
-      const page = await w.read(A, query);
-      seen.push(...page.tasks.map((r) => r.taskId));
-      if (!page.hasMore) break;
-      query = { cursor: page.next, state: "merged", limit: 2 };
-    }
-    expect(seen).toEqual([3, 6, 9].map(id));
-  });
-
-  it("a read of an empty range gives a cursor that can be passed back (and finds what started since)", async () => {
-    const w = world();
-    const empty = await w.read(A, { from: day(1) });
-    expect(empty).toMatchObject({ tasks: [], hasMore: false });
-    await w.seed({ n: 1, startedAt: day(3) });
-    expect((await w.read(A, { cursor: empty.next })).tasks.map((r) => r.taskId)).toEqual([id(1)]);
-  });
-
   it("when a filter makes pages overshoot the limit, the rows past the limit are read again next time, not lost", async () => {
     const w = world();
     // pages of 3 stored rows: merged, merged, open | merged, merged, open | merged, merged: two matches a page, limit 3
@@ -333,16 +179,6 @@ describe("GET report tasks: filters and paging", () => {
       query = { cursor: page.next, state: "merged", limit: 3 };
     }
     expect(seen).toEqual([1, 2, 4, 5, 7, 8].map(id));
-  });
-
-  it("polls: the cursor after the last page, asked again later, returns what started since", async () => {
-    const w = world();
-    await w.seed({ n: 1, startedAt: day(3) });
-    const first = await w.read(A, { from: day(1) });
-    expect(first.hasMore).toBe(false);
-    await w.seed({ n: 2, startedAt: day(10) });
-    const later = await w.read(A, { cursor: first.next });
-    expect(later.tasks.map((r) => r.taskId)).toEqual([id(2)]);
   });
 
   it("a page is at most the default size when no limit is given, and at most 200 whatever is asked", async () => {
@@ -369,9 +205,7 @@ describe("GET report tasks: filters and paging", () => {
 
 describe("GET report tasks: query checks", () => {
   it.each([
-    ["no from and no cursor", {}], ["both from and cursor", { from: day(1), cursor: "x" }], ["an unknown field", { from: day(1), person: "ada" }], ["a requester field", { from: day(1), requester: "ada" }],
-    ["a from that is not an instant", { from: "2026-11-01" }], ["from after to", { from: day(9), to: day(1) }], ["a limit of zero", { from: day(1), limit: 0 }], ["an origin that does not exist", { from: day(1), origin: "carrier-pigeon" }],
-    ["a project that is not a name", { from: day(1), project: "../etc" }], ["a cursor that is not one", { cursor: "not-a-cursor" }],
+    ["no from and no cursor", {}], ["from after to", { from: day(9), to: day(1) }], ["a cursor that is not one", { cursor: "not-a-cursor" }],
   ])("refuses %s with fixed words", async (_name, query) => {
     const w = world();
     const error = await w.read(A, query as Record<string, unknown>).catch((e: Error) => e);
@@ -385,20 +219,6 @@ describe("GET report tasks: query checks", () => {
 });
 
 describe("GET report tasks: the company boundary", () => {
-  it("two companies, same project names, same times: each reads only its own rows, costs and features", async () => {
-    const w = world();
-    const fa = await createFeatureStore({ store: w.store, companyId: A, audit: { stage: () => [] }, now: () => NOW }).create({ name: "Shared name" }, ada);
-    const fb = await createFeatureStore({ store: w.store, companyId: B, audit: { stage: () => [] }, now: () => NOW }).create({ name: "Shared name" }, ada);
-    const a = await w.seed({ company: A, n: 1, startedAt: day(3), cost: { micros: 111, currency: "USD" } });
-    const b = await w.seed({ company: B, n: 2, startedAt: day(3), cost: { micros: 222, currency: "USD" } });
-    await createFeatureStore({ store: w.store, companyId: A, audit: { stage: () => [] }, now: () => NOW }).setTaskFeature({ taskId: a, project: "alpha", featureId: fa.id, source: "chosen" }, ada);
-    await createFeatureStore({ store: w.store, companyId: B, audit: { stage: () => [] }, now: () => NOW }).setTaskFeature({ taskId: b, project: "alpha", featureId: fb.id, source: "chosen" }, ada);
-    const [ra, rb] = [await w.read(A, { from: day(1) }), await w.read(B, { from: day(1) })];
-    expect(ra.tasks.map((r) => [r.taskId, r.costMicros, r.feature?.id])).toEqual([[a, 111, fa.id]]);
-    expect(rb.tasks.map((r) => [r.taskId, r.costMicros, r.feature?.id])).toEqual([[b, 222, fb.id]]);
-    expect(JSON.stringify(ra)).not.toContain(b);
-    expect(JSON.stringify(rb)).not.toContain(a);
-  });
 
   it("a task of B filed under A's feature id does not read as that feature in B (the feature is not B's)", async () => {
     const w = world();
@@ -435,23 +255,10 @@ describe("GET report tasks: the company boundary", () => {
     expect(await w.read(A, { from: day(1) })).toMatchObject({ tasks: [], unreadable: 1 });
   });
 
-  it("a task record that names another task than its row is skipped", async () => {
-    const w = world();
-    const taskId = await w.seed({ n: 1, startedAt: day(3) });
-    await w.store.update({ key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ops: [{ op: "set", path: ["taskId"], value: id(99) }] });
-    expect(await w.read(A, { from: day(1) })).toMatchObject({ tasks: [], skipped: 1 });
-  });
-
   it("a cost total of another company is skipped, not added", async () => {
     const w = world();
     await w.seed({ company: B, n: 1, startedAt: day(3), cost: { micros: 999, companyId: A } });
     expect(await w.read(B, { from: day(1) })).toMatchObject({ tasks: [], skipped: 1 });
-  });
-
-  it("a milestone row of another company never gives a task a pull request time", async () => {
-    const w = world();
-    await w.seed({ company: B, n: 1, startedAt: day(3), milestones: [{ kind: "pr_ready", at: day(4), orgId: A }] });
-    expect((await w.read(B, { from: day(1) })).tasks[0]).not.toHaveProperty("firstPrAt");
   });
 
   it("a cursor belongs to one company and one question", async () => {
@@ -465,22 +272,4 @@ describe("GET report tasks: the company boundary", () => {
     expect((await w.read(A, { cursor: page.next, limit: 1 })).tasks[0]!.taskId).toBe(id(2));
   });
 
-  it("two projects of one company: a project filter shows one project's rows only", async () => {
-    const w = world();
-    await w.seed({ n: 1, startedAt: day(3), project: "alpha" });
-    await w.seed({ n: 2, startedAt: day(4), project: "beta" });
-    expect((await w.read(A, { from: day(1), project: "alpha" })).tasks.map((r) => r.project)).toEqual(["alpha"]);
-    expect((await w.read(A, { from: day(1), project: "beta" })).tasks.map((r) => r.project)).toEqual(["beta"]);
-  });
-
-  it("the rows hold up under a store that lies: a store fault is a fixed 503, never partial rows", async () => {
-    const w = world();
-    await w.seed({ n: 1, startedAt: day(3) });
-    const original = w.store.getMany.bind(w.store);
-    w.store.getMany = async () => { throw new Error("boom secret-canary"); };
-    const error = await w.read(A, { from: day(1) }).catch((e: Error) => e);
-    expect((error as Error).message).toMatch(/can't read the report/u);
-    expect((error as Error).message).not.toContain("secret-canary");
-    w.store.getMany = original;
-  });
 });

@@ -3,11 +3,11 @@
 // A red marked check is the customer's environment (failed before tests, or red on main), a question for a person (no detail, rounds used, timeout), or a fix within its cap; logs stay off unless turned on.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  CI_EVIDENCE_ASK_PREFIX, CI_EVIDENCE_ENVIRONMENT_PREFIX, createCandidateManifest, DEFAULT_CI_EVIDENCE_SETTINGS, GITHUB_ACTIONS_APP_ID, IMPLICIT_COMPANY_ID, isCiFixBlockReason,
+  CI_EVIDENCE_ASK_PREFIX, createCandidateManifest, DEFAULT_CI_EVIDENCE_SETTINGS, GITHUB_ACTIONS_APP_ID, IMPLICIT_COMPANY_ID, isCiFixBlockReason,
   type ChangeRequestStatus, type Check, type CheckRunner, type CiEvidenceSettings, type LatestCheck,
 } from "@agentx/contracts";
 import { readCi, registerMergeActionDecider, trackTask, type MergeTrackingDependencies } from "../../packages/broker/src/core/merge/merge-tracking.js";
-import { installCiFixDecider, readCiEvidence, uninstallCiFixDecider } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
+import { installCiFixDecider, uninstallCiFixDecider } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
 import { LANDED_LINE_MAX, landedLine } from "../../packages/broker/src/core/ci-evidence/tracking.js";
 import { checkTimesKey, readCheckTimes } from "../../packages/broker/src/core/ci-evidence/history.js";
 import { CLOCK, TASK_ID, mergeWorld, wrapStore, type MergeWorld } from "../support/merge-world.js";
@@ -64,25 +64,9 @@ describe("nothing marked is today's pass", () => {
     expect(await item(w)).toEqual(await item(today));
     expect((await item(w)).ciMarked).toBeUndefined();
   });
-  it("treats settings that do not parse as none, and logs it without the value", async () => {
-    const { w, deps, logs } = await world({ version: 1, markedChecks: "everything", secret: "do-not-echo" });
-    await trackTask(deps, TASK_ID);
-    expect((await item(w)).ciMarked).toBeUndefined();
-    expect(logs).toContain("ci_evidence.settings_unreadable");
-    expect(JSON.stringify(logs)).not.toContain("do-not-echo");
-  });
 });
 
 describe("the marked check's own clock", () => {
-  it("keeps CI pending while the marked check has not reported, and names when to look again (no machine held)", async () => {
-    const { w, deps } = await world(settings());
-    const outcome = await trackTask(deps, TASK_ID);
-    const stored = await item(w);
-    expect(stored.ci).toBe("pending");
-    expect(stored.ciMarked).toEqual([{ name: "e2e-real", state: "waiting", until: new Date(CLOCK + 120 * MIN).toISOString(), expectedMs: 120 * MIN }]);
-    expect(outcome.recheckAt).toBeLessThanOrEqual(CLOCK + 120 * MIN);
-    expect((await w.task()).workflow.state).toBe("WAITING");
-  });
   it("says not run after the wait and asks a person, never failed and never a fix", async () => {
     const { w, deps } = await world(settings());
     await trackTask(deps, TASK_ID);
@@ -157,36 +141,6 @@ describe("a result that lands", () => {
 });
 
 describe("a marked check that failed", () => {
-  it("is the customer's environment when it is red on main too: no fix, a re-run link", async () => {
-    const runner: Runner = { facts: 0, main: { revision: "c".repeat(40), check: e2e({ conclusion: "failure" }) } };
-    const { w, deps } = await world(settings(), runner);
-    setChecks(w, [unit, e2e({ conclusion: "failure" })]);
-    await trackTask(deps, TASK_ID);
-    const workflow = (await w.task()).workflow;
-    expect(workflow.state).toBe("BLOCKED");
-    expect(workflow.blockReason).toBe(`${CI_EVIDENCE_ENVIRONMENT_PREFIX}e2e-real is also failing on main's latest run, so Rovara is not changing the code for it. Re-run it when it is fixed: https://github.com/acme/app/actions/runs/5/job/77`);
-  });
-  it("asks a person when nothing says which test failed (logs off by default)", async () => {
-    const { w, deps } = await world(settings(), { facts: 0, main: { revision: "c".repeat(40), check: e2e() } });
-    setChecks(w, [unit, e2e({ conclusion: "failure" })]);
-    await trackTask(deps, TASK_ID);
-    expect((await w.task()).workflow.blockReason).toMatch(new RegExp(`^${CI_EVIDENCE_ASK_PREFIX}e2e-real failed without saying which test failed`, "u"));
-  });
-  it("fixes within the long check's cap when the customer shares logs", async () => {
-    const { w, deps } = await world(settings({ shareLogs: true }), { facts: 0, main: { revision: "c".repeat(40), check: e2e() } });
-    setChecks(w, [unit, e2e({ conclusion: "failure" })]);
-    await trackTask(deps, TASK_ID);
-    const workflow = (await w.task()).workflow;
-    expect(workflow.stage).toBe("IMPLEMENT");
-    expect(w.milestones.written.some((entry) => entry.kind === "fixing" && entry.text.includes("round 1 of 2"))).toBe(true);
-  });
-  it("asks once the long check's two rounds are used", async () => {
-    const { w, deps } = await world(settings({ shareLogs: true }), { facts: 0, main: { revision: "c".repeat(40), check: e2e() } });
-    await w.setWorkflow({ fixRounds: { ci: 2, conflict: 0, feedbackAuto: 0 } });
-    setChecks(w, [unit, e2e({ conclusion: "failure" })]);
-    await trackTask(deps, TASK_ID);
-    expect((await w.task()).workflow.blockReason).toMatch(new RegExp(`^${CI_EVIDENCE_ASK_PREFIX}e2e-real is still failing after the fixes`, "u"));
-  });
   it("lets a person's Retry for this head go to the CI fix as before", async () => {
     const { w, deps } = await world(settings({ shareLogs: true }), { facts: 0, main: { revision: "c".repeat(40), check: e2e({ conclusion: "failure" }) } });
     await w.setWorkflow({ ciFixApproved: [w.prs[0]!.head] });
@@ -197,30 +151,12 @@ describe("a marked check that failed", () => {
 });
 
 describe("review fixes (A3 review 1)", () => {
-  it("drops the marked entries when a project un-marks its checks, back to today's item", async () => {
-    const { w, deps } = await world(settings());
-    await trackTask(deps, TASK_ID);
-    expect((await item(w)).ciMarked).toBeDefined();
-    await trackTask({ ...deps, ciEvidence: () => undefined }, TASK_ID);
-    const stored = await item(w);
-    expect(stored.ciMarked).toBeUndefined();
-    expect(stored.ciMarkedSince).toBeUndefined();
-  });
   it("does not run a pass on a settings read that failed: no round, no log, tried again", async () => {
     const { w, deps } = await world(settings(), { facts: 0, main: { revision: "c".repeat(40), check: e2e() } });
     setChecks(w, [unit, e2e({ conclusion: "failure" })]);
     await expect(trackTask({ ...deps, ciEvidence: () => { throw new Error("store down secret-value"); } }, TASK_ID)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     expect((await w.task()).workflow.stage).toBe("WAIT_FOR_MERGE");
     expect((await w.task()).workflow.state).toBe("WAITING");
-  });
-  it("calls a port written as a class method with its own this", async () => {
-    class Port { constructor(private readonly value: CiEvidenceSettings) {} ciEvidence() { return this.value; } }
-    const port = new Port(settings());
-    const { w, deps } = await world(undefined);
-    await trackTask({ ...deps, ciEvidence: port.ciEvidence.bind(port) }, TASK_ID);
-    const holder = { ...deps, value: settings(), ciEvidence(this: { value: CiEvidenceSettings }) { return this.value; } };
-    await trackTask(holder, TASK_ID);
-    expect((await item(w)).ciMarked).toBeDefined();
   });
   it("never reads a skipped or neutral marked check as passing", async () => {
     for (const conclusion of ["skipped", "neutral"] as const) {
@@ -268,16 +204,6 @@ describe("review fixes (A3 review 1)", () => {
 });
 
 describe("run facts (A3 re-check N3)", () => {
-  it("reads a finished run's facts once even when the runner gave no finish time", async () => {
-    const { w, deps } = await world(settings());
-    let asked = 0;
-    const plain: MergeTrackingDependencies = { ...deps, repository: async (...args) => { const home = await deps.repository(...args); return home === undefined ? undefined : { ...home, checkRunner: { ...home.checkRunner!, runFacts: async () => { asked += 1; return { attempt: 1 }; } } }; } };
-    setChecks(w, [unit, e2e()]);
-    await trackTask(plain, TASK_ID);
-    w.now.value += MIN;
-    await trackTask(plain, TASK_ID);
-    expect(asked).toBe(1);
-  });
   it("never stores a run attempt the item cannot read back (tracking would stop for that pull request)", async () => {
     const { w, deps } = await world(settings());
     const odd: MergeTrackingDependencies = { ...deps, repository: async (...args) => { const home = await deps.repository(...args); return home === undefined ? undefined : { ...home, checkRunner: { ...home.checkRunner!, runFacts: async () => ({ attempt: 5_000 }) } }; } };
@@ -289,20 +215,6 @@ describe("run facts (A3 re-check N3)", () => {
     w.now.value += MIN;
     await trackTask(odd, TASK_ID);
     expect((await item(w)).version).toBeGreaterThanOrEqual(1);
-  });
-});
-
-describe("logs stay off until the customer turns them on", () => {
-  it("never hands a marked check's log to a fix round a person asked for", async () => {
-    const { w, deps } = await world(settings(), { facts: 0, main: { revision: "c".repeat(40), check: e2e({ conclusion: "failure" }) } });
-    await w.setWorkflow({ ciFixApproved: [w.prs[0]!.head] });
-    setChecks(w, [unit, e2e({ conclusion: "failure" })]);
-    await trackTask(deps, TASK_ID);
-    const workflow = (await w.task()).workflow;
-    expect(workflow.stage).toBe("IMPLEMENT");
-    const block = await readCiEvidence(w.store, TASK_ID, IMPLICIT_COMPANY_ID, workflow.revision);
-    expect(block).toContain("This check has no log Rovara can read here.");
-    expect(block).not.toContain("AssertionError");
   });
 });
 

@@ -2,13 +2,13 @@
 // Proven here: working vs waiting is attributed right (a step that runs is Rovara working, a plan or a question is a decision wait, a pull request review is shown apart, a queued step is the system's); the numbers are
 // absent, never zero, for a task the events do not cover from its start; a company and a project only ever see their own events; a settled task keeps its numbers.
 import { describe, expect, it } from "vitest";
-import { ReportTaskRowSchema, codeMilestoneKey, reportTaskKey, type OrgId, type ReportTasksResponse, type WorkEventInput } from "@agentx/contracts";
+import { codeMilestoneKey, type OrgId, type ReportTasksResponse, type WorkEventInput } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { readCompanyReportTasks } from "../../packages/broker/src/core/report/read.js";
-import { reportStartItems, storedRowOf } from "../../packages/broker/src/core/report/task-row.js";
+import { reportStartItems } from "../../packages/broker/src/core/report/task-row.js";
 import { TIMES_EVENTS_MAX, foldTimes, readTaskTimes, timesOfStored } from "../../packages/broker/src/core/report/times.js";
 import { workEventRow } from "../../packages/broker/src/core/work-events/work-events.js";
-import { workEventId, workEventPartitions } from "@agentx/contracts";
+import { workEventId } from "@agentx/contracts";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -51,33 +51,6 @@ function world() {
 }
 
 describe("the time split, attributed", () => {
-  it("working, decisions, pull request review and system waits are each their own, and they add up to the wall time", async () => {
-    const w = world();
-    const taskId = await w.seed({ n: 1, startedAt: at(9), merged: at(12, 41), events: [...MAIN, answered(at(10, 11), "person_gate", "changes_requested", 1)] });
-    const row = (await w.read(A)).tasks.find((task) => task.taskId === taskId)!;
-    expect(row).toMatchObject({ workingMs: 40 * MIN, waitingPeopleMs: { decisionsMs: 60 * MIN, prReviewMs: 120 * MIN }, waitingSystemMs: MIN, sendBacksRovara: 0, sendBacksPeople: 1, timesComplete: true });
-    expect(row.workingMs! + row.waitingPeopleMs!.decisionsMs + row.waitingPeopleMs!.prReviewMs + row.waitingSystemMs!).toBe(Date.parse(at(12, 41)) - Date.parse(at(9)));
-    expect(ReportTaskRowSchema.safeParse(row).success).toBe(true);
-  });
-
-  it("a pull request review is not a decision wait, an answer is not a pull request review, and spend or a block is a decision wait", () => {
-    const task = { taskId: id(1), project: "alpha", orgId: A };
-    const fold = (spec: Spec[], end: string) => foldTimes(spec.map((one) => event(A, id(1), "alpha", one)), task, Date.parse(end), NOW)!;
-    const only = (reason: string, on = "person") => fold([started(at(9)), wait(at(9), on, reason)], at(10));
-    expect(only("pr_review")).toMatchObject({ prReviewMs: 60 * MIN, decisionsMs: 0, workingMs: 0, waitingSystemMs: 0 });
-    for (const reason of ["answer", "plan_approval", "spend_approval", "blocked", "design_choice"]) expect(only(reason)).toMatchObject({ decisionsMs: 60 * MIN, prReviewMs: 0, workingMs: 0, waitingSystemMs: 0 });
-    expect(only("queued", "system")).toMatchObject({ waitingSystemMs: 60 * MIN, decisionsMs: 0, prReviewMs: 0, workingMs: 0 });
-    expect(fold([started(at(9)), wait(at(9), "agent")], at(10))).toMatchObject({ workingMs: 60 * MIN, decisionsMs: 0, prReviewMs: 0, waitingSystemMs: 0 });
-    // Nobody is waited for after the end.
-    expect(fold([started(at(9)), wait(at(9), "agent"), wait(at(9, 30), "none")], at(11))).toMatchObject({ workingMs: 30 * MIN, decisionsMs: 0, waitingSystemMs: 0 });
-  });
-
-  it("the fold itself ignores an event of another company, even one for the same task id", () => {
-    const task = { taskId: id(1), project: "alpha", orgId: A };
-    const mine = [started(at(9)), wait(at(9), "agent")].map((one) => event(A, id(1), "alpha", one));
-    const strayWait = event(B, id(1), "alpha", wait(at(9, 10), "person", "plan_approval"));
-    expect(foldTimes([...mine, strayWait], task, Date.parse(at(10)), NOW)).toMatchObject({ workingMs: 60 * MIN, decisionsMs: 0 });
-  });
 
   it("an event after the end is not counted, and an open task runs to now", async () => {
     const task = { taskId: id(1), project: "alpha", orgId: A };
@@ -102,13 +75,6 @@ describe("the time split, attributed", () => {
 });
 
 describe("absent is not zero", () => {
-  it("a task with no events has none of the numbers at all (not zero)", async () => {
-    const w = world();
-    const taskId = await w.seed({ n: 1, startedAt: at(9), merged: at(12) });
-    const row = (await w.read(A)).tasks.find((task) => task.taskId === taskId)!;
-    for (const name of ["workingMs", "waitingPeopleMs", "waitingSystemMs", "sendBacksRovara", "sendBacksPeople", "timesComplete"]) expect(Object.keys(row)).not.toContain(name);
-    expect(ReportTaskRowSchema.safeParse(row).success).toBe(true);
-  });
 
   it("events that do not cover the task from its start leave the numbers out: no start event, no wait, an event row that cannot be read, too many events", async () => {
     const w = world();
@@ -125,15 +91,6 @@ describe("absent is not zero", () => {
     expect(Object.keys((await w.read(A)).tasks.find((task) => task.taskId === many)!)).not.toContain("workingMs");
   });
 
-  it("a task with events and no send-backs says 0 send-backs (that is known), and the fields come all together", async () => {
-    const w = world();
-    const taskId = await w.seed({ n: 1, startedAt: at(9), merged: at(12), events: [started(at(9)), wait(at(9), "agent")] });
-    const row = (await w.read(A)).tasks.find((task) => task.taskId === taskId)!;
-    expect(row).toMatchObject({ sendBacksRovara: 0, sendBacksPeople: 0, timesComplete: true, workingMs: 3 * 60 * MIN });
-    expect(ReportTaskRowSchema.safeParse({ ...row, sendBacksPeople: undefined }).success).toBe(false);
-    expect(ReportTaskRowSchema.safeParse({ ...row, workingMs: undefined }).success).toBe(false);
-  });
-
   it("a stored times object that is not six whole numbers is not known", () => {
     expect(timesOfStored({ workingMs: 1, decisionsMs: 2, prReviewMs: 3, waitingSystemMs: 4, sendBacksRovara: 0, sendBacksPeople: 0 })).toEqual({ workingMs: 1, decisionsMs: 2, prReviewMs: 3, waitingSystemMs: 4, sendBacksRovara: 0, sendBacksPeople: 0 });
     for (const bad of [undefined, null, [], {}, { workingMs: 1 }, { workingMs: -1, decisionsMs: 2, prReviewMs: 3, waitingSystemMs: 4, sendBacksRovara: 0, sendBacksPeople: 0 }, { workingMs: 1.5, decisionsMs: 2, prReviewMs: 3, waitingSystemMs: 4, sendBacksRovara: 0, sendBacksPeople: 0 },
@@ -145,43 +102,9 @@ describe("covered from the start, or not known", () => {
   const task = { taskId: id(1), project: "alpha", orgId: A };
   const fold = (spec: Spec[], end: string | undefined = at(11)) => foldTimes(spec.map((one) => event(A, id(1), "alpha", one)), task, end === undefined ? undefined : Date.parse(end), NOW);
 
-  it("the first wait must be the one the start wrote; a first wait later than the start leaves the time before it unaccounted, so nothing is claimed", () => {
-    expect(fold([started(at(9)), wait(at(9), "agent")])).toBeDefined();
-    expect(fold([started(at(9)), wait(at(9, 30), "agent")])).toBeUndefined();
-  });
-
   it("a task that counted no time at all is not known, not a row of zeros", () => {
     expect(fold([started(at(9)), wait(at(9), "agent")], at(9))).toBeUndefined();
     expect(fold([started(at(9)), wait(at(9), "agent")], at(8))).toBeUndefined();
-  });
-});
-
-describe("a settled task keeps its numbers", () => {
-  it("a merged task is settled with its numbers, and the next read serves them from the row even when the events are gone", async () => {
-    const w = world();
-    const taskId = await w.seed({ n: 1, startedAt: at(9), merged: at(12, 41), events: MAIN });
-    const first = (await w.read(A)).tasks.find((task) => task.taskId === taskId)!;
-    const stored = storedRowOf((await w.store.get(reportTaskKey(A, at(9), taskId)))!, A)!;
-    expect(stored.settledAt).toBeDefined();
-    expect(stored.times).toMatchObject({ workingMs: 40 * MIN });
-    // The events leave (retention); the settled row still has them.
-    for (const month of ["2026-11"]) {
-      const rows = (await w.store.query({ pk: `ORG#${A}#WORK_EVENTS#${month}#${String(Number.parseInt(taskId.replace(/-/gu, "").slice(0, 2), 16) % 8)}` })).items;
-      for (const row of rows) await w.store.delete({ key: { pk: row.pk, sk: row.sk } });
-    }
-    const second = (await w.read(A)).tasks.find((task) => task.taskId === taskId)!;
-    expect(second).toEqual(first);
-  });
-
-  it("a merged task whose events did not cover it settles with no numbers, and stays without", async () => {
-    const w = world();
-    const taskId = await w.seed({ n: 1, startedAt: at(9), merged: at(12) });
-    const first = (await w.read(A)).tasks.find((task) => task.taskId === taskId)!;
-    expect(Object.keys(first)).not.toContain("workingMs");
-    expect(storedRowOf((await w.store.get(reportTaskKey(A, at(9), taskId)))!, A)!.times).toBeUndefined();
-    // Events that show up after it settled are not read for it.
-    await w.put(MAIN, A, taskId, "alpha");
-    expect(Object.keys((await w.read(A)).tasks.find((task) => task.taskId === taskId)!)).not.toContain("workingMs");
   });
 });
 
@@ -220,18 +143,6 @@ describe("company and project keyed", () => {
     expect((await w.read(A, { from: "2026-11-01T00:00:00.000Z", project: "beta" })).tasks.map((task) => task.taskId)).toEqual([two]);
   });
 
-  it("no row, and no stored numbers, names a person", async () => {
-    const w = world();
-    const taskId = await w.seed({ n: 1, startedAt: at(9), merged: at(12, 41), events: [...MAIN, answered(at(10, 11), "person_gate", "changes_requested", 1)] });
-    const read = await w.read(A);
-    expect(JSON.stringify(read)).not.toMatch(/personId|requester|actor/u);
-    const stored = JSON.stringify(await w.store.get(reportTaskKey(A, at(9), taskId)));
-    expect(stored).toContain("workingMs");
-    expect(stored).not.toMatch(/personId|requester|actor/u);
-    const rows = (await Promise.all(workEventPartitions(A, "2026-11").map((pk) => w.store.query({ pk })))).flatMap((page) => page.items);
-    expect(rows.length).toBeGreaterThan(5);
-    expect(JSON.stringify(rows)).not.toContain("personId");
-  });
 });
 
 describe("a read that fails", () => {

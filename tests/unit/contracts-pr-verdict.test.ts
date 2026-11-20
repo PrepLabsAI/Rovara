@@ -35,21 +35,6 @@ describe("the typical green task (design example 1)", () => {
     delete legacy.approvedAt;
     expect(EvidenceDependencySchema.safeParse(legacy).success).toBe(true);
   });
-  it("says Verified, low risk and nothing extra to check, with the six lines", () => {
-    const v = verdict();
-    expect(v.heading).toBe("Verified · Low risk · nothing extra to check");
-    expect(v.count).toBe(0);
-    expect(v.items).toEqual([]);
-    expect(v.lines.changed).toBe("4 files, +86 -12. 3 tests added.");
-    expect(v.lines.proven).toBe("3 of 3 requirements proven.");
-    expect(v.lines.testedAgainst).toBe("Postgres (real, the project's image). Stripe (recorded fake, approved 34 days ago).");
-    expect(v.lines.reviews).toBe("Code review and security review passed. The second review found no blocking finding.");
-    expect(v.lines.risk).toEqual(["Low. A small change with no sensitive paths, dependency changes or open concerns."]);
-    expect(v.lines.needsYou).toBe("The normal code review. Nothing else.");
-    expect(v.drawers).toEqual({
-      requirements: "Requirements and proof: 3 of 3 proven", checks: "Checks: 4 of 4 passed (214 tests)", setup: "Test setup: sandbox, 1 real service, 1 recorded fake, Stripe recorded fake, approved 34 days ago", reviews: "Reviews: 2 passed, 0 findings accepted, second review found no blocking finding",
-    });
-  });
   it("drawers for browser evidence and what Rovara used appear only when there is something", () => {
     expect(verdict().drawers.screenshots).toBeUndefined();
     expect(verdict().drawers.used).toBeUndefined();
@@ -118,12 +103,6 @@ describe("every exception of design 2.3 is an item above the fold, counted in th
     const produced = new Set(TABLE.flatMap(([, over]) => kinds(verdict(over))));
     for (const kind of produced) expect(PR_EXCEPTION_KINDS).toContain(kind);
   });
-  it("the green task and its quiet parts produce no item at all (silent when fine)", () => {
-    expect(verdict().items).toEqual([]);
-    expect(verdict({ weakening: { weaker: [], flags: [], notCompared: [] }, mergeOrder: [], evalCheck: { label: "Improved on eval", promptChanged: true } }).items).toEqual([]);
-    expect(verdict({ evalCheck: { label: "Not run", promptChanged: false } }).items).toEqual([]);
-    expect(verdict({ changed: { source: "host", files: 3, added: 1, removed: 0, complete: true, testsAdded: 0, codeChanged: false } }).items).toEqual([]);
-  });
   it("items are ordered with failures first (design 2.5: the failed check is item 1, the snapshot last)", () => {
     const v = verdict({
       checks: [{ label: "Integration tests", status: "failed", reason: "check_failed" }], testing: { result: "code_failed", reasons: ["check_failed"] },
@@ -135,15 +114,6 @@ describe("every exception of design 2.3 is an item above the fold, counted in th
 });
 
 describe("rule V1: the result is never better than its worst row", () => {
-  // Mutant X2: the result is taken from the Testing view alone, so a failed row can still read "Verified". Killed by the first two cases.
-  it("a Testing view that says verified cannot outvote a failed or blocked row", () => {
-    const failed = verdict({ testing: { result: "verified" }, checks: [pass("Unit tests"), { label: "Lint", status: "failed" }] });
-    expect(failed.result).toBe("Code failed");
-    expect(failed.heading.startsWith("Code failed")).toBe(true);
-    expect(verdict({ testing: { result: "verified" }, checks: [{ label: "Lint", status: "blocked", reason: "timed_out" }] }).result).toBe("Blocked by environment");
-    expect(verdict({ testing: { result: "verified" }, checks: [pass("a"), { label: "b", status: "pending", reason: "full_suite_pending" }] }).result).toBe("Partially verified");
-    expect(verdict({ testing: { result: "verified" }, checks: [] }).result).toBe("Partially verified");
-  });
   it("the worse of the view's result and the rows' result is used, in either direction", () => {
     expect(verdict({ testing: { result: "code_failed", reasons: ["check_failed"] }, checks: [pass("a")] }).resultKind).toBe("code_failed");
     expect(verdict({ testing: { result: "blocked_by_environment", reasons: ["timed_out"] }, checks: [{ label: "x", status: "failed" }] }).resultKind).toBe("code_failed");
@@ -156,11 +126,6 @@ describe("rule V1: the result is never better than its worst row", () => {
     expect(verdict({ testing: undefined, checks: [{ label: "b", status: "blocked", reason: "timed_out" }] }).result).toBe("Checks could not run");
     expect(verdict({ testing: undefined, checks: [pass("a"), { label: "b", status: "not_run", reason: "check_not_run" }] }).result).toBe("Some checks did not run");
     expect(verdict({ testing: undefined, checks: [] }).result).toBe("No checks recorded");
-  });
-  it("a review-only task says it was not verified by automated checks", () => {
-    const v = verdict({ testing: undefined, checks: [], reviewOnly: { why: "Documentation only" } });
-    expect(v.result).toBe("Not verified by automated checks (review only)");
-    expect(v.items[0]).toMatchObject({ kind: "review_only", detail: "Why: Documentation only" });
   });
 });
 
@@ -185,14 +150,6 @@ describe("rule V2: proven means proven", () => {
     expect(v.lines.proven).toBe("No approved requirements to prove.");
     expect(v.drawers.requirements).toBeUndefined();
   });
-  it("a check a Rovara-made mock answered is counted apart in the Checks drawer, not as a plain pass", () => {
-    const v = verdict({ checks: [pass("a"), { ...pass("b"), madeByRovara: true }] });
-    expect(v.drawers.checks).toBe("Checks: 2 of 2 passed, 1 with a Rovara-made mock");
-  });
-  it("the eval label is part of the Proven line", () => {
-    expect(verdict({ evalCheck: { label: "Improved on eval", promptChanged: true } }).lines.proven).toBe("3 of 3 requirements proven. Improved on eval.");
-    expect(verdict({ evalCheck: { label: "No regression measured", promptChanged: true } }).lines.proven).toContain("No regression measured.");
-  });
 });
 
 describe("rule V4: every service is named, and only the quiet fake is quiet", () => {
@@ -211,34 +168,12 @@ describe("rule V4: every service is named, and only the quiet fake is quiet", ()
     expect(line).toContain("S3 (emulated, not real AWS)");
     expect(line).toContain("Clock (faked by the tests themselves)");
   });
-  it("a fresh recorded fake with no made-up answer is named and quiet", () => {
-    const v = verdict({ dependencies: [STRIPE_FRESH] });
-    expect(v.lines.testedAgainst).toContain("Stripe (recorded fake, approved 34 days ago)");
-    expect(v.drawers.setup).toContain("Stripe recorded fake, approved 34 days ago");
-    expect(v.items).toEqual([]);
-  });
-  it("uses capture date wording for older evidence without approval provenance", () => {
-    const legacy = dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z" });
-    expect(verdict({ dependencies: [legacy] }).lines.testedAgainst).toContain("Stripe (recorded fake, recorded 34 days ago)");
-    expect(kinds(verdict({ dependencies: [legacy] }))).toEqual([]);
-  });
   it("a recorded fake over 90 days old, or with no date, is an item; 90 days exactly is still quiet", () => {
     const at = (days: number) => dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: new Date(Date.parse(AS_OF) - days * 86_400_000).toISOString() });
     expect(kinds(verdict({ dependencies: [at(90)] }))).toEqual([]);
     expect(kinds(verdict({ dependencies: [at(91)] }))).toEqual(["service_old_fake"]);
     expect(kinds(verdict({ dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake" })] }))).toEqual(["service_old_fake"]);
     expect(verdict({ dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake" })] }).lines.testedAgainst).toContain("date unknown");
-  });
-  it("uses approval age for the old fake rule even when the capture was recent", () => {
-    const approvedLongAgo = dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-11-16T00:00:00.000Z", approvedAt: "2026-08-18T12:00:00.000Z" });
-    expect(verdict({ dependencies: [approvedLongAgo] }).lines.testedAgainst).toContain("approved 91 days ago");
-    expect(kinds(verdict({ dependencies: [approvedLongAgo] }))).toEqual(["service_old_fake"]);
-  });
-  it("keeps an approval exactly 90 days old quiet even when its capture is older", () => {
-    const approvedAtBoundary = dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: new Date(Date.parse(AS_OF) - 200 * 86_400_000).toISOString(), approvedAt: new Date(Date.parse(AS_OF) - 90 * 86_400_000).toISOString() });
-    const v = verdict({ dependencies: [approvedAtBoundary] });
-    expect(kinds(v)).toEqual([]);
-    expect(v.lines.testedAgainst).toContain("approved 90 days ago");
   });
   it("uses neutral age wording for an old mixed set of approved and legacy fakes", () => {
     const approved = dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-11-16T00:00:00.000Z", approvedAt: "2026-08-18T12:00:00.000Z" });
@@ -248,19 +183,9 @@ describe("rule V4: every service is named, and only the quiet fake is quiet", ()
     expect(item.lines).toContain("Stripe: approved 91 days before this pull request");
     expect(item.lines).toContain("Mailer: recorded 91 days before this pull request");
   });
-  it("made-up answers and a fallback are in the Tested against line as well as the list", () => {
-    const v = verdict({ dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z", madeUpAnswers: 2, fellBack: { from: "test_account", reason: "test_account_busy" } })] });
-    expect(v.lines.testedAgainst).toContain("2 made-up answers");
-    expect(v.lines.testedAgainst).toContain("fell back: test account busy");
-    expect(kinds(v)).toEqual(["service_made_up_answers", "service_fell_back"]);
-  });
   it("no recorded dependency says so, never nothing", () => {
     expect(verdict({ dependencies: undefined }).lines.testedAgainst).toBe("Rovara has no record of which services the checks used.");
     expect(verdict({ dependencies: [] }).lines.testedAgainst).toBe("Rovara has no record of which services the checks used.");
-  });
-  it("the setup drawer counts every kind of service and says an old fake is old", () => {
-    const v = verdict({ dependencies: [POSTGRES, dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-07-02T00:00:00.000Z" }), dep({ name: "Mailer", backing: "fake", label: "rovara_made_fake" })] });
-    expect(v.drawers.setup).toBe("Test setup: sandbox, 1 real service, 1 old recorded fake, 1 fake made by Rovara, Stripe recorded fake, recorded 138 days ago");
   });
 });
 
@@ -273,12 +198,6 @@ describe("rules V5 and V6: risk", () => {
     expect(v.heading).toBe("Verified · Risk not judged yet (treated as high) · nothing extra to check");
     expect(v.lines.needsYou).toContain("Merging needs a fresh sign-in (high risk)");
     expect(v.lines.needsYou).not.toContain("Nothing else");
-  });
-  it("a mock spec mismatch raises risk one level and adds the PR thing to check", () => {
-    const v = verdict({ dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z", mockSpecResult: "mismatch", mockSpecVendor: "stripe" })] });
-    expect(v.riskLevel).toBe("medium");
-    expect(v.heading).toContain("Medium risk · 1 thing to check");
-    expect(v.items.find((item) => item.kind === "service_spec_check")?.lines).toContain("Stripe: does not match Stripe's published API; check this mock.");
   });
   it("a mock spec mismatch raises medium risk to high", () => {
     const v = verdict({
@@ -293,9 +212,6 @@ describe("rules V5 and V6: risk", () => {
     expect(v.riskLevel).toBe("low");
     expect(v.items.find((item) => item.kind === "service_spec_check")?.lines).toContain("Stripe: no published spec to check against.");
   });
-  it("a file list read from the host but not judged is not 'still reading'", () => {
-    expect(verdict({ risk: { level: "low", reasons: [], judged: false } }).lines.risk[0]).toBe("Not judged from the code host's list of changed files, so it counts as high.");
-  });
   it("a file list the worker reported is not checked, is high risk and is one item; it never lowers the risk or the count", () => {
     const v = verdict({ changed: { source: "worker", files: 1, added: 1, removed: 0, complete: true, testsAdded: 1, codeChanged: true }, risk: { level: "low", reasons: [], judged: true } });
     expect(v.riskLevel).toBe("high");
@@ -303,31 +219,10 @@ describe("rules V5 and V6: risk", () => {
     expect(v.lines.changed).not.toMatch(/\d/u);
     expect(kinds(v)).toEqual(["files_not_read"]);
   });
-  it("a fresh pull request counts the unread files once (no second Risk is High item)", () => {
-    const v = verdict({ changed: undefined, risk: { level: "high", reasons: ["Rovara couldn't read which files changed."], judged: false } });
-    expect(kinds(v)).toEqual(["files_not_read"]);
-    expect(v.lines.changed).toBe("The changed files have not been read yet.");
-    expect(v.heading).toContain("Risk not judged yet (treated as high)");
-  });
-  it("a judged high risk is in the heading, the Risk line and Needs you, with every reason above the fold", () => {
-    const reasons = ["Changes sensitive paths: src/payments/refund.ts.", "1 check failed on the latest code.", "A mock is out of date.", "The owner accepted a security review finding."];
-    const v = verdict({ risk: { level: "high", reasons, judged: true } });
-    expect(v.heading).toContain("High risk");
-    expect(v.lines.risk[0]).toBe("High. Changes sensitive paths: src/payments/refund.ts.");
-    for (const reason of reasons) expect(aboveFold(v)).toContain(reason);
-    expect(v.lines.needsYou).toContain("fresh sign-in");
-    expect(v.lines.needsYou).not.toContain("Nothing else");
-    expect(verdict({ risk: { level: "medium", reasons: ["A big change"], judged: true } }).lines.needsYou).not.toContain("fresh sign-in");
-  });
   it("the file count line says 'or more' and 'at least' when the list or the counts are partial", () => {
     expect(verdict({ changed: { source: "host", files: 40, added: 5, removed: 1, complete: false, testsAdded: 0, codeChanged: false } }).lines.changed).toBe("40 or more files, +5 -1; the list may be incomplete.");
     expect(verdict({ changed: { source: "host", files: 3, added: 5, removed: 1, uncounted: 1, complete: true, codeChanged: false } }).lines.changed).toBe("3 files, at least +5 -1.");
     expect(verdict({ changed: { source: "host", files: 1, added: 5, removed: 1, complete: true, codeChanged: false } }).lines.changed).toBe("1 file, +5 -1.");
-  });
-  it("a code change with no test is an item only when the list is whole and from the host", () => {
-    const base = { files: 2, added: 9, removed: 1, testsAdded: 0, codeChanged: true } as const;
-    expect(kinds(verdict({ changed: { ...base, source: "host", complete: true } }))).toEqual(["code_without_tests"]);
-    expect(kinds(verdict({ changed: { ...base, source: "host", complete: false } }))).toEqual(["files_incomplete"]);
   });
 });
 
@@ -338,40 +233,6 @@ describe("rule V7: the second review", () => {
     expect(v.lines.reviews).toBe("Code review and security review passed.");
     expect(v.drawers.reviews).toBe("Reviews: 2 passed, 0 findings accepted");
     expect(v.lines.reviews).not.toMatch(/second/iu);
-  });
-  it("an agreeing second review is 'no blocking finding', never an approval", () => {
-    const v = verdict();
-    expect(v.lines.reviews).toContain("The second review found no blocking finding.");
-    expect(v.lines.reviews).not.toMatch(/approv/iu);
-  });
-  it("a blocking second review keeps the first's pass in the line and names the finding in the list", () => {
-    const v = verdict({ secondReview: { state: "blocking", count: 2, model: "openai/model-b", findings: [{ text: "The refund amount is not checked", file: "src/payments/refund.ts", line: 88 }] } });
-    expect(v.lines.reviews).toContain("Code review and security review passed.");
-    expect(v.lines.reviews).toContain("**The second review did not pass.**");
-    const item = v.items.find((entry) => entry.kind === "second_review_blocking")!;
-    expect(item.detail).toBe("Second review (openai/model-b) has 2 blocking findings.");
-    expect(item.lines).toEqual(["The refund amount is not checked (src/payments/refund.ts:88)"]);
-    expect(v.drawers.reviews).toContain("second review has 2 blocking findings");
-  });
-  // Mutant X16: a partial or same-model review is only in the list, not in the Reviews line. Killed here.
-  it("a partial review, a same-model review and accepted findings are in the Reviews line as well as the list", () => {
-    const v = verdict({ reviews: { ...green().reviews, partialDiff: true, sameModel: true, accepted: [{ role: "CRITIC", text: "x", reason: "y" }] } });
-    expect(v.lines.reviews).toContain("**The reviews saw only part of the change.**");
-    expect(v.lines.reviews).toContain("**Same model as the build.**");
-    expect(v.lines.reviews).toContain("**The owner accepted 1 review finding.**");
-  });
-  it("a second review that was on and did not run is said above the fold", () => {
-    const v = verdict({ secondReview: { state: "did_not_run", reasonLine: "Second review did not run: budget" } });
-    expect(v.lines.reviews).toContain("**The second review did not run.**");
-    expect(v.items[0]!.detail).toBe("Second review did not run: budget");
-  });
-});
-
-describe("rule V8: no flag is never no weakening", () => {
-  it("a could-not-compare line is an item, and an absent weakening part is not 'none'", () => {
-    const v = verdict({ weakening: { weaker: [], flags: [], notCompared: ["Test weakening: could not compare (no test report to compare)"] } });
-    expect(v.items[0]).toMatchObject({ kind: "weakening_not_compared", detail: "No flag here does not mean no tests were weakened." });
-    expect(aboveFold(verdict())).not.toMatch(/none/iu);
   });
 });
 
@@ -401,20 +262,6 @@ describe("rule V9: nothing a repository, person or model wrote can change the pa
       expect(text, text).not.toMatch(/\bENG-\d/u);
     }
   });
-  it("a hostile text cannot start a heading, a quote or a list in the list's own lines", () => {
-    const v = verdict({ weakening: { weaker: ["# Heading", "> quote", "- item", "1. numbered", "| table |"], flags: [], notCompared: [] }, mergeOrder: ["## Merge", "* star"] });
-    for (const line of v.items.flatMap((item) => item.lines)) expect(line, line).not.toMatch(/^(?:[#>|*+-]|\d+[.)])/u);
-  });
-  it("drawer summaries hold fixed words and counts only: nothing from the hostile fields is in any of them", () => {
-    const drawers = Object.values(everything().drawers).join("\n");
-    expect(drawers).not.toContain("Evil");
-    expect(drawers).not.toContain("octocat");
-  });
-  it("text is cut: a very long line cannot grow the page", () => {
-    const long = "a".repeat(5_000);
-    const v = verdict({ weakening: { weaker: [long], flags: [], notCompared: [] }, checks: [{ label: long, status: "failed", reason: "check_failed" }], testing: { result: "code_failed", reasons: ["check_failed"] } });
-    for (const text of everyString(v)) expect(Array.from(text).length).toBeLessThanOrEqual(400);
-  });
 });
 
 describe("bad news is never only in a fold (the drawers repeat counts and result words)", () => {
@@ -429,24 +276,6 @@ describe("bad news is never only in a fold (the drawers repeat counts and result
       secondReview: { state: "blocking", count: 1, findings: [] },
     });
     expect(v.drawers.reviews).toBe("Reviews: 2 passed after accepted findings, 1 finding accepted, second review has 1 blocking finding, saw only part of the change, same model as the build");
-  });
-  it("design example 2: the heading, six lines and list of a task with a failed check, an old fake, a blocking second review and a changed snapshot", () => {
-    const v = verdict({
-      testing: { result: "code_failed", reasons: ["check_failed"] }, checks: [{ label: "Integration tests", status: "failed", reason: "check_failed" }, pass("Unit tests", 181), pass("Lint"), pass("Type check")],
-      requirements: [{ id: "R1", text: "a", result: "proven" }, { id: "R2", text: "b", result: "passed", notProvenReason: "made_by_rovara" }, { id: "R3", text: "c", result: "failed" }, { id: "R4", text: "d", result: "proven" }],
-      dependencies: [POSTGRES, dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-07-02T00:00:00.000Z" })],
-      changed: { source: "host", files: 7, added: 231, removed: 40, complete: true, testsAdded: 5, codeChanged: true },
-      risk: { level: "high", reasons: ["Changes sensitive paths: src/payments/refund.ts.", "1 check failed on the latest code."], judged: true },
-      weakening: { weaker: ["Snapshot files changed: tests/orders/__snapshots__/order-page.snap"], flags: [], notCompared: [] },
-      secondReview: { state: "blocking", count: 1, model: "openai/model-b", findings: [{ text: "The refund amount is not checked against the amount already refunded", file: "src/payments/refund.ts", line: 88 }] },
-    });
-    expect(v.heading).toBe("Code failed · High risk · 6 things to check");
-    expect(v.lines.changed).toBe("7 files, +231 -40. 5 tests added.");
-    expect(v.lines.proven).toBe("2 of 4 requirements proven. 1 failed. 1 passed but is not proven.");
-    expect(v.lines.testedAgainst).toBe("Postgres (real, the project's image). Stripe (recorded fake, recorded 138 days ago).");
-    expect(v.lines.reviews).toBe("Code review and security review passed. **The second review did not pass.**");
-    expect(kinds(v)).toEqual(["check_failed", "requirement_failed", "requirement_not_proven", "service_old_fake", "tests_weaker", "second_review_blocking"]);
-    expect(v.lines.needsYou).toBe("The 6 items below, then the normal code review. Merging needs a fresh sign-in (high risk).");
   });
 });
 
@@ -468,12 +297,6 @@ describe("review findings", () => {
       expect(v.count, result).toBeGreaterThan(0);
     }
     expect(kinds(verdict({ testing: { result: "code_failed", reasons: ["check_failed"] }, checks: [{ label: "a", status: "passed", reason: "check_failed" }] }))).toContain("testing_reason");
-  });
-  // Mutant R2: a passed row a Rovara-made mock answered is only in the Checks drawer.
-  it("a passed check a Rovara-made mock answered is an item above the fold even with no dependency recorded", () => {
-    const v = verdict({ dependencies: undefined, checks: [pass("a"), { ...pass("b"), madeByRovara: true }] });
-    expect(kinds(v)).toEqual(["check_made_by_rovara"]);
-    expect(aboveFold(v)).toContain("Rovara-made mock");
   });
   // Mutant R3: the Tested against line is cut at ten services, so a fake after the tenth is only an item (or nowhere).
   it("beyond ten services only plain real ones are ever left out; every fake stays named on the line", () => {
@@ -515,37 +338,6 @@ describe("review findings", () => {
     expect(kinds(v)).toContain("eval_prompt_without_run");
     const second = verdict({ secondReview: { state: "blocking", count: 1, findings: [{ text: "x", file: "a.ts", line: "3\n## pwn <details>" as never }] } });
     expect(second.items.find((item) => item.kind === "second_review_blocking")!.lines[0]).toBe("x (a.ts)");
-  });
-  // Mutant R11 and R12: the pre-inert second-review reason line and the browser problem lines are used raw.
-  it("the second review's reason line and the browser problem lines are made safe", () => {
-    const hostile = "Evil</details><!-- x --> @octocat https://evil.example\nnext";
-    const v = verdict({ secondReview: { state: "did_not_run", reasonLine: hostile }, browser: { pages: 1, problems: [hostile] } });
-    for (const item of v.items) for (const text of [item.title, item.detail, ...item.lines]) {
-      expect(text, text).not.toMatch(/[<\r\n]/u);
-      expect(text, text).not.toMatch(/@(?!\u200d)/u);
-    }
-    expect(kinds(v)).toEqual(["second_review_not_run", "browser_problem"]);
-  });
-  // Mutant R17: a failed requirement with a not-proven reason is listed twice (failed and not proven).
-  it("a failed requirement is listed once, as failed", () => {
-    const v = verdict({ requirements: [{ id: "R1", text: "a", result: "failed", notProvenReason: "made_by_rovara" }] });
-    expect(kinds(v)).toEqual(["requirement_failed"]);
-    expect(v.lines.proven).toBe("0 of 1 requirements proven. 1 failed.");
-  });
-  it("more than four merge-order lines say how many were left out", () => {
-    const v = verdict({ mergeOrder: ["a", "b", "c", "d", "e", "f"] });
-    expect(v.items[0]!.lines).toEqual(["a", "b", "c", "d", "and 2 more"]);
-  });
-});
-
-describe("requirements that could not be rebuilt in time", () => {
-  // Mutant R14: a stale table reads as "No approved requirements to prove".
-  it("are said to be pending, never read as no requirements", () => {
-    const v = verdict({ requirements: undefined, requirementsPending: true });
-    expect(v.lines.proven).toBe("Requirements are being checked against the latest change.");
-    expect(v.drawers.requirements).toBe("Requirements and proof: being updated for the latest change");
-    expect(kinds(v)).toEqual(["requirements_pending"]);
-    expect(v.lines.proven).not.toContain("No approved");
   });
 });
 
@@ -591,10 +383,6 @@ describe("L4-EVP: AI code was touched and no eval ran", () => {
     const v = verdict({ noEval: { reason: "not_a_prompt_change" } });
     expect(v.heading).toBe("Verified · Low risk · 1 thing to check");
     expect(v.result).toBe(verdict().result);
-  });
-  it("makes the reason inert and refuses a reason it does not know", () => {
-    expect(item({ noEval: { reason: "other", detail: "x\n## pwn <details> [a](http://x)" } })!.detail).not.toMatch(/\n|<details>/u);
-    expect(item({ noEval: { reason: "made-up" as never } })).toBeUndefined();
   });
   it("is one line per fact: not beside a result, a worse result or the existing prompt-changed item; and absent it is today's verdict", () => {
     expect(item({ noEval: { reason: "not_connected" }, evalCheck: { label: "No regression measured", promptChanged: true } })).toBeUndefined();

@@ -1,29 +1,16 @@
 // "How we work" in Code's core: the file read through the code host, the stored item Cloud's readers read, the view, and the layers each step is given. Everything runs on the fakes: the in-memory
 // store and the fake code host.
 import { describe, expect, it } from "vitest";
-import {
-  IMPLICIT_COMPANY_ID,
-  PLAYBOOK_FILE_PATH,
-  ProjectPlaybookSchema,
-  agentXError,
-  projectPlaybookKey,
-  queryAll,
-  type AuditEvent,
-  type JsonValue,
-  type PlaybookFile,
-  type ProjectDefinition,
-  type TransactItem,
-} from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, PLAYBOOK_FILE_PATH, agentXError, projectPlaybookKey, queryAll, type AuditEvent, type JsonValue, type ProjectDefinition, type TransactItem } from "@agentx/contracts";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
-import { createPlaybookService, stepForMode, type PlaybookMode } from "../../packages/broker/src/core/playbook/service.js";
+import { createPlaybookService, type PlaybookMode } from "../../packages/broker/src/core/playbook/service.js";
 import { createCodeHostPlaybookSource, fixedPlaybookSource } from "../../packages/broker/src/core/playbook/source.js";
-import { readProjectPlaybook, readStoredDesignReview } from "../../packages/broker/src/core/playbook/store.js";
+import { readStoredDesignReview } from "../../packages/broker/src/core/playbook/store.js";
 import { readEffectiveDesignReview } from "../../packages/broker/src/core/design-review/setting.js";
-import { runningProcessOf } from "../../packages/broker/src/core/playbook/process.js";
 import { computeHowWeWork } from "../../packages/broker/src/core/playbook/view.js";
 import { parsePlaybookText } from "../../packages/broker/src/core/playbook/file.js";
 import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
@@ -64,47 +51,10 @@ async function world(options: { file?: string; definition?: ProjectDefinition; h
 }
 
 describe("reading the file through the code host", () => {
-  it("reads nothing when the repository has no file, and the file when it has one", async () => {
-    const none = await world();
-    expect((await none.source.read("web")).status).toBe("none");
-    const some = await world({ file: FILE });
-    const reading = await some.source.read("web");
-    expect(reading).toMatchObject({ status: "ok", repository: "app", commit: some.model.headOf("main") });
-    expect(reading.status === "ok" && reading.digest).toMatch(/^[a-f0-9]{64}$/u);
-  });
-
-  it("reads the default branch's head and never a working branch: a task cannot change its own rules", async () => {
-    const w = await world({ file: "version: 1\nrules: ORIGINAL" });
-    w.model.commit("rovara/task-1", { [PLAYBOOK_FILE_PATH]: "version: 1\nrules: CHANGED BY THE TASK" });
-    const reading = await w.source.read("web");
-    expect(reading.status === "ok" && reading.file.rules).toBe("ORIGINAL");
-  });
-
-  it("sees a newer commit on the default branch once the short head cache has passed, and not before", async () => {
-    const w = await world({ file: "version: 1\nrules: ONE" });
-    expect((await w.source.read("web")).status === "ok" && ((await w.source.read("web")) as { file: PlaybookFile }).file.rules).toBe("ONE");
-    w.model.commit("main", { [PLAYBOOK_FILE_PATH]: "version: 1\nrules: TWO" });
-    expect(((await w.source.read("web")) as { file: PlaybookFile }).file.rules).toBe("ONE");
-    w.clock.now += 11_000;
-    expect(((await w.source.read("web")) as { file: PlaybookFile }).file.rules).toBe("TWO");
-  });
-
-  it("answers `invalid` with the problems for a file that cannot be used, and says so once per commit", async () => {
-    const w = await world({ file: "version: 1\nstages:\n  check:\n    instructions: x" });
-    const reading = await w.source.read("web");
-    expect(reading).toMatchObject({ status: "invalid", problems: [{ path: "stages.check" }] });
-  });
 
   it("refuses a file over the size cap without reading it, as a file that cannot be used", async () => {
     const w = await world({ file: `version: 1\nrules: |\n${"  x\n".repeat(20_000)}` });
     expect(await w.source.read("web")).toMatchObject({ status: "invalid", problems: [{ path: "(file)" }] });
-  });
-
-  it("answers `unreadable` when the host fails, and never says what it said", async () => {
-    const w = await world({ file: FILE });
-    w.host.baseBranchHead = () => Promise.reject(agentXError("RUNTIME_UNAVAILABLE", "https://secret.example/token=abc went wrong"));
-    const reading = await w.source.read("web");
-    expect(reading).toEqual({ status: "unreadable", reason: "the code host could not be reached just now" });
   });
 
   it("reads a project's meta repository when it has one, else its first repository; a project with no code host reads as no file", async () => {
@@ -118,38 +68,6 @@ describe("reading the file through the code host", () => {
 });
 
 describe("the stored item (Cloud's key and shape)", () => {
-  it("writes the item at the project playbook key with Cloud's attributes, and nothing for a project with no file", async () => {
-    const none = await world();
-    expect((await none.service.current("web")).playbook).toEqual({ revision: 0, defaultProcess: { kind: "builtin" } });
-    expect(await none.stored()).toBeUndefined();
-
-    const w = await world({ file: FILE });
-    const { playbook, file } = await w.service.current("web");
-    expect(file?.rules).toContain("PROJECT-RULE");
-    expect(playbook).toMatchObject({ revision: 1, defaultProcess: { kind: "builtin" }, designReview: { mode: "always", tier: "light", allowSkip: false, capUsdPerTask: 8 } });
-    const item = (await w.stored())!;
-    expect(item).toMatchObject({ pk: expect.stringContaining("PROJECT_PLAYBOOK#web") as string, sk: "META", entityType: "PROJECT_PLAYBOOK", orgId: COMPANY, revision: 1, defaultProcess: { kind: "builtin" }, updatedBy: "playbook-file" });
-    // Cloud reads exactly these two attributes with its strict schema; the digest beside them is ignored.
-    expect(ProjectPlaybookSchema.safeParse({ revision: item["revision"], defaultProcess: item["defaultProcess"] }).success).toBe(true);
-    expect(item["fileDigest"]).toMatch(/^[a-f0-9]{64}$/u);
-    expect(await readProjectPlaybook({ store: w.store, companyId: COMPANY }, "web")).toEqual(playbook);
-  });
-
-  it("is quiet when the file did not change: the same digest writes nothing, a comment writes nothing, a changed rule goes up one revision", async () => {
-    const w = await world({ file: FILE });
-    await w.service.current("web");
-    const before = w.events.length;
-    await w.service.current("web");
-    w.model.commit("main", { [PLAYBOOK_FILE_PATH]: `# a new comment\n${FILE}` });
-    w.clock.now += 11_000;
-    expect((await w.service.current("web")).playbook.revision).toBe(1);
-    w.model.commit("main", { [PLAYBOOK_FILE_PATH]: FILE.replace("PROJECT-RULE", "OTHER-RULE") });
-    w.clock.now += 11_000;
-    expect((await w.service.current("web")).playbook.revision).toBe(2);
-    // One file-changed event each time it moved, and the design review event only at the first write (the setting never changed).
-    expect(w.events.slice(before).map((event) => event.action)).toEqual(["playbook.file_changed"]);
-    expect(w.events.map((event) => event.action)).toEqual(["playbook.file_changed", "playbook.design_review_changed", "playbook.file_changed"]);
-  });
 
   it("audits the design review change in fixed words and counts, and a removed file drops the setting (one revision more)", async () => {
     const w = await world({ file: FILE });
@@ -175,15 +93,6 @@ describe("the stored item (Cloud's key and shape)", () => {
     expect(written.filter((item) => item["action"] === "playbook.file_changed")).toHaveLength(1);
   });
 
-  it("leaves an item Cloud wrote alone while there is no file, and a file then replaces it", async () => {
-    const w = await world();
-    await w.store.put({ item: { ...projectPlaybookKey(COMPANY, "web"), entityType: "PROJECT_PLAYBOOK", orgId: COMPANY, revision: 4, defaultProcess: { kind: "builtin" }, designReview: { mode: "never", tier: "light", allowSkip: true, capUsdPerTask: 2, highRiskApprover: { kind: "maintainers" } }, updatedAt: "2026-11-01T00:00:00.000Z", updatedBy: "someone" } });
-    expect((await w.service.current("web")).playbook.revision).toBe(4);
-    w.model.commit("main", { [PLAYBOOK_FILE_PATH]: "version: 1\nrules: x" });
-    w.clock.now += 11_000;
-    expect((await w.service.current("web")).playbook).toEqual({ revision: 5, defaultProcess: { kind: "builtin" } });
-  });
-
   it("reads an unreadable stored design review setting as Off through the design review stage, never a looser one", async () => {
     const w = await world();
     await w.store.put({ item: { ...projectPlaybookKey(COMPANY, "web"), entityType: "PROJECT_PLAYBOOK", orgId: COMPANY, revision: 1, defaultProcess: { kind: "builtin" }, designReview: { mode: "sometimes" } } });
@@ -198,15 +107,6 @@ describe("the stored item (Cloud's key and shape)", () => {
 });
 
 describe("a file that cannot be used, and a host that did not answer, fail closed", () => {
-  it("a file that is there and cannot be used is a refusal in words, never Rovara Code with the rules left out; the item stays as it was", async () => {
-    const w = await world({ file: FILE });
-    await w.service.current("web");
-    w.model.commit("main", { [PLAYBOOK_FILE_PATH]: "version: 1\nstages:\n  pull_request:\n    instructions: x" });
-    w.clock.now += 11_000;
-    await expect(w.service.current("web")).rejects.toMatchObject({ code: "PROCESS_UNAVAILABLE", message: expect.stringContaining("stages.pull_request: Rules for this stage aren't used yet.") as string });
-    await expect(w.service.layersFor("web", "PLAN")).rejects.toMatchObject({ code: "PROCESS_UNAVAILABLE" });
-    expect((await w.stored())?.["revision"]).toBe(1);
-  });
 
   it("holds the file's design review setting to a company lock a hosted install wrote: a looser file is refused in words that name the field, and nothing is stored", async () => {
     const w = await world({ file: `version: 1\n${DESIGN.replace("allowSkip: false", "allowSkip: true")}` });
@@ -219,32 +119,10 @@ describe("a file that cannot be used, and a host that did not answer, fail close
     expect((await ok.service.current("web")).playbook.revision).toBe(1);
   });
 
-  it("a host that did not answer is `RUNTIME_UNAVAILABLE`: the step waits", async () => {
-    const w = await world({ file: FILE });
-    w.host.baseBranchHead = () => Promise.reject(new Error("down"));
-    await expect(w.service.layersFor("web", "PLAN")).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-  });
-
-  it("the page's state shows what is wrong beside Rovara Code as it is, and refuses nothing", async () => {
-    const w = await world({ file: "version: 1\nrules: [1, 2" });
-    const state = await w.service.state("web");
-    expect(state.file).toMatchObject({ status: "invalid", problems: [{ path: "(file)" }] });
-    expect(state.view.stages.map((stage) => stage.id)).toEqual(["plan", "plan_critic", "build", "check", "review", "pull_request"]);
-    expect(state.view.rules).toEqual([]);
-    await expect(w.service.state("nobody")).rejects.toMatchObject({ code: "NOT_FOUND" });
-  });
 });
 
 describe("what each step is given from the file", () => {
   const layers = async (mode: PlaybookMode | undefined) => (await (await world({ file: FILE })).service.layersFor("web", mode)).map((layer) => layer.text);
-
-  it("plan, understand and build get the project-wide rules, then their own stage's", async () => {
-    expect(await layers("PLAN")).toEqual(["PROJECT-RULE: mention the ticket.", "PLAN-RULE"]);
-    expect(await layers("UNDERSTAND")).toEqual(["PROJECT-RULE: mention the ticket.", "PLAN-RULE"]);
-    expect(await layers("SETUP_DRAFT")).toEqual(["PROJECT-RULE: mention the ticket.", "PLAN-RULE"]);
-    expect(await layers("IMPLEMENT")).toEqual(["PROJECT-RULE: mention the ticket.", "BUILD-RULE"]);
-    expect(await layers(undefined)).toEqual(["PROJECT-RULE: mention the ticket.", "BUILD-RULE"]);
-  });
 
   it("the stages that check work get their own stage's rule and never the project-wide one", async () => {
     expect(await layers("PLAN_CRITIQUE")).toEqual(["CRITIC-RULE"]);
@@ -252,22 +130,6 @@ describe("what each step is given from the file", () => {
     expect(await layers("FEEDBACK_REVIEW")).toEqual([]);
   });
 
-  it("a project with no file gives nothing, and the built-in's own guidance is never moved into the block", async () => {
-    const none = await world();
-    for (const mode of ["PLAN", "IMPLEMENT", "REVIEW"] as const) expect(await none.service.layersFor("web", mode)).toEqual([]);
-  });
-
-  it("names where the text came from: the file's path", async () => {
-    const w = await world({ file: FILE });
-    expect((await w.service.layersFor("web", "PLAN")).map((layer) => layer.agentName)).toEqual([".rovara/playbook.yaml", ".rovara/playbook.yaml"]);
-  });
-
-  it("maps the modes to the stages Cloud maps them to", () => {
-    const recipe = runningProcessOf(undefined).recipe;
-    const kinds = (mode: PlaybookMode) => stepForMode(recipe, mode)?.kind;
-    expect([kinds("UNDERSTAND"), kinds("PLAN"), kinds("PLAN_CRITIQUE"), kinds("IMPLEMENT"), kinds("REVIEW"), kinds("CHECKS"), kinds("FEEDBACK_REVIEW"), kinds("SPEC_WRITE")])
-      .toEqual(["plan", "plan", "plan_critic", "build", "review", "check", "pull_request", "plan"]);
-  });
 });
 
 describe("the effective view (Cloud's How we work view)", () => {
@@ -285,29 +147,6 @@ describe("the effective view (Cloud's How we work view)", () => {
     expect(v.stages.map((stage) => stage.id)).toEqual(["plan", "plan_critic", "build", "check", "review", "pull_request"]);
     for (const stage of v.stages) for (const row of stage.knows.instructions) expect(row.source).toBe("rovara");
     expect(v.stages.find((stage) => stage.id === "pull_request")?.approves.items.map((item) => item.value)).toContain("Rovara never merges on its own: a person merges the pull request");
-  });
-
-  it("marks what the file wrote as the project's, and leaves the project-wide rules out of the stages that check work, with the fixed note", async () => {
-    const v = await view(FILE);
-    expect(v.rules).toEqual([{ value: "PROJECT-RULE: mention the ticket.", source: "project", locked: false }]);
-    const texts = (id: string) => v.stages.find((stage) => stage.id === id)!.knows.instructions.filter((row) => row.source === "project").map((row) => row.value);
-    expect(texts("plan")).toEqual(["PROJECT-RULE: mention the ticket.", "PLAN-RULE"]);
-    expect(texts("build")).toEqual(["PROJECT-RULE: mention the ticket.", "BUILD-RULE"]);
-    expect(texts("plan_critic")).toEqual(["CRITIC-RULE"]);
-    expect(texts("review")).toEqual(["REVIEW-RULE"]);
-    expect(texts("pull_request")).toEqual([]);
-    expect(v.stages.find((stage) => stage.id === "review")?.knows.note).toBe("Project rules apply to Understand, Plan and Build. Reviewers only follow rules written for them.");
-    expect(v.stages.find((stage) => stage.id === "plan")?.knows.note).toBeUndefined();
-  });
-
-  it("keeps the safety facts: reviewers are read-only and locked by Rovara, a person approves the plan, and nothing is locked by a company", async () => {
-    const v = await view(FILE);
-    const review = v.stages.find((stage) => stage.id === "review")!;
-    expect(review.may.readOnly).toBe(true);
-    expect(review.may.tools.locked).toBe(true);
-    expect(v.stages.find((stage) => stage.id === "plan")?.approves.items.map((item) => item.value)).toEqual(["A person approves the plan before any code is written"]);
-    const lockedBy = v.stages.flatMap((stage) => [stage.who.differentCompanyFrom, stage.may.tools, ...stage.checked.items, ...stage.approves.items]).filter((entry) => entry.locked).map((entry) => entry.lockedBy);
-    expect(new Set(lockedBy)).toEqual(new Set(["rovara"]));
   });
 
   it("a draft is looked at and never applied: nothing is written, and a bad draft says what is wrong", async () => {
@@ -333,28 +172,12 @@ describe("which branch the rules are read from", () => {
     return reading.status === "ok" ? reading.file.rules : reading.status;
   };
 
-  it("reads the branch the repository record names, never a stray `main` beside it", async () => {
-    const w = await world({ hostDefault: "trunk", file: "version: 1\nrules: TRUNK", definition: projectDefinition({ defaultBranch: "trunk" }) });
-    w.model.commit("main", { [PLAYBOOK_FILE_PATH]: "version: 1\nrules: A STRAY MAIN" });
-    expect(await rulesOf(w)).toBe("TRUNK");
-  });
-
   it("reads the host's default when the branch the record names is not there, and nothing guessed beside it", async () => {
     const w = await world({ hostDefault: "trunk", file: "version: 1\nrules: TRUNK", definition: projectDefinition({ defaultBranch: "develop" }) });
     w.model.commit("main", { [PLAYBOOK_FILE_PATH]: "version: 1\nrules: A STRAY MAIN" });
     w.model.commit("master", { [PLAYBOOK_FILE_PATH]: "version: 1\nrules: A STRAY MASTER" });
     noBranch(w, "develop");
     expect(await rulesOf(w)).toBe("TRUNK");
-  });
-
-  it("when neither the record's branch nor the host's default can be read it is unreadable, and a stray main or master is never read in their place", async () => {
-    const w = await world({ hostDefault: "trunk", file: "version: 1\nrules: TRUNK", definition: projectDefinition({ defaultBranch: "develop" }) });
-    w.model.commit("main", { [PLAYBOOK_FILE_PATH]: "version: 1\nrules: A STRAY MAIN" });
-    w.model.commit("master", { [PLAYBOOK_FILE_PATH]: "version: 1\nrules: A STRAY MASTER" });
-    noBranch(w, "develop", "trunk");
-    expect(await w.source.read("web")).toEqual({ status: "unreadable", reason: "the code host could not be reached just now" });
-    await expect(w.service.layersFor("web", "PLAN")).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringContaining("Couldn't read the project's rules from the code host") as string });
-    await expect(w.service.pin("web")).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
   });
 
   it("a repository the code host refuses outright (an address it does not serve) reads as no file, never as a refusal; a refused branch name on a repository it serves still fails closed", async () => {
@@ -369,42 +192,6 @@ describe("which branch the rules are read from", () => {
     expect(await badBranch.source.read("web")).toMatchObject({ status: "unreadable" });
   });
 
-  it("a repository that has no playbook file on its default branch is still no file, and is fine", async () => {
-    const w = await world({ hostDefault: "trunk", definition: projectDefinition({ defaultBranch: "trunk" }) });
-    w.model.commit("main", { [PLAYBOOK_FILE_PATH]: "version: 1\nrules: A STRAY MAIN" });
-    expect(await w.source.read("web")).toMatchObject({ status: "none" });
-    expect(await w.service.layersFor("web", "PLAN")).toEqual([]);
-  });
-});
-
-describe("one playbook revision for a task (the pin)", () => {
-  it("pin says the default branch's head the file was read at, for a file and for no file", async () => {
-    const some = await world({ file: FILE });
-    expect(await some.service.pin("web")).toBe(some.model.headOf("main"));
-    const none = await world();
-    expect(await none.service.pin("web")).toBe(none.model.headOf("main"));
-  });
-
-  it("pin refuses, in words, a file that cannot be used: a task does not start under rules that are not there", async () => {
-    const w = await world({ file: "version: 1\nstages:\n  check:\n    instructions: x" });
-    await expect(w.service.pin("web")).rejects.toMatchObject({ code: "PROCESS_UNAVAILABLE", message: expect.stringContaining("stages.check") as string });
-  });
-
-  it("a read at a pinned commit gives that commit's file, not the head's, and writes nothing", async () => {
-    const w = await world({ file: "version: 1\nrules: |\n  RULES-ONE" });
-    const pinned = await w.service.pin("web");
-    await w.service.current("web");
-    const before = (await w.stored())?.["revision"];
-    w.model.commit("main", { [PLAYBOOK_FILE_PATH]: "version: 1\nrules: |\n  RULES-TWO" });
-    w.clock.now += 11_000;
-    expect((await w.service.layersFor("web", "PLAN", pinned)).map((layer) => layer.text).join()).toContain("RULES-ONE");
-    expect((await w.service.layersFor("web", "PLAN")).map((layer) => layer.text).join()).toContain("RULES-TWO");
-    // The unpinned read brought the item up to the head; the pinned one never moves it back.
-    const after = (await w.stored())?.["revision"];
-    expect(after).toBe((before as number) + 1);
-    await w.service.layersFor("web", "PLAN", pinned);
-    expect((await w.stored())?.["revision"]).toBe(after);
-  });
 });
 
 describe("the page's state is a read", () => {

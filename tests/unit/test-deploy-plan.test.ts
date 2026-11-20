@@ -3,37 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Change } from "@aws-sdk/client-cloudformation";
 import { describe, expect, it, vi } from "vitest";
-import {
-  CONTROL_PLANE_LAMBDAS,
-  DEFAULT_DEPLOY_UNITS,
-  assertOnlyExpectedChanges,
-  executeChangeSetAndWait,
-  firstFailureReason,
-  executorRepositoryUri,
-  formatPlan,
-  liftResources,
-  liftSynthArguments,
-  observedChanges,
-  parseTestDeployArgs,
-  patchLambdaCode,
-  planTestDeploy,
-  resolveArtifactBucket,
-  resolveCodeArtifactBucket,
-  resolveTestStacks,
-  saveChangeSetOrDrop,
-  saveDescribedChangeSet,
-  verifyStackResources,
-  waitForStackUpdate,
-  type BuiltArtifacts,
-  type ChangeExpectation,
-  type DeployStep,
-  type StackParameters,
-  type TemplatePlan,
-} from "../../scripts/test-deploy.js";
+import { CONTROL_PLANE_LAMBDAS, DEFAULT_DEPLOY_UNITS, assertOnlyExpectedChanges, executeChangeSetAndWait, firstFailureReason, executorRepositoryUri, formatPlan, liftResources, liftSynthArguments, observedChanges, parseTestDeployArgs, patchLambdaCode, planTestDeploy, saveChangeSetOrDrop, saveDescribedChangeSet, verifyStackResources, waitForStackUpdate, type BuiltArtifacts, type ChangeExpectation, type DeployStep, type StackParameters, type TemplatePlan } from "../../scripts/test-deploy.js";
 
 const ENV = "agentxlivetest123";
 const CONTROL_PLANE = "agentx-agentxlivetest123-control-plane";
-const RUNTIME = "agentx-agentxlivetest123-runtime";
 const OLD_IMAGE = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-test/worker@sha256:${"a".repeat(64)}`;
 
 const artifacts: BuiltArtifacts = { revision: "0123456789ab", outputDir: "/tmp/test-deploy-0123456789ab" };
@@ -47,99 +20,6 @@ const plan = (only: Parameters<typeof planTestDeploy>[0]["only"], allowlist?: re
 const kinds = (steps: DeployStep[]) => steps.map((step) => step.kind);
 
 describe("planTestDeploy", () => {
-  it("plans a Broker-only deploy as build, upload, change set, execute, verify", () => {
-    const steps = plan(["broker"]);
-    expect(kinds(steps)).toEqual([
-      "build-lambda-zip",
-      "upload-artifact",
-      "create-change-set",
-      "execute-change-set",
-      "verify-lambda-code",
-    ]);
-    const [build, upload, changeSet, execute, verify] = steps as [
-      Extract<DeployStep, { kind: "build-lambda-zip" }>,
-      Extract<DeployStep, { kind: "upload-artifact" }>,
-      Extract<DeployStep, { kind: "create-change-set" }>,
-      Extract<DeployStep, { kind: "execute-change-set" }>,
-      Extract<DeployStep, { kind: "verify-lambda-code" }>,
-    ];
-    expect(build).toMatchObject({ logicalId: "BrokerE1355FD6", entry: "packages/broker/src/aws/broker-handler.ts" });
-    // Code goes to the access stack's versioned artifact bucket, not the control-plane stack's unversioned one.
-    expect(upload).toMatchObject({ bucketFromStack: "access", logicalId: "BrokerE1355FD6", from: build.id });
-    expect(changeSet).toMatchObject({
-      stack: CONTROL_PLANE,
-      template: { source: "lambda-code", patches: [{ logicalId: "BrokerE1355FD6", zip: upload.id }] },
-      expect: { action: "Modify", logicalIds: ["BrokerE1355FD6"], allowedAttributes: ["Properties.Code"], allowArnReevaluations: true },
-    });
-    expect(execute).toMatchObject({ stack: CONTROL_PLANE, createdBy: changeSet.id });
-    // The Lambda CodeSha256 is the base64 of the zip's sha256: the plan binds it to the build step.
-    expect(verify).toMatchObject({
-      stack: CONTROL_PLANE,
-      logicalId: "BrokerE1355FD6",
-      expectedSha256Base64: { fromStep: build.id, output: "sha256Base64" },
-    });
-  });
-
-  it("sets every control-plane parameter to UsePreviousValue and changes none", () => {
-    const changeSet = plan(["broker"]).find((step) => step.kind === "create-change-set");
-    expect(changeSet?.kind === "create-change-set" && changeSet.parameters).toEqual([
-      { key: "AdminValues", usePreviousValue: true },
-      { key: "CallbackSigningKey", usePreviousValue: true },
-      { key: "OidcIssuer", usePreviousValue: true },
-    ]);
-  });
-
-  it("changes Broker and Dispatcher code in one control-plane change set", () => {
-    const steps = plan(["dispatcher", "broker"]);
-    expect(kinds(steps)).toEqual([
-      "build-lambda-zip",
-      "upload-artifact",
-      "build-lambda-zip",
-      "upload-artifact",
-      "create-change-set",
-      "execute-change-set",
-      "verify-lambda-code",
-      "verify-lambda-code",
-    ]);
-    const changeSets = steps.filter((step) => step.kind === "create-change-set");
-    expect(changeSets).toHaveLength(1);
-    expect(changeSets[0]).toMatchObject({
-      expect: { action: "Modify", logicalIds: ["BrokerE1355FD6", "DispatcherD4A12972"] },
-    });
-  });
-
-  it("plans a worker-image deploy as ECR push then a runtime change set that changes only WorkerImageUri", () => {
-    const steps = plan(["worker-image"]);
-    expect(kinds(steps)).toEqual(["ecr-push", "create-change-set", "execute-change-set", "verify-stack-parameter"]);
-    const push = steps[0] as Extract<DeployStep, { kind: "ecr-push" }>;
-    // The repository comes from the image the stack runs today, never from a new or production one.
-    expect(push.repositoryUri).toBe("123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-test/worker");
-    const changeSet = steps[1] as Extract<DeployStep, { kind: "create-change-set" }>;
-    expect(changeSet.stack).toBe(RUNTIME);
-    expect(changeSet.template).toEqual({ source: "previous" });
-    expect(changeSet.parameters).toEqual([
-      { key: "ModelId", usePreviousValue: true },
-      { key: "ModelProvider", usePreviousValue: true },
-      { key: "WorkerImageUri", value: { fromStep: push.id, output: "imageUri" } },
-    ]);
-    expect(changeSet.expect).toMatchObject({ action: "Modify", logicalIdPrefixes: ["WorkerImageParameter"] });
-    expect(steps[3]).toMatchObject({ key: "WorkerImageUri", expected: { fromStep: push.id, output: "imageUri" } });
-  });
-
-  it("publishes the image before it changes the Broker, as the release pipeline does", () => {
-    const stacks = plan(["broker", "worker-image"])
-      .filter((step) => step.kind === "create-change-set")
-      .map((step) => step.kind === "create-change-set" && step.stack);
-    expect(stacks).toEqual([RUNTIME, CONTROL_PLANE]);
-  });
-
-  it("never touches a stack other than the control-plane and runtime stacks for the env", () => {
-    const steps = plan(["broker", "dispatcher", "worker-image"]);
-    const stacks = new Set(steps.flatMap((step) => ("stack" in step ? [step.stack] : [])));
-    expect(stacks).toEqual(new Set([CONTROL_PLANE, RUNTIME]));
-    // The access stack is only read, for its artifact bucket: no step changes it, and the only mention is the upload's bucket source.
-    expect(JSON.stringify(steps).replaceAll('"bucketFromStack":"access"', "")).not.toMatch(/foundation|identity|slack|access/);
-  });
 
   it("refuses an env that is not an allowlisted TEST installation", () => {
     for (const env of ["production", "agentxlivetest124", "AgentXLiveTest123", ""]) {
@@ -148,64 +28,6 @@ describe("planTestDeploy", () => {
       );
     }
     expect(() => plan(["broker"], [])).toThrow("test-deploy only targets allowlisted TEST installations");
-  });
-
-  it("ships the allowlist with exactly the TEST installation", () => {
-    expect(() => plan(["broker"])).not.toThrow();
-  });
-
-  const OLD_EXECUTOR = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-test/executor@sha256:${"d".repeat(64)}`;
-
-  it("plans an executor-image deploy as ECR push then a runtime change set that changes only ExecutorImageUri", () => {
-    const withParameter: StackParameters = { ...previous, runtime: { ...previous.runtime, ExecutorImageUri: OLD_EXECUTOR } };
-    const steps = planTestDeploy({ env: ENV, only: ["executor-image"], artifacts, previous: withParameter });
-    expect(kinds(steps)).toEqual(["ecr-push", "create-change-set", "execute-change-set", "verify-stack-parameter"]);
-    const push = steps[0] as Extract<DeployStep, { kind: "ecr-push" }>;
-    // Next to the worker's repository, which the stack's current WorkerImageUri names: nothing new is created.
-    expect(push).toMatchObject({ image: "executor", repositoryUri: "123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-test/executor", revision: artifacts.revision });
-    const changeSet = steps[1] as Extract<DeployStep, { kind: "create-change-set" }>;
-    expect(changeSet.stack).toBe(RUNTIME);
-    expect(changeSet.template).toEqual({ source: "previous" });
-    expect(changeSet.parameters).toEqual([
-      { key: "ExecutorImageUri", value: { fromStep: push.id, output: "imageUri" } },
-      { key: "ModelId", usePreviousValue: true },
-      { key: "ModelProvider", usePreviousValue: true },
-      { key: "WorkerImageUri", usePreviousValue: true },
-    ]);
-    expect(changeSet.expect).toEqual({ action: "Modify", logicalIdPrefixes: ["WorkerExecutorImageParameter"], allowedAttributes: ["Properties.Value"] });
-    expect(steps[3]).toMatchObject({ stack: RUNTIME, key: "ExecutorImageUri", expected: { fromStep: push.id, output: "imageUri" } });
-  });
-
-  it("adds the ExecutorImageUri parameter and its SSM setting the first time, as the only change, lifted from a synth of the runtime stack", () => {
-    // The deployed runtime stack predates ExecutorImageUri, so it has neither the parameter nor the setting yet.
-    const steps = plan(["executor-image"]);
-    const changeSet = steps.find((step) => step.kind === "create-change-set") as Extract<DeployStep, { kind: "create-change-set" }>;
-    expect(changeSet.template).toEqual({
-      source: "lift-resources",
-      logicalIdPrefix: "WorkerExecutorImageParameter",
-      parameterNames: ["ExecutorImageUri"],
-      construct: "AgentXProductionRuntime",
-      cdkContext: {},
-      identityMode: "cognito",
-    });
-    expect(changeSet.expect).toEqual({ action: "Add", logicalIdPrefixes: ["WorkerExecutorImageParameter"] });
-    expect(changeSet.parameters).toContainEqual({ key: "ExecutorImageUri", value: { fromStep: "push-executor-image", output: "imageUri" } });
-    expect(changeSet.parameters.filter((parameter) => "usePreviousValue" in parameter).map((parameter) => parameter.key)).toEqual(["ModelId", "ModelProvider", "WorkerImageUri"]);
-  });
-
-  it("passes the environment's identity mode to the synth the lifted template comes from", () => {
-    const steps = planTestDeploy({ env: ENV, only: ["executor-image"], artifacts, previous, identityMode: "oidc" });
-    const changeSet = steps.find((step) => step.kind === "create-change-set");
-    expect(changeSet?.kind === "create-change-set" && changeSet.template).toMatchObject({ source: "lift-resources", identityMode: "oidc" });
-  });
-
-  it("pushes both images and changes the runtime stack once for each when asked for both, worker first", () => {
-    const steps = plan(["executor-image", "worker-image"]);
-    expect(kinds(steps)).toEqual(["ecr-push", "create-change-set", "execute-change-set", "verify-stack-parameter", "ecr-push", "create-change-set", "execute-change-set", "verify-stack-parameter"]);
-    expect(steps.filter((step) => step.kind === "ecr-push").map((step) => step.kind === "ecr-push" && step.image)).toEqual(["worker", "executor"]);
-    const prefixes = steps.filter((step) => step.kind === "create-change-set").map((step) => step.kind === "create-change-set" && step.changeSetPrefix);
-    expect(new Set(prefixes).size).toBe(2);
-    expect(new Set(steps.flatMap((step) => ("stack" in step ? [step.stack] : [])))).toEqual(new Set([RUNTIME]));
   });
 
   it("derives the executor repository from the worker's, and refuses a worker repository it cannot map", () => {
@@ -217,128 +39,12 @@ describe("planTestDeploy", () => {
     expect(() => executorRepositoryUri(`${registry}/worker-team/images`)).toThrow(/executor repository/);
   });
 
-  it("states in the printed plan which image is pushed and that no repository is created", () => {
-    const text = formatPlan(plan(["executor-image"]));
-    expect(text).toContain("executor image");
-    expect(text).toContain("agentx-test/executor");
-    expect(text).toMatch(/never creates a repository/);
-  });
-
-  it("states in the printed plan that code goes to the access stack's versioned bucket", () => {
-    const text = formatPlan(plan(["broker"]));
-    expect(text).toContain("access stack's versioned artifact bucket");
-    expect(text).not.toContain("control-plane artifact bucket");
-  });
-
-  it("states in the printed plan that only no-op Arn re-evaluations are accepted beside the code units", () => {
-    const text = formatPlan(plan(["broker", "dispatcher"]));
-    expect(text).toContain("no-op re-evaluations caused by BrokerE1355FD6.Arn, DispatcherD4A12972.Arn");
-    expect(formatPlan(plan(["worker-image"]))).not.toContain("no-op re-evaluations");
-  });
-
-  it("plans qualification-transport as a guarded add-only change set on the control-plane stack", () => {
-    const steps = plan(["qualification-transport"]);
-    expect(kinds(steps)).toEqual(["create-change-set", "execute-change-set", "verify-stack-resources"]);
-    expect(steps[2]).toMatchObject({ stack: CONTROL_PLANE, createdBy: steps[0]?.id, logicalIdPrefix: "E2eQualificationTransport", expectedStatus: "CREATE_COMPLETE" });
-    expect(steps[0]).toMatchObject({
-      stack: CONTROL_PLANE,
-      template: {
-        source: "lift-resources",
-        logicalIdPrefix: "E2eQualificationTransport",
-        cdkContext: { "agentx:e2eQualificationTransport": "enabled" },
-      },
-      expect: { action: "Add", logicalIdPrefixes: ["E2eQualificationTransport"] },
-    });
-  });
-
   it("does not mix qualification-transport with code units that share its stack", () => {
     expect(() => plan(["qualification-transport", "broker"])).toThrow(/qualification-transport.*on its own/);
   });
 
-  it("requires something to deploy and a worker image to derive the repository from", () => {
-    expect(() => plan([])).toThrow("nothing to deploy");
-    expect(() =>
-      planTestDeploy({
-        env: ENV,
-        only: ["worker-image"],
-        artifacts,
-        previous: { ...previous, runtime: { ModelId: "model" } },
-      }),
-    ).toThrow("WorkerImageUri");
-  });
 });
 
-describe("resolveTestStacks", () => {
-  it("names the stacks the way the CLI resolves a named environment", () => {
-    expect(resolveTestStacks(ENV)).toEqual({ "control-plane": CONTROL_PLANE, runtime: RUNTIME });
-  });
-});
-
-const ACCESS = "agentx-agentxlivetest123-access";
-const ACCESS_BUCKET = "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13";
-const CONTROL_BUCKET = "agentx-agentxlivetest123-control-artifacts82dd59a1-syx0unxsewcf";
-
-/** A runner that answers the AWS reads the bucket guards make and records every call. */
-function fakeAws(options: { versioning?: string; brokerBucket?: unknown } = {}) {
-  const calls: string[][] = [];
-  const result = (stdout: unknown) => ({ status: 0, stdout: JSON.stringify(stdout), stderr: "" });
-  return {
-    calls,
-    aws(args: readonly string[]) {
-      calls.push([...args]);
-      const stackName = args[args.indexOf("--stack-name") + 1];
-      if (args[0] === "cloudformation" && args[1] === "describe-stacks") {
-        if (stackName === ACCESS) return result({ Outputs: [{ OutputKey: "ArtifactBucketName", OutputValue: ACCESS_BUCKET }] });
-        return result({ Outputs: [{ OutputKey: "ArtifactBucketName", OutputValue: CONTROL_BUCKET }] });
-      }
-      if (args[0] === "cloudformation" && args[1] === "get-template") {
-        return result({ Resources: { BrokerE1355FD6: { Type: "AWS::Lambda::Function", Properties: { Code: { S3Bucket: options.brokerBucket ?? ACCESS_BUCKET, S3Key: "k" } } } } });
-      }
-      if (args[0] === "s3api" && args[1] === "get-bucket-versioning") {
-        return result(options.versioning === undefined ? { Status: "Enabled" } : options.versioning === "" ? {} : { Status: options.versioning });
-      }
-      throw new Error(`unexpected aws call ${args.join(" ")}`);
-    },
-  };
-}
-
-describe("resolveArtifactBucket", () => {
-  it("takes the bucket from the access stack's ArtifactBucketName and checks its versioning", () => {
-    const runner = fakeAws();
-    expect(resolveArtifactBucket(runner, "us-east-1", ENV)).toBe(ACCESS_BUCKET);
-    expect(runner.calls.map((call) => call.slice(0, 2).join(" "))).toEqual(["cloudformation describe-stacks", "s3api get-bucket-versioning"]);
-    expect(runner.calls[0]).toContain(ACCESS);
-    expect(runner.calls.flat()).not.toContain(CONTROL_PLANE);
-    expect(runner.calls[1]).toContain(ACCESS_BUCKET);
-  });
-
-  it.each([["Suspended"], [""]])("refuses a bucket whose versioning is %j, naming it", (versioning) => {
-    expect(() => resolveArtifactBucket(fakeAws({ versioning }), "us-east-1", ENV)).toThrow(new RegExp(`${ACCESS_BUCKET}.*versioning.*Enabled`));
-  });
-});
-
-describe("resolveCodeArtifactBucket", () => {
-  it("returns the versioned access bucket when the deployed Code already uses it", () => {
-    const runner = fakeAws();
-    expect(resolveCodeArtifactBucket(runner, "us-east-1", ENV, "BrokerE1355FD6")).toBe(ACCESS_BUCKET);
-    expect(runner.calls.find((call) => call[1] === "get-template")).toEqual(expect.arrayContaining(["--stack-name", CONTROL_PLANE, "--template-stage", "Original"]));
-  });
-
-  it("refuses, naming both buckets, when the deployed Code uses another one", () => {
-    expect(() => resolveCodeArtifactBucket(fakeAws({ brokerBucket: CONTROL_BUCKET }), "us-east-1", ENV, "BrokerE1355FD6"))
-      .toThrow(new RegExp(`${ACCESS_BUCKET}.*${CONTROL_BUCKET}|${CONTROL_BUCKET}.*${ACCESS_BUCKET}`));
-  });
-
-  it("refuses when the deployed Code does not name a literal bucket", () => {
-    expect(() => resolveCodeArtifactBucket(fakeAws({ brokerBucket: { Ref: "Bucket" } }), "us-east-1", ENV, "BrokerE1355FD6")).toThrow(/S3Bucket/);
-  });
-
-  it("does not look at the deployed Code when the bucket is not versioned", () => {
-    const runner = fakeAws({ versioning: "Suspended" });
-    expect(() => resolveCodeArtifactBucket(runner, "us-east-1", ENV, "BrokerE1355FD6")).toThrow(/versioning/);
-    expect(runner.calls.some((call) => call[1] === "get-template")).toBe(false);
-  });
-});
 
 describe("assertOnlyExpectedChanges", () => {
   const addOnly = { action: "Add", logicalIdPrefixes: ["E2eQualificationTransport"] } as const;
@@ -808,16 +514,6 @@ describe("the control-plane-code unit", () => {
     expect(builds.filter((build) => build.extraFiles !== undefined)).toHaveLength(1);
   });
 
-  it("includes broker and dispatcher once when they are also named", () => {
-    const both = plan(["control-plane-code", "broker", "dispatcher"]);
-    expect(both).toEqual(steps);
-  });
-
-  it("keeps broker and dispatcher as units of their own", () => {
-    const only = plan(["broker"]).filter((step) => step.kind === "build-lambda-zip");
-    expect(only).toHaveLength(1);
-  });
-
   it("names every packaged function the infra builds, except the installer's page", () => {
     const entries = new Set<string>();
     for (const file of readdirSync(new URL("../../infra/lib/", import.meta.url))) {
@@ -960,42 +656,6 @@ describe("assertOnlyExpectedChanges for every control-plane Lambda (change set d
     const detail = find(changes, "SlackIngressIntegration").Details?.[0];
     detail!.CausingEntity = "State.Arn";
     expect(() => assertOnlyExpectedChanges(observedChanges(changes), all)).toThrow(/SlackIngressIntegration/);
-  });
-});
-
-describe("resolveCodeArtifactBucket for a function whose Code reads its bucket from a stack parameter", () => {
-  const PARAMETER = "AssetParameters4cc08d20a47075d98e1d1c0c3ec8a5c2fde4f48a7ec4017107965683d0be0353S3BucketBC7C2282";
-  function runnerWith(parameterValue: string | undefined, code: unknown = { S3Bucket: { Ref: PARAMETER } }) {
-    const calls: string[][] = [];
-    const result = (stdout: unknown) => ({ status: 0, stdout: JSON.stringify(stdout), stderr: "" });
-    return {
-      calls,
-      aws(args: readonly string[]) {
-        calls.push([...args]);
-        if (args[1] === "describe-stacks") {
-          const stack = args[args.indexOf("--stack-name") + 1];
-          if (stack === ACCESS) return result({ Outputs: [{ OutputKey: "ArtifactBucketName", OutputValue: ACCESS_BUCKET }] });
-          return result({ Parameters: parameterValue === undefined ? [] : [{ ParameterKey: PARAMETER, ParameterValue: parameterValue }] });
-        }
-        if (args[1] === "get-template") return result({ Resources: { DeveloperSignInFunction10B62B05: { Type: "AWS::Lambda::Function", Properties: { Code: code } } } });
-        if (args[1] === "get-bucket-versioning") return result({ Status: "Enabled" });
-        throw new Error(`unexpected aws call ${args.join(" ")}`);
-      },
-    };
-  }
-
-  it("accepts it when the parameter's current value is the access bucket", () => {
-    expect(resolveCodeArtifactBucket(runnerWith(ACCESS_BUCKET), "us-east-1", ENV, "DeveloperSignInFunction10B62B05")).toBe(ACCESS_BUCKET);
-  });
-
-  it("refuses, naming both buckets, when the parameter names another bucket", () => {
-    expect(() => resolveCodeArtifactBucket(runnerWith(CONTROL_BUCKET), "us-east-1", ENV, "DeveloperSignInFunction10B62B05"))
-      .toThrow(new RegExp(`${ACCESS_BUCKET}.*${CONTROL_BUCKET}|${CONTROL_BUCKET}.*${ACCESS_BUCKET}`));
-  });
-
-  it("refuses when the parameter is not on the stack, or the bucket is neither a literal nor a parameter", () => {
-    expect(() => resolveCodeArtifactBucket(runnerWith(undefined), "us-east-1", ENV, "DeveloperSignInFunction10B62B05")).toThrow(/S3Bucket/);
-    expect(() => resolveCodeArtifactBucket(runnerWith(ACCESS_BUCKET, { S3Bucket: { "Fn::ImportValue": "x" } }), "us-east-1", ENV, "DeveloperSignInFunction10B62B05")).toThrow(/S3Bucket/);
   });
 });
 

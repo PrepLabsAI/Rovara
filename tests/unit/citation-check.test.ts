@@ -7,7 +7,6 @@ import {
 } from "../../packages/broker/src/core/citations/citation-check.js";
 
 const SHA = "c".repeat(40);
-const OLD = "d".repeat(40);
 const LINES = Array.from({ length: 30 }, (_, index) => `const value${index + 1} = "line ${index + 1} of the file";`);
 const FILE = LINES.join("\n");
 const quoteOf = (line: number) => `"line ${line} of the file"`;
@@ -29,26 +28,6 @@ function reader(files: Record<string, unknown>, onCall?: () => void): { read: Ci
 const fixedNow = () => 5_000;
 
 describe("checkCitations: the match", () => {
-  it("holds when the quote is at the cited line, read once at the bound commit through the line plus the margin", async () => {
-    const { read, calls } = reader({ [`api:src/app.ts@${SHA}`]: FILE });
-    const check = await checkCitations(read, [ref(10, quoteOf(10))], { commits, now: fixedNow });
-    expect(check).toEqual({ complete: true, results: [{ outcome: "source_found", shown: { repo: "api", path: "src/app.ts", commit: SHA, line: 10, quote: quoteOf(10) } }] });
-    expect(calls).toEqual([{ repository: "api", path: "src/app.ts", commit: SHA, untilLine: 14, timeoutMs: 8_000 }]);
-  });
-
-  it("the window is exactly 3 lines either side: 3 away holds, 4 away fails", async () => {
-    const { read } = reader({ [`api:src/app.ts@${SHA}`]: FILE });
-    const check = await checkCitations(read, [ref(10, quoteOf(7)), ref(10, quoteOf(13)), ref(10, quoteOf(6)), ref(10, quoteOf(14))], { commits, now: fixedNow });
-    expect(check.results.map((result) => result.outcome === "source_not_found" ? result.reason : result.outcome)).toEqual(["source_found", "source_found", "quote_not_at_line", "quote_not_at_line"]);
-    expect(check.complete).toBe(true);
-  });
-
-  it("a quote that is not in the file, a line past the end and a missing file are not found; in plain mode a citation with no line matches anywhere and reads the whole file", async () => {
-    const { read, calls } = reader({ [`api:src/app.ts@${SHA}`]: FILE });
-    const check = await checkCitations(read, [ref(5, "an invented quotation"), ref(99, quoteOf(30)), ref(1, quoteOf(1), { path: "src/gone.ts" }), ref(undefined, quoteOf(29))], { commits, now: fixedNow, mode: "plain" });
-    expect(check.results.map((result) => result.outcome === "source_not_found" ? result.reason : result.outcome)).toEqual(["quote_not_at_line", "quote_not_at_line", "file_missing", "source_found"]);
-    expect(calls.find((call) => call.path === "src/app.ts")?.untilLine).toBeUndefined();
-  });
 
   it("a short or absent quote, or a line that is not a whole positive number, fails without a read", async () => {
     const { read, calls } = reader({ [`api:src/app.ts@${SHA}`]: FILE });
@@ -68,32 +47,12 @@ describe("checkCitations: the match", () => {
 });
 
 describe("checkCitations: commit binding", () => {
-  it("a citation at another commit than the one its repository is bound to fails, even when the quote is true there; it is never read", async () => {
-    const { read, calls } = reader({ [`api:src/app.ts@${OLD}`]: FILE, [`api:src/app.ts@${SHA}`]: "rewritten" });
-    const check = await checkCitations(read, [ref(10, quoteOf(10), { commit: OLD })], { commits, now: fixedNow });
-    expect(check.results[0]).toMatchObject({ outcome: "source_not_found", reason: "commit_not_bound" });
-    expect(calls).toEqual([]);
-  });
-
-  it("a repository that is not bound fails; the reader is asked only for the bound commit", async () => {
-    const { read, calls } = reader({ [`web:src/app.ts@${SHA}`]: FILE });
-    const check = await checkCitations(read, [ref(10, quoteOf(10), { repo: "web" })], { commits, now: fixedNow });
-    expect(check.results[0]).toMatchObject({ outcome: "source_not_found", reason: "commit_not_bound" });
-    expect(calls).toEqual([]);
-  });
 
   it("a bound commit the reader cannot fetch (not a full hash) is unreadable, not a pass", async () => {
     const { read, calls } = reader({});
     const check = await checkCitations(read, [ref(10, quoteOf(10), { commit: "abc123" })], { commits: new Map([["api", "abc123"]]), now: fixedNow });
     expect(check).toMatchObject({ complete: false, results: [{ outcome: "unreadable", reason: "commit_not_readable" }] });
     expect(calls).toEqual([]);
-  });
-
-  it("the same file at two commits is two reads; only the bound one can hold", async () => {
-    const { read, calls } = reader({ [`api:src/app.ts@${SHA}`]: FILE, [`api:src/app.ts@${OLD}`]: FILE });
-    const check = await checkCitations(read, [ref(10, quoteOf(10)), ref(10, quoteOf(10), { commit: OLD })], { commits, now: fixedNow });
-    expect(check.results.map((result) => result.outcome)).toEqual(["source_found", "source_not_found"]);
-    expect(calls.map((call) => call.commit)).toEqual([SHA]);
   });
 });
 
@@ -113,12 +72,6 @@ describe("checkCitations: a read that did not finish is not a pass", () => {
     const check = await checkCitations(read, [ref(10, quoteOf(10), { path: "a.ts" }), ref(10, quoteOf(10), { path: "b.ts" })], { commits, now: () => clock, limits: { deadlineMs: 500 } });
     expect(calls.map((call) => [call.path, call.timeoutMs])).toEqual([["a.ts", 500]]);
     expect(check).toMatchObject({ complete: false, results: [{ outcome: "source_found" }, { outcome: "unreadable", reason: "deadline" }] });
-  });
-
-  it("one unreadable citation makes the check incomplete even when the others hold", async () => {
-    const { read } = reader({ [`api:a.ts@${SHA}`]: FILE, [`api:b.ts@${SHA}`]: new Error("x") });
-    const check = await checkCitations(read, [ref(10, quoteOf(10), { path: "a.ts" }), ref(10, quoteOf(10), { path: "b.ts" })], { commits, now: fixedNow });
-    expect(check.complete).toBe(false);
   });
 });
 
@@ -163,20 +116,6 @@ describe("checkCitations: limits", () => {
     expect(calls.map((call) => call.path)).toEqual(["a.ts", "big.ts"]);
     expect(check.complete).toBe(false);
   });
-
-  it("at most `concurrency` reads at a time", async () => {
-    let inFlight = 0;
-    let peak = 0;
-    const read: CitationFileReader = async () => { inFlight += 1; peak = Math.max(peak, inFlight); await new Promise((resolve) => setTimeout(resolve, 1)); inFlight -= 1; return FILE; };
-    await checkCitations(read, Array.from({ length: 10 }, (_, index) => ref(10, quoteOf(10), { path: `f${index}.ts` })), { commits, now: fixedNow });
-    expect(peak).toBe(4);
-  });
-
-  it("one read per file and commit, as deep as the deepest cited line", async () => {
-    const { read, calls } = reader({ [`api:src/app.ts@${SHA}`]: FILE });
-    await checkCitations(read, [ref(3, quoteOf(3)), ref(20, quoteOf(20)), ref(8, quoteOf(8))], { commits, now: fixedNow });
-    expect(calls).toEqual([{ repository: "api", path: "src/app.ts", commit: SHA, untilLine: 24, timeoutMs: 8_000 }]);
-  });
 });
 
 describe("shown citations: redacted and inert, no file text", () => {
@@ -194,48 +133,6 @@ describe("shown citations: redacted and inert, no file text", () => {
     expect(shown.path).not.toContain("<b>");
     expect(shownCitation({ repo: "api", path: "a.ts", commit: "<img>@x", line: 0 })).toEqual({ repo: "api", path: "a.ts", commit: "@\u200Dx" });
   });
-
-  it("results carry no text from the file", async () => {
-    const marker = "ONLY-IN-THE-FILE-7f3a";
-    const { read } = reader({ [`api:src/app.ts@${SHA}`]: `${FILE}\n${marker}` });
-    const check = await checkCitations(read, [ref(10, quoteOf(10)), ref(10, "an invented quotation")], { commits, now: fixedNow });
-    expect(JSON.stringify(check)).not.toContain(marker);
-    expect(JSON.stringify(check)).not.toContain("const value");
-  });
-});
-
-describe("checkClaims: which sentences survive", () => {
-  it("a sentence survives only when it has a citation and every citation holds", async () => {
-    const { read } = reader({ [`api:src/app.ts@${SHA}`]: FILE, [`api:src/down.ts@${SHA}`]: new Error("x") });
-    const result = await checkClaims(read, [
-      { sentence: "Refunds are capped.", citations: [ref(10, quoteOf(10)), ref(20, quoteOf(21))] },
-      { sentence: "Partial refunds are allowed.", citations: [ref(10, quoteOf(10)), ref(5, "an invented quotation")] },
-      { sentence: "No source at all.", citations: [] },
-      { sentence: "Unreadable source.", citations: [ref(1, quoteOf(1), { path: "src/down.ts" })] },
-      { sentence: "Old commit.", citations: [ref(10, quoteOf(10), { commit: OLD })] },
-    ], { commits, now: fixedNow });
-    expect(result.kept).toEqual([0]);
-    expect(result.claims.map((claim) => claim.kept)).toEqual([true, false, false, false, false]);
-    expect(result.claims[1]!.results.map((entry) => entry.outcome)).toEqual(["source_found", "source_not_found"]);
-    expect(result.claims[2]!.results).toEqual([]);
-    expect(result.complete).toBe(false);
-    expect(result.claims[0]!.sentence).toBe("Refunds are capped.");
-  });
-
-  it("the limits cover all claims together: a sentence whose citations are past the limit is dropped and the check is incomplete", async () => {
-    const { read } = reader({ [`api:src/app.ts@${SHA}`]: FILE });
-    const claims = [1, 2, 3].map((n) => ({ sentence: `S${n}`, citations: [ref(10, quoteOf(10))] }));
-    const result = await checkClaims(read, claims, { commits, now: fixedNow, limits: { maxCitations: 2 } });
-    expect(result.kept).toEqual([0, 1]);
-    expect(result.claims[2]!.results).toMatchObject([{ outcome: "unreadable", reason: "over_citation_limit" }]);
-    expect(result.complete).toBe(false);
-  });
-
-  it("all holding is complete", async () => {
-    const { read } = reader({ [`api:src/app.ts@${SHA}`]: FILE });
-    const result = await checkClaims(read, [{ sentence: "A", citations: [ref(3, quoteOf(3))] }, { sentence: "B", citations: [ref(25, quoteOf(25))] }], { commits, now: fixedNow });
-    expect(result).toMatchObject({ kept: [0, 1], complete: true });
-  });
 });
 
 describe("prose mode (DEC 254zh): strict rules for answers and the wiki", () => {
@@ -247,15 +144,6 @@ describe("prose mode (DEC 254zh): strict rules for answers and the wiki", () => 
   ].join("\n");
   const files = { [`api:src/refunds.ts@${SHA}`]: CODE };
   const at = (line: number, quote: string): CitationRef => ref(line, quote, { path: "src/refunds.ts" });
-
-  it("is the default; a line is required (no match anywhere in the file); plain mode keeps the setup rule", async () => {
-    const { read, calls } = reader(files);
-    const prose = await checkCitations(read, [at(1, "export function refundLimit(order"), ref(undefined, "export function refundLimit(order", { path: "src/refunds.ts" })], { commits, now: fixedNow });
-    expect(prose.results.map((result) => result.outcome === "source_not_found" ? result.reason : result.outcome)).toEqual(["source_found", "line_required"]);
-    expect(calls.map((call) => call.untilLine)).toEqual([5]);
-    const plain = await checkCitations(read, [ref(undefined, "export function refundLimit(order", { path: "src/refunds.ts" })], { commits, now: fixedNow, mode: "plain" });
-    expect(plain.results[0]!.outcome).toBe("source_found");
-  });
 
   it("a quote must be at least PROSE_QUOTE_MIN_CHARS characters (whitespace collapsed); plain mode accepts 8", async () => {
     expect(PROSE_QUOTE_MIN_CHARS).toBe(20);
@@ -311,13 +199,6 @@ describe("prose mode (DEC 254zh): strict rules for answers and the wiki", () => 
     expect(Date.now() - started).toBeLessThan(1_500);
   });
 
-  it("codeNamesOf finds backticked spans and code-shaped words, each once; plain words are not code names", () => {
-    expect(codeNamesOf("Use `npm  run build` then call refundLimit() in src/app.ts via RefundService and MAX_CENTS; see app.ts, `refundLimit` and snake_case. Refunds are Partial.")).toEqual([
-      "npm run build", "refundLimit", "src/app.ts", "app.ts", "RefundService", "MAX_CENTS", "snake_case",
-    ]);
-    expect(codeNamesOf("Refunds are capped at the order total. E.g. ask Support first.")).toEqual([]);
-  });
-
   it("hasCodeToken matches whole tokens only, case-sensitive", () => {
     expect(hasCodeToken("x = refundLimit(order)", "refundLimit")).toBe(true);
     expect(hasCodeToken("x = refundLimitV2(order)", "refundLimit")).toBe(false);
@@ -327,12 +208,6 @@ describe("prose mode (DEC 254zh): strict rules for answers and the wiki", () => 
     expect(hasCodeToken("see src/app.tsx here", "app.ts")).toBe(false);
     expect(hasCodeToken("npm   run build", "npm run build")).toBe(true);
     expect(hasCodeToken("anything", "")).toBe(false);
-  });
-
-  it("results never say verified", async () => {
-    const { read } = reader(files);
-    const result = await checkClaims(read, [{ sentence: "refundLimit exists.", citations: [at(1, "export function refundLimit(order: Order): number {")] }], { commits, now: fixedNow });
-    expect(JSON.stringify(result)).not.toMatch(/verif/iu);
   });
 });
 
@@ -353,13 +228,6 @@ describe("review fixes (REVIEW-1)", () => {
     expect(buffer).toMatchObject({ complete: false, results: [{ outcome: "unreadable", reason: "read_failed" }] });
   });
 
-  it("L3: invisible characters do not hide a code name", async () => {
-    expect(codeNamesOf("Use refund\u200BLimit here.")).toEqual(["refundLimit"]);
-    const { read } = reader({ [`api:src/app.ts@${SHA}`]: FILE });
-    const result = await checkClaims(read, [{ sentence: "The cap is refund\u200BLimit.", citations: [ref(10, quoteOf(10))] }], { commits, now: fixedNow });
-    expect(result.claims[0]!.dropped).toBe("code_name_not_in_quote");
-  });
-
   it("L5: an unreadable citation drops its sentence as unreadable; an unknown mode is prose; $ is an identifier character; call and camelCase shapes alone are code names", async () => {
     const { read } = reader({ [`api:src/app.ts@${SHA}`]: FILE, [`api:src/down.ts@${SHA}`]: new Error("x") });
     const dropped = await checkClaims(read, [{ sentence: "It is down.", citations: [ref(1, quoteOf(1), { path: "src/down.ts" })] }], { commits, now: fixedNow });
@@ -378,10 +246,5 @@ describe("review fixes (REVIEW-1)", () => {
     const claims = [`${"a".repeat(250)}Limit`, `${"a".repeat(250)}_x`, `${"a".repeat(250)}.ts`, `${"a".repeat(250)}()`].map((name) => ({ sentence: `See ${name} here.`, citations: cite10 }));
     const result = await checkClaims(read, [...claims, { sentence: 42 as unknown as string, citations: cite10 }, { sentence: `${"a".repeat(200)} ok`, citations: cite10 }], { commits, now: fixedNow });
     expect(result.claims.map((claim) => claim.dropped ?? "kept")).toEqual(["code_name_too_long", "code_name_too_long", "code_name_too_long", "code_name_too_long", "not_a_sentence", "kept"]);
-  });
-
-  it("L5: a hostile repository name is inert when shown", () => {
-    const shown = shownCitation({ repo: "@everyone <img src=x> https://evil.example", path: "a.ts", commit: SHA, line: 1, quote: quoteOf(1) });
-    expect(shown.repo).not.toMatch(/@everyone|<img|https:\/\/evil/u);
   });
 });

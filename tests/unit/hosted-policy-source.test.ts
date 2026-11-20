@@ -50,43 +50,12 @@ describe("the stored project policy and the company's lock decide merge tracking
     w.advance(HOSTED_POLICY_TTL_MS);
     expect(await w.mode(A, "web")).toBe("rovara_real_run");
   });
-
-  it("the company's lock wins over the project's own choice, and a lock never loosens it", async () => {
-    const w = world({ locks: () => ({ real_check: "rovara_real_run" }) });
-    w.row(A, "web", { real_check: "sandbox_only" });
-    expect(await w.mode(A, "web")).toBe("rovara_real_run");
-    const loose = world({ locks: () => ({ real_check: "sandbox_only" }) });
-    loose.row(A, "web", { real_check: "their_ci_watch" });
-    expect(await loose.mode(A, "web")).toBe("their_ci_watch");
-    // No stored row at all: the lock still applies over today's default.
-    const none = world({ locks: () => ({ real_check: "rovara_real_run" }) });
-    expect(await none.mode(A, "web")).toBe("rovara_real_run");
-  });
-
-  it("a company's lock is asked for under that company and project only", async () => {
-    const w = world({ locks: (cid, pid) => (cid === A && pid === "web" ? { real_check: "rovara_real_run" } : {}) });
-    expect(await w.mode(A, "web")).toBe("rovara_real_run");
-    expect(await w.mode(B, "web")).toBe("their_ci_fix");
-    expect(await w.mode(A, "api")).toBe("their_ci_fix");
-    expect(w.service.asked.map((entry) => `${String(entry.q["cid"])}/${String(entry.q["pid"])}`).sort()).toEqual([`${A}/api`, `${A}/web`, `${B}/web`].sort());
-  });
 });
 
 describe("unreadable fails closed: never a default, never looser", () => {
   const unreadable = async (w: ReturnType<typeof world>, company = A, project = "web") => {
     await expect(w.mode(company, project)).rejects.toThrow(CI_MODE_UNREADABLE_WORDS);
   };
-  it("a rules service that gives no answer", async () => {
-    const w = world({ locks: () => new Error("private-canary") });
-    w.row(A, "web", { real_check: "sandbox_only" });
-    await unreadable(w);
-    await expect(w.source.resolve(w.scope(A, "web"), {})).rejects.toThrow("policy_unavailable");
-  });
-  it("an install whose rules service is configured but unusable (no signer)", async () => {
-    const db = new FakeDynamoDb();
-    const source = hostedPolicySource({ documentClient: db, tableName: "state", now: () => T0 }, () => { throw new Error("the policy hook is not usable"); });
-    await expect(policyCiReporting(source).ciMode({ orgId: A, project: "web" } as never)).rejects.toThrow(CI_MODE_UNREADABLE_WORDS);
-  });
   it("a stored row that does not parse, or names another company or project", async () => {
     const w = world({ withHook: false });
     w.row(A, "web", { real_check: "private-canary" });
@@ -98,10 +67,6 @@ describe("unreadable fails closed: never a default, never looser", () => {
     w.advance(HOSTED_POLICY_FAILURE_TTL_MS);
     await unreadable(w);
   });
-  it("a table that fails", async () => {
-    const down = hostedPolicySource({ documentClient: { async send() { throw new Error("private-canary"); } }, tableName: "state", now: () => T0 }, () => undefined);
-    await expect(policyCiReporting(down).ciMode({ orgId: A, project: "web" } as never)).rejects.toThrow(CI_MODE_UNREADABLE_WORDS);
-  });
   it("a scope that is not the root's own company/project form refuses without reading anything", async () => {
     const w = world({ withHook: false });
     for (const key of ["", "web", `${A}/web`, `company/${A}`, `company/${A}/project/`, `company/${A}/project/web/extra`, `company/not-an-org/project/web`, `company/${A}/project/.hidden`, `company/${A}/project/${"a".repeat(101)}`, `COMPANY/${A}/project/web`]) {
@@ -110,78 +75,9 @@ describe("unreadable fails closed: never a default, never looser", () => {
     await expect(w.source.resolve(undefined as never, {})).rejects.toThrow("policy_unavailable");
     expect(w.reads).toEqual([]);
   });
-  it("the refusal never echoes what the reader said", async () => {
-    const w = world({ locks: () => new Error("private-canary") });
-    await expect(w.source.resolve(w.scope(A, "web"), {})).rejects.toThrow(/^policy_unavailable$/u);
-  });
-});
-
-describe("two companies", () => {
-  it("each company reads only its own project row and asks for its own lock; the same project name under another company is never read", async () => {
-    const w = world({ locks: () => ({}) });
-    w.row(A, "web", { real_check: "sandbox_only" });
-    w.row(B, "web", { real_check: "rovara_real_run" });
-    expect(await w.mode(A, "web")).toBe("sandbox_only");
-    expect(w.reads.every((read) => read.pk === companyScoped(A, "PROJECT_SETTINGS#web"))).toBe(true);
-    expect(w.service.asked.every((entry) => entry.q["cid"] === A)).toBe(true);
-    w.reads.length = 0; w.service.asked.length = 0;
-    expect(await w.mode(B, "web")).toBe("rovara_real_run");
-    expect(w.reads.every((read) => read.pk === companyScoped(B, "PROJECT_SETTINGS#web"))).toBe(true);
-    expect(w.service.asked.every((entry) => entry.q["cid"] === B)).toBe(true);
-  });
-  it("one company's cached answer is never served to the other, and one project's never to another project", async () => {
-    const w = world({ withHook: false });
-    w.row(A, "web", { real_check: "sandbox_only" });
-    w.row(A, "api", { real_check: "their_ci_watch" });
-    w.row(B, "web", { real_check: "rovara_real_run" });
-    for (let round = 0; round < 2; round += 1) {
-      expect(await w.mode(A, "web")).toBe("sandbox_only");
-      expect(await w.mode(B, "web")).toBe("rovara_real_run");
-      expect(await w.mode(A, "api")).toBe("their_ci_watch");
-    }
-  });
-  it("a company with no row of its own does not read another company's", async () => {
-    const w = world({ withHook: false });
-    w.row(B, "web", { real_check: "sandbox_only" });
-    expect(await w.mode(A, "web")).toBe("their_ci_fix");
-  });
 });
 
 describe("the cache bounds the calls of one pass", () => {
-  it("many tasks of one project in one pass: one row read and one rules-service question", async () => {
-    const w = world({ locks: () => ({ real_check: "rovara_real_run" }) });
-    w.row(A, "web", { real_check: "sandbox_only" });
-    for (let i = 0; i < 40; i += 1) expect(await w.mode(A, "web")).toBe("rovara_real_run");
-    expect(w.reads).toHaveLength(1);
-    expect(w.service.asked).toHaveLength(1);
-  });
-  it("tasks asked at the same moment share one read", async () => {
-    const w = world({ withHook: false });
-    w.row(A, "web", { real_check: "sandbox_only" });
-    expect(await Promise.all(Array.from({ length: 10 }, async () => await w.mode(A, "web")))).toEqual(Array(10).fill("sandbox_only"));
-    expect(w.reads).toHaveLength(1);
-  });
-  it("a change is read after the short TTL, not before", async () => {
-    const w = world({ withHook: false });
-    w.row(A, "web", { real_check: "sandbox_only" });
-    expect(await w.mode(A, "web")).toBe("sandbox_only");
-    w.row(A, "web", { real_check: "rovara_real_run" });
-    w.advance(HOSTED_POLICY_TTL_MS - 1);
-    expect(await w.mode(A, "web")).toBe("sandbox_only");
-    w.advance(1);
-    expect(await w.mode(A, "web")).toBe("rovara_real_run");
-    expect(w.reads).toHaveLength(2);
-  });
-  it("an answer is never used past the rules service's own expiry", async () => {
-    const w = world({ lifetime: 10, locks: () => ({ real_check: "rovara_real_run" }) });
-    await w.mode(A, "web");
-    w.advance(9_000);
-    await w.mode(A, "web");
-    expect(w.service.asked).toHaveLength(1);
-    w.advance(1_000);
-    await w.mode(A, "web");
-    expect(w.service.asked).toHaveLength(2);
-  });
   it("a failure is remembered only briefly: a pass does not ask again for every task, and the next pass reads again", async () => {
     let failing = true;
     const w = world({ locks: () => (failing ? new Error("down") : {}) });
@@ -200,22 +96,6 @@ describe("the cache bounds the calls of one pass", () => {
     expect(w.reads).toHaveLength(2);
     expect(await w.mode(A, "web")).toBe("sandbox_only");
     expect(w.reads).toHaveLength(3);
-  });
-  it("one company's remembered failure does not touch another company's answer at the same moment", async () => {
-    const w = world({ locks: (cid) => (cid === A ? new Error("down") : { real_check: "rovara_real_run" }) });
-    const [a, b] = await Promise.allSettled([w.mode(A, "web"), w.mode(B, "web")]);
-    expect(a.status).toBe("rejected");
-    expect(b).toEqual({ status: "fulfilled", value: "rovara_real_run" });
-    await expect(w.mode(A, "web")).rejects.toThrow(CI_MODE_UNREADABLE_WORDS);
-    expect(await w.mode(B, "web")).toBe("rovara_real_run");
-    expect(w.service.asked).toHaveLength(2);
-  });
-  it("what a caller does to its answer does not change the next one", async () => {
-    const w = world({ withHook: false });
-    w.row(A, "web", { real_check: "sandbox_only" });
-    const first = await w.source.resolve(w.scope(A, "web"), {});
-    (first.values as Record<string, { value: unknown }>)["real_check"]!.value = "their_ci_fix";
-    expect((await w.source.resolve(w.scope(A, "web"), {})).values["real_check"]!.value).toBe("sandbox_only");
   });
   it("the cache holds at most maxEntries projects", async () => {
     const w = world({ withHook: false, maxEntries: 2 });

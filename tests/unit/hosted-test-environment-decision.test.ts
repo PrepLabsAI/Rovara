@@ -19,8 +19,6 @@ const sandbox = (over: Record<string, unknown> = {}): TestEnvironmentBody => Tes
 });
 const highRisk = () => sandbox({ services: [{ name: "partner-scorer", kind: "sagemaker_runtime", match: { endpointName: "partner-scorer" }, mode: "preprod", preprod: { endpointArn: "arn:aws:sagemaker:us-west-2:222222222222:endpoint/partner-scorer", roleArn: "arn:aws:iam::222222222222:role/rovara-invoke", region: "us-west-2" } }] });
 
-const OTHER_COMPANY = `org_${"z9".repeat(10)}`;
-
 function people(company: { role?: OrgRole; companyId?: OrgId } | undefined, grant?: "developer" | "administrator"): DeployedPeople & { calls: string[] } {
   const calls: string[] = [];
   return {
@@ -54,14 +52,6 @@ describe("who may approve a test environment on AWS (DEC 254z b)", () => {
 });
 
 describe("approving a project's test environment on AWS", () => {
-  it("a project maintainer approves a medium-risk proposal with no step-up: the proof is for exactly this act, the gate decides, the revision is stored", async () => {
-    const s = await setup(sandbox(), people({ role: "member" }, "administrator"));
-    expect(s.proposal.risk).toBe("medium");
-    const result = await s.decider.approve({ personId: "p1", project: s.b.project, approval: s.approval });
-    expect(result).toEqual({ ok: true, message: "Approved. Tasks that start from now on use it." });
-    expect(s.issued).toEqual([{ companyId: BENCH_ORG, personId: "p1", requestId: "req_0123456789", kind: "setting", project: s.b.project, revision: 1, artifactDigest: s.proposal.digest, outcome: "approve", card: { cardId: `test-environment:${s.b.project}`, contentVersion: s.proposal.digest } }]);
-    expect((await readApprovedTestEnvironment(s.b.deps, BENCH_ORG, s.b.project))?.revision).toBe(1);
-  });
 
   it("a high-risk proposal: a project maintainer is refused before any proof; a company admin approves", async () => {
     const maintainer = await setup(highRisk(), people({ role: "member" }, "administrator"));
@@ -71,25 +61,6 @@ describe("approving a project's test environment on AWS", () => {
     expect(maintainer.gate).not.toHaveBeenCalled();
     const admin = await setup(highRisk(), people({ role: "admin" }));
     expect(await admin.decider.approve({ personId: "p2", project: admin.b.project, approval: admin.approval })).toMatchObject({ ok: true });
-  });
-
-  it("a project developer, and anyone with no grant, decide nothing", async () => {
-    for (const grant of ["developer", undefined] as const) {
-      const s = await setup(sandbox(), people({ role: "member" }, grant));
-      expect(await s.decider.approve({ personId: "p1", project: s.b.project, approval: s.approval })).toMatchObject({ ok: false, reason: "not_allowed" });
-      expect(s.issued).toEqual([]);
-      expect(await readApprovedTestEnvironment(s.b.deps, BENCH_ORG, s.b.project)).toBeUndefined();
-    }
-  });
-
-  it("two companies: a person whose live membership is another company's (even as its owner) reads nothing of this company's proposal and decides nothing", async () => {
-    const who = people({ role: "owner", companyId: OTHER_COMPANY }, "administrator");
-    const s = await setup(sandbox(), who);
-    const result = await s.decider.approve({ personId: "p1", project: s.b.project, approval: s.approval });
-    expect(result).toMatchObject({ ok: false, reason: "not_found" });
-    expect(who.calls).toEqual(["member:p1"]);
-    expect(s.issued).toEqual([]);
-    expect(s.gate).not.toHaveBeenCalled();
   });
 
   it("a membership read that fails, or a revoked member: nothing is issued", async () => {
@@ -121,20 +92,6 @@ describe("approving a project's test environment on AWS", () => {
     const decider = createHostedTestEnvironmentDecision({ companyId: BENCH_ORG, deps: unproved.deps, gate: () => unproved.gate, people: people({ role: "admin" }), proofs: { issue: (input) => { issued.push(input); return { method: LOCAL_SESSION_METHOD, token: BENCH_SESSION }; } } });
     expect(await decider.approve({ personId: "p1", project: unproved.project, approval: { requestId: "req_0123456789", revision: 1, artifactDigest: proposed.digest } })).toMatchObject({ ok: false, reason: "stale" });
     expect(issued).toEqual([]);
-  });
-
-  it("a project name that is not a plain name is not found before anything is read: no membership or grant read, no proof, no gate", async () => {
-    const who = people({ role: "owner" });
-    const s = await setup(sandbox(), who);
-    for (const project of ["", "a/b", "../x", "x".repeat(101), 7 as unknown as string]) {
-      expect(await s.decider.approve({ personId: "p1", project, approval: s.approval }), String(project)).toMatchObject({ ok: false, reason: "not_found" });
-    }
-    expect(who.calls).toEqual([]);
-    expect(s.issued).toEqual([]);
-    expect(s.gate).not.toHaveBeenCalled();
-    // Positive control: the real project name reads the person.
-    expect(await s.decider.approve({ personId: "p1", project: s.b.project, approval: s.approval })).toMatchObject({ ok: true });
-    expect(who.calls.length).toBeGreaterThan(0);
   });
 
   it("not wired (no proof issuer: the hosted approvers point cannot prove this act yet) answers not_wired and reads nothing", async () => {

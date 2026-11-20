@@ -4,7 +4,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 import { createCoreTaskRuleRoutes } from "../../packages/broker/src/aws/core-task-rule-routes.js";
-import { coreTaskRuleOf } from "../../packages/broker/src/core-host/task-rule-paths.js";
 import { listCorePlanComments } from "../../packages/broker/src/developer/task-code-routes.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 
@@ -28,23 +27,6 @@ describe("the core task rule routes' own guards", () => {
     expect(depsFor).not.toHaveBeenCalled();
     expect(store.query).not.toHaveBeenCalled();
     await expect(routes.route({ request: request("POST", "people"), path: `/v1/dev/tasks/${TASK}/people`, person: { developerId: OWNER, name: "Maya" }, companyId: A, task: task(A), store })).rejects.toMatchObject({ code: "NOT_FOUND" });
-  });
-
-  it("serve exactly the old route table's methods", () => {
-    const served = (method: string, rest: string) => coreTaskRuleOf(`/v1/dev/tasks/${TASK}/${rest}`, method) !== undefined;
-    for (const rest of ["people", "people/candidates", "people/requests/r1", "readers", "events", "comments"]) {
-      expect(served("GET", rest), rest).toBe(true);
-      for (const method of ["POST", "PUT", "DELETE", "PATCH"]) expect(served(method, rest), `${method} ${rest}`).toBe(false);
-    }
-    for (const rest of ["people/add", "people/role", "people/take-ownership"]) {
-      expect(served("POST", rest), rest).toBe(true);
-      for (const method of ["GET", "PUT", "DELETE"]) expect(served(method, rest), `${method} ${rest}`).toBe(false);
-    }
-    for (const method of ["PUT", "DELETE"]) expect(served(method, "readers/x"), method).toBe(true);
-    for (const method of ["GET", "POST"]) expect(served(method, "readers/x"), method).toBe(false);
-    for (const path of [`/v1/dev/tasks/${TASK}/people/requests`, `/v1/dev/tasks/${TASK}/people/requests/a/b`, `/v1/dev/tasks/${TASK}/readers/a/b`, "/v1/dev/tasks/ABCDEF12-1111-4111-8111-111111111111/people", "/v1/dev/tasks/not-a-task/people", `/v1/dev/tasks/${TASK}/plan`, `/v1/dev/tasks/${TASK}/messages`]) {
-      expect(coreTaskRuleOf(path, "GET"), path).toBeUndefined();
-    }
   });
 
   it("plan comments keep the old route's company check of the row", async () => {

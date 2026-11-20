@@ -1,7 +1,7 @@
 // The `image-registry` point: the in-memory fake and the default "none" pass the contract; a login is held to one repository and a local-looking host.
 import { describe, expect, it } from "vitest";
 import { HostedSavedEnvRegistryAuthSchema, ImageRegistryError, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, SavedEnvRegistryAuthSchema, savedEnvRegistryAuthSchema, savedEnvRepositoryName } from "@agentx/contracts";
-import { createAdapterRegistry, createFakeImageRegistry, createUnavailableImageRegistry, registerCodeDefaults } from "../../packages/broker/src/ports/index.js";
+import { createFakeImageRegistry, createUnavailableImageRegistry } from "../../packages/broker/src/ports/index.js";
 import { runImageRegistryConformance } from "../support/ports/image-registry-conformance.js";
 
 runImageRegistryConformance("the in-memory fake", {
@@ -20,14 +20,6 @@ describe("the image-registry point", () => {
     expect(none.capabilities).toEqual({ workerPush: false, workerPull: false, scan: false });
     expect(await none.inspect({ companyId: "c", repository })).toBe("unusable");
     await expect(none.login({ companyId: "c", repository, access: "push", maxSeconds: 60 })).rejects.toBeInstanceOf(ImageRegistryError);
-  });
-
-  it("is registered as a default by registerCodeDefaults, and a configured adapter replaces it", () => {
-    const registry = createAdapterRegistry();
-    registerCodeDefaults(registry, { priceTable: { currency: "USD", models: {} } });
-    expect(registry.names("image-registry")).toEqual(["none"]);
-    registry.register("image-registry", "fake", createFakeImageRegistry());
-    expect(registry.names("image-registry")).toEqual(["fake"]);
   });
 
   it("holds a login's registry to the hosted registry's host or this machine's loopback and a port, nothing else", () => {

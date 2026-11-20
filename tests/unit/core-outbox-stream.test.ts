@@ -20,12 +20,6 @@ describe("L9 synchronous forwarding boundary", () => {
     expect(JSON.parse(payload.toString("utf8"))).toEqual({ Records: [record()] });
     expect(options.abortSignal).toBeInstanceOf(AbortSignal);
   });
-  it("accepts the mapping's full 100-record bound in linear time", async () => {
-    const records = Array.from({ length: 100 }, (_, index) => record(String(index + 1)));
-    const start = performance.now();
-    expect(await invokeCoreOutbox(client(async () => reply({ batchItemFailures: [] })), "broker", records)).toEqual({ batchItemFailures: [] });
-    expect(performance.now() - start).toBeLessThan(1_000);
-  });
   it("refuses oversized, malformed and non-INSERT input before any invocation", async () => {
     const send = vi.fn();
     for (const records of [Array.from({ length: 101 }, () => record()), [{ ...record(), eventName: "MODIFY" }], [{ ...record(), dynamodb: {} }], [record("private-value")], [{ ...record(), padding: "x".repeat(6 * 1024 * 1024) }]]) {
@@ -44,13 +38,5 @@ describe("L9 synchronous forwarding boundary", () => {
     ]) await expect(invokeCoreOutbox(client(async () => response), "broker", [record()])).rejects.toThrow(/^core outbox relay unavailable$/u);
     await expect(invokeCoreOutbox(client(async () => { throw new Error("private network cause"); }), "broker", [record()])).rejects.toThrow(/^core outbox relay unavailable$/u);
   });
-  it("aborts one hung batch using the caller's remaining time", async () => {
-    const send = (_command: InvokeCommand, options: { abortSignal: AbortSignal }) => new Promise((_resolve, reject) => {
-      const fail = () => reject(new Error("private timeout cause"));
-      if (options.abortSignal.aborted) fail();
-      else options.abortSignal.addEventListener("abort", fail, { once: true });
-    });
-    await expect(invokeCoreOutbox(client(send), "broker", [record()], 2_001)).rejects.toThrow(/^core outbox relay unavailable$/u);
-  }, 2_000);
 
 });

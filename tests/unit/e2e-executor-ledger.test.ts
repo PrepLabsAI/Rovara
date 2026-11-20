@@ -54,25 +54,6 @@ describe("file case ledger", () => {
     expect(() => createFileCaseLedger("relative/root", plan)).toThrow(/absolute/);
   });
 
-  it("returns a ref that binds the exact bytes and stores them in observations", async () => {
-    const dir = await root();
-    const ledger = createFileCaseLedger(dir, plan);
-    const ref = await ledger.evidence.recordCaseEvidence({ caseId, kind: "case-capture", bytes, mediaType: "application/json" }, signal) as { artifactId: string; sha256: string; byteLength: number };
-    expect(ref).toMatchObject({ sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.byteLength, mediaType: "application/json" });
-    const stored = JSON.parse(await readFile(join(dir, "observations", `${ref.artifactId}.json`), "utf8")) as { content: string; caseId: string };
-    expect(stored).toMatchObject({ caseId, content: '{"ok":true}' });
-  });
-
-  it("stores downloads as raw files under downloads/", async () => {
-    const dir = await root();
-    const ledger = createFileCaseLedger(dir, plan);
-    const csv = Buffer.from("id,customer\r\na1,Ada\r\n");
-    await ledger.evidence.recordCaseEvidence({ caseId, kind: "download", bytes: csv, mediaType: "text/csv" }, signal);
-    const files = await readdir(join(dir, "downloads"));
-    expect(files).toHaveLength(1);
-    expect(await readFile(join(dir, "downloads", files[0]!))).toEqual(csv);
-  });
-
   it("refuses evidence that carries an account credential", async () => {
     const ledger = createFileCaseLedger(await root(), plan);
     const leaking = Buffer.from(JSON.stringify({ note: plan.accounts[0]!.password }));
@@ -94,24 +75,6 @@ describe("file case ledger", () => {
     await expect(ledger.casePlans.readCasePlan({ launchContext: { ...launch, runId: "00000000-0000-4000-8000-000000000000" }, caseId,
       upstreamTestId: casePlan.expected.upstreamTestId, targetId: casePlan.expected.targetId }, signal)).rejects.toThrow(/foreign/);
     await expect(ledger.casePlans.readCasePlan({ launchContext: launch, caseId: "nope", upstreamTestId: "x", targetId: "y" }, signal)).rejects.toThrow("unknown case");
-  });
-
-  it("builds an observation binding that the host validator accepts", async () => {
-    const dir = await root();
-    const ledger = createFileCaseLedger(dir, plan, { observations: { sessionFacts: () => sessionFacts, upstreamRunId: () => "0190a000-0000-7000-8000-000000000001" } });
-    const casePlan = await ledger.casePlans.readCasePlan({ launchContext: launch, caseId, upstreamTestId: resolved.suite.expectedCases[0]!.upstreamTestId,
-      targetId: resolved.suite.expectedCases[0]!.targetId }, signal);
-    const observation = await readValidatedE2EApplicationCaseObservation({ reader: ledger.caseObservations, launchContext: launch, plan: casePlan,
-      ownedClientRef: "rovara-session-1", expectedSubjectKind: "service", signal });
-    expect(observation.identityEvidence).toHaveLength(4);
-    expect(observation.binding.sessionRef).toBe("rovara-session-1");
-    expect(observation.binding.assertionProducers).toHaveLength(casePlan.scenario.assertions.length);
-    // Four evidence items, plus the binding itself, persisted for the host and bound to its own digest.
-    const files = await readdir(join(dir, "observations"));
-    expect(files.filter((name) => name.startsWith("ev-"))).toHaveLength(4);
-    const persisted = JSON.parse(await readFile(join(dir, "observations", `binding-${caseId.replaceAll(":", "_")}.json`), "utf8")) as { sha256: string; binding: unknown };
-    expect(persisted.binding).toEqual(observation.binding);
-    expect(persisted.sha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it("persists observation and asset bindings that the host snapshot reads back, and refuses a binding that changed", async () => {

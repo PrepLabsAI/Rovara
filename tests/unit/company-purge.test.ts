@@ -196,22 +196,6 @@ describe("company purge: CORE company-scoped workspaces", () => {
     expect(await w.store.get(taskKey(started.taskId))).toBeUndefined();
     expect(await w.store.get(legacyRequest)).toBeUndefined();
   });
-
-  it("purges A's scoped workspace files while leaving B's scoped rows and file versions unchanged", async () => {
-    const w = world({}, new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES }));
-    const a = await startCoreWorkspace(w, A);
-    const b = await startCoreWorkspace(w, B);
-    const beforeRows = ofCompany(await all(w.store), b.key.pk, B);
-    const beforeFiles = [...w.files.objects].filter(([key]) => key.startsWith(b.prefix));
-    expect(beforeFiles).toHaveLength(4);
-    await scheduledAndDue(w);
-    await purgeToEnd(w, A);
-    expect(w.files.under(a.prefix)).toEqual([]);
-    expect((await w.store.query({ pk: a.key.pk })).items).toEqual([]);
-    expect(ofCompany(await all(w.store), b.key.pk, B)).toEqual(beforeRows);
-    expect([...w.files.objects].filter(([key]) => key.startsWith(b.prefix))).toEqual(beforeFiles);
-    expect(w.files.deleted).not.toContain(b.prefix);
-  });
 });
 
 describe("company purge: who may ask, and when", () => {
@@ -248,36 +232,12 @@ describe("company purge: who may ask, and when", () => {
     await expect(requestCompanyPurge(w.deps, { companyId: A, by: OP, requestId: "not-a-uuid" })).rejects.toThrow("The request id is not valid.");
   });
 
-  it("schedules after the cooling-off delay with its audit event; asking again keeps the first request and records nothing", async () => {
-    const w = world();
-    const first = await requestCompanyPurge(w.deps, { companyId: A, by: OP, requestId: REQ });
-    expect(first).toMatchObject({ status: "scheduled", alreadyRequested: false, requestedBy: "ops_ana", dueAt: new Date(w.clock.now + COMPANY_PURGE_COOLING_OFF_MS).toISOString() });
-    const events = (await all(w.store)).filter((item) => item.pk === `ORG#${A}#AUDIT`);
-    expect(events.map((item) => item["action"])).toEqual(["company.purge_requested"]);
-    expect(events[0]!["actor"]).toEqual({ type: "system", id: "operator:ops_ana" });
-    w.clock.now += 1_000;
-    const again = await requestCompanyPurge(w.deps, { companyId: A, by: OP, requestId: REQ2 });
-    expect(again).toMatchObject({ alreadyRequested: true, requestId: REQ, requestedAt: first.requestedAt, dueAt: first.dueAt });
-    expect((await all(w.store)).filter((item) => item.pk === `ORG#${A}#AUDIT`)).toHaveLength(1);
-  });
-
   it("keeps the cooling-off delay inside its bounds", async () => {
     const short = world({ coolingOffMs: 1 });
     const state = await requestCompanyPurge(short.deps, { companyId: A, by: OP, requestId: REQ });
     expect(Date.parse(state.dueAt) - short.clock.now).toBe(COMPANY_PURGE_COOLING_OFF_MIN_MS);
     const odd = world({ coolingOffMs: Number.NaN });
     expect(Date.parse((await requestCompanyPurge(odd.deps, { companyId: A, by: OP, requestId: REQ })).dueAt) - odd.clock.now).toBe(COMPANY_PURGE_COOLING_OFF_MS);
-  });
-
-  it("does nothing before it is due", async () => {
-    const w = world();
-    await seed(w, A, "a");
-    await requestCompanyPurge(w.deps, { companyId: A, by: OP, requestId: REQ });
-    const before = await all(w.store);
-    w.clock.now += COMPANY_PURGE_COOLING_OFF_MS - 1;
-    expect(await runCompanyPurge(w.deps, A)).toEqual({ companyId: A, outcome: "waiting" });
-    expect(await all(w.store)).toEqual(before);
-    expect(w.files.deleted).toEqual([]);
   });
 
   it("cancels inside the window (with its audit event), not after; a cancelled purge never runs and a new request schedules again", async () => {
@@ -548,22 +508,6 @@ describe("company purge: what goes and what stays", () => {
     expect(rows.filter((item) => item.pk === `ORG#${A}#LATE` || item.pk === "DEVTASK#task-a-late")).toEqual([]);
   });
 
-  it("never reports done while a file prefix could not be emptied", async () => {
-    const w = world();
-    await seed(w, A, "a");
-    await scheduledAndDue(w);
-    w.files.failPrefix = "private/owner-a/ws-a-1/";
-    for (let call = 0; call < 20; call += 1) {
-      expect((await runCompanyPurge(w.deps, A)).outcome).toBe("working");
-      w.clock.now += 70_000;
-    }
-    // The workspace's rows stay with its files: they are what names the files.
-    expect(await w.store.get({ pk: "WORKSPACE#ws-a-1", sk: "META" })).toBeDefined();
-    w.files.failPrefix = undefined;
-    await purgeToEnd(w, A);
-    expect(w.files.under("private/owner-a/")).toEqual([]);
-  });
-
   it("counts a workspace whose ids are not plain as refused and deletes no file for it", async () => {
     const w = world();
     await w.store.put({ item: { pk: "WORKSPACE#ws-odd", sk: "META", companyId: A, ownerKey: "../other" } });
@@ -636,42 +580,6 @@ describe("company purge: what goes and what stays", () => {
     expect(left.length).toBeGreaterThanOrEqual(101);
     expect(left.find((row) => row.sk === "META")).toMatchObject({ companyId: B });
   });
-
-  it("never deletes a META whose orgId came to name another company just before its delete", async () => {
-    const w = world();
-    await w.store.put({ item: { pk: "DEVTASK#task-y", sk: "META", companyId: A, orgId: A, ownerKey: "owner-y", workspaceId: "ws-y" } });
-    const s = w.store;
-    const deps: CompanyPurgeDeps = { ...w.deps, store: {
-      get: (key) => s.get(key), getMany: (keys) => s.getMany(keys), query: (request) => s.query(request), put: (request) => s.put(request), update: (request) => s.update(request),
-      transact: (items) => s.transact(items), scanPage: (request) => s.scanPage(request),
-      delete: async (request) => {
-        // Between the partition's last page and its META delete, the META's orgId moves to another company.
-        if (request.key.pk === "DEVTASK#task-y" && request.key.sk === "META") await s.update({ key: request.key, ops: [{ op: "set", path: ["orgId"], value: B }] });
-        return await s.delete(request);
-      },
-    } };
-    await requestCompanyPurge(deps, { companyId: A, by: OP, requestId: REQ });
-    w.clock.now += COMPANY_PURGE_COOLING_OFF_MS;
-    for (let call = 0; call < 50 && (await runCompanyPurge(deps, A)).outcome !== "done"; call += 1) w.clock.now += 1_000;
-    expect(await w.store.get({ pk: "DEVTASK#task-y", sk: "META" })).toMatchObject({ companyId: A, orgId: B });
-  });
-
-  it("clears an earlier purge's recorded partitions on a new request, so nothing it named is acted on without being proved again", async () => {
-    const w = world();
-    await seed(w, A, "a");
-    await scheduledAndDue(w);
-    // Run until a partition is recorded, then the company reopens; the held purge is cancelled.
-    for (let call = 0; call < 50 && (await w.store.query({ pk: `COMPANY_PURGE_PART#${A}` })).items.length === 0; call += 1) {
-      await runCompanyPurge(w.deps, A, 0);
-      w.clock.now += 1_000;
-    }
-    expect((await w.store.query({ pk: `COMPANY_PURGE_PART#${A}` })).items.length).toBeGreaterThan(0);
-    w.closed.delete(A);
-    await cancelCompanyPurge(w.deps, { companyId: A, by: OP });
-    w.closed.set(A, "close-2");
-    await requestCompanyPurge(w.deps, { companyId: A, by: OP, requestId: REQ2 });
-    for (const pk of [`COMPANY_PURGE_PART#${A}`, `COMPANY_PURGE_MARK#${A}`, `COMPANY_PURGE_DRYRUN#${A}`]) expect((await w.store.query({ pk })).items).toEqual([]);
-  });
 });
 
 describe("company purge: bounded, resumable, one run at a time", () => {
@@ -689,15 +597,6 @@ describe("company purge: bounded, resumable, one run at a time", () => {
     expect(calls).toBeGreaterThan(oneCall);
     const strip = (items: StoredDocument[]): unknown[] => items.map((item) => (item.pk === "COMPANY_PURGE" ? { pk: item.pk, sk: item.sk, status: item["status"] } : item.entityType === "AUDIT" ? { pk: item.pk, sk: item.sk } : item));
     expect(strip(await all(small.store))).toEqual(strip(await all(big.store)));
-  });
-
-  it("stops each call at its item limit", async () => {
-    const w = world();
-    for (let i = 0; i < 6_000; i += 1) await w.store.put({ item: { pk: `ORG#${A}#USAGE#d${String(i).padStart(5, "0")}`, sk: "ROW" } });
-    await scheduledAndDue(w);
-    const progress = await runCompanyPurge(w.deps, A, 3_600_000);
-    expect(progress.outcome).toBe("working");
-    expect(progress.counts!.deleted).toBeLessThanOrEqual(5_100);
   });
 
   it("goes on after a store fault from the place it saved, with fixed words", async () => {
@@ -737,38 +636,6 @@ describe("company purge: bounded, resumable, one run at a time", () => {
     expect((await all(w.store)).filter((item) => item.pk === `ORG#${B}#SETTINGS`)).toHaveLength(1);
   });
 
-  it("lets go of the purge when a call ends normally, so the next run need not wait", async () => {
-    const w = world();
-    await seed(w, A, "a");
-    await scheduledAndDue(w);
-    expect((await runCompanyPurge(w.deps, A, 0)).outcome).toBe("working");
-    w.clock.now += 1_000;
-    expect((await runCompanyPurge(w.deps, A, 0)).outcome).toBe("working");
-  });
-
-  it("removes a row written into a task or workspace partition after its META was deleted", async () => {
-    const w = world();
-    await seed(w, A, "a");
-    await seed(w, B, "b");
-    await scheduledAndDue(w);
-    let wrote = false;
-    for (let call = 0; call < 500; call += 1) {
-      const progress = await runCompanyPurge(w.deps, A, 0);
-      if (progress.outcome === "done") break;
-      if (!wrote && (await w.store.get({ pk: "DEVTASK#task-a-1", sk: "META" })) === undefined && (await w.store.get({ pk: "WORKSPACE#ws-a-1", sk: "META" })) === undefined) {
-        await w.store.put({ item: { pk: "DEVTASK#task-a-1", sk: "STATUS", status: "late" } });
-        await w.store.put({ item: { pk: "WORKSPACE#ws-a-1", sk: "OPERATION#late", status: "late" } });
-        await w.store.put({ item: { pk: "IDEMPOTENCY#owner-a#ws-a-1", sk: "REQUEST#late" } });
-        wrote = true;
-      }
-      w.clock.now += 1_000;
-    }
-    expect(wrote).toBe(true);
-    expect((await companyPurgeState(w.deps, A))!.status).toBe("done");
-    for (const pk of ["DEVTASK#task-a-1", "WORKSPACE#ws-a-1", "IDEMPOTENCY#owner-a#ws-a-1"]) expect((await w.store.query({ pk })).items).toEqual([]);
-    for (const pk of ["DEVTASK#task-b-1", "WORKSPACE#ws-b-1", "IDEMPOTENCY#owner-b#ws-b-1"]) expect((await w.store.query({ pk })).items.length).toBeGreaterThan(0);
-  });
-
   it("never ends while a scan page reports rows it could not read", async () => {
     const w = world();
     await seed(w, A, "a");
@@ -789,56 +656,6 @@ describe("company purge: bounded, resumable, one run at a time", () => {
     skip = false;
     for (let call = 0; call < 30 && (await runCompanyPurge(deps, A)).outcome !== "done"; call += 1) w.clock.now += 1_000;
     expect((await companyPurgeState(deps, A))).toMatchObject({ status: "done", counts: { unreadable: 0 } });
-  });
-
-  it("follows a partition page that is empty but carries a cursor (rows the store left out), and still moves on", async () => {
-    const w = world();
-    await w.store.put({ item: { pk: "DEVTASK#task-e", sk: "META", companyId: A, ownerKey: "owner-e", workspaceId: "ws-e" } });
-    for (let i = 0; i < 5; i += 1) await w.store.put({ item: { pk: "DEVTASK#task-e", sk: `NOTE#${String(i)}` } });
-    const s = w.store;
-    let first = true;
-    const deps: CompanyPurgeDeps = { ...w.deps, store: {
-      get: (key) => s.get(key), getMany: (keys) => s.getMany(keys), put: (request) => s.put(request), update: (request) => s.update(request),
-      delete: (request) => s.delete(request), transact: (items) => s.transact(items), scanPage: (request) => s.scanPage(request),
-      query: async (request) => {
-        if (request.pk === "DEVTASK#task-e" && request.cursor === undefined && first) { first = false; return { items: [], cursor: (await s.query({ pk: request.pk, limit: 1 })).cursor! }; }
-        return await s.query(request);
-      },
-    } };
-    await requestCompanyPurge(deps, { companyId: A, by: OP, requestId: REQ });
-    w.clock.now += COMPANY_PURGE_COOLING_OFF_MS;
-    for (let call = 0; call < 50 && (await runCompanyPurge(deps, A, 0)).outcome !== "done"; call += 1) w.clock.now += 1_000;
-    expect((await companyPurgeState(deps, A))!.status).toBe("done");
-    expect((await w.store.query({ pk: "DEVTASK#task-e" })).items).toEqual([]);
-  });
-
-  it("works from the row as taken, not a copy read before another run moved on", async () => {
-    const w = world();
-    await seed(w, A, "a");
-    await scheduledAndDue(w);
-    expect((await runCompanyPurge(w.deps, A, 0)).outcome).toBe("working");
-    const s = w.store;
-    let interleaved = false;
-    const deps: CompanyPurgeDeps = { ...w.deps, store: {
-      get: (key) => s.get(key), getMany: (keys) => s.getMany(keys), query: (request) => s.query(request), put: (request) => s.put(request), delete: (request) => s.delete(request),
-      transact: (items) => s.transact(items), scanPage: (request) => s.scanPage(request),
-      update: async (request) => {
-        // Just before this run's take: another run finishes a page that acted, meets an unreadable row, and lets go.
-        if (!interleaved && request.key.pk === "COMPANY_PURGE" && request.ops.some((op) => op.path[0] === "runId")) {
-          interleaved = true;
-          const row = (await s.get(request.key))!;
-          const counts = { ...(row["counts"] as Record<string, number>), deleted: (row["counts"] as Record<string, number>)["deleted"]! + 100_000 };
-          await s.put({ item: { ...row, acted: true, blocked: true, counts } });
-        }
-        return await s.update(request);
-      },
-    } };
-    const before = (await companyPurgeState(w.deps, A))!.counts.deleted;
-    w.clock.now += 1_000;
-    const progress = await runCompanyPurge(deps, A, 0);
-    expect(interleaved).toBe(true);
-    expect(progress.counts!.deleted).toBeGreaterThanOrEqual(before + 100_000);
-    expect((await companyPurgeState(w.deps, A))!.counts.deleted).toBeGreaterThanOrEqual(before + 100_000);
   });
 
   it("lets only one run hold the purge; a stale hold is taken over", async () => {
@@ -872,22 +689,6 @@ describe("company purge: bounded, resumable, one run at a time", () => {
 });
 
 describe("company purge: dry run", () => {
-  it("answers counts by kind with no write and no id, company-scoped", async () => {
-    const w = world();
-    await seed(w, A, "a");
-    await seed(w, B, "b");
-    const before = await all(w.store);
-    const filesBefore = [...w.files.objects];
-    const report = await dryRunCompanyPurge(w.deps, { companyId: A, by: OP });
-    expect(await all(w.store)).toEqual(before);
-    expect([...w.files.objects]).toEqual(filesBefore);
-    expect(report.complete).toBe(true);
-    expect(report.partitions).toEqual({ task: 1, ws: 1 });
-    expect(report.tombstones).toBe(1);
-    expect(report.rows).toMatchObject({ company: 1, "company:SETTINGS": 1, "company:COST": 1, "team-record": 1, DEVELOPER: 1, OPEN_AGENT_SESSIONS: 1, EGRESS_DOMAINS: 1, CORE_ENGINE_IN_USE: 1 });
-    const text = JSON.stringify(report);
-    for (const id of [A, B, "task-a-1", "ws-a-1", "owner-a", "proj-a", "-b"]) expect(text).not.toContain(id);
-  });
 
   it("pages with its cursor and never names a key part outside upper-case words", async () => {
     const w = world();

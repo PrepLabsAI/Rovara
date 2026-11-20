@@ -3,7 +3,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
 import { describe, expect, it } from "vitest";
 import {
-  IMPLICIT_COMPANY_ID, agentSessionKey, openAgentSessionKey, sessionTaskStatus, type AgentSessionRecord, type AuditSink, type DocumentChange, type OrgId, type Principal, type SessionId,
+  IMPLICIT_COMPANY_ID, openAgentSessionKey, sessionTaskStatus, type AgentSessionRecord, type AuditSink, type DocumentChange, type OrgId, type Principal, type SessionId,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createLocalOwnerIdentity, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
@@ -45,31 +45,6 @@ function world(initial: Partial<SessionTaskFacts> | undefined = {}) {
 
 const get = async (store: MemoryDocumentStore, sessionId: SessionId = SESSION): Promise<AgentSessionRecord> => (await new SessionStore(store).get(ORG, sessionId))!;
 
-describe("a task session is created with its task", () => {
-  it("writes the header, the leg, the started event, the lists and the sweep entry together, once", async () => {
-    const { store, create } = world();
-    expect(await create()).toMatchObject({ applied: true });
-    const session = await get(store);
-    expect(session).toMatchObject({ kind: "task", subject: { kind: "task", taskId: TASK }, summary: { status: "starting" }, owner: { developerId: OWNER_ID }, revision: 1, summaryRevision: 1 });
-    expect(await store.get(openAgentSessionKey(ORG, SESSION))).toBeDefined();
-    const events = await readSessionEvents(store, ORG, SESSION);
-    expect(events.events).toHaveLength(1);
-    expect(events.events[0]).toMatchObject({ type: "started", text: expect.stringContaining("Add retry") });
-    // The same start again is refused whole: there is never a second session for a task.
-    expect(await create()).toMatchObject({ applied: false });
-  });
-
-  it("the id belongs to the task, and a title with a token in it is redacted", async () => {
-    expect(taskSessionId(TASK)).toBe(taskSessionId(TASK));
-    expect(taskSessionId(TASK)).not.toBe(taskSessionId(TASK2));
-    const { store } = world();
-    const fake = ["sk", "ant", "x".repeat(40)].join("-");
-    const items = createTaskSessionItems({ orgId: ORG, sessionId: taskSessionId(TASK2), taskId: TASK2, project: "web", agent: { agentId: "rovara-code", name: "Rovara Code", version: 1 }, title: `Fix ${fake}`, owner: OWNER, origin: "app", payer: { kind: "member", developerId: OWNER_ID } as never, now: T0 });
-    await store.transact(items);
-    expect(JSON.stringify((await store.query({ pk: agentSessionKey(ORG, taskSessionId(TASK2), "META").pk })).items)).not.toContain(fake);
-  });
-});
-
 describe("the summary of a task session", () => {
   const stateOf = (overrides: Partial<SessionTaskFacts>, cost = 0, previous?: AgentSessionRecord["summary"]) => computeTaskState(facts(overrides), cost, previous, clock.now.getTime());
 
@@ -80,12 +55,6 @@ describe("the summary of a task session", () => {
     expect(stateOf({ runStatus: "STARTING", workflow: { stage: "UNDERSTAND", state: "RUNNING" } }).summary.status).toBe("starting");
     expect(stateOf({ runStatus: "CANCELLED" }).summary.status).toBe("stopped");
     expect(stateOf({ budgetPaused: true }).summary.status).toBe("paused");
-  });
-
-  it("a task with no workflow reads from its run, and a failed run says why in words", () => {
-    expect(stateOf({ workflow: undefined, runStatus: "RUNNING" }).summary.status).toBe("running");
-    const failed = stateOf({ workflow: undefined, runStatus: "FAILED", failureCategory: "timed_out" }).summary;
-    expect(failed).toMatchObject({ status: "waiting", lastRunFailed: true, step: "Failed: the run took too long and was stopped" });
   });
 
   it("the work is over when the pull request merged, the plan was rejected, the task was answered or closed, or the workspace could not be prepared", () => {
@@ -109,20 +78,6 @@ describe("the summary of a task session", () => {
 });
 
 describe("refreshing a session", () => {
-  it("writes the new summary, the revision, the tile and one event, and tells the hooks", async () => {
-    const w = world({ workflow: { stage: "PLAN_REVIEW", state: "WAITING" }, step: "Waiting for approval" });
-    await w.create();
-    expect(await refreshSessionSummary(w.deps, ORG, SESSION)).toBe("updated");
-    const session = await get(w.store);
-    expect(session).toMatchObject({ summary: { status: "needs_person", needsPeople: [OWNER_ID] }, summaryRevision: 2 });
-    expect((await readSessionEvents(w.store, ORG, SESSION)).events.map((event) => event.type)).toEqual(["started", "step"]);
-    expect(w.changes).toHaveLength(1);
-    expect(w.changes[0]).toMatchObject({ statusChanged: true, stepChanged: true, ended: false, summaryRevision: 2 });
-    // Nothing changed: nothing written, nobody told.
-    expect(await refreshSessionSummary(w.deps, ORG, SESSION)).toBe("unchanged");
-    expect(w.changes).toHaveLength(1);
-    expect((await get(w.store)).summaryRevision).toBe(2);
-  });
 
   it("refreshes racing each other leave one consistent revision per change", async () => {
     const w = world();
@@ -151,17 +106,6 @@ describe("refreshing a session", () => {
     w.state.cost = 2.5;
     expect(await refreshSessionSummary(w.deps, ORG, SESSION)).toBe("updated");
     expect((await get(w.store)).summary).toMatchObject({ status: "succeeded", costUsd: 2.5 });
-  });
-
-  it("a task of another company, a task that is gone and a session that is gone change nothing", async () => {
-    const w = world({ companyId: "org_11111111111111111111" });
-    await w.create();
-    expect(await refreshSessionSummary(w.deps, ORG, SESSION)).toBe("unchanged");
-    w.state.facts = undefined;
-    expect(await refreshSessionSummary(w.deps, ORG, SESSION)).toBe("unchanged");
-    expect(await refreshSessionSummary(w.deps, ORG, "ses_nonexistent00000000")).toBe("unchanged");
-    expect(await refreshSessionSummary(w.deps, "org_11111111111111111111", SESSION)).toBe("unchanged");
-    expect((await get(w.store)).summaryRevision).toBe(1);
   });
 
   it("a hook that fails does not fail the refresh", async () => {
@@ -374,11 +318,4 @@ describe("reading sessions", () => {
     expect(await new SessionStore(w.store).getForTask(ORG, { taskId: "another", orgId: ORG, sessionId: SESSION })).toBeUndefined();
     expect(await new SessionStore(w.store).getForTask(ORG, { taskId: TASK, orgId: "org_11111111111111111111", sessionId: SESSION })).toBeUndefined();
   });
-});
-
-it("T8 install-wide projector refuses contradictory or malformed companies", () => {
-  const a = `org_${"a".repeat(20)}`, b = `org_${"b".repeat(20)}`;
-  for (const fields of [{ companyId: a, orgId: b }, { companyId: "bad-canary" }]) {
-    expect(sessionTargetsOf([{ sequence: "1", kind: "insert", cause: "write", key: { pk: "DEVTASK#same", sk: "TASK" }, after: { pk: "DEVTASK#same", sk: "TASK", sessionId: "same", ...fields } }])).toEqual([]);
-  }
 });

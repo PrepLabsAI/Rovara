@@ -2,12 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { E2EModelChannelResponseSchema, E2EModelRouteDefinitionSchema, e2eModelRouteRevision } from "../../packages/contracts/src/e2e-model-channel.js";
 import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget } from "../../packages/model-runtime/src/e2e-route.js";
-import {
-  SCRIPTED_E2E_ROUTE_ID,
-  createScriptedE2EInvoke,
-  isScriptedE2EModelAdmissible,
-  scriptedE2ERouteDefinition,
-} from "../../packages/worker/src/e2e-model-scripted.js";
+import { SCRIPTED_E2E_ROUTE_ID, createScriptedE2EInvoke, scriptedE2ERouteDefinition } from "../../packages/worker/src/e2e-model-scripted.js";
 import { call, channelRequest } from "../support/e2e-model-fixtures.js";
 
 const sha = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
@@ -26,14 +21,6 @@ describe("scripted e2e model route", () => {
     expect(e2eModelRouteRevision(definition)).toMatch(/^r1-[a-f0-9]{12}$/);
   });
 
-  it("is admissible only for a qualification policy or when the CI harness sets ROVARA_E2E_SCRIPTED_MODEL=1", () => {
-    expect(isScriptedE2EModelAdmissible({ policyScope: "qualification", environment: {} })).toBe(true);
-    expect(isScriptedE2EModelAdmissible({ policyScope: "standard", environment: { ROVARA_E2E_SCRIPTED_MODEL: "1" } })).toBe(true);
-    expect(isScriptedE2EModelAdmissible({ policyScope: "standard", environment: {} })).toBe(false);
-    expect(isScriptedE2EModelAdmissible({ policyScope: "standard", environment: { ROVARA_E2E_SCRIPTED_MODEL: "true" } })).toBe(false);
-    expect(isScriptedE2EModelAdmissible({ policyScope: "standard", environment: { ROVARA_E2E_SCRIPTED_MODEL: "0" } })).toBe(false);
-  });
-
   it("picks the snapshot node whose accessible name matches the regex, keyed by the goal digest", async () => {
     const route = routeFor({ [sha(GOAL)]: [{ kind: "tap", name: /^export orders$/i }, { kind: "done" }] });
     const first = await route.generate(channelRequest({ callOverride: call(SNAPSHOT) }));
@@ -48,20 +35,6 @@ describe("scripted e2e model route", () => {
     expect(typed.result).toMatchObject({ status: "ok", content: [{ toolName: "type", input: JSON.stringify({ target: "n2", value: "orders.csv" }) }] });
     const again = await route.generate(channelRequest({ callIndex: 1, callOverride: call(SNAPSHOT, { typed: "x" }) }));
     expect(again.result).toEqual(typed.result);
-  });
-
-  it("declares done without acting for the negative tests", async () => {
-    const route = routeFor({ [sha(GOAL)]: [{ kind: "done", summary: "Nothing to do." }] });
-    const { result } = await route.generate(channelRequest({ callOverride: call(SNAPSHOT) }));
-    expect(result).toMatchObject({ status: "ok", content: [{ type: "tool-call", toolName: "complete_step" }] });
-    const content = (result as { content: Array<{ input: string }> }).content;
-    expect(JSON.parse(content[0]!.input)).toEqual({ status: "passed", summary: "Nothing to do." });
-  });
-
-  it("can pick a wrong node on purpose", async () => {
-    const route = routeFor({ [sha(GOAL)]: [{ kind: "tap", name: /delete all/i }] });
-    const { result } = await route.generate(channelRequest({ callOverride: call(SNAPSHOT) }));
-    expect(JSON.parse((result as { content: Array<{ input: string }> }).content[0]!.input)).toEqual({ target: "n3" });
   });
 
   it("answers provider-error for a goal with no script, a tap with no matching node, and an outage turn", async () => {

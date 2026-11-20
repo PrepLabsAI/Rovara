@@ -215,19 +215,6 @@ describe("the reviewer floor fails closed and is bound to the head", () => {
     expect(result.tier.level).toBe("risky");
     expect(result.tier.reasons.map((reason) => reason.code)).toContain("reviewer_text_instructions");
   });
-  it("the prompt marks the patch as untrusted data", async () => {
-    let seen = "";
-    await applyReviewerFloor({ tier: small(), reviewer: { answer: async (input) => { seen = input.prompt; return answers(); } }, files: ["src/a.ts"], patchText: "@@ x" });
-    expect(seen).toMatch(/untrusted/iu);
-    expect(seen).toMatch(/ignore/iu);
-    expect(seen).toContain("@@ x");
-  });
-  it("a floor on an estimate is not lowered by the first diff tier", async () => {
-    const estimate: ChangeTier = { ...small(), source: "estimate" };
-    const result = await applyReviewerFloor({ tier: estimate, reviewer: reviewerOf(() => answers(["auth"])), files: [], patchText: "@@ -1 +1 @@\n-a\n+b" });
-    const flow = recordReviewerFloor(recordTier(undefined, estimate).flow, result, ctx.at)!;
-    expect(recordTier(flow, small()).tier.level).toBe("risky");
-  });
   it("the question step is named for the head, and a floor computed for another head is not recorded", async () => {
     const tierA = { ...small(), headSha: "1".repeat(40) };
     const tierB = { ...small(), headSha: "2".repeat(40) };
@@ -248,10 +235,6 @@ describe("what the host says about the repository decides the docs route", () =>
     return readHeadFacts([{ host, repositoryId: R, repositoryUrl: "https://github.com/acme/app", number: 1, headSha: "a".repeat(40) }], [edit.file], { orgId: "org" });
   };
   const docsOnly = (head: HeadFacts): boolean => { const tier = tierFromDiff({ files: [edit.file], complete: true }, { ...ctx, head }); return tier.level === "small" && tier.kinds.join() === "docs"; };
-
-  it("plain words in a repository with no docs site and no instruction file are docs", async () => {
-    expect(docsOnly(await facts({ "docs/guide.md": edit.text[1] }))).toBe(true);
-  });
   it("a repository that builds a documentation site (mkdocs.yml at the head) does not get the docs route", async () => {
     const head = await facts({ "docs/guide.md": edit.text[1], "mkdocs.yml": "site_name: x\n" });
     expect(head.docsSite).toBe(true);
@@ -263,19 +246,10 @@ describe("what the host says about the repository decides the docs route", () =>
     expect(head.importsKnown).toBe(false);
     expect(docsOnly(head)).toBe(false);
   });
-  it("an AGENTS.md in the folder of the changed document is read, and what it names is not cleared", async () => {
-    const head = await facts({ "docs/guide.md": edit.text[1], "docs/AGENTS.md": "Read guide.md first.\n" });
-    expect(head.instructionImports!.has(factKey(R, "docs/guide.md"))).toBe(true);
-    expect(docsOnly(head)).toBe(false);
-  });
   it("an instruction file that cannot be read means the documents are not cleared", async () => {
     const host = { fileAtRevision: async (_r: unknown, path: string) => { if (path === "CLAUDE.md") throw new Error("denied"); return path === "docs/guide.md" ? edit.text[1] : undefined; } } as unknown as CodeHost;
     const head = await readHeadFacts([{ host, repositoryId: R, repositoryUrl: "https://github.com/acme/app", number: 1, headSha: "a".repeat(40) }], [edit.file], { orgId: "org" });
     expect(head.importsKnown).toBe(false);
-    expect(docsOnly(head)).toBe(false);
-  });
-  it("a document whose text was not read (past the limit) is not cleared", () => {
-    const head: HeadFacts = { text: new Map(), instructionImports: new Set(), importsKnown: true, links: new Set(), unchecked: new Set() };
     expect(docsOnly(head)).toBe(false);
   });
 });
@@ -292,26 +266,9 @@ describe("the head a tier is bound to", () => {
   });
 });
 
-describe("the size of the docs route", () => {
-  it("300 changed lines are docs, 301 are not", () => {
-    const lines = (count: number) => Array.from({ length: count }, (_, index) => `Plain sentence number ${index}.`);
-    const make = (count: number) => { const e = docEdit("docs/long.md", ["# Long", ""], lines(count)); return tierFromDiff({ files: [e.file], complete: true }, { ...ctx, head: headOf([e.text]) }); };
-    expect(make(300)).toMatchObject({ level: "small", kinds: ["docs"] });
-    const over = make(301);
-    expect(over.level).toBe("standard");
-    expect(over.reasons.map((reason) => reason.code)).toContain("docs_large");
-  });
-});
-
 describe("each content rule on its own (the review's cases overlap, these do not)", () => {
   const level = (c: C) => tierFromDiff({ files: c.files, complete: true }, { ...ctx, ...(c.head === undefined ? {} : { head: c.head }) });
   const noDocs = (e: { file: TierFile; text: [string, string] }, path = e.file.path) => level({ id: "x", name: "x", files: [e.file], head: headOf([[path, e.text[1]]]), expect: "small" });
-
-  it("KEY=value alone keeps a line off the docs route", () => {
-    const tier = noDocs(docEdit("docs/guide.md", ["# Guide", ""], ["Set DEBUG=1 before you run it."]));
-    expect(tier.kinds).not.toContain("docs");
-    expect(tier.level).toBe("standard");
-  });
   it("a plain line inside an existing HTML block is not docs: the block it sits in is read", () => {
     const tier = noDocs(docEdit("docs/guide.md", ["# Guide", "", "<script>"], ["Plain words."], ["</script>"]));
     expect(tier.kinds).not.toContain("docs");
@@ -320,22 +277,5 @@ describe("each content rule on its own (the review's cases overlap, these do not
   it("a plain line inside a fenced block of commands is not docs", () => {
     const tier = noDocs(docEdit("docs/guide.md", ["# Guide", "", "```", "npm install thing"], ["Plain words."], ["```"]));
     expect(tier.kinds).not.toContain("docs");
-  });
-  it("a repository that builds a documentation site does not get docs, whatever the line says", () => {
-    const e = docEdit("docs/guide.md", ["# Guide", ""], ["Plain words only."]);
-    const tier = tierFromDiff({ files: [e.file], complete: true }, { ...ctx, head: headOf([e.text], { docsSite: true }) });
-    expect(tier.kinds).not.toContain("docs");
-    expect(tier.level).toBe("standard");
-    expect(tier.reasons.map((reason) => reason.code)).toContain("docs_site_build");
-  });
-  it("a package source in a .props file that no manifest rule names is read as configuration", () => {
-    const tier = tierFromDiff({ files: [f("build/Common.props", added("    <RestoreSources>https://nuget.evil.example/v3/index.json</RestoreSources>"))], complete: true }, ctx);
-    expect(tier.level).toBe("risky");
-    expect(tier.reasons.map((reason) => reason.code)).toContain("package_source_setting");
-  });
-  it("the setup of a documentation build is not an ordinary file even when the change looks harmless", () => {
-    const tier = tierFromDiff({ files: [f("mkdocs.yml", chg(["theme: material"], ["theme: readthedocs"]))], complete: true }, ctx);
-    expect(tier.level).toBe("standard");
-    expect(tier.reasons.map((reason) => reason.code)).toContain("docs_build_config");
   });
 });

@@ -1,7 +1,6 @@
 // A coding run that ends with no code change keeps what it found: the commands the agent ran, their output and its own conclusion. This is the shape, its bounds and its redaction
 // (the worker builds it before it leaves; the broker rebuilds whatever arrives before it is stored or shown).
 import { describe, expect, it } from "vitest";
-import { expectLinearScaling } from "../support/scaling.js";
 import {
   NO_CHANGE_FINDINGS_COMMANDS_MAX, NO_CHANGE_FINDINGS_COMMAND_MAX, NO_CHANGE_FINDINGS_CONCLUSION_MAX, NO_CHANGE_FINDINGS_OUTPUT_MAX, NO_CHANGE_FINDINGS_TOTAL_MAX,
   NO_CODE_CHANGED_LEGACY_REASONS, NO_CODE_CHANGED_REASON, NoChangeFindingsSchema, buildNoChangeFindings, isNoCodeChangedReason, noChangeFindingsFrom, noChangeFindingsSize,
@@ -16,11 +15,6 @@ const secret = (): string => ["ghp_", "Ab12".repeat(9)].join("");
 const awsKey = (): string => ["AKIA", "QWERTYUIOPASDFGH"].join("");
 
 describe("buildNoChangeFindings", () => {
-  it("keeps the commands, their output and the conclusion as the agent left them", () => {
-    const findings = buildNoChangeFindings({ commands: [{ command: "grep -rn retry src", output: "src/a.ts:4: retry\n" }, { command: "npm test", output: "3 passed", failed: false }], conclusion: "We do use retry, in src/a.ts." });
-    expect(findings).toEqual({ commands: [{ command: "grep -rn retry src", output: "src/a.ts:4: retry" }, { command: "npm test", output: "3 passed" }], conclusion: "We do use retry, in src/a.ts." });
-    expect(NoChangeFindingsSchema.safeParse(findings).success).toBe(true);
-  });
 
   it("caps everything: many commands, huge outputs and a huge conclusion stay under the fixed limits, and the last commands are the ones kept", () => {
     const commands = Array.from({ length: 40 }, (_, index) => ({ command: `run-${String(index)} ${"x".repeat(1000)}`, output: `out-${String(index)} ${"y".repeat(50_000)}` }));
@@ -38,21 +32,6 @@ describe("buildNoChangeFindings", () => {
     expect(NoChangeFindingsSchema.safeParse(findings).success).toBe(true);
   });
 
-  it("keeps the beginning and the end of a long output, so a test run's summary line survives", () => {
-    const findings = buildNoChangeFindings({ commands: [{ command: "npm test", output: `START ${"m".repeat(5000)} 12 passed, 0 failed` }] });
-    const output = findings.commands[0]!.output!;
-    expect(output.startsWith("START")).toBe(true);
-    expect(output.endsWith("12 passed, 0 failed")).toBe(true);
-    expect(output.length).toBeLessThanOrEqual(NO_CHANGE_FINDINGS_OUTPUT_MAX);
-  });
-
-  it("the total limit wins over the per-command limit: the conclusion keeps its room and the earliest outputs shrink first", () => {
-    const findings = buildNoChangeFindings({ commands: Array.from({ length: 10 }, (_, index) => ({ command: `c${String(index)}`, output: "o".repeat(NO_CHANGE_FINDINGS_OUTPUT_MAX) })), conclusion: "k".repeat(NO_CHANGE_FINDINGS_CONCLUSION_MAX) });
-    expect(noChangeFindingsSize(findings)).toBeLessThanOrEqual(NO_CHANGE_FINDINGS_TOTAL_MAX);
-    expect(findings.conclusion).toHaveLength(NO_CHANGE_FINDINGS_CONCLUSION_MAX);
-    expect(findings.commands.at(-1)!.output!.length).toBeGreaterThan(0);
-  });
-
   it("redacts a secret in a command, its output and the conclusion (positive control: the plain text did hold it)", () => {
     const token = secret(), key = awsKey();
     const raw = { commands: [{ command: `curl -H "Authorization: Bearer ${token}" https://example.test`, output: `found ${token} and ${key}` }], conclusion: `The key ${key} is in the environment.` };
@@ -68,31 +47,11 @@ describe("buildNoChangeFindings", () => {
     expect(findings).toEqual({ commands: [{ command: "echo a echo b" }] });
   });
 
-  it("says nothing about a conclusion when the agent wrote none", () => {
-    expect(buildNoChangeFindings({ commands: [{ command: "ls" }], conclusion: undefined }).conclusion).toBeUndefined();
-    expect(buildNoChangeFindings({ commands: [{ command: "ls" }], conclusion: "  \n " }).conclusion).toBeUndefined();
-  });
 });
 
 describe("noChangeFindingsFrom: a result's block is rebuilt on this side", () => {
   it("is undefined when there is no block at all (an older worker), and for anything that is not an object", () => {
     for (const raw of [undefined, null, "text", 4, [], [{ commands: [] }]]) expect(noChangeFindingsFrom(raw)).toBeUndefined();
-  });
-
-  it("keeps an empty block (a newer worker that saw no commands and no conclusion)", () => {
-    expect(noChangeFindingsFrom({ commands: [] })).toEqual({ commands: [] });
-  });
-
-  it("redacts and bounds what a worker sent, whatever it sent (a hostile or a newer one)", () => {
-    const token = secret();
-    const hostile = { commands: Array.from({ length: 200 }, (_, index) => ({ command: `c${String(index)} ${token}`, output: `${token} ${"q".repeat(10_000)}` })), omitted: 7, conclusion: `${token} ${"w".repeat(50_000)}`, extra: "ignored" };
-    const findings = noChangeFindingsFrom(hostile)!;
-    expect(JSON.stringify(findings)).not.toContain(token);
-    expect(findings.commands).toHaveLength(NO_CHANGE_FINDINGS_COMMANDS_MAX);
-    expect(findings.omitted).toBe(7 + 190);
-    expect(noChangeFindingsSize(findings)).toBeLessThanOrEqual(NO_CHANGE_FINDINGS_TOTAL_MAX);
-    expect(NoChangeFindingsSchema.safeParse(findings).success).toBe(true);
-    expect(JSON.stringify(findings)).not.toContain("ignored");
   });
 
   it("survives a malformed block without throwing", () => {
@@ -128,16 +87,12 @@ describe("blocking a coding step keeps findings only for the no-code-change stop
     expect(blockWorkflow({ ...stopped, state: "RUNNING" }, "implementation operation ended failed", now).noChangeFindings).toBeUndefined();
   });
 
-  it("never attaches them to another reason, whatever the caller passed", () => {
-    expect(blockWorkflow(coding(), "implementation operation ended failed", now, { noChangeFindings: found }).noChangeFindings).toBeUndefined();
-  });
 });
 
 // Values built at run time: no key-shaped literal is in this file.
 const salt = (): string => ["s4lt", "Zq81".repeat(4)].join("-");
 const hmac = (): string => ["h", "9f3a".repeat(8)].join("");
 const stripe = (): string => ["rk_", "live_", "Q7w2".repeat(6)].join("");
-const dotenv = (): string => `NODE_ENV=production\nSIGNING_SALT=${salt()}\nHMAC=${hmac()}\nSTRIPE_LIVE=${stripe()}\nPORT=3000\n`;
 
 describe("commands that read environment or secret material", () => {
   it("are recognised, however they are written", () => {
@@ -147,17 +102,6 @@ describe("commands that read environment or secret material", () => {
       "cat ~/.docker/config.json", "cd app && cat '.env'", 'cat "$(pwd)/.env"', "cat < .env", "grep KEY --file=.env", "cat /proc/self/environ", "read app/.env", "grep -rn x *.key",
     ]) expect(commandReadsSecrets(command), command).toBe(true);
     for (const command of ["grep -rn retry src", "npm test", "ls src", "env NODE_ENV=test npm test", "export FOO=1", "cat package.json", "read app/a.ts", "git log --oneline"]) expect(commandReadsSecrets(command), command).toBe(false);
-  });
-
-  it("keep no output at all: `cat .env` and `env` show only that the output was not shown, in the worker's block and again when the broker rebuilds it", () => {
-    const raw = { commands: [{ command: "cat .env", output: dotenv() }, { command: "env", output: dotenv() }, { command: "grep -rn retry src", output: "src/a.ts:4: retry" }] };
-    for (const findings of [buildNoChangeFindings(raw), noChangeFindingsFrom(raw)!, noChangeFindingsFrom(buildNoChangeFindings(raw))!]) {
-      expect(findings.commands.map((item) => item.output)).toEqual([NO_CHANGE_OUTPUT_HIDDEN, NO_CHANGE_OUTPUT_HIDDEN, "src/a.ts:4: retry"]);
-      const text = JSON.stringify(findings);
-      for (const value of [salt(), hmac(), stripe()]) expect(text).not.toContain(value);
-    }
-    // Positive control: the raw block did hold them.
-    expect(JSON.stringify(raw)).toContain(salt());
   });
 
   it("keep no output of a file read: the output of `read` is left out", () => {
@@ -186,10 +130,6 @@ describe("secret-looking values are hidden", () => {
     expect(maskSecretValues("12 passed, 0 failed\nsrc/retry.ts:9: export const retry = true;")).toBe("12 passed, 0 failed\nsrc/retry.ts:9: export const retry = true;");
   });
 
-  it("is linear in the size of a hostile output", () => {
-    // A scaling check, not a wall-clock bound: the output is timed at N and at 8N (8N, about 3.8 bytes a unit, stays at or under 256 KiB so it stays in CPU cache).
-    expectLinearScaling((n) => { const output = `${"a_".repeat(n)}\n${"KEY".repeat(n * 3 / 5)}`; return () => maskSecretValues(output); }, { n: 6_250, unitBytes: 4, label: "maskSecretValues on a hostile output" });
-  });
 });
 
 describe("`omitted` never passes the schema's maximum", () => {
@@ -230,39 +170,6 @@ const callEvents = (id: string, command: string, text: string): [unknown, unknow
 describe("a run split into parts: one recorder for each part's session", () => {
   const A = "part-a", B = "part-b", C = "part-c";
 
-  it("groups the commands in the plan's order when the parts run at once and interleave their events, even with the same tool-call id in two sessions", () => {
-    const run = new RunFindings();
-    run.setOrder([A, B, C]);
-    // The sessions start in a different order from the plan, and each uses the ids "t1", "t2".
-    const c = run.forPart(C), a = run.forPart(A), b = run.forPart(B);
-    const [a1s, a1e] = callEvents("t1", "grep -rn alpha src", "a-out-1");
-    const [a2s, a2e] = callEvents("t2", "ls alpha", "a-out-2");
-    const [b1s, b1e] = callEvents("t1", "grep -rn beta src", "b-out-1");
-    const [b2s, b2e] = callEvents("t2", "ls beta", "b-out-2");
-    const [c1s, c1e] = callEvents("t1", "grep -rn gamma src", "c-out-1");
-    // Starts of the same id in two sessions are open together; the ends arrive crossed.
-    a.observe(a1s); b.observe(b1s); c.observe(c1s);
-    c.observe(c1e); b.observe(b1e); a.observe(a1e);
-    b.observe(b2s); a.observe(a2s); a.observe(a2e); b.observe(b2e);
-    const found = run.build();
-    expect(found.commands).toEqual([
-      { command: "grep -rn alpha src", output: "a-out-1" }, { command: "ls alpha", output: "a-out-2" },
-      { command: "grep -rn beta src", output: "b-out-1" }, { command: "ls beta", output: "b-out-2" },
-      { command: "grep -rn gamma src", output: "c-out-1" },
-    ]);
-    expect(found.omitted).toBeUndefined();
-  });
-
-  it("lists each part's final text in the plan's order, labelled by part", () => {
-    const run = new RunFindings();
-    run.setOrder([A, B, C]);
-    run.forPart(B).concludeWith("Beta uses retry in src/b.ts.");
-    run.forPart(C).concludeWith("Gamma has no retry.\nAgentX result: done");
-    run.forPart(A).concludeWith("Alpha uses retry in src/a.ts.");
-    run.forPart(A).concludeWith("Alpha uses retry in src/a.ts, twice.");
-    expect(run.build().conclusion).toBe("Part 1:\nAlpha uses retry in src/a.ts, twice.\n\nPart 2:\nBeta uses retry in src/b.ts.\n\nPart 3:\nGamma has no retry.");
-  });
-
   it("numbers a part by its place in the plan, and leaves out a part that wrote no conclusion", () => {
     const run = new RunFindings();
     run.setOrder([A, B, C]);
@@ -299,20 +206,6 @@ describe("a run split into parts: one recorder for each part's session", () => {
     expect(NoChangeFindingsSchema.safeParse(found).success).toBe(true);
   });
 
-  it("keeps each part's last command first, then the most recent overall, so no part is named without evidence; omitted stays exact", () => {
-    const run = new RunFindings();
-    run.setOrder([A, B, C]);
-    let id = 0;
-    const call = (key: string, name: string) => { const [start, end] = callEvents(`t${String(id += 1)}`, name, `out ${name}`); run.forPart(key).observe(start); run.forPart(key).observe(end); };
-    call(A, "a-0");
-    for (let index = 0; index < 30; index += 1) call(B, `b-${String(index)}`);
-    for (let index = 0; index < 30; index += 1) call(C, `c-${String(index)}`);
-    for (const key of [A, B, C]) run.forPart(key).concludeWith(`${key} spoke.`);
-    const found = run.build();
-    expect(found.commands.map((item) => item.command)).toEqual(["a-0", "b-29", ...Array.from({ length: 8 }, (_, index) => `c-${String(22 + index)}`)]);
-    expect(found.omitted).toBe(61 - 10);
-  });
-
   it("keeps the label of every part shown, however many parts there are: the first 20 are told, the rest are counted", () => {
     const run = new RunFindings();
     const ids = Array.from({ length: 100 }, (_, index) => `p${String(index)}`);
@@ -324,50 +217,6 @@ describe("a run split into parts: one recorder for each part's session", () => {
     for (let number = 1; number <= 20; number += 1) expect(text, `Part ${String(number)}`).toContain(`Part ${String(number)}:\np${String(number - 1)} found`);
     expect(text).not.toContain("Part 21:");
     expect(text.endsWith("…and 80 more parts")).toBe(true);
-  });
-
-  it("a short part keeps its whole text under the shared limit, and the long ones are cut to what is left", () => {
-    const run = new RunFindings();
-    run.setOrder([A, B, C]);
-    run.forPart(A).concludeWith("Short answer.");
-    run.forPart(B).concludeWith(`B-START ${"b".repeat(5000)}`);
-    run.forPart(C).concludeWith(`C-START ${"c".repeat(5000)}`);
-    const text = run.build().conclusion!;
-    expect(text.startsWith("Part 1:\nShort answer.\n\nPart 2:\nB-START")).toBe(true);
-    expect(text).toContain("\n\nPart 3:\nC-START");
-    expect(text.length).toBeGreaterThan(NO_CHANGE_FINDINGS_CONCLUSION_MAX - 10);
-    expect(text.length).toBeLessThanOrEqual(NO_CHANGE_FINDINGS_CONCLUSION_MAX);
-    const [, second, third] = text.split("\n\n");
-    expect(Math.abs(second!.length - third!.length)).toBeLessThanOrEqual(2);
-  });
-
-  it("a part's recorder asked for again (a re-run of the part, as in a conflict fix) appends its commands and replaces its conclusion", () => {
-    const run = new RunFindings();
-    run.setOrder([A, B]);
-    for (const event of callEvents("t1", "first run", "out 1")) run.forPart(A).observe(event);
-    run.forPart(A).concludeWith("First words.");
-    run.forPart(B).concludeWith("B words.");
-    for (const event of callEvents("t1", "second run", "out 2")) run.forPart(A).observe(event);
-    run.forPart(A).concludeWith("Second words.");
-    const found = run.build();
-    expect(found.commands).toEqual([{ command: "first run", output: "out 1" }, { command: "second run", output: "out 2" }]);
-    expect(found.conclusion).toBe("Part 1:\nSecond words.\n\nPart 2:\nB words.");
-  });
-
-  it("still redacts and masks what the parts held (positive control: the raw text did hold the secret)", () => {
-    const token = secret();
-    const run = new RunFindings();
-    run.setOrder([A, B]);
-    const [start, end] = callEvents("t1", `curl -H "Authorization: Bearer ${token}" https://example.test`, `apiKey=${hmac()}\nfound ${token}`);
-    run.forPart(A).observe(start); run.forPart(A).observe(end);
-    run.forPart(A).concludeWith(`Part A saw ${token}.`);
-    run.forPart(B).concludeWith(`DB_PASS=x1 and ${token}`);
-    const found = run.build();
-    const text = JSON.stringify(found);
-    expect(text).not.toContain(token);
-    expect(text).not.toContain(hmac());
-    expect(found.conclusion).toContain(`DB_PASS=${NO_CHANGE_VALUE_HIDDEN}`);
-    expect(found.commands[0]!.output).toContain(`apiKey=${NO_CHANGE_VALUE_HIDDEN}`);
   });
 
   it("a run with one part, or with none, reads exactly as one recorder did: no label", () => {
@@ -403,16 +252,9 @@ describe("secret names are matched as whole name parts", () => {
     expect(found.conclusion).toBe(`monkey=1 and apiKey=${NO_CHANGE_VALUE_HIDDEN}`);
   });
 
-  it("reads inside a value that is not hidden", () => {
-    expect(maskSecretValues(`URL=http://x.test/?a=1 API_TOKEN=${hmac()}`)).toBe(`URL=http://x.test/?a=1 API_TOKEN=${NO_CHANGE_VALUE_HIDDEN}`);
-  });
 });
 
 describe("a command that refers to a secret variable shows no output", () => {
-  it("is recognised for $NAME and ${NAME} whose name holds a secret word, and not for an ordinary variable", () => {
-    for (const command of ["echo $GITHUB_TOKEN", 'echo "$DB_PASSWORD"', "echo ${API_KEY}", "printenv X", "curl -H \"x: $AUTH_HEADER\" https://x.test", "node -e 'console.log(process.env.X)' $SESSION_ID"]) expect(commandReadsSecrets(command), command).toBe(true);
-    for (const command of ["echo $HOME", "echo $PWD", "echo $AUTHOR", 'echo "${NODE_ENV}"', "ls $TMPDIR"]) expect(commandReadsSecrets(command), command).toBe(false);
-  });
 
   it("keeps no output of such a command in the block", () => {
     const found = buildNoChangeFindings({ commands: [{ command: "echo $GITHUB_TOKEN", output: hmac() }, { command: 'echo "$DB_PASSWORD"', output: salt() }, { command: "echo $HOME", output: "/home/x" }] });

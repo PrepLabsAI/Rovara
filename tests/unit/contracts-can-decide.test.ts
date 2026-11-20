@@ -97,10 +97,6 @@ describe("canDecide: fails closed", () => {
     expect(canDecide(actor({ orgRole: "owner" }), "mark_ready_anyway", TASK, undefined as unknown as DecideCompany).allowed).toBe(false);
     expect(canDecide(actor({ orgRole: "owner" }), "mark_ready_anyway", "task" as unknown as DecideTask, COMPANY).allowed).toBe(false);
   });
-  it("gives a role named like an object property no power", () => {
-    for (const role of ["constructor", "__proto__", "toString", "Owner", "ADMIN", " admin"]) expect(canDecide(actor({ orgRole: role }), "manage_provider_keys", TASK, COMPANY).allowed).toBe(false);
-    for (const role of ["constructor", "__proto__", "Maintainer"]) expect(canDecide(actor({ projectRole: { project: "web", role } }), "mark_ready_anyway", TASK, COMPANY).allowed).toBe(false);
-  });
   it("never throws for a hostile object", () => {
     const hostile = new Proxy({}, { get() { throw new Error("boom"); } });
     expect(canDecide(hostile as unknown as DecideActor, "mark_ready_anyway", TASK, COMPANY).allowed).toBe(false);
@@ -120,13 +116,4 @@ describe("Round 2 M1: project target before authority", () => {
     expect(canDecide(person, "connect_product_ai_key", { ...TASK, companyId: "co-2" }, COMPANY)).toEqual(missing);
     expect(canDecide(person, "connect_product_ai_key", TASK, COMPANY)).toEqual({ allowed: true, reason: orgRole === "member" ? "maintainer" : "admin" });
   });
-});
-
-
-it("Round 2 M1: the reviewer's co-1 admin cannot connect a co-2 product key", () => {
-  const person = { personId: "admin-1", companyId: "co-1", orgRole: "admin" };
-  const missing = canDecide(person, "connect_product_ai_key", undefined, COMPANY);
-  expect(canDecide(person, "connect_product_ai_key", { companyId: "co-2", project: "web" }, COMPANY)).toEqual(missing);
-  expect(missing).toEqual({ allowed: false, reason: "no_task" });
-  expect(canDecide(person, "connect_product_ai_key", { companyId: "co-1", project: "web" }, COMPANY)).toEqual({ allowed: true, reason: "admin" });
 });

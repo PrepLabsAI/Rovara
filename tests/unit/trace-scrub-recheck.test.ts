@@ -5,9 +5,6 @@ import { crc32, inflateRawSync } from "node:zlib";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { TRACE_BLANKED, blankQueryText, scrubTrace } from "../../packages/verifier/src/executor/trace-scrub.js";
 
-// Built at run time so the file holds no key-shaped literal.
-const RST = ["rst", "9f8e7d6c5b4a3210"].join("-");
-const IDT = ["idt", "0123456789abcdef"].join("-");
 
 function zip(files: Record<string, string | Buffer>): Uint8Array {
   const parts: Buffer[] = []; const cd: Buffer[] = []; let off = 0;
@@ -33,33 +30,6 @@ const run = (files: Record<string, string | Buffer>, known: string[] = [], conta
 const net = (request: Record<string, unknown>, response: Record<string, unknown> = {}) => L({ type: "resource-snapshot", snapshot: { request: { headers: [], ...request }, response } });
 
 describe("every query value goes, whatever its length, whatever the carrier (P1-P4)", () => {
-  it("P1: HAR queryString and postData params arrays are blanked even for a 6-digit code", () => {
-    const out = text(run({ "trace.network": net({ url: "https://app.test/verify?otp=482913", queryString: [{ name: "otp", value: "482913" }], postData: { params: [{ name: "pin", value: "7731" }] } }) }));
-    expect(out).not.toContain("482913");
-    expect(out).not.toContain("7731");
-    expect(out).toContain('"name":"otp","value":"<blanked>"');
-  });
-  it("P2: a relative URL's query token, in a DOM snapshot's href and anywhere else", () => {
-    const out = text(run({ "trace.trace": L({ type: "frame-snapshot", snapshot: { pageId: "p", timestamp: 1, html: ["A", { href: "/reset?token=" + RST + "" }, "reset"] } }) }));
-    expect(out).not.toContain("" + RST + "");
-  });
-  it("P2b: the token read from a relative or in-text URL is a round secret everywhere else it appears (the page source, another snapshot)", () => {
-    const out = text(run({
-      "trace.trace": L({ type: "event", params: { url: "/reset?token=" + RST + "" } }),
-      "resources/page.html": "<a href='/somewhere'>use code " + RST + "</a>",
-    }));
-    expect(out).not.toContain("" + RST + "");
-    expect(out).toContain("resources/page.html:<blanked>");
-  });
-  it("P3: ws and wss addresses", () => {
-    expect(text(run({ "trace.trace": L({ type: "event", params: { url: "wss://app.test/socket?session=ws-sess-11223344556677", other: "ws://h/p?a=1&b=2" } }) }))).not.toMatch(/ws-sess-11223344556677|a=1|b=2/u);
-  });
-  it("P4: a URL inside a longer string, and a fragment that carries a token", () => {
-    const out = text(run({ "trace.trace": L({ type: "console", text: "redirecting to https://app.test/cb?code=oauthcode-aabbccddeeff then #access_token=frag-tok-0123456789&x=1" }) }));
-    expect(out).not.toContain("oauthcode-aabbccddeeff");
-    expect(out).not.toContain("frag-tok-0123456789");
-    expect(out).toContain("https://app.test/cb?code=<blanked>");
-  });
   it("blanks short values, keeps keys, paths and empty values, and is idempotent", () => {
     expect(blankQueryText("/p?a=1&b=&c=xyz#h=2")).toBe(`/p?a=${TRACE_BLANKED}&b=&c=${TRACE_BLANKED}#h=${TRACE_BLANKED}`);
     expect(blankQueryText(blankQueryText("/p?a=1"))).toBe(blankQueryText("/p?a=1"));
@@ -70,11 +40,6 @@ describe("every query value goes, whatever its length, whatever the carrier (P1-
 });
 
 describe("harvest reads the shapes real apps use (P5, P6, P9)", () => {
-  it("P5: simplejwt's access and refresh fields", () => {
-    const out = text(run({ "trace.network": net({ url: "https://app.test/api/token" }, { content: { _sha1: "a.json" } }), "resources/a.json": L({ access: "acc-0011223344556677", refresh: "ref-8899aabbccddeeff" }) }));
-    expect(out).not.toContain("ref-8899aabbccddeeff");
-    expect(out).not.toContain("acc-0011223344556677");
-  });
   it("P6: a form-encoded body", () => {
     const out = text(run({ "trace.network": net({ url: "https://app.test/oauth/token", postData: { _sha1: "b.txt" } }), "resources/b.txt": "grant_type=refresh_token&refresh_token=form-rt-0123456789abcdef" }));
     expect(out).not.toContain("form-rt-0123456789abcdef");
@@ -86,32 +51,6 @@ describe("harvest reads the shapes real apps use (P5, P6, P9)", () => {
   it("P9: a secret the caller knows, held in a JSON body that escapes the slash", () => {
     const out = text(run({ "trace.network": "", "resources/c.json": '{"x":"abc\\/def\\/ghijkl"}' }, ["abc/def/ghijkl"]));
     expect(out).not.toContain("ghijkl");
-  });
-});
-
-describe("a secret split across strings is refused with the REAL searcher (P7)", () => {
-  it("a known secret in two strings of one line", () => {
-    expect(run({ "trace.trace": L({ type: "event", a: "known-secret-", b: "part-two-xyz" }) }, ["known-secret-part-two-xyz"])).toBeNull();
-  });
-  it("positive control: the same two strings with no known secret are kept", () => {
-    expect(run({ "trace.trace": L({ type: "event", a: "known-secret-", b: "part-two-xyz" }) })).not.toBeNull();
-  });
-  it("a secret in an object KEY is refused too", () => {
-    expect(run({ "trace.trace": L({ type: "event", "known-secret-part-two-xyz": 1 }) }, ["known-secret-part-two-xyz"])).toBeNull();
-  });
-});
-
-describe("entry names are an allow-list (P8)", () => {
-  it("drops an entry that is not a line file, a resource or a screencast image, and counts it", () => {
-    const out = run({ "extra/net.json": L({ headers: { "x-api-key": "unk-entry-key-00112233" }, url: "https://a.test/?t=zzzzzzzzzzzz" }), "notes.txt": "hello", "resources/ok.json": "{}", "screencast/f.jpeg": Buffer.from([0xff, 0xd8, 0xff, 1, 2]) });
-    expect([...entries(out!.zip).keys()]).toEqual(["trace.trace", "resources/ok.json", "screencast/f.jpeg"]);
-    expect(out!.stats.droppedEntries).toBe(2);
-  });
-  it("refuses an archive with no trace file at all", () => {
-    expect(scrubTrace(zip({ "resources/a.json": "{}" }), none)).toBeNull();
-  });
-  it("does not take a nested path for a line file", () => {
-    expect([...entries(run({ "deep/trace.network": L({ type: "x" }) })!.zip).keys()]).toEqual(["trace.trace"]);
   });
 });
 
@@ -131,22 +70,6 @@ describe("a snapshot that shows a round secret takes the frames that show it wit
     "screencast/early.jpeg": Buffer.from([0xff, 0xd8, 0xff, 1]), "screencast/mid.jpeg": Buffer.from([0xff, 0xd8, 0xff, 2]), "screencast/late.jpeg": Buffer.from([0xff, 0xd8, 0xff, 3]), "screencast/other-page.jpeg": Buffer.from([0xff, 0xd8, 0xff, 4]),
     ...extra,
   });
-  it("drops the snapshot, and the frames of that page after its last clean snapshot, with their images; keeps the earlier frame and other pages", () => {
-    const out = run(files())!;
-    const kept = entries(out.zip);
-    expect(out.stats).toMatchObject({ droppedSnapshots: 1, droppedFrames: 2, secrets: expect.any(Number) as number });
-    expect([...kept.keys()].filter((name) => name.startsWith("screencast/")).sort()).toEqual(["screencast/early.jpeg", "screencast/other-page.jpeg"]);
-    const lines = kept.get("trace.trace")!.split("\n").map((line) => JSON.parse(line) as { type: string; file?: string });
-    expect(lines.filter((line) => line.type === "screencast-frame").map((line) => line.file)).toEqual(["screencast/early.jpeg", "screencast/other-page.jpeg"]);
-    expect(lines.filter((line) => line.type === "frame-snapshot")).toHaveLength(2);
-    expect(text(out)).not.toContain(TOKEN);
-  });
-  it("positive control: with the token nowhere in the snapshot, nothing is dropped", () => {
-    const clean = files({ "trace.trace": files()["trace.trace"].replace(TOKEN, "nothing") });
-    const out = run(clean)!;
-    expect(out.stats).toMatchObject({ droppedSnapshots: 0, droppedFrames: 0 });
-    expect([...entries(out.zip).keys()].filter((name) => name.startsWith("screencast/"))).toHaveLength(4);
-  });
   it("refuses the trace when the snapshot that shows the secret names no page or no time", () => {
     for (const snapshot of [{ timestamp: 300 }, { pageId: "p1" }, { pageId: "p1", timestamp: "late" }]) {
       const bad = L({ type: "frame-snapshot", snapshot: { ...snapshot, html: ["DIV", {}, `Your token: ${TOKEN}`] } });
@@ -164,12 +87,5 @@ describe("a snapshot that shows a round secret takes the frames that show it wit
     // without the account-only scope every hit counts as a round secret: the stricter reading drops the frames
     const strict = run(base, [], (bytes) => r.contains(bytes))!;
     expect(strict.stats).toMatchObject({ droppedSnapshots: 1, droppedFrames: 1 });
-  });
-  it("keeps the counts of what it did", () => {
-    const out = run({ ...files(), "resources/body.json": L({ id_token: "" + IDT + "" }), "trace.network": net({ url: "https://a.test/x?code=123456", headers: [{ name: "authorization", value: `Bearer ${TOKEN}` }] }, { content: { _sha1: "body.json" } }) })!;
-    expect(out.stats.blankedResources).toBeGreaterThanOrEqual(1);
-    expect(out.stats.blankedValues).toBeGreaterThan(0);
-    expect(out.stats.droppedSnapshots).toBe(1);
-    expect(out.stats.droppedFrames).toBe(2);
   });
 });

@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pushCommitFromIsolatedRepository, runGitWithCredential } from "../../packages/worker/src/git-auth.js";
 import { processesToStop, runningInContainer, stopWorkspaceProcesses, unstoppableProcesses, workspaceProcessScope, type ProcessEntry } from "../../packages/worker/src/workspace-processes.js";
+import { processEnded } from "../support/process-liveness.js";
 
 const execFileAsync = promisify(execFile);
 const directories: string[] = [];
@@ -97,8 +98,8 @@ describe("stopping what the workspace left running before a push (final review I
       await new Promise((resolveWait) => setTimeout(resolveWait, 200));
       const result = await stopWorkspaceProcesses({ rootPath: root, scope: "workspace" });
       expect(result.stopped).toBeGreaterThanOrEqual(1);
-      expect(() => process.kill(inside, 0)).toThrow();
-      expect(() => process.kill(outside, 0)).not.toThrow();
+      expect(processEnded(inside)).toBe(true);
+      expect(processEnded(outside)).toBe(false);
     } finally {
       try { process.kill(outside, "SIGKILL"); } catch { /* gone */ }
       try { process.kill(inside, "SIGKILL"); } catch { /* gone */ }

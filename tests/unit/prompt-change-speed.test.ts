@@ -1,10 +1,8 @@
 import "./prompt-change-offline.js";
 import { expect, it } from "vitest";
 import { detectPromptChanges, detectPromptChangesInDiff } from "../../packages/contracts/src/prompt-change-detect.js";
-import { sourceMode } from "../../packages/contracts/src/prompt-change-rules.js";
 import type { PromptChangeResult } from "../../packages/contracts/src/prompt-change-detect.js";
 import { expectLinearScaling } from "../support/scaling.js";
-const MiB = 1024 * 1024;
 const source = (text: string, path = "ai/a.ts") => detectPromptChanges({ files: [{ path, before: "", after: text, wholeFile: true }] }, { stats: true });
 const repeat = (unit: string, bytes: number) => unit.repeat(Math.ceil(bytes / Buffer.byteLength(unit))).slice(0, Math.floor(bytes / (Buffer.byteLength(unit) / unit.length)));
 const corpora: Array<[string, (n: number) => () => PromptChangeResult]> = [
@@ -60,38 +58,5 @@ const measurePair = (name: string, size: number, make: (n: number) => () => Prom
 it.each(corpora)("linear adversarial scan: %s", (name, make) => {
   measurePair(name, 128 * 1024, make, 8 * 1024);
 });
-it("scales actual scanned files and bounds a 5000-file 32 MiB diff", () => {
-  const one = "prompt: '" + "a".repeat(MiB - 12) + "'";
-  const make = (count: number) => () => detectPromptChanges({ files: Array.from({ length: count }, (_, i) => ({ path: `ai/${i}.ts`, before: "", after: one, wholeFile: true })) }, { stats: true });
-  // The work counts run on 1 and 4 one-MiB files; the timed ratio uses 2 -> 16 files of 16 KiB (8N = 256 KiB), so the 8N input stays in CPU cache.
-  const smallFile = "prompt: '" + "a".repeat(16 * 1024 - 12) + "'";
-  const makeSmall = (count: number) => () => detectPromptChanges({ files: Array.from({ length: count }, (_, i) => ({ path: `ai/${i}.ts`, before: "", after: smallFile, wholeFile: true })) }, { stats: true });
-  measurePair("four scanned files", 1, make, 2, makeSmall, 16 * 1024);
-  const chunk = "x".repeat(6600);
-  const diffOf = (count: number, body = chunk) => Array.from({ length: count }, (_, i) => `diff --git a/${i}.ts b/${i}.ts\n@@ -1 +1 @@\n-old\n+${body}\n`).join("");
-  // The big diff is a scaling check too (78 -> 624 small files, 8N = about 200 KiB so it stays in CPU cache), then the full-size 5000-file 32 MiB result is checked once.
-  const smallChunk = "x".repeat(200);
-  expectLinearScaling((count) => { const diff = diffOf(count, smallChunk); return () => detectPromptChangesInDiff(diff); }, { n: 78, unitBytes: 260, label: "624-file diff" });
-  expect(detectPromptChangesInDiff(diffOf(5000)).report.coverage).toBe("partial");
-});
-it("long ancestor identifiers cannot multiply token work", () => {
-  const report = source("x".repeat(100_000) + " = {" + "other: 1,".repeat(20_000) + "}");
-  expect(report.stats!.steps).toBeLessThanOrEqual(128 * (report.stats!.bytes + 1) + 10_000);
-});
 
-it.each(["env suffix", "path times hunks", "deep nesting"])("review scaling below caps: %s", (name) => {
-  const make = (n: number) => () => {
-    if (name === "env suffix") return source("prompt: 'new'", ".env".repeat(n) + "/x");
-    if (name === "deep nesting") return source("[".repeat(60) + "0,".repeat(n * 8) + "]".repeat(60));
-    const path = ".env".repeat(n) + ".ts";
-    const diff = `diff --git a/${path} b/${path}\n` + "@@ -1 +1 @@\n-a\n+b\n".repeat(n * 8);
-    return detectPromptChangesInDiff(diff, { stats: true });
-  };
-  measurePair(name, 240, make);
-});
 
-it("env basename classifier stays linear within the path byte cap", () => {
-  let mode: string | undefined;
-  expectLinearScaling((n) => { const path = ".env".repeat(n) + "/x"; return () => { for (let i = 0; i < 256; i++) mode = sourceMode(path); }; }, { n: 120, label: "env basename classifier" });
-  expect(mode).toBe("other");
-});

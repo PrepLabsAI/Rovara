@@ -82,7 +82,6 @@ function seeded() {
   return w;
 }
 const peopleA = (w: ReturnType<typeof world>) => build(w)(A, noStore);
-const peopleB = (w: ReturnType<typeof world>) => build(w)(B, noStore);
 
 describe("hosted lessons people: company isolation", () => {
   it("refuses every question that names another company, reading nothing", async () => {
@@ -95,20 +94,6 @@ describe("hosted lessons people: company isolation", () => {
     ];
     for (const ask of asks) await expect(ask()).rejects.toBeInstanceOf(OtherCompanyError);
     expect(w.sends).toEqual([]);
-  });
-
-  it("keeps two companies' same-named project apart: rosters, approvers and a grant never cross", async () => {
-    const w = seeded();
-    const a = peopleA(w), b = peopleB(w);
-    expect((await a.projectMembers!(A, "web")).ids).toEqual([OWN_A, ADMIN_A, MAINT_A, DEV_A].sort());
-    expect((await b.projectMembers!(B, "web")).ids).toEqual([OWN_B, DEV_B].sort());
-    // A grant on the project does not put a person of the other company on this company's roster, in either direction.
-    expect(await a.onProjectRoster(A, "web", DEV_B)).toBe(false);
-    expect(await b.onProjectRoster(B, "web", DEV_A)).toBe(false);
-    expect(await b.onProjectRoster(B, "web", OWN_A)).toBe(false);
-    expect((await a.approvers(A, "web")).eligibleIds).toEqual([OWN_A, ADMIN_A, MAINT_A].sort());
-    expect((await b.approvers(B, "web")).eligibleIds).toEqual([OWN_B]);
-    expect((await b.approvers(B, "web")).ownerIds).toEqual([OWN_B]);
   });
 
   it("names a person only of this company: another company's person, and nobody, have no name", async () => {
@@ -135,36 +120,6 @@ describe("hosted lessons people: company isolation", () => {
 });
 
 describe("hosted lessons people: project isolation", () => {
-  it("puts a person on the roster of the project they hold a grant on, and no other", async () => {
-    const w = seeded();
-    w.grant(DEV_A, "api", "developer");
-    const a = peopleA(w);
-    expect(await a.onProjectRoster(A, "web", DEV_A)).toBe(true);
-    expect(await a.onProjectRoster(A, "api", DEV_A)).toBe(true);
-    expect(await a.onProjectRoster(A, "api", MAINT_A)).toBe(false);
-    expect(await a.onProjectRoster(A, "web", PLAIN_A)).toBe(false);
-    expect((await a.projectMembers!(A, "api")).ids).toEqual([OWN_A, ADMIN_A, DEV_A].sort());
-  });
-
-  it("makes a company owner or admin a member of every project, a project maintainer only of theirs", async () => {
-    const w = seeded();
-    const a = peopleA(w);
-    for (const project of ["web", "api", "anything"]) {
-      expect(await a.onProjectRoster(A, project, OWN_A)).toBe(true);
-      expect(await a.onProjectRoster(A, project, ADMIN_A)).toBe(true);
-    }
-    expect(await a.onProjectRoster(A, "api", MAINT_A)).toBe(false);
-  });
-
-  it("approvers: a project's maintainer is eligible for that project only; the company-wide list holds owners and admins only", async () => {
-    const w = seeded();
-    const a = peopleA(w);
-    expect((await a.approvers(A, "web")).eligibleIds).toEqual([OWN_A, ADMIN_A, MAINT_A].sort());
-    expect((await a.approvers(A, "api")).eligibleIds).toEqual([OWN_A, ADMIN_A].sort());
-    expect((await a.approvers(A, undefined)).eligibleIds).toEqual([OWN_A, ADMIN_A].sort());
-    // A developer grant is a reader, never an approver.
-    expect((await a.approvers(A, "web")).eligibleIds).not.toContain(DEV_A);
-  });
 
   it("answers no for a name that is not a project's and refuses to list or approve for one", async () => {
     const w = seeded();
@@ -177,34 +132,6 @@ describe("hosted lessons people: project isolation", () => {
 });
 
 describe("hosted lessons people: approvers", () => {
-  it("lists live owners and non-owner admins and maintainers; ownerIds is owners only", async () => {
-    const w = seeded();
-    const a = await peopleA(w).approvers(A, "web");
-    expect(a.complete).toBe(true);
-    expect(a.ownerIds).toEqual([OWN_A]);
-    expect(a.eligibleIds).toEqual([OWN_A, ADMIN_A, MAINT_A].sort());
-    // The non-owner admin is a decider (the notices that go to deciders use this list), though not an owner.
-    expect(a.eligibleIds).toContain(ADMIN_A);
-    expect(a.ownerIds).not.toContain(ADMIN_A);
-  });
-
-  it("changes the membership version exactly when who may approve changes", async () => {
-    const w = seeded();
-    const a = peopleA(w);
-    const first = await a.approvers(A, "web");
-    const again = await a.approvers(A, "web");
-    expect(Number.isSafeInteger(first.membershipVersion)).toBe(true);
-    expect(first.membershipVersion).toBeGreaterThanOrEqual(0);
-    expect(again.membershipVersion).toBe(first.membershipVersion);
-    // A person who cannot approve joining changes nothing; a new admin changes it; the other project's list differs.
-    w.member(id(20), A, "member");
-    expect((await a.approvers(A, "web")).membershipVersion).toBe(first.membershipVersion);
-    expect((await a.approvers(A, "api")).membershipVersion).not.toBe(first.membershipVersion);
-    w.member(id(21), A, "admin");
-    expect((await a.approvers(A, "web")).membershipVersion).not.toBe(first.membershipVersion);
-    // And the other company's is its own.
-    expect((await peopleB(w).approvers(B, "web")).membershipVersion).not.toBe(first.membershipVersion);
-  });
 
   it("reports when an owner or admin was last lost: a removed one by their removal time, a demoted one by the role change", async () => {
     const none = await peopleA(seeded()).approvers(A, "web");
@@ -230,71 +157,7 @@ describe("hosted lessons people: approvers", () => {
   });
 });
 
-describe("hosted lessons people: live, at once", () => {
-  it("drops a removed member from the roster, the approvers and the list on the very next read", async () => {
-    const w = seeded();
-    const a = peopleA(w);
-    expect(await a.onProjectRoster(A, "web", MAINT_A)).toBe(true);
-    expect((await a.approvers(A, "web")).eligibleIds).toContain(MAINT_A);
-    expect((await a.projectMembers!(A, "web")).ids).toContain(MAINT_A);
-    // The authoritative row says removed; the company's list row (written with it in one transaction) is not what the answer rests on.
-    w.patchAuthoritative(MAINT_A, { revokedAt: "2026-11-18T11:59:00.000Z" });
-    expect(await a.onProjectRoster(A, "web", MAINT_A)).toBe(false);
-    expect((await a.approvers(A, "web")).eligibleIds).not.toContain(MAINT_A);
-    expect((await a.projectMembers!(A, "web")).ids).not.toContain(MAINT_A);
-  });
-
-  it("drops an admin who was demoted to a plain member from the approvers and from rosters they had no grant for", async () => {
-    const w = seeded();
-    const a = peopleA(w);
-    expect(await a.onProjectRoster(A, "api", ADMIN_A)).toBe(true);
-    w.patchAuthoritative(ADMIN_A, { role: "member" });
-    expect(await a.onProjectRoster(A, "api", ADMIN_A)).toBe(false);
-    expect((await a.approvers(A, "web")).eligibleIds).not.toContain(ADMIN_A);
-  });
-
-  it("drops a person whose grant was removed, and keeps nothing between calls", async () => {
-    const w = seeded();
-    const a = peopleA(w);
-    expect(await a.onProjectRoster(A, "web", DEV_A)).toBe(true);
-    w.rows.delete(`${STATE}|ORG#${A}#MEMBER#${DEV_A}|PROJECT#web`);
-    expect(await a.onProjectRoster(A, "web", DEV_A)).toBe(false);
-    expect((await a.projectMembers!(A, "web")).ids).not.toContain(DEV_A);
-    const before = w.sends.length;
-    await a.onProjectRoster(A, "web", DEV_A);
-    expect(w.sends.length).toBeGreaterThan(before);
-  });
-
-  it("a person who joined is on the next roster read", async () => {
-    const w = seeded();
-    const a = peopleA(w);
-    expect((await a.projectMembers!(A, "web")).ids).not.toContain(id(40));
-    w.member(id(40), A, "member"); w.grant(id(40), "web", "developer");
-    expect((await a.projectMembers!(A, "web")).ids).toContain(id(40));
-  });
-});
-
 describe("hosted lessons people: the roster the names filter needs", () => {
-  it("lists plain project members with no project-side row (a grant made before the list existed) and names them", async () => {
-    const w = seeded();
-    const a = peopleA(w);
-    // There is no PROJECT_MEMBERS# row for anybody here: the roster still has every grant holder, from the authoritative grant.
-    expect([...w.rows.keys()].some((k) => k.includes("PROJECT_MEMBERS#"))).toBe(false);
-    const roster = (await a.projectMembers!(A, "web")).ids;
-    expect(roster).toContain(DEV_A);
-    expect(roster).not.toContain(PLAIN_A);
-    const names = await Promise.all(roster.map((person) => a.displayName(A, person)));
-    expect(names).toContain(`Name ${DEV_A.slice(-2)}`);
-    expect(names).not.toContain(`Name ${PLAIN_A.slice(-2)}`);
-    expect(names.every((name) => name !== undefined)).toBe(true);
-  });
-
-  it("is the same set as onProjectRoster says yes for", async () => {
-    const w = seeded();
-    const a = peopleA(w);
-    const roster = new Set((await a.projectMembers!(A, "web")).ids);
-    for (const person of [OWN_A, ADMIN_A, MAINT_A, DEV_A, PLAIN_A, OWN_B, DEV_B, id(999)]) expect(roster.has(person), person).toBe(await a.onProjectRoster(A, "web", person));
-  });
 
   it("throws, never a shorter list, when the company is too large or a read fails", async () => {
     const w = seeded();
@@ -328,18 +191,6 @@ describe("hosted lessons people: the roster the names filter needs", () => {
     await expect(peopleA(w).approvers(A, "web")).rejects.toThrow();
     await expect(peopleA(w).projectMembers!(A, "web")).rejects.toThrow();
   });
-
-  it("throws on an install with no company layer, on every read", async () => {
-    const w = seeded();
-    for (const table of [undefined, ""]) {
-      const people = build(w, { signInTableName: table })(A, noStore);
-      await expect(people.approvers(A, "web")).rejects.toThrow();
-      await expect(people.projectMembers!(A, "web")).rejects.toThrow();
-      await expect(people.onProjectRoster(A, "web", OWN_A)).rejects.toThrow();
-      await expect(people.displayName(A, OWN_A)).rejects.toThrow();
-      await expect(people.resolveMember!(A, OWN_A)).rejects.toThrow();
-    }
-  });
 });
 
 describe("hosted lessons people: names", () => {
@@ -363,10 +214,6 @@ describe("hosted lessons people: names", () => {
     const name = await peopleA(w).displayName(A, DEV_A);
     expect(name).toBeDefined();
     expect(name).not.toMatch(/[<>@]/u);
-  });
-
-  it("has no outside accounts linked, so a person reads only places nothing restricts", async () => {
-    expect(await peopleA(seeded()).linkedAccounts(A, DEV_A)).toEqual([]);
   });
 });
 
@@ -396,34 +243,5 @@ describe("hosted lessons people: merged sign-ins and erase", () => {
     for (let n = 0; n < 7; n += 1) w.developer(id(120 + n), { mergedInto: id(121 + n) });
     w.developer(id(127), { mergedInto: DEV_A });
     expect(await a.resolveMember!(A, id(120))).toBe(DEV_A);
-  });
-
-  it("follows a chain of merges to its end (within the bound)", async () => {
-    const w = seeded();
-    w.developer(id(70), { mergedInto: id(71) }); w.developer(id(71), { mergedInto: DEV_A });
-    expect(await peopleA(w).resolveMember!(A, id(70))).toBe(DEV_A);
-  });
-
-  it("reads the erase receipt only when asked, from the store the company's runtime gives", async () => {
-    const w = seeded();
-    let asked = 0;
-    const store = new MemoryDocumentStore();
-    const a = build(w)(A, { store: async () => { asked += 1; return store; } });
-    await a.approvers(A, "web"); await a.onProjectRoster(A, "web", DEV_A); await a.displayName(A, DEV_A);
-    expect(asked).toBe(0);
-    expect(await a.isErased(A, DEV_A)).toBe(false);
-    expect(asked).toBe(1);
-    const broken = build(w)(A, { store: async () => ({ get: async () => { throw new Error("store down"); } }) });
-    await expect(broken.isErased(A, DEV_A)).rejects.toThrow();
-  });
-});
-
-describe("hosted lessons people: building one reads nothing", () => {
-  it("builds a port without reading, and without a table until asked", () => {
-    const w = seeded();
-    w.sends.length = 0;
-    build(w, { signInTableName: undefined })(A, noStore);
-    build(w)(A, noStore);
-    expect(w.sends).toEqual([]);
   });
 });

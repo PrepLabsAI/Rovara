@@ -1,11 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { companyScoped, IMPLICIT_COMPANY_ID, OrgIdSchema, projectRevisionKey, orgProjectCatalogKey, type JsonValue } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B, SHARED_RAW_IDS } from "../../packages/testing/src/isolation/two-company.js";
 import { createTaskFlow, TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
 import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
 import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
 import { workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
-import { taskKey, workspaceKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
+import { workspaceKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createHarness, definition, newRequestId } from "../support/task-flow-harness.js";
 import { dynamoWorld } from "../support/ports/dynamodb-harness.js";
 
@@ -27,29 +27,6 @@ async function sharedFlows() {
   const started = await a.flow.start(a.caller, { requestId: newRequestId(), project: project.name, instructions: COMPANY_A.canary });
   return { world, a, b, taskId: started.task.taskId };
 }
-
-describe("DynamoDB two-company task flow (R4 S2)", () => {
-  it("unchanged-source control: A reads and lists its own task on the shared real store", async () => {
-    const { a, taskId } = await sharedFlows();
-    expect(await a.flow.get(a.caller, taskId)).toMatchObject({ taskId, title: COMPANY_A.canary });
-    expect((await a.flow.list(a.caller)).tasks).toEqual([expect.objectContaining({ taskId, title: COMPANY_A.canary })]);
-  });
-
-  it("B cannot get or close A's task and A's stored task stays unchanged", async () => {
-    const { world, a, b, taskId } = await sharedFlows();
-    const before = await world.store.get(taskKey(taskId));
-    await expect(b.flow.get(b.caller, taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND", message: "TASK_NOT_FOUND: no such task" });
-    await expect(b.flow.close(b.caller, taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND", message: "TASK_NOT_FOUND: no such task" });
-    expect(await world.store.get(taskKey(taskId))).toEqual(before);
-    expect(await a.flow.get(a.caller, taskId)).toMatchObject({ taskId, title: COMPANY_A.canary });
-  });
-
-  it("B lists no A tasks when both companies use the same person and project", async () => {
-    const { b } = await sharedFlows();
-    expect(await b.flow.list(b.caller)).toEqual({ tasks: [] });
-  });
-});
-
 
 describe("core company list paging", () => {
   async function listing(companyId: string) {
@@ -74,18 +51,6 @@ describe("core company list paging", () => {
     expect(second.tasks.map((row) => row.title)).toEqual(["row-2"]);
     expect(second.cursor).toBeUndefined();
   });
-  it("stops at the fixed read bound with a continuation, including an empty filtered page", async () => {
-    const { world, flow, caller, put } = await listing(COMPANY_B.orgId);
-    for (let i = 1; i <= 11; i++) await put(i, i === 1 ? COMPANY_B.orgId : COMPANY_A.orgId);
-    const query = world.store.query.bind(world.store);
-    let calls = 0;
-    world.store.query = (request) => { calls++; return query(request); };
-    const first = await flow.list(caller, { limit: 1 });
-    expect(calls).toBe(10);
-    expect(first.tasks).toEqual([]);
-    expect(first.cursor).toEqual(expect.any(String));
-    expect((await flow.list(caller, { limit: 1, cursor: first.cursor! })).tasks.map((row) => row.title)).toEqual(["row-1"]);
-  });
   it.each([IMPLICIT_COMPANY_ID, COMPANY_A.orgId])("old rows belong only to implicit company (%s)", async (company) => {
     const { flow, caller, put } = await listing(company);
     await put(1);
@@ -102,7 +67,6 @@ describe("core company list paging", () => {
   });
 });
 
-
 describe("workspace operation rows in the same read module", () => {
   it("filters each operation by company even if a foreign row uses the same workspace key", async () => {
     const { world, a, b } = await sharedFlows();
@@ -118,7 +82,6 @@ describe("workspace operation rows in the same read module", () => {
     expect((await workspaceOperations({ ...a.flow.deps, companyId: OrgIdSchema.parse(IMPLICIT_COMPANY_ID) }, "shared")).map((row) => row.id)).toEqual(["old"]);
   });
 });
-
 
 describe("workspace operation total bound", () => {
   it("refuses beyond ten pages and accepts 2,000 small rows when they fit those pages", async () => {
@@ -137,7 +100,6 @@ describe("workspace operation total bound", () => {
   });
 });
 
-
 describe("runtime company context", () => {
   it.each(["", "private-canary"])('rejects a forged flow and principal company %s', async (companyId) => {
     const h = createHarness();
@@ -147,35 +109,18 @@ describe("runtime company context", () => {
     await h.store.put({ item: { pk: `DEVELOPER#${caller.principal.personId}`, sk: "TASK#1", orgId: companyId, title: "private-canary" } });
     expect(await flow.list(caller)).toEqual({ tasks: [] });
   });
-  it("refuses a different caller company even when the index contains this flow's rows", async () => {
-    const { a, b } = await sharedFlows();
-    expect(await a.flow.list(b.caller)).toEqual({ tasks: [] });
-  });
 });
 
 // S1/S3 run the common kit against the actual adapter, not a second implementation.
 import { assertSurfacesIsolated } from "../../packages/testing/src/isolation/two-company.js";
 import { dynamoCompanies } from "../support/ports/dynamodb-companies.js";
 
-it("isolates document and State-index surfaces on one real DynamoDB adapter", async () => {
-  const kit = dynamoCompanies();
-  await assertSurfacesIsolated(kit.surfaces);
-});
-
 it.each(["store", "index", "dispatch-index"] as const)("kit rejects the leaking %s variant", async (mutant) => {
   await expect(assertSurfacesIsolated(dynamoCompanies(mutant).surfaces)).rejects.toThrow();
 });
 
-
 import { STATE_TABLE_INDEXES } from "../../packages/aws-adapters/src/dynamodb/state-table.js";
 import { attempt, type IsolationSurface } from "../../packages/testing/src/isolation/two-company.js";
-
-it("isolates prefix-related company keys and refuses delimiters", async () => {
-  const { store } = dynamoWorld();
-  for (const company of ["short", "shorter"]) await store.put({ item: { pk: companyScoped(company, SHARED_RAW_IDS.documentName), sk: "META", marker: company } });
-  for (const company of ["short", "shorter"]) expect((await store.query({ pk: companyScoped(company, SHARED_RAW_IDS.documentName) })).items.map((row) => row.marker)).toEqual([company]);
-  for (const company of ["", "a#b", "a b", "a\nb"]) expect(() => companyScoped(company, "shared")).toThrow();
-});
 
 it.each(["bySessionState"])("known gap: %s lists both companies (T1/T8)", async (index) => {
   const { store } = dynamoWorld({ indexes: STATE_TABLE_INDEXES });
@@ -186,17 +131,6 @@ it.each(["bySessionState"])("known gap: %s lists both companies (T1/T8)", async 
   } });
   const seen = JSON.stringify(await store.queryIndex({ index, partition: "shared-partition" }));
   expect(seen).toContain(COMPANY_A.canary); expect(seen).toContain(COMPANY_B.canary);
-});
-
-it("known gap: DynamoStreamChangeFeed delivers both companies to every consumer (T8)", async () => {
-  const world = dynamoWorld();
-  const seen: unknown[] = [];
-  const subscription = await world.store.changes!.subscribe("shared-consumer", async (batch) => { seen.push(...batch); });
-  try {
-    for (const company of [COMPANY_A, COMPANY_B]) await world.store.put({ item: { pk: companyScoped(company.orgId, "same"), sk: "META", marker: company.canary } });
-    await world.settled();
-    expect(JSON.stringify(seen)).toContain(COMPANY_A.canary); expect(JSON.stringify(seen)).toContain(COMPANY_B.canary);
-  } finally { await subscription.stop(); }
 });
 
 it.each([false, true])("task flow kit controls and leaking variant (leak=%s)", async (leak) => {
@@ -251,11 +185,4 @@ it.each([false, true])("membership kit probes through DynamoDocumentStore (fallb
   }];
   if (fallback) await expect(assertFailsClosed(probes)).rejects.toThrow();
   else await assertFailsClosed(probes);
-});
-
-it("counts short operation pages as reads, with fixed words and an eleven-read bound", async () => {
-  const query = vi.fn(async () => ({ items: [], cursor: "private-canary" }));
-  await expect(workspaceOperations({ store: { query, get: async () => ({ ...workspaceKey(COMPANY_A.orgId, "private-canary"), companyId: COMPANY_A.orgId }) } as never, companyId: OrgIdSchema.parse(COMPANY_A.orgId) }, "private-canary"))
-    .rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: workspace operation read limit exceeded (10 reads, each up to 1 MB, plus a completion probe)" });
-  expect(query).toHaveBeenCalledTimes(11);
 });

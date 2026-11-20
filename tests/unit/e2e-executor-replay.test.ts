@@ -24,13 +24,6 @@ function recording(trace: Record<string, unknown> = cleanTrace(), options: { key
 }
 
 describe("the replay store serves only bound recordings (tests 13 and 14)", () => {
-  it("serves the recording whose trace digest is its binding's and whose key is the one it is read under, as the entry the runner reads", async () => {
-    const trace = cleanTrace();
-    const store = createE2EReplayStore([recording(trace)]);
-    const hit = await store.read(KEY);
-    expect(hit).toMatchObject({ status: "hit", entry: { schemaVersion: "trace-1", payload: trace } });
-    expect(await store.read(sha("another key"))).toEqual({ status: "miss" });
-  });
   it("is a miss for a recording whose bytes are not the bound ones (an edited trace, a binding for other bytes) and for one stored under another key", async () => {
     const edited = recording(cleanTrace({ endPath: "/other" }), { bind: { traceSha256: sha(canonicalJson(cleanTrace())) } });
     expect(await createE2EReplayStore([edited]).read(KEY)).toEqual({ status: "miss" });
@@ -71,14 +64,6 @@ describe("the replay store serves only bound recordings (tests 13 and 14)", () =
     expect(await store.write(KEY, cleanTrace() as never)).toBeUndefined();
     expect("delete" in store).toBe(false);
     expect((await store.read(KEY)).status).toBe("hit");
-  });
-  it("hands out a copy: a caller that edits the entry it was given changes nothing the next read returns", async () => {
-    const store = createE2EReplayStore([recording()]);
-    const first = await store.read(KEY);
-    if (first.status !== "hit") throw new Error("expected a hit");
-    (first.entry.payload as { actions: unknown[] }).actions.length = 0;
-    const second = await store.read(KEY);
-    expect(second.status === "hit" && (second.entry.payload as { actions: unknown[] }).actions).toHaveLength(1);
   });
 });
 

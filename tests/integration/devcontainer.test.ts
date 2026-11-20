@@ -30,6 +30,7 @@ import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
 import type { TaskShellSelection } from "../../packages/worker/src/task-sandbox.js";
+import { processEnded } from "../support/process-liveness.js";
 
 const run = promisify(execFile);
 const UP_OUTPUT = [
@@ -1242,5 +1243,5 @@ describe("the collected process under the devcontainer CLI (#154)", () => {
 /** Waits up to 3 s for a process to be gone. */
 async function expectGone(pid: number): Promise<void> {
   expect(Number.isInteger(pid) && pid > 0).toBe(true);
-  await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(/ESRCH/), { timeout: 3_000, interval: 50 });
+  await vi.waitFor(() => expect(processEnded(pid)).toBe(true), { timeout: 3_000, interval: 50 });
 }
