@@ -19,17 +19,17 @@ export const AGENTX_RELEASE_REPOSITORY_NAME = "Rovara";
 export const AGENTX_RELEASE_BRANCH = "mainline";
 // Must not match the broker's `agentx-*` CodeBuild gate allow-list, or a worker could start a release.
 export const AGENTX_RELEASE_PROJECT_NAME = "release-agentx-production";
-// #1242: the staging release's project, under the same rule as the production one.
-export const AGENTX_STAGING_RELEASE_PROJECT_NAME = "release-agentx-staging";
+// #1242: the beta release's project, under the same rule as the production one.
+export const AGENTX_BETA_RELEASE_PROJECT_NAME = "release-agentx-beta";
 export const AGENTX_RELEASE_PIPELINE_NAME = "AgentXProductionRelease";
-/** The pipeline's last stage. Its inbound transition stays disabled: enabling it is the manual approval that promotes staging's commit (#1242). */
+/** The pipeline's last stage. Its inbound transition stays disabled: enabling it is the manual approval that promotes beta's commit (#1242). */
 export const AGENTX_PRODUCTION_STAGE = "Production";
-/** The staging release build's own role, by a fixed name: the staging account's release role trusts exactly this role (staging-release-access.ts). */
-export const AGENTX_STAGING_BUILD_ROLE_NAME = "agentx-release-staging-build";
-/** The role in the staging account that the staging release runs as (staging-release-access.ts). */
-export const AGENTX_STAGING_RELEASE_ROLE_NAME = "agentx-staging-release";
-/** The AWS profile the staging build writes for that role: assumed from the build's own credentials, and assumed again by each AWS CLI and CDK process. */
-export const AGENTX_STAGING_PROFILE = "agentx-staging";
+/** The beta release build's own role, by a fixed name: the beta account's release role trusts exactly this role (beta-release-access.ts). */
+export const AGENTX_BETA_BUILD_ROLE_NAME = "agentx-release-beta-build";
+/** The role in the beta account that the beta release runs as (beta-release-access.ts). */
+export const AGENTX_BETA_RELEASE_ROLE_NAME = "agentx-beta-release";
+/** The AWS profile the beta build writes for that role: assumed from the build's own credentials, and assumed again by each AWS CLI and CDK process. */
+export const AGENTX_BETA_PROFILE = "agentx-beta";
 export const AGENTX_PRODUCTION_WORKER_REPOSITORY = "agentx-worker-production";
 export const AGENTX_RELEASE_AWS_CLI_VERSION = "2.36.47";
 export const AGENTX_RELEASE_STACKS = [
@@ -77,12 +77,12 @@ export class ReleasePipelineStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    const stagingAccountId = new CfnParameter(this, "StagingAccountId", {
+    const betaAccountId = new CfnParameter(this, "BetaAccountId", {
       type: "String",
       allowedPattern: "^[0-9]{12}$",
-      description: "The AWS account of the staging environment, which every mainline release deploys to before production (#1242)",
+      description: "The AWS account of the beta environment, which every mainline release deploys to before production (#1242)",
     });
-    const stagingReleaseRoleArn = `arn:${this.partition}:iam::${stagingAccountId.valueAsString}:role/${AGENTX_STAGING_RELEASE_ROLE_NAME}`;
+    const betaReleaseRoleArn = `arn:${this.partition}:iam::${betaAccountId.valueAsString}:role/${AGENTX_BETA_RELEASE_ROLE_NAME}`;
     const pipelineArn = `arn:${this.partition}:codepipeline:${this.region}:${this.account}:${AGENTX_RELEASE_PIPELINE_NAME}`;
 
     const project = new codebuild.PipelineProject(this, "ReleaseBuild", {
@@ -91,7 +91,7 @@ export class ReleasePipelineStack extends Stack {
       ...releaseProjectSettings(logGroup),
       buildSpec: releaseBuildSpec({
         // #1242: the first thing the production release does is close the gate it came through, so that only this promotion gets in; the next
-        // staging commit waits in front of Production until someone enables the transition again.
+        // beta commit waits in front of Production until someone enables the transition again.
         firstCommands: [
           `aws codepipeline disable-stage-transition --pipeline-name ${AGENTX_RELEASE_PIPELINE_NAME} --stage-name ${AGENTX_PRODUCTION_STAGE} --transition-type Inbound --reason "${PROMOTION_GATE_REASON}"`,
         ],
@@ -99,28 +99,28 @@ export class ReleasePipelineStack extends Stack {
       }),
     });
 
-    // #1242: the staging release runs the same release in the staging account. CI's proof reads GitHub with this account's GitHub App first (the
-    // build's own credentials); the release itself then runs as the staging account's release role, through a profile that every AWS CLI and CDK
+    // #1242: the beta release runs the same release in the beta account. CI's proof reads GitHub with this account's GitHub App first (the
+    // build's own credentials); the release itself then runs as the beta account's release role, through a profile that every AWS CLI and CDK
     // process assumes afresh, so a long release never outlives one role session.
-    const stagingRole = new iam.Role(this, "StagingReleaseBuildRole", {
-      roleName: AGENTX_STAGING_BUILD_ROLE_NAME,
+    const betaRole = new iam.Role(this, "BetaReleaseBuildRole", {
+      roleName: AGENTX_BETA_BUILD_ROLE_NAME,
       assumedBy: new iam.ServicePrincipal("codebuild.amazonaws.com"),
-      description: "The staging release build: CI's proof in this account, then the release as the staging account's release role",
+      description: "The beta release build: CI's proof in this account, then the release as the beta account's release role",
     });
-    const stagingProject = new codebuild.PipelineProject(this, "StagingReleaseBuild", {
-      projectName: AGENTX_STAGING_RELEASE_PROJECT_NAME,
-      description: "Runs npm run release:prod in the staging account for AgentX mainline commits (#1242)",
-      role: stagingRole,
+    const betaProject = new codebuild.PipelineProject(this, "BetaReleaseBuild", {
+      projectName: AGENTX_BETA_RELEASE_PROJECT_NAME,
+      description: "Runs npm run release:prod in the beta account for AgentX mainline commits (#1242)",
+      role: betaRole,
       ...releaseProjectSettings(logGroup),
       buildSpec: releaseBuildSpec({
         firstCommands: [],
-        variables: { STAGING_RELEASE_ROLE_ARN: stagingReleaseRoleArn },
+        variables: { BETA_RELEASE_ROLE_ARN: betaReleaseRoleArn },
         beforeRelease: [
           "mkdir -p ~/.aws",
-          `printf '[profile ${AGENTX_STAGING_PROFILE}]\\nrole_arn = %s\\ncredential_source = EcsContainer\\nrole_session_name = staging-release\\nregion = %s\\n' "$STAGING_RELEASE_ROLE_ARN" "$AWS_REGION" >> ~/.aws/config`,
-          `aws sts get-caller-identity --profile ${AGENTX_STAGING_PROFILE}`,
+          `printf '[profile ${AGENTX_BETA_PROFILE}]\\nrole_arn = %s\\ncredential_source = EcsContainer\\nrole_session_name = beta-release\\nregion = %s\\n' "$BETA_RELEASE_ROLE_ARN" "$AWS_REGION" >> ~/.aws/config`,
+          `aws sts get-caller-identity --profile ${AGENTX_BETA_PROFILE}`,
         ],
-        release: `npm run release:prod -- --region "$AWS_REGION" --profile ${AGENTX_STAGING_PROFILE} --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS`,
+        release: `npm run release:prod -- --region "$AWS_REGION" --profile ${AGENTX_BETA_PROFILE} --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS`,
       }),
     });
 
@@ -179,15 +179,15 @@ export class ReleasePipelineStack extends Stack {
       actions: ["codepipeline:DisableStageTransition"],
       resources: [`${pipelineArn}/${AGENTX_PRODUCTION_STAGE}`, pipelineArn],
     }));
-    // The staging build needs only CI's proof here (the GitHub App's key and the control plane's description) and the staging account's role.
+    // The beta build needs only CI's proof here (the GitHub App's key and the control plane's description) and the beta account's role.
     for (const policy of policies.filter((policy) => policy.sid === "ReadGithubAppKeyForCiProof" || policy.sid === "ReadReleaseStacks")) {
-      stagingProject.addToRolePolicy(policy);
+      betaProject.addToRolePolicy(policy);
     }
-    stagingProject.addToRolePolicy(useConnection);
-    stagingProject.addToRolePolicy(new iam.PolicyStatement({
-      sid: "AssumeStagingReleaseRole",
+    betaProject.addToRolePolicy(useConnection);
+    betaProject.addToRolePolicy(new iam.PolicyStatement({
+      sid: "AssumeBetaReleaseRole",
       actions: ["sts:AssumeRole"],
-      resources: [stagingReleaseRoleArn],
+      resources: [betaReleaseRoleArn],
     }));
 
     const sourceRole = new iam.Role(this, "SourceActionRole", {
@@ -198,7 +198,7 @@ export class ReleasePipelineStack extends Stack {
 
     const sourceOutput = new codepipeline.Artifact("Source");
     const releaseOutput = new codepipeline.Artifact("ReleaseManifest");
-    const stagingOutput = new codepipeline.Artifact("StagingReleaseManifest");
+    const betaOutput = new codepipeline.Artifact("BetaReleaseManifest");
     const source = new actions.CodeStarConnectionsSourceAction({
       actionName: "GitHub",
       connectionArn: connectionArn.valueAsString,
@@ -213,9 +213,9 @@ export class ReleasePipelineStack extends Stack {
     new codepipeline.Pipeline(this, "Pipeline", {
       pipelineName: AGENTX_RELEASE_PIPELINE_NAME,
       pipelineType: codepipeline.PipelineType.V2,
-      // #1242: every merge goes to staging; production takes staging's newest commit only when someone enables the transition into Production.
+      // #1242: every merge goes to beta; production takes beta's newest commit only when someone enables the transition into Production.
       // A run waiting in front of a disabled transition is replaced by a newer one only in SUPERSEDED mode, which is what makes one promotion carry
-      // every merge since the last. (QUEUED, #114, kept each merge apart; two merges that land while staging is deploying now go to staging together.)
+      // every merge since the last. (QUEUED, #114, kept each merge apart; two merges that land while beta is deploying now go to beta together.)
       executionMode: codepipeline.ExecutionMode.SUPERSEDED,
       // aws-cdk-lib types Bucket.isWebsite as `boolean | undefined`, which exactOptionalPropertyTypes rejects for IBucket.
       artifactBucket: artifactBucket as s3.IBucket,
@@ -224,13 +224,13 @@ export class ReleasePipelineStack extends Stack {
       stages: [
         { stageName: "Source", actions: [source] },
         {
-          stageName: "Staging",
+          stageName: "Beta",
           actions: [
             new actions.CodeBuildAction({
-              actionName: "ReleaseStaging",
-              project: stagingProject,
+              actionName: "ReleaseBeta",
+              project: betaProject,
               input: sourceOutput,
-              outputs: [stagingOutput],
+              outputs: [betaOutput],
             }),
           ],
         },

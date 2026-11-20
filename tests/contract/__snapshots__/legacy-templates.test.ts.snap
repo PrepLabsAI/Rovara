@@ -15987,6 +15987,11 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
 {
   "Description": "AgentX production release pipeline for the mainline branch",
   "Parameters": {
+    "BetaAccountId": {
+      "AllowedPattern": "^[0-9]{12}$",
+      "Description": "The AWS account of the beta environment, which every mainline release deploys to before production (#1242)",
+      "Type": "String",
+    },
     "BootstrapVersion": {
       "Default": "/cdk-bootstrap/hnb659fds/version",
       "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
@@ -15995,11 +16000,6 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     "GitHubConnectionArn": {
       "AllowedPattern": "^arn:aws(-[a-z]+)?:(codeconnections|codestar-connections):[a-z0-9-]+:[0-9]{12}:connection/[0-9a-f-]{36}$",
       "Description": "Authorized CodeConnections GitHub connection for PrepLabsAI/Rovara",
-      "Type": "String",
-    },
-    "StagingAccountId": {
-      "AllowedPattern": "^[0-9]{12}$",
-      "Description": "The AWS account of the staging environment, which every mainline release deploys to before production (#1242)",
       "Type": "String",
     },
   },
@@ -16081,6 +16081,457 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
       },
       "Type": "AWS::S3::BucketPolicy",
     },
+    "BetaReleaseBuild11A90FDF": {
+      "Properties": {
+        "Artifacts": {
+          "Type": "CODEPIPELINE",
+        },
+        "Cache": {
+          "Modes": [
+            "LOCAL_DOCKER_LAYER_CACHE",
+          ],
+          "Type": "LOCAL",
+        },
+        "ConcurrentBuildLimit": 1,
+        "Description": "Runs npm run release:prod in the beta account for AgentX mainline commits (#1242)",
+        "EncryptionKey": "alias/aws/s3",
+        "Environment": {
+          "ComputeType": "BUILD_GENERAL1_LARGE",
+          "Image": "aws/codebuild/amazonlinux-aarch64-standard:3.0",
+          "ImagePullCredentialsType": "CODEBUILD",
+          "PrivilegedMode": true,
+          "Type": "ARM_CONTAINER",
+        },
+        "LogsConfig": {
+          "CloudWatchLogs": {
+            "GroupName": {
+              "Ref": "ReleaseBuildLogsD2C04AA9",
+            },
+            "Status": "ENABLED",
+          },
+        },
+        "Name": "release-agentx-beta",
+        "ServiceRole": {
+          "Fn::GetAtt": [
+            "BetaReleaseBuildRole985CB47A",
+            "Arn",
+          ],
+        },
+        "Source": {
+          "BuildSpec": {
+            "Fn::Join": [
+              "",
+              [
+                "{
+  "version": "0.2",
+  "env": {
+    "shell": "bash",
+    "variables": {
+      "NODE_OPTIONS": "--max-old-space-size=8192",
+      "AWS_CLI_VERSION": "2.36.47",
+      "GITLEAKS_VERSION": "8.30.1",
+      "GITLEAKS_SHA256": "<asset-hash>",
+      "BETA_RELEASE_ROLE_ARN": "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::",
+                {
+                  "Ref": "BetaAccountId",
+                },
+                ":role/agentx-beta-release"
+    }
+  },
+  "phases": {
+    "install": {
+      "commands": [
+        "node_version=\\"$(cat .node-version)\\"",
+        "node_archive=\\"node-v\${node_version}-linux-arm64.tar.xz\\"",
+        "curl -fsSL -o \\"/tmp/\${node_archive}\\" \\"https://nodejs.org/dist/v\${node_version}/\${node_archive}\\"",
+        "curl -fsSL \\"https://nodejs.org/dist/v\${node_version}/SHASUMS256.txt\\" | grep \\" \${node_archive}$\\" | (cd /tmp && sha256sum -c -)",
+        "mkdir -p /opt/node && tar -xJf \\"/tmp/\${node_archive}\\" -C /opt/node --strip-components=1",
+        "curl -fsSL -o /tmp/awscliv2.zip \\"https://awscli.amazonaws.com/awscli-exe-linux-aarch64-\${AWS_CLI_VERSION}.zip\\"",
+        "unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --install-dir /opt/aws-cli --bin-dir /opt/aws-cli/bin",
+        "curl -fsSL -o /tmp/gitleaks.tar.gz \\"https://github.com/gitleaks/gitleaks/releases/download/v\${GITLEAKS_VERSION}/gitleaks_\${GITLEAKS_VERSION}_linux_arm64.tar.gz\\"",
+        "echo \\"\${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz\\" | sha256sum -c -",
+        "mkdir -p /opt/gitleaks && tar -xzf /tmp/gitleaks.tar.gz -C /opt/gitleaks gitleaks",
+        "export PATH=\\"/opt/node/bin:/opt/aws-cli/bin:/opt/gitleaks:$PATH\\"",
+        "node --version && npm --version && aws --version && gitleaks version && docker buildx version"
+      ]
+    },
+    "pre_build": {
+      "commands": [
+        "npm ci"
+      ]
+    },
+    "build": {
+      "commands": [
+        "if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara --github-app-stack AgentXControlPlane --region \\"$AWS_REGION\\"; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; mkdir -p ~/.aws && printf '[profile agentx-beta]\\\\nrole_arn = %s\\\\ncredential_source = EcsContainer\\\\nrole_session_name = beta-release\\\\nregion = %s\\\\n' \\"$BETA_RELEASE_ROLE_ARN\\" \\"$AWS_REGION\\" >> ~/.aws/config && aws sts get-caller-identity --profile agentx-beta && npm run release:prod -- --region \\"$AWS_REGION\\" --profile agentx-beta --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS"
+      ]
+    }
+  },
+  "artifacts": {
+    "files": [
+      "cdk.out/agentx-production-release.json"
+    ],
+    "discard-paths": "yes"
+  }
+}",
+              ],
+            ],
+          },
+          "Type": "CODEPIPELINE",
+        },
+        "TimeoutInMinutes": 120,
+      },
+      "Type": "AWS::CodeBuild::Project",
+    },
+    "BetaReleaseBuildRole985CB47A": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "codebuild.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "The beta release build: CI's proof in this account, then the release as the beta account's release role",
+        "RoleName": "agentx-release-beta-build",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "BetaReleaseBuildRoleDefaultPolicy9803C34B": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ReleaseBuildLogsD2C04AA9",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":logs:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":log-group:/aws/codebuild/",
+                      {
+                        "Ref": "BetaReleaseBuild11A90FDF",
+                      },
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":logs:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":log-group:/aws/codebuild/",
+                      {
+                        "Ref": "BetaReleaseBuild11A90FDF",
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "codebuild:CreateReportGroup",
+                "codebuild:CreateReport",
+                "codebuild:UpdateReport",
+                "codebuild:BatchPutTestCases",
+                "codebuild:BatchPutCodeCoverages",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":codebuild:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":report-group/",
+                    {
+                      "Ref": "BetaReleaseBuild11A90FDF",
+                    },
+                    "-*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/github-apps/*",
+                  ],
+                ],
+              },
+              "Sid": "ReadGithubAppKeyForCiProof",
+            },
+            {
+              "Action": "cloudformation:DescribeStacks",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":cloudformation:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":stack/AgentXControlPlane/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":cloudformation:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":stack/AgentXProductionFoundation/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":cloudformation:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":stack/AgentXProductionRuntime/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":cloudformation:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":stack/AgentXSlackOrchestrator/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "ReadReleaseStacks",
+            },
+            {
+              "Action": [
+                "codeconnections:UseConnection",
+                "codestar-connections:UseConnection",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "GitHubConnectionArn",
+              },
+            },
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":iam::",
+                    {
+                      "Ref": "BetaAccountId",
+                    },
+                    ":role/agentx-beta-release",
+                  ],
+                ],
+              },
+              "Sid": "AssumeBetaReleaseRole",
+            },
+            {
+              "Action": [
+                "s3:GetObject*",
+                "s3:GetBucket*",
+                "s3:List*",
+                "s3:DeleteObject*",
+                "s3:PutObject",
+                "s3:PutObjectLegalHold",
+                "s3:PutObjectRetention",
+                "s3:PutObjectTagging",
+                "s3:PutObjectVersionTagging",
+                "s3:Abort*",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Artifacts82DD59A1",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Artifacts82DD59A1",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "codestar-connections:UseConnection",
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "GitHubConnectionArn",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "BetaReleaseBuildRoleDefaultPolicy9803C34B",
+        "Roles": [
+          {
+            "Ref": "BetaReleaseBuildRole985CB47A",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "PipelineBetaReleaseBetaCodePipelineActionRole37D4683C": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "PipelineRoleD68726F7",
+                    "Arn",
+                  ],
+                },
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "PipelineBetaReleaseBetaCodePipelineActionRoleDefaultPolicy579F8BAC": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "codebuild:BatchGetBuilds",
+                "codebuild:StartBuild",
+                "codebuild:StopBuild",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "BetaReleaseBuild11A90FDF",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "PipelineBetaReleaseBetaCodePipelineActionRoleDefaultPolicy579F8BAC",
+        "Roles": [
+          {
+            "Ref": "PipelineBetaReleaseBetaCodePipelineActionRole37D4683C",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
     "PipelineC660917D": {
       "DependsOn": [
         "PipelineRoleDefaultPolicyC7A05455",
@@ -16155,7 +16606,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                 },
                 "Configuration": {
                   "ProjectName": {
-                    "Ref": "StagingReleaseBuild619757B0",
+                    "Ref": "BetaReleaseBuild11A90FDF",
                   },
                 },
                 "InputArtifacts": [
@@ -16163,22 +16614,22 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Name": "Source",
                   },
                 ],
-                "Name": "ReleaseStaging",
+                "Name": "ReleaseBeta",
                 "OutputArtifacts": [
                   {
-                    "Name": "StagingReleaseManifest",
+                    "Name": "BetaReleaseManifest",
                   },
                 ],
                 "RoleArn": {
                   "Fn::GetAtt": [
-                    "PipelineStagingReleaseStagingCodePipelineActionRole7D2782EE",
+                    "PipelineBetaReleaseBetaCodePipelineActionRole37D4683C",
                     "Arn",
                   ],
                 },
                 "RunOrder": 1,
               },
             ],
-            "Name": "Staging",
+            "Name": "Beta",
           },
           {
             "Actions": [
@@ -16371,7 +16822,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Effect": "Allow",
               "Resource": {
                 "Fn::GetAtt": [
-                  "PipelineStagingReleaseStagingCodePipelineActionRole7D2782EE",
+                  "PipelineBetaReleaseBetaCodePipelineActionRole37D4683C",
                   "Arn",
                 ],
               },
@@ -16393,58 +16844,6 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         "Roles": [
           {
             "Ref": "PipelineRoleD68726F7",
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Policy",
-    },
-    "PipelineStagingReleaseStagingCodePipelineActionRole7D2782EE": {
-      "Properties": {
-        "AssumeRolePolicyDocument": {
-          "Statement": [
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Principal": {
-                "AWS": {
-                  "Fn::GetAtt": [
-                    "PipelineRoleD68726F7",
-                    "Arn",
-                  ],
-                },
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-      },
-      "Type": "AWS::IAM::Role",
-    },
-    "PipelineStagingReleaseStagingCodePipelineActionRoleDefaultPolicyEA982B42": {
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": [
-                "codebuild:BatchGetBuilds",
-                "codebuild:StartBuild",
-                "codebuild:StopBuild",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "StagingReleaseBuild619757B0",
-                  "Arn",
-                ],
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "PolicyName": "PipelineStagingReleaseStagingCodePipelineActionRoleDefaultPolicyEA982B42",
-        "Roles": [
-          {
-            "Ref": "PipelineStagingReleaseStagingCodePipelineActionRole7D2782EE",
           },
         ],
       },
@@ -17060,405 +17459,6 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         "Roles": [
           {
             "Ref": "SourceActionRole4344B1D1",
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Policy",
-    },
-    "StagingReleaseBuild619757B0": {
-      "Properties": {
-        "Artifacts": {
-          "Type": "CODEPIPELINE",
-        },
-        "Cache": {
-          "Modes": [
-            "LOCAL_DOCKER_LAYER_CACHE",
-          ],
-          "Type": "LOCAL",
-        },
-        "ConcurrentBuildLimit": 1,
-        "Description": "Runs npm run release:prod in the staging account for AgentX mainline commits (#1242)",
-        "EncryptionKey": "alias/aws/s3",
-        "Environment": {
-          "ComputeType": "BUILD_GENERAL1_LARGE",
-          "Image": "aws/codebuild/amazonlinux-aarch64-standard:3.0",
-          "ImagePullCredentialsType": "CODEBUILD",
-          "PrivilegedMode": true,
-          "Type": "ARM_CONTAINER",
-        },
-        "LogsConfig": {
-          "CloudWatchLogs": {
-            "GroupName": {
-              "Ref": "ReleaseBuildLogsD2C04AA9",
-            },
-            "Status": "ENABLED",
-          },
-        },
-        "Name": "release-agentx-staging",
-        "ServiceRole": {
-          "Fn::GetAtt": [
-            "StagingReleaseBuildRoleA05F506A",
-            "Arn",
-          ],
-        },
-        "Source": {
-          "BuildSpec": {
-            "Fn::Join": [
-              "",
-              [
-                "{
-  "version": "0.2",
-  "env": {
-    "shell": "bash",
-    "variables": {
-      "NODE_OPTIONS": "--max-old-space-size=8192",
-      "AWS_CLI_VERSION": "2.36.47",
-      "GITLEAKS_VERSION": "8.30.1",
-      "GITLEAKS_SHA256": "<asset-hash>",
-      "STAGING_RELEASE_ROLE_ARN": "arn:",
-                {
-                  "Ref": "AWS::Partition",
-                },
-                ":iam::",
-                {
-                  "Ref": "StagingAccountId",
-                },
-                ":role/agentx-staging-release"
-    }
-  },
-  "phases": {
-    "install": {
-      "commands": [
-        "node_version=\\"$(cat .node-version)\\"",
-        "node_archive=\\"node-v\${node_version}-linux-arm64.tar.xz\\"",
-        "curl -fsSL -o \\"/tmp/\${node_archive}\\" \\"https://nodejs.org/dist/v\${node_version}/\${node_archive}\\"",
-        "curl -fsSL \\"https://nodejs.org/dist/v\${node_version}/SHASUMS256.txt\\" | grep \\" \${node_archive}$\\" | (cd /tmp && sha256sum -c -)",
-        "mkdir -p /opt/node && tar -xJf \\"/tmp/\${node_archive}\\" -C /opt/node --strip-components=1",
-        "curl -fsSL -o /tmp/awscliv2.zip \\"https://awscli.amazonaws.com/awscli-exe-linux-aarch64-\${AWS_CLI_VERSION}.zip\\"",
-        "unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --install-dir /opt/aws-cli --bin-dir /opt/aws-cli/bin",
-        "curl -fsSL -o /tmp/gitleaks.tar.gz \\"https://github.com/gitleaks/gitleaks/releases/download/v\${GITLEAKS_VERSION}/gitleaks_\${GITLEAKS_VERSION}_linux_arm64.tar.gz\\"",
-        "echo \\"\${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz\\" | sha256sum -c -",
-        "mkdir -p /opt/gitleaks && tar -xzf /tmp/gitleaks.tar.gz -C /opt/gitleaks gitleaks",
-        "export PATH=\\"/opt/node/bin:/opt/aws-cli/bin:/opt/gitleaks:$PATH\\"",
-        "node --version && npm --version && aws --version && gitleaks version && docker buildx version"
-      ]
-    },
-    "pre_build": {
-      "commands": [
-        "npm ci"
-      ]
-    },
-    "build": {
-      "commands": [
-        "if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara --github-app-stack AgentXControlPlane --region \\"$AWS_REGION\\"; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; mkdir -p ~/.aws && printf '[profile agentx-staging]\\\\nrole_arn = %s\\\\ncredential_source = EcsContainer\\\\nrole_session_name = staging-release\\\\nregion = %s\\\\n' \\"$STAGING_RELEASE_ROLE_ARN\\" \\"$AWS_REGION\\" >> ~/.aws/config && aws sts get-caller-identity --profile agentx-staging && npm run release:prod -- --region \\"$AWS_REGION\\" --profile agentx-staging --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS"
-      ]
-    }
-  },
-  "artifacts": {
-    "files": [
-      "cdk.out/agentx-production-release.json"
-    ],
-    "discard-paths": "yes"
-  }
-}",
-              ],
-            ],
-          },
-          "Type": "CODEPIPELINE",
-        },
-        "TimeoutInMinutes": 120,
-      },
-      "Type": "AWS::CodeBuild::Project",
-    },
-    "StagingReleaseBuildRoleA05F506A": {
-      "Properties": {
-        "AssumeRolePolicyDocument": {
-          "Statement": [
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Principal": {
-                "Service": "codebuild.amazonaws.com",
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "Description": "The staging release build: CI's proof in this account, then the release as the staging account's release role",
-        "RoleName": "agentx-release-staging-build",
-      },
-      "Type": "AWS::IAM::Role",
-    },
-    "StagingReleaseBuildRoleDefaultPolicy4560FEE3": {
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": [
-                "logs:CreateLogStream",
-                "logs:PutLogEvents",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "ReleaseBuildLogsD2C04AA9",
-                  "Arn",
-                ],
-              },
-            },
-            {
-              "Action": [
-                "logs:CreateLogGroup",
-                "logs:CreateLogStream",
-                "logs:PutLogEvents",
-              ],
-              "Effect": "Allow",
-              "Resource": [
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":logs:us-east-1:",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":log-group:/aws/codebuild/",
-                      {
-                        "Ref": "StagingReleaseBuild619757B0",
-                      },
-                    ],
-                  ],
-                },
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":logs:us-east-1:",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":log-group:/aws/codebuild/",
-                      {
-                        "Ref": "StagingReleaseBuild619757B0",
-                      },
-                      ":*",
-                    ],
-                  ],
-                },
-              ],
-            },
-            {
-              "Action": [
-                "codebuild:CreateReportGroup",
-                "codebuild:CreateReport",
-                "codebuild:UpdateReport",
-                "codebuild:BatchPutTestCases",
-                "codebuild:BatchPutCodeCoverages",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":codebuild:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":report-group/",
-                    {
-                      "Ref": "StagingReleaseBuild619757B0",
-                    },
-                    "-*",
-                  ],
-                ],
-              },
-            },
-            {
-              "Action": "secretsmanager:GetSecretValue",
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":secretsmanager:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":secret:agentx/github-apps/*",
-                  ],
-                ],
-              },
-              "Sid": "ReadGithubAppKeyForCiProof",
-            },
-            {
-              "Action": "cloudformation:DescribeStacks",
-              "Effect": "Allow",
-              "Resource": [
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":cloudformation:us-east-1:",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":stack/AgentXControlPlane/*",
-                    ],
-                  ],
-                },
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":cloudformation:us-east-1:",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":stack/AgentXProductionFoundation/*",
-                    ],
-                  ],
-                },
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":cloudformation:us-east-1:",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":stack/AgentXProductionRuntime/*",
-                    ],
-                  ],
-                },
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":cloudformation:us-east-1:",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":stack/AgentXSlackOrchestrator/*",
-                    ],
-                  ],
-                },
-              ],
-              "Sid": "ReadReleaseStacks",
-            },
-            {
-              "Action": [
-                "codeconnections:UseConnection",
-                "codestar-connections:UseConnection",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Ref": "GitHubConnectionArn",
-              },
-            },
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":iam::",
-                    {
-                      "Ref": "StagingAccountId",
-                    },
-                    ":role/agentx-staging-release",
-                  ],
-                ],
-              },
-              "Sid": "AssumeStagingReleaseRole",
-            },
-            {
-              "Action": [
-                "s3:GetObject*",
-                "s3:GetBucket*",
-                "s3:List*",
-                "s3:DeleteObject*",
-                "s3:PutObject",
-                "s3:PutObjectLegalHold",
-                "s3:PutObjectRetention",
-                "s3:PutObjectTagging",
-                "s3:PutObjectVersionTagging",
-                "s3:Abort*",
-              ],
-              "Effect": "Allow",
-              "Resource": [
-                {
-                  "Fn::GetAtt": [
-                    "Artifacts82DD59A1",
-                    "Arn",
-                  ],
-                },
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      {
-                        "Fn::GetAtt": [
-                          "Artifacts82DD59A1",
-                          "Arn",
-                        ],
-                      },
-                      "/*",
-                    ],
-                  ],
-                },
-              ],
-            },
-            {
-              "Action": "codestar-connections:UseConnection",
-              "Effect": "Allow",
-              "Resource": {
-                "Ref": "GitHubConnectionArn",
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "PolicyName": "StagingReleaseBuildRoleDefaultPolicy4560FEE3",
-        "Roles": [
-          {
-            "Ref": "StagingReleaseBuildRoleA05F506A",
           },
         ],
       },
