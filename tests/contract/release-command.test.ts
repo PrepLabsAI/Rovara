@@ -330,10 +330,10 @@ describe("the release's test suite as root (CodeBuild)", () => {
   }
   const { uid, gid, home } = RELEASE_TEST_ACCOUNT;
 
-  it("runs the tests directly when the release is not root", () => {
+  it("runs the tests directly when the release is not root, the nightly-only ones too", () => {
     const { runner, calls } = recorder();
     runTests(runner, 501);
-    expect(calls).toEqual([["npm", "test"]]);
+    expect(calls).toEqual([["npm", "test"], ["npm", "run", "test:nightly"]]);
   });
 
   it("runs them as nobody when it is root, and gives the checkout back to root", () => {
@@ -343,10 +343,13 @@ describe("the release's test suite as root (CodeBuild)", () => {
       ["mkdir", "-p", home],
       ["chown", "-R", `${String(uid)}:${String(gid)}`, process.cwd(), home],
       ["as", "npm", "test"],
+      ["as", "npm", "run", "test:nightly"],
       ["chown", "-R", "0:0", process.cwd()],
     ]);
-    const account = calls[2]![1] as { uid: number; gid: number; env: NodeJS.ProcessEnv };
-    expect([account.uid, account.gid, account.env.HOME, calls[2]!.slice(2)]).toEqual([uid, gid, home, ["npm", "test"]]);
+    for (const [index, command] of [[2, ["npm", "test"]], [3, ["npm", "run", "test:nightly"]]] as const) {
+      const account = calls[index]![1] as { uid: number; gid: number; env: NodeJS.ProcessEnv };
+      expect([account.uid, account.gid, account.env.HOME, calls[index]!.slice(2)]).toEqual([uid, gid, home, command]);
+    }
   });
 
   it("still gives the checkout back to root when the tests fail", () => {
