@@ -12,8 +12,13 @@ import { WorkerSettingsStack } from "../../infra/lib/worker-settings.js";
 import {
   AGENTX_RELEASE_PROJECT_NAME,
   AGENTX_RELEASE_TRIGGER_PATHS,
+  AGENTX_STAGING_BUILD_ROLE_NAME,
+  AGENTX_STAGING_RELEASE_PROJECT_NAME,
+  AGENTX_STAGING_RELEASE_ROLE_NAME,
+  PROMOTION_GATE_REASON,
   ReleasePipelineStack,
 } from "../../infra/lib/release-pipeline.js";
+import { StagingReleaseAccessStack } from "../../infra/lib/staging-release-access.js";
 import { SlackOrchestratorStack } from "../../infra/lib/slack-orchestrator.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
@@ -439,10 +444,12 @@ describe("production release pipeline", () => {
   const statements = policies.flatMap((policy) => policy.Properties.PolicyDocument.Statement);
   const actionsOf = (statement: Statement) => [statement.Action].flat();
 
-  it("starts a V2 pipeline only for filtered mainline pushes, with a full Git clone, releasing each merge in turn", () => {
+  it("starts a V2 pipeline only for filtered mainline pushes, with a full Git clone, staging first and production behind a disabled transition", () => {
     template.hasResourceProperties("AWS::CodePipeline::Pipeline", {
       PipelineType: "V2",
-      ExecutionMode: "QUEUED",
+      // #1242: a run waiting at the disabled transition is replaced by a newer one only in SUPERSEDED mode, so a promotion takes staging's newest commit.
+      ExecutionMode: "SUPERSEDED",
+      DisableInboundStageTransitions: [{ StageName: "Production", Reason: PROMOTION_GATE_REASON }],
       Triggers: [{
         ProviderType: "CodeStarSourceConnection",
         GitConfiguration: {
@@ -466,6 +473,67 @@ describe("production release pipeline", () => {
       })]),
     });
     template.resourceCountIs("AWS::KMS::Key", 0);
+    const [pipeline] = Object.values(template.findResources("AWS::CodePipeline::Pipeline")) as Array<{
+      Properties: { Stages: Array<{ Name: string; Actions: Array<{ Name: string; Configuration: { ProjectName: unknown } }> }> };
+    }>;
+    expect(pipeline?.Properties.Stages.map((stage) => `${stage.Name}:${stage.Actions.map((action) => action.Name).join(",")}`))
+      .toEqual(["Source:GitHub", "Staging:ReleaseStaging", "Production:ReleaseProduction"]);
+  });
+
+  it("gives the transition into Production a reason CodePipeline accepts", () => {
+    // CodePipeline refuses any other character in a transition's reason (DisableStageTransition), and the release passes the same text.
+    expect(PROMOTION_GATE_REASON).toMatch(/^[a-zA-Z0-9!@ ().*?-]{1,300}$/u);
+  });
+
+  const projects = Object.values(template.findResources("AWS::CodeBuild::Project")) as Array<{
+    Properties: { Name: string; Source: { BuildSpec: unknown }; ServiceRole: unknown };
+  }>;
+  /** A build spec as text; the staging one is a join around the staging account parameter. */
+  const buildSpecOf = (name: string): string => {
+    const spec = projects.find((project) => project.Properties.Name === name)?.Properties.Source.BuildSpec;
+    if (typeof spec === "string") return spec;
+    const parts = (spec as { "Fn::Join"?: [string, unknown[]] } | undefined)?.["Fn::Join"]?.[1] ?? [];
+    return parts.map((part) => (typeof part === "string" ? part : "<token>")).join("");
+  };
+
+  it("closes the gate first in the production release, so one promotion lets in one commit", () => {
+    const buildSpec = buildSpecOf(AGENTX_RELEASE_PROJECT_NAME);
+    const install = buildSpec.indexOf('"install"');
+    const close = buildSpec.indexOf("aws codepipeline disable-stage-transition --pipeline-name AgentXProductionRelease --stage-name Production --transition-type Inbound");
+    expect(close).toBeGreaterThan(install);
+    expect(close).toBeLessThan(buildSpec.indexOf("node_version="));
+    expect(statements.find((statement) => statement.Sid === "ClosePromotionGate")?.Action).toEqual("codepipeline:DisableStageTransition");
+    expect(buildSpec).not.toContain("--profile");
+  });
+
+  it("runs the staging release in the staging account, as its release role, after CI's proof in this account", () => {
+    template.hasResourceProperties("AWS::CodeBuild::Project", {
+      Name: AGENTX_STAGING_RELEASE_PROJECT_NAME,
+      ConcurrentBuildLimit: 1,
+      TimeoutInMinutes: 120,
+      Environment: Match.objectLike({ Type: "ARM_CONTAINER", ComputeType: "BUILD_GENERAL1_LARGE", PrivilegedMode: true }),
+    });
+    template.hasResourceProperties("AWS::IAM::Role", { RoleName: AGENTX_STAGING_BUILD_ROLE_NAME });
+    template.hasParameter("StagingAccountId", { Type: "String", AllowedPattern: "^[0-9]{12}$" });
+    const buildSpec = buildSpecOf(AGENTX_STAGING_RELEASE_PROJECT_NAME);
+    expect(buildSpec).not.toContain("disable-stage-transition");
+    const proof = buildSpec.indexOf("node scripts/release-ci-proof.ts");
+    const profile = buildSpec.indexOf("[profile agentx-staging]");
+    expect(proof).toBeGreaterThan(-1);
+    expect(profile).toBeGreaterThan(proof);
+    expect(buildSpec).toContain("credential_source = EcsContainer");
+    expect(buildSpec).toContain(`:role/${AGENTX_STAGING_RELEASE_ROLE_NAME}`);
+    expect(buildSpec).toContain('npm run release:prod -- --region \\"$AWS_REGION\\" --profile agentx-staging --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS');
+    expect(buildSpec.match(/--skip-checks/gu)).toHaveLength(1);
+    expect(buildSpec).not.toMatch(/--allow-dirty/);
+    // The staging build's own rights: CI's proof here, and the staging account's release role; nothing that deploys in this account.
+    const stagingPolicy = Object.values(template.findResources("AWS::IAM::Policy")).find((policy) =>
+      JSON.stringify((policy as { Properties: { Roles: unknown } }).Properties.Roles).includes("StagingReleaseBuildRole")) as
+      { Properties: { PolicyDocument: { Statement: Statement[] } } } | undefined;
+    const sids = (stagingPolicy?.Properties.PolicyDocument.Statement ?? []).map((statement) => statement.Sid).filter(Boolean);
+    expect(sids).toEqual(expect.arrayContaining(["ReadGithubAppKeyForCiProof", "ReadReleaseStacks", "AssumeStagingReleaseRole"]));
+    expect(sids).not.toContain("AssumeCdkBootstrapRoles");
+    expect(sids).not.toContain("ProductionWorkerRepository");
   });
 
   it("runs the checked production release on one native ARM Docker build at a time", () => {
@@ -481,10 +549,7 @@ describe("production release pipeline", () => {
       }),
     });
     template.hasResourceProperties("AWS::Logs::LogGroup", { RetentionInDays: 30 });
-    const [project] = Object.values(template.findResources("AWS::CodeBuild::Project")) as Array<{
-      Properties: { Source: { BuildSpec: string } };
-    }>;
-    const buildSpec = project?.Properties.Source.BuildSpec ?? "";
+    const buildSpec = buildSpecOf(AGENTX_RELEASE_PROJECT_NAME);
     expect(buildSpec).toContain("npm run release:prod");
     // #1145: --skip-checks only behind the CI proof; without it every check runs.
     expect(buildSpec).toContain("if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara --github-app-stack AgentXControlPlane --region ");
@@ -504,8 +569,9 @@ describe("production release pipeline", () => {
     expect(buildSpec).toContain('"NODE_OPTIONS": "--max-old-space-size=8192"');
   });
 
-  it("keeps the release project outside the broker's CodeBuild gate allow-list", () => {
+  it("keeps the release projects outside the broker's CodeBuild gate allow-list", () => {
     expect(AGENTX_RELEASE_PROJECT_NAME).not.toMatch(/^agentx-/i);
+    expect(AGENTX_STAGING_RELEASE_PROJECT_NAME).not.toMatch(/^agentx-/i);
   });
 
   it("grants no wildcard actions and scopes release permissions to production resources", () => {
@@ -526,6 +592,35 @@ describe("production release pipeline", () => {
     expect(json).toContain("codeconnections:UseConnection");
     expect(json).not.toMatch(/bedrock-[a-z]+:/);
     expect(actions).not.toContain("cloudformation:CreateStack");
+  });
+});
+
+describe("staging release access (#1242)", () => {
+  const template = Template.fromStack(new StagingReleaseAccessStack(new App(), "TestStagingReleaseAccess", { env: { region: "us-east-1" } }));
+  const statements = (Object.values(template.findResources("AWS::IAM::Policy")) as Array<{
+    Properties: { PolicyDocument: { Statement: Array<{ Sid?: string; Action: string | string[]; Resource: unknown }> } };
+  }>).flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+
+  it("trusts only the release account's staging build role", () => {
+    template.hasParameter("ReleaseAccountId", { Type: "String", AllowedPattern: "^[0-9]{12}$" });
+    const [role] = Object.values(template.findResources("AWS::IAM::Role")) as Array<{
+      Properties: { RoleName: string; AssumeRolePolicyDocument: { Statement: Array<{ Principal: unknown; Condition: unknown }> } };
+    }>;
+    expect(role?.Properties.RoleName).toBe(AGENTX_STAGING_RELEASE_ROLE_NAME);
+    expect(role?.Properties.AssumeRolePolicyDocument.Statement).toHaveLength(1);
+    const trust = JSON.stringify(role?.Properties.AssumeRolePolicyDocument.Statement[0]);
+    expect(trust).toContain('"ArnEquals":{"aws:PrincipalArn"');
+    expect(trust).toContain(`:role/${AGENTX_STAGING_BUILD_ROLE_NAME}`);
+    expect(trust).toContain('{"Ref":"ReleaseAccountId"}');
+  });
+
+  it("has the production release build's rights in its own account and nothing more", () => {
+    expect(statements.map((statement) => statement.Sid)).toEqual(["AssumeCdkBootstrapRoles", "EcrAuthorization", "ReleaseImageRepositories", "ReadReleaseStacks"]);
+    const actions = statements.flatMap((statement) => [statement.Action].flat());
+    expect(actions.filter((action) => action === "*" || action.endsWith(":*"))).toEqual([]);
+    expect(statements.filter((statement) => statement.Resource === "*").flatMap((statement) => [statement.Action].flat())).toEqual(["ecr:GetAuthorizationToken"]);
+    expect(actions).not.toContain("secretsmanager:GetSecretValue");
+    expect(actions).not.toContain("ecr:CreateRepository");
   });
 });
 

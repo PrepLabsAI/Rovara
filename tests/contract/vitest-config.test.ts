@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import config from "../../vitest.config.js";
 import nativeP0Config from "../../vitest.native-p0.config.js";
 import nightlyConfig from "../../vitest.nightly.config.js";
-import { nativeP0Files, nightlyOnlyFiles, postDeployFiles } from "../support/vitest-shared-config.js";
+import { moduleMockingFiles, nativeP0Files, nightlyOnlyFiles, postDeployFiles } from "../support/vitest-shared-config.js";
 
 describe("the test runner's configuration", () => {
   it("gives every test, CDK synths included, 60 seconds", () => {
@@ -24,6 +24,9 @@ describe("the test runner's configuration", () => {
     expect(nightlyOnlyFiles).toContain("tests/unit/eval-question-simulation.test.ts");
     // #1236: the detectors' growth check runs nightly, and in a pull request only when the change reaches it.
     expect(nightlyOnlyFiles).toContain("tests/unit/worker-env-detect-growth.test.ts");
+    // #1256: and the 256 KiB hostile-file sweep, split from worker-env-detect-hardening (whose fast checks run in every run).
+    expect(nightlyOnlyFiles).toContain("tests/unit/worker-env-detect-redos.test.ts");
+    expect(nightlyOnlyFiles).not.toContain("tests/unit/worker-env-detect-hardening.test.ts");
     expect(nightlyOnlyFiles).toContain("tests/unit/local-up-flow.test.ts");
     // Every workflow-e2e suite, read from the folder, so a new one is nightly-only too.
     const workflowE2e = readdirSync("tests/integration/workflow-e2e").filter((name) => name.endsWith(".test.ts")).map((name) => `tests/integration/workflow-e2e/${name}`);
@@ -50,5 +53,19 @@ describe("the test runner's configuration", () => {
       if (previous === undefined) delete process.env.ROVARA_NIGHTLY_TESTS; else process.env.ROVARA_NIGHTLY_TESTS = previous;
     }
     expect(nightlyConfig.test?.include).toEqual(expect.arrayContaining(postDeployFiles));
+  });
+
+  it("puts the files that mock modules, themselves or through a helper under tests/, in their own project; both projects still give every file fresh modules", () => {
+    type Project = { test?: { name?: string; include?: string[]; exclude?: string[]; isolate?: boolean } };
+    const projects = (config.test?.projects ?? []) as Project[];
+    expect(projects.map((project) => project.test?.name)).toEqual(["fresh-modules", "shared-modules"]);
+    for (const project of projects) expect(project.test?.isolate, project.test?.name).toBe(true);
+    const [fresh, shared] = projects as [Project, Project];
+    expect(fresh.test?.include).toEqual(moduleMockingFiles);
+    expect(shared.test?.exclude).toEqual(expect.arrayContaining(moduleMockingFiles));
+    // A file that calls vi.mock itself, and one that mocks only through tests/support/core-context-world.ts.
+    expect(moduleMockingFiles).toContain("tests/contract/core-admin-stop-company.test.ts");
+    expect(moduleMockingFiles).toContain("tests/integration/core-context-routes.test.ts");
+    expect(moduleMockingFiles).not.toContain("tests/unit/core-sqs-reflect-wiring.test.ts");
   });
 });
