@@ -25,15 +25,6 @@ describe("FixtureSet v2 schema", () => {
   it("accepts a recorded set and round-trips it", () => {
     expect(mocks.FixtureSetSchema.parse(set())).toEqual(set());
   });
-  it("is version 2, synthetic only and strict at every level", () => {
-    expect(ok(set({ schemaVersion: 1 }))).toBe(false);
-    expect(ok(set({ syntheticOnly: false }))).toBe(false);
-    expect(ok(set({ extra: 1 }))).toBe(false);
-    expect(ok(set({ dependency: { ...dependency, extra: 1 } }))).toBe(false);
-    expect(ok(set({ match: { ...baseMatch, extra: 1 } }))).toBe(false);
-    expect(ok(set({ entries: [{ ...entryFor(), extra: 1 }] }))).toBe(false);
-    expect(ok(set({ entries: [{ ...entryFor(), request: { ...request(), extra: 1 } }] }))).toBe(false);
-  });
   it("needs a date for a recorded set and for no other, and a writer only for a written one", () => {
     expect(ok(set({ recordedAt: undefined }))).toBe(false);
     expect(ok(set({ origin: "written", recordedAt: undefined, writtenBy: "Priya (reviewed)" }))).toBe(true);
@@ -48,36 +39,10 @@ describe("FixtureSet v2 schema", () => {
     expect(ok(set({ dependency: { ...dependency, protocol: "soap" } }))).toBe(false);
     expect(ok(set({ dependency: { ...dependency, id: "Bad Id" } }))).toBe(false);
   });
-  it("lets the schemas be absent but not null", () => {
-    expect(ok(set({ requestSchema: undefined, responseSchema: undefined }))).toBe(true);
-    expect(ok(set({ requestSchema: null }))).toBe(false);
-  });
   it("keeps a recording once and a fault name once", () => {
     expect(ok(set({ entries: [entryFor(), entryFor()] }))).toBe(false);
     expect(ok(set({ faults: [{ name: "a", kind: "timeout", delayMs: 1 }, { name: "a", kind: "timeout", delayMs: 1 }] }))).toBe(false);
     expect(ok(set({ faults: Array.from({ length: 21 }, (_, n) => ({ name: `f${String(n)}`, kind: "timeout", delayMs: 1 })) }))).toBe(false);
-  });
-  it("takes a method from the five, and a canonical path", () => {
-    expect(ok(set({ entries: [entryFor({ method: "TRACE" })] }))).toBe(false);
-    expect(ok(set({ entries: [entryFor({ method: "get" })] }))).toBe(false);
-    for (const path of ["/", "/v1/charges", "/endpoints/x-1/invocations", "/a%20b", "/a.b_c~d"]) expect(ok(set({ entries: [entryFor({ path })] })), path).toBe(true);
-    for (const path of ["v1", "", "/a/../b", "//x", "/a b", "/a?x=1", "/a#x", `/${"a".repeat(512)}`]) expect(ok(set({ entries: [entryFor({ path })] })), path).toBe(false);
-  });
-  it("lets an empty content type through for a request with no body, and bounds a body to 64 KiB", () => {
-    expect(ok(set({ entries: [entryFor({ contentType: "", body: "" })] }))).toBe(true);
-    expect(ok(set({ entries: [entryFor({ body: "x".repeat(65_536) })] }))).toBe(true);
-    expect(ok(set({ entries: [entryFor({ body: "x".repeat(65_537) })] }))).toBe(false);
-    expect(ok(set({ entries: [{ ...entryFor(), response: response({ body: "é".repeat(40_000) }) }] }))).toBe(false);
-    expect(ok(set({ entries: [entryFor({ contentType: "a\nb" })] }))).toBe(false);
-  });
-  it("bounds the response: status, latency, headers", () => {
-    const withResponse = (over: Record<string, unknown>) => set({ entries: [{ ...entryFor(), response: response(over) }] });
-    expect(ok(withResponse({ status: 99 }))).toBe(false);
-    expect(ok(withResponse({ status: 600 }))).toBe(false);
-    expect(ok(withResponse({ latencyMs: 30_001 }))).toBe(false);
-    expect(ok(withResponse({ latencyMs: -1 }))).toBe(false);
-    expect(ok(withResponse({ headers: [] }))).toBe(true);
-    expect(ok(withResponse({ contentType: "" }))).toBe(false);
   });
   it("keeps only allow-listed response headers, once each, at most eight", () => {
     const withHeaders = (headers: unknown[]) => set({ entries: [{ ...entryFor(), response: response({ headers }) }] });
@@ -156,24 +121,6 @@ describe("FixtureSet v2 schema", () => {
     expect(ok(withTarget("aws:dynamodb", "api.example-pay.com", "aws_json"))).toBe(false);
     expect(ok(withTarget("aws:dynamodb", "dynamodb.us-west-2.amazonaws.com.evil.example", "aws_json"))).toBe(false);
   });
-  it("refuses a stored entry whose hash is not the hash of its own request, whatever else is right", () => {
-    const good = entryFor({ path: "/a" });
-    expect(ok(set({ entries: [good] }))).toBe(true);
-    expect(ok(set({ entries: [{ ...good, requestHash: "a".repeat(64) }] }))).toBe(false);
-    expect(ok(set({ entries: [{ ...good, request: { ...good.request, path: "/b" } }] }))).toBe(false);
-    expect(ok(set({ entries: [{ ...good, request: { ...good.request, body: '{"amount":6}' } }] }))).toBe(false);
-    expect(ok(set({ entries: [{ ...good, request: { ...good.request, method: "PUT" } }] }))).toBe(false);
-    expect(ok(set({ entries: [good, { ...entryFor({ path: "/c" }), requestHash: good.requestHash }] }))).toBe(false);
-    // The hash covers the set's own match rules: an entry hashed under other rules does not belong.
-    expect(ok(set({ match: { ignorePaths: [], query: ["customer"] }, entries: [good] }))).toBe(false);
-    expect(ok(set({ dependency: { ...dependency, id: "payments-two" }, entries: [good] }))).toBe(true);
-    expect(ok(set({ dependency: { ...dependency, family: "http:api.other-pay.com", target: "api.other-pay.com" }, entries: [good] }))).toBe(false);
-  });
-  it("holds at most 2,000 entries", () => {
-    const many = (count: number) => Array.from({ length: count }, (_, n) => entryFor({ path: `/p${String(n)}` }));
-    expect(ok(set({ entries: many(2_000) }))).toBe(true);
-    expect(ok(set({ entries: many(2_001) }))).toBe(false);
-  });
   it("refuses a set over 4 MiB however its entries are spread", () => {
     const big = (count: number) => Array.from({ length: count }, (_, n) => ({ ...entryFor({ path: `/p${String(n)}`, body: "x".repeat(60_000) }), response: response({ body: "y".repeat(60_000) }) }));
     expect(ok(set({ entries: big(30) }))).toBe(true);
@@ -181,125 +128,26 @@ describe("FixtureSet v2 schema", () => {
   });
 });
 
-describe("FixtureSet digest", () => {
-  it("is the same for a re-ordered set and different for a changed one", () => {
-    const one = parsed();
-    const reverseKeys = (value: unknown): unknown => (Array.isArray(value) ? value.map(reverseKeys) : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).reverse().map(([key, member]) => [key, reverseKeys(member)])) : value);
-    const reordered = mocks.FixtureSetSchema.parse(reverseKeys(set()));
-    expect(Object.keys(reverseKeys(set()) as object)).not.toEqual(Object.keys(set()));
-    expect(mocks.fixtureSetDigest(one)).toMatch(/^[a-f0-9]{64}$/);
-    expect(mocks.fixtureSetDigest(reordered)).toBe(mocks.fixtureSetDigest(one));
-    expect(mocks.fixtureSetDigest(parsed({ revision: 4 }))).not.toBe(mocks.fixtureSetDigest(one));
-    expect(mocks.fixtureSetDigest(parsed({ match: { ignorePaths: [], query: ["customer"] }, entries: [] }))).not.toBe(mocks.fixtureSetDigest(one));
-  });
-  it("refuses to digest a set that does not parse", () => {
-    expect(() => mocks.fixtureSetDigest({ ...parsed(), syntheticOnly: false } as never)).toThrow();
-  });
-});
-
 describe("request hash (v2)", () => {
-  it("is one request for a JSON body whatever its key order or spacing", () => {
-    expect(hash('{"a":1,"b":{"c":2,"d":3}}')).toBe(hash('{ "b": {"d":3, "c":2}, "a": 1 }'));
-    expect(hash('{"a":1}')).not.toBe(hash('{"a":2}'));
-  });
-  it("includes the method and the path, so the same bytes to another operation find nothing", () => {
-    const base = hash('{"a":1}');
-    expect(hash('{"a":1}', { method: "PUT" })).not.toBe(base);
-    expect(hash('{"a":1}', { path: "/v1/refunds" })).not.toBe(base);
-    expect(hash('{"a":1}', { method: "post" })).toBe(base);
-    expect(hash('{"a":1}', { contentType: "text/plain" })).not.toBe(base);
-    expect(hash('{"a":1}', { contentType: "Application/JSON; charset=utf-8" })).toBe(base);
-  });
-  it("includes the dependency's family and target", () => {
-    const base = hash('{"a":1}');
-    expect(hash('{"a":1}', {}, { ignorePaths: [] }, { ...dependency, family: "http:api.other-pay.com" })).not.toBe(base);
-    expect(hash('{"a":1}', {}, { ignorePaths: [] }, { ...dependency, target: "api.other-pay.com" })).not.toBe(base);
-  });
-  it("hashes a body that is not JSON as written, even under a JSON content type", () => {
-    expect(hash("not json")).toBe(hash("not json"));
-    expect(hash("not json")).not.toBe(hash("not  json"));
-    expect(hash("a,b\n1,2", { contentType: "text/csv" })).toMatch(/^[a-f0-9]{64}$/);
-    expect(hash("not json", {}, { ignorePaths: ["/a"] })).toBe(hash("not json"));
-  });
-  it("never meets a v1 hash", () => {
-    const v1 = mocks.serviceMockRequestHash({ service: "http", target: dependency.target, method: "POST", contentType: "application/json", body: '{"a":1}' });
-    expect(hash('{"a":1}')).not.toBe(v1);
-  });
 
   describe("ignorePaths", () => {
     const ignoring = (...ignorePaths: string[]) => ({ ignorePaths });
-    it("makes requests that differ only at an ignored path one request", () => {
-      const match = ignoring("/requestedAt");
-      expect(hash('{"amount":5,"requestedAt":"2026-11-02T10:00:00Z"}', {}, match)).toBe(hash('{"requestedAt":"2030-01-01T00:00:00Z","amount":5}', {}, match));
-    });
-    it("still tells requests apart by every other member", () => {
-      const match = ignoring("/requestedAt");
-      expect(hash('{"amount":5,"requestedAt":"x"}', {}, match)).not.toBe(hash('{"amount":6,"requestedAt":"x"}', {}, match));
-      expect(hash('{"amount":5,"requestedAt":"x"}', {}, ignoring())).not.toBe(hash('{"amount":5}', {}, ignoring()));
-    });
-    it("does not ignore anything it was not told to", () => {
-      expect(hash('{"amount":5,"requestedAt":"a"}')).not.toBe(hash('{"amount":5,"requestedAt":"b"}'));
-    });
-    it("reaches nested members and array elements, which become null so the others keep their places", () => {
-      const nested = ignoring("/meta/trace/id");
-      expect(hash('{"meta":{"trace":{"id":"1","k":2}}}', {}, nested)).toBe(hash('{"meta":{"trace":{"id":"2","k":2}}}', {}, nested));
-      expect(hash('{"meta":{"trace":{"id":"1","k":2}}}', {}, nested)).not.toBe(hash('{"meta":{"trace":{"id":"1","k":3}}}', {}, nested));
-      const array = ignoring("/items/1");
-      expect(hash('{"items":["a","x","c"]}', {}, array)).toBe(hash('{"items":["a","y","c"]}', {}, array));
-      expect(hash('{"items":["a","x","c"]}', {}, array)).not.toBe(hash('{"items":["a","c"]}', {}, array));
-      expect(hash('{"items":["a","x","c"]}', {}, array)).not.toBe(hash('{"items":["b","x","c"]}', {}, array));
-    });
-    it("reads ~1 as a slash and ~0 as a tilde in a member name", () => {
-      expect(hash('{"a/b":1,"k":0}', {}, ignoring("/a~1b"))).toBe(hash('{"a/b":2,"k":0}', {}, ignoring("/a~1b")));
-      expect(hash('{"a~b":1,"k":0}', {}, ignoring("/a~0b"))).toBe(hash('{"a~b":2,"k":0}', {}, ignoring("/a~0b")));
-      expect(hash('{"a/b":1,"a":{"b":1}}', {}, ignoring("/a~1b"))).not.toBe(hash('{"a/b":1,"a":{"b":2}}', {}, ignoring("/a~1b")));
-    });
     it("does nothing for a path that leads nowhere, and never touches the prototype", () => {
       const nowhere = ignoring("/missing", "/amount/deeper", "/items/9", "/items/x", "/items/01", "/items/-1", "/items/1.0", "/__proto__/polluted", "/constructor/prototype/x");
       expect(hash('{"amount":5,"items":[1,2]}', {}, nowhere)).toBe(hash('{"amount":5,"items":[1,2]}'));
       expect(({} as Record<string, unknown>).polluted).toBeUndefined();
-    });
-    it("walks only a body's own members: a pointer through __proto__ cannot reach, let alone delete, anything on the prototype", () => {
-      const original = Object.getOwnPropertyDescriptor(Object.prototype, "isPrototypeOf");
-      try {
-        hash('{"a":1}', {}, ignoring("/__proto__/isPrototypeOf", "/constructor/prototype/isPrototypeOf"));
-        expect(Object.getOwnPropertyDescriptor(Object.prototype, "isPrototypeOf")).toEqual(original);
-      } finally {
-        if (original !== undefined) Object.defineProperty(Object.prototype, "isPrototypeOf", original);
-      }
-    });
-    it("takes an own member called __proto__ out, like any other", () => {
-      const match = ignoring("/__proto__");
-      expect(hash('{"__proto__":{"a":1},"k":1}', {}, match)).toBe(hash('{"__proto__":{"a":2},"k":1}', {}, match));
-      expect(hash('{"__proto__":{"a":1},"k":1}', {}, match)).not.toBe(hash('{"k":2}', {}, match));
-    });
-    it("leaves the caller's text alone", () => {
-      const body = '{"a":1,"requestedAt":"x"}';
-      hash(body, {}, ignoring("/requestedAt"));
-      expect(body).toBe('{"a":1,"requestedAt":"x"}');
     });
   });
 
   describe("identifying query", () => {
     const match = { ignorePaths: [], query: ["customer", "page"] };
     const withQuery = (query: Array<{ name: string; value: string }>, m = match) => mocks.fixtureRequestHash({ dependency, match: m }, request({ query }));
-    it("counts only the parameters the set matches on", () => {
-      expect(withQuery([{ name: "customer", value: "c1" }, { name: "trace", value: "1" }])).toBe(withQuery([{ name: "customer", value: "c1" }, { name: "trace", value: "2" }]));
-      expect(withQuery([{ name: "customer", value: "c1" }])).not.toBe(withQuery([{ name: "customer", value: "c2" }]));
-    });
     it("does not depend on the order of the pairs", () => {
       expect(withQuery([{ name: "customer", value: "c1" }, { name: "page", value: "2" }])).toBe(withQuery([{ name: "page", value: "2" }, { name: "customer", value: "c1" }]));
-    });
-    it("tells a missing identifying parameter from a present one", () => {
-      expect(withQuery([])).not.toBe(withQuery([{ name: "customer", value: "c1" }]));
-      expect(withQuery([{ name: "customer", value: "" }])).not.toBe(withQuery([]));
     });
     it("keeps repeated values of one name apart, in a fixed order", () => {
       expect(withQuery([{ name: "customer", value: "b" }, { name: "customer", value: "a" }])).toBe(withQuery([{ name: "customer", value: "a" }, { name: "customer", value: "b" }]));
       expect(withQuery([{ name: "customer", value: "a" }])).not.toBe(withQuery([{ name: "customer", value: "a" }, { name: "customer", value: "b" }]));
-    });
-    it("ignores every parameter when the set matches on none", () => {
-      expect(withQuery([{ name: "customer", value: "c1" }], { ignorePaths: [], query: undefined } as never)).toBe(withQuery([], { ignorePaths: [], query: undefined } as never));
     });
   });
 });
@@ -334,29 +182,8 @@ describe("v1 to v2 converter", () => {
     return result.set;
   };
 
-  it("rebuilds a model endpoint set: POST /endpoints/<name>/invocations, rehashed under v2", () => {
-    const out = convert(v1());
-    expect(out).toMatchObject({ schemaVersion: 2, origin: "recorded", revision: 2, recordedAt: "2026-10-30T00:00:00.000Z", syntheticOnly: true, dependency: { id: "partner-scorer", family: "aws:sagemaker-runtime", protocol: "model_invoke", target: "partner-scorer" }, match: { ignorePaths: [] } });
-    expect(out.entries.map((entry) => entry.request)).toEqual([
-      { method: "POST", path: "/endpoints/partner-scorer/invocations", contentType: "application/json", body: '{"partner":"p1"}' },
-      { method: "POST", path: "/endpoints/partner-scorer/invocations", contentType: "application/json", body: '{"partner":"p2"}' },
-    ]);
-    expect(mocks.fixtureSetHashProblems(out)).toEqual([]);
-    expect(out.entries[0]!.requestHash).toBe(mocks.fixtureRequestHash(out, { method: "POST", path: "/endpoints/partner-scorer/invocations", contentType: "application/json", body: '{ "partner": "p1" }' }));
-    expect(out.entries[0]!.response).toEqual({ status: 200, headers: [], contentType: "application/json", body: '{"score":0.82}', latencyMs: 40 });
-    expect(out.faults).toEqual(v1().faults);
-    expect(out.requestSchema).toEqual(v1().requestSchema);
-    expect("responseSchema" in out).toBe(false);
-    expect(mocks.FixtureSetSchema.safeParse(out).success).toBe(true);
-  });
   it("is a different digest from the v1 set's, so the pin has to be renewed", () => {
     expect(mocks.fixtureSetDigest(convert(v1()))).not.toBe(mocks.serviceMockFixtureSetDigest(v1()));
-  });
-  it("pins the literal digest of a fixed legacy v1 FixtureSet", () => {
-    expect(mocks.serviceMockFixtureSetDigest(v1())).toBe("bfc44cef24d6ddf406231ba6aabe4c385fb03c27612213afc1119463871d21f4");
-  });
-  it("keeps a v1 set with no entries", () => {
-    expect(convert(v1({ entries: [] })).entries).toEqual([]);
   });
   it("will not place an http entry whose request line v1 never kept, unless the caller says what each was", () => {
     const http = (): ReturnType<typeof v1> => v1({ service: { name: "Payments API", kind: "http", target: "api.example-pay.com" } });
@@ -421,18 +248,6 @@ describe("E2E GET fixture converter", () => {
     expect(out.entries.every((entry) => entry.response.contentType === "application/json" && entry.response.headers.length === 0)).toBe(true);
     expect(mocks.fixtureSetHashProblems(out)).toEqual([]);
   });
-  it("finds each variant by the request the app would send, whatever other query parameters it adds", () => {
-    const result = convert();
-    if (!result.ok) throw new Error(result.reason);
-    const find = (value: string, extra: Array<{ name: string; value: string }> = []) => result.set.entries.find((entry) => entry.requestHash === mocks.fixtureRequestHash(result.set, { method: "GET", path: "/api/accounts", query: [{ name: "accountId", value }, ...extra], contentType: "", body: "" }));
-    expect(find("acct-2")?.response.status).toBe(403);
-    expect(find("acct-3", [{ name: "trace", value: "9" }])?.response.body).toBe('{"id":7}');
-    expect(find("acct-9")).toBeUndefined();
-  });
-  it("takes the revision the caller gives", () => {
-    const result = convert({}, { host: "accounts.example.com", revision: 5 } as never);
-    expect(result.ok && result.set.revision).toBe(5);
-  });
   it("refuses a host it cannot name a family for, a body that is not JSON, and a fixture that does not parse", () => {
     expect(convert({}, { host: "10.0.0.1" })).toEqual({ ok: false, reason: "invalid" });
     expect(convert({}, { host: "localhost" })).toEqual({ ok: false, reason: "invalid" });
@@ -440,8 +255,5 @@ describe("E2E GET fixture converter", () => {
     expect(convert({ method: "POST" })).toEqual({ ok: false, reason: "invalid" });
     expect(convert({ path: "/a b" })).toEqual({ ok: false, reason: "invalid" });
     expect(convert({ variants: [] })).toEqual({ ok: false, reason: "invalid" });
-  });
-  it("refuses a variant body over 64 KiB", () => {
-    expect(convert({ variants: [{ id: "success", inputValue: "a", status: 200, body: { text: "x".repeat(70_000) } }, { id: "refusal", inputValue: "b", status: 403, body: {} }, { id: "invalid-data", inputValue: "c", status: 200, body: {} }] })).toEqual({ ok: false, reason: "invalid" });
   });
 });

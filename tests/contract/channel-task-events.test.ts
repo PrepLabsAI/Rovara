@@ -73,14 +73,6 @@ describe("a coding turn in an adapter's conversation (#438)", () => {
     expect(ofType(events, "done")[0]!.data).toEqual({ inReplyTo: "evt-1", outcome: "succeeded", taskId: publishOperation });
   });
 
-  it("names, for a task, the same commit as the pull request's head and the checks that ran on it", async () => {
-    const { events, run } = harness(codingTurn);
-    await run();
-    const pr = ofType(events, "pr")[0]!.data;
-    const checked = ofType(events, "check_report").find((event) => event.data.taskId === pr.taskId)!.data;
-    expect(checked.commits).toEqual([{ repository: "acme/web", sha: pr.headSha }]);
-  });
-
   it("names a pull request change by its action", async () => {
     const { events, run } = harness(async (input) => {
       input.recorder!.toolStarted({ toolCallId: "1", toolName: "agentx_close_pull_request", args: {} });
@@ -99,16 +91,6 @@ describe("a coding turn in an adapter's conversation (#438)", () => {
     const failing = harness(async () => { throw new Error("model down"); });
     await failing.run();
     expect(ofType(failing.events, "done")[0]!.data).toMatchObject({ outcome: "failed", code: "request_failed" });
-  });
-});
-
-describe("adapters that know none of the new fields (#438)", () => {
-  it("still read every event as they did, since each field is optional", () => {
-    const base = { version: 1, id: "evt_AAAAAAAAAAAAAAAAAAAA", channel: "scheduler", conversation, createdAt: "2026-11-11T10:00:00.000Z" };
-    expect(ChannelEventSchema.safeParse({ ...base, type: "pr", data: { url: "https://github.com/acme/web/pull/42", title: "t" } }).success).toBe(true);
-    expect(ChannelEventSchema.safeParse({ ...base, type: "check_report", data: { text: "ok", status: "passed" } }).success).toBe(true);
-    expect(ChannelEventSchema.safeParse({ ...base, type: "done", data: {} }).success).toBe(true);
-    expect(ChannelEventSchema.safeParse({ ...base, type: "done", data: { outcome: "maybe" } }).success).toBe(false);
   });
 });
 

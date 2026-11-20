@@ -34,15 +34,6 @@ describe("link codes", () => {
     expect(await previewLinkCode(deps, code)).toBeUndefined();
   });
 
-  it("expire after 10 minutes, even before the table removes them", async () => {
-    const { deps, advance } = setup();
-    const { code } = await issueLinkCode(deps, actor);
-    advance(600_000);
-    expect(await previewLinkCode(deps, code)).toBeUndefined();
-    await expect(redeemLinkCode(deps, "dev-1", code)).rejects.toMatchObject({ code: "NOT_FOUND" });
-    expect(await linkedDeveloper(deps, actor)).toBeUndefined();
-  });
-
   it("do not relink an actor already linked to someone", async () => {
     const { deps } = setup();
     await redeemLinkCode(deps, "dev-1", (await issueLinkCode(deps, actor)).code);

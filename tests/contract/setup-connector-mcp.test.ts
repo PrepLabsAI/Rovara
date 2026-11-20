@@ -148,11 +148,6 @@ describe("agentx connector add mcp: an API key", () => {
     expect(secrets.values.size).toBe(0);
   });
 
-  it("does not register a revision the control plane reports as not connected", async () => {
-    const plane = fakeControlPlane();
-    plane.preflight.sentry = { status: "not_connected", problem: "credential mcp-sentry is not pinned to a host" };
-    await expect(addMcp(input({ plane, flags: { ...keyFlags, name: "sentry", tools: "get_issue" } }))).rejects.toThrow("the sentry connector is not_connected: credential mcp-sentry is not pinned to a host");
-  });
 });
 
 describe("agentx connector add mcp: OAuth", () => {

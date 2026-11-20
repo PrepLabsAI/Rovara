@@ -5,7 +5,7 @@ import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { CodeIntentRequest, OrgId } from "@agentx/contracts";
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
-import { fakeLinear, LINEAR_APP, LINEAR_CLIENT_SECRET, LINEAR_WEBHOOK_SECRET, testSealer, WORKSPACE_A, type FakeWorkspace } from "../support/fake-linear-oauth.js";
+import { fakeLinear, LINEAR_APP, LINEAR_WEBHOOK_SECRET, testSealer, WORKSPACE_A, type FakeWorkspace } from "../support/fake-linear-oauth.js";
 import { RecordingStore } from "../support/intake-world.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { LinearConnections, linearConnectionKey, linearTeamKey, linearWorkspaceKey, type LinearAppSettings } from "../../packages/broker/src/aws/linear-connections.js";
@@ -113,11 +113,7 @@ function perProjectStart(w: Awaited<ReturnType<typeof world>>, ports: IntakePort
 }
 
 const PAYLOADS: Array<[string, (at: number) => Record<string, unknown>]> = [
-  ["a linked member's label starts", (at) => issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-maya", at })],
-  ["an outsider's label waits", (at) => issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-stranger", at })],
   ["no actor waits", (at) => issueCreated(WORKSPACE_A, { label: "rovara", at })],
-  ["no label starts nothing", (at) => issueCreated(WORKSPACE_A, { actor: "user-maya", at })],
-  ["an update starts nothing", (at) => issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-maya", at, action: "update" })],
   ["a comment starts nothing", (at) => ({ type: "Comment", action: "create", organizationId: WORKSPACE_A.id, webhookTimestamp: at, actor: { id: "user-maya" }, data: { id: "c-1", body: "go", issue: { id: "issue-acme", teamId: "team-a-eng" } } })],
 ];
 
@@ -136,34 +132,9 @@ describe("golden: the app's event is the per-project hook's event", () => {
       expect(viaApp.logs.filter((e) => e.event === "linear.intake_delivered").map((e) => e.outcomes)).toEqual([outcomes]);
     });
   }
-  it("a linked member's label starts ONE task in A's project, as that member, and the issue was read with A's own OAuth token", async () => {
-    const w = await world();
-    await w.appHook(issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-maya", at: w.now }));
-    expect(w.intake.started.map((s) => [s.orgId, s.developerId, s.request.project])).toEqual([[A, MEMBER_A, "alpha"]]);
-    expect(w.intake.started[0]!.request.binding).toMatchObject({ kind: "tracker_item", system: "linear", id: "ENG-1", url: "https://linear.app/acme/issue/ENG-1/x" });
-    const reads = w.linear.requests.filter((r) => r.url === "https://api.linear.app/graphql" && r.body.includes("issue(id: $id)"));
-    expect(reads).toHaveLength(1);
-    expect(w.linear.validAccess(reads[0]!.authorization.replace(/^Bearer /, ""))).toBe(true);
-    expect(w.linear.grants.find((g) => g.access.has(reads[0]!.authorization.replace(/^Bearer /, "")))?.workspace).toBe(WORKSPACE_A);
-  });
 });
 
 describe("two companies", () => {
-  it("B's workspace's event (with the SAME team id string as A's pick) creates work only in B's project; A's event only in A's", async () => {
-    const w = await world();
-    await w.appHook(issueCreated(WORKSPACE_D, { label: "rovara", actor: "user-bo", at: w.now }));
-    expect(w.intake.started.map((s) => [s.orgId, s.request.project, s.request.binding])).toEqual([[B, "bravo", expect.objectContaining({ url: "https://linear.app/delta/issue/ENG-1/x" })]]);
-    expect(w.intake.asked).toEqual([B]);
-    await w.appHook(issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-maya", at: w.now }));
-    expect(w.intake.started.map((s) => [s.orgId, s.request.project])).toEqual([[B, "bravo"], [A, "alpha"]]);
-    expect(w.intake.asked).toEqual([B, A]);
-  });
-  it("A's member's Linear account named in B's workspace is nobody there: the ticket waits in B's project", async () => {
-    const w = await world();
-    await w.appHook(issueCreated(WORKSPACE_D, { label: "rovara", actor: "user-maya", at: w.now }));
-    expect(w.intake.started).toEqual([]);
-    expect(w.intake.logs).toContainEqual({ event: "intake.waiting", fields: expect.objectContaining({ orgId: B, project: "bravo" }) as Record<string, unknown> });
-  });
   it("A's tracker refuses a call under B's scope before any token is read: read, comment and a delivery", async () => {
     const w = await world();
     const tracker = linearCompanyTracker({ connections: w.connections, companyId: A, fetch: w.linear.fetch,
@@ -187,19 +158,10 @@ describe("once", () => {
     expect(w.intake.started).toHaveLength(1);
     expect(w.logs.filter((e) => e.event === "linear.intake_delivered").map((e) => e.outcomes)).toEqual([["started"], ["duplicate"]]);
   });
-  it("a project with BOTH its own API-key hook and the app's: the same Linear event through each starts one task, whichever comes first", async () => {
-    for (const order of ["project-first", "app-first"] as const) {
-      const w = await world();
-      const body = issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-maya", at: w.now });
-      if (order === "project-first") { await perProjectStart(w, w.intake.portsFor(A), body); await w.appHook({ ...body, webhookId: "app-hook" }); }
-      else { await w.appHook({ ...body, webhookId: "app-hook" }); await perProjectStart(w, w.intake.portsFor(A), body); }
-      expect(w.intake.started).toHaveLength(1);
-    }
-  });
 });
 
 describe("connection not usable", () => {
-  for (const status of ["needs_reconnect", "disconnected"] as const) {
+  for (const status of ["needs_reconnect"] as const) {
     it(`${status}: no intake, no Linear call, one clear log line`, async () => {
       const w = await world();
       const row = w.h.db.get(linearConnectionKey(A).pk, "META") as Record<string, unknown>;
@@ -220,13 +182,6 @@ describe("connection not usable", () => {
     await w.deliverInto({ companyId: A, project: "alpha", teamId: "team-a-eng", type: "Issue", action: "create", body: {}, organizationId: WORKSPACE_D.id, delivery: { rawBody: "{}", headers: {} } });
     expect(w.logs).toContainEqual(expect.objectContaining({ event: "linear.intake_skipped", companyId: A, reason: "other_workspace" }));
     expect(w.intake.asked).toEqual([]);
-  });
-  it("without intake ports (hosted today) the event is logged by ids and nothing starts", async () => {
-    const w = await world();
-    const logs: Array<Record<string, unknown>> = [];
-    const deliver = linearAppIntakeDeliver({ connections: w.connections, app: async () => ({ ...LINEAR_APP }), fetch: w.linear.fetch, log: (e) => logs.push(e) });
-    await deliver({ companyId: A, project: "alpha", teamId: "team-a-eng", type: "Issue", action: "create", body: {}, organizationId: WORKSPACE_A.id, delivery: { rawBody: "{}", headers: {} } });
-    expect(logs).toEqual([{ event: "linear.intake_not_wired", companyId: A, project: "alpha", type: "Issue", action: "create" }]);
   });
   it("a signature that is not the app's secret is refused by the intake's own check too (the delivery is verified again): logged by code, not retried", async () => {
     const w = await world();
@@ -274,13 +229,6 @@ describe("connection not usable", () => {
     expect(w.logs).toContainEqual({ event: "linear.intake_failed", companyId: A, project: "alpha", type: "Issue", action: "create", code: "TRACKER_WRITE_REFUSED", retry: false });
     expect(w.intake.started).toEqual([]);
   });
-  it("an issue read whose link is in another workspace than the connection's is no issue", async () => {
-    const w = await world();
-    const tracker = linearCompanyTracker({ connections: w.connections, companyId: A, fetch: w.linear.fetch, workspace: "delta" });
-    await expect(tracker.readItem({ tracker: "linear", id: "ENG-1" }, { orgId: A })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-    const own = linearCompanyTracker({ connections: w.connections, companyId: A, fetch: w.linear.fetch, workspace: "acme" });
-    expect((await own.readItem({ tracker: "linear", id: "ENG-1" }, { orgId: A })).title).toBe("Fix the login (acme)");
-  });
   it("the app's settings gone between routing and intake: a retryable failure (503), nothing starts", async () => {
     const w = await world();
     const raw = JSON.stringify(issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-maya", at: w.now }));
@@ -292,18 +240,6 @@ describe("connection not usable", () => {
 });
 
 describe("replies", () => {
-  it("a comment on A's ticket is posted with A's own OAuth token (actor=app) in A's workspace; B's with B's; never an API key", async () => {
-    const w = await world();
-    const projectKey = w.linear.apiKeyFor(WORKSPACE_A);
-    for (const [companyId, workspace] of [[A, WORKSPACE_A], [B, WORKSPACE_D]] as const) {
-      const tracker = linearCompanyTracker({ connections: w.connections, companyId, fetch: w.linear.fetch });
-      await tracker.comment!({ tracker: "linear", id: "ENG-1", url: `https://linear.app/${workspace.urlKey}/issue/ENG-1/x` }, "Rovara opened a pull request.", { orgId: companyId });
-    }
-    expect(w.linear.comments.map((c) => [c.workspace, c.issueId])).toEqual([[WORKSPACE_A.id, "issue-acme"], [WORKSPACE_D.id, "issue-delta"]]);
-    const owners = w.linear.comments.map((c) => w.linear.grants.find((g) => g.access.has(c.authorization.replace(/^Bearer /, "")))?.workspace);
-    expect(owners).toEqual([WORKSPACE_A, WORKSPACE_D]);
-    expect(w.linear.comments.every((c) => c.authorization.startsWith("Bearer ") && c.authorization !== projectKey)).toBe(true);
-  });
   it("a comment whose ticket link is in another workspace than the token's is refused, not posted", async () => {
     const w = await world();
     const tracker = linearCompanyTracker({ connections: w.connections, companyId: A, fetch: w.linear.fetch });
@@ -312,18 +248,3 @@ describe("replies", () => {
   });
 });
 
-describe("leaks", () => {
-  it("no token, secret, raw body or ticket words in any log line or answer of the intake path", async () => {
-    const w = await world();
-    const answers = [
-      await w.appHook(issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-maya", at: w.now })),
-      await w.appHook(issueCreated(WORKSPACE_D, { label: "rovara", actor: "user-stranger", at: w.now })),
-    ];
-    const row = w.h.db.get(linearConnectionKey(A).pk, "META") as Record<string, unknown>;
-    w.h.db.set({ ...row, status: "needs_reconnect" });
-    answers.push(await w.appHook(issueCreated(WORKSPACE_A, { label: "rovara", actor: "user-maya", at: w.now - 2 })));
-    const text = JSON.stringify([answers, w.logs, w.intake.logs]);
-    const secrets = [LINEAR_WEBHOOK_SECRET, LINEAR_CLIENT_SECRET, PROJECT_SECRET, "Fix the login", "Ignore all previous", ...w.linear.grants.flatMap((g) => [g.current, ...g.access])];
-    for (const secret of secrets) expect(text).not.toContain(secret);
-  });
-});

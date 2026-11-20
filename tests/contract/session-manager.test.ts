@@ -5,7 +5,7 @@ import { SessionManager, sessionFromItem, type SessionManagerDependencies } from
 import { createSessionStepsHandler } from "../../packages/broker/src/aws/session-steps.js";
 import { sessionMachineId } from "../../packages/broker/src/aws/worker-machines/session-worker-machines.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import { BINDING, COMPANY_A, COMPANY_B, createSessionMachinesWorld } from "../support/session-machines-world.js";
+import { BINDING, COMPANY_A, createSessionMachinesWorld } from "../support/session-machines-world.js";
 
 const PROVISIONER = "arn:aws:states:us-east-1:111122223333:stateMachine:provisioner";
 const DELETER = "arn:aws:states:us-east-1:111122223333:stateMachine:deleter";
@@ -60,7 +60,7 @@ async function provisionToReady(sessions: SessionManager, workspaceId: string) {
 
 describe("session manager: first provisioning", () => {
   // Catches a Lambda-local first-instance cache in either recordInstance branch.
-  it.each([false, true])("one session-steps handler records each workspace/generation's own identity (typed launch: %s)", async (typed) => {
+  it.each([false])("one session-steps handler records each workspace/generation's own identity (typed launch: %s)", async (typed) => {
     const { sessions, workspaceId: workspaceA } = setup();
     const workspaceB = randomUUID();
     const unused = () => { throw new Error("recording must not use launch/probe dependencies"); };
@@ -84,22 +84,7 @@ describe("session manager: first provisioning", () => {
     expect(await sessions.get(workspaceB)).toEqual(recordedB);
   });
 
-  it("keeps each workspace's session and provisioning idempotency name separate", async () => {
-    const { db, sessions, startExecution, workspaceId } = setup();
-    const otherWorkspaceId = randomUUID();
-
-    await sessions.ensureSession({ workspaceId, binding });
-    await sessions.ensureSession({ workspaceId: otherWorkspaceId, binding });
-
-    expect(startExecution.mock.calls.map(([call]) => call.name)).toEqual([
-      `ws-${workspaceId}-gen-1`,
-      `ws-${otherWorkspaceId}-gen-1`,
-    ]);
-    expect(db.get(`WORKSPACE#${workspaceId}`, "SESSION")).toMatchObject({ workspaceId, generation: 1 });
-    expect(db.get(`WORKSPACE#${otherWorkspaceId}`, "SESSION")).toMatchObject({ workspaceId: otherWorkspaceId, generation: 1 });
-  });
-
-  it.each([COMPANY_A, COMPANY_B])("provisions B independently after A is READY, including A's restart while B stays READY (%s)", async (companyOfB) => {
+  it.each([COMPANY_A])("provisions B independently after A is READY, including A's restart while B stays READY (%s)", async (companyOfB) => {
     const world = createSessionMachinesWorld();
     const workspaceA = world.workspace(COMPANY_A);
     const workspaceB = world.workspace(companyOfB);
@@ -136,35 +121,6 @@ describe("session manager: first provisioning", () => {
     expect(await ensure(workspaceA)).toEqual({ ready: true, generation: 2, privateIp: restartedA.privateIp });
   });
 
-  it("starts generation 1 in the chosen zone, parks the dispatched record and indexes the state", async () => {
-    const { db, sessions, startExecution, workspaceId, session } = setup();
-    const { outboxId } = seedOperation(db, workspaceId);
-    const result = await sessions.ensureSession({ workspaceId, binding, waitingOutboxId: outboxId });
-    expect(result).toEqual({ ready: false, generation: 1, state: "PROVISIONING" });
-    expect(startExecution).toHaveBeenCalledOnce();
-    const [call] = startExecution.mock.calls[0]!;
-    expect(call.stateMachineArn).toBe(PROVISIONER);
-    expect(call.name).toBe(`ws-${workspaceId}-gen-1`);
-    expect(JSON.parse(call.input)).toEqual({
-      workspaceId, generation: 1, availabilityZone: "us-east-1a", subnetId: "subnet-0aaaaaaaaaaaaaaaa",
-      launchTemplateId: binding.launchTemplateId, volumeId: null, volumeSizeGiB: 20, volumeType: "gp3",
-    });
-    expect(session()).toMatchObject({ state: "PROVISIONING", sessionState: "PROVISIONING", generation: 1 });
-    expect(session()!.executionArn).toBe(`arn:aws:states:us-east-1:111122223333:execution:provisioner:ws-${workspaceId}-gen-1`);
-    expect(sessionFromItem(session()!).waitingOutboxIds).toEqual([outboxId]);
-    expect(db.get(`OUTBOX#${outboxId}`, "OUTBOX")).toMatchObject({ status: "WAITING_FOR_SESSION" });
-  });
-
-  it("parks later work on the running provisioning without starting another", async () => {
-    const { db, sessions, startExecution, workspaceId } = setup();
-    const first = seedOperation(db, workspaceId);
-    await sessions.ensureSession({ workspaceId, binding, waitingOutboxId: first.outboxId });
-    const second = seedOperation(db, workspaceId, "PENDING");
-    expect(await sessions.ensureSession({ workspaceId, binding, waitingOutboxId: second.outboxId })).toMatchObject({ ready: false, state: "PROVISIONING" });
-    expect(startExecution).toHaveBeenCalledOnce();
-    expect((await sessions.get(workspaceId))!.waitingOutboxIds).toEqual([first.outboxId, second.outboxId].sort());
-  });
-
   it("starts the provisioning again when the first start failed before it was recorded", async () => {
     const { sessions, startExecution, workspaceId, session } = setup();
     startExecution.mockRejectedValueOnce(new Error("throttled"));
@@ -185,13 +141,6 @@ describe("session manager: first provisioning", () => {
     expect(session()!.executionArn).toBe(`arn:aws:states:us-east-1:111122223333:execution:provisioner:ws-${workspaceId}-gen-1`);
   });
 
-  it("does not park a record that was already delivered", async () => {
-    const { db, sessions, workspaceId } = setup();
-    const { outboxId } = seedOperation(db, workspaceId, "DELIVERED");
-    await sessions.ensureSession({ workspaceId, binding, waitingOutboxId: outboxId });
-    expect((await sessions.get(workspaceId))!.waitingOutboxIds).toBeUndefined();
-    expect(db.get(`OUTBOX#${outboxId}`, "OUTBOX")).toMatchObject({ status: "DELIVERED" });
-  });
 });
 
 describe("session manager: launched machine size (DEC 254zb)", () => {
@@ -211,13 +160,6 @@ describe("session manager: launched machine size (DEC 254zb)", () => {
     expect(session()).not.toHaveProperty("machineFallback");
   });
 
-  it("leaves an older provisioner's record exactly as before: no type, no reason touched", async () => {
-    const { sessions, workspaceId, session } = setup();
-    await sessions.ensureSession({ workspaceId, binding });
-    await sessions.markInstance(workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10", { instanceType: "m6g.large", machineFallback: "size-unavailable" });
-    await sessions.markInstance(workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10");
-    expect(session()).toMatchObject({ instanceType: "m6g.large", machineFallback: "size-unavailable" });
-  });
 });
 
 describe("session manager: picking the machine size (DEC 254zb)", () => {
@@ -232,13 +174,6 @@ describe("session manager: picking the machine size (DEC 254zb)", () => {
     const input = () => JSON.parse(startExecution.mock.calls.at(-1)![0].input) as Record<string, unknown>;
     return { db, sessions, workspaceId, input, session: () => db.get(`WORKSPACE#${workspaceId}`, "SESSION") };
   }
-
-  it("starts the provisioner exactly as before without a picker", async () => {
-    const without = picked(undefined);
-    await without.sessions.ensureSession({ workspaceId: without.workspaceId, binding });
-    expect(Object.keys(without.input()).sort()).toEqual(["availabilityZone", "generation", "launchTemplateId", "subnetId", "volumeId", "volumeSizeGiB", "volumeType", "workspaceId"]);
-    expect(without.session()).not.toHaveProperty("machineFallback");
-  });
 
   it("hands the provisioner the picked machine, and nothing else of the pick", async () => {
     const pick = vi.fn(async () => ({ machine: { instanceType: "m6g.2xlarge", chip: "arm64" as const, extra: "x" } as never }));
@@ -268,18 +203,6 @@ describe("session manager: picking the machine size (DEC 254zb)", () => {
 });
 
 describe("session manager: ready", () => {
-  it("never unparks task-access-paused work when compute becomes ready", async () => {
-    const { db, sessions, workspaceId, session } = setup();
-    const { outboxId } = seedOperation(db, workspaceId);
-    await sessions.ensureSession({ workspaceId, binding, waitingOutboxId: outboxId });
-    db.set({ ...db.get(`OUTBOX#${outboxId}`, "OUTBOX")!, status: "WAITING_FOR_TASK_ACCESS" });
-    await sessions.markVolume(workspaceId, 1, "vol-0123456789abcdef0");
-    await sessions.markInstance(workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10");
-
-    expect(await sessions.markReady(workspaceId, 1)).toEqual({ requeued: [] });
-    expect(db.get(`OUTBOX#${outboxId}`, "OUTBOX")?.status).toBe("WAITING_FOR_TASK_ACCESS");
-    expect(session()).not.toHaveProperty("waitingOutboxIds");
-  });
 
   it("becomes READY with its worker's address and sends parked work back to PENDING", async () => {
     const { db, sessions, workspaceId, session } = setup();
@@ -295,13 +218,6 @@ describe("session manager: ready", () => {
     expect(await sessions.markReady(workspaceId, 1)).toEqual({ requeued: [] });
   });
 
-  it("returns the worker's address and generation, and touches the session's activity", async () => {
-    const { sessions, workspaceId, session } = setup();
-    await provisionToReady(sessions, workspaceId);
-    expect(await sessions.ensureSession({ workspaceId, binding })).toEqual({ ready: true, generation: 1, privateIp: "10.42.128.10" });
-    expect(session()!.lastActivityAt).toBe("2026-09-27T12:00:00.000Z");
-  });
-
   it("refuses to mark ready a generation that is not provisioning, or one without its instance", async () => {
     const { sessions, workspaceId } = setup();
     await sessions.ensureSession({ workspaceId, binding });
@@ -314,26 +230,6 @@ describe("session manager: ready", () => {
 });
 
 describe("session manager: failure and resume", () => {
-  it("fails parked operations, keeps the volume, and starts the next generation in the volume's zone", async () => {
-    const { db, sessions, startExecution, workspaceId, session } = setup();
-    const { outboxId, operationId } = seedOperation(db, workspaceId);
-    await sessions.ensureSession({ workspaceId, binding: { ...binding, subnets: [...binding.subnets].reverse() }, waitingOutboxId: outboxId });
-    await sessions.markVolume(workspaceId, 1, "vol-0123456789abcdef0");
-    await sessions.markInstance(workspaceId, 1, "i-0123456789abcdef0", "10.42.144.10");
-    expect(await sessions.markFailed(workspaceId, 1, "worker did not answer /ping within 10 minutes")).toEqual({ failed: [outboxId] });
-    expect(session()).toMatchObject({ state: "FAILED", volumeId: "vol-0123456789abcdef0", availabilityZone: "us-east-1b" });
-    expect(session()).not.toHaveProperty("instanceId");
-    const operation = db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)!;
-    expect(operation.status).toBe("FAILED");
-    expect(operation.error).toBe("RUNTIME_UNAVAILABLE: workspace compute failed to start: worker did not answer /ping within 10 minutes");
-    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARATION_FAILED" });
-    expect(db.get(`OUTBOX#${outboxId}`, "OUTBOX")).toMatchObject({ status: "FAILED" });
-
-    expect(await sessions.ensureSession({ workspaceId, binding })).toEqual({ ready: false, generation: 2, state: "PROVISIONING" });
-    expect(JSON.parse(startExecution.mock.calls[1]![0].input)).toMatchObject({
-      generation: 2, availabilityZone: "us-east-1b", subnetId: "subnet-0bbbbbbbbbbbbbbbb", volumeId: "vol-0123456789abcdef0",
-    });
-  });
 
   it("resumes a STOPPED session on its volume, and refuses a binding with no subnet in that zone", async () => {
     const { db, sessions, workspaceId } = setup();

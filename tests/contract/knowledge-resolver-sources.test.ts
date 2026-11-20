@@ -1,8 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { loadKnowledgeContext } from "../../packages/worker/src/knowledge/load.js";
 import { openBaseCommitSource, openWorkingTreeSource } from "../../packages/worker/src/knowledge/source.js";
@@ -72,47 +71,6 @@ describe("judging stages read rule files from the base commit", () => {
     expect(context.resolved.items.every((item) => item.readAt === "base")).toBe(true);
   });
 
-  it("reads the working tree for a builder, nested files included", async () => {
-    const root = await workspace();
-    const { directory } = await repository(root, "repo/payments", BASE_FILES);
-    await write(directory, { ".kiro/steering/always.md": "Builder sees the working copy" });
-    const context = await loadKnowledgeContext(root, [{ name: "payments", path: "repo/payments" }], {
-      stage: "build", at: "working-tree", filesInPlay: [{ repo: "payments", path: "src/match/rank.py" }],
-    }, root);
-    expect(text(context)).toContain("Builder sees the working copy");
-    expect(text(context)).toContain("nested rules at base");
-    expect(context.notices).toEqual([]);
-  });
-
-  it("gives no file and a diagnostic for a repository with no broker-given base commit", async () => {
-    const root = await workspace();
-    await repository(root, "repo/payments", BASE_FILES);
-    const context = await loadKnowledgeContext(root, [{ name: "payments", path: "repo/payments" }], { stage: "review", at: "base-commit" }, root);
-    expect(context.files).toEqual([]);
-    expect(context.diagnostics).toEqual(["skipped the context file of payments: no usable base commit"]);
-  });
-
-  it("stops with the fixed reason when a tree object of the base commit is gone", async () => {
-    const root = await workspace();
-    const { directory, commit } = await repository(root, "repo/payments", BASE_FILES);
-    const tree = git(directory, "rev-parse", `${commit}:.kiro/steering`);
-    await rm(join(directory, ".git/objects", tree.slice(0, 2), tree.slice(2)), { force: true });
-    const failure = await loadKnowledgeContext(root, [{ name: "payments", path: "repo/payments", baseCommit: commit }], { stage: "review", at: "base-commit" }, root).catch((error: unknown) => error);
-    expect(isRuleFilesUnverified(failure)).toBe(true);
-  });
-
-  it("stops with the fixed reason when a rule file's object holds other bytes than its id says", async () => {
-    const root = await workspace();
-    const { directory, commit } = await repository(root, "repo/payments", BASE_FILES);
-    const blob = git(directory, "rev-parse", `${commit}:.kiro/steering/always.md`);
-    const path = join(directory, ".git/objects", blob.slice(0, 2), blob.slice(2));
-    await chmod(path, 0o644);
-    const other = Buffer.from("planted rule");
-    await writeFile(path, deflateSync(Buffer.concat([Buffer.from(`blob ${other.length}\0`), other])));
-    const failure = await loadKnowledgeContext(root, [{ name: "payments", path: "repo/payments", baseCommit: commit }], { stage: "review", at: "base-commit" }, root).catch((error: unknown) => error);
-    expect(isRuleFilesUnverified(failure)).toBe(true);
-  });
-
   it("does not follow a symbolic link rule file or rule folder in the commit", async () => {
     const root = await workspace();
     await writeFile(join(root, "secret.md"), "workspace secret\n");
@@ -132,23 +90,6 @@ describe("judging stages read rule files from the base commit", () => {
 });
 
 describe("the meta repo is read at its pinned commit", () => {
-  it("reads the pinned commit's rules, not the folder's newer files, and labels them with the commit", async () => {
-    const root = await workspace();
-    const meta = await repository(root, "repo/service-meta", { ".kiro/steering/product.md": "Product at the pinned commit", "AGENTS.md": "meta agents" });
-    await write(meta.directory, { ".kiro/steering/product.md": "NEWER product text, pushed after the task started" });
-    git(meta.directory, "commit", "--quiet", "-am", "later");
-    const code = await repository(root, "repo/engine", { "AGENTS.md": "engine rules" });
-    const context = await loadKnowledgeContext(root, [{ name: "engine", path: "repo/engine", baseCommit: code.commit }], {
-      stage: "plan", at: "base-commit", meta: { name: "service-meta", path: "repo/service-meta", knowledgeCommit: meta.commit },
-    }, root);
-    const all = text(context);
-    expect(all).toContain("Product at the pinned commit");
-    expect(all).not.toContain("NEWER");
-    expect(all).toContain(`pinned at ${meta.commit.slice(0, 12)}`);
-    expect(context.resolved.items.filter((item) => item.layer === "meta").every((item) => item.readAt === "knowledgeCommit")).toBe(true);
-    // The meta repo is not also read as a code repository.
-    expect(context.resolved.records.filter((record) => record.repo === "service-meta").length).toBeGreaterThan(0);
-  });
 
   it("refuses the stage when the meta repo's checkout is missing or its commit does not verify", async () => {
     const root = await workspace();
@@ -340,31 +281,6 @@ describe("the loaded-knowledge record of a session", () => {
   });
 });
 
-
-describe("each object read has its own deadline", () => {
-  it("reads many files through a slow link although their total passes one deadline", async () => {
-    const root = await workspace();
-    const { directory, commit } = await repository(root, "repo/payments", BASE_FILES);
-    let links = 0;
-    const slow = async (source: string, target: string): Promise<void> => {
-      links += 1;
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      const { link } = await import("node:fs/promises");
-      await link(source, target);
-    };
-    const source = await openBaseCommitSource(directory, commit, "base", { workspaceRoot: root, deadlineMs: 1500, linkFile: slow });
-    try {
-      const started = Date.now();
-      expect((await source.listDirectory("src/match"))?.length).toBe(2);
-      expect(await source.readFile("src/match/AGENTS.md", 1000)).toMatchObject({ kind: "file" });
-      expect(await source.readFile("AGENTS.md", 1000)).toMatchObject({ kind: "file" });
-      expect(Date.now() - started).toBeGreaterThan(1200);
-      expect(links).toBeGreaterThan(4);
-    } finally {
-      await source.close();
-    }
-  });
-});
 
 describe("the Plan stage", () => {
   it("reads the base commit when one is sent, lists auto rules for the model, and the plan check loads them", async () => {

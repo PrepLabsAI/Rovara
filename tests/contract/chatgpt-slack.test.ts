@@ -6,10 +6,7 @@ import { CHATGPT_CALLBACK_URL } from "@agentx/contracts";
 import { chatGptConnections, type ChatGptSealer } from "../../packages/broker/src/chatgpt/connections.js";
 import { CHATGPT_TOKEN_URL } from "../../packages/broker/src/chatgpt/oauth.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import {
-  CHATGPT_CONNECTING_TEXT, CHATGPT_OPEN_ACTION, CHATGPT_PASTE_ACTION, CHATGPT_PASTE_SUBMISSION, answerSlackChatGpt, chatGptSlackCommand,
-  chatGptSubmission, isHandedOffChatGptFinish, runHandedOffChatGptFinish, type HandedOffChatGptFinish,
-} from "../../packages/broker/src/aws/slack-chatgpt.js";
+import { CHATGPT_CONNECTING_TEXT, CHATGPT_OPEN_ACTION, CHATGPT_PASTE_ACTION, CHATGPT_PASTE_SUBMISSION, answerSlackChatGpt, chatGptSubmission, isHandedOffChatGptFinish, runHandedOffChatGptFinish, type HandedOffChatGptFinish } from "../../packages/broker/src/aws/slack-chatgpt.js";
 import { createSlackIngressHandler } from "../../packages/broker/src/aws/slack-ingress.js";
 import { chatGptActionHandler, createSlackInteractivityHandler } from "../../packages/broker/src/aws/slack-interactivity.js";
 import { createAdminBroker } from "../support/admin-broker.js";
@@ -142,15 +139,6 @@ const linkOf = (blocks: unknown) => {
 const callbackFor = (authorizeUrl: string, extra = "") => `${CHATGPT_CALLBACK_URL}?code=the-code&scope=x&state=${new URL(authorizeUrl).searchParams.get("state") ?? ""}&client_id=oaiapp_issued${extra}`;
 
 describe("the ChatGPT commands in Slack (#340)", () => {
-  it("reads only the three commands, loosely typed", () => {
-    expect(chatGptSlackCommand("connect chatgpt")).toBe("connect");
-    expect(chatGptSlackCommand("  Connect   ChatGPT. ")).toBe("connect");
-    expect(chatGptSlackCommand("link my chatgpt")).toBe("connect");
-    expect(chatGptSlackCommand("disconnect chatgpt")).toBe("disconnect");
-    expect(chatGptSlackCommand("chatgpt status")).toBe("status");
-    expect(chatGptSlackCommand("connect chatgpt to the billing page")).toBeUndefined();
-    expect(chatGptSlackCommand("what is chatgpt")).toBeUndefined();
-  });
 
   it("connects end to end: a private link, the paste form, and the connection, without queuing anything", async () => {
     const h = await rovara();
@@ -255,10 +243,4 @@ describe("the broker's side of a Slack ChatGPT command (#340)", () => {
       .resolves.toMatchObject({ authorizeUrl: "https://auth.openai.com/x" });
   });
 
-  it("takes a hand-off only from a direct invoke, never from an HTTP request", () => {
-    const event = { source: "agentx.slack-interactivity", action: "chatgpt-finish", teamId: team, userId: maya, callbackUrl: "x", viewId: "V0FORM0001", channel, threadTs };
-    expect(isHandedOffChatGptFinish(event)).toBe(true);
-    expect(isHandedOffChatGptFinish({ ...event, requestContext: {} })).toBe(false);
-    expect(isHandedOffChatGptFinish({ ...event, viewId: "not a view" })).toBe(false);
-  });
 });

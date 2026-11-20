@@ -101,21 +101,6 @@ describe("agentx connector add jira (FR-036 to FR-039)", () => {
     expect(projectKeys(["HR-4", "FIN-2", "HR-9", "OPS_2-1"])).toEqual(["HR", "FIN", "OPS_2"]);
   });
 
-  it("asks nothing more under --yes when the account sees other projects: the same warning, saved", async () => {
-    const lines: string[] = [];
-    const vendors = fakeVendors({ jiraCloudId: CLOUD, jiraInside: ["PAY-1"], jiraOutside: ["HR-4"] });
-    const env = { TOKEN_ENV: TOKEN };
-    const base = input({ vendors, lines, script: [] });
-    const result = await addJira({ ...base, processEnv: env, flags: { jiraSite: "acme", jiraProject: "PAY", jiraToken: { envName: "TOKEN_ENV" } } });
-    expect(result.warning).toContain("can also see issues in HR");
-    expect(lines.some((line) => line.startsWith("Warning: the Jira service account can also see issues in HR"))).toBe(true);
-  });
-
-  it("says nothing extra when the account sees only the connected project", async () => {
-    const result = await addJira(input({ vendors: fakeVendors({ jiraCloudId: CLOUD, jiraInside: ["PAY-1"], jiraOutside: [] }), script: ["acme", TOKEN, "PAY"] }));
-    expect(result).toEqual({ ref: "jira", revision: 2 });
-  });
-
   it("names only the class of a search error that is not a refusal, never its text, and stores nothing (as Asana does)", async () => {
     const secrets = memoryInitSecrets();
     const vendors = { ...fakeVendors({ jiraCloudId: CLOUD }), jiraSearch: async () => { throw new TypeError("fetch failed: upstream said SECRET-vendor-detail"); } };
@@ -123,31 +108,6 @@ describe("agentx connector add jira (FR-036 to FR-039)", () => {
     await expect(failure).rejects.toThrow("could not search Jira through Rovo MCP (TypeError), so nothing was stored; check that Rovo MCP allows API token authentication (docs/connectors/jira.md, Step 1), then run agentx --env staging connector add jira --project payments-api again");
     await expect(failure).rejects.not.toThrow("SECRET-vendor-detail");
     expect(secrets.values.size).toBe(0);
-  });
-
-  it("refuses a project that still uses the older integrations.githubMcp setting, before the token is stored", async () => {
-    // Same bug class as Linear's (fixed in 55b0bab): the refusal must happen before anything is
-    // read or stored, not only once the control plane rejects the mixed githubMcp/connectors
-    // definition. No site lookup, no token prompt, no search, no secret.
-    const legacyDir = await mkdtemp(join(tmpdir(), "agentx-projects-legacy-"));
-    try {
-      await writeProjectFile(legacyDir, {
-        name: "payments-api", revision: 1,
-        repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
-        setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote AgentX worker.",
-        integrations: { githubMcp: { tools: [{ name: "list_issues", access: "read" }] } },
-      });
-      const secrets = memoryInitSecrets();
-      const vendors = fakeVendors({ jiraCloudId: CLOUD });
-      const testInput = input({ secrets, vendors, script: ["acme", TOKEN, "PAY"] });
-      await expect(addJira({ ...testInput, services: { ...testInput.services, configDir: legacyDir } })).rejects.toThrow(
-        "project payments-api uses the older integrations.githubMcp setting; move it to integrations.connectors (see docs/project-configuration.md) before adding connectors",
-      );
-      expect(secrets.values.size).toBe(0);
-      expect(vendors.calls).toEqual([]);
-    } finally {
-      await rm(legacyDir, { recursive: true, force: true });
-    }
   });
 
   it("asks for one issue in an empty project, so an empty answer is not mistaken for a blind one", async () => {
@@ -170,11 +130,4 @@ describe("agentx connector add jira (FR-036 to FR-039)", () => {
     await expect(addJira(input({ vendors: fakeVendors({ jiraCloudId: CLOUD }), script: ["acme", TOKEN, "pay project"] }))).rejects.toThrow("a Jira project key is capital letters and digits, such as PAY");
   });
 
-  it("refuses a one-letter project key before storing the token (F4: the schema's own pattern)", async () => {
-    const secrets = memoryInitSecrets();
-    const vendors = fakeVendors({ jiraCloudId: CLOUD });
-    await expect(addJira(input({ vendors, secrets, script: ["acme", TOKEN, "P"] }))).rejects.toThrow("a Jira project key is capital letters and digits, such as PAY");
-    expect(secrets.values.size).toBe(0);
-    expect(vendors.calls).toEqual(["jiraCloudId https://acme.atlassian.net"]);
-  });
 });

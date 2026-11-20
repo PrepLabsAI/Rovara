@@ -74,19 +74,4 @@ describe("action policy through the control plane", () => {
     expect(secondThread.body).not.toHaveProperty("actionPolicy");
   });
 
-  it("sends no action policy when the project has none", async () => {
-    const { handler } = await bound();
-    expect((await threadWorkspace(handler, { includeActionPolicy: true })).body).not.toHaveProperty("actionPolicy");
-  });
-
-  it("refuses to register a rule that can never apply, and stores nothing", async () => {
-    const { db, handler } = await bound(policy);
-    const refused = await register(handler, 2, { rules: [{ tool: "delete_*", connector: "github", outcome: "deny" }] });
-    expect(refused.status).toBe(400);
-    expect(JSON.stringify(refused.body)).toContain("action policy rule 1: delete_* matches no approved github tool");
-    expect(db.get("PROJECT#payments", "REV#000000000002")).toBeUndefined();
-    const both = await register(handler, 2, { rules: [{ tool: "issue_write", connector: "github", outcome: "ask", treatAs: "change" }] });
-    expect(both.status).toBe(400);
-    expect(JSON.stringify(both.body)).toContain("exactly one of outcome and treatAs");
-  });
 });

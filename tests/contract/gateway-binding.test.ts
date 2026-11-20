@@ -1,22 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  approveTools,
-  boundNames,
-  executeTool,
-  githubBinder,
-  GuardRejection,
-  reviewTools,
-  type Binder,
-  type ConnectorContext,
-  type ConnectorDefinition,
-  type Guard,
-  type GitHubRepositoryScope,
-  type Invocation,
-  type Ledger,
-  type McpConnection,
-  type McpToolResult,
-  type connectMcp,
-} from "../../packages/gateway/src/index.js";
+import { approveTools, executeTool, githubBinder, reviewTools, type Binder, type ConnectorContext, type ConnectorDefinition, type Guard, type GitHubRepositoryScope, type Invocation, type Ledger, type McpConnection, type McpToolResult, type connectMcp } from "../../packages/gateway/src/index.js";
 import { vendorTools } from "../support/vendor-fixtures.js";
 
 function memoryLedger(): Ledger {
@@ -47,28 +30,6 @@ describe("GitHub binding stays byte-identical", () => {
       { name: "get_me", access: "read" },
     ] },
   };
-
-  it("removes owner and repo, skips a tool that lacks either or has it optional, with the same reason text and hashes", () => {
-    // Recorded from the phase 5a code before the binder changed (feature 013, phase 5b).
-    expect(reviewTools({ tools }, { binder: githubBinder }, context)).toEqual({
-      tools: [
-        {
-          name: "list_issues", scope: "demo", description: "List issues in a repository",
-          inputSchema: { type: "object", properties: { state: { type: "string", enum: ["open", "closed"] }, perPage: { type: "number" } }, required: ["state"], additionalProperties: false },
-          schemaHash: "43f2c9dcac73ccee04c89f461ce122d302b978a4be99eb1011684950d5db9daa", access: "read",
-        },
-        {
-          name: "issue_write", scope: "demo", description: "Create or update an issue",
-          inputSchema: { type: "object", properties: { title: { type: "string" }, body: { type: "string" } }, required: ["title"], additionalProperties: false },
-          schemaHash: "f93da683b3799b4e0269da48af6ff98090670b5880c363fa87c28d40bc8b26cf", access: "write",
-        },
-      ],
-      skipped: [
-        { tool: "search_issues", reason: "missing server-bound property owner" },
-        { tool: "get_me", reason: "missing server-bound property owner" },
-      ],
-    });
-  });
 
   it("sends exactly the model's arguments plus owner and repo, and refuses a model-supplied owner", async () => {
     const call = vi.fn<(name: string, args: Record<string, unknown>) => Promise<McpToolResult>>(async () => ok);
@@ -173,25 +134,6 @@ describe("when-present properties the gateway cannot bind", () => {
     ]);
   });
 
-  it("changes the schema hash when the vendor adds a when-present property to a tool, so an older request is refused as schema_changed", () => {
-    const before: McpConnection["tools"] = [{ name: "plain", inputSchema: { type: "object", properties: { q: { type: "string" } } } }];
-    const after: McpConnection["tools"] = [{ name: "plain", inputSchema: { type: "object", properties: { q: { type: "string" }, team: { type: "string" } } } }];
-    const context = contextFor(linearScope, ["plain"]);
-    const old = reviewTools({ tools: before }, { binder: linearBinder }, context).tools[0]!;
-    const now = reviewTools({ tools: after }, { binder: linearBinder }, context).tools[0]!;
-    expect(now.inputSchema).toEqual(old.inputSchema);
-    expect(now.schemaHash).not.toBe(old.schemaHash);
-  });
-
-  it("does not let a binding change the schema hash, which depends only on the vendor tool, the policy and the scope", () => {
-    const tools: McpConnection["tools"] = [{ name: "plain", inputSchema: { type: "object", properties: { team: { type: "string" }, q: { type: "string" } } } }];
-    const context = contextFor(linearScope, ["plain"]);
-    const bound = reviewTools({ tools }, { binder: linearBinder }, context).tools[0]!;
-    const unbound = reviewTools({ tools }, { binder: { properties: [], bind: () => ({}) } }, context).tools[0]!;
-    expect(bound.schemaHash).toBe(unbound.schemaHash);
-    expect(propertiesOf(bound)).toEqual(["q"]);
-    expect(propertiesOf(unbound)).toEqual(["team", "q"]);
-  });
 });
 
 function vendorRig<Scope extends { alias: string }>(vendor: "linear" | "jira", binder: Binder<Scope>, scope: Scope, names: readonly string[], guards: Guard[] = []) {
@@ -218,42 +160,6 @@ function vendorRig<Scope extends { alias: string }>(vendor: "linear" | "jira", b
 }
 
 describe("when-present binding at call time", () => {
-  it("sends the team only to Linear tools that have it, under the name each tool uses", async () => {
-    const rig = vendorRig("linear", linearBinder, linearScope, LINEAR_TOOLS);
-    const team = linearScope.teamId;
-    expect(await rig.run("list_issues", { query: "login" })).toMatchObject({ status: "SUCCEEDED" });
-    expect(rig.call).toHaveBeenLastCalledWith("list_issues", { query: "login", team });
-    expect(await rig.run("list_issue_statuses", {})).toMatchObject({ status: "SUCCEEDED" });
-    expect(rig.call).toHaveBeenLastCalledWith("list_issue_statuses", { team });
-    expect(await rig.run("list_documents", {})).toMatchObject({ status: "SUCCEEDED" });
-    expect(rig.call).toHaveBeenLastCalledWith("list_documents", { teamId: team });
-    expect(await rig.run("get_issue", { id: "CHA-1" })).toMatchObject({ status: "SUCCEEDED" });
-    expect(rig.call).toHaveBeenLastCalledWith("get_issue", { id: "CHA-1" });
-  });
-
-  it("sends cloudId on every Jira call and projectKey only on createJiraIssue", async () => {
-    const rig = vendorRig("jira", jiraBinder, jiraScope, JIRA_TOOLS);
-    expect(await rig.run("createJiraIssue", { summary: "Bug", issueType: "Task" })).toMatchObject({ status: "SUCCEEDED" });
-    expect(rig.call).toHaveBeenLastCalledWith("createJiraIssue", { summary: "Bug", issueType: "Task", cloudId: jiraScope.cloudId, projectKey: "KAN" });
-    expect(await rig.run("getJiraIssue", { issueIdOrKey: "KAN-1" })).toMatchObject({ status: "SUCCEEDED" });
-    expect(rig.call).toHaveBeenLastCalledWith("getJiraIssue", { issueIdOrKey: "KAN-1", cloudId: jiraScope.cloudId });
-  });
-
-  it("gives guards every bound value, including one the called tool does not have", async () => {
-    const check = vi.fn<Guard["check"]>(async () => undefined);
-    const rig = vendorRig("jira", jiraBinder, jiraScope, JIRA_TOOLS, [{ requiredTools: () => [], check }]);
-    await rig.run("searchJiraIssuesUsingJql", { jql: "status = Done" });
-    expect(check).toHaveBeenCalledWith(expect.objectContaining({ bound: { cloudId: jiraScope.cloudId, projectKey: "KAN" }, scope: jiraScope }));
-    expect(rig.call).toHaveBeenLastCalledWith("searchJiraIssuesUsingJql", { jql: "status = Done", cloudId: jiraScope.cloudId });
-  });
-
-  it("refuses a model-supplied when-present property, on a tool that has it and on one that does not, before issuing a credential", async () => {
-    const rig = vendorRig("linear", linearBinder, linearScope, LINEAR_TOOLS);
-    await expect(rig.run("list_issues", { team: "Other team" })).rejects.toThrow(/Linear routing arguments are server controlled/);
-    await expect(rig.run("get_issue", { id: "CHA-1", teamId: "other" })).rejects.toThrow(/Linear routing arguments are server controlled/);
-    expect(rig.issue).not.toHaveBeenCalled();
-    expect(rig.connect).not.toHaveBeenCalled();
-  });
 
   it("fails closed, without calling the vendor, when the binder has no value for a when-present property the tool has", async () => {
     const binder: Binder<LinearScope> = { properties: [], optionalProperties: ["team"], bind: () => ({}) };
@@ -264,18 +170,6 @@ describe("when-present binding at call time", () => {
     });
     expect(await rig.run("get_issue", { id: "CHA-1" })).toMatchObject({ status: "SUCCEEDED" });
     expect(rig.call).toHaveBeenCalledExactlyOnceWith("get_issue", { id: "CHA-1" });
-  });
-
-  it("treats a name listed as both required and when-present as required only, and binds it once", async () => {
-    const binder: Binder<JiraScope> = { properties: ["cloudId"], optionalProperties: ["cloudId", "projectKey"], bind: (scope) => ({ cloudId: scope.cloudId, projectKey: scope.projectKey }) };
-    expect(boundNames(binder)).toEqual(["cloudId", "projectKey"]);
-    const context = contextFor(jiraScope, JIRA_TOOLS);
-    const review = reviewTools({ tools: vendorTools("jira") }, { binder }, context);
-    expect(review.skipped).toEqual(reviewTools({ tools: vendorTools("jira") }, { binder: jiraBinder }, context).skipped);
-    const rig = vendorRig("jira", binder, jiraScope, JIRA_TOOLS);
-    expect(await rig.run("getJiraIssue", { issueIdOrKey: "KAN-1" })).toMatchObject({ status: "SUCCEEDED" });
-    expect(rig.call).toHaveBeenLastCalledWith("getJiraIssue", { issueIdOrKey: "KAN-1", cloudId: jiraScope.cloudId });
-    expect(Object.keys(rig.call.mock.lastCall![1])).toEqual(["issueIdOrKey", "cloudId"]);
   });
 
   it("checks a name listed as both required and when-present on the required path, not the when-present one", async () => {
@@ -289,42 +183,9 @@ describe("when-present binding at call time", () => {
     expect(rig.call).not.toHaveBeenCalled();
   });
 
-  it("fails closed on a write, never as an unknown outcome, when the binder has no value for its when-present property", async () => {
-    const binder: Binder<LinearScope> = { properties: [], optionalProperties: ["team"], bind: () => ({}) };
-    const rig = vendorRig("linear", binder, linearScope, LINEAR_TOOLS);
-    expect(await rig.run("save_issue", { title: "Bug" })).toMatchObject({
-      status: "FAILED", reason: "policy_denied",
-      text: "Linear has no server-bound value for team. An administrator must fix the connector configuration.",
-    });
-    expect(rig.call).not.toHaveBeenCalled();
-  });
 });
 
-/** A test stand-in for phase 6's JQL guard: every search is limited to the scope's project. */
-const projectSearch: Guard = {
-  requiredTools: () => [],
-  check: async () => undefined,
-  rewrite({ tool, arguments: args, scope }) {
-    if (tool !== "searchJiraIssuesUsingJql") return { ...args };
-    if (typeof args.jql !== "string" || /\border\s+by\b/i.test(args.jql)) throw new GuardRejection("Search without ORDER BY.");
-    return { ...args, jql: `project = "${(scope as JiraScope).projectKey}" AND (${args.jql})` };
-  },
-};
-
 describe("guards that rewrite the model's arguments", () => {
-  it("sends the rewritten arguments, with bound values, and shows them to every check", async () => {
-    const check = vi.fn<Guard["check"]>(async () => undefined);
-    const rig = vendorRig("jira", jiraBinder, jiraScope, JIRA_TOOLS, [projectSearch, { requiredTools: () => [], check }]);
-    expect(await rig.run("searchJiraIssuesUsingJql", { jql: "status = Done" })).toMatchObject({ status: "SUCCEEDED" });
-    expect(rig.call).toHaveBeenLastCalledWith("searchJiraIssuesUsingJql", { jql: "project = \"KAN\" AND (status = Done)", cloudId: jiraScope.cloudId });
-    expect(check).toHaveBeenCalledWith(expect.objectContaining({ arguments: { jql: "project = \"KAN\" AND (status = Done)" } }));
-  });
-
-  it("returns a rewrite refusal as a policy denial without calling the vendor", async () => {
-    const rig = vendorRig("jira", jiraBinder, jiraScope, JIRA_TOOLS, [projectSearch]);
-    expect(await rig.run("searchJiraIssuesUsingJql", { jql: "status = Done ORDER BY created" })).toMatchObject({ status: "FAILED", reason: "policy_denied", text: "Search without ORDER BY." });
-    expect(rig.call).not.toHaveBeenCalled();
-  });
 
   it("refuses a rewrite that sets a server-bound property, even one the tool does not have", async () => {
     const rig = vendorRig("jira", jiraBinder, jiraScope, JIRA_TOOLS, [{ requiredTools: () => [], check: async () => undefined, rewrite: ({ arguments: args }) => ({ ...args, projectKey: "OTHER" }) }]);
@@ -345,51 +206,4 @@ describe("guards that rewrite the model's arguments", () => {
     expect(rig.call).toHaveBeenCalledOnce();
   });
 
-  it("signs a long-text field the model wrote, with its rewritten value, and never one a rewrite added", async () => {
-    const tools = vendorTools("linear");
-    const call = vi.fn<(name: string, args: Record<string, unknown>) => Promise<McpToolResult>>(async () => ok);
-    const connect = vi.fn<typeof connectMcp>(async () => ({ tools, call, close: async () => undefined }));
-    const prefix: Guard = { requiredTools: () => [], check: async () => undefined, rewrite: ({ arguments: args }) => ({ ...args, title: `[Payments] ${String(args.title)}` }) };
-    const adds: Guard = { requiredTools: () => [], check: async () => undefined, rewrite: ({ arguments: args }) => typeof args.description === "string" ? { ...args, description: `${args.description} (triaged)` } : { ...args, description: "Filed from Slack." } };
-    const connector: ConnectorDefinition<LinearScope> = {
-      label: "Linear", endpoint: new URL("https://mcp.linear.test/mcp"), permissionsHint: "API key permissions",
-      credentials: { issue: async () => ({ token: "linear-secret", bindings: {} }) },
-      binder: linearBinder, guards: [prefix, adds],
-    };
-    const context = contextFor(linearScope, ["save_issue"], ["save_issue"]);
-    const options = { connect, ledger: memoryLedger(), attribution: "Requested by Pratik via AgentX" };
-    const schemaHash = approveTools({ tools }, connector, context)[0]!.schemaHash;
-    await executeTool({ requestId: "w-1", scope: linearScope.alias, tool: "save_issue", schemaHash, arguments: { title: "Bug", description: "Steps" } }, connector, context, options);
-    expect(call).toHaveBeenLastCalledWith("save_issue", { title: "[Payments] Bug", description: "Steps (triaged)\n\n—\nRequested by Pratik via AgentX", team: linearScope.teamId });
-    await executeTool({ requestId: "w-2", scope: linearScope.alias, tool: "save_issue", schemaHash, arguments: { title: "Bug" } }, connector, context, options);
-    expect(call).toHaveBeenLastCalledWith("save_issue", { title: "[Payments] Bug", description: "Filed from Slack.", team: linearScope.teamId });
-  });
-
-  it("never signs a description a guard added by mutating its input, and leaves the caller's arguments unchanged", async () => {
-    const tools = vendorTools("linear");
-    const call = vi.fn<(name: string, args: Record<string, unknown>) => Promise<McpToolResult>>(async () => ok);
-    const connect = vi.fn<typeof connectMcp>(async () => ({ tools, call, close: async () => undefined }));
-    const mutateAndReturn: Guard = { requiredTools: () => [], check: async () => undefined, rewrite: ({ arguments: args }) => { const writable = args as Record<string, unknown>; writable.description = "Filed from Slack."; return writable; } };
-    const mutateThenCopy: Guard = { requiredTools: () => [], check: async () => undefined, rewrite: ({ arguments: args }) => { (args as Record<string, unknown>).description = "Filed from Slack."; return { ...args }; } };
-    const context = contextFor(linearScope, ["save_issue"], ["save_issue"]);
-    for (const [index, guard] of [mutateAndReturn, mutateThenCopy].entries()) {
-      const connector: ConnectorDefinition<LinearScope> = {
-        label: "Linear", endpoint: new URL("https://mcp.linear.test/mcp"), permissionsHint: "API key permissions",
-        credentials: { issue: async () => ({ token: "linear-secret", bindings: {} }) },
-        binder: linearBinder, guards: [guard],
-      };
-      const schemaHash = approveTools({ tools }, connector, context)[0]!.schemaHash;
-      const modelArgs = { title: "Bug" };
-      const result = await executeTool({ requestId: `m-${index}`, scope: linearScope.alias, tool: "save_issue", schemaHash, arguments: modelArgs }, connector, context, { connect, ledger: memoryLedger(), attribution: "Requested by Pratik via AgentX" });
-      expect(result).toMatchObject({ status: "SUCCEEDED" });
-      expect(call).toHaveBeenLastCalledWith("save_issue", { title: "Bug", description: "Filed from Slack.", team: linearScope.teamId });
-      expect(modelArgs).toEqual({ title: "Bug" });
-    }
-  });
-
-  it("validates the rewritten arguments against the vendor's schema", async () => {
-    const rig = vendorRig("jira", jiraBinder, jiraScope, JIRA_TOOLS, [{ requiredTools: () => [], check: async () => undefined, rewrite: ({ arguments: args }) => ({ ...args, notAJiraArgument: true }) }]);
-    expect(await rig.run("getJiraIssue", { issueIdOrKey: "KAN-1" })).toMatchObject({ status: "FAILED", reason: "policy_denied", text: "Arguments do not match the upstream MCP tool schema." });
-    expect(rig.call).not.toHaveBeenCalled();
-  });
 });

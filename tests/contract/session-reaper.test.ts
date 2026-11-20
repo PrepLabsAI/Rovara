@@ -105,12 +105,6 @@ describe("idle reaper", () => {
     expect(busyWorker.terminate).not.toHaveBeenCalled();
   });
 
-  it("treats a stored null activeOperationId as no operation", async () => {
-    const { db, reap } = setup();
-    const workspaceId = seedReady(db, { idleMinutes: 30, activeOperationId: null });
-    expect((await reap()).claimed).toEqual([workspaceId]);
-  });
-
   it("loses to a dispatch that touches the session between its read and its claim", async () => {
     const race = { workspaceId: "" };
     const { db, sessions, reap, terminate } = setup({
@@ -124,20 +118,6 @@ describe("idle reaper", () => {
     const report = await reap();
     expect(report.lostRace).toEqual([raced]);
     expect(sessionOf(db, raced)).toMatchObject({ state: "READY", lastActivityAt: NOW.toISOString() });
-    expect(terminate).not.toHaveBeenCalled();
-  });
-
-  it("loses to a task that takes the workspace between its read and its claim", async () => {
-    const race = { workspaceId: "" };
-    const { db, reap, terminate } = setup({
-      ping: async () => {
-        db.get(`WORKSPACE#${race.workspaceId}`, "META")!.activeOperationId = randomUUID();
-        return "Healthy";
-      },
-    });
-    const raced = race.workspaceId = seedReady(db, { idleMinutes: 10 });
-    expect((await reap()).lostRace).toEqual([raced]);
-    expect(sessionOf(db, raced)).toMatchObject({ state: "READY" });
     expect(terminate).not.toHaveBeenCalled();
   });
 

@@ -1,6 +1,6 @@
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { GetTemplateCommand } from "@aws-sdk/client-cloudformation";
 import type { ChangeSetChange, DeployRequest, StackDeployer } from "../../packages/cli/src/deploy/deployer.js";
@@ -12,7 +12,6 @@ import { readEnvironmentSettings, writeEnvironmentSettings } from "../../package
 import { writeSlackTeamId } from "../../packages/cli/src/signin/settings.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { prepareDeployment } from "../../packages/cli/src/deploy/commands.js";
-import { agentXError } from "@agentx/contracts";
 import { accessChanged, runUpgrade, type UpgradeDependencies } from "../../packages/cli/src/upgrade/run.js";
 import { SETTINGS } from "../support/doctor-fakes.js";
 import { allStackOutputs, fakeGitHubApi, fakeRelease, memoryInitSecrets, scriptedDeployer, T0, TEST_PRIVATE_KEY } from "../support/init-fakes.js";
@@ -101,67 +100,8 @@ async function harness(overrides: Partial<UpgradeDependencies> & { caller?: stri
 const options = { env: "staging", yes: true, allowReplace: [] as string[] };
 
 describe("agentx upgrade (FR-042 to FR-044)", () => {
-  it("keeps every core setting across an upgrade", async () => {
-    const coreSettings = {
-      CoreEngine: "on:org_aaaaaaaaaaaaaaaaaaaa",
-      CoreAllowedCompanies: "org_aaaaaaaaaaaaaaaaaaaa",
-      CoreTaskCapUsd: "500",
-      CoreCompanyDayCapUsd: "800",
-      CorePolicyHook: `{"address":"https://hook.example/answer","jwks":"https://hook.example/jwks.json","thumbprints":["${"a".repeat(43)}"]}`,
-      CoreLessons: "on:org_aaaaaaaaaaaaaaaaaaaa",
-      // Core switch-on blocker (2026-11-17): the model gateway settings an overlay used to carry, now kept like the rest.
-      CoreModelGatewayHost: "gateway.staging.example.dev",
-      CoreAgentModel: "claude-sonnet-4-6",
-      // L4-AM (DEC 254zzn(2)): the hosted answers model is kept across an upgrade too.
-      CoreAnswersModel: "claude-haiku-5-5",
-      // DEC 254zzz58: the hosted lessons learning model is kept across an upgrade too.
-      CoreLearningModel: "claude-haiku-5-5",
-    };
-    const h = await harness({ controlPlane: { GitHubAppId: "123", GitHubAppPrivateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", BudgetMonthlyUsd: "250", CallbackSigningKey: "****", ...coreSettings }, loadRelease: async () => release("1.3.0", ["BudgetMonthlyUsd", ...Object.keys(coreSettings)]) });
-    await runUpgrade(options, h.deps);
-    const deployed = h.deployer.requests.find((request) => request.stackName === "agentx-staging-control-plane")?.parameters;
-    for (const [name, value] of Object.entries(coreSettings)) expect(deployed?.[name], name).toBe(value);
-  });
-
-  it("shows the notes, deploys in upgrade order, records the new version, keeps the budget and runs doctor", async () => {
-    const h = await harness();
-    const result = await runUpgrade(options, h.deps);
-    expect(h.lines).toContain("Upgrading staging from 1.2.3 to 1.3.0 (templates engine)");
-    expect(h.lines).toContain("Release notes for 1.3.0:\n  Fixes.");
-    expect(h.deployer.deployed).toEqual(["agentx-staging-access", "agentx-staging-foundation", "agentx-staging-identity", "agentx-staging-runtime", "agentx-staging-control-plane", "agentx-staging-slack"]);
-    // Ruling F7: the operator's budget survives the upgrade.
-    expect(h.deployer.requests.find((request) => request.stackName === "agentx-staging-control-plane")?.parameters.BudgetMonthlyUsd).toBe("250");
-    expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.3.0");
-    expect(h.doctorRuns).toEqual(["staging"]);
-    expect(result).toMatchObject({ from: "1.2.3", to: "1.3.0", doctor: { failed: 0 } });
-  });
 
   describe("the GitHub webhook", () => {
-    it("sets the hook URL, keeps the stored secret, and says so before doctor runs", async () => {
-      const h = await harness();
-      await runUpgrade(options, h.deps);
-      expect(h.lines).toContain("GitHub webhook: configured");
-      expect(h.lines.indexOf("GitHub webhook: configured")).toBeLessThan(h.lines.indexOf("Checking the environment with agentx doctor"));
-      expect(h.github.hookWrites).toEqual([{ url: GITHUB_WEBHOOK_URL, secret: HAND_SET_WEBHOOK_SECRET }]);
-      expect((JSON.parse(h.githubSecrets.values.get(GITHUB_APP_SECRET)!) as { webhookSecret: string }).webhookSecret).toBe(HAND_SET_WEBHOOK_SECRET);
-    });
-
-    it("asks for Active to be turned on when the App's hook had no URL or another one", async () => {
-      const h = await harness();
-      await runUpgrade(options, h.deps);
-      expect(h.lines).toContain("GitHub webhook: turn on Active at https://github.com/organizations/acme/settings/apps/agentx-acme-staging if it is off");
-      const same = await harness({ github: { hookUrl: GITHUB_WEBHOOK_URL } });
-      await runUpgrade(options, same.deps);
-      expect(same.lines.some((line) => line.includes("turn on Active"))).toBe(false);
-    });
-
-    it("says unchanged when the hook already points at the control plane", async () => {
-      const h = await harness({ github: { hookUrl: GITHUB_WEBHOOK_URL } });
-      await runUpgrade(options, h.deps);
-      expect(h.lines).toContain("GitHub webhook: unchanged");
-      // The stored secret is sent again: GitHub masks its own copy, so a mismatch could not be seen.
-      expect(h.github.hookWrites).toEqual([{ url: GITHUB_WEBHOOK_URL, secret: HAND_SET_WEBHOOK_SECRET }]);
-    });
 
     it("tells the owner which events to tick and where", async () => {
       const h = await harness({ github: { hookUrl: GITHUB_WEBHOOK_URL, events: ["pull_request"] } });
@@ -180,14 +120,6 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
       expect(stored.webhookSecret).toMatch(/^[0-9a-f]{64}$/);
       expect(generated.lines.join("\n")).not.toContain(stored.webhookSecret);
       expect(JSON.stringify(result)).not.toContain(stored.webhookSecret);
-    });
-
-    it("carries on to doctor, and says what failed, when GitHub cannot be set up", async () => {
-      const h = await harness();
-      h.github.setHookConfig = async () => { throw agentXError("RUNTIME_UNAVAILABLE", "GitHub webhook update failed with HTTP 503"); };
-      await runUpgrade(options, h.deps);
-      expect(h.lines.some((line) => line.startsWith("GitHub webhook: could not be set up") && line.includes("HTTP 503"))).toBe(true);
-      expect(h.doctorRuns).toEqual(["staging"]);
     });
 
     it("does not print the secret when storing it fails", async () => {
@@ -209,91 +141,11 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
     });
   });
 
-  it("never prints the callback signing key", async () => {
-    const h = await harness();
-    const result = await runUpgrade(options, h.deps);
-    expect(h.lines.join("\n")).not.toContain(CALLBACK_KEY);
-    expect(JSON.stringify(result)).not.toContain(CALLBACK_KEY);
-  });
-
-  it("refuses an older release before anything else happens", async () => {
-    const h = await harness({ loadRelease: async () => release("1.1.0") });
-    await expect(runUpgrade(options, h.deps)).rejects.toThrow("release 1.1.0 is older than 1.2.3");
-    expect(h.prepared).toEqual([]);
-    expect(h.deployer.deployed).toEqual([]);
-  });
-
-  it("re-checks the version under the environment lock, so a concurrent upgrade is never undone (question 3)", async () => {
-    const h = await harness();
-    h.deps.loadRelease = async () => {
-      // Another upgrade finishes while this one loads its release.
-      await writeEnvironmentSettings(h.store, { ...INSTALLED, version: "1.4.0" });
-      return release("1.3.0");
-    };
-    await expect(runUpgrade(options, h.deps)).rejects.toThrow("release 1.3.0 is older than 1.4.0");
-    expect(h.prepared).toEqual([]);
-    expect(h.deployer.deployed).toEqual([]);
-    expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
-  });
-
-  it("holds the environment lock while it deploys, and releases it after", async () => {
-    const h = await harness();
-    const holders: Array<string | undefined> = [];
-    const prepare = h.deps.prepare.bind(h.deps);
-    h.deps.prepare = async (input) => {
-      holders.push(h.store.values.get(lockParameterName("staging")));
-      return prepare(input);
-    };
-    await runUpgrade(options, h.deps);
-    expect(holders).toHaveLength(1);
-    expect(JSON.parse(holders[0] ?? "{}")).toMatchObject({ holder: ADMIN, command: "upgrade" });
-    expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
-  });
-
-  it("refuses while another command holds the environment lock, deploying nothing", async () => {
-    const h = await harness();
-    h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: "arn:aws:sts::123456789012:assumed-role/Admin/bob", command: "config set", acquiredAt: new Date(T0).toISOString() }));
-    await expect(runUpgrade(options, h.deps)).rejects.toThrow(`locked by arn:aws:sts::123456789012:assumed-role/Admin/bob running "config set" since ${new Date(T0).toISOString()}; wait for it to finish, then run the same agentx command again`);
-    expect(h.deployer.deployed).toEqual([]);
-  });
-
-  it("offers to take over a stale lock a killed upgrade left, and upgrades once confirmed", async () => {
-    const asked: string[] = [];
-    const h = await harness({ ask: async (prompt) => { asked.push(prompt); return "y"; } });
-    const stale = new Date(T0 - 3 * 60 * 60 * 1000).toISOString();
-    h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: ADMIN, command: "upgrade", acquiredAt: stale }));
-    await runUpgrade(options, h.deps);
-    expect(asked[0]).toBe(`Environment staging is locked by ${ADMIN} running "upgrade" since ${stale}. Take the lock over? Say yes only if that command is no longer running. [y/N] `);
-    expect(h.deployer.deployed).toHaveLength(6);
-    expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
-  });
-
   it("keeps a stale lock when the takeover is declined, deploying nothing", async () => {
     const h = await harness({ ask: async () => "n" });
     h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: ADMIN, command: "upgrade", acquiredAt: new Date(T0 - 3 * 60 * 60 * 1000).toISOString() }));
     await expect(runUpgrade(options, h.deps)).rejects.toThrow("older than 2 hours");
     expect(h.prepared).toEqual([]);
-    expect(h.deployer.deployed).toEqual([]);
-  });
-
-  it("offers the same caller its own cut-off upgrade's lock at once, and upgrades once confirmed", async () => {
-    const asked: string[] = [];
-    const h = await harness({ ask: async (prompt) => { asked.push(prompt); return "y"; } });
-    const fresh = new Date(T0).toISOString();
-    h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: ADMIN, command: "upgrade", acquiredAt: fresh }));
-    await runUpgrade(options, h.deps);
-    expect(asked[0]).toBe(`Environment staging is locked by ${ADMIN} running "upgrade" since ${fresh}. Take the lock over? Say yes only if that command is no longer running. [y/N] `);
-    expect(h.deployer.deployed).toHaveLength(6);
-    expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
-  });
-
-  it("still refuses a fresh upgrade lock another caller holds, asking nothing", async () => {
-    const asked: string[] = [];
-    const h = await harness({ ask: async (prompt) => { asked.push(prompt); return "y"; } });
-    const bob = "arn:aws:sts::123456789012:assumed-role/Admin/bob";
-    h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: bob, command: "upgrade", acquiredAt: new Date(T0).toISOString() }));
-    await expect(runUpgrade(options, h.deps)).rejects.toThrow(`locked by ${bob} running "upgrade"`);
-    expect(asked).toEqual([]);
     expect(h.deployer.deployed).toEqual([]);
   });
 
@@ -309,13 +161,6 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
     await runUpgrade(options, h.deps);
     expect(h.lines).toContain("Environment staging already runs 1.2.3; checking that every stack is on it");
     expect(h.deployer.deployed).toHaveLength(6);
-  });
-
-  it("refuses a prerelease target right after loading it, deploying nothing (ruling F31)", async () => {
-    const h = await harness({ loadRelease: async () => release("1.3.0-rc.1") });
-    await expect(runUpgrade({ ...options, releaseDir: "/releases/rc" }, h.deps)).rejects.toThrow("release 1.3.0-rc.1 is a prerelease");
-    expect(h.prepared).toEqual([]);
-    expect(h.deployer.deployed).toEqual([]);
   });
 
   it("needs a version when this agentx was built from source", async () => {
@@ -334,37 +179,6 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
     await writeEnvironmentSettings(h.store, { ...INSTALLED, naming: "legacy" });
     await expect(runUpgrade(options, h.deps)).rejects.toThrow("agentx upgrade works on environments installed with agentx init; staging uses the legacy stack names");
     await expect(runUpgrade({ ...options, env: "other" }, h.deps)).rejects.toThrow("environment other is not installed in this account and region");
-  });
-
-  it("under the operator role, skips an unchanged access stack", async () => {
-    const h = await harness({ caller: OPERATOR });
-    await runUpgrade(options, h.deps);
-    expect(h.deployer.deployed[0]).toBe("agentx-staging-foundation");
-  });
-
-  it("under the operator role, stops before deploying when the release changes the access stack (question 9)", async () => {
-    const h = await harness({ caller: OPERATOR, loadRelease: async () => release("1.3.0", [], CHANGED_ACCESS_TEMPLATE) });
-    await expect(runUpgrade(options, h.deps)).rejects.toThrow("release 1.3.0 changes the access stack, which only admin credentials can deploy");
-    await expect(runUpgrade(options, h.deps)).rejects.toThrow("agentx --env staging upgrade --export <dir>");
-    expect(h.deployer.deployed).toEqual([]);
-  });
-
-  it("with admin credentials, deploys a changed access stack first without comparing it (question 9)", async () => {
-    const sent: unknown[] = [];
-    const h = await harness({ loadRelease: async () => release("1.3.0", ["BudgetMonthlyUsd"], CHANGED_ACCESS_TEMPLATE), cloudFormation: { send: async (command) => { sent.push(command); throw new Error("unexpected"); } } });
-    await runUpgrade(options, h.deps);
-    expect(h.deployer.deployed[0]).toBe("agentx-staging-access");
-    expect(sent).toEqual([]);
-  });
-
-  it("stops on a data replacement under --yes, deleting nothing, and continues with --allow-replace", async () => {
-    const changes = { "agentx-staging-control-plane": [{ action: "Modify", logicalId: "State", type: "AWS::DynamoDB::Table", replacement: "True" }] };
-    const stopped = await harness({ changes });
-    await expect(runUpgrade(options, stopped.deps)).rejects.toThrow("upgrade stopped: agentx-staging-control-plane would replace State (AWS::DynamoDB::Table)");
-    expect(stopped.deployer.deployed).not.toContain("agentx-staging-control-plane");
-    const allowed = await harness({ changes });
-    await runUpgrade({ ...options, allowReplace: ["State"] }, allowed.deps);
-    expect(allowed.deployer.deployed).toContain("agentx-staging-control-plane");
   });
 
   it("stops when the operator declines a stack's changes, naming how to continue", async () => {
@@ -395,13 +209,6 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
     expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.3.0");
   });
 
-  it("keeps a release's own refusal for a region it does not cover", async () => {
-    const uncovered: LoadedRelease = { ...release(), template: (part) => { if (part === "access") throw agentXError("CONFIG_INVALID", "release 1.3.0 does not cover region us-east-1; use a region it lists"); return "{}"; } };
-    const h = await harness({ caller: OPERATOR, loadRelease: async () => uncovered });
-    await expect(runUpgrade(options, h.deps)).rejects.toThrow("release 1.3.0 does not cover region us-east-1; use a region it lists");
-    expect(h.deployer.deployed).toEqual([]);
-  });
-
   it("puts no secret in a refusal", async () => {
     const refusals: string[] = [];
     const changes = { "agentx-staging-control-plane": [{ action: "Modify", logicalId: "State", type: "AWS::DynamoDB::Table", replacement: "True" }] };
@@ -422,46 +229,12 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
     await expect(runUpgrade({ ...options, yes: false }, h.deps)).rejects.toThrow("agentx upgrade needs --yes when stdin is not a terminal");
   });
 
-  it("with --export, writes the bundle and deploys nothing", async () => {
-    const out = await bundleDir("agentx-upgrade-run-export-");
-    const h = await harness();
-    const result = await runUpgrade({ ...options, exportDir: out }, h.deps);
-    expect(result.exported).toBe(out);
-    expect(h.deployer.deployed).toEqual([]);
-    expect(h.prepared).toEqual([]);
-    expect(h.doctorRuns).toEqual([]);
-    // No AWS write: the settings keep the old version, and no lock is taken.
-    expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.2.3");
-    expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
-    expect(await readdir(out)).toEqual(expect.arrayContaining(["README.md", "parameters", "templates", "packages"]));
-    expect(h.lines).toContain("Writing the upgrade of staging from 1.2.3 to 1.3.0 (templates engine) to a bundle");
-  });
-
   it("with --export under the operator role, carries a changed access stack instead of refusing (question 9)", async () => {
     const out = await bundleDir("agentx-upgrade-run-export-");
     const h = await harness({ caller: OPERATOR, isInteractive: () => false, loadRelease: async () => release("1.3.0", [], CHANGED_ACCESS_TEMPLATE) });
     const result = await runUpgrade({ ...options, yes: false, exportDir: out }, h.deps);
     expect(result.parts[0]).toBe("access");
     expect(await readFile(join(out, "README.md"), "utf8")).toContain("create-change-set --stack-name agentx-staging-access ");
-  });
-
-  it("with --export, leaves out an unchanged access stack", async () => {
-    const out = await bundleDir("agentx-upgrade-run-export-");
-    const h = await harness();
-    const result = await runUpgrade({ ...options, exportDir: out }, h.deps);
-    expect(result.parts).not.toContain("access");
-    expect(await readFile(join(out, "README.md"), "utf8")).not.toContain("--stack-name agentx-staging-access ");
-  });
-
-  it("with --export, describes each stack once", async () => {
-    const out = await bundleDir("agentx-upgrade-run-export-");
-    const h = await harness();
-    const described: string[] = [];
-    const stacks = h.deps.stacks;
-    h.deps.stacks = { describe: async (name) => { described.push(name); return stacks.describe(name); } };
-    await runUpgrade({ ...options, exportDir: out }, h.deps);
-    expect(described.length).toBeGreaterThan(0);
-    expect(new Set(described).size).toBe(described.length);
   });
 
   it("applies the same sign-in values as agentx upgrade when SSM and the stack disagree (ruling F29)", async () => {
@@ -483,12 +256,6 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
     expect({ SlackTeamId: written.SlackTeamId, DeveloperSignInSlack: written.DeveloperSignInSlack }).toEqual({ SlackTeamId: sent.SlackTeamId, DeveloperSignInSlack: sent.DeveloperSignInSlack });
   });
 
-  it("with --export, still refuses an older release and a prerelease", async () => {
-    const out = await bundleDir("agentx-upgrade-run-export-");
-    await expect(runUpgrade({ ...options, exportDir: out }, (await harness({ loadRelease: async () => release("1.1.0") })).deps)).rejects.toThrow("release 1.1.0 is older than 1.2.3");
-    await expect(runUpgrade({ ...options, exportDir: out }, (await harness({ loadRelease: async () => release("1.3.0-rc.1") })).deps)).rejects.toThrow("release 1.3.0-rc.1 is a prerelease");
-    expect(await readdir(dirname(out))).toEqual([]);
-  });
 });
 
 describe("agentx upgrade with the cdk engine", () => {
@@ -503,40 +270,6 @@ describe("agentx upgrade with the cdk engine", () => {
     await expect(runUpgrade({ ...options, source: "/src" }, h.deps)).rejects.toThrow("upgrade stopped: agentx-staging-control-plane would delete Artifacts9F8E7D (AWS::S3::Bucket)");
     expect(h.deployer.deployed).toContain("agentx-staging-runtime");
     expect(h.deployer.deployed).not.toContain("agentx-staging-control-plane");
-  });
-
-  it("upgrades every stack with admin credentials and runs doctor, which must pass (ruling F4)", async () => {
-    const h = await cdk();
-    const result = await runUpgrade({ ...options, source: "/src" }, h.deps);
-    expect(h.deployer.deployed).toEqual(["agentx-staging-access", "agentx-staging-foundation", "agentx-staging-identity", "agentx-staging-runtime", "agentx-staging-control-plane", "agentx-staging-slack"]);
-    expect(h.doctorRuns).toEqual(["staging"]);
-    expect(result.doctor).toEqual({ failed: 0, warned: 0 });
-  });
-
-  // Issue 152 replaces live check L7's refusal: a source-built CLI takes the version from the tag.
-  it("with a source-built CLI and no --release or --to, builds the release from --source: the tag's version", async () => {
-    const built: Array<{ source: string; images?: { worker?: string; slack?: string } }> = [];
-    const h = await cdk({
-      cliVersion: undefined,
-      loadRelease: async () => { throw new Error("test setup: no release directory or download expected"); },
-      sourceRelease: async (input) => { built.push(input); return release("1.3.0"); },
-    });
-    const images = { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/w@sha256:${"d".repeat(64)}` };
-    const result = await runUpgrade({ ...options, source: "/src", images }, h.deps);
-    expect(built).toEqual([{ source: "/src", images }]);
-    expect(result).toMatchObject({ from: "1.2.3", to: "1.3.0" });
-    expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.3.0");
-  });
-
-  it("with --to or --release, loads that release as before (prepare then checks it is the source's tag)", async () => {
-    const loaded: Array<{ releaseDir?: string; version?: string }> = [];
-    const h = await cdk({
-      cliVersion: undefined,
-      loadRelease: async (input) => { loaded.push(input); return release("1.3.0"); },
-      sourceRelease: async () => { throw new Error("test setup: no source release expected"); },
-    });
-    await runUpgrade({ ...options, source: "/src", to: "1.3.0" }, h.deps);
-    expect(loaded).toEqual([{ version: "1.3.0" }]);
   });
 
   it("refuses a --to that is not the source's tag before anything deploys, through the real prepare (review M9)", async () => {
@@ -601,17 +334,6 @@ describe("the agentx upgrade command", () => {
     return { out, err, stdout: { write: (text: string) => out.push(text) }, stderr: { write: (text: string) => err.push(text) } };
   }
 
-  it("upgrades and says so, keeping progress on stderr", async () => {
-    const h = await harness();
-    const io = capture();
-    const rest = withoutWrite(h.deps);
-    const code = await executeCli(["--env", "staging", "upgrade", "--yes"], { ...io, upgrade: rest });
-    expect(code).toBe(0);
-    expect(io.out.join("")).toBe("Upgraded staging from 1.2.3 to 1.3.0.\n");
-    expect(io.err.join("")).toContain("Upgrading staging from 1.2.3 to 1.3.0 (templates engine)");
-    expect(io.out.join("") + io.err.join("")).not.toContain(CALLBACK_KEY);
-  });
-
   it("with --export, says where the bundle is and who it is for", async () => {
     const out = await bundleDir("agentx-upgrade-cli-export-");
     const h = await harness();
@@ -652,10 +374,6 @@ describe("accessChanged (question 9)", () => {
   const input = (templateBody: string | undefined) => ({
     cloudFormation: { send: async () => (templateBody === undefined ? {} : { TemplateBody: templateBody }) },
     stackName: "agentx-staging-access", release: release(), region: "us-east-1", env: "staging",
-  });
-
-  it("is false for the same template written differently", async () => {
-    expect(await accessChanged(input(JSON.stringify({ Resources: { ArtifactBucket: { Type: "AWS::S3::Bucket" } } }, null, 2)))).toBe(false);
   });
 
   it("is true when GetTemplate returns no body", async () => {

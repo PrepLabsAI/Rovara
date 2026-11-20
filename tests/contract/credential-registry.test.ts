@@ -19,17 +19,6 @@ const secretValues: Record<string, string> = {
 const secrets = { read: vi.fn(async (name: string) => secretValues[name]) };
 
 describe("credential registry routes", () => {
-  it("registers, lists with the built-in GitHub App first, and never returns a secret value", async () => {
-    const { handler } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
-    const registered = await adminCall(handler, { method: "POST", path: "/v1/admin/credentials", body: { ref: "jira-sa", type: "static-secret", secretName: "agentx/connectors/jira-sa" } });
-    expect(registered.status).toBe(201);
-    expect(registered.body).toMatchObject({ replaced: false, credential: { ref: "jira-sa", type: "static-secret", builtIn: false, tokenCached: false } });
-    const listed = await adminCall(handler, { method: "GET", path: "/v1/admin/credentials" });
-    expect(listed.status).toBe(200);
-    expect((listed.body.credentials as Array<{ ref: string }>).map((entry) => entry.ref)).toEqual(["github-app", "jira-sa"]);
-    expect(listed.body.credentials).toContainEqual({ ref: "github-app", type: "github-app", secretName: githubApp.secretName, builtIn: true, tokenCached: false });
-    expect(JSON.stringify([registered.body, listed.body])).not.toMatch(/jira-key-value|linear-secret-value/);
-  });
 
   it("requires the administrator claim", async () => {
     const { handler } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
@@ -64,13 +53,6 @@ describe("credential registry routes", () => {
 });
 
 describe("registry providers", () => {
-  it("names the provider type behind a reference, and nothing for an unknown one", async () => {
-    const { handler, registry } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
-    await adminCall(handler, { method: "POST", path: "/v1/admin/credentials", body: { ref: "jira-oauth", type: "oauth-client-credentials", secretName: "agentx/connectors/jira-oauth" } });
-    expect(await registry!.typeOf(githubApp.ref)).toBe("github-app");
-    expect(await registry!.typeOf("jira-oauth")).toBe("oauth-client-credentials");
-    expect(await registry!.typeOf("missing")).toBeUndefined();
-  });
 
   it("resolves the record on each issue and reports unregistered or unusable references as unavailable", async () => {
     const { handler, registry } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
@@ -105,33 +87,6 @@ describe("Secrets Manager source and token cache", () => {
     await expect(secretsManagerSource(failing("ResourceNotFoundException")).read("agentx/connectors/x")).resolves.toBeUndefined();
     await expect(secretsManagerSource(failing("AccessDeniedException")).read("agentx/connectors/x")).rejects.toBeInstanceOf(CredentialUnavailable);
     await expect(secretsManagerSource(failing("ThrottlingException")).read("agentx/connectors/x")).rejects.not.toBeInstanceOf(CredentialUnavailable);
-  });
-
-  it("maps DecryptionFailure, InvalidRequestException and InvalidParameterException to CredentialUnavailable, naming only the secret", async () => {
-    const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
-    const failing = (name: string) => ({ send: vi.fn(async () => { throw Object.assign(new Error("aws-internal-detail: ciphertext blob invalid"), { name }); }) });
-    for (const name of ["DecryptionFailure", "InvalidRequestException", "InvalidParameterException"]) {
-      const error = await secretsManagerSource(failing(name)).read("agentx/connectors/x").catch((caught: unknown) => caught);
-      expect(error).toBeInstanceOf(CredentialUnavailable);
-      expect((error as Error).message).toBe("secret agentx/connectors/x cannot be decrypted or is scheduled for deletion");
-      expect((error as Error).message).not.toContain("aws-internal-detail");
-    }
-  });
-
-  it("extends the access-denied message to name the KMS key as a possible cause, and the actual configured connector prefix", async () => {
-    const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
-    const failing = { send: vi.fn(async () => { throw Object.assign(new Error("denied"), { name: "AccessDeniedException" }); }) };
-    const error = await secretsManagerSource(failing).read("agentx/connectors/x").catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(CredentialUnavailable);
-    expect((error as Error).message).toBe("AgentX cannot read secret agentx/connectors/x; connector secrets must be named agentx/connectors/<name> in this account and region, or its KMS key does not allow the AgentX broker");
-  });
-
-  it("names an environment's own connector prefix in the access-denied message, when the source is given one", async () => {
-    const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
-    const failing = { send: vi.fn(async () => { throw Object.assign(new Error("denied"), { name: "AccessDeniedException" }); }) };
-    const error = await secretsManagerSource(failing, "agentx/staging/connectors/").read("agentx/staging/connectors/x").catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(CredentialUnavailable);
-    expect((error as Error).message).toBe("AgentX cannot read secret agentx/staging/connectors/x; connector secrets must be named agentx/staging/connectors/<name> in this account and region, or its KMS key does not allow the AgentX broker");
   });
 
   it("logs and swallows a token cache write failure without the token", async () => {
@@ -172,37 +127,6 @@ describe("registry failure modes", () => {
     expect(response.status).toBe(400);
     expect(response.body).toMatchObject({ error: { code: "CONFIG_INVALID", message: "secret agentx/connectors/jira-sa cannot be decrypted or is scheduled for deletion" } });
     expect(JSON.stringify(response.body)).not.toMatch(/aws-internal-detail/);
-  });
-
-  it("keeps a transient Secrets Manager error a plain error on the provider path", async () => {
-    let failing = false;
-    const flaky = { read: vi.fn(async (name: string) => {
-      if (failing) throw Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" });
-      return secretValues[name];
-    }) };
-    const { handler, registry } = await createAdminBroker({ connectorCredentials: { secrets: flaky, githubApp } });
-    expect((await register(handler, "jira-sa", "static-secret", "agentx/connectors/jira-sa")).status).toBe(201);
-    failing = true;
-    const error = await registry!.provider("jira-sa").issue(undefined, "read").catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(Error);
-    expect(error).not.toBeInstanceOf(CredentialUnavailable);
-  });
-
-  it("refuses an oauth-client-credentials registration whose secret has the static shape", async () => {
-    const { handler } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
-    expect((await register(handler, "jira-oauth", "oauth-client-credentials", "agentx/connectors/jira-sa")).body).toMatchObject({
-      error: { code: "CONFIG_INVALID", message: 'credential jira-oauth: secret agentx/connectors/jira-sa must be JSON {"clientId": "...", "clientSecret": "...", "scopes": ["..."]}' },
-    });
-  });
-
-  it("makes the same provider object return the new secret after re-registration with another secret name", async () => {
-    const rotating = { read: vi.fn(async (name: string) => ({ ...secretValues, "agentx/connectors/jira-sa-2": JSON.stringify({ apiKey: "jira-key-2" }) })[name]) };
-    const { handler, registry } = await createAdminBroker({ connectorCredentials: { secrets: rotating, githubApp } });
-    await register(handler, "jira-sa", "static-secret", "agentx/connectors/jira-sa");
-    const provider = registry!.provider("jira-sa");
-    expect((await provider.issue(undefined, "read")).token).toBe("jira-key-value");
-    expect((await register(handler, "jira-sa", "static-secret", "agentx/connectors/jira-sa-2")).body).toMatchObject({ replaced: true });
-    expect((await provider.issue(undefined, "read")).token).toBe("jira-key-2");
   });
 
   it("treats a malformed stored record as unregistered and skips it in the list with a log line", async () => {

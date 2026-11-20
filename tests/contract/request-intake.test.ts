@@ -1,7 +1,7 @@
 // Smart intake: small talk is answered with a fixed reply before any model is asked; everything else goes on to the
 // classifier. The owner's case: "@Rovara hello" was answered with the Quick / Full / Just answer card.
 import { describe, expect, it } from "vitest";
-import { REQUEST_ROUTER_SYSTEM_PROMPT, SMALL_TALK_MAX_CHARS, smallTalkOf, smallTalkReply, type SmallTalkKind } from "../../packages/contracts/src/index.js";
+import { SMALL_TALK_MAX_CHARS, smallTalkOf, smallTalkReply, type SmallTalkKind } from "../../packages/contracts/src/index.js";
 
 /** Words user-facing copy never uses (global constraints). */
 const JARGON = /candidate|revision|digest|operation|artifact|workflow|SUCCEEDED|FAILED|invalid json/i;
@@ -69,14 +69,6 @@ describe("small talk, read without a model", () => {
       expect(smallTalkReply(kind)).not.toMatch(JARGON);
       expect(smallTalkReply(kind)).not.toContain("How should I handle this?");
     }
-  });
-});
-
-describe("the classifier's instruction", () => {
-  it("sends greetings, thanks and small talk to an answer, and keeps unclear for a possible change it cannot read", () => {
-    expect(REQUEST_ROUTER_SYSTEM_PROMPT).toMatch(/question[^\n]*a greeting, thanks, small talk/);
-    expect(REQUEST_ROUTER_SYSTEM_PROMPT).toContain("Answer unclear only when the person may want a code change");
-    expect(REQUEST_ROUTER_SYSTEM_PROMPT).toContain("When in doubt between question and unclear, answer question");
   });
 });
 

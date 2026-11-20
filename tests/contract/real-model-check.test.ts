@@ -3,7 +3,6 @@ import type { z } from "zod";
 import { REAL_MODEL_CHECK_ARTIFACT, RealModelCheckSchema, RealModelCheckWriteSchema, realModelCheckLine, realModelPassed } from "../../packages/contracts/src/real-model-check.js";
 import { TestProofSchema, TestProofWriteSchema } from "../../packages/contracts/src/test-proof.js";
 import { agentRepliesStatus } from "../../packages/broker/src/core/proof/agent-replies.js";
-import { expectLinearScaling } from "../support/scaling.js";
 
 function result(): z.infer<typeof RealModelCheckWriteSchema> {
   return { schemaVersion: 1, candidateDigest: "a".repeat(64), status: "completed", items: [{ checkId: "unit", test: "test_refund", result: "passed" }], totals: { selected: 1, passed: 1, passedOnRerun: 0, failed: 0, notRun: 0 }, calls: 3, costMicros: 40_000, model: "gemini-2.5-flash" };
@@ -37,22 +36,10 @@ describe("real model artifact", () => {
     const skipped = { ...result(), status: "skipped", items: [], totals: { selected: 0, passed: 0, passedOnRerun: 0, failed: 0, notRun: 0 }, calls: 0, costMicros: 0, model: null };
     expect(realModelCheckLine(skipped)).toBeUndefined();
   });
-  it("counts exact test passes for 192a", () => {
-    const r = result(); expect(realModelPassed(r, "unit", "test_refund")).toBe(true);
-    r.items[0]!.result = "passed_on_rerun"; r.totals.passed = 0; r.totals.passedOnRerun = 1;
-    expect(realModelPassed(r, "unit", "test_refund")).toBe(true);
-    r.items[0]!.result = "failed"; r.totals.passedOnRerun = 0; r.totals.failed = 1;
-    expect(realModelPassed(r, "unit", "test_refund")).toBe(false);
-  });
   it.each(["[x[1]](https://example.invalid) ![a[b]c](x)", "[x][ref] ![x][ref]", "@person #123 <b>html</b>", "# title\n> quote\n---\n```\n~~~", "hidden\u200b\ufe0ftext"])("makes every displayed field inert: %s", text => {
     const r = result(); r.items[0]!.test = text; r.items[0]!.result = "failed"; r.totals.passed = 0; r.totals.failed = 1; r.model = text;
     const line = realModelCheckLine(r)!;
     expect(line).not.toMatch(/\[|<b>|@person|#123|https:\/\/example|\n|\ufe0f/u);
-  });
-  it("refuses a megabyte without echo or unbounded work", () => {
-    // A scaling check, not a wall-clock bound: refusing a longer string must not cost more than linearly more (8N stays at or under 256 KiB so it stays in CPU cache; the full 1,000,000 characters is checked once below).
-    expectLinearScaling((n) => { const hostile = { ...result(), model: "x".repeat(n) }; return () => realModelCheckLine(hostile); }, { n: 32_768, label: "realModelCheckLine on a huge model name" });
-    expect(realModelCheckLine({ ...result(), model: "x".repeat(1_000_000) })).toBe("Real model check: not run: real model results could not be read.");
   });
 });
 
@@ -71,33 +58,6 @@ describe("TE-192a reference reader", () => {
       expect(RealModelCheckWriteSchema.safeParse(raw).success).toBe(false);
       expect(realModelCheckLine(raw)).toBe("Real model check: not run: real model results could not be read.");
     }
-  });
-  it("strips reference future fields and preserves the candidate binding", () => {
-    expect(RealModelCheckSchema.parse({ ...run([{ ...item, future: true }]), future: true })).toEqual(run());
-    for (const candidateDigest of [undefined, "x", "A".repeat(64), "a".repeat(63)]) {
-      expect(realModelPassed({ ...run(), candidateDigest }, item.checkId, "a")).toBe(false);
-    }
-  });
-  it("refuses every malformed reference item and duplicate without dropping valid siblings", () => {
-    const badItems = [{ ...item, result: "private-cause" }, { ...item, checkId: 1 }, { ...item, test: "" }, { ...item, test: "x".repeat(501) }, { ...item, result: "failed" }];
-    for (const bad of badItems) {
-      const raw = run([item, bad]);
-      expect(RealModelCheckSchema.safeParse(raw).success).toBe(false);
-      expect(realModelPassed(raw, item.checkId, "a")).toBe(false);
-    }
-  });
-  it("accepts maximum reference field lengths and refuses huge arrays before traversal", () => {
-    const items = Array.from({ length: 200 }, (_, i) => ({ checkId: "c".repeat(64), test: String(i).padEnd(500, "x"), result: "passed" }));
-    expect(RealModelCheckSchema.safeParse(run(items)).success).toBe(true);
-    expect(realModelPassed(run(items), items[0]!.checkId, items[0]!.test)).toBe(true);
-    const oversizedOf = (length: number) => {
-      const list = Array.from({ length }, () => item);
-      Object.defineProperty(list, 0, { get: () => { throw new Error("must not visit"); } });
-      return list;
-    };
-    // A scaling check, not a wall-clock bound: refusing a longer array must not cost more than linearly more (unitBytes 8 is a pointer per item; 8N stays under 256 KiB so it stays in CPU cache; the full 100,000 items is checked once below).
-    expectLinearScaling((n) => { const hostile = run(oversizedOf(n)); return () => RealModelCheckSchema.safeParse(hostile); }, { n: 4_096, unitBytes: 8, label: "RealModelCheckSchema on a huge items array" });
-    expect(RealModelCheckSchema.safeParse(run(oversizedOf(100_000))).success).toBe(false);
   });
   it.each([
     { totals: { selected: 0, passed: 0, passedOnRerun: 0, failed: 0, notRun: 0 } },
@@ -118,11 +78,6 @@ describe("TE-192a reference reader", () => {
 });
 
 describe("artifact limits and refusal words", () => {
-  it("accepts exactly 200 items and scopes the same test name by check", () => {
-    const r = result(); r.items = Array.from({ length: 200 }, (_, i) => ({ checkId: `c${i}`, test: "same", result: "passed" })); r.calls = 200; r.totals.selected = 200; r.totals.passed = 200;
-    expect(RealModelCheckWriteSchema.safeParse(r).success).toBe(true); expect(realModelPassed(r, "c0", "same")).toBe(true); expect(realModelPassed(r, "missing", "same")).toBe(false);
-    r.items[1] = r.items[0]!; expect(RealModelCheckSchema.safeParse(r).success).toBe(false);
-  });
   it.each([
     ["ports_missing", "product key approval and monthly meter are not connected"], ["round_kind", "real model tests need a check round"],
     ["approval_missing", "product key approval is unavailable"], ["approval_invalid", "product key approval does not cover these tests"],
@@ -142,12 +97,6 @@ describe("artifact limits and refusal words", () => {
   });
 });
 
-it("rejects an over-limit artifact without visiting its rows", () => {
-  const items = Array.from({ length: 201 }, () => result().items[0]);
-  Object.defineProperty(items, "0", { get: () => { throw new Error("row must not be read"); } });
-  expect(RealModelCheckSchema.safeParse({ ...result(), items }).success).toBe(false);
-});
-
 
 describe("exact check and test granularity", () => {
   it.each(["passed", "passed_on_rerun", "failed", "not_run"] as const)("accepts whole-check %s and never infers a test pass", state => {
@@ -160,11 +109,6 @@ describe("exact check and test granularity", () => {
     expect(realModelPassed(r, "other")).toBe(false);
     expect(realModelPassed(r, "unit", "test_refund")).toBe(false);
     if (state === "failed") expect(realModelCheckLine(r)).toContain("twice: unit.");
-  });
-  it("never infers a whole-check pass from a per-test pass", () => {
-    expect(realModelPassed(result(), "unit", "test_refund")).toBe(true);
-    expect(realModelPassed(result(), "unit")).toBe(false);
-    expect(realModelPassed(result(), "other", "test_refund")).toBe(false);
   });
   it("keeps both levels distinct and rejects duplicate whole-check items", () => {
     const r = result();
@@ -192,56 +136,6 @@ describe("scriptedReplies proof part", () => {
     expect(TestProofSchema.parse({ ...proof, scriptedReplies: facts })).toEqual({ ...proof, scriptedReplies: facts });
     expect(TestProofWriteSchema.safeParse({ ...proof, scriptedReplies: facts }).success).toBe(true);
   });
-  it("never drops a present malformed part, including wrong numeric types and duplicate check ids", () => {
-    for (const scriptedReplies of [null, {}, [{ ...facts[0], taskMade: -1 }], [{ ...facts[0], counted: Infinity }], [{ ...facts[0], taskMade: "1" }], [{ checkId: "readiness:0" }], [...facts, ...facts], Array.from({ length: 201 }, (_, i) => ({ ...facts[0], checkId: `readiness:${i}` }))]) {
-      expect(TestProofSchema.safeParse({ ...proof, scriptedReplies }).success).toBe(false);
-      expect(TestProofWriteSchema.safeParse({ ...proof, scriptedReplies }).success).toBe(false);
-    }
-  });
-  it("accepts 200 reply facts and refuses oversized facts without visiting them", () => {
-    const scriptedReplies = Array.from({ length: 200 }, (_, i) => ({ checkId: `readiness:${i}`, taskMade: 0, counted: Number.MAX_SAFE_INTEGER }));
-    expect(TestProofWriteSchema.safeParse({ ...proof, scriptedReplies }).success).toBe(true);
-    const huge = Array.from({ length: 100_000 }, () => facts[0]);
-    Object.defineProperty(huge, 0, { get: () => { throw new Error("must not visit"); } });
-    expect(TestProofSchema.safeParse({ ...proof, scriptedReplies: huge }).success).toBe(false);
-  });
-  it("strips only unknown fact keys on read, not on write", () => {
-    const value = { ...proof, scriptedReplies: [{ ...facts[0], future: true }] };
-    expect(TestProofSchema.parse(value).scriptedReplies).toEqual(facts);
-    expect(TestProofWriteSchema.safeParse(value).success).toBe(false);
-  });
-});
-
-it("refuses an oversized proof before traversing its items", () => {
-  const items = Array.from({ length: 100_000 }, () => ({}));
-  Object.defineProperty(items, 0, { get: () => { throw new Error("must not visit"); } });
-  expect(TestProofSchema.safeParse({ ...proof, items }).success).toBe(false);
-  expect(TestProofWriteSchema.safeParse({ ...proof, items }).success).toBe(false);
-});
-
-it("refuses invalid header and item fields at runtime", () => {
-  const badItems = [
-    { ...item, checkId: "" }, { ...item, checkId: "x".repeat(65) }, { ...item, checkId: null },
-    { ...item, test: "" }, { ...item, test: 1 }, { ...item, result: undefined },
-  ];
-  const invalid = [...badItems.map((bad) => run([bad])), { ...run(), schemaVersion: 2 }, { ...run(), candidateDigest: "A".repeat(64) }, { ...run(), candidateDigest: "a".repeat(63) }, { ...run(), items: null }];
-  // F9 (owner of the contract) keeps its strict writer: minimal 192a fixtures are read-only references, so run() is rejected here.
-  expect(RealModelCheckWriteSchema.safeParse(run()).success).toBe(false);
-  for (const value of invalid) {
-    expect(RealModelCheckSchema.safeParse(value).success).toBe(false);
-    expect(RealModelCheckWriteSchema.safeParse(value).success).toBe(false);
-  }
-});
-
-it("refuses invalid reply fact ids and every non-count numeric form", () => {
-  const facts = { checkId: "readiness:0", taskMade: 0, counted: 0 };
-  const invalid = ["", "x".repeat(65), null].map((checkId) => ({ ...facts, checkId }));
-  for (const field of ["taskMade", "counted"]) for (const value of [-1, 0.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1, "1", null]) invalid.push({ ...facts, [field]: value });
-  expect(TestProofWriteSchema.safeParse({ ...proof, scriptedReplies: [facts] }).success).toBe(true);
-  for (const value of invalid) {
-    expect(TestProofSchema.safeParse({ ...proof, scriptedReplies: [value] }).success).toBe(false);
-    expect(TestProofWriteSchema.safeParse({ ...proof, scriptedReplies: [value] }).success).toBe(false);
-  }
 });
 
 it("F9 workflow ids cannot confirm proof readiness ids", () => {

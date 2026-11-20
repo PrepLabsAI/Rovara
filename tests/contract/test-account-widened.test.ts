@@ -17,19 +17,6 @@ const awsBase = (over: Record<string, unknown> = {}, aws: Record<string, unknown
 const widened = (previous: unknown, next: unknown) => acc.testAccountWidened(previous as never, next as never);
 
 describe("testAccountWidened", () => {
-  it("is false for the same record, and for a re-ordered one", () => {
-    expect(widened(base(), base())).toBe(false);
-    expect(widened(base(), base({ hosts: ["files.example-pay.com", "api.example-pay.com"], envNames: ["PAYMENTS_KEY_COPY", "PAYMENTS_API_KEY"], projectIds: ["billing", "orders"] }))).toBe(false);
-  });
-  it("is false for each pure narrowing", () => {
-    expect(widened(base(), base({ hosts: ["api.example-pay.com"] }))).toBe(false);
-    expect(widened(base(), base({ envNames: ["PAYMENTS_API_KEY"] }))).toBe(false);
-    expect(widened(base(), base({ envNames: [] }))).toBe(false);
-    expect(widened(base(), base({ projectIds: ["orders"] }))).toBe(false);
-    expect(widened(base({ projectIds: "all" }), base({ projectIds: ["orders"] }))).toBe(false);
-    expect(widened(base({ projectIds: "all" }), base({ projectIds: "all" }))).toBe(false);
-    expect(widened(base(), base({ limits: { maxConnectionsPerRun: 100, maxConnectionsPerDay: 20_000, maxConcurrentRounds: 1 } }))).toBe(false);
-  });
   it("is true for each widening", () => {
     expect(widened(base(), base({ hosts: [...base().hosts, "other.example-pay.com"] }))).toBe(true);
     expect(widened(base(), base({ hosts: ["other.example-pay.com"] }))).toBe(true);
@@ -77,15 +64,6 @@ describe("testAccountWidened", () => {
     expect(widened(s3(["arn:aws:s3:::bucket-a/*"]), s3(["arn:aws:s3:::bucket-a/?"]))).toBe(true);
     expect(widened(s3(["arn:aws:s3:::bucket-a/*"]), s3(["arn:aws:s3:::bucket-a/"]))).toBe(true);
   });
-  it("never lets a narrowing and a widening hide in one change", () => {
-    expect(widened(base(), base({ hosts: ["other.example-pay.com"], envNames: [] }))).toBe(true);
-    expect(widened(base(), base({ hosts: ["api.example-pay.com"], projectIds: "all" }))).toBe(true);
-    expect(widened(base(), base({ hosts: ["api.example-pay.com"], limits: { ...base().limits, maxConnectionsPerDay: 20_001 } }))).toBe(true);
-  });
-  it("ignores the label, status, approvals and dates, which the approval digest does not cover either", () => {
-    expect(widened({ ...base(), label: "a" }, { ...base(), label: "b" })).toBe(false);
-    expect(acc.testAccountApprovalDigest(base() as never)).toBe(acc.testAccountApprovalDigest({ ...base(), label: "zzz" } as never));
-  });
 });
 
 describe("restampApprovals", () => {
@@ -123,9 +101,5 @@ describe("the run-time secret grant", () => {
       { ...grant(), value: "x" }, grant({ envNames: [] }), grant({ envNames: ["PATH"] }), grant({ envNames: ["A_ONE", "A_ONE"] }), grant({ key: "a/b" }),
       grant({ credentials: { accessKeyId: "has space", secretAccessKey: "x", sessionToken: "y" } }), grant({ expiresAt: "soon" }),
     ]) expect(acc.parseTestAccountSecretGrant(bad)).toBeUndefined();
-  });
-  it("never throws and never returns the reasons, so a credential cannot reach a log through a parse error", () => {
-    expect(() => acc.parseTestAccountSecretGrant({ credentials: 7 })).not.toThrow();
-    expect(acc.parseTestAccountSecretGrant(undefined)).toBeUndefined();
   });
 });

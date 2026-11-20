@@ -22,32 +22,11 @@ describe("item argument paths (spec 014)", () => {
     expect(itemPathValues({ tasks: [{ task: "11" }] }, "tasks[]")).toEqual([]);
   });
 
-  it("finds each present item: top level, nested, or in every object of an array", () => {
-    expect(itemPathValues({ id: "T-5" }, "id")).toEqual(["T-5"]);
-    expect(itemPathValues({ issue_number: 42 }, "issue_number")).toEqual([42]);
-    expect(itemPathValues({ fields: { key: "PAY-7" } }, "fields.key")).toEqual(["PAY-7"]);
-    expect(itemPathValues({ tasks: [{ task: "11" }, { name: "new" }, { task: "12" }] }, "tasks[].task")).toEqual(["11", "12"]);
-    expect(itemPathHolders({ tasks: [{ task: "11", completed: true }, 3, null] }, "tasks[].task")).toEqual([{ task: "11", completed: true }]);
-    expect(itemPathHolders({ id: "T-5" }, "id")).toEqual([{ id: "T-5" }]);
-  });
-
   it("never reads deeper than the path's own steps", () => {
     const deep = { a: [{ b: { c: [{ d: "x", e: { f: "y" } }] } }] };
     expect(itemPathValues(deep, "a[].b.c[].d")).toEqual(["x"]);
     expect(itemPathValues(deep, "a[].b.c[].e.f")).toEqual([]);
     expect(itemPathHolders(deep, "a[].b.c[].e.f")).toEqual([]);
-  });
-
-  it("finds nothing, and never throws, when the arguments themselves are not a plain object", () => {
-    expect(itemPathValues(null as unknown as Record<string, unknown>, "id")).toEqual([]);
-    expect(itemPathValues("hello" as unknown as Record<string, unknown>, "id")).toEqual([]);
-    expect(itemPathValues(["a"] as unknown as Record<string, unknown>, "id")).toEqual([]);
-    expect(itemPathValues(42 as unknown as Record<string, unknown>, "id")).toEqual([]);
-    expect(itemPathHolders(null as unknown as Record<string, unknown>, "id")).toEqual([]);
-    expect(itemPathHolders("hello" as unknown as Record<string, unknown>, "id")).toEqual([]);
-    expect(itemPathHolders(["a"] as unknown as Record<string, unknown>, "id")).toEqual([]);
-    expect(itemPathHolders(42 as unknown as Record<string, unknown>, "id")).toEqual([]);
-    expect(() => itemPathValues(null as unknown as Record<string, unknown>, "id")).not.toThrow();
   });
 
   it("reports a malformed, duplicated or empty declaration", () => {

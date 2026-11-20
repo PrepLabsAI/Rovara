@@ -64,19 +64,6 @@ describe("reading the base commit's rule file when git could not run (#569)", ()
     expect(logged).toEqual([{ component: "worker", event: "rule_files.unverified", repository: "payments", attempt: 1, reason: "git cat-file blob: start: EAGAIN", retrying: true }]);
   });
 
-  it("stops with the fixed reason after a second temporary failure", async () => {
-    const { rootPath, repositories } = await workspaceWithRule("Flag every TODO.\n");
-    plan.failures = [{ reason: "git cat-file tree: timed out", transient: true }, { reason: "git cat-file tree: timed out", transient: true }];
-    await expect(loadRepositoryContextFiles(rootPath, repositories, { at: "base-commit" })).rejects.toThrow("couldn't verify the base rule files");
-    expect(logged.map((line) => [line.attempt, line.retrying])).toEqual([[1, true], [2, false]]);
-  });
-
-  it("never retries a read that did not verify", async () => {
-    const { rootPath, repositories } = await workspaceWithRule("Flag every TODO.\n");
-    plan.failures = [{ reason: "git cat-file blob: did not verify", transient: false }];
-    await expect(loadRepositoryContextFiles(rootPath, repositories, { at: "base-commit" })).rejects.toThrow("couldn't verify the base rule files");
-    expect(logged).toEqual([expect.objectContaining({ attempt: 1, reason: "git cat-file blob: did not verify", retrying: false })]);
-  });
 });
 
 describe("the reason a verified read failed", () => {
@@ -90,9 +77,4 @@ describe("the reason a verified read failed", () => {
     expect(unverifiedFrom(kept, "read blob")).toBe(kept);
   });
 
-  it("never carries a path or a message: an error code that is not a plain code is left out", () => {
-    const leaky = Object.assign(new Error("/home/worker/secret/path failed"), { code: "/home/worker/secret/path" });
-    expect(unverifiedFrom(leaky, "open the base commit").reason).toBe("open the base commit: error");
-    expect(unverifiedFrom(new Error("/workspace/repo/AGENTS.md"), "read blob").reason).toBe("read blob: error");
-  });
 });

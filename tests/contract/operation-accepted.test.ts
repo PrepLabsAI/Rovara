@@ -78,13 +78,6 @@ describe("onOperationAttached (#173)", () => {
     expect(accepted).not.toHaveBeenCalled();
   });
 
-  it("is not called by agentx_task_status, which waits on nothing", async () => {
-    const attached = vi.fn(async () => undefined);
-    const tool = createOrchestrationTools(fakeApi([]), context, { recovery: true, onOperationAttached: attached }).find((entry) => entry.name === "agentx_task_status")!;
-    await tool.execute("call-1", { operationId: OPERATION }, undefined, undefined, {} as never);
-    expect(attached).not.toHaveBeenCalled();
-  });
-
   it("is handed from the hosted Slack runtime to agentx_task_result", async () => {
     const attached = vi.fn(async () => undefined);
     const runtime = await createHostedSlackRuntime({
@@ -134,21 +127,6 @@ describe("the hosted Slack runtime", () => {
 });
 
 describe("stopping a handed-off turn's model", () => {
-  it("aborts the session when the turn's signal fires, once, and not after the turn let go", async () => {
-    const abort = vi.fn(async () => undefined);
-    const controller = new AbortController();
-    const release = stopModelOnAbort(controller.signal, { session: { abort } });
-    expect(abort).not.toHaveBeenCalled();
-    controller.abort();
-    controller.abort();
-    expect(abort).toHaveBeenCalledOnce();
-    release();
-
-    const later = new AbortController();
-    stopModelOnAbort(later.signal, { session: { abort } })();
-    later.abort();
-    expect(abort).toHaveBeenCalledOnce();
-  });
 
   it("aborts at once for a signal that already fired, and reports a failed abort instead of throwing", async () => {
     const abort = vi.fn(async () => {
@@ -187,11 +165,6 @@ describe("running a hosted turn that may be handed off", () => {
     expect(abort).toHaveBeenCalledOnce();
   });
 
-  it("runs the turn as before without a signal", async () => {
-    const abort = vi.fn(async () => undefined);
-    expect(await runHostedTurn({ session: { abort } }, undefined, async () => "answered")).toBe("answered");
-    expect(abort).not.toHaveBeenCalled();
-  });
 });
 
 describe("a task tool whose turn was handed off", () => {

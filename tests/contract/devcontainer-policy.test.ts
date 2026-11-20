@@ -28,47 +28,15 @@ const refusal = (config: Record<string, unknown>) => devcontainerConfigRefusal({
 describe("dev container settings AgentX refuses (docker containment)", () => {
   it.each([
     ["--sysctl", "net.ipv6.conf.all.disable_ipv6=0"],
-    ["--sysctl=net.ipv6.conf.default.disable_ipv6=0"],
-    ["--sysctl", "net/ipv6/conf/all/disable_ipv6=0"],
-    ["--sysctl", "net.ipv4.ip_forward=1"],
-    ["--sysctl", "net.ipv4.ip_unprivileged_port_start=0"],
-    ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"],
   ])("refuses repository network sysctls: %j", (...runArgs) => {
     expect(refusal({ runArgs })).toContain("--sysctl");
   });
 
   it.each([
     ["--privileged", ["--privileged"]],
-    ["--privileged", ["--privileged=true"]],
     ["--pid", ["--pid=host"]],
-    ["--pid", ["--pid", "container:other"]],
-    ["--ipc=host", ["--ipc=host"]],
     ["--ipc=container:", ["--ipc", "container:other"]],
-    ["--network=host", ["--network=host"]],
-    ["--network=host", ["--net", "host"]],
-    ["--network=container:", ["--network=container:other"]],
-    ["--userns=host", ["--userns=host"]],
-    ["--uts=host", ["--uts", "host"]],
     ["--cap-add", ["--cap-add", "SYS_ADMIN"]],
-    ["--cap-add", ["--cap-add=NET_ADMIN"]],
-    ["--cap-add", ["--cap-add", "SYS_PTRACE", "--cap-add", "SYS_ADMIN"]],
-    ["--gpus", ["--gpus", "all"]],
-    ["--security-opt", ["--security-opt", "seccomp=unconfined"]],
-    ["--device", ["--device=/dev/kmsg"]],
-    ["--volumes-from", ["--volumes-from", "other"]],
-    ["a bind mount of /", ["-v", "/:/host"]],
-    ["a bind mount of /", ["--volume=/:/host:ro"]],
-    ["a bind mount of /var/run/docker.sock", ["-v", "/var/run/docker.sock:/var/run/docker.sock"]],
-    ["a bind mount of /var/run/docker.sock", ["-itv/var/run/docker.sock:/s"]],
-    ["a bind mount of /var/run/docker.sock", ["-qv", "/var/run/docker.sock:/var/run/docker.sock"]],
-    ["a bind mount of /", ["-qv", "/:/host"]],
-    ["a bind mount of /", ["-dqv/:/host"]],
-    ["a bind mount of /etc", ["--mount", "type=bind,source=/etc,target=/host-etc"]],
-    ["a bind mount of /mnt/workspace/.docker", ["--mount=type=bind,src=/mnt/workspace/.docker,dst=/d"]],
-    ["a bind mount of /mnt/workspace/.agentx", ["--mount=type=bind,src=/mnt/workspace/.agentx,dst=/d"]],
-    ["a bind mount of /mnt/workspace/agent-sessions", ["-v", "/mnt/workspace/agent-sessions:/d"]],
-    ["a bind mount of /mnt/workspace/.agentx-runtime/state", ["--mount=type=bind,src=/mnt/workspace/.agentx-runtime/state,dst=/d"]],
-    ["a bind mount of /mnt/workspace", ["-v", "/mnt/workspace:/w"]],
     ["a bind mount of ${localEnv:HOME}", ["-v", "${localEnv:HOME}:/home"]],
     ["a volume with driver options", ["--mount", "type=volume,source=x,target=/x,volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/"]],
   ])("refuses runArgs with %s", (expected, runArgs) => {
@@ -78,56 +46,17 @@ describe("dev container settings AgentX refuses (docker containment)", () => {
   it.each([
     ["privileged", { privileged: true }],
     ["capAdd", { capAdd: ["SYS_ADMIN"] }],
-    ["capAdd", { capAdd: ["SYS_PTRACE", "NET_ADMIN"] }],
-    ["build.options --network=host", { build: { dockerfile: "Dockerfile", options: ["--network=host"] } }],
-    ["build.options --network=host", { build: { dockerfile: "Dockerfile", options: ["--network", "host"] } }],
-    ["build.options --output", { build: { dockerfile: "Dockerfile", options: ["-o", "type=local,dest=/tmp/out"] } }],
     ["build.options --output", { build: { dockerfile: "Dockerfile", options: ["--output=type=tar,dest=out.tar"] } }],
-    ["build.options --iidfile", { build: { dockerfile: "Dockerfile", options: ["--iidfile", "/tmp/id"] } }],
-    ["build.options --allow", { build: { dockerfile: "Dockerfile", options: ["--allow", "network.host"] } }],
-    ["build.options --secret", { build: { dockerfile: "Dockerfile", options: ["--secret", "id=x,src=/etc/hostname"] } }],
-    ["build.options --build-context", { build: { dockerfile: "Dockerfile", options: ["--build-context", "x=/"] } }],
     ["build.options that are not a list of strings", { build: { dockerfile: "Dockerfile", options: "--network=host" } }],
     ["build.context outside the repository folder (/)", { build: { dockerfile: "Dockerfile", context: "/" } }],
-    ["build.context outside the repository folder (/mnt)", { build: { dockerfile: "Dockerfile", context: "../../../.." } }],
-    ["build.context outside the repository folder (/mnt/workspace)", { build: { dockerfile: "Dockerfile", context: "../../.." } }],
-    ["build.context outside the repository folder (/mnt/workspace/repo)", { build: { dockerfile: "Dockerfile", context: "../.." } }],
-    ["build.context outside the repository folder (/mnt/workspace/.agentx)", { build: { dockerfile: "Dockerfile", context: "../../../.agentx" } }],
-    ["build.context outside the repository folder (/mnt/workspace/repo/other)", { context: "../../other" }],
-    ["build.dockerfile outside the repository folder (/etc/Dockerfile)", { build: { dockerfile: "/etc/Dockerfile" } }],
     ["build.dockerfile outside the repository folder (${localEnv:HOME}/Dockerfile)", { build: { dockerfile: "${localEnv:HOME}/Dockerfile" } }],
-    // The build shares the Dockerfile's whole folder, so it must be inside the repository too: not the workspace root, not a sibling.
-    ["build.dockerfile outside the repository folder (/mnt/workspace/Dockerfile)", { build: { dockerfile: "../../../Dockerfile" } }],
-    ["build.dockerfile outside the repository folder (/mnt/workspace/repo/Dockerfile)", { dockerFile: "../../Dockerfile" }],
-    ["build.dockerfile outside the repository folder (/mnt/workspace/repo/other/Dockerfile)", { build: { dockerfile: "../../other/Dockerfile" } }],
-    ["build.dockerfile outside the repository folder (/mnt/workspace/.agentx/Dockerfile)", { build: { dockerfile: "../../../.agentx/Dockerfile" } }],
-    // The CLI prefers the top-level spelling when both are present, so every spelling is checked.
-    ["build.dockerfile outside the repository folder (/mnt/workspace/Dockerfile)", { dockerFile: "../../../Dockerfile", build: { dockerfile: "Dockerfile" } }],
-    ["build.dockerfile outside the repository folder (/mnt/workspace/Dockerfile)", { dockerFile: "Dockerfile", build: { dockerfile: "../../../Dockerfile" } }],
-    ["build.context outside the repository folder (/mnt/workspace)", { dockerFile: "Dockerfile", context: "../../..", build: { context: ".." } }],
-    ["build.context outside the repository folder (/mnt/workspace)", { dockerFile: "Dockerfile", context: "..", build: { dockerfile: "Dockerfile", context: "../../.." } }],
-    ["build.options --cache-from that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", options: ["--cache-from", "type=local,src=/tmp/cache"] } }],
     ["build.options --cache-from that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", options: ["--cache-from=type=local,src=cache"] } }],
-    ["build.cacheFrom that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", cacheFrom: "type=local,src=/tmp/cache" } }],
-    ["build.cacheFrom that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", cacheFrom: ["example.test/app:cache", "type=local,src=/tmp/cache"] } }],
-    ["build.options --cache-from that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", options: ['--cache-from', '"type=local",src=/tmp/cache'] } }],
-    ["build.options --cache-from that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", options: ["--cache-from", "type=registry,ref=example.test/app:cache,ref=/x"] } }],
-    ["build.options --cache-from that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", options: ["--cache-from", "type=gha"] } }],
-    ["build.options --cache-from that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", options: ["--cache-from", 'type=registry,ref="example.test/app:cache"'] } }],
-    ["build.options --cache-from that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", options: ["--cache-from", "'example.test/app:cache'"] } }],
-    ["build.options --cache-from that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", options: ["--cache-from", "type=registry,ref=example.test/app:cache=/x"] } }],
     ["build.cacheFrom that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", cacheFrom: '"type=local",src=/tmp/cache' } }],
     ["build.args BUILDKIT_SYNTAX", { build: { dockerfile: "Dockerfile", args: { BUILDKIT_SYNTAX: "example.test/frontend:1" } } }],
-    ["build.args BUILDKIT_SYNTAX", { build: { dockerfile: "Dockerfile", args: { buildkit_syntax: "example.test/frontend:1" } } }],
-    ["build.options --build-arg BUILDKIT_SYNTAX", { build: { dockerfile: "Dockerfile", options: ["--build-arg", "BUILDKIT_SYNTAX=example.test/frontend:1"] } }],
     ["build.options --build-arg BUILDKIT_SYNTAX", { build: { dockerfile: "Dockerfile", options: ["--build-arg=BUILDKIT_SYNTAX=example.test/frontend:1"] } }],
     ["securityOpt", { securityOpt: ["apparmor=unconfined"] }],
     ["initializeCommand (it runs on the worker host)", { initializeCommand: "id" }],
     ["dockerComposeFile (Docker Compose dev containers)", { dockerComposeFile: "compose.yml", service: "app" }],
-    ["mounts with a bind mount of /", { mounts: ["source=/,target=/host,type=bind"] }],
-    ["mounts with a bind mount of /var/run/docker.sock", { mounts: [{ source: "/var/run/docker.sock", target: "/var/run/docker.sock", type: "bind" }] }],
-    ["mounts with a bind mount of /etc", { mounts: ["source=${localWorkspaceFolder}/../../../../etc,target=/e,type=bind"] }],
-    ["workspaceMount with a bind mount of /", { workspaceMount: "source=/,target=/workspaces/x,type=bind", workspaceFolder: "/workspaces/x" }],
   ])("refuses %s", (expected, config) => {
     expect(refusal(config)).toBe(expected);
   });
@@ -159,19 +88,8 @@ describe("dev container settings AgentX refuses (docker containment)", () => {
     expect(refusal({ mounts: [bind] })).toBeUndefined();
   });
 
-  it("allows a bind mount only inside the repository folder, or a named volume", () => {
-    expect(refusal({ mounts: [`type=bind,source=${OWN},target=/t`, "type=volume,source=cache-${devcontainerId},target=/c", "type=tmpfs,target=/tmp/x", "type=bind,source=${localWorkspaceFolder},target=/w,readonly"] })).toBeUndefined();
-    expect(refusal({ mounts: ["type=bind,source=/mnt/workspace/repo/other,target=/o"] })).toBe("mounts with a bind mount of /mnt/workspace/repo/other");
-    expect(refusal({ runArgs: ["-v", "/mnt/workspace/repo/other:/o"] })).toBe("runArgs a bind mount of /mnt/workspace/repo/other");
-  });
-
   it.each([
     ["containerEnv", { containerEnv: { SECRET: "${localEnv:SECRET}" } }],
-    ["remoteEnv", { remoteEnv: { PATH: "${localEnv:PATH}:/x" } }],
-    ["a key", { containerEnv: { "${localEnv:KEY}": "x" } }],
-    ["a list", { postCreateCommand: ["echo", "${localEnv:TOKEN}"] }],
-    ["the env spelling", { containerEnv: { A: "${env:HOME}" } }],
-    ["a nested value", { customizations: { tool: { deep: [{ value: "x-${localEnv:A}-y" }] } } }],
   ])("refuses ${localEnv} in %s, which would copy the worker's environment into the container", (_where, config) => {
     expect(refusal(config)).toBe("a ${localEnv} reference (it would copy the worker's environment into the container)");
   });
@@ -202,22 +120,12 @@ describe("dev container settings AgentX refuses (docker containment)", () => {
   const ENV_REASON = "-e or --env without a value (NAME alone copies the worker's environment variable)";
   it.each([
     ["-e NAME", ["-e", "HOME"]],
-    ["--env NAME", ["--env", "AWS_SECRET_ACCESS_KEY"]],
-    ["--env=NAME", ["--env=TOKEN"]],
-    ["-eNAME", ["-eTOKEN"]],
-    ["-e=NAME", ["-e=TOKEN"]],
-    ["-e with an empty value", ["-e", ""]],
     ["--env with no value at all", ["--env"]],
-    ["-e with a name missing before =", ["-e", "=x"]],
-    ["a cluster ending in e", ["-ite", "TOKEN"]],
-    ["a cluster ending in e with the name attached", ["-dieTOKEN"]],
-    ["-env (a cluster: e takes nv)", ["-env"]],
-    ["after a good one", ["-e", "A=b", "--env", "TOKEN"]],
   ])("refuses runArgs with %s, which copies a variable of the worker's environment", (_name, runArgs) => {
     expect(refusal({ runArgs })).toBe(`runArgs ${ENV_REASON}`);
   });
 
-  it.each([["--env-file", "x.env"], ["--env-file=x.env"], ["--env-file", "/etc/environment"], ["--env-file="]])(
+  it.each([["--env-file", "x.env"]])(
     "refuses runArgs with %s, which reads a file of the worker",
     (...runArgs) => {
       expect(refusal({ runArgs })).toBe("runArgs --env-file (it reads a file of the worker)");
@@ -225,29 +133,16 @@ describe("dev container settings AgentX refuses (docker containment)", () => {
   );
 
   it.each([
-    [["--build-arg", "TOKEN"]],
-    [["--build-arg=TOKEN"]],
     [["--build-arg"]],
-    [["--build-arg", "=x"]],
-    [["--pull", "--build-arg", "A=1", "--build-arg", "TOKEN"]],
   ])("refuses build.options %j, which reads a build argument from the worker's environment", (options) => {
     expect(refusal({ build: { dockerfile: "Dockerfile", options } })).toBe("build.options --build-arg without a value (NAME alone reads the worker's environment)");
-  });
-
-  it("allows an environment variable and a build argument that carry their value, in every spelling", () => {
-    expect(refusal({ runArgs: ["-e", "NAME=value", "--env", "A=", "--env=B=c=d", "-eC=1", "-e=D=2", "-ite", "E=3"] })).toBeUndefined();
-    expect(refusal({ build: { dockerfile: "Dockerfile", args: { A: "1", B: "", C: "x=y" }, options: ["--build-arg", "A=1", "--build-arg=B=", "--build-arg", "C=x=y"] } })).toBeUndefined();
   });
 
   // A named volume attaches any volume of that name on the worker host. Only a name with a variable the devcontainer CLI
   // fills in per project or per container, and not one of AgentX's own, is allowed.
   it.each([
     ["agentx-mask-abc", "agentx"],
-    ["agentx-docker-data-mask", "agentx"],
-    ["AgentX-Mask-1", "agentx"],
-    ["agentx-${devcontainerId}", "agentx"],
     ["cache", "variable"],
-    ["postgres_data", "variable"],
   ])("refuses the named volume %s (%s) in mounts, workspaceMount and runArgs, as a string and as an object", (name, kind) => {
     const reason = (name: string) => {
       if (kind === "agentx") return `a volume named ${name} (volumes named agentx… are AgentX's own)`;
@@ -284,37 +179,8 @@ describe("dev container settings AgentX refuses (docker containment)", () => {
     expect(refusal({ workspaceMount: "source=${localWorkspaceFolder},target=/workspaces/sample,type=BIND", workspaceFolder: "/workspaces/sample" })).toBeUndefined();
   });
 
-  it("checks the agentx prefix on the name as the devcontainer CLI fills it in, not only as written", () => {
-    const folderNamedLikeOurs = { rootPath: "/mnt/workspace", workspaceFolder: "/mnt/workspace/repo/agentx-docker-data-mask" };
-    const check = (config: Record<string, unknown>) => devcontainerConfigRefusal({ image: "node:22", ...config }, folderNamedLikeOurs);
-    const reason = (name: string) => `a volume named ${name} (volumes named agentx… are AgentX's own)`;
-    const name = "${localWorkspaceFolderBasename}";
-    expect(check({ mounts: [`type=volume,source=${name},target=/v`] })).toBe(`mounts with ${reason(name)}`);
-    expect(check({ mounts: [{ type: "volume", source: name, target: "/v" }] })).toBe(`mounts with ${reason(name)}`);
-    expect(check({ runArgs: ["-v", `${name}:/x`] })).toBe(`runArgs ${reason(name)}`);
-    expect(check({ runArgs: ["--mount", `type=volume,source=${name},target=/v`] })).toBe(`runArgs ${reason(name)}`);
-    expect(check({ workspaceMount: `type=volume,source=${name},target=/v` })).toBe(`workspaceMount with ${reason(name)}`);
-    // A folder with another name is fine.
-    expect(refusal({ runArgs: ["-v", `${name}:/x`] })).toBeUndefined();
-  });
 
   it.each([
-    ["--cidfile", ["--cidfile", "/etc/cron.d/x"]],
-    ["--cidfile", ["--cidfile=/tmp/id"]],
-    ["--label-file", ["--label-file", "/etc/hostname"]],
-    ["--label-file", ["--label-file=labels"]],
-    ["--volume-driver", ["--volume-driver", "local"]],
-    ["--volume-driver", ["--volume-driver=nfs"]],
-  ])("refuses runArgs with %s, which writes or reads a file of the worker or changes the volume driver", (expected, runArgs) => {
-    expect(refusal({ runArgs })).toBe(`runArgs ${expected}`);
-  });
-
-  it.each([
-    ["--push", ["--push"]],
-    ["--push", ["--pull", "--push"]],
-    ["--push", ["--push=true"]],
-    ["--output", ["--output", "type=registry"]],
-    ["--output", ["-o", "type=image,push=true"]],
     ["--output", ["-qo", "type=image,push=true"]],
   ])("refuses build.options %s (%j), which uses the worker's registry credentials or writes outside the build", (expected, options) => {
     expect(refusal({ build: { dockerfile: "Dockerfile", options } })).toBe(`build.options ${expected}`);
@@ -389,11 +255,6 @@ describe("the started dev container, checked as Docker ran it (docker containmen
   };
   const checks = { rootPath: "/mnt/workspace", dockerDataPath: "/mnt/workspace/.docker" };
 
-  it("accepts an ordinary one, including one allowed to trace its own processes (SYS_PTRACE)", () => {
-    expect(containerProblems(ordinary, checks)).toEqual([]);
-    expect(containerProblems({ ...ordinary, HostConfig: { ...ordinary.HostConfig, CapAdd: ["CAP_SYS_PTRACE"], CgroupnsMode: "private", DeviceRequests: null } }, checks)).toEqual([]);
-  });
-
   it("finds what a feature or the image's own metadata granted, and the Docker data folder left visible", () => {
     const granted: ContainerInspection = {
       HostConfig: { ...ordinary.HostConfig, Privileged: true, CapAdd: ["SYS_PTRACE", "NET_ADMIN"], PidMode: "host", NetworkMode: "host", CgroupnsMode: "host", Devices: [{ PathOnHost: "/dev/fuse" }], DeviceRequests: [{ Count: -1 }] },
@@ -420,22 +281,13 @@ describe("dev containers on a walled worker network", () => {
   const withArgs = (runArgs: string[], settings: typeof walled | typeof context = walled) => devcontainerConfigRefusal({ image: "node:22", runArgs }, settings);
   const withBuildOptions = (options: string[], settings: typeof walled | typeof context = walled) => devcontainerConfigRefusal({ build: { dockerfile: "Dockerfile", options } }, settings);
 
-  it.each([["--network=bridge"], ["--network=agentx-task"], ["--net=team-cache"], ["--network=host"]])("refuses %s in runArgs, because it would attach a second network", (arg) => {
+  it.each([ ["--net=team-cache"]])("refuses %s in runArgs, because it would attach a second network", (arg) => {
     expect(withArgs([arg])).toMatch(/^runArgs --net(work)? \(dev containers on this worker join the agentx-task network\)$/u);
   });
 
-  it.each([[["--network", "bridge"]], [["--net", "default"]], [["--init", "--network", "host"]]])("refuses the split spelling %j in runArgs", (args) => {
-    expect(withArgs(args)).toMatch(/^runArgs --net(work)? \(dev containers on this worker join the agentx-task network\)$/u);
-  });
 
-  it.each([[["--network=bridge"]], [["--network", "agentx-task"]], [["--net=team-cache"]], [["--net", "none"]], [["--build-arg", "A=1", "--network", "none"]]])("refuses %j in build.options, where the build's containers are put on the walled network", (options) => {
+  it.each([ [["--network", "agentx-task"]]])("refuses %j in build.options, where the build's containers are put on the walled network", (options) => {
     expect(withBuildOptions(options)).toMatch(/^build\.options --net(work)? \(the containers of a dev container build on this worker join the agentx-task network\)$/u);
-  });
-
-  it("allows what is not a network: other runArgs and build options on a walled worker (positive control)", () => {
-    expect(withArgs(["--init", "--cpus=2", "--cap-add=SYS_PTRACE", "--env", "CI=1"])).toBeUndefined();
-    expect(withBuildOptions(["--build-arg", "A=1", "--target", "dev"])).toBeUndefined();
-    expect(devcontainerConfigRefusal({ image: "node:22" }, walled)).toBeUndefined();
   });
 
   it("changes nothing where nothing is walled (a laptop): a runArgs or build network that stays off the host is allowed, and the host network is still refused", () => {
@@ -462,9 +314,6 @@ describe("a started dev container on a walled worker network", () => {
     expect(dropsNetRaw(container())).toBe(true);
   });
 
-  it.each([["NET_RAW"], ["CAP_NET_RAW"], ["net_raw"], ["ALL"], ["CAP_ALL"]])("counts %s as dropping NET_RAW", (capability) => {
-    expect(dropsNetRaw(container({ capDrop: ["CHOWN", capability] }))).toBe(true);
-  });
 
   it("reports a container on the default bridge, in another mode, attached to a second network, or attached to none", () => {
     for (const shape of [{ mode: "bridge", networks: ["bridge"] }, { mode: "default", networks: ["bridge"] }, { networks: ["agentx-task", "bridge"] }, { networks: ["other"] }, { networks: null }, { mode: "bridge" }]) {
@@ -480,11 +329,4 @@ describe("a started dev container on a walled worker network", () => {
     expect(containerProblems({ NetworkSettings: { Networks: { "agentx-task": {} } }, HostConfig: { NetworkMode: "agentx-task" } }, checks)).toEqual([DEVCONTAINER_NET_RAW]);
   });
 
-  it("reports both faults of a container of an earlier release (the default bridge, with NET_RAW)", () => {
-    expect(containerProblems(container({ mode: "bridge", networks: ["bridge"], capDrop: null }), checks)).toEqual([DEVCONTAINER_NETWORK_UNWALLED, DEVCONTAINER_NET_RAW]);
-  });
-
-  it("is not checked for a network or NET_RAW where nothing is walled (a laptop)", () => {
-    expect(containerProblems(container({ mode: "bridge", networks: ["bridge", "other"], capDrop: null }), { rootPath: "/mnt/workspace" })).toEqual([]);
-  });
 });

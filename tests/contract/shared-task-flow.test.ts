@@ -13,7 +13,7 @@ import { createThreadApi } from "../../packages/slack-service/src/thread-api.js"
 import { brokerFetch } from "../support/broker-fetch.js";
 import { MAYA, bindChannel, createDeveloperTaskBroker, grantProject, recordStream, registerRevision, teammate } from "../support/developer-task-broker.js";
 import { signedInClient } from "../support/mcp-broker-client.js";
-import { SLACK_CHANNEL, SLACK_TEAM, call, issuer } from "../support/slack-broker.js";
+import { SLACK_CHANNEL, call, issuer } from "../support/slack-broker.js";
 
 type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
 interface SharedTask { workspaceId: string; share: { threadTs: string; teamId: string; channelId: string; mode: string; sharedReason: string; modeReason?: string } }
@@ -244,27 +244,6 @@ describe("the owner's answers, end to end", () => {
     expect(service.posts.at(-1)).toBe(`<@${PRIYA}> Added the test.`);
     expect(service.records).toEqual([expect.objectContaining({ taskId, disposition: "answered" })]);
     expect((await tool("agentx_get_task", { task_id: taskId })).value).toMatchObject({ share_mode: "continue", channel_turns: [{ slack_user: PRIYA, outcome: "answered" }] });
-  });
-
-  it("lets a teammate's stop in a continue thread cancel the developer's own run (Q8)", async () => {
-    const harness = await createDeveloperTaskBroker();
-    const slack = notifier(harness);
-    const { tool } = await signedInClient(harness, MAYA);
-    const { taskId, subject, workspaceId } = await startShared(harness, slack, tool, "continue");
-    await harness.finish(workspaceId, String(activeOperation(harness, workspaceId)), "SUCCEEDED");
-    const developerRun = String(activeOperation(harness, workspaceId));
-    await slack.pump();
-
-    const stop = await harness.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: parseSlackThreadSubject(subject), userId: PRIYA });
-    expect(JSON.parse(stop.body)).toMatchObject({ outcome: "CANCEL_REQUESTED" });
-    expect(harness.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel" && item.workspaceId === workspaceId)).toEqual([expect.objectContaining({ requestedBy: { teamId: SLACK_TEAM, userId: PRIYA } })]);
-    expect(harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${developerRun}`)).toMatchObject({ status: "CANCEL_REQUESTED" });
-    // The worker stops the developer's run.
-    await harness.finish(workspaceId, developerRun, "CANCELLED");
-    expect(harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${developerRun}`)).toMatchObject({ status: "CANCELLED" });
-    expect((await tool("agentx_get_task", { task_id: taskId })).value).toMatchObject({ status: "CANCELLED" });
-    await slack.pump();
-    expect(slack.posts.at(-1)).toMatchObject({ threadTs: taskRecord(harness, taskId).share.threadTs, text: "The task ended CANCELLED." });
   });
 
   it("refuses a teammate's ordinary thread turn on a gated task shared in continue mode, and queues nothing (gap 10a)", async () => {

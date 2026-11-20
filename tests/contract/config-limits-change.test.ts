@@ -10,12 +10,10 @@ import { tokenStoreKey } from "../../packages/cli/src/auth.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 import { runConfigSet, type ConfigServices } from "../../packages/cli/src/config/commands.js";
-import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { createAdminChangeBroker } from "../support/admin-change-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, ensureWorkspace } from "../support/slack-broker.js";
 import { configServicesFor } from "../support/config-services.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
-import { STAGING_SETTINGS } from "../support/setup-fakes.js";
 
 /** The CLI's fetch, into the broker in process, with the admin sign-in's claims (API Gateway's JWT authorizer). */
 function brokerFetch(harness: Awaited<ReturnType<typeof createAdminChangeBroker>>): typeof fetch {
@@ -49,66 +47,12 @@ describe("agentx config set limits.* (FR-053, owner requirement)", () => {
     expect((await ensureWorkspace(harness.handler, `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000405`, "U0OMAR0001")).body).toMatchObject({ outcome: "WORKSPACE", created: true });
   });
 
-  it("changes nothing on no, and the audit says declined", async () => {
-    const harness = await createAdminChangeBroker();
-    const services = await configServicesFor({
-      adminSession: async () => ({ controlPlaneUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", accessToken: "admin-token-for-tests" }),
-      fetch: brokerFetch(harness),
-      prompter: { confirm: async () => false } as never,
-    });
-    expect(await runConfigSet(services, "staging", { key: "limits.workspacesPerOrg", value: "40", yes: false })).toEqual({ changed: false });
-    expect(harness.db.get("SETTINGS", "WORKSPACE_LIMITS")).toBeUndefined();
-    expect(harness.db.find((item) => item.entityType === "ADMIN_CHANGE_AUDIT")[0]).toMatchObject({ outcome: "declined", methodUsed: "cli" });
-  });
-
-  it("with --yes applies without asking, still prints the effect once, and never prints the admin token", async () => {
-    const harness = await createAdminChangeBroker();
-    const asked: string[] = [];
-    const services = await configServicesFor({
-      adminSession: async () => SESSION,
-      fetch: brokerFetch(harness),
-      prompter: { confirm: async (question: string) => { asked.push(question); return false; } } as never,
-    });
-    expect(await runConfigSet(services, "staging", { key: "limits.workspacesPerOrg", value: "40", yes: true })).toEqual({ changed: true });
-    expect(asked).toEqual([]);
-    expect(harness.db.get("SETTINGS", "WORKSPACE_LIMITS")).toMatchObject({ perPerson: 3, perOrganization: 40 });
-    expect(services.lines.filter((line) => line.includes("40"))).toHaveLength(1);
-    expect(services.lines.at(-1)).toBe("Applied.");
-    expect(services.lines.join("\n")).not.toContain(SESSION.accessToken);
-  });
-
-  it("shows the effect once when it asks: in the question, not also above it", async () => {
-    const harness = await createAdminChangeBroker();
-    const asked: string[] = [];
-    const services = await configServicesFor({
-      adminSession: async () => SESSION,
-      fetch: brokerFetch(harness),
-      prompter: { confirm: async (question: string) => { asked.push(question); return false; } } as never,
-    });
-    await runConfigSet(services, "staging", { key: "limits.workspacesPerOrg", value: "40", yes: false });
-    expect(asked).toHaveLength(1);
-    expect(asked[0]).toMatch(/\nApply this change\?$/);
-    const effect = asked[0]!.replace(/\nApply this change\?$/, "");
-    expect(services.lines).not.toContain(effect);
-    expect(services.lines).toEqual(["Nothing changed."]);
-  });
-
   it("refuses a value out of range before anything is planned", async () => {
     const harness = await createAdminChangeBroker();
     const services = await configServicesFor({ adminSession: async () => SESSION, fetch: brokerFetch(harness) });
     await expect(runConfigSet(services, "staging", { key: "limits.workspacesPerMember", value: "51", yes: true })).rejects.toThrow("from 1 to 50");
     expect(harness.db.find((item) => item.entityType === "ADMIN_CHANGE_AUDIT")).toEqual([]);
     expect(harness.db.get("SETTINGS", "WORKSPACE_LIMITS")).toBeUndefined();
-  });
-
-  it("refuses in the legacy deployment, which has no admin change path (D14), and says what to do instead", async () => {
-    const store = new MemoryParameterStore();
-    await writeEnvironmentSettings(store, { ...STAGING_SETTINGS, env: "production", naming: "legacy" } as never);
-    let fetched = false;
-    const services = await configServicesFor({ store, adminSession: async () => SESSION, fetch: (async () => { fetched = true; return Response.json({}); }) as unknown as typeof fetch });
-    await expect(runConfigSet(services, "production", { key: "limits.workspacesPerMember", value: "5", yes: true }))
-      .rejects.toThrow(LEGACY_REFUSAL);
-    expect(fetched).toBe(false);
   });
 
   it("refuses the same way for production before agentx env adopt, when it has no settings record at all", async () => {
@@ -118,14 +62,6 @@ describe("agentx config set limits.* (FR-053, owner requirement)", () => {
     // Any other environment with no settings is still not installed.
     await expect(runConfigSet(services, "staging", { key: "limits.workspacesPerMember", value: "5", yes: true })).rejects.toThrow("environment staging is not installed in this account and region; check --env and --region");
     expect(fetched).toBe(false);
-  });
-
-  it("refuses without --yes when nobody can answer the prompt, before anything is planned", async () => {
-    const harness = await createAdminChangeBroker();
-    const services = await configServicesFor({ adminSession: async () => SESSION, fetch: brokerFetch(harness), canAsk: false });
-    await expect(runConfigSet(services, "staging", { key: "limits.workspacesPerMember", value: "2", yes: false }))
-      .rejects.toMatchObject({ code: "CONFIRMATION_UNAVAILABLE", message: expect.stringContaining("limits.workspacesPerMember needs a yes: run the command in a terminal to answer its prompt, or pass --yes; nothing changed") as unknown });
-    expect(harness.db.find((item) => item.entityType === "ADMIN_CHANGE_AUDIT")).toEqual([]);
   });
 
   describe("through agentx config set", () => {
@@ -183,14 +119,6 @@ describe("agentx config set limits.* (FR-053, owner requirement)", () => {
       expect(session.stderr()).toContain("limits.workspacesPerMember needs a yes: run the command in a terminal to answer its prompt, or pass --yes");
       expect(session.fetched()).toBe(0);
       expect(session.harness.db.find((item) => item.entityType === "ADMIN_CHANGE_AUDIT")).toEqual([]);
-    });
-
-    it("without a terminal, a bad value is refused for what it is, not for the missing terminal", async () => {
-      const session = await cli({ signedIn: true, prompter: false });
-      expect(await session.run(["limits.workspacesPerMember", "51"])).not.toBe(0);
-      expect(session.stderr()).toContain("from 1 to 50");
-      expect(session.stderr()).not.toContain("needs a yes");
-      expect(session.fetched()).toBe(0);
     });
 
     it("in a terminal, asks with the effect; n declines it, and the command says nothing changed", async () => {

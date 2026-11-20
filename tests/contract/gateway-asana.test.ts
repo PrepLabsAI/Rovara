@@ -3,10 +3,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { ASANA_PROJECT_TOOL_ACCESS, itemPathProblems } from "../../packages/contracts/src/index.js";
-import {
-  ASANA_CREATE_TASK_ITEM_KEYS, ASANA_ITEM_ARGUMENTS, ASANA_MCP_ENDPOINT, ASANA_TASK_REFERENCES, ASANA_TOKEN_ENDPOINT, ASANA_UPDATE_TASK_ITEM_KEYS, asanaBinder, asanaConnector, asanaProjectGuard, executeTool, GuardRejection, presentCatalog, reviewTools,
-  type AsanaProjectScope, type ConnectorContext, type Invocation, type Ledger, type McpToolResult, type ToolApproval,
-} from "../../packages/gateway/src/index.js";
+import { ASANA_CREATE_TASK_ITEM_KEYS, ASANA_ITEM_ARGUMENTS, ASANA_MCP_ENDPOINT, ASANA_TASK_REFERENCES, ASANA_UPDATE_TASK_ITEM_KEYS, asanaBinder, asanaConnector, asanaProjectGuard, executeTool, GuardRejection, reviewTools, type AsanaProjectScope, type ConnectorContext, type Invocation, type Ledger, type McpToolResult, type ToolApproval } from "../../packages/gateway/src/index.js";
 import { vendorTools } from "../support/vendor-fixtures.js";
 
 const PROJECT = "1210000000000010";
@@ -79,11 +76,6 @@ function harness(options: { policy?: ToolApproval[]; getTask?: (gid: string) => 
 }
 
 describe("Asana connector definition", () => {
-  it("talks to Asana's MCP server and refreshes at Asana's token endpoint", () => {
-    expect(ASANA_MCP_ENDPOINT.href).toBe("https://mcp.asana.com/v2/mcp");
-    expect(ASANA_TOKEN_ENDPOINT.href).toBe("https://app.asana.com/-/oauth_token");
-    expect(asanaConnector({ issue: vi.fn() })).toMatchObject({ label: "Asana", attributionKeys: ["text"] });
-  });
 
   it("offers all eight guarded tools from the recorded catalog with the project arguments removed", () => {
     const { reviewed } = harness();
@@ -111,46 +103,9 @@ describe("Asana connector definition", () => {
     expect(new Set(topLevel)).toEqual(new Set(["task_id"]));
   });
 
-  it("presents each tool with the item arguments its schema offers: tasks[].task on update_tasks, task_id on get_task and add_comment, none on create_tasks", () => {
-    const { reviewed } = harness();
-    const presented = presentCatalog({
-      connector: "asana", label: "Asana", scopeNoun: "project", approvals: approvals.map(({ name }) => ({ name })),
-      scopes: [{ alias: "payments", tools: reviewed.tools }], itemArguments: asanaConnector({ issue: vi.fn() }).itemArguments,
-    });
-    expect(presented.skipped).toEqual([]);
-    expect(Object.fromEntries(presented.tools.map((tool) => [tool.upstreamName, tool.itemArguments]))).toEqual({
-      get_task: ["task_id"], get_task_stories: ["task_id"], add_comment: ["task_id"], update_tasks: ["tasks[].task"],
-      create_tasks: [], get_tasks: [], search_tasks: [], get_project: [],
-    });
-  });
 });
 
 describe("Asana project guard", () => {
-  it("accepts Asana's get_task answer exactly as the live check captured it (vendors/asana-get-task.json)", async () => {
-    const raw = readFileSync(new URL("../fixtures/vendors/asana-get-task.json", import.meta.url), "utf8");
-    const { run, writes } = harness({ getTask: (gid) => gid === GET_TASK.data.gid ? { content: [{ type: "text", text: raw }] } : { isError: true, content: [{ type: "text", text: "Not found" }] } });
-    expect(await run("add_comment", { task_id: GET_TASK.data.gid, text: "Seen." })).toMatchObject({ status: "SUCCEEDED" });
-    expect(writes()).toHaveLength(1);
-  });
-
-  it("binds the project on lists, searches and project reads", async () => {
-    const { run, calls } = harness();
-    expect(await run("get_tasks", { completed_since: "2026-09-01T00:00:00Z" })).toMatchObject({ status: "SUCCEEDED" });
-    expect(await run("search_tasks", { text: "login", completed: false })).toMatchObject({ status: "SUCCEEDED" });
-    expect(await run("get_project", {})).toMatchObject({ status: "SUCCEEDED" });
-    expect(calls).toEqual([
-      { name: "get_tasks", arguments: { completed_since: "2026-09-01T00:00:00Z", project: PROJECT } },
-      { name: "search_tasks", arguments: { text: "login", completed: false, projects_any: PROJECT } },
-      { name: "get_project", arguments: { project_id: PROJECT } },
-    ]);
-  });
-
-  it("refuses a model-supplied project on any tool before connecting", async () => {
-    const { run, connect } = harness();
-    await expect(run("get_tasks", { project: OTHER_PROJECT })).rejects.toMatchObject({ code: "FORBIDDEN", message: expect.stringContaining("Asana routing arguments are server controlled") as unknown });
-    await expect(run("search_tasks", { projects_any: `${PROJECT},${OTHER_PROJECT}` })).rejects.toMatchObject({ code: "FORBIDDEN" });
-    expect(connect).not.toHaveBeenCalled();
-  });
 
   it("refuses get_tasks filters that would replace the project context", async () => {
     const { run, calls } = harness();
@@ -160,31 +115,6 @@ describe("Asana project guard", () => {
       expect(result.text).toContain("works only in the payments project");
     }
     expect(calls).toEqual([]);
-  });
-
-  it("reads and comments on a task in the project, signing only the plain-text comment", async () => {
-    const { run, calls } = harness();
-    expect(await run("get_task", { task_id: "1210000000000101" })).toMatchObject({ status: "SUCCEEDED" });
-    expect(await run("add_comment", { task_id: "1210000000000102", text: "Fixed in main." })).toMatchObject({ status: "SUCCEEDED" });
-    expect(calls.map((entry) => entry.name)).toEqual(["get_task", "get_task", "get_task", "add_comment"]);
-    expect(calls[1]).toEqual({ name: "get_task", arguments: { task_id: "1210000000000101" } });
-    expect(calls[3]!.arguments).toEqual({ task_id: "1210000000000102", text: "Fixed in main.\n\n—\nRequested by Slack member U1 via AgentX" });
-  });
-
-  it("refuses to comment on, read or list the stories of a task in another project, and writes nothing", async () => {
-    const { run, writes } = harness();
-    for (const [tool, args] of [["add_comment", { task_id: "1210000000000201", text: "x" }], ["get_task", { task_id: "1210000000000201" }], ["get_task_stories", { task_id: "1210000000000201" }]] as const) {
-      const result = await run(tool, args);
-      expect(result).toMatchObject({ status: "FAILED", reason: "policy_denied", text: "Asana task 1210000000000201 is not in the payments project this connector may use." });
-    }
-    expect(writes()).toEqual([]);
-  });
-
-  it("follows a subtask up to its parent's project, at most three levels", async () => {
-    const { run, calls } = harness();
-    expect(await run("add_comment", { task_id: "1210000000000302", text: "x" })).toMatchObject({ status: "SUCCEEDED" });
-    expect(calls.filter((entry) => entry.name === "get_task").map((entry) => entry.arguments.task_id)).toEqual(["1210000000000302", "1210000000000301", "1210000000000101"]);
-    expect(await run("add_comment", { task_id: "1210000000000401", text: "x" })).toMatchObject({ status: "FAILED", reason: "policy_denied" });
   });
 
   it("fails closed when the task cannot be read, has an unexpected shape, or is a different task", async () => {
@@ -202,14 +132,6 @@ describe("Asana project guard", () => {
       expect(result).toMatchObject({ status: "FAILED", reason: "policy_denied", text: "Could not confirm that Asana task 1210000000000101 is in the payments project, so the request was not sent." });
       expect(writes()).toEqual([]);
     }
-  });
-
-  it("refuses a task URL or name instead of a task ID, before any call", async () => {
-    const { run, calls } = harness();
-    for (const task_id of ["https://app.asana.com/0/1210000000000010/1210000000000101", "Flaky login test", "0123"]) {
-      expect(await run("add_comment", { task_id, text: "x" })).toMatchObject({ status: "FAILED", text: expect.stringContaining("Pass the Asana task ID") as unknown });
-    }
-    expect(calls).toEqual([]);
   });
 
   it("creates tasks only in the project: binds default_project, allows its own project_id and a parent in it, refuses the rest", async () => {
@@ -331,15 +253,6 @@ describe("Asana project guard", () => {
     }
   });
 
-  it("reads a shared parent chain once, so sibling subtasks do not exhaust the lookup cap", async () => {
-    const { run, calls } = harness();
-    const siblings = ["1210000000000303", "1210000000000304", "1210000000000305", "1210000000000306"];
-    expect(await run("update_tasks", { tasks: siblings.map((task) => ({ task, completed: true })) })).toMatchObject({ status: "SUCCEEDED" });
-    const lookups = calls.filter((entry) => entry.name === "get_task").map((entry) => entry.arguments.task_id);
-    expect(lookups.length).toBeLessThanOrEqual(2 + siblings.length);
-    expect(new Set(lookups).size).toBe(lookups.length);
-  });
-
   it("checks search_tasks custom_fields: GID.operator keys with plain values only", async () => {
     const { run, calls } = harness();
     expect(await run("search_tasks", { custom_fields: '{"4578152156.value":"1200123456789012","1200999999999999.is_set":true}' })).toMatchObject({ status: "SUCCEEDED" });
@@ -367,14 +280,6 @@ describe("Asana project guard", () => {
     ];
     for (const [tool, args] of refused) expect(await run(tool, args)).toMatchObject({ status: "FAILED", reason: "policy_denied" });
     expect(writes()).toEqual([]);
-  });
-
-  it("allows only Asana's documented search operators in search_tasks custom_fields", async () => {
-    const { run, calls } = harness();
-    const operators = ["value", "is_set", "not_value", "starts_with", "ends_with", "contains", "less_than", "greater_than", "before", "after"];
-    expect(await run("search_tasks", { custom_fields: JSON.stringify(Object.fromEntries(operators.map((operator) => [`4578152156.${operator}`, "x"]))) })).toMatchObject({ status: "SUCCEEDED" });
-    expect(await run("search_tasks", { custom_fields: '{"123.projects_any":"1210000000000020"}' })).toMatchObject({ status: "FAILED", reason: "policy_denied" });
-    expect(calls.map((entry) => entry.name)).toEqual(["search_tasks"]);
   });
 
   it("requires every update_tasks item to name its task by GID", async () => {

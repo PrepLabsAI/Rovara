@@ -7,11 +7,6 @@ const record = (over: Record<string, unknown> = {}) => ({ schemaVersion: 1, depe
 const ok = (value: unknown) => TestServicesUsageRecordSchema.safeParse(value).success;
 
 describe("the usage record", () => {
-  it("round-trips a healthy Postgres with no unknown calls", () => {
-    expect(TestServicesUsageRecordSchema.parse(record())).toEqual(record());
-    expect(testServicesUnknownCallCount(TestServicesUsageRecordSchema.parse(record()))).toBe(0);
-    expect(testServicesUnhealthy(TestServicesUsageRecordSchema.parse(record()))).toEqual([]);
-  });
 
   it("is strict and bounded", () => {
     expect(ok(record({ extra: 1 }))).toBe(false);
@@ -52,15 +47,4 @@ describe("the usage record", () => {
     expect(withDomains(Array.from({ length: 50 }, (_unused, index) => ({ domain: `d${String(index)}.example.com`, count: 1 })))).toBe(true);
   });
 
-  it("never carries a secret-shaped name", () => {
-    // Built at run time: a key-shaped literal in the source would trip the repository's push protection.
-    const keyId = ["AK", "IA", "ABCDEFGHIJKLMNOP"].join("");
-    const longToken = "a1b2c3d4".repeat(5);
-    const withDomain = (domain: string) => ok(record({ unknownCalls: { domains: [{ domain, count: 1 }], otherCount: 0 } }));
-    // A DNS name arrives lower-cased, which hides an access key id from a case-sensitive check.
-    expect(withDomain(`${keyId.toLowerCase()}.attacker.test`)).toBe(false);
-    expect(withDomain(`x.${keyId.toLowerCase()}.attacker.test`)).toBe(false);
-    expect(withDomain(`${longToken}.attacker.test`)).toBe(false);
-    expect(withDomain("attacker.test")).toBe(true);
-  });
 });

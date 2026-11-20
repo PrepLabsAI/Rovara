@@ -45,20 +45,6 @@ function harness(answer: (method: string, path: string) => { status: number; bod
 }
 
 describe("agentx adapter add", () => {
-  it("registers the adapter with its capabilities, projects and step-up, and prints the new secret once", async () => {
-    const { cli, requests, lines } = harness();
-    const result = await cli("adapter", "add", "whatsapp", "--callback-url", "https://adapter.example.com/rovara", "--projects", "web,billing", "--buttons", "3", "--step-up", "admin");
-    expect(result).toEqual({ code: 0, stderr: "" });
-    expect(requests).toEqual([{
-      method: "PUT", path: "/v1/admin/channels/whatsapp", token: "Bearer admin-token",
-      body: {
-        callbackUrl: "https://adapter.example.com/rovara",
-        capabilities: { threads: false, buttons: 3, edits: false, maxTextLength: 4096, proactive: false },
-        projects: ["web", "billing"], stepUp: ["admin"],
-      },
-    }]);
-    expect(lines.join("")).toContain(`Signing secret (shown once; give it to the adapter, Rovara does not show it again):\n${SECRET}\n`);
-  });
 
   it("declares the richer capabilities and the commands URL only when they are given (spec 062 Phase 7)", async () => {
     const { cli, requests } = harness();

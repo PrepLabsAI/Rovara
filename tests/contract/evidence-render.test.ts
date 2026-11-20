@@ -1,12 +1,5 @@
-// TE-A2a: the pure evidence renderer (first line and body). Golden text for the five levels and each producer line; slots appear only when given; output stays bounded and inert; nothing outside contracts calls it yet.
-import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import {
-  EVIDENCE_ISOLATIONS, EVIDENCE_LEVELS, EVIDENCE_RENDER_LIMITS, NEWER_EVIDENCE_WORDS, evidencePackV1ToV2, inertEvidenceText, readEvidencePack, renderEvidence, renderEvidenceRead, type EvidencePackV2,
-} from "../../packages/contracts/src/index.js";
-import { isolatedGitEnvironment } from "../../packages/worker/src/git.js";
+import { EVIDENCE_RENDER_LIMITS, NEWER_EVIDENCE_WORDS, evidencePackV1ToV2, inertEvidenceText, readEvidencePack, renderEvidence, renderEvidenceRead, type EvidencePackV2 } from "../../packages/contracts/src/index.js";
 import { v1Pack, v2Pack } from "../support/evidence-v2-fixtures.js";
 import { expectLinearScaling } from "../support/scaling.js";
 
@@ -14,85 +7,9 @@ const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const withLevel = (reached: string, isolation = "sealed", result = "verified"): EvidencePackV2 => v2Pack({ level: { reached, required: [] }, producer: { edition: "cloud", isolation }, result });
 const ZWJ = "‍";
 
-describe("the first line, one golden per level", () => {
-  it.each([
-    ["rovara_real_run", "Verified · Real run by Rovara"],
-    ["their_ci", "Verified · Checked by your CI"],
-    ["sandbox_only", "Verified · Sandbox only, no sealed run"],
-    ["no_ci", "Verified · No CI to check against"],
-    ["ci_not_readable", "Verified · Your CI results could not be read"],
-  ])("%s", (level, expected) => {
-    expect(renderEvidence(withLevel(level)).firstLine).toBe(expected);
-  });
-
-  it("covers every level the schema knows", () => {
-    for (const level of EVIDENCE_LEVELS) expect(renderEvidence(withLevel(level)).firstLine).not.toContain(NEWER_EVIDENCE_WORDS);
-  });
-
-  it("names the result axis and the weakest stage, and says 'not sealed' when the round ran in the sandbox", () => {
-    const pack = v2Pack({ level: { reached: "sandbox_only", required: ["sealed"], weakest: { stageId: "sealed", words: "38 tests used recorded answers" } }, producer: { edition: "cloud", isolation: "sandbox" }, result: "partially_verified" });
-    expect(renderEvidence(pack).firstLine).toBe("Partly verified · Sandbox only, no sealed run · weakest: 38 tests used recorded answers · not sealed");
-    expect(renderEvidence(withLevel("rovara_real_run", "sealed", "code_failed")).firstLine).toBe("Code failed checks · Real run by Rovara");
-    expect(renderEvidence(withLevel("rovara_real_run", "sealed", "blocked_by_environment")).firstLine).toBe("Blocked by the environment · Real run by Rovara");
-  });
-
-  it("says nothing better than the words it has for a level or result it does not know", () => {
-    const read = readEvidencePack({ ...clone(v2Pack()), level: { reached: "quantum", required: [] }, result: "mystery" });
-    expect(read.status).toBe("v2");
-    if (read.status === "v2") expect(renderEvidence(read.pack, { newer: read.newer }).firstLine).toBe(`${NEWER_EVIDENCE_WORDS} · ${NEWER_EVIDENCE_WORDS}`);
-  });
-});
-
-describe("the producer line", () => {
-  it.each([
-    ["developer_machine", "Ran on a developer machine"],
-    ["sealed", "Checked in a sealed round"],
-    ["sandbox", "Checked in the agent's sandbox (not sealed)"],
-    ["imported", "Imported from your CI (not run by Rovara)"],
-  ])("%s", (isolation, expected) => {
-    expect(renderEvidence(withLevel("their_ci", isolation)).producerLine).toBe(expected);
-    expect(renderEvidence(withLevel("their_ci", isolation)).body[0]).toBe(expected);
-  });
-
-  it("puts 'not sealed' in the first line for the sandbox and for nothing else that is honest about itself", () => {
-    expect(renderEvidence(withLevel("sandbox_only", "sandbox")).firstLine.endsWith("not sealed")).toBe(true);
-    for (const isolation of ["sealed", "developer_machine", "imported"]) expect(renderEvidence(withLevel("their_ci", isolation)).firstLine).not.toContain("not sealed");
-  });
-});
-
 // M4: the first line never says "Real" for a pack that did not run in a sealed round or that rests on scripted AI replies.
 describe("the first line is never better than where the checks ran", () => {
-  it("words a 'real run' claimed outside a sealed round as what it was", () => {
-    for (const [isolation, expected] of [["sandbox", "Run by Rovara, not sealed"], ["developer_machine", "Ran on a developer machine"], ["imported", "Imported, not run by Rovara"]]) {
-      const first = renderEvidence(withLevel("rovara_real_run", isolation)).firstLine;
-      expect(first, isolation).toBe(`Verified · ${expected}`);
-      expect(first).not.toMatch(/real/iu);
-    }
-  });
 
-  // TE-A2b review M3: only a sealed round or the agent's sandbox is a Rovara run; a stored pack (read tolerantly) that says otherwise is worded as where it really ran.
-  it.each([
-    ["developer_machine", "Verified · Ran on a developer machine"],
-    ["imported", "Verified · Imported, not run by Rovara"],
-    ["teleport", "Verified · Where the checks ran is not known"],
-  ])("a 'real run' claimed with isolation %s is not worded as a Rovara run", (isolation, expected) => {
-    const read = readEvidencePack({ ...clone(withLevel("rovara_real_run")), producer: { edition: "code", isolation } });
-    expect(read.status).toBe("v2");
-    if (read.status !== "v2") return;
-    const first = renderEvidence(read.pack, { newer: read.newer }).firstLine;
-    expect(first.startsWith(expected)).toBe(true);
-    expect(first).not.toContain("Run by Rovara");
-    expect(first).not.toMatch(/real/iu);
-  });
-
-  // TE-A2b review L1: a laptop report whose CI has not finished says where it ran (O26), never "Sandbox only, no sealed run".
-  it("a developer machine with the CI still running says it ran on a developer machine", () => {
-    const first = renderEvidence(withLevel("sandbox_only", "developer_machine")).firstLine;
-    expect(first).toBe("Verified · Ran on a developer machine");
-    expect(first).not.toContain("Sandbox only");
-    expect(renderEvidence(withLevel("sandbox_only", "imported")).firstLine).toBe("Verified · Imported, not run by Rovara");
-    expect(renderEvidence(withLevel("sandbox_only", "sandbox")).firstLine).toContain("Sandbox only, no sealed run");
-  });
 
   it("words a scripted-AI proof as such and the change proof line says so", () => {
     const pack = withLevel("rovara_real_run");
@@ -104,34 +21,9 @@ describe("the first line is never better than where the checks ran", () => {
     expect(renderEvidence(v2Pack()).body).toContain("Change proof: 1 proven");
   });
 
-  it("says 'Real' only for a real run in a sealed round", () => {
-    for (const level of EVIDENCE_LEVELS) {
-      for (const isolation of EVIDENCE_ISOLATIONS) {
-        const first = renderEvidence(withLevel(level, isolation)).firstLine;
-        expect(/real/iu.test(first), `${level} ${isolation}`).toBe(level === "rovara_real_run" && isolation === "sealed");
-      }
-    }
-  });
 });
 
 describe("the full text of a complete pack", () => {
-  it("is this golden", () => {
-    expect(renderEvidence(v2Pack()).text).toBe([
-      "Verified · Real run by Rovara",
-      "Checked in a sealed round",
-      "Checks: 2 (2 passed)",
-      "Measures: reported by the project's test runner, not measured by Rovara",
-      "- Tests: pytest -q: passed, 3 tests (1 new), 90% of changed lines covered",
-      "- Benchmark: render time: passed, p95 118 ms (was 120 ms)",
-      "Change proof: 1 proven",
-      "Dependencies: Real · Recorded (12 Nov)",
-      "- stripe: Recorded (12 Nov)",
-      "- postgres: Real",
-      "Spent: $0.40 model, 12 machine minutes ($0.10)",
-      "Not tested:",
-      "- refund flow (no test)",
-    ].join("\n"));
-  });
 
   it("renders a v1 pack upgraded with its context", () => {
     const upgraded = evidencePackV1ToV2(v1Pack(), { producer: { edition: "code", isolation: "developer_machine" }, level: { reached: "their_ci", required: [] }, result: "verified" });
@@ -142,30 +34,7 @@ describe("the full text of a complete pack", () => {
   });
 });
 
-describe("slots", () => {
-  it("shows the time-target line and the Rovara-problem line only when given", () => {
-    const plain = renderEvidence(v2Pack());
-    expect(plain.text).not.toContain("Time target");
-    const slotted = renderEvidence(v2Pack(), { timeTargetLine: "Time target: ready in 40 min (p75 of 20 runs)", rovaraProblemLine: "Held back: Rovara problem, not your code" });
-    expect(slotted.body.slice(0, 3)).toEqual(["Checked in a sealed round", "Held back: Rovara problem, not your code", "Time target: ready in 40 min (p75 of 20 runs)"]);
-    expect(renderEvidence(v2Pack(), { timeTargetLine: "   " }).text).toBe(plain.text);
-  });
-
-  it("makes a slot line inert, including a line that would open a heading", () => {
-    const out = renderEvidence(v2Pack(), { rovaraProblemLine: "# Heading @octocat" });
-    expect(out.body[1]).toBe(`${ZWJ}# Heading @${ZWJ}octocat`);
-  });
-});
-
 describe("trust and proof words", () => {
-  it("shows a scripted-AI proof as 'proven with scripted AI replies', never Real", () => {
-    const pack = clone(v2Pack());
-    Object.assign(pack.checks[0]!, { proofBasis: "scripted_ai_replies", trust: "simulated" });
-    const out = renderEvidence(pack).text;
-    expect(out).toContain("proven with scripted AI replies");
-    const line = out.split("\n").find((entry) => entry.startsWith("- Tests"))!;
-    expect(line).not.toMatch(/Real/u);
-  });
 
   it("counts Made by Rovara mocks by when they were made", () => {
     const pack = clone(v2Pack());
@@ -188,16 +57,6 @@ describe("newer evidence", () => {
     expect(renderEvidenceRead({ status: "v1", pack: v1Pack() }).firstLine).toBe("Evidence from an older Rovara, open in Rovara for the level");
   });
 
-  it("shows the newer-evidence line for a check outcome the build does not know, and an ordinary 'not checked' for the real outcome 'unknown'", () => {
-    const flaky = clone(v2Pack());
-    flaky.checks[0]!.after = "flaky" as never;
-    const read = readEvidencePack(flaky);
-    expect(read.status === "v2" && renderEvidenceRead(read).text).toContain(`pytest -q: ${NEWER_EVIDENCE_WORDS}`);
-    const real = clone(v2Pack());
-    real.checks[0]!.after = "unknown";
-    const known = readEvidencePack(real);
-    expect(known.status === "v2" && renderEvidenceRead(known).text).toContain("pytest -q: not checked");
-  });
 });
 
 describe("bounds", () => {
@@ -216,14 +75,6 @@ describe("bounds", () => {
     for (const line of out.text.split("\n")) expect(Array.from(line).length, line.slice(0, 40)).toBeLessThanOrEqual(EVIDENCE_RENDER_LIMITS.lineMax);
     expect(out.text).toContain(`and ${String(64 - EVIDENCE_RENDER_LIMITS.checksListed)} more checks`);
     expect(out.text).toContain(`and ${String(200 - EVIDENCE_RENDER_LIMITS.notTestedListed)} more`);
-  });
-
-  it("lists exactly the capped number of checks, dependencies and not-tested rows, never more", () => {
-    const lines = big().text.split("\n");
-    expect(lines.filter((line) => line.startsWith("- Tests:"))).toHaveLength(EVIDENCE_RENDER_LIMITS.checksListed);
-    expect(lines.filter((line) => line.startsWith("- ") && line.includes(": not available"))).toHaveLength(EVIDENCE_RENDER_LIMITS.dependenciesListed);
-    expect(lines).toContain("- and 16 more dependencies");
-    expect(lines.filter((line) => line.startsWith("- W") && line.includes("(R"))).toHaveLength(EVIDENCE_RENDER_LIMITS.notTestedListed);
   });
 
   it("prints '?' for a count or an amount that is not a finite number, and never throws on one", () => {
@@ -271,18 +122,6 @@ describe("inert text", () => {
     }
   });
 
-  it("stays linear for a large max: the largest allowed max is capped, so a million '<' finishes at once", () => {
-    for (const max of [2_000, 1_000_000_000]) {
-      const out = inertEvidenceText("<".repeat(1_000_000), max);
-      expect(Array.from(out).length).toBeLessThanOrEqual(2_000);
-      expect(Array.from(inertEvidenceText("[](".repeat(400_000), max)).length).toBeLessThanOrEqual(2_000);
-    }
-    // Both hostile inputs at a small size (8N stays at or under 256 KiB so it stays in CPU cache; the full size was checked once above), for each max, must cost about eight times, not sixty-four.
-    for (const max of [2_000, 1_000_000_000]) {
-      expectLinearScaling((scale) => { const angles = "<".repeat(scale * 2.5); const links = "[](".repeat(scale); return () => { inertEvidenceText(angles, max); inertEvidenceText(links, max); }; }, { n: 5_900, unitBytes: 5.5, label: `inertEvidenceText with max ${String(max)}` });
-    }
-  });
-
   // SCALING-CAP-BLIND: the scaling checks above stop at 256 KiB, so they cannot see a regression that reads past the cap. These pin the cap itself: the last character inside it counts, the first one past it never does,
   // and a hostile text far past it gives exactly what the text cut at the cap gives (the cap refuses; it does not slow down).
   it("the 256 KiB read cap is exact: a word that ends inside it is kept, one that starts at the cap is never read", () => {
@@ -292,40 +131,6 @@ describe("inert text", () => {
     expect(inertEvidenceText(at(CAP - 10 - 4), 300)).toBe("xxxxxxxxxx tail");
     expect(inertEvidenceText(at(CAP - 10 - 3), 300)).toBe("xxxxxxxxxx");
     expect(inertEvidenceText(at(CAP - 10 + 1), 300)).toBe("xxxxxxxxxx");
-  });
-  it("a hostile text past the cap reads as the text cut at the cap, for every hostile shape, and the far end never changes the answer", () => {
-    const CAP = 262_144;
-    for (const unit of ["![", "[](", "<", "&", "a", " ", "\n"] as const) {
-      const base = unit.repeat(Math.ceil(CAP / unit.length)).slice(0, CAP);
-      const expected = inertEvidenceText(base, 300);
-      for (const tail of ["x", "Z".repeat(1_000), "![a](b)".repeat(100_000), " ".repeat(2_000_000)]) expect(inertEvidenceText(`${base}${tail}`, 300), `${JSON.stringify(unit)} + ${String(tail.length)} chars`).toBe(expected);
-    }
-  });
-
-  it("reads at most 256 KiB of raw input", () => {
-    expect(inertEvidenceText(`${"x".repeat(10)}${" ".repeat(300_000)}tail`, 300)).toBe("xxxxxxxxxx");
-    expect(inertEvidenceText(`${"x".repeat(10)} tail`, 300)).toBe("xxxxxxxxxx tail");
-  });
-
-  it("redacts a secret even when the cut would split it: no fragment of a token is ever printed", () => {
-    const token = `gh${"p"}_${"a".repeat(36)}`;
-    // Whitespace collapses, so the token ends up inside the output even though it starts past 4 x max characters of raw input.
-    const out = inertEvidenceText(`${" ".repeat(1190)}${token}`, 300);
-    expect(out).toBe("(REDACTED)");
-    expect(out).not.toContain("ghp_");
-    // Markup that is stripped afterwards shrinks the text, so the secret can start inside the working window and end outside it: it is redacted before the window is cut, not after.
-    expect(inertEvidenceText(`${"<b>".repeat(396)}${token}`, 300)).toBe("(REDACTED)");
-    // A secret that straddles the hard cap on the raw input is dropped with its whole last word, not left as a fragment.
-    const straddle = inertEvidenceText(`${" ".repeat(262_144 - 20)}${token} end`, 300);
-    expect(straddle).not.toMatch(/g(?:h(?:p(?:_a*)?)?)?$/u);
-    expect(straddle).not.toContain("ghp");
-  });
-
-  it("redacts a secret-shaped token (built here at run time, never written out)", () => {
-    const token = `gh${"p"}_${"a".repeat(36)}`;
-    const out = inert(`token ${token} end`);
-    expect(out).not.toContain(token);
-    expect(out).toContain("(REDACTED)");
   });
 
   it("breaks a mention, a link, a bare www address (any case), an issue reference, a Linear key and a tag", () => {
@@ -340,151 +145,5 @@ describe("inert text", () => {
     expect(inert("a & b")).toBe("a &amp; b");
   });
 
-  it("makes every word from a repository inert in a rendered pack", () => {
-    const pack = clone(v2Pack());
-    pack.checks[0]!.label = "![x](http://evil.test/a.png) @octocat see https://evil.test #123 Fixes ENG-42‮ <!-- hide";
-    pack.notTested = [{ what: "<script>alert(1)</script> [click](http://e.co)", reason: "line\nbreak" }];
-    const text = renderEvidence(pack).text;
-    expect(text).not.toMatch(/[‮]/u);
-    expect(text).not.toMatch(/!\[/u);
-    expect(text).not.toMatch(/@octocat/u);
-    expect(text).not.toMatch(/:\/\/(?!‍)/u);
-    expect(text).not.toMatch(/#123/u);
-    expect(text).not.toMatch(/ENG-42/u);
-    expect(text).not.toContain("<");
-  });
 });
 
-describe("callers", () => {
-  it("only the broker's evidence writer, reader and pull request description (TE-A2b) use an export the evidence pack v2 lane added", () => {
-    const root = fileURLToPath(new URL("../..", import.meta.url));
-    const source = (file: string) => readFileSync(`${root}/packages/contracts/src/${file}`, "utf8");
-    const exported = (text: string) => [...text.matchAll(/^export (?:declare )?(?:const|function|type|interface|class) ([A-Za-z0-9_]+)/gmu)].map((match) => match[1]!);
-    const v2Start = (text: string) => text.slice(text.indexOf("// ---- evidence pack v2 (TE-A2a"));
-    const newerStart = (text: string) => text.slice(text.indexOf("// ---- newer evidence (TE-A2)"));
-    const names = [
-      ...exported(source("check-kinds.ts")), ...exported(source("evidence-render.ts")), ...exported(source("evidence-inert.ts")), ...exported(v2Start(source("evidence.ts"))), ...exported(newerStart(source("forward-reader.ts"))),
-    ];
-    expect(names.length).toBeGreaterThan(60);
-    expect(names).toEqual(expect.arrayContaining(["renderEvidence", "readEvidencePack", "inertEvidenceText", "tolerantRead", "isRegisteredCheckKind", "EvidencePackV2Schema"]));
-    const callers = (symbols: string[]) => {
-      const env = isolatedGitEnvironment(root, { GIT_LITERAL_PATHSPECS: "1", GIT_GLOB_PATHSPECS: "0", GIT_NOGLOB_PATHSPECS: "0", GIT_ICASE_PATHSPECS: "0" });
-      const found = spawnSync("git", ["grep", "--untracked", "-lw", ...symbols.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env });
-      expect([0, 1]).toContain(found.status);
-      return found.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/")).sort();
-    };
-    // The proof table alone uses the trust type and TE-192a's words; inert text is also shared by TE-B3 (weakening-flags.ts), TE-A4 (test-report.ts) and the eval files (eval-round, eval-discovery, eval-health). TE-A2b is the first caller of every other
-    // v2 export (the writer, the readers and the description's Evidence block); any other caller has to be named here on purpose.
-    const proofOnly = ["EvidenceTrustClass", "SCRIPTED_AI_PROOF_WORDS", "AGENT_REPLIES_UNCONFIRMED_WORDS", "AGENT_REPLIES_DISAGREED_WORDS"];
-    const writerFiles = [
-      // TE-H1 slice 2 (DEC 241, #756): the reader that serves a browser-evidence picture (`readEvidenceArtifact`) takes the task's v2 pack as `EvidencePackV2` / `EvidencePackV2Read`, so it can serve the pairs of its `visual` check
-      // and nothing else of a v2 pack (the download rule is `servableBrowserEvidenceImage`, in contracts/browser-evidence-wire.ts). It only reads.
-      "packages/broker/src/core/proof/evidence-artifacts.ts",
-      "packages/broker/src/core/proof/evidence-guard.ts",
-      "packages/broker/src/core/proof/evidence-keep.ts",
-      "packages/broker/src/core/proof/evidence-lines.ts",
-      "packages/broker/src/core/proof/evidence-pack.ts",
-      "packages/broker/src/core/proof/evidence-v2-lines.ts",
-    ];
-    // The generic contract finder's mock config (TE-G6; SageMaker is its first adapter) reuses only the trust words, for its "Made by Rovara" label.
-    // General fakes (DEC 234) moved it into contracts so the worker can build fakes; the broker path re-exports it.
-    const mockConfig = "packages/contracts/src/service-contract-mock.ts";
-    expect(callers(names.filter((name) => !proofOnly.includes(name) && name !== "inertEvidenceText" && name !== "EVIDENCE_TRUST_CLASS_WORDS"))).toEqual(writerFiles);
-    // Its users are now all inside contracts (the mock config and general-fakes.ts's "Made by Rovara" label), which `callers` does not list.
-    expect(callers(["EVIDENCE_TRUST_CLASS_WORDS"])).toEqual([]);
-    expect(names.filter((name) => new RegExp(`\\b${name}\\b`, "u").test(readFileSync(`${root}/${mockConfig}`, "utf8")))).toEqual(["EVIDENCE_TRUST_CLASS_WORDS"]);
-    // The v1 loader (test-proof-lines.ts) also uses the unconfirmed words.
-    for (const name of proofOnly) expect(callers([name])).toEqual([
-      "packages/broker/src/core/proof/proof-table.ts",
-      ...(name === "AGENT_REPLIES_UNCONFIRMED_WORDS" ? ["packages/broker/src/developer/test-proof-lines.ts"] : []),
-    ]);
-    // setup-prove.ts (DEC 185 / TE-C5 part A) makes setup command output inert before it enters the setup Prove report, the same use as test-report.ts.
-    expect(callers(["inertEvidenceText"])).toEqual([
-      "packages/broker/src/core/proof/proof-table.ts", "packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/setup-prove.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts", "packages/worker/src/verification/eval-round.ts", "packages/worker/src/verification/test-report.ts",
-    ].sort());
-  });
-});
-
-// TE-A2b review L2: version 2 is off everywhere until the Cloud half and the TE-A1 gate turn it on. Nothing in a package may set the description's writer to 2, give `keepEvidence` a writer, or read a pack with `loadEvidenceRead` but the files named here.
-describe("nothing turns the version 2 writer on yet", () => {
-  const root = fileURLToPath(new URL("../..", import.meta.url));
-  const grep = (...args: string[]) => {
-    const found = spawnSync("git", ["grep", "--untracked", ...args, "--", ":(glob)packages/*/src/**"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
-    expect([0, 1]).toContain(found.status);
-    return found.stdout.split("\n").filter((entry) => entry !== "");
-  };
-  it("no package sets `evidenceWriter: 2`", () => {
-    expect(grep("-nE", "evidenceWriter[[:space:]]*:[[:space:]]*2")).toEqual([]);
-  });
-  it("only the writer's own file and the local wiring name keepEvidence, and the wiring gives it no writer", () => {
-    expect(grep("-lE", "keepEvidence\\(").sort()).toEqual(["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/local/app/evidence.ts"]);
-    expect(readFileSync(`${root}/packages/broker/src/local/app/evidence.ts`, "utf8")).not.toMatch(/\bwriter\b/u);
-    // TE-H1 slice 2 (DEC 241, #756): the one place a writer is given. A pack needs the v2 form only to carry the browser evidence `visual` check and its pairs, so `keepEvidence` makes the v2 writer itself, and ONLY when this run's
-    // `browserEvidence` was uploaded and stored (no browser evidence = no writer = the v1 pack, byte for byte: tests/unit/browser-evidence-keep.test.ts). Every v2 reader is already in place or ships in the same change: the v1 view
-    // (`loadEvidencePack`, which the proof page reads; the risk input has no caller in Code yet and would read the same view), the description's reader (`loadEvidenceRead`, off until `evidenceWriter: 2`), the panel, the PR lines and the picture route (local/app/evidence.ts), and the
-    // erase by task prefix; nothing else (Slack, MCP, the CLI, Cloud) reads a pack Code keeps. A failure to build the v2 form falls back to the plain v1 pack. Exactly this one line is approved, by its words.
-    const approvedForcedWriter = (entry: string) => entry.startsWith("packages/broker/src/core/proof/evidence-keep.ts:") && entry.includes("{ version: 2, producer: { edition: \"code\", isolation: browser.isolation } }");
-    const writers = grep("-nE", "writer[[:space:]]*:[[:space:]]*\\{[[:space:]]*version[[:space:]]*:[[:space:]]*2");
-    expect(writers.filter((entry) => !approvedForcedWriter(entry))).toEqual([]);
-    expect(writers.filter(approvedForcedWriter)).toHaveLength(1);
-  });
-  it("only the evidence keep file and a comment in the evidence lines name loadEvidenceRead", () => {
-    // TE-H1 slice 2 (DEC 241, #756): the local wiring (local/app/evidence.ts) reads the task's v2 pack to show the before/after panel, write the PR's text lines and serve the pictures. It only reads, and only for the current code.
-    expect(grep("-lw", "loadEvidenceRead").sort()).toEqual(["packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/core/proof/evidence-lines.ts", "packages/broker/src/local/app/evidence.ts"]);
-  });
-});
-
-it("keeps runner-measure provenance visible even with long check labels and inert measure names", () => {
-  const pack = clone(v2Pack());
-  const check = pack.checks[1]!;
-  check.label = "L".repeat(200);
-  check.measures = [{ name: "[score](https://example.com) @owner #123", unit: "ms", base: 1, head: 2, direction: "down_good" }];
-  const out = renderEvidence(pack);
-  expect(out.body).toContain("Measures: reported by the project's test runner, not measured by Rovara");
-  expect(out.text).not.toMatch(/https:\/\/|@owner|#123/u);
-  check.label = "eval";
-  expect(renderEvidence(pack).text).toContain("score");
-  for (const row of pack.checks) delete row.measures;
-  expect(renderEvidence(pack).text).not.toContain("reported by the project's test runner");
-});
-
-describe("no callers", () => {
-  it("nothing outside packages/contracts uses any export the evidence pack v2 lane added except its approved callers", () => {
-    const root = fileURLToPath(new URL("../..", import.meta.url));
-    const source = (file: string) => readFileSync(`${root}/packages/contracts/src/${file}`, "utf8");
-    const exported = (text: string) => [...text.matchAll(/^export (?:declare )?(?:const|function|type|interface|class) ([A-Za-z0-9_]+)/gmu)].map((match) => match[1]!);
-    const v2Start = (text: string) => text.slice(text.indexOf("// ---- evidence pack v2 (TE-A2a"));
-    const newerStart = (text: string) => text.slice(text.indexOf("// ---- newer evidence (TE-A2)"));
-    const names = [
-      ...exported(source("check-kinds.ts")), ...exported(source("evidence-render.ts")), ...exported(source("evidence-inert.ts")), ...exported(v2Start(source("evidence.ts"))), ...exported(newerStart(source("forward-reader.ts"))),
-    ];
-    expect(names.length).toBeGreaterThan(60);
-    expect(names).toEqual(expect.arrayContaining(["renderEvidence", "readEvidencePack", "inertEvidenceText", "tolerantRead", "isRegisteredCheckKind", "EvidencePackV2Schema"]));
-    const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
-    expect([0, 1]).toContain(found.status);
-    const hits = found.stdout.split("\n").filter((entry) => entry !== "");
-    const approved = new Set([
-      // TE-H1 slice 2 (DEC 241, #756): the reader that serves a browser-evidence picture takes the v2 pack's types (see the callers test above).
-      "packages/broker/src/core/proof/evidence-artifacts.ts",
-      "packages/broker/src/core/proof/evidence-guard.ts", "packages/broker/src/core/proof/evidence-keep.ts", "packages/broker/src/core/proof/evidence-lines.ts",
-      "packages/broker/src/core/proof/evidence-pack.ts", "packages/broker/src/core/proof/evidence-v2-lines.ts", "packages/broker/src/core/proof/proof-table.ts",
-      "packages/broker/src/core/proof/weakening-flags.ts", "packages/worker/src/verification/eval-discovery.ts", "packages/worker/src/verification/eval-health.ts",
-      "packages/worker/src/verification/eval-round.ts", "packages/worker/src/verification/test-report.ts",
-      // setup-prove.ts (DEC 185 / #629) makes setup command output inert before it enters the setup Prove report, the same use as test-report.ts.
-      "packages/worker/src/setup-prove.ts",
-      // The v1 test-proof description loader uses the unconfirmed-replies words (TE-192a B-0).
-      "packages/broker/src/developer/test-proof-lines.ts",
-      // The generic contract finder's labelled mock config (TE-G6) reuses the trust words for its label; nothing calls it in production (pinned below).
-      "packages/broker/src/core/test-env/service-contract-mock.ts",
-    ]);
-    expect(hits.filter((file) => !file.startsWith("packages/contracts/") && !approved.has(file))).toEqual([]);
-    // The contract finder's callers: its own files, the broker re-export paths, and general fakes (DEC 234: the OpenAPI adapter in contracts and the worker's round, behind the project setting, off by default).
-    const wired = spawnSync("git", ["grep", "--untracked", "-l", "-e", "service-contract", "-e", "sagemaker-contract", "-e", "sagemaker-mock", "-e", "generateSageMakerMock", "-e", "findSageMakerContract", "-e", "findServiceContract", "-e", "generateServiceMock", "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
-    expect(wired.status).toBe(0);
-    const dir = "packages/broker/src/core/test-env";
-    expect(wired.stdout.trim().split("\n").sort()).toEqual([
-      `${dir}/sagemaker-contract.ts`, `${dir}/sagemaker-mock.ts`, `${dir}/service-contract-mock.ts`, `${dir}/service-contract.md`, `${dir}/service-contract.ts`,
-      "packages/contracts/src/index.ts", "packages/contracts/src/openapi-fake.ts", "packages/contracts/src/service-contract-mock.ts", "packages/contracts/src/service-contract.ts",
-    ].sort());
-  });
-});

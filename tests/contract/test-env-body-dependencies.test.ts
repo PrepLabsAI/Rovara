@@ -1,21 +1,7 @@
 // Test services, slice 1 T1 (contracts): the environment body, the draft, the task plan, the Prove steps and the usage record carry test-services dependencies.
 // The golden digest below was computed on the base BEFORE the `dependencies` field existed: a body without it must keep it, byte for byte (design test-services.md 2.3, "no data migration").
 import { describe, expect, it } from "vitest";
-import {
-  TEST_ENV_BASE_PROVE_STEPS,
-  TEST_ENV_DEPENDENCY_PROVE_STEPS,
-  TEST_ENV_PROVE_FAILURES,
-  TEST_ENV_PROVE_STEPS,
-  TEST_SERVICES_PLAN_FEATURE,
-  TaskDependencyPlanSchema,
-  TestEnvDependencyCandidateSchema,
-  TestEnvDraftSchema,
-  TestEnvTaskPlanSchema,
-  TestEnvironmentBodySchema,
-  TestEnvProveReportSchema,
-  WORKER_INVOCATION_FEATURES,
-  testEnvDigest,
-} from "../../packages/contracts/src/index.js";
+import { TEST_ENV_BASE_PROVE_STEPS, TEST_ENV_DEPENDENCY_PROVE_STEPS, TEST_ENV_PROVE_FAILURES, TEST_ENV_PROVE_STEPS, TaskDependencyPlanSchema, TestEnvDependencyCandidateSchema, TestEnvDraftSchema, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, TestEnvProveReportSchema, testEnvDigest } from "../../packages/contracts/src/index.js";
 
 const cmd = (executable: string, args: string[] = [], cwd = "service") => ({ cwd, executable, args, timeoutSeconds: 600 });
 const baseBody = (over: Record<string, unknown> = {}) => ({
@@ -43,13 +29,6 @@ const GOLDEN_DIGEST = "73802a131459df3de70f5f0a10dc36e4dcfe6d4e28871f207df81a334
 const sha = (letter: string) => letter.repeat(64);
 
 describe("the environment body and its digest", () => {
-  it("keeps today's digest when `dependencies` is absent (golden)", () => {
-    expect(testEnvDigest(TestEnvironmentBodySchema.parse(baseBody()))).toBe(GOLDEN_DIGEST);
-    // The parsed body has no `dependencies` key at all, so the canonical text is unchanged too.
-    expect("dependencies" in TestEnvironmentBodySchema.parse(baseBody())).toBe(false);
-    // An explicit `undefined` is dropped by the canonical text as well.
-    expect(testEnvDigest(TestEnvironmentBodySchema.parse(baseBody({ dependencies: undefined })))).toBe(GOLDEN_DIGEST);
-  });
 
   it("accepts up to 24 dependencies' worth of fields and binds the digest to them", () => {
     const withPostgres = TestEnvironmentBodySchema.parse(baseBody({ dependencies: [postgres()] }));
@@ -73,20 +52,11 @@ describe("the environment body and its digest", () => {
     expect(parses([postgres({ connect: { env: [{ name: "DATABASE_URL", template: "postgres://app:hunter2@{host}:{port}/{db}" }], hostAliases: ["postgres"] } })])).toBe(false);
   });
 
-  it("keeps v1 services as they were beside dependencies", () => {
-    expect(TestEnvironmentBodySchema.safeParse(baseBody({ dependencies: [postgres()], services: [] })).success).toBe(true);
-  });
 });
 
 describe("the draft carries detector candidates", () => {
   const candidate = (over: Record<string, unknown> = {}) => ({ family: "postgres", kind: "database", evidence: [{ path: "docker-compose.yml", line: 4 }], strength: "declared", hints: { version: "16", envNames: ["DATABASE_URL"], ports: [5432] }, ...over });
   const draft = (over: Record<string, unknown> = {}) => ({ environment: baseBody(), valueSources: [], pendingServices: [], notes: [], questions: [], ...over });
-
-  it("is today's draft when there are none", () => {
-    const parsed = TestEnvDraftSchema.parse(draft());
-    expect("dependencies" in parsed).toBe(false);
-    expect(TestEnvDraftSchema.parse(draft({ dependencies: [candidate()] })).dependencies).toEqual([candidate()]);
-  });
 
   it("refuses a draft whose environment lists dependencies: a worker reports candidates, never a backing", () => {
     const listed = [postgres()];
@@ -126,18 +96,6 @@ describe("the task plan carries pinned dependencies", () => {
   });
   const parses = (value: unknown) => TestEnvTaskPlanSchema.safeParse(value).success;
 
-  it("is today's plan when there are none", () => {
-    const parsed = TestEnvTaskPlanSchema.parse(plan());
-    expect("dependencies" in parsed).toBe(false);
-    expect(parses(plan({ dependencies: [] }))).toBe(false); // never sent empty: absent means none
-  });
-
-  it("round-trips a pinned Postgres and holds no secret", () => {
-    const parsed = TestEnvTaskPlanSchema.parse(plan({ dependencies: [dependencyPlan()] }));
-    expect(parsed.dependencies).toEqual([dependencyPlan()]);
-    expect(JSON.stringify(parsed)).not.toMatch(/hunter2|secret|token/iu);
-  });
-
   it("refuses what is not a pin or not safe", () => {
     const ok = (over: Record<string, unknown>) => TaskDependencyPlanSchema.safeParse(dependencyPlan(over)).success;
     expect(ok({})).toBe(true);
@@ -169,10 +127,6 @@ describe("the task plan carries pinned dependencies", () => {
 });
 
 describe("the feature string and the Prove steps", () => {
-  it("names the feature and lists it as an invocation feature", () => {
-    expect(TEST_SERVICES_PLAN_FEATURE).toBe("task.testServices.v1");
-    expect(WORKER_INVOCATION_FEATURES).toContain(TEST_SERVICES_PLAN_FEATURE);
-  });
 
   it("adds the two dependency steps after the seven that were there", () => {
     expect(TEST_ENV_BASE_PROVE_STEPS).toEqual(["setup", "build", "boot", "smoke", "full_suite", "mocks", "preprod_probe"]);

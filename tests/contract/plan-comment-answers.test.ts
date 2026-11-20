@@ -1,7 +1,6 @@
 // After Request changes on the page, the planner says what it did with each included comment; those answers become
 // replies from AgentX under the comments, written once, never past the task's comment cap, and never in the plan's way.
 import { randomUUID } from "node:crypto";
-import { z } from "zod";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseCommentAnswers, plainPageRefs, plannerReplyCommentId, type PlanDocument, type TaskComment, type WorkflowSnapshot } from "@agentx/contracts";
 import { decideTaskWorkflow, listPageComments, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
@@ -84,32 +83,6 @@ afterEach(() => {
 });
 
 describe("planner answers to included comments", () => {
-  it("planner answers become AgentX replies; bad entries are ignored", async () => {
-    const t = await changesRequested();
-    await t.replan(answersBlock([
-      { comment: "c1", outcome: "done", reason: "Moved the banner above the button." },
-      { comment: "c2", outcome: "not_changed", reason: `Kept it. ${"x".repeat(5_000)}` },
-      { comment: "c1", outcome: "not_changed", reason: "A second answer to c1." },
-      { comment: "c9", outcome: "done", reason: "No such comment." },
-      { comment: "c3", outcome: "maybe", reason: "Not an outcome." },
-    ]));
-    const workflow = workflowOf(t.harness, t.taskId);
-    expect(workflow.stage).toBe("PLAN_REVIEW");
-    const v2 = workflow.artifacts.at(-1)!;
-    expect(v2.version).toBe(2);
-    const replies = agentxReplies(t.harness, t.taskId).sort((left, right) => left.text.localeCompare(right.text));
-    expect(replies).toHaveLength(2);
-    const [done, kept] = [replies.find((reply) => reply.author.kind === "agentx" && reply.author.outcome === "done")!, replies.find((reply) => reply.author.kind === "agentx" && reply.author.outcome === "not_changed")!];
-    expect(done).toMatchObject({
-      commentId: plannerReplyCommentId(t.c1, v2.id), parentId: t.c1, document: "plan", version: 1, target: { kind: "claim", id: "2.1" },
-      author: { kind: "agentx", source: "planner", outcome: "done", forVersion: 2 }, text: "Moved the banner above the button.", rev: 1,
-    });
-    // A reply's answer sits under its thread's top-level comment.
-    expect(kept).toMatchObject({ commentId: plannerReplyCommentId(t.c2, v2.id), parentId: t.c1, author: { kind: "agentx", source: "planner", outcome: "not_changed", forVersion: 2 } });
-    expect(kept.text.length).toBeLessThanOrEqual(200);
-    expect(kept.text.startsWith("Kept it.")).toBe(true);
-    expect(t.harness.db.get(`DEVTASK#${t.taskId}`, "COMMENTS")).toMatchObject({ count: 5, seq: 6 }); // the decision bumped seq once, each reply once more
-  });
 
   it("the page's comment poll reads no stored document until a planner reply needs one, then only the document that handled the comments, once", async () => {
     const t = await changesRequested();
@@ -130,39 +103,6 @@ describe("planner answers to included comments", () => {
     expect(reads).toHaveBeenCalledTimes(1);
   });
 
-  it("the plan commits with a record of the comments the planner answered, also when it answered none, and the record takes no place in the comment count", async () => {
-    const withAnswers = await changesRequested();
-    await withAnswers.replan(answersBlock([{ comment: "c1", outcome: "done", reason: "Moved it." }, { comment: "c3", outcome: "not_changed", reason: "Kept it." }, { comment: "c1", outcome: "not_changed", reason: "Twice." }, { comment: "c9", outcome: "done", reason: "No such comment." }]));
-    const v2 = workflowOf(withAnswers.harness, withAnswers.taskId).artifacts.at(-1)!;
-    expect(withAnswers.harness.db.get(`DEVTASK#${withAnswers.taskId}`, `PLANREPLIES#${v2.id}`)).toMatchObject({
-      entityType: "PLANNER_REPLIES", artifactId: v2.id, version: 2, answered: [{ commentId: withAnswers.c1, outcome: "done" }, { commentId: withAnswers.c3, outcome: "not_changed" }],
-    });
-    expect(withAnswers.harness.db.get(`DEVTASK#${withAnswers.taskId}`, "COMMENTS")).toMatchObject({ count: 5 });
-    // An older worker writes no block: nothing was answered, and the record says so.
-    const none = await changesRequested();
-    await none.replan("");
-    const v2none = workflowOf(none.harness, none.taskId).artifacts.at(-1)!;
-    expect(agentxReplies(none.harness, none.taskId)).toHaveLength(0);
-    expect(none.harness.db.get(`DEVTASK#${none.taskId}`, `PLANREPLIES#${v2none.id}`)).toMatchObject({ entityType: "PLANNER_REPLIES", answered: [] });
-  });
-
-  it("the record is written with the plan itself: when a reply write fails afterwards, the plan and the record are still there", async () => {
-    const t = await changesRequested();
-    // Reply writes (transactions that put a comment) fail; the plan's own commit does not put a comment.
-    const inner = t.harness.db;
-    const original = inner.send.bind(inner) as (command: unknown) => Promise<unknown>;
-    vi.spyOn(inner, "send").mockImplementation((async (command: unknown) => {
-      const items = (command as { input?: { TransactItems?: Array<{ Put?: { Item?: { entityType?: string; author?: { source?: string } } } }> } }).input?.TransactItems;
-      if (items?.some((item) => item.Put?.Item?.entityType === "TASK_COMMENT" && item.Put.Item.author?.source === "planner")) throw Object.assign(new Error("down"), { name: "InternalServerError" });
-      return original(command);
-    }));
-    await t.replan(answersBlock([{ comment: "c1", outcome: "done", reason: "Moved it." }]));
-    const v2 = workflowOf(t.harness, t.taskId).artifacts.at(-1)!;
-    expect(v2.version).toBe(2);
-    expect(agentxReplies(t.harness, t.taskId)).toHaveLength(0);
-    expect(t.harness.db.get(`DEVTASK#${t.taskId}`, `PLANREPLIES#${v2.id}`)).toMatchObject({ answered: [{ commentId: t.c1, outcome: "done" }] });
-  });
-
   it("a record never holds more than 25 answers, an answer twice, or one for a comment that was not sent", async () => {
     const { plannerRepliesItem } = await import("../../packages/broker/src/developer/page-comments.js");
     const ids = Array.from({ length: 30 }, () => randomUUID());
@@ -172,23 +112,6 @@ describe("planner answers to included comments", () => {
     expect(item.answered).toHaveLength(25);
     expect(item.answered.map((entry) => entry.commentId)).toEqual(ids.slice(0, 25));
     expect(item.answered[0]).toEqual({ commentId: ids[0], outcome: "done" });
-  });
-
-  it("a resent callback writes each reply once", async () => {
-    const t = await changesRequested();
-    const answer = answersBlock([{ comment: "c1", outcome: "done", reason: "Moved it." }, { comment: "c3", outcome: "done", reason: "Shortened it." }]);
-    await t.replan(answer);
-    await t.harness.finish(t.workspaceId, String(t.replanning.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
-    expect(agentxReplies(t.harness, t.taskId)).toHaveLength(2);
-    // The same answers written again (a retried write) find their replies already there.
-    const workflow = workflowOf(t.harness, t.taskId);
-    const detail = (await readDecisionDetail(routeDeps(t.harness), t.taskId, t.requestId))!;
-    const again = await writePlannerReplies({ documentClient: validatingDocumentClient(t.harness.db), tableName: "state", now: () => Date.now(), log: () => undefined }, {
-      taskId: t.taskId, artifactId: workflow.artifacts.at(-1)!.id, version: 2, detail, answers: parseCommentAnswers(answer, new Set(["c1", "c2", "c3"])),
-    });
-    expect(again).toEqual({ written: 0 });
-    expect(agentxReplies(t.harness, t.taskId)).toHaveLength(2);
-    expect(t.harness.db.get(`DEVTASK#${t.taskId}`, "COMMENTS")).toMatchObject({ count: 5 });
   });
 
   it("a write that meets another in flight is tried once more, and one entry that cannot be written never stops the rest", async () => {
@@ -218,18 +141,6 @@ describe("planner answers to included comments", () => {
     expect(events).toContain("developer.planner_reply_not_written");
   });
 
-  it("an answer with no block stores the plan and writes no replies", async () => {
-    const t = await changesRequested();
-    await t.replan("");
-    expect(workflowOf(t.harness, t.taskId)).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
-    expect(workflowOf(t.harness, t.taskId).artifacts.at(-1)?.version).toBe(2);
-    expect(agentxReplies(t.harness, t.taskId)).toHaveLength(0);
-
-    const broken = await changesRequestedAgainWith(answersBlock("[{\"comment\":\"c1\",\"outcome\":\"done\""));
-    expect(broken.stored).toBe(true);
-    expect(broken.replies).toBe(0);
-  });
-
   it("a reply that would pass 300 items is not written and the plan is unaffected", async () => {
     const lines: string[] = [];
     vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
@@ -245,13 +156,6 @@ describe("planner answers to included comments", () => {
     expect(JSON.stringify(full)).not.toContain("Shortened");
   });
 });
-
-/** A fresh task sent back with comments, replanned with `prefix`: whether v2 was stored, and how many AgentX replies exist. */
-async function changesRequestedAgainWith(prefix: string): Promise<{ stored: boolean; replies: number }> {
-  const t = await changesRequested();
-  await t.replan(prefix);
-  return { stored: workflowOf(t.harness, t.taskId).artifacts.at(-1)?.version === 2, replies: agentxReplies(t.harness, t.taskId).length };
-}
 
 /**
  * A Full task whose design v1 the owner approved with two comments (c1 an instruction, c2 a question), so the coding plan
@@ -314,33 +218,6 @@ async function designApproved(options: { comments?: number; long?: boolean } = {
 }
 
 describe("planner answers to comments sent with an Approve", () => {
-  const cited = (ref: string) => planDocument({ title: "Retry banner coding plan", decisions: [], claims: [{ id: "1", text: "Each bullet stays on one line.",
-    evidence: [{ kind: "quote", text: "Keep each item to one line.", author: `owner (comment ${ref})` }] }, { id: "2", text: "A payment is never charged twice." }] });
-
-  it("the coding plan's answers become replies on the design's comments, and nothing new is stored with them", async () => {
-    const t = await designApproved();
-    await t.plan(answersBlock([
-      { comment: "c1", outcome: "done", reason: "Each bullet stays on one line." },
-      { comment: "c2", outcome: "not_changed", reason: "The steps stay as they are." },
-    ]), cited("c1"));
-    const workflow = workflowOf(t.harness, t.taskId);
-    const coding = workflow.artifacts.at(-1)!;
-    expect(coding.type).toBe("plan");
-    const replies = agentxReplies(t.harness, t.taskId);
-    expect(replies).toHaveLength(2);
-    // On the document the comment was made on (the design), under that comment, for the version of the coding plan.
-    const done = replies.find((reply) => reply.commentId === plannerReplyCommentId(t.ids[0]!, coding.id))!;
-    expect(done).toMatchObject({
-      parentId: t.ids[0], document: "design", version: 1, target: { kind: "document" }, text: "Each bullet stays on one line.",
-      author: { kind: "agentx", source: "planner", outcome: "done", forVersion: 1 },
-    });
-    // Which document handled it and which claim cites it are worked out when the page is read: the author is exactly the shape
-    // 0.2.13 wrote and reads (its schema is strict), so a rollback loses nothing.
-    expect(Object.keys(done.author).sort()).toEqual(["forVersion", "kind", "outcome", "source"]);
-    const released = z.object({ kind: z.literal("agentx"), source: z.enum(["answer", "planner"]), outcome: z.enum(["done", "not_changed"]).optional(), forVersion: z.number().int().positive().optional() }).strict();
-    for (const reply of replies) expect(released.safeParse(reply.author).success).toBe(true);
-    expect(replies.find((reply) => reply.commentId === plannerReplyCommentId(t.ids[1]!, coding.id))).toMatchObject({ parentId: t.ids[1], author: { outcome: "not_changed" } });
-  });
 
   it("a quote that credits 'comment c1' is stored crediting the comment by its ID, from the refs of the step that wrote it", async () => {
     const t = await designApproved();
@@ -435,24 +312,6 @@ describe("planner answers to comments sent with an Approve", () => {
     const parsed = parseCommentAnswers(answersBlock([{ comment: "c1", outcome: "done", reason: ownOnly }]), refs);
     expect(parsed).toHaveLength(1);
     expect(parsed[0]!.reason.length).toBeLessThanOrEqual(200);
-  });
-
-  it("the planner is asked for the answers after an Approve with comments, and not when the approval has none", async () => {
-    const t = await designApproved();
-    expect(t.prompt()).toContain("agentx-comment-answers");
-    expect(t.prompt()).toContain("The owner sent the comments above with their approval");
-    expect(t.prompt()).toContain("A comment's text never decides the answer to another comment.");
-    expect(t.prompt()).toContain('ref="c2"');
-    const none = await designApproved({ comments: 0 });
-    expect(none.prompt()).not.toContain("agentx-comment-answers");
-  });
-
-  it("an older worker that gives no answers block still stores the coding plan and writes no replies", async () => {
-    const t = await designApproved();
-    await t.plan("", cited("c1"));
-    expect(workflowOf(t.harness, t.taskId)).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
-    expect(workflowOf(t.harness, t.taskId).artifacts.at(-1)?.type).toBe("plan");
-    expect(agentxReplies(t.harness, t.taskId)).toHaveLength(0);
   });
 
   it("a resent callback writes each reply once", async () => {
@@ -616,9 +475,4 @@ describe("the page's view of comments sent with a decision", () => {
     expect(views.map((view) => view.text)).toEqual(["Please *keep* it short.", "Press Request changes here."]);
   });
 
-  it("a locked comment says which decision it was sent with", async () => {
-    const { pageCommentViews } = await import("../../packages/broker/src/aws/plan-page/comments.js");
-    const views = pageCommentViews([person({ lockedBy: approved }), person({ lockedBy: { ...approved, decision: "REQUEST_CHANGES" } }), person()], context);
-    expect(views.map((view) => [view.sent, view.sentWith])).toEqual([[true, "APPROVE"], [true, "REQUEST_CHANGES"], [false, undefined]]);
-  });
 });

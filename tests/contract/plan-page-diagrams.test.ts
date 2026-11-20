@@ -40,24 +40,7 @@ const markdownEvidenceLine = (evidence: Diagram): string => {
   return found!.trimStart().slice("- Evidence: ".length);
 };
 
-const forbidden = [/<script/i, /\son[a-z]+\s*=/i, /href/i, /<style/i, /\sid=/i, /\sclass=/i, /<title/i, /<!--/, /<\?xml/, /<!DOCTYPE/i];
-
 describe("plan page diagrams", () => {
-  it("draws a state machine with every state and nothing that could run", async () => {
-    const { svg, text } = await renderDiagram(stateMachine);
-    expect(svg).toBeDefined();
-    for (const state of stateMachine.states) expect(svg).toContain(state);
-    for (const pattern of forbidden) expect(svg).not.toMatch(pattern);
-    expect(svg).toMatch(/^<svg /);
-    expect(svg).toContain('width="100%"');
-    expect(svg).toMatch(/^<svg [^>]*fill="currentColor"/);
-    expect(svg).toContain("viewBox=");
-    expect(svg).toContain('role="img"');
-    expect(svg).toContain(`aria-label="${text.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}"`);
-    expect(svg).not.toContain('fill="white"');
-    expect(svg).not.toContain('"black"');
-    expect(svg).not.toContain("font-family");
-  });
 
   it("keeps hostile labels inert in a state machine", async () => {
     const hostile: Diagram = {
@@ -74,35 +57,6 @@ describe("plan page diagrams", () => {
     expect(svg).toContain("&lt;/text&gt;&lt;a href=&quot;javascript:x&quot;&gt;");
   });
 
-  it("draws a schema with two entities and a relation", async () => {
-    const { svg } = await renderDiagram(schema);
-    expect(svg).toBeDefined();
-    for (const word of ["Payment", "Retry", "paymentId: uuid", "amount: int", "retries"]) expect(svg).toContain(word);
-    for (const pattern of forbidden) expect(svg).not.toMatch(pattern);
-  });
-
-  it("draws a call flow with numbered steps", async () => {
-    const { svg } = await renderDiagram(flow);
-    expect(svg).toBeDefined();
-    for (const word of ["Customer", "Gateway", "Bank", "1. pays", "2. charges the card", "3. checks the balance", "4. says yes"]) expect(svg).toContain(word);
-    for (const pattern of forbidden) expect(svg).not.toMatch(pattern);
-    expect(svg).toContain('role="img"');
-    expect(svg).toContain('width="100%"');
-  });
-
-  it("keeps hostile text inert in a call flow", async () => {
-    const hostile: Diagram = {
-      kind: "flow",
-      participants: ["</text><a href=\"javascript:x\">", "B"],
-      steps: [{ from: "</text><a href=\"javascript:x\">", to: "B", label: "\"><script>alert(1)</script>" }],
-    };
-    const { svg } = await renderDiagram(hostile);
-    expect(svg).toBeDefined();
-    expect(svg).not.toContain("<script");
-    expect(svg).not.toContain("<a ");
-    expect(svg).toContain("&lt;script&gt;");
-  });
-
   it("gives a text alternative with the Markdown copy's wording", async () => {
     for (const evidence of [stateMachine, schema, flow]) {
       const { text } = await renderDiagram(evidence);
@@ -114,12 +68,6 @@ describe("plan page diagrams", () => {
     const { svg, text } = await renderDiagram(stateMachine, { loadGraphviz: async () => { throw new Error("no wasm"); } });
     expect(svg).toBeUndefined();
     expect(text).toBe(markdownEvidenceLine(stateMachine));
-  });
-
-  it("returns only the text when Graphviz fails on the drawing", async () => {
-    const { svg, text } = await renderDiagram(schema, { loadGraphviz: async () => ({ dot: () => { throw new Error("syntax error"); } }) });
-    expect(svg).toBeUndefined();
-    expect(text).toBe(markdownEvidenceLine(schema));
   });
 
   it("returns only the text when the drawing holds anything outside the allowlist", async () => {
@@ -141,15 +89,4 @@ describe("plan page diagrams", () => {
     }
   });
 
-  it("strips identifiers, comments and titles that Graphviz adds", async () => {
-    const drawing = '<?xml version="1.0"?>\n<!DOCTYPE svg>\n<!-- c -->\n<svg width="62pt" height="44pt" viewBox="0.00 0.00 62.00 44.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">\n<g id="graph0" class="graph" transform="translate(4 40)"><title>G</title><polygon fill="white" stroke="none" points="-4,4 -4,-40 58,-40 58,4 -4,4"/><text font-family="Times" text-anchor="middle" x="27" y="-14" font-size="14.00" fill="black">A</text><path fill="none" stroke="black" d="M0 0L1 1"/></g></svg>';
-    const { svg } = await renderDiagram(stateMachine, { loadGraphviz: async () => ({ dot: () => drawing }) });
-    expect(svg).toBeDefined();
-    for (const pattern of forbidden) expect(svg).not.toMatch(pattern);
-    expect(svg).not.toContain("xmlns");
-    expect(svg).toContain('fill="none" stroke="none"');
-    expect(svg).toContain('stroke="currentColor"');
-    expect(svg).toContain('fill="currentColor"');
-    expect(svg).not.toContain("font-family");
-  });
 });

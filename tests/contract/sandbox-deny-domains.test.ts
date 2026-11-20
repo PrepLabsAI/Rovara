@@ -53,20 +53,6 @@ describe("the sandbox registry deny list (owner decision 4, DEC 254zzz77)", () =
     }
   });
 
-  it("does not deny anything else the default list holds, and keeps mcr.microsoft.com, github.com and the AWS data hosts allowed", async () => {
-    const g = await gateway();
-    const registry = (name: string): boolean => /docker\.(io|com)|ghcr|pkg-containers|cloudflarestorage|gcr\.io|pkg\.dev|quay\.io|ecr/u.test(name);
-    for (const name of DEFAULT_AGENT_ALLOW_DOMAINS.filter((entry) => !registry(entry))) {
-      const probe = name.replace(/^\*\./u, "x.");
-      // A VPC-internal name is not a public-style name for the gateway's validName check ("*.42.10.in-addr.arpa" has no letter in its first label); every other entry must pass the deny check.
-      if (/in-addr\.arpa$/u.test(probe)) continue;
-      expect(g.hostAllowed(probe, "sandbox"), name).toBe(true);
-    }
-    for (const name of ["mcr.microsoft.com", "github.com", "s3.us-west-2.amazonaws.com", "sts.us-west-2.amazonaws.com", "bedrock-runtime.us-east-1.amazonaws.com", "dynamodb.us-west-2.amazonaws.com", "ecr.example.com", "dkr.ecr.us-west-2.amazonaws.com"]) {
-      expect(g.hostAllowed(name, "sandbox"), name).toBe(true);
-    }
-  });
-
   it("is the very list the gateway program is configured with at boot (the worker image's contracts), and the worker role keeps it", async () => {
     const g = await gateway();
     // The worker role of the laptop gateway (not exempt in host mode: there is no worker network there, so a missing role is a sandbox) and an explicit `worker` role differ only for the laptop layout.

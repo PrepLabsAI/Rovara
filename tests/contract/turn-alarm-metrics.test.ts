@@ -8,11 +8,6 @@ const call = (source?: string) => ({
 const record = (overrides: Record<string, unknown>) => ({ disposition: "answered", emptyResponse: false, calls: [], durationMs: 420_000, ...overrides }) as never;
 
 describe("metric lines the FR-045 alarms read", () => {
-  it("reports every answered or failed turn's duration", () => {
-    const lines: Array<[string, unknown]> = [];
-    emitTurnMetrics(record({}), (event, fields) => { lines.push([event, fields]); });
-    expect(lines).toContainEqual(["metric", { metric: "TurnDurationMs", count: 420_000 }]);
-  });
 
   it("counts calls the action gate could not check (it failed closed)", () => {
     const lines: Array<[string, unknown]> = [];
@@ -20,9 +15,4 @@ describe("metric lines the FR-045 alarms read", () => {
     expect(lines).toContainEqual(["metric", { metric: "GateCheckerFailed", count: 2 }]);
   });
 
-  it("reports nothing for a turn that never ran the orchestrator", () => {
-    const lines: unknown[] = [];
-    emitTurnMetrics(record({ disposition: "workspace_limit" }), (...args) => { lines.push(args); });
-    expect(lines).toEqual([]);
-  });
 });

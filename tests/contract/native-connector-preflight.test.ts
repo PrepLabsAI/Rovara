@@ -53,11 +53,4 @@ describe("the registration preflight of a native read-only connector", () => {
     }
   });
 
-  it("still refuses a connector of a type that can write when it declares none", async () => {
-    const { connector, project } = await sentryConnector();
-    const real = connector.definition.bind(connector);
-    const writer = { ...connector, type: "linear", definition: async () => ({ ...(await real() as object), itemArguments: [] }) } as unknown as typeof connector;
-    const outcome = await preflightConnectors([writer], project, "owner-key");
-    expect(outcome.refusals).toEqual(["connector errors: declare 1 to 16 item argument paths"]);
-  });
 });

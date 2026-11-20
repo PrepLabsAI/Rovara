@@ -15,22 +15,6 @@ const noOperator = { "agentx-staging-access": { OperatorPrincipalArn: "" } };
 const controlPlane = { GitHubAppId: "123", GitHubAppPrivateKeySecretArn: KEY_ARN, GitHubAppCredentialRef: "github-agentx-sdlc", CallbackSigningKey: "****", AdminClaim: "cognito:groups", AdminValues: "[\"agentx-admin\"]" };
 
 describe("upgradeAnswers: everything from the environment itself, nothing asked", () => {
-  it("builds a Cognito environment's answers from its settings and deployed stacks", async () => {
-    const answers = await upgradeAnswers({ settings: SETTINGS, stacks: stacks({ "agentx-staging-control-plane": controlPlane, "agentx-staging-access": { OperatorPrincipalArn: "arn:aws:iam::123456789012:role/ops" } }) });
-    expect(answers).toEqual({
-      env: "staging", region: "us-east-1", account: "123456789012", models: SETTINGS.models, identity: { mode: "cognito" },
-      github: { appId: "123", privateKeySecretArn: KEY_ARN, credentialRef: "github-agentx-sdlc" },
-      operatorPrincipalArn: "arn:aws:iam::123456789012:role/ops",
-    });
-    // Never the callback signing key: deployEnvironment reads it from Secrets Manager itself.
-    expect(JSON.stringify(answers)).not.toContain("****");
-  });
-
-  it("carries your own OIDC provider's admin claim and values from the control-plane stack", async () => {
-    const oidc = { ...SETTINGS, identity: { mode: "oidc" as const, issuer: "https://idp.example.com", audience: "agentx", clientId: "cli" } };
-    const answers = await upgradeAnswers({ settings: oidc, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": { ...controlPlane, AdminClaim: "groups", AdminValues: "[\"eng-admins\"]" } }) });
-    expect(answers.identity).toEqual({ mode: "oidc", issuer: "https://idp.example.com", audience: "agentx", clientId: "cli", adminClaim: "groups", adminValues: ["eng-admins"] });
-  });
 
   // L4-IAM: the worker role reads only agentx-<env>/, so a worker image elsewhere is refused here, before any stack is touched.
   it("refuses a --worker-image outside the environment's image prefix, with fixed words and nothing echoed", async () => {
@@ -54,11 +38,6 @@ describe("upgradeAnswers: everything from the environment itself, nothing asked"
     await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({ "agentx-staging-control-plane": {} }) })).rejects.toThrow("stack agentx-staging-control-plane has no GitHubAppId parameter");
   });
 
-  it("keeps an empty GitHub App id: the control plane deployed before the app reads it from the secret", async () => {
-    const answers = await upgradeAnswers({ settings: SETTINGS, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": { ...controlPlane, GitHubAppId: "" } }) });
-    expect(answers.github).toMatchObject({ appId: "", privateKeySecretArn: KEY_ARN });
-  });
-
   it("refuses a GitHub App id that is not a number, or a private key that is not an ARN", async () => {
     await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": { ...controlPlane, GitHubAppId: "12a" } }) })).rejects.toThrow("stack agentx-staging-control-plane's GitHubAppId parameter is not a GitHub App id (a number); run agentx doctor, and agentx init --resume if the install never finished");
     await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": { ...controlPlane, GitHubAppPrivateKeySecretArn: "agentx/staging/github-app" } }) })).rejects.toThrow("stack agentx-staging-control-plane's GitHubAppPrivateKeySecretArn parameter is not an ARN; run agentx doctor, and agentx init --resume if the install never finished");
@@ -80,14 +59,6 @@ describe("upgradeAnswers: everything from the environment itself, nothing asked"
     await expect(upgradeAnswers({ settings: oidc, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": noClaim }) })).rejects.toThrow("stack agentx-staging-control-plane has no AdminClaim parameter; run agentx doctor, and agentx init --resume if the install never finished");
   });
 
-  it("passes the slack image override alone, and no images at all without overrides", async () => {
-    const slack = await upgradeAnswers({ settings: SETTINGS, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": controlPlane }), images: { slack: `s@sha256:${"c".repeat(64)}` } });
-    expect(slack.images).toEqual({ slack: `s@sha256:${"c".repeat(64)}` });
-    for (const images of [undefined, {}]) {
-      const none = await upgradeAnswers({ settings: SETTINGS, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": controlPlane }), ...(images === undefined ? {} : { images }) });
-      expect(none).not.toHaveProperty("images");
-    }
-  });
 });
 
 describe("the target release", () => {

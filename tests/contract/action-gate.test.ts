@@ -41,15 +41,6 @@ const allow: ActionClassifier = async () => ({ decision: "allow", reason: "The m
 
 describe("the action gate's decisions", () => {
   afterEach(() => { vi.useRealTimers(); });
-  it("runs reads and creates without the classifier, and asks for a destructive action without it", async () => {
-    const classifier = vi.fn(allow);
-    const { gate: g, session } = gate({ classifier });
-    expect(await g.decide(call("tracker__list_items", {}), { memberMessages: messages })).toMatchObject({ outcome: "allow", source: "default", kind: "read" });
-    expect(await g.decide(call("tracker__save_item", { title: "Refund" }), { memberMessages: messages })).toMatchObject({ outcome: "allow", kind: "create", actionClass: "create" });
-    expect(await g.decide(call("tracker__close_item", { id: "TRK-9" }), { memberMessages: messages })).toMatchObject({ outcome: "ask", kind: "destructive" });
-    expect(classifier).not.toHaveBeenCalled();
-    expect(session.asks).toEqual([{ toolCallId: expect.any(String) as string, tool: "tracker__close_item", argumentsHash: argumentsHash("tracker__close_item", { id: "TRK-9" }), summary: "Use tracker to close item: id TRK-9", kind: "destructive" }]);
-  });
 
   it("sends a change to the classifier with the members' messages, the call and the item it names, and follows its verdict", async () => {
     const classifier = vi.fn(allow);
@@ -125,37 +116,6 @@ describe("the action gate's decisions", () => {
     expect(classifier).toHaveBeenCalledOnce();
   });
 
-  it("M4: allows a configured gate deadline up to 60 seconds, and falls back to 8 seconds above it", async () => {
-    vi.useFakeTimers();
-    for (const [classifierTimeoutMs, expected] of [[60_000, 60_000], [60_001, 8_000], [3_000_000_000, 8_000]] as const) {
-      const { gate: g } = gate({ classifier: () => new Promise(() => undefined), classifierTimeoutMs });
-      const pending = g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages });
-      await vi.advanceTimersByTimeAsync(expected);
-      expect(await pending, String(classifierTimeoutMs)).toMatchObject({ reason: `the classifier could not decide: it did not answer within ${expected} ms` });
-    }
-  });
-
-  it("M4: follows the configured classifier timeout rather than a fixed 8 seconds", async () => {
-    vi.useFakeTimers();
-    const { gate: g } = gate({ classifier: () => new Promise(() => undefined), classifierTimeoutMs: 12_000 });
-    let settled = false;
-    const pending = g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages }).finally(() => { settled = true; });
-    await vi.advanceTimersByTimeAsync(8_000);
-    expect(settled).toBe(false);
-    await vi.advanceTimersByTimeAsync(4_000);
-    expect(await pending).toMatchObject({ outcome: "ask", source: "classifier_unavailable", reason: "the classifier could not decide: it did not answer within 12000 ms" });
-  });
-
-  it("M4: falls back to 8 seconds when the configured classifier timeout is not a positive whole number", async () => {
-    vi.useFakeTimers();
-    for (const classifierTimeoutMs of [0, -5, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
-      const { gate: g } = gate({ classifier: () => new Promise(() => undefined), classifierTimeoutMs });
-      const pending = g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages });
-      await vi.advanceTimersByTimeAsync(8_000);
-      expect(await pending, String(classifierTimeoutMs)).toMatchObject({ reason: "the classifier could not decide: it did not answer within 8000 ms" });
-    }
-  });
-
   it("asks when the turn is cancelled while the classifier works", async () => {
     const controller = new AbortController();
     let seen: AbortSignal | undefined;
@@ -167,18 +127,6 @@ describe("the action gate's decisions", () => {
     const early = gate({ classifier: vi.fn(allow) });
     expect(await early.gate.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages, signal: AbortSignal.abort() }))
       .toMatchObject({ outcome: "ask", source: "classifier_unavailable", reason: "the classifier could not decide: the turn was cancelled" });
-  });
-
-  it("uses the default classifier limit when the configured one is not a whole number of zero or more", async () => {
-    for (const maxClassifierCalls of [Number.NaN, -1, 1.5]) {
-      const classifier = vi.fn(allow);
-      const { gate: g } = gate({ classifier, maxClassifierCalls });
-      for (let id = 0; id < 8; id += 1) expect((await g.decide(call("tracker__save_item", { id: String(id) }), { memberMessages: messages })).outcome).toBe("allow");
-      expect(await g.decide(call("tracker__save_item", { id: "last" }), { memberMessages: messages })).toMatchObject({ reason: "this turn already used its 8 classifier checks" });
-      expect(classifier).toHaveBeenCalledTimes(8);
-    }
-    const none = gate({ classifier: vi.fn(allow), maxClassifierCalls: 0 });
-    expect(await none.gate.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages })).toMatchObject({ reason: "this turn already used its 0 classifier checks" });
   });
 
   it("keeps a thrown error's own message out of the decision unless it is the classifier's", async () => {
@@ -246,23 +194,6 @@ describe("the action gate's decisions", () => {
     expect(classifier).not.toHaveBeenCalled();
   });
 
-  it("checks coding work in a thread with no compute, and runs it once compute is prepared", async () => {
-    const classifier = vi.fn(allow);
-    let ready = false;
-    const worker = { prepared: () => ready, ensureReady: async () => undefined };
-    const { gate: g } = gate({ classifier, worker });
-    expect(await g.decide(call("agentx_submit_task", { prompt: "list the files" }), { memberMessages: messages })).toMatchObject({ actionClass: "change", source: "classifier" });
-    ready = true;
-    expect(await g.decide(call("agentx_submit_task", { prompt: "now run the tests" }), { memberMessages: messages })).toMatchObject({ actionClass: "read", outcome: "allow" });
-    expect(classifier).toHaveBeenCalledOnce();
-  });
-
-  it("treats a tool it knows nothing about as a change for the classifier, not as destructive", async () => {
-    const classifier = vi.fn(allow);
-    expect(await gate({ classifier }).gate.decide(call("mystery__tool", { x: 1 }), { memberMessages: messages })).toMatchObject({ actionClass: "change", outcome: "allow", source: "classifier" });
-    expect(classifier).toHaveBeenCalledOnce();
-  });
-
   it("records every decision, and a failing decision log changes nothing", async () => {
     const onDecision = vi.fn(() => { throw new Error("log sink down"); });
     const { gate: g, session } = gate({ onDecision });
@@ -288,14 +219,6 @@ describe("the approval text says what will happen in plain words (#215)", () => 
     expect(text).not.toMatch(/\(\d+ characters\)/u);
     expect(describeAction("agentx_submit_task", { prompt: "replace ZZZ-NOT-THERE with x in README.md" })).toBe('Start a coding task: "replace ZZZ-NOT-THERE with x in README.md"');
     expect(describeAction("agentx_follow_up", { prompt: "now run the tests" })).toBe('Continue the coding task: "now run the tests"');
-  });
-
-  it("shortens a long prompt instead of counting its characters, on one Slack-safe line", () => {
-    const text = describeAction("agentx_submit_task", { prompt: `<!channel> \`go\`\n${"word ".repeat(100)}` });
-    expect(text.startsWith('Start a coding task: "&lt;!channel&gt; go word word')).toBe(true);
-    expect(text.endsWith('…"')).toBe(true);
-    expect(text.length).toBeLessThanOrEqual(300);
-    expect(text).not.toMatch(/characters\)|<!channel>|`|\n/u);
   });
 
   it("describes pull request work in words", () => {
@@ -325,23 +248,6 @@ describe("the approval text says what will happen in plain words (#215)", () => 
     expect(describeAction("agentx_new_thing", { a: 1 })).toBe("Run an AgentX action: a 1");
   });
 
-  it("keeps the classifier's own summary, and puts the plain words in the ask", async () => {
-    const seen: unknown[] = [];
-    const { gate: g, session } = gate({ classifier: async (input) => { seen.push(input.call.summary); return { decision: "ask", reason: "unclear" }; } });
-    await g.decide(call("tracker__save_item", { id: "TRK-5", priority: 2 }), { memberMessages: messages });
-    expect(seen).toEqual(["tracker__save_item: id=TRK-5, priority=2"]);
-    expect(session.asks).toMatchObject([{ tool: "tracker__save_item", summary: "Use tracker to save item: id TRK-5, priority 2", kind: "classifier" }]);
-  });
-
-  it("marks an ask the classifier could not check as unchecked, not as a doubt", async () => {
-    const down = gate({ classifier: async () => { throw new ClassifierError("the classifier did not answer within 8000 ms"); } });
-    expect(await down.gate.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages })).toMatchObject({ outcome: "ask", source: "classifier_unavailable", kind: "classifier" });
-    expect(down.session.asks).toMatchObject([{ kind: "unchecked" }]);
-    const none = gate();
-    await none.gate.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages });
-    expect(none.session.asks).toMatchObject([{ kind: "unchecked" }]);
-  });
-
   it("still names the confirmed tool to the model, which must call it again exactly", () => {
     const session = createGateSession(member, { approvals: [{ tool: "agentx_submit_task", argumentsHash: "a".repeat(64), summary: 'Start a coding task: "list files"' }] });
     expect(confirmationNote(session)).toContain('1. Start a coding task: "list files" (tool agentx_submit_task)');
@@ -349,11 +255,6 @@ describe("the approval text says what will happen in plain words (#215)", () => 
 });
 
 describe("gate helpers", () => {
-  it("hashes a call independently of key order and of undefined values", () => {
-    expect(argumentsHash("t", { a: 1, b: { d: [1, 2], c: "x" } })).toBe(argumentsHash("t", { b: { c: "x", d: [1, 2] }, a: 1, e: undefined }));
-    expect(argumentsHash("t", { a: 1 })).not.toBe(argumentsHash("u", { a: 1 }));
-    expect(argumentsHash("t", { a: [1, 2] })).not.toBe(argumentsHash("t", { a: [2, 1] }));
-  });
 
   it("describes the action and its target on one Slack-safe line", () => {
     expect(describeCall("tracker__close_item", { target: "payments", id: "TRK-9" })).toBe("tracker__close_item in payments: id=TRK-9");

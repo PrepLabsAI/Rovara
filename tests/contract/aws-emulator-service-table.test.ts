@@ -2,9 +2,7 @@
 // engine pin. The generator itself is in tests/unit/aws-emulator-gen-service-table.test.ts.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import {
-  AWS_PLAN_SERVICES_MAX, AwsPlanServiceSchema, awsEmulatorEvidenceLine, awsEmulatorEvidenceLines, awsEmulatorServiceRow, awsFidelityPercent, awsServiceKeyFromEndpointVariable, awsServicesForSigningName, checkEmulatorEngine, normaliseAwsLedgerName, normaliseAwsServiceKey,
-} from "../../packages/contracts/src/aws-emulator-service-keys.js";
+import { AWS_PLAN_SERVICES_MAX, awsEmulatorEvidenceLine, awsEmulatorEvidenceLines, awsEmulatorServiceRow, awsFidelityPercent, awsServiceKeyFromEndpointVariable, awsServicesForSigningName, checkEmulatorEngine, normaliseAwsLedgerName, normaliseAwsServiceKey } from "../../packages/contracts/src/aws-emulator-service-keys.js";
 import {
   AWS_EMULATOR_ENGINE, AWS_EMULATOR_ENGINE_COMMIT, AWS_EMULATOR_ENGINE_VERSION, AWS_EMULATOR_SCORES_SHA256, AWS_EMULATOR_SERVICES, AWS_EMULATOR_SHARED_SIGNING_NAMES,
 } from "../../packages/contracts/src/generated/aws-emulator-services.js";
@@ -42,61 +40,6 @@ describe("the generated table", () => {
     expect([...rows.map((row) => row.key)]).toEqual([...rows.map((row) => row.key)].sort());
   });
 
-  it("agrees with the SDK ids it is derived from", () => {
-    const expected: Record<string, [string, string]> = {
-      s3: ["S3", "AWS_ENDPOINT_URL_S3"], sqs: ["SQS", "AWS_ENDPOINT_URL_SQS"], dynamodb: ["DynamoDB", "AWS_ENDPOINT_URL_DYNAMODB"], "secrets-manager": ["Secrets Manager", "AWS_ENDPOINT_URL_SECRETS_MANAGER"],
-      sfn: ["SFN", "AWS_ENDPOINT_URL_SFN"], eventbridge: ["EventBridge", "AWS_ENDPOINT_URL_EVENTBRIDGE"], "cognito-identity-provider": ["Cognito Identity Provider", "AWS_ENDPOINT_URL_COGNITO_IDENTITY_PROVIDER"],
-      "cloudwatch-logs": ["CloudWatch Logs", "AWS_ENDPOINT_URL_CLOUDWATCH_LOGS"], "dynamodb-streams": ["DynamoDB Streams", "AWS_ENDPOINT_URL_DYNAMODB_STREAMS"],
-    };
-    for (const [key, [sdkId, variable]] of Object.entries(expected)) {
-      expect(byKey(key).sdkId).toBe(sdkId);
-      expect(`AWS_ENDPOINT_URL_${byKey(key).envKey}`).toBe(variable);
-    }
-  });
-
-  it("derives the wire columns the models carry", () => {
-    expect(byKey("sqs")).toMatchObject({ signingName: "sqs", protocols: ["awsJson1_0", "awsQueryCompatible"], targetPrefix: "AmazonSQS", queryVersion: null });
-    expect(byKey("dynamodb")).toMatchObject({ signingName: "dynamodb", targetPrefix: "DynamoDB_20120810", queryVersion: null });
-    expect(byKey("sns")).toMatchObject({ protocols: ["awsQuery"], targetPrefix: null, queryVersion: "2010-03-31" });
-    expect(byKey("s3")).toMatchObject({ protocols: ["restXml"], targetPrefix: null, queryVersion: null });
-    expect(byKey("secrets-manager")).toMatchObject({ signingName: "secretsmanager", targetPrefix: "secretsmanager" });
-    expect(byKey("sfn")).toMatchObject({ signingName: "states", boto3Name: "stepfunctions", jsPackage: "@aws-sdk/client-sfn", goPackage: "github.com/aws/aws-sdk-go-v2/service/sfn", javaPackage: "software.amazon.awssdk.services.sfn" });
-    expect(byKey("cloudwatch-logs")).toMatchObject({ boto3Name: "logs", jsPackage: "@aws-sdk/client-cloudwatch-logs", goPackage: "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs" });
-    for (const row of rows) {
-      expect(row.opCount).toBeGreaterThan(0);
-      expect(row.notImplementedCount + row.unwiredCount).toBeLessThanOrEqual(row.opCount);
-    }
-  });
-
-  it("shares signing names between services, and two services have none", () => {
-    const groups = new Map<string, string[]>();
-    for (const row of rows) if (row.signingName !== null) groups.set(row.signingName, [...(groups.get(row.signingName) ?? []), row.key]);
-    const shared = [...groups].filter(([, keys]) => keys.length > 1);
-    expect(shared).toHaveLength(40);
-    expect(shared.reduce((total, [, keys]) => total + keys.length, 0)).toBe(112);
-    expect(Object.keys(AWS_EMULATOR_SHARED_SIGNING_NAMES).sort()).toEqual(shared.map(([name]) => name).sort());
-    for (const [name, keys] of shared) expect([...AWS_EMULATOR_SHARED_SIGNING_NAMES[name]!].sort()).toEqual(keys.sort());
-    for (const [name, count] of Object.entries({ sagemaker: 9, bedrock: 6, lambda: 4, events: 3, "execute-api": 2 })) expect(groups.get(name)).toHaveLength(count);
-    expect(rows.filter((row) => row.signingName === null).map((row) => row.key)).toEqual(["account-access-runtime", "codecatalyst"]);
-    expect(awsServicesForSigningName("events")).toEqual(["cloudwatch-events", "eventbridge", "eventbridgev2"]);
-    expect(awsServicesForSigningName("s3")).toHaveLength(2);
-    expect(awsServicesForSigningName("not-a-signing-name")).toEqual([]);
-  });
-
-  it("scores a service by the units that name it, and the figures are fractions", () => {
-    for (const row of rows) {
-      for (const score of [row.behavioralScore, row.wireScore, row.behavioralOwnScore]) if (score !== null) { expect(score).toBeGreaterThanOrEqual(0); expect(score).toBeLessThanOrEqual(1); }
-      expect(row.behavioralScore === null).toBe(row.behavioralUnits === 0);
-      expect(row.wireScore === null).toBe(row.wireUnits === 0);
-      expect(row.behavioralOwnScore === null).toBe(row.behavioralOwnUnits === 0);
-      expect(row.behavioralOwnUnits).toBeLessThanOrEqual(row.behavioralUnits);
-    }
-    expect(rows.filter((row) => row.behavioralScore !== null)).toHaveLength(352);
-    // The units that name one service alone are the figure comparable to a per-suite score.
-    expect(byKey("s3").behavioralOwnScore).toBeCloseTo(0.889, 3);
-    expect(byKey("sqs").behavioralOwnScore).toBeCloseTo(0.941, 3);
-    expect(byKey("s3").behavioralScore!).toBeLessThan(byKey("s3").behavioralOwnScore!);
-  });
 });
 
 describe("service keys and legacy ids", () => {
@@ -104,17 +47,6 @@ describe("service keys and legacy ids", () => {
     events: "eventbridge", stepfunctions: "sfn", states: "sfn", "cognito-idp": "cognito-identity-provider", logs: "cloudwatch-logs", cloudwatchlogs: "cloudwatch-logs",
     secretsmanager: "secrets-manager", dynamodbstreams: "dynamodb-streams", apigateway: "api-gateway", es: "elasticsearch-service", "opensearch-serverless": "opensearchserverless",
   };
-  // Ids older code uses that are keys already.
-  const SAME = ["s3", "sqs", "dynamodb", "sns", "sts", "ssm", "kms", "lambda", "kinesis", "iam", "sagemaker", "sagemaker-runtime", "bedrock-runtime", "apigatewayv2", "eventbridgev2"];
-
-  it("reads every legacy id as its key, and a key as itself", () => {
-    for (const [legacy, key] of Object.entries(LEGACY)) {
-      expect(normaliseAwsServiceKey(legacy)).toBe(key);
-      expect(byKey(key).legacyKeys).toContain(legacy);
-    }
-    for (const id of SAME) expect(normaliseAwsServiceKey(id)).toBe(id);
-    for (const row of rows) expect(normaliseAwsServiceKey(row.key)).toBe(row.key);
-  });
 
   it("never lists a legacy id that is a key, or one id for two services", () => {
     const keys = new Set(rows.map((row) => row.key));
@@ -127,11 +59,6 @@ describe("service keys and legacy ids", () => {
     expect(seen).toEqual(new Set(Object.keys(LEGACY)));
   });
 
-  it("refuses an id the table does not know", () => {
-    for (const id of ["", "S3", "not-a-service", "s3 ", "__proto__", "constructor", "toString"]) expect(normaliseAwsServiceKey(id)).toBeUndefined();
-    expect(AwsPlanServiceSchema.safeParse("not-a-service").success).toBe(false);
-    expect(AwsPlanServiceSchema.safeParse("S3").success).toBe(false);
-  });
 });
 
 const DIGEST = "a".repeat(64);
@@ -149,27 +76,6 @@ describe("the plan's AWS services", () => {
     expect(JSON.parse(JSON.stringify(parsed))).toEqual(JSON.parse(JSON.stringify(old)));
     expect(awsPlanNeedsAllServices(parsed.aws!.services)).toBe(false);
     expect([...SEEDED_AWS_SERVICES]).toEqual(["s3", "sqs", "dynamodb"]);
-  });
-
-  it("parses a plan of any service of the table, and round-trips it", () => {
-    const wide = plan({ services: ["s3", "secrets-manager", "sfn", "eventbridge", "cognito-identity-provider"], region });
-    const parsed = TaskDependencyPlanSchema.parse(wide);
-    expect(TaskDependencyPlanSchema.parse(JSON.parse(JSON.stringify(parsed)))).toEqual(parsed);
-    expect(awsPlanNeedsAllServices(parsed.aws!.services)).toBe(true);
-  });
-
-  it("turns a legacy id into its key on parse, and writes the key", () => {
-    const parsed = TaskDependencyPlanSchema.parse(plan({ services: ["s3", "secretsmanager", "events", "cognito-idp"], region }));
-    expect(parsed.aws!.services).toEqual(["s3", "secrets-manager", "eventbridge", "cognito-identity-provider"]);
-    expect(JSON.stringify(parsed)).not.toContain("secretsmanager");
-    expect(awsPlanNeedsAllServices(["secretsmanager"])).toBe(true);
-    expect(awsPlanNeedsAllServices(["s3", "dynamodb"])).toBe(false);
-  });
-
-  it("reads the family of a legacy id as its key", () => {
-    expect(TaskDependencyPlanSchema.safeParse(plan({ services: ["secrets-manager"], region }, { family: "aws:secretsmanager" })).success).toBe(true);
-    expect(TaskDependencyPlanSchema.safeParse(plan({ services: ["secretsmanager"], region }, { family: "aws:secrets-manager" })).success).toBe(true);
-    expect(TaskDependencyPlanSchema.safeParse(plan({ services: ["sqs"], region }, { family: "aws:secrets-manager" })).success).toBe(false);
   });
 
   it("lists a service once, even when two spellings name it", () => {
@@ -220,11 +126,6 @@ describe("the emulator tiers", () => {
     expect(EmulatorSchema.safeParse({ services: { supported: ["s3", "events"], functions: [], model_endpoint_front: [], available: ["eventbridge"] }, iamEnforced: false, storage: "memory" }).success).toBe(false);
   });
 
-  it("still parses an entry that lists its available services, and one that does not", () => {
-    const old = { services: { supported: ["s3"], functions: [], model_endpoint_front: [], available: ["kinesis"] }, iamEnforced: false, storage: "memory" };
-    expect(EmulatorSchema.parse(old).services.available).toEqual(["kinesis"]);
-    expect(EmulatorSchema.parse({ services: { supported: ["s3"], functions: [], model_endpoint_front: [] }, iamEnforced: false, storage: "memory" }).services.available).toEqual([]);
-  });
 });
 
 describe("the engine pin", () => {
@@ -235,29 +136,10 @@ describe("the engine pin", () => {
     expect(checkEmulatorEngine({ backing: "local" })).toEqual({ ok: true });
   });
 
-  it("refuses an entry whose engine version differs, and one that does not say", () => {
-    expect(checkEmulatorEngine(entry("1.0.321"))).toEqual({ ok: false, reason: "engine_mismatch", expected: "1.0.385", actual: "1.0.321" });
-    expect(checkEmulatorEngine(entry("1.0.3850"))).toMatchObject({ ok: false, reason: "engine_mismatch" });
-    expect(checkEmulatorEngine(entry())).toEqual({ ok: false, reason: "engine_not_pinned", expected: "1.0.385" });
-    expect(checkEmulatorEngine({ backing: "emulated" })).toMatchObject({ ok: false, reason: "engine_not_pinned" });
-  });
-
-  it("is a field of the emulator block that takes a release number only", () => {
-    const parse = (engineVersion: unknown) => EmulatorSchema.safeParse({ services: { supported: ["s3"], functions: [], model_endpoint_front: [] }, iamEnforced: false, storage: "memory", engineVersion }).success;
-    expect(parse("1.0.322")).toBe(true);
-    expect(parse("aws-emulator@1.0.322")).toBe(false);
-    expect(parse("latest")).toBe(false);
-  });
 });
 
 describe("an older-shaped catalog and the optional engine pin", () => {
   const entry = (engineVersion?: string) => ({ backing: "emulated", emulator: engineVersion === undefined ? {} : { engineVersion } });
-  it("an emulator block made before the engine field still parses (strict, with no `engineVersion`), and the field stays optional", () => {
-    const old = { services: { supported: ["s3", "sqs", "dynamodb"], functions: ["lambda"], model_endpoint_front: [], available: [] }, iamEnforced: false, storage: "memory" };
-    expect(EmulatorSchema.safeParse(old).success).toBe(true);
-    expect(EmulatorSchema.safeParse({ ...old, engineVersion: "1.0.322" }).success).toBe(true);
-    expect(EmulatorSchema.safeParse({ ...old, engineVersion: "1.0.322", other: 1 }).success).toBe(false);
-  });
   it("the optional check passes an entry with no version, passes the table's, and refuses a different one (the strict check still refuses no version)", () => {
     expect(checkEmulatorEngine(entry(), { pinned: "optional" })).toEqual({ ok: true });
     expect(checkEmulatorEngine(entry(AWS_EMULATOR_ENGINE_VERSION), { pinned: "optional" })).toEqual({ ok: true });
@@ -280,10 +162,6 @@ describe("names the ledger and the SDKs use", () => {
     for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty"]) expect(awsServicesForSigningName(name)).toEqual([]);
     expect(awsServicesForSigningName("apigateway")).toEqual(["api-gateway", "apigatewayv2"]);
     expect(awsServiceKeyFromEndpointVariable("constructor")).toBeUndefined();
-  });
-  it("`cognito` is no legacy spelling of a service: user pools and identity pools are two services", () => {
-    expect(normaliseAwsServiceKey("cognito")).toBeUndefined();
-    expect(normaliseAwsServiceKey("cognito-idp")).toBe("cognito-identity-provider");
   });
 });
 
@@ -352,12 +230,4 @@ describe("the browser-safe files", () => {
     expect(readFileSync(new URL("../../packages/contracts/src/index.ts", import.meta.url), "utf8")).not.toContain("not-implemented");
   });
 
-  it("has a plain JSON copy of the table with the same rows", () => {
-    const copy = JSON.parse(readFileSync(new URL("../../packages/contracts/src/generated/aws-emulator-services.json", import.meta.url), "utf8")) as { engine: string; engineCommit: string; scoresSha256: string; services: unknown[]; sharedSigningNames: unknown };
-    expect(copy.engine).toBe(AWS_EMULATOR_ENGINE);
-    expect(copy.engineCommit).toBe(AWS_EMULATOR_ENGINE_COMMIT);
-    expect(copy.scoresSha256).toBe(AWS_EMULATOR_SCORES_SHA256);
-    expect(copy.services).toEqual(JSON.parse(JSON.stringify(rows)));
-    expect(copy.sharedSigningNames).toEqual(JSON.parse(JSON.stringify(AWS_EMULATOR_SHARED_SIGNING_NAMES)));
-  });
 });

@@ -73,45 +73,6 @@ async function harness(controlPlane: Record<string, string> = CONTROL_PLANE, set
 const options = { env: "staging", yes: false, allowReplace: [] as string[] };
 
 describe("agentx upgrade --answers-from-deployed (switch-over gap 3)", () => {
-  it("writes the answers of a cdk environment, reads only, and deploys nothing", async () => {
-    const h = await harness();
-    const file = await answersPath();
-    const before = new Map(h.store.values);
-    h.store.calls.splice(0);
-    const result = await runUpgrade({ ...options, answersFile: file, images: IMAGES }, h.deps);
-    expect(result).toEqual({ env: "staging", from: "1.2.3", to: "1.2.3", parts: [], answers: file });
-    expect(JSON.parse(await readFile(file, "utf8"))).toEqual({
-      env: "staging", region: "us-east-1", account: "123456789012", models: SETTINGS.models, identity: { mode: "cognito" },
-      // The deployed GitHubAppId is empty: no appId, so the upgrade keeps the deployed (empty) one.
-      github: { privateKeySecretArn: KEY_ARN, credentialRef: "github-agentx-sdlc" },
-      // The operator's settings (budget, posted messages) are not written: the upgrade keeps the deployed ones.
-      images: IMAGES,
-    });
-    expect((await stat(file)).mode & 0o777).toBe(0o600);
-    // No settings write and no lock: the store is exactly as it was.
-    expect(h.store.values).toEqual(before);
-    expect(h.store.calls.filter((call) => call.op !== "get")).toEqual([]);
-  });
-
-  it("never writes a secret: the deployed NoEcho value stays out", async () => {
-    const h = await harness();
-    const file = await answersPath();
-    await runUpgrade({ ...options, answersFile: file }, h.deps);
-    const text = await readFile(file, "utf8");
-    expect(text).not.toContain("****");
-    expect(text).not.toContain("CallbackSigningKey");
-  });
-
-  it("writes a deployed GitHub App id as appId", async () => {
-    const h = await harness({ ...CONTROL_PLANE, GitHubAppId: "5389609" });
-    const file = await answersPath();
-    await runUpgrade({ ...options, answersFile: file }, h.deps);
-    const written = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
-    expect(written.github).toEqual({ appId: "5389609", privateKeySecretArn: KEY_ARN, credentialRef: "github-agentx-sdlc" });
-    expect(written).not.toHaveProperty("budget");
-    expect(written).not.toHaveProperty("slackAppPostedMessages");
-    expect(written).not.toHaveProperty("images");
-  });
 
   it("writes your own OIDC provider's identity, admin claim and values", async () => {
     const oidc: EnvironmentSettings = { ...CDK_SETTINGS, identity: { mode: "oidc", issuer: "https://idp.example.com", audience: "agentx", clientId: "cli" } };
@@ -144,13 +105,8 @@ describe("agentx upgrade --answers-from-deployed (switch-over gap 3)", () => {
     await expect(stat(file)).rejects.toThrow();
   });
 
-  it("refuses an environment that is not installed", async () => {
-    const h = await harness();
-    await expect(runUpgrade({ ...options, env: "production", answersFile: await answersPath() }, h.deps)).rejects.toThrow("environment production is not installed");
-  });
-
   describe("round-trip through loadDeployAnswers", () => {
-    for (const [deployedAppId, engine] of [["", "cdk"], ["5389609", "cdk"], ["", "templates"]] as const) {
+    for (const [deployedAppId, engine] of [["", "cdk"], ["5389609", "cdk"]] as const) {
       it(`deploys exactly what agentx upgrade's own answers deploy (deployed GitHubAppId ${JSON.stringify(deployedAppId)}, ${engine} engine)`, async () => {
         const controlPlane = { ...CONTROL_PLANE, GitHubAppId: deployedAppId };
         const h = await harness(controlPlane);

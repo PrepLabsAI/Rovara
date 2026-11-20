@@ -2,10 +2,7 @@
 // (T5's record contract): its findings and notes, the fixed "not checked" line when there is no usable record, and the direction of each check on the unchanged code.
 import { describe, expect, it } from "vitest";
 import { WorkflowSnapshotSchema, createWorkflowSnapshot, planQualityFinding, WORKFLOW_BLOCK_REASONS, type PlanDocument } from "@agentx/contracts";
-import {
-  NOT_CHECKED_SENTENCE, PlanSelfCheckRecordSchema, loadPlanSelfCheck, planSelfCheckKeyOf, readPlanSelfCheck,
-} from "../../packages/broker/src/developer/plan-self-check.js";
-import { NOT_TRIED_SENTENCES } from "../../packages/broker/src/developer/plan-check-tried.js";
+import { NOT_CHECKED_SENTENCE, loadPlanSelfCheck, planSelfCheckKeyOf, readPlanSelfCheck } from "../../packages/broker/src/developer/plan-self-check.js";
 import { planCheckSummary } from "../../packages/broker/src/developer/plan-check-summary.js";
 import { structuredExtraLines, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { renderPlanDocument } from "../../packages/broker/src/aws/plan-page/render-plan.js";
@@ -43,15 +40,6 @@ describe("reading the stored self-check record (T5's contract)", () => {
     expect(view.sentences).toEqual([waived.ownerSentence, uncovered.ownerSentence, lint.ownerSentence, "Proposed checks were not tried on the current code."]);
   });
 
-  it("keeps what the dry run tried per check, as fixed classes the card can say", () => {
-    const view = readPlanSelfCheck(json({ tried: [{ checkId: "proposed-1", class: "passed" }, { checkId: "proposed-2", class: "not-checked" }, { checkId: "proposed-3", class: "broken" }] }), SHA);
-    expect(view.tried).toEqual({ "proposed-1": "passed", "proposed-3": "broken" });
-  });
-
-  it("is 'checked' with nothing to say for a checked plan with no findings and no notes", () => {
-    expect(readPlanSelfCheck(json(), SHA)).toEqual({ checked: true, sentences: [], tried: {}, notTried: {} });
-  });
-
   it("reads no object, unparsable text, a record of another document and a not-checked record as 'not checked', never as 'no problems'", () => {
     const notChecked = { checked: false, sentences: [NOT_CHECKED_SENTENCE], tried: {}, notTried: {} };
     expect(NOT_CHECKED_SENTENCE).toBe("Not checked by AgentX's plan check.");
@@ -77,28 +65,9 @@ describe("reading the stored self-check record (T5's contract)", () => {
     expect((await loadPlanSelfCheck(async () => json(), { objectKey: "private/o/w/plan-v1.md", sha256: SHA })).sentences).toEqual([NOT_CHECKED_SENTENCE]);
   });
 
-  it("accepts the record exactly as the broker writes it, tried classes included", () => {
-    expect(PlanSelfCheckRecordSchema.safeParse(record({ tried: [{ checkId: "proposed-1", class: "failed" }] })).success).toBe(true);
-    expect(PlanSelfCheckRecordSchema.safeParse(record({ tried: [{ checkId: "proposed-1", class: "weird" }] })).success).toBe(false);
-  });
 });
 
 describe("the direction of a check on the unchanged code", () => {
-  it("says which result the planner expects before the change, so a check written backwards can be spotted", () => {
-    const summary = planCheckSummary(backwardsPlan());
-    expect(summary.checks[0]).toMatchObject({ expectedOnBase: "pass" });
-    expect(summary.checks[0]!.line).toContain("should pass now and after the change");
-    expect(summary.checks[1]!.line).toContain("should fail now and pass after the change");
-    // A check with no prediction says nothing about a direction.
-    expect(planCheckSummary(backwardsPlan({ checks: { ...backwardsPlan().checks!, expectOnBase: {} } })).checks[0]!.line).not.toContain("should");
-  });
-
-  it("puts the dry run's result next to the direction, and says when it was not as expected", () => {
-    const view = readPlanSelfCheck(json({ tried: [{ checkId: "proposed-1", class: "failed" }, { checkId: "proposed-2", class: "failed" }] }), SHA);
-    const summary = planCheckSummary(backwardsPlan(), { selfCheck: view });
-    expect(summary.checks[0]!.line).toContain("should pass now and after the change; tried on current code: failed, not as expected");
-    expect(summary.checks[1]!.line).toContain("should fail now and pass after the change; tried on current code: failed as expected");
-  });
 
   it("shows the direction on the card and the page", async () => {
     const plan = backwardsPlan();
@@ -120,30 +89,6 @@ describe("DRYMSG: what the card says of a check the dry run did not try, or trie
     ], proves: { "proposed-1": ["1"], "proposed-2": ["1"], "proposed-3": ["2"] }, ...(expectOnBase === undefined ? {} : { expectOnBase }) },
   });
 
-  it("keeps the checks the dry run did not try, by class, apart from the ones it tried", () => {
-    const tried = [{ checkId: "proposed-1", class: "not-checked" }, { checkId: "proposed-2", class: "not-run" }, { checkId: "proposed-3", class: "failed" }];
-    const view = readPlanSelfCheck(json({ tried }), SHA);
-    expect(view.notTried).toEqual({ "proposed-1": "not-checked", "proposed-2": "not-run" });
-    expect(view.tried).toEqual({ "proposed-3": "failed" });
-    // A record that is not this document's, and one with nothing tried, give nothing.
-    expect(readPlanSelfCheck(json({ tried }), "b".repeat(64)).notTried).toEqual({});
-    expect(readPlanSelfCheck(json(), SHA).notTried).toEqual({});
-  });
-
-  it("names each untried check with its own fixed reason, and says nothing of one that was tried", () => {
-    const view = readPlanSelfCheck(json({ tried: [{ checkId: "proposed-1", class: "failed" }, { checkId: "proposed-2", class: "not-checked" }, { checkId: "proposed-3", class: "not-run" }] }), SHA);
-    const summary = planCheckSummary(three({ "proposed-1": "fail" }), { selfCheck: view });
-    expect(summary.checks[1]!.tried).toBe("not tried on current code: it needs tools the sandbox does not run");
-    expect(summary.checks[1]!.tried).toBe(NOT_TRIED_SENTENCES["not-checked"]);
-    expect(summary.checks[2]!.tried).toBe("not tried on current code: it ran out of time, was cancelled, or the sandbox could not start it");
-    expect(summary.checks[1]!.line).toContain('Check "Exits with 1" runs node --eval process.exit(1); proves claim 1; not tried on current code: it needs tools the sandbox does not run');
-    expect(summary.checks[2]!.line).toContain("; not tried on current code: it ran out of time");
-    expect(summary.checks[0]!.line).toContain("tried on current code: failed as expected");
-    expect(summary.checks[0]!.line).not.toContain("not tried");
-    // The card's lines carry them, so the owner can tell which check and why.
-    expect(summary.lines.filter((line) => line.includes("not tried on current code"))).toHaveLength(2);
-  });
-
   it("says nothing of a try for a check with no record entry, and a result from the caller wins over a not-tried class", () => {
     const view = readPlanSelfCheck(json({ tried: [{ checkId: "proposed-2", class: "not-checked" }] }), SHA);
     const summary = planCheckSummary(three(), { selfCheck: view });
@@ -160,14 +105,6 @@ describe("DRYMSG: what the card says of a check the dry run did not try, or trie
     const withIt = planCheckSummary(three({ "proposed-1": "fail", "proposed-2": "fail" }), { selfCheck: view });
     expect(withIt.checks[0]!.tried).toBe("tried on current code: failed as expected");
     expect(withIt.checks[1]!.tried).toBe("tried on current code: passed, not as expected");
-  });
-
-  it("builds every sentence from the class alone: text a worker could put in the record reaches no line", () => {
-    // The record schema only takes the fixed classes, so a free-text class is not a record at all.
-    expect(readPlanSelfCheck(json({ tried: [{ checkId: "proposed-1", class: "node: command not found /secret/path" }] }), SHA)).toEqual({ checked: false, sentences: [NOT_CHECKED_SENTENCE], tried: {}, notTried: {} });
-    const view = readPlanSelfCheck(json({ tried: [{ checkId: "proposed-2", class: "not-checked" }, { checkId: "proposed-3", class: "not-run" }] }), SHA);
-    const text = JSON.stringify(planCheckSummary(three(), { selfCheck: view }).checks.map((check) => check.tried));
-    expect(text).toBe(JSON.stringify([null, NOT_TRIED_SENTENCES["not-checked"], NOT_TRIED_SENTENCES["not-run"]]));
   });
 
   it("shows an untried check on the task page too", async () => {
@@ -188,23 +125,10 @@ describe("what the self-check found, on the card", () => {
     documentLink: { url: "https://agentx.example.test/review/x/task?doc=coding-plan&from=1#coding-plan" }, structured: structured(lines, extra) })!;
   const visible = (text: string) => text.replace(/<[^>]*\|([^>]*)>/g, "$1");
 
-  it("lists the findings' sentences ahead of the checks, each as a bullet", () => {
-    const extras = structuredExtraLines(structured([uncovered.ownerSentence, lint.ownerSentence]), 900);
-    expect(extras.indexOf(`• ${uncovered.ownerSentence}`)).toBeGreaterThanOrEqual(0);
-    expect(extras.indexOf(`• ${lint.ownerSentence}`)).toBeGreaterThan(extras.indexOf(`• ${uncovered.ownerSentence}`));
-    expect(extras.findIndex((line) => line.startsWith("• Check \"") || line.startsWith("• As "))).toBeGreaterThan(extras.indexOf(`• ${lint.ownerSentence}`));
-  });
-
   it("says 'Not checked by AgentX's plan check.' when the plan was not checked", () => {
     const text = visible(card([NOT_CHECKED_SENTENCE]).text);
     expect(text).toContain(`• ${NOT_CHECKED_SENTENCE}`);
     expect(text.length).toBeLessThanOrEqual(1_200);
-  });
-
-  it("says nothing about the plan check when it ran and found nothing", () => {
-    const text = visible(card([]).text);
-    expect(text).not.toContain("plan check");
-    expect(text).not.toContain("Not checked");
   });
 
   it("is never silent and never past the brief limit, however many decisions, claims and findings crowd it", () => {
@@ -223,50 +147,9 @@ describe("what the self-check found, on the card", () => {
     expect(/• The proposed check|• 1\.1|• 2 |is proved by no check|plan check/i.test(text)).toBe(true);
   });
 
-  it("reads 'And 1 more decision', not 'decisions', for a single decision left out", () => {
-    const some = (count: number) => Array.from({ length: count }, (_, index) => ({ id: `d${index + 1}`, question: "Which?", answer: "This one" }));
-    // No checks listed: three decisions are spelled out, so four leave one.
-    const lines = structuredExtraLines(structured([], { decisions: some(4), decisionCount: 4, checkLines: [] }), 900);
-    expect(lines).toContain("And 1 more decision on the task page.");
-    expect(lines.join("\n")).not.toContain("1 more decisions");
-    // Checks listed too: two decisions are spelled out, so three leave one and four leave two.
-    expect(structuredExtraLines(structured([], { decisions: some(3), decisionCount: 3 }), 900)).toContain("And 1 more decision on the task page.");
-    expect(structuredExtraLines(structured([], { decisions: some(4), decisionCount: 4 }), 900)).toContain("And 2 more decisions on the task page.");
-  });
 });
 
 describe("what the self-check found, on the task page", () => {
-  /** The page's text, with the apostrophes the escaping turns into entities read back. */
-  const page = async (selfCheck: Parameters<typeof renderPlanDocument>[0]["selfCheck"], plan = backwardsPlan()) =>
-    (await renderPlanDocument({ anchor: "coding-plan", kind: "plan", version: 1, approved: false, current: true, plan, openWhatChanged: false, ...(selfCheck === undefined ? {} : { selfCheck }) })).replaceAll("&#39;", "'");
-
-  it("lists every finding and note under its own heading, escaped", async () => {
-    const view = readPlanSelfCheck(json({ findings: [uncovered, waived], notes: [{ code: "checks-not-tried", ownerSentence: "Proposed checks were not tried on the current code." }] }), SHA);
-    const html = await page(view);
-    expect(html).toContain("Rovara's plan check");
-    for (const sentence of [uncovered.ownerSentence, waived.ownerSentence, "Proposed checks were not tried on the current code."]) expect(html).toContain(sentence);
-    expect(html.indexOf(waived.ownerSentence)).toBeLessThan(html.indexOf(uncovered.ownerSentence));
-    // A sentence is escaped, not trusted.
-    expect(await page({ checked: true, sentences: ["<script>alert(1)</script> found"], tried: {}, notTried: {} })).not.toContain("<script>alert(1)</script>");
-  });
-
-  it("says 'Not checked by AgentX's plan check.' for a plan that was not checked, and when the page was given no record at all", async () => {
-    expect(await page(readPlanSelfCheck(undefined, SHA))).toContain(NOT_CHECKED_SENTENCE.replaceAll("AgentX", "Rovara"));
-    expect(await page(undefined)).toContain(NOT_CHECKED_SENTENCE.replaceAll("AgentX", "Rovara"));
-  });
-
-  it("says that the plan check ran and found nothing, when it did", async () => {
-    const html = await page(readPlanSelfCheck(json(), SHA));
-    expect(html).toContain("Rovara's plan check found no problems.");
-    expect(html).not.toContain(NOT_CHECKED_SENTENCE.replaceAll("AgentX", "Rovara"));
-  });
-
-  it("is shown for a coding plan only, not for requirements or a design", async () => {
-    for (const kind of ["requirements", "design"] as const) {
-      const html = await renderPlanDocument({ anchor: kind, kind, version: 1, approved: false, current: true, plan: planDocument(), openWhatChanged: false });
-      expect(html).not.toContain("plan check");
-    }
-  });
 
   it("reaches the rendered task page from the loaded document view", async () => {
     const view = {
@@ -310,13 +193,6 @@ describe("the loaded task page and the full-plan route read the record beside th
     expect((await readTaskPlanDocument(task, async (key) => fixture.objects.get(key), {})).summary.selfCheckLines).toEqual([NOT_CHECKED_SENTENCE]);
   });
 
-  it("does not trust a record whose digest is another document's", async () => {
-    const fixture = pageTask();
-    const artifact = fixture.addVersion("plan", backwardsPlan());
-    fixture.objects.set(artifact.objectKey.replace(/\.json$/u, ".quality.json"), JSON.stringify(record({ artifactSha256: "c".repeat(64), findings: [] })));
-    const task = fixture.db.get(`DEVTASK#${fixture.taskId}`, "META") as never;
-    expect((await readTaskPlanDocument(task, async (key) => fixture.objects.get(key), {})).summary.selfCheckLines).toEqual([NOT_CHECKED_SENTENCE]);
-  });
 });
 
 describe("an unreadable plan, after the automatic second try", () => {

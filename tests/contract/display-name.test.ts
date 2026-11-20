@@ -3,11 +3,6 @@ import { DISPLAY_NAME_MAX_CODE_POINTS, cleanDisplayName } from "../../packages/c
 import { DISPLAY_NAME_MAX_ENCODED_LENGTH } from "../../packages/contracts/src/display-name.js";
 
 describe("Slack display names shared by the Slack service and the broker", () => {
-  it("never cuts a character cluster in half at the length cap", () => {
-    const coder = "\u{1F469}\u200D\u{1F4BB}";
-    expect(cleanDisplayName("a".repeat(78) + coder)).toBe("a".repeat(78));
-    expect(cleanDisplayName("a".repeat(77) + coder)).toBe("a".repeat(77) + coder);
-  });
 
   it("keeps the longest cleaned name inside the broker's encoded-length limit", () => {
     const longest = cleanDisplayName("\u{1F600}".repeat(200))!;

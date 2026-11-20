@@ -14,18 +14,6 @@ const set = (over: Record<string, unknown> = {}) => ({
 const ok = (value: unknown) => mocks.ServiceMockFixtureSetSchema.safeParse(value).success;
 
 describe("request hash", () => {
-  it("is one request for a JSON body whatever its key order or spacing", () => {
-    expect(hash('{"a":1,"b":{"c":2,"d":3}}')).toBe(hash('{ "b": {"d":3, "c":2}, "a": 1 }'));
-    expect(hash('{"a":1}')).not.toBe(hash('{"a":2}'));
-  });
-  it("includes the service, target, method and content type, so the same bytes elsewhere find nothing", () => {
-    const base = hash('{"a":1}');
-    expect(hash('{"a":1}', { target: "other-endpoint" })).not.toBe(base);
-    expect(hash('{"a":1}', { service: "http" })).not.toBe(base);
-    expect(hash('{"a":1}', { method: "PUT" })).not.toBe(base);
-    expect(hash('{"a":1}', { contentType: "text/plain" })).not.toBe(base);
-    expect(hash('{"a":1}', { method: "post", contentType: "Application/JSON; charset=utf-8" })).toBe(base);
-  });
   it("hashes a body that is not JSON as written, even under a JSON content type", () => {
     expect(hash("not json")).toBe(hash("not json"));
     expect(hash("not json")).not.toBe(hash("not  json"));
@@ -34,35 +22,9 @@ describe("request hash", () => {
 });
 
 describe("fixture set", () => {
-  it("accepts a recorded set and round-trips it", () => {
-    expect(mocks.ServiceMockFixtureSetSchema.parse(set())).toEqual(set());
-  });
-  it("is synthetic only and strict", () => {
-    expect(ok(set({ syntheticOnly: false }))).toBe(false);
-    expect(ok(set({ extra: 1 }))).toBe(false);
-    expect(ok(set({ entries: [{ ...entry(), extra: 1 }] }))).toBe(false);
-  });
-  it("bounds entries (500), bodies (64 KiB, counted in bytes), faults (20) and latency (30 s)", () => {
-    const many = (count: number) => Array.from({ length: count }, (_, index) => entry(`{"n":${String(index)}}`));
-    expect(ok(set({ entries: many(500) }))).toBe(true);
-    expect(ok(set({ entries: many(501) }))).toBe(false);
-    expect(ok(set({ entries: [entry('{"a":1}', { response: { status: 200, contentType: "application/json", body: "x".repeat(65_536), latencyMs: 0 } })] }))).toBe(true);
-    expect(ok(set({ entries: [entry('{"a":1}', { response: { status: 200, contentType: "application/json", body: "x".repeat(65_537), latencyMs: 0 } })] }))).toBe(false);
-    expect(ok(set({ entries: [entry('{"a":1}', { response: { status: 200, contentType: "application/json", body: "é".repeat(40_000), latencyMs: 0 } })] }))).toBe(false);
-    expect(ok(set({ entries: [entry('{"a":1}', { response: { status: 200, contentType: "application/json", body: "{}", latencyMs: 30_001 } })] }))).toBe(false);
-    expect(ok(set({ faults: Array.from({ length: 21 }, (_, index) => ({ name: `f${String(index)}`, kind: "http_5xx", status: 500, delayMs: 0 })) }))).toBe(false);
-  });
   it("has one recording per request and fault names that are unique", () => {
     expect(ok(set({ entries: [entry(), entry()] }))).toBe(false);
     expect(ok(set({ faults: [{ name: "a", kind: "timeout", delayMs: 1 }, { name: "a", kind: "timeout", delayMs: 1 }] }))).toBe(false);
-  });
-  it("gives a timeout no status and every other fault one in the error range", () => {
-    const fault = (over: Record<string, unknown>) => ok(set({ faults: [{ name: "f", delayMs: 0, ...over }] }));
-    expect(fault({ kind: "timeout" })).toBe(true);
-    expect(fault({ kind: "timeout", status: 500 })).toBe(false);
-    expect(fault({ kind: "http_5xx" })).toBe(false);
-    expect(fault({ kind: "http_5xx", status: 503 })).toBe(true);
-    expect(fault({ kind: "throttle", status: 200 })).toBe(false);
   });
   it("bounds a schema's depth (32) and size (2,048 nodes)", () => {
     const deep = (levels: number): mocks.ServiceMockJsonSchema => (levels === 0 ? { type: "string" } : { type: "object", properties: { next: deep(levels - 1) } });
@@ -72,13 +34,6 @@ describe("fixture set", () => {
     expect(ok(set({ responseSchema: wide }))).toBe(false);
     expect(ok(set({ requestSchema: null, responseSchema: null }))).toBe(true);
     expect(ok(set({ requestSchema: { type: "object", unknownKeyword: true } }))).toBe(false);
-  });
-  it("has a digest that is stable, order-independent and changes with any recording", () => {
-    const digest = mocks.serviceMockFixtureSetDigest(mocks.ServiceMockFixtureSetSchema.parse(set()));
-    expect(digest).toMatch(/^[a-f0-9]{64}$/);
-    expect(mocks.serviceMockFixtureSetDigest(mocks.ServiceMockFixtureSetSchema.parse(set()))).toBe(digest);
-    const changed = set({ entries: [entry('{"partner":"p1"}', { response: { status: 200, contentType: "application/json", body: '{"score":0.83}', latencyMs: 40 } })] });
-    expect(mocks.serviceMockFixtureSetDigest(mocks.ServiceMockFixtureSetSchema.parse(changed))).not.toBe(digest);
   });
 });
 

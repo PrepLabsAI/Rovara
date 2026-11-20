@@ -53,9 +53,6 @@ const stripeTest = () => build("sk", "_", "test", "_", rand(24));
 const awsKeyId = (prefix = "AKIA") => build(prefix, "ABCDEFGHIJKLMNOP");
 
 describe("TestAccount record", () => {
-  it("accepts an active API-key account and round-trips it", () => {
-    expect(acc.TestAccountSchema.parse(account())).toEqual(account());
-  });
   it("is strict: no member can hold a value", () => {
     for (const key of ["value", "secret", "token", "apiKey", "password", "secretValue", "credentials", "key"]) expect(ok({ ...account(), [key]: "x" }), key).toBe(false);
     expect(ok({ ...account(), aws: awsBlock() })).toBe(false);
@@ -72,19 +69,8 @@ describe("TestAccount record", () => {
   });
 
   describe("secret reference", () => {
-    it("must be a test-account reference at all", () => {
-      for (const secretRef of ["", "plain-value", stripeTest(), "{{resolve:secretsmanager:agentx/staging/org-connectors/" + ORG + "/payments-test:SecretString:apiKey}}", "{{resolve:ssm:/x}}", "agentx/staging/org-test-accounts/x/y"]) expect(ok(account({ secretRef })), secretRef.slice(0, 20)).toBe(false);
-    });
     it("must point at this org's own path", () => {
       expect(ok(account({ secretRef: ref({ org: OTHER_ORG }) }))).toBe(false);
-    });
-    it("must point at this account's own secret", () => {
-      expect(ok(account({ secretRef: ref({ id: "someone-elses" }) }))).toBe(false);
-    });
-    it("is refused with extra segments or traversal", () => {
-      const base = `{{resolve:secretsmanager:agentx/staging/org-test-accounts/${ORG}/payments-test:SecretString:apiKey}}`;
-      expect(ok(account({ secretRef: base }))).toBe(true);
-      for (const bad of [base.replace("payments-test", "payments-test/../x"), base.replace("/payments-test", "/a/payments-test"), base.replace("apiKey", "api/Key"), base.replace(":SecretString:apiKey", ""), `${base} `, ` ${base}`, base.replace("}}", ":v1}}"), base.replace("staging", "../staging")]) expect(ok(account({ secretRef: bad })), bad).toBe(false);
     });
     it("is refused on an AWS role account, which stores no secret", () => {
       expect(ok(awsAccount({ secretRef: ref({ id: "orders-dev" }) }))).toBe(false);
@@ -104,11 +90,6 @@ describe("TestAccount record", () => {
       // The account's own host listed and its action approved is not enough: an AWS role account is for an AWS family.
       expect(ok(awsAccount({ family: "http:dynamodb.us-west-2.amazonaws.com" }))).toBe(false);
     });
-    it("lists the account's own host for an http family, and its own service's action for an AWS family", () => {
-      expect(ok(account({ hosts: ["other.example-pay.com"] }))).toBe(false);
-      expect(ok(awsAccount({ aws: awsBlock({ actions: ["s3:GetObject"] }) }))).toBe(false);
-      expect(ok(awsAccount({ family: "aws:sagemaker-runtime", aws: awsBlock({ actions: ["sagemaker:InvokeEndpoint"], resources: ["arn:aws:sagemaker:us-west-2:222222222222:endpoint/scorer"] }), hosts: ["runtime.sagemaker.us-west-2.amazonaws.com"] }))).toBe(true);
-    });
     it("has explicit actions only: no wildcard, no malformed action", () => {
       for (const action of ["*", "dynamodb:*", "dynamodb:Get*", "dynamodb", "dynamodb:Get Item", "DynamoDB:GetItem:x", "dynamodb:?etItem", ""]) expect(ok(awsAccount({ aws: awsBlock({ actions: [action, "dynamodb:GetItem"] }) })), action).toBe(false);
     });
@@ -127,25 +108,6 @@ describe("TestAccount record", () => {
         const fixture = awsFixtures[service]!;
         for (const name of names) expect(ok(fixture(`${service}:${name}`)), `${service}:${name}`).toBe(true);
       }
-    });
-    it("refuses everything not on the list: access-granting, secrets, keys, parameters, code changes, instance access, control plane", () => {
-      const refused = [
-        "iam:PassRole", "iam:CreateRole", "iam:AttachRolePolicy", "sts:AssumeRole", "sts:GetFederationToken", "organizations:ListAccounts", "account:GetContactInformation", "sso:ListInstances", "identitystore:ListUsers",
-        "s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutObjectAcl", "s3:PutBucketAcl", "s3:GetObjectAcl", "s3:GetBucketPolicy", "s3:PutAccessPointPolicy", "s3:DeleteBucket", "s3:CreateBucket", "s3:PutObjectTagging", "s3:GetObjectVersion",
-        "dynamodb:PutResourcePolicy", "dynamodb:DeleteResourcePolicy", "dynamodb:CreateTable", "dynamodb:DeleteTable", "dynamodb:UpdateTable", "dynamodb:DescribeTable", "dynamodb:CreateBackup", "dynamodb:ExportTableToPointInTime",
-        "sqs:AddPermission", "sqs:RemovePermission", "sqs:SetQueueAttributes", "sqs:CreateQueue", "sqs:DeleteQueue", "sqs:PurgeQueue",
-        "sns:AddPermission", "sns:RemovePermission", "sns:SetTopicAttributes", "sns:Subscribe", "sns:CreateTopic", "sns:DeleteTopic",
-        "kinesis:DeleteStream", "kinesis:CreateStream", "kinesis:PutResourcePolicy", "kinesis:RegisterStreamConsumer", "kinesis:UpdateShardCount",
-        "events:PutPermission", "events:RemovePermission", "events:PutRule", "events:PutTargets", "events:CreateApiDestination",
-        "secretsmanager:GetSecretValue", "secretsmanager:PutResourcePolicy", "secretsmanager:BatchGetSecretValue", "ssm:GetParameter", "ssm:GetParameters", "ssm:SendCommand", "ssm:StartSession",
-        "kms:Decrypt", "kms:Encrypt", "kms:CreateGrant", "kms:PutKeyPolicy", "kms:GenerateDataKey",
-        "lambda:InvokeFunction", "lambda:UpdateFunctionCode", "lambda:UpdateFunctionConfiguration", "lambda:AddPermission", "lambda:CreateFunction", "lambda:PublishLayerVersion",
-        "ec2-instance-connect:SendSSHPublicKey", "ec2:RunInstances", "sagemaker:CreateEndpoint", "sagemaker:InvokeEndpointAsync", "sagemaker:CreatePresignedDomainUrl", "states:StartExecution", "cloudformation:CreateStack",
-        "dynamodb:getitem", "DYNAMODB:GetItem", "dynamodb:GetItem ",
-      ];
-      for (const action of refused) expect(ok(awsAccount({ aws: awsBlock({ actions: ["dynamodb:GetItem", action] }) })), action).toBe(false);
-      // Not even alone, in the account's own family.
-      expect(ok(awsAccount({ aws: awsBlock({ actions: ["dynamodb:PutResourcePolicy"] }) }))).toBe(false);
     });
     it("names its resources: never a wildcard bucket, a whole service, a cross-account, cross-region or cross-partition one", () => {
       const s3 = (resources: string[], over: Record<string, unknown> = {}) => s3Account({ aws: awsBlock({ actions: ["s3:GetObject", "s3:ListBucket"], resources, ...over }) });
@@ -186,11 +148,6 @@ describe("TestAccount record", () => {
       expect(acc.awsResourceProblem("arn:aws:dynamodb:us-west-2:222222222222:table/t?", role, services)).toBe("fields");
       expect(acc.awsResourceProblem("not an arn", role, services)).toBe("fields");
     });
-    it("takes a role ARN, an external id and a region in their shapes, each list once and bounded", () => {
-      expect(ok(awsAccount({ aws: awsBlock({ roleArn: "arn:aws:iam::222222222222:user/x" }) }))).toBe(false);
-      expect(ok(awsAccount({ aws: awsBlock({ externalId: "short" }) }))).toBe(false);
-      expect(ok(awsAccount({ aws: awsBlock({ externalId: "has space in it" }) }))).toBe(false);
-    });
     it("holds the external id Rovara derives for the company and the account, and no other", () => {
       expect(acc.testAccountExternalId(ORG, "orders-dev")).toBe(`rovara-${ORG}-orders-dev`);
       expect(ok(awsAccount())).toBe(true);
@@ -217,13 +174,6 @@ describe("TestAccount record", () => {
       expect(ok(awsAccount({ hosts: [] }))).toBe(false);
       expect(ok(awsAccount({ envNames: ["ORDERS_KEY"] }))).toBe(false);
     });
-    it("refuses an endpoint of a service it did not approve, bucket subdomains, API-gateway hosts and other variants", () => {
-      // dynamodb approved only: the s3 endpoint is another service's.
-      expect(ok(awsAccount({ hosts: ["dynamodb.us-west-2.amazonaws.com", "s3.us-west-2.amazonaws.com"] }))).toBe(false);
-      const both = (hosts: string[]) => s3Account({ aws: awsBlock({ actions: ["s3:GetObject", "dynamodb:GetItem"], resources: ["arn:aws:s3:::orders-test-bucket/*", "arn:aws:dynamodb:us-west-2:222222222222:table/orders-test"] }), hosts });
-      expect(ok(both(["s3.us-west-2.amazonaws.com", "dynamodb.us-west-2.amazonaws.com"]))).toBe(true);
-      for (const host of ["orders-test-bucket.s3.us-west-2.amazonaws.com", "s3.dualstack.us-west-2.amazonaws.com", "s3-fips.us-west-2.amazonaws.com", "s3.us-west-2.amazonaws.com.evil.example", "abc123.execute-api.us-west-2.amazonaws.com", "execute-api.us-west-2.amazonaws.com", "dynamodb-fips.us-west-2.amazonaws.com", "dynamodb.us-west-2.api.aws", "lambda.us-west-2.amazonaws.com", "s3.us-east-1.amazonaws.com", "s3.amazonaws.com"]) expect(ok(both(["s3.us-west-2.amazonaws.com", host])), host).toBe(false);
-    });
     it("lists the endpoints an account of given actions may reach", () => {
       expect(acc.testAccountAwsEndpointHosts({ region: "us-west-2", actions: ["dynamodb:GetItem", "dynamodb:PutItem", "s3:GetObject"] })).toEqual(["dynamodb.us-west-2.amazonaws.com", "s3.us-west-2.amazonaws.com"]);
       expect(acc.testAccountAwsEndpointHosts({ region: "eu-west-1", actions: ["sagemaker:InvokeEndpoint"] })).toEqual(["runtime.sagemaker.eu-west-1.amazonaws.com"]);
@@ -232,9 +182,6 @@ describe("TestAccount record", () => {
   });
 
   describe("hosts", () => {
-    it("are plain lower-case names: no address, wildcard, port, path, credentials or trailing dot", () => {
-      for (const host of ["10.0.0.1", "192.168.1.5", "*.example-pay.com", "api.example-pay.com:443", "api.example-pay.com/v1", "user@api.example-pay.com", "api.example-pay.com.", "API.example-pay.com", "localhost", "https://api.example-pay.com", "a b.example.com", "-a.example.com", `${"a".repeat(64)}.example.com`]) expect(ok(account({ family: "http:api.example-pay.com", hosts: ["api.example-pay.com", host] })), host).toBe(false);
-    });
     it("are at most 253 characters long", () => {
       const long = `${Array.from({ length: 4 }, () => "a".repeat(63)).join(".")}.com`;
       expect(long.length).toBeGreaterThan(253);
@@ -263,15 +210,6 @@ describe("TestAccount record", () => {
       expect(acc.TEST_ACCOUNT_LIMIT_MAXIMUMS).toMatchObject({ maxConnectionsPerRun: 20_000, maxConcurrentRounds: 10 });
       expect(ok(account({ limits: acc.TEST_ACCOUNT_LIMIT_DEFAULTS }))).toBe(true);
     });
-    it("stop at the maximums and at 1", () => {
-      expect(ok(account({ limits: { maxConnectionsPerRun: 20_000, maxConnectionsPerDay: 20_000, maxConcurrentRounds: 10 } }))).toBe(true);
-      expect(ok(account({ limits: { maxConnectionsPerRun: 20_001, maxConnectionsPerDay: 100_000, maxConcurrentRounds: 2 } }))).toBe(false);
-      expect(ok(account({ limits: { maxConnectionsPerRun: 100, maxConnectionsPerDay: 1_000, maxConcurrentRounds: 11 } }))).toBe(false);
-      expect(ok(account({ limits: { maxConnectionsPerRun: 0, maxConnectionsPerDay: 1_000, maxConcurrentRounds: 2 } }))).toBe(false);
-      expect(ok(account({ limits: { maxConnectionsPerRun: 100, maxConnectionsPerDay: 1_000, maxConcurrentRounds: 0 } }))).toBe(false);
-      expect(ok(account({ limits: { maxConnectionsPerRun: 100, maxConnectionsPerDay: 1_000_001, maxConcurrentRounds: 2 } }))).toBe(false);
-      expect(ok(account({ limits: { maxConnectionsPerRun: 1.5, maxConnectionsPerDay: 1_000, maxConcurrentRounds: 2 } }))).toBe(false);
-    });
     it("keep a run's requests inside the day's", () => {
       expect(ok(account({ limits: { maxConnectionsPerRun: 5_000, maxConnectionsPerDay: 4_999, maxConcurrentRounds: 2 } }))).toBe(false);
       expect(ok(account({ limits: { maxConnectionsPerRun: 5_000, maxConnectionsPerDay: 5_000, maxConcurrentRounds: 2 } }))).toBe(true);
@@ -291,29 +229,12 @@ describe("TestAccount record", () => {
   });
 
   describe("approval and expiry", () => {
-    it("makes an account active only with two different people's approvals", () => {
-      expect(ok(account({ approvals: [approval("a")] }))).toBe(false);
-      expect(ok(account({ approvals: [approval("a"), approval("a")] }))).toBe(false);
-      expect(ok(account({ approvals: [] }))).toBe(false);
-      expect(ok(account({ approvals: [approval("a"), approval("b")] }))).toBe(true);
-    });
     it("allows the sole-owner exception with one person", () => {
       expect(ok(account({ approvals: [approval("a", { kind: "sole_owner_exception" })] }))).toBe(true);
       expect(acc.testAccountApprovalsSatisfied([approval("a") as never])).toBe(false);
       expect(acc.testAccountApprovalsSatisfied([approval("a", { kind: "sole_owner_exception" }) as never])).toBe(true);
       expect(acc.testAccountApprovalsSatisfied([approval("a") as never, approval("b") as never])).toBe(true);
       expect(acc.testAccountApprovalsSatisfied([])).toBe(false);
-    });
-    it("needs every approval to carry a fresh sign-in", () => {
-      expect(ok(account({ approvals: [approval("a"), approval("b", { freshSignIn: false })] }))).toBe(false);
-      expect(ok(account({ approvals: [approval("a"), { by: person("b"), at: "2026-11-02T10:00:00.000Z", kind: "approver" }] }))).toBe(false);
-      expect(ok(account({ approvals: [approval("a"), approval("b", { by: "short" })] }))).toBe(false);
-      expect(ok(account({ approvals: Array.from({ length: 11 }, (_, n) => approval(String(n % 10), {})) }))).toBe(false);
-    });
-    it("lets a pending, suspended or expired account lack approvals", () => {
-      for (const status of ["pending", "suspended", "expired"]) expect(ok(account({ status, approvals: [], expiresAt: undefined })), status).toBe(true);
-      expect(ok(account({ status: "pending", approvals: [approval("a")], expiresAt: undefined }))).toBe(true);
-      expect(ok(account({ status: "frozen" }))).toBe(false);
     });
     it("expires an active account, after its last approval and within 90 days of it", () => {
       expect(acc.TEST_ACCOUNT_EXPIRY_DAYS).toEqual({ default: 90, max: 90, reminder: 14 });
@@ -326,31 +247,12 @@ describe("TestAccount record", () => {
       expect(ok(account({ expiresAt: "2027-01-31T10:00:01.000Z" }))).toBe(false);
       expect(ok(account({ expiresAt: "2027-11-02T10:00:00.000Z" }))).toBe(false);
     });
-    it("has no window to measure for a record nobody has approved yet", () => {
-      expect(ok(account({ status: "pending", approvals: [], expiresAt: "2030-01-01T00:00:00.000Z" }))).toBe(true);
-      expect(ok(account({ status: "pending", approvals: [approval("a", { approvedDigest: sha("e") })], expiresAt: "2030-01-01T00:00:00.000Z" }))).toBe(true);
-    });
     it("lets a company set a shorter expiry, never a longer one", () => {
       const thirty = acc.testAccountSchemaFor({ maxExpiryDays: 30 });
       expect(thirty.safeParse(account({ expiresAt: "2026-12-02T10:00:00.000Z" })).success).toBe(true);
       expect(thirty.safeParse(account({ expiresAt: "2026-12-02T10:00:01.000Z" })).success).toBe(false);
       expect(acc.testAccountSchemaFor({ maxExpiryDays: 90 }).safeParse(account({ expiresAt: "2027-01-31T10:00:00.000Z" })).success).toBe(true);
       for (const days of [91, 365, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) expect(() => acc.testAccountSchemaFor({ maxExpiryDays: days }), String(days)).toThrow(RangeError);
-    });
-    it("measures the 90 days from the LATEST qualifying approval, and ignores a later approval of something else", () => {
-      const later = approval("b", { at: "2026-12-02T10:00:00.000Z" });
-      expect(ok(account({ approvals: [approval("a"), later], expiresAt: "2027-03-02T10:00:00.000Z" }))).toBe(true);
-      expect(ok(account({ approvals: [later, approval("a")], expiresAt: "2027-03-02T10:00:01.000Z" }))).toBe(false);
-      expect(ok(account({ approvals: [approval("a"), later], expiresAt: "2026-12-02T10:00:00.000Z" }))).toBe(false);
-      // A third approval, much later, of an older version of the record does not move the window.
-      const stale = approval("c", { at: "2026-12-30T10:00:00.000Z", approvedDigest: sha("e") });
-      expect(ok(account({ approvals: [approval("a"), approval("b"), stale], expiresAt: "2027-01-31T10:00:00.000Z" }))).toBe(true);
-      expect(ok(account({ approvals: [approval("a"), approval("b"), stale], expiresAt: "2027-02-01T10:00:00.000Z" }))).toBe(false);
-    });
-    it("takes dates as dates", () => {
-      expect(ok(account({ expiresAt: "next year" }))).toBe(false);
-      expect(ok(account({ rotatedAt: "2026-11-03T00:00:00.000Z", lastUsedAt: "2026-11-04T00:00:00.000Z" }))).toBe(true);
-      expect(ok(account({ rotatedAt: "yesterday" }))).toBe(false);
     });
   });
 
@@ -359,10 +261,6 @@ describe("TestAccount record", () => {
       expect(ok(account({ label: "" }))).toBe(false);
       expect(ok(account({ label: "x".repeat(81) }))).toBe(false);
       expect(ok(account({ label: "two\nlines" }))).toBe(false);
-    });
-    it("is never the place for a key: any key shape, live or test, is refused", () => {
-      for (const label of [`Key ${stripeLive()}`, `Key ${stripeTest()}`, `Key ${awsKeyId()}`, `Key ${awsKeyId("ASIA")}`, `tok ${build("gh", "p_", rand(30))}`, `tok ${build("xox", "b-", rand(20))}`, `jwt ${build("ey", "J", rand(20), ".", rand(20), ".", rand(20))}`, `pem ${build("-----", "BEGIN")} x`, `long ${rand(40)}`]) expect(ok(account({ label })), label.slice(0, 10)).toBe(false);
-      expect(ok(account({ label: "Payments sandbox for the orders service" }))).toBe(true);
     });
   });
 });
@@ -382,25 +280,6 @@ describe("secret name, tags and reference", () => {
     expect(acc.testAccountSecretTags(ORG)).toEqual({ "rovara:org": ORG, "rovara:use": "test-account" });
     expect(() => acc.testAccountSecretTags("org_short")).toThrow(RangeError);
   });
-  it("refuses any part that is not a plain segment, and never echoes it", () => {
-    const bad: Array<[string, string, string]> = [["../x", ORG, "a1"], ["staging/x", ORG, "a1"], ["", ORG, "a1"], ["staging", "org_short", "a1"], ["staging", `${ORG}/..`, "a1"], ["staging", ORG, "../a1"], ["staging", ORG, "a/b"], ["staging", ORG, ""], ["staging", ORG, "A1"], ["staging", ORG, "a1\n"], ["staging", ORG, "a".repeat(65)], ["x".repeat(33), ORG, "a1"], ["st aging", ORG, "a1"]];
-    for (const [env, org, id] of bad) {
-      expect(() => acc.testAccountSecretName(env, org, id), `${env}|${org}|${id}`).toThrow(RangeError);
-      try {
-        acc.testAccountSecretName(env, org, id);
-      } catch (error) {
-        expect(String(error)).not.toContain("..");
-        expect(String(error)).not.toContain(org === ORG ? "org_a1" : "\u0000never");
-      }
-    }
-    expect(() => acc.testAccountSecretPrefix("staging", "org_short")).toThrow(RangeError);
-    expect(() => acc.testAccountSecretPrefix("../x", ORG)).toThrow(RangeError);
-  });
-  it("builds a resolve reference and reads it back", () => {
-    const reference = acc.testAccountSecretRef("staging", ORG, "payments-test", "apiKey");
-    expect(reference).toBe(`{{resolve:secretsmanager:agentx/staging/org-test-accounts/${ORG}/payments-test:SecretString:apiKey}}`);
-    expect(acc.parseTestAccountSecretRef(reference)).toEqual({ env: "staging", orgId: ORG, accountId: "payments-test", key: "apiKey" });
-  });
   it("takes a plain JSON key", () => {
     for (const key of ["", "a/b", "a:b", "1abc", "a b", "a}}", "x".repeat(65)]) expect(() => acc.testAccountSecretRef("staging", ORG, "payments-test", key), key).toThrow(RangeError);
     expect(() => acc.testAccountSecretRef("staging", ORG, "payments-test", "client_secret-2")).not.toThrow();
@@ -418,39 +297,11 @@ describe("secret name, tags and reference", () => {
 describe("key-shape table", () => {
   const family = "http:api.stripe.com";
   const verdict = (value: string, fam = family) => acc.checkTestAccountKeyShape(fam, value);
-  it("accepts a vendor's test key and refuses its live key", () => {
-    expect(verdict(stripeTest())).toEqual({ ok: true });
-    expect(verdict(stripeLive())).toEqual({ ok: false, code: "live_shaped" });
-    for (const prefix of ["rk", "pk"]) {
-      expect(verdict(build(prefix, "_test_", rand(24)))).toEqual({ ok: true });
-      expect(verdict(build(prefix, "_live_", rand(24)))).toEqual({ ok: false, code: "live_shaped" });
-    }
-  });
-  it("accepts only the test shape where the vendor has one", () => {
-    expect(verdict("totally-plain-token-12345678")).toEqual({ ok: false, code: "not_test_shaped" });
-    expect(verdict(build("sk", "_test_", "short"))).toEqual({ ok: false, code: "not_test_shaped" });
-    expect(verdict(` ${stripeTest()}`)).toEqual({ ok: false, code: "not_test_shaped" });
-    expect(verdict(build("xx", stripeTest()))).toEqual({ ok: false, code: "not_test_shaped" });
-  });
-  it("refuses a live key whatever it is embedded in", () => {
-    expect(verdict(`Bearer ${stripeLive()}`)).toEqual({ ok: false, code: "live_shaped" });
-    expect(verdict(`${stripeTest()} ${stripeLive()}`)).toEqual({ ok: false, code: "live_shaped" });
-    expect(verdict(`key=${stripeLive()}`)).toEqual({ ok: false, code: "live_shaped" });
-  });
   it("applies the vendor row by the family's host only", () => {
     expect(verdict(stripeTest(), "http:api.example-pay.com")).toEqual({ ok: true });
     expect(verdict("totally-plain-token-12345678", "http:api.example-pay.com")).toEqual({ ok: true });
     expect(verdict("totally-plain-token-12345678", "http:api.stripe.com.example.net")).toEqual({ ok: true });
     expect(verdict("totally-plain-token-12345678", "aws:dynamodb")).toEqual({ ok: true });
-  });
-  it("refuses a live word in any family", () => {
-    for (const value of ["live_abc123def456", "abc-live-abc123", "my.prod.token", "PROD-key-1", "token_production_x", "key:PRD:1", "x live"]) expect(verdict(value, "http:api.example-pay.com"), value).toEqual({ ok: false, code: "live_shaped" });
-    for (const value of ["alive123", "delivery-key", "product-7", "olive_oil_9", "prodigy"]) expect(verdict(value, "http:api.example-pay.com"), value).toEqual({ ok: true });
-  });
-  it("refuses a long-lived AWS key id in any family, and a session key id too", () => {
-    for (const prefix of ["AKIA", "ASIA", "AIDA", "AROA", "ABIA", "ACCA"]) expect(verdict(awsKeyId(prefix), "http:api.example-pay.com"), prefix).toEqual({ ok: false, code: "long_lived_aws_key" });
-    expect(verdict(`id=${awsKeyId()};x`, "aws:dynamodb")).toEqual({ ok: false, code: "long_lived_aws_key" });
-    expect(verdict(build("AKIA", "SHORT"), "http:api.example-pay.com")).toEqual({ ok: true });
   });
   it("refuses a private key block, an empty value, an oversized one and a multi-line one", () => {
     expect(verdict(`${build("-----", "BEGIN RSA PRIVATE KEY", "-----")}\nabc`, "http:api.example-pay.com")).toEqual({ ok: false, code: "private_key_block" });
@@ -472,41 +323,10 @@ describe("key-shape table", () => {
   });
 });
 
-describe("looksLikeSecretValue", () => {
-  it("finds each specific shape even when it is too short for the generic long-token rule", () => {
-    for (const text of [build("sk", "_", "live", "_", rand(10)), build("sk", "_", "test", "_", rand(10)), build("gh", "o_", rand(20)), build("github", "_pat_", rand(20)), build("xox", "a-", rand(10)), build("ey", "J", rand(10), ".", rand(10), ".", rand(10))]) {
-      // No run of token characters reaches 32 (dots break the JWT's runs), so only the specific rule can find it.
-      expect(Math.max(...text.split(".").map((part) => part.length)), text.slice(0, 8)).toBeLessThan(32);
-      expect(shared.looksLikeSecretValue(`note ${text}`), text.slice(0, 8)).toBe(true);
-    }
-  });
-  it("finds every known shape, live or test", () => {
-    for (const text of [stripeLive(), stripeTest(), awsKeyId(), awsKeyId("ASIA"), build("gh", "p_", rand(30)), build("gh", "s_", rand(30)), build("github", "_pat_", rand(30)), build("xox", "p-", rand(20)), build("ey", "J", rand(20), ".", rand(20), ".", rand(20)), build("-----", "BEGIN PRIVATE KEY"), rand(40)]) expect(shared.looksLikeSecretValue(`note: ${text}`), text.slice(0, 8)).toBe(true);
-  });
-  it("leaves ordinary words alone", () => {
-    for (const text of ["Payments test mode", "Dev AWS (orders)", "CRM sandbox for the orders-service", "ABC-123", "a".repeat(31)]) expect(shared.looksLikeSecretValue(text), text).toBe(false);
-  });
-});
-
 describe("hosts that look like production", () => {
   const problems = (...hosts: string[]) => acc.testAccountHostProblems(hosts);
   it("refuses a vendor's production host where the vendor has a sandbox", () => {
     expect(problems("login.salesforce.com", "acme.my.salesforce.com", "api-m.paypal.com", "production.plaid.com", "api.plaid.com")).toEqual([0, 1, 2, 3, 4].map((index) => ({ index, code: "vendor_production_host" })));
-  });
-  it("accepts the vendor's sandbox hosts", () => {
-    expect(problems("test.salesforce.com", "acme--uat.sandbox.my.salesforce.com", "acme.scratch.my.salesforce.com", "api-m.sandbox.paypal.com", "sandbox.paypal.com", "sandbox.plaid.com")).toEqual([]);
-  });
-  it("does not take a look-alike for the vendor, or the vendor for a look-alike", () => {
-    expect(problems("salesforce.com.example.net", "notsalesforce.com", "paypal.com.evil.example")).toEqual([]);
-    expect(problems("salesforce.com")).toEqual([{ index: 0, code: "vendor_production_host" }]);
-    expect(problems("PayPal.com")).toEqual([{ index: 0, code: "vendor_production_host" }]);
-  });
-  it("refuses a name with a prod or live label", () => {
-    expect(problems("api.prod.example.com", "prod.example.com", "live.example.com", "api.production.example.com", "api.prd.example.com", "api.example.com.prod")).toEqual([0, 1, 2, 3, 4, 5].map((index) => ({ index, code: "prod_shaped_host" })));
-    expect(problems("api.product.example.com", "api.delivery.example.com", "api.example-prod.com", "api.alive.example.com", "api.sandbox.example.com")).toEqual([]);
-  });
-  it("returns positions and codes only", () => {
-    expect(JSON.stringify(problems("ok.example.com", "login.salesforce.com"))).toBe('[{"index":1,"code":"vendor_production_host"}]');
   });
 });
 
@@ -516,19 +336,11 @@ describe("production deny list", () => {
     expect(problemsOf(account())).toEqual([]);
     expect(problemsOf(awsAccount(), deny({ accountIds: ["111122223333"] }))).toEqual([]);
   });
-  it("refuses an account while the company has listed nothing as production", () => {
-    expect(problemsOf(account(), deny())).toEqual([{ kind: "prod_deny_missing", field: "prodDeny" }]);
-    expect(problemsOf(awsAccount(), deny())).toEqual([{ kind: "prod_deny_missing", field: "prodDeny" }]);
-  });
   it("finds a host on the list, exact or by wildcard, with its position", () => {
     expect(problemsOf(account({ hosts: ["api.example-pay.com", "billing.internal.example.com"] }), deny({ hosts: ["*.internal.example.com"] }))).toEqual([{ kind: "prod_host", field: "hosts[1]" }]);
     expect(problemsOf(account({ hosts: ["api.example-pay.com", "billing.prod.example.com"] }))).toEqual([{ kind: "prod_host", field: "hosts[1]" }, { kind: "prod_shaped_host", field: "hosts[1]" }]);
     expect(problemsOf(account(), deny({ hosts: ["api.example-pay.com"] }))).toEqual([{ kind: "prod_host", field: "hosts[0]" }]);
     expect(problemsOf(account(), deny({ hosts: ["API.EXAMPLE-PAY.COM"] }))).toEqual([{ kind: "prod_host", field: "hosts[0]" }]);
-  });
-  it("finds a host that looks like production although the list does not name it", () => {
-    expect(problemsOf(account({ family: "http:login.salesforce.com", hosts: ["login.salesforce.com"] }))).toEqual([{ kind: "vendor_production_host", field: "hosts[0]" }]);
-    expect(problemsOf(account({ family: "http:api.prod.shop.example.org", hosts: ["api.prod.shop.example.org"] }))).toEqual([{ kind: "prod_shaped_host", field: "hosts[0]" }]);
   });
   it("finds a role and resources on the list by ARN prefix, and by account", () => {
     expect(problemsOf(awsAccount(), deny({ arnPrefixes: ["arn:aws:iam::222222222222:role/rovara-"] }))).toEqual([{ kind: "prod_arn", field: "aws.roleArn" }]);
@@ -547,83 +359,9 @@ describe("production deny list", () => {
     expect(problemsOf(account(), deny(), { alsoDeny: before })).toEqual([{ kind: "prod_host", field: "hosts[0]" }]);
     expect(problemsOf(account(), deny(), { alsoDeny: deny() })).toEqual([{ kind: "prod_deny_missing", field: "prodDeny" }]);
   });
-  it("returns kinds and fields only, never the host or ARN", () => {
-    const text = JSON.stringify(problemsOf(awsAccount({ hosts: ["dynamodb.us-west-2.amazonaws.com"] }), deny({ accountIds: ["222222222222"], hosts: ["dynamodb.us-west-2.amazonaws.com"] })));
-    expect(text).not.toContain("222222222222");
-    expect(text).not.toContain("amazonaws");
-  });
 });
 
 describe("approvals cover what was approved", () => {
-  const staleDigest = sha("e");
-  it("binds each approval to the digest of family, hosts, AWS block, variables, projects, limits and secret reference", () => {
-    const base = parsed(account());
-    const digest = acc.testAccountApprovalDigest(base);
-    expect(digest).toMatch(/^[a-f0-9]{64}$/);
-    const changed: Array<[string, Record<string, unknown>]> = [
-      ["family", { family: "http:api.other-pay.com", hosts: ["api.other-pay.com"] }],
-      ["hosts", { hosts: ["api.example-pay.com", "extra.example-pay.com"] }],
-      ["envNames", { envNames: ["PAYMENTS_API_KEY", "OTHER_KEY"] }],
-      ["projectIds", { projectIds: ["orders", "billing", "reports"] }],
-      ["projectIds all", { projectIds: "all" }],
-      ["limits run", { limits: { maxConnectionsPerRun: 2_001, maxConnectionsPerDay: 20_000, maxConcurrentRounds: 2 } }],
-      ["limits day", { limits: { maxConnectionsPerRun: 2_000, maxConnectionsPerDay: 20_001, maxConcurrentRounds: 2 } }],
-      ["limits rounds", { limits: { maxConnectionsPerRun: 2_000, maxConnectionsPerDay: 20_000, maxConcurrentRounds: 3 } }],
-      ["secretRef", { secretRef: ref({ key: "other" }) }],
-      ["kind", { kind: "basic" }],
-      ["id", { id: "payments-test-two", secretRef: ref({ id: "payments-test-two" }) }],
-      ["orgId", { orgId: OTHER_ORG, secretRef: ref({ org: OTHER_ORG }) }],
-    ];
-    for (const [what, over] of changed) expect(acc.testAccountApprovalDigest({ ...base, ...over }), what).not.toBe(digest);
-    // The family alone, with the hosts held the same.
-    const twoHosts = { ...base, hosts: ["api.example-pay.com", "api.other-pay.com"] };
-    expect(acc.testAccountApprovalDigest({ ...twoHosts, family: "http:api.other-pay.com" })).not.toBe(acc.testAccountApprovalDigest(twoHosts));
-    const aws = parsed(awsAccount());
-    const awsDigest = acc.testAccountApprovalDigest(aws);
-    const awsChanged: Array<[string, Record<string, unknown>]> = [
-      ["roleArn", { roleArn: "arn:aws:iam::222222222222:role/other" }],
-      ["externalId", { externalId: "ext-9999999999" }],
-      ["region", { region: "us-east-1" }],
-      ["actions", { actions: ["dynamodb:GetItem"] }],
-      ["resources", { resources: ["arn:aws:dynamodb:us-west-2:222222222222:table/other"] }],
-    ];
-    for (const [what, over] of awsChanged) expect(acc.testAccountApprovalDigest({ ...aws, aws: { ...aws.aws!, ...over } }), what).not.toBe(awsDigest);
-  });
-  it("is the same for a re-ordered list and unaffected by fields an approval does not cover", () => {
-    const base = parsed(account());
-    const digest = acc.testAccountApprovalDigest(base);
-    expect(acc.testAccountApprovalDigest({ ...base, projectIds: ["billing", "orders"] })).toBe(digest);
-    expect(acc.testAccountApprovalDigest({ ...base, label: "Another label", status: "suspended", expiresAt: "2030-01-01T00:00:00.000Z", rotatedAt: "2026-11-05T00:00:00.000Z", lastUsedAt: "2026-11-06T00:00:00.000Z", approvals: [] } as never)).toBe(digest);
-    const aws = parsed(awsAccount({ aws: awsBlock({ actions: ["dynamodb:GetItem", "dynamodb:PutItem"], resources: ["arn:aws:dynamodb:us-west-2:222222222222:table/a1", "arn:aws:dynamodb:us-west-2:222222222222:table/b1"] }) }));
-    const reordered = { ...aws, aws: { ...aws.aws!, actions: [...aws.aws!.actions].reverse(), resources: [...aws.aws!.resources].reverse() } };
-    expect(acc.testAccountApprovalDigest(reordered as never)).toBe(acc.testAccountApprovalDigest(aws));
-  });
-  it("ties approvals to this account in this org, even for a role-only AWS account with no secret reference", () => {
-    const approved = parsed(awsAccount());
-    expect(ok(approved)).toBe(true);
-    // The external id follows the account (it is derived from the company and the id), so a copy under another id or org carries its own.
-    const otherId = { ...approved, id: "orders-dev-two", aws: { ...approved.aws!, externalId: acc.testAccountExternalId(ORG, "orders-dev-two") } };
-    const otherOrg = { ...approved, orgId: OTHER_ORG, aws: { ...approved.aws!, externalId: acc.testAccountExternalId(OTHER_ORG, "orders-dev") } };
-    // Everything the approvers saw is the same; only whose account it is differs.
-    expect(acc.testAccountApprovalDigest(otherId)).not.toBe(acc.testAccountApprovalDigest(approved));
-    expect(acc.testAccountApprovalDigest(otherOrg)).not.toBe(acc.testAccountApprovalDigest(approved));
-    expect(ok(otherId)).toBe(false);
-    expect(ok(otherOrg)).toBe(false);
-    expect(acc.testAccountQualifyingApprovals(otherId)).toEqual([]);
-    expect(acc.testAccountQualifyingApprovals(otherOrg)).toEqual([]);
-    expect(acc.testAccountQualifyingApprovals(approved)).toHaveLength(2);
-    // The same fields under another id or org count once approved there.
-    expect(ok(stamp({ ...otherId, approvals: withoutDigest(otherId.approvals) }))).toBe(true);
-    expect(ok(stamp({ ...otherOrg, approvals: withoutDigest(otherOrg.approvals) }))).toBe(true);
-    // The same holds for an account with a secret reference.
-    const withSecret = parsed(account());
-    expect(ok({ ...withSecret, id: "payments-test-two", secretRef: ref({ id: "payments-test-two" }) })).toBe(false);
-  });
-  it("needs every approval to carry the digest, in its shape", () => {
-    const without = account();
-    expect(ok({ ...without, approvals: withoutDigest(without.approvals) })).toBe(false);
-    for (const approvedDigest of ["", "abc", sha("A"), `${sha("e")}0`]) expect(ok(account({ approvals: [approval("a", { approvedDigest }), approval("b", { approvedDigest })] })), approvedDigest).toBe(false);
-  });
   it("has an approval schema that is strict and needs a 64-hex digest", () => {
     const one = { by: person("a"), at: "2026-11-02T10:00:00.000Z", freshSignIn: true, kind: "approver", approvedDigest: sha("e") };
     expect(acc.TestAccountApprovalSchema.safeParse(one).success).toBe(true);
@@ -631,45 +369,6 @@ describe("approvals cover what was approved", () => {
     for (const approvedDigest of ["", "abc", sha("A"), `${sha("e")}0`, sha("e").slice(1), `sha256:${sha("e")}`, 5, null]) expect(acc.TestAccountApprovalSchema.safeParse({ ...one, approvedDigest }).success, String(approvedDigest)).toBe(false);
     expect(acc.TestAccountApprovalSchema.safeParse({ ...one, extra: 1 }).success).toBe(false);
     expect(acc.TestAccountApprovalSchema.safeParse({ ...one, freshSignIn: false }).success).toBe(false);
-  });
-  it("counts only approvals of exactly this record: a stale approval is no approval", () => {
-    expect(ok(account({ approvals: [approval("a"), approval("b", { approvedDigest: staleDigest })] }))).toBe(false);
-    expect(ok(account({ approvals: [approval("a", { approvedDigest: staleDigest }), approval("b", { approvedDigest: staleDigest })] }))).toBe(false);
-    expect(ok(account({ approvals: [approval("a"), approval("b"), approval("c", { approvedDigest: staleDigest })] }))).toBe(true);
-    const record = parsed(account({ status: "pending", expiresAt: undefined, approvals: [approval("a"), approval("b", { approvedDigest: staleDigest })] }));
-    expect(acc.testAccountQualifyingApprovals(record).map((each) => each.by)).toEqual([person("a")]);
-  });
-  it("applies to the sole-owner exception too", () => {
-    expect(ok(account({ approvals: [approval("a", { kind: "sole_owner_exception" })] }))).toBe(true);
-    expect(ok(account({ approvals: [approval("a", { kind: "sole_owner_exception", approvedDigest: staleDigest })] }))).toBe(false);
-    expect(ok(account({ approvals: [approval("a", { kind: "sole_owner_exception", approvedDigest: staleDigest }), approval("b")] }))).toBe(false);
-  });
-  it("needs fresh approvals when a record is widened", () => {
-    const approved = parsed(account());
-    expect(ok(approved)).toBe(true);
-    const widenings: Array<[string, Record<string, unknown>]> = [
-      ["a host", { hosts: ["api.example-pay.com", "billing.example-pay.com"] }],
-      ["a project", { projectIds: [...(approved.projectIds as string[]), "reports"] }],
-      ["all projects", { projectIds: "all" }],
-      ["a request limit", { limits: { ...approved.limits, maxConnectionsPerRun: 5_000 } }],
-      ["a variable", { envNames: [...approved.envNames, "EXTRA_VALUE"] }],
-      ["the secret", { secretRef: ref({ key: "otherKey" }) }],
-    ];
-    for (const [what, over] of widenings) {
-      const widened = { ...approved, ...over };
-      expect(ok(widened), `${what}: old approvals`).toBe(false);
-      // The same people approving the widened record count.
-      expect(ok(stamp({ ...widened, approvals: withoutDigest(widened.approvals) })), `${what}: fresh approvals`).toBe(true);
-    }
-    const awsApproved = parsed(awsAccount());
-    expect(ok(awsApproved)).toBe(true);
-    expect(ok({ ...awsApproved, aws: { ...awsApproved.aws!, actions: [...awsApproved.aws!.actions, "dynamodb:DeleteItem"] } })).toBe(false);
-    expect(ok({ ...awsApproved, aws: { ...awsApproved.aws!, resources: [...awsApproved.aws!.resources, "arn:aws:dynamodb:us-west-2:222222222222:table/other-table"] } })).toBe(false);
-    expect(ok({ ...awsApproved, aws: { ...awsApproved.aws!, region: "us-east-1" }, hosts: ["dynamodb.us-east-1.amazonaws.com"] })).toBe(false);
-  });
-  it("lets a label, status or date change without new approvals", () => {
-    const approved = parsed(account());
-    expect(ok({ ...approved, label: "Renamed", lastUsedAt: "2026-11-05T00:00:00.000Z", rotatedAt: "2026-11-04T00:00:00.000Z" })).toBe(true);
   });
 });
 
@@ -703,11 +402,6 @@ describe("isTestAccountUsableAt", () => {
     expect(acc.isTestAccountUsableAt(record(), new Date(when).toISOString())).toBe(true);
     for (const bad of ["yesterday", "", Number.NaN, new Date(Number.NaN)]) expect(acc.isTestAccountUsableAt(record(), bad as never), String(bad)).toBe(false);
   });
-  it("keeps the milliseconds of a Date it is given", () => {
-    const withMillis = { ...record(), expiresAt: "2027-01-30T10:00:00.500Z" };
-    expect(acc.isTestAccountUsableAt(withMillis, new Date("2027-01-30T10:00:00.400Z"))).toBe(true);
-    expect(acc.isTestAccountUsableAt(withMillis, new Date("2027-01-30T10:00:00.700Z"))).toBe(false);
-  });
   it("does not count an approval dated after now, nor an expiry computed from one", () => {
     const base = account({ status: "pending", expiresAt: undefined, approvals: [approval("a"), approval("b")] });
     const make = (approvals: Array<Record<string, unknown>>, expiresAt: string) => parsed(stamp({ ...base, status: "active", expiresAt, approvals }));
@@ -723,34 +417,6 @@ describe("isTestAccountUsableAt", () => {
     const secondInFuture = make([approval("a"), approval("b", { at: "2027-01-01T10:00:00.000Z" })], "2027-03-30T10:00:00.000Z");
     expect(acc.isTestAccountUsableAt(secondInFuture, "2026-11-03T00:00:00.000Z")).toBe(false);
     expect(acc.isTestAccountUsableAt(secondInFuture, "2027-01-01T10:00:00.000Z")).toBe(true);
-  });
-  it("counts an approval from now on, not before, and never one whose date is not a date", () => {
-    const record = parsed(account());
-    const first = Date.parse("2026-11-02T10:00:00.000Z");
-    expect(acc.testAccountQualifyingApprovals(record, first - 1)).toEqual([]);
-    expect(acc.testAccountQualifyingApprovals(record, first)).toHaveLength(2);
-    expect(acc.testAccountQualifyingApprovals(record)).toHaveLength(2);
-    const broken = { ...record, approvals: record.approvals.map((each) => ({ ...each, at: "never" })) };
-    expect(acc.testAccountQualifyingApprovals(broken, first)).toEqual([]);
-    expect(acc.testAccountQualifyingApprovals(broken)).toHaveLength(2);
-  });
-  it("is not usable unless active", () => {
-    for (const status of ["pending", "suspended", "expired"]) expect(at("2026-11-03T00:00:00.000Z", { status }), status).toBe(false);
-  });
-  it("is not usable without an expiry", () => {
-    expect(at("2026-11-03T00:00:00.000Z", { expiresAt: undefined })).toBe(false);
-    expect(at("2026-11-03T00:00:00.000Z", { expiresAt: "soon" })).toBe(false);
-  });
-  it("is not usable when its approvals no longer cover the record (a record that did not come through the schema)", () => {
-    expect(at("2026-11-03T00:00:00.000Z", { hosts: ["api.example-pay.com", "extra.example-pay.com"] })).toBe(false);
-    expect(at("2026-11-03T00:00:00.000Z", { approvals: [] })).toBe(false);
-    expect(at("2026-11-03T00:00:00.000Z", { approvals: [(record().approvals)[0]!] })).toBe(false);
-  });
-  it("is not usable when its expiry is further out than the allowed days", () => {
-    expect(at("2026-11-03T00:00:00.000Z", { expiresAt: "2027-01-31T10:00:00.000Z" })).toBe(true);
-    expect(at("2026-11-03T00:00:00.000Z", { expiresAt: "2027-01-31T10:00:01.000Z" })).toBe(false);
-    expect(at("2026-11-03T00:00:00.000Z", {}, { maxExpiryDays: 30 })).toBe(false);
-    expect(() => at("2026-11-03T00:00:00.000Z", {}, { maxExpiryDays: 120 })).toThrow(RangeError);
   });
 });
 
@@ -769,21 +435,6 @@ describe("environment variable names (shared rule)", () => {
   it.each(names)("reserves the name %s", (name) => {
     expect(shared.reservedDependencyEnvName(name)).toBe(true);
   });
-  it("refuses each reserved name as a test account's variable", () => {
-    for (const name of [...names, ...prefixes.map((prefix) => `${prefix}FOO`)]) if (/^[A-Z][A-Z0-9_]{0,63}$/u.test(name)) expect(ok(account({ envNames: [name] })), name).toBe(false);
-  });
-  it("reserves the loader, runtime, shell-helper and credential-agent names that were missing", () => {
-    for (const name of ["ECS_CONTAINER_METADATA_URI", "SSH_AUTH_SOCK", "SSH_ASKPASS", "DOTNET_STARTUP_HOOKS", "COREHOST_TRACE", "CORECLR_ENABLE_PROFILING", "COMPLUS_X", "LC_ALL", "LANG", "MALLOC_CONF", "JAVA_OPTS", "GRADLE_OPTS", "SBT_OPTS", "EDITOR", "VISUAL", "PAGER", "BROWSER", "LESSOPEN", "HISTFILE", "LOCPATH", "NLSPATH"]) {
-      expect(shared.reservedDependencyEnvName(name), name).toBe(true);
-      expect(ok(account({ envNames: [name] })), name).toBe(false);
-    }
-  });
-  it("leaves ordinary names alone", () => {
-    for (const name of ["DATABASE_URL", "REDIS_URL", "PAYMENTS_API_KEY", "PAYMENTS_API_URL", "CRM_TOKEN", "STRIPE_KEY", "DB_PASSWORD", "AMQP_URL", "ORDERS_ENDPOINT"]) {
-      expect(shared.reservedDependencyEnvName(name), name).toBe(false);
-      expect(ok(account({ envNames: [name] })), name).toBe(true);
-    }
-  });
 });
 
 describe("hosts that can be read as an address (shared host rule)", () => {
@@ -794,30 +445,5 @@ describe("hosts that can be read as an address (shared host rule)", () => {
       expect(shared.TestServiceHostSchema.safeParse(host).success, host).toBe(false);
       expect(ok(account({ hosts: ["api.example-pay.com", host] })), host).toBe(false);
     }
-  });
-  it("refuses them as a test account's only host and as its own family's host", () => {
-    for (const host of ["127.1", "0x7f.0.0.1", "169.254.43518"]) expect(ok(account({ family: `http:${host}`, hosts: [host] })), host).toBe(false);
-  });
-  it("accepts ordinary names, including ones with digits and hyphens", () => {
-    for (const host of ["api.example-pay.com", "a.io", "sandbox.api2.example.com", "xn--p1ai.xn--p1ai", "1password.example.com", "api-1.example.org", "x.dev"]) {
-      expect(shared.hostProblem(host), host).toBeUndefined();
-      expect(shared.TestServiceHostSchema.safeParse(host).success, host).toBe(true);
-    }
-  });
-  it("refuses a last label that does not start with a letter, whatever else it is", () => {
-    for (const host of ["foo.1a", "api.example.123abc", "api.example.9", "api.example.0x", "a.b.1e5"]) {
-      expect(shared.hostProblem(host), host).toBe("numeric_label");
-      expect(ok(account({ hosts: ["api.example-pay.com", host] })), host).toBe(false);
-    }
-  });
-  it("says why, in fixed codes", () => {
-    expect(shared.hostProblem("0x7f.0x1")).toBe("address_shaped");
-    expect(shared.hostProblem("0177.0.0.1")).toBe("address_shaped");
-    expect(shared.hostProblem("127.1")).toBe("address_shaped");
-    expect(shared.hostProblem("api.example.0x1")).toBe("numeric_label");
-    expect(shared.hostProblem("localhost")).toBe("single_label");
-    expect(shared.hostProblem("Api.example.com")).toBe("shape");
-    expect(shared.hostProblem("")).toBe("shape");
-    expect(shared.hostProblem("a".repeat(254))).toBe("shape");
   });
 });

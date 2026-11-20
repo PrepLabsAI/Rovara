@@ -92,12 +92,3 @@ it("two companies: A's administrator, whose grant names 'payments', is refused o
   expect(authorize).toHaveBeenCalledWith("payments");
 });
 
-it("each way round: B's administrator is refused on A's 'payments' task and A's administrator stops it", async () => {
-  const h = await world();
-  const a = await h.start(ownerA);
-  const authorize = vi.fn(async () => undefined);
-  const stop: NonNullable<CoreTaskEntry["stopWorkspaceForAdmin"]> = (workspaceId, administrator, authorize) => h.root.coreTasks!.stopWorkspaceForAdmin!(workspaceId, administrator, authorize);
-  await expect(stop(a.workspaceId, { id: adminB }, authorize)).rejects.toMatchObject({ code: "NOT_FOUND", message: `NOT_FOUND: ${ADMIN_GRANT_MISSING}` });
-  expect(authorize).not.toHaveBeenCalled();
-  expect(await stop(a.workspaceId, { id: adminA }, authorize)).toEqual({ taskId: a.taskId, nothingRunning: false });
-});

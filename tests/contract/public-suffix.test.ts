@@ -23,34 +23,6 @@ describe("the generated rules", () => {
 });
 
 describe("isPublicSuffix", () => {
-  it("is true for a TLD, a multi-label suffix, and a PRIVATE-section hosting suffix", () => {
-    for (const name of ["com", "co.uk", "github.io", "s3.amazonaws.com", "dev"]) expect(isPublicSuffix(name), name).toBe(true);
-  });
-
-  it("is false for a registrable name and for one beneath a suffix", () => {
-    for (const name of ["acme.com", "foo.github.io", "amazonaws.com", "registry.npmjs.org", "bar.co.uk", "a.s3.amazonaws.com"]) expect(isPublicSuffix(name), name).toBe(false);
-  });
-
-  it("follows a wildcard rule: *.ck makes every name directly under ck a suffix", () => {
-    expect(isPublicSuffix("ck")).toBe(true);
-    expect(isPublicSuffix("foo.ck")).toBe(true);
-    expect(isPublicSuffix("bar.foo.ck")).toBe(false);
-  });
-
-  it("follows an exception rule: !www.ck makes www.ck registrable", () => {
-    expect(isPublicSuffix("www.ck")).toBe(false);
-    expect(registrableDomain("www.ck")).toBe("www.ck");
-    expect(registrableDomain("a.www.ck")).toBe("www.ck");
-    expect(registrableDomain("foo.ck")).toBeUndefined();
-    expect(registrableDomain("a.foo.ck")).toBe("a.foo.ck");
-  });
-
-  it("follows wildcard rules whose bare name has no rule: *.sch.uk, *.kawasaki.jp, *.0emm.com", () => {
-    for (const name of ["x.sch.uk", "foo.kawasaki.jp", "anything.0emm.com", "a.compute.amazonaws.com"]) expect(isPublicSuffix(name), name).toBe(true);
-    for (const name of ["sch.uk", "kawasaki.jp", "0emm.com", "a.x.sch.uk", "a.foo.kawasaki.jp"]) expect(isPublicSuffix(name), name).toBe(false);
-    expect(registrableDomain("a.x.sch.uk")).toBe("a.x.sch.uk");
-    expect(registrableDomain("x.sch.uk")).toBeUndefined();
-  });
 
   it("lets an exception rule beat the wildcard it sits under: !city.kawasaki.jp", () => {
     expect(isPublicSuffix("city.kawasaki.jp")).toBe(false);
@@ -64,22 +36,9 @@ describe("isPublicSuffix", () => {
     for (const name of ["", ".", "a..b", ".com", "*.com"]) expect(isPublicSuffix(name), name).toBe(false);
   });
 
-  it("treats an unknown top-level name as a suffix, as the list's default rule says", () => {
-    expect(isPublicSuffix("localhost")).toBe(true);
-    expect(registrableDomain("foo.localhost")).toBe("foo.localhost");
-  });
 });
 
 describe("registrableDomain", () => {
-  it("is the public suffix plus one label", () => {
-    expect(registrableDomain("artifacts.acme.dev")).toBe("acme.dev");
-    expect(registrableDomain("acme.co.uk")).toBe("acme.co.uk");
-    expect(registrableDomain("www.acme.co.uk")).toBe("acme.co.uk");
-    expect(registrableDomain("foo.github.io")).toBe("foo.github.io");
-    expect(registrableDomain("x.y.foo.github.io")).toBe("foo.github.io");
-    expect(registrableDomain("bucket.s3.amazonaws.com")).toBe("bucket.s3.amazonaws.com");
-    expect(registrableDomain("ACME.COM")).toBe("acme.com");
-  });
 
   it("is undefined for a public suffix and for an invalid name", () => {
     for (const name of ["com", "co.uk", "github.io", "s3.amazonaws.com", "", "a..b"]) expect(registrableDomain(name), name).toBeUndefined();

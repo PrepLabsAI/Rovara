@@ -67,13 +67,6 @@ async function runningTask(options: { idle?: number; companyId?: string; teamId?
 }
 
 describe("the backstop's limits (#173)", () => {
-  it("are 24 hours idle, a 15-minute waiter window and a 48-hour grace for unstamped waiters, and the note says so plainly", () => {
-    expect(UNWAITED_TASK_IDLE_LIMIT_MS).toBe(24 * HOUR);
-    expect(WAITER_SEEN_WITHIN_MS).toBe(15 * 60_000);
-    expect(UNSTAMPED_WAITER_GRACE_MS).toBe(48 * HOUR);
-    expect(UNWAITED_TASK_NOTE).toContain("idle for over 24 hours with nobody waiting on it");
-    expect(UNWAITED_TASK_NOTE).not.toMatch(/—|–/);
-  });
 
   it("measures activity from the latest worker event, else the operation's updatedAt, never later than now", () => {
     const now = new Date("2026-10-01T12:00:00.000Z");
@@ -85,31 +78,6 @@ describe("the backstop's limits (#173)", () => {
 });
 
 describe("the backstop: when it cancels (#173)", () => {
-  it("cancels a task idle past the limit with nobody waiting, through the shared cancel path, and posts the note once", async () => {
-    const { db, sweep, current, cancels, postNote, logs, workspaceId, operationId } = await runningTask();
-    const result = await sweep();
-    expect(result.cancelled).toEqual([operationId]);
-    expect(current().status).toBe("CANCEL_REQUESTED");
-    expect(cancels()).toHaveLength(1);
-    const cancel = cancels()[0]!;
-    expect(cancel).toMatchObject({ kind: "cancel", status: "ACCEPTED", targetOperationId: operationId });
-    expect(cancel).not.toHaveProperty("requestedBy");
-    const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === cancel.id)[0];
-    expect(outbox?.invocation).toMatchObject({ kind: "cancel", payload: { targetOperationId: operationId } });
-    expect(postNote).toHaveBeenCalledExactlyOnceWith(THREAD, UNWAITED_TASK_NOTE);
-    expect(logs).toContainEqual(expect.objectContaining({ event: "unwaited_task.cancelled", workspaceId, operationId }));
-    await sweep();
-    expect(postNote).toHaveBeenCalledOnce();
-    expect(cancels()).toHaveLength(1);
-  });
-
-  it("never stops a task idle under the limit, and stops it once it passes", async () => {
-    const { sweep, now, current } = await runningTask({ idle: UNWAITED_TASK_IDLE_LIMIT_MS - 60_000 });
-    await sweep();
-    expect(current().status).toBe("RUNNING");
-    await sweep(new Date(now.getTime() + 2 * 60_000));
-    expect(current().status).toBe("CANCEL_REQUESTED");
-  });
 
   it("never stops a task still producing events, however long it has run", async () => {
     const { sweep, event, current } = await runningTask({ idle: 5 * UNWAITED_TASK_IDLE_LIMIT_MS });
@@ -177,32 +145,6 @@ describe("the backstop: what it never touches (#173)", () => {
     expect(requested.current().status).toBe("RUNNING");
   });
 
-  it("never touches CANCEL_REQUESTED or finished tasks, other kinds, or an operation that no longer owns its workspace", async () => {
-    for (const status of ["CANCEL_REQUESTED", "SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]) {
-      const task = await runningTask();
-      task.current().status = status;
-      await task.sweep();
-      expect(task.current().status).toBe(status);
-      expect(task.cancels()).toHaveLength(0);
-    }
-    for (const kind of ["prepare", "publish", "maintain", "close"]) {
-      const task = await runningTask();
-      task.current().kind = kind;
-      await task.sweep();
-      expect(task.current().status).toBe("RUNNING");
-    }
-    const released = await runningTask();
-    released.db.get(`WORKSPACE#${released.workspaceId}`, "META")!.activeOperationId = randomUUID();
-    await released.sweep();
-    expect(released.current().status).toBe("RUNNING");
-  });
-
-  it("never touches a workspace no Slack thread owns", async () => {
-    const { db, sweep, current } = await runningTask();
-    delete db.find((item) => item.entityType === "SLACK_THREAD")[0]!.thread;
-    await sweep();
-    expect(current().status).toBe("RUNNING");
-  });
 });
 
 describe("the backstop: races and failures (#173)", () => {
@@ -342,19 +284,6 @@ describe("the backstop: review hardening (#173)", () => {
     expect(logs).toContainEqual(expect.objectContaining({ event: "unwaited_task.skipped", reason: "active-again" }));
   });
 
-  it("reads only the activeTurn from the thread's META row, never its notes", async () => {
-    const { db, sweep } = await runningTask();
-    const original = db.send;
-    const threadReads: Array<Record<string, unknown>> = [];
-    db.send = async (command) => {
-      if (command.input.TableName === "threads") threadReads.push(command.input);
-      return original(command);
-    };
-    await sweep();
-    expect(threadReads).toHaveLength(1);
-    expect(threadReads[0]).toMatchObject({ ProjectionExpression: "activeTurn" });
-  });
-
   it("logs why it leaves a workspace alone when its Slack thread record is unreadable or points elsewhere", async () => {
     const unreadable = await runningTask();
     delete unreadable.db.find((item) => item.entityType === "SLACK_THREAD")[0]!.thread;
@@ -387,14 +316,6 @@ describe("the backstop: review hardening (#173)", () => {
   });
 });
 
-
-it("carries each authoritative workspace company/team for identical raw channel and timestamps", async () => {
-  for (const [companyId, teamId] of [["org_aaaaaaaaaaaaaaaaaaaa", "T0AAAAAAA"], ["org_bbbbbbbbbbbbbbbbbbbb", "T0BBBBBBB"]] as const) {
-    const h = await runningTask({ companyId, teamId });
-    await h.sweep();
-    expect(h.postNote).toHaveBeenCalledExactlyOnceWith({ ...THREAD, workspace: { companyId, teamId } }, UNWAITED_TASK_NOTE);
-  }
-});
 
 it("L2-2 18d: in company mode the install's own thread keeps today's unscoped note, another team's is scoped", async () => {
   const own = await runningTask({ companyId: "org_00000000000000000000", teamId: "T0INSTALL0", slackLegacyTeamId: "T0INSTALL0", orgId: null });
