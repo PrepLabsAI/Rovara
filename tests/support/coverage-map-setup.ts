@@ -68,5 +68,8 @@ afterEach(async (context) => {
   }
   // A test that failed here (a timing check slowed by the coverage itself, say) is recorded as failed and always kept.
   const failed = (context.task.result?.errors?.length ?? 0) > 0 || context.task.result?.state === "fail";
-  appendFileSync(records, `${JSON.stringify({ id, file, concurrent: context.task.concurrent === true, failed, scripts })}\n`);
+  // Where the test is declared (vitest.coverage-map.config.ts asks for task locations): the tests an `it.each` table or a loop generates share it, so a
+  // pruner can tell which row of the table a redundant test came from.
+  const location = context.task.location === undefined ? undefined : [context.task.location.line, context.task.location.column];
+  appendFileSync(records, `${JSON.stringify({ id, file, concurrent: context.task.concurrent === true, failed, scripts, ...(location === undefined ? {} : { location }) })}\n`);
 });
