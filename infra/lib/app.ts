@@ -15,7 +15,8 @@ import { EnvironmentRolePath } from "./role-path.js";
 import { SlackOrchestratorStack } from "./slack-orchestrator.js";
 import { SwebenchEvalStack, swebenchNames } from "./swebench-eval.js";
 import { CiRunnerStack } from "./ci-runner.js";
-import { StagingReleaseAccessStack } from "./staging-release-access.js";
+import { BetaDomainStack } from "./beta-domain.js";
+import { BetaReleaseAccessStack } from "./beta-release-access.js";
 import { WorkerSettingsStack } from "./worker-settings.js";
 
 export function buildAgentXApp(context: Record<string, unknown> = {}): App {
@@ -172,11 +173,18 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
       env: { region: deploymentRegion ?? "us-east-1" },
     });
   }
-  // #1242: the staging account's release role, only when asked for (-c agentxStagingAccess=enabled) and deployed into the staging account by hand;
-  // the release pipeline's staging build assumes it. No release deploys it.
-  if (naming.env === undefined && app.node.tryGetContext("agentxStagingAccess") === "enabled") {
-    new StagingReleaseAccessStack(app, "AgentXStagingReleaseAccess", {
-      description: "The release pipeline's staging build role in the staging account",
+  // #1242: the beta account's release role, only when asked for (-c agentxBetaAccess=enabled) and deployed into the beta account by hand;
+  // the release pipeline's beta build assumes it. No release deploys it.
+  if (naming.env === undefined && app.node.tryGetContext("agentxBetaAccess") === "enabled") {
+    new BetaReleaseAccessStack(app, "AgentXBetaReleaseAccess", {
+      description: "The release pipeline's beta build role in the beta account",
+      env: { region: deploymentRegion ?? "us-east-1" },
+    });
+  }
+  // #1242: beta's address (beta.rovara.dev) in front of the beta control plane's API, only when asked for (-c agentxBetaDomain=enabled), by hand.
+  if (naming.env === undefined && app.node.tryGetContext("agentxBetaDomain") === "enabled") {
+    new BetaDomainStack(app, "AgentXBetaDomain", {
+      description: "Beta's address in front of the beta control plane's API",
       env: { region: deploymentRegion ?? "us-east-1" },
     });
   }

@@ -28,17 +28,17 @@ preparation are separate operations.
 ## Continuous production releases
 
 `AgentXReleasePipeline` runs the same release from AWS for every qualifying push to `mainline`,
-first to staging, then, when someone approves it, to production (#1242). It is a CodePipeline V2
+first to beta, then, when someone approves it, to production (#1242). It is a CodePipeline V2
 pipeline, `AgentXProductionRelease`, with three stages:
 
 ```
-Source (mainline push) → Staging (every push) ⏸ disabled transition → Production (on approval)
+Source (mainline push) → Beta (every push) ⏸ disabled transition → Production (on approval)
 ```
 
-- **Staging:** the CodeBuild project `release-agentx-staging` runs the release in the staging
-  account, as that account's `agentx-staging-release` role. CI's proof (below) is read first, in the
+- **Beta:** the CodeBuild project `release-agentx-beta` runs the release in the beta
+  account, as that account's `agentx-beta-release` role. CI's proof (below) is read first, in the
   release account.
-- **Production:** the transition into it stays disabled. The newest staging run waits in front of
+- **Production:** the transition into it stays disabled. The newest beta run waits in front of
   it; a newer one replaces it (the pipeline runs in SUPERSEDED mode), so one promotion carries every
   merge since the last. `release-agentx-production` closes the transition again as its first
   command, so each approval lets one run in.
@@ -49,7 +49,7 @@ Both projects run:
 npm run release:prod -- --region "$AWS_REGION" --reuse-unchanged-worker --require-existing-foundation
 ```
 
-(the staging one with `--profile agentx-staging`).
+(the beta one with `--profile agentx-beta`).
 
 To promote the commit waiting in front of Production, enable the transition in the console
 (**Enable transition** above the Production stage), or:
@@ -59,8 +59,8 @@ aws codepipeline enable-stage-transition --pipeline-name AgentXProductionRelease
   --stage-name Production --transition-type Inbound
 ```
 
-Nothing waiting means production already runs staging's newest commit. A failed production
-release leaves the transition disabled; the next promotion takes staging's newest commit again.
+Nothing waiting means production already runs beta's newest commit. A failed production
+release leaves the transition disabled; the next promotion takes beta's newest commit again.
 
 | A push to `mainline` that changes | Result |
 |---|---|
@@ -82,27 +82,27 @@ npm run build --workspace @agentx/infra
 npx cdk deploy AgentXReleasePipeline --app 'node infra/dist/bin/agentx.js' \
   --profile agentx-deployer -c agentxRegion=us-east-1 \
   --parameters GitHubConnectionArn=<codeconnections-arn> \
-  --parameters StagingAccountId=<staging-account-id>
+  --parameters BetaAccountId=<beta-account-id>
 ```
 
 `<codeconnections-arn>` is the ARN of the already-authorized GitHub connection in the release account.
 Find the value in the private release runbook (kept outside this repository).
 
-The staging account needs, once, before the pipeline's first staging release:
+The beta account needs, once, before the pipeline's first beta release:
 
-1. CDK bootstrap (`npx cdk bootstrap aws://<staging-account-id>/us-east-1`).
-2. The staging release role, `AgentXStagingReleaseAccess`:
+1. CDK bootstrap (`npx cdk bootstrap aws://<beta-account-id>/us-east-1`).
+2. The beta release role, `AgentXBetaReleaseAccess`:
 
    ```sh
-   npx cdk deploy AgentXStagingReleaseAccess --app 'node infra/dist/bin/agentx.js' \
-     --profile <staging-profile> -c agentxRegion=us-east-1 -c agentxStagingAccess=enabled \
+   npx cdk deploy AgentXBetaReleaseAccess --app 'node infra/dist/bin/agentx.js' \
+     --profile <beta-profile> -c agentxRegion=us-east-1 -c agentxBetaAccess=enabled \
      --parameters ReleaseAccountId=<release-account-id>
    ```
 
 3. The same first release production had: the foundation, the control plane (its own sign-in pool,
    callback signing key and GitHub App key secret), then one local
-   `npm run release:prod -- --profile <staging-profile> --require-existing-foundation` with
-   `AGENTX_MODEL_PROVIDER` and `AGENTX_MODEL_ID` set. Staging has its own Slack, GitHub and Linear
+   `npm run release:prod -- --profile <beta-profile> --require-existing-foundation` with
+   `AGENTX_MODEL_PROVIDER` and `AGENTX_MODEL_ID` set. Beta has its own Slack, GitHub and Linear
    apps; never point production's at it.
 
 Protect `mainline` in GitHub. The build role can deploy through the CDK bootstrap roles, so push
