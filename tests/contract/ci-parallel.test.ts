@@ -101,6 +101,7 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
       CI_LABELS: "${{ toJSON(github.event.pull_request.labels.*.name) }}",
       CI_TITLE: "${{ github.event.pull_request.title }}",
       CI_FORCE_LINUX: "${{ github.event.inputs.linux }}",
+      CI_BASE_REF: "${{ github.base_ref }}",
       BASE_SHA: "${{ github.event.pull_request.base.sha }}",
     });
     expect(step.run).toContain("git diff --name-only HEAD^1 HEAD");
