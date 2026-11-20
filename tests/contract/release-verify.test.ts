@@ -136,13 +136,13 @@ describe("verifyRelease: release.json problems", () => {
 });
 
 describe("CI workflow reproducibility check", () => {
-  it("runs a release build+verify reproducibility step in the quick job's release part, after infra:synth", async () => {
+  it("runs a release build+verify reproducibility step in the release-check job, after infra:synth", async () => {
     const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
     const text = await readFile(join(repoRoot, ".github/workflows/ci.yml"), "utf8");
     const workflow = YAML.parse(text) as {
-      jobs: { quick: { steps: Array<{ name?: string; run?: string; uses?: string }> } };
+      jobs: { "release-check": { steps: Array<{ name?: string; run?: string; uses?: string }> } };
     };
-    const steps = workflow.jobs.quick.steps;
+    const steps = workflow.jobs["release-check"].steps;
     const synthIndex = steps.findIndex((step) => typeof step.run === "string" && step.run.includes("infra:synth"));
     const reproIndex = steps.findIndex(
       (step) =>
