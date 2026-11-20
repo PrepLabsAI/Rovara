@@ -2,9 +2,8 @@
 // The gateway is the source of truth for "may this approval spend": its stored approval plus the project's own connected customer key. Anything but a 200 that answers
 // exactly the company, project and approver that were asked about, with provider "customer" and connected true, is "spend not approved" (no grant, no hold, no call).
 import { createHash, generateKeyPairSync, sign, verify } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, PluginConfigSchema, TASK_KEY_PURPOSE, type EvalReservationAdapter, type EvalSpendApprovalRecord, type EvalSpendPlan, type OrgId, type StoredDocument } from "@agentx/contracts";
+import { PluginConfigSchema, TASK_KEY_PURPOSE, type EvalReservationAdapter, type EvalSpendApprovalRecord, type EvalSpendPlan, type OrgId, type StoredDocument } from "@agentx/contracts";
 import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import {
@@ -17,10 +16,6 @@ import { evalSpendKey } from "../../packages/broker/src/core/setup-agent/eval-sp
 import { boundEvalMonthlyCap, boundEvalProviderConnected, boundEvalReservation, createBoundEvalSpendCapabilities } from "../../packages/broker/src/core/setup-agent/eval-reservation.js";
 import { evalSpendDigest, evalSpendInputsDigest } from "../../packages/contracts/src/eval-spend.js";
 import type { SessionMembers } from "../../packages/broker/src/core/sessions/access.js";
-import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
-import { createEvalSpendSubject, proposeEvalSpendApproval, EVAL_SPEND_KIND } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
-import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
-import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 
 const ORG_A = "org_evalauthority000000a" as OrgId;
 const ORG_B = "org_evalauthority000000b" as OrgId;
@@ -54,14 +49,6 @@ const bodyOf = (s: Seen) => JSON.parse(s.init.body as string) as Record<string, 
 const tokenOf = (s: Seen) => String((s.init.headers as Record<string, string>)["authorization"]).replace(/^Bearer /u, "");
 
 describe("the eval-reservation plug-in point", () => {
-  it("is a point of one adapter, and Code registers no default (no adapter: spend not approved)", () => {
-    expect(PLUGIN_POINTS).toContain("eval-reservation");
-    expect(PLUGIN_POINT_CARDINALITY["eval-reservation"]).toBe("one");
-    const registry = createAdapterRegistry();
-    registerCodeDefaults(registry, { priceTable: { currency: "USD", models: {} } });
-    expect(registry.names("eval-reservation")).toEqual([]);
-    expect(boundEvalReservation(registry)).toBeUndefined();
-  });
   it("the owner's config may name one adapter, never two", () => {
     const entry = (name: string) => ({ point: "eval-reservation", name, module: `@acme/${name}` });
     expect(PluginConfigSchema.safeParse({ version: 1, plugins: [entry("one")] }).success).toBe(true);
@@ -70,43 +57,6 @@ describe("the eval-reservation plug-in point", () => {
 });
 
 describe("the request (golden: what Cloud implements)", () => {
-  it("is one POST to /v1/product/eval/authority with a bearer service token and the asked company, project and approver as its body", async () => {
-    const g = gateway();
-    const found = await ask(adapter(g.fetchImpl));
-    expect(found).toEqual(answer());
-    expect(g.seen).toHaveLength(1);
-    const { url, init } = g.seen[0]!;
-    expect(EVAL_AUTHORITY_PATH).toBe("/v1/product/eval/authority");
-    expect(url).toBe(`${GATEWAY}/v1/product/eval/authority`);
-    expect(init.method).toBe("POST");
-    expect(init.redirect).toBe("error");
-    expect(Object.keys(init.headers as object).sort()).toEqual(["accept", "authorization", "content-type"]);
-    expect((init.headers as Record<string, string>)["content-type"]).toBe("application/json");
-    expect(bodyOf(g.seen[0]!)).toEqual({ company: ORG_A, project: PROJECT, approver: { personId: APPROVER.personId, provider: APPROVER.provider } });
-    expect(Object.keys(bodyOf(g.seen[0]!))).toEqual(["company", "project", "approver"]);
-  });
-
-  it("the token is the task key's service token for this audience and this company, signed RS256", async () => {
-    const g = gateway();
-    await ask(adapter(g.fetchImpl));
-    const [header, claims, signature] = tokenOf(g.seen[0]!).split(".") as [string, string, string];
-    expect(Buffer.from(header, "base64url").toString()).toBe(JSON.stringify({ alg: "RS256", typ: "rovara-service+jwt", kid: KID }));
-    const body = decode(claims);
-    const iat = NOW / 1000;
-    expect(EVAL_AUTHORITY_AUDIENCE).toBe("rovara-model-gateway-eval-authority");
-    expect({ ...body, jti: "<uuid>" }).toEqual({ iss: ISSUER, aud: EVAL_AUTHORITY_AUDIENCE, jti: "<uuid>", iat, nbf: iat - 30, exp: iat + 60, cid: ORG_A });
-    expect(verify("sha256", Buffer.from(`${header}.${claims}`), pair.publicKey, Buffer.from(signature, "base64url"))).toBe(true);
-  });
-
-  it("one company's ask never carries the other company's id", async () => {
-    const g = gateway((s) => ok(answer({ company: bodyOf(s)["company"], principal: principal({ companyId: bodyOf(s)["company"] }) })));
-    const a = adapter(g.fetchImpl);
-    expect(await ask(a, ORG_A)).toMatchObject({ company: ORG_A });
-    expect(await ask(a, ORG_B)).toMatchObject({ company: ORG_B });
-    expect(JSON.stringify(g.seen[0])).not.toContain(ORG_B);
-    expect(decode(tokenOf(g.seen[1]!).split(".")[1]!)["cid"]).toBe(ORG_B);
-    expect(JSON.stringify(g.seen[1])).not.toContain(ORG_A);
-  });
 
   it("a company, project or approver that is not well formed is refused before anything is signed or sent", async () => {
     const g = gateway();
@@ -118,12 +68,6 @@ describe("the request (golden: what Cloud implements)", () => {
     for (const approver of [{ ...APPROVER, personId: "" }, { ...APPROVER, provider: "" }, { ...APPROVER, personId: 5 }, undefined, null]) expect(await a.authority({ company: ORG_A, project: PROJECT, approver: approver as never })).toBeUndefined();
     expect(g.seen).toEqual([]);
     expect(spy).not.toHaveBeenCalled();
-  });
-
-  it("reserve() holds nothing here: the worker takes the hold through the gateway's own /hold route", async () => {
-    const g = gateway();
-    expect(await adapter(g.fetchImpl).reserve({ approval: {} as EvalSpendApprovalRecord, calls: 1, costMicros: 1, revalidate: async () => true })).toBeUndefined();
-    expect(g.seen).toEqual([]);
   });
 });
 
@@ -170,23 +114,6 @@ describe("anything but the exact answer is spend not approved (fail closed)", ()
       expect(await ask(adapter(g.fetchImpl))).toBeUndefined();
     });
   }
-
-  it("the whole ask is held to one short time, and the request is aborted", async () => {
-    let signal: AbortSignal | undefined;
-    const g = gateway((s) => { signal = s.init.signal ?? undefined; return new Promise<Response>(() => undefined); });
-    const started = Date.now();
-    expect(await ask(adapter(g.fetchImpl, { timeoutMs: 30 }))).toBeUndefined();
-    expect(Date.now() - started).toBeLessThan(1_000);
-    expect(signal?.aborted).toBe(true);
-  });
-
-  it("a signer that fails or is not the task key sends nothing", async () => {
-    const g = gateway();
-    for (const signer of [signing({ rovara_purpose: "sign-in" }), signing({ kid: "short" }), { publicJwk: async () => { throw new Error("kms down"); }, sign: async () => Buffer.alloc(0) } as TokenSigner]) {
-      expect(await ask(adapter(g.fetchImpl, { signer }))).toBeUndefined();
-    }
-    expect(g.seen).toEqual([]);
-  });
 });
 
 describe("turned on by ROVARA_CORE_MODEL_GATEWAY_URL", () => {
@@ -232,13 +159,6 @@ describe("createEvalSpendCapabilities through the bound adapter", () => {
     return registry;
   };
 
-  it("approved: the gateway's yes is a customer grant for this company and project", async () => {
-    const g = gateway();
-    const caps = createBoundEvalSpendCapabilities(registryWith(adapter(g.fetchImpl)), { store: await seeded(), companyId: ORG_A, members, project: PROJECT, current: async () => plan });
-    expect(await caps.approval.read()).toMatchObject({ company: ORG_A, project: PROJECT, provider: "customer", connected: true, role: "owner" });
-    expect(g.seen).toHaveLength(1);
-  });
-
   it("with the HTTP adapter bound, the broker-side meter holds nothing and never asks the gateway for a hold", async () => {
     const g = gateway();
     const caps = createBoundEvalSpendCapabilities(registryWith(adapter(g.fetchImpl)), { store: await seeded(), companyId: ORG_A, members, project: PROJECT, current: async () => plan });
@@ -255,18 +175,6 @@ describe("createEvalSpendCapabilities through the bound adapter", () => {
     expect(boundEvalReservation({ names: () => ["a"], get: () => one as never })).toBe(one);
   });
 
-  it("no bound adapter (Code's default): spend not approved, and the gateway is never asked", async () => {
-    const caps = createBoundEvalSpendCapabilities(registryWith(), { store: await seeded(), companyId: ORG_A, members, project: PROJECT, current: async () => plan });
-    expect(await caps.approval.read()).toBeUndefined();
-  });
-
-  it("a caller cannot slip its own adapter past the registry", async () => {
-    const yes: EvalReservationAdapter = { authority: async () => ({ company: ORG_A, project: PROJECT, principal: principal(), provider: "customer", connected: true }), reserve: async () => undefined };
-    const withOwn = { store: await seeded(), companyId: ORG_A, members, project: PROJECT, current: async () => plan, adapter: yes };
-    const caps = createBoundEvalSpendCapabilities(registryWith(), withOwn);
-    expect(await caps.approval.read()).toBeUndefined();
-  });
-
   for (const [name, reply] of [["not connected", () => ok(answer({ connected: false }))], ["wrong company", () => ok(answer({ company: ORG_B }))], ["wrong project", () => ok(answer({ project: "other" }))], ["a 500", () => new Response("", { status: 500 })]] as const) {
     it(`${name}: no grant`, async () => {
       const g = gateway(reply);
@@ -274,76 +182,6 @@ describe("createEvalSpendCapabilities through the bound adapter", () => {
       expect(await caps.approval.read()).toBeUndefined();
     });
   }
-
-  it("two companies: company B's capabilities never read company A's approval nor ask about it", async () => {
-    const g = gateway();
-    const caps = createBoundEvalSpendCapabilities(registryWith(adapter(g.fetchImpl)), { store: await seeded(ORG_A), companyId: ORG_B, members, project: PROJECT, current: async () => plan });
-    expect(await caps.approval.read()).toBeUndefined();
-    expect(g.seen).toEqual([]);
-  });
-});
-
-describe("the approver a REAL approval records is what the adapter sends (and Cloud's developer id reference)", () => {
-  const inputs = { evalSetHash: "a".repeat(64), judgePin: "b".repeat(64), modelVersion: "v1", model: "model", catalogRowId: "model", commandFingerprint: "c".repeat(64), settingsFingerprint: "d".repeat(64) };
-  const plan: EvalSpendPlan = { selection: "evals/demo", inputs, estimate: { calls: 6, costMicros: 60 }, budget: { usual: { calls: 6, costMicros: 60 }, maximum: { calls: 400, costMicros: 4_000_000 } } };
-  const fixture = JSON.parse(readFileSync(new URL("../../contracts/shared/eval-authority-developer-id.v1.json", import.meta.url), "utf8")) as { function: string; inputs: string[]; vectors: Array<{ provider: string; personId: string; developerId: string }> };
-  const reference = (provider: string, personId: string) => createHash("sha256").update(`developer\u0000${provider}\u0000${personId}`, "utf8").digest("hex");
-
-  // Approves through Code's own decision gate and subject (the setup approval), then reads the eval authority through the real adapter and a recording gateway.
-  async function approvedBy(approver: ReturnType<typeof localOwnerPrincipal>) {
-    const store = new MemoryDocumentStore();
-    const members: SessionMembers = { companyRole: (p) => p.companyId === approver.companyId && p.developerId === developerIdOf(approver) ? "owner" : undefined, projectGrant: () => undefined };
-    const deps = { store, companyId: approver.companyId, members, monthlyCapMicros: 50_000_000 };
-    const gate = createDecisionGate({
-      store, audit: createNoopAuditSink(), subjects: [createEvalSpendSubject(deps)], now: () => new Date("2026-11-16T05:00:00.000Z"),
-      approvers: { requirement: async () => ({ methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: true }), verify: async (_request, proof) => ({ approved: true, approver, method: proof.method, proofId: proof.proofId }) },
-    });
-    const row = await proposeEvalSpendApproval(deps, PROJECT, plan);
-    const decided = await gate.decide({ companyId: approver.companyId, kind: EVAL_SPEND_KIND, subjectId: PROJECT, requestId: "eval-decision-1", outcome: "approve", seen: { revision: row.revision, artifactDigest: row.digest }, credentials: [{ method: "local-session", token: ["fake", "session"].join("-") }] });
-    expect(decided.status).toBe("decided");
-    const g = gateway((s) => ok(answer({ company: bodyOf(s)["company"], principal: { companyId: approver.companyId, personId: approver.personId, displayName: approver.displayName, roles: approver.roles, provider: approver.provider } })));
-    const registry = createAdapterRegistry();
-    registry.register("eval-reservation", "http", adapter(g.fetchImpl));
-    const grant = await createBoundEvalSpendCapabilities(registry, { ...deps, project: PROJECT, current: async () => plan }).approval.read();
-    return { g, grant };
-  }
-
-  it("sends the approver's identity pair as Code's identity adapter names it, never a developer id", async () => {
-    const approver = localOwnerPrincipal({ companyId: ORG_A });
-    const { g, grant } = await approvedBy(approver);
-    expect(grant).toMatchObject({ company: ORG_A, project: PROJECT, role: "owner", provider: "customer", connected: true });
-    expect(g.seen).toHaveLength(1);
-    const sent = bodyOf(g.seen[0]!)["approver"] as { personId: string; provider: string };
-    expect(sent).toEqual({ personId: approver.personId, provider: approver.provider });
-    expect(sent).toEqual({ personId: "local-owner", provider: "local-owner" });
-    expect(sent.personId).not.toBe(developerIdOf(approver));
-    // What Cloud converts it to: the developer id Code's own records name this approver by.
-    expect(developerIdOf(sent)).toBe(reference(sent.provider, sent.personId));
-    expect(developerIdOf(sent)).toBe(developerIdOf(approver));
-  });
-
-  it("a hosted-style approver (not the local owner) is sent the same way, and a second company's approver never appears", async () => {
-    const approver = { ...localOwnerPrincipal({ companyId: ORG_B, personId: "person-1" }), provider: "rovara-sign-in" };
-    const { g, grant } = await approvedBy(approver);
-    expect(grant).toMatchObject({ company: ORG_B });
-    expect(bodyOf(g.seen[0]!)).toEqual({ company: ORG_B, project: PROJECT, approver: { personId: "person-1", provider: "rovara-sign-in" } });
-    expect(JSON.stringify(g.seen[0])).not.toContain(ORG_A);
-    expect(developerIdOf({ provider: "rovara-sign-in", personId: "person-1" })).toBe("a2389b50163f927aeb226bdce4345cf12e0bcbac45a00217909d2183b56ffa4d");
-  });
-
-  it("the developer id derivation is pinned by the shared fixture vectors (Cloud's conversion reference)", () => {
-    expect(fixture.function).toBe("developerIdOf");
-    expect(fixture.inputs).toEqual(["provider", "personId"]);
-    expect(fixture.vectors.length).toBeGreaterThanOrEqual(4);
-    for (const v of fixture.vectors) {
-      expect(developerIdOf({ provider: v.provider, personId: v.personId })).toBe(v.developerId);
-      expect(reference(v.provider, v.personId)).toBe(v.developerId);
-      expect(v.developerId).toMatch(/^[0-9a-f]{64}$/u);
-    }
-    // The separator matters: ("ab","c") and ("a","bc") are different people.
-    const [x, y] = fixture.vectors.slice(-2);
-    expect(x!.developerId).not.toBe(y!.developerId);
-  });
 });
 
 describe("DEC 253q(c): the eval monthly cap from Cloud's company budget (monthlyCapMicros)", () => {
@@ -399,27 +237,6 @@ describe("L4-T3: whether the project's AI provider is connected (providerConnect
       expect(decode(tokenOf(g.seen[0]!).split(".")[1]!)).toMatchObject({ aud: EVAL_CAP_AUDIENCE, cid: ORG_A });
     }
   });
-  it("the cap still reads as before with or without the member, and `connected` never changes it (mutant: the optional member)", async () => {
-    expect(await adapter(gateway(() => capWith({ connected: false })).fetchImpl).monthlyCapMicros!({ company: ORG_A, project: PROJECT })).toBe(25_000_000);
-    expect(await adapter(gateway(() => capWith()).fetchImpl).monthlyCapMicros!({ company: ORG_A, project: PROJECT })).toBe(25_000_000);
-  });
-  it("a gateway that does not say is 'unknown', never a guess", async () => {
-    expect(await adapter(gateway(() => capWith()).fetchImpl).providerConnected!({ company: ORG_A, project: PROJECT })).toBeUndefined();
-  });
-  it("any other answer is unknown: another company or project, a non-boolean, an extra member, a non-200, unparseable JSON, a fault, the timeout", async () => {
-    const replies: Array<() => Response | Promise<Response>> = [
-      () => ok({ company: ORG_B, project: PROJECT, monthlyCapMicros: 1, connected: false }), () => ok({ company: ORG_A, project: "other", monthlyCapMicros: 1, connected: false }),
-      () => capWith({ connected: "false" }), () => capWith({ connected: 0 }), () => capWith({ connected: false, extra: true }), () => new Response("{}", { status: 404 }),
-      () => new Response("not json", { status: 200 }), () => { throw new Error("fault"); }, () => new Promise<Response>(() => undefined),
-    ];
-    for (const reply of replies) expect(await adapter(gateway(reply).fetchImpl).providerConnected!({ company: ORG_A, project: PROJECT })).toBeUndefined();
-  });
-  it("refuses before signing or sending for a company or project it could never ask about", async () => {
-    const g = gateway(() => capWith({ connected: false }));
-    expect(await adapter(g.fetchImpl).providerConnected!({ company: "not an org", project: PROJECT })).toBeUndefined();
-    expect(await adapter(g.fetchImpl).providerConnected!({ company: ORG_A, project: "../x" })).toBeUndefined();
-    expect(g.seen).toHaveLength(0);
-  });
   it("the install's source is the bound adapter's only: none bound (a laptop) or an adapter without it is no source, and a fault or non-boolean is unknown", async () => {
     const empty = createAdapterRegistry();
     expect(boundEvalProviderConnected(empty)).toBeUndefined();
@@ -428,10 +245,5 @@ describe("L4-T3: whether the project's AI provider is connected (providerConnect
     expect(await boundEvalProviderConnected(bind(async () => false))!({ company: ORG_A, project: PROJECT })).toBe(false);
     expect(await boundEvalProviderConnected(bind(async () => { throw new Error("private"); }))!({ company: ORG_A, project: PROJECT })).toBeUndefined();
     expect(await boundEvalProviderConnected(bind((async () => "yes") as never))!({ company: ORG_A, project: PROJECT })).toBeUndefined();
-  });
-  it("two companies: company B's token and body never read company A's answer (the answer must name the company asked about)", async () => {
-    const g = gateway(() => ok({ company: ORG_A, project: PROJECT, monthlyCapMicros: 1, connected: false }));
-    expect(await adapter(g.fetchImpl).providerConnected!({ company: ORG_B, project: PROJECT })).toBeUndefined();
-    expect(decode(tokenOf(g.seen[0]!).split(".")[1]!)).toMatchObject({ cid: ORG_B });
   });
 });

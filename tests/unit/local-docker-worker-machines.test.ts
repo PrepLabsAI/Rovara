@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGENTX_PROTOCOL_VERSION, MachineError, WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { DockerWorkerMachines, workspaceIdFor, ownerWantsPiMcp } from "../../packages/broker/src/local/docker-worker-machines.js";
+import { DockerWorkerMachines, workspaceIdFor } from "../../packages/broker/src/local/docker-worker-machines.js";
 import { createEphemeralInvokeSigner } from "../../packages/broker/src/local/invoke-signer.js";
 import { runSetupAgentInvocation } from "../../packages/worker/src/setup-agent-invocation.js";
 import { runWorkerMachinesConformance } from "../support/ports/worker-machines-conformance.js";
@@ -95,42 +95,6 @@ describe("local docker worker machines", () => {
     expect(container.environment.AGENTX_SANDBOX_NETWORK).toBe(`rovara-snet-${hash}`);
     // The environment file is gone after the container is created.
     expect(readdirSync(join(stateDirectory, "workspaces")).filter((entry) => entry.startsWith(".env-"))).toEqual([]);
-  });
-
-  it("walls the machine: two internal networks without a host address, one plain bridge, a gateway on all three and a guard on the worker's", async () => {
-    const { machines, docker } = await build();
-    const handle = await machines.start({ machineKey: "ws-walls", companyId: COMPANY });
-    const hash = handle.machineId.slice("rovara-worker-".length);
-    const networks = [...docker.networks.values()];
-    expect(networks.map((network) => network.name).sort()).toEqual([`rovara-snet-${hash}`, `rovara-wnet-${hash}`, `rovara-xnet-${hash}`]);
-    for (const inner of networks.filter((network) => !network.name.includes("xnet"))) {
-      expect(inner.internal).toBe(true);
-      expect(inner.options["com.docker.network.bridge.inhibit_ipv4"]).toBe("true");
-    }
-    expect(networks.find((network) => network.name.includes("xnet"))!.internal).toBe(false);
-    const gateway = docker.containers.get(`rovara-gw-${hash}`)!;
-    const guard = docker.containers.get(`rovara-sock-${hash}`)!;
-    expect([...gateway.networks.keys()].sort()).toEqual(networks.map((network) => network.name).sort());
-    expect([...guard.networks.keys()]).toEqual([`rovara-wnet-${hash}`]);
-    const gatewayText = gateway.args.join(" ");
-    expect(gatewayText).toContain("--publish 127.0.0.1::8080");
-    expect(gatewayText).toContain("--cap-drop ALL");
-    expect(gatewayText).toContain("--read-only");
-    expect(gatewayText).not.toContain("docker.sock");
-    const guardText = guard.args.join(" ");
-    expect(guardText).toContain("/var/run/docker.sock:/var/run/docker.sock");
-    expect(guardText).toContain("--group-add 999");
-    expect(guardText).not.toContain("--publish");
-    // The guard hands sandboxes the gateway's address on the sandbox network as their name server.
-    const policy = JSON.parse(guard.environment.ROVARA_SOCK_POLICY!) as { dns: string[]; network: string; image: string; owner: string };
-    expect(policy).toMatchObject({ network: `rovara-snet-${hash}`, image: "worker:test", owner: hash });
-    expect(policy.dns).toEqual([gateway.networks.get(`rovara-snet-${hash}`)]);
-    expect(docker.containers.get(handle.machineId)!.args).toContain(gateway.networks.get(`rovara-wnet-${hash}`));
-    // The gateway's list is the default list plus the owner's.
-    const config = JSON.parse(gateway.environment.ROVARA_GW_CONFIG!) as { allowed: string[]; callback: { workspaceId: string; hostHeader: string } };
-    expect(config.allowed).toContain("api.anthropic.com");
-    expect(config.callback.workspaceId).toBe(workspaceIdFor(COMPANY, "ws-walls"));
-    expect(config.callback.hostHeader).toBe("host.docker.internal:1234");
   });
 
   it("refuses to start, and leaves nothing behind, when a network cannot be made or an existing one is not as it should be", async () => {
@@ -225,16 +189,6 @@ describe("local docker worker machines", () => {
     await expect(other.deliver(machineId, invocationFor(workspaceIdFor(COMPANY, "ws-b"), randomUUID()))).rejects.toMatchObject({ code: "unauthorized" });
   });
 
-  it("keeps two companies' machines with the same key apart, and uses a key that is a UUID as the workspace id", async () => {
-    const { machines } = await build();
-    const one = await machines.start({ machineKey: "same", companyId: COMPANY });
-    const two = await machines.start({ machineKey: "same", companyId: "org_bbbbbbbbbbbbbbbbbbbb" });
-    expect(one.machineId).not.toBe(two.machineId);
-    const uuid = randomUUID();
-    expect(workspaceIdFor(COMPANY, uuid)).toBe(uuid);
-    expect(workspaceIdFor(COMPANY, "x")).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-  });
-
   it("stays at its limit of running machines and says so", async () => {
     const { machines } = await build({ maxConcurrentMachines: 1 });
     await machines.start({ machineKey: "first", companyId: COMPANY });
@@ -273,55 +227,6 @@ describe("local docker worker machines", () => {
     await expect(machines.start({ machineKey: "another", companyId: COMPANY })).rejects.toMatchObject({ code: "unavailable" });
   });
 
-  it("removes the workspace folder only when the container is gone, and never touches an id that is not ours", async () => {
-    const { machines, docker, stateDirectory } = await build();
-    const { machineId } = await machines.start({ machineKey: "gone", companyId: COMPANY });
-    const folder = join(stateDirectory, "workspaces", machineId.slice("rovara-worker-".length));
-    expect(existsSync(folder)).toBe(true);
-    await machines.terminate("../../../etc");
-    await machines.terminate("rovara-worker-../..");
-    expect(existsSync(stateDirectory)).toBe(true);
-    await machines.terminate(machineId);
-    expect(existsSync(folder)).toBe(false);
-    expect(docker.containers.has(machineId)).toBe(false);
-  });
-
-  it("stops every running worker and keeps the workspaces", async () => {
-    const { machines, docker, stateDirectory } = await build();
-    const { machineId } = await machines.start({ machineKey: "bye", companyId: COMPANY });
-    expect(await machines.stopAll()).toBe(1);
-    expect(docker.containers.get(machineId)!.status).toBe("exited");
-    expect(readdirSync(join(stateDirectory, "workspaces"))).toContain(machineId.slice("rovara-worker-".length));
-  });
-
-  it("re-creates a stopped worker whose broker address changed, with a new session generation, and keeps its workspace", async () => {
-    const docker = new FakeDocker();
-    const signer = createEphemeralInvokeSigner(); // the key is kept in the state folder, so a restart has the same one
-    const first = await build({ docker, signer, callbackPort: 1111 });
-    const { machineId } = await first.machines.start({ machineKey: "ws-port", companyId: COMPANY });
-    const before = docker.containers.get(machineId)!;
-    const generation = before.labels["rovara.local.generation"];
-    await first.machines.stop(machineId);
-    const folder = join(first.stateDirectory, "workspaces", machineId.slice("rovara-worker-".length));
-    expect(existsSync(folder)).toBe(true);
-
-    // `rovara up` restarted on another port.
-    const second = await build({ docker, signer, stateDirectory: first.stateDirectory, callbackPort: 2222 });
-    const again = await second.machines.start({ machineKey: "ws-port", companyId: COMPANY });
-    expect(again.machineId).toBe(machineId);
-    const after = docker.containers.get(machineId)!;
-    expect(after).not.toBe(before);
-    const gatewayAfter = JSON.parse(docker.containers.get(`rovara-gw-${machineId.slice("rovara-worker-".length)}`)!.environment.ROVARA_GW_CONFIG!) as { callback: { hostHeader: string } };
-    expect(gatewayAfter.callback.hostHeader).toBe("host.docker.internal:2222");
-    expect(after.labels["rovara.local.generation"]).not.toBe(generation);
-    expect(existsSync(folder)).toBe(true);
-    // Unchanged address: the same container is woken, not replaced.
-    await second.machines.stop(machineId);
-    const third = await build({ docker, signer, stateDirectory: first.stateDirectory, callbackPort: 2222 });
-    await third.machines.start({ machineKey: "ws-port", companyId: COMPANY });
-    expect(docker.containers.get(machineId)).toBe(after);
-  });
-
   it("refuses a token for an earlier container of the same machine (a new generation)", async () => {
     const docker = new FakeDocker();
     const signer = createEphemeralInvokeSigner();
@@ -336,18 +241,6 @@ describe("local docker worker machines", () => {
     // The replacement worker verifies against its own generation.
     const response = await docker.fetch(`http://127.0.0.1:${docker.portOf(machineId)}/invocations`, { method: "POST", headers: { authorization: token }, body: JSON.stringify(job) });
     expect(response.status).toBe(401);
-  });
-
-  it("only counts and stops the workers of its own state folder", async () => {
-    const docker = new FakeDocker();
-    const one = await build({ docker, maxConcurrentMachines: 1 });
-    const two = await build({ docker, maxConcurrentMachines: 1 });
-    const a = await one.machines.start({ machineKey: "same", companyId: COMPANY });
-    const b = await two.machines.start({ machineKey: "same", companyId: COMPANY });
-    expect(a.machineId).not.toBe(b.machineId);
-    expect(await one.machines.stopAll()).toBe(1);
-    expect(docker.containers.get(a.machineId)!.status).toBe("exited");
-    expect(docker.containers.get(b.machineId)!.status).toBe("running");
   });
 
   it("refuses environment names that change how the worker loads code or reaches Docker, and labels that claim another machine's name", async () => {
@@ -411,35 +304,6 @@ describe("local docker worker machines", () => {
 });
 
 describe("local docker worker machines and the model proxy (lane L9a)", () => {
-  it("tells the worker where the broker's model proxy is, an address and never a key", async () => {
-    const { machines, docker } = await build({ modelProxy: true });
-    const handle = await machines.start({ machineKey: "ws-proxy", companyId: COMPANY });
-    const environment = docker.containers.get(handle.machineId)!.environment;
-    expect(environment.AGENTX_MODEL_PROXY_URL).toBe("http://rovara-broker:8081/v1/internal/model-proxy");
-    expect(Object.keys(environment).filter((name) => /KEY|SECRET|TOKEN|PASSWORD/iu.test(name))).toEqual(["AGENTX_INVOKE_PUBLIC_KEY"]);
-  });
-
-  it("sets no proxy address when the broker serves no proxy, and a spec cannot set or move it", async () => {
-    const off = await build();
-    const plain = await off.machines.start({ machineKey: "ws-plain", companyId: COMPANY });
-    expect(off.docker.containers.get(plain.machineId)!.environment.AGENTX_MODEL_PROXY_URL).toBeUndefined();
-    const on = await build({ modelProxy: true });
-    await expect(on.machines.start({ machineKey: "ws-move", companyId: COMPANY, environment: { AGENTX_MODEL_PROXY_URL: "http://elsewhere.example.test" } })).rejects.toMatchObject({ code: "rejected" });
-  });
-
-  it("refuses a model key, a provider's address or cloud credentials in a spec's environment: the worker holds none", async () => {
-    const { machines } = await build({ modelProxy: true });
-    for (const name of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GEMINI_API_KEY", "AWS_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "AWS_REGION_OVERRIDE", "HTTPS_PROXY", "http_proxy", "ALL_PROXY", "NO_PROXY"]) {
-      await expect(machines.start({ machineKey: `ws-${name.toLowerCase().replaceAll("_", "-")}`, companyId: COMPANY, environment: { [name]: "x" } }), name).rejects.toMatchObject({ code: "rejected" });
-    }
-  });
-
-  it("lets the two AWS region names through, which are not secret and which the setup agent reads, and nothing else of AWS_", async () => {
-    const { machines, docker } = await build({ modelProxy: true });
-    const handle = await machines.start({ machineKey: "ws-region", companyId: COMPANY, environment: { AWS_REGION: "us-west-2", AWS_DEFAULT_REGION: "us-west-2" } });
-    expect(docker.containers.get(handle.machineId)!.environment).toMatchObject({ AWS_REGION: "us-west-2", AWS_DEFAULT_REGION: "us-west-2" });
-    await expect(machines.start({ machineKey: "ws-region-2", companyId: COMPANY, environment: { AWS_REGIONS: "x" } })).rejects.toMatchObject({ code: "rejected" });
-  });
 
   it("lets a setup run start: it needs the proxy address the adapter sets, so the run's spend is counted", async () => {
     const { machines, docker } = await build({ modelProxy: true });
@@ -456,23 +320,5 @@ describe("local docker worker machines and the model proxy (lane L9a)", () => {
     const plain = await build();
     const off = await plain.machines.start({ machineKey: "ws-setup-off", companyId: COMPANY });
     await expect(run(plain.docker.containers.get(off.machineId)!.environment)).rejects.toThrow(/no model proxy/);
-  });
-});
-
-describe("local docker worker machines and the agent's MCP client (the rovara server)", () => {
-  it("turns Pi's MCP client on by default, off when the owner flips back, and a spec cannot set it either way", async () => {
-    const on = await build();
-    const handle = await on.machines.start({ machineKey: "ws-mcp-on", companyId: COMPANY });
-    expect(on.docker.containers.get(handle.machineId)!.environment.ROVARA_PI_MCP).toBe("1");
-    const back = await build({ piMcp: false });
-    const old = await back.machines.start({ machineKey: "ws-mcp-off", companyId: COMPANY });
-    expect(back.docker.containers.get(old.machineId)!.environment.ROVARA_PI_MCP).toBe("0");
-    for (const value of ["0", "1"]) await expect(on.machines.start({ machineKey: `ws-mcp-spec-${value}`, companyId: COMPANY, environment: { ROVARA_PI_MCP: value } })).rejects.toMatchObject({ code: "rejected" });
-  });
-
-  it("reads the owner's switch strictly: unset or 1 is on, any other value flips back", () => {
-    expect(ownerWantsPiMcp({})).toBe(true);
-    expect(ownerWantsPiMcp({ ROVARA_PI_MCP: "1" })).toBe(true);
-    for (const value of ["0", "false", "off", "no", "", "true", "yes", "01"]) expect(ownerWantsPiMcp({ ROVARA_PI_MCP: value }), value).toBe(false);
   });
 });

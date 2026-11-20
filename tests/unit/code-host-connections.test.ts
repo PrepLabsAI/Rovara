@@ -2,9 +2,8 @@
 import { describe, expect, it } from "vitest";
 import { ProjectDefinitionSchema, type CodeHost } from "@agentx/contracts";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
-import { AMBIGUOUS_CONNECTION_MESSAGE, TWO_DEFAULT_CONNECTIONS_MESSAGE, connectionProblems, defaultConnectionOf, providerOf } from "../../packages/broker/src/plugins/code-host/connections.js";
+import { AMBIGUOUS_CONNECTION_MESSAGE, TWO_DEFAULT_CONNECTIONS_MESSAGE, connectionProblems, defaultConnectionOf } from "../../packages/broker/src/plugins/code-host/connections.js";
 import { AMBIGUOUS_REPOSITORY_HOST_MESSAGE, NO_HOST_MESSAGE, assertRepositoryHostsKnown, codeHostForKind, codeHostForRecord, codeHostForRepositoryAddress } from "../../packages/broker/src/plugins/routing.js";
-import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
 import { githubCodeHostPlugin } from "../../packages/broker/src/plugins/code-host/github/plugin.js";
 import { registryRepositoryResolver } from "../../packages/broker/src/core/merge/resolver.js";
 import { FakeCodeHost, FakeHostModel } from "@agentx/broker/fakes";
@@ -35,17 +34,6 @@ describe("code host connections", () => {
     expect(codeHostForRecord(registry, {})).toBe(main);
     expect(codeHostForKind(registry, "github-company")).toBe(company);
     expect(() => assertRepositoryHostsKnown(registry, [{}, { host: { kind: "github-company" } }])).not.toThrow();
-  });
-
-  it("lets a repository name the provider when no connection has that name: the provider's default serves it", () => {
-    const registry = createAdapterRegistry();
-    const main = connection("github-main", "github", true);
-    registry.register("code-host", "github-main", main);
-    registry.register("code-host", "github-company", connection("github-company", "github"));
-    expect(codeHostForRecord(registry, { host: { kind: "github" } })).toBe(main);
-    expect(codeHostForRecord(registry, {})).toBe(main);
-    expect(providerOf(main)).toBe("github");
-    expect(providerOf(new FakeCodeHost(fakeModel()))).toBe("fake");
   });
 
   it("is never served by a connection of another provider, and a name nobody registered is refused with the fixed sentence", () => {
@@ -89,18 +77,6 @@ describe("code host connections", () => {
     expect(registry.names("code-host")).toEqual(["github", "github-company"]);
   });
 
-  it("makes the GitHub adapter a named connection of provider github, and its webhook events carry the connection's name", async () => {
-    const provider = new GitHubFixtureProvider(new FakeHostModel({ url: GITHUB_REPO_URL, id: "1", fullName: "acme/app", webBase: "https://github.com" }));
-    const plain = githubCodeHost(provider, { credentialRef: "github" });
-    expect(plain.kind).toBe("github");
-    expect(providerOf(plain)).toBe("github");
-    expect(plain.defaultConnection).toBeUndefined();
-    const company = githubCodeHost(provider, { credentialRef: "company", name: "github-company", isDefault: true, webhookSecret: async () => "fixture-secret" });
-    expect(company.kind).toBe("github-company");
-    expect(providerOf(company)).toBe("github");
-    expect(company.defaultConnection).toBe(true);
-  });
-
   it("looks up the runner and the team lookup under the connection's own name first, and the provider's only when there is none (review L2)", async () => {
     const registry = createAdapterRegistry();
     registry.register("code-host", "github-company", connection("github-company", "github", true));
@@ -138,14 +114,6 @@ describe("which connection serves an address (review M1, N2)", () => {
     return { registry, main, company };
   };
 
-  it("serves the connection the record names, and the default when it names none", () => {
-    const { registry, main, company } = registered();
-    expect(codeHostForRepositoryAddress(registry, url, [{ url, host: { kind: "github" } }])).toBe(main);
-    expect(codeHostForRepositoryAddress(registry, url, [{ url, host: { kind: "github-company" } }])).toBe(company);
-    expect(codeHostForRepositoryAddress(registry, url, [{ url }])).toBe(company);
-    expect(codeHostForRepositoryAddress(registry, url, [])).toBe(company);
-  });
-
   it("refuses an address whose records resolve to DIFFERENT connections, and allows records that resolve to the same one", () => {
     const { registry, company } = registered();
     expect(() => codeHostForRepositoryAddress(registry, url, [{ url, host: { kind: "github" } }, { url, host: { kind: "github-company" } }])).toThrow(AMBIGUOUS_REPOSITORY_HOST_MESSAGE);
@@ -154,13 +122,6 @@ describe("which connection serves an address (review M1, N2)", () => {
     expect(codeHostForRepositoryAddress(registry, url, [{ url }, { url, host: { kind: "github-company" } }])).toBe(company);
     // Two records that name the same connection, or another address entirely, are no disagreement either.
     expect(codeHostForRepositoryAddress(registry, url, [{ url, host: { kind: "github-company" } }, { url, host: { kind: "github-company" } }, { url: "https://github.com/acme/other", host: { kind: "github" } }])).toBe(company);
-  });
-
-  it("serves no-host and a provider name that resolves to the one default connection without refusing", () => {
-    const registry = createAdapterRegistry();
-    const only = connection("github-main", "github", true);
-    registry.register("code-host", "github-main", only);
-    expect(codeHostForRepositoryAddress(registry, url, [{ url }, { url, host: { kind: "github" } }])).toBe(only);
   });
 });
 

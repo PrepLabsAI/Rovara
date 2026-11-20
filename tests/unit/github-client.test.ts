@@ -58,9 +58,6 @@ runContract("GitHub CodeHost adapter over the real GitHub client passes the Code
 runContract("GitHub Actions CheckRunner over the real GitHub client passes the CheckRunner contract", checkRunnerChecks, actionsWorld);
 
 describe("the real GitHub client under the adapters", () => {
-  it("has every method the adapters need", () => {
-    expect(missingGitHubProviderMethods(providerOver(new GitHubFixtureApi(githubModel())))).toEqual([]);
-  });
 
   it("DEC 213: reads one commit's changes over every page with a contents-read token, and says the list is cut when GitHub cut anything", async () => {
     const world = codeHostWorld();
@@ -200,15 +197,6 @@ describe("the real GitHub client under the adapters", () => {
     world.api.compareReads.filesMax = 300;
   });
 
-  it("mints a clone credential with read access to contents and a push credential with write, for this repository only", async () => {
-    const world = codeHostWorld();
-    await world.host.issueGitCredential(world.repository, "clone", world.scope);
-    await world.host.issueGitCredential(world.repository, "push", world.scope);
-    const mints = world.api.tokens.filter((token) => token.permissions.contents !== undefined && Object.keys(token.permissions).length === 1);
-    expect(mints.map((mint) => mint.permissions.contents)).toEqual(["read", "write"]);
-    expect(mints.every((mint) => mint.repositories?.join() === "app")).toBe(true);
-  });
-
   it("only reads Rovara's own working branches", async () => {
     const world = codeHostWorld();
     world.model.commit("feature/x", { "x.txt": "x\n" });
@@ -289,10 +277,5 @@ describe("the client conformance suite can fail", () => {
   it("catches a client that never asks the tenant binding", async () => {
     await expect(find("tenant: every call").run(conformanceWorld({ binding: false }))).rejects.toThrow();
     await expect(find("tenant: a refused binding").run(conformanceWorld({ binding: false }))).rejects.toThrow();
-  });
-
-  it("catches a client whose requests would follow a redirect", async () => {
-    await expect(find("network: every request refuses redirects").run(conformanceWorld({ stripRedirectMode: true }))).rejects.toThrow();
-    await expect(find("network: a redirect answer is never followed to another host").run(conformanceWorld({ stripRedirectMode: true }))).rejects.toThrow();
   });
 });

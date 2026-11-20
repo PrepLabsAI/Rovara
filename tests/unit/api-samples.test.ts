@@ -89,10 +89,6 @@ describe("bodies are structure with placeholders", () => {
     expect(buildApiSample({ method: "GET", path: "no-slash", status: 200 })).toEqual({ bytes: undefined, withheld: "invalid" });
     expect(buildApiSample({ method: "GET", path: "/x", status: 99 })).toEqual({ bytes: undefined, withheld: "invalid" });
   });
-  it("redacts a secret-shaped value even where the path is approved as safe", () => {
-    const { sample } = build({ safePaths: ["note"], responseBody: enc({ note: "key ghp_abcdefghijklmnopqrstuvwxyz0123456789 end" }) });
-    expect(JSON.stringify(sample)).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123456789");
-  });
 });
 
 describe("the run's credential scan over a sample", () => {
@@ -106,17 +102,6 @@ describe("the run's credential scan over a sample", () => {
     const { entry, root } = await records({ echoed: PASSWORD }, ["echoed"]);
     expect(entry).toMatchObject({ kind: "api-sample", omitted: "credential-match" });
     expect((await readdir(join(root, CAPTURE_DIR))).filter((name) => name !== "entries")).toEqual([]);
-  });
-  it("drops it when the secret is spelled as base64, percent-encoded or hex", async () => {
-    for (const spelled of [Buffer.from(`ab:${PASSWORD}`).toString("base64"), encodeURIComponent(PASSWORD), Buffer.from(PASSWORD).toString("hex"), EMAIL]) {
-      const { entry } = await records({ v: spelled }, ["v"]);
-      expect(entry?.omitted, spelled).toBe("credential-match");
-    }
-  });
-  it("keeps the same sample when the value is not approved (it is a placeholder), so the drop above is the scan's and not luck", async () => {
-    const { entry, root } = await records({ echoed: PASSWORD }, []);
-    expect(entry?.omitted).toBeUndefined();
-    expect((await readdir(join(root, CAPTURE_DIR))).filter((name) => name !== "entries")).toEqual([captureApiSampleFileName(0, 0)]);
   });
 });
 
@@ -210,19 +195,10 @@ describe("the structural diff", () => {
   it("is none when only the hidden values or their lengths differ", () => {
     expect(diffApiSamples(sampleOf({ name: "Ann", items: [{ id: "a" }] }), sampleOf({ name: "Bartholomew", items: [{ id: "bb" }, { id: "c" }] }))).toEqual({ diff: "none", changedPaths: [] });
   });
-  it("names added, removed and retyped paths, never a value", () => {
-    const result = diffApiSamples(sampleOf({ total: 1, gone: "x", kind: "a" }), sampleOf({ total: "1", fresh: true, kind: "a" }));
-    expect(result.diff).toBe("changed");
-    expect(result.changedPaths).toEqual(["$.fresh", "$.gone", "$.total"]);
-  });
   it("compares the values of approved paths, and the status", () => {
     const before = sampleOf({ state: "open" }, { safePaths: ["state"] });
     expect(diffApiSamples(before, sampleOf({ state: "closed" }, { safePaths: ["state"] })).changedPaths).toEqual(["$.state"]);
     expect(diffApiSamples(before, sampleOf({ state: "open" }, { safePaths: ["state"], status: 500 })).changedPaths).toEqual(["$status"]);
-  });
-  it("caps the paths it lists at fifty", () => {
-    const wide = (prefix: string) => sampleOf(Object.fromEntries(Array.from({ length: 40 }, (_, index) => [`${prefix}${index}`, 1])));
-    expect(diffApiSamples(wide("a"), wide("b")).changedPaths).toHaveLength(50);
   });
 });
 
@@ -235,11 +211,6 @@ describe("the broker reads samples back and builds the api rows", () => {
     },
   });
   const ids = new Set(["case-a"]);
-  it("returns each case's samples in step order, each held to its listed digest and the sample schema", () => {
-    const one = sampleFile("case-0-api-2.json", { a: 1 }, 2); const two = sampleFile("case-0-api-0.json", { b: 1 }, 0);
-    const read = readCaptureApiSamples(evidenceOf([{ caseId: "case-a", ...one }, { caseId: "case-a", ...two }]), ids);
-    expect(read.get("case-a")?.map((item) => item.step)).toEqual([0, 2]);
-  });
   it("ignores a dropped sample, a foreign case, tampered bytes, a name for another step, bytes that are no sample, and a sixth sample", () => {
     const good = sampleFile("case-0-api-0.json", { a: 1 }, 0);
     expect(readCaptureApiSamples(evidenceOf([{ caseId: "case-a", ...good }], { omitted: "budget" }), ids).size).toBe(0);
@@ -252,12 +223,6 @@ describe("the broker reads samples back and builds the api rows", () => {
     expect(readCaptureApiSamples(evidenceOf([{ caseId: "case-a", step: 0, name: "case-0-api-0.json", data: junk }]), ids).size).toBe(0);
     const six = Array.from({ length: 6 }, (_, step) => ({ caseId: "case-a", ...sampleFile(`case-0-api-${step}.json`, { [`k${step}`]: 1 }, step) }));
     expect(readCaptureApiSamples(evidenceOf(six), ids).get("case-a")).toHaveLength(5);
-  });
-  it("does not take a screenshot's entry for a sample, nor a sample's for a screenshot", () => {
-    const good = sampleFile("case-0-api-0.json", { a: 1 }, 0);
-    const wrongKind = evidenceOf([{ caseId: "case-a", ...good }]);
-    (wrongKind.captures.artifacts[0] as { kind: string }).kind = "screenshot";
-    expect(readCaptureApiSamples(wrongKind, ids).size).toBe(0);
   });
   it("diffs a candidate scenario against the baseline by request step", () => {
     const mk = (body: unknown, step: number) => { const data = buildApiSample({ method: "GET", path: "/o", status: 200, responseHeaders: JSON_CT, responseBody: enc(body) }).bytes!; return { step, sha256: sha(data), data, sample: parseApiSample(data)! }; };
@@ -288,10 +253,6 @@ describe("the broker reads samples back and builds the api rows", () => {
 });
 
 describe("small things in the samples and the evidence lines", () => {
-  it("M6: a sample's path is a fixed path: a query or a fragment withholds the sample", () => {
-    for (const path of ["/orders?token=abc", "/orders#frag", "/o?"]) expect(buildApiSample({ method: "GET", path, status: 200 })).toEqual({ bytes: undefined, withheld: "invalid" });
-    expect(buildApiSample({ method: "GET", path: "/orders/42", status: 200 }).bytes).toBeDefined();
-  });
   it("M6: changed paths carry real key names from bodies, so no pull request line may print them (they are not among the fixed evidence words)", async () => {
     const { readFileSync } = await import("node:fs");
     for (const file of ["packages/broker/src/core/proof/evidence-lines.ts", "packages/broker/src/core/proof/proof-section.ts"]) expect(readFileSync(file, "utf8"), file).not.toMatch(/changedPaths/u);

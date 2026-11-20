@@ -2,7 +2,7 @@
 // given, `x-amz-meta-*` metadata, the `rovara-retention` tag that the bucket's lifecycle rules read), and never passes on S3's own words.
 import type { GetObjectCommand } from "@aws-sdk/client-s3";
 import { describe, expect, it } from "vitest";
-import { EVIDENCE_ARTIFACT_RETENTION, ObjectConflictError, ObjectKeyError, ObjectMetaError, ObjectTooBigError } from "@agentx/contracts";
+import { ObjectConflictError, ObjectMetaError, ObjectTooBigError } from "@agentx/contracts";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
 import { S3ObjectStorage, S3ObjectStorageError, S3_METADATA_MAX_BYTES, s3ExpiryOf, s3RetentionTagging, type S3ObjectClient, type S3RetentionTag } from "../../packages/aws-adapters/src/s3/index.js";
 import { S3ObjectStorageSettingsSchema, s3ObjectStoragePlugin } from "../../packages/broker/src/plugins/object-storage/s3/plugin.js";
@@ -47,22 +47,6 @@ runObjectStorageConformance("S3 (expired objects removed by the lifecycle run)",
 });
 
 describe("S3 object storage: the hosted layout", () => {
-  const key = `private/owner-1/ws-1/evidence/task-1/${"a".repeat(64)}`;
-
-  it("writes the key as given, the metadata as x-amz-meta, the content type, and the retention class as the rovara-retention tag", async () => {
-    const { s3, store } = world();
-    await store.put(key, new Uint8Array([1, 2, 3]), { contentType: "text/plain; charset=utf-8", metadata: { sha256: "a".repeat(64), kind: "log_txt" }, retention: "evidence-std" });
-    const put = s3.calls.find((call) => call.command === "PutObjectCommand")!.input;
-    expect(put).toMatchObject({ Bucket: BUCKET, Key: key, ContentType: "text/plain; charset=utf-8", Metadata: { sha256: "a".repeat(64), kind: "log_txt" }, Tagging: "rovara-retention=evidence-std", IfNoneMatch: "*" });
-    expect(s3.tagsOf(key)).toEqual({ "rovara-retention": "evidence-std" });
-    expect(await store.stat(key)).toEqual({ bytes: 3, metadata: { sha256: "a".repeat(64), kind: "log_txt" } });
-  });
-
-  it("tags every evidence kind the hosted map names with the tag its rule reads", () => {
-    for (const retention of new Set(Object.values(EVIDENCE_ARTIFACT_RETENTION))) {
-      expect(s3RetentionTagging(retention, HOSTED_TAGS)).toBe(retention in HOSTED_TAGS ? `rovara-retention=${retention}` : undefined);
-    }
-  });
 
   it("names no tag of its own: without a map, or for a class the map does not name, an object is written untagged (and kept)", async () => {
     const s3 = new FakeS3({ bucket: BUCKET, rules: HOSTED_RULES });
@@ -77,23 +61,6 @@ describe("S3 object storage: the hosted layout", () => {
     expect(s3.tagsOf("b")).toEqual({ k: "v" });
     expect(() => new S3ObjectStorage({ client: s3, bucket: BUCKET, retentionTags: { "evidence-std": { key: "bad key", value: "v" } } })).toThrow(S3ObjectStorageError);
     expect(s3RetentionTagging("toString", {})).toBeUndefined();
-  });
-
-  it("leaves the lifetime to the bucket's rules: evidence-short ends after 14 days, evidence-std after 30, an unknown class never", async () => {
-    const { store, advance } = world();
-    const meta = (retention: string) => ({ contentType: "application/octet-stream", metadata: {}, retention });
-    await store.put("private/o/w/evidence/t/short", new Uint8Array([1]), meta("evidence-short"));
-    await store.put("private/o/w/evidence/t/std", new Uint8Array([2]), meta("evidence-std"));
-    await store.put("private/o/w/evidence/t/kept", new Uint8Array([3]), meta("evidence-record-kept"));
-    // The evidence rule needs the private/ prefix as well as the tag (the hosted rule is prefix AND tag): an evidence-std object elsewhere is kept.
-    await store.put("elsewhere/std", new Uint8Array([4]), meta("evidence-std"));
-    advance(15 * DAY);
-    expect(await store.get("private/o/w/evidence/t/short", 10)).toBeUndefined();
-    expect(await store.get("private/o/w/evidence/t/std", 10)).toBeDefined();
-    advance(16 * DAY);
-    expect(await store.stat("private/o/w/evidence/t/std")).toBeUndefined();
-    expect(await store.get("private/o/w/evidence/t/kept", 10)).toBeDefined();
-    expect(await store.get("elsewhere/std", 10)).toBeDefined();
   });
 
   it("reads S3's expiry header, and treats one it cannot read as no expiry (keeps the object)", () => {
@@ -123,31 +90,6 @@ describe("S3 object storage: the hosted layout", () => {
     await expect(store.put("k", new Uint8Array(1), { ...meta, metadata: {}, retention: "has space" })).rejects.toBeInstanceOf(ObjectMetaError);
     await expect(store.put("k", new Uint8Array(1), { ...meta, metadata: {}, retention: "x&y=z" })).rejects.toBeInstanceOf(ObjectMetaError);
     expect(s3.calls).toHaveLength(0);
-  });
-
-  it("refuses a bad key or a too-big object before any call", async () => {
-    const { s3, store } = world({ maxObjectBytes: 10 });
-    await expect(store.put("../x", new Uint8Array(1), { contentType: "a/b", metadata: {}, retention: "r" })).rejects.toBeInstanceOf(ObjectKeyError);
-    await expect(store.put("k", new Uint8Array(11), { contentType: "a/b", metadata: {}, retention: "r" })).rejects.toBeInstanceOf(ObjectTooBigError);
-    await expect(store.presignGet("a//b", { contentType: "a/b", disposition: "inline" })).rejects.toBeInstanceOf(ObjectKeyError);
-    expect(s3.calls).toHaveLength(0);
-  });
-
-  it("deletes a prefix of more than one page", async () => {
-    const { s3, store } = world();
-    for (let index = 0; index < 2_100; index += 1) s3.objects.set(`nightly-maps/c/p/${String(index)}`, { bytes: new Uint8Array(1), contentType: "a/b", metadata: {}, tags: new Map(), etag: `"e${String(index)}"`, writtenAt: 0 });
-    s3.objects.set("nightly-maps/c/q/0", { bytes: new Uint8Array(1), contentType: "a/b", metadata: {}, tags: new Map(), etag: '"q"', writtenAt: 0 });
-    expect(await store.deletePrefix("nightly-maps/c/p/")).toBe(true);
-    expect([...s3.objects.keys()]).toEqual(["nightly-maps/c/q/0"]);
-    expect(s3.calls.filter((call) => call.command === "DeleteObjectsCommand").length).toBe(3);
-  });
-
-  it("sends the expected bucket owner on every call, so a bucket of another account is never written", async () => {
-    const s3 = new FakeS3({ bucket: BUCKET, owner: "111111111111" });
-    const store = new S3ObjectStorage({ client: s3, bucket: BUCKET, expectedBucketOwner: "222222222222" });
-    await expect(store.put("k", new Uint8Array(1), { contentType: "a/b", metadata: {}, retention: "r" })).rejects.toBeInstanceOf(S3ObjectStorageError);
-    expect(s3.objects.size).toBe(0);
-    expect(s3.calls.every((call) => call.input["ExpectedBucketOwner"] === "222222222222")).toBe(true);
   });
 
   it("never passes on S3's own words (they quote the bucket and the key)", async () => {

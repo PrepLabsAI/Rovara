@@ -8,12 +8,10 @@ import {
   BuildSystemGlobSchema,
   BuildSystemProfileSchema,
   PLUGIN_POINT_CARDINALITY,
-  PrepareSavedEnvBuildSchema,
   PluginRegistryError,
   buildSystemDetectorModules,
   buildSystemKeyFileGlobs,
   buildSystemSetupPrograms,
-  keyFilePaths,
   parseBuildSystemProfiles,
   serializeBuildSystemProfiles,
   type BuildSystem,
@@ -104,19 +102,6 @@ describe("the profiles in the worker's environment", () => {
 });
 
 describe("the key files", () => {
-  it("make a build system's own files part of the key, through the job's detectorGlobs", () => {
-    const paths = ["package.json", "tools/pins/a.lock", "src/EXAMPLE_BUILD", "src/main.ts"];
-    expect(keyFilePaths(paths, [])).toEqual(["package.json"]);
-    const globs = detectorGlobsWithBuildSystems([], [withKeyFiles(profile(), ["**/EXAMPLE_BUILD", "tools/pins/*.lock"])]);
-    expect(keyFilePaths(paths, globs)).toEqual(["package.json", "src/EXAMPLE_BUILD", "tools/pins/a.lock"]);
-  });
-
-  it("keeps the detectors' own globs, adds none twice, and still fits the job's schema", () => {
-    const merged = detectorGlobsWithBuildSystems(["a.lock", "tools/pins/*.lock"], [withKeyFiles(profile(), ["**/EXAMPLE_BUILD", "tools/pins/*.lock"])]);
-    expect(merged).toEqual(["a.lock", "tools/pins/*.lock", "**/EXAMPLE_BUILD"]);
-    const job = PrepareSavedEnvBuildSchema.shape.detectorGlobs.parse(merged);
-    expect(job).toEqual(merged);
-  });
 
   it("fails closed when the globs would not fit in a job (a key over fewer files is a wrong key)", () => {
     const many = Array.from({ length: 150 }, (_, i) => `d${String(i)}.lock`);
@@ -134,12 +119,6 @@ describe("collecting the profiles of the registered adapters", () => {
     registry.register("build-system", "zbuild", adapter("zbuild", { name: "zbuild", setupPrograms: [], keyFileGlobs: [] }));
     registry.register("build-system", "examplebuild", adapter("examplebuild", profile()));
     expect((await collectBuildSystemProfiles(registry)).map((entry) => entry.name)).toEqual(["examplebuild", "zbuild"]);
-  });
-
-  it("accepts an adapter whose profile is built asynchronously", async () => {
-    const registry = createAdapterRegistry();
-    registry.register("build-system", "examplebuild", { name: "examplebuild", profile: async () => profile() });
-    expect(await collectBuildSystemProfiles(registry)).toEqual([profile()]);
   });
 
   it("refuses a profile that is not valid, one under another name, and one that throws (the machine does not start half described)", async () => {

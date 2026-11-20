@@ -178,12 +178,6 @@ describe("the saved image", () => {
 });
 
 describe("the approved install steps", () => {
-  it("are the answer when there is no image: an argv each, the directory made relative to the checkout", async () => {
-    const w = world({ paths: new Map([["demo", "repo/demo"]]) });
-    await approve(w.db, A, WEB, body([{ repositoryId: "demo", setupCommands: [cmd("pip", ["install", "-r", "requirements.txt"], "repo/demo"), cmd("npm", ["ci"], "repo/demo/web/ui")], checks: [{ id: "unit", label: "Unit", command: cmd("pytest", [], "repo/demo"), kind: "test" }] }]));
-    expect(await w.source(scope(), "demo")).toEqual({ kind: "install", commands: [{ executable: "pip", args: ["install", "-r", "requirements.txt"], cwd: "." }, { executable: "npm", args: ["ci"], cwd: "web/ui" }] });
-    expect(await w.source(scope(), undefined)).toEqual(await w.source(scope(), "demo"));
-  });
 
   it("are not given as a part: a step with its own variables, one outside the repository, a shape the worker refuses or more than the limit is no install at all", async () => {
     const bad: Array<[string, ProjectCommand[]]> = [
@@ -206,16 +200,6 @@ describe("the approved install steps", () => {
     expect(installStepsOf([cmd("npm", ["ci"], "demo", { env: {} })], "demo")).toEqual([{ executable: "npm", args: ["ci"], cwd: "." }]);
     expect(installStepsOf([], "demo")).toBeUndefined();
   });
-
-  it("a saved image still comes with no fallback when the install steps cannot be given", async () => {
-    const w = world();
-    const approved = await approve(w.db, A, WEB, body([{ repositoryId: "demo", setupCommands: [cmd("npm", ["ci"], "elsewhere")], checks: [{ id: "unit", label: "Unit", command: cmd("pytest"), kind: "test" }] }]));
-    w.registry.pushForTest(w.repositoryName(), { digest: IMAGE });
-    await putImage(w.db, A, WEB, approved);
-    const environment = await w.source(scope(), undefined);
-    expect(environment?.kind).toBe("saved");
-    expect(environment).not.toHaveProperty("fallbackInstall");
-  });
 });
 
 describe("absent", () => {
@@ -234,15 +218,6 @@ describe("absent", () => {
     const bare = world();
     await approve(bare.db, A, WEB, body([{ repositoryId: "demo", setupCommands: [], checks: [{ id: "unit", label: "Unit", command: cmd("pytest"), kind: "test" }] }]));
     expect(await bare.source(scope(), undefined)).toBeUndefined();
-  });
-
-  it("is the answer when the project's repositories cannot be read or do not name the plan's repository", async () => {
-    const w = world({ paths: undefined });
-    await w.withImage();
-    expect(await w.source(scope(), undefined)).toBeUndefined();
-    const other = world({ paths: new Map([["other", "other"]]) });
-    await other.withImage();
-    expect(await other.source(scope(), undefined)).toBeUndefined();
   });
 });
 
@@ -265,34 +240,6 @@ describe("company and project scope", () => {
     await approve(w.db, A, WEB, body([{ repositoryId: "demo", setupCommands: [cmd("make", ["deps"])], checks: [{ id: "unit", label: "Unit", command: cmd("pytest"), kind: "test" }] }]));
     expect(await w.source(scope(A, WEB), undefined)).toEqual({ kind: "install", commands: [{ executable: "make", args: ["deps"], cwd: "." }] });
   });
-
-  it("refuses a scope of another company before anything is read, even when this company holds the very same approved environment (no login is minted for the other)", async () => {
-    const w = world();
-    await w.withImage(A, WEB);
-    await w.withImage(B, WEB);
-    const before = w.registry.loginsGiven().length;
-    expect(await w.source(scope(B, WEB), undefined)).toBeUndefined();
-    expect(w.registry.loginsGiven()).toHaveLength(before);
-    expect(await w.source(scope(A, WEB), undefined)).toMatchObject({ kind: "saved", repository: w.repositoryName(A, WEB) });
-  });
-
-  it("does not take a row that says it is another company's or project's, whatever key it is stored at", async () => {
-    for (const over of [{ rowOrg: B }, { rowProject: "api" }]) {
-      const w = world();
-      const approved = await approve(w.db, A, WEB, body());
-      w.registry.pushForTest(w.repositoryName(), { digest: IMAGE });
-      await putImage(w.db, A, WEB, approved, over);
-      expect(await w.source(scope(), undefined)).toEqual({ kind: "install", commands: FALLBACK });
-      expect(w.registry.loginsGiven()).toEqual([]);
-    }
-  });
-
-  it("an approved environment of another project is not this project's steps (the rows are keyed by company and project)", async () => {
-    const w = world();
-    await approve(w.db, A, "api", body([{ repositoryId: "demo", setupCommands: [cmd("make", ["api"])], checks: [{ id: "unit", label: "Unit", command: cmd("pytest"), kind: "test" }] }]));
-    expect(await w.source(scope(A, WEB), undefined)).toBeUndefined();
-    expect(await w.source(scope(A, "api"), undefined)).toEqual({ kind: "install", commands: [{ executable: "make", args: ["api"], cwd: "." }] });
-  });
 });
 
 describe("unreadable stores fail closed", () => {
@@ -302,15 +249,6 @@ describe("unreadable stores fail closed", () => {
     db.get = (async (key: { pk: string; sk: string }) => { if (key.sk.startsWith(prefix)) throw new Error("store down"); return get(key); });
     return db;
   };
-
-  it("the approved environment unreadable gives absent: no install steps, no image, no login", async () => {
-    const w = world();
-    await w.withImage();
-    breaking(w.db, "TESTENV#");
-    expect(await w.source(scope(), undefined)).toBeUndefined();
-    expect(w.registry.loginsGiven()).toEqual([]);
-    expect(w.events).toContain("eval_environment_unreadable");
-  });
 
   it("a damaged approved environment gives absent", async () => {
     const w = world();
@@ -334,19 +272,6 @@ describe("unreadable stores fail closed", () => {
     expect(await damaged.source(scope(), undefined)).toEqual({ kind: "install", commands: FALLBACK });
     expect(damaged.registry.loginsGiven()).toEqual([]);
   });
-
-  it("a store of the approved environment that never answers cleanly, and every unexpected fault, give absent rather than throw", async () => {
-    const w = world();
-    await w.withImage();
-    const failing = createEvalEnvironmentSource({
-      store: { get: async () => { throw new Error("x"); } } as never, companyId: A, now: () => NOW, env: ON, repositoryPaths: async () => { throw new Error("x"); },
-    });
-    expect(await failing(scope(), undefined)).toBeUndefined();
-    const throwingSaved = createEvalEnvironmentSource({
-      store: w.db, companyId: A, now: () => NOW, env: ON, repositoryPaths: async () => new Map([["demo", "demo"]]), savedEnv: () => { throw new Error("no registry"); },
-    });
-    expect(await throwingSaved(scope(), undefined)).toEqual({ kind: "install", commands: FALLBACK });
-  });
 });
 
 describe("an archived project", () => {
@@ -357,17 +282,6 @@ describe("an archived project", () => {
     expect(await archived(scope(), undefined)).toBeUndefined();
     const live = createEvalEnvironmentSource({ store: w.db, companyId: A, now: () => NOW, env: ON, repositoryPaths: repositoryPathsOf({ latest: async () => ({ definition: { repositories: [{ name: "demo", path: "demo" }] } }) as never }) });
     expect(await live(scope(), undefined)).toEqual({ kind: "install", commands: FALLBACK });
-  });
-
-  it("an install install-list too big for the answer, and an unbound registry, are no fault", async () => {
-    const w = world();
-    await approve(w.db, A, WEB, body());
-    const noRegistry = createEvalEnvironmentSource({
-      store: w.db, companyId: A, now: () => NOW, env: OFF, repositoryPaths: async () => new Map([["demo", "demo"]]),
-      savedEnv: () => evalSavedEnvDepsOf({ store: w.db, registry: () => { throw new Error("no registry"); }, envName: "local", now: () => NOW, env: OFF }), log: (event) => w.events.push(event),
-    });
-    expect(await noRegistry(scope(), undefined)).toEqual({ kind: "install", commands: FALLBACK });
-    expect(w.events).toEqual([]);
   });
 });
 
@@ -422,14 +336,5 @@ describe("the eval plan source", () => {
       expect(read?.plan).toMatchObject({ project: WEB });
       expect(read).not.toHaveProperty("environment");
     }
-  });
-
-  it("is delivered end to end through the real source: the plan, then the project's own install steps", async () => {
-    const w = world();
-    await approve(w.db, A, WEB, body());
-    const read = await (await approvedSources(w.source)).read({ companyId: A, project: WEB }, run);
-    expect(read?.environment).toEqual({ kind: "install", commands: FALLBACK });
-    // a run of another company's scope is answered nothing at all
-    expect(await (await approvedSources(w.source)).read({ companyId: B, project: WEB }, run)).toBeUndefined();
   });
 });

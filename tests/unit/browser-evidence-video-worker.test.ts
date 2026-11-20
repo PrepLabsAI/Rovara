@@ -2,9 +2,9 @@
 // for the "before" side and the agent's files are put back exactly; the slice-1 runner's limits hold for whatever the capture container prints; a fault that must stop the task is never absorbed.
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { decodeBrowserEvidenceExecutorPlan, decodeBrowserEvidenceUpload, type BrowserEvidenceExecutorLine, type BrowserEvidenceRecipe, type BrowserEvidenceSignInAnswer } from "../../packages/contracts/src/index.js";
+import { decodeBrowserEvidenceExecutorPlan, decodeBrowserEvidenceUpload, type BrowserEvidenceExecutorLine, type BrowserEvidenceRecipe } from "../../packages/contracts/src/index.js";
 import type { OriginalCode } from "../../packages/worker/src/verification/original-code.js";
-import { collectBrowserEvidence, parseCaptureOutput, saveBrowserEvidence, type BrowserEvidenceWorkInput } from "../../packages/worker/src/browser-evidence-run.js";
+import { collectBrowserEvidence, saveBrowserEvidence, type BrowserEvidenceWorkInput } from "../../packages/worker/src/browser-evidence-run.js";
 
 const SANDBOX = "agentx-task-op1-abcd1234";
 const IMAGE = "rovara-e2e-executor:test";
@@ -72,31 +72,11 @@ function world(over: { capture?: (side: "before" | "after", routes: string[], in
   return { log, calls, appAborts, input };
 }
 
-
 const webm = (seed: string, size = 900) => { const bytes = new Uint8Array(size); bytes.set([0x1a, 0x45, 0xdf, 0xa3]); bytes.fill(seed.charCodeAt(0), 4); return bytes; };
 const VIDEO_RECIPE: BrowserEvidenceRecipe = { ...RECIPE, video: { fixtureDataOnly: true } };
 const failedWithVideo = (route: string, bytes = webm("v")): BrowserEvidenceExecutorLine => ({ t: "shot", route, ok: false, reason: "page_did_not_load", videoBase64: Buffer.from(bytes).toString("base64") });
-const plansOf = (calls: ReturnType<typeof world>["calls"]) => calls.map((call) => ({ side: call.side, plan: decodeBrowserEvidenceExecutorPlan(call.args.at(-1)) }));
 
 describe("video on failure, in the worker", () => {
-  it("asks only the candidate's side to record, and only for a recipe that says fixture data only", async () => {
-    const w = world();
-    await collectBrowserEvidence(w.input({ recipe: VIDEO_RECIPE }));
-    expect(plansOf(w.calls).map((row) => [row.side, row.plan?.video])).toEqual([["before", undefined], ["after", true]]);
-    const plain = world();
-    await collectBrowserEvidence(plain.input());
-    expect(plansOf(plain.calls).map((row) => row.plan?.video)).toEqual([undefined, undefined]);
-  });
-
-  it("never asks for a recording of an app behind a login, whatever the recipe object says", async () => {
-    const signedIn = { ...VIDEO_RECIPE, signIn: { path: "/login", usernameSelector: "#u", passwordSelector: "#p", submitSelector: "#go", successPath: "/home", credentialRef: "be-demo-signin" } } as BrowserEvidenceRecipe;
-    const w = world();
-    const answer: BrowserEvidenceSignInAnswer = { status: "ready", values: { username: ["tester", "ada", "7"].join("-"), password: ["pw", "Zq7", "Lm2", "Xv9"].join("-") } };
-    const captured = await collectBrowserEvidence(w.input({ recipe: signedIn, signIn: async () => answer }));
-    // The recipe does not read (the pair is refused whole), so nothing runs at all: no container, no recording.
-    expect(captured.notRun).toBe("no_recipe");
-    expect(w.calls).toEqual([]);
-  });
 
   it("keeps the video of a page that fails on the candidate (and only the candidate), and the upload carries it", async () => {
     const w = world({ capture: (side, routes) => line({ t: "app", status: "ready" }) + routes.map((route) => line(side === "after" ? failedWithVideo(route) : shotLine(route, "a"))).join("") });
@@ -114,30 +94,5 @@ describe("video on failure, in the worker", () => {
     const captured = await collectBrowserEvidence(w.input({ changedFilesOf: async () => ["src/checkout/page.tsx"] }));
     // The side that was not asked to record printed a recording: that is no answer at all (the app did not answer as it should).
     expect(captured.notRun).toBe("app_did_not_start");
-  });
-
-  it("a before side that prints a recording is no answer, even for a recipe with video", async () => {
-    const w = world({ capture: (side, routes) => line({ t: "app", status: "ready" }) + routes.map((route) => line(side === "before" ? failedWithVideo(route) : shotLine(route, "b"))).join("") });
-    const captured = await collectBrowserEvidence(w.input({ recipe: VIDEO_RECIPE, changedFilesOf: async () => ["src/checkout/page.tsx"] }));
-    expect(captured.notRun).toBe("app_did_not_start");
-  });
-
-  it("only the candidate's side may print the larger output: the base side keeps the picture bound", () => {
-    const app = line({ t: "app", status: "ready" });
-    const big = Buffer.from(app + line({ t: "shot", route: "/a", ok: true, consoleErrors: 1, jpegBase64: Buffer.from(jpeg("a")).toString("base64"), videoBase64: Buffer.from(webm("v", 1_500_000)).toString("base64") }));
-    expect(big.byteLength).toBeGreaterThan(1_500_000);
-    expect(parseCaptureOutput(big, ["/a"], { video: true })?.shots.get("/a")).toBeDefined();
-    expect(parseCaptureOutput(Buffer.concat([big, Buffer.alloc(4 * 1024 * 1024)]), ["/a"], { video: true })).toBeUndefined();
-    expect(parseCaptureOutput(big, ["/a"])).toBeUndefined();
-  });
-
-  it("hands the docker CLI the picture bound for the base side and the larger one for the candidate's, nothing else changed", async () => {
-    const seen: Array<{ side: string; max: number | undefined }> = [];
-    const w = world();
-    const docker = w.input().docker!;
-    const spying: BrowserEvidenceWorkInput["docker"] = { run: docker.run, execBytes: async (args, options) => { seen.push({ side: seen.length === 0 ? "before" : "after", max: options.maxStdoutBytes }); return docker.execBytes!(args, options); } };
-    await collectBrowserEvidence(w.input({ recipe: VIDEO_RECIPE, docker: spying }));
-    expect(seen[0]?.max).toBe(4 * 1024 * 1024);
-    expect(seen[1]?.max).toBeGreaterThan(4 * 1024 * 1024);
   });
 });

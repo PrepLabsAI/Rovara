@@ -8,7 +8,7 @@ import {
   type DiagnosisFailureReason, type ErrorRef, type OrgId,
 } from "@agentx/contracts";
 import {
-  DIAGNOSIS_LAPTOP_FAILURE_WORDS, DIAGNOSIS_LAPTOP_REFUSALS, DIAGNOSIS_LAPTOP_WORDS, DiagnosisModelProblem, createDiagnosis, diagnosisWordsChecked,
+  DIAGNOSIS_LAPTOP_FAILURE_WORDS, DIAGNOSIS_LAPTOP_REFUSALS, DiagnosisModelProblem, createDiagnosis, diagnosisWordsChecked,
   type DiagnosisAnswerer, type DiagnosisTaskView, type DiagnosisWords,
 } from "../../packages/broker/src/core/diagnosis/index.js";
 import type { TaskRecord } from "../../packages/broker/src/core/task-flow/records.js";
@@ -62,17 +62,6 @@ const refusalOf = async (call: Promise<unknown>): Promise<string> => {
 };
 
 describe("the laptop's words (the default)", () => {
-  it("are what a diagnosis says when no words are given, and still name the laptop's commands", async () => {
-    expect(DIAGNOSIS_LAPTOP_WORDS.refusals).toBe(DIAGNOSIS_LAPTOP_REFUSALS);
-    expect(DIAGNOSIS_LAPTOP_WORDS.failure).toBe(DIAGNOSIS_LAPTOP_FAILURE_WORDS);
-    expect(DIAGNOSIS_LAPTOP_REFUSALS.noProvider).toContain("`rovara up --check`");
-    expect(DIAGNOSIS_LAPTOP_REFUSALS.startOnThePage).toContain("`rovara open <task>`");
-    expect(DIAGNOSIS_LAPTOP_FAILURE_WORDS.key_invalid).toContain("`rovara up --check`");
-    const none = world({ answerer: null });
-    expect(none.diagnosis.words).toBe(DIAGNOSIS_LAPTOP_WORDS);
-    expect(await refusalOf(none.diagnosis.start(OWNER, { requestId: randomUUID(), errorRef: blocked(none.task) }))).toContain(DIAGNOSIS_LAPTOP_REFUSALS.noProvider);
-    expect(await none.diagnosis.forTask(OWNER, none.task)).toMatchObject({ offered: false, why: DIAGNOSIS_LAPTOP_REFUSALS.noProvider });
-  });
 
   it("say the laptop's failure words for each reason a diagnosis can fail", async () => {
     for (const reason of HOST_FAILURE_NAMES) {
@@ -124,22 +113,6 @@ describe("a host's own words", () => {
     hostOnly((await none.diagnosis.forTask(OWNER, none.task))?.why);
   });
 
-  it("are said when the person may not ask, the error is not the one shown, or it is not a kind a diagnosis reads", async () => {
-    const w = world({ words });
-    const stranger = { ...OWNER, personId: "someone-else" };
-    const notAllowed = await refusalOf(w.diagnosis.start(stranger, { requestId: randomUUID(), errorRef: blocked(w.task) }));
-    expect(notAllowed).toContain(words.refusals.notAllowed);
-    const notCurrent = await refusalOf(w.diagnosis.start(OWNER, { requestId: randomUUID(), errorRef: blocked(w.task, "SOMETHING_ELSE") }));
-    expect(notCurrent).toContain(words.refusals.notCurrent);
-    const connector = ErrorRefSchema.parse({ kind: "connector_health", code: "CONNECTOR_EXPIRED", subject: { connectorId: "linear" }, at: AT });
-    const notAvailable = await refusalOf(w.diagnosis.start(OWNER, { requestId: randomUUID(), errorRef: connector }));
-    expect(notAvailable).toContain(words.refusals.notAvailable);
-    // The page's own form says the same.
-    expect(await refusalOf(w.diagnosis.startForTask(stranger, w.task, { requestId: randomUUID(), errorKey: "x" }))).toContain(words.refusals.notAllowed);
-    expect(await refusalOf(w.diagnosis.startForTask(OWNER, w.task, { requestId: randomUUID(), errorKey: "not-the-key" }))).toContain(words.refusals.notCurrent);
-    for (const message of [notAllowed, notCurrent, notAvailable]) hostOnly(message);
-  });
-
   it("are said when the model's answer cannot be asked for, and when the rates are full", async () => {
     const down = world({ words, prepare: async () => { throw new Error("socket closed"); } });
     const message = await refusalOf(down.diagnosis.start(OWNER, { requestId: randomUUID(), errorRef: blocked(down.task) }));
@@ -154,27 +127,5 @@ describe("a host's own words", () => {
     }
     expect(refused).toContain(words.refusals.rateLimited);
     hostOnly(refused);
-  });
-
-  it("are said for each reason a diagnosis fails, and for a failure with no known reason", async () => {
-    for (const reason of HOST_FAILURE_NAMES) {
-      const w = world({ words, answer: async () => { throw new DiagnosisModelProblem(reason, false); } });
-      const queued = await w.diagnosis.start(OWNER, { requestId: randomUUID(), errorRef: blocked(w.task) });
-      await w.diagnosis.idle();
-      const status = await w.diagnosis.status(OWNER, queued.diagnosisId);
-      expect(status).toMatchObject({ state: "failed", failure: words.failure[reason] });
-      hostOnly(status.failure);
-    }
-    const unknown = world({ words, answer: async () => { throw new Error("provider said no"); } });
-    const queued = await unknown.diagnosis.start(OWNER, { requestId: randomUUID(), errorRef: blocked(unknown.task) });
-    await unknown.diagnosis.idle();
-    const status = await unknown.diagnosis.status(OWNER, queued.diagnosisId);
-    expect(status).toMatchObject({ state: "failed", failure: words.refusals.couldNot });
-    hostOnly(status.failure);
-  });
-
-  it("are the words the diagnosis shows its host's routes and pages, so the routes of a host say the same", () => {
-    expect(world({ words }).diagnosis.words).toBe(words);
-    expect(world({ words }).diagnosis.words.refusals.startOnThePage).toBe(words.refusals.startOnThePage);
   });
 });

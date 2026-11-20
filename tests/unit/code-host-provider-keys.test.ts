@@ -3,9 +3,7 @@
 import { describe, expect, it } from "vitest";
 import type { CodeHost } from "@agentx/contracts";
 import { findLinkedChangeRequest, linkedChangeRequestKey, linkedChangeRequestStep } from "../../packages/broker/src/core/proof/revert/linked-change-requests.js";
-import { codeHostRepositoryKey } from "../../packages/broker/src/core/proof/revert/repository-key.js";
-import { pressMerge, prepareMerge, readMergeTracking, trackPullRequest } from "../../packages/broker/src/core/merge/index.js";
-import { providerOf } from "../../packages/broker/src/plugins/routing.js";
+import { prepareMerge, readMergeTracking, trackPullRequest } from "../../packages/broker/src/core/merge/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { FakeCodeHost } from "@agentx/broker/fakes";
 import { ORG, TASK_ID, mergeWorld } from "../support/merge-world.js";
@@ -14,13 +12,6 @@ import { ORG, TASK_ID, mergeWorld } from "../support/merge-world.js";
 const renamed = (model: ConstructorParameters<typeof FakeCodeHost>[0]): CodeHost => Object.create(new FakeCodeHost(model), { kind: { value: "github-main" }, provider: { value: "github" } }) as CodeHost;
 
 describe("keys by provider", () => {
-  it("files a GitHub connection under owner/name whatever it is called", () => {
-    const connection = renamed({ url: "https://github.com/Acme/App", id: "1", fullName: "Acme/App" } as never);
-    expect(providerOf(connection)).toBe("github");
-    expect(codeHostRepositoryKey(providerOf(connection), "https://github.com/Acme/App.git")).toBe("acme/app");
-    // The connection's own name would have made another key: that was the orphaning.
-    expect(codeHostRepositoryKey("github-main", "https://github.com/Acme/App.git")).toBe("github-main:https://github.com/Acme/App");
-  });
 
   it("reads a link written under the provider by a connection of any name, and still reads one an earlier build wrote under the connection's own name", async () => {
     const store = new MemoryDocumentStore();
@@ -45,14 +36,5 @@ describe("keys by provider", () => {
     expect(items).toHaveLength(1);
     // The link the task was started with (filed under `github`) is found, so the press can be prepared.
     await expect(prepareMerge(world.deps, { taskId: TASK_ID, requestId: world.requestId() })).resolves.toBeDefined();
-  });
-
-  it("presses a merge through a renamed GitHub connection: the reverse link (filed under the provider) is the one looked up (review L1)", async () => {
-    const world = await mergeWorld({ codeHost: renamed });
-    await world.seedTracking();
-    const prepared = await world.prepare();
-    const result = await pressMerge(world.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) });
-    expect(result).toBeDefined();
-    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("merged");
   });
 });

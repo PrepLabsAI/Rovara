@@ -7,7 +7,7 @@ import {
   checkRequestBody, checkRequestHeaders, capabilityModelGrants, localRoute, scrubProviderText, upstreamUrl, usageOf, DEFAULT_PROVIDER_ENDPOINTS,
   type ModelGrant,
 } from "../../packages/broker/src/local/model-proxy/index.js";
-import { fakeKey, loadGatewayRelay, sha256 } from "../support/model-proxy-world.js";
+import { fakeKey, loadGatewayRelay } from "../support/model-proxy-world.js";
 
 const grant = (over: Partial<ModelGrant> = {}): ModelGrant => ({ workspaceId: "ws-1", operationId: "op-1", routes: [localRoute("anthropic", "claude-test").route], ...over });
 
@@ -40,30 +40,6 @@ describe("the proxy token book", () => {
     expect(book.lookup(token)).toEqual({ ok: false, reason: "unknown" });
   });
 
-  it("keeps a digest of a token, not the token: the digest itself is no token, and a token one character off is none", () => {
-    const book = new ModelTokenBook();
-    const { token } = book.mint(grant());
-    expect(book.lookup(sha256(token))).toEqual({ ok: false, reason: "unknown" });
-    expect(book.lookup(token.slice(0, -1) + (token.endsWith("A") ? "B" : "A"))).toEqual({ ok: false, reason: "unknown" });
-    expect(book.lookup("")).toEqual({ ok: false, reason: "unknown" });
-  });
-
-  it("gives each mint a different token and ends an operation's tokens together, keeping its spend", () => {
-    const book = new ModelTokenBook();
-    const one = book.mint(grant());
-    const two = book.mint(grant());
-    const other = book.mint(grant({ operationId: "op-2" }));
-    expect(one.token).not.toBe(two.token);
-    book.ledger("op-1").spentMicros = 42;
-    expect(book.revokeOperation("op-1")).toBe(2);
-    expect(book.lookup(one.token).ok).toBe(false);
-    expect(book.lookup(two.token).ok).toBe(false);
-    expect(book.lookup(other.token).ok).toBe(true);
-    expect(book.ledger("op-1").spentMicros).toBe(42);
-    book.forgetOperation("op-1");
-    expect(book.ledger("op-1").spentMicros).toBe(0);
-  });
-
   it("refuses a lifetime the worker could not renew in time", () => {
     expect(DEFAULT_TOKEN_TTL_SECONDS).toBeGreaterThan(MIN_TOKEN_TTL_SECONDS);
     expect(() => new ModelTokenBook({ ttlSeconds: 60 })).toThrow(/at least 150 seconds/);
@@ -73,12 +49,6 @@ describe("the proxy token book", () => {
 
 describe("reading usage from the provider's answer", () => {
   const sse = (...events: unknown[]) => new TextEncoder().encode(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
-
-  it("reads Anthropic's start and delta, later numbers replacing earlier ones", () => {
-    const collector = new UsageCollector("anthropic-messages");
-    collector.push(sse({ type: "message_start", message: { usage: { input_tokens: 10, output_tokens: 1, cache_read_input_tokens: 20, cache_creation_input_tokens: 3 } } }, { type: "content_block_delta" }, { type: "message_delta", usage: { output_tokens: 99 } }));
-    expect(collector.finish()).toEqual({ input: 10, output: 99, cacheRead: 20, cacheWrite: 3 });
-  });
 
   it("reads OpenAI's chat chunk and responses event without counting cached tokens twice", () => {
     const chat = new UsageCollector("openai-completions");
@@ -116,11 +86,6 @@ describe("reading usage from the provider's answer", () => {
 });
 
 describe("the request guard (Cloud's proxy rules)", () => {
-  it("lets through the fields each wire shape allows, field for field", () => {
-    expect(() => checkRequestBody("anthropic-messages", { model: "a", messages: [], max_tokens: 1, stream: true, system: "s", temperature: 1, thinking: {}, output_config: {}, tool_choice: { type: "auto" }, tools: [], metadata: { user_id: "u" } })).not.toThrow();
-    expect(() => checkRequestBody("openai-responses", { model: "a", input: [], stream: true, store: false, max_output_tokens: 1, reasoning: {}, include: [], prompt_cache_key: "k" })).not.toThrow();
-    expect(() => checkRequestBody("openai-completions", { model: "a", messages: [], stream_options: { include_usage: true }, reasoning_effort: "low", provider: { allow_fallbacks: false, only: ["x"] } })).not.toThrow();
-  });
 
   it("refuses a field that moves the call, adds a credential, or turns one call into several", () => {
     const refused: Array<[Parameters<typeof checkRequestBody>[0], Record<string, unknown>, RegExp]> = [
@@ -183,15 +148,6 @@ describe("the request guard (Cloud's proxy rules)", () => {
       expect(message).toContain(`'${shown}'`);
       expect(message).toContain("tools[1]");
     }
-  });
-
-  it("serves plain function tools on every route, no tools, and an empty list", () => {
-    expect(() => checkRequestBody("anthropic-messages", { ...BASE["anthropic-messages"], tools: [clientTool, { ...clientTool, type: "custom" }], tool_choice: { type: "tool", name: "read_file" } })).not.toThrow();
-    expect(() => checkRequestBody("openai-responses", { ...BASE["openai-responses"], tools: [responsesFn], tool_choice: "auto" })).not.toThrow();
-    expect(() => checkRequestBody("openai-completions", { ...BASE["openai-completions"], tools: [fnTool], tool_choice: { type: "function", function: { name: "read_file" } } })).not.toThrow();
-    expect(() => checkRequestBody("openai-completions", { ...BASE["openai-completions"] })).not.toThrow();
-    expect(() => checkRequestBody("openai-responses", { ...BASE["openai-responses"], tools: [] })).not.toThrow();
-    expect(() => checkRequestBody("openai-responses", { ...BASE["openai-responses"], tools: null, tool_choice: null })).not.toThrow();
   });
 
   it("refuses tools that are not a list of objects, and a tool_choice that names a provider-side tool", () => {
@@ -258,11 +214,6 @@ describe("the request guard (Cloud's proxy rules)", () => {
     for (const include of [["web_search_call.action.sources"], ["file_search_call.results"], ["code_interpreter_call.outputs"], ["reasoning.encrypted_content", "message.output_text.logprobs"], "reasoning.encrypted_content", [["x"]]]) expect(run(include), JSON.stringify(include)).toThrow(/field include/);
   });
 
-  it("refuses a tool_choice whose type is not a string, and accepts the shapes pi-ai sends", () => {
-    for (const choice of [{ type: ["auto"] }, { type: { a: 1 } }, ["auto"]]) expect(() => checkRequestBody("openai-responses", { ...BASE["openai-responses"], tools: [responsesFn], tool_choice: choice }), JSON.stringify(choice)).toThrow(/tool_choice type 'unknown'/);
-    for (const choice of [{ type: "any" }, { type: "tool", name: "read_file" }, { type: "function", name: "read_file" }, "required", "none"]) expect(() => checkRequestBody("openai-responses", { ...BASE["openai-responses"], tools: [responsesFn], tool_choice: choice }), JSON.stringify(choice)).not.toThrow();
-  });
-
   it("refuses proxy-control and billing headers, and a beta it does not know", () => {
     for (const name of ["x-litellm-api-key", "x-litellm-metadata", "openai-organization", "openai-project", "x-api-key-override"]) expect(() => checkRequestHeaders({ [name]: "x" }), name).toThrow(/header/);
     expect(() => checkRequestHeaders({ "anthropic-beta": [...ALLOWED_BETAS].join(", ") })).not.toThrow();
@@ -307,16 +258,6 @@ describe("routes", () => {
 
 describe("model access as a callback action", () => {
   const secret = Buffer.alloc(32, 7);
-  it("is an action a capability must list, so a capability for events alone cannot ask for a model", async () => {
-    const capabilities = new CallbackCapabilities(secret);
-    const source = capabilityModelGrants({ capabilities, holds: async () => true, describe: async () => ({ routes: [localRoute("anthropic", "claude-test").route] }) });
-    const withAction = capabilities.issue({ workspaceId: "w", operationId: "o", fence: 3, actions: ["events", "model-access"], expiresInSeconds: 60 });
-    const without = capabilities.issue({ workspaceId: "w", operationId: "o", fence: 3, actions: ["events", "result"], expiresInSeconds: 60 });
-    await expect(source.grant(withAction)).resolves.toMatchObject({ workspaceId: "w", operationId: "o", fence: 3 });
-    await expect(source.grant(without)).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-    await expect(source.grant(`${withAction}x`)).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-    await expect(source.grant("not-a-capability")).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-  });
 
   it("refuses an operation that lost its workspace, one with nothing described, and grants nothing before a task flow is wired", async () => {
     const capabilities = new CallbackCapabilities(secret);

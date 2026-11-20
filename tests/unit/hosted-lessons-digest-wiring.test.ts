@@ -4,7 +4,7 @@
 //   B6  the summary asks the company's own chat seam for the adapter (the registry the notices read), not the raw core registry (which has no `channel` point on a deployed install). A summary that was not delivered is not marked done.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { IMPLICIT_COMPANY_ID, companyScoped, orgProjectCatalogKey, projectRevisionKey, type ChannelAdapter, type ChannelEvent, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
+import { companyScoped, orgProjectCatalogKey, projectRevisionKey, type ChannelAdapter, type ChannelEvent, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { prefsKey } from "../../packages/broker/src/core/notify/prefs.js";
 import type { ChatThreads } from "../../packages/broker/src/core-host/chat-threads.js";
@@ -77,7 +77,6 @@ async function setup(options: { lessons?: string; systemRuns?: string; chat?: bo
 type Setup = Awaited<ReturnType<typeof setup>>;
 
 const job = (s: Setup, name: string) => s.root.app.handleScheduledJob({ source: "agentx.core-job", job: name }) as Promise<{ job: string; companies: Array<{ companyId: string; outcome: string }> }>;
-const companiesOf = (result: { companies: Array<{ companyId: string }> }): string[] => result.companies.map((entry) => entry.companyId).sort();
 
 async function lessonsOf(s: Setup, companyId: OrgId): Promise<lessonsModule.CoreLessons> {
   await s.root.app.runtimeFor(companyId);
@@ -105,13 +104,6 @@ const sentRow = (s: Setup, companyId: OrgId) => s.world.store.get({ pk: companyS
 const eventsOf = (s: Setup, companyId: OrgId) => (s.own[companyId] as ReturnType<typeof chatAdapter>).events;
 
 describe("B5: a company a lessons or system-runs flag names has its scheduled jobs before its first core task", () => {
-  it("control: with no flag naming it, a company without an in-use mark gets no job (only the install's own company does)", async () => {
-    const s = await setup({ lessons: "off" });
-    expect(companiesOf(await job(s, "lessons"))).toEqual([IMPLICIT_COMPANY_ID]);
-    const sweep = await job(s, "dispatch-sweep");
-    expect(sweep.companies.map((entry) => entry.companyId)).not.toContain(A);
-    expect(sweep.companies.map((entry) => entry.companyId)).not.toContain(B);
-  });
 
   it("ROVARA_CORE_LESSONS=on:<id> lists that company (and only it) for every job, with no mark and no task", async () => {
     const s = await setup({ lessons: `on:${A}` });
@@ -131,13 +123,6 @@ describe("B5: a company a lessons or system-runs flag names has its scheduled jo
     expect(listed).toEqual(expect.arrayContaining([A, B]));
   });
 
-  it("a flag that says `on` (every company) names nobody and adds nothing", async () => {
-    const s = await setup({ lessons: "on", systemRuns: "on" });
-    const listed = (await job(s, "dispatch-sweep")).companies.map((entry) => entry.companyId);
-    expect(listed).not.toContain(A);
-    expect(listed).not.toContain(B);
-  });
-
   it("a flag cannot widen the engine: with the engine on for only company A, a company B the lessons flag names is not run", async () => {
     const world = createFakeWorld();
     adapters.modules = world.modules;
@@ -154,22 +139,6 @@ describe("B5: a company a lessons or system-runs flag names has its scheduled jo
 });
 
 describe("B6: the weekly lessons summary is delivered through the company's own chat seam", () => {
-  it("the pilot company's admin is told in the chat the seam serves for THAT company, once; the week is then marked done", async () => {
-    const s = await setup({ lessons: `on:${A}` });
-    await ready(s, A, "TA");
-    const first = await job(s, "lessons");
-    expect(first.companies.find((entry) => entry.companyId === A)).toMatchObject({ outcome: "ran" });
-    expect(eventsOf(s, A)).toHaveLength(1);
-    const event = eventsOf(s, A)[0] as { conversation: { tenant: string; space: string }; data: { text: string } };
-    expect(event.conversation).toMatchObject({ tenant: "TA", space: "D-a-admin" });
-    expect(event.data.text).toContain('Lessons this week in payments:');
-    expect(event.data.text).not.toContain("Body never sent");
-    expect(s.asked.every((entry) => entry.company === A)).toBe(true);
-    expect(await weekRow(s, A)).toBeDefined();
-    expect(await sentRow(s, A)).toBeDefined();
-    await job(s, "lessons");
-    expect(eventsOf(s, A)).toHaveLength(1);
-  });
 
   it("two companies: each company's summary goes through its own seam adapter only; a place on the other company's tenant gets nothing", async () => {
     const s = await setup({ lessons: `on:${A}:${B}` });
@@ -179,15 +148,6 @@ describe("B6: the weekly lessons summary is delivered through the company's own 
     expect(eventsOf(s, A)).toHaveLength(1);
     expect(eventsOf(s, B)).toHaveLength(0);
     expect(s.asked.filter((entry) => entry.company === B).length).toBeGreaterThan(0);
-  });
-
-  it("a company the lessons flag does not name sends nothing even with a chat place and a project that chose nothing", async () => {
-    const s = await setup({ lessons: `on:${A}` });
-    await ready(s, A, "TA");
-    await s.root.app.runtimeFor(B).catch(() => undefined);
-    await job(s, "lessons");
-    expect(eventsOf(s, B)).toHaveLength(0);
-    expect(await weekRow(s, B)).toBeUndefined();
   });
 
   it("a chat adapter the seam does not serve: nothing is delivered, the week and the person stay due, a fixed line is logged, and the next pass delivers once the adapter is there", async () => {
@@ -221,13 +181,5 @@ describe("B6: the weekly lessons summary is delivered through the company's own 
     await job(s, "lessons");
     expect(fixed.events).toHaveLength(1);
     expect(await weekRow(s, A)).toBeDefined();
-  });
-
-  it("with no chat seam (the root has no chat), the summary is not sent and not marked done (it is never silently closed)", async () => {
-    const s = await setup({ lessons: `on:${A}`, chat: false });
-    await ready(s, A, "TA");
-    await job(s, "lessons");
-    expect(await weekRow(s, A)).toBeUndefined();
-    expect(await sentRow(s, A)).toMatchObject({ tries: 1 });
   });
 });

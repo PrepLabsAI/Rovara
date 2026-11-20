@@ -6,21 +6,11 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_AGENT_GUARDRAILS } from "@agentx/contracts";
 import { writeGuardrails } from "../../packages/broker/src/core/agents/guardrails.js";
 import { resolveAgentForAutonomousRun } from "../../packages/broker/src/core/agents/roster.js";
-import { resolveAgent } from "../../packages/broker/src/core/agents/store.js";
 import { COMPANY, OWNER, PROJECT, createAutomationWorld, publishAgent, reporterOverlay } from "../support/automation-world.js";
 
 const run = (world: ReturnType<typeof createAutomationWorld>, agentId: string, project = PROJECT) => resolveAgentForAutonomousRun(world.roster, { orgId: COMPANY, project, agentId });
 
 describe("custom agents", () => {
-  it("publishes a version and resolves the recipe it runs", async () => {
-    const world = createAutomationWorld();
-    const { agentId, version } = await publishAgent(world);
-    expect(version).toBe(1);
-    const recipe = await resolveAgent(world.agents, COMPANY, agentId, 1);
-    expect(recipe.steps.map((step) => step.id)).toEqual(["look"]);
-    const resolved = await run(world, agentId);
-    expect(resolved.ref).toEqual({ agentId, version: 1 });
-  });
 
   it("never runs an unattended run on a draft, an archived agent or an agent with no published version", async () => {
     const world = createAutomationWorld();

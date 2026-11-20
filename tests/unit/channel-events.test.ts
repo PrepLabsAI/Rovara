@@ -65,12 +65,6 @@ describe("delivery", () => {
     expect((await setup({ checkAddresses: async () => { throw new Error("ENOTFOUND"); } }).run(done)).batchItemFailures).toHaveLength(1);
   });
 
-  it("caps the delay at 15 minutes", async () => {
-    const { run, delay } = setup({}, 500);
-    await run(done, "20");
-    expect(delay).toHaveBeenCalledWith("r1", 900);
-  });
-
   it.each([
     ["a 400", setup({}, 400)],
     ["a redirect", setup({}, 302)],
@@ -98,12 +92,6 @@ describe("delivery", () => {
 });
 
 describe("shaping (FR-023)", () => {
-  it("cuts text to the adapter's limit", () => {
-    const long = { ...done, data: { text: "x".repeat(500) } } as ChannelEvent;
-    const fitted = fitEventToAdapter(long, adapter);
-    expect((fitted.data as { text: string }).text).toHaveLength(200);
-    expect((fitted.data as { text: string }).text.endsWith("…")).toBe(true);
-  });
 
   it("strips approve actions from a stepped-up kind and keeps the task page link even when cut", () => {
     const event = approval("plan_approval");

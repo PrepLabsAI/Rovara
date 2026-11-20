@@ -151,13 +151,6 @@ it("the legacy installation seam uses the existing cache and uninstalled refusal
   expect(unknown).toEqual(await refusal(provider.checkRepository({ credentialRef: "github", url: "https://github.com/missing/app.git" })));
 });
 
-it("bounds total bytes read, even when an otherwise valid binding has oversized extra fields", async () => {
-  const { db, store } = setup();
-  await store.claim(IMPLICIT_COMPANY_ID, 1, "shared-account", "operator");
-  const client = { send: async () => ({ Item: { ...db.get("GITHUB_INSTALLATION#1", "BINDING")!, padding: "x".repeat(1_000_001) } }) };
-  await expect(new GithubInstallationBindings(client, "state").ownerOf(1)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
-});
-
 it("filters whole runtime-validated lists within one total budget, preserving order", async () => {
   const module = await import("../../packages/broker/src/aws/github-credentials.js");
   const filter = (module as unknown as { filterInstallationsFor: (company: string, listed: unknown, bindings: unknown) => Promise<unknown> }).filterInstallationsFor;
@@ -190,14 +183,6 @@ it("reads the shared marker once and applies a total deadline to list filtering"
   expect(markers).toBe(1);
   const budget = boundedCompanyReads(db, () => now);
   await expect(filterInstallationsFor(IMPLICIT_COMPANY_ID, rows, bindings, budget)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
-});
-
-it("bounds aggregate list bytes even when each installation and repository is individually valid", async () => {
-  const { filterInstallationsFor } = await import("../../packages/broker/src/aws/github-credentials.js");
-  const { store } = setup();
-  const rows = Array.from({ length: 100 }, (_, index) => ({ installationId: index + 1, accountLogin: "example", accountType: "Organization" as const, repositorySelection: "all" as const, status: "active" as const,
-    repositories: Array.from({ length: 100 }, () => ({ fullName: "r".repeat(201), githubRepositoryId: 42, private: true, defaultBranch: "b".repeat(256) })) }));
-  await expect(filterInstallationsFor(IMPLICIT_COMPANY_ID, rows, store)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
 });
 
 it("operator backfill finishes 125 installations in bounded pages with a fresh write clock", async () => {

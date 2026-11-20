@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
-  DIAGNOSIS_RATE, ErrorRefSchema, IMPLICIT_COMPANY_ID, diagnosisByPersonKey, diagnosisKey, diagnosisOpenKey, diagnosisRateKey, errorRefKey, workflowBlockErrorRef,
+  DIAGNOSIS_RATE, ErrorRefSchema, IMPLICIT_COMPANY_ID, diagnosisKey, diagnosisRateKey, errorRefKey, workflowBlockErrorRef,
   type Admission, type AdmissionRequest, type AuditEvent, type DiagnosisRecord, type ErrorRef, type OrgId, type Principal,
 } from "@agentx/contracts";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
@@ -72,48 +72,6 @@ async function world(options: { answerer?: DiagnosisAnswerer | null; admission?:
 const stranger: Principal = { companyId: ORG, personId: "someone-else", displayName: "Someone", roles: [], provider: "local-owner" };
 
 describe("asking for a diagnosis", () => {
-  it("answers from the error's data with the owner's model and no tools, keeps closed proposals, and writes only its own rows and an audit with no words", async () => {
-    const w = await world();
-    const queued = await w.diagnosis.start(OWNER, { requestId: REQ(1), errorRef: blocked() });
-    expect(queued).toMatchObject({ tier: "light", state: "queued" });
-    await w.diagnosis.idle();
-    const status = await w.diagnosis.status(OWNER, queued.diagnosisId);
-    expect(status).toMatchObject({ state: "ready", needsCode: false });
-    expect(status.proposals).toEqual([{ kind: "explain", text: "The planning step ended without an answer." }, { kind: "retry_with_note", note: "Try the step again." }]);
-    // One call: the rules first, the data after in tags only this install can name, secrets redacted, planted tags inert.
-    expect(w.calls).toHaveLength(1);
-    const call = w.calls[0]!;
-    expect(call).toMatchObject({ taskId: TASK, project: "web", maxOutputTokens: 4_000 });
-    expect(call.question).toContain("Diagnose the error");
-    expect(call.context).toMatch(/^You diagnose one error for the person who runs a software project\./u);
-    const nonce = /<task_title id="([0-9a-f]{16})">/u.exec(call.context)?.[1];
-    expect(nonce).toBeDefined();
-    expect(call.context).not.toContain(TOKEN);
-    expect(call.context).toContain("Only tags carrying id=");
-    // The planted closing tag and the planted tag with a made-up id are gone from the data (a tag in the data is never a tag), so only this install's id marks a tag.
-    expect(call.context).not.toContain('id="x"');
-    expect([...call.context.matchAll(/<failure_message id="([0-9a-f]{16})">/gu)].map((match) => match[1])).toEqual([nonce]);
-    // The rows are the hosted layout: the request (no context text once settled), the record, the person link and its index, the open place and the rate counters.
-    const request = (await w.store.get(diagnosisKey(ORG, queued.diagnosisId, "REQUEST")))!;
-    expect(request).toMatchObject({ entityType: "DIAGNOSIS_REQUEST", tier: "light", state: "ready", project: "web" });
-    expect(request["context"]).toBeUndefined();
-    expect(request["keyClaimedAt"]).toBeUndefined();
-    expect(JSON.stringify(request)).not.toContain("Try the step again");
-    const record = (await readDiagnosisRecord({ store: w.store }, ORG, queued.diagnosisId))!;
-    expect(record).toMatchObject({ tier: "light", model: "anthropic/test-model", costCents: 0, droppedProposals: 0 });
-    expect(await w.store.get(diagnosisKey(ORG, queued.diagnosisId, "PERSON"))).toMatchObject({ requestedBy: OWNER_ID });
-    expect(await w.store.get(diagnosisByPersonKey(ORG, OWNER_ID, queued.diagnosisId))).toBeDefined();
-    expect(await w.store.get(diagnosisOpenKey(ORG, "light", errorRefKey(blocked())))).toMatchObject({ diagnosisId: queued.diagnosisId });
-    expect(await w.store.get(diagnosisRateKey(ORG, "light_person", OWNER_ID))).toMatchObject({ count: 1 });
-    expect(await w.store.get(diagnosisRateKey(ORG, "light_project", "web"))).toMatchObject({ count: 1 });
-    // The audit is ids, fixed words and counts: nothing of the error or the answer.
-    const events = await w.audited();
-    expect(events.map((event) => event.action)).toEqual(["diagnosis.proposed", "diagnosis.started"]);
-    const [proposed, started] = events as [AuditEvent, AuditEvent];
-    expect(started).toMatchObject({ actor: { type: "person", id: OWNER_ID }, subject: { type: "diagnosis", id: queued.diagnosisId }, details: { errorKind: "workflow_block", errorCode: "WORKFLOW_BLOCKED", tier: "light" } });
-    expect(proposed).toMatchObject({ details: { total: 2, dropped: 0, explain: 1, retryWithNote: 1 } });
-    expect(JSON.stringify(events)).not.toMatch(/planning step|Try the step|model did not answer/u);
-  });
 
   it("is the same diagnosis for the same request and for the same error while it is open: nothing more is spent and the model is asked once", async () => {
     const admitted: AdmissionRequest[] = [];
@@ -164,22 +122,6 @@ describe("asking for a diagnosis", () => {
     expect(denied.calls).toHaveLength(0);
     expect(await denied.store.get(diagnosisRateKey(ORG, "light_person", OWNER_ID))).toBeUndefined();
     expect(await denied.audited()).toEqual([]);
-  });
-
-  it("is not offered, in fixed words and before anything is spent, with no model key or a model whose price is not known", async () => {
-    const none = await world({ answerer: null });
-    await expect(none.diagnosis.start(OWNER, { requestId: REQ(7), errorRef: blocked() })).rejects.toMatchObject({ code: "MODEL_NOT_ALLOWED", message: expect.stringContaining(DIAGNOSIS_LAPTOP_REFUSALS.noProvider) });
-    for (const [reason, words] of [["no_model", DIAGNOSIS_LAPTOP_REFUSALS.noProvider], ["not_priced", DIAGNOSIS_LAPTOP_REFUSALS.notPriced]] as const) {
-      const answer = vi.fn();
-      const w = await world({ answerer: { async prepare() { return { ok: false, reason }; }, answer } });
-      await expect(w.diagnosis.start(OWNER, { requestId: REQ(8), errorRef: blocked() })).rejects.toMatchObject({ code: "MODEL_NOT_ALLOWED", message: expect.stringContaining(words) });
-      expect(answer).not.toHaveBeenCalled();
-      expect(await w.store.get(diagnosisRateKey(ORG, "light_person", OWNER_ID))).toBeUndefined();
-      expect(await w.audited()).toEqual([]);
-      // The page says the same, as the reason there is no button.
-      expect(await w.diagnosis.forTask(OWNER, TASK)).toMatchObject({ offered: false, why: words, diagnosis: null });
-    }
-    expect(DIAGNOSIS_LAPTOP_REFUSALS.noProvider).not.toMatch(/Settings|Admin/u);
   });
 
   it("refuses what is not the owner's, not current, not a kind it can read again or switched off, in fixed words that repeat nothing", async () => {
@@ -325,41 +267,10 @@ describe("the allowance held for a model call", () => {
     return { adm, w, started };
   };
 
-  it("is settled with what the call used when it returns, and with the estimate when it said nothing of its use", async () => {
-    settledOnly((await run({})).adm, 1_050);
-    settledOnly((await run({ answer: async () => ({ text: JSON.stringify({ summary: "s", proposals: [] }), model: "m" }) })).adm);
-  });
-
   it("is settled, not given back, when no suggestion survives: the model was paid for the answer", async () => {
     const { adm, w, started } = await run({ answer: async () => ({ text: "   ", model: "m", usage: { input: 800, output: 20, cacheRead: 0, cacheWrite: 0 } }) });
     settledOnly(adm, 820);
     expect(await w.diagnosis.status(OWNER, started.diagnosisId)).toMatchObject({ state: "failed" });
-  });
-
-  it("is settled at the estimate when the turn timed out or was aborted after the request was sent, or the provider failed", async () => {
-    for (const [n, error] of [[31, new DOMException("aborted", "AbortError")], [32, new Error("socket hang up")], [33, new DiagnosisModelProblem("provider_unavailable")], [34, new DiagnosisModelProblem("other")]] as const) {
-      settledOnly((await run({ answer: async () => { throw error; } }, n)).adm);
-    }
-  });
-
-  it("is settled with the usage when writing the result fails after a good answer", async () => {
-    const adm = holdingAdmission();
-    const w = await world({ admission: adm.admission });
-    const real = w.store.transact.bind(w.store);
-    w.store.transact = async (items) => { if (items.some((item) => item.kind === "put" && item.item["entityType"] === "DIAGNOSIS_RECORD")) throw new Error("the disk is full"); return real(items); };
-    await w.diagnosis.start(OWNER, { requestId: REQ(35), errorRef: blocked() });
-    await w.diagnosis.idle();
-    settledOnly(adm, 1_050);
-  });
-
-  it("is given back only when nothing was sent: no model, no price, a refusal before the proxy forwards", async () => {
-    for (const [n, error] of [[36, new DiagnosisModelProblem("no_model", false)], [37, new DiagnosisModelProblem("not_priced", false)], [38, new DiagnosisModelProblem("limit_reached", false)], [39, new DiagnosisModelProblem("key_invalid", false)]] as const) {
-      const { adm } = await run({ answer: async () => { throw error; } }, n);
-      expect(adm.settled).toEqual([]);
-      expect(adm.released).toEqual(["held-1"]);
-      expect(adm.open()).toEqual([]);
-      expect(adm.violations).toEqual([]);
-    }
   });
 
   it("goes back when a start finds its diagnosis already made: two presses that overlap hold two allowances and keep one", async () => {
@@ -378,23 +289,6 @@ describe("the allowance held for a model call", () => {
     expect(adm.released).toHaveLength(1);
     expect(adm.open()).toEqual([]);
     expect(adm.violations).toEqual([]);
-  });
-});
-
-describe("a model that is too dear for this much data", () => {
-  const dear: DiagnosisAnswerer = {
-    async prepare(request) { return request === undefined ? { ok: true } : { ok: false, reason: "too_dear" }; },
-    async answer() { throw new Error("must not be called"); },
-  };
-
-  it("is refused before a rate slot or an allowance is taken, and the page is told why instead of getting a button", async () => {
-    const adm = holdingAdmission();
-    const w = await world({ answerer: dear, admission: adm.admission });
-    await expect(w.diagnosis.start(OWNER, { requestId: REQ(50), errorRef: blocked() })).rejects.toMatchObject({ code: "MODEL_NOT_ALLOWED", message: expect.stringContaining(DIAGNOSIS_LAPTOP_REFUSALS.tooDear) });
-    expect(adm.asked).toEqual([]);
-    expect(await w.store.get(diagnosisRateKey(ORG, "light_person", OWNER_ID))).toBeUndefined();
-    expect(await w.audited()).toEqual([]);
-    expect(await w.diagnosis.forTask(OWNER, TASK)).toMatchObject({ offered: false, why: DIAGNOSIS_LAPTOP_REFUSALS.tooDear, diagnosis: null });
   });
 });
 

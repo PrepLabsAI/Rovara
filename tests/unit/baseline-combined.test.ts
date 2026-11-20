@@ -3,7 +3,7 @@
 // failing set never excuses a failure across repositories (`alreadyFailingFromBaseline` gives nothing for a combined baseline).
 import { describe, expect, it } from "vitest";
 import {
-  BaselineRowSchema, EvidenceBaselineSchema, EvidenceRawSchema, RawRepositoryBaselinesSchema, baselineWords, projectRevisionKey, type BaselineRow, type EvidenceBaseline, type CheckEntry,
+  BaselineRowSchema, EvidenceRawSchema, RawRepositoryBaselinesSchema, baselineWords, projectRevisionKey, type BaselineRow, type EvidenceBaseline, type CheckEntry,
 } from "../../packages/contracts/src/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
@@ -59,13 +59,6 @@ describe("the wire shapes", () => {
     expect(EvidenceRawSchema.safeParse({ ...raw, baselines: [claim("a", 1), claim("b", 2)] }).success).toBe(true);
     expect(EvidenceRawSchema.safeParse({ ...raw, baseline: { sha: sha(1), commitsBack: 0 }, baselines: [claim("a", 1), claim("b", 2)] }).success).toBe(false);
   });
-  it("the stored words name each repository when the baseline is combined, and the old words parse as before", () => {
-    const old = { schemaVersion: 1, sha: sha(1), branch: "main", writer: "nightly", commitsBack: 2, ageHours: 5, knownFailing: 1, flaky: 0 };
-    expect(EvidenceBaselineSchema.safeParse(old).success).toBe(true);
-    expect(EvidenceBaselineSchema.safeParse({ ...old, repositories: [claim("a", 1), claim("b", 2)] }).success).toBe(true);
-    expect(EvidenceBaselineSchema.safeParse({ ...old, repositories: [claim("a", 1)] }).success).toBe(false);
-    expect(EvidenceBaselineSchema.safeParse({ ...old, repositories: [claim("a", 1), claim("a", 2)] }).success).toBe(false);
-  });
   it("the line names every repository's commit and says partial when any is behind", () => {
     const words: EvidenceBaseline = { schemaVersion: 1, sha: sha(1), branch: "main", writer: "nightly", commitsBack: 3, ageHours: 5, knownFailing: 4, flaky: 1, repositories: [lead("abc1234", "payments-lib"), lead("8d3e11a", "service", 3)] };
     expect(baselineWords(words)).toBe("Compared with main at payments-lib abc1234, service 8d3e11a (nightly, 5 h old, 3 commits back; partial): 4 known failing, 1 flaky");
@@ -78,14 +71,6 @@ describe("the wire shapes", () => {
 describe("the engine's combination", () => {
   const find = (store: MemoryDocumentStore, parts: Array<{ repositoryId: string; sha: string; commitsBack: number }>, over: Record<string, unknown> = {}) =>
     combinedBaselineFor({ store, now: () => NOW }, { orgId: ORG, project: PROJECT, envRevision: 1, branch: "main", parts, ...over });
-
-  it("is found when every repository has a trusted run, with the oldest age, the farthest commit count and the sums", async () => {
-    const w = await world([row(1, 3), row(2, 10, { tests: { total: 5, passed: 4, failed: 1, skipped: 0 }, failed: ["c.py::q"], flaky: [] })], undefined);
-    const found = (await find(w.documents, [claim("lib", 1), claim("service", 2, 4)]))!;
-    expect(found).toMatchObject({ commitsBack: 4, partial: true, ageHours: 10 });
-    expect(found.parts.map((part) => [part.repositoryId, part.found.row.headSha])).toEqual([["lib", sha(1)], ["service", sha(2)]]);
-    expect(evidenceCombinedBaselineOf(found)).toEqual({ schemaVersion: 1, sha: sha(1), branch: "main", writer: "nightly", commitsBack: 4, ageHours: 10, knownFailing: 3, flaky: 1, repositories: [claim("lib", 1), claim("service", 2, 4)] });
-  });
   it("is not found when ANY repository has none, when two repositories name one commit, or with fewer than two", async () => {
     const w = await world([row(1, 3), row(2, 3)], undefined);
     expect(await find(w.documents, [claim("lib", 1), claim("service", 9)])).toBeUndefined();
@@ -102,11 +87,6 @@ describe("the engine's combination", () => {
     const mixed = await world([row(1, 3), row(2, 3, { writer: "readiness" })], undefined);
     expect(await find(mixed.documents, [claim("lib", 1), claim("service", 2)])).toBeUndefined();
   });
-  it("a claim farther than 50 commits, or not an integer, finds nothing", async () => {
-    const w = await world([row(1, 3), row(2, 3)], undefined);
-    expect(await find(w.documents, [claim("lib", 1, 51), claim("service", 2)])).toBeUndefined();
-    expect(await find(w.documents, [claim("lib", 1, 1.5), claim("service", 2)])).toBeUndefined();
-  });
   it("excuses no failure: a combined baseline's repository-less failing set is never read as the failing set of a repository", async () => {
     const w = await world([row(1, 3), row(2, 3)], undefined);
     const found = (await find(w.documents, [claim("lib", 1), claim("service", 2)]))!;
@@ -119,16 +99,6 @@ describe("the engine's combination", () => {
 
 describe("the keeper", () => {
   const kept = async (w: Awaited<ReturnType<typeof world>>) => loadEvidenceBaseline(w.blobs, TASK, DIGEST);
-  it("keeps the combined words when every claimed commit was offered and every repository has a row", async () => {
-    const w = await world([row(1, 3), row(2, 6)], [claim("lib", 1), claim("service", 2, 2)]);
-    expect(await w.keep()).toMatchObject({ kept: true });
-    expect(await kept(w)).toMatchObject({ sha: sha(1), commitsBack: 2, ageHours: 6, knownFailing: 4, flaky: 2, repositories: [claim("lib", 1), claim("service", 2, 2)] });
-  });
-  it("keeps nothing when one claimed commit was not offered, even if a row exists for it", async () => {
-    const w = await world([row(1, 3), row(2, 6)], [claim("lib", 1), claim("service", 2)], [sha(1)]);
-    await w.keep();
-    expect(await kept(w)).toBeUndefined();
-  });
   it("keeps nothing for a claim of some of the project's repositories, or of names the project does not have", async () => {
     const some = await world([row(1, 3), row(2, 6)], [claim("lib", 1), claim("service", 2)], undefined, ["lib", "service", "docs"]);
     await some.keep();

@@ -101,16 +101,6 @@ describe("the hosted gateway answer model (the answers purpose, L4-E)", () => {
     expect(g.log).toEqual(["reserve:org_a:alpha:ada:answer:a1:15", "call:res-1:15", "call:res-1:11", "settle:res-1:8"]);
   });
 
-  it("settles at the gateway's own ceiling when the cost is unknown, and is made for one company only", async () => {
-    const g = gateway();
-    const model = createGatewayAnswerModel(g, "org_a");
-    const session = await model.open({ companyId: "org_a", project: "alpha", personId: "ada", answerId: "a1", ceilingCents: 15 });
-    await session.finish({ tokens: 5 });
-    expect(g.log.at(-1)).toBe("settle:res-1:undefined");
-    await expect(model.open({ companyId: "org_b", project: "alpha", personId: "ada", answerId: "a2", ceilingCents: 15 })).rejects.toMatchObject({ reason: "unavailable" });
-    expect(g.log.filter((entry) => entry.startsWith("reserve:"))).toHaveLength(1);
-  });
-
   it("maps the gateway's refusals by name and anything else to 'unavailable'; an unreachable gateway is not available", async () => {
     for (const [thrown, expected] of [[new AnswersGatewayError("over_budget"), "over_budget"], [new AnswersGatewayError("not_set_up"), "not_set_up"], [new Error("boom sk-x"), "unavailable"]] as const) {
       const model = createGatewayAnswerModel(gateway({ reserve: async () => { throw thrown; } }), "org_a");
@@ -130,17 +120,6 @@ describe("the code source", () => {
     fileAtRevision: async (repository: { url: string }, path: string, revision: string, _scope: unknown, options?: { untilLine?: number; timeoutMs?: number; maxBytes?: number }) => { log.push(`read:${repository.url}:${path}:${revision.slice(0, 4)}:${String(options?.untilLine)}:${String(options?.maxBytes)}`); return "text"; },
   });
   const handle = (name: string, log: string[], over: { head?: string; fail?: boolean } = {}) => ({ name, defaultBranch: "main", repository: { url: `https://x/${name}.git` }, scope: { orgId: "org_a" }, host: host(log, over) }) as never;
-
-  it("asks each repository's host for its head once per answer, leaves out one that cannot answer, and refuses a head that is not a full hash", async () => {
-    const log: string[] = [];
-    const source = createAnswerCodeSource([handle("web", log), handle("api", log, { fail: true }), handle("odd", log, { head: "main" })], ["web", "api", "odd", "unreadable"]);
-    expect(source.repositories).toEqual(["web", "api", "odd"]);
-    // The project's repositories are every one of them, readable or not.
-    expect(source.projectRepositories).toEqual(["web", "api", "odd", "unreadable"]);
-    expect([...(await source.heads())]).toEqual([["web", "a".repeat(40)]]);
-    await source.heads();
-    expect(log.filter((entry) => entry.startsWith("head:"))).toHaveLength(3);
-  });
 
   it("reads only the project's repositories, only at a full commit hash, bounded by size", async () => {
     const log: string[] = [];

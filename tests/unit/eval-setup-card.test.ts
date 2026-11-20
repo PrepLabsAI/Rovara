@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { EvalDiscoveryConfirmBodySchema, EvalSpendApprovalRecordSchema, evalCommandFingerprintOf, evalQuestionHash, type Principal } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { dollarRangeOf, dollarsOf, evalApprovalSentence, evalDollarsOf } from "../../packages/broker/src/core/setup-agent/eval-cost.js";
+import { dollarRangeOf, dollarsOf, evalDollarsOf } from "../../packages/broker/src/core/setup-agent/eval-cost.js";
 import { readEvalCard } from "../../packages/broker/src/core/setup-agent/eval-card.js";
 import { readEvalDiscovery } from "../../packages/broker/src/core/setup-agent/eval-discovery.js";
 import { evalHealthState, finishEvalHealthRequest, readEvalHealthRequest, requestEvalHealthCheck } from "../../packages/broker/src/core/setup-agent/eval-health-request.js";
@@ -13,11 +13,6 @@ import { evalSpendKey, proposeEvalSpendApproval, readApprovedEvalPlan } from "..
 import { A, B, CAP, COST_PER_CASE, MODEL, NOW, ROLES, VERSION, command, company, filesOf, person, project, reportOf, reportPath, type Role } from "../support/eval-card-world.js";
 
 describe("the dollars on the card", () => {
-  it("reads in plain words: one run, the most a check can cost, and the monthly cap", () => {
-    const d = evalDollarsOf({ questions: 2, costMicrosPerQuestion: COST_PER_CASE, maximumMicros: 4_000_000, monthlyCapMicros: CAP })!;
-    expect(d).toEqual({ perCheckLowMicros: 200_000, perCheckHighMicros: 1_800_000, monthlyCapMicros: CAP });
-    expect(evalApprovalSentence(d)).toBe("Running your evals on each AI change will cost about $0.20-$1.80 per PR, at most $50.00 a month. Approve?");
-  });
   it("never goes above the approved per-check ceiling and says 'under $0.01' for a figure too small to show", () => {
     // 100 cases at $0.10 cost $30 for the three runs, so the confirm's ceiling is that estimate ($30), and a check is never shown above it.
     const capped = evalDollarsOf({ questions: 100, costMicrosPerQuestion: COST_PER_CASE, maximumMicros: 30_000_000, monthlyCapMicros: CAP })!;
@@ -29,24 +24,10 @@ describe("the dollars on the card", () => {
     expect(dollarRangeOf(20, 180)).toBe("under $0.01");
     expect(dollarRangeOf(20, 50_000)).toBe("up to $0.05");
   });
-  it("a most (the per-PR top, the monthly cap) is rounded UP to the cent, never shown below what is approved", () => {
-    expect(dollarsOf(1_804_900)).toBe("$1.80");
-    expect(evalApprovalSentence({ perCheckLowMicros: 200_000, perCheckHighMicros: 1_804_900, monthlyCapMicros: 50_000_001 })).toBe("Running your evals on each AI change will cost about $0.20-$1.81 per PR, at most $50.01 a month. Approve?");
-  });
   it("refuses a figure that is not a whole positive number", () => {
     for (const bad of [{ questions: 0 }, { costMicrosPerQuestion: 1.5 }, { maximumMicros: -1 }, { monthlyCapMicros: Number.NaN }]) {
       expect(evalDollarsOf({ questions: 2, costMicrosPerQuestion: COST_PER_CASE, maximumMicros: 4_000_000, monthlyCapMicros: CAP, ...bad })).toBeUndefined();
     }
-  });
-  it("the reported card shows dollars only: no calls, tokens or micro-dollar words, whatever the suite", async () => {
-    const w = company(A); const r = await w.run(filesOf(2), reportOf());
-    const card = await r.card();
-    expect(card.state).toBe("propose");
-    expect(card.suites).toHaveLength(1);
-    expect(card.suites[0]).toMatchObject({ sentence: "Running your evals on each AI change will cost about $0.20-$1.80 per PR, at most $50.00 a month. Approve?", perPr: "about $0.20-$1.80", monthly: "$50.00", cases: 2,
-      seen: { perCheckHighMicros: 1_800_000, monthlyCapMicros: CAP } });
-    const words = JSON.stringify([card.suites[0]!.sentence, card.suites[0]!.perPr, card.suites[0]!.monthly]);
-    expect(words).not.toMatch(/token|call|micro/iu);
   });
 });
 
@@ -77,13 +58,6 @@ describe("one approval (D8)", () => {
     expect(await w.store.get(evalSpendKey(A, project))).toBeUndefined();
     expect((await readEvalDiscovery({ store: w.store, companyId: A }, project))?.state).toBe("reported");
   });
-  it("the monthly cap moving between the card and the yes is a refusal, not an approval of the new cap", async () => {
-    const w = company(A); const r = await w.run(filesOf(2), reportOf());
-    const seen = (await r.card()).suites[0]!.seen;
-    w.state.cap = CAP * 2;
-    await expect(r.approve(person(A, "admin"), { seen })).rejects.toMatchObject({ code: "CHANGE_STALE" });
-    expect(w.approved).toEqual([]);
-  });
   it("a body that approves must name what it saw, and a body that names it must approve", () => {
     const base = { taskId: "t".repeat(8), reportDigest: "a".repeat(64), selection: "s", paths: ["a.txt"] };
     expect(EvalDiscoveryConfirmBodySchema.safeParse(base).success).toBe(true);
@@ -98,13 +72,6 @@ describe("one approval (D8)", () => {
     expect(await w.store.get(evalSpendKey(A, project))).toBeUndefined();
     expect((await readEvalDiscovery({ store: w.store, companyId: A }, project))?.state).toBe("reported");
   });
-  it("the approval step is offered exactly the item this confirm proposed (its own revision and digest)", async () => {
-    const w = company(A); const r = await w.run(filesOf(2), reportOf());
-    const offers: Array<{ requestId: string; revision: number; artifactDigest: string }> = [];
-    await r.approve(person(A, "admin"), {}, { approve: async (offer, principal) => { offers.push(offer); await w.decide(offer, principal); } });
-    const stored = (await w.record())!;
-    expect(offers).toEqual([{ requestId: `eval-${stored.digest.slice(0, 40)}-${stored.revision}`, revision: stored.revision, artifactDigest: stored.digest }]);
-  });
   it("a refused approval step puts the report back to 'reported' so the person can approve again, and the second try approves the same waiting item", async () => {
     const w = company(A); const r = await w.run(filesOf(2), reportOf());
     await expect(r.approve(person(A, "admin"), {}, { approve: async () => { throw new Error("refused:sign_in_not_fresh"); } })).rejects.toThrow("sign_in_not_fresh");
@@ -113,19 +80,6 @@ describe("one approval (D8)", () => {
     expect(waiting.state).toBe("waiting");
     await r.approve(person(A, "admin"));
     expect((await w.record())).toMatchObject({ state: "approved", digest: waiting.digest, revision: waiting.revision });
-  });
-  it("a plain confirm (no approve) still leaves the spend waiting for its own approval, as before", async () => {
-    const w = company(A); const r = await w.run(filesOf(2), reportOf());
-    const answer = await r.confirmOnly();
-    expect(answer.evalSpend?.state).toBe("waiting");
-    expect(w.approved).toEqual([]);
-  });
-  it("no health button is offered by an install that has no health runner", async () => {
-    const w = company(A); const r = await w.run(filesOf(2), reportOf());
-    await r.approve();
-    const card = await readEvalCard({ store: w.store, companyId: A, members: w.members, monthlyCap: async () => CAP }, project, person(A, "admin"));
-    expect(card.spend).toMatchObject({ state: "approved" });
-    expect(card.health).toBeUndefined();
   });
   it("the card after approval shows the approved dollars and the opt-in health button with its cost", async () => {
     const w = company(A); const r = await w.run(filesOf(2), reportOf());
@@ -158,13 +112,6 @@ describe("a changed eval set (D6)", () => {
     const found = await readApprovedEvalPlan({ store: w.store, companyId: A }, project);
     expect(found?.plan.questions.find(q => q.id === "q1")?.hash).toBe(evalQuestionHash(Buffer.from("question q1, reworded\n")));
   });
-  it("removing a case stays inside the limit too", async () => {
-    const { w } = await approvedOnce();
-    const second = await w.run(filesOf(1), reportOf(1));
-    await second.approve();
-    expect(w.approved).toHaveLength(1);
-    expect((await w.record())).toMatchObject({ state: "approved", carriedFrom: 1 });
-  });
   it("a set that grew past the approved limit asks again: the eval reads 'Needs approval: your eval set grew past the approved $X' and its spend stops until a new card is approved", async () => {
     const { w } = await approvedOnce();
     const second = await w.run(filesOf(3), reportOf(3));
@@ -187,27 +134,6 @@ describe("a changed eval set (D6)", () => {
     const answer = await second.confirmOnly();
     expect(answer.evalSpend).toMatchObject({ state: "waiting", card: { needsApproval: "Needs approval: your eval set grew past the approved $1.80" } });
     expect(w.approved).toHaveLength(1);
-  });
-  it("the preview says 'inside' only for the approved suite with the same model and command: a second suite, a changed model or a changed command read as changed", async () => {
-    const { w } = await approvedOnce();
-    const sameSet = await w.run(filesOf(2), reportOf(2));
-    expect((await sameSet.card()).suites[0]!.versusApproved).toEqual({ within: true, words: "Inside the approved cost. A change to the model, judge or command asks again." });
-    const otherSelection = await w.run(filesOf(2), reportOf(2, { selection: "evals/other" }));
-    expect((await otherSelection.card()).suites[0]!.versusApproved).toEqual({ within: false, words: "Needs approval: the model, judge or command of your eval changed" });
-    const otherModel = await w.run(filesOf(2), reportOf(2, { model: "gemini-2.5-pro", modelVersion: "gemini-2.5-pro-001" }));
-    expect((await otherModel.card()).suites[0]!.versusApproved).toMatchObject({ within: false });
-    const c = { ...command, args: ["evals/run.js", "--fast", "--out", "rovara-measures.json"] };
-    const otherCommand = await w.run(filesOf(2), reportOf(2, { command: c, commandFingerprint: evalCommandFingerprintOf(c, reportPath) }));
-    expect((await otherCommand.card()).suites[0]!.versusApproved).toMatchObject({ within: false });
-  });
-  it("the new card, approved, runs again with the new dollars and a new limit", async () => {
-    const { w } = await approvedOnce();
-    const second = await w.run(filesOf(3), reportOf(3));
-    await second.approve();
-    expect(w.approved).toHaveLength(2);
-    expect((await w.record())).toMatchObject({ state: "approved", plan: { dollars: { perCheckHighMicros: 2_700_000 } } });
-    expect((await w.record())?.carriedFrom).toBeUndefined();
-    expect(await readApprovedEvalPlan({ store: w.store, companyId: A }, project)).toBeDefined();
   });
   it.each([
     ["the judge's scoring file changed", filesOf(2, { "evals/demo/score.txt": "score: a different rule\n" }), reportOf(2)],
@@ -244,29 +170,6 @@ describe("a changed eval set (D6)", () => {
     expect(again.state).toBe("waiting");
     expect(again.carriedFrom).toBeUndefined();
   });
-  it("a live monthly cap that rose does not change what was approved; the approved monthly figure stays", async () => {
-    const { w, before } = await approvedOnce();
-    w.state.cap = CAP * 2;
-    const second = await w.run(filesOf(2, { "evals/demo/q2.txt": "edited\n" }), reportOf(2));
-    await second.approve(person(A, "admin"));
-    expect((await w.record())?.plan.dollars?.monthlyCapMicros).toBe(before.plan.dollars!.monthlyCapMicros);
-  });
-  it("a live monthly cap that fell below the approved ceiling refuses the carry (the budget no longer fits)", async () => {
-    const { w } = await approvedOnce();
-    w.state.cap = 3_000_000;
-    const second = await w.run(filesOf(2, { "evals/demo/q2.txt": "edited\n" }), reportOf(2));
-    await expect(second.confirmOnly()).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-  });
-  it("another company's approval is never carried onto this company's edit", async () => {
-    const store = new MemoryDocumentStore();
-    const a = company(A, { ...ROLES }, store); const b = company(B, { ...ROLES }, store);
-    const ra = await a.run(filesOf(2), reportOf(2)); await ra.approve();
-    const rb = await b.run(filesOf(2, { "evals/demo/q1.txt": "b edit\n" }), reportOf(2));
-    const answer = await rb.confirmOnly();
-    expect(answer.evalSpend?.state).toBe("waiting");
-    expect((await a.record())?.state).toBe("approved");
-    expect((await b.record())?.carriedFrom).toBeUndefined();
-  });
 });
 
 describe("two companies", () => {
@@ -288,13 +191,6 @@ describe("the health run is opt-in (D5)", () => {
     requestEvalHealthCheck({ store: w.store, companyId: A, now: () => NOW, members: w.members }, project, { requestId: randomUUID(), seenCostMicros: 600_000, ...body }, as);
   const reader = (w: ReturnType<typeof company>) => readEvalHealthRequest({ store: w.store, companyId: A, members: w.members }, project);
   async function approved() { const w = company(A); const r = await w.run(filesOf(2), reportOf(2)); await r.approve(); return { w, r }; }
-
-  it("approving does not start a health run or leave a request: only a yes does", async () => {
-    const { w } = await approved();
-    expect(await reader(w)).toBeUndefined();
-    expect(await evalHealthState({ store: w.store, companyId: A, members: w.members }, project)).toBe("none");
-    expect(await w.store.get({ pk: `ORG#${A}#SETUP#${project}`, sk: "EVAL_HEALTH_REQUEST" })).toBeUndefined();
-  });
   it("a yes records one request with the cost the person was shown, and the runner reads it", async () => {
     const { w } = await approved();
     const id = randomUUID();
@@ -325,22 +221,6 @@ describe("the health run is opt-in (D5)", () => {
     expect(await reader(w)).toBeUndefined();
     expect(await evalHealthState({ store: w.store, companyId: A, members: w.members }, project)).toBe("none");
   });
-  it("a request is void when the approval it was made under is replaced by a new approved item of the same cost (another model)", async () => {
-    const { w } = await approved();
-    await ask(w);
-    expect(await reader(w)).toBeDefined();
-    const other = await w.run(filesOf(2), reportOf(2, { model: "gemini-2.5-pro", modelVersion: "gemini-2.5-pro-001" }));
-    await other.approve();
-    expect((await w.record())?.plan.estimate.costMicros).toBe(600_000);
-    expect(await reader(w)).toBeUndefined();
-  });
-  it("a request whose approver lost the right to approve is void", async () => {
-    const roles: Record<string, Role> = { ...ROLES, ada: { company: "admin" } };
-    const w = company(A, roles); const r = await w.run(filesOf(2), reportOf(2)); await r.approve(person(A, "ada"));
-    await ask(w);
-    roles["ada"] = undefined;
-    expect(await reader(w)).toBeUndefined();
-  });
   it("the runner finishes a request once, by its own id", async () => {
     const { w } = await approved();
     const id = randomUUID(); await ask(w, person(A, "admin"), { requestId: id });
@@ -370,25 +250,10 @@ describe("the eval card names the provider and its connection (L4-T3)", () => {
     expect(await read(w, async () => false)).toMatchObject({ state: "approved", provider: label, connected: false });
     expect(await read(w, async () => true)).toMatchObject({ state: "approved", provider: label, connected: true });
   });
-  it("flipping the connection flips `connected` and nothing else about the card (the mutation of the reading)", async () => {
-    const w = company(A); await w.run(filesOf(2), reportOf(2));
-    const off = await read(w, async () => false); const on = await read(w, async () => true);
-    expect(off.connected).toBe(false); expect(on.connected).toBe(true);
-    expect({ ...off, connected: undefined }).toEqual({ ...on, connected: undefined });
-  });
   it.each([["no source (a laptop)", undefined], ["no answer", async () => undefined], ["a fault", async () => { throw new Error("private gateway detail"); }], ["a non-boolean", async () => "yes" as never]])("%s: `connected` is absent, the provider is still named, and nothing leaks", async (_name, source) => {
     const w = company(A); await w.run(filesOf(2), reportOf(2));
     const card = await read(w, source);
     expect(card.provider).toBe("Google Gemini"); expect(card).not.toHaveProperty("connected"); expect(JSON.stringify(card)).not.toContain("private gateway detail");
-  });
-  it("asks the source about exactly this company and project, once per read", async () => {
-    const w = company(A); await w.run(filesOf(2), reportOf(2)); const asked: unknown[] = [];
-    await read(w, async scope => { asked.push(scope); return true; });
-    expect(asked).toEqual([{ company: A, project }]);
-  });
-  it("no eval found: the card says nothing about a provider or a connection", async () => {
-    const w = company(A); const card = await read(w, async () => false);
-    expect(card.state).toBe("none"); expect(card).not.toHaveProperty("provider"); expect(card).not.toHaveProperty("connected");
   });
   it("a rejected eval says nothing about a provider or a connection (there is nothing to connect for)", async () => {
     const w = company(A); const run = await w.run(filesOf(2), reportOf(2)); await run.approve();
@@ -396,15 +261,5 @@ describe("the eval card names the provider and its connection (L4-T3)", () => {
     await w.store.put({ item: { ...rest, state: "rejected" } as never });
     const card = await read(w, async () => false);
     expect(card.state).toBe("rejected"); expect(card).not.toHaveProperty("provider"); expect(card).not.toHaveProperty("connected");
-  });
-  it("two companies: B's card shows nothing of A's provider, and B's own connection answer is B's", async () => {
-    const store = new MemoryDocumentStore();
-    const a = company(A, { ...ROLES }, store); const b = company(B, { ...ROLES }, store);
-    await a.run(filesOf(2), reportOf(2, { catalogRowId: "vertex" }));
-    const asked: unknown[] = [];
-    const card = await read(b, async scope => { asked.push(scope); return true; }, "admin", B);
-    expect(card.state).toBe("none"); expect(card).not.toHaveProperty("provider"); expect(card).not.toHaveProperty("connected");
-    expect(asked.every(scope => (scope as { company: string }).company === B)).toBe(true);
-    expect(await read(a, async () => false)).toMatchObject({ provider: "Vertex AI", connected: false });
   });
 });

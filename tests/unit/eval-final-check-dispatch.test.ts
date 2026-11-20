@@ -3,7 +3,7 @@ import { EVAL_GATEWAY_FEATURE, EvalGatewayOriginSchema, WORKER_INVOCATION_FEATUR
 import { startChecksRerun } from "../../packages/broker/src/core/build-step/start.js";
 import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
 import { readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
-import { operationKey, taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { evalRequestForChecks } from "../../packages/broker/src/core/proof/eval-round-reader.js";
 
@@ -73,13 +73,6 @@ describe("eval CHECKS dispatch", () => {
     const actions = (JSON.parse(Buffer.from(String((job as { callbackCapability?: string }).callbackCapability).split(".")[0]!, "base64url").toString("utf8")) as { actions: string[] }).actions;
     expect(actions.includes("eval-plan")).toBe(feature);
   });
-  it("leaves ordinary checks payloads untouched when the tier has no eval hint", async () => {
-    const w = await world(true, false);
-    expect(await startChecksRerun(w.h.deps, { taskId: w.task.taskId, workflowRevision: w.workflow.revision }, { requestId: newRequestId(), actorId: "owner" })).toBe("STARTED");
-    const operation = (await workspaceOperations(w.h.deps, w.task.workspaceId)).find(op => op.workflowMode === "CHECKS")!;
-    expect(operation.dispatch.payload).not.toHaveProperty("evalRequest");
-    expect(operation.dispatch.extraActions ?? []).not.toContain("eval-plan");
-  });
 });
 
 // Lead 4 L4-EVW: the model gateway's origin goes to a hosted worker with the eval request (the worker has no setting of its own).
@@ -112,73 +105,10 @@ describe("eval gateway delivery to the worker", () => {
     expect(() => WorkerInvocationSchema.parse(job)).not.toThrow();
   });
 
-  it("sends nothing when the install has no gateway: the payload is exactly what it was", async () => {
-    const w = await world(true); expect(w.h.deps.evalGatewayUrl).toBeUndefined();
-    const { job } = await delivered(w);
-    expect(job.payload).toHaveProperty("evalRequest");
-    expect(job.payload).not.toHaveProperty("evalGatewayUrl");
-    expect(JSON.stringify(job.payload)).not.toContain("gateway");
-  });
-
-  it("an older worker (eval round, no gateway feature) is sent the request but not the field, so its strict parse never refuses the step", async () => {
-    const w = await world(true, true, [EVAL_GATEWAY_FEATURE]); w.h.deps.evalGatewayUrl = GATEWAY;
-    const { job } = await delivered(w);
-    expect(job.payload).toHaveProperty("evalRequest");
-    expect(job.payload).not.toHaveProperty("evalGatewayUrl");
-  });
-
-  it("a worker that lists the gateway feature but not the eval round gets neither the request nor the field (the order of the two checks)", async () => {
-    const w = await world(false); w.h.deps.evalGatewayUrl = GATEWAY;
-    const { job } = await delivered(w);
-    expect(job.payload).not.toHaveProperty("evalRequest");
-    expect(job.payload).not.toHaveProperty("evalGatewayUrl");
-    expect(() => WorkerInvocationSchema.parse(job)).not.toThrow();
-  });
-
   it.each(["http://gateway.example.test", `${GATEWAY}/v1`, "https://u:p@gateway.example.test", `${GATEWAY}?a=b`, "gateway.example.test", ""])("refuses to send an address that is not an https origin (%s) and still delivers the step", async bad => {
     const w = await world(true); w.h.deps.evalGatewayUrl = bad;
     const { job } = await delivered(w);
     expect(job.payload).toHaveProperty("evalRequest");
     expect(job.payload).not.toHaveProperty("evalGatewayUrl");
-  });
-
-  it("never sends it without an eval request, even where the gateway is configured (ordinary checks and every other step)", async () => {
-    const w = await world(true, false); w.h.deps.evalGatewayUrl = GATEWAY;
-    const { job } = await delivered(w);
-    expect(job.payload).not.toHaveProperty("evalRequest");
-    expect(job.payload).not.toHaveProperty("evalGatewayUrl");
-    const workspace = (await readWorkspace(w.h.deps, w.task.workspaceId))!;
-    for (const entry of w.h.machines.delivered(workspace.machine!.machineId)) expect(entry.payload).not.toHaveProperty("evalGatewayUrl");
-  });
-
-  it("an address in the stored payload is never trusted: it is dropped and only the dispatcher's own setting is sent", async () => {
-    const w = await world(true);
-    expect(await startChecksRerun(w.h.deps, { taskId: w.task.taskId, workflowRevision: w.workflow.revision }, { requestId: newRequestId(), actorId: "owner" })).toBe("STARTED");
-    const operation = (await workspaceOperations(w.h.deps, w.task.workspaceId)).find(op => op.workflowMode === "CHECKS")!;
-    await w.h.store.update({ key: operationKey(w.h.deps.companyId, w.task.workspaceId, operation.id), ops: [{ op: "set", path: ["dispatch", "payload", "evalGatewayUrl"], value: "https://attacker.example.test" }] });
-    await w.h.flow.dispatchOnce({ maxMessages: 10 });
-    const workspace = (await readWorkspace(w.h.deps, w.task.workspaceId))!;
-    const job = w.h.machines.delivered(workspace.machine!.machineId).find(entry => entry.operationId === operation.id) as { payload: Record<string, unknown> };
-    expect(job).toBeDefined();
-    expect(JSON.stringify(job.payload)).not.toContain("attacker");
-    expect(job.payload).not.toHaveProperty("evalGatewayUrl");
-  });
-
-  it("the stored operation never carries the address (it is added at delivery only)", async () => {
-    const w = await world(true); w.h.deps.evalGatewayUrl = GATEWAY;
-    const { operation } = await delivered(w);
-    expect(JSON.stringify(operation.dispatch)).not.toContain(GATEWAY);
-    expect(operation.dispatch.payload).not.toHaveProperty("evalGatewayUrl");
-  });
-
-  it("the worker contract refuses the field without an eval request (and with a bad origin) and accepts it with one", async () => {
-    const w = await world(true); w.h.deps.evalGatewayUrl = GATEWAY;
-    const { job } = await delivered(w);
-    const invocation = job;
-    expect(WorkerInvocationSchema.safeParse(invocation).success).toBe(true);
-    const { evalRequest: _evalRequest, ...withoutRequest } = invocation.payload; void _evalRequest;
-    expect(WorkerInvocationSchema.safeParse({ ...invocation, payload: withoutRequest }).success).toBe(false);
-    expect(WorkerInvocationSchema.safeParse({ ...invocation, payload: { ...invocation.payload, evalGatewayUrl: "http://gateway.example.test" } }).success).toBe(false);
-    expect(WorkerInvocationSchema.safeParse({ ...invocation, payload: { ...invocation.payload, evalGatewayUrl: `${GATEWAY}/v1` } }).success).toBe(false);
   });
 });

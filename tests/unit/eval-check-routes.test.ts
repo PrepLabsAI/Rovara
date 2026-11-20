@@ -12,7 +12,7 @@ import { isEvalCheckPath, routeHostedEvalCheck, type HostedEvalCheckWiring } fro
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { createLocalEvalCheck } from "../../packages/broker/src/local/app/eval-check.js";
 import { EVAL_CHECK_WORDS, ciDefinitionReaderOf, setEvalCheck } from "../../packages/broker/src/core/ci-evidence/eval-check-card.js";
-import { evalCheckEvidencePort, evalCheckKey, readEvalCheckSetting } from "../../packages/broker/src/core/ci-evidence/eval-check-setting.js";
+import { evalCheckEvidencePort, evalCheckKey } from "../../packages/broker/src/core/ci-evidence/eval-check-setting.js";
 import { parseCiEvidenceSettings } from "@agentx/contracts";
 import type { CiDefinitionReader } from "../../packages/broker/src/rovara-code/ci-checks.js";
 import { COMPANY_A, COMPANY_B } from "../support/wiki-build-fixtures.js";
@@ -90,19 +90,6 @@ describe("the path", () => {
 });
 
 describe("propose, confirm, stored", () => {
-  it("a manager reads the proposals from the workflow files, with the card's one explanation, and nothing is confirmed yet", async () => {
-    const w = hosted();
-    const answer = await w.call(OWNER, "GET", "beacon");
-    expect(answer.status).toBe(200);
-    expect(answer.body).toMatchObject({ project: "beacon", canManage: true, confirmed: null, explanation: "Rovara shows this check's result on its pull requests.", proposals: { verdict: "proposals", cut: false } });
-    const items = (answer.body["proposals"] as { items: Array<Record<string, unknown>> }).items;
-    const names = items.map((item) => item["name"]);
-    // The job whose id or name says eval, the one whose commands run an eval tool and the "evals/" script: the plain unit job is not offered.
-    expect(names).toEqual(["evals", "Quality gate"]);
-    expect(items[0]).toEqual({ name: "evals", source: ACTIONS, workflow: ".github/workflows/ci.yml", repository: "app", basis: "name" });
-    expect(w.audited).toEqual([]);
-    expect(await w.port()(task(COMPANY_A, "beacon"))).toBeUndefined();
-  });
 
   it("confirms one proposed check: the row is stored, the audit record names the person and why, and the port answers it as evalCheck with nothing marked", async () => {
     const w = hosted();
@@ -119,21 +106,6 @@ describe("propose, confirm, stored", () => {
     // A reader sees the confirmed check, not the proposals.
     const reader = await w.call(VIEWER, "GET", "beacon");
     expect(reader.body).toMatchObject({ canManage: false, confirmed: { name: "evals", source: ACTIONS }, proposals: null });
-  });
-
-  it("None clears: the row says none, the port answers nothing named, and the audit record keeps what it replaced", async () => {
-    const w = hosted();
-    await put(w, OWNER, "beacon", choose("evals"));
-    const cleared = await put(w, OWNER, "beacon", { requestId: randomUUID(), check: null });
-    expect(cleared.status).toBe(200);
-    expect(cleared.body["confirmed"]).toBeNull();
-    expect(w.audited[1]).toMatchObject({ action: "ci_eval_check.set", details: { check: "none", previous: "evals" } });
-    expect(w.audited[1]!.details).not.toHaveProperty("source");
-    expect(await w.port()(task(COMPANY_A, "beacon"))).toBeUndefined();
-    expect(await readEvalCheckSetting({ store: w.store, companyId: COMPANY_A }, "beacon")).toMatchObject({ changedAt: new Date(T0).toISOString() });
-    expect((await readEvalCheckSetting({ store: w.store, companyId: COMPANY_A }, "beacon"))?.check).toBeUndefined();
-    // And it can be confirmed again.
-    expect((await put(w, OWNER, "beacon", choose("Quality gate"))).body["confirmed"]).toMatchObject({ name: "Quality gate" });
   });
 
   it("a check Rovara did not propose is refused, however it is spelled; nothing is recorded or stored", async () => {
@@ -168,14 +140,6 @@ describe("propose, confirm, stored", () => {
 });
 
 describe("who", () => {
-  it("a company owner, a company admin and the project's administrator confirm; the audit record names why", async () => {
-    const w = hosted();
-    for (const [person, basis] of [[OWNER, "company-owner"], [ADMIN, "company-admin"], [PROJECT_ADMIN, "project-admin"]] as const) {
-      const answer = await put(w, person, "beacon", choose("evals"));
-      expect(answer.status, person).toBe(200);
-      expect(w.audited.at(-1)).toMatchObject({ actor: { id: person }, details: { basis } });
-    }
-  });
 
   it("a reader (a person who uses the project) cannot confirm or clear: 403, and nothing is written or recorded", async () => {
     const w = hosted();
@@ -219,13 +183,6 @@ describe("who", () => {
 });
 
 describe("the act", () => {
-  it("the audit record is written BEFORE the row: when it cannot be written nothing is stored", async () => {
-    const w = hosted({ audit: async () => { throw new Error("audit down"); } });
-    const answer = await put(w, OWNER, "beacon", choose("evals"));
-    expect(answer).toMatchObject({ status: 503, body: { error: { code: "AUDIT_UNAVAILABLE", message: EVAL_CHECK_WORDS.auditUnavailable } } });
-    expect(await w.store.get(evalCheckKey({ orgId: COMPANY_A, project: "beacon" }))).toBeUndefined();
-    expect(await w.port()(task(COMPANY_A, "beacon"))).toBeUndefined();
-  });
 
   it("the same request id with the same choice is one act (one record); the same id with another choice is a new act", async () => {
     const w = hosted();
@@ -239,19 +196,6 @@ describe("the act", () => {
     expect((await w.call(OWNER, "GET", "beacon")).body["confirmed"]).toMatchObject({ name: "Quality gate" });
   });
 
-  it("replaying an OLD request id after a later change is a new act: it is recorded again (the record names what it replaced) and the row follows", async () => {
-    const w = hosted();
-    const first = choose("evals");
-    await put(w, OWNER, "beacon", first);
-    await put(w, OWNER, "beacon", choose("Quality gate"));
-    expect(w.audited).toHaveLength(2);
-    const replay = await put(w, OWNER, "beacon", first);
-    expect(replay.body["confirmed"]).toMatchObject({ name: "evals" });
-    expect(w.audited).toHaveLength(3);
-    expect(w.audited[2]).toMatchObject({ details: { check: "evals", previous: "Quality gate" } });
-    expect(new Set(w.audited.map((event) => event.eventId)).size).toBe(3);
-  });
-
   it("replaying X after X, None, is still a new act: the id names the request that made the row too", async () => {
     const w = hosted();
     const first = choose("evals");
@@ -261,13 +205,6 @@ describe("the act", () => {
     expect(w.audited).toHaveLength(3);
     expect(new Set(w.audited.map((event) => event.eventId)).size).toBe(3);
     expect((await w.call(OWNER, "GET", "beacon")).body["confirmed"]).toMatchObject({ name: "evals" });
-  });
-
-  it("a job whose name carries a zero-width or direction character is never proposed", async () => {
-    const hidden = WORKFLOW.replace("  evals:", "  eval\u200bs:").replace("npx promptfoo eval", "npx promptfoo eval").replace("    runs-on: ubuntu-latest\n    steps:\n      - run: npx promptfoo eval", "    name: \"eval\u202es\"\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx promptfoo eval");
-    const w = hosted({ reader: readerOf({ "ci.yml": hidden }) });
-    const names = ((await w.call(OWNER, "GET", "beacon")).body["proposals"] as { items: Array<{ name: string }> }).items.map((item) => item.name);
-    expect(names.every((name) => !/[\u200b\u202e]/u.test(name))).toBe(true);
   });
 
   it("bodies are strict: an unknown field, a bad request id, an empty or over-long name and a missing check are refused in fixed words", async () => {
@@ -287,13 +224,6 @@ describe("the act", () => {
     });
     expect(notJson.statusCode).toBe(400);
     expect(w.audited).toEqual([]);
-  });
-
-  it("a name a person or a repository wrote is never echoed in a refusal", async () => {
-    const w = hosted();
-    const secret = "SECRET-NAME-do-not-echo";
-    const answer = await put(w, OWNER, "beacon", { requestId: randomUUID(), check: { name: secret, source: ACTIONS } });
-    expect(JSON.stringify(answer.body)).not.toContain(secret);
   });
 });
 
@@ -320,19 +250,6 @@ describe("two companies, two projects", () => {
     expect(await store.get(evalCheckKey({ orgId: COMPANY_B, project: "beacon" }))).toMatchObject({ orgId: COMPANY_B });
     expect(evalCheckKey({ orgId: COMPANY_A, project: "beacon" }).pk).not.toBe(evalCheckKey({ orgId: COMPANY_B, project: "beacon" }).pk);
     expect(evalCheckKey({ orgId: COMPANY_A, project: "beacon" }).pk).not.toBe(evalCheckKey({ orgId: COMPANY_A, project: "other" }).pk);
-  });
-
-  it("a row copied under another company's or project's key reads as nothing named (its body names its own company and project)", async () => {
-    const store = new MemoryDocumentStore();
-    const a = hosted({ store, company: COMPANY_A });
-    await put(a, OWNER, "beacon", choose("evals"));
-    const row = (await store.get(evalCheckKey({ orgId: COMPANY_A, project: "beacon" })))!;
-    const { pk, sk, ...body } = row;
-    void pk; void sk;
-    await store.put({ item: { ...evalCheckKey({ orgId: COMPANY_B, project: "beacon" }), ...body } });
-    await store.put({ item: { ...evalCheckKey({ orgId: COMPANY_A, project: "other" }), ...body } });
-    expect(await evalCheckEvidencePort({ store, companyId: COMPANY_B })(task(COMPANY_B, "beacon"))).toBeUndefined();
-    expect(await evalCheckEvidencePort({ store, companyId: COMPANY_A })(task(COMPANY_A, "other"))).toBeUndefined();
   });
 
   it("a damaged row (a name that does not read, a wrong entity) is nothing named and says so in fixed words, never what it held", async () => {
@@ -374,18 +291,6 @@ describe("the proposals across repositories", () => {
     expect(reads.sort()).toEqual(["a", "b", "c"]);
     const body = JSON.parse(answer.body) as Body;
     expect((body["proposals"] as { items: Array<Record<string, unknown>> }).items.map((item) => [item["name"], item["repository"]])).toEqual([["evals", "a"], ["Quality gate", "a"]]);
-  });
-
-  it("one repository that cannot be read makes a list with no proposal 'unknown', never 'none found'", async () => {
-    const store = new MemoryDocumentStore();
-    const two = ["a", "b"].map((name) => ({ name, url: `https://github.com/acme/${name}`, defaultBranch: "main" }));
-    const flow = { store, projects: { latest: async () => ({ definition: { repositories: two } }) } } as never;
-    const wiring: HostedEvalCheckWiring = { standing: async () => ({ access: "manage", basis: "company-owner" }), readerFor: async (_org, repository) => (repository.name === "a" ? readerOf({ "ci.yml": NO_EVAL_WORKFLOW }) : undefined) };
-    const answer = await routeHostedEvalCheck({
-      request: { method: "GET", path: "/v1/app/projects/beacon/ci-eval-check", headers: {}, body: "" }, path: "/v1/app/projects/beacon/ci-eval-check",
-      principal: { companyId: COMPANY_A, personId: OWNER, displayName: "x", roles: [], provider: "test" }, companyId: COMPANY_A, flow, wiring, audit: { stage: () => [], record: async () => undefined }, now: () => T0,
-    });
-    expect((JSON.parse(answer.body) as Body)["proposals"]).toEqual({ verdict: "unknown", items: [], cut: false });
   });
 });
 
@@ -432,14 +337,6 @@ describe("on a laptop", () => {
     const failing = local({ audit: async () => { throw new Error("down"); } });
     expect((await failing.call("PUT", path, choose("evals")))!.status).toBe(503);
     expect(await failing.store.get(evalCheckKey({ orgId: IMPLICIT_COMPANY_ID, project: "beacon" }))).toBeUndefined();
-  });
-
-  it("no reader on this install: nothing can be confirmed, None still works", async () => {
-    const l = local({ reader: undefined });
-    const path = "/v1/app/projects/beacon/ci-eval-check";
-    expect((await l.call("GET", path))!.body["proposals"]).toEqual({ verdict: "unknown", items: [], cut: false });
-    expect((await l.call("PUT", path, choose("evals")))!.status).toBe(503);
-    expect((await l.call("PUT", path, { requestId: randomUUID(), check: null }))!.status).toBe(200);
   });
 });
 

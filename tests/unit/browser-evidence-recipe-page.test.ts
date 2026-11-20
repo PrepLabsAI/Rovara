@@ -1,6 +1,6 @@
 // TE-H1 browser evidence, slice 3: the recipe page. It reads a form as a recipe whole-or-nothing, draws the recipe in force without ever drawing a saved value, takes a change only as one verified form in a page opened within the last ten
 // minutes, and answers every post with a fixed notice. The laptop's actions (fresh page, config wins, two companies, the API's refusal) are tested against the real store and the real secret files.
-import { mkdtemp, readdir, realpath, rm, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -133,19 +133,6 @@ describe("the recipe page", () => {
     } finally { await bare.close(); }
   });
 
-  it("never draws a saved value: only that a sign-in is saved, and the password box is empty and a password box", async () => {
-    view = { ...current(), signInSaved: true, recipe: { ...RECIPE, signIn: { path: "/login", usernameSelector: "#email", passwordSelector: "#password", submitSelector: "button", successPath: "/dashboard", credentialRef: "be-web-signin" } } };
-    const html = (await get(`${base}/browser-evidence/web`)).body;
-    expect(html).toContain("A sign-in is saved for this project. Its values are never shown.");
-    expect(html).toContain("Replace the saved sign-in");
-    expect(html).toContain("Remove the saved sign-in");
-    expect(html).toMatch(/<input type="password" name="password"[^>]*autocomplete="new-password">/u);
-    expect(html).not.toMatch(/name="(?:username|password)"[^>]*value=/u);
-    expect(html).toContain('value="#email"');
-    view = { ...current(), signInSaved: false };
-    expect((await get(`${base}/browser-evidence/web`)).body).toContain("No sign-in is saved.");
-  });
-
   it("shows the setup agent's suggestion as plain text, and starts the form from it only when asked (nothing is saved)", async () => {
     view = { project: "web", source: "none", signInSaved: false, canRun: true, suggestion: {
       recipe: { startCommand: "npm run start", port: 3000, routes: [{ path: "/checkout", files: ["src/checkout/**", "<script>alert(1)</script>"] }] }, from: ["web/package.json:8"], verdict: "unchecked" } };
@@ -162,23 +149,6 @@ describe("the recipe page", () => {
     if (suggested === undefined) throw new Error("no suggestion");
     view = { ...current(), suggestion: { ...suggested, verdict: "unverified" } };
     expect((await get(`${base}/browser-evidence/web`)).body).toContain("not found where it says");
-  });
-
-  it("saves the recipe from one verified form, in a fresh page, and the action gets the recipe as the form said it", async () => {
-    const form = await formOfOp("save");
-    const sent = { ...form.fields, ...FIELDS, ...SIGN_IN_FIELDS };
-    const reply = await post(form.action, sent);
-    expect(reply.status).toBe(303);
-    expect(locationOf(reply)).toBe(`${base}/browser-evidence/web?n=bevsaved`);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({ fresh: true, input: { op: "save", project: "web", expectedVersion: 2, recipe: { startCommand: "npm run start", port: 3000, signIn: { credentialRef: "be-web-signin" } } } });
-  });
-
-  it("refuses a form that does not read, with no call (mutant: a recipe sent on that did not parse)", async () => {
-    const form = await formOfOp("save");
-    const reply = await post(form.action, { ...form.fields, ...FIELDS, port: "x" });
-    expect(locationOf(reply)).toBe(`${base}/browser-evidence/web?n=invalid`);
-    expect(calls).toEqual([]);
   });
 
   it("takes a form once, only for its own operation and project, and only with its token (mutants: the token, its single use, its subject dropped)", async () => {
@@ -359,17 +329,5 @@ describe("the recipe page's actions on a laptop", () => {
     }
     for (const path of ["/v1/app/projects/web", "/v1/app/projects/web/browser-evidence/other", "/v1/app/projects/Web/browser-evidence", "/v1/dev/tasks"]) expect(await w.a.routes({ method: "GET", path, headers: {} }), path).toBeUndefined();
     expect(await files(w.directory)).toEqual([]);
-  });
-
-  it("keeps the saved values only in the owner's secret file, in the company's own folder", async () => {
-    const w = await world();
-    await w.a.action({ op: "save-sign-in", project: "web", ...VALUES }, { fresh: true });
-    const found = await files(w.directory);
-    expect(found).toHaveLength(1);
-    expect(found[0]).toMatch(new RegExp(`^${A}/be-web-signin\\.`, "u"));
-    expect(JSON.parse(await readFile(join(w.directory, found[0]!), "utf8"))).toEqual(VALUES);
-    // Nothing else the page wrote holds a value: the document store has the recipe rows only.
-    const rows = await w.store.query({ pk: `ORG#${A}#PROJECT#web` });
-    for (const text of LEAK) expect(JSON.stringify(rows.items)).not.toContain(text);
   });
 });

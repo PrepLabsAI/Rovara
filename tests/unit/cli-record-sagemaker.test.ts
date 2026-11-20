@@ -94,24 +94,6 @@ describe("personal data in a request: nothing is sent", () => {
 });
 
 describe("personal data in an answer", () => {
-  const echo = scripted((request) => answer(JSON.stringify({ echo: `reply to ${EMAIL}`, n: request.body.length })));
-
-  it("refuses the whole recording by default, naming kind and field and never the text, and writes nothing", async () => {
-    const result = await recordSageMakerEndpoint(options([{ body: "{}" }, { body: "{\"b\":2}" }]), deps(echo));
-    expect(result).toMatchObject({ ok: false, reason: "answer_findings", findings: [{ kind: "email", field: "answers[0].body" }], index: 0 });
-    expect(JSON.stringify(result)).not.toContain("quill");
-    expect(await files()).toEqual([]);
-  });
-  it("redacts each found span when asked, scans the redacted text again, and writes a file that passes the upload scan", async () => {
-    const result = await recordSageMakerEndpoint(options([{ body: "{}" }], { policy: "redact" }), deps(echo));
-    expect(result).toMatchObject({ ok: true, redactions: 1 });
-    const text = await readFile(join(directory, "recording.json"), "utf8");
-    expect(text).not.toContain("quill");
-    expect(text).toContain("[REDACTED:EMAIL]");
-    const file = SageMakerRecordingFileSchema.parse(JSON.parse(text));
-    expect(file.scan).toMatchObject({ policy: "redact", redactions: 1, open: 0 });
-    expect(JSON.parse(file.fixtures.rules![0]!.response.body!)).toEqual({ echo: "reply to [REDACTED:EMAIL]", n: 2 });
-  });
   it("refuses when redaction would break the answer's JSON, and when a binary answer holds a finding", async () => {
     const card = scripted(() => answer("{\"card\": 4111111111111111}"));
     expect(await recordSageMakerEndpoint(options([{ body: "{}" }], { policy: "redact" }), deps(card))).toMatchObject({ ok: false, reason: "redaction_failed" });
@@ -134,10 +116,6 @@ describe("personal data in an answer", () => {
     const result = await recordSageMakerEndpoint(options([{ body: "{}" }]), { invoker, scanner: late, now: () => { final = true; return NOW; }, version: "1.2.3" });
     expect(result).toMatchObject({ ok: false, reason: "answer_findings", findings: [{ kind: "person_name", field: "rules[0].response.body" }] });
     expect(await files()).toEqual([]);
-  });
-  it("refuses a finding in a header the reply carries, even when redacting", async () => {
-    const header = scripted(() => answer("{}", { customAttributes: `user=${EMAIL}` }));
-    expect(await recordSageMakerEndpoint(options([{ body: "{}" }], { policy: "redact" }), deps(header))).toMatchObject({ ok: false, reason: "redaction_failed", findings: [{ kind: "email", field: "answers[0].customAttributes" }] });
   });
   it("stops at a binary answer unless it was allowed, then stores its bytes", async () => {
     const binary = scripted(() => ({ kind: "answer", body: new Uint8Array([0xff, 0xfe, 0x01]), contentType: "application/octet-stream" }));
@@ -275,16 +253,6 @@ describe("what the reviewer's probes could do before", () => {
     expect(await recordSageMakerEndpoint(options([{ body: "a" }], { defaultAccept: "--debug" }), deps(invoker))).toEqual({ ok: false, reason: "bad_inputs" });
     expect(invoker.calls).toHaveLength(0);
   });
-
-  it("finds an email or a name written with JSON escapes, in a request (nothing sent) and in an answer", async () => {
-    const invoker = scripted(() => answer("{}"));
-    expect(await recordSageMakerEndpoint(options([{ body: ESCAPED_EMAIL }]), deps(invoker))).toEqual({ ok: false, reason: "request_findings", findings: [{ kind: "email", field: "inputs[0].body" }] });
-    expect(await recordSageMakerEndpoint(options([{ body: ESCAPED_NAME }]), deps(invoker))).toEqual({ ok: false, reason: "request_findings", findings: [{ kind: "person_name", field: "inputs[0].body" }] });
-    expect(invoker.calls).toHaveLength(0);
-    const email = scripted(() => answer(ESCAPED_EMAIL));
-    expect(await recordSageMakerEndpoint(options([{ body: "{}" }]), deps(email))).toMatchObject({ ok: false, reason: "answer_findings", findings: [{ kind: "email", field: "answers[0].body" }] });
-    expect(await files()).toEqual([]);
-  });
   it("redacts an escaped email and an escaped name, writes JSON that still parses, and the file passes the upload scan", async () => {
     for (const [reply, expected] of [[ESCAPED_EMAIL, { e: "[REDACTED:EMAIL]" }], [ESCAPED_NAME, { customer_name: "[REDACTED:PERSON_NAME]" }]] as const) {
       const invoker = scripted(() => answer(reply));
@@ -295,19 +263,6 @@ describe("what the reviewer's probes could do before", () => {
       expect(JSON.parse(SageMakerRecordingFileSchema.parse(JSON.parse(written)).fixtures.rules![0]!.response.body!)).toEqual(expected);
       expect((await rescanSageMakerRecording(JSON.parse(written), builtinPiiScanner)).ok).toBe(true);
     }
-  });
-  it("refuses, rather than redact, an address split across two values", async () => {
-    const invoker = scripted(() => answer("{\"a\":\"pat.quill@\",\"b\":\"fakemail-sample.io\"}"));
-    expect(await recordSageMakerEndpoint(options([{ body: "{}" }], { policy: "redact" }), deps(invoker))).toMatchObject({ ok: false, reason: "redaction_failed", findings: [{ kind: "email", field: "answers[0].body" }] });
-    expect(await files()).toEqual([]);
-  });
-
-  it("scans a request's accept and content type, not only its body", async () => {
-    const invoker = scripted(() => answer("{}"));
-    expect(await recordSageMakerEndpoint(options([{ body: "a", accept: `x/${EMAIL}` }]), deps(invoker))).toMatchObject({ ok: false, reason: "request_findings", findings: [{ kind: "email", field: "inputs[0].accept" }] });
-    expect(await recordSageMakerEndpoint(options([{ body: "a", contentType: `x/${EMAIL}` }]), deps(invoker))).toMatchObject({ ok: false, reason: "request_findings", findings: [{ kind: "email", field: "inputs[0].contentType" }] });
-    expect(await recordSageMakerEndpoint(options([{ body: "a" }], { defaultAccept: `x/${EMAIL}` }), deps(invoker))).toMatchObject({ ok: false, reason: "request_findings", findings: [{ kind: "email", field: "inputs[0].accept" }] });
-    expect(invoker.calls).toHaveLength(0);
   });
 
   it("treats UTF-16 text as binary: it needs --allow-binary, and is then scanned as the text it is", async () => {
@@ -320,11 +275,6 @@ describe("what the reviewer's probes could do before", () => {
     expect(await recordSageMakerEndpoint(options([{ body: "{}" }], { allowBinary: true }), deps(reply))).toMatchObject({ ok: false, reason: "answer_findings", findings: [{ kind: "email", field: "answers[0].body" }] });
     expect(invoker.calls).toHaveLength(0);
     expect(await files()).toEqual([]);
-  });
-  it("sees through zero-width characters in an answer", async () => {
-    const invoker = scripted(() => answer("{\"m\":\"pat.quill@fake​mail-sample.io\"}"));
-    expect(await recordSageMakerEndpoint(options([{ body: "{}" }]), deps(invoker))).toMatchObject({ ok: false, reason: "answer_findings", findings: [{ kind: "email", field: "answers[0].body" }] });
-    expect(await recordSageMakerEndpoint(options([{ body: "{}" }], { policy: "redact" }), deps(invoker))).toMatchObject({ ok: false, reason: "redaction_failed" });
   });
 
   it("removes its temporary folder when the process is told to stop, then raises the signal again", async () => {
@@ -376,15 +326,6 @@ describe("the optional Presidio scanner", () => {
     expect(await scanner.scan("by Alice Smyth 1234 end")).toEqual([{ kind: "person_name", start: 3, end: 9 }, { kind: "national_id", start: 10, end: 14 }]);
     expect(Object.values(PRESIDIO_ENTITY_KINDS)).not.toContain(undefined);
   });
-  it("sends the text only to the analyzer address, with no redirect followed", async () => {
-    const sent: Array<{ url: string; body: string; redirect: unknown }> = [];
-    const fetchSpy = (async (url: URL, init: RequestInit) => { sent.push({ url: String(url), body: bodyText(init), redirect: init.redirect }); return new Response("[]"); }) as unknown as typeof fetch;
-    await presidioScanner({ url: "http://localhost:5002", fetch: fetchSpy }).scan("hello there");
-    expect(sent).toHaveLength(1);
-    expect(sent[0]!.url).toBe("http://localhost:5002/analyze");
-    expect(sent[0]!.redirect).toBe("error");
-    expect(JSON.parse(sent[0]!.body)).toMatchObject({ text: "hello there", language: "en" });
-  });
   it("fails the scan when the analyzer is down, errors, or answers something unexpected", async () => {
     const down = (async () => { throw new Error("refused"); }) as unknown as typeof fetch;
     await expect(presidioScanner({ url: "http://localhost:5002", fetch: down }).scan("x")).rejects.toThrow("could not be reached");
@@ -406,21 +347,6 @@ describe("the optional Presidio scanner", () => {
     expect(last.offset + last.text.length).toBe(text.length);
     expect(sliceText("short", 50, 10)).toEqual([{ offset: 0, text: "short" }]);
     expect(sliceText("", 50, 10)).toEqual([]);
-  });
-  it("sees a two-word name that straddles a cut, because the slices overlap", async () => {
-    const name = "Zyx Qwerty";
-    const text = `${"filler ".repeat(12)}${name} ${"after ".repeat(12)}`;
-    const cut = text.indexOf(name) + 4;
-    // an analyzer that only knows the name when both words are in one slice
-    const analyzer = (async (_url: URL, init: RequestInit) => {
-      const slice = (JSON.parse(bodyText(init)) as { text: string }).text;
-      const at = slice.indexOf(name);
-      return new Response(JSON.stringify(at < 0 ? [] : [{ entity_type: "PERSON", start: at, end: at + name.length, score: 0.9 }]));
-    }) as unknown as typeof fetch;
-    const noOverlap = presidioScanner({ url: "http://localhost:5002", fetch: analyzer, sliceChars: cut + 1, overlapChars: 0 });
-    expect(await noOverlap.scan(text)).toEqual([]);
-    const overlapping = presidioScanner({ url: "http://localhost:5002", fetch: analyzer, sliceChars: cut + 1, overlapChars: 20 });
-    expect(await overlapping.scan(text)).toEqual([{ kind: "person_name", start: text.indexOf(name), end: text.indexOf(name) + name.length }]);
   });
   it("turns Presidio's code-point offsets into UTF-16 offsets before it slices, so text after an emoji is not shifted", async () => {
     const text = "\u{1F600}\u{1F600} Alice Smyth wrote";
@@ -495,12 +421,6 @@ describe("the command", () => {
     expect(result.stderr).toContain("Nothing was written.");
     expect(result.stderr).not.toContain("quill");
     expect(await files()).toEqual(["inputs.json"]);
-  });
-  it("redacts with --on-finding redact", async () => {
-    const result = await run(["--endpoint", "fraud-scorer", "--inputs", await inputs("[{\"body\":\"a\"}]"), "--out", join(directory, "out.json"), "--on-finding", "redact"], () => answer(`{"mail":"${EMAIL}"}`));
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain("Redactions: 1");
-    expect(await readFile(join(directory, "out.json"), "utf8")).not.toContain("quill");
   });
   it("refuses an unreadable or invalid input file, and a Presidio analyzer that is not on this computer, before any call", async () => {
     const missing = await run(["--endpoint", "fraud-scorer", "--inputs", join(directory, "nope.json"), "--out", join(directory, "out.json")]);

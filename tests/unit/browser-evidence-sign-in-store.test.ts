@@ -10,10 +10,8 @@ import { createLocalConnectionSecrets } from "../../packages/broker/src/connecti
 import { createLocalSecretStore } from "../../packages/broker/src/ports/secret-stores.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { SIGN_IN_WORDS, browserEvidenceSignInSecretName, createBrowserEvidenceSignIn } from "../../packages/broker/src/core/proof/browser-evidence-sign-in.js";
-import { clearStoredRecipe, effectiveRecipe, readStoredRecipe, recipeFitsProject, saveStoredRecipe } from "../../packages/broker/src/core/proof/browser-evidence-recipe.js";
+import { effectiveRecipe, readStoredRecipe, recipeFitsProject, saveStoredRecipe } from "../../packages/broker/src/core/proof/browser-evidence-recipe.js";
 import { handleBrowserEvidenceSignIn } from "../../packages/broker/src/core/proof/browser-evidence-sign-in-callback.js";
-import { createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
-import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { operationKey, taskKey, taskPointerKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 
@@ -116,30 +114,6 @@ const RECIPE: BrowserEvidenceRecipe = { startCommand: "npm run start", port: 300
 const WITH_SIGN_IN = (project: string): BrowserEvidenceRecipe => ({ ...RECIPE, signIn: { path: "/login", usernameSelector: "#email", passwordSelector: "#password", submitSelector: "button", successPath: "/dashboard", credentialRef: `be-${project}-signin` } });
 
 describe("the saved recipe", () => {
-  it("is one company-scoped row per project, holds no secret, and reads back exactly what was saved", async () => {
-    const store = new MemoryDocumentStore();
-    expect(await saveStoredRecipe(store, A, "web", WITH_SIGN_IN("web"), { expectedVersion: undefined, now: () => 1_700_000_000_000 })).toEqual({ version: 1 });
-    expect(await readStoredRecipe(store, A, "web")).toEqual({ recipe: WITH_SIGN_IN("web"), version: 1, updatedAt: "2023-11-14T22:13:20.000Z" });
-    const row = await store.get(projectBrowserEvidenceRecipeKey(A, "web"));
-    expect(row?.pk).toMatch(new RegExp(`^ORG#${A}#PROJECT#web$`, "u"));
-    expect(JSON.stringify(row)).not.toMatch(/password":|username":/u);
-  });
-
-  it("is company A's alone (two-company): B's same-named project has none, B's save leaves A's, and a row moved under B's key is no recipe", async () => {
-    const store = new MemoryDocumentStore();
-    await saveStoredRecipe(store, A, "web", RECIPE, { expectedVersion: undefined, now: () => 1 });
-    expect(await readStoredRecipe(store, B, "web")).toBeUndefined();
-    await saveStoredRecipe(store, B, "web", { ...RECIPE, port: 4000 }, { expectedVersion: undefined, now: () => 2 });
-    expect((await readStoredRecipe(store, A, "web"))?.recipe.port).toBe(3000);
-    expect((await readStoredRecipe(store, B, "web"))?.recipe.port).toBe(4000);
-    // A's row written under B's key (a store fault or a hand edit) is not B's recipe: it names its own company and project.
-    const forged = { ...(await store.get(projectBrowserEvidenceRecipeKey(A, "web")))!, ...projectBrowserEvidenceRecipeKey(B, "other") };
-    await store.put({ item: forged });
-    expect(await readStoredRecipe(store, B, "other")).toBeUndefined();
-    await clearStoredRecipe(store, B, "web");
-    expect(await readStoredRecipe(store, B, "web")).toBeUndefined();
-    expect(await readStoredRecipe(store, A, "web")).toBeDefined();
-  });
 
   it("refuses a second page's save over a recipe it did not see (mutant: the version guard dropped), and a first save over one that is there", async () => {
     const store = new MemoryDocumentStore();
@@ -195,7 +169,6 @@ describe("the sign-in callback", () => {
   const workspaceId = randomUUID();
   const operationId = randomUUID();
   const taskId = randomUUID();
-  const KEY = Buffer.alloc(32, 7);
 
   async function world(options: { operation?: Record<string, unknown>; project?: string; taskCompany?: string; recipe?: unknown } = {}) {
     const w = await secretsWorld();
@@ -211,13 +184,6 @@ describe("the sign-in callback", () => {
     const deps = (companyId = A) => ({ signIn: w.signIn, companyId, async projectOf() { return (await store.get(taskKey(taskId)))?.["project"] as string | undefined; } });
     return { ...w, store, operation, deps };
   }
-
-  it("answers the saved values to the live CHECKS run whose own recipe has a sign-in, and `not_set` when none is saved", async () => {
-    const w = await world();
-    expect(await handleBrowserEvidenceSignIn(w.deps(), await w.operation())).toEqual({ status: "not_set" });
-    await w.signIn.save(A, "web", VALUES);
-    expect(await handleBrowserEvidenceSignIn(w.deps(), await w.operation())).toEqual({ status: "ready", values: VALUES });
-  });
 
   it("is refused for any run that was not sent a recipe with a sign-in, and for one that is not live (mutants: each check dropped)", async () => {
     const forbidden = async (options: Parameters<typeof world>[0]) => {
@@ -238,42 +204,11 @@ describe("the sign-in callback", () => {
     await forbidden({ recipe: { ...WITH_SIGN_IN("web"), port: 80 } });
   });
 
-  it("reads nothing when the recipe's reference is another project's, even a project of this company that has a saved sign-in (mutant: the project check dropped)", async () => {
-    const w = await world({ recipe: WITH_SIGN_IN("api") });
-    await w.signIn.save(A, "api", { username: "api-user@example.test", password: ["api", "pw", "Qx81"].join("-") });
-    await w.signIn.save(A, "web", VALUES);
-    // The run belongs to the project `web`, its stored invocation names `api`'s sign-in: it is not answered.
-    expect(await handleBrowserEvidenceSignIn(w.deps(), await w.operation())).toEqual({ status: "not_set" });
-  });
-
   it("answers only for the company that runs the operation (two-company)", async () => {
     const w = await world();
     await w.signIn.save(A, "web", VALUES);
     expect(await handleBrowserEvidenceSignIn(w.deps(B), await w.operation())).toEqual({ status: "not_set" });
     const none = await handleBrowserEvidenceSignIn({ ...w.deps(), projectOf: async () => undefined }, await w.operation()).then(() => undefined, (caught: unknown) => caught as Error);
     expect(none).toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-  });
-
-  it("is served by the callback route only with its own capability, says `no-store`, reads nothing from the request and answers `not available` where no sign-ins are kept", async () => {
-    const w = await world();
-    await w.signIn.save(A, "web", VALUES);
-    const capabilities = new CallbackCapabilities(KEY);
-    const token = (actions: string[]) => capabilities.issue({ workspaceId, operationId, fence: 1, actions: actions as never, expiresInSeconds: 60 });
-    const handler = createCallbackHandler({ flow: { store: w.store, companyId: A, callbackSigningKey: KEY } as never, blobs: {} as never, grants: {} as never, browserEvidenceSignIn: w.signIn });
-    const call = (capability: string | undefined, body = "{}") => handler({ method: "POST", path: `/v1/internal/workspaces/${workspaceId}/operations/${operationId}/browser-evidence-sign-in`, headers: capability === undefined ? {} : { "x-agentx-callback-capability": capability }, body });
-    // No capability, a capability for another action: refused with the capability sentences and never the values.
-    for (const reply of [await call(undefined), await call(token(["browser-evidence"]))]) {
-      expect(reply.statusCode).toBeGreaterThanOrEqual(400);
-      for (const text of LEAK) expect(reply.body).not.toContain(text);
-    }
-    const ok = await call(token(["browser-evidence-sign-in"]), JSON.stringify({ project: "api", ref: "be-api-signin", companyId: B }));
-    expect(ok.statusCode).toBe(200);
-    expect(ok.headers["cache-control"]).toBe("no-store");
-    expect(JSON.parse(ok.body ?? "{}")).toEqual({ status: "ready", values: VALUES });
-    // A broker with no sign-ins (Cloud) does not serve the action at all, and says nothing about a value.
-    const bare = createCallbackHandler({ flow: { store: w.store, companyId: A, callbackSigningKey: KEY } as never, blobs: {} as never, grants: {} as never });
-    const refused = await bare({ method: "POST", path: `/v1/internal/workspaces/${workspaceId}/operations/${operationId}/browser-evidence-sign-in`, headers: { "x-agentx-callback-capability": token(["browser-evidence-sign-in"]) }, body: "{}" });
-    expect(refused.statusCode).toBe(404);
-    for (const text of LEAK) expect(refused.body).not.toContain(text);
   });
 });

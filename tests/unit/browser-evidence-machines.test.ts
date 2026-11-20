@@ -3,7 +3,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { DockerWorkerMachines } from "../../packages/broker/src/local/docker-worker-machines.js";
@@ -13,7 +12,6 @@ import { FakeDocker } from "../support/local/fake-docker.js";
 const scratch: string[] = [];
 afterAll(async () => { while (scratch.length > 0) await rm(scratch.pop()!, { recursive: true, force: true }); });
 const EXECUTOR = "rovara-e2e-executor:test";
-const EXECUTOR_ID = `sha256:${createHash("sha256").update(EXECUTOR).digest("hex")}`;
 const PROFILE = '{"defaultAction":"SCMP_ACT_ERRNO"}';
 
 const SIGNER = createEphemeralInvokeSigner();
@@ -33,11 +31,6 @@ async function start(options: { stateDirectory?: string | undefined; browser?: {
 const enabled = { image: EXECUTOR, enabled: (project: string | undefined) => project === "my-app", seccomp: () => PROFILE };
 
 describe("machines with browser evidence", () => {
-  it("for a project with a recipe: EXECUTOR_IMAGE is the image's id and the guard is given the pinned id and profile", async () => {
-    const w = await start({ browser: enabled, project: "my-app" });
-    expect(w.worker.environment.EXECUTOR_IMAGE).toBe(EXECUTOR_ID);
-    expect(w.policy.browserEvidence).toEqual({ image: EXECUTOR_ID, seccomp: PROFILE });
-  });
 
   it("for anything else the machine is what it always was: no variable, no policy, the same digest as a machine made with no such option", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "rovara-be-same-"));

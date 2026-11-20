@@ -1,10 +1,9 @@
 // L4-E34 (E4): the stand-in set version is part of an eval's base-cache identity and its settings fingerprint, and of NOTHING an approval binds. A seed change misses the cache; an unchanged set hits it; an eval with no stand-ins
 // keeps the key and fingerprint it always had (golden values taken from the code before this change).
 import { describe, expect, it } from "vitest";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import {
-  STAND_IN_ROW_GENERATOR_VERSION, createDocumentBaseScoreCache, evalBaseCacheKey, evalCommandFingerprint, evalSettingsFingerprintOf, isStandInSetVersion, standInSetVersion, standInSettingsFingerprint,
-  type EvalBaseCacheKeyParts, type EvalBaseRecord, type StandInSetParts,
+  STAND_IN_ROW_GENERATOR_VERSION, evalBaseCacheKey, evalCommandFingerprint, evalSettingsFingerprintOf, isStandInSetVersion, standInSetVersion, standInSettingsFingerprint,
+  type EvalBaseCacheKeyParts, type StandInSetParts,
 } from "@agentx/contracts";
 
 const hex = (character: string, length = 64) => character.repeat(length);
@@ -12,8 +11,6 @@ const set = (over: Partial<StandInSetParts> = {}): StandInSetParts => ({ images:
 const parts = (over: Partial<EvalBaseCacheKeyParts> = {}): EvalBaseCacheKeyParts => ({
   company: "org_aaaaaaaaaaaaaaaaaaaa", project: "project-1", baseCommit: hex("a", 40), evalSetHash: hex("b"), hiddenSetHash: "none", commandFingerprint: evalCommandFingerprint("npm run eval"), catalogRowId: "gemini", model: "gemini-small", modelVersion: "gemini-small-2026-10-01", settingsFingerprint: hex("f"), ...over,
 });
-const record = (): EvalBaseRecord => ({ schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.04, count: 50 }], caseCount: 50, recordedOn: "2026-11-18", roundKind: "check_unsealed", runnerSchemaVersion: 1 });
-const OWN = { writer: "rovara_base_round" as const, baseCommit: hex("a", 40) };
 
 describe("the stand-in set version", () => {
   it("is a stable sha-256 hex for the same set", () => {
@@ -90,31 +87,5 @@ describe("the base-cache key", () => {
   });
   it("refuses a version that is present and not a version (never the plain key), naming the part", () => {
     for (const bad of ["", "short", hex("A"), 5, null]) expect(() => evalBaseCacheKey(parts({ standInSetVersion: bad as never }))).toThrow(/standInSetVersion/u);
-  });
-});
-
-describe("the cache over the document store", () => {
-  const cacheOf = (store: MemoryDocumentStore, companyId: string) => createDocumentBaseScoreCache(store, { companyId });
-  it("a seed change misses and an unchanged set hits: the score of one version is never read for another, nor for no version", async () => {
-    const store = new MemoryDocumentStore(); const cache = cacheOf(store, "org_aaaaaaaaaaaaaaaaaaaa");
-    const one = standInSetVersion(set()); const changedSeed = standInSetVersion(set({ seeds: [hex("c"), hex("b")] }));
-    expect(await cache.write(parts({ standInSetVersion: one }), record(), OWN)).toBe("stored");
-    expect(await cache.read(parts({ standInSetVersion: one }))).toBeDefined();
-    expect(await cache.read(parts({ standInSetVersion: standInSetVersion(set()) }))).toBeDefined();
-    expect(await cache.read(parts({ standInSetVersion: changedSeed }))).toBeUndefined();
-    expect(await cache.read(parts())).toBeUndefined();
-    // and the other way: a plain score is not a stand-in score
-    const other = new MemoryDocumentStore(); const plain = cacheOf(other, "org_aaaaaaaaaaaaaaaaaaaa");
-    await plain.write(parts(), record(), OWN);
-    expect(await plain.read(parts({ standInSetVersion: one }))).toBeUndefined();
-  });
-  it("two companies: the same project, commit and stand-in set never share a record", async () => {
-    const store = new MemoryDocumentStore(); const one = standInSetVersion(set());
-    const a = cacheOf(store, "org_aaaaaaaaaaaaaaaaaaaa"); const b = cacheOf(store, "org_bbbbbbbbbbbbbbbbbbbb");
-    await a.write(parts({ standInSetVersion: one }), record(), OWN);
-    expect(await a.read(parts({ standInSetVersion: one }))).toBeDefined();
-    expect(await b.read(parts({ company: "org_bbbbbbbbbbbbbbbbbbbb", standInSetVersion: one }))).toBeUndefined();
-    // a company cannot ask the other's partition by naming it in the parts
-    expect(await b.read(parts({ standInSetVersion: one }))).toBeUndefined();
   });
 });

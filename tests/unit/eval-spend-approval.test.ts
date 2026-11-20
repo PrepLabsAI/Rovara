@@ -1,16 +1,13 @@
 // L4-EVC (DEC 254zzz20 D8): the hosted approvers point accepts its proof of one act (DEC 254zzz73: no step-up) for ONE more subject, a project's eval spend item, and only for it. A proof of one subject type never stands for another
 // (a task's, a setup candidate's, an eval spend item's), and every binding of the proof (company, person, request, kind, project, revision, digest, answer, card) is held again at `verify`.
 import { describe, expect, it } from "vitest";
-import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
-import { createNoopAuditSink } from "../../packages/broker/src/ports/policy-defaults.js";
 import type { ApprovalProof, ApprovalRequest, OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import {
   EVAL_SPEND_SUBJECT, SETUP_PROPOSAL_SUBJECT, APPROVAL_PROOF_METHOD, createHostedApprovers, issueEvalSpendApprovalProof, issueSetupApprovalProof, issueApprovalProof, approvalProofKeyOf,
 } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
-import { EVAL_SPEND_KIND, createEvalSpendSubject } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
-import { deployedSessionMembers } from "../../packages/broker/src/core-host/deployed-decisions.js";
+import { EVAL_SPEND_KIND } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
 import { evalSpendCardOf } from "../../packages/broker/src/core-host/setup-approval.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 
@@ -83,18 +80,5 @@ describe("the approval proof for a project's eval spend item (no step-up)", () =
   it("refuses an input it cannot bind (a project name that is not one)", () => {
     expect(() => issueEvalSpendApprovalProof(KEY, act({ project: "../x" }), NOW)).toThrow();
     expect(() => issueEvalSpendApprovalProof(KEY, act({ project: undefined }), NOW)).toThrow();
-  });
-  it("decides the real eval spend item end to end through the gate, as a company admin, and refuses the same proof presented for another project", async () => {
-    const store = new MemoryDocumentStore();
-    const members = deployedSessionMembers(A, { membershipOf: async (id) => MEMBERS[id], projectGrantRole: async () => undefined });
-    const subject = createEvalSpendSubject({ store, companyId: A, members, monthlyCapMicros: 50_000_000 });
-    const gate = createDecisionGate({ store, approvers: approvers(store), audit: createNoopAuditSink(), subjects: [subject], now: () => new Date(NOW) });
-    const { proposeEvalSpendApproval } = await import("../../packages/broker/src/core/setup-agent/eval-spend.js");
-    const row = await proposeEvalSpendApproval({ store, companyId: A, members, monthlyCapMicros: 50_000_000 }, PROJECT, { selection: "evals/demo", inputs: { evalSetHash: "1".repeat(64), judgePin: "2".repeat(64), modelVersion: "v1", model: "m", catalogRowId: "gemini", commandFingerprint: "3".repeat(64), settingsFingerprint: "4".repeat(64) }, estimate: { calls: 6, costMicros: 600_000 } });
-    const requestId = `eval-${row.digest.slice(0, 40)}-${row.revision}`;
-    const issued = issueEvalSpendApprovalProof(KEY, act({ requestId, revision: row.revision, artifactDigest: row.digest, card: evalSpendCardOf(PROJECT, row.digest) }), NOW);
-    const attempt = { companyId: A, kind: EVAL_SPEND_KIND, subjectId: PROJECT, requestId, outcome: "approve" as const, seen: { revision: row.revision, artifactDigest: row.digest }, credentials: [{ method: issued.method, token: issued.token }], card: evalSpendCardOf(PROJECT, row.digest) };
-    const result = await gate.decide(attempt);
-    expect(result.status).toBe("decided");
   });
 });

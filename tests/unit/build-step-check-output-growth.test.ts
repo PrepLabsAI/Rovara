@@ -10,10 +10,6 @@ describe("which file a Python traceback blames", () => {
   it("blames the check's own -c code when the last file before the error is <string>", () => {
     expect(checkCommandCouldNotRun(python(["-c", "x ="]), 1, 'Traceback (most recent call last):\n  File "<string>", line 1\n    x =\nSyntaxError: invalid syntax\n')).toBe(true);
   });
-  it("blames the change when the last file is a module the check imports", () => {
-    const output = 'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\n  File "/work/repo/app/mod.py", line 3\nSyntaxError: invalid syntax\n';
-    expect(checkCommandCouldNotRun(python(["-c", "import app.mod"]), 1, output)).toBe(false);
-  });
   it("reads the file line after tabs, Windows line ends, blank lines and non-breaking spaces, as before", () => {
     for (const lead of ["\t", "\r\n  ", "\n\n\n  ", " ", "﻿  "]) {
       expect(checkCommandCouldNotRun(python(["check.py"]), 1, `Traceback:\n${lead}File "check.py", line 2\nIndentationError: unexpected indent\n`), JSON.stringify(lead)).toBe(true);

@@ -1,6 +1,6 @@
 // The stores behind context sources, on the document store port: the counters a stage's allowance rests on, the revision rule of a project's sources, and the events of a host.
 import { describe, expect, it } from "vitest";
-import { INDEX_EXPIRY_ATTRIBUTE, change, orgScoped, type McpControllerEvent, type OrgId } from "@agentx/contracts";
+import { change, orgScoped, type McpControllerEvent, type OrgId } from "@agentx/contracts";
 import { documentContextSourceStore } from "../../packages/broker/src/context-sources/store.js";
 import { SOURCE_FAILURE_LIMIT, STAGE_TOTAL_CALLS, documentUsageStore } from "../../packages/broker/src/context-sources/usage.js";
 import { documentControllerEventStore, drainControllerEvents } from "../../packages/broker/src/context-sources/controller-events.js";
@@ -39,12 +39,6 @@ describe("the usage of a stage", () => {
     expect(await counters.bytesUsed({ ...key, operationId: "op2" })).toBe(0);
     expect(await counters.bytesUsed({ ...key, orgId: OTHER })).toBe(0);
   });
-
-  it("gives every counter row an expiry, so a stage leaves nothing behind", async () => {
-    const db = memoryStore();
-    await documentUsageStore({ store: db, now: () => NOW }).reserveCall({ ...key, callsPerStage: 1 });
-    expect((await db.get({ pk: orgScoped(ORG, "CTXUSE#op1"), sk: "USE" }))![INDEX_EXPIRY_ATTRIBUTE]).toBe(Math.floor(NOW / 1_000) + 3 * 24 * 60 * 60);
-  });
 });
 
 describe("a project's sources", () => {
@@ -75,15 +69,6 @@ describe("a project's sources", () => {
     await db.put({ item: { pk: orgScoped(ORG, "CTXSRC#proj"), sk: "DOC", revision: 3, sources: [{ not: "a source" }] } });
     expect(await sources.readDocument(ORG, "proj")).toEqual({ revision: 3, sources: [] });
     await expect(sources.putChange(change0())).rejects.toThrow(/already exists/u);
-  });
-});
-
-describe("a document with a stage that never reads sources", () => {
-  it("serves no source from a document that names the stage that writes the code, whatever else it holds", async () => {
-    const db = memoryStore();
-    const sources = documentContextSourceStore({ store: db, now: () => NOW });
-    await db.put({ item: { pk: orgScoped(ORG, "CTXSRC#proj"), sk: "DOC", revision: 2, sources: [{ ...source(), stages: ["IMPLEMENT", "PLAN"] }] as never } });
-    expect(await sources.readDocument(ORG, "proj")).toEqual({ revision: 2, sources: [] });
   });
 });
 

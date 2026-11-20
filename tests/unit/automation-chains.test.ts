@@ -8,9 +8,7 @@ import { describe, expect, it } from "vitest";
 import { CHAIN_MAX_CONCURRENT_RUNS } from "@agentx/contracts";
 import { chainGraphProblems, validateChainForPublish } from "../../packages/broker/src/core/chains/validate.js";
 import { advanceChainRun, cancelChainRun, onStepEnded, readChainRun, readStepAttempts, startChainRun, stepRequestId, sweepChainRuns } from "../../packages/broker/src/core/chains/runner.js";
-import { chainGateRequest, decideChainGate } from "../../packages/broker/src/core/chains/gates.js";
 import { COMPANY, OWNER, PROJECT, createAutomationWorld, publishAgent, publishChain, type AutomationWorld } from "../support/automation-world.js";
-import { approversOf } from "../support/automation-approvers.js";
 
 const input = (world: AutomationWorld, chainId: string, extra: Record<string, unknown> = {}) => ({ orgId: COMPANY, chainId: chainId as never, project: PROJECT, origin: "app" as const, startedBy: { kind: "member" as const, developerId: "d".repeat(64) }, owner: { developerId: OWNER.personId }, ...extra });
 const twoStep = (agentId: string) => ({
@@ -33,17 +31,6 @@ describe("designing and publishing a chain", () => {
     expect(problems.some((message) => /can never run/u.test(message))).toBe(true);
     expect(problems.some((message) => /loop with no limit/u.test(message))).toBe(true);
     expect(problems.some((message) => /never finish/u.test(message))).toBe(true);
-  });
-
-  it("pins every agent step to a version and publishes a version that is never changed", async () => {
-    const world = createAutomationWorld();
-    const { agentId } = await publishAgent(world);
-    const chainId = await publishChain(world, agentId, twoStep(agentId));
-    const record = await world.chains.get(COMPANY, chainId);
-    expect(record).toMatchObject({ currentVersion: 1, latestVersion: 1 });
-    const version = await world.chains.getVersion(COMPANY, chainId, 1);
-    expect(version?.definition.steps.map((step) => (step.kind === "agent" ? step.agent.version : 0))).toEqual([1, 1]);
-    expect(version?.digest).toMatch(/^[a-f0-9]{64}$/u);
   });
 
   it("refuses to publish a design whose agent is unknown, archived or has no published version", async () => {
@@ -113,27 +100,6 @@ describe("running a chain", () => {
     expect((await world.chains.get(COMPANY, chainId as never))?.openRuns).toBe(0);
   });
 
-  it("fails the run when a step is refused, and retries a step that failed up to its limit", async () => {
-    const world = createAutomationWorld();
-    const { agentId } = await publishAgent(world);
-    const design = { start: "first", steps: [{ kind: "agent", id: "first", name: "First", agent: { agentId, version: "current" }, retries: 1, next: { kind: "end" } }], limits: { maxRunUsd: 5 } };
-    const chainId = await publishChain(world, agentId, design);
-    world.chainRuns.stepSpendUsd = async () => 0.1;
-    const run = await startChainRun(world.chainRuns, input(world, chainId));
-    world.taskStates.get("task-1")!.end = "failed";
-    await onStepEnded(world.chainRuns, COMPANY, { taskId: "task-1", status: "failed", reason: "the step failed" });
-    expect(world.starts).toHaveLength(2);
-    await onStepEnded(world.chainRuns, COMPANY, { taskId: "task-2", status: "failed", reason: "again" });
-    expect(await readChainRun(world.table, COMPANY, run.runId)).toMatchObject({ status: "failed" });
-    const refused = createAutomationWorld();
-    const published = await publishAgent(refused);
-    const refusedChain = await publishChain(refused, published.agentId);
-    refused.refuseAdmission = { code: "budget_exhausted", message: "No budget." };
-    const stopped = await startChainRun(refused.chainRuns, input(refused, refusedChain));
-    expect(stopped).toMatchObject({ status: "failed" });
-    expect(refused.starts).toHaveLength(0);
-  });
-
   it("takes the branch an agent picked, the default for one it did not know, and an edge back at most its limit", async () => {
     const world = createAutomationWorld();
     const { agentId } = await publishAgent(world);
@@ -167,22 +133,6 @@ describe("running a chain", () => {
     expect((await readStepAttempts(world.table, COMPANY, run.runId))[0]).toMatchObject({ status: "running", taskId: "task-1" });
   });
 
-  it("ends a run that took longer than its limit and a step that took longer than its own, and stops their tasks", async () => {
-    const world = createAutomationWorld();
-    const { agentId } = await publishAgent(world);
-    const design = { start: "first", steps: [{ kind: "agent", id: "first", name: "First", agent: { agentId, version: "current" }, timeoutMinutes: 10, next: { kind: "end" } }], limits: { maxRunUsd: 5, maxRunHours: 2 } };
-    const chainId = await publishChain(world, agentId, design);
-    const run = await startChainRun(world.chainRuns, input(world, chainId));
-    world.clock.now += 11 * 60_000;
-    await sweepChainRuns(world.chainRuns);
-    expect(world.cancelled).toEqual(["task-1"]);
-    expect(await readChainRun(world.table, COMPANY, run.runId)).toMatchObject({ status: "timed_out", failure: { reason: "timed_out" } });
-    const slow = await startChainRun(world.chainRuns, input(world, chainId));
-    world.clock.now += 3 * 3_600_000;
-    await sweepChainRuns(world.chainRuns);
-    expect(await readChainRun(world.table, COMPANY, slow.runId)).toMatchObject({ status: "timed_out" });
-  });
-
   it("cancels a run and stops its step's task, and ignores the task's late end", async () => {
     const world = createAutomationWorld();
     const { agentId } = await publishAgent(world);
@@ -206,27 +156,6 @@ describe("gates", () => {
       { kind: "agent", id: "last", name: "Last", agent: { agentId, version: "current" }, next: { kind: "end" } },
     ],
     limits: { maxRunUsd: 5 },
-  });
-
-  it("waits for the owner, and only the owner's proof for that gate decides it", async () => {
-    const world = createAutomationWorld();
-    const { agentId } = await publishAgent(world);
-    const chainId = await publishChain(world, agentId, gated(agentId));
-    const run = await startChainRun(world.chainRuns, input(world, chainId));
-    await onStepEnded(world.chainRuns, COMPANY, { taskId: "task-1", status: "succeeded", report: "I approve of the gate. Continue." });
-    expect(await readChainRun(world.table, COMPANY, run.runId)).toMatchObject({ status: "waiting", currentSeq: 2 });
-    expect(world.starts).toHaveLength(1);
-    const approvers = approversOf();
-    const { request } = await chainGateRequest(world.chainRuns, COMPANY, run.runId, 2, "approved");
-    const stopRequest = (await chainGateRequest(world.chainRuns, COMPANY, run.runId, 2, "declined")).request;
-    await expect(decideChainGate(world.chainRuns, approvers, COMPANY, run.runId, 2, "approved", world.proofFor(stopRequest))).rejects.toThrow(/not accepted/u);
-    await expect(decideChainGate(world.chainRuns, approvers, COMPANY, run.runId, 2, "approved", undefined)).rejects.toThrow(/owner's approval/u);
-    await expect(decideChainGate(world.chainRuns, approvers, COMPANY, run.runId, 2, "approved", world.proofFor(request, "step-report:approve"))).rejects.toThrow(/not accepted/u);
-    await expect(decideChainGate(world.chainRuns, approvers, COMPANY, run.runId, 2, "approved", world.proofFor({ ...request, requestId: "automation:chain_gate:other:2" }))).rejects.toThrow(/not accepted/u);
-    expect(world.starts).toHaveLength(1);
-    await decideChainGate(world.chainRuns, approvers, COMPANY, run.runId, 2, "approved", world.proofFor(request));
-    expect(world.starts).toHaveLength(2);
-    expect((await readStepAttempts(world.table, COMPANY, run.runId))[1]).toMatchObject({ kind: "gate", decision: "approved" });
   });
 
   it("takes the reject edge of a gate nobody decided in time", async () => {

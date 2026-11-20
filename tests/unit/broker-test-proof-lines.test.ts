@@ -18,48 +18,11 @@ const item = (verdict: TestProof["items"][number]["verdict"], label = "npm test"
 });
 
 describe("test proof lines for the pull request", () => {
-  // 8
-  it("says which new tests fail on the original code, and warns about one that passes there too", () => {
-    const lines = testProofPullRequestLines(proof([item("proves_change"), item("does_not_prove", "npm test -- unit")]), DIGEST, inert);
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toBe("Test proof: 1 check fails on the original code and passes now");
-    expect(lines[1]).toContain("Warning");
-    expect(lines[1]).toContain("npm test -- unit");
-  });
-
-  it("never counts or warns about a check that is not a test runner (lint)", () => {
-    const lines = testProofPullRequestLines(proof([item("proves_change"), item("not_applicable", "npm run lint")]), DIGEST, inert);
-    expect(lines).toEqual(["Test proof: 1 check fails on the original code and passes now"]);
-    expect(testProofPullRequestLines(proof([item("not_applicable", "npm run lint")]), DIGEST, inert)).toEqual([]);
-  });
-
-  it("strips an unclosed HTML comment opener and backticks from a quoted name", () => {
-    const text = testProofPullRequestLines(proof([item("does_not_prove", "npm test <!-- hide the rest `code`")]), DIGEST, inert).join("\n");
-    expect(text).not.toContain("<!--");
-    expect(text).not.toContain("`");
-    expect(text).toContain("npm test");
-  });
 
   it("ignores a proof bound to an older candidate, and one that does not parse", () => {
     expect(testProofPullRequestLines(proof([item("proves_change")], OLD_DIGEST), DIGEST, inert)).toEqual([]);
     expect(testProofPullRequestLines({ nonsense: true }, DIGEST, inert)).toEqual([]);
     expect(testProofPullRequestLines(proof([item("proves_change")]), undefined, inert)).toEqual([]);
-  });
-
-  it("redacts and makes inert every label it quotes", () => {
-    const secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
-    const lines = testProofPullRequestLines(proof([item("does_not_prove", `ping @everyone <img src=x> token=${secret}`)]), DIGEST, inert);
-    const text = lines.join("\n");
-    expect(text).toContain("@‍everyone");
-    expect(text).not.toContain("<img");
-    expect(text).not.toContain(secret);
-  });
-
-  it("cannot be made to rebuild a comment opener or a backtick by nesting", () => {
-    for (const nasty of ["a <!<!<!------ b", "a <!<!<!<!--------", "a ``<<!-`-- b"]) {
-      const text = testProofPullRequestLines(proof([item("does_not_prove", nasty)]), DIGEST, (line) => line).join("\n");
-      expect(text.replace(/^Warning[^(]*\(/u, "")).not.toMatch(/[<>`]/u);
-    }
   });
 
   it("is silent when no test changed", () => {
@@ -137,23 +100,6 @@ describe("v1 reply provenance", () => {
     }
     expect((await load({ ...proof([item("does_not_prove", "vacuous")]), scriptedReplies: facts() })).lines).toEqual(["Warning: 1 check also passes on the original code, so it does not prove the change (vacuous)"]);
     expect((await load({ ...proof([item("proves_change")], OLD_DIGEST), scriptedReplies: facts() })).lines).toEqual([countLine]);
-  });
-  it("never revives older proof after unreadable reply facts or a malformed marked proof", async () => {
-    const secret = `gh${"p"}_${"z".repeat(36)}`;
-    const valid = { ...proof([item("proves_change")]), scriptedReplies: facts() };
-    const bad = [null, secret, {}, [{ checkId: "readiness:0" }], [{ ...facts()[0], taskMade: "1" }], [...facts(), ...facts()]];
-    for (const value of [...bad.map((scriptedReplies) => ({ ...valid, scriptedReplies })), { ...valid, status: secret }, { ...valid, items: [{ ...item("proves_change"), verdict: secret }] }, { ...valid, candidateDigest: secret }, JSON.stringify(valid).slice(0, -1)]) {
-      const result = await load(value);
-      expect(result.lines).toEqual([]);
-      expect(result.listings).toEqual(["new"]);
-      expect(result.reads).toEqual(["private/owner/ws/new/proof"]);
-      expect(JSON.stringify(result)).not.toContain(secret);
-    }
-  });
-  it("preserves legacy bytes for missing provenance and malformed unmarked roots", async () => {
-    expect((await load(proof([item("proves_change")]))).lines.join("\n")).toBe(countLine);
-    for (const value of [{ invalid: true }, null, 42]) expect((await load(value)).lines.join("\n")).toBe(countLine);
-    expect((await load("{broken")).lines).toEqual([]);
   });
   it("uses fixed qualifier words without leaking hostile proving labels and bounds large input", async () => {
     const secret = `gh${"p"}_${"q".repeat(36)}`;

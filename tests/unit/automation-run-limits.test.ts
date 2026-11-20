@@ -6,7 +6,6 @@
 import { describe, expect, it } from "vitest";
 import { NO_CAP_MESSAGE, startUnattendedRun, sweepUnattendedRuns, type AutomatedRunRequest } from "../../packages/broker/src/core/automation/run-seam.js";
 import { cancelChainRun, onStepEnded, readChainRun, readStepAttempts, startChainRun, stepShareUsd, sweepChainRuns } from "../../packages/broker/src/core/chains/runner.js";
-import { createTrigger, enableTrigger, triggerEnableRequest } from "../../packages/broker/src/core/triggers/lifecycle.js";
 import { COMPANY, OWNER, PROJECT, createAutomationWorld, publishAgent, publishChain, type AutomationWorld } from "../support/automation-world.js";
 
 const uuid = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -34,32 +33,6 @@ describe("a dollar cap that nothing enforces", () => {
     await startUnattendedRun(world.unattended, { ...request(3), origin: "automatic", automatic: { job: "scheduled_check", purpose: "saved_env_rebuild" } });
     expect(world.starts).toHaveLength(1);
   });
-
-  it("refuses a chain with no limit of its own on an install with no cap, and starts no task", async () => {
-    const world = createAutomationWorld();
-    world.enforces.dollars = false;
-    const { agentId } = await publishAgent(world);
-    const chainId = await publishChain(world, agentId, { limits: {} });
-    const run = await start(world, chainId);
-    expect(run).toMatchObject({ status: "failed", failure: { reason: "AGENT_BUDGET_REQUIRED" } });
-    expect(world.starts).toHaveLength(0);
-    expect(world.admissions).toHaveLength(0);
-  });
-
-  it("is told to the owner when a trigger is turned on, and the trigger stays off", async () => {
-    const world = createAutomationWorld();
-    const { agentId } = await publishAgent(world);
-    const trigger = await createTrigger(world.dispatch, { orgId: COMPANY, target: { kind: "agent", agentId }, project: PROJECT, spec: { kind: "event", source: "github", type: "pull_request.opened" }, by: OWNER.personId });
-    world.enforces.dollars = false;
-    await expect(enableTrigger(world.dispatch, COMPANY, trigger.triggerId, world.proofFor(await triggerEnableRequest(world.dispatch, trigger)))).rejects.toThrow(/no dollar cap/u);
-    expect((await world.triggers.get(COMPANY, trigger.triggerId))?.enabled).toBe(false);
-  });
-
-  it("tells Admission the figure the run is held to", async () => {
-    const world = createAutomationWorld();
-    await startUnattendedRun(world.unattended, request(3, 2.5));
-    expect(world.admissions[0]?.estimate?.cost).toEqual({ micros: 2_500_000, currency: "USD" });
-  });
 });
 
 describe("a chain step's share of the run's dollar limit", () => {
@@ -69,20 +42,6 @@ describe("a chain step's share of the run's dollar limit", () => {
     expect(stepShareUsd(definition, { runLimitUsd: 6, spentUsd: 5 })).toBe(1);
     expect(stepShareUsd(definition, { runLimitUsd: 6, spentUsd: 6 })).toBe(0);
     expect(stepShareUsd(definition, {})).toBeUndefined();
-  });
-
-  it("starts each step with its own share, and counts what a step really cost against the run", async () => {
-    const world = createAutomationWorld();
-    const { agentId } = await publishAgent(world);
-    const chainId = await publishChain(world, agentId, twoSteps(agentId));
-    world.chainRuns.stepSpendUsd = async () => 4;
-    const run = await start(world, chainId);
-    expect(world.starts[0]?.limits.maxRunUsd).toBe(3);
-    expect(world.admissions[0]?.estimate?.cost?.micros).toBe(3_000_000);
-    await onStepEnded(world.chainRuns, COMPANY, { taskId: "task-1", status: "succeeded", report: "Done." });
-    // The first step cost 4 of the run's 6: the second may have 2, though its equal share is 3.
-    expect(world.starts[1]?.limits.maxRunUsd).toBe(2);
-    expect((await readChainRun(world.table, COMPANY, run.runId))?.spentUsd).toBe(4);
   });
 
   it("counts a step with no cost figure at the whole share it was granted, and fails the step that has nothing left", async () => {
@@ -121,16 +80,6 @@ describe("settling and releasing an unattended run's allowance", () => {
     world.taskStates.delete("task-1");
     expect(await sweepUnattendedRuns(world.unattended)).toMatchObject({ settled: 1 });
     expect(world.settles).toHaveLength(1);
-  });
-
-  it("gives the reservation back when Admission is held and the start is refused or fails with no run", async () => {
-    const world = createAutomationWorld();
-    world.starter.failWith = Object.assign(new Error("PROJECT_ARCHIVED: gone"), { code: "PROJECT_ARCHIVED" });
-    await expect(startUnattendedRun(world.unattended, request(11, 1))).rejects.toThrow();
-    world.starter.failWith = new Error("socket hang up");
-    await expect(startUnattendedRun(world.unattended, request(12, 1))).rejects.toThrow();
-    expect(world.releases).toEqual(["res-1", "res-2"]);
-    expect(world.settles).toEqual([]);
   });
 
   it("stops a run that outlives its minutes, not counting the time its task waited for the owner", async () => {

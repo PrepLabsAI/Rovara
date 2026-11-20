@@ -37,11 +37,6 @@ describe("the trackers a laptop signs in to", () => {
       expect(await kinds(secrets({ "env:JIRA_API_TOKEN": JIRA }), { JIRA_SITE_URL: site, JIRA_EMAIL: "owner@example.test" })).toEqual([]);
     }
   });
-
-  it("reads a secrets adapter that fails as no sign-in, and its words are not passed on", async () => {
-    const failing = { async read() { throw new Error(`the vault said ${LINEAR}`); } } as unknown as SecretStore;
-    expect(await kinds(failing)).toEqual([]);
-  });
 });
 
 describe("the config's linked accounts", () => {

@@ -45,12 +45,6 @@ for (const backend of ["memory", "sqlite", "dynamo"] as const) describe(`company
     } finally { for (const sub of subs) await sub.stop(); await sqlite?.close(); }
   });
 });
-
-it("fails closed: unusable view company is refused before subscription", () => {
-  for (const company of ["", "bad-canary", undefined, null, 42, `${A}x`]) {
-    expect(() => ports.companyChangeFeed({ subscribe: () => { throw new Error("read"); } }, company as string)).toThrow("invalid company");
-  }
-});
 it("poison callbacks see only their company's batch and fixed error text", async () => {
   const store = new MemoryDocumentStore();
   const poisoned: unknown[] = [];

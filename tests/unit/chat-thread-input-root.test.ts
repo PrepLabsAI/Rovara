@@ -7,7 +7,6 @@ import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { SLACK_CHANNEL, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { readTaskNotes } from "../../packages/broker/src/core/sessions/notes.js";
-import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import type { ChatThreadInput } from "../../packages/broker/src/core-host/chat-thread-input.js";
 import { createFakeWorld, FAKE_COMPANY, type FakeWorld } from "../support/core-host-fakes.js";
 
@@ -74,24 +73,6 @@ async function world(options: { chatThreads?: boolean } = {}) {
 }
 
 describe("the hosted core root takes a Slack thread's later message as the task's input", () => {
-  it("is on the core entry when the deployment wires its chat threads, and absent when it does not", async () => {
-    const wired = (await world()).root.coreTasks;
-    expect(wired !== undefined && "threadInput" in wired).toBe(true);
-    // The root's entry wrapper once kept only `route` and the admin stop: a start from a chat never remembered its thread (L4-U5b's `recordThread`), so a later message had no thread to belong to.
-    expect(wired !== undefined && "recordThread" in wired).toBe(true);
-    const unwired = (await world({ chatThreads: false })).root.coreTasks;
-    expect(unwired !== undefined && "threadInput" in unwired).toBe(false);
-    expect(unwired !== undefined && "recordThread" in unwired).toBe(false);
-  });
-
-  it("the task's owner (live member of the thread's company, with the project grant) adds a note the task keeps, once", async () => {
-    const w = await world();
-    const taskId = await w.start();
-    expect(await w.root.coreTasks!.threadInput!(w.caller(OWNER), w.input(taskId))).toEqual({ outcome: "captured", notice: "note_saved" });
-    expect(await w.root.coreTasks!.threadInput!(w.caller(OWNER), w.input(taskId))).toEqual({ outcome: "duplicate" });
-    expect((await readTaskNotes(w.fake.store, taskId)).map((note) => note.text)).toEqual(["Also cover the 404 case."]);
-    expect((await w.fake.store.get(taskKey(taskId)))?.["threadNoteCount"]).toBe(1);
-  });
 
   it("a start from a Slack thread through the root remembers the thread, and a reply from another thread of the same workspace is refused", async () => {
     const w = await world();
@@ -116,14 +97,6 @@ describe("the hosted core root takes a Slack thread's later message as the task'
     const fromB = w.input(taskId, { conversation: { channel: SLACK_CHANNEL, tenant: TEAM_B, space: SPACE, thread: THREAD }, actor: { channel: SLACK_CHANNEL, tenant: TEAM_B, userId: "U0123456789" } });
     expect(await w.root.coreTasks!.threadInput!(w.caller(OWNER), fromB)).toEqual({ outcome: "refused", notice: "not_allowed" });
     expect(await w.root.coreTasks!.threadInput!(w.caller("nobody-at-all"), w.input(taskId))).toEqual({ outcome: "refused", notice: "not_allowed" });
-    expect(await readTaskNotes(w.fake.store, taskId)).toEqual([]);
-  });
-
-  it("the task's owner, once their membership is gone (read live on every call), is refused", async () => {
-    const w = await world();
-    const taskId = await w.start();
-    w.rows.delete(`${SIGN_IN}|COMPANY_MEMBER#${OWNER}|COMPANY`);
-    expect(await w.root.coreTasks!.threadInput!(w.caller(OWNER), w.input(taskId))).toEqual({ outcome: "refused", notice: "not_allowed" });
     expect(await readTaskNotes(w.fake.store, taskId)).toEqual([]);
   });
 

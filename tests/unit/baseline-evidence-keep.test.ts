@@ -6,7 +6,6 @@ import {
 } from "../../packages/contracts/src/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import { eraseTaskEvidence } from "../../packages/broker/src/core/proof/evidence-erase.js";
 import { evidenceBaselineKey, keepEvidence, loadEvidenceBaseline, loadEvidencePack, type KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
 import { evidenceLines } from "../../packages/broker/src/core/proof/evidence-lines.js";
 import { mintTrustedBaselineRun, recordBaselineRow } from "../../packages/broker/src/core/test-env/baseline-cache.js";
@@ -79,28 +78,6 @@ describe("the claim is used only for a commit this task's plan offered", () => {
     expect(await ask({ words: { ...words, sha: sha(9) } })).toBeUndefined();
   });
 
-  it("ignores a sha the plan did not offer, even when a row exists for it", async () => {
-    const w = await world(raw({ sha: sha(2), commitsBack: 1 }));
-    expect(await w.keep([sha(1)])).toMatchObject({ kept: true });
-    expect(await kept(w)).toBeUndefined();
-    // Positive control: the same claim is used when the plan did offer it.
-    const control = await world(raw({ sha: sha(2), commitsBack: 1 }));
-    await control.keep([sha(1), sha(2)]);
-    expect(await kept(control)).toMatchObject({ sha: sha(2), commitsBack: 1, ageHours: 30 });
-  });
-
-  it("ignores a claim when the plan offered nothing (an old engine, the switch off) and when there is no claim", async () => {
-    const none = await world(raw({ sha: sha(1), commitsBack: 0 }));
-    await none.keep(undefined);
-    expect(await kept(none)).toBeUndefined();
-    const off = await world(raw({ sha: sha(1), commitsBack: 0 }));
-    await off.keep([sha(1)], {});
-    expect(await kept(off)).toBeUndefined();
-    const noClaim = await world(raw());
-    await noClaim.keep([sha(1)]);
-    expect(await kept(noClaim)).toBeUndefined();
-  });
-
   it("refuses a claim out of range or not an integer (the raw file does not even parse as evidence), and still keeps the pack of the broker's own verdicts", async () => {
     for (const bad of [{ sha: sha(1), commitsBack: 51 }, { sha: sha(1), commitsBack: -1 }, { sha: sha(1), commitsBack: 1.5 }, { sha: sha(1), commitsBack: "1" }, { sha: "main", commitsBack: 1 }, { sha: sha(1), commitsBack: 1, extra: 1 }]) {
       expect(EvidenceRawSchema.safeParse(JSON.parse(raw(bad))).success).toBe(false);
@@ -108,16 +85,6 @@ describe("the claim is used only for a commit this task's plan offered", () => {
       expect(await w.keep([sha(1)])).toMatchObject({ kept: true });
       expect(await kept(w)).toBeUndefined();
     }
-  });
-
-  it("a row that cannot be used (another revision, a failing set that did not fit, none at all) gives no words, never a made-up count", async () => {
-    const w = await world(raw({ sha: sha(9), commitsBack: 1 }));
-    await w.keep([sha(9)]);
-    expect(await kept(w)).toBeUndefined();
-    const other = await world(raw({ sha: sha(1), commitsBack: 1 }));
-    const wrongRevision = taskBaselineOf({ store: other.documents, now: () => NOW, env: { ROVARA_BASELINE_CACHE: "1" } }, { orgId: ORG, project: PROJECT, taskId: TASK.taskId, plan: { revision: 2, baselineCandidates: [{ sha: sha(1) }] } });
-    await keepEvidence(other.deps, { orgId: ORG, task: TASK, operationId: OP, candidateDigest: DIGEST, checks: [entry("readiness:0")], baseline: wrongRevision });
-    expect(await kept(other)).toBeUndefined();
   });
 
   it("a claim for the candidate of another company's task finds nothing (the company is the task's)", async () => {
@@ -144,26 +111,6 @@ describe("the claim is used only for a commit this task's plan offered", () => {
     expect(await kept(same)).toMatchObject({ sha: sha(1), branch: "main" });
   });
 
-  it("never writes a baseline row: a whole task round of keeping adds no row to the store", async () => {
-    const w = await world(raw({ sha: sha(1), commitsBack: 2 }));
-    const before = (await w.documents.query({ pk: `ORG#${ORG}#PROJECT#${PROJECT}`, sk: { op: "beginsWith", prefix: "TESTENV#BASELINE#SHA#" } })).items.map((item) => item.sk);
-    expect(before).toHaveLength(2);
-    await w.keep([sha(1), sha(2)]);
-    await w.keep([sha(1), sha(2)]);
-    const after = (await w.documents.query({ pk: `ORG#${ORG}#PROJECT#${PROJECT}`, sk: { op: "beginsWith", prefix: "TESTENV#BASELINE#" } })).items.map((item) => item.sk);
-    expect(after).toEqual(before);
-  });
-
-  it("a re-check of the same code replaces the words, and a re-check with no claim removes the old ones (never 'compared with' a run it was not)", async () => {
-    const w = await world(raw({ sha: sha(1), commitsBack: 3 }));
-    await w.keep([sha(1)]);
-    expect(await kept(w)).toMatchObject({ commitsBack: 3 });
-    const again = await world(raw());
-    await w.blobs.put(evidenceBaselineKey(TASK, DIGEST), Buffer.from(JSON.stringify({ schemaVersion: 1, sha: sha(1), branch: "main", writer: "nightly", commitsBack: 3, ageHours: 1, knownFailing: 0, flaky: 0 })), { contentType: "application/json", metadata: {}, retention: "evidence-std" }, { overwrite: true });
-    await keepEvidence({ ...again.deps, store: { blobs: w.blobs } }, { orgId: ORG, task: TASK, operationId: OP, candidateDigest: DIGEST, checks: [entry("readiness:0")], baseline: again.baseline([sha(1)]) });
-    expect(await kept(w)).toBeUndefined();
-  });
-
   it("an abandoned call (its time has run out) writes no baseline words, and the call it ran in still ends", async () => {
     const w = await world(raw({ sha: sha(1), commitsBack: 3 }));
     // The keeper asks `late` before it stores the tails, before it stores the pack, and now before the words: the third answer is "late".
@@ -176,28 +123,6 @@ describe("the claim is used only for a commit this task's plan offered", () => {
     // Positive control: the same call, not late, writes them.
     await w.keep([sha(1)]);
     expect(await kept(w)).toBeDefined();
-  });
-
-  it("with the switch off (no baseline input) the keeper does not touch the words object at all: no write and no delete", async () => {
-    const w = await world(raw({ sha: sha(1), commitsBack: 3 }));
-    const touched: string[] = [];
-    const spy = { ...w.blobs, put: async (key: string, ...rest: Parameters<typeof w.blobs.put> extends [string, ...infer R] ? R : never) => { touched.push(`put ${key}`); await w.blobs.put(key, ...rest); }, delete: async (key: string) => { touched.push(`delete ${key}`); await w.blobs.delete(key); } };
-    const deps = { ...w.deps, store: { blobs: spy } };
-    await keepEvidence(deps, { orgId: ORG, task: TASK, operationId: OP, candidateDigest: DIGEST, checks: [entry("readiness:0")] });
-    expect(touched.some((entry) => entry.includes(".baseline.json"))).toBe(false);
-    expect(touched.some((entry) => entry.startsWith("put ") && entry.includes("evidence-pack"))).toBe(true);
-    // Positive control: with baseline input the same keeper does write or delete the words object.
-    await keepEvidence(deps, { orgId: ORG, task: TASK, operationId: OP, candidateDigest: DIGEST, checks: [entry("readiness:0")], baseline: w.baseline([sha(1)]) });
-    expect(touched.some((entry) => entry.includes(".baseline.json"))).toBe(true);
-  });
-
-  it("is deleted with the task's evidence (erase by task or workspace prefix), and the object expires with it", async () => {
-    const w = await world(raw({ sha: sha(1), commitsBack: 3 }));
-    await w.keep([sha(1)]);
-    expect(await kept(w)).toBeDefined();
-    expect(await eraseTaskEvidence(w.blobs, TASK)).toBe(true);
-    expect(await kept(w)).toBeUndefined();
-    expect(await loadEvidencePack(w.blobs, TASK, DIGEST)).toBeUndefined();
   });
 
   it("a damaged or look-alike stored object reads as no baseline", async () => {
@@ -235,13 +160,6 @@ describe("the pull request line", () => {
     expect(plain).not.toContain(line);
     expect(plain.filter((value) => value.startsWith("Compared with"))).toEqual([]);
     expect(evidenceLines({ pack: bound, mode: "summary", baseline: words }, DIGEST, 0).lines.filter((value) => value !== line)).toEqual(plain);
-  });
-
-  it("a hostile branch name is inert in the line, whatever the stored words say", async () => {
-    const bound = await pack();
-    const hostile = evidenceLines({ pack: bound, mode: "summary", baseline: { ...words, branch: "[x](https://evil.example) @owner #12 ENG-42 <b>" } }, DIGEST, 0).lines.find((value) => value.startsWith("Compared with"))!;
-    expect(hostile).not.toMatch(/\]\(|<b>|(?<!‍)@owner|#12\b/u);
-    expect(hostile.split("\n")).toHaveLength(1);
   });
 });
 

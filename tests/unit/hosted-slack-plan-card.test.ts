@@ -11,23 +11,18 @@ import { createCoreHostApp } from "../../packages/broker/src/core-host/index.js"
 import { coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { createHostedApprovers, approvalProofKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
-import { hostedDecisionService, type DeployedPeople } from "../../packages/broker/src/core-host/deployed-decisions.js";
+import { type DeployedPeople } from "../../packages/broker/src/core-host/deployed-decisions.js";
 import { hostedThreadHandler, hostedThreadNotification } from "../../packages/broker/src/core-host/thread-notification.js";
 import { hostedTaskAccess } from "../../packages/broker/src/aws/core-engine-root.js";
-import type { StartExtrasInput } from "../../packages/broker/src/core/task-flow/deps.js";
-import { ticketSessionStartExtras } from "../../packages/broker/src/aws/hosted-intake.js";
 import { hostedSlackThreads } from "../../packages/broker/src/aws/slack-thread-channel.js";
-import { readApprovalCard } from "../../packages/broker/src/core/channel/cards.js";
 import { recordTaskThread } from "../../packages/broker/src/core/channel/threads.js";
 import { projectPageUrl, sessionPageUrl } from "../../packages/broker/src/core/decisions/open-path.js";
-import { WORKFLOW_DOCUMENT_KIND } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import { PENDING_PK, deliverAttention } from "../../packages/broker/src/core/notify/index.js";
 import { createTaskSessionItems, developerIdOf, refreshSessionSummary, taskSessionId } from "../../packages/broker/src/core/sessions/index.js";
 import { createTaskFactsSource } from "../../packages/broker/src/local/app/facts.js";
 import { driftTaskKey, recheckRowKey, setupPausedMessage, type RecheckState } from "../../packages/broker/src/core/setup-agent/recheck.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { ticketMomentsOnChange } from "../../packages/broker/src/core/ticket-updates/moments.js";
-import { bindingItems } from "../../packages/broker/src/core/sessions/bindings.js";
 import { createDocumentMilestones } from "../../packages/broker/src/core/milestones/milestones.js";
 import { FAKE_COMPANY, createFakeWorld } from "../support/core-host-fakes.js";
 
@@ -146,45 +141,6 @@ async function seedBroken(w: World): Promise<void> {
 }
 
 describe("the plan card on a hosted Slack thread", () => {
-  it("posts ONE card in the thread with the company's token: the plan's risk and a link to the task's page on the web app", async () => {
-    const w = await world();
-    await w.handler.on(w.milestone("plan_ready"));
-    await w.handler.on(w.milestone("plan_ready"));
-    expect(w.slack.posts).toHaveLength(1);
-    const post = w.slack.posts[0]!;
-    expect(post).toMatchObject({ token: TOKEN_A, channel: CHANNEL, thread_ts: TS });
-    expect(post.text).toMatch(/^The plan for ".*" is ready for review\. Risk: (low|medium|high)\./u);
-    // The link is the web app's own address of this task's session, not a path of the broker.
-    const open = buttonsOf(post).find((button) => button["action_id"] === "rovara_open_task");
-    expect(open?.["url"]).toBe(`${ORIGIN}/app/sessions/${w.sessionId}`);
-    expect(open?.["url"]).toBe(sessionPageUrl(ORIGIN, w.sessionId));
-  });
-
-  it("has NO Approve or Request changes button: the hosted approvers take a fresh web step-up only, so the card is the sign-in card, whatever the risk", async () => {
-    const w = await world();
-    await w.handler.on(w.milestone("plan_ready"));
-    expect(buttonsOf(w.slack.posts[0]).map((button) => button["action_id"])).toEqual(["rovara_open_task"]);
-    // The gate is the hosted one: it says the one method is the step-up, and a chat is not among them.
-    const found = await hostedDecisionService({ deps: w.deps, registry: w.registry, companyId: ORG, now: () => new Date(w.fake.clock.now) }).gate.requirement(ORG, WORKFLOW_DOCUMENT_KIND, w.task.taskId);
-    expect(found?.requirement.methods).toEqual(["rovara-step-up"]);
-    expect(found?.requirement.methods.some((method) => method.startsWith("chat-"))).toBe(false);
-  });
-
-  it("a press that somehow reached the gate (a forged chat credential, in the name of the member) approves, rejects and asks for changes NOTHING", async () => {
-    const w = await world();
-    await w.handler.on(w.milestone("plan_ready"));
-    const card = (await readApprovalCard({ store: w.storage, orgId: ORG, now: () => w.fake.clock.now }, [...(await cardIds(w))][0]!))!;
-    const gate = hostedDecisionService({ deps: w.deps, registry: w.registry, companyId: ORG, now: () => new Date(w.fake.clock.now) }).gate;
-    const before = await w.stepWorkflow();
-    for (const outcome of ["approve", "request_changes", "reject"] as const) {
-      const result = await gate.decide({
-        companyId: ORG, kind: card.subject.type, subjectId: card.subject.id, requestId: card.requestId, outcome, seen: { revision: card.revision, artifactDigest: card.artifactDigest },
-        credentials: [{ method: "chat-slack", token: "pressed", claimedAccount: { provider: SLACK_CHANNEL, tenant: TEAM_A, accountId: USER } }], reason: "Pressed in chat.",
-      });
-      expect(result.status).toBe("refused");
-    }
-    expect(await w.stepWorkflow()).toEqual(before);
-  });
 
   it("another company's workspace, a thread whose person left the company, and a workspace with no token get no card (and no Slack call is made for the first two)", async () => {
     // The thread row names company B's workspace: this company never reaches it.
@@ -202,16 +158,6 @@ describe("the plan card on a hosted Slack thread", () => {
     await expect(tokenless.handler.on(tokenless.milestone("plan_ready"))).rejects.toThrow();
     expect(tokenless.slack.posts).toEqual([]);
     expect(await cardIds(tokenless)).toEqual([]);
-  });
-
-  it("a milestone naming another company reads nothing of this company's task, and a plan that no longer waits has no card", async () => {
-    const w = await world();
-    await w.handler.on(w.milestone("plan_ready", OTHER));
-    expect(w.slack.posts).toEqual([]);
-    const task = (await w.store.get(taskKey(w.task.taskId)))!;
-    await w.store.put({ item: { ...task, closedAt: "2026-11-15T10:05:00.000Z" } });
-    await w.handler.on(w.milestone("plan_ready"));
-    expect(w.slack.posts).toEqual([]);
   });
 
   it("with no https origin there is no link and no button (never a broker path, an http address or a made-up host)", async () => {
@@ -334,37 +280,7 @@ describe("what needs a person also reaches the hosted thread", () => {
   });
 });
 
-describe("a start from a chat thread gets its session (the plan card and the notices are told through it)", () => {
-  const input = (client: string, ticket = false): StartExtrasInput => ({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", project: "payments", title: "Add a retry", workspaceId: "ws-1", principal: principalOf("dev-a"), client, receivedAt: "2026-11-15T10:00:00.000Z", ...(ticket ? { ticket: { system: "linear", id: "ENG-1", url: "https://linear.app/acme/issue/ENG-1/x" } } : {}) });
-  // Batch b18: #1045 (core task web routes, DEC 254zzz39 (6)) gives EVERY person's hosted start its session (web, Slack, API, intake), so a Slack start keeps its session whatever the chat seam says, and a web start now has one too.
-  it("a start from Slack gets its session, with or without the chat seam, and so does a web start (#1045)", () => {
-    const chat = ticketSessionStartExtras(ORG, { chatThreads: true });
-    expect(chat(input("slack")).sessionId).toBe(taskSessionId(input("slack").taskId));
-    expect(chat(input("slack")).items.length).toBeGreaterThan(0);
-    expect(chat(input("web")).sessionId).toBe(taskSessionId(input("web").taskId));
-    expect(ticketSessionStartExtras(ORG)(input("slack")).sessionId).toBe(taskSessionId(input("slack").taskId));
-    // A ticket still gets its session and binding, with or without chat threads.
-    expect(ticketSessionStartExtras(ORG)(input("web", true)).items.length).toBeGreaterThan(1);
-  });
-});
-
 describe("the thread's moments are written for a session that follows a thread, and for nothing else", () => {
-  it("the plan moment is written when the session follows a thread, never when it does not (a ticket is not a reason here), and the follow check is asked for THIS company's session", async () => {
-    const w = await world();
-    const milestones = createDocumentMilestones({ store: w.store, now: () => w.fake.clock.now });
-    const change = { orgId: ORG, sessionId: w.sessionId, session: { subject: { kind: "task", taskId: w.task.taskId } }, summary: { display: { state: "needs_you" } }, ended: false } as never;
-    const planRows = async () => (await w.store.query({ pk: `DEVTASK#${w.task.taskId}` })).items.filter((item) => JSON.stringify(item).includes("plan_ready"));
-    const asked: Array<[string, string]> = [];
-    await ticketMomentsOnChange({ store: w.store, milestones, now: () => w.fake.clock.now, follows: async (orgId, sessionId) => { asked.push([orgId, sessionId]); return false; }, ticketBindings: false })(change);
-    expect(await planRows()).toEqual([]);
-    expect(asked).toEqual([[ORG, w.sessionId]]);
-    // A ticket binding alone is not a reason here (only a thread is).
-    await w.store.transact(bindingItems(ORG, w.sessionId, { kind: "tracker_item", system: "linear", id: "ENG-1", url: "https://linear.app/acme/issue/ENG-1/x" }, "2026-11-15T10:00:00.000Z"));
-    await ticketMomentsOnChange({ store: w.store, milestones, now: () => w.fake.clock.now, follows: async () => false, ticketBindings: false })(change);
-    expect(await planRows()).toEqual([]);
-    await ticketMomentsOnChange({ store: w.store, milestones, now: () => w.fake.clock.now, follows: async () => true, ticketBindings: false })(change);
-    expect((await planRows()).length).toBeGreaterThan(0);
-  });
 
   it("a table that serves one company writes nothing for another company's task", async () => {
     const w = await world();

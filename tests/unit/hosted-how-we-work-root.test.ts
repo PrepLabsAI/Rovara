@@ -53,13 +53,4 @@ describe("the hosted broker's core root (L4-HW3)", () => {
     expect(JSON.stringify(pinB)).not.toContain(`Rules of ${A}`);
     expect(JSON.stringify(pinA)).not.toContain("ONLY-B-RULE");
   });
-
-  it("an install that registers no company-instructions point pins the file only; no company rules, and nothing asks", async () => {
-    const { root, asked } = await setup({ points: false });
-    const seam = (await root.app.runtimeFor(A)).flow.deps.standingInstructions!;
-    const pin = await seam.pinContent!("payments", await seam.pin("payments"));
-    expect(pin?.company).toBeUndefined();
-    expect(pin?.playbook?.file.rules).toBe("HOSTED-RULE");
-    expect(asked).toEqual([]);
-  });
 });

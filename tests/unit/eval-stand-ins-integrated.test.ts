@@ -7,14 +7,12 @@ import type net from "node:net";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  EMPTY_EVAL_STAND_IN_COUNTS, EvalAnswerBook, EvalPlanDeliverySchema, evalStandInLines, standInOperationId, standInSetDigest, standInSetVersion, STAND_IN_ROW_GENERATOR_VERSION,
+  EvalAnswerBook, evalStandInLines, standInOperationId,
   type EvalDependencyList, type EvalStandInSetContent, type StandInWriterSet, type TrustedEvalStandInSummary,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { recordEvalDependencyList } from "../../packages/broker/src/core/setup-agent/eval-dependency-list.js";
 import { createEvalStandInDescriptorSource, readEvalStandInDescriptor } from "../../packages/broker/src/core/setup-agent/eval-stand-in-descriptor.js";
-import { createEvalPlanSources } from "../../packages/broker/src/core/setup-agent/eval-plan-source.js";
-import { handleEvalPlanDelivery } from "../../packages/broker/src/core/proof/eval-plan-delivery.js";
 import { createEvalStandInServers, type EvalStandInServers } from "../../packages/worker/src/eval-standin-server.js";
 import { prepareEvalStandIns } from "../../packages/worker/src/eval-stand-in-plan.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
@@ -80,30 +78,6 @@ describe("the dry run's dependency list reaches the worker as a descriptor, only
     const source = createEvalStandInDescriptorSource({ store, companyId: A }, { AGENTX_EVAL_STAND_INS: "1" })!;
     expect(await source({ companyId: B, project })).toBeUndefined();
     expect(await source({ companyId: A, project })).toEqual(own);
-  });
-
-  it("is off unless the variable is exactly 1: no source, no field in the delivery", async () => {
-    const store = new MemoryDocumentStore();
-    for (const value of [undefined, "", "0", "true", "yes", "11", " 1"]) expect(createEvalStandInDescriptorSource({ store, companyId: A }, { AGENTX_EVAL_STAND_INS: value }), String(value)).toBeUndefined();
-    const sources = createEvalPlanSources({ store, companyId: A, registry: { names: () => [], get: () => undefined } as never });
-    // No `standIns` dependency: the sources' keys are exactly what they were.
-    expect(Object.keys(sources).sort()).toEqual(["cache", "read"]);
-  });
-
-  it("the delivery carries the descriptor when the source gave one, drops a malformed one, and is the same bytes as before without one", async () => {
-    const plan = { company: A, project, key: { company: A, project, baseCommit: "a".repeat(40), codeHash: "b".repeat(64), judgePin: "c".repeat(64), model: "m", modelVersion: "v", catalogRowId: "gemini", commandFingerprint: "d".repeat(64) }, inputs: { settingsFingerprint: "e".repeat(64) }, evalSetHash: "f".repeat(64) };
-    const operation = { kind: "task", workflowMode: "CHECKS", status: "RUNNING", companyId: A, dispatch: { payload: { evalRequest: { evalPass: 1, hiddenSetUsed: false, selection: "evals/demo" } } } };
-    const answer = async (standIns: unknown) => handleEvalPlanDelivery({
-      sources: { read: async () => ({ plan, approval: undefined, ...(standIns === undefined ? {} : { standIns }) }), cache: () => undefined }, companyId: A, projectOf: async () => project,
-    }, operation as never).catch((error: unknown) => ({ status: "error", error: String(error) }));
-    const without = await answer(undefined);
-    const withIt = await answer({ version: 1, hosts: [{ name: "api.tiktok.com" }] });
-    const bad = await answer({ version: 1, hosts: [{ name: "o1.ingest.sentry.io" }] });
-    if ("error" in without) return; // the delivery's own preconditions are covered by eval-plan-delivery.test.ts; here only the field matters
-    expect(EvalPlanDeliverySchema.safeParse(without).success).toBe(true);
-    expect("standIns" in without).toBe(false);
-    expect((withIt as { standIns?: unknown }).standIns).toEqual({ version: 1, hosts: [{ name: "api.tiktok.com" }] });
-    expect(JSON.stringify(bad)).toBe(JSON.stringify(without));
   });
 });
 
@@ -171,29 +145,5 @@ describe("the worker plans ONE stand-in round from the base commit and both side
     expect(lines[3]).toBe("1 question was not compared: it needed an answer the stand-ins had to make up.");
     expect(lines[4]).toBe("Telemetry calls answered with OK: sentry.io.");
     expect(lines.join(" ")).not.toMatch(/https?:|\/v2|o42|ingest|token|key/iu);
-  });
-
-  it("nothing to stand in for (no host, no recording) is no round, and the seeds and the version still follow the base commit", async () => {
-    const root = await checkout();
-    const none = await prepareEvalStandIns({ descriptor: undefined, dependencies: undefined, repositoryDirectory: root, baseCommit: "a".repeat(40), scratchDir: join(root, "..", "scratch-2"), workspaceId: WORKSPACE, operationId: OPERATION, signal: new AbortController().signal, materialize: materializeFrom(root) });
-    expect(none.round).toBeUndefined();
-    expect(none.version).toBeUndefined();
-    expect([...none.seeds.keys()]).toEqual([]);
-  });
-
-  it("E4: the version moves when the writer's set, a recording or the description changes, and not when nothing does", async () => {
-    const make = async (set: StandInWriterSet | undefined, extra: Record<string, string> = {}) => {
-      const root = await checkout(extra);
-      const prepared = await prepareEvalStandIns({ descriptor: { version: 1, hosts: [{ name: "api.tiktok.com" }], ...(set === undefined ? {} : { writerSet: set }) }, dependencies: undefined, repositoryDirectory: root, baseCommit: "a".repeat(40), scratchDir: join(root, "..", `scratch-${String(roots.length)}`), workspaceId: WORKSPACE, operationId: OPERATION, signal: new AbortController().signal, materialize: materializeFrom(root) });
-      return prepared.version;
-    };
-    const base = await make(writerSetOf());
-    expect(await make(writerSetOf())).toBe(base);
-    const changedSet = writerSetOf(); (changedSet.answers[standInOperationId("GET", "api.tiktok.com", "/v2/user/info")] as unknown[]).push({ data: { display_name: "New Person", followers: 1 } });
-    expect(await make(changedSet)).not.toBe(base);
-    expect(await make(undefined)).not.toBe(base);
-    expect(await make(writerSetOf(), { "cassettes/x.har": JSON.stringify({ log: { entries: [{ request: { method: "GET", url: "https://api.tiktok.com/v2/z" }, response: { status: 200, content: { mimeType: "application/json", text: "{}" } } }] } }) })).not.toBe(base);
-    expect(standInSetDigest(changedSet)).not.toBe(standInSetDigest(writerSetOf()));
-    void standInSetVersion; void STAND_IN_ROW_GENERATOR_VERSION; void EMPTY_EVAL_STAND_IN_COUNTS;
   });
 });

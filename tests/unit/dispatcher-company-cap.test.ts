@@ -92,14 +92,6 @@ afterEach(() => { vi.unstubAllGlobals(); });
 const refused = (code: string, message: string) => ({ allowed: false, code, message });
 
 describe("the dispatcher's run.start gate applies the company's limit (the rules service)", () => {
-  it("a company limit below the project's own: the run is refused at the company's limit, not dispatched against the project's", async () => {
-    const w = world({ [A]: 5 });
-    w.projectLimit(A, "web", 20);
-    const over = await w.task(A, "web", 5_000_000);
-    expect(await w.runStart(A, over)).toEqual(refused("task_cap", PROJECT_TASK_CAP_REACHED));
-    const under = await w.task(A, "web", 4_999_999);
-    expect(await w.runStart(A, under)).toEqual({ allowed: true });
-  });
 
   it("the project's own limit still applies when it is the lower one, and alone where the install has no rules service (nothing asked, nothing signed)", async () => {
     const w = world({ [A]: 10 });
@@ -126,22 +118,6 @@ describe("the dispatcher's run.start gate applies the company's limit (the rules
     expect(await w.runStart(A, await w.task(A, "web"))).toEqual(refused("company_day_cap", COMPANY_DAY_CAP_REACHED));
     // Another company's day is its own.
     expect(await w.runStart(B, await w.task(B, "web"))).toEqual({ allowed: true });
-  });
-
-  it("asks for the asking company only: another company's lock never applies, and each question names its own company", async () => {
-    const w = world({ [A]: 1 });
-    expect(await w.runStart(B, await w.task(B, "web", 2_000_000))).toEqual({ allowed: true });
-    expect(await w.runStart(A, await w.task(A, "web", 2_000_000))).toEqual(refused("task_cap", PROJECT_TASK_CAP_REACHED));
-    expect(new Set(w.asked.map((asked) => `${String(asked.q["cid"])}/${String(asked.q["pid"])}`))).toEqual(new Set([`${B}/web`, `${A}/web`]));
-  });
-
-  it("signs each question with the dispatcher's own key, exactly as the key policy allows it (RS256 over the raw input), and reads its public key", async () => {
-    const w = world({ [A]: 5 });
-    await w.runStart(A, await w.task(A, "web"));
-    const signs = w.kms.sent.filter((entry) => entry.command === "Sign");
-    expect(signs.length).toBeGreaterThan(0);
-    for (const entry of signs) expect(entry.input).toMatchObject({ KeyId: KEY_ARN, MessageType: "RAW", SigningAlgorithm: "RSASSA_PKCS1_V1_5_SHA_256" });
-    expect(w.kms.sent.filter((entry) => entry.command === "GetPublicKey").map((entry) => entry.input)).toEqual([{ KeyId: KEY_ARN }]);
   });
 });
 

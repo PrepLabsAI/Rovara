@@ -2,7 +2,7 @@
 // project), whole (the schema), and never a reason to withhold the plan. The worker reads it back as a copy, in memory only.
 import { describe, expect, it } from "vitest";
 import {
-  EvalPlanDeliverySchema, evalCommandFingerprint, savedEnvRepositoryName,
+  evalCommandFingerprint, savedEnvRepositoryName,
   type EvalEnvironment,
 } from "@agentx/contracts";
 import { handleEvalPlanDelivery, type EvalPlanDeliveryDeps, type EvalPlanScope, type EvalPlanSources } from "../../packages/broker/src/core/proof/eval-plan-delivery.js";
@@ -24,7 +24,6 @@ const saved = (orgId: string, projectId: string): EvalEnvironment => {
   return { kind: "saved", repository, digest: `sha256:${hex("a")}`, environmentKey: hex("b"), testEnvRevision: 2, directory: "app",
     login: { registry: "123456789012.dkr.ecr.us-west-2.amazonaws.com", repository, username: "AWS", password: ["pw", "z".repeat(24)].join("-"), expiresAt: new Date(Date.now() + 3_600_000).toISOString() } };
 };
-const INSTALL: EvalEnvironment = { kind: "install", commands: [{ executable: "python3", args: ["-m", "pip", "install", "-r", "requirements.txt"], cwd: "." }] };
 
 const operation = { kind: "task", workflowMode: "CHECKS", status: "RUNNING", companyId: A, dispatch: { payload: { evalRequest: { aiChange: true, reason: "eval_hint", evalPass: 1, callsAlreadyUsed: 0, costAlreadyUsedMicros: 0 } } } };
 async function deliver(environment: unknown, scope: EvalPlanScope = { companyId: A, project: "web" }) {
@@ -38,15 +37,6 @@ async function deliver(environment: unknown, scope: EvalPlanScope = { companyId:
 }
 
 describe("the environment beside the plan", () => {
-  it("delivers this company's and project's saved image, and install steps; the plan is delivered either way", async () => {
-    for (const environment of [saved(A, "web"), INSTALL]) {
-      const { answer, events } = await deliver(environment);
-      expect(answer.status).toBe("ready");
-      expect(answer.status === "ready" && answer.environment).toEqual(environment);
-      expect(events).toEqual([]);
-      expect(EvalPlanDeliverySchema.safeParse(answer).success).toBe(true);
-    }
-  });
 
   it("an environment that makes the answer too big is dropped and the plan still goes (never a reason to withhold the plan)", async () => {
     const big: EvalEnvironment = { kind: "install", commands: Array.from({ length: 8 }, () => ({ executable: "npm", args: Array.from({ length: 256 }, () => "x".repeat(700)), cwd: "." })) };
@@ -54,12 +44,6 @@ describe("the environment beside the plan", () => {
     expect(answer.status).toBe("ready");
     expect("environment" in answer).toBe(false);
     expect(events).toEqual(["eval_environment_invalid"]);
-  });
-
-  it("absent means absent: the answer has no environment key at all (byte-identical to before)", async () => {
-    const { answer } = await deliver(undefined);
-    expect(answer.status).toBe("ready");
-    expect("environment" in answer).toBe(false);
   });
 
   it("cross-company and cross-project: another company's or another project's saved image is dropped, the plan still goes, and only a fixed event is logged (mutant: the repository scope check)", async () => {

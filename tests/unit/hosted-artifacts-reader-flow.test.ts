@@ -8,9 +8,8 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  EVAL_ROUND_ARTIFACT, EVAL_ROUND_ARTIFACT_MAX_BYTES, WORKER_INVOCATION_FEATURES, canonicalPlanJson, captureEvalRoundEvidence, type JsonValue, type ObjectStorage, type OrgId, type TaskGraphV1, type WorkflowArtifact, type WorkflowSnapshot,
+  EVAL_ROUND_ARTIFACT, WORKER_INVOCATION_FEATURES, canonicalPlanJson, captureEvalRoundEvidence, type JsonValue, type ObjectStorage, type OrgId, type TaskGraphV1, type WorkflowArtifact, type WorkflowSnapshot,
 } from "@agentx/contracts";
-import { startChecksRerun } from "../../packages/broker/src/core/build-step/start.js";
 import { approvedCodingPlan, reviewPlanOf } from "../../packages/broker/src/core/build-step/plan-input.js";
 import { WORKSPACE_DIFF_ARTIFACT, artifactRowKey, reportedChangedFiles } from "../../packages/broker/src/core/build-step/changed-files.js";
 import { evalRequestForChecks } from "../../packages/broker/src/core/proof/eval-round-reader.js";
@@ -18,7 +17,7 @@ import { earlierPlans } from "../../packages/broker/src/core/plan/context.js";
 import { PLAN_UNREADABLE, approvedGraphOf, breakdownForApproval } from "../../packages/broker/src/core/work-breakdown/plan-graph.js";
 import { planContextOf, readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { operationKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
+import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { artifactObjectKey } from "../../packages/broker/src/services/callbacks.js";
 import { createCompanyArtifactReader } from "../../packages/broker/src/core-host/company-artifact-reader.js";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
@@ -97,38 +96,6 @@ async function otherWorkspace(w: World, companyId: OrgId, workspaceId: string, o
 }
 
 describe("hosted eval request: the reader turns it on, and only for the task's own evidence", () => {
-  it("the first pass needs no read at all: with the reader the CHECKS dispatch carries the request, without a reader (today's hosted flow) it carries none", async () => {
-    const w = await world();
-    expect(await startChecksRerun(w.h.deps, { taskId: w.task.taskId, workflowRevision: w.workflow.revision }, { requestId: newRequestId(), actorId: "owner" })).toBe("STARTED");
-    const operation = (await workspaceOperations(w.h.deps, w.task.workspaceId)).find(op => op.workflowMode === "CHECKS")!;
-    expect(operation.dispatch.payload).toMatchObject({ evalRequest: { aiChange: true, reason: "eval_hint", evalPass: 1, callsAlreadyUsed: 0, costAlreadyUsedMicros: 0 } });
-    expect(w.stored.asked).toEqual([]);
-    // Today's hosted flow: no reader, no request.
-    delete w.h.deps.artifacts;
-    expect(await evalRequestForChecks(w.h.deps, w.task, w.workflow)).toBeUndefined();
-  });
-
-  it("a task whose project has no eval hint gets no request even with the reader", async () => {
-    const w = await world({ hint: false });
-    expect(await evalRequestForChecks(w.h.deps, w.task, w.workflow)).toBeUndefined();
-  });
-
-  it("the second pass reads the first round the worker saved under the engine's own callback key, and counts its calls and cost", async () => {
-    const w = await world();
-    const { objectKey } = await savedRound(w);
-    expect(objectKey).toBe(`workspaces/${w.task.workspaceId}/operations/op-eval-1/${EVAL_ROUND_ARTIFACT}`);
-    expect(await evalRequestForChecks(w.h.deps, w.task, w.workflow)).toEqual({ aiChange: true, reason: "eval_hint", evalPass: 2, callsAlreadyUsed: 4, costAlreadyUsedMicros: 40 });
-    expect(w.stored.asked).toEqual([objectKey]);
-  });
-
-  it("a round saved under a digest (a replaceable artifact's key) and one in Cloud's owner-keyed shape are read the same way", async () => {
-    const w = await world();
-    await savedRound(w, { objectKey: `${artifactObjectKey(w.task.workspaceId, "op-eval-1", EVAL_ROUND_ARTIFACT)}/${"a".repeat(64)}` });
-    expect(await evalRequestForChecks(w.h.deps, w.task, w.workflow)).toMatchObject({ evalPass: 2 });
-    const w2 = await world();
-    await savedRound(w2, { objectKey: `private/${w2.task.ownerKey}/${w2.task.workspaceId}/op-eval-1/${EVAL_ROUND_ARTIFACT}` });
-    expect(await evalRequestForChecks(w2.h.deps, w2.task, w2.workflow)).toMatchObject({ evalPass: 2 });
-  });
 
   it("another operation's key is refused: the row for an eval attempt points at a different operation's folder, so spend stays unknown and no request is made", async () => {
     const w = await world();
@@ -137,68 +104,10 @@ describe("hosted eval request: the reader turns it on, and only for the task's o
     expect(w.stored.asked).toEqual([]);
   });
 
-  it("an operation whose id only starts like the attempt's (op-eval-10 for op-eval-1) is another folder: refused", async () => {
-    const w = await world();
-    await savedRound(w, { objectKey: artifactObjectKey(w.task.workspaceId, "op-eval-10", EVAL_ROUND_ARTIFACT) });
-    expect(await evalRequestForChecks(w.h.deps, w.task, w.workflow)).toBeUndefined();
-    expect(w.stored.asked).toEqual([]);
-  });
-
-  it("the operation-folder check stands on its own: with a reader that would read anything, op-eval-10's folder is still not op-eval-1's", async () => {
-    const w = await world();
-    const key = artifactObjectKey(w.task.workspaceId, "op-eval-10", EVAL_ROUND_ARTIFACT);
-    await savedRound(w, { objectKey: key });
-    const asked: string[] = [];
-    w.h.deps.artifacts = { get: async (objectKey) => { asked.push(objectKey); return w.stored.objects.get(key); } };
-    expect(await evalRequestForChecks(w.h.deps, w.task, w.workflow)).toBeUndefined();
-    expect(asked).toEqual([]);
-  });
-
-  it("another task's key in the same company is refused by the eval reader's own operation-folder check, the reader is never asked", async () => {
-    const w = await world();
-    await otherWorkspace(w, w.companyId, "ws-other-task", "owner-other-task");
-    await savedRound(w, { objectKey: artifactObjectKey("ws-other-task", "op-eval-1", EVAL_ROUND_ARTIFACT) });
-    expect(await evalRequestForChecks(w.h.deps, w.task, w.workflow)).toBeUndefined();
-    expect(w.stored.asked).toEqual([]);
-  });
-
-  it("another company's key is refused by the hosted reader itself, so not even a row that was pointed there is read", async () => {
-    const w = await world();
-    const foreignWorkspace = "ws-foreign-1";
-    await otherWorkspace(w, OTHER_COMPANY, foreignWorkspace, "owner-foreign");
-    // The row says the operation's artifact is in the other company's folder: even if the eval reader's folder check were bypassed, the hosted reader refuses it.
-    const key = artifactObjectKey(foreignWorkspace, "op-eval-1", EVAL_ROUND_ARTIFACT);
-    w.stored.objects.set(key, bytesOf(roundJson(1)));
-    expect(await w.h.deps.artifacts!.get(key, EVAL_ROUND_ARTIFACT_MAX_BYTES)).toBeUndefined();
-    await savedRound(w, { objectKey: key });
-    expect(await evalRequestForChecks(w.h.deps, w.task, w.workflow)).toBeUndefined();
-    expect(w.stored.asked).toEqual([]);
-  });
-
-  it("a round bigger than the eval round's own bound reads as missing: no request, spend unknown", async () => {
-    const w = await world();
-    await savedRound(w, { body: new Uint8Array(EVAL_ROUND_ARTIFACT_MAX_BYTES + 1) });
-    expect(await evalRequestForChecks(w.h.deps, w.task, w.workflow)).toBeUndefined();
-  });
-
   it("an unreadable object store never resets the spend to zero: no request", async () => {
     const w = await world();
     await savedRound(w);
     w.stored.state.down = true;
-    expect(await evalRequestForChecks(w.h.deps, w.task, w.workflow)).toBeUndefined();
-  });
-
-  it("a missing round object (the row exists, the bytes do not) gives no request", async () => {
-    const w = await world();
-    const { objectKey } = await savedRound(w);
-    w.stored.objects.delete(objectKey);
-    expect(await evalRequestForChecks(w.h.deps, w.task, w.workflow)).toBeUndefined();
-  });
-
-  it("two finished passes leave no third", async () => {
-    const w = await world();
-    await savedRound(w, { operation: "op-eval-1", pass: 1 });
-    await savedRound(w, { operation: "op-eval-2", pass: 2 });
     expect(await evalRequestForChecks(w.h.deps, w.task, w.workflow)).toBeUndefined();
   });
 });

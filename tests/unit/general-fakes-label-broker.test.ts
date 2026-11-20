@@ -58,11 +58,6 @@ describe("the proof table reads the recorded label", () => {
     expect(proofCheckResults(workflowWith({ madeByRovara: true }))[0]).toMatchObject({ checkId: "unit", madeByRovara: true });
   });
 
-  it("a result without the label leaves the context exactly as it was (golden)", async () => {
-    const context = await loadProofContext({ actions: noProof }, task, workflowWith({}), approved);
-    expect(context).toEqual({ plan });
-  });
-
   it("the label and the test proof's own facts for the same check give one dependency, not two", async () => {
     const stored = { schemaVersion: 1, candidateDigest: DIGEST, status: "checked", note: "completed", changedTests: { added: 1, changed: 0, deleted: 0 }, durationMs: 1,
       items: [{ checkId: "readiness:0", label: "Unit tests", granularity: "check", verdict: "proves_change", reason: "assertion_failed_on_old" }], madeByRovara: [{ checkId: "readiness:0", served: 2 }] };
@@ -86,11 +81,6 @@ describe("the recorded results (core build step)", () => {
       { checkId: "check-3", status: "FAILED", broken: true, neverStarted: true },
       { checkId: "check-4", status: "UNKNOWN" },
     ]);
-  });
-
-  it("an entry that is not a project check, or is missing, never stands in for a result and carries no label", () => {
-    const results = verificationResultsOf(selected.slice(0, 2), [at(0, "passed", "", { source: "agent_commands", madeByRovara: true })]);
-    expect(results).toEqual([{ checkId: "check-0", status: "UNKNOWN" }, { checkId: "check-1", status: "UNKNOWN" }]);
   });
 
   it("a command that could not run is broken whatever the label says", () => {

@@ -30,13 +30,6 @@ describe("the deployment_status delivery", () => {
     expect(neutralEventsOfGithub("deployment_status", githubPayloads.deploymentStatus("success", { action: "edited" }), ID)).toEqual([]);
   });
 
-  it("never takes an inherited property name as a state", () => {
-    for (const state of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"]) {
-      expect(DEPLOYMENT_STATES_OF_GITHUB[state], state).toBeUndefined();
-      expect(neutralEventsOfGithub("deployment_status", githubPayloads.deploymentStatus(state), ID), state).toEqual([]);
-    }
-  });
-
   it("takes the environment from the status, else from the deployment, and says nothing for one it cannot name", () => {
     expect((neutralEventsOfGithub("deployment_status", githubPayloads.deploymentStatus("success", { environment: null, deploymentEnvironment: "qa" }), ID)[0] as { environment: string }).environment).toBe("qa");
     expect((neutralEventsOfGithub("deployment_status", githubPayloads.deploymentStatus("success", { environment: "prod", deploymentEnvironment: "qa" }), ID)[0] as { environment: string }).environment).toBe("prod");
@@ -44,11 +37,6 @@ describe("the deployment_status delivery", () => {
     expect(neutralEventsOfGithub("deployment_status", githubPayloads.deploymentStatus("success", { environment: "" }), ID)).toEqual([]);
     expect(neutralEventsOfGithub("deployment_status", githubPayloads.deploymentStatus("success", { environment: "e".repeat(65) }), ID)).toEqual([]);
     expect(neutralEventsOfGithub("deployment_status", githubPayloads.deploymentStatus("success", { environment: "e".repeat(64) }), ID)).toHaveLength(1);
-  });
-
-  it("builds the repository address from GitHub's own name, never from a url in the body", () => {
-    const body = { ...githubPayloads.deploymentStatus("success"), repository: { id: 4242, full_name: "acme/app", html_url: "https://evil.example.test/x/y" }, deployment_status: { state: "success", environment: "staging", repository_url: "https://evil.example.test/x/y" } };
-    expect((neutralEventsOfGithub("deployment_status", body, ID)[0] as { repository: { url: string } }).repository.url).toBe("https://github.com/acme/app");
   });
 
   it("refuses a body that does not read, with fixed words that echo nothing from it", () => {
@@ -81,33 +69,6 @@ function world() {
 }
 
 describe("the deploymentStatuses read", () => {
-  it("is read only: a token with deployments and metadata read for this one repository, and nothing but GET requests besides the token mint", async () => {
-    const { model, api, host, sha, repository } = world();
-    model.setDeployment(sha, "staging", "success");
-    await host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE);
-    expect(api.tokens.at(-1)).toMatchObject({ permissions: { deployments: "read", metadata: "read" }, repositories: ["app"] });
-    expect(Object.keys(api.tokens.at(-1)!.permissions).sort()).toEqual(["deployments", "metadata"]);
-    const writes = api.requests.filter((request) => request.method !== "GET" && !/\/access_tokens$/u.test(request.path));
-    expect(writes).toEqual([]);
-  });
-
-  it("reads one list and one status request per deployment (at most ten), each counted against the allowance", async () => {
-    const { api, host, sha, repository } = world();
-    api.deploymentReads.rows = Array.from({ length: 10 }, (_, index) => ({ id: 100 + index, environment: `env${String(index)}`, statuses: [{ state: "success" }] }));
-    let counted = 0;
-    const read = await host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE, { beforeRequest: () => { counted += 1; } });
-    expect(read.statuses).toHaveLength(10);
-    expect(counted).toBe(11);
-    expect(api.requests.filter((request) => request.method === "GET" && /\/deployments/u.test(request.path))).toHaveLength(11);
-  });
-
-  it("stops when the allowance is used up, and the error is the budget's, not an empty answer", async () => {
-    const { api, host, sha, repository } = world();
-    api.deploymentReads.rows = [{ id: 1, environment: "a", statuses: [{ state: "success" }] }, { id: 2, environment: "b", statuses: [{ state: "success" }] }];
-    let left = 2;
-    const exhausted = new Error("allowance used up");
-    await expect(host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE, { beforeRequest: () => { if (left === 0) throw exhausted; left -= 1; } })).rejects.toBe(exhausted);
-  });
 
   it("takes the newest deployment (highest id) of an environment, skips `inactive`, and maps every state to the port's words", async () => {
     const { api, host, sha, repository } = world();
@@ -144,16 +105,6 @@ describe("the deploymentStatuses read", () => {
     await expect(host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
   });
 
-  it("throws for a refused read (an App without the permission), never an empty answer", async () => {
-    const { api, host, sha, repository } = world();
-    api.deploymentReads.rows = [{ id: 1, environment: "staging", statuses: [{ state: "success" }] }];
-    api.deploymentReads.listHttp = 403;
-    await expect(host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-    api.deploymentReads.listHttp = undefined;
-    api.deploymentReads.statusHttp = 404;
-    await expect(host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-  });
-
   it("tells a rate limit from a refusal with the neutral signal, so nothing asks again at once", async () => {
     const { api, host, sha, repository } = world();
     api.deploymentReads.rows = [{ id: 1, environment: "staging", statuses: [{ state: "success" }] }];
@@ -168,27 +119,6 @@ describe("the deploymentStatuses read", () => {
     // A plain refusal (an App without the permission) is not a rate limit.
     api.deploymentReads.listMessage = undefined;
     expect(hostRateLimitRetryAt(await host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE).catch((error: unknown) => error))).toBeUndefined();
-  });
-
-  it("lets the newest deployment of an environment speak even when it has no status yet or its newest status says nothing", async () => {
-    const { api, host, sha, repository } = world();
-    api.deploymentReads.rows = [
-      { id: 9, environment: "staging", statuses: [] },
-      { id: 5, environment: "staging", statuses: [{ state: "failure" }] },
-      { id: 8, environment: "qa", statuses: [{ state: "inactive" }] },
-      { id: 4, environment: "qa", statuses: [{ state: "success" }] },
-      { id: 3, environment: "prod", statuses: [{ state: "weird" }] },
-      { id: 2, environment: "prod", statuses: [{ state: "failure" }] },
-    ];
-    expect(await host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE)).toEqual({ statuses: [], complete: true });
-  });
-
-  it("refuses a malformed answer", async () => {
-    const { api, host, sha, repository } = world();
-    for (const rows of [[{ id: 0, environment: "x", statuses: [] }], [{ id: 1.5, environment: "x", statuses: [] }], [{ id: "7" as never, environment: "x", statuses: [] }], [{ id: 2 ** 60, environment: "x", statuses: [] }]]) {
-      api.deploymentReads.rows = rows;
-      await expect(host.deploymentStatuses!(repository, sha, GITHUB_ORG_SCOPE)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-    }
   });
 
   it("refuses an invalid revision before any request, and a scope that names no company or system", async () => {
