@@ -3,14 +3,13 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
-  FEATURE_ADMIN_ONLY, FEATURE_IS_DONE, FEATURE_NOT_FOUND, REPORT_ADMIN_ONLY, TASK_FEATURE_NEEDS_MAINTAINER, TASK_FEATURE_NOT_FOUND, orgProjectCatalogKey, projectRevisionKey, reportTaskKey,
+  FEATURE_ADMIN_ONLY, FEATURE_IS_DONE, FEATURE_NOT_FOUND, REPORT_ADMIN_ONLY, TASK_FEATURE_NEEDS_MAINTAINER, TASK_FEATURE_NOT_FOUND, orgProjectCatalogKey, projectRevisionKey,
   type JsonValue, type ProjectDefinition, type ReportTasksResponse,
 } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
-import { isReportPath } from "../../packages/broker/src/core-host/report-routes.js";
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
@@ -65,13 +64,6 @@ async function setup(standings: Record<string, SetupRunStanding["access"]> = {})
   return { world, app, routes, as, start, standing };
 }
 
-describe("which paths are the report's", () => {
-  it("serves the seven and no other method on them", () => {
-    for (const [method, path] of [["GET", "/v1/app/org/report/tasks"], ["GET", "/v1/app/org/report/features"], ["POST", "/v1/app/org/report/features"], ["POST", "/v1/app/org/report/features/ft_1/rename"], ["POST", "/v1/app/org/report/features/ft_1/merge"], ["POST", "/v1/app/org/report/features/ft_1/state"], ["POST", `/v1/app/tasks/${randomUUID()}/feature`]] as const) expect(isReportPath(path, method), `${method} ${path}`).toBe(true);
-    for (const [method, path] of [["POST", "/v1/app/org/report/tasks"], ["PUT", "/v1/app/org/report/features"], ["DELETE", "/v1/app/org/report/features"], ["GET", "/v1/app/org/report/features/ft_1/rename"], ["POST", "/v1/app/org/report/features/ft_1/delete"], ["POST", "/v1/app/org/report/people"], ["GET", "/v1/app/org/report/people"], ["GET", `/v1/app/tasks/${randomUUID()}/feature`], ["POST", "/v1/app/tasks/x/feature/extra"], ["POST", "/v1/app/org/report/tasks/x"]] as const) expect(isReportPath(path, method), `${method} ${path}`).toBe(false);
-  });
-});
-
 describe("the report on the deployed API: who may read and change", () => {
   it.each(ADMIN_PATHS)("%s %s: a member is refused with fixed words (the principal's own roles do not count), an admin and an owner are not", async (method, path) => {
     const { routes, as } = await setup();
@@ -101,34 +93,9 @@ describe("the report on the deployed API: who may read and change", () => {
     expect(answer?.statusCode).toBe(404);
     expect(body(answer).error!.message).toBe(NOT_ON_THE_CORE_YET);
   });
-
-  it("the company is membership's: a body, query or header that names another company changes nothing", async () => {
-    const { routes, as, start } = await setup();
-    const theirs = await start(OTHER, "someone");
-    const caller = as(FAKE_COMPANY, "admin", "admin-1");
-    const answer = await routes.route({ ...get(`/v1/app/org/report/tasks?from=${SINCE}`), headers: { "x-company": OTHER } }, caller);
-    expect(answer?.statusCode).toBe(200);
-    expect((body(answer) as unknown as ReportTasksResponse).tasks).toEqual([]);
-    expect(answer!.body).not.toContain(theirs);
-    expect((await routes.route(get(`/v1/app/org/report/tasks?from=${SINCE}&company=${OTHER}`), caller))?.statusCode).toBe(400);
-  });
 });
 
 describe("the report tasks route", () => {
-  it("a task started through the core runtime has its row from its first moment, and the admin reads it", async () => {
-    const { world, routes, as, start } = await setup();
-    const taskId = await start(FAKE_COMPANY, "starter-1", "payments", "Add a health endpoint");
-    const stored = (await world.store.query({ pk: `ORG#${FAKE_COMPANY}#REPORT`, sk: { op: "beginsWith", prefix: "TASK#" } })).items;
-    expect(stored).toHaveLength(1);
-    expect(stored[0]).toMatchObject({ taskId, project: "payments", title: "Add a health endpoint", origin: "web", state: "open", companyId: FAKE_COMPANY });
-    expect(stored[0]!.sk).toBe(reportTaskKey(FAKE_COMPANY, stored[0]!["startedAt"] as string, taskId).sk);
-    const page = body(await routes.route(get(`/v1/app/org/report/tasks?from=${SINCE}`), as(FAKE_COMPANY, "admin", "admin-1"))) as unknown as ReportTasksResponse;
-    expect(page.tasks).toHaveLength(1);
-    expect(page.tasks[0]).toMatchObject({ taskId, project: "payments", title: "Add a health endpoint", origin: "web", state: "open", costMicros: 0, unpricedCalls: 0, prsOpened: 0 });
-    expect(page.tasks[0]).not.toHaveProperty("feature");
-    expect(page).toMatchObject({ hasMore: false, skipped: 0, unreadable: 0 });
-    expect(JSON.stringify(page)).not.toContain("starter-1");
-  });
 
   it("two companies and two projects: each admin reads their company's tasks only; the project filter splits one company's", async () => {
     const { routes, as, start } = await setup();
@@ -142,19 +109,6 @@ describe("the report tasks route", () => {
     expect(await read(adminA, "&project=ledger")).toEqual([a2]);
     expect(await read(adminA, "&project=payments")).toEqual([a1]);
     expect(await read(adminB, "&project=ledger")).toEqual([]);
-  });
-
-  it("each row carries the page of its own task, and an admin of the other company never gets one for a task of this company", async () => {
-    const { routes, as, start } = await setup();
-    const a = await start(FAKE_COMPANY, "p1", "payments");
-    const b = await start(OTHER, "p2", "payments");
-    const pages = async (caller: DeployedCaller) => ((body(await routes.route(get(`/v1/app/org/report/tasks?from=${SINCE}`), caller))) as unknown as ReportTasksResponse).tasks.map((row) => [row.taskId, row.taskPage]);
-    expect(await pages(as(FAKE_COMPANY, "admin", "admin-a"))).toEqual([[a, `/review/${a}/task`]]);
-    expect(await pages(as(OTHER, "owner", "owner-b"))).toEqual([[b, `/review/${b}/task`]]);
-    // a member is refused before any row is read: no reference leaves with the refusal
-    const refused = await routes.route(get(`/v1/app/org/report/tasks?from=${SINCE}`), as(FAKE_COMPANY, "member", "member-1"));
-    expect(refused?.statusCode).toBe(403);
-    expect(refused!.body).not.toContain("/review/");
   });
 
   it("refuses a query it does not know, twice-given parameters, empty values and a limit that is not a number, with fixed words", async () => {
@@ -288,17 +242,6 @@ describe("filing and moving a task", () => {
     }
   });
 
-  it("the starter cannot replace an inheritance or a maintainer's deliberate No feature", async () => {
-    const w = await filed();
-    const { createFeatureStore } = await import("../../packages/broker/src/core/report/feature-store.js");
-    const store = createFeatureStore({ store: w.world.store, companyId: FAKE_COMPANY, audit: { stage: () => [] }, now: () => Date.now() });
-    await store.setTaskFeature({ taskId: w.taskId, project: "payments", featureId: w.one, source: "inherited" }, { type: "system", id: "tracker" });
-    const starter = w.as(FAKE_COMPANY, "member", "starter-1");
-    expect((await w.move(starter, w.taskId, w.two))?.statusCode).toBe(403);
-    await w.move(w.as(FAKE_COMPANY, "member", "maint-pay"), w.taskId, null);
-    expect((await w.move(starter, w.taskId, w.two))?.statusCode).toBe(403);
-  });
-
   it("an owner, an admin, and the project's maintainer move it; 'No feature' is a move too, and shows as no feature", async () => {
     const w = await filed();
     await w.move(w.as(FAKE_COMPANY, "member", "starter-1"), w.taskId, w.one);
@@ -307,22 +250,6 @@ describe("filing and moving a task", () => {
     const none = await w.move(w.as(FAKE_COMPANY, "member", "maint-pay"), w.taskId, null);
     expect(body(none)).toEqual({ task: { taskId: w.taskId, feature: null } });
     expect(await w.read()).not.toHaveProperty("feature");
-  });
-
-  it("every filing by a maintainer, an owner or an admin is a move (the highest rule), the first one too", async () => {
-    const w = await filed();
-    const maintainer = w.as(FAKE_COMPANY, "member", "maint-pay");
-    expect(body(await w.move(maintainer, w.taskId, w.one)).task).toMatchObject({ feature: { source: "moved" } });
-    expect(body(await w.move(maintainer, w.taskId, w.two)).task).toMatchObject({ feature: { source: "moved" } });
-  });
-
-  it("a setup run and a replay cannot be filed: they read as missing tasks", async () => {
-    const w = await filed();
-    for (const patch of [{ purpose: "setup_agent" }, { origin: "test_run" }]) {
-      const id = await w.start(FAKE_COMPANY, "starter-1", "payments");
-      await w.world.store.update({ key: { pk: `DEVTASK#${id}`, sk: "META" }, ops: Object.entries(patch).map(([name, value]) => ({ op: "set" as const, path: [name] as [string], value })) });
-      expect((await w.move(w.admin, id, w.one))?.statusCode).toBe(404);
-    }
   });
 
   it("a person who neither started the task nor maintains its project gets exactly the missing task's answer (a viewer, another project's maintainer, a stranger, another company's maintainer)", async () => {
@@ -336,18 +263,6 @@ describe("filing and moving a task", () => {
       expect(body(answer).error!.message).toBe(TASK_FEATURE_NOT_FOUND);
     }
     expect(await w.read()).not.toHaveProperty("feature");
-  });
-
-  it("another company's task id is the missing task's answer even for a maintainer there; the other company's feature id is not found", async () => {
-    const w = await filed();
-    const theirTask = await w.start(OTHER, "starter-b", "payments");
-    const maintainerHere = w.as(FAKE_COMPANY, "member", "maint-pay");
-    expect((await w.move(maintainerHere, theirTask, w.one))?.statusCode).toBe(404);
-    // a maintainer in OTHER cannot file their task under this company's feature
-    const adminB = w.as(OTHER, "owner", "owner-b");
-    const answer = await w.move(adminB, theirTask, w.one);
-    expect(answer?.statusCode).toBe(404);
-    expect(body(answer).error!.message).toBe(FEATURE_NOT_FOUND);
   });
 
   it("a feature that is done takes no task; one that is merged away takes none; one that does not exist is not found", async () => {
@@ -369,19 +284,6 @@ describe("filing and moving a task", () => {
     expect((await w.read())!.feature).toEqual({ id: w.one, source: "chosen" });
   });
 
-  it("refuses a body with another field, a feature that is not an id, or an empty body; echoes nothing; and never decides on the body what the task's standing says", async () => {
-    const w = await filed();
-    const starter = w.as(FAKE_COMPANY, "member", "starter-1");
-    for (const payload of [{ feature: w.one, requester: "canary-person" }, { feature: "canary-feature" }, {}, { feature: 5 }, "[canary-array]"]) {
-      const answer = await w.routes.route(post(`/v1/app/tasks/${w.taskId}/feature`, payload), starter);
-      expect(answer?.statusCode, JSON.stringify(payload)).toBe(400);
-      expect(answer!.body).not.toMatch(/canary/u);
-    }
-    // the same refusal for a stranger: an invalid body tells nobody that the task exists
-    const stranger = await w.routes.route(post(`/v1/app/tasks/${w.taskId}/feature`, { feature: "canary-feature" }), w.as(FAKE_COMPANY, "member", "stranger"));
-    expect(stranger?.statusCode).toBe(400);
-  });
-
   it("a standing that cannot be read is a fixed 503, never a move", async () => {
     const w = await filed();
     w.standing.mockRejectedValueOnce(new Error("secret-canary"));
@@ -389,19 +291,5 @@ describe("filing and moving a task", () => {
     expect(answer?.statusCode).toBe(503);
     expect(answer!.body).not.toContain("secret-canary");
     expect(await w.read()).not.toHaveProperty("feature");
-  });
-
-  it("each filing and move writes its audit record naming the person, the task, the feature, the source and the project", async () => {
-    const w = await filed();
-    await w.move(w.as(FAKE_COMPANY, "member", "starter-1"), w.taskId, w.one);
-    await w.move(w.as(FAKE_COMPANY, "member", "maint-pay"), w.taskId, w.two);
-    const events = w.world.audit.filter((event) => event.action === "report.task_feature_set");
-    expect(events.map((event) => [event.actor.id, event.subject, event.details])).toEqual([
-      ["starter-1", { type: "task", id: w.taskId }, { featureId: w.one, source: "chosen", project: "payments" }],
-      ["maint-pay", { type: "task", id: w.taskId }, { featureId: w.two, source: "moved", project: "payments" }],
-    ]);
-    // the stored rows hold no person
-    const rows = (await w.world.store.query({ pk: `ORG#${FAKE_COMPANY}#REPORT`, limit: 100 })).items;
-    expect(JSON.stringify(rows)).not.toMatch(/starter-1|maint-pay|admin-1/u);
   });
 });

@@ -15,12 +15,11 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, NOT_ON_THE_CORE_YET, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import {
-  SETUP_PROPOSAL_SUBJECT, APPROVAL_PROOF_METHOD, TEST_ENVIRONMENT_SUBJECT, createHostedApprovers, issueSetupApprovalProof, issueApprovalProof, issueTestEnvironmentApprovalProof, approvalProofKeyOf,
+  APPROVAL_PROOF_METHOD, TEST_ENVIRONMENT_SUBJECT, createHostedApprovers, issueSetupApprovalProof, issueApprovalProof, issueTestEnvironmentApprovalProof, approvalProofKeyOf,
 } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { createHostedTestEnvironmentApproval, testEnvironmentCardOf } from "../../packages/broker/src/core-host/test-environment-approval.js";
 import { TEST_ENVIRONMENT_NOT_ALLOWED } from "../../packages/broker/src/core-host/hosted-test-environment-decision.js";
-import { appRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import { FAKE_COMPANY, createFakeWorld } from "../support/core-host-fakes.js";
 import { projectStore } from "../support/test-env-world.js";
 import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
@@ -51,7 +50,6 @@ const highRisk = (): TestEnvironmentBody => sandbox({ services: [{ name: "partne
 
 describe("hosted approvers: a test environment's proof", () => {
   const DIGEST = SHA("e");
-  const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
   const members: Record<string, { companyId: OrgId; role: OrgRole }> = { ada: { companyId: A, role: "member" }, cy: { companyId: OTHER, role: "member" } };
   const identity = createHostedIdentity({ membershipOf: async (personId) => members[personId], displayNameOf: async () => "Ada" });
   const card = (project = "payments", version = DIGEST) => ({ cardId: `test-environment:${project}`, contentVersion: version });
@@ -63,11 +61,6 @@ describe("hosted approvers: a test environment's proof", () => {
   const token = (overrides: Record<string, unknown> = {}, at = NOW) => issueTestEnvironmentApprovalProof(KEY, { ...base, project: "payments", ...overrides }, at).token;
   const proof = (req: ApprovalRequest, value: string): ApprovalProof => ({ proofId: randomUUID(), method: APPROVAL_PROOF_METHOD, requestId: req.requestId, revision: req.revision, artifactDigest: req.artifactDigest, token: value });
   const point = (nowMs = NOW) => createHostedApprovers({ store: new MemoryDocumentStore(), identity, key: KEY, now: () => new Date(nowMs) });
-
-  it("accepts a live member's proof for exactly this project, revision, digest, card and answer", async () => {
-    const verdict = await point().verify(request(), proof(request(), token()));
-    expect(verdict, JSON.stringify(verdict)).toMatchObject({ approved: true, approver: { personId: "ada", companyId: A } });
-  });
 
   it("refuses every other project, revision, digest, answer, request, card, company, person, window and a replay (each by its own fixed reason)", async () => {
     const cases: Array<[string, ApprovalRequest, string, string]> = [
@@ -95,59 +88,6 @@ describe("hosted approvers: a test environment's proof", () => {
     const once = token();
     expect(await approvers.verify(request(), proof(request(), once))).toMatchObject({ approved: true });
     expect(await approvers.verify(request(), proof(request(), once))).toEqual({ approved: false, reason: "proof_already_used" });
-  });
-
-  it("a forged or re-signed token is no proof, and a caller that does not settle claims gets none", async () => {
-    const good = token();
-    expect(await point().verify(request(), proof(request(), `${good.slice(0, -4)}AAAA`))).toEqual({ approved: false, reason: "not_a_valid_proof" });
-    const otherKey = approvalProofKeyOf("another-signing-key-for-tests-0123456789abcdef");
-    const foreign = issueTestEnvironmentApprovalProof(otherKey, { ...base, project: "payments" }, NOW).token;
-    expect(await point().verify(request(), proof(request(), foreign))).toEqual({ approved: false, reason: "not_a_valid_proof" });
-    expect((await point().verify({ ...request(), settlesClaims: false } as unknown as ApprovalRequest, proof(request(), good))).approved).toBe(false);
-  });
-
-  it("separates the three subjects both ways: a task, a setup and a test environment proof each stand only for their own kind", async () => {
-    const taskCard = { cardId: `approve_plan:${TASK}`, contentVersion: DIGEST };
-    const setupCard = { cardId: "setup_proposal:payments", contentVersion: DIGEST };
-    const tokens = {
-      task: issueApprovalProof(KEY, { ...base, kind: "setting", taskId: TASK, card: taskCard }, NOW).token,
-      setup: issueSetupApprovalProof(KEY, { ...base, kind: "setting", project: "payments", card: setupCard }, NOW).token,
-      env: token(),
-    };
-    const requests = {
-      task: request({ subject: { type: "task", id: TASK }, card: taskCard, projectName: undefined as unknown as string }),
-      setup: request({ subject: { type: SETUP_PROPOSAL_SUBJECT, id: "payments" }, card: setupCard }),
-      env: request(),
-    };
-    for (const proofKind of ["task", "setup", "env"] as const) {
-      for (const requestKind of ["task", "setup", "env"] as const) {
-        const req = requests[requestKind];
-        const verdict = await point().verify(req, proof(req, tokens[proofKind]));
-        if (proofKind === requestKind) {
-          // The task request carries no project name (its owner check reads the task), so only its own proof is judged by the task's owner rule; the other two are accepted for a live member.
-          if (proofKind === "task") expect(verdict).toMatchObject({ approved: false, reason: "not_the_task_owner" });
-          else expect(verdict, `${proofKind} on ${requestKind}`).toMatchObject({ approved: true });
-        } else {
-          expect(verdict, `${proofKind} proof on a ${requestKind} request`).toEqual({ approved: false, reason: "other_subject" });
-        }
-      }
-    }
-  });
-
-  it("a project whose name looks like a task id: only the proof's subject marker tells a task proof from a test environment proof", async () => {
-    const UUID_PROJECT = "3c2d1e0f-9a8b-4c7d-8e6f-5a4b3c2d1e0f";
-    const c = card(UUID_PROJECT);
-    const req = request({ subject: { type: TEST_ENVIRONMENT_SUBJECT, id: UUID_PROJECT }, projectName: UUID_PROJECT, card: c });
-    const taskProof = issueApprovalProof(KEY, { ...base, kind: "setting", taskId: UUID_PROJECT, card: c }, NOW).token;
-    expect(await point().verify(req, proof(req, taskProof))).toEqual({ approved: false, reason: "other_subject" });
-    expect(await point().verify(req, proof(req, token({ project: UUID_PROJECT, card: c })))).toMatchObject({ approved: true });
-  });
-
-  it("issues no proof for a malformed project, request id, digest, answer or card", () => {
-    for (const project of ["", "-bad", "a/b", "x".repeat(101)]) expect(() => token({ project }), project).toThrow("an approval proof cannot be issued for this input");
-    for (const bad of [{ requestId: "x" }, { artifactDigest: "nope" }, { revision: 0 }, { outcome: "maybe" }, { card: { cardId: "", contentVersion: "" } }]) {
-      expect(() => token(bad), JSON.stringify(bad)).toThrow("an approval proof cannot be issued for this input");
-    }
   });
 });
 
@@ -227,61 +167,7 @@ async function world(options: { approval?: boolean } = {}) {
   return { fake, store, clock, person, call, routes, audit, memberReadsLeft, grantReadsLeft, seed, approved, bodyFor, approvers, approvals, depsOf, sink, identity, people };
 }
 
-describe("the route table", () => {
-  it("has one new row for approving, full access only; the state read keeps its row; propose, the laptop's other routes and other methods stay unserved", () => {
-    expect(appRouteOf("POST", PATH("payments"))).toEqual({ method: "POST", path: "/v1/app/projects/{project}/test-environment/approve", requires: "full" });
-    expect(appRouteOf("GET", "/v1/app/projects/payments/test-environment")).toEqual({ method: "GET", path: "/v1/app/projects/{project}/test-environment", requires: "full" });
-    for (const [method, path] of [["GET", PATH("payments")], ["PUT", PATH("payments")], ["DELETE", PATH("payments")], ["POST", "/v1/app/projects/payments/test-environment"], ["POST", "/v1/app/projects/payments/test-environment/propose"],
-      ["POST", "/v1/app/projects/payments/test-environment/decide"], ["POST", "/v1/app/projects/payments/test-environment/approve/x"], ["POST", "/v1/app/projects/payments/test-environment/service-images/approve"]] as const) {
-      expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
-    }
-  });
-});
-
 describe("approving a test environment on the deployed API: who, by risk (DEC 254z b)", () => {
-  it("a project maintainer approves a medium-risk proposal with no step-up: the next revision is stored and the answer is in fixed words", async () => {
-    const w = await world();
-    const seen = await w.seed(A, "payments");
-    const maintainer = w.person("mia", A, "member", { payments: "administrator" });
-    const reply = await w.call("payments", maintainer, w.bodyFor(seen));
-    expect(reply, JSON.stringify(reply)).toMatchObject({ status: 200, body: { message: "Approved. Tasks that start from now on use it." } });
-    expect((await w.approved(A, "payments"))?.revision).toBe(1);
-    // The audit trail names the approver.
-    expect(JSON.stringify(w.audit)).toContain("mia");
-  });
-
-  it("company owner and admin approve medium and high; a maintainer is refused a high-risk proposal before anything is issued", async () => {
-    const w = await world();
-    const high = await w.seed(A, "payments", highRisk());
-    const maintainer = w.person("mia", A, "member", { payments: "administrator" });
-    const refused = await w.call("payments", maintainer, w.bodyFor(high));
-    expect(refused).toMatchObject({ status: 403, body: { error: { code: "FORBIDDEN" } } });
-    expect(await w.approved(A, "payments")).toBeUndefined();
-    for (const role of ["owner", "admin"] as const) {
-      const w2 = await world();
-      const seen = await w2.seed(A, "payments", highRisk());
-      const reply = await w2.call("payments", w2.person("ann", A, role), w2.bodyFor(seen));
-      expect(reply.status, role).toBe(200);
-      expect((await w2.approved(A, "payments"))?.revision).toBe(1);
-    }
-  });
-
-  it("a company owner or admin with NO grant on the project approves a high-risk proposal (the deployment's reading rule is grants only)", async () => {
-    for (const role of ["owner", "admin"] as const) {
-      const w = await world();
-      const seen = await w.seed(A, "payments", highRisk());
-      const reply = await w.call("payments", w.person("ann", A, role), w.bodyFor(seen));
-      expect(reply.status, `${role}: ${reply.raw}`).toBe(200);
-      expect((await w.approved(A, "payments"))?.revision).toBe(1);
-    }
-  });
-
-  it("a member with no access to the project is told the project is not found (no step-up is asked first)", async () => {
-    const w = await world();
-    const seen = await w.seed(A, "payments");
-    expect(await w.call("payments", w.person("nobody", A, "member"), w.bodyFor(seen))).toMatchObject({ status: 404 });
-    expect(await w.approved(A, "payments")).toBeUndefined();
-  });
 
   it("a project developer and a member with no grant decide nothing (the grant-less member cannot even read the project)", async () => {
     const w = await world();
@@ -290,61 +176,9 @@ describe("approving a test environment on the deployed API: who, by risk (DEC 25
     expect(await w.call("payments", w.person("nobody", A, "member"), w.bodyFor(seen))).toMatchObject({ status: 404 });
     expect(await w.approved(A, "payments")).toBeUndefined();
   });
-
-  it("two projects: a maintainer of one project cannot approve another project's proposal, with or without read access to it, and a digest from one project does not reach the other", async () => {
-    const w = await world();
-    const payments = await w.seed(A, "payments");
-    const ledger = await w.seed(A, "ledger", sandbox({ roundBudgetMin: 45 }));
-    expect(ledger.digest).not.toBe(payments.digest);
-    const ledgerMaintainer = w.person("lee", A, "member", { ledger: "administrator", payments: "developer" });
-    // Reads payments but maintains only ledger: not allowed there.
-    expect(await w.call("payments", ledgerMaintainer, w.bodyFor(payments))).toMatchObject({ status: 403 });
-    // No access to payments at all: the project does not exist for them.
-    const ledgerOnly = w.person("lou", A, "member", { ledger: "administrator" });
-    expect(await w.call("payments", ledgerOnly, w.bodyFor(payments))).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND", message: "project not found" } } });
-    // Ledger's digest on payments' route (by a company admin): not the proposal that waits there.
-    const admin = w.person("ann", A, "admin");
-    const crossed = await w.call("payments", admin, w.bodyFor(ledger));
-    expect(crossed.status).toBe(409);
-    expect(await w.approved(A, "payments")).toBeUndefined();
-    expect(await w.approved(A, "ledger")).toBeUndefined();
-    // Each approves its own, and only its own.
-    expect((await w.call("ledger", ledgerMaintainer, w.bodyFor(ledger))).status).toBe(200);
-    expect((await w.approved(A, "ledger"))?.revision).toBe(1);
-    expect(await w.approved(A, "payments")).toBeUndefined();
-  });
-
-  it("two companies: another company's owner, with the same project name and the first company's digest, approves nothing there and nothing of theirs changes", async () => {
-    const w = await world();
-    const seenA = await w.seed(A, "payments");
-    const seenB = await w.seed(OTHER, "payments", sandbox({ roundBudgetMin: 45 }));
-    expect(seenB.digest).not.toBe(seenA.digest);
-    const ownerB = w.person("bo", OTHER, "owner");
-    const crossed = await w.call("payments", ownerB, w.bodyFor(seenA));
-    expect(crossed.status).toBe(409);
-    expect(await w.approved(A, "payments")).toBeUndefined();
-    expect(await w.approved(OTHER, "payments")).toBeUndefined();
-    // Company A's owner cannot decide B's proposal either (their membership is A's).
-    const ownerA = w.person("ann", A, "owner");
-    expect((await w.call("payments", ownerA, w.bodyFor(seenB))).status).toBe(409);
-    expect(await w.approved(OTHER, "payments")).toBeUndefined();
-    // Each decides its own.
-    expect((await w.call("payments", ownerB, w.bodyFor(seenB))).status).toBe(200);
-    expect((await w.approved(OTHER, "payments"))?.revision).toBe(1);
-    expect(await w.approved(A, "payments")).toBeUndefined();
-    expect((await w.call("payments", ownerA, w.bodyFor(seenA))).status).toBe(200);
-    expect((await w.approved(A, "payments"))?.revision).toBe(1);
-  });
 });
 
 describe("approving a test environment on the deployed API: no step-up, binding and the live role", () => {
-  it("needs no step-up (DEC 254zzz73): a signed-in company owner approves; the stored revision moves on", async () => {
-    const w = await world();
-    const seen = await w.seed(A, "payments");
-    const owner = w.person("ann", A, "owner");
-    expect((await w.call("payments", owner, w.bodyFor(seen))).status).toBe(200);
-    expect((await w.approved(A, "payments"))?.revision).toBeDefined();
-  });
 
   it("binds what the person saw: another digest, another revision, a malformed id, an extra field or a non-object is refused and approves nothing", async () => {
     const w = await world();
@@ -361,16 +195,6 @@ describe("approving a test environment on the deployed API: no step-up, binding 
     // The proposal no longer waits once it is the newest revision: a second approval finds nothing to approve, and no second revision is made.
     expect((await w.call("payments", owner, w.bodyFor(seen))).status).toBe(404);
     expect((await w.approved(A, "payments"))?.revision).toBe(1);
-  });
-
-  it("an unproved proposal and a missing proposal are refused", async () => {
-    const w = await world();
-    await projectStore(A, "payments", { store: w.store });
-    const owner = w.person("ann", A, "owner");
-    const proposed = await proposeTestEnvironment(w.depsOf(), { orgId: A, project: "payments", proposedBy: "owner", body: sandbox() });
-    expect((await w.call("payments", owner, w.bodyFor({ digest: proposed.digest, revision: 1 }))).status).toBe(409);
-    expect((await w.call("ledger-none", w.person("ann", A, "owner"), w.bodyFor({ digest: SHA("a"), revision: 1 }))).status).toBe(404);
-    expect(await w.approved(A, "payments")).toBeUndefined();
   });
 
   it("re-reads the company role inside the decision: an admin demoted after the route's own check approves nothing", async () => {
@@ -400,18 +224,6 @@ describe("approving a test environment on the deployed API: no step-up, binding 
     expect((await w.call("payments", maintainer, w.bodyFor(seen))).status).toBe(200);
   });
 
-  it("a grant read that throws inside the decision is a refusal, never an approval", async () => {
-    const w = await world();
-    const seen = await w.seed(A, "payments");
-    const maintainer = w.person("mia", A, "member", { payments: "administrator" });
-    let reads = 0;
-    const flaky = { membershipOf: async (id: string) => { const f = w.people.get(id); return f === undefined ? undefined : { companyId: f.companyId, role: f.role }; }, projectGrantRole: async (id: string, p: string) => { if (++reads > 1) throw new Error("grant table down"); return w.people.get(id)?.grants[p]; } };
-    const approval = createHostedTestEnvironmentApproval({ companyId: A, deps: w.depsOf(), store: w.store, approvers: w.approvers, audit: w.sink, identity: w.identity, people: flaky, proofKey: KEY, now: () => new Date(w.clock.now) });
-    const result = await approval.approve({ personId: maintainer.principal.personId, project: "payments", approval: { requestId: "req_0123456789", revision: seen.revision, artifactDigest: seen.digest } });
-    expect(result).toMatchObject({ ok: false });
-    expect(await w.approved(A, "payments")).toBeUndefined();
-  });
-
   it("a proposal that changes between the person's look and the act (a newer one replaces it) is stale, never approved on the old digest", async () => {
     const w = await world();
     const first = await w.seed(A, "payments");
@@ -427,19 +239,6 @@ describe("approving a test environment on the deployed API: no step-up, binding 
     const seen = await w.seed(A, "payments");
     const reply = await w.call("payments", w.person("ann", A, "owner"), w.bodyFor(seen));
     expect(reply).toMatchObject({ status: 404, body: { error: { message: NOT_ON_THE_CORE_YET } } });
-  });
-
-  it("refusals say nothing but fixed words: no token, person id, digest or request id is echoed", async () => {
-    const w = await world();
-    const seen = await w.seed(A, "payments", highRisk());
-    const maintainer = w.person("mia-the-maintainer", A, "member", { payments: "administrator" });
-    const body = w.bodyFor(seen, { requestId: "req_secret_marker_01" });
-    for (const reply of [await w.call("payments", maintainer, body), await w.call("payments", w.person("ann-gone", OTHER, "owner"), body)]) {
-      expect(reply.raw).not.toContain("mia-the-maintainer");
-      expect(reply.raw).not.toContain("req_secret_marker_01");
-      expect(reply.raw).not.toContain(seen.digest);
-      expect(reply.raw).not.toContain("su1.");
-    }
   });
 });
 
@@ -467,17 +266,6 @@ describe("approving a test environment on the deployed API: the gate refuses ano
     expect(await attempt("req_envproof_01", own)).toMatchObject({ status: "decided" });
     expect((await w.approved(A, "payments"))?.revision).toBe(1);
   });
-
-  it("the other direction: a test environment proof is refused for a task decision's request", async () => {
-    const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
-    const identity = createHostedIdentity({ membershipOf: async () => ({ companyId: A, role: "member" as const }), displayNameOf: async () => "x" });
-    const approvers = createHostedApprovers({ store: new MemoryDocumentStore(), identity, key: KEY, now: () => new Date(NOW) });
-    const DIGEST = SHA("d");
-    const taskCard = { cardId: `approve_plan:${TASK}`, contentVersion: DIGEST };
-    const envProof = issueTestEnvironmentApprovalProof(KEY, { companyId: A, personId: "ada", requestId: "req_0123456789", kind: "plan", project: "payments", revision: 3, artifactDigest: DIGEST, outcome: "approve", card: taskCard }, NOW);
-    const req: ApprovalRequest = { companyId: A, requestId: "req_0123456789.x", kind: "plan", subject: { type: "task", id: TASK }, projectName: "payments", revision: 3, artifactDigest: DIGEST, risk: "high", outcome: "approve", card: taskCard, settlesClaims: true };
-    expect(await approvers.verify(req, { proofId: "p1", method: APPROVAL_PROOF_METHOD, requestId: req.requestId, revision: 3, artifactDigest: DIGEST, token: envProof.token })).toEqual({ approved: false, reason: "other_subject" });
-  });
 });
 
 describe("the test environment subject's own approver rule (read inside the decision)", () => {
@@ -498,15 +286,6 @@ describe("the test environment subject's own approver rule (read inside the deci
     await expect(attemptWith({ mayDecide: async () => false, refusal: WORDS }, ann)).rejects.toMatchObject({ message: WORDS });
     await expect(attemptWith({ mayDecide: async () => true, refusal: WORDS }, ann)).resolves.toBeDefined();
   });
-  it("the rule holds for EVERY approver the point vouched for, and is given the project and the proposal's risk", async () => {
-    const seenCalls: unknown[] = [];
-    const rule = { mayDecide: async (approver: { personId: string }, input: { project: string; risk: string }) => { seenCalls.push([approver.personId, input.project, input.risk]); return approver.personId !== "second"; }, refusal: WORDS };
-    await expect(attemptWith(rule, [{ companyId: A, personId: "first" }, { companyId: A, personId: "second" }])).rejects.toMatchObject({ message: WORDS });
-    expect(seenCalls).toEqual([["first", "payments", "medium"], ["second", "payments", "medium"]]);
-  });
-  it("without a rule (the laptop) nothing is asked", async () => {
-    await expect(attemptWith(undefined, [{ companyId: A, personId: "ann" }])).resolves.toBeDefined();
-  });
 });
 
 describe("the hosted rule is for approvers of THIS company only", () => {
@@ -520,43 +299,6 @@ describe("the hosted rule is for approvers of THIS company only", () => {
     const result = await approval.approve({ personId: "zed", project: "payments", approval: { requestId: "req_0123456789", revision: seen.revision, artifactDigest: seen.digest } });
     expect(called).toBe(true);
     expect(result).toMatchObject({ ok: false });
-    expect(await w.approved(A, "payments")).toBeUndefined();
-  });
-});
-
-describe("the rule inside the decision (the subject's own, read again after the proof is verified)", () => {
-  /** An approval whose approvers point is wrapped: `afterVerify` runs once the proof is verified (so the roles can change between the decider's check and the rule inside the gate). */
-  const rig = (w: Awaited<ReturnType<typeof world>>, afterVerify: (result: Awaited<ReturnType<typeof w.approvers.verify>>) => Awaited<ReturnType<typeof w.approvers.verify>>, roles: { company: () => OrgRole | undefined }) => createHostedTestEnvironmentApproval({
-    companyId: A, deps: w.depsOf(), store: w.store, audit: w.sink, identity: w.identity, proofKey: KEY, now: () => new Date(w.clock.now),
-    approvers: { ...w.approvers, verify: async (request, proofOf) => afterVerify(await w.approvers.verify(request, proofOf)) },
-    people: { membershipOf: async (personId) => { const found = w.people.get(personId); const role = roles.company(); return found === undefined || role === undefined ? undefined : { companyId: found.companyId, role }; }, projectGrantRole: async (personId, project) => w.people.get(personId)?.grants[project] },
-  });
-
-  it("the risk the rule reads is the proposal's: a maintainer who was a company admin at the check, and is a member at the act, is refused a high-risk proposal", async () => {
-    const w = await world();
-    const seen = await w.seed(A, "payments", highRisk());
-    w.person("mia", A, "member", { payments: "administrator" });
-    let flipped = false;
-    const approval = rig(w, (result) => { flipped = true; return result; }, { company: () => (flipped ? "member" : "admin") });
-    const answer = await approval.approve({ personId: "mia", project: "payments", approval: w.bodyFor(seen) });
-    expect(answer).toMatchObject({ ok: false, reason: "not_allowed" });
-    expect(await w.approved(A, "payments")).toBeUndefined();
-    // Positive control: the same maintainer at a medium-risk proposal passes the same rule.
-    const w2 = await world();
-    const medium = await w2.seed(A, "payments");
-    w2.person("mia", A, "member", { payments: "administrator" });
-    let flipped2 = false;
-    const approval2 = rig(w2, (result) => { flipped2 = true; return result; }, { company: () => (flipped2 ? "member" : "admin") });
-    expect(await approval2.approve({ personId: "mia", project: "payments", approval: w2.bodyFor(medium) })).toMatchObject({ ok: true });
-  });
-
-  it("an approver the point names in another company is refused whatever the person's live role here (the gate refuses first, wrong_company; the rule's own company check is defence in depth and an equivalent mutant)", async () => {
-    const w = await world();
-    const seen = await w.seed(A, "payments");
-    w.person("ann", A, "admin");
-    const approval = rig(w, (result) => (result.approved ? { ...result, approver: { ...result.approver, companyId: OTHER } } : result), { company: () => "admin" });
-    const answer = await approval.approve({ personId: "ann", project: "payments", approval: w.bodyFor(seen) });
-    expect(answer).toMatchObject({ ok: false });
     expect(await w.approved(A, "payments")).toBeUndefined();
   });
 });

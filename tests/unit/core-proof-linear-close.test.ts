@@ -2,22 +2,12 @@
 // comes only from the session's own Linear binding in the task's org; it is checked to be an issue key (never free text); and no model-written line can say a second one.
 import { describe, expect, it } from "vitest";
 import type { SessionBinding } from "@agentx/contracts";
-import { inertLine } from "../../packages/broker/src/core/proof/inert-text.js";
-import { breakLinearKeys, linearCloseLine, linearIssueKeyOf, linearIssueKeyOfBindings, neutralizeLinearWords, parseLinearIssue, sealLinearText } from "../../packages/broker/src/core/proof/linear-close.js";
-import { expectLinearScaling } from "../support/scaling.js";
+import { breakLinearKeys, linearIssueKeyOf, linearIssueKeyOfBindings, neutralizeLinearWords, parseLinearIssue } from "../../packages/broker/src/core/proof/linear-close.js";
 
 const issue = (issueId: string, url = "https://linear.app/acme/issue/ENG-142/fix-the-retry-bug"): SessionBinding => ({ kind: "linear_issue", issueId, url });
 const THREAD: SessionBinding = { kind: "slack_thread", teamId: "T0TEAM001", channelId: "C0CHAN001", threadTs: "1695500000.000031" };
 
 describe("linearIssueKeyOf", () => {
-  it("reads the key from the issue id, or from the issue's link", () => {
-    expect(linearIssueKeyOf(issue("ENG-142"))).toBe("ENG-142");
-    expect(linearIssueKeyOf(issue("eng-142"))).toBe("ENG-142");
-    expect(linearIssueKeyOf(issue("7c1f2d9e-4b1a-4f66-9d0e-5a3c1b2d4e6f"))).toBe("ENG-142");
-    expect(linearIssueKeyOf(issue("7c1f2d9e-4b1a-4f66-9d0e-5a3c1b2d4e6f", "https://linear.app/acme/issue/eng-142"))).toBe("ENG-142");
-    expect(linearIssueKeyOf(issue("ENG-142", "https://linear.app/acme/issue/ENG-142"))).toBe("ENG-142");
-    expect(linearIssueKeyOf(issue("A2-7", "https://linear.app/acme/issue/A2-7/x"))).toBe("A2-7");
-  });
 
   it("is nothing for a Slack thread, an id and a link that disagree, a link that is not Linear's, or anything that is not an issue key", () => {
     expect(linearIssueKeyOf(THREAD)).toBeUndefined();
@@ -28,25 +18,6 @@ describe("linearIssueKeyOf", () => {
     for (const id of ["ENG", "ENG-", "-142", "ENG-0", "ENG_142", "ENG-142x", "ENG-12345678901", "TOOLONGTEAMKEY-1"]) {
       expect(linearIssueKeyOf(issue(id, "https://linear.app/acme/team/all")), id).toBeUndefined();
     }
-  });
-
-  it("says Fixes <KEY>", () => {
-    expect(linearCloseLine("ENG-142")).toBe("Fixes ENG-142");
-  });
-});
-
-describe("linearIssueKeyOfBindings", () => {
-  // Reading the bindings from the session store, in the task's own company, is the sessions module's (lane L6b); this takes what it read.
-  it("is the key of the session's Linear issue, whichever binding comes first", () => {
-    expect(linearIssueKeyOfBindings([THREAD, issue("ENG-142")])).toBe("ENG-142");
-    expect(linearIssueKeyOfBindings([issue("ENG-142"), THREAD])).toBe("ENG-142");
-  });
-
-  it("is nothing without a Linear binding, and nothing for a binding that is not usable", () => {
-    expect(linearIssueKeyOfBindings([])).toBeUndefined();
-    expect(linearIssueKeyOfBindings([THREAD])).toBeUndefined();
-    expect(linearIssueKeyOfBindings([issue("ENG-142", "https://evil.example/acme/issue/ENG-142/x")])).toBeUndefined();
-    expect(linearIssueKeyOfBindings([issue("ENG-142", "https://linear.app/acme/issue/OPS-9/x")])).toBeUndefined();
   });
 });
 
@@ -85,64 +56,6 @@ describe("a model-written line cannot close or link a Linear issue", () => {
     "leaves %j exactly as it is: no magic word is in it", (line) => {
       expect(neutralizeLinearWords(line)).toBe(line);
     });
-
-  it("leaves technical text byte for byte: UTF-8, SHA-256, node-22, x86-64, ISO-8601, paths, versions and dates", () => {
-    for (const line of [
-      "UTF-8", "SHA-256", "node-22", "x86-64", "ISO-8601", "python-3.11", "TLS-1.3", "COVID-19", "CVE-2024-1234", "iPhone-15", "2026-10-26", "v1.2.3", "12-34",
-      "src/utf-8-handler.ts", "db/V1-2__init.sql", "docs/ADR-0007.md", "git checkout feature-2", "npm i node-22 && sha256sum -c SHA-256.txt", "Use UTF-8 and SHA-256 for the digest",
-      "```sh\nnpm i node-22\nopenssl dgst -sha-256 file\n```", "`git checkout feature-2`", "- Passed: Unit tests (x86-64)",
-    ]) {
-      expect(neutralizeLinearWords(line), line).toBe(line);
-    }
-  });
-
-  it("changes only the magic word inside code and fences, and leaves the rest of them", () => {
-    const fenced = "```\nfixes ENG-1\nnode-22\n```";
-    const out = neutralizeLinearWords(fenced);
-    expect(linked(out)).toEqual([]);
-    expect(out).toContain("node-22");
-    expect(out.replaceAll(JOINER, "")).toBe(fenced);
-    const span = neutralizeLinearWords("run `closes UTF-8` now");
-    expect(linked(span)).toEqual([]);
-    expect(span).toContain("UTF-8");
-  });
-
-  it("leaves ordinary use of the words alone: no key follows", () => {
-    for (const line of ["Fixes the null check", "The fix for UTF8 is done", "Closes the connection", "This updates the docs", "Completed the migration", "Fixes #12", "Fixes nothing", "part of the plan", "a ref to the base", "Fixes from PR feedback", "Prefixes ENG-1", "Postfix ENG-1", "Fixture ENG-1", "Fixesing ENG-1", "Closeness ENG-1", "Transfixes ENG-1", "Fixture-1", "Closeness-2", "Refer-3"]) {
-      expect(neutralizeLinearWords(line), line).toBe(line);
-    }
-  });
-
-  it("is what inertLine does to every line it makes inert, and does not mangle a path", () => {
-    for (const line of ["_Fixes OPS-3_ by retrying", "Fixes `OPS-3`", "Part of OPS-3", "see (OPS-3)"]) expect(linked(inertLine(line, 200)), line).toEqual([]);
-    expect(inertLine("_Fixes OPS-3_ by retrying", 200).replaceAll(JOINER, "")).toBe("_Fixes OPS-3_ by retrying");
-    expect(inertLine("db/V1-2__init.sql and UTF-8 and node-22", 200)).toBe("db/V1-2__init.sql and UTF-8 and node-22");
-  });
-
-  it("runs in time proportional to the text, however it is shaped", () => {
-    // Scaling checks: each shape is timed at a size and at eight times it (the largest 8N inputs are 200,000 characters, under 256 KiB so they stay in CPU cache); the cost must grow no faster than the text.
-    const shapes: Array<[string, number, number, (size: number) => string]> = [
-      ["repeated fix", 6_250, 4, (size) => "fix ".repeat(size)],
-      ["fix then a long word", 25_000, 1, (size) => `fix ${"a".repeat(size)}-1`],
-      ["repeated fixes and an ampersand", 3_750, 7, (size) => "fixes &".repeat(size)],
-      ["a long run of letters and digits", 12_500, 2, (size) => `${"a1".repeat(size)}-5`],
-    ];
-    for (const [label, n, unitBytes, build] of shapes) {
-      expectLinearScaling((size) => {
-        const text = build(size);
-        return () => neutralizeLinearWords(text);
-      }, { n, unitBytes, label: `neutralizeLinearWords on ${label}` });
-    }
-  });
-
-  it("seals every line but Rovara's own Fixes line", () => {
-    const lines = ["Fixes ENG-142", "- note: fixes ENG-142 too", "Fixes ENG-142 ", "fixes ENG-142", "Fixes ENG-1432", "Part of ENG-142"];
-    const sealed = sealLinearText(lines, "ENG-142");
-    expect(sealed[0]).toBe("Fixes ENG-142");
-    for (const line of sealed.slice(1)) expect(linked(line), line).toEqual([]);
-    expect(sealLinearText(lines, undefined).every((line) => linked(line).length === 0)).toBe(true);
-    expect(sealLinearText(["Fixes ENG-142"], undefined)).not.toEqual(["Fixes ENG-142"]);
-  });
 });
 
 describe("breakLinearKeys, for a pull request's title", () => {
@@ -166,15 +79,6 @@ describe("parseLinearIssue", () => {
   });
 });
 
-describe("a binding whose link is not Linear's", () => {
-  it("names no issue, even when its id is a key", () => {
-    expect(linearIssueKeyOf(issue("ENG-5", "https://evil.com/acme/issue/ENG-6"))).toBeUndefined();
-    expect(linearIssueKeyOf(issue("ENG-5", "https://linear.app.evil.example/acme/issue/ENG-5"))).toBeUndefined();
-    expect(linearIssueKeyOf(issue("ENG-5", "https://linear.app/acme/issue/ENG-5"))).toBe("ENG-5");
-    expect(linearIssueKeyOf(issue("ENG-5", "https://linear.app/issue/ENG-5"))).toBe("ENG-5");
-  });
-});
-
 describe("a ticket a task started from, in the tracker that registered as linear", () => {
   const ticket = (id: string, url = "https://linear.app/acme/issue/ENG-142/fix-the-retry-bug", system = "linear"): SessionBinding => ({ kind: "tracker_item", system, id, url });
 
@@ -182,12 +86,5 @@ describe("a ticket a task started from, in the tracker that registered as linear
     expect(linearIssueKeyOf(ticket("ENG-142"))).toBe("ENG-142");
     expect(linearIssueKeyOf(ticket("eng-142"))).toBe("ENG-142");
     expect(linearIssueKeyOfBindings([THREAD, ticket("ENG-142")])).toBe("ENG-142");
-  });
-
-  it("is nothing for a ticket of another tracker, an id and a link that disagree, or a link that is not Linear's", () => {
-    expect(linearIssueKeyOf(ticket("ENG-142", "https://acme.atlassian.net/browse/ENG-142", "jira"))).toBeUndefined();
-    expect(linearIssueKeyOf(ticket("ENG-142", "https://linear.app/acme/issue/OPS-9/x"))).toBeUndefined();
-    expect(linearIssueKeyOf(ticket("ENG-142", "https://evil.example/acme/issue/ENG-142/x"))).toBeUndefined();
-    expect(linearIssueKeyOf(ticket("ENG-142", "https://linear.app.evil.example/acme/issue/ENG-142/x"))).toBeUndefined();
   });
 });

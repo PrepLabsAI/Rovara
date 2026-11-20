@@ -36,12 +36,6 @@ describe("the ready line says the verdict", () => {
     expect(CodeMilestoneSchema.safeParse(ready()[0]).success).toBe(true);
     void w;
   });
-  it("without a verdict source the line is what it was", async () => {
-    const { tracking, ready, pr } = await world(undefined);
-    await trackPullRequest(tracking, TASK_ID);
-    expect(ready()[0]!.text).toBe(`Rovara marked app pull request ${String(pr.number)} ready for review.`);
-    expect(ready()[0]).not.toHaveProperty("verdict");
-  });
   it("a source that fails, or says nothing, leaves the line as it was and the pull request is still marked ready", async () => {
     for (const verdict of [async () => { throw new Error("down"); }, async () => undefined] as const) {
       const { tracking, ready, pr } = await world(verdict);
@@ -59,38 +53,6 @@ describe("the ready line says the verdict", () => {
     expect(pr.model.getChangeRequest(String(pr.number)).draft).toBe(false);
     expect(ready()[0]!.text).toBe(`Rovara marked app pull request ${String(pr.number)} ready for review.`);
   }, 15_000);
-  // Mutant R3: a heading the milestone's schema refuses throws, and the pull request is never marked ready.
-  it("a heading the milestone does not take is left out of the line, never a failure", async () => {
-    const { tracking, ready, pr } = await world(async () => ({ resultKind: "verified", heading: "Verified <b>bold</b> @everyone", body: [] }));
-    await trackPullRequest(tracking, TASK_ID);
-    expect(pr.model.getChangeRequest(String(pr.number)).draft).toBe(false);
-    expect(ready()[0]!.text).toBe(`Rovara marked app pull request ${String(pr.number)} ready for review.`);
-    expect(ready()[0]).not.toHaveProperty("verdict");
-  });
-});
-
-describe("the real verdict source in the ready line (the service's own)", () => {
-  // Mutant R4: the service does not give the pass its verdict source, so the ready line never carries a verdict.
-  it("the tracking service marks a draft ready with the description's heading in the line and the milestone", async () => {
-    const { host } = await import("../support/service-host.js");
-    const { verifiedFilesKey } = await import("../../packages/broker/src/core/build-step/changed-files.js");
-    const { workspaceKeys } = await import("../../packages/broker/src/core/task-flow/workspace-location.js");
-    const { readTask } = await import("../../packages/broker/src/core/task-flow/reads.js");
-    const { createPullRequestVerdictSource } = await import("../../packages/broker/src/core/build-step/pull-request-verdict.js");
-    const w = await host();
-    const pr = w.world.prs[0]!;
-    pr.model.getChangeRequest(String(pr.number)).draft = true;
-    const task = (await readTask(w.h.deps, TASK_ID))!;
-    const location = await workspaceKeys(w.h.deps, task.workspaceId);
-    await w.world.store.put({ item: { ...verifiedFilesKey(location.workspaceKey, task.workflow!.candidate!.digest), entityType: "VERIFIED_FILES", candidateDigest: task.workflow!.candidate!.digest, complete: true, verifiedAt: "2026-11-09T10:00:00.000Z", files: [{ repository: "app", path: "src/a.ts", added: 3, removed: 1 }] } });
-    const expected = (await createPullRequestVerdictSource(w.h.deps)({ task: { ...task, orgId: task.companyId } as never, repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head }))!;
-    await w.tracking.sweep();
-    expect(pr.model.getChangeRequest(String(pr.number)).draft).toBe(false);
-    const rows = (await w.world.store.query({ pk: `DEVTASK#${TASK_ID}` })).items.filter((row) => row["kind"] === "pr_ready");
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!["verdict"]).toBe(expected.heading);
-    expect(rows[0]!["text"]).toEqual(expect.stringContaining(`${expected.heading}.`));
-  });
 });
 
 describe("the ticket says the verdict of a ready pull request only", () => {

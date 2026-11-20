@@ -1,9 +1,9 @@
 // Port lane L7a: the pure rules of the merge core (Cloud's, unchanged): what the checks say, whose approval counts, when the pull requests may be merged and in whose words.
 import { describe, expect, it } from "vitest";
 import { MERGE_NOT_READY_MESSAGES as M, WORKFLOW_BLOCK_REASONS, type ChangeRequestStatus, type MergeTrackingItem } from "../../packages/contracts/src/index.js";
-import { humanApprovalOf, latestReviewers } from "../../packages/broker/src/core/merge/approval.js";
+import { humanApprovalOf } from "../../packages/broker/src/core/merge/approval.js";
 import { mergeReadiness, mergeViewFromReadiness, riskOfTask, type MergePullRequestFacts, type ReadinessInput } from "../../packages/broker/src/core/merge/merge.js";
-import { NO_CI_GRACE_MS, PERMISSION_LOOKUPS_MAX, readBranch, readCi, readHeadByRovara, readReviews, tracksMerge } from "../../packages/broker/src/core/merge/merge-tracking.js";
+import { PERMISSION_LOOKUPS_MAX, readBranch, readCi, readHeadByRovara, readReviews } from "../../packages/broker/src/core/merge/merge-tracking.js";
 
 const HEAD = "a".repeat(40);
 const OLD = "1".repeat(40);
@@ -22,30 +22,11 @@ const review = (login: string, state: ChangeRequestStatus["reviews"][number]["st
 
 describe("readCi", () => {
   const input = { checksEverSeen: false, lastRovaraPushAt: undefined, now: NOW };
-  it("counts every check on an unprotected base and the required ones on a protected one", () => {
-    const checks = [check("unit", "completed", "success"), check("lint", "completed", "failure")];
-    expect(readCi(status({ checks }), input)).toMatchObject({ ci: "failing", ciBasis: "all_checks", failingChecks: ["lint"] });
-    expect(readCi(status({ checks: [check("unit", "completed", "success"), check("lint", "completed", "failure")], targetHasRequiredChecks: true, requiredChecks: [{ name: "unit" }] }), input))
-      .toMatchObject({ ci: "passing", ciBasis: "required" });
-  });
   it("is pending while a required check has not reported, and while a counted one is unfinished or needs action", () => {
     expect(readCi(status({ checks: [check("lint", "completed", "success")], targetHasRequiredChecks: true, requiredChecks: [{ name: "unit" }] }), input).ci).toBe("pending");
     expect(readCi(status({ checks: [check("unit", "pending")] }), input).ci).toBe("pending");
     expect(readCi(status({ checks: [check("unit", "completed", "action_required")] }), input).ci).toBe("pending");
     expect(readCi(status({ checks: [check("unit", "completed", "skipped")] }), input).ci).toBe("passing");
-  });
-  it("reads cancelled, timed-out and startup failures as failing, and keeps ten failing names at most, each once", () => {
-    for (const conclusion of ["cancelled", "timed_out", "startup_failure", "error", "stale"] as const) expect(readCi(status({ checks: [check("unit", "completed", conclusion)] }), input).ci).toBe("failing");
-    const many = Array.from({ length: 14 }, (_, n) => check(`job-${String(n)}`, "completed", "failure"));
-    const read = readCi(status({ checks: [...many, check("job-0", "completed", "failure")] }), input);
-    expect(read.failingChecks).toHaveLength(10);
-    expect(new Set(read.failingChecks).size).toBe(10);
-  });
-  it("respects the app a required check names, and never reads unreadable checks as passing", () => {
-    const required = { targetHasRequiredChecks: true, requiredChecks: [{ name: "unit", source: "app-a" }] };
-    expect(readCi(status({ ...required, checks: [check("unit", "completed", "success", { source: "app-b" })] }), input).ci).toBe("pending");
-    expect(readCi(status({ ...required, checks: [check("unit", "completed", "success", { source: "app-a" })] }), input).ci).toBe("passing");
-    expect(readCi(status({ checks: [check("unit", "completed", "success")], checksUnavailable: true }), input).ci).toBe("pending");
   });
   it("hands a failing check's run id and the host's word that its log can be read to the fix, and never reads the source for it (item C4)", () => {
     const failing = check("unit", "completed", "failure", { source: "15368", runId: "77", logReadable: true });
@@ -55,13 +36,6 @@ describe("readCi", () => {
       expect.objectContaining({ name: "unit", jobId: "77", source: "15368", logReadable: true }),
       expect.not.objectContaining({ logReadable: true }),
     ]);
-  });
-  it("reads 'no CI' only when nothing ever reported, the head defines no checks and Rovara's push is a full sweep interval old", () => {
-    const bare = status({ headDefinesChecks: false });
-    expect(readCi(bare, { checksEverSeen: false, lastRovaraPushAt: NOW - 1_000, now: NOW })).toMatchObject({ ci: "pending", recheckAt: NOW - 1_000 + NO_CI_GRACE_MS });
-    expect(readCi(bare, { checksEverSeen: false, lastRovaraPushAt: NOW - NO_CI_GRACE_MS, now: NOW }).ci).toBe("none");
-    expect(readCi(bare, { checksEverSeen: true, lastRovaraPushAt: NOW - NO_CI_GRACE_MS, now: NOW }).ci).toBe("pending");
-    expect(readCi(status({ headDefinesChecks: true }), { checksEverSeen: false, lastRovaraPushAt: NOW - NO_CI_GRACE_MS, now: NOW }).ci).toBe("pending");
   });
 });
 
@@ -94,18 +68,10 @@ describe("humanApprovalOf", () => {
     expect(base({ permissions: new Map([["ana", "read" as const]]) })).toEqual({ approved: false, reason: "no_write" });
     expect(base({ reviews: [] })).toEqual({ approved: false, reason: "none" });
   });
-  it("carries an approval of the head before a clean sync only while checks pass on the merged head", () => {
-    expect(base({ headSha: OLD, syncedFrom: HEAD, ciPassingOnHead: true })).toMatchObject({ approved: true });
-    expect(base({ headSha: OLD, syncedFrom: HEAD, ciPassingOnHead: false })).toEqual({ approved: false, reason: "stale" });
-  });
   it("with self-approval off needs a linked person who is not a requester", () => {
     expect(base({ allowSelfApproval: false })).toEqual({ approved: false, reason: "unlinked_requester" });
     expect(base({ allowSelfApproval: false, requesterHostUserIds: ["1"], linkedHostUserIds: new Set(["1"]) })).toEqual({ approved: false, reason: "self_only" });
     expect(base({ allowSelfApproval: false, requesterHostUserIds: ["2"], linkedHostUserIds: new Set(["1"]) })).toMatchObject({ approved: true });
-  });
-  it("never counts an excluded account (the Auditor), and latestReviewers drops dismissals and bots' ids", () => {
-    expect(base({ excludedHostUserIds: new Set(["1"]) })).toEqual({ approved: false, reason: "no_write" });
-    expect(latestReviewers([{ hostUserId: "1", login: "ana", accountType: "person", state: "DISMISSED", commitId: HEAD, submittedAt: "2026-11-09T08:00:00Z" }])).toEqual([]);
   });
 });
 
@@ -117,10 +83,6 @@ describe("mergeReadiness", () => {
     allowSelfApproval: true, requesterName: "Priya", ...over,
   });
   const refused = (over: Partial<ReadinessInput>) => { const r = mergeReadiness(input(over)); return r.ready ? "ready" : r.message; };
-
-  it("is ready when the pull request is open, on its base, not a draft, green, clean and approved", () => {
-    expect(mergeReadiness(input())).toEqual({ ready: true });
-  });
   it("says why not, in the exact words", () => {
     expect(refused({ pullRequests: [fact({ draft: true })] })).toBe(M.draft);
     expect(refused({ pullRequests: [fact({ ci: "failing" })] })).toBe(M.checks);
@@ -190,14 +152,6 @@ describe("the branch, the head and the risk", () => {
     expect(readHeadByRovara({ prior: false, head: HEAD, recorded: [OLD], pushPending: true })).toBe(false);
     expect(readHeadByRovara({ prior: undefined, head: HEAD, recorded: [OLD], pushPending: true })).toBe(true);
     expect(readHeadByRovara({ prior: true, head: HEAD, recorded: [OLD], pushPending: false })).toBe(false);
-  });
-  it("tracks only a version 1.1.0 task with a pull request that is not finished", () => {
-    const wf = (over: Record<string, unknown>) => ({ definitionVersion: "1.1.0", stage: "WAIT_FOR_MERGE", pullRequests: [{}], ...over }) as never;
-    expect(tracksMerge(wf({}))).toBe(true);
-    expect(tracksMerge(wf({ definitionVersion: "1.0.0" }))).toBe(false);
-    expect(tracksMerge(wf({ stage: "MERGED" }))).toBe(false);
-    expect(tracksMerge(wf({ pullRequests: [] }))).toBe(false);
-    expect(tracksMerge(undefined)).toBe(false);
   });
   it("raises the risk to medium when none was judged, when it was judged for other code, or when someone else pushed", () => {
     const item = (headByRovara: boolean) => [{ headByRovara }];

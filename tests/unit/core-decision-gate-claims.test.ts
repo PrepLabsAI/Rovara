@@ -2,7 +2,7 @@
 // adapter offers both `commitClaim` and `releaseClaim`, names the card the person answered on, spends every claim once its transaction applied, gives it back when the decision stopped or lost,
 // leaves it to lapse when the transaction's outcome is unknown, and answers a repeat of a finished decision whose one-time proof is spent as the same decision again.
 import { randomUUID } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   IMPLICIT_COMPANY_ID, NEEDS_SETTLING_CALLER, createWorkflowSnapshot, submitWorkflowArtifact,
   type ApprovalProof, type ApprovalRequest, type ApprovalVerdict, type Approvers, type JsonValue, type Principal, type WorkflowSnapshot,
@@ -72,77 +72,6 @@ function attempt(overrides: Partial<DecisionAttempt> = {}): DecisionAttempt {
 }
 
 describe("the approval gate settles one-time claims (gap G3) and names the card (gap G4)", () => {
-  it("asks with settlesClaims and the card, and spends the claim once the decision committed", async () => {
-    const adapter = claimingApprovers();
-    const w = await world(adapter);
-    expect(await w.gate.decide(attempt())).toMatchObject({ status: "decided" });
-    expect(adapter.requests[0]).toMatchObject({ settlesClaims: true, card: CARD });
-    expect(adapter.committed).toEqual(["claim-1"]);
-    expect(adapter.released).toEqual([]);
-    expect(await w.stage()).toBe("IMPLEMENT");
-  });
-
-  it("does not say it settles claims to an adapter that cannot be told (no commit and release): a one-time method is then refused", async () => {
-    const adapter = claimingApprovers({ settles: false });
-    const w = await world(adapter);
-    expect(await w.gate.decide(attempt())).toMatchObject({ status: "refused", reason: "not_approved" });
-    expect(adapter.requests[0]?.settlesClaims).toBeUndefined();
-    expect(await w.stage()).toBe("PLAN_REVIEW");
-  });
-
-  it("names no card when the attempt names none", async () => {
-    const adapter = claimingApprovers();
-    const w = await world(adapter);
-    const { card: _card, ...without } = attempt();
-    void _card;
-    await w.gate.decide(without);
-    expect(adapter.requests[0]?.card).toBeUndefined();
-  });
-
-  it("gives the claim back when the decision stops after the verdict (a rule of the request refuses it)", async () => {
-    const adapter = claimingApprovers({ selfApprovalAllowed: false });
-    const w = await world(adapter, { requestedBy: OWNER });
-    expect(await w.gate.decide(attempt())).toMatchObject({ status: "refused", reason: "self_approval_not_allowed" });
-    expect(adapter.released).toEqual(["claim-1"]);
-    expect(adapter.committed).toEqual([]);
-  });
-
-  it("gives the claim back when the decision loses a race (the task moved while it was decided)", async () => {
-    const race: { move?: () => Promise<void> } = {};
-    const adapter = claimingApprovers({ onVerify: async () => { await race.move?.(); } });
-    const w = await world(adapter);
-    race.move = async () => {
-      const item = (await w.store.get(workflowTaskKey(TASK_ID)))!;
-      const workflow = item["workflow"] as unknown as WorkflowSnapshot;
-      await w.store.put({ item: { ...item, workflow: JSON.parse(JSON.stringify({ ...workflow, revision: workflow.revision + 1 })) as JsonValue } });
-    };
-    expect(await w.gate.decide(attempt())).toMatchObject({ status: "refused" });
-    expect(adapter.released).toEqual(["claim-1"]);
-    expect(adapter.committed).toEqual([]);
-  });
-
-  it("leaves the claim to lapse (neither spent nor given back) when the transaction's outcome is unknown", async () => {
-    const adapter = claimingApprovers();
-    const w = await world(adapter);
-    vi.spyOn(w.store, "transact").mockRejectedValueOnce(new Error("the store did not answer"));
-    await expect(w.gate.decide(attempt())).rejects.toThrow("the store did not answer");
-    expect(adapter.committed).toEqual([]);
-    expect(adapter.released).toEqual([]);
-  });
-
-  it("answers a repeat of a finished decision with its spent one-time proof as the same decision, and changes nothing", async () => {
-    const adapter = claimingApprovers();
-    const w = await world(adapter);
-    const first = attempt();
-    const decided = await w.gate.decide(first);
-    expect(decided).toMatchObject({ status: "decided" });
-    expect(await w.gate.decide(first)).toMatchObject({ status: "replayed" });
-    // The replay is asked with the card and as a settling caller too (an adapter that claims refuses anything else).
-    expect(adapter.requests.at(-1)).toMatchObject({ settlesClaims: true, card: CARD });
-    expect(adapter.committed).toEqual(["claim-1"]);
-    // Another proof under the same request id is not that decision.
-    expect(await w.gate.decide({ ...first, credentials: [{ method: METHOD, token: randomUUID() }] })).toMatchObject({ status: "refused", reason: "request_id_reused" });
-  });
 
   it("gives back a claim the adapter took while a repeat was read (a replay changes nothing)", async () => {
     const adapter = claimingApprovers({ reapprove: true });

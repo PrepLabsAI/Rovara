@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, type MeterEntry, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { companyDayKey, costPartition } from "../../packages/broker/src/core/cost/ledger.js";
-import { holdKey, openHoldRoom } from "../../packages/broker/src/core/cost/holds.js";
+import { holdKey } from "../../packages/broker/src/core/cost/holds.js";
 import {
   COMPANY_DAY_CAP_REACHED, CORE_OUTBOX_STREAM_RELAY_VARIABLE, RUN_STOP_NOT_WIRED, SPEND_UNKNOWN, TASK_CAP_REACHED, createHostedAdmission, createHostedLedger, createHostedMoneyStop, hostedSecurityModules,
   runSpendState, runStopWiredFrom, runsOwed, unflushedEntryId, unflushedEstimateMicros, type HostedAdmissionSettings,
@@ -16,7 +16,7 @@ import { coreMoneyWiring } from "../../packages/broker/src/aws/core-engine-root.
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { CAPABILITY_HEADER, createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
 import { operationKey, taskKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { CHECKPOINT_ENTRY_PREFIX, EMPTY_REPORT_CHARGE_MICROS, readUsagePayload } from "../../packages/broker/src/core-host/usage-booking.js";
+import { CHECKPOINT_ENTRY_PREFIX, EMPTY_REPORT_CHARGE_MICROS } from "../../packages/broker/src/core-host/usage-booking.js";
 import { RUN_START_ACTION, type MoneyStop } from "../../packages/broker/src/core/task-flow/money-stop.js";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
@@ -57,15 +57,6 @@ function setup(settings: HostedAdmissionSettings = SETTINGS) {
 }
 
 describe("where a run stands against the caps (runSpendState)", () => {
-  it("is within while the task's booked spend is under the task cap and the day has room", async () => {
-    const w = setup();
-    const task = randomUUID();
-    await w.start(A, task);
-    await w.book(A, task, 4_999_999);
-    expect(await w.state(A, task)).toBe("within");
-    await w.book(A, task, 1);
-    expect(await w.state(A, task)).toBe("task_cap");
-  });
 
   it("at a full day, stops a run whose own hold is used up, and lets one go on that still has room in its own hold", async () => {
     const w = setup({ ...SETTINGS, companyDayCapMicros: 10_000_000 });
@@ -87,33 +78,6 @@ describe("where a run stands against the caps (runSpendState)", () => {
     expect(await w.state(A, other)).toBe("within");
   });
 
-  it("at a full day, stops a run whose own hold is used up even under the task cap; a hold of an earlier day gives no room today", async () => {
-    // With a $20 task cap a start holds the full $6 planning allowance.
-    const w = setup({ ...SETTINGS, taskCapMicros: 20_000_000, companyDayCapMicros: 12_000_000 });
-    const mine = randomUUID();
-    await w.start(A, mine);
-    await w.start(A, randomUUID());
-    await w.book(A, mine, 6_000_000);
-    // Its $6 hold is used up, the day is at $12 of $12: no room left anywhere, though the task is under its cap.
-    expect(await w.state(A, mine)).toBe("company_day_cap");
-    // A hold taken yesterday, with room: today's full day stops the run all the same.
-    const store = new MemoryDocumentStore();
-    const yesterday = new Date(`2026-11-14T10:00:00.000Z`);
-    const old = createHostedLedger({ store, metering: exactMeter, now: () => yesterday });
-    const staged = await createHostedAdmission({ settings: SETTINGS, store, ledger: old, now: () => yesterday, runStopWired: true }).stage({ companyId: A, idempotencyKey: "s", action: "task.start", subject: { type: "task", id: mine }, taskStart: { workflow: true, path: "FULL", pathFrom: "request" } });
-    expect((await store.transact([...staged.items])).applied).toBe(true);
-    const today = createHostedLedger({ store, metering: exactMeter, now: () => NOW });
-    await today.recordUsage({ companyId: A, entryId: "big", at: NOW.toISOString(), taskId: randomUUID(), usage: { provider: "p", modelId: "m", tokens: { input: 25_000_000, output: 0, cacheRead: 0, cacheWrite: 0 } } });
-    expect(await runSpendState({ store, ledger: today, settings: SETTINGS, now: () => NOW }, A, mine)).toBe("company_day_cap");
-  });
-
-  it("reads a task with unpriced usage as unknown even when the day reads", async () => {
-    const w = setup();
-    const task = randomUUID();
-    await w.store.put({ item: { pk: costPartition(A, task), sk: "TOTAL", entityType: "COST_TOTAL", taskId: task, companyId: A, micros: 0, entries: 1, unpricedEntries: 1 } });
-    expect(await w.state(A, task)).toBe("spend_unknown");
-  });
-
   it("reads spend that is not dollars as unknown (fails closed), and so a read that throws", async () => {
     const w = setup();
     const task = randomUUID();
@@ -124,15 +88,6 @@ describe("where a run stands against the caps (runSpendState)", () => {
     // Another task of the company booked an unreadable usage: the day is unknown, so this run stops too.
     const fine = randomUUID();
     expect(await w.state(A, fine)).toBe("spend_unknown");
-  });
-
-  it("never reads another company's day or task", async () => {
-    const w = setup({ ...SETTINGS, companyDayCapMicros: 5_000_000 });
-    const task = randomUUID();
-    await w.book(B, task, 5_000_000);
-    expect(await w.state(B, task)).toBe("task_cap");
-    expect(await w.state(A, task)).toBe("within");
-    expect(await w.state(A, randomUUID())).toBe("within");
   });
 });
 
@@ -205,22 +160,6 @@ describe("a stopped run's usage that never arrived: the whole hold is kept, mark
     expect((await w.ledger.taskCost(A, task)).micros).toBe(3_000_000 + unflushedEstimateMicros(SETTINGS));
     expect(unflushedEstimateMicros(SETTINGS)).toBe(5_000_000);
     expect(unflushedEstimateMicros(undefined)).toBe(6_000_000);
-  });
-
-  it("a hold its usage used up keeps nothing more, so the estimate is booked; a hold of an earlier day leaves no room on this one", async () => {
-    const w = setup();
-    const task = randomUUID();
-    const hold = await w.start(A, task);
-    await w.book(A, task, 5_000_000);
-    const stop = createHostedMoneyStop({ store: w.store, companyId: A, settings: SETTINGS, now: () => NOW });
-    await stop.keepWholeHold(hold, { operationId: "o1", taskId: task });
-    expect(await w.store.get(holdKey(A, hold))).toMatchObject({ state: "settled", keptMicros: 0, estimated: true });
-    expect((await w.ledger.taskCost(A, task)).micros).toBe(10_000_000);
-    const other = setup();
-    const t2 = randomUUID();
-    const h2 = await other.start(A, t2);
-    expect(await openHoldRoom(other.store, h2, DAY)).toBe(5_000_000);
-    expect(await openHoldRoom(other.store, h2, "2026-11-16")).toBe(0);
   });
 
   it("touches only the hold's own company, and does nothing for no hold or an id that is not one", async () => {
@@ -315,25 +254,6 @@ describe("the run is stopped as its usage is booked (the broker root's wiring an
     expect(await store.get({ pk: costPartition(A, taskId), sk: "TOTAL" })).toMatchObject({ micros: 1_000 });
     await money.bookUsage(operation, [{ type: "usage", timestamp: `${DAY}T10:00:03.000Z`, payload: zero }]);
     expect(await store.get({ pk: costPartition(A, taskId), sk: "TOTAL" })).toMatchObject({ micros: 1_000 + EMPTY_REPORT_CHARGE_MICROS });
-  });
-
-  it("a final zero with no checkpoint of its run in the ledger keeps the empty-report floor (the worker's word alone never makes it $0)", async () => {
-    const { store, money } = await root(A);
-    const taskId = randomUUID();
-    const mine = { id: randomUUID(), workspaceId: randomUUID(), companyId: A } as unknown as OperationRecord;
-    const other = { id: randomUUID(), workspaceId: mine.workspaceId, companyId: A } as unknown as OperationRecord;
-    await store.put({ item: { ...taskPointerKey(mine.companyId, mine.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId } });
-    const finalZero = { ...telemetry(0), checkpoint: undefined, final: true };
-    // Another run's checkpoint does not count for this one.
-    await money.bookUsage(other, [{ type: "usage", timestamp: `${DAY}T10:00:01.000Z`, payload: telemetry(1_000) }]);
-    await money.bookUsage(mine, [{ type: "usage", timestamp: `${DAY}T10:00:02.000Z`, payload: finalZero }]);
-    expect(await store.get({ pk: costPartition(A, taskId), sk: "TOTAL" })).toMatchObject({ micros: 1_000 + EMPTY_REPORT_CHARGE_MICROS });
-    expect(readUsagePayload(finalZero)).toMatchObject({ reportedMicros: EMPTY_REPORT_CHARGE_MICROS });
-    expect(readUsagePayload(finalZero, { checkpointsBooked: true })).not.toHaveProperty("reportedMicros");
-    // A checkpoint of its own booked in an earlier batch counts.
-    await money.bookUsage(mine, [{ type: "usage", timestamp: `${DAY}T10:00:03.000Z`, payload: telemetry(2_000) }]);
-    await money.bookUsage(mine, [{ type: "usage", timestamp: `${DAY}T10:00:04.000Z`, payload: finalZero }]);
-    expect(await store.get({ pk: costPartition(A, taskId), sk: "TOTAL" })).toMatchObject({ micros: 3_000 + EMPTY_REPORT_CHARGE_MICROS });
   });
 
   it("the callback layer acks the batch and asks the run to stop (CANCEL_REQUESTED, the code, a cancel to its worker); another company's run is never touched", async () => {

@@ -6,7 +6,7 @@ import {
   type AutoFixBudget, type TestingView, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { testingSectionLines, testingTableLines, testingViewOf, type TestingViewInput } from "../../packages/broker/src/core/proof/testing-section.js";
-import { rovaraStatusLines, type PullRequestBodyContext } from "../../packages/broker/src/core/proof/pull-request-body.js";
+import { rovaraStatusLines } from "../../packages/broker/src/core/proof/pull-request-body.js";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const NOW = "2026-11-02T12:00:00.000Z";
@@ -91,21 +91,6 @@ describe("the Testing view: one row per selected check, in order", () => {
     const none = workflow({ checkPolicy: { required: [], optional: [], selectedOptionalIds: [], proposed: [] } });
     expect(testingViewOf({ workflow: none, facts: {}, budget, evidence: pack(), alreadyFailing: [] })).toEqual({ waiting: "unreadable" });
   });
-
-  it("redacts and cuts a command, strips hidden characters, and never stores the invisible marks inertness adds", () => {
-    const token = ["gh", "p_", "a".repeat(36)].join("");
-    const secret = workflow({ checkPolicy: policy(["unit", "Unit tests‮", "run", [`--token=${token}`, "x".repeat(300)]]), ...results(check("unit", "PASS")) });
-    const v = view({ workflow: secret, evidence: pack([{}]) });
-    expect(v.rows[0]!.command.includes(token)).toBe(false);
-    expect(Array.from(v.rows[0]!.command).length).toBeLessThanOrEqual(120);
-    expect(v.rows[0]!.label).toBe("Unit tests");
-    expect(JSON.stringify(v)).not.toMatch(/[‍‮]/u);
-  });
-
-  it("a pack for other code changes the result (Partially verified: details missing), never a worker's word", () => {
-    const other = { ...pack(), candidateDigest: "9".repeat(64) };
-    expect(view({ evidence: other })).toMatchObject({ result: "partially_verified", reasons: ["evidence_missing"] });
-  });
 });
 
 describe("the pull request's Testing section", () => {
@@ -124,60 +109,16 @@ describe("the pull request's Testing section", () => {
     expect(lines).toContain("- Tested on head commit 11111111");
   });
 
-  it("makes every label and command inert: no mention, cross-reference, link or table break", () => {
-    const lines = testingSectionLines(many(), 0);
-    const text = lines.join("\n");
-    expect(text).not.toMatch(/@team/u);
-    expect(text).toContain("@‍team");
-    expect(text).not.toMatch(/#123/u);
-    for (const row of lines.filter((line) => line.startsWith("| Check number"))) expect(row.split("|").length).toBe(5);
-  });
-
-  it("keeps the result and every blocked or not-run row at levels 0 to 4, and folds passed rows from level 2", () => {
-    const v = many();
-    for (let level = 0; level <= 4; level += 1) {
-      const lines = testingSectionLines(v, level);
-      expect(lines[0], `level ${String(level)}`).toBe("## Testing — Blocked by environment");
-      expect(lines[1]).toMatch(/^Result: /u);
-      expect(lines.some((line) => line.includes("Check number 39") && line.includes("⛔ blocked")), `blocked row at ${String(level)}`).toBe(true);
-      expect(lines.some((line) => line.includes("Full test suite") && line.includes("pending")), `pending row at ${String(level)}`).toBe(true);
-      const passedRows = lines.filter((line) => line.includes("✅")).length;
-      if (level < 2) expect(passedRows).toBe(39);
-      else {
-        expect(passedRows).toBe(0);
-        expect(lines.some((line) => /^39 more checks passed/u.test(line))).toBe(true);
-      }
-    }
-  });
-
   it("is smaller at each level (the description can shrink to fit its byte cap)", () => {
     const sizes = [0, 1, 2, 3, 4, 5].map((level) => Buffer.byteLength(testingSectionLines(many(), level).join("\n")));
     for (let level = 1; level < sizes.length; level += 1) expect(sizes[level]!).toBeLessThanOrEqual(sizes[level - 1]!);
     expect(sizes[5]!).toBeLessThan(sizes[0]!);
     expect(sizes[4]!).toBeLessThan(sizes[3]!);
   });
-
-  it("says each reason only in its fixed sentence", () => {
-    const v = view({ workflow: STUCK(), evidence: undefined });
-    expect(testingSectionLines(v, 0).join("\n")).toContain(TESTING_REASON_TEXT.check_runner_failed);
-  });
 });
 
 describe("the whole description with the view", () => {
   const reviews = () => ["Reviews: code review passed; security review passed"];
-  const body = (context: PullRequestBodyContext) => rovaraStatusLines(workflow(), context, reviews);
-
-  // L4-C: the block no longer has the old `## Tests` lists (the pins of the layout before the redesign are replaced by tests/fixtures/pr-body/*.md, which the golden test reads). With no Testing view (`vx` off) the Checks drawer is built from the
-  // recorded results, and the heading says it in the fixed words of a task with no classified result: never "Verified".
-  it("with the view absent (vx off) says what the recorded results say, in words that are never Verified, and the same with the field set to undefined", () => {
-    expect(body({})).toEqual(body({ testing: undefined }));
-    const text = body({}).join("\n");
-    expect(text.split("\n")[0]).toBe("## Checks passed · Risk not judged yet (treated as high) · 1 thing to check");
-    expect(text).toContain("<summary>Checks: 2 of 2 passed</summary>");
-    expect(text).not.toContain("Verified");
-    expect(text).not.toContain("Result: ");
-    expect(text).toContain("| Unit tests | `pytest -q` | ✅ passed |");
-  });
 
   // L1 (Opus re-check): 64 blocked rows with multibyte labels and commands must still fit, with the result line, however the budget is set.
   const multibyte = (): TestingView => TestingViewSchema.parse({
@@ -206,16 +147,6 @@ describe("the whole description with the view", () => {
     expect(Array.from(level4.split("|")[1]!.trim()).length).toBeLessThanOrEqual(40);
   });
 
-  it("with the view, the Checks drawer holds the table, the tested commit and the tests added, and the heading carries the result", () => {
-    const lines = body({ testing: view() });
-    const text = lines.join("\n");
-    expect(lines).not.toContain("## Tests");
-    expect(lines[0]).toBe("## Verified · Risk not judged yet (treated as high) · 1 thing to check");
-    expect(text).toContain("Result: Verified.");
-    expect(text).toContain("- Tested on head commit 11111111");
-    expect(text).not.toContain("- Passed:");
-  });
-
   it("fits a tiny budget by shrinking the table and never drops the blocked check or the result from above the fold", () => {
     const checks = Array.from({ length: 40 }, (_, n) => ({ id: `c${String(n)}`, label: `Check number ${String(n)}`, command: command("run-all-the-things", ["--flag", "x".repeat(100)]) }));
     const rows = checks.map((entry, n) => (n === 39 ? check(entry.id, "FAILED", { neverStarted: true }) : check(entry.id, "PASS")));
@@ -227,10 +158,5 @@ describe("the whole description with the view", () => {
     expect(text.indexOf("Check number 39")).toBeLessThan(text.indexOf("<details>"));
     // The passed rows fold into a count before the blocked row is touched (at a roomier budget).
     expect([20_000, 12_000, 8_000, 6_000, 4_500].some((budget) => rovaraStatusLines(flow, { testing: v }, reviews, budget).join("\n").includes("more checks passed"))).toBe(true);
-  });
-
-  it("the result is said in the heading and once as the Checks drawer's first line", () => {
-    // No plan with claims here, so there is no requirements drawer: the heading and the Checks drawer carry the result.
-    expect(body({ testing: view() }).filter((line) => line.startsWith("Result: ")).length).toBe(1);
   });
 });

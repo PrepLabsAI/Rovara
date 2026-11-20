@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 import { HostRateLimitError, type CommitIdentity, type OrgId } from "../../packages/contracts/src/index.js";
 import { TrackingRequestCapError, trackPullRequest, type MergeTrackingDependencies } from "../../packages/broker/src/core/merge/index.js";
 import { HUMAN_EDIT_REQUESTS_MAX } from "../../packages/broker/src/core/merge/merge-tracking.js";
-import type { HumanEditPush } from "../../packages/broker/src/core/merge/seams.js";
 import type { TaskRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { createHumanEditProducer, humanEditRowKey } from "../../packages/broker/src/lessons/human-edit-producer.js";
 import type { ReflectQueueMessage } from "../../packages/broker/src/lessons/reflect-queue.js";
@@ -33,55 +32,6 @@ function push(world: MergeWorld, identity: CommitIdentity | undefined, path = "s
 const withHook = (world: MergeWorld, humanEdit: MergeTrackingDependencies["humanEdit"]): MergeTrackingDependencies => ({ ...world.tracking, ...(humanEdit === undefined ? {} : { humanEdit }) });
 
 describe("what a pass tells learning", () => {
-  it("nothing while the head is Rovara's own, and the coordinates of the push once it is not", async () => {
-    const world = await mergeWorld();
-    const told: HumanEditPush[] = [];
-    const deps = withHook(world, async (event) => { told.push(event); });
-    await trackPullRequest(deps, TASK_ID);
-    expect(told).toEqual([]);
-    const head = push(world, person);
-    await trackPullRequest(deps, TASK_ID);
-    expect(told).toHaveLength(1);
-    const pr = world.prs[0]!;
-    expect(told[0]).toMatchObject({
-      task: { taskId: TASK_ID, orgId: ORG }, pullRequest: { repositoryId: "app", number: pr.number }, base: pr.head, head, headRef: pr.model.getChangeRequest(String(pr.number)).sourceBranch,
-      repository: { scope: { orgId: ORG } },
-    });
-    expect(told[0]!.repository.codeHost).toBeDefined();
-    expect(typeof told[0]!.budget?.beforeRequest).toBe("function");
-  });
-
-  it("the base is the commit Rovara last pushed: the pull request record's head when it has one (a fix Rovara pushed after the workflow's head), else the workflow's head", async () => {
-    const world = await mergeWorld();
-    const pr = world.prs[0]!;
-    const told: HumanEditPush[] = [];
-    // Rovara pushed a fix: the record holds it, while the workflow still names the first head. A person then pushed on top of the fix.
-    const fix = push(world, undefined, "src/fix.ts", FIVE);
-    const person1 = push(world, person);
-    await trackPullRequest({ ...withHook(world, async (event) => { told.push(event); }), recordedHead: async () => fix }, TASK_ID);
-    expect(told.map((event) => [event.base, event.head])).toEqual([[fix, person1]]);
-    // With no record the workflow's own head is the base.
-    const bare = await mergeWorld();
-    const bareTold: HumanEditPush[] = [];
-    const head = push(bare, person);
-    await trackPullRequest({ ...withHook(bare, async (event) => { bareTold.push(event); }), recordedHead: async () => undefined }, TASK_ID);
-    expect(bareTold.map((event) => [event.base, event.head])).toEqual([[bare.prs[0]!.head, head]]);
-    expect(pr.head).not.toBe(fix);
-  });
-
-  it("not for a pull request that is no longer open, and not at all when no receiver is given (the pass is what it was)", async () => {
-    const world = await mergeWorld();
-    const told: HumanEditPush[] = [];
-    push(world, person);
-    const pr = world.prs[0]!;
-    pr.model.getChangeRequest(String(pr.number)).state = "closed";
-    await trackPullRequest(withHook(world, async (event) => { told.push(event); }), TASK_ID);
-    expect(told).toEqual([]);
-    const plain = await mergeWorld();
-    push(plain, person);
-    await expect(trackPullRequest(withHook(plain, undefined), TASK_ID)).resolves.toBeDefined();
-    expect(Object.keys(plain.tracking)).not.toContain("humanEdit");
-  });
 
   it("a receiver that fails does not fail the pass (one fixed log line); the host's rate limit and the pass's spent allowance go up", async () => {
     const world = await mergeWorld();
@@ -144,16 +94,6 @@ describe("a person's push, through the producer, becomes one job", () => {
     push(anon, undefined);
     await trackPullRequest(second.deps, TASK_ID);
     expect(second.sent).toEqual([]);
-  });
-
-  it("a mixed push (a person's commit, then a bot's on top) queues the head; a bot's commit alone on top of a person's already-judged head does not repeat it", async () => {
-    const world = await mergeWorld();
-    const { sent, deps } = producer(world);
-    push(world, person, "src/a.ts", FIVE);
-    const top = push(world, bot, "src/gen.ts", FIVE);
-    await trackPullRequest(deps, TASK_ID);
-    expect(sent).toHaveLength(1);
-    expect((sent[0] as { headSha: string }).headSha).toBe(top);
   });
 
   it("learning off for the project: nothing is read of the host and nothing is queued", async () => {

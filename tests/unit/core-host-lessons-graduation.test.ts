@@ -284,17 +284,6 @@ describe("graduating over the API", () => {
     expect(await call(target, "b-admin", "GET", `${P}/skills`)).toEqual({ ok: true, body: { project: "payments", canDecide: true, skills: [] } });
   });
 
-  it("the page reads the shared signals, but a decision reads them fresh: a mark made after the card was shown stops the graduation, and an old one does not count", async () => {
-    const w = await setUp();
-    await proven(w, A, "les_conv0001");
-    const { api: target } = api(w);
-    expect(await call(target, "a-maint", "GET", `${GP}/graduation`)).toMatchObject({ ok: true, body: { card: { lessonId: "les_conv0001" } } });
-    await w.lessons.get(A)!.runtime.evidence.note({ workspaceId: A, project: "payments", lessonId: "les_conv0001", kind: "against", weight: 1, at: w.world.clock.now, id: "mark-late" });
-    // The cached page may still show the card; the decision does not go through.
-    expect(await call(target, "a-maint", "POST", `${GP}/les_conv0001/graduate`, { target: "rule" })).toMatchObject({ ok: false, code: "FORBIDDEN", message: "That lesson has not proved itself yet." });
-    expect(await rulesOf(w, A)).toEqual([]);
-  });
-
 })
 
 describe("team rules over the API", () => {

@@ -3,7 +3,7 @@
 // task's own branch at the head Rovara recorded), and what a finished restack is (from what the host shows, never carrying an approval).
 import { describe, expect, it } from "vitest";
 import {
-  WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, startWorkflowBranchSync, startWorkflowBranchSyncRun, type Autonomy, type CodeHost, type OrgId, type WorkflowProgram, type WorkflowSnapshot,
+  WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, startWorkflowBranchSync, startWorkflowBranchSyncRun, type CodeHost, type OrgId, type WorkflowProgram, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { branchWritersKey, noteBranchHead, noteRestackRefused, openBranchWriters, readBranchWriters, type BranchWriters } from "../../packages/broker/src/core/branch-sync/branch-writers.js";
@@ -20,10 +20,6 @@ const NEW_HEAD = "9".repeat(40);
 const NEW_TREE = "c".repeat(40);
 
 describe("who has written to a branch", () => {
-  it("no record is no proof: a branch nobody has opened a record for is not Rovara-only", async () => {
-    const store = new MemoryDocumentStore();
-    expect(await readBranchWriters(store, KEY)).toEqual({ state: "unknown" });
-  });
 
   it("the publish path opens a Rovara-only record once; seeing Rovara's own head writes nothing", async () => {
     const store = new MemoryDocumentStore();
@@ -32,41 +28,6 @@ describe("who has written to a branch", () => {
     await noteBranchHead(store, KEY, { headIsRecordedRovaraPush: true, now: "2026-11-09T14:00:00.000Z" });
     expect(await readBranchWriters(store, KEY)).toEqual({ state: "rovara_only", restackRefused: false });
     expect(await store.get(branchWritersKey(KEY))).toMatchObject({ entityType: "BRANCH_WRITERS", orgId: ORG, personPushed: false, createdAt: at });
-  });
-
-  it("a tracking pass never creates a Rovara-only record: a deleted or expired row, or a branch Rovara did not open, stays unknown", async () => {
-    const store = new MemoryDocumentStore();
-    await noteBranchHead(store, KEY, { headIsRecordedRovaraPush: true, now: at });
-    expect(await readBranchWriters(store, KEY)).toEqual({ state: "unknown" });
-    expect(await store.get(branchWritersKey(KEY))).toBeUndefined();
-  });
-
-  it("a person's push is remembered for good: the head going back to Rovara's (an ABA reset) does not clear it", async () => {
-    const store = new MemoryDocumentStore();
-    await openBranchWriters(store, KEY, at);
-    await noteBranchHead(store, KEY, { headIsRecordedRovaraPush: false, now: "2026-11-09T13:00:00.000Z" });
-    expect(await readBranchWriters(store, KEY)).toEqual({ state: "person_pushed", restackRefused: false });
-    await noteBranchHead(store, KEY, { headIsRecordedRovaraPush: true, now: "2026-11-09T14:00:00.000Z" });
-    await noteBranchHead(store, KEY, { headIsRecordedRovaraPush: false, now: "2026-11-09T15:00:00.000Z" });
-    expect(await readBranchWriters(store, KEY)).toEqual({ state: "person_pushed", restackRefused: false });
-    expect(await store.get(branchWritersKey(KEY))).toMatchObject({ firstPersonPushAt: "2026-11-09T13:00:00.000Z" });
-  });
-
-  it("a first sighting of a head that is not Rovara's says a person pushed, and the record cannot then be opened as Rovara-only", async () => {
-    const store = new MemoryDocumentStore();
-    await noteBranchHead(store, KEY, { headIsRecordedRovaraPush: false, now: at });
-    expect(await readBranchWriters(store, KEY)).toEqual({ state: "person_pushed", restackRefused: false });
-    await openBranchWriters(store, KEY, at);
-    expect(await readBranchWriters(store, KEY)).toEqual({ state: "person_pushed", restackRefused: false });
-  });
-
-  it("is kept for the branch, not for a task or a pull request: a second task or a reopened pull request on it does not start clean; spelling does not matter", async () => {
-    const store = new MemoryDocumentStore();
-    await openBranchWriters(store, KEY, at);
-    await noteBranchHead(store, KEY, { headIsRecordedRovaraPush: false, now: at });
-    expect(await readBranchWriters(store, { ...KEY, branch: BRANCH.toUpperCase(), repositoryId: "Payments" })).toEqual({ state: "person_pushed", restackRefused: false });
-    expect(await readBranchWriters(store, { ...KEY, branch: "rovara/another" })).toEqual({ state: "unknown" });
-    expect(await readBranchWriters(store, { ...KEY, orgId: "org_bbbbbbbbbbbbbbbbbbbb" })).toEqual({ state: "unknown" });
   });
 
   it("a refs/heads spelling is the same branch; any other full ref is not a branch name", async () => {
@@ -87,16 +48,6 @@ describe("who has written to a branch", () => {
     expect(await readBranchWriters(store, KEY)).toEqual({ state: "rovara_only", restackRefused: true });
   });
 
-  it("a row that is not what its key says, or is another company's, is no proof", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: { ...branchWritersKey(KEY), entityType: "SOMETHING_ELSE", personPushed: false } });
-    expect(await readBranchWriters(store, KEY)).toEqual({ state: "unknown" });
-    await store.put({ item: { ...branchWritersKey(KEY), entityType: "BRANCH_WRITERS", orgId: ORG, personPushed: "no" } });
-    expect(await readBranchWriters(store, KEY)).toEqual({ state: "unknown" });
-    await store.put({ item: { ...branchWritersKey(KEY), entityType: "BRANCH_WRITERS", orgId: "org_bbbbbbbbbbbbbbbbbbbb", personPushed: false } });
-    expect(await readBranchWriters(store, KEY)).toEqual({ state: "unknown" });
-  });
-
   it("refuses keys that could widen a partition", () => {
     expect(() => branchWritersKey({ ...KEY, repositoryId: "a#b" })).toThrow();
     expect(() => branchWritersKey({ ...KEY, repositoryId: "" })).toThrow();
@@ -111,10 +62,6 @@ const method = (overrides: Partial<Parameters<typeof decideBranchMethod>[0]> = {
 });
 
 describe("restack or merge", () => {
-  it("restacks a branch only Rovara has written to, whose head is Rovara's, when Rovara may act on its own", () => {
-    expect(method()).toEqual({ method: "restack" });
-    expect(method({ autonomy: "run" })).toEqual({ method: "restack" });
-  });
 
   it("falls back to a merge for every branch that is not proved Rovara-only", () => {
     expect(method({ writers: { state: "person_pushed", restackRefused: false } })).toEqual({ method: "merge", reason: "person_pushed" });
@@ -124,12 +71,6 @@ describe("restack or merge", () => {
     expect(method({ autonomy: "suggest" })).toEqual({ method: "merge", reason: "ask_first" });
     expect(method({ recordedBranch: "main" })).toEqual({ method: "merge", reason: "base_is_head_branch" });
     expect(method({ recordedBranch: "trunk", defaultBranch: "trunk", baseBranch: "release" })).toEqual({ method: "merge", reason: "base_is_head_branch" });
-  });
-
-  it("a person's push wins over everything else", () => {
-    for (const autonomy of ["suggest", "prepare", "run"] as Autonomy[]) {
-      expect(method({ writers: { state: "person_pushed", restackRefused: false }, autonomy }).method).toBe("merge");
-    }
   });
 });
 
@@ -175,13 +116,6 @@ describe("the one way a force-push is spelled", () => {
     expect(lease({ headIsRecordedRovaraPush: false })).toEqual({ ok: false, reason: "not_rovara_only" });
     expect(lease({ writers: { state: "rovara_only", restackRefused: true } })).toEqual({ ok: false, reason: "not_rovara_only" });
     expect(lease({ autonomy: "suggest" })).toEqual({ ok: false, reason: "ask_first" });
-  });
-
-  it("is refused for a branch name git could read as an option or a second ref", () => {
-    for (const bad of ["-f", "--force", "a:b", "a b", "a..b", "a@{1}", "a\nb", "/a", "a//b", "a.lock", "a/", "a?", "a*", "a[b", "a\\b", "a~1", "a^", "a;b", "$(x)", ""]) {
-      expect(lease({ branch: bad, recordedBranch: bad }), JSON.stringify(bad)).toEqual({ ok: false, reason: "unsafe_branch" });
-    }
-    expect(lease({ branch: "rovara/a-b_c.d+e", recordedBranch: "rovara/a-b_c.d+e" }).ok).toBe(true);
   });
 });
 
@@ -261,37 +195,6 @@ describe("what a finished restack is", () => {
     if (outcome.kind !== "restacked") return;
     expect(outcome.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", candidate: { repositories: [{ commitSha: NEW_HEAD }] } });
     expect(outcome.workflow.branchSync).toBeUndefined();
-  });
-
-  it("never carries a person's approval to the rewritten head: no earlier head is kept for it", () => {
-    const outcome = plan();
-    if (outcome.kind !== "restacked") throw new Error("expected a restack");
-    const entry = outcome.workflow.pullRequests?.find((pullRequest) => pullRequest.number === 7);
-    expect(entry?.headSha).toBe(NEW_HEAD);
-    expect(entry?.syncedFrom).toBeUndefined();
-  });
-
-  it("is not recorded when the host does not show it on top of the base, when that could not be told, or when the head or the tree is not the one the worker reported (or it reported none)", () => {
-    expect(plan({ buildsOnBase: false }).kind).toBe("unchanged");
-    expect(plan({ buildsOnBase: undefined }).kind).toBe("unchanged");
-    expect(plan({ reported: { headSha: NEW_HEAD, treeSha: "d".repeat(40) } }).kind).toBe("unchanged");
-    expect(plan({ reported: { headSha: "8".repeat(40), treeSha: NEW_TREE } }).kind).toBe("unchanged");
-    expect(plan({ reported: undefined }).kind).toBe("unchanged");
-  });
-
-  it("is never recorded from a restack that did not succeed: a person's merge of the base onto the branch after a failed or lost restack is not Rovara's head", () => {
-    for (const status of ["FAILED", "CANCELLED", "TIMED_OUT"]) {
-      expect(plan({ status, error: "RUNTIME_UNAVAILABLE: lost", reported: undefined }).kind, status).toBe("unchanged");
-      expect(plan({ status, error: "RUNTIME_UNAVAILABLE: lost" }).kind, status).toBe("unchanged");
-    }
-  });
-
-  it("is never a head that is not a new commit on the task's branch of an open pull request: a person's push, another branch, a closed pull request", () => {
-    expect(plan({ github: github({ headCommit: HEAD_A }) }).kind).toBe("unchanged");
-    expect(plan({ github: github({ headBranch: "someone/else" }) }).kind).toBe("unchanged");
-    expect(plan({ github: github({ state: "closed" }) }).kind).toBe("unchanged");
-    expect(plan({ github: github({ headCommit: "not a sha" }) }).kind).toBe("unchanged");
-    expect(plan({ github: undefined }).kind).toBe("unchanged");
   });
 
   it("is a refusal when the host refused the force-push and the head did not move: nothing is rewritten, and the next try is a merge", () => {

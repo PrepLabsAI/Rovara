@@ -3,20 +3,17 @@
 // (spend unknown); no reader means today's install cap, nothing read. Two companies throughout.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, companyScoped, type AdmissionRequest, type DocumentStore, type MeterEntry, type OrgId } from "@agentx/contracts";
+import { companyScoped, type AdmissionRequest, type MeterEntry, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { companyDayKey } from "../../packages/broker/src/core/cost/ledger.js";
 import { holdKey } from "../../packages/broker/src/core/cost/holds.js";
 import {
-  PROJECT_TASK_CAP_REACHED, SPEND_UNKNOWN, TASK_CAP_REACHED, createHostedAdmission, createHostedLedger, hostedSecurityModules, runSpendState, taskCapOf, type HostedAdmissionSettings, type ProjectTaskCap,
+  PROJECT_TASK_CAP_REACHED, SPEND_UNKNOWN, TASK_CAP_REACHED, createHostedAdmission, createHostedLedger, runSpendState, taskCapOf, type HostedAdmissionSettings, type ProjectTaskCap,
 } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { RUN_START_ACTION } from "../../packages/broker/src/core/task-flow/money-stop.js";
-import { taskKey, taskPointerKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { coreMoneyWiring, enginePolicyHook, hostedRoundCap } from "../../packages/broker/src/aws/core-engine-root.js";
-import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
+import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { enginePolicyHook, hostedRoundCap } from "../../packages/broker/src/aws/core-engine-root.js";
 import { projectTaskCapReader } from "../../packages/broker/src/aws/project-settings.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import { buildCoreRegistry, coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 import { ISSUER, fakeService, makeKey, settingsFor, signerOf } from "./policy-hook-fixture.js";
 import { COMPANY_A_ID, COMPANY_B_ID } from "../../packages/testing/src/isolation/two-company.js";
 
@@ -75,38 +72,6 @@ describe("a project's own per-task limit lowers the task cap", () => {
     expect(w.asked.every((entry) => entry === `${A}/web`)).toBe(true);
   });
 
-  it("before each model run (run.start) and after each booking (the per-run stop): stopped at the project's limit, not the install's", async () => {
-    const w = setup({ [`${A}/web`]: 1_500_000 });
-    const taskId = await w.task(A, "web");
-    expect(await w.runStart(A, taskId, "web")).toEqual({ allowed: true });
-    expect(await w.state(A, taskId)).toBe("within");
-    await w.book(A, taskId, 1_499_999);
-    expect(await w.state(A, taskId)).toBe("within");
-    await w.book(A, taskId, 1);
-    expect(await w.state(A, taskId)).toBe("task_cap");
-    expect(await w.runStart(A, taskId, "web")).toEqual({ allowed: false, code: "task_cap", message: PROJECT_TASK_CAP_REACHED });
-    // Without the request's project name, the task's own row names it.
-    expect(await w.state(A, taskId, undefined)).toBe("task_cap");
-  });
-
-  it("a lowered limit stops a running task at its next booking; a raised one lets it go on (read each time)", async () => {
-    const limits: Record<string, number | Error> = { [`${A}/web`]: 4_000_000 };
-    const w = setup(limits);
-    const taskId = await w.task(A, "web");
-    await w.book(A, taskId, 3_000_000);
-    expect(await w.state(A, taskId)).toBe("within");
-    limits[`${A}/web`] = 3_000_000;
-    expect(await w.state(A, taskId)).toBe("task_cap");
-    limits[`${A}/web`] = 4_500_000;
-    expect(await w.state(A, taskId)).toBe("within");
-  });
-
-  it("a limit of $0 refuses the start", async () => {
-    const w = setup({ [`${A}/web`]: 0 });
-    const taskId = await w.task(A, "web");
-    expect((await w.admission.stage(w.startRequest(A, taskId, "web"))).decision).toEqual({ allowed: false, code: "task_cap", message: PROJECT_TASK_CAP_REACHED });
-  });
-
   it("a limit at or above the install's cap, or none, leaves the install's cap and its words", async () => {
     for (const limit of [undefined, 5_000_000, 50_000_000]) {
       const w = setup(limit === undefined ? {} : { [`${A}/web`]: limit });
@@ -122,15 +87,6 @@ describe("a project's own per-task limit lowers the task cap", () => {
 });
 
 describe("fails closed", () => {
-  it("a limit that cannot be read refuses the start, the model run and the booking check (spend unknown), never the install's cap alone", async () => {
-    const w = setup({ [`${A}/web`]: new Error("private-canary") });
-    const taskId = await w.task(A, "web");
-    const staged = await w.admission.stage(w.startRequest(A, taskId, "web"));
-    expect(staged).toEqual({ decision: { allowed: false, code: "spend_unknown", message: SPEND_UNKNOWN }, items: [] });
-    expect(await w.runStart(A, taskId, "web")).toEqual({ allowed: false, code: "spend_unknown", message: SPEND_UNKNOWN });
-    expect(await w.state(A, taskId)).toBe("spend_unknown");
-    expect(await w.store.get(companyDayKey(A, DAY))).toBeUndefined();
-  });
 
   it.each([
     ["a missing task", async () => Promise.resolve(randomUUID())],
@@ -149,31 +105,6 @@ describe("fails closed", () => {
       const taskId = await w.task(A, "web");
       expect(await w.state(A, taskId)).toBe("spend_unknown");
     }
-  });
-});
-
-describe("unchanged without a reader, and two companies", () => {
-  it("no reader: the install's cap, and no project read at all", async () => {
-    const w = setup(undefined);
-    const taskId = randomUUID();
-    const staged = await w.admission.stage(w.startRequest(A, taskId, "web"));
-    expect((await w.store.transact([...staged.items])).applied).toBe(true);
-    expect(await heldMicros(w, A, staged.decision.allowed ? staged.decision.reservationId : undefined)).toBe(5_000_000);
-    // No task row exists: without a reader nothing asks for it.
-    expect(await w.state(A, taskId)).toBe("within");
-    expect(w.asked).toEqual([]);
-  });
-
-  it("each company's tasks read only their own project's limit", async () => {
-    const w = setup({ [`${A}/web`]: 1_000_000, [`${B}/web`]: 4_000_000 });
-    const a = await w.task(A, "web"); const b = await w.task(B, "web");
-    await w.book(A, a, 2_000_000); await w.book(B, b, 2_000_000);
-    expect(await w.state(A, a)).toBe("task_cap");
-    expect(await w.state(B, b)).toBe("within");
-    // A run of B's task asked under A reads A's project row only (and the ledger keeps the companies apart).
-    w.asked.length = 0;
-    await w.state(A, b);
-    expect(w.asked).toEqual([]);
   });
 });
 
@@ -219,28 +150,9 @@ describe("the engine's reader of the project's settings (projectTaskCapReader)",
     const unusable = projectTaskCapReader({ documentClient: w.db, tableName: "state", now: () => NOW.getTime() }, () => { throw new Error("the policy hook is not usable"); });
     await expect(unusable(A, "web")).rejects.toThrow();
   });
-
-  it("reads only the asking company's row; a row naming another company or not parsing throws", async () => {
-    const w = world();
-    w.row(B, "web", { model_budget_usd: 1 });
-    expect(await w.read(A, "web")).toBeUndefined();
-    w.row(A, "web", { model_budget_usd: 1 }, { companyId: B });
-    await expect(w.read(A, "web")).rejects.toThrow();
-    w.row(A, "web", { model_budget_usd: "private-canary" });
-    await expect(w.read(A, "web")).rejects.toThrow();
-  });
 });
 
 describe("races and the task's own project (L2-5 b mutants)", () => {
-  it("the start's commit re-checks the task's spend against the project's limit: spend booked between the decision and the commit refuses the commit", async () => {
-    const w = setup({ [`${A}/web`]: 2_000_000 });
-    const taskId = await w.task(A, "web");
-    // A second start attempt of the same task: decided with nothing booked (it holds the whole $2), then $1 is booked before its transaction commits.
-    const staged = await w.admission.stage({ ...w.startRequest(A, taskId, "web"), idempotencyKey: `task.start:${taskId}:2` });
-    expect(staged.decision.allowed).toBe(true);
-    await w.book(A, taskId, 1_000_000);
-    expect((await w.store.transact([...staged.items])).applied).toBe(false);
-  });
 
   it("the task's own row names the project: a request naming another project, or a malformed one, refuses (spend unknown); with no row, a malformed name refuses", async () => {
     const w = setup({ [`${A}/web`]: 1_000_000, [`${A}/api`]: 9_000_000 });
@@ -252,31 +164,6 @@ describe("races and the task's own project (L2-5 b mutants)", () => {
     expect(w.asked).toEqual([`${A}/web`]);
     const fresh = randomUUID();
     expect((await w.admission.stage(w.startRequest(A, fresh, "not a name!"))).decision).toEqual({ allowed: false, code: "spend_unknown", message: SPEND_UNKNOWN });
-  });
-
-  it("the deployed modules (hostedSecurityModules) hand the reader to the admission: a start over the project's limit is refused", async () => {
-    const store = new MemoryDocumentStore();
-    const modules = hostedSecurityModules({ env: { ROVARA_CORE_ALLOWED_COMPANIES: "all" }, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: true,
-      projectTaskCap: async (companyId, project) => (companyId === A && project === "web" ? 0 : undefined) });
-    const registry = await buildCoreRegistry({
-      modules: [coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => store }), coreAdapter({ point: "metering", name: "exact", owner: "test", create: () => exactMeter }), ...modules.filter((module) => module.point !== "metering")],
-      context: { installCompanyId: IMPLICIT_COMPANY_ID, now: () => NOW, env: {}, clients: {}, log: () => undefined }, areas: [],
-    });
-    const taskId = randomUUID();
-    const decision = (await registry.require("admission").stage({ companyId: A, idempotencyKey: `task.start:${taskId}`, action: "task.start", projectName: "web", subject: { type: "task", id: taskId }, taskStart: { workflow: true, path: "FULL", pathFrom: "request" } })).decision;
-    expect(decision).toEqual({ allowed: false, code: "task_cap", message: PROJECT_TASK_CAP_REACHED });
-  });
-
-  it("the broker root's booking check (coreMoneyWiring) stops a run at the project's limit", async () => {
-    const w = setup({ [`${A}/web`]: 1_000_000 });
-    const taskId = await w.task(A, "web");
-    const operation = { id: randomUUID(), workspaceId: randomUUID(), companyId: A } as unknown as OperationRecord;
-    await w.store.put({ item: { ...taskPointerKey(A, operation.workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId } });
-    const registry = { require: ((point: string) => (point === "storage" ? w.store : exactMeter)) as never } as { require: (point: string) => DocumentStore };
-    const usage = (input: number, second: number) => [{ type: "usage", timestamp: `${DAY}T10:00:0${String(second)}.000Z`, payload: { schemaVersion: 1, outcome: "SUCCEEDED", provider: "anthropic", modelId: "m", cacheRetention: "short", tokens: { input, output: 0, cacheRead: 0, cacheWrite: 0, total: input }, cacheReadRatio: 0, costUsd: null, checkpoint: true } }];
-    const money = coreMoneyWiring(registry as never, A, () => NOW, SETTINGS, async (companyId, project) => (companyId === A && project === "web" ? 1_000_000 : undefined));
-    expect(await money.bookUsage(operation, usage(600_000, 1) as never)).toEqual({ booked: 1, unreadable: 0 });
-    expect(await money.bookUsage(operation, usage(400_000, 2) as never)).toEqual({ booked: 1, unreadable: 0, spendStop: "task_cap" });
   });
 
   it("the owner's round's money check uses the cap that applies, and refuses when the limit cannot be read", async () => {

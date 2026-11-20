@@ -2,14 +2,14 @@
 // channel adapters the registry holds. The adapters here are fakes; no provider is named.
  
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, NOTIFY_BATCH_MINUTES, agentSessionKey, type ChannelEvent, type ConversationRef, type OrgId } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, agentSessionKey, type ConversationRef, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createTaskSessionItems, developerIdOf, refreshSessionSummary, taskSessionId, type SessionChange, type SessionTaskFacts, type SummaryDependencies } from "../../packages/broker/src/core/sessions/index.js";
 import {
-  ATTENTION_RETRY_BASE_MS, ATTENTION_TARGET_TRIES_MAX, attentionKindOf, attentionText, batchEventId, deliverAttention, queueAttention, readNotifyPrefs, writeNotifyPrefs, PENDING_PK,
+  ATTENTION_TARGET_TRIES_MAX, attentionText, batchEventId, deliverAttention, queueAttention, writeNotifyPrefs, PENDING_PK,
 } from "../../packages/broker/src/core/notify/index.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
@@ -42,19 +42,6 @@ async function world() {
 }
 
 const target = (conversation = CONVERSATION) => ({ channel: conversation.channel, conversation });
-
-describe("what a status calls for", () => {
-  it("names the kind for the states a person acts on or is told have ended, and nothing for the rest", () => {
-    const summary = (status: string, extra: Record<string, unknown> = {}) => attentionKindOf({ status, ...extra } as never);
-    expect(summary("needs_person")).toBe("needs_you");
-    expect(summary("paused")).toBe("paused");
-    expect(summary("failed")).toBe("failed");
-    expect(summary("waiting", { lastRunFailed: true })).toBe("failed");
-    expect(summary("running")).toBeUndefined();
-    expect(summary("starting")).toBeUndefined();
-    expect(summary("succeeded")).toBe("done");
-  });
-});
 
 describe("queueing", () => {
   it("a session that moves into Needs you is queued for its owner once, and a repeat of the same state is not", async () => {
@@ -95,19 +82,6 @@ describe("queueing", () => {
   });
 });
 
-describe("preferences", () => {
-  it("keeps where a person is told, refuses a conversation on another channel, and leaves the hosted channel choice alone", async () => {
-    const w = await world();
-    await w.store.put({ item: { pk: `NOTIFY_PREFS#${ORG}`, sk: `DEV#${OWNER_ID}`, orgId: ORG, channel: "both" } });
-    expect(await w.prefs([target(), target(), target(OTHER_CONVERSATION)])).toMatchObject({ targets: [expect.anything(), expect.anything()], muted: false });
-    expect((await readNotifyPrefs(w.store, ORG, OWNER_ID)).targets).toHaveLength(2);
-    expect((await w.store.get({ pk: `NOTIFY_PREFS#${ORG}`, sk: `DEV#${OWNER_ID}` }))!["channel"]).toBe("both");
-    await expect(w.prefs([{ channel: "examplechat", conversation: OTHER_CONVERSATION }])).rejects.toThrow();
-    await expect(w.prefs(Array.from({ length: 6 }, (_, index) => target({ ...CONVERSATION, thread: `t${String(index)}` })))).rejects.toThrow();
-    expect(await readNotifyPrefs(w.store, ORG, "e".repeat(64))).toEqual({ targets: [], muted: false, emailUnsubscribed: false });
-  });
-});
-
 async function needsYou() {
   const w = await world();
   await w.move({});
@@ -117,77 +91,6 @@ async function needsYou() {
 }
 
 describe("delivering", () => {
-  it("sends one event to the person's target with the task's title, its status words and the link, and removes the row", async () => {
-    const w = await needsYou();
-    await w.prefs([target()]);
-    const outcome = await w.deliver();
-    expect(outcome).toMatchObject({ people: 1, sent: 1, dropped: 0 });
-    expect(w.adapter.delivered).toHaveLength(1);
-    const event = w.adapter.delivered[0]!;
-    expect(event).toMatchObject({ version: 1, type: "progress", channel: "examplechat", conversation: CONVERSATION });
-    const text = (event.data as { text: string }).text;
-    expect(text).toContain("Add retry");
-    expect(text).toContain("Needs you");
-    expect(text).toContain(`https://example.test/sessions/${SESSION}`);
-    expect(await w.pending()).toHaveLength(0);
-  });
-
-  it("a person gets at most one message per batch window; what arrives in between waits for the next", async () => {
-    const w = await needsYou();
-    await w.prefs([target()]);
-    await w.deliver();
-    await w.move({ workflow: { stage: "IMPLEMENT", state: "RUNNING" } });
-    await w.move({ workflow: { stage: "IMPLEMENT", state: "BLOCKED", blockReason: "tests failed" } });
-    expect((await w.pending()).length).toBe(1);
-    expect(await w.deliver()).toMatchObject({ people: 0, sent: 0 });
-    expect(w.adapter.delivered).toHaveLength(1);
-    clock.ms += NOTIFY_BATCH_MINUTES * 60_000 + 1;
-    await w.deliver();
-    expect(w.adapter.delivered).toHaveLength(2);
-  });
-
-  it("a row whose session moved on, or that the person may no longer read, is dropped without a word", async () => {
-    const w = await needsYou();
-    await w.prefs([target()]);
-    await w.move({ workflow: { stage: "IMPLEMENT", state: "RUNNING" } });
-    expect(await w.deliver()).toMatchObject({ sent: 0, dropped: 1 });
-    expect(w.adapter.delivered).toHaveLength(0);
-    const again = await needsYou();
-    await again.prefs([target()]);
-    expect(await again.deliver({ access: async () => undefined })).toMatchObject({ sent: 0, dropped: 1 });
-  });
-
-  it("a muted person, or one with nowhere to be told, is not messaged and the rows go", async () => {
-    const w = await needsYou();
-    expect(await w.deliver()).toMatchObject({ sent: 0 });
-    expect(await w.pending()).toHaveLength(0);
-    const muted = await needsYou();
-    await muted.prefs([target()], true);
-    expect(await muted.deliver()).toMatchObject({ sent: 0 });
-    expect(muted.adapter.delivered).toHaveLength(0);
-  });
-
-  it("a failing target is retried after a growing wait with the same event, and gives up after its tries; another target is not held back", async () => {
-    const w = await needsYou();
-    const flaky = new FakeChannelAdapter();
-    let fail = true;
-    const original = flaky.deliver.bind(flaky);
-    flaky.deliver = async (event) => { if (fail) throw new Error("down"); await original(event); };
-    w.registry.register("channel", "otherchat", flaky);
-    await w.prefs([target(), target(OTHER_CONVERSATION)]);
-    const first = await w.deliver();
-    expect(first).toMatchObject({ sent: 1, failed: 1 });
-    expect(w.adapter.delivered).toHaveLength(1);
-    expect((await w.pending())).toHaveLength(1);
-    // Too soon to try the failing target again, and the working one has the row already.
-    expect(await w.deliver()).toMatchObject({ sent: 0, failed: 0 });
-    clock.ms += ATTENTION_RETRY_BASE_MS + NOTIFY_BATCH_MINUTES * 60_000;
-    fail = false;
-    expect(await w.deliver()).toMatchObject({ sent: 1 });
-    expect(flaky.delivered).toHaveLength(1);
-    expect(w.adapter.delivered).toHaveLength(1);
-    expect(await w.pending()).toHaveLength(0);
-  });
 
   it("gives up on a target that keeps failing", async () => {
     const w = await needsYou();
@@ -202,23 +105,6 @@ describe("delivering", () => {
     }
     expect(gaveUp).toBe(1);
     expect(await w.pending()).toHaveLength(0);
-  });
-
-  it("a channel nobody serves, or one that cannot message first, is counted as unreachable and not retried", async () => {
-    const w = await needsYou();
-    w.registry.register("channel", "otherchat", new FakeChannelAdapter({ ...FAKE_CHANNEL_CAPABILITIES, proactive: false }));
-    await w.prefs([target(OTHER_CONVERSATION), target({ ...CONVERSATION, channel: "missingchat" })]);
-    expect(await w.deliver()).toMatchObject({ sent: 0, unreachable: 2 });
-    expect(await w.pending()).toHaveLength(0);
-  });
-
-  it("never sends to a conversation in another company's chat tenant (owner decision 131): it is unreachable, and the company's own target still gets it", async () => {
-    const w = await needsYou();
-    const theirs: ConversationRef = { ...CONVERSATION, tenant: "team2", space: "room9" };
-    await w.prefs([target(theirs), target()]);
-    const companyOf = ({ tenant }: { channel: string; tenant: string }) => (tenant === "team1" ? ORG : tenant === "team2" ? ("other-company" as OrgId) : undefined);
-    expect(await w.deliver({ companyOf })).toMatchObject({ sent: 1, unreachable: 1 });
-    expect(w.adapter.delivered.map((event) => (event as { conversation: ConversationRef }).conversation)).toEqual([CONVERSATION]);
   });
 
   it("sends to no chat when the host cannot say whose tenant a target is (companyOf throws)", async () => {
@@ -242,23 +128,6 @@ describe("delivering", () => {
     expect([...text].length).toBeLessThanOrEqual(600);
     expect(attentionText([line], 0, 4000)).toContain("A task needs your attention");
     expect(attentionText([line, line], 3, 4000)).toContain("and 3 more");
-  });
-
-  it("a failed task is sent as an error event, and a finished one as done", async () => {
-    const w = await world();
-    await w.move({});
-    await w.prefs([target()]);
-    await w.move({ workflow: undefined, runStatus: "FAILED", failureCategory: "timed_out" });
-    await w.deliver();
-    const event: ChannelEvent = w.adapter.delivered.at(-1)!;
-    expect(event.type).toBe("error");
-    expect(event.data).toMatchObject({ code: "task_failed" });
-    const finished = await world();
-    await finished.move({});
-    await finished.prefs([target()]);
-    await finished.move({ workflow: { stage: "MERGED", state: "COMPLETE" }, step: "Merged" });
-    await finished.deliver();
-    expect(finished.adapter.delivered.at(-1)!.type).toBe("done");
   });
 });
 

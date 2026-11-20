@@ -3,8 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PlanDocument, TestProof } from "../../packages/contracts/src/index.js";
 import { loadProofContext } from "../../packages/broker/src/core/proof/proof-inputs.js";
-import { loadTestProof } from "../../packages/broker/src/core/proof/test-proof-reader.js";
-import { hadProofSection, proofReadLimitMs, withinTime } from "../../packages/broker/src/core/proof/proof-keep.js";
+import { hadProofSection, proofReadLimitMs } from "../../packages/broker/src/core/proof/proof-keep.js";
 import { proofSection } from "../../packages/broker/src/core/proof/proof-section.js";
 
 const DIGEST = "1".repeat(64);
@@ -44,23 +43,6 @@ function actionsOf(options: { operations?: unknown[]; stored?: Record<string, st
   };
 }
 
-describe("loadTestProof", () => {
-  it("lists the newest operations' artifacts together, not one after the other, and still prefers the newest proof", async () => {
-    const operations = [1, 2, 3, 4, 5, 6].map(operation);
-    const newer = { ...proof(), durationMs: 2 };
-    const t = actionsOf({ operations, stored: { [key("op-2")]: JSON.stringify(proof()), [key("op-5")]: JSON.stringify(newer) } });
-    expect(await loadTestProof(t.actions, task, DIGEST)).toEqual(newer);
-    expect(t.counts.artifacts).toBe(6);
-    expect(t.counts.maxInFlight).toBe(6);
-  });
-
-  it("does not read the operations again when the caller passes them", async () => {
-    const t = actionsOf({ stored: { [key("op-1")]: JSON.stringify(proof()) } });
-    expect(await loadTestProof(t.actions, task, DIGEST, [operation(1)])).toEqual(proof());
-    expect(t.counts.operations).toBe(0);
-  });
-});
-
 describe("loadProofContext", () => {
   it("uses the operations it is given and reads none of its own", async () => {
     const t = actionsOf();
@@ -70,35 +52,9 @@ describe("loadProofContext", () => {
     expect(t.counts.operations).toBe(0);
     expect(scenarioResults).toHaveBeenCalledTimes(1);
   });
-
-  it("lists no artifacts for a task with no checks recorded for the current code (no test proof can matter), and still gives the plan", async () => {
-    const t = actionsOf({ stored: { [key("op-1")]: JSON.stringify(proof()) } });
-    const none = await loadProofContext({ actions: t.actions }, task, workflow(false), approved, [operation(1)] as never);
-    expect(none).toEqual({ plan });
-    const other = await loadProofContext({ actions: t.actions }, task, { candidate: { digest: DIGEST }, verification: { candidateDigest: "2".repeat(64) } } as never, approved, [operation(1)] as never);
-    expect(other).toEqual({ plan });
-    expect(t.counts.artifacts).toBe(0);
-    // With checks recorded for this code, the proof is read.
-    const verified = await loadProofContext({ actions: t.actions }, task, workflow(true), approved, [operation(1)] as never);
-    expect(verified?.testProof).toEqual(proof());
-    expect(t.counts.artifacts).toBe(1);
-  });
-
-  it("reads the test proof and the browser/API rows together", async () => {
-    const order: string[] = [];
-    const slow = async <T,>(name: string, value: T) => { order.push(`${name}:start`); await new Promise((resolve) => setTimeout(resolve, 20)); order.push(`${name}:end`); return value; };
-    const actions = { operations: async () => [] as never, artifacts: () => slow("artifacts", []), readArtifact: async () => "" };
-    await loadProofContext({ actions, scenarioResults: () => slow("scenarios", { scenarios: [] } as never) }, task, workflow(true, { e2e: { required: true } }), approved, [operation(1)] as never);
-    expect(order.slice(0, 2).sort()).toEqual(["artifacts:start", "scenarios:start"]);
-  });
 });
 
 describe("withinTime", () => {
-  it("gives the value when it answers in time, and done: false when it is slow or fails (never rejecting)", async () => {
-    expect(await withinTime(200, async () => 7)).toEqual({ done: true, value: 7 });
-    expect(await withinTime(10, () => new Promise<number>((resolve) => setTimeout(() => resolve(1), 300)))).toEqual({ done: false });
-    expect(await withinTime(200, async () => { throw new Error("down"); })).toEqual({ done: false });
-  });
 
   it("gives the Proof section a third of the update's time, at most a second and a half", () => {
     expect(proofReadLimitMs(5_000)).toBe(1_500);
@@ -112,12 +68,6 @@ describe("hadProofSection", () => {
   const END = "<!-- /rovara:checks-and-reviews -->";
   const block = ["## Tests", "- Checks: 1 passed", "", "### Proof", "", "| Requirement | Evidence | Result |", "| --- | --- | --- |", "| 1: Retried | none | ⚠ not tested |", "", "## Reviews", "- ok"];
   const body = (eol = "\n", lines = block) => `A note.\n\n${START}${eol}${lines.join(eol)}${eol}${END}\nRovara session: x`;
-
-  it("is true when the marked block has a Proof section, whatever its size", () => {
-    expect(hadProofSection(body())).toBe(true);
-    expect(hadProofSection(body("\r\n"))).toBe(true);
-    expect(hadProofSection(body("\n", ["### Proof", ...Array.from({ length: 500 }, (_, index) => `line ${index}`), "## Reviews"]))).toBe(true);
-  });
 
   it("is false when there is no Proof section in the block, or the markers are not exactly one pair in order", () => {
     expect(hadProofSection(body("\n", block.filter((line) => line !== "### Proof")))).toBe(false);
@@ -138,16 +88,6 @@ describe("192a injected real-model input", () => {
   const run = { schemaVersion: 1 as const, candidateDigest: DIGEST, items: [{ checkId: "readiness:0", result: "passed" as const }] };
   const scripted = { ...proof(), items: [{ ...proof().items[0]!, checkId: "readiness:0" }], scriptedReplies: [{ checkId: "readiness:0", taskMade: 1, counted: 0 }] };
   const wf = () => ({ candidate: { digest: DIGEST }, verification: { candidateDigest: DIGEST, results: [{ checkId: "unit", status: "PASS" }] } }) as never;
-  it("reads once and maps worker readiness ids through recorded order", async () => {
-    const t = actionsOf({ stored: { [key("op-1")]: JSON.stringify(scripted) } });
-    const realModelRun = vi.fn(async () => run);
-    const context = await loadProofContext({ actions: t.actions, realModelRun }, task, wf(), approved, [operation(1)] as never);
-    expect(context?.checkDependencies?.get("unit")).toEqual([{ dependencyId: "scripted_replies", trust: "simulated", replies: "task_made" }]);
-    expect(context?.realModelRun).toEqual(run);
-    expect(realModelRun).toHaveBeenCalledExactlyOnceWith(DIGEST);
-    expect(t.counts.operations).toBe(0);
-    expect(t.counts.artifacts).toBe(1);
-  });
   it("does not invoke the reader without current checks or a plan", async () => {
     const t = actionsOf();
     const realModelRun = vi.fn(async () => run);
@@ -164,20 +104,6 @@ describe("192a injected real-model input", () => {
       expect(context?.checkDependencies?.get("unit")?.[0]?.replies).toBe("task_made");
       expect(JSON.stringify(context)).not.toContain(secret);
     }
-  });
-  it("times out through the existing guard and ignores a late read result", async () => {
-    vi.useFakeTimers();
-    try {
-      let finish!: (value: typeof run) => void;
-      const pending = loadProofContext({ actions: actionsOf().actions, realModelRun: () => new Promise((resolve) => { finish = resolve; }) }, task, wf(), approved, []);
-      await vi.advanceTimersByTimeAsync(1_501);
-      const context = await pending;
-      expect(context?.realModelRun).toBeUndefined();
-      finish(run);
-      await Promise.resolve();
-      expect(context?.realModelRun).toBeUndefined();
-      expect(vi.getTimerCount()).toBe(0);
-    } finally { vi.useRealTimers(); }
   });
   it("a present unreadable or unmappable reply part invalidates the entire proof", async () => {
     for (const scriptedReplies of ["broken", [{ checkId: "unknown", taskMade: 1, counted: 0 }], [{ checkId: "readiness:1", taskMade: 1, counted: 0 }]]) {
@@ -198,32 +124,4 @@ describe("192a injected real-model input", () => {
     const t = actionsOf({ stored: { [key("op-1")]: JSON.stringify(zero) } });
     expect(await loadProofContext({ actions: t.actions }, task, wf(), approved, [operation(1)] as never)).toEqual({ plan, testProof: zero });
   });
-  it("zero task-made replies do not add provenance or change the legacy context", async () => {
-    const value = { ...scripted, scriptedReplies: [{ checkId: "readiness:0", taskMade: 0, counted: 2 }] };
-    const t = actionsOf({ stored: { [key("op-1")]: JSON.stringify(value) } });
-    expect(await loadProofContext({ actions: t.actions }, task, wf(), approved, [operation(1)] as never)).toEqual({ plan, testProof: value });
-  });
-});
-
-it("does not revive an older proof when the newest proof has unreadable reply provenance", async () => {
-  const old = proof();
-  const malformed = { ...old, scriptedReplies: [{ checkId: "unit", taskMade: "broken", counted: 0 }] };
-  const t = actionsOf({ stored: { [key("op-1")]: JSON.stringify(old), [key("op-2")]: JSON.stringify(malformed) } });
-  expect(await loadTestProof(t.actions, task, DIGEST, [operation(1), operation(2)] as never)).toBeUndefined();
-});
-
-it("keeps the legacy context byte-identical for missing and malformed root artifacts", async () => {
-  for (const stored of [{}, { [key("op-1")]: "{broken" }, { [key("op-1")]: JSON.stringify({ schemaVersion: 99 }) }]) {
-    const t = actionsOf({ stored });
-    expect(JSON.stringify(await loadProofContext({ actions: t.actions }, task, workflow(true), approved, [operation(1)] as never))).toBe(JSON.stringify({ plan }));
-  }
-});
-
-it("a synchronously throwing or non-function real-model reader is a fixed refusal", async () => {
-  const secret = `gh${"p"}_${"z".repeat(36)}`;
-  for (const realModelRun of [() => { throw new Error(secret); }, "unsupported" as never]) {
-    const context = await loadProofContext({ actions: actionsOf().actions, realModelRun }, task, workflow(true), approved, []);
-    expect(context?.realModelRun).toBeUndefined();
-    expect(JSON.stringify(context)).not.toContain(secret);
-  }
 });

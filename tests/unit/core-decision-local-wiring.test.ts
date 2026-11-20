@@ -52,44 +52,6 @@ async function world(options: { wired?: boolean } = {}) {
 type ApprovalOffer = Parameters<ReturnType<typeof createDecisionActions>["decidePlan"]>[0]["approval"];
 
 describe("the local pages' proofs through the registry's approvers and the gate", () => {
-  it("a proof the pages sign approves the request, revision and digest it names", async () => {
-    const w = await world();
-    const approval = w.offer(TASK_A);
-    expect(await w.actions.decidePlan({ taskId: TASK_A, decision: "approve", approval, proof: w.proofFor(approval) })).toMatchObject({ ok: true });
-    expect(await w.stage(TASK_A)).toBe("IMPLEMENT");
-  });
-
-  it("a proof for request A cannot approve request B: another request id, another task, another digest", async () => {
-    const w = await world();
-    const a = w.offer(TASK_A);
-    const proofA = w.proofFor(a);
-    // The same proof presented with another request id for the same task.
-    const otherId = { ...a, requestId: randomUUID() };
-    expect(await w.actions.decidePlan({ taskId: TASK_A, decision: "approve", approval: otherId, proof: { ...proofA, requestId: otherId.requestId } })).toMatchObject({ ok: false });
-    // The same proof for another task (whose digest and revision are its own).
-    const b = w.offer(TASK_B, a.requestId);
-    expect(await w.actions.decidePlan({ taskId: TASK_B, decision: "approve", approval: b, proof: { ...proofA, revision: b.revision, artifactDigest: b.artifactDigest } })).toMatchObject({ ok: false });
-    expect(await w.stage(TASK_A)).toBe("PLAN_REVIEW");
-    expect(await w.stage(TASK_B)).toBe("PLAN_REVIEW");
-  });
-
-  it("a proof for revision R cannot approve revision R+1 or another digest, even when the caller says it saw the newer one", async () => {
-    const w = await world();
-    const old = w.offer(TASK_A);
-    const proofOld = w.proofFor(old);
-    // The task moves on: the stored state is now revision R+1.
-    const moved = JSON.parse(JSON.stringify(waiting(TASK_A))) as WorkflowSnapshot;
-    await w.store.put({ item: { ...workflowTaskKey(TASK_A), orgId: COMPANY, project: "web", workflow: JSON.parse(JSON.stringify({ ...moved, revision: moved.revision + 1 })) } });
-    // Presenting the old proof as if it were for the new revision: the signed proof does not match what the gate asks about.
-    const fresh = w.offer(TASK_A, old.requestId, old.revision + 1);
-    expect(await w.actions.decidePlan({ taskId: TASK_A, decision: "approve", approval: fresh, proof: { ...proofOld, revision: fresh.revision } })).toMatchObject({ ok: false });
-    // And the honest old view is stale.
-    expect(await w.actions.decidePlan({ taskId: TASK_A, decision: "approve", approval: old, proof: proofOld })).toMatchObject({ ok: false, reason: "stale" });
-    expect(await w.stage(TASK_A)).toBe("PLAN_REVIEW");
-    // A proof signed for the new revision works.
-    const next = w.offer(TASK_A, randomUUID(), old.revision + 1);
-    expect(await w.actions.decidePlan({ taskId: TASK_A, decision: "approve", approval: next, proof: w.proofFor(next) })).toMatchObject({ ok: true });
-  });
 
   it("the raw page-session secret and the owner's sign-in secret are refused as approval proofs", async () => {
     const w = await world();

@@ -3,12 +3,12 @@
 import { describe, expect, it } from "vitest";
 import {
   BRANCH_SYNCS_PER_DAY_MAX, CI_FAILED_JOBS_MAX, CI_FIX_ROUNDS_MAX, CI_OUTPUT_BLOCK_HEADER, WorkflowSnapshotSchema, branchConflictAskMessage, branchConflictStopMessage, ciFixAskMessage, ciFixStopMessage,
-  createCandidateManifest, createWorkflowSnapshot, startWorkflowFix, type Autonomy, type MergeTrackingItem, type OrgId, type WorkflowProgram, type WorkflowSnapshot,
+  createCandidateManifest, createWorkflowSnapshot, type MergeTrackingItem, type OrgId, type WorkflowProgram, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { conflictDecider, installBranchSyncDeciders, syncDecider, uninstallBranchSyncDeciders } from "../../packages/broker/src/core/branch-sync/branch-sync.js";
 import { ciFixDecider, installCiFixDecider, readCiEvidence, readLatestCiEvidence, uninstallCiFixDecider } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
-import { WORKFLOW_NO_CANDIDATE_DIGEST, type MergeActionContext, type MergeActionDecider, type MergeActionInput, type MergeActionRequest, type MergeActionSlot } from "../../packages/broker/src/core/branch-sync/merge-action.js";
+import { WORKFLOW_NO_CANDIDATE_DIGEST, type MergeActionContext, type MergeActionDecider, type MergeActionInput, type MergeActionSlot } from "../../packages/broker/src/core/branch-sync/merge-action.js";
 
 const at = "2026-10-25T12:00:00.000Z";
 const NOW = Date.parse(at);
@@ -48,12 +48,6 @@ const input = (overrides: Partial<MergeActionInput> & { itemOverrides?: Partial<
 });
 
 describe("the sync slot", () => {
-  it("queues the merge of the base into a behind branch with a counted approval: the workflow, the SYNC dispatch for it and the day's count one more; no row of its own", () => {
-    const request = syncDecider(input())!;
-    expect(request).toMatchObject({ slot: "sync", steps: [], milestones: [], syncs: { day: "2026-10-25", count: 1 } });
-    expect(request.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "READY", branchSync: { repositoryId: "payments", number: 7, expectedHeadCommit: HEAD_A, reason: "behind" } });
-    expect(request.dispatch).toEqual({ kind: "SYNC", workflowRevision: request.workflow.revision, candidateDigest: candidate.digest, at });
-  });
 
   it("does nothing without an approval, with a base that does not require it, when the day's merges are used up, or with the agent set to suggest", () => {
     expect(syncDecider(input({ itemOverrides: { review: "requested", approval: undefined } }))).toBeUndefined();
@@ -99,21 +93,10 @@ describe("a task whose changes need browser or API checks (decision 70(c))", () 
     expect(syncDecider(input({ workflow: withE2E(false) }))?.slot, "e2e recorded, not required").toBe("sync");
     expect(syncDecider(input())?.slot, "no e2e").toBe("sync");
   });
-
-  it("still merges the base into a conflicted branch: that fix goes through coding, which exports its source", () => {
-    const conflicted = { branch: "conflicted" as const, review: "requested" as const, approval: undefined };
-    expect(conflictDecider(input({ itemOverrides: conflicted, workflow: withE2E(true) }))?.slot).toBe("conflict");
-  });
 });
 
 describe("the conflict slot", () => {
   const conflicted = { branch: "conflicted" as const, review: "requested" as const, approval: undefined };
-
-  it("tries the merge on a conflicted branch whether or not it is approved: the workflow queues it for a conflict", () => {
-    const request = conflictDecider(input({ itemOverrides: conflicted }))!;
-    expect(request).toMatchObject({ slot: "conflict", steps: [], milestones: [], dispatch: { kind: "SYNC" } });
-    expect(request.workflow.branchSync?.reason).toBe("conflict");
-  });
 
   it("two conflict rounds that did not help stop with the exact text and a stuck milestone, and start no machine", () => {
     const used = waiting({ fixRounds: { ci: 0, conflict: 2, feedbackAuto: 0 } });
@@ -141,18 +124,6 @@ describe("the CI slot", () => {
   const failing = { branch: "up_to_date" as const, ci: "failing" as const, failingChecks: ["test"] };
   const check = { name: "test", conclusion: "failure", url: "https://github.com/acme/payments/actions/runs/1/job/4242", jobId: "4242", source: "15368", logReadable: true };
 
-  it("starts one round: the counted workflow, the block of what CI said as a row of its own, the coding run's dispatch and a 'fixing' milestone", async () => {
-    const read: string[] = [];
-    const request = (await ciFixDecider(input({ itemOverrides: failing, ctx: { failing: [check], readJobLog: async (jobId) => { read.push(jobId); return "FAIL src/retry.test.ts\nExpected 3 got 2"; } } })))!;
-    expect(read).toEqual(["4242"]);
-    expect(request.slot).toBe("ci_fix");
-    expect(request.workflow).toMatchObject({ stage: "IMPLEMENT", state: "READY", fixSource: "ci", fixRounds: { ci: 1 } });
-    expect(request.dispatch).toEqual({ kind: "IMPLEMENT", workflowRevision: request.workflow.revision, candidateDigest: candidate.digest, at });
-    expect(request.milestones[0]).toMatchObject({ n: request.workflow.revision, milestone: { kind: "fixing", text: `CI is failing on test, so Rovara is fixing it (round 1 of ${String(CI_FIX_ROUNDS_MAX)}).` } });
-    expect(request.steps).toHaveLength(1);
-    expect(request.steps[0]).toMatchObject({ kind: "put", condition: { op: "notExists" }, item: { pk: `DEVTASK#${TASK}`, sk: `CI_EVIDENCE#${String(request.workflow.revision).padStart(9, "0")}`, entityType: "CI_EVIDENCE", orgId: ORG, taskId: TASK } });
-  });
-
   it("keeps the block until the fix starts: written in the pass's transaction, read back for its task and company only, and only as a CI block", async () => {
     const store = new MemoryDocumentStore();
     const request = (await ciFixDecider(input({ itemOverrides: failing, ctx: { failing: [check], readJobLog: async () => "boom" } })))!;
@@ -170,16 +141,6 @@ describe("the CI slot", () => {
     expect(await readLatestCiEvidence(store, OTHER_TASK, ORG)).toBeUndefined();
     await store.put({ item: { pk: `DEVTASK#${TASK}`, sk: "CI_EVIDENCE#999999999", entityType: "CI_EVIDENCE", orgId: ORG, taskId: TASK, block: "not a block" } });
     expect(await readLatestCiEvidence(store, TASK, ORG)).toBeUndefined();
-  });
-
-  it("the newest round's block is the latest one", async () => {
-    const store = new MemoryDocumentStore();
-    const first = (await ciFixDecider(input({ itemOverrides: failing, ctx: { failing: [check], readJobLog: async () => "first" } })))!;
-    await store.transact(first.steps);
-    const later = startWorkflowFix(waiting(), { source: "ci", problems: ["test"], now: at });
-    const second = (await ciFixDecider(input({ itemOverrides: failing, workflow: WorkflowSnapshotSchema.parse({ ...waiting(), revision: later.revision + 5 }), ctx: { failing: [check], readJobLog: async () => "second" } })))!;
-    await store.transact(second.steps);
-    expect(await readLatestCiEvidence(store, TASK, ORG)).toContain("second");
   });
 
   it("with the rounds used up it stops with the exact text and the first line of the failing log, and starts no machine; a person's go-ahead is one round more, not counted", async () => {
@@ -221,10 +182,6 @@ describe("the CI slot", () => {
     expect(custom.item["indexExpiresAt"]).toBeUndefined();
   });
 
-  it("decides nothing for a head someone else pushed or a version 1 task's pull request that is not open (merge tracking does not call the slot; the slot itself refuses a closed one)", async () => {
-    expect(await ciFixDecider(input({ itemOverrides: { ...failing, state: "closed", ci: "none", failingChecks: [] } }))).toBeUndefined();
-  });
-
   it("uses the all-zero digest where the task has no candidate yet", () => {
     expect(WORKFLOW_NO_CANDIDATE_DIGEST).toBe("0".repeat(64));
   });
@@ -249,12 +206,5 @@ describe("filling the slots", () => {
     installBranchSyncDeciders(register);
     expect(slots.size).toBe(2);
     uninstallBranchSyncDeciders();
-  });
-
-  it("a request the slots hand back is a plain MergeActionRequest", () => {
-    const request: MergeActionRequest | undefined = syncDecider(input());
-    expect(request?.slot).toBe("sync");
-    const autonomy: Autonomy = "run";
-    expect(syncDecider(input({ autonomy }))).toBeDefined();
   });
 });

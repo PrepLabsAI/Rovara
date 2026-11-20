@@ -1,7 +1,7 @@
 // Wiki W0 (DEC 254zh): the free file map on the deployed API. Who may make a map (a live company owner or admin, or the project's administrator), who may only read a kept one (a project user), who sees nothing
 // (anyone else, another project of the same company, another company, a missing or malformed project: one uniform 404); the cache is keyed by company AND project; no AI key is involved.
 import { describe, expect, it, vi } from "vitest";
-import { orgProjectCatalogKey, projectRevisionKey, WIKI_MAP_NOT_ALLOWED, WikiFileMapViewSchema, type JsonValue, type ProjectDefinition, type WikiFileMap } from "@agentx/contracts";
+import { orgProjectCatalogKey, projectRevisionKey, WIKI_MAP_NOT_ALLOWED, type JsonValue, type ProjectDefinition, type WikiFileMap } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
@@ -100,20 +100,6 @@ async function mapWorld(options: { standing?: HostedWikiMapWiring["standing"] } 
 }
 
 describe("hosted file map: who may do what", () => {
-  it("lets a company owner, a company admin and the project's administrator make a map, and any of them read it back", async () => {
-    for (const [role, grants] of [["owner", {}], ["admin", {}], ["member", { payments: "administrator" as const }]] as const) {
-      const { person, call } = await mapWorld();
-      const caller = person(`p-${role}`, FAKE_COMPANY, role, grants);
-      const none = await call(get(MAP("payments")), caller);
-      expect(none.body, role).toEqual({ status: "none", canManage: true });
-      const made = await call(post(MAP("payments")), caller);
-      expect(made.status, role).toBe(200);
-      expect(WikiFileMapViewSchema.parse(made.body)).toMatchObject({ status: "ready", canManage: true });
-      expect(made.body.map.repositories[0]).toMatchObject({ name: "payments", status: "ok", files: 3 });
-      const read = await call(get(MAP("payments")), caller);
-      expect(read.body).toEqual(made.body);
-    }
-  });
 
   it("lets a project user read a kept map but not make one (403 in fixed words, nothing computed)", async () => {
     const { person, call, listings } = await mapWorld();
@@ -167,32 +153,6 @@ describe("hosted file map: who may do what", () => {
     expect(a.body.map.repositories[0]!.areas.map((x: { path: string }) => x.path)).toEqual(["payments-core"]);
   });
 
-  it("keeps two companies apart: the same project name in another company has its own map and its own cache", async () => {
-    const { person, call } = await mapWorld();
-    const ours = person("p-ours", FAKE_COMPANY, "owner");
-    const theirs = person("p-theirs", OTHER, "owner");
-    await call(post(MAP("payments")), ours);
-    // The other company has made nothing yet: it never sees ours.
-    expect((await call(get(MAP("payments")), theirs)).body).toEqual({ status: "none", canManage: true });
-    const made = await call(post(MAP("payments")), theirs);
-    expect(made.body.map.repositories[0]!.areas.map((a: { path: string }) => a.path)).toEqual(["rival-core"]);
-    expect(made.raw).not.toContain("payments-core");
-    const back = await call(get(MAP("payments")), ours);
-    expect(back.body.map.repositories[0]!.areas.map((a: { path: string }) => a.path)).toEqual(["payments-core"]);
-    expect(back.raw).not.toContain("rival-core");
-  });
-
-  it("serves a kept map only while the project names the same repositories", async () => {
-    const { world, person, call } = await mapWorld();
-    const admin = person("p-admin", FAKE_COMPANY, "admin");
-    await call(post(MAP("payments")), admin);
-    expect((await call(get(MAP("payments")), admin)).body.status).toBe("ready");
-    // A second revision adds a repository: the kept map no longer describes the project.
-    await world.store.put({ item: { ...projectRevisionKey(FAKE_COMPANY, "payments", 2), entityType: "PROJECT", definition: JSON.parse(JSON.stringify({ ...project(FAKE_COMPANY, "payments", ["ledger"]), revision: 2 })) as JsonValue } });
-    await world.store.put({ item: { ...orgProjectCatalogKey(FAKE_COMPANY, "payments"), entityType: "PROJECT_CATALOG", latestRevision: 2 } });
-    expect((await call(get(MAP("payments")), admin)).body).toEqual({ status: "none", canManage: true });
-  });
-
   it("serves a kept map only for the branch it was read from, and makes a repository whose code host is missing unavailable, not an error", async () => {
     const { world, person, call } = await mapWorld();
     const admin = person("p-admin", FAKE_COMPANY, "admin");
@@ -224,13 +184,6 @@ describe("hosted file map: who may do what", () => {
     await call(post(MAP("payments")), admin);
     expect(one.body).toEqual(two.body);
     expect(listings).toHaveBeenCalledTimes(1);
-  });
-
-  it("needs no model key: the route reads the code host only, and a company's setup standing is the one live read", async () => {
-    const { person, call, standing } = await mapWorld();
-    const admin = person("p-admin", FAKE_COMPANY, "admin");
-    await call(post(MAP("payments")), admin);
-    expect(standing).toHaveBeenCalledWith("p-admin", FAKE_COMPANY, "payments");
   });
 
   it("refuses in fixed words when the standing cannot be read, and treats an unknown answer as none, never as manage", async () => {

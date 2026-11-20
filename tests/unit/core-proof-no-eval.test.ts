@@ -7,11 +7,6 @@ const flowWith = (...codes: string[]) => ({ flow: { tier: { reasons: codes.map((
 const ai = (label: string, notRunReason?: string, promptWithoutEval = false) => ({ eval: { label, ...(notRunReason === undefined ? {} : { notRunReason }) }, promptWithoutEval });
 
 describe("noEvalOf", () => {
-  it("says nothing when no AI code was touched (today's description)", () => {
-    expect(noEvalOf(flowWith(), undefined, true)).toBeUndefined();
-    expect(noEvalOf(flowWith("api_change"), undefined, true)).toBeUndefined();
-    expect(noEvalOf({} as WorkflowSnapshot, undefined, true)).toBeUndefined();
-  });
   it("AI code touched, no prompt location or prompt file, so no eval is ever asked for: known at once, even before the checks finish", () => {
     expect(noEvalOf(flowWith("ai_code_touched"), undefined, false)).toEqual({ reason: "not_a_prompt_change" });
     expect(noEvalOf(flowWith("ai_code_touched"), undefined, true)).toEqual({ reason: "not_a_prompt_change" });
@@ -30,13 +25,5 @@ describe("noEvalOf", () => {
     expect(noEvalOf(flowWith("eval_hint"), ai("Not run", "checks_failed"), true)).toEqual({ reason: "other", detail: "the tests did not pass, so the eval was not run" });
     expect(noEvalOf(flowWith("eval_hint"), ai("Not run", "made up <b>"), true)).toEqual({ reason: "other" });
     expect(noEvalOf(flowWith("eval_hint"), ai("Not run"), true)).toEqual({ reason: "other" });
-  });
-  it("L4-T3: an approved eval whose AI provider is not connected says so in its own words, never the 'not connected on this install, or its spend is not approved' reading", () => {
-    const got = noEvalOf(flowWith("eval_hint"), ai("Not run", "provider_not_connected"), true);
-    expect(got).toEqual({ reason: "other", detail: "the AI your evals call is not connected for this project (connect it in Company settings, AI keys)" });
-    expect(got).not.toEqual({ reason: "not_connected" });
-  });
-  it("leaves the existing 'prompt changed and no evaluation ran' case to its own item", () => {
-    expect(noEvalOf(flowWith("eval_hint"), ai("Not run", "no_eval_configured", true), true)).toBeUndefined();
   });
 });

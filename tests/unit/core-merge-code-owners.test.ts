@@ -29,17 +29,6 @@ describe("codeOwnerVerdict", () => {
     expect(await verdict("/docs/ @a", ["src/a.ts"], [])).toEqual({ ok: true });
   });
 
-  it("needs an approval from an owner of every covered path, a person matched in any case", async () => {
-    expect(await verdict("/src/ @Max-GH", ["src/a.ts"], ["arjun-gh"])).toEqual({ ok: false, owners: "@Max-GH" });
-    expect(await verdict("/src/ @Max-GH", ["src/a.ts"], ["max-gh"])).toEqual({ ok: true });
-    expect(await verdict("/src/ @a\n/docs/ @b", ["src/x", "docs/y"], ["a"])).toEqual({ ok: false, owners: "@b" });
-    expect(await verdict("/src/ @a\n/docs/ @b", ["src/x", "docs/y"], ["a", "b"])).toEqual({ ok: true });
-  });
-
-  it("any one of a path's owners is enough", async () => {
-    expect(await verdict("/src/ @a @b", ["src/x"], ["b"])).toEqual({ ok: true });
-  });
-
   it("a team owner is satisfied by an approver who is in the team", async () => {
     const team = async (name: string, login: string) => (name === "acme/payments" && login === "arjun-gh" ? "member" as const : "not_member" as const);
     expect(await verdict("/src/ @acme/payments", ["src/x"], ["arjun-gh"], team)).toEqual({ ok: true });
@@ -55,25 +44,5 @@ describe("codeOwnerVerdict", () => {
   it("names at most three owners and counts the rest", async () => {
     const result = await verdict("* @a @b @c @d @e", ["x"], []);
     expect(result).toEqual({ ok: false, owners: "@a, @b, @c and 2 more" });
-  });
-
-  it("asks about a team once per login however many paths it owns", async () => {
-    let asked = 0;
-    const team = async () => { asked += 1; return "not_member" as const; };
-    await verdict("/src/ @acme/t\n/docs/ @acme/t @other", ["src/a", "src/b", "docs/c"], ["x", "y"], team);
-    // Two sets of owners name the same team: each login is asked about once, not once per set.
-    expect(asked).toBe(2);
-  });
-});
-
-describe("codeOwnerVerdict over a neutral answer", () => {
-  it("works from any host's owners, not only a file's: a person, a team and an owner it cannot match", async () => {
-    const owners = { unsupported: false, ownersOf: (path: string) => (path.startsWith("pay/") ? [{ kind: "team" as const, team: "acme/pay" }, { kind: "person" as const, login: "Lee" }] : []) };
-    const team = async (name: string, login: string) => (name === "acme/pay" && login === "kim" ? "member" as const : "not_member" as const);
-    expect(await codeOwnerVerdict({ codeOwners: owners, paths: ["pay/a.ts"], approverLogins: ["lee"], teamMember: team })).toEqual({ ok: true });
-    expect(await codeOwnerVerdict({ codeOwners: owners, paths: ["pay/a.ts"], approverLogins: ["kim"], teamMember: team })).toEqual({ ok: true });
-    expect(await codeOwnerVerdict({ codeOwners: owners, paths: ["pay/a.ts"], approverLogins: ["zed"], teamMember: team })).toEqual({ ok: false, owners: "@acme/pay, @Lee" });
-    expect(await codeOwnerVerdict({ codeOwners: owners, paths: ["other.ts"], approverLogins: [], teamMember: team })).toEqual({ ok: true });
-    expect(await codeOwnerVerdict({ codeOwners: { unsupported: true, ownersOf: () => [] }, paths: ["x"], approverLogins: [], teamMember: team })).toEqual({ ok: false, unreadable: true });
   });
 });

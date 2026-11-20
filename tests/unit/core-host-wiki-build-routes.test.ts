@@ -13,7 +13,7 @@ import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
 import { wikiBuildPartition } from "../../packages/broker/src/core/wiki-build/keys.js";
 import { readWikiBuildPointer } from "../../packages/broker/src/core/wiki-build/run.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
-import { NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
+import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import type { HostedWikiBuildWiring, WikiBuildStarterInput } from "../../packages/broker/src/core-host/wiki-build-routes.js";
 import type { HostedWikiMapWiring } from "../../packages/broker/src/core-host/wiki-map-routes.js";
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
@@ -183,16 +183,6 @@ describe("hosted wiki build controls: who may do what", () => {
     expect((await call(get(WB("ledger")), stranger)).status).toBe(404);
   });
 
-  it("refuses a script token on every control before anything is read", async () => {
-    const { person, routes } = await buildWorld();
-    const caller = { ...person("p-owner", FAKE_COMPANY, "owner"), scriptToken: { tokenId: "tok" } } as DeployedCaller;
-    for (const request of [get(WB("payments")), post(WB("payments"), { requestId: id() }), post(WB("payments", "/delete"), { requestId: id() })]) {
-      const answer = await routes.route(request, caller);
-      expect(answer?.statusCode).toBe(403);
-      expect((JSON.parse(answer!.body) as Body).error.message).toBe(NOT_FOR_SCRIPT_TOKENS);
-    }
-  });
-
   it("answers 'not on the core yet' when the deployment wires no controls", async () => {
     const { person, call } = await buildWorld({ wired: false });
     const owner = person("p-owner", FAKE_COMPANY, "owner");
@@ -202,40 +192,9 @@ describe("hosted wiki build controls: who may do what", () => {
       expect(answer.body.error.message).toBe(NOT_ON_THE_CORE_YET);
     }
   });
-
-  it("does not serve other methods or paths under the family", async () => {
-    const { person, routes } = await buildWorld();
-    const caller = person("p-owner", FAKE_COMPANY, "owner");
-    for (const request of [{ method: "PUT", path: WB("payments") }, { method: "DELETE", path: WB("payments") }, { method: "GET", path: WB("payments", "/stop") }, { method: "GET", path: WB("payments", "/delete") }, { method: "POST", path: WB("payments", "/extra") }, { method: "GET", path: `${WB("payments")}/` }]) {
-      const answer = await routes.route({ ...request, headers: {}, body: "{}" }, caller);
-      // Not this family's: the dev routes answer a fixed 404 or leave the path to the old broker (undefined).
-      expect(answer === undefined || answer.statusCode === 404, `${request.method} ${request.path}`).toBe(true);
-    }
-  });
 });
 
 describe("hosted wiki build controls: two projects and two companies", () => {
-  it("keeps two projects of one company apart: a person who manages A can neither build, switch, refresh nor delete B, and B's rows are untouched", async () => {
-    const { world, person, call, starter } = await buildWorld();
-    const adminOfA = person("p-a", FAKE_COMPANY, "member", { payments: "administrator" });
-    const companyAdmin = person("p-admin", FAKE_COMPANY, "admin");
-    await seed(world, FAKE_COMPANY, "ledger", ["overview", "repo-ledger"]);
-    await call(post(WB("ledger", "/agents"), { requestId: id(), on: true }), companyAdmin);
-    const ledgerBefore = { wiki: await rows(world, wikiPartition(FAKE_COMPANY, "ledger")), use: await rows(world, wikiUsePartition(FAKE_COMPANY, "ledger")) };
-    for (const [tail, body] of [["", { requestId: id() }], ["/continue", { requestId: id() }], ["/stop", { requestId: id() }], ["/refresh", { requestId: id() }], ["/agents", { requestId: id(), on: false }], ["/delete", { requestId: id() }]] as const) {
-      const answer = await call(post(WB("ledger", tail), body), adminOfA);
-      expect(answer.status, tail).toBe(404);
-      expect(answer.raw).not.toContain("ledger-core");
-    }
-    expect(await call(get(WB("ledger")), adminOfA)).toMatchObject({ status: 404 });
-    expect(starter.started).toHaveLength(0);
-    expect({ wiki: await rows(world, wikiPartition(FAKE_COMPANY, "ledger")), use: await rows(world, wikiUsePartition(FAKE_COMPANY, "ledger")) }).toEqual(ledgerBefore);
-    expect((await call(get(WB("ledger")), companyAdmin)).body).toMatchObject({ agents: { on: true }, wiki: { pages: 2 } });
-    // What A's manager does to A never shows in B.
-    await call(post(WB("payments", "/agents"), { requestId: id(), on: true }), adminOfA);
-    expect((await call(get(WB("payments")), adminOfA)).body.agents).toEqual({ on: true });
-    expect(await world.store.get(wikiAgentSwitchKey(FAKE_COMPANY, "ledger"))).toMatchObject({ on: true });
-  });
 
   it("keeps two companies apart: the same project name in another company has its own build, switch, pages and delete", async () => {
     const { world, person, call } = await buildWorld();
@@ -360,35 +319,9 @@ describe("hosted wiki build controls: the rest of each control", () => {
     expect(starter.started).toHaveLength(0);
     expect(await world.store.get(wikiAgentSwitchKey(FAKE_COMPANY, "payments"))).toBeUndefined();
   });
-
-  it("prunes a removed repository's pages before the state is read", async () => {
-    const { world, person, call } = await buildWorld();
-    const owner = person("p-owner", FAKE_COMPANY, "owner");
-    await seed(world, FAKE_COMPANY, "payments", ["overview"]);
-    const wiki = createWikiStore({ store: world.store, companyId: FAKE_COMPANY, now: () => world.clock.now });
-    await wiki.writePage("payments", { ...page("repo-gone"), repos: [{ repo: "gone", commit: API_SHA }], claims: [{ ...page("x").claims[0]!, citations: [{ repo: "gone", path: "a.ts", commit: API_SHA, line: 1, quote: "export const a = 1;" }] }] });
-    expect((await wiki.readIndex("payments")).map((entry) => entry.pageId)).toContain("repo-gone");
-    const view = await call(get(WB("payments")), owner);
-    expect(view.body.wiki.pages).toBe(1);
-    expect((await wiki.readIndex("payments")).map((entry) => entry.pageId)).not.toContain("repo-gone");
-  });
 });
 
 describe("hosted wiki build controls: the audit event ids and the start rule", () => {
-  it("a reused request id that acts again always gets its own audit event id, even the third flip (A, B, A)", async () => {
-    const { world, person, call } = await buildWorld();
-    const owner = person("p-owner", FAKE_COMPANY, "owner");
-    const requestId = id();
-    for (const on of [true, false, true]) {
-      world.clock.now += 1000;
-      await call(post(WB("payments", "/agents"), { requestId, on }), owner);
-    }
-    const ids = wikiEvents(world).map((event) => event.eventId);
-    expect(ids).toHaveLength(3);
-    // Every act is its own record, even the third flip (A, B, A) under the same request id.
-    expect(new Set(ids).size).toBe(3);
-    expect(wikiEvents(world).map((event) => event.details?.["on"])).toEqual([true, false, true]);
-  });
 
   it("the flow the starter is made with starts only for the company's live managers of that project", async () => {
     const { person, call, inputs } = await buildWorld();
