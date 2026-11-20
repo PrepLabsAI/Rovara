@@ -192,7 +192,7 @@ const planBind: Planner = async (deps, identity, input, options) => {
   if (latest === undefined) throw agentXError("NOT_FOUND", `project ${input.project} is not registered; register it with agentx admin project register`);
   const now = current === undefined ? "It is bound to nothing today." : `It is bound to ${current.projectName} today; its existing threads keep their workspaces.`;
   return {
-    ...effects(channel, (shown) => `Bind channel ${shown} to project ${input.project}. ${now} New threads in ${shortName(shown)} will use ${input.project} revision ${latest.definition.revision}.`),
+    ...effects(channel, (shown) => `Bind channel ${shown} to project ${input.project}. ${now} New threads in ${shortName(shown)} will use ${input.project} revision ${latest.definition.revision}. Projects: unknown (freshness unknown). Running work: unknown (freshness unknown). Queued work: unknown (freshness unknown). Schedules: unknown (freshness unknown). People: unknown (freshness unknown). Channels: unknown (freshness unknown). Dependency counts are not available from this plan. Keep the current binding until you have checked the replacement channel and its audience. Test the replacement first; this plan does not test replacement routing.`),
     details: { channelId, project: input.project, currentProject: current?.projectName ?? null, revision: latest.definition.revision },
     snapshot: { binding: current ?? null, latestRevision: latest.definition.revision },
     apply: (applier) => deps.handlers.bindChannel(applier, teamId, channelId, input.project),
@@ -208,7 +208,7 @@ const planUnbind: Planner = async (deps, identity, input, options) => {
   if (current === undefined) throw agentXError("NOT_FOUND", `channel ${label} is not bound to any project; list the bindings with agentx admin slack bindings`);
   await deps.handlers.requireAdministrator(identity, current.projectName);
   return {
-    ...effects(channel, (shown) => `Unbind channel ${shown} from project ${current.projectName}. New messages there will get no reply; existing thread workspaces are kept.`),
+    ...effects(channel, (shown) => `Unbind channel ${shown} from project ${current.projectName}. New messages there will get no reply; existing thread workspaces are kept. Retained workspaces do not establish ongoing task permission. Projects: unknown (freshness unknown). Running work: unknown (freshness unknown). Queued work: unknown (freshness unknown). Schedules: unknown (freshness unknown). People: unknown (freshness unknown). Channels: unknown (freshness unknown). Dependency counts are not available from this plan. Keep the current binding while you review dependent work. Test the replacement first; this plan does not test replacement routing.`),
     details: { channelId, project: current.projectName },
     snapshot: { binding: current },
     apply: (applier) => deps.handlers.unbindChannel(applier, teamId, channelId),
