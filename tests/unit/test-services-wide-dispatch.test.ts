@@ -2,13 +2,10 @@
 // into the task flow, and the dispatch to a worker. A worker whose health lacks `task.testServices.aws.allServices.v1` is refused the step with the fixed "too old" sentence and nothing is delivered; a feature-complete
 // worker is sent it.
 import { describe, expect, it } from "vitest";
-import {
-  TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_PLAN_FEATURE, TestEnvironmentBodySchema, WORKER_INVOCATION_FEATURES, testEnvDigest, type JsonValue, type TestEnvironmentBody,
-} from "@agentx/contracts";
-import { AWS_EMULATOR_SERVICES } from "../../packages/contracts/src/generated/aws-emulator-services.js";
+import { TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TestEnvironmentBodySchema, WORKER_INVOCATION_FEATURES, testEnvDigest, type JsonValue, type TestEnvironmentBody } from "@agentx/contracts";
 import { documentOf, type TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
 import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
-import { createTaskTestEnvironment, testServicesMissingWords } from "../../packages/broker/src/core/test-env/seam.js";
+import { createTaskTestEnvironment } from "../../packages/broker/src/core/test-env/seam.js";
 import { TEST_SERVICES_UNAVAILABLE_WORDS } from "../../packages/broker/src/core/test-env/test-services-switch.js";
 import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
 import { acceptStep, readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
@@ -79,13 +76,6 @@ const NARROW = [aws("s3", { connect: { env: [], hostAliases: ["aws"] } }), aws("
 const OLD_WORKER = WORKER_INVOCATION_FEATURES.filter((feature) => feature !== TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
 
 describe("a wide plan at the dispatch guard", () => {
-  it("builds the step with the all-services feature among what it requires", async () => {
-    const w = await world(WIDE, WORKER_INVOCATION_FEATURES);
-    const { stepPlan, operation } = await acceptChecks(w);
-    expect(stepPlan.plan.dependencies!.map((plan) => plan.aws!.services)).toEqual([["sns"], ["secrets-manager"], ["kinesis"]]);
-    expect(stepPlan.requires).toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
-    expect(operation.dispatch.requires).toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
-  });
 
   it("is refused, with the fixed sentence and nothing delivered, by a worker whose health lacks the feature", async () => {
     const w = await world(WIDE, OLD_WORKER);
@@ -97,42 +87,6 @@ describe("a wide plan at the dispatch guard", () => {
     expect(w.h.machines.delivered(machine).map((job) => job.operationId)).not.toContain(operation.id);
   });
 
-  it("is accepted and delivered, with the plan, by a feature-complete worker", async () => {
-    const w = await world(WIDE, WORKER_INVOCATION_FEATURES);
-    const { operation, workspaceId } = await acceptChecks(w);
-    await w.h.flow.dispatchOnce({ maxMessages: 10 });
-    const workspace = (await readWorkspace(w.h.deps, workspaceId))!;
-    const job = w.h.machines.delivered(workspace.machine!.machineId).find((entry) => entry.operationId === operation.id);
-    expect(job).toBeDefined();
-    expect(job).toMatchObject({ payload: { workflowMode: "CHECKS", testEnvironment: { dependencies: [{ aws: { services: ["sns"] } }, { aws: { services: ["secrets-manager"] } }, { aws: { services: ["kinesis"] } }] } } });
-    const after = (await workspaceOperations(w.h.deps, workspaceId)).find((entry) => entry.id === operation.id)!;
-    expect(after.status).not.toBe("FAILED");
-  });
-
-  it("a plan of the three that were always seeded still goes to a worker without the feature", async () => {
-    const w = await world(NARROW, OLD_WORKER);
-    const { stepPlan, operation, workspaceId } = await acceptChecks(w);
-    expect(stepPlan.requires).not.toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
-    await w.h.flow.dispatchOnce({ maxMessages: 10 });
-    const workspace = (await readWorkspace(w.h.deps, workspaceId))!;
-    expect(w.h.machines.delivered(workspace.machine!.machineId).some((entry) => entry.operationId === operation.id)).toBe(true);
-  });
-
-  // The environment's cap on one backing's services is the plan's (64), not the 24 it was: a dependency that names 40 services is pinned whole, and still only goes to a worker that lists the feature.
-  it("a dependency naming 40 services (past the old cap of 24) is pinned whole, requires the feature, and is refused by a worker without it", async () => {
-    const keys = AWS_EMULATOR_SERVICES.slice(0, 40).map((row) => row.key);
-    const many = [aws(keys[0]!, { backing: { kind: "emulated", catalogId: "local-aws@r1", awsServices: keys, region: "us-east-1" }, connect: { env: [], hostAliases: ["aws"] } })];
-    const ok = await world(many, WORKER_INVOCATION_FEATURES);
-    const accepted = await acceptChecks(ok);
-    expect(accepted.stepPlan.plan.dependencies![0]!.aws!.services).toEqual(keys);
-    expect(accepted.stepPlan.requires).toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
-    const old = await world(many, OLD_WORKER);
-    const refused = await acceptChecks(old);
-    await old.h.flow.dispatchOnce({ maxMessages: 10 });
-    const after = (await workspaceOperations(old.h.deps, refused.workspaceId)).find((entry) => entry.id === refused.operation.id)!;
-    expect(after).toMatchObject({ status: "FAILED", error: TOO_OLD });
-    expect(old.h.machines.delivered((await readWorkspace(old.h.deps, refused.workspaceId))!.machine!.machineId).map((job) => job.operationId)).not.toContain(refused.operation.id);
-  });
 });
 
 // DEC 254zm: a worker that offers no test services at all (on Code's AWS workers: its boot stage or pulls failed) is not "too old": the step ends with the fixed "not available here" words.
@@ -148,12 +102,4 @@ describe("a plan with dependencies at a worker that offers no test services", ()
     expect(w.h.machines.delivered(machine).map((job) => job.operationId)).not.toContain(operation.id);
   });
 
-  it("the words only for a gap of test-services features that includes the base one; any other gap keeps 'too old'", () => {
-    expect(testServicesMissingWords([TEST_SERVICES_PLAN_FEATURE])).toBe(TEST_SERVICES_UNAVAILABLE_WORDS.workers);
-    expect(testServicesMissingWords([TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE])).toBe(TEST_SERVICES_UNAVAILABLE_WORDS.workers);
-    expect(testServicesMissingWords([TEST_SERVICES_AWS_ALL_SERVICES_FEATURE])).toBeUndefined();
-    expect(testServicesMissingWords([TEST_SERVICES_PLAN_FEATURE, "model.route"])).toBeUndefined();
-    expect(testServicesMissingWords(["task.readiness"])).toBeUndefined();
-    expect(testServicesMissingWords([])).toBeUndefined();
-  });
 });

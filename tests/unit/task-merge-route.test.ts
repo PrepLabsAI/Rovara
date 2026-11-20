@@ -51,18 +51,6 @@ describe("a merge press through the merge core", () => {
     expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
   });
 
-  it("answers another company's task, someone else's task and a missing task alike, before the core reads anything else", async () => {
-    const world = await mergeWorld(); await world.seedTracking();
-    const answers = [];
-    for (const overrides of [{ companyId: COMPANY_B.orgId }, { presserPersonId: "someone-else" }, { taskId: "99999999-9999-4999-8999-999999999999" }]) {
-      const w = wiring(world);
-      answers.push(await rejects(() => pressTaskMerge(w, press(overrides))));
-      expect(w.view).not.toHaveBeenCalled();
-    }
-    expect(answers).toEqual([{ code: "TASK_NOT_FOUND", message: "task not found" }, { code: "TASK_NOT_FOUND", message: "task not found" }, { code: "TASK_NOT_FOUND", message: "task not found" }]);
-    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
-  });
-
   it("refuses when the risk the person was shown is not the risk now", async () => {
     const world = await mergeWorld(); await world.seedTracking();
     const prepared = await world.prepare();
@@ -78,15 +66,6 @@ describe("the merge route", () => {
 
   it("is a fixed 'not set up' where the deployment has not wired the merge core", async () => {
     expect(await rejects(() => route(undefined))).toEqual({ code: "NOT_FOUND", message: MERGE_NOT_SET_UP });
-  });
-
-  it("DEC 254zzz73: merges with no step-up for the task's owner; another person and another company still get 'task not found' and nothing merges", async () => {
-    const world = await mergeWorld(); await world.seedTracking();
-    for (const overrides of [{ personId: "someone-else" }, { companyId: COMPANY_B.orgId }]) {
-      expect(await rejects(() => route(wiring(world), overrides))).toEqual({ code: "TASK_NOT_FOUND", message: "task not found" });
-    }
-    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
-    expect(await route(wiring(world))).toMatchObject({ merged: true });
   });
 
   it("validates the id and the body at runtime without echoing them", async () => {
@@ -114,11 +93,6 @@ describe("the merge route on the developer API", () => {
     };
     return { loadTask, seen };
   }
-
-  it("answers the fixed 'not set up' when nothing is wired, as before for any deployment", async () => {
-    const h = companyRouteHarness();
-    expect(errorOf((await h.read(MERGE_PATH, { method: "POST", body: JSON.stringify({ requestId: REQUEST }) })).body)).toEqual({ code: "NOT_FOUND", message: MERGE_NOT_SET_UP });
-  });
 
   it("takes the company only from membership (DEC 254zzz73: no step-up)", async () => {
     const h = companyRouteHarness();

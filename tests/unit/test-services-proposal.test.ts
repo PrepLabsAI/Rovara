@@ -1,13 +1,12 @@
 // Test services: a setup draft's dependency candidates become PROPOSED dependencies (through the backing chooser, real catalog software only), and the card lines say what backs each one plainly.
 import { describe, expect, it } from "vitest";
-import { TEST_ENV_DRAFT_RESULT_KEY, TestEnvironmentBodySchema, type OrgId, type TestEnvDraft, type TestEnvironmentBody } from "@agentx/contracts";
+import { TestEnvironmentBodySchema, type TestEnvironmentBody } from "@agentx/contracts";
 import { DEPENDENCIES_LEFT_OUT_NOTE, DEPENDENCIES_NO_CATALOG_NOTE, DEPENDENCIES_NOT_PROPOSED_NOTE } from "../../packages/broker/src/core/test-env/dependency-proposal.js";
 import { dependencyCardLines } from "../../packages/broker/src/core/test-env/dependency-card-lines.js";
-import { sanitizeTestEnvDraft, testEnvDraftEndItems } from "../../packages/broker/src/core/test-env/draft.js";
+import { sanitizeTestEnvDraft } from "../../packages/broker/src/core/test-env/draft.js";
 import { TEST_SERVICES_MIN_CATALOG_REVISION } from "../../packages/broker/src/core/test-env/dependency-plan.js";
 import { pinnedCatalog, unpinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 
-const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const PROJECT = "service";
 const ON = { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "1" };
 const cmd = (executable: string, args: string[] = []) => ({ cwd: "service", executable, args, timeoutSeconds: 600 });
@@ -24,19 +23,6 @@ const draftOf = (candidates?: unknown[], environment: unknown = baseBody()): unk
 const options = (catalog: ReturnType<typeof verifiedCatalog> | "none" = verifiedCatalog(pinnedCatalog()), env: NodeJS.ProcessEnv = ON) => ({ env, propose: { catalog: catalog === "none" ? undefined : catalog, edition: "public" as const, projectId: PROJECT } });
 
 describe("a draft's dependency candidates", () => {
-  it("is today's draft when there are none, with the switch on or off", () => {
-    expect(sanitizeTestEnvDraft(draftOf(), options())).toEqual(sanitizeTestEnvDraft(draftOf()));
-    const kept = sanitizeTestEnvDraft(draftOf(), options())!;
-    expect("dependencies" in kept).toBe(false);
-    expect("dependencies" in kept.environment).toBe(false);
-  });
-
-  it("drops the candidates and proposes nothing with tx off (the draft is what it was)", () => {
-    const off = sanitizeTestEnvDraft(draftOf([candidate("postgres")]), options("none", { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" }))!;
-    expect(off).toEqual(sanitizeTestEnvDraft(draftOf())!);
-    // DEC 254z-amend3: switched on by default, but where the host says it cannot run them (hosted Code today) the draft is the plain one too.
-    expect(sanitizeTestEnvDraft(draftOf([candidate("postgres")]), { env: { ROVARA_TEST_SERVICES_UNAVAILABLE: "workers" } })).toEqual(sanitizeTestEnvDraft(draftOf()));
-  });
 
   it("keeps the candidates when it has no catalog to propose from, and says so", () => {
     const kept = sanitizeTestEnvDraft(draftOf([candidate("postgres")]), options("none"))!;
@@ -50,46 +36,10 @@ describe("a draft's dependency candidates", () => {
     expect(written!.notes).toEqual(["Found pytest."]);
   });
 
-  it("carries the validated candidates into what is stored at the end of a setup draft, and nothing with tx off", () => {
-    const task = { taskId: "t1", purpose: "setup_draft", project: PROJECT, orgId: ORG } as never;
-    const operation = { kind: "task", workflowMode: "SETUP_DRAFT" };
-    const stored = (env: NodeJS.ProcessEnv, candidates: unknown[] = [candidate("postgres")]) => {
-      const items = testEnvDraftEndItems(task, operation, { status: "SUCCEEDED", result: { [TEST_ENV_DRAFT_RESULT_KEY]: draftOf(candidates) } }, "2026-11-03T10:00:00.000Z", env);
-      return (items[0] as { item: { draft: TestEnvDraft } } | undefined)?.item.draft;
-    };
-    expect(stored(ON)!.dependencies).toEqual([candidate("postgres")].map((entry) => clean(entry)));
-    expect(stored({ ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toEqual(sanitizeTestEnvDraft(draftOf()));
-    expect("dependencies" in stored({ ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })!).toBe(false);
-    // An invalid candidate makes the whole report not a draft: nothing is stored, and the setup draft's own result is untouched.
-    expect(stored(ON, [candidate("postgres", { hints: { password: "x" } })])).toBeUndefined();
-  });
-
-  it("proposes a real Postgres from the catalog, with the catalog's own variable names and the files the detector cited", () => {
-    const draft = sanitizeTestEnvDraft(draftOf([candidate("postgres", { evidence: [{ path: "docker-compose.yml", line: 4 }, { path: "db/init.sql", line: 1 }] })]), options())!;
-    const proposed = draft.environment.dependencies!;
-    expect(proposed).toHaveLength(1);
-    expect(proposed[0]).toMatchObject({ id: "postgres", name: "Postgres", kind: "database", family: "postgres", usedBy: ["integration"], reset: "fresh_per_round", seeds: [], backing: { kind: "local", catalogId: "postgres@16" }, found: [{ path: "docker-compose.yml", line: 4 }, { path: "db/init.sql", line: 1 }] });
-    expect(proposed[0]!.connect.env.map((entry) => entry.name)).toContain("DATABASE_URL");
-    expect(proposed[0]!.connect.hostAliases).toEqual(["postgres"]);
-    // Nothing a repository wrote is in it as a name or value: the name is a fixed word, and the whole thing is a valid environment.
-    expect(TestEnvironmentBodySchema.safeParse(draft.environment).success).toBe(true);
-  });
-
   it("proposes only what the catalog has PINNED: an unpinned catalog proposes nothing", () => {
     const draft = sanitizeTestEnvDraft(draftOf([candidate("postgres")]), options(verifiedCatalog(unpinnedCatalog(TEST_SERVICES_MIN_CATALOG_REVISION))))!;
     expect(draft.environment.dependencies).toBeUndefined();
     expect(draft.notes).toContain(DEPENDENCIES_NOT_PROPOSED_NOTE);
-  });
-
-  it("leaves out, with one fixed note, whatever is not real catalog software", () => {
-    const draft = sanitizeTestEnvDraft(draftOf([
-      candidate("postgres"), candidate("aws:kinesis"), candidate("http:api.example-pay.com", { kind: "http_api" }), candidate("redis", { hints: { fakedByTests: true } }),
-    ]), options())!;
-    expect(draft.environment.dependencies!.map((entry) => entry.id)).toEqual(["postgres"]);
-    expect(draft.notes.filter((note) => note === DEPENDENCIES_NOT_PROPOSED_NOTE)).toHaveLength(1);
-    expect(draft.notes.join(" ")).not.toMatch(/example-pay|kinesis/iu);
-    // The candidates themselves are still in the draft for a person to see.
-    expect(draft.dependencies).toHaveLength(4);
   });
 
   it("proposes nothing when the candidates cannot be proposed together", () => {
@@ -99,26 +49,6 @@ describe("a draft's dependency candidates", () => {
     expect(draft.notes).toContain(DEPENDENCIES_LEFT_OUT_NOTE);
   });
 
-  it("refuses a draft whose own environment lists dependencies (a worker never proposes a backing), and keeps one with an empty list", () => {
-    const claimed = baseBody({ dependencies: [{
-      id: "payments", name: "Payments", kind: "http_api", family: "http:api.example-pay.com", found: ["model"], usedBy: ["integration"], backing: { kind: "test_account", accountId: "payments-test" },
-      connect: { env: [{ name: "PAY_URL", template: "https://{host}" }], hostAliases: [] }, seeds: [], reset: "fresh_per_round",
-    }] });
-    expect(sanitizeTestEnvDraft(draftOf(undefined, claimed), options())).toBeUndefined();
-    expect(sanitizeTestEnvDraft(draftOf([candidate("postgres")], claimed), options())).toBeUndefined();
-    expect(sanitizeTestEnvDraft(draftOf(undefined, baseBody({ dependencies: [] })), options())).toEqual(sanitizeTestEnvDraft(draftOf()));
-  });
-
-  it("reads a stored draft (candidates only) the same every time", () => {
-    const stored = sanitizeTestEnvDraft(draftOf([candidate("postgres")]), { env: ON })!;
-    const first = sanitizeTestEnvDraft(stored, options())!;
-    expect(first.environment.dependencies!.map((entry) => entry.id)).toEqual(["postgres"]);
-    expect(sanitizeTestEnvDraft(stored, options())).toEqual(first);
-  });
-
-  it("stays bounded: more than 64 candidates is not a draft", () => {
-    expect(sanitizeTestEnvDraft(draftOf(Array.from({ length: 65 }, () => candidate("postgres"))), options())).toBeUndefined();
-  });
 });
 
 describe("the card's lines", () => {

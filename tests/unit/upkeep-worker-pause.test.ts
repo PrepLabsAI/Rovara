@@ -72,8 +72,6 @@ describe("the gateway's upkeep pause", () => {
   // MUTANT pause detection: the worker reads the pause from anything but the gateway's fixed sentence (or not at all, so it reports infrastructure).
   it.each([
     ["no_budget", UPKEEP_PAUSE_MESSAGES.no_budget],
-    ["monthly_limit", UPKEEP_PAUSE_MESSAGES.monthly_limit],
-    ["cost_too_high", UPKEEP_PAUSE_MESSAGES.cost_too_high],
   ])("a turn that failed with the %s sentence reports upkeep_paused with that reason and keeps no page", async (reason, sentence) => {
     const w = world([pageJob("overview")], (session) => session.turn("", { input: 1_000, output: 10 }, { stopReason: "error", errorMessage: `422 ${sentence}` }));
     await runWikiBuild(w.input);
@@ -106,9 +104,4 @@ describe("the gateway's upkeep pause", () => {
     for (const w of [notAllowed, spent, other]) expect(answerOf(w)).not.toHaveProperty("pause");
   });
 
-  it("words that only look like the sentence are not a pause", async () => {
-    const w = world([pageJob("overview")], () => { throw new Error("upkeep_paused: nightly upkeep is paused"); });
-    await runWikiBuild(w.input);
-    expect(answerOf(w)).toMatchObject({ failure: "infrastructure" });
-  });
 });

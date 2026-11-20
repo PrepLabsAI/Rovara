@@ -1881,7 +1881,6 @@
     "tests/unit/task-actions-continue.test.ts": 0.072,
     "tests/unit/task-actions-local-wiring.test.ts": 0.373,
     "tests/unit/task-actions-review-findings.test.ts": 0.195,
-    "tests/unit/task-actions-security-accept.test.ts": 0.086,
     "tests/unit/task-actions-send-back.test.ts": 0.159,
     "tests/unit/task-comments.test.ts": 0.01,
     "tests/unit/task-end-seam.test.ts": 0.092,

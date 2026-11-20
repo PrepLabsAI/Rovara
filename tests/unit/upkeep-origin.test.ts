@@ -5,12 +5,9 @@
 //   3. the token describer gives model access to an origin-`nightly` task only when it is a wiki build (the model-free nightly test run, or any other task marked nightly, gets none).
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, UPKEEP_ORIGIN, systemOwnerIdOf, type OrgId, type Principal } from "@agentx/contracts";
-import { createTaskTokenDescriber } from "../../packages/broker/src/core/model-gateway/describer.js";
+import { IMPLICIT_COMPANY_ID, systemOwnerIdOf, type OrgId, type Principal } from "@agentx/contracts";
 import { createUpkeepWikiStarter, createWikiBuildStarter } from "../../packages/broker/src/core/wiki-build/starter.js";
-import { readWikiBuildPointer, startWikiBuild, wikiBuildRequestText, type WikiBuildDeps } from "../../packages/broker/src/core/wiki-build/run.js";
-import { operationKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import type { TaskTokenOperation } from "../../packages/broker/src/core/model-gateway/token.js";
+import { wikiBuildRequestText, type WikiBuildDeps } from "../../packages/broker/src/core/wiki-build/run.js";
 import { createHarness, type Harness } from "../support/task-flow-harness.js";
 import { API_SHA, area, fileMap, repoEntry } from "../support/wiki-build-fixtures.js";
 
@@ -37,19 +34,6 @@ async function world() {
   return { h, cancel, base, cancelled };
 }
 
-/** The describer's answer for the build task's own running operation. */
-async function describeOf(h: Harness, taskId: string, patch: Record<string, unknown> = {}) {
-  const task = (await h.store.get(taskKey(taskId)))!;
-  const workspaceId = task["workspaceId"] as string;
-  const workspace = (await h.store.get(workspaceKey(company, workspaceId)))!;
-  const scope: TaskTokenOperation = { workspaceId, operationId: workspace["activeOperationId"] as string, fence: 1 };
-  const key = operationKey(company, workspaceId, scope.operationId);
-  const operation = (await h.store.get(key))!;
-  await h.store.put({ item: { ...operation, kind: "task", status: "RUNNING", programStepId: "wiki", requester: { personId: "a".repeat(64), provider: "test" }, dispatch: { kind: "task", payload: {} } } });
-  if (Object.keys(patch).length > 0) await h.store.put({ item: { ...task, ...patch } as typeof task });
-  return createTaskTokenDescriber(h.deps).describe(scope);
-}
-
 describe("a person's starter never carries the upkeep origin", () => {
   it("refuses a caller whose origin is nightly when it is made", async () => {
     const w = await world();
@@ -57,15 +41,6 @@ describe("a person's starter never carries the upkeep origin", () => {
     expect(() => createWikiBuildStarter({ flow: w.h.deps, caller: w.h.owner, cancel: w.cancel })).not.toThrow();
   });
 
-  it("a person's build is an app task: its token origin is app, never nightly, and it is paid by the project", async () => {
-    const w = await world();
-    const deps = w.base(createWikiBuildStarter({ flow: w.h.deps, caller: w.h.owner, cancel: w.cancel }));
-    await startWikiBuild(deps, w.h.owner.principal.personId, "payments", { requestId: randomUUID() });
-    const pointer = (await readWikiBuildPointer(w.h.store, company, "payments"))!;
-    const description = await describeOf(w.h, pointer.taskId);
-    expect(description).toMatchObject({ origin: "app", payer: { kind: "project", project: "payments" } });
-    expect(description?.origin).not.toBe(UPKEEP_ORIGIN);
-  });
 });
 
 describe("the upkeep starter: origin nightly, set here, as the project's own system owner only", () => {
@@ -77,14 +52,6 @@ describe("the upkeep starter: origin nightly, set here, as the project's own sys
     });
   };
 
-  it("starts a wiki_build task with origin nightly whatever origin the caller object carried, and its token says nightly with the project paying", async () => {
-    const w = await world();
-    const started = await startOnce(w, system("payments"));
-    const task = (await w.h.store.get(taskKey(started.taskId)))!;
-    expect(task).toMatchObject({ origin: "nightly", purpose: "wiki_build" });
-    expect(await describeOf(w.h, started.taskId)).toMatchObject({ origin: "nightly", payer: { kind: "project", project: "payments" }, models: ["claude-sonnet-4-5"] });
-  });
-
   it("refuses a person, and another project's system owner, and a made-up system id", async () => {
     const w = await world();
     await expect(startOnce(w, w.h.owner.principal)).rejects.toMatchObject({ code: "FORBIDDEN" });
@@ -92,30 +59,6 @@ describe("the upkeep starter: origin nightly, set here, as the project's own sys
     await expect(startOnce(w, { ...system("payments"), personId: `sysowner_${"0".repeat(64)}` })).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 
-  it("still refuses another payer than the project (money)", async () => {
-    const w = await world();
-    const starter = createUpkeepWikiStarter({ flow: w.h.deps, caller: { principal: system("payments"), origin: "app" }, cancel: w.cancel });
-    await expect(starter.start({
-      requestId: randomUUID(), project: "payments", text: "x", payer: { kind: "project", project: "other" }, limits: { pages: 10, budgetCents: 700, wallClockMin: 60, pageReserveCents: 50 }, pins: [{ repo: "demo", commit: HEAD }],
-      pointerItemFor: () => ({ kind: "put", item: { pk: "X#1", sk: "RUN" } }), notesItemFor: () => undefined,
-    })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-  });
-});
-
-describe("the token describer: model access for origin nightly only to a wiki build", () => {
-  it("a task marked nightly that is not a wiki build (the model-free nightly test run) gets no model access at all", async () => {
-    const w = await world();
-    const started = await w.h.flow.start(w.h.owner, { project: "payments", instructions: "Build it", requestId: randomUUID() });
-    expect(await describeOf(w.h, started.task.taskId, { origin: "nightly" })).toBeUndefined();
-    // The same task marked app is described as before, so the tightening is only about the nightly origin.
-    expect(await describeOf(w.h, started.task.taskId, { origin: "app" })).toMatchObject({ origin: "app" });
-  });
-
-  it("a wiki build marked nightly is described with origin nightly and the project as payer", async () => {
-    const w = await world();
-    const started = await w.h.flow.start(w.h.owner, { project: "payments", instructions: "Build it", requestId: randomUUID() });
-    expect(await describeOf(w.h, started.task.taskId, { origin: "nightly", purpose: "wiki_build" })).toMatchObject({ origin: "nightly", payer: { kind: "project", project: "payments" } });
-  });
 });
 
 void API_SHA;

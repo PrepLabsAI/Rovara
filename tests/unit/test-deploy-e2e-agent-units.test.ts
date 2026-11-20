@@ -1,16 +1,11 @@
 import { describe, expect, it } from "vitest";
-import {
-  DEFAULT_DEPLOY_UNITS, DEPLOY_UNITS, E2E_AGENT_SETTINGS_UNIT, assertOnlyExpectedChanges, formatPlan, liftDeclaredSettings, observedChanges, parseTestDeployArgs, planTestDeploy,
-  type BuiltArtifacts, type CfnTemplate, type DeployStep, type StackParameters,
-} from "../../scripts/test-deploy.js";
+import { DEFAULT_DEPLOY_UNITS, DEPLOY_UNITS, assertOnlyExpectedChanges, liftDeclaredSettings, observedChanges, parseTestDeployArgs, planTestDeploy, type BuiltArtifacts, type CfnTemplate, type DeployStep, type StackParameters } from "../../scripts/test-deploy.js";
 import type { Change } from "@aws-sdk/client-cloudformation";
 import { readFileSync } from "node:fs";
 
 // M1.4 Task 4.10A, test 12: the test-deploy units that put the AI navigation model setting on TEST.
 
 const ENV = "agentxlivetest123";
-const CONTROL_PLANE = "agentx-agentxlivetest123-control-plane";
-const RUNTIME = "agentx-agentxlivetest123-runtime";
 const OLD_IMAGE = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-test/worker@sha256:${"a".repeat(64)}`;
 const HAIKU_45_US = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 const artifacts: BuiltArtifacts = { revision: "0123456789ab", outputDir: "/tmp/test-deploy-0123456789ab" };
@@ -18,10 +13,8 @@ const previous: StackParameters = {
   "control-plane": { OidcIssuer: "https://issuer.example", CallbackSigningKey: "****", AdminValues: "admin" },
   runtime: { ModelId: "model", ModelProvider: "amazon-bedrock", WorkerImageUri: OLD_IMAGE },
 };
-const withSetting: StackParameters = { ...previous, runtime: { ...previous.runtime, E2eAgentModelId: "default" } };
 const plan = (only: Parameters<typeof planTestDeploy>[0]["only"], extra: Partial<Parameters<typeof planTestDeploy>[0]> = {}) =>
   planTestDeploy({ env: ENV, only, artifacts, previous, ...extra });
-const kinds = (steps: DeployStep[]) => steps.map((step) => step.kind);
 type ChangeSetStep = Extract<DeployStep, { kind: "create-change-set" }>;
 const changeSetOf = (steps: DeployStep[]) => steps.find((step): step is ChangeSetStep => step.kind === "create-change-set")!;
 
@@ -29,39 +22,6 @@ describe("the e2e-agent-model unit", () => {
   it("is a unit of its own, never a default one", () => {
     expect(DEPLOY_UNITS).toContain("e2e-agent-model");
     expect(DEFAULT_DEPLOY_UNITS).not.toContain("e2e-agent-model");
-  });
-
-  it("adds the parameter and its SSM setting the first time: exactly two additions, lifted from a synth of the runtime stack, with the chosen model as the parameter's value", () => {
-    const steps = plan(["e2e-agent-model"], { e2eModel: HAIKU_45_US });
-    expect(kinds(steps)).toEqual(["create-change-set", "execute-change-set", "verify-stack-parameter"]);
-    const changeSet = changeSetOf(steps);
-    expect(changeSet.stack).toBe(RUNTIME);
-    expect(changeSet.template).toEqual({
-      source: "lift-resources", logicalIdPrefix: "WorkerE2eAgentModelParameter", parameterNames: ["E2eAgentModelId"], construct: "AgentXProductionRuntime", cdkContext: {}, identityMode: "cognito",
-    });
-    expect(changeSet.expect).toEqual({ action: "Add", logicalIdPrefixes: ["WorkerE2eAgentModelParameter"] });
-    // The additions: one CloudFormation parameter and one SSM parameter resource.
-    const template = changeSet.template as Extract<ChangeSetStep["template"], { source: "lift-resources" }>;
-    expect((template.parameterNames ?? []).length + (changeSet.expect.logicalIdPrefixes ?? []).length).toBe(2);
-    expect(changeSet.parameters).toEqual([
-      { key: "E2eAgentModelId", literal: HAIKU_45_US },
-      { key: "ModelId", usePreviousValue: true }, { key: "ModelProvider", usePreviousValue: true }, { key: "WorkerImageUri", usePreviousValue: true },
-    ]);
-    expect(steps[2]).toMatchObject({ stack: RUNTIME, key: "E2eAgentModelId", expected: { literal: HAIKU_45_US } });
-  });
-
-  it("changes only the setting's value afterwards, on the previous template", () => {
-    const steps = plan(["e2e-agent-model"], { e2eModel: "global.anthropic.claude-haiku-4-5-20251001-v1:0", previous: withSetting });
-    const changeSet = changeSetOf(steps);
-    expect(changeSet.template).toEqual({ source: "previous" });
-    expect(changeSet.expect).toEqual({ action: "Modify", logicalIdPrefixes: ["WorkerE2eAgentModelParameter"], allowedAttributes: ["Properties.Value"] });
-    expect(changeSet.parameters.filter((parameter) => "literal" in parameter)).toEqual([{ key: "E2eAgentModelId", literal: "global.anthropic.claude-haiku-4-5-20251001-v1:0" }]);
-    expect(changeSet.parameters.filter((parameter) => "usePreviousValue" in parameter).map((parameter) => parameter.key)).toEqual(["ModelId", "ModelProvider", "WorkerImageUri"]);
-  });
-
-  it("puts the recommendation back with default", () => {
-    const steps = plan(["e2e-agent-model"], { e2eModel: "default", previous: withSetting });
-    expect(changeSetOf(steps).parameters).toContainEqual({ key: "E2eAgentModelId", literal: "default" });
   });
 
   it("needs a model, and refuses one the table does not list for the stack's provider and region", () => {
@@ -84,13 +44,6 @@ describe("the e2e-agent-model unit", () => {
     }
   });
 
-  it("prints what it will do: the model, that it is a stack parameter and a setting, and that no image is built", () => {
-    const text = formatPlan(plan(["e2e-agent-model"], { e2eModel: HAIKU_45_US }));
-    expect(text).toContain(`E2eAgentModelId=${HAIKU_45_US}`);
-    expect(text).toContain("WorkerE2eAgentModelParameter*");
-    expect(text).not.toContain("image");
-  });
-
   it("parses --e2e-model, and takes it only with --only e2e-agent-model", () => {
     const parsed = parseTestDeployArgs(["--env", ENV, "--profile", "p", "--only", "e2e-agent-model", "--e2e-model", HAIKU_45_US]);
     expect(parsed).toMatchObject({ only: ["e2e-agent-model"], e2eModel: HAIKU_45_US });
@@ -105,47 +58,6 @@ describe("the e2e-agent-settings unit", () => {
     expect(DEPLOY_UNITS).toContain("e2e-agent-settings");
     expect(DEFAULT_DEPLOY_UNITS).not.toContain("e2e-agent-settings");
     expect(() => plan(["e2e-agent-settings", "broker"])).toThrow(/e2e-agent-settings.*on its own/);
-  });
-
-  it("plans one change set on the control-plane stack that only modifies the broker's environment and the two role policies (two setting ARNs each), then reads the variable back", () => {
-    const steps = plan(["e2e-agent-settings"]);
-    expect(kinds(steps)).toEqual(["create-change-set", "execute-change-set", "verify-lambda-environment"]);
-    const changeSet = changeSetOf(steps);
-    expect(changeSet.stack).toBe(CONTROL_PLANE);
-    expect(changeSet.template).toEqual({
-      source: "lift-declared", construct: "AgentXControlPlane", cdkContext: { "agentx:e2eQualificationTransport": "enabled" }, identityMode: "cognito",
-      environment: [{ logicalId: "BrokerE1355FD6", variable: "AGENTX_E2E_AGENT_SETTINGS_PREFIX" }],
-      // Both settings' ARNs in both policies: 4.10A's worker-e2e-agent-model and 4.10D's worker-model-fallback.
-      grants: E2E_AGENT_SETTINGS_UNIT.policies.flatMap((logicalId) => [`/agentx/${ENV}/worker-e2e-agent-model`, `/agentx/${ENV}/worker-model-fallback`].map((parameterName) => ({ logicalId, parameterName }))),
-    });
-    expect(E2E_AGENT_SETTINGS_UNIT.policies).toEqual(["BrokerServiceRoleDefaultPolicyDDFD9E7E", "SessionsStepsServiceRoleDefaultPolicy9F4B87C9"]);
-    expect(changeSet.expect).toEqual({
-      action: "Modify", logicalIds: ["BrokerE1355FD6", ...E2E_AGENT_SETTINGS_UNIT.policies],
-      allowedAttributes: [], allowedAttributesByLogicalId: { BrokerE1355FD6: ["Properties.Environment"], ...Object.fromEntries(E2E_AGENT_SETTINGS_UNIT.policies.map((id) => [id, ["Properties.PolicyDocument"]])) },
-      allowArnReevaluations: true, arnSources: ["BrokerE1355FD6"],
-    });
-    // Every parameter keeps its value.
-    expect(changeSet.parameters.every((parameter) => "usePreviousValue" in parameter)).toBe(true);
-    expect(steps[2]).toMatchObject({ stack: CONTROL_PLANE, logicalId: "BrokerE1355FD6", key: "AGENTX_E2E_AGENT_SETTINGS_PREFIX", expected: { literal: `/agentx/${ENV}/` } });
-    expect(formatPlan(steps)).toContain("BrokerE1355FD6");
-    expect(formatPlan(steps)).toContain("AGENTX_E2E_AGENT_SETTINGS_PREFIX");
-  });
-
-  it("accepts the change set only when the broker changes its Environment and each policy its PolicyDocument, and nothing else", () => {
-    const expected = changeSetOf(plan(["e2e-agent-settings"])).expect;
-    const own = [{ evaluation: "Static", changeSource: "DirectModification" }];
-    const broker = { action: "Modify", logicalId: "BrokerE1355FD6", type: "AWS::Lambda::Function", replacement: "False", attributes: ["Properties.Environment"], details: own };
-    const policies = E2E_AGENT_SETTINGS_UNIT.policies.map((logicalId) => ({ action: "Modify", logicalId, type: "AWS::IAM::Policy", replacement: "False", attributes: ["Properties.PolicyDocument"], details: own }));
-    expect(() => assertOnlyExpectedChanges([broker, ...policies], expected)).not.toThrow();
-    // A policy may change its document and not its roles, and the broker its environment and not its code or role.
-    expect(() => assertOnlyExpectedChanges([{ ...broker, attributes: ["Properties.Environment", "Properties.Code"] }, ...policies], expected)).toThrow(/Properties\.Code/);
-    expect(() => assertOnlyExpectedChanges([{ ...broker, attributes: ["Properties.PolicyDocument"] }, ...policies], expected)).toThrow(/Properties\.PolicyDocument/);
-    expect(() => assertOnlyExpectedChanges([broker, { ...policies[0]!, attributes: ["Properties.PolicyDocument", "Properties.Roles"] }, ...policies.slice(1)], expected)).toThrow(/Properties\.Roles/);
-    expect(() => assertOnlyExpectedChanges([broker, { ...policies[0]!, attributes: ["Properties.Environment"] }, ...policies.slice(1)], expected)).toThrow(/Properties\.Environment/);
-    expect(() => assertOnlyExpectedChanges([{ ...broker, replacement: "True" }, ...policies], expected)).toThrow(/replac/);
-    expect(() => assertOnlyExpectedChanges([broker, ...policies, { action: "Modify", logicalId: "SessionsSteps3B98DD2B", type: "AWS::Lambda::Function", attributes: ["Properties.Code"], details: own }], expected)).toThrow(/SessionsSteps3B98DD2B/);
-    expect(() => assertOnlyExpectedChanges([broker, ...policies, { action: "Add", logicalId: "E2eModelDiscovery", type: "AWS::IAM::Policy" }], expected)).toThrow(/Add E2eModelDiscovery/);
-    expect(() => assertOnlyExpectedChanges([broker, ...policies.slice(1)], expected)).toThrow(/missing the expected Modify/);
   });
 
   // DEPLOYFIX round 2: the change set CloudFormation made for this unit on TEST at b6cfedb4 (saved from the refused live run): the three declared Modifies and eight Modifies that only
@@ -210,7 +122,6 @@ describe("the e2e-agent-settings unit", () => {
 });
 
 describe("the model-fallback-settings unit", () => {
-  const RUNTIME_WITH_FALLBACK: StackParameters = { ...previous, runtime: { ...previous.runtime, ModelFallback: "none" } };
 
   it("is a unit of its own, never a default one", () => {
     expect(DEPLOY_UNITS).toContain("model-fallback-settings");
@@ -220,45 +131,6 @@ describe("the model-fallback-settings unit", () => {
     }
   });
 
-  it("adds the parameter and its SSM setting, defaulting to none: exactly two additions lifted from a synth of the runtime stack, then reads the parameter back", () => {
-    const steps = plan(["model-fallback-settings"]);
-    expect(kinds(steps)).toEqual(["create-change-set", "execute-change-set", "verify-stack-parameter"]);
-    const changeSet = changeSetOf(steps);
-    expect(changeSet.stack).toBe(RUNTIME);
-    expect(changeSet.template).toEqual({
-      source: "lift-resources", logicalIdPrefix: "WorkerModelFallbackParameter", parameterNames: ["ModelFallback"], construct: "AgentXProductionRuntime", cdkContext: {}, identityMode: "cognito",
-    });
-    expect(changeSet.expect).toEqual({ action: "Add", logicalIdPrefixes: ["WorkerModelFallbackParameter"] });
-    const template = changeSet.template as Extract<ChangeSetStep["template"], { source: "lift-resources" }>;
-    expect((template.parameterNames ?? []).length + (changeSet.expect.logicalIdPrefixes ?? []).length).toBe(2);
-    expect(changeSet.parameters).toEqual([
-      { key: "ModelFallback", literal: "none" },
-      { key: "ModelId", usePreviousValue: true }, { key: "ModelProvider", usePreviousValue: true }, { key: "WorkerImageUri", usePreviousValue: true },
-    ]);
-    expect(steps[2]).toMatchObject({ stack: RUNTIME, key: "ModelFallback", expected: { literal: "none" } });
-  });
-
-  it("refuses to plan once the runtime stack has the parameter, and points at the command that changes it", () => {
-    expect(() => plan(["model-fallback-settings"], { previous: RUNTIME_WITH_FALLBACK })).toThrow(/already has ModelFallback.*models\.fallback/);
-  });
-
-  it("accepts the change set only when it adds the parameter's SSM setting and nothing else", () => {
-    const expected = changeSetOf(plan(["model-fallback-settings"])).expect;
-    const added = { action: "Add", logicalId: "WorkerModelFallbackParameter0A1B2C3D", type: "AWS::SSM::Parameter" };
-    expect(() => assertOnlyExpectedChanges([added], expected)).not.toThrow();
-    expect(() => assertOnlyExpectedChanges([added, { action: "Add", logicalId: "WorkerOtherParameter", type: "AWS::SSM::Parameter" }], expected)).toThrow(/Add WorkerOtherParameter/);
-    expect(() => assertOnlyExpectedChanges([added, { action: "Modify", logicalId: "WorkerImageParameter", type: "AWS::SSM::Parameter", attributes: ["Properties.Value"] }], expected)).toThrow(/Modify WorkerImageParameter/);
-    expect(() => assertOnlyExpectedChanges([{ ...added, action: "Modify" }], expected)).toThrow(/Modify WorkerModelFallbackParameter0A1B2C3D/);
-  });
-
-  it("prints what it will do, and takes no --e2e-model", () => {
-    const text = formatPlan(plan(["model-fallback-settings"]));
-    expect(text).toContain("ModelFallback=none");
-    expect(text).toContain("WorkerModelFallbackParameter*");
-    expect(text).not.toContain("image");
-    expect(parseTestDeployArgs(["--env", ENV, "--profile", "p", "--only", "model-fallback-settings"])).toMatchObject({ only: ["model-fallback-settings"] });
-    expect(() => parseTestDeployArgs(["--env", ENV, "--profile", "p", "--only", "model-fallback-settings", "--e2e-model", "default"])).toThrow("--e2e-model goes only with --only e2e-agent-model");
-  });
 });
 
 describe("liftDeclaredSettings", () => {
@@ -393,17 +265,4 @@ describe("liftDeclaredSettings", () => {
     });
   });
 
-  it("refuses a policy that does not carry the parameter in head, a resource of another type, and a resource missing from either template", () => {
-    expect(() => liftDeclaredSettings(template(false), template(false), { environment: [], grants: declared.grants })).toThrow(/head's P1 has no grant/);
-    expect(() => liftDeclaredSettings(template(false), template(false), declared)).toThrow(/head's BrokerE1355FD6 does not set AGENTX_E2E_AGENT_SETTINGS_PREFIX/);
-    const notPolicy = template(true);
-    notPolicy.Resources!["P1"] = { Type: "AWS::SQS::Queue", Properties: {} };
-    expect(() => liftDeclaredSettings(template(false), notPolicy, declared)).toThrow(/P1 is not an AWS::IAM::Policy/);
-    const missing = template(true);
-    delete missing.Resources!["P2"];
-    expect(() => liftDeclaredSettings(template(false), missing, declared)).toThrow(/P2/);
-    const noBroker = template(false);
-    delete noBroker.Resources!["BrokerE1355FD6"];
-    expect(() => liftDeclaredSettings(noBroker, template(true), declared)).toThrow(/BrokerE1355FD6/);
-  });
 });

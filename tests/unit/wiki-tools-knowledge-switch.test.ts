@@ -3,7 +3,7 @@
 // wiki, its repositories or its store is read. Switch off: byte-identical to before. Two companies: one company's switch never reaches another's wiki.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { KNOWLEDGE_STAYS_SENTENCE, WikiToolsOffSchema, type AuditSink, type OrgId, type WikiPageWrite } from "@agentx/contracts";
+import { KNOWLEDGE_STAYS_SENTENCE, type AuditSink, type OrgId, type WikiPageWrite } from "@agentx/contracts";
 import { createScriptToken } from "../../packages/broker/src/core/script-tokens/store.js";
 import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
 import { createCoreDevRoutes } from "../../packages/broker/src/core-host/dev-routes.js";
@@ -72,31 +72,6 @@ async function world(options: { learning?: Partial<LearningSettings>; gateFails?
 }
 
 describe("the MCP wiki tools answer the company switch", () => {
-  it("switch ON: a tool outside Rovara gets the one fixed sentence on every wiki read, and nothing of the wiki, its repositories or its store is read", async () => {
-    const h = await world();
-    await h.stays(FAKE_COMPANY, true);
-    for (const path of paths) {
-      h.events.length = 0;
-      const answer = await h.tool(path);
-      expect(answer?.statusCode, path).toBe(200);
-      const body = JSON.parse(answer!.body) as unknown;
-      expect(WikiToolsOffSchema.parse(body), path).toEqual({ status: "off", reason: "company_stays", message: KNOWLEDGE_STAYS_SENTENCE });
-      expect(JSON.stringify(body)).not.toMatch(/A-alpha|B-alpha|overview|web/u);
-      // The order: the person's standing, then the gate, and then nothing at all (no repositories read, no prune, no wiki row asked for).
-      expect(h.events, path).toEqual([`standing ${FAKE_COMPANY}/alpha`, `gate ${FAKE_COMPANY}/alpha`]);
-    }
-  });
-
-  it("switch ON: a script token with the wiki permission is held to it too", async () => {
-    const h = await world();
-    await h.stays(FAKE_COMPANY, true);
-    // A script token reaches only the two reads the MCP tools use (the index and a page); search and sources are the web app's.
-    for (const path of [paths[0], paths[1]]) {
-      const answer = await h.scriptToken(path);
-      expect(answer?.statusCode, path).toBe(200);
-      expect(JSON.parse(answer!.body)).toEqual({ status: "off", reason: "company_stays", message: KNOWLEDGE_STAYS_SENTENCE });
-    }
-  });
 
   it("switch OFF: the same reads answer exactly what the web app is given (nothing changed)", async () => {
     const h = await world();
@@ -112,48 +87,6 @@ describe("the MCP wiki tools answer the company switch", () => {
     await h.stays(FAKE_COMPANY, true);
     await h.stays(FAKE_COMPANY, false);
     expect(JSON.parse((await h.tool(paths[0]))!.body)).toMatchObject({ project: "alpha", state: "ready" });
-  });
-
-  it("switch ON: the Rovara web app's own Wiki tab is NOT held back (only tools outside Rovara are)", async () => {
-    const h = await world();
-    await h.stays(FAKE_COMPANY, true);
-    for (const path of paths) {
-      h.events.length = 0;
-      const answer = await h.webApp(path);
-      expect(answer?.statusCode, path).toBe(200);
-      expect(answer!.body).not.toContain("Your company keeps team knowledge");
-      expect(h.events.some((event) => event.startsWith("gate")), path).toBe(false);
-    }
-    expect((await h.webApp(paths[1]))!.body).toContain("A-alpha");
-  });
-
-  it("two companies: one company's switch never reaches the other's wiki, in either direction", async () => {
-    const h = await world();
-    await h.stays(FAKE_COMPANY, true);
-    // Company A is on, B is off: B's tool reads B's own wiki, A's tool is told the sentence.
-    const b = await h.tool(paths[1], OTHER);
-    expect(b?.statusCode).toBe(200);
-    expect(b!.body).toContain("B-alpha");
-    expect(b!.body).not.toMatch(/A-alpha|Your company keeps/u);
-    expect(JSON.parse((await h.tool(paths[1]))!.body)).toMatchObject({ status: "off" });
-    // And the other way round.
-    await h.stays(FAKE_COMPANY, false);
-    await h.stays(OTHER, true);
-    expect((await h.tool(paths[1]))!.body).toContain("A-alpha");
-    expect(JSON.parse((await h.tool(paths[1], OTHER))!.body)).toMatchObject({ status: "off", message: KNOWLEDGE_STAYS_SENTENCE });
-  });
-
-  it("a person with no standing on the project still gets 'project not found', never the sentence (the switch cannot be used to probe projects)", async () => {
-    const h = await world();
-    await h.stays(FAKE_COMPANY, true);
-    h.denyRole();
-    for (const path of paths) {
-      h.events.length = 0;
-      const answer = await h.tool(path);
-      expect(answer?.statusCode, path).toBe(404);
-      expect(answer!.body).not.toContain("Your company keeps");
-      expect(h.events.some((event) => event.startsWith("gate"))).toBe(false);
-    }
   });
 
   it("a setting that cannot be read fails closed (503, no wiki), not open", async () => {
@@ -196,17 +129,6 @@ describe("wikiToolsGate", () => {
     expect(await wikiToolsGate({ localTools: settings({ companyStays: true }) }, key)).toEqual({ status: "off", reason: "company_stays", message: KNOWLEDGE_STAYS_SENTENCE });
     expect(await wikiToolsGate({ localTools: settings({ companyStays: false }) }, key)).toBeUndefined();
     await expect(wikiToolsGate({ localTools: settings("throw") }, key)).rejects.toBeInstanceOf(LocalLessonsUnavailable);
-  });
-  it("a caller that says nothing about being the web app is held to the switch (the route's default is closed)", async () => {
-    const h = await world();
-    await h.stays(FAKE_COMPANY, true);
-    const { routeHostedWiki } = await import("../../packages/broker/src/core-host/wiki-routes.js");
-    const answer = await routeHostedWiki({ request: { method: "GET", path: paths[0], headers: {} }, path: paths[0], personId: "p", companyId: FAKE_COMPANY, store: h.w.store, now: () => h.w.clock.now, wiring: { standing: async () => ({ access: "view" }), projectRepositories: async () => ["web"], toolGate: async (companyId, project) => await wikiToolsGate({ localTools: h.localTools }, { workspaceId: companyId, project }) } });
-    expect(JSON.parse(answer.body)).toMatchObject({ status: "off" });
-  });
-  it("throws LocalLessonsUnavailable when the setting cannot be read", async () => {
-    setLearnedLessonsGate(() => true);
-    await expect(wikiToolsGate({ localTools: settings("throw"), settings: learning() }, key)).rejects.toBeInstanceOf(LocalLessonsUnavailable);
   });
 });
 

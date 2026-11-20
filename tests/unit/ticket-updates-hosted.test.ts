@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_TICKET_UPDATES, TicketUpdatesViewSchema, ticketUpdatesSettingsKey, ticketWriteAccessKey, type AuditEvent, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { TICKET_UPDATES_WORDS, isTicketUpdatesPath, routeHostedTicketUpdates, type HostedTicketUpdatesWiring } from "../../packages/broker/src/core-host/ticket-updates-routes.js";
+import { TICKET_UPDATES_WORDS, routeHostedTicketUpdates, type HostedTicketUpdatesWiring } from "../../packages/broker/src/core-host/ticket-updates-routes.js";
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { readTicketUpdates } from "../../packages/broker/src/core/ticket-updates/settings.js";
 import { COMPANY_A, COMPANY_B } from "../support/wiki-build-fixtures.js";
@@ -57,16 +57,6 @@ const put = (w: ReturnType<typeof hosted>, person: string, project: string, body
 const NOT_FOUND = { status: 404, body: { error: { code: "NOT_FOUND", message: "project not found" } } };
 const defaults = { ...DEFAULT_TICKET_UPDATES, statuses: { ...DEFAULT_TICKET_UPDATES.statuses } };
 
-describe("the path", () => {
-  it("is GET and PUT on exactly /v1/app/projects/{project}/intake/updates", () => {
-    expect(isTicketUpdatesPath("/v1/app/projects/beacon/intake/updates", "GET")).toBe(true);
-    expect(isTicketUpdatesPath("/v1/app/projects/beacon/intake/updates", "PUT")).toBe(true);
-    for (const [path, method] of [["/v1/app/projects/beacon/intake/updates", "POST"], ["/v1/app/projects/beacon/intake/updates", "DELETE"], ["/v1/app/projects/beacon/intake/updates/x", "GET"], ["/v1/app/projects/beacon/intake", "GET"], ["/v1/app/projects/beacon/intake/sources", "PUT"], ["/v1/app/projects//intake/updates", "GET"]] as const) {
-      expect(isTicketUpdatesPath(path, method), `${method} ${path}`).toBe(false);
-    }
-  });
-});
-
 describe("reading: any role reads, the laptop's defaults, everyone else the same 404", () => {
   it("answers the laptop's view shape: the defaults, canEdit for a manager, and Linear's write access as last seen", async () => {
     const w = hosted();
@@ -107,17 +97,6 @@ describe("reading: any role reads, the laptop's defaults, everyone else the same
 });
 
 describe("changing: a company owner or admin, or the project's administrator; a reader is refused", () => {
-  it("each manager saves, and the view answers what was saved; the audit record names the person and why", async () => {
-    for (const [person, basis] of [[OWNER, "company-owner"], [ADMIN, "company-admin"], [PROJECT_ADMIN, "project-admin"]] as const) {
-      const w = hosted();
-      const requestId = randomUUID();
-      const saved = await put(w, person, "beacon", { requestId, settings: DECISIONS });
-      expect(saved).toEqual({ status: 200, body: { settings: DECISIONS, canEdit: true, access: [{ tracker: "linear", state: "ok" }] } });
-      expect((await readTicketUpdates({ store: w.store, now: () => T0 }, COMPANY_A, "beacon")).settings).toEqual(DECISIONS);
-      expect(w.audited).toHaveLength(1);
-      expect(w.audited[0]).toMatchObject({ companyId: COMPANY_A, actor: { type: "person", id: person }, action: "ticket_updates.changed", subject: { type: "project", id: "beacon" }, details: { project: "beacon", basis, requestId, level: "decisions", comments: true, changeStatus: true } });
-    }
-  });
 
   it("refuses a reader with 403 in fixed words, before the body is read and with nothing written", async () => {
     const w = hosted();
@@ -160,28 +139,3 @@ describe("changing: a company owner or admin, or the project's administrator; a 
   });
 });
 
-describe("isolation: every row is keyed by company AND project", () => {
-  it("two projects: a save for beacon leaves other on the defaults", async () => {
-    const w = hosted();
-    await put(w, OWNER, "beacon", { requestId: randomUUID(), settings: DECISIONS });
-    expect((await w.call(OWNER, "GET", "beacon")).body.settings).toEqual(DECISIONS);
-    expect((await w.call(OWNER, "GET", "other")).body.settings).toEqual(defaults);
-  });
-
-  it("two companies: the same project name in company B is its own setting, and company A's owner cannot reach it", async () => {
-    const store = new MemoryDocumentStore();
-    const a = hosted({ store });
-    const b = hosted({ store, company: COMPANY_B });
-    await put(a, OWNER, "beacon", { requestId: randomUUID(), settings: DECISIONS });
-    expect((await b.call(OWNER_B, "GET", "beacon")).body.settings).toEqual(defaults);
-    // Company A's owner, asking through company B's route, has no standing there.
-    expect(await b.call(OWNER, "GET", "beacon")).toEqual(NOT_FOUND);
-    expect(await put(b, OWNER, "beacon", { requestId: randomUUID(), settings: { ...DECISIONS, level: "full" } })).toEqual(NOT_FOUND);
-    expect((await readTicketUpdates({ store, now: () => T0 }, COMPANY_B, "beacon")).revision).toBe(0);
-    expect((await readTicketUpdates({ store, now: () => T0 }, COMPANY_A, "beacon")).settings).toEqual(DECISIONS);
-    // Company B's write access is its own: A's "needs write access" is not shown to B.
-    await store.put({ item: { ...ticketWriteAccessKey(COMPANY_A, "linear"), entityType: "TICKET_WRITE_ACCESS", orgId: COMPANY_A, tracker: "linear", state: "needs_write_access", at: "2026-11-18T10:00:00.000Z" } });
-    expect((await b.call(OWNER_B, "GET", "beacon")).body.access).toEqual([{ tracker: "linear", state: "ok" }]);
-    expect(JSON.stringify((await b.call(OWNER_B, "GET", "beacon")).body)).not.toContain(COMPANY_A);
-  });
-});

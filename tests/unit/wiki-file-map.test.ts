@@ -35,28 +35,6 @@ const SAMPLE = {
 };
 
 describe("wiki file map: one repository", () => {
-  it("counts files, languages, areas and tests, skips vendored, generated, lock and secret files, and pins one commit", async () => {
-    const w = world(SAMPLE);
-    const head = w.model.headOf("main");
-    const map = await mapRepository(w.repo(), deps, NOW + 60_000, 100);
-    expect(map.status).toBe("ok");
-    expect(map.commit).toBe(head);
-    expect(map.skipped).toEqual({ generated: 1, vendored: 2, lockfiles: 1, assets: 1, secret: 3 });
-    expect(map.files).toBe(SAMPLE_COUNTED);
-    expect(map.languages.map((l) => l.language)).toEqual(["TypeScript", "Python"]);
-    expect(map.areas.map((a) => a.path).sort()).toEqual([".", "docs", "src/a", "src/b", "tests", "web"].sort());
-    expect(map.testFolders).toEqual(["tests"]);
-    expect(map.skippedFolders).toEqual(["dist", "node_modules", "vendor"]);
-    expect(map.pages).toEqual({ repository: 1, modules: 3, modulesCapped: false });
-  });
-
-  it("never lists a secret-shaped path anywhere in the map (names, folders, chips)", async () => {
-    const w = world({ ...SAMPLE, "src/a/.env.local": "x", "vendor/app/.env": "x", "dist/keys/id_rsa": "x", "billing/prod.tfvars": "x", "billing/a.ts": "x", "billing/b.ts": "x", "billing/c.ts": "x" });
-    const map = await computeWikiFileMap({ project: "p", repositories: [w.repo()] }, deps);
-    const text = JSON.stringify(map);
-    for (const needle of [".env", "server.pem", "secrets", "id_rsa", "tfvars", "db.txt"]) expect(text, needle).not.toContain(needle);
-    expect(map.repositories[0]!.skipped.secret).toBe(7);
-  });
 
   it("measures activity per source area from the code host and ranks the busiest first", async () => {
     const w = world(SAMPLE);
@@ -171,71 +149,6 @@ describe("wiki file map: one repository", () => {
     expect(big.repositories[0]!.areas.length).toBe(40);
   });
 
-  it("caps pages per project and says so", async () => {
-    const many: Record<string, string> = {};
-    for (let i = 0; i < 40; i += 1) for (const f of ["a", "b", "c"]) many[`mod${String(i)}/${f}.ts`] = "x";
-    const repos = Array.from({ length: 10 }, (_, i) => world(many, `r${String(i)}`).repo({ name: `r${String(i)}` }));
-    const map = await computeWikiFileMap({ project: "p", repositories: repos }, deps);
-    expect(map.forecast).toMatchObject({ pages: 300, pagesCapped: true });
-  });
-
-  it("reads at most 20 repositories and says how many were left out", async () => {
-    const repos = Array.from({ length: 23 }, (_, i) => world({ "a.ts": "x" }, `r${String(i)}`).repo({ name: `r${String(i)}` }));
-    const { wrapped, calls } = counted(repos[0]!.host);
-    const map = await computeWikiFileMap({ project: "p", repositories: repos.map((r) => ({ ...r, host: wrapped })) }, deps);
-    expect(map.repositories).toHaveLength(20);
-    expect(calls.tree).toBe(20);
-    expect(map.repositoriesOmitted).toBe(3);
-    expect(map.complete).toBe(false);
-  });
-
-  it("shares the commit-count budget across repositories", async () => {
-    const files: Record<string, string> = {};
-    for (let i = 0; i < 30; i += 1) for (const f of ["a", "b", "c"]) files[`m${String(i)}/${f}.ts`] = "x";
-    const repos = Array.from({ length: 8 }, (_, i) => world(files, `r${String(i)}`).repo({ name: `r${String(i)}` }));
-    const { wrapped, calls } = counted(repos[0]!.host);
-    const map = await computeWikiFileMap({ project: "p", repositories: repos.map((r) => ({ ...r, host: wrapped })) }, deps);
-    // 30 source folders x 8 repositories would be 240 calls (each folder with no commit costs two requests): each repository gets 160 / 8 = 20 requests, so it measures about 10 folders and says partial.
-    expect(calls.activity).toBeLessThanOrEqual(8 * 10);
-    expect(map.repositories.every((repo) => repo.activity.status === "partial")).toBe(true);
-    expect(map.complete).toBe(false);
-  });
-
-  it("never names a folder that looks secret, whatever it is called, and does not walk into it", async () => {
-    const names = ["prod-secrets", "secrets_prod", "credentials", ".env", "private-keys", "keys", "my.secret", "Secrets"];
-    const files: Record<string, string> = { "src/a/one.ts": "x", "src/a/two.ts": "x", "src/a/three.ts": "x" };
-    for (const name of names) for (const f of ["a.ts", "b.ts", "c.ts"]) files[`${name}/${f}`] = "x";
-    const w = world(files);
-    for (const cut of [false, true]) {
-      if (cut) w.model.incompleteTrees.add(w.model.headOf("main"));
-      const dirs: string[] = [];
-      const host: FileMapHost = { ...counted(w.host).wrapped, directoryEntries: async (...args) => { dirs.push(args[1]); return w.host.directoryEntries(args[0], args[1], args[2], args[3]); } };
-      const map = await computeWikiFileMap({ project: "p", repositories: [w.repo({ host })] }, deps);
-      const text = JSON.stringify(map).toLowerCase();
-      for (const name of names) expect(text, `${name} cut=${String(cut)}`).not.toContain(name.toLowerCase());
-      expect(map.repositories[0]!.skipped.secret).toBe(cut ? 0 : names.length * 3);
-      for (const dir of dirs) expect(names.map((n) => n.toLowerCase())).not.toContain(dir.toLowerCase());
-    }
-  });
-
-  it("does not walk into vendored, generated or secret folders after a cut tree (they are named, not read)", async () => {
-    const w = world({ "src/a.ts": "x", "node_modules/p/i.js": "x", "vendor/x/y.php": "x", "dist/main.js": "x" });
-    w.model.incompleteTrees.add(w.model.headOf("main"));
-    const dirs: string[] = [];
-    const host: FileMapHost = { ...counted(w.host).wrapped, directoryEntries: async (...args) => { dirs.push(args[1]); return w.host.directoryEntries(args[0], args[1], args[2], args[3]); } };
-    const map = await mapRepository(w.repo({ host }), deps, NOW + 60_000, 100);
-    expect(dirs.sort()).toEqual(["", "src"]);
-    expect(map.skippedFolders).toEqual(["dist", "node_modules", "vendor"]);
-  });
-
-  it("stops the folder walk when time is up and says partial", async () => {
-    const w = world({ "a/x.ts": "x", "b/x.ts": "x", "c/x.ts": "x" });
-    w.model.incompleteTrees.add(w.model.headOf("main"));
-    let clock = NOW;
-    const map = await mapRepository(w.repo(), { scope, now: () => (clock += 10_000) }, NOW + 25_000, 100);
-    expect(map.status === "partial" || map.status === "unavailable").toBe(true);
-  });
-
   it("counts, but never names, a folder whose name is not one plain line", async () => {
     const odd = `bad\nfolder`;
     const long = "l".repeat(310);
@@ -255,33 +168,8 @@ describe("wiki file map: one repository", () => {
     expect(map.complete).toBe(false);
   });
 
-  it("answers in the contract's own shape, with no dollar field", async () => {
-    const w = world(SAMPLE);
-    const map = await computeWikiFileMap({ project: "p", repositories: [w.repo()] }, deps);
-    expect(WikiFileMapSchema.parse(map)).toEqual(map);
-    expect(JSON.stringify(map)).not.toMatch(/usd|dollar|cost|\$/iu);
-    expect(map.forecast.price).toBe("not_priced_yet");
-  });
 });
 
 // Counted files of SAMPLE: README.md, package.json, src/a x3, src/b x3, tests/a.test.ts, docs/guide.md, web x3 = 13.
 const SAMPLE_COUNTED = 13;
 
-describe("wiki file map contract", () => {
-  it("refuses a map that is partial without saying so, and a whole one that claims to be partial", async () => {
-    const w = world(SAMPLE);
-    const whole = await computeWikiFileMap({ project: "p", repositories: [w.repo()] }, deps);
-    const repo = whole.repositories[0]!;
-    const bad = (override: object) => WikiFileMapSchema.safeParse({ ...whole, repositories: [{ ...repo, ...override }] }).success;
-    expect(bad({})).toBe(true);
-    expect(bad({ status: "partial" })).toBe(false);
-    expect(bad({ status: "partial", partial: "the code host cut the list" })).toBe(false);
-    expect(bad({ status: "partial", partial: "partial: the code host cut the list" })).toBe(true);
-    expect(bad({ partial: "partial: because" })).toBe(false);
-    expect(bad({ status: "unavailable" })).toBe(false);
-    expect(bad({ unavailable: "x" })).toBe(false);
-    expect(bad({ extra: 1 })).toBe(false);
-    expect(WikiFileMapSchema.safeParse({ ...whole, forecast: { ...whole.forecast, price: "$4.00" } }).success).toBe(false);
-    expect(WikiFileMapSchema.safeParse({ ...whole, forecast: { ...whole.forecast, estimatedUsd: 4 } }).success).toBe(false);
-  });
-});

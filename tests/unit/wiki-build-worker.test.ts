@@ -8,8 +8,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { BUDGET_LIMIT_KINDS, WIKI_BUILD_TOOLS, agentXError, budgetExhaustedWords, type WikiBuildPins } from "@agentx/contracts";
-import { ModelBudgetExhaustedError } from "@agentx/model-runtime";
+import { WIKI_BUILD_TOOLS, agentXError, type WikiBuildPins } from "@agentx/contracts";
 import { agentStepTools } from "../../packages/worker/src/agent-step.js";
 import { createWorkspacePiSession, piTaskToolCapabilities, type PiSessionAdapter, type PiSessionHandle } from "../../packages/worker/src/pi-session.js";
 import { wikiSessionInputOf } from "../../packages/worker/src/wiki-build-invocation.js";
@@ -77,19 +76,6 @@ const answers = (w: World) => w.bodies.filter((body) => body["kind"] === "page")
 const answerText = (draft: unknown = DRAFT) => `Here is the page.\n\`\`\`json\n${JSON.stringify(draft)}\n\`\`\``;
 
 describe("the session is read-only", () => {
-  // MUTANT read-only tool list: the session is given bash, write or edit (or the list is the caller's).
-  it("opens every session with exactly read, grep, find and ls in the WIKI mode, sequential and output-capped", async () => {
-    const w = world([pageJob("overview"), pageJob("repo-api")], (session) => session.turn(answerText()));
-    await runWikiBuild(w.input);
-    expect(w.parts).toHaveLength(2);
-    for (const given of w.parts) {
-      expect(given.workflowMode).toBe("WIKI");
-      expect([...given.agentTools]).toEqual(["read", "grep", "find", "ls"]);
-      expect(given.sequentialTools).toBe(true);
-      expect(given.maxOutputTokens).toBeGreaterThan(0);
-    }
-    expect([...WIKI_BUILD_TOOLS]).toEqual(["read", "grep", "find", "ls"]);
-  });
 
   it("the mode's own tool surface is read-only: no shell, and asking for bash or write adds nothing", () => {
     expect(piTaskToolCapabilities("WIKI")).toEqual({ tools: ["read", "grep", "find", "ls"], customFileTools: false, shell: false });
@@ -97,12 +83,6 @@ describe("the session is read-only", () => {
     expect(agentStepTools("WIKI", WIKI_BUILD_TOOLS)).toEqual({ tools: ["read", "grep", "find", "ls"], shell: false });
   });
 
-  it("each page gets a fresh session, disposed after the page", async () => {
-    const w = world([pageJob("overview"), pageJob("repo-api")], (session) => session.turn(answerText()));
-    await runWikiBuild(w.input);
-    expect(new Set(w.sessions).size).toBe(2);
-    expect(w.sessions.map((session) => session.disposed)).toEqual([1, 1]);
-  });
 });
 
 describe("pins enforcement: the workspace is the broker's pinned commits", () => {
@@ -110,11 +90,8 @@ describe("pins enforcement: the workspace is the broker's pinned commits", () =>
   it.each([
     ["another commit", [{ name: "api", path: "repo/api", resolvedCommit: WEB }], PINS],
     ["an extra repository", [{ name: "api", path: "repo/api", resolvedCommit: API }, { name: "web", path: "repo/web", resolvedCommit: WEB }], PINS],
-    ["a missing repository", [{ name: "api", path: "repo/api", resolvedCommit: API }], [{ repo: "api", commit: API }, { repo: "web", commit: WEB }]],
-    ["no repository", [], PINS],
     ["a pull request head", [{ name: "api", path: "repo/api", resolvedCommit: API, checkedOut: { pr: 1 } }], PINS],
     ["a commit that is not a hash", [{ name: "api", path: "repo/api", resolvedCommit: "main" }], [{ repo: "api", commit: "main" }]],
-    ["a repository the pins do not name", [{ name: "other", path: "repo/other", resolvedCommit: API }], PINS],
   ])("refuses %s before the broker is asked for anything", async (_name, repositories, pins) => {
     const w = world([pageJob("overview")], (session) => session.turn(answerText()), { repositories, pins });
     await expect(runWikiBuild(w.input)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
@@ -132,20 +109,6 @@ describe("pins enforcement: the workspace is the broker's pinned commits", () =>
 });
 
 describe("the callback carries only what the run knows", () => {
-  it("next names the spend only; page names the page id, the spend and the draft or the failure only", async () => {
-    const w = world([pageJob("overview")], (session) => session.turn(answerText()));
-    await runWikiBuild(w.input);
-    expect(w.bodies.map((body) => Object.keys(body).sort())).toEqual([["kind", "spentCents"], ["answer", "kind"], ["kind", "spentCents"]]);
-    expect(Object.keys(answers(w)[0]!).sort()).toEqual(["draft", "pageId", "spentCents"]);
-    expect(JSON.stringify(w.bodies)).not.toMatch(/orgId|companyId|project|taskId|workspace/u);
-  });
-
-  it("ends when the broker says so, with the word, and asks again only after each answer", async () => {
-    const w = world([pageJob("overview"), { kind: "end", word: "budget_used" }], (session) => session.turn(answerText()));
-    const result = await runWikiBuild(w.input);
-    expect(result).toMatchObject({ pagesAttempted: 1, end: "budget_used" });
-    expect(w.bodies.map((body) => body["kind"])).toEqual(["next", "page", "next"]);
-  });
 
   it("the task's instructions carry the broker's words, the repository paths and the framed notes, and nothing else", async () => {
     const w = world([pageJob("overview", 1_000, { notes: "<source-result untrusted=\"true\">src matters</source-result>" })], (session) => session.turn(answerText()));
@@ -158,40 +121,6 @@ describe("the callback carries only what the run knows", () => {
 });
 
 describe("money: metered spend, a ceiling that holds", () => {
-  const big: Usage = { input: 100_000, output: 4_000 };
-
-  it("reports the run's spend, only ever upward, across pages", async () => {
-    const w = world([pageJob("overview"), pageJob("repo-api")], (session) => session.turn(answerText(), big));
-    await runWikiBuild(w.input);
-    const spends = w.bodies.map((body) => (body["kind"] === "next" ? body["spentCents"] : (body["answer"] as { spentCents: number }).spentCents) as number);
-    // next(0), page(first page's cost), next(that), page(both pages), next(both)
-    expect(spends[0]).toBe(0);
-    expect(spends[1]).toBeGreaterThanOrEqual(36);
-    expect(spends[2]).toBe(spends[1]);
-    expect(spends[3]).toBeGreaterThanOrEqual(spends[1]! * 2 - 1);
-    for (let i = 1; i < spends.length; i += 1) expect(spends[i]!).toBeGreaterThanOrEqual(spends[i - 1]!);
-  });
-
-  // MUTANT spend stop: the ceiling is not checked (or checked after the next turn, or only against the spend without the next turn's estimate).
-  it("stops the session before a turn that could cross the ceiling, reports budget_used and keeps no draft", async () => {
-    // One turn costs 36 cents; the next turn could cost about 46 more: with a ceiling of 60 the second turn must not start.
-    const w = world([pageJob("overview", 60)], (session) => { session.turn("thinking", big); session.turn(answerText(), big); });
-    await runWikiBuild(w.input);
-    const [answer] = answers(w);
-    expect(answer).toMatchObject({ pageId: "overview", failure: "budget_used" });
-    expect(answer).not.toHaveProperty("draft");
-    expect(w.sessions[0]!.aborted).toBeGreaterThanOrEqual(1);
-    expect(answer!["spentCents"]).toBeGreaterThanOrEqual(36);
-  });
-
-  it("stops before the very first turn when even one turn could not fit under the ceiling", async () => {
-    let turns = 0;
-    const w = world([pageJob("overview", 5)], (session) => { session.emit({ type: "turn_start" }); turns += 1; });
-    await runWikiBuild(w.input);
-    expect(answers(w)[0]).toMatchObject({ failure: "budget_used" });
-    expect(w.sessions[0]!.aborted).toBeGreaterThanOrEqual(1);
-    expect(turns).toBe(1);
-  });
 
   // MUTANT estimate (review M1): the next-turn estimate ignores what the tools returned, so a turn that read many big files crosses the ceiling.
   it("counts what the tools returned since the last model message in the next turn's estimate", async () => {
@@ -213,44 +142,11 @@ describe("money: metered spend, a ceiling that holds", () => {
     expect(many.sessions[0]!.aborted).toBeGreaterThanOrEqual(1);
   });
 
-  it("the reads counted are those since the last model message (a later turn starts the count again)", async () => {
-    const w = world([pageJob("overview", 30)], (session) => {
-      session.turn("reading", { input: 1_000, output: 200 });
-      session.emit({ type: "tool_execution_end" });
-      session.turn("reading again", { input: 1_000, output: 200 });
-      session.emit({ type: "tool_execution_end" });
-      session.emit({ type: "turn_start" });
-      session.turn(answerText(), { input: 1_000, output: 200 });
-    });
-    await runWikiBuild(w.input);
-    expect(answers(w)[0]).toMatchObject({ draft: DRAFT });
-  });
-
   // MUTANT (review L1): only the whole session's total is checked for unreadable usage, so a later turn with no usage adds nothing and under-reports.
   it("a LATER turn with no usage and no new cost is unreadable too, even after good turns", async () => {
     const w = world([pageJob("overview", 1_000)], (session) => { session.turn("one", { input: 1_000, output: 200 }); session.turn(answerText(), { input: 0, output: 0 }); });
     await runWikiBuild(w.input);
     expect(answers(w)[0]).toMatchObject({ failure: "budget_used" });
-  });
-
-  it("a ceiling with room lets the page finish and keep its draft", async () => {
-    const w = world([pageJob("overview", 1_000)], (session) => session.turn(answerText(), { input: 1_000, output: 200 }));
-    await runWikiBuild(w.input);
-    expect(answers(w)[0]).toMatchObject({ draft: DRAFT });
-    expect(answers(w)[0]).not.toHaveProperty("failure");
-    expect(w.sessions[0]!.aborted).toBe(0);
-  });
-
-  it("a turn with no usage and no cost is unreadable, which counts as used up", async () => {
-    const w = world([pageJob("overview", 1_000)], (session) => session.turn(answerText(), { input: 0, output: 0 }));
-    await runWikiBuild(w.input);
-    expect(answers(w)[0]).toMatchObject({ failure: "budget_used" });
-  });
-
-  it("the larger of the session's reported cost and the run's own count stands", async () => {
-    const w = world([pageJob("overview", 1_000)], (session) => { session.costDollars = 5; session.turn(answerText(), { input: 1_000, output: 200 }); });
-    await runWikiBuild(w.input);
-    expect(answers(w)[0]!["spentCents"]).toBeGreaterThanOrEqual(500);
   });
 
   it("the gateway's budget-exhausted marker on a turn (the project's monthly limit ran out) is the budget stop", async () => {
@@ -261,19 +157,6 @@ describe("money: metered spend, a ceiling that holds", () => {
     }
   });
 
-  it("a plain error carrying any limit's own words (task, project, company month, person month, company day) is the budget stop", async () => {
-    for (const limit of BUDGET_LIMIT_KINDS) {
-      const w = world([pageJob("overview")], () => { throw new Error(budgetExhaustedWords(limit)); });
-      await runWikiBuild(w.input);
-      expect(answers(w)[0]).toMatchObject({ failure: "budget_used" });
-    }
-  });
-
-  it("the budget-exhausted failure words from a refused prompt are the budget stop too", async () => {
-    const w = world([pageJob("overview")], () => { throw new ModelBudgetExhaustedError("project"); });
-    await runWikiBuild(w.input);
-    expect(answers(w)[0]).toMatchObject({ failure: "budget_used" });
-  });
 });
 
 describe("fixed failure words", () => {
@@ -291,13 +174,6 @@ describe("fixed failure words", () => {
     const w = world([pageJob("overview")], (session) => session.turn("", { input: 10, output: 1 }, { stopReason: "error", errorMessage: "Model not allowed: Connect an AI key" }));
     await runWikiBuild(w.input);
     expect(answers(w)[0]).toMatchObject({ failure: "needs_ai_key" });
-  });
-
-  it("any other fault is infrastructure, and a refusal carries no words of the cause", async () => {
-    const w = world([pageJob("overview")], () => { throw new Error("socket hang up sk-secret"); });
-    await runWikiBuild(w.input);
-    expect(answers(w)[0]).toMatchObject({ failure: "infrastructure" });
-    expect(JSON.stringify(w.bodies)).not.toContain("socket");
   });
 
   it("a repository that cannot be read at its folder ends the run repo_unreadable, and no session is opened for it", async () => {

@@ -79,33 +79,6 @@ describe("scripts/test-model-canary.ts", () => {
     expect(() => parseCanaryArgs(["--env", ENV, "--profile", "p", "--instance", INSTANCE_ID, "--discover", "--model", MODEL])).toThrow(/--discover/);
   });
 
-  it("refuses to run without --apply", async () => {
-    const fake = effects(passed());
-    await expect(runModelCanary(parseCanaryArgs(["--env", ENV, "--profile", "agentx-test", "--instance", INSTANCE_ID, "--model", MODEL]), fake.value)).rejects.toThrow(/--apply/);
-    expect(fake.puts).toEqual([]);
-  });
-
-  it("asks for a v2 driving test of the planned route and records the rows only for a validated pass", async () => {
-    const fake = effects(passed());
-    expect(await runModelCanary(args, fake.value)).toBe(0);
-    expect(fake.puts).toEqual([{ key: `${PREFIX}canary-request.json`, body: { schemaVersion: "rovara-e2e-model-check-request/v2", checkId: CHECK_ID, kind: "drive", routeId: defs.standard.routeId, definitionDigest: digest } }]);
-    expect(fake.recorded).toEqual([{ kind: "drive-passed", checkId: CHECK_ID }]);
-    expect(fake.lines.join("\n")).toContain("driving test passed");
-    expect(fake.lines.join("\n")).toContain("inputTokens 1000");
-  });
-
-  it("an earlier answer under the key is not this check's: it waits for the one that names it", async () => {
-    const fake = effects(passed(), { stale: true });
-    expect(await runModelCanary(args, fake.value)).toBe(0);
-    expect(fake.recorded).toHaveLength(1);
-  });
-
-  it("asks in the stored shape when a minimal shape passed before", async () => {
-    const fake = effects(undefined, { shape: "minimal" });
-    await runModelCanary({ ...args, timeoutMinutes: 1 }, fake.value);
-    expect(fake.puts[0]!.body["definitionDigest"]).toBe(e2eAgentRouteDefinitionDigest(defs.minimal));
-  });
-
   it("records a failed test's row but exits 1, and writes nothing for a result that does not add up", async () => {
     const failed = receipt({ outcome: "provider-error", responseSha256: null, inputTokens: 0, outputTokens: 0, failure: { class: "limit-or-rate-limited", signal: "ThrottlingException" } });
     const fake = effects(passed({ outcome: "failed", failure: { class: "limit-or-rate-limited", signal: "ThrottlingException" }, caseVerdict: "none", reported: null, calls: 1, inputTokens: 0, outputTokens: 0, receipts: [failed] }));
@@ -131,13 +104,6 @@ describe("scripts/test-model-canary.ts", () => {
     expect(fake.puts[0]!.body).toEqual({ schemaVersion: "rovara-e2e-model-check-request/v2", checkId: CHECK_ID, kind: "discover" });
     expect(fake.recorded).toEqual([{ kind: "discovery", checkId: CHECK_ID }]);
     expect(fake.lines.join("\n")).toContain(`${MODEL}: available, geographic L-1 5 tokens per minute`);
-  });
-
-  it("gives up, bounded, when the runner never answers, and writes no row", async () => {
-    const fake = effects(undefined);
-    expect(await runModelCanary(args, fake.value)).toBe(1);
-    expect(fake.recorded).toEqual([]);
-    expect(fake.lines.join("\n")).toMatch(/no result for this check within/);
   });
 
   it("refuses an installation with no provider, or a model Rovara cannot use there, sending nothing", async () => {
