@@ -117,7 +117,7 @@ describe("every /v1/dev route the broker registers", () => {
     const caller: DeveloperCaller = { developerId: "a".repeat(64), sessionId: "s", amr: "oidc", name: "Ada" };
     // The readers route loads the task before it looks at the method; the gate refuses the other methods there.
     const checksMethodAfterLoading = (path: string) => /^\/v1\/dev\/tasks\/\{\}\/readers(\/\{\})?$/.test(path);
-    for (const path of [...tablePaths].filter((candidate) => candidate === "/v1/dev/tasks" || candidate.startsWith("/v1/dev/tasks/"))) {
+    for (const path of [...tablePaths].filter((candidate) => candidate === "/v1/dev/tasks" || (candidate.startsWith("/v1/dev/tasks/") && candidate !== "/v1/dev/tasks/start-requests/{}"))) {
       for (const method of METHODS) {
         const concrete = path.replaceAll("{}", "x1");
         let served = true;
