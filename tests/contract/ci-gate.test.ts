@@ -65,12 +65,20 @@ describe("the gate behind the local check: what each job must have done, from th
     expect(gateVerdict({ plan: { ...AFFECTED, mode: "sometimes" }, results: affectedRan }).ok).toBe(false);
     expect(gateVerdict({ plan: { ...AFFECTED, tests: "most" }, results: affectedRan }).ok).toBe(false);
     expect(gateVerdict({ plan: { ...AFFECTED, linux: "maybe" }, results: affectedRan }).ok).toBe(false);
-    for (const thinner of [{ tests: "changed" }, { lint: "changed" }, { linux: "false" }, { release: "false" }, { docs_only: "true" }]) {
+    for (const thinner of [{ tests: "changed" }, { lint: "changed" }, { release: "false" }, { docs_only: "true" }]) {
       const verdict = gateVerdict({ plan: { ...FULL, ...thinner }, results: fullRan });
       expect(verdict.ok, JSON.stringify(thinner)).toBe(false);
       expect(verdict.reason).toMatch(/the plan says full but also skips|says Markdown-only/);
     }
     expect(gateVerdict({ plan: { ...DOCS, tests: "changed" }, results: docsRan }).ok).toBe(false);
+  });
+
+  // #1185: a FULL run (a Batch or Sync mainline pull request whose change does not reach the Linux runtime area) may skip linux-runtime by design.
+  it("accepts a full run that skips the Linux runtime check by design, and holds it to that skip", () => {
+    const fullNoLinux = { ...FULL, linux: "false" };
+    expect(gateVerdict({ plan: fullNoLinux, results: { ...fullRan, "linux-runtime": "skipped" } })).toEqual({ ok: true, reason: "FULL run; 4 jobs succeeded, 1 skipped by design (linux-runtime)" });
+    expect(gateVerdict({ plan: fullNoLinux, results: fullRan }).ok).toBe(false);
+    expect(gateVerdict({ plan: FULL, results: { ...fullRan, "linux-runtime": "skipped" } }).ok).toBe(false);
   });
 
   it("fails a plan that runs the whole suite in fewer than eight shards", () => {

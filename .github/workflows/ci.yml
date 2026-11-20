@@ -7,11 +7,19 @@ name: CI
 # run the port guard (the `port-guard` job below).
 on:
   workflow_dispatch:
+    inputs:
+      linux:
+        description: Also run the Linux runtime check (#1185)
+        type: boolean
+        default: false
   pull_request:
     # `labeled` so that adding the `full-ci` label starts a FULL run. Any other label starts an ordinary run too (a skipped run would leave a skipped `local` that reads as a pass).
     types: [opened, synchronize, reopened, ready_for_review, labeled]
   push:
     branches: [code/next]
+  # #1185, #1192: the nightly run on mainline (the default branch): the non-blocking device emulator check and the typecheck. (The Linux runtime check runs in the release.)
+  schedule:
+    - cron: "0 6 * * *"
 
 # Read-only by default; a job that needs more says so itself (linux-runtime reads packages, live-aws mints an OIDC token).
 permissions:
@@ -24,9 +32,11 @@ concurrency:
 
 # Two modes (DEC 242; scripts/ci-plan.ts decides, in the `plan` job, and every other job reads its answer).
 # FULL: a push to code/next, a manual run, a pull request labelled `full-ci` or titled "Batch ..." or "Sync mainline ...". Everything runs: the typecheck and the whole lint
-#   in `quick`, the release check, all 8 `test (n/8)` shards, `linux-runtime`, and the check `ci-mode (full)`, which exists only in this mode: a merge needs it.
+#   in `quick`, the release check, all 8 `test (n/8)` shards, and the check `ci-mode (full)`, which exists only in this mode: a merge needs it.
 # AFFECTED (a pull request, the default): the typecheck stays full; the tests are the ones the change can reach, in 2 shards (the whole suite when something shared changes);
-#   lint covers the changed files; `linux-runtime` and the release check run only when their area changes; a Markdown-only change that no test reads runs nothing but `plan`.
+#   lint covers the changed files; the release check runs only when its area changes; a Markdown-only change that no test reads runs nothing but `plan`.
+# `linux-runtime` (#1185) runs in either mode only when its area changes, on each push to code/next (once per batch), nightly (the schedule, which runs it and the
+#   typecheck only), or on request: the `linux-ci` or `full-ci` label, or a manual run's `linux` input.
 # The job called `local` waits for every job and is the one check a pull request needs (scripts/ci-gate.ts). It knows from `plan` which jobs must have run, so a job
 # skipped by design counts as a pass but a job that should have run and did not fails it. `port-guard` is a check of its own. A draft skips every job.
 #
@@ -61,6 +71,8 @@ jobs:
           CI_EVENT: ${{ github.event_name }}
           CI_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           CI_TITLE: ${{ github.event.pull_request.title }}
+          CI_FORCE_LINUX: ${{ github.event.inputs.linux }}
+          CI_BASE_REF: ${{ github.base_ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           # On a pull request the script is the base branch's copy, never the pull request's own: a change to ci-plan.ts cannot change how its own run is judged (scripts/port-guard.ts also lists it as a guard file).
@@ -380,7 +392,7 @@ jobs:
   # the reason on the log and as a warning annotation, never a silent pass. It builds a tiny fixture app twice with the runner's own JDK and Android SDK (tests/fixtures/device-evidence-app), starts the
   # device executor beside a network-less container that stands in for the task sandbox, and checks the masked pictures, the arguments as Docker understood them, and the listeners in the shared loopback.
   # QUARANTINED (DEC 254zn): this test is flaky (the Android SDK download, the emulator's pictures), so it runs ONLY when device or emulator files change (scripts/ci-plan.ts DEVICE_PATTERNS), and once in each
-  # "Batch " pull request and each push to code/next (and a scheduled run, if one is ever added: ci-plan.ts handles the event, ci.yml has no cron yet) so indirect breakage is still seen. A manual run (code-ci.sh) does not run it. The image build is retried, and the test retries itself twice
+  # "Batch " pull request and each push to code/next (and the nightly scheduled run, #1185) so indirect breakage is still seen. A manual run (code-ci.sh) does not run it. The image build is retried, and the test retries itself twice
   # (`retry: 2` in the test file). It is REQUIRED (a red job fails the run) when the change touches device files (`device_required`); in every other run it is `continue-on-error`: a flake there shows as a warning
   # annotation and does not fail the run. It is not in the `local` gate and not a branch-protection check.
   # It uses no secret and no permission beyond the workflow's `contents: read`: it pulls only the one image the device Dockerfile builds on (the registry fallback in scripts/ci-images.ts needs no login).
