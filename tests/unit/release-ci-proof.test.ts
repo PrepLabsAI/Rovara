@@ -55,6 +55,16 @@ describe("the release's CI proof", () => {
     expect((await ciProof({ repository: "o/r", commit: "d".repeat(40), git: gitOf(solo, {}), checkRuns: async () => [run()] })).proven).toBe(false);
   });
 
+  // #1259: the merge queue merges a pull request onto the latest mainline in a commit of its own, runs CI on that commit, and fast-forwards mainline to it.
+  // The pull request's head (its second parent) has other code when it was behind, so the proof stands on the queue commit's own gate run.
+  it("is proven for a merge-queue commit by its own gate run, when the pull request's head was behind mainline", async () => {
+    const trees = { [MERGE]: TREE, [BASE]: OTHER_TREE, [HEAD]: OTHER_TREE };
+    const asked: string[] = [];
+    const proof = await ciProof({ repository: "o/r", commit: "HEAD", git: gitOf(trees, { [MERGE]: [BASE, HEAD] }), checkRuns: async (sha) => { asked.push(sha); return sha === MERGE ? [run()] : []; } });
+    expect(proof).toMatchObject({ proven: true, candidate: MERGE });
+    expect(asked).toEqual([MERGE]);
+  });
+
   it("takes the newest GitHub Actions run as the gate's result", () => {
     expect(latestGateRun([run({ id: 3, conclusion: "failure" }), run({ id: 7 }), run({ id: 9, app: { slug: "other" } })])?.id).toBe(7);
   });

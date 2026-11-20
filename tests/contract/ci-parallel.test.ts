@@ -105,7 +105,10 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(all.run).toBe("$AS_TESTER npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
     const changed = test.steps.find((step) => step.name === "Tests (the ones this change can reach)")!;
     expect(changed.if).toBe("needs.plan.outputs.tests == 'changed'");
-    expect(changed.run).toContain("$AS_TESTER npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+    // #1259: against the pull request's base (the merge commit's first parent) or the merge queue's base (merge_group.base_sha).
+    expect(changed.run).toContain("DIFF_BASE=HEAD^1");
+    expect(changed.run).toContain('if [ "$CI_EVENT" = merge_group ]; then DIFF_BASE="$BASE_SHA"; fi');
+    expect(changed.run).toContain('$AS_TESTER npm test -- --changed "$DIFF_BASE" --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}');
     expect(changed.run).toContain("xargs $AS_TESTER npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
   });
 
@@ -113,7 +116,8 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
   // every other run use GitHub's free runner. The tests run as an ordinary account there, since CodeBuild runs the job as root.
   it("runs the shards of a same-repository pull request into mainline on the CodeBuild runner, as an ordinary account, and everything else on GitHub's", async () => {
     const test = (await workflow()).jobs.test as Job & { "runs-on"?: string };
-    expect(test["runs-on"]).toBe("${{ (github.event_name == 'pull_request' && github.base_ref == 'mainline' && github.event.pull_request.head.repo.full_name == github.repository) && format('codebuild-rovara-ci-tests-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}");
+    // #1259: a merge-queue run is always this repository's, into mainline.
+    expect(test["runs-on"]).toBe("${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.base_ref == 'mainline' && github.event.pull_request.head.repo.full_name == github.repository)) && format('codebuild-rovara-ci-tests-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}");
     const order = test.steps.map((step) => step.name ?? step.uses ?? "");
     const asTester = test.steps.find((step) => step.name === "Run the tests as an ordinary account (CodeBuild only)")!;
     expect(order.indexOf(asTester.name!)).toBeGreaterThan(order.indexOf("Unpack the build output"));
@@ -152,10 +156,12 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
       CI_LABELS: "${{ toJSON(github.event.pull_request.labels.*.name) }}",
       CI_TITLE: "${{ github.event.pull_request.title }}",
       CI_FORCE_LINUX: "${{ github.event.inputs.linux }}",
-      CI_BASE_REF: "${{ github.base_ref }}",
-      BASE_SHA: "${{ github.event.pull_request.base.sha }}",
+      // #1259: the merge queue's base for a merge-queue run.
+      CI_BASE_REF: "${{ github.base_ref || github.event.merge_group.base_ref }}",
+      BASE_SHA: "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}",
     });
     expect(step.run).toContain("git diff --name-only HEAD^1 HEAD");
+    expect(step.run).toContain('git diff --name-only "$BASE_SHA" HEAD');
     expect(step.run).toContain('node "$PLAN_SCRIPT"');
     // Untrusted text (the title) reaches the script through the environment, never spliced into the shell.
     expect(step.run).not.toContain("github.event.pull_request.title");
@@ -312,6 +318,8 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
       workflow_dispatch: { inputs: { linux: { description: "Also run the Linux runtime check (#1185)", type: "boolean", default: false } } },
       pull_request: { types: ["opened", "synchronize", "reopened", "ready_for_review", "labeled"] },
       push: { branches: ["code/next"] },
+      // #1259: the merge queue on mainline.
+      merge_group: { types: ["checks_requested"] },
       schedule: [{ cron: "0 6 * * *" }],
     });
     // Every job but the plan hangs off it (or the gate does), so a draft's skipped plan skips them all.
@@ -343,7 +351,8 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
 });
 
 describe("on a pull request CI judges the change with the base branch's plan and gate, never the pull request's own copy (DEC 242 follow-up)", () => {
-  const BASE = "${{ github.event.pull_request.base.sha }}";
+  // #1259: a merge-queue run is judged the same way, from the queue's base.
+  const BASE = "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}";
 
   /** Every step that runs the plan or the gate script, with the job it is in. */
   async function runners(script: "ci-plan.ts" | "ci-gate.ts") {
@@ -358,7 +367,7 @@ describe("on a pull request CI judges the change with the base branch's plan and
       expect(step.env?.BASE_SHA, job).toBe(BASE);
       expect(step.env?.CI_EVENT, job).toBe("${{ github.event_name }}");
       const run = step.run!;
-      expect(run, job).toContain('if [ "$CI_EVENT" = pull_request ]; then');
+      expect(run, job).toContain('if [ "$CI_EVENT" = pull_request ] || [ "$CI_EVENT" = merge_group ]; then');
       expect(run, job).toContain('git fetch --no-tags --depth=1 origin "$BASE_SHA"');
       expect(run, job).toContain('git show "$BASE_SHA:scripts/ci-plan.ts" > "$PLAN_SCRIPT"');
       // The checkout's copy is the default only: a push or a manual run has no base sha.
@@ -379,7 +388,7 @@ describe("on a pull request CI judges the change with the base branch's plan and
     expect(step.env?.CI_EVENT).toBe("${{ github.event_name }}");
     expect(step.env?.NEEDS).toBe("${{ toJSON(needs) }}");
     const run = step.run!;
-    expect(run).toContain('if [ "$CI_EVENT" = pull_request ]; then');
+    expect(run).toContain('if [ "$CI_EVENT" = pull_request ] || [ "$CI_EVENT" = merge_group ]; then');
     expect(run).toContain('git fetch --no-tags --depth=1 origin "$BASE_SHA"');
     expect(run).toContain('git show "$BASE_SHA:scripts/ci-gate.ts" > "$GATE_SCRIPT"');
     expect(run).toContain("GATE_SCRIPT=scripts/ci-gate.ts");
@@ -392,5 +401,23 @@ describe("on a pull request CI judges the change with the base branch's plan and
       const run = (await runners(script)).find(({ job }) => job === name)!.step.run!;
       expect(run).toContain(`git cat-file -e "$BASE_SHA:scripts/${script}"`);
     }
+  });
+});
+
+// #1259: a merge-queue group may hold several pull requests, so its changed files (for the lint, the plan and the related tests) are taken against the queue's
+// base, never just the group commit's first parent.
+describe("the merge queue's run (merge_group)", () => {
+  it("lints the changed files against the queue's base", async () => {
+    const quick = (await workflow()).jobs.quick!;
+    const lint = quick.steps.find((step) => step.name === "checks: lint the changed files")!;
+    expect(lint.env).toEqual({ CI_EVENT: "${{ github.event_name }}", BASE_SHA: "${{ github.event.merge_group.base_sha }}" });
+    expect(lint.run).toContain("DIFF_BASE=HEAD^1");
+    expect(lint.run).toContain('if [ "$CI_EVENT" = merge_group ]; then git fetch --no-tags --depth=1 origin "$BASE_SHA"; DIFF_BASE="$BASE_SHA"; fi');
+    expect(lint.run).toContain('git diff --name-only "$DIFF_BASE" HEAD > "$RUNNER_TEMP/changed.txt"');
+  });
+  it("never runs the port guard (it checks what code/next holds beyond mainline) and never cancels a queued run", async () => {
+    const parsed = await workflow();
+    expect(parsed.jobs["port-guard"]!.if).not.toContain("merge_group");
+    expect((parsed as unknown as { concurrency: { "cancel-in-progress": string } }).concurrency["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
   });
 });
