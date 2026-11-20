@@ -1,6 +1,7 @@
 // The model each step uses: the owner's setting on the document store (the hosted layout), what each step runs on by default, the fallback, the price rule where a limit is held, what a refused call teaches, and the
 // owner's own change (fresh page, current revision, an approval rule for a less-safe one, audited in the same transaction).
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import {
   ModelSelectionStateSchema, canonicalModelName, modelSelectionLines, orgSettingsKey,
   type Approvers, type AuditEvent, type ModelProviderAdapter, type AuditSink, type InvocationModelRoute, type ModelIdentifier, type OrgId, type Principal,
@@ -366,6 +367,17 @@ describe("the model each step uses: the owner's change", () => {
     const broken = world({ approvers: { async requirement() { throw new Error("down"); }, async verify() { return { approved: false, reason: "no" }; } } });
     await broken.apply({ action: "set", stage: "plan_check", choice: { model: ref(OPUS) }, expectedRevision: 0 });
     expect(await broken.apply({ action: "set", stage: "plan_check", choice: { model: ref(HAIKU) }, expectedRevision: 1 })).toMatchObject({ ok: false, code: "approval_unavailable" });
+  });
+
+  it("binds a less-safe review-default change into the approval digest", async () => {
+    let captured: unknown;
+    const w = world({ defaultReviewDefault: "different-company", approvers: {
+      async requirement(request) { captured = request; return { methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: true }; },
+      async verify() { return { approved: false, reason: "unused" }; },
+    } });
+    expect(await w.apply({ action: "review-default", value: "install-model", expectedRevision: 0 })).toMatchObject({ ok: true, lessSafe: [expect.stringContaining("Stops checking steps")] });
+    const digest = createHash("sha256").update(JSON.stringify(["model-selection", 0, {}, "install-model"])).digest("hex");
+    expect(captured).toMatchObject({ requestId: `model-selection:${digest.slice(0, 32)}`, artifactDigest: digest, companyId: ORG });
   });
 
   it("a row the hosted product wrote (no review default, a lock) is read, and a row that cannot be read is an error, never the default", async () => {

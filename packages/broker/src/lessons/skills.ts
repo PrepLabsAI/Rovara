@@ -366,6 +366,7 @@ export async function approveSkill(deps: SkillDeps, key: ScopeKey, input: { name
   // An approval counts only while its giver may still decide (as for a lesson's): one who has left the project, lost the role or been erased is not one of the two.
   const group = await deps.directory.eligibility(key.workspaceId, key.project, { approverId: input.by }).catch(() => undefined);
   if (group === undefined || !group.complete) return { ok: false, code: "eligibility_unavailable" };
+  if (!idIn(group.eligibleIds, input.by)) return { ok: false, code: "not_eligible" };
   const approvals = [...version.approvals.filter((entry) => idIn(group.eligibleIds, entry.by)), { by: input.by, at: deps.now() }];
   const live = approvals.length >= ROVARA_SKILL_APPROVERS_REQUIRED;
   // The proof was read when the draft was made and may be old: a skill goes live for the FIRST time only (a later version of a live skill no longer depends on its lessons, which became it) while every lesson it came from is STILL proven (read now, signals fresh) and has not become something else.
@@ -373,15 +374,19 @@ export async function approveSkill(deps: SkillDeps, key: ScopeKey, input: { name
   if (!await requireAudit(deps.audit, { action: "lesson.skill_approved", workspaceId: key.workspaceId, project: key.project, actor: input.by, facts: { skill: input.name, version: input.version, approvals: approvals.length } })) return { ok: false, code: "audit_unavailable" };
   if (live && !await requireAudit(deps.audit, { action: "lesson.skill_activated", workspaceId: key.workspaceId, project: key.project, actor: input.by, facts: { skill: input.name, version: input.version, approvals: approvals.length } })) return { ok: false, code: "audit_unavailable" };
   const now = deps.now();
-  const headStillNewest = when.and(when.eq("currentVersion", input.version), when.notExists("retired"));
+  const headStillNewest = when.and(
+    when.eq("currentVersion", input.version), when.notExists("retired"),
+    head.activeVersion === undefined ? when.notExists("activeVersion") : when.eq("activeVersion", head.activeVersion),
+  );
   const approvalStep: TransactItem = { kind: "update", key: versionKey(key.workspaceId, key.project, input.name, input.version), ops: [change.set("approvals", approvals), ...(live ? [change.set("activatedAt", now)] : [])], condition: when.eq("approvals", version.approvals) };
   try {
     // Not live yet: the approval is written only while the version is still the newest. Live: the same transaction moves the skill's live pointer and the `set` row (created first if it is not there; a lost race on that
     // create still leaves the row there).
     if (live) await deps.documents.put({ item: { ...setKey(key.workspaceId, key.project), entityType: "SKILL_SET", members: {}, updatedAt: now }, condition: when.absent() });
+    const membershipFence = (group.fence ?? []) as readonly TransactItem[];
     const written = await deps.documents.transact(live
-      ? [approvalStep, { kind: "update", key: headKey(key.workspaceId, key.project, input.name), ops: [change.set("activeVersion", input.version), change.set("updatedAt", now)], condition: headStillNewest }, { kind: "update", key: setKey(key.workspaceId, key.project), ops: [change.set(["members", input.name], input.version), change.set("updatedAt", now)] }]
-      : [approvalStep, { kind: "check", key: headKey(key.workspaceId, key.project, input.name), condition: headStillNewest }]);
+      ? [...membershipFence, approvalStep, { kind: "update", key: headKey(key.workspaceId, key.project, input.name), ops: [change.set("activeVersion", input.version), change.set("updatedAt", now)], condition: headStillNewest }, { kind: "update", key: setKey(key.workspaceId, key.project), ops: [change.set(["members", input.name], input.version), change.set("updatedAt", now)] }]
+      : [...membershipFence, approvalStep, { kind: "check", key: headKey(key.workspaceId, key.project, input.name), condition: headStillNewest }]);
     if (!written.applied) return { ok: false, code: "conflict" };
   } catch { return { ok: false, code: "unreadable" }; }
   if (live) {

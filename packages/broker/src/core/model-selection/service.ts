@@ -251,8 +251,8 @@ export function createModelSelection(deps: ModelSelectionDependencies): ModelSel
   }
 
   /** The approval request a less-safe change is asked under, bound to exactly this change (the stages and the setting they get). */
-  function approvalRequest(next: StepOverrides, revision: number, owner: Principal): ApprovalRequest {
-    const digest = createHash("sha256").update(JSON.stringify(["model-selection", revision, next])).digest("hex");
+  function approvalRequest(next: StepOverrides, reviewDefault: ReviewDefault, revision: number, owner: Principal): ApprovalRequest {
+    const digest = createHash("sha256").update(JSON.stringify(["model-selection", revision, next, reviewDefault])).digest("hex");
     return { companyId: orgId, requestId: `model-selection:${digest.slice(0, 32)}`, kind: "setting", subject: { type: "model-selection", id: "company" }, revision, artifactDigest: digest, requestedBy: owner, risk: "high" };
   }
 
@@ -317,7 +317,7 @@ export function createModelSelection(deps: ModelSelectionDependencies): ModelSel
       // A less-safe change (a weaker model for a check, a new AI company, the same model as the step it checks) is made only when this install's approval rules let the owner approve their own change; rules that
       // need a different person cannot be met on a laptop, and the change is not made.
       try {
-        const requirement = await deps.approvers.requirement(approvalRequest(nextOverrides, policy.revision, owner));
+        const requirement = await deps.approvers.requirement(approvalRequest(nextOverrides, reviewDefault, policy.revision, owner));
         if (requirement.minApprovers > 1 || !requirement.selfApprovalAllowed) return { ok: false, code: "second_person_required", words: "This change needs a different person to confirm it, and this install has no second person. It was not made." };
       } catch { return { ok: false, code: "approval_unavailable", words: "The approval rules could not be read, so the change was not made." }; }
     }
