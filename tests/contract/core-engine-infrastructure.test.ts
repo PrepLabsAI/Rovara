@@ -649,7 +649,13 @@ describe("L1a broker environment derivation", () => {
     // #1148: re-pinned for the core engine in the legacy template (CoreEngine off by default).
     // SIGNIN-STATE-TABLE: re-pinned for ONE change: the sign-in function's STATE_TABLE_NAME is the plain Ref to State instead of an Fn::If on SlackCompanyModeOn to "" (rule D: with the
     // old Fn::If put back, the old pin db40b76d... held; the legacy-templates snapshot diff is that one hunk).
-    expect(digest(legacy.toJSON())).toBe("f15083c44efe613e69041046d5daf9b74fe81958ecfb2c20639a30701ab93b99");
+    // LEGACY-WORKER-CAPABILITY-ROUTES: re-pinned for ONE change: the legacy template gains the ContextToolsListRoute and DesignReviewPacketRoute resources (named environments already had them).
+    // Rule D proof: with exactly those two resources taken out, the old pin f15083c4... holds. The legacy-templates snapshot diff is those two resources.
+    const withoutCapabilityRoutes = structuredClone(legacy.toJSON()) as Json;
+    delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;
+    delete withoutCapabilityRoutes.Resources.DesignReviewPacketRoute;
+    expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("f15083c44efe613e69041046d5daf9b74fe81958ecfb2c20639a30701ab93b99");
+    expect(digest(legacy.toJSON())).toBe("8935c91d8d22dd6781f7a40db0329a6acca336137a14ca0c5e3736900f74f958");
   });
 });
 import { createHash } from "node:crypto";
