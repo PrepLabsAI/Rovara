@@ -1,6 +1,6 @@
 // The broker re-reads every place a setup proposal says a value came from. The worker's copy of a proposal is never trusted, and neither is the
 // model behind it: a model can write a quote that is not in the file, or a file that does not exist. For each file citation (`file`, `ci`, `readme`, `manifest`) the broker reads
-// `repo@commit:path` from the project's code host and checks that the quote is near the cited line or occurs exactly once in the whole file.
+// `repo@commit:path` from the project's code host and checks that the quote is near the cited line. Only command items may fall back to a unique whole-file quote.
 //
 // "Verified" has to mean that the quoted text SUPPORTS the proposed value, because a verified item for an empty setting is the only thing the page ticks for a person:
 //   - a citation with no quote, or a quote shorter than `VERIFY_QUOTE_MIN_CHARS` (whitespace collapsed), proves nothing about a value: the item is `unchecked`;
@@ -124,6 +124,9 @@ function quotesSupport(item: SetupItem, citations: readonly Provenance[], source
   }
 }
 
+/** Only values checked as whole command tokens may use the offset fallback. Other item kinds retain their original window/name rules. */
+const isCommandItem = (item: SetupItem): boolean => item.kind === "setup" || item.kind === "tests" || item.kind === "check";
+
 type Verdict = "holds" | "fails" | "unread" | "skipped";
 
 /** Test only the original line window, never infer whole-file uniqueness from a prefix. */
@@ -172,7 +175,7 @@ export async function verifyProposalDetailed(
   const fallbackNeeds = new Map<string, CitedFileNeed>();
   for (const item of items) {
     for (const citation of item.proposed.from) {
-      if (!readable(item, citation) || citation.line === undefined) continue;
+      if (!isCommandItem(item) || !readable(item, citation) || citation.line === undefined) continue;
       const key = keyOf(citation);
       const found = texts.get(key);
       if (found?.kind !== "text" || windowHolds(found.text, citation)) continue;
@@ -192,6 +195,7 @@ export async function verifyProposalDetailed(
     if (found.kind === "unread") return "unread";
     if (found.kind === "missing") return "fails";
     if (windowHolds(found.text, citation)) return "holds";
+    if (!isCommandItem(item)) return "fails";
     const full = needs.get(key)!.whole ? found : fallbackTexts.get(key);
     if (full === undefined || full.kind === "unread") return "unread";
     return full.kind === "text" && citationHolds(full.text, citation) ? "holds" : "fails";

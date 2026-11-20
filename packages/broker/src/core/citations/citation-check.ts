@@ -40,10 +40,10 @@ export function usableQuoteOf(citation: { quote?: string | undefined }): string 
 
 /**
  * Whether a file's text supports a citation: the citation has a usable quote (a citation with none holds nothing), the line exists, and the quote (whitespace collapsed) is within
- * `CITATION_LINE_SLACK` lines of it, or occurs exactly once in the whole file. With no line, the quote may appear anywhere.
+ * `CITATION_LINE_SLACK` lines of it, or occurs exactly once in the whole file outside comment lines, preserving multiline quote boundaries. With no line, the quote may appear anywhere.
  * Callers must supply the whole committed file and separately check that quotes support their proposed values as whole tokens.
  */
-export function citationHolds(text: string, citation: { line?: number | undefined; quote?: string | undefined }): boolean {
+export function citationHolds(text: string, citation: { line?: number | undefined; quote?: string | undefined; path?: string | undefined }): boolean {
   const wanted = usableQuoteOf(citation);
   if (wanted === undefined) return false;
   const lines = text.split(/\r\n|\r|\n/u);
@@ -53,7 +53,36 @@ export function citationHolds(text: string, citation: { line?: number | undefine
   const whole = collapseWhitespace(text);
   const first = whole.indexOf(wanted);
   // Advance one character, rather than the quote length, so overlapping occurrences count too.
-  return first !== -1 && whole.indexOf(wanted, first + 1) === -1;
+  if (first === -1 || whole.indexOf(wanted, first + 1) !== -1) return false;
+  // Preserve line boundaries for multiline fallback quotes. The original local window still collapses all whitespace.
+  const quoteLines = citation.quote!.split(/\r\n|\r|\n/u).map(collapseWhitespace);
+  if (quoteLines.length > 1 && !lines.map(collapseWhitespace).join("\n").includes(quoteLines.join("\n"))) return false;
+  // Locate every source line contributing to the unique collapsed match, including a clipped first line.
+  let offset = 0;
+  for (const line of lines) {
+    const normalised = collapseWhitespace(line);
+    if (normalised === "") continue;
+    if (offset > 0) offset += 1;
+    const end = offset + normalised.length;
+    if (offset < first + wanted.length && end > first && isCommentLine(line, citation.path)) return false;
+    offset = end;
+  }
+  return true;
+}
+
+/** Comment syntax is file-specific; unknown types conservatively recognise all listed comment prefixes. */
+function isCommentLine(line: string, path: string | undefined): boolean {
+  const name = path?.split("/").at(-1)?.toLowerCase() ?? "";
+  const extension = name.split(".").at(-1) ?? "";
+  let markers: readonly string[];
+  if (["yml", "yaml", "sh", "bash", "zsh", "fish", "toml", "py", "rb", "ps1"].includes(extension) || ["dockerfile", "makefile"].includes(name)) markers = ["#"];
+  else if (["ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "jsonc", "c", "h", "cpp", "hpp", "java", "go", "rs", "cs", "swift", "kt"].includes(extension)) markers = ["//", "/*", "*"];
+  else if (["css", "scss"].includes(extension)) markers = ["/*", "*"];
+  else if (["ini", "cfg", "conf"].includes(extension)) markers = ["#", ";"];
+  else if (extension === "sql") markers = ["--", "/*", "*"];
+  else if (["html", "htm", "xml", "md", "markdown"].includes(extension)) markers = ["<!--"];
+  else markers = ["#", "//", ";", "--", "/*", "*", "<!--"];
+  return markers.some((marker) => line.trimStart().startsWith(marker));
 }
 
 /** The strict prose match, kept separate from the setup/plain whole-file fallback. */
