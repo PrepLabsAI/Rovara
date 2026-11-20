@@ -19,6 +19,7 @@
     "preflight": "tsx scripts/preflight.ts",
     "eval": "tsx scripts/eval.ts",
     "test": "vitest run",
+    "test:nightly": "vitest run --config vitest.nightly.config.ts",
     "test:contract": "vitest run tests/contract",
     "test:integration": "vitest run tests/integration",
     "test:e2e": "vitest run tests/e2e",

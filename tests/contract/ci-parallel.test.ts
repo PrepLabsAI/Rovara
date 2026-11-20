@@ -24,11 +24,22 @@ const workflow = async () => YAML.parse(await readFile(".github/workflows/ci.yml
 describe("CI runs its checks side by side, as the plan says (a Markdown-only change skips them all)", () => {
   it("has the jobs of the plan-driven CI, each waiting only on the plan (and the build, for the tests), and no job left over from before", async () => {
     const { jobs } = await workflow();
-    expect(Object.keys(jobs).sort()).toEqual(["build", "ci-mode", "device-runtime", "linux-runtime", "live-aws", "local", "plan", "port-guard", "quick", "test"]);
+    expect(Object.keys(jobs).sort()).toEqual(["build", "ci-mode", "device-runtime", "linux-runtime", "live-aws", "local", "nightly-tests", "plan", "port-guard", "quick", "test"]);
     expect(jobs.plan!.needs).toBeUndefined();
     for (const name of ["ci-mode", "quick", "build", "linux-runtime", "device-runtime"]) expect(jobs[name]!.needs, name).toBe("plan");
     expect(jobs.test!.needs).toEqual(["plan", "build"]);
     expect(jobs["port-guard"]!.needs).toBeUndefined();
+    expect(jobs["nightly-tests"]!.needs).toBeUndefined();
+  });
+
+  it("runs the nightly-only tests once a night, and in a pull request only when its change reaches them", async () => {
+    const { jobs } = await workflow();
+    const nightly = jobs["nightly-tests"]!;
+    expect(nightly.if).toBe("github.event_name == 'schedule'");
+    expect(nightly.steps.map((step) => step.run ?? "").join("\n")).toContain("npm run test:nightly");
+    const changed = jobs.test!.steps.find((step) => step.name === "Tests (the ones this change can reach)")!;
+    expect(changed.env?.ROVARA_NIGHTLY_TESTS).toBe("1");
+    for (const step of jobs.test!.steps.filter((item) => item.name !== changed.name)) expect(step.env?.ROVARA_NIGHTLY_TESTS, step.name).toBeUndefined();
   });
 
   it("puts the old scope, checks and release jobs into `quick`: one after another with their own commands, conditions and time limits, on one checkout and one install", async () => {
@@ -307,7 +318,8 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(gate.if).toBe("always() && github.event.pull_request.draft != true");
     // port-guard (the Rovara Code port's check, tests/contract/port-guard-ci.test.ts) runs on code/next only; a skipped job would fail the gate on mainline's pull requests.
     // device-runtime (DEC 244, tests/contract/device-executor-image.test.ts) is informational until its first real run has been read, so the gate does not wait for it yet.
-    const others = Object.keys(jobs).filter((name) => name !== "local" && name !== "live-aws" && name !== "port-guard" && name !== "device-runtime").sort();
+    // nightly-tests runs only on the nightly schedule, so a pull request's gate never waits for it.
+    const others = Object.keys(jobs).filter((name) => name !== "local" && name !== "live-aws" && name !== "port-guard" && name !== "device-runtime" && name !== "nightly-tests").sort();
     expect([...(gate.needs as string[])].sort()).toEqual(others);
     expect([...(gate.needs as string[])].sort()).toEqual(["plan", ...GATED_JOBS].sort());
     expect(gate["timeout-minutes"]).toBe(5);
