@@ -65,6 +65,15 @@ describe("the release's CI proof", () => {
     expect(asked).toEqual([MERGE]);
   });
 
+  // #1262: a merge-queue run of byte-identical code reuses the pull request's pass, so its own gate (local) passes without the suite running again. The release
+  // stands on that gate run like any other, and a gate check from anything but GitHub Actions still doesn't count.
+  it("is proven for a merge-queue commit whose own gate passed by reusing the pull request's run, and never by a gate check from another app", async () => {
+    const trees = { [MERGE]: TREE, [BASE]: OTHER_TREE, [HEAD]: OTHER_TREE };
+    const git = gitOf(trees, { [MERGE]: [BASE, HEAD] });
+    expect(await ciProof({ repository: "o/r", commit: "HEAD", git, checkRuns: async (sha) => (sha === MERGE ? [run({ id: 77 })] : []) })).toMatchObject({ proven: true, candidate: MERGE });
+    expect((await ciProof({ repository: "o/r", commit: "HEAD", git, checkRuns: async (sha) => (sha === MERGE ? [run({ app: { slug: "someone-else" } })] : []) })).proven).toBe(false);
+  });
+
   it("takes the newest GitHub Actions run as the gate's result", () => {
     expect(latestGateRun([run({ id: 3, conclusion: "failure" }), run({ id: 7 }), run({ id: 9, app: { slug: "other" } })])?.id).toBe(7);
   });

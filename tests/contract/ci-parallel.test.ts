@@ -49,7 +49,8 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(quick.permissions).toBeUndefined();
     expect(JSON.stringify(quick)).not.toContain("secrets.");
     // A Markdown-only change (the plan says so) skips the job whole; a manual run and a push never do.
-    expect(quick.if).toBe("needs.plan.outputs.docs_only != 'true'");
+    // #1262: a merge-queue reuse stands on the pull request's own pass, so it skips the checks too.
+    expect(quick.if).toBe("needs.plan.outputs.docs_only != 'true' && needs.plan.outputs.mode != 'reuse'");
     expect(quick.steps.filter((step) => (step.uses ?? "").startsWith("actions/checkout"))).toHaveLength(1);
     expect(quick.steps.filter((step) => step.name === "checks: npm ci")).toHaveLength(1);
     const parts = quick.steps.filter((step) => step.run !== undefined).map((step) => [step.name, step.if, step["timeout-minutes"], step.run] as const);
@@ -156,6 +157,10 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
       CI_LABELS: "${{ toJSON(github.event.pull_request.labels.*.name) }}",
       CI_TITLE: "${{ github.event.pull_request.title }}",
       CI_FORCE_LINUX: "${{ github.event.inputs.linux }}",
+      // #1262: what a merge-queue reuse is proven against, and the token that reads the merge commit's statuses.
+      CI_QUEUE_HEAD_REF: "${{ github.event.merge_group.head_ref }}",
+      CI_REPOSITORY: "${{ github.repository }}",
+      GH_TOKEN: "${{ github.token }}",
       // #1259: the merge queue's base for a merge-queue run.
       CI_BASE_REF: "${{ github.base_ref || github.event.merge_group.base_ref }}",
       BASE_SHA: "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}",
@@ -165,6 +170,9 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(step.run).toContain('node "$PLAN_SCRIPT"');
     // Untrusted text (the title) reaches the script through the environment, never spliced into the shell.
     expect(step.run).not.toContain("github.event.pull_request.title");
+    // #1262: reading statuses is all the plan widens its token for; it passes the reused run on.
+    expect(plan.permissions).toEqual({ contents: "read", statuses: "read" });
+    expect((plan as Job & { outputs?: Record<string, string> }).outputs?.reuse_run).toBe("${{ steps.plan.outputs.reuse_run }}");
   });
 
   it("runs the Linux runtime check on an ARM64 runner, behind the same Markdown-only skip as the other heavy jobs", async () => {
@@ -347,6 +355,28 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     const run = gate.steps.map((step) => step.run ?? "").join("\n");
     expect(run).toContain('node "$GATE_SCRIPT"');
     expect(gate.steps.some((step) => step.env?.NEEDS === "${{ toJSON(needs) }}")).toBe(true);
+  });
+
+  // #1262: the gate marks the merge commit it judged, for the merge queue to reuse; only a same-repository pull request into mainline, never a fork's.
+  it("marks a same-repository pull request's tested merge commit with the gate's verdict, as status ci/local, with only statuses: write", async () => {
+    const { jobs } = await workflow();
+    const gate = jobs.local!;
+    expect(gate.permissions).toEqual({ contents: "read", statuses: "write" });
+    expect(gate.steps.find((step) => step.name === "Every job passed?")?.id).toBe("gate");
+    const mark = gate.steps.find((step) => step.name === "Mark the tested merge commit for the merge queue")!;
+    expect(mark.if).toBe("always() && github.event_name == 'pull_request' && github.base_ref == 'mainline' && github.event.pull_request.head.repo.full_name == github.repository && (steps.gate.outcome == 'success' || steps.gate.outcome == 'failure')");
+    expect(mark.env).toEqual({
+      GH_TOKEN: "${{ github.token }}",
+      REPOSITORY: "${{ github.repository }}",
+      TESTED: "${{ github.sha }}",
+      VERDICT: "${{ steps.gate.outcome }}",
+      RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+    });
+    expect(mark.run).toContain('gh api --method POST "repos/$REPOSITORY/statuses/$TESTED" -f state="$VERDICT" -f context=ci/local');
+    // A failed mark costs the reuse only, never the gate.
+    expect(mark.run).toContain("|| echo \"::warning::");
+    // The mark comes after the verdict.
+    expect(gate.steps.indexOf(mark)).toBeGreaterThan(gate.steps.findIndex((step) => step.id === "gate"));
   });
 });
 
