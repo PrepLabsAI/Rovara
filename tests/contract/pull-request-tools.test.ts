@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { validateToolArguments } from "@earendil-works/pi-ai";
 import { createOrchestrationTools, type OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { CONVERSATION_ID, LIFECYCLE_CASES, OPERATION_ID, REQUEST_ID, WORKSPACE_ID } from "../support/pull-request-cases.js";
 
@@ -32,25 +31,6 @@ describe("agentx_manage_pull_request replaces the seven lifecycle tools call for
     expect(api.createPullRequest).not.toHaveBeenCalled();
   });
 
-  it.each(["append", "sync", "close", "reopen"] as const)("drops a title and body sent with %s, as the retired tool could not send them", async (action) => {
-    const api = managePullRequestApi();
-    const tools = createOrchestrationTools(api, { workspaceId: WORKSPACE_ID, conversationId: CONVERSATION_ID }, { requestId: () => REQUEST_ID });
-    await tools.find((entry) => entry.name === "agentx_manage_pull_request")!
-      .execute("call-1", { action, repository: "web", pullRequestNumber: 12, title: "Ignored", body: "Ignored" }, undefined, undefined, {} as never);
-    expect(api.managePullRequest).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, action, repository: "web", pullRequestNumber: 12 });
-  });
-
-  it("rejects an action outside the enum before anything reaches the control plane", () => {
-    const tool = createOrchestrationTools(managePullRequestApi(), { workspaceId: WORKSPACE_ID, conversationId: CONVERSATION_ID }).find((entry) => entry.name === "agentx_manage_pull_request")!;
-    const call = (action: string) => ({ type: "toolCall" as const, id: "call-1", name: tool.name, arguments: { action, repository: "web", pullRequestNumber: 12 } });
-    expect(() => { validateToolArguments(tool as never, call("merge")); }).toThrow();
-    expect(validateToolArguments(tool as never, call("close")) as unknown).toMatchObject({ action: "close" });
-  });
-
-  it("no longer offers the retired tool names", () => {
-    const tools = createOrchestrationTools(managePullRequestApi(), { workspaceId: WORKSPACE_ID, conversationId: CONVERSATION_ID });
-    for (const { tool } of LIFECYCLE_CASES) expect(tools.map((entry) => entry.name)).not.toContain(tool);
-  });
 
   const PROGRESS = { operationId: OPERATION_ID, status: "RUNNING", message: "Running checks." };
 

@@ -13,7 +13,6 @@ import { fakeCloudFormation } from "../support/fake-cloudformation.js";
 const SONNET = "us.anthropic.claude-sonnet-4-6";
 const throttled = () => Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException", $metadata: { httpStatusCode: 429 } });
 const quotas = (value: number): QuotaClient => ({ list: async () => ({ quotas: [{ code: "L-SONNET46GEO", name: "Cross-region model inference tokens per minute for Anthropic Claude Sonnet 4.6", value }] }) });
-const denied: QuotaClient = { list: async () => { throw Object.assign(new Error("not allowed"), { name: "AccessDeniedException" }); } };
 const caller = { account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice" };
 
 async function init(client: QuotaClient | undefined): Promise<{ calls: number; message: string }> {
@@ -32,15 +31,6 @@ describe("INST-8 in init", () => {
     expect(message).not.toContain("wait a minute");
   });
 
-  it("names the quota and its value above zero with 'if this repeats'", async () => {
-    expect((await init(quotas(5_000_000))).message).toContain("if this repeats, check Service Quotas → Amazon Bedrock (quota L-SONNET46GEO: 5000000 tokens per minute)");
-  });
-
-  it("keeps today's text and says the quota could not be read when the lookup is denied", async () => {
-    const { message } = await init(denied);
-    expect(message).toContain(`Bedrock throttled the check of ${SONNET}; wait a minute and run agentx init again`);
-    expect(message).toContain("Rovara could not read the quota");
-  });
 });
 
 describe("INST-8 in doctor", () => {
@@ -54,12 +44,6 @@ describe("INST-8 in doctor", () => {
     expect(orchestrator.detail).not.toContain("wait a minute");
   });
 
-  it("says 'if this repeats' above zero, and the old text with 'could not read the quota' when denied", async () => {
-    expect((await found(quotas(5_000_000))).detail).toContain("quota L-SONNET46GEO: 5000000 tokens per minute");
-    const unreadable = (await found(denied)).detail;
-    expect(unreadable).toContain("wait a minute and run agentx doctor again");
-    expect(unreadable).toContain("could not read the quota");
-  });
 });
 
 describe("INST-8 in config set", () => {

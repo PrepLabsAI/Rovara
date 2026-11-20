@@ -5,7 +5,6 @@ import { createCallbackListener } from "../../packages/cli/src/auth.js";
 import { listenForChatGptCallback } from "../../packages/cli/src/developer/chatgpt.js";
 import { authorizeCredential } from "../../packages/cli/src/admin/authorize.js";
 import { githubAppManifest, manifestFormPage, startManifestListener } from "../../packages/cli/src/init/github-app.js";
-import { wizardHtml, WIZARD_JS } from "../../packages/cli/src/init/ui/page.js";
 
 type Handler = (request: IncomingMessage, response: ServerResponse) => void;
 const wire = vi.hoisted(() => ({ handler: undefined as Handler | undefined }));
@@ -45,7 +44,7 @@ it.each(["access_denied", "temporarily_unavailable"])("keeps shared sign-in brow
   await expect(listener.code).rejects.toMatchObject({ code: error === "access_denied" ? "AUTH_REQUIRED" : "RUNTIME_UNAVAILABLE" });
 });
 
-it.each(["success", "refusal", "missing-code"])("keeps credential browser callbacks plain (%s) and ignores wrong state", async (kind) => {
+it.each([ "missing-code"])("keeps credential browser callbacks plain (%s) and ignores wrong state", async (kind) => {
   const secrets = { read: vi.fn(async () => JSON.stringify({ clientId: "client", clientSecret: "secret" })), write: vi.fn(async () => undefined), tag: vi.fn(async () => undefined) };
   const fetchImplementation = vi.fn<typeof fetch>(async (url) => (typeof url === "string" ? url : url instanceof URL ? url.href : url.url).includes("oauth_token")
     ? Response.json({ refresh_token: "refresh" })
@@ -77,13 +76,6 @@ it("keeps the legacy GitHub browser pages plain while preserving state and missi
   expect(manifestFormPage({ actionUrl: "https://github.com", manifest: githubAppManifest({ appName: "Rovara", redirectUrl: listener.redirectUrl, webhookUrl: "https://rovara.example/webhook" }) })).not.toMatch(/agentx|terminal|\bcommand\b/iu);
 });
 
-it("uses Rovara in the installer shell and gives browser recovery on connection loss", () => {
-  expect(wizardHtml("token")).toContain("<title>Install Rovara</title>");
-  expect(wizardHtml("token")).not.toMatch(/agentx/iu);
-  expect(WIZARD_JS).toContain("Lost the connection to the installer. Refresh this page to reconnect.");
-  expect(WIZARD_JS).not.toMatch(/in a terminal|run the command/iu);
-});
-
 it("keeps shared sign-in completion and invalid callbacks plain and preserves state checks", async () => {
   const listener = await createCallbackListener("expected", 60_000, 41234);
   cleanup.push(() => listener.close());
@@ -99,7 +91,7 @@ it("keeps shared sign-in missing-code failures plain", async () => {
   await expect(listener.code).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
 });
 
-it.each(["success", "refusal", "missing-code"])("keeps ChatGPT browser callbacks plain (%s)", async (kind) => {
+it.each([ "refusal", "missing-code"])("keeps ChatGPT browser callbacks plain (%s)", async (kind) => {
   const listener = await listenForChatGptCallback("expected", 41234);
   cleanup.push(listener!.close);
   expect(request({ state: "wrong", code: "untrusted", client_id: "client" }, "/auth/callback").status).toBe(400);

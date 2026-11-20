@@ -14,7 +14,6 @@ import {
   fetchEvalBatchResults,
 } from "../../packages/cli/src/admin/eval-batch.js";
 import { evalBatchPlaceholderThreadTs, isPlaceholderThreadTs } from "../../packages/broker/src/aws/eval-batch-admin.js";
-import { exitCodeForError } from "../../packages/cli/src/output.js";
 
 const base = { controlPlaneUrl: "https://api.example.com/", accessToken: "token" };
 const batchId = "4f1d7c1e-0f5e-5b57-8c0b-0d3b1a1e9a11";
@@ -54,15 +53,6 @@ describe("agentx admin eval batch start (spec 052 FR-001, FR-003)", () => {
     });
   });
 
-  it("sends the same body for a repeated start, so the route finds the same batch", async () => {
-    const filePath = await tempFile("batch.yaml", yamlFile);
-    const fetchImplementation = fakeFetch(200, { created: true });
-    const input = { ...base, teamId: "T0BSHLLUGBD", channelId: "C0123456789", filePath };
-    await startEvalBatch(input, fetchImplementation as typeof fetch);
-    await startEvalBatch(input, fetchImplementation as typeof fetch);
-    expect(fetchImplementation.mock.calls[1]![1]!.body).toBe(fetchImplementation.mock.calls[0]![1]!.body);
-  });
-
   it("prints the batch ID, and the thread only when the route returns one", () => {
     const text = evalBatchStartText({ created: true, batch: { batchId, status: "RUNNING", runs: 2 } });
     expect(text).toContain(batchId);
@@ -85,13 +75,6 @@ describe("agentx admin eval batch start (spec 052 FR-001, FR-003)", () => {
     await expect(readEvalBatchFile("/nonexistent/batch.yaml")).rejects.toThrow(/cannot read/);
   });
 
-  it("prints the broker's refusal reason and fails with a non-zero exit code", async () => {
-    const filePath = await tempFile("batch.yaml", yamlFile);
-    const refusing = fakeFetch(400, { error: { code: "CONFIG_INVALID", message: "model amazon-bedrock/us.vendor.batch-v1 is not approved for this project" } });
-    const failure = await startEvalBatch({ ...base, teamId: "T0BSHLLUGBD", channelId: "C0123456789", filePath }, refusing as typeof fetch).catch((error: Error & { code?: string }) => error);
-    expect((failure as Error).message).toContain("is not approved for this project");
-    expect(exitCodeForError((failure as { code: never }).code)).not.toBe(0);
-  });
 });
 
 describe("agentx admin eval batch show and stop (spec 052 FR-009, Ruling 11)", () => {

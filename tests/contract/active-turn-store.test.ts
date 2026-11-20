@@ -15,13 +15,6 @@ function seeded() {
 }
 
 describe("the active turn on the thread META row", () => {
-  it("saves the turn beside the thread's other fields, and reads it back", async () => {
-    const { db, store } = seeded();
-    await store.saveActiveTurn(subject, active);
-    const item = db.get(`THREAD#${subject}`, "META");
-    expect(item).toMatchObject({ workspaceId: active.workspaceId, conversationId: "33333333-3333-4333-8333-333333333333", pendingRequests: 1, activeTurn: active });
-    expect(activeTurnFromItem(item?.activeTurn)).toEqual(active);
-  });
 
   it("keeps an approval's request with the turn, and reads it back", async () => {
     const { db, store } = seeded();

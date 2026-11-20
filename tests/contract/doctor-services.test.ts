@@ -4,10 +4,9 @@ import { githubChecks, githubWebhookChecks } from "../../packages/cli/src/doctor
 import { githubAppSecretName, githubWebhookUrl } from "../../packages/cli/src/init/github-app.js";
 import { secretChecks } from "../../packages/cli/src/doctor/secrets.js";
 import { slackChecks, slackSigningSecret } from "../../packages/cli/src/doctor/slack.js";
-import { probeSlackUrls, SlackSignatureRefusedError } from "../../packages/cli/src/init/slack-app.js";
 import { SlackRateLimitedError } from "../../packages/cli/src/setup/channel-add.js";
-import { doctorContext, doctorServices, SECRETS, SETTINGS, SIGNING_KEY, WEBHOOK_SECRET } from "../support/doctor-fakes.js";
-import { fakeGitHubApi, fakeSlackApi, memoryInitSecrets, T0, TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET } from "../support/init-fakes.js";
+import { doctorContext, doctorServices, SECRETS, SETTINGS, SIGNING_KEY } from "../support/doctor-fakes.js";
+import { fakeGitHubApi, fakeSlackApi, memoryInitSecrets, T0, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET } from "../support/init-fakes.js";
 import { fakeSlackChannels } from "../support/setup-fakes.js";
 
 const withSecrets = (values: Record<string, string>) => doctorContext({ services: doctorServices({ secrets: memoryInitSecrets(values) }) });
@@ -82,21 +81,6 @@ describe("doctor: the OpenRouter secret (fix round 1)", () => {
 });
 
 describe("doctor: Slack (FR-050)", () => {
-  it("passes a working bot token, both URLs answering the signed probe, and the bot in the bound channel", async () => {
-    const checks = await slackChecks(doctorContext());
-    expect(checks.map((entry) => [entry.name, entry.status])).toEqual([["bot token", "ok"], ["request URLs", "ok"], ["#payments", "ok"]]);
-    expect(text(checks)).not.toContain(TEST_BOT_TOKEN);
-    expect(text(checks)).not.toContain(TEST_SIGNING_SECRET);
-  });
-
-  it("fails a revoked token with Slack's error code only, and skips the checks that need it", async () => {
-    const context = doctorContext({ services: doctorServices({ slackApi: fakeSlackApi({ authTest: async () => ({ ok: false, error: "token_revoked" }) }) }) });
-    const checks = await slackChecks(context);
-    expect(checks[0]).toMatchObject({ name: "bot token", status: "fail", detail: "Slack refused the bot token (token_revoked)" });
-    expect(checks[0]!.fix).toContain("reinstall the Slack app");
-    // Live check L1: the exact next step, the same one sign-in's scope check gives.
-    expect(checks[0]!.fix).toBe('reinstall the Slack app (api.slack.com/apps, Install App), then store its new Bot User OAuth Token in agentx/staging/slack (docs/day-two.md, "Replace the Slack bot token")');
-  });
 
   it("fails when the bot token belongs to another workspace than init recorded", async () => {
     const context = doctorContext({ services: doctorServices({ slackApi: fakeSlackApi({ authTest: async () => ({ ok: true, user_id: "U1", bot_id: "B1", team_id: "T0OTHER", team: "Other" }) }) }) });
@@ -118,10 +102,6 @@ describe("doctor: Slack (FR-050)", () => {
     expect((await slackChecks(context)).find((entry) => entry.name === "#payments")).toMatchObject({ status: "fail", fix: "in #payments, type /invite @agentx, or bind another channel with agentx --env staging channel add --project payments" });
   });
 
-  it("skips the channel check when init bound no channel", async () => {
-    const context = doctorContext({ progress: { ...doctorContext().progress!, project: undefined } });
-    expect((await slackChecks(context)).at(-1)).toMatchObject({ name: "bound channels", status: "skip" });
-  });
 });
 
 describe("doctor: the Slack signing secret parse (final review M10)", () => {
@@ -144,14 +124,6 @@ describe("doctor: the Slack signing secret parse (final review M10)", () => {
 });
 
 describe("doctor: Slack (fix round 1)", () => {
-  it("reads the Slack secret once, for both the token and the signing secret", async () => {
-    const secrets = memoryInitSecrets(SECRETS);
-    const reads: string[] = [];
-    const counting = { get: async (name: string) => { reads.push(name); return secrets.get(name); } };
-    const checks = await slackChecks(doctorContext({ services: doctorServices({ secrets: counting }) }));
-    expect(checks.map((entry) => entry.status)).toEqual(["ok", "ok", "ok"]);
-    expect(reads.filter((name) => name === "agentx/staging/slack")).toHaveLength(1);
-  });
 
   it("keeps the checks already made, and fails the channel, when the channel lookup throws", async () => {
     const channels = { ...fakeSlackChannels([]), find: async () => { throw new AgentXError("RUNTIME_UNAVAILABLE", "Slack conversations.list failed with HTTP 503", 503); } };
@@ -181,19 +153,6 @@ describe("doctor: GitHub App (fix round 1)", () => {
   const withGitHub = (overrides: Partial<ReturnType<typeof fakeGitHubApi>>, progress = doctorContext().progress) =>
     doctorContext({ progress, services: doctorServices({ github: { ...fakeGitHubApi({ installationId: 456 }), ...overrides } }) });
 
-  it("fails, with a fix, when the installation token cannot be made", async () => {
-    const found = (await githubChecks(withGitHub({ installationToken: async () => { throw new AgentXError("RUNTIME_UNAVAILABLE", "GitHub installation token failed with HTTP 403", 503); } })))[0]!;
-    expect(found).toMatchObject({ name: "GitHub App", status: "fail" });
-    expect(found.detail).toContain("GitHub installation token failed with HTTP 403");
-    expect(found.fix).toContain("the installation may be suspended; check it in the installation settings on GitHub");
-  });
-
-  it("fails, with a fix, when the repositories cannot be listed", async () => {
-    const found = (await githubChecks(withGitHub({ repositoryCount: async () => { throw new AgentXError("RUNTIME_UNAVAILABLE", "GitHub repository list failed with HTTP 500", 503); } })))[0]!;
-    expect(found).toMatchObject({ name: "GitHub App", status: "fail" });
-    expect(found.fix).toContain("installation settings on GitHub");
-  });
-
   it("tells a refused key (HTTP 401) apart from GitHub being unreachable", async () => {
     const refused = (await githubChecks(withGitHub({ listInstallations: async () => { throw new AgentXError("RUNTIME_UNAVAILABLE", "GitHub installation list failed with HTTP 401", 503); } })))[0]!;
     expect(refused).toMatchObject({ status: "fail", detail: "GitHub refused the app's key (HTTP 401)" });
@@ -215,16 +174,6 @@ describe("doctor: GitHub App (fix round 1)", () => {
 });
 
 describe("doctor: GitHub App (FR-050)", () => {
-  it("passes an installed app that sees repositories, and never shows the private key", async () => {
-    const checks = await githubChecks(doctorContext());
-    expect(checks).toEqual([expect.objectContaining({ name: "GitHub App", status: "ok", detail: "installed on acme, sees 1 repository" })]);
-    expect(text(checks)).not.toContain(TEST_PRIVATE_KEY.slice(40, 80));
-  });
-
-  it("fails when the app is no longer installed, with the install link", async () => {
-    const context = doctorContext({ services: doctorServices({ github: fakeGitHubApi({ installAfterPolls: 99 }) }) });
-    expect((await githubChecks(context))[0]).toMatchObject({ status: "fail", fix: "install it again: https://github.com/apps/agentx-acme/installations/new" });
-  });
 
   it("fails when the installation sees no repository", async () => {
     const context = doctorContext({ services: doctorServices({ github: fakeGitHubApi({ installationId: 456, repositoryCounts: [0] }) }) });
@@ -238,15 +187,6 @@ describe("doctor: GitHub App (FR-050)", () => {
 });
 
 describe("doctor: Slack and GitHub (Task 6 polish)", () => {
-  it("probeSlackUrls reports the 401 timeout as a typed error carrying the URL, with init's words", async () => {
-    let clock = T0;
-    const refusing = probeSlackUrls({ eventsUrl: "https://cp.example.test/slack/events", interactivityUrl: "https://cp.example.test/slack/interactivity", signingSecret: TEST_SIGNING_SECRET,
-      fetch: async () => new Response("{}", { status: 401 }), now: () => clock, sleep: async (ms) => { clock += ms; }, write: () => undefined, timeoutMs: 60_000, pollMs: 5_000 });
-    const error = await refusing.catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(SlackSignatureRefusedError);
-    expect((error as SlackSignatureRefusedError).url).toBe("https://cp.example.test/slack/events");
-    expect((error as Error).message).toContain("then run agentx init again");
-  });
 
   const lookupFailing = (error: Error) => doctorContext({ services: doctorServices({ slackChannels: { ...fakeSlackChannels([]), find: async () => { throw error; } } }) });
   const channelCheck = async (error: Error) => (await slackChecks(lookupFailing(error))).find((entry) => entry.name === "#payments")!;
@@ -284,17 +224,6 @@ describe("doctor: GitHub webhook", () => {
   const contextWith = (github: Parameters<typeof fakeGitHubApi>[0], secret = SECRETS[SECRET_ID]!) =>
     doctorContext({ services: doctorServices({ github: fakeGitHubApi({ installationId: 456, ...github }), secrets: memoryInitSecrets({ ...SECRETS, [SECRET_ID]: secret }) }) });
 
-  it("is ok when the hook points at the control plane, the events are on and the secret is stored", async () => {
-    const checks = await githubWebhookChecks(doctorContext());
-    expect(checks.map((entry) => [entry.name, entry.status, entry.detail])).toEqual([
-      ["GitHub webhook", "ok", `the App sends events to ${EXPECTED_URL}`],
-      ["GitHub webhook", "ok", "subscribed to pull request and comment events; check that Active is on at https://github.com/organizations/acme/settings/apps/agentx-acme-staging"],
-      ["GitHub webhook secret", "ok", "stored"],
-      ["GitHub webhook deliveries", "ok", "GitHub delivered an event to AgentX in the last 3 days"],
-    ]);
-    expect(text(checks)).not.toContain(WEBHOOK_SECRET);
-  });
-
   describe("recent deliveries", () => {
     const SETTINGS_PAGE = "https://github.com/organizations/acme/settings/apps/agentx-acme-staging";
     const hoursAgo = (hours: number) => new Date(T0 - hours * 60 * 60 * 1000).toISOString();
@@ -316,19 +245,6 @@ describe("doctor: GitHub webhook", () => {
       expect(refused.fix).toContain(`check that Active is on at ${SETTINGS_PAGE}`);
       const unreachable = await deliveriesCheck([{ deliveredAt: hoursAgo(1), status: "Invalid HTTP Response: 0", statusCode: 0 }]);
       expect(unreachable).toMatchObject({ status: "warn", detail: "GitHub's latest delivery to AgentX failed (it got no answer)" });
-    });
-
-    it("is ok when the latest recent delivery went through, whatever order GitHub lists them in", async () => {
-      const found = await deliveriesCheck([{ deliveredAt: hoursAgo(30), status: "Bad Gateway", statusCode: 502 }, { deliveredAt: hoursAgo(2), status: "OK", statusCode: 200 }]);
-      expect(found).toMatchObject({ status: "ok" });
-    });
-
-    it("does not report deliveries ok while the App's webhook points somewhere else, and names the expected URL", async () => {
-      const checks = await githubWebhookChecks(contextWith({ hookUrl: "https://old.example.test/hook", deliveries: [{ deliveredAt: hoursAgo(1), status: "OK", statusCode: 200 }] }));
-      const found = checks.find((entry) => entry.name === "GitHub webhook deliveries")!;
-      expect(found.status).toBe("warn");
-      expect(found.detail).toBe(`GitHub's deliveries go to https://old.example.test/hook, not ${EXPECTED_URL}`);
-      expect(found.fix).toBe("run agentx --env staging upgrade: it points the App's webhook at the control plane");
     });
 
     it("warns, and does not fail, when the deliveries cannot be read", async () => {

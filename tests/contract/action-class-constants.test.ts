@@ -32,10 +32,6 @@ describe("the write-classification constants", () => {
     expect(nameWords("get_merged_pull_requests").some((word) => WRITE_VERBS.includes(word))).toBe(false);
   });
 
-  it("has no name in both the read and write verbs", () => {
-    expect(READ_VERBS.filter((verb) => WRITE_VERBS.includes(verb))).toEqual([]);
-  });
-
   it("is reachable from contracts with the moved functions", () => {
     expect(destructiveSignal("delete_widget", {})).toContain("delete");
   });

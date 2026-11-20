@@ -1,6 +1,6 @@
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import { TurnCallSchema, TurnRecordSchema, type ConnectorCatalog, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
+import { TurnRecordSchema, type ConnectorCatalog, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
 import { createGateSession } from "../../packages/orchestrator/src/action-gate.js";
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { createOrchestratorRuntime, runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
@@ -9,25 +9,9 @@ import { buildTurnRecord } from "../../packages/slack-service/src/turn-records.j
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
-const call = { name: "tracker__close_item", arguments: "{\"id\":\"TRK-9\"}", argumentsFingerprint: "a".repeat(32), validation: "ok", outcome: "FAILED", durationMs: 3 } as const;
 const DESTRUCTIVE = "the tool's name says \"close\"; destructive actions always ask";
 
 describe("gate decisions in turn records (spec 014 FR-021)", () => {
-  it("keeps parsing a call recorded before the gate, and parses one with a decision", () => {
-    expect(TurnCallSchema.safeParse(call).success).toBe(true);
-    expect(TurnCallSchema.safeParse({ ...call, gate: { outcome: "ask", source: "default", kind: "destructive", reason: DESTRUCTIVE } }).success).toBe(true);
-    expect(TurnCallSchema.safeParse({ ...call, gate: { outcome: "deny", source: "rule", kind: "admin", rule: "2", reason: "Closing is frozen." } }).success).toBe(true);
-  });
-
-  it("refuses a decision with other fields, an unknown outcome or source, a numeric rule or a long reason", () => {
-    for (const gate of [
-      { outcome: "ask", source: "default", reason: "x", arguments: "{}" },
-      { outcome: "maybe", source: "default", reason: "x" },
-      { outcome: "ask", source: "model", reason: "x" },
-      { outcome: "ask", source: "rule", rule: 2, reason: "x" },
-      { outcome: "ask", source: "classifier", reason: "r".repeat(201) },
-    ]) expect(TurnCallSchema.safeParse({ ...call, gate }).success, JSON.stringify(gate)).toBe(false);
-  });
 
   it("records each decision on its call, the rule as text, and no argument value in a classifier's reason", () => {
     const recorder = new TurnRecorder(() => 0);

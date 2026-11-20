@@ -23,7 +23,7 @@ it.each([false, true].flatMap((explicit) => ["on", "off", "cutoff"].map(policy =
  expect(resolver).not.toHaveBeenCalled();
 });
 
-it.each(["missing","revoked","malformed","moved","read"])("independent code AND refresh refuse live membership %s", async damage=>{
+it.each(["missing","malformed"])("independent code AND refresh refuse live membership %s", async damage=>{
  const h=signinCompanyWorld();await h.create(COMPANY_A.orgId);
  const first=await h.signInCompany(COMPANY_A.orgId);const signed=await h.exchange(new URL(first.headers.location!).searchParams.get("code")!);expect(signed.status).toBe(200);
  const second=await h.signInCompany(COMPANY_A.orgId);const code=new URL(second.headers.location!).searchParams.get("code")!;

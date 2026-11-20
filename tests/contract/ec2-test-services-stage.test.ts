@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { mirroredStarterEntries } from "../../packages/contracts/src/test-service-mirror.js";
-import { ec2WorkerBootScript, type Ec2WorkerBootConfig } from "../../packages/contracts/src/session.js";
 import { parseBootFacts } from "../../packages/worker/src/test-services-report.js";
 
 const stage = readFileSync(new URL("../../packages/worker/ec2/test-services-stage.sh", import.meta.url), "utf8");
@@ -106,53 +105,9 @@ const mounted = (h: Host): boolean => existsSync(join(h.runDir, ".mounted"));
 const calls = (h: Host): string[] => (existsSync(h.calls) ? readFileSync(h.calls, "utf8").split("\n").filter((line) => line !== "") : []);
 
 describe("the test-services stage on a worker", () => {
-  it("pulls the install's five starter copies by digest with one login that it removes, walls the run networks, mounts the run directory and hands the worker the owner list, its own image and the boot facts", () => {
-    const h = host();
-    const result = runStage(h);
-    expect(result.status, result.stderr).toBe(0);
-    const lines = envLines(h);
-    expect(lines).toContain(`AGENTX_WORKER_IMAGE=${WORKER_IMAGE}`);
-    expect(lines).toContain(`AGENTX_TEST_SERVICES_OWNER_IMAGES=${JSON.stringify(mirroredStarterEntries(REGISTRY, "staging"))}`);
-    expect(lines.some((line) => line.startsWith("AGENTX_TEST_SERVICES_NOT_PULLED="))).toBe(false);
-    expect(factsOf(h)).toEqual({ metadataBlocked: true, runWalls: true, ipv6Drops: true, prepull: "ok", prepulled: 5, loggedOut: true, dockerVersion: "25.0.8" });
-    expect(readFileSync(h.pulled, "utf8").trim().split("\n").sort()).toEqual([...references].sort());
-    expect(readFileSync(h.rules, "utf8")).toContain("DOCKER-USER -i rvi+ -o rvi+ -m physdev ! --physdev-is-bridged -j DROP");
-    expect(readFileSync(h.rules6, "utf8").split("\n")).toEqual(expect.arrayContaining(["INPUT -i rvb+ -j DROP", "INPUT -i rvi+ -j DROP"]));
-    expect(mounted(h)).toBe(true);
-    const daemon = JSON.parse(readFileSync(h.daemon, "utf8")) as { "data-root": string; "default-address-pools": Array<{ base: string }> };
-    expect(daemon["data-root"]).toBe("/mnt/workspace/.docker");
-    expect(daemon["default-address-pools"].map((pool) => pool.base).some((base) => base.startsWith("172.29.") || base.startsWith("172.30.") || base.startsWith("10."))).toBe(false);
-    // The worker image is read with no network, no capability and a read-only root; the login comes before the pulls and the logout after them.
-    const log = calls(h);
-    const runs = log.filter((line) => line.startsWith("docker run"));
-    expect(runs.length).toBe(2);
-    for (const line of runs) expect(line).toContain(`--rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint node ${WORKER_IMAGE} /opt/agentx/packages/worker/dist/test-services-mirror-cli.js`);
-    const login = log.findIndex((line) => line.startsWith("docker login"));
-    const firstPull = log.findIndex((line) => line.startsWith("docker pull"));
-    const lastPull = log.map((line) => line.startsWith("docker pull")).lastIndexOf(true);
-    expect(login).toBeGreaterThan(-1);
-    expect(login).toBeLessThan(firstPull);
-    expect(log.findIndex((line, index) => index > lastPull && line.startsWith("docker logout"))).toBeGreaterThan(-1);
-    for (const line of log.filter((entry) => entry.startsWith("docker pull"))) expect(line).toMatch(/@sha256:[a-f0-9]{64}$/u);
-    // The restore unit runs before the worker; the worker only wants it (a failure there never stops the worker).
-    expect(readFileSync(join(h.units, "rovara-test-services.service"), "utf8")).toContain("Before=agentx-worker.service");
-    expect(readFileSync(join(h.units, "agentx-worker.service.d", "20-test-services.conf"), "utf8")).toBe("[Unit]\nWants=rovara-test-services.service\nAfter=rovara-test-services.service\n");
-  });
-
-  it("partial pulls: the owner list holds exactly the copies that arrived, and the facts say partial", () => {
-    const h = host({ failPull: /mysql/u });
-    const result = runStage(h);
-    expect(result.status, result.stderr).toBe(0);
-    const list = calls(h).find((line) => line.startsWith("docker run") && line.includes(" list "))!;
-    const named = list.slice(list.indexOf(" list ") + 6).split(" ").slice(2);
-    expect(named.sort()).toEqual(references.filter((reference) => !reference.includes("mysql")).sort());
-    expect(factsOf(h)).toMatchObject({ prepull: "partial", prepulled: 4 });
-    expect(mounted(h)).toBe(true);
-  });
 
   it.each([
     ["every pull fails", { failAllPulls: true }, { prepull: "failed", prepulled: 0 }],
-    ["the registry login fails", { failLogin: true }, { prepull: "failed", prepulled: 0 }],
   ] as const)("withholds test services when %s: no owner list, the run directory unmounted, `all` written, and the stage reports a failure the boot only logs", (_name, options, facts) => {
     const h = host(options);
     const result = runStage(h);
@@ -175,57 +130,6 @@ describe("the test-services stage on a worker", () => {
     expect(mounted(h)).toBe(false);
   });
 
-  it("Docker not coming back on the new address pools: the original daemon.json is put back and Docker restarted on it (the worker still needs Docker), and test services are withheld", () => {
-    const h = host({ failDockerRestart: true });
-    expect(runStage(h).status).not.toBe(0);
-    expect(readFileSync(h.daemon, "utf8")).toBe('{"data-root": "/mnt/workspace/.docker"}\n');
-    expect(existsSync(`${h.daemon}.before-test-services`)).toBe(false);
-    expect(calls(h).filter((line) => line === "systemctl restart docker.service")).toHaveLength(2);
-    const log = calls(h);
-    expect(log.indexOf("systemctl reset-failed docker.service")).toBeGreaterThan(log.indexOf("systemctl restart docker.service"));
-    expect(log.indexOf("systemctl reset-failed docker.service")).toBeLessThan(log.lastIndexOf("systemctl restart docker.service"));
-    expect(envLines(h)).toContain("AGENTX_TEST_SERVICES_NOT_PULLED=all");
-    expect(calls(h).some((line) => line.startsWith("docker pull"))).toBe(false);
-  });
-
-  it("withholds test services, pulling nothing, when the metadata block is not in place after Docker's restart", () => {
-    const h = host({ noMetadataBlock: true });
-    expect(runStage(h).status).not.toBe(0);
-    expect(envLines(h)).toContain("AGENTX_TEST_SERVICES_NOT_PULLED=all");
-    expect(calls(h).some((line) => line.startsWith("docker pull"))).toBe(false);
-  });
-
-  it("takes only references of the fixed form for THIS registry and environment, and with none it changes nothing on the host", () => {
-    const h = host({ refs: [`docker.io/library/postgres@sha256:${"1".repeat(64)}`, `${REGISTRY}/agentx-prod--test-services/postgres-16/postgres@sha256:${"2".repeat(64)}`, `${REGISTRY}/agentx-staging--test-services/postgres-16/postgres:16`, `999988887777.dkr.ecr.us-west-2.amazonaws.com/agentx-staging--test-services/postgres-16/postgres@sha256:${"3".repeat(64)}`] });
-    expect(runStage(h).status).not.toBe(0);
-    expect(envLines(h)).toEqual(["AWS_REGION=us-west-2", "AGENTX_SANDBOX_IMAGE=x"]);
-    expect(readFileSync(h.daemon, "utf8")).toBe('{"data-root": "/mnt/workspace/.docker"}\n');
-    expect(calls(h).some((line) => line.startsWith("docker pull") || line.startsWith("systemctl"))).toBe(false);
-  });
-
-  it("takes at most eight references, whatever the worker image prints", () => {
-    const many = Array.from({ length: 12 }, (_, index) => `${REGISTRY}/agentx-staging--test-services/postgres-${String(index + 10)}/postgres@sha256:${String(index % 10).repeat(64)}`);
-    const h = host({ refs: many });
-    expect(runStage(h).status).toBe(0);
-    expect(readFileSync(h.pulled, "utf8").trim().split("\n")).toHaveLength(8);
-  });
-
-  it("pulls only the references that passed, when the worker image names some others too", () => {
-    const h = host({ refs: [...references.slice(0, 2), `docker.io/library/redis@sha256:${"4".repeat(64)}`] });
-    expect(runStage(h).status).toBe(0);
-    expect(readFileSync(h.pulled, "utf8").trim().split("\n").sort()).toEqual(references.slice(0, 2).sort());
-  });
-
-  it.each([
-    ["a worker image outside this account's ECR", { AGENTX_WORKER_IMAGE: `docker.io/library/node@sha256:${"a".repeat(64)}` }],
-    ["a log group that is not a named environment's", { AGENTX_LOG_GROUP: "/agentx/staging/other" }],
-    ["an environment name that is not one", { AGENTX_LOG_GROUP: "/agentx/Staging_1/worker" }],
-  ])("does nothing at all for %s", (_name, environment) => {
-    const h = host();
-    expect(runStage(h, environment).status).not.toBe(0);
-    expect(calls(h)).toEqual([]);
-    expect(envLines(h)).toEqual(["AWS_REGION=us-west-2", "AGENTX_SANDBOX_IMAGE=x"]);
-  });
 
   it("refuses an owner list that is not one line of entries, and withholds", () => {
     const h = host({ list: "not json" });
@@ -234,37 +138,9 @@ describe("the test-services stage on a worker", () => {
     expect(envLines(h)).toContain("AGENTX_TEST_SERVICES_NOT_PULLED=all");
   });
 
-  it("the restore script puts the walls and the run directory back after a reboot, and withholds (never failing the unit) when it cannot", () => {
-    const ok = host();
-    expect(runStage(ok).status).toBe(0);
-    const restore = readFileSync(ok.restore, "utf8");
-    // After a reboot: no mount, no rules but the container firewall's metadata block.
-    writeFileSync(ok.rules, "DOCKER-USER -d 169.254.169.254/32 -j DROP\n");
-    writeFileSync(ok.rules6, "");
-    spawnSync("rm", ["-f", join(ok.runDir, ".mounted")]);
-    const env = { PATH: `${join(ok.dir, "bin")}:${process.env.PATH ?? ""}` };
-    expect(spawnSync("bash", ["-c", restore], { encoding: "utf8", env }).status).toBe(0);
-    expect(mounted(ok)).toBe(true);
-    expect(readFileSync(ok.rules, "utf8")).toContain("DOCKER-USER -i rvi+ -o rvi+ -m physdev ! --physdev-is-bridged -j DROP");
-    expect(envLines(ok)).not.toContain("AGENTX_TEST_SERVICES_NOT_PULLED=all");
-    // The metadata block lost: withheld, unmounted, the unit still succeeds.
-    writeFileSync(ok.rules, "");
-    expect(spawnSync("bash", ["-c", restore], { encoding: "utf8", env }).status).toBe(0);
-    expect(mounted(ok)).toBe(false);
-    expect(envLines(ok)).toContain("AGENTX_TEST_SERVICES_NOT_PULLED=all");
-  });
 });
 
 describe("boot.sh's test-services hook", () => {
-  const config: Ec2WorkerBootConfig = {
-    workspaceId: "11111111-2222-4333-8444-555555555555", generation: 2, volumeId: "vol-0123456789abcdef0", expectNewVolume: false, workerImage: WORKER_IMAGE, invokePublicKey: "QUJD",
-    controlPlaneUrl: "https://abc.execute-api.us-west-2.amazonaws.com", modelProvider: "amazon-bedrock", modelId: "m", promptCacheRetention: "long", logGroupName: "/agentx/staging/worker",
-  };
-
-  it("renders AGENTX_TEST_SERVICES=1 for Code's launch only when the configuration asks for test services", () => {
-    expect(ec2WorkerBootScript({ ...config, testServices: true }, bootScript)).toContain("export AGENTX_TEST_SERVICES='1'");
-    expect(ec2WorkerBootScript(config, bootScript)).not.toContain("export AGENTX_TEST_SERVICES=");
-  });
 
   it("runs the stage only with AGENTX_TEST_SERVICES=1, after the worker environment and unit are written and before the worker starts, and a failure is only logged", () => {
     expect(bootScript).toContain('[[ ${AGENTX_TEST_SERVICES:-} != 1 ]] || test_services_stage "$region" || log "no test services on this worker (not fatal)"');

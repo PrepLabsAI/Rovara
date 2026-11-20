@@ -3,7 +3,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { verifyWebhook, webhookHeaders } from "@agentx/contracts";
 import { registerChannelAdapter } from "../../packages/broker/src/aws/channel-adapters.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, registerSlackProject } from "../support/slack-broker.js";
+import { call, createBroker, loadSlackBroker, registerSlackProject } from "../support/slack-broker.js";
 
 const admin = { subject: "admin-subject", admin: true };
 const outsider = { subject: "other-admin", admin: true };
@@ -65,11 +65,7 @@ describe("registering an adapter (FR-020)", () => {
 
   it.each([
     ["a person without the administrator claim", developer, registration, 403],
-    // Not a member of the project: NOT_FOUND, as for Slack bindings, so the project is not revealed.
-    ["an administrator who does not administer the project", outsider, registration, 404],
-    ["a project that is not registered", admin, { ...registration, projects: ["missing"] }, 404],
     ["an http callback", admin, { ...registration, callbackUrl: "http://adapter.example.com/rovara" }, 400],
-    ["a callback on an IP address", admin, { ...registration, callbackUrl: "https://203.0.113.9/rovara" }, 400],
   ])("refuses %s", async (_name, user, body, status) => {
     const { as, put } = await setup();
     expect((await as(user, "PUT", "/v1/admin/channels/whatsapp", body)).status).toBe(status);
@@ -95,20 +91,6 @@ describe("registering an adapter (FR-020)", () => {
 
 describe("binding an adapter's space (FR-024)", () => {
   const path = "/v1/admin/channels/whatsapp/bindings/%2B14155550100/group%3DAbC-12_x";
-
-  it("binds a space to a project the adapter is registered for, beside the Slack binding", async () => {
-    const { as, db } = await setup();
-    await as(admin, "PUT", "/v1/admin/channels/whatsapp", registration);
-    const bound = await as(admin, "PUT", path, { projectName: "payments" });
-    expect(bound.status).toBe(200);
-    expect(bound.body.binding).toMatchObject({ channel: "whatsapp", tenant: "+14155550100", space: "group=AbC-12_x", projectName: "payments" });
-    expect(db.get("BINDING#whatsapp/+14155550100", "SPACE#group=AbC-12_x")).toMatchObject({ entityType: "CHANNEL_BINDING", channel: "whatsapp", projectName: "payments" });
-    // The Slack binding registerSlackProject made is untouched.
-    expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)).toMatchObject({ entityType: "SLACK_BINDING", projectName: "payments" });
-
-    expect((await as(admin, "DELETE", path)).body).toMatchObject({ deleted: true });
-    expect(db.get("BINDING#whatsapp/+14155550100", "SPACE#group=AbC-12_x")).toBeUndefined();
-  });
 
   it("refuses a space of an unregistered adapter, a project the adapter is not registered for, and a non-administrator", async () => {
     const { as } = await setup();

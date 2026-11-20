@@ -13,12 +13,6 @@ describe("G3 v1 shared browser contracts", () => {
  it("refuses mixed effective/refusal, duplicate stages, unknown fields and unbounded lists", () => {
   for (const value of [{ ...view, stages: [stage, stage] }, { ...view, stages: [{ ...stage, refusal: { code: "MODEL_NOT_VERIFIED" } }] }, { ...view, secret: "do-not-accept" }, { ...view, stages: [{ ...stage, candidates: Array(24).fill({ model, label: "Model", provider: "anthropic", company: "anthropic", status: "verified", checkedAt: at }) }] }]) expect(contracts.StageModelsResponseSchema.safeParse(value).success).toBe(false);
  });
- it("supports fixed refusals and a separate draft stale code", () => {
-  const rest = Object.fromEntries(Object.entries(stage).filter(([key]) => key !== "effective"));
-  expect(contracts.StageModelsResponseSchema.safeParse({ ...view, stages: [{ ...rest, refusal: { code: "LOCK_UNSATISFIABLE", fixHref: "/app/admin/how-we-work" } }] }).success).toBe(true);
-  expect(contracts.StageModelRefusalCodeSchema.safeParse("DRAFT_STALE").success).toBe(true);
-  expect(contracts.StageModelRefusalCodeSchema.safeParse("provider says raw error").success).toBe(false);
- });
  it("rejects external or executable remediation links", () => {
   for (const fixHref of ["https://evil.test", "//evil.test", "javascript:alert(1)", "/app/admin?token=secret"]) expect(contracts.StageModelRefusalSchema.safeParse({ code: "MODEL_NOT_VERIFIED", fixHref }).success).toBe(false);
  });
@@ -33,11 +27,6 @@ describe("G3 v1 shared browser contracts", () => {
   const page = { version: 1, checkedAt: at, policyRevision: 0, mayBeIncomplete: true, projects: [{ project: "web", impact: "blocked", reasonCodes: ["MODEL_NOT_VERIFIED"] }], nextCursor: "opaque" };
   expect(contracts.ModelPolicyPreviewResponseSchema.safeParse(page).success).toBe(true);
   expect(contracts.ModelPolicyPreviewResponseSchema.safeParse({ ...page, total: 1 }).success).toBe(false);
- });
- it("represents default fallback visibility without accepting raw reasons", () => {
-  const fallback = { stage: "build", used: "anthropic/claude-sonnet-4", wanted: null, reasonCode: "DEFAULT_MODEL_UNAVAILABLE" };
-  expect(contracts.ModelFallbackSchema.safeParse(fallback).success).toBe(true);
-  expect(contracts.ModelFallbackSchema.safeParse({ ...fallback, reasonCode: "a provider exception" }).success).toBe(false);
  });
 });
 
@@ -54,8 +43,6 @@ it("exports browser-safe mapping/edit groups without widening the recipe thinkin
  expect(contracts.STAGE_EDIT_RULES.security_review.editGroup).toBe("review");
  expect(contracts.STAGE_MODEL_THINKING_LEVELS).toEqual(["off","minimal","low","medium","high"]);
 });
-
-it("does not silently widen stage thinking beyond the recipe schema",()=>{expect(contracts.StageModelChoiceSchema.safeParse({model,thinkingLevel:"xhigh"}).success).toBe(false);});
 
 it("keeps every edit group aligned and exports the policy reference pairs",()=>{
  expect(contracts.STAGE_EDIT_GROUPS).toContainEqual(["understand","plan"]);

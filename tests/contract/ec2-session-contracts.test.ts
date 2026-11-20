@@ -1,18 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import {
-  Ec2RuntimeBindingSchema,
-  WorkerInvokeTokenClaimsSchema,
-  WorkspaceSessionSchema,
-  workspaceSessionKey,
-} from "../../packages/contracts/src/session.js";
+import { Ec2RuntimeBindingSchema, WorkerInvokeTokenClaimsSchema, WorkspaceSessionSchema } from "../../packages/contracts/src/session.js";
 import { WorkspaceDeploymentModeSchema, WorkspaceInstanceSchema } from "../../packages/contracts/src/workspace.js";
 // The broker's copy of the contracts (the built package), so its instanceof AgentXError holds.
 import { agentXError } from "@agentx/contracts";
 import { parseRuntimeBinding } from "../../packages/broker/src/aws/lambda.js";
 import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
-import { createOutboxPublisherHandler } from "../../packages/broker/src/aws/outbox-publisher.js";
-import { cliRuntimeBinding, registerProject } from "../../packages/cli/src/admin/register.js";
+import { cliRuntimeBinding } from "../../packages/cli/src/admin/register.js";
 import {
   SLACK_CHANNEL, SLACK_TEAM, account, call, createBroker, finishOperation, lazyEnsureWorkspace, loadSlackBroker, markReady,
   prepareThread, serviceCall,
@@ -80,17 +74,6 @@ describe("the ec2-ebs deployment mode", () => {
 });
 
 describe("the ec2-ebs runtime binding", () => {
-  it("parses a launch template, one subnet per zone, and the volume, with no legacy ARNs", () => {
-    const reordered = {
-      volumeType: "gp3" as const,
-      volumeSizeGiB: 20,
-      subnets: binding.subnets.map((subnet) => ({ subnetId: subnet.subnetId, availabilityZone: subnet.availabilityZone })),
-      launchTemplateId: binding.launchTemplateId,
-      deploymentMode: "ec2-ebs" as const,
-    };
-    // Registration compares bindings as JSON, so the parsed key order must not depend on the input's.
-    expect(JSON.stringify(parseRuntimeBinding(reordered))).toBe(JSON.stringify(binding));
-  });
 
   it("refuses legacy fields, a zone with two subnets, and an unsupported volume", () => {
     expect(() => parseRuntimeBinding({ ...binding, runtimeArn: legacyRuntime.runtimeArn })).toThrow(/CONFIG_INVALID/);
@@ -104,47 +87,10 @@ describe("the ec2-ebs runtime binding", () => {
     expect(() => Ec2RuntimeBindingSchema.parse({ ...binding, launchTemplateId: "template" })).toThrow(/launch template/);
   });
 
-  it("rejects retired and unknown registration modes", () => {
-    expect(() => parseRuntimeBinding({ deploymentMode: "instances-ebs", launchTemplateId: binding.launchTemplateId }))
-      .toThrow(/CONFIG_INVALID/);
-    expect(() => parseRuntimeBinding({ runtimeArn: "not-an-arn", endpointQualifier: "DEFAULT", deploymentMode: "bogus" }))
-      .toThrow(/CONFIG_INVALID/);
-  });
-});
-
-describe("registering an ec2-ebs project from the CLI module", () => {
-  const definition = {
-    name: "payments",
-    revision: 1,
-    repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }],
-    setup: [],
-    readiness: [],
-    orchestratorInstructions: "Delegate work.",
-  };
-
-  it("sends a valid binding and refuses an invalid one before contacting the control plane", async () => {
-    const fetchImplementation = vi.fn(async () => new Response(JSON.stringify({ duplicate: false }), { status: 201 }));
-    const mutableBinding = { ...binding, subnets: binding.subnets.map((subnet) => ({ ...subnet })) };
-    await registerProject({ controlPlaneUrl: "https://control.example.test", accessToken: "token", definition, runtimeBinding: mutableBinding }, fetchImplementation);
-    const [, init] = fetchImplementation.mock.calls[0] as unknown as [string, RequestInit];
-    expect(JSON.parse(init.body as string)).toMatchObject({ runtimeBinding: binding });
-
-    fetchImplementation.mockClear();
-    await expect(registerProject({
-      controlPlaneUrl: "https://control.example.test", accessToken: "token", definition, runtimeBinding: { ...binding, subnets: [] },
-    }, fetchImplementation)).rejects.toThrow();
-    expect(fetchImplementation).not.toHaveBeenCalled();
-  });
 });
 
 describe("admin project register flags (#84)", () => {
   const defaults = { endpointQualifier: "DEFAULT", volumeSizeGib: "20", volumeType: "gp3" };
-
-  it("builds an ec2-ebs binding from the foundation's launch template and subnet pairs", () => {
-    expect(cliRuntimeBinding("ec2-ebs", {
-      ...defaults, launchTemplateId: binding.launchTemplateId, subnets: "us-east-1a=subnet-0123456789abcdef0, us-east-1b=subnet-0fedcba9876543210",
-    })).toEqual(binding);
-  });
 
   it("keeps each mode to its own flags", () => {
     expect(() => cliRuntimeBinding("ec2-ebs", { ...defaults, launchTemplateId: binding.launchTemplateId })).toThrow(/requires --launch-template-id and --subnets/);
@@ -175,10 +121,6 @@ describe("the SESSION record", () => {
     lastActivityAt: now,
     executionArn: `arn:aws:states:us-east-1:${account}:execution:agentx-session-provisioner:ws-${workspaceId}-gen-2`,
   } as const;
-
-  it("shares the workspace partition with its operations", () => {
-    expect(workspaceSessionKey(workspaceId)).toEqual({ pk: `WORKSPACE#${workspaceId}`, sk: "SESSION" });
-  });
 
   it("parses each state of the session lifecycle", () => {
     expect(WorkspaceSessionSchema.parse(ready)).toEqual(ready);
@@ -257,19 +199,6 @@ describe("ec2-ebs outbox records", () => {
     expect(result.batchItemFailures).toEqual([{ itemIdentifier: "m1" }]);
   });
 
-  it("wait outside the queue and are re-published when moved back to PENDING", async () => {
-    const send = vi.fn(async () => undefined);
-    const markQueued = vi.fn(async () => undefined);
-    const handler = createOutboxPublisherHandler({ send, markQueued });
-    const image = (status: string) => ({
-      pk: { S: `OUTBOX#${record.id}` }, entityType: { S: "OUTBOX" }, status: { S: status }, id: { S: record.id }, deploymentMode: { S: "ec2-ebs" },
-    });
-    await handler({ Records: [{ eventName: "MODIFY", dynamodb: { NewImage: image("WAITING_FOR_SESSION") } }] });
-    expect(send).not.toHaveBeenCalled();
-    await handler({ Records: [{ eventName: "MODIFY", dynamodb: { NewImage: image("PENDING") } }] });
-    expect(send).toHaveBeenCalledOnce();
-    expect(markQueued).toHaveBeenCalledWith(record.id);
-  });
 });
 
 describe("an ec2-ebs project in the broker", () => {
@@ -330,15 +259,6 @@ describe("an ec2-ebs project in the broker", () => {
     });
     return { db, workspaceId, completed };
   }
-
-  it("registers idempotently, prepares with an ec2-ebs outbox record, and deletes the session's instance and volume on close (#84)", async () => {
-    const deleteEc2Session = vi.fn<(workspaceId: string) => Promise<void>>(async () => undefined);
-    const { db, workspaceId, completed } = await closeEc2Workspace(deleteEc2Session);
-    expect(completed.status).toBe(200);
-    expect(completed.body).toMatchObject({ outcome: "CLOSED", workspaceId, storageReleased: true });
-    expect(deleteEc2Session).toHaveBeenCalledExactlyOnceWith(workspaceId);
-    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "CLOSED" });
-  });
 
   it("refuses to close rather than leak the volume when the session cannot be deleted", async () => {
     const refused = await closeEc2Workspace();

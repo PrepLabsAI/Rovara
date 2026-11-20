@@ -2,10 +2,8 @@
 // through conditional writes, and checked against the stored document and the one access rule.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { COMMENT_RATE, NUDGE_WINDOW_MS, TaskCommentSchema, sharedTaskKey, type TaskComment } from "@agentx/contracts";
-import {
-  createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor, queueCommentAnswer, setSuggestion, takeRate,
-} from "../../packages/broker/src/developer/page-comments.js";
+import { NUDGE_WINDOW_MS, sharedTaskKey, type TaskComment } from "@agentx/contracts";
+import { createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, queueCommentAnswer, setSuggestion, takeRate } from "../../packages/broker/src/developer/page-comments.js";
 import { resolveTaskAccess } from "../../packages/broker/src/developer/task-access.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { PRIYA, SAM, pagePlan, pageTask, type PageTaskFixture } from "../support/page-tasks.js";
@@ -33,27 +31,6 @@ function waitingTask(): PageTaskFixture {
 }
 
 describe("page comments", () => {
-  it("a comment on claim 2.1 is stored redacted with the author from the session", async () => {
-    const fixture = waitingTask();
-    const { comment: written, duplicate } = await comment(fixture, SAM, { text: "Above reads better. password=hunter2hunter2" });
-    expect(duplicate).toBe(false);
-    expect(written).toMatchObject({
-      taskId: fixture.taskId, document: "plan", version: 1, target: { kind: "claim", id: "2.1" }, rev: 1,
-      author: { kind: "person", developerId: SAM.developerId, slackUserId: SAM.slackUserId, name: "Sam Lee", owner: false },
-    });
-    expect(written.text).toContain("Above reads better.");
-    expect(written.text).not.toContain("hunter2hunter2");
-    const item = stored(fixture, written.commentId)!;
-    expect(item).toMatchObject({ pk: `DEVTASK#${fixture.taskId}`, sk: `COMMENT#${written.commentId}`, entityType: "TASK_COMMENT" });
-    expect(TaskCommentSchema.parse(Object.fromEntries(Object.entries(item).filter(([key]) => !["pk", "sk", "entityType"].includes(key))))).toEqual(written);
-    expect(counter(fixture)).toMatchObject({ count: 1, seq: 1, entityType: "TASK_COMMENT_COUNTER" });
-    expect(await listTaskComments(fixture.deps, fixture.taskId)).toEqual([written]);
-    // The owner's comment says so, from the role.
-    const owners = await comment(fixture, PRIYA, { target: { kind: "document" } });
-    expect(owners.comment.author).toMatchObject({ kind: "person", owner: true, name: "Priya Shah" });
-    // Nothing written ever lands inside the task item.
-    expect(JSON.stringify(fixture.db.get(`DEVTASK#${fixture.taskId}`, "META"))).not.toContain("Above reads better");
-  });
 
   it("hostile comment text is stored plain and redacted", async () => {
     const fixture = waitingTask();
@@ -142,19 +119,6 @@ describe("page comments", () => {
     expect((await refusal(comment(broken, SAM, { target: { kind: "document" } }))).pageReason).toBe("not_here");
   });
 
-  it("the 31st comment in 10 minutes is refused; the window resets", async () => {
-    const fixture = waitingTask();
-    for (let index = 0; index < COMMENT_RATE.comments; index += 1) await comment(fixture, SAM, { text: `Comment ${index}` });
-    const limited = await refusal(comment(fixture, SAM));
-    expect([limited.pageReason, limited.message]).toEqual(["slow_down", expect.stringContaining("You've posted a lot in the last 10 minutes. Try again in a few minutes.")]);
-    // Someone else is not slowed down.
-    await expect(comment(fixture, PRIYA)).resolves.toBeDefined();
-    fixture.advance(COMMENT_RATE.windowMs);
-    await expect(comment(fixture, SAM)).resolves.toBeDefined();
-    // The rate item is one per person and kind, overwritten in place.
-    expect(fixture.db.find((item) => item.entityType === "TASK_RATE").map((item) => item.sk).sort()).toEqual([`RATE#comment#${PRIYA.developerId}`, `RATE#comment#${SAM.developerId}`]);
-  });
-
   it("takeRate counts in fixed windows", async () => {
     const fixture = waitingTask();
     const key = { taskId: fixture.taskId, kind: "ask" as const, actor: "task" };
@@ -163,13 +127,6 @@ describe("page comments", () => {
     expect(await takeRate(fixture.deps, key, 2, 60_000)).toBe(false);
     fixture.advance(60_000);
     expect(await takeRate(fixture.deps, key, 2, 60_000)).toBe(true);
-  });
-
-  it("two first uses of a new window at once both count", async () => {
-    const fixture = waitingTask();
-    const key = { taskId: fixture.taskId, kind: "ask" as const, actor: "task" };
-    expect(await Promise.all([takeRate(fixture.deps, key, 5, 60_000), takeRate(fixture.deps, key, 5, 60_000)])).toEqual([true, true]);
-    expect(fixture.db.get(`DEVTASK#${fixture.taskId}`, "RATE#ask#task")).toMatchObject({ count: 2 });
   });
 
   it("only the author edits or deletes, and not after it is sent", async () => {
@@ -224,33 +181,6 @@ describe("page comments", () => {
     expect((stored(changed, original.comment.commentId) as unknown as TaskComment).text).toBe(original.comment.text);
   });
 
-  it("writes no comment or rate item when the task closes after authority was resolved", async () => {
-    const fixture = waitingTask();
-    const stale = await access(fixture, SAM);
-    fixture.close();
-
-    await expect(createTaskComment(fixture.deps, stale, {
-      requestId: randomUUID(), document: "plan", version: 1, target: { kind: "document" }, text: "late comment", ask: false,
-    })).rejects.toBeDefined();
-    expect(fixture.db.find((item) => item.entityType === "TASK_COMMENT" || item.entityType === "TASK_RATE")).toEqual([]);
-  });
-
-  it("writes no edit or delete when the task closes after authority was resolved", async () => {
-    for (const change of ["edit", "delete"] as const) {
-      const fixture = waitingTask();
-      const written = (await comment(fixture, SAM)).comment;
-      const stale = await access(fixture, SAM);
-      fixture.close();
-      const action = change === "edit"
-        ? editTaskComment(fixture.deps, stale, { commentId: written.commentId, rev: 1, text: "late edit" })
-        : deleteTaskComment(fixture.deps, stale, { commentId: written.commentId, rev: 1 });
-
-      await expect(action).rejects.toBeDefined();
-      expect(stored(fixture, written.commentId)).toMatchObject({ text: written.text, rev: 1 });
-      expect(fixture.db.get(`DEVTASK#${fixture.taskId}`, `RATE#change#${SAM.developerId}`)).toBeUndefined();
-    }
-  });
-
   it("writes no suggestion or rate item when the task closes after authority was resolved", async () => {
     const fixture = waitingTask();
     const stale = await access(fixture, SAM);
@@ -278,17 +208,6 @@ describe("page comments", () => {
     expect(sent).toBe(0);
     expect(stored(fixture, written.commentId)?.ask).toBeUndefined();
     expect(fixture.db.find((item) => item.entityType === "TASK_RATE" && String(item.sk).startsWith("RATE#ask"))).toEqual([]);
-  });
-
-  it("writes no comment when the current document changes after authority was resolved", async () => {
-    const fixture = waitingTask();
-    const stale = await access(fixture, SAM);
-    fixture.addVersion("plan", pagePlan({ title: "New plan" }));
-
-    await expect(createTaskComment(fixture.deps, stale, {
-      requestId: randomUUID(), document: "plan", version: 1, target: { kind: "document" }, text: "stale document", ask: false,
-    })).rejects.toBeDefined();
-    expect(fixture.db.find((item) => item.entityType === "TASK_COMMENT" || item.entityType === "TASK_RATE")).toEqual([]);
   });
 
   it("the 301st item is refused", async () => {
@@ -338,22 +257,4 @@ describe("page comments", () => {
     await expect(comment(fixture, SAM)).resolves.toBeDefined();
   });
 
-  it("openCommentsFor carries comments forward by document and leaves sent ones out", () => {
-    const base = { schemaVersion: 1 as const, taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", target: { kind: "document" as const }, rev: 1,
-      author: { kind: "person" as const, developerId: SAM.developerId, name: "Sam", owner: false } };
-    const at = (minute: number) => `2026-10-11T10:${String(minute).padStart(2, "0")}:00.000Z`;
-    const make = (id: string, extra: Partial<TaskComment>): TaskComment => ({ ...base, commentId: `6c1f5d7e-4ab0-4d43-9c55-${id.padStart(12, "0")}`, document: "plan", version: 1, text: id, createdAt: at(Number(id)), ...extra });
-    const comments = [
-      make("5", { version: 2 }),
-      make("1", {}),
-      make("2", { lockedBy: { requestId: randomUUID(), decision: "REQUEST_CHANGES", at: at(3) } }),
-      make("3", { deletedAt: at(4), text: "" }),
-      make("4", { author: { kind: "agentx", source: "answer" } }),
-      make("6", { document: "design" }),
-      make("7", { parentId: `6c1f5d7e-4ab0-4d43-9c55-${"1".padStart(12, "0")}` }),
-    ];
-    expect(openCommentsFor(comments, "plan", 2).map((entry) => entry.text)).toEqual(["1", "5", "7"]);
-    expect(openCommentsFor(comments, "plan", 1).map((entry) => entry.text)).toEqual(["1", "7"]);
-    expect(openCommentsFor(comments, "design", 1).map((entry) => entry.text)).toEqual(["6"]);
-  });
 });

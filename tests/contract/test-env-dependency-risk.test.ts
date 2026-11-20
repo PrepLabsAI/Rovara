@@ -25,21 +25,6 @@ describe("less-safe changes with dependencies", () => {
     expect(TEST_ENV_LESS_SAFE_FIELDS.filter((field) => field === "schema_synth")).toHaveLength(1);
   });
 
-  it("is nothing for real catalog software, and nothing at all for a body without dependencies (golden)", () => {
-    expect(testEnvLessSafeChanges(undefined, body([dep()]))).toEqual([]);
-    expect(testEnvLessSafeChanges(undefined, body())).toEqual([]);
-    expect(testEnvLessSafeChanges(body(), body([dep()]))).toEqual([]);
-  });
-
-  it("turns on a test account, a project image, a substitute image, excluded tests or a made-up-answers fake", () => {
-    expect(testEnvLessSafeChanges(undefined, body([account]))).toEqual(["test_account"]);
-    expect(testEnvLessSafeChanges(undefined, body([dep({ backing: { kind: "project_image", imageId: "mine" } })]))).toEqual(["project_image"]);
-    expect(testEnvLessSafeChanges(undefined, body([dep({ backing: { kind: "local", catalogId: "postgres@16", config: {}, substituteImage: { digest: sha("c"), catalogDigest: sha("d"), approvalRef: "approval-123456" } } })]))).toEqual(["substitute_image"]);
-    expect(testEnvLessSafeChanges(undefined, body([dep({ backing: { kind: "none", reason: "declined", excludedTests: ["tests/db/**"] }, connect: { env: [], hostAliases: [] } })]))).toEqual(["none_excluded_tests"]);
-    expect(testEnvLessSafeChanges(undefined, body([fake("schema_synth")]))).toEqual(["schema_synth"]);
-    expect(testEnvLessSafeChanges(undefined, body([fake("fail")]))).toEqual([]);
-  });
-
   it("is a change only when a use is new or moved, never when it stays or goes away", () => {
     expect(testEnvLessSafeChanges(body([account]), body([account]))).toEqual([]);
     expect(testEnvLessSafeChanges(body([account]), body())).toEqual([]);

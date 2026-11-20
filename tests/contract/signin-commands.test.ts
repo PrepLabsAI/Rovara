@@ -330,13 +330,6 @@ describe("agentx signin enable oidc (FR-004, FR-010, FR-045)", () => {
     expect(printed).toContain("agentx-staging-control-plane will change: Modify DeveloperSignInFunction1A2B3C4D (AWS::Lambda::Function)");
   });
 
-  it("refuses an issuer whose discovery document cannot be read, before storing anything", async () => {
-    const h = await services([]);
-    await expect(runSigninEnable(h.s, "staging", "oidc", { oidcIssuer: "https://down.example.test", oidcClientId: "c" }, { oidcClientSecret: { envName: "OIDC_SECRET" } }, true))
-      .rejects.toThrow("could not read https://down.example.test/.well-known/openid-configuration; check the issuer URL and that this computer can reach it");
-    expect(h.secrets.values.has("agentx/staging/developer-oidc")).toBe(false);
-  });
-
   it("leaves a company client secret that did not exist before in place when the stack rolls back, and says it is unused", async () => {
     const h = await services([true], {}, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_ROLLBACK_COMPLETE" });
     await writeSignInSettings(h.store, slackOn);

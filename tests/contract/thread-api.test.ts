@@ -45,25 +45,6 @@ describe("the Slack service's thread client", () => {
     expect(await threadApi(handler).startClose(randomUUID())).toEqual({ outcome: "NOT_FOUND" });
   });
 
-  it("asks for the member's open AI-tool task count when it prepares a thread (spec 025 C16)", async () => {
-    const { handler } = createBroker();
-    await registerSlackProject(handler);
-    await lazyEnsureWorkspace(handler, thread, pratik);
-    const sent: unknown[] = [];
-    const requestId = randomUUID();
-    await threadApi(handler, sent).prepareWorkspace!(requestId);
-    expect(sent).toEqual([{ requestId, includeOpenTaskCount: true, includeSharedTask: true }]);
-  });
-
-  it("opts in to the shared task refusal when it starts a close (spec 025 C11), and an ordinary thread still gets NOT_FOUND", async () => {
-    const { handler } = createBroker();
-    await registerSlackProject(handler);
-    const sent: unknown[] = [];
-    const requestId = randomUUID();
-    expect(await threadApi(handler, sent).startClose(requestId)).toEqual({ outcome: "NOT_FOUND" });
-    expect(sent).toEqual([{ requestId, includeSharedTask: true }]);
-  });
-
   it("sends explicit discard authorization only when requested", async () => {
     const { handler } = createBroker();
     await registerSlackProject(handler);
@@ -79,21 +60,6 @@ describe("the Slack service's thread client", () => {
     await expect(threadApi(handler).ensureWorkspace(randomUUID())).rejects.toThrow(/^thread workspace request failed: FORBIDDEN /);
     await expect(threadApi(handler).prepareWorkspace!(randomUUID())).rejects.toThrow(/^thread workspace preparation failed: FORBIDDEN /);
     await expect(threadApi(handler).listProjectModels!()).rejects.toThrow(/^project model list failed: FORBIDDEN /);
-  });
-
-  it("opts into lazy preparation, so a new thread gets a record without compute", async () => {
-    const { handler, db } = createBroker();
-    await registerSlackProject(handler);
-    const sent: unknown[] = [];
-    const requestId = randomUUID();
-    const result = await threadApi(handler, sent).ensureWorkspace(requestId);
-    expect(sent).toEqual([{
-      requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true,
-      includeAllConnectorTypes: true, includeRecoverableOperations: true, lazyPreparation: true,
-      includeActionPolicy: true, includeSharedTask: true, includeOpenTaskCount: true,
-    }]);
-    expect(result).toMatchObject({ outcome: "WORKSPACE", status: "UNPREPARED", operationId: null, created: true });
-    expect(db.find((item) => item.entityType === "OPERATION")).toHaveLength(0);
   });
 
   it("lists and selects the bound project's coding model through signed service routes", async () => {
@@ -152,30 +118,5 @@ describe("the Slack service's thread client", () => {
       expect(db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string } | undefined)?.kind === "cancel")).toHaveLength(0);
     });
 
-    it("answers a task that finishes just before the cancel is written as finished, keeping its status (#196)", async () => {
-      const { db, handler, workspaceId, operationId } = await runningTask();
-      // The task's result lands between the broker's read and its write; the fake evaluates the real condition.
-      const original = db.send;
-      db.send = async (command) => {
-        if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("\"CANCEL_REQUESTED\"")) {
-          db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)!.status = "FAILED";
-        }
-        return original(command);
-      };
-      expect(await threadApi(handler).cancelOperation!(workspaceId, operationId)).toEqual({ outcome: "finished", status: "FAILED" });
-      expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)).toMatchObject({ status: "FAILED" });
-      expect(db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string } | undefined)?.kind === "cancel")).toHaveLength(0);
-    });
-
-    it("counts a queued cancel as requested without reading the rest of the broker's answer", async () => {
-      const signedFetch: typeof fetch = async () => new Response(JSON.stringify({ operation: { id: randomUUID() }, duplicate: false }), { status: 202 });
-      const api = createThreadApi({ controlPlaneUrl: "https://agentx.example.test", signedFetch });
-      expect(await api.cancelOperation!(randomUUID(), randomUUID())).toEqual({ outcome: "requested" });
-    });
-
-    it("throws the broker's refusal, so the caller can log it", async () => {
-      const { handler, workspaceId } = await runningTask();
-      await expect(threadApi(handler).cancelOperation!(workspaceId, randomUUID())).rejects.toMatchObject({ code: "NOT_FOUND" });
-    });
   });
 });

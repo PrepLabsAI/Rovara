@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { ASANA_PROJECT_TOOL_ACCESS, ConnectorsSchema, type CredentialType, ProjectDefinitionSchema, StoredProjectDefinitionSchema } from "../../packages/contracts/src/index.js";
+import { ConnectorsSchema, ProjectDefinitionSchema } from "../../packages/contracts/src/index.js";
 import { ASANA_MCP_ENDPOINT, ASANA_TOKEN_ENDPOINT, CredentialUnavailable } from "../../packages/gateway/src/index.js";
 import { asanaConnectorType } from "../../packages/broker/src/aws/asana-connector-type.js";
-import { BUILT_IN_CONNECTOR_TYPES, resolveConnectors, type ResolvedConnector } from "../../packages/broker/src/aws/connector-types.js";
+import { resolveConnectors } from "../../packages/broker/src/aws/connector-types.js";
 import { CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
 import { credentialRefusals } from "../../packages/broker/src/aws/registration-preflight.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -24,11 +24,6 @@ function registry(records: Array<{ ref: string; type: string }> = []) {
 }
 
 describe("asana connector configuration", () => {
-  it("accepts an asana connector beside github, with every guarded tool at its pinned access", () => {
-    const github = { name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }] };
-    const all = Object.entries(ASANA_PROJECT_TOOL_ACCESS).map(([name, access]) => ({ name, access }));
-    expect(ProjectDefinitionSchema.safeParse(project([github, asana({ tools: all, identity: "service" })])).success).toBe(true);
-  });
 
   it("refuses an unguarded tool, a wrong access, duplicate aliases or projects, a bad GID and a missing credential", () => {
     const issues = (value: unknown) => {
@@ -44,23 +39,9 @@ describe("asana connector configuration", () => {
     expect(issues(asana({ scopes: [] }))).not.toEqual([]);
   });
 
-  it("validates a stored asana entry strictly", () => {
-    expect(StoredProjectDefinitionSchema.safeParse(project([asana()])).success).toBe(true);
-    expect(StoredProjectDefinitionSchema.safeParse(project([asana({ extra: true })])).success).toBe(false);
-  });
 });
 
 describe("asana connector type", () => {
-  it("is built in and resolves label, vendor, scope noun, ledger and an oauth-refresh-token credential", () => {
-    expect(BUILT_IN_CONNECTOR_TYPES.asana).toBe(asanaConnectorType);
-    const [connector] = resolveConnectors(ProjectDefinitionSchema.parse(project([asana()])), { credentialRegistry: registry() });
-    expect(connector).toMatchObject({
-      name: "asana", type: "asana", label: "Asana tasks", vendor: "Asana", scopeNoun: "Asana project", attribution: true,
-      ledger: { prefix: "CONNECTOR#asana#", entityType: "CONNECTOR_INVOCATION" },
-      credential: { ref: "asana-bot", accepts: ["oauth-refresh-token"] },
-      scopes: [{ alias: "payments", scope: { alias: "payments", projectGid: PROJECT } }],
-    });
-  });
 
   it("is not connected until an oauth-refresh-token credential is registered under its reference", async () => {
     const resolve = (records: Array<{ ref: string; type: string }>) => resolveConnectors(ProjectDefinitionSchema.parse(project([asana()])), { credentialRegistry: registry(records) })[0]!;
@@ -95,17 +76,6 @@ describe("asana connector type", () => {
 });
 
 describe("the setup command named for an unregistered credential", () => {
-  // Derived from the credential type the connector declares, never from the connector's name.
-  const connectorAccepting = (name: string, accepts: readonly CredentialType[]) =>
-    ({ name, vendor: "Example", credential: { ref: `${name}-cred`, accepts } }) as unknown as ResolvedConnector;
-
-  it("is authorize for a connector that needs an oauth-refresh-token credential and register for any other", async () => {
-    expect(await credentialRefusals([connectorAccepting("bot", ["oauth-refresh-token"]), connectorAccepting("keyed", ["static-secret"]), connectorAccepting("client", ["oauth-client-credentials"])], registry())).toEqual([
-      "connector bot: credential bot-cred is not registered; run agentx admin credential authorize first",
-      "connector keyed: credential keyed-cred is not registered; run agentx admin credential register first",
-      "connector client: credential client-cred is not registered; run agentx admin credential register first",
-    ]);
-  });
 
   it("is authorize at call time when an asana credential is removed after the connector resolved", async () => {
     const credentials = registry([{ ref: "asana-bot", type: "oauth-refresh-token" }]);

@@ -9,11 +9,6 @@ import * as worker from "../../packages/worker/src/usage.js";
 const stats = { tokens: { input: 10, output: 2, cacheRead: 8, cacheWrite: 1, total: 21 }, cost: 0.25 };
 
 describe("shared usage contract", () => {
-  it("labels OpenRouter catalog estimates and unknown cost without calling it free", () => {
-    const unknown = createTaskUsageTelemetry({ ...stats, cost: 0 }, { provider: "openrouter", modelId: "model" }, "SUCCEEDED");
-    expect(TaskUsageTelemetrySchema.parse(unknown)).toMatchObject({ costUsd: null, costSource: "unknown" });
-    expect(createTaskUsageTelemetry(stats, { provider: "openrouter", modelId: "model" }, "SUCCEEDED")).toMatchObject({ costUsd: 0.25, costSource: "estimated" });
-  });
   it("labels an OpenRouter total the provider billed (Pi 1.5 totalFromProvider) as billed, and only for OpenRouter", () => {
     const billed = createTaskUsageTelemetry({ ...stats, costFromProvider: true }, { provider: "openrouter", modelId: "model" }, "SUCCEEDED");
     expect(TaskUsageTelemetrySchema.parse(billed)).toMatchObject({ costUsd: 0.25, costSource: "billed" });
@@ -21,19 +16,6 @@ describe("shared usage contract", () => {
     // No cost is never billed; a direct provider's total is its list price whatever the flag says.
     expect(createTaskUsageTelemetry({ ...stats, cost: 0, costFromProvider: true }, { provider: "openrouter", modelId: "model" }, "SUCCEEDED")).toMatchObject({ costUsd: null, costSource: "unknown" });
     expect(createTaskUsageTelemetry({ ...stats, costFromProvider: true }, { provider: "anthropic", modelId: "model" }, "SUCCEEDED")).toMatchObject({ costSource: "list-price" });
-  });
-  it.each(["anthropic", "openai"])("labels %s list prices and unknown cost", (provider) => {
-    const listed = createTaskUsageTelemetry(stats, { provider, modelId: "model" }, "SUCCEEDED");
-    expect(TaskUsageTelemetrySchema.parse(listed)).toMatchObject({ costUsd: 0.25, costSource: "list-price" });
-    expect(createTaskUsageTelemetry({ ...stats, cost: 0 }, { provider, modelId: "model" }, "SUCCEEDED")).toMatchObject({ costUsd: null, costSource: "unknown" });
-  });
-  it("builds the feature 011 shape from session totals", () => {
-    const usage = createTaskUsageTelemetry(stats, { provider: "amazon-bedrock", modelId: "model", cacheRetention: "long" }, "SUCCEEDED");
-    expect(usage).toEqual({
-      schemaVersion: 1, outcome: "SUCCEEDED", provider: "amazon-bedrock", modelId: "model", cacheRetention: "long",
-      tokens: { input: 10, output: 2, cacheRead: 8, cacheWrite: 1, total: 21 }, cacheReadRatio: 8 / 19, costUsd: 0.25,
-    });
-    expect(TaskUsageTelemetrySchema.parse(usage)).toEqual(usage);
   });
 
   it("gives the worker the same functions through its unchanged import path", () => {

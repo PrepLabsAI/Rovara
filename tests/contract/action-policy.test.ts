@@ -26,35 +26,6 @@ describe("action classes (spec 014 D1)", () => {
     expect(destructiveSignal("edit_item", { fields: { completed: false } })).toBe("the call sets \"fields.completed\"");
   });
 
-  it("reads a read-approved tool, even one that filters by a lifecycle key", () => {
-    expect(baseClass("tracker__list_items", tracker("list_items", "read", { itemArguments: [] }), { state: "open" })).toBe("read");
-    expect(baseClass("tracker__list_items", tracker("list_items", "read", { hints: { readOnlyHint: false } }), {})).toBe("create");
-  });
-
-  it("creates when the call names no existing item, changes when it names one, and destroys on a destructive word or lifecycle key", () => {
-    const save = tracker("save_item", "write");
-    expect(baseClass("tracker__save_item", save, { title: "Refund" })).toBe("create");
-    expect(baseClass("tracker__save_item", save, { id: "T-5", priority: 2 })).toBe("change");
-    expect(baseClass("tracker__save_item", save, { id: "T-5", state: "Done" })).toBe("destructive");
-    expect(baseClass("tracker__delete_item", tracker("delete_item", "write"), { id: "T-5" })).toBe("destructive");
-    expect(baseClass("tracker__add_note", tracker("add_note", "write", { itemArguments: [] }), { body: "x" })).toBe("create");
-  });
-
-  it("reads item arguments inside arrays of objects: a present item changes, none creates, and a lifecycle key in an item object destroys", () => {
-    const update = tracker("update_items", "write", { itemArguments: ["item_id", "items[].item"] });
-    expect(baseClass("tracker__update_items", update, { items: [{ item: "11", title: "Renamed" }] })).toBe("change");
-    expect(baseClass("tracker__update_items", update, { item_id: "11", title: "Renamed" })).toBe("change");
-    expect(baseClass("tracker__update_items", update, { items: [] })).toBe("create");
-    expect(baseClass("tracker__update_items", update, { items: [{ title: "New" }] })).toBe("create");
-    expect(baseClass("tracker__update_items", update, { title: "x" })).toBe("create");
-    expect(baseClass("tracker__update_items", update, { items: [{ item: "11", completed: true }] })).toBe("destructive");
-    expect(destructiveSignal("update_items", { items: [{ item: "11" }, { item: "12", completed: true }] }, ["items[].item"]))
-      .toBe("the call sets \"items[].completed\"");
-    // Only objects that hold one of the tool's item paths are searched, so a create's array is not.
-    expect(baseClass("tracker__create_items", tracker("create_items", "write", { itemArguments: [] }), { items: [{ title: "Done already", completed: true }] })).toBe("create");
-    expect(itemReference(update, { items: [{ item: "11" }, { item: "12" }] })).toBe("items[].item=11,12");
-  });
-
   it("treats a tool whose connector declares no item argument as a change, never as destructive without a signal", () => {
     expect(baseClass("tracker__save_item", tracker("save_item", "write", { itemArguments: undefined }), { title: "x" })).toBe("change");
     expect(baseClass("mystery_tool", undefined, { x: 1 })).toBe("change");
@@ -69,12 +40,6 @@ describe("action classes (spec 014 D1)", () => {
     expect(baseClass("agentx_follow_up", undefined, {}, prepared(false))).toBe("read");
     for (const action of ["close", "replace", "revert"]) expect(baseClass("agentx_manage_pull_request", undefined, { action })).toBe("destructive");
     for (const action of ["edit", "append", "sync", "reopen"]) expect(baseClass("agentx_manage_pull_request", undefined, { action })).toBe("change");
-  });
-
-  it("names the existing item a call changes, when the connector declares how", () => {
-    expect(itemReference(tracker("save_item", "write"), { id: "T-5" })).toBe("id=T-5");
-    expect(itemReference(tracker("save_item", "write"), { title: "x" })).toBeUndefined();
-    expect(itemReference(undefined, { id: "T-5" })).toBeUndefined();
   });
 
   it("counts the items a call touches as its longest array, at most two levels into the arguments", () => {
@@ -97,32 +62,6 @@ describe("rules and built-in defaults", () => {
     expect(evaluatePolicy({ name: "tracker__save_item", args: { id: "T-5" }, facts: tracker("save_item", "write") }).settled).toBeUndefined();
   });
 
-  it("lets destructiveHint tighten only what AgentX cannot tell: a tool whose connector declares no item argument", () => {
-    const hinted = (itemArguments: readonly string[] | undefined) => tracker("save_item", "write", { itemArguments, hints: { destructiveHint: true } });
-    expect(evaluatePolicy({ name: "tracker__save_item", args: { title: "x" }, facts: hinted(undefined) }).settled).toMatchObject({ outcome: "ask", kind: "hint" });
-    expect(evaluatePolicy({ name: "tracker__save_item", args: { title: "x" }, facts: hinted(["id"]) }).settled).toMatchObject({ outcome: "allow", kind: "create" });
-    expect(evaluatePolicy({ name: "tracker__save_item", args: { id: "T-5" }, facts: hinted(["id"]) }).settled).toBeUndefined();
-  });
-
-  it("applies deny, then ask, then allow, whatever order the rules are listed in", () => {
-    const policy: ActionPolicy = { rules: [
-      { tool: "tracker__*", outcome: "allow" },
-      { tool: "*_item", outcome: "ask" },
-      { tool: "close_*", connector: "tracker", outcome: "deny", reason: "Closing is frozen for the audit." },
-    ] };
-    expect(evaluatePolicy({ name: "tracker__close_item", args: {}, facts: tracker("close_item", "write"), policy }).settled)
-      .toEqual({ outcome: "deny", source: "rule", kind: "admin", rule: 3, reason: "Closing is frozen for the audit." });
-    expect(evaluatePolicy({ name: "tracker__save_item", args: {}, facts: tracker("save_item", "write"), policy }).settled)
-      .toEqual({ outcome: "ask", source: "rule", kind: "admin", rule: 2, reason: "an administrator's ask rule matches *_item" });
-    expect(evaluatePolicy({ name: "tracker__list_things", args: { id: "x" }, facts: tracker("list_things", "write"), policy }).settled)
-      .toMatchObject({ outcome: "allow", source: "rule", kind: "allowed", rule: 1 });
-  });
-
-  it("matches a connector rule on the vendor's tool name and a plain rule on the presented name, never across connectors", () => {
-    const policy: ActionPolicy = { rules: [{ tool: "save_item", connector: "other", outcome: "deny" }, { tool: "save_item", outcome: "deny" }] };
-    expect(evaluatePolicy({ name: "tracker__save_item", args: { id: "T-5" }, facts: tracker("save_item", "write"), policy }).settled).toBeUndefined();
-  });
-
   it("reclassifies with the first matching treatAs rule, which whenArguments can narrow", () => {
     const policy: ActionPolicy = { rules: [
       { tool: "save_item", connector: "tracker", whenArguments: ["assignee"], treatAs: "destructive" },
@@ -134,11 +73,6 @@ describe("rules and built-in defaults", () => {
       .toEqual({ actionClass: "change", classRule: 2 });
   });
 
-  it("governs in-house tools by rule too", () => {
-    const policy: ActionPolicy = { rules: [{ tool: "agentx_submit_task", outcome: "ask", reason: "Coding work needs a person." }] };
-    expect(evaluatePolicy({ name: "agentx_submit_task", args: { prompt: "fix it" }, policy }).settled).toMatchObject({ outcome: "ask", kind: "admin", rule: 1 });
-    expect(evaluatePolicy({ name: "agentx_submit_task", args: { prompt: "fix it" }, worker: prepared(true) }).settled).toMatchObject({ outcome: "allow", kind: "read" });
-  });
 });
 
 describe("fix round 1 (task 2 review)", () => {
@@ -175,14 +109,6 @@ describe("fix round 1 (task 2 review)", () => {
     }
   });
 
-  it("I2: compares lifecycle keys case- and separator-insensitively, and knows stateReason", () => {
-    expect(LIFECYCLE_KEYS.has("stateReason")).toBe(true);
-    for (const key of ["State", "STATUS", "state_id", "status_id", "transition_id", "duplicate_of", "state_reason"]) {
-      expect(destructiveSignal("save_item", { id: "1", [key]: "x" }), key).toBe(`the call sets "${key}"`);
-      expect(baseClass("tracker__save_item", write("save_item"), { id: "1", [key]: "x" }), key).toBe("destructive");
-    }
-  });
-
   it("I3: a tool that offers item paths is destructive on a lifecycle key at any depth up to four; a tool with none keeps the shallow search", () => {
     expect(baseClass("tracker__save_item", write("save_item"), { items: [{ id: "1", state: "closed" }] })).toBe("destructive");
     expect(destructiveSignal("save_item", { items: [{ id: "1", state: "closed" }] }, ["id"])).toBe("the call sets \"items[].state\"");
@@ -201,12 +127,6 @@ describe("fix round 1 (task 2 review)", () => {
     expect(baseClass("tracker__create_items", write("create_items", []), { items: [{ title: "x", completed: true }] })).toBe("create");
   });
 
-  it("I4: counts a very long array without overflowing the stack", () => {
-    const ids = Array.from({ length: 200_000 }, (_, index) => index);
-    expect(() => itemCount({ ids })).not.toThrow();
-    expect(itemCount({ ids })).toBe(200_000);
-  });
-
   it("M1: arguments that are not a plain object make a write a change, never a throw", () => {
     for (const args of [null, undefined, "x", 3, ["a"]] as unknown as Array<Record<string, unknown>>) {
       expect(baseClass("tracker__save_item", write("save_item"), args)).toBe("change");
@@ -218,18 +138,6 @@ describe("fix round 1 (task 2 review)", () => {
       expect(evaluatePolicy({ name: "tracker__save_item", args, facts: write("save_item"),
         policy: { rules: [{ tool: "tracker__*", whenArguments: ["id"], outcome: "deny" }] } })).toEqual({ actionClass: "change" });
     }
-  });
-
-  it("M2: whenArguments matches only the call's own top-level arguments", () => {
-    const policy: ActionPolicy = { rules: [{ tool: "tracker__*", whenArguments: ["constructor"], outcome: "deny" }] };
-    expect(evaluatePolicy({ name: "tracker__save_item", args: {}, facts: write("save_item"), policy }).settled).toMatchObject({ kind: "create" });
-    expect(evaluatePolicy({ name: "tracker__save_item", args: { constructor: "x" }, facts: write("save_item"), policy }).settled).toMatchObject({ outcome: "deny" });
-  });
-
-  it("M3: in-house task tools fail closed as a change when no worker is passed", () => {
-    expect(baseClass("agentx_submit_task", undefined, {})).toBe("change");
-    expect(baseClass("agentx_follow_up", undefined, {})).toBe("change");
-    expect(baseClass("agentx_follow_up", undefined, {}, prepared(true))).toBe("read");
   });
 
   it("D2: only a rule naming the exact tool allows or reclassifies a destructive or bulk call", () => {

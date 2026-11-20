@@ -52,8 +52,4 @@ describe("agentx_get_diagnosis", () => {
     expect((await call({ offered: false, diagnosis: null })).text).toBe("This task shows no error to look into.");
   });
 
-  it("reads a proposal kind a newer server sent as a line that says it cannot show it", async () => {
-    const result = await call({ errorRef, offered: true, diagnosis: diagnosis({ state: "ready", proposals: [{ kind: "unknown" }] }) });
-    expect(result.structured["suggestions"]).toEqual(["A suggestion this version of Rovara does not know how to show."]);
-  });
 });

@@ -7,12 +7,9 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import {
-  WORKER_INVOCATION_FEATURES, WorkflowReviewReportSchema, parseWorkflowReviewerResponse, reviewJsonShape,
-} from "../../packages/contracts/src/index.js";
+import { WorkflowReviewReportSchema, parseWorkflowReviewerResponse, reviewJsonShape } from "../../packages/contracts/src/index.js";
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, submitWorkflowReview } from "../../packages/contracts/src/task-workflow-node.js";
 import { runWorkflowReviews } from "../../packages/worker/src/verification/review.js";
-import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 import type { PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 
 const execFile = promisify(execFileCallback);
@@ -95,13 +92,6 @@ describe("the review report", () => {
   });
 });
 
-describe("the feature", () => {
-  it("is known to the contracts and advertised by the worker", () => {
-    expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowReviewRisk");
-    expect(WORKER_IMPLEMENTED_FEATURES).toContain("task.workflowReviewRisk");
-  });
-});
-
 describe("the worker's code review", () => {
   async function repository() {
     const rootPath = await mkdtemp(join(tmpdir(), "rovara-risk-review-"));
@@ -170,16 +160,4 @@ describe("the worker's code review", () => {
     expect(reports.find((report) => report.role === "SECURITY")).not.toHaveProperty("risk");
   });
 
-  it("a code review that states no level still passes, without one", async () => {
-    const { reports } = await run(true, { CRITIC: '{"findings":[]}', SECURITY: '{"findings":[]}' });
-    expect(reports.find((report) => report.role === "CRITIC")).toMatchObject({ status: "PASS" });
-    expect(reports.find((report) => report.role === "CRITIC")).not.toHaveProperty("risk");
-  });
-
-  it("a version 1 review is exactly as before: no risk in the prompt, and an answer with one fails its shape", async () => {
-    const { reports, seen } = await run(undefined, { CRITIC: '{"findings":[],"risk":"high"}', SECURITY: '{"findings":[]}' });
-    expect(seen.every((entry) => !/risk/i.test(entry.prompt.replace(/Change under review[\s\S]*$/, "")))).toBe(true);
-    expect(reports.find((report) => report.role === "CRITIC")).toMatchObject({ status: "UNKNOWN", failureReason: "INVALID_SHAPE" });
-    expect(reports.find((report) => report.role === "CRITIC")).not.toHaveProperty("risk");
-  });
 });

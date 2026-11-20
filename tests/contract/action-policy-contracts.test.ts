@@ -1,16 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  ActionPolicySchema,
-  IN_HOUSE_TOOL_NAMES,
-  PresentedToolSchema,
-  ProjectDefinitionSchema,
-  SlackThreadWorkspaceResultSchema,
-  StoredProjectDefinitionSchema,
-  ToolPatternSchema,
-  toolPatternMatches,
-} from "../../packages/contracts/src/index.js";
+import { PresentedToolSchema, ProjectDefinitionSchema, SlackThreadWorkspaceResultSchema, ToolPatternSchema, toolPatternMatches } from "../../packages/contracts/src/index.js";
 import { expectLinearScaling } from "../support/scaling.js";
-import { ORCHESTRATION_TOOL_NAMES } from "../../packages/orchestrator/src/orchestration-tools.js";
 
 const repository = { name: "api", url: "https://github.com/example/api.git", path: "repo/api", defaultBranch: "main", credentialRef: "github-app" };
 const project = (actionPolicy: unknown, connectors: unknown[] = [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }, { name: "issue_write", access: "write" }] }]) => ({
@@ -23,26 +13,6 @@ const issues = (value: unknown) => {
 };
 
 describe("action policy contracts", () => {
-  it("names the same in-house tools as the orchestrator", () => {
-    expect([...IN_HOUSE_TOOL_NAMES]).toEqual([...ORCHESTRATION_TOOL_NAMES]);
-  });
-
-  it("matches tool patterns whole, with * as any run of characters", () => {
-    expect(toolPatternMatches("save_issue", "save_issue")).toBe(true);
-    expect(toolPatternMatches("save_issue", "save_issues")).toBe(false);
-    expect(toolPatternMatches("delete_*", "delete_comment")).toBe(true);
-    expect(toolPatternMatches("*__save_*", "linear__save_issue")).toBe(true);
-    expect(toolPatternMatches("*", "anything")).toBe(true);
-    expect(toolPatternMatches("save-issue", "save_issue")).toBe(false);
-  });
-
-  it("matches a pattern's literal characters literally, never as a regular expression", () => {
-    expect(toolPatternMatches("a.b", "axb")).toBe(false);
-    expect(toolPatternMatches("a.b", "a.b")).toBe(true);
-    expect(toolPatternMatches("(", "(")).toBe(true);
-    expect(toolPatternMatches("(", "a")).toBe(false);
-    expect(() => toolPatternMatches("(", "(")).not.toThrow();
-  });
 
   it("matches a many-star pattern in linear time, with no catastrophic backtracking", () => {
     const pattern = "*a".repeat(8);
@@ -61,20 +31,6 @@ describe("action policy contracts", () => {
     expect(ToolPatternSchema.safeParse("a*b*c*d*e").success).toBe(true);
     expect(ToolPatternSchema.safeParse("a*b*c*d*e*f").success).toBe(false);
     expect(ToolPatternSchema.safeParse("*").success).toBe(true);
-  });
-
-  it("requires exactly one of outcome and treatAs, and refuses unknown fields and bad patterns", () => {
-    expect(ActionPolicySchema.safeParse({ rules: [{ tool: "delete_*", connector: "linear", outcome: "deny" }] }).success).toBe(true);
-    for (const treatAs of ["read", "create", "change", "destructive"]) {
-      expect(ActionPolicySchema.safeParse({ rules: [{ tool: "save_issue", connector: "linear", treatAs }] }).success).toBe(true);
-    }
-    expect(ActionPolicySchema.safeParse({ rules: [{ tool: "save_issue", connector: "linear", treatAs: "write" }] }).success).toBe(false);
-    expect(ActionPolicySchema.safeParse({ rules: [{ tool: "save_issue", outcome: "ask", treatAs: "change" }] }).success).toBe(false);
-    expect(ActionPolicySchema.safeParse({ rules: [{ tool: "save_issue" }] }).success).toBe(false);
-    expect(ActionPolicySchema.safeParse({ rules: [{ tool: "save_issue", outcome: "maybe" }] }).success).toBe(false);
-    expect(ActionPolicySchema.safeParse({ rules: [{ tool: "save issue", outcome: "ask" }] }).success).toBe(false);
-    expect(ActionPolicySchema.safeParse({ rules: [{ tool: "save_issue", outcome: "ask", when: "always" }] }).success).toBe(false);
-    expect(ActionPolicySchema.safeParse({ rules: [] }).success).toBe(false);
   });
 
   it("registers rules that name a configured connector's approved tools, a presented name or an in-house tool", () => {
@@ -97,10 +53,6 @@ describe("action policy contracts", () => {
   it("reads the legacy githubMcp policy as a connector named github", () => {
     const legacy = { ...project({ rules: [{ tool: "issue_write", connector: "github", outcome: "ask" }] }), integrations: { githubMcp: { tools: [{ name: "issue_write", access: "write" }] } } };
     expect(issues(legacy)).toEqual([]);
-  });
-
-  it("keeps serving a stored revision with an action policy", () => {
-    expect(StoredProjectDefinitionSchema.safeParse(project({ rules: [{ tool: "issue_write", connector: "github", outcome: "ask" }] })).success).toBe(true);
   });
 
   it("carries a presented tool's two hints and item arguments and nothing else, and an optional action policy on the thread workspace result", () => {

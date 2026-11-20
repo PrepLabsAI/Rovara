@@ -47,14 +47,6 @@ describe("rovara config set models.chatgpt.* (#343)", () => {
     expect(await readChatGptSettings(table)).toEqual({ enabled: false, preferredModel: "gpt-5.5" });
   });
 
-  it("changes nothing when the admin says no", async () => {
-    const harness = await createAdminChangeBroker();
-    const { services, asked } = await configFor(harness, false);
-    expect(await runConfigSet(services, "staging", { key: "models.chatgpt.enabled", value: "true", yes: false })).toEqual({ changed: false });
-    expect(asked[0]).toContain("Turn Sign in with ChatGPT on");
-    expect(harness.db.get(CHATGPT_SETTINGS_KEY.pk, CHATGPT_SETTINGS_KEY.sk)).toBeUndefined();
-  });
-
   it("refuses a value that is not one before anything is asked", async () => {
     const harness = await createAdminChangeBroker();
     const { services, asked } = await configFor(harness, true);

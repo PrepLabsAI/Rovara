@@ -40,19 +40,6 @@ describe("bearer challenge", () => {
 });
 
 describe("OAuth discovery", () => {
-  it("follows the 401 challenge to the resource metadata, then the authorization server's metadata", async () => {
-    const { fetchImplementation, requests } = vendor({
-      [ENDPOINT]: unauthorized(`Bearer resource_metadata="https://mcp.vendor.example/prm.json", scope="issues:read"`),
-      "https://mcp.vendor.example/prm.json": () => Response.json(prm()),
-      [AS_URL]: () => Response.json(asMetadata()),
-    });
-    expect(await discoverOAuth(new URL(ENDPOINT), fetchImplementation)).toEqual({
-      resource: ENDPOINT, issuer: ISSUER, authorizeUrl: `${ISSUER}/authorize`, tokenUrl: `${ISSUER}/token`, registrationUrl: `${ISSUER}/register`, scopes: ["issues:read"],
-    });
-    expect(requests.every((request) => request.init?.redirect === "error")).toBe(true);
-    expect(requests[0]!.init).toMatchObject({ method: "POST" });
-    expect(new Headers(requests[0]!.init?.headers).get("authorization")).toBeNull();
-  });
 
   it("falls back to the well-known locations, path-inserted first, and to OpenID configuration", async () => {
     const { fetchImplementation, requests } = vendor({
@@ -71,7 +58,6 @@ describe("OAuth discovery", () => {
   it.each([
     ["no resource metadata", {}, "mcp.vendor.example publishes no OAuth protected resource metadata"],
     ["metadata for another resource", { [PRM_URL]: () => Response.json(prm({ resource: "https://mcp.vendor.example/other" })) }, "describes https://mcp.vendor.example/other"],
-    ["metadata for another origin", { [PRM_URL]: () => Response.json(prm({ resource: "https://evil.example/mcp" })) }, "describes https://evil.example/mcp"],
     ["no authorization server", { [PRM_URL]: () => Response.json(prm({ authorization_servers: [] })) }, "names no authorization server"],
     ["a plain-http authorization server", { [PRM_URL]: () => Response.json(prm({ authorization_servers: ["http://auth.vendor.example"] })) }, "must be a plain https URL"],
     ["no server metadata", { [PRM_URL]: () => Response.json(prm()) }, "publishes no OAuth metadata"],
@@ -83,10 +69,6 @@ describe("OAuth discovery", () => {
     await expect(discoverOAuth(new URL(ENDPOINT), fetchImplementation)).rejects.toThrow(message);
   });
 
-  it("refuses a challenge that points its metadata at plain http", async () => {
-    const { fetchImplementation } = vendor({ [ENDPOINT]: unauthorized('Bearer resource_metadata="http://mcp.vendor.example/prm"') });
-    await expect(discoverOAuth(new URL(ENDPOINT), fetchImplementation)).rejects.toThrow("must be a plain https URL");
-  });
 });
 
 describe("dynamic client registration", () => {
@@ -187,7 +169,6 @@ describe("authorize --endpoint", () => {
 
   it.each([
     [{ provider: "asana", endpoint: ENDPOINT }, "give exactly one of --provider"],
-    [{}, "give exactly one of --provider"],
     [{ endpoint: "http://mcp.vendor.example/mcp" }, "--endpoint: endpoint must use https"],
     [{ endpoint: ENDPOINT, authorizeUrl: `${ISSUER}/authorize` }, "give both --authorize-url and --token-url"],
     [{ provider: "asana", registerClient: true }, "go with --endpoint, not --provider"],

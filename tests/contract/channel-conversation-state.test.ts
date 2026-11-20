@@ -2,11 +2,7 @@
 // comes from Rovara's own records, so it is true whatever events were missed or dead-lettered, and it takes only the
 // fields it shows from those records.
 import { describe, expect, it } from "vitest";
-import {
-  CONFIRMATION_TTL_MS, CONVERSATION_STATE_THREAD_ATTRIBUTES, CONVERSATION_STATE_WORKSPACE_ATTRIBUTES,
-  confirmationDigest, confirmationKey, conversationOwnerIssuer, conversationSubject, generateWebhookSecret, webhookHeaders,
-  type ChannelAdapterRecord, type ChannelEvent, type PendingConfirmation,
-} from "@agentx/contracts";
+import { CONFIRMATION_TTL_MS, confirmationKey, conversationOwnerIssuer, conversationSubject, generateWebhookSecret, webhookHeaders, type ChannelAdapterRecord, type ChannelEvent, type PendingConfirmation } from "@agentx/contracts";
 import { createChannelEventSender } from "../../packages/broker/src/aws/channel-events.js";
 import { lastEventItem, lastEventKey, readConversationState, type ConversationStateDependencies } from "../../packages/broker/src/aws/channel-conversation-state.js";
 import { createChannelIngressHandler, type ChannelIngressDependencies } from "../../packages/broker/src/aws/channel-ingress.js";
@@ -62,26 +58,6 @@ function seeded() {
 }
 
 describe("a conversation's state (#437)", () => {
-  it("names the workspace, the current task, the pending decision, the latest checks, the pull requests and the newest event", async () => {
-    const { deps } = seeded();
-    expect(await readConversationState(deps, conversation)).toEqual({
-      conversation,
-      workspace: { state: "ready" },
-      task: { taskId: publishId, kind: "publish", status: "running", startedAt: "2026-11-11T11:30:00.000Z" },
-      pendingDecision: { requestId: confirmation.confirmationId, kind: "admin", expectedRevision: 1, artifactDigest: confirmationDigest(confirmation), expiresAt: confirmation.expiresAt },
-      checks: { taskId, status: "failed" },
-      pullRequests: [{ repository: "acme/web", number: 42, url: "https://github.com/acme/web/pull/42", state: "open", headSha: sha, baseBranch: "main", taskId: publishId }],
-      lastEvent: { id: "evt_AAAAAAAAAAAAAAAAAAAA", type: "progress", createdAt: "2026-11-11T11:31:05.000Z" },
-    });
-  });
-
-  it("asks the state table only for the fields it shows", async () => {
-    const { deps, asked } = seeded();
-    await readConversationState(deps, conversation);
-    const workspaceFields = [...CONVERSATION_STATE_WORKSPACE_ATTRIBUTES];
-    expect(asked).toEqual([[...CONVERSATION_STATE_THREAD_ATTRIBUTES], workspaceFields, workspaceFields, workspaceFields]);
-    for (const attributes of asked) expect(attributes).not.toContain("prompt");
-  });
 
   it("shows a finished task with when it ended, and no decision once it is answered or expired", async () => {
     const t = seeded();

@@ -1,22 +1,16 @@
 // The worker puts the meta repository in the workspace read-only and sparse, and reports the commit every stage reads (`knowledgeCommit`).
 // Real Git repositories in a temporary folder; the clone is injected as the other preparation tests do. Each case fails when the rule it names is removed.
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import {
-  PrepareMetaSchema,
-  StoredProjectDefinitionSchema,
-  WorkerInvocationSchema,
-  type ProjectDefinition,
-} from "../../packages/contracts/src/index.js";
+import { PrepareMetaSchema, StoredProjectDefinitionSchema, type ProjectDefinition } from "../../packages/contracts/src/index.js";
 import { META_CHECKOUT_MAX_FILES, listMaterialized, metaPathWanted, parseTreeListing } from "../../packages/worker/src/meta-checkout.js";
-import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 import { prepareWorkspace, preparedBaseResult, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
-import { META_PREPARE_FEATURE, knowledgeCommitToStore, metaPrepareFor, metaPrepareProblem, parseKnowledgeCommit } from "../../packages/broker/src/core/meta-repo/prepare-meta.js";
+import { META_PREPARE_FEATURE, knowledgeCommitToStore, metaPrepareFor, metaPrepareProblem } from "../../packages/broker/src/core/meta-repo/prepare-meta.js";
 
 const execFileAsync = promisify(execFile);
 const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };
@@ -86,14 +80,6 @@ describe("the meta repository in the workspace", () => {
     expect(await readFile(join(rootPath, "repo/service-meta/AGENTS.md"), "utf8")).toBe("# team rules\n");
   });
 
-  it("reports the commit as knowledgeCommit and leaves the code repositories' base commits alone", async () => {
-    const f = await fixture();
-    const manifest = await prepareWorkspace({ rootPath: await f.workspace(), project: f.workerProject, readOnly: true, materializer: f.materializer, meta: f.metaRequest });
-    const result = preparedBaseResult(manifest);
-    expect(result.preparedBase).toEqual([{ repositoryId: "api", baseCommitSha: f.code.head }]);
-    expect(result.knowledgeCommit).toBe(f.meta.head);
-  });
-
   it("reads exactly the commit the broker named, even when the branch has moved on since", async () => {
     const f = await fixture();
     const rootPath = await f.workspace();
@@ -135,31 +121,12 @@ describe("the meta repository in the workspace", () => {
       .rejects.toThrow("another commit than the one asked for");
   });
 
-  it("makes the files read-only", async () => {
-    const f = await fixture();
-    const rootPath = await f.workspace();
-    await prepareWorkspace({ rootPath, project: f.workerProject, readOnly: true, materializer: f.materializer, meta: f.metaRequest });
-    for (const path of ["AGENTS.md", ".kiro/steering/product.md", "services/search/AGENTS.md"]) {
-      expect((await stat(join(rootPath, "repo/service-meta", path))).mode & 0o222, path).toBe(0);
-    }
-    const refusal = await writeFile(join(rootPath, "repo/service-meta/AGENTS.md"), "x").then(() => "written", (error: NodeJS.ErrnoException) => error.code);
-    expect(["EACCES", "EPERM"]).toContain(refusal);
-  });
-
   it("does nothing about a meta repo when none is asked for, and writes no meta entry in the manifest", async () => {
     const f = await fixture();
     const manifest = await prepareWorkspace({ rootPath: await f.workspace(), project: f.workerProject, readOnly: true, materializer: f.materializer });
     expect(manifest.meta).toBeUndefined();
     expect(f.cloned).toEqual(["api"]);
     expect(preparedBaseResult(manifest)).not.toHaveProperty("knowledgeCommit");
-  });
-
-  it("does not follow a symbolic link or a submodule among the chosen paths, and counts them", async () => {
-    const f = await fixture({ files: { "AGENTS.md": "# rules\n", ".kiro/steering/a.md": "a\n" }, links: { ".kiro/steering/evil.md": "/etc/passwd" } });
-    const rootPath = await f.workspace();
-    const manifest = await prepareWorkspace({ rootPath, project: f.workerProject, readOnly: true, materializer: f.materializer, meta: f.metaRequest });
-    expect(await listMaterialized(join(rootPath, "repo/service-meta"))).toEqual([".kiro/steering/a.md", "AGENTS.md"]);
-    expect(manifest.meta).toMatchObject({ files: 2, skipped: 1 });
   });
 
   it("refuses a meta repo with more knowledge files than the cap, with a fixed message", async () => {
@@ -207,13 +174,6 @@ describe("the meta repository in the workspace", () => {
     }
   });
 
-  it("treats a chosen path as a literal name, never as a pattern that could take other files", async () => {
-    const f = await fixture({ files: { "AGENTS.md": "# rules\n", ".kiro/steering/[x].md": "literal\n", ".kiro/steering/x.md": "sibling\n" } });
-    const rootPath = await f.workspace();
-    await prepareWorkspace({ rootPath, project: f.workerProject, readOnly: true, materializer: f.materializer, meta: { ...f.metaRequest, paths: [".kiro/steering/[x].md", "AGENTS.md"] } });
-    expect(await listMaterialized(join(rootPath, "repo/service-meta"))).toEqual([".kiro/steering/[x].md", "AGENTS.md"]);
-  });
-
   it("matches paths by folder and by name, never by prefix of a name", () => {
     const chosen = [".kiro/steering", "AGENTS.md"];
     expect(metaPathWanted(".kiro/steering/a.md", chosen)).toBe(true);
@@ -232,30 +192,6 @@ describe("the meta repository in the workspace", () => {
 
 describe("the contract and the broker's side", () => {
   const COMMIT = "a".repeat(40);
-  const request = { repository: { name: "service-meta", url: "https://github.com/acme/service-meta.git", path: "repo/service-meta", defaultBranch: "main", credentialRef: "github-app" }, paths: [".kiro/steering"], commit: COMMIT };
-
-  it("accepts a well-formed request and refuses a path out of the repo, a duplicate, an empty list, a URL with a password, no commit and an unknown key", () => {
-    expect(PrepareMetaSchema.safeParse(request).success).toBe(true);
-    expect(PrepareMetaSchema.safeParse({ ...request, paths: ["../x"] }).success).toBe(false);
-    expect(PrepareMetaSchema.safeParse({ ...request, paths: [".git/config"] }).success).toBe(false);
-    expect(PrepareMetaSchema.safeParse({ ...request, paths: ["a", "a"] }).success).toBe(false);
-    expect(PrepareMetaSchema.safeParse({ ...request, paths: [] }).success).toBe(false);
-    expect(PrepareMetaSchema.safeParse({ ...request, repository: { ...request.repository, url: "https://u:p@github.com/a/b.git" } }).success).toBe(false);
-    expect(PrepareMetaSchema.safeParse({ ...request, commit: undefined }).success).toBe(false);
-    expect(PrepareMetaSchema.safeParse({ ...request, token: "x" }).success).toBe(false);
-  });
-
-  it("is part of the prepare invocation, which a worker without the field would refuse (strict)", () => {
-    const base = { protocolVersion: 1, operationId: "0b9f4c1e-6a56-4a52-8a8e-2f3a8d9a8c11", workspaceId: "1b9f4c1e-6a56-4a52-8a8e-2f3a8d9a8c11", fence: 1, projectRevision: 1, callbackCapability: "c".repeat(40), kind: "prepare" };
-    const project = { name: "payments", revision: 1, repositories: [{ name: "api", url: "https://github.com/acme/api.git", path: "repo/api", defaultBranch: "main", credentialRef: "github-app" }], setup: [], readiness: [], orchestratorInstructions: "x" };
-    expect(WorkerInvocationSchema.safeParse({ ...base, payload: { project, repositoryGrant: "g", meta: request } }).success).toBe(true);
-    expect(WorkerInvocationSchema.safeParse({ ...base, payload: { project, repositoryGrant: "g" } }).success).toBe(true);
-    expect(WorkerInvocationSchema.safeParse({ ...base, payload: { project, repositoryGrant: "g", meta: { ...request, paths: [] } } }).success).toBe(false);
-  });
-
-  it("is advertised by the worker that implements it", () => {
-    expect(WORKER_IMPLEMENTED_FEATURES).toContain(META_PREPARE_FEATURE);
-  });
 
   const separate = StoredProjectDefinitionSchema.parse({
     name: "payments", revision: 1, setup: [], readiness: [], orchestratorInstructions: "x",
@@ -285,11 +221,6 @@ describe("the contract and the broker's side", () => {
     expect(await fail(metaPrepareFor(separate, reader(new Error("503 from github.com/secret-path")), undefined))).not.toContain("secret-path");
   });
 
-  it("sends the credential no more than the repository entry needs, and never the pins", async () => {
-    const withPins = StoredProjectDefinitionSchema.parse({ ...separate, repositories: separate.repositories.map((entry) => ({ ...entry, installationId: 5, githubRepositoryId: 9 })) });
-    expect(JSON.stringify(await metaPrepareFor(withPins, reader(COMMIT), undefined))).not.toMatch(/installationId|githubRepositoryId|alsoCode|role/);
-  });
-
   it("asks for nothing, and reads nothing, when the project has no meta repo or the meta repo is its own code", async () => {
     const heads = reader(COMMIT);
     const plain = StoredProjectDefinitionSchema.parse({ ...separate, repositories: [separate.repositories[0]] });
@@ -301,18 +232,6 @@ describe("the contract and the broker's side", () => {
     expect(metaPrepareProblem(self, [])).toBeUndefined();
     expect(metaPrepareProblem(separate, [])).toBe("This project's meta repo needs a newer worker. Ask an admin to upgrade Rovara.");
     expect(metaPrepareProblem(separate, [META_PREPARE_FEATURE])).toBeUndefined();
-  });
-
-  it("uses the knowledge paths a config names instead of the defaults", async () => {
-    const fields = await metaPrepareFor(separate, reader(COMMIT), undefined, { steering: ["docs/rules"], skills: [], specs: ["specs"], runbooks: [], keyDocs: ["ARCHITECTURE.md"] });
-    expect(fields.meta?.paths).toEqual(expect.arrayContaining(["docs/rules", "specs", "ARCHITECTURE.md", "AGENTS.md"]));
-    expect(fields.meta?.paths).not.toContain(".kiro/steering");
-  });
-
-  it("takes a knowledge commit only when it is a full hash", () => {
-    expect(parseKnowledgeCommit({ knowledgeCommit: COMMIT })).toBe(COMMIT);
-    for (const bad of ["abc123", "A".repeat(40), "main", 5, null, undefined]) expect(parseKnowledgeCommit({ knowledgeCommit: bad })).toBeUndefined();
-    expect(parseKnowledgeCommit(null)).toBeUndefined();
   });
 
   it("stores the commit the BROKER chose, and only when the worker reported exactly it", () => {

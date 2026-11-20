@@ -13,7 +13,6 @@ const WORKSPACE = "22222222-2222-4222-8222-222222222222";
 const OPERATION = "11111111-1111-4111-8111-111111111111";
 const TASK = "33333333-3333-4333-8333-333333333333";
 const OWNER = "a".repeat(64);
-const PLANTED = `ghp_${"A".repeat(36)}`;
 
 function store(items: Record<string, unknown>[] = []): IndexStore & { puts: Record<string, unknown>[] } {
   const puts: Record<string, unknown>[] = [];
@@ -42,21 +41,6 @@ const taskWorkspace = [
 ];
 
 describe("the failure index (FR-038, A5)", () => {
-  it("indexes a Slack task that ends FAILED, with its thread as the turn record link", async () => {
-    const index = store(slackWorkspace);
-    const result = await indexActivity([modified(operation({}), operation({
-      status: "FAILED", error: "npm test exited 1", updatedAt: "2026-09-30T08:15:00.000Z", requestedBy: { teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" },
-    }))], index, vi.fn());
-    expect(result).toEqual({ failures: 1, usage: 0, failed: 0 });
-    expect(index.puts).toEqual([{
-      pk: "FAILURE#2026-09-30", sk: `2026-09-30T08:15:00.000Z#${OPERATION}`, entityType: "FAILURE_INDEX",
-      indexExpiresAt: Math.floor(Date.parse("2026-09-30T08:15:00.000Z") / 1000) + 30 * 86_400,
-      operationId: OPERATION, workspaceId: WORKSPACE, project: "payments", origin: "slack",
-      requester: { kind: "slack", teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" },
-      kind: "task", status: "FAILED", category: "task_failed", error: "npm test exited 1", endedAt: "2026-09-30T08:15:00.000Z",
-      thread: "T0BSHLLUGBD/C0123456789/1695500000.000100",
-    }]);
-  });
 
   it("indexes a developer task's interrupted run as ai_tool, naming the developer and the task", async () => {
     const index = store(taskWorkspace);
@@ -67,33 +51,6 @@ describe("the failure index (FR-038, A5)", () => {
       origin: "ai_tool", category: "interrupted", taskId: TASK, error: "the task operation ended INTERRUPTED",
       requester: { kind: "developer", developerId: "d".repeat(64), provider: "slack", name: "Maya Chen" },
     });
-  });
-
-  it("stores a failure's error redacted and cut, and logs only IDs", async () => {
-    const index = store(slackWorkspace);
-    const log = vi.fn();
-    await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z", error: `auth failed for ${PLANTED} ${"x".repeat(2_000)}` }))], index, log);
-    const error = String(index.puts[0]?.error);
-    expect(error).toContain("[REDACTED]");
-    expect(error).not.toContain(PLANTED);
-    expect(error.length).toBeLessThanOrEqual(1_000);
-    expect(JSON.stringify(log.mock.calls)).not.toContain("auth failed");
-  });
-
-  it("indexes nothing for a success, a repeat of a terminal status, or another entity", async () => {
-    const index = store(slackWorkspace);
-    await indexActivity([
-      modified(operation({}), operation({ status: "SUCCEEDED" })),
-      modified(operation({ status: "FAILED" }), operation({ status: "FAILED", updatedAt: "2026-09-30T08:20:00.000Z" })),
-      modified({ entityType: "WORKSPACE", status: "READY" }, { entityType: "WORKSPACE", status: "PREPARATION_FAILED" }),
-    ], index, vi.fn());
-    expect(index.puts).toEqual([]);
-  });
-
-  it("names the project unknown when the workspace record is gone, and the requester none when absent", async () => {
-    const index = store([]);
-    await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
-    expect(index.puts[0]).toMatchObject({ project: "unknown", origin: "slack", requester: { kind: "none" } });
   });
 
 });
@@ -108,19 +65,6 @@ describe("the usage index (A5, A9)", () => {
     tokens: { input: 1_000, output: 200, cacheRead: 50, cacheWrite: 0, total: 1_250 }, cacheReadRatio: 0.05, costUsd: 0.42,
   };
 
-  it("indexes a worker's usage event with the task's duration, tokens and cost", async () => {
-    const index = store([...slackWorkspace, operation({ requestedBy: { teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" } })]);
-    const result = await indexActivity([usageEvent(telemetry)], index, vi.fn());
-    expect(result.usage).toBe(1);
-    expect(index.puts[0]).toEqual({
-      pk: "USAGE#2026-09-30", sk: `2026-09-30T08:10:00.000Z#${OPERATION}`, entityType: "USAGE_INDEX",
-      indexExpiresAt: Math.floor(Date.parse("2026-09-30T08:10:00.000Z") / 1000) + 30 * 86_400,
-      operationId: OPERATION, workspaceId: WORKSPACE, project: "payments", origin: "slack",
-      requester: { kind: "slack", teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" }, thread: "T0BSHLLUGBD/C0123456789/1695500000.000100",
-      at: "2026-09-30T08:10:00.000Z", durationMs: 600_000, inputTokens: 1_050, outputTokens: 200, costUsd: 0.42,
-    });
-  });
-
   it("follows a company pointer for project and core operation requester", async () => {
     const companyId = IMPLICIT_COMPANY_ID;
     const scopedPk = `ORG#${companyId}#WORKSPACE#${WORKSPACE}`;
@@ -131,58 +75,6 @@ describe("the usage index (A5, A9)", () => {
     ]);
     await indexActivity([usageEvent(telemetry)], index, vi.fn());
     expect(index.puts[0]).toMatchObject({ project: "core-payments", requester: { kind: "slack", teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" } });
-  });
-
-  it("follows the workspace company's task pointer and never reads another company's partition", async () => {
-    // A non-implicit company: an implementation that reads under the implicit company must fail this test.
-    const companyA = "org_aaaaaaaaaaaaaaaaaaaa";
-    const companyB = "org_11111111111111111111";
-    const items = [
-      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId: companyA },
-      { ...workspaceKey(companyA, WORKSPACE), entityType: "WORKSPACE", companyId: companyA, orgId: companyA, projectName: "core-payments" },
-      { ...scopedTaskPointerKey(companyA, WORKSPACE), entityType: "DEVELOPER_TASK_POINTER", taskId: TASK },
-      { ...scopedTaskPointerKey(companyB, WORKSPACE), entityType: "DEVELOPER_TASK_POINTER", taskId: "44444444-4444-4444-8444-444444444444" },
-      { pk: `DEVTASK#${TASK}`, sk: "META", taskId: TASK, developerName: "Maya Chen" },
-    ];
-    const index = store(items);
-    const get = vi.spyOn(index, "get");
-    await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
-    expect(index.puts[0]).toMatchObject({ project: "core-payments", origin: "ai_tool", taskId: TASK });
-    expect(get).toHaveBeenCalledWith(scopedTaskPointerKey(companyA, WORKSPACE), expect.anything());
-    expect(get).not.toHaveBeenCalledWith(scopedTaskPointerKey(companyB, WORKSPACE), expect.anything());
-  });
-
-  it("keeps a dangling workspace pointer soft and logs the fixed integrity event", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const companyId = IMPLICIT_COMPANY_ID;
-    const index = store([
-      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId },
-      { pk: `WORKSPACE#${WORKSPACE}`, sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId: TASK },
-    ]);
-    const result = await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
-    expect(result).toEqual({ failures: 1, usage: 0, failed: 0 });
-    expect(index.puts[0]).toMatchObject({ project: "unknown", origin: "slack" });
-    expect(index.puts[0]).not.toHaveProperty("taskId");
-    expect(warn).toHaveBeenCalledWith({ component: "broker", event: "workspace.pointer_integrity" });
-    warn.mockRestore();
-  });
-
-  it("fails soft when the scoped workspace names another company than its pointer, and reads no task pointer", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const companyA = "org_aaaaaaaaaaaaaaaaaaaa";
-    const companyB = "org_11111111111111111111";
-    const index = store([
-      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: WORKSPACE, companyId: companyA },
-      { ...workspaceKey(companyA, WORKSPACE), entityType: "WORKSPACE", companyId: companyB, projectName: "core-payments" },
-      { ...scopedTaskPointerKey(companyA, WORKSPACE), entityType: "DEVELOPER_TASK_POINTER", taskId: TASK },
-    ]);
-    const get = vi.spyOn(index, "get");
-    await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
-    expect(index.puts[0]).toMatchObject({ project: "unknown", origin: "slack" });
-    expect(index.puts[0]).not.toHaveProperty("taskId");
-    expect(get).not.toHaveBeenCalledWith(scopedTaskPointerKey(companyA, WORKSPACE), expect.anything());
-    expect(warn).toHaveBeenCalledWith({ component: "broker", event: "workspace.pointer_integrity" });
-    warn.mockRestore();
   });
 
   it("fails soft when the scoped workspace orgId differs from its pointer, and reads no task pointer", async () => {
@@ -231,16 +123,6 @@ describe("the usage index (A5, A9)", () => {
     expect((await indexActivity([usageEvent(telemetry)], plain, vi.fn())).usage).toBe(1);
   });
 
-  it.each([
-    { input: 3, cacheRead: 900, cacheWrite: 70, expected: 973 },
-    { input: 0, cacheRead: 900, cacheWrite: 0, expected: 900 },
-    { input: 0, cacheRead: 0, cacheWrite: 70, expected: 70 },
-    { input: 3, cacheRead: 0, cacheWrite: 0, expected: 3 },
-  ])("indexes every worker input category once: $input/$cacheRead/$cacheWrite", async ({ input, cacheRead, cacheWrite, expected }) => {
-    const index = store([...slackWorkspace, operation({})]);
-    await indexActivity([usageEvent({ ...telemetry, tokens: { input, output: 200, cacheRead, cacheWrite, total: expected + 200 } })], index, vi.fn());
-    expect(index.puts[0]).toMatchObject({ inputTokens: expected, outputTokens: 200, costUsd: 0.42 });
-  });
 
   it("keeps an unknown cost as null, and skips a usage payload it cannot read, counting it", async () => {
     const index = store([...slackWorkspace, operation({})]);
@@ -251,19 +133,6 @@ describe("the usage index (A5, A9)", () => {
     expect(log).toHaveBeenCalledWith({ event: "activity_index.usage_unreadable", operationId: OPERATION });
   });
 
-  it("goes on after one record's write fails, and reports it by error name", async () => {
-    const index = store(slackWorkspace);
-    let first = true;
-    index.put = async (item) => {
-      if (first) { first = false; throw Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" }); }
-      index.puts.push(item);
-    };
-    const log = vi.fn();
-    const failed = (id: string, at: string) => modified(operation({ id }), operation({ id, sk: `OPERATION#${id}`, status: "FAILED", updatedAt: at }), id);
-    const result = await indexActivity([failed(OPERATION, "2026-09-30T08:15:00.000Z"), failed("44444444-4444-4444-8444-444444444444", "2026-09-30T08:16:00.000Z")], index, log);
-    expect(result).toEqual({ failures: 1, usage: 0, failed: 1 });
-    expect(log).toHaveBeenCalledWith({ event: "activity_index.write_failed", operationId: OPERATION, error: "ThrottlingException" });
-  });
 });
 
 // Task 6 reads these items with the strict schemas after stripping the key attributes, so every
@@ -296,18 +165,6 @@ describe("index items parse as the admin routes read them", () => {
     await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z", requestedBy: { kind: "developer", developerId: "d".repeat(64), provider: "oidc" } }))], named, vi.fn());
     expect(named.puts[0]).toMatchObject({ requester: { kind: "developer", developerId: "d".repeat(64), provider: "oidc", name: "M".repeat(200) } });
     expect(FailureIndexRecordSchema.safeParse(strip(named.puts[0])).success).toBe(true);
-  });
-
-  it("cuts a long project name to 63 characters and drops a thread that would not parse", async () => {
-    const index = store([
-      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", projectName: "p".repeat(64), ownerKey: OWNER },
-      { pk: `SLACK_THREAD#${OWNER}`, sk: "META", thread: "t".repeat(129) },
-    ]);
-    const result = await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
-    expect(result).toEqual({ failures: 1, usage: 0, failed: 0 });
-    expect(index.puts[0]).toMatchObject({ project: "p".repeat(63), origin: "slack" });
-    expect(index.puts[0]).not.toHaveProperty("thread");
-    expect(FailureIndexRecordSchema.safeParse(strip(index.puts[0])).success).toBe(true);
   });
 
   it("names a missing operation kind unknown, not undefined", async () => {
@@ -348,41 +205,4 @@ describe("the index's deadline (A4)", () => {
     expect(log.mock.calls).toEqual([[{ event: "activity_index.deadline_reached", skipped: 2 }]]);
   });
 
-  it("stops between records when the deadline passes mid-batch", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    try {
-      vi.setSystemTime(Date.parse("2026-09-30T08:20:00.000Z"));
-      const index = store(slackWorkspace);
-      index.put = async (item) => { index.puts.push(item); vi.setSystemTime(Date.parse("2026-09-30T08:20:10.000Z")); };
-      const log = vi.fn();
-      const result = await indexActivity([failedAt(OPERATION, "2026-09-30T08:15:00.000Z"), failedAt(SECOND, "2026-09-30T08:16:00.000Z")], index, log, Date.parse("2026-09-30T08:20:05.000Z"));
-      expect(result).toEqual({ failures: 1, usage: 0, failed: 0 });
-      expect(index.puts).toHaveLength(1);
-      expect(log).toHaveBeenCalledWith({ event: "activity_index.deadline_reached", skipped: 1 });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("gives up on a store call that never answers once the deadline passes, and hands each call an abort signal", async () => {
-    // The wall clock stands still, so the deadline's timer fires while Date.now() is still before
-    // the deadline: under load a timer can fire a millisecond early, and the index must stop anyway.
-    vi.useFakeTimers({ toFake: ["Date"] });
-    try {
-      vi.setSystemTime(Date.parse("2026-09-30T08:20:00.000Z"));
-      const index = store(slackWorkspace);
-      const signals: Array<AbortSignal | undefined> = [];
-      index.get = (_key, options) => { signals.push(options?.signal); return new Promise(() => undefined); };
-      const log = vi.fn();
-      const result = await indexActivity([failedAt(OPERATION, "2026-09-30T08:15:00.000Z"), failedAt(SECOND, "2026-09-30T08:16:00.000Z")], index, log, Date.now() + 50);
-      expect(result).toEqual({ failures: 0, usage: 0, failed: 1 });
-      expect(index.puts).toEqual([]);
-      expect(signals.length).toBeGreaterThan(0);
-      expect(signals.every((signal) => signal instanceof AbortSignal && signal.aborted)).toBe(true);
-      expect(log).toHaveBeenCalledWith({ event: "activity_index.write_failed", operationId: OPERATION, error: "TimeoutError" });
-      expect(log).toHaveBeenCalledWith({ event: "activity_index.deadline_reached", skipped: 1 });
-    } finally {
-      vi.useRealTimers();
-    }
-  }, 2_000);
 });

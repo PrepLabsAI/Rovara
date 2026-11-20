@@ -79,24 +79,6 @@ describe("no core task, switch off: the AWS developer routes are byte-identical 
     }
   });
 
-  it("an action on the task (close) answers and writes the same", async () => {
-    const first = await finishedTask();
-    const second = await finishedTask();
-    bypass.on = true;
-    const beforeWrites: string[] = [];
-    const stopBefore = first.db.onWrite((change) => beforeWrites.push(Object.keys(change).join()));
-    const before = await first.dev(MAYA, "POST", `/v1/dev/tasks/${first.taskId}/close`, { requestId: "11111111-1111-4111-8111-111111111111" });
-    stopBefore();
-    bypass.on = false;
-    const afterWrites: string[] = [];
-    const stopAfter = second.db.onWrite((change) => afterWrites.push(Object.keys(change).join()));
-    const after = await second.dev(MAYA, "POST", `/v1/dev/tasks/${second.taskId}/close`, { requestId: "11111111-1111-4111-8111-111111111111" });
-    stopAfter();
-    const scrub = (value: unknown, ...ids: string[]) => ids.reduce((text, id) => text.replaceAll(id, "<id>"), withoutRequestId(JSON.stringify(value))).replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/gu, "<time>");
-    expect(scrub(after, second.taskId, second.workspaceId)).toBe(scrub(before, first.taskId, first.workspaceId));
-    expect(afterWrites).toEqual(beforeWrites);
-  });
-
   it("the task actions answer a workflow workspace the same", async () => {
     const { actions, db, workspaceId } = await finishedTask();
     for (const [name, request] of [

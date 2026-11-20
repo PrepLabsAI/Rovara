@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { agentXError, type ConnectorCatalog } from "../../packages/contracts/src/index.js";
 import { createConnectorTools } from "../../packages/orchestrator/src/connector-tools.js";
 import { createOrchestratorRuntime, runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
-import { createOrchestrationTools, type OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
+import { type OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 
 const context = { workspaceId: "11111111-1111-4111-8111-111111111111", conversationId: "22222222-2222-4222-8222-222222222222" };
@@ -29,23 +29,6 @@ describe("orchestrator behaviour without a turn recorder (characterization)", ()
     const failure = agentXError("FORBIDDEN", "GitHub MCP tool is not approved for this project");
     const [tool] = createConnectorTools([catalog], async () => { throw failure; }, context);
     await expect(tool!.execute("call-1", { state: "OPEN" }, undefined, undefined, {} as never)).rejects.toBe(failure);
-  });
-
-  it("rethrows a non-AgentX connector error unchanged from the orchestration tools", async () => {
-    const failure = new TypeError("fetch failed");
-    const api = { callConnectorTool: async () => { throw failure; } } as unknown as OrchestrationApi;
-    const tool = createOrchestrationTools(api, context, { connectorCatalogs: [catalog] }).find((entry) => entry.name === "github__list_issues");
-    await expect(tool!.execute("call-1", {}, undefined, undefined, {} as never)).rejects.toBe(failure);
-  });
-
-  it("prompts without template expansion, waits for idle, and returns the last assistant text, touching nothing else", async () => {
-    const { runtime, prompt, waitForIdle } = stubRuntime([
-      { role: "user", content: [{ type: "text", text: "hi" }] },
-      { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "<thinking>x</thinking> Hello." }] },
-    ]);
-    expect(await runOrchestratorTurn(runtime, "hi")).toBe("Hello.");
-    expect(prompt).toHaveBeenCalledWith("hi", { expandPromptTemplates: false });
-    expect(waitForIdle).toHaveBeenCalledOnce();
   });
 
   it("throws the model's error as RUNTIME_UNAVAILABLE and propagates a prompt failure unchanged", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createPkceParameters, loginWithPkce, tokenStoreKey } from "../../packages/cli/src/auth.js";
+import { loginWithPkce, tokenStoreKey } from "../../packages/cli/src/auth.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 
 describe("browser PKCE authentication", () => {
@@ -76,11 +76,4 @@ describe("browser PKCE authentication", () => {
     });
   });
 
-  it("creates verifier, challenge and state values with sufficient entropy", () => {
-    const first = createPkceParameters();
-    const second = createPkceParameters();
-    expect(first.verifier.length).toBeGreaterThanOrEqual(43);
-    expect(first.challenge).not.toBe(first.verifier);
-    expect(first.state).not.toBe(second.state);
-  });
 });

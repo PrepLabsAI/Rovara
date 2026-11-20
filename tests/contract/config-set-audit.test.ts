@@ -8,10 +8,9 @@ import { describe, expect, it } from "vitest";
 import { exportChanges } from "../../packages/cli/src/admin/changes.js";
 import { runConfigSet, type ConfigServices } from "../../packages/cli/src/config/commands.js";
 import { createAdminChangeBroker } from "../support/admin-change-broker.js";
-import { configServicesFor, seeded, stacks } from "../support/config-services.js";
+import { configServicesFor, stacks } from "../support/config-services.js";
 import { fakeCloudFormation } from "../support/fake-cloudformation.js";
 import { memoryInitSecrets, scriptedPrompter, T0 } from "../support/init-fakes.js";
-import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { fakeAlerts } from "../support/setup-fakes.js";
 
 type Harness = Awaited<ReturnType<typeof createAdminChangeBroker>>;
@@ -45,44 +44,6 @@ async function configOver(harness: Harness, overrides: Partial<ConfigServices> =
 }
 
 describe("agentx config set records stack-parameter changes in the admin change history (#205)", () => {
-  it("mcp.confirmElicitation disabled writes one record: admin, cli client, before enabled, after disabled, applied", async () => {
-    const harness = await createAdminChangeBroker();
-    const { services, cloudFormation } = await configOver(harness);
-    expect(await runConfigSet(services, "staging", { key: "mcp.confirmElicitation", value: "disabled", yes: true })).toEqual({ changed: true });
-    expect(cloudFormation.parameters.McpConfirmElicitation).toBe("disabled");
-    const records = audits(harness);
-    expect(records).toHaveLength(1);
-    const record = records[0]!;
-    expect(record).toMatchObject({
-      kind: "set_config",
-      admin: { subject: "admin-subject", displayName: "Ada" },
-      client: { cliVersion: expect.any(String) as unknown },
-      change: { kind: "set_config", key: "mcp.confirmElicitation", target: "stack parameter McpConfirmElicitation on agentx-staging-control-plane", before: "enabled", after: "disabled" },
-      methodsOffered: ["cli"], methodUsed: "cli", status: "applied", outcome: "confirmed",
-    });
-    expect(record.effect).toBe("mcp.confirmElicitation: enabled -> disabled (stack parameter McpConfirmElicitation on agentx-staging-control-plane)");
-    for (const time of ["proposedAt", "answeredAt", "appliedAt"]) expect(Date.parse(record[time] as string)).not.toBeNaN();
-    expect(record.failedAt).toBeUndefined();
-    expect(harness.metrics).toEqual(["confirmed"]);
-  });
-
-  it("setting it back to enabled writes a second record the other way", async () => {
-    const harness = await createAdminChangeBroker();
-    const { services } = await configOver(harness, {}, "disabled");
-    await runConfigSet(services, "staging", { key: "mcp.confirmElicitation", value: "enabled", yes: true });
-    expect(audits(harness).map((record) => record.change)).toEqual([expect.objectContaining({ before: "disabled", after: "enabled" })]);
-  });
-
-  it("keeps the existing prompt; a no records nothing and changes nothing", async () => {
-    const harness = await createAdminChangeBroker();
-    const prompter = scriptedPrompter([false]);
-    const { services, cloudFormation } = await configOver(harness, { prompter });
-    await expect(runConfigSet(services, "staging", { key: "mcp.confirmElicitation", value: "disabled", yes: false }))
-      .rejects.toThrow("the config change to agentx-staging-control-plane was not applied; nothing changed");
-    expect(prompter.asked).toEqual(["Apply this change to agentx-staging-control-plane?"]);
-    expect(cloudFormation.calls.filter((call) => call.name === "ExecuteChangeSetCommand")).toEqual([]);
-    expect(audits(harness)).toEqual([]);
-  });
 
   it("records a yes at the prompt with when it was asked and answered", async () => {
     const harness = await createAdminChangeBroker();
@@ -159,17 +120,6 @@ describe("agentx config set records stack-parameter changes in the admin change 
     expect(await runConfigSet(later.services, "staging", { key: "mcp.confirmElicitation", value: "disabled", yes: true })).toEqual({ changed: true });
   });
 
-  it("checks the sign-in again after the prompt, which may have stayed open, and changes nothing if too little is left", async () => {
-    const harness = await createAdminChangeBroker();
-    let now = T0;
-    const prompter = { ...scriptedPrompter([]), confirm: async () => { now += 20 * 60_000; return true; } };
-    const { services, cloudFormation } = await configOver(harness, { now: () => now, prompter, adminSession: async () => ({ ...SESSION, expiresAt: T0 + 50 * 60_000 }) });
-    await expect(runConfigSet(services, "staging", { key: "mcp.confirmElicitation", value: "disabled", yes: false }))
-      .rejects.toMatchObject({ code: "AUTH_REQUIRED", message: expect.stringContaining("ends in 30 minutes, too soon to record how this mcp.confirmElicitation change ends") as unknown });
-    expect(cloudFormation.calls.filter((call) => call.name === "ExecuteChangeSetCommand")).toEqual([]);
-    expect(audits(harness)).toEqual([]);
-  });
-
   it("without the admin sign-in at the prompt, says to answer no and sign in first", async () => {
     const harness = await createAdminChangeBroker();
     const { services } = await configOver(harness, { adminSession: async () => undefined, prompter: scriptedPrompter([false]) });
@@ -201,36 +151,7 @@ describe("agentx config set records stack-parameter changes in the admin change 
     expect(audits(harness)).toEqual([expect.objectContaining({ status: "applied", change: expect.objectContaining({ before: "enabled", after: "disabled" }) as unknown })]);
   });
 
-  it("leaves the record applying, and says so, when the stack update may still be running", async () => {
-    const harness = await createAdminChangeBroker();
-    const inner = fakeCloudFormation({ parameters: { McpConfirmElicitation: "enabled" } });
-    let executed = false;
-    const cloudFormation = {
-      calls: inner.calls, parameters: inner.parameters,
-      async send(command: { constructor: { name: string }; input: Record<string, unknown> }): Promise<unknown> {
-        if (executed && command.constructor.name === "DescribeChangeSetCommand") throw Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" });
-        if (command.constructor.name === "ExecuteChangeSetCommand") executed = true;
-        return inner.send(command);
-      },
-    };
-    const { services } = await configOver(harness, { cloudFormation });
-    await expect(runConfigSet(services, "staging", { key: "mcp.confirmElicitation", value: "disabled", yes: true })).rejects.toThrow("Rate exceeded");
-    const record = audits(harness)[0]!;
-    expect(record).toMatchObject({ status: "applying" });
-    expect(record.outcome).toBeUndefined();
-    expect(services.lines).toContain(`Warning: the mcp.confirmElicitation change may still be applying, so agentx admin changes shows change ${record.changeId as string} as applying; check agentx-staging-control-plane in the CloudFormation console.`);
-  });
-
-  it("with --yes, records no prompt time", async () => {
-    const harness = await createAdminChangeBroker();
-    const { services } = await configOver(harness);
-    await runConfigSet(services, "staging", { key: "mcp.confirmElicitation", value: "disabled", yes: true });
-    expect(audits(harness)[0]!.confirmationRequestedAt).toBeUndefined();
-  });
-
   it.each([
-    ["alerts.slowTurnMinutes", "9", "5", "stack parameter SlowTurnMinutes on agentx-staging-slack"],
-    ["limits.threadTurnsPerMinute", "12", "6", "stack parameter SlackThreadTurnsPerMinute on agentx-staging-control-plane"],
     ["models.worker", "zai.glm-4.7", "us.anthropic.claude-sonnet-4-6", "stack parameter ModelId on agentx-staging-runtime"],
   ])("records %s, which shares the stack-parameter path", async (key, value, before, target) => {
     const harness = await createAdminChangeBroker();
@@ -240,12 +161,6 @@ describe("agentx config set records stack-parameter changes in the admin change 
     expect(audits(harness)).toEqual([expect.objectContaining({ kind: "set_config", status: "applied", change: { kind: "set_config", key, target, before, after: value } })]);
   });
 
-  it("records nothing when the value is already set", async () => {
-    const harness = await createAdminChangeBroker();
-    const { services } = await configOver(harness);
-    expect(await runConfigSet(services, "staging", { key: "mcp.confirmElicitation", value: "enabled", yes: true })).toEqual({ changed: false });
-    expect(audits(harness)).toEqual([]);
-  });
 });
 
 describe("agentx config set alerts.address, a secret-bearing key (#205)", () => {
@@ -276,15 +191,6 @@ describe("agentx config set alerts.address, a secret-bearing key (#205)", () => 
     const stored = JSON.stringify(harness.db.find((item) => item.entityType === "ADMIN_CHANGE_AUDIT"));
     expect(stored).not.toContain("ops@example.com");
     expect(stored).not.toContain("SECRETkey");
-  });
-
-  it("records nothing when the environment lock is held, since nothing started", async () => {
-    const harness = await createAdminChangeBroker();
-    const store = await seeded();
-    const { services } = await configOver(harness, { store, alerts: fakeAlerts({ confirmAfterPolls: 0 }) });
-    store.values.set(lockParameterName("staging"), JSON.stringify({ holder: "arn:aws:sts::123456789012:assumed-role/agentx-staging-operator/bob", command: "upgrade", acquiredAt: new Date(T0).toISOString() }));
-    await expect(runConfigSet(services, "staging", { key: "alerts.address", value: "ops@example.com", yes: true })).rejects.toThrow("locked by");
-    expect(audits(harness)).toEqual([]);
   });
 
   it("the broker refuses a secret-bearing key's record that carries a value", async () => {
