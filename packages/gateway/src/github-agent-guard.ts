@@ -1,4 +1,4 @@
-// packages/gateway/src/github-agent-guard.ts
+// packages/gateway/src/github-agent-guard.ts (CI timing probe: comment only)
 // The guard for an agent's GitHub calls. It replaces issueNotPullRequestGuard for agent calls only;
 // the existing guard keeps serving the non-agent connector. Every owner and repo the model names must be
 // the scope's bound repository; a pull request tool needs a pull request number that exists in it;
