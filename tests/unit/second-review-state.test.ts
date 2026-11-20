@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { SecondOpinionSchema, secondReviewModelKey, workflowFindingFingerprint, type DocumentChange, type SecondOpinion } from "@agentx/contracts";
 import {
-  TRACK_RECORD_DAYS, applyTrackChange, fileHash, findingKey, modeApprovalRequest, noteQualification, noticeLines, observationOf, planSecondReview, readNotice, readSecondReviewSettings, readTrackRecord,
+  TRACK_RECORD_DAYS, applyTrackChange, approveSecondReviewModeChange, fileHash, findingKey, modeApprovalRequest, noteQualification, noticeLines, observationOf, planSecondReview, readNotice, readSecondReviewSettings, readTrackRecord,
   secondReviewPartition, secondReviewSettingsKey, trackChangeOf, verdictHoldsFor, trackRowKey, type TrackChange,
 } from "../../packages/broker/src/core/second-review/index.js";
 import { prepareVerdict, commitVerdict, withdrawVerdict } from "../../packages/broker/src/core/second-review/evidence.js";
@@ -147,6 +147,28 @@ describe("the mode", () => {
       const changeId = (proposed as { changeId: string }).changeId;
       world.clock.now += 8 * 86_400_000;
       await expect(world.review.apply(OTHER, { action: "approve-mode", changeId, proof: proofFor({ requestId: `second-review-mode:${changeId}`, revision: 1, artifactDigest: "x" } as never, OTHER.personId) })).rejects.toMatchObject({ code: "CHANGE_STALE" });
+    });
+
+    it("a same-name project in another company cannot lend its person an approval", async () => {
+      const world = createWorld({ approvers: secondPersonApprovers() });
+      await world.review.apply(OWNER, { action: "mode", scope: "project", project: "web", mode: "shadow" });
+      const proposed = await world.review.apply(OWNER, { action: "mode", scope: "project", project: "web", mode: "off" });
+      const changeId = (proposed as { changeId: string }).changeId;
+      const request = modeApprovalRequest({ companyId: COMPANY }, { id: changeId, scope: { kind: "project", project: "web" }, from: "shadow", to: "off", expiresAt: Date.parse("2026-11-17T10:00:00.000Z") });
+      const foreign = { ...OTHER, companyId: "org_aaaaaaaaaaaaaaaaaaaa" };
+      const auditCount = world.audit.length;
+      await expect(world.review.apply(foreign, { action: "mode", scope: "project", project: "web", mode: "shadow" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+      await expect(world.review.apply(foreign, { action: "context", context: "same_as_first" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(world.audit).toHaveLength(auditCount);
+      const deps = { store: world.store, audit: recordingAudit(world.audit), approvers: secondPersonApprovers(), companyId: COMPANY, now: () => world.clock.now };
+      expect(await approveSecondReviewModeChange(deps, { changeId, approver: foreign, proof: proofFor(request, OTHER.personId) })).toEqual({ ok: false, code: "not_found" });
+
+      const impostorDeps = { ...deps, approvers: {
+        async requirement() { return { methods: ["test-proof"], minApprovers: 2, selfApprovalAllowed: false }; },
+        async verify() { return { approved: true as const, approver: foreign, method: "test-proof", proofId: "foreign" }; },
+      } };
+      expect(await approveSecondReviewModeChange(impostorDeps, { changeId, approver: OTHER, proof: proofFor(request, OTHER.personId) })).toEqual({ ok: false, code: "second_person_required" });
+      expect((await readSecondReviewSettings(world.store, COMPANY, "web")).projectMode).toBe("shadow");
     });
   });
 });

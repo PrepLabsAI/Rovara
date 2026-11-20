@@ -79,7 +79,7 @@ function settingUpdate(deps: ModeDeps, input: { scope: ModeScope; to: SecondRevi
 
 /** A check, in the same transaction, that the company has not been lowered since `seen` was read (the stamp is what it was, or still absent). */
 const loweredCheck = (deps: ModeDeps, seen: SecondReviewSettings): TransactItem =>
-  ({ kind: "check", key: { pk: secondReviewPartition(deps.companyId), sk: SECOND_REVIEW_SETTINGS_SK }, condition: sameAsRead([["loweredAt", seen.companyLoweredAt]]) });
+  ({ kind: "check", key: { pk: secondReviewPartition(deps.companyId), sk: SECOND_REVIEW_SETTINGS_SK }, condition: sameAsRead([["default", seen.companyDefault], ["lock", seen.companyLock], ["loweredAt", seen.companyLoweredAt]]) });
 
 /** The audit event as transaction steps (Code: the sink's own; none when it writes somewhere else). */
 export function stagedAudit(deps: Pick<ModeDeps, "audit" | "companyId">, event: { action: string; subject?: { type: string; id: string }; details?: Record<string, JsonValue> }, actorId: string, at: number): TransactItem[] {
@@ -229,6 +229,7 @@ export type ModeApproval = { ok: true; mode: SecondReviewMode } | { ok: false; c
  */
 export async function approveSecondReviewModeChange(deps: ModeDeps, input: { changeId: string; approver: Principal; proof: ApprovalProof; fresh?: boolean }): Promise<ModeApproval> {
   if (input.fresh === false) return { ok: false, code: "reauth_required" };
+  if (input.approver.companyId !== deps.companyId) return { ok: false, code: "not_found" };
   const stored = await deps.store.get(changeKey(deps.companyId, input.changeId)).catch(() => undefined);
   const found = parseChange(stored);
   if (found === undefined || found.orgId !== deps.companyId) return { ok: false, code: "not_found" };
@@ -239,17 +240,19 @@ export async function approveSecondReviewModeChange(deps: ModeDeps, input: { cha
   const request = modeApprovalRequest(deps, found, proposerOf(stored, found));
   const verdict = await deps.approvers.verify(request, input.proof).catch(() => undefined);
   if (verdict === undefined) return { ok: false, code: "approval_unavailable" };
-  if (!verdict.approved || verdict.approver.personId === found.proposedBy || verdict.approver.personId !== input.approver.personId) return { ok: false, code: "second_person_required" };
+  if (!verdict.approved || verdict.approver.companyId !== deps.companyId || verdict.approver.personId === found.proposedBy || verdict.approver.personId !== input.approver.personId) return { ok: false, code: "second_person_required" };
   const seen = await read(deps, found.scope);
   if (seen === undefined) return { ok: false, code: "settings_unreadable" };
   // The world moved since the proposal: what the scope effectively has is no longer what the proposal was made against.
   if (effectiveMode(seen, found.scope) !== found.from) return { ok: false, code: "stale" };
   // Clearing a project's override lands on the COMPANY's mode as it is now, which may differ from what it was when the proposal was made: the event and the answer say what the setting becomes.
   const to: SecondReviewMode = found.clear === true ? companyModeOf(seen) : found.to;
+  if (found.scope.kind === "project" && secondReviewModeLoweringNeedsSecondPerson(companyModeOf(seen), to)) return { ok: false, code: "below_company_mode" };
   const audit = stagedAudit(deps, { action: "company.second_review_mode_changed", subject: subjectOf(deps, found.scope), details: { scope: found.scope.kind, from: found.from, to, mode: "second_person" } }, input.approver.personId, at);
   const claim: TransactItem = { kind: "update", key: changeKey(deps.companyId, found.id), ops: [change.set("state", "applied")], condition: when.and(when.eq("state", "pending"), when.eq("proposedBy", found.proposedBy), when.eq("expiresAt", found.expiresAt)) };
   const write = settingUpdate(deps, { scope: found.scope, to, clear: found.clear === true, lowering: found.scope.kind === "company", seen, by: input.approver.personId, at });
-  return (await send(deps, [claim, write, ...audit])) === "ok" ? { ok: true, mode: to } : { ok: false, code: "stale" };
+  const floor = found.scope.kind === "project" ? [loweredCheck(deps, seen)] : [];
+  return (await send(deps, [claim, write, ...floor, ...audit])) === "ok" ? { ok: true, mode: to } : { ok: false, code: "stale" };
 }
 
 /** The proposer, or another person the port lets act, withdraws a pending proposal. */

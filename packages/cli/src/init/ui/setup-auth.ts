@@ -127,7 +127,7 @@ export async function finishSignIn(input: {
   const access = claims(tokens.access_token);
   const groups = Array.isArray(access["cognito:groups"]) ? access["cognito:groups"] : [];
   if (!groups.includes(ADMIN_GROUP)) {
-    return { ok: false, status: 403, reason: "This account is not an AgentX administrator, so it cannot set AgentX up." };
+    return { ok: false, status: 403, reason: "This account is not a Rovara administrator, so it cannot set Rovara up." };
   }
   const expiresAt = input.now() + tokens.expires_in * 1000;
   const sessionId = base64url(randomBytes(32));

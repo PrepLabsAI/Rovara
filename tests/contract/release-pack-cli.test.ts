@@ -70,7 +70,7 @@ describe("publishable CLI package", () => {
     expect(initHelp).toContain("--no-ui");
     expect(initHelp).toContain("the default in an interactive terminal that can open a browser");
     const bundle = await readFile(join(project, "node_modules", "@preplabsai", "rovara-code", "bin", "agentx-cli.mjs"), "utf8");
-    expect(bundle).toContain("<title>Install AgentX</title>");
+    expect(bundle).toContain("<title>Install Rovara</title>");
     expect(bundle).toContain("x-agentx-wizard-token");
     expect(bundle).toContain("renderPanelCards(state);");
 

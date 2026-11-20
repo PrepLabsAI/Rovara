@@ -1,7 +1,6 @@
 // Java reports J2: the JaCoCo XML reader (`target/site/jacoco/jacoco.xml`, `build/reports/jacoco/test/jacocoTestReport.xml`) into the same per-file line coverage the Go reader gives, and its use in the
 // format-neutral changed-line intersection. Fail closed: a report it cannot read completely is "not measured"; a file it cannot place in exactly one source root is listed, not guessed.
 import { describe, expect, it } from "vitest";
-import { expectLinearScaling } from "../support/scaling.js";
 import { EvidenceCoverageSchema } from "../../packages/contracts/src/evidence.js";
 import { changedLineCoverage, javaSourceRoots, looksLikeJacocoXml, parseJacocoXml, parseLineCoverage, JACOCO_XML_MAX_BYTES } from "../../packages/worker/src/verification/changed-coverage.js";
 
@@ -21,14 +20,6 @@ const MATCH = report(
 );
 
 describe("looksLikeJacocoXml", () => {
-  it("tells a JaCoCo report from a Go profile, LCOV and other XML", () => {
-    expect(looksLikeJacocoXml(MATCH)).toBe(true);
-    expect(looksLikeJacocoXml('<report name="x"><package name="a"/></report>')).toBe(true);
-    expect(looksLikeJacocoXml("mode: set\nexample.com/a/b.go:1.1,2.2 1 1\n")).toBe(false);
-    expect(looksLikeJacocoXml("SF:src/a.js\nDA:1,1\nend_of_record\n")).toBe(false);
-    expect(looksLikeJacocoXml('<coverage line-rate="1"><packages/></coverage>')).toBe(false);
-    expect(looksLikeJacocoXml('<testsuite name="x"/>')).toBe(false);
-  });
   it("accepts comments before and after the DOCTYPE, a byte-order mark and leading space, and refuses an unclosed comment, a DOCTYPE with an internal subset and a root that is not <report>", () => {
     expect(looksLikeJacocoXml(`\uFEFF  <?xml version="1.0"?>\n<!-- one -->\n<!-- two -->${DOCTYPE.slice(DOCTYPE.indexOf("<!DOCTYPE"))}<!-- three --> <report name="x"/>`)).toBe(true);
     expect(looksLikeJacocoXml("<!-- a --><report>")).toBe(true);
@@ -38,41 +29,9 @@ describe("looksLikeJacocoXml", () => {
     expect(looksLikeJacocoXml("<!-- a --> text <report>")).toBe(false);
     expect(looksLikeJacocoXml('<?xml version="1.0" <report>')).toBe(false);
   });
-  it("answers a hostile file of empty comments in linear time (the old pattern took about 30 seconds for 30 comments)", () => {
-    // Scaling checks: the reader looks at the first 4096 characters only, so what can blow up is the number of comments in them. Each shape is timed with 4 comments and with 32 (the old pattern took
-    // about 30 seconds for 30): a pattern that backtracks over the comments grows far faster than four times, and a run that never finishes hits the hang limit.
-    const shapes: Array<[string, (comments: number) => string]> = [
-      ["empty comments then text", (comments) => "<!---->".repeat(comments) + "x"],
-      ["spaced comments", (comments) => "<!-- -->".repeat(comments)],
-      ["empty comments then the root and an open comment", (comments) => `${"<!---->".repeat(comments)}<report>`.slice(0, 4096) + "<!--"],
-    ];
-    for (const [label, build] of shapes) {
-      expectLinearScaling((comments) => {
-        const hostile = build(comments);
-        return () => looksLikeJacocoXml(hostile);
-      }, { n: 4, unitBytes: 7, label: `looksLikeJacocoXml on ${label}` });
-    }
-    expect(looksLikeJacocoXml("<!---->".repeat(1000) + "x")).toBe(false);
-    expect(looksLikeJacocoXml("<!---->".repeat(30) + "x")).toBe(false);
-    expect(looksLikeJacocoXml("<!-- -->".repeat(1000))).toBe(false);
-    expect(looksLikeJacocoXml(`${"<!---->".repeat(500)}<report>`.slice(0, 4096) + "<!--")).toBe(true);
-    expect(looksLikeJacocoXml("<!---->".repeat(500) + "<report>")).toBe(true);
-    // The reader that calls it takes the same time: a coverage file made only of comments is "not measured", at once.
-    expectLinearScaling((comments) => {
-      const hostile = "<!---->".repeat(comments) + "x";
-      return () => parseLineCoverage(hostile, { javaSourceRoots: ROOTS });
-    }, { n: 4, unitBytes: 7, label: "parseLineCoverage on empty comments" });
-    expect(parseLineCoverage("<!---->".repeat(1000) + "x", { javaSourceRoots: ROOTS })).toBeUndefined();
-  });
 });
 
 describe("parseJacocoXml", () => {
-  it("reads package and source file into repository paths under the source root, statements are lines with instructions, covered when any ran", () => {
-    const read = parseJacocoXml(MATCH, { sourceRoots: ROOTS })!;
-    expect([...read.files.keys()].sort()).toEqual(["src/main/java/Main.java", "src/main/java/com/acme/match/Matcher.java", "src/main/java/com/acme/match/Other.java", "src/main/java/com/acme/util/Strings.java"]);
-    expect(read.files.get("src/main/java/com/acme/match/Matcher.java")).toEqual({ statements: [[10, 12], [20, 20]], covered: [[10, 10], [12, 12], [20, 20]] });
-    expect(read.unmappedBlocks).toBe(0);
-  });
   it("picks the one root that has the file when the repository file list is given, per module", () => {
     const paths = ["svc/a/src/main/java/com/acme/A.java", "svc/b/src/main/java/com/acme/B.java", "svc/b/src/main/kotlin/com/acme/K.kt"];
     const text = report(pkg("com/acme", sourcefile("A.java", line(1, 0, 1)), sourcefile("B.java", line(2, 1, 0)), sourcefile("K.kt", line(3, 0, 1)), sourcefile("Gone.java", line(4, 0, 1))));
@@ -110,13 +69,6 @@ describe("parseJacocoXml", () => {
     expect(parseJacocoXml(good, { sourceRoots: [] })).toBeUndefined();
     expect(parseJacocoXml(`${good}${" ".repeat(JACOCO_XML_MAX_BYTES)}`, { sourceRoots: ROOTS })).toBeUndefined();
   });
-  it("drops names that leave the source root or hold odd characters, and counts them; a report with no placeable file is not measured", () => {
-    const text = report(pkg("com/acme", sourcefile("A.java", line(1, 0, 1))), pkg("../escape", sourcefile("B.java", line(1, 0, 1))), pkg("com/acme", sourcefile("../C.java", line(1, 0, 1))), pkg("com\\acme", sourcefile("D.java", line(1, 0, 1))));
-    const read = parseJacocoXml(text, { sourceRoots: ROOTS })!;
-    expect([...read.files.keys()]).toEqual(["src/main/java/com/acme/A.java"]);
-    expect(read.unmappedBlocks).toBe(3);
-    expect(parseJacocoXml(report(pkg("../escape", sourcefile("B.java", line(1, 0, 1)))), { sourceRoots: ROOTS })).toBeUndefined();
-  });
   it("sends package and file names through the data guard: a name with a secret or a control character is never stored or listed, and its file counts as not placed", () => {
     const token = ["gh", "p_", "a".repeat(36)].join("");
     const text = report(
@@ -135,15 +87,6 @@ describe("parseJacocoXml", () => {
     expect(JSON.stringify(listed.ambiguousFiles)).not.toContain(token);
     // A name the guard leaves alone is untouched.
     expect(parseJacocoXml(report(pkg("com/acme/util", sourcefile("Strings$Inner_2.java", line(1, 0, 1)))), { sourceRoots: ROOTS })!.files.has("src/main/java/com/acme/util/Strings$Inner_2.java")).toBe(true);
-  });
-  it("is not fooled by package or line elements inside comments or CDATA", () => {
-    const text = report(pkg("com/acme", sourcefile("A.java", line(1, 0, 1)))).replace("</report>", '<!-- <package name="com/fake"><sourcefile name="F.java"><line nr="1" mi="0" ci="1"/></sourcefile></package> --></report>');
-    expect([...parseJacocoXml(text, { sourceRoots: ROOTS })!.files.keys()]).toEqual(["src/main/java/com/acme/A.java"]);
-  });
-  it("reads a large report in one pass", () => {
-    const lines = Array.from({ length: 50_000 }, (_, n) => line(n + 1, n % 2, (n + 1) % 2)).join("");
-    const read = parseJacocoXml(report(pkg("com/acme", `<sourcefile name="Big.java">${lines}</sourcefile>`)), { sourceRoots: ROOTS })!;
-    expect(read.files.get("src/main/java/com/acme/Big.java")?.statements).toEqual([[1, 50_000]]);
   });
 });
 

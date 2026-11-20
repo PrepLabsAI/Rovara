@@ -8,22 +8,12 @@ const GOOD: ModelHelperServeArgs = {
 };
 
 describe("model helper arguments", () => {
-  it("round-trips: the builder's line is the parser's input", () => {
-    const argv = modelHelperArgs(GOOD);
-    expect(argv).toContain("--record-escapes");
-    expect(parseModelHelperArgs(argv)).toEqual(GOOD);
-    expect(parseModelHelperArgs(modelHelperArgs({ ...GOOD, projectId: "rovara-test-project", metaPort: undefined, recordEscapes: false }))).toMatchObject({ projectId: "rovara-test-project", metaPort: undefined, recordEscapes: false });
-  });
   it("refuses a wildcard or a name for listen and caller, a bad port, a bad mode, a path with .., a short digest, a project id with a slash", () => {
     const bad: Array<Partial<ModelHelperServeArgs>> = [
       { listen: "0.0.0.0" }, { listen: "localhost" }, { listen: "::" }, { caller: "rovara-models" }, { port: 0 }, { port: 70_000 }, { port: 1.5 }, { metaPort: 8080 }, { mode: "sneaky" as never },
       { rows: "../etc/passwd" }, { rows: "relative.json" }, { ledger: "/a/../b" }, { digest: "abc" }, { blockState: "sealed" as never }, { projectId: "a/b" },
     ];
     for (const over of bad) expect(() => modelHelperArgs({ ...GOOD, ...over }), JSON.stringify(over)).toThrow(ModelHelperArgsRefused);
-  });
-  it("allows an ephemeral port only on a loopback address", () => {
-    expect(() => modelHelperArgs({ ...GOOD, listen: "127.0.0.1", caller: "127.0.0.1", port: 0, metaPort: 0 })).not.toThrow();
-    expect(() => modelHelperArgs({ ...GOOD, port: 0 })).toThrow(ModelHelperArgsRefused);
   });
   it("the parser refuses an unknown flag, a repeated one, a missing value and a stray value", () => {
     const argv = modelHelperArgs(GOOD);

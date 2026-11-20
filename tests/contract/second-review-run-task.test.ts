@@ -39,7 +39,7 @@ const reviewer = (id: string): PiSessionAdapter => ({
     let listener: ((event: unknown) => void) | undefined;
     return {
       conversationId: input.conversationId ?? "review", sessionFile,
-      async prompt() { listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: '{"findings":[]}' }] } }); },
+      async prompt() { listener?.({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: '{"findings":[]}' }] } }); },
       async abort() {},
       getModel: () => ({ provider: "test", modelId: id }),
       getSessionStats: () => ({ tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 }) as never,

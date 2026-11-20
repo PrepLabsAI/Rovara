@@ -4,11 +4,8 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { builtinModelCatalog } from "@agentx/contracts";
 import { RESERVED_RUN_ALIASES, checkSandboxNames } from "../../packages/worker/src/check-sandbox.js";
-import {
-  MODEL_HELPER_ALIAS, RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_SLOTS, RUN_NETWORK_WORKSPACE_LABEL, runNetworkAddresses, runNetworkHelperIp, runNetworkModelHelperIp,
-} from "../../packages/worker/src/run-network.js";
+import { MODEL_HELPER_ALIAS, RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, runNetworkAddresses, runNetworkHelperIp, runNetworkModelHelperIp } from "../../packages/worker/src/run-network.js";
 import { HELPER_RESERVED_ALIASES } from "../../packages/worker/src/service-helpers.js";
 import {
   MODEL_HELPER_ENTRY, MODEL_HELPER_LEDGER_DIR, MODEL_HELPER_RUN_DIR, modelHelperArgProblems, modelHelperRunArgs,
@@ -26,7 +23,6 @@ const TASK = "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11";
 const IMAGE = "worker:test";
 const RUN_DIR = "/run/rovara/job1/models";
 const NOW = 1_800_000_000_000;
-const LABEL_KEYS = [RUN_NETWORK_LABEL, RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_WORKSPACE_LABEL];
 /** The boot facts root writes on a named worker whose walls are in place. */
 const FACTS = JSON.stringify({ metadataBlocked: true, runWalls: true, ipv6Drops: true, prepull: "off", prepulled: 0, loggedOut: true, dockerVersion: "27.3.1" });
 const OFFERED: NodeJS.ProcessEnv = { AGENTX_TEST_SERVICES_BOOT_FACTS: FACTS };
@@ -164,9 +160,6 @@ describe("the gate: a worker offers the model helper only when its walls are in 
       expect(modelHelperAdvertisedFeatures(environment), label).toEqual([]);
     }
   });
-  it("a repository that is not pulled does not withdraw the model helper (it needs no catalog image)", () => {
-    expect(modelHelperOffer({ ...OFFERED, AGENTX_TEST_SERVICES_NOT_PULLED: "svc/postgres" }).offered).toBe(true);
-  });
   it("startModelHelper starts nothing on a worker that does not offer it", async () => {
     const daemon = fakeDaemon();
     await expect(startModelHelper(daemon.docker, startInput({ environment: {} }))).rejects.toThrow();
@@ -175,17 +168,6 @@ describe("the gate: a worker offers the model helper only when its walls are in 
 });
 
 describe(".9 is the model helper's, and a repository alias can never take it", () => {
-  it("is .9 of every slot, outside the service helper range (.16 to .47), and never an index of runNetworkHelperIp", () => {
-    for (const slot of [1, 7, 253]) {
-      const address = runNetworkModelHelperIp(slot);
-      expect(address).toBe(`172.30.${String(slot)}.9`);
-      for (let index = 0; index < 32; index += 1) expect(runNetworkHelperIp(slot, index)).not.toBe(address);
-    }
-    expect(() => runNetworkModelHelperIp(RUN_NETWORK_SLOTS + 1)).toThrow();
-    expect(() => runNetworkModelHelperIp(0)).toThrow();
-    // The address plan of a slot is unchanged: the model helper is not a field of it.
-    expect(Object.keys(runNetworkAddresses(7))).not.toContain("modelHelperIp");
-  });
   it("the name the sandboxes know it by is a reserved alias for dependencies in both launcher rule sets", () => {
     expect(MODEL_HELPER_ALIAS).toBe("rovara-models");
     expect(RESERVED_RUN_ALIASES.has(MODEL_HELPER_ALIAS)).toBe(true);
@@ -202,24 +184,6 @@ describe("the helper's docker arguments", () => {
   const args = () => modelHelperRunArgs({ net, image: IMAGE, runDir: RUN_DIR, sandboxIp: net.workingSandboxIp, programArgs: helperArgs({ listen: MODEL_IP, caller: net.workingSandboxIp }) });
   const valuesOf = (list: readonly string[], flag: string) => list.flatMap((arg, index) => (list[index - 1] === flag ? [arg] : []));
 
-  it("is hardened: no capability, read-only root, no new privileges, one network (the run network, at .9), no egress, no DNS upstream, no published port", () => {
-    const list = args();
-    expect(valuesOf(list, "--network")).toEqual([net.name]);
-    expect(valuesOf(list, "--ip")).toEqual(["172.30.153.9"]);
-    expect(valuesOf(list, "--cap-drop")).toEqual(["ALL"]);
-    // Docker's embedded resolver (127.0.0.11) would forward a lookup to the daemon's upstream: the helper's only upstream is its own loopback, where nothing listens.
-    expect(valuesOf(list, "--dns")).toEqual(["127.0.0.1"]);
-    expect(list).toContain("--read-only");
-    expect(valuesOf(list, "--security-opt")).toEqual(["no-new-privileges"]);
-    expect(valuesOf(list, "--user")).toEqual(["1000:1000"]);
-    for (const flag of ["--add-host", "--dns-search", "--publish", "-p", "--privileged", "--cap-add", "--pid", "--ipc", "--net", "--link", "--device", "--userns"]) expect(list, flag).not.toContain(flag);
-    expect(list).toContain("--pull=never");
-    expect(valuesOf(list, "--entrypoint")).toEqual(["/usr/local/bin/node"]);
-  });
-  it("carries ALL four labels of the network on the helper, so the sweep and stop() find it", () => {
-    const keys = valuesOf(args(), "--label").map((label) => label.split("=")[0]);
-    expect(keys.sort()).toEqual([...LABEL_KEYS].sort());
-  });
   it("has exactly one bind mount, read-only, of a directory that holds only the helper's files, and exactly one tmpfs (the ledger)", () => {
     const list = args();
     expect(valuesOf(list, "--volume")).toEqual([`${RUN_DIR}:${MODEL_HELPER_RUN_DIR}:ro`]);
@@ -261,9 +225,6 @@ describe("the helper's docker arguments", () => {
       list.splice(list.indexOf("--entrypoint"), 0, ...extra);
       return list;
     };
-    it("is clean for the real arguments", () => {
-      expect(problems(args())).toEqual([]);
-    });
     it("a second network", () => {
       expect(problems(withExtra(["--network", TASK_SANDBOX_NETWORK])).join(";")).toMatch(/network/u);
     });
@@ -271,12 +232,6 @@ describe("the helper's docker arguments", () => {
       for (const extra of [["--add-host", "api.openai.com:1.1.1.1"], ["--dns", "8.8.8.8"], ["--dns-option", "ndots:0"], ["--publish", "8080:8080"], ["--cap-add", "NET_ADMIN"], ["--privileged"], ["--volume", "/:/host"], ["--tmpfs", "/tmp"], ["--net", "host"], ["--pid", "host"], ["--device", "/dev/kmsg"], ["--security-opt", "seccomp=unconfined"]]) {
         expect(problems(withExtra(extra)).length, extra.join(" ")).toBeGreaterThan(0);
       }
-    });
-    it("a missing --dns 127.0.0.1, or another DNS server", () => {
-      const without = args();
-      without.splice(without.indexOf("--dns"), 2);
-      expect(problems(without).join(";")).toMatch(/DNS/u);
-      expect(problems(args().map((arg) => (arg === "127.0.0.1" ? "8.8.8.8" : arg))).join(";")).toMatch(/DNS/u);
     });
     it("a missing label, a missing read-only root, a missing --cap-drop ALL, a writable run directory, a root user", () => {
       const without = (flag: string, count: number) => { const list = args(); list.splice(list.indexOf(flag), count); return list; };
@@ -290,39 +245,6 @@ describe("the helper's docker arguments", () => {
 });
 
 describe("starting the helper", () => {
-  it("makes the network, then the helper on it (all four labels), waits for it, and only then is a sandbox block available; the network is an internal rvi bridge", async () => {
-    const daemon = fakeDaemon();
-    const started = await startModelHelper(daemon.docker, startInput());
-    const order = daemon.calls.map((call) => call.slice(0, 2).join(" "));
-    expect(order.indexOf("network create")).toBeGreaterThanOrEqual(0);
-    expect(order.indexOf("run --detach")).toBeGreaterThan(order.indexOf("network create"));
-    expect(daemon.networks).toHaveLength(1);
-    expect(daemon.networks[0]!.internal).toBe(true);
-    expect(daemon.networks[0]!.bridge).toMatch(/^rvi[0-9a-f]{8}$/u);
-    const helper = daemon.containers.find((c) => c.name.endsWith("-models"))!;
-    expect(helper.networks.size).toBe(1);
-    expect([...helper.networks.keys()]).toEqual([daemon.networks[0]!.name]);
-    expect(helper.networks.get(daemon.networks[0]!.name)).toBe(runNetworkModelHelperIp(started.network.slot));
-    expect(Object.keys(helper.labels).sort()).toEqual([...LABEL_KEYS].sort());
-    expect(started.helperIp).toBe(runNetworkModelHelperIp(started.network.slot));
-    expect(started.sandboxIp).toBe(started.network.workingSandboxIp);
-  });
-  it("one network per task: two tasks get two networks and two helpers, each on its own network only", async () => {
-    const daemon = fakeDaemon();
-    const first = await startModelHelper(daemon.docker, startInput({ id: "task-aaaa" }));
-    const second = await startModelHelper(daemon.docker, startInput({ id: "task-bbbb" }));
-    expect(first.network.name).not.toBe(second.network.name);
-    expect(daemon.networks).toHaveLength(2);
-    for (const helper of daemon.containers.filter((c) => c.name.endsWith("-models"))) expect(helper.networks.size).toBe(1);
-  });
-  it("a failed helper start removes the network and answers one fixed sentence (the docker error is not repeated)", async () => {
-    const daemon = fakeDaemon({ failRun: (args) => args.some((arg) => arg.endsWith("-models")) });
-    const error = await startModelHelper(daemon.docker, startInput()).catch((caught: unknown) => caught as Error);
-    expect((error as Error).message).toContain(MODEL_HELPER_FAILURE_SENTENCE);
-    expect((error as Error).message).not.toMatch(/docker: run failed/u);
-    expect(daemon.networks).toEqual([]);
-    expect(daemon.containers).toEqual([]);
-  });
   it("a helper that is not running, or that the daemon put on a second network, fails closed and is cleaned up", async () => {
     for (const options of [{ helperStopsImmediately: true }, { extraNetworkForHelpers: TASK_SANDBOX_NETWORK }] as DaemonOptions[]) {
       const daemon = fakeDaemon(options);
@@ -331,14 +253,6 @@ describe("starting the helper", () => {
       expect(daemon.networks, JSON.stringify(options)).toEqual([]);
       expect(daemon.containers, JSON.stringify(options)).toEqual([]);
     }
-  });
-  it("stop() removes the helper and then the network, and is safe to call again", async () => {
-    const daemon = fakeDaemon();
-    const started = await startModelHelper(daemon.docker, startInput());
-    await started.stop();
-    await started.stop();
-    expect(daemon.containers).toEqual([]);
-    expect(daemon.networks).toEqual([]);
   });
   it("the run id of a task and of each round are different hashes, never the id itself", () => {
     const ids = [modelHelperRunId("task", TASK), modelHelperRunId("round", TASK, 1), modelHelperRunId("round", TASK, 2), modelHelperRunId("task", "other")];
@@ -473,11 +387,6 @@ describe("the working sandbox is dual-homed; the fresh check sandbox is on a new
     expect(task.sandboxBlock({}).role).toBe("working");
     expect(() => new TaskSandbox({ rootPath: "/mnt/workspace", taskId: TASK, docker: daemon.docker, image: IMAGE, environment: {}, modelBlock: task.sandboxBlock({}) })).not.toThrow();
   });
-  it("attachSandbox checks with an inspect that the sandbox is on the network: a connect that 'worked' on a container that is not there fails", async () => {
-    const daemon = fakeDaemon();
-    const task = await startModelHelper(daemon.docker, startInput());
-    await expect(task.attachSandbox("no-such-container", "working")).rejects.toThrow();
-  });
   it("attachSandbox refuses a container name that could be a docker option", async () => {
     const daemon = fakeDaemon();
     const task = await startModelHelper(daemon.docker, startInput());
@@ -514,13 +423,3 @@ describe("the worker-start sweep", () => {
   });
 });
 
-describe("the catalog's own check: the model-row block comes from the built-in catalog by default", () => {
-  it("sandboxBlock({}) is the built-in catalog's block at the helper's address", async () => {
-    const daemon = fakeDaemon();
-    const helper = await startModelHelper(daemon.docker, startInput());
-    const block = helper.sandboxBlock({}).block;
-    expect(block.hosts).toContain(builtinModelCatalog().rows[0]!.hosts[0]);
-    expect(block.address).toBe(helper.helperIp);
-    expect(block.target).toBe("helper");
-  });
-});

@@ -22,6 +22,7 @@ import { CompanySignInStore } from "../developer/company-membership.js";
 import { companyIssuerProvider } from "../developer/company-issuer.js";
 import { CompanyInviteStore } from "../developer/company-invites.js";
 import { CompanyImportStore } from "../developer/company-import.js";
+import { createCompanySignInAuditWriter } from "../developer/company-signin-audit.js";
 import { POLICY_QUESTION_KEY_PURPOSE, kmsTokenSigner } from "../developer/tokens.js";
 import type { HttpApiV2Event } from "./lambda.js";
 
@@ -272,6 +273,8 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
       now,
     }),
     ...(company === undefined ? {} : { company, companyIssuer: companyIssuerProvider({ store: company, env: config.env, readSecret: readCompanySecret, fetch, jwksFor: companyJwksFor, now }),
+      // The State table is read only with the company layer on (the audit write is its only use here); with the layer off, init needs no STATE_TABLE_NAME.
+      signInAudit: createCompanySignInAuditWriter({ documentClient, tableName: required(env, "STATE_TABLE_NAME"), now }),
       // DEC 254a, 253z: invite codes and self-serve create, only with the company layer.
       // DEC 254zg (a): self-serve create only while the CompanySelfServe switch is on as well (infra/lib/company-signin.ts gives "enabled" only with CompanySignIn on).
       companyInvites: new CompanyInviteStore({ documentClient, tableName, now, company, selfServeAllowed: companySelfServeFromEnvironment(env) }) }),

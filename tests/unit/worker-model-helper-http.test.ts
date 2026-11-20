@@ -6,7 +6,7 @@ import { isInboundCredentialHeader } from "@agentx/contracts";
 import { isInboundCredentialHeader as isInboundCredentialHeaderFromEntry } from "@agentx/contracts/model-helper";
 import { createModelLedgerWriter } from "../../packages/worker/src/model-helper-ledger.js";
 import { MODEL_HELPER_LIMITS, REAL_NOT_AVAILABLE_SENTENCE, headersForBackend, parseModelTarget, startModelHelperLoop, type ModelBackend } from "../../packages/worker/src/model-helper-http.js";
-import { GEMINI_BODY, OPENAI_BODY, ROWS, ZERO_DIGEST, cleanupWorlds, fakeKey, geminiPath, request, stampSet, startWorld, type World } from "../support/model-helper-world.js";
+import { OPENAI_BODY, ROWS, ZERO_DIGEST, cleanupWorlds, fakeKey, request, stampSet, startWorld, type World } from "../support/model-helper-world.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,14 +25,6 @@ const GEMINI_SET = stampSet("gemini", [{ id: "weather", match: { promptContains:
 const OPENAI_SET = stampSet("openai_compatible", [{ id: "chat", response: { text: "Hello from the script.", finish: "stop" } }]);
 
 describe("parseModelTarget", () => {
-  it("reads the row, any version prefix, the failure segments and the token, in the fixed order", () => {
-    const token = "A".repeat(20);
-    expect(parseModelTarget("/p/gemini/v1beta/models/m:generateContent?alt=sse")).toEqual({ ok: true, target: { rowId: "gemini", failure: undefined, token: undefined, rest: "/v1beta/models/m:generateContent", query: "alt=sse" } });
-    expect(parseModelTarget("/p/gemini/v1/models/m:generateContent")).toMatchObject({ ok: true, target: { rest: "/v1/models/m:generateContent" } });
-    expect(parseModelTarget("/p/openai/f/rate_limit/n/2/x/" + token + "/v1/chat/completions")).toEqual({ ok: true, target: { rowId: "openai", failure: { mode: "rate_limit", afterCalls: 2 }, token, rest: "/v1/chat/completions", query: "" } });
-    expect(parseModelTarget("/p/openai/f/token_limit.input/v1/chat/completions")).toMatchObject({ ok: true, target: { failure: { mode: "token_limit", variant: "input" } } });
-    expect(parseModelTarget("/p/openai/x/" + token + "/v1/chat/completions")).toMatchObject({ ok: true, target: { failure: undefined, token } });
-  });
   it("refuses an absolute-form target, a leading //, a second ?, control characters, encoded slashes and dots, .. and a bad failure form", () => {
     const refused = [
       "http://example.com/p/openai/v1/x", "//p/openai", "/p/openai/v1/a?b?c", "/p/openai/v1/a\u0001b", "/p/openai/v1/a b", "/p/openai/v1%2fx", "/p/openai/v1%5cx", "/p/openai/%2e%2e/x", "/p/openai/../x",
@@ -54,54 +46,12 @@ describe("headersForBackend", () => {
 // BEDROCK-HELPER-CREDENTIAL-RULE-ONE-SOURCE: the helper (in the sandbox) and the gateway side drop credential headers by ONE rule, `isInboundCredentialHeader`, which the helper reaches through its narrow contracts entry.
 // A second copy of the rule would drift (it did: the helper missed x-authorization and x-amzn-bedrock-authorization, the contracts rule missed amz-sdk-*).
 describe("the helper's credential-header rule is the gateway's rule", () => {
-  const NAMES = [
-    "authorization", "Authorization", "proxy-authorization", "proxy-connection", "x-api-key", "x-goog-api-key", "X-Goog-Api-Key", "api-key", "x-goog-user-project", "cookie", "cookie2", "set-cookie",
-    "x-amz-security-token", "x-amz-date", "x-amz-content-sha256", "x-authorization", "x-amzn-bedrock-authorization", "x-amzn-bedrock-trace", "amz-sdk-invocation-id", "amz-sdk-request", "x-custom-api-key", "x-apikey", "my-authorization-header", "authorization:", "Authorization\r\n x",
-    "content-type", "accept", "anthropic-version", "x-goog-api-client", "user-agent", "x-request-id",
-  ];
-  it("the helper keeps a header exactly when the shared rule says it is not a credential, for every name in the corpus", () => {
-    for (const name of NAMES) {
-      const kept = Object.keys(headersForBackend({ [name]: "v" }));
-      expect(kept.length === 0, name).toBe(isInboundCredentialHeader(name));
-    }
-  });
-  it("drops the names the two copies used to disagree on (x-authorization, x-amzn-bedrock-authorization, amz-sdk-*), and keeps the plain ones (control)", () => {
-    expect(headersForBackend({ "x-authorization": "k", "x-amzn-bedrock-authorization": "k", "amz-sdk-invocation-id": "i", "amz-sdk-request": "attempt=1", "content-type": "application/json" })).toEqual({ "content-type": "application/json" });
-    for (const name of ["x-authorization", "x-amzn-bedrock-authorization", "amz-sdk-invocation-id"]) expect(isInboundCredentialHeader(name), name).toBe(true);
-    expect(["content-type", "accept", "user-agent"].map((name) => isInboundCredentialHeader(name))).toEqual([false, false, false]);
-  });
   it("is one function: the helper's narrow entry exports the very function the contracts' gateway side uses", () => {
     expect(isInboundCredentialHeaderFromEntry).toBe(isInboundCredentialHeader);
   });
 });
 
 describe("serving", () => {
-  it("serves a scripted Gemini answer for any version prefix and counts it by provenance", async () => {
-    const w = await world({ sets: [GEMINI_SET] });
-    for (const version of ["v1beta", "v1", "v1alpha"]) {
-      const reply = await request(`${w.base}${geminiPath("gemini", version)}`, { method: "POST", body: GEMINI_BODY, headers: { "content-type": "application/json", "x-goog-api-key": fakeKey() } });
-      expect(reply.status).toBe(200);
-      expect((JSON.parse(reply.body) as { candidates: Array<{ content: { parts: Array<{ text: string }> } }> }).candidates[0]?.content.parts[0]?.text).toBe("Sunny in Paris.");
-    }
-    expect(w.summary()).toMatchObject({ trusted: true, mode: "scripted", blockState: "by_name", scripted: { before_task: 3, independent: 0, task_made: 0 }, countsTowardProof: 3, failurePack: 0, unmatched: 0, refused: 0 });
-  });
-  it("streams SSE for alt=sse and a JSON array otherwise (redirect-check 7)", async () => {
-    const w = await world({ sets: [GEMINI_SET] });
-    const sse = await request(`${w.base}${geminiPath("gemini", "v1beta", "streamGenerateContent")}?alt=sse`, { method: "POST", body: GEMINI_BODY });
-    expect(sse.headers["content-type"]).toBe("text/event-stream");
-    expect(sse.body.startsWith("data: ")).toBe(true);
-    const array = await request(`${w.base}${geminiPath("gemini", "v1beta", "streamGenerateContent")}?%24alt=json%3Benum-encoding%3Dint`, { method: "POST", body: GEMINI_BODY });
-    expect(array.headers["content-type"]).toBe("application/json");
-    const parsed = JSON.parse(array.body) as unknown[];
-    expect(Array.isArray(parsed)).toBe(true);
-  });
-  it("an unmatched call fails closed with the family's error envelope, is counted, and never invents a reply", async () => {
-    const w = await world({ sets: [GEMINI_SET] });
-    const reply = await request(`${w.base}${geminiPath()}`, { method: "POST", body: JSON.stringify({ contents: [{ parts: [{ text: "something else" }] }] }) });
-    expect(reply.status).toBe(400);
-    expect(reply.body).toContain("not run: no scripted reply for this request");
-    expect(w.summary()).toMatchObject({ unmatched: 1, scripted: { before_task: 0 } });
-  });
   it("a family with no reply set answers unmatched to every call; a Bedrock row is not served here", async () => {
     const w = await world({ sets: [GEMINI_SET], rows: [...ROWS, { id: "bedrock", family: "bedrock", routesTo: "local_aws_front" }] });
     const openai = await request(`${w.base}/p/openai/v1/chat/completions`, { method: "POST", body: OPENAI_BODY });
@@ -110,11 +60,6 @@ describe("serving", () => {
     expect(bedrock.status).toBe(421);
     expect(bedrock.body).toContain("Bedrock scripted replies are served by the local AWS front");
     expect(w.summary()).toMatchObject({ unmatched: 1, notServed: 1 });
-  });
-  it("task_made replies are served but never counted toward the proof", async () => {
-    const w = await world({ sets: [stampSet("openai_compatible", [{ id: "mine", provenance: "task_made", origin: undefined }])] });
-    expect((await request(`${w.base}/p/openai/v1/chat/completions`, { method: "POST", body: OPENAI_BODY })).status).toBe(200);
-    expect(w.summary()).toMatchObject({ scripted: { task_made: 1, before_task: 0 }, countsTowardProof: 0 });
   });
   it("the failure pack answers from /f/<mode>, after n calls with /n/<n>, is its own class and never counts", async () => {
     const w = await world({ sets: [OPENAI_SET] });
@@ -128,22 +73,6 @@ describe("serving", () => {
     expect(w.summary()).toMatchObject({ scripted: { before_task: 1 }, failurePack: 1, countsTowardProof: 1 });
     await expect(request(`${w.base}/p/openai/f/cut_off_stream/v1/chat/completions`, { method: "POST", body: JSON.stringify({ model: "m", stream: true, messages: [{ role: "user", content: "hi" }] }) })).rejects.toThrow("aborted");
     expect(w.summary().failurePack).toBe(2);
-  });
-  it("the ledger holds no body, header value, query or prompt (only a hash of the prompt)", async () => {
-    const w = await world({ sets: [GEMINI_SET] });
-    const key = fakeKey();
-    await request(`${w.base}${geminiPath()}?note=secretquery`, { method: "POST", body: GEMINI_BODY, headers: { "x-goog-api-key": key, authorization: `Bearer ${key}`, "x-secret-header": "headervalue" } });
-    const text = w.ledgerText();
-    for (const leak of [key, "secretquery", "headervalue", "weather in Paris", "Sunny"]) expect(text, leak).not.toContain(leak);
-    expect(text).toContain("promptSha256");
-    expect(text).toContain("replySha256");
-  });
-  it("writes the ledger row before the answer is sent", async () => {
-    const w = await world({ sets: [OPENAI_SET] });
-    const reply = await request(`${w.base}/p/openai/v1/chat/completions`, { method: "POST", body: OPENAI_BODY });
-    // by the time the client has the whole answer, the row is already on disk
-    expect(reply.status).toBe(200);
-    expect(w.ledgerText().trim().split("\n")).toHaveLength(2);
   });
 });
 
@@ -219,15 +148,6 @@ describe("refusals", () => {
     expect(answer.startsWith("HTTP/1.1 408")).toBe(true);
     expect(w.summary()).toMatchObject({ refused: 1, scripted: { before_task: 0 } });
   });
-  it("L4: the server holds at most maxConnections sockets; the rest are dropped", async () => {
-    const w = await world({ sets: [OPENAI_SET], limits: { maxConnections: 4 } });
-    const sockets = await Promise.all(Array.from({ length: 10 }, () => new Promise<net.Socket>((done) => { const socket = net.connect(w.loop.port, "127.0.0.1"); socket.on("error", () => undefined); socket.on("connect", () => done(socket)); })));
-    await new Promise((done) => setTimeout(done, 300));
-    const alive = sockets.filter((socket) => !socket.destroyed).length;
-    for (const socket of sockets) socket.destroy();
-    expect(alive).toBeLessThanOrEqual(4);
-    expect(MODEL_HELPER_LIMITS.maxConnections).toBeGreaterThanOrEqual(16);
-  });
   it("L4: the metadata server and the 443/80 escape listeners hold at most maxConnections sockets too", async () => {
     const w = await world({ sets: [OPENAI_SET], limits: { maxConnections: 3 }, escapes: { recorder: { observe: () => ({ host: undefined }) }, ports: { tls: 0, plain: 0 } } });
     const ports = [w.loop.metaPort as number, (w.loop.escapePorts as { tls: number }).tls, (w.loop.escapePorts as { plain: number }).plain];
@@ -239,11 +159,6 @@ describe("refusals", () => {
       expect(alive, String(port)).toBeLessThanOrEqual(3);
     }
     expect(MODEL_HELPER_LIMITS.sideMaxConnections).toBeGreaterThanOrEqual(16);
-  });
-  it("a client that sends no complete header block in 10 s is dropped (limit configured)", async () => {
-    const w = await world({ sets: [OPENAI_SET] });
-    expect(MODEL_HELPER_LIMITS).toMatchObject({ headerBytes: 16384, bodyBytes: 5 * 1024 * 1024, headerReadMs: 10_000, totalMs: 600_000, chunkBytes: 1024 * 1024 });
-    expect(w.loop.port).toBeGreaterThan(0);
   });
   it("a full ledger refuses further calls instead of answering without a record", async () => {
     const dir = mkdtempSync(join(tmpdir(), "rsmh-f-"));

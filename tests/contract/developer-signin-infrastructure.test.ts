@@ -61,6 +61,8 @@ let longestNamed: TemplateJson;
 const LONGEST_ENV = "headroom-longest-env"; // 20 characters: the contract maximum.
 const ARN_ESTIMATE_CONTEXT = "@aws-cdk/aws-iam.arnSizeEstimate";
 let foundation: TemplateJson;
+/** The named control-plane template as synthesized, before any test stripper (SIGNIN-STATE-TABLE reads the sign-in function's own variables). */
+let namedRaw: TemplateJson;
 
 const controlPlane = (app: ReturnType<typeof buildAgentXApp>, name: string) =>
   Template.fromStack(app.node.children.find((child): child is Stack => Stack.isStack(child) && child.stackName === name)!).toJSON() as TemplateJson;
@@ -143,7 +145,9 @@ const SAMPLE_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111122223333:table/agentx-s
 
 beforeAll(() => {
   const app = buildAgentXApp({ agentxEnv: "staging" });
-  const full = withoutSlackCompanyMode(controlPlane(app, "agentx-staging-control-plane")) as TemplateJson;
+  const raw = controlPlane(app, "agentx-staging-control-plane");
+  namedRaw = structuredClone(raw);
+  const full = withoutSlackCompanyMode(raw) as TemplateJson;
   namedWithSignInGrants = structuredClone(full);
   // DEC 254zzz33: the sign-in function's company grants (SignInCompanyGrants) are asserted exactly by tests/support/company-import-reads-template.ts and taken out, so every pin
   // below holds what it held before (rule D); tests/contract/signin-company-grants.test.ts runs each code path under the full synthesized policy.
@@ -249,6 +253,29 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(JSON.stringify(reads.map((s) => s.Resource))).toContain(":secret:agentx/staging/developer-github-??????");
     // Spec 062 Phase 7c1b: its Slack directory reads go through the adapter's commands once SlackViaChannel is on.
     expect(JSON.stringify(reads.map((s) => s.Resource))).toContain("ChannelApiSlackAdapterSecret");
+  });
+
+  it("gives DeveloperIdentity exactly one State-table PutItem for company audit rows", () => {
+    const [stateId] = ofType(named, "AWS::DynamoDB::Table").find(([logicalId]) => logicalId.startsWith("State"))!;
+    const statements = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => touches(statement, "dynamodb") && reaches(named, statement, stateId, SAMPLE_TABLE_ARN));
+    expect(statements).toHaveLength(1);
+    expect(actionsOf(statements[0]!)).toEqual(["dynamodb:PutItem"]);
+    expect(statements[0]!.Resource).toEqual({ "Fn::GetAtt": [stateId, "Arn"] });
+    expect(statements[0]!.Condition).toEqual({
+      "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#AUDIT"] },
+      Null: { "dynamodb:LeadingKeys": "false" },
+    });
+  });
+
+  // SIGNIN-STATE-TABLE (0.5.34): the Slack company switch once turned this variable into an Fn::If to "" while off, and sign-in's init needs the real table with CompanySignIn on.
+  it.each([["named", () => namedRaw], ["legacy (production)", () => legacy]])("gives the sign-in function the real State table name in the %s template, whatever the Slack company switch", (_label, template) => {
+    const t = template();
+    const [stateId] = ofType(t, "AWS::DynamoDB::Table").find(([logicalId]) => logicalId.startsWith("State"))!;
+    const variables = (t.Resources[functionId(t, "DeveloperSignInFunction")]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(variables.STATE_TABLE_NAME).toEqual({ Ref: stateId });
+    expect(JSON.stringify(variables.STATE_TABLE_NAME)).not.toContain("Fn::If");
+    // The Slack company switch stays its own variable, still conditioned.
+    expect(JSON.stringify(variables.SLACK_COMPANY_WORKSPACES)).toContain("Fn::If");
   });
 
   it("lets only the broker invoke DeveloperIdentity directly, and API Gateway only on /v1/auth/*", () => {
@@ -710,7 +737,7 @@ describe("task-token key and membership IAM", () => {
     // Owner DEC 254zzz73 (rule D, a removal): re-pinned for the step-up's removal ONLY: the StepUpEmailSender parameter, the sign-in function's STEP_UP_EMAIL_FROM and DEVELOPER_PASSKEYS variables,
     // its ses:SendEmail statement and its PASSKEYS# Query/DeleteItem statement. The named-templates snapshot diff of the same change is those 68 lines deleted and nothing added, and the
     // effective-tuple pin below drops exactly those three tuples. The old value was ed3d1dc0a51d0607302a7b61ad15bc4613a4fbe86e8031beadbcc58a2b125668.
-    expect(createHash("sha256").update(text).digest("hex")).toBe("7e2689c09f612ae9a8c35cc10aff3a69fae7a955ece46c60391ddb03b6edf105");
+    expect(createHash("sha256").update(text).digest("hex")).toBe("7a0c1f8f959f8a5d4546e251f9df1eecf5b8fc63c0de796f45b9c4feda58c5f4");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -1737,6 +1764,10 @@ const byText = (left: AccessTuple, right: AccessTuple) => JSON.stringify(left).l
 const githubSignInTuples: AccessTuple[] = [
   ["role:DeveloperSignInFunctionServiceRole","Allow","secretsmanager:GetSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/developer-github-??????","{}"],
 ];
+/** DEC 254zzz202: the sign-in function may append only the company AUDIT family in the shared State store. */
+const companySignInAuditTuples: AccessTuple[] = [
+  ["role:DeveloperSignInFunctionServiceRole", "Allow", "dynamodb:PutItem", "table:State", "{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"ORG#org_????????????????????#AUDIT\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
+];
 // Guided onboarding PR 4 (Add to Slack): DeveloperIdentity writes, reads (to revoke) and overwrites each company's bot token in the token store's family; no delete, no tags.
 // DEC 254zg (a), owner-approved re-pin: those three tuples (secretsmanager CreateSecret, GetSecretValue and PutSecretValue on
 // arn:...:secret:agentx/staging/slack-workspaces/*, role DeveloperSignInFunctionServiceRole, no condition) were pinned here as slackInstallTuples. With CompanySignIn off
@@ -1799,7 +1830,7 @@ const lessonsReflectTuples: AccessTuple[] = [
 ];
 // L4-HARD (c): the ChatGPT key's Deny: the four actions, denied to every principal but the broker's role (the same shape as the sibling keys' Deny tuples in beforeTuples).
 const chatGptKeyDenyTuples: AccessTuple[] = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey*", "kms:ReEncrypt*"].map((action) => ["*", "Deny", action, "key:ChatGptConnectionKey", "{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\"]}}"] as AccessTuple);
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...chatGptKeyDenyTuples, ...hostedWiringTuples, ...githubSignInTuples, ...attentionEmailTuples, ...companyImportTuples,
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...chatGptKeyDenyTuples, ...hostedWiringTuples, ...githubSignInTuples, ...companySignInAuditTuples, ...attentionEmailTuples, ...companyImportTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
   // DEC 254v(c): the dispatcher reads the callback signing key's one secret, under the core switch's condition (core-engine.ts). The broker, the eval tick and the reconciler read it through the secret's own policy, which adds no tuple here.
   ["role:DispatcherServiceRole", "Allow", "secretsmanager:GetSecretValue", "secret:CallbackSigningKeySecret", "{}"] as AccessTuple,

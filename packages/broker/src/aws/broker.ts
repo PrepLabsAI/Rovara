@@ -1,4 +1,5 @@
 import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveAdminCompany, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
+import { coreContextWorkerRouteOf } from "./dev-route-scopes.js";
 import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
@@ -1432,8 +1433,10 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
       if (setupArtifact?.[1] && setupArtifact[2] === "evidence/finalize" && request.method === "POST") {
         return json(await handleProjectSetupEvidenceFinalize(dependencies, request, setupArtifact[1]), request.requestId);
       }
-      // Lane E2 step 6: a worker's callback for a workspace a core task holds is the core's (its own capability and grant exchange; the root matches the paths). Undefined: not a core workspace, or the switch is off. L2b: also its model-access GET. Lane L14: also its context-tools GET.
-      if (core !== undefined && (request.method === "POST" || (request.method === "GET" && (url.pathname === CORE_MODEL_ACCESS_PATH || request.path.split("?")[0] === "/v1/internal/context-tools")))) {
+      // Lane E2 step 6: a worker's callback for a workspace a core task holds is the core's (its own capability and grant exchange; the root matches the paths). Undefined: not a core workspace, or the switch is off. L2b: also its model-access GET. Also the exact worker context and packet GETs in the inventory.
+      const contextRead = coreContextWorkerRouteOf(request.method, url.pathname);
+      if (core !== undefined && (request.method === "POST" || (request.method === "GET" && (url.pathname === CORE_MODEL_ACCESS_PATH
+        || contextRead?.path === "/v1/internal/context-tools" || contextRead?.path === "/v1/internal/design-review/packet")))) {
         const answer = await core.callback(request);
         if (answer !== undefined) return answer;
       }

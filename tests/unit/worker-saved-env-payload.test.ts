@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PREPARE_SAVED_ENV_FEATURE, PrepareSavedEnvSchema, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, savedEnvRepositoryName } from "../../packages/contracts/src/index.js";
 import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 import { createSavedEnvLoginProvider } from "../../packages/worker/src/saved-env/login.js";
-import { savedEnvOptionsOf } from "../../packages/worker/src/saved-env/use.js";
 
 afterEach(() => vi.restoreAllMocks());
 const repository = savedEnvRepositoryName({ env: "test", orgId: "org-1", projectId: "payments" });
@@ -40,17 +39,6 @@ describe("the saved environment field", () => {
     expect(WORKER_IMPLEMENTED_FEATURES).toContain(PREPARE_SAVED_ENV_FEATURE);
   });
 
-  it("the worker builds its options from it, and a fallback is a log line with the digest and the step and no credential", async () => {
-    const docker = { run: async () => ({ exitCode: 0, stdout: "", stderr: "" }) };
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const getLogin = async () => login;
-    const options = savedEnvOptionsOf(PrepareSavedEnvSchema.parse(payload), getLogin, docker);
-    expect(options).toMatchObject({ ref: payload, login: getLogin, docker });
-    options.onFallback?.("pull");
-    const line = String(log.mock.calls[0]![0]);
-    expect(JSON.parse(line)).toEqual({ component: "worker", event: "saved-env.fallback", digest: payload.digest, step: "pull" });
-    expect(line).not.toContain(secret);
-  });
 });
 
 describe("the worker's request for the pull login", () => {

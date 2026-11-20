@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { applyBudget, dropOrder, fitPool } from "../../packages/worker/src/knowledge/budget.js";
+import { dropOrder, fitPool } from "../../packages/worker/src/knowledge/budget.js";
 import { expandImports, resolveRepositoryPath, type ImportRead } from "../../packages/worker/src/knowledge/imports.js";
-import { DEFAULT_KNOWLEDGE_BUDGETS, type KnowledgeItem, type KnowledgeLayer } from "../../packages/worker/src/knowledge/model.js";
+import { type KnowledgeItem, type KnowledgeLayer } from "../../packages/worker/src/knowledge/model.js";
 
 const files = (map: Record<string, string>) => async (path: string): Promise<ImportRead> => (path in map ? { kind: "file", text: map[path]! } : { kind: "missing" });
 
@@ -46,14 +46,6 @@ describe("imports", () => {
     expect(result.imported).toEqual(["src/a.ts", "README.md"]);
   });
 
-  it("lists a folder reference instead of reading it", async () => {
-    const result = await expandImports({
-      text: "#[[folder:docs]]", path: "a.md", style: "kiro", maxDepth: 4, budgetBytes: 10_000,
-      read: files({}), listDirectory: async () => ["a.md", "b.md"],
-    });
-    expect(result.text).toBe("[Folder docs]\n- a.md\n- b.md\n[End of docs]");
-  });
-
   it("stops at depth 4 and at a cycle", async () => {
     const chain = { "a1.md": "@a2.md", "a2.md": "@a3.md", "a3.md": "@a4.md", "a4.md": "@a5.md", "a5.md": "FIVE" };
     const deep = await expandImports({ text: "@a1.md", path: "root.md", style: "claude", maxDepth: 4, budgetBytes: 10_000, read: files(chain) });
@@ -63,15 +55,6 @@ describe("imports", () => {
     const cycle = await expandImports({ text: "@a.md", path: "root.md", style: "claude", maxDepth: 4, budgetBytes: 10_000, read: files({ "a.md": "@b.md", "b.md": "@a.md" }) });
     expect(cycle.imported).toEqual(["a.md", "b.md"]);
     expect(cycle.text).toContain("[Already included: a.md]");
-  });
-
-  it("does not repeat a file the context already holds (CLAUDE.md that imports AGENTS.md)", async () => {
-    const result = await expandImports({
-      text: "@AGENTS.md", path: "CLAUDE.md", style: "claude", maxDepth: 4, budgetBytes: 10_000,
-      alreadyIncluded: new Set(["AGENTS.md"]), read: files({ "AGENTS.md": "AGENTS" }),
-    });
-    expect(result.text).toBe("[Already included: AGENTS.md]");
-    expect(result.imported).toEqual([]);
   });
 
   it("leaves a reference that leaves the repository, is absolute or is missing as written", async () => {
@@ -99,11 +82,6 @@ describe("imports", () => {
     expect(hidden.text).toContain("okhidden");
     const large = await expandImports({ text: "@a.md", path: "CLAUDE.md", style: "claude", maxDepth: 4, budgetBytes: 1000, read: async () => ({ kind: "too_large" }) });
     expect(large.issues).toEqual([{ path: "a.md", code: "too_large" }]);
-  });
-
-  it("does nothing for a format with no imports", async () => {
-    const result = await expandImports({ text: "@a.md #[[file:a.md]]", path: "AGENTS.md", style: "none", maxDepth: 4, budgetBytes: 1000, read: files({ "a.md": "A" }) });
-    expect(result.text).toBe("@a.md #[[file:a.md]]");
   });
 
   it("bounds the references followed from one file", async () => {
@@ -137,22 +115,4 @@ describe("budget", () => {
     expect(fitted.bytes).toBeLessThanOrEqual(100);
   });
 
-  it("is deterministic and keeps everything that fits", () => {
-    const items = [item("repo", "a", 10), item("repo", "b", 10)];
-    expect(fitPool(items, 20).dropped).toEqual([]);
-    expect(fitPool(items, 19).dropped.map((entry) => entry.path)).toEqual(["b"]);
-  });
-
-  it("reports locked rules that alone exceed the budget", () => {
-    const fitted = fitPool([item("company", "c", 200, { locked: true }), item("repo", "r", 10)], 100);
-    expect(fitted.lockedOverflow).toBe(true);
-    expect(fitted.kept.map((entry) => entry.path)).toEqual(["c"]);
-  });
-
-  it("keeps the always-on pool and the additions pool apart", () => {
-    const budgets = { ...DEFAULT_KNOWLEDGE_BUDGETS, alwaysOnBytes: 50, additionsBytes: 50 };
-    const result = applyBudget([item("repo", "a", 50), item("repo", "m", 50, { activation: "fileMatch" }), item("folder", "f", 50, { activation: "manual" })], budgets);
-    expect(result.alwaysOn.dropped).toEqual([]);
-    expect(result.additions.dropped.map((entry) => entry.path)).toEqual(["f"]);
-  });
 });

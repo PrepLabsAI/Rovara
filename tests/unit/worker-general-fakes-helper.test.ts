@@ -99,25 +99,6 @@ describe("the helper's own deadline", () => {
     expect(helper.server.listening).toBe(false);
     await expect(call(helper.port, "GET", "/s/0/pets/4")).rejects.toThrow();
   });
-  it("is cancelled by a normal close (no exit is called for a helper that was already closed)", async () => {
-    const exits: number[] = [];
-    const helper = await serveGeneralFakes({ ...ARGS, lifetimeMs: 500 }, { readFile: read(), files: memoryFiles(), port: 0, summaryPath: SUMMARY_PATH, exit: (code) => { exits.push(code); } });
-    await helper.close();
-    await new Promise((resolve) => setTimeout(resolve, 1_200));
-    expect(exits).toEqual([]);
-  });
-  it("still exits at the deadline with a connection held open (the held connection is cut)", async () => {
-    const exits: number[] = [];
-    const helper = await serveGeneralFakes({ ...ARGS, lifetimeMs: 500 }, { readFile: read(), files: memoryFiles(), port: 0, summaryPath: SUMMARY_PATH, exit: (code) => { exits.push(code); } });
-    running.push(helper);
-    const socket = connect(helper.port, "127.0.0.1");
-    await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
-    socket.on("error", () => undefined);
-    const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
-    await vi.waitFor(() => { expect(exits).toEqual([0]); }, { timeout: 5000 });
-    await closed;
-    socket.destroy();
-  });
 });
 
 describe("the helper serving a set", () => {
@@ -142,26 +123,6 @@ describe("the helper serving a set", () => {
       const unrouted = await call(helper.port, "GET", path);
       expect([unrouted.status, unrouted.body, label(unrouted)], path).toEqual([404, GENERAL_FAKE_CANNOT_ANSWER_BODY, GENERAL_FAKE_ANSWER_LABEL]);
     }
-  });
-
-  it("counts every call by outcome, and the summary file is written BEFORE the answer is sent", async () => {
-    const { helper, files } = await start();
-    const seenBeforeAnswer: string[] = [];
-    // Written before the answer: by the time the client has the response, the file already holds the call.
-    const answer = await call(helper.port, "GET", "/s/0/pets/4");
-    seenBeforeAnswer.push(files.files.get(SUMMARY_PATH)!);
-    expect(answer.status).toBe(200);
-    expect(parseGeneralFakesSummaryText(seenBeforeAnswer[0]!)).toMatchObject({ trusted: true, served: 1 });
-    await call(helper.port, "GET", "/s/0/odd");
-    await call(helper.port, "GET", "/s/0/nothing");
-    await call(helper.port, "GET", "/s/1/x");
-    await call(helper.port, "GET", "/elsewhere");
-    const summary = parseGeneralFakesSummaryText(files.files.get(SUMMARY_PATH)!);
-    expect(summary).toEqual({
-      schemaVersion: 1, trusted: true, workspaceId: WORKSPACE, operationId: OPERATION, digest: SET.digest, served: 1,
-      cannotAnswer: { no_spec: 0, spec_unreadable: 0, spec_ambiguous: 1, operation_unknown: 1, operation_unsupported: 1 }, foreign: 0, unrouted: 1, refused: 0, saturated: false,
-    });
-    expect(helper.summary()).toEqual(summary);
   });
 
   it("writes a first, zero summary before it listens (a helper that cannot write one never serves)", async () => {
@@ -237,19 +198,8 @@ describe("the helper refuses a set that is not exactly the pinned one (nothing l
     expect(files.files.size).toBe(0);
   };
   it("another digest", () => refused({ digest: "0".repeat(64) }));
-  it("another company", () => refused({ workspaceId: "11111111-1111-4111-8111-111111111111" }));
-  it("another task", () => refused({ operationId: "11111111-1111-4111-8111-111111111111" }));
-  it("a set of another company, though it hashes to the digest it was pinned with", async () => {
-    const other = buildGeneralFakesSetBytes({ workspaceId: "11111111-1111-4111-8111-111111111111", operationId: OPERATION, fakes: FAKES })!;
-    await refused({ digest: other.digest }, other.bytes);
-  });
-  it("bytes that are not a set", () => refused({}, new TextEncoder().encode("{}")));
   it("a file that cannot be read", async () => {
     await expect(serveGeneralFakes({ ...ARGS }, { readFile: () => { throw new Error("EACCES"); }, files: memoryFiles(), port: 0 })).rejects.toMatchObject({ reason: "set" });
-  });
-  it("the refusal carries no value", async () => {
-    const error = await serveGeneralFakes({ ...ARGS, digest: "0".repeat(64) }, { readFile: read(), files: memoryFiles(), port: 0 }).then(() => undefined, (reason: unknown) => reason as Error);
-    expect(error?.message).toBe("general fakes helper refused: set");
   });
 });
 

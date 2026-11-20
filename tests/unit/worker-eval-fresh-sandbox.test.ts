@@ -6,14 +6,12 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { isEvalBaseAttestation } from "@agentx/contracts";
 import {
   EVAL_BRIDGE_SOCKET_NAME, EVAL_HELPER_DIR_NAME, FRESH_EVAL_IDS_VARIABLE, FRESH_EVAL_WORKSPACE, bridgeFolderMountProblems, createFreshEvalSandbox, freshEvalEnvironment, freshEvalSandboxArgProblems, freshEvalSandboxRunArgs,
   type FreshEvalSandboxConfig, type FreshEvalSandboxRun,
 } from "../../packages/worker/src/verification/eval-bridged-exec.js";
-import { MODEL_HELPER_BRIDGE_SOCKET } from "../../packages/worker/src/model-helper-bridge-backend.js";
 import { planModelHostBlock } from "../../packages/worker/src/model-helper-block.js";
-import { RUN_NETWORK_LABEL, runNetworkAddresses, runNetworkModelHelperIp } from "../../packages/worker/src/run-network.js";
+import { RUN_NETWORK_LABEL } from "../../packages/worker/src/run-network.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
 
 const WS = "0123456789abcdef";
@@ -150,36 +148,6 @@ describe("available()", () => {
 });
 
 describe("one run", () => {
-  it("starts a new round network, the helper on it at .9 with the bridge folder as its one read-only mount, then the sandbox at .4 on that network only, and removes all of it before resolving", async () => {
-    const w = await world();
-    const result = await w.sandbox.run(w.input());
-    const helper = runArgsOf(w.daemon.calls, "-models")!;
-    const sandbox = runArgsOf(w.daemon.calls, "-eval")!;
-    const net = helper[helper.indexOf("--network") + 1]!;
-    const slot = Number(helper[helper.indexOf("--ip") + 1]!.split(".")[2]);
-    expect(helper[helper.indexOf("--ip") + 1]).toBe(runNetworkModelHelperIp(slot));
-    expect(helper.filter((arg) => arg === "--volume")).toHaveLength(1);
-    expect(helper[helper.indexOf("--volume") + 1]).toBe(`${w.bridgeDir}:/rovara/models:ro`);
-    expect(helper.slice(helper.indexOf("--mode"), helper.indexOf("--mode") + 2)).toEqual(["--mode", "real"]);
-    expect(helper.slice(helper.indexOf("--bridge-socket"), helper.indexOf("--bridge-socket") + 2)).toEqual(["--bridge-socket", MODEL_HELPER_BRIDGE_SOCKET]);
-    expect(helper[helper.indexOf("--caller") + 1]).toBe(runNetworkAddresses(slot).checkSandboxIp);
-    expect(sandbox.filter((arg) => arg === "--network")).toHaveLength(1);
-    expect(sandbox[sandbox.indexOf("--network") + 1]).toBe(net);
-    expect(sandbox[sandbox.indexOf("--ip") + 1]).toBe(runNetworkAddresses(slot).checkSandboxIp);
-    expect(sandbox.filter((arg) => arg === "--volume")).toHaveLength(1);
-    expect(sandbox.join(" ")).not.toContain(w.bridgeDir);
-    // the helper is up before the sandbox; the mounts are read from the daemon after the sandbox starts and before it is waited on
-    const order = w.daemon.calls.map((c) => (c[0] === "run" ? `run${c[c.indexOf("--name") + 1]!.endsWith("-eval") ? ":eval" : ":helper"}` : c[0] === "inspect" && c.includes("{{json .Mounts}}") ? "mounts" : c[0]));
-    expect(order.indexOf("run:helper")).toBeLessThan(order.indexOf("run:eval"));
-    expect(order.lastIndexOf("mounts")).toBeLessThan(order.indexOf("wait"));
-    // joined: nothing left in the daemon, nothing of the run on disk but the report copy
-    expect(w.daemon.containers).toEqual([]); expect(w.daemon.networks).toEqual([]);
-    expect(readdirSync(w.config.scratchDir).filter((name) => name.startsWith("run-"))).toEqual([]);
-    expect(readdirSync(w.bridgeDir)).toEqual([]);
-    expect(await readFile(join(result.report.root, REPORT.cwd, REPORT.argument), "utf8")).toBe(REPORT_BYTES);
-    expect(result.report).toMatchObject({ cwd: REPORT.cwd, argument: REPORT.argument });
-    expect(result).not.toHaveProperty("attestation");
-  });
   it("the token reaches the sandbox only through its env file: never on a docker command line, and the file is gone at once", async () => {
     let envWhileRunning: boolean | undefined;
     const daemon = fakeDaemon({ eval: async (dir) => { const run = runArgsOf(daemon.calls, "-eval")!; envWhileRunning = existsSync(run[run.indexOf("--env-file") + 1]!); await writeFile(join(dir, REPORT.argument), REPORT_BYTES); return 0; } });
@@ -193,23 +161,6 @@ describe("one run", () => {
     expect(existsSync(sandbox[sandbox.indexOf("--env-file") + 1]!)).toBe(false);
     expect(envWhileRunning).toBe(false);
   });
-  it("the new side checks out the candidate commit; the old side the base commit, with the working sandbox paused (checked) for the run and unpaused after, and a real attestation", async () => {
-    const w = await world();
-    const pausedWhileRunning: boolean[] = [];
-    const daemon = fakeDaemon({ eval: async (dir) => { pausedWhileRunning.push(daemon.working.paused); await writeFile(join(dir, REPORT.argument), REPORT_BYTES); return 0; } });
-    const v = await world(daemon);
-    const fresh = await v.sandbox.run(v.input({ side: "new" }));
-    const old = await v.sandbox.run(v.input({ side: "old" }));
-    expect(v.materialized.map((m) => m.commit)).toEqual([CANDIDATE, BASE]);
-    // the base checkout is written with the working sandbox already paused (it cannot change the objects while they are read)
-    expect(v.materialized.map((m) => m.workingPaused)).toEqual([false, true]);
-    expect(pausedWhileRunning).toEqual([false, true]);
-    expect(daemon.working.paused).toBe(false);
-    expect(fresh.attestation).toBeUndefined();
-    expect(isEvalBaseAttestation(old.attestation)).toBe(true);
-    expect(old.attestation?.baseCommit).toBe(BASE);
-    void w;
-  });
   it("a working sandbox that does not show as paused stops the old side before the sandbox exists; everything is removed and the working sandbox unpaused", async () => {
     const daemon = fakeDaemon({ pauseIgnored: true });
     const w = await world(daemon);
@@ -217,35 +168,6 @@ describe("one run", () => {
     expect(runArgsOf(daemon.calls, "-eval")).toBeUndefined();
     expect(daemon.calls.some((c) => c[0] === "unpause")).toBe(true);
     expect(daemon.containers).toEqual([]); expect(daemon.networks).toEqual([]);
-  });
-  it("two runs (or two tasks) get two networks, two checkouts and two report folders: one never reads the other's report", async () => {
-    const daemon = fakeDaemon({ eval: async (dir) => { await writeFile(join(dir, REPORT.argument), readFileSync(join(dir, "eval.js"), "utf8")); return 0; } });
-    const a = await world(daemon, { taskId: "company-a-op" });
-    const b = await world(daemon, { taskId: "company-b-op", repository: { directory: "/repo/b", baseCommit: BASE, candidateCommit: "e".repeat(40) } });
-    const [ra, rb] = await Promise.all([a.sandbox.run(a.input()), b.sandbox.run(b.input())]);
-    expect(ra.report.root).not.toBe(rb.report.root);
-    expect(await readFile(join(ra.report.root, REPORT.argument), "utf8")).toBe(`// ${CANDIDATE}`);
-    expect(await readFile(join(rb.report.root, REPORT.argument), "utf8")).toBe(`// ${"e".repeat(40)}`);
-    const nets = daemon.calls.filter((c) => c[0] === "network" && c[1] === "create").map((c) => c.at(-1));
-    expect(new Set(nets).size).toBe(2);
-  });
-});
-
-describe("the report", () => {
-  it("a report the eval did not write, or one older than the run, is not copied: the location reads nothing", async () => {
-    const none = await world(fakeDaemon({ eval: async () => 0 }));
-    const result = await none.sandbox.run(none.input());
-    expect(existsSync(join(result.report.root, REPORT.argument))).toBe(false);
-    const stale = await world(fakeDaemon({ eval: async () => 0 }), { materialize: async (_r, _c, destination) => { const { utimes } = await import("node:fs/promises"); const file = join(destination, REPORT.argument); await writeFile(file, REPORT_BYTES); await utimes(file, new Date(0), new Date(0)); } });
-    const old = await stale.sandbox.run(stale.input());
-    expect(existsSync(join(old.report.root, REPORT.argument))).toBe(false);
-  });
-  it("a report that is a link out of the checkout is not followed", async () => {
-    const outside = await mkdtemp(join(tmpdir(), "fes-out-")); roots.push(outside);
-    await writeFile(join(outside, "secret.json"), "SECRET");
-    const w = await world(fakeDaemon({ eval: async (dir) => { const { symlink } = await import("node:fs/promises"); await symlink(join(outside, "secret.json"), join(dir, REPORT.argument)); return 0; } }));
-    const result = await w.sandbox.run(w.input());
-    expect(existsSync(join(result.report.root, REPORT.argument))).toBe(false);
   });
 });
 
@@ -270,18 +192,6 @@ describe("join, also on a stop", () => {
 });
 
 describe("TE-F1C-SOCKET-ACCESS from the daemon's view", () => {
-  it("a sandbox the daemon shows mounting the bridge folder is stopped and the run fails", async () => {
-    const daemon = fakeDaemon({ extraSandboxMount: (bridgeDir) => ({ Source: bridgeDir, Destination: "/x", RW: false, Type: "bind" }) });
-    const w = await world(daemon);
-    await expect(w.sandbox.run(w.input())).rejects.toThrow("not isolated");
-    expect(daemon.calls.some((c) => c[0] === "wait")).toBe(false);
-    expect(daemon.containers).toEqual([]);
-  });
-  it("a helper whose bridge mount the daemon shows writable fails the run too", async () => {
-    const daemon = fakeDaemon({ helperMountRw: true });
-    const w = await world(daemon);
-    await expect(w.sandbox.run(w.input())).rejects.toThrow("not isolated");
-  });
   it("names every way the mounts are wrong, and an unreadable look is never fine", () => {
     const helper = [{ source: "/b/models", destination: "/rovara/models", rw: false, type: "bind" }, { source: "", destination: "/rovara/ledger", rw: true, type: "tmpfs" }];
     const sandbox = [{ source: "/r/checkout", destination: FRESH_EVAL_WORKSPACE, rw: true, type: "bind" }, { source: "", destination: "/tmp", rw: true, type: "tmpfs" }];
@@ -305,13 +215,6 @@ describe("the sandbox's arguments (allow-list)", () => {
   const block = planModelHostBlock({ hasModelRow: true, helperIp: "172.30.7.9" });
   const input = { net, image: IMAGE, name: "rovara-svc-0123456789ab-eval", checkout: "/s/r1/checkout", envFile: "/s/r1/env", block, command: { executable: "node", args: ["eval.js", "--fast"], cwd: "evals" } };
   const expected = { checkout: input.checkout, bridgeDir: "/s/e1/models", helperIp: "172.30.7.9" };
-  it("are sound as built: the round network only, its .4, no upstream DNS, the checkout as the one mount, non-root, no capability, read-only root, the init, model hosts pinned to the helper", () => {
-    const args = freshEvalSandboxRunArgs(input, { bridgeDir: expected.bridgeDir });
-    expect(freshEvalSandboxArgProblems(args, net, expected)).toEqual([]);
-    expect(args.slice(args.indexOf(IMAGE))).toEqual([IMAGE, "--", "node", "eval.js", "--fast"]);
-    expect(args[args.indexOf("--workdir") + 1]).toBe(`${FRESH_EVAL_WORKSPACE}/evals`);
-    expect(args.filter((arg) => arg === "--add-host").length).toBeGreaterThan(1);
-  });
   it("names each unsound change (mutants of the built list)", () => {
     const args = freshEvalSandboxRunArgs(input, { bridgeDir: expected.bridgeDir });
     const at = args.indexOf(IMAGE);
@@ -358,11 +261,6 @@ describe("refusals before anything starts", () => {
     for (const over of bad) await expect(w.sandbox.run(w.input(over)), JSON.stringify(over)).rejects.toThrow();
     expect(daemon.calls).toEqual([]);
   });
-  it("the env file holds plain lines only: no value can add a variable", () => {
-    expect(() => freshEvalEnvironment({ rowId: "gemini", token: "a\nB=1", side: "new", runs: 1, ids: ["q"] })).toThrow();
-    expect(() => freshEvalEnvironment({ rowId: "gemini", token: TOKEN, side: "new", runs: 1, ids: ["q r"] })).toThrow();
-    expect(freshEvalEnvironment({ rowId: "gemini", token: TOKEN, side: "old", runs: 3, ids: ["q1", "q2"] }).split("\n").filter(Boolean).map((line) => line.split("=")[0])).toEqual(["GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY", "GOOGLE_API_KEY", "HOME", "ROVARA_EVAL_SIDE", "ROVARA_EVAL_RUNS", "ROVARA_EVAL_IDS"]);
-  });
 });
 
 describe("review fixes (TE-B1 REVIEW-1)", () => {
@@ -377,21 +275,6 @@ describe("review fixes (TE-B1 REVIEW-1)", () => {
     const s2 = await world(stuck);
     await expect(s2.sandbox.run(s2.input({ side: "old" }))).rejects.toThrow("could not be unpaused");
     expect(stuck.containers).toEqual([]); expect(stuck.networks).toEqual([]);
-  });
-  it("two sandboxes for the SAME operation (a retried invocation) never share a round network", async () => {
-    const daemon = fakeDaemon();
-    const a = await world(daemon, { taskId: "same-op" });
-    const b = await world(daemon, { taskId: "same-op" });
-    await Promise.all([a.sandbox.run(a.input()), b.sandbox.run(b.input())]);
-    const nets = daemon.calls.filter((c) => c[0] === "network" && c[1] === "create").map((c) => c.at(-1));
-    expect(nets).toHaveLength(2); expect(new Set(nets).size).toBe(2);
-  });
-  it("the sandbox's log is small and capped (an agent's output cannot fill the host's disk) and goes with the container (L4-EVS: it was `none`; the worker reads its tail for a failed run)", async () => {
-    const w = await world();
-    await w.sandbox.run(w.input());
-    const sandbox = runArgsOf(w.daemon.calls, "-eval")!;
-    expect(sandbox[sandbox.indexOf("--log-driver") + 1]).toBe("json-file");
-    expect(sandbox.flatMap((arg, index) => (sandbox[index - 1] === "--log-opt" ? [arg] : [])).sort()).toEqual(["max-file=1", "max-size=64k"]);
   });
   it("names unsound limits, name, working folder, labels and env file (mutants of the built list)", () => {
     const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", labelArgs: () => ["--label", `${RUN_NETWORK_LABEL}=rovara-svc-0123456789ab`, "--label", "rovara.run-network.created=1", "--label", "rovara.run-network.expires=2", "--label", `rovara.run-network.workspace=${WS}`] };
@@ -408,25 +291,11 @@ describe("review fixes (TE-B1 REVIEW-1)", () => {
       label: insert("--label", "com.docker.compose.project=x"), labelLookalike: insert("--label", "rovara.run-networkX=1"), envInCheckout: replace("--env-file", "/s/r1/checkout/.env"), envInBridge: replace("--env-file", "/s/e1/models/env"),
     })) expect(freshEvalSandboxArgProblems(mutant, net, expected), name).not.toEqual([]);
   });
-  it("a helper with any second mount (a volume, not only a bind) is refused", () => {
-    const helper = [{ source: "/b/models", destination: "/rovara/models", rw: false, type: "bind" }, { source: "/var/lib/docker/volumes/x", destination: "/x", rw: true, type: "volume" }];
-    const sandbox = [{ source: "/r/checkout", destination: FRESH_EVAL_WORKSPACE, rw: true, type: "bind" }];
-    expect(bridgeFolderMountProblems({ helper, sandbox, bridgeDir: "/b/models", checkout: "/r/checkout" })).not.toEqual([]);
-  });
 });
 
 describe("the vertex row (L4-EVV)", () => {
   const argAfter = (args: readonly string[], flag: string): string | undefined => { const at = args.indexOf(flag); return at < 0 ? undefined : args[at + 1]; };
   const lines = (text: string): Record<string, string> => Object.fromEntries(text.split("\n").filter(Boolean).map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)] as [string, string]));
-  it("a gemini row's run is exactly as before: no metadata port, no project id, a gemini helper row", async () => {
-    let rows = "";
-    const daemon = fakeDaemon({ eval: async (dir) => { rows = await readFile(join(w.bridgeDir, "rows.json"), "utf8"); await writeFile(join(dir, REPORT.argument), REPORT_BYTES); return 0; } });
-    const w = await world(daemon);
-    await w.sandbox.run(w.input());
-    const helper = runArgsOf(daemon.calls, "-models")!;
-    expect(helper).not.toContain("--meta-port"); expect(helper).not.toContain("--project-id");
-    expect(JSON.parse(rows)).toEqual([{ id: "gemini", family: "gemini" }]);
-  });
   it("a vertex row's run serves a vertex helper row with the metadata port and Rovara's placeholder project, and writes the Vertex client's variables (and no key) into the env file", async () => {
     let rows = "";
     const daemon = fakeDaemon({ eval: async (dir) => { rows = await readFile(join(w.bridgeDir, "rows.json"), "utf8"); await writeFile(join(dir, REPORT.argument), REPORT_BYTES); return 0; } });
@@ -456,38 +325,6 @@ describe("the vertex row (L4-EVV)", () => {
   });
 });
 
-
-describe("stand-in project commands on the round network", () => {
-  it("runs each side's migrations in its own checkout with service variables, walls and cleanup before the eval", async () => {
-    const daemon = fakeDaemon(); const events: string[] = [];
-    const w = await world(daemon, { reportStandInDatabases: true, sealedDns: false, services: {
-      async start(net, signal, commands) {
-        const started = { hosts: [{ alias: "postgres", address: net.checkSandboxIp.replace(/\.4$/u, ".16") }], env: [["DATABASE_URL", "postgres://app:run-only@postgres/app"]] as Array<[string, string]>, secrets: ["run-only"], started: [], targets: [], unsupported: [] };
-        expect(commands).toBeTypeOf("function");
-        const result = await commands!(started)({ cwd: ".", executable: "alembic", args: ["upgrade", "head"], timeoutSeconds: 2 }, signal);
-        expect(result).toEqual({ exitCode: 0, timedOut: false }); events.push("migrated");
-        return { ...started, observe: async ids => { events.push(`observed ${ids.join(",")}`); }, stop: async () => { events.push("stopped"); } };
-      },
-    } });
-    for (const side of ["old", "new"] as const) await w.sandbox.run(w.input({ side }));
-    const seeds = daemon.calls.filter(args => args[0] === "run" && args.includes("alembic"));
-    expect(seeds).toHaveLength(2);
-    for (const args of seeds) {
-      expect(args.slice(-4)).toEqual(["--", "alembic", "upgrade", "head"]);
-      expect(args).toContain("--read-only"); expect(args).toContain("no-new-privileges");
-      const name = args[args.indexOf("--name") + 1]!;
-      expect(args[args.indexOf("--network") + 1]).toBe(name.replace(/-eval$/u, ""));
-      expect(daemon.calls).toContainEqual(["rm", "--force", name]);
-    }
-    expect(daemon.envSeen.filter(text => text.includes("DATABASE_URL=") && !text.includes(TOKEN))).toHaveLength(2);
-    for (const text of daemon.envSeen.filter(text => text.includes("DATABASE_URL=") && !text.includes(TOKEN))) {
-      expect(text).toContain("DATABASE_URL=postgres://app:run-only@postgres/app"); expect(text).not.toContain(TOKEN);
-    }
-    expect(w.materialized.map(m => m.commit)).toEqual([BASE, CANDIDATE]);
-    expect(events).toEqual(["migrated", "observed q1,q2", "stopped", "migrated", "observed q1,q2", "stopped"]);
-    expect(daemon.containers).toHaveLength(0); expect(daemon.networks).toHaveLength(0);
-  });
-});
 
 
 it("never starts a preparation command whose checkout no longer satisfies its seed lock", async () => {

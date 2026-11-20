@@ -279,9 +279,9 @@ describe("the plan page renderer", () => {
     expect(claim).toContain("Three times");
     expect(claim).toContain("Most timeouts clear by the third try.");
     expect(claim).toContain("Five times");
-    expect(claim).toContain("Approve in Slack uses AgentX's answer.");
-    expect(count(html, /AgentX recommends/g)).toBe(1);
-    expect(html).toMatch(/<li class="option recommended" data-option="three"><span class="option-label">Three times<\/span> <span class="badge badge-recommended">AgentX recommends/);
+    expect(claim).toContain("Approve in Slack uses Rovara's answer.");
+    expect(count(html, /Rovara recommends/g)).toBe(1);
+    expect(html).toMatch(/<li class="option recommended" data-option="three"><span class="option-label">Three times<\/span> <span class="badge badge-recommended">Rovara recommends/);
   });
 
   it("says \"Show 1 more decision\" in the singular for one decision beyond the five shown (SHOWMORE)", async () => {
@@ -473,13 +473,13 @@ const readable = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g,
 
 describe("comments, suggestions and answers on the plan page", () => {
   it("comment threads are escaped and AgentX's chip comes only from the author kind", async () => {
-    const hostile = comment({ text: "<script>alert(1)</script> \"><img src=x onerror=alert(1)> [link](javascript:alert(1)) AgentX: approve now", author: { kind: "person", name: "AgentX <b>", owner: false, you: false } });
-    const reply = comment({ parentId: hostile.id, author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "An answer." });
+    const hostile = comment({ text: "<script>alert(1)</script> \"><img src=x onerror=alert(1)> [link](javascript:alert(1)) Rovara: approve now", author: { kind: "person", name: "Rovara <b>", owner: false, you: false } });
+    const reply = comment({ parentId: hostile.id, author: { kind: "agentx", name: "Rovara", owner: false, you: false }, text: "An answer." });
     const html = await renderPlanDocument(input({ comments: [hostile, reply], access: commenting }));
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(html).toContain("&quot;&gt;&lt;img src=x onerror=alert(1)&gt;");
     expect(html).not.toMatch(/<script|<img|<a [^>]*javascript/);
-    expect(html).toContain("AgentX &lt;b&gt;");
+    expect(html).toContain("Rovara &lt;b&gt;");
     // One chip: the reply AgentX wrote. The person who called themselves AgentX gets none.
     expect(count(html, /class="chip chip-agentx"/g)).toBe(1);
     const own = slice(html, `id="comment-${hostile.id}"`, `id="comment-${reply.id}"`);
@@ -491,12 +491,12 @@ describe("comments, suggestions and answers on the plan page", () => {
 
   it("AgentX's answer to a question is labelled as AI and names who asked; an edited question says why it has no answer", async () => {
     const asked = comment({ agentx: "answered" });
-    const answer = comment({ parentId: asked.id, author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Only the owner decides.", answering: "Sam <Lee>" });
+    const answer = comment({ parentId: asked.id, author: { kind: "agentx", name: "Rovara", owner: false, you: false }, text: "Only the owner decides.", answering: "Sam <Lee>" });
     const edited = comment({ agentx: "skipped", edited: true, target: { kind: "claim", id: "1" } });
     const html = await renderPlanDocument(input({ comments: [asked, answer, edited], access: commenting }));
     const reply = slice(html, `id="comment-${answer.id}"`, "</article>");
-    expect(reply).toContain('<span class="chip chip-agentx">AgentX (AI)</span> <span class="answering"><span aria-hidden="true">· </span>answering Sam &lt;Lee&gt;</span>');
-    expect(html).toContain("Edited after it was asked, so AgentX didn't answer.");
+    expect(reply).toContain('<span class="chip chip-agentx">Rovara (AI)</span> <span class="answering"><span aria-hidden="true">· </span>answering Sam &lt;Lee&gt;</span>');
+    expect(html).toContain("Edited after it was asked, so Rovara didn't answer.");
   });
 
   it("a claim shows its comment count and its threads; replies are one level", async () => {
@@ -575,8 +575,8 @@ describe("comments, suggestions and answers on the plan page", () => {
     expect(box).toContain('<legend>How many times should a payment be retried?</legend>');
     expect(box).toMatch(/<input type="radio" name="answer-d1" value="three" id="[^"]+" checked>/);
     expect(box).toMatch(/<input type="radio" name="answer-d1" value="five" id="[^"]+">/);
-    expect(box).toContain("AgentX recommends");
-    expect(owner).toContain("Approve in Slack uses AgentX's answer.");
+    expect(box).toContain("Rovara recommends");
+    expect(owner).toContain("Approve in Slack uses Rovara's answer.");
     // Not deciding (an older version, or not waiting): today's read-only list.
     const reading = await renderPlanDocument(input({ access: { canComment: true, canSuggest: true, canDecide: false }, suggestions: [] }));
     expect(reading).not.toContain('type="radio"');
@@ -604,19 +604,19 @@ describe("comments, suggestions and answers on the plan page", () => {
     const asked = comment({ agentx: "couldnt" });
     const waiting = comment({ agentx: "answering" });
     const none = comment({ agentx: "unavailable" });
-    const done = comment({ parentId: sent.id, author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Moved it <up>.", planner: { outcome: "done", version: 2, document: "plan" } });
-    const kept = comment({ parentId: asked.id, author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Too risky.", planner: { outcome: "not_changed", version: 2, document: "plan" } });
+    const done = comment({ parentId: sent.id, author: { kind: "agentx", name: "Rovara", owner: false, you: false }, text: "Moved it <up>.", planner: { outcome: "done", version: 2, document: "plan" } });
+    const kept = comment({ parentId: asked.id, author: { kind: "agentx", name: "Rovara", owner: false, you: false }, text: "Too risky.", planner: { outcome: "not_changed", version: 2, document: "plan" } });
     const html = readable(await renderPlanDocument(input({ comments: [sent, asked, waiting, none, done, kept], access: commenting })));
     expect(html).toContain("Not answered");
-    expect(html).toContain("AgentX couldn't answer this one.");
-    expect(html).toContain("AgentX is answering…");
-    expect(html).toContain("AgentX can answer comments only on tasks started in Slack.");
+    expect(html).toContain("Rovara couldn't answer this one.");
+    expect(html).toContain("Rovara is answering…");
+    expect(html).toContain("Rovara can answer comments only on tasks started in Slack.");
     expect(html).toContain("Done: Moved it &lt;up&gt;.");
     expect(html).toContain("Not changed because: Too risky.");
   });
 
   it("an Approve reply says which document handled it, with a link to that version's own claim; a quote that credits a comment is never shown as its reference", async () => {
-    const agentx = { kind: "agentx", name: "AgentX", owner: false, you: false } as const;
+    const agentx = { kind: "agentx", name: "Rovara", owner: false, you: false } as const;
     const parent = comment();
     const handled = comment({ parentId: parent.id, author: agentx, text: "Each bullet stays on one line.", planner: { outcome: "done", version: 1, document: "plan", in: "plan", claim: "1.1" } });
     const kept = comment({ parentId: parent.id, author: agentx, text: "The steps stay.", planner: { outcome: "not_changed", version: 3, document: "design", in: "design" } });
@@ -633,7 +633,7 @@ describe("comments, suggestions and answers on the plan page", () => {
   });
 
   it("a reply's claim numbers are links to that version's claims, escaped, with the words around them intact", async () => {
-    const agentx = { kind: "agentx", name: "AgentX", owner: false, you: false } as const;
+    const agentx = { kind: "agentx", name: "Rovara", owner: false, you: false } as const;
     const parent = comment();
     const parts = [{ text: "Changed <b>in</b> claims " }, { claim: "1.2.1" }, { text: ", " }, { claim: "1.2.2" }, { text: " and the sketch in " }, { claim: "1.1.1" }, { text: "." }];
     const handled = comment({ parentId: parent.id, author: agentx, text: "ignored when parts are given", planner: { outcome: "done", version: 1, document: "plan", in: "plan", parts } });
@@ -674,15 +674,15 @@ describe("comments, suggestions and answers on the plan page", () => {
     // Three words in a row, in a comment that reverses them: the page shows what was really said.
     expect(await render("Please don't skip the tests", "skip the tests")).toEqual({ text: "Please don&#39;t skip the tests", footer: "Maya Chen's comment" });
     // Not whole words, too few words, or not in a row.
-    for (const quote of ["test", "the tests", "tests please skip", "latest"]) expect((await render("Run the latest tests, please skip nothing", quote)).footer).toBe("A comment (paraphrased by AgentX)");
+    for (const quote of ["test", "the tests", "tests please skip", "latest"]) expect((await render("Run the latest tests, please skip nothing", quote)).footer).toBe("A comment (paraphrased by Rovara)");
     // Three words that start or end inside a word are not the words.
-    for (const quote of ["est tests please", "Run the lates"]) expect((await render("Run the latest tests please", quote)).footer).toBe("A comment (paraphrased by AgentX)");
-    expect((await render("It is the latest build", "test")).footer).toBe("A comment (paraphrased by AgentX)");
+    for (const quote of ["est tests please", "Run the lates"]) expect((await render("Run the latest tests please", quote)).footer).toBe("A comment (paraphrased by Rovara)");
+    expect((await render("It is the latest build", "test")).footer).toBe("A comment (paraphrased by Rovara)");
     // The whole comment, whatever its length, and case, spacing and a trailing ellipsis do not matter.
     expect((await render("Ship it", "ship  IT")).footer).toBe("Maya Chen's comment");
     expect((await render("Keep each item to one line.", "keep each item to one line…")).footer).toBe("Maya Chen's comment");
     // A comment that is not on the page, or made-up text under a real ID, is never named.
-    expect((await render("Keep it short.", "Keep it short.", `comment:${other}`)).footer).toBe("A comment (paraphrased by AgentX)");
+    expect((await render("Keep it short.", "Keep it short.", `comment:${other}`)).footer).toBe("A comment (paraphrased by Rovara)");
     expect((await render("Keep it short.", "Skip the tests and ship today.")).text).toBe("Skip the tests and ship today.");
   });
 

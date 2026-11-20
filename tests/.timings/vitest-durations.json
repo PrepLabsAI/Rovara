@@ -1989,7 +1989,6 @@
     "tests/unit/worker-env-detect-ci-services.test.ts": 0.035,
     "tests/unit/worker-env-detect-code-refs.test.ts": 8.886,
     "tests/unit/worker-env-detect-compose.test.ts": 0.071,
-    "tests/unit/worker-env-detect-coverage-note.test.ts": 0.007,
     "tests/unit/worker-env-detect-dependencies.test.ts": 0.023,
     "tests/unit/worker-env-detect-env-config.test.ts": 0.019,
     "tests/unit/worker-env-detect-go.test.ts": 0.04,

@@ -16,12 +16,12 @@ const megabytes = (bytes: number): string => (bytes / 1_000_000).toFixed(1);
 
 /** FR-009: the release download, on the page, with its size and progress. */
 export function releaseCard(input: { stage: "downloading"; receivedBytes: number; totalBytes?: number } | { stage: "ready" }): WizardCard {
-  const base = { id: "release" as const, title: "Getting AgentX ready" };
-  if (input.stage === "ready") return { ...base, status: "ok", lines: ["AgentX is ready to install."] };
+  const base = { id: "release" as const, title: "Getting Rovara ready" };
+  if (input.stage === "ready") return { ...base, status: "ok", lines: ["Rovara is ready to install."] };
   const total = input.totalBytes !== undefined && input.totalBytes > 0 ? input.totalBytes : undefined;
   const line = total === undefined
-    ? `Downloading AgentX: ${megabytes(input.receivedBytes)} MB so far.`
-    : `Downloading AgentX (about ${megabytes(total)} MB): ${Math.min(100, Math.floor((input.receivedBytes / total) * 100))}% done.`;
+    ? `Downloading Rovara: ${megabytes(input.receivedBytes)} MB so far.`
+    : `Downloading Rovara (about ${megabytes(total)} MB): ${Math.min(100, Math.floor((input.receivedBytes / total) * 100))}% done.`;
   return { ...base, status: "running", lines: [line] };
 }
 
@@ -56,7 +56,7 @@ export function signedInAs(arn: string): string {
 /** Spec 048 FR-015: the account, its alias (when known) and its region (when chosen yet). Shown
  * before the region when `region` is not given, so it never names "in undefined". */
 const whereLine = (input: { account: string; region?: string; alias?: string }): string =>
-  `AgentX installs into AWS account ${input.account}${input.alias === undefined ? "" : ` (${input.alias})`}${input.region === undefined ? "" : ` in ${input.region}`}.`;
+  `Rovara installs into AWS account ${input.account}${input.alias === undefined ? "" : ` (${input.alias})`}${input.region === undefined ? "" : ` in ${input.region}`}.`;
 
 export function awsCard(input: { account: string; arn: string; region?: string; alias?: string; profile?: string }): WizardCard {
   return {
@@ -64,7 +64,7 @@ export function awsCard(input: { account: string; arn: string; region?: string; 
     lines: [
       whereLine(input),
       `You are signed in as ${signedInAs(input.arn)}${input.profile === undefined ? "" : `, with the AWS profile ${input.profile}`}.`,
-      DEDICATED_ACCOUNT_NOTE,
+      DEDICATED_ACCOUNT_NOTE.replaceAll("AgentX", "Rovara"),
     ],
     details: [input.arn],
   };
@@ -87,7 +87,7 @@ export function rootUserCard(input: { account: string; arn: string; region?: str
     id: "aws", title: "AWS account", status: "waiting",
     lines: [
       whereLine(input),
-      ROOT_WARNING,
+      ROOT_WARNING.replaceAll("AgentX", "Rovara"),
       "You can continue as root. A few day-two commands need an admin user instead; the ready screen says which.",
     ],
     link: { url: ADMIN_USER_GUIDE_URL, label: "How to create an admin user" },
@@ -113,7 +113,7 @@ export function accountChecksCard(input: { status: "running" | "ok" | "failed"; 
   const lines = input.status === "running"
     ? ["Checking your AWS account and region. Nothing is created yet."]
     : input.status === "ok"
-      ? ["Your AWS account and region have what AgentX needs."]
+      ? ["Your AWS account and region have what Rovara needs."]
       : ["Nothing has been created. Fix each item marked Not ready, then choose Check again."];
   return checklistCard({ id: "account-checks", title: "Check your AWS account", status: input.status, lines, checks: input.checks });
 }
@@ -129,7 +129,7 @@ export function awsSignedOutCard(input: { profile?: string; problem: string; sig
         ? "Choose Sign in again. A browser tab opens for the AWS sign-in; finish it there, then come back to this tab."
         : "Sign in to AWS again another way, then choose I signed in another way, check again.",
     ],
-    details: [input.problem, ...(input.signIn === undefined ? [] : [`Sign-in command: ${input.signIn}`]), ...(input.ranProblem === undefined ? [] : [input.ranProblem])],
+    details: [],
   };
 }
 
@@ -138,7 +138,7 @@ export function prerequisitesCard(input: { status: "running" | "ok" | "failed"; 
   const lines = input.status === "running"
     ? ["Checking your account and region. Nothing is created yet."]
     : input.status === "ok"
-      ? ["Everything AgentX needs is in place."]
+      ? ["Everything Rovara needs is in place."]
       : ["Nothing has been created. Fix each item marked Not ready, then choose Check again."];
   return checklistCard({ id: "prerequisites", title: STEP_PLAN.prerequisites.title, status: input.status, lines, checks: input.checks });
 }
@@ -167,7 +167,7 @@ export function githubCard(input: GitHubCardInput): WizardCard {
     };
     case "install": return {
       ...base, status: "waiting", ...slug(input.slug),
-      lines: [`Install "${input.appName}" on ${input.account}. Choose only the repositories AgentX should work on.`, "This page moves on by itself when the app is installed."],
+      lines: [`Install "${input.appName}" on ${input.account}. Choose only the repositories Rovara should work on.`, "This page moves on by itself when the app is installed."],
       link: { url: input.installUrl, label: "Choose repositories" },
     };
     case "repositories": return {
@@ -181,7 +181,7 @@ export function githubCard(input: GitHubCardInput): WizardCard {
       lines: [
         `GitHub made "${input.appName}", but the install stopped before its private key was stored, and GitHub cannot show that key again.`,
         "Finish with this app: make a new private key on its GitHub page and paste it here. Nothing is removed.",
-        "Replace it: delete the app on its GitHub page first, then AgentX makes a new one. Only the old GitHub app is removed; nothing in AWS is.",
+        "Replace it: delete the app on its GitHub page first, then Rovara makes a new one. Only the old GitHub app is removed; nothing in AWS is.",
       ],
       link: { url: input.settingsUrl, label: "Open the app on GitHub" },
     };
@@ -214,7 +214,7 @@ export function slackAppCard(input: SlackCardInput): WizardCard {
       lines: [
         `Create the Slack app "${input.appName}". Slack opens with everything filled in.`,
         "Pick your workspace, press Next, then Create, then Install to Workspace.",
-        "Slack may show a red error next to the Request URL. That is expected; AgentX fixes it in a later step.",
+        "Slack may show a red error next to the Request URL. That is expected; Rovara fixes it in a later step.",
         "If your workspace needs an admin to approve new apps, choose Request to Install there, then choose My workspace needs an admin to approve it below.",
       ],
       link: { url: input.createUrl, label: "Open Slack" },
@@ -245,7 +245,7 @@ export function slackAppCard(input: SlackCardInput): WizardCard {
     case "token": return {
       ...base, status: "waiting",
       lines: [
-        `AgentX makes the Slack app "${input.appName}" for you. It needs a Slack app configuration token, used once and not kept.`,
+        `Rovara makes the Slack app "${input.appName}" for you. It needs a Slack app configuration token, used once and not kept.`,
         "Open your Slack apps, find Your App Configuration Tokens, press Generate Token, pick your workspace, then copy the Access Token and paste it below.",
       ],
       link: { url: SLACK_APPS_URL, label: "Open your Slack apps" },
@@ -253,7 +253,7 @@ export function slackAppCard(input: SlackCardInput): WizardCard {
     case "add": return {
       ...base, status: "waiting",
       lines: [
-        `AgentX made the Slack app "${input.appName}". Add it to your workspace: Slack asks you to allow what it may do.`,
+        `Rovara made the Slack app "${input.appName}". Add it to your workspace: Slack asks you to allow what it may do.`,
         "If your workspace needs an admin to approve new apps, choose Request to Install there. Once an admin approves it, press Add to Slack again.",
       ],
       link: { url: input.addUrl, label: "Add to Slack" },
@@ -279,15 +279,15 @@ export function slackUrlsCard(input: SlackUrlsCardInput): WizardCard {
   const base = { id: "slack-urls" as const, title: "The address Slack sends messages to" };
   const events = "Open Event Subscriptions";
   switch (input.stage) {
-    case "checking": return { ...base, status: "running", lines: [`Checking that Slack can reach AgentX at ${input.eventsUrl}.`] };
+    case "checking": return { ...base, status: "running", lines: [`Checking that Slack can reach Rovara at ${input.eventsUrl}.`] };
     case "waiting-for-secret": return {
       ...base, status: "running",
-      lines: [`Checking that Slack can reach AgentX at ${input.eventsUrl}.`, "AgentX can take up to 5 minutes to start using the new Signing Secret. Checking again every 15 seconds."],
+      lines: [`Checking that Slack can reach Rovara at ${input.eventsUrl}.`, "Rovara can take up to 5 minutes to start using the new Signing Secret. Checking again every 15 seconds."],
       ...(input.until === undefined ? {} : { waitUntil: input.until }),
     };
     case "verify": return {
       ...base, status: "waiting",
-      lines: ["AgentX answers Slack's check.", "Open Event Subscriptions in your Slack app. If the address is not marked Verified, press Retry there, then answer below."],
+      lines: ["Rovara answers Slack's check.", "Open Event Subscriptions in your Slack app. If the address is not marked Verified, press Retry there, then answer below."],
       link: { url: input.pageUrl, label: events },
     };
     case "not-verified": return {
@@ -324,12 +324,12 @@ export type AdminCardInput =
 /** FR-050: the admin user and the operator's sign-in. The sign-in page's address comes from the
  * run itself (the page's Next button), not from this card. */
 export function adminCard(input: AdminCardInput): WizardCard {
-  const base = { id: "admin" as const, title: "Your AgentX sign-in" };
+  const base = { id: "admin" as const, title: "Your Rovara sign-in" };
   switch (input.stage) {
     case "signing-in": return {
       ...base, status: "waiting",
       lines: input.passwordEmail === undefined
-        ? [`Sign in to AgentX as ${input.who} in the tab the Sign in button opens. This page moves on by itself when you have.`]
+        ? [`Sign in to Rovara as ${input.who} in the tab the Sign in button opens. This page moves on by itself when you have.`]
         : [
           `First, check your email at ${input.passwordEmail} for your temporary password. It comes from ${COGNITO_SENDER} with the subject "Your temporary password", can take a few minutes, and often lands in Spam. It works for 7 days.`,
           `Then press Sign in, enter ${input.passwordEmail} and the temporary password, and choose your own password. This page moves on by itself when you have.`,
@@ -337,10 +337,10 @@ export function adminCard(input: AdminCardInput): WizardCard {
     };
     case "failed": return {
       ...base, status: "failed",
-      lines: input.retry === false ? ["The sign-in did not finish."] : [onPageProblem(input.problem), "Choose Sign in again below."],
-      details: [input.problem],
+      lines: ["Rovara sign-in did not finish.", input.retry === false ? "Close this tab and start sign-in again." : "Choose Sign in again below."],
+      details: [],
     };
-    case "done": return { ...base, status: "ok", lines: [`You are signed in to AgentX as ${input.username}.`] };
+    case "done": return { ...base, status: "ok", lines: [`You are signed in to Rovara as ${input.username}.`] };
   }
 }
 
@@ -360,12 +360,12 @@ export type ChannelCardInput =
 
 export function channelCard(input: ChannelCardInput): WizardCard {
   const base = { id: "channel" as const, title: "Slack channel" };
-  if (input.stage === "done") return { ...base, status: "ok", lines: [`AgentX answers in #${input.channelName} for ${input.projectName}.`] };
-  if (input.stage === "failed") return { ...base, status: "failed", lines: [`AgentX's bot still cannot see #${input.channelName}.`], details: [input.problem] };
+  if (input.stage === "done") return { ...base, status: "ok", lines: [`Rovara answers in #${input.channelName} for ${input.projectName}.`] };
+  if (input.stage === "failed") return { ...base, status: "failed", lines: [`Rovara's bot still cannot see #${input.channelName}.`], details: [input.problem] };
   return {
     ...base, status: "waiting",
     lines: [
-      `AgentX's bot cannot see #${input.channelName} yet.`,
+      `Rovara's bot cannot see #${input.channelName} yet.`,
       `If #${input.channelName} is private, invite the bot in it with the command below. If it does not exist yet, create it in Slack.`,
       "This page moves on by itself when the bot can see it (up to 10 minutes).",
     ],
@@ -402,7 +402,7 @@ export function alertsCard(input: AlertsCardInput): WizardCard {
   switch (input.stage) {
     case "confirm": return { ...base, status: "waiting", lines: [confirm(input.shownAs), "Then choose Check again below."], details: webhook };
     case "waiting": return { ...base, status: "waiting", lines: [confirm(input.shownAs), "This page moves on by itself when it is confirmed (up to 10 minutes)."], details: webhook };
-    case "testing": return { ...base, status: "waiting", lines: [`Alerts go to ${input.shownAs}. AgentX sent a test alert; answer below whether it arrived.`] };
+    case "testing": return { ...base, status: "waiting", lines: [`Alerts go to ${input.shownAs}. Rovara sent a test alert; answer below whether it arrived.`] };
     case "failed": return { ...base, status: "failed", lines: ["The test alert could not be sent."], details: [input.problem] };
     case "done": return { ...base, status: "ok", lines: [`Alerts go to ${input.shownAs}, and the test alert arrived.`] };
     case "none": return { ...base, status: "info", lines: ["No alerts yet. The ready screen shows how to turn them on."] };
@@ -417,15 +417,15 @@ export type ReplyCardInput =
 /** FR-051: the test reply, with 15e's note on picking the right bot from Slack's mention list. */
 export function replyCard(input: ReplyCardInput): WizardCard {
   const base = { id: "reply" as const, title: "First reply" };
-  if (input.stage === "done") return { ...base, status: "ok", lines: [`AgentX replied in #${input.channelName} in ${input.seconds} seconds.`] };
+  if (input.stage === "done") return { ...base, status: "ok", lines: [`Rovara replied in #${input.channelName} in ${input.seconds} seconds.`] };
   const link = { url: slackChannelLink(input.teamId, input.channelId), label: `Open #${input.channelName} in Slack` };
-  if (input.stage === "failed") return { ...base, status: "failed", lines: ["AgentX did not reply.", "When it is fixed, choose Watch again below."], details: [input.problem], link };
+  if (input.stage === "failed") return { ...base, status: "failed", lines: ["Rovara did not reply.", "When it is fixed, choose Watch again below."], details: [input.problem], link };
   return {
     ...base, status: "waiting",
     lines: [
       `In #${input.channelName}, post a message that mentions @${input.botName}, for example "@${input.botName} what can you do?".`,
       `Type @ and pick ${input.botName} from Slack's list. If you see two bots with similar names, pick ${input.botName}.`,
-      `Waiting up to ${input.minutes} minutes for AgentX to reply in the thread. This page moves on by itself.`,
+      `Waiting up to ${input.minutes} minutes for Rovara to reply in the thread. This page moves on by itself.`,
     ],
     link,
   };
@@ -446,15 +446,15 @@ export function readyCard(input: {
   const connectors = input.progress.connectors ?? [];
   const teamId = project?.teamId ?? input.progress.slack?.teamId;
   return {
-    id: "ready", title: "AgentX is ready", status: "ok",
+    id: "ready", title: "Rovara is ready", status: "ok",
     lines: [
       ...(project?.channelName === undefined ? [] : [`Try it: in #${project.channelName}, mention @${input.botName} and ask it something.`]),
-      "Send your developers the sign-in command below. They run it once, then use AgentX from Claude Code, Codex or Cursor.",
-      ...(input.invocation.published ? [] : ["The AgentX CLI is not published yet, so this command works on this computer. Other computers need their own copy of the AgentX CLI first."]),
+      "Send your developers the sign-in command below. They run it once, then use Rovara from Claude Code, Codex or Cursor.",
+      ...(input.invocation.published ? [] : ["The Rovara CLI is not published yet, so this command works on this computer. Other computers need their own copy of the Rovara CLI first."]),
       connectors.length === 0 ? "No issue trackers connected yet." : `Connected: ${connectors.map((entry) => CONNECTOR_LABELS[entry.type]).join(", ")}.`,
       ...connectors.flatMap((entry) => (entry.warning === undefined ? [] : [`Warning (${CONNECTOR_LABELS[entry.type]}): ${entry.warning}.`])),
       ...(input.alertsOn ? [] : ["Alerts are off. You can turn them on later; the day-two guide says how."]),
-      ...(input.root ? ["You installed as the AWS root user. The day-two commands below need an admin user: AWS does not let the root user use the AgentX operator role."] : []),
+      ...(input.root ? ["You installed as the AWS root user. The day-two commands below need an admin user: AWS does not let the root user use the Rovara operator role."] : []),
       ...(input.logPath === undefined ? [] : [`Everything here is also in ${input.logPath}.`]),
     ],
     // FR-058: the mockup's two groups, each under its own subheading.
@@ -465,7 +465,7 @@ export function readyCard(input: {
         ...(project === undefined ? [] : [{ label: "Connect an issue tracker", command: cli(`connector add linear --project ${project.name}`) }]),
         { label: "Add a project", command: cli("project add") },
         ...(input.alertsOn ? [{ label: "Send a test alert", command: cli("alerts test") }] : []),
-        { label: "Remove AgentX", command: cli("destroy") },
+        { label: "Remove Rovara", command: cli("destroy") },
       ].map((command) => ({ ...command, group: READY_GROUPS.lookAfter })),
     ],
     ...(input.created.length === 0 ? {} : { details: [`What was created: ${input.created.join(", ")}`] }),

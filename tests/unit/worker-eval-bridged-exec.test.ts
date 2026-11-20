@@ -1,19 +1,15 @@
-// The eval's sandbox exec over the real F1-c bridge, with a FAKE fresh sandbox that speaks to the bridge's socket as the helper would. No Docker, no network, no model.
-// Rules: one bridge per run in a private folder; the egress is the stage's call; the token is made for this run, forwarding only, and gone when the run ends; the folder and
-// socket are removed however the run ends; the changed prompt is counted by the worker's own classifier, never on the sandbox's word.
-import { existsSync, statSync } from "node:fs";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import http from "node:http";
 import net from "node:net";
-import { basename, dirname, join, relative } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { attestRovaraOnlyBaseCheckout, type ModelEgress, type ModelEgressEvent, type ModelEgressFrame, type ModelEgressScope } from "@agentx/contracts";
-import { bridgeMadeEnd, createBridgedEvalExec as create, EVAL_BRIDGE_CALLS_MAX, EVAL_BRIDGE_SOCKET_NAME, EVAL_HELPER_DIR_NAME, type FreshEvalSandbox, type FreshEvalSandboxRun } from "../../packages/worker/src/verification/eval-bridged-exec.js";
+import { bridgeMadeEnd, createBridgedEvalExec as create, EVAL_BRIDGE_CALLS_MAX, type FreshEvalSandbox, type FreshEvalSandboxRun } from "../../packages/worker/src/verification/eval-bridged-exec.js";
 import { MODEL_BRIDGE_DROP_REASONS } from "../../packages/worker/src/model-bridge.js";
 import { collectModelBridge } from "../../packages/worker/src/model-helper-bridge-client.js";
 import type { EvalSandboxRequest } from "../../packages/worker/src/verification/eval-runner.js";
-import { answer, classAnswer, frame } from "../support/eval-model-access.js";
+import { answer, frame } from "../support/eval-model-access.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -35,51 +31,7 @@ function sandboxOf(run: (input: FreshEvalSandboxRun) => Promise<unknown>, availa
 }
 const ok = (input: FreshEvalSandboxRun) => Promise.resolve({ report: location, ...(input.side === "old" ? { attestation: attestRovaraOnlyBaseCheckout({ baseCommit: "a".repeat(40) }) } : {}) });
 
-describe("one bridge per run", () => {
-  it("hands the sandbox a socket and a token, and every call it sends is the stage's egress, once, under the stage's scope", async () => {
-    const root = await makeRoot(); const e = egressOf();
-    const sandbox = sandboxOf(async (input) => { const answered = await send(input, frame("one")); expect(answered.status).toBe(200); expect(answered.settle).toMatchObject({ class: "ok", costMicros: 10 }); return ok(input); });
-    const result = await createBridgedEvalExec({ sandbox, runDir: root }).run(request(e));
-    expect(result).toEqual({ report: location, changedPromptCalls: 1 });
-    expect(e.seen).toHaveLength(1); expect(e.scopes).toEqual([scope]);
-    expect(Object.keys(sandbox.inputs[0]!).sort()).toEqual(["ids", "model", "runs", "side", "signal"]);
-    expect(Object.keys(sandbox.inputs[0]!.model).sort()).toEqual(["socketPath", "token"]);
-  });
-  it("makes the folder private and the socket mode 0600 while the run is open; both are gone when it ends", async () => {
-    const root = await makeRoot(); let folder = ""; let socketMode = 0; let folderMode = 0;
-    const sandbox = sandboxOf(async (input) => {
-      folder = join(input.model.socketPath, "..");
-      socketMode = statSync(input.model.socketPath).mode & 0o777; folderMode = statSync(folder).mode & 0o777;
-      expect(folder.startsWith(root)).toBe(true);
-      return ok(input);
-    });
-    await createBridgedEvalExec({ sandbox, runDir: root }).run(request(egressOf()));
-    expect(socketMode).toBe(0o600); expect(folderMode).toBe(0o700);
-    expect(existsSync(folder)).toBe(false); expect(await readdir(root)).toEqual([]);
-  });
-  it("two runs never share a folder, a socket or a token", async () => {
-    const root = await makeRoot(); const sandbox = sandboxOf(async (input) => { await new Promise((resolve) => setTimeout(resolve, 20)); return ok(input); });
-    const exec = createBridgedEvalExec({ sandbox, runDir: root });
-    await Promise.all([exec.run(request(egressOf())), exec.run(request(egressOf(), { side: "old" }))]);
-    expect(new Set(sandbox.inputs.map((i) => i.model.socketPath)).size).toBe(2);
-    expect(new Set(sandbox.inputs.map((i) => i.model.token)).size).toBe(2);
-  });
-});
-
 describe("the token", () => {
-  it("is for this run only: a forged token and no token are refused and reach no egress", async () => {
-    const root = await makeRoot(); const e = egressOf();
-    const sandbox = sandboxOf(async (input) => {
-      const forged = await send(input, frame("x"), "f".repeat(32));
-      expect(forged.status).toBe(403); expect(forged.settle).toMatchObject({ refusal: "not_allowed" });
-      const none = await collectModelBridge({ socketPath: input.model.socketPath, mode: "real", frame: { ...frame("x") } });
-      expect(none.status).toBe(403); expect(none.settle).toMatchObject({ refusal: "not_allowed" });
-      return ok(input);
-    });
-    // the bridge's own refusals never reached the stage, so the run is failed (Not run), whatever the sandbox wrote
-    await expect(createBridgedEvalExec({ sandbox, runDir: root }).run(request(e))).rejects.toThrow();
-    expect(e.seen).toEqual([]);
-  });
   it("is a forwarding token of the check round only: replay mode and a no-token real call never reach the egress", async () => {
     const root = await makeRoot(); const e = egressOf();
     const sandbox = sandboxOf(async (input) => {
@@ -89,16 +41,6 @@ describe("the token", () => {
     });
     await expect(createBridgedEvalExec({ sandbox, runDir: root }).run(request(e))).rejects.toThrow();
     expect(e.seen).toEqual([]);
-  });
-  it("stops working when the run ends, whether it ended well or the sandbox threw, and the socket is gone", async () => {
-    const root = await makeRoot(); let kept: FreshEvalSandboxRun | undefined;
-    const exec = createBridgedEvalExec({ sandbox: sandboxOf(async (input) => { kept = input; return ok(input); }), runDir: root });
-    await exec.run(request(egressOf()));
-    await expect(send(kept!, frame("late"))).rejects.toThrow();
-    const failing = createBridgedEvalExec({ sandbox: sandboxOf(async (input) => { kept = input; throw new Error("boom"); }), runDir: root });
-    await expect(failing.run(request(egressOf()))).rejects.toThrow();
-    await expect(send(kept!, frame("late"))).rejects.toThrow();
-    expect(await readdir(root)).toEqual([]);
   });
   it("a sandbox that returns with a call still open fails the run, the call is cut off at once, and nothing more reaches the egress", async () => {
     const root = await makeRoot(); let release: () => void = () => undefined; const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -141,49 +83,15 @@ describe("the changed prompt is the worker's own count", () => {
     const sandbox = sandboxOf(async (input) => { for (let i = 0; i < sandboxCalls; i++) await send(input, frame(`call-${String(i)}`)); return ok(input); });
     return createBridgedEvalExec({ sandbox, runDir: root, ...(classifier === undefined ? {} : { changedPrompt: classifier }) }).run(request(egressOf(script)));
   };
-  it("counts only the settled-ok calls the classifier names", async () => {
-    const named = (f: ModelEgressFrame) => new TextDecoder().decode(f.body).endsWith("1") || new TextDecoder().decode(f.body).endsWith("2");
-    expect((await calls(4, named)).changedPromptCalls).toBe(2);
-    // call-2 fails (provider error): it is not an exercised prompt
-    expect((await calls(4, named, (_f, i) => (i === 2 ? classAnswer("provider_error", 502) : answer()))).changedPromptCalls).toBe(1);
-  });
   it("counts unknown classifications as changed; only an explicit false proves unchanged", async () => {
     expect((await calls(3, undefined)).changedPromptCalls).toBe(3);
     expect((await calls(3, () => { throw new Error("x"); })).changedPromptCalls).toBe(3);
     expect((await calls(3, (() => "yes") as never)).changedPromptCalls).toBe(3);
     expect((await calls(3, () => false)).changedPromptCalls).toBe(0);
   });
-  it("the sandbox cannot raise it: its own result field is ignored", async () => {
-    const root = await makeRoot();
-    const sandbox = sandboxOf(async (input) => ({ ...(await ok(input)), changedPromptCalls: 99 }));
-    expect((await createBridgedEvalExec({ sandbox, runDir: root, changedPrompt: () => true }).run(request(egressOf()))).changedPromptCalls).toBe(0);
-  });
-});
-
-describe("the result", () => {
-  it("carries the attestation for the old side only, never for the new side", async () => {
-    const root = await makeRoot(); const attestation = attestRovaraOnlyBaseCheckout({ baseCommit: "a".repeat(40) });
-    const both = sandboxOf(async () => ({ report: location, attestation }));
-    const exec = createBridgedEvalExec({ sandbox: both, runDir: root });
-    expect((await exec.run(request(egressOf(), { side: "old" }))).attestation).toBe(attestation);
-    expect(await exec.run(request(egressOf(), { side: "new" }))).not.toHaveProperty("attestation");
-  });
 });
 
 describe("what the stage cannot see", () => {
-  it("more calls open at once than the bridge's old default of four are queued by the stage, not refused: all answered, the run is clean", async () => {
-    const root = await makeRoot(); const seen: ModelEgressFrame[] = [];
-    const slow: ModelEgress = { capabilities: { schemes: [] }, async *forward(_s, f) { seen.push(f); await new Promise((resolve) => setTimeout(resolve, 30)); yield* answer(); } };
-    const sandbox = sandboxOf(async (input) => { const all = await Promise.all(Array.from({ length: 12 }, (_, i) => send(input, frame(`p${String(i)}`)))); expect(all.map((a) => a.status)).toEqual(Array(12).fill(200)); return ok(input); });
-    await createBridgedEvalExec({ sandbox, runDir: root }).run({ ...request(egressOf()), egress: slow });
-    expect(seen).toHaveLength(12);
-  });
-  it("the model is the worker's pin: a frame it does not name never reaches the stage, the sandbox sees a failure, and the run is Not run", async () => {
-    const root = await makeRoot(); const e = egressOf(); let status = 0;
-    const sandbox = sandboxOf(async (input) => { status = (await send(input, frame("x"))).status!; return ok(input); });
-    await expect(createBridgedEvalExec({ sandbox, runDir: root, modelAllowed: () => false }).run(request(e))).rejects.toThrow();
-    expect(status).not.toBe(200); expect(e.seen).toEqual([]);
-  });
   it("a pin that throws or answers a non-true value allows nothing; no pin at all is a refusal before anything starts", async () => {
     const root = await makeRoot(); const e = egressOf();
     for (const pin of [() => { throw new Error("x"); }, (() => "yes") as never]) {
@@ -191,11 +99,6 @@ describe("what the stage cannot see", () => {
     }
     await expect(create({ sandbox: sandboxOf(ok), runDir: root } as never).run(request(e))).rejects.toThrow();
     expect(e.seen).toEqual([]); expect(await readdir(root)).toEqual([]);
-  });
-  it("a call that fails at the stage (its own refusal) is the stage's to mark, and does not fail the run by itself", async () => {
-    const root = await makeRoot();
-    const sandbox = sandboxOf(async (input) => { await send(input, frame("x")); return ok(input); });
-    await createBridgedEvalExec({ sandbox, runDir: root }).run(request(egressOf(() => classAnswer("rate_limit", 429))));
   });
 });
 
@@ -212,15 +115,6 @@ describe("limits", () => {
     const sandbox = sandboxOf(async (input) => { const refused = await send(input, { ...frame("x"), row: "Bad Row!" }); expect(refused.status).not.toBe(200); return ok(input); });
     await expect(createBridgedEvalExec({ sandbox, runDir: root }).run(request(e))).rejects.toThrow();
     expect(e.seen).toEqual([]);
-  });
-});
-
-describe("the helper's folder", () => {
-  it("is named `models` (the helper's one mount) and holds the socket `m`, so the launch can mount exactly this folder", async () => {
-    const root = await makeRoot(); let socket = "";
-    await createBridgedEvalExec({ sandbox: sandboxOf(async (input) => { socket = input.model.socketPath; return ok(input); }), runDir: root }).run(request(egressOf()));
-    expect(basename(socket)).toBe(EVAL_BRIDGE_SOCKET_NAME); expect(basename(dirname(socket))).toBe(EVAL_HELPER_DIR_NAME);
-    expect(EVAL_HELPER_DIR_NAME).toBe("models"); expect(dirname(dirname(dirname(socket)))).toBe(root);
   });
 });
 

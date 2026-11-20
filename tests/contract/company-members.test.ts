@@ -84,6 +84,56 @@ it.each(["role-role", "revoke-revoke", "role-revoke"])("last-owner race %s: both
   }
 });
 
+it.each([
+  { label: "two live owners", extraOwner: false, expectedSuccesses: 1 },
+  { label: "two live owners plus a removed former owner", extraOwner: "removed", expectedSuccesses: 1 },
+  { label: "three live owners", extraOwner: "live", expectedSuccesses: 2 },
+] as const)("owner step-down race keeps a live owner after every commit: $label", async ({ extraOwner, expectedSuccesses }) => {
+  for (const reverse of [false, true]) {
+    const h = world(); h.seed(p, "owner"); h.seed(q, "owner");
+    if (extraOwner !== false) h.seed(actor, "owner", A, extraOwner === "removed" ? { revokedAt: at, revokedBy: "operator" } : {});
+    const calls = [roleSet(p, "admin"), roleSet(q, "admin")];
+    const send = h.db.send; const pending: Array<() => Promise<void>> = [];
+    let both!: () => void; const ready = new Promise<void>((resolve) => { both = resolve; });
+    let initialTransactions = 0;
+    h.db.send = (command) => {
+      if (command.constructor.name !== "TransactWriteCommand" || initialTransactions === 2) return send(command);
+      initialTransactions += 1;
+      return new Promise((resolve, reject) => {
+        pending.push(async () => { try { resolve(await send(command)); } catch (error) { reject(error instanceof Error ? error : new Error("transaction failed")); } });
+        if (pending.length === 2) both();
+      });
+    };
+    const outcomesPromise = Promise.all(calls.map((event) => h.invoke({ ...event, createdBy: event.personId })));
+    await ready;
+    const commits = reverse ? pending.toReversed() : pending;
+    for (const commit of commits) {
+      await commit();
+      const owners = h.db.find((row) => row.entityType === "COMPANY_MEMBERSHIP" && row.role === "owner" && row.revokedAt === undefined);
+      expect(owners.length).toBeGreaterThanOrEqual(1);
+    }
+    const answers = await outcomesPromise;
+    expect(answers.filter((answer) => answer.ok)).toHaveLength(expectedSuccesses);
+    if (expectedSuccesses === 1) expect(answers.filter((answer) => !answer.ok)).toEqual([lastOwner]);
+    expect(h.db.find((row) => row.entityType === "COMPANY_MEMBERSHIP" && row.role === "owner" && row.revokedAt === undefined)).toHaveLength(1);
+    expect(h.db.refusals).toEqual([]);
+  }
+});
+
+it("a live owner steps down through the membership store only while a distinct live owner remains", async () => {
+  const h = world(); h.seed(p, "owner"); h.seed(q, "owner");
+  expect(await h.invoke({ ...roleSet(p, "admin"), createdBy: p })).toEqual({ ok: true });
+  expect(await h.store.membership(p)).toMatchObject({ role: "admin" });
+  expect(await h.store.membership(q)).toMatchObject({ role: "owner" });
+  expect(h.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([expect.objectContaining({ event: "company-member-role-set", companyId: A, personId: p, fromRole: "owner", toRole: "admin", createdBy: p })]);
+  assertMirror(h, p);
+
+  const sole = world(); sole.seed(p, "owner");
+  expect(await sole.invoke({ ...roleSet(p, "member"), createdBy: p })).toEqual(lastOwner);
+  expect(await sole.store.membership(p)).toMatchObject({ role: "owner" });
+  expect(sole.db.refusals).toEqual([]);
+});
+
 it.each([false, true])("sequential demote/revoke cannot remove the final owner (reverse=%s)", async (reverse) => {
   const h = world(); h.seed(); h.seed(q);
   const calls = reverse ? [revoke(q), roleSet()] : [roleSet(), revoke(q)];

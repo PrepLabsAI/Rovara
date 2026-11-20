@@ -128,7 +128,7 @@ describe("spec 048 FR-029: the plan as a plain summary", () => {
   it("says what is created in AWS, GitHub and Slack by name, how long the build takes, and how to remove it", () => {
     expect(plan.sections.map((section) => section.title)).toEqual(["In AWS", "In GitHub", "In Slack", "Budget and alerts", "To remove it later"]);
     expect(plan.sections[0]?.lines).toEqual([
-      "The network and sign-in, the AgentX service and the Slack connection, in AWS account 123456789012 (us-east-1).",
+      "The network and sign-in, the Rovara service and the Slack connection, in AWS account 123456789012 (us-east-1).",
       "Building them takes about 21 minutes, and you can leave while it runs.",
     ]);
     expect(plan.sections[1]?.lines).toEqual(["An app named \"AgentX acme (staging)\" owned by acme. It can read code and open pull requests in the repositories you choose."]);
@@ -138,7 +138,7 @@ describe("spec 048 FR-029: the plan as a plain summary", () => {
   it("FR-030: says developer sign-in is turned on with the Slack connection, with no second approval", () => {
     expect(plan.sections[2]?.lines).toEqual([
       "An app named \"AgentX acme (staging)\" in the Slack workspace you choose.",
-      "Developers sign in to AgentX with Slack. It is turned on with the Slack connection, with no separate approval.",
+      "Developers sign in to Rovara with Slack. It is turned on with the Slack connection, with no separate approval.",
     ]);
   });
 
