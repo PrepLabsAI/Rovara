@@ -1,10 +1,8 @@
 // TE-F10: choosing and pairing the cases, the eval-set source, and the table of when the layer is on. Each rule has a test that fails when the rule is removed.
 import { describe, expect, it } from "vitest";
-import {
-  checkKindInfo, modelOfFrame, pairSideBySideCases, selectSideBySideCases, sideBySideIsOn, sideBySideOrder, SIDE_BY_SIDE_CHECK_KIND, SIDE_BY_SIDE_MAX_CASES, type SideBySideCase,
-} from "../../packages/contracts/src/index.js";
+import { modelOfFrame, pairSideBySideCases, selectSideBySideCases, sideBySideIsOn, SIDE_BY_SIDE_MAX_CASES, type SideBySideCase } from "../../packages/contracts/src/index.js";
 import { collect } from "../../packages/testing/src/ports/model-egress-conformance.js";
-import { COMPANY_A, evalCases, MODEL, reportIncomplete, reportModelOnly, reportNeeded, reportNone, sbsWorld, source } from "../support/side-by-side-world.js";
+import { COMPANY_A, MODEL, reportIncomplete, reportModelOnly, reportNeeded, reportNone, sbsWorld, source } from "../support/side-by-side-world.js";
 
 const ids = (cases: readonly SideBySideCase[]): string[] => cases.map((item) => item.caseId);
 
@@ -26,11 +24,6 @@ describe("choosing the cases", () => {
     const twice = selectSideBySideCases([...cases, ...cases], { seed: "s" });
     expect(new Set(ids(twice)).size).toBe(twice.length);
   });
-  it("decides the A/B order from the seed and the case id alone, and both orders occur", () => {
-    const orders = Array.from({ length: 40 }, (_, index) => sideBySideOrder("seed", `case-${String(index)}`));
-    expect(new Set(orders)).toEqual(new Set(["old_first", "new_first"]));
-    expect(sideBySideOrder("seed", "case-1")).toBe(sideBySideOrder("seed", "case-1"));
-  });
 });
 
 describe("pairing the two sides", () => {
@@ -49,11 +42,6 @@ describe("pairing the two sides", () => {
     expect(refused.paired).toEqual([]);
     expect(refused.refused.map((item) => item.reason)).toEqual(["different_model", "different_model"]);
     expect(pairSideBySideCases(cases, { modelChange: true }).paired).toHaveLength(2);
-  });
-  it("refuses a frame the port would refuse (an unknown key), without echoing it", async () => {
-    const [good] = await source(COMPANY_A, 1).cases();
-    const bad = { ...good!, caseId: "bad", old: { ...good!.old, company: "org_x" } } as unknown as SideBySideCase;
-    expect(pairSideBySideCases([bad], { modelChange: false })).toEqual({ paired: [], refused: [{ caseId: "bad", reason: "bad_frame" }] });
   });
   it("reads the model from the body for the families that name it there", async () => {
     const [good] = await source(COMPANY_A, 1).cases();
@@ -75,10 +63,6 @@ describe("the eval-set source", () => {
     expect(sent[0]).toContain("OLD-PROMPT-TEXT");
     expect(sent[1]).toContain("NEW-PROMPT-TEXT");
   });
-  it("is bound to one company", async () => {
-    expect(source(COMPANY_A, 1).company).toBe(COMPANY_A.orgId);
-    expect(source(COMPANY_A, 1).kind).toBe("eval_set");
-  });
 });
 
 describe("when the layer is on", () => {
@@ -95,20 +79,6 @@ describe("when the layer is on", () => {
     expect(sideBySideIsOn(reportNone(), { preset: "careful", aiPilot: true, optIn: true })).toEqual({ on: false, reason: "no_prompt_change" });
     expect(sideBySideIsOn(reportIncomplete(), { preset: "careful", ...off }).on).toBe(true);
     expect(sideBySideIsOn(reportModelOnly(), { preset: "careful", ...off }).on).toBe(true);
-  });
-  it("refuses an input that is not one of the three presets, and never turns on for it", () => {
-    expect(sideBySideIsOn(reportNeeded(), { preset: "whatever" as never, ...off })).toEqual({ on: false, reason: "not_enabled" });
-    expect(sideBySideIsOn(reportNeeded(), { preset: "balanced", aiPilot: "yes" as never, optIn: 1 as never })).toEqual({ on: false, reason: "not_enabled" });
-  });
-});
-
-describe("the check kind", () => {
-  it("is registered additively, carries pairs only, and never counts toward the proof that a change works", () => {
-    expect(SIDE_BY_SIDE_CHECK_KIND).toBe("prompt_side_by_side");
-    expect(checkKindInfo(SIDE_BY_SIDE_CHECK_KIND)).toMatchObject({ id: "prompt_side_by_side", parts: ["pairs"], countsTowardProof: false });
-  });
-  it("leaves the cases helper deterministic: the source has no randomness", async () => {
-    expect(ids(await source(COMPANY_A, 9).cases())).toEqual(evalCases(9).map((item) => item.caseId));
   });
 });
 

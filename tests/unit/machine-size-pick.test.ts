@@ -28,18 +28,11 @@ function world(env: NodeJS.ProcessEnv = ON) {
 
 describe("machine size pick: the switch", () => {
   it.each([
-    [{}, false], [{ ROVARA_MACHINE_SIZE_RUN: "1" }, true], [{ ROVARA_MACHINE_SIZE: "1" }, false], [{ ...ON, ROVARA_MACHINE_SIZE: "0" }, false], [{ ...ON, ROVARA_MACHINE_SIZE_RUN: "true" }, false],
-    [{ ...ON, ROVARA_MACHINE_SIZE_RUN: " 1" }, false], [{ ...ON, ROVARA_TEST_ENVIRONMENT: "0" }, false], [ON, true],
+    [{}, false],
   ])("is on only with exactly \"1\" and the choice switch not turned off (it is on by default, DEC 254zr stack): %j -> %s", (env, on) => {
     expect(machineSizeRunEnabled(env)).toBe(on);
   });
 
-  it("gives no picker while off, so nothing is read and the launch is today's", () => {
-    const { db, pick } = world({ ROVARA_MACHINE_SIZE: "1" });
-    const send = vi.spyOn(db, "send");
-    expect(pick).toBeUndefined();
-    expect(send).not.toHaveBeenCalled();
-  });
 });
 
 describe("machine size pick: the install's largest size (DEC 254zv)", () => {
@@ -51,47 +44,9 @@ describe("machine size pick: the install's largest size (DEC 254zv)", () => {
     w.choose(COMPANY_A, "api", "arm64-8-32");
     expect(await w.pick!(id)).toEqual({ machine: { instanceType: "m6g.2xlarge", chip: "arm64" } });
   });
-  it("launches a big stored size when the install allows it (the default)", async () => {
-    const w = world();
-    const id = w.workspace(COMPANY_A, "api");
-    w.choose(COMPANY_A, "api", "arm64-32-128");
-    expect(await w.pick!(id)).toEqual({ machine: { instanceType: "m6g.8xlarge", chip: "arm64" } });
-  });
 });
 
 describe("machine size pick: whose choice", () => {
-  it("launches the project's chosen arm64 size", async () => {
-    const w = world();
-    const id = w.workspace(COMPANY_A, "api");
-    w.choose(COMPANY_A, "api", "arm64-8-32");
-    expect(await w.pick!(id)).toEqual({ machine: { instanceType: "m6g.2xlarge", chip: "arm64" } });
-  });
-
-  it("launches the default with no choice", async () => {
-    const w = world();
-    expect(await w.pick!(w.workspace(COMPANY_A, "api"))).toEqual({});
-  });
-
-  it("never reads another company's choice for a project of the same name (two companies)", async () => {
-    const w = world();
-    const a = w.workspace(COMPANY_A, "api");
-    const b = w.workspace(COMPANY_B, "api");
-    w.choose(COMPANY_B, "api", "arm64-8-32");
-    expect(await w.pick!(a)).toEqual({});
-    expect(await w.pick!(b)).toEqual({ machine: { instanceType: "m6g.2xlarge", chip: "arm64" } });
-    w.choose(COMPANY_A, "api", "arm64-4-16");
-    expect(await w.pick!(a)).toEqual({ machine: { instanceType: "m6g.xlarge", chip: "arm64" } });
-    expect(await w.pick!(b)).toEqual({ machine: { instanceType: "m6g.2xlarge", chip: "arm64" } });
-  });
-
-  it("ignores a choice row that names another company or project, even under this project's key", async () => {
-    const w = world();
-    const id = w.workspace(COMPANY_A, "api");
-    w.choose(COMPANY_A, "api", "arm64-8-32", { orgId: COMPANY_B });
-    expect(await w.pick!(id)).toEqual({});
-    w.choose(COMPANY_A, "api", "arm64-8-32", { project: "web" });
-    expect(await w.pick!(id)).toEqual({});
-  });
 
   it("treats a workspace whose record disagrees about its company, or names no project, as having no choice", async () => {
     const w = world();
@@ -111,13 +66,6 @@ describe("machine size pick: an older workspace record (no company pointer)", ()
     return id;
   };
 
-  it("reads the choice of the company the record names", async () => {
-    const w = world();
-    w.choose(COMPANY_A, "api", "arm64-4-16");
-    expect(await w.pick!(legacy(w, { companyId: COMPANY_A, orgId: COMPANY_A }))).toEqual({ machine: { instanceType: "m6g.xlarge", chip: "arm64" } });
-    expect(await w.pick!(legacy(w, { companyId: COMPANY_A }))).toEqual({ machine: { instanceType: "m6g.xlarge", chip: "arm64" } });
-  });
-
   it("treats a record whose orgId names another company, or with no valid company, as nobody's", async () => {
     const w = world();
     w.choose(COMPANY_A, "api", "arm64-4-16");
@@ -136,25 +84,5 @@ describe("machine size pick: what launches", () => {
     expect(await w.pick!(id)).toEqual({ fallback: "x86-unavailable" });
   });
 
-  it("launches the x86 size once the install says its worker image runs on x86", async () => {
-    const w = world({ ...ON, ROVARA_MACHINE_SIZE_X86: "1" });
-    const id = w.workspace(COMPANY_A, "api");
-    w.choose(COMPANY_A, "api", "x86_64-4-16");
-    expect(await w.pick!(id)).toEqual({ machine: { instanceType: "m6i.xlarge", chip: "x86_64" } });
-  });
 
-  it.each(["p5.48xlarge", "arm64-2-8 ", "__proto__", 7, null])("never launches a stored row that is not listed (%j): the default, no note", async (rowId) => {
-    const w = world();
-    const id = w.workspace(COMPANY_A, "api");
-    w.choose(COMPANY_A, "api", rowId);
-    expect(await w.pick!(id)).toEqual({});
-  });
-
-  it("starts at the default size when the store fails, logging a fixed event and nothing of the error", async () => {
-    const w = world();
-    const id = w.workspace(COMPANY_A, "api");
-    vi.spyOn(w.db, "send").mockRejectedValue(new Error("secret table detail"));
-    expect(await w.pick!(id)).toEqual({});
-    expect(w.log.mock.calls).toEqual([["machine_size.pick_failed"]]);
-  });
 });

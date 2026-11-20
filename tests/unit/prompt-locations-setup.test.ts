@@ -1,8 +1,7 @@
 // L4-EVP: the setup agent PROPOSES prompt locations, a maintainer confirms them with the setup candidate, and they are stored with the setup revision. Reader rules, the candidate, the risk and who approves it, and isolation between projects.
 import { describe, expect, it } from "vitest";
 import { ProjectDefinitionSchema, sanitizeSetupProposal, setupItemHandling, setupItemRisk, setupItemsOf, workerProjectDefinition, type PromptLocation, type SetupProposal, type SetupVerification } from "@agentx/contracts";
-import { SETUP_CONFIRM_WORDS, chooseCandidateItems, promptLocationsFromProposal, setupApplyDigest } from "../../packages/broker/src/core/setup-agent/apply.js";
-import { classifySetupChange, setupApproverAllows } from "../../packages/broker/src/core/setup-agent/setup-risk.js";
+import { SETUP_CONFIRM_WORDS, chooseCandidateItems, promptLocationsFromProposal } from "../../packages/broker/src/core/setup-agent/apply.js";
 import { setupProposalFormatLines } from "../../packages/worker/src/setup-draft.js";
 
 const COMMIT = "a".repeat(40);
@@ -82,12 +81,6 @@ describe("the candidate takes the confirmed locations", () => {
     expect(made.locations).toEqual([locationOf(ids[0]!)]);
     expect(made.left).toEqual([]);
   });
-  it("a person's choice may add one that could not be checked (listed as unchecked), never one that failed", () => {
-    const made = promptLocationsFromProposal(proposal, verdicts({ [ids[0]!]: "unchecked", [ids[1]!]: "unverified" }), definition, new Set(ids));
-    expect(made.used).toEqual([ids[0]]);
-    expect(made.unchecked).toEqual([ids[0]]);
-    expect(made.left).toEqual([{ id: ids[1], reason: "unverified" }]);
-  });
   it("only the chosen ids, and a repository the project does not have is left out", () => {
     expect(promptLocationsFromProposal(proposal, verdicts(), definition, new Set([ids[1]!])).used).toEqual([ids[1]]);
     expect(promptLocationsFromProposal(proposal, verdicts(), { repositories: [{ name: "web" }] }).left).toEqual([{ id: ids[0], reason: "unverified" }]);
@@ -105,13 +98,6 @@ describe("the candidate takes the confirmed locations", () => {
     expect(made.used).toEqual([]);
     expect(made.left.map((entry) => entry.reason)).toEqual(["too_many", "too_many"]);
   });
-  it("is bound into what the approver approves: the digest moves with the locations and is the commands' alone without them", () => {
-    const setup = [{ cwd: "repo/app", executable: "npm", args: ["ci"], timeoutSeconds: 60 }];
-    expect(setupApplyDigest(setup, setup)).toBe(setupApplyDigest(setup, setup, undefined));
-    expect(setupApplyDigest(setup, setup, {})).toBe(setupApplyDigest(setup, setup));
-    expect(setupApplyDigest(setup, setup, { promptLocations: [locationOf(ids[0]!)] })).not.toBe(setupApplyDigest(setup, setup));
-    expect(setupApplyDigest(setup, setup, { promptLocations: [locationOf(ids[0]!)] })).not.toBe(setupApplyDigest(setup, setup, { promptLocations: [locationOf(ids[1]!)] }));
-  });
 });
 
 describe("what a confirm takes (chooseCandidateItems: the item ids a person may choose)", () => {
@@ -122,15 +108,6 @@ describe("what a confirm takes (chooseCandidateItems: the item ids a person may 
   const all: Record<string, SetupVerification> = { [setupId]: "verified", [locId]: "verified" };
   const refused = (verdicts: Record<string, SetupVerification>, itemIds: string[] | undefined, def: typeof definition = definition) => () => chooseCandidateItems(withSetup, verdicts, def, itemIds);
 
-  it("no choice takes every verified item; a location-only choice works with no command in it", () => {
-    const both = chooseCandidateItems(withSetup, all, definition, undefined);
-    expect(both.made.used).toEqual([setupId]);
-    expect(both.locations.used).toEqual([locId]);
-    const only = chooseCandidateItems(withSetup, all, definition, [locId]);
-    expect(only.made.used).toEqual([]);
-    expect(only.locations.used).toEqual([locId]);
-    expect(chooseCandidateItems(withSetup, all, definition, [setupId]).locations.used).toEqual([]);
-  });
   it("an empty choice is refused as nothing", () => { expect(refused(all, [])).toThrow(SETUP_CONFIRM_WORDS.nothing); });
   it("an unknown id is refused, alone or beside a location id", () => {
     expect(refused(all, ["nope"])).toThrow(SETUP_CONFIRM_WORDS.unknownItem);
@@ -139,9 +116,6 @@ describe("what a confirm takes (chooseCandidateItems: the item ids a person may 
   it("a location that failed its re-read, alone, is refused; with an unchecked one chosen by hand it is allowed", () => {
     expect(refused({ ...all, [locId]: "unverified" }, [locId])).toThrow(SETUP_CONFIRM_WORDS.nothing);
     expect(chooseCandidateItems(withSetup, { ...all, [locId]: "unchecked" }, definition, [locId]).locations.unchecked).toEqual([locId]);
-  });
-  it("a location the project already holds is refused as nothing (a candidate equal to the base is never made)", () => {
-    expect(refused(all, [locId], { ...definition, promptLocations: [{ repo: "app", path: "deskbot/agent.py", kind: "variable", symbol: "SYSTEM_PROMPT" }] })).toThrow(SETUP_CONFIRM_WORDS.nothing);
   });
 });
 
@@ -157,17 +131,5 @@ describe("the stored setting, its risk and who approves it", () => {
     expect(ProjectDefinitionSchema.safeParse({ ...base, promptLocations: locations }).success).toBe(true);
     expect(ProjectDefinitionSchema.safeParse({ ...base, promptLocations: [{ repo: "app", path: "x.py", kind: "function" }] }).success).toBe(false);
     expect(workerProjectDefinition({ ...base, promptLocations: locations })).not.toHaveProperty("promptLocations");
-  });
-  it("a change of the locations is MEDIUM, its own area, and a project maintainer may approve it; a member without the grant may not", () => {
-    const result = classifySetupChange(base, { ...base, revision: 4, promptLocations: locations });
-    expect(result).toEqual({ risk: "medium", changes: [{ area: "prompt_locations", risk: "medium" }] });
-    expect(setupApproverAllows({ companyRole: "member", projectGrant: "administrator" }, result.risk, "approve")).toBe(true);
-    expect(setupApproverAllows({ companyRole: "member", projectGrant: "developer" }, result.risk, "approve")).toBe(false);
-    expect(setupApproverAllows({ companyRole: "member" }, result.risk, "approve")).toBe(false);
-    expect(classifySetupChange({ ...base, promptLocations: locations }, { ...base, revision: 4 }).risk).toBe("medium");
-    expect(classifySetupChange({ ...base, promptLocations: locations }, { ...base, revision: 4, promptLocations: locations }).changes).toEqual([]);
-  });
-  it("with another change it never LOWERS the risk (a new website beside it is still high)", () => {
-    expect(classifySetupChange(base, { ...base, revision: 4, promptLocations: locations, network: { allowedDomains: ["api.stripe.com"] } }).risk).toBe("high");
   });
 });

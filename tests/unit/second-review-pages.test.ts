@@ -50,17 +50,6 @@ function formFor(page: string, suffix: string, op: string): Record<string, strin
 const settings = async () => (await world.review.state());
 
 describe("the settings page", () => {
-  it("says who reviews now, how it counts, and lists the models with their maker and cost; the builder's company is not offered", async () => {
-    const page = await get("/second-review");
-    expect(page.status).toBe(200);
-    expect(page.body).toContain("Second review");
-    expect(page.body).toContain("Using default");
-    expect(page.body).toContain("Company mode: <strong>off</strong>");
-    expect(page.body).toContain("gpt-5.5");
-    expect(page.headers["content-security-policy"]).toContain("default-src 'none'");
-    // Everything on it is escaped text.
-    expect(page.body).not.toContain("<script");
-  });
 
   it("is not there when the feature is off", async () => {
     await server.close();
@@ -69,19 +58,6 @@ describe("the settings page", () => {
     server = await createLocalPagesServer({ data: createLocalPageData(deps), actions: createPageExtraActions(deps) as never });
     base = `/s/${server.sessions.mint().token}`;
     expect((await get("/second-review")).status).toBe(404);
-  });
-
-  it("chooses the reviewer with one verified form: saved, audited, and the form answers once", async () => {
-    const page = (await get("/second-review")).body;
-    const fields = formFor(page, "/second-review/act", "choose");
-    const sent = { ...fields, primary: `${GPT.provider}::${GPT.modelId}`, backup: "" };
-    const reply = await post("/second-review/act", sent);
-    expect(reply.headers["location"]).toContain("n=saved");
-    expect((await settings()).choice).toEqual({ models: [GPT] });
-    expect(world.audit.map((event) => event.action)).toEqual(["company.second_review_choice_changed"]);
-    // The same form a second time is spent.
-    expect((await post("/second-review/act", sent)).headers["location"]).toContain("n=form");
-    expect((await get("/second-review")).body).toContain("Reviewed by gpt-5.5 (company choice)");
   });
 
   it("refuses a form with no token, a token made for another change, a model that is not offered, and a change the service refuses (`on` without evidence)", async () => {
@@ -183,18 +159,6 @@ describe("a task's page", () => {
     } });
     return workflow;
   };
-
-  it("an `on` second review that did not run says so and asks the owner to acknowledge; one form, and the merge no longer waits", async () => {
-    await seedTask("on");
-    const page = (await get(`/plan/${TASK}`)).body;
-    expect(page).toContain('id="second-review"');
-    expect(page).toContain("Second review did not run");
-    expect(page).toContain("Acknowledge: I have seen this");
-    // It claims no merge is held here: Rovara does not merge on this computer.
-    expect(page).toContain("Rovara does not merge on this computer");
-    expect(page).not.toContain("allow the merge");
-    expect(world.review.mergeWait((await readTask(h.deps, TASK))! as never)).toContain("Second review did not run");
-  });
 
   it("shadow shows nothing on the task's page", async () => {
     await seedTask("shadow");

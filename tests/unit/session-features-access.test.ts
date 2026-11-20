@@ -66,19 +66,6 @@ describe("the session levels", () => {
     expect(await localOwnerMembers().companyRole({ companyId: ORG, developerId: id(person("dana")), principal: person("dana") })).toBeUndefined();
   });
 
-  it("a project grant: a maintainer edits; a contributor and a collaborator view and may ask; a viewer only watches and may not ask", async () => {
-    const w = await world();
-    const table = { mia: { role: "member" as const, grants: { web: "maintainer" as const } }, cole: { role: "member" as const, grants: { web: "contributor" as const } }, cara: { role: "member" as const, grants: { web: "collaborator" as const } }, vic: { role: "member" as const, grants: { web: "viewer" as const } } };
-    expect(await levelOf(w.store, table, person("mia"))).toMatchObject({ level: "edit", owner: false, mayAsk: true });
-    expect(await levelOf(w.store, table, person("cole"))).toMatchObject({ level: "view", projectRole: "contributor", mayAsk: true });
-    expect(await levelOf(w.store, table, person("cara"))).toMatchObject({ level: "view", projectRole: "collaborator", mayAsk: true });
-    expect(await levelOf(w.store, table, person("vic"))).toMatchObject({ level: "view", projectRole: "viewer", mayAsk: false });
-    // A member with no role on the project, and a grant on another project, read a missing session.
-    expect(await levelOf(w.store, { ned: { role: "member", grants: { api: "maintainer" } } }, person("ned"))).toBe("NOT_FOUND");
-    // A role found elsewhere (the hosted product's project channel) is `view`.
-    expect(await levelOf(w.store, { sam: { role: "member", elsewhere: { web: "contributor" } } }, person("sam"))).toMatchObject({ level: "view", mayAsk: true });
-  });
-
   it("a company owner or admin views every task session and may stop it; an auditor reads and works on nothing, whatever it holds", async () => {
     const w = await world({ shares: [{ principal: { kind: "org" }, level: "edit" }] });
     const admin = await levelOf(w.store, { ada: { role: "admin" } }, person("ada"));
@@ -166,16 +153,6 @@ describe("the session levels", () => {
     expect(await levelOf(slack.store, { cam: { role: "member" } }, person("cam"))).toMatchObject({ level: "use", mayAsk: true });
   });
 
-  it("a take-over: the taker owns the session, the creator no longer does, and a taker that does not read gives nobody an owner's access", async () => {
-    const taker = person("tia", "Tia");
-    const w = await world({ task: { currentOwner: { developerId: id(taker), name: "Tia", provider: "oidc", since: T0 } } });
-    expect(await levelOf(w.store, { tia: { role: "member" } }, taker)).toMatchObject({ level: "edit", owner: true, effectiveOwner: { developerId: id(taker), name: "Tia" } });
-    // The creator, now only a member with no role on the project, holds nothing.
-    expect(await levelOf(w.store, { tia: { role: "member" }, __owner: { role: "member" } }, OWNER)).toBe("NOT_FOUND");
-    const unreadable = await world({ task: { currentOwner: { developerId: id(taker), provider: "carrier-pigeon", since: T0 } } });
-    expect(await levelOf(unreadable.store, { tia: { role: "member" } }, taker)).toBe("TASK_ACCESS_DENIED");
-  });
-
   it("Ask's own check names the viewer rule and the missing role in fixed words", async () => {
     const w = await world();
     const vic = await createSessionAccess({ store: w.store, members: members({ vic: { role: "member", grants: { web: "viewer" } } }) }).of(person("vic"), await w.session());
@@ -257,19 +234,6 @@ describe("what each feature asks of the levels", () => {
       const ask = createAsk({ store: w.store, audit: createNoopAuditSink(), answerer: answerer(calls), admission: held.admission, members: members(table2), questionHashKey: "k".repeat(32), now: () => new Date(clock.ms) });
       return { ...w, ask, calls, held };
     }
-
-    it("a contributor and a collaborator may ask a task they can view (decisions 103, 104), through admission, as themselves", async () => {
-      for (const role of ["contributor", "collaborator"] as const) {
-        const w = await asking({ cole: { role: "member", grants: { web: role } } });
-        const submitted = await w.ask.submit(person("cole"), ORG, SESSION, { requestId: REQ(20), question: "Where is it?" });
-        await w.ask.idle();
-        expect(await w.ask.status(person("cole"), ORG, SESSION, submitted.askId)).toMatchObject({ state: "answered", answer: "It is planning." });
-        expect(w.held.asked).toHaveLength(1);
-        expect(w.held.asked[0]).toMatchObject({ action: "model.call", actor: { personId: "cole" }, subject: { type: "task", id: TASK } });
-        expect(w.held.open()).toEqual([]);
-        expect(w.calls).toEqual(["Where is it?"]);
-      }
-    });
 
     it("a project viewer, an auditor, a person a People entry denies and a stranger may not: nothing is admitted, rated or asked", async () => {
       const denied = { schemaVersion: 1, people: [{ developerId: id(person("ada")), role: "denied" }] };

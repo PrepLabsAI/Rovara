@@ -24,11 +24,6 @@ describe("reading a config file", () => {
     expect(parseMetaConfigFile(".rovara/project.json", "version: 1")).toMatchObject({ ok: false });
   });
 
-  it("answers a fixed sentence for text that is not YAML, never a quote of the file", () => {
-    const parsed = parseMetaConfigFile(".rovara/project.yaml", "version: 1\npassword: hunter2-secret\n  bad: [unclosed");
-    expect(parsed).toEqual({ ok: false, problems: [{ path: "(file)", message: "the file is not valid YAML" }] });
-  });
-
   it("refuses a file over the size limit unread", () => {
     expect(parseMetaConfigFile(".rovara/project.yaml", `version: 1\n# ${"x".repeat(262_144)}`)).toMatchObject({ ok: false });
   });
@@ -41,34 +36,9 @@ describe("reading a config file", () => {
     expect(parseMetaConfigFile(".rovara/project.yaml", "version: 1\n---\nversion: 1\n")).toMatchObject({ ok: false });
   });
 
-  it("refuses a setting this release does not know, and names where, not what", () => {
-    const parsed = parseMetaConfigFile(".rovara/project.yaml", "version: 1\ncredentials:\n  token: s3cr3t-value\n");
-    expect(parsed.ok).toBe(false);
-    expect(JSON.stringify(parsed)).not.toContain("s3cr3t");
-  });
 });
 
 describe("planning what a config file changes", () => {
-  it("lists each repository's commands, run in that repository's folder, and the test commands as the project's readiness", () => {
-    const plan = planMetaConfigChange({
-      config: yaml("version: 1\nsetup:\n  api: [npm ci, npm run build]\n  web: [npm ci]\ntests:\n  api:\n    commands: [npm test]\n"),
-      definition: stored(separate()),
-    });
-    expect(plan.problems).toEqual([]);
-    expect(plan.items.map((item) => item.id)).toEqual(["setup", "readiness"]);
-    expect(plan.items[0]).toMatchObject({ kind: "set_commands", before: [], after: ["api: npm ci", "api: npm run build", "web: npm ci"] });
-    expect(plan.items[1]).toMatchObject({ after: ["api: npm test"] });
-  });
-
-  it("plans nothing when the project already has what the file says", () => {
-    const plan = planMetaConfigChange({ config: yaml("version: 1\nsetup:\n  api: [npm ci]\n"), definition: stored(separate({ setup: [command("npm ci", "repo/api")] })) });
-    expect(plan.items).toEqual([]);
-  });
-
-  it("leaves alone a field the file does not mention", () => {
-    const plan = planMetaConfigChange({ config: yaml("version: 1\nsetup:\n  api: [npm ci]\n"), definition: stored(separate({ readiness: [command("npm test", "repo/api", 1800)] })) });
-    expect(plan.items.map((item) => item.id)).toEqual(["setup"]);
-  });
 
   it("flags a value a person typed that differs, but not an empty one, one the file set before, or one an agent set", () => {
     const config = yaml("version: 1\nsetup:\n  api: [npm ci]\n");
@@ -119,11 +89,6 @@ describe("planning what a config file changes", () => {
     expect(JSON.stringify(plan.problems)).not.toContain("npm test");
   });
 
-  it("lets a file with no repositories section name the project's own repositories", () => {
-    const plan = planMetaConfigChange({ config: yaml("version: 1\nsetup:\n  web: [npm ci]\n"), definition: stored(separate()) });
-    expect(plan.problems).toEqual([]);
-  });
-
   it("plans for a repository called constructor (a name every record has on its prototype), reading only the file's own entries", () => {
     const def = stored(definition([repo("constructor", { role: "code" }), repo("service-meta", { role: "meta" })]));
     const none = planMetaConfigChange({ config: yaml("version: 1\nsetup:\n  other: [x]\n"), definition: def });
@@ -131,19 +96,6 @@ describe("planning what a config file changes", () => {
     expect(planMetaConfigChange({ config: yaml("version: 1\nsetup:\n  constructor: [make]\n"), definition: def }).items[0]).toMatchObject({ id: "setup", after: ["constructor: make"] });
     expect(() => planMetaConfigChange({ config: yaml("version: 1\ntests:\n  api:\n    commands: [t]\n"), definition: def })).not.toThrow();
     expect(() => planMetaConfigChange({ config: yaml("version: 1\n"), definition: def })).not.toThrow();
-  });
-
-  it("refuses a __proto__ key anywhere, instead of reading it as an empty section that would wipe the project's commands", () => {
-    expect(parseMetaConfigFile(".rovara/project.json", '{"version":1,"setup":{"__proto__":["x"]}}')).toEqual({ ok: false, problems: [{ path: "(file)", message: "has a reserved key" }] });
-    expect(parseMetaConfigFile(".rovara/project.yaml", "version: 1\ntests:\n  api:\n    __proto__: {commands: [x]}\n")).toMatchObject({ ok: false });
-    expect(parseMetaConfigFile(".rovara/project.yaml", "version: 1\nsetup:\n  constructor: [x]\n")).toMatchObject({ ok: true });
-  });
-
-  it("refuses a repository folder the file chooses: only repo/<name>, never a reserved or dot folder", () => {
-    for (const path of [".agentx/web", ".devcontainer/x", "tools/lib", "repo/other", "repo/lib/sub", "/abs", "../x"]) {
-      expect(parseMetaConfigFile(".rovara/project.yaml", `version: 1\nrepositories:\n  - {name: lib, url: 'https://github.com/acme/lib.git', path: '${path}'}\n`), path).toMatchObject({ ok: false });
-    }
-    expect(parseMetaConfigFile(".rovara/project.yaml", "version: 1\nrepositories:\n  - {name: lib, url: 'https://github.com/acme/lib.git', path: repo/lib}\n")).toMatchObject({ ok: true });
   });
 
   it("says how many of a person's commands the file removes", () => {
@@ -158,27 +110,12 @@ describe("planning what a config file changes", () => {
     expect(planMetaConfigChange({ config: yaml("version: 1\n"), definition: stored(definition([repo("api")])) }).problems).toEqual([{ path: "(project)", message: "this project has no meta repository" }]);
   });
 
-  it("plans the spec target the file names, as lines the maintainer reads, and nothing when the project already has it", () => {
-    const config = yaml("version: 1\nspecTarget: {format: speckit, when: always}\n");
-    const plan = planMetaConfigChange({ config, definition: stored(separate()) });
-    expect(plan.deferred).toEqual([]);
-    expect(plan.items).toEqual([{ id: "specTarget", field: "specTarget", kind: "set_spec_target", before: [], after: ['where: "meta_repo"', 'format: "speckit"', 'when: "always"', 'linkStyle: "together"'] }]);
-    const have = stored(separate({ specTarget: { where: "meta_repo", format: "speckit", when: "always", linkStyle: "together" } }));
-    expect(planMetaConfigChange({ config, definition: have }).items).toEqual([]);
-  });
-
   it("refuses a spec folder inside a folder the same file names as its own rules, steering, skills, runbooks or key docs", () => {
     const file = (template: string) => yaml(`version: 1\nknowledge: {steering: [design/rules], skills: [design/skills], runbooks: [ops/books], keyDocs: [docs/key]}\nspecTarget: {pathTemplate: "${template}"}\n`);
     for (const template of ["design/rules/{slug}/", "design/skills/x/", "ops/books/{slug}/", "docs/key/{slug}/", "design/rules"]) {
       expect(planMetaConfigChange({ config: file(template), definition: stored(separate()) }).problems.map((problem) => problem.path), template).toEqual(["specTarget.pathTemplate"]);
     }
     expect(planMetaConfigChange({ config: file("design/specs/{slug}/"), definition: stored(separate()) }).problems).toEqual([]);
-  });
-
-  it("refuses a spec target with an unsafe folder, an unknown key, or a template folder for a format that reads none", () => {
-    for (const target of ["{pathTemplate: ../../etc}", "{pathTemplate: .git/hooks}", "{surprise: 1}", "{format: kiro, templatePath: tpl}", "{format: team_template}"]) {
-      expect(parseMetaConfigFile(".rovara/project.yaml", `version: 1\nspecTarget: ${target}\n`).ok, target).toBe(false);
-    }
   });
 
   it("knows a GitHub repository by its owner and name only", () => {

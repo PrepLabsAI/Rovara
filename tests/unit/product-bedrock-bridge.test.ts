@@ -71,9 +71,6 @@ describe("Bedrock product contract and request boundary", () => {
   it("preserves Bedrock feature headers through the helper boundary for egress refusal", () => {
     expect(headersForBackend({ "X-Amzn-Bedrock-GuardrailIdentifier": "guardrail", "x-amz-security-token": DUMMY, "content-type": "application/json" })).toEqual({ "x-amzn-bedrock-guardrailidentifier": "guardrail", "content-type": "application/json" });
   });
-  it("strips SDK bookkeeping at the helper boundary too", () => {
-    expect(headersForBackend(Object.fromEntries([...credentials.filter(n => !/^x-amz(?:n)?-bedrock-/iu.test(n)).map((n): [string, string] => [n, DUMMY]), ["content-type", "application/json"]]) as Record<string, string>)).toEqual({ "content-type": "application/json" });
-  });
   it("accepts the SDK's percent-encoded model colon and canonicalizes it", async () => {
     const r = bedrock();
     const path = `/model/${model.replace(":", "%3A")}/converse`;

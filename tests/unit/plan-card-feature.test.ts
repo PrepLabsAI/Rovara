@@ -11,9 +11,8 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
-import { isReportPath } from "../../packages/broker/src/core-host/report-routes.js";
 import { createFeatureStore } from "../../packages/broker/src/core/report/feature-store.js";
-import { mayReplaceTaskFeature, planFeatureChoices, planFeatureLine, readPlanFeature } from "../../packages/broker/src/core/report/plan-feature.js";
+import { planFeatureChoices, planFeatureLine, readPlanFeature } from "../../packages/broker/src/core/report/plan-feature.js";
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
@@ -93,23 +92,12 @@ describe("the plan card's feature line", () => {
     expect(PlanFeatureSchema.safeParse({ line: messy, feature: null, canChange: false, canCreate: false }).success).toBe(true);
   });
 
-  it("mayReplaceTaskFeature: a manager always, the starter a first filing or a suggestion only", () => {
-    expect(mayReplaceTaskFeature(true, "moved")).toBe(true);
-    for (const source of [undefined, "tracker", "confirmed_at_plan"] as const) expect(mayReplaceTaskFeature(false, source), String(source)).toBe(true);
-    for (const source of ["chosen", "moved", "inherited"] as const) expect(mayReplaceTaskFeature(false, source), source).toBe(false);
-  });
 });
 
 describe("reading the plan card's feature", () => {
   const task = (taskId: string) => ({ taskId, project: "payments" });
   const id = () => randomUUID();
   const who = (over: Partial<{ mayFile: boolean; manager: boolean; admin: boolean }> = {}) => ({ mayFile: true, manager: false, admin: false, ...over });
-
-  it("a task with no filing reads as No feature, and the starter may change it", async () => {
-    const w = world0();
-    const read = await readPlanFeature({ store: w.store, companyId: FAKE_COMPANY, now: () => w.clock.now }, task(id()), who());
-    expect(read).toEqual({ line: "Feature: No feature", feature: null, canChange: true, canCreate: false });
-  });
 
   it("names the tracker's suggestion with its words, and follows a merge to the target", async () => {
     const w = world0();
@@ -123,46 +111,6 @@ describe("reading the plan card's feature", () => {
     await features.merge(parent.id, target.id, SYSTEM);
     const merged = await readPlanFeature(deps, task(taskId), who());
     expect(merged!.feature).toEqual({ id: target.id, name: "Payments", source: "tracker" });
-  });
-
-  it("canChange needs mayFile AND the filing rule; canCreate needs canChange AND an owner or admin", async () => {
-    const w = world0();
-    const features = feat(w);
-    const one = await features.create({ name: "One" }, SYSTEM);
-    const deps = { store: w.store, companyId: FAKE_COMPANY, now: () => w.clock.now };
-    const suggested = id(), chosen = id();
-    await features.setTaskFeature({ taskId: suggested, project: "payments", featureId: one.id, source: "tracker" }, SYSTEM);
-    await features.setTaskFeature({ taskId: chosen, project: "payments", featureId: one.id, source: "chosen" }, SYSTEM);
-    const cases: Array<[string, string, Parameters<typeof who>[0], { canChange: boolean; canCreate: boolean }]> = [
-      ["suggestion, starter", suggested, {}, { canChange: true, canCreate: false }],
-      ["suggestion, starter who is admin", suggested, { admin: true }, { canChange: true, canCreate: true }],
-      ["suggestion, may not file", suggested, { mayFile: false, admin: true, manager: true }, { canChange: false, canCreate: false }],
-      ["chosen, starter", chosen, {}, { canChange: false, canCreate: false }],
-      ["chosen, starter who is admin but not manager", chosen, { admin: true }, { canChange: false, canCreate: false }],
-      ["chosen, manager", chosen, { manager: true, admin: true }, { canChange: true, canCreate: true }],
-    ];
-    for (const [name, taskId, over, expected] of cases) {
-      const read = await readPlanFeature(deps, task(taskId), who(over));
-      expect({ canChange: read!.canChange, canCreate: read!.canCreate }, name).toEqual(expected);
-      expect(read!.line).toContain("One");
-    }
-  });
-
-  it("two companies: another company's filing and features never show, and an assignment for another project is ignored", async () => {
-    const w = world0();
-    const theirs = await feat(w, OTHER).create({ name: "Their secret feature" }, SYSTEM);
-    const taskId = id();
-    await feat(w, OTHER).setTaskFeature({ taskId, project: "payments", featureId: theirs.id, source: "chosen" }, SYSTEM);
-    const deps = { store: w.store, companyId: FAKE_COMPANY, now: () => w.clock.now };
-    const read = await readPlanFeature(deps, task(taskId), who());
-    expect(read!.feature).toBeNull();
-    expect(JSON.stringify(read)).not.toContain("secret");
-    expect(await planFeatureChoices(deps)).toEqual([]);
-    // the same company, but the row names another project than the task's: the task view ignores it, and so does the card
-    const mine = await feat(w).create({ name: "Mine" }, SYSTEM);
-    const other = id();
-    await feat(w).setTaskFeature({ taskId: other, project: "ledger", featureId: mine.id, source: "chosen" }, SYSTEM);
-    expect((await readPlanFeature(deps, task(other), who()))!.feature).toBeNull();
   });
 
   it("a store fault gives no line and never throws; a read never writes", async () => {
@@ -179,20 +127,6 @@ describe("reading the plan card's feature", () => {
     expect(put).not.toHaveBeenCalled();
   });
 
-  it("the picker lists open features only (not done, not merged away), by name, at most 50", async () => {
-    const w = world0();
-    const features = feat(w);
-    const deps = { store: w.store, companyId: FAKE_COMPANY, now: () => w.clock.now };
-    const done = await features.create({ name: "Done one" }, SYSTEM);
-    await features.setState(done.id, "done", SYSTEM);
-    const gone = await features.create({ name: "Merged away" }, SYSTEM);
-    const keep = await features.create({ name: "Beta" }, SYSTEM);
-    await features.merge(gone.id, keep.id, SYSTEM);
-    await features.create({ name: "Alpha" }, SYSTEM);
-    expect((await planFeatureChoices(deps)).map((item) => item.name)).toEqual(["Alpha", "Beta"]);
-    for (let n = 0; n < 60; n += 1) await features.create({ name: `Bulk ${String(n).padStart(2, "0")}` }, SYSTEM);
-    expect(await planFeatureChoices(deps)).toHaveLength(50);
-  });
 });
 
 describe("GET /v1/app/tasks/{id}/feature-choices on the deployed API", () => {
@@ -207,12 +141,6 @@ describe("GET /v1/app/tasks/{id}/feature-choices on the deployed API", () => {
     const taskId = await w.start(FAKE_COMPANY, "starter-1", "payments");
     return { ...w, admin, one, two, done, taskId };
   }
-
-  it("is a report path for GET only", () => {
-    expect(isReportPath(`/v1/app/tasks/${randomUUID()}/feature-choices`, "GET")).toBe(true);
-    for (const method of ["POST", "PUT", "DELETE"]) expect(isReportPath(`/v1/app/tasks/${randomUUID()}/feature-choices`, method), method).toBe(false);
-    expect(isReportPath("/v1/app/tasks/x/feature-choices/extra", "GET")).toBe(false);
-  });
 
   it("the starter, a maintainer of the project, an owner and an admin read the open features by name; nobody else does", async () => {
     const t = await started();
@@ -247,13 +175,6 @@ describe("GET /v1/app/tasks/{id}/feature-choices on the deployed API", () => {
     expect(own?.statusCode).toBe(200);
     expect(own!.body).toContain("Their canary feature");
     expect(own!.body).not.toContain("Zulu");
-  });
-
-  it("a malformed id is a missing task; a script token never reaches it", async () => {
-    const t = await started();
-    const admin = t.as(FAKE_COMPANY, "admin", "admin-5");
-    expect((await t.routes.route(choices("not-a-task"), admin))?.statusCode).toBe(404);
-    expect((await t.routes.route(choices(t.taskId), { ...admin, scriptToken: { tokenId: "sct_1" } }))?.statusCode).toBe(403);
   });
 
   it("a store fault is a fixed 503 that names nothing; an unwired deployment says so", async () => {

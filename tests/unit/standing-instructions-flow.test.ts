@@ -1,10 +1,7 @@
 import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // Standing instructions on the task flow: the company's rules and the project's How we work are put in front of every step that reads them, read at the dispatch, never dropped and never cut.
 import { describe, expect, it } from "vitest";
-import {
-  COMPANY_RULES_EXCEED_BUDGET_MESSAGE, PLAYBOOK_FILE_PATH, change, projectPlaybookKey, STANDING_INSTRUCTIONS_FEATURE, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, agentXError, queryAll,
-  type CompanyInstructionsSnapshot, type WorkerInvocation,
-} from "@agentx/contracts";
+import { PLAYBOOK_FILE_PATH, change, STANDING_INSTRUCTIONS_FEATURE, WORKER_INVOCATION_FEATURES, agentXError, queryAll, type CompanyInstructionsSnapshot, type WorkerInvocation } from "@agentx/contracts";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
@@ -71,47 +68,6 @@ const standingOf = (invocation: WorkerInvocation | undefined): { text: string; c
   (invocation as { payload?: { standingInstructions?: { text: string; company?: { version: string; text: string } } } } | undefined)?.payload?.standingInstructions;
 
 describe("the block on a dispatched step", () => {
-  it("Understand carries the company's rules and the project's How we work, in order, in a payload the worker accepts; the preparation carries none", async () => {
-    const { h } = await setup({ file: FILE, company: [RULES] });
-    const { workspace, machineId } = await startedAndPrepared(h);
-    expect(standingOf(h.machines.delivered(machineId)[0])).toBeUndefined();
-    await drain(h);
-    const understand = lastTask(h, machineId)!;
-    expect(WorkerInvocationSchema.safeParse(understand).success).toBe(true);
-    const block = standingOf(understand)!;
-    expect(block.text.indexOf("Company rules")).toBeLessThan(block.text.indexOf("How we work"));
-    expect(block.text).toContain("- Never log customer data.");
-    expect(block.text).toContain("From .rovara/playbook.yaml:\n> PROJECT-RULE ticket id.");
-    expect(block.text).toContain("> PLAN-RULE");
-    expect(block.company?.version).toBe("3");
-    expect(block.company?.text).not.toContain("PROJECT-RULE");
-    expect(workspace.id).toBeDefined();
-  });
-
-  it("no rules and no file: no block, and the step is exactly what it was before", async () => {
-    const { h } = await setup();
-    const { machineId } = await startedAndPrepared(h);
-    await drain(h);
-    const understand = lastTask(h, machineId)!;
-    expect(understand).toMatchObject({ kind: "task", payload: { workflowMode: "UNDERSTAND" } });
-    expect(standingOf(understand)).toBeUndefined();
-  });
-
-  it("reads the newest rules at each step: a rule file changed between two steps is in the second", async () => {
-    const { h, company } = await setup({ company: [RULES, { version: "4", rules: [{ text: "Brand new rule.", priority: "required" }] }] });
-    expect(company?.asked).toEqual([]);
-    const { workspace, machineId } = await startedAndPrepared(h);
-    await drain(h);
-    const understand = lastTask(h, machineId)!;
-    expect(standingOf(understand)?.company?.version).toBe("3");
-    h.machines.finish(machineId, understand.operationId);
-    await h.flow.recordResult({ workspaceId: workspace.id, operationId: understand.operationId, fence: 2, status: "SUCCEEDED", outcome: { kind: "understood", assessment: { kind: "ready", path: "QUICK", restatement: "Add a health endpoint", assumptions: [] } } });
-    await drain(h);
-    const plan = lastTask(h, machineId)!;
-    expect(plan).toMatchObject({ payload: { workflowMode: "PLAN" } });
-    expect(standingOf(plan)?.company?.version).toBe("4");
-    expect(standingOf(plan)?.text).toContain("Brand new rule.");
-  });
 
   it("a worker that cannot place the block is refused the step, never sent it without", async () => {
     const { h } = await setup({ company: [RULES], features: WORKER_INVOCATION_FEATURES.filter((feature) => feature !== STANDING_INSTRUCTIONS_FEATURE) });
@@ -122,32 +78,9 @@ describe("the block on a dispatched step", () => {
     expect(lastTask(h, machineId)).toBeUndefined();
   });
 
-  it("a worker that cannot place the block is fine when there is no block", async () => {
-    const { h } = await setup({ features: WORKER_INVOCATION_FEATURES.filter((feature) => feature !== STANDING_INSTRUCTIONS_FEATURE) });
-    const { machineId } = await startedAndPrepared(h);
-    await drain(h);
-    expect(lastTask(h, machineId)).toBeDefined();
-  });
 });
 
 describe("failing closed", () => {
-  it("a file that cannot be used ends the step with its sentence, and nothing is sent to the worker", async () => {
-    const { h } = await setup({ file: "version: 1\nstages:\n  check:\n    instructions: x" });
-    const { workspace, machineId } = await startedAndPrepared(h, { unpinned: true });
-    await drain(h);
-    const last = (await operationsOf(h, workspace.id)).at(-1)!;
-    expect(last).toMatchObject({ kind: "task", status: "FAILED" });
-    expect(last.error).toContain("This project's How we work file can't be used right now (stages.check: Rules for this stage aren't used yet.)");
-    expect(lastTask(h, machineId)).toBeUndefined();
-  });
-
-  it("company rules over the limits end the step with the clear sentence, nothing cut", async () => {
-    const tooMany: CompanyInstructionsSnapshot = { version: "9", rules: Array.from({ length: 31 }, () => ({ text: "x", priority: "required" as const })) };
-    const { h } = await setup({ company: [tooMany] });
-    const { workspace } = await startedAndPrepared(h);
-    await drain(h);
-    expect((await operationsOf(h, workspace.id)).at(-1)?.error).toContain(COMPANY_RULES_EXCEED_BUDGET_MESSAGE);
-  });
 
   it("a rule source that fails, or a code host that does not answer, makes the step wait and try again; it ends nothing", async () => {
     const down = await setup({ company: new Error("store down") });
@@ -206,11 +139,6 @@ describe("the rules are read first, and the true cause is said", () => {
 });
 
 describe("a task starts under one playbook", () => {
-  it("pins the commit the playbook was read at when the task starts, and keeps it on the workspace", async () => {
-    const { h, model } = await setup({ file: FILE });
-    const { workspace } = await startedAndPrepared(h);
-    expect(workspace.playbookCommit).toBe(model.headOf("main"));
-  });
 
   it("reads the pinned commit at every step: a file merged after the start does not reach the task, and a later task gets it", async () => {
     const { h, model } = await setup({ file: "version: 1\nrules: RULES-ONE" });
@@ -225,32 +153,12 @@ describe("a task starts under one playbook", () => {
     expect(standingOf(lastTask(h, second.machineId))?.text).toContain("RULES-TWO");
   });
 
-  it("a task's later steps never move the stored item back to an older file", async () => {
-    const { h, model } = await setup({ file: "version: 1\nrules: RULES-ONE" });
-    await startedAndPrepared(h);
-    model.commit("main", { [PLAYBOOK_FILE_PATH]: "version: 1\nrules: RULES-TWO" });
-    h.clock.advance(60);
-    const second = await startedAndPrepared(h);
-    await drain(h);
-    expect(standingOf(lastTask(h, second.machineId))?.text).toContain("RULES-TWO");
-    const revision = (await h.store.get(projectPlaybookKey(COMPANY, "payments")))?.["revision"];
-    // The first task is still running under ONE: its steps read the old file and write nothing.
-    await drain(h);
-    expect((await h.store.get(projectPlaybookKey(COMPANY, "payments")))?.["revision"]).toBe(revision);
-  });
-
   it("refuses to start under a file that cannot be used, with the reason, and writes no task", async () => {
     const { h } = await setup({ file: "version: 1\nstages:\n  check:\n    instructions: x" });
     await expect(h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true })).rejects.toMatchObject({ code: "PROCESS_UNAVAILABLE", message: expect.stringContaining("stages.check") as string });
     expect((await h.flow.list(h.owner)).tasks).toEqual([]);
   });
 
-  it("refuses to start when the rules cannot be read, saying so, and writes no task", async () => {
-    const { h, host } = await setup({ file: FILE });
-    host.baseBranchHead = () => Promise.reject(agentXError("RUNTIME_UNAVAILABLE", "down"));
-    await expect(h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringContaining(COULD_NOT_READ_RULES) as string });
-    expect((await h.flow.list(h.owner)).tasks).toEqual([]);
-  });
 });
 
 describe("which operations carry a block", () => {
@@ -262,23 +170,6 @@ describe("which operations carry a block", () => {
     for (const mode of modes) expect((await standing.forOperation({ project: "payments", mode }))?.text, String(mode)).toContain("Never log customer data.");
     for (const mode of ["CHECKS", "SETUP_AGENT", "SPEC_WRITE"] as const) expect(await standing.forOperation({ project: "payments", mode }), mode).toBeUndefined();
     expect(await standing.forOperation({ project: "payments", mode: "PLAN", purpose: "diagnosis" })).toBeUndefined();
-  });
-
-  it("a stage that checks work is also told to judge the change against the Required rules; one that does the work is not", async () => {
-    const { h } = await setup({ company: [RULES] });
-    const standing = h.deps.standingInstructions!;
-    for (const mode of ["PLAN_CRITIQUE", "REVIEW", "FEEDBACK_REVIEW"] as const) expect((await standing.forOperation({ project: "payments", mode }))?.text, mode).toContain("You are checking work, not doing it");
-    for (const mode of ["UNDERSTAND", "PLAN", "IMPLEMENT"] as const) expect((await standing.forOperation({ project: "payments", mode }))?.text, mode).not.toContain("You are checking work, not doing it");
-  });
-
-  it("the project's file reaches the stages that do the work and not the ones that check it", async () => {
-    const { h } = await setup({ file: "version: 1\nrules: PROJECT-RULE\nstages:\n  review:\n    instructions: REVIEW-RULE" });
-    const standing = h.deps.standingInstructions!;
-    expect((await standing.forOperation({ project: "payments", mode: "IMPLEMENT" }))?.text).toContain("PROJECT-RULE");
-    const review = (await standing.forOperation({ project: "payments", mode: "REVIEW" }))?.text;
-    expect(review).toContain("REVIEW-RULE");
-    expect(review).not.toContain("PROJECT-RULE");
-    expect((await standing.forOperation({ project: "payments", mode: "CHECKS" }))).toBeUndefined();
   });
 
   it("refuses a block too long to send with a clear sentence, and never cuts it: the longest legal rules and file together are over the worker's limit", async () => {

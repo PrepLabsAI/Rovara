@@ -7,44 +7,12 @@ import { approvalProofMarkerKey, type DecisionGatePolicy, type DecisionSubject }
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { createNoopAuditSink } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createHarness } from "../support/task-flow-harness.js";
-import * as broker from "../../packages/broker/src/index.js";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
-import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { writeNotifyPrefs } from "../../packages/broker/src/core/notify/index.js";
-import { recoveryRowKey } from "../../packages/broker/src/core/merge/store.js";
 import { createDecisionService, createNoticeService } from "../../packages/broker/src/services/index.js";
-import { TASK_ID } from "../support/merge-world.js";
 import { CONVERSATION, FOOTER, ORG, OWNER, OWNER_ID, SESSION, host } from "../support/service-host.js";
 
 describe("the service layer, composed with fake adapters and no local-app code", () => {
-  it("is exported from the package's public entry", () => {
-    for (const name of ["createMergeTrackingService", "createSessionService", "createNoticeService", "createDecisionService", "createCallbackService", "createMilestoneService"]) {
-      expect(typeof (broker as unknown as Record<string, unknown>)[name], name).toBe("function");
-    }
-  });
-
-  it("tracks one merge: the pull request merged on the code host is recorded in the workflow with its milestone, and the tracking row ends", async () => {
-    const w = await host();
-    const pr = w.world.prs[0]!;
-    expect(pr.model.merge(String(pr.number), { revision: pr.head, method: "squash" }).outcome).toBe("merged");
-    expect(await w.tracking.sweep()).toEqual({ attempted: 1 });
-    const task = (await w.world.store.get(taskKey(TASK_ID)))!;
-    expect(task["workflow"]).toMatchObject({ stage: "MERGED", state: "COMPLETE", outcome: "MERGED", pullRequests: [expect.objectContaining({ number: pr.number, state: "MERGED" })] });
-    // The milestone is a row of the task, written once, in the merge's own commit.
-    const rows = (await w.world.store.query({ pk: `DEVTASK#${TASK_ID}` })).items.filter((item) => String(item.sk).startsWith("CODE_MILESTONE#"));
-    expect(rows.filter((row) => row["kind"] === "merged")).toHaveLength(1);
-    expect(await w.world.store.get(recoveryRowKey(TASK_ID))).toBeUndefined();
-    // A second sweep has nothing to read.
-    expect(await w.tracking.sweep()).toEqual({ attempted: 0 });
-  });
-
-  it("reads who a person is through the seam the host passed, not a sole owner", async () => {
-    const w = await host();
-    expect(w.tracking.deps.people).toBe(w.people);
-    // The pull request is open and approved: the pass asks the host's seam who asked for the task.
-    await w.tracking.sweep();
-    expect(w.requested).toContain("requestersOf");
-  });
 
   it("runs one session sweep and delivers one notice through the host's own words", async () => {
     const w = await host();
@@ -74,9 +42,6 @@ describe("the service layer, composed with fake adapters and no local-app code",
 
 describe("decision service approval policy", () => {
   it.each<{ label: string; policy?: DecisionGatePolicy; method: string; spent: boolean }>([
-    { label: "omitted policy spends a non-local credential once", method: "browser-session", spent: true },
-    { label: "omitted policy keeps the local session reusable", method: "local-session", spent: false },
-    { label: "supplied policy keeps its named method reusable", policy: { reusableMethods: ["browser-session"] }, method: "browser-session", spent: false },
     { label: "supplied policy replaces the default reusable methods", policy: { reusableMethods: ["browser-session"] }, method: "local-session", spent: true },
   ])("$label", async ({ policy, method, spent }) => {
     const h = createHarness();

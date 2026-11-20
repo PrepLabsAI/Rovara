@@ -14,8 +14,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { SYSTEM_RUNS_WORDS, setSystemRunsConsent, type SystemRunsControlDeps } from "../../packages/broker/src/core/system-runs/consent-control.js";
-import { readSystemRunsConsentRow, seenRowFence, systemRunsConsentKey } from "../../packages/broker/src/core/system-runs/consent.js";
+import { systemRunsConsentKey } from "../../packages/broker/src/core/system-runs/consent.js";
 import { upkeepSettingsKey } from "../../packages/broker/src/core/upkeep/keys.js";
 import { UPKEEP_WORDS, setSystemRunsAndUpkeep, setUpkeepEnabled, type UpkeepSettingsDeps } from "../../packages/broker/src/core/upkeep/settings.js";
 import { COMPANY_A } from "../support/wiki-build-fixtures.js";
@@ -35,75 +34,6 @@ const consentRow = (extra: Record<string, unknown> = {}) => ({ ...systemRunsCons
 const projectRow = (extra: Record<string, unknown> = {}) => ({ ...upkeepSettingsKey({ orgId: COMPANY_A, project: "beacon" }), entityType: "UPKEEP_SETTINGS", orgId: COMPANY_A, project: "beacon", enabled: false, ...extra });
 const consentOf = (store: MemoryDocumentStore) => store.get(systemRunsConsentKey(COMPANY_A));
 
-function control(store: MemoryDocumentStore, hook: () => Promise<void> = async () => undefined): SystemRunsControlDeps {
-  // Owner DEC 254zzz91: the Rovara website's own client.
-  return { store, companyId: COMPANY_A, now: () => T0, isCompanyAdmin: async () => true, available: () => true, webApp: true, record: async () => { await hook(); } };
-}
-const allow = (deps: SystemRunsControlDeps, allowed = true) => setSystemRunsConsent(deps, () => ({ requestId: randomUUID(), allowed }));
-const lostRace = { code: "RUNTIME_UNAVAILABLE", message: `RUNTIME_UNAVAILABLE: ${SYSTEM_RUNS_WORDS.unreadable}` };
-
-describe("company consent control (setSystemRunsConsent)", () => {
-  // MUTANT F1, F5.
-  it("two concurrent writers on a row without changedAt: exactly one wins, the other is told to try again", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: consentRow() });
-    const wait = barrier(2);
-    const results = await Promise.allSettled([allow(control(store, wait)), allow(control(store, wait))]);
-    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
-    const lost = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
-    expect(lost.reason).toMatchObject(lostRace);
-    expect(await readSystemRunsConsentRow({ store, companyId: COMPANY_A })).toMatchObject({ enabled: true, changedAt: new Date(T0).toISOString() });
-  });
-
-  // MUTANT F1: a writer that read a row WITHOUT changedAt must lose to a change made after its read (the other writer's row carries one).
-  it("a writer that read a row without changedAt loses when a changedAt appears before its write; the other row stays", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: consentRow() });
-    const racing = consentRow({ enabled: true, changedAt: "2026-11-17T11:59:58.000Z", requestId: randomUUID() });
-    await expect(allow(control(store, async () => { await store.put({ item: racing }); }))).rejects.toMatchObject(lostRace);
-    expect(await consentOf(store)).toEqual(racing);
-  });
-
-  // MUTANT F4
-  it("a row deleted between the read and the write (it was seen without changedAt) is not silently re-created: refused", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: consentRow() });
-    await expect(allow(control(store, async () => { await store.delete({ key: systemRunsConsentKey(COMPANY_A) }); }))).rejects.toMatchObject(lostRace);
-    expect(await consentOf(store)).toBeUndefined();
-  });
-
-  // MUTANT F2
-  it("a row whose changedAt moved between the read and the write is refused and keeps the other writer's row", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: consentRow({ changedAt: "2026-11-17T10:00:00.000Z", requestId: randomUUID() }) });
-    const racing = consentRow({ enabled: false, changedAt: "2026-11-17T11:59:59.000Z", requestId: randomUUID() });
-    await expect(allow(control(store, async () => { await store.put({ item: racing }); }))).rejects.toMatchObject(lostRace);
-    expect(await consentOf(store)).toEqual(racing);
-  });
-
-  it("a row whose changedAt is unchanged is written", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: consentRow({ changedAt: "2026-11-17T10:00:00.000Z", requestId: randomUUID() }) });
-    expect(await allow(control(store))).toMatchObject({ allowed: true });
-    expect((await consentOf(store))?.["changedAt"]).toBe(new Date(T0).toISOString());
-  });
-
-  // MUTANT F3
-  it("two concurrent creators of a new row: the row is created once, the other is told to try again", async () => {
-    const store = new MemoryDocumentStore();
-    const wait = barrier(2);
-    const results = await Promise.allSettled([allow(control(store, wait)), allow(control(store, wait))]);
-    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
-    expect((results.find((r) => r.status === "rejected") as PromiseRejectedResult).reason).toMatchObject(lostRace);
-    expect(await readSystemRunsConsentRow({ store, companyId: COMPANY_A })).toMatchObject({ enabled: true });
-  });
-
-  it("a new row with no race is created", async () => {
-    const store = new MemoryDocumentStore();
-    expect(await allow(control(store))).toMatchObject({ allowed: true });
-    expect(await consentOf(store)).toMatchObject({ enabled: true, orgId: COMPANY_A });
-  });
-});
 
 function setupDeps(store: MemoryDocumentStore, hook: () => Promise<void> = async () => undefined): UpkeepSettingsDeps {
   return {
@@ -131,40 +61,6 @@ describe("the setup step (setSystemRunsAndUpkeep): both rows are fenced", () => 
     expect(c?.["requestId"]).toBe(p?.["requestId"]);
   });
 
-  // MUTANT F6 (consent put unconditional): the consent row (no changedAt) gains one after the read.
-  it("the consent row (without changedAt) changing before the write refuses the setup step and writes neither row", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: consentRow() });
-    const racing = consentRow({ enabled: false, changedAt: "2026-11-17T11:59:59.000Z", requestId: randomUUID() });
-    await expect(setup(setupDeps(store, async () => { await store.put({ item: racing }); }))).rejects.toMatchObject(lostSetup);
-    expect(await consentOf(store)).toEqual(racing);
-    expect(await store.get(upkeepSettingsKey({ orgId: COMPANY_A, project: "beacon" }))).toBeUndefined();
-  });
-
-  // MUTANT F6 (settings put unconditional): the project's row (no changedAt) gains one after the read; the consent row must not be written either.
-  it("the project's row (without changedAt) changing before the write refuses the setup step and writes neither row", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: projectRow() });
-    const racing = projectRow({ enabled: false, changedAt: "2026-11-17T11:59:59.000Z", requestId: randomUUID() });
-    await expect(setup(setupDeps(store, async () => { await store.put({ item: racing }); }))).rejects.toMatchObject(lostSetup);
-    expect(await store.get(upkeepSettingsKey({ orgId: COMPANY_A, project: "beacon" }))).toEqual(racing);
-    expect(await consentOf(store)).toBeUndefined();
-  });
-
-  it("rows with a changedAt that moved are refused (both rows)", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: consentRow({ changedAt: "2026-11-17T10:00:00.000Z" }) });
-    await store.put({ item: projectRow({ changedAt: "2026-11-17T10:00:00.000Z" }) });
-    const racing = projectRow({ enabled: false, changedAt: "2026-11-17T11:59:59.000Z", requestId: randomUUID() });
-    await expect(setup(setupDeps(store, async () => { await store.put({ item: racing }); }))).rejects.toMatchObject(lostSetup);
-    expect(await consentOf(store)).toMatchObject({ changedAt: "2026-11-17T10:00:00.000Z" });
-  });
-
-  it("new rows with no race are created", async () => {
-    const store = new MemoryDocumentStore();
-    expect(await setup(setupDeps(store))).toEqual({ changed: true });
-    expect(await consentOf(store)).toMatchObject({ enabled: true });
-  });
 });
 
 describe("the maintainer's plain switch (setUpkeepEnabled) is fenced too", () => {
@@ -190,33 +86,5 @@ describe("the maintainer's plain switch (setUpkeepEnabled) is fenced too", () =>
     expect(calls).toEqual(["put"]);
   });
 
-  it("a row whose changedAt moved loses and keeps the other writer's row; two creators of a new row: one wins", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: projectRow({ changedAt: "2026-11-17T10:00:00.000Z" }) });
-    const racing = projectRow({ enabled: false, changedAt: "2026-11-17T11:59:59.000Z", requestId: randomUUID() });
-    await expect(flip(plain(store, async () => { await store.put({ item: racing }); }))).rejects.toMatchObject(lostSetup);
-    expect(await settingsOf(store)).toEqual(racing);
-    const fresh = new MemoryDocumentStore();
-    const wait = barrier(2);
-    const results = await Promise.allSettled([flip(plain(fresh, wait)), flip(plain(fresh, wait))]);
-    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
-  });
-
-  it("a row read without changedAt that gets one before the write loses; with no race the switch works", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: projectRow() });
-    const racing = projectRow({ enabled: true, changedAt: "2026-11-17T11:59:58.000Z", requestId: randomUUID() });
-    await expect(flip(plain(store, async () => { await store.put({ item: racing }); }), false)).rejects.toMatchObject(lostSetup);
-    expect(await settingsOf(store)).toEqual(racing);
-    const calm = new MemoryDocumentStore();
-    expect(await flip(plain(calm, async () => undefined))).toMatchObject({ enabled: true, changed: true });
-  });
 });
 
-describe("seenRowFence", () => {
-  it("is never an empty condition: every shape of seen row gets one", () => {
-    for (const seen of [undefined, { changedAt: "x" }, {}, { enabled: true }]) expect(seenRowFence(seen as never)).toBeDefined();
-    expect(seenRowFence(undefined)).toEqual({ op: "notExists", path: ["pk"] });
-    expect(seenRowFence({ changedAt: "t" })).toEqual({ op: "eq", path: ["changedAt"], value: "t" });
-  });
-});

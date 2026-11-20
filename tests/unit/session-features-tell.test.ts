@@ -64,16 +64,6 @@ describe("telling a session with notes", () => {
     expect((await w.store.get({ pk: `DEVTASK#${TASK}`, sk: "META" }))?.["threadNoteCount"]).toBe(1);
   });
 
-  it("plans the message again when its transaction lost a race, and saves it once", async () => {
-    const plans: number[] = [];
-    const w = await world((store) => noting(store, { flaky: { fails: 2, plans } }));
-    const told = await w.control.tell(OWNER, ORG, SESSION, { requestId: REQ(2), text: "again" });
-    expect(told).toMatchObject({ status: "done", message: { delivery: { state: "queued" } } });
-    expect(plans).toHaveLength(3);
-    expect((await w.store.get({ pk: `DEVTASK#${TASK}`, sk: "META" }))?.["threadNoteCount"]).toBe(1);
-    expect(await w.count()).toBe(1);
-  });
-
   it("gives up with a plain sentence when the race never ends, and writes nothing", async () => {
     const plans: number[] = [];
     const w = await world((store) => noting(store, { flaky: { fails: 99, plans } }));

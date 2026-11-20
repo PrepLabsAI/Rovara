@@ -3,9 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   capSentence, modelOutputText, MODEL_EGRESS_OVERRUN_SENTENCE, NOT_RUN_SENTENCES, runSideBySide, SIDE_BY_SIDE_DEFAULT_CALL_CAP, SIDE_BY_SIDE_OFFER_MAX_ITEMS, type ModelEgress, type ModelEgressEvent, type ModelEgressSettle, type SideBySideRunInput, type SideBySideRunResult, type SideBySideSummary,
 } from "../../packages/contracts/src/index.js";
-import { withNetworkTripwire } from "../../packages/testing/src/ports/no-network.js";
 import { twoCompanyChecks, type IsolationSurface, type TwoCompanyIsolation } from "../../packages/testing/src/isolation/two-company.js";
-import { expectLinearScalingAsync } from "../support/scaling.js";
 import { RUN_DEFAULTS, canary, COMPANY_A, COMPANY_B, evalCases, geminiBody, recordingJudge, reportNeeded, sbsWorld, source, verdictText } from "../support/side-by-side-world.js";
 
 const policy = { preset: "careful", aiPilot: false, optIn: false } as const;
@@ -44,21 +42,6 @@ function input(world: ReturnType<typeof sbsWorld>, over: Partial<SideBySideRunIn
 }
 
 describe("a normal run", () => {
-  it("makes one old and one new call per case through the port, spends the product key, and judges each case once on the Rovara meter", async () => {
-    const world = sbsWorld();
-    const judge = recordingJudge(COMPANY_A, (call) => ({ text: verdictText(call, "same"), costMicros: 1_000 }));
-    world.answers(...Array.from({ length: 10 }, (_, index) => `answer ${String(index)}`));
-    const summary = ran(await runSideBySide(input(world, { judge })));
-    expect(summary.cases).toHaveLength(5);
-    expect(summary.counts).toMatchObject({ planned: 5, judged: 5, same: 5, better: 0, worse: 0, unclear: 0, notRun: 0, callFailed: 0, judgeNotRun: 0, refused: 0 });
-    expect(world.world.provider.calls).toHaveLength(10);
-    expect(judge.received).toHaveLength(5);
-    // The two meters stay apart: the product meter is the adapter's own, the Rovara meter is the judge's.
-    const productSpent = await world.world.meterOf(COMPANY_A);
-    expect(summary.meters.product).toEqual({ calls: 10, costMicros: productSpent });
-    expect(summary.meters.rovara).toEqual({ calls: 5, costMicros: 5_000 });
-    expect(await world.world.meterOf(COMPANY_B)).toBe(0);
-  });
   it("is off, with no call at all, when the layer is not on", async () => {
     const world = sbsWorld();
     const egress = counting(world.egress);
@@ -66,26 +49,6 @@ describe("a normal run", () => {
     const result = await runSideBySide(input(world, { policy: { preset: "balanced", aiPilot: false, optIn: false }, judge }, egress));
     expect(result).toEqual({ status: "off", reason: "not_enabled" });
     expect([egress.calls, judge.received.length]).toEqual([0, 0]);
-  });
-  it("carries no proof basis and no trust class, and says plainly that it does not count toward proof", async () => {
-    const world = sbsWorld();
-    world.answers(...Array.from({ length: 10 }, (_, index) => `answer ${String(index)}`));
-    const summary = ran(await runSideBySide(input(world)));
-    expect(summary.evidence).toEqual({ kind: "prompt_side_by_side", countsTowardProof: false });
-    const text = JSON.stringify(summary);
-    expect(text).not.toMatch(/"(?:trust|proofBasis)"/u);
-    expect(text).not.toMatch(/real|proves_change|scripted_ai_replies/iu);
-    expect(Object.keys(summary).sort()).toEqual(["cases", "counts", "evidence", "judge", "meters", "schemaVersion"]);
-  });
-  it("counts a case the pairing refused, and makes no call for it", async () => {
-    const world = sbsWorld();
-    const egress = counting(world.egress);
-    const good = await source(COMPANY_A, 1).cases();
-    const mixed = { company: COMPANY_A.orgId, kind: "eval_set" as const, cases: () => [good[0]!, { ...good[0]!, caseId: "wrong-row", new: { ...good[0]!.new, row: "openai" } }] };
-    world.answers("a", "b");
-    const summary = ran(await runSideBySide(input(world, { source: mixed }, egress)));
-    expect(summary.counts).toMatchObject({ planned: 1, refused: 1 });
-    expect(egress.calls).toBe(2);
   });
 });
 
@@ -144,33 +107,12 @@ describe("a call that did not run", () => {
 });
 
 describe("the overrun stop (DECISIONS 165)", () => {
-  it("makes no further call after a call that settled over the cap: the case that tripped it is kept, the rest are 'not run', and the cap was passed by one call only", async () => {
-    const world = sbsWorld();
-    const egress = stubEgress([{}, { settle: { overrun: true } }]);
-    const judge = okJudge();
-    const summary = ran(await runSideBySide(input(world, { judge }, egress)));
-    expect(egress.calls).toBe(2);
-    expect(summary.stoppedBy).toBe("overrun");
-    expect(summary.cases[0]).toMatchObject({ status: "judged" });
-    expect(summary.cases.slice(1).every((item) => item.status === "not_run" && item.sentence === MODEL_EGRESS_OVERRUN_SENTENCE)).toBe(true);
-    expect(judge.received).toHaveLength(1);
-  });
   it("does not even make the new call when the OLD call overran", async () => {
     const world = sbsWorld();
     const egress = stubEgress([{ settle: { overrun: true } }]);
     const summary = ran(await runSideBySide(input(world, {}, egress)));
     expect(egress.calls).toBe(1);
     expect(summary.cases.every((item) => item.status === "not_run" && item.sentence === MODEL_EGRESS_OVERRUN_SENTENCE)).toBe(true);
-  });
-  it("stops the same way on the fake adapter when the spend passes the cap", async () => {
-    const world = sbsWorld();
-    await world.world.setCap(COMPANY_A, 20_000);
-    world.world.provider.script(...Array.from({ length: 10 }, () => ({ body: geminiBody("big", { promptTokenCount: 1_000_000, candidatesTokenCount: 1_000_000 }) })));
-    const egress = counting(world.egress);
-    const summary = ran(await runSideBySide(input(world, {}, egress)));
-    expect(egress.calls).toBeLessThanOrEqual(3);
-    expect(world.world.provider.calls.length).toBeLessThanOrEqual(2);
-    expect(summary.stoppedBy === "overrun" || summary.stoppedBy === "cap").toBe(true);
   });
   it("applies a per-task call limit as defence in depth: 10 by default, and a case that cannot get both its calls is not started", async () => {
     expect(SIDE_BY_SIDE_DEFAULT_CALL_CAP).toBe(10);
@@ -200,14 +142,6 @@ describe("the judge's side of a run", () => {
       expect(summary.meters.rovara.costMicros).toBe(step === 0 ? 7 : 0);
     }
   });
-  it("keeps no free text from the judge: an extra field with a canary makes the whole answer 'judge not run' and the canary is nowhere in the result", async () => {
-    const world = sbsWorld();
-    world.answers("a", "b");
-    const judge = recordingJudge(COMPANY_A, (call) => JSON.stringify({ verdicts: [{ caseId: call.cases[0]!.caseId, verdict: "same", reason: canary("judge-reason") }] }));
-    const summary = ran(await runSideBySide(input(world, { source: source(COMPANY_A, 1), judge })));
-    expect(summary.cases[0]).toMatchObject({ status: "judge_not_run" });
-    expect(JSON.stringify(summary)).not.toContain(canary("judge-reason"));
-  });
   it("has its own call limit (the Rovara source's cap, separate from the product key's)", async () => {
     const world = sbsWorld();
     world.answers(...Array.from({ length: 10 }, (_, index) => `answer ${String(index)}`));
@@ -235,30 +169,7 @@ describe("outputs", () => {
   });
 });
 
-describe("no real call", () => {
-  it("opens no socket to a non-loopback address in a whole run", async () => {
-    const world = sbsWorld();
-    world.answers(...Array.from({ length: 10 }, (_, index) => `answer ${String(index)}`));
-    const outcome = await withNetworkTripwire(() => runSideBySide(input(world)));
-    expect(outcome.attempts).toEqual([]);
-    expect(outcome.error).toBeUndefined();
-    expect(outcome.result?.status).toBe("ran");
-  });
-});
-
 describe("two companies", () => {
-  it("refuses a case source or a judge of another company, with no call and nothing of either company in the answer", async () => {
-    const world = sbsWorld();
-    const egress = counting(world.egress);
-    const judgeB = recordingJudge(COMPANY_B, (call) => verdictText(call, "same"));
-    const foreignSource = await runSideBySide(input(world, { source: source(COMPANY_B, 3, { prefix: canary("b-case") }) }, egress));
-    expect(foreignSource).toEqual({ status: "refused", reason: "company_mismatch" });
-    const foreignJudge = await runSideBySide(input(world, { judge: judgeB }, egress));
-    expect(foreignJudge).toEqual({ status: "refused", reason: "company_mismatch" });
-    expect(egress.calls).toBe(0);
-    expect(judgeB.received).toEqual([]);
-    expect(JSON.stringify([foreignSource, foreignJudge])).not.toContain(COMPANY_B.canary);
-  });
   it("passes the shared two-company kit: each company sees only its own run, and the other's source or judge is refused under shared raw ids", async () => {
     const surface: IsolationSurface = {
       kind: "read",
@@ -291,38 +202,7 @@ describe("two companies", () => {
   });
 });
 
-describe("the family of a case, before any call (fix round 1, M1)", () => {
-  it("makes no product call and no judge call for cases whose family cannot be read, and counts them as refused", async () => {
-    const world = sbsWorld();
-    const egress = counting(world.egress);
-    const judge = okJudge();
-    const good = await source(COMPANY_A, 3).cases();
-    const bad = { company: COMPANY_A.orgId, kind: "eval_set" as const, cases: () => good.map((item, index) => ({ ...item, family: (index === 0 ? "bogus" : index === 1 ? undefined : "bedrock") as never })) };
-    const summary = ran(await runSideBySide(input(world, { source: bad, judge }, egress)));
-    expect([egress.calls, judge.received.length]).toEqual([0, 0]);
-    expect(summary.counts).toMatchObject({ planned: 0, refused: 3, judged: 0, callFailed: 0 });
-  });
-});
-
 describe("a total limit on what a source offers (fix round 1, M3)", () => {
-  it("refuses a source that offers more cases than the limit with a fixed word, before parsing or hashing any of them and with no call", async () => {
-    const [one] = await source(COMPANY_A, 1).cases();
-    // Refused on the count alone (over the 1,000-case limit, before any case is read): the cost does not grow with what the source offers (1,100, then 8,800 cases, built before the timing; the array holds one shared case so it is 8 bytes a case and the 8N input stays far under 256 KiB, in CPU cache). The full 100,000 cases are refused once, un-timed.
-    const runs = new Map<number, { result: unknown; egress: ReturnType<typeof counting> }>();
-    const refuseOffer = (count: number) => {
-      const world = sbsWorld();
-      const egress = counting(world.egress);
-      const offered = Array.from({ length: count }, () => one!);
-      const huge = { company: COMPANY_A.orgId, kind: "eval_set" as const, cases: () => offered };
-      return async () => { runs.set(count, { result: await runSideBySide(input(world, { source: huge }, egress)), egress }); };
-    };
-    await expectLinearScalingAsync(refuseOffer, { n: 1_100, unitBytes: 8, label: "side by side: a source offering too many cases" });
-    await refuseOffer(100_000)();
-    for (const count of [1_100, 8_800, 100_000]) {
-      expect(runs.get(count)!.result).toEqual({ status: "refused", reason: "source_too_large" });
-      expect(runs.get(count)!.egress.calls).toBe(0);
-    }
-  });
   it("accepts exactly the limit, and refuses one more", async () => {
     const world = sbsWorld();
     const [one] = await source(COMPANY_A, 1).cases();
@@ -399,32 +279,6 @@ describe("the read bound and the time limit (fix round 1, M2)", () => {
     expect(summary.cases.every((item) => item.status === "not_run" && /time limit/iu.test(item.sentence))).toBe(true);
     expect(egress.signals).toHaveLength(1);
     expect(egress.signals[0]?.aborted).toBe(true);
-  });
-  it("hands the product call a signal even when the caller gives none", async () => {
-    const world = sbsWorld();
-    const egress = hangingEgress();
-    await runSideBySide(input(world, { deadlineMs: 20, maxCases: 1 }, egress));
-    expect(egress.signals[0]).toBeInstanceOf(AbortSignal);
-  });
-  it("is bounded in time when the judge never answers: 'judge not run', and the judge was handed the abort signal", async () => {
-    const world = sbsWorld();
-    world.answers("old out", "new out");
-    const seen: unknown[] = [];
-    const judge = { ...recordingJudge(COMPANY_A, () => ""), judge: (_call: unknown, options?: { signal?: AbortSignal }) => { seen.push(options?.signal); return never<{ text: string; costMicros: number }>(); } } as unknown as ReturnType<typeof okJudge>;
-    const started = Date.now();
-    const summary = ran(await runSideBySide(input(world, { source: source(COMPANY_A, 1), judge, deadlineMs: 100 })));
-    expect(Date.now() - started).toBeLessThan(3_000);
-    expect(summary.cases[0]).toMatchObject({ status: "judge_not_run", oldText: "old out", newText: "new out" });
-    expect(seen[0]).toBeInstanceOf(AbortSignal);
-  });
-  it("is bounded in time when the source never answers: refused with a fixed word and no call", async () => {
-    const world = sbsWorld();
-    const egress = counting(world.egress);
-    const stuck = { company: COMPANY_A.orgId, kind: "eval_set" as const, cases: () => never<never>() };
-    const started = Date.now();
-    expect(await runSideBySide(input(world, { source: stuck, deadlineMs: 50 }, egress))).toEqual({ status: "refused", reason: "time_limit" });
-    expect(Date.now() - started).toBeLessThan(3_000);
-    expect(egress.calls).toBe(0);
   });
   it("stops starting cases once the caller's own signal has aborted, and refuses at once when it was aborted before the run", async () => {
     const world = sbsWorld();

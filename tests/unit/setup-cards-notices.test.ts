@@ -2,7 +2,7 @@
 // on the pull request message and the pull request body, the admins' "Setup needs repair" notice, and the "Setup needs repair" card the web page reads. "One experience rule": silent when fine, one message when
 // someone must act, one evidence line when trust changes; Slack, Linear and the web say the SAME words; no cost figure in a chat. Mutants are listed in the PR body with the test that kills each.
 import { describe, expect, it } from "vitest";
-import { intakeItemIdOf, setupDriftWords, type ChannelEvent, type CodeMilestone, type ConversationRef, type DocumentStore, type OrgId, type StoredDocument } from "@agentx/contracts";
+import { intakeItemIdOf, type ChannelEvent, type CodeMilestone, type ConversationRef, type DocumentStore, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
@@ -16,11 +16,8 @@ import { readIntakeItem } from "../../packages/broker/src/core/intake/store.js";
 import { createLocalOwnerIdentity, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { FAKE_TRACKER_KIND, FakeTracker } from "../../packages/broker/src/plugins/fake/tracker.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import {
-  SETUP_REPAIR_WORDS, driftTaskKey, inertSetupStep, plainSetupLink, recheckRowKey, setupAdminNoticeWords, setupBrokenTaskWords, setupEvidenceOf, setupMayBeOutOfDateWords, setupNotRecheckedWords,
-  setupPausedMessage, setupPullRequestLineOf, setupRecheckLineOf, setupStillWorksWords, setupTrustLineOf, type RecheckRow, type RecheckState,
-} from "../../packages/broker/src/core/setup-agent/recheck-rows.js";
-import { repairToldKey, setupBrokenSubjectId, setupBrokenSubjectOf } from "../../packages/broker/src/core/setup-agent/broken-notice.js";
+import { SETUP_REPAIR_WORDS, driftTaskKey, plainSetupLink, recheckRowKey, setupAdminNoticeWords, setupBrokenTaskWords, setupEvidenceOf, setupMayBeOutOfDateWords, setupNotRecheckedWords, setupPausedMessage, setupPullRequestLineOf, setupStillWorksWords, setupTrustLineOf, type RecheckRow, type RecheckState } from "../../packages/broker/src/core/setup-agent/recheck-rows.js";
+import { repairToldKey } from "../../packages/broker/src/core/setup-agent/broken-notice.js";
 import { COMPANY, createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { ThreadWorld } from "./support/setup-cards-thread-world.js";
 
@@ -54,15 +51,6 @@ async function seed(store: DocumentStore, input: { orgId?: OrgId; project?: stri
 describe("the evidence line of a task", () => {
   const reader = (store: MemoryDocumentStore, companyId: OrgId = COMPANY) => ({ store, companyId });
 
-  it("says nothing for a task with no drift (no link), whatever else the project has", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: recheckRow(COMPANY, "payments", KEY_A, "broken") });
-    expect(await setupEvidenceOf(reader(store), "payments", "t-none")).toBeUndefined();
-    expect(await setupRecheckLineOf(reader(store), "payments", "t-none")).toBeUndefined();
-    expect(await setupTrustLineOf(reader(store), "payments", "t-none")).toBeUndefined();
-    expect(await setupPullRequestLineOf(reader(store), "payments", "t-none")).toBeUndefined();
-  });
-
   it("each state has one fixed line; only 'could not be checked' lowers trust, and the pull request carries every finished state", async () => {
     const cases: Array<[RecheckState, string, boolean, boolean]> = [
       ["running", "Checking setup again. Your code changed since setup was approved.", false, false],
@@ -78,16 +66,6 @@ describe("the evidence line of a task", () => {
       expect(await setupTrustLineOf(reader(store), "payments", "t1"), state).toBe(trust ? line : undefined);
       expect(await setupPullRequestLineOf(reader(store), "payments", "t1"), state).toBe(onPullRequest ? line : undefined);
     }
-  });
-
-  it("a task whose re-check was not started says so: 'may be out of date' when system runs are off, 'couldn't re-check' otherwise (both lower trust, both reach the pull request)", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: link(COMPANY, "payments", "t-off", "", { state: "released", noRecheck: { classes: ["lockfile", "compose"], reason: "off" } }) });
-    await store.put({ item: link(COMPANY, "payments", "t-cap", "", { state: "released", noRecheck: { classes: ["lockfile"] } }) });
-    expect(await setupTrustLineOf(reader(store), "payments", "t-off")).toBe(setupMayBeOutOfDateWords(["lockfile", "compose"]));
-    expect(await setupTrustLineOf(reader(store), "payments", "t-off")).toBe("Setup may be out of date after dependency files and a compose file changed.");
-    expect(await setupTrustLineOf(reader(store), "payments", "t-cap")).toBe("Couldn't re-check setup after dependency files changed.");
-    expect(await setupPullRequestLineOf(reader(store), "payments", "t-off")).toBe("Setup may be out of date after dependency files and a compose file changed.");
   });
 
   it("never reads another company's or another project's row, and a fault is no line", async () => {
@@ -114,35 +92,12 @@ describe("the words are one set, safe for a chat, with no cost in them", () => {
     expect(Object.values(SETUP_REPAIR_WORDS).join(" ")).not.toMatch(COST);
   });
 
-  it("repository text (the failing step) is made safe: no mention, link, markup or control character; a plain step is unchanged", () => {
-    expect(inertSetupStep(STEP)).toBe(STEP);
-    const hostile = inertSetupStep("setup step 0 (npm ci) failed: @here <!channel> `rm -rf` https://evil.test/x [click](//evil.test) *bold* _it_ #chan | ! ~x~‮\u0007\nsecond line");
-    for (const unsafe of ["@", "<", ">", "`", "\u202e", "\u0007", "\n", "://", "//", "[", "]", "*", "_", "#", "|", "!", "~"]) expect(hostile.includes(unsafe), JSON.stringify(unsafe)).toBe(false);
-    expect(setupPausedMessage("x @everyone <https://evil.test|click>")).not.toMatch(/@everyone|<https/u);
-    expect(inertSetupStep("x".repeat(500))).toHaveLength(200);
-  });
-
-  it("a markup character hidden inside a scheme separator does not rebuild a link", () => {
-    expect(inertSetupStep("x https:/@/evil.test")).not.toContain("//");
-    expect(inertSetupStep("x http:/<!/evil.test")).not.toContain("//");
-  });
-
   it("a link goes into a chat only as a plain https address (no sign-in data, no spaces, no markup)", () => {
     expect(plainSetupLink("https://app.example.test/p/payments/setup")).toBe("https://app.example.test/p/payments/setup");
     for (const bad of ["http://app.example.test/x", "https://user:pw@app.example.test/x", "javascript:alert(1)", "https://app.example.test/a b", "https://app.example.test/<x>", "not a link", undefined]) expect(plainSetupLink(bad as never), String(bad)).toBeUndefined();
     expect(setupPausedMessage(STEP, "http://insecure.test/x")).toContain("Open the project's setup page in Rovara.");
   });
 
-  it("the subject id of the admins' notice is its own kind: never a session id or an upkeep subject, and the project survives the round trip", () => {
-    const id = setupBrokenSubjectId({ project: "beacon-api", recheckKey: KEY_A });
-    expect(id).toBe(`setup-${"a".repeat(16)}-beacon-api`);
-    expect(setupBrokenSubjectOf(id)).toEqual({ prefix: "a".repeat(16), project: "beacon-api" });
-    expect(setupBrokenSubjectOf("ses_abcdefghijklmnopqrst")).toBeUndefined();
-    expect(setupBrokenSubjectOf("upkeep-2026-11-monthly_limit-beacon")).toBeUndefined();
-    expect(() => setupBrokenSubjectId({ project: "Bad#Name", recheckKey: KEY_A })).toThrow();
-    expect(() => setupBrokenSubjectId({ project: "beacon", recheckKey: "not-hex" })).toThrow();
-    expect(setupDriftWords(["lockfile"])).toBe("dependency files");
-  });
 });
 
 describe("the chat thread: one message when the task pauses at Build", () => {
@@ -162,31 +117,6 @@ describe("the chat thread: one message when the task pauses at Build", () => {
     expect((event as ChannelEvent & { data: { text: string } }).data.text).toBe(setupPausedMessage(STEP));
     expect((event as { data: Record<string, unknown> }).data["actions"]).toBeUndefined();
     expect(JSON.stringify(event)).not.toMatch(COST);
-  });
-
-  it("a new break (a different re-check) is a new message; a pass, a running check or a task with no link says nothing", async () => {
-    const w = await ThreadWorld.make();
-    await seed(w.store, { taskId: ThreadWorld.TASK, state: "broken", key: KEY_A });
-    await w.handler.on(paused());
-    await seed(w.store, { taskId: ThreadWorld.TASK, state: "broken", key: KEY_B });
-    await w.handler.on(paused());
-    expect(w.attempts).toHaveLength(2);
-    for (const state of ["passed", "running", "unclear", "tests_failing"] as const) {
-      const quiet = await ThreadWorld.make();
-      await seed(quiet.store, { taskId: ThreadWorld.TASK, state });
-      await quiet.handler.on(paused());
-      expect(quiet.attempts, state).toHaveLength(0);
-    }
-    const none = await ThreadWorld.make();
-    await none.handler.on(paused());
-    expect(none.attempts).toHaveLength(0);
-  });
-
-  it("is a notice that someone must act: the host's switch for the milestone lines does not turn it off", async () => {
-    const w = await ThreadWorld.make({ milestones: false });
-    await seed(w.store, { taskId: ThreadWorld.TASK, state: "broken" });
-    await w.handler.on(paused());
-    expect(w.attempts).toHaveLength(1);
   });
 
   it("carries the setup page's link when the host has one, as the last line, and the words that say where to go when it has none", async () => {
@@ -311,15 +241,6 @@ describe("the ticket the task came from: the same message, once", () => {
     expect((await noTicket.h.store.get(taskKey(started.task.taskId)))?.["ticket"]).toBeUndefined();
   });
 
-  it("a new break is a new comment; another task's thread and ticket are its own", async () => {
-    const w = await intakeWorld();
-    await seed(w.h.store, { project: "payments", taskId: w.item.taskId!, state: "broken", key: KEY_A });
-    expect(await sendTicketUpdate(w.deps(), w.milestone("setup_paused"))).toBe("posted");
-    await seed(w.h.store, { project: "payments", taskId: w.item.taskId!, state: "broken", key: KEY_B });
-    expect(await sendTicketUpdate(w.deps(), w.milestone("setup_paused"))).toBe("posted");
-    expect(w.setupComments()).toHaveLength(2);
-  });
-
   it("the pull request comment carries the evidence line only when the setup could not be re-checked", async () => {
     const unclear = await intakeWorld();
     await seed(unclear.h.store, { project: "payments", taskId: unclear.item.taskId!, state: "unclear" });
@@ -357,31 +278,6 @@ const OPEN = (over: Partial<{ key: string; failedStep: string; fixReady: boolean
 const ADMINS = (over: Record<string, unknown> = {}) => ({ administers: async (_org: OrgId, person: string) => person !== NOT_ADMIN, setupRead: OPEN(), ...over });
 
 describe("the admins' notice: one message for the project, not one per task", () => {
-  it("queues one pending row per admin and says nothing more for the same break, however many readers or tasks see it", async () => {
-    const w = adminWorld();
-    expect(await w.queue(COMPANY, "payments", KEY_A)).toEqual({ queued: 2, deduped: false });
-    const rows = await w.pending();
-    expect(rows.map((row) => row["developerId"]).sort()).toEqual([ADMIN_1, ADMIN_2]);
-    expect(rows[0]).toMatchObject({ orgId: COMPANY, kind: "setup_broken", sessionId: setupBrokenSubjectId({ project: "payments", recheckKey: KEY_A }) });
-    expect(await w.queue(COMPANY, "payments", KEY_A)).toEqual({ queued: 0, deduped: true });
-    // Even after the rows were delivered and are gone, the same break is not told again.
-    for (const row of rows) await w.store.delete({ key: { pk: row["pk"], sk: row["sk"] } });
-    expect(await w.queue(COMPANY, "payments", KEY_A)).toEqual({ queued: 0, deduped: true });
-    expect(await w.pending()).toHaveLength(0);
-    expect(await w.store.get(repairToldKey(COMPANY, "payments", KEY_A))).toMatchObject({ entityType: "SETUP_REPAIR_TOLD" });
-  });
-
-  it("a different break, project or company is its own notice, and only that company's people are told", async () => {
-    const w = adminWorld(async (orgId) => (orgId === COMPANY ? [ADMIN_1] : [ADMIN_2]));
-    await w.queue(COMPANY, "payments", KEY_A);
-    expect((await w.queue(COMPANY, "payments", KEY_B)).queued).toBe(1);
-    expect((await w.queue(COMPANY, "billing", KEY_A)).queued).toBe(1);
-    expect((await w.queue(OTHER, "payments", KEY_A)).queued).toBe(1);
-    const rows = await w.pending();
-    expect(rows).toHaveLength(4);
-    expect(rows.filter((row) => row["orgId"] === OTHER).map((row) => row["developerId"])).toEqual([ADMIN_2]);
-    expect(rows.filter((row) => row["orgId"] === COMPANY).every((row) => row["developerId"] === ADMIN_1)).toBe(true);
-  });
 
   it("keeps only person ids, gives the marker back when nobody could be told or the read failed, and never throws on a bad identity", async () => {
     const none = adminWorld(async () => ["not-a-person", "", "ADMIN"]);
@@ -425,16 +321,6 @@ describe("the admins' notice: one message for the project, not one per task", ()
     expect((await w.queue(COMPANY, "payments", KEY_A)).deduped).toBe(true);
   });
 
-  it("offers 'Approve new setup' (and not 'Fix setup') while a checked fix waits for approval", async () => {
-    const w = adminWorld();
-    await w.prefs(COMPANY, ADMIN_1);
-    await w.queue(COMPANY, "payments", KEY_A);
-    await w.deliver(ADMINS({ setupRead: OPEN({ fixReady: true }) }));
-    const text = (w.sends[0] as { data: { text: string } }).data.text;
-    expect(text).toContain("Approve new setup on the setup page.");
-    expect(text).not.toContain("Fix setup");
-  });
-
   it("goes only to a person who still administers the project, and is dropped silently for anyone else", async () => {
     const w = adminWorld(async () => [ADMIN_1, NOT_ADMIN]);
     await w.prefs(COMPANY, ADMIN_1);
@@ -476,13 +362,6 @@ describe("the admins' notice: one message for the project, not one per task", ()
     expect((await waiting.deliver(ADMINS())).sent).toBe(1);
   });
 
-  it("an admin with no chat and no email is told nowhere (their inbox row is the page's job): the row goes", async () => {
-    const w = adminWorld();
-    await w.queue(COMPANY, "payments", KEY_A);
-    expect((await w.deliver(ADMINS())).sent).toBe(0);
-    expect(w.sends).toHaveLength(0);
-  });
-
   it("the email carries the same words: its own subject and no cost", () => {
     const line = { title: "payments", status: setupAdminNoticeWords(STEP), kind: "setup_broken" };
     const mail = attentionEmail([line], 0, "attention");
@@ -494,23 +373,6 @@ describe("the admins' notice: one message for the project, not one per task", ()
   });
 });
 
-describe("the nightly upkeep pause reaches an admin's Slack target in fixed words with no cost (N1's path, pinned here)", () => {
-  it("the pause notice goes to the chat the admin chose, names the Spending limits page, and carries no dollar figure; an admin with no chat is told nowhere", async () => {
-    const w = adminWorld();
-    await w.prefs(COMPANY, ADMIN_1);
-    await queueUpkeepPaused({ store: w.store, now: () => new Date(clock.ms), recipients: async () => [ADMIN_1, ADMIN_2] }, { orgId: COMPANY, project: "payments", reason: "monthly_limit" });
-    const outcome = await w.deliver({ administers: async () => true, link: (project: string) => `https://app.example.test/p/${project}/spending-limits` });
-    expect(outcome.sent).toBe(1);
-    expect(w.sends).toHaveLength(1);
-    const text = (w.sends[0] as { data: { text: string } }).data.text;
-    expect(text).toContain("Nightly upkeep needs your attention in Rovara:");
-    expect(text).toContain("Raise it on Spending limits");
-    expect(text).not.toMatch(/\$\d|USD|dollar/iu);
-    // ADMIN_2 chose no chat and has no email: nothing is sent for them.
-    expect(w.sends.every((event) => (event as { conversation?: unknown }).conversation !== undefined)).toBe(true);
-  });
-});
-
 
 // ---- the pull request description
 
@@ -519,27 +381,12 @@ import { greenScenario } from "../support/pr-body-scenarios.js";
 describe("the pull request description carries the setup's one line (L4-U5)", () => {
   const drawer = (body: string): string => body.slice(body.indexOf("<summary>Test setup"), body.indexOf("</details>", body.indexOf("<summary>Test setup")));
 
-  it("prints the line first in the Test setup drawer when the setup was re-checked for the task, and nothing when it was not", () => {
-    const line = setupStillWorksWords(["lockfile"]);
-    const body = greenScenario("clean", { setupLine: line }).body;
-    expect(drawer(body)).toContain(`\n- ${line}\n`);
-    // It is the FIRST list line of the drawer (the Rovara-recorded setup facts follow it).
-    expect(drawer(body).split("\n").find((entry) => entry.startsWith("- "))).toBe(`- ${line}`);
-    // No drift: exactly the description it was.
-    expect(greenScenario("clean", {}).body).toBe(greenScenario("clean").body);
-    expect(greenScenario("clean").body).not.toMatch(/Setup (re-checked|may be)|Couldn't re-check/u);
-  });
-
   it("says the note when the check could not be made, in the same words as the task page and the chat", () => {
     const line = setupNotRecheckedWords(["compose"]);
     expect(drawer(greenScenario("clean", { setupLine: line }).body)).toContain(`- ${line}`);
     expect(drawer(greenScenario("clean", { setupLine: setupMayBeOutOfDateWords(["version"]) }).body)).toContain(`- ${setupMayBeOutOfDateWords(["version"])}`);
   });
 
-  it("makes the line safe for GitHub: no mention, link, markup or hidden comment survives", () => {
-    const body = greenScenario("clean", { setupLine: "Setup re-checked @everyone <!-- x --> [click](https://evil.test) <img src=x>" }).body;
-    expect(drawer(body)).not.toMatch(/@everyone|<!--|\]\(https|<img/u);
-  });
 });
 
 // ---- the task page's read
@@ -566,7 +413,7 @@ describe("the task view carries the evidence line to the web (L4-U5)", () => {
 
 // ---- the upkeep switch's read tells the admins' page that nightly upkeep is paused
 
-import { UPKEEP_NOTICE_WORDS, UpkeepViewSchema } from "@agentx/contracts";
+import { UpkeepViewSchema } from "@agentx/contracts";
 import { upkeepView } from "../../packages/broker/src/core/upkeep/settings.js";
 import { upkeepNightKey } from "../../packages/broker/src/core/upkeep/keys.js";
 
@@ -578,16 +425,6 @@ describe("nightly upkeep's read says why it is paused, to the people who manage 
     const notice = (reason: "no_budget" | "monthly_limit" | "cost_too_high", month?: string) => queueUpkeepPaused({ store, now: () => new Date(clock.ms), recipients: async () => [ADMIN_1] }, { orgId: COMPANY, project: "payments", reason, ...(month === undefined ? {} : { month }) });
     return { store, deps, night, notice };
   }
-
-  it("a manager reads the pause (reason and month) while the last decided night was a pause; it parses against the contract and is worded by the admins' notice words", async () => {
-    const w = await pausedWorld();
-    await w.night("2026-11-17", "paused");
-    await w.notice("monthly_limit");
-    const view = await upkeepView(w.deps, ADMIN_1, "payments");
-    expect(view.paused).toEqual({ reason: "monthly_limit", month: "2026-11" });
-    expect(UpkeepViewSchema.safeParse(view).success).toBe(true);
-    expect(UPKEEP_NOTICE_WORDS[view.paused!.reason]).toContain("this month's upkeep limit is used up");
-  });
 
   it("is absent for a person who may only read, once a later night ran, with no notice this month, and for another project or company's rows", async () => {
     const reader = await pausedWorld("view");

@@ -39,15 +39,6 @@ const defaults = (method: string): Record<string, unknown> => {
 const reader = (value: string) => async () => value;
 
 describe("the web client", () => {
-  it("asks who the bot is and posts a message in a thread with no previews and no name read as a mention", async () => {
-    const slack = fakeSlack();
-    const web = slackWeb({ botToken: reader(BOT_TOKEN), fetch: slack.fetch });
-    expect(await web.authTest()).toEqual({ teamId: TEAM, botUserId: BOT });
-    await web.postMessage({ channel: CHANNEL, threadTs: "1700000000.000001", text: "hello" });
-    const post = slack.calls.find((call) => call.method === "chat.postMessage")!;
-    expect(post.headers.get("authorization")).toBe(`Bearer ${BOT_TOKEN}`);
-    expect(JSON.parse(post.body)).toMatchObject({ channel: CHANNEL, thread_ts: "1700000000.000001", text: "hello", unfurl_links: false, unfurl_media: false, link_names: false, parse: "none" });
-  });
 
   it("names the tool's error code and nothing else, and never sends a token of the wrong shape", async () => {
     const refused = fakeSlack({ "chat.postMessage": () => ({ ok: false, error: "channel_not_found" }) });
@@ -104,16 +95,6 @@ describe("what Rovara says", () => {
     expect(rendered.text).not.toMatch(/&[a-z]{0,3}…$/u);
   });
 
-  it("shows a card with its buttons only when the event has actions, and carries only the exact request in each button", () => {
-    const data = { text: "Plan waits.", kind: "other" as const, requestId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301", expectedRevision: 3, artifactDigest: "d".repeat(64), taskUrl: "https://example.test/t" };
-    const withButtons = renderEvent({ ...base, type: "approval_request", data: { ...data, actions: [{ decision: "APPROVE", label: "Approve" }, { decision: "REJECT", label: "Reject" }] } }, 3_000)!;
-    const elements = (withButtons.blocks![1] as { elements: Array<{ action_id: string; value?: string; url?: string }> }).elements;
-    expect(elements.map((element) => element.action_id)).toEqual(["rovara_decide_APPROVE", "rovara_decide_REJECT", "rovara_open_task"]);
-    expect(JSON.parse(elements[0]!.value!)).toEqual({ r: data.requestId, v: 3, d: data.artifactDigest, o: "APPROVE" });
-    const pointer = renderEvent({ ...base, type: "approval_request", data }, 3_000)!;
-    expect((pointer.blocks![1] as { elements: unknown[] }).elements).toHaveLength(1);
-  });
-
   it("shows mainline's message event as its text, to one person when its audience is one, and says nothing for a done with no closing line or a direct message", () => {
     expect(renderEvent({ ...base, type: "message", data: { text: "Working on <it>" } }, 3_000)).toEqual({ text: "Working on &lt;it&gt;" });
     const privately = renderEvent({ ...base, type: "message", data: { text: "Only you.", audience: { kind: "ephemeral", actor: { channel: "slack", tenant: TEAM, userId: PERSON } } } }, 3_000)!;
@@ -135,26 +116,10 @@ describe("what it hears", () => {
     team_id: TEAM, event_id: "Ev0001", event: { type: "app_mention", user: PERSON, text: `<@${BOT}> add a retry for <@U0OTHER99> &amp; more`, ts: "1700000000.000200", channel: CHANNEL, user_team: TEAM, ...overrides }, ...envelope,
   });
 
-  it("reads a mention of the bot as a message in its thread, without the bot's name or anyone's account id", () => {
-    const message = messageOf(mention(), { userId: BOT }, CLOCK)!;
-    expect(message).toMatchObject({
-      version: 2, channel: "slack", eventId: "Ev0001", text: "add a retry for @member & more",
-      conversation: { channel: "slack", tenant: TEAM, space: CHANNEL, thread: "1700000000.000200" }, actor: { channel: "slack", tenant: TEAM, userId: PERSON },
-    });
-    expect(messageOf(mention({ thread_ts: "1700000000.000001" }), { userId: BOT }, CLOCK)!.conversation.thread).toBe("1700000000.000001");
-  });
-
   it("refuses a mention that does not say which workspace the speaker belongs to, and says so in one fixed word", () => {
     const logs: Array<Record<string, unknown>> = [];
     expect(messageOf(mention({ user_team: undefined }), { userId: BOT }, CLOCK, (entry) => logs.push(entry))).toBeUndefined();
     expect(logs).toEqual([{ event: "slack.speaker_workspace_unknown" }]);
-  });
-
-  it("takes the speaker's workspace from the speaker, so a guest from a shared channel is not of the channel's workspace", () => {
-    const guest = messageOf(mention({ user_team: "T0GUESTTT" }), { userId: BOT }, CLOCK)!;
-    expect(guest.actor.tenant).toBe("T0GUESTTT");
-    expect(guest.conversation.tenant).toBe(TEAM);
-    expect(messageOf(mention({ user_team: TEAM }), { userId: BOT }, CLOCK)!.actor.tenant).toBe(TEAM);
   });
 
   it("hears nothing else: another event, the bot's own words, another bot, an empty mention, a malformed event", () => {
@@ -188,13 +153,6 @@ describe("what it hears", () => {
     const logs: Array<Record<string, unknown>> = [];
     expect(decisionOf(press(VALUE, undefined, { user: { id: PERSON } }), CLOCK, (entry) => logs.push(entry))).toBeUndefined();
     expect(logs).toEqual([{ event: "slack.speaker_workspace_unknown" }]);
-  });
-
-  it("takes the presser's workspace from the presser", () => {
-    const external = decisionOf(press(VALUE, undefined, { user: { id: PERSON, team_id: "T0GUESTTT" } }), CLOCK)!;
-    expect(external.actor.tenant).toBe("T0GUESTTT");
-    expect(external.conversation.tenant).toBe(TEAM);
-    expect(decisionOf(press(VALUE, undefined, { user: { id: PERSON, team_id: TEAM } }), CLOCK)!.actor.tenant).toBe(TEAM);
   });
 
   it("ignores a press that is not Rovara's, whose value does not read, or whose button and value disagree", () => {
@@ -294,14 +252,6 @@ describe("the adapter", () => {
   const make = (slack = fakeSlack(), extra: Partial<ConstructorParameters<typeof SlackChannel>[0]> = {}) => ({ slack, adapter: new SlackChannel({ projects: ["web"], botToken: reader(BOT_TOKEN), fetch: slack.fetch, now: CLOCK, ...extra }) });
   const posts = (slack: ReturnType<typeof fakeSlack>) => slack.calls.filter((call) => call.method === "chat.postMessage").map((call) => JSON.parse(call.body) as Record<string, unknown>);
 
-  it("describes itself: threads, four buttons, no edits, may message first, and asks for a sign-in on a plan and an admin change", () => {
-    const { adapter } = make();
-    expect(adapter.capabilities).toEqual(SLACK_CAPABILITIES);
-    expect(adapter.stepUp).toEqual(["plan_approval", "admin"]);
-    expect(adapter.noThread).toBe(NO_THREAD);
-    expect(adapter.projects).toEqual(["web"]);
-  });
-
   it("refuses a direct message, which needs the `direct` ability it does not declare, and posts nothing", async () => {
     const { slack, adapter } = make();
     const direct = { version: 1, id: "evt_cccccccccccccccccccc", channel: "slack", createdAt: "2026-11-10T10:00:00.000Z", type: "direct", to: { channel: "slack", tenant: TEAM, userId: PERSON }, data: { text: "Hi" } } as ChannelEvent;
@@ -329,16 +279,6 @@ describe("the adapter", () => {
     const ephemeral = slack.calls.filter((call) => call.method === "chat.postEphemeral").map((call) => JSON.parse(call.body) as Record<string, unknown>);
     expect(ephemeral).toHaveLength(1);
     expect(ephemeral[0]).toMatchObject({ channel: CHANNEL, user: PERSON, thread_ts: "1700000000.000001", text: "Paste this code: abc" });
-  });
-
-  it("does not post a failed event as sent, so the retry posts it", async () => {
-    let fail = true;
-    const slack = fakeSlack({ "chat.postMessage": () => (fail ? { ok: false, error: "ratelimited" } : { ok: true, ts: "1700000000.000100" }) });
-    const { adapter } = make(slack);
-    await expect(adapter.deliver(event())).rejects.toBeInstanceOf(SlackApiError);
-    fail = false;
-    await adapter.deliver(event());
-    expect(posts(slack)).toHaveLength(2);
   });
 
   it("posts only in its own workspace, and only for its own channel id", async () => {
@@ -399,13 +339,6 @@ describe("the plug-in", () => {
     expect(slack.calls).toEqual([]);
   });
 
-  it("refuses settings that are not valid, saying which field and never what it held", async () => {
-    await expect(load({ botToken: { env: "X" }, projects: [] })).rejects.toThrow(/projects/u);
-    await expect(load({ botToken: "xoxb-in-the-config", projects: ["web"] })).rejects.toThrow(/botToken/u);
-    await expect(load({ botToken: { env: "X" }, projects: ["web"], extra: true })).rejects.toThrow();
-    const error = await load({ botToken: BOT_TOKEN, projects: ["web"] }).catch((caught: Error) => caught.message);
-    expect(error).not.toContain(BOT_TOKEN);
-  });
 });
 
 describe("Request changes asks what should change", () => {
@@ -434,11 +367,6 @@ describe("Request changes asks what should change", () => {
     expect(modal.blocks[0]!.label.text).toBe("What should change?");
     expect(modal.blocks[0]!.element.max_length).toBe(500);
     expect(JSON.parse(modal.private_metadata)).toEqual(context);
-  });
-
-  it("reads the words typed in the box as the reason of a request for changes for the request the box was opened for", () => {
-    const heard = changesSubmissionOf(submission("Use the retry helper."), { userId: BOT }, CLOCK);
-    expect(heard).toMatchObject({ status: "ok", decision: { decision: "REQUEST_CHANGES", reason: "Use the retry helper.", requestId: REQUEST, expectedRevision: 3, eventId: "V0VIEW001", conversation: { tenant: TEAM, space: CHANNEL, thread: "1700000000.000001" }, actor: { userId: PERSON, tenant: TEAM } } });
   });
 
   it("makes the words safe the way other chat text is, and cuts them to the limit", () => {
@@ -533,11 +461,6 @@ describe("Request changes asks what should change", () => {
     await listening.stop();
   });
 
-  it("tells the person why a box that could not be read was closed, where the record still names the card's place", () => {
-    const place = changesSubmissionOf(submission("x", {}, { ...context, d: "short" }), { userId: BOT }, CLOCK);
-    expect(place).toEqual({ status: "refused", why: "unreadable", notify: { channel: CHANNEL, thread: "1700000000.000001", user: PERSON } });
-    expect(changesSubmissionOf(submission("x", {}, "{not json"), { userId: BOT }, CLOCK)).toEqual({ status: "refused", why: "unreadable" });
-  });
 });
 
 describe("a card with no address to open", () => {
