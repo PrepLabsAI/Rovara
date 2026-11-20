@@ -669,7 +669,7 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
       const launchTemplateId = binding.launchTemplateId;
 
       // The template is launched as it is: refuse one that is not the reviewed shape instead of overriding it.
-      const template = (await ec2.send(new DescribeLaunchTemplateVersionsCommand({ LaunchTemplateId: launchTemplateId, Versions: ["$Default"] }))).LaunchTemplateVersions?.[0]?.LaunchTemplateData;
+      const template = (await ec2.send(new DescribeLaunchTemplateVersionsCommand({ LaunchTemplateId: launchTemplateId, Versions: ["$Latest"] }))).LaunchTemplateVersions?.[0]?.LaunchTemplateData;
       const shapeProblem = launchTemplateShapeProblem(template);
       if (shapeProblem !== undefined) throw new Error(shapeProblem);
 

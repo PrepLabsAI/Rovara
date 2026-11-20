@@ -88,7 +88,8 @@ function runInstance(props: SessionStateMachineProps, workspaceTags: Array<{ Key
     Type: "Task",
     Resource: ec2("runInstances"),
     Arguments: {
-      LaunchTemplate: { LaunchTemplateId: "{% $launchTemplateId %}", Version: "$Default" },
+      // #1191: $Latest, the version CloudFormation last wrote. An update adds a version but never moves $Default, so $Default stayed on a size the IAM allow-list no longer admits.
+      LaunchTemplate: { LaunchTemplateId: "{% $launchTemplateId %}", Version: "$Latest" },
       ...(pinned ? { ImageId: "{% $qualifiedAmi %}" } : {}),
       ...(sizing === "x86_64" ? { ImageId: `resolve:ssm:${MACHINE_LAUNCH_AMI_PARAMETERS.x86_64}` } : {}),
       ...(sizing === "none" ? {} : { InstanceType: "{% $machine.instanceType %}" }),
