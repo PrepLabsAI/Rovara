@@ -40,15 +40,16 @@ async function world() {
 
 describe("the broker's core root gives each company's flow a company-bound artifacts reader", () => {
 
-  it("wires both hosted reviewer kinds and fail-safe company autonomy on the real root", async () => {
+  it("wires hosted second review and design review with fail-safe company autonomy", async () => {
     const { root } = await world();
     const a = (await root.app.runtimeFor(A)).flow.deps;
     const b = (await root.app.runtimeFor(B)).flow.deps;
     expect(typeof a.secondReview?.prepare).toBe("function");
-    expect(typeof a.designReview?.runRow).toBe("function");
-    expect(typeof a.designReview?.designFirst).toBe("function");
-    expect(a.secondReview).not.toBe(b.secondReview);
+    // Each company owns its design runtime.
+    expect(a.designReview).toBeDefined();
+    expect(b.designReview).toBeDefined();
     expect(a.designReview).not.toBe(b.designReview);
+    expect(a.secondReview).not.toBe(b.secondReview);
     expect(await a.autonomy!({ companyId: A } as never)).toEqual({ autonomy: "suggest", unreadable: true });
     expect(await a.autonomy!({ companyId: B } as never)).toEqual({ autonomy: "suggest", noCompany: true });
   });

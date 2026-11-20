@@ -20,7 +20,8 @@ const check = (checkId: string, status: string, extra: Over = {}): Over => ({ ch
 const results = (...rows: Over[]): Over => ({ verification: { candidateDigest: candidate.digest, producer: "worker", environmentId: "env", recordedAt: NOW, results: rows } });
 const workflow = (over: Over = {}, state: "READY" | "BLOCKED" = "READY", blockReason?: string): WorkflowSnapshot => WorkflowSnapshotSchema.parse({
   ...createWorkflowSnapshot({ taskId, ownerId: "a".repeat(64), now: NOW }), definitionVersion: "1.1.0", revision: 7, stage: "REVIEW", state, ...(blockReason === undefined ? {} : { blockReason }), candidate, checkPolicy: POLICY,
-  ...results(check("unit", "PASS"), check("lint", "PASS")), ...over,
+  ...results(check("unit", "PASS"), check("lint", "PASS")),
+  reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: taskId, candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: NOW })), ...over,
 });
 const pack = (checks: Over[] = [{}, { checkId: "lint", kind: "lint", label: "lint" }], over: Over = {}) => EvidencePackSchema.parse({
   schemaVersion: 1, candidateDigest: candidate.digest, environment: { tier: "sandbox", envRevision: 1, services: [], data: "synthetic", accounts: [] },

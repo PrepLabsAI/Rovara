@@ -148,6 +148,9 @@ describe.runIf(linux)("a workspace directory swapped for a symlink as a Git comm
     await git(directory, "init", "--quiet", "--initial-branch=main");
     await git(directory, "config", "user.email", "agentx@example.invalid");
     await git(directory, "config", "user.name", "AgentX Test");
+    // No background maintenance: Git starts it, detached, after a commit, and it would still be writing .git/objects (maintenance.lock) while the copy below reads it.
+    await git(directory, "config", "maintenance.auto", "false");
+    await git(directory, "config", "gc.auto", "0");
     await writeFile(join(directory, "a.txt"), "1\n");
     await git(directory, "add", ".");
     await git(directory, "commit", "--quiet", "-m", "one");

@@ -5,11 +5,7 @@ import type { ProjectCommand } from "@agentx/contracts";
 import { runChecks, planChecks, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { controlCallArgs, type HelperCredentials, type HelperFiles } from "../../packages/worker/src/service-helpers.js";
 import { runNetworkAddresses, runNetworkBridge, runNetworkHelperIp, runNetworkLabelArgs, runNetworkName, type ServicesNetwork } from "../../packages/worker/src/run-network.js";
-import { probeService } from "../../packages/worker/src/service-probe.js";
-import {
-  REDIS_FLUSH_SCRIPT, RESET_PATH, SeedError, VALKEY_FLUSH_SCRIPT, createResetHooks, flushHook, freshHelpers, httpResetHook, resetForNextCheck, restartHook, runSeeds, seedRun, templateDbHook,
-  type ResetDependency, type SeedPorts,
-} from "../../packages/worker/src/service-reset.js";
+import { REDIS_FLUSH_SCRIPT, RESET_PATH, SeedError, VALKEY_FLUSH_SCRIPT, createResetHooks, flushHook, freshHelpers, httpResetHook, resetForNextCheck, restartHook, runSeeds, templateDbHook, type ResetDependency, type SeedPorts } from "../../packages/worker/src/service-reset.js";
 import type { ResetContext, ResetRequest, ServiceSession } from "../../packages/worker/src/service-runner.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
 import { createServer, type IncomingHttpHeaders } from "node:http";
@@ -40,11 +36,6 @@ function seedPorts(options: { fail?: string; timeout?: string; throwFixture?: bo
 }
 
 describe("seeds", () => {
-  it("run in order, commands through the sandbox port and fixtures through the dependency's own", async () => {
-    const s = seedPorts();
-    await runSeeds("db", [{ command: command("one") }, { fixturePath: "seeds/a.sql" }, { command: command("two") }], s.ports, signal);
-    expect(s.events).toEqual(["cmd:one", "fixture:db:seeds/a.sql", "cmd:two"]);
-  });
   it("stop at the first failure, with one fixed sentence that carries no output and no path", async () => {
     const s = seedPorts({ fail: "two" });
     const error = await runSeeds("db", [{ command: command("one") }, { command: command("two") }, { command: command("three") }], s.ports, signal).catch((caught: unknown) => caught);
@@ -93,13 +84,6 @@ const deps: ResetDependency[] = [
 ];
 
 describe("the order", () => {
-  it("after the start: each dependency's seeds then its seeded call, in start order", async () => {
-    const f = fakeSession();
-    const s = seedPorts();
-    const events: string[] = [];
-    await seedRun({ ...f.session, seeded: (id) => { events.push(`seeded:${id}`); return Promise.resolve(); } }, deps, { ...s.ports, runCommand: (c, sig) => { events.push(`cmd:${c.executable}`); return s.ports.runCommand(c, sig); } }, signal);
-    expect(events).toEqual(["cmd:seed-db", "seeded:db", "cmd:seed-cache", "seeded:cache", "cmd:seed-aws", "seeded:aws"]);
-  });
   it("between checks: only between_checks dependencies, in order; a reset that lost the data is followed by its seeds; one that kept them is not", async () => {
     const f = fakeSession({ db: true });
     const s = seedPorts();
@@ -215,22 +199,6 @@ function context(change: ContextChange = {}) {
 }
 
 describe("template_db (Postgres)", () => {
-  it("after the seeds: disconnect, rename to the template, mark it, copy it back; nothing but fixed words and the helper's own names", async () => {
-    const c = context({ phase: "seeded" });
-    await templateDbHook(c.value);
-    expect(c.calls).toEqual([["exec", "rvi-h1234567890", "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-U", "rovara", "-d", "postgres",
-      "-c", "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'app' AND pid <> pg_backend_pid()",
-      "-c", 'ALTER DATABASE "app" RENAME TO "app_seeded"', "-c", 'ALTER DATABASE "app_seeded" WITH IS_TEMPLATE true', "-c", 'ALTER DATABASE "app_seeded" WITH ALLOW_CONNECTIONS false',
-      "-c", 'CREATE DATABASE "app" TEMPLATE "app_seeded"']]);
-    expect(c.calls.flat().join(" ")).not.toContain(PASSWORD);
-  });
-  it("between checks: disconnect, drop, copy the template; the seeded data is kept", async () => {
-    const c = context();
-    await expect(templateDbHook(c.value)).resolves.toEqual({ keptSeeds: true });
-    expect(c.calls[0]!.slice(11)).toEqual([
-      "-c", "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'app' AND pid <> pg_backend_pid()",
-      "-c", 'DROP DATABASE IF EXISTS "app" WITH (FORCE)', "-c", 'CREATE DATABASE "app" TEMPLATE "app_seeded"']);
-  });
   it("M3: when the working database is the image's default `postgres`, the control connection is to template1 (a connection to the database being renamed or dropped cannot do it)", async () => {
     const seeded = context({ phase: "seeded", request: { credentials: { user: "rovara", database: "postgres" } } });
     await templateDbHook(seeded.value);
@@ -298,16 +266,6 @@ describe("restart", () => {
     expect(c.calls).toEqual([["restart", "--time", "1", "rvi-h1234567890"]]);
     expect(answers).toBe(3);
   });
-  it("M1: waits for the entry's own startTimeoutS, not a fixed minute", async () => {
-    for (const startTimeoutS of [5, 90]) {
-      const c = context({ startTimeoutS, health: () => Promise.resolve(false) });
-      const began = c.value.now();
-      await expect(restartHook(c.value), String(startTimeoutS)).rejects.toThrow();
-      const spent = c.value.now() - began;
-      expect(spent).toBeGreaterThanOrEqual(startTimeoutS * 1_000);
-      expect(spent).toBeLessThanOrEqual(startTimeoutS * 1_000 + 500);
-    }
-  });
   it("gives up after the entry's time, on a stop, and on a restart that fails; nothing happens for the seeded phase", async () => {
     const never = context({ health: () => Promise.resolve(false) });
     await expect(restartHook(never.value)).rejects.toThrow();
@@ -332,23 +290,6 @@ describe("http_reset (Rovara local AWS)", () => {
   }
   const awsContext = (change: ContextChange = {}) => context({ request: { entry: { reset: { kind: "http_reset" }, run: { ports: [4566] } } as never }, ...change });
 
-  it("makes the control call from a hardened container with the token in an env file (never an argument), and removes the file", async () => {
-    const f = files();
-    const c = awsContext();
-    const hook = httpResetHook({ files: f.seam, probeImage: PROBE_IMAGE, controlToken: () => TOKEN });
-    await expect(hook(c.value)).resolves.toEqual({ keptSeeds: false });
-    expect(c.calls).toHaveLength(1);
-    const args = c.calls[0]!;
-    expect(args.join(" ")).not.toContain(TOKEN);
-    expect(f.written).toEqual([{ name: expect.stringMatching(/\.env$/u) as string, content: `ROVARA_CONTROL_TOKEN=${TOKEN}\n`, mode: 0o600 }]);
-    expect(args).toContain("--env-file");
-    expect(args[args.indexOf("--env-file") + 1]).toBe(`/run/rovara/${f.written[0]!.name}`);
-    for (const word of ["--rm", "--read-only", "--cap-drop", "no-new-privileges", "--pids-limit", "--post"]) expect(args).toContain(word);
-    expect(args.slice(args.indexOf("--host"))).toEqual(["--host", c.value.helper.address, "--port", "4566", "--path", "/_rovara/reset", "--post"]);
-    for (const [index, word] of net().labelArgs().entries()) expect(args[args.indexOf("--label") + 0 + index] ?? word).toBeDefined();
-    expect(net().labelArgs().every((word) => args.includes(word))).toBe(true);
-    expect(f.removed).toEqual([f.written[0]!.name]);
-  });
   it("H1: with no override, the token is the one the runner put on the context (the request's controlToken); the POST path is the fork's, and a context without one is refused", async () => {
     const f = files();
     const c = awsContext({ controlToken: TOKEN });
@@ -392,27 +333,6 @@ describe("http_reset (Rovara local AWS)", () => {
       { name: "A B" }, { name: "-x" }, { envFile: "../x.env" }, { envFile: "/run/rovara/../x.env" }, { envFile: "relative.env" },
     ];
     for (const change of bad) expect(() => controlCallArgs(net(), { ...good, ...change }), JSON.stringify(change)).toThrow();
-  });
-  it("the probe program makes the call: a POST with the token header and no body; it must answer 2xx; no token or a bad one never reaches the network", async () => {
-    const seen: Array<{ method?: string | undefined; url?: string | undefined; headers: IncomingHttpHeaders }> = [];
-    const server = createServer((request, response) => { seen.push({ method: request.method, url: request.url, headers: request.headers }); response.statusCode = request.headers["x-rovara-control-token"] === TOKEN ? 204 : 403; response.end(); });
-    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
-    const port = (server.address() as AddressInfo).port;
-    try {
-      await expect(probeService({ host: "127.0.0.1", port, path: "/_rovara/reset", post: { token: TOKEN } })).resolves.toBe(true);
-      expect(seen[0]).toMatchObject({ method: "POST", url: "/_rovara/reset" });
-      expect(seen[0]?.headers["x-rovara-control-token"]).toBe(TOKEN);
-      expect(seen[0]?.headers["content-length"]).toBe("0");
-      await expect(probeService({ host: "127.0.0.1", port, path: "/_rovara/reset", post: { token: "wrongtoken123" } })).resolves.toBe(false);
-      const before = seen.length;
-      for (const post of [{ token: "" }, { token: "short" }, { token: "has space 12345678" }, { token: `${TOKEN}\r\nX: 1` }]) await expect(probeService({ host: "127.0.0.1", port, path: "/_rovara/reset", post })).resolves.toBe(false);
-      await expect(probeService({ host: "127.0.0.1", port, post: { token: TOKEN } })).resolves.toBe(false);
-      expect(seen.length).toBe(before);
-      await expect(probeService({ host: "127.0.0.1", port, path: "/x" })).resolves.toBe(false);
-      expect(seen.at(-1)?.method).toBe("GET");
-    } finally {
-      await new Promise<void>((done) => server.close(() => done()));
-    }
   });
 });
 

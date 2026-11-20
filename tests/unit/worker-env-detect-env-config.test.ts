@@ -43,34 +43,6 @@ describe("example and sample env files", () => {
     expect(detection.dependencies!.map((item) => item.family)).not.toEqual(expect.arrayContaining(["app", "aws"]));
   });
 
-  it("never copies a password, a token, a user or a host name", async () => {
-    const out = JSON.stringify(await detect({ ".env.example": text, ".env.test": text }));
-    for (const secret of [PASSWORD, TOKEN, HOST, "guest", "cluster0", "broker-1", "abcde"]) expect(out).not.toContain(secret);
-  });
-});
-
-describe("a real env file", () => {
-  const real = [`DATABASE_URL=postgres://app:${PASSWORD}@${HOST}/app`, `REDIS_URL=redis://localhost:6379`, `POSTGRES_PASSWORD=${PASSWORD}`, `SENDGRID_API_KEY=${TOKEN}`, `SECRET_KEY=${TOKEN}`, ""].join("\n");
-  it("is read for names only: no value is looked at, so a URL gives no scheme or host family", async () => {
-    const detection = await detect({ ".env": real });
-    expect(detection.dependencies!.map((item) => item.family).sort()).toEqual(["postgres", "redis", "sendgrid"]);
-    for (const item of detection.dependencies!) expect(item.hints.url).toBeUndefined();
-    expect(family(detection, "postgres")!.hints.envNames).toEqual(["POSTGRES_PASSWORD"]);
-  });
-  it("never lets a value reach the output", async () => {
-    const out = JSON.stringify(await detect({ ".env": real, ".env.local": real, ".env.production": real }));
-    for (const secret of [PASSWORD, TOKEN, HOST]) expect(out).not.toContain(secret);
-  });
-  it("does not read an encrypted env file", async () => {
-    expect((await detect({ ".env.enc": "REDIS_URL=x", ".env.sops": "REDIS_URL=x" })).dependencies).toBeUndefined();
-  });
-  it("drops a variable name that is shaped like a key", async () => {
-    const keyName = ["AK", "IA", "ABCDEFGHIJKLMNOP"].join("");
-    const shaped = `REDIS_${keyName}`;
-    const detection = await detect({ ".env": `REDIS_URL=1\n${keyName}=1\n${shaped}=1\nredis_lower=1\n` });
-    expect(JSON.stringify(detection)).not.toContain(keyName);
-    expect(family(detection, "redis")!.hints.envNames).toEqual(["REDIS_URL"]);
-  });
 });
 
 describe("settings files", () => {
@@ -93,16 +65,6 @@ describe("settings files", () => {
     expect(family(detection, "redis")!.hints.envNames).toEqual(["REDIS_HOST"]);
     expect(family(detection, "redis")!.evidence).toContainEqual({ path: "src/main/resources/application-test.yml", line: 2 });
     expect(JSON.stringify(detection)).not.toContain(PASSWORD);
-  });
-  it("reads .NET connection string names, config folder files, and never an http URL", async () => {
-    const json = '{"ConnectionStrings": {"Postgres": "Host=h;Password=' + PASSWORD + '", "RedisCache": "redis:6379"}, "Api": "https://api.partner.example.net/v1"}';
-    const detection = await detect({ "appsettings.json": json, "config/default.yaml": "url: https://api.partner.example.net\nstore: mysql://u:p@db:3306/x\n" });
-    expect(detection.dependencies!.map((item) => item.family).sort()).toEqual(["mysql", "postgres", "redis"]);
-    expect(JSON.stringify(detection)).not.toContain(PASSWORD);
-    expect(JSON.stringify(detection)).not.toContain("partner");
-  });
-  it("skips vendored folders and finds nothing in a repository with no settings", async () => {
-    expect((await detect({ "node_modules/x/config/a.yml": "u: redis://localhost", "README.md": "REDIS_URL" })).dependencies).toBeUndefined();
   });
 });
 

@@ -7,7 +7,7 @@ import { createWorkspacePiSession, type PiSessionAdapter, type WorkspaceModelCon
 import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
 import { runWikiBuild, type WikiSessionParts } from "./wiki-build-run.js";
-import { setupModelPrice } from "./setup-agent-price.js";
+import { modelSpendIsMetered, setupModelPrice } from "./setup-agent-price.js";
 import { taskSandboxFor, taskShellSelection, type TaskShellSelection } from "./task-sandbox.js";
 
 export interface WikiInvocationDependencies {
@@ -49,9 +49,9 @@ export async function runWikiBuildInvocation(
   if (dependencies.wikiBuild === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the worker cannot reach the control plane's wiki build callback");
   const environment = dependencies.environment ?? process.env;
   // Money: a wiki build is metered by the model proxy (the broker's spend ledger) and priced from the catalog; without either it does not start.
-  const proxy = environment["AGENTX_MODEL_PROXY_URL"];
-  if (proxy === undefined || proxy === "") throw agentXError("RUNTIME_UNAVAILABLE", "this install has no model proxy, so AgentX did not build the wiki (its spending could not be counted)");
-  const price = setupModelPrice(dependencies.model);
+  // Hotfix 0.5.33: the boot-time proxy (laptop) OR the invocation's own model route (hosted, metered through the control plane); neither refuses.
+  if (!modelSpendIsMetered(environment, invocation.payload)) throw agentXError("RUNTIME_UNAVAILABLE", "this install has no model proxy, so AgentX did not build the wiki (its spending could not be counted)");
+  const price = setupModelPrice(dependencies.model, invocation.payload.modelRoute);
   const callback = dependencies.wikiBuild;
   const events = new EventBatcher(dependencies.eventSink);
   const conversationId = invocation.payload.conversationId;

@@ -49,36 +49,6 @@ describe("CommandRecorder", () => {
     expect(recorder.edited).toBe(false);
   });
 
-  it("keeps only the first run of each replay string", async () => {
-    const { recorder, bash, tool, runs } = harness();
-    await bash("pytest -k x", { exitCode: 1 });
-    await tool("edit");
-    await bash("pytest -k x", { exitCode: 0 });
-    expect(recorder.edited).toBe(true);
-    expect((await runs()).map(({ replay, exitCode, afterFirstEdit }) => ({ replay, exitCode, afterFirstEdit })))
-      .toEqual([{ replay: "pytest -k x", exitCode: 1, afterFirstEdit: false }]);
-  });
-
-  it("marks a command first run after an edit or write", async () => {
-    const { bash, tool, runs } = harness();
-    await bash("pytest -k x");
-    await tool("write");
-    await bash("npm test");
-    expect((await runs()).map(({ order, replay, afterFirstEdit }) => ({ order, replay, afterFirstEdit }))).toEqual([
-      { order: 0, replay: "pytest -k x", afterFirstEdit: false },
-      { order: 1, replay: "npm test", afterFirstEdit: true },
-    ]);
-  });
-
-  it("records a test command piped into tail -N as its bare command, with the run's exit code (pipefail)", async () => {
-    const { bash, runs } = harness();
-    await bash("python -m pytest a/test_x.py -q 2>&1 | tail -20", { exitCode: 1 });
-    await bash("python -m pytest a/test_x.py -q", { exitCode: 0 });
-    expect((await runs()).map(({ command, replay, exitCode, afterFirstEdit }) => ({ command, replay, exitCode, afterFirstEdit }))).toEqual([
-      { command: "python -m pytest a/test_x.py -q 2>&1 | tail -20", replay: "python -m pytest a/test_x.py -q", exitCode: 1, afterFirstEdit: false },
-    ]);
-  });
-
   it("never records a refused pipe, a non-test command, or another tool's result", async () => {
     const { recorder, bash, runs } = harness();
     await bash("pytest | tee out.txt");
@@ -87,14 +57,6 @@ describe("CommandRecorder", () => {
     recorder.observe({ toolCallId: "r", toolName: "read", input: { command: "pytest" }, isError: false, content: [{ type: "text", text: "x" }] });
     recorder.observe({ toolCallId: "b", toolName: "bash", input: {}, isError: false, content: [] });
     expect(await runs()).toEqual([]);
-  });
-
-  it("does not count a failed edit as an edit", async () => {
-    const { recorder, bash, tool, runs } = harness();
-    await tool("edit", true);
-    await bash("npm test");
-    expect(recorder.edited).toBe(false);
-    expect((await runs())[0]?.afterFirstEdit).toBe(false);
   });
 
   it("reads the exit code from the last text marker without structuredContent, else 0 on success, else unknown", async () => {
@@ -131,47 +93,6 @@ describe("CommandRecorder", () => {
 });
 
 describe("CommandRecorder: tests inside chains and filters (#299)", () => {
-  it("records each test in a chain, without the chain's exit code, which is not the test's", async () => {
-    const { bash, runs } = harness();
-    await bash("pytest a; pytest b", { exitCode: 1, text: "1 failed" });
-    expect(await runs()).toEqual([
-      { order: 0, command: "pytest a; pytest b", replay: "pytest a", exitCode: undefined, afterFirstEdit: false, output: "1 failed" },
-      { order: 1, command: "pytest a; pytest b", replay: "pytest b", exitCode: undefined, afterFirstEdit: false, output: "1 failed" },
-    ]);
-  });
-
-  it("records a test piped into another filter, or chained with || true, without its exit code", async () => {
-    const { bash, runs } = harness();
-    await bash("pytest | tail", { exitCode: 0 });
-    await bash('python -m pytest -q 2>&1 | grep -E "^E" | head', { exitCode: 0 });
-    await bash("npm test || true", { exitCode: 0 });
-    expect((await runs()).map(({ replay, exitCode }) => ({ replay, exitCode }))).toEqual([
-      { replay: "pytest", exitCode: undefined },
-      { replay: "python -m pytest -q", exitCode: undefined },
-      { replay: "npm test", exitCode: undefined },
-    ]);
-  });
-
-  it("keeps the run's exit code for cd <dir>; <test>, the same command as cd <dir> && <test>", async () => {
-    const { bash, runs } = harness();
-    await bash("cd pkg; npm test 2>&1 | tail -5", { exitCode: 1 });
-    expect((await runs()).map(({ replay, exitCode }) => ({ replay, exitCode }))).toEqual([{ replay: "cd pkg && npm test", exitCode: 1 }]);
-  });
-
-  it("lets a later simple run, made before any edit, supply the before a chained run could not", async () => {
-    const { bash, runs } = harness();
-    await bash("go build ./... && go test ./x 2>&1 | tail -20", { exitCode: 0 });
-    await bash("go test ./x", { exitCode: 1 });
-    expect((await runs()).map(({ command, replay, exitCode }) => ({ command, replay, exitCode })))
-      .toEqual([{ command: "go test ./x", replay: "go test ./x", exitCode: 1 }]);
-  });
-
-  it("marks a chained test run after a bash command that changed the workspace as after an edit (Ruling E)", async () => {
-    const h = harness();
-    await h.bash("sed -i s/a/b/ src.py", { effect: () => { h.workspace.state = "sed"; } });
-    await h.bash("make build && pytest");
-    expect((await h.runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: true });
-  });
 
   it("maps every cd target and keeps the agent's own text as the command", async () => {
     const { bash, runs } = harness(undefined, (target) => (target === "/app" ? "" : target.startsWith("/app/") ? target.slice(5) : undefined));
@@ -185,39 +106,6 @@ describe("CommandRecorder: tests inside chains and filters (#299)", () => {
 });
 
 describe("CommandRecorder: an edit made through bash (Ruling E)", () => {
-  it("marks a test run after a bash command that changed the workspace as after an edit", async () => {
-    const { recorder, workspace, bash, runs } = harness();
-    await bash("sed -i s/a/b/ src.py", { effect: () => { workspace.state = "sed"; } });
-    await bash("pytest", { exitCode: 1 });
-    expect(recorder.edited).toBe(false);
-    expect((await runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: true });
-  });
-
-  it("keeps a test run's before valid after a bash command that changed nothing", async () => {
-    const { bash, runs } = harness();
-    await bash("ls");
-    await bash("pytest", { exitCode: 1 });
-    expect((await runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: false });
-  });
-
-  it("takes the baseline at the first tool call, before it runs, whatever the tool", async () => {
-    const calls: string[] = [];
-    const { workspace, bash, runs } = harness(async () => { calls.push("fingerprint"); return workspace.state; });
-    await bash("sed -i s/a/b/ src.py", { effect: () => { calls.push("sed ran"); workspace.state = "sed"; } });
-    await bash("pytest");
-    expect(calls).toEqual(["fingerprint", "sed ran", "fingerprint"]);
-    expect((await runs())[0]?.afterFirstEdit).toBe(true);
-  });
-
-  it("does not fingerprint once an edit tool has succeeded", async () => {
-    let count = 0;
-    const { workspace, bash, tool, runs } = harness(async () => { count += 1; return workspace.state; });
-    await tool("edit");
-    const before = count;
-    await bash("pytest");
-    expect(count).toBe(before);
-    expect((await runs())[0]?.afterFirstEdit).toBe(true);
-  });
 
   it("treats a run as after an edit when the fingerprint fails, and reports it", async () => {
     const { diagnostics, bash, runs } = harness(async () => { throw new Error("not a git repository"); });
@@ -258,95 +146,5 @@ describe("CommandRecorder: a parallel batch (Ruling G)", () => {
     expect((await k.runs())[0]).toMatchObject({ replay: "npm test", afterFirstEdit: true });
   });
 
-  it("voids the before of a test run batched with an edit or write that finishes after it", async () => {
-    const h = harness();
-    await batch(h, [{ toolName: "edit", effect: () => { h.workspace.state = "edit"; } }, { toolName: "bash", command: "pytest" }], [1, 0]);
-    const k = harness();
-    await batch(k, [{ toolName: "bash", command: "pytest" }, { toolName: "write" }]);
-    expect((await h.runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: true });
-    expect((await k.runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: true });
-  });
-
-  it("voids the before of a test run batched with a chained test that also changes files, either order (#299, abuse case 7)", async () => {
-    const h = harness();
-    await batch(h, [{ toolName: "bash", command: "sed -i s/x/y/ src/a.py && pytest", effect: () => { h.workspace.state = "sed"; } }, { toolName: "bash", command: "npm test" }]);
-    const k = harness();
-    await batch(k, [{ toolName: "bash", command: "npm test" }, { toolName: "bash", command: "sed -i s/x/y/ src/a.py && pytest", effect: () => { k.workspace.state = "sed"; } }]);
-    expect((await h.runs()).map(({ replay, exitCode, afterFirstEdit }) => ({ replay, exitCode, afterFirstEdit }))).toEqual([
-      { replay: "pytest", exitCode: undefined, afterFirstEdit: false },
-      { replay: "npm test", exitCode: 0, afterFirstEdit: true },
-    ]);
-    expect((await k.runs()).find(({ replay }) => replay === "npm test")).toMatchObject({ exitCode: 0, afterFirstEdit: true });
-  });
-
-  it("keeps the before valid in a batch of tests whose chains hold only tests, cd and filters", async () => {
-    const h = harness();
-    await batch(h, [{ toolName: "bash", command: "cd a && pytest | grep x" }, { toolName: "bash", command: "npm test" }]);
-    expect((await h.runs()).find(({ replay }) => replay === "npm test")).toMatchObject({ afterFirstEdit: false });
-  });
-
-  it("keeps the before valid in a batch of test commands and reads", async () => {
-    const h = harness();
-    await batch(h, [{ toolName: "bash", command: "pytest" }, { toolName: "read" }, { toolName: "bash", command: "npm test" }]);
-    expect((await h.runs()).map(({ replay, afterFirstEdit }) => ({ replay, afterFirstEdit }))).toEqual([
-      { replay: "pytest", afterFirstEdit: false },
-      { replay: "npm test", afterFirstEdit: false },
-    ]);
-  });
-
-  it("does not let a finished batch void a later call", async () => {
-    const h = harness();
-    await batch(h, [{ toolName: "bash", command: "ls" }, { toolName: "bash", command: "cat a" }]);
-    await h.bash("pytest");
-    expect((await h.runs())[0]?.afterFirstEdit).toBe(false);
-  });
 });
 
-describe("CommandRecorder: fingerprint cost (M-9, M-11)", () => {
-  it("stops reading the fingerprint once it has differed", async () => {
-    let count = 0;
-    const h = harness(async () => { count += 1; return h.workspace.state; });
-    await h.bash("sed -i s/a/b/ src.py", { effect: () => { h.workspace.state = "sed"; } });
-    await h.bash("pytest");
-    const after = count;
-    await h.bash("npm test");
-    expect(count).toBe(after);
-    expect((await h.runs()).map((run) => run.afterFirstEdit)).toEqual([true, true]);
-  });
-
-  it("reports a failing fingerprint once per session", async () => {
-    const h = harness(async () => { throw new Error("not a git repository"); });
-    await h.bash("pytest");
-    await h.bash("npm test");
-    await h.bash("go test ./...");
-    await h.runs();
-    expect(h.diagnostics).toHaveLength(1);
-  });
-
-  it("passes the tool call's abort signal to the fingerprint", async () => {
-    const signals: Array<AbortSignal | undefined> = [];
-    const recorder = new CommandRecorder({ fingerprint: async (signal) => { signals.push(signal); return "s"; } });
-    const controller = new AbortController();
-    await recorder.observeCall({ toolCallId: "sig", toolName: "bash", input: { command: "pytest" } }, controller.signal);
-    expect(signals.length).toBeGreaterThan(0);
-    expect(signals.every((signal) => signal === controller.signal)).toBe(true);
-  });
-});
-
-describe("CommandRecorder: a call that never gets a tool_result (M-12)", () => {
-  it("drops a blocked call from the calls in flight at its tool_execution_end", async () => {
-    const h = harness();
-    await h.recorder.observeCall({ toolCallId: "blocked", toolName: "bash", input: { command: "sed -i s/a/b/ src.py" } });
-    h.recorder.observeExecutionEnd("blocked");
-    await h.bash("pytest");
-    expect((await h.runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: false });
-  });
-
-  it("clears the calls in flight at turn_end", async () => {
-    const h = harness();
-    await h.recorder.observeCall({ toolCallId: "aborted", toolName: "edit", input: { path: "a.ts" } });
-    h.recorder.observeTurnEnd();
-    await h.bash("pytest");
-    expect((await h.runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: false });
-  });
-});

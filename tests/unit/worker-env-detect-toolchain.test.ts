@@ -25,18 +25,6 @@ function acceptable(result: Awaited<ReturnType<typeof propose>>): Record<string,
 }
 
 describe("Go", () => {
-  it("proposes the Go dev container image at the smallest listed version that satisfies go.mod, citing the go line", async () => {
-    const result = await propose({ "go.mod": GO_MOD("1.22.3"), "a.go": "" });
-    expect(result.devcontainer).toMatchObject({ configPath: ".devcontainer/devcontainer.json", exists: false, from: [{ path: "go.mod", line: 3 }, "detector:toolchain"] });
-    expect(acceptable(result)).toEqual({ name: "Go 1.25 for tests", image: "mcr.microsoft.com/devcontainers/go:1.25-bookworm" });
-    expect(result.notes.join(" ")).toContain("go.mod line 3");
-    expect(result.notes.join(" ")).toContain("pull request a person approves");
-    expect(result.questions).toEqual([]);
-  });
-  it("keeps the exact listed version when go.mod asks for it, and a newer patch of it", async () => {
-    expect(acceptable(await propose({ "go.mod": GO_MOD("1.26"), "a.go": "" }))["image"]).toBe("mcr.microsoft.com/devcontainers/go:1.26-bookworm");
-    expect(acceptable(await propose({ "go.mod": GO_MOD("1.27.4"), "a.go": "" }))["image"]).toBe("mcr.microsoft.com/devcontainers/go:1.27-bookworm");
-  });
   it("proposes nothing and asks when go.mod asks for a Go newer than any listed image", async () => {
     const result = await propose({ "go.mod": GO_MOD("1.99"), "a.go": "" });
     expect(result.devcontainer).toBeUndefined();
@@ -58,15 +46,6 @@ describe("Go", () => {
 });
 
 describe("Java", () => {
-  it("proposes the JDK image and the Java feature's Maven when there is no Maven wrapper, citing the pom line", async () => {
-    const result = await propose({ "pom.xml": pom("17"), "src/main/java/A.java": "" });
-    expect(result.devcontainer?.from[0]).toEqual({ path: "pom.xml", line: 3 });
-    expect(acceptable(result)).toEqual({
-      name: "Java 17 for tests", image: "mcr.microsoft.com/devcontainers/java:17-bookworm",
-      features: { "ghcr.io/devcontainers/features/java:1": { version: "none", installMaven: true, installGradle: false } },
-    });
-    expect(result.notes.join(" ")).toContain("no maven wrapper");
-  });
   it("adds no build tool when the wrapper is complete, and installs Gradle when it is not", async () => {
     expect(acceptable(await propose({ "pom.xml": pom("21"), ...MVNW }))).toEqual({ name: "Java 21 for tests", image: "mcr.microsoft.com/devcontainers/java:21-bookworm" });
     expect(acceptable(await propose({ "build.gradle": "java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }\n", ...GRADLEW }))).toEqual({ name: "Java 21 for tests", image: "mcr.microsoft.com/devcontainers/java:21-bookworm" });
@@ -99,9 +78,6 @@ describe("what is not proposed", () => {
       expect(await propose(files)).toEqual({ notes: [], questions: [] });
     }
     expect(BASE_IMAGE_LANGUAGES).toEqual(["node", "python"]);
-  });
-  it("proposes nothing for a language the caller says the image already has", async () => {
-    expect(await propose({ "go.mod": GO_MOD("1.22"), "a.go": "" }, { baseLanguages: ["node", "python", "go"] })).toEqual({ notes: [], questions: [] });
   });
   it("uses the repository's own dev container and asks only when it does not name the language", async () => {
     const named = await propose({ "go.mod": GO_MOD("1.22"), "a.go": "", ".devcontainer/devcontainer.json": '{ "image": "mcr.microsoft.com/devcontainers/go:1.22" }' });

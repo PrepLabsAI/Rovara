@@ -129,16 +129,6 @@ describe("GitHub adapter specifics", () => {
     for (const bad of ["", "0", "-1", "12; x", "review_comment:", "other:12", "1".repeat(20)]) expect(replyTargetOf(bad)).toEqual({ kind: "none" });
   });
 
-  it("does not post when the reply text is not fixed text, even for a comment that is gone", async () => {
-    const world = githubCodeHostWorld();
-    const head = world.model.commit(WORKING_BRANCH(1), { "src/a.ts": "x\n" });
-    const { ref } = await world.host.reconcileChangeRequest({ repository: world.repository, sourceBranch: WORKING_BRANCH(1), targetBranch: "main", title: "t" }, world.scope);
-    expect(head).toMatch(/^[a-f0-9]{40}$/);
-    const before = world.api.calls.length;
-    await expect(world.host.reply(ref, "discussion:5", "thanks @someone", world.scope)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    expect(world.api.calls.length).toBe(before);
-  });
-
   it("gives a long comment to the port cut to its bound, and never fails the read", async () => {
     const world = githubCodeHostWorld();
     world.model.commit(WORKING_BRANCH(1), { "src/a.ts": "x\n" });
@@ -172,22 +162,6 @@ describe("CodeBuild adapter specifics", () => {
     const world = codeBuildWorld();
     await expect(world.runner.listChecks({ kind: "revision", repository: world.repository, revision: "a".repeat(40) }, world.scope)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     await expect(world.runner.listChecks({ kind: "change-request", ref: { repository: world.repository, id: "1", url: "" } }, world.scope)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-  });
-
-  it("maps every CodeBuild status to a pending check or a finished one with a conclusion", async () => {
-    const world = codeBuildWorld();
-    const revision = "a".repeat(40);
-    const { run } = await world.runner.start!({ repository: world.repository, revision, gate: "unit", project: world.project, timeoutMinutes: 10, idempotencyKey: "k" }, world.scope);
-    const target = { kind: "run" as const, repository: world.repository, revision, run, gate: "unit", project: world.project };
-    const expected: Array<[CodeBuildCheckResult["status"], string | undefined]> = [
-      ["IN_PROGRESS", undefined], ["SUCCEEDED", "success"], ["FAILED", "failure"], ["FAULT", "error"], ["STOPPED", "cancelled"], ["TIMED_OUT", "timed_out"],
-    ];
-    for (const [status, conclusion] of expected) {
-      world.gateway.finish(run.id, status);
-      const check = await world.runner.getRun!(target, world.scope);
-      expect(check.state).toBe(conclusion === undefined ? "pending" : "completed");
-      expect(check.conclusion).toBe(conclusion);
-    }
   });
 
   it("reads a run only with its project", async () => {

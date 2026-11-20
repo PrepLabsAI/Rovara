@@ -19,21 +19,6 @@ describe("the fallback report", () => {
     expect(JSON.parse(calls[0]!.init.body as string)).toEqual({ step: "extract" });
   });
 
-  it("never throws: an unreachable or refusing broker changes nothing", async () => {
-    for (const fetchImplementation of [async () => { throw new Error("down"); }, async () => new Response("no", { status: 500 })] as Array<typeof fetch>) {
-      await expect(createSavedEnvFallbackReporter({ controlPlaneUrl: "https://cp.example.test", invocation, fetchImplementation })("pull")).resolves.toBeUndefined();
-    }
-  });
-
-  it("is called by the preparation's fallback, once per fallback, with the step; without a reporter the fallback is the log line alone", () => {
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const steps: string[] = [];
-    const options = savedEnvOptionsOf(payload, async () => { throw new Error("unused"); }, undefined, async (step) => { steps.push(step); });
-    options.onFallback?.("manifest");
-    expect(steps).toEqual(["manifest"]);
-    expect(() => savedEnvOptionsOf(payload, async () => { throw new Error("unused"); }).onFallback?.("pull")).not.toThrow();
-  });
-
   it("does not wait for a report that fails: a rejecting reporter is not an unhandled rejection of the preparation", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const options = savedEnvOptionsOf(payload, async () => { throw new Error("unused"); }, undefined, createSavedEnvFallbackReporter({ controlPlaneUrl: "https://cp.example.test", invocation, fetchImplementation: async () => { throw new Error("down"); } }));

@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
+import { answerMcp } from "../context-sources/mcp-endpoint.js";
 // Team-record-only context on the core. Verify before routing reads; the workspace owns the company.
 // Configured MCP sources have no connection/secret ports here and are deliberately not opened.
 import { z } from "zod";
-import { ContextToolCallRequestSchema, OrgIdSchema, SEARCH_TEAM_KNOWLEDGE_TOOL, isContextSourceStage, type ContextSource, type OrgId } from "@agentx/contracts";
+import { ContextToolCallRequestSchema, WorkspaceStatusSchema, WorkflowStageSchema, OrgIdSchema, SEARCH_TEAM_KNOWLEDGE_TOOL, isContextSourceStage, type ContextSource, type ContextToolCatalog, type ContextToolCallRequest, type ContextToolCallResponse, type OrgId } from "@agentx/contracts";
 import type { CallbackCapabilities } from "../callbacks.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { CONTEXT_TOOLS_PATH, CONTEXT_TOOLS_CALL_PATH, GATEWAY_MCP_PATH } from "../services/context-tools.js";
@@ -42,8 +44,7 @@ export async function handleCoreContextTools(request: BrokerRequest, ports: Core
       const claims = ports.capabilities.verify(token, "context-tools");
       // Validate signed fields too: signing is not a substitute for a readable capability.
       if (!UUID.test(claims.workspaceId) || !UUID.test(claims.operationId) || !Number.isSafeInteger(claims.fence) || claims.fence < 1
-        || !Number.isFinite(claims.expiresAt) || claims.expiresAt <= Math.floor(Date.now() / 1000)
-        || request.headers["x-rovara-workspace"] !== claims.workspaceId) return refuse();
+        || !Number.isFinite(claims.expiresAt) || claims.expiresAt <= Math.floor(Date.now() / 1000)) return refuse();
       deadline.check();
       if ((path === CONTEXT_TOOLS_PATH ? request.method !== "GET" : request.method !== "POST") || (request.body?.length ?? 0) > MAX_REQUEST_BYTES
         || Buffer.byteLength(request.body ?? "") > MAX_REQUEST_BYTES) return refuse();
@@ -59,7 +60,8 @@ export async function handleCoreContextTools(request: BrokerRequest, ports: Core
       const workspace = fromDocument<WorkspaceRecord>(location?.workspace);
       deadline.check();
       if (location === undefined || workspace === undefined || workspace.id !== claims.workspaceId || workspace.companyId !== companyId
-        || (workspace.orgId !== undefined && workspace.orgId !== companyId) || workspace.activeOperationId !== claims.operationId || workspace.fence !== claims.fence) return refuse();
+        || (workspace.orgId !== undefined && workspace.orgId !== companyId) || workspace.activeOperationId !== claims.operationId || workspace.fence !== claims.fence
+        || !WorkspaceStatusSchema.safeParse(workspace.status).success || workspace.closedAt !== undefined || ["CLOSING", "CLOSED", "STOPPED"].includes(workspace.status)) return refuse();
       const operation = fromDocument<OperationRecord>(await flow.store.get(location.operationKey(claims.operationId)));
       deadline.check();
       if (operation === undefined || operation.id !== claims.operationId || operation.workspaceId !== claims.workspaceId || operation.companyId !== companyId
@@ -70,30 +72,42 @@ export async function handleCoreContextTools(request: BrokerRequest, ports: Core
       const task = await readTask(flow, pointer.taskId);
       deadline.check();
       if (task === undefined || task.taskId !== pointer.taskId || task.companyId !== companyId || task.workspaceId !== claims.workspaceId
-        || typeof task.developerId !== "string" || task.developerId === "" || typeof task.project !== "string" || task.project !== workspace.projectName) return refuse();
+        || typeof task.developerId !== "string" || task.developerId === "" || typeof task.project !== "string" || task.project !== workspace.projectName
+        || task.stopRequest !== undefined || task.releasedAt !== undefined || task.closedAt !== undefined || task.workflow?.stage === "CLOSED" || task.workflow?.stage === "MERGED"
+        || (task.workflow !== undefined && !WorkflowStageSchema.safeParse(task.workflow.stage).success)) return refuse();
       // The flow's deployed access rule re-reads the owner's live membership AND project grant on every request.
       const requireAuthority = async () => { if (!(await flow.access.checkStep(task)).allowed) fail(); deadline.check(); };
       await requireAuthority();
-      if (path === GATEWAY_MCP_PATH) return refuse(NOT_YET);
-      if (path === CONTEXT_TOOLS_PATH) return answer({ sources: [], tools: [], searchTeamKnowledge: teamSearch !== undefined, unavailable: [], disabled: [] });
+      const list = async (): Promise<ContextToolCatalog> => ({ sources: [], tools: [], searchTeamKnowledge: teamSearch !== undefined, unavailable: [], disabled: [] });
+      const call = async (input: ContextToolCallRequest): Promise<ContextToolCallResponse> => {
+        await requireAuthority();
+        if (input.tool !== SEARCH_TEAM_KNOWLEDGE_TOOL) return { status: "REFUSED", text: NOT_YET };
+        const args = SearchArguments.safeParse(input.arguments);
+        if (!args.success || teamSearch === undefined) return fail();
+        await requireAuthority();
+        // None of the worker's fields choose a company, task or project. The per-company root supplied this search.
+        const hits = await teamSearch.search({ orgId: companyId, projectId: task.project, asAgentForTask: task.taskId, query: args.data.query,
+          ...(args.data.sources === undefined ? {} : { sources: args.data.sources }), limit: TEAM_SEARCH_LIMIT_MAX });
+        deadline.check();
+        if (!Array.isArray(hits) || hits.length > TEAM_SEARCH_LIMIT_MAX) return fail();
+        const checked = z.array(Hit).safeParse(hits);
+        if (!checked.success) return fail();
+        if (checked.data.length === 0) return { status: "OK", text: "No results." };
+        const text = checked.data.map((hit) => `- ${inertSentence(hit.title, 200)} (${hit.system}, ${inertSentence(hit.itemRef, 200)}): ${inertSentence(hit.snippet ?? "", 280)}`).join("\n");
+        const framed = frameResult({ source: { label: "Team record" } as ContextSource, itemRef: "search", fetchedAt: (flow.now?.() ?? new Date()).toISOString(), text, maxBytes: 8 * 1024, standing: "outsider" });
+        const response: ContextToolCallResponse = { status: "OK", text: framed.text, ...(framed.truncated ? { truncated: true } : {}) };
+        deadline.check();
+        return Buffer.byteLength(JSON.stringify(response)) <= MAX_RESPONSE_BYTES ? response : fail();
+      };
+      if (path === GATEWAY_MCP_PATH) {
+        const result = await answerMcp({ list, call }, request.body, randomUUID);
+        return { statusCode: result.statusCode, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: result.body === undefined ? "" : JSON.stringify(result.body) };
+      }
+      if (path === CONTEXT_TOOLS_PATH) return answer(await list());
       const parsed = ContextToolCallRequestSchema.safeParse(JSON.parse(request.body ?? ""));
       if (!parsed.success) return refuse();
-      if (parsed.data.tool !== SEARCH_TEAM_KNOWLEDGE_TOOL) return refuse(NOT_YET);
-      const args = SearchArguments.safeParse(parsed.data.arguments);
-      if (!args.success || teamSearch === undefined) return refuse();
-      // None of the worker's fields choose a company, task or project. The per-company root supplied this search.
-      const hits = await teamSearch.search({ orgId: companyId, projectId: task.project, asAgentForTask: task.taskId, query: args.data.query,
-        ...(args.data.sources === undefined ? {} : { sources: args.data.sources }), limit: TEAM_SEARCH_LIMIT_MAX });
-      deadline.check();
-      if (!Array.isArray(hits) || hits.length > TEAM_SEARCH_LIMIT_MAX) return refuse();
-      const checked = z.array(Hit).safeParse(hits);
-      if (!checked.success) return refuse();
-      if (checked.data.length === 0) return answer({ status: "OK", text: "No results." });
-      const text = checked.data.map((hit) => `- ${inertSentence(hit.title, 200)} (${hit.system}, ${inertSentence(hit.itemRef, 200)}): ${inertSentence(hit.snippet ?? "", 280)}`).join("\n");
-      const framed = frameResult({ source: { label: "Team record" } as ContextSource, itemRef: "search", fetchedAt: (flow.now?.() ?? new Date()).toISOString(), text, maxBytes: 8 * 1024, standing: "outsider" });
-      const response = answer({ status: "OK", text: framed.text, ...(framed.truncated ? { truncated: true } : {}) });
-      deadline.check();
-      return Buffer.byteLength(response.body) <= MAX_RESPONSE_BYTES ? response : refuse();
+      const result = await call(parsed.data);
+      return answer(result, result.status === "REFUSED" ? 403 : 200);
     });
   } catch { return refuse(); }
 }

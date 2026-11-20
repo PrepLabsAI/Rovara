@@ -47,7 +47,7 @@ function adapter(answer: string, created: PiSessionInput[], prompts: string[]): 
       let listener: ((event: unknown) => void) | undefined;
       return {
         conversationId: input.conversationId ?? "review-session", sessionFile,
-        async prompt(text) { prompts.push(text); listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: answer }] } }); },
+        async prompt(text) { prompts.push(text); listener?.({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: answer }] } }); },
         async abort() {}, getModel: () => ({ provider: "test", modelId: "review-v1" }),
         getSessionStats: () => ({ tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 } as never),
         subscribe(callback) { listener = callback; return () => { listener = undefined; }; }, dispose() {},

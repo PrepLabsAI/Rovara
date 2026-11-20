@@ -347,7 +347,7 @@ describe("the reviewers answer through a tool", () => {
     expect(seen[0]!.toolNames).not.toContain("submit_spec_verdicts");
     expect(reports).toHaveLength(1);
     expect(reports[0]).toMatchObject({ status: "PASS" });
-    expect(secondResult?.report).toMatchObject({ status: "FINDINGS", findings: [finding] });
+    expect(secondResult).toMatchObject({ tries: 1, report: { status: "FINDINGS", findings: [finding] } });
   });
 
   describe("the spec walk", () => {

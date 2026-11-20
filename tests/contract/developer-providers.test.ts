@@ -193,7 +193,8 @@ describe("company sign-in (FR-004)", () => {
 
   it("refuses a person outside the required group and names the group (US4 scenario 3)", async () => {
     const { fake, provider } = oidc("groups", ["engineering", "platform"]);
-    expect(await signIn(provider, fake, "okta-2")).toEqual({ ok: false, wrongAccount: true, reason: "this AgentX requires the groups claim to include engineering or platform" });
+    expect(await signIn(provider, fake, "okta-2")).toEqual({ ok: false, wrongAccount: true, reason: "this AgentX requires the groups claim to include engineering or platform",
+      verifiedIdentity: { method: "oidc", issuer: OIDC_ISSUER, subject: "okta-2", displayName: "okta-2" } });
   });
 
   it("drops an unverified email", async () => {

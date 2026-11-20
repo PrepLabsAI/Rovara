@@ -1,7 +1,7 @@
 // L4-AK1H: the hosted twin of the laptop's team knowledge routes (core-host/knowledge-api.ts). Same request, same answer, same limits as the laptop; what is hosted is WHO asks and for WHICH company: a signed-in person (live
 // membership, on the project's roster now) or a script token with the Team knowledge (`lessons`) permission naming the project. Two companies, two projects; every guard has a mutant (briefs/lead4/l4-ak1h/MUTANTS).
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentXError, KNOWLEDGE_PROPOSALS_PER_PERSON_DAY_MAX, KNOWLEDGE_PROPOSE_MESSAGES, KNOWLEDGE_PROPOSE_RECEIVED_MESSAGE, KNOWLEDGE_STAYS_SENTENCE, LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX, LOCAL_KNOWLEDGE_DAY_CALLS_MAX, LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE, companyScoped, orgProjectCatalogKey, projectRevisionKey, scriptTokenKey,
   type AuditSink, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition, type ProjectRole,
@@ -18,10 +18,11 @@ import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESS
 import { createKnowledgeApi, knowledgeSwitchedOff, knowledgeToolOf, scriptTokenAuthenticator, type KnowledgeApi, type KnowledgeApiOptions, type KnowledgeCaller } from "../../packages/broker/src/core-host/knowledge-api.js";
 import { isLessonsApiPath } from "../../packages/broker/src/core-host/lessons-api.js";
 import { KNOWLEDGE_API_ROUTES } from "../../packages/broker/src/aws/developer-routes.js";
-import { createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
+import { createHostedIdentity, HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
 import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
 import { setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
 import { DocumentPresetStore } from "../../packages/broker/src/lessons/document-settings.js";
+import { proposedByOf } from "../../packages/broker/src/lessons/proposal-mark.js";
 import { LOCAL_OFF_MESSAGES } from "../../packages/broker/src/lessons/local-tools.js";
 import { PROPOSE_BODY_BYTES_MAX } from "../../packages/broker/src/lessons/knowledge-serve.js";
 import { DEV_ROUTES, devRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
@@ -205,6 +206,22 @@ describe("a signed-in person", () => {
     expect((await asPerson(b, "a-admin", lessonsPath())).ok).toBe(true);
   });
 
+  it("someone in the company but not on the project's roster, a project that does not exist and another company's project all answer the same words", async () => {
+    const w = await setUp();
+    const b = build(w);
+    await put(w, A, lesson(A, "les_pay00001"));
+    const same = { ok: false, code: "NOT_FOUND", message: "No such project." };
+    expect(await asPerson(b, "a-out", lessonsPath())).toMatchObject(same);
+    expect(await asPerson(b, "a-out", areasPath())).toMatchObject(same);
+    expect(await asPerson(b, "a-contrib", lessonsPath("nope"))).toMatchObject(same);
+    expect(await asPerson(b, "a-contrib", lessonsPath("billing"))).toMatchObject(same);
+    // B's person asking for A's project name reads B's own (empty) project: never A's units.
+    const theirs = await asPerson(b, "b-contrib", lessonsPath());
+    expect(theirs.ok).toBe(true);
+    expect(ids(theirs)).toEqual([]);
+    expect(knowledgeAudit(w).every((event) => event.actor.id === "b-contrib")).toBe(true);
+  });
+
   it("a person with no company (or one whose membership cannot be read) is told to sign in again and nothing is read", async () => {
     const w = await setUp();
     const b = build(w);
@@ -234,6 +251,19 @@ describe("a signed-in person", () => {
 });
 
 describe("a script token", () => {
+  it("a token with the Team knowledge permission naming the project reads the whole-project answer and the tree, as its creator", async () => {
+    const w = await setUp();
+    const b = build(w);
+    await put(w, A, lesson(A, "les_pay00001"));
+    const secret = await makeToken(w, "a-admin");
+    const answer = await asToken(b, secret, lessonsPath());
+    expect(answer).toMatchObject({ ok: true, body: { status: "ok" } });
+    expect(ids(answer)).toEqual(["les_pay00001"]);
+    expect((await asToken(b, secret, areasPath())).ok).toBe(true);
+    const events = knowledgeAudit(w);
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({ actor: { id: "a-admin" }, details: { tool: "lessons", via: "token", units: 1, u1: "les_pay00001" } });
+  });
 
   it("a token without the permission, for another project, or on a route that is not on the token list is refused and reads, counts and audits nothing", async () => {
     const w = await setUp();
@@ -300,9 +330,57 @@ describe("a script token", () => {
     w.roles.set("a-admin", { companyId: A, role: "member" });
     expect(await asToken(b, changed, lessonsPath())).toMatchObject({ ok: false, code: "AUTH_REQUIRED" });
   });
+
+  it("company isolation: a token of company B never reads company A, and a token that claims A is looked up in A only", async () => {
+    const w = await setUp();
+    const b = build(w);
+    await put(w, A, lesson(A, "les_mine0001", { title: "Company A only" }));
+    await put(w, B, lesson(B, "les_theirs01", { title: "Company B only" }));
+    const bToken = await makeToken(w, "b-admin");
+    const answer = await asToken(b, bToken, lessonsPath());
+    expect(ids(answer)).toEqual(["les_theirs01"]);
+    expect(JSON.stringify(answer)).not.toContain("les_mine");
+    const aToken = await makeToken(w, "a-admin");
+    expect(ids(await asToken(b, aToken, lessonsPath()))).toEqual(["les_mine0001"]);
+    // A's token with B's company id swapped into it is B's lookup, which holds no such token.
+    const swapped = aToken.replace(/^rvst_[0-9a-z]{20}/u, `rvst_${B.slice(4)}`);
+    expect(await asToken(b, swapped, lessonsPath())).toMatchObject({ ok: false, code: "AUTH_REQUIRED" });
+    // Every counter and record of A's read is under A's partition.
+    expect((await w.world.store.query({ pk: companyScoped(A, "KNOWLEDGE_READ_DAY") })).items.length).toBe(1);
+    expect((await w.world.store.query({ pk: companyScoped(B, "KNOWLEDGE_READ_DAY") })).items.length).toBe(1);
+    expect(knowledgeAudit(w).map((event) => event.companyId).sort()).toEqual([A, B]);
+  });
+
+  it("a token for a company the lessons switch does not cover builds nothing and is refused", async () => {
+    const w = await setUp({ [CORE_LESSONS_VARIABLE]: `on:${A}` });
+    const secretB = await makeToken(w, "b-admin");
+    const lessonsSwitch = readCoreLessonsSwitch({ [CORE_LESSONS_VARIABLE]: `on:${A}` }).value;
+    const looked: string[] = [];
+    const authenticate = scriptTokenAuthenticator({ lessonsSwitch, now: () => w.world.clock.now, companyOf: async (companyId) => { looked.push(companyId); return { store: w.world.store, audit: w.audits.get(companyId)!, identity: identityOf(w) }; } });
+    await expect(authenticate({ method: "POST", path: lessonsPath(), authorization: `Bearer ${secretB}` })).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    expect(looked).toEqual([]);
+  });
 });
 
 describe("names: a unit that names a person of the project never leaves Rovara", () => {
+  it("is left out when it names the asker, an approver (owner, admin or maintainer) or, where the port lists the roster, any member of the project", async () => {
+    const w = await setUp();
+    const b = build(w);
+    await put(w, A, lesson(A, "les_clean001", { title: "Use the retry helper" }),
+      lesson(A, "les_asker001", { title: "Ask Name a-contrib about it", body: "Name a-contrib knows." }),
+      lesson(A, "les_maint001", { title: "Ask Name a-maint before billing changes", body: "Name a-maint decides." }),
+      lesson(A, "les_admin001", { title: "Ask Name a-admin", body: "x" }));
+    // The maintainer and the admin are the project's approvers; the asker is the person asking.
+    const answer = await asPerson(b, "a-contrib", lessonsPath());
+    expect(ids(answer)).toEqual(["les_clean001"]);
+    // Another member who is NOT an approver and not the asker is named by the roster list (the port gives it).
+    await put(w, A, lesson(A, "les_other001", { title: "Ask Name a-contrib" }));
+    const viaMaint = await asPerson(b, "a-maint", lessonsPath());
+    expect(ids(viaMaint)).toEqual(["les_clean001"]);
+    // Without a roster list from the port the contributor is covered only while they are the asker.
+    const noRoster = build(w, { people: { onProjectRoster: (...args) => w.people.onProjectRoster(...args), approvers: (...args) => w.people.approvers(...args) } });
+    expect(ids(await asPerson(noRoster, "a-maint", lessonsPath()))).toEqual(["les_asker001", "les_clean001", "les_other001"]);
+  });
 
   it("an approver list or a roster that cannot be completed, or read, withholds everything (fail closed, fixed words)", async () => {
     const w = await setUp();
@@ -387,6 +465,24 @@ describe("limits", () => {
 });
 
 describe("audit: one record per answer, unit ids only, written before the answer", () => {
+  it("records the tool, how it asked and the ids, never a title, a reason, a body, the task text, a file or a repository", async () => {
+    const w = await setUp();
+    const b = build(w);
+    await put(w, A, lesson(A, "les_aaaa1111", { title: "Title-should-not-leak" }), lesson(A, "les_bbbb2222", { title: "Another-title" }));
+    const secret = await makeToken(w, "a-admin");
+    const answer = await asToken(b, secret, lessonsPath(), { task: "TASK-WORDS-never-audited", files: ["src/secret-file.ts"], repo: REPO });
+    expect(ids(answer).sort()).toEqual(["les_aaaa1111", "les_bbbb2222"]);
+    const events = knowledgeAudit(w);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ actor: { id: "a-admin" }, companyId: A, details: { tool: "lessons", via: "token", units: 2, tokenId: `stk_${secret.split("_")[2]!}` } });
+    expect(JSON.stringify(events)).not.toContain(secret);
+    const written = JSON.stringify(events);
+    for (const text of ["Title-should-not-leak", "Another-title", "withRetry", TEXT, "TASK-WORDS", "secret-file", "example/demo"]) expect(written, text).not.toContain(text);
+    // The tree is one record with no units; an answer of none is still one record.
+    await asPerson(b, "a-admin", areasPath());
+    expect(knowledgeAudit(w)).toHaveLength(2);
+    expect(knowledgeAudit(w)[1]).toMatchObject({ details: { tool: "areas", via: "person", units: 0 } });
+  });
 
   it("no record, no answer: when the audit cannot be written nothing is returned", async () => {
     const w = await setUp();
@@ -502,6 +598,20 @@ describe("the switches", () => {
   });
 });
 
+describe("repositories and projects inside one company", () => {
+  it("a project's answer and tree hold only its own units, and a repository of another project answers like a missing project", async () => {
+    const w = await setUp();
+    const b = build(w);
+    await put(w, A, lesson(A, "les_pay00001", { scope: { paths: ["src/pay/**"] } }), lesson(A, "les_bill0001", { project: "billing", scope: { paths: ["src/bill/**"] } }));
+    const pay = await asPerson(b, "a-admin", lessonsPath(), { files: ["src/pay/a.ts"] });
+    expect(ids(pay)).toEqual(["les_pay00001"]);
+    expect(JSON.stringify((await asPerson(b, "a-admin", areasPath())).body)).not.toContain("bill");
+    expect(await asPerson(b, "a-admin", lessonsPath(), { repo: "https://github.com/example/billing.git" })).toMatchObject({ ok: false, code: "NOT_FOUND", message: "No such project." });
+    expect(await asPerson(b, "a-admin", areasPath(), { repo: "https://github.com/example/billing.git" })).toMatchObject({ ok: false, code: "NOT_FOUND", message: "No such project." });
+    expect((await asPerson(b, "a-admin", lessonsPath(), { repo: REPO })).ok).toBe(true);
+  });
+});
+
 describe("hosted answers match the laptop's for the same data", () => {
   /** The laptop's own route over the same lessons (the same shared implementation, but its own harness, store and caller). */
   async function laptop() {
@@ -560,6 +670,29 @@ describe("hosted answers match the laptop's for the same data", () => {
     // The off answer is the laptop's own (company switch), word for word.
     await w.lessons.get(A)!.runtime.localTools.setCompany(A, true, w.world.clock.now);
     expect((await asPerson(b, "a-contrib", lessonsPath())).body).toMatchObject({ status: "off", reason: "company_stays", message: KNOWLEDGE_STAYS_SENTENCE });
+  });
+
+  it("the install-switch-off answer of the hosted API has the laptop's shape and words", async () => {
+    const laptopOff = knowledgeSwitchedOff({ method: "POST", path: lessonsPath() }, Date.parse("2026-11-15T10:00:00Z")) as { status: string; reason: string; message: string; project: string; lessons: unknown[]; markdown: string; complete: boolean };
+    expect(laptopOff).toMatchObject({ status: "off", reason: "install_switch", message: "Lessons are switched off for this Rovara installation, so there are no lessons to give.", project: "payments", lessons: [], complete: true });
+    expect(laptopOff.markdown).toContain("Lessons are switched off for this Rovara installation");
+  });
+});
+
+describe("the principal a hosted token is made for", () => {
+  it("is the hosted identity: a person's hosted sign-in and their token key every limit the same way", async () => {
+    const w = await setUp();
+    const principal = (await identityOf(w).getPrincipal(A, "a-admin"))!;
+    expect(principal.provider).toBe(HOSTED_IDENTITY_PROVIDER);
+    const secret = await makeToken(w, "a-admin");
+    const b = build(w);
+    await put(w, A, lesson(A, "les_pay00001"));
+    await asToken(b, secret, lessonsPath());
+    await asPerson(b, "a-admin", lessonsPath());
+    const day = (await w.world.store.query({ pk: companyScoped(A, "KNOWLEDGE_READ_DAY") })).items;
+    expect(day).toHaveLength(1);
+    expect(day[0]!["sk"]).toBe("a-admin");
+    vi.fn();
   });
 });
 
@@ -621,6 +754,7 @@ describe("the MCP tools against a hosted install (the CLI client targets the sam
   }, 60_000);
 });
 
+
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 // L4-AK3H: a tool's team SUGGESTION on a hosted install (`POST /v1/dev/projects/{p}/knowledge/propose`, the `team_propose` MCP tool). The rules are the laptop's (`lessons/knowledge-serve.ts` -> `lessons/propose.ts`, the same
 // code); what is hosted is who asks and for which company: a signed-in person on the project's LIVE roster, or a script token with the Team knowledge (`lessons`) permission naming the project, verified against the shared registry
@@ -634,7 +768,97 @@ const askAs = (b: Built, id: string, body: unknown, project = "payments") => cal
 const askToken = (b: Built, secret: string, body: unknown, project = "payments") => call(b.api, { kind: "token" }, proposePath(project), body, `Bearer ${secret}`) as Promise<Reply & { body?: Record<string, unknown> }>;
 const RECEIVED = { status: "received", message: KNOWLEDGE_PROPOSE_RECEIVED_MESSAGE };
 
+describe("suggestions: the route table and the paths", () => {
+  it("adds exactly ONE row (full access only), recognises exactly the one path, and every other row and path is as it was", () => {
+    const rows = DEV_ROUTES.filter((route) => route.path.endsWith("/knowledge/propose"));
+    expect(rows).toEqual([{ method: "POST", path: "/v1/dev/projects/{project}/knowledge/propose", requires: "full" }]);
+    expect(devRouteOf("POST", proposePath())).toEqual(rows[0]);
+    expect(knowledgeToolOf("POST", proposePath())).toBe("propose");
+    for (const [method, path] of [["GET", proposePath()], ["PUT", proposePath()], ["DELETE", proposePath()], ["POST", `${proposePath()}/x`], ["POST", `${P}/knowledge/proposex`], ["POST", `${P}/knowledge/proposals`], ["POST", `${P}/knowledge/Propose`], ["POST", "/v1/dev/projects//knowledge/propose"], ["POST", "/v1/dev/projects/a/b/knowledge/propose"]] as const) {
+      expect(knowledgeToolOf(method, path), `${method} ${path}`).toBeUndefined();
+    }
+    for (const path of [proposePath(), proposePath("a.b-c_d"), `${proposePath()}/`, `${P}/knowledge/propose/x`, `${P}/knowledge/proposex`]) expect(KNOWLEDGE_API_ROUTES.test(path), path).toBe(knowledgeToolOf("POST", path) !== undefined);
+    // The two reads are as they were.
+    expect(knowledgeToolOf("POST", lessonsPath())).toBe("lessons");
+    expect(knowledgeToolOf("POST", areasPath())).toBe("areas");
+  });
+});
+
 describe("suggestions from a signed-in person", () => {
+  it("a person on the roster sends a suggestion: a weak-source candidate in THEIR company, scoped to the repository named, never served to a tool, audited without the text", async () => {
+    const w = await setUp();
+    const b = build(w);
+    const answer = await askAs(b, "a-contrib", { ...GOOD, repo: REPO, paths: ["src/pay/**"] });
+    expect(answer).toMatchObject({ ok: true, body: RECEIVED });
+    const [lesson, ...rest] = await stored(w);
+    expect(rest).toEqual([]);
+    expect(lesson).toMatchObject({ status: "candidate", reviewRequired: true, approvals: [], title: GOOD.advice, scope: { repos: ["demo"], paths: ["src/pay/**"] }, workspaceId: A, project: "payments" });
+    expect(lesson!.provenance).toMatchObject({ minTrust: "system", memberSignal: false, measured: false, supportTasks: [], authors: ["a-contrib"], sources: ["proposed:tool", "member:a-contrib"] });
+    expect(proposedByOf(lesson!)).toBe("tool");
+    // One sighting is held: no tool is given it.
+    expect(ids(await asPerson(b, "a-maint", lessonsPath()))).toEqual([]);
+    const events = proposedAudit(w);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ actor: { id: "a-contrib" }, companyId: A, details: { by: "tool", lessonType: "convention" } });
+    expect(JSON.stringify(events)).not.toContain("withRetry");
+    expect(JSON.stringify(events)).not.toContain("network");
+  });
+
+  it("one person twice is ONE sighting; a second, different person puts it in front of the people who decide, still not live", async () => {
+    const w = await setUp();
+    const b = build(w);
+    await askAs(b, "a-contrib", GOOD);
+    await askAs(b, "a-contrib", GOOD);
+    expect(await stored(w)).toHaveLength(1);
+    expect((await stored(w))[0]).toMatchObject({ status: "candidate" });
+    expect(await askAs(b, "a-maint", GOOD)).toMatchObject({ ok: true, body: RECEIVED });
+    const [lesson] = await stored(w);
+    expect(await stored(w)).toHaveLength(1);
+    expect(lesson).toMatchObject({ status: "pending", approvals: [], reviewRequired: true });
+    expect([...lesson!.provenance.authors].sort()).toEqual(["a-contrib", "a-maint"]);
+    // Still no tool is given it: only a person makes it live.
+    expect(ids(await asPerson(b, "a-contrib", lessonsPath()))).toEqual([]);
+  });
+
+  it("someone in the company but not on the roster, a missing project and another company's project name all answer \"No such project.\" and store, count and audit nothing", async () => {
+    const w = await setUp();
+    const b = build(w);
+    const same = { ok: false, code: "NOT_FOUND", message: "No such project." };
+    expect(await askAs(b, "a-out", GOOD)).toMatchObject(same);
+    expect(await askAs(b, "a-contrib", GOOD, "nope")).toMatchObject(same);
+    expect(await askAs(b, "a-contrib", GOOD, "billing")).toMatchObject(same);
+    expect(await stored(w)).toEqual([]);
+    expect(await stored(w, A, "billing")).toEqual([]);
+    expect(proposedAudit(w)).toEqual([]);
+    expect((await w.world.store.query({ pk: companyScoped(A, "KNOWLEDGE_PROPOSE_DAY") })).items).toEqual([]);
+  });
+
+  it("the roster is read live: a person removed from the project is refused on the very next call and nothing is stored; a roster that cannot be read refuses (fail closed)", async () => {
+    const w = await setUp();
+    const b = build(w);
+    expect((await askAs(b, "a-contrib", GOOD)).ok).toBe(true);
+    const before = (await stored(w)).length;
+    w.removed.add("a-contrib");
+    expect(await askAs(b, "a-contrib", { ...GOOD, advice: "Keep jobs idempotent always" })).toMatchObject({ ok: false, code: "NOT_FOUND", message: "No such project." });
+    expect((await stored(w)).length).toBe(before);
+    expect(proposedAudit(w)).toHaveLength(1);
+    w.removed.delete("a-contrib");
+    expect((await askAs(b, "a-contrib", { ...GOOD, advice: "Keep jobs idempotent always" })).ok).toBe(true);
+    const down = build(w, { people: { onProjectRoster: async () => { throw new Error("roster down"); }, approvers: (...args) => w.people.approvers(...args) } });
+    expect(await askAs(down, "a-contrib", { ...GOOD, advice: "Name queues after their jobs" })).toMatchObject({ ok: false, code: "RUNTIME_UNAVAILABLE", message: "Rovara can't read lessons right now. Try again." });
+    expect(await stored(w)).toHaveLength(2);
+  });
+
+  it("a person with no company (or one whose membership cannot be read) is told to sign in again; nothing is read, counted or stored", async () => {
+    const w = await setUp();
+    const b = build(w);
+    expect(await askAs(b, "stranger", GOOD)).toMatchObject({ ok: false, code: "AUTH_REQUIRED", message: "Sign in again." });
+    w.left.add("a-contrib");
+    expect(await askAs(b, "a-contrib", GOOD)).toMatchObject({ ok: false, code: "AUTH_REQUIRED" });
+    expect(await askAs(build(w, { companyOf: async () => { throw new Error("down"); } }), "a-maint", GOOD)).toMatchObject({ ok: false, code: "AUTH_REQUIRED" });
+    expect(await stored(w)).toEqual([]);
+    expect(proposedAudit(w)).toEqual([]);
+  });
 
   it("a project the roster port lists but the company does not have is \"No such project.\" (the server's own existence check)", async () => {
     const w = await setUp();
@@ -667,6 +891,20 @@ describe("suggestions from a signed-in person", () => {
 });
 
 describe("suggestions from a script token", () => {
+  it("a token with the Team knowledge permission naming the project sends a suggestion AS ITS CREATOR (one person: the creator's own sign-in and token are one sighting)", async () => {
+    const w = await setUp();
+    const b = build(w);
+    const secret = await makeToken(w, "a-admin");
+    expect(await askToken(b, secret, GOOD)).toMatchObject({ ok: true, body: RECEIVED });
+    expect((await stored(w))[0]!.provenance.authors).toEqual(["a-admin"]);
+    expect(proposedAudit(w)[0]).toMatchObject({ actor: { id: "a-admin" }, companyId: A });
+    // The creator's own sign-in says the same thing: still one sighting. Another person is the second.
+    await askAs(b, "a-admin", GOOD);
+    expect((await stored(w))[0]).toMatchObject({ status: "candidate" });
+    await askAs(b, "a-maint", GOOD);
+    expect(await stored(w)).toHaveLength(1);
+    expect((await stored(w))[0]).toMatchObject({ status: "pending" });
+  });
 
   it("a token without the permission, for another project, made for reads only, or on a path that is not on the token list stores, counts and audits nothing", async () => {
     const w = await setUp();
@@ -688,9 +926,79 @@ describe("suggestions from a script token", () => {
     expect(await stored(w)).toEqual([]);
     expect(proposedAudit(w)).toEqual([]);
   });
+
+  it("a made-up, malformed or revoked token, and a token when script tokens are not served, is refused with fixed words and stores nothing", async () => {
+    const w = await setUp();
+    const b = build(w);
+    const secret = await makeToken(w, "a-admin");
+    // The tampered token must DIFFER from the real one: a random secret already ends in "A" one time in 64, which made this case accept the real token.
+    const tampered = `${secret.slice(0, -1)}${secret.endsWith("A") ? "B" : "A"}`;
+    expect(tampered).not.toBe(secret);
+    for (const bad of ["rvst_notatoken", `${secret}x`, tampered, "garbage"]) expect(await askToken(b, bad, GOOD), bad).toMatchObject({ ok: false, code: "AUTH_REQUIRED" });
+    const principal = (await identityOf(w).getPrincipal(A, "a-admin"))!;
+    await revokeScriptToken({ store: w.world.store, audit: w.audits.get(A)!, now: () => w.world.clock.now }, { developerId: developerIdOf(principal), personId: "a-admin", orgId: A, orgRole: "admin" }, `stk_${secret.split("_")[2]!}`);
+    expect(await askToken(b, secret, GOOD)).toMatchObject({ ok: false, code: "AUTH_REQUIRED", message: "This script token was revoked." });
+    expect(await askToken(build(w, { authenticateToken: undefined }), await makeToken(w, "a-admin"), GOOD)).toMatchObject({ ok: false, code: "AUTH_REQUIRED" });
+    expect(await stored(w)).toEqual([]);
+    expect(proposedAudit(w)).toEqual([]);
+  });
+
+  it("a token's creator is read live: removed from the project, removed from the company, or no longer in the role it was made with, and the token stops at once", async () => {
+    const w = await setUp();
+    const b = build(w);
+    const roster = await makeToken(w, "a-admin");
+    expect((await askToken(b, roster, GOOD)).ok).toBe(true);
+    w.removed.add("a-admin");
+    expect(await askToken(b, roster, { ...GOOD, advice: "Keep jobs idempotent always" })).toMatchObject({ ok: false, code: "NOT_FOUND", message: "No such project." });
+    w.removed.delete("a-admin");
+    const left = await makeToken(w, "a-admin");
+    w.left.add("a-admin");
+    expect(await askToken(b, left, { ...GOOD, advice: "Keep jobs idempotent always" })).toMatchObject({ ok: false, code: "AUTH_REQUIRED" });
+    w.left.delete("a-admin");
+    const changed = await makeToken(w, "a-admin");
+    w.roles.set("a-admin", { companyId: A, role: "member" });
+    expect(await askToken(b, changed, { ...GOOD, advice: "Keep jobs idempotent always" })).toMatchObject({ ok: false, code: "AUTH_REQUIRED" });
+    expect(await stored(w)).toHaveLength(1);
+    expect(proposedAudit(w)).toHaveLength(1);
+  });
 });
 
 describe("suggestions: two companies", () => {
+  it("the same suggestion for the same project name in company A and company B is two separate candidates, two sightings never count across companies, and every row is in its own company's partition", async () => {
+    const w = await setUp();
+    const b = build(w);
+    await askAs(b, "a-contrib", GOOD);
+    await askAs(b, "b-contrib", GOOD);
+    await askAs(b, "b-maint", GOOD);
+    const inA = await stored(w, A);
+    const inB = await stored(w, B);
+    expect(inA).toHaveLength(1);
+    expect(inB).toHaveLength(1);
+    // B's second person made B's lesson a held one; A's lesson is still one sighting.
+    expect(inA[0]).toMatchObject({ status: "candidate", workspaceId: A });
+    expect(inB[0]).toMatchObject({ status: "pending", workspaceId: B });
+    expect(inA[0]!.provenance.authors).toEqual(["a-contrib"]);
+    expect([...inB[0]!.provenance.authors].sort()).toEqual(["b-contrib", "b-maint"]);
+    expect(JSON.stringify(inA)).not.toContain("b-contrib");
+    expect(JSON.stringify(inB)).not.toContain("a-contrib");
+    expect(proposedAudit(w).map((event) => [event.companyId, event.actor.id]).sort()).toEqual([[A, "a-contrib"], [B, "b-contrib"], [B, "b-maint"]]);
+    expect((await w.world.store.query({ pk: companyScoped(A, "KNOWLEDGE_PROPOSE_DAY") })).items.map((row) => row["sk"])).toEqual(["a-contrib"]);
+    expect((await w.world.store.query({ pk: companyScoped(B, "KNOWLEDGE_PROPOSE_DAY") })).items.map((row) => row["sk"]).sort()).toEqual(["b-contrib", "b-maint"]);
+  });
+
+  it("a token of company B never writes into company A; a token that claims A is looked up in A only; a person of A cannot name B's project", async () => {
+    const w = await setUp();
+    const b = build(w);
+    const bToken = await makeToken(w, "b-admin");
+    expect(await askToken(b, bToken, GOOD)).toMatchObject({ ok: true, body: RECEIVED });
+    expect(await stored(w, A)).toEqual([]);
+    expect(await stored(w, B)).toHaveLength(1);
+    const aToken = await makeToken(w, "a-admin");
+    const swapped = aToken.replace(/^rvst_[0-9a-z]{20}/u, `rvst_${B.slice(4)}`);
+    expect(await askToken(b, swapped, GOOD)).toMatchObject({ ok: false, code: "AUTH_REQUIRED" });
+    expect(await stored(w, A)).toEqual([]);
+    expect(await stored(w, B)).toHaveLength(1);
+  });
 
   it("a token for a company the lessons switch does not cover builds nothing, stores nothing and is refused; a person of such a company is told the fixed off sentence", async () => {
     const env = { [CORE_LESSONS_VARIABLE]: `on:${A}` };
@@ -760,6 +1068,20 @@ describe("suggestions: limits (10 a person a UTC day for tools)", () => {
 });
 
 describe("suggestions: the switches (one fixed sentence for a tool)", () => {
+  it("the company's \"Knowledge stays in Rovara\" answers the one sentence for a person and a token at once; nothing is stored or counted; another company is not affected; off again, the same person proposes", async () => {
+    const w = await setUp();
+    const b = build(w);
+    const secret = await makeToken(w, "a-admin");
+    await w.lessons.get(A)!.runtime.localTools.setCompany(A, true, w.world.clock.now);
+    for (const reply of [await askAs(b, "a-admin", GOOD), await askToken(b, secret, GOOD)]) expect(reply).toMatchObject({ ok: true, body: { status: "off", message: KNOWLEDGE_STAYS_SENTENCE } });
+    expect(KNOWLEDGE_STAYS_SENTENCE).toBe("Your company keeps team knowledge inside Rovara.");
+    expect(await stored(w)).toEqual([]);
+    expect(proposedAudit(w)).toEqual([]);
+    expect((await w.world.store.query({ pk: companyScoped(A, "KNOWLEDGE_PROPOSE_DAY") })).items).toEqual([]);
+    expect(await askAs(b, "b-contrib", GOOD)).toMatchObject({ ok: true, body: RECEIVED });
+    await w.lessons.get(A)!.runtime.localTools.setCompany(A, false, w.world.clock.now);
+    expect(await askAs(b, "a-admin", GOOD)).toMatchObject({ ok: true, body: RECEIVED });
+  });
 
   it("the Regulated preset says the same sentence; the project's own switch and learning Off say their own fixed words; nothing is stored", async () => {
     const w = await setUp();
@@ -771,6 +1093,26 @@ describe("suggestions: the switches (one fixed sentence for a tool)", () => {
     expect(await askAs(b, "a-contrib", GOOD)).toMatchObject({ ok: true, body: { status: "off", message: LOCAL_OFF_MESSAGES.project_setting } });
     expect(await stored(w)).toEqual([]);
     expect(proposedAudit(w)).toEqual([]);
+  });
+
+  it("the install's lessons switch off: the fixed off answer, nothing read (not even who is asking), a token is not looked up; a deployment with no knowledge API gives the same answer", async () => {
+    const w = await setUp();
+    const asked = vi.fn(async () => { throw new Error("must not be asked"); });
+    const off = build(w, { lessonsSwitch: { mode: "off" }, companyOf: asked, authenticateToken: asked });
+    const answer = await askAs(off, "a-admin", GOOD);
+    expect(answer).toMatchObject({ ok: true, body: { status: "off", message: LOCAL_OFF_MESSAGES.install_switch } });
+    expect(await askToken(off, await makeToken(w, "a-admin"), GOOD)).toMatchObject({ ok: true, body: { status: "off" } });
+    expect(asked).not.toHaveBeenCalled();
+    expect(knowledgeSwitchedOff({ method: "POST", path: proposePath() }, 0)).toEqual({ status: "off", message: LOCAL_OFF_MESSAGES.install_switch });
+    expect(await stored(w)).toEqual([]);
+  });
+
+  it("lessons handed back for another company are a wiring fault: refused before anything is stored", async () => {
+    const w = await setUp();
+    const swapped = build(w, { lessonsOf: async () => w.lessons.get(B) });
+    expect(await askAs(swapped, "a-contrib", GOOD)).toMatchObject({ ok: false, code: "RUNTIME_UNAVAILABLE" });
+    expect(await stored(w, A)).toEqual([]);
+    expect(await stored(w, B)).toEqual([]);
   });
 });
 
@@ -848,6 +1190,17 @@ describe("suggestions: hosted is the laptop (same rules, same words, same stored
     await w.lessons.get(A)!.runtime.localTools.setCompany(A, true, w.world.clock.now);
     await local.lessons.runtime.localTools.setCompany(COMPANY, true, 1);
     expect((await call(b.api, person("a-contrib"), proposePath(), GOOD)).body).toEqual((await local.post(GOOD)).body);
+  });
+
+  it("the day's limit has the laptop's words and number", async () => {
+    const w = await setUp();
+    const b = build(w);
+    const local = await laptop();
+    for (let n = 0; n <= KNOWLEDGE_PROPOSALS_PER_PERSON_DAY_MAX; n += 1) {
+      const body = { advice: `Keep module number ${String(n).padStart(2, "0")} small` };
+      expect((await call(b.api, person("a-contrib"), proposePath(), body)).body, String(n)).toEqual((await local.post(body)).body);
+    }
+    expect((await call(b.api, person("a-contrib"), proposePath(), { advice: "Anything else here" })).body).toMatchObject({ status: "refused", reason: "day_limit" });
   });
 });
 

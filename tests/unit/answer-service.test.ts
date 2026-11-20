@@ -1,10 +1,11 @@
 // The smart Just answer service (lead 4, J1): outcomes, the post-answer check (commit binding, citation gating, the numbers rule), the three read-only lookups and their limits, the secret-file refusal,
 // roles, the per-person limit, the dollar ceiling, thread memory, answer records, and two-project / two-company isolation on every read and write.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ANSWER_COST_CEILING_CENTS, ANSWER_LIMITS, ANSWER_THREAD_TURNS, ANSWER_WORDS, AgentXError, AnswerResponseSchema, answerThreadKey, redactText, type StoredDocument } from "@agentx/contracts";
 import { ANSWER_SYSTEM_RULES } from "../../packages/broker/src/core/answers/protocol.js";
 import { AnswerModelRefused } from "../../packages/broker/src/core/answers/ports.js";
-import { ANSWER_BRIEFING_WAIT_MS } from "../../packages/broker/src/core/answers/service.js";
+import { createAnswerCodeSource } from "../../packages/broker/src/core/answers/code-source.js";
+import { ANSWER_BRIEFING_WAIT_MS, type AnswerServiceDeps } from "../../packages/broker/src/core/answers/service.js";
 import { TOOL_WORDS } from "../../packages/broker/src/core/answers/tools.js";
 import { A, B, HEAD, OLD, REFUND_TS, T0, answer, body, codeSource, goodSentence, json, page, refundCite, scriptedModel, tool, world, type ScriptedModel } from "../support/answer-world.js";
 
@@ -1020,4 +1021,148 @@ describe("the team knowledge briefing of an answer (lead 4 L4-AK2b)", () => {
     expect(seen[1]).toContain(`notes of ${B}`);
     expect(seen[1]).not.toContain(A);
   });
+});
+
+
+describe("fixed failure causes", () => {
+  const fault = async (): Promise<never> => { throw new Error("CONTENT-CANARY https://private.example/secret"); };
+  it.each([{ failure: "throw", usable: true }, { failure: "invalid-head", usable: true }, { failure: "throw", usable: false }])("logs omitted repository heads from the real adapter ($failure, usable=$usable)", async ({ failure, usable }) => {
+    const w = ready();
+    const missingHead = vi.fn(async () => failure === "throw" ? fault() : "omitted-repo");
+    const fileAtRevision = vi.fn(async (repository: { url: string }) => repository.url.endsWith("/web") ? REFUND_TS : undefined);
+    const code = createAnswerCodeSource((usable ? ["web", "omitted-repo"] : ["omitted-repo"]).map((name) => ({
+      name, defaultBranch: "main", repository: { url: `https://private.example/${name}` }, scope: { orgId: A },
+      host: { baseBranchHead: name === "web" ? async () => HEAD : missingHead, fileAtRevision },
+    })), ["web", "omitted-repo"]);
+    const model = scriptedModel([answer([goodSentence, { text: "An unavailable claim.", cites: [{ ...refundCite, repo: "omitted-repo" }] }])]);
+    const result = await w.service({ model, code: () => code }).ask({ personId: ADA, project: "alpha", body: body({ question: "QUESTION-CANARY" }) });
+    expect(result).toMatchObject(usable ? { outcome: "partly", sources: [{ repo: "web", commit: HEAD }] } : { outcome: "not_found", text: "", sources: [] });
+    expect(missingHead).toHaveBeenCalledTimes(1);
+    expect(await code.heads()).toEqual(new Map(usable ? [["web", HEAD]] : []));
+    expect(missingHead).toHaveBeenCalledTimes(1);
+    if (usable) expect(fileAtRevision).toHaveBeenCalled();
+    else expect(fileAtRevision).not.toHaveBeenCalled();
+    expect(fileAtRevision.mock.calls.every(([repository]) => repository.url.endsWith("/web"))).toBe(true);
+    expect(w.logs.filter((entry) => entry.event !== "answer.done")).toEqual([{ component: "answers", event: "answer.failed", cause: "repository_unavailable" }]);
+    expect(JSON.stringify(w.logs)).not.toMatch(/CANARY|omitted-repo|private.example|refund/);
+  });
+
+  it("logs exhausted malformed model replies without their content and keeps the not-found response", async () => {
+    const w = ready();
+    const model = scriptedModel(["CONTENT-CANARY https://private.example/secret", '{"omitted-repo":"bad shape"}']);
+    const result = await w.service({ model }).ask({ personId: ADA, project: "alpha", body: body({ question: "QUESTION-CANARY" }) });
+    expect(result).toMatchObject({ outcome: "not_found", text: "", sources: [], honesty: ANSWER_WORDS.notFound });
+    expect(model.turns).toHaveLength(2);
+    expect(model.finished).toHaveLength(1);
+    expect(w.logs.filter((entry) => entry.event !== "answer.done")).toEqual([{ component: "answers", event: "answer.failed", cause: "model_output_invalid" }]);
+    expect(JSON.stringify(w.logs)).not.toMatch(/CANARY|private.example/);
+  });
+  it.each(["access", "repository", "answer-read", "rate", "heads", "prune", "model-open", "model-first"] as const)("logs exactly one content-free cause for %s", async (boundary) => {
+    const w = ready();
+    const over: Partial<AnswerServiceDeps> = {};
+    let cause = "model_unavailable";
+    if (boundary === "access") { over.access = { mayAsk: fault }; cause = "access_unavailable"; }
+    if (boundary === "repository") { over.code = fault; cause = "repository_unavailable"; }
+    if (boundary === "answer-read") { over.wiki = { ...w.wiki(A), readAnswer: fault }; cause = "answer_store_unavailable"; }
+    if (boundary === "rate") { vi.spyOn(w.store, "update").mockImplementationOnce(fault); cause = "rate_limit_unavailable"; }
+    if (boundary === "heads") { over.code = async () => ({ ...codeSource({ "web/src/refund.ts": REFUND_TS }), heads: fault }); cause = "repository_unavailable"; }
+    if (boundary === "prune") { over.wiki = { ...w.wiki(A), pruneRepositories: fault }; cause = "repository_unavailable"; }
+    if (boundary === "model-open") over.model = { available: async () => true, open: fault };
+    if (boundary === "model-first") over.model = scriptedModel([new Error("CONTENT-CANARY")]);
+    expect(await refusal(w.service({ over }).ask({ personId: ADA, project: "alpha", body: body({ question: "QUESTION-CANARY" }) }))).toEqual({ code: "RUNTIME_UNAVAILABLE", message: ANSWER_WORDS.unavailable });
+    expect(w.logs).toEqual([{ component: "answers", event: "answer.failed", cause }]);
+  });
+  it.each(["thread-read", "briefing", "record", "thread-write", "settle"] as const)("logs one fixed cause for a degraded %s failure", async (boundary) => {
+    const w = ready();
+    const over: Partial<AnswerServiceDeps> = {};
+    let event = "answer.failed";
+    let cause = "thread_unavailable";
+    if (boundary === "thread-read") {
+      const get = w.store.get.bind(w.store);
+      const key = answerThreadKey(A, "alpha", "thread-fixed", { personId: ADA });
+      let refused = false;
+      vi.spyOn(w.store, "get").mockImplementation(async (input) => {
+        if (!refused && input.pk === key.pk && input.sk === key.sk) { refused = true; return fault(); }
+        return get(input);
+      });
+    }
+    if (boundary === "briefing") { over.briefing = fault; cause = "briefing_unavailable"; }
+    if (boundary === "record") { over.wiki = { ...w.wiki(A), writeAnswer: fault }; event = "answer.not_recorded"; cause = "answer_store_unavailable"; }
+    if (boundary === "thread-write") {
+      const put = w.store.put.bind(w.store);
+      vi.spyOn(w.store, "put").mockImplementation(async (input) => input.item.entityType === "WIKI_THREAD" ? fault() : put(input));
+      event = "answer.thread_not_kept";
+    }
+    if (boundary === "settle") {
+      const model = scriptedModel([answer([goodSentence])]);
+      const open = model.open.bind(model);
+      over.model = { ...model, open: async (input) => ({ ...await open(input), finish: fault }) };
+      event = "answer.settle_failed"; cause = "model_settlement_unavailable";
+    }
+    const result = await w.service({ over }).ask({ personId: ADA, project: "alpha", body: body({ threadId: "thread-fixed", question: "QUESTION-CANARY" }) });
+    expect(result.outcome).toBe("answered");
+    expect(w.logs.filter((entry) => entry.event !== "answer.done")).toEqual([{ component: "answers", event, cause }]);
+    expect(JSON.stringify(w.logs)).not.toMatch(/CANARY|private.example/);
+  });
+
+  it.each(["code-lookup", "wiki-search", "wiki-search-page", "wiki-read", "citation-read"] as const)("logs a fixed cause while degrading a failed %s", async (boundary) => {
+    const w = ready();
+    await seedPage(w);
+    const code = codeSource({ "web/src/refund.ts": REFUND_TS });
+    const wiki = w.wiki(A);
+    const over: Partial<AnswerServiceDeps> = {};
+    let cause: string;
+    let turns: string[];
+    if (boundary === "code-lookup") {
+      code.read = fault;
+      cause = "code_lookup_unavailable";
+      turns = [tool({ tool: "code_read", repo: "web", path: "src/CONTENT-CANARY.ts" }), answer([])];
+    } else if (boundary === "citation-read") {
+      code.read = fault;
+      cause = "citation_read_unavailable";
+      turns = [answer([goodSentence])];
+    } else {
+      cause = boundary === "wiki-search" ? "wiki_search_unavailable" : "wiki_read_unavailable";
+      over.wiki = { ...wiki, ...(boundary === "wiki-search" ? { readIndex: fault } : { readPage: fault }) };
+      turns = [boundary === "wiki-read" ? tool({ tool: "wiki_read", page: "billing" }) : tool({ tool: "wiki_search", query: "refund CONTENT-CANARY" }), answer([])];
+    }
+    const model = scriptedModel(turns);
+    const result = await w.service({ model, code: () => code, over }).ask({ personId: ADA, project: "alpha", body: body({ question: "QUESTION-CANARY" }) });
+    expect(result.outcome).toBe("not_found");
+    expect(w.logs.filter((entry) => entry.event !== "answer.done")).toEqual([{ component: "answers", event: "answer.failed", cause }]);
+    expect(JSON.stringify(w.logs)).not.toMatch(/CANARY|private.example|refund|billing/);
+    if (boundary === "citation-read") expect(w.logs.find((entry) => entry.event === "answer.done")).toMatchObject({ complete: false, kept: 0 });
+    else expect(model.turns[1]!.transcript).toContain(TOOL_WORDS.unavailable);
+  });
+
+  it("logs a citation re-read failure while checking a wiki correction and leaves the claim visible", async () => {
+    const w = ready();
+    await seedPage(w, A, "alpha", "old", { claims: [{ claimId: "c0001", text: "Old limit", citations: [{ ...refundCite, commit: OLD, quote: "export const OLD_LIMIT_DAYS = 14;" }], source: "found", checkedAt: new Date(T0).toISOString() }] });
+    const code = codeSource({ "web/src/refund.ts": REFUND_TS });
+    const read = code.read;
+    let reads = 0;
+    code.read = (...args) => ++reads === 1 ? read(...args) : fault();
+    const model = scriptedModel([tool({ tool: "wiki_read", page: "billing" }), answer([goodSentence], { wiki_wrong: [{ page: "billing", claim: "c0001" }] })]);
+    const result = await w.service({ model, code: () => code }).ask({ personId: ADA, project: "alpha", body: body() });
+    expect(result.outcome).toBe("answered");
+    expect((await w.wiki(A).readPage("alpha", "billing", "person"))!.flags).toEqual([]);
+    expect(w.logs.filter((entry) => entry.event !== "answer.done")).toEqual([{ component: "answers", event: "answer.failed", cause: "citation_read_unavailable" }]);
+    expect(JSON.stringify(w.logs)).not.toMatch(/CANARY|private.example/);
+  });
+
+  it("logs a wiki flag write failure without exposing the exception", async () => {
+    const w = ready();
+    await seedPage(w, A, "alpha", "old", { claims: [{ claimId: "c0001", text: "Old limit", citations: [{ ...refundCite, commit: OLD, quote: "export const OLD_LIMIT_DAYS = 14;" }], source: "found", checkedAt: new Date(T0).toISOString() }] });
+    const model = scriptedModel([tool({ tool: "wiki_read", page: "billing" }), answer([goodSentence], { wiki_wrong: [{ page: "billing", claim: "c0001" }] })]);
+    const result = await w.service({ model, over: { wiki: { ...w.wiki(A), addFlag: fault } } }).ask({ personId: ADA, project: "alpha", body: body() });
+    expect(result.outcome).toBe("answered");
+    expect(w.logs.filter((entry) => entry.event !== "answer.done")).toEqual([{ component: "answers", event: "answer.flag_failed", cause: "wiki_flag_unavailable" }]);
+  });
+
+  it("logs a failed answer read for task context", async () => {
+    const w = ready();
+    await expect(w.service({ over: { wiki: { ...w.wiki(A), readAnswer: fault } } }).taskContext({ personId: ADA, project: "alpha", answerId: "answer-fixed" })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(w.logs).toEqual([{ component: "answers", event: "answer.failed", cause: "answer_store_unavailable" }]);
+  });
+
 });

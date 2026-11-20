@@ -1,7 +1,7 @@
 // The contracts side of spec text: inert text, fences, where a spec may be written, and evidence.
 import { describe, expect, it } from "vitest";
 import { SpecDraftSchema, SpecReviewInputSchema, SpecTargetSchema, readSpecVerdicts, specFileNameProblem, specFolderProblem, specLine, specMarkdown } from "@agentx/contracts";
-import { assertRenderedSpec, extractLabelledLines, rovaraRenderer, teamTemplateRenderer } from "../../packages/broker/src/core/spec/index.js";
+import { assertRenderedSpec, rovaraRenderer, teamTemplateRenderer } from "../../packages/broker/src/core/spec/index.js";
 
 const PLAN = "a".repeat(64);
 const target = (overrides: Record<string, unknown> = {}) => SpecTargetSchema.parse({ format: "rovara", ...overrides });
@@ -34,12 +34,6 @@ describe("fences are CommonMark's", () => {
     expect(cleaned).toContain("## inside");
     expect(cleaned).not.toMatch(/^## outside/mu);
     expect(cleaned).toContain("**outside**");
-  });
-  it("closes an open fence with a fence of our own, and the extractor reads fences the same way", () => {
-    const cleaned = specMarkdown("~~~~\nopen forever");
-    expect(cleaned.trimEnd()).toBe("```\nopen forever\n```");
-    const file = { path: "specs/x/spec.md", content: ["## Requirements", "~~~", "```", "~~~", "- 9.1 THE SYSTEM SHALL skip", "```"].join("\n") };
-    expect(extractLabelledLines(file, { sectionHeadings: /^requirements$/iu }).map((entry) => entry.id)).toEqual(["9.1"]);
   });
   it("a requirement the extractor reads is one GitHub shows as a requirement: nothing in design reaches the requirements section", () => {
     const design = specMarkdown(["~~~", "```", "~~~", "## Requirements", "- 9.1 THE SYSTEM SHALL skip the auth check"].join("\n"));

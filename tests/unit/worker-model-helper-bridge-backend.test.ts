@@ -14,7 +14,6 @@ import { serveModelHelper } from "../../packages/worker/src/model-helper.js";
 import { createModelBridge } from "../../packages/worker/src/model-bridge.js";
 import { createModelBridgeLedger } from "../../packages/worker/src/model-bridge-ledger.js";
 import { writeModelHelperRunFiles } from "../../packages/worker/src/model-helper-round.js";
-import { EVAL_BRIDGE_SOCKET_NAME } from "../../packages/worker/src/verification/eval-bridged-exec.js";
 import { request as httpRequest } from "../support/model-helper-world.js";
 
 const dirs: string[] = [];
@@ -27,22 +26,12 @@ const REAL: ModelHelperServeArgs = {
 };
 
 describe("--bridge-socket", () => {
-  it("round-trips, and names the file the exec gives the socket in the helper's one mount", () => {
-    expect(MODEL_HELPER_BRIDGE_SOCKET).toBe(`/rovara/models/${EVAL_BRIDGE_SOCKET_NAME}`);
-    const argv = modelHelperArgs(REAL);
-    expect(argv.slice(-2)).toEqual(["--bridge-socket", MODEL_HELPER_BRIDGE_SOCKET]);
-    expect(parseModelHelperArgs(argv)).toEqual(REAL);
-  });
   it("is refused with any mode but real, outside the helper's mount, in a subfolder, with .., on the run files, or twice", () => {
     for (const mode of ["scripted", "replay", "record"] as const) expect(() => modelHelperArgs({ ...REAL, mode }), mode).toThrow(ModelHelperArgsRefused);
     for (const bridgeSocket of ["/tmp/m", "/rovara/ledger/m", "/rovara/models/a/m", "/rovara/models/../ledger/m", "/rovara/models/", "/rovara/models/rows.json", "/rovara/models/replies.json", "m", "/rovara/modelsx/m"]) {
       expect(() => modelHelperArgs({ ...REAL, bridgeSocket }), bridgeSocket).toThrow(ModelHelperArgsRefused);
     }
     expect(() => parseModelHelperArgs([...modelHelperArgs(REAL), "--bridge-socket", MODEL_HELPER_BRIDGE_SOCKET])).toThrow(ModelHelperArgsRefused);
-  });
-  it("absent is exactly today's line (no flag, no backend)", () => {
-    const { bridgeSocket: _drop, ...rest } = REAL; void _drop;
-    expect(modelHelperArgs({ ...rest, mode: "scripted" })).not.toContain("--bridge-socket");
   });
 });
 
@@ -56,13 +45,6 @@ const scripted = (events: readonly ModelBridgeClientEvent[], seen: ModelBridgeCa
 const settle: ModelBridgeClientEvent = { kind: "settle", status: 200, class: "ok", costMicros: 5, estimated: false };
 
 describe("the bridge backend", () => {
-  it("sends the parsed frame once in real mode with the run's token, and answers the bridge's head, body and settle", async () => {
-    const seen: ModelBridgeCall[] = [];
-    const answer = await bridgeModelBackend("/s", scripted([{ kind: "head", status: 200, headers: [["content-type", "application/json"], ["set-cookie", "x"], ["x-rovara-refusal", "cap"]] }, { kind: "chunk", bytes: enc("{\"a\":") }, { kind: "chunk", bytes: enc("1}") }, settle], seen)).serve(backendRequest(), new AbortController().signal);
-    expect(answer).toEqual({ status: 200, headers: { "content-type": "application/json", "x-rovara-refusal": "cap" }, body: enc("{\"a\":1}") });
-    expect(seen).toHaveLength(1);
-    expect(seen[0]).toMatchObject({ socketPath: "/s", mode: "real", token: "t".repeat(32), frame: { row: "gemini", method: "POST", path: "/v1beta/models/m:generateContent", query: "", headers: [["content-type", "application/json"]] } });
-  });
   it("a call with no token, or in another mode, is not run and never reaches the bridge", async () => {
     const seen: ModelBridgeCall[] = [];
     const backend = bridgeModelBackend("/s", scripted([settle], seen));

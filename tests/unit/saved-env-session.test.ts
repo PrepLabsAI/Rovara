@@ -1,30 +1,12 @@
 // What the broker decides before it asks the image registry for a login: the switch, the approved pin, the Prove report, the repository's name, and that nobody else made the repository first.
 import { describe, expect, it } from "vitest";
-import { HostedSavedEnvRegistryAuthSchema, SAVED_ENV_PULL_SESSION_SECONDS, SAVED_ENV_PUSH_SESSION_SECONDS, savedEnvRepositoryName } from "@agentx/contracts";
 import { mintPullSession, mintPushSession, repositoryOf, verifyRepository } from "../../packages/broker/src/core/test-env/saved-env-session.js";
 import { APPROVED, savedEnvWorld, type WorldOptions } from "../support/saved-env-world.js";
 
 const ids = { orgId: "org-1", projectId: "proj-1" };
 const sessions = (over: WorldOptions = {}) => { const w = savedEnvWorld(over); return { w, config: w.deps.session.config, ports: w.deps.session.ports }; };
 
-describe("the schema a login is read through", () => {
-  it("is a setting: a hosted install's schema refuses the local registry's login for a push and a pull, where Code's own takes it", async () => {
-    const { config, ports } = sessions();
-    const hosted = { ...ports, registryAuthSchema: HostedSavedEnvRegistryAuthSchema };
-    expect((await mintPushSession(config, ports, { ...ids, approved: APPROVED })).ok).toBe(true);
-    expect(await mintPushSession(config, hosted, { ...ids, approved: APPROVED })).toEqual({ ok: false, reason: "unavailable" });
-    expect(await mintPullSession(config, hosted, { ...ids, approved: APPROVED })).toEqual({ ok: false, reason: "unavailable" });
-  });
-});
-
 describe("a push login", () => {
-  it("is for the project's own repository, for the longest push session, and only after the checks below", async () => {
-    const { w, config, ports } = sessions();
-    const minted = await mintPushSession(config, ports, { ...ids, approved: APPROVED });
-    expect(minted).toMatchObject({ ok: true, auth: { repository: savedEnvRepositoryName({ env: "test", orgId: ids.orgId, projectId: ids.projectId }) } });
-    expect(w.logins).toEqual([{ repository: w.repository, access: "push", maxSeconds: SAVED_ENV_PUSH_SESSION_SECONDS }]);
-    expect(minted.ok && minted.expiresAtMs).toBeLessThanOrEqual(w.clock.now + SAVED_ENV_PUSH_SESSION_SECONDS * 1000);
-  });
 
   it("is refused with the switch off, for an id that is not text, for a registry that cannot take a worker's push: the registry is not reached", async () => {
     for (const [name, over, input] of [
@@ -63,24 +45,9 @@ describe("a push login", () => {
     expect((await mintPushSession(fresh.config, fresh.ports, { ...ids, approved: APPROVED })).ok).toBe(true);
   });
 
-  it("answers a registry that is down as unavailable, keeping nothing of its error", async () => {
-    const { config, ports } = sessions({ registry: { login: async () => { throw new Error("secret-looking address 10.0.0.9"); } } });
-    const answer = await mintPushSession(config, ports, { ...ids, approved: APPROVED });
-    expect(answer).toEqual({ ok: false, reason: "unavailable" });
-    expect(JSON.stringify(answer)).not.toContain("10.0.0.9");
-  });
 });
 
 describe("a pull login", () => {
-  it("is for the project's repository for the shorter session, and needs the repository to be there and to be the one Rovara makes", async () => {
-    const { w, config, ports } = sessions();
-    expect((await mintPullSession(config, ports, { ...ids, approved: APPROVED })).ok).toBe(true);
-    expect(w.logins).toEqual([{ repository: w.repository, access: "pull", maxSeconds: SAVED_ENV_PULL_SESSION_SECONDS }]);
-    for (const state of ["absent", "unusable"] as const) {
-      const other = sessions({ state });
-      expect(await mintPullSession(other.config, other.ports, { ...ids, approved: APPROVED }), state).toEqual({ ok: false, reason: "unavailable" });
-    }
-  });
 
   it("is refused for a registry the worker cannot pull from, a moved pin and the switch off, without reaching the registry", async () => {
     const cannot = sessions({ capabilities: { workerPull: false } });

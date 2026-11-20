@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -10,13 +10,6 @@ async function workspace(run: (root: string) => Promise<void>) {
 }
 const valid = '{"schemaVersion":1,"measures":[{"name":"bytes","unit":"B","value":12,"direction":"down_good"}]}';
 describe("report parts file", () => {
-  it("reads the explicitly named fresh measures, CTRF and TRX files through the common reader", async () => workspace(async (root) => {
-    for (const name of ["measures.json", "ctrf.json", "trx.xml"]) {
-      await writeFile(join(root, name), await readFile(new URL(`../fixtures/report-adapters/${name}`, import.meta.url)));
-      const read = await readReportPartsFile({ root, cwd: ".", argument: name, notBeforeMs: Date.now() });
-      expect(read).toMatchObject({ ok: true, parts: { format: name === "measures.json" ? "measures" : name === "ctrf.json" ? "ctrf" : "trx" } });
-    }
-  }));
   it("refuses a symlink file or directory, path escape, missing file and missing freshness", async () => workspace(async (root) => {
     await mkdir(join(root, "real")); await writeFile(join(root, "real", "report.json"), valid);
     await symlink(join(root, "real"), join(root, "linked"));

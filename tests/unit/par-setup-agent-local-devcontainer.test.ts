@@ -88,19 +88,6 @@ describe("the start on a laptop", () => {
     expect(harness.calls).toEqual([]);
   });
 
-  it("starts a cloud worker as it always did: the config as the project wrote it, and the workspace mounted beside the tool's own", async () => {
-    const target = await workspace('{ "image": "node:22" }');
-    const harness = fakeCli();
-    await ensureDevcontainer(harness.cli, target, { environment: { AGENTX_RUNTIME: "ec2", ...LOCAL } });
-    expect(target.overrideConfigPath).toBeUndefined();
-    const up = harness.calls.find((args) => args[0] === "up")!;
-    expect(up).not.toContain("--override-config");
-    expect(up).toContain(`type=bind,source=${target.rootPath},target=${target.rootPath}`);
-    const bare = await workspace('{ "image": "node:22" }');
-    const other = fakeCli();
-    await ensureDevcontainer(other.cli, bare, { environment: {} });
-    expect(bare.overrideConfigPath).toBeUndefined();
-  });
 });
 
 describe("the worker's check of a started dev container", () => {

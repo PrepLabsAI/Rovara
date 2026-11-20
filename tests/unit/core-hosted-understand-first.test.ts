@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  WORKFLOW_PATH_REQUIRED, orgProjectCatalogKey, projectRevisionKey, recordIntentAssessment, startWorkflowUnderstand,
+  WORKFLOW_PATH_REQUIRED, createCandidateManifest, orgProjectCatalogKey, projectRevisionKey, recordIntentAssessment, startWorkflowUnderstand,
   type OrgId, type StoredDocument,
 } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
@@ -138,8 +138,12 @@ describe("the hosted core root starts workflow tasks on 1.1.0 (L4-HW1)", () => {
     expect(workflowDependenciesAllowed(deps, workflow)).toBe(true);
     // Plan check: the program has the plan_critic step (core/plan runs the check from it).
     expect(workflow.program?.steps.some((step) => step.kind === "plan_critic")).toBe(true);
-    // The Rovara check on the pull request has a verdict only for a 1.1.0 task.
-    expect(workflowPullRequestCheckVerdict({ taskId, title: "Add a health endpoint" } as never, workflow, undefined)).toBeDefined();
+    // An unreviewed start has no verdict; the 1.1.0 projection engages once its current code reviews clear.
+    const task = { title: "Add a health endpoint" };
+    expect(workflowPullRequestCheckVerdict(task, workflow, undefined)).toBeUndefined();
+    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "1".repeat(40), treeSha: "2".repeat(40), baseCommitSha: "3".repeat(40) }]);
+    const reviewed = { ...workflow, candidate, reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS" as const, findings: [], readOnly: true, recordedAt: "2026-11-19T00:00:00.000Z" })) };
+    expect(workflowPullRequestCheckVerdict(task, reviewed as typeof workflow, undefined)).toBeDefined();
   });
 });
 

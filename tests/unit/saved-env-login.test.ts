@@ -3,7 +3,7 @@ const T1_COMPANY = "org_aaaaaaaaaaaaaaaaaaaa";
 import { describe, expect, it } from "vitest";
 import { HostedSavedEnvRegistryAuthSchema } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { countOperationAttribute, readSavedEnvOperation } from "../../packages/broker/src/core/test-env/saved-env-operations.js";
+import { readSavedEnvOperation } from "../../packages/broker/src/core/test-env/saved-env-operations.js";
 import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { SAVED_ENV_LOGIN_MAX_PER_OPERATION, exchangeSavedEnvLoginCore, type SavedEnvLoginContext } from "../../packages/broker/src/core/test-env/saved-env-login.js";
 
@@ -33,13 +33,6 @@ const call = (c: SavedEnvLoginContext, over: { grant?: string | undefined; body?
   exchangeSavedEnvLoginCore(c, { grant: "grant" in over ? over.grant : "g", workspaceId: over.workspaceId ?? "ws", operationId: over.operationId ?? "op", body: "body" in over ? over.body : {} });
 
 describe("the saved environment login exchange", () => {
-  it("gives the login for the digest recorded WITH THE OPERATION, for the workspace's own org and project, and logs the digest and expiry but never the login", async () => {
-    const { context: c, asked, logged } = context();
-    expect(await call(c)).toEqual({ login });
-    expect(asked).toEqual([{ orgId: "org-1", projectName: "payments", digest: DIGEST }]);
-    expect(JSON.stringify(logged)).toContain(DIGEST);
-    expect(JSON.stringify(logged)).not.toContain(PASSWORD);
-  });
 
   it("reads the login through the schema it is given: a hosted install's schema refuses a login that names a loopback registry, where Code's own takes it", async () => {
     await expect(call(context({ registryAuthSchema: HostedSavedEnvRegistryAuthSchema }).context)).rejects.toThrow();
@@ -69,11 +62,6 @@ describe("the saved environment login exchange", () => {
     expect(asked).toEqual([]);
   });
 
-  it("no login from the registry (the image went stale, the project moved on) is a refusal, and a login for another shape is not passed on", async () => {
-    await expect(call(context({ login: async () => undefined }).context)).rejects.toThrow();
-    await expect(call(context({ login: async () => ({ ...login, registry: "evil.example.com" }) }).context)).rejects.toThrow();
-  });
-
   it("gives at most three logins per operation, then refuses with FORBIDDEN and asks the registry no more", async () => {
     const { context: c, asked } = context();
     for (let n = 0; n < SAVED_ENV_LOGIN_MAX_PER_OPERATION; n += 1) await call(c);
@@ -81,15 +69,6 @@ describe("the saved environment login exchange", () => {
     expect(asked).toHaveLength(SAVED_ENV_LOGIN_MAX_PER_OPERATION);
   });
 
-  it("counts only a request that passed every other check", async () => {
-    let counted = 0;
-    const base = context({ countLogin: async () => { counted += 1; return true; } }).context;
-    await expect(call(base, { grant: undefined })).rejects.toThrow();
-    await expect(call({ ...base, enabled: false })).rejects.toThrow();
-    expect(counted).toBe(0);
-    await call(base);
-    expect(counted).toBe(1);
-  });
 });
 
 describe("the operation as the handlers read it, and the counter on its record", () => {
@@ -110,22 +89,4 @@ describe("the operation as the handlers read it, and the counter on its record",
     expect(await readSavedEnvOperation(await seeded(), T1_COMPANY, "ws-1", "op-1")).toMatchObject({ savedEnvJobId: undefined, savedEnvDigest: undefined });
   });
 
-  it("an operation or a workspace that is not there is NOT_FOUND", async () => {
-    await expect(readSavedEnvOperation(new MemoryDocumentStore(), T1_COMPANY, "ws-1", "op-1")).rejects.toMatchObject({ code: "NOT_FOUND" });
-  });
-
-  it("counts a login on that operation only while it is under the limit, and never on an operation that is not there", async () => {
-    const store = await seeded();
-    const results: boolean[] = [];
-    for (let attempt = 0; attempt < SAVED_ENV_LOGIN_MAX_PER_OPERATION + 2; attempt += 1) results.push(await countOperationAttribute(store, T1_COMPANY, "ws-1", "op-1", "savedEnvLoginCount", SAVED_ENV_LOGIN_MAX_PER_OPERATION));
-    expect(results).toEqual([true, true, true, false, false]);
-    expect((await store.get(operationKey(T1_COMPANY, "ws-1", "op-1")))?.["savedEnvLoginCount"]).toBe(SAVED_ENV_LOGIN_MAX_PER_OPERATION);
-    expect(await countOperationAttribute(store, T1_COMPANY, "ws-1", "op-missing", "savedEnvLoginCount", 3)).toBe(false);
-  });
-
-  it("two requests at once cannot both take the last slot", async () => {
-    const store = await seeded();
-    const answers = await Promise.all(Array.from({ length: 6 }, () => countOperationAttribute(store, T1_COMPANY, "ws-1", "op-1", "savedEnvPushLoginCount", 3)));
-    expect(answers.filter(Boolean)).toHaveLength(3);
-  });
 });

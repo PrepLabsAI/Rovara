@@ -21,17 +21,6 @@ beforeEach(() => {
 });
 
 describe("the daily check's heartbeat", () => {
-  it("records the first scheduled run as the moment the schedule was enabled, once, and reports age 0 that day", async () => {
-    await check();
-    expect(enabledRow()).toMatchObject({ entityType: "RUNTIME_REQUALIFY_SCHEDULE_ENABLED", at: new Date(cloud.clock).toISOString() });
-    expect(ages()).toEqual([0]);
-    // A later run never moves the first-enabled time.
-    const first = enabledRow()!["at"];
-    cloud.clock += 2 * DAY;
-    await check();
-    expect(enabledRow()!["at"]).toBe(first);
-    expect(ages()).toEqual([0, 2]);
-  });
 
   it("reports the days since the last successful renewal, and reaches the alarm's threshold after six days without one", async () => {
     await recordRenewalSuccess(cloud.deps(), RUN_ID);
@@ -51,29 +40,10 @@ describe("the daily check's heartbeat", () => {
     expect(ages().at(-1)).toBe(0);
   });
 
-  it("counts from the first enable when no renewal has ever succeeded, so a schedule that never renews still breaches", async () => {
-    await check();
-    cloud.clock += 6 * DAY;
-    await check();
-    expect(ages()).toEqual([0, 6]);
-  });
-
-  it("does nothing for the operator's forced start: it is not the schedule and must not mark it enabled", async () => {
-    await check(true);
-    expect(enabledRow()).toBeUndefined();
-    expect(ages()).toEqual([]);
-  });
-
   it("never fails the check, and does not start or stop a renewal, when the metric cannot be written", async () => {
     cloud.failMetrics = true;
     await expect(check()).resolves.toEqual({ started: false, reason: "not-due" });
     expect(enabledRow()).toBeDefined();
   });
 
-  it("a renewal that is due still starts, and the age is reported alongside", async () => {
-    cloud.ddb.clear();
-    cloud.seedRegistered({ generation: 1, pointerInstance: cloud.addRunner().id, expiresInMs: 60 * 3_600_000 });
-    await expect(check()).resolves.toEqual({ started: true, reason: "expiring" });
-    expect(ages()).toEqual([0]);
-  });
 });

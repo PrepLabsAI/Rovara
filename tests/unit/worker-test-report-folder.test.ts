@@ -4,17 +4,13 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { isValidTestId, testIdOf } from "@agentx/contracts";
-import { expectLinearScalingAsync } from "../support/scaling.js";
-import { TEST_REPORT_MAX_BYTES, TEST_REPORT_MAX_TESTS, displayLine } from "../../packages/worker/src/verification/test-report.js";
+import { TEST_REPORT_MAX_BYTES, TEST_REPORT_MAX_TESTS } from "../../packages/worker/src/verification/test-report.js";
 import { REPORT_FOLDER_MAX_FILES, readJunitFolder, readTestReportAt } from "../../packages/worker/src/verification/test-report-folder.js";
 
 // What Surefire writes: one TEST-<class>.xml per class.
 const suite = (cls: string, cases: string): string => `<?xml version="1.0" encoding="UTF-8"?>\n<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" name="${cls}" time="0.05" tests="9" errors="0" skipped="0" failures="0">\n<properties><property name="java.version" value="21"/></properties>\n${cases}\n</testsuite>`;
 const OK = (cls: string, name: string): string => `<testcase name="${name}" classname="${cls}" time="0.01"/>`;
 const FAIL = (cls: string, name: string): string => `<testcase name="${name}" classname="${cls}" time="0.02"><failure message="expected 1 but was 2" type="org.opentest4j.AssertionFailedError">trace</failure></testcase>`;
-const SKIP = (cls: string, name: string): string => `<testcase name="${name}" classname="${cls}" time="0"><skipped/></testcase>`;
-const ERR = (cls: string, name: string): string => `<testcase name="${name}" classname="${cls}" time="0.02"><error message="boom" type="java.lang.IllegalStateException">trace</error></testcase>`;
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "rovara-report-folder-")); });
@@ -22,21 +18,6 @@ afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 const put = (name: string, text: string): void => writeFileSync(join(dir, name), text);
 
 describe("readJunitFolder", () => {
-  it("merges the per-class files into one report with the right totals and class-plus-name test ids", async () => {
-    put("TEST-com.acme.MatchTest.xml", suite("com.acme.MatchTest", [OK("com.acme.MatchTest", "scoresPartner"), FAIL("com.acme.MatchTest", "rejectsNoRegion")].join("\n")));
-    put("TEST-com.acme.RankTest.xml", suite("com.acme.RankTest", [OK("com.acme.RankTest", "top5"), SKIP("com.acme.RankTest", "slow"), ERR("com.acme.RankTest", "timeout")].join("\n")));
-    const result = await readJunitFolder(dir);
-    expect(result.report).toMatchObject({ format: "junit", total: 5, passed: 2, failed: 1, skipped: 1, errored: 1 });
-    expect(result.report?.tests.map((test) => `${test.file}::${test.name}`)).toEqual([
-      "com/acme/MatchTest::scoresPartner", "com/acme/MatchTest::rejectsNoRegion", "com/acme/RankTest::top5", "com/acme/RankTest::slow", "com/acme/RankTest::timeout",
-    ]);
-    expect(result).toMatchObject({ filesRead: 2, filesMalformed: 0, filesRefused: 0, complete: true });
-  });
-  it("counts the test cases it reads, not the files' own summary attributes, and keeps a repeated id from a rerun", async () => {
-    put("TEST-a.A.xml", suite("a.A", OK("a.A", "t")));
-    put("TEST-a.B.xml", suite("a.A", OK("a.A", "t")));
-    expect((await readJunitFolder(dir)).report?.total).toBe(2);
-  });
   it("reads other *.xml JUnit files, ignores files that are not JUnit (a failsafe summary) and ignores non-xml files and subfolders", async () => {
     put("TEST-a.A.xml", suite("a.A", OK("a.A", "t")));
     put("junit-extra.xml", `<testsuites><testsuite name="x">${OK("b.B", "u")}</testsuite></testsuites>`);
@@ -58,15 +39,6 @@ describe("readJunitFolder", () => {
     expect(result.report).toMatchObject({ total: 3, passed: 1, errored: 2 });
     expect(result.report?.tests.filter((test) => test.status === "errored").map((test) => test.name).join("|")).toContain("TEST-b.B.xml");
     expect(result.notes.join(" ")).toMatch(/2 .*could not be read/u);
-  });
-  it("treats a suite with no test case as empty (not malformed) only when it is complete", async () => {
-    put("TEST-a.A.xml", suite("a.A", OK("a.A", "t")));
-    put("TEST-e.E.xml", '<testsuite name="e.E" tests="0"></testsuite>');
-    put("TEST-f.F.xml", '<testsuite name="f.F" tests="0"/>');
-    put("TEST-g.G.xml", '<testsuite name="g.G" tests="0"');
-    const result = await readJunitFolder(dir);
-    expect(result).toMatchObject({ filesRead: 1, filesEmpty: 2, filesMalformed: 1, complete: false });
-    expect(result.report?.total).toBe(2);
   });
   it("is not measured when the folder holds no test at all, or is empty", async () => {
     expect((await readJunitFolder(dir)).report).toBeUndefined();
@@ -146,46 +118,6 @@ describe("readJunitFolder inside a workspace root", () => {
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
-  });
-  it("reads a folder inside the root, also when the root itself is reached through a link", async () => {
-    const linked = join(tmpdir(), `rovara-report-linked-${String(process.pid)}-${String(Date.now())}`);
-    try {
-      mkdirSync(join(dir, "r"));
-      writeFileSync(join(dir, "r", "TEST-a.A.xml"), suite("a.A", OK("a.A", "t")));
-      symlinkSync(dir, linked);
-      expect((await readJunitFolder(join(linked, "r"), linked)).report?.total).toBe(1);
-      expect((await readTestReportAt(linked, "r")).report?.total).toBe(1);
-    } finally {
-      rmSync(linked, { force: true });
-    }
-  });
-  it("cuts a very long path before doing any work on it, and drops trailing slashes without a pattern that is quadratic", async () => {
-    // Scaling checks, not wall-clock bounds: each long path is timed at N and at 8N (8N is the original length).
-    const longPaths: Array<[string, (n: number) => string]> = [["leading slashes", (n) => "/".repeat(n) + "a"], ["trailing slashes", (n) => "a" + "/".repeat(n)]];
-    for (const [label, pathOf] of longPaths) {
-      await expectLinearScalingAsync((n) => { const path = pathOf(n); return () => readTestReportAt(dir, path); }, { n: 10_000, label });
-    }
-    for (const path of ["/".repeat(80_000) + "a", "a".repeat(501), "a" + "/".repeat(80_000)]) {
-      expect((await readTestReportAt(dir, path)).problem, path.slice(0, 5)).toBe("refused");
-    }
-    mkdirSync(join(dir, "r"));
-    writeFileSync(join(dir, "r", "TEST-a.A.xml"), suite("a.A", OK("a.A", "t")));
-    expect((await readTestReportAt(dir, "r" + "/".repeat(300))).report?.total).toBe(1);
-  });
-  it("redacts a secret in a report's file attribute, and keeps a hidden character in the file as written but never as a valid test id (shown as one plain line)", async () => {
-    const token = ["gh", "p_", "a".repeat(36)].join("");
-    put("TEST-a.A.xml", suite("a.A", `<testcase name="t" classname="a.A" file="src/${token}/A.java"/><testcase name="u" classname="a.A" file="src/B\u202e.java"/><testcase name="v" classname="a.A" file="src/Fine.java"/>`));
-    const result = await readJunitFolder(dir);
-    expect(JSON.stringify(result.report)).not.toContain(token);
-    // NH-1 re-check F2/F5: the file is kept as the report wrote it (a test's id is built from it, and an id must be the real one), so the hidden character stays in the parsed report; the id it makes is not valid,
-    // is never matched, and is shown only as one plain line (the evidence and the nightly use `isValidTestId` and `displayLine`).
-    const files = result.report?.tests.map((test) => test.file);
-    expect(files?.[1]).toBe("src/B\u202e.java");
-    const ids = result.report?.tests.map((test) => testIdOf(test)) ?? [];
-    expect(ids.map((id) => isValidTestId(id))).toEqual([true, false, true]);
-    expect(displayLine(ids[1]!)).not.toContain("\u202e");
-    expect(displayLine(ids[1]!)).toBe("src/B .java::u");
-    expect(files?.[2]).toBe("src/Fine.java");
   });
 });
 

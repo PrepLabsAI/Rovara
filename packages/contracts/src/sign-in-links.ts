@@ -70,11 +70,11 @@ export type SignInUnlinkResponse = { ok: true } | SignInLinkRefusal;
 /** Fixed words, never echoing anything a request or a provider sent. */
 export const SIGN_IN_LINK_TEXT = {
   refused: "That sign-in can't be connected to your account.",
-  signedOut: "Your AgentX sign-in has ended. Sign in again.",
+  signedOut: "Your Rovara sign-in has ended. Sign in again.",
   forbidden: "Only the person or a company owner or admin can change this person's sign-ins.",
   lastMethod: "This is the first way this person signs in, so it can't be removed.",
   notFound: "That sign-in is not connected.",
   notSetUp: "Connecting sign-ins is not set up on this install.",
-  invalid: "That request is not one AgentX understands.",
-  unavailable: "AgentX could not finish this just now. Try again in a moment.",
+  invalid: "That request is not one Rovara understands.",
+  unavailable: "Rovara could not finish this just now. Try again in a moment.",
 } as const;

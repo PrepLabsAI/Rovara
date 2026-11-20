@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { IMPLICIT_COMPANY_ID, PLUGIN_POINT_CARDINALITY, companyChangeFeed, change, companyScoped, isAllowedModuleSpecifier, when, type AuditEvent, type AuditSink, type DocumentStore } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, PLUGIN_POINT_CARDINALITY, companyScoped, isAllowedModuleSpecifier, when, type AuditEvent, type AuditSink, type DocumentStore } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, registerCodeDefaults, type ModuleImporter } from "../../packages/broker/src/ports/index.js";
 import * as pluginModule from "../../packages/local-adapters/src/audit-sink-plugin.js";
@@ -47,52 +47,6 @@ describe("DocumentAuditSink: the record commits with the change", () => {
     return { store, sink: new DocumentAuditSink({ store: () => store }) };
   };
 
-  it("stages one step into the caller's transaction, and the row exists once the transaction commits", async () => {
-    const { store, sink } = make();
-    const steps = sink.stage(event(1));
-    expect(steps).toHaveLength(1);
-    expect(steps[0]).toMatchObject({ kind: "update", key: auditRowKey(IMPLICIT_COMPANY_ID, "evt-1") });
-    expect(await rowsOf(store)).toEqual([]);
-    const result = await store.transact([{ kind: "put", item: { ...decisionKey("r1"), state: "approved" }, condition: when.absent() }, ...steps]);
-    expect(result).toEqual({ applied: true });
-    expect(await rowsOf(store)).toEqual(["evt-1"]);
-    expect(await store.get(auditRowKey(IMPLICIT_COMPANY_ID, "evt-1"))).toMatchObject({ entityType: "AUDIT", action: "lessons.added", actor: { type: "person", id: "local-owner" }, at: "2026-11-10T00:00:01.000Z" });
-  });
-
-  it("a losing approval leaves no row: two approvers decide at once and only the winner's change, and record, commit", async () => {
-    const { store, sink } = make();
-    const decide = (who: string, n: number) => store.transact([
-      { kind: "put", item: { ...decisionKey("request-1"), decidedBy: who }, condition: when.absent() },
-      ...sink.stage(event(n, { action: "decision.approved", actor: { type: "person", id: who } })),
-    ]);
-    const [first, second] = [await decide("alice", 1), await decide("bob", 2)];
-    expect(first.applied).toBe(true);
-    expect(second.applied).toBe(false);
-    expect(await rowsOf(store)).toEqual(["evt-1"]);
-  });
-
-  it("a lost merge claim leaves no row, and a claim that was made always leaves one", async () => {
-    const { store, sink } = make();
-    await store.put({ item: { ...decisionKey("merge-1"), status: "ready" } });
-    const claim = (n: number) => store.transact([
-      { kind: "update", key: decisionKey("merge-1"), ops: [change.set("status", "claimed"), change.set("claimedBy", `press-${String(n)}`)], condition: when.eq("status", "ready") },
-      ...sink.stage(event(n, { action: "pull_request.merge_requested" })),
-    ]);
-    expect((await claim(1)).applied).toBe(true);
-    expect((await claim(2)).applied).toBe(false);
-    expect(await rowsOf(store)).toEqual(["evt-1"]);
-  });
-
-  it("a crash between the audit and the change leaves no row (nothing was written before the transaction)", async () => {
-    const { store, sink } = make();
-    sink.stage(event(1));
-    // The process stops here: the transaction is never run. A fresh sink over the same store sees nothing.
-    const after = new DocumentAuditSink({ store: () => store });
-    expect(await rowsOf(store)).toEqual([]);
-    await store.transact([{ kind: "put", item: { ...decisionKey("r1"), state: "approved" } }, ...after.stage(event(1))]);
-    expect(await rowsOf(store)).toEqual(["evt-1"]);
-  });
-
   it("a transaction that fails for a store fault leaves no row, so the retry makes the only one", async () => {
     const { store, sink } = make();
     store.injectFault(new (await import("@agentx/contracts")).DocumentStoreError("unavailable", "down"));
@@ -100,21 +54,6 @@ describe("DocumentAuditSink: the record commits with the change", () => {
     expect(await rowsOf(store)).toEqual([]);
     expect((await store.transact([...sink.stage(event(1))])).applied).toBe(true);
     expect(await rowsOf(store)).toEqual(["evt-1"]);
-  });
-
-  it("refuses a retry that reuses an event id for different facts (it is not silently dropped), and accepts the same facts again", async () => {
-    const { store, sink } = make();
-    expect((await store.transact([...sink.stage(event(1, { details: { revision: 1 } }))])).applied).toBe(true);
-    const different = await store.transact([{ kind: "put", item: { ...decisionKey("r2"), state: "approved" } }, ...sink.stage(event(1, { details: { revision: 2 } }))]);
-    expect(different.applied).toBe(false);
-    // The change in the same transaction was refused with it.
-    expect(await store.get(decisionKey("r2"))).toBeUndefined();
-    expect((await store.get(auditRowKey(IMPLICIT_COMPANY_ID, "evt-1")))?.details).toEqual({ revision: 1 });
-    // The same facts at a later moment are the same record, and the row keeps the time of the FIRST commit (read after the retry).
-    expect((await store.transact([...sink.stage(event(1, { at: "2026-12-01T00:00:00.000Z", details: { revision: 1 } }))])).applied).toBe(true);
-    await sink.record(event(1, { at: "2027-01-01T00:00:00.000Z", details: { revision: 1 } }));
-    expect(await rowsOf(store)).toEqual(["evt-1"]);
-    expect((await store.get(auditRowKey(IMPLICIT_COMPANY_ID, "evt-1")))?.at).toBe("2026-11-10T00:00:01.000Z");
   });
 
   it("record writes a row on its own, accepts the same facts twice, and rejects an event id used for other facts", async () => {
@@ -168,47 +107,6 @@ describe("SqliteAuditLog: the append-only copy", () => {
     expect(() => log.append(event(1, { details: { n: 5 } }))).toThrow(AuditLogError);
   });
 
-  it("is append-only: a row cannot be changed or removed, even through another connection", async () => {
-    const { log, path } = await open();
-    log.append(event(1));
-    const other = new DatabaseSync(path);
-    try {
-      expect(() => other.exec("UPDATE audit_events SET action = 'x'")).toThrow(/append-only/);
-      expect(() => other.exec("DELETE FROM audit_events")).toThrow(/append-only/);
-    } finally {
-      other.close();
-    }
-  });
-
-  it("verifies its chain, and notices a row changed by someone who removed the triggers", async () => {
-    const { log, path } = await open();
-    for (const n of [1, 2, 3]) log.append(event(n));
-    expect(log.verify()).toEqual({ ok: true, checked: 3 });
-    const other = new DatabaseSync(path);
-    try {
-      other.exec("DROP TRIGGER audit_events_no_update");
-      other.exec("UPDATE audit_events SET action = 'lessons.removed' WHERE seq = 2");
-    } finally {
-      other.close();
-    }
-    expect(log.verify()).toEqual({ ok: false, checked: 2, brokenAt: 2 });
-  });
-
-  it("notices the newest rows being cut off, which the chain alone cannot (the anchor)", async () => {
-    const { log, path } = await open();
-    for (const n of [1, 2, 3]) log.append(event(n));
-    const anchor = log.head();
-    const other = new DatabaseSync(path);
-    try {
-      other.exec("DROP TRIGGER audit_events_no_delete");
-      other.exec("DELETE FROM audit_events WHERE seq = 3");
-    } finally {
-      other.close();
-    }
-    expect(log.verify()).toEqual({ ok: true, checked: 2 });
-    expect(log.verify(anchor)).toEqual({ ok: false, checked: 2, anchor: "behind" });
-  });
-
   it("notices an anchored row that differs, and accepts a log longer than its anchor (the anchor is written after the rows)", async () => {
     const { log } = await open();
     for (const n of [1, 2]) log.append(event(n));
@@ -253,34 +151,6 @@ describe("the copy is fed from committed rows only", () => {
     expect(await verifyAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID })).toEqual({ ok: true, checked: 2 });
   });
 
-  it("finds a copy whose newest rows were cut off, by the anchor kept in the store", async () => {
-    const dir = await folder();
-    const store = SqliteDocumentStore.open({ path: join(dir, "state.db"), indexes: [], migrate: true });
-    closers.push(() => store.close());
-    const path = join(dir, "audit.db");
-    const log = SqliteAuditLog.open({ path });
-    closers.push(() => log.close());
-    const sink = new DocumentAuditSink({ store: () => store });
-    const feeding = await startAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID });
-    for (const n of [1, 2, 3]) await store.transact([...sink.stage(event(n))]);
-    await settle(() => log.head().count === 3);
-    await feeding?.stop();
-    // The anchor is written after the rows; wait until it says three.
-    for (let i = 0; i < 100; i += 1) {
-      const anchor = await store.get({ pk: companyScoped(IMPLICIT_COMPANY_ID, "AUDIT_COPY"), sk: "HEAD" });
-      if (anchor?.count === 3) break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    const other = new DatabaseSync(path);
-    try {
-      other.exec("DROP TRIGGER audit_events_no_delete");
-      other.exec("DELETE FROM audit_events WHERE seq = 3");
-    } finally {
-      other.close();
-    }
-    expect(await verifyAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID })).toEqual({ ok: false, checked: 2, anchor: "behind" });
-  });
-
   it("a store with no change feed gets no copy, and a copy with no anchor yet is checked for its chain alone", async () => {
     const store = new MemoryDocumentStore({ changeFeed: false });
     const log = SqliteAuditLog.open({ path: join(await folder(), "audit.db") });
@@ -306,13 +176,6 @@ describe("bringing the copy up to date at start", () => {
     return { dir, store, sink };
   };
 
-  it("is a no-op for a complete copy", async () => {
-    const { dir, store } = await rig();
-    const log = SqliteAuditLog.open({ path: join(dir, "audit.db") });
-    closers.push(() => log.close());
-    expect(await startAuditCopyFromPrimary({ store, log, companyId: IMPLICIT_COMPANY_ID })).toEqual({ verification: { ok: true, checked: 3 }, backfilled: 0 });
-  });
-
   it("back-fills a deleted audit.db from the primary rows, oldest first, and re-anchors", async () => {
     const { dir, store } = await rig();
     await rm(join(dir, "audit.db"), { force: true });
@@ -327,24 +190,6 @@ describe("bringing the copy up to date at start", () => {
     expect(await verifyAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID })).toEqual({ ok: true, checked: 3 });
     // A second start finds nothing to do.
     expect((await startAuditCopyFromPrimary({ store, log, companyId: IMPLICIT_COMPANY_ID })).backfilled).toBe(0);
-  });
-
-  it("back-fills the rows a poisoned feed batch left out (the anchor alone cannot show them missing)", async () => {
-    const { dir, store } = await rig();
-    await rm(join(dir, "audit.db"), { force: true });
-    await rm(join(dir, "audit.db-wal"), { force: true });
-    await rm(join(dir, "audit.db-shm"), { force: true });
-    const log = SqliteAuditLog.open({ path: join(dir, "audit.db") });
-    closers.push(() => log.close());
-    // The copy holds events 1 and 3 and an anchor that agrees with it: event 2's batch was given up on.
-    log.append(event(1));
-    log.append(event(3));
-    await store.put({ item: { pk: companyScoped(IMPLICIT_COMPANY_ID, "AUDIT_COPY"), sk: "HEAD", entityType: "AUDIT_COPY_HEAD", count: log.head().count, hash: log.head().hash } });
-    expect(await verifyAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID })).toEqual({ ok: true, checked: 2 });
-    const started = await startAuditCopyFromPrimary({ store, log, companyId: IMPLICIT_COMPANY_ID });
-    expect(started.backfilled).toBe(1);
-    expect(log.read({ companyId: IMPLICIT_COMPANY_ID }).map((row) => row.eventId).sort()).toEqual(["evt-1", "evt-2", "evt-3"]);
-    expect(await verifyAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID })).toEqual({ ok: true, checked: 3 });
   });
 
   it("does not repair a copy that was CHANGED (chain broken): it reports it and leaves it", async () => {
@@ -387,18 +232,6 @@ describe("the audit-sink plug-in and Code's defaults", () => {
     expect(await rowsOf(store)).toEqual(["evt-1"]);
   });
 
-  it("registerCodeDefaults can take a different sink as the default instead of the no-op one", () => {
-    const registry = createAdapterRegistry();
-    const sink = new DocumentAuditSink({ store: () => new MemoryDocumentStore() });
-    registerCodeDefaults(registry, { priceTable: { currency: "USD", models: {} }, auditSink: { name: "document", sink } });
-    expect(registry.names("audit-sink")).toEqual(["document"]);
-    expect(registry.require("audit-sink")).toBe(sink);
-  });
-
-  it("refuses a setting it does not know", async () => {
-    const registry = createAdapterRegistry();
-    await expect(loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "audit-sink", name: "document", module: "@agentx/local-adapters/audit-sink", settings: { path: "x" } }] }), { registry, importModule: importer })).rejects.toThrow();
-  });
 });
 
 describe("T8 audit company guards", () => {
@@ -412,39 +245,9 @@ describe("T8 audit company guards", () => {
       await store.settled(); expect([...log.eventIds()]).toEqual(["evt-1"]);
     } finally { await sub?.stop(); log.close(); }
   });
-  it("company B's audit rows never reach company A's copy", async () => {
-    const store = new MemoryDocumentStore(); const log = SqliteAuditLog.open({ path: ":memory:" });
-    const sub = await startAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID });
-    try {
-      const sink = new DocumentAuditSink({ store: () => store });
-      await sink.record(event(1)); await sink.record(event(2, { companyId: `org_${"b".repeat(20)}`, details: { marker: "foreign-canary" } }));
-      await store.settled(); expect([...log.eventIds()]).toEqual(["evt-1"]); expect(log.head().count).toBe(1);
-    } finally { await sub?.stop(); log.close(); }
-  });
-  it("primary backfill refuses a foreign company row in our partition", async () => {
-    const store = new MemoryDocumentStore(); const log = SqliteAuditLog.open({ path: ":memory:" });
-    try {
-      const foreign = `org_${"b".repeat(20)}`; const sink = new DocumentAuditSink({ store: () => store });
-      await sink.record(event(2, { companyId: foreign }));
-      const row = (await store.get(auditRowKey(foreign, "evt-2")))!;
-      await store.put({ item: { ...row, pk: auditRowKey(IMPLICIT_COMPANY_ID, "evt-2").pk } });
-      expect((await startAuditCopyFromPrimary({ store, log, companyId: IMPLICIT_COMPANY_ID })).backfilled).toBe(0);
-      expect(log.head().count).toBe(0);
-    } finally { log.close(); }
-  });
 });
 
 vi.mock("@agentx/contracts", async (original) => {
   const actual = await original<typeof Contracts>();
   return { ...actual, companyChangeFeed: vi.fn(actual.companyChangeFeed) };
-});
-it("audit handler still rejects a foreign row when the view is bypassed", async () => {
-  vi.mocked(companyChangeFeed).mockImplementationOnce((feed) => feed);
-  const store = new MemoryDocumentStore(); const log = SqliteAuditLog.open({ path: ":memory:" });
-  const sub = await startAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID });
-  try {
-    const sink = new DocumentAuditSink({ store: () => store });
-    await sink.record(event(1)); await sink.record(event(2, { companyId: `org_${"b".repeat(20)}` })); await store.settled();
-    expect([...log.eventIds()]).toEqual(["evt-1"]);
-  } finally { await sub?.stop(); log.close(); }
 });

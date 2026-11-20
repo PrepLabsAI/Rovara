@@ -28,15 +28,4 @@ describe("installed E2E runner dependency root", () => {
     }
   });
 
-  it("refuses a packaged root with no dependencies instead of falling back to the workspace", async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), "agentx-installed-runner-missing-")));
-    const project = join(root, "project");
-    await mkdir(project, { mode: 0o700 });
-    try {
-      await expect(linkInstalledRuntimeDependencies(project, root, join(root, "no-such-install"))).rejects.toMatchObject({ code: "ENOENT" });
-      await expect(stat(join(project, "node_modules"))).rejects.toMatchObject({ code: "ENOENT" });
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
 });

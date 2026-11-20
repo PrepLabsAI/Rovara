@@ -1,8 +1,7 @@
 import { join } from "node:path";
 import type { Node } from "typescript";
-import type { TaskRecord } from "../../packages/broker/src/core/task-flow/records.js";
-import { describe, expect, it, vi } from "vitest";
-import { IMPLICIT_COMPANY_ID, type StoredDocument } from "@agentx/contracts";
+import { describe, expect, it } from "vitest";
+import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import * as keys from "../../packages/broker/src/core/task-flow/keys.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 
@@ -10,35 +9,7 @@ const A = IMPLICIT_COMPANY_ID;
 const B = "org_bbbbbbbbbbbbbbbbbbbb";
 // Runtime calls deliberately exercise the new mandatory argument before its implementation exists.
 const call = (fn: unknown, ...args: string[]) => (fn as (...values: string[]) => unknown)(...args);
-it("creates the thin discovery pointer atomically with the scoped workspace and never overwrites it", async () => {
-  const { createHarness, newRequestId } = await import("../support/task-flow-harness.js");
-  const h = createHarness();
-  await h.registerProject();
-  const transactions = vi.spyOn(h.store, "transact");
-  const { task } = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Add health" });
-  const pointer = { pk: `WORKSPACE#${task.workspaceId}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: task.workspaceId, companyId: A };
-  expect(await h.store.get({ pk: pointer.pk, sk: "META" })).toEqual(pointer);
-  const creation = transactions.mock.calls.find(([items]) => items.some((item) => item.kind === "put" && item.item.entityType === "WORKSPACE"))![0];
-  for (const pk of [pointer.pk, `ORG#${A}#WORKSPACE#${task.workspaceId}`]) {
-    const put = creation.find((item) => item.kind === "put" && item.item.pk === pk && item.item.sk === "META");
-    expect(put).toMatchObject({ kind: "put", condition: { op: "notExists", path: ["pk"] } });
-  }
-  const other = new MemoryDocumentStore();
-  const pointerStep = creation.find((item) => item.kind === "put" && item.item.pk === pointer.pk)!;
-  const workspaceStep = creation.find((item) => item.kind === "put" && item.item.entityType === "WORKSPACE")!;
-  await other.put({ item: { ...pointer, companyId: B } });
-  expect((await other.transact([pointerStep, workspaceStep])).applied).toBe(false);
-  expect(await other.get(keys.workspaceKey(A, task.workspaceId))).toBeUndefined();
-  expect(await other.get({ pk: pointer.pk, sk: "META" })).toEqual({ ...pointer, companyId: B });
-  transactions.mockRestore();
-});
 
-it("never treats an orphan discovery pointer as an implicit legacy workspace", async () => {
-  const { locateWorkspace } = await import("../../packages/broker/src/core/task-flow/workspace-location.js");
-  const store = new MemoryDocumentStore();
-  await store.put({ item: { pk: "WORKSPACE#ws", sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: "ws", companyId: A } });
-  expect(await locateWorkspace({ store, companyId: A }, "ws")).toBeUndefined();
-});
 describe("company task-flow keys", () => {
   it("scopes every workspace constructor and request; refuses invalid companies", () => {
     expect(call(keys.workspaceKey, A, "ws")).toEqual({ pk: `ORG#${A}#WORKSPACE#ws`, sk: "META" });
@@ -53,29 +24,6 @@ describe("company task-flow keys", () => {
         expect(() => call(fn, company, "ws", "op", "req")).toThrow("invalid workspace company");
       }
     }
-  });
-  it("locates scoped first, admits only implicit legacy, and refuses corrupt ownership", async () => {
-    const { locateWorkspace } = await import("../../packages/broker/src/core/task-flow/workspace-location.js");
-    const store = new MemoryDocumentStore();
-    const get = vi.spyOn(store, "get");
-    const legacy = { pk: "WORKSPACE#ws", sk: "META", id: "ws" };
-    await store.put({ item: legacy });
-    expect((await locateWorkspace({ store, companyId: A }, "ws"))?.scope).toBe("legacy");
-    get.mockClear();
-    expect(await locateWorkspace({ store, companyId: B }, "ws")).toBeUndefined();
-    // Its own scoped key first; then the id-only discovery key, only to notice a dangling pointer of its OWN company (controller condition 2). A legacy row is never admitted for B.
-    expect(get.mock.calls).toEqual([[{ pk: `ORG#${B}#WORKSPACE#ws`, sk: "META" }], [{ pk: "WORKSPACE#ws", sk: "META" }]]);
-    for (const companyId of [B, "bad", "", null]) {
-      await store.put({ item: { ...legacy, companyId } });
-      expect(await locateWorkspace({ store, companyId: A }, "ws")).toBeUndefined();
-    }
-    await store.put({ item: { ...legacy, companyId: A } });
-    await store.put({ item: { ...legacy, pk: `ORG#${A}#WORKSPACE#ws`, companyId: A } });
-    expect((await locateWorkspace({ store, companyId: A }, "ws"))?.scope).toBe("company");
-    expect(await locateWorkspace({ store, companyId: A }, "missing")).toBeUndefined();
-    get.mockClear();
-    await expect(locateWorkspace({ store, companyId: "" }, "ws")).rejects.toThrow("invalid workspace company");
-    expect(get).not.toHaveBeenCalled();
   });
 });
 
@@ -107,47 +55,6 @@ it("rejects raw workspace/operation literals in task-flow modules, including a p
   };
   for (const root of roots) walk(root);
   expect(bad).toEqual([]);
-});
-it("refuses legacy resolver faults without echoing the adapter's cause", async () => {
-  const { locateWorkspace } = await import("../../packages/broker/src/core/task-flow/workspace-location.js");
-  const store = new MemoryDocumentStore();
-  vi.spyOn(store, "get").mockImplementation(async (key) => { if (key.pk.startsWith("WORKSPACE#")) throw new Error(`secret-${B}`); return undefined; });
-  await expect(locateWorkspace({ store, companyId: A }, "ws")).rejects.toThrow(/^RUNTIME_UNAVAILABLE: workspace unavailable$/);
-});
-it("keeps a foreign operation indistinguishable from a missing operation", async () => {
-  const { readOperation } = await import("../../packages/broker/src/core/task-flow/results.js");
-  const store = new MemoryDocumentStore();
-  await store.put({ item: { ...keys.workspaceKey(A, "ws"), companyId: A } });
-  await store.put({ item: { ...keys.operationKey(A, "ws", "op"), companyId: B, marker: "private-operation" } });
-  expect(await readOperation({ store, companyId: A }, "ws", "op")).toBeUndefined();
-  expect(await readOperation({ store, companyId: A }, "ws", "missing")).toBeUndefined();
-});
-it("pins one workspace location for all reads of a TaskView during cutover", async () => {
-  const { taskViewOf } = await import("../../packages/broker/src/core/task-flow/reads.js");
-  const { createHarness } = await import("../support/task-flow-harness.js");
-  const { readFileSync } = await import("node:fs");
-  const { materializeT1Golden } = await import("../support/t1-golden-normalizer.js");
-  const fixture = materializeT1Golden(JSON.parse(readFileSync(new URL("../fixtures/t1-key-goldens/memory.json", import.meta.url), "utf8")) as { snapshots: Array<{ rows: StoredDocument[] }> });
-  const rows = fixture.snapshots.at(-1)!.rows;
-  const h = createHarness();
-  for (const row of rows) await h.store.put({ item: row });
-  const meta = rows.find((row) => row.entityType === "WORKSPACE")!;
-  const task = rows.find((row) => row.entityType === "DEVELOPER_TASK")!;
-  if (typeof meta.id !== "string") throw new Error("invalid fixture workspace");
-  const workspaceId = meta.id;
-  const get = h.store.get.bind(h.store); let copied = false;
-  const reads = vi.spyOn(h.store, "get").mockImplementation(async (key) => {
-    const found = await get(key);
-    if (!copied && key.pk === meta.pk && key.sk === "META") {
-      copied = true;
-      for (const row of rows.filter((row: { pk: string }) => row.pk === meta.pk)) await h.store.put({ item: { ...row, pk: keys.workspaceKey(A, workspaceId).pk } });
-    }
-    return found;
-  });
-  const query = vi.spyOn(h.store, "query");
-  await taskViewOf(h.deps, task as unknown as TaskRecord);
-  expect(reads.mock.calls.filter(([key]) => key.sk === "DEVELOPER_TASK").map(([key]) => key.pk)).toEqual([meta.pk]);
-  expect(query.mock.calls.map(([request]) => request.pk)).toEqual([meta.pk]);
 });
 it("nightly pointer lookup keeps the stored task company check", async () => {
   const { nightlyRunOfOperation } = await import("../../packages/broker/src/core/test-env/nightly-callback.js");

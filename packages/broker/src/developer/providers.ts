@@ -14,7 +14,7 @@ import { SLACK_OIDC_ISSUER, SlackTeamIdSchema, SlackUserIdSchema, cleanDisplayNa
 export interface ProviderIdentity { method: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; slackTeam?: { id: string; name?: string }; administrator?: true }
 /** `wrongAccount`: the person signed in fine but is not one AgentX accepts (another Slack workspace,
  * or without the required claim), so signing in as someone else may help. */
-export type ProviderResult = { ok: true; identity: ProviderIdentity } | { ok: false; reason: string; wrongAccount?: true };
+export type ProviderResult = { ok: true; identity: ProviderIdentity } | { ok: false; reason: string; wrongAccount?: true; verifiedIdentity?: ProviderIdentity };
 /** The provider could not be reached; try again. */
 export class ProviderUnavailableError extends Error { override name = "ProviderUnavailableError"; }
 /** An admin must finish setting the provider up. */
@@ -226,14 +226,15 @@ export function oidcSignInProvider(input: {
       const verified = await verifyIdToken(body.id_token, input.jwksFor(doc.jwks_uri), { issuer: doc.issuer, audience: input.clientId, nonce, now: input.now() });
       if (!verified.ok) return verified;
       const payload = verified.payload;
+      if (typeof payload.sub !== "string" || payload.sub === "") return { ok: false, reason: "the identity token has no subject; ask an admin to check the company sign-in app" };
       if (input.requiredClaim !== undefined && input.requiredValues.length > 0) {
         const raw = payload[input.requiredClaim];
         const values = Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === "string") : typeof raw === "string" ? raw.split(/[\s,]+/) : [];
         if (!input.requiredValues.some((value) => values.includes(value))) {
-          return { ok: false, wrongAccount: true, reason: `this AgentX requires the ${input.requiredClaim} claim to include ${input.requiredValues.join(" or ")}` };
+          return { ok: false, wrongAccount: true, reason: `this AgentX requires the ${input.requiredClaim} claim to include ${input.requiredValues.join(" or ")}`,
+            verifiedIdentity: { method: "oidc", issuer, subject: payload.sub, displayName: payload.sub } };
         }
       }
-      if (typeof payload.sub !== "string" || payload.sub === "") return { ok: false, reason: "the identity token has no subject; ask an admin to check the company sign-in app" };
       const email = verifiedEmail(payload);
       const name = [payload.name, payload.preferred_username, email].find((value): value is string => typeof value === "string" && value !== "");
       return {

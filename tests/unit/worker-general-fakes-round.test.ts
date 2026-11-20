@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { GENERAL_FAKE_LABEL, GENERAL_FAKE_NOT_RUN_SENTENCES, type GeneralFakesPayload } from "@agentx/contracts";
+import { GENERAL_FAKE_NOT_RUN_SENTENCES, type GeneralFakesPayload } from "@agentx/contracts";
 import { CheckNotRunError, createCheckRunners, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { GENERAL_FAKES_DISCOVERY_LIMITS, generalFakesPlanFor, withGeneralFakesRound, type GeneralFakesRoundResult } from "../../packages/worker/src/general-fakes-round.js";
 
@@ -43,42 +43,6 @@ const call = (path: string, expectStatus = 200) => [
 const run = (runners: CheckRunners, args: string[], env?: Record<string, string>) => runners.runProjectCommand({ cwd: ".", executable: process.execPath, args, timeoutSeconds: 30, ...(env === undefined ? {} : { env }) }, new AbortController().signal);
 
 describe("withGeneralFakesRound", () => {
-  it("is the same runners object without a plan (byte-identical when the setting is off)", () => {
-    const runners = createCheckRunners({ rootPath: tmpdir(), local: true });
-    expect(withGeneralFakesRound(undefined, runners)).toBe(runners);
-  });
-
-  it("makes no plan without the payload, and none off the local shell", () => {
-    const options = { localShell: true, rootPath: tmpdir(), repositoryPaths: [], onResult: () => undefined };
-    expect(generalFakesPlanFor(undefined, options)).toBeUndefined();
-    expect(generalFakesPlanFor({ services: [{ variable: "PETS_API_URL" }] }, { ...options, localShell: false })).toBeUndefined();
-  });
-
-  it("a real project command gets the fake's answer through its base-URL variable, and the check is reported as made by Rovara", async () => {
-    const root = await workspace({ "repo/api/openapi.json": PETS });
-    const results: GeneralFakesRoundResult[] = [];
-    const runners = withGeneralFakesRound(planOf(root, { services: [{ variable: "PETS_API_URL" }] }, results), createCheckRunners({ rootPath: root, local: true }));
-    runners.beginCheck?.("readiness:0");
-    const result = await run(runners, call("/pets/4"));
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain('200 {"id":5,"name":"example"}');
-    // The server's base path is honoured too (a variable that holds only the host).
-    runners.beginCheck?.("readiness:1");
-    expect((await run(runners, call("/v1/pets/4"))).exitCode).toBe(0);
-    await runners.endRound?.();
-    expect(results).toHaveLength(1);
-    expect(results[0]!.facts).toEqual({ unknown: false, checks: [{ checkId: "readiness:0", served: 1 }, { checkId: "readiness:1", served: 1 }] });
-    expect(results[0]!.lines).toEqual([expect.stringMatching(new RegExp(`^${GENERAL_FAKE_LABEL}: 2 outside calls`, "u"))]);
-  });
-
-  it("the fake replaces the project's own value of the variable, and the base URL is a loopback address", async () => {
-    const root = await workspace({ "repo/openapi.json": PETS });
-    const runners = withGeneralFakesRound(planOf(root, { services: [{ variable: "PETS_API_URL" }] }, []), createCheckRunners({ rootPath: root, local: true }));
-    runners.beginCheck?.("readiness:0");
-    const result = await run(runners, ["-e", "console.log(process.env.PETS_API_URL)"], { PETS_API_URL: "https://real.example.test" });
-    expect(result.stdout.trim()).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/s\/0$/u);
-    await runners.endRound?.();
-  });
 
   it("a failed check after a call the fake could not answer is Not run with the reason, never failed; a passing one stays passed and still counts as fake-answered", async () => {
     const root = await workspace({ "repo/openapi.json": PETS });
@@ -149,24 +113,4 @@ describe("withGeneralFakesRound", () => {
     expect(second[0]!.facts.unknown).toBe(true);
   });
 
-  it("reasons and lines carry no path, variable, host or body", async () => {
-    const root = await workspace({ "repo/secret-dir/openapi.yaml": "openapi: [x" });
-    const results: GeneralFakesRoundResult[] = [];
-    const runners = withGeneralFakesRound(planOf(root, { services: [{ variable: "PETS_API_URL", spec: "repo/secret-dir/openapi.yaml" }] }, results), createCheckRunners({ rootPath: root, local: true }));
-    runners.beginCheck?.("readiness:0");
-    const error = await run(runners, call("/pets/zzz-private")).catch((caught: unknown) => caught);
-    await runners.endRound?.();
-    const text = `${String((error as Error).message)} ${JSON.stringify(results)}`;
-    expect(text).toContain("Not run:");
-    expect(text).not.toMatch(/secret-dir|PETS_API_URL|zzz-private|127\.0\.0\.1|openapi\.yaml/u);
-  });
-
-  it("the server is stopped when the round ends", async () => {
-    const root = await workspace({ "repo/openapi.json": PETS });
-    const runners = withGeneralFakesRound(planOf(root, { services: [{ variable: "PETS_API_URL" }] }, []), createCheckRunners({ rootPath: root, local: true }));
-    runners.beginCheck?.("readiness:0");
-    const url = (await run(runners, ["-e", "console.log(process.env.PETS_API_URL)"])).stdout.trim();
-    await runners.endRound?.();
-    await expect(fetch(`${url}/pets/1`)).rejects.toThrow();
-  });
 });

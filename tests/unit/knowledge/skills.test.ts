@@ -2,7 +2,7 @@
 // rule (32 KB, a gentle note above 8 KB), the lessons it came from are not loaded again, and the live skills go to a plan or build step through the skills path, company and project scoped.
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { LEARNED_CONTEXT_FEATURE, ROVARA_SKILL_LONG_NOTE, ROVARA_SKILL_LONG_NOTE_BYTES, ROVARA_SKILL_TEXT_MAX_BYTES, ROVARA_SKILLS_PAYLOAD_BYTES_MAX, ROVARA_SKILLS_PER_STEP_MAX, ROVARA_SKILLS_FEATURE, companyScoped } from "@agentx/contracts";
+import { LEARNED_CONTEXT_FEATURE, ROVARA_SKILL_LONG_NOTE, ROVARA_SKILL_LONG_NOTE_BYTES, ROVARA_SKILL_TEXT_MAX_BYTES, ROVARA_SKILLS_PAYLOAD_BYTES_MAX, ROVARA_SKILLS_PER_STEP_MAX, ROVARA_SKILLS_FEATURE, companyScoped, when } from "@agentx/contracts";
 import { createAdapterRegistry } from "../../../packages/broker/src/ports/adapter-registry.js";
 import { createLocalOwnerApprovers, createLocalOwnerIdentity, createPriceTableMetering, localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-defaults.js";
 import { createMemoryModelKeyStore } from "../../../packages/broker/src/ports/model-key-stores.js";
@@ -292,6 +292,55 @@ describe("two different people approve a version before it is used", () => {
     expect(await liveSkillsForStep(w.h.store, KEY)).toEqual({ skills: [], left: 0 });
     expect((await listSkills(w.deps, KEY))[0]!.approvers).toEqual(["bob"]);
     expect(await approveSkill(w.deps, KEY, { name: "add-a-queue-handler", version: 1, by: "cy" })).toEqual({ ok: true, approvals: 2, live: true });
+  });
+
+  it("commits the roster fence with a skill approval", async () => {
+    const w = await world();
+    await draftSkillFromLesson(w.deps, KEY, { lessonId: (await proven(w)).id, by: "ann" });
+    const rosterKey = { pk: "AUTHORITY", sk: "ROSTER" };
+    await w.h.store.put({ item: { ...rosterKey, revision: 1 } });
+    w.deps.directory.eligibility = async () => ({ complete: true, membershipVersion: 1, ownerIds: ["ann"], eligibleIds: ["ann", "bob", "cy"], lastEligibleLossAtMs: null, fence: [{ kind: "check", key: rosterKey, condition: when.eq("revision", 1) }] });
+    const transact = w.h.store.transact.bind(w.h.store);
+    w.h.store.transact = async (items) => {
+      if (items.some((item) => item.kind === "check" && item.key.pk === rosterKey.pk)) await w.h.store.put({ item: { ...rosterKey, revision: 2 } });
+      return transact(items);
+    };
+    expect(await approveSkill(w.deps, KEY, { name: "add-a-queue-handler", version: 1, by: "ann" })).toEqual({ ok: false, code: "conflict" });
+    expect((await listSkills(w.deps, KEY))[0]!.approvals).toBe(0);
+  });
+
+  it("does not accept an approval after the refreshed roster removes its actor", async () => {
+    const w = await world();
+    await draftSkillFromLesson(w.deps, KEY, { lessonId: (await proven(w)).id, by: "ann" });
+    let reads = 0;
+    w.deps.directory.eligibility = async () => {
+      reads += 1;
+      return { complete: true, membershipVersion: reads, ownerIds: ["ann"], eligibleIds: reads === 1 ? ["ann", "bob", "cy"] : ["ann", "cy"], lastEligibleLossAtMs: null };
+    };
+    expect(await approveSkill(w.deps, KEY, { name: "add-a-queue-handler", version: 1, by: "bob" })).toEqual({ ok: false, code: "not_eligible" });
+    expect(reads).toBe(2);
+    expect((await listSkills(w.deps, KEY))[0]!.approvals).toBe(0);
+  });
+
+  it("does not replace a live pointer that changed after the approval read", async () => {
+    const w = await world();
+    await draftSkillFromLesson(w.deps, KEY, { lessonId: (await proven(w)).id, by: "ann" });
+    await goLive(w, "add-a-queue-handler", 1);
+    await editSkill(w.deps, KEY, { name: "add-a-queue-handler", by: "bob", expectedVersion: 1, form: { description: "A newer procedure", when: "updating a queue", steps: ["Check the queue", "Update its handler"] } });
+    expect(await approveSkill(w.deps, KEY, { name: "add-a-queue-handler", version: 2, by: "ann" })).toMatchObject({ ok: true, live: false });
+    const actualGet = w.h.store.get.bind(w.h.store);
+    let raced = false;
+    w.h.store.get = async (key) => {
+      const row = await actualGet(key);
+      if (!raced && key.sk === "head#add-a-queue-handler" && row !== undefined) {
+        raced = true;
+        await w.h.store.put({ item: { ...row, activeVersion: 3 } });
+      }
+      return row;
+    };
+    expect(await approveSkill(w.deps, KEY, { name: "add-a-queue-handler", version: 2, by: "cy" })).toEqual({ ok: false, code: "conflict" });
+    w.h.store.get = actualGet;
+    expect((await w.h.store.get({ pk: companyScoped(COMPANY, "SKILL#payments"), sk: "head#add-a-queue-handler" }))!["activeVersion"]).toBe(3);
   });
 
   it("retire wins a race with the second approval: a retired skill is never left in the live set, and the head is checked when a step is sent", async () => {

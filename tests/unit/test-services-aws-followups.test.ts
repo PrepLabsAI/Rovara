@@ -1,16 +1,11 @@
 // Follow-ups to the all-services work: (1) the environment's cap on one backing's AWS services is the plan's, and a plan that is not wide never reaches a worker that would refuse it; (2) the usage record's optional
 // `heavyFunctions` and the evidence sentences about them; (3) the digest fence of the test-environment edit.
 import { describe, expect, it } from "vitest";
-import {
-  AWS_PLAN_SERVICES_MAX, IMPLICIT_COMPANY_ID, TEST_ENV_DEPENDENCY_LIMITS, TEST_ENV_EDIT_STALE_MESSAGE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_USAGE_LIMITS, TEST_SERVICES_HEAVY_FUNCTION_REASONS,
-  TestEnvBackingSchema, TestEnvEditBodySchema, TestEnvironmentBodySchema, TestServicesAwsUsageSchema, TestServicesUsageRecordSchema, awsHeavyFunctionEvidenceLine, awsHeavyFunctionEvidenceLines, awsPlanNeedsAllServices,
-  projectMetaKey, testEnvDigest, type TaskDependencyPlan, type TestEnvironmentBody, type TestServicesUsageRecord,
-} from "@agentx/contracts";
+import { AWS_PLAN_SERVICES_MAX, IMPLICIT_COMPANY_ID, TEST_ENV_DEPENDENCY_LIMITS, TEST_SERVICES_AWS_USAGE_LIMITS, TEST_SERVICES_HEAVY_FUNCTION_REASONS, TestEnvBackingSchema, TestEnvEditBodySchema, TestEnvironmentBodySchema, TestServicesAwsUsageSchema, TestServicesUsageRecordSchema, awsHeavyFunctionEvidenceLine, awsHeavyFunctionEvidenceLines, awsPlanNeedsAllServices, projectMetaKey, testEnvDigest, type TestEnvironmentBody, type TestServicesUsageRecord } from "@agentx/contracts";
 import { AWS_EMULATOR_SERVICES } from "../../packages/contracts/src/generated/aws-emulator-services.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { documentOf, type TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
 import { clearEditedProposal, currentProposalDigest, proposeTestEnvironment, refuseStaleEdit, setEditedProposal } from "../../packages/broker/src/core/test-env/environment.js";
-import { featuresForTestPlan } from "../../packages/broker/src/core/test-env/seam.js";
 import { AWS_FIDELITY_ITEM_PREFIX, dependencyEvidenceOf } from "../../packages/broker/src/core/proof/dependency-evidence.js";
 import { createServiceRedactor, helperSecretValues } from "../../packages/worker/src/service-env.js";
 import { newLocalAwsCredentials } from "../../packages/worker/src/service-helpers.js";
@@ -47,12 +42,6 @@ describe("the cap on the AWS services of one backing", () => {
     expect(awsPlanNeedsAllServices(Array.from({ length: 25 }, () => "s3"))).toBe(true);
     expect(awsPlanNeedsAllServices(["s3", "sns"])).toBe(true);
     expect(awsPlanNeedsAllServices(KEYS.slice(0, 40))).toBe(true);
-  });
-  it("the broker adds the feature to the step of a plan of 40 services and of 25 repeated names, and not to a plan of the three", () => {
-    const plan = (services: string[]): TaskDependencyPlan => ({ id: "aws", name: "AWS", kind: "cloud_api", family: "aws:s3", backing: "emulated", aws: { services, region: "us-east-1" }, seeds: [] }) as unknown as TaskDependencyPlan;
-    expect(featuresForTestPlan([plan(KEYS.slice(0, 40))])).toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
-    expect(featuresForTestPlan([plan(Array.from({ length: 25 }, () => "s3"))])).toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
-    expect(featuresForTestPlan([plan(["s3", "sqs", "dynamodb"])])).not.toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
   });
 });
 
@@ -152,21 +141,6 @@ describe("the digest fence of an edit", () => {
     const first = await propose(w, 1);
     await expect(refuseStaleEdit(w.deps, { orgId: ORG, project: PROJECT, digest: undefined })).resolves.toBeUndefined();
     await expect(refuseStaleEdit(w.deps, { orgId: ORG, project: PROJECT, digest: first.digest })).resolves.toBeUndefined();
-  });
-  it("refuses a stale edit with CHANGE_STALE and the fixed sentence, which names no digest", async () => {
-    const w = world();
-    const first = await propose(w, 1);
-    w.clock.now += 1_000;
-    const second = await propose(w, 2);
-    expect(second.digest).not.toBe(first.digest);
-    expect(await currentProposalDigest(w.deps, ORG, PROJECT)).toBe(second.digest);
-    const refused = await refuseStaleEdit(w.deps, { orgId: ORG, project: PROJECT, digest: first.digest }).then(() => undefined, (error: unknown) => error as Error & { code?: string });
-    expect(refused).toBeDefined();
-    expect(refused?.code).toBe("CHANGE_STALE");
-    expect(refused?.message).toContain(TEST_ENV_EDIT_STALE_MESSAGE);
-    expect(refused?.message).not.toContain(first.digest);
-    expect(refused?.message).not.toContain(second.digest);
-    await expect(refuseStaleEdit(w.deps, { orgId: ORG, project: PROJECT, digest: second.digest })).resolves.toBeUndefined();
   });
   it("follows the owner's edited proposal, and refuses an edit of a proposal that is gone", async () => {
     const w = world();

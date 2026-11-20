@@ -4,13 +4,13 @@
 // (Port lane L7b: the cases that went through Cloud's broker and its state table are not here; they are the task flow's (lane L6a).)
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { type VerificationReport } from "../../packages/contracts/src/index.js";
+import { RiskAssessmentSchema, type VerificationReport } from "../../packages/contracts/src/index.js";
 import { workflowFindingFingerprint } from "../../packages/contracts/src/task-workflow.js";
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
 import { RISK_SENSITIVE_PATH_PATTERNS, assessRisk, isSensitivePath, type RiskInput } from "../../packages/broker/src/core/proof/risk.js";
 import { parseChangedFiles } from "../../packages/broker/src/core/proof/changed-files.js";
 import { recomputeRisk, withLinearCloseLine } from "../../packages/broker/src/core/proof/pull-request-body.js";
-import { pullRequestTitle, workflowPullRequestBody, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
+import { pullRequestTitle, workflowPullRequestBody, workflowPullRequestCheckVerdict, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
 import { rewriteAttributionBody } from "../../packages/contracts/src/attribution.js";
 import { feedbackFixesSection, withFeedbackFixes, withStatusLines } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
 
@@ -21,6 +21,7 @@ const digest = createCandidateManifest([{ repositoryId: "payments", commitSha: "
 const candidate = (letter: string) => createCandidateManifest([{ repositoryId: "payments", commitSha: letter.repeat(40), treeSha: letter.repeat(40), baseCommitSha: "e".repeat(40) }]);
 const check = (id: string, label: string) => ({ id, label, command: { cwd: "repo/payments", executable: "npm", args: ["test"], timeoutSeconds: 30 } });
 
+
 const cleanReport: VerificationReport = { reviewOnly: false, passed: [{ label: "Unit tests" }], failed: [], notChecked: [], testsAdded: [] };
 const file = (path: string, added = 3, removed = 1) => ({ repository: "payments", path, added, removed });
 function riskInput(overrides: Partial<RiskInput> = {}): RiskInput {
@@ -28,6 +29,27 @@ function riskInput(overrides: Partial<RiskInput> = {}): RiskInput {
 }
 
 describe("assessRisk", () => {
+  it("a small change with nothing else to say is low, with its one reason", () => {
+    const risk = assessRisk(riskInput());
+    expect(risk.level).toBe("low");
+    expect(risk.reasons).toHaveLength(1);
+    expect(risk.candidateDigest).toBe(digest);
+    expect(RiskAssessmentSchema.safeParse(risk).success).toBe(true);
+  });
+
+  it("db/migrations/001.sql is high", () => {
+    const risk = assessRisk(riskInput({ changedFiles: [file("db/migrations/001.sql")] }));
+    expect(risk.level).toBe("high");
+    expect(risk.reasons.join("\n")).toContain("db/migrations/001.sql");
+  });
+
+  it("matches path segments, not substrings: src/author.ts and src/diamond.ts are not high", () => {
+    for (const path of ["src/author.ts", "src/diamond.ts", "src/authored/list.ts", "src/payments-ui.ts", "docs/infrastructure.md", "src/secretsanta.ts", "src/cdk8s.ts",
+      // A directory that only ends like a sensitive one is not one either.
+      "src/xoauth/x.ts", "src/reauth/x.ts", "lib/preauthz/x.ts", "lib/subiam/x.ts", "app/nonmigrations/x.ts", "app/myinfra/x.ts"]) {
+      expect(assessRisk(riskInput({ changedFiles: [file(path)] })).level, path).toBe("low");
+    }
+  });
 
   it("every sensitive directory, file pattern and the workflows folder is high, in any folder and in any case", () => {
     for (const path of [
@@ -44,11 +66,86 @@ describe("assessRisk", () => {
     expect(RISK_SENSITIVE_PATH_PATTERNS.length).toBeGreaterThan(0);
   });
 
+  it("450 lines is medium, 400 is not, and a count covers both added and removed lines", () => {
+    expect(assessRisk(riskInput({ changedFiles: [file("src/a.ts", 450, 0)] })).level).toBe("medium");
+    expect(assessRisk(riskInput({ changedFiles: [file("src/a.ts", 400, 0)] })).level).toBe("low");
+    expect(assessRisk(riskInput({ changedFiles: [file("src/a.ts", 401, 0)] })).level).toBe("medium");
+    expect(assessRisk(riskInput({ changedFiles: [file("src/a.ts", 200, 0), file("src/b.ts", 100, 101)] })).level).toBe("medium");
+    expect(assessRisk(riskInput({ changedFiles: [file("src/a.ts", 200, 0), file("src/b.ts", 100, 100)] })).level).toBe("low");
+  });
+
+  it("a lock file or a manifest is medium", () => {
+    for (const path of ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "web/package.json", "Cargo.toml", "Cargo.lock", "go.mod", "go.sum", "requirements.txt", "poetry.lock", "pyproject.toml", "Gemfile.lock", "pom.xml", "build.gradle"]) {
+      expect(assessRisk(riskInput({ changedFiles: [file(path)] })).level, path).toBe("medium");
+    }
+    expect(assessRisk(riskInput({ changedFiles: [file("docs/package.json.md")] })).level).toBe("low");
+  });
+
+  it("a review-only change, a failed check and a check that couldn't run are each medium", () => {
+    expect(assessRisk(riskInput({ report: { ...cleanReport, reviewOnly: true, passed: [], notChecked: [{ label: "Automated checks", reason: "Docs only" }] } })).level).toBe("medium");
+    expect(assessRisk(riskInput({ report: { ...cleanReport, failed: [{ label: "Lint", summary: "It failed on the latest code." }] } })).level).toBe("medium");
+    expect(assessRisk(riskInput({ report: { ...cleanReport, notChecked: [{ label: "Types", reason: "It never started." }] } })).level).toBe("medium");
+  });
+
   it("an accepted code finding is medium and an accepted security finding is high", () => {
     expect(assessRisk(riskInput({ acceptedFindings: [{ role: "CRITIC" }] })).level).toBe("medium");
     expect(assessRisk(riskInput({ acceptedFindings: [{ role: "SECURITY" }] })).level).toBe("high");
     // A security finding the review introduced counts even when the accepted list no longer holds it.
     expect(assessRisk(riskInput({ securityFindings: 1 })).level).toBe("high");
+  });
+
+  it("the reviewer's high raises low, the reviewer's medium raises low, and the reviewer's low lowers nothing", () => {
+    expect(assessRisk(riskInput({ reviewerRisk: "high" })).level).toBe("high");
+    expect(assessRisk(riskInput({ reviewerRisk: "medium" })).level).toBe("medium");
+    expect(assessRisk(riskInput({ reviewerRisk: "low" })).level).toBe("low");
+    expect(assessRisk(riskInput({ changedFiles: [file("infra/main.ts")], reviewerRisk: "low" })).level).toBe("high");
+    expect(assessRisk(riskInput({ changedFiles: [file("package.json")], reviewerRisk: "low" })).level).toBe("medium");
+  });
+
+  it("the highest matching rule wins, and every match adds its reason", () => {
+    const risk = assessRisk(riskInput({
+      changedFiles: [file("infra/main.ts", 300, 200), file("package.json")], report: { ...cleanReport, failed: [{ label: "Lint", summary: "x" }] },
+      acceptedFindings: [{ role: "SECURITY" }, { role: "CRITIC" }], reviewerRisk: "high",
+    }));
+    expect(risk.level).toBe("high");
+    const text = risk.reasons.join("\n");
+    expect(text).toContain("infra/main.ts");
+    expect(text).toMatch(/security/i);
+    expect(text).toMatch(/code review/i);
+    expect(text).toMatch(/lines/i);
+    expect(text).toMatch(/package\.json/);
+    expect(risk.reasons.length).toBeLessThanOrEqual(8);
+    expect(risk.reasons.every((reason) => reason.length >= 1 && reason.length <= 200)).toBe(true);
+    expect(RiskAssessmentSchema.safeParse(risk).success).toBe(true);
+  });
+
+  it("every rule at once still gives a valid assessment of at most 8 reasons, with the high ones first", () => {
+    const risk = assessRisk(riskInput({
+      changedFiles: [file("infra/main.ts", 500, 0), file("package.json")], changedFilesComplete: false, report: { ...cleanReport, reviewOnly: true, failed: [{ label: "Lint", summary: "x" }], notChecked: [{ label: "Types", reason: "y" }] },
+      acceptedFindings: [{ role: "SECURITY" }, { role: "CRITIC" }], securityFindings: 2, reviewerRisk: "high",
+    }));
+    expect(risk.level).toBe("high");
+    expect(risk.reasons).toHaveLength(8);
+    expect(risk.reasons.slice(0, 3).join("\n")).toMatch(/sensitive paths[\s\S]*security[\s\S]*code review/i);
+    expect(RiskAssessmentSchema.safeParse(risk).success).toBe(true);
+  });
+
+  it("a change whose files couldn't all be read is at least medium, never low", () => {
+    expect(assessRisk(riskInput({ changedFiles: [], changedFilesComplete: false })).level).toBe("medium");
+    expect(assessRisk(riskInput({ changedFiles: [file("src/a.ts")], changedFilesComplete: false })).level).toBe("medium");
+    expect(assessRisk(riskInput({ changedFiles: [file("infra/x.ts")], changedFilesComplete: false })).level).toBe("high");
+  });
+
+  it("file names are untrusted: a reason has no mention, no link, no line break and no secret, and stays in its limit", () => {
+    const hostile = `infra/@octocat/https://evil.example/ghp_abcdefghijklmnopqrstuvwxyz0123456789\n# injected ${"x".repeat(400)}.tf`;
+    const risk = assessRisk(riskInput({ changedFiles: [file(hostile), file("auth/@everyone.ts"), file("iam/[click](http://e.example).ts")] }));
+    expect(risk.level).toBe("high");
+    for (const reason of risk.reasons) {
+      expect(reason).not.toMatch(/\n/);
+      expect(reason).not.toContain("ghp_");
+      expect(reason.length).toBeLessThanOrEqual(200);
+    }
+    expect(RiskAssessmentSchema.safeParse(risk).success).toBe(true);
   });
 });
 
@@ -85,6 +182,21 @@ describe("parseChangedFiles", () => {
     expect(parseChangedFiles(text).files.some((file) => isSensitivePath(file.path))).toBe(true);
   });
 
+  it("counts a pure addition and a pure deletion as counted (0 on the other side), not as unknown", () => {
+    const text = section([], ["diff --git a/src/added.ts b/src/added.ts", "@@ -0,0 +1,2 @@", "+a", "+b", "diff --git a/src/removed.ts b/src/removed.ts", "@@ -1,2 +0,0 @@", "-a", "-b"]);
+    expect(parseChangedFiles(text).files).toEqual([
+      { repository: "payments", path: "src/added.ts", added: 2, removed: 0 },
+      { repository: "payments", path: "src/removed.ts", added: 0, removed: 2 },
+    ]);
+  });
+
+  it("records a rename with both names, and counts its changed lines", () => {
+    const text = section([], ["diff --git a/auth/old.ts b/lib/old.ts", "similarity index 90%", "rename from auth/old.ts", "rename to lib/old.ts", "--- a/auth/old.ts", "+++ b/lib/old.ts", "@@ -1 +1 @@", "-a", "+b"]);
+    expect(parseChangedFiles(text).files).toEqual([{ repository: "payments", path: "lib/old.ts", renamedFrom: "auth/old.ts", added: 1, removed: 1 }]);
+    const pure = section([], ["diff --git a/auth/old.ts b/lib/old.ts", "similarity index 100%", "rename from auth/old.ts", "rename to lib/old.ts"]);
+    expect(parseChangedFiles(pure).files).toEqual([{ repository: "payments", path: "lib/old.ts", renamedFrom: "auth/old.ts" }]);
+  });
+
   it("is incomplete when the diff was cut, its base was gone, or it names as many files as it keeps", () => {
     expect(parseChangedFiles(`${section([], hunk("a.ts"))}\n\n[workspace diff truncated to fit the AgentX artifact limit]\n`).complete).toBe(false);
     expect(parseChangedFiles(`## payments\n\n[the commit this workspace was prepared at is not in this repository: x]\n### status\n### diff\n`).complete).toBe(false);
@@ -98,6 +210,41 @@ describe("parseChangedFiles", () => {
 describe("a changed public API or response shape", () => {
   const section = (diff: string[]) => ["## inventory", "", "### status", "### diff", ...diff].join("\n");
   const change = (path: string, minus: string[], plus: string[]): string[] => [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, "@@ -1 +1 @@", ...minus.map((line) => `-${line}`), ...plus.map((line) => `+${line}`)];
+  const flagged = (path: string, minus: string[], plus: string[]) => parseChangedFiles(section(change(path, minus, plus))).files[0]?.apiShapeChanged === true;
+
+  it("is read from a route declaration or response model a change adds or removes, in the common frameworks", () => {
+    expect(flagged("inventory/app.py", ['    @app.get("/items", response_model=list[ItemView])'], ['    @app.get("/items", response_model=ItemPage)'])).toBe(true);
+    expect(flagged("src/routes/orders.ts", [], ["router.post('/orders', createOrder);"])).toBe(true);
+    expect(flagged("src/server.ts", ["app.get('/health', (req, res) => res.json({ ok: true }));"], [])).toBe(true);
+    expect(flagged("src/orders.controller.ts", [], ["  @Get(':id')"])).toBe(true);
+    expect(flagged("src/main/java/OrderController.java", [], ['  @GetMapping("/orders")'])).toBe(true);
+    expect(flagged("cmd/api/main.go", [], ['  r.GET("/orders", list)'])).toBe(true);
+  });
+
+  it("is read from a schema, serializer, OpenAPI or protobuf file that changed", () => {
+    for (const path of ["inventory/schemas.py", "src/schemas/item.ts", "api/serializers.py", "openapi.yaml", "docs/swagger.json", "proto/orders.proto", "api/schema.graphql", "src/dto/order.dto.ts"]) {
+      expect(flagged(path, ["old"], ["new"]), path).toBe(true);
+    }
+  });
+
+  it("is not read from a handler's body alone, an ordinary module, a test that declares a route, or a file that only looks like a schema", () => {
+    expect(flagged("inventory/catalog.py", ["    return session.scalars(select(Item)).all()"], ["    return session.scalars(select(Item).limit(5)).all()"])).toBe(false);
+    expect(flagged("src/retry.ts", ["const a = 1;"], ["const a = 2;"])).toBe(false);
+    expect(flagged("tests/test_api.py", [], ['    @app.get("/items")'])).toBe(false);
+    expect(flagged("src/schemas.test.ts", ["a"], ["b"])).toBe(false);
+    expect(flagged("src/reschedule.ts", ["a"], ["b"])).toBe(false);
+  });
+
+  it("makes the risk at least medium and says existing callers may see a different response, naming the files", () => {
+    const risk = assessRisk(riskInput({ changedFiles: [{ ...file("inventory/app.py"), apiShapeChanged: true }, { ...file("inventory/schemas.py"), apiShapeChanged: true }, file("inventory/catalog.py")] }));
+    expect(risk.level).toBe("medium");
+    expect(risk.reasons.join("\n")).toMatch(/public API route or response shape/);
+    expect(risk.reasons.join("\n")).toContain("inventory/app.py");
+    expect(risk.reasons.join("\n")).toMatch(/existing callers/);
+    // It raises nothing above medium by itself, and a high reason still leads.
+    expect(assessRisk(riskInput({ changedFiles: [{ ...file("src/payments/charge.ts"), apiShapeChanged: true }] })).level).toBe("high");
+    expect(assessRisk(riskInput({ changedFiles: [file("inventory/catalog.py")] })).level).toBe("low");
+  });
 
   it("shows in the description's Risk section for the diff of the blind test's pull request", () => {
     const diff = section([
@@ -135,9 +282,28 @@ describe("a file whose lines were not counted", () => {
     expect(body).toContain("**Changed** 2 files, at least +3 -1.");
     expect(body).toContain("Medium risk");
   });
+
+  it("a new test file that was not counted still counts as a test added", () => {
+    const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ changedFiles: { files: [entry("tests/new.test.ts")], complete: true } }));
+    expect(body).toContain("Tests added: tests/new.test.ts");
+  });
+});
+
+describe("a renamed file", () => {
+  it("is high when its old name or its new name is a sensitive path, and the reason names the sensitive one", () => {
+    const moved = { repository: "payments", path: "lib/old.ts", renamedFrom: "auth/old.ts", added: 1, removed: 1 };
+    const risk = assessRisk(riskInput({ changedFiles: [moved] }));
+    expect(risk.level).toBe("high");
+    expect(risk.reasons.join("\n")).toContain("auth/old.ts");
+    expect(assessRisk(riskInput({ changedFiles: [{ ...moved, path: "infra/old.ts", renamedFrom: "lib/old.ts" }] })).level).toBe("high");
+    expect(assessRisk(riskInput({ changedFiles: [{ ...moved, renamedFrom: "lib/older.ts" }] })).level).toBe("low");
+    expect(assessRisk(riskInput({ changedFiles: [{ ...moved, path: "lib/package.json", renamedFrom: "lib/x.json" }] })).level).toBe("medium");
+    expect(assessRisk(riskInput({ changedFiles: [{ ...moved, path: "lib/x.json", renamedFrom: "lib/package.json" }] })).level).toBe("medium");
+  });
 });
 
 // ---- the description
+
 
 function workflowWith(extra: Record<string, unknown> = {}, definitionVersion: "1.0.0" | "1.1.0" = "1.1.0"): WorkflowSnapshot {
   const code = candidate("1");
@@ -199,9 +365,49 @@ describe("the version 2 pull request description", () => {
     expect(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context())).not.toContain("Requested by");
   });
 
+  it("keeps the attribution when the body is cut to its size: the lists shrink, the attribution stays (I3)", () => {
+    const files = Array.from({ length: 4_000 }, (_, index) => file(`src/very/long/path/number/${String(index)}/module-with-a-long-name.ts`, 5, 1));
+    const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ changedFiles: { files, complete: true }, attribution: { requester: { state: "named", name: "Maya Chen", ref: "0123456789abcdef" } } }));
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(30_000);
+    expect(body).toContain("Requested by: Maya Chen");
+  });
+
+  it("has its sections in order, the plan summary first, the session link and the closing line last, and never says AgentX", () => {
+    const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context());
+    const at = (text: string) => body.indexOf(text);
+    const order = ["Add the retry flag.", START, "## Checks passed", "**Changed**", "**Proven**", "**Tested against**", "**Reviews**", "**Risk** Low.", "**Needs you**", "<summary>Checks: ", "<summary>Test setup: ", "<summary>Reviews: ", END, "<summary>Plan and record</summary>", `Rovara session: ${SESSION}`, CLOSING];
+    for (const text of order) expect(at(text), text).toBeGreaterThanOrEqual(0);
+    for (let index = 1; index < order.length; index += 1) expect(at(order[index]!), order[index]).toBeGreaterThan(at(order[index - 1]!));
+    expect(body.trimEnd().endsWith(CLOSING)).toBe(true);
+    expect(body).not.toMatch(/agentx/i);
+    expect(body).not.toContain("Opened as a draft");
+    expect(body.split(START)).toHaveLength(2);
+    expect(body.split(END)).toHaveLength(2);
+  });
+
+  it("Changed says the counts (no list of files: GitHub's Files changed tab is that), and the Checks drawer lists what passed and the tests added", () => {
+    const report = workflowWith();
+    const body = workflowPullRequestBody(task, report, planOf, SESSION, context());
+    expect(body).toContain("**Changed** 2 files, +40 -2. 1 test added.");
+    expect(body).not.toContain("- src/retry.ts");
+    const tests = drawer(body, "Checks: ");
+    expect(tests).toContain("Unit tests");
+    expect(tests).toContain("- Tests added: src/retry.test.ts");
+    expect(drawer(body, "Reviews: ")).toContain("code review passed; security review passed");
+  });
+
+  it("says when the changed files couldn't be listed, and doesn't pretend that no test was added", () => {
+    const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, {});
+    expect(aboveFold(body)).toContain("**Changed** The changed files have not been read yet.");
+    expect(aboveFold(body)).toContain("**The changed files have not been read yet.**");
+    expect(body).not.toContain("Tests added: none");
+    // The risk is not judged without the files: it counts as high, and says so, never "Low" and never a false alarm of its own.
+    expect(aboveFold(body)).toContain("Risk not judged yet (treated as high)");
+  });
+
   it("names a failed check, a check that couldn't run and a review-only change in Tests", () => {
     const failing = workflowWith({
-      stage: "VERIFY", state: "BLOCKED", blockReason: "candidate checks failed or have unknown results", reviews: undefined,
+      stage: "VERIFY", state: "BLOCKED", blockReason: "candidate checks failed or have unknown results",
       checkPolicy: { required: [check("unit", "Unit tests"), check("lint", "Lint"), check("types", "Types")], optional: [], selectedOptionalIds: [], proposed: [] },
       verification: { candidateDigest: candidate("1").digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now,
         results: [{ checkId: "unit", status: "PASS" }, { checkId: "lint", status: "FAILED" }, { checkId: "types", status: "FAILED", programNotFound: true }] },
@@ -217,7 +423,7 @@ describe("the version 2 pull request description", () => {
     // The failed row is the first row of the table.
     expect(tests.indexOf("| Lint ")).toBeLessThan(tests.indexOf("| Unit tests "));
     const reviewOnly = workflowWith({
-      stage: "REVIEW", state: "WAITING", reviews: undefined,
+      stage: "REVIEW", state: "WAITING",
       checkPolicy: { required: [], optional: [], selectedOptionalIds: [], proposed: [], noneReason: "Documentation only" },
       verification: { candidateDigest: candidate("1").digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results: [], reviewOnly: true },
     });
@@ -225,6 +431,86 @@ describe("the version 2 pull request description", () => {
     expect(aboveFold(body)).toContain("Not verified by automated checks (review only)");
     expect(aboveFold(body)).toContain("Why: Documentation only");
     expect(body.split("\n").find((line) => line.startsWith("## "))).not.toContain("Verified ·");
+  });
+
+  it("says it checked against every check on the branch only when the base has no required checks", () => {
+    const line = (base: string) => `Checked against every check on this branch, because ${base} has no required checks.`;
+    expect(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ ciBasis: "all_checks", baseBranch: "main" }))).toContain(line("main"));
+    expect(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ ciBasis: "all_checks" }))).toContain(line("the base branch"));
+    expect(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ ciBasis: "required", baseBranch: "main" }))).not.toContain("Checked against every check");
+    expect(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context())).not.toContain("Checked against every check");
+    // The line sits in the Checks drawer.
+    const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ ciBasis: "all_checks", baseBranch: "main" }));
+    expect(drawer(body, "Checks: ")).toContain(line("main"));
+    // A branch name is untrusted text.
+    const odd = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ ciBasis: "all_checks", baseBranch: "@everyone/ghp_abcdefghijklmnopqrstuvwxyz0123456789" }));
+    expect(odd).not.toContain("@everyone");
+    expect(odd).not.toContain("ghp_");
+  });
+
+  it("shows the risk level with its reasons, from the files and the code reviewer's own level", () => {
+    const sensitive = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ changedFiles: { files: [file("db/migrations/001.sql")], complete: true } }));
+    expect(sensitive).toContain("High risk");
+    expect(aboveFold(sensitive)).toContain("db/migrations/001.sql");
+    expect(aboveFold(sensitive)).toContain("Merging needs a fresh sign-in (high risk)");
+    const reviewed = workflowWith({ reviews: workflowWith().reviews!.map((review) => review.role === "CRITIC" ? { ...review, risk: "high" } : review) });
+    const body = workflowPullRequestBody(task, reviewed, planOf, SESSION, context());
+    expect(body).toContain("High risk");
+    expect(aboveFold(body)).toMatch(/code review/i);
+    // A review of other code does not affect risk, but cannot clear the missing current role.
+    const stale = workflowWith({ stage: "REVIEW", state: "WAITING", reviews: workflowWith().reviews!.map((review) => review.role === "CRITIC" ? { ...review, risk: "high", candidateDigest: candidate("2").digest } : review) });
+    expect(recomputeRisk(stale, context().changedFiles, {}).risk?.level).toBe("low");
+    expect(workflowPullRequestBody(task, stale, planOf, SESSION, context())).toContain("The required reviews did not finish.");
+  });
+
+  it("an accepted finding raises the risk and is listed under Reviews", () => {
+    const finding = { text: "Retries can double-charge a card", origin: "INTRODUCED", severity: "HIGH", file: "src/retry.ts", line: 4 };
+    const code = candidate("1");
+    const accepted = workflowWith({
+      reviews: [
+        { operationId: randomUUID(), candidateDigest: code.digest, role: "CRITIC", provider: "t", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now },
+        { operationId: randomUUID(), candidateDigest: code.digest, role: "SECURITY", provider: "t", version: "1", status: "FINDINGS", findings: [finding], readOnly: true, recordedAt: now },
+      ],
+      acceptedFindings: [{ candidateDigest: code.digest, role: "SECURITY", fingerprint: workflowFindingFingerprint("SECURITY", finding), text: finding.text, reason: "Handled by the payment provider", actorId: ownerId, at: now }],
+    });
+    const body = workflowPullRequestBody(task, accepted, planOf, SESSION, context());
+    expect(body).toContain("High risk");
+    // The owner's acceptance is above the fold (a thing to check) and in full in the Reviews drawer.
+    expect(aboveFold(body)).toContain("**The owner accepted a review finding.**");
+    expect(aboveFold(body)).toContain("Retries can double-charge a card");
+    const reviews = drawer(body, "Reviews: ");
+    expect(reviews).toContain("Owner accepted 1 review finding");
+    expect(reviews).toContain("Retries can double-charge a card");
+  });
+
+  it("makes every model-written line inert: no mention, link, image, cross-reference, HTML or comment, and no secret", () => {
+    const hostile = [
+      "# Plan", "",
+      "1. Ping @octocat and @org/team about https://evil.example/x and www.evil.example",
+      "2. ![pixel](https://evil.example/p.png) [click me](javascript:alert(1)) <https://evil.example/auto>",
+      "3. Fix #123 and org/repo#456 with <script>alert(1)</script> token ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+      "4. <!-- an unclosed comment that would hide the rest",
+      "5. <!-- /rovara:checks-and-reviews --> and <!-- rovara:checks-and-reviews -->",
+    ].join("\n");
+    const body = workflowPullRequestBody(task, workflowWith({
+      checkPolicy: { required: [check("unit", "Unit @octocat <b>t</b> https://e.x/ghp_abcdefghijklmnopqrstuvwxyz0123456789")], optional: [], selectedOptionalIds: [], proposed: [] },
+    }), hostile, SESSION, context({ changedFiles: { files: [file("src/@everyone.ts"), file("src/[x](http://evil.example).ts"), file("src/#12.ts")], complete: true } }));
+    expect(body).not.toMatch(/@(?!‍)/u);
+    expect(body).not.toContain("ghp_");
+    expect(body).not.toMatch(/https?:\/\/(?!‍)[^\s]*evil/);
+    expect(body).not.toMatch(/\]\(/);
+    expect(body).not.toContain("<script");
+    expect(body).not.toContain("<b>");
+    expect(body).not.toMatch(/#(?!‍)\d/u);
+    expect(body).not.toContain("<!-- an unclosed");
+    expect(body).not.toMatch(/<!--(?! \/?rovara:checks-and-reviews -->)/);
+    // The markers appear once each, so the block stays regenerable.
+    expect(body.split(START)).toHaveLength(2);
+    expect(body.split(END)).toHaveLength(2);
+    // The only tags are Rovara's own markers and its drawers' fixed `<details>` and `<summary>` (the summaries hold fixed words and counts only).
+    expect(body).not.toMatch(/<(?!!-- \/?rovara:checks-and-reviews -->|\/?details>|\/?summary>)/);
+    expect(body.match(/<summary>/gu)).toHaveLength(body.match(/<\/summary>/gu)!.length);
+    expect(body.match(/<details>/gu)).toHaveLength(body.match(/<\/details>/gu)!.length);
   });
 
   it("shows the plan's words as a quotation under their own heading, so they can't pose as one of Rovara's sections", () => {
@@ -250,6 +536,12 @@ describe("the version 2 pull request description", () => {
     expect(body).toContain("&amp;#x40;octocat");
     expect(body).toContain("&amp;amp; more");
     expect(body).not.toMatch(/GH-\d/i);
+  });
+
+  it("falls back to the task's title, made inert, when there is no plan", () => {
+    const body = workflowPullRequestBody({ title: "Ping @octocat about <https://evil.example|this>" }, workflowWith(), undefined, SESSION, context());
+    expect(body.split("\n")[0]).not.toMatch(/@(?!‍)/u);
+    expect(body.split("\n")[0]).toContain("Ping");
   });
 
   it("stays under the byte cap whatever it is given, and keeps its markers, risk and closing line", () => {
@@ -278,6 +570,29 @@ describe("the version 2 pull request description", () => {
     // A body that big can still be regenerated in place.
     expect(withStatusLines(body, ["- a new line"])).toBeDefined();
   });
+
+  it("a pushed fix regenerates only the marked block: the person's words around it stay, and the risk is recomputed", () => {
+    const first = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context());
+    expect(first).toContain("Low risk");
+    const edited = `Heads up from Priya: please look at the retry cap first.\n\n${first}\n\nPS: merged after the standup.`;
+    // A CI fix then touched infra/: another candidate, with its own diff.
+    const fixed = workflowWith({ candidate: candidate("2"), reviews: workflowWith().reviews!.map((review) => ({ ...review, candidateDigest: candidate("2").digest })),
+      verification: { candidateDigest: candidate("2").digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results: [{ checkId: "unit", status: "PASS" }] } });
+    const lines = workflowPullRequestStatusLines(fixed, context({ changedFiles: { files: [file("src/retry.ts"), file("infra/queue.ts")], complete: true } }));
+    const next = withStatusLines(edited, lines);
+    expect(next).toBeDefined();
+    expect(next).toContain("Heads up from Priya: please look at the retry cap first.");
+    expect(next).toContain("PS: merged after the standup.");
+    expect(next).toContain("High risk");
+    expect(next).not.toContain("Low risk");
+    expect(next).toContain("infra/queue.ts");
+    expect(next).toContain(`Rovara session: ${SESSION}`);
+    expect(next).toContain(CLOSING);
+    expect(next).toContain("Add the retry flag.");
+    // Nothing else moved: putting the first lines back gives the first block again.
+    const back = withStatusLines(next!, workflowPullRequestStatusLines(workflowWith(), context()));
+    expect(back).toBe(edited);
+  });
 });
 
 // Blind test 02 (staging 0.4.13): the plan said "Four files change" and the pull request changed five. The count of files comes from the diff; a model's count that differs is corrected in place and
@@ -290,6 +605,14 @@ describe("the plan summary's file count", () => {
     // The plan's lines are in the closing "Plan and record" drawer (the one-line quote above the block is its first line).
     return drawer(body, "Plan and record");
   };
+
+  it("is corrected to the diff's count, saying what the plan had said", () => {
+    const summary = summaryOf("# Plan\n\nGET /items takes limit and offset.\nFour files change; no schema migration is needed.\n");
+    expect(summary).toContain("5 files change (the plan said four); no schema migration is needed.");
+    expect(summary).not.toContain("Four files change");
+    const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, { changedFiles: fiveFiles });
+    expect(body).toContain("**Changed** 5 files, +15 -5.");
+  });
 
   it("is corrected in the other common phrasing too, and for digits", () => {
     expect(summaryOf("# Plan\n\nThe change touches 3 files and adds a test.\n")).toContain("touches 5 files (the plan said 3) and adds a test.");
@@ -308,6 +631,21 @@ describe("the plan summary's file count", () => {
 
 describe("the Tests section names the commit that was tested", () => {
   const testsOf = (body: string) => drawer(body, "Checks: ");
+  const pushed = (letter: string, candidateDigest: string) => ({ repositoryId: "payments", number: 7, url: "https://github.com/example/payments/pull/7", headSha: letter.repeat(40), candidateDigest, required: true, state: "OPEN" });
+
+  it("says the short head commit (8 characters) of the checked code", () => {
+    const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context());
+    expect(testsOf(body)).toContain("- Tested on head commit 11111111\n");
+    expect(testsOf(body)).not.toContain("1".repeat(9));
+  });
+
+  it("says where the pushed head differs from the commit the checks ran on, and the pull request head when it holds the same code", () => {
+    const code = candidate("1");
+    expect(testsOf(workflowPullRequestBody(task, workflowWith({ pullRequests: [pushed("2", code.digest)] }), planOf, SESSION, context()))).toContain("- Tested on head commit 11111111 (pushed as 22222222)");
+    // A pull request head that holds older code says nothing: it was not the code that was tested.
+    expect(testsOf(workflowPullRequestBody(task, workflowWith({ pullRequests: [pushed("2", candidate("3").digest)] }), planOf, SESSION, context()))).not.toContain("pushed as");
+    expect(testsOf(workflowPullRequestBody(task, workflowWith({ pullRequests: [pushed("1", code.digest)] }), planOf, SESSION, context()))).toContain("- Tested on head commit 11111111\n");
+  });
 
   it("names each repository when the task changed more than one", () => {
     const two = createCandidateManifest([
@@ -318,9 +656,25 @@ describe("the Tests section names the commit that was tested", () => {
       reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: randomUUID(), candidateDigest: two.digest, role, provider: "test", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now })) });
     expect(testsOf(workflowPullRequestBody(task, workflow, planOf, SESSION, context()))).toContain("- Tested on head commits: payments aaaaaaaa, web bbbbbbbb");
   });
+
+  it("is in the regenerated block too, so a fix on the pull request names the new commit", () => {
+    const lines = workflowPullRequestStatusLines(workflowWith(), context());
+    expect(lines).toContain("- Tested on head commit 11111111");
+  });
+
+  it("is not in a version 1 description", () => {
+    expect(workflowPullRequestBody(task, workflowWith({}, "1.0.0"), planOf, SESSION)).not.toContain("Tested on head commit");
+  });
 });
 
 describe("which findings, reviews and recorded risk count", () => {
+  const securityFinding = { text: "Retries can double-charge a card", origin: "INTRODUCED", severity: "HIGH", file: "src/retry.ts", line: 4 };
+  const acceptedFor = (letter: string) => ({ candidateDigest: candidate(letter).digest, role: "SECURITY", fingerprint: workflowFindingFingerprint("SECURITY", securityFinding), text: securityFinding.text, reason: "ok", actorId: ownerId, at: now });
+
+  it("only a finding accepted for this very code counts", () => {
+    expect(recomputeRisk(workflowWith({ acceptedFindings: [acceptedFor("2")] }), context().changedFiles, {}).risk?.level).toBe("low");
+    expect(recomputeRisk(workflowWith({ acceptedFindings: [acceptedFor("1")] }), context().changedFiles, {}).risk?.level).toBe("high");
+  });
 
   it("a risk recorded for this code stands when the files can't be read now, and one recorded for other code does not", () => {
     const recorded = (letter: string) => ({ level: "high" as const, reasons: ["Changes sensitive paths: infra/main.ts."], candidateDigest: candidate(letter).digest });
@@ -329,9 +683,27 @@ describe("which findings, reviews and recorded risk count", () => {
     expect(stale).toContain("Rovara couldn't list every changed file.");
     expect(stale).not.toContain("infra/main.ts");
   });
+
+  it("an unclosed tag in a model-written line can't open a hidden comment", () => {
+    const body = workflowPullRequestBody(task, workflowWith(), "<!-- hide the rest of the page\nSecond line", SESSION, context());
+    expect(body.split("\n")[0]).toContain("&lt;!-- hide");
+    expect(body).not.toContain("<!-- hide");
+    expect(body.split("\n")[0]).toContain("&lt;!-- hide the rest of the page");
+    expect(body.match(/<!--/g)).toHaveLength(2);
+  });
 });
 
 describe("the risk is recomputed whenever the code on the pull request changes", () => {
+  it("a CI fix touching infra/ recomputes the risk to high, for the new candidate", () => {
+    const before = recomputeRisk(workflowWith(), context().changedFiles, {});
+    expect(before.risk).toMatchObject({ level: "low", candidateDigest: candidate("1").digest });
+    const fixed = workflowWith({ candidate: candidate("2"), risk: before.risk,
+      reviews: workflowWith().reviews!.map((review) => ({ ...review, candidateDigest: candidate("2").digest })),
+      verification: { candidateDigest: candidate("2").digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results: [{ checkId: "unit", status: "PASS" }] } });
+    const after = recomputeRisk(fixed, { files: [file("src/retry.ts"), file("infra/queue.ts")], complete: true }, {});
+    expect(after.risk).toMatchObject({ level: "high", candidateDigest: candidate("2").digest });
+    expect(WorkflowSnapshotSchema.safeParse(after).success).toBe(true);
+  });
 
   it("uses the code reviewer's level and the owner's accepted findings for this candidate only", () => {
     const reviewed = workflowWith({ reviews: workflowWith().reviews!.map((review) => review.role === "CRITIC" ? { ...review, risk: "medium" } : review) });
@@ -344,6 +716,101 @@ describe("the risk is recomputed whenever the code on the pull request changes",
     expect(recomputeRisk(v1, context().changedFiles, {})).not.toHaveProperty("risk");
   });
 });
+
+describe("a version 1 task's description is exactly as before", () => {
+  it("keeps its title-free body, its AgentX task line and its closing line, and ignores a version 2 context", () => {
+    const v1 = workflowWith({}, "1.0.0");
+    const body = workflowPullRequestBody(task, v1, planOf, SESSION, undefined);
+    const [summary, ...rest] = body.split("\n\n");
+    expect(summary).toContain("Add the retry flag");
+    expect(rest.join("\n\n")).toBe([
+      "<!-- agentx:checks-and-reviews -->", "Checks: Unit tests passed", "Reviews: code review passed; security review passed", "<!-- /agentx:checks-and-reviews -->",
+      `AgentX task: ${SESSION}`, "",
+      "Opened as a draft by AgentX after the owner-approved plan, checks and reviews passed. Merge it on GitHub.",
+    ].join("\n"));
+    expect(body).toContain("<!-- agentx:checks-and-reviews -->");
+    expect(body).toContain(`AgentX task: ${SESSION}`);
+    expect(body).not.toContain("## ");
+    expect(body).not.toContain("Rovara");
+    // A context (version 2's) changes nothing on a version 1 task.
+    expect(workflowPullRequestBody(task, v1, planOf, SESSION, context({ ciBasis: "all_checks", baseBranch: "main" }))).toBe(body);
+    expect(workflowPullRequestStatusLines(v1, context())).toEqual(workflowPullRequestStatusLines(v1));
+    expect(workflowPullRequestStatusLines(v1)).toEqual(["Checks: Unit tests passed", "Reviews: code review passed; security review passed"]);
+  });
+});
+
+// ---- through the broker
+
+
+// ---- Plan 6 Task 20: "Fixes <KEY>" for a session bound to a Linear issue
+
+const FIXES = /\b(?:fix|fixes|fixed|fixing|close|closes|closed|closing|resolve|resolves|resolved|resolving|complete|completes|completed|completing)[\s:]+[a-z][a-z0-9]*-\d+/giu;
+const closers = (text: string) => text.match(FIXES) ?? [];
+
+describe("a pull request for a session bound to a Linear issue", () => {
+  it("says Fixes <KEY> exactly once, inside Rovara's block, so Linear's own GitHub integration closes the issue when it merges", () => {
+    const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ linearIssueKey: "ENG-142" }));
+    expect(closers(body)).toEqual(["Fixes ENG-142"]);
+    expect(body.indexOf("Fixes ENG-142")).toBeGreaterThan(body.indexOf(START));
+    expect(body.indexOf("Fixes ENG-142")).toBeLessThan(body.indexOf(END));
+    expect(body.trimEnd().endsWith(CLOSING)).toBe(true);
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(30_000);
+  });
+
+  it("says nothing of Linear without a key, and refuses a key that is not an issue key", () => {
+    expect(closers(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context()))).toEqual([]);
+    for (const key of ["", "eng", "ENG-", "ENG-0", "ENG-142\n/approve", "ENG-142 and OPS-1", "ENG_142", "<!-- x -->", "@all-1", "ENG-1234567890123"]) {
+      expect(closers(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ linearIssueKey: key }))), key).toEqual([]);
+    }
+  });
+
+  it("keeps it exactly once when the block is rewritten after a fix, and adds it when the issue was bound after the pull request opened", () => {
+    const wf = workflowWith();
+    const first = workflowPullRequestBody(task, wf, planOf, SESSION, context({ linearIssueKey: "ENG-142" }));
+    const noted = `A note from Priya, kept.\n\n${first}`;
+    // Rewriting with the same lines changes nothing (undefined); a rewrite after a fix, with the new code's lines, replaces the block and keeps the one line.
+    expect(withStatusLines(noted, workflowPullRequestStatusLines(wf, context({ linearIssueKey: "ENG-142" })))).toBeUndefined();
+    const fixed = withStatusLines(noted, workflowPullRequestStatusLines(wf, { changedFiles: { files: [file("src/retry.ts", 10, 2), file("src/other.ts", 1, 1)], complete: true }, linearIssueKey: "ENG-142" }))!;
+    expect(closers(fixed)).toEqual(["Fixes ENG-142"]);
+    // The rewritten block says what the new code changed (two files now), and the person's note stays.
+    expect(fixed).toContain("**Changed** 2 files, +11 -3.");
+    expect(fixed).toContain("A note from Priya, kept.");
+    const unbound = workflowPullRequestBody(task, wf, planOf, SESSION, context());
+    expect(closers(withStatusLines(unbound, workflowPullRequestStatusLines(wf, context({ linearIssueKey: "ENG-142" })))!)).toEqual(["Fixes ENG-142"]);
+  });
+
+  it("keeps the line when the lists shrink to fit the byte cap", () => {
+    const many = Array.from({ length: 400 }, (_, index) => file(`src/generated/module-${index}-${"x".repeat(120)}.ts`, 3, 1));
+    const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, { changedFiles: { files: many, complete: true }, linearIssueKey: "ENG-142" });
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(30_000);
+    expect(closers(body)).toEqual(["Fixes ENG-142"]);
+  });
+
+  it("is not fooled by model-written words: a plan that says Fixes OTHER-9 or Closes ENG-142 adds no second closer", () => {
+    const plan = "# Plan\n\n1. Fixes OTHER-9 and closes ENG-142, resolves OPS-1 & OPS-2.\n2. Add a regression test.\n";
+    const hostile = workflowWith({ checkPolicy: { required: [check("unit", "Completes ENG-7 check")], optional: [], selectedOptionalIds: [], proposed: [] } });
+    const body = workflowPullRequestBody(task, hostile, plan, SESSION, context({ linearIssueKey: "ENG-142" }));
+    expect(closers(body)).toEqual(["Fixes ENG-142"]);
+    // The words stay readable: only the issue key is broken for Linear's reader.
+    expect(body.replaceAll("‍", "")).toContain("Fixes OTHER-9 and closes ENG-142");
+    const without = workflowPullRequestBody(task, hostile, plan, SESSION, context());
+    expect(closers(without)).toEqual([]);
+  });
+
+  it("is not fooled by a task title either", () => {
+    const titled = { title: "Fixes OTHER-9: add a retry flag" } as never;
+    const body = workflowPullRequestBody(titled, workflowWith(), undefined, SESSION, context({ linearIssueKey: "ENG-142" }));
+    expect(closers(body)).toEqual(["Fixes ENG-142"]);
+  });
+
+  it("is the version 1 description, as it was, for a version 1 task", () => {
+    const v1 = workflowWith({}, "1.0.0");
+    expect(workflowPullRequestBody(task, v1, planOf, SESSION, context({ linearIssueKey: "ENG-142" }))).toBe(workflowPullRequestBody(task, v1, planOf, SESSION));
+    expect(workflowPullRequestStatusLines(v1, context({ linearIssueKey: "ENG-142" }))).toEqual(workflowPullRequestStatusLines(v1));
+  });
+});
+
+
 
 // ---- Plan 6 Task 20 review fixes: no text but Rovara's own Fixes line may name a Linear issue
 
@@ -379,9 +846,48 @@ describe("every text path into a version 2 pull request leaves no Linear key but
     expect(readable(lines.join("\n"))).toEqual(["Fixes ENG-142"]);
   });
 
+  it("the plan's summary", () => {
+    onlyOwn(workflowPullRequestBody(task, workflowWith(), "# Plan\n\n1. _Fixes OPS-3_ by retrying; also `OPS-4` and (OPS-5).\n2. Fixes ENG-1 ENG-2\n", SESSION, withOwn()));
+  });
+
+  it("the task's title, when there is no plan", () => {
+    onlyOwn(workflowPullRequestBody({ title: "OPS-9 and Fixes OPS-10" }, workflowWith(), undefined, SESSION, withOwn()));
+  });
+
   it("a changed file's path, its old name and its repository", () => {
     const files = [{ repository: "payments", path: "docs/OPS-12-notes.md", added: 1, removed: 0 }, { repository: "OPS-14", path: "src/new.ts", renamedFrom: "src/Fixes-OPS-15.ts", added: 1, removed: 1 }];
     onlyOwn(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, withOwn({ changedFiles: { files, complete: true } })));
+  });
+
+  it("a check's label, a failed check, a check that couldn't run, a test added and the reason there was no check", () => {
+    const failing = workflowWith({
+      stage: "VERIFY", state: "BLOCKED", blockReason: "candidate checks failed or have unknown results",
+      checkPolicy: { required: [check("unit", "Unit OPS-1"), check("lint", "Lint OPS-2"), check("types", "Types OPS-3")], optional: [], selectedOptionalIds: [], proposed: [] },
+      verification: { candidateDigest: candidate("1").digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now,
+        results: [{ checkId: "unit", status: "PASS" }, { checkId: "lint", status: "FAILED" }, { checkId: "types", status: "FAILED", programNotFound: true }] },
+    });
+    onlyOwn(workflowPullRequestBody(task, failing, planOf, SESSION, withOwn({ changedFiles: { files: [file("src/OPS-4.test.ts")], complete: true } })));
+    const reviewOnly = workflowWith({
+      stage: "REVIEW", state: "WAITING",
+      checkPolicy: { required: [], optional: [], selectedOptionalIds: [], proposed: [], noneReason: "Documentation only, see OPS-9" },
+      verification: { candidateDigest: candidate("1").digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results: [], reviewOnly: true },
+    });
+    onlyOwn(workflowPullRequestBody(task, reviewOnly, planOf, SESSION, withOwn()));
+  });
+
+  it("the base branch's name, and a risk reason", () => {
+    onlyOwn(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, withOwn({ ciBasis: "all_checks", baseBranch: "release/OPS-77" })));
+    onlyOwn(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, withOwn({ changedFiles: { files: [file("db/migrations/OPS-8.sql")], complete: true } })));
+  });
+
+  it("anything at all that reaches the block: a final pass breaks it, and keeps Rovara's own line and the session link whole", () => {
+    // A path that skipped every per-line guard still cannot name an issue.
+    const lines = workflowPullRequestStatusLines(workflowWith(), withOwn({ changedFiles: { files: [file("OPS-1.ts")], complete: true } }));
+    expect(lines).toContain("Fixes ENG-142");
+    expect(readable(lines.join("\n"))).toEqual(["Fixes ENG-142"]);
+    const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, withOwn());
+    expect(body).toContain(`Rovara session: ${SESSION}`);
+    expect(body).toContain(CLOSING);
   });
 
   it("the 'Fixes from PR feedback' section, which a reviewer model writes from comments anyone can post", () => {
@@ -397,6 +903,35 @@ describe("every text path into a version 2 pull request leaves no Linear key but
     expect(section.body).toContain("Fixes from PR feedback");
     expect(section.body).toContain("the null check");
     expect(readable(feedbackFixesSection(fixes, 10_000))).toEqual([]);
+  });
+
+  it("without a key of its own, no key at all", () => {
+    expect(readable(workflowPullRequestBody(task, accepted("Fixes OPS-12", "Part of OPS-13"), "1. Closes OPS-3", SESSION, context()))).toEqual([]);
+  });
+});
+
+describe("technical text in a version 2 description stays as it is", () => {
+  it("keeps UTF-8, SHA-256, node-22, x86-64 and paths byte for byte, including in a risk reason (no stray space where a joiner was)", () => {
+    const files = [file("db/V1-2__init.sql"), file("src/utf-8-handler.ts"), file("docs/ADR-0007.md"), file("scripts/sha-256.sh")];
+    const lines = workflowPullRequestStatusLines(workflowWith(), context({ linearIssueKey: "ENG-142", changedFiles: { files, complete: true } }));
+    const body = lines.join("\n");
+    // The per-file list is GitHub's own tab: only the flagged path is in the description, in the risk reason, byte for byte.
+    expect(body).toContain("db/V1-2__init.sql");
+    expect(body).toMatch(/Changes sensitive paths: db\/V1-2__init\.sql/u);
+    expect(body).not.toContain("V1- 2");
+    expect(body).not.toContain("\u200D");
+    const full = workflowPullRequestBody(task, workflowWith(), "# Plan\n\n1. Use UTF-8 and SHA-256 on node-22 (x86-64)\n2. Run `git checkout feature-2`\n", SESSION, context({ linearIssueKey: "ENG-142", changedFiles: { files, complete: true } }));
+    expect(full).toContain("Use UTF-8 and SHA-256 on node-22 (x86-64)");
+    expect(full).toContain("git checkout feature-2");
+    expect(full).not.toContain("\u200D");
+  });
+
+  it("keeps the joiner it puts in a name that holds a magic word and a key, in the block and in a risk reason (it is not inerted a second time into a space)", () => {
+    const files = [file("db/migrations/Fixes-ENG-1.sql")];
+    const body = workflowPullRequestStatusLines(workflowWith(), context({ linearIssueKey: "ENG-142", changedFiles: { files, complete: true } })).join("\n");
+    expect(body).toContain("Changes sensitive paths: db/migrations/F\u200Dixes-ENG-1.sql");
+    expect(body).not.toContain("F ixes");
+    expect(readable(body)).toEqual(["Fixes ENG-142"]);
   });
 });
 
@@ -431,6 +966,15 @@ describe("the open pull request's Fixes line follows the binding at once", () =>
     expect(withLinearCloseLine(BLOCK(), undefined)).toEqual({ kind: "same" });
   });
 
+  it("takes out only a line that is exactly Rovara's own, not words of a person's inside the block", () => {
+    const noted = BLOCK("", "A person wrote: Fixes ENG-9 here", "Fixes ENG-142 too", "Fixes ENG-142");
+    const removed = withLinearCloseLine(noted, undefined) as { kind: string; body: string };
+    expect(removed.body).toContain("A person wrote: Fixes ENG-9 here");
+    expect(removed.body).toContain("Fixes ENG-142 too");
+    expect(removed.body.split("\n").filter((line) => line === "Fixes ENG-142")).toEqual([]);
+    expect(withLinearCloseLine(BLOCK("", "Fixes ENG-142 too"), undefined)).toEqual({ kind: "same" });
+  });
+
   it("keeps a CRLF description's endings, and refuses a description whose block is not as Rovara wrote it", () => {
     const crlf = BLOCK("", "Fixes ENG-142").replaceAll("\n", "\r\n");
     const changed = withLinearCloseLine(crlf, "ENG-143") as { kind: string; body: string };
@@ -447,10 +991,52 @@ describe("the open pull request's Fixes line follows the binding at once", () =>
 describe("the version 2 description carries the test proof", () => {
   const PROOF = "Test proof: 1 check fails on the original code and passes now";
 
+  it("lists the proof lines at the end of the Checks drawer, before the Test setup", () => {
+    const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context(), [PROOF]);
+    const tests = body.indexOf("<summary>Checks: ");
+    const proof = body.indexOf(`- ${PROOF}`);
+    expect(tests).toBeGreaterThanOrEqual(0);
+    expect(proof).toBeGreaterThan(tests);
+    expect(proof).toBeGreaterThan(body.indexOf("- Tests added:"));
+    expect(proof).toBeLessThan(body.indexOf("<summary>Test setup: "));
+    expect(body.split(PROOF)).toHaveLength(2);
+  });
+
+  it("leaves the description as it was without proof lines", () => {
+    expect(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context(), [])).toBe(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context()));
+    expect(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context())).not.toContain("Test proof");
+  });
+
   it("carries them in the status block a later update rewrites when they are given", () => {
     const lines = workflowPullRequestStatusLines(workflowWith(), context(), [PROOF]);
     expect(lines).toContain(`- ${PROOF}`);
     expect(workflowPullRequestStatusLines(workflowWith(), context())).not.toContain(`- ${PROOF}`);
+  });
+});
+
+describe("failed reviews in pull request text", () => {
+  it("does not write a passed status line or verdict when a required review could not run", () => {
+    const reviews = workflowWith().reviews!.map((review) => review.role === "CRITIC"
+      ? { ...review, status: "UNKNOWN" as const, failureReason: "SESSION_FAILED" as const }
+      : review);
+    const workflow = { ...workflowWith(), reviews } as WorkflowSnapshot;
+    const lines = workflowPullRequestStatusLines(workflow);
+    expect(lines.join("\n")).toContain("The required reviews did not finish");
+    expect(lines.join("\n")).not.toContain("code review passed");
+    expect(workflowPullRequestBody(task, workflow, planOf, SESSION, context())).toContain("The required reviews did not finish");
+    expect(workflowPullRequestCheckVerdict(task, workflow, planOf, context())).toBeUndefined();
+  });
+});
+
+describe("the version 1 pull request description names who asked (I3)", () => {
+  it("adds the lines after the status block, and nothing when there is no attribution", () => {
+    const v1 = workflowWith({}, "1.0.0");
+    const plain = workflowPullRequestBody({ title: "Add a retry flag" }, v1, planOf, "https://rovara.example/review/x/task");
+    expect(plain).not.toContain("Requested by");
+    const body = workflowPullRequestBody({ title: "Add a retry flag" }, v1, planOf, "https://rovara.example/review/x/task", { attribution: { requester: { state: "named", name: "Maya Chen", ref: "0123456789abcdef" }, approver: { state: "named", name: "Priya Raman", ref: "fedcba9876543210" } } });
+    expect(body).toContain("Requested by: Maya Chen\nPlan approved by: Priya Raman\n");
+    expect(body.indexOf("Requested by")).toBeGreaterThan(body.indexOf("<!-- /agentx:checks-and-reviews -->"));
+    expect(body).not.toContain("0123456789abcdef");
   });
 });
 
@@ -481,5 +1067,13 @@ describe("the browser evidence lines of the description", () => {
     const full = workflowPullRequestBody(task, workflowWith({}, "1.0.0"), planOf, SESSION, context({ browserEvidenceLines: lines }));
     for (const entry of lines) expect(full).toContain(entry);
     expect(workflowPullRequestBody(task, workflowWith({}, "1.0.0"), planOf, SESSION, context())).not.toContain("Browser evidence");
+  });
+  it("is text only: a line with a break in it is left out, an address a reader could mistake for an image is never added, and an email is hidden", () => {
+    const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ browserEvidenceLines: ["ok line", "two\nlines", "mail ada@example.com"] }));
+    expect(body).toContain("ok line");
+    expect(body).not.toContain("two\nlines");
+    expect(body).not.toContain("ada@example.com");
+    expect(body).not.toContain("<summary>Screenshots: 2");
+    expect(body).not.toMatch(/!\[|<img/u);
   });
 });

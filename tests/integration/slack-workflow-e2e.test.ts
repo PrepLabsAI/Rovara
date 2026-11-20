@@ -285,7 +285,7 @@ describe("Slack-only workflow, end to end in one process", () => {
     // The page, fetched as the owner: the claim, the cited code with its commit, the decision and the check with the claim it proves.
     const page = await e2e.taskPage("?doc=coding-plan&from=1");
     expect(page.status).toBe(200);
-    for (const expected of ["Add a greet function to greeting.ts.", "Which greeting should it use?", "AgentX recommends", "Hello, name", PROPOSED.label,
+    for (const expected of ["Add a greet function to greeting.ts.", "Which greeting should it use?", "Rovara recommends", "Hello, name", PROPOSED.label,
       e2e.baseCommit.slice(0, 7), ...CITED.map((line) => line.replaceAll("'", "&#39;"))]) {
       expect(page.body).toContain(expected);
     }

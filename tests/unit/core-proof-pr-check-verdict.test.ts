@@ -1,8 +1,8 @@
 // Lane L4-PRP (design pr-redesign.md 2.6 and rule 2.1.7): the verdict the "Rovara" Check carries is built from the very same facts, by the same functions, as the description's heading, six lines and list. Driven over the four
 // golden tasks (green, clean green, exceptions with a hostile variant, largest), so a wording or a layout change shows in both places or in neither.
 import { describe, expect, it } from "vitest";
-import { rovaraCheckOf } from "../../packages/contracts/src/index.js";
-import { workflowPullRequestCheckVerdict } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
+import { WorkflowStageSchema, rovaraCheckOf } from "../../packages/contracts/src/index.js";
+import { workflowPullRequestBody, workflowPullRequestCheckVerdict } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
 import { SCENARIOS, SCENARIO_PLAN_TEXT, SCENARIO_TASK, exceptionsScenario, type Scenario } from "../support/pr-body-scenarios.js";
 
 const verdictOf = (scenario: Scenario) => workflowPullRequestCheckVerdict(SCENARIO_TASK, scenario.inputs.workflow, SCENARIO_PLAN_TEXT(), scenario.inputs.context, scenario.inputs.proofLines);
@@ -11,6 +11,21 @@ const SIX = ["**Changed** ", "**Proven** ", "**Tested against** ", "**Reviews** 
 const aboveFold = (body: string): string => body.slice(0, body.indexOf("<details>"));
 
 describe("the Check says the description's words", () => {
+  // Removing the stage-independent missing-report guard must expose a passing claim here.
+  for (const stage of WorkflowStageSchema.options) {
+    it.each(["all", "CRITIC", "SECURITY"])(`${stage}: missing %s current reports withholds passing PR and Check text`, (missing) => {
+      const scenario = SCENARIOS.find((entry) => entry.name === "green-clean")!.build();
+      const workflow = {
+        ...scenario.inputs.workflow, stage, state: "BLOCKED" as const,
+        reviews: missing === "all" ? [] : scenario.inputs.workflow.reviews!.filter((review) => review.role !== missing),
+      };
+      expect(workflowPullRequestCheckVerdict(SCENARIO_TASK, workflow, SCENARIO_PLAN_TEXT())).toBeUndefined();
+      const body = workflowPullRequestBody(SCENARIO_TASK, workflow, SCENARIO_PLAN_TEXT(), undefined);
+      expect(body).toContain("The required reviews did not finish.");
+      expect(body).not.toContain("Code review and security review passed");
+      expect(body).not.toMatch(/Reviews: .*passed/u);
+    });
+  }
   for (const { name, build } of SCENARIOS) {
     const scenario = build();
     it(`${name}: the heading is the description's heading`, () => {

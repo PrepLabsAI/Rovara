@@ -2,12 +2,13 @@
 // after the role; refusals are fixed words with no echo; two companies and two projects never meet; with no model wired the answer is the fixed "not set up" outcome; a script token never reaches it.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { ANSWER_WORDS, AnswerResponseSchema, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
+import { ANSWER_WORDS, AgentXError, AnswerResponseSchema, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
-import { routeHostedAnswers, type HostedAnswersWiring } from "../../packages/broker/src/core-host/answer-routes.js";
+import { isAnswersPath, routeHostedAnswers, type HostedAnswersWiring } from "../../packages/broker/src/core-host/answer-routes.js";
+import { AnswerModelRefused } from "../../packages/broker/src/core/answers/ports.js";
 import type { AnswerRepositoryHandle } from "../../packages/broker/src/core/answers/code-source.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { FAKE_COMPANY, createFakeWorld } from "../support/core-host-fakes.js";
@@ -30,6 +31,7 @@ function setup(standings: Record<string, "view" | "manage"> = {}, projects: Reco
   const store = new MemoryDocumentStore();
   const calls: string[] = [];
   const standingCalls: string[] = [];
+  const logs: Array<Record<string, unknown>> = [];
   const model = scriptedModel([answer([goodSentence])]);
   const wiring: HostedAnswersWiring = {
     standing: async (personId, companyId, project) => { standingCalls.push(`${companyId}/${project}/${personId}`); const access = standings[`${companyId}/${project}/${personId}`]; return access === "manage" ? { access, basis: "company-admin" } : access === "view" ? { access } : { access: "none" }; },
@@ -37,12 +39,21 @@ function setup(standings: Record<string, "view" | "manage"> = {}, projects: Reco
     model: () => model,
   };
   const post = async (companyId: OrgId, personId: string, body: unknown, overrides: Partial<HostedAnswersWiring> = {}, path = PATH) => {
-    const answerResponse = await routeHostedAnswers({ request: { method: "POST", path, headers: {}, body: typeof body === "string" ? body : JSON.stringify(body) }, path, personId, companyId, store, wiring: { ...wiring, ...overrides }, now: () => T0 });
+    const answerResponse = await routeHostedAnswers({ request: { method: "POST", path, headers: {}, body: typeof body === "string" ? body : JSON.stringify(body) }, path, personId, companyId, store, wiring: { ...wiring, ...overrides }, now: () => T0, log: (entry) => logs.push(entry) });
     return { status: answerResponse.statusCode, body: JSON.parse(answerResponse.body ?? "{}") as Record<string, unknown>, raw: answerResponse.body ?? "" };
   };
-  return { store, post, calls, standingCalls, model };
+  return { store, post, calls, standingCalls, model, logs };
 }
 const ask = (extra: Record<string, unknown> = {}) => ({ requestId: `req-${randomUUID().slice(0, 12)}`, question: "How long do refunds last?", ...extra });
+
+describe("the answer route: paths", () => {
+  it("serves only POST on /v1/app/projects/{project}/answers", () => {
+    expect(isAnswersPath(PATH, "POST")).toBe(true);
+    for (const [method, path] of [["GET", PATH], ["PUT", PATH], ["DELETE", PATH], ["POST", "/v1/app/projects/alpha/answers/x"], ["POST", "/v1/app/projects//answers"], ["POST", "/v1/app/projects/alpha/answer"], ["POST", "/v1/app/projects/alpha/wiki/answers"]] as const) {
+      expect(isAnswersPath(path, method), `${method} ${path}`).toBe(false);
+    }
+  });
+});
 
 describe("the answer route: who asks", () => {
   it.each([["a project grant (view)", "ada", "view"], ["a company owner or admin (manage)", "owner", "manage"]] as const)("%s asks and gets the answer object", async (_name, person, access) => {
@@ -88,6 +99,59 @@ describe("the answer route: who asks", () => {
   });
 });
 
+describe("the answer route: two companies and two projects", () => {
+  it("reads only the caller's company's code and writes only the caller's company's rows", async () => {
+    const w = setup({ [`${A}/alpha/ada`]: "view", [`${B}/alpha/ada`]: "view" });
+    expect((await w.post(A, "ada", ask())).status).toBe(200);
+    expect(w.calls.every((call) => call.startsWith(`${A}:`))).toBe(true);
+    const asB = await w.post(B, "ada", ask());
+    // Company B's file does not hold the quoted line, so B's answer is not found; it never saw A's code.
+    expect(asB.body["outcome"]).toBe("not_found");
+    expect(w.calls.filter((call) => call.startsWith(`${B}:`)).length).toBeGreaterThan(0);
+    const keys: string[] = [];
+    let cursor: string | undefined;
+    do { const page = await w.store.scanPage({ limit: 1_000, ...(cursor === undefined ? {} : { cursor }) }); keys.push(...page.items.map((item) => item.pk)); cursor = page.cursor; } while (cursor !== undefined);
+    expect(keys.every((pk) => pk.startsWith(`ORG#${A}#`) || pk.startsWith(`ORG#${B}#`))).toBe(true);
+    expect(keys.some((pk) => pk.startsWith(`ORG#${A}#`))).toBe(true);
+    expect(keys.some((pk) => pk.startsWith(`ORG#${B}#`))).toBe(true);
+  });
+});
+
+describe("the answer route: fixed failure logging", () => {
+  it.each([new Error("PROVIDER-CANARY"), new AgentXError("RUNTIME_UNAVAILABLE", "PROVIDER-CANARY", 503)])("logs a construction failure once, including structured runtime errors", async (error) => {
+    const w = setup({ [`${A}/alpha/ada`]: "view" });
+    const result = await w.post(A, "ada", ask({ question: "QUESTION-CANARY" }), { model: () => { throw error; } });
+    expect(result.status).toBe(503);
+    expect(w.logs.filter((entry) => entry.event === "answer.failed")).toEqual([{ component: "answers", event: "answer.failed", cause: "unexpected" }]);
+    expect(JSON.stringify(w.logs)).not.toMatch(/CANARY/);
+  });
+
+  it.each([new Error("PROVIDER-CANARY"), new AnswerModelRefused("unavailable"), new AnswerModelRefused("not_set_up")])("logs a later-turn model failure once and keeps the degraded not_found", async (error) => {
+    const w = setup({ [`${A}/alpha/ada`]: "view" });
+    const result = await w.post(A, "ada", ask({ question: "QUESTION-CANARY" }), { model: () => scriptedModel([tool({ tool: "code_read", repo: "web", path: "src/refund.ts", from: 1, to: 7 }), error]) });
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ outcome: "not_found", text: "" });
+    expect(w.logs.filter((entry) => entry.event === "answer.failed")).toEqual([{ component: "answers", event: "answer.failed", cause: "model_unavailable" }]);
+    expect(JSON.stringify(w.logs)).not.toMatch(/CANARY/);
+  });
+
+  it("logs a rejected availability check and keeps not_set_up", async () => {
+    const w = setup({ [`${A}/alpha/ada`]: "view" });
+    const result = await w.post(A, "ada", ask({ question: "QUESTION-CANARY" }), { model: () => ({ ...w.model, available: async () => { throw new Error("PROVIDER-CANARY"); } }) });
+    expect(result.status).toBe(200);
+    expect(result.body["outcome"]).toBe("not_set_up");
+    expect(w.logs).toEqual([{ component: "answers", event: "answer.failed", cause: "model_unavailable" }]);
+  });
+
+  it("logs a fixed repository failure code without logging the question or answer", async () => {
+    const w = setup({ [`${A}/alpha/ada`]: "view" });
+    const result = await w.post(A, "ada", ask({ question: "QUESTION-CANARY" }), { repositories: async () => { throw new Error("ANSWER-CANARY"); } });
+    expect(result.status).toBe(503);
+    expect(w.logs).toContainEqual({ component: "answers", event: "answer.failed", cause: "repository_unavailable" });
+    expect(JSON.stringify(w.logs)).not.toMatch(/QUESTION-CANARY|ANSWER-CANARY/);
+  });
+});
+
 describe("the answer route: the team knowledge briefing (lead 4 L4-AK2b)", () => {
   it("each company's answer is briefed by ITS OWN company's seam, only for a person with a role, and an absent seam leaves the answer as before", async () => {
     const w = setup({ [`${A}/alpha/ada`]: "view", [`${B}/alpha/bob`]: "view" });
@@ -108,6 +172,20 @@ describe("the answer route: the team knowledge briefing (lead 4 L4-AK2b)", () =>
     const before = w.model.turns.length;
     await w.post(A, "ada", ask());
     expect(w.model.turns[before]!.transcript).not.toContain("team-knowledge");
+  });
+});
+
+describe("the answer route: no model wired", () => {
+  it("answers 200 with the fixed 'not set up' outcome, no button, and spends and records nothing", async () => {
+    const w = setup({ [`${A}/alpha/ada`]: "view" });
+    const before = await w.store.scanPage({ limit: 1_000 });
+    const result = await w.post(A, "ada", ask(), { model: undefined });
+    expect(result.status).toBe(200);
+    expect(AnswerResponseSchema.parse(result.body)).toMatchObject({ outcome: "not_set_up", text: "", honesty: ANSWER_WORDS.notSetUp, sources: [] });
+    expect(result.body["action"]).toBeUndefined();
+    expect(result.body["answerId"]).toBeUndefined();
+    expect(w.calls).toEqual([]);
+    expect((await w.store.scanPage({ limit: 1_000 })).items).toEqual(before.items);
   });
 });
 

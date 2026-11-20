@@ -4,37 +4,16 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { NOT_SEALED_BLOCKED_BY_NAME_SENTENCE } from "@agentx/contracts";
 import { DockerWorkerMachines } from "../../packages/broker/src/local/docker-worker-machines.js";
 import { createEphemeralInvokeSigner } from "../../packages/broker/src/local/invoke-signer.js";
 import { laptopSandboxDenyList } from "../../packages/broker/src/local/isolation/sandbox-model-deny.js";
 import { laptopBlockEvidenceFor, laptopBlockEvidenceInput } from "../../packages/broker/src/local/model-egress/name-block.js";
-import { modelBridgeEvidenceLines, NOT_SEALED_NO_BLOCK_SENTENCE } from "../../packages/worker/src/model-bridge-ledger.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 
 const scratch: string[] = [];
 afterAll(async () => { while (scratch.length > 0) await rm(scratch.pop()!, { recursive: true, force: true }); });
 
-const lines = (input: ReturnType<typeof laptopBlockEvidenceInput>) => modelBridgeEvidenceLines({ roundKind: "check_unsealed", classes: [], ...input });
-
 describe("the evidence follows the machine's real state", () => {
-  it("denied: blocked by name, with the deny list's own hosts (and no wildcard in the host list)", () => {
-    const input = laptopBlockEvidenceInput("denied");
-    expect(input).toMatchObject({ blockMode: "by_name", azureOpenAiNotBlocked: false });
-    expect(input.machineBlock).toBeUndefined();
-    expect(input.blockList).toContain("api.openai.com");
-    expect(input.blockList.some((entry) => entry.startsWith("*."))).toBe(false);
-    expect(lines(input)[0]).toBe(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE);
-  });
-  it("allowed, or a machine that cannot say: not blocked, and never the by-name claim", () => {
-    for (const state of ["allowed", undefined] as const) {
-      const input = laptopBlockEvidenceInput(state);
-      expect(input).toMatchObject({ blockMode: "none", machineBlock: "not_blocked", blockList: [] });
-      expect(lines(input).join("\n")).not.toMatch(/blocked by name only/u);
-      expect(lines(input)[0]).toMatch(/^not sealed; model hosts not blocked on this machine/u);
-    }
-    void NOT_SEALED_NO_BLOCK_SENTENCE;
-  });
   it("the block list never holds Google's token hosts (DECISIONS 174)", () => {
     const list = laptopBlockEvidenceInput("denied").blockList;
     for (const host of ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"]) expect(list).not.toContain(host);

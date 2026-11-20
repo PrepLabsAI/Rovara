@@ -258,7 +258,7 @@ describe("the Proof section of the version 2 pull request description", () => {
     const failingPlan = plan({ claims, checks: { proposed: [...proposed.slice(0, 7), check("bad", labels(9))], proves: { ...Object.fromEntries(proposed.slice(0, 7).map((item) => [item.id, claims.slice(0, 30).map((claim) => claim.id)])), bad: claims.slice(30, 35).map((claim) => claim.id) } } });
     const results = [...proposed.slice(0, 7).map((item) => ({ checkId: item.id, status: "PASS" })), { checkId: "bad", status: "FAILED" }];
     const checkPolicy = { required: [], optional: [], selectedOptionalIds: [], proposed: [...proposed.slice(0, 7), check("bad", labels(9))] };
-    const workflow = workflowWith({ stage: "VERIFY", state: "BLOCKED", blockReason: "candidate checks failed or have unknown results", reviews: undefined, checkPolicy, verification: { candidateDigest: CODE.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results } });
+    const workflow = workflowWith({ stage: "VERIFY", state: "BLOCKED", blockReason: "candidate checks failed or have unknown results", checkPolicy, verification: { candidateDigest: CODE.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results } });
     const manyFiles = { files: Array.from({ length: 200 }, (_, index) => ({ repository: "payments", path: `src/module-${index}/some/deeply/nested/file-name-${index}.ts`, added: 5, removed: 1 })), complete: true };
     const summary = Array.from({ length: 40 }, (_, index) => `Plan line ${index} ${"x".repeat(180)}`).join("\n");
     const body = workflowPullRequestBody(task, workflow, summary, SESSION, { changedFiles: manyFiles, proof: { plan: failingPlan, testProof: undefined } });

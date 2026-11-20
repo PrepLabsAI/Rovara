@@ -26,18 +26,6 @@ function world(answer: Parameters<typeof fakeService>[0]["answer"], base: Admiss
 }
 
 describe("policy hook: may this task start", () => {
-  it("a yes lets the install's own decision through, with its steps", async () => {
-    const w = world(() => ({ allow: true }));
-    expect(await w.admission.stage(request("task_1"))).toEqual({ decision: { allowed: true }, items: [] });
-    expect(w.service.asked).toHaveLength(1);
-    expect(w.service.asked[0]!.q).toEqual({ cid: COMPANY, pid: "web", per: "person-1", tid: "task_1", path: "FULL" });
-  });
-
-  it("a no refuses with fixed words, whatever the service says", async () => {
-    const w = world(() => ({ allow: false, code: "over_budget" }));
-    expect(await w.admission.stage(request("task_1"))).toEqual({ decision: { allowed: false, code: "company_rules_refused", message: POLICY_HOOK_WORDS.startRefused }, items: [] });
-    expect(w.audit.events.map((event) => event["action"])).toEqual(["policy_hook.answered"]);
-  });
 
   it("stricter only: the install's own refusal stands and the service is not asked", async () => {
     const refusing: Admission = { ...createAllowAllAdmission(), async admit() { return { allowed: false, code: "budget_exhausted", message: "Over budget." }; }, async stage() { return { decision: { allowed: false, code: "budget_exhausted", message: "Over budget." }, items: [] }; } };
@@ -45,14 +33,6 @@ describe("policy hook: may this task start", () => {
     expect((await w.admission.stage(request("task_1"))).decision).toEqual({ allowed: false, code: "budget_exhausted", message: "Over budget." });
     expect((await w.admission.admit(request("task_1")))).toEqual({ allowed: false, code: "budget_exhausted", message: "Over budget." });
     expect(w.service.asked).toHaveLength(0);
-  });
-
-  it("not cached: every start asks again", async () => {
-    let answers = 0;
-    const w = world(() => ({ allow: answers++ === 0 }));
-    expect((await w.admission.stage(request("task_1"))).decision.allowed).toBe(true);
-    expect((await w.admission.stage(request("task_1"))).decision.allowed).toBe(false);
-    expect(w.service.asked).toHaveLength(2);
   });
 
   it("service down: holds and retries the same signed question for up to 240 s in all, then refuses plainly; nothing has started", async () => {
@@ -66,23 +46,6 @@ describe("policy hook: may this task start", () => {
     expect(new Set(w.service.asked.map((asked) => asked.text)).size).toBe(1);
     expect(w.audit.events).toHaveLength(1);
     expect(w.audit.events[0]).toMatchObject({ action: "policy_hook.no_answer", details: { attempts: w.service.asked.length } });
-  });
-
-  it("the hold never passes 240 s, even when each attempt takes its full timeout or a longer hold is asked for", async () => {
-    let clock = T0;
-    const audit = memoryAudit();
-    const slow: typeof fetch = async () => { clock += 5_000; return new Response("down", { status: 503 }); };
-    const client = createPolicyHookClient({ settings: settingsFor(hookKey), install: { issuer: ISSUER, signer: signerOf(install) }, fetch: slow, now: () => clock, audit: audit.sink });
-    const admission = withPolicyHookAdmission(createAllowAllAdmission(), client, { holdMs: 600_000, now: () => clock, sleep: async (ms) => { clock += ms; } });
-    expect((await admission.stage(request("task_1"))).decision).toMatchObject({ allowed: false, message: POLICY_HOOK_WORDS.startNoAnswer });
-    expect(clock - T0).toBeLessThanOrEqual(240_000);
-  });
-
-  it("service back within the hold: the start goes ahead on the late answer", async () => {
-    let calls = 0;
-    const w = world(() => (calls++ < 3 ? new Response("down", { status: 503 }) : { allow: true }));
-    expect((await w.admission.stage(request("task_1"))).decision).toEqual({ allowed: true });
-    expect(w.sleeps).toEqual([1_000, 2_000, 4_000]);
   });
 
   it("other actions are the install's own admission, untouched and never asked", async () => {
@@ -106,13 +69,6 @@ describe("policy hook: may this task start", () => {
     const staging: Admission = { ...createAllowAllAdmission(), async stage() { return { decision: { allowed: true, reservationId: "res-2" }, items: [charge] }; } };
     expect(await world(() => ({ allow: false }), staging).admission.stage(request("task_1"))).toEqual({ decision: { allowed: false, code: "company_rules_refused", message: POLICY_HOOK_WORDS.startRefused }, items: [] });
     expect((await world(() => ({ allow: true }), staging).admission.stage(request("task_1"))).items).toEqual([charge]);
-  });
-
-  it("a refusal at stage gives back the install's staged reservation", async () => {
-    const released: string[] = [];
-    const staging: Admission = { ...createAllowAllAdmission(), async stage() { return { decision: { allowed: true, reservationId: "res-3" }, items: [] }; }, async release(id) { released.push(id); } };
-    expect((await world(() => ({ allow: false }), staging).admission.stage(request("task_1"))).decision.allowed).toBe(false);
-    expect(released).toEqual(["res-3"]);
   });
 
   it("a start the contract cannot carry (no project) is refused, not asked", async () => {

@@ -101,6 +101,7 @@ type CompanyInviteWorld = ReturnType<typeof companyRouteHarness> & {
   forwarded: unknown[];
   post(body?: unknown): ReturnType<ReturnType<typeof companyRouteHarness>["read"]>;
   withdraw(emailHash?: string): ReturnType<ReturnType<typeof companyRouteHarness>["read"]>;
+  resend(emailHash?: string, body?: unknown): ReturnType<ReturnType<typeof companyRouteHarness>["read"]>;
 };
 export async function inviteCompanyWorld(): Promise<CompanyInviteWorld> {
   const A = COMPANY_A.orgId, B = COMPANY_B.orgId;
@@ -122,5 +123,6 @@ export async function inviteCompanyWorld(): Promise<CompanyInviteWorld> {
   });
   const post = (body: unknown = { email, role: "member", expiresInHours: 24 }) => h.read(path, { method: "POST", body: JSON.stringify(body) });
   const withdraw = (emailHash = hash) => h.read(`${path}/${emailHash}`, { method: "DELETE" });
-  return { ...h, identity, member, forwarded, post, withdraw };
+  const resend = (emailHash = hash, body: unknown = { expiresInHours: 24 }) => h.read(`${path}/${emailHash}/resend`, { method: "POST", body: JSON.stringify(body) });
+  return { ...h, identity, member, forwarded, post, withdraw, resend };
 }

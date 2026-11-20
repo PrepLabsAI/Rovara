@@ -153,7 +153,7 @@ export function pageCommentViews(comments: readonly TaskComment[], context: Comm
       document: comment.document, version: comment.version, target: comment.target,
       author: person !== undefined
         ? { kind: "person", name: shownName(person.name), owner: person.owner, you: person.developerId === context.readerId }
-        : { kind: "agentx", name: "AgentX", owner: false, you: false },
+        : { kind: "agentx", name: "Rovara", owner: false, you: false },
       text: comment.deletedAt === undefined ? (agentxAuthor === undefined ? redactText(comment.text) : plainReplyText(redactText(comment.text))) : "",
       createdAt: comment.createdAt,
       edited: comment.editedAt !== undefined,
@@ -203,12 +203,12 @@ export function commentCountBadge(count: number): string {
 }
 
 const AGENTX_STATES: Record<NonNullable<PageCommentView["agentx"]>, string> = {
-  answering: "AgentX is answering…",
+  answering: "Rovara is answering…",
   answered: "",
-  couldnt: "AgentX couldn't answer this one.",
+  couldnt: "Rovara couldn't answer this one.",
   not_answered: "Not answered",
-  unavailable: "AgentX can answer comments only on tasks started in Slack.",
-  skipped: "Edited after it was asked, so AgentX didn't answer.",
+  unavailable: "Rovara can answer comments only on tasks started in Slack.",
+  skipped: "Edited after it was asked, so Rovara didn't answer.",
   sent_to_coding: "Sent to coding when the plan was approved.",
 };
 
@@ -245,11 +245,11 @@ const shortTime = (at: string): string => {
  */
 function commentHtml(comment: PageCommentView, context: { shownVersion: number; canComment: boolean }, reply: boolean): string {
   const author = comment.author.kind === "agentx" && comment.answering !== undefined
-    ? `<span class="chip chip-agentx">AgentX (AI)</span> <span class="answering"><span aria-hidden="true">· </span>answering ${t(comment.answering)}</span>`
+    ? `<span class="chip chip-agentx">Rovara (AI)</span> <span class="answering"><span aria-hidden="true">· </span>answering ${t(comment.answering)}</span>`
     : comment.author.kind === "agentx" && comment.planner !== undefined
-    ? `<span class="chip chip-agentx">AgentX</span> <span class="answering"><span aria-hidden="true">· </span>from ${HANDLED_IN[comment.planner.document].bare} v${comment.planner.version}</span>`
+    ? `<span class="chip chip-agentx">Rovara</span> <span class="answering"><span aria-hidden="true">· </span>from ${HANDLED_IN[comment.planner.document].bare} v${comment.planner.version}</span>`
     : comment.author.kind === "agentx"
-    ? '<span class="chip chip-agentx">AgentX</span>'
+    ? '<span class="chip chip-agentx">Rovara</span>'
     : `<span class="comment-author">${t(comment.author.name)}</span>${comment.author.owner ? ' <span class="tag tag-owner">Owner</span>' : ""}`;
   const from = comment.version < context.shownVersion ? ` <span class="from-version">from v${comment.version}</span>` : "";
   const edited = comment.edited && !comment.deleted ? ' <span class="comment-edited">(edited)</span>' : "";

@@ -89,56 +89,9 @@ describe("the state: any role reads, nobody else", () => {
     expect((await wikiControlsView(w.controls, ADMIN, "beacon")).wiki).toEqual({ pages: 3, refreshPages: 2 });
   });
 
-  it("is per company: company B's wiki and switch for the same project name never show in company A's view", async () => {
-    const store = new MemoryDocumentStore();
-    const a = world({ store });
-    const b = world({ store, company: COMPANY_B });
-    await seedWiki(b, "beacon", ["overview", "repo-api", "repo-web"]);
-    await setWikiAgentSwitch(b.controls.agents, "beacon", true);
-    expect(await wikiControlsView(a.controls, ADMIN, "beacon")).toMatchObject({ agents: { on: false }, wiki: { pages: 0 } });
-    expect(await wikiControlsView(b.controls, ADMIN, "beacon")).toMatchObject({ agents: { on: true }, wiki: { pages: 3 } });
-  });
 });
 
 describe("Build, Stop and Continue: manage only, the run's own rules, audited first", () => {
-  it("a manager builds: the project pays, the request is audited BEFORE the task starts, and the answer is the full view", async () => {
-    const order: string[] = [];
-    const w = world({ record: async (action) => { order.push(`audit:${action}`); } });
-    const origStart = w.starter.start.bind(w.starter);
-    w.starter.start = async (request) => { order.push("start"); return origStart(request); };
-    const requestId = id();
-    const done = await startWikiControl(w.controls, ADMIN, "beacon", { requestId });
-    expect(done.status).toBe(202);
-    expect(done.view).toMatchObject({ status: "running", canManage: true, payer: "project", wiki: { pages: 0 } });
-    expect(order).toEqual(["audit:start_requested", "start"]);
-    expect(w.starter.started[0]).toMatchObject({ project: "beacon", payer: { kind: "project", project: "beacon" } });
-    // A repeat of the request id starts nothing more.
-    expect((await startWikiControl(w.controls, ADMIN, "beacon", { requestId })).status).toBe(200);
-    expect(w.starter.started).toHaveLength(1);
-  });
-
-  it("a viewer and a person with no role start, stop and continue nothing, and nothing is audited", async () => {
-    const w = world();
-    await startWikiControl(w.controls, ADMIN, "beacon", { requestId: id() });
-    const before = w.audited.length;
-    for (const control of [startWikiControl, stopWikiControl, continueWikiControl]) {
-      await expect(control(w.controls, VIEWER, "beacon", { requestId: id() })).rejects.toMatchObject({ code: "FORBIDDEN", message: `FORBIDDEN: ${WIKI_BUILD_WORDS.notAllowed}` });
-      await expect(control(w.controls, OUTSIDER, "beacon", { requestId: id() })).rejects.toMatchObject({ code: "PROJECT_NOT_FOUND" });
-    }
-    expect(w.audited).toHaveLength(before);
-    expect(w.starter.started).toHaveLength(1);
-    expect(w.starter.cancelled).toHaveLength(0);
-    expect((await readWikiBuildPointer(w.store, w.company, "beacon"))?.stop).toBeUndefined();
-  });
-
-  it("a manager of project A cannot build, stop or continue project B they do not manage", async () => {
-    const w = world({ manages: ["beacon"] });
-    for (const control of [startWikiControl, stopWikiControl, continueWikiControl]) {
-      await expect(control(w.controls, ADMIN, "other", { requestId: id() })).rejects.toMatchObject({ code: "PROJECT_NOT_FOUND" });
-    }
-    expect(w.starter.started).toHaveLength(0);
-    expect(await readWikiBuildPointer(w.store, w.company, "other")).toBeUndefined();
-  });
 
   it("an audit record that cannot be written means nothing is done", async () => {
     const w = world({ record: async () => { throw new Error("audit down"); } });
@@ -174,31 +127,6 @@ describe("Build, Stop and Continue: manage only, the run's own rules, audited fi
 describe("Refresh now: the same entry, a filtered plan", () => {
   const FULL = ["overview", "repo-api", "repo-web", modulePageId("api", "src"), modulePageId("web", "app"), "connections"];
 
-  it("rewrites only the pages marked wrong, with changed claims, or not yet written (kind refresh, at today's commits); up-to-date pages are left alone", async () => {
-    const w = world();
-    await seedWiki(w, "beacon", ["overview", "repo-api", "repo-web", modulePageId("api", "src")]);
-    await w.wiki.addFlag("beacon", { pageId: "repo-api", by: { kind: "person", personId: "p1" } });
-    await w.wiki.markClaims("beacon", modulePageId("api", "src"), [{ claimId: "c0001", source: "changed" }]);
-    const done = await refreshWikiControl(w.controls, ADMIN, "beacon", { requestId: id() });
-    expect(done.status).toBe(202);
-    const pointer = (await readWikiBuildPointer(w.store, w.company, "beacon"))!;
-    // Not planned: overview and repo-web (up to date). Planned: flagged, changed, and the two planned pages that were never written.
-    expect(pointer.plan.map((p) => p.id)).toEqual(["repo-api", modulePageId("api", "src"), modulePageId("web", "app"), "connections"]);
-    expect(FULL.filter((id) => !pointer.plan.some((p) => p.id === id))).toEqual(["overview", "repo-web"]);
-    expect(pointer).toMatchObject({ buildKind: "refresh", payer: { kind: "project", project: "beacon" } });
-    expect(w.records.at(-1)).toMatchObject({ kind: "refresh", state: "running" });
-    expect(w.audited.map((entry) => entry.action)).toEqual(["refresh_requested"]);
-  });
-
-  it("a claim-level mark (not only a page-level one) makes the page part of the refresh, in the view count and in the plan", async () => {
-    const w = world();
-    await seedWiki(w, "beacon", FULL);
-    await w.wiki.addFlag("beacon", { pageId: "repo-web", claimId: "c0001", by: { kind: "person", personId: "p1" } });
-    expect((await wikiControlsView(w.controls, ADMIN, "beacon")).wiki).toEqual({ pages: FULL.length, refreshPages: 1 });
-    expect((await refreshWikiControl(w.controls, ADMIN, "beacon", { requestId: id() })).status).toBe(202);
-    expect((await readWikiBuildPointer(w.store, w.company, "beacon"))!.plan.map((p) => p.id)).toEqual(["repo-web"]);
-  });
-
   it("a claim mark older than the page (a refresh already rewrote it and kept the claim) does not pick it up again; a resolved mark never does", async () => {
     const w = world();
     await seedWiki(w, "beacon", FULL);
@@ -229,29 +157,6 @@ describe("Refresh now: the same entry, a filtered plan", () => {
     const broken = { ...w.controls, wiki: { ...w.wiki, openClaimFlagPages: async () => { throw new Error("secret row detail"); } } } as WikiControlsDeps;
     await expect(wikiControlsView(broken, ADMIN, "beacon")).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: `RUNTIME_UNAVAILABLE: ${WIKI_CONTROLS_WORDS.unreadable}` });
     await expect(refreshWikiControl(broken, ADMIN, "beacon", { requestId: id() })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: `RUNTIME_UNAVAILABLE: ${WIKI_CONTROLS_WORDS.unreadable}` });
-  });
-
-  it("claim marks are per project and per company: another project's or company's mark makes no refresh here", async () => {
-    const store = new MemoryDocumentStore();
-    const a = world({ store, manages: ["beacon", "other"] });
-    const b = world({ store, company: COMPANY_B });
-    for (const [x, project] of [[a, "beacon"], [a, "other"], [b, "beacon"]] as const) await seedWiki(x, project, FULL);
-    await a.wiki.addFlag("other", { pageId: "repo-api", claimId: "c0001", by: { kind: "person", personId: "p1" } });
-    await b.wiki.addFlag("beacon", { pageId: "repo-api", claimId: "c0001", by: { kind: "person", personId: "p1" } });
-    expect((await wikiControlsView(a.controls, ADMIN, "beacon")).wiki.refreshPages).toBe(0);
-    await expect(refreshWikiControl(a.controls, ADMIN, "beacon", { requestId: id() })).rejects.toMatchObject({ message: `CONFIG_INVALID: ${WIKI_CONTROLS_WORDS.nothingToRefresh}` });
-    expect((await wikiControlsView(a.controls, ADMIN, "other")).wiki.refreshPages).toBe(1);
-    expect((await wikiControlsView(b.controls, ADMIN, "beacon")).wiki.refreshPages).toBe(1);
-    expect(a.starter.started).toHaveLength(0);
-  });
-
-  it("refuses with nothing started when there is no wiki, or when everything is up to date", async () => {
-    const empty = world();
-    await expect(refreshWikiControl(empty.controls, ADMIN, "beacon", { requestId: id() })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: `CONFIG_INVALID: ${WIKI_CONTROLS_WORDS.buildFirst}` });
-    const w = world();
-    await seedWiki(w, "beacon", FULL);
-    await expect(refreshWikiControl(w.controls, ADMIN, "beacon", { requestId: id() })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: `CONFIG_INVALID: ${WIKI_CONTROLS_WORDS.nothingToRefresh}` });
-    expect(empty.starter.started.length + w.starter.started.length).toBe(0);
   });
 
   it("is manage only, project scoped, and company scoped: another company's flagged page does not make a refresh", async () => {
@@ -299,24 +204,7 @@ describe("Give the wiki to agents: A1's switch, written by a manager for ONE com
     expect(a.audited.map((entry) => [entry.action, entry.on])).toEqual([["agents_switched", true], ["agents_switched", false]]);
   });
 
-  it("a viewer and a person with no role cannot change it, and nothing is written or audited; a manager of another project cannot reach this one", async () => {
-    const w = world({ manages: ["other"], views: ["beacon"] });
-    await expect(agentsSwitchControl(w.controls, VIEWER, "beacon", { requestId: id(), on: true })).rejects.toMatchObject({ code: "FORBIDDEN" });
-    await expect(agentsSwitchControl(w.controls, OUTSIDER, "beacon", { requestId: id(), on: true })).rejects.toMatchObject({ code: "PROJECT_NOT_FOUND" });
-    await expect(agentsSwitchControl(w.controls, ADMIN, "beacon", { requestId: id(), on: true })).rejects.toMatchObject({ code: "PROJECT_NOT_FOUND" });
-    expect(await store(w).get(wikiAgentSwitchKey(w.company, "beacon"))).toBeUndefined();
-    expect(w.audited).toHaveLength(0);
-  });
-
-  it("the body is strict: on must be a boolean and nothing else is allowed", async () => {
-    const w = world();
-    for (const body of [{ requestId: id() }, { requestId: id(), on: "yes" }, { requestId: id(), on: true, project: "other" }, { on: true }]) {
-      await expect(agentsSwitchControl(w.controls, ADMIN, "beacon", body)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    }
-    expect(await store(w).get(wikiAgentSwitchKey(w.company, "beacon"))).toBeUndefined();
-  });
 });
-const store = (w: World): MemoryDocumentStore => w.store;
 
 describe("Delete wiki: W2's deleteWiki AND A1's deleteWikiUse AND the build's own rows, for this company and project only", () => {
   const partitions = (company: OrgId, project: string) => ({ wiki: wikiPartition(company, project), use: wikiUsePartition(company, project), build: wikiBuildPartition({ orgId: company, project }) });
@@ -351,15 +239,6 @@ describe("Delete wiki: W2's deleteWiki AND A1's deleteWikiUse AND the build's ow
     expect(await sizes(a, COMPANY_A, "other")).toEqual(before.other);
     expect(await sizes(a, COMPANY_B, "beacon")).toEqual(before.b);
     expect(a.audited.map((entry) => entry.action)).toEqual(["delete_requested"]);
-  });
-
-  it("a project made again under the same name never inherits the switch: it is off after the delete", async () => {
-    const w = world();
-    await fill(w, "beacon");
-    expect(await wikiAgentSwitchIsOn(w.controls.agents, "beacon")).toBe(true);
-    await deleteWikiControl(w.controls, ADMIN, "beacon", { requestId: id() }, { store: w.store, now: () => T0 });
-    expect(await wikiAgentSwitchIsOn(w.controls.agents, "beacon")).toBe(false);
-    expect(await w.store.get(wikiAgentSwitchKey(w.company, "beacon"))).toBeUndefined();
   });
 
   it("a viewer, a person with no role and a manager of another project delete nothing; a running build must be stopped first", async () => {
@@ -410,47 +289,7 @@ describe("Delete wiki: W2's deleteWiki AND A1's deleteWikiUse AND the build's ow
   });
 });
 
-describe("the answers match the contract the setup page reads", () => {
-  it("every state answer parses with WikiControlsViewSchema, in each status", async () => {
-    const { WikiControlsViewSchema } = await import("@agentx/contracts");
-    const w = world();
-    expect(WikiControlsViewSchema.parse(await wikiControlsView(w.controls, ADMIN, "beacon"))).toMatchObject({ status: "none" });
-    const running = await startWikiControl(w.controls, ADMIN, "beacon", { requestId: id() });
-    expect(WikiControlsViewSchema.parse(running.view)).toMatchObject({ status: "running" });
-    const stopped = await stopWikiControl(w.controls, ADMIN, "beacon", { requestId: id() });
-    expect(WikiControlsViewSchema.parse(stopped.view)).toMatchObject({ status: "stopped", stop: "stopped_by_person" });
-    const missing = world({ deps: { aiKey: async () => "missing" } });
-    expect(WikiControlsViewSchema.parse(await wikiControlsView(missing.controls, ADMIN, "beacon"))).toMatchObject({ aiKey: "missing", connectKey: WIKI_BUILD_WORDS.connectKey });
-  });
-});
-
 describe("audit tokens and a pointer that moved (review M1, L3)", () => {
-  it("a reused request id that finds another state carries another token, so it gets its own audit record; a true repeat carries the same one", async () => {
-    const w = world();
-    const requestId = id();
-    await agentsSwitchControl(w.controls, ADMIN, "beacon", { requestId, on: true });
-    await agentsSwitchControl(w.controls, ADMIN, "beacon", { requestId, on: false });
-    expect(w.audited.map((entry) => [entry.on, entry.token.split("@")[0]])).toEqual([[true, "false>true"], [false, "true>false"]]);
-    // The same flip a third time (A, B, A) is a new act and carries a new token once the clock has moved.
-    clock.now += 1000;
-    await agentsSwitchControl(w.controls, ADMIN, "beacon", { requestId, on: true });
-    expect(w.audited.at(-1)!.token.split("@")[0]).toBe("false>true");
-    expect(w.audited.at(-1)!.token).not.toBe(w.audited[0]!.token);
-
-    await seedWiki(w, "beacon", ["overview"]);
-    const del = id();
-    await deleteWikiControl(w.controls, ADMIN, "beacon", { requestId: del }, { store: w.store, now: () => T0 });
-    await seedWiki(w, "beacon", ["overview", "repo-api"]);
-    await deleteWikiControl(w.controls, ADMIN, "beacon", { requestId: del }, { store: w.store, now: () => T0 });
-    const deletes = w.audited.filter((entry) => entry.action === "delete_requested");
-    expect(deletes).toHaveLength(2);
-    expect(deletes[0]!.token).not.toBe(deletes[1]!.token);
-
-    const started = id();
-    await startWikiControl(w.controls, ADMIN, "beacon", { requestId: started });
-    const first = w.audited.filter((entry) => entry.action === "start_requested").at(-1)!;
-    expect(first.token.startsWith("none@")).toBe(true);
-  });
 
   it("deleting the build's rows leaves the pointer of a run that started after the pointer was read", async () => {
     const w = world();

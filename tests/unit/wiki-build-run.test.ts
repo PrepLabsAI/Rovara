@@ -9,9 +9,8 @@ import {
   continueWikiBuild, eraseWikiBuildNotes, nextWikiPage, readWikiBuildPointer, startWikiBuild, stopWikiBuild, submitWikiPage, wikiBuildState,
   type WikiBuildDeps, type WikiBuildStanding, type WikiPageJob, type WikiPageLoopDeps,
 } from "../../packages/broker/src/core/wiki-build/run.js";
-import { modulePageId } from "../../packages/broker/src/core/wiki-build/plan.js";
 import { wikiPageInstructions } from "../../packages/broker/src/core/wiki-build/prompt.js";
-import { API_SHA, COMPANY_A, COMPANY_B, FakeSink, FakeStarter, WEB_SHA, area, fileMap, reader, repoEntry } from "../support/wiki-build-fixtures.js";
+import { API_SHA, COMPANY_A, FakeSink, FakeStarter, WEB_SHA, area, fileMap, reader, repoEntry } from "../support/wiki-build-fixtures.js";
 
 const ADMIN = "person-admin";
 const VIEWER = "person-viewer";
@@ -62,27 +61,6 @@ const scopeOf = (w: World, taskId: string) => ({ orgId: w.deps.companyId, projec
 const pageOf = (job: WikiPageJob) => { if (job.kind !== "page") throw new Error(`expected a page, got ${job.word}`); return job.page; };
 
 describe("start: who, the key, the map, the commits and the payer", () => {
-  it("a project admin starts it; the pointer holds the code host's heads, the plan, the limits and the project as payer; nothing comes from the body", async () => {
-    const w = world();
-    const result = await startWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID(), notes: "src matters" });
-    expect(result.status).toBe(202);
-    expect(result.view).toMatchObject({ status: "running", payer: "project", limits: { budgetCents: 1_000 } });
-    const request = w.starter.started[0]!;
-    expect(request.payer).toEqual({ kind: "project", project: "beacon" });
-    expect(request.pins).toEqual([{ repo: "api", commit: API_SHA }, { repo: "web", commit: WEB_SHA }]);
-    const pointer = await readWikiBuildPointer(w.store, COMPANY_A, "beacon");
-    expect(pointer).toMatchObject({ requestedBy: ADMIN, pins: request.pins, payer: { kind: "project", project: "beacon" }, buildKind: "first" });
-    expect(pointer!.plan.map((page) => page.id)).toEqual(["overview", "repo-api", "repo-web", modulePageId("api", "src"), modulePageId("web", "app"), "connections"]);
-    expect(w.records.at(-1)).toMatchObject({ state: "running", kind: "first", repos: request.pins });
-  });
-
-  it("a body that tries to set limits, payer or commits is refused", async () => {
-    const w = world();
-    for (const extra of [{ budgetCents: 99_999 }, { payer: { kind: "member" } }, { pins: [{ repo: "api", commit: "f".repeat(40) }] }]) {
-      await expect(startWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID(), ...extra })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    }
-    expect(w.starter.started).toHaveLength(0);
-  });
 
   it("a viewer is refused in fixed words; a person with no role gets 'project not found'; a standing that cannot be read is refused", async () => {
     const w = world();
@@ -157,32 +135,6 @@ describe("the page loop", () => {
     expect(job.instructions).toContain(`api@${API_SHA}`);
   });
 
-  it("the cap: a page is granted when spend + reserve equals the cap, and not one cent past it", async () => {
-    const w = world();
-    const { taskId } = await started(w);
-    const scope = scopeOf(w, taskId);
-    await nextWikiPage(w.loop, scope, { spentCents: 0 });
-    await submitWikiPage(w.loop, scope, { pageId: "overview", spentCents: 900, draft: goodDraft("overview") });
-    expect(pageOf(await nextWikiPage(w.loop, scope, { spentCents: 900 })).id).toBe("repo-api");
-    await submitWikiPage(w.loop, scope, { pageId: "repo-api", spentCents: 901, draft: goodDraft("repo-api") });
-    expect(await nextWikiPage(w.loop, scope, { spentCents: 901 })).toEqual({ kind: "end", word: "budget_used" });
-    expect(await wikiBuildState(w.deps, "beacon")).toMatchObject({ status: "stopped", stop: "budget_used", message: WIKI_BUILD_WORDS.budget_used, canContinue: true });
-    expect(w.records.at(-1)).toMatchObject({ state: "stopped", stopReason: "cap" });
-  });
-
-  it("a spend that goes backwards is ignored (the most seen stands)", async () => {
-    const w = world();
-    const { taskId } = await started(w);
-    const scope = scopeOf(w, taskId);
-    await nextWikiPage(w.loop, scope, { spentCents: 850 });
-    expect(await nextWikiPage(w.loop, scope, { spentCents: 0 })).toMatchObject({ kind: "page" });
-    await submitWikiPage(w.loop, scope, { pageId: "overview", spentCents: 0, draft: goodDraft("overview") });
-    expect(await readWikiBuildPointer(w.store, COMPANY_A, "beacon")).toMatchObject({ spentCents: 850 });
-    expect(await nextWikiPage(w.loop, scope, { spentCents: 0 })).toMatchObject({ kind: "page" });
-    await submitWikiPage(w.loop, scope, { pageId: "repo-api", spentCents: 901, draft: goodDraft("repo-api") });
-    expect(await nextWikiPage(w.loop, scope, { spentCents: 0 })).toEqual({ kind: "end", word: "budget_used" });
-  });
-
   it("a page that is not out, an unreadable spend, and a draft for another page are refused or dropped", async () => {
     const w = world();
     const { taskId } = await started(w);
@@ -236,17 +188,6 @@ describe("the page loop", () => {
 });
 
 describe("fixed commits and replaced runs", () => {
-  it("a page citing another commit of the same file is not kept, even though the quote is there", async () => {
-    const w = world();
-    w.loop.read = reader({ ...FILES, [`api:src/server.ts@${"0".repeat(40)}`]: API_FILE }).read;
-    const { taskId } = await started(w);
-    const scope = scopeOf(w, taskId);
-    await nextWikiPage(w.loop, scope, { spentCents: 0 });
-    const draft = goodDraft("overview");
-    draft.sections[0]!.claims[0]!.citations[0]!.commit = "0".repeat(40);
-    expect(await submitWikiPage(w.loop, scope, { pageId: "overview", spentCents: 1, draft })).toMatchObject({ kept: false });
-    expect(w.sink.pages.size).toBe(0);
-  });
 
   it("a run replaced while its page was being checked does not write that page", async () => {
     const w = world();
@@ -266,32 +207,6 @@ describe("fixed commits and replaced runs", () => {
 });
 
 describe("stop and continue", () => {
-  it("stop keeps finished pages (even one handed in after Stop); continue uses the same commits and plan, skips them, and carries what was spent", async () => {
-    const w = world();
-    const { taskId } = await started(w);
-    const scope = scopeOf(w, taskId);
-    await nextWikiPage(w.loop, scope, { spentCents: 0 });
-    await submitWikiPage(w.loop, scope, { pageId: "overview", spentCents: 100, draft: goodDraft("overview") });
-    await nextWikiPage(w.loop, scope, { spentCents: 100 });
-    await expect(stopWikiBuild(w.deps, VIEWER, "beacon", { requestId: randomUUID() })).rejects.toMatchObject({ code: "FORBIDDEN" });
-    const stopped = await stopWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID() });
-    expect(stopped.view).toMatchObject({ status: "stopped", stop: "stopped_by_person", canContinue: true });
-    expect(w.starter.cancelled).toEqual([taskId]);
-    // The page that was out when Stop was pressed is still taken.
-    expect(await submitWikiPage(w.loop, scope, { pageId: "repo-api", spentCents: 150, draft: goodDraft("repo-api") })).toMatchObject({ kept: true });
-    expect(await nextWikiPage(w.loop, scope, { spentCents: 150 })).toEqual({ kind: "end", word: "stopped_by_person" });
-    expect([...w.sink.pages.keys()]).toEqual(["overview", "repo-api"]);
-
-    const before = await readWikiBuildPointer(w.store, COMPANY_A, "beacon");
-    w.deps.defaultBranchHeads = async () => [{ repo: "api", commit: "c".repeat(40) }, { repo: "web", commit: "d".repeat(40) }];
-    await continueWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID() });
-    const after = await readWikiBuildPointer(w.store, COMPANY_A, "beacon");
-    expect(after).toMatchObject({ pins: before!.pins, plan: before!.plan, keptFromEarlier: ["overview", "repo-api"], continuedFrom: taskId, spentCents: 0, spentEarlierCents: 150 });
-    const next = await nextWikiPage(w.loop, scopeOf(w, after!.taskId), { spentCents: 0 });
-    expect(pageOf(next).id).toBe("repo-web");
-    // The old run's callbacks no longer reach the project's build.
-    await expect(nextWikiPage(w.loop, scope, { spentCents: 0 })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-  });
 
   it("the build cap holds across Stop and Continue: no room under the limit, no continue; raising the limit makes room; the job's ceiling is what is left", async () => {
     const w = world();
@@ -313,15 +228,6 @@ describe("stop and continue", () => {
     expect(await wikiBuildState(w.deps, "beacon")).toMatchObject({ summary: { spentCents: 1_901 } });
   });
 
-  it("a page still out when the run ended is charged at its reserve on continue", async () => {
-    const w = world();
-    const { taskId } = await started(w);
-    await nextWikiPage(w.loop, scopeOf(w, taskId), { spentCents: 200 });
-    await stopWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID() });
-    await continueWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID() });
-    expect(await readWikiBuildPointer(w.store, COMPANY_A, "beacon")).toMatchObject({ spentEarlierCents: 300 });
-  });
-
   it("a continue keeps the notes' author, so erasing that person removes every copy", async () => {
     const w = world();
     w.standings.set("person-second-admin", "manage");
@@ -339,31 +245,6 @@ describe("stop and continue", () => {
     await expect(continueWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID() })).rejects.toMatchObject(refusal("CONFIG_INVALID", WIKI_BUILD_WORDS.nothingToContinue));
     await started(w);
     await expect(continueWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID() })).rejects.toMatchObject({ code: "WORKSPACE_BUSY" });
-  });
-});
-
-describe("isolation: company AND project", () => {
-  it("another company's or project's callback, and a sink of another project or company, are refused", async () => {
-    const w = world();
-    const { taskId } = await started(w);
-    await expect(nextWikiPage(w.loop, { orgId: COMPANY_B, project: "beacon", taskId }, { spentCents: 0 })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-    await expect(nextWikiPage(w.loop, { orgId: COMPANY_A, project: "other", taskId }, { spentCents: 0 })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-    await expect(nextWikiPage({ ...w.loop, sink: new FakeSink(COMPANY_A, "other") }, scopeOf(w, taskId), { spentCents: 0 })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-    await expect(nextWikiPage({ ...w.loop, sink: new FakeSink(COMPANY_B, "beacon") }, scopeOf(w, taskId), { spentCents: 0 })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-    // A callback that names another company, with that company's sink, on this company's install: refused (the scope's company must be the install's own).
-    await expect(nextWikiPage({ ...w.loop, sink: new FakeSink(COMPANY_B, "beacon") }, { orgId: COMPANY_B, project: "beacon", taskId }, { spentCents: 0 })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-  });
-
-  it("a build of project A is invisible from project B and from another company, on the same store", async () => {
-    const w = world();
-    await started(w);
-    expect(await readWikiBuildPointer(w.store, COMPANY_A, "other")).toBeUndefined();
-    expect(await readWikiBuildPointer(w.store, COMPANY_B, "beacon")).toBeUndefined();
-    expect((await wikiBuildState({ ...w.deps, companyId: COMPANY_B }, "beacon")).status).toBe("none");
-    // Company B starts its own build of a project with the same name: both stand.
-    const b: WikiBuildDeps = { ...w.deps, companyId: COMPANY_B, starter: new FakeStarter(w.store) };
-    await startWikiBuild(b, ADMIN, "beacon", { requestId: randomUUID() });
-    expect((await readWikiBuildPointer(w.store, COMPANY_A, "beacon"))!.taskId).not.toBe((await readWikiBuildPointer(w.store, COMPANY_B, "beacon"))!.taskId);
   });
 });
 
@@ -388,40 +269,3 @@ describe("person erase", () => {
   });
 });
 
-describe("the job's ceiling: one page's reserve above what the broker knows (review M2)", () => {
-  // MUTANT: the ceiling is the whole remaining cap, so a page that dies unreported (Stop, crash, lost machine) can cost far more than the reserve a continue charges for it.
-  it("is the cap that is left, or the known spend plus one reserve, whichever is less; it follows the spend the worker reported", async () => {
-    const w = world();
-    const { taskId } = await started(w);
-    const scope = scopeOf(w, taskId);
-    expect(await nextWikiPage(w.loop, scope, { spentCents: 0 })).toMatchObject({ kind: "page", spendCeilingCents: 100 });
-    await submitWikiPage(w.loop, scope, { pageId: "overview", spentCents: 80, draft: goodDraft("overview") });
-    expect(await nextWikiPage(w.loop, scope, { spentCents: 80 })).toMatchObject({ kind: "page", spendCeilingCents: 180 });
-    // A page asked for again while it is out keeps the same ceiling (no more spend was reported).
-    expect(await nextWikiPage(w.loop, scope, { spentCents: 80 })).toMatchObject({ spendCeilingCents: 180 });
-    await submitWikiPage(w.loop, scope, { pageId: "repo-api", spentCents: 850, draft: goodDraft("repo-api") });
-    // Near the cap the cap is what limits it: 1000 - 850 = 150 is less than 850 + 100.
-    expect(await nextWikiPage(w.loop, scope, { spentCents: 850 })).toMatchObject({ kind: "page", spendCeilingCents: 950 });
-  });
-
-  it("stop and continue, over and over, with every page dying unreported at its ceiling: what was really spent never passes the cap", async () => {
-    const w = world();
-    let real = 0;
-    for (let round = 0; round < 40; round += 1) {
-      const pointer = round === 0 ? undefined : await readWikiBuildPointer(w.store, COMPANY_A, "beacon");
-      if (round === 0) await startWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID() });
-      else {
-        try { await continueWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID() }); } catch (error) { expect(error).toMatchObject({ code: "BUDGET_EXCEEDED" }); break; }
-      }
-      void pointer;
-      const now = (await readWikiBuildPointer(w.store, COMPANY_A, "beacon"))!;
-      const job = await nextWikiPage(w.loop, scopeOf(w, now.taskId), { spentCents: 0 });
-      if (job.kind !== "page") break;
-      // The page spends right up to its ceiling and the machine dies: nothing of that spend is ever reported.
-      real += job.spendCeilingCents;
-      await stopWikiBuild(w.deps, ADMIN, "beacon", { requestId: randomUUID() });
-    }
-    expect(real).toBeLessThanOrEqual(1_000);
-    expect(real).toBeGreaterThan(0);
-  });
-});

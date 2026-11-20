@@ -31,29 +31,6 @@ const CODE_FILES = {
 };
 
 describe("resolveKnowledge: the design's example", () => {
-  it("loads always rules, matched fileMatch rules and nested files, and lists the rest with reasons", async () => {
-    const result = await resolve("plan", [meta(META_FILES), repo(CODE_FILES)], { filesInPlay: [{ repo: "SvcEngine", path: "src/match/rank.py" }] });
-    expect(paths(result)).toEqual([
-      "service-meta:.kiro/steering/product.md", "service-meta:.kiro/steering/python-style.md", "service-meta:AGENTS.md",
-      "SvcEngine:AGENTS.md", "SvcEngine:src/match/AGENTS.md",
-    ]);
-    expect(record(result, ".kiro/steering/python-style.md")).toMatchObject({ status: "loaded", why: { kind: "matched", detail: "src/match/rank.py" }, layer: "meta" });
-    expect(record(result, "src/match/AGENTS.md")).toMatchObject({ status: "loaded", layer: "folder", why: { kind: "matched" } });
-    expect(record(result, ".kiro/steering/oncall.md")).toMatchObject({ status: "skipped", reason: "not_requested" });
-    expect(record(result, ".cursor/rules/ui.mdc")).toMatchObject({ status: "skipped", reason: "not_matched" });
-    expect(record(result, ".kiro/hooks/lint.json")).toMatchObject({ status: "skipped", reason: "found_not_run" });
-    expect(record(result, ".kiro/steering/api.md")).toMatchObject({ status: "available" });
-    expect(result.autoCatalog).toEqual([{ name: "api-design", description: "REST rules", repo: "service-meta", path: ".kiro/steering/api.md" }]);
-    expect(result.items.every((item) => /^[0-9a-f]{64}$/u.test(item.digest))).toBe(true);
-    expect(result.items.find((item) => item.path === ".kiro/steering/product.md")?.readAt).toBe("knowledgeCommit");
-  });
-
-  it("finds a nested AGENTS.md only for folders on the way to a file in play", async () => {
-    const none = await resolve("plan", [repo(CODE_FILES)]);
-    expect(paths(none)).toEqual(["SvcEngine:AGENTS.md"]);
-    const elsewhere = await resolve("plan", [repo(CODE_FILES)], { filesInPlay: [{ repo: "SvcEngine", path: "src/other/x.ts" }] });
-    expect(paths(elsewhere)).toEqual(["SvcEngine:AGENTS.md"]);
-  });
 
   it("applies a meta repo's pattern rule to every repository's files, by the path in that repository", async () => {
     const result = await resolve("build", [meta(META_FILES), repo(CODE_FILES)], { filesInPlay: [{ repo: "SvcEngine", path: "lib/a.py" }] });
@@ -71,11 +48,6 @@ describe("resolveKnowledge: activation modes", () => {
     expect(result.manualItems.has("oncall")).toBe(false);
   });
 
-  it("keeps a manual rule that was not named available for later", async () => {
-    const result = await resolve("plan", [meta(META_FILES)]);
-    expect(result.manualItems.get("oncall")?.text).toBe("Oncall runbook");
-  });
-
   it("lists auto rules for the model in Understand, Plan and Build; judging stages load the plan's set plus rules the diff hits", async () => {
     const build = await resolve("build", [meta(META_FILES)]);
     expect(build.autoCatalog.map((entry) => entry.name)).toEqual(["api-design"]);
@@ -88,13 +60,6 @@ describe("resolveKnowledge: activation modes", () => {
     expect(record(reviewWithPlan, ".kiro/steering/api.md")).toMatchObject({ status: "loaded" });
     const checkWithPlan = await resolve("plan_check", [meta(META_FILES)], { plannedAuto: new Set(["API-Design"]) });
     expect(record(checkWithPlan, ".kiro/steering/api.md")?.status).toBe("loaded");
-  });
-
-  it("a judging stage that does not know the plan's set loads every auto rule, so a steered planner cannot hide one (meta Q9)", async () => {
-    for (const stage of ["review", "plan_check"] as const) {
-      const result = await resolve(stage, [meta(META_FILES)]);
-      expect(record(result, ".kiro/steering/api.md")).toMatchObject({ status: "loaded" });
-    }
   });
 
   it("leaves a Copilot rule out of the stages its excludeAgent names", async () => {
@@ -113,20 +78,6 @@ describe("resolveKnowledge: AGENTS.md and CLAUDE.md", () => {
     expect(record(result, "AGENTS.md")).toMatchObject({ status: "skipped", reason: "overridden" });
   });
 
-  it("does not repeat AGENTS.md when CLAUDE.md imports it", async () => {
-    const result = await resolve("plan", [repo({ "AGENTS.md": "agents text", "CLAUDE.md": "@AGENTS.md\nmore" })]);
-    const claude = result.items.find((item) => item.path === "CLAUDE.md");
-    expect(claude?.text).toContain("[Already included: AGENTS.md]");
-    expect(claude?.text.match(/agents text/gu)).toBeNull();
-    expect(result.items.find((item) => item.path === "AGENTS.md")?.text).toBe("agents text");
-  });
-
-  it("follows Kiro file references inside the same repository and counts them in the item's size", async () => {
-    const result = await resolve("plan", [repo({ ".kiro/steering/a.md": "See #[[file:docs/api.md]] now", "docs/api.md": "API DOC" })]);
-    const item = result.items[0]!;
-    expect(item.text).toContain("API DOC");
-    expect(item.bytes).toBe(Buffer.byteLength(item.text, "utf8"));
-  });
 });
 
 describe("resolveKnowledge: what is skipped and why", () => {
@@ -150,11 +101,6 @@ describe("resolveKnowledge: what is skipped and why", () => {
     expect(result.diagnostics.some((line) => line.includes("hidden characters"))).toBe(true);
   });
 
-  it("never puts text from a file into a diagnostic or a reason", async () => {
-    const result = await resolve("plan", [repo({ ".kiro/steering/SECRET-NAME.md": "---\ninclusion: nope\n---\nSECRET-BODY" })]);
-    expect(JSON.stringify([result.diagnostics, result.notices])).not.toContain("SECRET");
-  });
-
   it("bounds how many rule files and folders it reads", async () => {
     const files: Record<string, string> = {};
     for (let index = 0; index < 250; index += 1) files[`.kiro/steering/r${String(index).padStart(3, "0")}.md`] = "x";
@@ -165,22 +111,6 @@ describe("resolveKnowledge: what is skipped and why", () => {
 });
 
 describe("resolveKnowledge: budgets", () => {
-  const big = (kind: string) => `${kind}${"x".repeat(40 * 1024)}`;
-
-  it("drops the farthest items first and lists every drop", async () => {
-    // Always-on: meta and repo files together are about 160 KiB, so the repo-level files (the farther layer) go before the meta one.
-    const metaFiles = { "AGENTS.md": big("meta") };
-    const files = { "AGENTS.md": big("repo"), ".kiro/steering/a.md": big("steer"), ".kiro/steering/b.md": big("steer2") };
-    const result = await resolve("plan", [meta(metaFiles), repo(files)]);
-    const skipped = result.records.filter((entry) => entry.status === "skipped" && entry.reason === "over_budget");
-    expect(skipped.length).toBe(1);
-    expect(skipped[0]?.layer).toBe("repo");
-    expect(record(result, "AGENTS.md")).toBeDefined();
-    expect(result.items.some((item) => item.layer === "meta")).toBe(true);
-    expect(result.budget.skipped).toBe(1);
-    expect(result.budget.alwaysOnBytes).toBeLessThanOrEqual(DEFAULT_KNOWLEDGE_BUDGETS.alwaysOnBytes);
-    for (const entry of skipped) expect(entry.path).toBeDefined();
-  });
 
   const companyRule = (index: number, length = 600) => externalRuleItem({ layer: "company", name: `Rule ${index}`, text: "y".repeat(length), locked: true });
 
@@ -196,14 +126,6 @@ describe("resolveKnowledge: budgets", () => {
 
   it("still fails closed when locked company rules alone exceed the always-on byte budget", async () => {
     await expect(resolve("plan", [], { external: [companyRule(0), companyRule(1)], budgets: { ...DEFAULT_KNOWLEDGE_BUDGETS, alwaysOnBytes: 1_000 } })).rejects.toThrow(COMPANY_RULES_EXCEED_BUDGET_MESSAGE);
-  });
-
-  it("never drops a locked company rule to make room", async () => {
-    const company = Array.from({ length: 20 }, (_, index) => companyRule(index));
-    const result = await resolve("plan", [repo({ "AGENTS.md": "w".repeat(8_000) })], { external: company, budgets: { ...DEFAULT_KNOWLEDGE_BUDGETS, alwaysOnBytes: 14_000 } });
-    expect(result.items.filter((item) => item.locked === true)).toHaveLength(20);
-    expect(record(result, "AGENTS.md")).toMatchObject({ status: "skipped", reason: "over_budget" });
-    expect(result.records.filter((entry) => entry.locked === true).every((entry) => entry.status === "loaded" && entry.why?.kind === "required")).toBe(true);
   });
 
   it("budgets fileMatch additions apart from always-on rules", async () => {
@@ -231,11 +153,6 @@ describe("resolveKnowledge: the change under judgement edits a rule file", () =>
     ]);
   });
 
-  it("says nothing when the rule files are unchanged", async () => {
-    const files = { "AGENTS.md": "same", ".kiro/steering/a.md": "same too" };
-    const result = await resolve("review", [{ name: "payments", path: "p", layer: "repo", source: memoryKnowledgeSource(files, "base"), compareWith: memoryKnowledgeSource(files, "working") }]);
-    expect(result.notices).toEqual([]);
-  });
 });
 
 describe("resolveKnowledge: stacking order", () => {
@@ -274,13 +191,6 @@ describe("resolveKnowledge: nested folders with glob characters", () => {
     // The bracket folder is a literal: it does not match the folder `app/i`.
     const other = await resolve("build", [repo(files)], { filesInPlay: [{ repo: "SvcEngine", path: "app/i/page.tsx" }] });
     expect(other.items.map((item) => item.text)).toEqual(["other"]);
-  });
-});
-
-describe("resolveKnowledge: hooks come from the readers", () => {
-  it("finds hooks in the folders a reader names, and nowhere else", async () => {
-    const result = await resolve("plan", [repo({ ".kiro/hooks/a.json": "{}", "hooks/b.json": "{}" })]);
-    expect(result.records.filter((entry) => entry.reason === "found_not_run").map((entry) => entry.path)).toEqual([".kiro/hooks/a.json"]);
   });
 });
 

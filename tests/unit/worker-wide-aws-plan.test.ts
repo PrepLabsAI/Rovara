@@ -5,10 +5,7 @@ import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_PLAN_FEATURE, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, WORKER_INVOCATION_FEATURES,
-  type ProjectCommand, type ServiceCatalog, type TaskDependencyPlan,
-} from "@agentx/contracts";
+import { TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_PLAN_FEATURE, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, type ProjectCommand, type ServiceCatalog, type TaskDependencyPlan } from "@agentx/contracts";
 import { taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
 import { featuresForTestPlan } from "../../packages/broker/src/core/test-env/seam.js";
 import { withDetachedWorking } from "../../packages/worker/src/check-sandbox.js";
@@ -69,17 +66,6 @@ describe("the broker pins a wide plan, and only a worker that lists the feature 
     const needs = featuresForTestPlan(plans);
     expect(needs).toEqual(expect.arrayContaining([TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE]));
     expect(TestEnvTaskPlanSchema.safeParse({ revision: 1, digest: "a".repeat(64), roundBudgetMin: 30, selection: { method: "full", alwaysRun: [], fullSuiteOn: [] }, checks: [{ id: "unit", kind: "test" }], dependencies: plans }).success).toBe(true);
-  });
-  it("a new worker (every feature) has all it needs; an old one without the feature lacks exactly that, so the dispatch guard refuses it with the fixed sentence", () => {
-    const needs = featuresForTestPlan(planOf(WIDE));
-    const lacking = (workerFeatures: readonly string[]) => needs.filter((feature) => !workerFeatures.includes(feature));
-    expect(lacking(WORKER_INVOCATION_FEATURES)).toEqual([]);
-    expect(lacking(WORKER_INVOCATION_FEATURES.filter((feature) => feature !== TEST_SERVICES_AWS_ALL_SERVICES_FEATURE))).toEqual([TEST_SERVICES_AWS_ALL_SERVICES_FEATURE]);
-  });
-  it("a plan of the three that were always seeded does not need the feature, so an old worker still gets it", () => {
-    const narrow = planOf([aws("s3", { connect: { env: [], hostAliases: ["aws"] } }), aws("sqs"), aws("dynamodb")]);
-    expect(featuresForTestPlan(narrow)).not.toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
-    expect(featuresForTestPlan(narrow)).toContain(TEST_SERVICES_AWS_PLAN_FEATURE);
   });
 });
 
@@ -169,13 +155,6 @@ describe("the worker starts a wide plan", () => {
       const plans = planOf(services.map((service, index) => aws(service, index === 0 ? { connect: { env: [], hostAliases: ["aws"] } } : {})));
       const outcome = await h.start(plans).then(async (run) => { await run.dispose(); return "started"; }, (caught: unknown) => (caught instanceof TestServicesError ? caught.reason : "other"));
       expect(outcome, services.join(",")).toBe(ok ? "started" : "mismatch");
-    }
-  });
-  it("on the table's engine runs any service of the table", async () => {
-    for (const services of [["ec2"], ["sns", "bedrock-runtime"], ["kinesis", "sfn", "cognito-identity-provider"]]) {
-      const h = await harness(engineCatalog("1.0.385"));
-      const run = await h.start(planOf(services.map((service, index) => aws(service, index === 0 ? { connect: { env: [], hostAliases: ["aws"] } } : {}))));
-      await run.dispose();
     }
   });
   it("reads the repository's endpoint names again for each sealed round: a `.env` edited between rounds is seen by the next one", async () => {

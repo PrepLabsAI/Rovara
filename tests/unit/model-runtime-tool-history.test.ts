@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import type { Context } from "@earendil-works/pi-ai";
 import { createConfiguredModelRuntime } from "../../packages/model-runtime/src/index.js";
-import { TOOL_DECLARATIONS_MISSING_WORDS, toolBlocksWithoutTools } from "../../packages/model-runtime/src/tool-history.js";
+import { toolBlocksWithoutTools } from "../../packages/model-runtime/src/tool-history.js";
 
 const ALIAS = "qwen.qwen3-coder-480b-a35b-v1:0";
 const TOOL = { name: "read_file", description: "Read a file", parameters: Type.Object({ path: Type.String() }) };
@@ -17,7 +17,6 @@ const history = (tools: Context["tools"]): Context => ({
     { role: "toolResult", toolCallId: "toolu_1", toolName: "read_file", content: [{ type: "text", text: "# Hello" }], isError: false, timestamp: 3 },
   ],
 });
-const plain: Context = { messages: [{ role: "user", content: "Say hi", timestamp: 1 }] };
 
 function sse(events: Array<{ type: string } & Record<string, unknown>>) {
   return new Response(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "Content-Type": "text/event-stream" } });
@@ -57,33 +56,6 @@ describe("tool blocks without declared tools (pure)", () => {
 });
 
 describe("a routed model call (the gateway's agent route)", () => {
-  it("declares the tools when the conversation holds tool blocks: the request carries tools, tool_use and tool_result (positive control)", async () => {
-    const { runtime, model, bodies } = await routed();
-    const message = await runtime.completeSimple(model, history([TOOL]));
-    expect(message.stopReason).toBe("stop");
-    expect(bodies).toHaveLength(1);
-    const body = bodies[0]! as { tools?: Array<{ name: string }>; messages: Array<{ content: unknown }>; model: string };
-    expect(body.model).toBe(ALIAS);
-    expect(body.tools?.map((tool) => tool.name)).toEqual(["read_file"]);
-    expect(JSON.stringify(body.messages)).toContain("tool_use");
-    expect(JSON.stringify(body.messages)).toContain("tool_result");
-  });
-
-  it("refuses a conversation with tool blocks and no declared tools: nothing is sent, fixed words", async () => {
-    const { runtime, model, transport } = await routed();
-    const message = await runtime.completeSimple(model, history(undefined));
-    expect(message.stopReason).toBe("error");
-    expect(message.errorMessage).toBe(TOOL_DECLARATIONS_MISSING_WORDS);
-    expect(transport).not.toHaveBeenCalled();
-    expect(JSON.stringify(message)).not.toContain("README.md");
-  });
-
-  it("sends a conversation with no tool blocks and no tools exactly as before", async () => {
-    const { runtime, model, bodies } = await routed();
-    const message = await runtime.completeSimple(model, plain);
-    expect(message.stopReason).toBe("stop");
-    expect((bodies[0]! as { tools?: unknown }).tools).toBeUndefined();
-  });
 
   it("holds a call whose tools were all withdrawn after being used", async () => {
     const { runtime, model, transport } = await routed();

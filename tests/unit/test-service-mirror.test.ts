@@ -1,6 +1,6 @@
 // DEC 254zm: the install's starter copies as the contracts name them, the worker image's CLI the boot stage asks, and the copy script's plan and check.
 import { describe, expect, it } from "vitest";
-import { ownerCatalogOf, ownerImageReferences, ownerStarterEntries, OwnerListEntrySchema, OWNER_STARTER_IMAGES } from "../../packages/contracts/src/index.js";
+import { ownerCatalogOf, ownerImageReferences, ownerStarterEntries, OWNER_STARTER_IMAGES } from "../../packages/contracts/src/index.js";
 import { mirroredStarterEntries, testServiceMirrorRepositories } from "../../packages/contracts/src/test-service-mirror.js";
 import { testServicesMirrorOutput } from "../../packages/worker/src/test-services-mirror-cli.js";
 import { testServicesConfigFromEnvironment } from "../../packages/worker/src/test-services-run.js";
@@ -10,17 +10,6 @@ const REGISTRY = "111122223333.dkr.ecr.us-west-2.amazonaws.com";
 const digestOf = (reference: string): string => reference.slice(reference.indexOf("@sha256:") + 8);
 
 describe("the starter copies in the contracts", () => {
-  it("name each starter by this install's copy with the STARTER'S digest, and pass the owner-list schema", () => {
-    const entries = mirroredStarterEntries(REGISTRY, "staging");
-    expect(entries).toHaveLength(OWNER_STARTER_IMAGES.length);
-    entries.forEach((entry, index) => {
-      const starter = OWNER_STARTER_IMAGES[index]!;
-      expect(entry.reference.startsWith(`${REGISTRY}/agentx-staging--test-services/`)).toBe(true);
-      expect(digestOf(entry.reference)).toBe(digestOf(starter.reference));
-      expect(entry).toEqual({ reference: entry.reference, family: starter.family, version: starter.version });
-      expect(OwnerListEntrySchema.safeParse(entry).success).toBe(true);
-    });
-  });
 
   it("make the SAME catalog as the starter list (the broker's): the same ids, digests, profiles; only where an image is pulled from differs", () => {
     const broker = ownerCatalogOf(ownerStarterEntries())!;

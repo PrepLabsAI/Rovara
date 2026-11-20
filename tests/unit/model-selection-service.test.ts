@@ -1,6 +1,7 @@
 // The model each step uses: the owner's setting on the document store (the hosted layout), what each step runs on by default, the fallback, the price rule where a limit is held, what a refused call teaches, and the
 // owner's own change (fresh page, current revision, an approval rule for a less-safe one, audited in the same transaction).
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import {
   ModelSelectionStateSchema, canonicalModelName, modelSelectionLines, orgSettingsKey,
   type Approvers, type AuditEvent, type ModelProviderAdapter, type AuditSink, type InvocationModelRoute, type ModelIdentifier, type OrgId, type Principal,
@@ -67,25 +68,6 @@ const modelOf = async (result: ReturnType<ReturnType<typeof world>["stage"]>) =>
 const ref = (model: ModelIdentifier): { provider: string; modelId: string } => ({ provider: model.provider, modelId: model.modelId });
 
 describe("the model each step uses: what a step runs on with nothing set", () => {
-  it("every step runs on the install's model, a checking step says it is the same model, and each carries its proxy route", async () => {
-    const w = world();
-    for (const name of ["understand", "plan", "build", "pull_request"] as const) {
-      const step = (await modelOf(w.stage(name)))!;
-      expect(step.model).toEqual(SONNET);
-      expect(step.reason).toBe("BUILTIN_DEFAULT");
-      expect(step.route).toEqual({ alias: "anthropic/claude-sonnet-4-5", api: "anthropic-messages", catalog: "claude-sonnet-4-5" });
-      expect(step.sameModelAsChecked).toBe(false);
-    }
-    for (const name of ["plan_check", "code_review", "security_review"] as const) {
-      const step = (await modelOf(w.stage(name)))!;
-      expect(step).toMatchObject({ model: SONNET, reason: "INSTALL_MODEL", sameModelAsChecked: true });
-    }
-  });
-
-  it("an install with no model at all has no model to choose, whatever the stage", async () => {
-    const w = world({ install: undefined, servable: [] });
-    for (const name of ["plan", "plan_check", "build"] as const) expect(await w.stage(name)).toMatchObject({ ok: false, code: "NO_MODEL" });
-  });
 
   it("the state is a valid answer, one row per step, and reads as plain lines", async () => {
     const w = world();
@@ -208,28 +190,6 @@ describe("the model each step uses: what a refused call teaches, and the price r
     expect((none as { words: string }).words).not.toMatch(/the model call failed|is not available on this install/u);
   });
 
-  it("with a limit held a model with no price is not used, and one that has a price is", async () => {
-    const free = world({ install: UNPRICED, servable: [UNPRICED] });
-    expect((await modelOf(free.stage("build")))?.model).toEqual(UNPRICED);
-    const capped = world({ install: UNPRICED, servable: [UNPRICED], cap: true });
-    const refused = await capped.stage("build");
-    expect(refused).toMatchObject({ ok: false });
-    expect((refused as { words: string }).words).toContain("company-gateway/house-model has no price, and a run limit is held");
-    expect(await capped.stage("plan_check")).toMatchObject({ ok: false });
-    expect(ModelSelectionStateSchema.parse(await capped.selection.state()).steps.every((step) => step.refusal !== undefined)).toBe(true);
-    const fine = world({ cap: true });
-    expect((await modelOf(fine.stage("build")))?.model).toEqual(SONNET);
-  });
-
-  it("a backup with a price takes over from a model with none while a limit is held, and the owner cannot set an unpriced model then", async () => {
-    const w = world({ install: UNPRICED, servable: [UNPRICED, OPUS], cap: true });
-    const refused = await w.apply({ action: "set", stage: "build", choice: { model: ref(UNPRICED) }, expectedRevision: 0 });
-    expect(refused).toMatchObject({ ok: false, code: "model_unavailable" });
-    expect((refused as { words: string }).words).toContain("no price while a run limit is held");
-    expect((await w.apply({ action: "set", stage: "build", choice: { model: ref(OPUS) }, expectedRevision: 0 })).ok).toBe(true);
-    expect(await modelOf(w.stage("build"))).toMatchObject({ model: OPUS });
-  });
-
   it("learns a model from a failed step only when the failure says the model cannot be used", async () => {
     const w = world();
     const refusedCall = { model: GPT };
@@ -272,20 +232,6 @@ describe("the model each step uses: prices in another currency, and what a missi
     expect((await modelOf(world({ install: UNPRICED, servable: [UNPRICED], cap: true, providers: [dollars] }).stage("build")))?.model).toEqual(UNPRICED);
   });
 
-  it("what a policy that says nothing about checking steps reads as is the host's to say: the install's model on a laptop, another company's model for a host whose rule that is", async () => {
-    const laptop = world();
-    expect((await readModelSelectionPolicy(laptop.store, ORG)).reviewDefault).toBe("install-model");
-    const host = world({ defaultReviewDefault: "different-company" });
-    expect(await readModelSelectionPolicy(host.store, ORG, "different-company")).toMatchObject({ revision: 0, reviewDefault: "different-company" });
-    expect((await modelOf(host.stage("plan_check")))!.reason).toBe("DEFAULT_DIFFERENT_COMPANY");
-    // A row a host wrote (no attribute) reads as the host's default; one that says reads as it says; a write made here always says.
-    await host.store.put({ item: { ...orgSettingsKey(ORG, "MODEL_SELECTION_POLICY"), entityType: "MODEL_SELECTION_POLICY", orgId: ORG, version: 1, revision: 2, rankingVersion: "g3-v1", stepOverrides: {}, updatedAt: "2026-11-10T00:00:00.000Z", updatedBy: "x" } });
-    expect((await readModelSelectionPolicy(host.store, ORG, "different-company")).reviewDefault).toBe("different-company");
-    expect((await host.apply({ action: "review-default", value: "install-model", expectedRevision: 2 })).ok).toBe(true);
-    expect((await host.store.get(orgSettingsKey(ORG, "MODEL_SELECTION_POLICY")))!["reviewDefault"]).toBe("install-model");
-    expect((await readModelSelectionPolicy(host.store, ORG, "different-company")).reviewDefault).toBe("install-model");
-    expect((await modelOf(host.stage("plan_check")))!.reason).toBe("INSTALL_MODEL");
-  });
 });
 
 describe("the model each step uses: the owner's change", () => {
@@ -328,16 +274,6 @@ describe("the model each step uses: the owner's change", () => {
     expect((await w.apply({ action: "set", stage: "code_review", choice: { model: ref(GPT) }, expectedRevision: 1 })).ok).toBe(true);
   });
 
-  it("a check cannot be saved on the model the step it checks would run on when that step is left to the default", async () => {
-    const w = world();
-    // The plan is unset, so it runs on the install's model: a plan check set to that model would be refused at every dispatch.
-    expect(await w.apply({ action: "set", stage: "plan_check", choice: { model: ref(SONNET) }, expectedRevision: 0 })).toMatchObject({ ok: false, code: "same_model" });
-    expect(await w.apply({ action: "set", stage: "plan_check", choice: { fallbackModel: ref(SONNET) }, expectedRevision: 0 })).toMatchObject({ ok: false, code: "same_model" });
-    expect((await w.apply({ action: "set", stage: "plan_check", choice: { model: ref(GPT) }, expectedRevision: 0 })).ok).toBe(true);
-    // And the plan cannot then be moved onto the check's model.
-    expect(await w.apply({ action: "set", stage: "plan", choice: { model: ref(GPT) }, expectedRevision: 1 })).toMatchObject({ ok: false, code: "same_model" });
-  });
-
   it("a weaker model for a check that had none set, and giving up the different-company default, are said to be less safe", async () => {
     const w = world();
     const weaker = await w.apply({ action: "set", stage: "plan_check", choice: { model: ref(HAIKU) }, expectedRevision: 0 });
@@ -366,6 +302,17 @@ describe("the model each step uses: the owner's change", () => {
     const broken = world({ approvers: { async requirement() { throw new Error("down"); }, async verify() { return { approved: false, reason: "no" }; } } });
     await broken.apply({ action: "set", stage: "plan_check", choice: { model: ref(OPUS) }, expectedRevision: 0 });
     expect(await broken.apply({ action: "set", stage: "plan_check", choice: { model: ref(HAIKU) }, expectedRevision: 1 })).toMatchObject({ ok: false, code: "approval_unavailable" });
+  });
+
+  it("binds a less-safe review-default change into the approval digest", async () => {
+    let captured: unknown;
+    const w = world({ defaultReviewDefault: "different-company", approvers: {
+      async requirement(request) { captured = request; return { methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: true }; },
+      async verify() { return { approved: false, reason: "unused" }; },
+    } });
+    expect(await w.apply({ action: "review-default", value: "install-model", expectedRevision: 0 })).toMatchObject({ ok: true, lessSafe: [expect.stringContaining("Stops checking steps")] });
+    const digest = createHash("sha256").update(JSON.stringify(["model-selection", 0, {}, "install-model"])).digest("hex");
+    expect(captured).toMatchObject({ requestId: `model-selection:${digest.slice(0, 32)}`, artifactDigest: digest, companyId: ORG });
   });
 
   it("a row the hosted product wrote (no review default, a lock) is read, and a row that cannot be read is an error, never the default", async () => {

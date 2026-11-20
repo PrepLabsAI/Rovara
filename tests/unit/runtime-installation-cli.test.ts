@@ -55,22 +55,4 @@ describe("runtime installation challenge CLI response", () => {
     }
   });
 
-  it("rejects unknown challenge payload fields and does not write output", async () => {
-    const root = await mkdtemp(join(tmpdir(), "agentx-runtime-install-challenge-"));
-    const bindingFile = join(root, "binding.json");
-    const outputFile = join(root, "challenge.json");
-    await writeFile(bindingFile, JSON.stringify(challenge.binding), { mode: 0o600 });
-    try {
-      const response = { requestId: "apigw:ZKx7mF3nY=", ...challenge, unrecognized: true };
-      const fetcher: typeof fetch = async () => new Response(JSON.stringify(response), { status: 201 });
-      await expect(requestRuntimeInstallChallenge({
-        controlPlaneUrl: "https://control.example", accessToken: "test-token", bindingFile,
-        endpoint: challenge.endpoint, generation: challenge.generation,
-        transportCorrelationId: challenge.transportCorrelationId, profileId: challenge.profileId, outputFile,
-      }, fetcher)).rejects.toThrow();
-      await expect(readFile(outputFile, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
 });

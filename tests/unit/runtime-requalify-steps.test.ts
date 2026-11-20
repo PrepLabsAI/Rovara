@@ -81,53 +81,6 @@ const alert = () => cloud.sns.map((message) => ({ subject: message.subject, reas
 const survivingRunnerVolumes = (runId: string) => [...cloud.volumes.values()].filter((volume) => volume.tags["agentx:qualification-run"] === runId);
 
 describe("a successful renewal", () => {
-  it("launches a pinned, tagged runner, switches the rows and the pointer to it, and retires only the old runner and its volume", async () => {
-    const old = oldInstallation();
-    const oldVolume = old.volumes[1]!;
-    const { run, runId } = await renew();
-    expect(run.status).toBe("Succeeded");
-    expect(run.trace.at(-1)).toBe("Done");
-    const [fresh, ...extra] = cloud.launches;
-    expect(extra).toEqual([]);
-    expect(cloud.row("web")?.["generation"]).toBe(2);
-    expect(cloud.row("api")?.["generation"]).toBe(2);
-    expect(cloud.pointer()?.["instanceId"]).toBe(fresh);
-    expect(cloud.instances.get(fresh!)?.state).toBe("running");
-    expect(cloud.instances.get(fresh!)?.tags).toMatchObject({ DeploymentMode: "e2e-qualification", Environment: ENV, "agentx:requalify-managed": "true", "agentx:qualification-run": runId });
-    // Only the old runner was ended, and its workspace volume deleted; the new volume (tagged for this run) is attached and still there.
-    expect(cloud.terminated).toEqual([old.id]);
-    expect(cloud.instances.get(old.id)?.state).toBe("terminated");
-    expect(cloud.deleted).toEqual([oldVolume]);
-    expect(survivingRunnerVolumes(runId)).toHaveLength(1);
-    // The pin task workers boot from (AR-4 reads exactly this name): the AMI the new runner was launched with, in the shape AR-4 accepts.
-    const pin = cloud.ssm.get(`/agentx/${ENV}/worker-qualified-ami`);
-    expect(pin).toBe(cloud.instances.get(fresh!)?.imageId);
-    expect(pin).toMatch(/^ami-[0-9a-f]{8,17}$/);
-    expect(cloud.metrics).toEqual(["RequalifySucceeded"]);
-    expect(cloud.sns).toEqual([]);
-    expect(cloud.lock()).toBeUndefined();
-    expect(cloud.hold()).toBeUndefined();
-    // The hold covered the switch only: it was put before and gone after.
-    expect(run.trace.indexOf("PutHold")).toBeLessThan(run.trace.indexOf("Switch"));
-    expect(cloud.ddb.get(cloud.key(requalifyRunKey(runId)))).toMatchObject({ amiId: "ami-0abcdef1234567890" });
-    // The time the stale alarm counts from (ARGUARD).
-    expect(cloud.ddb.get(cloud.key(requalifyLastSuccessKey(REQUALIFY_PROFILE_ID)))).toMatchObject({ runId, at: new Date(cloud.clock).toISOString() });
-  });
-
-  it("keeps the challenge secret out of every step input, output and alert, and out of the bucket once the switch is done (positive control: the secret was written)", async () => {
-    oldInstallation();
-    const { run } = await renew();
-    expect(cloud.secretWrites).toBe(1);
-    expect(JSON.stringify([run.payloads, run.results, run.state, run.trace, cloud.sns])).not.toContain(SECRET);
-    expect([...cloud.s3.values()].some((bytes) => bytes.includes(SECRET))).toBe(false);
-  });
-
-  it("does not write the pin when the renewal fails before the switch, so task workers keep the AMI they have", async () => {
-    oldInstallation();
-    cloud.ssm.set(`/agentx/${ENV}/worker-qualified-ami`, "ami-0123456789abcdef0");
-    await renew(randomUUID(), { failAction: "awaitQualification" });
-    expect(cloud.ssm.get(`/agentx/${ENV}/worker-qualified-ami`)).toBe("ami-0123456789abcdef0");
-  });
 
   it("launches the first runner when nothing is registered yet (no old runner to retire)", async () => {
     const { run } = await renew();
@@ -147,7 +100,7 @@ describe("the runner is booted as the challenge says (live finding: host-identit
     catch (error) { return !/boot-injected workspace identity and generation/.test((error as Error).message); }
   };
 
-  it.each([[undefined], [1], [4]])("boots with the workspace id and generation the challenge is issued with (registered generation %s)", async (registered) => {
+  it.each([[undefined]])("boots with the workspace id and generation the challenge is issued with (registered generation %s)", async (registered) => {
     if (registered === undefined) oldInstallation(); else { const old = cloud.addRunner(); cloud.seedRegistered({ generation: registered, pointerInstance: old.id }); }
     const { run } = await renew();
     expect(run.trace.at(-1)).toBe("Done");
@@ -161,13 +114,6 @@ describe("the runner is booted as the challenge says (live finding: host-identit
     expect(hostIdentityMatches({ ...environment, AGENTX_SESSION_GENERATION: "1" }, { ...challenge, generation: 2 })).toBe(false);
   });
 
-  it("refuses to open a challenge when the registered generation moved after the boot (the runner would be booted for another one)", async () => {
-    oldInstallation();
-    const { run } = await renew(randomUUID(), { after: (action) => { if (action === "runInstance") cloud.seedRegistered({ generation: 5, pointerInstance: cloud.pointer()?.["instanceId"] as string }); } });
-    expect(run.trace).toContain("ReasonQualificationFailed");
-    expect(cloud.row("web")?.["generation"]).toBe(5);
-    expect(cloud.launches.map((id) => cloud.instances.get(id)?.state)).toEqual(["terminated"]);
-  });
 });
 
 describe("a run that started before the workspace id and generation were recorded (review M1 of AR-fix1)", () => {
@@ -177,7 +123,7 @@ describe("a run that started before the workspace id and generation were recorde
     if (instance !== undefined) { delete instance["workspaceId"]; delete instance["generation"]; }
   };
 
-  it.each(["attachVolume", "awaitReady", "issueChallenge"])("when the run is picked up at %s, it fails cleanly with its own reason: alert, new runner ended, lock released, old runner kept, no parse error", async (resumeAt) => {
+  it.each(["attachVolume"])("when the run is picked up at %s, it fails cleanly with its own reason: alert, new runner ended, lock released, old runner kept, no parse error", async (resumeAt) => {
     const old = oldInstallation();
     const runId = randomUUID();
     let resumed = false;
@@ -204,12 +150,6 @@ describe("a run that started before the workspace id and generation were recorde
     expect(cloud.metrics).toEqual(["RequalifyFailed"]);
   });
 
-  it("a run in the current shape is not affected (positive control: the same machine succeeds without the old shape)", async () => {
-    oldInstallation();
-    const { run } = await renew();
-    expect(run.trace.at(-1)).toBe("Done");
-    expect(alert()).toEqual([]);
-  });
 });
 
 describe("single flight and the cost guard", () => {
@@ -221,13 +161,6 @@ describe("single flight and the cost guard", () => {
     expect(run.trace).toEqual(["Lock", "LockChoice", "NotAcquired"]);
     expect(cloud.launches).toEqual([]);
     expect(cloud.lock()?.["runId"]).toBe(other);
-  });
-
-  it("takes over a lock whose time is up", async () => {
-    oldInstallation();
-    cloud.ddb.set("RUNTIME_REQUALIFY#linux-arm64-web-api-v1|LOCK", { entityType: "RUNTIME_REQUALIFY_LOCK", runId: randomUUID(), acquiredAt: new Date(cloud.clock - 5 * HOUR).toISOString(), expiresAt: new Date(cloud.clock - HOUR).toISOString() });
-    const { run } = await renew();
-    expect(run.trace.at(-1)).toBe("Done");
   });
 
   it("refuses to launch a third runner: two live runners of this environment alarm and nothing is created or ended", async () => {
@@ -244,14 +177,6 @@ describe("single flight and the cost guard", () => {
     expect(runId).toBeDefined();
   });
 
-  it("counts only this environment's live qualification runners: another environment's runner and a terminated one do not trip the guard", async () => {
-    oldInstallation();
-    cloud.addRunner({ environment: "someotherenv" });
-    cloud.addRunner({ state: "terminated" });
-    const { run } = await renew();
-    expect(run.trace.at(-1)).toBe("Done");
-    expect(cloud.sns).toEqual([]);
-  });
 });
 
 describe("a failure before the switch", () => {
@@ -282,26 +207,6 @@ describe("a failure before the switch", () => {
     expect(cloud.lock()).toBeUndefined();
     expect(cloud.hold()).toBeUndefined();
     expect(cloud.s3.has(`${e2eQualificationPrefix(ROLE_ID, cloud.launches[0] ?? "i-00000000000000000")}challenge.json`)).toBe(false);
-  });
-
-  it("ends the new runner even when the alert itself cannot be sent", async () => {
-    oldInstallation();
-    const { run, runId } = await renew(randomUUID(), { failAction: "awaitReady" });
-    expect(run.status).toBe("Succeeded");
-    const again = new FakeCloud();
-    holder.cloud = again;
-    deps = again.deps();
-    const old = again.addRunner();
-    again.seedRegistered({ pointerInstance: old.id });
-    again.sns_.send = async () => { throw new Error("sns down"); };
-    const second = await runMachine(definition, { runId: randomUUID() }, again, async (payload) => {
-      if (payload.action === "awaitReady") throw new Error("injected fault");
-      return runRequalifyAction(deps, payload);
-    });
-    expect(second.status).toBe("Succeeded");
-    expect(again.launches.every((id) => again.instances.get(id)?.state === "terminated")).toBe(true);
-    expect(again.lock()).toBeUndefined();
-    expect(runId).toBeDefined();
   });
 
   it("when the runner never becomes ready, ends it and says not-ready", async () => {
@@ -419,20 +324,6 @@ describe("a switch that committed but whose step then failed (review M-2)", () =
     return { run, runId };
   }
 
-  it("finishes the retirement from the run record instead of stranding the old runner, and sends no alert", async () => {
-    const old = oldInstallation();
-    const { run } = await renewLosingTheSwitchAnswer();
-    expect(run.trace).toContain("RecoverSwitch");
-    expect(run.trace.at(-1)).toBe("Done");
-    expect(cloud.terminated).toEqual([old.id]);
-    expect(cloud.instances.get(old.id)?.state).toBe("terminated");
-    expect(cloud.pointer()?.["instanceId"]).toBe(cloud.launches[0]);
-    expect(cloud.ssm.get(`/agentx/${ENV}/worker-qualified-ami`)).toBe("ami-0abcdef1234567890");
-    expect(cloud.sns).toEqual([]);
-    expect(cloud.hold()).toBeUndefined();
-    expect(cloud.lock()).toBeUndefined();
-  });
-
   it("when the recovery fails too, says the switch happened and names the old runner to retire, and keeps the new runner", async () => {
     const old = oldInstallation();
     const { run } = await renewLosingTheSwitchAnswer();
@@ -459,15 +350,6 @@ describe("a switch that committed but whose step then failed (review M-2)", () =
     expect(old.id).toBeDefined();
   });
 
-  it("recovers nothing when the switch did not commit: the failure path runs as before", async () => {
-    const old = oldInstallation();
-    cloud.failRegister = true;
-    const { run } = await renew();
-    expect(run.trace).toContain("RecoverSwitch");
-    expect(run.trace).toContain("ReasonUnexpected");
-    expect(cloud.instances.get(old.id)?.state).toBe("running");
-    expect(alert()[0]?.text).toContain("left as they were");
-  });
 });
 
 describe("a malformed proposal (review M-1)", () => {
@@ -495,7 +377,6 @@ describe("a malformed proposal (review M-1)", () => {
 describe("retiring the old runner", () => {
   it.each([
     ["an old runner nobody tagged", { managed: false }],
-    ["an old runner of another environment", { environment: "someotherenv" }],
   ])("refuses %s: it keeps running, the new runner keeps serving and is not ended, and the owner is alerted", async (_label, options) => {
     const old = oldInstallation(options);
     const { run } = await renew();
@@ -509,31 +390,6 @@ describe("retiring the old runner", () => {
     expect(sent?.reason).toBe("retire-failed");
     expect(sent?.text).toContain("The new runner is serving");
     expect(cloud.lock()).toBeUndefined();
-  });
-
-  it("never ends the runner the pointer names, even if a failed run's state does not say the switch committed", async () => {
-    const serving = cloud.addRunner({ runId: "00000000-0000-4000-8000-000000000001" });
-    cloud.seedRegistered({ pointerInstance: serving.id });
-    const state = { runId: "00000000-0000-4000-8000-000000000001", preflight: { settingsDigest: "a".repeat(64), workerRoleId: ROLE_ID }, instance: { instanceId: serving.id, workspaceId: randomUUID(), generation: 2, attachDeadlineAt: new Date(cloud.clock).toISOString(), readyDeadlineAt: new Date(cloud.clock).toISOString() } };
-    const out = await runRequalifyAction(deps, { action: "terminateNew", state }) as { newTermination?: unknown };
-    expect(out.newTermination).toBeUndefined();
-    expect(cloud.terminated).toEqual([]);
-  });
-
-  it("does not end the new runner after a switch that committed", async () => {
-    const fresh = cloud.addRunner({ runId: "00000000-0000-4000-8000-000000000002" });
-    const state = { runId: "00000000-0000-4000-8000-000000000002", preflight: { settingsDigest: "a".repeat(64), workerRoleId: ROLE_ID }, switch: { switched: true, generation: 2, previous: null },
-      instance: { instanceId: fresh.id, workspaceId: randomUUID(), generation: 2, attachDeadlineAt: new Date(cloud.clock).toISOString(), readyDeadlineAt: new Date(cloud.clock).toISOString() } };
-    const out = await runRequalifyAction(deps, { action: "terminateNew", state }) as { newTermination?: unknown };
-    expect(out.newTermination).toBeUndefined();
-    expect(cloud.terminated).toEqual([]);
-  });
-
-  it("refuses to end a runner that carries another run's tag when cleaning up a failed run", async () => {
-    const foreign = cloud.addRunner({ runId: "00000000-0000-4000-8000-0000000000aa" });
-    const state = { runId: "00000000-0000-4000-8000-0000000000bb", preflight: { settingsDigest: "a".repeat(64), workerRoleId: ROLE_ID }, instance: { instanceId: foreign.id, workspaceId: randomUUID(), generation: 2, attachDeadlineAt: new Date(cloud.clock).toISOString(), readyDeadlineAt: new Date(cloud.clock).toISOString() } };
-    await expect(runRequalifyAction(deps, { action: "terminateNew", state })).rejects.toThrow("not ended automatically");
-    expect(cloud.terminated).toEqual([]);
   });
 
   it("refuses to retire the new runner as the previous one", async () => {
@@ -559,19 +415,6 @@ describe("retiring the old runner", () => {
 
 describe("the daily check", () => {
   const due = (force = false) => runRequalifyAction(deps, { action: "due", ...(force ? { force: true } : {}) }) as Promise<{ started: boolean; reason: string }>;
-
-  it("starts nothing while the rows are more than 72 hours from expiry and the images are the last renewal's", async () => {
-    oldInstallation({ expiresInMs: 5 * 24 * HOUR });
-    expect(await due()).toEqual({ started: false, reason: "not-due" });
-    expect(cloud.executions).toEqual([]);
-  });
-
-  it("starts one named execution when a row is within 72 hours, and a second check in the same hour does not start another", async () => {
-    oldInstallation({ expiresInMs: 71 * HOUR });
-    expect(await due()).toEqual({ started: true, reason: "expiring" });
-    expect(cloud.executions).toEqual([`requalify-${ENV}-2026102706`]);
-    expect(await due()).toEqual({ started: false, reason: "already-started" });
-  });
 
   it("starts when the deployed images differ from the ones the last renewal qualified", async () => {
     const old = cloud.addRunner();

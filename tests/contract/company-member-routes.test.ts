@@ -235,11 +235,25 @@ describe("removal and role change", () => {
     expect(await h.call("PUT", member(OWNER2, "role"), { role: "member" })).toEqual(refusal(409, "MEMBER_ALREADY_REMOVED", MEMBER_REVOKED));
   });
 
-  it("nobody changes their own role or removes themselves here", async () => {
+  it("an admin cannot change their own role, and nobody removes themselves here", async () => {
     const h = world(); h.as(OWNER);
-    expect(await h.call("PUT", member(OWNER, "role"), { role: "member" })).toEqual(refusal(403, "FORBIDDEN", OWN_MEMBERSHIP));
     expect(await h.call("POST", member(OWNER, "removal"))).toEqual(refusal(403, "FORBIDDEN", OWN_MEMBERSHIP));
     expect(h.forwarded).toEqual([]);
+    h.as(ADMIN);
+    expect(await h.call("PUT", member(ADMIN, "role"), { role: "member" })).toEqual(refusal(403, "FORBIDDEN", OWN_MEMBERSHIP));
+    expect(await h.call("POST", member(ADMIN, "removal"))).toEqual(refusal(403, "FORBIDDEN", OWN_MEMBERSHIP));
+    expect(h.forwarded).toEqual([]);
+  });
+
+  it("a live owner can step down only while another live owner remains", async () => {
+    const h = world(); h.as(OWNER);
+    expect(await h.call("PUT", member(OWNER, "role"), { role: "member" })).toEqual(refusal(409, "LAST_OWNER", "a company must keep at least one active owner"));
+    expect(h.role(OWNER)).toBe("owner");
+    h.join(OWNER2, A, "owner");
+    expect(await h.call("PUT", member(OWNER, "role"), { role: "admin" })).toEqual({ status: 200, body: { ok: true } });
+    expect(h.role(OWNER)).toBe("admin");
+    expect(h.role(OWNER2)).toBe("owner");
+    expect(h.forwarded.map((event) => event["createdBy"])).toEqual([OWNER, OWNER]);
   });
 
   it("refuses unknown fields, bad roles and non-JSON in fixed words that never echo the body", async () => {

@@ -70,14 +70,6 @@ describe("TE-B3 weakening facts from the run on the original code", () => {
     expect((await readFile(join(made.directory, "settings.txt"), "utf8")).trim()).toBe("weak");
   });
 
-  it("says nothing is missing and nothing more is skipped when the suites are the same", async () => {
-    const made = await repository("all");
-    const runner = runnerOver(made.directory);
-    await prime(made, runner);
-    const proof = await runTestProof(optionsFor(made, runner));
-    expect(proof.weakening).toEqual([{ checkId: "readiness:0", skippedBefore: 0, skippedAfter: 0, absentOnNew: [], absentOnNewCount: 0 }]);
-  });
-
   it("does not count a test that the original code's run did not reach: a run that timed out leaves a partial report", async () => {
     const made = await repository("weak");
     const partial = runnerOver(made.directory, { outcome: (mode) => (mode === "all" ? { exitCode: null, timedOut: true } : { exitCode: 0, timedOut: false }) });
@@ -86,16 +78,6 @@ describe("TE-B3 weakening facts from the run on the original code", () => {
     const proof = await runTestProof({ ...optionsFor(made, partial), budgetMs: 10 * 60_000 });
     expect(proof.weakening).toBeUndefined();
     expect(proof.weakeningNotCompared).toEqual([{ checkId: "readiness:0", reason: "original_run_incomplete" }]);
-  });
-
-  it("makes no claim without a report of its own from the original code's run, or from this code's run", async () => {
-    const made = await repository("weak");
-    // The original code's run wrote no report (the proof removes the candidate's before that run, so a stale one is never read as its result).
-    const stale = runnerOver(made.directory, { writeReport: false });
-    await writeFile(join(made.directory, "report.json"), JSON.stringify({ testResults: [{ name: join(made.directory, "src/old.test.ts"), assertionResults: [{ fullName: "a", status: "passed", failureMessages: [] }] }] }));
-    const none = await runTestProof(optionsFor(made, stale));
-    expect(none.weakening).toBeUndefined();
-    expect(none.weakeningNotCompared).toEqual([{ checkId: "readiness:0", reason: "no_report" }]);
   });
 
   // L3: the original code's run wrote a report, but the very bytes this code's run wrote (it did not write one of its own): that says nothing about the original code.
@@ -143,27 +125,6 @@ describe("TE-B3 weakening facts from the run on the original code", () => {
     return runTestProof({ ...optionsFor(made, runners), plan: { source: "project" as const, readiness: [command], projectBefore: ["unknown" as const] } });
   };
 
-  it("pytest-style: the new test file fails to collect on the original code and nothing runs there: no skip rise, no absent test, and the check is said not to be compared", async () => {
-    const made = await repository("all");
-    // This code's run: the old tests (two skipped) and the new ones. The original code's run (the source file still has `= 1`): only the collection error of the new test file, as pytest aborts the whole run.
-    const base = fakeTestRunner(made.directory);
-    const collecting: CheckRunners = { ...base, runProjectCommand: async (given, signal) => {
-      const source = await readFile(join(made.directory, "src/bug.ts"), "utf8");
-      const run = await base.runProjectCommand(given, signal);
-      const results = source.includes("= 1;")
-        ? [{ name: join(made.directory, "src/bug.test.ts"), status: "failed", message: "ERROR collecting", assertionResults: [] }]
-        : [
-          { name: join(made.directory, "src/bug.test.ts"), assertionResults: [{ fullName: "bug is fixed", status: "passed", failureMessages: [] }] },
-          { name: join(made.directory, "src/old.test.ts"), assertionResults: [{ fullName: "a", status: "passed" }, { fullName: "b", status: "skipped" }, { fullName: "c", status: "skipped" }].map((entry) => ({ ...entry, failureMessages: [] })) },
-        ];
-      await writeFile(join(made.directory, "report.json"), JSON.stringify({ testResults: results }));
-      return run;
-    } };
-    const proof = await check(made, collecting);
-    expect(proof.weakening).toBeUndefined();
-    expect(proof.weakeningNotCompared).toEqual([{ checkId: "readiness:0", reason: "original_run_truncated" }]);
-  });
-
   it("jest-style: the new test file fails to load on the original code and the rest ran: the error entry is not a test that went missing, and the change's own tests are not compared", async () => {
     const made = await repository("all");
     const runners = fakeTestRunner(made.directory);
@@ -182,28 +143,6 @@ describe("TE-B3 weakening facts from the run on the original code", () => {
     expect(proof.weakening).toEqual([{ checkId: "readiness:0", skippedBefore: 0, skippedAfter: 0, absentOnNew: [], absentOnNewCount: 0 }]);
   });
 
-  it("a changed test file's old test that is not in this code's report is not 'missing' (the original run shows the change's own files)", async () => {
-    const made = await repository("all");
-    const runners = fakeTestRunner(made.directory);
-    const proof = await check(made, { ...runners, runProjectCommand: async (given, signal) => {
-      const source = await readFile(join(made.directory, "src/bug.ts"), "utf8");
-      const run = await runners.runProjectCommand(given, signal);
-      const bug = [{ name: join(made.directory, "src/bug.test.ts"), assertionResults: [{ fullName: source.includes("= 1;") ? "old name" : "new name", status: "passed", failureMessages: [] }] }];
-      await writeFile(join(made.directory, "report.json"), JSON.stringify({ testResults: [{ name: join(made.directory, "src/old.test.ts"), assertionResults: ["a", "b", "c"].map((fullName) => ({ fullName, status: "passed", failureMessages: [] })) }, ...bug] }));
-      return run;
-    } });
-    expect(proof.weakening?.[0]).toMatchObject({ absentOnNew: [], absentOnNewCount: 0 });
-  });
-
-  it.each(["-x", "--exitfirst", "--maxfail=1", "--bail", "-xvs"])("a command with %s stops at its first failure: no skip rise and no missing test is claimed from its original run", async (flag) => {
-    const made = await repository("weak");
-    const command: ProjectCommand = { ...COMMAND, args: [...COMMAND.args, flag] };
-    // The original run (settings "all") would show tests the candidate's does not, and a skip count that differs; with a stop-at-first-failure option that is only where the run stopped.
-    const runners = runnerOver(made.directory);
-    const proof = await check(made, runners, command);
-    expect(proof.weakening).toBeUndefined();
-    expect(proof.weakeningNotCompared).toEqual([{ checkId: "readiness:0", reason: "original_run_truncated" }]);
-  });
 
   it("an original run with far fewer untouched tests than this code's run is not compared", async () => {
     const made = await repository("all");

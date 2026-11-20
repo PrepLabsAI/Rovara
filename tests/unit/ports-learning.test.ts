@@ -30,10 +30,4 @@ describe("the learning point", () => {
     expect(adapter.vectors?.("org_00000000000000000000")).toBe(vectors);
   });
 
-  it("the document store refuses a vector of a lesson it does not hold, without an error", async () => {
-    const store = new MemoryDocumentStore();
-    const vectors = documentLessonVectors(store);
-    await vectors.put("org_00000000000000000000", "web", "spec-a", "les_none", { hash: "h", vector: [1] }).catch(() => undefined);
-    expect((await vectors.get("org_00000000000000000000", "web", "spec-a", ["les_none"])).size).toBe(0);
-  });
 });

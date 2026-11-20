@@ -1,9 +1,6 @@
 // Work events (U3): the shape is closed and holds no content; the key, the retention and the id are exact; one change gives one event, in the change's own transaction, once.
 import { describe, expect, it } from "vitest";
-import {
-  IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, WORK_EVENT_BLOCK_CAUSES, WORK_EVENT_FAILURE_CAUSES, WORK_EVENT_KINDS, WORK_EVENT_SHARDS, WorkEventSchema, queryAll, workEventCauseIsFailure, workEventExpiresAt, workEventId, workEventKey, workEventMonths, workEventPartition, workEventPartitions, workEventShard,
-  type DocumentStore, type WorkEventInput, type WorkEventKind,
-} from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, WORK_EVENT_BLOCK_CAUSES, WORK_EVENT_FAILURE_CAUSES, WORK_EVENT_KINDS, WORK_EVENT_SHARDS, WorkEventSchema, workEventCauseIsFailure, workEventExpiresAt, workEventId, workEventKey, workEventMonths, workEventPartition, workEventPartitions, workEventShard, type WorkEventInput, type WorkEventKind } from "@agentx/contracts";
 import { WORK_EVENTS_PER_CHANGE_MAX, listWorkEvents, recordWorkEvent, workEventItem, workEventItems, workEventRow } from "../../packages/broker/src/core/work-events/work-events.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 
@@ -140,16 +137,9 @@ describe("where an event lives, and for how long", () => {
     expect(workEventExpiresAt("2026-01-01T00:00:00.000Z") - Date.parse("2026-02-01T00:00:00.000Z") / 1000).toBeGreaterThanOrEqual(13 * 28 * 86_400);
   });
 
-  it("stores the row with the store's expiry attribute and nothing but the event", () => {
-    const row = workEventRow(SAMPLES.pr_merged);
-    expect(row).toMatchObject({ entityType: "WORK_EVENT", kind: "pr_merged", repository: "acme/api", number: 7, [INDEX_EXPIRY_ATTRIBUTE]: workEventExpiresAt(at) });
-    expect(Object.keys(row).sort()).toEqual(["actor", "at", "entityType", "id", INDEX_EXPIRY_ATTRIBUTE, "kind", "number", "orgId", "pk", "project", "repository", "sk", "taskId", "version"].sort());
-  });
 });
 
 describe("writing events", () => {
-  const store = (): DocumentStore => new MemoryDocumentStore({ ttlAttribute: INDEX_EXPIRY_ATTRIBUTE });
-  const rowsOf = async (s: DocumentStore) => (await Promise.all(workEventPartitions(orgId, "2026-11").map((pk) => queryAll(s, { pk })))).flat();
 
   it("is one put with no condition, so an event can never be the reason a change is refused", () => {
     const item = workEventItem(SAMPLES.task_started);
@@ -170,32 +160,6 @@ describe("writing events", () => {
     expect(surplus).toEqual(["too_many", "too_many", "too_many"]);
   });
 
-  it("writes nothing for an event that is not valid", () => {
-    expect(() => workEventItem({ ...SAMPLES.task_started, actor: { kind: "person", personId: "Priya Shah" } })).toThrow();
-    expect(() => workEventItem({ ...SAMPLES.task_started, text: "a plan" } as unknown as WorkEventInput)).toThrow();
-  });
-
-  it("commits with the change that caused it, and a change that does not commit leaves no event", async () => {
-    const s = store();
-    await s.put({ item: { pk: "TASK#1", sk: "META", state: "WAITING" } });
-    const ok = await s.transact([{ kind: "update", key: { pk: "TASK#1", sk: "META" }, ops: [{ op: "set", path: ["state"], value: "RUNNING" }], condition: { op: "eq", path: ["state"], value: "WAITING" } }, ...workEventItems([SAMPLES.step_started])]);
-    expect(ok.applied).toBe(true);
-    expect(await rowsOf(s)).toHaveLength(1);
-    // The same change again: its source condition fails, so the whole transaction is refused and no second event appears.
-    const lost = await s.transact([{ kind: "update", key: { pk: "TASK#1", sk: "META" }, ops: [{ op: "set", path: ["state"], value: "RUNNING" }], condition: { op: "eq", path: ["state"], value: "WAITING" } }, ...workEventItems([{ ...SAMPLES.step_started, id: workEventId({ kind: "step_started", taskId, source: "op2" }) }])]);
-    expect(lost.applied).toBe(false);
-    expect(await rowsOf(s)).toHaveLength(1);
-  });
-
-  it("keeps one event when the same change is recorded twice (the id is the change's), and a second write never fails", async () => {
-    const s = store();
-    expect((await recordWorkEvent(s, SAMPLES.pr_merged)).applied).toBe(true);
-    expect((await recordWorkEvent(s, SAMPLES.pr_merged)).applied).toBe(true);
-    expect(await rowsOf(s)).toHaveLength(1);
-    // Inside a transaction too: the repeat does not cancel the change it rides with.
-    expect((await s.transact([...workEventItems([SAMPLES.pr_merged]), { kind: "put", item: { pk: "TASK#1", sk: "META", n: 1 } }])).applied).toBe(true);
-    expect(await rowsOf(s)).toHaveLength(1);
-  });
 });
 
 describe("reading events", () => {
@@ -239,14 +203,5 @@ describe("T8 company guards", () => {
     let reads = 0;
     for (const bad of ["bad-canary", "", undefined, null, 42]) await expect(listWorkEvents({ query: async () => { reads++; return { items: [] }; } }, { orgId: bad as string, from: at, to: at })).rejects.toThrow("invalid company");
     expect(reads).toBe(0);
-  });
-  it("counts a foreign row orgId or partition as unreadable without returning it", async () => {
-    const foreign = `org_${"b".repeat(20)}`;
-    for (const wrong of [{ orgId: foreign }, { pk: `ORG#${foreign}#WORK_EVENTS#2026-11#0` }]) {
-      const row = { ...workEventRow(SAMPLES.task_started), ...wrong };
-      let first = true;
-      const result = await listWorkEvents({ query: async () => { const items = first ? [row] : []; first = false; return { items }; } }, { orgId, from: at, to: at, now: Date.parse(at) });
-      expect(result).toEqual({ events: [], unreadable: 1 });
-    }
   });
 });

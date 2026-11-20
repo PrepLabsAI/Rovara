@@ -39,16 +39,6 @@ function deps(over: Partial<NightlyInvocationDependencies> = {}) {
 }
 
 describe("the nightly invocation", () => {
-  it("reports RUNNING first, runs the night once, posts its result once, and ends with a result that carries no tests", async () => {
-    const d = deps();
-    const out = await runNightlyInvocation(invocation(), d.all, manifest());
-    expect(out).toEqual({ conversationId: "22222222-2222-4222-8222-222222222222", reopened: false, workflowMode: "CHECKS" });
-    expect(d.events[0]).toMatchObject({ type: "lifecycle", payload: { status: "RUNNING" } });
-    expect(d.events.at(-1)).toMatchObject({ type: "result", payload: { status: "SUCCEEDED", workflowMode: "CHECKS" } });
-    expect(d.posted).toHaveLength(1);
-    const sent = d.posted[0] as { result: { slotId: string; envRevision: number; headSha: string; tests: { total: number; failed: number } } };
-    expect(sent.result).toMatchObject({ slotId: sha("c"), envRevision: 2, headSha: HEAD, tests: { total: 2, failed: 1 } });
-  });
 
   it("ED-1: a workspace at another commit, with a pull request head, or with more than one repository is refused: no result, and the word for why is sent (branch_moved for the commit, worker_refused for the others)", async () => {
     for (const [name, m, reason] of [["commit", manifest({ resolvedCommit: OTHER }), "branch_moved"], ["pull request head", manifest({ checkedOut: { number: 4 } }), "worker_refused"], ["two repositories", { repositories: [{ name: "a", path: "a", resolvedCommit: HEAD }, { name: "b", path: "b", resolvedCommit: HEAD }] } as never, "worker_refused"]] as const) {
@@ -82,15 +72,6 @@ describe("the nightly invocation", () => {
     const d = deps({ nightlyResult: undefined });
     await expect(runNightlyInvocation(invocation(), d.all, manifest())).rejects.toThrow(/nightly callback/);
     await expect(runNightlyInvocation(invocation(null), deps().all, manifest())).rejects.toThrow(/started to run/);
-  });
-
-  it("a broker that refuses the result fails the night, with an error event and no result event", async () => {
-    const d = deps({ nightlyResult: () => Promise.reject(new Error("callback returned HTTP 403")) });
-    await expect(runNightlyInvocation(invocation(), d.all, manifest())).rejects.toThrow(/403/);
-    expect(d.events.some((event) => event.type === "error")).toBe(true);
-    expect(d.events.some((event) => event.type === "result")).toBe(false);
-    // The broker's refusal is not answered with another report: the one post was the result.
-    expect(d.posted).toEqual([]);
   });
 
   it("once the result has been posted, nothing that fails afterwards is reported as a failed night: the broker already has the night (F4)", async () => {

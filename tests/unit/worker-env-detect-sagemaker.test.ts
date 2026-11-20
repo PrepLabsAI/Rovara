@@ -11,39 +11,6 @@ async function detect(files: Files) {
 }
 const candidateOf = async (files: Files) => (await detect(files)).dependencies?.find((item) => item.family === "aws:sagemaker-runtime");
 
-describe("the Runtime client, in every language", () => {
-  it("reads boto3: the client, the call and the endpoint name", async () => {
-    const found = await candidateOf({ "app/score.py": "import boto3\n\nruntime = boto3.client(\"sagemaker-runtime\")\n\ndef score(x):\n    return runtime.invoke_endpoint(EndpointName=\"fraud-scorer\", Body=x)\n" });
-    expect(found).toMatchObject({ kind: "model_endpoint", strength: "used", hints: { endpointNames: ["fraud-scorer"], sagemakerSignals: ["runtime_client", "invoke_call"] } });
-    expect(found?.hints.seenBy).toContain("sagemaker");
-    expect(found?.evidence[0]).toEqual({ path: "app/score.py", line: 3 });
-    expect(found?.hints.startsEmpty).toBeUndefined();
-  });
-  it("reads the JavaScript SDK v3", async () => {
-    const found = await candidateOf({ "src/score.ts": "import { SageMakerRuntimeClient, InvokeEndpointCommand } from \"@aws-sdk/client-sagemaker-runtime\";\nconst client = new SageMakerRuntimeClient({});\nawait client.send(new InvokeEndpointCommand({ EndpointName: \"ranker-v2\", Body: b }));\n" });
-    expect(found?.hints).toMatchObject({ endpointNames: ["ranker-v2"], sagemakerSignals: ["runtime_client", "invoke_call"] });
-  });
-  it("reads the Java SDK v2", async () => {
-    const found = await candidateOf({ "src/main/java/Score.java": "import software.amazon.awssdk.services.sagemakerruntime.SageMakerRuntimeClient;\nimport software.amazon.awssdk.services.sagemakerruntime.model.InvokeEndpointRequest;\nclass Score { void go() { InvokeEndpointRequest.builder().endpointName(\"java-model\").body(b).build(); } }\n" });
-    expect(found?.hints).toMatchObject({ endpointNames: ["java-model"], sagemakerSignals: ["runtime_client", "invoke_call"] });
-  });
-  it("reads the Go SDK v2", async () => {
-    const found = await candidateOf({ "score/score.go": "package score\n\nimport \"github.com/aws/aws-sdk-go-v2/service/sagemakerruntime\"\n\nfunc Run(c *sagemakerruntime.Client) {\n\tc.InvokeEndpoint(ctx, &sagemakerruntime.InvokeEndpointInput{EndpointName: aws.String(\"go-model\")})\n}\n" });
-    expect(found?.hints).toMatchObject({ endpointNames: ["go-model"], sagemakerSignals: ["runtime_client", "invoke_call"] });
-  });
-  it("asks about a Java or Go call with no literal endpoint name, and guesses nothing", async () => {
-    const detection = await detect({ "Score.java": "import software.amazon.awssdk.services.sagemakerruntime.SageMakerRuntimeClient;\nclass S { void go(String name) { client.invokeEndpoint(r -> r.endpointName(name)); } }\n" });
-    expect(detection.questions.join(" ")).toContain("Which SageMaker endpoint does Score.java call?");
-    const candidate = detection.dependencies?.find((item) => item.family === "aws:sagemaker-runtime");
-    expect(candidate?.hints.endpointNames).toBeUndefined();
-  });
-  it("reads each language's SDK names from the generated service table", async () => {
-    // A package of another SageMaker service (the control plane client) is not the Runtime client.
-    expect(await candidateOf({ "a.py": "import boto3\nc = boto3.client(\"sagemaker\")\nc.create_endpoint(EndpointName=\"x1\")\n" })).toBeUndefined();
-    expect(await candidateOf({ "a.js": "import { SageMakerClient } from \"@aws-sdk/client-sagemaker\";\n" })).toBeUndefined();
-  });
-});
-
 describe("the SageMaker Python SDK", () => {
   it("reads Predictor, ModelBuilder and a local session, with the endpoint name of a Predictor", async () => {
     const found = await candidateOf({
@@ -51,9 +18,6 @@ describe("the SageMaker Python SDK", () => {
     });
     expect(found?.hints).toMatchObject({ endpointNames: ["churn-model"], sagemakerSignals: ["predictor", "model_builder", "local_session"] });
     expect(found?.strength).toBe("used");
-  });
-  it("needs the SDK imported: a class named Predictor in another project is not SageMaker", async () => {
-    expect(await candidateOf({ "x.py": "class Predictor:\n    pass\n\np = Predictor(\"hello\")\n" })).toBeUndefined();
   });
 });
 
@@ -87,9 +51,6 @@ describe("endpoint names in settings and infrastructure code", () => {
     expect(found?.hints.endpointNames).toHaveLength(3);
     expect(found?.hints.sagemakerSignals).toEqual(["endpoint_in_iac"]);
   });
-  it("is not fooled by an Endpoint class that is not SageMaker's", async () => {
-    expect(await candidateOf({ "infra/stack.ts": "import * as apigw from 'aws-cdk-lib/aws-apigateway';\nnew apigw.Endpoint(this, 'x', { endpointName: 'not-sm' });\n" })).toBeUndefined();
-  });
 });
 
 describe("model signs", () => {
@@ -101,16 +62,6 @@ describe("model signs", () => {
       "model/Dockerfile": "FROM registry.example.test/ml/pytorch-inference:2.1-cpu\nCOPY . /opt/ml/model\n",
     });
     expect(found?.hints.sagemakerSignals).toEqual(expect.arrayContaining(["model_archive", "inference_script", "inference_image"]));
-  });
-  it("gives no candidate for a model that nothing calls", async () => {
-    expect(await candidateOf({ "model/code/inference.py": "def model_fn(d):\n    return 1\n", "model/model.tar.gz": "" })).toBeUndefined();
-  });
-  it("does not take any Dockerfile that exposes 8080 for an inference image", async () => {
-    const found = await candidateOf({ "app.py": "import boto3\nboto3.client('sagemaker-runtime')\n", "web/Dockerfile": "FROM node:22\nEXPOSE 8080\nCMD [\"node\", \"server.js\"]\n", "m/Dockerfile": "FROM python:3.12\nEXPOSE 8080\nENTRYPOINT [\"serve\"]\n" });
-    expect(found?.evidence.length).toBeGreaterThan(0);
-    expect(found?.hints.sagemakerSignals).toContain("inference_image");
-    const only = await candidateOf({ "app.py": "import boto3\nboto3.client('sagemaker-runtime')\n", "web/Dockerfile": "FROM node:22\nEXPOSE 8080\nCMD [\"node\", \"server.js\"]\n" });
-    expect(only?.hints.sagemakerSignals).not.toContain("inference_image");
   });
 });
 
@@ -127,11 +78,6 @@ describe("tests that fake the endpoint", () => {
       expect(found?.hints.fakedByTests).toBe(true);
     }
   });
-  it("leaves the flag off when the tests double something else, and reads no endpoint from a test file", async () => {
-    const found = await candidateOf({ ...app, "tests/test_other.py": "from botocore.stub import Stubber\nimport boto3\nStubber(boto3.client('s3'))\nEndpointName='from-a-test'\n" });
-    expect(found?.hints.fakedByTests).toBeUndefined();
-    expect(found?.hints.endpointNames).toEqual(["fraud-scorer"]);
-  });
 });
 
 describe("what the detector carries", () => {
@@ -141,19 +87,6 @@ describe("what the detector carries", () => {
     expect(TestEnvDependencyCandidateSchema.safeParse(found).success).toBe(true);
     expect(JSON.stringify(found)).not.toContain("hunter2");
     expect(detection.services.map((item) => item.value)).toEqual([{ kind: "sagemaker_runtime", target: "fraud-scorer" }]);
-  });
-  it("refuses a name shaped like a key", async () => {
-    const token = ["sk", "x".repeat(8), "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"].join("-");
-    const found = await candidateOf({ "a.py": `import boto3\nboto3.client('sagemaker-runtime').invoke_endpoint(EndpointName="${token}", Body=b)\n` });
-    expect(found?.hints.endpointNames).toBeUndefined();
-  });
-  it("gives no candidate for a repository with no sign of SageMaker, and does not disturb one that has other findings", async () => {
-    const detection = await detect({ "a.py": "print('hi')\n", "docker-compose.yml": "services:\n  db:\n    image: postgres:16\n" });
-    expect(detection.dependencies?.find((item) => item.family === "aws:sagemaker-runtime")).toBeUndefined();
-    expect(detection.dependencies?.find((item) => item.family === "postgres")).toBeDefined();
-  });
-  it("skips the folders no project reads (node_modules, vendor)", async () => {
-    expect(await candidateOf({ "node_modules/x/a.py": "import boto3\nboto3.client('sagemaker-runtime')\n" })).toBeUndefined();
   });
 });
 

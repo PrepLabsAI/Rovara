@@ -209,7 +209,8 @@ describe("Slack company mode's switch (18a)", () => {
     for (const fn of ["SlackIngress", "ChannelApiIngress", "DeveloperTaskNotifierFunction", "DeveloperSignInFunction", "SessionsReconciler"]) {
       expect(variablesOf(named, fn).SLACK_COMPANY_WORKSPACES, fn).toStrictEqual(off("enabled"));
     }
-    expect(variablesOf(named, "DeveloperSignInFunction").STATE_TABLE_NAME).toStrictEqual({ "Fn::If": [on, { Ref: byPrefix(named, "State", "AWS::DynamoDB::Table")[0] }, ""] });
+    // SIGNIN-STATE-TABLE: the sign-in function's State table is its own variable, always the real table (not the switch's; sign-in's company audit write needs it with the switch off).
+    expect(variablesOf(named, "DeveloperSignInFunction").STATE_TABLE_NAME).toStrictEqual({ Ref: byPrefix(named, "State", "AWS::DynamoDB::Table")[0] });
     // 18d: the environment's name for the channel API, notifier and reconciler factories, "" while off.
     for (const fn of ["DeveloperTaskNotifierFunction", "SessionsReconciler"]) expect(variablesOf(named, fn).AGENTX_ENV, fn).toStrictEqual({ "Fn::If": [on, "staging", ""] });
     // DEC 254zk: the channel API's factory needs the environment's name too.

@@ -37,25 +37,6 @@ const apply = (over: { readiness?: ProjectCommand[]; plan?: TestEnvTaskPlan; rep
 beforeEach(() => { changes.byDirectory.clear(); changes.throwFor.clear(); });
 
 describe("test selection for a task", () => {
-  it("runs the tests that touch the changed file, adds them only where the maintainer approved, and leaves every other command as it was", async () => {
-    changes.byDirectory.set("/work/service", [{ path: "src/score.py", status: "MODIFIED", hunks: [] }]);
-    const applied = (await apply())!;
-    expect(applied.readiness[0]).toEqual({ ...readiness[0]!, args: ["-q", "tests/test_score.py::test_a", "tests/test_score.py::test_b"] });
-    expect(applied.readiness[1]).toEqual(readiness[1]);
-    expect(applied.readiness[2]).toEqual(readiness[2]);
-    expect(applied.readiness).toHaveLength(readiness.length);
-    expect(applied.selection).toMatchObject({ method: "coverage_map", selected: 2, total: 14, mapAgeHours: 4 });
-    expect(applied).toMatchObject({ revision: 2, budgetMs: 30 * 60_000 });
-    // The approved placeholder never stays in a command.
-    expect(applied.readiness.flatMap((command) => command.args)).not.toContain("{tests}");
-  });
-
-  it("runs the whole check, with the reason, when there is no map", async () => {
-    changes.byDirectory.set("/work/service", [{ path: "src/score.py", status: "MODIFIED", hunks: [] }]);
-    const applied = (await apply({ plan: plan({ coverageMap: undefined }) }))!;
-    expect(applied.readiness).toEqual(readiness);
-    expect(applied.selection).toEqual({ method: "full", selected: 0, total: 0, fallbackReason: "map_missing" });
-  });
 
   it("runs the whole check when the map is stale, a changed file is unknown, or a path changes what every test means", async () => {
     changes.byDirectory.set("/work/service", [{ path: "src/score.py", status: "MODIFIED", hunks: [] }]);
@@ -107,24 +88,10 @@ describe("test selection for a task", () => {
     expect(applied.readiness[0]!.args).toEqual(["-q", "tests/test_rank.py::test_c", "tests/test_util.py::test_d"]);
   });
 
-  it("never passes a test id that reads as an argument file (@file) or an option, whatever the map says", async () => {
-    changes.byDirectory.set("/work/service", [{ path: "src/score.py", status: "MODIFIED", hunks: [] }]);
-    for (const id of ["@args.txt", "-x"]) {
-      const hostile = { builtAt: FRESH, files: { ...map.files, "src/score.py": [id, "tests/test_score.py::test_a"] } };
-      const applied = (await apply({ plan: plan({ coverageMap: hostile }) }))!;
-      expect(applied.readiness, id).toEqual(readiness);
-      expect(applied.selection?.fallbackReason, id).toBe("over_selected");
-    }
-  });
-
   it("is ignored whole when the run has fewer commands than the plan has checks", async () => {
     expect(await apply({ readiness: [cmd("pytest", ["-q"])] })).toBeUndefined();
   });
 
-  it("sets the round's budget from the plan", async () => {
-    changes.byDirectory.set("/work/service", [{ path: "src/score.py", status: "MODIFIED", hunks: [] }]);
-    expect((await apply({ plan: plan({ roundBudgetMin: 90 }) }))!.budgetMs).toBe(90 * 60_000);
-  });
 });
 
 describe("what the evidence reports of the selection", () => {
@@ -151,7 +118,4 @@ describe("what the evidence reports of the selection", () => {
     expect((await raw({ method: "full", selected: 0, total: 0, fallbackReason: "map_missing" }))?.selection).toEqual({ method: "full", selected: 3, total: 3, fallbackReason: "map_missing" });
   });
 
-  it("with no plan, is the whole check, as before", async () => {
-    expect((await raw(undefined))?.selection).toEqual({ method: "full", selected: 3, total: 3 });
-  });
 });

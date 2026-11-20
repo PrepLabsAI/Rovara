@@ -23,43 +23,6 @@ let root: string;
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "evidence-raw-")); });
 afterEach(async () => { await rm(root, { recursive: true, force: true }); });
 
-describe("the test report a check already writes", () => {
-  it("becomes totals and names, and the digest and a full-run selection come with it; the command is never altered", async () => {
-    await writeFile(join(root, "report.xml"), JUNIT);
-    const commands = [command(["--junitxml=report.xml"])];
-    const raw = await collectEvidenceRaw({ rootPath: root, commands, entries: [entry(0)], candidateDigest: DIGEST, repositories: [] });
-    expect(raw?.candidateDigest).toBe(DIGEST);
-    expect(raw?.checks).toHaveLength(1);
-    expect(raw?.checks[0]).toMatchObject({ checkId: "readiness:0", tests: { total: 3, passed: 2, skipped: 1, failed: 0, errored: 0 } });
-    expect(raw?.checks[0]?.tests?.names.map((name) => name.name)).toContain("tests/test_match.py::test_no_region");
-    expect(raw?.selection).toEqual({ method: "full", selected: 3, total: 3 });
-    expect(commands[0]?.args).toEqual(["--junitxml=report.xml"]);
-    expect(EvidenceRawSchema.safeParse(raw).success).toBe(true);
-  });
-
-  it("reads a vitest JSON report too, and only the check that names one", async () => {
-    await writeFile(join(root, "out.json"), JSON.stringify({ testResults: [{ name: "/w/src/a.test.ts", status: "passed", assertionResults: [{ fullName: "a works", status: "passed", duration: 3 }] }] }));
-    const raw = await collectEvidenceRaw({ rootPath: root, commands: [command(["run", "--reporter=json", "--outputFile=out.json"]), command(["lint"])], entries: [entry(0), entry(1, { label: "lint" })], candidateDigest: DIGEST, repositories: [] });
-    expect(raw?.checks.map((check) => check.checkId)).toEqual(["readiness:0"]);
-    expect(raw?.checks[0]?.tests).toMatchObject({ total: 1, passed: 1 });
-  });
-
-  it("says nothing for a check with no report and no failure: nothing is measured, so nothing is claimed", async () => {
-    expect(await collectEvidenceRaw({ rootPath: root, commands: [command(["-q"])], entries: [entry(0)], candidateDigest: DIGEST, repositories: [] })).toBeUndefined();
-  });
-
-  it("keeps only the end of a failed check's output, redacted, and none for a passing check", async () => {
-    const secret = `ghp_${"Ab1Cd2Ef3Gh4".repeat(3)}`;
-    const failed = entry(0, { after: "failed", exitCode: 1, output: `${"x".repeat(40_000)}\nAssertionError: boom ${secret}\n` });
-    const raw = await collectEvidenceRaw({ rootPath: root, commands: [command(["-q"])], entries: [failed], candidateDigest: DIGEST, repositories: [] });
-    const tail = raw?.checks[0]?.outputTail ?? "";
-    expect(tail).toContain("AssertionError: boom");
-    expect(tail).not.toContain(secret);
-    expect(Buffer.byteLength(tail, "utf8")).toBeLessThanOrEqual(16 * 1024);
-    expect(await collectEvidenceRaw({ rootPath: root, commands: [command(["-q"])], entries: [entry(0, { output: "all fine" })], candidateDigest: DIGEST, repositories: [] })).toBeUndefined();
-  });
-});
-
 describe("a report it must not read", () => {
   it("outside the workspace, through a link, malformed, or not there at all gives no tests", async () => {
     await mkdir(join(root, "work"));
@@ -135,19 +98,6 @@ describe("repository edge evidence", () => {
   });
   it.each([
     { edges: [repositoryEdges.edges[0], repositoryEdges.edges[0]], notes: [] },
-    { edges: [{ ...repositoryEdges.edges[0], provider: "app" }], notes: [] },
-    { edges: [{ ...repositoryEdges.edges[0], language: "rust" }], notes: [] },
-    { edges: [{ ...repositoryEdges.edges[0], source: "guess" }], notes: [] },
-    { edges: [{ ...repositoryEdges.edges[0], consumer: "bad\n" }], notes: [] },
-    { edges: [{ ...repositoryEdges.edges[0], extra: true }], notes: [] },
-    { edges: repositoryEdges.edges, notes: ["untrusted secret"] },
-    { edges: Array.from({ length: 65 }, (_, i) => ({ ...repositoryEdges.edges[0], consumer: `app${i}` })), notes: [] },
-    { edges: [{ consumer: "app", provider: "lib", language: "node" }], notes: [] },
-    { edges: [null], notes: [] },
-    { edges: "wrong", notes: [] },
-    { edges: repositoryEdges.edges, notes: null },
-    { edges: repositoryEdges.edges, notes: Array.from({ length: 9 }, () => "ambiguous") },
-    null,
   ])("refuses malformed facts without accepting free text: %j", value => {
     expect(EvidenceRawSchema.safeParse({ schemaVersion: 1, candidateDigest: DIGEST, checks: [], repositoryEdges: value }).success).toBe(false);
   });

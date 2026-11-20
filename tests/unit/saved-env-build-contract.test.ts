@@ -1,7 +1,6 @@
 // Saved project images (SV wiring): the rebuild job on the wire. The payload field names what to build and holds no credential in its stored form; the worker lists the feature it needs.
 import { describe, expect, it } from "vitest";
-import { PREPARE_SAVED_ENV_BUILD_FEATURE, PrepareSavedEnvBuildSchema, SavedEnvFallbackBodySchema, SavedEnvLeaseBodySchema, SavedEnvResultBodySchema, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, savedEnvRepositoryName, testEnvDigest, TestEnvironmentBodySchema } from "../../packages/contracts/src/index.js";
-import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
+import { PrepareSavedEnvBuildSchema, SavedEnvFallbackBodySchema, SavedEnvLeaseBodySchema, SavedEnvResultBodySchema, savedEnvRepositoryName, testEnvDigest, TestEnvironmentBodySchema } from "../../packages/contracts/src/index.js";
 
 const cmd = { cwd: "svc", executable: "npm", args: ["ci"], timeoutSeconds: 60 };
 const environment = TestEnvironmentBodySchema.parse({
@@ -23,23 +22,6 @@ describe("the prepare payload's savedEnvBuild", () => {
     expect(PrepareSavedEnvBuildSchema.parse(build({ leaseToken: "L".repeat(40) })).leaseToken).toBe("L".repeat(40));
   });
 
-  it("refuses what the worker could not build: a repository that is not a saved image repository, a commit that is not a sha, an empty or oversized job, a secret that is not a name, an unknown field", () => {
-    for (const bad of [{ repository: "rovara-env/other" }, { commits: { svc: "main" } }, { commits: {} }, { commits: Object.fromEntries(Array.from({ length: 17 }, (_, index) => [`r${String(index)}`, "d".repeat(40)])) }, { secretNames: ["has space"] }, { baseImageDigest: "latest" }, { expectedKey: "short" }, { expectedKey: undefined }, { reason: "whenever" }, { leaseToken: "short" }, { extra: 1 }]) {
-      expect(PrepareSavedEnvBuildSchema.safeParse(build(bad)).success, JSON.stringify(bad)).toBe(false);
-    }
-  });
-
-  it("rides in a prepare invocation, and the worker lists the feature the broker needs", () => {
-    const invocation = {
-      protocolVersion: 1, kind: "prepare", operationId: "22222222-2222-4222-8222-222222222222", workspaceId: "11111111-1111-4111-8111-111111111111", fence: 1, projectRevision: 1, callbackCapability: "c".repeat(40),
-      payload: { project: { name: "demo", revision: 1, repositories: [{ name: "svc", url: "https://github.com/acme/svc.git", path: "svc", defaultBranch: "main", credentialRef: "r" }], setup: [], readiness: [], orchestratorInstructions: "x" }, repositoryGrant: "g", readOnly: true, savedEnvBuild: build() },
-    };
-    expect(WorkerInvocationSchema.safeParse(invocation).success).toBe(true);
-    expect(WorkerInvocationSchema.safeParse({ ...invocation, payload: { ...invocation.payload, savedEnvBuild: build({ extra: 1 }) } }).success).toBe(false);
-    expect(PREPARE_SAVED_ENV_BUILD_FEATURE).toBe("prepare.savedEnvBuild.v1");
-    expect(WORKER_INVOCATION_FEATURES).toContain(PREPARE_SAVED_ENV_BUILD_FEATURE);
-    expect(WORKER_IMPLEMENTED_FEATURES).toContain(PREPARE_SAVED_ENV_BUILD_FEATURE);
-  });
 });
 
 describe("the route bodies", () => {

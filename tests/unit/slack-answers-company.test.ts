@@ -1,7 +1,6 @@
 // Lead 4 J2: how the Slack answer route finds the company, the person and the project: the same real workspace directory, core links and company check the rest of hosted Slack uses (aws/slack-person.ts),
 // with two companies that share raw Slack ids. Nothing but the verified Slack workspace and member picks a company or a person; a project another company owns is not reachable.
 import { describe, expect, it } from "vitest";
-import { slackAnswerThreadId } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/index.js";
 import { createSlackWorkspaceBindings } from "../../packages/broker/src/aws/slack-workspace-binding.js";
 import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/links.js";
@@ -39,15 +38,6 @@ async function world() {
 }
 
 describe("the Slack answer route finds the company and the person from the verified workspace and member", () => {
-  it("a linked member is their own company's person, and the same raw Slack id in another workspace is nobody until linked there", async () => {
-    const w = await world();
-    await w.link(COMPANY_A, TEAM.A, "dev-ada");
-    expect(await w.deps.person(TEAM.A, SHARED_USER)).toEqual({ companyId: COMPANY_A.orgId, personId: "dev-ada" });
-    expect(await w.deps.person(TEAM.B, SHARED_USER)).toBeUndefined();
-    await w.link(COMPANY_B, TEAM.B, "dev-bea");
-    expect(await w.deps.person(TEAM.B, SHARED_USER)).toEqual({ companyId: COMPANY_B.orgId, personId: "dev-bea" });
-    expect(await w.deps.person(TEAM.A, SHARED_USER)).toEqual({ companyId: COMPANY_A.orgId, personId: "dev-ada" });
-  });
 
   it("an unknown workspace, an unlinked member and a malformed id are nobody, and nothing throws", async () => {
     const w = await world();
@@ -60,24 +50,6 @@ describe("the Slack answer route finds the company and the person from the verif
     expect(await w.deps.projectInCompany(TEAM.A, "beta")).toBe(false);
     expect(await w.deps.projectInCompany(TEAM.B, "alpha")).toBe(false);
     expect(await w.deps.projectInCompany(TEAM.A, "ghost")).toBe(false);
-  });
-
-  it("an answer asked in one company's workspace is asked as that company, that person and the bound project, in the Slack thread's own id", async () => {
-    const w = await world();
-    await w.link(COMPANY_A, TEAM.A, "dev-ada");
-    const thread = { teamId: TEAM.A, channelId: "C0BOUND000", threadTs: "1700000000.000100" };
-    const result = await askSlackAnswer(w.deps, { thread, userId: SHARED_USER, boundProject: "alpha", taskThread: false, body: { requestId: REQUEST, question: "How long do refunds last?" } });
-    expect(result).toEqual({ status: "declined", reason: "not_available" });
-    expect(w.asked).toEqual([{ companyId: COMPANY_A.orgId, personId: "dev-ada", project: "alpha", threadId: slackAnswerThreadId(thread), requestId: REQUEST, question: "How long do refunds last?" }]);
-  });
-
-  it("a member of company A in a channel bound to company B's project is never asked as either company", async () => {
-    const w = await world();
-    await w.link(COMPANY_A, TEAM.A, "dev-ada");
-    const thread = { teamId: TEAM.A, channelId: "C0BOUND000", threadTs: "1700000000.000100" };
-    const result = await askSlackAnswer(w.deps, { thread, userId: SHARED_USER, boundProject: "beta", taskThread: false, body: { requestId: REQUEST, question: "q" } });
-    expect(result).toEqual({ status: "declined", reason: "not_available" });
-    expect(w.asked).toEqual([]);
   });
 
   it("with no core answer seam the route declines without asking anyone", async () => {

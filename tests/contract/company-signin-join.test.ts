@@ -43,7 +43,7 @@ it("a new implicit-company person still needs an invitation; only an existing no
   expect(await h.company.join({ personId, companyId: IMPLICIT_COMPANY_ID, email })).toEqual({ ok: false, reason: "not_invited" });
   await h.deps.store.upsertDeveloper({ developerId: personId, provider: "oidc", issuer: OIDC_ISSUER, subject: "person", displayName: "Person", email });
   expect(await h.company.join({ personId, companyId: IMPLICIT_COMPANY_ID, email })).toMatchObject({ ok: true, membership: { role: "member", joinedVia: "legacy", companyId: IMPLICIT_COMPANY_ID } });
-  expect(await h.company.join({ personId, companyId, email })).toEqual({ ok: false, reason: "member_elsewhere" });
+  expect(await h.company.join({ personId, companyId, email })).toEqual({ ok: false, reason: "member_elsewhere", attributedCompanyId: IMPLICIT_COMPANY_ID });
 });
 
 it("looks up preapproval only in the method's company and bounds reads", async () => {

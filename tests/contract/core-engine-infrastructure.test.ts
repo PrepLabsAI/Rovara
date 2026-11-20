@@ -641,12 +641,15 @@ describe("L1a broker environment derivation", () => {
     // machine's definition (new states SizeChosen, the *Sized and X86 launches, SizedLaunchFailed, SizeUnavailable; Start, LaunchConfiguration, RunInstance*, RecordInstance carry the size).
     // Batch 14: measured on the combined tree (batch 13 + the machine size stack); the legacy synth differs from batch 13's head only in the three machine size places above.
     // #1129: re-pinned for the company layer, the sign-in extras and the company-secrets role in the legacy template (both company switches off by default).
+    // SIGNIN-AUDIT: re-pinned for the sign-in role's conditional AUDIT-family PutItem on State.
     // #1131: re-pinned. The legacy (production) template gains the reliability parts named environments had: the DispatchDeadLetters, StuckCancels and UnwaitedTaskFailures
     // alarms, the reconciler's idle Slack backstop (its settings, ReadThreadWaiters, PostUnwaitedTaskNote, the Slack poster) and callback key read, and the hand-off grant's ordering.
     // #1149: re-pinned. The legacy broker packs its environment (the names parameter /agentx/production/broker-names, AGENTX_SETTINGS with the legacy layout marker, the
     // names parameter's read in its ssm:GetParameters statement); tests/contract/legacy-broker-packed-environment.test.ts proves it boots with the same values.
     // #1148: re-pinned for the core engine in the legacy template (CoreEngine off by default).
-    expect(digest(legacy.toJSON())).toBe("d83033611a45d30fb4b9162de323935d1b91ed6f8a200cbc8be10165d8cb4e8f");
+    // SIGNIN-STATE-TABLE: re-pinned for ONE change: the sign-in function's STATE_TABLE_NAME is the plain Ref to State instead of an Fn::If on SlackCompanyModeOn to "" (rule D: with the
+    // old Fn::If put back, the old pin db40b76d... held; the legacy-templates snapshot diff is that one hunk).
+    expect(digest(legacy.toJSON())).toBe("f15083c44efe613e69041046d5daf9b74fe81958ecfb2c20639a30701ab93b99");
   });
 });
 import { createHash } from "node:crypto";

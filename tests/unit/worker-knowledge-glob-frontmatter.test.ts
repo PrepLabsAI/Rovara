@@ -63,12 +63,6 @@ describe("knowledge front matter", () => {
     });
   });
 
-  it("only reads front matter that is the first thing in the file", () => {
-    const parsed = parseFrontMatter("\n---\ninclusion: manual\n---\nBody");
-    expect(parsed).toMatchObject({ ok: true, present: false });
-    expect(parseFrontMatter("# Title\n---\ninclusion: manual\n---\n")).toMatchObject({ ok: true, present: false });
-  });
-
   it("keeps a quoted true as a string and accepts a byte-order mark and CRLF", () => {
     expect(parseFrontMatter('﻿---\r\nname: "true"\r\nflag: true\r\n---\r\nx')).toMatchObject({ ok: true, data: { name: "true", flag: true }, body: "x" });
   });

@@ -14,6 +14,7 @@ import { RetainExceptOnCreate } from "./retention.js";
 import { EnvironmentRolePath } from "./role-path.js";
 import { SlackOrchestratorStack } from "./slack-orchestrator.js";
 import { SwebenchEvalStack, swebenchNames } from "./swebench-eval.js";
+import { CiRunnerStack } from "./ci-runner.js";
 import { WorkerSettingsStack } from "./worker-settings.js";
 
 export function buildAgentXApp(context: Record<string, unknown> = {}): App {
@@ -160,6 +161,13 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
   if (app.node.tryGetContext("agentxInstaller") === "enabled") {
     new InstallerStack(app, "AgentXInstaller", {
       description: INSTALLER_DESCRIPTION,
+      env: { region: deploymentRegion ?? "us-east-1" },
+    });
+  }
+  // #1200: CI's CodeBuild-hosted runner for the test shards of pull requests into mainline, only when asked for (-c agentxCiRunner=enabled); no release deploys it.
+  if (app.node.tryGetContext("agentxCiRunner") === "enabled") {
+    new CiRunnerStack(app, "AgentXCiRunner", {
+      description: "CodeBuild-hosted GitHub Actions runner for CI's test shards on pull requests into mainline",
       env: { region: deploymentRegion ?? "us-east-1" },
     });
   }

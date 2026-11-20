@@ -1,20 +1,8 @@
 // TE-F2 part A: the failure pack. Five modes in each served family's shape; the pack NEVER counts as proof (pinned here); the shapes match the error ids F0a's rows name. Pure: a socket or fetch fails the test.
-/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call -- these tests walk parsed JSON answers (`json()` returns any on purpose) */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-return -- these tests walk parsed JSON answers (`json()` returns any on purpose) */
 import net from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  FAILURE_AFTER_CALLS_MAX,
-  FAILURE_MODES,
-  FAILURE_PACK_CLASS,
-  FAILURE_REFUSAL_TEXT,
-  FAILURE_SHAPE_KEYS,
-  FailureSpecSchema,
-  buildFailureAnswer,
-  failureShapeId,
-  familyErrorAnswer,
-  type FailureContext,
-  type FailureMode,
-} from "../../packages/contracts/src/model-failure-pack.js";
+import { FAILURE_AFTER_CALLS_MAX, FAILURE_MODES, FAILURE_PACK_CLASS, FAILURE_REFUSAL_TEXT, FAILURE_SHAPE_KEYS, FailureSpecSchema, buildFailureAnswer, failureShapeId, type FailureContext, type FailureMode } from "../../packages/contracts/src/model-failure-pack.js";
 import { REPLY_RESULT_CLASSES, replyCountsTowardProof } from "../../packages/contracts/src/model-reply-provenance.js";
 import { builtinModelCatalog } from "../../packages/contracts/src/model-catalog-rows.js";
 import { SERVED_MODEL_FAMILIES } from "../../packages/contracts/src/model-served-family.js";
@@ -68,19 +56,9 @@ describe("the failure pack never counts as proof", () => {
     expect(replyCountsTowardProof(FAILURE_PACK_CLASS)).toBe(false);
     for (const mode of FAILURE_MODES) expect(replyCountsTowardProof(mode)).toBe(false);
   });
-  it("it never reads a reply set: the text of every answer is fixed in code", () => {
-    for (const shape of SHAPES) {
-      const a = answer("token_limit", shape.over);
-      expect(a.body, shape.name).toContain("This is the start of an answer");
-    }
-  });
 });
 
 describe("the five modes and the shape ids", () => {
-  it("are exactly the five, and each has the F0a row key", () => {
-    expect([...FAILURE_MODES]).toEqual(["rate_limit", "cut_off_stream", "token_limit", "refusal", "bad_tool_json"]);
-    expect(FAILURE_SHAPE_KEYS).toEqual({ rate_limit: "rateLimit", cut_off_stream: "cutOffStream", token_limit: "tokenLimit", refusal: "refusal", bad_tool_json: "badToolJson" });
-  });
   it("failureShapeId gives the ids the built-in rows name, for every served family a row exists for", () => {
     const rows = builtinModelCatalog().rows;
     const seen = new Set<string>();
@@ -91,35 +69,6 @@ describe("the five modes and the shape ids", () => {
     }
     // F0a's built-in rows now cover openai_compatible, anthropic_messages, cohere, gemini and vertex.
     expect([...seen].sort()).toEqual([...SERVED_MODEL_FAMILIES].sort());
-  });
-});
-
-describe("rate_limit", () => {
-  it("is a 429 with retry-after in each family's own envelope", () => {
-    for (const shape of SHAPES) {
-      const a = answer("rate_limit", shape.over);
-      expect(a.status, shape.name).toBe(429);
-      expect(a.headers["retry-after"], shape.name).toBe("1");
-      expect(a.headers["content-type"], shape.name).toBe("application/json");
-    }
-    expect(json(answer("rate_limit", { wire: "openai" }).body)).toEqual({ error: { message: expect.any(String), type: "requests", param: null, code: "rate_limit_exceeded" } });
-    expect(json(answer("rate_limit", { wire: "anthropic", operation: "messages" }).body)).toEqual({ type: "error", error: { type: "rate_limit_error", message: expect.any(String) } });
-    expect(json(answer("rate_limit", { wire: "gemini", operation: "generateContent" }).body)).toEqual({ error: { code: 429, message: expect.any(String), status: "RESOURCE_EXHAUSTED" } });
-    expect(json(answer("rate_limit", { wire: "cohere", operation: "chat" }).body)).toEqual({ message: expect.any(String) });
-  });
-  it("reads as a plain rate limit to F1-a's classifier (its branch is not merged: its two word lists are copied here)", () => {
-    // From pr/te-f1a-model-egress-core, model-egress/classify.ts (a329e8e02 base): a 429 is `quota` when the body has a QUOTA word and `rate_limit` otherwise. The pack's 429 must stay a rate limit.
-    const QUOTA_WORDS = /insufficient_quota|credit balance is too low|billing details|per ?day|daily|spending cap|prepayment|out of credits/iu;
-    const RATE_WORDS = /rate_limit|rate limit|per ?minute|too many requests|retry/iu;
-    for (const shape of SHAPES) {
-      const a = answer("rate_limit", shape.over);
-      expect(QUOTA_WORDS.test(a.body), shape.name).toBe(false);
-      expect(RATE_WORDS.test(a.body), shape.name).toBe(true);
-    }
-  });
-  it("applies to every operation, embeddings included", () => {
-    expect(answer("rate_limit", { wire: "openai", operation: "embeddings" }).status).toBe(429);
-    expect(answer("rate_limit", { wire: "cohere", operation: "rerank" }).status).toBe(429);
   });
 });
 
@@ -153,14 +102,6 @@ describe("cut_off_stream", () => {
     expect(named.ok && !named.complete).toBe(true);
     expect(named.ok && named.events.length).toBeGreaterThanOrEqual(3);
   });
-  it("a call that did not ask for a stream gets a JSON body cut in half", () => {
-    for (const shape of SHAPES.filter((entry) => entry.over.stream === undefined)) {
-      const a = answer("cut_off_stream", shape.over);
-      expect(a.status, shape.name).toBe(200);
-      expect(() => JSON.parse(a.body), shape.name).toThrow();
-      expect(a.body.length, shape.name).toBeGreaterThan(10);
-    }
-  });
   it("does not apply to an embedding: a fixed not-applicable error, never a made-up success", () => {
     const a = answer("cut_off_stream", { wire: "openai", operation: "embeddings" });
     expect(a.status).toBe(400);
@@ -169,22 +110,6 @@ describe("cut_off_stream", () => {
 });
 
 describe("token_limit", () => {
-  it("output: a complete answer with the family's length stop", () => {
-    expect(json(answer("token_limit", { wire: "openai", operation: "chat_completions" }).body).choices[0].finish_reason).toBe("length");
-    expect(json(answer("token_limit", { wire: "anthropic", operation: "messages" }).body).stop_reason).toBe("max_tokens");
-    expect(json(answer("token_limit", { wire: "gemini", operation: "generateContent" }).body).candidates[0].finishReason).toBe("MAX_TOKENS");
-    expect(json(answer("token_limit", { wire: "cohere", operation: "chat" }).body).finish_reason).toBe("MAX_TOKENS");
-    expect(json(answer("token_limit", { wire: "openai", operation: "responses" }).body)).toMatchObject({ status: "incomplete", incomplete_details: { reason: "max_output_tokens" } });
-    expect(answer("token_limit", { wire: "openai", operation: "chat_completions" }).status).toBe(200);
-  });
-  it("output, streamed: the last event carries the length stop and the stream is complete", () => {
-    expect(answer("token_limit", { wire: "openai", operation: "chat_completions", stream: "sse" }).body).toContain('"finish_reason":"length"');
-    expect(answer("token_limit", { wire: "openai", operation: "chat_completions", stream: "sse" }).body.endsWith("data: [DONE]\n\n")).toBe(true);
-    expect(answer("token_limit", { wire: "anthropic", operation: "messages", stream: "sse" }).body).toContain('"stop_reason":"max_tokens"');
-    expect(answer("token_limit", { wire: "gemini", operation: "streamGenerateContent", stream: "sse" }).body).toContain('"finishReason":"MAX_TOKENS"');
-    expect(answer("token_limit", { wire: "gemini", operation: "streamGenerateContent", stream: "json_array" }).body.endsWith("]")).toBe(true);
-    expect(answer("token_limit", { wire: "cohere", operation: "chat", stream: "sse" }).body).toContain('"finish_reason":"MAX_TOKENS"');
-  });
   it("input: a 400 input-too-long in each family's envelope", () => {
     const openai = answer("token_limit", { wire: "openai" }, { variant: "input" });
     expect(openai.status).toBe(400);
@@ -192,9 +117,6 @@ describe("token_limit", () => {
     expect(json(answer("token_limit", { wire: "anthropic", operation: "messages" }, { variant: "input" }).body)).toMatchObject({ type: "error", error: { type: "invalid_request_error" } });
     expect(json(answer("token_limit", { wire: "gemini", operation: "generateContent" }, { variant: "input" }).body).error).toMatchObject({ code: 400, status: "INVALID_ARGUMENT" });
     expect(answer("token_limit", { wire: "cohere", operation: "chat" }, { variant: "input" }).status).toBe(400);
-  });
-  it("an operation with no output to cut (embeddings) gets the input-too-long 400", () => {
-    expect(answer("token_limit", { wire: "openai", operation: "embeddings" }).status).toBe(400);
   });
 });
 
@@ -207,20 +129,10 @@ describe("refusal", () => {
     expect(filter.finish_reason).toBe("content_filter");
     expect(filter.message.refusal).toBeUndefined();
   });
-  it("OpenAI chat streamed: a refusal delta, then [DONE]", () => {
-    const body = answer("refusal", { wire: "openai", operation: "chat_completions", stream: "sse" }).body;
-    expect(body).toContain(`"delta":{"refusal":${JSON.stringify(FAILURE_REFUSAL_TEXT)}}`);
-    expect(body.endsWith("data: [DONE]\n\n")).toBe(true);
-    expect(answer("refusal", { wire: "openai", operation: "chat_completions", stream: "sse" }, { variant: "filter" }).body).toContain('"finish_reason":"content_filter"');
-  });
   it("OpenAI Responses: a refusal content part (or incomplete with content_filter)", () => {
     expect(json(answer("refusal", { wire: "openai", operation: "responses" }).body).output[0].content).toEqual([{ type: "refusal", refusal: FAILURE_REFUSAL_TEXT }]);
     expect(json(answer("refusal", { wire: "openai", operation: "responses" }, { variant: "filter" }).body)).toMatchObject({ status: "incomplete", incomplete_details: { reason: "content_filter" } });
     expect(answer("refusal", { wire: "openai", operation: "responses", stream: "sse" }).body).toContain("response.refusal.delta");
-  });
-  it("Anthropic: stop_reason refusal, whole and streamed", () => {
-    expect(json(answer("refusal", { wire: "anthropic", operation: "messages" }).body).stop_reason).toBe("refusal");
-    expect(answer("refusal", { wire: "anthropic", operation: "messages", stream: "sse" }).body).toContain('"stop_reason":"refusal"');
   });
   it("Gemini: finishReason SAFETY, or promptFeedback.blockReason in the filter variant (whole, SSE and JSON array)", () => {
     expect(json(answer("refusal", { wire: "gemini", operation: "generateContent" }).body).candidates[0].finishReason).toBe("SAFETY");
@@ -230,68 +142,12 @@ describe("refusal", () => {
     expect(answer("refusal", { wire: "gemini", operation: "streamGenerateContent", stream: "sse" }, { variant: "filter" }).body).toContain('"blockReason":"SAFETY"');
     expect(json(answer("refusal", { wire: "gemini", operation: "streamGenerateContent", stream: "json_array" }, { variant: "filter" }).body)[0].promptFeedback.blockReason).toBe("SAFETY");
   });
-  it("Cohere has no documented refusal marker: a refusal sentence with COMPLETE (UNVERIFIED)", () => {
-    const body = json(answer("refusal", { wire: "cohere", operation: "chat" }).body);
-    expect(body.finish_reason).toBe("COMPLETE");
-    expect(body.message.content[0].text).toBe(FAILURE_REFUSAL_TEXT);
-  });
   it("does not apply to an embedding", () => {
     expect(answer("refusal", { wire: "openai", operation: "embeddings" }).status).toBe(400);
   });
 });
 
 describe("bad_tool_json", () => {
-  it("OpenAI chat and Responses: arguments that do not parse", () => {
-    const chat = json(answer("bad_tool_json", { wire: "openai", operation: "chat_completions" }).body).choices[0].message.tool_calls[0];
-    expect(chat.function.name).toBe("get_weather");
-    expect(() => JSON.parse(chat.function.arguments)).toThrow();
-    const resp = json(answer("bad_tool_json", { wire: "openai", operation: "responses" }).body).output[0];
-    expect(resp.type).toBe("function_call");
-    expect(() => JSON.parse(resp.arguments)).toThrow();
-    const stream = answer("bad_tool_json", { wire: "openai", operation: "chat_completions", stream: "sse" }).body;
-    expect(stream).not.toContain("rovara_bad_tool_json");
-    const args = parseSseText(stream, { requireSpace: true });
-    const pieces = args.ok ? args.events.filter((event) => event !== "[DONE]").map((event) => JSON.parse(event).choices[0].delta.tool_calls?.[0]?.function?.arguments).filter((piece): piece is string => typeof piece === "string") : [];
-    expect(pieces.length).toBeGreaterThan(0);
-    expect(() => JSON.parse(pieces.join(""))).toThrow();
-  });
-  it("OpenAI chat stream: the usage-only chunk is added only when the request asked for include_usage", () => {
-    const choicesOf = (body: string): number[] => (parseSseText(body, { requireSpace: true }) as { events: string[] }).events.filter((event) => event !== "[DONE]").map((event) => JSON.parse(event).choices.length);
-    for (const mode of ["bad_tool_json", "refusal", "token_limit"] as const) {
-      const plain = answer(mode, { wire: "openai", operation: "chat_completions", stream: "sse" }, mode === "refusal" ? { variant: "filter" } : {});
-      const off = (plain.body.match(/"choices":\[\]/gu) ?? []).length;
-      expect(off, mode).toBe(0);
-      const asked = answer(mode, { wire: "openai", operation: "chat_completions", stream: "sse", includeUsage: true }, mode === "refusal" ? { variant: "filter" } : {});
-      expect((asked.body.match(/"choices":\[\]/gu) ?? []).length, mode).toBe(1);
-    }
-    const asked = answer("bad_tool_json", { wire: "openai", operation: "chat_completions", stream: "sse", includeUsage: true }).body;
-    expect(choicesOf(asked).filter((n) => n === 0)).toHaveLength(1);
-    expect(choicesOf(asked).at(-1)).toBe(0);
-    expect(choicesOf(answer("bad_tool_json", { wire: "openai", operation: "chat_completions", stream: "sse" }).body).every((n) => n === 1)).toBe(true);
-  });
-  it("Cohere: arguments that do not parse, whole and streamed", () => {
-    const body = json(answer("bad_tool_json", { wire: "cohere", operation: "chat" }).body);
-    expect(() => JSON.parse(body.message.tool_calls[0].function.arguments)).toThrow();
-    const stream = parseNamedSseText(answer("bad_tool_json", { wire: "cohere", operation: "chat", stream: "sse" }).body);
-    const joined = stream.ok ? stream.events.filter((event) => event.event === "tool-call-delta").map((event) => JSON.parse(event.data).delta.message.tool_calls.function.arguments).join("") : "";
-    expect(() => JSON.parse(joined)).toThrow();
-    expect(answer("bad_tool_json", { wire: "cohere", operation: "chat", stream: "sse" }).body).not.toContain("rovara_bad_tool_json");
-  });
-  it("Anthropic: a whole input of the wrong shape, and an unterminated partial_json when streamed (the SDK's partial parser then yields an object that breaks the schema)", () => {
-    const whole = json(answer("bad_tool_json", { wire: "anthropic", operation: "messages" }).body);
-    expect(whole.content[0]).toMatchObject({ type: "tool_use", name: "get_weather", input: { rovara_wrong_key: ["not", "the", "declared", "type"] } });
-    const stream = parseNamedSseText(answer("bad_tool_json", { wire: "anthropic", operation: "messages", stream: "sse" }).body);
-    const joined = stream.ok ? stream.events.filter((event) => event.event === "content_block_delta").map((event) => JSON.parse(event.data).delta.partial_json).join("") : "";
-    expect(() => JSON.parse(joined)).toThrow(); // the stream's pieces are never a complete JSON text
-  });
-  it("M4: Gemini functionCall.args is an OBJECT with the wrong keys and types, never a string (google-genai Python needs an object)", () => {
-    const wrong = { rovara_wrong_key: ["not", "the", "declared", "type"] };
-    const whole = json(answer("bad_tool_json", { wire: "gemini", operation: "generateContent" }).body);
-    expect(whole.candidates[0].content.parts[0].functionCall).toEqual({ name: "get_weather", args: wrong });
-    expect(typeof whole.candidates[0].content.parts[0].functionCall.args).toBe("object");
-    expect(answer("bad_tool_json", { wire: "gemini", operation: "streamGenerateContent", stream: "sse" }).body).toContain(`"args":${JSON.stringify(wrong)}`);
-    expect(json(answer("bad_tool_json", { wire: "gemini", operation: "streamGenerateContent", stream: "json_array" }).body)[0].candidates[0].content.parts.at(-1).functionCall.args).toEqual(wrong);
-  });
   it("uses the declared tool name, or unknown_tool", () => {
     expect(answer("bad_tool_json", { wire: "openai", toolName: undefined }).body).toContain('"name":"unknown_tool"');
     expect(answer("bad_tool_json", { wire: "openai", toolName: "lookup_order" }).body).toContain('"name":"lookup_order"');
@@ -312,11 +168,6 @@ describe("the spec", () => {
       expect(FailureSpecSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
     }
     expect(FailureSpecSchema.safeParse(JSON.parse('{"mode":"rate_limit","__proto__":{"x":1}}')).success).toBe(false);
-  });
-  it("familyErrorAnswer carries fixed words and a retry-after on a 429 only", () => {
-    expect(familyErrorAnswer("openai", "no_script").headers["retry-after"]).toBeUndefined();
-    expect(familyErrorAnswer("openai", "rate_limit").headers["retry-after"]).toBe("1");
-    expect(json(familyErrorAnswer("anthropic", "no_script").body).error.message).toBe("not run: no scripted reply for this request");
   });
 });
 

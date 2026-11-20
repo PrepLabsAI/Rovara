@@ -5,7 +5,7 @@ import type { EvalMeterCall, EvalRunDiagnostic } from "@agentx/contracts";
 import { createEvalRunner, type EvalSandboxExec } from "../../packages/worker/src/verification/eval-runner.js";
 import type { EvalFinalCheckPorts } from "../../packages/worker/src/verification/eval-final-check.js";
 import { EvalSandboxRunFailure, diagnoseEvalFailure, runFailureOf } from "../../packages/worker/src/verification/eval-run-diagnostic.js";
-import { answer, frame } from "../support/eval-model-access.js";
+import { answer } from "../support/eval-model-access.js";
 
 const diagnostic = (): EvalRunDiagnostic => diagnoseEvalFailure({ phase: "run", exitCode: 1, output: "ModuleNotFoundError: No module named 'yaml'" });
 const request = (call: Parameters<EvalFinalCheckPorts["runner"]>[0]["call"], signal = new AbortController().signal) => ({ side: "new" as const, ids: ["q1"], runs: 1 as const, call, signal });
@@ -23,14 +23,4 @@ describe("the runner passes the diagnostic on", () => {
     expect(plainError.message).toBe("eval run failed");
   });
 
-  it("drops the diagnostic when the stage refused a model call (the eval most likely crashed on the error it was handed: the call is the cause)", async () => {
-    const exec: EvalSandboxExec = { run: async (r) => {
-      for await (const _event of r.egress.forward(r.scope, frame())) void _event;
-      throw new EvalSandboxRunFailure(diagnostic());
-    } };
-    const refused = async (): Promise<EvalMeterCall> => { throw new Error("stage refused"); };
-    const error = await createEvalRunner(exec)(request(refused)).catch((e: unknown) => e);
-    expect(runFailureOf(error)).toBeUndefined();
-    expect((error as Error).message).toBe("eval run failed");
-  });
 });

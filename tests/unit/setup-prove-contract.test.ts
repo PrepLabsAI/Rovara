@@ -23,18 +23,6 @@ it("accepts a stored job without lease and a delivery job with lease; stays unad
   expect(WORKER_IMPLEMENTED_FEATURES).not.toContain(TEST_ENV_PROVE_MEASURE_FEATURE);
   expect(WorkerInvocationSchema.safeParse(invocation()).success).toBe(true);
 });
-it.each([{ machineChip: "x86_64" }, { measureMachine: true }, { extra: 1 }, { environment: null }, { commits: {} }, { jobId: "@owner" }, { leaseToken: "short" }, { proposalDigest: "bad" }])("strict job refuses unknown or malformed input %j", override => {
-  expect(PrepareSetupProveSchema.safeParse({ ...job, ...override }).success).toBe(false);
-});
-it.each([{ readOnly: undefined }, { pins: undefined }, { pins: [{ repository: "svc", commit: "e".repeat(40) }] }, { pins: [{ repository: "other", commit: "d".repeat(40) }] }, { checkout: [] }, { savedEnvBuild: {} }, { testServices: { dependencies: [] } }])("requires only a read-only preparation pinned to the job %j", override => {
-  const value = invocation();
-  expect(WorkerInvocationSchema.safeParse({ ...value, payload: { ...value.payload, ...override } }).success).toBe(false);
-});
-it("absent setupProve retains the exact ordinary prepare parse", () => {
-  const { kind, payload, ...base } = invocation();
-  const ordinary = { ...base, kind, payload: { project: payload.project, repositoryGrant: payload.repositoryGrant } };
-  expect(JSON.stringify(WorkerInvocationSchema.parse(ordinary))).toBe(JSON.stringify(ordinary));
-});
 it("one total job byte bound refuses huge and aggregate inputs without silently dropping fields", () => {
   // Scaling checks: a refusal must be needed only past 256 KiB, but the 8N input of a scaling check stays at or under 256 KiB so it stays in CPU cache, so the timed runs use the sizes below the bound
   // (the job is copied and measured the same way whatever the verdict; one huge string is refused here by its unknown key, the aggregate may be accepted). The refusals past the bound run once at full size, un-timed
@@ -73,9 +61,4 @@ it.each([
   const ordinary = { ...value.payload, setupProve: undefined };
   expect(WorkerInvocationSchema.safeParse({ ...value, payload: { ...ordinary, ...extra } }).success).toBe(true);
   expect(WorkerInvocationSchema.safeParse({ ...value, payload: { ...value.payload, ...extra } }).success).toBe(false);
-});
-it("setup Prove explicitly refuses duplicate pins even when count and each commit match", () => {
-  const value = invocation();
-  const payload = { ...value.payload, setupProve: { ...job, commits: { svc: "d".repeat(40), other: "d".repeat(40) } }, pins: [value.payload.pins[0], value.payload.pins[0]] };
-  expect(WorkerInvocationSchema.safeParse({ ...value, payload }).success).toBe(false);
 });

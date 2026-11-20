@@ -196,7 +196,9 @@ jobs:
     needs: [plan, build]
     if: needs.plan.outputs.tests != 'none'
     name: test (${{ matrix.shard }}/${{ strategy.job-total }})
-    runs-on: ubuntu-latest
+    # #1200: a pull request into mainline from this repository runs its shards on the account's CodeBuild ARM runner (infra/lib/ci-runner.ts), where they
+    # don't wait for a free GitHub runner; everything else (code/next, a fork's pull request) runs them on GitHub's free runner, as before.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.base_ref == 'mainline' && github.event.pull_request.head.repo.full_name == github.repository) && format('codebuild-rovara-ci-tests-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
     # 40, not 25: shard 2 passed 25 minutes on 2026-11-14 as code/next grew (PRs #612, #517 cancelled at the limit); shards 1, 3, 4 take 17-21.
     timeout-minutes: 40
     strategy:
@@ -214,10 +216,12 @@ jobs:
       - run: npm ci
       # tests/unit/port-guard.test.ts runs the real secret scan, and its re-check 3 cases fail loudly without gitleaks (they never skip). Same pinned
       # release and checksum as the port-guard job below; keep the two in step.
+      # #1200: the x64 or the arm64 build, for this runner (CodeBuild's is arm64); the arm64 checksum is the release's (infra/lib/release-pipeline.ts).
       - name: Install gitleaks 8.30.1 (checksum pinned)
         run: |
-          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
-          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -
+          if [ "$(uname -m)" = aarch64 ]; then arch=arm64; sum=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080; else arch=x64; sum=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb; fi
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_${arch}.tar.gz"
+          echo "${sum}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -
           mkdir "$RUNNER_TEMP/gitleaks-bin"
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
           echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
@@ -228,9 +232,71 @@ jobs:
           path: ${{ runner.temp }}/build-output
       - name: Unpack the build output
         run: tar -xzf "$RUNNER_TEMP/build-output/build-output.tgz"
+      # #1200: CodeBuild runs the job as root, and root can write to any file, so the tests that prove a read-only git directory is refused as writable cannot
+      # pass as root. As the release does (scripts/release-common.ts runTests, testEnvironment), the tests then run as an unprivileged account (65534) that owns
+      # the checkout, in an environment like a GitHub runner's: a short HOME and TMPDIR under /tmp (Unix socket paths stay under about 108 bytes, and the spool's
+      # directory ancestry is root-owned and sticky), only the PATH directories that account can enter (a missing command is ENOENT, not EACCES), no AWS_* or
+      # npm_* variables (CodeBuild's credential endpoint would make the worker refuse to start, and the tests need no AWS access), a step summary it can
+      # write, no group- or world-writable directory above the checkout (the application spool's ancestry check), and a reaper for orphaned processes: the
+      # container's PID 1 does not reap them, so a killed grandchild stays a zombie that kill(pid, 0) still finds (systemd reaps them on a GitHub runner).
+      # Root keeps working in the checkout (safe.directory, in this throwaway container only). On GitHub's runner (not root) this does nothing and AS_TESTER
+      # stays empty.
+      - name: Run the tests as an ordinary account (CodeBuild only)
+        run: |
+          if [ "$(id -u)" != 0 ]; then exit 0; fi
+          git config --global --add safe.directory '*'
+          as="setpriv --reuid=65534 --regid=65534 --clear-groups"
+          mkdir -p /tmp/h /tmp/t
+          chown 65534:65534 /tmp/h /tmp/t
+          chmod 700 /tmp/h /tmp/t
+          touch /tmp/h/step-summary.md && chown 65534:65534 /tmp/h/step-summary.md
+          chown -R 65534:65534 "$GITHUB_WORKSPACE"
+          # Every directory above the checkout, Node and gitleaks must be enterable by that account, and none above the checkout writable by others.
+          for path in "$GITHUB_WORKSPACE" "$(dirname "$(command -v node)")" "$RUNNER_TEMP/gitleaks-bin"; do
+            while [ "$path" != / ]; do chmod o+x "$path"; path="$(dirname "$path")"; done
+          done
+          path="$(dirname "$GITHUB_WORKSPACE")"
+          while [ "$path" != / ]; do chmod go-w "$path"; path="$(dirname "$path")"; done
+          # The reaper: a child subreaper (PR_SET_CHILD_SUBREAPER) that runs the tests and reaps every orphan that dies under it.
+          cat > /tmp/h/reaper.py <<'PY'
+          import ctypes, os, signal, sys
+          ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)
+          child = os.fork()
+          if child == 0:
+              os.execvp(sys.argv[1], sys.argv[1:])
+          for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+              signal.signal(number, lambda received, frame: os.kill(child, received))
+          code = 1
+          while True:
+              try:
+                  pid, status = os.wait()
+              except ChildProcessError:
+                  break
+              if pid == child:
+                  code = os.waitstatus_to_exitcode(status)
+                  break
+          while True:
+              try:
+                  pid, _ = os.waitpid(-1, os.WNOHANG)
+              except ChildProcessError:
+                  break
+              if pid == 0:
+                  break
+          sys.exit(code if code >= 0 else 128 - code)
+          PY
+          chown 65534:65534 /tmp/h/reaper.py
+          chmod o+r "$RUNNER_TEMP"/*.txt 2>/dev/null || true
+          tester_path=""
+          IFS=: read -ra dirs <<< "$PATH"
+          for dir in "${dirs[@]}"; do
+            if [ -n "$dir" ] && $as test -x "$dir"; then tester_path="${tester_path:+$tester_path:}$dir"; fi
+          done
+          unset_vars="$(env | grep -oiE '^(aws|npm)_[a-z0-9_]*' | sort -u | sed 's/^/-u /' | tr '\n' ' ')"
+          echo "AS_TESTER=$as env $unset_vars HOME=/tmp/h TMPDIR=/tmp/t PATH=$tester_path GITHUB_STEP_SUMMARY=/tmp/h/step-summary.md /usr/bin/python3 /tmp/h/reaper.py" >> "$GITHUB_ENV"
+          echo "available parallelism: $(node -p 'require("os").availableParallelism()'), memory: $(free -g | awk '/Mem:/{print $2}') GB; unset: $unset_vars"
       - name: Tests (the whole suite)
         if: needs.plan.outputs.tests == 'all'
-        run: npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+        run: $AS_TESTER npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
       # Vitest's --changed follows imports; the plan adds the tests that name a changed file or a package the change reaches (scripts/ci-plan.ts relatedTests).
       - name: Tests (the ones this change can reach)
         if: needs.plan.outputs.tests == 'changed'
@@ -253,8 +319,9 @@ jobs:
           fi
           git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
           node "$PLAN_SCRIPT" "$RUNNER_TEMP/changed.txt"
-          npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}
-          if [ -s "$CI_EXTRA_TESTS" ]; then xargs npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }} < "$CI_EXTRA_TESTS"; fi
+          [ -f "$CI_EXTRA_TESTS" ] && chmod o+r "$CI_EXTRA_TESTS"
+          $AS_TESTER npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+          if [ -s "$CI_EXTRA_TESTS" ]; then xargs $AS_TESTER npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }} < "$CI_EXTRA_TESTS"; fi
 
   # Real Chromium E2E checks need a Linux ARM64 Docker host, the platform Rovara's runtime targets. This job
   # builds the pinned browser executor image, smoke-tests it with no network, then runs tests/linux against
@@ -317,8 +384,12 @@ jobs:
       # The executor as the host runs it (the pinned seccomp profile, every capability dropped, read-only, no network), from the one definition the release path and
       # test-deploy use too. The smoke check fails unless Chromium's renderer is sandboxed.
       - name: Smoke-test the executor image without a network
+        id: runtime_setup
         run: npx tsx scripts/executor-smoke.ts rovara-e2e-executor:ci
+      # Once setup and smoke pass, independent checks report even after a sibling fails. Cancellation still stops them.
+      # A failed check still fails the job; no continue-on-error. The gateway stays last because it restarts Docker.
       - name: Linux runtime tests
+        if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -327,6 +398,7 @@ jobs:
       # Docker is newer and does, so the step above cannot see that. This one starts Docker 25.0.5 in Docker (a privileged container with its own network namespace, no change to this
       # runner) and runs the production host against it: the app's lookup of an undeclared name must reach the sinkhole, and a mock's alias must resolve.
       - name: Docker 25 DNS regression (dind 25.0.5)
+        if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -334,6 +406,7 @@ jobs:
       # M1.4 Task 4.3a: the worker <-> executor model channel on this Docker host (a scripted model route): the executor container's client reaches the proxy through the mounted
       # socket and the receipt is written, the app container sees neither the socket nor the proxy, and no socket is left behind. It builds a small derived executor image.
       - name: Model channel (scripted route)
+        if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -341,6 +414,7 @@ jobs:
       # M1.4 Task 4.3b: the agent step on this Docker host (a scripted model route, the m14 orders app, the real executor image and Chromium): the renamed export is found by its test
       # id and downloaded once (twenty times in a row, three at a time), a model that does nothing, a decoy, an outage and a second download each leave their record.
       - name: Agent steps (scripted route)
+        if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -348,6 +422,7 @@ jobs:
       # M1.4 Task 4.5: the three agent qualification probes through the production probe runner on this Docker host (the scripted route: no provider, no spend): the renamed export is
       # found and downloaded, a model that does nothing leaves the case UNKNOWN agent-no-download, and the app starts behind a guard that finds no path to the model.
       - name: Agent qualification probes (scripted route)
+        if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -356,6 +431,7 @@ jobs:
       # header, IndexedDB, one opaque id) never reach the model: the real executor image and Chromium on this Docker host, the scripted route recording every call, three groups of three
       # cases. Strong values are refused in any spelling, the weak one shows as `<session>`, a control case goes through, no transcript is truncated. Values are random for each run.
       - name: Mid-step values never reach the model (scripted route)
+        if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -363,18 +439,21 @@ jobs:
       # The browser path end to end through the real worker, broker and this Docker host: a failing round, send-back, a passing round, publication.
       # It skips unless Docker and the executor image are provided, so it is a native-suite file that only this job runs.
       - name: Native browser journey
+        if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
         run: npx vitest run --config vitest.native-p0.config.ts tests/e2e/m1-web-journey.test.ts
       # The M1.3 paths on the same Docker host: an external origin served by its approved mock, and a call no mock matches.
       - name: Native M1.3 journeys
+        if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
         run: npx vitest run --config vitest.native-p0.config.ts tests/e2e/m1-3-journeys.test.ts
       # The M1.4 paths with an AI navigation step (scripted model), through the worker's own checks: what the executor and the worker leave. The verdicts are Task 4.4's.
       - name: Native M1.4 journeys
+        if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -382,6 +461,7 @@ jobs:
       # L4-NETG / NETG2 / NETG3: the EC2 worker's sandbox-egress boot stage on REAL Docker. It restarts Docker (twice), sets the daemon's default name server and proxy, and walls docker0 and the old agentx-task
       # bridge, so it runs ALONE, last, after every other Docker step (never beside another test file), and its afterAll takes back the firewall rules it added.
       - name: Sandbox egress gateway (boot stage on real Docker)
+        if: (success() || failure()) && steps.runtime_setup.outcome == 'success'
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
@@ -473,8 +553,9 @@ jobs:
           node-version-file: .node-version
       - name: Install gitleaks 8.30.1 (checksum pinned)
         run: |
-          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
-          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -
+          if [ "$(uname -m)" = aarch64 ]; then arch=arm64; sum=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080; else arch=x64; sum=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb; fi
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_${arch}.tar.gz"
+          echo "${sum}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -
           mkdir "$RUNNER_TEMP/gitleaks-bin"
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
           echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"

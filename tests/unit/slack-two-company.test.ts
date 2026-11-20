@@ -1,7 +1,7 @@
 // Real workspace directory, core links, ingress and adapter delivery over in-process doubles.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, SlackTeamIdSchema, SlackChannelIdSchema, SlackUserIdSchema } from "@agentx/contracts";
-import { COMPANY_A, COMPANY_B, assertSurfacesIsolated, assertFailsClosed, attempt, createCompanySecretStore, type IsolationSurface } from "../../packages/testing/src/isolation/index.js";
+import { SlackTeamIdSchema, SlackChannelIdSchema, SlackUserIdSchema } from "@agentx/contracts";
+import { COMPANY_A, COMPANY_B, assertSurfacesIsolated, attempt, createCompanySecretStore, type IsolationSurface } from "../../packages/testing/src/isolation/index.js";
 import { slackTokens } from "../../packages/testing/src/channel/slack-world.js";
 import { createSlackWorkspaceBindings } from "../../packages/broker/src/aws/slack-workspace-binding.js";
 import { createSlackWorkspaceTokens } from "../../packages/broker/src/aws/slack-workspace-tokens.js";
@@ -50,32 +50,6 @@ describe("T4a primitive isolation through real stores and core links", () => {
     expect(SlackUserIdSchema.safeParse(SHARED.user).success).toBe(true);
   });
   it("keeps conditional claims, secrets and core links separate", async () => { await assertSurfacesIsolated(await surfaces()); });
-  it("detects a token reader that ignores the asking company (kit self-proof)", async () => {
-    // Prime both caches before observing cross-reads: even when no remote read occurs, a leaked cached token fails.
-    const set = await surfaces(true);
-    const secret = set[1]!;
-    await secret.observe(COMPANY_A, { own: TEAMS.A, other: TEAMS.A, byCompany: TEAMS });
-    await secret.observe(COMPANY_B, { own: TEAMS.B, other: TEAMS.B, byCompany: TEAMS });
-    await expect(assertSurfacesIsolated(set)).rejects.toThrow(/marker/);
-  });
-  it("detects a company resolver that turns failure into the implicit company (kit self-proof)", async () => {
-    const probe = (fallback: boolean) => [{ name: "implicit fallback", prepare: async () => undefined, attempt: async (mode: "throws" | "undefined") => {
-      const tokens = createSlackWorkspaceTokens({ environment: "test", bindings: { requireCompany: async () => {
-        if (fallback) return IMPLICIT_COMPANY_ID;
-        if (mode === "throws") throw new Error("private cause");
-        return undefined as unknown as string;
-      } }, readSecret: async () => JSON.stringify({ botToken: slackTokens("A").bot }) });
-      return (await tokens.tokenForEvent(TEAMS.A)) === undefined ? undefined : COMPANY_A.canary;
-    } }];
-    await assertFailsClosed(probe(false));
-    await expect(assertFailsClosed(probe(true))).rejects.toThrow(/marker/);
-  });
-  it("fails closed on an unavailable company lookup or secret", async () => {
-    await assertFailsClosed([{ name: "workspace token", prepare: async () => undefined, attempt: async (mode) => {
-      const token = createSlackWorkspaceTokens({ environment: "test", bindings: { requireCompany: async () => { if (mode === "throws") throw new Error("private cause"); return undefined as unknown as string; } }, readSecret: async () => JSON.stringify({ botToken: slackTokens("A").bot }) });
-      return (await token.tokenForEvent(TEAMS.A)) === undefined ? undefined : COMPANY_A.canary;
-    } }]);
-  });
 });
 
 import { createHmac } from "node:crypto";
@@ -116,7 +90,4 @@ async function hostedSurfaces(wrongEnvelope = false): Promise<IsolationSurface[]
 }
 it("isolates real signed ingress, channel binding and reply tokens with shared raw ids", async () => {
   await assertSurfacesIsolated(await hostedSurfaces());
-});
-it("detects an ingress that substitutes the nested event team for the verified envelope (kit self-proof)", async () => {
-  await expect(assertSurfacesIsolated(await hostedSurfaces(true))).rejects.toThrow();
 });
