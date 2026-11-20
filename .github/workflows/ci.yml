@@ -267,6 +267,9 @@ jobs:
     # variable LINUX_RUNTIME_RUNNER is `codebuild`, or a manual run asks for it. Every other job stays on GitHub's runners.
     runs-on: ${{ (inputs.linux_runtime_runner == 'codebuild' || vars.LINUX_RUNTIME_RUNNER == 'codebuild') && format('codebuild-rovara-ci-linux-runtime-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-24.04-arm' }}
     timeout-minutes: 75
+    # #1182: in the CodeBuild container Node's default heap is about 2 GB and `tsc -b` needs about 4 (#1118); on GitHub's runner nothing is set, as before.
+    env:
+      NODE_OPTIONS: ${{ (inputs.linux_runtime_runner == 'codebuild' || vars.LINUX_RUNTIME_RUNNER == 'codebuild') && '--max-old-space-size=8192' || '' }}
     permissions:
       contents: read
       packages: read

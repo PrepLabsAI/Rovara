@@ -110,7 +110,8 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
 
   it("runs the Linux runtime check on an ARM64 runner, behind the same Markdown-only skip as the other heavy jobs", async () => {
     const job = (await workflow()).jobs["linux-runtime"] as Job & { "runs-on"?: string };
-    expect(job["runs-on"]).toBe("ubuntu-24.04-arm");
+    // #1182: GitHub's ARM runner unless the repository variable or a manual run picks the CodeBuild ARM runner (infra/lib/ci-runner.ts).
+    expect(job["runs-on"]).toBe("${{ (inputs.linux_runtime_runner == 'codebuild' || vars.LINUX_RUNTIME_RUNNER == 'codebuild') && format('codebuild-rovara-ci-linux-runtime-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-24.04-arm' }}");
     // Only when the plan says its area changed (always in a full run).
     expect(job.if).toBe("needs.plan.outputs.linux == 'true'");
     expect(job.steps.every((step) => step.if === undefined)).toBe(true);
@@ -223,7 +224,8 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
   it("runs on pull requests and by hand, on a push to code/next only and never on a push to mainline, and skips a draft until it is ready", async () => {
     const parsed = await workflow();
     expect(parsed.on).toEqual({
-      workflow_dispatch: null,
+      // #1182: a manual run may put linux-runtime on the CodeBuild runner.
+      workflow_dispatch: { inputs: { linux_runtime_runner: { description: "Where linux-runtime runs: github (the default) or codebuild", type: "choice", options: ["github", "codebuild"], default: "github" } } },
       pull_request: { types: ["opened", "synchronize", "reopened", "ready_for_review", "labeled"] },
       push: { branches: ["code/next"] },
     });
