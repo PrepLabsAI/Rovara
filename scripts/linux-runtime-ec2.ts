@@ -220,7 +220,8 @@ export interface FileResult { file: string; outcome: "passed" | "failed" | "skip
 /** vitest's default reporter prints one line per test file: ✓ passed, ❯ or × with failures, ↓ skipped. */
 export function parseVitestFiles(log: string): FileResult[] {
   const results = new Map<string, FileResult>();
-  for (const line of log.split("\n")) {
+  // CI=true turns vitest's colours on; strip them first.
+  for (const line of log.replaceAll(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "gu"), "").split("\n")) {
     const match = /^\s*(✓|❯|×|↓)\s+(\S+\.test\.ts)\s+\(([^)]*)\)/u.exec(line);
     if (match === null) continue;
     const [, mark, file, detail] = match;

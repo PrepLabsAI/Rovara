@@ -90,6 +90,8 @@ describe("the results", () => {
     expect(parseSummary("no summary")).toEqual([]);
     const files = parseVitestFiles(" ✓ tests/linux/a.test.ts (3 tests) 120ms\n ❯ tests/linux/b.test.ts (4 tests | 2 failed) 9s\n ↓ tests/linux/c.test.ts (1 test | 1 skipped)\n");
     expect(files.map((file) => [file.file, file.outcome])).toEqual([["tests/linux/a.test.ts", "passed"], ["tests/linux/b.test.ts", "failed"], ["tests/linux/c.test.ts", "skipped"]]);
+    // As CI=true prints it: coloured.
+    expect(parseVitestFiles(" \u001b[32m✓\u001b[39m tests/linux/d.test.ts \u001b[2m(\u001b[22m\u001b[2m1 test\u001b[22m\u001b[2m)\u001b[22m 9ms\n")).toEqual([{ file: "tests/linux/d.test.ts", outcome: "passed", detail: "1 test" }]);
   });
 });
 
