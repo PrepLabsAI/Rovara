@@ -87,7 +87,7 @@ it("revokes and restores through the one R4 reader; revocation blocks joining an
   expect(await h.invoke({ kind: "company-member-revoke", companyId, personId })).toEqual({ ok: true });
   expect(await reader.companyOf(personId)).toBeUndefined();
   await expect(resolveCompany(reader, personId)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
-  expect(await h.store.join({ personId, companyId: IMPLICIT_COMPANY_ID, email: create.firstAdminEmail })).toEqual({ ok: false, reason: "member_revoked" });
+  expect(await h.store.join({ personId, companyId: IMPLICIT_COMPANY_ID, email: create.firstAdminEmail })).toEqual({ ok: false, reason: "member_revoked", attributedCompanyId: companyId });
   expect(await h.invoke({ kind: "company-member-restore", companyId, personId })).toEqual({ ok: true });
   expect(await reader.companyOf(personId)).toBe(companyId);
 });

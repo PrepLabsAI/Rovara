@@ -51,7 +51,7 @@ type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
  * then holds it), and the successor, who must be a live member of the same company (any role) at the moment the removal commits.
  */
 export interface RemovalFence { expectedRole?: Member["role"]; successorId?: string }
-export type CompanyJoin = { ok: true; membership: Member; viaPreapproval?: true } | { ok: false; reason: "not_invited" | "member_elsewhere" | "member_revoked" };
+export type CompanyJoin = { ok: true; membership: Member; viaPreapproval?: true } | { ok: false; reason: "not_invited" | "member_elsewhere" | "member_revoked"; attributedCompanyId?: string };
 const refused = (): CompanyJoin => ({ ok: false, reason: "not_invited" });
 const unavailable = () => new Error("company sign-in unavailable");
 const conditional = (error: unknown) => error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
@@ -90,8 +90,8 @@ export class CompanySignInStore {
     return found.data;
   }
   private memberResult(member: Member, companyId: string): CompanyJoin {
-    if (member.revokedAt !== undefined) return { ok: false, reason: "member_revoked" };
-    if (member.companyId !== companyId) return { ok: false, reason: "member_elsewhere" };
+    if (member.revokedAt !== undefined) return { ok: false, reason: "member_revoked", attributedCompanyId: member.companyId };
+    if (member.companyId !== companyId) return { ok: false, reason: "member_elsewhere", attributedCompanyId: member.companyId };
     return { ok: true, membership: member };
   }
   /** A bounded retry only rereads the winning membership; it never consumes another invite. */

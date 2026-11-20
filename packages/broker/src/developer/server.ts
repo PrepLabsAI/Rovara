@@ -636,6 +636,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       return providerFailure(error, method, request.clientRedirectUri, request.clientState);
     }
     if (!result.ok) {
+      if (result.verifiedIdentity !== undefined) {
+        outcome.developerId = ownerKeyForSubject(result.verifiedIdentity.issuer, result.verifiedIdentity.subject);
+      }
       if (deps.company !== undefined && request.companyId !== undefined) {
         deps.log({ event: "signin.refused", method, reason: "not_invited" });
         return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: "not invited" }) : browserReturn(request.browserReturnTo, false);
@@ -718,6 +721,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         : byInvite ? await deps.company.joinByInvite({ personId: developerId, companyId: candidate, inviteHash: request.inviteHash! })
           : await deps.company.join({ personId: developerId, companyId: candidate, ...(identity.email === undefined ? {} : { email: identity.email }) });
       if (joined.ok) outcome.companyId = joined.membership.companyId;
+      else if (joined.attributedCompanyId !== undefined) outcome.companyId = joined.attributedCompanyId;
       // DEC 253z: not invited anywhere, no company asked for, signing in to the web app: a session with no company (it can only create one).
       companyless = !joined.ok && joined.reason === "not_invited" && request.companyId === undefined && request.browserReturnTo === undefined
         && await companylessMayMint(developerId, method, registered);
