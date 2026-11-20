@@ -1,11 +1,12 @@
 import { expect, it, vi } from "vitest";
-import { createMergeTrackingService, createMilestoneService, SWEEP_MAX_REQUESTS } from "../../packages/broker/src/services/merge-tracking.js";
+import { createMergeTrackingService, createMilestoneService, createReadBudget, SWEEP_MAX_REQUESTS } from "../../packages/broker/src/services/merge-tracking.js";
 import { fixedCodeSettings } from "../../packages/broker/src/core/merge/defaults.js";
 import { recoveryRowKey } from "../../packages/broker/src/core/merge/store.js";
 import { RISK_UNVERIFIED_REASON, verifiedFilesKey } from "../../packages/broker/src/core/build-step/changed-files.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { createBrokerCoreServices } from "../../packages/broker/src/aws/core-job-services.js";
+import { guardedHostFetch } from "../../packages/broker/src/core/merge/host-requests.js";
 import { host, ORG } from "../support/service-host.js";
 import { TASK_ID } from "../support/merge-world.js";
 
@@ -63,11 +64,31 @@ function exhaustWithInstructions(w: Awaited<ReturnType<typeof world>>) {
     ? Array.from({ length: 40 }, (_, i) => `@extra${i}.md`).join("\n") : read(...args));
 }
 
+it("stops a verification budget at its request ceiling even while time remains", () => {
+  const verification = createReadBudget(() => 0, { requests: 2, ms: 15_000 });
+  try {
+    verification.budget.beforeRequest();
+    verification.check();
+    verification.budget.beforeRequest();
+    expect(() => verification.budget.beforeRequest()).toThrow(expect.objectContaining({ name: "GithubBudgetExhaustedError" }));
+    expect(() => verification.check()).toThrow(expect.objectContaining({ name: "GithubBudgetExhaustedError" }));
+    expect(verification.used()).toBe(2);
+  } finally {
+    verification.stop();
+  }
+});
+
 it.each(["time", "requests"] as const)("keeps unverified risk and reports actual usage when the verification %s allowance runs out", async (limit) => {
   const w = await world();
   const read = w.remote.getChangeRequest.bind(w.remote);
   const started = w.clock.ms;
+  let verificationSignal: AbortSignal | undefined;
+  const transport = guardedHostFetch(async (_input, init) => {
+    verificationSignal = init?.signal ?? undefined;
+    return new Response();
+  });
   vi.spyOn(w.remote, "getChangeRequest").mockImplementation(async (...args) => {
+    if (limit === "requests") await transport("https://example.test/verification");
     const result = await read(...args);
     if (limit === "time") w.clock.ms += 15_000;
     return result;
@@ -77,12 +98,17 @@ it.each(["time", "requests"] as const)("keeps unverified risk and reports actual
     vi.spyOn(w.remote, "changedFiles").mockResolvedValue({ files: Array.from({ length: 200 }, (_, i) => ({ path: `docs/part${i}/guide.md`, status: "modified" as const, additions: 1, deletions: 0 })) });
   }
   const files = vi.spyOn(w.remote, "changedFiles");
+  const operations = [vi.spyOn(w.remote, "getChangeRequest"), files, vi.spyOn(w.remote, "fileAtRevision"), vi.spyOn(w.remote, "pathKind")];
   await w.tracking.sweep({ budgetMs: 1000 });
   expect(await w.h.store.get(w.key)).toBeUndefined();
   expect((await readTask(w.flow, TASK_ID))!.workflow!.risk).toMatchObject({ level: "high", reasons: [RISK_UNVERIFIED_REASON] });
   const unavailable = w.logs.filter((entry) => entry["event"] === "build_step.changed_files_unavailable");
   expect(unavailable).toEqual([expect.objectContaining({ error: "GithubBudgetExhaustedError", ms: w.clock.ms - started, requests: limit === "time" ? 1 : 256 })]);
   if (limit === "time") expect(files).not.toHaveBeenCalled();
+  else {
+    expect(operations.reduce((count, operation) => count + operation.mock.calls.length, 0)).toBe(256);
+    expect(verificationSignal?.aborted).toBe(true);
+  }
   const recovery = await w.h.store.get(recoveryRowKey(TASK_ID));
   expect(recovery?.["nextAttemptAt"]).toBeGreaterThan(w.clock.ms);
 });

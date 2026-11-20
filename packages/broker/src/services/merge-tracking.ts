@@ -134,7 +134,10 @@ export function createReadBudget(now: () => number, limits: { requests: number; 
       signal: controller.signal,
       beforeRequest: () => {
         check();
-        if (requests >= limits.requests) throw exhaustedReadBudget();
+        if (requests >= limits.requests) {
+          controller.abort();
+          throw exhaustedReadBudget();
+        }
         requests += 1;
       },
     },
@@ -535,7 +538,12 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     // ONE host-operation counter covers verification and reconciliation across every row.
     const reconciliation = createReadBudget(now, { requests: SWEEP_MAX_REQUESTS, ms: Math.max(0, left) });
     const budget: ReadBudget = { signal: reconciliation.budget.signal, beforeRequest: () => { reconciliation.check(); total.check(); } };
-    sweepHostGuard = (host) => guardedCalls(host, () => { reconciliation.check(); total.check(); }, () => { reconciliation.check(); total.budget.beforeRequest(); }, reconciliation.budget.signal);
+    sweepHostGuard = (host) => guardedCalls(host, () => { reconciliation.check(); total.check(); }, () => {
+      reconciliation.check();
+      // Refuse further host calls without cancelling the store reads/writes needed to schedule a retry.
+      if (total.used() >= SWEEP_MAX_REQUESTS) throw exhaustedReadBudget();
+      total.budget.beforeRequest();
+    }, reconciliation.budget.signal);
     let attempted = 0;
     try {
       for (const row of rows) {
@@ -552,11 +560,10 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
           const task = await readTask(flow, row.taskId);
           if (task !== undefined) {
             const startedAt = now();
-            let requests = 0;
             const httpBefore = http.used();
             const verification = createReadBudget(now, { requests: SWEEP_MAX_REQUESTS, ms: Math.min(VERIFY_MAX_MS, Math.max(0, hardDeadline - now())) });
             const check = () => { verification.check(); total.check(); };
-            const charge = () => { check(); total.budget.beforeRequest(); requests += 1; };
+            const charge = () => { check(); verification.budget.beforeRequest(); total.budget.beforeRequest(); };
             const verificationFlow = {
               ...flow, store: guardedCalls(flow.store, check, check, verification.budget.signal), projects: guardedCalls(flow.projects, check, check, verification.budget.signal),
               ...(flow.codeHosts === undefined ? {} : { codeHosts: guardedHosts(flow.codeHosts, (host) => guardedCalls(host, check, charge, verification.budget.signal)) }),
@@ -564,7 +571,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
             try {
               unverified = (await withHostRequests({ signal: verification.budget.signal, beforeRequest: () => { check(); http.budget.beforeRequest(); } }, () => verifyPublishedChanges({
                 ...verificationFlow,
-                log: (entry) => flow.log?.(entry["event"] === "build_step.changed_files_unavailable" ? { ...entry, ms: Math.max(0, now() - startedAt), requests, requestUnit: "code_host_operations", httpRequests: http.used() - httpBefore } : entry),
+                log: (entry) => flow.log?.(entry["event"] === "build_step.changed_files_unavailable" ? { ...entry, ms: Math.max(0, now() - startedAt), requests: verification.used(), requestUnit: "code_host_operations", httpRequests: http.used() - httpBefore } : entry),
               }, task, check))) === "unavailable";
             } finally {
               verification.stop();
