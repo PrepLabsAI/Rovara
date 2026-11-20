@@ -87,6 +87,8 @@ describe("retained resources in a named environment", () => {
       // DEC 254za (#872): the callback signing key's own secret (agentx/production/callback-key, checked below), Retain like the Slack secret.
       "AgentXControlPlane Artifacts AWS::S3::Bucket", "AgentXControlPlane CallbackSigningKeySecret AWS::SecretsManager::Secret", "AgentXControlPlane DeveloperSignInTable AWS::DynamoDB::Table", "AgentXControlPlane SlackSecret AWS::SecretsManager::Secret", "AgentXControlPlane SlackThreadSessions AWS::S3::Bucket",
       "AgentXControlPlane SlackThreads AWS::DynamoDB::Table", "AgentXControlPlane State AWS::DynamoDB::Table", "AgentXControlPlane TurnRecords AWS::DynamoDB::Table",
+      // #1159: the test-service starter copies, kept on delete as in named environments (test-service-mirror.ts).
+      ...[0, 1, 2, 3, 4].map((index) => `AgentXProductionFoundation Ec2WorkersTestServiceMirrorRepository${String(index)} AWS::ECR::Repository`),
       "AgentXProductionFoundation VpcFlowLogs AWS::Logs::LogGroup", "AgentXProductionFoundation WorkspaceKey AWS::KMS::Key",
       "AgentXReleasePipeline Artifacts AWS::S3::Bucket",
     ]);

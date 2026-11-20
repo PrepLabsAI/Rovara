@@ -394,6 +394,10 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/app/tasks/{taskId}/merge", requires: "tasks:read" },
   { method: "POST", path: "/v1/app/tasks/{taskId}/merge", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a live owner or admin to make a token or erase).
+  // #1175: the company's per-step agent model choice (core-host/agent-model-routes.ts): full access only, then the core reads the live role (any member reads,
+  // an owner or admin changes). Without these rows the broker answered 404 before auth, and Cloud's "AI and spending" step could never finish.
+  { method: "GET", path: "/v1/app/agent-models", requires: "full" },
+  { method: "POST", path: "/v1/app/agent-models", requires: "full" },
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens/{tokenId}/revoke", requires: "full" },

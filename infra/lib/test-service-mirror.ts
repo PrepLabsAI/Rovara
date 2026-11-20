@@ -1,4 +1,4 @@
-// DEC 254zm: the install's own copies of the test-service starter images (packages/contracts/src/test-service-mirror.ts), named environments only.
+// DEC 254zm: the install's own copies of the test-service starter images (packages/contracts/src/test-service-mirror.ts); every deployment, the legacy one as `production` (#1159).
 //
 // Five ECR repositories, one per starter image, holding a copy made BY DIGEST (scripts/test-services-mirror.ts): the digest is the identity, a tag is a label. Each repository:
 //   - IMMUTABLE tags (a tag never moves to other bytes), scan on push, AES256 encryption;

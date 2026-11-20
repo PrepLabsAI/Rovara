@@ -41,7 +41,7 @@ import { CompanySecrets } from "./company-secrets.js";
 import { SavedEnvImages } from "./saved-env-images.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { TaskPersonProof } from "./task-person-proof.js";
-import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerNamesParameterArn } from "./broker-names.js";
+import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerEnvironmentName, brokerNamesParameterArn } from "./broker-names.js";
 import { CompanySignInSwitch } from "./company-signin.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
@@ -216,16 +216,10 @@ export class ControlPlaneStack extends Stack {
       visibilityTimeout: Duration.minutes(2),
     });
 
-    // ENV-ROOM (infra/lib/broker-names.ts): a named environment's broker gets its generated names packed (AGENTX_NAMES) and derives what the environment's name decides; the legacy
-    // template passes every variable whole, as before.
-    // ENV-ROOM 2: the entry reads a named environment's broker names from their SSM parameter before it loads broker.ts (packages/broker/src/aws/broker-handler.ts).
+    // ENV-ROOM (infra/lib/broker-names.ts): the broker gets its generated names packed (AGENTX_NAMES) and derives what the environment's name decides. #1149: the legacy
+    // install (production) too, under "production", deriving only the values identical to its own (contracts LEGACY_INSTALL_LAYOUT).
+    // ENV-ROOM 2: the entry reads the broker's names from their SSM parameter before it loads broker.ts (packages/broker/src/aws/broker-handler.ts).
     const broker = packagedFunction(this, "Broker", "packages/broker/src/aws/broker-handler.ts", {
-      ...(naming.env !== undefined ? {} : {
-        STATE_TABLE_NAME: state.tableName,
-        AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID: projectSetupRuntimeCatalogId,
-        AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: e2eFeatureRuntimeCatalogId,
-        ARTIFACT_BUCKET_NAME: artifacts.bucketName,
-      }),
       OIDC_ISSUER: oidcIssuer.valueAsString,
       ADMIN_CLAIM: adminClaim.valueAsString,
       ADMIN_VALUES: adminValues.valueAsString,
@@ -240,11 +234,11 @@ export class ControlPlaneStack extends Stack {
     if (naming.env !== undefined) {
       (broker.role!.node.defaultChild as iam.CfnRole).roleName = brokerRoleName(naming);
       (broker.node.defaultChild as lambda.CfnFunction).functionName = brokerFunctionName(naming);
-      addBrokerName(broker, naming, "stateTable", state.tableName, state.tableName);
-      addBrokerName(broker, naming, "artifactBucket", artifacts.bucketName, artifacts.bucketName);
-      addDerivedBrokerVariable(broker, naming, "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID", projectSetupRuntimeCatalogId);
-      addDerivedBrokerVariable(broker, naming, "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID", e2eFeatureRuntimeCatalogId);
     }
+    addBrokerName(broker, naming, "stateTable", state.tableName, state.tableName);
+    addBrokerName(broker, naming, "artifactBucket", artifacts.bucketName, artifacts.bucketName);
+    addDerivedBrokerVariable(broker, naming, "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID", projectSetupRuntimeCatalogId);
+    addDerivedBrokerVariable(broker, naming, "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID", e2eFeatureRuntimeCatalogId);
     const connectorSecretsArn = this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${naming.connectorSecretPrefix}*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
     if (naming.env !== undefined) {
       // The two grantReadWriteData statements' action/resource cross product, less dynamodb:GetRecords and dynamodb:GetShardIterator (ENV-ROOM 2, IAM room for the names
@@ -302,7 +296,8 @@ export class ControlPlaneStack extends Stack {
     const swebenchStateMachineArn = this.formatArn({ service: "states", resource: "stateMachine", resourceName: swebenchNames(naming).stateMachineName, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
     // ENV-ROOM 2: a named broker reads its names from their one SSM parameter (infra/lib/broker-names.ts) with this same action, so the parameter's ARN joins this statement
     // rather than adding one (the broker's inline policy has little room: tests/contract/developer-signin-infrastructure.test.ts, broker IAM headroom).
-    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: naming.env === undefined ? swebenchParameterArns : [...swebenchParameterArns, brokerNamesParameterArn(naming.env)] }));
+    // #1149: the legacy install's broker reads its names parameter too (under "production").
+    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: [...swebenchParameterArns, brokerNamesParameterArn(brokerEnvironmentName(naming))] }));
     // Named: the broker's two StartExecution grants (this and the session deleter's, sessions.connectBroker) are one statement, for the same room. Legacy: as before.
     if (naming.env === undefined) broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
 
@@ -370,7 +365,8 @@ export class ControlPlaneStack extends Stack {
     // trigger, never a third reader.
     new lambda.EventSourceMapping(this, "OutboxStreamMapping", {
       // Keep the legacy activity-index reader, excluding core company rows (no extra reader).
-      ...(naming.env === undefined ? {} : { filters: [lambda.FilterCriteria.filter({ dynamodb: { NewImage: { pk: { S: [{ "anything-but": { prefix: "ORG#" } }] } } } })] }),
+      // #1148: the legacy install too, now that it has the core engine.
+      filters: [lambda.FilterCriteria.filter({ dynamodb: { NewImage: { pk: { S: [{ "anything-but": { prefix: "ORG#" } }] } } } })],
       target: outboxPublisher,
       eventSourceArn: state.tableStreamArn!,
       startingPosition: lambda.StartingPosition.LATEST,
@@ -398,7 +394,8 @@ export class ControlPlaneStack extends Stack {
     // L4-IAMR (owner decision 2026-11-18, DEC 254zzz26), named environments only (the core engine's): the dispatcher's company-bound artifact reader (createCompanyArtifactReader, for the
     // second eval pass and the like) reads a company's stored artifacts. Read only: GetObject on the two prefixes the reader's keys live under, no List, no Put, no other prefix, no other
     // bucket. The bucket is S3-managed encrypted (no KMS key), so no kms grant. Every read is still checked in code against company, workspace owner and the ARTIFACT row.
-    if (naming.env !== undefined) {
+    // #1148: the legacy install (production) too, with the core engine.
+    {
       dispatcher.addToRolePolicy(new iam.PolicyStatement({ sid: DISPATCHER_ARTIFACTS_READ_SID, actions: ["s3:GetObject"], resources: DISPATCHER_ARTIFACTS_READ_PREFIXES.map((prefix) => artifacts.arnForObjects(prefix)) }));
     }
     // EC2 workers (#76): the idle reaper and reconciler find sessions by state through this sparse index.
@@ -423,8 +420,9 @@ export class ControlPlaneStack extends Stack {
       sortKey: { name: "webhookRecoverySk", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
-    // Lane E2 step 4: the core's outbox relay reads its pending messages through this sparse index (only a core outbox row carries `outboxState`). Named environments only.
-    if (naming.env !== undefined) {
+    // Lane E2 step 4: the core's outbox relay reads its pending messages through this sparse index (only a core outbox row carries `outboxState`). #1148: the legacy install too
+    // (an in-place index add on its State table; empty until the core writes an outbox row).
+    {
       if (OUTBOX_PENDING_INDEX.sortAttribute === undefined) throw new Error("the outbox pending index has a sort key");
       state.addGlobalSecondaryIndex({
         indexName: OUTBOX_PENDING_INDEX.name,
@@ -985,8 +983,8 @@ export class ControlPlaneStack extends Stack {
     // DEC 254o (b), L2-2 PR 18a: Slack company mode's switch (stack parameter SlackCompanyWorkspaces, default disabled). Named environments only; every grant it adds is a
     // separate policy under its condition, so nothing is granted while it is off (slack-company-workspaces.ts). DEC 254zg (a), 254zk: its condition also requires company
     // sign-in, so its grants and its "enabled" exist only with both switches on.
-    // #1129: still named environments only; the legacy deployment's Slack stays on its one workspace, with or without company sign-in.
-    const slackCompany = companySignIn === undefined || naming.env === undefined ? undefined : new SlackCompanyWorkspaces(this, "SlackCompanyMode", { naming, requires: companySignIn.isOn });
+    // #1171: the legacy deployment (production) too, off by default (owner 2026-11-19: no named-only features); off, its Slack stays on its one workspace, as before.
+    const slackCompany = companySignIn === undefined ? undefined : new SlackCompanyWorkspaces(this, "SlackCompanyMode", { naming, requires: companySignIn.isOn });
     if (slackCompany !== undefined) {
       // The Slack Lambda and the channel API's Slack router: the team's binding and company, the linked person (company-scoped link row, sign-in membership below), the
       // project's revisions (company check) and the company's token. Reads only: link notices and codes are written by the broker (#126 holds).
@@ -1013,7 +1011,7 @@ export class ControlPlaneStack extends Stack {
             StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" }, Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" } } })]);
       }
       // L2-2 PR 18c: the Slack Lambda's company factory needs the environment's name (the token path) and the install's team (always the legacy path); "" while off.
-      slackIngress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+      slackIngress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env ?? "production", "")));
       slackIngress.addEnvironment("SLACK_TEAM_ID", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, signInParameters.slackTeamId.valueAsString, "")));
       // DEC 254zk: the switch's conditioned value (enabled only with company sign-in on too), as every other consumer gets it.
       addBrokerSetting(broker, naming, "slackCompanyWorkspaces", slackCompany.flag);
@@ -1024,7 +1022,7 @@ export class ControlPlaneStack extends Stack {
       slackCompany.grant("Broker", broker.role!, [slackCompany.tokenRead(),
         new iam.PolicyStatement({ sid: "ReadInstallSlackToken", actions: ["secretsmanager:GetSecretValue"], resources: [slackSecret.secretArn] })]);
       // DEC 254zk: the channel API's company factory needs the environment's name too (it already has STATE_TABLE_NAME and SLACK_ADAPTER_TEAM_ID); "" while off.
-      channelAdapters.ingress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+      channelAdapters.ingress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env ?? "production", "")));
     }
     if (taskParameters !== undefined) {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
@@ -1097,11 +1095,12 @@ export class ControlPlaneStack extends Stack {
       } else chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
       addBrokerName(broker, naming, "chatGptConnectionKey", chatGptConnectionKey.keyId, chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
-      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, ...(naming.env === undefined ? {} : { coreBroker: broker }), controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
+      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, coreBroker: broker, controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
       if (companySignIn !== undefined) companySignIn.addTo(notifier.function);
       // Migration plan v3.2 lane E2: the core engine's switch (stack parameter CoreEngine, default off), its dispatch queue and its scheduled jobs (core-engine.ts).
       // Named environments only: the legacy (production) template has none of it, and this block now also runs for the legacy deployment.
-      if (naming.env !== undefined) new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env, broker, dispatcher, notifyOperator });
+      // #1148: the legacy install (production) too, under "production", with CoreEngine off by default.
+      new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env ?? "production", broker, dispatcher, notifyOperator });
       // Lane T6 (DEFERRED T6-SECRETS-IAM-20261114-v2): the role the broker will assume for one company's secrets; nothing assumes it yet. #1129: the legacy deployment
       // (production) too, its secrets under agentx/production/.
       {
@@ -1111,7 +1110,8 @@ export class ControlPlaneStack extends Stack {
       // L4-SE6 (owner-approved 2026-11-18): the saved environment images' registry side: ONE repository creation template for `rovara-env/<env>` and the three roles (push, pull, manage) that trust only
       // the broker. Named environments only (the legacy template is unchanged). It publishes the output contract (briefs/lead4/L4-SE-OUTPUT-CONTRACT.md) and gives the broker the three role ARNs and the prefix; the broker gets no new policy statement
       // (the trust names its role and the boundary allows the AssumeRole). Nothing assumes a role until the broker's switch is on.
-      if (naming.env !== undefined) new SavedEnvImages(this, "SavedEnvImages", { env: naming.env, brokerRole: broker.role! }).expose(this, broker);
+      // #1148: the legacy install too (its repositories under rovara-env/production; the feature stays off until SavedEnvironments is on).
+      new SavedEnvImages(this, "SavedEnvImages", { env: naming.env ?? "production", brokerRole: broker.role! }).expose(this, broker);
       // Spec 025 A13: the admin health route reads the environment's alarms, by name, and
       // the depths of its dead-letter queues. Read-only, and on exactly these resources.
       const alarmPrefix = naming.alarmName("");
@@ -1134,7 +1134,7 @@ export class ControlPlaneStack extends Stack {
         slackCompany.grant("DeveloperTaskNotifier", notifier.function.role!, [slackCompany.tokenRead(),
           slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", [...SLACK_BINDING_READ_KEYS, "ORG#org_????????????????????#WORKSPACE#*"])]);
         notifier.function.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
-        notifier.function.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+        notifier.function.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env ?? "production", "")));
         // DeveloperIdentity already reads the token family (Add to Slack); its directory needs the team's binding, on the State table it otherwise never reads.
         slackCompany.grant("DeveloperIdentity", developerSignIn.function.role!, [slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)]);
         developerSignIn.function.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
@@ -1164,7 +1164,7 @@ export class ControlPlaneStack extends Stack {
       addBrokerDeadLetterQueues(broker, naming, [
         ["dispatchDeadLetters", deadLetterQueues.dispatch], ["slackRequestDeadLetters", deadLetterQueues["slack-requests"]], ["developerNoticeDeadLetters", deadLetterQueues["developer-notices"]],
         ["developerNoticeStreamFailures", deadLetterQueues["developer-notice-stream"]], ["channelEventDeadLetters", deadLetterQueues["channel-events"]],
-      ], () => this.toJsonString(Object.fromEntries(Object.entries(deadLetterQueues).map(([name, queue]) => [name, queue.queueUrl]))));
+      ]);
       // Named environments only: the legacy (production) template keeps one statement on the broker's role, as mainline deploys it.
       if (naming.env !== undefined) {
         for (const queue of Object.values(deadLetterQueues)) queue.addToResourcePolicy(new iam.PolicyStatement({
@@ -1272,7 +1272,8 @@ export class ControlPlaneStack extends Stack {
     const foundationParameter = (name: string) => (this.node.findChild(name) as CfnParameter).valueAsString;
     // DEC 254z-amend3: the session steps read the test services switch whole (named environments, where CoreEngine declares it): on, a launch's boot configuration carries `testServices`.
     // DEC 254zm: and whether the starter copies are in place; only with both does a launch carry `testServices` (aws/hosted-test-services.ts).
-    if (naming.env !== undefined) {
+    // #1148: the legacy install too, now that CoreEngine declares these there.
+    {
       sessions.steps.addEnvironment(TEST_SERVICES_SETTING_VARIABLE, foundationParameter(TEST_SERVICES_PARAMETER));
       sessions.steps.addEnvironment(TEST_SERVICE_IMAGES_SETTING_VARIABLE, foundationParameter(TEST_SERVICE_IMAGES_PARAMETER));
       // L4-NETG (DEC 254zzz77): how a worker host's sandboxes and devcontainers reach the internet. `bridge` (the default) is today's behaviour; `gateway` walls them behind the host's egress gateway and a launch carries
@@ -1307,7 +1308,7 @@ export class ControlPlaneStack extends Stack {
       // The reconciler already reads and writes the State table; it needs only the company's token for its thread notes.
       slackCompany.grant("SessionReconciler", sessions.reconciler.role!, [slackCompany.tokenRead()]);
       sessions.reconciler.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
-      sessions.reconciler.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+      sessions.reconciler.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env ?? "production", "")));
       // The hosted Slack service (ECS): the team's binding and the company's token for its posts. Its container gets the switch from the slack stack.
       slackCompany.grant("SlackOrchestrator", slackOrchestratorRole, [slackCompany.tokenRead(), slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)]);
       // L2-2 PR 18d: the Slack service's inputs, handed to the slack stack by the deploy (parameters.ts optionalOutputs). DEC 254zk: always there, so that agentx config set
@@ -1399,9 +1400,9 @@ export class ControlPlaneStack extends Stack {
     sessions.connectDispatcher(dispatcher);
     sessions.connectBroker(broker);
     if (naming.env !== undefined) broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [sessions.deleter.stateMachineArn, swebenchStateMachineArn] }));
-    // Lane E2 step 4: the dispatcher is the core dispatch queue's consumer (named environments only: the core engine construct exists only there, so the legacy template is unchanged).
+    // Lane E2 step 4: the dispatcher is the core dispatch queue's consumer (#1148: in the legacy install too, ENABLED only while CoreEngine is not off).
     const coreEngine = this.node.tryFindChild("CoreEngineJobs");
-    if (naming.env !== undefined && coreEngine instanceof CoreEngine) {
+    if (coreEngine instanceof CoreEngine) {
       coreEngine.connectDispatcher(dispatcher, {
         deleterArn: sessions.deleter.stateMachineArn, callbackSigningKeySecret: { secretName: callbackSigningKeySecretName, secretArn: callbackSigningKeySecret.secretArn },
         workerSubnets: foundationParameter("Ec2WorkerSubnets"), workerLaunchTemplateId: foundationParameter("Ec2WorkerLaunchTemplateId"),

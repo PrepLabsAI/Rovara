@@ -2638,7 +2638,12 @@ export async function routeAppRequest(deps: DeveloperRouteDependencies, request:
   // The core matches the raw path; a path the URL parser would read differently (a backslash, say) is refused rather than matched two ways.
   if ((request.path.split("?")[0] ?? "") !== url.pathname) throw agentXError("NOT_FOUND", "route not found");
   const route = appRouteOf(request.method, url.pathname);
-  if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
+  if (route === undefined) {
+    // #1175: a path the core may serve but the route table does not list is refused here, before auth; say so once, bounded (method and the first
+    // three path segments only: never a project, task or person id).
+    logDeveloperEvent({ event: "developer.app_route_unlisted", method: request.method.slice(0, 10), path: url.pathname.split("/").slice(0, 4).join("/").slice(0, 80) });
+    throw agentXError("NOT_FOUND", "route not found");
+  }
   const caller = await authenticateCaller(deps, request.headers.authorization, route);
   // The core gets the request without its credentials: the caller is already the verified one.
   const { authorization: _credential, ...headers } = request.headers;

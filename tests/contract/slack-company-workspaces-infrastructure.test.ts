@@ -62,9 +62,24 @@ describe("Slack company mode's switch (18a)", () => {
     expect(named.Conditions[on]).toStrictEqual({ "Fn::And": [{ "Fn::Equals": [{ Ref: "SlackCompanyWorkspaces" }, "enabled"] }, { Condition: companyOn }] });
   });
 
-  it("does not exist in the deployment that predates environments", () => {
-    // #1129: the legacy deployment has company sign-in (whose Add to Slack writes slack-workspaces tokens, under CompanySignIn), but not Slack company mode.
-    expect(JSON.stringify(legacy)).not.toMatch(/SlackCompany|SLACK_COMPANY_WORKSPACES/u);
+  it("exists in the deployment that predates environments too (#1171), off by default, every grant a policy under its condition, its tokens under production", () => {
+    // Owner 2026-11-19: no named-only feature. The legacy deployment (production) gets the same default-off parameter and the same condition, and nothing while it is off.
+    expect(legacy.Parameters.SlackCompanyWorkspaces).toStrictEqual(named.Parameters.SlackCompanyWorkspaces);
+    const legacyOn = Object.keys(legacy.Conditions).find((id) => id.startsWith("SlackCompanyModeOn"))!;
+    const companyOn = Object.keys(legacy.Conditions).find((id) => id.startsWith("CompanySignInSwitchOn"))!;
+    expect(legacy.Conditions[legacyOn]).toStrictEqual({ "Fn::And": [{ "Fn::Equals": [{ Ref: "SlackCompanyWorkspaces" }, "enabled"] }, { Condition: companyOn }] });
+    const added = Object.entries(legacy.Resources).filter(([id]) => id.startsWith("SlackCompanyMode"));
+    expect(added.length).toBeGreaterThan(0);
+    for (const [id, resource] of added) {
+      expect(resource.Type, id).toBe("AWS::IAM::Policy");
+      expect(resource.Condition, id).toBe(legacyOn);
+    }
+    // The same consumers as a named environment's, but for the TEST proof-only installation's (agentxlivetest123 only).
+    const consumers = (template: TemplateJson) => Object.keys(template.Resources).filter((id) => id.startsWith("SlackCompanyMode")).map((id) => id.replace(/^SlackCompanyMode/u, "").replace(/[0-9A-F]{8}$/u, "")).sort();
+    expect(consumers(legacy)).toEqual(consumers(named));
+    const text = JSON.stringify(legacy);
+    expect(text).toContain("agentx/production/slack-workspaces/*");
+    expect(text).not.toContain("agentx/undefined");
   });
 
   it("grants only through policies under its condition, one per consumer", () => {
@@ -113,7 +128,10 @@ describe("Slack company mode's switch (18a)", () => {
     // No other consumer gets it, and the legacy deployment has none of it.
     const others = Object.entries(named.Resources).filter(([id, r]) => r.Type === "AWS::IAM::Policy" && !id.startsWith("SlackCompanyModeSlackIngressCompanyBindings") && JSON.stringify(r.Properties).includes("#SLACK_BINDING#"));
     expect(others.map(([id]) => id)).toEqual([]);
-    expect(JSON.stringify(legacy)).not.toContain("#SLACK_BINDING#");
+    // #1171: the legacy deployment has it under the same condition only (nothing while Slack company mode is off).
+    const legacyPolicies = Object.entries(legacy.Resources).filter(([, r]) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r.Properties).includes("#SLACK_BINDING#"));
+    expect(legacyPolicies.map(([id]) => id.replace(/[0-9A-F]{8}$/u, ""))).toEqual(["SlackCompanyModeSlackIngressCompanyBindings"]);
+    expect(legacyPolicies[0]![1].Condition).toMatch(/^SlackCompanyModeOn[0-9A-F]{8}$/u);
   });
 
   it("gives the Slack Lambda and the channel API a NAMED company's project revisions: Query, keys plus companyId and candidate, the exact company-id shape (R2-F1 lane 1 review M2)", () => {
@@ -131,7 +149,10 @@ describe("Slack company mode's switch (18a)", () => {
     expect(allowed("ORG#org_demoaaaaaaaaaaaaaaaa#PROJECT#demo-tasklog")).toBe(true);
     for (const key of ["PROJECT#demo-tasklog", "ORG#org_demoaaaaaaaaaaaaaaaa#PROJECT_CATALOG", "ORG#org_demoaaaaaaaaaaaaaaaa#PROJECT_MEMBERS#demo-tasklog", "ORG#org_demoaaaaaaaaaaaaaaaa#MEMBER#e46d",
       "ORG#org_short#PROJECT#demo-tasklog"]) expect(allowed(key), key).toBe(false);
-    expect(JSON.stringify(legacy)).not.toContain("ReadCompanyProjectRevisions");
+    // #1171: the legacy deployment has them under the same condition only (nothing while Slack company mode is off).
+    const legacyPolicies = Object.entries(legacy.Resources).filter(([, r]) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r.Properties).includes("ReadCompanyProjectRevisions"));
+    expect(legacyPolicies.map(([id]) => id.replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual(["SlackCompanyModeChannelApiCompanyProjects", "SlackCompanyModeSlackIngressCompanyProjects"]);
+    for (const [, resource] of legacyPolicies) expect(resource.Condition).toMatch(/^SlackCompanyModeOn[0-9A-F]{8}$/u);
   });
 
   it("never lets the Slack Lambda write the State table, switch on or off (#126)", () => {

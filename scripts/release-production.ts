@@ -382,7 +382,8 @@ async function releaseSlackOrchestrator(
     // #1131: the Slack service's alarms (FR-045) notify the control plane's alert topic.
     ...parameter("OperatorAlertsTopicArn", stackOutput(controlPlane, "OperatorAlertsTopicArn")),
     // Spec 062 Phase 7d: the channel API's queues and the built-in Slack adapter's commands, once the control plane has them.
-    ...["ChannelRequestQueueUrl", "ChannelEventQueueUrl", "SlackAdapterCommandsUrl", "SlackAdapterSecretName"].flatMap((name) => {
+    // #1171: and Slack company mode's inputs (the State table and the install's team), which the control plane outputs; the two switches keep their previous values.
+    ...["ChannelRequestQueueUrl", "ChannelEventQueueUrl", "SlackAdapterCommandsUrl", "SlackAdapterSecretName", "SlackCompanyStateTableName", "SlackCompanyTeamId"].flatMap((name) => {
       const value = controlPlane.Outputs?.find((output) => output.OutputKey === name)?.OutputValue;
       return value ? parameter(name, value) : [];
     }),

@@ -5,6 +5,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { CONTROL_PLANE_FOUNDATION_PARAMETERS } from "../../packages/contracts/src/session.js";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 type Resource = { Type: string; Properties: Record<string, unknown> };
 type Statement = { Sid?: string; Effect: string; Action: string | string[]; Resource: unknown; Condition?: Record<string, Record<string, unknown>> };
@@ -159,7 +160,8 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
 
   it("lets the broker start only the deleter, for ec2-ebs close (#84)", () => {
     const [, broker] = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("Broker"))!;
-    expect(Object.keys((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables)).toEqual(expect.arrayContaining(["DELETER_ARN"]));
+    // #1149: the legacy broker's names are packed; read them as the broker does.
+    expect(Object.keys(unpackedBrokerVariables((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables, template.toJSON() as never))).toEqual(expect.arrayContaining(["DELETER_ARN"]));
     const roleId = (broker.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
     const starts = roleStatements(roleId).filter((st) => [st.Action].flat().includes("states:StartExecution"));
     expect(JSON.stringify(starts.map((st) => st.Resource))).toContain("SessionsDeleter");
@@ -174,7 +176,8 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
   it("gives the broker fixed, separate setup and mock-feature catalogs and the dispatcher setup catalog only", () => {
     const broker = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("Broker"))![1];
     const dispatcher = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("Dispatcher"))![1];
-    const brokerEnv = (broker.Properties.Environment as { Variables: Record<string, string> }).Variables;
+    // #1149: the legacy broker derives both catalog ids (the values it was given whole before).
+    const brokerEnv = unpackedBrokerVariables((broker.Properties.Environment as { Variables: Record<string, string> }).Variables, template.toJSON() as never) as Record<string, string>;
     const dispatcherEnv = (dispatcher.Properties.Environment as { Variables: Record<string, string> }).Variables;
     expect(brokerEnv.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID).toBe("agentx-production-project-setup-runtime-v1");
     expect(brokerEnv.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID).toBe("agentx-production-e2e-mock-runtime-v1");

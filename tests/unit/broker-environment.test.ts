@@ -42,7 +42,8 @@ const SETTINGS = {
   coreEngine: "off", coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6", slackCompanyWorkspaces: "0", companySignIn: "1", testServices: "1", savedEnvironments: "0", testServiceImages: "mirrored", coreAttentionEmail: "off",
   coreAnswersModel: "claude-haiku-5-5", coreAgentModelChoice: "on",
   coreLearningModel: "claude-haiku-5-5",
-} as const satisfies Record<BrokerSettingKey, string>;
+  // #1149: a named broker's settings: the legacy layout marker (installLayout) is the legacy install's alone.
+} as const satisfies Record<Exclude<BrokerSettingKey, "installLayout">, string>;
 
 const names = (entries: Partial<Record<BrokerNameKey, string>> = NAMES): string => Object.entries(entries).map(([key, value]) => `${BROKER_NAMES[key as BrokerNameKey].code}=${value}`).join(",");
 const settings = (entries: Partial<Record<BrokerSettingKey, string>> = SETTINGS): string => Object.entries(entries).map(([key, value]) => `${BROKER_SETTINGS[key as BrokerSettingKey].code}=${value}`).join(",");
@@ -243,5 +244,34 @@ describe("hydrateBrokerEnvironment: what it cannot read stops the broker, in fix
       expect(JSON.parse(line)).toMatchObject({ event: "broker_environment.unknown_codes" });
       expect(line).not.toContain(SECRETISH);
     }
+  });
+});
+
+describe("hydrateBrokerEnvironment: the legacy install's packed broker (#1149)", () => {
+  const legacy = (): MutableEnvironment => ({ AWS_REGION: "us-east-1", AGENTX_ACCOUNT_ID: "123456789012", AGENTX_ENV: "production", AGENTX_NAMES: "ts=AgentXControlPlane-State-X", AGENTX_SETTINGS: "ly=legacy,ss=disabled", AGENTX_ALARM_PREFIX: "AgentX" });
+
+  it("derives only the variables marked legacy, which are production's own values, and adds none of the others", () => {
+    const env = legacy();
+    hydrateBrokerEnvironment(env);
+    expect(env.STATE_TABLE_NAME).toBe("AgentXControlPlane-State-X");
+    expect(env.DEVELOPER_SIGNIN_SLACK).toBe("disabled");
+    expect(env.SWEBENCH_SETTINGS_PREFIX).toBe("/agentx/production/");
+    expect(env.CHANNEL_ADAPTER_SECRET_PREFIX).toBe("agentx/production/");
+    expect(env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID).toBe("agentx-production-project-setup-runtime-v1");
+    expect(env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID).toBe("agentx-production-e2e-mock-runtime-v1");
+    // Passed whole, never replaced.
+    expect(env.AGENTX_ALARM_PREFIX).toBe("AgentX");
+    for (const variable of DERIVED_BROKER_VARIABLES.filter((entry) => entry.legacy !== true).map((entry) => entry.variable)) {
+      if (variable === "AGENTX_ALARM_PREFIX") continue;
+      expect(env[variable], variable).toBeUndefined();
+    }
+  });
+
+  it("a named environment (no layout marker) still derives every variable", () => {
+    const env = legacy();
+    env.AGENTX_SETTINGS = "ss=disabled";
+    delete env.AGENTX_ALARM_PREFIX;
+    hydrateBrokerEnvironment(env);
+    for (const entry of DERIVED_BROKER_VARIABLES) expect(env[entry.variable], entry.variable).toBeDefined();
   });
 });
