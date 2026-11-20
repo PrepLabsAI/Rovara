@@ -543,7 +543,7 @@
     "tests/contract/release-installer.test.ts": 2.926,
     "tests/contract/release-pack-cli.test.ts": 18.691,
     "tests/contract/release-test-workflow.test.ts": 0.083,
-    "tests/contract/release-verify.test.ts": 335.21,
+    "tests/contract/release-verify.test.ts": 69.53,
     "tests/contract/release-workflow.test.ts": 0.097,
     "tests/contract/release-zip.test.ts": 0.005,
     "tests/contract/repository-context.test.ts": 0.084,
