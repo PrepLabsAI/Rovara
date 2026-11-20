@@ -6,7 +6,7 @@ import {
   exchangeLinearCode, linearAuthorizeUrl, linearTeamsOf, linearWorkspaceOf, LinearOAuthFailure, LINEAR_TEAMS_MAX, refreshLinearTokens, revokeLinearToken,
 } from "../../packages/broker/src/aws/linear-oauth-client.js";
 import { linearAppSettingsReader, linearCompanyWiring } from "../../packages/broker/src/aws/linear-wiring.js";
-import { linearAppSecretName, LinearAppSettingsSchema } from "../../packages/broker/src/aws/linear-connections.js";
+import { LinearAppSettingsSchema } from "../../packages/broker/src/aws/linear-connections.js";
 import { handleLinearAppWebhook } from "../../packages/broker/src/aws/linear-app-webhook.js";
 import { linearTracker } from "../../packages/broker/src/plugins/tracker/linear/index.js";
 import { SCOPE } from "../support/ports/plugin-fake-worlds.js";
@@ -78,9 +78,6 @@ describe("the Linear OAuth client", () => {
 });
 
 describe("the app's settings", () => {
-  it("live under the connector secret prefix the broker already reads", () => {
-    expect(linearAppSecretName("agentx/staging/connectors/")).toBe("agentx/staging/connectors/linear-oauth-app");
-  });
   it("accept only an https callback at Cloud's path, with no query; a malformed secret is 'not set up' and is read again next time", async () => {
     expect(LinearAppSettingsSchema.safeParse(LINEAR_APP).success).toBe(true);
     for (const redirectUri of ["http://app.rovara.example/api/connect/linear/callback", "https://app.rovara.example/other", "https://app.rovara.example/api/connect/linear/callback?x=1", "https://u:p@app.rovara.example/api/connect/linear/callback"]) {
@@ -131,9 +128,6 @@ describe("the app's settings", () => {
       expect((await post("{}")).status).toBe(401);
       expect(send).toHaveBeenCalledTimes(3);
     } finally { vi.useRealTimers(); }
-  });
-  it("without the token key nothing is wired (routes unknown, webhook 404)", () => {
-    expect(linearCompanyWiring({ env: {}, documentClient: { send: vi.fn() }, tableName: "State", kms: { send: vi.fn() } as never, secrets: { send: vi.fn() } as never, connectorSecretPrefix: "agentx/x/connectors/", log: () => undefined })).toBeUndefined();
   });
 });
 

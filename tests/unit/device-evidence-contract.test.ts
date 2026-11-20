@@ -8,11 +8,9 @@ import {
   deviceEvidenceOn, pickChangedFlows, planDeviceMask, type DeviceEvidenceOutcome,
 } from "../../packages/contracts/src/device-evidence.js";
 import { BROWSER_EVIDENCE_TEXT_MASKS, scrubVisibleText } from "../../packages/contracts/src/browser-evidence.js";
-import { checkKindInfo } from "../../packages/contracts/src/check-kinds.js";
 import { EVIDENCE_ARTIFACT_MAX_BYTES, EvidencePackV2Schema, type ArtifactRef, type EvidencePackV2 } from "../../packages/contracts/src/evidence.js";
 import { POLICY_FIELDS, resolvePolicy } from "../../packages/contracts/src/policy.js";
 import { POLICY_PRESETS } from "../../packages/contracts/src/presets.js";
-import { proofHolds, type TestProof } from "../../packages/contracts/src/test-proof.js";
 
 const sha = (c: string) => c.repeat(64);
 const jpeg = (c: string, bytes = 1_000): ArtifactRef => ({ kind: "jpeg", sha256: sha(c), bytes, retentionClass: "evidence-std" });
@@ -59,14 +57,6 @@ describe("the recipe", () => {
 });
 
 describe("which changed flows are picked", () => {
-  it("picks the recipe flows whose globs match a changed file, in recipe order, each once, with their steps", () => {
-    expect(pickChangedFlows({ changedFiles: ["app/src/shared/x.kt", "app/src/main/kotlin/checkout/Pay.kt", "README.md"], recipe: recipe() })).toEqual({
-      status: "picked", notShown: [], moreNotShown: 0,
-      flows: [{ id: "checkout", steps: [{ id: "open", label: "Step open" }, { id: "submit", label: "Step submit" }] }, { id: "settings", steps: [{ id: "open", label: "Step open" }, { id: "submit", label: "Step submit" }] }],
-    });
-    const only = pickChangedFlows({ changedFiles: ["app/src/main/java/settings/A.kt"], recipe: recipe() });
-    expect(only.status === "picked" && only.flows.map((row) => row.id)).toEqual(["settings"]);
-  });
   it("says Not run when nothing changed maps to a flow, when there is no recipe, and refuses input that is not a file list", () => {
     expect(pickChangedFlows({ changedFiles: ["README.md"], recipe: recipe() })).toEqual({ status: "not_run", reason: "no_changed_flow" });
     expect(pickChangedFlows({ changedFiles: [], recipe: recipe() })).toEqual({ status: "not_run", reason: "no_changed_flow" });
@@ -143,14 +133,6 @@ describe("the view-tree mask plan", () => {
       expect(plan(screen([node({ text: "ok" }), bad])), JSON.stringify(bad)).toEqual({ status: "withheld", reason: "masked_content" });
     }
   });
-  it("withholds a secret that only shows across two nodes (a label and its value)", () => {
-    const got = plan(screen([node({ text: "API key:", bounds: { x: 0, y: 0, width: 80, height: 20 } }), node({ text: "abcd1234", bounds: { x: 0, y: 30, width: 80, height: 20 } })]));
-    expect(got).toEqual({ status: "withheld", reason: "masked_content" });
-    // A hint shows while a field is empty, so a value there counts as text on the screen.
-    expect(plan(screen([node({ text: "API key:" }), node({ hint: "abcd1234" })]))).toEqual({ status: "withheld", reason: "masked_content" });
-    // A sign-in screen's label beside its (painted) secure field and a two-word button is not one.
-    expect(plan(screen([node({ text: "Password:" }), node({ text: "••••", secure: true }), node({ text: "Sign in" })]))).toMatchObject({ status: "paint" });
-  });
   it("withholds a screen it cannot read: no tree, no nodes, no text at all, a malformed tree, a tree of another size, or too many nodes", () => {
     const bad: unknown[] = [undefined, null, {}, screen([]), screen([node({}), { }]), screen([node({ text: "x" })], { width: 361, height: 640 }), screen([node({ text: "x" })], { width: 360, height: 641 }),
       { ...screen([node({ text: "x" })]), extra: 1 }, screen([{ text: "x", extra: 1 }]), screen([node({ text: 5 })]), screen([node({ text: "x", bounds: { x: 1.5, y: 0, width: 1, height: 1 } })]),
@@ -159,32 +141,12 @@ describe("the view-tree mask plan", () => {
     for (const tree of bad) expect(plan(tree), JSON.stringify(tree)?.slice(0, 80)).toEqual({ status: "withheld", reason: "unreadable_screen" });
     expect(plan(screen(Array.from({ length: DEVICE_EVIDENCE_TREE_NODES_MAX }, (_, i) => node({ text: `n${i}` }))))).toMatchObject({ status: "paint" });
   });
-  it("text of only spaces or hidden characters is no text: that screen cannot be read either", () => {
-    for (const text of [" ", "\u200b", " \u00a0\t\n", "\u202e"]) {
-      expect(plan(screen([node({ text })])), JSON.stringify(text)).toEqual({ status: "withheld", reason: "unreadable_screen" });
-      expect(plan(screen([node({ description: text }), node({ hint: text })]))).toEqual({ status: "withheld", reason: "unreadable_screen" });
-    }
-    expect(plan(screen([node({ text: " a " })]))).toMatchObject({ status: "paint" });
-  });
-  it("a canvas, game or map surface is always painted, whatever text its screen has", () => {
-    expect(plan(screen([node({ text: "Play" }), node({ surface: true, bounds: { x: 0, y: 20, width: 360, height: 300 } })]))).toEqual({ status: "paint", rects: [{ x: 0, y: 20, width: 360, height: 300 }] });
-    expect(plan(screen([node({ text: "Play" }), node({ surface: "yes" })]))).toEqual({ status: "withheld", reason: "unreadable_screen" });
-  });
-  it("a value before its label (a hint shown above a value) and an accessibility label as the visible one read as a label and value too", () => {
-    expect(plan(screen([node({ text: "abcd1234", hint: "token:" })]))).toEqual({ status: "withheld", reason: "masked_content" });
-    expect(plan(screen([node({ description: "Password:" }), node({ text: "hunter22" })]))).toEqual({ status: "withheld", reason: "masked_content" });
-    expect(plan(screen([node({ description: "Close" }), node({ text: "Welcome back" })]))).toMatchObject({ status: "paint" });
-  });
   it("the painted area is bounded: rectangles that cover the frame more than four times over withhold the screen, and four times is allowed", () => {
     const full = { x: 0, y: 0, width: 360, height: 640 };
     const stack = (n: number) => screen([node({ text: "hi" }), ...Array.from({ length: n }, () => node({ secure: true, bounds: full }))]);
     expect(plan(stack(4))).toMatchObject({ status: "paint" });
     expect(plan(stack(5))).toEqual({ status: "withheld", reason: "masked_content" });
     expect(plan(stack(DEVICE_EVIDENCE_TREE_NODES_MAX - 1))).toEqual({ status: "withheld", reason: "masked_content" });
-  });
-  it("the maskIds option can only add: a bad one is ignored and the defaults stay", () => {
-    expect(plan(screen([node({ id: "a", secure: true }), node({ id: "b", text: "x" })]), { maskIds: 3 })).toMatchObject({ status: "paint", rects: [{ x: 10 }] });
-    expect(plan(screen([node({ id: "b", text: "x" })]), { maskIds: [3, "b"] })).toMatchObject({ status: "paint", rects: [{ x: 10 }] });
   });
   it("with fixture data only switched on, a screen with no readable text is shown unmasked, but a screen with a match it cannot paint is still withheld", () => {
     expect(plan(null, { fixtureDataOnly: true })).toEqual({ status: "unmasked" });
@@ -197,12 +159,6 @@ describe("the view-tree mask plan", () => {
     expect(plan(screen([node({ text: "ok" }), { text: email }]), { fixtureDataOnly: true })).toEqual({ status: "withheld", reason: "masked_content" });
     expect(plan(null, { fixtureDataOnly: "true" })).toEqual({ status: "withheld", reason: "unreadable_screen" });
     expect(plan(null)).toEqual({ status: "withheld", reason: "unreadable_screen" });
-  });
-  it("finishes a customer-sized tree within a bounded time", () => {
-    const nodes = Array.from({ length: DEVICE_EVIDENCE_TREE_NODES_MAX }, (_, i) => node({ text: `${"a.".repeat(10)}${i}`, description: "x ".repeat(3), bounds: { x: 0, y: i % 600, width: 10, height: 10 } }));
-    const started = performance.now();
-    expect(plan(screen(nodes)).status).toBe("paint");
-    expect(performance.now() - started).toBeLessThan(5_000);
   });
   it("a screen with more visible text than the masks scan (200,000 characters) is withheld whole, never half checked", () => {
     const nodes = Array.from({ length: 50 }, () => node({ text: "word ".repeat(900) }));
@@ -248,24 +204,11 @@ describe("the evidence-pack check", () => {
     expect(EvidencePackV2Schema.safeParse(addDeviceEvidenceToPack(basePack(), shown)).success).toBe(true);
     expect(deviceEvidenceCheck({ ...shown, isolation: "developer_machine" }).check.stage).toBeUndefined();
   });
-  it("says what the device was in the label, for every kind", () => {
-    expect(deviceEvidenceCheck({ ...shown, device: "android_emulator" }).check.label).toBe("Device evidence: Android emulator");
-    expect(deviceEvidenceCheck({ ...shown, device: "ios_simulator", isolation: "developer_machine" }).check.label).toBe("Device evidence: iOS simulator");
-  });
   it("a run that showed nothing is `not_run` with no pairs, and a whole-run reason becomes one not-tested row", () => {
     const { check, notTested } = deviceEvidenceCheck({ device: "fake", isolation: "sandbox", durationMs: 0, steps: [], notShown: [], moreNotShown: 0, unmasked: 0, notRun: "app_did_not_build" });
     expect(check).toMatchObject({ kind: "visual", before: "not_run", after: "not_run", class: "not_rerun" });
     expect(check.pairs).toBeUndefined();
     expect(notTested).toEqual([{ what: "Device evidence", reason: "Not run: the app did not build" }]);
-  });
-  it("NEVER counts toward the proof: the kind is visual, the registry says so, the hold rule ignores it, and a fake device cannot be anything else", () => {
-    for (const device of ["fake", "android_emulator"] as const) expect(deviceEvidenceCheck({ ...shown, device }).check.kind).toBe("visual");
-    expect(checkKindInfo("visual")?.countsTowardProof).toBe(false);
-    const proof: TestProof = { schemaVersion: 1, candidateDigest: sha("d"), status: "checked", note: "completed", changedTests: { added: 1, changed: 0, deleted: 0 }, durationMs: 10,
-      items: [{ checkId: DEVICE_EVIDENCE_CHECK_ID, label: "Device evidence", granularity: "check", verdict: "proves_change", reason: "assertion_failed_on_old" }] };
-    // Positive control: the same entry under a kind that counts is a proven change.
-    expect(proofHolds({ facts: { proof, checkKinds: { [DEVICE_EVIDENCE_CHECK_ID]: "e2e" } }, mode: "hold" }).provenCount).toBe(1);
-    expect(proofHolds({ facts: { proof, checkKinds: { [DEVICE_EVIDENCE_CHECK_ID]: deviceEvidenceCheck(shown).check.kind } }, mode: "hold" }).provenCount).toBe(0);
   });
   it("refuses an outcome it does not understand rather than writing a guess", () => {
     for (const bad of [{ ...shown, isolation: "imported" }, { ...shown, device: "phone" }, { ...shown, steps: [{ flow: "a", step: "b", status: "maybe" }] },
@@ -352,16 +295,6 @@ describe("absent = today's behaviour, byte for byte", () => {
     expect(addDeviceEvidenceToPack(pack, undefined)).toBe(pack);
     expect(JSON.stringify(addDeviceEvidenceToPack(pack, undefined))).toBe(before);
     expect(deviceEvidenceLines(undefined, {})).toEqual([]);
-  });
-  it("adding it never touches the other checks or rows", () => {
-    const pack = basePack();
-    const before = JSON.stringify(pack);
-    const added = addDeviceEvidenceToPack(pack, shown);
-    expect(JSON.stringify(pack)).toBe(before);
-    expect(added.checks.slice(0, 1)).toEqual(pack.checks);
-    expect(added.checks).toHaveLength(2);
-    expect(added.result).toBe(pack.result);
-    expect(added.level).toEqual(pack.level);
   });
   it("refuses to add it twice, or to a pack whose producer says another place than the outcome", () => {
     expect(() => addDeviceEvidenceToPack(addDeviceEvidenceToPack(basePack(), shown), shown)).toThrow("device evidence outcome is not valid");

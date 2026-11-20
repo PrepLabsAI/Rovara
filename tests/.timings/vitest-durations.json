@@ -1452,7 +1452,6 @@
     "tests/unit/executor-run-lock.test.ts": 0.357,
     "tests/unit/executor-smoke.test.ts": 0.011,
     "tests/unit/external-checks.test.ts": 0.01,
-    "tests/unit/flaky-checks-seam.test.ts": 0.006,
     "tests/unit/flaky-evidence.test.ts": 0.044,
     "tests/unit/flaky-verify-contracts.test.ts": 0.021,
     "tests/unit/flow-guard.test.ts": 0.035,

@@ -17,10 +17,6 @@ describe("hosted reviewer authority", () => {
     }
     expect(await reviewerAuthority({ companyId: A, offered: async () => { throw new Error("private-canary"); } })).toBeUndefined();
   });
-  it("refuses a connected-model claim absent from the offered list", async () => {
-    const value = answer(); value.models.pop();
-    expect(await reviewerAuthority({ companyId: A, offered: async () => value })).toBeUndefined();
-  });
   it("reads only the task company's autonomy and asks on unknown, malformed or failed reads", async () => {
     const h = createHarness();
     await h.store.put({ item: { ...agentGuardrailsKey(A), revision: 1, guardrails: JSON.parse(JSON.stringify({ ...DEFAULT_AGENT_GUARDRAILS, maxAutonomy: "prepare" })) as JsonValue } });

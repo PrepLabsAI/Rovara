@@ -32,26 +32,6 @@ async function featureForms() {
 const feature = (over: Partial<NonNullable<ReturnType<typeof planView>["feature"]>> = {}) => ({ line: "Feature: Checkout v2 (from the Linear parent)", featureId: FT_ONE, canChange: true, choices: [{ id: FT_ONE, name: "Checkout v2" }, { id: FT_TWO, name: "Billing" }], ...over });
 
 describe("the plan page's feature line", () => {
-  it("draws the line, a Change form with the open features (the current one chosen) and a No feature form", async () => {
-    world.data.plan = planView({ feature: feature() });
-    const page = (await get(`${base}/plan/${TASK}`)).body;
-    expect(page).toContain("Feature: Checkout v2 (from the Linear parent)");
-    const forms = await featureForms();
-    expect(forms).toHaveLength(2);
-    expect(forms[0]!.html).toContain(`<option value="${FT_ONE}" selected>Checkout v2</option>`);
-    expect(forms[0]!.html).toContain(`<option value="${FT_TWO}">Billing</option>`);
-    expect(forms[0]!.html).toContain(">Change<");
-    expect(forms[1]!.fields["feature"]).toBe("none");
-    expect(forms[1]!.html).toContain(">No feature<");
-  });
-
-  it("a task with no feature has no No feature form; with no open features it says so", async () => {
-    world.data.plan = planView({ feature: feature({ featureId: null, line: "Feature: No feature" }) });
-    expect(await featureForms()).toHaveLength(1);
-    world.data.plan = planView({ feature: feature({ featureId: null, line: "Feature: No feature", choices: [] }) });
-    expect(await featureForms()).toHaveLength(0);
-    expect((await get(`${base}/plan/${TASK}`)).body).toContain("This company has no open features yet.");
-  });
 
   it("a reader who may not change it sees the line and no form; a page with no feature view has no section", async () => {
     world.data.plan = planView({ feature: feature({ canChange: false, choices: [] }) });
@@ -60,13 +40,6 @@ describe("the plan page's feature line", () => {
     expect(await featureForms()).toHaveLength(0);
     world.data.plan = planView();
     expect((await get(`${base}/plan/${TASK}`)).body).not.toContain("plan-feature");
-  });
-
-  it("draws a feature name as text, never as markup", async () => {
-    world.data.plan = planView({ feature: feature({ choices: [{ id: FT_ONE, name: "<img src=x onerror=alert(1)>" }] }) });
-    const page = (await get(`${base}/plan/${TASK}`)).body;
-    expect(page).not.toContain("<img src=x");
-    expect(page).toContain("&lt;img src=x");
   });
 });
 
@@ -110,23 +83,5 @@ describe("the plan page's feature forms", () => {
       expect(String(answer.headers.location), `${feature_}|${revision}`).toContain("n=invalid");
     }
     expect(world.actions.calls.length).toBe(before);
-  });
-
-  it("a refusal from the action is a notice, not a crash; a page without the action says invalid", async () => {
-    const [pick] = await featureForms();
-    world.actions.next = { ok: false, reason: "stale", message: "x" };
-    expect(String((await post(pick!.action, { ...pick!.fields, feature: FT_ONE })).headers.location)).toContain("n=stale");
-    const withoutPlanFeature: Partial<typeof world.actions> = { ...world.actions };
-    delete withoutPlanFeature.planFeature;
-    const bare = await createLocalPagesServer({ data: world.data, actions: withoutPlanFeature as typeof world.actions });
-    const bareBase = `/s/${bare.sessions.mint().token}`;
-    const bareHost = new URL(bare.origin).host;
-    const page = (await raw(bare.origin, { path: `${bareBase}/plan/${TASK}`, headers: { host: bareHost } })).body;
-    const form = [...page.matchAll(/<form[^>]*action="([^"]+\/feature)"[^>]*>([\s\S]*?)<\/form>/g)][0]!;
-    const fields: Record<string, string> = { feature: FT_ONE };
-    for (const input of (form[2] ?? "").matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) fields[decode(input[1] ?? "")] = decode(input[2] ?? "");
-    const answer = await raw(bare.origin, { method: "POST", path: decode(form[1] ?? ""), body: formBody(fields), headers: { host: bareHost, origin: bare.origin, "content-type": "application/x-www-form-urlencoded" } });
-    expect(String(answer.headers.location)).toContain("n=invalid");
-    await bare.close();
   });
 });

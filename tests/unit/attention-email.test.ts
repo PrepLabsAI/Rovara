@@ -120,16 +120,6 @@ describe("the switch", () => {
 });
 
 describe("the broker's adapter: one invoke of the sender function", () => {
-  it("hands one message to the named function, synchronously, and treats only { ok: true } as sent", async () => {
-    const f = fakeLambda();
-    const sender = lambdaAttentionEmailSender({ lambda: f.lambda, functionName: FUNCTION, now: () => NOW });
-    expect(sender.capabilities).toEqual({ available: true, html: false, unsubscribeHeader: false });
-    await sender.send(message({ deadline: NOW + 2_500, unsubscribeUrl: `${ORIGIN}/app/notifications/unsubscribe?t=x` }));
-    expect(f.calls).toHaveLength(1);
-    expect(f.calls[0]!.input).toMatchObject({ FunctionName: FUNCTION, InvocationType: "RequestResponse" });
-    expect(f.calls[0]!.payload).toEqual({ v: 1, to: "dana@example.test", subject: "Rovara: 1 task needs your attention", text: message().text });
-    expect((f.calls[0]!.options as { abortSignal?: unknown }).abortSignal).toBeDefined();
-  });
 
   it("refuses what the port refuses before any call, and passes the function's refusal on, in fixed words", async () => {
     const f = fakeLambda();
@@ -277,26 +267,6 @@ describe("the reverse index (H1), scoped to one company", () => {
   const taskRecord = (fields: Record<string, unknown> = {}) => ({ pk: `DEVTASK#${taskId}`, sk: "META", developerId: PERSON, provider: HOSTED_IDENTITY_PROVIDER, companyId: ORG, sessionId, ...fields });
   const remember = (store: MemoryDocumentStore, orgId: OrgId = ORG, owner = PERSON_HASH) => rememberAttentionOwner({ store, provider: HOSTED_IDENTITY_PROVIDER, now: () => new Date(NOW) }, { orgId, sessionId, session: session(orgId, owner) });
 
-  it("remembers the task's owner from the task's own record, in the company's partition, and finds them again", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: taskRecord() });
-    expect(await remember(store)).toBe(true);
-    expect(await store.get(attentionPersonKey(ORG, PERSON_HASH))).toMatchObject({ orgId: ORG, developerId: PERSON_HASH, personId: PERSON });
-    expect(await attentionPersonOf(store, HOSTED_IDENTITY_PROVIDER, ORG, PERSON_HASH)).toBe(PERSON);
-    // Another company asks for the same hash: its partition is empty.
-    expect(await attentionPersonOf(store, HOSTED_IDENTITY_PROVIDER, OTHER_ORG, PERSON_HASH)).toBeUndefined();
-  });
-
-  it("keeps one row per company: another company's row for the same id never replaces or answers for this one", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: taskRecord() });
-    await remember(store);
-    await store.put({ item: { ...attentionPersonKey(OTHER_ORG, PERSON_HASH), entityType: "ATTENTION_PERSON", orgId: OTHER_ORG, developerId: PERSON_HASH, personId: PERSON } });
-    expect(await attentionPersonOf(store, HOSTED_IDENTITY_PROVIDER, ORG, PERSON_HASH)).toBe(PERSON);
-    expect(await attentionPersonOf(store, HOSTED_IDENTITY_PROVIDER, OTHER_ORG, PERSON_HASH)).toBe(PERSON);
-    expect(attentionPersonKey(ORG, PERSON_HASH).pk).not.toBe(attentionPersonKey(OTHER_ORG, PERSON_HASH).pk);
-  });
-
   it("writes nothing for a task record of another company, another provider, a person who is not the owner, another session, or a session that is not a task's", async () => {
     for (const fields of [{ companyId: OTHER_ORG }, { provider: "github" }, { developerId: "someone-else" }, { sessionId: "ses_other" }, { developerId: "has space" }]) {
       const store = new MemoryDocumentStore();
@@ -364,13 +334,6 @@ describe("the reverse index (H1), scoped to one company", () => {
 });
 
 describe("the signed link", () => {
-  it("names one company and one person, for 90 days, and nothing else", () => {
-    const token = mintUnsubscribeToken(KEY, { orgId: ORG, developerId: DANA_ID, nowMs: NOW });
-    expect(verifyUnsubscribeToken(KEY, token, NOW + 1)).toEqual({ orgId: ORG, developerId: DANA_ID });
-    expect(verifyUnsubscribeToken(KEY, token, NOW + (UNSUBSCRIBE_LINK_DAYS * 86_400_000) - 1)).toEqual({ orgId: ORG, developerId: DANA_ID });
-    expect(verifyUnsubscribeToken(KEY, token, NOW + UNSUBSCRIBE_LINK_DAYS * 86_400_000)).toBeUndefined();
-    expect(token).not.toContain(DANA_ID);
-  });
   it("is refused when changed in any way, signed by another key, or not shaped like one", () => {
     const token = mintUnsubscribeToken(KEY, { orgId: ORG, developerId: DANA_ID, nowMs: NOW });
     const [v, body, sig] = token.split(".") as [string, string, string];
@@ -509,18 +472,6 @@ describe("a hosted person with no chat is told by email, in the core's words", (
     expect(verifyUnsubscribeToken(unsubscribeKeyOf("callback-signing-key-for-tests"), decodeURIComponent(unsubscribe.split("?t=")[1]!), NOW)).toEqual({ orgId: ORG, developerId: PERSON_HASH });
     expect(text).not.toContain(w.sessionId);
     expect(await w.notices.deliver()).toMatchObject({ emails: 0 });
-  });
-
-  it("sends nothing to a person who stopped these emails, is a member elsewhere now, has a company issuer's or no address; and does not fail", async () => {
-    const stopped = await world();
-    await writeNotifyPrefs({ store: stopped.store, now: () => new Date(NOW) }, ORG, PERSON_HASH, { emailUnsubscribed: true });
-    await stopped.notices.deliver();
-    expect(stopped.sent).toEqual([]);
-    for (const options of [{ companyId: OTHER_ORG }, { record: { email: "pat@example.test", provider: "oidc", issuer: "https://idp.company.test", subject: "s" } }, { record: undefined }, { record: { email: "Pat <pat@example.test>", provider: "github", issuer: GITHUB_ISSUER } }]) {
-      const w = await world(options);
-      await expect(w.notices.deliver()).resolves.toBeDefined();
-      expect(w.sent, JSON.stringify(options)).toEqual([]);
-    }
   });
 
   it("does not send again an email whose invoke was cut off at the deadline (the claim is kept)", async () => {

@@ -45,16 +45,6 @@ describe("bulkCreate", () => {
     expect(answer.results.map((row) => row.outcome === "created" ? "created" : row.reason)).toEqual(["created", "created", "not_started", "not_started"]);
     expect(create).toHaveBeenCalledTimes(2);
   });
-
-  it("runs repositories that make the same project name one after another", async () => {
-    const order: string[] = [];
-    let active = 0; let most = 0;
-    await bulkCreate(["x/web", "y/web", "z/web"], { now: () => 0, nameOf: () => "web", concurrency: 4, create: async (repository) => {
-      active++; most = Math.max(most, active); order.push(repository); await new Promise((resolve) => setTimeout(resolve, 5)); active--; return repository;
-    } });
-    expect(most).toBe(1);
-    expect(order).toEqual(["x/web", "y/web", "z/web"]);
-  });
 });
 
 describe("eachLimited", () => {

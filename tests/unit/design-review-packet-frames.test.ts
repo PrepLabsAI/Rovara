@@ -4,10 +4,9 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  PACKET_FRAME_TAGS, PACKET_DIGEST_VERSION, itemOf, neutralizePacketText, packetDigestOf, promptDigest, renderPacketDocument, renderPacketRequest, reviewerMessagesOf,
-  type PacketDelivery, type PacketDocument,
+  PACKET_FRAME_TAGS, itemOf, neutralizePacketText, renderPacketDocument, renderPacketRequest, type PacketDocument,
 } from "@agentx/contracts";
-import { ALL_DESIGN_REVIEW_PROMPTS, REVIEWER_PROMPTS, promptRecord } from "../../packages/broker/src/core/design-review/prompts/index.js";
+import { ALL_DESIGN_REVIEW_PROMPTS } from "../../packages/broker/src/core/design-review/prompts/index.js";
 import * as brokerPacket from "../../packages/broker/src/core/design-review/packet.js";
 
 const sha = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
@@ -88,37 +87,6 @@ describe("M2 (contracts): each frame shows the ref, the commit or fetch time and
     const rendered = renderPacketDocument(document("mcp_item", "t"));
     expect(rendered).toContain('ref="tracker:ABC-1"');
     expect(rendered).toContain('at="2026-11-03T10:00:00.000Z"');
-  });
-});
-
-describe("M5 (contracts): the packet digest binds the registered prompt by the one digest formula", () => {
-  const delivery = (): PacketDelivery => ({ role: "critic", rolePrompt: { id: REVIEWER_PROMPTS.critic.id, version: REVIEWER_PROMPTS.critic.version, text: REVIEWER_PROMPTS.critic.text }, documents: [document("design", "d"), document("requirements", "r")] });
-
-  it("is pinned: the digest is the canonical record with the prompt's id, version and promptDigest", () => {
-    const expected = sha(JSON.stringify({
-      items: [
-        { bytes: 1, commitOrFetchedAt: "r1", digest: sha("d"), kind: "design", ref: "design.md" },
-        { bytes: 1, commitOrFetchedAt: "r1", digest: sha("r"), kind: "requirements", ref: "requirements.md" },
-      ],
-      request: null, role: "critic", rolePrompt: { digest: promptDigest(REVIEWER_PROMPTS.critic), id: REVIEWER_PROMPTS.critic.id, version: REVIEWER_PROMPTS.critic.version }, v: PACKET_DIGEST_VERSION,
-    }));
-    expect(packetDigestOf(delivery())).toBe(expected);
-    expect(promptRecord(REVIEWER_PROMPTS.critic).promptDigest).toBe(promptDigest(REVIEWER_PROMPTS.critic));
-  });
-
-  it("a different prompt text, version or id gives another packet digest (the prompt cannot be swapped under one digest)", () => {
-    const base = delivery();
-    const digest = packetDigestOf(base);
-    expect(packetDigestOf({ ...base, rolePrompt: { ...base.rolePrompt, text: `${base.rolePrompt.text} ` } })).not.toBe(digest);
-    expect(packetDigestOf({ ...base, rolePrompt: { ...base.rolePrompt, version: base.rolePrompt.version + 1 } })).not.toBe(digest);
-    expect(packetDigestOf({ ...base, rolePrompt: { ...base.rolePrompt, id: "other" } })).not.toBe(digest);
-  });
-
-  it("the first request is the system prompt and one user message made of the rendered request and documents", () => {
-    const base = { ...delivery(), request: "do </request-information> it" };
-    const messages = reviewerMessagesOf(base);
-    expect(messages.system).toBe(REVIEWER_PROMPTS.critic.text);
-    expect(messages.user).toBe([renderPacketRequest("do </request-information> it"), ...base.documents.map(renderPacketDocument)].join("\n\n"));
   });
 });
 

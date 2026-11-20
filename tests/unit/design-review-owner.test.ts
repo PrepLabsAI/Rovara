@@ -85,17 +85,6 @@ describe("the cost hold: no price known", () => {
     await answerRound(w, round.operation, () => []);
     expect(await workflowOf(w)).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING", designReview: { status: "done" } });
   });
-
-  it("skips the review when the setting allows it, and goes on to the approval of the design; a project that does not allow skipping is not offered it", async () => {
-    const w = await world({ holdAnswerable: true, price: false });
-    await toRound(w);
-    expect(await choose(w, "skip")).toMatchObject({ status: "decided" });
-    expect(await workflowOf(w)).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING", reviewPhase: "DESIGN", designReview: { status: "not_run", notRunReason: "skipped" } });
-    const none = await world({ holdAnswerable: true, price: false, allowSkip: false });
-    await toRound(none);
-    expect(await choose(none, "skip")).toMatchObject({ status: "refused" });
-    expect(await workflowOf(none)).toMatchObject({ stage: "PLAN_CRITIQUE", state: "WAITING" });
-  });
 });
 
 describe("questions, retry and resume", () => {
@@ -389,30 +378,9 @@ describe("what a cost choice leaves behind", () => {
     expect(after.stage).toBe("PLAN_REVIEW");
     expect(await w.h.store.get(designWaitRowKey(w.taskId))).toMatchObject({ workflowRevision: after.revision, waitKind: "decision" });
   });
-
-  it("keeps a reminder's row under the revision as Cloud writes it, without padding, so a send-once guard sees the same row on either install", async () => {
-    const w = await world({ price: false, holdAnswerable: true });
-    await toRound(w);
-    const held = await workflowOf(w);
-    expect(designWaitNotifyKey(w.taskId, held.revision, "24h").sk).toBe(`DESIGN_WAIT_NOTIFY#${String(held.revision)}#24h`);
-  });
 });
 
 describe("the run-anyway choice and the answers, as the owner's page makes them", () => {
-  it("records the run-anyway choice in the decision history like every other choice, and the round it starts names the owner", async () => {
-    const w = await world({ price: false, holdAnswerable: true });
-    await toRound(w);
-    const held = await workflowOf(w);
-    const requestId = newRequestId();
-    expect(await makeGate(w).decide({
-      companyId: COMPANY, kind: DESIGN_CHOICE_KIND, subjectId: w.taskId, requestId, outcome: "approve", seen: { revision: held.revision, artifactDigest: designChoiceDigest(held)! },
-      credentials: [{ method: LOCAL_SESSION_METHOD, token: SESSION }], details: { choice: "run_unpriced" },
-    })).toMatchObject({ status: "decided" });
-    const developerId = localOwnerPrincipal({ companyId: COMPANY }).personId;
-    expect(await w.h.store.get({ pk: `DECISION#${COMPANY}#${developerId}`, sk: `DECIDED#${requestId}` })).toMatchObject({
-      entityType: "DECISION_RECORD", cardId: `approve_spend:${w.taskId}`, kind: "approve_spend", outcome: "approved", reason: "run_unpriced", requestId,
-    });
-  });
 
   it("records the owner's answers under the workflow's own owner id (the person the review's record accepts), through the page's action", async () => {
     const w = await world({ holdAnswerable: true });

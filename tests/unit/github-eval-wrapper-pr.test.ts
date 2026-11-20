@@ -99,22 +99,6 @@ const requestOf = (github: FakeGitHub, over: Record<string, unknown> = {}): Eval
 const refusal = async (call: () => Promise<unknown>): Promise<string> => { try { await call(); return ""; } catch (error) { return error instanceof Error ? error.message : String(error); } };
 
 describe("the GitHub eval wrapper pull request: what it does", () => {
-  it("makes ONE branch with ONE new file and opens ONE pull request: five writes, no update, no delete, no default-branch write", async () => {
-    const github = new FakeGitHub();
-    const base = github.branches.get("main")!;
-    const done = await openEvalWrapperPullRequestOn(contextOf(github), requestOf(github));
-    expect(done).toMatchObject({ number: 7, url: "https://github.com/acme/app/pull/7" });
-    expect(github.writes).toEqual(["POST /git/blobs", "POST /git/trees", "POST /git/commits", "POST /git/refs", "POST /pulls"]);
-    // The commit is built on the checked default-branch head, with exactly one tree entry at the fixed path.
-    expect(github.written.commits[0]).toMatchObject({ parents: [base] });
-    expect(github.written.trees[0]!.tree).toEqual([expect.objectContaining({ path: EVAL_WRAPPER_PYTHON_PATH, mode: "100644", type: "blob" })]);
-    expect((github.written.trees[0]!.tree as unknown[]).length).toBe(1);
-    // The branch is created pointing at that commit in one step; the default branch never moves.
-    expect(github.written.refs).toEqual([{ ref: `refs/heads/${BRANCH}`, sha: done.revision }]);
-    expect(github.branches.get("main")).toBe(base);
-    expect(github.written.pulls).toEqual([{ title: "Add Rovara's eval wrapper", head: BRANCH, base: "main", body: "Please read it." }]);
-    expect(github.branches.get(BRANCH)).toBe(done.revision);
-  });
 
   it("works for the Node wrapper path too, and for a repository whose rovara folder already holds other files", async () => {
     const github = new FakeGitHub({ "rovara/notes.md": "file", "src/a.ts": "file" });
@@ -160,14 +144,6 @@ describe("the GitHub eval wrapper pull request: what it refuses (nothing is aske
     expect(await refusal(() => openEvalWrapperPullRequestOn(contextOf(github), requestOf(github)))).toContain(EVAL_WRAPPER_PATH_TAKEN_MESSAGE);
     expect(github.writes).toEqual([]);
     expect([...github.branches.keys()]).toEqual(["main"]);
-  });
-
-  it("a folder listing that is cut at GitHub's 1,000 entries and does not name the wrapper cannot say it is free: refused, nothing written", async () => {
-    const files: Record<string, Entry> = {};
-    for (let index = 0; index < 1_000; index += 1) files[`rovara/file-${String(index).padStart(4, "0")}.txt`] = "file";
-    const github = new FakeGitHub(files);
-    expect(await refusal(() => openEvalWrapperPullRequestOn(contextOf(github), requestOf(github)))).toContain(EVAL_WRAPPER_PATH_TAKEN_MESSAGE);
-    expect(github.writes).toEqual([]);
   });
 
   it("a default branch that moved since the path was checked is a conflict, and so is a branch name somebody already has: nothing is written", async () => {

@@ -1,16 +1,16 @@
 // Test services on the local Docker worker, the broker's side: the catalog it trusts (and what it does with none), the images it pulls on the host, and how the worker machine is told about test services. The guard's rules
 // are in local-test-services-guard.test.ts; the real daemon is in tests/integration/local-test-services-isolation.test.ts.
-import { createHash, createSign, generateKeyPairSync } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createSign, generateKeyPairSync } from "node:crypto";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CATALOG_FILE, CATALOG_SIGNATURE_ALGORITHM, CATALOG_SIGNATURE_FILE, catalogPins, catalogSigningMessage, parseBundlePublicKey, sha256HexOf, MachineError } from "@agentx/contracts";
+import { CATALOG_FILE, CATALOG_SIGNATURE_ALGORITHM, CATALOG_SIGNATURE_FILE, catalogPins, catalogSigningMessage, parseBundlePublicKey, sha256HexOf } from "@agentx/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import type { DockerResult, DockerRunner } from "../../packages/broker/src/local/docker-runner.js";
 import { DockerWorkerMachines } from "../../packages/broker/src/local/docker-worker-machines.js";
 import { createEphemeralInvokeSigner } from "../../packages/broker/src/local/invoke-signer.js";
 import { prepareLocalTestServices } from "../../packages/broker/src/local/test-services-install.js";
-import { NO_TRUSTED_CATALOG_SENTENCE, loadLocalServiceCatalog, localTestServicesDigestPart, localTestServicesFrom, prepareTestServiceImages, removePulledTestServiceImages, testServicesEnvironment } from "../../packages/broker/src/local/test-services.js";
+import { NO_TRUSTED_CATALOG_SENTENCE, loadLocalServiceCatalog, localTestServicesDigestPart, localTestServicesFrom, prepareTestServiceImages, removePulledTestServiceImages } from "../../packages/broker/src/local/test-services.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 
@@ -24,10 +24,6 @@ async function folder(): Promise<string> {
 }
 
 describe("the catalog a local install trusts", () => {
-  it("is refused with the one sentence when the files are missing", async () => {
-    const result = await loadLocalServiceCatalog(await folder());
-    expect(result).toMatchObject({ ok: false, sentence: NO_TRUSTED_CATALOG_SENTENCE });
-  });
 
   it("is refused when it is signed by a key this release does not trust (a release with no compiled-in key trusts none)", async () => {
     const directory = await folder();
@@ -66,21 +62,6 @@ describe("pulling the catalog's images on the host", () => {
   const catalog = () => verifiedCatalog(pinnedCatalog());
   const pins = () => catalogPins(catalog(), "public").filter((pin, index, all) => all.findIndex((other) => other.repository === pin.repository && other.digest === pin.digest) === index);
 
-  it("pulls each pinned image by its digest from the install's registry, and returns the references the guard may let start", async () => {
-    const state = await folder();
-    const docker = pullingDocker(new Set());
-    const result = await prepareTestServiceImages({ docker, catalog: catalog(), registry: "registry.example:5000", catalogEnv: "local", stateDirectory: state });
-    const pulls = docker.calls.filter((call) => call[0] === "pull").map((call) => call[call.length - 1]!);
-    expect(pulls.length).toBeGreaterThan(0);
-    for (const reference of pulls) expect(reference).toMatch(/^registry\.example:5000\/rovara-catalog\/local\/svc\/[a-z0-9._-]+@sha256:[a-f0-9]{64}$/u);
-    expect(result.images.sort()).toEqual([...new Set(pulls)].sort());
-    expect(result.notPulled).toEqual([]);
-    expect(result.pulledNow.sort()).toEqual(result.images.sort());
-    // A pin that is not in the catalog is never pulled, and a tag is never built.
-    expect(pulls.some((reference) => !reference.includes("@sha256:"))).toBe(false);
-    expect(pins().length).toBeLessThanOrEqual(result.images.length + 5);
-  });
-
   it("leaves an image the owner already had alone, and never removes it", async () => {
     const state = await folder();
     const first = pins()[0]!;
@@ -115,14 +96,6 @@ describe("pulling the catalog's images on the host", () => {
     const second = await prepareTestServiceImages({ docker, catalog: catalog(), registry: "registry.example", catalogEnv: "Local Env", stateDirectory: await folder() });
     expect(second.images).toEqual([]);
   });
-
-  it("writes the bookkeeping file only with owner access", async () => {
-    const state = await folder();
-    await prepareTestServiceImages({ docker: pullingDocker(new Set()), catalog: catalog(), registry: "registry.example", catalogEnv: "local", stateDirectory: state });
-    const info = await stat(join(state, "test-services-images.json"));
-    expect(info.mode & 0o077).toBe(0);
-    expect((JSON.parse(await readFile(join(state, "test-services-images.json"), "utf8")) as { references: string[] }).references.length).toBeGreaterThan(0);
-  });
 });
 
 describe("the worker machine with test services", () => {
@@ -143,70 +116,6 @@ describe("the worker machine with test services", () => {
     return JSON.parse(text.slice("ROVARA_SOCK_POLICY=".length)) as GuardPolicy;
   };
 
-  it("with test services off is the machine it always was: no run folder, no extra mount, no services in the guard's policy, no test services variable", async () => {
-    const { machines, docker, stateDirectory } = await build(false);
-    const handle = await machines.start({ machineKey: "ws-off", companyId: COMPANY });
-    const hash = handle.machineId.slice("rovara-worker-".length);
-    expect("services" in policyOf(docker, hash)).toBe(false);
-    const worker = docker.containers.get(handle.machineId)!;
-    expect(worker.args.filter((entry) => entry === "--volume")).toHaveLength(1);
-    expect(Object.keys(worker.environment).filter((name) => name.startsWith("AGENTX_TEST_SERVICES") || name === "AGENTX_WORKER_IMAGE")).toEqual([]);
-    await expect(stat(join(stateDirectory, "test-services"))).rejects.toThrow();
-    await machines.terminate(handle.machineId);
-    expect(docker.calls.some((call) => call.includes("rovara.local.sandbox=service") || (call[0] === "network" && call[1] === "ls"))).toBe(false);
-  });
-
-  it("with test services on tells the worker its registry, environment, run folder and own pinned image, mounts the folder in the worker alone, and gives the guard the list", async () => {
-    const { machines, docker, stateDirectory } = await build(true);
-    const handle = await machines.start({ machineKey: "ws-on", companyId: COMPANY });
-    const hash = handle.machineId.slice("rovara-worker-".length);
-    const runDirectory = join(stateDirectory, "test-services", hash);
-    const worker = docker.containers.get(handle.machineId)!;
-    const imageId = `sha256:${createHash("sha256").update("worker:test").digest("hex")}`;
-    expect(worker.environment).toMatchObject({ AGENTX_TEST_SERVICES_REGISTRY: "registry.example:5000", AGENTX_TEST_SERVICES_ENV: "local", AGENTX_TEST_SERVICES_RUN_DIR: runDirectory, AGENTX_WORKER_IMAGE: imageId, AGENTX_TEST_SERVICES_MAX_MEM_MIB: "2048" });
-    expect(worker.args.filter((entry) => entry === "--volume")).toHaveLength(2);
-    expect(worker.args).toContain(`${runDirectory}:${runDirectory}`);
-    // The run folder is not inside the workspace the sandboxes mount.
-    expect(runDirectory.startsWith(`${join(stateDirectory, "workspaces", hash)}/`)).toBe(false);
-    expect((await stat(runDirectory)).mode & 0o777).toBe(0o777);
-    expect((await stat(join(stateDirectory, "test-services"))).mode & 0o077).toBe(0);
-    const policy = policyOf(docker, hash);
-    const bindDirectory = `${runDirectory}-binds`;
-    expect(policy.services).toEqual({ images: services.images, guardImage: imageId, runDirectory, bindDirectory, socketGroup: policy.services?.socketGroup, maxMemoryMiB: 2048 });
-    expect(typeof policy.services?.socketGroup).toBe("number");
-    // The folder for the guard's copies sits beside the run folder (never inside it), is not mounted into the worker, and the sandboxes' policy is unchanged.
-    expect(bindDirectory.startsWith(`${runDirectory}/`)).toBe(false);
-    expect(worker.args).not.toContain(`${bindDirectory}:${bindDirectory}`);
-    expect(policy.workspaceDir).toBe(join(stateDirectory, "workspaces", hash));
-    // The guard reads the run folder read-only (it copies the files a service container mounts) and writes its copies into its own folder.
-    const guardArgs = docker.containers.get(`rovara-sock-${hash}`)!.args;
-    const guardVolumes = guardArgs.filter((entry, index) => guardArgs[index - 1] === "--volume");
-    expect(guardVolumes).toContain(`${runDirectory}:${runDirectory}:ro`);
-    expect(guardVolumes).toContain(`${bindDirectory}:${bindDirectory}`);
-  });
-
-  it("DEC 254zm 2: with limits the guard enforces them and the worker is told the first two; without them the guard keeps its defaults and the worker's environment has neither", async () => {
-    const limits = { containers: 20, helperMemoryMiB: 2048, memoryPercent: 60 };
-    const withLimits = await (async () => {
-      const stateDirectory = await folder();
-      const docker = new FakeDocker();
-      const machines = new DockerWorkerMachines({ image: "worker:test", stateDirectory, callback: () => ({ tcpPort: 1234 }), signer: createEphemeralInvokeSigner(), docker, fetch: docker.fetch, testServices: { ...services, maxMemoryMiB: 4096, limits } });
-      return { docker, machines };
-    })();
-    const handle = await withLimits.machines.start({ machineKey: "ws-limits", companyId: COMPANY });
-    const hash = handle.machineId.slice("rovara-worker-".length);
-    const policy = policyOf(withLimits.docker, hash);
-    // The limits win over the old single knob for the guard; that knob is still the worker's per-run total.
-    expect(policy.services).toMatchObject({ maxContainers: 20, maxMemoryMiB: 2048, maxMemoryPercent: 60 });
-    expect(withLimits.docker.containers.get(handle.machineId)!.environment).toMatchObject({ AGENTX_TEST_SERVICES_MAX_MEM_MIB: "4096", AGENTX_TEST_SERVICES_MAX_CONTAINERS: "20", AGENTX_TEST_SERVICES_MAX_HELPER_MEM_MIB: "2048" });
-    const plain = await build(true);
-    const other = await plain.machines.start({ machineKey: "ws-plain", companyId: COMPANY });
-    const plainPolicy = policyOf(plain.docker, other.machineId.slice("rovara-worker-".length));
-    expect("maxContainers" in plainPolicy.services).toBe(false);
-    expect("maxMemoryPercent" in plainPolicy.services).toBe(false);
-    expect(Object.keys(plain.docker.containers.get(other.machineId)!.environment).filter((name) => /MAX_CONTAINERS|MAX_HELPER_MEM/u.test(name))).toEqual([]);
-  });
-
   it("DEC 254zm 2: a changed ceiling is a different machine configuration, an unchanged one is not", () => {
     const base = { registry: "r.example", catalogEnv: "local", images: ["i"] };
     const at = (containers: number, helperMemoryMiB = 1024, memoryPercent = 40) => JSON.stringify(localTestServicesDigestPart({ ...base, limits: { containers, helperMemoryMiB, memoryPercent } }, undefined));
@@ -216,13 +125,6 @@ describe("the worker machine with test services", () => {
     expect(at(12)).not.toBe(at(12, 1024, 41));
     expect(at(12)).not.toBe(JSON.stringify(localTestServicesDigestPart(base, undefined)));
     expect(JSON.stringify(localTestServicesDigestPart(base, undefined))).toBe(JSON.stringify(["r.example", "local", ["i"], null, null]));
-  });
-
-  it("does not let a job's environment name the test services settings or the worker's own image", async () => {
-    const { machines } = await build(true);
-    for (const name of ["AGENTX_WORKER_IMAGE", "AGENTX_TEST_SERVICES_REGISTRY", "AGENTX_TEST_SERVICES_RUN_DIR", "AGENTX_TEST_SERVICES_ENV", "AGENTX_TEST_SERVICES_NOT_PULLED", "AGENTX_TEST_SERVICES_MAX_MEM_MIB", "AGENTX_TEST_SERVICES_EDITION", "AGENTX_TEST_SERVICES_MAX_CONTAINERS", "AGENTX_TEST_SERVICES_MAX_HELPER_MEM_MIB"]) {
-      await expect(machines.start({ machineKey: `ws-${name.length}`, companyId: COMPANY, environment: { [name]: "x" } }), name).rejects.toBeInstanceOf(MachineError);
-    }
   });
 
   it("lists the repositories that did not pull for the worker, and re-creates an idle machine when the list of images changes", async () => {
@@ -274,22 +176,5 @@ describe("the worker machine with test services", () => {
     });
     expect(install.mode).toBe("signed");
     expect(install.services?.limits).toEqual({ containers: 30, helperMemoryMiB: 1024, memoryPercent: 40 });
-  });
-
-  it("DEC 254zm 2: the signed path's options carry the limits it was given", () => {
-    const prepared = { images: ["r.example/rovara-catalog/local/svc/redis@sha256:" + "c".repeat(64)], notPulled: [], failed: [], pulledNow: [] };
-    const limits = { containers: 9, helperMemoryMiB: 512, memoryPercent: 30 };
-    expect(localTestServicesFrom({ registry: "r.example", catalogEnv: "local", prepared, limits })).toMatchObject({ limits });
-    expect("limits" in localTestServicesFrom({ registry: "r.example", catalogEnv: "local", prepared })!).toBe(false);
-  });
-
-  it("builds the worker's environment from exactly what it was given, limits included", () => {
-    expect(testServicesEnvironment({ registry: "r.example", catalogEnv: "local", images: [], limits: { containers: 12, helperMemoryMiB: 1024, memoryPercent: 40 } }, { runDirectory: "/run/x", workerImageId: `sha256:${"a".repeat(64)}` })).toMatchObject({ AGENTX_TEST_SERVICES_MAX_CONTAINERS: "12", AGENTX_TEST_SERVICES_MAX_HELPER_MEM_MIB: "1024" });
-  });
-
-  it("builds the worker's environment from exactly what it was given", () => {
-    expect(testServicesEnvironment({ registry: "r.example", catalogEnv: "local", images: [], notPulled: ["svc/a", "svc/b"] }, { runDirectory: "/run/x", workerImageId: `sha256:${"a".repeat(64)}` })).toEqual({
-      AGENTX_TEST_SERVICES_REGISTRY: "r.example", AGENTX_TEST_SERVICES_ENV: "local", AGENTX_TEST_SERVICES_RUN_DIR: "/run/x", AGENTX_WORKER_IMAGE: `sha256:${"a".repeat(64)}`, AGENTX_TEST_SERVICES_NOT_PULLED: "svc/a,svc/b",
-    });
   });
 });

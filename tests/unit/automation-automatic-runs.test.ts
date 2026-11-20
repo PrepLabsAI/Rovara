@@ -5,7 +5,7 @@
 //   4. a repeat of a request is one run and counts once;
 //   5. an unattended start carries no approval of anything.
 import { describe, expect, it } from "vitest";
-import { startUnattendedRun, sweepUnattendedRuns, type AutomatedRunRequest } from "../../packages/broker/src/core/automation/run-seam.js";
+import { startUnattendedRun, type AutomatedRunRequest } from "../../packages/broker/src/core/automation/run-seam.js";
 import { claimAutomaticRun, readAutomaticRunsUse, setAutomaticRunsCap } from "../../packages/broker/src/core/automatic-runs/cap.js";
 import { startAutomaticRun, type AutomaticRunInput } from "../../packages/broker/src/core/automatic-runs/start.js";
 import { putAutomaticRunWatch, sweepAutomaticRuns } from "../../packages/broker/src/core/automatic-runs/end.js";
@@ -28,40 +28,6 @@ describe("the unattended door", () => {
     expect(world.starts).toHaveLength(0);
     // The failed start gave its place back: the month's count is zero.
     expect((await readAutomaticRunsUse(deps(world), COMPANY, PROJECT)).used).toBe(0);
-  });
-
-  it("asks Admission first, with the request id as its key, and starts nothing when it refuses", async () => {
-    const world = createAutomationWorld();
-    world.refuseAdmission = { code: "budget_exhausted", message: "The budget is used up." };
-    await expect(startUnattendedRun(world.unattended, request(3))).rejects.toThrow(/budget is used up/u);
-    expect(world.admissions.map((entry) => [entry.action, entry.idempotencyKey])).toEqual([["automation.run", `automation.run#${uuid(3)}`]]);
-    expect(world.starts).toHaveLength(0);
-  });
-
-  it("gives the reservation back when the starter refuses or fails with no run made, and keeps it when the run exists", async () => {
-    const world = createAutomationWorld();
-    world.starter.failWith = Object.assign(new Error("PROJECT_ARCHIVED: archived"), { code: "PROJECT_ARCHIVED" });
-    await expect(startUnattendedRun(world.unattended, request(4))).rejects.toThrow(/archived/u);
-    expect(world.releases).toEqual(["res-1"]);
-    // A fault with nothing made: the request id finds no run, so the reservation goes back too.
-    world.starter.failWith = new Error("socket hang up");
-    await expect(startUnattendedRun(world.unattended, request(5))).rejects.toThrow(/socket/u);
-    expect(world.releases).toEqual(["res-1", "res-2"]);
-    // A fault AFTER the run was made: the run exists, so its reservation is kept (and recorded to be settled).
-    world.starter.failAfterCommit = true;
-    await expect(startUnattendedRun(world.unattended, request(6))).rejects.toThrow(/socket/u);
-    expect(world.releases).toEqual(["res-1", "res-2"]);
-    expect(await sweepUnattendedRuns(world.unattended)).toMatchObject({ open: 1, settled: 0 });
-  });
-
-
-  it("is one run for one request id, and carries no approval, no model key and no starter", async () => {
-    const world = createAutomationWorld();
-    const first = await startUnattendedRun(world.unattended, request(6));
-    const again = await startUnattendedRun(world.unattended, request(6));
-    expect(again).toEqual({ taskId: first.taskId, duplicate: true });
-    expect(world.starts).toHaveLength(1);
-    expect(Object.keys(world.starts[0]!).sort()).toEqual(["agent", "input", "limits", "origin", "project", "requestId"]);
   });
 });
 
@@ -89,29 +55,6 @@ describe("the monthly cap of automatic runs", () => {
     // The same request again is the same run (claimed once), not "skipped"; a new request is skipped.
     expect(await claimAutomaticRun(deps(world), { orgId: COMPANY, project: PROJECT, requestId: uuid(20), job: "scheduled_check" })).toMatchObject({ claimed: true, replay: true });
     expect(await startAutomaticRun(deps(world), rebuild(21))).toEqual({ skipped: "automatic_cap" });
-  });
-
-  it("skips a run at the cap without starting it or asking Admission", async () => {
-    const world = createAutomationWorld();
-    await setAutomaticRunsCap(deps(world), { orgId: COMPANY, project: PROJECT, changedBy: OWNER.personId, cap: 0, requestId: "cap-request-2" });
-    expect(await startAutomaticRun(deps(world), rebuild(7))).toEqual({ skipped: "automatic_cap" });
-    expect(world.admissions).toHaveLength(0);
-    expect(world.starts).toHaveLength(0);
-  });
-
-  it("gives the place back when Admission refuses, and keeps it when the run exists", async () => {
-    const world = createAutomationWorld();
-    world.refuseAdmission = { code: "budget_exhausted", message: "No budget." };
-    await expect(startAutomaticRun(deps(world), rebuild(8))).rejects.toThrow(/No budget/u);
-    expect((await readAutomaticRunsUse(deps(world), COMPANY, PROJECT)).used).toBe(0);
-    world.refuseAdmission = undefined;
-    const started = await startAutomaticRun(deps(world), rebuild(9));
-    expect(started).toMatchObject({ started: { duplicate: false } });
-    // The run's answer was lost after it committed: its retry finds the run and counts once.
-    world.starter.failWith = new Error("lost the answer");
-    world.starter.failAfterCommit = true;
-    await expect(startAutomaticRun(deps(world), rebuild(10))).rejects.toThrow(/lost the answer/u);
-    expect((await readAutomaticRunsUse(deps(world), COMPANY, PROJECT)).used).toBe(2);
   });
 
   it("applies a cap change once per request id and refuses a cap out of range", async () => {

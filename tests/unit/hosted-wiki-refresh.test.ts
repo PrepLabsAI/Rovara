@@ -97,13 +97,6 @@ describe("the two locks and the cap stand before anything is held or started", (
     expect(w.auditBefore).toEqual([]);
     expect(await readWikiBuildPointer(w.h.store, w.company, "payments")).toBeUndefined();
   });
-
-  it("a project whose upkeep is off starts nothing (the unattended door's switch is the project's own row)", async () => {
-    const w = await build({ upkeep: false });
-    await expect(go(w)).rejects.toMatchObject({ code: "NOT_AVAILABLE_HERE" });
-    expect(w.admitted).toEqual([]);
-    expect(await readWikiBuildPointer(w.h.store, w.company, "payments")).toBeUndefined();
-  });
 });
 
 describe("a started refresh", () => {

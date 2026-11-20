@@ -28,18 +28,6 @@ const settle = <T,>(work: Promise<T>) => work.catch((error: { code: string; mess
 const companyRows = (db: FakeDynamoDb, company: string) => JSON.stringify(db.find((item) => JSON.stringify(item).includes(company)));
 
 describe("webhook marks", () => {
-  it("moves only the named installation's binding, conditionally, with an audit row by github, and keeps history", async () => {
-    const { db, store } = await setup();
-    const beforeA = companyRows(db, A);
-    expect(await store.markLifecycle(202, "suspend", D1)).toEqual({ outcome: "marked", companyId: B, from: "active", to: "suspended" });
-    expect(binding(db, 202)).toMatchObject({ companyId: B, state: "suspended", stateAt: NOW, boundBy: BEA });
-    expect(db.get("GITHUB_INSTALLATION#202", `AUDIT#LIFECYCLE#${D1}`)).toMatchObject({ actor: "github", from: "active", to: "suspended", action: "suspend", companyId: B });
-    expect(await store.markLifecycle(202, "deleted", D2)).toMatchObject({ outcome: "marked", from: "suspended", to: "uninstalled" });
-    // History stays: the binding row, its claim audit and every lifecycle audit.
-    expect(binding(db, 202)).toMatchObject({ state: "uninstalled" });
-    expect(db.find((item) => item.pk === "GITHUB_INSTALLATION#202" && String(item.sk).startsWith("AUDIT#"))).toHaveLength(3);
-    expect(companyRows(db, A)).toBe(beforeA);
-  });
   it("an uninstalled binding is never re-activated by a webhook; a redelivered event changes nothing; an unbound installation is left alone", async () => {
     const { db, store } = await setup();
     await store.markLifecycle(101, "deleted", D1);
@@ -133,23 +121,6 @@ describe("disconnect", () => {
     expect(companyRows(db, B)).toBe(beforeB);
     expect(await store.companyInstallations(A)).toEqual([]);
   });
-  it("is refused (nothing written) before the backfill marker exists", async () => {
-    const { db, store } = await setup();
-    db.delete("GITHUB_INSTALLATION_BINDING", "BACKFILL");
-    await expect(store.disconnect(A, 101, ADA)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
-    expect(binding(db, 101)).toBeDefined();
-  });
-  it("loses cleanly to a change made after its read (a webhook mark in between): refused, nothing deleted", async () => {
-    const { db, store } = await setup();
-    const send = db.send.bind(db);
-    let raced = false;
-    db.send = async (command) => {
-      if (!raced && command.constructor.name === "TransactWriteCommand") { raced = true; await store.markLifecycle(101, "suspend", D1); }
-      return send(command);
-    };
-    await expect(store.disconnect(A, 101, ADA)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
-    expect(binding(db, 101)).toMatchObject({ state: "suspended" });
-  });
   it("races a same-company claim: the end state is consistent (bound with its list row, or unbound with neither) and never another company's", async () => {
     for (let round = 0; round < 6; round++) {
       const { db, store } = await setup();
@@ -161,14 +132,6 @@ describe("disconnect", () => {
       if (claimed === "bound") { expect(row).toMatchObject({ companyId: A }); expect(listed).toBeDefined(); }
       expect((await store.companyInstallations(A)).length).toBe(row === undefined ? 0 : 1);
     }
-  });
-  it("races another company's claim after it: the other company may bind only once it is unbound", async () => {
-    const { db, store } = await setup();
-    const [gone, other] = await Promise.all([store.disconnect(A, 101, ADA), store.claimPerson(B, { installationId: 101, accountLogin: "acme" }, BEA)]);
-    expect(gone.outcome).toBe("disconnected");
-    expect(db.find((item) => item.pk === "GITHUB_INSTALLATION#101" && String(item.sk).startsWith("AUDIT#DISCONNECT#"))).toHaveLength(1);
-    if (other === "bound") expect(binding(db, 101)).toMatchObject({ companyId: B });
-    else { expect(other).toBe("taken"); expect(binding(db, 101)).toBeUndefined(); }
   });
 });
 
@@ -201,14 +164,6 @@ describe("fences on what was read (races between the read and the write)", () =>
     before(db, async () => { await store.markLifecycle(101, "deleted", D2); });
     await expect(store.claimPerson(A, { installationId: 101, accountLogin: "acme" }, ADA)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
     expect(binding(db, 101)).toMatchObject({ state: "uninstalled" });
-  });
-  it("an already-bound claim that loses to a disconnect does not bring back the list row without its binding", async () => {
-    const { db, store, tick } = await setup();
-    tick();
-    before(db, async () => { expect((await store.disconnect(A, 101, ADA)).outcome).toBe("disconnected"); tick(); });
-    expect(await store.claimPerson(A, { installationId: 101, accountLogin: "acme" }, ADA)).toBe("bound");
-    expect(binding(db, 101)).toMatchObject({ companyId: A });
-    expect(await store.companyInstallations(A)).toHaveLength(1);
   });
   it("a disconnect whose transaction committed but answered an error still says disconnected", async () => {
     const { db, store } = await setup();

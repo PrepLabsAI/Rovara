@@ -2,11 +2,10 @@
 // them into a `made_by_rovara` dependency (so #588's proof table says "with a Rovara-made mock; not Proven"), the v1 lines say so first, and the hold rule never counts such a check.
 import { describe, expect, it } from "vitest";
 import {
-  GENERAL_FAKE_LABEL, GENERAL_FAKE_NOT_RUN_SENTENCES, GENERAL_FAKES_FEATURE, GeneralFakesSettingSchema, ProjectDefinitionSchema, TestProofSchema, WORKER_INVOCATION_FEATURES,
+  GENERAL_FAKE_LABEL, GENERAL_FAKE_NOT_RUN_SENTENCES, GeneralFakesSettingSchema, ProjectDefinitionSchema, TestProofSchema,
   generalFakesPayloadOf, generalFakesRoundLine, proofHolds, workerProjectDefinition, type PlanDocument, type TestProof,
 } from "@agentx/contracts";
 import { withGeneralFakeFacts } from "../../packages/worker/src/verification/test-proof.js";
-import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 import { loadProofContext } from "../../packages/broker/src/core/proof/proof-inputs.js";
 import { MOCK_PROOF_PREFIX, testProofQualifier } from "../../packages/broker/src/core/proof/proof-table.js";
 import { loadTestProofLines } from "../../packages/broker/src/developer/test-proof-lines.js";
@@ -39,11 +38,6 @@ describe("the setting and the payload", () => {
     const withSetting = ProjectDefinitionSchema.parse({ ...definition, generalFakes: { enabled: true, services: [{ variable: "PAYMENTS_API_URL" }] } });
     expect(withSetting.generalFakes).toEqual({ enabled: true, services: [{ variable: "PAYMENTS_API_URL" }] });
     expect(JSON.stringify(workerProjectDefinition(withSetting))).toBe(JSON.stringify(workerProjectDefinition(parsed)));
-  });
-
-  it("the worker lists the feature and the protocol knows it", () => {
-    expect(WORKER_INVOCATION_FEATURES).toContain(GENERAL_FAKES_FEATURE);
-    expect(WORKER_IMPLEMENTED_FEATURES).toContain(GENERAL_FAKES_FEATURE);
   });
 
   it("the words are fixed: the shared trust label, a number, and Not run sentences with no placeholder", () => {

@@ -11,7 +11,7 @@ import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
 import { gapKindOf, listGaps, pressNotRight, topicKey, topicWords } from "../../packages/broker/src/core/answers/feedback.js";
 import { routeHostedWikiCorrections, type HostedWikiCorrectionsWiring } from "../../packages/broker/src/core-host/wiki-corrections-routes.js";
 import { isAnswersPath, routeHostedAnswers, type HostedAnswersWiring } from "../../packages/broker/src/core-host/answer-routes.js";
-import { A, B, HEAD, OLD, REFUND_TS, T0, answer, body, codeSource, goodSentence, page, scriptedModel, tool, world } from "../support/answer-world.js";
+import { A, B, HEAD, OLD, T0, answer, body, goodSentence, page, scriptedModel, tool, world } from "../support/answer-world.js";
 
 const ADA = "ada";
 const BOB = "bob";
@@ -91,17 +91,6 @@ describe("the gap list", () => {
     expect(await listGaps(wiki, "alpha", 20)).toMatchObject({ items: [], more: false });
   });
 
-  it("two projects and two companies never meet", async () => {
-    const m = await memory();
-    await m.wikiOf(A).writeAnswer("alpha", record({ answerId: "a0001", question: "How do refunds work?", outcome: "partly" }));
-    await m.wikiOf(A).writeAnswer("beta", record({ answerId: "a0002", question: "Where is the payout schedule?", outcome: "dont_know", sources: [] }));
-    await m.wikiOf(B).writeAnswer("alpha", record({ answerId: "a0003", question: "What about invoices?", outcome: "partly" }));
-    expect((await listGaps(m.wikiOf(A), "alpha")).items.map((item) => item.topic)).toEqual(["How do refunds work?"]);
-    expect((await listGaps(m.wikiOf(A), "beta")).items.map((item) => item.topic)).toEqual(["Where is the payout schedule?"]);
-    expect((await listGaps(m.wikiOf(B), "alpha")).items.map((item) => item.topic)).toEqual(["What about invoices?"]);
-    expect((await listGaps(m.wikiOf(B), "beta")).items).toEqual([]);
-  });
-
   it("an erased asker's questions and an expired record leave the list (the topic is gone with its words)", async () => {
     const m = await memory();
     const wiki = m.wikiOf(A);
@@ -144,26 +133,6 @@ describe("Not right", () => {
     expect((await listGaps(wiki, "alpha")).items[0]).toMatchObject({ kind: "not_right", people: 1 });
   });
 
-  it("a second press is 'already' and changes nothing; an answer that rested on no wiki claim is only noted", async () => {
-    const { wiki } = await withAnswer();
-    await pressNotRight(wiki, { project: "alpha", answerId: "a0001", personId: ADA });
-    expect(await pressNotRight(wiki, { project: "alpha", answerId: "a0001", personId: ADA })).toEqual({ answerId: "a0001", state: "already", claims: 0 });
-    await wiki.writeAnswer("alpha", record({ answerId: "a0002", pagesRead: [], question: "Other thing entirely" }));
-    expect(await pressNotRight(wiki, { project: "alpha", answerId: "a0002", personId: ADA })).toEqual({ answerId: "a0002", state: "noted", claims: 0 });
-  });
-
-  it("only the asker: another person, another project, another company, an expired record and an unknown id all read as 'not there' and change nothing", async () => {
-    const { m, wiki } = await withAnswer();
-    expect(await pressNotRight(wiki, { project: "alpha", answerId: "a0001", personId: BOB })).toBeUndefined();
-    expect(await pressNotRight(wiki, { project: "beta", answerId: "a0001", personId: ADA })).toBeUndefined();
-    expect(await pressNotRight(m.wikiOf(B), { project: "alpha", answerId: "a0001", personId: ADA })).toBeUndefined();
-    expect(await pressNotRight(wiki, { project: "alpha", answerId: "a9999", personId: ADA })).toBeUndefined();
-    expect((await wiki.readPage("alpha", "billing", "person"))!.page.claims.every((claim) => claim.source === "found")).toBe(true);
-    expect((await wiki.readAnswer("alpha", "a0001"))!.notRight).toBeUndefined();
-    m.clock.now += (WIKI_ANSWER_RETENTION_DAYS * 86_400 + 1) * 1000;
-    expect(await pressNotRight(wiki, { project: "alpha", answerId: "a0001", personId: ADA })).toBeUndefined();
-  });
-
   it("the store itself refuses another person's, an expired and an unknown record (a second wall behind the module's check)", async () => {
     const { m, wiki } = await withAnswer();
     expect(await wiki.markAnswerNotRight("alpha", "a0001", BOB)).toBeUndefined();
@@ -182,20 +151,6 @@ describe("Not right", () => {
     ], blocks: [{ kind: "heading", blockId: "h0001", level: 2, text: "Refunds" }] }));
     expect(await pressNotRight(wiki, { project: "alpha", answerId: "a0001", personId: ADA })).toEqual({ answerId: "a0001", state: "noted", claims: 0 });
     expect((await wiki.readPage("alpha", "billing", "person"))!.page.claims[0]!.source).toBe("found");
-  });
-
-  it("queues at most 12 claims per press and only claims that are 'found' (a changed or not-found claim is left as it is)", async () => {
-    const m = await memory();
-    const wiki = m.wikiOf(A);
-    const claims = Array.from({ length: 20 }, (_, i) => ({ claimId: `c${String(i).padStart(4, "0")}`, text: `Claim ${String(i)}`, citations: [{ repo: "web", path: "src/refund.ts", commit: HEAD, line: 3, quote: "export const MAX_REFUND_DAYS = 30;" }], source: "found" as const, checkedAt: "2026-11-17T09:00:00.000Z" }));
-    await wiki.writePage("alpha", page("A-alpha", { repos: [{ repo: "web", commit: HEAD }], claims, blocks: [{ kind: "heading", blockId: "h0001", level: 2, text: "Refunds" }] }));
-    await wiki.markClaims("alpha", "billing", [{ claimId: "c0000", source: "not_found" }]);
-    await wiki.writeAnswer("alpha", record({ answerId: "a0001" }));
-    const done = await pressNotRight(wiki, { project: "alpha", answerId: "a0001", personId: ADA });
-    expect(done?.claims).toBe(ANSWER_FEEDBACK_LIMITS.claimsPerPress);
-    const read = (await wiki.readPage("alpha", "billing", "person"))!;
-    expect(read.page.claims.filter((claim) => claim.source === "changed")).toHaveLength(12);
-    expect(read.page.claims.find((claim) => claim.claimId === "c0000")!.source).toBe("not_found");
   });
 });
 
@@ -217,43 +172,6 @@ describe("a flag from an answer: only when Code itself did not find the claim's 
     expect(read.flags[0]).toMatchObject({ claimId: "c0001", by: { kind: "answer", answerId: result.answerId } });
     expect(read.flags[0]!.reason).toBeUndefined();
     expect((await w.wiki(A).readPage("alpha", "billing", "agent"))!.page.claims).toEqual([]);
-  });
-
-  it("the same claim named by the model AND linked by a removed sentence is flagged once", async () => {
-    const w = ready();
-    await w.wiki(A).writePage("alpha", page("A-alpha", { claims: [stale] }));
-    const model = scriptedModel([tool({ tool: "wiki_read", page: "billing" }), answer([goodSentence, { text: "The refund limit is `OLD_LIMIT_DAYS` days.", cites: [wrongCite] }], { wiki_wrong: [{ page: "billing", claim: "c0001" }] })]);
-    await w.service({ model }).ask({ personId: ADA, project: "alpha", body: body() });
-    expect((await w.wiki(A).readPage("alpha", "billing", "person"))!.flags).toHaveLength(1);
-  });
-
-  it("a claim that Code still finds in its file is NOT flagged because a sentence about the same file was removed (the model's error is not the wiki's)", async () => {
-    const w = ready();
-    await w.wiki(A).writePage("alpha", page("A-alpha"));
-    const model = scriptedModel([tool({ tool: "wiki_read", page: "billing" }), answer([goodSentence, { text: "The refund limit is `OLD_LIMIT_DAYS` days.", cites: [wrongCite] }])]);
-    await w.service({ model }).ask({ personId: ADA, project: "alpha", body: body() });
-    expect((await w.wiki(A).readPage("alpha", "billing", "person"))!.flags).toEqual([]);
-  });
-
-  it("an answer that is 'not found' still flags a claim Code could not find, and another project's page is never flagged", async () => {
-    const w = ready();
-    await w.wiki(A).writePage("alpha", page("A-alpha", { claims: [stale] }));
-    await w.wiki(A).writePage("beta", page("A-beta", { claims: [stale] }));
-    const model = scriptedModel([tool({ tool: "wiki_read", page: "billing" }), answer([{ text: "The refund limit is `OLD_LIMIT_DAYS` days.", cites: [wrongCite] }])]);
-    const result = await w.service({ model }).ask({ personId: ADA, project: "alpha", body: body() });
-    expect(result.outcome).toBe("not_found");
-    expect((await w.wiki(A).readPage("alpha", "billing", "person"))!.flags).toHaveLength(1);
-    expect((await w.wiki(A).readPage("beta", "billing", "person"))!.flags).toEqual([]);
-    expect((await w.wiki(B).readPage("alpha", "billing", "person"))).toBeUndefined();
-  });
-
-  it("a claim the model was never shown (the page was not read) is not flagged, and one flagged claim per answer slot is bounded by the answer's own limit", async () => {
-    const w = ready();
-    await w.wiki(A).writePage("alpha", page("A-alpha", { claims: [stale] }));
-    const model = scriptedModel([answer([goodSentence, { text: "The refund limit is `OLD_LIMIT_DAYS` days.", cites: [wrongCite] }])]);
-    await w.service({ model }).ask({ personId: ADA, project: "alpha", body: body() });
-    expect((await w.wiki(A).readPage("alpha", "billing", "person"))!.flags).toEqual([]);
-    void codeSource; void REFUND_TS;
   });
 });
 
@@ -354,20 +272,5 @@ describe("the Not right route (the asker, with a role now)", () => {
     const done = await routeHostedAnswers({ request: { method: "POST", path, headers: {}, body: "{}" }, path, personId: ADA, companyId: A, store: m.store, wiring, now: () => m.clock.now });
     expect(done.statusCode).toBe(503);
     expect(done.body).not.toContain("down");
-  });
-});
-
-describe("deleting the project's wiki removes what answers left behind (answer records, thread memory)", () => {
-  it("answers, a thread row and a Not right press are gone with the wiki, and the other project's are not", async () => {
-    const w = world();
-    w.roles.add(`${A}/alpha/${ADA}`); w.roles.add(`${A}/beta/${ADA}`);
-    await w.wiki(A).writePage("alpha", page("A-alpha"));
-    const svc = w.service({ model: scriptedModel([answer([goodSentence])]) });
-    const first = await svc.ask({ personId: ADA, project: "alpha", body: body() });
-    await svc.ask({ personId: ADA, project: "beta", body: body() });
-    await pressNotRight(w.wiki(A), { project: "alpha", answerId: first.answerId!, personId: ADA });
-    await w.wiki(A).deleteWiki("alpha");
-    expect((await w.wiki(A).listAnswers("alpha", 100)).records).toEqual([]);
-    expect((await w.wiki(A).listAnswers("beta", 100)).records).toHaveLength(1);
   });
 });

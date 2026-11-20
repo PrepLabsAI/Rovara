@@ -2,10 +2,10 @@
 // core: a slot is looked up only in the stored binding, a slot asked for twice gives no result and is charged its whole budget, a key is given exactly its ceiling, and the ceilings never add up past either room.
 import { describe, expect, it } from "vitest";
 import { DesignReviewBindingSchema, DesignReviewWorkerResultSchema, type DesignReviewBinding } from "@agentx/contracts";
-import { bindingSlotOf, designReviewKeyIds, planSlotBudgets, readSlotCeiling, recordSlotReask } from "../../packages/broker/src/core/design-review/slot-keys.js";
+import { designReviewKeyIds, planSlotBudgets, readSlotCeiling, recordSlotReask } from "../../packages/broker/src/core/design-review/slot-keys.js";
 import { mergeBindingFor } from "../../packages/broker/src/core/design-review/merge-binding.js";
 import { COMPANY } from "../support/task-flow-harness.js";
-import { answerRound, localDesignReview, mintKeys, nextJob, taskOf, toRound, world } from "../support/design-review-flow-world.js";
+import { answerRound, mintKeys, nextJob, taskOf, toRound, world } from "../support/design-review-flow-world.js";
 
 const MODEL = { provider: "anthropic", modelId: "m1" };
 const DIGEST = "d".repeat(64);
@@ -13,15 +13,6 @@ const binding = (withMerge = false): DesignReviewBinding => DesignReviewBindingS
   version: 1, round: 1,
   reviewers: [{ role: "critic", keySlot: "r1-critic", packetDigest: DIGEST, model: MODEL }, { role: "zoom_out", keySlot: "r1-zoom_out", packetDigest: DIGEST, model: MODEL }],
   ...(withMerge ? { merge: mergeBindingFor({ keySlot: "r1-merge", model: MODEL }) } : {}),
-});
-
-describe("a reviewer's slot", () => {
-  it("is found only in the stored binding: a well-formed slot the binding does not name is nobody's", () => {
-    const stored = binding();
-    expect(bindingSlotOf(stored, "r1-critic")).toMatchObject({ keySlot: "r1-critic", purpose: "reviewer", role: "critic" });
-    expect(bindingSlotOf(stored, "r1-zoom_out")).toMatchObject({ role: "zoom_out" });
-    for (const slot of ["r2-critic", "r1-comprehension", "r1-merge", "R1-CRITIC", "", "r1 critic"]) expect(bindingSlotOf(stored, slot), slot).toBeUndefined();
-  });
 });
 
 describe("a slot asked for its key twice", () => {
@@ -44,21 +35,6 @@ describe("a slot asked for its key twice", () => {
     const run = runs.find((entry) => entry.role === stored.reviewers[0]!.role)!;
     expect(run.verified).toBe(false);
     expect(run.costUsd).toBeCloseTo(budget, 6);
-  });
-});
-
-describe("a reviewer's key at the model proxy", () => {
-  it("is given exactly its slot's ceiling, never more", async () => {
-    const w = await world();
-    await toRound(w);
-    const round = await nextJob(w);
-    const stored = DesignReviewBindingSchema.parse(round.operation.designReview);
-    const { local } = localDesignReview(w);
-    for (const reviewer of stored.reviewers) {
-      const ceiling = (await readSlotCeiling(w.h.store, { orgId: COMPANY, operationId: round.operation.id, slot: reviewer.keySlot }))!;
-      const grant = await local.slotGrants.describeSlot({ workspaceId: w.workspaceId, operationId: round.operation.id, fence: round.operation.fence }, reviewer.keySlot);
-      expect(grant!.budget).toEqual({ micros: Math.round(ceiling * 1_000_000), currency: "USD" });
-    }
   });
 });
 

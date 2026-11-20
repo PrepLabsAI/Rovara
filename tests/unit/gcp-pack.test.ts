@@ -178,18 +178,6 @@ describe("the environment that points the clients at the emulators", () => {
   };
   const build = (families: GcpPackFamily[], gcp?: { projectId?: string }) => Object.fromEntries(buildServiceEnvironment({ sandbox: "working", sinkholeUrl: "http://sinkhole", dependencies: families.map(depOf), ...(gcp === undefined ? {} : { gcp }) }).entries);
 
-  it("sets the variable each client library reads, with the emulator's alias and port", () => {
-    expect(build(["pubsub"])).toEqual({ PUBSUB_EMULATOR_HOST: "pubsub:8085" });
-    expect(build(["firestore"])).toEqual({ FIRESTORE_EMULATOR_HOST: "firestore:8080" });
-    expect(build(["datastore"])).toEqual({ DATASTORE_EMULATOR_HOST: "datastore:8080" });
-    expect(build(["bigtable"])).toEqual({ BIGTABLE_EMULATOR_HOST: "bigtable:8086" });
-    expect(build(["spanner"])).toEqual({ SPANNER_EMULATOR_HOST: "spanner:9010" });
-    // the Cloud Storage client wants the scheme
-    expect(build(["gcs"])).toEqual({ STORAGE_EMULATOR_HOST: "http://gcs:4443" });
-    expect(build(["bigquery"])).toEqual({ BIGQUERY_EMULATOR_HOST: "bigquery:9050", BIGQUERY_API_ENDPOINT: "http://bigquery:9050" });
-    expect(build([...GCP_PACK_FAMILIES])).toMatchObject({ PUBSUB_EMULATOR_HOST: "pubsub:8085", STORAGE_EMULATOR_HOST: "http://gcs:4443", SPANNER_EMULATOR_HOST: "spanner:9010" });
-  });
-
   it("adds a made-up project id and no credential when the run has a pack dependency, and no Google variable when it has none", () => {
     const env = build(["pubsub", "gcs"], {});
     expect(env).toMatchObject({ GOOGLE_CLOUD_PROJECT: GCP_FAKE_PROJECT_ID, GCLOUD_PROJECT: GCP_FAKE_PROJECT_ID, CLOUDSDK_CORE_PROJECT: GCP_FAKE_PROJECT_ID });

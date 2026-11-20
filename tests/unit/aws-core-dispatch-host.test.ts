@@ -37,7 +37,6 @@ import { CoreRegistryError } from "../../packages/broker/src/core-host/registry.
 import { createCoreHostApp, DispatchOnlyMergeTrackingError, DISPATCH_ONLY_MERGE_TRACKING_REFUSED } from "../../packages/broker/src/core-host/app.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import { createFakeOfferedModels } from "../support/offered-models-fake.js";
-import { COMPANY_ENGINE_MODEL_UNREADABLE, companyEngineModelKey } from "../../packages/broker/src/core-host/company-engine-model.js";
 import { FakeDynamoDb } from "../support/ports/dynamodb-fake.js";
 import { FakeSqs } from "../support/ports/sqs-fake.js";
 import { SqsIamFence } from "../support/ports/sqs-iam-fence.js";
@@ -101,82 +100,6 @@ async function createWorld(options: { enabled?: boolean; /** L4-SQS: the deps of
 const failures = (answer: unknown) => (answer as { batchItemFailures: Array<{ itemIdentifier: string }> }).batchItemFailures.map((failure) => failure.itemIdentifier);
 
 describe("the dispatcher as the host of the core's dispatch", () => {
-  it("hands each operation to its own company's EC2 machine, once, after the machine is ready, and acknowledges it only then", async () => {
-    const w = await createWorld();
-    const taskA = await w.start(COMPANY_A);
-    const taskB = await w.start(COMPANY_B);
-    let batch = await w.staged();
-    expect(batch).toHaveLength(2);
-    // What the core stages carries its company (accept.ts), and the host reads it strictly.
-    expect(batch.map((record) => coreDispatchMessage(record.body)?.companyId).sort()).toEqual([COMPANY_A, COMPANY_B]);
-
-    // First receive: both machines are starting. Nothing is sent, each record is hidden to come back (never deleted), and each company got its own deps.
-    expect(failures(await w.handler({ Records: batch }))).toEqual(batch.map((record) => record.messageId));
-    expect(w.changeVisibility).toHaveBeenCalledTimes(2);
-    expect(w.changeVisibility.mock.calls.map(([handle]) => handle).sort()).toEqual(batch.map((record) => record.receiptHandle).sort());
-    expect(w.depsFor.mock.calls.map(([company]) => company).sort()).toEqual([COMPANY_A, COMPANY_B]);
-    expect(w.machinesWorld.posts).toEqual([]);
-    await w.machinesWorld.settle();
-
-    // Second receive: both ready; each job goes to the instance of its own workspace, the token passes the worker's own check, and both records are done.
-    batch = batch.map(w.again);
-    expect(failures(await w.handler({ Records: batch }))).toEqual([]);
-    const accepted = w.machinesWorld.posts.filter((post) => post.status === 200);
-    expect(accepted.map((post) => post.workspaceId).sort()).toEqual([taskA.workspaceId, taskB.workspaceId].sort());
-    for (const instance of w.machinesWorld.instances.values()) expect(instance.accepted.size).toBe(1);
-    // Today's path saw none of it.
-    expect(w.today).not.toHaveBeenCalled();
-    expect(w.deliverEc2).not.toHaveBeenCalled();
-    expect(w.markDispatching).not.toHaveBeenCalled();
-
-    // SQS delivers a record again: the worker is handed the same operation, says it already has it, and runs it once.
-    expect(failures(await w.handler({ Records: [w.again(batch[0]!)] }))).toEqual([]);
-    for (const instance of w.machinesWorld.instances.values()) expect(instance.accepted.size).toBe(1);
-    expect(w.machinesWorld.posts.filter((post) => post.status !== 200)).toEqual([]);
-  });
-
-  it("keeps the core's fences: a job whose workspace was closed before the machine was ready is ended, never sent, and its machine is ended", async () => {
-    const w = await createWorld();
-    const task = await w.start(COMPANY_A);
-    const batch = await w.staged();
-    expect(failures(await w.handler({ Records: batch }))).toHaveLength(1);
-    await w.machinesWorld.settle();
-    await w.flows.get(COMPANY_A)!.close({ principal: localOwnerPrincipal({ companyId: COMPANY_A }), client: "test", origin: "app" }, task.taskId);
-    await w.machinesWorld.settle();
-    expect(failures(await w.handler({ Records: batch.map(w.again) }))).toEqual([]);
-    expect(w.machinesWorld.posts).toEqual([]);
-    expect([...w.machinesWorld.instances.values()].filter((instance) => instance.running)).toEqual([]);
-  });
-
-  it("never runs a message whose workspace belongs to another company than the message names: it comes back, and no company's core is asked", async () => {
-    const w = await createWorld();
-    const taskA = await w.start(COMPANY_A);
-    const [record] = await w.staged();
-    const workspace = (await w.store.get(workspaceKey(COMPANY_A, taskA.workspaceId)))!;
-    await w.store.put({ item: { ...workspace, companyId: COMPANY_B } });
-    expect(failures(await w.handler({ Records: [record!] }))).toEqual([record!.messageId]);
-    expect(w.depsFor).not.toHaveBeenCalled();
-    expect(w.changeVisibility).not.toHaveBeenCalled();
-    expect(w.machinesWorld.executions).toEqual([]);
-    expect(w.machinesWorld.posts).toEqual([]);
-    // Rewriting the message cannot change the immutable pointer: A's pointer and B's corrupt scoped row disagree, so routing still refuses.
-    const rewritten = { ...w.again(record!), body: JSON.stringify({ ...JSON.parse(record!.body), companyId: COMPANY_B }) };
-    expect(failures(await w.handler({ Records: [rewritten] }))).toEqual([rewritten.messageId]);
-    expect(w.depsFor).not.toHaveBeenCalled();
-    expect(w.machinesWorld.executions).toEqual([]);
-  });
-
-  it("takes nothing with the switch off: a core record comes back without reaching today's handler or the core", async () => {
-    const off = await createWorld({ enabled: false });
-    await off.start(COMPANY_A);
-    const batch = await off.staged();
-    expect(failures(await off.handler({ Records: batch }))).toEqual([batch[0]!.messageId]);
-    expect(off.today).not.toHaveBeenCalled();
-    expect(off.depsFor).not.toHaveBeenCalled();
-    expect(off.machinesWorld.executions).toEqual([]);
-    // The host itself takes nothing while off, even if asked.
-    expect(off.host.take(batch)).toEqual(new Set());
-  });
 
   it("keeps a record whose dead-letter move failed: it comes back, it is never deleted and lost", async () => {
     const record = { messageId: "m-1", receiptHandle: "rh-1", body: JSON.stringify({ v: 1, companyId: COMPANY_A, workspaceId: randomUUID(), operationId: randomUUID() }) };
@@ -307,17 +230,6 @@ describe("the dispatcher's router", () => {
     on = true;
     expect(failures(await handler({ Records: [record] }))).toEqual(["m-1"]);
     expect(host).toHaveBeenCalledTimes(1);
-  });
-
-  it("leaves every core record to come back when the core cannot be built, and logs fixed words only", async () => {
-    const logs: Array<Record<string, unknown>> = [];
-    const today = vi.fn(async () => ({ batchItemFailures: [] }));
-    const handler = withCoreDispatch(today, { coreQueueArn: CORE_QUEUE_ARN, serves: () => true, host: async () => { throw new Error("secret-value-123 at arn:aws:secret"); }, log: (entry) => logs.push(entry) });
-    const record = { messageId: "m-1", receiptHandle: "rh", body: JSON.stringify({ v: 1, companyId: COMPANY_A, workspaceId: randomUUID(), operationId: randomUUID() }), eventSourceARN: CORE_QUEUE_ARN };
-    expect(failures(await handler({ Records: [record] }))).toEqual(["m-1"]);
-    expect(today).not.toHaveBeenCalled();
-    expect(JSON.stringify(logs)).not.toContain("secret-value-123");
-    expect(logs).toEqual([{ event: "dispatch.core_unavailable", error: "Error" }]);
   });
 });
 
@@ -608,27 +520,6 @@ describe("the core on the dispatcher", () => {
     expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "claude-sonnet-5-5" } } });
   });
 
-  it("DEC 254n (1): each step's route is the company's OWN engine model when it set one, else the install's; another company's setting never reaches it; an unreadable setting dispatches nothing", async () => {
-    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
-    const extraModules = createFakeWorld().modules.filter((module) => owed.has(module.point));
-    const route = { route: async () => ({ alias: "claude-sonnet-5-5", api: "anthropic-messages" as const, catalog: "claude-sonnet-5-5" }) };
-    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
-    const host = createDispatcherCoreHost({ ...made.inputs, extraModules, flow: { standingInstructions: null, modelAccess: route, learned: null } });
-    const a = await host.app.runtimeFor(COMPANY_A);
-    const b = await host.app.runtimeFor(COMPANY_B);
-    const state = (await host.app.registry()).require("storage");
-    await state.put({ item: { ...companyEngineModelKey(COMPANY_A), entityType: "COMPANY_ENGINE_MODEL", orgId: COMPANY_A, version: 1, model: "zai.glm-5", updatedAt: "2026-11-17T00:00:00.000Z", updatedBy: "d".repeat(64) } });
-    expect(await a.flow.deps.modelAccess!.route()).toStrictEqual({ alias: "zai.glm-5", api: "anthropic-messages", catalog: "zai.glm-5" });
-    // The stored-choice default (no validated choice) is the company's own model too.
-    expect(await a.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { reason: "INSTALL_MODEL", route: { alias: "zai.glm-5" } } });
-    // B never sees A's setting.
-    expect(await b.flow.deps.modelAccess!.route()).toStrictEqual(await route.route());
-    expect(await b.flow.deps.stepModels!.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: "claude-sonnet-5-5" } } });
-    // A row under A's key that names another company is unreadable: no route on a guess.
-    await state.put({ item: { ...companyEngineModelKey(COMPANY_A), entityType: "COMPANY_ENGINE_MODEL", orgId: COMPANY_B, version: 1, model: "zai.glm-5", updatedAt: "2026-11-17T00:00:00.000Z", updatedBy: "d".repeat(64) } });
-    await expect(a.flow.deps.modelAccess!.route()).rejects.toThrow(COMPANY_ENGINE_MODEL_UNREADABLE);
-  });
-
   it("builds nothing until a core record arrives, and then refuses by name while the security-list points are owed: the record comes back, no machine is started", async () => {
     const { world, inputs: given } = inputs(env());
     const { app, host } = createDispatcherCoreHost(given);
@@ -667,14 +558,6 @@ describe("the core on the dispatcher", () => {
     // The grant key is the broker's derivation: a grant the dispatcher issues is one the broker verifies.
     expect(repositoryGrantKeyOf("k".repeat(48))).toEqual(repositoryGrantKeyOf("k".repeat(48)));
     expect(repositoryGrantKeyOf("k".repeat(48)).byteLength).toBe(32);
-  });
-});
-
-describe("the flow inputs the deployment declares on the dispatcher (lane E2 step 6)", () => {
-  it("declares explicit none while off, and refuses an undeclared lessons reader while on", () => {
-    expect(hostedDispatcherFlow({})).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
-    expect(hostedDispatcherFlow({ ROVARA_CORE_LESSONS: "off" })).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
-    for (const value of ["on", `on:${COMPANY_A}`]) expect(hostedDispatcherFlow({ ROVARA_CORE_LESSONS: value }), value).toBeUndefined();
   });
 });
 

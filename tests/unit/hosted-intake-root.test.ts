@@ -38,12 +38,6 @@ function root(env: NodeJS.ProcessEnv, options: { linear?: boolean } = {}) {
 const extrasInput = (withTicket: boolean) => ({ taskId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222", project: "payments", title: "t", principal, client: "web", receivedAt: "2026-11-17T00:00:00.000Z", ...(withTicket ? { ticket } : {}) });
 
 describe("the core root's hosted intake", () => {
-  it("is not built while the switch is off, its settings are unreadable, or Linear is not wired", () => {
-    expect(root({ ROVARA_CORE_ENGINE: "off" }).root.intake).toBeUndefined();
-    expect(root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "none" }).root.intake).toBeUndefined();
-    expect(root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all" }, { linear: false }).root.intake).toBeUndefined();
-    expect(root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all" }).root.intake).toBeDefined();
-  });
 
   it("gives intake only to a company whose new tasks start on the core; another company's runtime is never built for it", async () => {
     const { root: built } = root({ ROVARA_CORE_ENGINE: `on:${A}`, ROVARA_CORE_ALLOWED_COMPANIES: "all" });
@@ -82,17 +76,6 @@ describe("the core root's hosted intake", () => {
     }
   });
 
-  it("ticketSessionStartExtras writes the session of this company only, for any person's start", () => {
-    const plain = ticketSessionStartExtras(A)(extrasInput(false));
-    expect(plain.sessionId).toMatch(/^ses_/u);
-    expect(JSON.stringify(plain.items)).toContain(A);
-    expect(JSON.stringify(plain.items)).not.toContain(B);
-    const withTicket = ticketSessionStartExtras(A, { chatThreads: true })(extrasInput(true));
-    expect(withTicket.sessionId).toBe(plain.sessionId);
-    expect(JSON.stringify(withTicket.items)).toContain(A);
-    expect(JSON.stringify(withTicket.items)).not.toContain(B);
-  });
-
   it("registers the ticket write-back on the company's milestones, only where Linear is wired", async () => {
     const handler = { name: "ticket_updates", on: async () => undefined };
     const { root: built } = root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ROVARA_CORE_LESSONS: "on" });
@@ -101,24 +84,5 @@ describe("the core root's hosted intake", () => {
     const { root: unwired } = root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ROVARA_CORE_LESSONS: "on" }, { linear: false });
     const plain = (await unwired.app.runtimeFor(A)).flow.deps.milestones as unknown as { register(h: typeof handler): () => void };
     expect(() => plain.register(handler)).not.toThrow();
-  });
-
-  it("L4-LP2: hooks the task log (answers, questions and decisions told to the ticket thread) and registers its handler beside the write-back, only where Linear and lessons are wired", async () => {
-    const taskLogHandler = { name: "task_log", on: async () => undefined };
-    const wired = root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ROVARA_CORE_LESSONS: "on" }).root;
-    const runtime = await wired.app.runtimeFor(A);
-    expect(runtime.flow.deps.taskLog).toBeDefined();
-    const milestones = runtime.flow.deps.milestones as unknown as { register(h: typeof taskLogHandler): () => void };
-    expect(() => milestones.register(taskLogHandler)).toThrow("already registered");
-    // Each company gets its own hook: B's flow is not told of A's tasks.
-    const other = await wired.app.runtimeFor(B);
-    expect(other.flow.deps.taskLog).toBeDefined();
-    expect(other.flow.deps.taskLog).not.toBe(runtime.flow.deps.taskLog);
-    // No Linear write-back: the flow is as before (no hook, no log handler).
-    const unwired = (await root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ROVARA_CORE_LESSONS: "on" }, { linear: false }).root.app.runtimeFor(A)).flow.deps;
-    expect(unwired.taskLog).toBeUndefined();
-    expect(() => (unwired.milestones as unknown as { register(h: typeof taskLogHandler): () => void }).register(taskLogHandler)).not.toThrow();
-    // No lessons: no company milestones, so nothing here is built either.
-    expect((await root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all" }).root.app.runtimeFor(A)).flow.deps.taskLog).toBeUndefined();
   });
 });

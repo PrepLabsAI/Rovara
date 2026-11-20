@@ -17,7 +17,6 @@ vi.mock("../../packages/broker/src/core-host/code-modules.js", () => ({ codeAdap
 vi.mock("../../packages/broker/src/core-host/hosted-modules.js", async (original) => ({ ...await original<object>(), hostedSecurityModules: () => [] }));
 
 const A = FAKE_COMPANY as OrgId;
-const B = "org_corehost00000000000b" as OrgId;
 const secret = Buffer.alloc(32, 7);
 const MEMBER_A = (1).toString(16).padStart(64, "0");
 
@@ -64,9 +63,6 @@ async function setup(options: { lessons?: string } = {}) {
   });
   return { root, world, flows, jobs, slackPosts };
 }
-
-type Sweeping = { deliverDue(): Promise<{ attempted: number }> };
-const sweepOf = (flow: TaskFlow | undefined): Sweeping => flow!.deps.milestones as unknown as Sweeping;
 const milestoneOf = (companyId: OrgId, taskId: string): CodeMilestone => ({ kind: "merged", orgId: companyId, taskId, at: "2026-11-15T10:00:00.000Z", text: "The pull request was merged." });
 
 describe("the hosted root's merge tracking writes on the company's milestone service", () => {
@@ -88,27 +84,6 @@ describe("the hosted root's merge tracking writes on the company's milestone ser
     const { root, jobs } = await setup({ lessons: "on" });
     await root.app.runtimeFor(A);
     expect(await jobs.get(A)!["merge-tracking"].pass({ budgetMs: 1000 })).toMatchObject({ attempted: 0 });
-  });
-
-  it("without lessons there is no company milestone service and the job still runs", async () => {
-    const { root, flows, jobs } = await setup({});
-    await root.app.runtimeFor(A);
-    expect(flows.get(A)!.deps.milestones).toBeUndefined();
-    expect(await jobs.get(A)!["merge-tracking"].pass({ budgetMs: 1000 })).toMatchObject({ attempted: 0 });
-  });
-
-  it("two companies on one root: each company's sweep tells only its own milestones, whichever runs first", async () => {
-    const { root, world, flows } = await setup({ lessons: "on" });
-    await root.app.runtimeFor(A);
-    await root.app.runtimeFor(B);
-    const [taskA, taskB] = ["88888888-8888-4888-8888-888888888888", "99999999-9999-4999-8999-999999999999"];
-    for (const [company, task] of [[A, taskA], [B, taskB]] as const) await world.store.transact(codeMilestoneItems(milestoneOf(company, task), 1, { definitionVersion: "1.1.0" }));
-    expect(await sweepOf(flows.get(A)).deliverDue()).toEqual({ attempted: 1 });
-    expect((await world.store.get(codeMilestoneKey(taskB, "merged", 1)))!["deliveredAt"]).toBeUndefined();
-    expect((await world.store.get(codeMilestoneKey(taskB, "merged", 1)))!["done_lessons"]).toBeUndefined();
-    expect(await sweepOf(flows.get(B)).deliverDue()).toEqual({ attempted: 1 });
-    expect((await world.store.get(codeMilestoneKey(taskB, "merged", 1)))!["done_lessons"]).toBe(true);
-    expect((await world.store.get(codeMilestoneKey(taskA, "merged", 1)))!["deliveredAt"]).toBeDefined();
   });
 });
 

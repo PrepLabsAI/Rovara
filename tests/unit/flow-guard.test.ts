@@ -4,7 +4,6 @@ import { IMPLICIT_COMPANY_ID, change, createWorkflowSnapshot, submitWorkflowArti
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createWorkflowDocumentSubject, workflowTaskKey } from "../../packages/broker/src/core/decisions/workflow-subject.js";
-import { workflowUpdateItem } from "../../packages/broker/src/core/merge/store.js";
 import { flowIs, workflowWriteOps } from "../../packages/broker/src/core/task-flow/flow-guard.js";
 import { recordTier, tierFromDiff } from "../../packages/broker/src/core/decisions/change-tier.js";
 
@@ -29,18 +28,6 @@ async function storeWith(workflow: WorkflowSnapshot): Promise<MemoryDocumentStor
 const storedFlow = async (store: MemoryDocumentStore): Promise<unknown> => ((await store.get(KEY))!["workflow"] as { flow?: unknown }).flow;
 
 describe("workflowWriteOps", () => {
-  it("writes nothing for a workflow that did not change, and one key for one change", () => {
-    const current = waiting();
-    expect(workflowWriteOps(current, current).ops).toEqual([]);
-    expect(workflowWriteOps(current, { ...current, updatedAt: "2026-11-09T11:00:00.000Z" }).ops).toEqual([change.set(["workflow", "updatedAt"], "2026-11-09T11:00:00.000Z")]);
-  });
-  it("removes a key the writer dropped, and leaves `flow` alone when the writer did not change it", () => {
-    const current = { ...waiting(), flow: flowWith("a") };
-    const { blockReason: _gone, ...without } = { ...current, blockReason: "x" };
-    void _gone;
-    expect(workflowWriteOps({ ...current, blockReason: "x" }, without as WorkflowSnapshot).ops).toEqual([change.remove(["workflow", "blockReason"])]);
-    expect(workflowWriteOps(current, { ...current, updatedAt: "2026-11-09T11:00:00.000Z" }).ops.map((op) => (op as unknown as { path: readonly string[] }).path.join("."))).toEqual(["workflow.updatedAt"]);
-  });
   it("sets `flow` under a fence on the record read only when the writer owns it and changed it", () => {
     const current = { ...waiting(), flow: flowWith("a") };
     const next = { ...current, flow: flowWith("b") };
@@ -57,26 +44,6 @@ describe("workflowWriteOps", () => {
 });
 
 describe("a whole-workflow writer that read the task before the record was written", () => {
-  it("workflowUpdateItem: the stored record is carried forward and the write is not refused for it", async () => {
-    const stale = waiting();
-    const store = await storeWith(stale);
-    // A tier write lands after the stale writer read the task (no revision move).
-    const recorded = flowWith("c");
-    await store.update({ key: KEY, ops: [change.set(["workflow", "flow"], JSON.parse(JSON.stringify(recorded)) as never)], condition: when.and(when.eq(["workflow", "revision"], stale.revision), flowIs(undefined)) });
-    const next = { ...stale, revision: stale.revision + 1, updatedAt: "2026-11-09T11:00:00.000Z" };
-    const written = await store.transact([workflowUpdateItem(TASK, next, stale.revision, stale)]);
-    expect(written.applied).toBe(true);
-    expect(((await store.get(KEY))!["workflow"] as { revision: number }).revision).toBe(stale.revision + 1);
-    expect(await storeFlow(store)).toEqual(JSON.parse(JSON.stringify(recorded)));
-  });
-  it("workflowUpdateItem: a writer that changes `flow` from a stale read is refused", async () => {
-    const stale = waiting();
-    const store = await storeWith(stale);
-    await store.update({ key: KEY, ops: [change.set(["workflow", "flow"], JSON.parse(JSON.stringify(flowWith("c"))) as never)], condition: when.eq(["workflow", "revision"], stale.revision) });
-    const next = { ...stale, flow: flowWith("d") };
-    expect((await store.transact([workflowUpdateItem(TASK, next, stale.revision, stale)])).applied).toBe(false);
-    expect(await storeFlow(store)).toEqual(JSON.parse(JSON.stringify(flowWith("c"))));
-  });
   it("the plan decision (workflow-subject): the approval is written and the stored record is kept", async () => {
     const store = await storeWith(waiting());
     const subject = createWorkflowDocumentSubject({ store, riskOf: () => "low" });

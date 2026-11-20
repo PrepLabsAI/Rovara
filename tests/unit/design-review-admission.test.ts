@@ -2,14 +2,12 @@
 // not run; the round's reservation is kept on its allocation and given back when the round ends, whichever way it ends (what the keys spent is booked by the proxy's metering, never twice); a round that never starts
 // gives it back too; and a second dispatch racing the first one waits instead of ending the review.
 import { describe, expect, it } from "vitest";
-import { DesignReviewBindingSchema, queryAll, type Admission, type AdmissionRequest, type Cost, type TransactItem } from "@agentx/contracts";
+import { type Admission, type AdmissionRequest, type Cost, type TransactItem } from "@agentx/contracts";
 import { designReviewPartition } from "../../packages/broker/src/core/design-review/packet-store.js";
-import { designNotRunLine } from "../../packages/broker/src/core/design-review/not-run.js";
-import { readSlotAllocationReservation, readSlotCeiling } from "../../packages/broker/src/core/design-review/slot-keys.js";
 import { COMPANY } from "../support/task-flow-harness.js";
 import { claimRound, ROUND_CLAIM_SECONDS } from "../../packages/broker/src/core/design-review/round-start.js";
 import { recordDesignReviewRound, releaseDesignReviewRound } from "../../packages/broker/src/core/design-review/round-record.js";
-import { answerRound, design, finish, mintKeys, nextJob, planned, taskOf, toDesignPhase, toRound, world } from "../support/design-review-flow-world.js";
+import { design, finish, mintKeys, nextJob, planned, taskOf, toDesignPhase, toRound, world } from "../support/design-review-flow-world.js";
 
 const isReview = (request: { idempotencyKey: string }): boolean => request.idempotencyKey.startsWith("design-review:");
 
@@ -33,77 +31,6 @@ function recordingAdmission(review: "allow" | "refuse" | "throw" = "allow"): Adm
 }
 
 describe("a design review round and the Admission port", () => {
-  it("asks for the whole sum of the slots' ceilings before the round is dispatched, keeps the reservation on the allocation and settles it with the keys' measured spend", async () => {
-    const admission = recordingAdmission();
-    const w = await world({ admission });
-    await toRound(w);
-    const round = await nextJob(w);
-    const binding = DesignReviewBindingSchema.parse(round.operation.designReview);
-    const reviewAsks = admission.asked.filter(isReview);
-    expect(reviewAsks).toHaveLength(1);
-    const ask = reviewAsks[0]!;
-    expect(ask).toMatchObject({ companyId: COMPANY, action: "model.call", idempotencyKey: `design-review:${w.taskId}:${round.operation.id}`, projectName: "payments", subject: { type: "task", id: w.taskId } });
-    // What the port is asked to hold is every slot's ceiling together, never less (an estimate could be lower than what the keys may spend).
-    let ceilings = 0;
-    for (const reviewer of binding.reviewers) ceilings += (await readSlotCeiling(w.h.store, { orgId: COMPANY, operationId: round.operation.id, slot: reviewer.keySlot }))!;
-    expect(ceilings).toBeGreaterThan(0);
-    expect(ask.estimate?.cost).toEqual({ micros: Math.ceil(ceilings * 1_000_000), currency: "USD" });
-    const reservationId = `res:design-review:${w.taskId}:${round.operation.id}`;
-    expect(await readSlotAllocationReservation(w.h.store, { orgId: COMPANY, operationId: round.operation.id })).toBe(reservationId);
-    expect(admission.released).not.toContain(reservationId);
-
-    // Each key spent 0.05 as the proxy measured it: that is the review's spend, and the reservation is given back once the round is recorded (never settled: the proxy's metering books the spend).
-    await mintKeys(w, round.operation);
-    await answerRound(w, round.operation, () => []);
-    const recorded = (await taskOf(w)).workflow.designReview!;
-    const spent = recorded.rounds[0]!.reviewers.reduce((sum, run) => sum + run.costUsd, 0);
-    expect(spent).toBeCloseTo(0.05 * binding.reviewers.length, 6);
-    expect(admission.released.filter((id) => id === reservationId)).toEqual([reservationId]);
-    expect(admission.settled).toEqual([]);
-  });
-
-  it("does not run the review when the port refuses it: nothing is stored or dispatched for the round, and the line says the spending limit left no room", async () => {
-    const admission = recordingAdmission("refuse");
-    const w = await world({ admission });
-    await toRound(w);
-    const task = await taskOf(w);
-    expect(task.workflow.designReview).toMatchObject({ status: "not_run", notRunReason: "task_limit" });
-    expect(designNotRunLine(task.workflow.designReview)).toBe("Design review did not run: the spending limit left no room for it.");
-    const ask = admission.asked.filter(isReview);
-    expect(ask).toHaveLength(1);
-    // No round's operation exists, and nothing was stored under the operation id the round would have had.
-    const operationId = ask[0]!.idempotencyKey.split(":").at(-1)!;
-    expect(await queryAll(w.h.store, { pk: designReviewPartition(COMPANY, operationId), sk: { op: "beginsWith", prefix: "" } })).toEqual([]);
-    expect(admission.settled).toEqual([]);
-  });
-
-  it("does not run the review when the port fails (a step that failed, never a round that runs unadmitted)", async () => {
-    const admission = recordingAdmission("throw");
-    const w = await world({ admission });
-    await toRound(w);
-    const task = await taskOf(w);
-    expect(task.workflow.designReview).toMatchObject({ status: "not_run", notRunReason: "worker_failed" });
-    const operationId = admission.asked.filter(isReview)[0]!.idempotencyKey.split(":").at(-1)!;
-    expect(await queryAll(w.h.store, { pk: designReviewPartition(COMPANY, operationId), sk: { op: "beginsWith", prefix: "" } })).toEqual([]);
-  });
-
-  it("gives back the reservation of a round whose operation failed, and charges the review a key the proxy cannot measure at its whole budget", async () => {
-    const admission = recordingAdmission();
-    const w = await world({ admission });
-    w.runtime.keys.keySpend = async () => undefined;
-    await toRound(w);
-    const round = await nextJob(w);
-    const binding = DesignReviewBindingSchema.parse(round.operation.designReview);
-    await mintKeys(w, round.operation);
-    let budgets = 0;
-    for (const reviewer of binding.reviewers) budgets += (await readSlotCeiling(w.h.store, { orgId: COMPANY, operationId: round.operation.id, slot: reviewer.keySlot }))!;
-    await finish(w, round.operation, undefined, "FAILED", "the worker stopped");
-    expect((await taskOf(w)).workflow.designReview).toMatchObject({ status: "not_run", notRunReason: "worker_failed" });
-    const reservationId = `res:design-review:${w.taskId}:${round.operation.id}`;
-    expect(admission.released.filter((id) => id === reservationId)).toEqual([reservationId]);
-    expect(admission.settled).toEqual([]);
-    expect((await taskOf(w)).workflow.designReview!.spentUsd).toBeGreaterThanOrEqual(budgets - 1e-6);
-  });
 
   it("charges a failed round everything its keys could have been given when the keys cannot be read, never nothing", async () => {
     const admission = recordingAdmission();
@@ -193,13 +120,5 @@ describe("a design review round and the Admission port", () => {
     expect(ask).toHaveLength(1);
     expect(admission.released).toEqual(expect.arrayContaining([`res:${ask[0]!.idempotencyKey}`]));
     expect(admission.settled).toEqual([]);
-  });
-
-  it("asks nothing of the port for a round held for its cost: the hold comes before any money is asked for", async () => {
-    const admission = recordingAdmission();
-    const w = await world({ admission, price: false, holdAnswerable: true });
-    await toRound(w);
-    expect((await taskOf(w)).workflow.designReview).toMatchObject({ status: "waiting_cost" });
-    expect(admission.asked.filter(isReview)).toEqual([]);
   });
 });

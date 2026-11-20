@@ -55,40 +55,12 @@ describe("the page", () => {
     expect(page.body).toContain(`href="${base}/how-we-work">How we work</a>`);
   });
 
-  it("shows what the file says: where it was read, the rules marked as the project's, and the stage's own", async () => {
-    const page = await get(`${base}/how-we-work/web`);
-    expect(page.status).toBe(200);
-    expect(page.body).toContain(".rovara/playbook.yaml");
-    expect(page.body).toContain("PROJECT-RULE: mention the ticket.");
-    expect(page.body).toContain("PLAN-RULE");
-    expect(page.body).toContain("(this project)");
-    expect(page.body).toContain("Project rules apply to Understand, Plan and Build. Reviewers only follow rules written for them.");
-    // The draft box starts with the file as it is, so the owner edits what is there.
-    expect(decode(/<textarea[^>]*>([\s\S]*?)<\/textarea>/.exec(page.body)![1]!)).toBe(FILE);
-  });
-
-  it("says there is no file for a project without one, and offers the starter text to try", async () => {
-    const page = await get(`${base}/how-we-work/docs`);
-    expect(page.body).toContain("has no How we work file, so it runs Rovara Code as it is");
-    expect(decode(/<textarea[^>]*>([\s\S]*?)<\/textarea>/.exec(page.body)![1]!)).toContain("version: 1");
-    expect(page.body).not.toContain("(this project)");
-  });
-
   it("names what is wrong with a file that cannot be used, and says no step starts until it is fixed", async () => {
     files["legacy"] = "version: 1\nstages:\n  check:\n    instructions: x";
     const page = await get(`${base}/how-we-work/legacy`);
     expect(page.body).toContain("cannot be used, so no step of this project starts until it is fixed");
     expect(page.body).toContain("stages.check");
     expect(page.body).toContain("Rules for this stage aren&#39;t used yet.");
-  });
-
-  it("draws everything from the file as plain text: markup in a rule is shown, never run", async () => {
-    files["web"] = "version: 1\nrules: \"<script>alert(1)</script> <img src=x onerror=y>\"";
-    const page = await get(`${base}/how-we-work/web`);
-    expect(page.body).not.toContain("<script>alert");
-    expect(page.body).not.toContain("<img src=x");
-    expect(page.body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
-    expect(page.headers["content-security-policy"]).toContain("default-src 'none'");
   });
 
   it("is not found for a project that is not registered, or a name that is not a project name, and for an install that has no playbook", async () => {

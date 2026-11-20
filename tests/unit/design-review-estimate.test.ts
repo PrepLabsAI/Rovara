@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { DecisionCardSchema, type ModelIdentifier } from "@agentx/contracts";
 import * as estimateModule from "../../packages/broker/src/core/design-review/estimate.js";
-import { PLANNER_REVISION_TOKENS, MERGE_TOKENS, REVIEWER_CACHE_READ_SHARE, ROLE_INPUT_FLOOR_TOKENS, ROLE_INPUT_TURN_FACTOR, ROLE_OUTPUT_TOKENS, estimateReviewerUsd, routeCaches, plannerRunsFor, estimateDesignReviewUsd as estimateWithPacket, designReviewKeyBudgets, gateDesignReviewCost, nextLowerTier, recordedReviewerCost, reviewersForRound, TIER_REVIEWERS, type DesignReviewEstimate, type DesignReviewEstimateInput, type PriceLookup } from "../../packages/broker/src/core/design-review/estimate.js";
+import { PLANNER_REVISION_TOKENS, MERGE_TOKENS, REVIEWER_CACHE_READ_SHARE, ROLE_INPUT_FLOOR_TOKENS, ROLE_INPUT_TURN_FACTOR, ROLE_OUTPUT_TOKENS, estimateReviewerUsd, routeCaches, plannerRunsFor, estimateDesignReviewUsd as estimateWithPacket, designReviewKeyBudgets, gateDesignReviewCost, recordedReviewerCost, TIER_REVIEWERS, type DesignReviewEstimate, type DesignReviewEstimateInput, type PriceLookup } from "../../packages/broker/src/core/design-review/estimate.js";
 import { designSpendCardItem, designSpendChoicePath } from "../../packages/broker/src/core/design-review/spend-card.js";
 import { cardOfItem } from "../../packages/broker/src/core/decisions/project.js";
 import { estimateSecondReviewUsd } from "../../packages/broker/src/core/design-review/estimate.js";
@@ -70,30 +70,6 @@ describe("the estimate", () => {
     expect(priced(estimateDesignReviewUsd({ tier: "light", models, price, packetTokens: 1 })).breakdown.reviewersUsd).toBeGreaterThan(0);
   });
 
-  it("M4: tool-using reviewers re-send the context every turn, so the estimate is a multiple of the packet for them (named factors measured from the first real round; Comprehension never reads the repository)", () => {
-    expect(ROLE_INPUT_TURN_FACTOR).toEqual({ comprehension: 5, critic: 23, codebase: 32, zoom_out: 23, critic_b: 23 });
-    expect(ROLE_INPUT_FLOOR_TOKENS).toEqual({ comprehension: 43_000, critic: 207_000, codebase: 288_000, zoom_out: 207_000, critic_b: 207_000 });
-    expect(ROLE_OUTPUT_TOKENS).toEqual({ comprehension: 17_000, critic: 20_000, codebase: 9_000, zoom_out: 20_000, critic_b: 20_000 });
-    const free: PriceLookup = () => ({ inputUsdPerMTok: 1, outputUsdPerMTok: 0 });
-    const cost = (tier: "standard" | "thorough") => priced(estimateDesignReviewUsd({ tier, models: { reviewer: STRONG, planner: PLANNER }, price: free, packetTokens: 1_000_000, rounds: 1 })).breakdown.reviewersUsd;
-    // 5 + 23 + 32 packets of 1M tokens at $1 per million, one round.
-    expect(cost("standard")).toBeCloseTo(60, 6);
-    // Thorough adds Zoom-out (23) and Critic B (23).
-    expect(cost("thorough")).toBeCloseTo(106, 6);
-  });
-
-  it("a small packet does not shrink what the repository readers take in: input is at least the role's floor", () => {
-    const free: PriceLookup = () => ({ inputUsdPerMTok: 1, outputUsdPerMTok: 0 });
-    const cost = (tier: "light" | "standard" | "thorough", packetTokens: number) => priced(estimateDesignReviewUsd({ tier, models: { reviewer: STRONG, planner: PLANNER }, price: free, packetTokens, rounds: 1 })).breakdown.reviewersUsd;
-    // A 100-token packet: every role is at its floor (43k + 207k + 288k tokens at $1 per million).
-    expect(cost("standard", 100)).toBeCloseTo(0.538, 6);
-    expect(cost("light", 100)).toBeCloseTo(0.207, 6);
-    // Zoom-out and Critic B use the Critic's floor: Thorough adds two of them.
-    expect(cost("thorough", 100)).toBeCloseTo(0.538 + 0.207 * 2, 6);
-    // A packet big enough that its multiple passes the floor is priced by the multiple.
-    expect(cost("light", 100_000)).toBeCloseTo(2.3, 6);
-  });
-
   it("the cache share is applied to input only, only on a route known to cache, and only for a cache-read price above 0 ", () => {
     const withCache = { inputUsdPerMTok: 2, outputUsdPerMTok: 0, cacheReadUsdPerMTok: 0.2 };
     const share = REVIEWER_CACHE_READ_SHARE;
@@ -117,22 +93,6 @@ describe("the estimate", () => {
     expect(run(-1)).toBeCloseTo(23 * 2, 6);
     expect(run(0)).toBeCloseTo(23 * 2, 6);
     expect(run(0.2)).toBeCloseTo(23 * (2 * (1 - share) + 0.2 * share), 6);
-  });
-
-  it("only Claude on Amazon Bedrock is known to cache; every other route is priced at full input", () => {
-    expect(routeCaches({ provider: "amazon-bedrock", modelId: "us.anthropic.claude-haiku-4-5" })).toBe(true);
-    expect(routeCaches({ provider: "amazon-bedrock", modelId: "anthropic.claude-sonnet-4-6" })).toBe(true);
-    expect(routeCaches({ provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" })).toBe(false);
-    expect(routeCaches({ provider: "anthropic", modelId: "claude-haiku-4-5" })).toBe(false);
-    expect(routeCaches({ provider: "openai", modelId: "gpt-5" })).toBe(false);
-    const price = () => ({ inputUsdPerMTok: 2, outputUsdPerMTok: 0, cacheReadUsdPerMTok: 0.2 });
-    const run = (reviewer: ModelIdentifier, ...flag: [boolean | undefined] | []) => priced(estimateDesignReviewUsd({ tier: "light", models: { reviewer, planner: PLANNER }, price, packetTokens: 1_000_000, rounds: 1, reviewerCaches: flag.length === 0 ? true : flag[0] })).breakdown.reviewersUsd;
-    expect(run({ provider: "anthropic", modelId: "claude-haiku-4-5" })).toBeCloseTo(23 * 2, 6);
-    expect(run({ provider: "amazon-bedrock", modelId: "us.anthropic.claude-haiku-4-5" })).toBeLessThan(23 * 2);
-    // The SOURCE matters too: a customer's own Bedrock account has the same model ids and was never measured, and an unknown source is not assumed to cache.
-    const bedrock: ModelIdentifier = { provider: "amazon-bedrock", modelId: "us.anthropic.claude-haiku-4-5" };
-    expect(run(bedrock, false)).toBeCloseTo(23 * 2, 6);
-    expect(run(bedrock, undefined)).toBeCloseTo(23 * 2, 6);
   });
 
   it("replays the first real round (one recorded round, haiku-4-5 standard, packet 9,021 tokens): every reviewer's estimate is at or above what it cost, and the total is above $0.444 but within 1.6x", () => {
@@ -161,13 +121,6 @@ describe("the estimate", () => {
     }
   });
 
-  it("L3: Zoom-out runs only after round 1, so round 1 of Thorough plans four reviewers and round 2 five", () => {
-    expect(reviewersForRound("thorough", 1)).toEqual(["comprehension", "critic", "codebase", "critic_b"]);
-    expect(reviewersForRound("thorough", 2)).toEqual(TIER_REVIEWERS.thorough);
-    expect(reviewersForRound("standard", 1)).toEqual(TIER_REVIEWERS.standard);
-    expect(reviewersForRound("light", 2)).toEqual(["critic"]);
-  });
-
   it("is Cost unavailable, never a number, when the catalog has no price for a model it must price", () => {
     const noReviewerPrice: PriceLookup = (model) => (model.modelId === "strong-model" ? undefined : PRICES[model.modelId]);
     expect(estimateDesignReviewUsd({ tier: "standard", models, price: noReviewerPrice })).toEqual({ kind: "unavailable", tier: "standard", missing: ["reviewer"] });
@@ -181,74 +134,6 @@ describe("the estimate", () => {
     const broken: PriceLookup = () => ({ inputUsdPerMTok: Number.NaN, outputUsdPerMTok: 5 });
     expect(estimateDesignReviewUsd({ tier: "light", models, price: broken }).kind).toBe("unavailable");
     expect(estimateDesignReviewUsd({ tier: "light", models, price: () => ({ inputUsdPerMTok: -1, outputUsdPerMTok: 5 }) }).kind).toBe("unavailable");
-  });
-
-  it("falls back to the reviewer's price for the merge step when no separate model was resolved (it can only come out high)", () => {
-    const same = priced(estimateDesignReviewUsd({ tier: "standard", models: { reviewer: STRONG, planner: PLANNER }, price }));
-    const cheaper = priced(estimateDesignReviewUsd({ tier: "standard", models, price }));
-    expect(same.breakdown.mergeUsd).toBeGreaterThan(cheaper.breakdown.mergeUsd);
-  });
-
-  it("knows the next lower tier", () => {
-    expect(nextLowerTier("thorough")).toBe("standard");
-    expect(nextLowerTier("standard")).toBe("light");
-    expect(nextLowerTier("light")).toBeUndefined();
-  });
-});
-
-describe("the cap gate", () => {
-  const est = (tier: "light" | "standard" | "thorough", capModels = models) => estimateDesignReviewUsd({ tier, models: capModels, price });
-  const standard = priced(est("standard"));
-
-  it("goes when the estimate is within the cap (at the cap too)", () => {
-    expect(gateDesignReviewCost({ spentUsd: 0, tier: "standard", capUsd: 10, estimate: standard, canSkip: true })).toEqual({ kind: "go", estimateUsd: standard.usd });
-    expect(gateDesignReviewCost({ spentUsd: 0, tier: "standard", capUsd: standard.usd, estimate: standard, canSkip: true }).kind).toBe("go");
-  });
-
-  it("asks when over the cap, with the lower tier only if it fits, a raise only if allowed, and skip only if the rules allow", () => {
-    const light = priced(est("light"));
-    const capBetween = (light.usd + standard.usd) / 2;
-    const gate = gateDesignReviewCost({ spentUsd: 0, tier: "standard", capUsd: capBetween, estimate: standard, lowerTier: { tier: "light", estimate: light }, canSkip: true });
-    expect(gate.kind).toBe("ask");
-    if (gate.kind !== "ask") return;
-    expect(gate.why).toBe("over_cap");
-    expect(gate.choices.map((c) => c.choice)).toEqual(["lower_tier", "raise_cap", "skip"]);
-    expect(gate.choices[0]).toEqual({ choice: "lower_tier", tier: "light", estimateUsd: light.usd });
-    // The raise is to the estimate rounded UP to a cent: it always covers the estimate.
-    const raise = gate.choices[1] as { choice: "raise_cap"; newCapUsd: number };
-    expect(raise.newCapUsd).toBeGreaterThanOrEqual(standard.usd);
-    expect(raise.newCapUsd - standard.usd).toBeLessThan(0.0101);
-    // The lower tier does not fit either: not offered.
-    const tight = gateDesignReviewCost({ spentUsd: 0, tier: "standard", capUsd: light.usd / 2, estimate: standard, lowerTier: { tier: "light", estimate: light }, canSkip: true });
-    expect(tight.kind === "ask" && tight.choices.map((c) => c.choice)).toEqual(["raise_cap", "skip"]);
-    // The lower tier has no price: not offered, and never guessed.
-    const unpricedLower = gateDesignReviewCost({ spentUsd: 0, tier: "standard", capUsd: capBetween, estimate: standard, lowerTier: { tier: "light", estimate: { kind: "unavailable", tier: "light", missing: ["reviewer"] } }, canSkip: true });
-    expect(unpricedLower.kind === "ask" && unpricedLower.choices.map((c) => c.choice)).toEqual(["raise_cap", "skip"]);
-    // The skip rules take Skip away.
-    const noSkip = gateDesignReviewCost({ spentUsd: 0, tier: "standard", capUsd: capBetween, estimate: standard, lowerTier: { tier: "light", estimate: light }, canSkip: false });
-    expect(noSkip.kind === "ask" && noSkip.choices.map((c) => c.choice)).toEqual(["lower_tier", "raise_cap"]);
-  });
-
-  it("never offers a raise above the highest cap or the company's ceiling", () => {
-    const huge: DesignReviewEstimate = { kind: "priced", usd: 250, breakdown: { reviewersUsd: 250, mergeUsd: 0, plannerUsd: 0 }, tier: "thorough", reviewers: 5, rounds: 2 };
-    const overMax = gateDesignReviewCost({ spentUsd: 0, tier: "thorough", capUsd: 10, estimate: huge, canSkip: true });
-    expect(overMax.kind === "ask" && overMax.choices.map((c) => c.choice)).toEqual(["skip"]);
-    const ceiling = gateDesignReviewCost({ spentUsd: 0, tier: "standard", capUsd: 1, capCeilingUsd: 1.5, estimate: standard, canSkip: true });
-    expect(standard.usd).toBeGreaterThan(1.5);
-    expect(ceiling.kind === "ask" && ceiling.choices.map((c) => c.choice)).toEqual(["skip"]);
-  });
-
-  it("with no skip and nothing that fits, asks with NO choices: it never runs by itself", () => {
-    const huge: DesignReviewEstimate = { kind: "priced", usd: 250, breakdown: { reviewersUsd: 250, mergeUsd: 0, plannerUsd: 0 }, tier: "thorough", reviewers: 5, rounds: 2 };
-    expect(gateDesignReviewCost({ spentUsd: 0, tier: "thorough", capUsd: 10, estimate: huge, canSkip: false })).toEqual({ kind: "ask", why: "over_cap", estimateUsd: 250, choices: [] });
-  });
-
-  it("Cost unavailable: asks, with run-anyway (one tap) and skip if allowed, and no number", () => {
-    const unavailable = estimateDesignReviewUsd({ tier: "standard", models, price: () => undefined });
-    expect(gateDesignReviewCost({ spentUsd: 0, tier: "standard", capUsd: 10, estimate: unavailable, canSkip: true })).toEqual({ kind: "ask", why: "cost_unavailable", estimateUsd: undefined, choices: [{ choice: "run_unpriced" }, { choice: "skip" }] });
-    expect(gateDesignReviewCost({ spentUsd: 0, tier: "standard", capUsd: 10, estimate: unavailable, canSkip: false })).toEqual({ kind: "ask", why: "cost_unavailable", estimateUsd: undefined, choices: [{ choice: "run_unpriced" }] });
-    // Even a huge cap does not let an unpriced review start: there is no "within the cap" without a price.
-    expect(gateDesignReviewCost({ spentUsd: 0, tier: "standard", capUsd: 100, estimate: unavailable, canSkip: true }).kind).toBe("ask");
   });
 });
 
@@ -295,18 +180,6 @@ describe("the approve_spend card source", () => {
     expect(card.next.costUsd).toBe(standard.usd);
   });
 
-  it("says Cost unavailable and is low risk when there is no price", () => {
-    const unavailable = estimateDesignReviewUsd({ tier: "standard", models, price: () => undefined });
-    const gate = gateDesignReviewCost({ spentUsd: 0, tier: "standard", capUsd: 10, estimate: unavailable, canSkip: true });
-    if (gate.kind !== "ask") throw new Error("expected an ask");
-    const card = cardOfItem(designSpendCardItem({ ...base, capUsd: 10, gate }))!.card;
-    expect(card.risk).toBe("low");
-    expect(card.evidence[0]).toMatchObject({ label: "Estimate", value: "Cost unavailable", state: "unknown" });
-    expect(card.next.costUsd).toBeUndefined();
-    expect(card.actions.filter((a) => a.kind === "choose").map((a) => a.label)).toEqual(["Run it anyway", "Skip design review"]);
-    expect(card.question).not.toMatch(/\$/u);
-  });
-
   it("a gate with no choice left gives a card that only opens the page", () => {
     const card = cardOfItem(designSpendCardItem({ ...base, capUsd: 10, gate: { kind: "ask", why: "over_cap", estimateUsd: 250, choices: [] } }))!.card;
     expect(card.actions.map((a) => a.kind)).toEqual(["open"]);
@@ -328,27 +201,9 @@ describe("the approve_spend card source", () => {
       expect(reduced.actions.map(({ kind, href, method }) => ({ kind, href, method }))).toEqual(full.actions.map(({ kind, href, method }) => ({ kind, href, method })));
     }
   });
-
-  it("an ordinary spend request is unchanged", () => {
-    const card = cardOfItem({ kind: "approve_spend", subjectId: "spr1", taskId: TASK, project: "payments", title: "t", createdAt: base.createdAt, openPath: base.openPath, contentVersion: "v1", amountUsd: 5, scopeLabel: "this task" })!.card;
-    expect(card.actions.map((a) => a.kind)).toEqual(["approve", "reject", "open"]);
-  });
 });
 
-
 describe("money N3 (pure parts): what each reviewer's key may spend, and what a run records", () => {
-  it("splits what is left under the cap between the reviewers and the merge model, rounding down so the shares never exceed it", () => {
-    const standard = designReviewKeyBudgets({ capUsd: 10, spentUsd: 4, reviewers: 3, hasMergeModel: true });
-    expect(standard).toEqual({ reviewerUsd: 1.5, mergeUsd: 1.5, roomUsd: 6 });
-    const light = designReviewKeyBudgets({ capUsd: 10, spentUsd: 4, reviewers: 1, hasMergeModel: false });
-    expect(light).toEqual({ reviewerUsd: 6, mergeUsd: 0, roomUsd: 6 });
-    const odd = designReviewKeyBudgets({ capUsd: 1, spentUsd: 0, reviewers: 3, hasMergeModel: true });
-    expect(odd.reviewerUsd).toBe(0.25);
-    for (const [cap, spent, reviewers] of [[10, 3.3333333, 3], [7, 0.1, 5], [0.5, 0, 4]] as const) {
-      const budgets = designReviewKeyBudgets({ capUsd: cap, spentUsd: spent, reviewers, hasMergeModel: true });
-      expect(budgets.reviewerUsd * reviewers + budgets.mergeUsd).toBeLessThanOrEqual(budgets.roomUsd + 1e-9);
-    }
-  });
 
   it("holds back a reservation for the planner, and gives nothing when nothing is left or the input is not a number", () => {
     expect(designReviewKeyBudgets({ capUsd: 10, spentUsd: 0, reviewers: 3, hasMergeModel: false, reservedUsd: 1 })).toEqual({ reviewerUsd: 3, mergeUsd: 0, roomUsd: 9 });

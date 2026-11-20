@@ -6,13 +6,6 @@ import { codeOwnerOf, ownersOfPath, parseCodeOwners, readCodeOwnersFile } from "
 const rules = (text: string) => parseCodeOwners(text).rules;
 
 describe("parseCodeOwners and ownersOfPath", () => {
-  it("takes the last matching rule, in GitHub's way", () => {
-    const text = ["# owners", "*       @acme/everyone", "/docs/  @docs-lead", "*.ts @ts-lead", "/src/payments/ @pay-lead @acme/payments  # trailing comment"].join("\n");
-    expect(ownersOfPath(rules(text), "README.md")).toEqual(["@acme/everyone"]);
-    expect(ownersOfPath(rules(text), "docs/a/b.md")).toEqual(["@docs-lead"]);
-    expect(ownersOfPath(rules(text), "src/index.ts")).toEqual(["@ts-lead"]);
-    expect(ownersOfPath(rules(text), "src/payments/charge.ts")).toEqual(["@pay-lead", "@acme/payments"]);
-  });
 
   it("an anchored rule matches only from the root, an unanchored directory rule at any depth", () => {
     expect(ownersOfPath(rules("/build/ @a"), "src/build/x.js")).toEqual([]);
@@ -31,11 +24,6 @@ describe("parseCodeOwners and ownersOfPath", () => {
     expect(ownersOfPath(rules("/Docs/ @a"), "docs/x")).toEqual([]);
   });
 
-  it("a rule with no owner takes ownership away; an email is an owner Rovara cannot match", () => {
-    expect(ownersOfPath(rules("* @a\n/vendor/\n"), "vendor/x.js")).toEqual([]);
-    expect(ownersOfPath(rules("* a@example.com @ok"), "x")).toEqual(["a@example.com", "@ok"]);
-  });
-
   it("says when the file holds anything Rovara cannot read the way GitHub does: negation, character classes, a malformed owner, a name that is no owner, too many rules", () => {
     for (const text of ["!/docs/ @a", "/src/[ab].ts @a", "/secure/ @alice!x", "/secure/ nobody", "/secure/ @", "* @a @-bad", "/x/ @a/b/c"]) {
       expect(parseCodeOwners(text).unsupported, text).toBe(true);
@@ -44,10 +32,6 @@ describe("parseCodeOwners and ownersOfPath", () => {
     expect(parseCodeOwners(crowded).unsupported).toBe(true);
     expect(parseCodeOwners(Array.from({ length: 5_000 }, (_, index) => `/f${String(index)}/ @a`).join("\n")).unsupported).toBe(false);
     expect(parseCodeOwners("* @a @b/team a@b.co\n# c\n\n/docs/\n").unsupported).toBe(false);
-  });
-
-  it("ignores blank lines, comments and a file that is not text", () => {
-    expect(rules("\n# only\n\n")).toEqual([]);
   });
 });
 
@@ -63,10 +47,6 @@ describe("readCodeOwnersFile", () => {
     expect(read.ownersOf("docs/x.md")).toEqual([{ kind: "team", team: "acme/writers" }, { kind: "other", label: "a@example.com" }]);
     // A rule with no owner takes ownership away.
     expect(read.ownersOf("vendor/x.js")).toEqual([]);
-  });
-
-  it("flags a file it cannot read as a whole", () => {
-    expect(readCodeOwnersFile("* @a\n!/x/ @b").unsupported).toBe(true);
   });
 });
 

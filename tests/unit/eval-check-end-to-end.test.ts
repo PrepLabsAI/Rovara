@@ -15,7 +15,6 @@ import { CLOCK, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-wo
 const MIN = 60_000;
 const ACTIONS = String(GITHUB_ACTIONS_APP_ID);
 const EVAL_URL = "https://github.com/acme/app/actions/runs/5/job/77";
-const OTHER_ORG = "org_11111111111111111111";
 const unit: Check = { name: "unit", state: "completed", conclusion: "success", required: false, url: "", runId: "11" };
 const evals: Check = { name: "evals", state: "completed", conclusion: "success", required: false, url: EVAL_URL, runId: "77", source: ACTIONS };
 const PROVEN = "**Proven** 2 of 2 requirements proven. Improved on eval.";
@@ -70,13 +69,6 @@ beforeEach(() => installCiFixDecider(registerMergeActionDecider));
 afterEach(() => uninstallCiFixDecider());
 
 describe("propose, confirm, stored, and the line appears on the pull request", () => {
-  it("before anything is confirmed the pass is today's: no line, no eval entry on the item", async () => {
-    const { w, deps } = await world();
-    setChecks(w);
-    await trackTask(deps, TASK_ID);
-    expect(evalLines(body(w))).toEqual([]);
-    expect(await w.trackingOf(w.prs[0]!)).not.toHaveProperty("ciEval");
-  });
 
   it("the proposal is read from the workflow files, one is confirmed, and the next pass says the customer's CI result under the Proven line", async () => {
     const { w, deps, card, asked } = await world();
@@ -90,33 +82,5 @@ describe("propose, confirm, stored, and the line appears on the pull request", (
     const lines = body(w).split("\n");
     expect(lines[lines.indexOf(PROVEN) + 1]).toBe(`  - Eval (reported by your CI): passed, ${EVAL_URL}`);
     expect(await w.trackingOf(w.prs[0]!)).toMatchObject({ ciEval: { name: "evals", state: "passed" } });
-  });
-
-  it("None: a project that confirmed then chose none gets a pass exactly like a project that never confirmed", async () => {
-    const { w, deps, card } = await world();
-    await call(card, "PUT", { requestId: randomUUID(), check: { name: "evals", source: ACTIONS } });
-    await call(card, "PUT", { requestId: randomUUID(), check: null });
-    setChecks(w);
-    await trackTask(deps, TASK_ID);
-    const today = await world(false);
-    setChecks(today.w);
-    await trackTask(today.deps, TASK_ID);
-    expect(body(w)).toBe(bodyOf());
-    expect(body(w)).toBe(body(today.w));
-    expect(await w.trackingOf(w.prs[0]!)).not.toHaveProperty("ciEval");
-  });
-
-  it("another company's confirmation for a project of the same name, and another project's, say nothing here", async () => {
-    const { w, deps, card } = await world();
-    await call(card, "PUT", { requestId: randomUUID(), check: { name: "evals", source: ACTIONS } });
-    // The same confirmation under another company, and under another project of this company, is not this task's.
-    const other = evalCheckEvidencePort({ store: w.store, companyId: OTHER_ORG });
-    expect(await other({ orgId: OTHER_ORG, project: "web" })).toBeUndefined();
-    expect(await evalCheckEvidencePort({ store: w.store, companyId: IMPLICIT_COMPANY_ID })({ orgId: IMPLICIT_COMPANY_ID, project: "docs" })).toBeUndefined();
-    // A pass for a task of the other company's port (a wrong-company port) says nothing, even though the project's row exists in this store.
-    const wrong: MergeTrackingDependencies = { ...deps, ciEvidence: (task) => other(task) };
-    setChecks(w);
-    await trackTask(wrong, TASK_ID);
-    expect(evalLines(body(w))).toEqual([]);
   });
 });

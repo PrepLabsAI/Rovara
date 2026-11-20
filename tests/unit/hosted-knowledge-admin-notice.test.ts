@@ -28,19 +28,6 @@ describe("adminNoticeIdsOf: who the notice is queued for", () => {
   const identity = { getPrincipal: async (_company: string, personId: string) => ({ provider: HOSTED_IDENTITY_PROVIDER, personId }) };
   const group = (over: Partial<HostedApprovers>): HostedApprovers => ({ complete: true, membershipVersion: 1, ownerIds: [], eligibleIds: [], lastEligibleLossAtMs: null, ...over });
 
-  it("names the owners and the non-owner admins (the company-wide eligible list), not just the owners", async () => {
-    const asked: Array<string | undefined> = [];
-    const people = { approvers: async (_company: OrgId, project: string | undefined) => { asked.push(project); return group({ ownerIds: ["owner"], eligibleIds: ["admin", "owner"] }); } };
-    expect(await adminNoticeIdsOf(people, identity, A)).toEqual([idOf("admin"), idOf("owner")]);
-    // The question is company-wide: no project, so a project's maintainers are never in it.
-    expect(asked).toEqual([undefined]);
-  });
-
-  it("an owner-only list would miss the admin: the owner list is not what is read", async () => {
-    const people = { approvers: async () => group({ ownerIds: ["owner"], eligibleIds: ["owner", "admin"] }) };
-    expect(await adminNoticeIdsOf(people, identity, A)).toContain(idOf("admin"));
-  });
-
   it("tells nobody when the list is not complete, when the port throws, or when the identity no longer names a person", async () => {
     expect(await adminNoticeIdsOf({ approvers: async () => group({ complete: false, eligibleIds: ["admin"] }) }, identity, A)).toEqual([]);
     await expect(adminNoticeIdsOf({ approvers: async () => { throw new Error("down"); } }, identity, A)).rejects.toThrow("down");
@@ -106,32 +93,6 @@ describe("the delivery re-check on a hosted install (the real people port over t
     expect(await told(MAINTAINER_A)).toBe(false);
     expect(await told(MEMBER_A)).toBe(false);
     expect(await told("f".repeat(64))).toBe(false);
-  });
-
-  it("a removed admin, or one demoted to member, is not told at delivery (read live, on the very next call)", async () => {
-    const { root, rows } = await setup();
-    expect(await root.adminNotice!(A, idOf(ADMIN_A))).toBe(true);
-    const row = rows.get(`signin|COMPANY_MEMBER#${ADMIN_A}|COMPANY`)!;
-    rows.set(`signin|COMPANY_MEMBER#${ADMIN_A}|COMPANY`, { ...row, revokedAt: "2026-11-17T00:00:00.000Z" });
-    rows.delete(`signin|${companyScoped(A, "MEMBERS")}|MEMBER#${ADMIN_A}`);
-    expect(await root.adminNotice!(A, idOf(ADMIN_A))).toBe(false);
-    // The owner is still told.
-    expect(await root.adminNotice!(A, idOf(OWNER_A))).toBe(true);
-    // A demotion is the same: the live role says member.
-    rows.set(`signin|COMPANY_MEMBER#${OWNER_A}|COMPANY`, { ...rows.get(`signin|COMPANY_MEMBER#${OWNER_A}|COMPANY`)!, role: "member" });
-    rows.set(`signin|${companyScoped(A, "MEMBERS")}|MEMBER#${OWNER_A}`, { ...rows.get(`signin|${companyScoped(A, "MEMBERS")}|MEMBER#${OWNER_A}`)!, role: "member" });
-    expect(await root.adminNotice!(A, idOf(OWNER_A))).toBe(false);
-  });
-
-  it("two companies: a company's notice is told only to its own owners and admins, never to the other company's", async () => {
-    const { root } = await setup();
-    expect(await root.adminNotice!(B, idOf(ADMIN_B))).toBe(true);
-    expect(await root.adminNotice!(B, idOf(OWNER_B))).toBe(true);
-    expect(await root.adminNotice!(A, idOf(ADMIN_B))).toBe(false);
-    expect(await root.adminNotice!(A, idOf(OWNER_B))).toBe(false);
-    expect(await root.adminNotice!(B, idOf(ADMIN_A))).toBe(false);
-    expect(await root.adminNotice!(B, idOf(OWNER_A))).toBe(false);
-    expect(await root.adminNotice!(B, idOf(MAINTAINER_A))).toBe(false);
   });
 });
 

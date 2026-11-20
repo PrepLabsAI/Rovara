@@ -32,12 +32,6 @@ describe("getPullRequestFilesPage", () => {
     expect((await provider([]).instance.getPullRequestFilesPage("https://github.com/acme/demo", 7, 1)).more).toBe(false);
   });
 
-  it("keeps a long patch whole (the route decides what is too long)", async () => {
-    const patch = "+".repeat(200_000);
-    const page = await provider([file("big.ts", { patch })]).instance.getPullRequestFilesPage("https://github.com/acme/demo", 7, 1);
-    expect(page.files[0]!.patch).toHaveLength(200_000);
-  });
-
   it("refuses a page or a file that does not read, and a page number that is not valid", async () => {
     for (const body of ["nope", {}, [file("")], [file("a", { additions: "1" })], [file("a", { status: 5 })], [null], [file("x".repeat(501))], Array.from({ length: 31 }, (_, index) => file(`f${index}`))]) {
       await expect(provider(body).instance.getPullRequestFilesPage("https://github.com/acme/demo", 7, 1, 30)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });

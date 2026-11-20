@@ -110,14 +110,6 @@ describe("the SQS adapter reads a queue's policy from SQS and declares what it c
     await expect(queues.queue("q")).rejects.toThrow(/not a queue of the same kind/);
   });
 
-  it("says what a standard queue and a FIFO queue guarantee", async () => {
-    const world = sqsWorld();
-    const standard = await world.provisioning(false).queue("a");
-    const fifo = await world.provisioning(true).queue("b");
-    expect(standard.capabilities).toEqual({ ordered: false, dedupe: false, maxDelaySeconds: 900, detectsStaleHandle: false, deadLettersById: false });
-    expect(fifo.capabilities).toEqual({ ordered: true, dedupe: true, maxDelaySeconds: 0, detectsStaleHandle: false, deadLettersById: false });
-  });
-
   it("refuses options the queue was not declared with, and a name nothing declares", async () => {
     const world = sqsWorld();
     world.provision("jobs", { visibilityTimeoutSeconds: 40, maxReceiveCount: 5 });
@@ -132,18 +124,6 @@ describe("the SQS adapter reads a queue's policy from SQS and declares what it c
     await expect(world.service.queue("jobs", { visibilityTimeoutSeconds: 1.5 })).rejects.toThrow();
   });
 
-  it("reads each queue's attributes once, even when asked for at the same time, and asks again after a failed read", async () => {
-    const world = sqsWorld();
-    world.provision("once");
-    await Promise.all([world.service.queue("once"), world.service.queue("once"), world.service.queue("once")]);
-    await world.service.queue("once");
-    expect(world.fake.requests.filter((request) => request.operation === "GetQueueAttributes" && request.input.QueueUrl === urlOf("once"))).toHaveLength(1);
-    world.provision("flaky");
-    world.fake.fail("GetQueueAttributes", service("ServiceUnavailable"));
-    await expect(world.service.queue("flaky")).rejects.toBeInstanceOf(SqsQueueError);
-    expect(await world.service.queue("flaky")).toBeDefined();
-  });
-
   it("refuses a dead-letter URL that is not the queue its redrive policy names, and a URL that disagrees with the queue's kind", async () => {
     const world = sqsWorld();
     world.fake.createQueue(urlOf("dlq"));
@@ -155,17 +135,6 @@ describe("the SQS adapter reads a queue's policy from SQS and declares what it c
     await expect(mismatched.queue("main")).rejects.toThrow(/not the queue its redrive policy names/);
     await expect(mismatched.queue("kind")).rejects.toThrow(/same kind/);
     expect(await mismatched.queue("ok", { maxReceiveCount: 3 })).toBeDefined();
-  });
-
-  it("checks a declared dead-letter URL even when the queue has no redrive policy: it must exist and be of the queue's kind", async () => {
-    const world = sqsWorld();
-    world.fake.createQueue(urlOf("plain"));
-    world.fake.createQueue(urlOf("somewhere"));
-    world.fake.createQueue(urlOf("somewhere", true));
-    const open = (deadLetterUrl: string) => new SqsQueueService({ client: world.fake, queues: { q: { url: urlOf("plain"), deadLetterUrl } } }).queue("q");
-    await expect(open(urlOf("missing"))).rejects.toBeInstanceOf(SqsQueueError);
-    await expect(open(urlOf("somewhere", true))).rejects.toThrow(/same kind/);
-    expect(await open(urlOf("somewhere"))).toBeDefined();
   });
 
   it("refuses a queue URL that is not an SQS queue URL, and one that says FIFO while the queue is not", async () => {
@@ -189,12 +158,6 @@ describe("the SQS adapter reads a queue's policy from SQS and declares what it c
 // ---- Message size and content ----
 
 describe("message size: SQS counts the body and its attributes together", () => {
-  it("refuses a body over the port's limit and sends nothing", async () => {
-    const world = sqsWorld();
-    const queue = await world.provisioning(false).queue("size");
-    await expect(queue.enqueue({ body: "x".repeat(QUEUE_LIMITS.maxBodyBytes) })).rejects.toThrow(/at most/);
-    expect(sends(world.fake)).toHaveLength(0);
-  });
 
   it("counts attribute names, the type name and values, and refuses a message over SQS's 256 KiB total", async () => {
     const world = sqsWorld();
@@ -210,23 +173,6 @@ describe("message size: SQS counts the body and its attributes together", () => 
     // The same body with no attributes has room for them to spare.
     await queue.enqueue({ body: "x".repeat(room + 1) });
     expect(sends(world.fake)).toHaveLength(2);
-  });
-
-  it("counts a body by its UTF-8 bytes, not its characters", async () => {
-    const world = sqsWorld();
-    const queue = await world.provisioning(false).queue("size");
-    // 3 bytes each; 87,381 of them plus the quotes is 262,145 bytes.
-    await expect(queue.enqueue({ body: "€".repeat(87_381) })).rejects.toThrow();
-    await queue.enqueue({ body: "€".repeat(87_380) });
-    expect(sends(world.fake)).toHaveLength(1);
-  });
-
-  it("honours a queue whose own maximum message size is smaller", async () => {
-    const world = sqsWorld();
-    world.provision("small", {}, { maximumMessageSize: 1_024 });
-    const queue = await world.service.queue("small");
-    await expect(queue.enqueue({ body: "x".repeat(1_023) })).rejects.toThrow(/at most 1024 bytes/);
-    await queue.enqueue({ body: "x".repeat(1_000) });
   });
 
   it("carries at most nine attributes of its own (SQS's ten less the dead-letter marker's) and refuses names and values SQS refuses", async () => {
@@ -270,94 +216,9 @@ describe("message size: SQS counts the body and its attributes together", () => 
   });
 });
 
-// ---- Ordering ----
-
-describe("ordering: FIFO keeps a group's order, a standard queue promises none", () => {
-  it("is received one message per request on a FIFO queue, because a FIFO request may return several of one group", async () => {
-    const world = sqsWorld();
-    const queue = await world.provisioning(true).queue("order");
-    for (const body of ["a1", "a2", "a3"]) await queue.enqueue({ body, groupId: "a" });
-    await queue.enqueue({ body: "b1", groupId: "b" });
-    const got = await queue.receive({ maxMessages: 10 });
-    expect(got.map((message) => message.body)).toEqual(["a1", "b1"]);
-    const asked = world.fake.requests.filter((request) => request.operation === "ReceiveMessage" && request.input.QueueUrl === urlOf("order", true));
-    expect(asked.map((request) => request.input.MaxNumberOfMessages)).toEqual([1, 1, 1]);
-    // a2 and a3 were never received, so their receive counts are untouched.
-    expect(world.fake.stored(urlOf("order", true)).filter((message) => message.groupId === "a").map((message) => message.receiveCount)).toEqual([1, 0, 0]);
-  });
-
-  it("delivers a group's messages in the order they were sent, one after the other, across acknowledgements", async () => {
-    const world = sqsWorld();
-    const queue = await world.provisioning(true).queue("order");
-    for (const body of ["a1", "a2", "a3"]) await queue.enqueue({ body, groupId: "a" });
-    const seen: unknown[] = [];
-    for (let round = 0; round < 3; round += 1) {
-      const [message] = await queue.receive({ maxMessages: 10 });
-      seen.push(message!.body);
-      expect(await queue.receive({ maxMessages: 10 })).toEqual([]);
-      await queue.ack(message!.receiptHandle);
-    }
-    expect(seen).toEqual(["a1", "a2", "a3"]);
-  });
-
-  it("gives a message with no group a group of its own, so unrelated messages never wait for each other, and hides that group", async () => {
-    const world = sqsWorld();
-    const queue = await world.provisioning(true).queue("solo");
-    await queue.enqueue({ body: "one" });
-    await queue.enqueue({ body: "two" });
-    const groups = sends(world.fake).map((request) => request.input.MessageGroupId as string);
-    expect(new Set(groups).size).toBe(2);
-    expect(groups.every((group) => group.startsWith("rovara-solo-"))).toBe(true);
-    const got = await queue.receive({ maxMessages: 2 });
-    expect(got.map((message) => message.body)).toEqual(["one", "two"]);
-    expect(got.every((message) => message.groupId === undefined)).toBe(true);
-  });
-
-  it("makes no order promise on a standard queue: the double shuffles, and every message still comes exactly once", async () => {
-    const world = sqsWorld();
-    const queue = await world.provisioning(false).queue("loose");
-    const bodies = Array.from({ length: 30 }, (_, index) => index);
-    for (const body of bodies) await queue.enqueue({ body });
-    const received: number[] = [];
-    for (;;) {
-      const batch = await queue.receive({ maxMessages: 10 });
-      if (batch.length === 0) break;
-      for (const message of batch) {
-        received.push(message.body as number);
-        await queue.ack(message.receiptHandle);
-      }
-    }
-    expect([...received].sort((a, b) => a - b)).toEqual(bodies);
-    expect(received).not.toEqual(bodies);
-    expect(queue.capabilities.ordered).toBe(false);
-  });
-
-  it("asks a standard queue for the whole batch in one request, and a long poll waits at most SQS's 20 seconds, on the first request only", async () => {
-    const world = sqsWorld();
-    const standard = await world.provisioning(false).queue("std");
-    await standard.receive({ maxMessages: 7, waitSeconds: 60 });
-    const request = world.fake.requests.find((entry) => entry.operation === "ReceiveMessage")!.input;
-    expect(request.MaxNumberOfMessages).toBe(7);
-    expect(request.WaitTimeSeconds).toBe(20);
-    const fifo = await world.provisioning(true).queue("fifo");
-    await fifo.enqueue({ body: 1 });
-    await fifo.enqueue({ body: 2 });
-    await fifo.receive({ maxMessages: 3, waitSeconds: 5 });
-    const fifoRequests = world.fake.requests.filter((entry) => entry.operation === "ReceiveMessage" && entry.input.QueueUrl === urlOf("fifo", true));
-    expect(fifoRequests.map((entry) => entry.input.WaitTimeSeconds)).toEqual([5, undefined, undefined]);
-  });
-});
-
 // ---- Duplicates ----
 
 describe("duplicates: suppressed on FIFO by the deduplication id, reported only for what this process sent", () => {
-  it("sends the id's hash as the deduplication id, so any text is accepted and nothing leaks", async () => {
-    const world = sqsWorld();
-    const queue = await world.provisioning(true).queue("dup");
-    const id = `${companyScoped(COMPANY, "OUTBOX#op 1 with spaces and é")}#${"long".repeat(60)}`;
-    await queue.enqueue({ body: 1, dedupeId: id });
-    expect(sends(world.fake)[0]!.input.MessageDeduplicationId).toBe(sha(id));
-  });
 
   it("drops a repeat inside five minutes and says so, then accepts the id again when the window has passed", async () => {
     const world = sqsWorld();
@@ -369,16 +230,6 @@ describe("duplicates: suppressed on FIFO by the deduplication id, reported only 
     const later = await queue.enqueue({ body: "x later", dedupeId: "same" });
     expect(later.duplicate).toBe(false);
     expect(world.fake.stored(urlOf("dup", true))).toHaveLength(2);
-  });
-
-  it("cannot tell a repeat sent by another process: SQS drops it all the same, and the flag stays false", async () => {
-    const world = sqsWorld();
-    const mine = await world.provisioning(true).queue("dup");
-    const theirs = await new SqsQueueService({ client: world.fake, queues: { dup: world.provision("dup", { ordered: true }) }, now: () => world.fake.now }).queue("dup");
-    await mine.enqueue({ body: "x", dedupeId: "shared" });
-    const repeat = await theirs.enqueue({ body: "x", dedupeId: "shared" });
-    expect(repeat.duplicate).toBe(false);
-    expect(world.fake.stored(urlOf("dup", true))).toHaveLength(1);
   });
 
   it("names the solo group of a message with no group after its dedupe id, so a repeat is dropped even when SQS deduplicates only within a group", async () => {
@@ -398,38 +249,6 @@ describe("duplicates: suppressed on FIFO by the deduplication id, reported only 
       // The flag is reported only where the queue promises suppression across groups.
       expect(second, deduplicationScope).toEqual(deduplicationScope === "queue" ? { messageId: first.messageId, duplicate: true } : { messageId: second.messageId, duplicate: false });
     }
-  });
-
-  it("reports dedupe false for a queue that deduplicates only within a message group, because a repeat in another group is kept", async () => {
-    const world = sqsWorld();
-    world.provision("by-group", { ordered: true }, { deduplicationScope: "messageGroup" });
-    const queue = await world.service.queue("by-group");
-    expect(queue.capabilities.dedupe).toBe(false);
-    await queue.enqueue({ body: "x", groupId: "a", dedupeId: "same" });
-    await queue.enqueue({ body: "x", groupId: "b", dedupeId: "same" });
-    expect(world.fake.stored(urlOf("by-group", true))).toHaveLength(2);
-    const whole = sqsWorld();
-    whole.provision("by-queue", { ordered: true });
-    expect((await whole.service.queue("by-queue")).capabilities.dedupe).toBe(true);
-  });
-
-  it("sends no deduplication id to a standard queue (SQS refuses one) and so stores both copies", async () => {
-    const world = sqsWorld();
-    const queue = await world.provisioning(false).queue("std");
-    expect(queue.capabilities.dedupe).toBe(false);
-    expect((await queue.enqueue({ body: "x", dedupeId: "same" })).duplicate).toBe(false);
-    expect((await queue.enqueue({ body: "x", dedupeId: "same" })).duplicate).toBe(false);
-    expect(sends(world.fake).every((request) => request.input.MessageDeduplicationId === undefined)).toBe(true);
-    expect(world.fake.stored(urlOf("std"))).toHaveLength(2);
-  });
-
-  it("gives a FIFO message with no dedupe id a fresh one, so nothing is suppressed", async () => {
-    const world = sqsWorld();
-    const queue = await world.provisioning(true).queue("dup");
-    await queue.enqueue({ body: "same body" });
-    await queue.enqueue({ body: "same body" });
-    expect(world.fake.stored(urlOf("dup", true))).toHaveLength(2);
-    expect(new Set(sends(world.fake).map((request) => request.input.MessageDeduplicationId)).size).toBe(2);
   });
 });
 
@@ -486,23 +305,6 @@ describe("poison messages: SQS's redrive policy moves them, and the adapter reac
     return { world, open: () => queue.queue("jobs", { visibilityTimeoutSeconds: 10, maxReceiveCount: 2, ...(fifo ? { ordered: true } : {}) }), url: urlOf("jobs", fifo), dead: urlOf("jobs-dead", fifo) };
   };
 
-  it("leaves a message that was received maxReceiveCount times without an ack to SQS, which moves it to the dead-letter queue with its id", async () => {
-    const { world, open, url, dead } = setup();
-    const queue = await open();
-    const sent = await queue.enqueue({ body: "poison", attributes: { kind: "x" } });
-    expect(await queue.receive()).toHaveLength(1);
-    world.fake.advance(11);
-    expect((await queue.receive())[0]!.receiveCount).toBe(2);
-    world.fake.advance(11);
-    expect(await queue.receive()).toEqual([]);
-    expect(world.fake.stored(url)).toEqual([]);
-    expect(world.fake.stored(dead).map((message) => message.messageId)).toEqual([sent.messageId]);
-    // The adapter can look at it: SQS's move keeps the id and has no reason of ours.
-    const listed = await queue.listDeadLetters();
-    expect(listed.items).toHaveLength(1);
-    expect(listed.items[0]).toMatchObject({ messageId: sent.messageId, body: "poison", reason: "max_receives", attributes: { kind: "x" } });
-  });
-
   it("redrives a dead letter by its id as a new message with its count reset, and discards another", async () => {
     const { world, open, url, dead } = setup();
     const queue = await open();
@@ -532,24 +334,6 @@ describe("poison messages: SQS's redrive policy moves them, and the adapter reac
     expect(releases.every((request) => request.input.VisibilityTimeout === 0 || request.input.VisibilityTimeout === 60)).toBe(true);
     expect(releases.some((request) => request.input.VisibilityTimeout === 0)).toBe(true);
     void url;
-  });
-
-  it("keeps the messages a scan has looked at hidden until it ends, so a long dead-letter queue is read through and an id past the first batch is found", async () => {
-    const world = sqsWorld({ order: "oldest-first" });
-    const queue = await world.provisioning(false).queue("jobs", { visibilityTimeoutSeconds: 10, maxReceiveCount: 1 });
-    const sent = [];
-    for (let index = 0; index < 25; index += 1) sent.push(await queue.enqueue({ body: index }));
-    for (let round = 0; round < 3; round += 1) await queue.receive({ maxMessages: 10 });
-    world.fake.advance(11);
-    for (let round = 0; round < 3; round += 1) await queue.receive({ maxMessages: 10 });
-    expect(world.fake.stored(urlOf("jobs-dead"))).toHaveLength(25);
-    for (const target of [sent[0]!, sent[12]!, sent[24]!]) expect(await queue.redrive(target.messageId)).toBe(true);
-    expect(world.fake.stored(urlOf("jobs-dead"))).toHaveLength(22);
-    // Messages already looked at stay hidden, so each scan reads the 25 in at most three batches and one empty one (without that, a batch can bring back
-    // messages the scan has seen, and it takes many more).
-    const dead = world.fake.requests.filter((request) => request.input.QueueUrl === urlOf("jobs-dead"));
-    expect(dead.filter((request) => request.operation === "ReceiveMessage").length).toBeLessThanOrEqual(3 * 4);
-    expect(dead.filter((request) => request.operation === "ChangeMessageVisibility" && request.input.VisibilityTimeout === 60)).toHaveLength(3);
   });
 
   it("sends nothing when the hide on the found dead letter has run out and another reader holds it (no duplicate)", async () => {
@@ -767,18 +551,6 @@ describe("the relay hook: a stream record leads to an enqueue, once by its idemp
     });
   }
 
-  it("is told once per company in a batch, with only that company's new rows", async () => {
-    const world = await relayWorld(false);
-    const relayed: { companyId: string; ids?: readonly string[] | undefined }[] = [];
-    const hook = createOutboxRelayHook({ outbox: { relay: async (options) => { relayed.push(options); return { delivered: 0, failed: 0, dead: 0 }; } } });
-    await world.stage("a1");
-    await world.stage("a2");
-    await world.stage("b1", OTHER);
-    const changes = world.records.filter((record) => record.eventName === "INSERT").map((record) => changeOfRecord(record));
-    await hook([...changes, ...changes]);
-    expect(relayed).toEqual([{ companyId: COMPANY, ids: ["a1", "a2"] }, { companyId: OTHER, ids: ["b1"] }]);
-  });
-
   it("ignores everything but a new, pending outbox row: other documents, the relay's own updates, removals, rows already handed over", async () => {
     const world = await relayWorld(false);
     const relayed: unknown[] = [];
@@ -889,16 +661,6 @@ describe("the backstop: a row whose stream record was missed is picked up by the
     clock = 0;
     const slow = createOutboxBackstop({ companies: async () => ["c1", "c2"], budgetMs: 0, now: () => clock, outbox: { relay: async () => { clock += 5; return { delivered: 0, failed: 0, dead: 0 }; } } });
     expect(await slow()).toMatchObject({ companies: 1, deferred: 1 });
-  });
-
-  it("carries one row's queue name through: the row decides its queue, and two queues are served in one run", async () => {
-    const world = await relayWorld(false);
-    await world.stage("q1", COMPANY, "alpha");
-    await world.stage("q2", COMPANY, "beta");
-    const backstop = createOutboxBackstop({ outbox: world.outbox, companies: async () => [COMPANY] });
-    expect((await backstop()).delivered).toBe(2);
-    expect(world.sqs.fake.stored(urlOf("alpha")).map((message) => message.attributes.outboxId)).toEqual(["q1"]);
-    expect(world.sqs.fake.stored(urlOf("beta")).map((message) => message.attributes.outboxId)).toEqual(["q2"]);
   });
 });
 

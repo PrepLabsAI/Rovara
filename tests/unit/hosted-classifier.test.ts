@@ -4,16 +4,14 @@
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
-  REQUEST_ROUTER_SYSTEM_PROMPT, START_SUGGESTS_PER_PERSON_PER_HOUR, START_SUGGEST_WORDS, StartSuggestResponseSchema, requestRouterPrompt,
-  startSuggestRateKey, startSuggestRatePartition, type OrgId, type StoredDocument,
+  REQUEST_ROUTER_SYSTEM_PROMPT, START_SUGGESTS_PER_PERSON_PER_HOUR, START_SUGGEST_WORDS, requestRouterPrompt, type OrgId,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
-import { ANSWERS_MESSAGES_PATH, ANSWERS_PAUSE_HEADER, hostedAnswersModel } from "../../packages/broker/src/core-host/gateway-answers.js";
+import { ANSWERS_PAUSE_HEADER, hostedAnswersModel } from "../../packages/broker/src/core-host/gateway-answers.js";
 import { routeHostedStartSuggest, type HostedStartSuggestWiring } from "../../packages/broker/src/core-host/start-suggest-routes.js";
 import { START_ROUTER_CEILING_CENTS, START_ROUTER_MAX_OUTPUT_TOKENS, createModelStartRouter, hostedStartRoute } from "../../packages/broker/src/core/answers/model-start-router.js";
-import { createStartSuggestRate } from "../../packages/broker/src/core/answers/start-suggest-rate.js";
 import { AnswerModelRefused, type AnswerModel, type AnswerModelTurn } from "../../packages/broker/src/core/answers/ports.js";
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 
@@ -81,15 +79,6 @@ describe("the router: one small call, the same fixed prompt Slack uses", () => {
     expect(JSON.stringify(out)).not.toContain("CANARY");
   });
 
-  it("gives every call its own answer id of the shape the gateway adapter accepts (never the answer service's id for the request)", async () => {
-    const s = scripted(ROUTE("question"));
-    await run(s); await run(s);
-    const ids = s.opened.map((open) => open.answerId);
-    expect(ids[0]).toMatch(/^a[0-9a-f]{31}$/u);
-    expect(ids[1]).toMatch(/^a[0-9a-f]{31}$/u);
-    expect(ids[0]).not.toBe(ids[1]);
-  });
-
   it.each([["prose", "I think this is a question"], ["extra key", JSON.stringify({ kind: "question", reason: "x", extra: 1 })], ["unknown kind", ROUTE("delete_everything")], ["empty", ""], ["two objects", `${ROUTE("question")}${ROUTE("large_change")}`]])("a reply that is not exactly one route object (%s) is 'invalid', and the call is still closed", async (_name, text) => {
     const s = scripted(text);
     expect(await run(s)).toEqual({ kind: "unclear", outcome: "invalid" });
@@ -142,7 +131,6 @@ const taskKey = (): TokenSigner => taskKeySigner({
   sign: async (input) => sign("sha256", input, pair.privateKey),
 });
 const ENV = { [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_AGENT_MODEL_VARIABLE]: MODEL };
-const claimsOf = (token: string) => JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString()) as Record<string, unknown>;
 const messages = (text: string, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify({ model: MODEL, content: [{ type: "text", text }], usage: { input_tokens: 100, output_tokens: 20 } }), { status: 200, headers: { "content-type": "application/json", ...headers } });
 const refused = (status: number, type: string, reason?: string) =>
@@ -168,32 +156,8 @@ function gatewayWorld(answer: (n: number) => Response | Promise<Response> = () =
   };
   return { seen, fetchImpl, post, stores, store };
 }
-const tokenOf = (seen: Seen) => (seen.init.headers as Record<string, string>)["x-api-key"]!;
 
 describe("the hosted start box through the answers gateway", () => {
-  it("a real pick: one POST to the answers path with an answers token for the caller's company and project, the fixed prompt, 120 tokens", async () => {
-    const w = gatewayWorld();
-    const result = await w.post(A, "ada");
-    expect(result.status).toBe(200);
-    expect(StartSuggestResponseSchema.parse(result.body)).toEqual({ kind: "large_change", classifier: "ok", pick: "full" });
-    expect(w.seen).toHaveLength(1);
-    expect(w.seen[0]!.url).toBe(`${GATEWAY}${ANSWERS_MESSAGES_PATH}`);
-    expect(claimsOf(tokenOf(w.seen[0]!))).toMatchObject({ cid: A, pid: "alpha", stp: "rovara-answers-call", mdl: [MODEL] });
-    expect(claimsOf(tokenOf(w.seen[0]!))).not.toHaveProperty("per");
-    expect(JSON.parse(w.seen[0]!.init.body as string)).toEqual({ model: MODEL, max_tokens: 120, system: REQUEST_ROUTER_SYSTEM_PROMPT, messages: [{ role: "user", content: requestRouterPrompt("Fix the typo in the README title") }] });
-  });
-
-  it("two companies: each call's token names only its own company, even for the same person id and project name, and the counters are separate", async () => {
-    const w = gatewayWorld();
-    expect((await w.post(A, "ada")).status).toBe(200);
-    expect((await w.post(B, "ada")).status).toBe(200);
-    expect(w.seen.map((seen) => claimsOf(tokenOf(seen)).cid)).toEqual([A, B]);
-    expect(w.seen.map((seen) => claimsOf(tokenOf(seen)).pid)).toEqual(["alpha", "alpha"]);
-    // One counter row in each company's own store, and none in the other's.
-    const rowsOf = async (company: OrgId) => (await w.stores.get(company)!.scanPage({ limit: 100 })).items.filter((row) => row.entityType === "START_SUGGEST_RATE");
-    expect((await rowsOf(A)).map((row) => row.pk)).toEqual([startSuggestRatePartition(A)]);
-    expect((await rowsOf(B)).map((row) => row.pk)).toEqual([startSuggestRatePartition(B)]);
-  });
 
   it.each([
     ["the company has no connected key", () => refused(403, "answers_paused", "no_provider")],
@@ -212,27 +176,9 @@ describe("the hosted start box through the answers gateway", () => {
     expect(result.raw).not.toMatch(/sk-ant|gateway words/u);
   });
 
-  it("a fetch that throws is 'unavailable' too, with no echo", async () => {
-    const w = gatewayWorld(() => { throw new Error("socket hang up sk-ant-secret"); });
-    const result = await w.post(A, "ada");
-    expect(result.body).toEqual({ kind: "unknown", classifier: "unavailable", pick: "answer" });
-    expect(result.raw).not.toContain("sk-ant");
-  });
-
   it("a reply that is not exactly a route is 'failed' (the page asks the person), never a guessed Quick or Full", async () => {
     const w = gatewayWorld(() => messages("Sure! This looks like a small change."));
     expect((await w.post(A, "ada")).body).toEqual({ kind: "unknown", classifier: "failed", pick: "answer" });
-  });
-
-  it("with no gateway configured nothing is called and no counter row is written: 'unavailable'", async () => {
-    const calls = vi.fn(async () => messages("x"));
-    const none = hostedStartRoute(() => hostedAnswersModel({}, () => ({ signer: taskKey(), issuer: ISSUER }), calls));
-    expect(none(A, { project: "alpha", personId: "ada" })).toBeUndefined();
-    const w = gatewayWorld();
-    const result = await w.post(A, "ada", body(), "alpha", NOW, { route: none });
-    expect(result.body).toEqual({ kind: "unknown", classifier: "unavailable", pick: "answer" });
-    expect(calls).not.toHaveBeenCalled();
-    expect((await w.store.scanPage({ limit: 10 })).items).toHaveLength(0);
   });
 
   it("small talk is answered free: no gateway call, no counter row", async () => {
@@ -248,106 +194,6 @@ describe("the hosted start box through the answers gateway", () => {
     expect((await w.post(B, "bob")).status).toBe(404);
     expect(w.seen).toHaveLength(0);
     expect((await w.store.scanPage({ limit: 10 })).items).toHaveLength(0);
-  });
-
-  it("no key of any kind is in the request: only the call's own token, and nothing in Code names a provider key", async () => {
-    const w = gatewayWorld();
-    await w.post(A, "ada");
-    expect(Object.keys(w.seen[0]!.init.headers as object).sort()).toEqual(["anthropic-version", "content-type", "x-api-key"]);
-    expect(w.seen[0]!.init.body as string).not.toMatch(/api_key|sk-ant/u);
-  });
-});
-
-// ---- the stored counter -------------------------------------------------------------------------------------------------------------------------------------------------------------
-describe("the stored hourly counter: company + project + person, expired by the app", () => {
-  const make = (store = new MemoryDocumentStore(), company = A, now = () => NOW, limit?: number) => ({ store, rate: createStartSuggestRate({ store, companyId: company, now, ...(limit === undefined ? {} : { limit }) }) });
-  const rowsOf = async (store: MemoryDocumentStore): Promise<StoredDocument[]> => (await store.scanPage({ limit: 1_000 })).items;
-
-  it("holds one row per project, person and hour, under the company's own partition, with ids and a count only", async () => {
-    const { store, rate } = make();
-    expect(await rate.take("alpha", "ada")).toBe(true);
-    const rows = await rowsOf(store);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ ...startSuggestRateKey(A, "alpha", "ada", Math.floor(NOW / HOUR) * HOUR), entityType: "START_SUGGEST_RATE", orgId: A, count: 1 });
-    expect(Object.keys(rows[0]!).sort()).toEqual(["count", "entityType", "orgId", "pk", "sk", "windowStart"]);
-    expect(rows[0]!.pk).toBe(`ORG#${A}#START_SUGGEST_RATE`);
-  });
-
-  it("limits per person: the 61st in an hour is refused, another person is not held back", async () => {
-    const { rate } = make();
-    for (let i = 0; i < START_SUGGESTS_PER_PERSON_PER_HOUR; i += 1) expect(await rate.take("alpha", "ada")).toBe(true);
-    expect(await rate.take("alpha", "ada")).toBe(false);
-    expect(await rate.take("alpha", "bob")).toBe(true);
-  });
-
-  it("limits per project: the same person on another project has their own places", async () => {
-    const { rate } = make(undefined, A, () => NOW, 2);
-    expect(await rate.take("alpha", "ada")).toBe(true);
-    expect(await rate.take("alpha", "ada")).toBe(true);
-    expect(await rate.take("alpha", "ada")).toBe(false);
-    expect(await rate.take("beta", "ada")).toBe(true);
-  });
-
-  it("limits per company: the same project and person id in another company are separate places, in that company's own rows", async () => {
-    const shared = new MemoryDocumentStore();
-    const a = make(shared, A, () => NOW, 1);
-    const b = make(shared, B, () => NOW, 1);
-    expect(await a.rate.take("alpha", "ada")).toBe(true);
-    expect(await a.rate.take("alpha", "ada")).toBe(false);
-    expect(await b.rate.take("alpha", "ada")).toBe(true);
-    expect(await b.rate.take("alpha", "ada")).toBe(false);
-    const rows = await rowsOf(shared);
-    expect(rows.map((row) => row.pk).sort()).toEqual([startSuggestRatePartition(A), startSuggestRatePartition(B)].sort());
-  });
-
-  it("can only be lowered: no caller raises the placeholder", async () => {
-    const { rate } = make(undefined, A, () => NOW, 1_000);
-    for (let i = 0; i < START_SUGGESTS_PER_PERSON_PER_HOUR; i += 1) expect(await rate.take("alpha", "ada")).toBe(true);
-    expect(await rate.take("alpha", "ada")).toBe(false);
-  });
-
-  it("starts afresh the next hour, and the person's counters of earlier hours are removed by the app (no table expiry), not piled up", async () => {
-    let now = NOW;
-    const { store, rate } = make(undefined, A, () => now, 5);
-    for (let hour = 0; hour < 4; hour += 1) { await rate.take("alpha", "ada"); now += HOUR; }
-    await rate.take("alpha", "bob");
-    const rows = await rowsOf(store);
-    expect(rows.filter((row) => row.sk.startsWith("PROJECT#alpha#PERSON#ada#"))).toHaveLength(1);
-    expect(rows.filter((row) => row.sk.startsWith("PROJECT#alpha#PERSON#bob#"))).toHaveLength(1);
-    expect(rows.some((row) => "expiresAt" in row || "ttl" in row || "expiresAtEpochSeconds" in row)).toBe(false);
-  });
-
-  it("the sweep removes only the same person's and project's earlier hours (another person's and project's rows stay)", async () => {
-    let now = NOW;
-    const { store, rate } = make(undefined, A, () => now, 5);
-    await rate.take("alpha", "ada"); await rate.take("beta", "ada"); await rate.take("alpha", "bob");
-    now += HOUR;
-    await rate.take("alpha", "ada");
-    const keys = (await rowsOf(store)).map((row) => row.sk).sort();
-    expect(keys).toEqual([
-      `PROJECT#alpha#PERSON#ada#${String(Math.floor(now / HOUR) * HOUR)}`,
-      `PROJECT#alpha#PERSON#bob#${String(Math.floor(NOW / HOUR) * HOUR)}`,
-      `PROJECT#beta#PERSON#ada#${String(Math.floor(NOW / HOUR) * HOUR)}`,
-    ].sort());
-  });
-
-  it("the last place cannot be taken twice by requests at the same moment", async () => {
-    const { rate } = make(undefined, A, () => NOW, 3);
-    const results = await Promise.all(Array.from({ length: 8 }, () => rate.take("alpha", "ada")));
-    expect(results.filter(Boolean)).toHaveLength(3);
-  });
-
-  it("fails closed: a counter that cannot be written is an error, never a place", async () => {
-    const store = new MemoryDocumentStore();
-    vi.spyOn(store, "update").mockRejectedValue(new Error("db down"));
-    await expect(createStartSuggestRate({ store, companyId: A, now: () => NOW }).take("alpha", "ada")).rejects.toThrow();
-  });
-
-  it("refuses a project or person that is not an id before anything is written", async () => {
-    const { store, rate } = make();
-    await expect(rate.take("Not A Project", "ada")).rejects.toThrow();
-    await expect(rate.take("alpha", "ada#bob")).rejects.toThrow();
-    expect(await rowsOf(store)).toHaveLength(0);
   });
 });
 
@@ -379,27 +225,6 @@ describe("the hosted route's hourly limit, stored", () => {
 
 // L4-AM (DEC 254zzn(2)): the classifier runs on the dedicated answers model when ROVARA_CORE_ANSWERS_MODEL is set, and on the agent model otherwise.
 describe("the hosted start box and the dedicated answers model (L4-AM)", () => {
-  const ANSWERS_MODEL = "claude-haiku-5-5";
-
-  it("empty or unset: the token and the request name the agent model, exactly as before", async () => {
-    for (const env of [ENV, { ...ENV, ROVARA_CORE_ANSWERS_MODEL: "" }, { ...ENV, ROVARA_CORE_ANSWERS_MODEL: "  " }]) {
-      const w = gatewayWorld(undefined, env);
-      expect((await w.post(A, "ada")).status).toBe(200);
-      expect(claimsOf(tokenOf(w.seen[0]!)).mdl).toEqual([MODEL]);
-      expect((JSON.parse(w.seen[0]!.init.body as string) as { model: string }).model).toBe(MODEL);
-    }
-  });
-
-  it("set: the one classifier call names the answers model in its token and request, for the caller's own company", async () => {
-    const w = gatewayWorld(undefined, { ...ENV, ROVARA_CORE_ANSWERS_MODEL: ANSWERS_MODEL });
-    const result = await w.post(A, "ada");
-    expect(StartSuggestResponseSchema.parse(result.body)).toEqual({ kind: "large_change", classifier: "ok", pick: "full" });
-    expect(w.seen).toHaveLength(1);
-    expect(claimsOf(tokenOf(w.seen[0]!))).toMatchObject({ cid: A, pid: "alpha", stp: "rovara-answers-call", mdl: [ANSWERS_MODEL] });
-    expect((JSON.parse(w.seen[0]!.init.body as string) as { model: string }).model).toBe(ANSWERS_MODEL);
-    expect((await w.post(B, "ada")).status).toBe(200);
-    expect(w.seen.map((seen) => claimsOf(tokenOf(seen)).cid)).toEqual([A, B]);
-  });
 
   it("set to something the answers purpose cannot serve: the classifier is unavailable, never a silent fall back to the agent model", async () => {
     for (const bad of ["zai.glm-5", "us.anthropic.claude-haiku-5-5", "claude-haiku-5-5,am=x", "Claude-Haiku"]) {

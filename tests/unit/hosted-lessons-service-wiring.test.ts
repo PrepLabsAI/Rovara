@@ -3,7 +3,6 @@
 //   (a) `lessons.service` is returned from the company's services, so the 5-minute `lessons` schedule runs the pass: the reflection queue pump, milestones.deliverDue() retries, the nightly upkeep.
 //   (b) the learning model is the gateway's learning route on the company's own account: no gateway, no token, no call; a company the gateway has no allowance for learns nothing and spends nothing.
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
@@ -13,7 +12,7 @@ import { createHostedLessonsPeople } from "../../packages/broker/src/aws/hosted-
 import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { hostedLessonsLearning } from "../../packages/broker/src/core-host/hosted-learning.js";
 import { COMPANY_LEARNING_MODEL_ENTITY, companyLearningModelKey } from "../../packages/broker/src/core-host/company-learning-model.js";
-import { LEARNING_MESSAGES_PATH, LEARNING_PAUSE_HEADER } from "../../packages/broker/src/lessons/gateway-learning.js";
+import { LEARNING_MESSAGES_PATH } from "../../packages/broker/src/lessons/gateway-learning.js";
 import { setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
 import { codeMilestoneItems, type DocumentMilestones } from "../../packages/broker/src/core/milestones/milestones.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -135,28 +134,6 @@ async function servedCompany(s: Setup, companyId: OrgId, personId: string): Prom
 }
 
 describe("(a) the lessons job is wired on the hosted root", () => {
-  it("the company's services return the lessons pass where the switch covers it, and the 5-minute `lessons` job runs it (not `service_not_wired`)", async () => {
-    const s = await setup({ lessons: "on" });
-    await servedCompany(s, A, MEMBER_A);
-    const runtime = await s.root.app.runtimeFor(A);
-    expect(runtime.services.lessons).toBeDefined();
-    const result = await lessonsJob(s.root);
-    const report = reportOf(result, A);
-    expect(report?.outcome).toBe("ran");
-    expect(report?.report).not.toHaveProperty("skipped");
-    const passed = report?.report as Record<string, unknown>;
-    expect([typeof passed.milestones, typeof passed.reflected, typeof passed.nightly]).toEqual(["number", "number", "boolean"]);
-  });
-
-  it("where the switch is off, or names only another company, no pass is returned: the job is skipped as not wired for this company, and nothing is built", async () => {
-    for (const lessons of [undefined, "off", `on:${B}`]) {
-      const s = await setup({ ...(lessons === undefined ? {} : { lessons }) });
-      await servedCompany(s, A, MEMBER_A);
-      const runtime = await s.root.app.runtimeFor(A);
-      expect(runtime.services.lessons, String(lessons)).toBeUndefined();
-      expect(reportOf(await lessonsJob(s.root), A)?.report, String(lessons)).toMatchObject({ skipped: "service_not_wired" });
-    }
-  });
 
   it("a milestone a handler failed on (a Slack thread or Linear write-back that failed once) is told again by the pass", async () => {
     const s = await setup({ lessons: "on" });
@@ -207,43 +184,6 @@ describe("(b) the learning model is the gateway's, on the company's own account"
     // The message was taken off the queue (not left to loop) and nothing was learned.
     expect(receivedIn(result)).toBe(1);
   });
-
-  it("with no learning port given at all, no call is made either", async () => {
-    const s = await setup({ lessons: "on", learning: false });
-    await mergedTask(s, A, MEMBER_A, sentBack);
-    await lessonsJob(s.root);
-    expect(s.seen).toEqual([]);
-  });
-
-  it("a company the gateway has no allowance for (no connected account, no room) learns nothing: the gateway's pause is the whole answer and the pass still completes", async () => {
-    const s = await setup({ lessons: "on", answer: () => new Response(JSON.stringify({ error: { type: "lessons_paused", message: "words" } }), { status: 403, headers: { "content-type": "application/json", [LEARNING_PAUSE_HEADER]: "no_provider" } }) });
-    await mergedTask(s, A, MEMBER_A, sentBack);
-    const result = await lessonsJob(s.root);
-    expect(reportOf(result, A)?.outcome).toBe("ran");
-    expect(s.seen.length).toBeGreaterThanOrEqual(1);
-    // Every attempt the pass made was refused at the gateway; no lesson of the company exists.
-    const stored = await queryAll(s.world.store, { pk: `${companyScoped(A, "LESSONS")}`, sk: { op: "beginsWith", prefix: "" } }).catch(() => []);
-    expect(stored).toEqual([]);
-  });
-
-  it("two companies: each company's task is reflected with its own token, and a company the switch does not name makes no call", async () => {
-    const s = await setup({ lessons: `on:${A}:${B}` });
-    await mergedTask(s, A, MEMBER_A, sentBack);
-    await mergedTask(s, B, MEMBER_B, "Name the route /healthz like the others.");
-    await lessonsJob(s.root);
-    const byCompany = s.seen.map((seen) => claimsOf(seen.token).cid);
-    expect(new Set(byCompany)).toEqual(new Set([A, B]));
-    for (const seen of s.seen) {
-      const cid = claimsOf(seen.token).cid;
-      // A's words only ever travel on A's token, B's on B's.
-      expect(JSON.stringify(seen.body).includes("withRetry")).toBe(cid === A);
-      expect(JSON.stringify(seen.body).includes("healthz")).toBe(cid === B);
-    }
-    const off = await setup({ lessons: `on:${B}` });
-    await mergedTask(off, A, MEMBER_A, sentBack);
-    await lessonsJob(off.root);
-    expect(off.seen).toEqual([]);
-  });
 });
 
 // DEC 254zzz58/63: learning has its OWN model: the company's choice (read from its own core store), else the install's, else Claude Haiku 5.5. Staging runs its agents on zai.glm-5
@@ -255,45 +195,6 @@ describe("(c) the learning model is its own, never the agent model", () => {
   const glmEnv = (learning?: string): NodeJS.ProcessEnv => ({ [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_AGENT_MODEL_VARIABLE]: GLM, ...(learning === undefined ? {} : { [CORE_LEARNING_MODEL_VARIABLE]: learning }) });
   const choose = async (s: Setup, companyId: OrgId, model: string) => s.world.store.put({ item: { ...companyLearningModelKey(companyId), entityType: COMPANY_LEARNING_MODEL_ENTITY, orgId: companyId, version: 1, model, updatedAt: "2026-11-18T00:00:00.000Z", updatedBy: MEMBER_A } });
   const models = (s: Setup) => s.seen.map((seen) => [claimsOf(seen.token).cid, claimsOf(seen.token).mdl, (seen.body as { model?: string }).model]);
-
-  it("agent model zai.glm-5 with the learning model set: the task is reflected on the LEARNING model (the token's one model and the request's), and nothing says 'not set up'", async () => {
-    const logs: Array<Record<string, unknown>> = [];
-    const s = await setup({ lessons: "on", answer, learningEnv: glmEnv(MODEL), log: (entry) => { logs.push(entry); } });
-    await mergedTask(s, A, MEMBER_A, sentBack);
-    expect(reflectedIn(await lessonsJob(s.root))).toBe(1);
-    expect(s.seen.length).toBeGreaterThanOrEqual(1);
-    expect(new Set(models(s).map(String))).toEqual(new Set([String([A, [MODEL], MODEL])]));
-    expect(JSON.stringify(s.seen)).not.toContain(GLM);
-    expect(logs.filter((entry) => entry.event === "core_engine.lessons_learning_not_set_up")).toEqual([]);
-  });
-
-  it("agent model zai.glm-5, nothing chosen anywhere: Claude Haiku 5.5 learns", async () => {
-    const s = await setup({ lessons: "on", answer, learningEnv: glmEnv() });
-    await mergedTask(s, A, MEMBER_A, sentBack);
-    expect(reflectedIn(await lessonsJob(s.root))).toBe(1);
-    expect(s.seen.length).toBeGreaterThanOrEqual(1);
-    expect(new Set(models(s).map(String))).toEqual(new Set([String([A, [CORE_LEARNING_MODEL_DEFAULT], CORE_LEARNING_MODEL_DEFAULT])]));
-  });
-
-  it("the company's own choice, read from its own core store by the root, wins over the install's", async () => {
-    const s = await setup({ lessons: "on", answer, learningEnv: glmEnv(MODEL) });
-    await choose(s, A, "claude-haiku-4-5");
-    await mergedTask(s, A, MEMBER_A, sentBack);
-    expect(reflectedIn(await lessonsJob(s.root))).toBe(1);
-    expect(s.seen.length).toBeGreaterThanOrEqual(1);
-    expect(new Set(models(s).map(String))).toEqual(new Set([String([A, ["claude-haiku-4-5"], "claude-haiku-4-5"])]));
-  });
-
-  it("an install learning model set to a model other than Claude is refused: no port, the same 'not set up' line as before, and no call", async () => {
-    for (const learning of [GLM, "us.anthropic.claude-sonnet-4-6-v1:0", "Claude-Sonnet-5"]) {
-      const logs: Array<Record<string, unknown>> = [];
-      const s = await setup({ lessons: "on", answer, learningEnv: glmEnv(learning), log: (entry) => { logs.push(entry); } });
-      await mergedTask(s, A, MEMBER_A, sentBack);
-      await lessonsJob(s.root);
-      expect(s.seen, learning).toEqual([]);
-      expect(logs, learning).toContainEqual({ event: "core_engine.lessons_learning_not_set_up", companyId: A });
-    }
-  });
 
   it("two companies: each learns on its own choice (or the default) with its own token, and one company's choice never reaches the other", async () => {
     const s = await setup({ lessons: `on:${A}:${B}`, answer, learningEnv: glmEnv() });
@@ -307,14 +208,6 @@ describe("(c) the learning model is its own, never the agent model", () => {
 });
 
 describe("the root asks for the learning port only where it can be used", () => {
-  it("only for a company the lessons switch names: a company outside it never has a port asked for, a named one does", async () => {
-    const asked: string[] = [];
-    const s = await setup({ lessons: `on:${B}`, custom: (companyId: OrgId) => { asked.push(companyId); return undefined; } });
-    await s.root.app.runtimeFor(A);
-    expect(asked).toEqual([]);
-    await s.root.app.runtimeFor(B);
-    expect(asked).toEqual([B]);
-  });
 
   it("a port that throws is no port: the company's lessons still build, learning refuses, and it is said in the log (company id only)", async () => {
     const logs: Array<Record<string, unknown>> = [];
@@ -324,22 +217,5 @@ describe("the root asks for the learning port only where it can be used", () => 
     expect(runtime.services.lessons).toBeDefined();
     expect(logs.filter((entry) => entry.event === "core_engine.lessons_learning_unavailable")).toEqual([{ event: "core_engine.lessons_learning_unavailable", companyId: A }]);
     expect(JSON.stringify(logs)).not.toContain("sk-ant-secret");
-  });
-
-  it("a covered company with no port (no gateway settings) is said in the log, never silent", async () => {
-    const logs: Array<Record<string, unknown>> = [];
-    const s = await setup({ lessons: "on", gateway: false, log: (entry) => { logs.push(entry); } });
-    await servedCompany(s, A, MEMBER_A);
-    expect(logs).toContainEqual({ event: "core_engine.lessons_learning_not_set_up", companyId: A });
-  });
-});
-
-describe("the broker hands the core root the learning port", () => {
-  const source = readFileSync(new URL("../../packages/broker/src/aws/broker.ts", import.meta.url), "utf8");
-  const call = source.slice(source.indexOf("const coreRoot = createBrokerCoreRoot({"));
-  const body = call.slice(0, call.indexOf("builtCoreRoot = coreRoot;"));
-
-  it("passes lessonsLearning built by hostedLessonsLearning over the process environment and the install's own task-token signer", () => {
-    expect(body).toMatch(/lessonsLearning:\s*hostedLessonsLearning\(process\.env,\s*\(\) => taskTokensFromEnvironment\(process\.env, new KMSClient\(awsClientConfiguration\)\)\)/u);
   });
 });

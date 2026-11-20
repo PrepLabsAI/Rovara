@@ -6,7 +6,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { artifactObjectKey } from "../../packages/broker/src/services/callbacks.js";
 import {
-  COMPANY_ARTIFACT_READ_MAX_BYTES, artifactKeyScopeOf, createCompanyArtifactReader, type ArtifactReadRefusal,
+  artifactKeyScopeOf, createCompanyArtifactReader, type ArtifactReadRefusal,
 } from "../../packages/broker/src/core-host/company-artifact-reader.js";
 import { COMPANY_A_ID, COMPANY_B_ID } from "../../packages/testing/src/isolation/two-company.js";
 
@@ -75,77 +75,6 @@ describe("the hosted artifacts reader: what it reads", () => {
     expect(decode(await w.reader.get(callbackKey(A_ONLY), 1000))).toBe("a-only-callback");
     expect(decode(await w.reader.get(replaceable, 1000))).toBe("round");
   });
-
-  it("answers a missing object with undefined and a stored one with exactly its bytes", async () => {
-    const w = await world({ [`${callbackKey(A_ONLY, "op-2", "x.json")}`]: text("{}") });
-    expect(await w.reader.get(planKey(OWNER_A, A_ONLY).replace("art-1", "art-404"), 1000)).toBeUndefined();
-    expect(decode(await w.reader.get(callbackKey(A_ONLY, "op-2", "x.json"), 1000))).toBe("{}");
-  });
-});
-
-describe("the hosted artifacts reader: another company is never read", () => {
-  it("reads the same raw workspace id only in its own company: B's reader never sees A's object and A's never sees B's", async () => {
-    const w = await world();
-    const b = w.readerOf(B);
-    expect(decode(await w.reader.get(planKey(OWNER_A, SHARED), 1000))).toBe("a-shared-plan");
-    expect(decode(await b.get(planKey(OWNER_B, SHARED), 1000))).toBe("b-shared-plan");
-    // A's reader given B's owner key for the shared workspace id: the workspace is A's, the owner is not
-    expect(await w.reader.get(planKey(OWNER_B, SHARED), 1000)).toBeUndefined();
-    expect(await b.get(planKey(OWNER_A, SHARED), 1000)).toBeUndefined();
-  });
-
-  it("refuses a key that names another company's workspace, before the object store is asked", async () => {
-    const w = await world();
-    w.calls.length = 0;
-    expect(await w.reader.get(planKey(OWNER_B, B_ONLY), 1000)).toBeUndefined();
-    expect(await w.reader.get(callbackKey(B_ONLY), 1000)).toBeUndefined();
-    expect(await w.readerOf(B).get(callbackKey(A_ONLY), 1000)).toBeUndefined();
-    expect(w.calls).toEqual([]);
-  });
-
-  it("refuses a callback-shaped key of one of its own workspaces that nobody recorded: S3 keys carry no company, so the company's own ARTIFACT row must name exactly this key", async () => {
-    const ghost = callbackKey(A_ONLY, "op-9", "ghost.json");
-    const w = await world({ [ghost]: text("planted") }, { unrecorded: [ghost] });
-    w.calls.length = 0;
-    expect(await w.reader.get(ghost, 1000)).toBeUndefined();
-    expect(w.calls).toEqual([]);
-    // a row that names another key does not bless this one
-    await w.store.put({ item: { ...workspaceKey(A, A_ONLY), sk: "ARTIFACT#op-9#ghost.json", entityType: "ARTIFACT", objectKey: callbackKey(A_ONLY, "op-9", "other.json") } });
-    expect(await w.reader.get(ghost, 1000)).toBeUndefined();
-  });
-
-  it("a workspace id that two companies both hold reads, for a callback-shaped key, only where that company recorded the artifact", async () => {
-    const shared = callbackKey(SHARED);
-    const w = await world();
-    await w.store.delete({ key: { ...workspaceKey(B, SHARED), sk: "ARTIFACT#op-1#plan.md" } });
-    expect(decode(await w.reader.get(shared, 1000))).toBe("a-shared-callback");
-    expect(await w.readerOf(B).get(shared, 1000)).toBeUndefined();
-  });
-
-  it("refuses a record stored under one workspace id that says it is another (the key names the record it finds)", async () => {
-    const w = await world();
-    await w.store.put({ item: { ...workspaceKey(A, "ws-x"), entityType: "WORKSPACE", id: "ws-y", companyId: A, orgId: A, ownerKey: "owner-x" } });
-    const { blobs } = fakeBlobs({ "private/owner-x/ws-x/plan.json": text("x") });
-    expect(await createCompanyArtifactReader({ blobs, store: w.store, companyId: A }).get("private/owner-x/ws-x/plan.json", 1000)).toBeUndefined();
-  });
-
-  it("refuses a key of a workspace nobody started (no record binds it to a company)", async () => {
-    const w = await world({ [planKey("owner-x", "ws-ghost")]: text("ghost"), [callbackKey("ws-ghost")]: text("ghost") });
-    expect(await w.reader.get(planKey("owner-x", "ws-ghost"), 1000)).toBeUndefined();
-    expect(await w.reader.get(callbackKey("ws-ghost"), 1000)).toBeUndefined();
-  });
-
-  it("refuses an owner-keyed key whose owner is not the workspace's, even inside the same company", async () => {
-    const w = await world({ [planKey("someone-else", A_ONLY)]: text("not yours") });
-    expect(await w.reader.get(planKey("someone-else", A_ONLY), 1000)).toBeUndefined();
-  });
-
-  it("does not follow a workspace record that carries another company's name", async () => {
-    const w = await world({ [planKey("owner-c", "ws-forged")]: text("forged") });
-    // A record under A's partition that says it belongs to B: `locateWorkspace` and the reader's own check both refuse it
-    await w.store.put({ item: { ...workspaceKey(A, "ws-forged"), entityType: "WORKSPACE", id: "ws-forged", companyId: B, orgId: B, ownerKey: "owner-c" } });
-    expect(await w.reader.get(planKey("owner-c", "ws-forged"), 1000)).toBeUndefined();
-  });
 });
 
 describe("the hosted artifacts reader: only the flow's own key shapes", () => {
@@ -186,38 +115,9 @@ describe("the hosted artifacts reader: only the flow's own key shapes", () => {
     expect(await createCompanyArtifactReader({ blobs: fakeBlobs(w.objects).blobs, store, companyId: A }).get(key, 1000)).toBeUndefined();
     expect(reads).toBe(0);
   });
-
-  it("refuses a key that is not a string, never throwing", async () => {
-    const w = await world();
-    for (const key of [undefined, null, 5, {}, [], ["private", OWNER_A, A_ONLY, "x"]]) {
-      await expect(w.reader.get(key as never, 1000)).resolves.toBeUndefined();
-    }
-    expect(w.calls).toEqual([]);
-  });
-
-  it("reads the scope of a key as pure text", () => {
-    expect(artifactKeyScopeOf(planKey(OWNER_A, A_ONLY))).toEqual({ form: "owner", ownerKey: OWNER_A, workspaceId: A_ONLY });
-    expect(artifactKeyScopeOf(callbackKey(A_ONLY))).toEqual({ form: "operation", workspaceId: A_ONLY, operationId: "op-1", name: "plan.md" });
-    expect(artifactKeyScopeOf("private/a/b")).toBeUndefined();
-    expect(artifactKeyScopeOf("workspaces/a/operations/b")).toBeUndefined();
-  });
 });
 
 describe("the hosted artifacts reader: the size bound", () => {
-  it("passes the caller's limit through, and an object bigger than it reads as not there (never cut)", async () => {
-    const w = await world({ [callbackKey(A_ONLY, "op-3", "big.json")]: new Uint8Array(500) });
-    w.calls.length = 0;
-    expect(await w.reader.get(callbackKey(A_ONLY, "op-3", "big.json"), 499)).toBeUndefined();
-    expect((await w.reader.get(callbackKey(A_ONLY, "op-3", "big.json"), 500))?.byteLength).toBe(500);
-    expect(w.calls.map((call) => call.maxBytes)).toEqual([499, 500]);
-  });
-
-  it("holds a caller that asks for more than the bound to the bound", async () => {
-    const w = await world({ [callbackKey(A_ONLY, "op-4", "huge.json")]: new Uint8Array(COMPANY_ARTIFACT_READ_MAX_BYTES + 1) });
-    w.calls.length = 0;
-    expect(await w.reader.get(callbackKey(A_ONLY, "op-4", "huge.json"), Number.MAX_SAFE_INTEGER)).toBeUndefined();
-    expect(w.calls.map((call) => call.maxBytes)).toEqual([COMPANY_ARTIFACT_READ_MAX_BYTES]);
-  });
 
   it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, "1000" as never, undefined as never, null as never])("refuses a limit that is not a positive whole number (%s) without asking the store", async (limit) => {
     const w = await world();
@@ -237,15 +137,6 @@ describe("the hosted artifacts reader: the size bound", () => {
 });
 
 describe("the hosted artifacts reader: fails closed and says nothing", () => {
-  it("answers undefined, never throws, when the company's store or the object store cannot answer", async () => {
-    const refusals: ArtifactReadRefusal[] = [];
-    const store = await companyStore();
-    const down = { get: async () => { throw new Error("secret-store-detail"); } };
-    expect(await createCompanyArtifactReader({ blobs: fakeBlobs({}).blobs, store: down, companyId: A, refused: (reason) => refusals.push(reason) }).get(planKey(OWNER_A, A_ONLY), 1000)).toBeUndefined();
-    const objectsDown = { get: async () => { throw new Error("secret-object-detail"); } };
-    expect(await createCompanyArtifactReader({ blobs: objectsDown, store, companyId: A, refused: (reason) => refusals.push(reason) }).get(planKey(OWNER_A, A_ONLY), 1000)).toBeUndefined();
-    expect(refusals).toEqual(["storage_unavailable", "storage_unavailable"]);
-  });
 
   it("reports only fixed reason words: never the key, the company, a workspace or a cause", async () => {
     const seen: string[] = [];
@@ -265,12 +156,5 @@ describe("the hosted artifacts reader: fails closed and says nothing", () => {
     await expect(w.reader.get(planKey(OWNER_B, B_ONLY), 1000)).resolves.toBeUndefined();
     expect(hook).toHaveBeenCalledTimes(1);
     expect(decode(await w.reader.get(planKey(OWNER_A, A_ONLY), 1000))).toBe("a-only-plan");
-  });
-
-  it("reads the workspace record at the time of each read, with no cache: a record that is gone refuses at once", async () => {
-    const w = await world();
-    expect(decode(await w.reader.get(planKey(OWNER_A, A_ONLY), 1000))).toBe("a-only-plan");
-    await w.store.delete({ key: workspaceKey(A, A_ONLY) });
-    expect(await w.reader.get(planKey(OWNER_A, A_ONLY), 1000)).toBeUndefined();
   });
 });

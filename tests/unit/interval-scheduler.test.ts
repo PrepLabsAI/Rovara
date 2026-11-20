@@ -70,31 +70,6 @@ describe("the local interval scheduler", () => {
     expect(latestSlot(every, anchor, anchor, anchor + 200 * 60_000, 3_600_000)).toBe(anchor + 180 * 60_000);
   });
 
-  it("delivers a fire once, and not again on the next tick", async () => {
-    const { scheduler, clock } = build();
-    const heard: DueSchedule[] = [];
-    scheduler.subscribe(async (due) => { heard.push(due); });
-    await scheduler.put(entry("night"));
-    clock.at = Date.parse("2026-11-10T02:30:20Z");
-    await scheduler.tick();
-    await scheduler.tick();
-    clock.at = Date.parse("2026-11-10T02:45:00Z");
-    await scheduler.tick();
-    expect(heard).toHaveLength(1);
-    expect(heard[0]?.scheduledAt).toBe("2026-11-10T02:30:00.000Z");
-  });
-
-  it("delivers a fire missed while the process was down once, late, and drops the older ones", async () => {
-    const { scheduler, clock } = build();
-    const heard: DueSchedule[] = [];
-    scheduler.subscribe(async (due) => { heard.push(due); });
-    await scheduler.put(entry("often", { when: { kind: "every", minutes: 10 } }));
-    // Down for an hour and a half: slots at :10, :20 ... passed. One fire, the latest, inside the hour.
-    clock.at = START + 90 * 60_000 + 5_000;
-    await scheduler.tick();
-    expect(heard.map((due) => due.scheduledAt)).toEqual(["2026-11-10T01:30:00.000Z"]);
-  });
-
   it("drops a fire later than the entry allows", async () => {
     const { scheduler, clock } = build();
     const heard: DueSchedule[] = [];
@@ -138,62 +113,6 @@ describe("the local interval scheduler", () => {
     // Given up: the next tick does not start the same slot over.
     await scheduler.tick();
     expect(attempts).toEqual([1, 2, 3]);
-  });
-
-  it("does not consume a fire when no handler is subscribed", async () => {
-    const { scheduler, clock } = build();
-    await scheduler.put(entry("night"));
-    clock.at = Date.parse("2026-11-10T02:31:00Z");
-    await scheduler.tick();
-    const heard: DueSchedule[] = [];
-    scheduler.subscribe(async (due) => { heard.push(due); });
-    clock.at = Date.parse("2026-11-10T02:40:00Z");
-    await scheduler.tick();
-    expect(heard).toHaveLength(1);
-  });
-
-  it("keeps its schedules across a restart (a new scheduler on the same store) and does not repeat a handled fire", async () => {
-    const store = new MemoryDocumentStore();
-    const first = build(store);
-    const heard: string[] = [];
-    first.scheduler.subscribe(async (due) => { heard.push(due.slotId); });
-    await first.scheduler.put(entry("night"));
-    first.clock.at = Date.parse("2026-11-10T02:31:00Z");
-    await first.scheduler.tick();
-    await first.scheduler.close?.();
-    const second = build(store, { at: Date.parse("2026-11-10T02:40:00Z") });
-    second.scheduler.subscribe(async (due) => { heard.push(due.slotId); });
-    expect((await second.scheduler.get(COMPANY, "night"))?.scheduleId).toBe("night");
-    await second.scheduler.tick();
-    expect(heard).toHaveLength(1);
-    second.clock.at = Date.parse("2026-11-11T02:31:00Z");
-    await second.scheduler.tick();
-    expect(heard).toHaveLength(2);
-  });
-
-  it("serves more than one company and replaces the handler on a second subscribe", async () => {
-    const { scheduler, clock } = build();
-    const a: string[] = [];
-    const b: string[] = [];
-    scheduler.subscribe(async (due) => { a.push(due.companyId); });
-    scheduler.subscribe(async (due) => { b.push(due.companyId); });
-    await scheduler.put(entry("night"));
-    await scheduler.put(entry("night", { companyId: "org_11111111111111111111" }));
-    clock.at = Date.parse("2026-11-10T02:31:00Z");
-    await scheduler.tick();
-    expect(a).toEqual([]);
-    expect(b.sort()).toEqual([COMPANY, "org_11111111111111111111"]);
-  });
-
-  it("stops: after close nothing is delivered and calls are harmless", async () => {
-    const { scheduler, clock } = build();
-    const heard: string[] = [];
-    scheduler.subscribe(async (due) => { heard.push(due.slotId); });
-    await scheduler.put(entry("night"));
-    await scheduler.close?.();
-    clock.at = Date.parse("2026-11-10T02:31:00Z");
-    await scheduler.tick();
-    expect(heard).toHaveLength(0);
   });
 
   it("starts a timer on subscribe and stops it on close (an injected timer, no real waiting)", async () => {

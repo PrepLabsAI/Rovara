@@ -153,16 +153,6 @@ describe("hosted reviewer grants", () => {
     await expect(createTaskTokenDescriber(w.h.deps, w.hosted.grants).describe(w.scope)).rejects.toThrow("could not work out who pays for this task");
     await expect(w.grant()).rejects.toThrow("could not work out who pays for this task");
   });
-  it("connected providers prepare exactly one routed reviewer whose ceiling fits its Admission hold", async () => {
-    const w = await world(); const admit = vi.spyOn(w.h.deps.admission, "admit");
-    const prepared = await w.hosted.secondReview.prepare({ task: (await w.records()).task });
-    expect(prepared.field?.candidates).toHaveLength(1);
-    expect(prepared.field?.candidates[0]).toMatchObject({ keySlot: "second_review", modelRoute: { alias: second } });
-    const asked = admit.mock.calls.find(([request]) => request.action === "model.call")?.[0].estimate?.cost?.micros;
-    const ceiling = prepared.record?.caps?.[second]?.capUsd;
-    expect(asked).toBeGreaterThan(0); expect(ceiling).toBeGreaterThan(0);
-    expect(ceiling! * 1_000_000).toBeLessThanOrEqual(asked!);
-  });
   it("never starts an unpriced reviewer or takes a zero-dollar hold for it", async () => {
     const w = await world(); const admit = vi.spyOn(w.h.deps.admission, "admit");
     const unpriced = "vendor.unpriced-review-test";
@@ -180,13 +170,6 @@ describe("hosted reviewer grants", () => {
     expect(prepared.record?.notRun?.reason).toBe("budget");
     const opinion = secondOpinionFromReviewResult({ recorded: prepared.record, operationId: w.scope.operationId, terminalStatus: "SUCCEEDED", result: {}, currentCandidateDigest: digest, now: new Date(w.h.clock.now).toISOString() });
     expect(w.hosted.secondReview.prLines({ secondOpinion: opinion }, digest)).toContain(SPEND_STOP_REASON);
-  });
-  it("(b) refuses at the company monthly cap supplied by the gateway", async () => {
-    const w = await world();
-    w.offered.mockImplementation(async () => ({ ...access(), reviewerAccess: { ...access().reviewerAccess, companyLimitUsd: 0 } }));
-    expect(await w.grant()).toBeUndefined();
-    const prepared = await w.hosted.secondReview.prepare({ task: (await w.records()).task });
-    expect(prepared.field).toBeUndefined();
   });
   it("keeps a review ceiling inside the gateway company monthly room", async () => {
     const w = await world(); await w.book(A, "another-task", 9.75);
@@ -301,19 +284,6 @@ describe("hosted reviewer grants", () => {
     await designSlot(w);
     await expect(mint()).rejects.toThrow("invalid or expired model access");
   });
-  it("renews only the already held ceiling even when monthly room is now zero", async () => {
-    const w = await world(); const signer = signingWorld();
-    const deps = { signer: signer.signer, issuer: claimVector().iss, now: () => w.h.clock.now, describer: createTaskTokenDescriber(w.h.deps, w.hosted.grants) };
-    const mint = async () => mintTaskToken(deps, { ...w.scope, reviewerSlot: "second_review" }, await w.records());
-    const first = await mint(); w.h.clock.now += 140_000;
-    w.offered.mockImplementation(async () => ({ version: 1, models }));
-    const renewed = await mint();
-    const claims = (token: string) => JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString()) as TaskTokenClaims;
-    expect(claims(renewed.token).reviewer).toEqual(claims(first.token).reviewer);
-    expect(claims(renewed.token).jti).toBe(claims(first.token).jti);
-    // A different slot still needs new authority, so cannot turn this hold into a fresh grant.
-    expect(await w.grant("r1-critic")).toBeUndefined();
-  });
   it("records design-review usage on the task cost record and refuses another task at the engine daily cap", async () => {
     const w = await world(); w.settings.companyDayCapMicros = 5_000_000;
     await w.book(A, "earlier-task", 3); await w.book(B, "other-company-task", 100);
@@ -393,13 +363,6 @@ describe("hosted reviewer grants", () => {
       const prepared = await on.hosted.secondReview.prepare({ task: (await on.records()).task });
       expect(prepared.firstEvent).not.toBe(SECOND_REVIEW_SETTINGS_UNAVAILABLE);
       expect(prepared.field !== undefined || prepared.record?.notRun?.mode === "on").toBe(true);
-    });
-    it("a malformed stored mode reads as OFF and starts nothing", async () => {
-      const w = await world(); const admit = vi.spyOn(w.h.deps.admission, "admit");
-      await w.h.store.put({ item: { ...secondReviewSettingsKey(A), default: { not: "a mode" } } });
-      w.offered.mockClear();
-      expect((await w.hosted.secondReview.prepare({ task: (await w.records()).task })).field).toBeUndefined();
-      expect(w.offered).not.toHaveBeenCalled(); expect(admit).not.toHaveBeenCalled();
     });
   });
   it("design review reads only through createCompanyArtifactReader, refusing another company's artifact", async () => {

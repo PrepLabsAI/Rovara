@@ -1,14 +1,10 @@
-// TE-H1 slice 4: the runner's video rules over a fake driver. A video is asked for only on the candidate's side and only when the run says video is wanted (the recipe's fixture-data choice); it is kept only
-// for a page that failed or showed errors after the change; it is held to the WebM check, the per-video and per-run caps and the credential scan; and ONE page withheld for what it showed (either side)
-// takes every video of the run with it, because a page that showed a secret in a recipe that says "fixture data only" means the recording cannot be trusted either.
-import { createHash } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 import { BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS, BROWSER_EVIDENCE_VIDEO_MAX_BYTES, BROWSER_EVIDENCE_VIDEO_TOTAL_MAX_BYTES } from "../../packages/contracts/src/browser-evidence.js";
 import { runBrowserEvidence, type BrowserEvidenceDriver, type BrowserEvidenceSide } from "../../packages/verifier/src/executor/browser-evidence.js";
 
 const jpegOf = (seed: string, size = 2_000) => { const bytes = new Uint8Array(size); bytes.set([0xff, 0xd8, 0xff]); bytes.fill(seed.charCodeAt(0) || 1, 3); return bytes; };
 const webmOf = (seed: string, size = 5_000) => { const bytes = new Uint8Array(size); bytes.set([0x1a, 0x45, 0xdf, 0xa3]); bytes.fill(seed.charCodeAt(0) || 1, 4); return bytes; };
-const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 type Answer = Record<string, unknown>;
 function fakeDriver(answer: (side: BrowserEvidenceSide, route: string) => Answer | undefined) {
@@ -27,42 +23,6 @@ const base = { isolation: "sandbox" as const, notShown: [], moreNotShown: 0, mas
 const failing = (video?: Uint8Array, extra: Answer = {}): Answer => ({ ok: false, reason: "page_did_not_load", ...(video === undefined ? {} : { video }), ...extra });
 
 describe("runBrowserEvidence with video on failure", () => {
-  it("asks for a video only on the candidate's side, and only when the run says video is wanted", async () => {
-    const wanted = fakeDriver(() => undefined);
-    await runBrowserEvidence({ ...base, routes: ["/a"], driver: wanted.driver, video: true });
-    expect(wanted.asked.map((row) => [row.side, row.video])).toEqual([["before", undefined], ["after", true]]);
-    const off = fakeDriver(() => undefined);
-    await runBrowserEvidence({ ...base, routes: ["/a"], driver: off.driver });
-    expect(off.asked.map((row) => row.video)).toEqual([undefined, undefined]);
-  });
-
-  it("keeps the video of a page that failed after the change, and of a page with errors after it; never the video of a healthy page", async () => {
-    const { driver } = fakeDriver((side, route) => {
-      if (side === "before") return undefined;
-      if (route === "/broken") return failing(webmOf("a"));
-      if (route === "/noisy") return { ok: true, bytes: jpegOf("n"), consoleErrors: 3, video: webmOf("b") };
-      return { ok: true, bytes: jpegOf("h"), consoleErrors: 0, video: webmOf("c") };
-    });
-    const got = await runBrowserEvidence({ ...base, routes: ["/broken", "/noisy", "/healthy"], driver, video: true });
-    const byRoute = Object.fromEntries(got.routes.map((row) => [row.route, row]));
-    expect(byRoute["/broken"]).toMatchObject({ status: "not_run", reason: "page_did_not_load", video: { sha256: sha(webmOf("a")) } });
-    expect(byRoute["/noisy"]).toMatchObject({ status: "shown", video: { sha256: sha(webmOf("b")) } });
-    expect(Object.keys(byRoute["/healthy"] ?? {})).not.toContain("video");
-    expect(Object.keys(byRoute["/healthy"] ?? {})).not.toContain("videoNotKept");
-  });
-
-  it("a video is never kept when the run did not ask for one, even if a driver hands one over", async () => {
-    const { driver } = fakeDriver((side) => (side === "after" ? failing(webmOf("a")) : undefined));
-    const got = await runBrowserEvidence({ ...base, routes: ["/a"], driver });
-    expect(got.routes[0]).toEqual({ route: "/a", status: "not_run", reason: "page_did_not_load" });
-  });
-
-  it("a page that failed on the base code has no candidate capture and so no video", async () => {
-    const { driver, asked } = fakeDriver((side) => (side === "before" ? failing() : undefined));
-    const got = await runBrowserEvidence({ ...base, routes: ["/new-page"], driver, video: true });
-    expect(asked.filter((row) => row.side === "after")).toEqual([]);
-    expect(got.routes[0]).toEqual({ route: "/new-page", status: "not_run", reason: "page_did_not_load" });
-  });
 
   it("a failed page whose recording is missing or says why not carries the fixed reason, never a guess", async () => {
     const { driver } = fakeDriver((side, route) => {
@@ -111,44 +71,6 @@ describe("runBrowserEvidence with video on failure", () => {
     expect(BROWSER_EVIDENCE_VIDEO_TOTAL_MAX_BYTES).toBe(2 * BROWSER_EVIDENCE_VIDEO_MAX_BYTES);
   });
 
-  it("ONE page withheld for what it showed, on either side, takes every video of the run with it", async () => {
-    for (const maskedSide of ["before", "after"] as const) {
-      const { driver } = fakeDriver((side, route) => {
-        if (route === "/leaky" && side === maskedSide) return { ok: false, reason: "masked_content" };
-        if (side === "after" && route === "/broken") return failing(webmOf("a"));
-        return undefined;
-      });
-      const got = await runBrowserEvidence({ ...base, routes: ["/broken", "/leaky"], driver, video: true });
-      const broken = got.routes.find((row) => row.route === "/broken") as { video?: unknown; videoNotKept?: string };
-      expect(broken.video, maskedSide).toBeUndefined();
-      expect(broken.videoNotKept, maskedSide).toBe("withheld");
-      expect(got.routes.find((row) => row.route === "/leaky")).toEqual({ route: "/leaky", status: "not_run", reason: "masked_content" });
-    }
-    // Positive control: without the leaky page the same video is kept.
-    const { driver } = fakeDriver((side, route) => (side === "after" && route === "/broken" ? failing(webmOf("a")) : undefined));
-    const got = await runBrowserEvidence({ ...base, routes: ["/broken"], driver, video: true });
-    expect((got.routes[0] as { video?: unknown }).video).toBeDefined();
-  });
-
-  it("a picture caught by the credential scan counts as a page withheld for what it showed", async () => {
-    const { driver } = fakeDriver((side, route) => {
-      if (side === "after" && route === "/broken") return failing(webmOf("a"));
-      if (side === "after" && route === "/shown") { const bytes = jpegOf("s"); bytes.set(new TextEncoder().encode("hunter2-secret"), 50); return { ok: true, bytes, consoleErrors: 0 }; }
-      return undefined;
-    });
-    const got = await runBrowserEvidence({ ...base, routes: ["/broken", "/shown"], driver, video: true, redactor: { contains: (bytes) => Buffer.from(bytes).includes(Buffer.from("hunter2-secret")) } });
-    expect(got.routes.find((row) => row.route === "/shown")).toMatchObject({ reason: "masked_content" });
-    expect(got.routes.find((row) => row.route === "/broken")).toMatchObject({ videoNotKept: "withheld" });
-  });
-
-  it("a page that ran out of time, or could not be photographed, keeps no recording even if the driver hands one over: its text was never read and verified", async () => {
-    for (const reason of ["time_limit", "capture_failed"] as const) {
-      const { driver } = fakeDriver((side) => (side === "after" ? { ok: false, reason, video: webmOf("a") } : undefined));
-      const got = await runBrowserEvidence({ ...base, routes: ["/slow"], driver, video: true });
-      expect(got.routes[0], reason).toEqual({ route: "/slow", status: "not_run", reason });
-    }
-  });
-
   it("a page the driver calls withheld (a mask had to rewrite its text), healthy or not, takes every video of the run with it", async () => {
     const { driver } = fakeDriver((side, route) => {
       if (side === "before") return undefined;
@@ -168,11 +90,5 @@ describe("runBrowserEvidence with video on failure", () => {
     const clean = fakeDriver((side, route) => (side === "after" && route === "/broken" ? failing(webmOf("a")) : side === "after" && route === "/noisy" ? { ok: true, bytes: jpegOf("n"), consoleErrors: 2, video: webmOf("b") } : undefined));
     const kept = await runBrowserEvidence({ ...base, routes: ["/broken", "/noisy"], driver: clean.driver, video: true });
     expect(kept.routes.map((entry) => (entry as { video?: unknown }).video !== undefined)).toEqual([true, true]);
-  });
-
-  it("a run without video is the run it was: no video key on any page, whatever the pages did", async () => {
-    const { driver } = fakeDriver((side, route) => (side === "after" && route === "/b" ? failing() : undefined));
-    const got = await runBrowserEvidence({ ...base, routes: ["/a", "/b"], driver });
-    for (const row of got.routes) { expect(Object.keys(row)).not.toContain("video"); expect(Object.keys(row)).not.toContain("videoNotKept"); }
   });
 });

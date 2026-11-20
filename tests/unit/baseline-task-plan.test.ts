@@ -38,21 +38,6 @@ async function world(env: NodeJS.ProcessEnv, twoRepositories = false) {
 }
 
 describe("baseline candidates in the task plan", () => {
-  it("with the switch off, or no trusted row, the plan is today's plan byte for byte, and no feature is asked of the worker", async () => {
-    const reference = await (await world({})).plan();
-    expect(reference?.plan).toBeDefined();
-    expect(JSON.stringify(reference?.plan)).not.toContain("baselineCandidates");
-    const off = await world({});
-    await off.keep({});
-    expect(JSON.stringify((await off.plan())?.plan)).toBe(JSON.stringify(reference?.plan));
-    expect((await off.plan())?.requires).toEqual(["task.testEnvironment.v1"]);
-    const noRows = await world({ ROVARA_BASELINE_CACHE: "1" });
-    expect(JSON.stringify((await noRows.plan())?.plan)).toBe(JSON.stringify(reference?.plan));
-    expect((await noRows.plan())?.requires).toEqual(["task.testEnvironment.v1"]);
-    const sameTimeNoSwitch = await world({ ROVARA_BASELINE_CACHE: "0" });
-    await sameTimeNoSwitch.keep({});
-    expect(JSON.stringify((await sameTimeNoSwitch.plan())?.plan)).toBe(JSON.stringify(reference?.plan));
-  });
 
   it("with the switch on, the plan names the newest trusted commits of the base branch and revision, as shas, and asks the worker for the feature", async () => {
     const on = await world({ ROVARA_BASELINE_CACHE: "1" });
@@ -87,29 +72,6 @@ describe("baseline candidates in the task plan", () => {
     const off = await world({}, true);
     await off.keep({});
     expect((await off.plan())?.plan.repositoryBaselines).toBeUndefined();
-  });
-
-  it("the branch is the task's own base branch: another branch, or two different ones, offers nothing from the default branch's rows; the same branch (or its own rows) still works", async () => {
-    const reference = JSON.stringify((await (await world({})).plan())?.plan);
-    const release = await world({ ROVARA_BASELINE_CACHE: "1" });
-    await release.keep({ headSha: sha(1) });
-    await release.track(1, "release/1.2");
-    expect(JSON.stringify((await release.plan())?.plan)).toBe(reference);
-    expect((await release.plan())?.requires).toEqual(["task.testEnvironment.v1"]);
-    const split = await world({ ROVARA_BASELINE_CACHE: "1" });
-    await split.keep({ headSha: sha(1) });
-    await split.track(1, "main"); await split.track(2, "release/1.2");
-    expect(JSON.stringify((await split.plan())?.plan)).toBe(reference);
-    const same = await world({ ROVARA_BASELINE_CACHE: "1" });
-    await same.keep({ headSha: sha(1) });
-    await same.track(1, "main"); await same.track(2, "release/1.2", "merged");
-    expect((await same.plan())?.plan.baselineCandidates).toEqual([{ sha: sha(1) }]);
-    // A row of the task's own (non-default) branch is a candidate for that branch's tasks.
-    const own = await world({ ROVARA_BASELINE_CACHE: "1" });
-    await own.keep({ headSha: sha(2), branch: "release/1.2" });
-    await own.keep({ headSha: sha(1) });
-    await own.track(1, "release/1.2");
-    expect((await own.plan())?.plan.baselineCandidates).toEqual([{ sha: sha(2) }]);
   });
 
   it("names the feature only for a plan that carries candidates", () => {

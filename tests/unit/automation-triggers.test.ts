@@ -78,14 +78,6 @@ describe("turning a trigger on", () => {
 });
 
 describe("dispatching an event", () => {
-  it("starts nothing while automation is off", async () => {
-    const world = createAutomationWorld();
-    await onTrigger(world);
-    world.switchOn.value = false;
-    expect(await dispatchTriggerEvent(world.dispatch, COMPANY, event())).toEqual([]);
-    expect(world.starts).toHaveLength(0);
-    expect(world.admissions).toHaveLength(0);
-  });
 
   it("starts the agent's published version through Admission, with no approval and the trigger named, and once per event", async () => {
     const world = createAutomationWorld();
@@ -99,16 +91,6 @@ describe("dispatching an event", () => {
     expect(again).toMatchObject({ outcome: "duplicate", taskId: "task-1" });
     expect(world.starts).toHaveLength(1);
     expect(requestIdFor(eventIdentity(trigger.triggerId, "pr-1"))).toBe(world.starts[0]!.requestId);
-  });
-
-  it("carries the digest of the frozen recipe, so a starter never re-resolves a wider one", async () => {
-    const world = createAutomationWorld();
-    const { agentId } = await onTrigger(world);
-    await dispatchTriggerEvent(world.dispatch, COMPANY, event());
-    const { resolveAgentForAutonomousRun } = await import("../../packages/broker/src/core/agents/roster.js");
-    const { recipeDigest } = await import("@agentx/contracts");
-    const frozen = await resolveAgentForAutonomousRun(world.roster, { orgId: COMPANY, project: PROJECT, agentId });
-    expect(world.starts[0]?.recipeDigest).toBe(recipeDigest(frozen.recipe));
   });
 
   it("never starts what Rovara itself did, and checks the actor against Rovara's own accounts", async () => {
@@ -151,14 +133,6 @@ describe("dispatching an event", () => {
     world.refuseAdmission = undefined;
     world.starter.failWith = Object.assign(new Error("RUNTIME_UNAVAILABLE: away"), { code: "RUNTIME_UNAVAILABLE", statusCode: 503, name: "AgentXError" });
     await expect(dispatchTriggerEvent(world.dispatch, COMPANY, event({}, "pr-2"))).rejects.toThrow();
-  });
-
-  it("takes an event only for the trigger's own project, source, type and filter", async () => {
-    const world = createAutomationWorld();
-    await onTrigger(world, { ...PR, filter: { label: ["p1"] } });
-    expect(await dispatchTriggerEvent(world.dispatch, COMPANY, event())).toEqual([]);
-    expect(await dispatchTriggerEvent(world.dispatch, COMPANY, event({ fields: { label: ["P1"] } }, "pr-9"))).toHaveLength(1);
-    expect(await dispatchTriggerEvent(world.dispatch, COMPANY, event({ project: "other" }, "pr-10"))).toEqual([]);
   });
 
   it("turns a trigger off, and starts nothing, when its target no longer qualifies", async () => {

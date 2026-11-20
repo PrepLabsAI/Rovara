@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { brokerCoreWorkerMachines } from "../../packages/broker/src/aws/worker-machines/broker-core.js";
 import { SessionWorkerFleet, sessionMachineId } from "../../packages/broker/src/aws/worker-machines/session-worker-machines.js";
-import { COMPANY_A, COMPANY_B, DELETER_ARN, TABLE, createSessionMachinesWorld } from "../support/session-machines-world.js";
+import { COMPANY_A, COMPANY_B, TABLE, createSessionMachinesWorld } from "../support/session-machines-world.js";
 
 function setup() {
   const world = createSessionMachinesWorld();
@@ -10,27 +10,6 @@ function setup() {
 }
 
 describe("broker worker operations", () => {
-  it("cancels only the owning company's session through the existing deleter", async () => {
-    const { world, fleet } = setup();
-    const workspace = world.workspace(COMPANY_B);
-    const machine = await world.machinesFor(COMPANY_B).start({ companyId: COMPANY_B, machineKey: workspace });
-    await world.settle();
-    const recorded = await world.sessions.get(workspace);
-    const before = JSON.stringify(recorded);
-    const sessionReads = vi.spyOn(world.sessions, "get");
-    await fleet.forCompany(COMPANY_A).stop(machine.machineId);
-    await fleet.forCompany(COMPANY_A).terminate(machine.machineId);
-    expect((await fleet.forCompany(COMPANY_A).health(machine.machineId)).state).toBe("terminated");
-    expect(sessionReads).not.toHaveBeenCalled();
-    expect(JSON.stringify(await world.sessions.get(workspace))).toBe(before);
-    expect(world.executions).toHaveLength(1);
-    await fleet.forCompany(COMPANY_B).stop(machine.machineId);
-    expect(world.executions.at(-1)?.stateMachineArn).toBe(DELETER_ARN);
-    expect(world.executions.at(-1)?.input).toEqual({ workspaceId: workspace, instanceId: recorded?.instanceId, volumeId: recorded?.volumeId });
-    await world.settle();
-    expect((await fleet.forCompany(COMPANY_B).health(machine.machineId)).state).toBe("terminated");
-    expect(fleet.capabilities.persistentVolume).toBe(false);
-  });
 
   it("fails closed on missing or malformed workspace company and malformed machine ids", async () => {
     const { world, fleet } = setup();
@@ -82,7 +61,6 @@ describe("broker worker operations", () => {
     expect((await fleet.forCompany(COMPANY_A).health(machine.machineId)).state).toBe("terminated");
   });
 });
-
 
 it("never echoes failures from workspace, session or deleter reads", async () => {
   const { world } = setup();

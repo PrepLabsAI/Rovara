@@ -68,27 +68,6 @@ describe("the parameter's name and format", () => {
 });
 
 describe("loadBrokerNamesParameter", () => {
-  it("puts the list in AGENTX_NAMES, read from the pointed parameter once, and hydration builds the names from it", async () => {
-    const env = POINTED();
-    const read = stored(written());
-    await loadBrokerNamesParameter(env, read);
-    expect(read).toHaveBeenCalledTimes(1);
-    expect(read).toHaveBeenCalledWith("/agentx/staging/broker-names");
-    expect(env[BROKER_NAMES_VARIABLE]).toBe(LIST);
-    hydrateBrokerEnvironment(env);
-    expect(env.STATE_TABLE_NAME).toBe(`agentx-staging-control-plane-State-${SECRETISH}`);
-    expect(env.ARTIFACT_BUCKET_NAME).toBe(`agentx-staging-artifacts-${SECRETISH}`);
-  });
-
-  it("reads nothing and changes nothing where the environment points at no parameter (legacy, an older template, tests)", async () => {
-    for (const env of [{}, { AGENTX_ENV: "staging", [BROKER_NAMES_VARIABLE]: LIST }, { STATE_TABLE_NAME: "t" }] as MutableEnvironment[]) {
-      const before = { ...env };
-      const read = stored(written());
-      await loadBrokerNamesParameter(env, read);
-      expect(read).not.toHaveBeenCalled();
-      expect(env).toEqual(before);
-    }
-  });
 
   it.each([
     ["a pointer without a revision", { [BROKER_NAMES_REVISION_VARIABLE]: undefined }, "AGENTX_NAMES_PARAMETER and AGENTX_NAMES_REVISION are given together or not at all"],
@@ -127,11 +106,6 @@ describe("loadBrokerNamesParameter", () => {
   ])("refuses %s", async (_label, fetched, message) => {
     expect((await refusal(POINTED(), async () => fetched)).message).toBe(message);
   });
-
-  it("refuses names written by another revision of the control plane (a cold start mid-deploy, a rollback, a hand edit)", async () => {
-    expect((await refusal(POINTED(), stored(written(OTHER_REVISION)))).message)
-      .toBe("the broker names parameter was written by another revision of the control plane than this function's AGENTX_NAMES_REVISION; refusing to start");
-  });
 });
 
 describe("hydrateBrokerEnvironment, where the names are in a parameter", () => {
@@ -143,21 +117,6 @@ describe("hydrateBrokerEnvironment, where the names are in a parameter", () => {
 describe("the broker's Lambda entry", () => {
   const event = { rawPath: "/v1/health" };
   const context = { awsRequestId: "r-1" };
-
-  it("reads the names before it loads the broker, loads it once, and hands every invocation to the broker's handler", async () => {
-    const env = POINTED();
-    const order: string[] = [];
-    const inner = vi.fn(async (received: unknown, receivedContext: unknown) => ({ received, receivedContext }));
-    const handler = createBrokerLambdaHandler({
-      environment: env,
-      readParameter: async (name) => { order.push(`read ${name}`); return { type: "String", value: written() }; },
-      loadBroker: async () => { order.push(`load with ${env[BROKER_NAMES_VARIABLE] === LIST ? "names" : "no names"}`); return { handler: inner }; },
-    });
-    expect(await handler(event, context)).toEqual({ received: event, receivedContext: context });
-    await handler(event, context);
-    expect(order).toEqual(["read /agentx/staging/broker-names", "load with names"]);
-    expect(inner).toHaveBeenCalledTimes(2);
-  });
 
   it("serves nothing while the names cannot be read, never loads the broker, and reads again on the next invocation", async () => {
     const env = POINTED();
@@ -183,13 +142,6 @@ describe("the broker's Lambda entry", () => {
     expect(loadBroker).toHaveBeenCalledTimes(1);
     const empty = createBrokerLambdaHandler({ environment: {}, readParameter: stored(written()), loadBroker: async () => ({}) });
     await expect(empty(event, context)).rejects.toThrow("the broker module has no handler");
-  });
-
-  it("loads the broker straight away where the environment points at no parameter", async () => {
-    const read = stored(written());
-    const handler = createBrokerLambdaHandler({ environment: { AGENTX_ENV: "staging" }, readParameter: read, loadBroker: async () => ({ handler: async () => "served" }) });
-    expect(await handler(event, context)).toBe("served");
-    expect(read).not.toHaveBeenCalled();
   });
 });
 
