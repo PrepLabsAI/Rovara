@@ -61,6 +61,8 @@ let longestNamed: TemplateJson;
 const LONGEST_ENV = "headroom-longest-env"; // 20 characters: the contract maximum.
 const ARN_ESTIMATE_CONTEXT = "@aws-cdk/aws-iam.arnSizeEstimate";
 let foundation: TemplateJson;
+/** The named control-plane template as synthesized, before any test stripper (SIGNIN-STATE-TABLE reads the sign-in function's own variables). */
+let namedRaw: TemplateJson;
 
 const controlPlane = (app: ReturnType<typeof buildAgentXApp>, name: string) =>
   Template.fromStack(app.node.children.find((child): child is Stack => Stack.isStack(child) && child.stackName === name)!).toJSON() as TemplateJson;
@@ -143,7 +145,9 @@ const SAMPLE_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111122223333:table/agentx-s
 
 beforeAll(() => {
   const app = buildAgentXApp({ agentxEnv: "staging" });
-  const full = withoutSlackCompanyMode(controlPlane(app, "agentx-staging-control-plane")) as TemplateJson;
+  const raw = controlPlane(app, "agentx-staging-control-plane");
+  namedRaw = structuredClone(raw);
+  const full = withoutSlackCompanyMode(raw) as TemplateJson;
   namedWithSignInGrants = structuredClone(full);
   // DEC 254zzz33: the sign-in function's company grants (SignInCompanyGrants) are asserted exactly by tests/support/company-import-reads-template.ts and taken out, so every pin
   // below holds what it held before (rule D); tests/contract/signin-company-grants.test.ts runs each code path under the full synthesized policy.
@@ -261,6 +265,17 @@ describe("developer sign-in infrastructure (named environments)", () => {
       "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#AUDIT"] },
       Null: { "dynamodb:LeadingKeys": "false" },
     });
+  });
+
+  // SIGNIN-STATE-TABLE (0.5.34): the Slack company switch once turned this variable into an Fn::If to "" while off, and sign-in's init needs the real table with CompanySignIn on.
+  it.each([["named", () => namedRaw], ["legacy (production)", () => legacy]])("gives the sign-in function the real State table name in the %s template, whatever the Slack company switch", (_label, template) => {
+    const t = template();
+    const [stateId] = ofType(t, "AWS::DynamoDB::Table").find(([logicalId]) => logicalId.startsWith("State"))!;
+    const variables = (t.Resources[functionId(t, "DeveloperSignInFunction")]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(variables.STATE_TABLE_NAME).toEqual({ Ref: stateId });
+    expect(JSON.stringify(variables.STATE_TABLE_NAME)).not.toContain("Fn::If");
+    // The Slack company switch stays its own variable, still conditioned.
+    expect(JSON.stringify(variables.SLACK_COMPANY_WORKSPACES)).toContain("Fn::If");
   });
 
   it("lets only the broker invoke DeveloperIdentity directly, and API Gateway only on /v1/auth/*", () => {

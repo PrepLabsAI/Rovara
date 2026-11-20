@@ -312,8 +312,10 @@ describe("the named TEST proof-only installation gate", () => {
         // #1129, #1131: the company layer, GitHub sign-in, the company-secrets role and the reliability parts in the legacy (production) template too (no step-up: DEC 254zzz73).
         // #1149: re-pinned for the legacy broker's packed environment (names parameter, AGENTX_SETTINGS, the names parameter's read).
         // #1148: re-pinned for the core engine in the legacy template (CoreEngine off by default, the /v1/app route, saved environment images, the core's keys).
-        withRoute: "5e7b09b249041b80ebbea3cfd93e43a30ba3ffa6aa885f90b38d5c370c88357b",
-        withoutRoute: "40317b61610d9bba71d85e977652cb5b022e28bf23d3bc51147249fcf03609d0",
+        // SIGNIN-STATE-TABLE: re-pinned for ONE change: the sign-in function's STATE_TABLE_NAME is the plain Ref to State instead of an Fn::If on SlackCompanyModeOn to "" (rule D: with the old
+        // Fn::If put back, the old pins 5e7b09b2... and 40317b61... held). Named and foreign are unchanged (withoutSlackCompanyMode takes the variable out in both forms).
+        withRoute: "e2e5356f32d994932404dd8147336996aa5cd897b89c7e17998e1540848786c1",
+        withoutRoute: "73dec60e0ae54317d76cc9443a59ac1b2df17ae4ae6007650f2b79b7bb8f1ac6",
         beforeStepUpRemoval: undefined,
       },
     ] as const;

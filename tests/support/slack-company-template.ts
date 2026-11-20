@@ -15,7 +15,8 @@ const VARIABLES: ReadonlyArray<readonly [RegExp, readonly string[]]> = [
   // DEC 254zk: the channel API's company factory needs the environment's name too.
   [/^ChannelApiIngress[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "DEVELOPER_SIGNIN_TABLE_NAME", "AGENTX_ENV"]],
   [/^DeveloperTaskNotifierFunction[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "AGENTX_ENV"]],
-  [/^DeveloperSignInFunction[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "STATE_TABLE_NAME"]],
+  // SIGNIN-STATE-TABLE: the sign-in function's STATE_TABLE_NAME is no longer part of the switch; it is checked as the real State table and taken out below.
+  [/^DeveloperSignInFunction[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES"]],
   [/^SessionsReconciler[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "AGENTX_ENV"]],
 ];
 
@@ -67,6 +68,15 @@ export function withoutSlackCompanyMode(input: unknown, options: { proof?: boole
       delete variables[name];
     }
   }
+  // SIGNIN-STATE-TABLE: the sign-in function's own STATE_TABLE_NAME (developer-signin.ts) is always a plain Ref to the State table, whatever this switch says (the company audit write
+  // needs it with company sign-in on). Not part of the switch: checked here and taken out only so the pins that held it out before (rule D) are unchanged.
+  const stateTables = Object.entries(template.Resources).filter(([id, resource]) => resource.Type === "AWS::DynamoDB::Table" && /^State[0-9A-F]{8}$/u.test(id));
+  expect(stateTables).toHaveLength(1);
+  const signIn = Object.entries(template.Resources).filter(([id, resource]) => /^DeveloperSignInFunction[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function");
+  expect(signIn).toHaveLength(1);
+  const signInVariables = (signIn[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+  expect(signInVariables.STATE_TABLE_NAME).toStrictEqual({ Ref: stateTables[0]![0] });
+  delete signInVariables.STATE_TABLE_NAME;
   const broker = Object.entries(template.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")!;
   const brokerVariables = (broker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
   // DEC 254zk: the conditioned switch flag ("1" only with company sign-in on too), not the raw parameter.
