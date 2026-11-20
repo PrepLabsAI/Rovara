@@ -372,9 +372,11 @@ function enterableByOthers(directory: string): boolean {
  * because later steps run git as root and git refuses a repository another user owns.
  */
 export function runTests(runner: Runner, uid: number | undefined = typeof process.getuid === "function" ? process.getuid() : undefined): void {
-  const args = ["test"];
+  // `npm test` leaves out the slow tests that CI runs only at night or when a change reaches them (nightlyOnlyFiles, tests/support/vitest-shared-config.ts);
+  // a release runs them as well, so nothing ships that no run has tested.
+  const commands = [["test"], ["run", "test:nightly"]];
   if (uid !== 0) {
-    runner.run("npm", args);
+    for (const args of commands) runner.run("npm", args);
     return;
   }
   const { uid: testUid, gid, home } = RELEASE_TEST_ACCOUNT;
@@ -383,7 +385,7 @@ export function runTests(runner: Runner, uid: number | undefined = typeof proces
   runner.run("mkdir", ["-p", home]);
   runner.run("chown", ["-R", owner, directory, home]);
   try {
-    runner.runAs({ uid: testUid, gid, env: testEnvironment(process.env, home) }, "npm", args);
+    for (const args of commands) runner.runAs({ uid: testUid, gid, env: testEnvironment(process.env, home) }, "npm", args);
   } finally {
     runner.run("chown", ["-R", "0:0", directory]);
   }
