@@ -104,6 +104,17 @@ The beta account needs, once, before the pipeline's first beta release:
    `npm run release:prod -- --profile <beta-profile> --require-existing-foundation` with
    `AGENTX_MODEL_PROVIDER` and `AGENTX_MODEL_ID` set. Beta has its own Slack, GitHub and Linear
    apps; never point production's at it.
+4. Beta's address, `beta.rovara.dev`, in front of the beta control plane's API:
+
+   ```sh
+   npx cdk deploy AgentXBetaDomain --app 'node infra/dist/bin/agentx.js' \
+     --profile <beta-profile> -c agentxRegion=us-east-1 -c agentxBetaDomain=enabled \
+     --parameters DomainName=beta.rovara.dev --parameters ApiId=<beta control plane API id>
+   ```
+
+   The `rovara.dev` zone is in the release account, so add ACM's validation record there while
+   the deploy waits, then an alias A record for `beta.rovara.dev` to the stack's
+   `RegionalDomainName` (`RegionalHostedZoneId`).
 
 Protect `mainline` in GitHub. The build role can deploy through the CDK bootstrap roles, so push
 access to `mainline` is deploy access. To roll back, revert the change on `mainline`, or run
