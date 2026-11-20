@@ -1,3 +1,4 @@
+import { CORE_CONTEXT_WORKER_ROUTES, coreContextWorkerRouteOf, appRouteOf as contextAppRouteOf, devRouteOf as contextDevRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
 // Lane L12: the core engine's own /v1/app/* routes on the broker's HTTP API (sessions, decision cards, how we work, script tokens, person erase).
 //   - Off (no core entry): every /v1/app/* path on the core's route answers "route not found" and reads nothing; on any other route the broker answers as before (the golden is in
 //     aws-core-root-golden.test.ts).
@@ -553,4 +554,17 @@ it("inventories exactly four worker-only saved image callbacks without exposing 
     expect(devRouteOf("POST", path)).toBeUndefined();
   }
   expect([...APP_ROUTES, ...DEV_ROUTES].some(row => row.path.includes("/v1/internal/"))).toBe(false);
+});
+
+it("inventories the four exact context worker routes without person authority", () => {
+  expect(CORE_CONTEXT_WORKER_ROUTES.map(row => `${row.method} ${row.path}`)).toEqual([
+    "GET /v1/internal/context-tools", "GET /v1/internal/design-review/packet", "POST /v1/internal/context-tools/call", "POST /v1/internal/mcp",
+  ]);
+  for (const row of CORE_CONTEXT_WORKER_ROUTES) {
+    expect(coreContextWorkerRouteOf(row.method, row.path)).toEqual({ ...row, requires: "worker" });
+    expect(coreContextWorkerRouteOf(row.method === "GET" ? "POST" : "GET", row.path)).toBeUndefined();
+    expect(coreContextWorkerRouteOf(row.method, `${row.path}/extra`)).toBeUndefined();
+    expect(contextAppRouteOf(row.method, row.path)).toBeUndefined();
+    expect(contextDevRouteOf(row.method, row.path)).toBeUndefined();
+  }
 });

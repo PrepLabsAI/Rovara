@@ -432,3 +432,14 @@ export const SAVED_ENV_WORKER_ROUTES = [
 export function savedEnvWorkerRouteOf(method: string, path: string): (typeof SAVED_ENV_WORKER_ROUTES)[number] | undefined {
   return SAVED_ENV_WORKER_ROUTES.find(row => row.method === method && new RegExp(`^${row.path.replace(/\{[a-z]+\}/gu, "[^/]+")}$`, "u").test(path));
 }
+
+// Exact worker-only context paths; person scopes never authorize them.
+export const CORE_CONTEXT_WORKER_ROUTES = [
+  { method: "GET", path: "/v1/internal/context-tools", requires: "worker" },
+  { method: "GET", path: "/v1/internal/design-review/packet", requires: "worker" },
+  { method: "POST", path: "/v1/internal/context-tools/call", requires: "worker" },
+  { method: "POST", path: "/v1/internal/mcp", requires: "worker" },
+] as const;
+export function coreContextWorkerRouteOf(method: string, pathname: string): (typeof CORE_CONTEXT_WORKER_ROUTES)[number] | undefined {
+  return CORE_CONTEXT_WORKER_ROUTES.find(row => row.method === method && row.path === pathname);
+}
