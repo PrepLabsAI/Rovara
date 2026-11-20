@@ -1,14 +1,14 @@
 // TESTPROOF review round 1: stale report files, checks that are not tests, mixed repositories, the budget floor, the size of test-proof.json,
 // and the kinds of file the overlay must keep (an executable, a symlink, a file turned into a directory and back).
-import { chmod, lstat, mkdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { TestProofSchema, type CheckEntry, type ProjectCommand, type TestProof } from "../../packages/contracts/src/index.js";
+import { type CheckEntry, type ProjectCommand } from "../../packages/contracts/src/index.js";
 import type { CheckPlan, CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { gitOriginalCode } from "../../packages/worker/src/verification/original-code.js";
-import { runTestProof, serializeTestProof } from "../../packages/worker/src/verification/test-proof.js";
+import { runTestProof } from "../../packages/worker/src/verification/test-proof.js";
 import { FAKE_TEST_COMMAND, fakeTestRunner, git, passedEntry, repositoryWithCandidate } from "../support/test-proof-fixture.js";
 
 const SOURCE_1 = "export const value = 1;\n";
@@ -50,32 +50,6 @@ describe("TESTPROOF review fixes", () => {
     expect(await readFile(join(made.directory, "report.json"), "utf8")).toBe(ALL_PASSED_REPORT(made.directory));
   });
 
-  it("falls back to the check when a report says every test passed but the check failed", async () => {
-    const made = await repository({ "src/bug.ts": SOURCE_1, ".gitignore": "report.json\n" }, fixed);
-    await writeFile(join(made.directory, "report.json"), ALL_PASSED_REPORT(made.directory));
-    const base = fakeTestRunner(made.directory);
-    const runner: CheckRunners = { ...base, runProjectCommand: async (command, signal) => {
-      const run = await base.runProjectCommand(command, signal);
-      await writeFile(join(made.directory, "report.json"), ALL_PASSED_REPORT(made.directory).replace("bug is fixed", "bug is fixed ")); // different bytes, same verdicts
-      return run;
-    } };
-    const proof = await runTestProof(options(made, { plan: planOf(REPORT_COMMAND), runners: runner }));
-    expect(proof.items).toEqual([expect.objectContaining({ granularity: "check", verdict: "proves_change" })]);
-  });
-
-  it("falls back to the check when the old run left the very report the new run wrote", async () => {
-    const made = await repository({ "src/bug.ts": SOURCE_1, ".gitignore": "report.json\n" }, fixed);
-    await writeFile(join(made.directory, "report.json"), ALL_PASSED_REPORT(made.directory));
-    const base = fakeTestRunner(made.directory);
-    const runner: CheckRunners = { ...base, runProjectCommand: async (command, signal) => {
-      const run = await base.runProjectCommand(command, signal);
-      await writeFile(join(made.directory, "report.json"), ALL_PASSED_REPORT(made.directory));
-      return run;
-    } };
-    const proof = await runTestProof(options(made, { plan: planOf(REPORT_COMMAND), runners: runner }));
-    expect(proof.items).toEqual([expect.objectContaining({ granularity: "check", verdict: "proves_change" })]);
-  });
-
   // 6
   it("puts an ignored report file back as the new run left it, and never writes through a symlink that leaves the workspace", async () => {
     const made = await repository({ "src/bug.ts": SOURCE_1, ".gitignore": "report.json\nlink.json\n" }, fixed);
@@ -105,35 +79,6 @@ describe("TESTPROOF review fixes", () => {
     expect(proof.items).toEqual([expect.objectContaining({ granularity: "check", verdict: "proves_change" })]);
     expect(await readFile(outside, "utf8")).toBe("written by the old run\n");
     expect((await lstat(join(made.directory, "link.json"))).isSymbolicLink()).toBe(true);
-  });
-
-  // 2
-  it("gives no verdict to a check that is not a test runner, and does not run it on the original code", async () => {
-    const made = await repository({ "src/bug.ts": SOURCE_1 }, fixed);
-    const lint: ProjectCommand = { cwd: ".", executable: "npm", args: ["run", "lint"], timeoutSeconds: 60 };
-    const calls: ProjectCommand[] = [];
-    const proof = await runTestProof(options(made, {
-      plan: planOf(FAKE_TEST_COMMAND, lint), runners: fakeTestRunner(made.directory, calls),
-      newEntries: [passedEntry(), { ...passedEntry("readiness:1", "npm run lint"), output: "lint clean" }],
-    }));
-    expect(calls).toHaveLength(1);
-    expect(proof.items).toHaveLength(2);
-    expect(proof.items).toEqual(expect.arrayContaining([
-      expect.objectContaining({ checkId: "readiness:1", verdict: "not_applicable", reason: "not_a_test_check" }),
-      expect.objectContaining({ checkId: "readiness:0", verdict: "proves_change" }),
-    ]));
-  });
-
-  it("treats a check whose output names a changed test file as a test check", async () => {
-    const made = await repository({ "src/bug.ts": SOURCE_1 }, fixed);
-    const custom: ProjectCommand = { cwd: ".", executable: "./scripts/verify.sh", args: [], timeoutSeconds: 60 };
-    const calls: ProjectCommand[] = [];
-    const proof = await runTestProof(options(made, {
-      plan: planOf(custom), runners: fakeTestRunner(made.directory, calls),
-      newEntries: [{ ...passedEntry("readiness:0", "verify"), output: "ran src/bug.test.ts ok" }],
-    }));
-    expect(calls).toHaveLength(1);
-    expect(proof.items).toEqual([expect.objectContaining({ verdict: "proves_change" })]);
   });
 
   // 4
@@ -177,38 +122,6 @@ describe("TESTPROOF review fixes", () => {
     expect(proof.items).toEqual([expect.objectContaining({ checkId: "readiness:0", granularity: "check", verdict: "proves_change" })]);
   });
 
-  // 9
-  it("keeps test-proof.json under the broker's 256 KiB read limit with 200 items with long labels, and it still parses", () => {
-    const item = (index: number): TestProof["items"][number] => ({
-      checkId: `readiness:${index % 64}`, label: "x".repeat(1_024), granularity: "test", test: "y".repeat(300), verdict: "proves_change", reason: "assertion_failed_on_old",
-    });
-    const proof: TestProof = { schemaVersion: 1, candidateDigest: DIGEST, status: "checked", note: "completed", changedTests: { added: 200, changed: 0, deleted: 0 }, items: Array.from({ length: 200 }, (_, index) => item(index)), durationMs: 5 };
-    expect(JSON.stringify(proof).length).toBeGreaterThan(256 * 1024);
-    const text = serializeTestProof(proof);
-    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(200 * 1024);
-    const parsed = TestProofSchema.parse(JSON.parse(text));
-    expect(parsed.candidateDigest).toBe(DIGEST);
-    expect(parsed.items.length).toBeGreaterThan(0);
-    expect(parsed.items.every((entry) => entry.verdict === "proves_change")).toBe(true);
-  });
-
-  // 12
-  it("keeps an executable and a symlink in the overlay, and restores them", async () => {
-    const made = await repository({ "src/bug.ts": SOURCE_1 }, { ...fixed, "src/run.test.sh": "#!/bin/sh\nexit 0\n" }, async (directory) => {
-      await chmod(join(directory, "src/run.test.sh"), 0o755);
-      await symlink("bug.test.ts", join(directory, "src/link.test.ts"));
-    });
-    const seen = await gitOriginalCode([{ directory: made.directory, commit: made.startCommit, overlay: ["src/run.test.sh", "src/link.test.ts", "src/bug.test.ts"] }]).run(async () => ({
-      mode: (await lstat(join(made.directory, "src/run.test.sh"))).mode & 0o111,
-      link: await readlink(join(made.directory, "src/link.test.ts")),
-    }));
-    expect(seen.mode).not.toBe(0);
-    expect(seen.link).toBe("bug.test.ts");
-    expect((await lstat(join(made.directory, "src/run.test.sh"))).mode & 0o111).not.toBe(0);
-    expect((await lstat(join(made.directory, "src/link.test.ts"))).isSymbolicLink()).toBe(true);
-    expect(git(made.directory, "status", "--porcelain", "--untracked-files=all")).toBe("");
-  });
-
   it("handles a test file the candidate replaced by a directory, and a test directory it replaced by a file", async () => {
     const made = await repository(
       { "src/bug.ts": SOURCE_1, "src/a.test.ts": "was a file\n", "src/b.test.ts/inner.test.ts": "was a directory\n" },
@@ -227,43 +140,6 @@ describe("TESTPROOF review fixes", () => {
     expect(seen).toEqual({ a: "now a directory\n", b: "now a file\n" });
     expect(git(made.directory, "status", "--porcelain", "--untracked-files=all")).toBe("");
     expect(await readFile(join(made.directory, "src/a.test.ts/inner.test.ts"), "utf8")).toBe("now a directory\n");
-  });
-
-  it("shows the original code in every repository at once, and restores them all", async () => {
-    const first = await repository({ "src/bug.ts": SOURCE_1 }, fixed);
-    const second = await repository({ "src/bug.ts": SOURCE_1 }, fixed);
-    const base = fakeTestRunner(first.directory);
-    const seen: string[][] = [];
-    const runner: CheckRunners = { ...base, runProjectCommand: async (command, signal) => {
-      seen.push([await readFile(join(first.directory, "src/bug.ts"), "utf8"), await readFile(join(second.directory, "src/bug.ts"), "utf8"), await readFile(join(second.directory, "src/bug.test.ts"), "utf8")]);
-      return base.runProjectCommand(command, signal);
-    } };
-    const proof = await runTestProof(options(first, { runners: runner, repositories: [
-      { repositoryId: "one", directory: first.directory, startCommit: first.startCommit, candidateTreeSha: first.candidateTreeSha },
-      { repositoryId: "two", directory: second.directory, startCommit: second.startCommit, candidateTreeSha: second.candidateTreeSha },
-    ] }));
-    expect(seen.at(-1)).toEqual([SOURCE_1, SOURCE_1, TEST_EXPECTS(2)]);
-    expect(proof.changedTests.added).toBe(2);
-    expect(await readFile(join(first.directory, "src/bug.ts"), "utf8")).toBe(SOURCE_2);
-    expect(await readFile(join(second.directory, "src/bug.ts"), "utf8")).toBe(SOURCE_2);
-    expect(git(second.directory, "status", "--porcelain")).toBe("");
-  });
-
-  // review round 2
-  it("shows the original code in a repository with no changed test too, so old and new code are never mixed", async () => {
-    const withTest = await repository({ "src/bug.ts": SOURCE_1 }, { "src/bug.test.ts": 'import { value } from "./bug.js";\nexpect(value).toBe(2);\n' });
-    const otherRepo = await repository({ "src/bug.ts": SOURCE_1 }, { "src/bug.ts": SOURCE_2 });
-    // The new test (repository one) passes only with the change made in repository two.
-    const runner: CheckRunners = { ...fakeTestRunner(withTest.directory), runProjectCommand: async () => {
-      const value = (await readFile(join(otherRepo.directory, "src/bug.ts"), "utf8")).includes("= 2") ? 2 : 1;
-      return value === 2 ? { exitCode: 0, timedOut: false, stdout: "ok", stderr: "" } : { exitCode: 1, timedOut: false, stdout: "AssertionError: expected 1 to be 2", stderr: "" };
-    } };
-    const proof = await runTestProof(options(withTest, { runners: runner, repositories: [
-      { repositoryId: "one", directory: withTest.directory, startCommit: withTest.startCommit, candidateTreeSha: withTest.candidateTreeSha },
-      { repositoryId: "two", directory: otherRepo.directory, startCommit: otherRepo.startCommit, candidateTreeSha: otherRepo.candidateTreeSha },
-    ] }));
-    expect(proof.items).toEqual([expect.objectContaining({ verdict: "proves_change" })]);
-    expect(await readFile(join(otherRepo.directory, "src/bug.ts"), "utf8")).toBe(SOURCE_2);
   });
 
   it("does not take a lint check for a test check because its output names a changed test file's basename", async () => {

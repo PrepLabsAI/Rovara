@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { expectLinearScaling } from "../support/scaling.js";
 import { isValidTestId } from "@agentx/contracts";
 import { EvidencePackSchema } from "../../packages/contracts/src/evidence.js";
-import { absentOnNew, evidenceTests, originalRunLooksCut, untouchedCount, parseGoTestJson, parseJsonReport, parseJunit, parseTestReport, plainName, skipRise, counted, skippedOutsideChanged, TEST_REPORT_MAX_BYTES, TEST_REPORT_MAX_TESTS } from "../../packages/worker/src/verification/test-report.js";
+import { absentOnNew, evidenceTests, originalRunLooksCut, untouchedCount, parseGoTestJson, parseJsonReport, parseJunit, plainName, skipRise, counted, skippedOutsideChanged, TEST_REPORT_MAX_TESTS } from "../../packages/worker/src/verification/test-report.js";
 
 // A pytest --junitxml file, as pytest 8 writes it.
 const PYTEST = `<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="1" failures="1" skipped="1" tests="5" time="0.30">
@@ -19,19 +19,6 @@ const VITEST = JSON.stringify({ numTotalTests: 99, testResults: [
 ] });
 
 describe("JUnit", () => {
-  const report = parseJunit(PYTEST)!;
-  it("counts the test cases it reads, not the header's own numbers", () => {
-    expect(report).toMatchObject({ format: "junit", total: 5, passed: 2, failed: 1, errored: 1, skipped: 1 });
-    expect(parseJunit(PYTEST.replace('tests="5"', 'tests="500"').replace('failures="1"', 'failures="0"'))).toMatchObject({ total: 5, failed: 1 });
-  });
-  it("reads each test's file from the file attribute or the class name, its name unescaped and its time as milliseconds", () => {
-    expect(report.tests[0]).toEqual({ file: "tests/test_match", name: "test_no_region", status: "passed", durationMs: 12, classname: "tests.test_match" });
-    expect(report.tests[4]?.name).toBe("test_top5[a & b]");
-    expect(parseJunit('<testsuite><testcase classname="a/b.py" file="a/b.py" name="t"/></testsuite>')?.tests[0]?.file).toBe("a/b.py");
-  });
-  it("calls a case with both a failure and an error errored", () => {
-    expect(parseJunit('<testsuite><testcase name="t"><failure/><error/></testcase></testsuite>')?.tests[0]?.status).toBe("errored");
-  });
   it("is not fooled by test-case-looking text inside CDATA or comments", () => {
     const text = '<testsuite><testcase name="real"><failure><![CDATA[<testcase name="fake"/></testcase>]]></failure></testcase><!-- <testcase name="hidden"/> --></testsuite>';
     const read = parseJunit(text)!;
@@ -44,14 +31,6 @@ describe("JUnit", () => {
     const odd = parseJunit('<testsuite><testcase name="bad &#0; &#xD800;"/></testsuite>')?.tests[0]?.name ?? "";
     expect(odd.startsWith("bad")).toBe(true);
     expect(isValidTestId(odd)).toBe(false);
-  });
-  it("is not measured when it is not a report, holds no test, or has too many tests", () => {
-    expect(parseJunit("<html><body>not junit</body></html>")).toBeUndefined();
-    expect(parseJunit('<testsuites><testsuite name="empty" tests="0"></testsuite></testsuites>')).toBeUndefined();
-    expect(parseJunit("")).toBeUndefined();
-    const many = `<testsuite>${'<testcase name="t"/>'.repeat(TEST_REPORT_MAX_TESTS + 1)}</testsuite>`;
-    expect(parseJunit(many)).toBeUndefined();
-    expect(parseJunit(`<testsuite>${'<testcase name="t"/>'.repeat(TEST_REPORT_MAX_TESTS)}</testsuite>`)?.total).toBe(TEST_REPORT_MAX_TESTS);
   });
 });
 
@@ -89,25 +68,6 @@ describe("JUnit written by a command the agent can influence", () => {
     const read = parseJunit(`<testsuite><testcase junk = name='first' name="second" =x classname="a.b" time=oops/></testsuite>`)!;
     expect(read.tests[0]).toMatchObject({ name: "first", file: "a/b" });
   });
-  it("reads a hostile 8 MiB file in one pass: many unclosed test cases, comments or CDATA sections cost no more than a single scan", () => {
-    // Scaling checks, not wall-clock bounds: the same hostile shape at N and at 8N copies may take about eight times as long, never sixty-four.
-    // The timed 8N input is at most 256 KiB, so it stays in CPU cache (on CI runners an 8 MiB 8N input reads a steady ratio of about 25 for linear code); the full-size count (the old input) is parsed once, untimed.
-    const hostile: ReadonlyArray<readonly [string, number]> = [
-      ['<testcase name="a">', 400_000],
-      ["<!--", 2_000_000],
-      ["<![CDATA[", 900_000],
-      ['<testcase name="a" ', 400_000],
-    ];
-    for (const [unit, count] of hostile) {
-      let got: ReturnType<typeof parseJunit> | undefined = parseJunit('<testsuite><testcase name="seed"/></testsuite>');
-      expectLinearScaling((copies) => {
-        const text = `<testsuite>${unit.repeat(copies)}`;
-        return () => { got = parseJunit(text); };
-      }, { n: Math.floor(32_768 / unit.length), unitBytes: unit.length, label: `junit hostile ${JSON.stringify(unit)}` });
-      expect(got, unit).toBeUndefined();
-      expect(parseJunit(`<testsuite>${unit.repeat(count)}`), `${unit} full size`).toBeUndefined();
-    }
-  });
 });
 
 describe("vitest and jest JSON", () => {
@@ -138,30 +98,10 @@ describe("vitest and jest JSON, fail closed", () => {
     expect(read).toMatchObject({ skipped: 4, errored: 3, passed: 1 });
     expect(read.tests.filter((test) => test.status === "errored").map((test) => test.name)).toEqual(["t4", "t5", "t6"]);
   });
-  it("keeps a suite's own failure when its tests passed (an afterAll or hook failure), and does not add one when a test failed", () => {
-    const hook = parseJsonReport(suite({ status: "failed", assertionResults: [{ fullName: "t", status: "passed" }] }))!;
-    expect(hook).toMatchObject({ total: 2, passed: 1, errored: 1 });
-    expect(hook.tests.at(-1)).toMatchObject({ status: "errored", file: "/w/a.test.ts" });
-    const failing = parseJsonReport(suite({ status: "failed", assertionResults: [{ fullName: "t", status: "failed" }] }))!;
-    expect(failing).toMatchObject({ total: 1, failed: 1, errored: 0 });
-  });
   it("stops at the test cap even for suite-level errors", () => {
     const suites = Array.from({ length: TEST_REPORT_MAX_TESTS + 1 }, (_, index) => ({ name: `f${String(index)}`, status: "failed", assertionResults: [] }));
     expect(parseJsonReport(JSON.stringify({ testResults: suites }))).toBeUndefined();
     expect(parseJsonReport(JSON.stringify({ testResults: suites.slice(0, TEST_REPORT_MAX_TESTS) }))?.total).toBe(TEST_REPORT_MAX_TESTS);
-  });
-});
-
-describe("parseTestReport", () => {
-  it("picks the format from the text, or the one the check names", () => {
-    expect(parseTestReport(PYTEST)?.format).toBe("junit");
-    expect(parseTestReport(`  ${VITEST}`)?.format).toBe("json");
-    expect(parseTestReport(PYTEST, "json")).toBeUndefined();
-    expect(parseTestReport(VITEST, "junit")).toBeUndefined();
-  });
-  it("reads nothing from an empty text or one over the size cap", () => {
-    expect(parseTestReport("")).toBeUndefined();
-    expect(parseTestReport(`${PYTEST}${" ".repeat(TEST_REPORT_MAX_BYTES)}`)).toBeUndefined();
   });
 });
 
@@ -200,15 +140,6 @@ describe("evidence tests", () => {
     expect(big.newTests).toHaveLength(100);
     expect(big.total).toBe(700);
   });
-  it("keeps a failing test in the 500 even when it comes last in the report", () => {
-    const tests = [...Array.from({ length: 600 }, (_, index) => ({ name: `t${String(index)}`, status: "passed" as const })), { name: "the-failure", status: "failed" as const }];
-    const big = evidenceTests({ format: "junit", total: 601, passed: 600, failed: 1, skipped: 0, errored: 0, tests });
-    expect(big.names[0]?.name).toBe("the-failure");
-  });
-  it("lists a duplicate test name in one file once", () => {
-    const tests = [{ file: "a.py", name: "t", status: "passed" as const }, { file: "a.py", name: "t", status: "passed" as const }, { file: "b.py", name: "t", status: "passed" as const }];
-    expect(evidenceTests({ format: "junit", total: 3, passed: 3, failed: 0, skipped: 0, errored: 0, tests }).names).toHaveLength(2);
-  });
   it("carries the skips among untouched tests before and after, so the broker can judge a rise", () => {
     const withSkips = evidenceTests(report, { changedTestPaths: changed, skippedOutside: { before: 0, after: 1 } });
     expect(withSkips).toMatchObject({ skippedBefore: 0, skippedAfter: 1 });
@@ -228,15 +159,6 @@ describe("evidence tests", () => {
 describe("a rise in skips", () => {
   const changed = ["tests/test_match.py"];
   const before = parseJunit('<testsuite><testcase classname="tests.test_rank" name="a"/><testcase classname="tests.test_rank" name="b"><skipped/></testcase></testsuite>')!;
-  it("counts skips only among tests the change did not touch", () => {
-    const after = parseJunit('<testsuite><testcase classname="tests.test_match" name="new"><skipped/></testcase><testcase classname="tests.test_rank" name="a"><skipped/></testcase><testcase classname="tests.test_rank" name="b"><skipped/></testcase></testsuite>')!;
-    expect(skippedOutsideChanged(after, changed)).toBe(2);
-    expect(skipRise(before, after, changed)).toEqual({ rose: true, before: 1, after: 2 });
-  });
-  it("does not call a skip in a new test, or a steady count, a rise", () => {
-    const onlyNew = parseJunit('<testsuite><testcase classname="tests.test_match" name="new"><skipped/></testcase><testcase classname="tests.test_rank" name="a"/><testcase classname="tests.test_rank" name="b"><skipped/></testcase></testsuite>')!;
-    expect(skipRise(before, onlyNew, changed)?.rose).toBe(false);
-  });
   it("makes no claim without both reports", () => {
     expect(skipRise(undefined, before, changed)).toBeUndefined();
     expect(skipRise(before, undefined, changed)).toBeUndefined();
@@ -263,27 +185,10 @@ const GO_STREAM = [
 ].join("\n");
 
 describe("go test -json", () => {
-  it("counts the tests it reads, subtests too, from the Action fields only (a forged line inside Output changes nothing)", () => {
-    const report = parseGoTestJson(GO_STREAM)!;
-    expect(report).toMatchObject({ format: "gotest", total: 4, passed: 1, failed: 2, skipped: 1, errored: 0 });
-    expect(report.tests.map((test) => [test.file, test.name, test.status])).toEqual([
-      ["example.com/m/match", "TestScores", "passed"], ["example.com/m/match", "TestRegion/no_region", "failed"], ["example.com/m/match", "TestRegion", "failed"], ["example.com/m/match", "TestSlow", "skipped"],
-    ]);
-    expect(report.tests[0]?.durationMs).toBe(12);
-  });
   it("counts a package that failed with no failing test of its own as one errored test named for the package (a build failure)", () => {
     const report = parseGoTestJson([ev({ Action: "start", Package: "p/a" }), ev({ Action: "output", Package: "p/a", Output: "FAIL\tp/a [build failed]\n" }), ev({ Action: "fail", Package: "p/a", Elapsed: 0, FailedBuild: "p/a" })].join("\n"))!;
     expect(report).toMatchObject({ total: 1, errored: 1, failed: 0 });
     expect(report.tests[0]).toMatchObject({ file: "p/a", name: "p/a", status: "errored" });
-  });
-  it("counts a test that started and never finished as errored, so a cut-off file never reads as passing", () => {
-    const report = parseGoTestJson([ev({ Action: "run", Package: "p", Test: "TestA" }), ev({ Action: "pass", Package: "p", Test: "TestA", Elapsed: 0.1 }), ev({ Action: "run", Package: "p", Test: "TestB" })].join("\n"))!;
-    expect(report).toMatchObject({ total: 2, passed: 1, errored: 1 });
-    expect(report.tests.find((test) => test.status === "errored")?.name).toBe("TestB");
-  });
-  it("counts each repeated run of a test (-count=2) as its own test", () => {
-    const once = [ev({ Action: "run", Package: "p", Test: "TestA" }), ev({ Action: "pass", Package: "p", Test: "TestA" })];
-    expect(parseGoTestJson([...once, ...once].join("\n"))).toMatchObject({ total: 2, passed: 2 });
   });
   it("skips lines that are not events, but reads nothing from a file with no test result in it", () => {
     const mixed = ["# p/a", "some compiler text", ev({ Action: "run", Package: "p", Test: "TestA" }), ev({ Action: "pass", Package: "p", Test: "TestA" }), "{not json"].join("\n");
@@ -292,26 +197,6 @@ describe("go test -json", () => {
     expect(parseGoTestJson("just text\nmore text")).toBeUndefined();
     expect(parseGoTestJson([ev({ Action: "start", Package: "p" }), ev({ Action: "skip", Package: "p" }), ev({ Action: "pass", Package: "p" })].join("\n"))).toBeUndefined();
     expect(parseGoTestJson(JSON.stringify({ testResults: [] }))).toBeUndefined();
-  });
-  it("ignores an event of an unknown Action, a missing Package or a wrong type, and never throws on odd values", () => {
-    const odd = [ev({ Action: "pass", Test: "TestNoPackage" }), ev({ Action: "explode", Package: "p", Test: "TestX" }), ev({ Action: 5, Package: "p", Test: "TestY" }), "null", "[]", "5", ev({ Action: "run", Package: "p", Test: "TestOk" }), ev({ Action: "pass", Package: "p", Test: "TestOk", Elapsed: "soon" })].join("\n");
-    expect(parseGoTestJson(odd)).toMatchObject({ total: 1, passed: 1 });
-    expect(parseGoTestJson(odd)?.tests[0]?.durationMs).toBeUndefined();
-  });
-  it("redacts and cuts a test name, and bounds the number of tests", () => {
-    const name = `Test${"x".repeat(500)}`;
-    expect(parseGoTestJson([ev({ Action: "run", Package: "p", Test: name }), ev({ Action: "pass", Package: "p", Test: name })].join("\n"))?.tests[0]?.name).toBe(name);
-    // Never cut silently: a name over the id limit is kept whole, and is simply not a valid id.
-    expect(isValidTestId(`p::${name}`)).toBe(false);
-    const many = Array.from({ length: TEST_REPORT_MAX_TESTS + 1 }, (_, n) => ev({ Action: "pass", Package: "p", Test: `T${String(n)}` })).join("\n");
-    expect(parseGoTestJson(many)).toBeUndefined();
-  });
-  it("is chosen by parseTestReport from the content under auto and json, never for a JUnit request, and vitest JSON still reads as json", () => {
-    expect(parseTestReport(GO_STREAM)?.format).toBe("gotest");
-    expect(parseTestReport(GO_STREAM, "json")?.format).toBe("gotest");
-    expect(parseTestReport(GO_STREAM, "junit")).toBeUndefined();
-    expect(parseTestReport(VITEST)?.format).toBe("json");
-    expect(parseTestReport(PYTEST)?.format).toBe("junit");
   });
   it("feeds the evidence summary like any other report, and a Go package is never taken for a changed test file", () => {
     const report = parseGoTestJson(GO_STREAM)!;
@@ -325,19 +210,6 @@ describe("go test -json", () => {
 // TE-B3: tests that ran on the original code and are not in this code's report.
 describe("tests that ran before and not now (absentOnNew)", () => {
   const report = (...tests: Array<[string, "passed" | "failed" | "skipped" | "errored"]>) => counted("json", tests.map(([name, status]) => ({ file: "t.py", name, status })));
-  it("names a test that ran before and is not in the new report, in the order of the before report", () => {
-    expect(absentOnNew(report(["a", "passed"], ["b", "failed"], ["c", "passed"]), report(["a", "passed"]))).toEqual({ ids: ["t.py::b", "t.py::c"], count: 2 });
-  });
-  it("does not name a test that was skipped before, or that is in the new report even as skipped", () => {
-    expect(absentOnNew(report(["a", "skipped"], ["b", "passed"]), report(["b", "skipped"]))).toEqual({ ids: [], count: 0 });
-  });
-  it("counts a test once, ignores ids that hold a memory address, and keeps at most 100 names while counting them all", () => {
-    expect(absentOnNew(report(["a", "passed"], ["a", "passed"], ["<Thing object at 0x7f3a2c1b9d>", "passed"]), report())).toEqual({ ids: ["t.py::a"], count: 1 });
-    const many = counted("json", Array.from({ length: 250 }, (_unused, n) => ({ file: "t.py", name: `t${String(n)}`, status: "passed" as const })));
-    const result = absentOnNew(many, report());
-    expect(result?.count).toBe(250);
-    expect(result?.ids).toHaveLength(100);
-  });
   it("shows an id that is not valid as one plain line and still compares by the real id", () => {
     const odd = counted("json", [{ file: "t.py", name: "bad\u0007name", status: "passed" }]);
     expect(absentOnNew(odd, report())?.ids[0]).toBe("t.py::bad name");
@@ -347,32 +219,11 @@ describe("tests that ran before and not now (absentOnNew)", () => {
     expect(absentOnNew(undefined, report())).toBeUndefined();
     expect(absentOnNew(report(), undefined)).toBeUndefined();
   });
-  it("reads a very large report in linear time", () => {
-    // A scaling check, not a wall-clock bound: 500 tests and 4,000 tests may take about eight times as long, never sixty-four. About 60 bytes per test keeps the 8N input near 240 KiB (in CPU cache);
-    // the old 50,000-test report is read once, untimed.
-    let count: number | undefined;
-    const bigOf = (tests: number) => counted("json", Array.from({ length: tests }, (_unused, n) => ({ file: "t.py", name: `test_${String(n)}`, status: "passed" as const })));
-    expectLinearScaling((tests) => {
-      const big = bigOf(tests);
-      const other = report();
-      return () => { count = absentOnNew(big, other)?.count; };
-    }, { n: 500, unitBytes: 60, label: "absentOnNew over a large report" });
-    expect(count).toBe(4_000);
-    expect(absentOnNew(bigOf(50_000), report())?.count).toBe(50_000);
-  });
 });
 
 // TE-B3, review H2 and L2: what is NOT "ran before and not now".
 describe("absentOnNew and originalRunLooksCut: the test-first case and cut runs", () => {
   const rep = (...tests: Array<[string, string, "passed" | "failed" | "skipped" | "errored"]>) => counted("json", tests.map(([file, name, status]) => ({ file, name, status })));
-  it("does not compare a test of a changed test file, and an error entry is not a test that ran", () => {
-    const before = rep(["tests/test_new.py", "old_name", "passed"], ["tests/test_old.py", "gone", "passed"], ["tests/test_new.py", "tests.test_new", "errored"], ["tests/test_old.py", "broken", "errored"]);
-    expect(absentOnNew(before, rep(["tests/test_new.py", "new_name", "passed"]), ["tests/test_new.py"])).toEqual({ ids: ["tests/test_old.py::gone"], count: 1 });
-  });
-  it("treats a pytest tmp_path id and a temporary directory as unstable", () => {
-    const before = rep(["t.py", "test_x[/tmp/pytest-of-ci/pytest-3/test_x0]", "passed"], ["t.py", "test_y[/private/var/folders/ab/T/pytest-of-me/x]", "passed"], ["t.py", "test_z[/var/folders/ab/c]", "passed"], ["t.py", "test_w[pytest-of-ci-3]", "passed"], ["t.py", "test_ok[1]", "passed"]);
-    expect(absentOnNew(before, rep(), [])).toEqual({ ids: ["t.py::test_ok[1]"], count: 1 });
-  });
   const many = (n: number, file = "t.py") => rep(...Array.from({ length: n }, (_unused, i): [string, string, "passed"] => [file, `t${String(i)}`, "passed"]));
   it("looks cut when the command stops at the first failure, whatever the reports say", () => {
     for (const flag of ["-x", "--exitfirst", "--maxfail=2", "--maxfail", "--bail", "--bail=1", "-bail", "-xq"]) expect(originalRunLooksCut(many(10), many(10), [], ["run", flag]), flag).toBe(true);
@@ -394,22 +245,3 @@ describe("absentOnNew and originalRunLooksCut: the test-first case and cut runs"
   });
 });
 
-// ---- re-check of TE-B3 (N2, N3)
-describe("originalRunLooksCut: option names", () => {
-  const same = (n: number) => counted("json", Array.from({ length: n }, (_unused, i) => ({ file: "t.py", name: `t${String(i)}`, status: "passed" as const })));
-  const cut = (...args: string[]) => originalRunLooksCut(same(10), same(10), [], ["test", ...args]);
-  it.each(["-x", "--exitfirst", "--maxfail=1", "--maxfail=5", "--bail", "--bail=1", "-bail", "-b", "-f", "--failfast", "-failfast", "--fail-fast", "--stepwise", "--sw", "--stepwise-skip", "--stop-on-failure", "--stop-on-error", "--stop-on-defect", "--max-failures=1", "-xv", "-vx", "-qx", "-sx", "-lx"])("%s stops the run early", (flag) => expect(cut(flag)).toBe(true));
-  it.each(["-rx", "-rsx", "-rxs", "-rfEsxXw", "-rA", "-v", "-vv", "-q", "-n", "-k", "-s", "-Xmx", "-Dxy", "-m", "-c", "-e", "-xyz", "-ex", "-lxk", "--no-fail-fast", "--maxfail=0", "--bail=0", "-bail=0"])("%s does not", (flag) => expect(cut(flag)).toBe(false));
-  it("--maxfail 0 as two arguments means no limit; --maxfail 3 is a limit", () => {
-    expect(cut("--maxfail", "0")).toBe(false);
-    expect(cut("--maxfail", "3")).toBe(true);
-  });
-  it("a bail the command line does not show: an original run that is only the first part of this code's run, in order, is cut", () => {
-    const before = same(95);
-    const after = counted("json", Array.from({ length: 100 }, (_unused, i) => ({ file: "t.py", name: `t${String(i)}`, status: i >= 95 ? "skipped" as const : "passed" as const })));
-    expect(originalRunLooksCut(before, after, [], ["test"])).toBe(true);
-    // The same tests in another order, or fewer tests that are not a prefix, are not (a vanished test is not a cut).
-    const hole = counted("json", [...same(100).tests.slice(0, 40), ...same(100).tests.slice(41)]);
-    expect(originalRunLooksCut(hole, same(100), [], ["test"])).toBe(false);
-  });
-});

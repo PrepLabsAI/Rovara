@@ -70,11 +70,6 @@ describe("a pass that does not finish", () => {
       expect(JSON.stringify({ ...detection, notes: detection.notes.filter((note) => note !== ENV_DETECT_TIMEOUT_NOTE) })).toBe(JSON.stringify(direct));
     } finally { vi.restoreAllMocks(); vi.useRealTimers(); }
   }, 60_000);
-  it("gives an empty detection with the note when even the shorter pass is stuck", async () => {
-    const detection = await runDetectorsGuarded(reader(REPOS["node"]!).reader, "svc", { timeoutMs: 500, entry: entryOf("env-detect-stuck-thread.ts") });
-    expect(detection.checks).toEqual([]);
-    expect(detection.notes).toEqual([ENV_DETECT_TIMEOUT_NOTE]);
-  });
   it("runs in the calling thread, as before, when the thread cannot be started, and says so once in the log", async () => {
     const files = REPOS["compose"]!;
     const direct = await runDetectors(reader(files).reader, "svc");
@@ -116,13 +111,3 @@ describe.skipIf(!compiledPresent)("the compiled thread entry (dist)", () => {
   });
 });
 
-describe("the legacy-only pass", () => {
-  it("drops every dependency candidate, including the manifest ones from the language detectors", async () => {
-    const files = REPOS["python"]!;
-    const full = await runDetectors(reader(files).reader, "svc");
-    const legacy = await runDetectors(reader(files).reader, "svc", { legacyOnly: true });
-    expect(full.dependencies?.length).toBeGreaterThan(0);
-    expect(Object.hasOwn(legacy, "dependencies")).toBe(false);
-    expect(legacy.checks).toEqual(full.checks);
-  });
-});

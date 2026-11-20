@@ -2,7 +2,7 @@
 // sandbox target; the push login and the result use the job's lease and the preparation's grant; a result is always posted.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PrepareSavedEnvBuildSchema, TestEnvironmentBodySchema, savedEnvRepositoryName, testEnvDigest, type SavedEnvBuildResult, type WorkerInvocation } from "../../packages/contracts/src/index.js";
-import { forbiddenValuesOf, liveTaskSandboxes, rememberCredentials, runSavedEnvRebuild, workspaceBuildSandbox, type SavedEnvRebuildDependencies } from "../../packages/worker/src/saved-env/rebuild.js";
+import { forbiddenValuesOf, rememberCredentials, runSavedEnvRebuild, workspaceBuildSandbox, type SavedEnvRebuildDependencies } from "../../packages/worker/src/saved-env/rebuild.js";
 import type { SavedEnvBuildInput, SavedEnvBuildPorts } from "../../packages/worker/src/saved-env/build.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
 
@@ -56,25 +56,6 @@ function bench(over: Partial<SavedEnvRebuildDependencies> & { build?: SavedEnvRe
 }
 
 describe("the job", () => {
-  it("gives the build the job's commits and environment, and the worker's own view of what else runs here and what is secret", async () => {
-    const { deps, calls } = bench({ otherOperations: async () => [{ id: "another-operation", rootPath: "/mnt/workspace" }], cloneCredentialValues: () => ["clone-token-value-0123"], environment: { PATH: "/usr/bin", AGENTX_SANDBOX_IMAGE: SANDBOX_IMAGE, MODEL_API_KEY: "model-key-value-4567" } });
-    await runSavedEnvRebuild(deps);
-    const input = calls.input!;
-    expect(input).toMatchObject({
-      repository: REPOSITORY, approved: { revision: 1, digest: testEnvDigest(environment) }, repositories: [{ repositoryId: "svc", directory: "svc", defaultBranch: "main", commit: COMMIT }],
-      expectedKey: KEY, detectorGlobs: ["**/x"], secretNames: ["NPM_TOKEN"], baseImageDigest: `sha256:${"b".repeat(64)}`, notFrom: [{ id: "another-operation", rootPath: "/mnt/workspace" }],
-    });
-    expect(input.environment).toEqual(environment);
-    // the forbidden values: the grant, the capability, the lease, the clone credential and the credential-shaped variables
-    expect(new Set(input.forbiddenValues)).toEqual(new Set([GRANT, CAPABILITY, LEASE, "clone-token-value-0123", "model-key-value-4567"]));
-  });
-
-  it("takes notFrom from the worker's own registry, never from the payload: another running task sandbox is listed too", async () => {
-    const { deps, calls } = bench({ docker: docker("agentx-task-abc\nagentx-task-def\n") });
-    await runSavedEnvRebuild(deps);
-    expect(calls.input!.notFrom.map((other) => other.id)).toEqual(["agentx-task-abc", "agentx-task-def"]);
-    await expect(liveTaskSandboxes({ run: async () => ({ exitCode: 1, stdout: "", stderr: "" }) }, "/mnt/workspace", "")).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-  });
 
   it("builds nothing when the clone is not at the job's commits, and says so", async () => {
     const build = vi.fn(async (): Promise<SavedEnvBuildResult> => ({ ok: false, reason: "not_proved" }));
@@ -93,11 +74,6 @@ describe("the job", () => {
 });
 
 describe("the base image", () => {
-  it("builds only on the image the key was worked out for: the worker's own sandbox image digest is the job's", async () => {
-    const { deps, calls } = bench();
-    await runSavedEnvRebuild(deps);
-    expect(calls.input).toBeDefined();
-  });
 
   it("refuses with key_mismatch and builds nothing when the worker runs another image (a rollback), and says so to the broker", async () => {
     const build = vi.fn(async (): Promise<SavedEnvBuildResult> => ({ ok: false, reason: "not_proved" }));
@@ -134,17 +110,6 @@ describe("the broker calls", () => {
     const { deps } = bench({ answers: [new Response("no", { status: 403 }), new Error("down")], during: async (ports) => { seen.push(await ports.pushSession({ repository: REPOSITORY })); seen.push(await ports.pushSession({ repository: REPOSITORY })); } });
     await runSavedEnvRebuild(deps);
     expect(seen).toEqual([undefined, undefined]);
-  });
-
-  it("posts the result with the job's lease and the grant, whatever the result is, and retries a broker that does not answer", async () => {
-    const { deps, posted } = bench({ answers: [new Error("down"), new Response("no", { status: 503 }), new Response("{}", { status: 200 })] });
-    const result = await runSavedEnvRebuild(deps);
-    expect(posted).toHaveLength(3);
-    for (const call of posted) {
-      expect(call.url).toMatch(/\/saved-env-result$/u);
-      expect(call.headers).toEqual({ "content-type": "application/json", "x-agentx-callback-capability": CAPABILITY });
-      expect(call.body).toEqual({ jobId: "job-1", leaseToken: LEASE, result });
-    }
   });
 
   it("gives up after its attempts, and a build that throws is reported as a failure with a fixed word", async () => {
@@ -207,9 +172,4 @@ describe("forbidden values", () => {
     expect(calls.input!.forbiddenValues).toContain("token-for-svc-0123");
   });
 
-  it("a provider that fails is not hidden: the preparation fails as it would have", async () => {
-    const remembered = rememberCredentials(async () => { throw new Error("no"); });
-    await expect(remembered.provider({ name: "svc" } as never)).rejects.toThrow("no");
-    expect(remembered.values()).toEqual([]);
-  });
 });

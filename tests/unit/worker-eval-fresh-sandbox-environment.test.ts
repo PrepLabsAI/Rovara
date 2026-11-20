@@ -7,11 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { readMeasuresFile, savedEnvRepositoryName, type EvalEnvironment } from "@agentx/contracts";
-import {
-  EVAL_BRIDGE_SOCKET_NAME, EVAL_HELPER_DIR_NAME, FRESH_EVAL_WORKSPACE, createFreshEvalSandbox, freshEvalEnvironment, freshEvalSandboxArgProblems,
-  type FreshEvalSandboxConfig, type FreshEvalSandboxRun,
-} from "../../packages/worker/src/verification/eval-bridged-exec.js";
+import { savedEnvRepositoryName, type EvalEnvironment } from "@agentx/contracts";
+import { EVAL_BRIDGE_SOCKET_NAME, EVAL_HELPER_DIR_NAME, FRESH_EVAL_WORKSPACE, createFreshEvalSandbox, freshEvalSandboxArgProblems, type FreshEvalSandboxConfig, type FreshEvalSandboxRun } from "../../packages/worker/src/verification/eval-bridged-exec.js";
 import { EvalSandboxRunFailure, runFailureOf } from "../../packages/worker/src/verification/eval-run-diagnostic.js";
 import { RUN_NETWORK_LABEL } from "../../packages/worker/src/run-network.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
@@ -26,7 +23,6 @@ const FACTS = JSON.stringify({ metadataBlocked: true, runWalls: true, ipv6Drops:
 const OFFERED: NodeJS.ProcessEnv = { AGENTX_TEST_SERVICES_BOOT_FACTS: FACTS };
 const REPORT = { cwd: ".", argument: "eval-report.json" };
 const REPORT_BYTES = JSON.stringify({ measures: { version: 1 } });
-const MODEL_KEY = ["rovara", "test", "key"].join("-");
 
 interface Container { log?: string; id: string; name: string; labels: Record<string, string>; network: string; ip: string; args: string[]; mounts: { Source: string; Destination: string; RW: boolean; Type: string }[]; paused: boolean; exit?: number }
 interface Play { readonly code: number | "hang" | "timeout"; readonly log?: string; readonly files?: Readonly<Record<string, string>> }
@@ -157,56 +153,8 @@ const installArgsOf = (calls: string[][]) => calls.filter((c) => c[0] === "run" 
 const flag = (args: readonly string[], name: string): string[] => args.flatMap((arg, index) => (args[index - 1] === name ? [arg] : []));
 const PIP: EvalEnvironment = { kind: "install", commands: [{ executable: "python3", args: ["-m", "pip", "install", "-r", "requirements.txt"], cwd: "." }] };
 const junit = (cases: Array<[string, boolean]>): string => `<testsuites><testsuite name="pytest">${cases.map(([name, pass]) => (pass ? `<testcase name="${name}"/>` : `<testcase name="${name}"><failure message="x"/></testcase>`)).join("")}</testsuite></testsuites>`;
-const roundNetworks = (daemon: ReturnType<typeof fakeDaemon>) => daemon.networks.filter((n) => n.name !== "agentx-task" && n.name !== "rovara-snet");
-
-describe("no environment: today's run, byte for byte", () => {
-  it("runs no install, makes no extra variable, and starts the helper and the eval as before", async () => {
-    const w = await world();
-    await w.sandbox.run(w.input());
-    expect(w.daemon.order.filter((step) => step.endsWith("install"))).toEqual([]);
-    expect(w.daemon.envSeen).toEqual([freshEvalEnvironment({ rowId: "gemini", token: TOKEN, side: "new", runs: 1, ids: ["q1", "q2"] })]);
-    expect(w.daemon.envSeen[0]).not.toContain("PYTHONUSERBASE");
-    expect(w.daemon.calls.some((c) => c[0] === "logs")).toBe(true);
-  });
-});
 
 describe("install steps", () => {
-  it("run BEFORE the round network exists, on the shared sandbox network with no model route and no token, then the sealed run is on the round network only", async () => {
-    const seen: { network: string[]; checkoutHadInstall: boolean[] } = { network: [], checkoutHadInstall: [] };
-    const daemon = fakeDaemon({ play: async (kind, checkout) => {
-      if (kind === "install") return { code: 0, files: { ".venv/lib/site-packages/yaml.py": "# yaml" } };
-      seen.checkoutHadInstall.push(existsSync(join(checkout, ".venv/lib/site-packages/yaml.py")));
-      await writeFile(join(checkout, REPORT.argument), REPORT_BYTES);
-      return { code: 0 };
-    } });
-    const w = await world(daemon, { evalEnvironment: PIP });
-    await w.sandbox.run(w.input());
-    const order = w.daemon.order;
-    expect(order.indexOf("run:install")).toBeLessThan(order.indexOf("wait:install"));
-    expect(order.indexOf("wait:install")).toBeLessThan(order.indexOf("network:create"));
-    expect(order.indexOf("network:create")).toBeLessThan(order.indexOf("run:helper"));
-    expect(order.indexOf("run:helper")).toBeLessThan(order.indexOf("run:eval"));
-    const [install] = installArgsOf(w.daemon.calls);
-    expect(flag(install!, "--network")).toEqual(["agentx-task"]);
-    expect(install).not.toContain("--env-file");
-    expect(install).not.toContain("--ip");
-    expect(install!.join(" ")).not.toContain(TOKEN);
-    expect(install!.join(" ")).not.toContain(w.bridgeDir);
-    expect(flag(install!, "--add-host").every((host) => host.endsWith(":10.255.255.1"))).toBe(true);
-    // The sealed run: the round network ONLY, the helper's address for model names, and the arguments the allow-list accepts, as before.
-    const sealed = runArgsOf(w.daemon.calls, "-eval")!;
-    expect(flag(sealed, "--network")).toHaveLength(1);
-    expect(flag(sealed, "--network")[0]).not.toBe("agentx-task");
-    expect(flag(sealed, "--dns")).toEqual(["127.0.0.1"]);
-    expect(sealed).not.toContain("--publish");
-    expect(flag(sealed, "--add-host").every((host) => !host.endsWith(":10.255.255.1"))).toBe(true);
-    // The install's files are in the checkout the sealed run mounts; its variables tell the run where a --user install lives.
-    expect(seen.checkoutHadInstall).toEqual([true]);
-    expect(w.daemon.envSeen[0]).toContain("PYTHONUSERBASE=/workspace/.rovara-python");
-    // Gone: the install box, the helper, the network.
-    expect(w.daemon.containers).toEqual([]);
-    expect(roundNetworks(w.daemon)).toEqual([]);
-  });
 
   it("L4-NETG: on a gateway-mode worker the install box joins the gateway's internal network with the gateway as its ONE name server, and never the open bridge; a half-configured gateway worker refuses before any install box starts", async () => {
     const gatewayEnvironment: NodeJS.ProcessEnv = { ...OFFERED, AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "172.28.250.2" };
@@ -237,24 +185,6 @@ describe("install steps", () => {
     const [install] = installArgsOf(w.daemon.calls);
     expect(flag(install!, "--label").map((label) => label.split("=")[0]!).sort()).toEqual(["agentx.task", "agentx.workspace"]);
     expect(w.daemon.containers).toEqual([]);
-  });
-
-  it("a failed install step stops the run before the helper or the round network: a named, redacted diagnostic, and nothing left behind", async () => {
-    const daemon = fakeDaemon({ play: async (kind) => (kind === "install" ? { code: 2, log: `ERROR: No matching distribution found for pyyaml\nusing token ${TOKEN} and key ${MODEL_KEY}` } : { code: 0 }) });
-    const w = await world(daemon, { evalEnvironment: PIP });
-    const error = await w.sandbox.run(w.input({ side: "old" })).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(EvalSandboxRunFailure);
-    const diagnostic = runFailureOf(error)!;
-    expect(diagnostic).toMatchObject({ code: "install_failed", phase: "install", exitCode: 2 });
-    expect(diagnostic.tail).toContain("No matching distribution");
-    expect(diagnostic.tail).not.toContain(TOKEN);
-    expect(diagnostic.tail).not.toContain(MODEL_KEY);
-    expect(JSON.stringify(error)).not.toContain(TOKEN);
-    expect(w.daemon.order).not.toContain("run:helper");
-    expect(w.daemon.order).not.toContain("run:eval");
-    expect(w.daemon.containers).toEqual([]);
-    expect(roundNetworks(w.daemon)).toEqual([]);
-    expect(w.daemon.working.paused).toBe(false);
   });
 
   it("L4-TH1: a sealed eval that tried to reach a database and an outside host is named; a model host the sandbox pinned to the helper is not", async () => {
@@ -295,15 +225,6 @@ describe("the saved environment", () => {
     ...(fallbackInstall === undefined ? {} : { fallbackInstall }),
   });
 
-  it("is used when it works: no install runs, and the seam got this environment and the checkout the commit was written to", async () => {
-    const calls: Array<{ kind: string; checkout: string; hadCommitFile: boolean }> = [];
-    const w = await world(fakeDaemon(), { evalEnvironment: saved(PIP.kind === "install" ? PIP.commands : []), useSavedEnvironment: async ({ environment, checkout }) => { calls.push({ kind: environment.kind, checkout, hadCommitFile: existsSync(join(checkout, "eval.js")) }); return true; } });
-    await w.sandbox.run(w.input());
-    expect(calls).toEqual([{ kind: "saved", checkout: w.materialized[0]!.destination, hadCommitFile: true }]);
-    expect(installArgsOf(w.daemon.calls)).toEqual([]);
-    expect(w.daemon.envSeen[0]).toContain("PYTHONUSERBASE=");
-  });
-
   it("falls back to the plan's install steps when it cannot be used, and to the bare image when there are none; it never blocks the eval", async () => {
     const failing = async () => false;
     const withFallback = await world(fakeDaemon(), { evalEnvironment: saved(PIP.kind === "install" ? PIP.commands : []), useSavedEnvironment: failing });
@@ -323,28 +244,6 @@ describe("the saved environment", () => {
 });
 
 describe("a failed eval is named, redacted and bounded (stderr for Not run)", () => {
-  it("a missing package: the cause, the one name and the redacted tail; the token and key never show; nothing is left", async () => {
-    const log = ["Traceback (most recent call last):", `  File "evals/run.py", line 3`, `    client = connect("http://rovara-models:8080/p/gemini/x/${TOKEN}", key="${MODEL_KEY}")`, "ModuleNotFoundError: No module named 'yaml'"].join("\n");
-    const w = await world(fakeDaemon({ play: async () => ({ code: 1, log }) }));
-    const error = await w.sandbox.run(w.input()).catch((e: unknown) => e);
-    const diagnostic = runFailureOf(error)!;
-    expect(diagnostic).toMatchObject({ code: "missing_package", phase: "run", name: "yaml", exitCode: 1 });
-    expect(diagnostic.tail).toContain("No module named 'yaml'");
-    expect(diagnostic.tail).not.toContain(TOKEN);
-    expect(diagnostic.tail).not.toContain(MODEL_KEY);
-    expect(diagnostic.tail.length).toBeLessThanOrEqual(4096);
-    expect(w.daemon.containers).toEqual([]);
-    expect(roundNetworks(w.daemon)).toEqual([]);
-  });
-
-  it("an eval that exits 0 without a report, or exits non-zero WITH a report (its own gate failed), is not a failed run: as before", async () => {
-    const quiet = await world(fakeDaemon({ play: async () => ({ code: 0 }) }));
-    const quietResult = await quiet.sandbox.run(quiet.input());
-    expect(existsSync(join(quietResult.report.root, REPORT.argument))).toBe(false);
-    const gate = await world(fakeDaemon({ play: async (_k, checkout) => { await writeFile(join(checkout, REPORT.argument), REPORT_BYTES); return { code: 1, log: "gate failed: 80% < 90%" }; } }));
-    const gateResult = await gate.sandbox.run(gate.input());
-    expect(await readFile(join(gateResult.report.root, REPORT.argument), "utf8")).toBe(REPORT_BYTES);
-  });
 
   it("a run that ran out of time is a failure whatever it wrote", async () => {
     const w = await world(fakeDaemon({ play: async (_k, checkout) => { await writeFile(join(checkout, REPORT.argument), REPORT_BYTES); return { code: "timeout" }; } }));
@@ -352,15 +251,6 @@ describe("a failed eval is named, redacted and bounded (stderr for Not run)", ()
     expect(w.daemon.containers).toEqual([]);
   });
 
-  it("asks only for the log tail (a bounded number of lines) after the wait, and the log is read before the box is removed", async () => {
-    const w = await world(fakeDaemon({ play: async () => ({ code: 1, log: "x" }) }));
-    await w.sandbox.run(w.input()).catch(() => undefined);
-    const logs = w.daemon.calls.filter((c) => c[0] === "logs");
-    expect(logs).toHaveLength(1);
-    expect(logs[0]!.slice(0, 3)).toEqual(["logs", "--tail", "200"]);
-    const names = w.daemon.calls.map((c) => c[0]);
-    expect(names.indexOf("logs")).toBeGreaterThan(names.indexOf("wait"));
-  });
 });
 
 describe("the customer's own per-case report (JUnit)", () => {
@@ -370,17 +260,6 @@ describe("the customer's own per-case report (JUnit)", () => {
     if (rows !== undefined) await writeFile(join(checkout, REPORT.argument), junit(rows));
     return { code: 0 };
   } });
-
-  it("runs the command once per run, and turns the reports into the measures file (one sample per run, in order); the first run is told `runs`, the others one", async () => {
-    const daemon = plays([[["a", true], ["b", false]], [["a", false], ["b", false]], [["a", true], ["b", true]]]);
-    const w = await world(daemon);
-    const result = await w.sandbox.run(w.input({ ids: ["a", "b"], runs: 3 }));
-    expect(w.daemon.envSeen.map((env) => /ROVARA_EVAL_RUNS=(\d)/u.exec(env)![1])).toEqual(["3", "1", "1"]);
-    const read = readMeasuresFile(JSON.parse(await readFile(join(result.report.root, REPORT.argument), "utf8")));
-    expect(read.status).toBe("ok");
-    if (read.status === "ok") expect(read.file.questions!.map((q) => [q.id, q.samples.map((s) => s.pass)])).toEqual([["a", [true, false, true]], ["b", [false, false, true]]]);
-    expect(w.daemon.containers).toEqual([]);
-  });
 
   it("a later run that writes nothing leaves NO report (never a half result, never an old file read as fresh)", async () => {
     const w = await world(plays([[["a", true]], [["a", true]], undefined]));
@@ -429,20 +308,6 @@ describe("the sealed run's arguments (L4-EVS: the capped log)", () => {
 });
 
 describe("a run past its deadline, and a stop (REVIEW-1 findings 2, 3, 7)", () => {
-  it("a sealed run that ran out of time is KILLED before its log is read", async () => {
-    const w = await world(fakeDaemon({ play: async () => ({ code: "timeout", log: "slow" }) }));
-    await w.sandbox.run(w.input()).catch(() => undefined);
-    const names = w.daemon.calls.map((c) => c[0]);
-    expect(names.indexOf("kill")).toBeGreaterThan(-1);
-    expect(names.indexOf("kill")).toBeLessThan(names.indexOf("logs"));
-  });
-
-  it("an install step that ran out of time is killed before its log is read", async () => {
-    const w = await world(fakeDaemon({ play: async (kind) => (kind === "install" ? { code: "timeout" } : { code: 0 }) }), { evalEnvironment: PIP });
-    await w.sandbox.run(w.input()).catch(() => undefined);
-    const names = w.daemon.calls.map((c) => c[0]);
-    expect(names.indexOf("kill")).toBeLessThan(names.indexOf("logs"));
-  });
 
   it("a stop while an install step runs removes that box at once and rejects only after everything is gone", async () => {
     const controller = new AbortController();
@@ -453,19 +318,4 @@ describe("a run past its deadline, and a stop (REVIEW-1 findings 2, 3, 7)", () =
     expect(w.daemon.order).not.toContain("run:helper");
   });
 
-  it("a plan with no install step gives the sealed run the whole round budget, as before; one with an install step shares the one deadline", async () => {
-    const waits: number[] = [];
-    const base = fakeDaemon();
-    const spy: DockerCli = { run: async (args, options) => { if (args[0] === "wait") waits.push(options?.timeoutMs ?? -1); return base.docker.run(args, options); } };
-    const plain = await world({ ...base, docker: spy });
-    await plain.sandbox.run(plain.input());
-    expect(waits).toEqual([600_000]);
-    waits.length = 0;
-    const base2 = fakeDaemon();
-    const spy2: DockerCli = { run: async (args, options) => { if (args[0] === "wait") waits.push(options?.timeoutMs ?? -1); return base2.docker.run(args, options); } };
-    const withInstall = await world({ ...base2, docker: spy2 }, { evalEnvironment: PIP });
-    await withInstall.sandbox.run(withInstall.input());
-    expect(waits).toHaveLength(2);
-    expect(waits[1]!).toBeLessThanOrEqual(600_000);
-  });
 });

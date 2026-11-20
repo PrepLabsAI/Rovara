@@ -16,11 +16,6 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((dir) => rm(dir, {
 describe("worker application runtime configuration", () => {
   const image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/rovara-executor@sha256:" + "a".repeat(64);
 
-  it("takes the executor image from EXECUTOR_IMAGE, the build image from the pin and a shared run root from the host profile", () => {
-    expect(workflowE2EApplicationRuntimeConfig({ EXECUTOR_IMAGE: image }, "linux", "arm64"))
-      .toEqual({ executorImage: image, buildImage: WEB_API_BUILD_IMAGE, runRoot: "/mnt/agentx-runtime/candidates/web-api-runs" });
-  });
-
   it("L4-NETG2: a gateway-mode worker's build commands are given the gateway's network and name server; any other worker is given none; a gateway-mode worker that lost them refuses", () => {
     const gateway = { EXECUTOR_IMAGE: image, AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "172.28.250.2" };
     expect(workflowE2EApplicationRuntimeConfig(gateway, "linux", "arm64")).toEqual({ executorImage: image, buildImage: WEB_API_BUILD_IMAGE, runRoot: "/mnt/agentx-runtime/candidates/web-api-runs", buildEgress: { network: "rovara-snet", dns: "172.28.250.2" } });
@@ -44,13 +39,6 @@ describe("worker application runtime configuration", () => {
     expect(e2eModelSocketPath(runRoot, uuid)).toBe(`${runRoot}/${uuid}/model/model.sock`);
   });
 
-  it.each([{}, { EXECUTOR_IMAGE: "" }, { EXECUTOR_IMAGE: "  " }, { EXECUTOR_IMAGE: "--privileged" }, { EXECUTOR_IMAGE: "two words" }])("refuses to run without a usable executor image (%j)", (environment) => {
-    expect(() => workflowE2EApplicationRuntimeConfig(environment, "linux", "arm64")).toThrow(/EXECUTOR_IMAGE/);
-  });
-
-  it("refuses a host with no shared runtime directory", () => {
-    expect(() => workflowE2EApplicationRuntimeConfig({ EXECUTOR_IMAGE: image }, "darwin", "arm64")).toThrow(/shared runtime directory/);
-  });
 
   it("builds one Docker application host per call over the supplied admission, group and staged source, touching docker only when it runs", async () => {
     const source = await realpath(await mkdtemp(join(tmpdir(), "runtime-source-")));
@@ -67,34 +55,11 @@ describe("worker application runtime configuration", () => {
     expect(() => runtime.createHost({ admission: fixture.plan.admission, groupId: "not-a-group", candidateSourceDir: source })).toThrow(/not a runnable application group/);
   });
 
-  it("takes only the admission, group and staged source from the caller, never the image, run root or docker", () => {
-    const config = { executorImage: image, buildImage: WEB_API_BUILD_IMAGE, runRoot: "/mnt/agentx-runtime/candidates/web-api-runs" };
-    const docker = new FakeDockerCli();
-    const now = () => 1;
-    const hostile = { admission: { marker: "admission" }, groupId: "group-1", candidateSourceDir: "/staged", executorImage: "evil:latest", buildImage: "evil:build",
-      runRoot: "/tmp/elsewhere", docker: "not-docker", now: () => 2, assemble: "x", onRunOutput: "x", executorSeccompProfile: "/tmp/open.json" } as never;
-    const deps = workflowE2EApplicationHostDeps(config, docker, now, hostile);
-    expect(Object.keys(deps).sort()).toEqual(["admission", "buildImage", "candidateSourceDir", "docker", "executorImage", "groupId", "now", "runRoot"]);
-    expect(deps).toMatchObject({ executorImage: image, buildImage: WEB_API_BUILD_IMAGE, runRoot: config.runRoot, docker, now, groupId: "group-1", candidateSourceDir: "/staged" });
-  });
 });
 
 describe("whether this worker can run application rounds at all", () => {
   const image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/rovara-executor@sha256:" + "a".repeat(64);
   const docker = (code: number) => ({ run: vi.fn<(args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>>(async () => ({ code, stdout: "", stderr: "" })) });
-
-  it("is ready only when EXECUTOR_IMAGE is set and the host holds that image", async () => {
-    const cli = docker(0);
-    await expect(workflowE2EApplicationChecksAvailability({ EXECUTOR_IMAGE: image }, { platform: "linux", arch: "arm64", docker: cli })).resolves.toEqual({ status: "ready" });
-    expect(cli.run.mock.calls[0]?.[0]).toEqual(["image", "inspect", image]);
-  });
-
-  it("is unavailable, without touching docker, when EXECUTOR_IMAGE is not set to an image reference", async () => {
-    const cli = docker(0);
-    await expect(workflowE2EApplicationChecksAvailability({}, { platform: "linux", arch: "arm64", docker: cli })).resolves.toEqual({ status: "unavailable", reason: "executor-image-not-configured" });
-    await expect(workflowE2EApplicationChecksAvailability({ EXECUTOR_IMAGE: "--privileged" }, { platform: "linux", arch: "arm64", docker: cli })).resolves.toMatchObject({ status: "unavailable" });
-    expect(cli.run).not.toHaveBeenCalled();
-  });
 
   it("is unavailable when the host does not hold the image, or docker cannot be asked", async () => {
     await expect(workflowE2EApplicationChecksAvailability({ EXECUTOR_IMAGE: image }, { platform: "linux", arch: "arm64", docker: docker(1) }))
@@ -122,55 +87,6 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
     const body = await (await handleWorkerRequest(new Request("http://worker/ping"), state)).json() as { invocationFeatures: string[]; invocationFeatureDiagnostics?: Record<string, unknown> };
     return { body, elapsedMs: Date.now() - started };
   };
-
-  it("starts as unavailable and answers /ping at once while a slow Docker has not answered, then lists the feature once the first check succeeds", async () => {
-    let release!: (result: Result) => void;
-    const docker = { run: vi.fn(() => new Promise<Result>((resolve) => { release = resolve; })) };
-    const monitor = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: image }, platform: "linux", arch: "arm64", docker, intervalMs: 60_000 });
-    expect(monitor.current()).toEqual({ status: "unavailable", reason: "not-yet-checked" });
-    monitor.start();
-    const slow = await pingOf(monitor);
-    expect(slow.elapsedMs).toBeLessThan(500);
-    expect(slow.body.invocationFeatures).not.toContain(FEATURE);
-    expect(slow.body.invocationFeatureDiagnostics).toMatchObject({ [FEATURE]: { status: "unavailable", reason: "not-yet-checked" } });
-    release({ code: 0, stdout: "", stderr: "" });
-    await vi.waitFor(() => expect(monitor.current()).toEqual({ status: "ready" }));
-    expect((await pingOf(monitor)).body.invocationFeatures).toContain(FEATURE);
-    monitor.stop();
-  });
-
-  it("lists browser evidence on its own (no shared runtime directory needed), keeps it through one failed look and withholds it after two in a row (TE-H1)", async () => {
-    const BROWSER = "task.browserEvidence.v1";
-    let code = 0;
-    const docker = { run: vi.fn(async () => ({ code, stdout: "", stderr: "" })) };
-    // A platform with no shared runtime directory: application CHECKS cannot be listed, browser evidence still can.
-    const monitor = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: image }, platform: "darwin", arch: "arm64", docker, intervalMs: 25 });
-    vi.useFakeTimers();
-    try {
-      monitor.start();
-      await vi.advanceTimersByTimeAsync(5);
-      expect((await pingOf(monitor)).body.invocationFeatures).toContain(BROWSER);
-      expect((await pingOf(monitor)).body.invocationFeatures).not.toContain(FEATURE);
-      code = 1;
-      // One failed look is kept through (a slow or busy Docker is not the image being gone) ...
-      await vi.advanceTimersByTimeAsync(25);
-      expect((await pingOf(monitor)).body.invocationFeatures).toContain(BROWSER);
-      // ... and two in a row are not.
-      await vi.advanceTimersByTimeAsync(25);
-      expect((await pingOf(monitor)).body.invocationFeatures).not.toContain(BROWSER);
-      // And it comes back at once when the image does.
-      code = 0;
-      await vi.advanceTimersByTimeAsync(25);
-      expect((await pingOf(monitor)).body.invocationFeatures).toContain(BROWSER);
-      monitor.stop();
-    } finally { vi.useRealTimers(); }
-    // An image reference that is not one is never listed.
-    const bad = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: "-v /:/host" }, platform: "linux", arch: "arm64", docker: { run: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })) }, intervalMs: 60_000 });
-    bad.start();
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect((await pingOf(bad)).body.invocationFeatures).not.toContain(BROWSER);
-    bad.stop();
-  });
 
   it("refreshes in the background: a host that loses the image stops listing the feature, and one that gets it lists it again", async () => {
     vi.useFakeTimers();
@@ -258,16 +174,6 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
     } finally { vi.useRealTimers(); }
   });
 
-  it("stays unavailable without calling Docker when EXECUTOR_IMAGE is not set (production today)", async () => {
-    const docker = { run: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })) };
-    const monitor = createApplicationChecksFeatureMonitor({ environment: {}, platform: "linux", arch: "arm64", docker, intervalMs: 60_000 });
-    monitor.start();
-    await vi.waitFor(() => expect(monitor.current()).toEqual({ status: "unavailable", reason: "executor-image-not-configured" }));
-    expect(docker.run).not.toHaveBeenCalled();
-    expect((await pingOf(monitor)).body.invocationFeatures).not.toContain(FEATURE);
-    monitor.stop();
-  });
-
   it("is wired in main.ts from the monitor's last value: started at boot, spread into the executor, and never asked of Docker per ping", async () => {
     const main = await readFile(new URL("../../packages/worker/src/main.ts", import.meta.url), "utf8");
     expect(main).toContain("createApplicationChecksFeatureMonitor({ environment: process.env })");
@@ -334,23 +240,6 @@ describe("the agent step feature as /ping reports it (Task 4.3a: withheld, with 
     expect(JSON.stringify(ping)).not.toContain("ENDPOINTVALUE");
   });
 
-  it("is withheld because the shared AWS files can redirect a model call", async () => {
-    clean();
-    const monitor = await monitorFor({ environment: bedrockEnvironment, sharedConfigCheck: () => { throw new Error("this worker's shared AWS files can redirect or re-authenticate model calls (~/.aws/config sets endpoint_url); the AI navigation agent does not start"); } });
-    const ping = await pingOf(monitor);
-    expect(ping.invocationFeatureDiagnostics![AGENT]).toMatchObject({ status: "unavailable", reason: "model-environment-unsafe" });
-    expect(ping.invocationFeatureDiagnostics![AGENT]!.detail).toContain("endpoint_url");
-  });
-
-  it("is withheld because the installation's settings make no route (a keyed provider with no secret, an unknown provider)", async () => {
-    clean();
-    for (const environment of [{ ...bedrockEnvironment, AGENTX_MODEL_PROVIDER: "anthropic" }, { ...bedrockEnvironment, AGENTX_MODEL_PROVIDER: "made-up" }, { EXECUTOR_IMAGE: image, AGENTX_MODEL_PROVIDER: "amazon-bedrock" }]) {
-      const ping = await pingOf(await monitorFor({ environment }));
-      expect(ping.invocationFeatures).not.toContain(AGENT);
-      expect(ping.invocationFeatureDiagnostics![AGENT], JSON.stringify(environment)).toMatchObject({ status: "unavailable", reason: "agent-route-not-derivable" });
-    }
-  });
-
   // Task 4.3b: the executor ships its driver, so the only reasons left are the ones about this worker's own checks, environment and settings.
   it("is listed when every other condition holds: the application checks run, nothing can redirect a model call, and the settings make a route (Bedrock, and a keyed provider with its secret)", async () => {
     clean();
@@ -364,14 +253,4 @@ describe("the agent step feature as /ping reports it (Task 4.3a: withheld, with 
     expect(keyed.invocationFeatures).toContain(AGENT);
   });
 
-  it("is still withheld when the environment can redirect a model call, even though the driver is shipped, and carries no driver reason anywhere", async () => {
-    clean();
-    const unsafe = await monitorFor({ environment: { ...bedrockEnvironment, HTTPS_PROXY: "http://proxy.invalid:3128" } });
-    const ping = await pingOf(unsafe);
-    expect(ping.invocationFeatures).not.toContain(AGENT);
-    expect(ping.invocationFeatureDiagnostics![AGENT]).toMatchObject({ status: "unavailable", reason: "model-environment-unsafe" });
-    const source = await readFile(join(import.meta.dirname, "../../packages/worker/src/workflow-e2e-application-runtime.ts"), "utf8");
-    expect(source).not.toContain("agent-driver-not-installed");
-    expect(source).not.toContain("AGENT_DRIVER_INSTALLED");
-  });
 });

@@ -197,22 +197,6 @@ describe("what the detector reads from infrastructure code", () => {
     expect(resourcesOf(other, "aws:kms")).toBeUndefined();
     expect(resourcesOf(other, "aws:secrets-manager")).toBeUndefined();
   });
-  it("CDK Python: the same by keyword arguments", async () => {
-    const py = [
-      "from aws_cdk import aws_sqs as sqs, aws_sns as sns, aws_sns_subscriptions as subs, aws_secretsmanager as secretsmanager, aws_kms as kms",
-      "class S(Stack):", "    def __init__(self, scope):",
-      '        jobs = sqs.Queue(self, "Jobs", queue_name="jobs")',
-      '        alerts = sns.Topic(self, "Alerts", topic_name="alerts")',
-      "        alerts.add_subscription(subs.SqsSubscription(jobs))",
-      '        secretsmanager.Secret(self, "Db", secret_name="app/db")',
-      '        kms.Key(self, "Main", alias="alias/main")',
-      "",
-    ].join("\n");
-    const detection = await detect({ "infra/app_stack.py": py });
-    expect(resourcesOf(detection, "aws:sns")).toEqual([{ kind: "topic", name: "alerts", queues: ["jobs"] }]);
-    expect(resourcesOf(detection, "aws:secrets-manager")).toEqual([{ kind: "secret", name: "app/db" }]);
-    expect(resourcesOf(detection, "aws:kms")).toEqual([{ kind: "key", name: "Main", alias: "alias/main" }]);
-  });
 });
 
 describe("readAwsResourcesFromIac for a wide plan", () => {

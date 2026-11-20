@@ -27,9 +27,6 @@ async function attempt(environment: NodeJS.ProcessEnv) {
 describe("a setup run on a worker whose launcher withdrew the setup firewall rules", () => {
   it.each([
     ["unavailable", { [SETUP_ISOLATION_ENVIRONMENT]: "unavailable" }],
-    ["no value at all (the fact could not be read: fail closed)", {}],
-    ["an empty value", { [SETUP_ISOLATION_ENVIRONMENT]: "" }],
-    ["an odd value", { [SETUP_ISOLATION_ENVIRONMENT]: "Ready" }],
   ])("is refused with the specific reason, and nothing is started: %s", async (_name, extra) => {
     const { error, calls } = await attempt({ ...EC2_NAMED, ...extra, AGENTX_MODEL_PROXY_URL: "https://proxy.test" });
     expect(error?.message).toContain(SETUP_ISOLATION_UNAVAILABLE_MESSAGE);

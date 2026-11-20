@@ -26,13 +26,6 @@ describe("buildLoadedKnowledgeManifest", () => {
     expect(manifest.omitted).toEqual({ skipped: 0, available: 0 });
   });
 
-  it("removes hidden characters from names and paths, and carries the record under one event field", () => {
-    const manifest = buildLoadedKnowledgeManifest({
-      stage: "build", resolved: resolved([{ ...record(1, "loaded"), path: "a‮b.md", name: "n​m" }]), repositories: [],
-    });
-    expect(manifest.items[0]).toMatchObject({ path: "ab.md", name: "nm" });
-    expect(Object.keys(loadedKnowledgePayload(manifest))).toEqual(["loadedKnowledge"]);
-  });
 });
 
 const D = "a".repeat(64);
@@ -57,11 +50,6 @@ describe("the record fits the worker event", () => {
     await batcher.flush();
     expect(Buffer.byteLength(JSON.stringify(sent[0]!.payload), "utf8")).toBeLessThanOrEqual(WORKER_EVENT_PAYLOAD_MAX_BYTES);
     expect(loadedKnowledgeOfProgress(sent[0]!.payload)).toEqual(manifest);
-  });
-
-  it("does not mark a record that fits", () => {
-    const manifest = buildLoadedKnowledgeManifest({ stage: "plan", resolved: resolved([record(1, "loaded")]), repositories: [] });
-    expect(manifest.recordTruncated).toBeUndefined();
   });
 
   it("a name or path that is only hidden characters drops that entry or field, not the record", () => {

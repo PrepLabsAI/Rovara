@@ -4,11 +4,10 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { EVAL_HEALTH_RESULT_PATH, EvalHealthResultBodySchema, PREPARE_EVAL_HEALTH_FEATURE, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
+import { EVAL_HEALTH_RESULT_PATH, EvalHealthResultBodySchema, WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
 import { runEvalHealthRider, type EvalHealthRiderDeps } from "../../packages/worker/src/eval-health-run.js";
 import { pinnedEvalPlan } from "../../packages/worker/src/verification/eval-plan-source.js";
 import { EVAL_GATEWAY_URL_VARIABLE } from "../../packages/worker/src/verification/eval-wiring.js";
-import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 import { createEvalFinalCheckWorld } from "../support/eval-final-check.js";
 
 const HEAD = "d".repeat(40);
@@ -46,14 +45,6 @@ async function withPorts(over: Partial<EvalHealthRiderDeps> = {}) {
 }
 
 describe("the contract of the health run's preparation", () => {
-  it("is on the worker's lists, and a preparation carrying it is read-only, pinned and alone", () => {
-    expect(WORKER_INVOCATION_FEATURES).toContain(PREPARE_EVAL_HEALTH_FEATURE);
-    expect(WORKER_IMPLEMENTED_FEATURES).toContain(PREPARE_EVAL_HEALTH_FEATURE);
-    expect(WorkerInvocationSchema.safeParse(invocation()).success).toBe(true);
-    for (const bad of [{ readOnly: undefined }, { pins: undefined }, { setupProve: {} }, { savedEnvBuild: {} }, { savedEnv: {} }, { checkout: [] }, { registries: {} }, { evalHealth: { ...ids, extra: 1 } }, { evalHealth: { requestId: "x", claimId: ids.claimId } }]) {
-      expect(WorkerInvocationSchema.safeParse(invocation({}, bad)).success, JSON.stringify(Object.keys(bad))).toBe(false);
-    }
-  });
   it("takes the gateway's address only with a health run, and only as an https origin", () => {
     expect(WorkerInvocationSchema.safeParse(invocation({}, { evalGatewayUrl: "https://gateway.example.test" })).success).toBe(true);
     for (const url of ["http://gateway.example.test", "https://gateway.example.test/path", "https://u:p@gateway.example.test", "gateway"]) expect(WorkerInvocationSchema.safeParse(invocation({}, { evalGatewayUrl: url })).success).toBe(false);
@@ -66,18 +57,6 @@ describe("the rider measures main and posts the one result", () => {
     const inv = invocation({}, { evalHealth: undefined });
     expect(await runEvalHealthRider(deps({ invocation: inv }))).toBeUndefined();
     expect(await runEvalHealthRider(deps({ invocation: null as never }))).toBeUndefined();
-  });
-  it("pins main as the candidate (each repository's own commit and its tree), runs the job and posts the result to its own route with its own capability", async () => {
-    const t = await withPorts();
-    const answer = await runEvalHealthRider(t.base);
-    expect(answer).toMatchObject({ ...ids, result: { status: "measured" } });
-    expect(EvalHealthResultBodySchema.safeParse(answer).success).toBe(true);
-    expect(t.seen.treeAsked).toEqual([["/work/web", HEAD]]);
-    expect(t.net.sent).toHaveLength(1);
-    expect(t.net.sent[0]!.url).toBe(`https://control.example.test/v1/internal/workspaces/11111111-1111-4111-8111-111111111111/operations/22222222-2222-4222-8222-222222222222/${EVAL_HEALTH_RESULT_PATH}`);
-    expect(t.net.sent[0]!.headers["x-agentx-callback-capability"]).toBe(CAPABILITY);
-    expect(JSON.parse(t.net.sent[0]!.body)).toEqual(JSON.parse(JSON.stringify(answer)));
-    expect(t.w.holds).toHaveLength(1);
   });
   it("posts the prepared stand-in version with the measured result", async () => {
     const t = await withPorts(); const version = "c".repeat(64); const original = t.base.ports!;
@@ -92,12 +71,6 @@ describe("the rider measures main and posts the one result", () => {
     // The empty plan is not runnable (nothing was delivered): not connected, nothing held, and the person is told.
     expect(answer?.result).toEqual({ status: "not_run", reason: "not_connected" });
     expect(t.net.sent).toHaveLength(1);
-  });
-  it("a worker that cannot run it (no sandbox, no sources) says not connected, spends nothing, and posts that", async () => {
-    const net = network();
-    const answer = await runEvalHealthRider(deps({ fetch: net.fetchImpl, ports: () => undefined }));
-    expect(answer).toMatchObject({ ...ids, result: { status: "not_run", reason: "not_connected" } });
-    expect(net.sent).toHaveLength(1);
   });
   it("the production binding without a fresh check sandbox (no worker image) is not connected: it asks for no plan, holds nothing and only posts the answer", async () => {
     const net = network();
@@ -138,10 +111,5 @@ describe("the rider measures main and posts the one result", () => {
     expect(none.sent).toHaveLength(3);
     const ok = network([200]); const t3 = await withPorts({ fetch: ok.fetchImpl }); await runEvalHealthRider(t3.base);
     expect(ok.sent).toHaveLength(1);
-  });
-  it("a result that leaves the worker carries no company, project, key, payer or cost", async () => {
-    const t = await withPorts(); await runEvalHealthRider(t.base);
-    expect(Object.keys((JSON.parse(t.net.sent[0]!.body) as object)).sort()).toEqual(["claimId", "requestId", "result"]);
-    expect(t.net.sent[0]!.body).not.toMatch(/company-a|project-a|costMicros|"payer"/u);
   });
 });

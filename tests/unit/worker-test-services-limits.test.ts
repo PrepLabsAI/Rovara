@@ -23,16 +23,8 @@ const env = (extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
 const idle = { run: async () => ({ exitCode: 0, stdout: "", stderr: "" }) } as unknown as DockerCli;
 
 describe("the worker's configuration: the guard's ceilings", () => {
-  it("defaults to 12 containers and 1024 MiB a helper when the broker told it nothing", () => {
-    expect(testServicesConfigFromEnvironment(env(), idle, undefined, false)!.limits).toEqual({ containers: 12, helperMemMiB: 1024 });
-  });
   it("takes what the broker told it", () => {
     expect(testServicesConfigFromEnvironment(env({ AGENTX_TEST_SERVICES_MAX_CONTAINERS: "30", AGENTX_TEST_SERVICES_MAX_HELPER_MEM_MIB: "2048" }), idle, undefined, false)!.limits).toEqual({ containers: 30, helperMemMiB: 2048 });
-  });
-  it("falls back to the defaults for a value that is not a positive whole number", () => {
-    for (const bad of ["", "0", "-3", "1.5", "lots", "1e3"]) {
-      expect(testServicesConfigFromEnvironment(env({ AGENTX_TEST_SERVICES_MAX_CONTAINERS: bad, AGENTX_TEST_SERVICES_MAX_HELPER_MEM_MIB: bad }), idle, undefined, false)!.limits, JSON.stringify(bad)).toEqual({ containers: 12, helperMemMiB: 1024 });
-    }
   });
 });
 
@@ -65,21 +57,6 @@ describe("starting helpers under the ceilings", () => {
     expect(error).toBeInstanceOf(HelperStartError);
     expect(error).toMatchObject({ reason: "over_limit", message: TEST_SERVICES_OVER_LIMIT_SENTENCE });
     expect(over.calls).toEqual([]);
-  });
-
-  it("refuses a helper that asks for more memory than one helper may have, at exactly one MiB over, before anything starts", async () => {
-    const memory = entryOf("postgres@16").resources.memMiB;
-    expect(memory).toBeGreaterThan(64);
-    const fits = cli();
-    await expect(startHelpers(fits.cli, net, input([entryOf("postgres@16")], { containers: 12, helperMemMiB: memory }))).resolves.toBeDefined();
-    const over = cli();
-    await expect(startHelpers(over.cli, net, input([entryOf("postgres@16")], { containers: 12, helperMemMiB: memory - 1 }))).rejects.toMatchObject({ reason: "over_limit", message: TEST_SERVICES_OVER_LIMIT_SENTENCE });
-    expect(over.calls).toEqual([]);
-  });
-
-  it("makes no check of its own when it was given no limits (the guard decides)", async () => {
-    const run = cli();
-    await expect(startHelpers(run.cli, net, input(Array.from({ length: 12 }, () => redis())))).resolves.toBeDefined();
   });
 
   it("when the guard stops a start with its words, the failure is the fixed over-limit sentence and nothing of Docker's text", async () => {

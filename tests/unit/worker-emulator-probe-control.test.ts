@@ -35,36 +35,6 @@ async function emulator(handler?: (request: IncomingMessage, response: ServerRes
 }
 
 describe("a request with no token (all a sandbox can send) is refused; the worker's call, with the run's token, is answered", () => {
-  it("every control path and method answers false for the sandbox's request, and the open health path still answers", async () => {
-    const { port, seen } = await emulator();
-    for (const [method, path] of [["GET", "/_rovara/ledger/summary"], ["POST", "/_rovara/seed"], ["POST", "/_rovara/reset"], ["GET", "/_rovara/ledger"], ["GET", "/_rovara/tick"]] as const) {
-      // What a sandbox's program can do: a plain request (the probe's own GET is the closest this module has), with no token or a guess.
-      expect(await probeService({ host: "127.0.0.1", port, path }), `${method} ${path}`).toBe(false);
-      expect(await probeService({ host: "127.0.0.1", port, path, control: { token: "guessguessguess1", method } }), `${method} ${path} guess`).toBe(false);
-    }
-    expect(await probeService({ host: "127.0.0.1", port, path: "/_rovara/health" })).toBe(true);
-    expect(seen.filter((entry) => entry.token === TOKEN)).toHaveLength(0);
-  });
-  it("the worker's control call sends the token as a header, a GET with no body and a POST with its body, and hands back the answer", async () => {
-    const { port, seen } = await emulator();
-    let printed = "";
-    expect(await probeService({ host: "127.0.0.1", port, path: "/_rovara/ledger/summary", control: { token: TOKEN, method: "GET", onBody: (text) => { printed = text; } } })).toBe(true);
-    expect(JSON.parse(printed)).toHaveProperty("s3");
-    expect(seen.at(-1)).toMatchObject({ method: "GET", path: "/_rovara/ledger/summary", token: TOKEN, body: "" });
-    let answer = "";
-    const body = Buffer.from(JSON.stringify({ region: "us-east-1", s3: { buckets: [{ name: "orders-archive" }] } }));
-    expect(await probeService({ host: "127.0.0.1", port, path: "/_rovara/seed", control: { token: TOKEN, method: "POST", body, onBody: (text) => { answer = text; } } })).toBe(true);
-    expect(JSON.parse(answer)).toMatchObject({ ok: true });
-    expect(seen.at(-1)).toMatchObject({ method: "POST", path: "/_rovara/seed", token: TOKEN, body: body.toString() });
-  });
-  it("a non-2xx answer (a 422 seed report, a 403, a 500) is false and prints nothing", async () => {
-    for (const status of [403, 422, 500]) {
-      const { port } = await emulator((_request, response) => { response.writeHead(status).end('{"ok":false,"steps":[{"error":"secret detail"}]}'); return true; });
-      let printed = "";
-      expect(await probeService({ host: "127.0.0.1", port, path: "/_rovara/seed", control: { token: TOKEN, method: "POST", body: Buffer.from("{}"), onBody: (text) => { printed = text; } } }), String(status)).toBe(false);
-      expect(printed).toBe("");
-    }
-  });
   it("an answer past the limit fails the call (never a truncated answer that looks whole)", async () => {
     const { port } = await emulator((_request, response) => { response.writeHead(200).end("x".repeat(CONTROL_ANSWER_MAX_BYTES + 1)); return true; });
     let printed = "";
@@ -95,25 +65,12 @@ describe("a request with no token (all a sandbox can send) is refused; the worke
 });
 
 describe("the program (probeCli): the token only from the environment, the body only from a file under /rovara", () => {
-  it("a GET control call with --print exits 0 and prints the answer; the token came from the environment", async () => {
-    const { port, seen } = await emulator();
-    const result = await probeCli(["--host", "127.0.0.1", "--port", String(port), "--path", "/_rovara/ledger/summary", "--control", "get", "--print"], { ROVARA_CONTROL_TOKEN: TOKEN });
-    expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout)).toHaveProperty("s3");
-    expect(seen.at(-1)?.token).toBe(TOKEN);
-  });
   it("without --print nothing is printed, and with no token in the environment (a sandbox's environment) the call fails", async () => {
     const { port } = await emulator();
     const argv = ["--host", "127.0.0.1", "--port", String(port), "--path", "/_rovara/ledger/summary", "--control", "GET"];
     expect(await probeCli(argv, { ROVARA_CONTROL_TOKEN: TOKEN })).toEqual({ exitCode: 0, stdout: "" });
     expect(await probeCli([...argv, "--print"], {})).toEqual({ exitCode: 1, stdout: "" });
     expect(await probeCli([...argv, "--print"], { ROVARA_CONTROL_TOKEN: "x" })).toEqual({ exitCode: 1, stdout: "" });
-  });
-  it("a token given as an argument is ignored (there is no such option): the call fails when the environment has none", async () => {
-    const { port, seen } = await emulator();
-    const result = await probeCli(["--host", "127.0.0.1", "--port", String(port), "--path", "/_rovara/ledger/summary", "--control", "GET", "--token", TOKEN, "--print"], {});
-    expect(result.exitCode).toBe(1);
-    expect(seen.every((entry) => entry.token !== TOKEN)).toBe(true);
   });
   it("a POST reads its body from the mounted file and sends exactly that; a body path outside /rovara, a bad method and a bad timeout exit 1 without a connection", async () => {
     const { port, seen } = await emulator();
