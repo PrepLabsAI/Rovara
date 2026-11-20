@@ -1259,9 +1259,11 @@ describe("what did not change", () => {
     expect(rows.filter((row) => row === inviteResend)).toEqual([inviteResend]);
     const preview = "POST /v1/dev/projects/{project}/start-estimates tasks:read";
     expect(rows.filter((row) => row.includes("/start-estimates "))).toEqual([preview]);
-    const withPreview = rows.filter((row) => !added.some((path) => row === `${path} full`) && row !== inviteResend);
+    const serverReads = ["GET /v1/dev/tasks/start-requests/{requestId} tasks:read", "POST /v1/dev/company/connections/impact full"];
+    expect(rows.filter(row => serverReads.includes(row))).toEqual(serverReads);
+    const withPreview = rows.filter((row) => !added.some((path) => row === `${path} full`) && row !== inviteResend && !serverReads.includes(row));
     const existing = withPreview.filter((row) => row !== preview);
-    expect(existing).toHaveLength(DEV_ROUTES.length - 6);
+    expect(existing).toHaveLength(DEV_ROUTES.length - 8);
     // A digest of every other row, in order: any change to an existing route fails here and must be reviewed.
     expect(createHash("sha256").update(existing.join("\n")).digest("hex")).toBe(EXISTING_ROUTES_DIGEST);
     // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.

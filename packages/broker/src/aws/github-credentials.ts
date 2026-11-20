@@ -595,3 +595,45 @@ export async function filterInstallationsFor(companyId: string, listed: ClientRe
     budget.check(); return visible;
   } catch { throw githubBindingRefusal(); }
 }
+
+/** Complete local inventory only. A single binding allowance spans initial and final reads. */
+export function companyInstallationSnapshotReader(client: { send(command: unknown): Promise<unknown> }, tableName: string, clock: () => number = Date.now) {
+  const started = clock(); let commands = 0; let bytes = 0;
+  const check = () => { if (commands > 304 || bytes > 1_000_000 || clock() - started >= 10_000) throw githubBindingRefusal(); };
+  const send = async (command: unknown) => {
+    commands++; check();
+    const response = await client.send(command);
+    bytes += Buffer.byteLength(JSON.stringify(response) ?? ""); check();
+    if (response === null || typeof response !== "object" || Array.isArray(response)) throw githubBindingRefusal();
+    return response as { Item?: unknown; Items?: unknown; LastEvaluatedKey?: unknown };
+  };
+  const rereadTarget = async (companyId: string, installationId: number) => {
+    OrgIdSchema.parse(companyId); installationIdSchema.parse(installationId);
+    const key = bindingKey(installationId);
+    const response = await send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }));
+    if (response.Item === undefined) return undefined;
+    const row = bindingSchema.parse(response.Item);
+    const raw = response.Item as Record<string, unknown>;
+    if (raw.pk !== key.pk || raw.sk !== key.sk || row.installationId !== installationId) throw githubBindingRefusal();
+    return row.companyId !== companyId ? undefined : { ...row, state: stateOf(row) };
+  };
+  return { rereadTarget, async readComplete(companyId: string) {
+    OrgIdSchema.parse(companyId);
+    const pk = companyInstallationKey(companyId, 1).pk;
+    const response = await send(new QueryCommand({ TableName: tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+      ExpressionAttributeValues: { ":pk": pk, ":prefix": "INSTALLATION#" }, Limit: COMPANY_INSTALLATIONS_MAX + 1, ConsistentRead: true }));
+    if (response.LastEvaluatedKey !== undefined && (response.LastEvaluatedKey === null || typeof response.LastEvaluatedKey !== "object" || Array.isArray(response.LastEvaluatedKey) || Object.keys(response.LastEvaluatedKey).length !== 0)) throw githubBindingRefusal();
+    const rows = z.array(companyInstallationSchema).max(COMPANY_INSTALLATIONS_MAX).parse(response.Items);
+    if (new Set(rows.map(row => row.installationId)).size !== rows.length) throw githubBindingRefusal();
+    const rawRows = response.Items as Array<Record<string, unknown>>;
+    for (const [index, row] of rows.entries()) {
+      if (row.companyId !== companyId || rawRows[index]?.pk !== pk || rawRows[index]?.sk !== `INSTALLATION#${row.installationId}`) throw githubBindingRefusal();
+    }
+    const current: NonNullable<Awaited<ReturnType<typeof rereadTarget>>>[] = [];
+    for (const row of rows) {
+      const binding = await rereadTarget(companyId, row.installationId);
+      if (binding !== undefined) current.push(binding);
+    }
+    check(); return current;
+  } };
+}

@@ -136,6 +136,11 @@ export function boundedCompanyReads(client: { send(command: unknown): Promise<un
     return result;
   };
   return { check,
+    readCounted: <T>(work: () => Promise<T>, countRows: (result: T) => number) => run(work, (result) => {
+      const count = countRows(result);
+      if (!Number.isSafeInteger(count) || count < 0) throw agentXError("CONFIG_INVALID", "company read limit exceeded");
+      return count;
+    }),
     read: <T>(work: () => Promise<T>, readFiles = 0) => run(work, (result) => Array.isArray(result) ? result.length : result === undefined ? 0 : 1, readFiles),
     client: { send: (command: unknown): Promise<unknown> => run(() => client.send(command), (result) => {
       const response = result as { Item?: unknown; Items?: unknown[] } | undefined;
