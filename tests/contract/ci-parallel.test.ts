@@ -24,9 +24,9 @@ const workflow = async () => YAML.parse(await readFile(".github/workflows/ci.yml
 describe("CI runs its checks side by side, as the plan says (a Markdown-only change skips them all)", () => {
   it("has the jobs of the plan-driven CI, each waiting only on the plan (and the build, for the tests), and no job left over from before", async () => {
     const { jobs } = await workflow();
-    expect(Object.keys(jobs).sort()).toEqual(["build", "ci-mode", "device-runtime", "linux-runtime", "live-aws", "local", "nightly-tests", "plan", "port-guard", "quick", "test"]);
+    expect(Object.keys(jobs).sort()).toEqual(["build", "ci-mode", "device-runtime", "linux-runtime", "live-aws", "local", "nightly-tests", "plan", "port-guard", "quick", "release-check", "test"]);
     expect(jobs.plan!.needs).toBeUndefined();
-    for (const name of ["ci-mode", "quick", "build", "linux-runtime", "device-runtime"]) expect(jobs[name]!.needs, name).toBe("plan");
+    for (const name of ["ci-mode", "quick", "build", "linux-runtime", "device-runtime", "release-check"]) expect(jobs[name]!.needs, name).toBe("plan");
     expect(jobs.test!.needs).toEqual(["plan", "build"]);
     expect(jobs["port-guard"]!.needs).toBeUndefined();
     expect(jobs["nightly-tests"]!.needs).toBeUndefined();
@@ -42,7 +42,7 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     for (const step of jobs.test!.steps.filter((item) => item.name !== changed.name)) expect(step.env?.ROVARA_NIGHTLY_TESTS, step.name).toBeUndefined();
   });
 
-  it("puts the old scope, checks and release jobs into `quick`: one after another with their own commands, conditions and time limits, on one checkout and one install", async () => {
+  it("puts the checks into `quick`: one after another with their own commands, conditions and time limits, on one checkout and one install", async () => {
     const quick = (await workflow()).jobs.quick! as Job & { "runs-on"?: string };
     expect(quick["runs-on"]).toBe("ubuntu-latest");
     // Read-only like the workflow's default: no permissions of its own, so nothing the merged jobs lacked.
@@ -55,16 +55,29 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     const parts = quick.steps.filter((step) => step.run !== undefined).map((step) => [step.name, step.if, step["timeout-minutes"], step.run] as const);
     expect(parts).toEqual([
       ["checks: npm ci", undefined, 15, "npm ci"],
-      ["checks: npm run typecheck", undefined, 15, "npm run typecheck"],
       ["checks: npm run typecheck:all", undefined, 15, "npm run typecheck:all"],
       ["checks: npm run lint", "needs.plan.outputs.lint == 'all'", 15, "npm run lint"],
       ["checks: lint the changed files", "needs.plan.outputs.lint == 'changed'", 15, expect.stringContaining('node scripts/lint-shards.ts --files "$RUNNER_TEMP/changed.txt"')],
-      ["release: npm run build", "needs.plan.outputs.release == 'true'", 15, "npm run build"],
-      ["release: npm run infra:synth", "needs.plan.outputs.release == 'true'", 15, "npm run infra:synth"],
-      ["release: Release builds are reproducible", "needs.plan.outputs.release == 'true'", 15, expect.stringContaining("npm run release:verify -- \"$RUNNER_TEMP/release-a\"")],
     ]);
-    // The job's own limit is the sum of the old jobs' (scope 5 + checks 15 + release 15), and each step may take at most its old job's limit.
-    expect(quick["timeout-minutes"]).toBe(35);
+    // typecheck:all runs tsc -b itself, so a separate `npm run typecheck` step only repeated it; the release check is its own job (below).
+    expect(quick.steps.some((step) => step.run === "npm run typecheck")).toBe(false);
+    expect(quick["timeout-minutes"]).toBe(30);
+  });
+
+  it("runs the release check as its own job beside `quick`, when the plan says the release area changed", async () => {
+    const release = (await workflow()).jobs["release-check"]! as Job & { "runs-on"?: string };
+    expect(release.if).toBe("needs.plan.outputs.release == 'true'");
+    expect(release["runs-on"]).toBe("ubuntu-latest");
+    expect(release.permissions).toBeUndefined();
+    expect(JSON.stringify(release)).not.toContain("secrets.");
+    const parts = release.steps.filter((step) => step.run !== undefined).map((step) => [step.name, step.if, step["timeout-minutes"], step.run] as const);
+    expect(parts).toEqual([
+      ["release: npm ci", undefined, 15, "npm ci"],
+      ["release: npm run build", undefined, 15, "npm run build"],
+      ["release: npm run infra:synth", undefined, 15, "npm run infra:synth"],
+      ["release: Release builds are reproducible", undefined, 15, expect.stringContaining("npm run release:verify -- \"$RUNNER_TEMP/release-a\"")],
+    ]);
+    expect(release["timeout-minutes"]).toBe(35);
   });
 
   it("builds once in its own job and hands the output to the test shards as an artifact, instead of each shard building", async () => {

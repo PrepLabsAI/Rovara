@@ -378,12 +378,15 @@ describe("wiring", () => {
     expect(pkg.scripts["typecheck:baseline"]).toBe("tsc -b --pretty false && node scripts/typecheck-baseline.ts update");
   });
 
-  it("runs the ratchet in CI right after the typecheck, behind the plan's Markdown-only skip", async () => {
+  it("runs the typecheck and the ratchet in CI right after the install (typecheck:all is the typecheck, then the ratchet), behind the plan's Markdown-only skip", async () => {
     const workflow = YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
     const quick = workflow.jobs.quick!;
-    const typecheck = quick.steps.findIndex((step) => step.run === "npm run typecheck");
+    const scripts = (JSON.parse(await readFile("package.json", "utf8")) as { scripts: Record<string, string> }).scripts;
+    expect(scripts["typecheck:all"]).toBe(`${scripts.typecheck!} && node scripts/typecheck-baseline.ts check`);
+    const install = quick.steps.findIndex((step) => step.run === "npm ci");
     const ratchet = quick.steps.findIndex((step) => step.run === "npm run typecheck:all");
-    expect(ratchet).toBe(typecheck + 1);
+    expect(ratchet).toBe(install + 1);
+    expect(quick.steps.some((step) => step.run === "npm run typecheck")).toBe(false);
     // Behind the plan's Markdown-only skip (the job's own condition), and never skipped otherwise: the typecheck stays full in every mode.
     expect(quick.if).toBe("needs.plan.outputs.docs_only != 'true'");
     expect(quick.steps[ratchet]!.if).toBeUndefined();
