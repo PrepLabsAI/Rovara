@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  AFFECTED_SHARDS, FULL_SHARDS, MAX_EXTRA_TESTS, affectedPackages, fullReason, planCi, planOutputs, relatedTests, type PackageInfo, type PlanInput,
+  AFFECTED_SHARDS, FULL_SHARDS, MAX_EXTRA_TESTS, affectedPackages, fullReason, linuxRuns, planCi, planOutputs, relatedTests, type PackageInfo, type PlanInput,
 } from "../../scripts/ci-plan.js";
 
 // Paths here are made up on purpose: a real path named in a test would make that file run full CI.
@@ -23,7 +23,8 @@ describe("which runs are FULL", () => {
   it("is every run that is not a pull request: a push to code/next and a manual run (the emulator check runs in a push, not in a manual run: DEC 254zn)", () => {
     for (const event of ["push", "workflow_dispatch"]) {
       const plan = planCi(input({ event, changed: [] }));
-      expect(plan, event).toMatchObject({ mode: "full", tests: "all", lint: "all", linux: true, device: event === "push", release: true, docsOnly: false, shards: FULL_SHARDS });
+      // #1185: a push to code/next runs the Linux runtime check (once per batch); a manual run only when asked (its `linux` input).
+      expect(plan, event).toMatchObject({ mode: "full", tests: "all", lint: "all", linux: event === "push", device: event === "push", release: true, docsOnly: false, shards: FULL_SHARDS });
     }
   });
 
@@ -118,9 +119,11 @@ describe("the affected plan of an ordinary pull request", () => {
   });
 
   it("runs the device emulator check once, non-blocking, in a push to code/next, a scheduled run and a Batch pull request, and never in a manual run, a label-only full run or a Sync mainline run", () => {
-    for (const run of [input({ event: "push", changed: [] }), input({ event: "schedule", changed: [] }), input({ title: "Batch 12: things", changed: ["packages/other-d/src/x.ts"] })]) {
+    for (const run of [input({ event: "push", changed: [] }), input({ title: "Batch 12: things", changed: ["packages/other-d/src/x.ts"] })]) {
       expect(planCi(run), `${run.event} ${run.title}`).toMatchObject({ device: true, deviceRequired: false, mode: "full" });
     }
+    // #1185: the scheduled run is the nightly Linux runtime run, not a full suite; it still runs the emulator check, non-blocking.
+    expect(planCi(input({ event: "schedule", changed: [] }))).toMatchObject({ device: true, deviceRequired: false, mode: "affected", linux: true });
     for (const run of [input({ event: "workflow_dispatch", changed: [] }), input({ labels: ["full-ci"] }), input({ title: "Sync mainline into code/next" }), input({ title: "Batching the sends" })]) {
       expect(planCi(run), `${run.event} ${run.title}`).toMatchObject({ device: false, deviceRequired: false });
     }
@@ -154,5 +157,41 @@ describe("the outputs the workflow reads", () => {
     expect(planOutputs(planCi(input({ event: "push", changed: [] }))).shards).toBe("[1,2,3,4,5,6,7,8]");
     const docs = planOutputs(planCi(input({ changed: ["docs/sample/guide.md"] })));
     expect(docs).toMatchObject({ docs_only: "true", tests: "none", shards: "[1]" });
+  });
+});
+
+// #1185: the Linux runtime check (the slowest job) runs when its area changes, once per batch, nightly and on request; not on every FULL run.
+describe("when the Linux runtime check runs", () => {
+  it("runs when the change reaches its area, in an ordinary or a FULL pull request", () => {
+    for (const area of ["packages/worker/src/x.ts", "packages/verifier/src/x.ts", "environments/base/Dockerfile", "tests/linux/x.test.ts", "package-lock.json", ".github/workflows/ci.yml"]) {
+      expect(planCi(input({ changed: [area] })).linux, area).toBe(true);
+      expect(planCi(input({ title: "Batch 3: things", changed: [area] })).linux, `Batch ${area}`).toBe(true);
+    }
+  });
+  it("runs on each push to code/next and on the nightly schedule, whatever changed", () => {
+    expect(planCi(input({ event: "push", changed: [] })).linux).toBe(true);
+    expect(planCi(input({ event: "schedule", changed: [] })).linux).toBe(true);
+  });
+  it("runs on request: the linux-ci or full-ci label, or a manual run's linux input", () => {
+    expect(planCi(input({ labels: ["linux-ci"] })).linux).toBe(true);
+    expect(planCi(input({ labels: ["full-ci"] })).linux).toBe(true);
+    expect(planCi(input({ event: "workflow_dispatch", changed: [], forceLinux: true })).linux).toBe(true);
+    expect(planCi(input({ event: "workflow_dispatch", changed: [] })).linux).toBe(false);
+  });
+  it("does not run on a Batch or Sync mainline pull request, or an ordinary one, whose change is outside its area", () => {
+    for (const title of ["Batch 9: things", "Sync mainline into code/next", "Mainline takes code/next through b23", "Sample change"]) {
+      const plan = planCi(input({ title, changed: ["packages/other-d/src/x.ts"] }));
+      expect(plan.linux, title).toBe(false);
+    }
+    expect(planCi(input({ title: "Sync mainline into code/next" })).mode).toBe("full");
+  });
+  it("does not run for a Markdown-only change, and does run when a pull request's changed files are unknown", () => {
+    expect(planCi(input({ changed: ["docs/guide.md"] })).linux).toBe(false);
+    expect(linuxRuns({ event: "pull_request", labels: [], changed: [] })).toBe(true);
+  });
+  it("makes the nightly run the Linux runtime check and the typecheck only: no tests, lint or release check", () => {
+    const plan = planCi(input({ event: "schedule", changed: [] }));
+    expect(plan).toMatchObject({ mode: "affected", tests: "none", lint: "none", release: false, linux: true, docsOnly: false });
+    expect(planOutputs(plan)).toMatchObject({ shards: "[1]", linux: "true", tests: "none" });
   });
 });

@@ -2,11 +2,16 @@
 // affect, while a FULL run (everything, as before) stays available and is the one a merge needs.
 //
 // FULL mode: a push to code/next, a manual run, a pull request labelled `full-ci`, or one whose title starts with "Batch " or "Sync mainline". It runs every job
-// in full: all test shards, the whole lint, the Linux runtime check and the release check (the device emulator check only on a push or a "Batch " pull request; see DEVICE_PATTERNS). The `ci-mode (full)` check exists only then.
+// in full: all test shards, the whole lint and the release check (the device emulator check only on a push or a "Batch " pull request; see DEVICE_PATTERNS). The `ci-mode (full)` check exists only then.
 // AFFECTED mode (a pull request, the default): the typecheck stays full; the tests are the ones the change can reach (vitest --changed plus the tests that name a
 // changed file or one of the packages it touches), in 2 shards; lint covers the lint shards that hold changed files; the Linux runtime, device emulator and release checks run only
 // when files in their area change (the device emulator check: only device code, DEC 254zn); a Markdown-only change that no test reads runs nothing but the plan. Anything shared (vitest config, package.json, the lockfile,
 // tests/support, the workflow) falls back to the whole test suite, and the lint settings to the whole lint.
+//
+// The Linux runtime check (#1185) is the slowest job (~26 min) and runs in neither mode by default: it runs when its area changes (LINUX_PATTERNS), once per batch
+// (each push to code/next), every night (the scheduled run, which runs it and nothing else heavy), and on request (the `linux-ci` or `full-ci` label, or a manual
+// run's `linux` input). A FULL pull request ("Batch ...", "Sync mainline ...") whose change does not reach its area does not run it: that tree is checked on
+// code/next's push or that night.
 //
 // Node runs this file directly, before `npm ci`, so it imports only Node's own modules and uses only erasable syntax. (The docs-only rule that lived in
 // scripts/ci-docs-only.ts is here now.)
@@ -75,16 +80,22 @@ export interface PlanInput {
   /** Every test file's source, by repository path. */
   testSources: ReadonlyMap<string, string>;
   packages: readonly PackageInfo[];
+  /** A manual run asked for the Linux runtime check (workflow_dispatch input `linux`). */
+  forceLinux?: boolean;
 }
 
 export const FULL_LABEL = "full-ci";
+/** #1185: a pull request labelled like this runs the Linux runtime check whatever it changes. */
+export const LINUX_LABEL = "linux-ci";
+/** #1185: runs that always run the Linux runtime check: a push (CI runs on pushes to code/next only, so once per batch) and the nightly scheduled run. */
+export const LINUX_EVENTS: readonly string[] = ["push", "schedule"];
 export const FULL_TITLE_PREFIXES = ["Batch ", "Sync mainline"] as const;
 export const FULL_SHARDS = 8;
 export const AFFECTED_SHARDS = 2;
 /** More related tests than this and the selection saves little: run the whole suite. */
 export const MAX_EXTRA_TESTS = 300;
 
-/** Why a run is FULL, or undefined when it is not. */
+/** Why a run is FULL, or undefined when it is not. (The scheduled run is neither: it is the nightly Linux runtime run, see planCi.) */
 export function fullReason(input: Pick<PlanInput, "event" | "labels" | "title">): string | undefined {
   if (input.event !== "pull_request") return `${input.event} runs everything`;
   if (input.labels.includes(FULL_LABEL)) return `the pull request has the ${FULL_LABEL} label`;
@@ -209,12 +220,28 @@ export function relatedTests(changed: readonly string[], packages: readonly Pack
   return found.sort();
 }
 
+/**
+ * #1185: whether the Linux runtime check runs: once per batch and every night (LINUX_EVENTS), on request (the `linux-ci` or `full-ci` label, a manual run's
+ * input), and when the change reaches its area (LINUX_PATTERNS), including a pull request whose changed-file list is empty (unknown, so it runs).
+ */
+export function linuxRuns(input: Pick<PlanInput, "event" | "labels" | "changed" | "forceLinux">): boolean {
+  if (LINUX_EVENTS.includes(input.event) || input.forceLinux === true) return true;
+  if (input.labels.includes(LINUX_LABEL) || input.labels.includes(FULL_LABEL)) return true;
+  if (input.event !== "pull_request") return false;
+  return input.changed.length === 0 || input.changed.some((file) => anyMatch(file, LINUX_PATTERNS));
+}
+
 export function planCi(input: PlanInput): Plan {
-  const reason = fullReason(input);
   const deviceRequired = input.changed.some((file) => anyMatch(file, DEVICE_PATTERNS));
   const deviceFull = DEVICE_FULL_EVENTS.includes(input.event) || (input.event === "pull_request" && input.title.startsWith(DEVICE_FULL_TITLE_PREFIX));
+  // #1185: the nightly run is the Linux runtime check (and the device emulator check, non-blocking, as DEC 254zn had it for a scheduled run), not a second full suite:
+  // the typecheck still runs in `quick`, but no tests, lint or release check. Mainline's merges were tested by their own runs.
+  if (input.event === "schedule") {
+    return { mode: "affected", modeReason: "the nightly Linux runtime run", docsOnly: false, tests: "none", testsReason: "the nightly run checks the Linux runtime only", shards: 1, lint: "none", linux: true, device: true, deviceRequired: false, release: false, extraTests: [] };
+  }
+  const reason = fullReason(input);
   if (reason !== undefined) {
-    return { mode: "full", modeReason: reason, docsOnly: false, tests: "all", testsReason: "FULL mode", shards: FULL_SHARDS, lint: "all", linux: true, device: deviceRequired || deviceFull, deviceRequired, release: true, extraTests: [] };
+    return { mode: "full", modeReason: reason, docsOnly: false, tests: "all", testsReason: "FULL mode", shards: FULL_SHARDS, lint: "all", linux: linuxRuns(input), device: deviceRequired || deviceFull, deviceRequired, release: true, extraTests: [] };
   }
   const { changed } = input;
   const docs = docsOnlyChange(changed, input.testSources);
@@ -241,7 +268,7 @@ export function planCi(input: PlanInput): Plan {
     testsReason,
     shards: tests === "all" ? FULL_SHARDS : AFFECTED_SHARDS,
     lint,
-    linux: changed.length === 0 || changed.some((file) => anyMatch(file, LINUX_PATTERNS)),
+    linux: linuxRuns(input),
     device: deviceRequired || deviceFull || changed.length === 0,
     deviceRequired,
     release: changed.length === 0 || changed.some((file) => anyMatch(file, RELEASE_PATTERNS)),
@@ -299,7 +326,7 @@ if (process.argv[1]?.endsWith("ci-plan.ts")) {
     try { return (JSON.parse(process.env.CI_LABELS || "[]") as unknown[]).filter((label): label is string => typeof label === "string"); } catch { return []; }
   })();
   const changed = readFileSync(listed, "utf8").split("\n").map((line) => line.trim()).filter((line) => line !== "");
-  const plan = planCi({ event, labels, title: process.env.CI_TITLE ?? "", changed, testSources: new Map([...testFiles("tests"), ...testFiles("packages")]), packages: readPackages(".") });
+  const plan = planCi({ event, labels, title: process.env.CI_TITLE ?? "", changed, testSources: new Map([...testFiles("tests"), ...testFiles("packages")]), packages: readPackages("."), forceLinux: process.env.CI_FORCE_LINUX === "true" });
   console.log(`CI mode: ${plan.mode} (${plan.modeReason}).`);
   console.log(plan.docsOnly
     ? `Markdown-only change: ${plan.testsReason}; nothing but this plan runs.`

@@ -100,6 +100,7 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
       CI_EVENT: "${{ github.event_name }}",
       CI_LABELS: "${{ toJSON(github.event.pull_request.labels.*.name) }}",
       CI_TITLE: "${{ github.event.pull_request.title }}",
+      CI_FORCE_LINUX: "${{ github.event.inputs.linux }}",
       BASE_SHA: "${{ github.event.pull_request.base.sha }}",
     });
     expect(step.run).toContain("git diff --name-only HEAD^1 HEAD");
@@ -223,9 +224,11 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
   it("runs on pull requests and by hand, on a push to code/next only and never on a push to mainline, and skips a draft until it is ready", async () => {
     const parsed = await workflow();
     expect(parsed.on).toEqual({
-      workflow_dispatch: null,
+      // #1185: a manual run may ask for the Linux runtime check; the nightly schedule runs it on mainline.
+      workflow_dispatch: { inputs: { linux: { description: "Also run the Linux runtime check (#1185)", type: "boolean", default: false } } },
       pull_request: { types: ["opened", "synchronize", "reopened", "ready_for_review", "labeled"] },
       push: { branches: ["code/next"] },
+      schedule: [{ cron: "0 6 * * *" }],
     });
     // Every job but the plan hangs off it (or the gate does), so a draft's skipped plan skips them all.
     expect(parsed.jobs.plan!.if).toBe("github.event.pull_request.draft != true");
