@@ -43,6 +43,7 @@ import { APP_NODE_IMAGE } from "../support/linux-runtime.js";
 import { DOCKER_25_DIND_IMAGE, startDind, type Dind } from "../support/linux-dind.js";
 import { createGatewayNameFiles } from "../../packages/worker/src/gateway-name-files.js";
 import { docker, sudo } from "../support/linux-network-walls.js";
+import { F11_ALLOWED_TARGETS, f11GatewaySource, probeF11Dns, probeF11Navigation, snapshotF11Diagnostics, withF11FailureDiagnostics } from "../support/f11-diagnostics.js";
 import { repoExecutorSeccompProfilePath } from "../../scripts/executor-smoke.js";
 
 const run = promisify(execFile);
@@ -206,7 +207,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const held = await docker("run", "-d", "--name", HELD_CONTAINER, "--restart", "always", "--pull=never", "--network", "agentx-task", APP_NODE_IMAGE, "sleep", "3600");
     expect(held.code, held.stderr).toBe(0);
     await writeFile(join(dir, "worker.env"), "AWS_REGION=us-west-2\n");
-    const made = await stage(EGRESS_GATEWAY_SOURCE);
+    const made = await stage(f11GatewaySource(EGRESS_GATEWAY_SOURCE));
     expect(made.code, `${made.failure}\n${made.output}`).toBe(0);
     await ordinarySandbox(ICC_PEER, ICC_PEER_IP);
     await ordinarySandbox(ICC_CLIENT);
@@ -590,7 +591,6 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const marker = `be0-peer-${suffix}`;
     const hostAddress = "172.28.251.1";
     const metadataAddress = "169.254.169.254";
-    const seccomp = verifyExecutorSeccompProfile(repoExecutorSeccompProfilePath());
     // Bound the CLI as well as every in-container request. A timeout is a test
     // failure; a killed CLI's container is still removed by finally.
     const dockerFor = async (args: string[], timeout = 30_000) => run("docker", args, { timeout, maxBuffer: 16 * 1024 * 1024 }).then(
@@ -614,15 +614,11 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       expect(await response.text(), url).toBe(marker);
     };
     const waitForExit = async (name: string, timeout: number) => {
-      try {
-        const waited = await run("docker", ["wait", name], { timeout });
-        expect(waited.stderr.trim(), `${name}: docker wait errors`).toBe("");
-        expect(waited.stdout.trim(), `${name}: container exit code`).toBe("0");
-      } catch (error) {
-        const removed = await docker("rm", "--force", name);
-        expect(removed.code, `remove timed-out/failed ${name}: ${removed.stderr}`).toBe(0);
-        throw error;
-      }
+      const waited = await run("docker", ["wait", name], { timeout });
+      expect(waited.stderr.trim(), `${name}: docker wait errors`).toBe("");
+      expect(waited.stdout.trim(), `${name}: container exit code`).toBe("0");
+      // On failure, keep the container for the outer diagnostic dump. The
+      // finally block still requires every remaining container to be removed.
     };
     // These names include containers whose --rm run may already have finished.
     // Inspect the remaining names, then require each actual removal to succeed.
@@ -631,7 +627,15 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     let metadataRoute = false;
     let metadataVia = "";
     let madeOtherNetwork = false;
+    let probeEvidence = "";
+    const diagnostics = {
+      gatewayLog: () => docker("logs", "rovara-egw"),
+      sandboxDns: () => docker("exec", sandboxName, "node", "-e", `const dns=require('dns').promises;const resolver=new dns.Resolver({timeout:4000,tries:2});(${probeF11Dns.toString()})(resolver,['registry.npmjs.org','github.com']).then(r=>console.log(JSON.stringify(r))).catch(e=>{console.error(e);process.exit(1)})`),
+      chromium: async () => ({ savedProbeOutput: probeEvidence, currentProbeLog: await docker("logs", probeName) }),
+    };
+    const dump = (message: string) => console.error(message);
     try {
+      const seccomp = verifyExecutorSeccompProfile(repoExecutorSeccompProfilePath());
       const present = await docker("image", "inspect", image);
       expect(present.code, `CI must preload ${image}: ${present.stderr}`).toBe(0);
       expect((await sudo("cat", DAEMON_JSON)).stdout).toContain(`"dns": ["${GATEWAY_IP}"]`);
@@ -786,18 +790,19 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       // shared namespace and ALL production executor security/resource flags.
       // DNS is an actual bounded lookup of the namespace's configured resolver;
       // HTTPS to the allowed name separately exercises its required TLS path.
-      const targets = { raw1: "https://1.1.1.1/", raw2: "https://8.8.8.8/", registry: `https://${REGISTRY_HOST}/v2/`, peer: peerUrl(remoteName), stale: peerUrl(staleName), otherSandbox: peerUrl(otherName), inner: peerUrl(innerName), host: hostUrl, gatewayOuter: gatewayUrl, metadata: metadataUrl, daemonProxy: "http://172.28.251.2:3128/", allowed: "https://registry.npmjs.org/" };
+      const targets = { raw1: "https://1.1.1.1/", raw2: "https://8.8.8.8/", registry: `https://${REGISTRY_HOST}/v2/`, peer: peerUrl(remoteName), stale: peerUrl(staleName), otherSandbox: peerUrl(otherName), inner: peerUrl(innerName), host: hostUrl, gatewayOuter: gatewayUrl, metadata: metadataUrl, daemonProxy: "http://172.28.251.2:3128/", ...F11_ALLOWED_TARGETS };
       const probeScript = `const {openEvidenceChromium}=require('/opt/agentx/packages/verifier/dist/executor/browser-evidence-chromium.js');
 (async()=>{
   const dns=require('dns').promises;const resolver=new dns.Resolver({timeout:4000,tries:2});const out={};
-  for(const [key,name] of [['dnsDenied','ghcr.io'],['dnsAllowed','registry.npmjs.org']]){try{out[key]={addresses:await resolver.resolve4(name)}}catch(e){out[key]={error:e.code}}}
+  const navigate=${probeF11Navigation.toString()};
+  for(const [key,name] of [['dnsDenied','ghcr.io'],['dnsAllowed','registry.npmjs.org'],['dnsAllowedSecond','github.com']]){try{out[key]={addresses:await resolver.resolve4(name)}}catch(e){out[key]={error:e.code}}}
   const c=await openEvidenceChromium({signal:AbortSignal.timeout(180000)});
   try{const p=await c.browser.newPage();
-    const local=await p.goto('http://127.0.0.1:${String(port)}/checkout',{waitUntil:'domcontentloaded',timeout:10000});
-    out.local={status:local&&local.status(),body:(await p.locator('body').innerText()).slice(0,2000)};
+    out.local=await navigate(p,'http://127.0.0.1:${String(port)}/checkout',10000);
+    console.log(JSON.stringify(out));
     for(const [key,url] of Object.entries(${JSON.stringify(targets)})){
-      try{const r=await p.goto(url,{waitUntil:'domcontentloaded',timeout:key==='allowed'?20000:8000});out[key]={status:r&&r.status(),body:(await p.locator('body').innerText()).slice(0,2000)}}
-      catch(e){out[key]={error:String(e.message)}}
+      const targetPage=await c.browser.newPage();
+      try{out[key]=await navigate(targetPage,url,key.startsWith('allowed')?20000:8000);console.log(JSON.stringify(out))}finally{await targetPage.close()}
     }
     console.log(JSON.stringify(out));
   }finally{await c.close()}
@@ -833,8 +838,6 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
         expect(state.code, state.stderr).toBe(0);
         if (state.stdout.trim() === "false") break;
         if (Date.now() >= probeDeadline) {
-          const killed = await docker("rm", "--force", probeName);
-          expect(killed.code, killed.stderr).toBe(0);
           throw new Error("Chromium network probe exceeded its bounded run");
         }
         await pause();
@@ -842,12 +845,15 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       expect(controlRounds).toBeGreaterThan(0);
       await waitForExit(probeName, 15_000);
       const probe = await docker("logs", probeName);
+      probeEvidence = `${probe.stderr}\n${probe.stdout}`;
+      console.log(`[F11 Chromium probe]\n${probeEvidence}`);
       expect(probe.code, probe.stderr).toBe(0);
       const result = JSON.parse(probe.stdout.trim().split("\n").at(-1) ?? "{}") as Record<string, { status?: number; body?: string; error?: string; addresses?: string[] }>;
       expect(result.local?.status).toBe(200);
       expect(result.local?.body).toContain("Checkout");
       expect(result.dnsDenied).toEqual({ error: "ENOTFOUND" });
       expect(result.dnsAllowed).toEqual({ addresses: [GATEWAY_IP] });
+      expect(result.dnsAllowedSecond).toEqual({ addresses: [GATEWAY_IP] });
       const isNetworkDenial = (answer: { status?: number; error?: string } | undefined): boolean => answer?.status === undefined && /net::ERR_(ADDRESS_UNREACHABLE|CONNECTION_TIMED_OUT|CONNECTION_REFUSED)\b/u.test(answer?.error ?? "");
       // ICC-off plus isolated ordinary ports must also refuse the live peer on
       // this same bridge; the shared resolver/allowed HTTPS controls must pass.
@@ -856,35 +862,41 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       }
       expect(result.registry?.error).toMatch(/net::ERR_NAME_NOT_RESOLVED/u);
       expect(result.allowed).toMatchObject({ status: 200 });
+      expect(result.allowedSecond).toMatchObject({ status: 200 });
       expect(result.allowed?.body).toMatch(/^\s*\{[\s\S]*\}\s*$/u);
       expect(() => { void (JSON.parse(result.allowed?.body ?? "") as unknown); }).not.toThrow();
       // Check the busy renderer after the network probes, so its contract
       // assertion cannot prevent them from executing.
       expect(captured?.shots.size).toBe(3);
       expect(captured?.shots.get("/busy")).toMatchObject({ t: "shot", ok: false, reason: "time_limit" });
+    } catch (error) {
+      await withF11FailureDiagnostics(async () => { throw error; }, diagnostics, dump);
     } finally {
-      // Namespace sharers must go BEFORE the sandbox. Do not let one cleanup
-      // failure prevent the rest of the containers/routes from being removed.
-      const cleanupErrors: string[] = [];
-      const existing = await docker("ps", "-a", "--format", "{{.Names}}");
-      if (existing.code !== 0) cleanupErrors.push(existing.stderr);
-      const names = new Set(existing.stdout.trim().split("\n"));
-      for (const name of removed) {
-        if (existing.code === 0 && !names.has(name)) continue;
-        const result = await docker("rm", "--force", name);
-        if (result.code !== 0) cleanupErrors.push(`${name}: ${result.stderr}`);
-      }
-      hostServer.closeAllConnections();
-      if (hostServer.listening) await new Promise<void>((resolve) => { hostServer.close(() => resolve()); });
-      if (metadataRoute) {
-        try { await checkedSudo("ip", "route", "del", `${metadataAddress}/32`, "via", metadataVia); }
-        catch (error) { cleanupErrors.push(String(error)); }
-      }
-      if (madeOtherNetwork) {
-        const result = await docker("network", "rm", otherNetwork);
-        if (result.code !== 0) cleanupErrors.push(result.stderr);
-      }
-      expect(cleanupErrors, "F11 cleanup").toEqual([]);
+      const cleanupDiagnostics = await snapshotF11Diagnostics(diagnostics);
+      await withF11FailureDiagnostics(async () => {
+        // Namespace sharers must go BEFORE the sandbox. Do not let one cleanup
+        // failure prevent the rest of the containers/routes from being removed.
+        const cleanupErrors: string[] = [];
+        const existing = await docker("ps", "-a", "--format", "{{.Names}}");
+        if (existing.code !== 0) cleanupErrors.push(existing.stderr);
+        const names = new Set(existing.stdout.trim().split("\n"));
+        for (const name of removed) {
+          if (existing.code === 0 && !names.has(name)) continue;
+          const result = await docker("rm", "--force", name);
+          if (result.code !== 0) cleanupErrors.push(`${name}: ${result.stderr}`);
+        }
+        hostServer.closeAllConnections();
+        if (hostServer.listening) await new Promise<void>((resolve) => { hostServer.close(() => resolve()); });
+        if (metadataRoute) {
+          try { await checkedSudo("ip", "route", "del", `${metadataAddress}/32`, "via", metadataVia); }
+          catch (error) { cleanupErrors.push(String(error)); }
+        }
+        if (madeOtherNetwork) {
+          const result = await docker("network", "rm", otherNetwork);
+          if (result.code !== 0) cleanupErrors.push(result.stderr);
+        }
+        expect(cleanupErrors, "F11 cleanup").toEqual([]);
+      }, cleanupDiagnostics, dump);
     }
   }, 900_000);
 
