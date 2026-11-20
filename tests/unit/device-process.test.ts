@@ -2,10 +2,11 @@
 // but the one given.
 import { describe, expect, it } from "vitest";
 import { createNodeCommandPort } from "../../packages/verifier/src/executor/device-process.js";
+import { processEnded } from "../support/process-liveness.js";
 
 const NODE = process.execPath;
 const port = createNodeCommandPort();
-const gone = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
+const gone = processEnded;
 const waitGone = async (pid: number, ms = 4_000) => { const end = Date.now() + ms; while (Date.now() < end) { if (gone(pid)) return true; await new Promise((resolve) => { setTimeout(resolve, 50); }); } return gone(pid); };
 const text = (bytes: Uint8Array) => Buffer.from(bytes).toString("utf8");
 

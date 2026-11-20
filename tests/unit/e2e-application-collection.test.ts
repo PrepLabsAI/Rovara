@@ -10,6 +10,7 @@ import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e
 import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/evidence-paths.js";
 import { E2E_AGENT_CONFIG_MAX_INPUT_TOKENS } from "../../packages/verifier/src/application-templates.js";
 import type { E2EApplicationReport } from "../../packages/verifier/src/application-report-schema.js";
+import { NO_PROTECTED_DIRECTORY, protectedBaseDirectory } from "../support/protected-directory.js";
 
 const sha = "a".repeat(64);
 const uuidA = "11111111-1111-4111-8111-111111111111";
@@ -222,15 +223,17 @@ describe("application collection contracts", () => {
       supervisorReceiptRefs: [receipt.ref, sourceReceipt.ref], cleanupConfirmed: true, cleanupServerListening: false })).toThrow();
   });
 
-  it("reads a fixed installed spool only after construction, with exact assignment identity and canonical raw bytes", async () => {
+  // The spool check walks the assignment root up to "/" (tests/support/protected-directory.ts says where such a folder is on each kind of machine).
+  const spoolBase = protectedBaseDirectory();
+  it.skipIf(spoolBase === undefined)(`reads a fixed installed spool only after construction, with exact assignment identity and canonical raw bytes${spoolBase === undefined ? ` (skipped: ${NO_PROTECTED_DIRECTORY})` : ""}`, async () => {
     if (process.platform !== "linux" && process.platform !== "darwin") return;
     const { createE2EApplicationSupervisorReadbackClientForConformance,
       createE2EApplicationSupervisorReadbackClientForConformanceWithHooks } = await import("../../packages/verifier/src/application-runtime-cli.js");
     const root = await mkdtemp(join(process.cwd(), ".application-spool-fixture-"));
+    const assignmentRoot = await mkdtemp(join(spoolBase!, ".application-spool-assigned-"));
     try {
       const packageRoot = join(root, "package"); const assetDir = join(packageRoot, "assets", "application-runtime-v1");
-      const assignmentRoot = join(root, "assigned-spools");
-      await mkdir(assetDir, { recursive: true, mode: 0o700 }); await mkdir(assignmentRoot, { mode: 0o700 });
+      await mkdir(assetDir, { recursive: true, mode: 0o700 });
       const descriptor = { entryPointId: "installed-local", entryPointManifestDigest: sha };
       const transportId = "private-channel-a"; const correlation = "33333333-3333-4333-8333-333333333333";
       await writeFile(join(assetDir, "supervisor-spools.json"), canonicalJson({ schemaVersion: "e2e-application-supervisor-spools/v1",
@@ -301,7 +304,7 @@ describe("application collection contracts", () => {
       const pending = abortClient.read({ ...expected, maxWireBytes: 26_214_400 }, aborting.signal);
       await expect(pending).rejects.toThrow();
       await writeFile(join(spoolDir, "supervisor-readback.json"), "{}", { mode: 0o600 });
-    } finally { await rm(root, { recursive: true, force: true }); }
+    } finally { await rm(root, { recursive: true, force: true }); await rm(assignmentRoot, { recursive: true, force: true }); }
   });
 
   it("accepts bounded first-party capture structure without turning claimed provenance into authentication", async () => {

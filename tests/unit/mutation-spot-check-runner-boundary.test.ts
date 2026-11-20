@@ -9,13 +9,14 @@ import { createCheckRunners } from "../../packages/worker/src/verification/check
 import { snapshotCandidate } from "../../packages/worker/src/verification/mutation-restore.js";
 import { runMutationSpotCheck } from "../../packages/worker/src/verification/mutation-spot-check.js";
 import { fixture, report } from "./mutation-spot-support.js";
+import { processAlive } from "../support/process-liveness.js";
 
 // The existing worker image carries deployment markers that intentionally refuse local child
 // execution. These fixtures test the explicitly local runner, including when hosted in that image.
 beforeEach(() => { vi.stubEnv("AGENTX_RUNTIME", ""); vi.stubEnv("AGENTX_WORKER_PROCESS_SCOPE", ""); });
 afterEach(() => vi.unstubAllEnvs());
 
-const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const alive = processAlive;
 async function until(predicate: () => Promise<boolean> | boolean): Promise<void> {
   const deadline = Date.now() + 10_000;
   while (!(await predicate())) { if (Date.now() >= deadline) throw new Error("test child did not reach its handshake"); await delay(10); }
