@@ -1304,7 +1304,6 @@
     "tests/unit/diagnosis-words.test.ts": 0.051,
     "tests/unit/docs-local-table.test.ts": 0.005,
     "tests/unit/dynamodb-two-company.test.ts": 0.188,
-    "tests/unit/e2e-accounts-fixture-plan.test.ts": 0.218,
     "tests/unit/e2e-agent-collection.test.ts": 14.698,
     "tests/unit/e2e-agent-model-seam.test.ts": 1.26,
     "tests/unit/e2e-agent-models.test.ts": 0.008,

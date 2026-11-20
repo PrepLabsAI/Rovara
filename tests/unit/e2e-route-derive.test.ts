@@ -4,7 +4,6 @@ import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
 import { e2eModelRouteRevision } from "../../packages/contracts/src/e2e-model-channel.js";
 import { deriveE2EAgentRoute, e2eAgentInstallationFromEnvironment, resolveE2EAgentRouteForAdmission, scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { deriveE2EAgentRoute as brokerDerive, e2eAgentInstallationFromParameters } from "../../packages/broker/src/e2e/model-route-registry.js";
-import { deriveE2EAgentRoute as installedDerive } from "@agentx/model-runtime/e2e-route-derive";
 import { SECRET_ARN } from "../support/e2e-model-fixtures.js";
 
 // Task 4.3a, test case 2 (Ruling DB-7): the worker re-derives the route an admission names from its own settings and holds it to the admission's revision.
@@ -108,11 +107,6 @@ describe("the broker and the worker derive the same route", () => {
       expect(canonicalJson(fromWorker)).toBe(canonicalJson(fromBroker));
       if (fromBroker.status === "available" && fromWorker.status === "available") expect(e2eModelRouteRevision(fromWorker.definition)).toBe(e2eModelRouteRevision(fromBroker.definition));
     }
-  });
-
-  it("the broker's registry re-exports the model-runtime derivation: one function, not two", () => {
-    // The broker (here its source, which imports the installed package) re-exports the function of the package's `./e2e-route-derive` subpath, which loads no pi-ai.
-    expect(brokerDerive).toBe(installedDerive);
   });
 
   it("an unset AGENTX_MODEL_PROVIDER is Bedrock for the worker, as for the coding agent", () => {

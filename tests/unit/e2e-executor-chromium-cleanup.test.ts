@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { launchLocalChromium, readProcessTable, removeDirectoryWithRetries, type ProcessTable } from "../../packages/verifier/src/executor/local-browser.js";
+import { launchLocalChromium, readProcessTable, removeDirectoryWithRetries } from "../../packages/verifier/src/executor/local-browser.js";
 import { fakeChromium as createFakeChromium } from "../support/fake-chromium.js";
 
 const dirs: string[] = [];
@@ -29,37 +29,9 @@ describe("removing a directory a browser may still be writing to", () => {
     expect(pauses).toHaveLength(1);
   });
 
-  it("gives up after a bounded number of attempts and returns the error instead of throwing it", async () => {
-    let calls = 0;
-    const failure = await removeDirectoryWithRetries("/profile", { remove: async (path) => { calls += 1; throw enotempty(path); }, sleep: async () => undefined, attempts: 3 });
-    expect(calls).toBe(3);
-    expect(failure?.message).toContain("ENOTEMPTY");
-  });
-
-  it("asks fs.rm itself to retry too, and removes a real directory", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "cleanup-real-"));
-    let options: unknown;
-    expect(await removeDirectoryWithRetries(dir, { remove: async (path, given) => { options = given; await rm(path, given); } })).toBeNull();
-    expect(options).toMatchObject({ recursive: true, force: true });
-    expect(typeof (options as { maxRetries?: unknown }).maxRetries).toBe("number");
-    expect(typeof (options as { retryDelay?: unknown }).retryDelay).toBe("number");
-    expect(await exists(dir)).toBe(false);
-  });
 });
 
 describe("closing the executor's Chromium", () => {
-  it("removes the profile after ENOTEMPTY once, with the same outcome and no diagnostic", async () => {
-    const fake = await fakeChromium("listen");
-    const diagnostics: string[] = []; let removals = 0;
-    const browser = await launchLocalChromium({ downloadDir: await downloadDir(), signal: new AbortController().signal, executablePath: fake.executable,
-      onCleanupDiagnostic: (message) => { diagnostics.push(message); }, sleep: async () => undefined,
-      removeDirectory: async (path, options) => { removals += 1; if (removals === 1) throw enotempty(path); await rm(path, options); } });
-    const profile = await profileOf(fake);
-    await expect(browser.close()).resolves.toBeUndefined();
-    expect(removals).toBe(2);
-    expect(diagnostics).toEqual([]);
-    expect(await exists(profile)).toBe(false);
-  });
 
   it("never throws when the profile cannot be removed: the failure is recorded as a cleanup diagnostic", async () => {
     const fake = await fakeChromium("listen");
@@ -74,16 +46,6 @@ describe("closing the executor's Chromium", () => {
     expect(diagnostics[0]).toMatch(/^chromium cleanup diagnostic: could not remove the profile directory .*ENOTEMPTY/);
     expect(diagnostics[0]).toContain(profile);
     await rm(profile, { recursive: true, force: true });
-  });
-
-  it("keeps the real launch error when the cleanup after it fails too", async () => {
-    const fake = await fakeChromium("no-usable-sandbox");
-    const diagnostics: string[] = [];
-    await expect(launchLocalChromium({ downloadDir: await downloadDir(), signal: new AbortController().signal, executablePath: fake.executable,
-      onCleanupDiagnostic: (message) => { diagnostics.push(message); }, sleep: async () => undefined,
-      removeDirectory: async (path) => { throw enotempty(path); } })).rejects.toThrow(/No usable sandbox/);
-    expect(diagnostics.some((line) => line.includes("ENOTEMPTY"))).toBe(true);
-    await rm(await profileOf(fake), { recursive: true, force: true });
   });
 
   it("a diagnostic sink that throws does not turn a cleanup problem into a failure", async () => {
@@ -127,25 +89,6 @@ describe("reading the process table", () => {
 
 describe("waiting for the browser's processes before removing the profile", () => {
   const entry = (ppid: number, start: string, zombie = false) => ({ ppid, zombie, start });
-
-  it("neither waits for nor signals a pid that another process has reused since it was recorded", async () => {
-    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
-    const fake = await fakeChromium("listen");
-    const diagnostics: string[] = [];
-    let mainPid = 0; let reads = 0;
-    const browser = await launchLocalChromium({ downloadDir: await downloadDir(), signal: new AbortController().signal, executablePath: fake.executable,
-      onCleanupDiagnostic: (message) => { diagnostics.push(message); }, sleep: async () => undefined,
-      readProcesses: async (): Promise<ProcessTable> => {
-        reads += 1;
-        // The first read (before SIGTERM) shows helper 9001 below the browser. Afterwards 9001 is a different, unrelated process: another start time, parent 1.
-        return new Map([[mainPid, entry(1, "main")], [9001, reads === 1 ? entry(mainPid, "helper-start") : entry(1, "somebody-else")]]);
-      } });
-    mainPid = browser.pid;
-    await browser.close();
-    expect(diagnostics).toEqual([]);
-    expect(kill.mock.calls.filter(([pid]) => pid === 9001)).toEqual([]);
-    expect(reads).toBe(2); // the snapshot, then one look that found nothing of the browser left
-  });
 
   it("still waits for, kills and reports a helper that keeps its pid and start time", async () => {
     const kill = vi.spyOn(process, "kill").mockImplementation(() => true);

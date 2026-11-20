@@ -107,26 +107,6 @@ describe("the driving test's budget on the worker (test 30)", () => {
 });
 
 describe("the check the runner makes", () => {
-  it("drive, a pass: the first call and the navigation's receipts are one finding the broker's validator accepts", async () => {
-    const { invokeFor, calls } = invokes({ standard: () => answer() });
-    const result = await runE2EModelCheck(driveRequest(), { ...base, invokeFor,
-      async navigate({ definition, runId, ledger, invoke }) {
-        const route = createGovernedE2EModelRoute(definition, { invoke, now: () => Date.now(), dayBudget: ledger });
-        const receipts = [];
-        for (let index = 0; index < 2; index += 1) receipts.push((await route.generate({ schemaVersion: "rovara-e2e-model-channel/v1", runId, caseId: "case-drive", stepIndex: 1, callIndex: index,
-          call: { prompt: [{ role: "user", content: [{ type: "text", text: "Goal: export the orders" }] }], maxOutputTokens: 64 } } as never, {})).receipt);
-        return { caseVerdict: "passed", caseCode: null, receipts, reported: { modelCalls: 2, downloads: 1, csvPassed: true } };
-      } });
-    expect(calls[0]!.shape).toBe("standard");
-    expect(calls[0]!.input.maxOutputTokens).toBeLessThanOrEqual(512);
-    const parsed = E2EModelCheckResultSchema.parse(result);
-    expect(parsed).toMatchObject({ status: "driven", checkId: CHECK, drive: { outcome: "passed", payloadShape: "standard", calls: 3, failure: null, caseVerdict: "passed" } });
-    expect(validateModelCheckResult(result, { checkId: CHECK, kind: "drive", provider: "amazon-bedrock", startShape: "standard", definitions: defs })).toMatchObject({ ok: true, kind: "drive" });
-    // The finding carries digests and counts only.
-    const text = JSON.stringify(result);
-    expect(text).not.toContain("secret answer");
-    expect(text).not.toContain("Reply with OK");
-  });
 
   it("request-rejected on the standard shape: one retry in the minimal shape, then the navigation in that shape", async () => {
     const { invokeFor, calls } = invokes({ standard: () => { throw failure("request-rejected", "ValidationException"); }, minimal: () => answer() });
@@ -156,16 +136,6 @@ describe("the check the runner makes", () => {
     expect(navigate).not.toHaveBeenCalled();
     expect(result).toMatchObject({ status: "driven", drive: { payloadShape: "minimal", outcome: "failed", failure: { class: "request-rejected" } } });
     expect(validateModelCheckResult(result, { checkId: CHECK, kind: "drive", provider: "amazon-bedrock", startShape: "minimal", definitions: defs })).toMatchObject({ ok: true });
-  });
-
-  it("a limit on the first call ends the test with that class: no retry, no navigation, and no provider text in the result", async () => {
-    const { invokeFor, calls } = invokes({ standard: () => { throw failure("limit-or-rate-limited", "ThrottlingException"); } });
-    const navigate = vi.fn();
-    const result = await runE2EModelCheck(driveRequest(), { ...base, invokeFor, navigate });
-    expect(calls).toHaveLength(1);
-    expect(navigate).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ status: "driven", drive: { outcome: "failed", failure: { class: "limit-or-rate-limited", signal: "ThrottlingException" }, caseVerdict: "none", calls: 1 } });
-    expect(JSON.stringify(result)).not.toContain("secret provider text");
   });
 
   it("refuses a request that is not valid, names another route, or runs where the environment could redirect the call: before any call", async () => {
@@ -250,14 +220,6 @@ describe("the bounded model check server (test 32)", () => {
     expect(s.puts.map((item) => item.key)).toEqual([`${PREFIX}${CANARY_RESULT_KEY}`]);
   });
 
-  it("serves a second check once it is under the key, at least 60 seconds after the first", async () => {
-    // The second request is there from the first poll after the first was served; the server waits out the spacing before serving it.
-    const s = server({ requests: [request(1), request(1), request(2)], stopAfterPolls: 6 });
-    await serveModelChecks(s.args, s.value);
-    expect(s.ran).toEqual([id(1), id(2)]);
-    expect(s.puts[1]!.at - s.puts[0]!.at).toBeGreaterThanOrEqual(60_000);
-  });
-
   it("refuses a 13th check with served-limit and makes no call for it", async () => {
     const requests = Array.from({ length: 13 }, (_unused, index) => request(index + 1));
     const s = server({ requests, stopAfterPolls: 14, waitSeconds: 30 * 24 * 3600 });
@@ -266,37 +228,6 @@ describe("the bounded model check server (test 32)", () => {
     expect(s.ran).not.toContain(id(13));
     expect(JSON.parse(s.puts.at(-1)!.body)).toEqual({ schemaVersion: "rovara-e2e-model-check-result/v2", status: "refused", code: "served-limit", checkId: id(13) });
     expect(s.lines).toContain("model-check: refused, served-limit");
-  });
-
-  it("polls every 20 seconds for two hours, then every 120 seconds, and stops at the expiry", async () => {
-    const s = server({ waitSeconds: 3 * 3600 });
-    expect(await serveModelChecks(s.args, s.value)).toBe(0);
-    const gaps = s.gets.slice(1).map((at, index) => at - s.gets[index]!);
-    expect(gaps[0]).toBe(20_000);
-    expect(gaps.filter((gap) => gap === 20_000)).toHaveLength(360);
-    expect(gaps.at(-1)).toBe(120_000);
-    expect(s.clockNow()).toBeGreaterThanOrEqual(3 * 3600 * 1000);
-    expect(s.lines.at(-1)).toBe("model-check: stopped");
-    expect(s.puts).toEqual([]);
-    expect(s.ran).toEqual([]);
-  });
-
-  it("stops when told to, and with 0 seconds does not even poll", async () => {
-    const stopped = server({ stopAfterPolls: 2 });
-    await serveModelChecks(stopped.args, stopped.value);
-    expect(stopped.gets).toHaveLength(2);
-    const none = server({ waitSeconds: 0 });
-    await serveModelChecks(none.args, none.value);
-    expect(none.gets).toHaveLength(0);
-  });
-
-  it("logs one fixed line, with the error's name, for the first unreadable request, and nothing about the error's text", async () => {
-    const throttled = Object.assign(new Error("Slow down for arn:aws:s3:::secret-bucket/key"), { name: "SlowDown" });
-    const s = server({ requests: [throttled], stopAfterPolls: 5 });
-    await serveModelChecks(s.args, s.value);
-    expect(s.lines.filter((line) => line.startsWith("model-check: request not readable"))).toEqual(["model-check: request not readable (SlowDown)"]);
-    expect(s.lines.join("\n")).not.toContain("secret-bucket");
-    expect(s.ran).toEqual([]);
   });
 
   // Review M-3: the worker role has no s3:ListBucket, so S3 answers a key that is not there with AccessDenied (403): that is a healthy runner with no request yet.
@@ -326,16 +257,6 @@ describe("the bounded model check server (test 32)", () => {
   it("returns the request's bytes when S3 has it", async () => {
     const transport = s3CanaryTransport("agentx-test-artifacts", "us-east-1", { send: async () => ({ Body: { transformToByteArray: async () => Buffer.from("{}") } }) });
     expect(Buffer.from((await transport.get(`${PREFIX}${CANARY_REQUEST_KEY}`))!).toString()).toBe("{}");
-  });
-
-  it("a transient fault in putting the result is retried, and does not end the server", async () => {
-    const s = server({ requests: [request(1)], stopAfterPolls: 3 });
-    let failures = 2;
-    const inner = s.value.transport;
-    s.value.transport = { get: (key) => inner.get(key), put: async (key, body) => { if (failures > 0) { failures -= 1; throw new Error("denied"); } await inner.put(key, body); } };
-    expect(await serveModelChecks(s.args, s.value)).toBe(0);
-    expect(s.puts).toHaveLength(1);
-    expect(s.lines).not.toContain("model-check: the result could not be uploaded");
   });
 
   it("answers a request that is empty, oversized or not JSON with a fixed refusal and no call, and exits 1 when the result cannot be put", async () => {

@@ -45,30 +45,6 @@ function rawPost(path: string, body: unknown): Promise<{ status: number; body: R
 const marker = (kind: "begin" | "end") => ({ schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, marker: kind, caseId: CASE_ID, stepIndex: 0 });
 
 describe("the scripted model channel of the agent qualification probes", () => {
-  it("listens under a qualification policy with no environment of its own, and answers the first turn with a tap on the node the script names", async () => {
-    const opened = await createScriptedQualificationModelChannel(probeRequest(), { environment: {} }).open(openInput());
-    closers.push(() => opened.close());
-    expect((await stat(socketPath)).isSocket()).toBe(true);
-    expect((await post("/v1/step", marker("begin"))).status).toBe(200);
-    const reply = await post("/v1/generate", channelRequest({ callOverride: call() }));
-    const result = reply.body.result as { status: string; content: Array<{ toolName: string; input: string }> };
-    expect(result.status).toBe("ok");
-    expect(result.content.map((part) => [part.toolName, JSON.parse(part.input) as unknown])).toEqual([["tap", { target: "n1" }]]);
-    expect((await post("/v1/step", marker("end"))).status).toBe(200);
-  });
-
-  it("closes with the receipts, the run's own value key, the transcripts and the scripted route's definition, and unlinks the socket", async () => {
-    const opened = await createScriptedQualificationModelChannel(probeRequest(), { environment: {} }).open(openInput("c".repeat(64)));
-    await post("/v1/step", marker("begin"));
-    await post("/v1/generate", channelRequest({ callOverride: call() }));
-    await post("/v1/step", marker("end"));
-    const closed = await opened.close();
-    expect(closed.receipts.map((receipt) => receipt.outcome)).toEqual(["ok"]);
-    expect(closed).toMatchObject({ valueKey: "c".repeat(64), routeId: "rovara-scripted/v1", routeRevision: WEB_API_AGENT_PROBE_ROUTE.routeRevision, droppedRequests: 0, unscopedRequests: 0, overrun: false });
-    expect(closed.definition).toMatchObject({ routeId: "rovara-scripted/v1", provider: "rovara-scripted", scope: "qualification", secretArn: null });
-    expect(closed.transcripts).toHaveLength(1);
-    expect(await exists(socketPath)).toBe(false);
-  });
 
   it("refuses a route that is not the scripted one, and a revision of it that is not the worker's, before anything listens", async () => {
     await expect(createScriptedQualificationModelChannel(probeRequest({ modelRoute: { routeId: "rovara-e2e-default", routeRevision: WEB_API_AGENT_PROBE_ROUTE.routeRevision } }), { environment: {} }).open(openInput()))

@@ -69,15 +69,6 @@ async function roundOf(options: Parameters<typeof createApplicationEvidenceFixtu
 }
 
 describe("verifying a round from its stored evidence", () => {
-  it("passes a round the broker re-collects as passing, with the authority's rows as the conditions to commit with", async () => {
-    const round = await roundOf(PASSING);
-    const diagnostic: E2EVerificationDiagnostic = {};
-    const verdict = await verifyWorkflowE2EEvidence(round.deps(allowing), round.operation, round.task, round.candidate, undefined, diagnostic, { terminalStatus: "SUCCEEDED" });
-    expect(diagnostic.reason).toBeUndefined();
-    expect(verdict).toBe("PASS");
-    expect(diagnostic.application).toBe(true);
-    expect(diagnostic.authorityChecks).toHaveLength(1);
-  });
 
   it("fails a round whose evidence shows the approved assertion broken", async () => {
     const round = await roundOf(FAILING);

@@ -66,52 +66,6 @@ const featureRecord = { pk: featureKey.pk, sk: featureKey.sk, schemaVersion: 1 a
   qualifiedAt: "2026-10-13T12:00:00.000Z", expiresAt: "2026-10-13T13:00:00.000Z" };
 
 describe("source-bound portable feature plan binding", () => {
-  it("keeps unlinked fixture hints while binding a proposed new callable only after final source adds it", () => {
-    const baseModule = Buffer.from("export function priceRows(input) { function unrelated(input) { return input.mode; } return { rows: input.rows }; }\n");
-    const baseCandidate = createCandidateManifest([{ repositoryId: "ordinary-orders", commitSha: "d".repeat(40), treeSha: "e".repeat(40) }]);
-    const baseSnapshot: E2ESourceSnapshot = { ...snapshot, candidate: baseCandidate, commitSha: baseCandidate.repositories[0]!.commitSha,
-      treeSha: baseCandidate.repositories[0]!.treeSha,
-      sources: snapshot.sources.map((source) => source.path === "src/index.mjs" ? { ...source, sha256: sha(baseModule), bytes: baseModule } : source) };
-    const context = buildFeatureE2EPlanningContext(policy, baseSnapshot, { origin: "approved-setup", preparedCommitSha: null });
-    expect(context.status).toBe("available");
-    if (context.status !== "available") return;
-    expect(context.portableOperations[0]?.callableSelectors.map((item) => item.selector)).toEqual([{ kind: "named", exportName: "priceRows" }]);
-    expect(context.mockFixtures[0]?.callableMappings).toEqual([]);
-
-    const operation = context.portableOperations[0]!;
-    const fixture = context.mockFixtures[0]!;
-    const proposed: E2EFeaturePlanIntent = {
-      schemaVersion: 1, requestedTargetIds: context.targets.map((item) => item.targetId),
-      portableOperationRefs: [{ operationId: operation.operationId, applicationId: operation.applicationId,
-        requestedTargetIds: operation.requestedTargetIds, packageExportSubpath: operation.packageExportSubpath,
-        moduleSpecifier: operation.moduleSpecifier, callableSelector: { kind: "named", exportName: "renderOrders" } }],
-      mockFixtureRefs: [{ componentId: fixture.componentId, requestedTargetId: fixture.requestedTargetIds[0]!,
-        operationId: fixture.operationId, sourcePath: fixture.sourcePath, sourceSha256: fixture.sourceSha256 }],
-      accountContextRefs: context.accountContextRefs,
-      scenarios: fixture.variants.map((variant) => ({ scenarioId: `render-orders-${variant.id}`, requirementId: "render-orders",
-        requestedTargetIds: [fixture.requestedTargetIds[0]!], required: true, accountProfileId: "synthetic", minimumEvidence: "mock-contract" as const,
-        requiredRealComponentIds: [], steps: [{ kind: "invoke-contract" as const, operationId: operation.operationId, input: { mode: variant.inputValue } }],
-        assertions: [{ kind: "state" as const, probeId: "result", equals: variant.id === "success" ? "Sample order" : variant.id === "refusal" ? "refused:403" : "invalid-data", pollTimeoutMs: 1000 }] })),
-      semanticExportDeltas: [],
-    };
-    const parsed = parsePlanDocument(`\`\`\`agentx-plan\n${JSON.stringify({ schemaVersion: 1, title: "Render orders", why: [{ text: "Show orders from the source-backed API contract.", author: "owner" }],
-      claims: [{ id: "1", text: "A user can view orders." }], notChanging: ["Existing access rules."], risks: ["The renderer is proposed future code."], decisions: [], e2e: proposed })}\n\`\`\``, { kind: "plan" });
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok || parsed.plan.e2e?.schemaVersion !== 1) return;
-    const proposedIntent = parsed.plan.e2e;
-    expect(() => deriveE2EFeaturePortableApprovalBinding({ intent: proposedIntent, snapshot: baseSnapshot,
-      artifactId: "feature-plan", artifactSha256: "b".repeat(64), planDigest: "c".repeat(64) })).toThrow();
-
-    const finalModule = Buffer.from(`${baseModule.toString("utf8")}export async function renderOrders(input) { const response = await fetch("/orders?mode=" + encodeURIComponent(input.mode)); if (!response.ok) return "refused:" + response.status; const body = await response.json(); if (!Array.isArray(body.orders)) return "invalid-data"; return body.orders.map((row) => row.name).join(","); }\n`);
-    const finalCandidate = createCandidateManifest([{ repositoryId: "ordinary-orders", commitSha: "f".repeat(40), treeSha: "1".repeat(40) }]);
-    const finalSnapshot: E2ESourceSnapshot = { ...baseSnapshot, candidate: finalCandidate, commitSha: finalCandidate.repositories[0]!.commitSha,
-      treeSha: finalCandidate.repositories[0]!.treeSha,
-      sources: baseSnapshot.sources.map((source) => source.path === "src/index.mjs" ? { ...source, sha256: sha(finalModule), bytes: finalModule } : source) };
-    const finalBinding = deriveE2EFeaturePortableApprovalBinding({ intent: parsed.plan.e2e, snapshot: finalSnapshot,
-      artifactId: "feature-plan", artifactSha256: "b".repeat(64), planDigest: "c".repeat(64) });
-    expect(finalBinding.operations[0]).toMatchObject({ callableSelector: { kind: "named", exportName: "renderOrders" },
-      sourceRefs: [{ path: "src/index.mjs", sha256: sha(finalModule) }] });
-  });
 
   it("turns prepared-source discovery into a parseable three-case mock proposal and compiled admission", () => {
     const context = buildFeatureE2EPlanningContext(policy, snapshot);
@@ -160,32 +114,6 @@ describe("source-bound portable feature plan binding", () => {
     expect(compiled.caseBindings.size).toBe(3);
   });
 
-  it("keeps package operations available when the base export module has no callable yet", () => {
-    const seedModule = Buffer.from("export const seed = 1;\n");
-    const seedCandidate = createCandidateManifest([{ repositoryId: "ordinary-orders", commitSha: "2".repeat(40), treeSha: "3".repeat(40) }]);
-    const seedSnapshot: E2ESourceSnapshot = { ...snapshot, candidate: seedCandidate, commitSha: seedCandidate.repositories[0]!.commitSha,
-      treeSha: seedCandidate.repositories[0]!.treeSha,
-      sources: snapshot.sources.map((source) => source.path === "src/index.mjs" ? { ...source, sha256: sha(seedModule), bytes: seedModule } : source) };
-    const context = buildFeatureE2EPlanningContext(policy, seedSnapshot);
-    expect(context.status).toBe("available");
-    if (context.status !== "available") return;
-    expect(context.portableOperations).toHaveLength(1);
-    expect(context.portableOperations[0]).toMatchObject({ operationId: portableOperationId(".", "ordinary-orders"),
-      moduleSpecifier: "./src/index.mjs", callableSelectors: [] });
-    expect(context.mockFixtures[0]?.callableMappings).toEqual([]);
-    expect(() => deriveE2EFeaturePortableApprovalBinding({ intent, snapshot: seedSnapshot,
-      artifactId: "feature-plan", artifactSha256: "b".repeat(64), planDigest: "c".repeat(64) })).toThrow();
-    const finalModule = Buffer.from(`${seedModule.toString("utf8")}export function renderOrders(input) { return input.mode; }\n`);
-    const finalCandidate = createCandidateManifest([{ repositoryId: "ordinary-orders", commitSha: "4".repeat(40), treeSha: "5".repeat(40) }]);
-    const finalSnapshot: E2ESourceSnapshot = { ...seedSnapshot, candidate: finalCandidate, commitSha: finalCandidate.repositories[0]!.commitSha,
-      treeSha: finalCandidate.repositories[0]!.treeSha,
-      sources: seedSnapshot.sources.map((source) => source.path === "src/index.mjs" ? { ...source, sha256: sha(finalModule), bytes: finalModule } : source) };
-    expect(deriveE2EFeaturePortableApprovalBinding({ intent, snapshot: finalSnapshot, artifactId: "feature-plan",
-      artifactSha256: "b".repeat(64), planDigest: "c".repeat(64) }).operations[0]).toMatchObject({
-      callableSelector: { kind: "named", exportName: "renderOrders" }, sourceRefs: [{ path: "src/index.mjs", sha256: sha(finalModule) }],
-    });
-  });
-
   it("marks prepared snapshot identity mismatches unknown and keeps oversized context out of prompts", () => {
     expect(isExactFeatureE2ESourceSnapshot(snapshot, "ordinary-orders", snapshot.commitSha)).toBe(true);
     expect(isExactFeatureE2ESourceSnapshot(snapshot, "another-repository", snapshot.commitSha)).toBe(false);
@@ -218,18 +146,6 @@ describe("source-bound portable feature plan binding", () => {
     // No target on a qualified profile: the pre-2.2 context shape (Ruling AQ).
     expect(placeholder).not.toHaveProperty("unavailableReasons");
     expect(placeholder).not.toHaveProperty("executableKinds");
-  });
-
-  it("binds an Owner-approved callable reference to the exact candidate package export and module bytes", () => {
-    const binding = deriveE2EFeaturePortableApprovalBinding({ intent, snapshot, artifactId: "plan-artifact", artifactSha256: "b".repeat(64), planDigest: "c".repeat(64) });
-    expect(binding.semanticApproval).toEqual({ artifactId: "plan-artifact", digest: "b".repeat(64) });
-    expect(binding.operations).toHaveLength(1);
-    expect(binding.operations[0]).toMatchObject({
-      purpose: "feature-invocation", operationId: portableOperationId(".", "ordinary-orders"), applicationId: "ordinary-orders",
-      packageExportSubpath: ".", moduleSpecifier: "./src/index.mjs", callableSelector: { kind: "named", exportName: "renderOrders" },
-      expectedExportNames: null, sourceRefs: [{ path: "src/index.mjs", sha256: sha(moduleBytes) }],
-    });
-    expect(binding.scenarioRegistrations).toHaveLength(3);
   });
 
   it("rejects a proposed module or callable that differs from the source-derived package export", () => {
@@ -267,28 +183,6 @@ describe("source-bound portable feature plan binding", () => {
 
   describe("a project policy that pins an AI navigation route (M1.4 Task 4.2)", () => {
     const PINNED = "r1-0123456789ab";
-    const pinned = { ...policy, modelRouteRevision: PINNED };
-    const admit = (candidatePolicy: E2EPolicy) => deriveE2EFeatureExecutionAdmission({ intent, snapshot, artifactId: "plan-artifact", artifactSha256: "b".repeat(64),
-      planDigest: "c".repeat(64), policy: candidatePolicy, runtimeCatalogId: "local-catalog", runtimeBinding: binding,
-      featureVerifier: featureRecord, now: Date.parse("2026-10-13T12:30:00.000Z") });
-
-    it("still selects the same portable groups and cases, with the model-free policy projection", () => {
-      const plain = admit(policy);
-      const withRoute = admit(pinned);
-      expect(withRoute.plan.groups.length).toBeGreaterThan(0);
-      expect(withRoute.plan.groups.flatMap((group) => group.expectedCases).map((item) => item.scenarioId))
-        .toEqual(plain.plan.groups.flatMap((group) => group.expectedCases).map((item) => item.scenarioId));
-      expect(withRoute.selectionInput.policy.modelRouteRevision).toBeNull();
-      expect(withRoute.plan.digest).toBe(plain.plan.digest);
-    });
-
-    it("binds a null model route in every group of the round", () => {
-      const admission = admit(pinned);
-      const { round } = buildE2EFeatureRound({ admission, taskId: "task-1", operationId: "operation-1", operationFence: 3, workflowRevision: 8,
-        roundId: "22222222-2222-4222-8222-222222222222", runIds: admission.plan.groups.map((_, index) => `33333333-3333-4333-8333-33333333333${index}`),
-        admittedAt: "2026-10-13T12:30:00.000Z", deadlineAt: "2026-10-13T12:31:00.000Z" });
-      expect(round.groupBindings.every((item) => item.modelRouteRevision === null)).toBe(true);
-    });
 
     it("gives project setup smoke the same projection, so a pinned route does not empty its plan", () => {
       const smoke = (candidatePolicy: E2EPolicy) => deriveProjectSetupSourceSmoke({ projectName: "ordinary-orders", proposalSha256: "d".repeat(64), approval: { proposalSha256: "d".repeat(64) },

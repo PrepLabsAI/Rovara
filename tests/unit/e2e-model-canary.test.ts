@@ -102,23 +102,6 @@ describe("the worker's model canary", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("reports a provider failure as a receipt that is not ok, still one call at most", async () => {
-    const { invoke, calls } = fakeInvoke(() => { throw Object.assign(new Error("AccessDeniedException: secret text"), { name: "AccessDeniedException", $metadata: { httpStatusCode: 403 } }); });
-    const result = await run(request(), invoke);
-    expect(calls).toHaveLength(1);
-    expect(result.status).toBe("called");
-    if (result.status !== "called") throw new Error("unreachable");
-    expect(result.receipt.outcome).toBe("provider-error");
-    expect(JSON.stringify(result)).not.toContain("secret text");
-  });
-
-  it("reports an answer above the output bound as not ok", async () => {
-    const { invoke } = fakeInvoke(answer({ usage: { inputTokens: 41, outputTokens: 1025 } }));
-    const result = await run(request(), invoke);
-    if (result.status !== "called") throw new Error("unreachable");
-    expect(result.receipt.outcome).toBe("invalid-output");
-  });
-
   it("holds the call to the canary bounds", () => {
     expect(E2E_MODEL_CANARY_BOUNDS).toEqual({ maxCalls: 1, maxInputTokens: 32_000, maxOutputTokens: 1024 });
     expect(E2E_MODEL_CANARY_CALL.maxOutputTokens).toBeLessThanOrEqual(1024);

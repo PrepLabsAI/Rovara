@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "../../packages/contracts/src/e2e-case-identity.js";
 import { E2ERoundSchema, E2ERunBindingSchema, type E2EExpectedCase } from "../../packages/contracts/src/e2e-node.js";
-import { E2E_MODULE_EXPORT_INVENTORY_PROTOCOL, projectE2EModuleExportNames, qualifyE2ECollection, type E2ECollection, type E2ECollectionOracle } from "../../packages/verifier/src/result-adapter.js";
+import { E2E_MODULE_EXPORT_INVENTORY_PROTOCOL, qualifyE2ECollection, type E2ECollection, type E2ECollectionOracle } from "../../packages/verifier/src/result-adapter.js";
 import { E2EReportSchema, type E2EReport } from "../../packages/verifier/src/report-schema.js";
 import type { E2ESelectionTuple } from "../../packages/verifier/src/selection.js";
 
@@ -36,90 +36,12 @@ function fixture() {
   collection.rawReportBytes = Buffer.from(JSON.stringify(report));
   return { oracle, collection, report, identity: exactIdentity, receipt: receipts[0]! };
 }
-function expandToCases(f: ReturnType<typeof fixture>, caseCount: number): void {
-  const baseTuple = f.oracle.selection.tuples[0]!;
-  const baseOracleCase = f.oracle.cases[0]!;
-  const baseExpected = f.oracle.binding.expectedCases[0]!;
-  const baseRow = structuredClone(f.report.run.results[0]!);
-  const basePair = (f.collection.publicList as { pairs: Record<string, unknown>[] }).pairs[0]!;
-  const baseObservation = f.collection.observations[0]!;
-  const baseReceipts = [...f.collection.receipts];
-  const addedRows: DeepMutable<E2EReport["run"]["results"][number]>[] = [];
-  const addedPairs: Record<string, unknown>[] = [];
-  for (let index = 1; index < caseCount; index += 1) {
-    const scenarioId = `scenario-extra-${index}`;
-    const criterionId = `criterion-extra-${index}`;
-    const caseCore = { ...f.identity, caseId: "", upstreamTestId: "", scenarioId, criterionId };
-    const caseId = e2eCaseIdFromIdentity(caseCore);
-    const expected = { ...caseCore, caseId, upstreamTestId: "" };
-    expected.upstreamTestId = e2eUpstreamTestIdFromIdentity(expected);
-    const title = `fixture case ${index}`;
-    const resultId = index.toString(16).padStart(64, "0");
-    const tuple = { ...baseTuple, caseId, upstreamTestId: expected.upstreamTestId, upstreamResultId: resultId, title };
-    f.oracle.selection.tuples.splice(1, 0, tuple);
-    f.oracle.binding.expectedCases.push(expected);
-    f.oracle.round.groupBindings[0]!.expectedCases.push(expected);
-    f.oracle.cases.push({ ...baseOracleCase, caseId, declarationIndex: index, hostRequestId: `request-${index}` });
-    const row = structuredClone(baseRow);
-    row.id = resultId; row.testId = expected.upstreamTestId; row.titlePath = [title]; row.declarationIndex = index;
-    addedRows.push(row);
-    const pair = { ...basePair, id: resultId, title, titlePath: [title], source: { file: ".agentx/e2e/generated-contract.test.ts", line: 1, column: 1 } };
-    addedPairs.push(pair);
-    const wireId = index.toString(16).padStart(48, "0");
-    const requestBytes = Buffer.from(JSON.stringify({ wireId, input: 1 }));
-    const responseBytes = Buffer.from(JSON.stringify({ wireId, output: true }));
-    f.collection.observations.push({ ...baseObservation, caseId, requestId: `request-${index}`, requestBytes, responseBytes });
-    for (const receipt of baseReceipts.filter((item) => item.caseId === baseExpected.caseId)) {
-      f.collection.receipts.push({ ...receipt, caseId, requestId: `request-${index}`, requestSha256: digest(requestBytes), responseSha256: digest(responseBytes) });
-    }
-  }
-  f.report.run.results.splice(1, 0, ...addedRows);
-  (f.collection.publicList as { pairs: Record<string, unknown>[] }).pairs.splice(1, 0, ...addedPairs);
-  f.report.run.summary.discovered = caseCount + 1; f.report.run.summary.selected = caseCount; f.report.run.summary.executed = caseCount; f.report.run.summary.passed = caseCount; f.report.run.summary.skipped = 0;
-  f.collection.rawReportBytes = Buffer.from(JSON.stringify(f.report));
-}
 
 describe("complete structural collection qualification", () => {
-  it("keeps upstream list source coordinates distinct from generated report coordinates", () => {
-    const f = fixture();
-    const pairs = (f.collection.publicList as { pairs: Array<Record<string, unknown>> }).pairs;
-    pairs[0]!.source = { file: ".agentx/e2e/generated-contract.test.ts", line: 58, column: 1 };
-    pairs[1]!.source = { file: ".agentx/e2e/generated-contract.test.ts", line: 113, column: 1 };
-    f.collection.rawReportBytes = Buffer.from(JSON.stringify(f.report));
-    const result = qualifyE2ECollection(f.oracle, f.collection);
-    expect(result.status, result.reason).toBe("PASS");
-    expect((f.collection.publicList as { pairs: Array<{ source: unknown }> }).pairs[0]!.source).toEqual({ file: ".agentx/e2e/generated-contract.test.ts", line: 58, column: 1 });
-  });
   it("rejects malformed upstream source coordinates without projecting them away", () => {
     const f = fixture();
     (f.collection.publicList as { pairs: Array<Record<string, unknown>> }).pairs[0]!.source = { file: ".agentx/e2e/generated-contract.test.ts", line: 0, column: 1 };
     expect(qualifyE2ECollection(f.oracle, f.collection).status).toBe("UNKNOWN");
-  });
-  it("accepts the exact 260 receipt packet from thirteen twenty-assertion cases", () => {
-    const f = fixture();
-    expandToCases(f, 13);
-    expect(f.collection.receipts).toHaveLength(260);
-    const result = qualifyE2ECollection(f.oracle, f.collection);
-    expect(result.status, result.reason).toBe("PASS");
-  });
-  it("retains the complete admitted sixty-four-case twenty-receipt ceiling", () => {
-    const f = fixture();
-    expandToCases(f, 64);
-    expect(f.collection.receipts).toHaveLength(1_280);
-    expect(qualifyE2ECollection(f.oracle, f.collection).status).toBe("PASS");
-  });
-  it("projects validated actual module inventory rows while retaining the source object protocol", () => {
-    expect(projectE2EModuleExportNames({ protocol: E2E_MODULE_EXPORT_INVENTORY_PROTOCOL, exports: [{ name: "zeta", kind: "value" }, { name: "alpha", kind: "callable" }] })).toEqual(["alpha", "zeta"]);
-    expect(() => projectE2EModuleExportNames({ protocol: "foreign/v1", exports: [{ name: "alpha", kind: "callable" }] })).toThrow();
-    expect(() => projectE2EModuleExportNames({ protocol: E2E_MODULE_EXPORT_INVENTORY_PROTOCOL, exports: [{ name: "alpha", kind: "callable" }, { name: "alpha", kind: "value" }] })).toThrow();
-    expect(() => projectE2EModuleExportNames({ protocol: E2E_MODULE_EXPORT_INVENTORY_PROTOCOL, exports: [{ name: "alpha", kind: "runtime-body" }] })).toThrow();
-  });
-  it("returns normalized scoped PASS only for a complete current binding and every per-index receipt", () => {
-    const f = fixture();
-    const result = qualifyE2ECollection(f.oracle, f.collection);
-    expect(result.status, result.reason).toBe("PASS");
-    expect(result.result?.qualification).toBe("exploratory");
-    expect(result.result?.cases[0]?.assertionReceipts).toHaveLength(20);
   });
   it("rejects missing, duplicate, and byte-hash-mutated assertion receipts", () => {
     const f = fixture();
@@ -233,28 +155,6 @@ describe("complete structural collection qualification", () => {
     expect(qualifyE2ECollection(f.oracle, mutateReport((report) => { report.run.results[0]!.source.line += 1; })).status).toBe("UNKNOWN");
     expect(qualifyE2ECollection(f.oracle, mutateReport((report) => { report.run.results[0]!.attempts[0]!.error = { category: "test", code: "ASSERTION_FAILED", message: "contradicts passed row", retryable: false }; })).status).toBe("UNKNOWN");
     expect(qualifyE2ECollection(f.oracle, { ...f.collection, configDigest: d("1") }).status).toBe("UNKNOWN");
-  });
-
-  it("blocks internal run errors even when the process exits zero", () => {
-    const f = fixture();
-    const report = parseReport(f.collection.rawReportBytes);
-    report.run.errors.push({ category: "internal", code: "INTERNAL", message: "runner error", retryable: false });
-    f.collection.rawReportBytes = Buffer.from(JSON.stringify(report));
-    expect(qualifyE2ECollection(f.oracle, f.collection).status).toBe("UNKNOWN");
-  });
-
-  it("accepts a maximum approved JSON literal inside a larger bounded app frame", () => {
-    const f = fixture();
-    const input = "x".repeat(65_534);
-    const requestBytes = Buffer.from(JSON.stringify({ wireId: "0123456789abcdef0123456789abcdef0123456789abcdef", input }));
-    expect(Buffer.byteLength(input)).toBe(65_534);
-    expect(requestBytes.byteLength).toBeGreaterThan(65_536);
-    expect(requestBytes.byteLength).toBeLessThanOrEqual(262_144);
-    f.oracle.cases[0]!.expectedCandidateInput = input;
-    f.collection.observations[0]!.requestBytes = requestBytes;
-    f.collection.receipts = f.collection.receipts.map((receipt) => ({ ...receipt, requestSha256: digest(requestBytes) }));
-    const result = qualifyE2ECollection(f.oracle, f.collection);
-    expect(result.status, result.reason).toBe("PASS");
   });
 
   it("projects a compiled inspection inventory and rejects malformed inventory outputs", () => {

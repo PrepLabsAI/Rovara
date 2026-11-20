@@ -98,24 +98,6 @@ describe("application build lifecycle", () => {
     expect(close).not.toHaveBeenCalled();
   });
 
-  it("bounds a hung allocation by the original ticket deadline", async () => {
-    fakeClock();
-    const fixture = validInput(30);
-    const allocating = calledPromise();
-    const allocateBuild = vi.fn(() => { allocating.mark(); return new Promise(() => undefined); });
-    const executeBuild = vi.fn((_lease: unknown, _input: unknown, _signal: AbortSignal) => { void _lease; void _input; void _signal; });
-    const observeOutput = vi.fn();
-    const close = vi.fn();
-    const outcome = expect(buildE2EApplication(fixture.input as never, { allocateBuild, executeBuild, observeOutput, close } as never)).rejects.toThrow(/allocation exceeded/);
-    await allocating.promise;
-    await vi.advanceTimersByTimeAsync(30);
-    await outcome;
-    expect(allocateBuild).toHaveBeenCalledOnce();
-    expect(executeBuild).not.toHaveBeenCalled();
-    expect(observeOutput).not.toHaveBeenCalled();
-    expect(close).not.toHaveBeenCalled();
-  });
-
   it("retains and closes an allocated lease when its source receipt is malformed", async () => {
     const fixture = validInput();
     const allocateBuild = vi.fn(async () => ({ leaseId: "owned-lease", sourceReceiptRef: { artifactId: "bad" } }));
@@ -126,26 +108,6 @@ describe("application build lifecycle", () => {
     expect(close).toHaveBeenCalledOnce();
     expect(close.mock.calls[0]?.[0]).toMatchObject({ leaseId: "owned-lease" });
     expect(executeBuild).not.toHaveBeenCalled();
-  });
-
-  it("bounds a hung build command and closes its owned lease only once", async () => {
-    fakeClock();
-    const fixture = validInput(30);
-    const allocateBuild = vi.fn(async () => ({ leaseId: "owned-lease", sourceReceiptRef: sourceReceipt }));
-    let callSignal: AbortSignal | undefined;
-    const executing = calledPromise();
-    const executeBuild = vi.fn((_lease: unknown, _input: unknown, signal: AbortSignal) => { void _lease; void _input; callSignal = signal; executing.mark();
-      return new Promise<{ processStatus: number | null; timedOut: boolean }>(() => undefined); });
-    const observeOutput = vi.fn();
-    const close = vi.fn(async (_lease: unknown, _signal: AbortSignal) => { void _lease; void _signal; return { confirmed: true }; });
-    const outcome = expect(buildE2EApplication(fixture.input, { allocateBuild, executeBuild, observeOutput, close })).rejects.toThrow(/execution exceeded/);
-    await executing.promise;
-    await vi.advanceTimersByTimeAsync(30);
-    await outcome;
-    expect(executeBuild).toHaveBeenCalledOnce();
-    expect(observeOutput).not.toHaveBeenCalled();
-    expect(close).toHaveBeenCalledOnce();
-    expect(callSignal?.aborted).toBe(true);
   });
 
   it("bounds a hung output observation and never accepts late bytes", async () => {

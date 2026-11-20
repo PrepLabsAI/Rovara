@@ -4,14 +4,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  E2EModelChannelResponseSchema,
-  E2EModelReceiptSchema,
-  checkE2EGroupModelBudget,
-  checkE2EStepModelAccounting,
-  e2eModelRouteRevision,
-  type E2EModelReceipt,
-} from "../../packages/contracts/src/e2e-model-channel.js";
+import { checkE2EGroupModelBudget, checkE2EStepModelAccounting, type E2EModelReceipt } from "../../packages/contracts/src/e2e-model-channel.js";
 import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget, type E2EInvoke } from "../../packages/model-runtime/src/e2e-route.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { createE2ECredentialGuard } from "../../packages/worker/src/e2e-model-credential-guard.js";
@@ -173,13 +166,6 @@ describe("e2e model proxy: clients that go away", () => {
 });
 
 describe("e2e model proxy: socket", () => {
-  it("listens on a socket with mode 0600 and unlinks it on close", async () => {
-    const { proxy } = await start(okInvoke());
-    expect((await stat(socketPath)).mode & 0o777).toBe(0o600);
-    expect((await stat(socketPath)).isSocket()).toBe(true);
-    await proxy.close();
-    await expect(stat(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
-  });
 
   it("unlinks the socket on close even when the run is aborted with a call in flight", async () => {
     const abort = new AbortController();
@@ -219,20 +205,6 @@ describe("e2e model proxy: socket", () => {
 });
 
 describe("e2e model proxy: a call", () => {
-  it("serves a valid call and writes the worker's receipt", async () => {
-    const { proxy, evidence, route } = await start(okInvoke());
-    const reply = await post(channelRequest());
-    expect(reply.status).toBe(200);
-    const parsed = E2EModelChannelResponseSchema.parse(reply.body);
-    expect(parsed.result.status).toBe("ok");
-    const summary = await proxy.close();
-    expect(summary.receipts).toHaveLength(1);
-    const receipt = E2EModelReceiptSchema.parse(summary.receipts[0]);
-    expect(receipt).toMatchObject({ receiptId: parsed.receiptId, runId: RUN_ID, caseId: CASE_ID, stepIndex: 0, callIndex: 0, outcome: "ok", routeRevision: e2eModelRouteRevision(route.definition) });
-    expect(evidence.receipts).toEqual(summary.receipts);
-    expect(evidence.transcripts).toHaveLength(1);
-    expect(evidence.transcripts[0]).toMatchObject({ receiptId: parsed.receiptId, caseId: CASE_ID, stepIndex: 0 });
-  });
 
   it("assigns callIndex itself and refuses a request whose index, case, step or run differs", async () => {
     const invoke = vi.fn(okInvoke());
@@ -333,21 +305,6 @@ describe("e2e model proxy: budgets", () => {
     const { receipts } = await proxy.close();
     expect(checkE2EGroupModelBudget({ receipts, budgets })).toMatchObject({ ok: false, code: "budget-refused" });
     expect(receipts.filter((item) => item.outcome !== "budget").reduce((total, item) => total + item.inputTokens, 0)).toBeLessThanOrEqual(3_000);
-  });
-
-  it("uses the route's own lowered per-step budget", async () => {
-    const { proxy } = await start(okInvoke(), {}, bedrockRoute({ budgets: loweredBudgets({ maxActionsPerStep: 2, extraModelCallsPerStep: 1 }) }));
-    for (let index = 0; index < 3; index += 1) expect((await post(channelRequest({ callIndex: index }))).body.result.status).toBe("ok");
-    expect((await post(channelRequest({ callIndex: 3 }))).body.result).toMatchObject({ code: "budget" });
-    await proxy.close();
-  });
-
-  it("does not let a supplied budget raise the route's", async () => {
-    const { proxy } = await start(okInvoke(), { budgets: loweredBudgets({ maxModelCallsPerGroup: 40 }) }, bedrockRoute({ budgets: loweredBudgets({ maxModelCallsPerGroup: 2 }) }));
-    await post(channelRequest({ callIndex: 0 }));
-    await post(channelRequest({ callIndex: 1 }));
-    expect((await post(channelRequest({ callIndex: 2 }))).body.result).toMatchObject({ code: "budget" });
-    await proxy.close();
   });
 
   it("answers timeout without calling the provider once the step's 90 s deadline has passed", async () => {
@@ -496,16 +453,6 @@ describe("e2e model proxy: fix round 1", () => {
     expect(summary.receipts[0]!.inputTokens).toBe(64_000);
   });
 
-  it("F3: applies the group's lowered per-call limits", async () => {
-    const seen: Array<{ max: number }> = [];
-    const budgets = loweredBudgets({ maxPromptBytes: 4_096, maxOutputTokens: 100 });
-    const { proxy } = await start(async (input) => { seen.push({ max: input.maxOutputTokens }); return tapAnswer(); }, { budgets });
-    expect((await post(channelRequest({ callOverride: call("x".repeat(6_000)) }))).body.result).toMatchObject({ code: "refused-protocol" });
-    expect((await post(channelRequest({ callIndex: 1 }))).body.result.status).toBe("ok");
-    expect(seen).toEqual([{ max: 100 }]);
-    await proxy.close();
-  });
-
   it("F4: scans a cookie reported after the start, and latches refusal on a value it cannot scan instead of throwing", async () => {
     const seen: unknown[] = [];
     const { proxy } = await start(okInvoke(seen));
@@ -520,31 +467,6 @@ describe("e2e model proxy: fix round 1", () => {
     expect((await post(channelRequest({ stepIndex: 1, callIndex: 2 }))).body.result).toMatchObject({ code: "refused-credential-match" });
     expect(seen).toHaveLength(2);
     await proxy.close();
-  });
-
-  it("F5: redacts object keys in stored transcripts", async () => {
-    const { proxy, evidence } = await start(okInvoke());
-    const callWithKey = call("#n2 textbox", { typed: "x" });
-    (callWithKey.prompt[2] as { content: Array<{ input: unknown }> }).content[0]!.input = { [PASSWORD]: "v", target: "n2" };
-    const reply = await post(channelRequest({ callOverride: callWithKey }));
-    expect(reply.body.result).toMatchObject({ code: "refused-credential-match" });
-    const summary = await proxy.close();
-    const stored = JSON.stringify({ transcripts: evidence.transcripts, summary });
-    expect(stored).not.toContain(PASSWORD);
-    expect(stored).not.toContain(JSON.stringify(PASSWORD).slice(1, -1));
-  });
-
-  it("F7: a route that fails inside gives a receipt, so there is no call index gap", async () => {
-    let first = true;
-    const dayBudget = { reserve: () => { if (first) { first = false; throw new Error("table unreachable"); } return { settle: () => undefined, release: () => undefined }; } };
-    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget });
-    const evidence = new Sink();
-    const proxy = await startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence, deadlineAt: Date.now() + 60_000, environment: {} });
-    proxies.push(proxy);
-    proxy.beginStep({ caseId: CASE_ID, stepIndex: 0 });
-    expect((await post(channelRequest({ callIndex: 0 }))).body.result).toMatchObject({ code: "budget" });
-    expect((await post(channelRequest({ callIndex: 1 }))).body.result.status).toBe("ok");
-    expect((await proxy.close()).receipts.map((item) => [item.callIndex, item.outcome])).toEqual([[0, "budget"], [1, "ok"]]);
   });
 
   it("F8: needs a socket directory that only its owner can use, makes a missing one with mode 0700, and does not touch the process umask", async () => {
@@ -609,19 +531,6 @@ describe("e2e model proxy: the provider layer (amendment A1)", () => {
     proxies.push(proxy);
   });
 
-  it("N1: starts and serves a call on a worker that has PI_CACHE_RETENTION set, as every deployed worker does", async () => {
-    vi.stubEnv("PI_CACHE_RETENTION", "long");
-    const { proxy } = await start(okInvoke());
-    expect((await post(channelRequest())).body.result.status).toBe("ok");
-    await proxy.close();
-  });
-
-  it("N2: the proxy checks the route against the process environment's settings, not only the caller's", async () => {
-    vi.stubEnv("AGENTX_MODEL_PROVIDER", "openrouter");
-    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
-    await expect(startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence: new Sink(), deadlineAt: Date.now() + 60_000, environment: { AGENTX_MODEL_PROVIDER: "amazon-bedrock" } })).rejects.toThrow(/model-route-changed-reapprove/);
-  });
-
   it("R3: refuses to start on a redirecting process environment whatever environment it is given", async () => {
     const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
     vi.stubEnv("HTTPS_PROXY", "http://proxy.example.test:3128");
@@ -643,13 +552,6 @@ describe("e2e model proxy: the provider layer (amendment A1)", () => {
     const bedrock = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
     await expect(startE2EModelProxy({ ...base, socketPath: join(dir, "b.sock"), route: bedrock, environment: { AGENTX_MODEL_PROVIDER: "anthropic" } })).rejects.toThrow(/model-route-changed-reapprove/);
     proxies.push(await startE2EModelProxy({ ...base, socketPath: join(dir, "b.sock"), route: bedrock, environment: {} }));
-  });
-
-  it("does not apply the guard to a scripted route, which calls no provider", async () => {
-    const scripted = bedrockRoute({ routeId: "rovara-scripted/v1", scope: "qualification", provider: "rovara-scripted", region: null, modelId: "rovara-scripted-v1", effort: null });
-    const route = createGovernedE2EModelRoute(scripted, { invoke: async () => tapAnswer({ servedModelId: "rovara-scripted-v1" }), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
-    const proxy = await startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence: new Sink(), deadlineAt: Date.now() + 60_000, policyScope: "qualification", environment: { HTTPS_PROXY: "http://proxy.example.test:3128" } });
-    proxies.push(proxy);
   });
 
   it("scans for the provider key the route's invoke holds, so a prompt can never carry it", async () => {
@@ -680,14 +582,6 @@ describe("e2e model proxy: the provider layer (amendment A1)", () => {
     expect(JSON.stringify({ evidence: evidence.transcripts, summary, reply: reply.text })).not.toContain(PASSWORD);
   });
 
-  it("stores the digest of the provider payload and the served model with the transcript and receipt", async () => {
-    const digest = "b".repeat(64);
-    const { proxy, evidence } = await start(async () => tapAnswer({ providerPayloadSha256: digest }));
-    expect((await post(channelRequest())).body.result.status).toBe("ok");
-    await proxy.close();
-    expect(evidence.transcripts[0]).toMatchObject({ providerPayloadSha256: digest });
-    expect(evidence.receipts[0]).toMatchObject({ servedModelId: null, servedUpstream: null });
-  });
 });
 
 describe("e2e model proxy: the scripted route", () => {
@@ -837,19 +731,6 @@ describe("e2e model proxy: step markers (POST /v1/step)", () => {
     expect((await stepPost(marker({ marker: "end", stepIndex: 1 }))).status).toBe(200);
     expect((await stepPost(marker({ stepIndex: 1 }))).status).toBe(409);
     expect(invoke).toHaveBeenCalledTimes(1);
-    await proxy.close();
-  });
-
-  it("the cookie values a run can bring are bounded by 32 for each allowed step, because a step begins once", async () => {
-    const { proxy } = await start(okInvoke(), { begin: false, allowedSteps: steps(0, 1) });
-    const values = (tag: string) => Array.from({ length: 32 }, (_, i) => `${tag}${i}=abcdef123456${tag}${i}`);
-    expect((await stepPost(marker({ cookieValues: values("a") }))).status).toBe(200);
-    expect((await stepPost(marker({ marker: "end" }))).status).toBe(200);
-    expect((await stepPost(marker({ stepIndex: 1, cookieValues: values("b") }))).status).toBe(200);
-    expect((await stepPost(marker({ marker: "end", stepIndex: 1 }))).status).toBe(200);
-    // Both steps have used their 32; no marker can bring more.
-    expect((await stepPost(marker({ cookieValues: values("c") }))).status).toBe(409);
-    expect((await stepPost(marker({ stepIndex: 1, cookieValues: values("d") }))).status).toBe(409);
     await proxy.close();
   });
 

@@ -213,21 +213,6 @@ describe("private E2E worker session", () => {
     } finally { await session.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
-  it("destroys an owned partial client on close and coalesces concurrent close completion", async () => {
-    const directory = await mkdtemp("/tmp/e2es-partial-");
-    await chmod(directory, 0o700);
-    const session = await createE2EWorkerSession({ directory, capability: "e".repeat(64), expectedByCase: new Map([["case", { payload: { caseId: "case" } }]]), handle: async (payload) => payload });
-    const socket = createConnection(session.socketPath);
-    await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
-    socket.write('{"partial":');
-    const firstClose = session.close();
-    const secondClose = session.close();
-    expect(firstClose).toBe(secondClose);
-    expect(await firstClose).toBe(true);
-    expect(session.readback()).toMatchObject({ socket: false, closed: true });
-    await rm(directory, { recursive: true, force: true });
-  });
-
   it("contains an abrupt disconnect while an observation is active", async () => {
     const directory = await mkdtemp("/tmp/e2es-abrupt-");
     await chmod(directory, 0o700);

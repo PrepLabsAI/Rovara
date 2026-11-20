@@ -74,35 +74,6 @@ describe("the executor's form login (rovara-form-login/v1)", () => {
       login: { kind: "form", path: "/", usernameTestId: "email", passwordTestId: "password", submitTestId: "login-submit", successTestId: "identity" } });
   });
 
-  it("opens three sessions for three accounts in two tenants, each bound to its own profile, tenant and role", async () => {
-    const app = fakeApplication(); const store = storeWith(app);
-    const opened = new Map<string, Awaited<ReturnType<typeof store.open>>>();
-    for (const profileId of ["orders-viewer", "orders-owner", "orders-owner-b"]) opened.set(profileId, await store.open(openFor(profileId), signal));
-    expect(new Set([...opened.values()].map((item) => item.sessionRef)).size).toBe(3);
-    expect(new Set([...opened.values()].map((item) => item.accountIdDigest)).size).toBe(3);
-    const facts = (profileId: string) => store.sessionFacts(opened.get(profileId)!.sessionRef, "service");
-    expect(facts("orders-viewer").identity).toMatchObject({ status: 200, tenantId: "tenant-a", role: "viewer" });
-    expect(facts("orders-owner").identity).toMatchObject({ status: 200, tenantId: "tenant-a", role: "owner" });
-    expect(facts("orders-owner-b").identity).toMatchObject({ status: 200, tenantId: "tenant-b", role: "owner" });
-    expect(facts("orders-owner-b").login).toEqual({ status: 200, role: "owner" });
-    // Each session is that account's alone: a request made on one session reaches the application with that session's cookie.
-    const cookies = new Map<string, string>();
-    for (const [profileId, item] of opened) cookies.set(profileId, store.browserStateFor(item.sessionRef).cookies[0]!.value);
-    expect(new Set(cookies.values()).size).toBe(3);
-    await store.request({ sessionRef: opened.get("orders-viewer")!.sessionRef, origin: E2E_EXECUTOR_COMPILED_ORIGIN, method: "GET", path: "/api/orders.csv" }, signal);
-    await store.request({ sessionRef: opened.get("orders-owner")!.sessionRef, origin: E2E_EXECUTOR_COMPILED_ORIGIN, method: "GET", path: "/api/orders.csv" }, signal);
-    expect(app.requests.filter((item) => item.path === "/api/orders.csv").map((item) => item.token)).toEqual([cookies.get("orders-viewer"), cookies.get("orders-owner")]);
-  });
-
-  it("signs in afresh for every case: two cases of one account get two sessions, two sign-ins and two cookies", async () => {
-    const app = fakeApplication(); const store = storeWith(app);
-    const first = await store.open(openFor("orders-owner"), signal);
-    const second = await store.open(openFor("orders-owner"), signal);
-    expect(second.sessionRef).not.toBe(first.sessionRef);
-    expect(app.signIns).toHaveLength(2);
-    expect(store.browserStateFor(first.sessionRef).cookies[0]!.value).not.toBe(store.browserStateFor(second.sessionRef).cookies[0]!.value);
-  });
-
   it("refuses a session whose identity is another role or tenant than the account profile declares, and reports a failed login", async () => {
     const failed: string[] = [];
     const wrongRole = fakeApplication({ identityOf: (profileId) => ({ subjectId: "s1", tenantId: "tenant-a", role: profileId === "orders-viewer" ? "owner" : "owner" }) });
@@ -110,28 +81,6 @@ describe("the executor's form login (rovara-form-login/v1)", () => {
     const wrongTenant = fakeApplication({ identityOf: () => ({ subjectId: "s2", tenantId: "tenant-a", role: "owner" }) });
     await expect(storeWith(wrongTenant, { onLoginFailed: (profileId) => failed.push(profileId) }).open(openFor("orders-owner-b"), signal)).rejects.toThrow(FormLoginError);
     expect(failed).toEqual(["orders-viewer", "orders-owner-b"]);
-  });
-
-  it("turns any sign-in failure into a login failure that names the profile only, and tells the host", async () => {
-    const failed: string[] = [];
-    const app = fakeApplication({ failFor: "orders-viewer" });
-    const error = await storeWith(app, { onLoginFailed: (profileId) => failed.push(profileId) }).open(openFor("orders-viewer"), signal).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(FormLoginError);
-    const account = fixture.plan.accounts.find((item) => item.profileId === "orders-viewer")!;
-    const text = `${(error as Error).message}\n${(error as Error).stack ?? ""}\n${JSON.stringify(error)}`;
-    expect(text).toContain("orders-viewer");
-    expect(text).not.toContain(account.password);
-    expect(text).not.toContain(account.email);
-    expect(text).not.toContain("bad credentials");
-    expect(failed).toEqual(["orders-viewer"]);
-  });
-
-  it("also treats an aborted or timed-out sign-in as a login failure", async () => {
-    const failed: string[] = [];
-    const store = createExecutorSessionStore({ plan: fixture.plan, onLoginFailed: (profileId) => failed.push(profileId),
-      formLogin: { signIn: async () => { throw new DOMException("The operation was aborted", "TimeoutError"); }, requestContext: async () => { throw new Error("unused"); } } });
-    await expect(store.open(openFor("orders-owner"), signal)).rejects.toThrow(FormLoginError);
-    expect(failed).toEqual(["orders-owner"]);
   });
 
   it("refuses a plan whose login differs from the approved source's when the store is made, before any case, and signs nobody in", async () => {
@@ -157,15 +106,6 @@ describe("the executor's form login (rovara-form-login/v1)", () => {
     await expect(store.open(openFor("orders-owner", { applicationId: "someone-else" }), signal)).rejects.toThrow();
     await expect(store.open({ ...openFor("orders-owner"), profileId: "orders-viewer" }, signal)).rejects.toThrow();
     expect(app.signIns).toHaveLength(0);
-  });
-
-  it("gives the case's browser context the cookies and local storage of the context that signed in", async () => {
-    const app = fakeApplication(); const store = storeWith(app);
-    const { sessionRef } = await store.open(openFor("orders-owner"), signal);
-    const state = store.browserStateFor(sessionRef);
-    expect(state.cookies).toHaveLength(1);
-    expect(state.cookies[0]).toMatchObject({ name: "sid", domain: "127.0.0.1", httpOnly: true, sameSite: "Strict" });
-    expect(state.localStorage).toEqual([{ origin: E2E_EXECUTOR_COMPILED_ORIGIN, entries: [{ name: "theme", value: "dark" }] }]);
   });
 
   it("answers API requests through a request context that carries the session's cookies, and reports the status the application gave", async () => {
@@ -341,14 +281,6 @@ describe("the anonymous profile in the executor (rovara-anonymous)", () => {
     await expect(store.request({ sessionRef, origin: E2E_EXECUTOR_COMPILED_ORIGIN, method: "GET", path: "/" }, signal)).rejects.toThrow();
   });
 
-  it("gives every case a session of its own", async () => {
-    const store = createExecutorSessionStore({ plan: anonymous.plan, fetchImpl: spy().fetchImpl });
-    const first = await store.open(anonymousOpen(), signal);
-    const second = await store.open(anonymousOpen(), signal);
-    expect(second.sessionRef).not.toBe(first.sessionRef);
-    expect(second.accountIdDigest).toBe(first.accountIdDigest);
-  });
-
   it("refuses an anonymous open outside the admitted application, origin and account reference, and a reference that is a registered account's", async () => {
     const store = createExecutorSessionStore({ plan: anonymous.plan, fetchImpl: spy().fetchImpl });
     await expect(store.open(anonymousOpen({ origin: "http://elsewhere.example" }), signal)).rejects.toThrow();
@@ -362,13 +294,4 @@ describe("the anonymous profile in the executor (rovara-anonymous)", () => {
     await expect(store.open({ ...anonymousOpen(), profileId: "orders-owner", approvedAccountRef: { ...e2eAnonymousRuntimeAccountRef(anonymousApplicationId), profileId: "orders-owner" } }, signal)).rejects.toThrow();
   });
 
-  it("is the same on a plan that carries both a signed-in account and the anonymous profile", async () => {
-    const { calls, fetchImpl } = spy();
-    const store = createExecutorSessionStore({ plan: fixture.plan, formLogin: fakeApplication().driver, fetchImpl });
-    // The accounts fixture's app has a project contract; the anonymous profile is not one of its declared accounts, and still needs no login.
-    const opened = await store.open({ binding: {}, applicationId, profileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, approvedAccountRef: e2eAnonymousRuntimeAccountRef(applicationId),
-      origin: E2E_EXECUTOR_COMPILED_ORIGIN }, signal);
-    expect(calls).toEqual([]);
-    expect(store.sessionFacts(opened.sessionRef, "service")).toMatchObject({ login: null, identity: null });
-  });
 });

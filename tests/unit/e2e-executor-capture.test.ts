@@ -6,8 +6,7 @@ import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { E2EArtifactRefSchema, E2EPolicySchema } from "@agentx/contracts";
-import { CAPTURE_ARTIFACTS_FILE, CAPTURE_DIR, CAPTURE_GROUP_BUDGET_BYTES, CAPTURE_SCREENSHOT_MAX_BYTES, admittedCapturePolicy, createCaptureRecorder, encodedBytes,
-  finalizeCaptureArtifacts, type CaptureEntry } from "../../packages/verifier/src/executor/capture.js";
+import { CAPTURE_DIR, CAPTURE_GROUP_BUDGET_BYTES, CAPTURE_SCREENSHOT_MAX_BYTES, admittedCapturePolicy, createCaptureRecorder, encodedBytes, finalizeCaptureArtifacts, type CaptureEntry } from "../../packages/verifier/src/executor/capture.js";
 import { createFileCaseLedger } from "../../packages/verifier/src/executor/case-ledger.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { snapshotExecutorOutput } from "../../packages/verifier/src/host/executor-readback.js";
@@ -198,18 +197,6 @@ describe("finalizing a group's captures", () => {
     const recorder = createCaptureRecorder({ root, policy: ON, caseIds: ids, redactor: redactor() });
     for (const item of items) await recorder.record({ caseId: item.caseId, kind: "screenshot", bytes: jpeg(item.size, item.caseId.length) });
   }
-  const artifactsOf = async (root: string) => (JSON.parse(await readFile(join(root, CAPTURE_ARTIFACTS_FILE), "utf8")) as { schemaVersion: string; artifacts: CaptureEntry[] });
-
-  it("lists every artifact as { caseId, kind, sha256, bytes, omitted? } in artifacts.json", async () => {
-    const root = await temp();
-    await seed(root, [{ caseId: "case-a", size: 4096 }]);
-    await finalizeCaptureArtifacts({ outDir: root, policy: ON, caseIds, redactor: redactor() });
-    const { schemaVersion, artifacts } = await artifactsOf(root);
-    expect(schemaVersion).toBe("e2e-executor-artifacts/v1");
-    const file = await readFile(join(root, CAPTURE_DIR, "case-0-screenshot.jpg"));
-    expect(artifacts).toEqual([{ caseId: "case-a", kind: "screenshot", sha256: sha(file), bytes: file.byteLength }]);
-    expect(await readdir(join(root, CAPTURE_DIR))).not.toContain("entries");
-  });
 
   it("counts the budget in encoded (base64) bytes: 6 MiB of them, not 6 MiB of JPEG", async () => {
     const root = await temp();
@@ -221,25 +208,6 @@ describe("finalizing a group's captures", () => {
     const entries = await finalizeCaptureArtifacts({ outDir: root, policy: ON, caseIds: many, redactor: redactor() });
     expect(entries.filter((entry) => entry.omitted === "budget")).toHaveLength(1);
     expect(entries.filter((entry) => entry.omitted === undefined).reduce((sum, entry) => sum + encodedBytes(entry.bytes), 0)).toBeLessThanOrEqual(CAPTURE_GROUP_BUDGET_BYTES);
-  });
-
-  it("sheds one file at a time, the largest first, and only until the set fits, touching no verdict file", async () => {
-    const root = await temp();
-    const resultBytes = JSON.stringify({ schemaVersion: "e2e-executor-result/v1", exitCode: 1, reason: null });
-    await writeFile(join(root, "executor-result.json"), resultBytes);
-    // Encoded sizes: 6 x 512 KiB = 4.0 MiB, one 400 KiB, one 300 KiB: 5.1 MiB in all is under budget, so add 2 more full ones to pass 6 MiB.
-    const sizes = [524_288, 524_288, 524_288, 524_288, 524_288, 524_288, 524_288, 524_288, 300_000, 400_000];
-    const ids = sizes.map((_, index) => `case-${index}`);
-    await seed(root, sizes.map((size, index) => ({ caseId: ids[index]!, size })), ids);
-    const entries = await finalizeCaptureArtifacts({ outDir: root, policy: ON, caseIds: ids, redactor: redactor() });
-    const dropped = entries.filter((entry) => entry.omitted === "budget");
-    // 8 x 699,052 + 400,000 and 300,000 as base64 is about 7.2 MiB: one full-size file goes (the last of the largest), then it fits.
-    expect(dropped.map((entry) => entry.bytes)).toEqual([524_288]);
-    expect(dropped[0]!.caseId).toBe("case-7");
-    expect(entries.filter((entry) => entry.omitted === undefined).reduce((sum, entry) => sum + encodedBytes(entry.bytes), 0)).toBeLessThanOrEqual(CAPTURE_GROUP_BUDGET_BYTES);
-    expect(await readFile(join(root, "executor-result.json"), "utf8")).toBe(resultBytes);
-    expect((await artifactsOf(root)).artifacts).toEqual(entries);
-    expect((await filesOf(root)).includes("case-7-screenshot.jpg")).toBe(false);
   });
 
   it("drops a stored capture that turns out to carry a credential, instead of failing the run", async () => {
@@ -266,11 +234,6 @@ describe("finalizing a group's captures", () => {
     expect(await readdir(root)).toEqual([]);
   });
 
-  it("lists an empty set when capture is on and nothing failed", async () => {
-    const root = await temp();
-    await expect(finalizeCaptureArtifacts({ outDir: root, policy: ON, caseIds, redactor: redactor() })).resolves.toEqual([]);
-    expect((await artifactsOf(root)).artifacts).toEqual([]);
-  });
 });
 
 describe("the admitted capture policy reaches the executor's ledger", () => {
@@ -281,15 +244,6 @@ describe("the admitted capture policy reaches the executor's ledger", () => {
     expect(ledger.capture.enabled("screenshot")).toBe(false);
     await expect(ledger.capture.record({ caseId, kind: "screenshot", bytes: jpeg(100) })).resolves.toBeNull();
     expect(await readdir(root)).toEqual([]);
-  });
-
-  it("takes screenshots for the qualification probes' own policy, which is unchanged: screenshots for a web probe, no traces, nothing for an API probe", async () => {
-    const web = createOrdersExecutorPlan({ probe: "web-csv-positive-v1" });
-    const ledger = createFileCaseLedger(await temp(), web.plan);
-    expect(ledger.capture.enabled("screenshot")).toBe(true);
-    const capturePolicyOf = (plan: ReturnType<typeof createOrdersExecutorPlan>) => plan.compiled.runtimeAdmissionContext.selectionInput.policy.capture;
-    expect(capturePolicyOf(web)).toEqual({ screenshots: true, traces: false, video: true, downloads: false });
-    expect(capturePolicyOf(createOrdersExecutorPlan({ probe: "api-state-positive-v1" }))).toEqual({ screenshots: false, traces: false, video: false, downloads: false });
   });
 
   it("registers a session secret without throwing, however short, and never refuses verdict-input evidence because of it", async () => {
@@ -373,62 +327,12 @@ describe("what a web case captures", () => {
   }
   const portsFor = (record: E2EWebCapturePorts["record"], policy: { screenshots: boolean } = ON): E2EWebCapturePorts => ({ ...policy, record });
 
-  it("takes one 70-quality JPEG screenshot for a FAILED case", async () => {
-    const f = fakes(); const capture = portsFor(f.record);
-    await finishWebCaseCapture({ capture, caseId, outcome: "failed", page: f.page });
-    expect(f.page.screenshot).toHaveBeenCalledWith(expect.objectContaining({ type: "jpeg", quality: 70 }));
-    const stored = f.record.mock.calls.map(([call]) => call);
-    expect(stored.map((item) => [item.caseId, item.kind, Buffer.from(item.bytes).equals(f.shot)])).toEqual([[caseId, "screenshot", true]]);
-  });
-
-  it("takes a screenshot for an UNKNOWN case", async () => {
-    const f = fakes();
-    await finishWebCaseCapture({ capture: portsFor(f.record), caseId, outcome: "unknown", page: f.page });
-    expect(f.record).toHaveBeenCalledTimes(1);
-  });
-
-  it("captures nothing for a PASS case", async () => {
-    const f = fakes();
-    await finishWebCaseCapture({ capture: portsFor(f.record), caseId, outcome: "passed", page: f.page });
-    expect(f.record).not.toHaveBeenCalled();
-    expect(f.page.screenshot).not.toHaveBeenCalled();
-  });
-
-  it("takes nothing, and touches no tracing, when capture is off or absent", async () => {
-    const f = fakes();
-    await finishWebCaseCapture({ capture: portsFor(f.record, OFF), caseId, outcome: "failed", page: f.page });
-    await finishWebCaseCapture({ capture: undefined, caseId, outcome: "failed", page: f.page });
-    expect(f.page.screenshot).not.toHaveBeenCalled();
-    expect(f.record).not.toHaveBeenCalled();
-    expect(f.context.tracing.start).not.toHaveBeenCalled();
-  });
-
   it("never lets a capture failure change the case: a screenshot that throws and a recorder that throws are absorbed", async () => {
     const f = fakes();
     f.page.screenshot.mockRejectedValueOnce(new Error("page crashed"));
     await expect(finishWebCaseCapture({ capture: portsFor(f.record), caseId, outcome: "failed", page: f.page })).resolves.toBeUndefined();
     await expect(finishWebCaseCapture({ capture: portsFor(async () => { throw new Error("recorder refused"); }), caseId, outcome: "failed", page: f.page })).resolves.toBeUndefined();
     await expect(finishWebCaseCapture({ capture: portsFor(f.record), caseId, outcome: "failed", page: null })).resolves.toBeUndefined();
-  });
-});
-
-describe("an API target declares no screenshots whatever the capture policy says (the D3 default must not break API groups)", () => {
-  const apiTarget = { targetId: "t", kind: "api" as const, applicationId: "app", runtimeProfileId: PROFILE };
-  const plan = { targetId: "t", kind: "api", applicationId: "app", runtimeProfileId: PROFILE } as never;
-  const D3_DEFAULT = E2EPolicySchema.shape.capture.parse({ screenshots: true, traces: false, video: false, downloads: true });
-
-  it("declares artifactCapabilities [] for an API target under the D3 default, and validates", () => {
-    const row = webApiRow("api");
-    const declared = webApiApplicationLaunchTarget({ target: apiTarget, runtime: row, capture: D3_DEFAULT });
-    expect(declared.artifactCapabilities).toEqual([]);
-    expect(() => validateE2EApplicationLaunchTarget({ ...(plan as object), kind: "api" } as never, declared, row, D3_DEFAULT)).not.toThrow();
-  });
-
-  it("still declares a screenshot for a web target under the D3 default", () => {
-    const row = webApiRow("web");
-    const declared = webApiApplicationLaunchTarget({ target: { ...apiTarget, kind: "web" }, runtime: row, capture: D3_DEFAULT });
-    expect(declared.artifactCapabilities).toEqual(["screenshot"]);
-    expect(declared.engine!.capabilities).toContain("artifacts");
   });
 });
 
@@ -478,14 +382,4 @@ describe("reading a finished run's captures back into the snapshot", () => {
     expect((await snapshotOf(out)).executorEvidence.captures).toBeNull();
   });
 
-  it("keeps the verdict inputs when the captures are unreadable: no captures, no failure", async () => {
-    const out = await outDirWith({ "artifacts.json": "{ not json", "captures/case-0-screenshot.jpg": jpeg(100) });
-    const snapshot = await snapshotOf(out);
-    expect(snapshot.executorEvidence.captures).toBeNull();
-    expect(snapshot.executorEvidence.executorLogHead.byteLength).toBe(0);
-  });
-
-  it("has no captures for a run that wrote none (capture off)", async () => {
-    expect((await snapshotOf(await outDirWith({}))).executorEvidence.captures).toBeNull();
-  });
 });

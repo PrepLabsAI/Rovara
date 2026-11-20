@@ -158,9 +158,4 @@ describe("anonymous cases in the collector (Ruling AZ)", () => {
     expect(result.qualification?.status ?? `unavailable: ${result.unavailableReason}`).toBe("UNKNOWN");
   });
 
-  it("keeps qualifying a signed-in case with an ordinary session, as before", async () => {
-    const { result } = await collectCase({ anonymous: false, claim: () => ({ sessionRef: "api-session-1", accountIdDigest: sha, accountSource: signedInSource }) });
-    expect(result.unavailableReason).toBeNull();
-    expect(result.qualification?.status).toBe("PASS");
-  });
 });

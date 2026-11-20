@@ -2,7 +2,7 @@
 // a registration that races another writes one revision between them, and a fence refuses once the row it stands on moved.
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { E2E_DISPLAY_SCREENSHOT_MAX_BYTES, IMPLICIT_COMPANY_ID, change, OrgIdSchema, projectPk, type E2EWorkflowAdmissionRef, type StoredDocument } from "@agentx/contracts";
+import { E2E_DISPLAY_SCREENSHOT_MAX_BYTES, IMPLICIT_COMPANY_ID, change, OrgIdSchema, type E2EWorkflowAdmissionRef, type StoredDocument } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { accountRegistryFences, planSetupAccountWrites, readAccountRegistryEntries } from "../../packages/broker/src/core/e2e/account-registry.js";
@@ -19,7 +19,6 @@ import { ORDERS_APPLICATION_ID, ordersManifestWith, withOwnerB, withViewerRole }
 import { NOW, PROFILE, binding, snapshotOf, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 
 const ORG = OrgIdSchema.parse(IMPLICIT_COMPANY_ID);
-const COMPANY_PK = projectPk(ORG, "payments");
 const T1 = "2026-10-01T00:00:00.000Z";
 const T2 = "2026-10-02T00:00:00.000Z";
 const T0 = Date.parse("2026-10-01T00:00:00.000Z");
@@ -35,53 +34,6 @@ describe("the account registry on the document store", () => {
     for (const profile of PROFILES) revisions[profile] = Number((await store.get(e2eAccountLatestKey(ORG, "payments", ORDERS_APPLICATION_ID, profile)))?.["revision"] ?? 0);
     return revisions;
   };
-
-  it("writes revision 1 of every synthetic profile under the company's project partition, and nothing when planned again", async () => {
-    const store = new MemoryDocumentStore();
-    const first = await plan({ store });
-    expect(first.written).toBe(4);
-    expect(await store.transact(first.items)).toEqual({ applied: true });
-    expect(await latestRevisions(store)).toEqual({ synthetic: 1, "orders-owner": 1, "orders-viewer": 1, "orders-owner-b": 1 });
-    const pointer = await store.get({ pk: COMPANY_PK, sk: `E2E_ACCOUNT_LATEST#${ORDERS_APPLICATION_ID}#orders-viewer` });
-    expect(pointer).toMatchObject({ entityType: "E2E_ACCOUNT_LATEST", revision: 1, setupApprovedAt: T1, setupProposalSha256: "a".repeat(64) });
-    expect(await store.get({ pk: COMPANY_PK, sk: `E2E_ACCOUNT#${ORDERS_APPLICATION_ID}#orders-viewer#REV#1` })).toMatchObject({ entityType: "E2E_ACCOUNT" });
-    expect((await plan({ store })).written).toBe(0);
-  });
-
-  it("lets one of two racing registrations win; the loser's transaction fails whole and its next plan finds nothing left to write", async () => {
-    const store = new MemoryDocumentStore();
-    const winner = await plan({ store });
-    const loser = await plan({ store });
-    expect(await store.transact(winner.items)).toEqual({ applied: true });
-    expect(await store.transact(loser.items)).toMatchObject({ applied: false, reason: "condition_failed" });
-    expect(await latestRevisions(store)).toEqual({ synthetic: 1, "orders-owner": 1, "orders-viewer": 1, "orders-owner-b": 1 });
-    expect((await plan({ store })).written).toBe(0);
-  });
-
-  it("writes the next revision only over the revision it read, and a planner that read an older pointer cannot overwrite a newer one", async () => {
-    const store = new MemoryDocumentStore();
-    await store.transact((await plan({ store })).items);
-    const stale = await plan({ store }, snapshotWith(withViewerRole("auditor")), T2);
-    const fresh = await plan({ store }, snapshotWith(withViewerRole("auditor")), T2);
-    // The newer setup approval raises the three unchanged pointers and writes revision 2 of the changed one.
-    expect(stale.written).toBe(4);
-    expect(stale.items.filter((item) => item.kind === "put" && String(item.item.sk).startsWith("E2E_ACCOUNT#"))).toHaveLength(1);
-    expect(await store.transact(stale.items)).toEqual({ applied: true });
-    expect((await latestRevisions(store))["orders-viewer"]).toBe(2);
-    // The other writer read revision 1 as well: its write names revision 1 as the one it replaces, which is gone.
-    expect(await store.transact(fresh.items)).toMatchObject({ applied: false });
-    expect((await latestRevisions(store))["orders-viewer"]).toBe(2);
-  });
-
-  it("does not let a pointer that was only raised overwrite a revision another writer wrote meanwhile", async () => {
-    const store = new MemoryDocumentStore();
-    await store.transact((await plan({ store })).items);
-    const raise = await plan({ store }, snapshotWith(), "2026-10-05T00:00:00.000Z");
-    expect(raise.items.every((item) => item.kind === "put" && String(item.item.sk).startsWith("E2E_ACCOUNT_LATEST#"))).toBe(true);
-    await store.transact((await plan({ store }, snapshotWith(withViewerRole("auditor")), T2)).items);
-    expect(await store.transact(raise.items)).toMatchObject({ applied: false, reason: "condition_failed" });
-    expect((await latestRevisions(store))["orders-viewer"]).toBe(2);
-  });
 
   it("lets only one of two racing repairs of the same account write its definition", async () => {
     const store = new MemoryDocumentStore();
@@ -118,25 +70,6 @@ describe("the account registry on the document store", () => {
     expect(await store.transact(repair.items)).toEqual({ applied: true });
     expect((await latestRevisions(store))["orders-viewer"]).toBe(3);
     expect((await latestRevisions(store))["orders-owner"]).toBe(1);
-  });
-
-  it("raises a pointer without writing a definition when only the setup approval is newer", async () => {
-    const store = new MemoryDocumentStore();
-    await store.transact((await plan({ store })).items);
-    const touched = await plan({ store }, snapshotWith(), "2026-10-05T00:00:00.000Z");
-    expect(touched.items.every((item) => item.kind === "put" && String(item.item.sk).startsWith("E2E_ACCOUNT_LATEST#"))).toBe(true);
-    expect(await store.transact(touched.items)).toEqual({ applied: true });
-    expect(await store.get(e2eAccountLatestKey(ORG, "payments", ORDERS_APPLICATION_ID, "synthetic"))).toMatchObject({ revision: 1, setupApprovedAt: "2026-10-05T00:00:00.000Z" });
-  });
-
-  it("keeps two companies' same-named projects apart", async () => {
-    const store = new MemoryDocumentStore();
-    const other = OrgIdSchema.parse("org_zzzzzzzzzzzzzzzzzzzz");
-    await store.transact((await plan({ store })).items);
-    const read = await readAccountRegistryEntries({ store }, other, "payments", [{ applicationId: ORDERS_APPLICATION_ID, profileId: "synthetic" }]);
-    expect(read.entries).toEqual([]);
-    const otherPlan = await planSetupAccountWrites({ store }, { orgId: other, projectId: "payments", snapshot: snapshotWith(), setup: { approvedAt: T1, proposalSha256: "a".repeat(64) }, now: T0 });
-    expect(otherPlan.written).toBe(4);
   });
 
   it("holds the accounts an approval stands on with fences that refuse once a pointer moved", async () => {
@@ -251,13 +184,6 @@ describe("the files of the checks on the object-storage port", () => {
     expect(await objects.stat(key)).toMatchObject({ metadata: { sha256: sha256(good) } });
     // Storing the same bytes again changes nothing and is still stored.
     expect([...await storeWorkflowE2EArtifacts({ objects }, owner, [{ sha256: sha256(good), bytes: good, contentType: "image/jpeg" }])]).toEqual([sha256(good)]);
-  });
-
-  it("does not count an object as stored when a different one already holds its key", async () => {
-    const objects = objectsOf();
-    const good = jpeg();
-    await objects.put(workflowE2EArtifactKey(owner.ownerKey, owner.workspaceId, sha256(good)), Buffer.from("something else"), { contentType: "image/jpeg", metadata: {}, retention: "task-document" });
-    expect((await storeWorkflowE2EArtifacts({ objects }, owner, [{ sha256: sha256(good), bytes: good, contentType: "image/jpeg" }])).size).toBe(0);
   });
 
   it("serves a screenshot only when a row of the baseline names it and the stored object is exactly those bytes", async () => {

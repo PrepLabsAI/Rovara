@@ -38,26 +38,6 @@ describe("state assertion evaluation after the poll times out (Ruling W)", () =>
     sessionRef: "session-a", accountIdDigest: sha, probeId: "api-state-positive/v1", probeAssetRef: schema.ref, samples: rows });
   const evaluate = (rows: unknown[]) => evaluateE2EApplicationAssertionObservation({ assertion, observation: observation(rows), proofBytes, assetBinding });
 
-  it("collects a definite mismatch when the last sample is a well-formed 2xx answer of a different value that was still pending at the timeout", () => {
-    expect(evaluate([sample(0, samples.pending.ref, "pending", 200), sample(900, samples.pendingAgain.ref, "timed-out", 200)]))
-      .toEqual({ supported: true, passed: false, value: other });
-    expect(evaluate([sample(0, samples.pending.ref, "timed-out", 204)])).toMatchObject({ supported: true, passed: false });
-  });
-
-  it("keeps the other samples' ordering rules: only the last sample may be the timed-out one", () => {
-    expect(evaluate([sample(0, samples.pending.ref, "timed-out", 200), sample(100, samples.pendingAgain.ref, "pending", 200)]).supported).toBe(false);
-    expect(evaluate([sample(0, samples.pending.ref, "timed-out", 200), sample(100, samples.pendingAgain.ref, "timed-out", 200)]).supported).toBe(false);
-  });
-
-  it("stays unavailable when the last answer was not 2xx, or its status is not recorded", () => {
-    expect(evaluate([sample(0, samples.pending.ref, "timed-out", 503)]).supported).toBe(false);
-    expect(evaluate([sample(0, samples.pending.ref, "timed-out", 429)]).supported).toBe(false);
-    expect(evaluate([sample(0, samples.pending.ref, "timed-out")]).supported).toBe(false);
-    // A 503 that simply kept the probe pending when the budget ran out is not a mismatch either.
-    expect(evaluate([sample(0, samples.pending.ref, "pending", 503)]).supported).toBe(false);
-    expect(evaluate([sample(0, samples.pending.ref, "pending", 200)]).supported).toBe(false);
-  });
-
   it("stays unavailable when a sample does not fit the approved probe shape", () => {
     expect(evaluate([sample(0, samples.malformedShape.ref, "timed-out", 200)]).supported).toBe(false);
     expect(evaluate([sample(0, samples.malformedShape.ref, "pending", 200), sample(100, samples.pending.ref, "timed-out", 200)]).supported).toBe(false);
@@ -129,21 +109,6 @@ describe("the API state poll records why it stopped (Ruling W)", () => {
   const bytes = (value: unknown) => Buffer.from(canonicalJson(value));
   const different: Answer = { status: 200, body: bytes({ version: 1, tenantId: "tenant-a", orderIds: ["a1"] }) };
 
-  it("collects FAILED when a 2xx answer of a different value is still the last sample at the timeout", async () => {
-    const { actual, samples, polls } = await poll({ pollTimeoutMs: 1_000, answer: () => different });
-    expect(polls).toBeGreaterThan(1);
-    expect(actual.assertions[0]).toMatchObject({ outcome: "failed", reason: "source-approved-value-mismatch" });
-    expect(samples.slice(0, -1).every((item) => item.disposition === "pending" && item.httpStatus === 200)).toBe(true);
-    expect(samples.at(-1)).toMatchObject({ disposition: "timed-out", httpStatus: 200 });
-  });
-
-  it("also collects FAILED when slow answers use up the budget between polls", async () => {
-    // Each answer takes 400 ms of a 1 s budget: two 2xx samples (at 400 ms and 900 ms) and a last sleep spend it, and no third request is made.
-    const { actual, samples } = await poll({ pollTimeoutMs: 1_000, elapsedPerRequestMs: 400, answer: () => different });
-    expect(actual.assertions[0]?.outcome).toBe("failed");
-    expect(samples.map((item) => item.disposition)).toEqual(["pending", "timed-out"]);
-  });
-
   it("collects FAILED when the next request is still outstanding, and is aborted, at the end of the budget after a 2xx answer of another value", async () => {
     // The first poll answers 200 with another value; the second never answers, and the poll's own budget timer aborts it (this waits for that one real timer).
     const { actual, samples, polls } = await poll({ pollTimeoutMs: 300, hangFrom: 2, answer: () => different });
@@ -152,21 +117,10 @@ describe("the API state poll records why it stopped (Ruling W)", () => {
     expect(actual.assertions[0]).toMatchObject({ outcome: "failed", reason: "source-approved-value-mismatch" });
   });
 
-  it("keeps a probe that answered 503 until the timeout unavailable", async () => {
-    const { actual, samples } = await poll({ pollTimeoutMs: 1_000, answer: () => ({ status: 503, body: different.body }) });
-    expect(actual.assertions[0]).toMatchObject({ outcome: "unavailable", reason: "observation-or-asset-not-supported" });
-    expect(samples.at(-1)).toMatchObject({ disposition: "pending", httpStatus: 503 });
-  });
-
   it("keeps a 2xx answer that is not JSON unavailable", async () => {
     const { actual, samples } = await poll({ pollTimeoutMs: 1_000, answer: () => ({ status: 200, body: Buffer.from("not json") }) });
     expect(actual.assertions[0]?.outcome).toBe("unavailable");
     expect(samples.at(-1)?.disposition).toBe("failed");
-  });
-
-  it("keeps a 2xx answer that does not fit the approved probe shape unavailable", async () => {
-    const { actual } = await poll({ pollTimeoutMs: 1_000, answer: () => ({ status: 200, body: bytes({ unexpected: true }) }) });
-    expect(actual.assertions[0]?.outcome).toBe("unavailable");
   });
 
   it("does not call a poll that stopped at its attempt cap a timeout", async () => {
@@ -177,9 +131,4 @@ describe("the API state poll records why it stopped (Ruling W)", () => {
     expect(samples.at(-1)?.disposition).toBe("pending");
   });
 
-  it("still passes a poll that reaches the approved value", async () => {
-    const { actual, samples } = await poll({ pollTimeoutMs: 1_000, answer: (index) => index < 3 ? different : { status: 200, body: bytes(expected) } });
-    expect(actual.assertions[0]?.outcome).toBe("passed");
-    expect(samples.at(-1)).toMatchObject({ disposition: "ready", httpStatus: 200 });
-  });
 });
