@@ -24,6 +24,9 @@ describe("the test runner's configuration", () => {
     expect(nightlyOnlyFiles).toContain("tests/unit/eval-question-simulation.test.ts");
     // #1236: the detectors' growth check runs nightly, and in a pull request only when the change reaches it.
     expect(nightlyOnlyFiles).toContain("tests/unit/worker-env-detect-growth.test.ts");
+    // #1256: and the 256 KiB hostile-file sweep, split from worker-env-detect-hardening (whose fast checks run in every run).
+    expect(nightlyOnlyFiles).toContain("tests/unit/worker-env-detect-redos.test.ts");
+    expect(nightlyOnlyFiles).not.toContain("tests/unit/worker-env-detect-hardening.test.ts");
     expect(nightlyOnlyFiles).toContain("tests/unit/local-up-flow.test.ts");
     // Every workflow-e2e suite, read from the folder, so a new one is nightly-only too.
     const workflowE2e = readdirSync("tests/integration/workflow-e2e").filter((name) => name.endsWith(".test.ts")).map((name) => `tests/integration/workflow-e2e/${name}`);
