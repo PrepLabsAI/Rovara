@@ -503,8 +503,7 @@ const LEGACY_SAVED_ENV_ROLES_VALUES = ["root", "none", "path"];
 const SAVED_ENV_PUSH_ROLE_ARN_OUTPUT = "SavedEnvImgPushRoleArn";
 
 /**
- * The `-c` flags that carry the switch to `cdk deploy`. Unset: none, so the default (today's template) holds. A release must carry the value the install is currently at, else it would put
- * the roles back where they were: an unknown value throws.
+ * The `-c` flags that carry the switch to `cdk deploy`. Unset: none, so the default (today's template) holds, unless the release derives `path` from the deployed control plane ({@link resolveLegacySavedEnvRolesContext}). An unknown value throws.
  */
 export function legacySavedEnvRolesContext(environment: Readonly<Record<string, string | undefined>> = process.env): string[] {
   const value = environment[LEGACY_SAVED_ENV_ROLES_ENVIRONMENT];
@@ -515,12 +514,43 @@ export function legacySavedEnvRolesContext(environment: Readonly<Record<string, 
   return ["-c", `agentxLegacySavedEnvRoles=${value}`];
 }
 
-/** Refuses a release that would revert a moved install: the deployed control plane has its saved environment roles under `/agentx/production/` but the release would build the root-path default (or `none`). */
-export function assertSavedEnvRolesNotReverted(deployed: StackDescription, environment: Readonly<Record<string, string | undefined>> = process.env): void {
+/** Where the deployed control plane's saved environment roles are: under `/agentx/production/` (`path`), at the root path (`root`), or not at all (`none`: the stack exists but has no saved role output, as between the two deploys of the move). */
+export function deployedSavedEnvRolesState(deployed: StackDescription): "root" | "path" | "none" {
   const arn = deployed.Outputs?.find((output) => output.OutputKey === SAVED_ENV_PUSH_ROLE_ARN_OUTPUT)?.OutputValue;
-  if (arn === undefined || !arn.includes(":role/agentx/production/")) return;
-  if (environment[LEGACY_SAVED_ENV_ROLES_ENVIRONMENT] === "path") return;
-  throw new Error(`the deployed control plane has its saved environment roles under /agentx/production/; set ${LEGACY_SAVED_ENV_ROLES_ENVIRONMENT}=path so this release keeps them there (the pipeline's build project must carry it)`);
+  if (arn === undefined) return "none";
+  return arn.includes(":role/agentx/production/") ? "path" : "root";
+}
+
+/**
+ * Refuses a release that would undo a move that is under way or done, judged from the deployed control plane (the release pipeline stack is not where the mode is kept):
+ *   - roles under `/agentx/production/`: only `path` (or an unset value, which the release derives as `path`) may follow;
+ *   - no saved roles (between the two deploys, or after a failed second one): only an explicit `path`, or `none` again, may follow, since an unset value or `root` would create the deleted roles at the root path again;
+ *   - roles at the root path: any value (the move starts with `none`).
+ */
+export function assertSavedEnvRolesNotReverted(deployed: StackDescription, environment: Readonly<Record<string, string | undefined>> = process.env): void {
+  const state = deployedSavedEnvRolesState(deployed);
+  const value = environment[LEGACY_SAVED_ENV_ROLES_ENVIRONMENT];
+  const unset = value === undefined || value === "";
+  if (state === "path" && (unset || value === "path")) return;
+  if (state === "path") {
+    throw new Error(`the deployed control plane has its saved environment roles under /agentx/production/; ${LEGACY_SAVED_ENV_ROLES_ENVIRONMENT}=${value ?? ""} would revert them (leave it unset or set ${LEGACY_SAVED_ENV_ROLES_ENVIRONMENT}=path)`);
+  }
+  if (state === "none" && value !== "path" && value !== "none") {
+    throw new Error(`the deployed control plane has no saved environment roles (the move to /agentx/production/ is under way); set ${LEGACY_SAVED_ENV_ROLES_ENVIRONMENT}=path to finish it, or =none to repeat the first step: ${unset ? "an unset value" : value} would create the deleted roles at the root path again`);
+  }
+}
+
+/**
+ * The `-c` flags a production release passes to the control plane deploy: the explicit value of AGENTX_LEGACY_SAVED_ENV_ROLES (validated), or, when none is given and the deployed control plane has
+ * its roles under `/agentx/production/`, `path`, so routine releases (pipeline included) keep a finished move without anyone updating the pipeline. Throws when the release would undo the move
+ * ({@link assertSavedEnvRolesNotReverted}). `deployed` is undefined when the control plane does not exist yet (a fresh install: the explicit value only).
+ */
+export function resolveLegacySavedEnvRolesContext(deployed: StackDescription | undefined, environment: Readonly<Record<string, string | undefined>> = process.env): string[] {
+  const explicit = legacySavedEnvRolesContext(environment);
+  if (deployed === undefined) return explicit;
+  assertSavedEnvRolesNotReverted(deployed, environment);
+  if (explicit.length === 0 && deployedSavedEnvRolesState(deployed) === "path") return ["-c", "agentxLegacySavedEnvRoles=path"];
+  return explicit;
 }
 
 function controlPlaneParameterDefinitions(): Array<{ parameter: string; environment: string }> {

@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest";
 import { environmentRolePath } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { savedEnvRoleSessionSettings } from "../../packages/broker/src/aws/saved-env-role-sessions.js";
-import { assertSavedEnvRolesNotReverted, legacySavedEnvRolesContext } from "../../scripts/release-common.js";
+import { assertSavedEnvRolesNotReverted, deployedSavedEnvRolesState, legacySavedEnvRolesContext, resolveLegacySavedEnvRolesContext } from "../../scripts/release-common.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { SAVED_ENV_BROKER_VARIABLES, SAVED_ENV_OUTPUT_KEYS, SAVED_ENV_ROLE_KINDS, idsOf, roleNameOf } from "../support/saved-env-images-template.js";
 
@@ -112,6 +112,10 @@ describe("legacy saved environment roles switch", () => {
 });
 
 describe("the production release carries the switch", () => {
+  const moved = { Outputs: [{ OutputKey: "SavedEnvImgPushRoleArn", OutputValue: "arn:aws:iam::111122223333:role/agentx/production/agentx-production-img-push" }] };
+  const root = { Outputs: [{ OutputKey: "SavedEnvImgPushRoleArn", OutputValue: "arn:aws:iam::111122223333:role/agentx-production-img-push" }] };
+  const noRoles = { Outputs: [{ OutputKey: "ApiEndpoint", OutputValue: "https://example.invalid" }] };
+
   it("passes the context to the control plane deploy only when the variable is set", () => {
     expect(legacySavedEnvRolesContext({})).toEqual([]);
     expect(legacySavedEnvRolesContext({ AGENTX_LEGACY_SAVED_ENV_ROLES: "" })).toEqual([]);
@@ -122,14 +126,44 @@ describe("the production release carries the switch", () => {
     expect(source.indexOf("...savedEnvRolesContext,")).toBeGreaterThan(source.indexOf("function deployControlPlane"));
   });
 
-  it("refuses to revert an install whose roles moved, unless the release carries `path`", () => {
-    const moved = { Outputs: [{ OutputKey: "SavedEnvImgPushRoleArn", OutputValue: "arn:aws:iam::111122223333:role/agentx/production/agentx-production-img-push" }] };
-    const root = { Outputs: [{ OutputKey: "SavedEnvImgPushRoleArn", OutputValue: "arn:aws:iam::111122223333:role/agentx-production-img-push" }] };
-    expect(() => assertSavedEnvRolesNotReverted(moved, {})).toThrow(/AGENTX_LEGACY_SAVED_ENV_ROLES=path/);
-    expect(() => assertSavedEnvRolesNotReverted(moved, { AGENTX_LEGACY_SAVED_ENV_ROLES: "none" })).toThrow(/AGENTX_LEGACY_SAVED_ENV_ROLES=path/);
+  it("judges the saved roles from the deployed control plane: path, root or none (no role output)", () => {
+    expect(deployedSavedEnvRolesState(moved)).toBe("path");
+    expect(deployedSavedEnvRolesState(root)).toBe("root");
+    expect(deployedSavedEnvRolesState(noRoles)).toBe("none");
+    expect(deployedSavedEnvRolesState({})).toBe("none");
+  });
+
+  it("an install whose roles moved accepts only path, or an unset value", () => {
+    expect(() => assertSavedEnvRolesNotReverted(moved, {})).not.toThrow();
+    expect(() => assertSavedEnvRolesNotReverted(moved, { AGENTX_LEGACY_SAVED_ENV_ROLES: "" })).not.toThrow();
     expect(() => assertSavedEnvRolesNotReverted(moved, { AGENTX_LEGACY_SAVED_ENV_ROLES: "path" })).not.toThrow();
-    expect(() => assertSavedEnvRolesNotReverted(root, {})).not.toThrow();
-    expect(() => assertSavedEnvRolesNotReverted({}, {})).not.toThrow();
+    expect(() => assertSavedEnvRolesNotReverted(moved, { AGENTX_LEGACY_SAVED_ENV_ROLES: "none" })).toThrow(/would revert them/);
+    expect(() => assertSavedEnvRolesNotReverted(moved, { AGENTX_LEGACY_SAVED_ENV_ROLES: "root" })).toThrow(/would revert them/);
+  });
+
+  it("a control plane with no saved roles (between the two deploys) accepts only path, or none again", () => {
+    expect(() => assertSavedEnvRolesNotReverted(noRoles, {})).toThrow(/under way/);
+    expect(() => assertSavedEnvRolesNotReverted(noRoles, { AGENTX_LEGACY_SAVED_ENV_ROLES: "" })).toThrow(/under way/);
+    expect(() => assertSavedEnvRolesNotReverted(noRoles, { AGENTX_LEGACY_SAVED_ENV_ROLES: "root" })).toThrow(/under way/);
+    expect(() => assertSavedEnvRolesNotReverted(noRoles, { AGENTX_LEGACY_SAVED_ENV_ROLES: "path" })).not.toThrow();
+    expect(() => assertSavedEnvRolesNotReverted(noRoles, { AGENTX_LEGACY_SAVED_ENV_ROLES: "none" })).not.toThrow();
+  });
+
+  it("an install with its roles at the root path accepts every value, as before the move", () => {
+    for (const value of [undefined, "", "root", "none", "path"]) expect(() => assertSavedEnvRolesNotReverted(root, { AGENTX_LEGACY_SAVED_ENV_ROLES: value }), String(value)).not.toThrow();
+  });
+
+  it("derives the mode for the control plane deploy: path when the roles moved and nothing is given, else the explicit value", () => {
+    const flag = (value: string) => ["-c", `agentxLegacySavedEnvRoles=${value}`];
+    expect(resolveLegacySavedEnvRolesContext(moved, {})).toEqual(flag("path"));
+    expect(resolveLegacySavedEnvRolesContext(moved, { AGENTX_LEGACY_SAVED_ENV_ROLES: "path" })).toEqual(flag("path"));
+    expect(resolveLegacySavedEnvRolesContext(root, {})).toEqual([]);
+    expect(resolveLegacySavedEnvRolesContext(root, { AGENTX_LEGACY_SAVED_ENV_ROLES: "none" })).toEqual(flag("none"));
+    expect(resolveLegacySavedEnvRolesContext(noRoles, { AGENTX_LEGACY_SAVED_ENV_ROLES: "path" })).toEqual(flag("path"));
+    expect(resolveLegacySavedEnvRolesContext(undefined, {})).toEqual([]);
+    expect(resolveLegacySavedEnvRolesContext(undefined, { AGENTX_LEGACY_SAVED_ENV_ROLES: "none" })).toEqual(flag("none"));
+    expect(() => resolveLegacySavedEnvRolesContext(undefined, { AGENTX_LEGACY_SAVED_ENV_ROLES: "bogus" })).toThrow(/must be one of/);
+    expect(() => resolveLegacySavedEnvRolesContext(noRoles, {})).toThrow(/under way/);
   });
 
   it("the release pipeline's build project carries the variable only when its stack is built with the switch", () => {

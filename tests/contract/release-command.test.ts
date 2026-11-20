@@ -220,7 +220,7 @@ describe("release ordering", () => {
   it("updates the production runtime before the control plane", () => {
     const source = readFileSync("scripts/release-production.ts", "utf8");
     const runtimeDeploy = source.indexOf("\n    RUNTIME_STACK,\n");
-    const controlPlaneDeploy = source.indexOf("\n  deployControlPlane(runner, options, foundation);\n");
+    const controlPlaneDeploy = source.indexOf("\n  deployControlPlane(runner, options, foundation, savedEnvRolesContext);\n");
     expect(runtimeDeploy).toBeGreaterThan(-1);
     expect(controlPlaneDeploy).toBeGreaterThan(-1);
     expect(runtimeDeploy).toBeLessThan(controlPlaneDeploy);
