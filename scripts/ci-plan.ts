@@ -15,6 +15,7 @@
 //
 // Node runs this file directly, before `npm ci`, so it imports only Node's own modules and uses only erasable syntax. (The docs-only rule that lived in
 // scripts/ci-docs-only.ts is here now.)
+import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -321,6 +322,90 @@ export function planOutputs(plan: Plan): Record<string, string> {
   };
 }
 
+// ---- #1262: the merge queue reuses a pull request's passing run of byte-identical code ----------------------------------------------------------------------
+// A pull request into mainline marks the merge commit its CI tested: the `local` job sets the commit status `ci/local` (success or failure, as the gate decided)
+// on `github.sha`, with the run's address. When the merge queue then builds its commit for that pull request, the queue run reuses that pass instead of running
+// the suite again, but only when ALL of these hold (anything else, a missing token or any git or GitHub error included, plans the run as usual):
+//   - the pull request number parses from merge_group.head_ref (refs/heads/gh-readonly-queue/mainline/pr-<N>-<sha>);
+//   - refs/pull/<N>/merge fetches, and its tree is byte-for-byte the queue commit's tree;
+//   - the merge commit's first parent and the queue commit's first parent are both merge_group.base_sha (the group is this one pull request, on the same base);
+//   - the merge commit's newest `ci/local` status is `success`, was created by github-actions[bot] (never a person's status) and names a run of this repository.
+// A reuse runs the plan and the gate only; the gate (scripts/ci-gate.ts) accepts it only in a merge_group run, and names the reused run.
+
+export const QUEUE_STATUS_CONTEXT = "ci/local";
+export const QUEUE_STATUS_CREATOR = "github-actions[bot]";
+const SHA = /^[0-9a-f]{40}$/u;
+const QUEUE_HEAD_REF = /^refs\/heads\/gh-readonly-queue\/mainline\/pr-([1-9][0-9]{0,8})-[0-9a-f]{40}$/u;
+
+export interface QueueStatus { id?: number; context?: string; state?: string; target_url?: string | null; creator?: { login?: string } | null }
+export interface QueueReuseInput {
+  repository: string;
+  /** merge_group.head_ref. */
+  headRef: string;
+  /** merge_group.base_sha. */
+  baseSha: string;
+  /** Runs git with these arguments: its trimmed output, or undefined when it fails. */
+  git: (...args: string[]) => string | undefined;
+  /** The commit statuses of a commit, or undefined when GitHub can't be read. */
+  statuses: (sha: string) => Promise<readonly QueueStatus[] | undefined>;
+}
+export type QueueReuse = { reused: true; pullRequest: number; mergeCommit: string; runUrl: string } | { reused: false; reason: string };
+
+/** The pull request a merge-queue branch holds, from merge_group.head_ref; undefined when it is not the queue's branch for mainline. */
+export function queuePullRequest(headRef: string): number | undefined {
+  const match = QUEUE_HEAD_REF.exec(headRef);
+  return match === null ? undefined : Number(match[1]);
+}
+
+export async function findQueueReuse(input: QueueReuseInput): Promise<QueueReuse> {
+  const no = (reason: string): QueueReuse => ({ reused: false, reason });
+  const pullRequest = queuePullRequest(input.headRef);
+  if (pullRequest === undefined) return no(`the queue's branch (${JSON.stringify(input.headRef)}) names no single pull request`);
+  if (!SHA.test(input.baseSha)) return no("the queue's base is not a commit");
+  if (input.git("fetch", "--no-tags", "--depth=2", "origin", `+refs/pull/${String(pullRequest)}/merge:refs/ci/queue-reuse`) === undefined) return no(`refs/pull/${String(pullRequest)}/merge could not be fetched`);
+  const mergeCommit = input.git("rev-parse", "--verify", "refs/ci/queue-reuse^{commit}");
+  if (mergeCommit === undefined || !SHA.test(mergeCommit)) return no("the pull request's merge commit could not be read");
+  const mergeTree = input.git("rev-parse", `${mergeCommit}^{tree}`), queueTree = input.git("rev-parse", "HEAD^{tree}");
+  if (mergeTree === undefined || queueTree === undefined || !SHA.test(mergeTree) || mergeTree !== queueTree) return no("the queue's code differs from what the pull request's run tested");
+  if (input.git("rev-parse", `${mergeCommit}^1`) !== input.baseSha) return no("the pull request's run tested it on another base");
+  if (input.git("rev-parse", "HEAD^1") !== input.baseSha) return no("the queue commit is not this pull request alone on the queue's base");
+  const statuses = await input.statuses(mergeCommit);
+  if (statuses === undefined) return no("GitHub's commit statuses could not be read");
+  const ours = statuses.filter((status) => status.context === QUEUE_STATUS_CONTEXT).sort((a, b) => (b.id ?? 0) - (a.id ?? 0));
+  const latest = ours[0];
+  if (latest === undefined) return no(`the merge commit has no ${QUEUE_STATUS_CONTEXT} status`);
+  if (latest.creator?.login !== QUEUE_STATUS_CREATOR) return no(`the newest ${QUEUE_STATUS_CONTEXT} status was not set by ${QUEUE_STATUS_CREATOR}`);
+  if (latest.state !== "success") return no(`the newest ${QUEUE_STATUS_CONTEXT} status is ${JSON.stringify(latest.state)}, not success`);
+  const runUrl = latest.target_url ?? "";
+  if (!new RegExp(`^https://github\\.com/${input.repository.replace(/[.]/gu, "\\.")}/actions/runs/[0-9]+$`, "u").test(runUrl)) return no("the status names no run of this repository");
+  return { reused: true, pullRequest, mergeCommit, runUrl };
+}
+
+/** The plan of a reuse: only the plan and the gate run. */
+export function queueReuseOutputs(runUrl: string): Record<string, string> {
+  return { mode: "reuse", docs_only: "false", tests: "none", shards: "[1]", lint: "none", linux: "false", device: "false", device_required: "false", release: "false", reuse_run: runUrl };
+}
+
+function gitOutput(...args: string[]): string | undefined {
+  try { return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 60_000 }).trim(); } catch { return undefined; }
+}
+
+function githubStatuses(repository: string, token: string): (sha: string) => Promise<readonly QueueStatus[] | undefined> {
+  return async (sha) => {
+    try {
+      const answer = await fetch(`https://api.github.com/repos/${repository}/commits/${sha}/statuses?per_page=100`, {
+        headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" },
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!answer.ok) return undefined;
+      const body: unknown = await answer.json();
+      return Array.isArray(body) ? (body as QueueStatus[]) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+}
+
 function testFiles(dir: string): Map<string, string> {
   const sources = new Map<string, string>();
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -355,6 +440,19 @@ if (process.argv[1]?.endsWith("ci-plan.ts")) {
   const labels = ((): string[] => {
     try { return (JSON.parse(process.env.CI_LABELS || "[]") as unknown[]).filter((label): label is string => typeof label === "string"); } catch { return []; }
   })();
+  // #1262: a merge-queue run of byte-identical code stands on the pull request's own pass.
+  const token = process.env.GH_TOKEN ?? "", repository = process.env.CI_REPOSITORY ?? "";
+  if (event === "merge_group") {
+    const reuse = token === "" || repository === "" ? { reused: false as const, reason: "no GitHub token for this run" }
+      : await findQueueReuse({ repository, headRef: process.env.CI_QUEUE_HEAD_REF ?? "", baseSha: process.env.BASE_SHA ?? "", git: gitOutput, statuses: githubStatuses(repository, token) }).catch((): QueueReuse => ({ reused: false, reason: "the reuse check failed" }));
+    if (reuse.reused) {
+      console.log(`CI mode: reuse (the queue's code is byte-for-byte pull request #${String(reuse.pullRequest)}'s merge commit ${reuse.mergeCommit}, which ${reuse.runUrl} tested and passed; only the plan and the gate run).`);
+      if (process.env.GITHUB_OUTPUT !== undefined) appendFileSync(process.env.GITHUB_OUTPUT, `${Object.entries(queueReuseOutputs(reuse.runUrl)).map(([key, value]) => `${key}=${value}`).join("\n")}\n`);
+      if (process.env.CI_EXTRA_TESTS !== undefined) writeFileSync(process.env.CI_EXTRA_TESTS, "");
+      process.exit(0);
+    }
+    console.log(`No reuse: ${reuse.reason}.`);
+  }
   const changed = readFileSync(listed, "utf8").split("\n").map((line) => line.trim()).filter((line) => line !== "");
   const plan = planCi({ event, labels, title: process.env.CI_TITLE ?? "", changed, testSources: new Map([...testFiles("tests"), ...testFiles("packages")]), packages: readPackages("."), forceLinux: process.env.CI_FORCE_LINUX === "true" , baseRef: (process.env.CI_BASE_REF ?? "").replace(/^refs\/heads\//u, "") });
   console.log(`CI mode: ${plan.mode} (${plan.modeReason}).`);

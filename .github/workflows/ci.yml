@@ -39,6 +39,8 @@ concurrency:
 #   in `quick`, the release check, all 8 `test (n/8)` shards, and the check `ci-mode (full)`, which exists only in this mode: a merge needs it.
 # AFFECTED (a pull request, the default): the typecheck stays full; the tests are the ones the change can reach, in 2 shards (the whole suite when something shared changes);
 #   lint covers the changed files; the release check runs only when its area changes; a Markdown-only change that no test reads runs nothing but `plan`.
+# REUSE (#1262, merge-queue runs only): when the queue's commit is byte-for-byte a pull request's merge commit that the pull request's own run passed (the gate marks it
+#   with the commit status `ci/local`), only `plan` and `local` run, and `local` names the reused run. Anything the plan cannot prove plans as above.
 # `linux-runtime` (#1185) runs in either mode only when its area changes, on each push to code/next (once per batch), nightly (the schedule, which runs it and the
 #   typecheck only), or on request: the `linux-ci` or `full-ci` label, or a manual run's `linux` input.
 # The job called `local` waits for every job and is the one check a pull request needs (scripts/ci-gate.ts). It knows from `plan` which jobs must have run, so a job
@@ -51,6 +53,10 @@ jobs:
     if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # #1262: a merge-queue run reads the pull request's merge commit statuses (ci-plan.ts findQueueReuse) to reuse its pass of byte-identical code.
+    permissions:
+      contents: read
+      statuses: read
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       docs_only: ${{ steps.plan.outputs.docs_only }}
@@ -61,6 +67,8 @@ jobs:
       device: ${{ steps.plan.outputs.device }}
       device_required: ${{ steps.plan.outputs.device_required }}
       release: ${{ steps.plan.outputs.release }}
+      # #1262: the pull request run a merge-queue reuse stands on (empty unless mode is reuse).
+      reuse_run: ${{ steps.plan.outputs.reuse_run }}
     steps:
       # Depth 2 keeps the pull request's merge commit and its first parent, the base branch.
       - uses: actions/checkout@v5
@@ -76,6 +84,10 @@ jobs:
           CI_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           CI_TITLE: ${{ github.event.pull_request.title }}
           CI_FORCE_LINUX: ${{ github.event.inputs.linux }}
+          # #1262: what a merge-queue reuse is proven against (the queue's branch names the pull request) and the token that reads its statuses.
+          CI_QUEUE_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          CI_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
           # #1259: a merge-queue run's base is the queue's (merge_group.base_ref is refs/heads/mainline; ci-plan.ts drops the prefix).
           CI_BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
@@ -115,7 +127,8 @@ jobs:
   # fails the job, and its name starts with the part it belongs to (checks, release). A Markdown-only change skips the job (the plan says so).
   quick:
     needs: plan
-    if: needs.plan.outputs.docs_only != 'true'
+    # #1262: a merge-queue reuse stands on the pull request's own pass of this exact code, so it skips the checks too.
+    if: needs.plan.outputs.docs_only != 'true' && needs.plan.outputs.mode != 'reuse'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -634,12 +647,17 @@ jobs:
     if: always() && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # #1262: the gate marks the merge commit it judged (commit status ci/local), so the merge queue can reuse a pass of byte-identical code.
+    permissions:
+      contents: read
+      statuses: write
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           node-version-file: .node-version
       - name: Every job passed?
+        id: gate
         env:
           NEEDS: ${{ toJSON(needs) }}
           CI_EVENT: ${{ github.event_name }}
@@ -656,6 +674,21 @@ jobs:
             fi
           fi
           node "$GATE_SCRIPT"
+      # #1262: a pull request into mainline from this repository marks the merge commit it tested (github.sha) with the gate's verdict: commit status ci/local,
+      # the tree in its description and this run as its address. The merge queue reuses only github-actions[bot]'s newest success on a commit whose tree is the
+      # queue's own (scripts/ci-plan.ts findQueueReuse). A fork's token cannot write statuses, so a fork marks nothing; a failed mark costs only the reuse.
+      - name: Mark the tested merge commit for the merge queue
+        if: always() && github.event_name == 'pull_request' && github.base_ref == 'mainline' && github.event.pull_request.head.repo.full_name == github.repository && (steps.gate.outcome == 'success' || steps.gate.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TESTED: ${{ github.sha }}
+          VERDICT: ${{ steps.gate.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          tree="$(git rev-parse "$TESTED^{tree}")"
+          gh api --method POST "repos/$REPOSITORY/statuses/$TESTED" -f state="$VERDICT" -f context=ci/local -f description="tree $tree" -f target_url="$RUN_URL" > /dev/null \
+            || echo "::warning::could not mark $TESTED for the merge queue; a queue run of this code runs CI again"
 
   live-aws:
     if: github.event_name == 'workflow_dispatch' && vars.AGENTX_ENABLE_AWS_TESTS == 'true'
