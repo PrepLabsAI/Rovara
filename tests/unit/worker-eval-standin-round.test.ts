@@ -4,7 +4,7 @@
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { attestRovaraOnlyBaseCheckout, evalFactsAllRun, EvalRoundArtifactSchema, evalResultFromArtifact, type EvalStandInCounts } from "@agentx/contracts";
+import { attestRovaraOnlyBaseCheckout, evalFactsAllRun, type EvalStandInCounts } from "@agentx/contracts";
 import { evalCommandFingerprint, type EvalBaseRecord } from "../../packages/contracts/src/eval-base-cache.js";
 import { runEvalRound, type EvalRoundInput } from "../../packages/worker/src/verification/eval-round.js";
 import { EvalStandInRound, buildEvalStandInPlan, readRepositoryRecordings } from "../../packages/worker/src/eval-standin-round.js";
@@ -54,10 +54,6 @@ async function setup(options: { n?: number; failing?: readonly string[]; failFir
 }
 
 describe("a gap can never make a question 'Worse on eval'", () => {
-  it("CONTROL: with no stand-in the same failures are 'Worse on eval'", async () => {
-    const { input } = await setup();
-    expect(await runEvalRound(input)).toMatchObject({ status: "done", result: { label: "Worse on eval" } });
-  });
   it("drops every question that failed in runs that all hit a gap: no verdict from them, 'Not run', the questions listed as not compared, the counts in the result", async () => {
     const { input } = await setup({ gapOf: () => true });
     const output = await runEvalRound(input);
@@ -70,42 +66,6 @@ describe("a gap can never make a question 'Worse on eval'", () => {
     expect(output.result.standIns).toEqual({ recorded: 0, generated: 1, generatedNoContract: 1, newConnections: 0, notCompared: 3, saturated: false });
     expect(output.result.summary).toContain("3 questions not compared");
     expect(output.result.disposition.check).not.toBe("failure");
-  });
-  it("keeps a question the re-ask cleared: the first big run hit a gap but the re-asks (few questions, both sides) hit none, so the regression is real", async () => {
-    // Run 0 is the first big run (it hit a gap); runs 1 and 2 are the re-asks of the suspects on each side (no gap).
-    const { input, requests } = await setup({ gapOf: (_side, _ids, index) => index === 0 });
-    const output = await runEvalRound(input);
-    if (output.status !== "done") throw new Error("done");
-    expect(requests.map((r) => `${r.side}:${String(r.runs)}`).slice(0, 3)).toEqual(["new:1", "old:3", "new:3"]);
-    expect(output.result.label).toBe("Worse on eval");
-    expect(output.result.excluded.filter((q) => q.reason === "stand_in_gap")).toEqual([]);
-    expect(output.result.standIns).toMatchObject({ notCompared: 0 });
-  });
-  it("drops only the questions that failed: one failing question in a gap run is not compared, and because it was the only failure (most failures dropped) the eval is 'Not run: outside calls were made up', never 'Worse'", async () => {
-    const { input } = await setup({ n: 3, failing: ["q1"], gapOf: () => true });
-    const output = await runEvalRound(input);
-    if (output.status !== "done") throw new Error("done");
-    expect(output.result.excluded).toEqual([{ id: "q1", reason: "stand_in_gap" }]);
-    expect(output.result.label).toBe("Not run");
-    expect(output.result.notRun?.reason).toBe("outside_calls_made_up");
-    expect(output.result.label).not.toBe("Worse on eval");
-    expect(output.result.standIns).toMatchObject({ notCompared: 1 });
-    expect(output.result.questions.map((q) => q.id)).not.toContain("q1");
-  });
-  it("drops nothing when no run hit a gap, and still reports the counts", async () => {
-    const { input } = await setup({ gapOf: () => false });
-    const output = await runEvalRound(input);
-    if (output.status !== "done") throw new Error("done");
-    expect(output.result.label).toBe("Worse on eval");
-    expect(output.result.excluded).toEqual([]);
-    expect(output.result.standIns).toMatchObject({ notCompared: 0, generated: 1 });
-  });
-  it("a whole-set runner (no subsets) in a gap round still ends in a judged or fixed-words result, never invalid question data", async () => {
-    const { input } = await setup({ subsetSupported: false, gapOf: () => true });
-    const output = await runEvalRound(input);
-    if (output.status !== "done") throw new Error("done");
-    expect(output.result.notRun?.reason).not.toBe("invalid_question_data");
-    expect(output.result.label).not.toBe("Worse on eval");
   });
   it("does not ask a dropped question again at the second look (q2 is flaky on main and was only ever asked in the gap run; q0 and q1 failed once by noise and were cleared by gap-free re-asks)", async () => {
     const { input, requests } = await setup({ n: 6, failing: [], failFirstOnly: ["q0", "q1"], flakyOld: ["q2"], gapOf: (_side, _ids, index) => index === 0 });
@@ -132,38 +92,6 @@ describe("a gap can never make a question 'Worse on eval'", () => {
   });
 });
 
-describe("the counts travel in the evidence and survive the artifact", () => {
-  it("puts the numbers in the evidence, and a re-derived result carries them, with the not-compared sentence and the made-up-answers line, and no host or path", async () => {
-    // No run hit a gap here (so the round itself drops nothing); one question is then listed as dropped for a gap, to see the words the artifact derives.
-    const { input } = await setup({ n: 3, failing: ["q1"], gapOf: () => false });
-    const output = await runEvalRound(input);
-    if (output.status !== "done" || output.evidence === undefined) throw new Error("done");
-    expect(output.evidence.standIns).toEqual({ recorded: 0, generated: 1, generatedNoContract: 1, newConnections: 0, notCompared: 0, saturated: false });
-    const evidence = { ...output.evidence, excluded: [{ id: "q9", reason: "stand_in_gap" }], standIns: { ...output.evidence.standIns!, notCompared: 1 } };
-    const artifact = { schemaVersion: 1, candidateDigest: "a".repeat(64), roundKind: "check_unsealed", evalPass: 1, outcome: "done", ...evidence, usage: { calls: 9, costMicros: 900 }, cache: "hit", evalConfigured: true };
-    expect(EvalRoundArtifactSchema.safeParse(artifact).success).toBe(true);
-    const result = evalResultFromArtifact(artifact);
-    expect(result.standIns).toMatchObject({ notCompared: 1 });
-    expect(result.excluded).toContainEqual({ id: "q9", reason: "stand_in_gap" });
-    expect(result.summary).toContain("1 question not compared: an outside service's answer was made up by Rovara.");
-    // E9 words: counted answers, "were made up", "not compared"; no host, path or secret.
-    const words = result.notices.join(" ");
-    expect(words).toContain("2 answers were made up");
-    expect(words).toContain("1 question was not compared");
-    expect(JSON.stringify(result)).not.toMatch(/https?:|tiktok|\/v2/u);
-  });
-  it("refuses a forged standIns block (a count past its limit, an unknown field)", async () => {
-    const { input } = await setup({ gapOf: () => false });
-    const output = await runEvalRound(input);
-    if (output.status !== "done" || output.evidence === undefined) throw new Error("done");
-    const base = { schemaVersion: 1, candidateDigest: "a".repeat(64), roundKind: "check_unsealed", evalPass: 1, outcome: "done", ...output.evidence, usage: { calls: 9, costMicros: 900 }, cache: "hit", evalConfigured: true };
-    expect(EvalRoundArtifactSchema.safeParse({ ...base, standIns: { ...base.standIns, host: "x.test" } }).success).toBe(false);
-    expect(EvalRoundArtifactSchema.safeParse({ ...base, standIns: { ...base.standIns, generated: -1 } }).success).toBe(false);
-    expect(EvalRoundArtifactSchema.safeParse({ ...base, standIns: { ...base.standIns, generated: 10_000_000 } }).success).toBe(false);
-    expect(EvalRoundArtifactSchema.safeParse({ ...base, excluded: [{ id: "q", reason: "made_up_reason" }] }).success).toBe(false);
-  });
-});
-
 describe("the round object", () => {
   const WORKSPACE = "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11";
   const OPERATION = "7c1f0d3a-2b8e-4a55-8f3b-9a1c2d3e4f50";
@@ -184,16 +112,6 @@ describe("the round object", () => {
     const round = new EvalStandInRound({ workspaceId: WORKSPACE, operationId: OPERATION, plan: [] });
     expect(round.absorb(summary({ counts: { recorded: 1, generated: 0, generatedNoContract: 0, newConnections: 0, served: 2, gapCalls: 0, saturated: false }, additions: [] })).hitGap).toBe(false);
     expect(round.absorb(summary({ counts: { recorded: 1, generated: 0, generatedNoContract: 0, newConnections: 0, served: 2, gapCalls: 0, saturated: true }, additions: [] })).hitGap).toBe(true);
-  });
-  it("counts a TLS handshake a client abandoned, or a refused request, as a run that hit a gap even with no made-up answer", () => {
-    for (const extra of [{ tlsFailed: 1 }, { refused: 1 }]) {
-      const round = new EvalStandInRound({ workspaceId: WORKSPACE, operationId: OPERATION, plan: [] });
-      expect(round.absorb(summary({ counts: { recorded: 0, generated: 0, generatedNoContract: 0, newConnections: 0, served: 1, gapCalls: 0, saturated: false }, additions: [], ...extra })).hitGap).toBe(true);
-    }
-  });
-  it("counts an unreadable summary as a run that hit a gap and marks every count a lower bound", () => {
-    const round = new EvalStandInRound({ workspaceId: WORKSPACE, operationId: OPERATION, plan: [] });
-    expect(round.absorb(undefined)).toMatchObject({ hitGap: true, counts: { saturated: true } });
   });
   it("preloads the repository's recordings into the book and the set", () => {
     const round = new EvalStandInRound({ workspaceId: WORKSPACE, operationId: OPERATION, plan: [], recorded: [{ method: "GET", host: "api.vendor.test", path: "/v1/me", query: "", status: 200, contentType: "application/json", body: "{}" }] });

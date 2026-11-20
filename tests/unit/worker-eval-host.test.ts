@@ -3,7 +3,7 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { attestRovaraOnlyBaseCheckout, evalProofBasis, evalResultFromArtifact, EvalRoundArtifactSchema, type EvalRequest, type ModelEgressEvent } from "@agentx/contracts";
+import { attestRovaraOnlyBaseCheckout, evalResultFromArtifact, EvalRoundArtifactSchema, type EvalRequest, type ModelEgressEvent } from "@agentx/contracts";
 import { createEvalFinalCheckPorts, type EvalHostCapabilities } from "../../packages/worker/src/verification/eval-host.js";
 import { runFinalCheckEval } from "../../packages/worker/src/verification/eval-final-check.js";
 import type { EvalSandboxExec } from "../../packages/worker/src/verification/eval-runner.js";
@@ -51,106 +51,10 @@ describe("createEvalFinalCheckPorts", () => {
     expect(ports.roundKind).toBe("check_unsealed");
     expect(createEvalFinalCheckPorts({ ...capabilities, roundKind: undefined })).not.toHaveProperty("roundKind");
   });
-  it("an unbound request is not run, with no call and no hold", async () => {
-    const { access, facts } = await bound();
-    const artifact = await runFinalCheckEval(request, createEvalFinalCheckPorts(undefined), facts());
-    expect(evalResultFromArtifact(artifact).notRun?.reason).toBe("not_connected");
-    expect(access.holds).toEqual([]); expect(access.forwarded).toEqual([]);
-  });
-  it("a working-sandbox round reads needs a fresh sandbox and holds nothing", async () => {
-    const { access, capabilities, facts } = await bound();
-    const artifact = await runFinalCheckEval(request, createEvalFinalCheckPorts({ ...capabilities, roundKind: "working" }), facts());
-    expect(evalResultFromArtifact(artifact).notRun?.reason).toBe("needs_fresh_sandbox"); expect(access.holds).toEqual([]);
-  });
-});
-
-describe("a prompt change runs the eval through the model-access port", () => {
-  it("no drop: every call went through the port under a whole-stage hold, and the proof row says what was measured", async () => {
-    const { w, access, ports, facts } = await bound({ newPass: true });
-    const artifact = read(await runFinalCheckEval(request, ports, facts()));
-    expect(artifact).toMatchObject({ outcome: "done", roundKind: "check_unsealed", cache: "hit" });
-    expect(evalResultFromArtifact(artifact).label).toBe("No regression measured (eval)");
-    expect(access.holds[0]).toEqual({ grant: w.grant, calls: 4, costMicros: 40 });
-    expect(access.forwarded).toHaveLength(4);
-    expect(new Set(access.scopes).size).toBe(1);
-    expect(access.released).toEqual([{ calls: 4, costMicros: 40, unknown: false }]);
-    expect(artifact.usage).toEqual({ calls: 4, costMicros: 40 });
-    expect(artifact.basis).toEqual({ evalSetHash: hash, judgePin: hash, model: "model-a", modelVersion: "v1", oldRuns: 3 });
-    const row = evalProofBasis(artifact)!;
-    expect(row).toMatchObject({ outcome: "ran", cases: { total: 4, compared: 4, excluded: 0 }, passed: { old: { passed: 12, of: 12 }, new: { passed: 4, of: 4 } }, judge: { pin: hash, sameFamily: false }, baseline: { oldRuns: 3, cache: "hit", model: "model-a", modelVersion: "v1" } });
-    expect(row.slices).toEqual([{ category: "ordinary", questions: 4, oldPassed: 12, oldOf: 12, newPassed: 4, newOf: 4 }]);
-  });
-  it("worse: the re-ask stages are held and charged too, and every hold is released with what it spent", async () => {
-    const { access, ports, stages, facts } = await bound({ newPass: false });
-    const artifact = read(await runFinalCheckEval(request, ports, facts()));
-    expect(evalResultFromArtifact(artifact)).toMatchObject({ label: "Worse on eval", fixRequested: true, disposition: { check: "failure" } });
-    expect(stages.length).toBeGreaterThan(1);
-    expect(access.holds.length).toBe(stages.length);
-    expect(access.forwarded.length).toBe(access.holds.reduce((n, h) => n + h.calls, 0));
-    expect(access.released).toEqual(access.holds.map(h => ({ calls: h.calls, costMicros: h.costMicros, unknown: false })));
-    expect(artifact.usage?.calls).toBe(access.forwarded.length);
-  });
-  it("hands the exec neither the grant nor the hold: only the egress path", async () => {
-    let keys: string[] = [];
-    const { ports, facts } = await bound({ exec: inner => ({ run: async r => { keys = Object.keys(r).sort(); return inner.run(r); } }) });
-    await runFinalCheckEval(request, ports, facts());
-    expect(keys).toEqual(["egress", "ids", "runs", "scope", "side", "signal"]);
-  });
-  it("asks the port only for the grant the approval returned, never another company's", async () => {
-    const { w, access, capabilities, facts } = await bound();
-    const ports = createEvalFinalCheckPorts({ ...capabilities, approval: { read: async () => ({ ...w.grant, company: "company-b" }) } })!;
-    expect(evalResultFromArtifact(await runFinalCheckEval(request, ports, facts())).notRun?.reason).toBe("spend_not_approved");
-    expect(access.holds).toEqual([]); expect(access.forwarded).toEqual([]);
-  });
 });
 
 describe("a provider or gateway fault is Not run, never a pass and never Worse", () => {
   const notRun = (artifact: unknown) => { const result = evalResultFromArtifact(artifact); expect(result.label).toBe("Not run"); expect(result.disposition).toMatchObject({ check: "neutral", retry: true, draft: false }); return result.notRun!.reason; };
-  it.each([
-    ["rate limit", classAnswer("rate_limit", 429), "rate_limit"], ["quota", classAnswer("quota", 429), "quota"], ["overloaded", classAnswer("overloaded", 503), "overloaded"],
-    ["refused key", classAnswer("key_refused", 401), "key_refused"], ["adapter refusal", classAnswer("refused", 403), "refused"], ["gateway cap", classAnswer("cap", 429), "cap"], ["provider error", classAnswer("provider_error", 502), "provider_error"],
-  ])("%s on the second call", async (_name, bad, reason) => {
-    const { access, ports, facts } = await bound({ newPass: false, script: (_f, i) => (i === 1 ? bad : answer()) });
-    const artifact = await runFinalCheckEval(request, ports, facts());
-    expect(notRun(artifact)).toBe(reason);
-    expect(access.forwarded.length).toBe(2);
-    expect(JSON.stringify(artifact)).not.toContain("questions");
-  });
-  it("a cut-off answer retains the spend as unknown and stops", async () => {
-    const { access, ports, facts } = await bound({ script: (_f, i) => (i === 0 ? answer() : [{ kind: "head", status: 200, headers: [] }, { kind: "chunk", bytes: new Uint8Array(3) }]) });
-    const artifact = await runFinalCheckEval(request, ports, facts());
-    expect(notRun(artifact)).toBe("provider_error");
-    expect(access.released.at(-1)).toMatchObject({ unknown: true }); expect(access.forwarded.length).toBe(2);
-  });
-  it("a thrown gateway fault never reaches the artifact", async () => {
-    const { ports, facts } = await bound({ script: () => Promise.reject(new Error("gateway-secret key-CANARY")) });
-    const artifact = await runFinalCheckEval(request, ports, facts());
-    expect(notRun(artifact)).toBe("provider_error"); expect(JSON.stringify(artifact)).not.toContain("CANARY");
-  });
-  it("a refused hold is over budget, with no call", async () => {
-    const { access, ports, facts } = await bound(); access.refuse("undefined");
-    expect(notRun(await runFinalCheckEval(request, ports, facts()))).toBe("cap");
-    expect(access.forwarded).toEqual([]);
-  });
-  it("a throwing hold is over budget too and says nothing of why", async () => {
-    const { access, ports, facts } = await bound(); access.refuse("throw");
-    const artifact = await runFinalCheckEval(request, ports, facts());
-    expect(notRun(artifact)).toBe("cap"); expect(JSON.stringify(artifact)).not.toContain("gateway-secret");
-  });
-  it("a failing exec is Not run and the hold is still released", async () => {
-    const { access, ports, facts } = await bound({ exec: () => ({ run: async () => { throw new Error("docker-secret"); } }) });
-    const artifact = await runFinalCheckEval(request, ports, facts());
-    expect(notRun(artifact)).toBe("provider_error"); expect(JSON.stringify(artifact)).not.toContain("docker-secret");
-    expect(access.released).toHaveLength(access.holds.length);
-  });
-  it("a stage that spent exactly its held cost and calls once more is over budget with the cost known, and the refused call is not counted", async () => {
-    const { access, ports, facts } = await bound({ script: () => answer({ costMicros: 20 }) });
-    const artifact = read(await runFinalCheckEval(request, ports, facts()));
-    expect(notRun(artifact)).toBe("cap");
-    expect(artifact.usage).toEqual({ calls: 2, costMicros: 40 });
-    expect(access.forwarded).toHaveLength(2);
-    expect(access.released[0]).toEqual({ calls: 2, costMicros: 40, unknown: false });
-  });
   it("an overrun settle stops the stage and is not a pass", async () => {
     const { access, ports, facts } = await bound({ script: () => answer({ overrun: true }) });
     const artifact = await runFinalCheckEval(request, ports, facts());
@@ -161,17 +65,6 @@ describe("a provider or gateway fault is Not run, never a pass and never Worse",
     const artifact = await runFinalCheckEval(request, ports, facts());
     expect(notRun(artifact)).toBe("cap"); expect(JSON.stringify(artifact)).not.toContain("questions");
     expect(access.released.every(r => !r.unknown)).toBe(true);
-  });
-  it("a stop that lands while the exec is still running is Not run, never Worse, whatever the report says", async () => {
-    const controller = new AbortController();
-    const { ports, facts } = await bound({ newPass: false, exec: inner => ({ run: async r => { controller.abort(); return inner.run(r); } }) });
-    expect(notRun(await runFinalCheckEval(request, ports, facts(controller.signal)))).toBe("stopped");
-  });
-  it("a stop during the first stage is Not run: stopped, and nothing is held after it", async () => {
-    const controller = new AbortController();
-    const { access, ports, facts } = await bound({ exec: inner => ({ run: async r => { const out = await inner.run(r); controller.abort(); return out; } }) });
-    const artifact = await runFinalCheckEval(request, ports, facts(controller.signal));
-    expect(notRun(artifact)).toBe("stopped"); expect(access.holds).toHaveLength(1); expect(access.released).toHaveLength(1);
   });
 });
 

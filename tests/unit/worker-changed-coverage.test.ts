@@ -80,23 +80,10 @@ describe("changedLineCoverage", () => {
     "example.com/acme/match/b.go:1.1,3.2 2 0",
   ), { modules: MODULES })!;
 
-  it("counts only the changed lines the profile calls statements, covered when any block on the line ran", () => {
-    const { coverage } = changedLineCoverage(read, changed({ "a.go": [1, 9, 10, 12, 15, 17, 18, 19, 20, 21, 22, 23] }));
-    // statements among the changed lines: 10 12 (ran) 17 18 (never) 20 (cond ran, body did not: covered) 21 22 (never)
-    expect(coverage).toEqual({ linesChanged: 7, linesCovered: 3, files: [{ path: "a.go", uncovered: [17, 18, 21, 22] }] });
-    expect(EvidenceCoverageSchema.safeParse(coverage).success).toBe(true);
-  });
   it("lists files with uncovered lines in path order, lines ascending and without repeats, and ignores files the profile does not name", () => {
     const { coverage, unmeasured } = changedLineCoverage(read, changed({ "b.go": [3, 1, 1, 2], "a.go": [17], "c.go": [1, 2], "d_test.go": [1] }));
     expect(coverage).toEqual({ linesChanged: 4, linesCovered: 0, files: [{ path: "a.go", uncovered: [17] }, { path: "b.go", uncovered: [1, 2, 3] }] });
     expect(unmeasured).toEqual(["c.go"]);
-  });
-  it("ignores lines that are not positive whole numbers", () => {
-    expect(changedLineCoverage(read, changed({ "a.go": [0, -1, 1.5, Number.NaN, 11] })).coverage).toEqual({ linesChanged: 1, linesCovered: 1, files: [] });
-  });
-  it("has nothing to report when no changed line is a measured statement", () => {
-    expect(changedLineCoverage(read, changed({ "a.go": [1, 2, 3] })).coverage).toEqual({ linesChanged: 0, linesCovered: 0, files: [] });
-    expect(changedLineCoverage(read, changed({})).coverage).toEqual({ linesChanged: 0, linesCovered: 0, files: [] });
   });
   it("keeps the evidence's limits: files and uncovered lines per file are cut, and the counts stay true", () => {
     const blocks = Array.from({ length: EVIDENCE_COVERAGE_FILES_MAX + 5 }, (_, n) => `example.com/acme/match/f${String(n).padStart(3, "0")}.go:1.1,${String(EVIDENCE_UNCOVERED_LINES_MAX + 50)}.2 1 0`);

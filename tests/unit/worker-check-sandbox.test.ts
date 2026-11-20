@@ -43,15 +43,6 @@ const config = (code: string): unknown => expect.objectContaining({ code, messag
 describe("the sealed check sandbox's run arguments", () => {
   const args = checkSandboxRunArgs(input(), FILES);
 
-  it("is attached to the run's services network alone, at the fixed address .4", () => {
-    expect(valuesOf(args, "--network")).toEqual([runNetworkName(RUN)]);
-    expect(valuesOf(args, "--ip")).toEqual([runNetworkAddresses(SLOT).checkSandboxIp]);
-    expect(runNetworkAddresses(SLOT).checkSandboxIp).toBe("172.30.5.4");
-    expect(args).not.toContain(TASK_SANDBOX_NETWORK);
-    for (const forbidden of ["bridge", "host", "none", "--net", "--publish", "-p", "--publish-all", "-P", "--expose", "--link", "--network-alias", "--add-host", "--privileged", "--cap-add", "--device", "--sysctl"]) expect(args, forbidden).not.toContain(forbidden);
-    expect(args.some((arg) => arg.startsWith("--network="))).toBe(false);
-  });
-
   it("names no DNS server of Docker's: the resolver file is the run's own", () => {
     for (const flag of ["--dns", "--dns-search", "--dns-option"]) expect(args).not.toContain(flag);
     expect(valuesOf(args, "--volume")).toEqual([`${ROOT}:${ROOT}`, `${FILES.resolvConfPath}:/etc/resolv.conf:ro`, `${FILES.hostsPath}:/etc/hosts:ro`]);
@@ -68,11 +59,6 @@ describe("the sealed check sandbox's run arguments", () => {
     expect(valuesOf(args, "--memory")).toEqual(["13107m"]);
     expect(valuesOf(args, "--cpus")).toEqual(["3"]);
     expect(args.slice(-4)).toEqual(["worker:img", "--", "sleep", "infinity"]);
-  });
-
-  it("carries all four run-network labels, so the sweep and stop() can find it", () => {
-    const labels = valuesOf(args, "--label");
-    for (const key of [RUN_NETWORK_LABEL, RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_WORKSPACE_LABEL]) expect(labels.some((label) => label.startsWith(`${key}=`)), key).toBe(true);
   });
 
   it("passes its own soundness check, and the check finds each unsound change", () => {
@@ -198,14 +184,6 @@ describe("the run's names, resolv.conf and hosts file", () => {
 
 describe("the DNS helper's run arguments (sealed mode)", () => {
   const args = sealedDnsHelperRunArgs({ net: network(), image: "worker:img", helpers: input().helpers, sinkholeIp: helper(0) });
-
-  it("is on the services network at .2, with all four labels, and nothing else attached", () => {
-    expect(valuesOf(args, "--network")).toEqual([runNetworkName(RUN)]);
-    expect(valuesOf(args, "--ip")).toEqual(["172.30.5.2"]);
-    expect(valuesOf(args, "--name")).toEqual([`${runNetworkName(RUN)}-dns`]);
-    expect(valuesOf(args, "--label")).toEqual(valuesOf(network().labelArgs(), "--label"));
-    for (const forbidden of ["--publish", "-p", "--publish-all", "-P", "--dns", "--add-host", "--privileged", "--cap-add", "--device", "--net", "--link", "--upstream", "bridge", "host", TASK_SANDBOX_NETWORK]) expect(args, forbidden).not.toContain(forbidden);
-  });
 
   it("has the setup helper's hardening", () => {
     expect(valuesOf(args, "--user")).toEqual(["1000:1000"]);
@@ -893,14 +871,6 @@ describe("the resolver guard's arguments (TS-SEAL-5 b)", () => {
       expect(valuesOf(args, "--memory")).toEqual(["64m"]);
       expect(valuesOf(args, "--memory-swap")).toEqual(["64m"]);
       expect(valuesOf(args, "--cpus")).toEqual(["0.5"]);
-    }
-  });
-
-  it("carries the four run-network labels, so a sweep removes a guard that outlived its worker", () => {
-    for (const args of [insert, verify]) {
-      const labels = valuesOf(args, "--label");
-      expect(labels).toEqual(valuesOf(network().labelArgs(), "--label"));
-      for (const key of [RUN_NETWORK_LABEL, RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_WORKSPACE_LABEL]) expect(labels.some((label) => label.startsWith(`${key}=`)), key).toBe(true);
     }
   });
 

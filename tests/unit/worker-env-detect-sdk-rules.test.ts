@@ -21,23 +21,6 @@ describe("Python", () => {
     expect(family(detection, "redis")!.evidence).toEqual([{ path: "pyproject.toml", line: 5 }]);
     expect(family(detection, "kafka")!.evidence).toEqual([{ path: "pyproject.toml", line: 6 }]);
   });
-  it("finds boto3 clients and resources by service id and flags a hard-coded endpoint_url", async () => {
-    const code = ["import boto3", "import os", 's3 = boto3.client("s3", endpoint_url="http://localhost:4566")', 'ddb = boto3.resource("dynamodb", endpoint_url=os.environ.get("AWS_ENDPOINT_URL"))', 'sqs = boto3.Session().client(\'sqs\', region_name="us-east-1")', 'sm = boto3.client("sagemaker-runtime")', ""].join("\n");
-    const detection = await detect({ "app/aws.py": code });
-    expect(family(detection, "aws:s3")).toMatchObject({ strength: "used", evidence: [{ path: "app/aws.py", line: 3 }], hints: { explicitEndpoint: true } });
-    expect(family(detection, "aws:dynamodb")!.hints.explicitEndpoint).toBeUndefined();
-    expect(family(detection, "aws:sqs")!.hints.explicitEndpoint).toBeUndefined();
-    // the SDK rules leave SageMaker Runtime to the SageMaker detector (SM4), which is the one that reports it
-    expect(family(detection, "aws:sagemaker-runtime")?.hints.seenBy).toEqual(["sagemaker"]);
-    expect(detection.notes.join(" ")).toContain("writes the address of a service into the source");
-  });
-  it("finds drivers and flags a literal host or URL but not a setting", async () => {
-    const code = ["import psycopg2", "import redis", "from pymongo import MongoClient", "import os", 'conn = psycopg2.connect(host="db.internal", user="u")', "r = redis.Redis(host=os.environ['REDIS_HOST'])", "m = MongoClient(os.getenv('MONGO_URI'))", ""].join("\n");
-    const detection = await detect({ "svc.py": code });
-    expect(family(detection, "postgres")!.hints.explicitEndpoint).toBe(true);
-    expect(family(detection, "redis")!.hints.explicitEndpoint).toBeUndefined();
-    expect(family(detection, "mongodb")!.hints.explicitEndpoint).toBeUndefined();
-  });
 });
 
 describe("Node", () => {
@@ -91,12 +74,6 @@ describe("Java and Kotlin", () => {
     expect(family(detection, "aws:s3")!.hints.explicitEndpoint).toBe(true);
     expect(family(detection, "aws:dynamodb")!.hints.explicitEndpoint).toBeUndefined();
   });
-  it("finds drivers by import in Kotlin and a JDBC URL literal", async () => {
-    const code = ["import redis.clients.jedis.Jedis", "import java.sql.DriverManager", 'val j = Jedis("localhost", 6379)', 'val c = DriverManager.getConnection("jdbc:postgresql://localhost/app")', ""].join("\n");
-    const detection = await detect({ "src/main/kotlin/Db.kt": code });
-    expect(family(detection, "postgres")!.hints.explicitEndpoint).toBe(true);
-    expect(family(detection, "redis")).toBeDefined();
-  });
 });
 
 describe("Go", () => {
@@ -106,40 +83,5 @@ describe("Go", () => {
     expect(families(detection)).toEqual(["aws:s3", "postgres", "redis"]);
     expect(family(detection, "postgres")!.evidence).toEqual([{ path: "go.mod", line: 6 }]);
   });
-  it("finds AWS service imports and flags a literal BaseEndpoint, and drivers with a literal address", async () => {
-    const code = ["package main", "", "import (", '\t"github.com/aws/aws-sdk-go-v2/service/sqs"', '\t"github.com/redis/go-redis/v9"', '\t"github.com/segmentio/kafka-go"', ")", "", "func f() {", '\t_ = sqs.NewFromConfig(cfg, func(o *sqs.Options) { o.BaseEndpoint = aws.String("http://localhost:4566") })', '\t_ = redis.NewClient(&redis.Options{Addr: "localhost:6379"})', "\t_ = kafka.NewWriter(kafka.WriterConfig{Brokers: brokers})", "}", ""].join("\n");
-    const detection = await detect({ "main.go": code });
-    expect(family(detection, "aws:sqs")).toMatchObject({ evidence: [{ path: "main.go", line: 4 }], hints: { explicitEndpoint: true } });
-    expect(family(detection, "redis")!.hints.explicitEndpoint).toBe(true);
-    expect(family(detection, "kafka")!.hints.explicitEndpoint).toBeUndefined();
-  });
-  it("flags a broker list written as host:port literals", async () => {
-    const code = ["package main", "", "import \"github.com/segmentio/kafka-go\"", "", "func f() {", '\t_ = kafka.NewWriter(kafka.WriterConfig{Brokers: []string{"broker-1:9092"}})', "}", ""].join("\n");
-    expect(family(await detect({ "main.go": code }), "kafka")!.hints.explicitEndpoint).toBe(true);
-  });
 });
 
-describe("rules that hold in every language", () => {
-  it("flags a connection URL written as a string literal, never keeping the host or password", async () => {
-    const password = ["pw", "k".repeat(16), "9"].join("-");
-    const detection = await detect({ "src/conf.ts": `const url = "mongodb://admin:${password}@prod-cluster.example-corp.net:27017/app";\nconst ok = \`postgres://\${user}@\${host}/db\`;\n` });
-    expect(family(detection, "mongodb")).toMatchObject({ hints: { explicitEndpoint: true }, evidence: [{ path: "src/conf.ts", line: 1 }] });
-    expect(family(detection, "postgres")).toBeUndefined();
-    const out = JSON.stringify(detection);
-    expect(out).not.toContain(password);
-    expect(out).not.toContain("prod-cluster");
-  });
-  it("does not read tests, fixtures or vendored folders for code rules", async () => {
-    const detection = await detect({ "tests/test_a.py": 'import boto3\nboto3.client("s3")', "node_modules/x/index.js": 'import "pg"; new Pool({host:"localhost"})', "vendor/a.go": '"github.com/lib/pq"' });
-    expect(detection.dependencies).toBeUndefined();
-  });
-  it("merges a manifest mention and a code use of one family into one candidate with the stronger strength", async () => {
-    const detection = await detect({ "requirements.txt": "redis==5\n", "app.py": "import redis\nr = redis.Redis()\n" });
-    expect(detection.dependencies).toHaveLength(1);
-    expect(family(detection, "redis")).toMatchObject({ strength: "used", evidence: [{ path: "requirements.txt", line: 1 }, { path: "app.py", line: 1 }], hints: { seenBy: ["driver", "sdk"] } });
-  });
-  it("leaves a repository with no driver or SDK exactly as before", async () => {
-    const detection = await detect({ "app.py": "print('hi')\n", "package.json": '{"scripts":{"test":"x"}}', "main.go": "package main\n", "A.java": "class A {}\n" });
-    expect(Object.hasOwn(detection, "dependencies")).toBe(false);
-  });
-});

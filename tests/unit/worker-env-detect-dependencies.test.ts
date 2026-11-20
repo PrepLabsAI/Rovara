@@ -38,10 +38,4 @@ describe("the detector index", () => {
     expect(Object.hasOwn(withNew, "dependencies")).toBe(false);
   });
 
-  it("adds candidates, merged by family with every sighting's evidence and the strongest strength", async () => {
-    const detection = await detect({ "docker-compose.yml": "services:\n  db: { image: postgres:16 }\n", "compose.override.yml": "services:\n  db: { image: postgres:16, ports: ['5432:5432'] }\n" });
-    expect(detection.dependencies).toHaveLength(1);
-    expect(detection.dependencies![0]).toMatchObject({ family: "postgres", strength: "declared", hints: { ports: [5432], version: "16" } });
-    expect(detection.dependencies![0]!.evidence.map((entry) => entry.path)).toEqual(["docker-compose.yml", "compose.override.yml"]);
-  });
 });

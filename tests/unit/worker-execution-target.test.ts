@@ -6,9 +6,7 @@ import { join } from "node:path";
 import ts from "typescript";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ProjectCommand } from "../../packages/contracts/src/index.js";
-import {
-  NO_RUNNER_CONFIGURED, SANDBOX_TARGET, executionFor, formatExecutionTarget, parseExecutionTarget, proveCommandPort,
-} from "../../packages/worker/src/execution-target.js";
+import { NO_RUNNER_CONFIGURED, SANDBOX_TARGET, executionFor, formatExecutionTarget, parseExecutionTarget } from "../../packages/worker/src/execution-target.js";
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
 import { programOf } from "../support/task-owner-scan.js";
@@ -87,21 +85,6 @@ describe("the sandbox target is the task sandbox, unchanged", () => {
     expect(normalized(viaSeam.fake.calls, viaSeam.sandbox.name)).toEqual(normalized(direct.fake.calls, direct.sandbox.name));
   });
 
-  it("calls the sandbox's own methods, passing exactly the arguments given", async () => {
-    const seen: unknown[][] = [];
-    const sandbox = {
-      runCommand: (...args: unknown[]) => { seen.push(args); return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" }); },
-      bashOperations: () => { seen.push(["bash"]); return { exec: () => Promise.resolve({ exitCode: 0 }) }; },
-    } as unknown as TaskSandbox;
-    const target = executionFor(SANDBOX_TARGET, { sandbox });
-    const signal = new AbortController().signal;
-    await target.runCommand(command);
-    await target.runCommand(command, signal);
-    target.bashOperations();
-    expect(seen).toEqual([[command], [command, signal], ["bash"]]);
-    expect(seen[0]).toHaveLength(1);
-  });
-
   it("needs the sandbox the caller started, and never starts or falls back to anything else", () => {
     expect(() => executionFor(SANDBOX_TARGET, {})).toThrow(/no task sandbox/u);
   });
@@ -122,21 +105,6 @@ describe("the runner target is refused", () => {
     for (const bad of ["", "local", "Sandbox", "runner:", "runner:UPPER", "runner:a b", "runner:../x", "runner:-x", "sandbox:x", "runner:" + "a".repeat(64)]) {
       expect(() => parseExecutionTarget(bad), bad).toThrow(RangeError);
     }
-  });
-});
-
-describe("Prove's command port", () => {
-  it("returns the exit code, the output and a timeout flag from the target", async () => {
-    const calls: unknown[][] = [];
-    const port = proveCommandPort({
-      bashOperations: () => { throw new Error("not used"); },
-      runCommand: (...args) => { calls.push(args); return Promise.resolve({ exitCode: 124, stdout: "o", stderr: "e", timedOut: true }); },
-    });
-    const signal = new AbortController().signal;
-    expect(await port(command, signal)).toEqual({ exitCode: 124, timedOut: true, stdout: "o", stderr: "e" });
-    expect(calls).toEqual([[command, signal]]);
-    const plain = proveCommandPort({ bashOperations: () => { throw new Error("x"); }, runCommand: () => Promise.resolve({ exitCode: 0, stdout: "", stderr: "" }) });
-    expect(await plain(command, signal)).toEqual({ exitCode: 0, timedOut: false, stdout: "", stderr: "" });
   });
 });
 

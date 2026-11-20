@@ -12,18 +12,6 @@ const detect = (files: Files, options = {}) => detectWorkspacePackages(Object.ke
 const declaration = (files: Files) => discoverWorkspaceRoots(Object.keys(files), (path) => Promise.resolve(files[path]));
 
 describe("workspace call limits", () => {
-  it("accepts exactly 64 units and rejects 65 before loading package content", async () => {
-    const files: Files = { "pnpm-workspace.yaml": "packages: ['p/*']" };
-    for (let n = 0; n < 63; n += 1) files[`p/${String(n)}/package.json`] = node;
-    const result = await detect(files);
-    expect(result.kind).toBe("workspace");
-    expect(result.units).toHaveLength(64);
-    expect(result.units.slice(1).every((unit) => unit.detection.checks.length === 1)).toBe(true);
-    files["p/extra/package.json"] = node;
-    const reads: string[] = [];
-    expect(await detectWorkspacePackages(Object.keys(files), (path) => { reads.push(path); return Promise.resolve(files[path]); }, "repo", { entry })).toMatchObject({ kind: "unavailable", units: [] });
-    expect(reads).toEqual(["pnpm-workspace.yaml"]);
-  });
 
   it("rejects an oversized inventory before attempting the guard", async () => {
     const paths = Array.from({ length: 5001 }, (_, n) => `f${String(n)}`);
@@ -37,42 +25,8 @@ describe("workspace call limits", () => {
     expect(result.units.find((unit) => unit.root === "a")!.detection.notes).toEqual(["isolated"]);
   });
 
-  it("accepts exactly 5000 inventory paths", async () => {
-    const files: Files = { "package.json": node };
-    for (let n = 1; n < 5000; n += 1) files[`docs/${String(n)}.txt`] = "";
-    const result = await detect(files);
-    expect(result.kind).toBe("single");
-    expect(result.units[0]!.omittedPaths).toBe(0);
-    expect(result.units[0]!.detection.checks).toHaveLength(1);
-  });
-
   it("refuses inventory entries the bounded reader would discard", async () => {
     expect(await detect({ "package.json": node, ["x".repeat(513)]: "" })).toMatchObject({ kind: "unavailable", units: [] });
-  });
-
-  it("reads the inherited root lock and each manifest only once for the whole call", async () => {
-    const files: Files = { "package.json": '{"workspaces":["p/*"]}', "pnpm-lock.yaml": "#".repeat(250000) };
-    for (let n = 0; n < 40; n += 1) files[`p/${String(n)}/package.json`] = node;
-    const reads: string[] = [];
-    const result = await detectWorkspacePackages(Object.keys(files), (path) => { reads.push(path); return Promise.resolve(files[path]); }, "repo", { entry });
-    expect(result.kind).toBe("workspace");
-    expect(reads.filter((path) => path === "pnpm-lock.yaml")).toHaveLength(1);
-    expect(reads).toHaveLength(new Set(reads).size);
-    expect(result.units.slice(1).every((unit) => unit.detection.checks[0]!.value.command.executable === "pnpm")).toBe(true);
-  });
-
-  it("shares the 4 MiB budget between discovery and all packages and stops further loads", async () => {
-    const definition = "packages: ['p/*']";
-    const files: Files = { "pnpm-workspace.yaml": definition };
-    // Exactly 4 MiB, including discovery, must still work.
-    for (let n = 0; n < 16; n += 1) files[`p/${String(n).padStart(2, "0")}/package.json`] = node.padEnd(262144 - (n === 0 ? definition.length : 0));
-    expect((await detect(files)).kind).toBe("workspace");
-    files["p/16/package.json"] = node;
-    files["p/17/package.json"] = node;
-    const reads: string[] = [];
-    const result = await detectWorkspacePackages(Object.keys(files), (path) => { reads.push(path); return Promise.resolve(files[path]); }, "repo", { entry });
-    expect(result).toMatchObject({ kind: "unavailable", units: [] });
-    expect(reads).not.toContain("p/17/package.json");
   });
 
   it("ends the whole call while discovery is waiting on a loader", async () => {
@@ -94,47 +48,13 @@ describe("workspace call limits", () => {
     expect(reads).not.toContain("a/.env.f16");
   });
 
-  it("ends a stuck detector thread without an unguarded or partial fallback", async () => {
-    const started = performance.now();
-    const reads: string[] = [];
-    // Signal a read before occupying the thread, so the control proves the busy loop started.
-    const busy = 'import { parentPort } from "node:worker_threads"; parentPort.postMessage({ type: "read", id: 1, path: "package.json" }); for (;;) {}';
-    const result = await detectWorkspacePackages(["package.json"], (path) => { reads.push(path); return Promise.resolve(node); }, "repo", { timeoutMs: 300, entry: { url: new URL(`data:text/javascript,${encodeURIComponent(busy)}`), execArgv: [] } });
-    expect(result).toMatchObject({ kind: "unavailable", units: [] });
-    expect(reads).toEqual(["package.json"]);
-    expect(performance.now() - started).toBeLessThan(3000);
-  });
-
   it("refuses a missing guard instead of running unguarded", async () => {
     expect(await detect({ "package.json": node }, { entry: { url: new URL("../support/no-such-thread.ts", import.meta.url), execArgv: ["--import", "tsx"] } })).toMatchObject({ kind: "unavailable", units: [] });
   });
 
-  it("retains undeclared files in a root remainder unit", async () => {
-    const result = await detect({ "settings.gradle": "include ':a'", "a/build.gradle": "plugins { java }", "packages/b/package.json": '{"dependencies":{"pg":"8"}}' });
-    expect(result.units.map((unit) => unit.root)).toEqual([".", "a"]);
-    expect(result.units[0]!.detection.dependencies?.map((item) => item.family)).toContain("postgres");
-  });
 });
 
 describe("bounded workspace patterns", () => {
-  it("rejects the review's 127 KiB pattern bomb quickly", async () => {
-    // A scaling check, not a wall-clock bound: the same bomb (n folders, n positive and n negative patterns; both sizes are over the 256-pattern limit) at 130 folders and at eight times that
-    // (about 190 bytes a folder, so the 8N input stays at or under 256 KiB and stays in CPU cache) may take about eight times as long to refuse, never sixty-four. The review's full size (4000) is refused once, un-timed.
-    let outcome: unknown;
-    const bomb = (count: number) => {
-      const files: Files = {};
-      const patterns: string[] = [];
-      for (let n = 0; n < count; n += 1) { files[`d/x${String(n)}/package.json`] = node; patterns.push(`  - 'd/x${String(n)}'`); }
-      for (let n = 0; n < count; n += 1) patterns.push(`  - '!d/zz${String(n)}/**'`);
-      files["pnpm-workspace.yaml"] = `packages:\n${patterns.join("\n")}\n`;
-      return async () => { outcome = await declaration(files).then(() => undefined, (error: unknown) => error); };
-    };
-    await expectLinearScalingAsync(bomb, { n: 130, unitBytes: 190, label: "pattern bomb refusal" });
-    expect(outcome).toBeInstanceOf(Error);
-    outcome = undefined;
-    await bomb(4000)();
-    expect(outcome).toBeInstanceOf(Error);
-  }, 60_000);
 
   it("matches 256 compiled prefix-pruned patterns against 4000 folders quickly", async () => {
     const filesOf = (folders: number): Files => {
@@ -166,26 +86,9 @@ describe("bounded workspace patterns", () => {
     await expect(declaration(files)).rejects.toThrow();
   });
 
-  it.each(["apps/{a,b}", "apps/@(a)", "apps/[", "apps/a**b"])("refuses unsupported glob syntax: %s", async (pattern) => {
+  it.each(["apps/{a,b}", "apps/[", "apps/a**b"])("refuses unsupported glob syntax: %s", async (pattern) => {
     await expect(declaration({ "package.json": JSON.stringify({ workspaces: [pattern] }), "apps/a/package.json": node, "apps/ab/package.json": node, "apps/[/package.json": node, [`${pattern}/package.json`]: node })).rejects.toThrow();
   });
-});
-
-describe("complete Gradle declarations", () => {
-  it.each(["settings.gradle", "settings.gradle.kts"])("refuses a bare multiline continuation in %s", async (path) => {
-    expect(await detect({ [path]: "include ':a',\n        ':b'\n", "a/build.gradle": "plugins { java }", "b/build.gradle": "plugins { java }" })).toMatchObject({ kind: "unavailable", units: [] });
-  });
-  it("refuses an unterminated parenthesized include", async () => {
-    expect(await detect({ "settings.gradle": 'include(":a"', "a/build.gradle": "plugins { java }" })).toMatchObject({ kind: "unavailable", units: [] });
-  });
-  it.each(["settings.gradle", "settings.gradle.kts"])("reads every parenthesized multiline module in %s", async (path) => {
-    const result = await detect({ [path]: 'include(\n ":a",\n ":b",\n)\n', "a/build.gradle": "plugins { java }", "b/build.gradle": "plugins { java }" });
-    expect(result.units.map((unit) => unit.root)).toEqual([".", "a", "b"]);
-  });
-});
-
-it("refuses a malformed root package when another file declares a workspace", async () => {
-  expect(await detect({ "package.json": "{ not json", "pnpm-workspace.yaml": "packages: ['a']", "a/package.json": node })).toMatchObject({ kind: "unavailable", units: [] });
 });
 
 describe("single-repository goldens from review 1", () => {

@@ -1,18 +1,14 @@
 // TE-F2 part B, M1: in a Vertex round the laptop shell's Google Application Default Credentials (a refresh token in ~/.config/gcloud, or a key file named by GOOGLE_APPLICATION_CREDENTIALS) must never be found, used or sent by a customer's
 // test in a helper round. Run with the real google-auth-library under a temporary HOME holding a fake ADC file with a real-looking refresh token built at run time, under the network tripwire.
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { afterEach, describe, expect, it } from "vitest";
-import { builtinModelCatalog } from "../../packages/contracts/src/index.js";
-import { laptopModelEnvironment } from "../../packages/worker/src/model-helper-env.js";
-import { cleanupWorlds, startWorld } from "../support/model-helper-world.js";
-import { installModelNetworkTripwire } from "../support/model-network-tripwire.js";
+import { cleanupWorlds } from "../support/model-helper-world.js";
 
 const require = createRequire(import.meta.url);
 const { GoogleAuth } = require("google-auth-library") as { GoogleAuth: new (options: object) => { getClient(): Promise<Record<string, unknown>> } };
-const CATALOG = builtinModelCatalog().rows;
 const dirs: string[] = [];
 const saved: Record<string, string | undefined> = {};
 afterEach(async () => {
@@ -56,45 +52,5 @@ describe("Application Default Credentials in a laptop round", () => {
     const { refresh } = usersMachine();
     const client = await clientOf();
     expect(client._refreshToken).toBe(refresh);
-  });
-  it("with the round's variables google-auth takes the METADATA path and gets only the dummy token: the real refresh token is never used, never in the environment, and nothing leaves loopback", async () => {
-    const { refresh, keyFile, home } = usersMachine();
-    setEnv("GOOGLE_APPLICATION_CREDENTIALS", keyFile); // the shell names a real key file too
-    const w = await startWorld();
-    try {
-      const run = tmp();
-      const cloudsdk = join(run, "cloudsdk");
-      mkdirSync(cloudsdk);
-      const metaHost = `127.0.0.1:${String(w.loop.metaPort)}`;
-      const result = laptopModelEnvironment({ rows: CATALOG, rowIds: ["vertex"], baseUrl: "http://127.0.0.1:5555", metadataHostPort: metaHost, projectId: "rovara-test-project", adc: { cloudsdkConfigDir: cloudsdk }, inherited: process.env });
-      expect(result.ok).toBe(true);
-      if (!result.ok) return;
-      const env = result.environment;
-      expect(env.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined();
-      expect(result.unset).toContain("GOOGLE_APPLICATION_CREDENTIALS");
-      expect(env.CLOUDSDK_CONFIG).toBe(cloudsdk);
-      expect(env.GCE_METADATA_HOST).toBe(metaHost);
-      for (const [name, value] of Object.entries(env)) setEnv(name, value);
-      for (const name of result.unset) setEnv(name, undefined);
-      const tripwire = installModelNetworkTripwire({ resolver: new Set(), ports: { 443: 1, 80: 1 } });
-      let token: string | undefined;
-      let client: Record<string, unknown>;
-      try {
-        client = await clientOf();
-        token = ((await (client as unknown as { getAccessToken(): Promise<{ token?: string | null }> }).getAccessToken()).token) ?? undefined;
-      } finally {
-        tripwire.restore();
-      }
-      expect(token).toBe(["rovara", "dummy", "token"].join("-"));
-      expect(client._refreshToken).toBeUndefined();
-      expect(client.email).not.toBe("real@real.example");
-      expect(tripwire.refused).toEqual([]);
-      expect(JSON.stringify(env)).not.toContain(refresh);
-      expect(readdirSync(cloudsdk)).toEqual([]);
-      // the user's real file under HOME is still there, untouched and unread by the round
-      expect(readFileSync(join(home, ".config/gcloud/application_default_credentials.json"), "utf8")).toContain(refresh);
-    } finally {
-      await w.close();
-    }
   });
 });

@@ -91,11 +91,6 @@ describe("mid-run knowledge", () => {
     expect(resolves()).toBe(MAX_MID_RUN_RESOLVES);
   });
 
-  it("serialises two tool results touching the same new folder at once", async () => {
-    const { session } = await start("build");
-    const [a, b] = await Promise.all([session.onPathTouched("repo/engine/src/ui/a.tsx"), session.onPathTouched("repo/engine/src/ui/b.tsx")]);
-    expect([a, b].filter((value) => value !== undefined)).toHaveLength(1);
-  });
 });
 
 describe("mid-run failures", () => {

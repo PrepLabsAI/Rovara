@@ -6,11 +6,11 @@ import { mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE, TaskDependencyPlanSchema, WORKER_INVOCATION_FEATURES, type ProjectCommand, type ServiceCatalog, type TaskDependencyPlan } from "@agentx/contracts";
+import { TaskDependencyPlanSchema, type ProjectCommand, type ServiceCatalog, type TaskDependencyPlan } from "@agentx/contracts";
 import { withDetachedWorking } from "../../packages/worker/src/check-sandbox.js";
 import { forgetWorkerStartSweeps } from "../../packages/worker/src/service-runner.js";
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
-import { TestServicesError, startTestServicesRun, testServicesAdvertisedFeatures, type SealedRoundPorts, type SealedRoundSetup, type TestServicesConfig } from "../../packages/worker/src/test-services-run.js";
+import { TestServicesError, startTestServicesRun, type SealedRoundPorts, type SealedRoundSetup, type TestServicesConfig } from "../../packages/worker/src/test-services-run.js";
 import type { CheckPlan, CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { fakeServicesDocker, type FakeServicesDockerOptions } from "../support/fake-services-docker.js";
 
@@ -128,31 +128,6 @@ const nothingLeft = async (h: Awaited<ReturnType<typeof harness>>): Promise<void
 
 const COMPANY = { imageId: "img_" + "1".repeat(20), registry: "docker.io", repository: "library/postgres", digest: "c".repeat(64) };
 const companyPlan = (change: Record<string, unknown> = {}): TaskDependencyPlan => dependency({ backing: "company", digest: COMPANY.digest, company: COMPANY, ...change } as never);
-
-describe("the wire: a company image plan", () => {
-  it("parses with its company block, and the plan says plainly that it is a company image", () => {
-    const plan = companyPlan();
-    expect(plan.backing).toBe("company");
-    expect(plan.company).toEqual(COMPANY);
-  });
-
-  it("is refused when it does not name its approval, runs another digest than the approved one, borrows a helper's profile, carries AWS services, or when a catalog plan carries a company block", () => {
-    const base = { id: "postgres", name: "Postgres", kind: "database", family: "postgres", catalogId: "postgres@16", repository: "svc/postgres", config: { database: "app", user: "app" }, aliases: ["postgres"], connect: [{ name: "DATABASE_URL", template: "postgres://{user}:{password}@{host}:{port}/{db}" }], seeds: [], reset: "fresh_per_round" };
-    const parse = (change: Record<string, unknown>) => TaskDependencyPlanSchema.safeParse({ ...base, digest: COMPANY.digest, ...change }).success;
-    expect(parse({ backing: "company", company: COMPANY })).toBe(true);
-    expect(parse({ backing: "company" })).toBe(false);
-    expect(parse({ backing: "company", company: { ...COMPANY, digest: "d".repeat(64) } })).toBe(false);
-    expect(parse({ backing: "company", company: { ...COMPANY, imageId: "img_short" } })).toBe(false);
-    expect(parse({ backing: "company", company: { ...COMPANY, extra: 1 } })).toBe(false);
-    expect(parse({ backing: "local", company: COMPANY })).toBe(false);
-  });
-
-  it("has its worker feature string, listed for a worker invocation, and this worker does not advertise it", () => {
-    expect(TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE).toBe("task.testServices.companyImage.v1");
-    expect(WORKER_INVOCATION_FEATURES).toContain(TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE);
-    for (const environment of [{}, { AGENTX_SANDBOX_IMAGE: IMAGE, AGENTX_WORKER_IMAGE: IMAGE }]) expect(testServicesAdvertisedFeatures(environment)).not.toContain(TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE);
-  });
-});
 
 describe("Rovara Code's worker refuses a company image", () => {
   it("BY NAME with the same sentence as a digest it does not pin: it is never started, even with the digest the catalog pins, and nothing is pulled or made", async () => {

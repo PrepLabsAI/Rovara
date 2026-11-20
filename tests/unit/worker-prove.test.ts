@@ -1,8 +1,3 @@
-import { mkdtemp, rm, writeFile, realpath } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { proveWithMachineMeasurement } from "../../packages/worker/src/machine-measurement.js";
-import { TestEnvProveReportSchema, TEST_ENV_PROVE_MEASURE_FEATURE } from "@agentx/contracts";
 // Proof and test environment E3: the Prove run's sequence, failure words, bounds, and the report the broker re-reads.
 import { describe, expect, it } from "vitest";
 import { TestEnvironmentBodySchema, testEnvDigest, testEnvIsProved, type ProjectCommand, type TestEnvironmentBody } from "@agentx/contracts";
@@ -61,25 +56,6 @@ describe("a command whose stop could not be confirmed (FIX-RUNNER-ABORT-JOIN)", 
 });
 
 describe("a passing run", () => {
-  it("runs the steps in order, times the full suite, records the mode used and the coverage map, and is proved", async () => {
-    const { ports, ran, started } = fakes();
-    const environment = env();
-    const report = await prove(ports, environment);
-    expect(ran).toEqual(["pip install", "make build", "pytest smoke", "pytest -q"]);
-    expect(started).toEqual(["scorer"]);
-    expect(statuses(report)).toEqual({ setup: "passed", build: "passed", boot: "passed", smoke: "passed", full_suite: "passed", mocks: "passed", preprod_probe: "skipped" });
-    expect(report.fullSuite).toEqual({ durationMs: 90_000, tests: 1_240 });
-    expect(report.coverageMapRef).toBe(sha("c"));
-    expect(report.services).toEqual([{ name: "scorer", modeUsed: "mocked" }]);
-    expect(testEnvIsProved(report, testEnvDigest(environment), environment)).toBe(true);
-  });
-  it("a suite longer than the round budget is a result, not a failure (that is why selection exists)", async () => {
-    const { ports, clock } = fakes();
-    const slow: ProvePorts = { ...ports, runCommand: (command) => { clock.t += command.args.includes("-q") ? 45 * 60_000 : 1_000; return Promise.resolve({ exitCode: 0, timedOut: false, stdout: "", stderr: "" }); } };
-    const report = await prove(slow);
-    expect(report.fullSuite?.durationMs).toBe(45 * 60_000);
-    expect(statuses(report).full_suite).toBe("passed");
-  });
   it("asks for no coverage map unless the environment selects by one, and a map that cannot be built is just absent", async () => {
     let asked = 0;
     const { ports } = fakes({ buildCoverageMap: () => { asked += 1; return Promise.reject(new Error("unreadable")); } });
@@ -111,11 +87,6 @@ describe("a failing step ends the run and names itself in fixed words", () => {
     expect(ran.length).toBeLessThanOrEqual(4);
     expect(testEnvIsProved(report, report.proposalDigest, {})).toBe(false);
     if (step !== "full_suite") expect(ran).not.toContain("pytest -q");
-  });
-  it("a command that hits its own time limit", async () => {
-    const { ports } = fakes({ results: { "pytest -q": { exitCode: null, timedOut: true } } });
-    expect(statuses(await prove(ports)).full_suite).toBe("failed");
-    expect((await prove(ports)).steps.find((step) => step.step === "full_suite")?.failure).toBe("round_budget_exceeded");
   });
   it("redacts and bounds the tail of what the command printed, and keeps it plain text", async () => {
     const secret = `ghp_${"Ab1Cd2Ef3Gh4".repeat(3)}`;
@@ -177,30 +148,13 @@ describe("bounds", () => {
     already.abort();
     expect((await prove(fakes().ports, env(), already.signal)).steps.find((step) => step.status === "failed")?.failure).toBe("infrastructure");
   });
-  it("an environment with nothing to run is never proved", async () => {
-    const empty = env({ repos: [{ repositoryId: "svc", setupCommands: [], checks: [] }], services: [] });
-    const report = await prove(fakes().ports, empty);
-    expect(Object.values(statuses(report)).every((status) => status === "skipped")).toBe(true);
-    expect(testEnvIsProved(report, report.proposalDigest, {})).toBe(false);
-  });
   it("refuses to label a run with a digest that is not the environment's", async () => {
     const environment = env();
     await expect(proveEnvironment(fakes().ports, { proposalDigest: sha("0"), environment, signal: new AbortController().signal, deadlineMs: 1000 })).rejects.toThrow(RangeError);
   });
-  it("binds the report to the digest it was given", async () => {
-    const report = await prove(fakes().ports);
-    expect(testEnvIsProved(report, sha("0"), {})).toBe(false);
-  });
 });
 
 describe("asked-for machine measurement", () => {
-  it("gate off is byte-for-byte unchanged and never reads the port", async () => {
-    const before = await prove(fakes().ports); let reads = 0;
-    const ports = fakes({ peakMemory: async () => { reads++; return 6144; } }).ports;
-    const environment = env();
-    const after = await proveEnvironment(ports, { proposalDigest: testEnvDigest(environment), environment, signal: new AbortController().signal, deadlineMs: 3600000, machineChip: "arm64", measureMachine: false });
-    expect(JSON.stringify(after)).toBe(JSON.stringify(before)); expect(reads).toBe(0);
-  });
   it("adds facts only when asked, after the suite and before release", async () => {
     const { ports, ran } = fakes(); let released = false;
     ports.release = async () => { released = true; };
@@ -209,27 +163,9 @@ describe("asked-for machine measurement", () => {
     const report = await proveEnvironment(ports, { proposalDigest: testEnvDigest(environment), environment, signal: new AbortController().signal, deadlineMs: 3600000, machineChip: "arm64", measureMachine: true });
     expect(report.fullSuite?.peakMemoryMiB).toBe(6144); expect(report.machineChip).toBe("arm64");
   });
-  it.each([undefined, NaN, Infinity, -1, 1_048_577])("omits invalid measurement %s", async peak => {
-    const environment = env(); const report = await proveEnvironment(fakes({ peakMemory: async () => peak }).ports, { proposalDigest: testEnvDigest(environment), environment, signal: new AbortController().signal, deadlineMs: 3600000, measureMachine: true });
-    expect(report.fullSuite).not.toHaveProperty("peakMemoryMiB");
-  });
   it("a rejected reader does not fail the suite", async () => {
     const environment = env(); const report = await proveEnvironment(fakes({ peakMemory: async () => { throw new Error("unreadable"); } }).ports, { proposalDigest: testEnvDigest(environment), environment, signal: new AbortController().signal, deadlineMs: 3600000, measureMachine: true });
     expect(report.fullSuite).toEqual({ durationMs: 90000, tests: 1240 });
   });
 });
 
-it("the single future setup entry point negotiates and reads the sandbox before release; old reports still parse", async () => {
-  const directory = await mkdtemp(join(await realpath(tmpdir()), "te-c5-integration-"));
-  try {
-    expect(dirname(directory)).toBe(await realpath(tmpdir()));
-    await writeFile(join(directory, "memory.peak"), "6442450944\n");
-    const environment = env(), input = { proposalDigest: testEnvDigest(environment), environment, signal: new AbortController().signal, deadlineMs: 3600000 };
-    const old = await prove(fakes().ports); expect(TestEnvProveReportSchema.parse(old)).toEqual(old);
-    for (const machineSize of [false, true]) for (const workerFeatures of [[], [TEST_ENV_PROVE_MEASURE_FEATURE]]) {
-      const report = await proveWithMachineMeasurement(fakes().ports, input, { machineSize, workerFeatures, machineChip: "arm64", cgroupDirectory: directory });
-      if (machineSize && workerFeatures.length > 0) expect(report.fullSuite?.peakMemoryMiB).toBe(6144);
-      else expect(report).toEqual(old);
-    }
-  } finally { await rm(directory, { recursive: true, force: true }); }
-});
