@@ -330,7 +330,8 @@ jobs:
   nightly-tests:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # About 40 minutes of test time on a small runner (the eval simulation, the detectors' growth check, local-up-flow and the workflow-e2e suites).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
