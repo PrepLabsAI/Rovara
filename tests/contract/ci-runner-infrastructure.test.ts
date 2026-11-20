@@ -12,10 +12,10 @@ describe("the CI test-shard runner stack", () => {
   const template = Template.fromStack(new CiRunnerStack(new App(), "AgentXCiRunner", { env: { region: "us-east-1" } }));
   const resources = (type: string): Resource[] => Object.values(template.findResources(type) as Record<string, Resource>);
 
-  it("is an unprivileged 4 vCPU / 8 GB ARM GitHub Actions runner for this repository's queued workflow jobs, through the GitHub connection", () => {
+  it("is an unprivileged 8 vCPU / 16 GB ARM GitHub Actions runner for this repository's queued workflow jobs, through the GitHub connection", () => {
     template.hasResourceProperties("AWS::CodeBuild::Project", {
       Name: CI_RUNNER_PROJECT,
-      Environment: { Type: "ARM_CONTAINER", ComputeType: "BUILD_GENERAL1_MEDIUM", Image: "aws/codebuild/amazonlinux-aarch64-standard:3.0", PrivilegedMode: false },
+      Environment: { Type: "ARM_CONTAINER", ComputeType: "BUILD_GENERAL1_LARGE", Image: "aws/codebuild/amazonlinux-aarch64-standard:3.0", PrivilegedMode: false },
       Source: { Type: "GITHUB", Location: "https://github.com/PrepLabsAI/Rovara", Auth: { Type: "CODECONNECTIONS", Resource: { Ref: "GitHubConnectionArn" } } },
     });
     template.hasResourceProperties("AWS::Logs::LogGroup", { RetentionInDays: 14 });

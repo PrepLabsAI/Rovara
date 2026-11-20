@@ -97,7 +97,11 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(asTester.run).toContain('if [ "$(id -u)" != 0 ]; then exit 0; fi');
     expect(asTester.run).toContain('as="setpriv --reuid=65534 --regid=65534 --clear-groups"');
     // A GitHub runner's environment: short HOME and TMPDIR (socket paths), enterable PATH only, no AWS_* or npm_* variables, a writable step summary.
-    expect(asTester.run).toContain('echo "AS_TESTER=$as env $unset_vars HOME=/tmp/h TMPDIR=/tmp/t PATH=$tester_path GITHUB_STEP_SUMMARY=/tmp/h/step-summary.md" >> "$GITHUB_ENV"');
+    expect(asTester.run).toContain('echo "AS_TESTER=$as env $unset_vars HOME=/tmp/h TMPDIR=/tmp/t PATH=$tester_path GITHUB_STEP_SUMMARY=/tmp/h/step-summary.md /usr/bin/python3 /tmp/h/reaper.py" >> "$GITHUB_ENV"');
+    // the container's PID 1 does not reap orphans: the tests run under a child subreaper
+    expect(asTester.run).toContain("ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)");
+    // the application spool's ancestry check: nothing above the checkout writable by others
+    expect(asTester.run).toContain('while [ "$path" != / ]; do chmod go-w "$path"; path="$(dirname "$path")"; done');
     expect(asTester.run).toContain("grep -oiE '^(aws|npm)_[a-z0-9_]*'");
     const gitleaks = test.steps.find((step) => step.name === "Install gitleaks 8.30.1 (checksum pinned)")!;
     expect(gitleaks.run).toContain("gitleaks_8.30.1_linux_${arch}.tar.gz");

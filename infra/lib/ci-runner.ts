@@ -53,9 +53,9 @@ export class CiRunnerStack extends Stack {
         auth: { type: "CODECONNECTIONS", resource: connectionArn.valueAsString },
       },
       artifacts: { type: "NO_ARTIFACTS" },
-      // 4 vCPU / 8 GB ARM, like GitHub's 4-vCPU runner; a job may ask for another size with the label's `-instance-size:` suffix. Unprivileged: the shards
-      // need no Docker (their Docker tests are switched off unless asked for).
-      environment: { type: "ARM_CONTAINER", computeType: "BUILD_GENERAL1_MEDIUM", image: "aws/codebuild/amazonlinux-aarch64-standard:3.0", privilegedMode: false },
+      // 8 vCPU / 16 GB ARM: the memory of GitHub's runner (16 GB). On MEDIUM (8 GB) the test-services guard's ceilings, a share of the machine's memory, refuse
+      // the 1 GiB helpers its tests make (429). Unprivileged: the shards need no Docker (their Docker tests are switched off unless asked for).
+      environment: { type: "ARM_CONTAINER", computeType: "BUILD_GENERAL1_LARGE", image: "aws/codebuild/amazonlinux-aarch64-standard:3.0", privilegedMode: false },
       // A GitHub Actions runner project: one queued workflow job per build, for this repository only, and only a trusted account's job.
       triggers: {
         webhook: true,

@@ -236,9 +236,11 @@ jobs:
       # pass as root. As the release does (scripts/release-common.ts runTests, testEnvironment), the tests then run as an unprivileged account (65534) that owns
       # the checkout, in an environment like a GitHub runner's: a short HOME and TMPDIR under /tmp (Unix socket paths stay under about 108 bytes, and the spool's
       # directory ancestry is root-owned and sticky), only the PATH directories that account can enter (a missing command is ENOENT, not EACCES), no AWS_* or
-      # npm_* variables (CodeBuild's credential endpoint would make the worker refuse to start, and the tests need no AWS access), and a step summary it can
-      # write. Root keeps working in the checkout (safe.directory, in this throwaway container only). On GitHub's runner (not root) this does nothing and
-      # AS_TESTER stays empty.
+      # npm_* variables (CodeBuild's credential endpoint would make the worker refuse to start, and the tests need no AWS access), a step summary it can
+      # write, no group- or world-writable directory above the checkout (the application spool's ancestry check), and a reaper for orphaned processes: the
+      # container's PID 1 does not reap them, so a killed grandchild stays a zombie that kill(pid, 0) still finds (systemd reaps them on a GitHub runner).
+      # Root keeps working in the checkout (safe.directory, in this throwaway container only). On GitHub's runner (not root) this does nothing and AS_TESTER
+      # stays empty.
       - name: Run the tests as an ordinary account (CodeBuild only)
         run: |
           if [ "$(id -u)" != 0 ]; then exit 0; fi
@@ -249,10 +251,40 @@ jobs:
           chmod 700 /tmp/h /tmp/t
           touch /tmp/h/step-summary.md && chown 65534:65534 /tmp/h/step-summary.md
           chown -R 65534:65534 "$GITHUB_WORKSPACE"
-          # Every directory above the checkout, Node and gitleaks must be enterable by that account.
+          # Every directory above the checkout, Node and gitleaks must be enterable by that account, and none above the checkout writable by others.
           for path in "$GITHUB_WORKSPACE" "$(dirname "$(command -v node)")" "$RUNNER_TEMP/gitleaks-bin"; do
             while [ "$path" != / ]; do chmod o+x "$path"; path="$(dirname "$path")"; done
           done
+          path="$(dirname "$GITHUB_WORKSPACE")"
+          while [ "$path" != / ]; do chmod go-w "$path"; path="$(dirname "$path")"; done
+          # The reaper: a child subreaper (PR_SET_CHILD_SUBREAPER) that runs the tests and reaps every orphan that dies under it.
+          cat > /tmp/h/reaper.py <<'PY'
+          import ctypes, os, signal, sys
+          ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)
+          child = os.fork()
+          if child == 0:
+              os.execvp(sys.argv[1], sys.argv[1:])
+          for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+              signal.signal(number, lambda received, frame: os.kill(child, received))
+          code = 1
+          while True:
+              try:
+                  pid, status = os.wait()
+              except ChildProcessError:
+                  break
+              if pid == child:
+                  code = os.waitstatus_to_exitcode(status)
+                  break
+          while True:
+              try:
+                  pid, _ = os.waitpid(-1, os.WNOHANG)
+              except ChildProcessError:
+                  break
+              if pid == 0:
+                  break
+          sys.exit(code if code >= 0 else 128 - code)
+          PY
+          chown 65534:65534 /tmp/h/reaper.py
           chmod o+r "$RUNNER_TEMP"/*.txt 2>/dev/null || true
           tester_path=""
           IFS=: read -ra dirs <<< "$PATH"
@@ -260,7 +292,7 @@ jobs:
             if [ -n "$dir" ] && $as test -x "$dir"; then tester_path="${tester_path:+$tester_path:}$dir"; fi
           done
           unset_vars="$(env | grep -oiE '^(aws|npm)_[a-z0-9_]*' | sort -u | sed 's/^/-u /' | tr '\n' ' ')"
-          echo "AS_TESTER=$as env $unset_vars HOME=/tmp/h TMPDIR=/tmp/t PATH=$tester_path GITHUB_STEP_SUMMARY=/tmp/h/step-summary.md" >> "$GITHUB_ENV"
+          echo "AS_TESTER=$as env $unset_vars HOME=/tmp/h TMPDIR=/tmp/t PATH=$tester_path GITHUB_STEP_SUMMARY=/tmp/h/step-summary.md /usr/bin/python3 /tmp/h/reaper.py" >> "$GITHUB_ENV"
           echo "available parallelism: $(node -p 'require("os").availableParallelism()'), memory: $(free -g | awk '/Mem:/{print $2}') GB; unset: $unset_vars"
       - name: Tests (the whole suite)
         if: needs.plan.outputs.tests == 'all'
