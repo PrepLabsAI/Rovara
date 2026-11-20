@@ -330,10 +330,11 @@ describe("the workflows", () => {
     expect(job.steps.some((step) => (step.uses ?? "").startsWith("aws-actions/"))).toBe(false);
   });
 
-  it("is read-only by default; only linux-runtime (packages: read) and live-aws (OIDC) widen it, each in its own permissions", () => {
+  it("is read-only by default; only plan (checks and actions: read), linux-runtime (packages: read) and live-aws (OIDC) widen it, each in its own permissions", () => {
     expect(ci.permissions).toEqual({ contents: "read" });
     const widened = Object.entries(ci.jobs).filter(([, job]) => job.permissions !== undefined).map(([name, job]) => [name, job.permissions]);
-    expect(widened).toEqual([["linux-runtime", { contents: "read", packages: "read" }], ["live-aws", { "id-token": "write", contents: "read" }]]);
+    // #1181: the plan reads the head commit's check runs and their workflow runs to prove a reuse; read-only.
+    expect(widened).toEqual([["plan", { contents: "read", checks: "read", actions: "read" }], ["linux-runtime", { contents: "read", packages: "read" }], ["live-aws", { "id-token": "write", contents: "read" }]]);
   });
 
   it("runs the mirror by hand only, with packages: write and no cloud credentials, over the whole list", () => {

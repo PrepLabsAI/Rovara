@@ -301,9 +301,9 @@ export function planOutputs(plan: Plan): Record<string, string> {
 //
 // A pull request whose code is exactly what an earlier FULL push run of this workflow tested and passed (a pinned code/next -> mainline pull request, a sync) does not
 // run the suite again. The proof, all of it required, everything else plans as before:
-//   - this is a pull request without the `full-ci` label, and the tree this run tests (the merge commit) is byte-for-byte the pull request head's tree (the pull request is up to date);
+//   - this is a pull request (never a push, a manual run or the nightly schedule) without the `full-ci` or `linux-ci` label, and the tree this run tests (the merge commit) is byte-for-byte the pull request head's tree (the pull request is up to date);
 //   - a DIFFERENT run of this workflow (.github/workflows/ci.yml), triggered by a push of exactly that head commit (so it tested exactly that tree), has, among its own
-//     GitHub Actions check runs on that commit, the latest `local`, `ci-mode (full)` and every `test (n/8)` completed with success: a full run that passed as a whole
+//     GitHub Actions check runs on that commit, the latest `local`, `ci-mode (full)`, `linux-runtime` and every `test (n/8)` completed with success: a full run that passed as a whole
 //     (a run that itself reused something has no test shards, so a reuse is never reused);
 //   - GitHub answers every read in time. Any refusal, rate limit, timeout or doubt: no reuse.
 // Reuse runs the plan, `ci-mode (full)`, port-guard and the gate; quick, build, the test shards and the runtime checks are skipped. The gate names the reused run.
@@ -313,7 +313,8 @@ export interface ReuseRun { id: number; event: string; head_sha: string; path: s
 export type Reuse = { runUrl: string; runId: number } | undefined;
 const RUN_OF_JOB = /^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/(\d+)\/job\/\d+$/u;
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
-export const REUSE_REQUIRED_CHECKS = ["local", "ci-mode (full)", ...Array.from({ length: FULL_SHARDS }, (_, index) => `test (${index + 1}/${FULL_SHARDS})`)];
+// `linux-runtime` too: a push run always runs it (#1185 LINUX_EVENTS), and a reuse skips it, so the reused run must have run it green.
+export const REUSE_REQUIRED_CHECKS = ["local", "ci-mode (full)", "linux-runtime", ...Array.from({ length: FULL_SHARDS }, (_, index) => `test (${index + 1}/${FULL_SHARDS})`)];
 
 /** The runs (ids) among these check runs whose own latest `local`, `ci-mode (full)` and test shards all completed with success; never `currentRunId`. Newest first. */
 export function passedFullRuns(runs: readonly ReuseCheckRun[], currentRunId: number): number[] {
@@ -349,7 +350,8 @@ export interface ReuseInput {
 /** A full pass of byte-identical code this pull request's run may stand on, or undefined (then the run plans as before). Never throws. */
 export async function findReuse(input: ReuseInput): Promise<Reuse> {
   try {
-    if (input.event !== "pull_request" || input.labels.includes("full-ci")) return undefined;
+    // A pull request only: never a push, a manual run, or the nightly schedule (#1185: it exists to run the Linux runtime check fresh). A label that asks for a run (`full-ci`, `linux-ci`) runs it.
+    if (input.event !== "pull_request" || input.labels.includes(FULL_LABEL) || input.labels.includes(LINUX_LABEL)) return undefined;
     if (!SHA_PATTERN.test(input.headSha) || !Number.isSafeInteger(input.currentRunId) || input.currentRunId <= 0 || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(input.repository)) return undefined;
     const tested = input.treeOf("HEAD"); const head = input.treeOf(input.headSha);
     if (tested === undefined || head === undefined || tested !== head) return undefined;
