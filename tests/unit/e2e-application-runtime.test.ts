@@ -13,6 +13,7 @@ import { createCompiledApiApplicationFixture } from "../support/e2e-application-
 import type { E2EActualApplicationRun } from "../../packages/verifier/src/application-collection.js";
 import type { E2EActualApplicationCliInput } from "../../packages/verifier/src/application-runtime-cli.js";
 import { createE2EApplicationRuntimeAssets } from "../../packages/verifier/src/application-runtime-assets.js";
+import { NO_PROTECTED_DIRECTORY, protectedBaseDirectory } from "../support/protected-directory.js";
 
 type InstalledBootstrap = { prepareE2EApplicationCliConfig(input: { configUrl: string }): Promise<E2EConfig> };
 type InstalledRunner = { runE2EApplicationActualCli(input: E2EActualApplicationCliInput): Promise<E2EActualApplicationRun> };
@@ -30,7 +31,9 @@ describe("application actual CLI and lifecycle", () => {
     expect(bootstrap.prepareE2EApplicationCliConfig).toBeTypeOf("function");
   });
 
-  it("resolves the generated wrapper in fresh parent and fork processes without import/list model effects", async () => {
+  // The spool check walks the assignment root up to "/" (tests/support/protected-directory.ts says where such a folder is on each kind of machine).
+  const spoolBase = protectedBaseDirectory();
+  it.skipIf(spoolBase === undefined)(`resolves the generated wrapper in fresh parent and fork processes without import/list model effects${spoolBase === undefined ? ` (skipped: ${NO_PROTECTED_DIRECTORY})` : ""}`, async () => {
     expect(process.version).toBe("v22.23.2");
     const repoRoot = process.cwd();
     const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -55,6 +58,7 @@ export function createE2EApplicationCliHost({ launchContext }) {
     const fixture = createCompiledApiApplicationFixture({ modelRoute: { routeId: "fixture-route", routeRevision: "fixture-route-r1" }, hostManifestDigest: hash(factoryBytes) });
     const compiled = fixture.compiled; const shard = compiled.shards[0]!;
     const root = await mkdtemp(join(repoRoot, "tests/.tmp-e2e-app-fresh-bootstrap-"));
+    const spoolRoot = await mkdtemp(join(spoolBase!, ".tmp-e2e-app-assigned-"));
     const packageRoot = join(root, "packages/verifier"); const projectRoot = join(root, "project");
     const verifierModules = join(packageRoot, "assets/application-runtime-v1");
     const nodeModules = join(root, "node_modules"); const scopedModules = join(nodeModules, "@agentx");
@@ -169,7 +173,7 @@ else { const parent = await resolveListAndGenerate(); const child = fork(fileURL
       const actualFixture = createCompiledApiApplicationFixture({ now: new Date(Date.now() - 10_000).toISOString(), hostManifestDigest: hash(factoryBytes) });
       const actualCompiled = actualFixture.compiled; const actualShard = actualCompiled.shards[0]!;
       const transportId = "fixed-test-transport"; const transportCorrelationId = randomUUID();
-      const assignmentRoot = join(root, "assigned-launches"); const correlationRoot = join(assignmentRoot, transportCorrelationId);
+      const assignmentRoot = join(spoolRoot, "assigned-launches"); const correlationRoot = join(assignmentRoot, transportCorrelationId);
       await mkdir(correlationRoot, { recursive: true, mode: 0o700 });
       await writeFile(join(installedHostRoot, "supervisor-spools.json"), JSON.stringify({ schemaVersion: "e2e-application-supervisor-spools/v1",
         entries: [{ profileId, descriptor, transportId, assignmentRoot, ownerUid: process.getuid!() }] }), { mode: 0o600 });
@@ -249,7 +253,7 @@ else { const parent = await resolveListAndGenerate(); const child = fork(fileURL
           platform: process.platform, arch: process.arch }), evidenceDirectory: cancelledEvidenceDirectory,
         supervisorAssignment: { transportId, transportCorrelationId }, signal: cancelled.signal })).rejects.toThrow();
       expect(await readdir(cancelledEvidenceDirectory)).toEqual([]);
-    } finally { await rm(root, { recursive: true, force: true }); }
+    } finally { await rm(root, { recursive: true, force: true }); await rm(spoolRoot, { recursive: true, force: true }); }
   });
 
   it("refuses invalid compiled admission before allocating any runtime resource", async () => {

@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FILE_OPS_NODE_FLAGS } from "../../packages/worker/src/file-ops-exec.js";
+import { processEnded } from "../support/process-liveness.js";
 import {
   FILE_OPS_TEMP_PREFIX,
   MAX_REQUEST_ARGUMENT_BYTES,
@@ -382,8 +383,7 @@ onLinux("sandbox-file-ops (Linux filesystem)", () => {
   describe("a pattern that backtracks catastrophically (ReDoS)", () => {
     const DEADLINE = { AGENTX_FILE_OPS_DEADLINE_MS: "600" };
     const gone = (pid: number | undefined): boolean => {
-      if (pid === undefined) return false;
-      try { process.kill(pid, 0); return false; } catch { return true; }
+      return pid !== undefined && processEnded(pid);
     };
 
     it("gives up on `(a+)+$` against a 28-character line within the deadline, and the helper process is gone", async () => {

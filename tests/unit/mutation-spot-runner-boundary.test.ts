@@ -10,12 +10,11 @@ import { expect, it } from "vitest";
 import { isolatedGitEnvironment } from "../../packages/worker/src/git.js";
 import { runIsolatedGit } from "../../packages/worker/src/isolated-repository.js";
 import { createCheckRunners } from "../../packages/worker/src/verification/checks.js";
+import { processAlive } from "../support/process-liveness.js";
 
 const original = "export const value = true;\n";
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
-const alive = (pid: number): boolean => {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-};
+const alive = processAlive;
 async function until(predicate: () => Promise<boolean> | boolean): Promise<void> {
   const deadline = Date.now() + 10_000;
   while (!(await predicate())) {

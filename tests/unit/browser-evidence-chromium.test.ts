@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS, BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES } from "../../packages/contracts/src/browser-evidence.js";
 import { runBrowserEvidence } from "../../packages/verifier/src/executor/browser-evidence.js";
 import { createChromiumEvidenceDriver, startProjectApp, type ProjectApp } from "../../packages/verifier/src/executor/browser-evidence-chromium.js";
+import { processEnded } from "../support/process-liveness.js";
 
 const haveChromium = existsSync(chromium.executablePath());
 const FIXTURE = join(process.cwd(), "tests/fixtures/browser-evidence-app");
@@ -141,7 +142,7 @@ describe.skipIf(!haveChromium)("browser evidence in a real Chromium", () => {
       expect(silent.status).toBe("time_limit");
       const pid = Number((await readFile(pidFile, "utf8")).trim());
       expect(pid).toBeGreaterThan(1);
-      expect(() => process.kill(pid, 0)).toThrow();
+      expect(processEnded(pid)).toBe(true);
     } finally { await rm(scratch, { recursive: true, force: true }); }
   }, 60_000);
 
