@@ -1,3 +1,4 @@
+import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { createHmac } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, type WorkflowSnapshot, type WorkflowFeedbackBundle } from "../../packages/contracts/src/task-workflow-node.js";
@@ -312,7 +313,7 @@ describe("GitHub webhook signature verification", () => {
     const event = { kind: "PULL_REQUEST" as const, action: "closed", installationId: 777, repositoryId: 1234, fullName: "acme/payments", number: 9 };
     const candidate = createCandidateManifest([{ repositoryId: "payments", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
     const url = "https://github.com/acme/payments/pull/9";
-    const task = { project: "test", startingRevision: 1, workflow: { stage: "WAIT_FOR_MERGE", candidate,
+    const task = { companyId: IMPLICIT_COMPANY_ID, project: "test", startingRevision: 1, workflow: { stage: "WAIT_FOR_MERGE", candidate,
       pullRequests: [{ repositoryId: "payments", number: 9, url, candidateDigest: candidate.digest }] } };
     let transaction: Record<string, unknown> | undefined;
     const dependencies = {
@@ -536,7 +537,7 @@ describe("task-wide current PR feedback reconciliation", () => {
           await f.input.saveWorkflow("task", values[":revision"], WorkflowSnapshotSchema.parse(values[":workflow"])); return {};
         }
         const key = objectInput(command.input.Key);
-        if (typeof key.pk === "string" && key.pk.startsWith("DEVTASK#")) return { Item: { ...(await f.input.loadTask("task")), ownerKey: "owner", workspaceId: "workspace" } };
+        if (typeof key.pk === "string" && key.pk.startsWith("DEVTASK#")) return { Item: { ...(await f.input.loadTask("task")), companyId: IMPLICIT_COMPANY_ID, ownerKey: "owner", workspaceId: "workspace" } };
         if (typeof key.pk === "string" && key.pk.startsWith("PROJECT#")) return { Item: { definition: { repositories: ["api", "ui"].map(name => ({ name, url: `https://github.com/acme/${name}.git` })) } } };
         return f.input.documentClient.send(command);
       } },

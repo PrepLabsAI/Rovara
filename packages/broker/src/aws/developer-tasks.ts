@@ -3,7 +3,7 @@ import { proofIndexOf, type ProofIndexResponse } from "../local/app/proof-index.
 import { rowInCompany } from "../developer/company-rows.js";
 import type { SlackWorkspaceScope } from "@agentx/contracts";
 import { routeTaskMerge, type TaskMergeWiring } from "./task-merge.js";
-import { CompanyReadItemLimit, recordInCompany } from "./company-check.js";
+import { CompanyReadItemLimit, readTaskLegacyProject, recordInCompany } from "./company-check.js";
 import { namedCompany } from "./company-layout.js";
 // Spec 025 FR-016 to FR-021: the developer task routes. Every task has its own workspace, reached
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
@@ -357,7 +357,7 @@ async function e2ePublicationContext(deps: DeveloperTaskRouteDependencies, calle
     || subject.projectName !== task.project || subject.projectRevision !== task.startingRevision) return unknown("current_task_scope_unavailable");
   const candidate = CandidateManifestSchema.safeParse(task.workflow.candidate);
   if (!candidate.success) return unknown("current_candidate_unavailable");
-  const project = await deps.actions.projectRevision(task.project, task.startingRevision);
+  const project = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision));
   if (project === undefined || project.definition.revision !== subject.projectRevision) return unknown("registered_project_revision_unavailable");
   const candidateRepositories = candidate.data.repositories.filter((item) => item.commitSha === subject.commitSha && item.treeSha === subject.treeSha);
   if (candidateRepositories.length !== 1) return unknown("candidate_commit_tree_or_base_mismatch");
@@ -1184,7 +1184,7 @@ function approvedFix(proposal: { summary: string; fileChanges: Array<{ repositor
 
 /** The task's repository folders, from the project revision it started from: where a corrected check may run. */
 async function taskRepositoryPaths(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<string[]> {
-  const project = await deps.actions.projectRevision(task.project, task.startingRevision);
+  const project = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision));
   if (project === undefined) throw agentXError("CONFIG_INVALID", "this task's project revision is no longer registered; ask an admin");
   return project.definition.repositories.map(repository => repository.path);
 }
@@ -1594,7 +1594,8 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   if (full !== undefined && await releaseFinishedTasksOf(deps, charge.member) > 0) full = await limitReached(deps.documentClient, deps.tableName, charge, limits);
   if (full !== undefined) return refused(await limitError(deps, caller, full, limits));
 
-  const identity = developerTaskIdentity({ taskId, developerId: caller.developerId, provider: caller.amr, developerName: caller.name, client });
+  const identity = developerTaskIdentity({ taskId, developerId: caller.developerId, provider: caller.amr, developerName: caller.name, client,
+    ...(access.companyId === undefined ? {} : { companyId: access.companyId }) });
   const preparation = await deps.actions.preparation(identity, project, request.requestId);
   const workspaceId = preparation.workspace.id;
   const conversationId = randomUUID();
@@ -1603,7 +1604,7 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   const task: DeveloperTaskRecord = {
     ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, developerId: caller.developerId, provider: caller.amr, developerName: caller.name,
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
-    client, project: request.project, title, workspaceId, ownerKey: identity.ownerKey, conversationId, startingRevision: revision,
+    client, ...(access.companyId === undefined ? {} : { companyId: access.companyId }), project: request.project, title, workspaceId, ownerKey: identity.ownerKey, conversationId, startingRevision: revision,
     // A workflow task quotes the request in each plan's "why"; every start (Slack and AI tool) comes through here.
     ...(request.workflow === true ? { requestText: storedRequestText(request.instructions) } : {}),
     charge, shared: share !== undefined, ...(share === undefined ? {} : { share, shareVersion: 1 }),
@@ -2064,7 +2065,7 @@ export async function decideTaskWorkflow(
   let workBreakdownDigest: string | undefined;
   if (planGraph !== undefined && request.decision === "APPROVE") {
     if (prior === undefined && deps.workflowDependenciesEnabled !== true) throw agentXError("CONFIG_INVALID", "ordered work plans are saved but this broker is not enabled to start them");
-    const pinnedProject = await deps.actions.projectRevision(task.project, task.startingRevision);
+    const pinnedProject = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision));
     if (pinnedProject === undefined || pinnedProject.definition.repositories.length !== 1) {
       throw agentXError("CONFIG_INVALID", "ordered work is available only when this task is pinned to one registered repository");
     }
@@ -2117,7 +2118,7 @@ export async function decideTaskWorkflow(
     ? boundDecisionRequest : { ...boundDecisionRequest, includedCommentIds: included.map((comment) => comment.commentId) };
   let next = transition(decisionRequest, decisions, workBreakdownDigest);
   if (request.decision === "APPROVE" && documentType === "plan" && !(loaded?.format === "structured" && loaded.plan.e2e !== undefined)) {
-    const pinnedProject = await deps.actions.projectRevision(task.project, task.startingRevision);
+    const pinnedProject = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision));
     if (pinnedProject === undefined) throw agentXError("CONFIG_INVALID", WORKFLOW_ACTIONABLE_REFUSALS.pinnedProjectUnavailable);
     if (pinnedProject.definition.e2e !== undefined && E2EPolicySchema.parse(pinnedProject.definition.e2e).baselineScenarioIds.length > 0) {
       throw agentXError("CONFIG_INVALID", WORKFLOW_ACTIONABLE_REFUSALS.baselineIntentMissing);
@@ -2130,7 +2131,7 @@ export async function decideTaskWorkflow(
   /** M1.3 Task 3.7b: whether the project wants the baseline round, so the coding run is asked to export the unchanged code. */
   let baselineSource = false;
   if (request.decision === "APPROVE" && documentType === "plan" && loaded?.format === "structured" && loaded.plan.e2e !== undefined) {
-    const pinnedProject = await deps.actions.projectRevision(task.project, task.startingRevision);
+    const pinnedProject = await readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision));
     if (pinnedProject?.definition.e2e === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the approved feature E2E intent has no pinned project policy");
     const intent = loaded.plan.e2e;
     const policy = E2EPolicySchema.parse(pinnedProject.definition.e2e);
@@ -4588,8 +4589,8 @@ async function workflowPublicationAuthority(
   if (ownerDecision === undefined || ownerDecision.artifactDigest === undefined || ownerDecision.actorRole === "AGENTX") return undefined;
   if (task.startingRevision === undefined) return undefined;
   const [pinned, latest] = await Promise.all([
-    deps.actions.projectRevision(task.project, task.startingRevision),
-    deps.actions.latestProject(task.project),
+    readTaskLegacyProject(task, () => deps.actions.projectRevision(task.project, task.startingRevision)),
+    readTaskLegacyProject(task, () => deps.actions.latestProject(task.project)),
   ]);
   if (pinned === undefined || latest === undefined || pinned.definition.name !== task.project || latest.definition.name !== task.project
     || pinned.definition.revision !== task.startingRevision || latest.definition.revision < pinned.definition.revision) return undefined;
@@ -4718,7 +4719,7 @@ export async function startTaskWorkflowPublicationFromSystem(
   // The catalog guard below needs the project's latest-revision pointer. A catalog row written before the pointer existed
   // is repaired from the revision history first (CONFIG_INVALID naming the project when that is not possible). A required
   // E2E task carries the same guard in its current-authority checks, which repair it where they are built.
-  if (workflow.e2e?.required !== true) await deps.actions.ensureProjectCatalogPointer(task.project);
+  if (workflow.e2e?.required !== true) await deps.actions.ensureProjectCatalogPointer(task.project, task);
   const publication = await workflowPublicationAuthority(deps, task, workflow, approvedPlan, workflow.revision + (ownerRetry ? 1 : 0));
   if (publication === undefined) return "STALE";
   const title = `AgentX: ${inertTaskTitle(task.title)}`.slice(0, 256);
@@ -5652,7 +5653,7 @@ async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: Dev
   if (repository === undefined) {
     // The revision the workspace was prepared from, which the publication pushes from: a
     // repository a newer revision added is not in this workspace.
-    const pinned = await deps.actions.projectRevision(workspace.projectName, workspace.projectRevision);
+    const pinned = await readTaskLegacyProject(task, () => deps.actions.projectRevision(workspace.projectName, workspace.projectRevision));
     if (pinned === undefined) throw agentXError("CONFIG_INVALID", "this task's project revision is no longer registered; ask an admin");
     const repositories = pinned.definition.repositories.map((entry) => entry.name);
     if (repositories.length > 1) throw agentXError("CONFIG_INVALID", `this project has several repositories; name one of: ${repositories.join(", ")}`);
@@ -6237,7 +6238,7 @@ async function nextShare(
   request: { shareMode?: "view" | "continue" | undefined; channel?: string | undefined },
   now: string,
 ): Promise<TaskShare | "unchanged"> {
-  const project = await deps.actions.latestProject(task.project);
+  const project = await readTaskLegacyProject(task, () => deps.actions.latestProject(task.project));
   if (project === undefined) throw agentXError("CONFIG_INVALID", "this task's project is no longer registered; ask an admin");
   const policy = developerTaskPolicy(project.definition);
   if (task.share === undefined) {
@@ -6399,7 +6400,7 @@ export async function adminShareMode(deps: ShareModeDependencies, admin: ShareAd
   for (let attempt = 0; attempt < SHARE_ATTEMPTS; attempt += 1) {
     if (current.closedAt !== undefined) throw agentXError("CONFIG_INVALID", "this task is closed, so its share mode can no longer change");
     if (current.share === undefined) throw agentXError("CONFIG_INVALID", "this task is private; only its developer can share it");
-    const project = await deps.actions.latestProject(current.project);
+    const project = await readTaskLegacyProject(current, () => deps.actions.latestProject(current.project));
     if (project === undefined) throw agentXError("CONFIG_INVALID", "this task's project is no longer registered; register it again first");
     const share = withMode(current.share, decideMode(developerTaskPolicy(project.definition), request.shareMode));
     if (share === "unchanged") return answer();

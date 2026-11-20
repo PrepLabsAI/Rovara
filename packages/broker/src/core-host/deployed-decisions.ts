@@ -20,6 +20,9 @@ import {
 } from "@agentx/contracts";
 import { SETUP_CHANGE_CARD_WORDS, WorkflowSnapshotSchema, setupChangeLines } from "@agentx/contracts";
 import { createDecisionService, type DecisionService } from "../services/decisions.js";
+import { hostedKnownFailing } from "./known-failing.js";
+import { createDecisionGate } from "../core/decisions/approval-gate.js";
+import { CARD_REFUSAL_OF_GATE } from "../core/decisions/performer.js";
 import type { Credential, DecisionOutcome } from "../core/decisions/approval-gate.js";
 import { WORKFLOW_DOCUMENT_CARD_KINDS, createDecisionPerformer, workflowDocumentHandler, type KindHandler, type ProvingCaller } from "../core/decisions/performer.js";
 import type { DecisionItem } from "../core/decisions/project.js";
@@ -46,7 +49,7 @@ import { loadWorkflowDocument } from "../developer/plan-document-reader.js";
 import { taskOwnerKey } from "../developer/task-records.js";
 import type { CoreRuntime } from "./core-runtime.js";
 import type { CoreDevWiring, DeployedDecisionCaller } from "./dev-routes.js";
-import { APPROVAL_PROOF_METHOD, issueApprovalProof, type HostedChatApproval, type ApprovalProofInput } from "./hosted-approvers.js";
+import { APPROVAL_PROOF_METHOD, issueApprovalProof, issueKnownFailingApprovalProof, type HostedChatApproval, type ApprovalProofInput } from "./hosted-approvers.js";
 import type { ChatThreads } from "./chat-threads.js";
 
 /** The company's own records of its people, as the broker keeps them. A read that fails throws (the caller refuses); `undefined` is "none". */
@@ -151,7 +154,7 @@ export type DecisionAct = ApprovalProofInput;
 
 /** The deployed issuer: lane L2a's signed, card-bound, one-time proof (`issueApprovalProof`), under the install's proof key. */
 export function approvalDecisionProofs(key: Buffer, nowMs: () => number): DecisionProofIssuer {
-  return { method: APPROVAL_PROOF_METHOD, issue: (act) => issueApprovalProof(key, act, nowMs()) };
+  return { method: APPROVAL_PROOF_METHOD, issue: (act) => act.kind === "known_failing" ? issueKnownFailingApprovalProof(key, { ...act, subjectId: act.taskId }, nowMs()) : issueApprovalProof(key, act, nowMs()) };
 }
 
 /** The `ApprovalRequest.kind` the workflow decision asks about for each document card (the subject's `currentDocumentType`), never the gate's subject kind. */
@@ -202,6 +205,7 @@ export interface DeployedDecisionCardsOptions {
   registry: AdapterRegistry;
   people: DeployedPeople;
   proofs: DecisionProofIssuer;
+  env?: NodeJS.ProcessEnv;
   /**
    * More tasks a person's listing reads besides their own index: the task ids of the tasks they were ADDED to (the involved rows of the involved list, C5). Only ids: every one is read as a task of this
    * company and judged by the live owner rule like any other, so a stale or foreign id shows nothing. At most INVOLVED_TASKS_MAX are read; a throw lists only the person's own. Absent: the person's own index.
@@ -262,6 +266,8 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
     },
   });
   const handler = workflowDocumentHandler<ProvingCaller>(decisions.gate);
+  const knownFailing = hostedKnownFailing({ flow: deps, blobs, people, ...(options.env === undefined ? {} : { env: options.env }) });
+  const kfGate = createDecisionGate({ store: deps.store, audit: deps.audit, approvers: registry.require("approvers"), subjects: [knownFailing.subject], now: () => new Date(nowMs()) });
 
 
   /** The task, if the person may decide its document now: still a member, an owner of the task (its own person or a co-owner, live), in this company, with the project grant. */
@@ -326,7 +332,9 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
       /** One task's card, if the task waits on the person's decision now: this company's, waiting, with the grant, and the person an owner of it (read live). */
       const cardOf = async (taskId: string): Promise<DecisionItem | undefined> => {
         const task = await readTask(deps, taskId);
-        if (task === undefined || task.companyId !== companyId || waitingDocument(task) === undefined || !(await granted(task.project)) || !(await isOwner(caller.principal, task))) return undefined;
+        if (task === undefined || task.companyId !== companyId || !(await granted(task.project)) || !(await isOwner(caller.principal, task))) return undefined;
+        if (task.workflow !== undefined) await knownFailing.observeBlocked({ companyId, project: task.project, taskId, workflow: task.workflow });
+        if (waitingDocument(task) === undefined) return undefined;
         return await itemOf(task, viewer);
       };
       let cursor: string | undefined;
@@ -359,6 +367,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
       }
       // An older task past the bound is not shown here (it is still decided on its own page); the log says the listing was cut.
       if (cursor !== undefined) log({ event: "core_engine.decision_cards_cut", companyId, read });
+      items.push(...await knownFailing.items(companyId, caller.principal));
       return items;
     },
     async locks() { return {}; },
@@ -394,7 +403,15 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
     reject: act("reject", (who, input) => handler.reject!(who, input)),
     requestChanges: act("request_changes", (who, input) => handler.requestChanges!(who, input)),
   };
-  const performer: DecisionPerformer<DeployedDecisionCaller> = createDecisionPerformer<DeployedDecisionCaller>(Object.fromEntries(WORKFLOW_DOCUMENT_CARD_KINDS.map((kind) => [kind, deployedHandler])));
+  const kfAct = (outcome: "approve" | "reject") => async (caller: DeployedDecisionCaller, input: PerformInput): Promise<PerformOutcome> => {
+    const personId = personOfCaller(companyId, caller), binding = input.item.binding;
+    if (caller.webApp !== true || personId === undefined) return { kind: "refused", reason: "forbidden" };
+    if (binding === undefined || input.item.kind !== "fix_setup") return { kind: "refused", reason: "stale" };
+    const credential = await proofs.issue({ companyId, personId, requestId: input.requestId, kind: "known_failing", taskId: input.item.subjectId, revision: binding.revision, artifactDigest: binding.artifactDigest, outcome, card: { cardId: input.card.id, contentVersion: input.item.contentVersion } });
+    const result = await kfGate.decide({ companyId, kind: "known_failing", subjectId: input.item.subjectId, requestId: input.requestId, outcome, seen: binding, credentials: [credential], card: { cardId: input.card.id, contentVersion: input.item.contentVersion }, details: { webApp: true } });
+    return result.status === "refused" ? { kind: "refused", reason: CARD_REFUSAL_OF_GATE[result.reason] } : { kind: "done" };
+  };
+  const performer: DecisionPerformer<DeployedDecisionCaller> = createDecisionPerformer<DeployedDecisionCaller>({ ...Object.fromEntries(WORKFLOW_DOCUMENT_CARD_KINDS.map((kind) => [kind, deployedHandler])), fix_setup: { approve: kfAct("approve"), reject: kfAct("reject") } });
 
   return {
     sources, performer, store: documentDecisionStore({ store: deps.store, now: nowMs }), now: nowMs,
@@ -425,6 +442,7 @@ export function deployedPlaybook(options: { runtime: CoreRuntime; registry: Adap
 export interface DeployedDevWiringInputs {
   runtime: CoreRuntime;
   registry: AdapterRegistry;
+  env?: NodeJS.ProcessEnv;
   people: DeployedPeople;
   /** The approvers point's proof issuer (lane L2a). Absent: no decision cards. */
   decisionProofs?: DecisionProofIssuer | undefined;
@@ -438,7 +456,7 @@ export function deployedDevWiringParts(inputs: DeployedDevWiringInputs): Pick<Co
   const playbook = deployedPlaybook({ runtime: inputs.runtime, registry: inputs.registry, codeSettings: inputs.codeSettings });
   return {
     members: deployedSessionMembers(inputs.runtime.companyId, inputs.people),
-    ...(inputs.decisionProofs === undefined ? {} : { decisions: deployedDecisionCards({ runtime: inputs.runtime, registry: inputs.registry, people: inputs.people, proofs: inputs.decisionProofs, involvedTaskIds: (caller) => involvedTaskIds(inputs.runtime.flow.deps, caller.principal), ...(inputs.log === undefined ? {} : { log: inputs.log }) }) }),
+    ...(inputs.decisionProofs === undefined ? {} : { decisions: deployedDecisionCards({ runtime: inputs.runtime, registry: inputs.registry, people: inputs.people, proofs: inputs.decisionProofs, ...(inputs.env === undefined ? {} : { env: inputs.env }), involvedTaskIds: (caller) => involvedTaskIds(inputs.runtime.flow.deps, caller.principal), ...(inputs.log === undefined ? {} : { log: inputs.log }) }) }),
     ...(playbook === undefined ? {} : { playbook }),
   };
 }

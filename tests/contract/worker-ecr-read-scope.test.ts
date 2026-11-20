@@ -166,8 +166,11 @@ describe("the worker role's ECR image read is scoped (L4-IAM)", () => {
       expect([...text.matchAll(/ecr get-login-password|docker login|--pull(?:=|\s)always/gu)], name).toHaveLength(0);
     }
     // Every image the egress stage starts is the worker image, and nothing else names an image.
-    expect([...egress.matchAll(/"\$AGENTX_WORKER_IMAGE"/gu)]).toHaveLength(4); // se_image_node (reads from the image), the gateway container, the boot probe, and the same probe from a container with no --dns (L4-NETG2)
-    expect([...egress.matchAll(/docker (?:run|create)/gu)]).toHaveLength(4);
+    // The three sites are se_image_node, se_gateway and se_probe; each starts
+    // exactly "$AGENTX_WORKER_IMAGE". DNS25 replaced the two --dns probes with
+    // one probe using the mounted resolver, so there is no fourth start.
+    expect([...egress.matchAll(/"\$AGENTX_WORKER_IMAGE"/gu)]).toHaveLength(3);
+    expect([...egress.matchAll(/docker (?:run|create)/gu)]).toHaveLength(3);
     expect(egress.split("\n").filter((line) => !/^\s*#/u.test(line)).join("\n")).not.toMatch(/\.dkr\.ecr\.|docker\.io\/|ghcr\.io\/|amazonaws\.com\/|node@sha256/u);
     expect(helperCalls(stage)).toEqual([]);
     // every ECR login is for this account's registry: the worker image's (boot.sh), the executor's (qualification), the starter copies' (stage)

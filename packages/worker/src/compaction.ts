@@ -9,10 +9,11 @@
 //   (a) replaces every context-source result in what the summary is built from with its stub, redacts what the source-text guard remembers from the messages and from the
 //       summary itself, and takes any source frame out of the summary;
 //   (b) adds the approved plan's key facts to the end of the summary word for word (and asks the summariser to leave them out of its own text);
-//   (c) reports "the conversation was compacted" once the entry is saved (`onCompacted`, which the worker turns into a task event).
+//   (c) keeps session/task usage complete (the worker's summariser records each model call before returning); and
+//   (d) reports "the conversation was compacted" once the entry is saved (`onCompacted`, which the worker turns into a task event).
 //
-// The messages are cleaned into new values and assigned together before anything else happens. Pi's runner catches a handler's throw and then runs its own summary on whatever the
-// preparation holds, so every failure with sources involved (or not known to be absent) cancels the compaction: an unscrubbed summary is worse than no summary.
+// The messages are cleaned into new values and assigned together before summarisation. Pi's runner catches a handler's throw and then runs its own summary on whatever the
+// preparation holds. Failures therefore return our deterministic fallback; an actual abort returns explicit cancellation so Pi cannot fall through to its default.
 import type { WorkflowApprovedPlan } from "@agentx/contracts";
 import type { CompactionResult, InlineExtension, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 import { stubContextEvent } from "./context-sources/events.js";
@@ -26,6 +27,11 @@ export const PLAN_FACTS_HEADING = "## Approved plan (key facts, kept word for wo
 /** The most of the approved plan a summary carries. */
 export const PLAN_FACTS_MAX_CHARS = 12_000;
 const PLAN_SECTION_MAX_CHARS = 5_000;
+// A 12,000-character approved plan plus the current item's bounded title/description/repository and scope sentence fits in 15,000 characters.
+// Bound the snapshot for both the main and fallback summaries identically; neither may drop facts the other carries.
+const SESSION_FACTS_MAX_CHARS = 15_000;
+// At most 16,384 characters total (facts + heading + structural text). No fallback calls a model, so it adds no usage.
+const FALLBACK_MAX_CHARS = 16_384;
 /** The plan sections that are facts to keep: what changes, in what order, what stays, how it is checked and what the owner decided. Why, Risks and E2E intent are left out. */
 const KEPT_SECTIONS: readonly string[] = ["Claims", "Work breakdown", "Not changing", "Checks", "Decisions"];
 
@@ -86,7 +92,7 @@ export interface ConversationCompacted {
   willRetry: boolean;
   tokensBefore: number;
   summaryChars: number;
-  /** Whether the worker's hook wrote the summary (false when Pi's own summary ran, which never carries the plan's facts). */
+  /** Whether the worker's hook supplied the summary; worker sessions require this. */
   fromHook: boolean;
   /** Whether the summary ends with the plan's (or the item's) facts. */
   keptApprovedPlan: boolean;
@@ -127,17 +133,15 @@ function withoutPlanFacts(summary: string): string {
   return at < 0 ? summary : summary.slice(0, at).trimEnd();
 }
 
-/** Whether the conversation being summarised may hold a source's text: a stage with a guard, or any source frame or context-tool result anywhere in it. Errs toward yes. */
-function mayHoldSources(preparation: Preparation, guard: SourceTextGuard | undefined): boolean {
-  if (guard !== undefined) return true;
-  try {
-    return /source-result|src_[a-z]|search_team_knowledge/iu.test(JSON.stringify([preparation.messagesToSummarize, preparation.turnPrefixMessages, preparation.previousSummary ?? ""]));
-  } catch { return true; }
+/** Structural facts only: never read message bodies, previous summaries, custom instructions, file names or a failed model's output. */
+function fallbackSummary(preparation: Preparation, factsBlock: string): string {
+  const structure = `Conversation compacted after the main summary failed. ${String(preparation.messagesToSummarize.length)} earlier messages; ${String(preparation.turnPrefixMessages.length)} turn-prefix messages. Earlier details are unavailable; verify progress against the approved plan and workspace before continuing.`;
+  return `${cut(structure, FALLBACK_MAX_CHARS - factsBlock.length)}${factsBlock}`;
 }
 
 /**
- * The compaction extension. Installed in every worker session; a session with nothing to clean, no guard and no facts compacts exactly as Pi does by default.
- * Pi's runner catches a handler's throw and then runs its own summary on the preparation as it stands, so nothing here may throw with sources involved: every error returns `cancel`.
+ * The compaction extension. Installed in every worker session; Pi's default summary is never used.
+ * Pi catches a handler's throw and then runs its default summary. Aborts return explicit cancellation. Every other error returns a bounded, no-model fallback; if even that fails, use only the plan facts.
  */
 export function compactionExtension(options: SessionCompactionOptions, summarise: CompactionSummariser, onDiagnostic?: (message: string) => void): InlineExtension {
   return {
@@ -148,31 +152,43 @@ export function compactionExtension(options: SessionCompactionOptions, summarise
         keptFacts = false;
         const preparation = event.preparation;
         let guard: SourceTextGuard | undefined;
-        let sensitive = false;
+        let facts: string | undefined;
+        let usage: CompactionResult["usage"];
         try {
+          // Snapshot before touching source content, so a broken guard/cleaner cannot lose the approved facts.
+          const suppliedFacts = options.planFacts?.();
+          facts = suppliedFacts === undefined ? undefined : cut(suppliedFacts, SESSION_FACTS_MAX_CHARS);
           guard = options.sourceGuard?.();
-          // (a) Everything is cleaned into new values first and assigned together, so a failure part way leaves the preparation as it was and the handler's catch decides (cancel).
+          // (a) Everything is cleaned into new values first and assigned together, so a failure part way leaves the preparation as it was and the handler's catch supplies the fallback.
           const history = cleaned(preparation.messagesToSummarize, guard);
           const prefix = cleaned(preparation.turnPrefixMessages, guard);
           const previous = preparation.previousSummary === undefined ? undefined : stubSourceFrames(guard?.active() === true ? guard.redact(withoutPlanFacts(preparation.previousSummary)) : withoutPlanFacts(preparation.previousSummary));
           preparation.messagesToSummarize = history.messages;
           preparation.turnPrefixMessages = prefix.messages;
           if (previous !== undefined) preparation.previousSummary = previous;
-          sensitive = history.stubbed + prefix.stubbed > 0 || history.changed || prefix.changed || guard?.active() === true;
-          const facts = options.planFacts?.();
-          if (!sensitive && facts === undefined) return undefined;
+          const sensitive = history.stubbed + prefix.stubbed > 0 || history.changed || prefix.changed || guard?.active() === true;
           const instructions = [event.customInstructions, sensitive ? SOURCE_INSTRUCTION : undefined, facts === undefined ? undefined : PLAN_INSTRUCTION].filter((part): part is string => part !== undefined && part !== "").join("\n\n");
           const result = await summarise(preparation, instructions, event.signal, event);
+          usage = result.usage;
           // (a) The summary itself: no source frame, none of the guard's runs. (b) The facts after it, word for word.
           let summary = stubSourceFrames(withoutPlanFacts(result.summary));
           if (guard?.active() === true) summary = guard.redact(summary);
           if (facts !== undefined) { summary = `${summary}\n\n${PLAN_FACTS_HEADING}\n${facts}`; keptFacts = true; }
           return { compaction: { ...result, summary } };
-        } catch (error) {
-          if (event.signal.aborted) throw error;
-          onDiagnostic?.(`conversation compaction: the worker's summary failed (${error instanceof Error ? error.message : String(error)})`);
-          // With sources involved (or not known to be absent) no summary is better than an unscrubbed one. With none, Pi's own summary may run on the messages as they are.
-          return sensitive || mayHoldSources(preparation, guard) ? { cancel: true } : undefined;
+        } catch {
+          if (event.signal.aborted) return { cancel: true };
+          // Do not echo the failed model/guard's text. Reporting itself must not let Pi run its default.
+          try { onDiagnostic?.("conversation compaction: the worker's summary failed; using a deterministic fallback"); } catch { /* reporting must not break compaction */ }
+          const factsBlock = facts === undefined ? "" : `\n\n${PLAN_FACTS_HEADING}\n${facts}`;
+          let summary: string;
+          try {
+            summary = fallbackSummary(preparation, factsBlock);
+          } catch {
+            // No preparation content or guard is needed for this last resort. Unreadable facts are unavailable; never recover them from conversation text.
+            summary = facts === undefined ? "Conversation compacted. Earlier details are unavailable." : `${PLAN_FACTS_HEADING}\n${facts}`;
+          }
+          keptFacts = facts !== undefined;
+          return { compaction: { summary, firstKeptEntryId: preparation.firstKeptEntryId, tokensBefore: preparation.tokensBefore, ...(usage === undefined ? {} : { usage }) } };
         }
       });
       pi.on("session_compact", (event) => {

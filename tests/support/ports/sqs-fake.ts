@@ -152,6 +152,9 @@ export class FakeSqs implements SqsSender {
 
   #attributes(input: GetQueueAttributesCommand["input"]): { Attributes: Record<string, string> } {
     const queue = this.#queue(input.QueueUrl);
+    if (!queue.fifo && input.AttributeNames?.includes("FifoQueue") === true) {
+      throw new SQSServiceException({ name: "InvalidAttributeName", $fault: "client", $metadata: {}, message: "Unknown Attribute FifoQueue" });
+    }
     const all = input.AttributeNames?.includes("All") === true;
     const wanted = new Set<string>(input.AttributeNames ?? []);
     const arn = `arn:aws:sqs:us-west-2:000000000000:${nameOf(queue.url)}`;

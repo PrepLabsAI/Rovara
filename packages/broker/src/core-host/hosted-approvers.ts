@@ -49,7 +49,8 @@ export const SETUP_HOST_SUBJECT = "setup_host";
 /** L4-EVC (DEC 254zzz20 D8): the subject type of a project's eval spend item (eval-spend.ts `createEvalSpendSubject`); named by its project, like a setup candidate. */
 export const EVAL_SPEND_SUBJECT = "eval_spend";
 /** The subject types a proof can be marked for besides a task (which has no marker). */
-type ProofSubject = typeof SETUP_PROPOSAL_SUBJECT | typeof TEST_ENVIRONMENT_SUBJECT | typeof SETUP_HOST_SUBJECT | typeof EVAL_SPEND_SUBJECT;
+export const KNOWN_FAILING_SUBJECT = "known_failing";
+type ProofSubject = typeof KNOWN_FAILING_SUBJECT | typeof SETUP_PROPOSAL_SUBJECT | typeof TEST_ENVIRONMENT_SUBJECT | typeof SETUP_HOST_SUBJECT | typeof EVAL_SPEND_SUBJECT;
 /** The one way to answer a decision on a deployed install: the broker's proof of one act by the signed-in person (the wire name is historical, DEC 254zzz73). */
 export const APPROVAL_PROOF_METHOD = "rovara-step-up";
 /** How long an issued proof is good for: the act follows the route's check at once. */
@@ -164,6 +165,14 @@ export function issueTestEnvironmentApprovalProof(key: Buffer, input: TestEnviro
   return issueProjectSubjectApproval(key, input, nowMs, TEST_ENVIRONMENT_SUBJECT);
 }
 
+/** Proof for the evidence-bound Fix setup subject; ordinary authenticated website session. */
+export function issueKnownFailingApprovalProof(key: Buffer, input: Omit<ApprovalProofInput, "taskId"> & { subjectId: string }, nowMs: number): { method: typeof APPROVAL_PROOF_METHOD; token: string } {
+  if (!/^[a-f0-9]{64}_[a-f0-9]{64}$/u.test(input.subjectId)) throw new Error("invalid known-failing subject");
+  const { subjectId, ...rest } = input;
+  checkProofInput({ ...rest, taskId: TASK_ID_FOR_CHECK });
+  return signProof(key, { ...claimsOf({ ...rest, taskId: subjectId }, nowMs), t: KNOWN_FAILING_SUBJECT });
+}
+
 function issueProjectSubjectApproval(key: Buffer, input: SetupApprovalProofInput, nowMs: number, subject: ProofSubject): { method: typeof APPROVAL_PROOF_METHOD; token: string } {
   if (typeof input?.project !== "string" || !PROJECT_NAME.test(input.project)) throw new Error("an approval proof cannot be issued for this input");
   // The task id check is for a task proof; the rest of the input is checked as for one.
@@ -211,7 +220,7 @@ function readProof(key: Buffer, token: unknown): ProofClaims | undefined {
   if (typeof c["c"] !== "string" || typeof c["p"] !== "string" || typeof c["r"] !== "string" || typeof c["q"] !== "string" || typeof c["s"] !== "string" || !Number.isSafeInteger(c["v"]) || typeof c["d"] !== "string"
     || !ANSWERS.has(c["o"]) || !Array.isArray(card) || card.length !== 2 || typeof card[0] !== "string" || typeof card[1] !== "string"
     || !Number.isSafeInteger(c["e"]) || typeof c["n"] !== "string" || !NONCE.test(c["n"])
-    || (Object.hasOwn(c, "t") && c["t"] !== SETUP_PROPOSAL_SUBJECT && c["t"] !== TEST_ENVIRONMENT_SUBJECT && c["t"] !== SETUP_HOST_SUBJECT && c["t"] !== EVAL_SPEND_SUBJECT)) return undefined;
+    || (Object.hasOwn(c, "t") && c["t"] !== KNOWN_FAILING_SUBJECT && c["t"] !== SETUP_PROPOSAL_SUBJECT && c["t"] !== TEST_ENVIRONMENT_SUBJECT && c["t"] !== SETUP_HOST_SUBJECT && c["t"] !== EVAL_SPEND_SUBJECT)) return undefined;
   return c as unknown as ProofClaims;
 }
 
@@ -269,14 +278,14 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
       const subject = request.subject;
       // A core task (its own person decides), a project's setup candidate (L4-D) or a project's test environment (L4-B3b): for those two a live member here, and the subject's own rule decides who
       // at the proposal's risk; or a setup run's website ask (L4-SF d: a live member here; the host subject's rule decides who, and the proof names the ask's own id). Nothing else.
-      const marker: ProofSubject | undefined = subject?.type === SETUP_PROPOSAL_SUBJECT || subject?.type === TEST_ENVIRONMENT_SUBJECT || subject?.type === SETUP_HOST_SUBJECT || subject?.type === EVAL_SPEND_SUBJECT ? subject.type : undefined;
+      const marker: ProofSubject | undefined = subject?.type === KNOWN_FAILING_SUBJECT || subject?.type === SETUP_PROPOSAL_SUBJECT || subject?.type === TEST_ENVIRONMENT_SUBJECT || subject?.type === SETUP_HOST_SUBJECT || subject?.type === EVAL_SPEND_SUBJECT ? subject.type : undefined;
       const setup = marker !== undefined;
       // A setup candidate and a test environment proposal are both named by their project (#908 and #933 merged in batch 14).
       const setupProposal = marker === SETUP_PROPOSAL_SUBJECT || marker === TEST_ENVIRONMENT_SUBJECT || marker === EVAL_SPEND_SUBJECT;
-      const setupHost = marker === SETUP_HOST_SUBJECT;
+      const setupHost = marker === SETUP_HOST_SUBJECT || marker === KNOWN_FAILING_SUBJECT;
       if (typeof companyId !== "string" || !OrgIdSchema.safeParse(companyId).success || typeof subject?.id !== "string"
         || !(setupProposal ? PROJECT_NAME.test(subject.id) && request.projectName === subject.id
-          : setupHost ? HOST_SUBJECT_ID.test(subject.id) && typeof request.projectName === "string" && PROJECT_NAME.test(request.projectName)
+          : setupHost ? (marker === KNOWN_FAILING_SUBJECT ? /^[a-f0-9]{64}_[a-f0-9]{64}$/u.test(subject.id) : HOST_SUBJECT_ID.test(subject.id)) && typeof request.projectName === "string" && PROJECT_NAME.test(request.projectName)
             : subject.type === "task" && TASK_ID.test(subject.id))) return refuse("no_rule_for_this_request");
       if (proof.requestId !== request.requestId || typeof request.requestId !== "string") return refuse("other_request");
       if (proof.revision !== request.revision) return refuse("other_revision");

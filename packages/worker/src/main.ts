@@ -34,6 +34,7 @@ import { executeWorkerCancelInvocation } from "./cancel-invocation.js";
 import { handleSteerInvocation } from "./steer-invocation.js";
 import { handlePeekInvocation } from "./peek-invocation.js";
 import { removeLeftoverMaskVolumes } from "./devcontainer.js";
+import { sweepGatewayNameFiles } from "./gateway-name-files.js";
 import { removeLeftoverTaskSandboxes, taskShellSelection } from "./task-sandbox.js";
 import { removeLeftoverSetupRuns, setupWorkspaceKey } from "./setup-network.js";
 import { createSavedEnvFallbackReporter, createSavedEnvLoginProvider } from "./saved-env/login.js";
@@ -75,6 +76,10 @@ if (taskShellSelection().kind === "sandbox") {
     (removed) => { if (removed > 0) console.log(JSON.stringify({ component: "worker", event: "task-sandbox.leftovers.removed", removed })); },
     (error: unknown) => { console.error(`could not remove leftover task sandboxes: ${error instanceof Error ? error.message : String(error)}`); },
   );
+  // Crash leftovers: keep files held by surviving/stopped containers, and touch only this workspace's worker-owned name files.
+  await sweepGatewayNameFiles(rootPath, createDockerCli()).catch((error: unknown) => {
+    console.error(`could not sweep gateway name files: ${error instanceof Error ? error.message : String(error)}`);
+  });
   // SH14: a setup run's helper container and network (a crash skips their removal); they go before anything starts, so their /24 slots are free again.
   await removeLeftoverSetupRuns(await setupWorkspaceKey(rootPath), createDockerCli()).then(
     (removed) => { if (removed.containers + removed.networks > 0) console.log(JSON.stringify({ component: "worker", event: "setup-run.leftovers.removed", ...removed })); },

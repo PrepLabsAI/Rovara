@@ -81,6 +81,8 @@ export interface DeveloperTaskRecord extends TaskSpendTotals {
   slackUserId?: string;
   client: string;
   project: string;
+  /** Company scope captured when a task is accepted, for queued work that later rereads its project. */
+  companyId?: string;
   title: string;
   workspaceId: string;
   ownerKey: string;
@@ -556,13 +558,14 @@ export function developerFooter(name: string, client: string): string {
 }
 
 /** The identity every workspace handler sees for a developer task: its own owner key (FR-021). */
-export function developerTaskIdentity(task: Pick<DeveloperTaskRecord, "taskId" | "developerId" | "provider" | "developerName" | "client">): AuthenticatedIdentity {
+export function developerTaskIdentity(task: Pick<DeveloperTaskRecord, "taskId" | "developerId" | "provider" | "developerName" | "client"> & Partial<Pick<DeveloperTaskRecord, "companyId">>): AuthenticatedIdentity {
   return {
     issuer: DEVELOPER_TASK_OWNER_ISSUER,
     subject: taskOwnerSubject(task.developerId, task.taskId),
     ownerKey: taskOwnerKey(task.developerId, task.taskId),
     isAdministrator: false,
     claims: {},
-    developer: { developerId: task.developerId, provider: task.provider, name: task.developerName, client: task.client, taskId: task.taskId },
+    developer: { developerId: task.developerId, provider: task.provider, name: task.developerName, client: task.client, taskId: task.taskId,
+      ...(task.companyId === undefined ? {} : { companyId: task.companyId }) },
   };
 }

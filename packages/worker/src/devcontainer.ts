@@ -12,6 +12,7 @@ import {
   type StoredProjectDefinition,
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
+import { gatewayResolverMount, gatewayWorkerDirectory, verifyGatewayResolverFile } from "./gateway-name-files.js";
 import { RunnerKillUnconfirmedError, runCollected, TIMEOUT_KILL_GRACE_MS } from "./collected-process.js";
 import {
   DOCKER_DATA_DIRECTORY,
@@ -893,7 +894,7 @@ function devcontainerExec(cli: DevcontainerCli, target: DevcontainerTarget): Con
 
 /** The `devcontainer` CLI bundled with the worker, run with this Node. */
 /**
- * L4-NETG (DEC 254zzz77): the docker program a gateway-mode worker hands the devcontainer CLI (`--docker-path`). It puts `--network <the internal network> --dns <the gateway> --cap-drop NET_RAW` on every `docker run` and
+ * L4-NETG (DEC 254zzz77): the docker program a gateway-mode worker hands the devcontainer CLI (`--docker-path`). It puts `--network <the internal network>`, a read-only resolver file and `--cap-drop NET_RAW` on every `docker run` and
  * `docker create` the CLI makes and passes everything else through (packages/worker/ec2/devcontainer-docker.sh, which ships in the worker image beside boot.sh's stages).
  */
 export const DEVCONTAINER_GATEWAY_DOCKER = "/opt/agentx/packages/worker/ec2/devcontainer-docker.sh";
@@ -932,7 +933,13 @@ export function createDevcontainerCli(options: { dockerPath?: string; environmen
         const { stdout } = await execFile(docker, ["inspect", "--type", "container", containerId], { encoding: "utf8", timeout: DOCKER_CALL_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 });
         const parsed: unknown = JSON.parse(stdout);
         if (!Array.isArray(parsed) || parsed.length !== 1 || parsed[0] === null || typeof parsed[0] !== "object") throw new Error("docker inspect did not describe one container");
-        return parsed[0] as ContainerInspection;
+        const inspection = parsed[0] as ContainerInspection;
+        if (gateway !== undefined) {
+          const source = gatewayResolverMount(inspection, gatewayWorkerDirectory((options.environment ?? process.env).AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace"));
+          if (source === undefined) throw new Error("the dev container has no exact worker-owned read-only gateway resolver mount");
+          await verifyGatewayResolverFile(source, gateway.dns);
+        }
+        return inspection;
       },
       async existing(target) {
         const { stdout } = await execFile(docker, ["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=devcontainer.local_folder=${target.workspaceFolder}`], { encoding: "utf8", timeout: DOCKER_CALL_TIMEOUT_MS });
