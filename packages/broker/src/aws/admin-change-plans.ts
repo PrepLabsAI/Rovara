@@ -22,10 +22,13 @@ import { COMPANY_IMPORT_MEMBERS_MAX, IMPLICIT_COMPANY_ID, companyInviteCodeId, t
 import { resolveAdminCompany } from "./company-check.js";
 import { planCompanyImport, planCompanyImportUndo, type CompanyImportReads } from "./install-company-import.js";
 
+/** Internal reviewed value; null means the operator reviewed an absent binding. */
+export type ReviewedChannelBinding = { projectName: string; updatedAt: string } | null;
+
 export interface AdminChangeHandlers {
   requireAdministrator(identity: AuthenticatedIdentity, project: string): Promise<void>;
-  bindChannel(identity: AuthenticatedIdentity, teamId: string, channelId: string, project: string): Promise<Record<string, unknown>>;
-  unbindChannel(identity: AuthenticatedIdentity, teamId: string, channelId: string): Promise<Record<string, unknown>>;
+  bindChannel(identity: AuthenticatedIdentity, teamId: string, channelId: string, project: string, reviewed?: ReviewedChannelBinding): Promise<Record<string, unknown>>;
+  unbindChannel(identity: AuthenticatedIdentity, teamId: string, channelId: string, reviewed?: ReviewedChannelBinding): Promise<Record<string, unknown>>;
   /**
    * Registration's parse, refusals and vendor preflight for a new revision; stores nothing.
    * `preflight: false` (the re-plan at apply) skips the vendor preflight: its findings are
@@ -194,8 +197,8 @@ const planBind: Planner = async (deps, identity, input, options) => {
   return {
     ...effects(channel, (shown) => `Bind channel ${shown} to project ${input.project}. ${now} New threads in ${shortName(shown)} will use ${input.project} revision ${latest.definition.revision}. Projects: unknown (freshness unknown). Running work: unknown (freshness unknown). Queued work: unknown (freshness unknown). Schedules: unknown (freshness unknown). People: unknown (freshness unknown). Channels: unknown (freshness unknown). Dependency counts are not available from this plan. Keep the current binding until you have checked the replacement channel and its audience. Test the replacement first; this plan does not test replacement routing.`),
     details: { channelId, project: input.project, currentProject: current?.projectName ?? null, revision: latest.definition.revision },
-    snapshot: { binding: current ?? null, latestRevision: latest.definition.revision },
-    apply: (applier) => deps.handlers.bindChannel(applier, teamId, channelId, input.project),
+    snapshot: { teamId, channelId, binding: current ?? null, latestRevision: latest.definition.revision },
+    apply: (applier) => deps.handlers.bindChannel(applier, teamId, channelId, input.project, current ?? null),
   };
 };
 
@@ -210,8 +213,8 @@ const planUnbind: Planner = async (deps, identity, input, options) => {
   return {
     ...effects(channel, (shown) => `Unbind channel ${shown} from project ${current.projectName}. New messages there will get no reply; existing thread workspaces are kept. Retained workspaces do not establish ongoing task permission. Projects: unknown (freshness unknown). Running work: unknown (freshness unknown). Queued work: unknown (freshness unknown). Schedules: unknown (freshness unknown). People: unknown (freshness unknown). Channels: unknown (freshness unknown). Dependency counts are not available from this plan. Keep the current binding while you review dependent work. Test the replacement first; this plan does not test replacement routing.`),
     details: { channelId, project: current.projectName },
-    snapshot: { binding: current },
-    apply: (applier) => deps.handlers.unbindChannel(applier, teamId, channelId),
+    snapshot: { teamId, channelId, binding: current },
+    apply: (applier) => deps.handlers.unbindChannel(applier, teamId, channelId, current),
   };
 };
 

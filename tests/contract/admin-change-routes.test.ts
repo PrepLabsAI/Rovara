@@ -671,7 +671,14 @@ describe("D045 operator impact review", () => {
       const pending = AdminChangePendingRecordSchema.parse(broker.pending(id));
       const message = adminChangeMessage(pending, broker.clock.now());
       expect(message.text.includes(name)).toBe(member);
-      expect(JSON.stringify([(await broker.get(id, "another-admin")).body, (await broker.list()).body, broker.audit(id), pending.effect, pending.details, pending.stateHash])).not.toContain(name);
+      const other = await broker.get(id, "another-admin");
+      const listed = await broker.list();
+      expect(other.status).toBe(200);
+      expect(listed.status).toBe(200);
+      expect(other.body.change).toMatchObject({ changeId: id, status: "pending" });
+      expect(JSON.stringify(listed.body)).toContain(id);
+      expect(broker.audit(id)).toMatchObject({ changeId: id, status: "pending" });
+      expect(JSON.stringify([other.body, listed.body, broker.audit(id), pending.effect, pending.details, pending.stateHash])).not.toContain(name);
       await broker.decline(id);
     }
     const refused = await broker.propose({ kind: "bind_channel", channel: "C0PRIVATE01", project: "payments" });
@@ -692,6 +699,10 @@ describe("D045 operator impact review", () => {
     broker.db.set({ ...revision, pk: `PROJECT#${project}`, definition: { ...revision.definition as object, name: project } });
     const membership = broker.db.find((item) => item.entityType === "MEMBERSHIP" && item.role === "administrator")[0]!;
     broker.db.set({ ...membership, sk: `PROJECT#${project}`, projectName: project });
+    const previousProject = AgentXNameSchema.parse(`old-${"p".repeat(59)}`);
+    broker.db.set({ ...revision, pk: `PROJECT#${previousProject}`, definition: { ...revision.definition as object, name: previousProject } });
+    broker.db.set({ ...membership, sk: `PROJECT#${previousProject}`, projectName: previousProject });
+    await bindChannel(broker.handler, "C0PRIVATE01", previousProject);
     await bindChannel(broker.handler, "C0LEDGER01", project);
     for (const kind of ["bind_channel", "unbind_channel"] as const) {
       const input = kind === "bind_channel" ? { kind, channel: "C0PRIVATE01", project } : { kind, channel: "C0LEDGER01" };
@@ -710,7 +721,13 @@ describe("D045 operator impact review", () => {
       assertWarnings(beforeButtons, kind);
       expect(beforeButtons).toContain(hostile ? "&amp;" : channelName);
       for (const block of blocks.filter((block) => block.type === "section")) expect(block.text!.text.length).toBeLessThanOrEqual(3_000);
-      await broker.decline(id);
+      // Full rebind warnings must not truncate the final re-review instruction on drift.
+      const channelId = kind === "bind_channel" ? "C0PRIVATE01" : "C0LEDGER01";
+      const pk = `SLACK_BINDING#${SLACK_TEAM}`, sk = `CHANNEL#${channelId}`;
+      broker.db.set({ ...broker.db.get(pk, sk), updatedAt: "2026-11-20T15:00:00.000Z" });
+      const stale = await broker.apply(id);
+      expect(stale.body.error).toMatchObject({ code: "CHANGE_STALE", message: expect.stringContaining("Ask for the change again if you still want it.") as unknown });
+      expect((stale.body.error as { message: string }).message.length).toBeLessThanOrEqual(1_000);
     }
   });
 });
