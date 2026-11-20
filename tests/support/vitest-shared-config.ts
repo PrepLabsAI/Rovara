@@ -1,5 +1,5 @@
 export const nativeP0Files = [
-  "tests/e2e/project-setup-terminal-authority-fix1.test.ts",
+  "tests/e2e/project-setup-terminal-authority.test.ts",
   "tests/e2e/p0-native-journey.test.ts",
   "tests/e2e/p0-native-journey-5b.test.ts",
   "tests/e2e/runtime-installation-qualification.native.test.ts",

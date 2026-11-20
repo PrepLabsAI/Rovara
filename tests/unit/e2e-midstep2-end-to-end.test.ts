@@ -343,10 +343,10 @@ describe("sign-in capture reads the same things", () => {
   });
 });
 
-describe("the host wires the new reads (static: the host is not started in unit tests; the behaviour is in e2e-midstep2-minifix.test.ts)", () => {
+describe("the host wires the new reads (static: the host is not started in unit tests; the behaviour is in e2e-midstep2-credential-edges.test.ts)", () => {
   it("hands every case context, a signed-out visitor's too, to the wiring (attach, request watch, Set-Cookie) and reads it at case close through it", () => {
     const host = readFileSync(new URL("../../packages/verifier/src/executor/host.ts", import.meta.url), "utf8");
-    // The sequences are exported functions with behaviour tests, and the host's two statements are checked on the syntax tree (e2e-midstep2-minifix.test.ts).
+    // The sequences are exported functions with behaviour tests, and the host's two statements are checked on the syntax tree (e2e-midstep2-credential-edges.test.ts).
     expect(host).toContain("adoptCaseContext({");
     expect(host).toContain("closeCaseContext({");
     expect(host).not.toMatch(/if \(anonymous\) return;/);

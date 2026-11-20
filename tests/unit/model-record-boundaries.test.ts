@@ -49,8 +49,8 @@ describe("TE-F8 has no callers yet", () => {
 
   it("only F8's own tests under tests/ use the modules", () => {
     const users = walk(join(root, "tests")).map(rel).filter((name) => NAMES.test(readFileSync(join(root, name), "utf8")));
-    // #531 round4 test reads F8's planRecording; still no production caller (the walk above covers tests/ only; production callers are refused by the test before).
-    const allowedTests = new Set(["tests/unit/prompt-change-round4.test.ts"]);
+    // #531 detector golden test reads F8's planRecording; still no production caller (the walk above covers tests/ only; production callers are refused by the test before).
+    const allowedTests = new Set(["tests/unit/prompt-change-detect.test.ts"]);
     expect(users.filter((name) => !/^tests\/unit\/model-record-[a-z-]+\.(?:test\.)?ts$/u.test(name) && !allowedTests.has(name))).toEqual([]);
   });
 });
