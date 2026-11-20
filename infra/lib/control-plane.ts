@@ -1154,7 +1154,7 @@ export class ControlPlaneStack extends Stack {
         // DeveloperIdentity already reads the token family (Add to Slack); its directory needs the team's binding, on the State table it otherwise never reads.
         slackCompany.grant("DeveloperIdentity", developerSignIn.function.role!, [slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)]);
         developerSignIn.function.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
-        developerSignIn.function.addEnvironment("STATE_TABLE_NAME", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, state.tableName, "")));
+        // STATE_TABLE_NAME is the sign-in function's own, always the real State table (developer-signin.ts: the company audit write needs it with CompanySignIn on, Slack company mode on or off). The Slack company switch is SLACK_COMPANY_WORKSPACES above, never this variable.
         // The Slack Lambda and the channel API resolve the linked person's company membership on the sign-in table (company-check.ts membershipKey), reads only.
         for (const [id, fn] of [["SlackIngressMembers", slackIngress], ["ChannelApiMembers", channelAdapters.ingress]] as const) {
           slackCompany.grant(id, fn.role!, [slackCompany.stateReads(developerSignIn.table, "ReadCompanyMemberships", ["COMPANY_MEMBER#*"])]);
