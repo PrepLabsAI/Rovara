@@ -260,7 +260,6 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
   if (config.oidcProblem !== undefined) log({ event: "signin.not_configured", method: "oidc", detail: config.oidcProblem });
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(region), { marshallOptions: { removeUndefinedValues: true } });
   const tableName = required(env, "DEVELOPER_SIGNIN_TABLE_NAME");
-  const auditTableName = required(env, "STATE_TABLE_NAME");
   const company = env.COMPANY_SIGNIN === "enabled" ? new CompanySignInStore({ documentClient, tableName, now }) : undefined;
   const readCompanySecret = companySecretReader(secrets);
   const companyJwksFor = remoteJwksCache(undefined, 50);
@@ -274,7 +273,8 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
       now,
     }),
     ...(company === undefined ? {} : { company, companyIssuer: companyIssuerProvider({ store: company, env: config.env, readSecret: readCompanySecret, fetch, jwksFor: companyJwksFor, now }),
-      signInAudit: createCompanySignInAuditWriter({ documentClient, tableName: auditTableName, now }),
+      // The State table is read only with the company layer on (the audit write is its only use here); with the layer off, init needs no STATE_TABLE_NAME.
+      signInAudit: createCompanySignInAuditWriter({ documentClient, tableName: required(env, "STATE_TABLE_NAME"), now }),
       // DEC 254a, 253z: invite codes and self-serve create, only with the company layer.
       // DEC 254zg (a): self-serve create only while the CompanySelfServe switch is on as well (infra/lib/company-signin.ts gives "enabled" only with CompanySignIn on).
       companyInvites: new CompanyInviteStore({ documentClient, tableName, now, company, selfServeAllowed: companySelfServeFromEnvironment(env) }) }),

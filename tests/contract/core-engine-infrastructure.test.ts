@@ -647,7 +647,9 @@ describe("L1a broker environment derivation", () => {
     // #1149: re-pinned. The legacy broker packs its environment (the names parameter /agentx/production/broker-names, AGENTX_SETTINGS with the legacy layout marker, the
     // names parameter's read in its ssm:GetParameters statement); tests/contract/legacy-broker-packed-environment.test.ts proves it boots with the same values.
     // #1148: re-pinned for the core engine in the legacy template (CoreEngine off by default).
-    expect(digest(legacy.toJSON())).toBe("db40b76d280ca162e755c4e3a64a3f7d48e99b6ab457ed4eb05fa70e4b15787a");
+    // SIGNIN-STATE-TABLE: re-pinned for ONE change: the sign-in function's STATE_TABLE_NAME is the plain Ref to State instead of an Fn::If on SlackCompanyModeOn to "" (rule D: with the
+    // old Fn::If put back, the old pin db40b76d... held; the legacy-templates snapshot diff is that one hunk).
+    expect(digest(legacy.toJSON())).toBe("f15083c44efe613e69041046d5daf9b74fe81958ecfb2c20639a30701ab93b99");
   });
 });
 import { createHash } from "node:crypto";

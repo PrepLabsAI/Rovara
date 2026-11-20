@@ -85,7 +85,7 @@ describe("release workflow", () => {
     expect(wf.jobs.npm?.permissions).toEqual({ contents: "read", "id-token": "write" });
   });
 
-  it("builds arm64 images with buildx, pushes a single-manifest image, and cross-checks the registry digest before publishing", async () => {
+  it("builds the images with buildx (the worker for arm64 and amd64, see worker-image-platforms.test.ts), pushes one digest per image, and cross-checks the registry digest before publishing", async () => {
     const wf = await workflow();
     const steps = wf.jobs.images!.steps;
     const buildxIndex = steps.findIndex((s) => s.uses?.startsWith("docker/setup-buildx-action"));
@@ -97,9 +97,10 @@ describe("release workflow", () => {
     const pushStepIndex = steps.findIndex((s) => (s.run ?? "").includes("docker buildx build"));
     expect(buildxIndex).toBeLessThan(pushStepIndex);
 
-    expect(push).toContain("--platform linux/arm64");
-    // Without these, buildx pushes an OCI index (image + attestations), not a single arm64
-    // manifest, and the digest read back would be the index's, not the image's.
+    const workerPlatforms = push.match(/worker\) platforms=([^\s;]+)/)?.[1];
+    expect(workerPlatforms).toBe("linux/arm64,linux/amd64");
+    // Without these, buildx adds attestation entries to the pushed index, and the digest read back would
+    // be the index's, not the image's. With them, the worker's index lists exactly its platforms.
     expect(push).toContain("--provenance=false");
     expect(push).toContain("--sbom=false");
     expect(push).toContain("containerimage.digest");
@@ -139,10 +140,17 @@ describe("release workflow", () => {
     const index = (match: (step: (typeof steps)[number]) => boolean) => steps.findIndex(match);
     const text = (step: (typeof steps)[number]) => step.run ?? "";
     const awsIndex = index((step) => step.uses?.startsWith("aws-actions/configure-aws-credentials") === true);
+    const qemuIndex = index((step) => step.uses?.startsWith("docker/setup-qemu-action") === true);
     const pushIndex = index((step) => step.id === "push");
     // Dependencies, the build and the userns sysctl come before any AWS credential exists, and only when the executor is published.
     const npmIndex = index((step) => text(step).includes("npm ci") && text(step).includes("npm run build"));
     const nodeIndex = index((step) => step.uses?.startsWith("actions/setup-node") === true);
+    expect(qemuIndex).toBeGreaterThanOrEqual(0);
+    expect(steps[qemuIndex]?.with).toEqual({
+      platforms: "amd64",
+      image: "tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0",
+    });
+    expect(qemuIndex).toBeLessThan(awsIndex);
     const sysctlIndex = index((step) => text(step).includes("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"));
     for (const found of [nodeIndex, npmIndex, sysctlIndex]) { expect(found).toBeGreaterThanOrEqual(0); expect(found).toBeLessThan(awsIndex); expect(steps[found]!.if).toBe("vars.AGENTX_PUBLISH_EXECUTOR_IMAGE == 'true'"); }
     expect(nodeIndex).toBeLessThan(npmIndex);
