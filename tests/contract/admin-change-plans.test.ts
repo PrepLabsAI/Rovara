@@ -46,7 +46,7 @@ describe("binding and unbinding (E7, E12)", () => {
     expect(unbound.effect).toContain("It is bound to nothing today.");
     expect(unbound.effect).toContain("New threads in #ledger-dev will use payments revision 1.");
     expect(unbound.details).toEqual({ channelId: input.channel, project: "payments", currentProject: null, revision: 1 });
-    expect(unbound.snapshot).toEqual({ binding: null, latestRevision: 1 });
+    expect(unbound.snapshot).toEqual({ teamId: SLACK_TEAM, channelId: input.channel, binding: null, latestRevision: 1 });
     const previous = { projectName: "ledger", updatedAt: "2026-11-20T12:00:00.000Z" };
     const membership = db.find((item) => item.entityType === "MEMBERSHIP" && item.role === "administrator")[0]!;
     db.set({ ...membership, sk: "PROJECT#ledger", projectName: "ledger" });
@@ -54,17 +54,17 @@ describe("binding and unbinding (E7, E12)", () => {
     const replacing = await planChange(deps, identity, input);
     expect(replacing.effect).toContain("It is bound to ledger today; its existing threads keep their workspaces.");
     expect(replacing.details).toEqual({ channelId: input.channel, project: "payments", currentProject: "ledger", revision: 1 });
-    expect(replacing.snapshot).toEqual({ binding: previous, latestRevision: 1 });
+    expect(replacing.snapshot).toEqual({ teamId: SLACK_TEAM, channelId: input.channel, binding: previous, latestRevision: 1 });
     expect(stateHash(replacing.snapshot)).not.toBe(stateHash(unbound.snapshot));
     const revision = db.find((item) => item.pk === "PROJECT#payments" && String(item.sk).startsWith("REV#"))[0]!;
     db.set({ ...revision, sk: "REV#000000000002", definition: { ...revision.definition as object, revision: 2 } });
     const latest = await planChange(deps, identity, input);
     expect(latest.effect).toContain("payments revision 2.");
-    expect(latest.snapshot).toEqual({ binding: previous, latestRevision: 2 });
+    expect(latest.snapshot).toEqual({ teamId: SLACK_TEAM, channelId: input.channel, binding: previous, latestRevision: 2 });
     expect(stateHash(latest.snapshot)).not.toBe(stateHash(replacing.snapshot));
     const unbind = await planChange(deps, identity, { kind: "unbind_channel", channel: input.channel });
     expect(unbind.details).toEqual({ channelId: input.channel, project: "ledger" });
-    expect(unbind.snapshot).toEqual({ binding: previous });
+    expect(unbind.snapshot).toEqual({ teamId: SLACK_TEAM, channelId: input.channel, binding: previous });
     expect(unbind.effect).toContain("Unbind channel #ledger-dev (C0LEDGER01) from project ledger.");
     expect(unbind.effect).toContain("New messages there will get no reply; existing thread workspaces are kept.");
     for (const plan of [unbound, replacing, latest, unbind]) {
@@ -101,14 +101,15 @@ describe("binding and unbinding (E7, E12)", () => {
     const bind = vi.spyOn(deps.handlers, "bindChannel");
     const unbind = vi.spyOn(deps.handlers, "unbindChannel");
     const plannedBind = await planChange(deps, identity, { kind: "bind_channel", channel: "C0LEDGER01", project: "payments" });
+    const reviewed = db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)!;
     const plannedUnbind = await planChange(deps, identity, { kind: "unbind_channel", channel: SLACK_CHANNEL });
     expect(bind).not.toHaveBeenCalled();
     expect(unbind).not.toHaveBeenCalled();
     await plannedBind.apply(identity);
-    expect(bind).toHaveBeenCalledExactlyOnceWith(identity, SLACK_TEAM, "C0LEDGER01", "payments");
+    expect(bind).toHaveBeenCalledExactlyOnceWith(identity, SLACK_TEAM, "C0LEDGER01", "payments", null);
     expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, "CHANNEL#C0LEDGER01")).toMatchObject({ projectName: "payments" });
     await plannedUnbind.apply(identity);
-    expect(unbind).toHaveBeenCalledExactlyOnceWith(identity, SLACK_TEAM, SLACK_CHANNEL);
+    expect(unbind).toHaveBeenCalledExactlyOnceWith(identity, SLACK_TEAM, SLACK_CHANNEL, { projectName: "payments", updatedAt: reviewed.updatedAt });
     expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)).toBeUndefined();
   });
 

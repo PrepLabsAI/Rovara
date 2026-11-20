@@ -292,7 +292,7 @@ import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
 import { outcomeMetric } from "./admin-change-audit.js";
 import { pressAdminChange, routeAdminChange, type AdminChangeDependencies } from "./admin-changes.js";
-import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans.js";
+import type { AdminChangeHandlers, PlanDependencies, ReviewedChannelBinding } from "./admin-change-plans.js";
 import { ZodError, z } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { recordPrepareFailureEvent } from "./operation-events.js";
@@ -818,8 +818,8 @@ function adminCompanyReader(dependencies: AwsBrokerDependencies): CompanyMembers
 function adminChangeHandlers(dependencies: AwsBrokerDependencies): AdminChangeHandlers {
   return {
     requireAdministrator: (identity, project) => requireAdministrator(dependencies, identity, project),
-    bindChannel: async (identity, teamId, channelId, project) => putSlackBinding(dependencies, identity, teamId, channelId, { projectName: project }),
-    unbindChannel: async (identity, teamId, channelId) => deleteSlackBinding(dependencies, identity, teamId, channelId),
+    bindChannel: async (identity, teamId, channelId, project, reviewed) => putSlackBinding(dependencies, identity, teamId, channelId, { projectName: project }, reviewed),
+    unbindChannel: async (identity, teamId, channelId, reviewed) => deleteSlackBinding(dependencies, identity, teamId, channelId, reviewed),
     checkRevision: async (identity, definitionValue, runtimeBindingValue, options) => {
       if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
       let definition: ProjectDefinition;
@@ -3388,12 +3388,27 @@ function displayName(value: string | undefined): string | undefined {
   } catch { return undefined; }
 }
 
+/** DP-E1-R2: reject reread drift and fence the final write, including reviewed absence.
+ * Only the internal confirmation path supplies this value; direct binding routes keep their contract.
+ */
+function reviewedBindingCondition(reviewed: ReviewedChannelBinding | undefined, current: SlackChannelBinding | undefined) {
+  if (reviewed === undefined) return {};
+  if (reviewed === null ? current !== undefined : current?.projectName !== reviewed.projectName || current.updatedAt !== reviewed.updatedAt) {
+    throw agentXError("CHANGE_STALE", "The channel binding changed after review; ask for the change again to review its current binding.");
+  }
+  return reviewed === null
+    ? { ConditionExpression: "attribute_not_exists(pk)" }
+    : { ConditionExpression: "projectName = :reviewedProject AND updatedAt = :reviewedAt",
+      ExpressionAttributeValues: { ":reviewedProject": reviewed.projectName, ":reviewedAt": reviewed.updatedAt } };
+}
+
 async function putSlackBinding(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   teamIdValue: string,
   channelIdValue: string,
   value: unknown,
+  reviewed?: ReviewedChannelBinding,
 ): Promise<{ binding: SlackChannelBinding; latestRevision: number }> {
   const input = object(value, "Slack channel binding");
   // Older CLIs still send projectRevision; the binding follows the project's latest revision instead.
@@ -3413,11 +3428,18 @@ async function putSlackBinding(
   if (existing && existing.projectName !== binding.projectName) {
     await requireAdministrator(dependencies, identity, existing.projectName);
   }
+  const condition = reviewedBindingCondition(reviewed, existing);
   const latest = await requireLatestProject(dependencies, binding.projectName);
-  await dependencies.documentClient.send(new PutCommand({
-    TableName: dependencies.tableName,
-    Item: { ...slackChannelBindingKeyFor(named, binding.teamId, binding.channelId), ...channelBindingAttributes(channelBindingFromSlack(binding)), updatedBy: identity.ownerKey },
-  }));
+  try {
+    await dependencies.documentClient.send(new PutCommand({
+      TableName: dependencies.tableName,
+      Item: { ...slackChannelBindingKeyFor(named, binding.teamId, binding.channelId), ...channelBindingAttributes(channelBindingFromSlack(binding)), updatedBy: identity.ownerKey },
+      ...condition,
+    }));
+  } catch (error) {
+    if (reviewed === undefined || !isConditional(error)) throw error;
+    throw agentXError("CHANGE_STALE", "The channel binding changed after review; ask for the change again to review its current binding.");
+  }
   return { binding, latestRevision: latest.definition.revision };
 }
 
@@ -3426,17 +3448,25 @@ async function deleteSlackBinding(
   identity: AuthenticatedIdentity,
   teamIdValue: string,
   channelIdValue: string,
+  reviewed?: ReviewedChannelBinding,
 ): Promise<{ deleted: true; binding: SlackChannelBinding }> {
   const teamId = SlackTeamIdSchema.parse(decodeURIComponent(teamIdValue));
   const channelId = SlackChannelIdSchema.parse(decodeURIComponent(channelIdValue));
   const binding = await getSlackBinding(dependencies, teamId, channelId);
+  const condition = reviewedBindingCondition(reviewed, binding);
   if (!binding) throw agentXError("NOT_FOUND", "Slack channel binding not found");
   await requireAdministrator(dependencies, identity, binding.projectName);
   // DEC 254zzz80 (R2-F1): the row the read found: a NAMED company's own (its binding carries companyId), else the legacy one.
-  await dependencies.documentClient.send(new DeleteCommand({
-    TableName: dependencies.tableName,
-    Key: slackChannelBindingKeyFor((binding as { companyId?: string }).companyId, teamId, channelId),
-  }));
+  try {
+    await dependencies.documentClient.send(new DeleteCommand({
+      TableName: dependencies.tableName,
+      Key: slackChannelBindingKeyFor((binding as { companyId?: string }).companyId, teamId, channelId),
+      ...condition,
+    }));
+  } catch (error) {
+    if (reviewed === undefined || !isConditional(error)) throw error;
+    throw agentXError("CHANGE_STALE", "The channel binding changed after review; ask for the change again to review its current binding.");
+  }
   return { deleted: true, binding };
 }
 
