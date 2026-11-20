@@ -1,10 +1,10 @@
 // CDK synth tests take more than 10 s under a loaded full gate (three gates hit it in phase 15e), so
 // the default test timeout leaves room for them (final review M4).
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import config from "../../vitest.config.js";
 import nativeP0Config from "../../vitest.native-p0.config.js";
 import nightlyConfig from "../../vitest.nightly.config.js";
-import { nativeP0Files, nightlyOnlyFiles } from "../support/vitest-shared-config.js";
+import { nativeP0Files, nightlyOnlyFiles, postDeployFiles } from "../support/vitest-shared-config.js";
 
 describe("the test runner's configuration", () => {
   it("gives every test, CDK synths included, 60 seconds", () => {
@@ -24,8 +24,25 @@ describe("the test runner's configuration", () => {
     // #1236: the detectors' growth check runs nightly, and in a pull request only when the change reaches it.
     expect(nightlyOnlyFiles).toContain("tests/unit/worker-env-detect-growth.test.ts");
     expect(config.test?.exclude).toEqual(expect.arrayContaining(nightlyOnlyFiles));
-    expect(nightlyConfig.test?.include).toEqual(nightlyOnlyFiles);
+    expect(nightlyConfig.test?.include).toEqual([...nightlyOnlyFiles, ...postDeployFiles]);
     expect(nightlyConfig.test?.passWithNoTests).toBe(false);
     expect(nightlyConfig.test?.globalSetup).toEqual(config.test?.globalSetup);
+  });
+
+  // #1242: the integration journeys that belong after a beta environment never run on code merge, not even in an affected run.
+  it("leaves the post-deploy journeys out of every pull request and push run, affected runs included, and runs them nightly", async () => {
+    expect(postDeployFiles).toContain("tests/integration/slack-workflow-e2e.test.ts");
+    expect(config.test?.exclude).toEqual(expect.arrayContaining(postDeployFiles));
+    const previous = process.env.ROVARA_NIGHTLY_TESTS;
+    process.env.ROVARA_NIGHTLY_TESTS = "1";
+    try {
+      vi.resetModules();
+      const affected = (await import("../../vitest.config.js")).default;
+      expect(affected.test?.exclude).toEqual(expect.arrayContaining(postDeployFiles));
+      expect(affected.test?.exclude).not.toEqual(expect.arrayContaining(nightlyOnlyFiles));
+    } finally {
+      if (previous === undefined) delete process.env.ROVARA_NIGHTLY_TESTS; else process.env.ROVARA_NIGHTLY_TESTS = previous;
+    }
+    expect(nightlyConfig.test?.include).toEqual(expect.arrayContaining(postDeployFiles));
   });
 });

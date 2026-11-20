@@ -18,6 +18,13 @@ export const nightlyOnlyFiles = [
   "tests/unit/worker-env-detect-growth.test.ts",
 ];
 
+// #1242: integration journeys that belong after a deployed beta environment in the release pipeline, not on code merge. Until that stage exists they
+// run only in CI's nightly job: unlike nightlyOnlyFiles, no pull request or push run includes them, not even when the change reaches them.
+// slack-workflow-e2e: 32 Slack-to-draft-pull-request journeys in one process (about 115 s).
+export const postDeployFiles = [
+  "tests/integration/slack-workflow-e2e.test.ts",
+];
+
 export const sharedVitestSettings = {
   coverage: { enabled: false },
   globalSetup: ["tests/support/test-temp-dir.ts"] as string[],
