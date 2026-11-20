@@ -13,7 +13,7 @@ import {
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 import { NAT_EGRESS_ADDRESSES_OUTPUT } from "@agentx/contracts";
-import { AgentDnsFirewall, EGRESS_ALLOW_DOMAINS_CONTEXT_KEY, installAgentAllowDomains, parseExtraAllowDomains } from "./agent-dns-firewall.js";
+import { AgentDnsFirewall, DNS_FIREWALL_CONTEXT_KEY, EGRESS_ALLOW_DOMAINS_CONTEXT_KEY, dnsFirewallMode, installAgentAllowDomains, parseExtraAllowDomains } from "./agent-dns-firewall.js";
 import { EgressAlarms, alertsTopicFromName } from "./egress-alarms.js";
 import { Ec2WorkerFoundation } from "./ec2-workers.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
@@ -218,19 +218,24 @@ export class ProductionFoundationStack extends Stack {
       instanceType: configuration.instanceType,
     });
 
-    // Named environments: the machines in the VPC resolve only an allowlist, and unusual egress raises an alarm. The legacy production template stays as it is.
-    if (naming.env !== undefined) {
+    // The machines in the VPC resolve only an allowlist, and unusual egress raises an alarm. A named environment always has it (block by default). The legacy production install
+    // gets it only when asked (`-c agentxDnsFirewall=watch|block`, owner 2026-11-20); absent, its template stays as it is. It then uses its own names (agentx-production-*,
+    // /agentx/production/dns-firewall) and its existing operator alerts topic.
+    const firewallMode = dnsFirewallMode(this.node.tryGetContext(DNS_FIREWALL_CONTEXT_KEY), naming.env === undefined);
+    if (firewallMode !== "off") {
+      const firewallEnv = naming.env ?? naming.environmentTagValue;
       const baseAllowDomains = installAgentAllowDomains(props.deploymentRegion, Aws.ACCOUNT_ID);
       const dnsFirewall = new AgentDnsFirewall(this, "AgentDnsFirewall", {
-        env: naming.env,
+        env: firewallEnv,
         vpcId: vpc.ref,
         baseAllowDomains,
         extraAllowDomains: parseExtraAllowDomains(this.node.tryGetContext(EGRESS_ALLOW_DOMAINS_CONTEXT_KEY), baseAllowDomains),
+        mode: firewallMode,
       });
       // The project list's id, for whatever keeps the approved project domains on it (the template never owns its contents).
       new CfnOutput(this, "ProjectAllowListId", { value: dnsFirewall.projectAllowListId });
       new EgressAlarms(this, "EgressAlarms", {
-        env: naming.env,
+        env: firewallEnv,
         resourcePrefix: naming.resourcePrefix,
         dnsFirewallLogGroup: dnsFirewall.logGroup,
         natGateways,

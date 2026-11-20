@@ -5,6 +5,21 @@ import { DEFAULT_AGENT_ALLOW_DOMAINS } from "@agentx/contracts";
 // A named environment's DNS firewall: the machines in the install's VPC resolve only an allowlist of websites. Ported from the hosted install's foundation (agentx-<env>-foundation,
 // 0.5.18) with the same construct ids, names and list, so an in-place update of a stack that already has it keeps the live firewall instead of deleting and recreating it.
 
+/**
+ * The CDK context key that switches the firewall and its last rule (owner 2026-11-20). `off`: no firewall (the legacy production install's default, so its template is
+ * unchanged); `watch`: the firewall with its last rule set to ALERT, so a name outside the lists is logged ("would block") but still resolves; `block`: the last rule answers NXDOMAIN
+ * (a named environment's default). Watch first, read what would be blocked from the query log, allow what is legitimate, then block.
+ */
+export const DNS_FIREWALL_CONTEXT_KEY = "agentxDnsFirewall";
+export type DnsFirewallMode = "off" | "watch" | "block";
+/** The mode from the context value: absent is `off` for the legacy production install and `block` for a named environment, which always keeps its firewall. Fixed refusal text. */
+export function dnsFirewallMode(value: unknown, legacyInstall: boolean): DnsFirewallMode {
+  if (value === undefined) return legacyInstall ? "off" : "block";
+  if (value !== "off" && value !== "watch" && value !== "block") throw new Error(`${DNS_FIREWALL_CONTEXT_KEY} must be off, watch or block`);
+  if (value === "off" && !legacyInstall) throw new Error(`${DNS_FIREWALL_CONTEXT_KEY}=off is only for the legacy production install; a named environment keeps its DNS firewall (watch or block)`);
+  return value;
+}
+
 /** The CDK context key holding extra allowed domains, comma separated (for example an internal package registry). */
 export const EGRESS_ALLOW_DOMAINS_CONTEXT_KEY = "agentxEgressAllowDomains";
 
@@ -115,6 +130,8 @@ export interface AgentDnsFirewallProps {
   baseAllowDomains: readonly string[];
   /** Allowed in addition to the base list. */
   extraAllowDomains?: readonly string[];
+  /** The last rule: `block` (default) answers NXDOMAIN; `watch` only logs the name (ALERT) and lets it resolve. */
+  mode?: "watch" | "block";
 }
 
 /**
@@ -157,7 +174,9 @@ export class AgentDnsFirewall extends Construct {
         // An allowed name may CNAME to a CDN name not on the list (auth.docker.io -> *.cdn.cloudflare.net); trust the chain only for names this rule already allowed.
         { action: "ALLOW", priority: 100, firewallDomainListId: allowList.attrId, firewallDomainRedirectionAction: "TRUST_REDIRECTION_DOMAIN" },
         { action: "ALLOW", priority: 150, firewallDomainListId: projectAllowList.attrId, firewallDomainRedirectionAction: "TRUST_REDIRECTION_DOMAIN" },
-        { action: "BLOCK", blockResponse: "NXDOMAIN", priority: 200, firewallDomainListId: blockList.attrId },
+        props.mode === "watch"
+          ? { action: "ALERT", priority: 200, firewallDomainListId: blockList.attrId }
+          : { action: "BLOCK", blockResponse: "NXDOMAIN", priority: 200, firewallDomainListId: blockList.attrId },
       ],
     });
     new resolver.CfnFirewallRuleGroupAssociation(this, "Association", {
