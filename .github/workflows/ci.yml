@@ -233,22 +233,35 @@ jobs:
       - name: Unpack the build output
         run: tar -xzf "$RUNNER_TEMP/build-output/build-output.tgz"
       # #1200: CodeBuild runs the job as root, and root can write to any file, so the tests that prove a read-only git directory is refused as writable cannot
-      # pass as root. As the release does (scripts/release-common.ts runTests), the tests then run as an unprivileged account (65534) that owns the checkout;
-      # root keeps working in it (safe.directory, in this throwaway container only). On GitHub's runner (not root) this does nothing and AS_TESTER stays empty.
+      # pass as root. As the release does (scripts/release-common.ts runTests, testEnvironment), the tests then run as an unprivileged account (65534) that owns
+      # the checkout, in an environment like a GitHub runner's: a short HOME and TMPDIR under /tmp (Unix socket paths stay under about 108 bytes, and the spool's
+      # directory ancestry is root-owned and sticky), only the PATH directories that account can enter (a missing command is ENOENT, not EACCES), no AWS_* or
+      # npm_* variables (CodeBuild's credential endpoint would make the worker refuse to start, and the tests need no AWS access), and a step summary it can
+      # write. Root keeps working in the checkout (safe.directory, in this throwaway container only). On GitHub's runner (not root) this does nothing and
+      # AS_TESTER stays empty.
       - name: Run the tests as an ordinary account (CodeBuild only)
         run: |
           if [ "$(id -u)" != 0 ]; then exit 0; fi
           git config --global --add safe.directory '*'
-          home="$RUNNER_TEMP/tester-home"
-          mkdir -p "$home/tmp"
-          chown -R 65534:65534 "$GITHUB_WORKSPACE" "$home"
-          # Every directory above the checkout, the tester's home and Node must be enterable by that account.
-          for path in "$GITHUB_WORKSPACE" "$home" "$(dirname "$(command -v node)")" "$RUNNER_TEMP/gitleaks-bin"; do
+          as="setpriv --reuid=65534 --regid=65534 --clear-groups"
+          mkdir -p /tmp/h /tmp/t
+          chown 65534:65534 /tmp/h /tmp/t
+          chmod 700 /tmp/h /tmp/t
+          touch /tmp/h/step-summary.md && chown 65534:65534 /tmp/h/step-summary.md
+          chown -R 65534:65534 "$GITHUB_WORKSPACE"
+          # Every directory above the checkout, Node and gitleaks must be enterable by that account.
+          for path in "$GITHUB_WORKSPACE" "$(dirname "$(command -v node)")" "$RUNNER_TEMP/gitleaks-bin"; do
             while [ "$path" != / ]; do chmod o+x "$path"; path="$(dirname "$path")"; done
           done
           chmod o+r "$RUNNER_TEMP"/*.txt 2>/dev/null || true
-          echo "AS_TESTER=setpriv --reuid=65534 --regid=65534 --clear-groups env HOME=$home TMPDIR=$home/tmp" >> "$GITHUB_ENV"
-          echo "available parallelism: $(node -p 'require("os").availableParallelism()'), memory: $(free -g | awk '/Mem:/{print $2}') GB"
+          tester_path=""
+          IFS=: read -ra dirs <<< "$PATH"
+          for dir in "${dirs[@]}"; do
+            if [ -n "$dir" ] && $as test -x "$dir"; then tester_path="${tester_path:+$tester_path:}$dir"; fi
+          done
+          unset_vars="$(env | grep -oiE '^(aws|npm)_[a-z0-9_]*' | sort -u | sed 's/^/-u /' | tr '\n' ' ')"
+          echo "AS_TESTER=$as env $unset_vars HOME=/tmp/h TMPDIR=/tmp/t PATH=$tester_path GITHUB_STEP_SUMMARY=/tmp/h/step-summary.md" >> "$GITHUB_ENV"
+          echo "available parallelism: $(node -p 'require("os").availableParallelism()'), memory: $(free -g | awk '/Mem:/{print $2}') GB; unset: $unset_vars"
       - name: Tests (the whole suite)
         if: needs.plan.outputs.tests == 'all'
         run: $AS_TESTER npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
@@ -495,8 +508,9 @@ jobs:
           node-version-file: .node-version
       - name: Install gitleaks 8.30.1 (checksum pinned)
         run: |
-          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
-          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -
+          if [ "$(uname -m)" = aarch64 ]; then arch=arm64; sum=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080; else arch=x64; sum=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb; fi
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_${arch}.tar.gz"
+          echo "${sum}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -
           mkdir "$RUNNER_TEMP/gitleaks-bin"
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
           echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"

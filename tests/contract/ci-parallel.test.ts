@@ -95,7 +95,10 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(order.indexOf(asTester.name!)).toBeGreaterThan(order.indexOf("Unpack the build output"));
     expect(order.indexOf(asTester.name!)).toBeLessThan(order.findIndex((name) => name.startsWith("Tests (")));
     expect(asTester.run).toContain('if [ "$(id -u)" != 0 ]; then exit 0; fi');
-    expect(asTester.run).toContain("AS_TESTER=setpriv --reuid=65534 --regid=65534 --clear-groups");
+    expect(asTester.run).toContain('as="setpriv --reuid=65534 --regid=65534 --clear-groups"');
+    // A GitHub runner's environment: short HOME and TMPDIR (socket paths), enterable PATH only, no AWS_* or npm_* variables, a writable step summary.
+    expect(asTester.run).toContain('echo "AS_TESTER=$as env $unset_vars HOME=/tmp/h TMPDIR=/tmp/t PATH=$tester_path GITHUB_STEP_SUMMARY=/tmp/h/step-summary.md" >> "$GITHUB_ENV"');
+    expect(asTester.run).toContain("grep -oiE '^(aws|npm)_[a-z0-9_]*'");
     const gitleaks = test.steps.find((step) => step.name === "Install gitleaks 8.30.1 (checksum pinned)")!;
     expect(gitleaks.run).toContain("gitleaks_8.30.1_linux_${arch}.tar.gz");
     // Every other job stays on GitHub's runners.
