@@ -242,14 +242,14 @@ describe("agentx init --ui", () => {
     expect(await h.run(["--ui", "--stop-after", "prerequisites"], { openBrowser: operator.open, github })).toBe(0);
     await operator.settled();
     const plans = operator.states.map((state) => state.plan).filter((plan): plan is WizardPlan => plan !== undefined);
-    expect(plans[0]?.sections[1]?.lines[0]).toContain("\"AgentX acme (staging)\" owned by acme.");
-    expect(plans.at(-1)?.sections[1]?.lines[0]).toContain("\"AgentX acme-labs (staging)\" owned by acme-labs.");
+    expect(plans[0]?.sections[1]?.lines[0]).toContain("\"Rovara acme (staging)\" owned by acme.");
+    expect(plans.at(-1)?.sections[1]?.lines[0]).toContain("\"Rovara acme-labs (staging)\" owned by acme-labs.");
     const second = operator.states.map((state) => state.question).filter((question) => question?.text === "Your settings")[1];
     expect(second?.fields?.find((field) => field.name === "email")?.value).toBe(ADMIN_EMAIL);
     expect(second?.fields?.find((field) => field.name === "alertEmail")?.value).toBe("ops@example.com");
     expect(second?.fields?.find((field) => field.name === "appName")?.value).toBe("");
     const answers = JSON.parse(h.store.values.get(installAnswersParameterName("staging")) ?? "{}") as InitAnswers;
-    expect(answers.github).toEqual({ account: "acme-labs", accountType: "organization", appName: "AgentX acme-labs (staging)" });
+    expect(answers.github).toEqual({ account: "acme-labs", accountType: "organization", appName: "Rovara acme-labs (staging)" });
   });
 
   it("FR-020: a new install name is the install's name from then on, and a used one is refused", async () => {

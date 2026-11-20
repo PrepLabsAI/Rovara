@@ -1,7 +1,7 @@
 // The one citation check (W1, DEC 254z-amend): code re-reads every place a model says a statement came from, after the model has answered, and decides whether the quote is really there.
 // A model can write a quote that is not in the file, a line that is not near it, or a file that does not exist; the agent that cited it could also have written its own workspace. So the
 // cited file is read again through the caller's reader (the project's code host at a commit, never a working tree the agent could write), and the quote must sit within
-// `CITATION_LINE_SLACK` lines of the cited line.
+// `CITATION_LINE_SLACK` lines of the cited line. Setup/plain citations may instead use a unique quote in the whole committed file; prose stays local.
 //
 // Used by:
 //   - the setup agent's proposal re-read (setup-agent/proposal-verify.ts): `citationHolds`, `usableQuoteOf`, `readCitedFiles` and the reader type, with its own item rules on top;
@@ -22,7 +22,7 @@ import { inertLine } from "../proof/inert-text.js";
 /** Reads a file at a commit in one of the project's repositories: undefined when the file is not there; throws when the code host cannot answer. It must refuse a repository that is not the project's. */
 export type CitationFileReader = (repository: string, path: string, commit: string, options: { untilLine?: number; timeoutMs: number }) => Promise<string | undefined>;
 
-/** How many lines either side of the cited line the quote may be on. Models are off by a line or two; a wider window would let a quote match anywhere. */
+/** How many lines either side of the cited line allow a quote without requiring whole-file uniqueness. Prose always uses this window. */
 export const CITATION_LINE_SLACK = 3;
 /** The shortest quote (whitespace collapsed) that can show anything. A one-word quote is in nearly every file. */
 export const CITATION_QUOTE_MIN_CHARS = 8;
@@ -40,20 +40,59 @@ export function usableQuoteOf(citation: { quote?: string | undefined }): string 
 
 /**
  * Whether a file's text supports a citation: the citation has a usable quote (a citation with none holds nothing), the line exists, and the quote (whitespace collapsed) is within
- * `CITATION_LINE_SLACK` lines of it, or anywhere in the file when no line is named.
+ * `CITATION_LINE_SLACK` lines of it, or occurs exactly once in the whole file outside comment lines, preserving multiline quote boundaries. With no line, the quote may appear anywhere.
+ * Callers must supply the whole committed file and separately check that quotes support their proposed values as whole tokens.
  */
-export function citationHolds(text: string, citation: { line?: number | undefined; quote?: string | undefined }): boolean {
+export function citationHolds(text: string, citation: { line?: number | undefined; quote?: string | undefined; path?: string | undefined }): boolean {
   const wanted = usableQuoteOf(citation);
   if (wanted === undefined) return false;
   const lines = text.split(/\r\n|\r|\n/u);
   if (citation.line !== undefined && citation.line > lines.length) return false;
   if (citation.line === undefined) return collapseWhitespace(text).includes(wanted);
-  const from = Math.max(0, citation.line - 1 - CITATION_LINE_SLACK);
-  const window = lines.slice(from, citation.line + CITATION_LINE_SLACK).join("\n");
-  return collapseWhitespace(window).includes(wanted);
+  if (quoteInWindow(lines, citation.line, wanted)) return true;
+  const whole = collapseWhitespace(text);
+  const first = whole.indexOf(wanted);
+  // Advance one character, rather than the quote length, so overlapping occurrences count too.
+  if (first === -1 || whole.indexOf(wanted, first + 1) !== -1) return false;
+  // Preserve line boundaries for multiline fallback quotes. The original local window still collapses all whitespace.
+  const quoteLines = citation.quote!.split(/\r\n|\r|\n/u).map(collapseWhitespace);
+  if (quoteLines.length > 1 && !lines.map(collapseWhitespace).join("\n").includes(quoteLines.join("\n"))) return false;
+  // Locate every source line contributing to the unique collapsed match, including a clipped first line.
+  let offset = 0;
+  for (const line of lines) {
+    const normalised = collapseWhitespace(line);
+    if (normalised === "") continue;
+    if (offset > 0) offset += 1;
+    const end = offset + normalised.length;
+    if (offset < first + wanted.length && end > first && isCommentLine(line, citation.path)) return false;
+    offset = end;
+  }
+  return true;
 }
 
-/** How far a citation needs its file read: through the cited line and the margin after it, or the whole file when no line is named. */
+/** Comment syntax is file-specific; unknown types conservatively recognise all listed comment prefixes. */
+function isCommentLine(line: string, path: string | undefined): boolean {
+  const name = path?.split("/").at(-1)?.toLowerCase() ?? "";
+  const extension = name.split(".").at(-1) ?? "";
+  let markers: readonly string[];
+  if (["yml", "yaml", "sh", "bash", "zsh", "fish", "toml", "py", "rb", "ps1"].includes(extension) || ["dockerfile", "makefile"].includes(name)) markers = ["#"];
+  else if (["ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "jsonc", "c", "h", "cpp", "hpp", "java", "go", "rs", "cs", "swift", "kt"].includes(extension)) markers = ["//", "/*", "*"];
+  else if (["css", "scss"].includes(extension)) markers = ["/*", "*"];
+  else if (["ini", "cfg", "conf"].includes(extension)) markers = ["#", ";"];
+  else if (extension === "sql") markers = ["--", "/*", "*"];
+  else if (["html", "htm", "xml", "md", "markdown"].includes(extension)) markers = ["<!--"];
+  else markers = ["#", "//", ";", "--", "/*", "*", "<!--"];
+  return markers.some((marker) => line.trimStart().startsWith(marker));
+}
+
+/** The strict prose match, kept separate from the setup/plain whole-file fallback. */
+function quoteInWindow(lines: readonly string[], line: number, wanted: string): boolean {
+  if (line > lines.length) return false;
+  const from = Math.max(0, line - 1 - CITATION_LINE_SLACK);
+  return collapseWhitespace(lines.slice(from, line + CITATION_LINE_SLACK).join("\n")).includes(wanted);
+}
+
+/** How far a strict prose citation needs its file read: through the cited line and the margin after it, or the whole file when no line is named. */
 export function untilLineOf(citation: { line?: number | undefined }): number | undefined {
   return citation.line === undefined ? undefined : citation.line + CITATION_LINE_SLACK + 1;
 }
@@ -252,7 +291,7 @@ export function shownCitation(citation: CitationRef): ShownCitation {
 /**
  * Re-reads every citation through `read` and returns one result per citation, in order. Never throws. A source is found only when the citation's repository is bound to exactly its commit,
  * its path is safe, it has a usable quote (in prose: a line and a quote of at least `PROSE_QUOTE_MIN_CHARS`), its file was read within the limits, and the quote is within
- * `CITATION_LINE_SLACK` lines of its line (in plain mode, anywhere when it names none).
+ * `CITATION_LINE_SLACK` lines of its line (in plain mode, anywhere when it names none; never the whole-file fallback).
  */
 export async function checkCitations(read: CitationFileReader | undefined, citations: readonly CitationRef[], options: CitationCheckOptions): Promise<CitationCheck> {
   const prose = (options.mode ?? "prose") !== "plain";
@@ -305,7 +344,9 @@ export async function checkCitations(read: CitationFileReader | undefined, citat
     if (found.kind === "missing") return { outcome: "source_not_found", reason: "file_missing", shown };
     // A reader that answers with something that is not text (a Buffer, say) did not finish the read.
     if (typeof found.text !== "string") return { outcome: "unreadable", reason: "read_failed", shown };
-    return citationHolds(found.text, citation) ? { outcome: "source_found", shown } : { outcome: "source_not_found", reason: "quote_not_at_line", shown };
+    // checkCitations never uses citationHolds' whole-file fallback (that is for setup COMMAND items only, via proposal-verify).
+    const holds = citation.line === undefined ? collapseWhitespace(found.text).includes(usableQuoteOf(citation)!) : quoteInWindow(found.text.split(/\r\n|\r|\n/u), citation.line, usableQuoteOf(citation)!);
+    return holds ? { outcome: "source_found", shown } : { outcome: "source_not_found", reason: "quote_not_at_line", shown };
   });
   return { results, complete: results.every((result) => result.outcome !== "unreadable") };
 }

@@ -19,8 +19,8 @@ const everyFlag: InitFlags = {
   permissionBoundary: "", operatorPrincipal: "",
   alertEmail: "ops@example.com",
   budget: "0",
-  githubAccount: "acme", githubAccountType: "organization", githubAppName: "AgentX acme (staging)",
-  slackAppName: "AgentX acme (staging)", slackAppPostedMessages: "accept",
+  githubAccount: "acme", githubAccountType: "organization", githubAppName: "Rovara acme (staging)",
+  slackAppName: "Rovara acme (staging)", slackAppPostedMessages: "accept",
 };
 
 /** These fixtures intentionally keep an own property whose value is undefined. */
@@ -389,7 +389,7 @@ describe("spec 048 FR-026: app names", () => {
     const env = "abcdefghij-klmnopqrs";
     expect(env.length).toBe(20);
     const name = defaultAppName({ owner, env });
-    expect(name).toBe("AgentX (abcdefghij-klmnopqrs)");
+    expect(name).toBe("Rovara (abcdefghij-klmnopqrs)");
     expect(name.length).toBeLessThanOrEqual(GITHUB_APP_NAME_LIMIT);
 
     const prompter = scriptedPrompter([...settingsScript({ env, owner, advanced: { alertEmail: "ops@example.com" } }), ""]);

@@ -98,7 +98,7 @@ export function slackBotDisplayName(appName: string): string {
 
 export function slackAppManifest(input: { appName: string; eventsUrl: string; interactivityUrl: string; signInCallbackUrl: string; publicInvitations?: boolean; privateInvitations?: boolean }): SlackManifest {
   return {
-    display_information: { name: input.appName, description: "AgentX: ask in Slack, and AgentX works in your repositories and trackers." },
+    display_information: { name: input.appName, description: "Rovara: ask in Slack, and Rovara works in your repositories and trackers." },
     features: { bot_user: { display_name: slackBotDisplayName(input.appName), always_online: true } },
     oauth_config: { redirect_urls: [input.signInCallbackUrl], scopes: { bot: slackBotScopes(input), user: [...SLACK_USER_SCOPES] } },
     settings: {

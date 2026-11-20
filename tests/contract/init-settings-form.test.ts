@@ -49,7 +49,7 @@ describe("the settings form's own checks", () => {
     const { answers } = await collectInitAnswers({ ...base, env: "staging", flags: { slackAppName: "Our Slack AgentX" }, prompter, signinMethods: "both", ownerType: async () => "organization" });
     expect(answers.signinMethods).toBe("both");
     expect(answers.slack.appName).toBe("Our Slack AgentX");
-    expect(answers.github.appName).toBe("AgentX acme (staging)");
+    expect(answers.github.appName).toBe("Rovara acme (staging)");
     expect(prompter.asked).not.toContain("How will developers sign in to AgentX from their AI tools?");
   });
 

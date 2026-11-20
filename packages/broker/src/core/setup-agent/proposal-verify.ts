@@ -1,6 +1,6 @@
 // The broker re-reads every place a setup proposal says a value came from. The worker's copy of a proposal is never trusted, and neither is the
 // model behind it: a model can write a quote that is not in the file, or a file that does not exist. For each file citation (`file`, `ci`, `readme`, `manifest`) the broker reads
-// `repo@commit:path` from the project's code host and checks that the quote is in the file within a few lines of the cited line.
+// `repo@commit:path` from the project's code host and checks that the quote is near the cited line. Only command items may fall back to a unique whole-file quote.
 //
 // "Verified" has to mean that the quoted text SUPPORTS the proposed value, because a verified item for an empty setting is the only thing the page ticks for a person:
 //   - a citation with no quote, or a quote shorter than `VERIFY_QUOTE_MIN_CHARS` (whitespace collapsed), proves nothing about a value: the item is `unchecked`;
@@ -10,12 +10,12 @@
 //
 // An item is
 //   `verified`    every file citation it has was read and holds with a usable quote, and the quotes support the value;
-//   `unverified`  a citation was read and does NOT hold (the file is missing, or the quote is not near that line), or the quotes do not contain the value;
+//   `unverified`  a citation was read and does NOT hold (missing file, missing quote, or an ambiguous quote outside the line window), or the quotes do not contain the value;
 //   `unchecked`   nothing could be shown: no usable quote, an inferred item, the code host could not be asked, or the budget for reads ran out.
 // Only a verified, safe item for an empty setting is pre-ticked on the page. An unverified or unchecked item is still shown, so a person can decide, but never ticked for them.
 //
-// Bounded and fail closed: at most `READS_MAX` distinct files per proposal, a few at a time, within one deadline; whatever is left is `unchecked`. A file is read only up to the
-// cited line (plus a margin), so a huge file costs little. Nothing here ever writes, and no text of a file is kept or returned: only the verdict. Whether a verdict is FINAL
+// Bounded and fail closed: at most `READS_MAX` distinct files per proposal, a few at a time, within one deadline; whatever is left is `unchecked`. Read the cited window first;
+// on a miss, re-read the whole file to establish uniqueness, within the code-host reader's existing byte cap (never a cut prefix). No file text is kept or returned: only the verdict. Whether a verdict is FINAL
 // (so it can be kept on the draft and not read again on every page load) is decided here too: a read that failed or ran out of time is not final; a citation that cannot be read
 // by design (no usable quote, a commit the reader cannot fetch, beyond the budget) is a final `unchecked`.
 import { FILE_PROVENANCE_KINDS, setupItemsOf, type Provenance, type SetupItem, type SetupProposal, type SetupVerification } from "@agentx/contracts";
@@ -66,11 +66,13 @@ function isCheckable(item: SetupItem): boolean {
  * Whether `needle` is in `text` as a whole token: at some hit, the character before passes `beforeOk` (or the hit starts the text) and the text after passes `afterOk` (or the
  * hit ends it). A plain substring test would accept `npm ci` inside `pnpm ci`, `npm cia` or `rm -rf /` inside `rm -rf /tmp/cache`.
  */
-function hasToken(text: string, needle: string, beforeOk: (character: string) => boolean, afterOk: (rest: string) => boolean): boolean {
+type SourceEdges = { before: string | undefined; after: string | undefined };
+
+function hasToken(text: string, needle: string, beforeOk: (character: string) => boolean, afterOk: (rest: string) => boolean, edges?: SourceEdges): boolean {
   if (needle === "") return false;
   for (let from = text.indexOf(needle); from !== -1; from = text.indexOf(needle, from + 1)) {
-    const before = from === 0 ? undefined : text[from - 1]!;
-    const rest = text.slice(from + needle.length);
+    const before = from === 0 ? edges?.before : text[from - 1]!;
+    const rest = text.slice(from + needle.length) || edges?.after || "";
     if ((before === undefined || beforeOk(before)) && (rest === "" || afterOk(rest))) return true;
   }
   return false;
@@ -87,11 +89,14 @@ const endsName = (rest: string, allowGit: boolean): boolean => {
 };
 
 /** Whether the quotes (already shown to be in the files) contain what the item proposes, as whole tokens. Call only for a checkable item whose every file citation holds. */
-function quotesSupport(item: SetupItem, citations: readonly Provenance[]): boolean {
+function quotesSupport(item: SetupItem, citations: readonly Provenance[], sourceEdges: (citation: Provenance) => SourceEdges | undefined): boolean {
   const quotes = citations.map(usableQuoteOf).filter((quote): quote is string => quote !== undefined);
   const has = (needle: string): boolean => {
     const wanted = collapse(needle);
-    return quotes.some((quote) => hasToken(quote, wanted, (character) => COMMAND_EDGE.test(character), (rest) => COMMAND_EDGE.test(rest[0]!)));
+    return citations.some((citation) => {
+      const quote = usableQuoteOf(citation);
+      return quote !== undefined && hasToken(quote, wanted, (character) => COMMAND_EDGE.test(character), (rest) => COMMAND_EDGE.test(rest[0]!), sourceEdges(citation));
+    });
   };
   /** A repository or host name, case-folded: not part of a longer name before it, and ending where a name ends. */
   const hasName = (needle: string, allowGit: boolean): boolean => {
@@ -119,7 +124,19 @@ function quotesSupport(item: SetupItem, citations: readonly Provenance[]): boole
   }
 }
 
+/** Only values checked as whole command tokens may use the offset fallback. Other item kinds retain their original window/name rules. */
+const isCommandItem = (item: SetupItem): boolean => item.kind === "setup" || item.kind === "tests" || item.kind === "check";
+
 type Verdict = "holds" | "fails" | "unread" | "skipped";
+
+/** Test only the original line window, never infer whole-file uniqueness from a prefix. */
+function windowHolds(text: string, citation: Provenance): boolean {
+  if (citation.line === undefined) return citationHolds(text, citation);
+  const lines = text.split(/\r\n|\r|\n/u);
+  if (citation.line > lines.length) return false;
+  const window = lines.slice(Math.max(0, citation.line - 1 - VERIFY_LINE_SLACK), citation.line + VERIFY_LINE_SLACK).join("\n");
+  return citationHolds(window, { quote: citation.quote });
+}
 
 /** What re-reading a proposal found: a verdict per item, and whether every verdict is final (nothing was left unread by a failed read, a timeout or a deadline). */
 export interface ProposalVerification { items: Record<string, SetupVerification>; final: boolean }
@@ -136,7 +153,7 @@ export async function verifyProposalDetailed(
   /** Whether a citation is worth reading: a file citation of a checkable item that has a usable quote and a commit the reader can fetch. */
   const readable = (item: SetupItem, citation: Provenance): boolean => isCheckable(item) && isFileCitation(citation) && usableQuoteOf(citation) !== undefined && READABLE_COMMIT.test(citation.commit ?? "");
 
-  // One read per (repository, commit, path), as far as the deepest line any citation needs.
+  // One initial read per (repository, commit, path), through the deepest cited window.
   const needs = new Map<string, CitedFileNeed>();
   const keyOf = (citation: Provenance) => `${citation.repo!}\0${citation.commit!}\0${citation.path!}`;
   for (const item of items) {
@@ -144,7 +161,6 @@ export async function verifyProposalDetailed(
       if (!readable(item, citation)) continue;
       const key = keyOf(citation);
       const entry = needs.get(key) ?? { repository: citation.repo!, path: citation.path!, commit: citation.commit!, untilLine: 0, whole: false };
-      // A quote with no line needs the whole file; a line needs the text through it and the margin after.
       const until = untilLineOf(citation);
       if (until === undefined) entry.whole = true;
       else entry.untilLine = Math.max(entry.untilLine ?? 0, until);
@@ -152,8 +168,22 @@ export async function verifyProposalDetailed(
     }
   }
 
-  // The shared bounded reader, with this proposal's budget (no byte limits: a file is read only up to the cited line plus the margin).
+  // The shared bounded reader, with this proposal's budget and the code-host reader's existing byte cap.
   const { texts, queued } = await readCitedFiles(read, needs, { maxFiles: VERIFY_READS_MAX, concurrency: VERIFY_CONCURRENCY, readTimeoutMs: VERIFY_READ_TIMEOUT_MS, deadline, now });
+
+  // Only a window miss needs a complete file. Keep initial results so a failed full read cannot invalidate a nearby citation of the same file.
+  const fallbackNeeds = new Map<string, CitedFileNeed>();
+  for (const item of items) {
+    for (const citation of item.proposed.from) {
+      if (!isCommandItem(item) || !readable(item, citation) || citation.line === undefined) continue;
+      const key = keyOf(citation);
+      const found = texts.get(key);
+      if (found?.kind !== "text" || windowHolds(found.text, citation)) continue;
+      const need = needs.get(key)!;
+      if (!need.whole) fallbackNeeds.set(key, { ...need, whole: true, untilLine: undefined });
+    }
+  }
+  const { texts: fallbackTexts } = await readCitedFiles(read, fallbackNeeds, { maxFiles: VERIFY_READS_MAX, concurrency: VERIFY_CONCURRENCY, readTimeoutMs: VERIFY_READ_TIMEOUT_MS, deadline, now });
 
   const verdictOf = (item: SetupItem, citation: Provenance): Verdict => {
     // Not worth a read, by design: it can never be better than unchecked, and reading it again would change nothing.
@@ -164,7 +194,24 @@ export async function verifyProposalDetailed(
     if (found === undefined) return queued.has(key) ? "unread" : "skipped";
     if (found.kind === "unread") return "unread";
     if (found.kind === "missing") return "fails";
-    return citationHolds(found.text, citation) ? "holds" : "fails";
+    if (windowHolds(found.text, citation)) return "holds";
+    if (!isCommandItem(item)) return "fails";
+    const full = needs.get(key)!.whole ? found : fallbackTexts.get(key);
+    if (full === undefined || full.kind === "unread") return "unread";
+    return full.kind === "text" && citationHolds(full.text, citation) ? "holds" : "fails";
+  };
+
+  /** Command matches must stay inside the original quote; source edges only validate a match touching a quote edge, never add evidence. */
+  const sourceEdges = (citation: Provenance): SourceEdges | undefined => {
+    const key = keyOf(citation);
+    const found = texts.get(key);
+    if (found?.kind !== "text" || windowHolds(found.text, citation)) return undefined;
+    const full = needs.get(key)!.whole ? found : fallbackTexts.get(key);
+    if (full?.kind !== "text") return undefined;
+    const wanted = usableQuoteOf(citation)!;
+    const text = collapse(full.text);
+    const at = text.indexOf(wanted);
+    return { before: text[at - 1], after: text[at + wanted.length] };
   };
 
   const result: Record<string, SetupVerification> = {};
@@ -176,7 +223,7 @@ export async function verifyProposalDetailed(
     if (verdicts.includes("fails")) result[item.id] = "unverified";
     else if (verdicts.includes("unread")) { result[item.id] = "unchecked"; final = false; }
     else if (verdicts.includes("skipped")) result[item.id] = "unchecked";
-    else result[item.id] = quotesSupport(item, fileCitations) ? "verified" : "unverified";
+    else result[item.id] = quotesSupport(item, fileCitations, sourceEdges) ? "verified" : "unverified";
   }
   return { items: result, final };
 }
