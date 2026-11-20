@@ -5,9 +5,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import type { ContainerImageAssetMetadataEntry } from "@aws-cdk/cloud-assembly-schema";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { accumulateAsset, assetSignatureMismatch, buildRelease, parseBuildArgs, type PackageAccumulator } from "../../scripts/release/build.js";
-import { ReleaseManifestSchema } from "../../scripts/release/manifest.js";
+import { ReleaseManifestSchema, type ReleaseManifest } from "../../scripts/release/manifest.js";
 import { readZipEntries } from "../support/zip-entries.js";
 
 const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
@@ -15,56 +15,83 @@ const worker = `public.ecr.aws/agentx/agentx-worker@sha256:${"a".repeat(64)}`;
 const executor = `public.ecr.aws/agentx/agentx-executor@sha256:${"c".repeat(64)}`;
 
 describe("release builder", () => {
+  // A release build is a CDK synth of every region plus the packages (about a minute on CI), so the file runs two and every test reads them:
+  // A, an ordinary build, and B, built with a much deeper TMPDIR and from a working directory outside the repository. B must come out byte for byte like A.
+  // (Images go into the manifest only, never into a template or a package.)
+  let a: { out: string; manifest: ReleaseManifest };
+  let b: { manifest: ReleaseManifest; cwdAfter: string; elsewhere: string };
+
+  beforeAll(async () => {
+    const outA = join(await mkdtemp(join(tmpdir(), "agentx-release-")), "r");
+    a = { out: outA, manifest: await buildRelease({ version: "1.2.3", out: outA, gitCommit: "b".repeat(40), images: { worker, executor } }) };
+
+    // The old (buggy) implementation synthesized under os.tmpdir(), which made the number of ".." segments in the bundle's source map (and, because that
+    // changes the bundle's own bytes, the asset id and every downstream checksum) depend on how deep the temp directory sits. And infra/lib/control-plane.ts
+    // resolves each Lambda's `entry` (e.g. "packages/broker/src/aws/broker.ts") with resolve(process.cwd(), entry), so a build from outside the repository
+    // root once failed to find those files at all.
+    const baseOut = await mkdtemp(join(tmpdir(), "agentx-release-tmpdir-check-"));
+    const deepTmp = join(baseOut, "much", "deeper", "nested", "path", "for", "a", "different", "tmpdir");
+    await mkdir(deepTmp, { recursive: true });
+    const elsewhere = await mkdtemp(join(tmpdir(), "agentx-release-elsewhere-"));
+    const originalTmpdir = process.env.TMPDIR;
+    const originalCwd = process.cwd();
+    process.env.TMPDIR = deepTmp;
+    process.chdir(elsewhere);
+    try {
+      const manifest = await buildRelease({ version: "1.2.3", out: join(baseOut, "b"), gitCommit: "b".repeat(40) });
+      b = { manifest, cwdAfter: process.cwd(), elsewhere };
+    } finally {
+      process.chdir(originalCwd);
+      if (originalTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = originalTmpdir;
+    }
+  }, 900_000);
+
   it("writes templates, packages and a manifest whose checksums match the files", async () => {
-    const out = join(await mkdtemp(join(tmpdir(), "agentx-release-")), "r");
-    const manifest = await buildRelease({ version: "1.2.3", out, gitCommit: "b".repeat(40), images: { worker, executor } });
-    expect(ReleaseManifestSchema.parse(JSON.parse(await readFile(join(out, "release.json"), "utf8")))).toEqual(manifest);
-    expect(manifest.legalDocuments?.map((document) => document.file)).toEqual([
+    expect(ReleaseManifestSchema.parse(JSON.parse(await readFile(join(a.out, "release.json"), "utf8")))).toEqual(a.manifest);
+    expect(a.manifest.legalDocuments?.map((document) => document.file)).toEqual([
       "legal/LICENSE",
       "legal/LICENSE-APACHE",
       "legal/RELICENSED.md",
     ]);
     // Every supported region's six parts, region by region (SUPPORTED_REGIONS order).
     const parts = ["access", "foundation", "identity", "runtime", "control-plane", "slack"];
-    expect(manifest.templates.map((t) => [t.region, t.part])).toEqual(["us-east-1", "us-west-2"].flatMap((region) => parts.map((part) => [region, part])));
-    for (const t of manifest.templates) {
+    expect(a.manifest.templates.map((t) => [t.region, t.part])).toEqual(["us-east-1", "us-west-2"].flatMap((region) => parts.map((part) => [region, part])));
+    for (const t of a.manifest.templates) {
       expect(t.file).toBe(`templates/${t.region}/${t.part}.template.json`);
-      expect(sha(await readFile(join(out, t.file)))).toBe(t.sha256);
+      expect(sha(await readFile(join(a.out, t.file)))).toBe(t.sha256);
     }
-    for (const p of manifest.packages) {
-      expect(sha(await readFile(join(out, p.file)))).toBe(p.sha256);
+    for (const p of a.manifest.packages) {
+      expect(sha(await readFile(join(a.out, p.file)))).toBe(p.sha256);
       expect(p.file).toBe(`packages/${p.assetId}.zip`);
       expect(p.keyParameterValue).toBe(`packages/||${p.assetId}.zip`);
     }
-    for (const document of manifest.legalDocuments ?? []) {
-      expect(sha(await readFile(join(out, document.file)))).toBe(document.sha256);
+    for (const document of a.manifest.legalDocuments ?? []) {
+      expect(sha(await readFile(join(a.out, document.file)))).toBe(document.sha256);
     }
     // The release carries both digests: the worker and the browser executor the worker pulls at boot.
-    expect(manifest.images).toEqual({ worker, executor });
-  }, 600_000);
+    expect(a.manifest.images).toEqual({ worker, executor });
+  });
 
   it("covers every asset parameter in every template with exactly one package, and ships no unused package", async () => {
-    const out = join(await mkdtemp(join(tmpdir(), "agentx-release-")), "r");
-    const manifest = await buildRelease({ version: "1.2.3", out, gitCommit: "b".repeat(40) });
-    const declared = new Set(manifest.packages.flatMap((p) => [p.bucketParameter, p.keyParameter, p.hashParameter]));
+    const declared = new Set(a.manifest.packages.flatMap((p) => [p.bucketParameter, p.keyParameter, p.hashParameter]));
     const used = new Set<string>();
-    for (const t of manifest.templates) {
-      const template = JSON.parse(await readFile(join(out, t.file), "utf8")) as { Parameters?: Record<string, unknown> };
+    for (const t of a.manifest.templates) {
+      const template = JSON.parse(await readFile(join(a.out, t.file), "utf8")) as { Parameters?: Record<string, unknown> };
       for (const name of Object.keys(template.Parameters ?? {}).filter((n) => n.startsWith("AssetParameters"))) {
         expect(declared.has(name), `${t.region}/${t.part}: ${name}`).toBe(true);
         used.add(name);
       }
     }
     expect([...declared].filter((n) => !used.has(n))).toEqual([]);
-    expect((await readdir(join(out, "packages"))).sort()).toEqual(manifest.packages.map((p) => `${p.assetId}.zip`).sort());
-  }, 600_000);
+    expect((await readdir(join(a.out, "packages"))).sort()).toEqual(a.manifest.packages.map((p) => `${p.assetId}.zip`).sort());
+  });
 
-  it("refuses a non-empty output directory and a malformed image reference", async () => {
+  it("refuses a non-empty output directory (an existing release) and a malformed image reference", async () => {
+    await expect(buildRelease({ version: "1.2.3", out: a.out, gitCommit: "b".repeat(40) })).rejects.toThrow(/not empty/);
     const dir = await mkdtemp(join(tmpdir(), "agentx-release-"));
-    await buildRelease({ version: "1.2.3", out: join(dir, "r"), gitCommit: "b".repeat(40) });
-    await expect(buildRelease({ version: "1.2.3", out: join(dir, "r"), gitCommit: "b".repeat(40) })).rejects.toThrow(/not empty/);
     await expect(buildRelease({ version: "1.2.3", out: join(dir, "s"), gitCommit: "b".repeat(40), images: { worker: "public.ecr.aws/x/y:latest" } })).rejects.toThrow(/digest/);
-  }, 600_000);
+  });
 
   it("takes the executor image from --executor-image and refuses one that is not pinned by digest", async () => {
     expect(parseBuildArgs(["--version", "1.2.3", "--out", "o", "--worker-image", worker, "--executor-image", executor]).images).toEqual({ worker, executor });
@@ -95,81 +122,40 @@ describe("release builder", () => {
     await expect(readdir(out)).rejects.toThrow();
   }, 600_000);
 
-  it(
-    "is independent of TMPDIR and how deep it is nested, and leaves no absolute path in a package's source map",
-    async () => {
-      const baseOut = await mkdtemp(join(tmpdir(), "agentx-release-tmpdir-check-"));
-      const originalTmpdir = process.env.TMPDIR;
-      try {
-        const outA = join(baseOut, "a");
-        const manifestA = await buildRelease({ version: "1.2.3", out: outA, gitCommit: "b".repeat(40) });
+  it("is independent of TMPDIR and how deep it is nested, and leaves no absolute path in a package's source map", async () => {
+    expect(b.manifest.templates).toEqual(a.manifest.templates);
+    expect(b.manifest.packages).toEqual(a.manifest.packages);
 
-        // Simulate a machine/CI whose ambient temp directory sits at a very different depth from
-        // this one; the old (buggy) implementation synthesized under os.tmpdir(), which made the
-        // number of ".." segments in the bundle's source map (and, because that changes the
-        // bundle's own bytes, the asset id and every downstream checksum) depend on exactly this.
-        const deepTmp = join(baseOut, "much", "deeper", "nested", "path", "for", "a", "different", "tmpdir");
-        await mkdir(deepTmp, { recursive: true });
-        process.env.TMPDIR = deepTmp;
-        const outB = join(baseOut, "b");
-        const manifestB = await buildRelease({ version: "1.2.3", out: outB, gitCommit: "b".repeat(40) });
-
-        expect(manifestB.templates).toEqual(manifestA.templates);
-        expect(manifestB.packages).toEqual(manifestA.packages);
-
-        // The source map itself must carry no absolute path: not the machine's home directory
-        // (however it is arranged), and not this checkout's own absolute path either.
-        const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-        let checkedAny = false;
-        for (const pkg of manifestA.packages) {
-          const zipBuffer = await readFile(join(outA, pkg.file));
-          for (const entry of readZipEntries(zipBuffer)) {
-            if (!entry.name.endsWith(".js.map")) continue;
-            checkedAny = true;
-            // Check only `sources` (the paths esbuild recorded for each original file), not
-            // `sourcesContent` (the original file text, embedded verbatim): that text is free-form
-            // source code and could legitimately contain a string that looks like an absolute path,
-            // e.g. in a comment or a string literal, without that being the bug this test guards.
-            const sourceMap = JSON.parse(entry.data.toString("utf8")) as { sources?: unknown };
-            const sources = Array.isArray(sourceMap.sources) ? (sourceMap.sources as unknown[]).join("\n") : "";
-            expect(sources).not.toMatch(/\/Users\//);
-            expect(sources).not.toMatch(/\/home\//);
-            expect(sources.includes(repoRoot)).toBe(false);
-          }
-        }
-        expect(checkedAny).toBe(true);
-      } finally {
-        if (originalTmpdir === undefined) delete process.env.TMPDIR;
-        else process.env.TMPDIR = originalTmpdir;
+    // The source map itself must carry no absolute path: not the machine's home directory
+    // (however it is arranged), and not this checkout's own absolute path either.
+    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+    let checkedAny = false;
+    for (const pkg of a.manifest.packages) {
+      const zipBuffer = await readFile(join(a.out, pkg.file));
+      for (const entry of readZipEntries(zipBuffer)) {
+        if (!entry.name.endsWith(".js.map")) continue;
+        checkedAny = true;
+        // Check only `sources` (the paths esbuild recorded for each original file), not
+        // `sourcesContent` (the original file text, embedded verbatim): that text is free-form
+        // source code and could legitimately contain a string that looks like an absolute path,
+        // e.g. in a comment or a string literal, without that being the bug this test guards.
+        const sourceMap = JSON.parse(entry.data.toString("utf8")) as { sources?: unknown };
+        const sources = Array.isArray(sourceMap.sources) ? (sourceMap.sources as unknown[]).join("\n") : "";
+        expect(sources).not.toMatch(/\/Users\//);
+        expect(sources).not.toMatch(/\/home\//);
+        expect(sources.includes(repoRoot)).toBe(false);
       }
-    },
-    600_000,
-  );
+    }
+    expect(checkedAny).toBe(true);
+  });
 
-  it(
-    "succeeds when the caller's current working directory is somewhere other than the repo root, and restores it afterward",
-    async () => {
-      const originalCwd = process.cwd();
-      const elsewhere = await mkdtemp(join(tmpdir(), "agentx-release-elsewhere-"));
-      process.chdir(elsewhere);
-      try {
-        // infra/lib/control-plane.ts resolves each Lambda's `entry` (e.g.
-        // "packages/broker/src/aws/broker.ts") with resolve(process.cwd(), entry); before this fix,
-        // running buildRelease from a directory that is not the repo root made NodejsFunction fail
-        // to find those entry files at all.
-        const out = join(await mkdtemp(join(tmpdir(), "agentx-release-")), "r");
-        const manifest = await buildRelease({ version: "1.2.3", out, gitCommit: "b".repeat(40) });
-        expect(manifest.templates.length).toBeGreaterThan(0);
-        expect(manifest.packages.length).toBeGreaterThan(0);
-        // Compare realpaths: process.cwd() resolves the macOS /tmp -> /private/tmp symlink, but
-        // `elsewhere` (built from os.tmpdir()) does not, even though they name the same directory.
-        expect(await realpath(process.cwd())).toBe(await realpath(elsewhere));
-      } finally {
-        process.chdir(originalCwd);
-      }
-    },
-    600_000,
-  );
+  it("succeeds when the caller's current working directory is somewhere other than the repo root, and restores it afterward", async () => {
+    expect(b.manifest.templates.length).toBeGreaterThan(0);
+    expect(b.manifest.packages.length).toBeGreaterThan(0);
+    // Compare realpaths: process.cwd() resolves the macOS /tmp -> /private/tmp symlink, but `elsewhere` (built from os.tmpdir()) does not, even though they
+    // name the same directory.
+    expect(await realpath(b.cwdAfter)).toBe(await realpath(b.elsewhere));
+  });
 });
 
 describe("release builder refuses ambient CDK context", () => {

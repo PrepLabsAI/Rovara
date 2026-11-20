@@ -538,7 +538,7 @@
     "tests/contract/refresh-token-infrastructure.test.ts": 1.564,
     "tests/contract/refresh-token-registry.test.ts": 1.046,
     "tests/contract/registration-preflight.test.ts": 0.978,
-    "tests/contract/release-build.test.ts": 262.034,
+    "tests/contract/release-build.test.ts": 70.74,
     "tests/contract/release-command.test.ts": 0.055,
     "tests/contract/release-installer.test.ts": 2.926,
     "tests/contract/release-pack-cli.test.ts": 18.691,
