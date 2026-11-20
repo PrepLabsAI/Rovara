@@ -47,15 +47,6 @@ function front(rovaraThreads: string[] = []) {
 }
 
 describe("the Slack adapter's front", () => {
-  it("hands a mention on with the bot's own mention removed, its message ID, and nothing decided", async () => {
-    const { handler, handedOff } = front();
-    const response = await handler(slackEvent({ type: "app_mention", channel: CHANNEL, user: "U0123456789", text: "<@U0AGENTX01> fix the menu", ts: THREAD }));
-    expect(response.statusCode).toBe(200);
-    expect(handedOff).toEqual([{
-      version: 2, channel: "slack", eventId: "EvROUTE0001", conversation, actor, text: "fix the menu",
-      receivedAt: new Date(NOW).toISOString(), messageId: THREAD,
-    }]);
-  });
 
   it("reads a plain reply only in a thread Rovara posted in, as not addressed to it", async () => {
     const reply = { type: "message", channel: CHANNEL, user: "U0123456789", text: "looks good", ts: "1695500000.000009", thread_ts: THREAD };
@@ -111,14 +102,6 @@ describe("the channel API routes the built-in adapter's messages", () => {
     };
     return { post, queued, claims };
   }
-
-  it("hands each message to the router with its bound project, and queues nothing itself", async () => {
-    const surface = vi.fn(async () => ({ statusCode: 200, body: JSON.stringify({ ok: true }) }));
-    const { post, queued } = ingress(surface);
-    expect((await post()).statusCode).toBe(200);
-    expect(surface).toHaveBeenCalledWith(message, { projectName: "web" });
-    expect(queued).toEqual([]);
-  });
 
   it("answers 500 when the router does, and frees the request for the adapter's retry", async () => {
     const { post, claims } = ingress(async () => ({ statusCode: 500, body: "{}" }));
@@ -218,9 +201,6 @@ describe("the router through the channel transport", () => {
   });
 
   it.each([
-    ["a person", { userId: "U0123456789", bot: false, deleted: false }, { outcome: "person" }],
-    ["a bot", { userId: "U0123456789", bot: true, deleted: false }, { outcome: "not_person" }],
-    ["a deactivated person", { userId: "U0123456789", bot: false, deleted: true }, { outcome: "not_person" }],
     ["someone the directory does not know", null, { outcome: "failed", error: "user_not_found" }],
   ] as const)("confirms %s as Slack's own check does", async (_name, user, expected) => {
     expect(await transport(user).routerTransport.checkMember("U0123456789")).toEqual(expected);

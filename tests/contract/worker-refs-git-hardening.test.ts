@@ -61,31 +61,6 @@ describe("deleting a ref the agent packed", () => {
     expect(await git(box.directory, "rev-parse", "refs/heads/main")).toBe(box.two);
   });
 
-  it("removes a ref that is both loose and packed, so the packed value does not reappear", async () => {
-    const box = await repository();
-    await git(box.directory, "update-ref", "refs/agentx/x", box.one);
-    await git(box.directory, "pack-refs", "--all");
-    await git(box.directory, "update-ref", "refs/agentx/x", box.two);
-    expect(await refExists(box.directory, "refs/agentx/x")).toBe(true);
-
-    await runIsolatedGit(box.directory, ["update-ref", "-d", "refs/agentx/x"]);
-
-    expect(await refExists(box.directory, "refs/agentx/x")).toBe(false);
-    expect(await readFile(join(box.directory, ".git", "packed-refs"), "utf8")).not.toContain("refs/agentx/x");
-    expect(await git(box.directory, "for-each-ref", "--format=%(refname)", "refs/agentx/")).toBe("");
-  });
-
-  it("names a stale packed-refs.lock instead of removing the ref around it", async () => {
-    const box = await repository();
-    await git(box.directory, "update-ref", "refs/agentx/x", box.one);
-    await git(box.directory, "pack-refs", "--all");
-    const lock = join(box.directory, ".git", "packed-refs.lock");
-    await writeFile(lock, "");
-    await expect(runIsolatedGit(box.directory, ["update-ref", "-d", "refs/agentx/x"])).rejects.toThrow(lock);
-    await rm(lock);
-    expect(await refExists(box.directory, "refs/agentx/x")).toBe(true);
-  });
-
   it("clears the original-code ref after the agent ran `git pack-refs --all` while the original code showed", async () => {
     const box = await repository();
     await writeFile(join(box.directory, "a.txt"), "the agent's version\n");

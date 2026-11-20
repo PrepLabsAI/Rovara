@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
-import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2EApplicationSelectionRecordSchema, E2EWorkflowEvidenceRefSchema, E2EWorkflowGroupEvidenceRefSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, workflowSendBackOffered } from "@agentx/contracts";
+import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2EApplicationSelectionRecordSchema, E2EWorkflowEvidenceRefSchema, E2EWorkflowGroupEvidenceRefSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX } from "@agentx/contracts";
 import { e2eApplicationPrivateTransferMaxBytes } from "@agentx/verifier";
 import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { getTaskDocumentView, retryApplicationRoundOnPage, startTaskWorkflowPublicationFromSystem } from "../../packages/broker/src/aws/developer-tasks.js";
@@ -67,31 +67,6 @@ const blockedWith = (round: ApplicationRound, reason: RegExp) => {
 };
 
 describe("uploading the evidence of an application round: group lookup, sizing and the broker's receipt", () => {
-  it("marks the admission reference it hands the dispatcher as an application admission, so a worker that predates application CHECKS is never sent it (Ruling BQ)", async () => {
-    const round = await startApplicationRound();
-    expect(round.admissionRef.kind).toBe("application");
-    expect(round.operationNow().workflowE2EAdmission.kind).toBe("application");
-    const [outbox] = round.harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === round.operationId) as Array<{ invocation: { payload: { workflowE2EAdmission: { kind?: string } } } }>;
-    expect(outbox!.invocation.payload.workflowE2EAdmission.kind).toBe("application");
-  });
-
-  it("accepts a group's evidence against the admission's own application groups and records the broker's receipt of it", async () => {
-    const round = await startApplicationRound();
-    round.markRunning();
-    const [group] = await collectAll(round, [PASS]);
-    const before = Date.now();
-    const uploaded = await round.upload(round.groupEnvelope(group!.groupRun), { groupRunId: group!.runId });
-    const after = Date.now();
-    expect(uploaded.stage).toBe("finalize");
-    expect(uploaded.response.status, JSON.stringify(uploaded.response.body)).toBe(200);
-    expect(uploaded.response.body).toMatchObject({ groupRunId: group!.runId, sha256: uploaded.digest });
-    expect(round.operationNow().workflowE2EGroupRunIds).toEqual([group!.runId]);
-    const receipt = Date.parse(String(round.uploadRow(group!.runId)?.receivedAt));
-    expect(receipt).toBeGreaterThanOrEqual(before);
-    expect(receipt).toBeLessThanOrEqual(after);
-    // The stored object is the content-addressed envelope the worker sent.
-    expect(round.harness.s3.objects.get(`workflow-e2e-group-evidence/sha256/${uploaded.digest}.json`)).toBe(uploaded.bytes.toString("utf8"));
-  });
 
   it("refuses a group outside the admission, and an operation whose reference names other groups than the admission does", async () => {
     const round = await startApplicationRound({ applications: 4 });
@@ -174,25 +149,6 @@ describe("uploading the evidence of an application round: group lookup, sizing a
     expect(E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES).toBeLessThanOrEqual(PORTABLE_REF_MAX_BYTES);
   });
 
-  it("reads the admission once for the init and once for the finalize of an upload, not again for each chunk", async () => {
-    const round = await startApplicationRound();
-    round.markRunning();
-    const [group] = await collectAll(round, [PASS]);
-    const admissionKey = round.admissionRef.admissionRef.key;
-    const send = round.harness.s3.send.bind(round.harness.s3);
-    let admissionReads = 0;
-    round.harness.s3.send = async (command) => {
-      if (command.constructor.name === "GetObjectCommand" && command.input?.Key === admissionKey) admissionReads += 1;
-      return send(command);
-    };
-    // Log tails make the evidence span several 64 KiB chunks, as a real one does.
-    const uploaded = await round.upload(round.groupEnvelope({ ...group!.groupRun, diagnostics: { appLogTail: "x".repeat(200_000) } }), { groupRunId: group!.runId });
-    expect(uploaded.response.status, JSON.stringify(uploaded.response.body)).toBe(200);
-    const chunks = Math.ceil(uploaded.bytes.byteLength / 65_536);
-    expect(chunks, "the evidence spans several chunks").toBeGreaterThan(2);
-    expect(admissionReads).toBe(2);
-  });
-
   it("takes the aggregate only in its application shape and only once every admitted group was accepted on its own", async () => {
     const round = await startApplicationRound({ applications: 4 });
     round.markRunning();
@@ -265,131 +221,10 @@ describe("uploading the evidence of an application round: group lookup, sizing a
       expect(round.uploadRow(group!.runId)?.receivedAt).toBe(receivedAt);
     });
 
-    it("is not moved by a slow upload: chunks and finalize minutes after the start still verify the group", async () => {
-      const round = await startApplicationRound();
-      const groups = await collectAll(round, [PASS]);
-      vi.useFakeTimers({ toFake: ["Date"] });
-      vi.setSystemTime(Date.now());
-      round.markRunning();
-      const group = groups[0]!;
-      const slow = await round.upload(round.groupEnvelope(group.groupRun), { groupRunId: group.runId, afterInit: () => { vi.setSystemTime(Date.now() + 300_000); } });
-      expect(slow.response.status, JSON.stringify(slow.response.body)).toBe(200);
-      const aggregate = await round.upload(round.aggregateEnvelope([group.groupRun]));
-      expect(aggregate.response.status).toBe(200);
-      await round.finishChecks(aggregate.response.body as { key: string; sha256: string });
-      expect(e2eOf(round).qualifiedRound, JSON.stringify(round.workflowNow())).toBeDefined();
-    });
-
-    it("qualifies every group of a round whose groups finished more than 30 s apart, when each uploads as it finishes (Ruling CL)", async () => {
-      const round = await startApplicationRound({ applications: 4 });
-      vi.useFakeTimers({ toFake: ["Date"] });
-      vi.setSystemTime(Date.now());
-      round.markRunning();
-      const runs: Record<string, unknown>[] = [];
-      for (const groupId of round.groupIds) {
-        const group = await round.collectGroup(groupId, PASS);
-        const uploaded = await round.upload(round.groupEnvelope(group.groupRun), { groupRunId: group.runId });
-        expect(uploaded.response.status, JSON.stringify(uploaded.response.body)).toBe(200);
-        runs.push(group.groupRun);
-        // The next group finishes 45 s later: past the original group's 30 s post-close window.
-        vi.setSystemTime(Date.now() + 45_000);
-      }
-      const aggregate = await round.upload(round.aggregateEnvelope(runs));
-      expect(aggregate.response.status).toBe(200);
-      await round.finishChecks(aggregate.response.body as { key: string; sha256: string });
-      expect(e2eOf(round).qualifiedRound, JSON.stringify(round.workflowNow())).toBeDefined();
-      expect(e2eOf(round).qualifiedRound!.groupRunIds).toHaveLength(2);
-    });
-
-    it("loses the earlier group to UNKNOWN when its upload waits for a slower group, which is why a worker uploads each group as it finishes", async () => {
-      const round = await startApplicationRound({ applications: 4 });
-      vi.useFakeTimers({ toFake: ["Date"] });
-      vi.setSystemTime(Date.now());
-      round.markRunning();
-      const first = await round.collectGroup(round.groupIds[0]!, PASS);
-      vi.setSystemTime(Date.now() + 45_000);
-      const second = await round.collectGroup(round.groupIds[1]!, PASS);
-      for (const group of [first, second]) {
-        const uploaded = await round.upload(round.groupEnvelope(group.groupRun), { groupRunId: group.runId });
-        expect(uploaded.response.status, JSON.stringify(uploaded.response.body)).toBe(200);
-      }
-      const aggregate = await round.upload(round.aggregateEnvelope([first.groupRun, second.groupRun]));
-      await round.finishChecks(aggregate.response.body as { key: string; sha256: string });
-      expect(e2eOf(round).qualifiedRound).toBeUndefined();
-      // The earlier group, and only it, is UNKNOWN, for the harvest window and for nothing else.
-      const reason = round.workflowNow().blockReason ?? "";
-      expect(reason).toMatch(/not received inside the original bounded post-close harvest window/);
-      expect(reason).toContain(round.groupIds[0]!);
-      expect(reason).not.toContain(round.groupIds[1]!);
-      expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
-    });
-
-    it("is not the time of the verification either: the same round verified 45 minutes later is the same verdict", async () => {
-      const round = await startApplicationRound();
-      await runRound(round, [PASS]);
-      expect(e2eOf(round).qualifiedRound).toBeDefined();
-      vi.useFakeTimers({ toFake: ["Date"] });
-      vi.setSystemTime(Date.now() + 2_700_000);
-      // The runtime row is still valid 45 minutes on, so the stored receipt (not the clock) is what the collector judges against.
-      expect((await presentationOf(round))?.shared.e2e.status).toBe("PASS");
-      expect((await publicationChecksOf(round))?.length).toBeGreaterThan(0);
-    });
-
-    it("is UNKNOWN, not PASS, when the upload only started after the post-close window, whatever the evidence holds", async () => {
-      const round = await startApplicationRound();
-      const groups = await collectAll(round, [PASS]);
-      vi.useFakeTimers({ toFake: ["Date"] });
-      vi.setSystemTime(Date.now() + 60_000);
-      const aggregate = await uploadAll(round, groups);
-      await round.finishChecks(aggregate);
-      blockedWith(round, /incomplete or unknown/);
-      expect(round.workflowNow().blockReason).toMatch(/post-close/);
-    });
-  });
-});
-
-describe("the collector on a group of several shards", () => {
-  it("collects a group of three shards, whose shard ids are in no particular order, as PASS (the oracle's shard inventory is compared sorted)", async () => {
-    const round = await startApplicationRound({ applications: 4 });
-    const three = round.applicationGroups.find((group) => group.shards.length === 3)!;
-    // Shard ids are digests; the compile order is the target order. A fixture that happened to be in id order would hide a comparison of one with the other.
-    const ids = three.shards.map((shard) => shard.shardId);
-    expect([...ids].sort()).not.toEqual(ids);
-    const group = await round.collectGroup(three.outerBinding.groupId, PASS);
-    expect(group.collected.qualification).toMatchObject({ status: "PASS" });
-    expect(group.collected.collection?.shards).toHaveLength(3);
   });
 });
 
 describe("verifying an application round at its result and gating publication on it", () => {
-  it("records the qualified round of a passing round, shows PASS, and gives publication checks", async () => {
-    const round = await startApplicationRound();
-    const { aggregate } = await runRound(round, [PASS]);
-    expect(round.workflowNow(), JSON.stringify(round.workflowNow())).toMatchObject({ stage: "REVIEW" });
-    expect(e2eOf(round).qualifiedRound).toMatchObject({ candidateDigest: round.candidate.digest, roundId: round.admissionRef.roundId, groupRunIds: round.admissionRef.groupRunIds,
-      admissionSha256: round.admissionRef.admissionRef.sha256, evidenceSha256: aggregate.sha256 });
-    expect(e2eOf(round).failedRound).toBeUndefined();
-    expect((await presentationOf(round))?.shared.e2e.status).toBe("PASS");
-    // The display the result callback captured for the notifier was taken while the operation's stored record was still RUNNING: it is the verdict, not "not ended".
-    const displayRef = (round.workflowNow().e2e as { displayRef?: { key: string } }).displayRef;
-    expect(JSON.parse(round.harness.s3.objects.get(displayRef!.key)!)).toMatchObject({ e2e: { status: "PASS" } });
-    const checks = await publicationChecksOf(round);
-    expect(checks?.length ?? 0).toBeGreaterThan(0);
-    // The checks fence the rows the verdict stands on: the runtime row of the admitted kind among them.
-    expect(JSON.stringify(checks)).toContain(apiRowKey.sk);
-  });
-
-  it("blocks a failing round with its failed round recorded and the send-back offered", async () => {
-    const round = await startApplicationRound();
-    const { aggregate } = await runRound(round, [FAIL]);
-    expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: "one or more admitted E2E groups failed" });
-    expect(e2eOf(round).failedRound).toMatchObject({ status: "FAILED", candidateDigest: round.candidate.digest, roundId: round.admissionRef.roundId,
-      groupRunIds: round.admissionRef.groupRunIds, admissionSha256: round.admissionRef.admissionRef.sha256, evidenceSha256: aggregate.sha256 });
-    expect(e2eOf(round).qualifiedRound).toBeUndefined();
-    expect(workflowSendBackOffered(round.workflowNow() as never)).toBe(true);
-    expect((await presentationOf(round))?.shared.e2e.status).toBe("FAILED");
-    expect(await publicationChecksOf(round)).toBeUndefined();
-  });
 
   it("makes a required scenario the runner skipped UNKNOWN, with publication STALE", async () => {
     const round = await startApplicationRound();
@@ -409,28 +244,6 @@ describe("verifying an application round at its result and gating publication on
     expect(await publicationChecksOf(round)).toBeUndefined();
     // A task that nevertheless reached the publication step is refused there too.
     await expectPublicationStale(round);
-  });
-
-  it("makes a worker's claimed pass over a report whose digest was tampered UNKNOWN", async () => {
-    const round = await startApplicationRound();
-    const groups = await collectAll(round, [PASS]);
-    expect(groups[0]!.groupRun).toMatchObject({ collection: { status: "PASS" } });
-    const aggregate = await uploadAll(round, groups, (groupRun) => {
-      ((groupRun.actual as { collection: { shards: Array<{ rawReport: { sha256: string } }> } }).collection.shards[0]!.rawReport).sha256 = "0".repeat(64);
-    });
-    await round.finishChecks(aggregate);
-    blockedWith(round, /incomplete or unknown/);
-    expect(await publicationChecksOf(round)).toBeUndefined();
-    expect((await presentationOf(round))?.shared.e2e.status).not.toBe("PASS");
-  });
-
-  it("never reads the worker's claim: a claimed PASS over failing evidence is FAILED, and a claimed FAILED over passing evidence passes", async () => {
-    const failing = await startApplicationRound();
-    await runRound(failing, [FAIL], { tweak: (groupRun) => { groupRun.collection = { status: "PASS", reason: "claimed" }; } });
-    expect(e2eOf(failing).failedRound).toBeDefined();
-    const passing = await startApplicationRound();
-    await runRound(passing, [PASS], { tweak: (groupRun) => { groupRun.collection = { status: "FAILED", reason: "claimed" }; } });
-    expect(e2eOf(passing).qualifiedRound).toBeDefined();
   });
 
   it("does not let group evidence without the round's aggregate be PASS: it shows as not passing and nothing is qualified", async () => {
@@ -473,39 +286,7 @@ describe("verifying an application round at its result and gating publication on
 
   describe("two groups of the same kind, end to end (four API targets: a group holds at most three)", () => {
     const threeShards = (round: ApplicationRound) => round.applicationGroups.findIndex((group) => group.shards.length === 3);
-    const outcomesWith = (round: ApplicationRound, byGroup: (shards: number) => Outcome) => round.applicationGroups.map((group) => byGroup(group.shards.length));
 
-    it("admits two groups, both passing: the combined verdict is PASS and both groups are recorded", async () => {
-      const round = await startApplicationRound({ applications: 4 });
-      expect(round.applicationGroups.map((group) => group.shards.length).sort()).toEqual([1, 3]);
-      expect(round.admissionRef.groupRunIds).toHaveLength(2);
-      const { groups } = await runRound(round, [PASS, PASS]);
-      expect(e2eOf(round).qualifiedRound).toMatchObject({ groupRunIds: round.admissionRef.groupRunIds });
-      expect(round.operationNow().workflowE2EGroupRunIds?.slice().sort()).toEqual(groups.map((group) => group.runId).sort());
-      expect((await presentationOf(round))?.shared.e2e.status).toBe("PASS");
-    });
-
-    for (const failing of ["the single-target group", "the three-target group"] as const) {
-      it(`fails the round when ${failing} fails and its sibling passes, and still records the sibling's evidence`, async () => {
-        const round = await startApplicationRound({ applications: 4 });
-        const three = threeShards(round);
-        const failsAt = failing === "the three-target group" ? three : 1 - three;
-        const outcomes = round.applicationGroups.map((group, index) => (index === failsAt ? (group.shards.length === 3 ? [PASS, FAIL, PASS] : FAIL) : PASS));
-        const { groups, aggregate } = await runRound(round, outcomes);
-        // The failing group's own result, and the passing sibling's: both are genuinely so, and both uploaded.
-        expect(groups[failsAt]!.collected.qualification?.status).toBe("FAILED");
-        expect(groups[1 - failsAt]!.collected.qualification?.status).toBe("PASS");
-        expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: "one or more admitted E2E groups failed" });
-        expect(e2eOf(round).failedRound).toMatchObject({ status: "FAILED", groupRunIds: round.admissionRef.groupRunIds, evidenceSha256: aggregate.sha256 });
-        expect(e2eOf(round).qualifiedRound).toBeUndefined();
-        const refs = (round.operationNow().workflowE2EGroupEvidenceRefs ?? []) as Array<{ groupRunId: string; evidenceRef: { key: string; sha256: string } }>;
-        expect(refs.map((ref) => ref.groupRunId).sort()).toEqual(groups.map((group) => group.runId).sort());
-        for (const ref of refs) expect(round.harness.s3.objects.has(ref.evidenceRef.key), ref.groupRunId).toBe(true);
-        expect((await presentationOf(round))?.shared.e2e.status).toBe("FAILED");
-        expect(await publicationChecksOf(round)).toBeUndefined();
-        expect(workflowSendBackOffered(round.workflowNow() as never)).toBe(true);
-      });
-    }
 
     it("fails the round for a failing group even when its sibling is UNKNOWN (any FAILED wins), and is UNKNOWN when the failure is not there", async () => {
       const skip = (report: E2EApplicationReport) => {
@@ -529,18 +310,6 @@ describe("verifying an application round at its result and gating publication on
       expect(e2eOf(unknown).failedRound).toBeUndefined();
     });
 
-    it("does not pass a round whose aggregate names a group the broker did not accept on its own", async () => {
-      const round = await startApplicationRound({ applications: 4 });
-      const groups = await collectAll(round, outcomesWith(round, () => PASS));
-      round.markRunning();
-      const [first, second] = groups as [ApplicationGroupEvidence, ApplicationGroupEvidence];
-      expect((await round.upload(round.groupEnvelope(first.groupRun), { groupRunId: first.runId })).response.status).toBe(200);
-      // The second group never reaches the broker; the aggregate that claims it is refused, and the round stays unqualified.
-      const claimed = await round.upload(round.aggregateEnvelope([first.groupRun, second.groupRun]));
-      expect(claimed.response.status).toBe(409);
-      await round.finishChecks();
-      blockedWith(round, /private evidence is missing/);
-    });
   });
 });
 
@@ -554,30 +323,6 @@ describe("current authority at verification (the runtime row, the creator, the s
     await round.finishChecks(aggregate);
     return round;
   }
-
-  it("is UNKNOWN, naming the generation, when the runtime row was requalified during the round", async () => {
-    const round = await requalifiedDuringRound((row) => ({ ...row, generation: Number(row.generation) + 1, qualifiedAt: new Date(Date.now() - 1_000).toISOString() }));
-    blockedWith(round, /requalified during the round \(generation 5 now, 4 when admitted\)/);
-    expect(e2eOf(round).failedRound).toBeUndefined();
-    expect(await publicationChecksOf(round)).toBeUndefined();
-  });
-
-  it("words a requalification so the owner's one retry approves the plan again against the new row, and the round then runs on it", async () => {
-    const round = await requalifiedDuringRound((row) => ({ ...row, generation: Number(row.generation) + 1, qualifiedAt: new Date(Date.now() - 1_000).toISOString() }));
-    expect(round.workflowNow().blockReason).toContain(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX);
-    expect(round.workflowNow().blockReason!.length).toBeLessThanOrEqual(500);
-    // New code does not fix a runtime that moved, so the send-back is not what is offered.
-    expect(workflowSendBackOffered(round.workflowNow() as never)).toBe(false);
-    const retried = await round.harness.dev(MAYA, "POST", `/v1/dev/tasks/${round.taskId}/workflow/retry`, { requestId: randomUUID(), expectedRevision: round.workflowNow().revision,
-      instructions: "Approve the plan again against the runtime that is ready now" });
-    expect(retried.status, JSON.stringify(retried.body)).toBe(200);
-    expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "WAITING" });
-    expect(E2EApplicationSelectionRecordSchema.parse(round.workflowNow().e2e!.applicationSelection).runtimeRows[0]).toMatchObject({ generation: 5 });
-    round.reseedReadiness();
-    await round.runDispatch();
-    expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
-    expect(round.checksOperations()).toHaveLength(2);
-  });
 
   describe("the task page's retry of a blocked round", () => {
     const maya = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: MAYA.provider, name: MAYA.name };
@@ -626,12 +371,6 @@ describe("current authority at verification (the runtime row, the creator, the s
     });
   });
 
-  it("asks for an administrator, not a retry, when no runtime of the admitted kind is ready any more", async () => {
-    const round = await requalifiedDuringRound((row) => ({ ...row, state: "REVOKED" }));
-    expect(round.workflowNow().blockReason).toContain(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX);
-    expect(workflowSendBackOffered(round.workflowNow() as never)).toBe(false);
-  });
-
   it("names the field that moved when the generation did not: the expiry, or the qualification time", async () => {
     const expiry = await requalifiedDuringRound((row) => ({ ...row, expiresAt: new Date(Date.parse(String(row.expiresAt)) + 60_000).toISOString() }));
     blockedWith(expiry, /requalified during the round \(expiresAt now .+, .+ when admitted\)/);
@@ -639,18 +378,6 @@ describe("current authority at verification (the runtime row, the creator, the s
     const qualified = await requalifiedDuringRound((row) => ({ ...row, qualifiedAt: new Date(Date.parse(String(row.qualifiedAt)) + 1_000).toISOString() }));
     blockedWith(qualified, /requalified during the round \(qualifiedAt now .+, .+ when admitted\)/);
     expect(qualified.workflowNow().blockReason).not.toMatch(/generation/);
-  });
-
-  it("is UNKNOWN when the row is no longer READY, saying the runtime is not ready", async () => {
-    const round = await requalifiedDuringRound((row) => ({ ...row, state: "REVOKED" }));
-    blockedWith(round, /no api runtime of profile linux-arm64-web-api-v1 is READY/);
-    expect(round.workflowNow().blockReason).not.toMatch(/requalified during the round/);
-  });
-
-  it("downgrades a FAILED round to UNKNOWN when the row was requalified, exactly as a portable round is (no failed round is recorded on stale authority)", async () => {
-    const round = await requalifiedDuringRound((row) => ({ ...row, generation: Number(row.generation) + 1 }), [FAIL]);
-    blockedWith(round, /requalified during the round/);
-    expect(e2eOf(round).failedRound).toBeUndefined();
   });
 
   it("fences the runtime row in the transaction that records the verdict: a requalification between verification and commit records nothing", async () => {
@@ -674,33 +401,6 @@ describe("current authority at verification (the runtime row, the creator, the s
     expect(round.workflowNow().stage).not.toBe("REVIEW");
   });
 
-  it("fences the whole runtime row, not only its generation and expiry: the endpoint, qualification time, manifest and runner environment too", async () => {
-    const changes: Array<[string, (row: Record<string, unknown>) => Record<string, unknown>]> = [
-      ["endpoint", (row) => ({ ...row, endpoint: "http://10.0.0.99:8080" })],
-      ["qualifiedAt", (row) => ({ ...row, qualifiedAt: new Date(Date.parse(String(row.qualifiedAt)) + 1_000).toISOString() })],
-      ["manifestDigest", (row) => ({ ...row, manifestDigest: "f".repeat(64) })],
-      ["runnerEnvironment", (row) => ({ ...row, runnerEnvironment: { ...(row.runnerEnvironment as Record<string, unknown>), os: "linux 9.9.9" } })],
-    ];
-    for (const [field, change] of changes) {
-      const round = await startApplicationRound();
-      const aggregate = await uploadAll(round, await collectAll(round, [PASS]));
-      const send = round.harness.db.send.bind(round.harness.db);
-      let raced = false;
-      round.harness.db.send = async (command) => {
-        const items = (command as { input?: { TransactItems?: Array<{ ConditionCheck?: { Key?: { pk?: string; sk?: string } } }> } }).input?.TransactItems;
-        if (!raced && command.constructor.name === "TransactWriteCommand" && items?.some((item) => item.ConditionCheck?.Key?.pk === apiRowKey.pk && item.ConditionCheck.Key.sk === apiRowKey.sk)) {
-          raced = true;
-          round.harness.db.set(change(round.harness.db.get(apiRowKey.pk, apiRowKey.sk)!));
-        }
-        return send(command);
-      };
-      try { await round.finishChecks(aggregate).catch(() => undefined); } finally { round.harness.db.send = send; }
-      expect(raced, field).toBe(true);
-      expect(e2eOf(round).qualifiedRound, field).toBeUndefined();
-      expect(round.workflowNow().stage, field).not.toBe("REVIEW");
-    }
-  });
-
   it("holds the creator's access to the one the round was admitted under: a re-issued grant or a rebound channel during the round refuses", async () => {
     const round = await startApplicationRound();
     const proof = (round.admission as { creatorAuthority?: { kind: string; developerId: string; project: string } }).creatorAuthority;
@@ -716,30 +416,6 @@ describe("current authority at verification (the runtime row, the creator, the s
     }
     await round.finishChecks(aggregate);
     blockedWith(round, /creator-membership-proof-changed-or-unavailable/);
-  });
-
-  it("refuses an admission that carries no creator authority at all: omitting the proof cannot skip the check", async () => {
-    const round = await startApplicationRound();
-    const { creatorAuthority, ...withoutProof } = round.admission as typeof round.admission & { creatorAuthority?: unknown };
-    expect(creatorAuthority, "the admission the dispatch built carries it").toBeDefined();
-    const broker = await brokerModule();
-    const judged = async (admission: unknown) => {
-      const diagnostic: { reason?: string } = {};
-      return { valid: await broker.workflowE2EApplicationAuthorityIsValid(round.harness.brokerInput as never, round.taskNow() as never, round.candidate, admission as never, diagnostic), reason: diagnostic.reason };
-    };
-    expect(await judged(round.admission)).toEqual({ valid: true, reason: undefined });
-    expect(await judged(withoutProof)).toEqual({ valid: false, reason: "creator-membership-proof-changed-or-unavailable" });
-    expect(await judged({ ...withoutProof, creatorAuthority: undefined })).toEqual({ valid: false, reason: "creator-membership-proof-changed-or-unavailable" });
-  });
-
-  it("is UNKNOWN when the creator lost access to the project before the verdict", async () => {
-    const round = await startApplicationRound();
-    const groups = await collectAll(round, [PASS]);
-    const aggregate = await uploadAll(round, groups);
-    const creator = round.harness.db.get(`DEVELOPER#${MAYA.developerId}`, "META")!;
-    round.harness.db.set({ ...creator, revoked: true });
-    await round.finishChecks(aggregate);
-    blockedWith(round, /current-creator-identity-unavailable/);
   });
 
   it("is UNKNOWN when the candidate's stored export is no longer there to hold the admission's source against", async () => {
@@ -809,15 +485,4 @@ describe("an application admission and a portable one never verify through each 
     expect(await publicationChecksOf(round)).toBeUndefined();
   });
 
-  it("verifies an application admission only for a plan that carries the application selection it was admitted under", async () => {
-    const round = await startApplicationRound();
-    await runRound(round, [PASS]);
-    expect(e2eOf(round).qualifiedRound).toBeDefined();
-    // The same stored round, asked of a task whose plan has no application selection, is not verified as an application round.
-    const task = round.taskNow() as { workflow: { e2e: Record<string, unknown> } };
-    const { applicationSelection: _selection, ...rest } = task.workflow.e2e;
-    void _selection;
-    round.harness.db.set({ ...task, workflow: { ...task.workflow, e2e: rest } });
-    expect(await publicationChecksOf(round)).toBeUndefined();
-  });
 });

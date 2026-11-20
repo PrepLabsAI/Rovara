@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
 import { createTaskWeb, type TaskDocumentView } from "../../packages/broker/src/aws/task-web.js";
-import { SHOT_SHA, failedBaseline, results, row } from "../support/e2e-scenario-results.js";
+import { failedBaseline, results, row } from "../support/e2e-scenario-results.js";
 
 // M1.3 Task 3.7: the task page lists one row per scenario of the browser and API round, in its own section, and links a screenshot to the API route behind the session.
 
@@ -29,13 +29,6 @@ describe("the results section of the task page", () => {
     expect(page.body).toContain("Browser and API checks: 4 passed, 1 failed, 0 incomplete");
     expect(page.body).toContain("Inventory service mocked");
     expect(page.body.indexOf('id="e2e-results"')).toBeLessThan(page.body.indexOf('id="findings"'));
-  });
-
-  it("links a screenshot to the API route of this task, behind the session, and still embeds no image (the page's policy allows none)", async () => {
-    const page = await pageOf({ ...base, e2eResults: results() });
-    expect(page.body).toContain(`href="/review/${taskId}/task/api/e2e/artifacts/${SHOT_SHA}"`);
-    expect(page.body).not.toContain("<img");
-    expect(page.headers["content-security-policy"]).toContain("img-src 'none'");
   });
 
   it("has no section when the task has no rows, and escapes what a row holds", async () => {

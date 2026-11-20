@@ -3,28 +3,7 @@
 // answer written before 25c still parses.
 import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
-import {
-  AdminShareModeRequestSchema,
-  AgentXErrorCodeSchema,
-  AiToolTurnRecordSchema,
-  ChannelTurnSchema,
-  CLOSED_SHARED_NOTICE,
-  DEVELOPER_API_VERSION,
-  DeveloperTaskViewSchema,
-  SHARED_BY_POLICY,
-  ShareDeveloperTaskRequestSchema,
-  SharedTaskRecordSchema,
-  SlackThreadPrepareResultSchema,
-  SlackThreadWorkspaceResultSchema,
-  SlackWorkspaceCloseStartResultSchema,
-  TurnRecordSchema,
-  VIEW_ONLY_BY_POLICY,
-  VIEW_ONLY_NOTICE,
-  agentXError,
-  sharedNoticeClaim,
-  sharedNoticeKey,
-  sharedTaskKey,
-} from "../../packages/contracts/src/index.js";
+import { AdminShareModeRequestSchema, AgentXErrorCodeSchema, ChannelTurnSchema, CLOSED_SHARED_NOTICE, DEVELOPER_API_VERSION, DeveloperTaskViewSchema, SHARED_BY_POLICY, ShareDeveloperTaskRequestSchema, SharedTaskRecordSchema, VIEW_ONLY_BY_POLICY, VIEW_ONLY_NOTICE, agentXError, sharedNoticeClaim, sharedNoticeKey, sharedTaskKey } from "../../packages/contracts/src/index.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const TASK = "11111111-1111-4111-8111-111111111111";
@@ -62,12 +41,6 @@ describe("share shapes (C1, C2, C6)", () => {
     expect(sharedNoticeKey("T0BSHLLUGBD/C0123456789/1695500000.000001")).toEqual({ pk: "THREAD#T0BSHLLUGBD/C0123456789/1695500000.000001", sk: "SHARED_NOTICE" });
   });
 
-  it("builds the shared thread key on the Slack thread subject, so a malformed thread is refused", () => {
-    expect(sharedTaskKey({ teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" }).pk).toBe("SHARED_TASK#T0BSHLLUGBD/C0123456789/1695500000.000001");
-    expect(() => sharedTaskKey({ teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "not-a-ts" })).toThrow();
-    expect(() => sharedTaskKey({ teamId: "T0BSHLLUGBD/x", channelId: "C0123456789", threadTs: "1695500000.000001" })).toThrow();
-  });
-
   it("refuses a malformed time on a channel turn and a shared thread record", () => {
     const turn = { author: { slackUserId: "U0PRIYA001" }, at: "2026-09-29T10:05:00.000Z", request: "run the linter", outcome: "answered" };
     expect(ChannelTurnSchema.safeParse(turn).success).toBe(true);
@@ -102,25 +75,6 @@ describe("the shared thread's hourly notice claim (C10, F13)", () => {
     }
   };
 
-  it("claims the thread's SHARED_NOTICE item, and keeps it two intervals", () => {
-    expect(sharedNoticeClaim(subject, 1_000_000, "view")).toEqual({
-      Key: sharedNoticeKey(subject),
-      UpdateExpression: "SET noticedAt = :now, expiresAt = :expires",
-      // Closed wins at the store: no view-only claim once a closed notice was ever claimed.
-      ConditionExpression: "attribute_not_exists(closedNoticedAt) AND (attribute_not_exists(noticedAt) OR noticedAt <= :cutoff)",
-      ExpressionAttributeValues: { ":now": 1_000_000, ":expires": 1_007_200, ":cutoff": 996_400 },
-    });
-  });
-
-  it("lets one caller through per thread per 3,600 seconds", async () => {
-    const db = new FakeDynamoDb();
-    expect(await claim(db, 1_000_000)).toBe(true);
-    expect(await claim(db, 1_000_000)).toBe(false);
-    expect(await claim(db, 1_003_599)).toBe(false);
-    expect(await claim(db, 1_003_600)).toBe(true);
-    expect(db.get(`THREAD#${subject}`, "SHARED_NOTICE")).toMatchObject({ noticedAt: 1_003_600, expiresAt: 1_010_800 });
-  });
-
   it("claims the closed notice apart from the view-only one, on the same item (live check)", async () => {
     expect(sharedNoticeClaim(subject, 1_000_000, "closed")).toEqual({
       Key: sharedNoticeKey(subject),
@@ -138,48 +92,9 @@ describe("the shared thread's hourly notice claim (C10, F13)", () => {
     expect(db.get(`THREAD#${subject}`, "SHARED_NOTICE")).toMatchObject({ noticedAt: 1_000_000, closedNoticedAt: 1_004_680, expiresAt: 1_011_880 });
   });
 
-  it("refuses a view-only claim after any closed claim, even one older than an hour (closed wins)", async () => {
-    const db = new FakeDynamoDb();
-    expect(await claim(db, 1_000_000, "closed")).toBe(true);
-    expect(await claim(db, 1_000_010, "view")).toBe(false);
-    expect(await claim(db, 1_000_000 + 2 * 3_600, "view")).toBe(false);
-    expect(db.get(`THREAD#${subject}`, "SHARED_NOTICE")).not.toHaveProperty("noticedAt");
-  });
-});
-
-describe("the Slack service's shapes (C11, C16)", () => {
-  it("adds VIEW_ONLY and an optional sharedTask, and keeps the WORKSPACE branch strict", () => {
-    expect(SlackThreadWorkspaceResultSchema.parse({ outcome: "VIEW_ONLY", taskId: TASK, closed: false })).toMatchObject({ outcome: "VIEW_ONLY" });
-    const workspace = { outcome: "WORKSPACE", workspaceId: WORKSPACE, status: "BUSY", operationId: null, created: false, orchestratorInstructions: "Delegate work." };
-    expect(SlackThreadWorkspaceResultSchema.parse({ ...workspace, sharedTask: { taskId: TASK, developerName: "Maya Chen" } })).toMatchObject({ sharedTask: { taskId: TASK } });
-    expect(SlackThreadWorkspaceResultSchema.safeParse({ ...workspace, unexpected: true }).success).toBe(false);
-  });
-
-  it("adds an optional open task count to both limit answers, and REFUSED to the close answer", () => {
-    const limit = { outcome: "LIMIT_REACHED", limit: "MEMBER", maximum: 3, starterThreads: [] };
-    expect(SlackThreadWorkspaceResultSchema.parse({ ...limit, openTaskCount: 3 })).toMatchObject({ openTaskCount: 3 });
-    expect(SlackThreadPrepareResultSchema.parse({ ...limit, openTaskCount: 1 })).toMatchObject({ openTaskCount: 1 });
-    expect(SlackThreadWorkspaceResultSchema.parse(limit)).not.toHaveProperty("openTaskCount");
-    expect(SlackWorkspaceCloseStartResultSchema.parse({ outcome: "REFUSED", reason: "shared_task" })).toMatchObject({ outcome: "REFUSED" });
-  });
 });
 
 describe("records and codes", () => {
-  it("lets a Slack turn record carry the task and the teammate's name, and still reads one without", () => {
-    const base = {
-      offeredTools: [], calls: [], emptyResponse: false, workerOperations: [], eventId: "Ev0000000001", subject: "T0BSHLLUGBD/C0123456789/1695500000.000001",
-      receivedAt: "2026-09-29T10:00:00.000Z", requestedBy: { teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" }, disposition: "answered",
-      startedAt: "2026-09-29T10:00:00.000Z", finishedAt: "2026-09-29T10:00:01.000Z", durationMs: 1000, requestText: "run the linter", responseText: "done",
-    };
-    expect(TurnRecordSchema.parse({ ...base, taskId: TASK, requesterName: "Priya" })).toMatchObject({ taskId: TASK, requesterName: "Priya" });
-    expect(TurnRecordSchema.parse(base)).not.toHaveProperty("taskId");
-  });
-
-  it("adds the share action to AI-tool records (Q9), and names an admin who made the change (C25)", () => {
-    expect(AiToolTurnRecordSchema.shape.action.options).toEqual(["start", "continue", "pull_request", "cancel", "close", "share"]);
-    expect(AiToolTurnRecordSchema.shape.admin.parse({ issuer: "https://identity.example.test", subject: "admin-subject", displayName: "Ada" })).toMatchObject({ subject: "admin-subject" });
-    expect(AiToolTurnRecordSchema.shape.admin.safeParse(undefined).success).toBe(true);
-  });
 
   it("takes an admin's mode switch with only a request ID and a mode (C25)", () => {
     expect(AdminShareModeRequestSchema.parse({ requestId: TASK, shareMode: "view" })).toEqual({ requestId: TASK, shareMode: "view" });

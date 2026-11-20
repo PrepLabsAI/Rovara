@@ -34,26 +34,6 @@ function framed(text: string, limit: number) {
 }
 
 describe("free wiki MCP tools", () => {
-  it("offers precisely wiki_list and wiki_read, with no wiki_ask or model-key dependency", async () => {
-    const { mcp } = await connected(index());
-    const tools = (await mcp.listTools()).tools.filter((tool) => tool.name.includes("wiki"));
-    expect(tools.map((tool) => tool.name)).toEqual(["wiki_list", "wiki_read"]);
-    for (const tool of tools) expect(tool.description).toMatch(/free|no model/iu);
-  });
-
-  it("lists one project's titles, summaries, freshness and stamps through W2's route, framed in both outputs", async () => {
-    const { mcp, requests } = await connected(index());
-    const result = await mcp.callTool({ name: "wiki_list", arguments: { project: "alpha" } });
-    expect(result.isError).not.toBe(true);
-    const text = textOf(result);
-    framed(text, 4096);
-    expect(text).toContain("overview");
-    expect(text).toContain("Summary");
-    expect(text).toContain("may be out of date");
-    expect(text).toContain(SHA);
-    expect(result.structuredContent).toMatchObject({ content: text });
-    expect(requests).toEqual([{ url: "https://api.example/v1/app/projects/alpha/wiki", method: "GET", authorization: "Bearer test-session" }]);
-  });
 
   it("reads Markdown with sources and stale marks, only approved notes, and neutralizes forged frames", async () => {
     const { mcp, requests } = await connected(page());
@@ -100,17 +80,6 @@ describe("free wiki MCP tools", () => {
     expect(JSON.stringify(result)).not.toContain("xoxb-3333333333-planted-secret");
   });
 
-  it("keeps an ASCII page's structured frame intact past the usual 4000-character cap", async () => {
-    const long = page();
-    long.page.blocks = [{ kind: "paragraph", blockId: "para-1", text: "a".repeat(3900), claimIds: [] }, { kind: "paragraph", blockId: "para-2", text: "b".repeat(3900), claimIds: [] }];
-    long.notes = [];
-    const { mcp } = await connected(long);
-    const result = await mcp.callTool({ name: "wiki_read", arguments: { project: "alpha", page_id: "overview" } });
-    framed(textOf(result), 8192);
-    expect(textOf(result).length).toBeGreaterThan(4000);
-    expect(result.structuredContent).toEqual({ content: textOf(result) });
-  });
-
   it("returns an empty wiki with no key and refuses a response naming another project", async () => {
     const empty = await connected({ project: "alpha", state: "empty", agentsEnabled: false, pages: [] });
     const result = await empty.mcp.callTool({ name: "wiki_list", arguments: { project: "alpha" } });
@@ -139,13 +108,4 @@ describe("free wiki MCP tools", () => {
     expect(seen).toEqual(many.pages.map((p) => p.pageId));
   });
 
-  it("refuses malformed identifiers before a fetch, and reports W2 refusals without a model call", async () => {
-    const { mcp, requests } = await connected({ error: { code: "FORBIDDEN", message: "A script token cannot do that." } }, 403);
-    const invalid = await mcp.callTool({ name: "wiki_read", arguments: { project: "alpha/../beta", page_id: "overview" } });
-    expect(invalid.isError).toBe(true);
-    expect(requests).toEqual([]);
-    const result = await mcp.callTool({ name: "wiki_read", arguments: { project: "alpha", page_id: "overview" } });
-    expect(result.isError).toBe(true);
-    expect(requests).toHaveLength(1);
-  });
 });

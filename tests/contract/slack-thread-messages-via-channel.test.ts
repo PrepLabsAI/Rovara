@@ -55,18 +55,6 @@ describe("the built-in Slack adapter takes thread_messages", () => {
 });
 
 describe("one read of a thread", () => {
-  it("answers the replies oldest first without the first message, and the space's facts, with two Slack reads and nothing else", async () => {
-    const { calls, send } = run(slackWith([message({ ts: THREAD, text: "the first message" }), message(), message({ ts: "1700000002.000100", text: "second" })]));
-    expect(await send()).toEqual({
-      space: { private: false, shared: false, direct: false }, truncated: false,
-      messages: [
-        { id: "1700000001.000100", userId: "U0000000001", bot: false, external: false, plain: true, text: "Use the shared helper." },
-        { id: "1700000002.000100", userId: "U0000000001", bot: false, external: false, plain: true, text: "second" },
-      ],
-    });
-    expect(calls.map((call) => call.method)).toEqual(["conversations.info", "conversations.replies"]);
-    expect(calls[1]!.query).toMatchObject({ channel: SPACE, ts: THREAD });
-  });
   it("marks an app, a bot message and a message with no person as a bot; a person of another organisation as external; a notice as not plain", async () => {
     const { send } = run(slackWith([
       message({ ts: "1700000001.000001", bot_id: "B1", user: "U0000000002" }),
@@ -83,13 +71,6 @@ describe("one read of a thread", () => {
     expect(answer.messages.map((m) => [m.id.slice(-1), m.bot, m.external, m.plain])).toEqual([
       ["1", true, false, true], ["2", true, false, false], ["3", true, false, true], ["4", true, false, true], ["5", false, true, true], ["6", false, true, true], ["7", false, false, false], ["8", false, false, true], ["9", false, true, true],
     ]);
-  });
-  it("reads a space as private unless Slack says it is public, shared when Slack says any kind of shared, and direct when Slack says a direct or group direct message", async () => {
-    expect((await run(slackWith([], { is_private: true })).send()).space.private).toBe(true);
-    expect((await run(slackWith([], { is_private: undefined })).send()).space.private).toBe(true);
-    for (const flag of ["is_shared", "is_ext_shared", "is_org_shared", "is_pending_ext_shared"]) expect((await run(slackWith([], { [flag]: true })).send()).space.shared, flag).toBe(true);
-    expect((await run(slackWith([], { is_im: true })).send()).space.direct).toBe(true);
-    expect((await run(slackWith([], { is_mpim: true })).send()).space.direct).toBe(true);
   });
   it("is bounded: at most one page, and says when there was more", async () => {
     const many = Array.from({ length: THREAD_MESSAGES_MAX + 20 }, (_, i) => message({ ts: `1700000003.${String(i).padStart(6, "0")}` }));

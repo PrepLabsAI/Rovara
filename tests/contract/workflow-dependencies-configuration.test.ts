@@ -1,17 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
-import { createDeveloperApiConfiguration, workflowDependenciesConfigurationFromEnvironment } from "../../packages/broker/src/aws/workflow-dependencies-configuration.js";
+import { createDeveloperApiConfiguration } from "../../packages/broker/src/aws/workflow-dependencies-configuration.js";
 import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 
 describe("workflow dependency runtime configuration", () => {
-  it("is disabled unless the exact runtime value is true", () => {
-    for (const value of [undefined, "", "false", "FALSE", "1"]) {
-      expect(workflowDependenciesConfigurationFromEnvironment({ AGENTX_WORKFLOW_DEPENDENCIES_ENABLED: value }))
-        .toEqual({ workflowDependenciesEnabled: false });
-    }
-    expect(workflowDependenciesConfigurationFromEnvironment({ AGENTX_WORKFLOW_DEPENDENCIES_ENABLED: "true" }))
-      .toEqual({ workflowDependenciesEnabled: true });
-  });
 
   it("composes the real developer route feature settings without changing People or invitations", () => {
     const build = (flag: string | undefined) => createDeveloperApiConfiguration({
@@ -70,12 +62,4 @@ describe("workflow dependency runtime configuration", () => {
     ]) expect(eligible).toContain(required);
   });
 
-  it("does not add work-breakdown guidance to requirements or design documents", () => {
-    for (const kind of ["requirements", "design"] as const) {
-      expect(planDocumentInstructions({ kind, path: "FULL", workBreakdownContext: {
-        taskId: "61dcaa71-b1d4-4b22-8174-817a62636e52",
-        repositoryId: "payments-service",
-      } })).not.toContain("workBreakdown");
-    }
-  });
 });

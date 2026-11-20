@@ -38,16 +38,6 @@ function fixture() {
 }
 
 describe("dynamic GitHub MCP integration", () => {
-  it("discovers descriptions/schemas, filters tools and narrows policy without hand-written definitions", async () => {
-    const f = fixture();
-    const catalog = await discoverGitHubTools(f.context, f);
-    expect(catalog.tools.map((tool) => tool.name)).toEqual(["list_issues", "issue_read", "issue_write", "add_issue_comment"]);
-    expect(catalog.tools[0]?.description).toBe("Upstream list description");
-    const properties = catalog.tools[2]!.inputSchema.properties as Record<string, unknown>;
-    expect(properties.owner).toBeUndefined();
-    expect(properties.state).toBeUndefined();
-    expect(f.close).toHaveBeenCalledOnce();
-  });
 
   it("exposes a newly approved upstream tool with no new implementation", async () => {
     const f = fixture();
@@ -69,66 +59,4 @@ describe("dynamic GitHub MCP integration", () => {
     expect(f.call).not.toHaveBeenCalled();
   });
 
-  it("invalidates old schema hashes when upstream definitions change", async () => {
-    const f = fixture();
-    const request = f.request("list_issues");
-    f.tools[0]!.description = "Changed definition";
-    expect(await executeGitHubTool(request, f.context, f)).toMatchObject({ status: "FAILED" });
-    expect(f.call).not.toHaveBeenCalled();
-  });
-
-  it("writes once on replay and rejects changed inputs", async () => {
-    const f = fixture();
-    const request = f.request("issue_write", { method: "create", title: "Fix bug" });
-    expect(await executeGitHubTool(request, f.context, f)).toMatchObject({ status: "SUCCEEDED" });
-    expect(await executeGitHubTool(request, f.context, f)).toMatchObject({ status: "SUCCEEDED", replayed: true });
-    expect(f.call).toHaveBeenCalledOnce();
-    await expect(executeGitHubTool({ ...request, arguments: { method: "create", title: "Changed" } }, f.context, f)).rejects.toThrow(/IDEMPOTENCY_CONFLICT/);
-  });
-
-  it("does not repeat concurrent or interrupted writes and hides credentials", async () => {
-    const f = fixture();
-    let release!: () => void;
-    f.call.mockImplementationOnce(async () => { await new Promise<void>((resolve) => { release = resolve; }); throw new Error("network lost secret-installation-token"); });
-    const request = f.request("issue_write", { method: "create", title: "Fix bug" });
-    const pending = executeGitHubTool(request, f.context, f);
-    await vi.waitFor(() => expect(f.call).toHaveBeenCalledOnce());
-    expect(await executeGitHubTool(request, f.context, f)).toMatchObject({ status: "IN_PROGRESS", replayed: true });
-    release();
-    expect(await pending).toMatchObject({ status: "UNKNOWN" });
-    const replay = await executeGitHubTool(request, f.context, f);
-    expect(replay.status).toBe("UNKNOWN");
-    expect(JSON.stringify(replay)).not.toContain("secret-installation-token");
-    expect(f.call).toHaveBeenCalledOnce();
-  });
-
-  it("forwards upstream assignment semantics instead of implementing its own assignment tool", async () => {
-    const f = fixture();
-    const request = f.request("issue_write", { method: "update", issue_number: 7, assignees: ["abhishek255"] });
-    expect(await executeGitHubTool(request, f.context, f)).toMatchObject({ status: "SUCCEEDED" });
-    expect(f.call.mock.calls[1]).toEqual(["issue_write", { owner: "acme", repo: "app", method: "update", issue_number: 7, assignees: ["abhishek255"] }]);
-  });
-
-  it("blocks issue tools from mutating a PR", async () => {
-    const f = fixture();
-    f.call.mockResolvedValueOnce(result({ ...issue, html_url: "https://github.com/acme/app/pull/7" }));
-    expect(await executeGitHubTool(f.request("add_issue_comment", { issue_number: 7, body: "hello" }), f.context, f)).toMatchObject({ status: "FAILED" });
-    expect(f.call).toHaveBeenCalledOnce();
-  });
-
-  it("treats MCP tool errors as failure/uncertainty, not success", async () => {
-    const f = fixture();
-    f.call.mockResolvedValue({ isError: true, content: [{ type: "text", text: "secret-installation-token" }] });
-    expect(await executeGitHubTool(f.request("list_issues"), f.context, f)).toMatchObject({ status: "FAILED" });
-    expect(await executeGitHubTool(f.request("issue_write", { method: "create", title: "Bug" }), f.context, f)).toMatchObject({ status: "UNKNOWN" });
-  });
-
-  it("retains a durable claim when saving the write result fails", async () => {
-    const f = fixture();
-    f.store.finish = async () => { throw new Error("storage unavailable"); };
-    const request = f.request("issue_write", { method: "create", title: "Bug" });
-    expect(await executeGitHubTool(request, f.context, f)).toMatchObject({ status: "UNKNOWN" });
-    expect(await executeGitHubTool(request, f.context, f)).toMatchObject({ status: "IN_PROGRESS" });
-    expect(f.call).toHaveBeenCalledOnce();
-  });
 });

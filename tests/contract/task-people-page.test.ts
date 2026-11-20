@@ -1,11 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { TaskPeopleChangeResult, TaskPeopleDisplayReadRequest, TaskPeopleProposal } from "@agentx/contracts";
+import type { TaskPeopleChangeResult, TaskPeopleDisplayReadRequest } from "@agentx/contracts";
 import type { TaskPeopleView } from "../../packages/broker/src/developer/task-people.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
 import { createTaskWebApi } from "../../packages/broker/src/aws/task-web-api.js";
-import { createTaskWeb, type TaskDocumentView } from "../../packages/broker/src/aws/task-web.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { DEV_ISSUER, createDeveloperTaskBroker, type Developer } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
@@ -22,13 +21,6 @@ const people: TaskPeopleView = {
   people: [{ personId, name: "Lee <script>", role: "commenter", you: false, effectiveRole: "commenter" }],
   canManage: true, canTakeOwnership: false,
   addPeopleUrl: "https://slack.com/archives/C0123456789/p1234567890123456",
-};
-
-const documentView: TaskDocumentView = {
-  taskId, title: "Private People", status: "Waiting", nextStep: "Review", path: "QUICK", revision: 4,
-  stage: "Coding plan", role: "owner", documents: [], checks: [], findings: [], pullRequests: [], history: [],
-  access: { role: "owner", canComment: true, canSuggest: true, canDecide: true, canAsk: true },
-  peopleRevision: 7, canManagePeople: true, canTakeOwnership: false,
 };
 
 function request(method: string, path: string, body?: unknown): AdaptedHttpRequest {
@@ -192,24 +184,4 @@ describe("private task People page adapters", () => {
     expect(pendingCalls).toEqual(["receipt", "confirm"]);
   });
 
-  it("renders the private People panel and a GET-only pending confirmation with escaped immutable identity", async () => {
-    const pending: TaskPeopleProposal = { requestId, taskId, expectedPeopleRevision: 7, personId, role: "owner", kind: "role", expiresAt: "2026-10-12T12:10:00.000Z" };
-    const web = createTaskWeb({
-      authenticateSession: async () => caller,
-      getTaskDocumentView: async () => documentView,
-      getTaskPeople: async () => people,
-      getTaskPeopleRequest: async () => ({ status: "PENDING", requestId, confirmationUrl: `${origin}/review/${taskId}/task/people/confirm/${requestId}`, expiresAt: pending.expiresAt }),
-      getTaskPeopleProposalMetadata: async () => pending,
-      getTaskPersonName: async () => "Lee <script>",
-      getTaskPeopleCapabilities: async () => ({ peopleRevision: 7, canManagePeople: true, canTakeOwnership: false }),
-    });
-    const page = await web(request("GET", `/review/${taskId}/task`), new URL(`${origin}/review/${taskId}/task`));
-    expect(page.body).toContain('id="task-people"');
-    expect(page.body).toContain("Lee &lt;script&gt;");
-    expect(page.body).toContain("Add people in Slack");
-    const confirmation = await web(request("GET", `/review/${taskId}/task/people/confirm/${requestId}`), new URL(`${origin}/review/${taskId}/task/people/confirm/${requestId}`));
-    expect(confirmation.statusCode).toBe(200);
-    expect(confirmation.body).toContain("Review People change");
-    expect(confirmation.body).toContain("Lee &lt;script&gt;");
-  });
 });

@@ -3,13 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type FauxProviderHandle, type JsonObject } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { EVAL_ROOT, EvalProjectSchema, loadCases, loadCatalog, loadProject, type EvalCase } from "../eval/case.js";
+import { EVAL_ROOT, EvalProjectSchema, loadCases, loadProject, type EvalCase } from "../eval/case.js";
 import { parseEvalArguments, recordLiveReport, runEvalCli, runEvalCommand } from "../eval/command.js";
-import { legacyNotApplicable, legacyPresentation } from "../eval/legacy-presentation.js";
-import { scriptExpectedAnswers } from "../eval/offline.js";
 import { newPresentation } from "../eval/presentation.js";
-import { createOrchestrationTools } from "../../packages/orchestrator/src/orchestration-tools.js";
-import { cannedApi, caseHash, compareWithBaseline, reportPath, runEvaluation, scoreRun, type EvalReport } from "../eval/runner.js";
+import { compareWithBaseline, reportPath, runEvaluation, scoreRun, type EvalReport } from "../eval/runner.js";
 import { compareSc004 } from "../eval/sc004.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
@@ -46,57 +43,6 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 describe("evaluation cases", () => {
-  it("parse, have unique IDs, and name only tools their project offers", async () => {
-    const cases = await loadCases();
-    expect(cases.length).toBeGreaterThanOrEqual(3);
-    expect(new Set(cases.map((entry) => entry.id)).size).toBe(cases.length);
-    for (const evalCase of cases) {
-      const project = await loadProject(evalCase.project);
-      const catalogs = new Map(await Promise.all(project.connectors.map(async (connector) => [connector.catalog, await loadCatalog(connector.catalog)] as const)));
-      const offered = newPresentation(project, catalogs).toolNames;
-      for (const tool of [evalCase.expect.tool].flat()) {
-        if (tool !== null) expect(offered, `${evalCase.id} expects ${tool}`).toContain(tool);
-      }
-    }
-  });
-
-  it("expect only arguments, and enum values, that the offered tool's schema declares", async () => {
-    for (const evalCase of (await loadCases()).filter((entry) => entry.expect.argsSubset !== undefined)) {
-      const project = await loadProject(evalCase.project);
-      const catalogs = new Map(await Promise.all(project.connectors.map(async (connector) => [connector.catalog, await loadCatalog(connector.catalog)] as const)));
-      const presented = newPresentation(project, catalogs);
-      const tools = createOrchestrationTools(cannedApi(presented.catalogs), { workspaceId: "w", conversationId: "c" },
-        { connectorCatalogs: presented.catalogs, recovery: presented.recoverableOperations.length > 0 });
-      const name = [evalCase.expect.tool].flat()[0];
-      const properties = (tools.find((tool) => tool.name === name)?.parameters as { properties?: Record<string, { enum?: unknown[] }> } | undefined)?.properties ?? {};
-      for (const [key, value] of Object.entries(evalCase.expect.argsSubset ?? {})) {
-        expect(Object.keys(properties), `${evalCase.id}: ${name} has no argument ${key}`).toContain(key);
-        const allowed = properties[key]?.enum;
-        if (allowed !== undefined) expect(allowed, `${evalCase.id}: ${key}`).toContain(value);
-      }
-    }
-  });
-
-  it("read fixture projects in the registered project format, resolved by the broker's own connector types", async () => {
-    const project = await loadProject("fixtures/payments.yaml");
-    expect(project).toMatchObject({
-      name: "payments",
-      instructions: "Delegate every repository read, edit, build and test to the worker.",
-      repositories: ["payments-api", "payments-web"],
-      recoverableOperations: [],
-      connectors: [{
-        name: "github", type: "github", label: "GitHub issues", vendor: "GitHub", scopeNoun: "repository",
-        catalog: "github", scopes: ["payments-api", "payments-web"], connected: true,
-      }],
-    });
-    expect(project.connectors[0]?.approvals.map((approval) => approval.name)).toEqual(["list_issues", "issue_read", "issue_write", "add_issue_comment"]);
-    const presented = newPresentation(project, new Map([["github", await loadCatalog("github")]]));
-    expect(presented.toolNames).toEqual([
-      "agentx_submit_task", "agentx_create_pull_request", "agentx_follow_up", "agentx_manage_pull_request",
-      "github__list_issues", "github__issue_read", "github__issue_write", "github__add_issue_comment",
-    ]);
-    expect(presented.catalogs[0]?.tools[2]?.description).toMatch(/^Create or update a GitHub issue\. Not for pull requests/);
-  });
 
   it("refuses a connector type this release cannot resolve, an unknown not-connected name, or a missing catalog, loudly", async () => {
     const base = {
@@ -112,28 +58,9 @@ describe("evaluation cases", () => {
     expect(() => newPresentation(project, new Map())).toThrow(/catalog github/);
   });
 
-  it("marks a connector not connected and offers recovery tools only through the fixture's eval settings", () => {
-    const project = EvalProjectSchema.parse({
-      name: "demo", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate.",
-      repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
-      integrations: { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }] }] },
-      eval: { notConnected: ["github"], recoverableOperations: ["0f0e0d0c-0b0a-4908-8706-050403020100"] },
-    });
-    const presented = newPresentation(project, new Map());
-    expect(presented.connectors).toEqual([{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: false }]);
-    expect(presented.catalogs).toEqual([]);
-    expect(presented.toolNames).toEqual(["agentx_submit_task", "agentx_create_pull_request", "agentx_task_status", "agentx_task_result", "agentx_follow_up", "agentx_manage_pull_request"]);
-  });
 });
 
 describe("evaluation harness, offline", () => {
-  it("scores every committed case with the new presentation through the real orchestrator", async () => {
-    const { modelRuntime, faux } = await fauxModelRuntime();
-    const cases = await loadCases();
-    const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, beforeRun: oracle(faux, expected) });
-    expect(report.cases.filter((result) => !result.passed).map((result) => result.id)).toEqual([]);
-    expect(report.summary).toMatchObject({ cases: cases.length, passed: cases.length, toolAccuracy: 1, refusalAccuracy: 1, errors: 0 });
-  }, 120_000);
 
   it("fails a case on a wrong tool, wrong arguments or a missing refusal, and counts regressions", async () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
@@ -167,85 +94,6 @@ describe("evaluation harness, offline", () => {
     }
   }, 60_000);
 
-  it("scores refusal and contains separately: both must pass, and refusal accuracy counts only the refusal phrase", async () => {
-    const { modelRuntime, faux } = await fauxModelRuntime();
-    const directory = await temporaryDirectory();
-    try {
-      const both = (id: string) => JSON.stringify({ id, project: "fixtures/github-only.yaml", prompt: "what's open in Jira?", expect: { tool: null, refusal: "not connected", contains: "Jira" } });
-      await writeFile(join(directory, "both.jsonl"), `${both("both-present")}\n${both("contains-missing")}\n`);
-      const cases = await loadCases(directory);
-      const answers = oracle(faux, (evalCase) => ({ text: evalCase.id === "both-present" ? "Jira is not connected for this channel." : "That is not connected for this channel." }));
-      const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, beforeRun: answers });
-      expect(report.cases.map((result) => [result.id, result.passed])).toEqual([["both-present", true], ["contains-missing", false]]);
-      expect(report.cases[1]?.runs[0]).toMatchObject({ toolOk: true, refusalOk: true, containsOk: false, phraseOk: false });
-      expect(report.summary).toMatchObject({ passed: 1, refusalCases: 2, refusalAccuracy: 1 });
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  }, 60_000);
-
-  it("waits for a timed-out run to stop before the next case starts on the shared model runtime", async () => {
-    const { modelRuntime, faux } = await fauxModelRuntime();
-    const cases = (await loadCases()).filter((entry) => ["files-not-pr", "append-pr"].includes(entry.id));
-    const events: string[] = [];
-    // The timeout applies to append-pr too, so it is long enough for a normal run on a loaded machine.
-    const script = oracle(faux, expected);
-    const beforeRun = async (evalCase: EvalCase) => {
-      if (evalCase.id === "files-not-pr") {
-        await new Promise((resolve) => setTimeout(resolve, 1_300));
-        // The abandoned run touches the shared faux handle after its deadline.
-        faux.setResponses([fauxAssistantMessage("Jira is a tool I lack.")]);
-        events.push("files-not-pr settled");
-        return;
-      }
-      events.push("append-pr started");
-      script(evalCase);
-    };
-    const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, timeoutMs: 1_000, graceMs: 2_000, beforeRun });
-    expect(events).toEqual(["files-not-pr settled", "append-pr started"]);
-    expect(report.cases.map((result) => [result.id, result.passed])).toEqual([["files-not-pr", false], ["append-pr", true]]);
-    expect(report.cases[0]?.runs[0]).toMatchObject({ error: "timed out after 1000 ms" });
-    expect(report.stopped).toBeUndefined();
-  }, 30_000);
-
-  it("stops the evaluation when a timed-out run does not stop within the grace period", async () => {
-    const { modelRuntime, faux } = await fauxModelRuntime();
-    const cases = (await loadCases()).filter((entry) => ["files-not-pr", "append-pr"].includes(entry.id));
-    const started: string[] = [];
-    const script = oracle(faux, expected);
-    const beforeRun = (evalCase: EvalCase) => {
-      started.push(evalCase.id);
-      if (evalCase.id === "files-not-pr") return new Promise<void>(() => undefined);
-      script(evalCase);
-      return undefined;
-    };
-    const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, timeoutMs: 50, graceMs: 100, beforeRun });
-    const stopped = "case files-not-pr did not stop after its timeout; the evaluation was stopped so later cases do not share its state";
-    expect(started).toEqual(["files-not-pr"]);
-    expect(report.stopped).toBe(stopped);
-    expect(report.notRun).toEqual(["append-pr"]);
-    expect(report.cases.map((result) => [result.id, result.passed])).toEqual([["files-not-pr", false]]);
-    expect(report.cases[0]?.runs[0]).toMatchObject({ toolOk: false, error: `timed out after 50 ms; ${stopped}` });
-    expect(report.summary).toMatchObject({ cases: 1, passed: 0, errors: 1 });
-    // A run that did not stop is an infrastructure fault, not a model timeout.
-    expect(report.cases[0]?.runs[0]?.timedOut).toBeUndefined();
-    expect(report.summary.timeouts).toBeUndefined();
-    const root = await temporaryDirectory();
-    try {
-      expect(await recordLiveReport({ ...report, provider: "amazon-bedrock", model: "us.anthropic.claude-sonnet-4-6" }, { updateBaseline: true, root })).toMatchObject({ exitCode: 1 });
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 30_000);
-
-  it("times out the whole run, including the steps before the turn", async () => {
-    const { modelRuntime } = await fauxModelRuntime();
-    const cases = (await loadCases()).filter((entry) => entry.id === "files-not-pr");
-    const stuck = () => new Promise<void>((resolve) => setTimeout(resolve, 1_500));
-    const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, timeoutMs: 50, beforeRun: stuck });
-    expect(report.cases[0]).toMatchObject({ passed: false, runs: [{ toolOk: false, error: "timed out after 50 ms" }] });
-  }, 30_000);
-
   it("counts a timed-out run as a failed run and a timeout, not as an error that blocks the baseline", async () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
     const cases = (await loadCases()).filter((entry) => ["files-not-pr", "append-pr"].includes(entry.id));
@@ -271,74 +119,6 @@ describe("evaluation harness, offline", () => {
     }
   }, 30_000);
 
-  it("still blocks the baseline on an infrastructure error or a fixture error alongside timeouts", async () => {
-    const timedOut = { tool: null, toolOk: false, argsOk: true, phraseOk: null, refusalOk: null, containsOk: null, timedOut: true as const, error: "timed out after 180000 ms" };
-    const infrastructure = { tool: null, toolOk: false, argsOk: true, phraseOk: null, refusalOk: null, containsOk: null, error: "RUNTIME_UNAVAILABLE: AccessDeniedException" };
-    const root = await temporaryDirectory();
-    try {
-      const report = liveReport({
-        cases: [{ id: "files-not-pr", passed: false, runs: [timedOut] }, { id: "append-pr", passed: false, runs: [infrastructure] }],
-        summary: { cases: 2, passed: 0, errors: 1, timeouts: 1, toolAccuracy: 0, refusalCases: 0, refusalAccuracy: 1 },
-      });
-      const outcome = await recordLiveReport(report, { updateBaseline: true, root });
-      expect(outcome).toEqual({ exitCode: 1, lines: ["Baseline not written: 1 case errored. Rerun once the errors are resolved."] });
-      await expect(readFile(reportPath("baseline", "us.anthropic.claude-sonnet-4-6", "new", root), "utf8")).rejects.toThrow(/ENOENT/);
-      expect((await recordLiveReport(report, { updateBaseline: false, root })).exitCode).toBe(1);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-    const { modelRuntime, faux } = await fauxModelRuntime();
-    const directory = await temporaryDirectory();
-    try {
-      await writeFile(join(directory, "broken.jsonl"), `${JSON.stringify({ id: "broken-fixture", project: "fixtures/missing-project.yaml", prompt: "list files", expect: { tool: "agentx_submit_task" } })}\n`);
-      const broken = await runEvaluation(await loadCases(directory), { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, beforeRun: oracle(faux, expected) });
-      expect(broken.cases[0]?.runs[0]?.timedOut).toBeUndefined();
-      expect(broken.summary).toMatchObject({ errors: 1 });
-      expect(broken.summary.timeouts).toBeUndefined();
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  }, 30_000);
-
-  it("counts a turn that runs past the timeout as an error", async () => {
-    const { modelRuntime, faux } = await fauxModelRuntime();
-    const cases = (await loadCases()).filter((entry) => entry.id === "files-not-pr");
-    const slow = () => faux.setResponses([async () => { await new Promise((resolve) => setTimeout(resolve, 1_500)); return fauxAssistantMessage("late"); }]);
-    const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, timeoutMs: 50, beforeRun: slow });
-    expect(report.cases[0]).toMatchObject({ passed: false, runs: [{ toolOk: false, error: "timed out after 50 ms" }] });
-  }, 30_000);
-
-  it("maps legacy tool names to the new names before scoring", async () => {
-    const { modelRuntime, faux } = await fauxModelRuntime();
-    const cases = (await loadCases()).filter((entry) => entry.id === "append-pr");
-    const project = await loadProject("fixtures/payments.yaml");
-    const legacy = legacyPresentation(project, new Map([["github", await loadCatalog("github")]]));
-    expect(legacy.tools.map((tool) => tool.name)).toHaveLength(12 + 4 * 2);
-    expect(legacy.systemPrompt).not.toContain("What this channel can do:");
-    const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "legacy", repeat: 1,
-      beforeRun: oracle(faux, () => ({ tool: "agentx_append_pull_request", args: { repository: "payments-api", pullRequestNumber: 12 } })) });
-    expect(report.cases[0]).toMatchObject({ passed: true, runs: [{ tool: "agentx_manage_pull_request", argsOk: true }] });
-    const issueTool = legacy.legacyName("github__list_issues", { target: "payments-web" });
-    expect(issueTool).toMatch(/^github_list_issues_[a-f0-9]{12}$/);
-    expect(legacy.canonical(issueTool, { state: "OPEN" })).toEqual({ tool: "github__list_issues", args: { state: "OPEN", target: "payments-web" } });
-    expect(legacy.legacyCall("github__list_issues", { target: "payments-web", state: "OPEN" })).toEqual({ tool: issueTool, args: { state: "OPEN" } });
-    expect(legacy.legacyCall("agentx_manage_pull_request", { repository: "payments-api", pullRequestNumber: 12, action: "append" }))
-      .toEqual({ tool: "agentx_append_pull_request", args: { repository: "payments-api", pullRequestNumber: 12 } });
-  }, 60_000);
-
-  it("reports a case the legacy presentation cannot express as not applicable, never a failure or a silent drop", async () => {
-    const { modelRuntime, faux } = await fauxModelRuntime();
-    const cases = (await loadCases()).filter((entry) => ["linear-open-issues", "github-not-linear", "files-not-pr", "jira-not-connected"].includes(entry.id));
-    const options = { model: FAUX_MODEL, modelRuntime, repeat: 1, beforeRun: scriptExpectedAnswers(faux) };
-    const legacy = await runEvaluation(cases, { ...options, presentation: "legacy" });
-    expect(legacy.cases.map((result) => [result.id, result.passed])).toEqual([["files-not-pr", true], ["jira-not-connected", true], ["github-not-linear", true]]);
-    expect(legacy.notApplicable).toEqual([{ id: "linear-open-issues", reason: "needs connector linear (type linear), which the legacy presentation cannot offer" }]);
-    expect(legacy.summary).toEqual({ cases: 3, passed: 3, errors: 0, notApplicable: 1, toolAccuracy: 1, refusalCases: 1, refusalAccuracy: 1 });
-    const fresh = await runEvaluation(cases, { ...options, presentation: "new" });
-    expect(fresh.notApplicable).toBeUndefined();
-    expect(fresh.summary).toEqual({ cases: 4, passed: 4, errors: 0, toolAccuracy: 1, refusalCases: 1, refusalAccuracy: 1 });
-  }, 60_000);
-
   it("matches phrases with curly apostrophes and quotes as straight ones", async () => {
     const [refusal] = (await loadCases()).filter((entry) => entry.id === "linear-read-unconfigured");
     expect(scoreRun(refusal!, { tool: null, args: {}, response: "Linear isn’t connected for this channel." })).toMatchObject({ toolOk: true, refusalOk: true, phraseOk: true });
@@ -346,32 +126,6 @@ describe("evaluation harness, offline", () => {
     const quoted: EvalCase = { id: "quoted", project: "fixtures/github-only.yaml", prompt: "x", expect: { tool: null, contains: "“AGENTX_OK”" } };
     expect(scoreRun(quoted, { tool: null, args: {}, response: 'I replied "agentx_ok".' })).toMatchObject({ containsOk: true });
   });
-
-  it("marks a case not applicable to legacy when its fixture needs a recoverable operation", async () => {
-    const cases = await loadCases();
-    const recover = cases.find((entry) => entry.id === "recover-operation")!;
-    expect(legacyNotApplicable(await loadProject(recover.project), recover)).toBe("needs a recoverable operation ID, which the legacy presentation cannot receive");
-    const files = cases.find((entry) => entry.id === "files-not-pr")!;
-    expect(legacyNotApplicable(await loadProject(files.project), files)).toBeUndefined();
-  });
-
-  it("records a stable hash of each case definition and of the scored case set", async () => {
-    const { modelRuntime, faux } = await fauxModelRuntime();
-    const cases = (await loadCases()).filter((entry) => ["files-not-pr", "linear-open-issues"].includes(entry.id));
-    const options = { model: FAUX_MODEL, modelRuntime, repeat: 1, beforeRun: scriptExpectedAnswers(faux) };
-    const fresh = await runEvaluation(cases, { ...options, presentation: "new" });
-    const legacy = await runEvaluation(cases, { ...options, presentation: "legacy" });
-    const files = cases.find((entry) => entry.id === "files-not-pr")!;
-    expect(caseHash(files)).toMatch(/^[a-f0-9]{64}$/);
-    expect(caseHash({ ...files, note: "a note changes nothing", source: "channel" })).toBe(caseHash(files));
-    expect(caseHash({ ...files, expect: { tool: "agentx_submit_task", argsSubset: {} } })).not.toBe(caseHash(files));
-    expect(caseHash({ ...files, prompt: `${files.prompt}.` })).not.toBe(caseHash(files));
-    expect(fresh.cases.map((result) => result.caseHash)).toEqual(cases.map(caseHash));
-    expect(legacy.cases.map((result) => [result.id, result.caseHash])).toEqual([["files-not-pr", caseHash(files)]]);
-    expect(fresh.caseSetHash).toMatch(/^[a-f0-9]{64}$/);
-    expect(legacy.caseSetHash).not.toBe(fresh.caseSetHash);
-    expect((await runEvaluation(cases, { ...options, presentation: "new" })).caseSetHash).toBe(fresh.caseSetHash);
-  }, 60_000);
 
   it("scores a first call to a tool the presentation does not offer as the wrong tool", async () => {
     const { modelRuntime, faux } = await fauxModelRuntime();

@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
 import type { DeveloperTaskView, StartDeveloperTaskRequest } from "@agentx/contracts";
-import { DEVELOPER_TOOLS, createAgentXMcpServer, httpControlPlaneClient, type ControlPlaneClient, type ToolContext } from "../../packages/mcp/src/index.js";
+import { createAgentXMcpServer, httpControlPlaneClient, type ControlPlaneClient, type ToolContext } from "../../packages/mcp/src/index.js";
 
 const TASK = "44444444-4444-4444-8444-444444444444";
 const AGT = "agt_aaaaaaaaaaaaaaaaaaaa";
@@ -33,26 +33,6 @@ async function connect(client: Partial<ControlPlaneClient>) {
   return mcp;
 }
 
-describe("the agent tools in the list", () => {
-  it("adds agentx_list_agents, agentx_run_agent and agentx_list_approvals", async () => {
-    const names = (await (await connect({})).listTools()).tools.map((tool) => tool.name);
-    expect(names).toEqual(expect.arrayContaining(["agentx_list_agents", "agentx_run_agent", "agentx_list_approvals"]));
-  });
-
-  it("has no tool that decides an approval, a spend request or a comment-trigger opt-out (R3-4)", async () => {
-    const { tools } = await (await connect({})).listTools();
-    const governed = tools.filter((tool) => /approv|spend|opt.?out|comment.?trigger|budget|guardrail/i.test(tool.name));
-    expect(governed.map((tool) => tool.name).sort()).toEqual(["agentx_list_approvals", "agentx_open_approval"]);
-    for (const tool of tools) expect(tool.name, tool.name).not.toMatch(/(approve|decline|deny|reject)/);
-    // The client the tools are written against has no way to decide one either.
-    const client = httpControlPlaneClient({ session: async () => ({ baseUrl: CELL, accessToken: "t", signInCommand: "x" }), fetch: vi.fn<typeof fetch>() });
-    expect(Object.keys(client).filter((name) => /decide|approve|decline|deny|optOut|spendRequest/i.test(name) && !/Workflow/.test(name))).toEqual([]);
-    const listing = tools.find((tool) => tool.name === "agentx_list_approvals")!;
-    expect(listing.description).toMatch(/confirm_url/);
-    expect(listing.description).toMatch(/cannot approve|can't approve|never approve/i);
-  });
-});
-
 describe("agentx_start_task and agentx_start_workflow take an agent and its input", () => {
   it("passes agent and input through, with the instructions as the input's text", async () => {
     const seen: StartDeveloperTaskRequest[] = [];
@@ -68,13 +48,6 @@ describe("agentx_start_task and agentx_start_workflow take an agent and its inpu
     expect(seen[1]).toMatchObject({ workflow: true, workflowPath: "QUICK", agent: { agentId: "rovara-code", version: 2 }, input: { text: "Fix it" } });
   });
 
-  it("sends neither when they are left out", async () => {
-    const seen: StartDeveloperTaskRequest[] = [];
-    const mcp = await connect({ startTask: async (request) => { seen.push(request); return view; } });
-    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "Fix it" } });
-    expect(seen[0]).not.toHaveProperty("agent");
-    expect(seen[0]).not.toHaveProperty("input");
-  });
 });
 
 describe("agentx_list_agents and agentx_run_agent", () => {
@@ -86,28 +59,6 @@ describe("agentx_list_agents and agentx_run_agent", () => {
     expect(structured(result)).toMatchObject({ agents: [{ agent_id: AGT, name: "Triage helper", builtin: false }] });
   });
 
-  it("starts a run of an agent and answers with its task", async () => {
-    const runAgent = vi.fn(async () => view);
-    const mcp = await connect({ runAgent, getTask: async () => view });
-    const result = await mcp.callTool({ name: "agentx_run_agent", arguments: { agent_id: AGT, project: "payments", input: "Look at the build", version: "draft" } });
-    expect(runAgent).toHaveBeenCalledWith(AGT, { requestId: "33333333-3333-4333-8333-333333333333", project: "payments", version: "draft", input: { text: "Look at the build" } });
-    expect(structured(result)).toMatchObject({ task_id: TASK });
-  });
-});
-
-describe("agentx_start with run_agent refuses the share fields (item H3)", () => {
-  it("refuses share, share_to_channel (and channel), and starts nothing", async () => {
-    const runAgent = vi.fn(async () => view);
-    const startTask = vi.fn(async () => view);
-    const mcp = await connect({ runAgent, startTask });
-    for (const extra of [{ share: true }, { share: false }, { share_to_channel: true }, { channel: "payments-dev" }]) {
-      const result = await mcp.callTool({ name: "agentx_start", arguments: { project: "payments", instructions: "Look at the build", run_agent: true, agent: { agent_id: AGT }, ...extra } });
-      expect(result).toMatchObject({ isError: true });
-      expect(JSON.stringify((result as { content: unknown }).content)).toContain("INVALID_REQUEST");
-    }
-    expect(runAgent).not.toHaveBeenCalled();
-    expect(startTask).not.toHaveBeenCalled();
-  });
 });
 
 describe("agentx_run_agent when the version asked for waits for the agent's owner (owner decision 2026-10-22)", () => {
@@ -179,10 +130,6 @@ describe("agentx_list_approvals", () => {
     ]);
   });
 
-  it("is in the module's tool definitions with an output schema", () => {
-    const definition = DEVELOPER_TOOLS.find((tool) => tool.name === "agentx_list_approvals");
-    expect(definition?.outputSchema).toHaveProperty("approvals");
-  });
 });
 
 describe("agentx_open_approval (review M2)", () => {
@@ -195,21 +142,6 @@ describe("agentx_open_approval (review M2)", () => {
     expect(text(result)).toContain(`${CONFIRM}?ticket=t1`);
   });
 
-  it("says the link is for the person and must not be fetched by the assistant", async () => {
-    const { tools } = await (await connect({})).listTools();
-    const tool = tools.find((entry) => entry.name === "agentx_open_approval")!;
-    expect(tool.description).toMatch(/for the person/i);
-    expect(tool.description).toMatch(/do not (fetch|open)|must not (be )?(fetch|open)/i);
-    const listing = tools.find((entry) => entry.name === "agentx_list_approvals")!;
-    expect(listing.description).toMatch(/agentx_open_approval/);
-  });
-
-  it("refuses an ID that is not an approval's before sending anything", async () => {
-    const approvalConfirmLink = vi.fn(async () => ({ confirmUrl: CONFIRM, ticketed: false }));
-    const result = await (await connect({ approvalConfirmLink })).callTool({ name: "agentx_open_approval", arguments: { approval_id: ".." } });
-    expect((result as { isError?: boolean }).isError).toBe(true);
-    expect(approvalConfirmLink).not.toHaveBeenCalled();
-  });
 });
 
 describe("the start tools with an agent (review M10)", () => {

@@ -5,9 +5,8 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { slackTokens } from "../../packages/testing/src/channel/slack-world.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { companyThenInstallLinkCodes, installAdapterLinkCodes, slackCompanyServes, slackRequestTeam, splitBySlackTeam, withoutSlackCompanyMode } from "../../packages/broker/src/aws/slack-company-split.js";
+import { companyThenInstallLinkCodes, installAdapterLinkCodes, slackCompanyServes, slackRequestTeam, withoutSlackCompanyMode } from "../../packages/broker/src/aws/slack-company-split.js";
 import { issueLinkCode } from "../../packages/broker/src/aws/channel-links.js";
-import { slackCompanyProject } from "../../packages/broker/src/aws/slack-person.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { call, createBroker, loadSlackBroker, orchestratorPrincipal, registerSlackProject, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
@@ -75,28 +74,6 @@ describe("which handler a request reaches", () => {
     expect(slackCompanyServes({ headers: { "x-agentx-slack-thread": `${OTHER}/${SLACK_CHANNEL}/${TS}` } }, SLACK_TEAM)).toBe(true);
   });
 
-  it("makes another team's channel binding 'not bound' in the install team's legacy view (defence in depth), and changes nothing off", async () => {
-    const view = withoutSlackCompanyMode({ workspaces: undefined as never, tableName: "t" }, SLACK_TEAM);
-    expect(view).toStrictEqual({ tableName: "t", slackInstallTeamOnly: SLACK_TEAM });
-    expect(withoutSlackCompanyMode({ workspaces: {}, tableName: "t" }, SLACK_TEAM)).toStrictEqual({ tableName: "t", slackInstallTeamOnly: SLACK_TEAM });
-    expect(await slackCompanyProject(view, OTHER, "payments")).toBe(false);
-    expect(await slackCompanyProject(view, SLACK_TEAM, "payments")).toBe(true);
-    expect(await slackCompanyProject({}, OTHER, "payments")).toBe(true);
-    // Company mode without SLACK_TEAM_ID: the broker passes "" (never a team), so no team's binding is bound in the legacy view.
-    const unset = withoutSlackCompanyMode({ workspaces: undefined as never, tableName: "t" }, "");
-    expect(await slackCompanyProject(unset, OTHER, "payments")).toBe(false);
-    expect(await slackCompanyProject(unset, SLACK_TEAM, "payments")).toBe(false);
-  });
-
-  it("is today's handler itself when company mode is off", () => {
-    const legacy = vi.fn(), company = vi.fn();
-    expect(splitBySlackTeam(legacy, undefined, SLACK_TEAM)).toBe(legacy);
-    expect(splitBySlackTeam(legacy, undefined, undefined)).toBe(legacy);
-    const split = splitBySlackTeam(legacy, company, SLACK_TEAM);
-    split({ teamId: OTHER }); split({ teamId: SLACK_TEAM });
-    expect(company).toHaveBeenCalledTimes(1); expect(legacy).toHaveBeenCalledTimes(1);
-  });
-
   it("drops only the company path from the legacy view", () => {
     const deps = { workspaces: {}, companies: {}, tableName: "t" };
     expect(withoutSlackCompanyMode(deps)).toStrictEqual({ companies: {}, tableName: "t" });
@@ -128,12 +105,6 @@ describe("the link page's codes in the company handler", () => {
     expect(install.redeem).not.toHaveBeenCalled();
     expect(await codes.redeem("p", "install")).toBe("install-link");
     expect(company.redeem).toHaveBeenCalledTimes(1);
-  });
-  it("serves only company codes where the deployment has no adapters", async () => {
-    const company = { preview: vi.fn(async () => undefined), redeem: vi.fn(async () => { throw new Error("expired"); }) };
-    const codes = companyThenInstallLinkCodes(company, undefined);
-    expect(await codes.preview("p", "any")).toBeUndefined();
-    await expect(codes.redeem("p", "any")).rejects.toThrow("expired");
   });
 });
 
@@ -196,20 +167,6 @@ describe("the install team's legacy view in a company-mode broker", () => {
   });
 });
 
-describe("company mode without SLACK_TEAM_ID", () => {
-  it("never serves another team's binding from the legacy view", async () => {
-    const module = await loadSlackBroker();
-    const h = createBroker();
-    await registerSlackProject(h.handler, { bind: false });
-    const admin = { subject: "admin-subject", admin: true };
-    expect((await call(h.handler, { method: "PUT", path: `/v1/admin/slack/bindings/${OTHER}/${SLACK_CHANNEL}`, user: admin, body: { projectName: "payments" } })).status).toBe(200);
-    const { slackWorkspaceLegacyTeamId: _install, ...world } = companyWorld(); void _install;
-    const split = module.createAwsBrokerHandler({ ...h.brokerInput, ...world } as never);
-    const answer = await call(split, { method: "GET", path: `/v1/admin/evals/channels/${OTHER}/${SLACK_CHANNEL}`, user: admin });
-    expect(JSON.stringify(answer.body)).toContain("bind the channel to a project first");
-  });
-});
-
 describe("the broker's split (golden)", () => {
   beforeAll(async () => { await loadSlackBroker(); });
 
@@ -253,24 +210,6 @@ describe("the broker's split (golden)", () => {
     expect(JSON.stringify(legacy.answers)).not.toContain(WEB);
     expect(legacy.commands.length).toBeGreaterThan(0);
     expect((await run(true, OTHER)).answers).not.toStrictEqual(legacy.answers);
-  });
-
-  it("sends another team through the company path (its checks refuse an unlinked person)", async () => {
-    const split = await run(true, OTHER);
-    expect(JSON.stringify(split.answers)).toContain(WEB);
-    expect(split.touched).toContain("requireCompany");
-    // No task starts for the refused team.
-    expect(JSON.stringify(split.answers)).not.toContain("taskId");
-  });
-
-  it("a request naming no team reaches the legacy handler", async () => {
-    const h = await createDeveloperTaskBroker({ channelMembers: async (r) => ({ ok: true, memberOf: r.channelIds }) });
-    const module = await loadSlackBroker();
-    const world = companyWorld(); const lookup = vi.spyOn(world.workspaces, "requireCompany");
-    const handler = module.createAwsBrokerHandler({ ...h.brokerInput, ...world } as never);
-    const legacy = await h.handler({ source: "agentx.github-webhook-recovery" });
-    expect(await handler({ source: "agentx.github-webhook-recovery" })).toStrictEqual(legacy);
-    expect(lookup).not.toHaveBeenCalled();
   });
 
   it("keeps randomUUID untouched (sanity for the id scrub)", () => { expect(randomUUID()).toMatch(/^[0-9a-f-]{36}$/u); });

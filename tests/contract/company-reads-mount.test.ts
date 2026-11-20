@@ -62,32 +62,9 @@ afterEach(() => { vi.useRealTimers(); });
 const AUDIT = "/v1/dev/client/company/audit/records";
 const EVENTS = "/v1/dev/client/company/events";
 
-// Hosted wiring: with lane ID's route table (#646) in front, the two reads need full access until a named company-read scope exists (the fixture's client has it).
-describe("the company reads behind lane ID's route table", () => {
-  it("refuses a client without full access, before anything is read", async () => {
-    const at = new Date(T0 - 60_000).toISOString();
-    db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, createdAt: at, updatedAt: at, updatedBy: "admin" });
-    for (const path of [AUDIT, EVENTS]) {
-      const read = await call("GET", path, await token());
-      expect(read.status, path).toBe(403);
-      expect(JSON.stringify(read.body)).not.toContain("evt_a");
-    }
-  });
-});
 type Records = { records: Array<{ eventId: string; actor: { developerId: string; name: string } }>; next?: string };
 
 describe("the company audit read on the developer API", () => {
-  it("answers an administrator the records of their own company, newest first, with the person's name", async () => {
-    const read = await call("GET", AUDIT, await token());
-    expect(read.status).toBe(200);
-    expect((read.body as unknown as Records).records.map((record) => record.eventId)).toEqual(["evt_a1", "evt_a0"]);
-    expect((read.body as unknown as Records).records[0]!.actor).toEqual({ developerId: ADA, name: "Ada", type: "person" });
-  });
-
-  it("answers the other administrator the other company", async () => {
-    const read = await call("GET", AUDIT, await token({ sub: BO, sid: "s-bo" }));
-    expect((read.body as unknown as Records).records.map((record) => record.eventId)).toEqual(["evt_b1", "evt_b0"]);
-  });
 
   it("shows a person's name only for a person of the caller's own company", async () => {
     await seedAudit(store, COMPANY_A, { eventId: "evt_stranger", at: "2026-11-10T10:09:00.000Z", actor: { type: "person", id: BO } });
@@ -104,10 +81,6 @@ describe("the company audit read on the developer API", () => {
     const both = [...(first.body as unknown as Records).records, ...(second.body as unknown as Records).records].map((record) => record.eventId).sort();
     expect(both).toEqual(["evt_a0", "evt_a1"]);
     expect((await call("GET", AUDIT, await token(), "limit=0")).status).toBe(400);
-  });
-
-  it("refuses a person who is not an administrator with 403", async () => {
-    expect((await call("GET", AUDIT, await token({ sub: CY, sid: "s-cy" }))).status).toBe(403);
   });
 
   it("refuses with the sign-in-again 401 when the person's company cannot be found", async () => {

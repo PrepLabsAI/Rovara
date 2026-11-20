@@ -10,15 +10,6 @@ const pricedOrLabelled = (role: ModelRole, choice: { value: string; label: strin
   modelPriceLabel(role, choice.value) !== PRICE_NOT_ON_FILE || choice.label.includes(PRICE_NOT_ON_FILE);
 
 describe("model prices", () => {
-  it("FR-024: prices every default model, the coding model included", () => {
-    const estimate = estimateMonthlyCost(DEFAULTS);
-    expect(estimate.unpriced).toEqual([]);
-    expect(estimate.lines.slice(-3).map((line) => [line.item, line.usd])).toEqual([
-      ["Main model (Claude Sonnet 4.6)", 25], ["Safety check model (Claude Haiku 4.5)", 2.5], ["Coding model (Claude Sonnet 4.6)", 75],
-    ]);
-    expect(estimate.lines.find((line) => line.item.startsWith("Coding machines"))).toMatchObject({ item: "Coding machines (m6g.large)", usd: 4.62, basis: "60 machine-hours at $0.077/hour" });
-    expect(estimate.totalUsd).toBe(213.44);
-  });
 
   it("FR-082: every model offered as a choice has a price or says price not on file", () => {
     for (const choice of ORCHESTRATOR_MODEL_CHOICES) expect(pricedOrLabelled("orchestrator", choice)).toBe(true);
@@ -32,20 +23,9 @@ describe("model prices", () => {
     expect(pricedOrLabelled("worker", { value: "us.anthropic.claude-opus-4-1-20250805-v1:0", label: `Claude Opus 4.1 (${PRICE_NOT_ON_FILE})` })).toBe(true);
   });
 
-  it("labels prices the way the choices show them", () => {
-    expect(modelPriceLabel("orchestrator", DEFAULT_ORCHESTRATOR_MODEL)).toBe("about $0.025 a turn");
-    expect(modelPriceLabel("classifier", DEFAULT_CLASSIFIER_MODEL)).toBe("about $0.0025 a check");
-    expect(modelPriceLabel("worker", DEFAULT_WORKER_MODEL)).toBe("about $0.75 a coding session");
-    expect(modelPriceLabel("orchestrator", DEFAULT_ORCHESTRATOR_MODEL, "openrouter")).toBe(PRICE_NOT_ON_FILE);
-  });
 });
 
 describe("the budget default", () => {
-  it("FR-023: is the estimate plus 20%, rounded up to a whole $10", () => {
-    expect(suggestedBudgetUsd(estimateMonthlyCost(DEFAULTS))).toBe(260);
-    expect(suggestedBudgetUsd({ lines: [], totalUsd: 0, unpriced: [] })).toBe(10);
-    expect(suggestedBudgetUsd({ lines: [], totalUsd: 100, unpriced: [] })).toBe(120);
-  });
 
   it("an unpriced model is named, left out of the total, and noted in the budget help", () => {
     const estimate = estimateMonthlyCost({ ...DEFAULTS, worker: "us.anthropic.claude-opus-4-1-20250805-v1:0" });

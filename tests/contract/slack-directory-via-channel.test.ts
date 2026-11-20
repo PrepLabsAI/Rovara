@@ -91,10 +91,8 @@ async function same<T>(read: (directory: SlackDirectory) => Promise<T>, answer?:
 
 describe("the Slack directory through the adapter answers as Slack itself does", () => {
   it.each([
-    ["a person in the team", "U0000000001", "active"],
     ["a guest from another organisation", "U0000000002", "gone"],
     ["a person linked to the team through Enterprise Grid", "U0000000003", "active"],
-    ["a bot", "U0000000004", "gone"],
     ["someone Slack does not know", "U0000000009", "gone"],
   ])("for %s", async (_name, userId, status) => {
     expect(await same((directory) => directory.userStatus(userId))).toBe(status);

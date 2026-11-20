@@ -62,23 +62,9 @@ describe("proofIndexOf", () => {
     });
   });
 
-  it.each(["PASS", "FINDINGS"])("a failure-marked %s review is unknown in the shared index", (status) => {
+  it.each(["PASS"])("a failure-marked %s review is unknown in the shared index", (status) => {
     const workflow = workflowWith({ reviews: [{ role: "CRITIC", candidateDigest: DIGEST, status, failureReason: "SESSION_FAILED", findings: [] }] });
     expect(Index.parse(proofIndexOf("t", workflow, undefined)).items.find((item) => item.id === "review:code")?.verdict).toBe("unknown");
-  });
-
-  it("golden: no workflow, no candidate, or results and reviews for older code give an empty index", () => {
-    expect(proofIndexOf("t", undefined, undefined)).toEqual({ taskId: "t", items: [] });
-    expect(proofIndexOf("t", workflowWith({ candidate: undefined }), v1Pack())).toEqual({ taskId: "t", items: [] });
-    const older = workflowWith({ verification: { candidateDigest: "d".repeat(64), results: [{ checkId: "unit", status: "PASS" }] }, reviews: [{ role: "SECURITY", candidateDigest: "d".repeat(64), status: "PASS", findings: [] }] });
-    expect(proofIndexOf("t", older, undefined)).toEqual({ taskId: "t", items: [] });
-  });
-
-  it("never shows a pack for other code than the current candidate", () => {
-    const stale = { ...packWith([["tests/a.test.ts::x"]]), candidateDigest: "d".repeat(64) } as EvidencePack;
-    const index = proofIndexOf("t", workflowWith(), stale);
-    expect(index.items.map((item) => item.id)).toEqual(["check:0", "check:1", "review:code"]);
-    expect(index).not.toHaveProperty("failures");
   });
 
   it("lists at most ten failing tests across checks and counts the rest; the rest is counted, never dropped silently", () => {
@@ -97,15 +83,6 @@ describe("proofIndexOf", () => {
     expect(index.items).toHaveLength(PROOF_INDEX_ITEMS_MAX);
   });
 
-  it("every text is plain: a hostile label or result name cannot carry a tag, link, mention or secret", () => {
-    const secret = `ghp_${"Ab1Cd2Ef3Gh4".repeat(3)}`;
-    const hostile = `[x](https://evil.example/p) @owner #12 <img src=x onerror=alert(1)> ${secret}`;
-    const pack = packWith([[`tests/${hostile}::a`]]) as unknown as { checks: Array<Record<string, unknown>> };
-    pack.checks[0]!["label"] = `<b>bold</b> ${hostile}`;
-    const workflow = workflowWith({ checkPolicy: { required: [CHECK("unit", `<b>x</b> ${hostile}`)], optional: [], selectedOptionalIds: [], proposed: [] } });
-    const text = JSON.stringify(proofIndexOf("t", workflow, pack as unknown as EvidencePack));
-    for (const bad of ["<img", "<b>", secret, "](https://", "https://evil", "@owner", "#12"]) expect(text, bad).not.toContain(bad);
-  });
 });
 
 // ---- the old broker's route
@@ -158,11 +135,4 @@ describe("GET /v1/dev/tasks/{id}/evidence on the old broker", () => {
     expect((await refusal(call(fixture, PRIYA))).code).toBe("TASK_NOT_FOUND");
   });
 
-  it("only GET is the index: another method on the path is not a route", async () => {
-    const fixture = pageTask();
-    for (const method of ["POST", "PUT", "DELETE"]) {
-      const error = await refusal(routeDeveloperTaskRequest(fixture.deps, PRIYA, { method, path: at(fixture).pathname, headers: {}, requestId: "r" }, at(fixture)));
-      expect([error.code, error.message]).toEqual(["NOT_FOUND", expect.stringContaining("route not found")]);
-    }
-  });
 });

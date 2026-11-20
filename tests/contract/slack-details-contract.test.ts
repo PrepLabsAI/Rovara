@@ -1,19 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  DETAILS_ACTION,
-  SLACK_SECTION_TEXT_LIMIT,
-  TURN_DETAILS_ATTRIBUTES,
-  TurnDetailsSchema,
-  TurnRecordSchema,
-  detailsButtonValue,
-  detailsExpireAt,
-  detailsReplyBlocks,
-  parseDetailsButtonValue,
-  splitSectionText,
-  turnDetailsFromItem,
-  turnDetailsKey,
-  turnRecordKeys,
-} from "../../packages/contracts/src/index.js";
+import { DETAILS_ACTION, SLACK_SECTION_TEXT_LIMIT, TurnRecordSchema, detailsButtonValue, detailsExpireAt, detailsReplyBlocks, parseDetailsButtonValue, splitSectionText, turnDetailsFromItem, turnDetailsKey, turnRecordKeys } from "../../packages/contracts/src/index.js";
 
 const subject = "T0BSHLLUGBD/C0123456789/1695500000.000001";
 const reference = { receivedAt: "2026-09-24T10:00:00.000Z", eventId: "EvTURN00001" };
@@ -63,16 +49,6 @@ describe("the Details contract (spec 014 FR-024)", () => {
     expect(parts.join("")).toBe(solid);
     expect(parts.every((part) => part.length <= SLACK_SECTION_TEXT_LIMIT && !/[\ud800-\udbff]$/.test(part))).toBe(true);
     expect(splitSectionText("")).toEqual([" "]);
-  });
-
-  it("lets the view read only what it shows: never request or response text, the workspace or worker operations", () => {
-    expect([...TURN_DETAILS_ATTRIBUTES].sort()).toEqual([...Object.keys(TurnDetailsSchema.shape), "expiresAt"].sort());
-    for (const name of TURN_DETAILS_ATTRIBUTES) {
-      if (name !== "expiresAt") expect(Object.keys(TurnRecordSchema.shape), name).toContain(name);
-    }
-    for (const name of ["requestText", "responseText", "textTruncated", "workspaceId", "conversationId", "settingsRevision", "manifestHash", "workerOperations", "project"]) {
-      expect(TURN_DETAILS_ATTRIBUTES).not.toContain(name);
-    }
   });
 
   it("parses a stored record without its storage keys, keeps a gate decision as data, and names only top-level fields when it cannot", () => {

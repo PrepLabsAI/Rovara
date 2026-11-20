@@ -12,7 +12,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export interface TestRecord { id: string; file: string; concurrent: boolean; failed?: boolean; scripts: Record<string, { h: string; iv: Array<[number, number]> }> }
+export interface TestRecord { id: string; file: string; concurrent: boolean; failed?: boolean; location?: [number, number]; scripts: Record<string, { h: string; iv: Array<[number, number]> }> }
 /** Tests never called redundant: by test file, by test id (case-insensitive), or by the module a test mostly runs (its main module). */
 export interface KeepRules { files?: string[]; titles?: string[]; modules?: string[] }
 

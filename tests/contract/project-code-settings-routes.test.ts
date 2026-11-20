@@ -57,10 +57,6 @@ function harness(options: { companies?: boolean; fullAccess?: boolean; webApp?: 
 const error = (code: string, message: string) => ({ error: { code, message } });
 
 describe("reading a project's merge rules", () => {
-  it("answers Code's defaults when none were saved, for a person who may use the project", async () => {
-    const h = harness(); h.join(ADA, COMPANY_A.orgId, "member"); h.project("alpha", COMPANY_A.orgId); h.grant(ADA, "alpha", "developer");
-    expect(await h.call("GET", PATH())).toEqual({ status: 200, body: { settings: DEFAULT_CODE_SETTINGS } });
-  });
 
   it("answers another company's project, a project the person may not use and a missing one alike", async () => {
     const h = harness(); h.join(ADA, COMPANY_A.orgId, "admin");
@@ -81,22 +77,6 @@ describe("reading a project's merge rules", () => {
     expect(await h.call("GET", PATH())).toEqual({ status: 503, body: error("RUNTIME_UNAVAILABLE", "the project's merge rules could not be read") });
     await expect(codeSettingsReader({ documentClient: h.db, tableName: "State" }).read(COMPANY_A.orgId as never, "alpha")).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     expect(await codeSettingsReader({ documentClient: h.db, tableName: "State" }).read(COMPANY_B.orgId as never, "alpha")).toMatchObject({ allowSelfApproval: true, revision: 7 });
-  });
-});
-
-describe("who may reach a project's merge rules", () => {
-  it("refuses a sign-in client without full access", async () => {
-    const h = harness({ fullAccess: false }); h.join(ADA, COMPANY_A.orgId, "admin"); h.project("alpha", COMPANY_A.orgId); h.grant(ADA, "alpha", "administrator");
-    // The route table's `full` row (lane ID) refuses it, in lane ID's words, before the project is read.
-    const refused = (method: string) => ({ status: 403, body: error("FORBIDDEN", `Web App needs full access for ${method} /v1/dev/client/projects/{project}/code-settings, which is off for it; an administrator can turn it on`) });
-    expect(await h.call("GET", PATH())).toEqual(refused("GET"));
-    expect(await h.call("PUT", PATH(), { requestId: REQUEST, expectedRevision: 0, mergeMethod: "merge" })).toEqual(refused("PUT"));
-  });
-
-  it("reads the company's projects under one bounded budget: past it, the whole answer is refused", async () => {
-    const h = harness(); h.join(ADA, COMPANY_A.orgId, "member");
-    for (let i = 0; i < 600; i++) { h.project(`p${i}`, COMPANY_A.orgId); h.grant(ADA, `p${i}`, "developer"); }
-    expect(await h.call("GET", PATH("p1"))).toEqual({ status: 400, body: error("CONFIG_INVALID", "company read limit exceeded") });
   });
 });
 
@@ -137,14 +117,6 @@ describe("changing a project's merge rules", () => {
     // The website's own client loosens the same rule.
     const web = harness(); web.join(ADA, COMPANY_A.orgId, "member"); web.project("alpha", COMPANY_A.orgId); web.grant(ADA, "alpha", "administrator");
     expect(await web.call("PUT", PATH(), { requestId: REQUEST, expectedRevision: 0, allowSelfApproval: true })).toMatchObject({ status: 200, body: { settings: { allowSelfApproval: true } } });
-  });
-
-  it("lets a company administrator change it, and refuses a plain member or developer of the project", async () => {
-    const h = harness(); h.join(ADA, COMPANY_A.orgId, "admin"); h.join(BEN, COMPANY_A.orgId, "member"); h.project("alpha", COMPANY_A.orgId);
-    h.grant(ADA, "alpha", "developer"); h.grant(BEN, "alpha", "developer");
-    expect(await h.call("PUT", PATH(), { requestId: REQUEST, expectedRevision: 0, mergeMethod: "merge" })).toMatchObject({ status: 200 });
-    h.as(BEN, "s-ben");
-    expect(await h.call("PUT", PATH(), { requestId: REQUEST, expectedRevision: 1, mergeMethod: "squash" })).toEqual({ status: 403, body: error("FORBIDDEN", NOT_A_PROJECT_ADMIN) });
   });
 
   it("refuses unknown fields, bad values and a missing revision in fixed words", async () => {

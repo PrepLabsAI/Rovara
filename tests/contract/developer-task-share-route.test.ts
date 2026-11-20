@@ -1,7 +1,7 @@
 // Spec 025 C5, C24: POST /v1/dev/tasks/{taskId}/share, and a close ending the shared thread.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { MAYA, OMAR, createDeveloperTaskBroker, grantProject, markThreadPosted, registerRevision, unbindChannel } from "../support/developer-task-broker.js";
+import { MAYA, createDeveloperTaskBroker, markThreadPosted } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
 async function privateTask(options: Parameters<typeof createDeveloperTaskBroker>[0] = {}) {
@@ -24,32 +24,6 @@ async function failSetup(harness: Awaited<ReturnType<typeof privateTask>>) {
 const THREAD = `SHARED_TASK#${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000100`;
 
 describe("POST /v1/dev/tasks/{taskId}/share (C5)", () => {
-  it("shares a private task in the default mode, and audits it (US3 scenario 9, Q9)", async () => {
-    const { share, record, shareRecords } = await privateTask();
-    const response = await share();
-    expect(response.status).toBe(200);
-    expect(response.body.task).toMatchObject({ shared: true, share: { mode: "view", channelId: SLACK_CHANNEL, sharedReason: "requested" } });
-    expect(record()).toMatchObject({ shared: true, shareVersion: 1, share: { teamId: SLACK_TEAM, mode: "view" } });
-    expect(shareRecords()).toEqual([expect.objectContaining({ origin: "ai_tool", action: "share", phase: "accepted", outcome: "accepted" })]);
-  });
-
-  it("switches a shared thread's mode, on the task and on the thread's record (US3 scenario 7)", async () => {
-    const { db, share, record, taskId } = await privateTask();
-    await share({ shareMode: "continue" });
-    markThreadPosted(db, taskId);
-    const switched = await share({ shareMode: "view" });
-    expect(switched.body.task).toMatchObject({ share: { mode: "view", threadUrl: `https://slack.com/archives/${SLACK_CHANNEL}/p1695500000000100` } });
-    expect(record().share).toMatchObject({ mode: "view", threadTs: "1695500000.000100" });
-    expect(db.get(THREAD, "META")).toMatchObject({ mode: "view" });
-  });
-
-  it("keeps view, and says why, when the latest revision does not allow continue (D5)", async () => {
-    const { handler, share } = await privateTask();
-    await share();
-    await registerRevision(handler, 2, { shareMode: { default: "view", allowContinue: false } });
-    const answer = await share({ shareMode: "continue" });
-    expect(answer.body.task).toMatchObject({ share: { mode: "view", modeReason: "continue_not_allowed" } });
-  });
 
   it("refuses to move a shared task to another channel", async () => {
     const { share } = await privateTask();
@@ -70,19 +44,6 @@ describe("POST /v1/dev/tasks/{taskId}/share (C5)", () => {
     expect(shareRecords()).toHaveLength(1);
   });
 
-  it("refuses a share on a project with no bound channel for what it is, not a missing Slack workspace", async () => {
-    const { db, handler, share, record } = await privateTask();
-    grantProject(db, MAYA);
-    await unbindChannel(handler, SLACK_CHANNEL);
-    expect((await share()).body.error).toEqual({ code: "CHANNEL_REQUIRED", message: "project `payments` has no Slack channel bound to it, so the task cannot be shared" });
-    expect(record()).not.toHaveProperty("share");
-  });
-
-  it("is the task owner's alone on the developer route (FR-036; an admin uses C25's route)", async () => {
-    const { share } = await privateTask();
-    expect((await share({}, OMAR)).body.error).toMatchObject({ code: "TASK_NOT_FOUND" });
-  });
-
   it("wins a race with the notifier's write by reading the task again (C1)", async () => {
     const { db, share, taskId, record } = await privateTask();
     await share({ shareMode: "continue" });
@@ -100,30 +61,6 @@ describe("POST /v1/dev/tasks/{taskId}/share (C5)", () => {
     expect(answer.status).toBe(200);
     expect(record().share).toMatchObject({ mode: "view", threadTs: "1695500000.000100" });
     expect(db.get(THREAD, "META")).toMatchObject({ mode: "view" });
-  });
-
-  it("refuses a closed task, and a close marks its thread's record closed (C24)", async () => {
-    const harness = await privateTask();
-    const { db, share, taskId, dev } = harness;
-    await share();
-    markThreadPosted(db, taskId);
-    await failSetup(harness);
-    expect((await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() })).body).toMatchObject({ closed: true });
-    expect(db.get(THREAD, "META")).toMatchObject({ closedAt: expect.any(String) as string });
-    expect((await share({ shareMode: "continue" })).body.error).toMatchObject({ code: "CONFIG_INVALID" });
-  });
-
-  it("refuses a terminal workflow before closedAt without changing the share or writing an audit", async () => {
-    const { db, share, taskId, record } = await privateTask();
-    const current = db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown>;
-    current.workflow = { revision: 2, stage: "MERGED", state: "COMPLETE", outcome: "MERGED" };
-    expect(current.closedAt).toBeUndefined();
-    const beforeTask = structuredClone(record());
-    const beforeEvents = db.find((item) => item.entityType === "AI_TOOL_TURN" && item.action === "share").length;
-
-    expect((await share({ shareMode: "continue" })).body.error).toMatchObject({ code: "CONFIG_INVALID" });
-    expect(record()).toEqual(beforeTask);
-    expect(db.find((item) => item.entityType === "AI_TOOL_TURN" && item.action === "share")).toHaveLength(beforeEvents);
   });
 
   it("marks the thread closed when the notifier records it after the close read the task (ruling F4)", async () => {

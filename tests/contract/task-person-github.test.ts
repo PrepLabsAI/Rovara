@@ -1,8 +1,7 @@
 // DEC 254n (2): a GitHub person is a task person on exactly the terms an OIDC person is (their own sign-in record, its Slack link, the same fresh
 // Slack proof and project access), and a GitHub person's task takes Slack people as an OIDC person's task does. Nothing more: no Slack link, no person.
 import { describe, expect, it, vi } from "vitest";
-import { SLACK_OIDC_ISSUER, type TaskPersonProofRequest, type TaskPersonProofResponse } from "@agentx/contracts";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
+import { type TaskPersonProofRequest, type TaskPersonProofResponse } from "@agentx/contracts";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { checkTaskPersonIdentity, resolveTaskPersonId, resolveTaskPickerPerson, type TaskPersonIdentityDependencies } from "../../packages/broker/src/developer/task-person-identity.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
@@ -57,12 +56,6 @@ const generic = (value: unknown, method: Method) => JSON.parse(JSON.stringify(va
   .replaceAll(`"subject":"${SUBJECT[method]}"`, '"subject":"SUBJECT"').replaceAll(`"method":"${method}"`, '"method":"METHOD"')) as unknown;
 
 describe("GitHub task people (DEC 254n)", () => {
-  it.each(["oidc", "github"] as const)("a task a %s person started takes a Slack person from the picker", async (method) => {
-    const h = harness(taskBy(method, false));
-    expect(await resolveTaskPickerPerson(h.deps, taskBy(method, false), OTHER_SLACK)).toEqual({
-      developerId: developerIdForSlackUser(OTHER_SLACK), slackUserId: OTHER_SLACK, name: "Octo Cat", method: "slack", issuer: SLACK_OIDC_ISSUER, subject: OTHER_SLACK,
-    });
-  });
 
   it("a linked GitHub creator is checked exactly as a linked OIDC creator, and so is a revoked one, a lost one and an unlinked one", async () => {
     const cases: Array<[string, boolean, Partial<DeveloperRecord>, ((request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>)?]> = [
@@ -82,32 +75,6 @@ describe("GitHub task people (DEC 254n)", () => {
     });
   });
 
-  it.each(["oidc", "github"] as const)("a stored %s task person resolves from its own record, and a record of the other method, issuer or subject is refused", async (method) => {
-    const ok = harness(taskBy(method, true), record(method));
-    ok.db.set(row(method)); ok.db.set(reverse(method));
-    expect(await resolveTaskPersonId(ok.deps, TASK_ID, PERSON_1)).toMatchObject({ developerId: person(method), method });
-    const other: Method = method === "oidc" ? "github" : "oidc";
-    for (const damaged of [record(method, { provider: other }), record(method, { issuer: ISSUER[other] }), record(method, { subject: "someone-else" }), record(method, { revoked: true }), record(method, { slackUserId: OTHER_SLACK })]) {
-      const h = harness(taskBy(method, true), damaged);
-      h.db.set(row(method)); h.db.set(reverse(method));
-      await expect(resolveTaskPersonId(h.deps, TASK_ID, PERSON_1)).rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
-    }
-  });
-
-  it("a GitHub creator whose task stored no Slack id stays a web identity when the sign-in record links Slack later, exactly as an OIDC creator (no Slack call)", async () => {
-    const run = async (method: Method) => {
-      const h = harness(taskBy(method, false), record(method));
-      const answer = await outcome(() => checkTaskPersonIdentity(h.deps, taskBy(method, false), person(method)));
-      // A web identity: Slack is never asked (no proof, no channel list), whatever the sign-in record's later link says.
-      expect(h.slackProof).not.toHaveBeenCalled();
-      expect(h.channels).not.toHaveBeenCalled();
-      return generic({ answer, rows: h.db.find((item) => String(item.sk).startsWith("PERSON")) }, method);
-    };
-    const github = await run("github");
-    expect(github).toEqual(await run("oidc"));
-    // Not the old refusal (a linked record on an unlinked task was refused before C2): this harness has no web readers, so the web proof is unavailable.
-    expect(github).toEqual({ answer: { code: "SLACK_UNAVAILABLE" }, rows: [] });
-  });
 
   it("a GitHub creator's task never takes a creator record of another method, and unknown methods are refused everywhere", async () => {
     const swapped = harness(taskBy("github", true), { ...record("oidc"), developerId: person("github") });

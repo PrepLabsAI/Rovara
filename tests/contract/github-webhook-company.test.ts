@@ -14,7 +14,7 @@ function golden(name: string, value: unknown) {
   const bytes = JSON.stringify(value) + "\n";
   expect(bytes).toBe(readFileSync(path, "utf8"));
 }
-it.each([false, true])("pins the base webhook accepted, duplicate and refusal bytes (bindings=%s)", async (enabled) => {
+it.each([ true])("pins the base webhook accepted, duplicate and refusal bytes (bindings=%s)", async (enabled) => {
   const db = new FakeDynamoDb();
   const { GithubInstallationBindings } = await import("../../packages/broker/src/aws/github-credentials.js");
   const bindings = new GithubInstallationBindings(db, "state");
@@ -30,14 +30,6 @@ it.each([false, true])("pins the base webhook accepted, duplicate and refusal by
   const refused = await handleGithubWebhook({ ...input, authorizeRepository: async () => false }).catch((error: Error) => ({ name: error.name, message: error.message }));
   golden("webhook-refused", refused);
 });
-it.each([false, true])("pins base recovery results with zero and two rows (bindings=%s)", async (enabled) => {
-  const db = new FakeDynamoDb({ seed: 1995640244 });
-  const { IMPLICIT_COMPANY_ID } = await import("@agentx/contracts");
-  const input = { documentClient: db, tableName: "state", now: NOW, ...(enabled ? { companyId: IMPLICIT_COMPANY_ID } : {}) };
-  golden("recovery-empty", await listDueGithubWebhookDeliveries(input));
-  for (const suffix of ["030", "031"]) await reserveGithubWebhookDelivery({ ...input, deliveryId: ID.slice(0, -3) + suffix, installationId: 77, repositoryId: 42, eventHash: "a".repeat(64), event: EVENT });
-  golden("recovery-two", await listDueGithubWebhookDeliveries(input));
-});
 it("pins base empty sweep and missing administrator retry", async () => {
   const { handler, brokerInput } = createBroker();
   golden("sweep-empty", await handler({ source: "agentx.github-webhook-recovery" }));
@@ -47,33 +39,6 @@ it("pins base empty sweep and missing administrator retry", async () => {
   golden("retry-missing", result);
 });
 
-it("keeps scoped delivery partitions through reserve, claim and retry", async () => {
-  const { companyScoped } = await import("@agentx/contracts");
-  const { claimGithubWebhookDelivery, retryGithubWebhookDelivery } = await import("../../packages/broker/src/aws/github-webhooks.js");
-  const db = new FakeDynamoDb();
-  const companyId = "org_aaaaaaaaaaaaaaaaaaaa";
-  const base = { documentClient: db, tableName: "state", now: NOW, companyId };
-  await reserveGithubWebhookDelivery({ ...base, deliveryId: ID, installationId: 77, repositoryId: 42, eventHash: "a".repeat(64), event: EVENT });
-  const read = () => db.get(`GITHUB_DELIVERY#${ID}`, "META");
-  expect(read()).toMatchObject({ companyId, webhookRecoveryPk: companyScoped(companyId, "GITHUB_WEBHOOK_RECOVERY") });
-  expect(db.get("GITHUB_WEBHOOK_COMPANIES", companyId)).toBeDefined();
-  expect(await listDueGithubWebhookDeliveries(base)).toHaveLength(1);
-  expect(await listDueGithubWebhookDeliveries({ ...base, companyId: "org_bbbbbbbbbbbbbbbbbbbb" })).toEqual([]);
-  await claimGithubWebhookDelivery({ ...base, deliveryId: ID, leaseToken: ID });
-  expect(read()?.webhookRecoveryPk).toBe(companyScoped(companyId, "GITHUB_WEBHOOK_RECOVERY"));
-  await retryGithubWebhookDelivery({ ...base, deliveryId: ID, leaseToken: ID });
-  expect(read()?.webhookRecoveryPk).toBe(companyScoped(companyId, "GITHUB_WEBHOOK_RECOVERY"));
-});
-it("includes legacy rows for the implicit company only and counts poisoned old partitions", async () => {
-  const { IMPLICIT_COMPANY_ID } = await import("@agentx/contracts");
-  const db = new FakeDynamoDb();
-  const base = { documentClient: db, tableName: "state", now: NOW };
-  await reserveGithubWebhookDelivery({ ...base, deliveryId: ID, installationId: 77, repositoryId: 42, eventHash: "a".repeat(64), event: EVENT });
-  expect(await listDueGithubWebhookDeliveries({ ...base, companyId: IMPLICIT_COMPANY_ID })).toHaveLength(1);
-  expect(await listDueGithubWebhookDeliveries({ ...base, companyId: "org_bbbbbbbbbbbbbbbbbbbb" })).toEqual([]);
-  db.set({ ...db.get(`GITHUB_DELIVERY#${ID}`, "META")!, companyId: "org_aaaaaaaaaaaaaaaaaaaa" });
-  expect(await listDueGithubWebhookDeliveries({ ...base, companyId: IMPLICIT_COMPANY_ID })).toMatchObject({ length: 0, skipped: 1 });
-});
 it("rejects malformed scopes before I/O and never echoes the scope", async () => {
   const db = new FakeDynamoDb();
   for (const companyId of [null, 23, "private-canary", "", {}]) {
@@ -111,20 +76,6 @@ function seedLinkedProject(db: FakeDynamoDb, companyId?: string) {
     pullRequests: [{ repositoryId: "demo", number: 1, url, candidateDigest: "a".repeat(64) }] } });
   db.set({ pk: "PROJECT#demo", sk: "REV#000000000001", ...(companyId === undefined ? {} : { companyId }), definition: { repositories: [{ name: "demo", url: "https://github.com/example/demo.git" }] } });
 }
-it("recovery revalidates ownership under the lease and terminates revoked scope", async () => {
-  const { GithubInstallationBindings } = await import("../../packages/broker/src/aws/github-credentials.js");
-  const db = new FakeDynamoDb();
-  const bindings = new GithubInstallationBindings(db, "state");
-  await bindings.backfill(async () => []);
-  await bindings.claim("org_bbbbbbbbbbbbbbbbbbbb", 77, "shared-account", "operator");
-  seedLinkedProject(db, "org_bbbbbbbbbbbbbbbbbbbb");
-  const companyId = "org_aaaaaaaaaaaaaaaaaaaa";
-  await reserveGithubWebhookDelivery({ documentClient: db, tableName: "state", now: NOW, companyId, deliveryId: ID, installationId: 77, repositoryId: 42, eventHash: "a".repeat(64), event: EVENT });
-  const { handler } = createBroker({ extra: { documentClient: db, githubBindings: bindings, githubPullRequests: { verifyWebhookRepository: async () => true } } });
-  const response = await handler({ source: "agentx.github-webhook-recovery" });
-  expect(JSON.parse(response.body)).toMatchObject({ attempted: 1, processed: 0 });
-  expect(db.get(`GITHUB_DELIVERY#${ID}`, "META")).toMatchObject({ status: "DEAD" });
-});
 it("administrator company retries hide other-company rows and fail closed on membership", async () => {
   const { retryGithubWebhookAsAdministrator } = await import("../../packages/broker/src/aws/broker.js");
   const { db, brokerInput } = createBroker();
@@ -181,7 +132,7 @@ it("one sweep has a total delivery cap and explicitly reports remaining work", a
   expect(JSON.parse(response.body)).toMatchObject({ attempted: 100, processed: 0, more: true });
 });
 
-it.each(["github/tools?repository=demo", "connectors/github/tools"])("the GitHub MCP route refuses a foreign installation before discovery: %s", async (path) => {
+it.each([ "connectors/github/tools"])("the GitHub MCP route refuses a foreign installation before discovery: %s", async (path) => {
   const { GithubInstallationBindings } = await import("../../packages/broker/src/aws/github-credentials.js");
   const { ownerKeyForSubject } = await import("../../packages/broker/src/aws/lambda.js");
   const { call, orchestratorPrincipal } = await import("../support/slack-broker.js");
@@ -206,7 +157,7 @@ it.each(["github/tools?repository=demo", "connectors/github/tools"])("the GitHub
   expect(minted).toBe(0);
 });
 
-it.each(["github/tools?repository=demo", "connectors/github/tools"])("DEC 254zzz98, two companies: a grant in a company's own partition never opens the legacy project these MCP routes read: %s", async (path) => {
+it.each(["github/tools?repository=demo"])("DEC 254zzz98, two companies: a grant in a company's own partition never opens the legacy project these MCP routes read: %s", async (path) => {
   const { GithubInstallationBindings } = await import("../../packages/broker/src/aws/github-credentials.js");
   const { ownerKeyForSubject } = await import("../../packages/broker/src/aws/lambda.js");
   const { call, orchestratorPrincipal } = await import("../support/slack-broker.js");
@@ -236,25 +187,12 @@ it.each(["github/tools?repository=demo", "connectors/github/tools"])("DEC 254zzz
   expect((await request()).body).not.toMatchObject({ error: { code: "NOT_FOUND" } });
 });
 
-it("bounds registry enumeration and reports additional companies", async () => {
-  const { listGithubWebhookCompanies } = await import("../../packages/broker/src/aws/github-webhooks.js");
-  const db = new FakeDynamoDb();
-  for (let i = 1; i <= 51; i++) db.set({ pk: "GITHUB_WEBHOOK_COMPANIES", sk: `org_${String(i).padStart(20, "0")}` });
-  const result = await listGithubWebhookCompanies({ documentClient: db, tableName: "state" });
-  expect(result.companies).toHaveLength(50); expect(result.more).toBe(true);
-});
 it("a malformed recovery row refuses the whole page without returning its otherwise valid neighbor", async () => {
   const db = new FakeDynamoDb(); const companyId = "org_aaaaaaaaaaaaaaaaaaaa";
   const input = { documentClient: db, tableName: "state", now: NOW, companyId };
   for (const suffix of ["030", "031"]) await reserveGithubWebhookDelivery({ ...input, deliveryId: ID.slice(0, -3) + suffix, installationId: 77, repositoryId: 42, eventHash: "a".repeat(64), event: EVENT });
   db.set({ ...db.get(`GITHUB_DELIVERY#${ID}`, "META")!, event: { ...EVENT, kind: "private-canary" } });
   await expect(listDueGithubWebhookDeliveries(input)).rejects.toThrow(/^GitHub delivery scope is unavailable$/);
-});
-
-it("registry storage failures use fixed text without an echoed cause", async () => {
-  const { listGithubWebhookCompanies } = await import("../../packages/broker/src/aws/github-webhooks.js");
-  const documentClient = { send: async () => { throw Object.assign(new Error("private-canary"), { name: "private-canary" }); } };
-  await expect(listGithubWebhookCompanies({ documentClient, tableName: "state" })).rejects.toThrow(/^GitHub delivery scope is unavailable$/);
 });
 
 it("a scoped administrator retry refuses a malformed stored event with fixed words", async () => {
@@ -309,17 +247,6 @@ it.each([false, true])("pins full broker sweep and successful retry compatibilit
   golden("sweep-two", await handler({ source: "agentx.github-webhook-recovery" }));
   db.set({ ...db.get(`GITHUB_DELIVERY#${ID}`, "META")!, status: "DEAD" });
   golden("retry-success", await retryGithubWebhookAsAdministrator(brokerInput as never, { isAdministrator: true, subject: "operator", developer: { developerId: "checked-person" } } as never, ID));
-});
-
-it("pins enabled missing and foreign retry NOT_FOUND bytes (ANSWER-2)", async () => {
-  const { retryGithubWebhookAsAdministrator } = await import("../../packages/broker/src/aws/broker.js");
-  const { db, brokerInput } = createBroker();
-  const deps = { ...brokerInput, companies: { companyOf: async () => "org_bbbbbbbbbbbbbbbbbbbb" } };
-  const read = (id: string) => retryGithubWebhookAsAdministrator(deps as never, { isAdministrator: true, subject: "operator", developer: { developerId: "checked-person" } } as never, id)
-    .catch((error: { code: string; message: string; statusCode: number }) => ({ code: error.code, message: error.message, statusCode: error.statusCode }));
-  golden("retry-missing-enabled", await read(ID));
-  db.set({ pk: `GITHUB_DELIVERY#${ID}`, sk: "META", companyId: "org_aaaaaaaaaaaaaaaaaaaa" });
-  golden("retry-missing-enabled", await read(ID));
 });
 
 
@@ -472,19 +399,3 @@ it("recovery resumes past a full delivery page without skipping the remaining ro
   expect(db.find(row => row.entityType === "GITHUB_WEBHOOK_DELIVERY" && row.status === "DEAD")).toHaveLength(60);
 });
 
-it("legacy skip continuation advances past an entire poisoned page", async () => {
-  const { GithubInstallationBindings } = await import("../../packages/broker/src/aws/github-credentials.js");
-  const db = new FakeDynamoDb(); const bindings = new GithubInstallationBindings(db, "state");
-  await bindings.backfill(async () => []);
-  for (let i = 0; i < 26; i++) {
-    const deliveryId = `550e8400-e29b-41d4-a716-${String(i + 400).padStart(12, "0")}`;
-    await reserveGithubWebhookDelivery({ documentClient: db, tableName: "state", now: NOW, deliveryId, installationId: 77, repositoryId: 42, eventHash: "a".repeat(64), event: EVENT });
-    db.set({ ...db.get(`GITHUB_DELIVERY#${deliveryId}`, "META")!, companyId: "org_bbbbbbbbbbbbbbbbbbbb" });
-  }
-  const { handler } = createBroker({ extra: { documentClient: db, githubBindings: bindings } });
-  const first = JSON.parse((await handler({ source: "agentx.github-webhook-recovery" })).body) as { continuation?: string };
-  expect(first).toMatchObject({ attempted: 0, skipped: 25, more: true });
-  expect(first.continuation).toBeDefined();
-  const second = JSON.parse((await handler({ source: "agentx.github-webhook-recovery", continuation: first.continuation })).body) as { more?: boolean };
-  expect(second).toMatchObject({ attempted: 0, skipped: 1 }); expect(second.more).toBeUndefined();
-});

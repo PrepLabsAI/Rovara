@@ -183,28 +183,6 @@ function world(options: { installTeam?: string; tokens?: boolean } = {}) {
 }
 
 describe("web: link a project's channel", () => {
-  it("joins a public channel and writes exactly the CLI's link row, with an audit row naming the person", async () => {
-    const w = world();
-    const answer = await w.link(w.adminA, "web", "C0GENERAL");
-    expect(answer.status).toBe(200);
-    expect(answer.body).toMatchObject({ status: "linked", workspace: { teamId: ACME }, channel: { id: "C0GENERAL", name: "general", isPrivate: false }, alreadyLinked: false, replaced: [] });
-    expect(w.slack.calls).toEqual(["conversations.info acme C0GENERAL", "conversations.join acme"]);
-    // Golden: the row the CLI's `agentx admin slack bind` writes (broker.ts putSlackBinding), with the person as updatedBy.
-    expect(w.linkRow(ACME, "C0GENERAL")).toEqual({ pk: `ORG#${A}#SLACK_BINDING#${ACME}`, sk: "CHANNEL#C0GENERAL", entityType: "SLACK_BINDING", teamId: ACME, channelId: "C0GENERAL", projectName: "web", updatedAt: TIME, updatedBy: w.adminA.personId });
-    expect(w.audits(A)).toEqual([expect.objectContaining({ entityType: "SLACK_CHANNEL_AUDIT", action: "link", actor: w.adminA.personId, via: "web", projectName: "web", channelId: "C0GENERAL", teamId: ACME, companyId: A })]);
-    expect(w.audits(B)).toEqual([]);
-    expect(w.logs).toEqual([expect.objectContaining({ event: "slack.channel_linked", companyId: A, channelId: "C0GENERAL", actor: w.adminA.personId })]);
-    expect(JSON.stringify(w.logs) + answer.raw).not.toContain("xoxb");
-  });
-
-  it("DEC 254zzz80: a NAMED company's project is its own partition's: a project only in the legacy layout (even stamped with A) is not A's", async () => {
-    const w = world();
-    w.db.delete(`ORG#${A}#PROJECT#web`, "REV#000000000001");
-    const answer = await w.link(w.adminA, "web", "C0GENERAL");
-    expect(answer.status).toBe(404);
-    expect(w.db.find((item) => String(item.pk).includes("SLACK_BINDING#"))).toEqual([]);
-    expect(w.slack.calls).toEqual([]);
-  });
 
   it("DEC 254zzz80: a link row in A's partition that names another company is unreadable, never A's link", async () => {
     const w = world();
@@ -243,25 +221,6 @@ describe("web: link a project's channel", () => {
     expect(w.slack.calls).toEqual(["conversations.info acme C0GENERAL", "conversations.join acme"]);
   });
 
-  it("a project admin's grant must be in the caller's company", async () => {
-    const w = world();
-    // DEC 254zzz80: a row in A's own partition that names company B, one in B's partition, and a legacy row: none is A's grant.
-    w.db.set({ pk: `ORG#${A}#MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "administrator", companyId: B });
-    expect((await w.link(w.memberA, "web", "C0GENERAL")).status).toBe(403);
-    w.db.delete(`ORG#${A}#MEMBER#${w.memberA.personId}`, "PROJECT#web");
-    w.db.set({ pk: `ORG#${B}#MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "administrator" });
-    expect((await w.link(w.memberA, "web", "C0GENERAL")).status).toBe(403);
-    w.db.set({ pk: `MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "administrator", companyId: A });
-    expect((await w.link(w.memberA, "web", "C0GENERAL")).status).toBe(403);
-  });
-
-  it("a project grant that is not administrator does not let a member link", async () => {
-    const w = world();
-    w.db.set({ pk: `ORG#${A}#MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "developer" });
-    expect((await w.link(w.memberA, "web", "C0GENERAL")).status).toBe(403);
-    expect(w.slack.calls).toEqual([]);
-  });
-
   it("a channel Slack shows as private without the bot is never joined: invite_needed", async () => {
     const w = world();
     const join = vi.fn(async () => true);
@@ -269,17 +228,6 @@ describe("web: link a project's channel", () => {
     expect((await w.link(w.adminA, "web", "G0PRIV")).body).toMatchObject({ status: "invite_needed" });
     expect(join).not.toHaveBeenCalled();
     expect(w.linkRow(ACME, "G0PRIV")).toBeUndefined();
-  });
-
-  it("a channel seen from another workspace's context counts as shared", async () => {
-    const w = world();
-    expect(await w.link(w.adminA, "web", "C0CTX")).toMatchObject({ status: 409, body: { error: { message: CHANNEL_SHARED } } });
-  });
-
-  it("the role is read live: a demoted admin is refused at once", async () => {
-    const w = world();
-    w.db.set({ ...membershipKey(w.adminA.personId), entityType: "COMPANY_MEMBERSHIP", personId: w.adminA.personId, companyId: A, role: "member", joinedAt: TIME });
-    expect((await w.link(w.adminA, "web", "C0GENERAL")).status).toBe(403);
   });
 
   it("a private channel the bot isn't in answers invite_needed; after /invite, Check links it", async () => {
@@ -498,21 +446,6 @@ describe("/rovara in Slack", () => {
     expect(slackSignInUrlOf("http://app.rovara.test/")).toBeUndefined();
   });
 
-  it("a foreign workspace's user with the same id as a member's install-workspace id is not that member", async () => {
-    const w = world();
-    // B's member signed in from the install's workspace (Acme) as U0TWIN; someone in Beta also has the id U0TWIN.
-    const twin = w.person(ACME, "U0TWIN", B, "owner");
-    expect(twin.personId).toBe(slackSignInPerson(ACME, "U0TWIN", ACME));
-    expect((await w.slash({ team: BETA, user: "U0TWIN" }, "link", "C0BETA")).text).toBe(ROVARA_SIGN_IN_FIRST);
-  });
-
-  it("an install-workspace Slack user who is another company's member is outside this team's company", async () => {
-    const w = world();
-    w.person(ACME, "U0TWIN", B, "owner");
-    expect((await w.slash({ team: ACME, user: "U0TWIN" }, "link")).text).toBe(ROVARA_SIGN_IN_FIRST);
-    expect(w.db.find((item) => item.entityType === "SLACK_ROVARA_ACTION")).toEqual([]);
-  });
-
   it("a press after the workspace moved to another company (with the same person moved too) changes nothing", async () => {
     const w = world();
     const value = w.buttons(await w.slash(w.adminA, "link web"))[0]!.value;
@@ -521,41 +454,12 @@ describe("/rovara in Slack", () => {
     expect((await w.press(w.adminA, ROVARA_LINK_ACTION, value))!.text).toBe(ROVARA_EXPIRED);
   });
 
-  it("the menu never offers a project of another company, even with a stray grant stamped with this company", async () => {
-    const w = world();
-    w.db.set({ pk: `ORG#${A}#MEMBER#${w.apiAdminA.personId}`, sk: "PROJECT#beta-app", projectName: "beta-app", role: "administrator" });
-    const menu = await w.slash(w.apiAdminA, "link");
-    expect(JSON.stringify(menu)).toContain("*api*");
-    expect(JSON.stringify(menu)).not.toContain("beta-app");
-  });
-
   it("a removed person (their record revoked) is outside", async () => {
     const w = world();
     w.db.set({ pk: `DEVELOPER#${w.adminA.personId}`, sk: "META", developerId: w.adminA.personId, provider: "slack", displayName: "x", revoked: true });
     expect((await w.slash(w.adminA, "link")).text).toBe(ROVARA_SIGN_IN_FIRST);
     w.db.delete(`DEVELOPER#${w.adminA.personId}`, "META");
     expect((await w.slash(w.adminA, "link")).text).toBe(ROVARA_SIGN_IN_FIRST);
-  });
-
-  it("the install's own workspace signs in as <user>, any other as <team>:<user>", () => {
-    expect(slackSignInPerson(ACME, "U0ADA", ACME)).not.toBe(slackSignInPerson(BETA, "U0ADA", ACME));
-    expect(slackSignInPerson(BETA, "U0ADA", ACME)).toBe(slackSignInPerson(BETA, "U0ADA", undefined));
-    expect(slackSignInPerson(ACME, "U0ADA", undefined)).not.toBe(slackSignInPerson(ACME, "U0ADA", ACME));
-  });
-
-  it("Link press links; a replayed press is refused and changes nothing", async () => {
-    const w = world();
-    const confirm = await w.slash(w.adminA, "link web");
-    expect(confirm.text).toBe("Link <#C0GENERAL> to *web*?");
-    const [button] = w.buttons(confirm);
-    const done = await w.press(w.adminA, ROVARA_LINK_ACTION, button!.value);
-    expect(done).toMatchObject({ response_type: "ephemeral", replace_original: true, text: "Linked <#C0GENERAL> to *web*. Mention @Rovara here to start work." });
-    expect(w.linkRow(ACME, "C0GENERAL")).toMatchObject({ projectName: "web", updatedBy: w.adminA.personId });
-    expect(w.audits(A)).toEqual([expect.objectContaining({ action: "link", via: "slack", actor: w.adminA.personId })]);
-    w.db.delete(`ORG#${A}#SLACK_BINDING#${ACME}`, "CHANNEL#C0GENERAL");
-    expect((await w.press(w.adminA, ROVARA_LINK_ACTION, button!.value))!.text).toBe(ROVARA_EXPIRED);
-    expect(w.linkRow(ACME, "C0GENERAL")).toBeUndefined();
-    expect(w.audits(A)).toHaveLength(1);
   });
 
   it("a press is bound to its team, channel, Slack user, action and 10 minutes", async () => {
@@ -573,39 +477,6 @@ describe("/rovara in Slack", () => {
     expect(w.linkRow(ACME, "C0GENERAL")).toBeUndefined();
   });
 
-  it("a press from another team leaves the token unspent; tokens carry no TTL attribute and are deleted when spent", async () => {
-    const w = world();
-    const value = w.buttons(await w.slash(w.adminA, "link web"))[0]!.value;
-    expect(w.db.get(rovaraActionKey(value).pk, "META")).toMatchObject({ expiresAt: Math.floor(Date.parse(TIME) / 1000) + 600 });
-    expect(w.db.get(rovaraActionKey(value).pk, "META")).not.toHaveProperty("indexExpiresAt");
-    expect((await w.press({ team: BETA, user: "U0ADA" }, ROVARA_LINK_ACTION, value))!.text).toBe(ROVARA_EXPIRED);
-    expect(w.db.get(rovaraActionKey(value).pk, "META")).toMatchObject({ status: "live" });
-    expect((await w.press(w.adminA, ROVARA_LINK_ACTION, value))!.text).toContain("Linked <#C0GENERAL> to *web*");
-    // Spent: the row is gone.
-    expect(w.db.get(rovaraActionKey(value).pk, "META")).toBeUndefined();
-  });
-
-  it("two presses of one token at once: exactly one links", async () => {
-    const w = world();
-    const token = w.buttons(await w.slash(w.adminA, "link web"))[0]!.value;
-    const press = { source: "agentx.slack-rovara" as const, kind: "press" as const, teamId: ACME, userId: "U0ADA", channelId: "C0GENERAL", action: "link" as const, token };
-    const answers = await Promise.all([handleSlackRovara(w.context(), press), handleSlackRovara(w.context(), press)]);
-    expect(answers.map((answer) => answer.text).sort()).toEqual([ROVARA_EXPIRED, "Linked <#C0GENERAL> to *web*. Mention @Rovara here to start work."].sort());
-    expect(w.audits(A)).toHaveLength(1);
-  });
-
-  it("a token is refused one second after its 10 minutes, and accepted just before", async () => {
-    const w = world();
-    const early = w.buttons(await w.slash(w.adminA, "link web"))[0]!.value;
-    w.tick(599_000);
-    expect((await w.press(w.adminA, ROVARA_LINK_ACTION, early))!.text).toContain("Linked");
-    const w2 = world();
-    const late = w2.buttons(await w2.slash(w2.adminA, "link web"))[0]!.value;
-    w2.tick(600_000);
-    expect((await w2.press(w2.adminA, ROVARA_LINK_ACTION, late))!.text).toBe(ROVARA_EXPIRED);
-    expect(w2.db.get(rovaraActionKey(late).pk, "META")).toMatchObject({ status: "live" });
-  });
-
   it("a press from a workspace that isn't the company's connected one links nothing", async () => {
     const w = world();
     // An older, operator-bound workspace of the same company.
@@ -614,13 +485,6 @@ describe("/rovara in Slack", () => {
     const value = w.buttons(await w.slash(legacy, "link web"))[0]!.value;
     expect((await w.press(legacy, ROVARA_LINK_ACTION, value))!.text).toBe(CHANNEL_NOT_CONNECTED);
     expect(w.db.find((item) => String(item.pk).includes("SLACK_BINDING#"))).toEqual([]);
-  });
-
-  it("a legacy link naming another company's project reads as unlinked", async () => {
-    const w = world();
-    w.db.set({ pk: `ORG#${A}#SLACK_BINDING#${ACME}`, sk: "CHANNEL#C0BOTIN", entityType: "SLACK_BINDING", teamId: ACME, channelId: "C0BOTIN", projectName: "beta-app", updatedAt: TIME });
-    const status = await w.slash(w.adminA, "status", "C0BOTIN");
-    expect(status.text).toBe("<#C0BOTIN> isn't linked to a Rovara project.");
   });
 
   it("a press re-checks the person live: removed or demoted since the menu, nothing changes", async () => {

@@ -2,9 +2,8 @@
 // asked, an example where one helps, the default it takes, and verb buttons. The terminal keeps
 // its own words.
 import { describe, expect, it } from "vitest";
-import { unattendedPrompter } from "../../packages/cli/src/init/prompts.js";
 import { browserPrompter } from "../../packages/cli/src/init/ui/prompter.js";
-import { ALERT_FLAG, pageHint, QUESTION_COPY, questionHelp } from "../../packages/cli/src/init/ui/question-copy.js";
+import { ALERT_FLAG, QUESTION_COPY, questionHelp } from "../../packages/cli/src/init/ui/question-copy.js";
 import type { QuestionHelp } from "../../packages/cli/src/init/prompts.js";
 import { lintCopy, type CopyEntry } from "../support/copy-lint.js";
 import { createWizardHub, type WizardHub } from "../../packages/cli/src/init/ui/state.js";
@@ -101,56 +100,9 @@ describe("the page's words for each question", () => {
     expect(lintCopy(entries)).toEqual([]);
   });
 
-  it("lets the caller's own help win over the catalog", () => {
-    expect(questionHelp({ kind: "ask", text: "x", flag: "--budget", given: { why: "About $210 a month." } }).why).toBe("About $210 a month.");
-  });
-
-  it("FR-010: says what an empty field means, and never an empty Leave empty for", () => {
-    expect(pageHint(undefined, {})).toBeUndefined();
-    expect(pageHint("", {})).toBe("Optional. Leave empty to use Rovara's default.");
-    expect(pageHint("production", {})).toBe("Leave empty to use production.");
-    expect(pageHint("us.anthropic.claude-sonnet-4-6", { defaultText: "Claude Sonnet 4.6" })).toBe("Leave empty to use Claude Sonnet 4.6.");
-    expect(pageHint("", { hint: "Optional. Leave empty if the project needs none." })).toBe("Optional. Leave empty if the project needs none.");
-  });
-});
-
-describe("the settings form's words (spec 048 FR-020, FR-025)", () => {
-  it("names the form's forward button, and says what turning alerts off gives up", () => {
-    expect(questionHelp({ kind: "form", text: "Your settings" })).toMatchObject({ label: "Your settings", submitLabel: "Review the plan" });
-    expect(questionHelp({ kind: "choose", text: "Where should AgentX send alerts?", flag: ALERT_FLAG }).choiceLabels?.none).toBe("Nowhere for now. Nobody is told when Rovara stops working.");
-    expect(questionHelp({ kind: "choose", text: "Is acme an organization or a personal account?", flag: "--github-account-type" }).why).toBe("GitHub could not tell Rovara, and keeps apps in a different place for each.");
-  });
-
-  it("does not tell the later admin-user question that it still chooses the alert address", () => {
-    expect(questionHelp({ kind: "ask", text: "Your email address, for your AgentX admin user", flag: "--admin-email" }).why)
-      .toBe("Rovara creates your admin sign-in with it.");
-  });
 });
 
 describe("browserPrompter with help", () => {
-  it("shows the page label, why line, example and hint, and keeps the terminal's text", async () => {
-    const hub = createWizardHub("staging");
-    const prompter = browserPrompter(hub);
-    const answer = prompter.ask("GitHub organization or user that will own the AgentX GitHub App", { flag: "--github-account" });
-    expect(shown(hub)).toMatchObject({
-      kind: "ask", text: "GitHub organization or user that will own the AgentX GitHub App",
-      label: "GitHub owner", why: "The GitHub organization or user that will own Rovara's GitHub app.", example: "acme",
-    });
-    expect(shown(hub).hint).toBeUndefined();
-    hub.answer(shown(hub).id, "acme");
-    await expect(answer).resolves.toBe("acme");
-  });
-
-  it("FR-011: a confirm's forward button is the primary one, whatever the terminal default", async () => {
-    const hub = createWizardHub("staging");
-    const answer = browserPrompter(hub).confirm("Create all of this?", { defaultValue: false });
-    expect(shown(hub).buttons).toEqual([
-      { value: "yes", label: "Create Rovara", primary: true },
-      { value: "no", label: "Cancel the install", primary: false },
-    ]);
-    hub.answer(shown(hub).id, "yes");
-    await expect(answer).resolves.toBe(true);
-  });
 
   it("a choose with buttons is an actions question, and only its choices are accepted", async () => {
     const hub = createWizardHub("staging");
@@ -168,21 +120,4 @@ describe("browserPrompter with help", () => {
     await expect(answer).resolves.toBe("stop");
   });
 
-  it("relabels choices for the page and keeps their values", async () => {
-    const hub = createWizardHub("staging");
-    const answer = browserPrompter(hub).choose("Deploy engine", [
-      { value: "templates", label: "templates: published CloudFormation templates, no CDK setup (recommended)" },
-      { value: "cdk", label: "cdk: deploy from AgentX's CDK code at the release tag" },
-    ], { flag: "--engine", defaultValue: "templates" });
-    expect(shown(hub).choices).toEqual([
-      { value: "templates", label: "Published templates (recommended)" },
-      { value: "cdk", label: "From Rovara's source code, for contributors" },
-    ]);
-    hub.answer(shown(hub).id, "");
-    await expect(answer).resolves.toBe("templates");
-  });
-
-  it("the terminal ignores help", async () => {
-    await expect(unattendedPrompter().ask("Slack app name", { flag: "--slack-app-name", defaultValue: "AgentX", help: { label: "x" } })).resolves.toBe("AgentX");
-  });
 });

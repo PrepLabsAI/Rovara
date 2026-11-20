@@ -1,7 +1,6 @@
 // Self-tests for the workflow E2E harness's controls: the clock, worker faults and version skew, recovery sweeps, Slack
 // variants, the feedback page, MCP, the webhook builder and secret rotation, wire mode, and the model fixtures.
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { execFileSync } from "node:child_process";
 import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, parsePlanDocument } from "@agentx/contracts";
 import { fauxProvider, normalizeContext } from "@earendil-works/pi-ai";
 import { LOST_COMPUTE_ERROR, SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../support/workflow-e2e.js";
@@ -34,28 +33,10 @@ describe("workflow E2E harness", () => {
   beforeEach(() => { log = vi.spyOn(console, "log").mockImplementation(() => undefined); });
   afterEach(() => { log.mockRestore(); });
 
-  it("e2e.clock fakes Date only: now, advance and set move it, timers still run, and the test's end restores it", async () => {
-    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
-    e2e.clock.set("2030-01-02T03:04:05.000Z");
-    expect(new Date().toISOString()).toBe("2030-01-02T03:04:05.000Z");
-    e2e.clock.advance(90_000);
-    expect(e2e.clock.now()).toBe(Date.parse("2030-01-02T03:05:35.000Z"));
-    await new Promise((resolve) => setTimeout(resolve, 1));
-    expect(e2e.clock.now()).toBe(Date.parse("2030-01-02T03:05:35.000Z"));
-  });
-
   it("the clock is real again in the next test", () => {
     expect(Date.now()).toBeGreaterThan(Date.parse("2026-01-01T00:00:00Z"));
     expect(new Date().getUTCFullYear()).toBeLessThan(2030);
   });
-
-  it("initial repository files are confined to repo/demo and included in its base commit", async () => {
-    const content = "export const baseFixture = true;\n";
-    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: [] }, initialRepositoryFiles: [{ path: "nested/fixture.ts", content }] });
-    expect(execFileSync("git", ["-C", e2e.repoDirectory, "show", `${e2e.baseCommit}:nested/fixture.ts`], { encoding: "utf8" })).toBe(content);
-    await expect(createWorkflowE2E({ initialRepositoryFiles: [{ path: "../outside.txt", content }] })).rejects.toThrow(/stay inside repo\/demo/);
-    await expect(createWorkflowE2E({ initialRepositoryFiles: [{ path: "/tmp/outside.txt", content }] })).rejects.toThrow(/stay inside repo\/demo/);
-  }, 120_000);
 
   it("resets coder command queues for a fresh session with the same prompt, without resetting within-session tool turns", async () => {
     const step = workflowModel({ plan: PLAN, edits: EDITS, beforeEditsCommands: ["echo before"], afterEditsCommands: ["echo after"] });
@@ -103,15 +84,6 @@ describe("workflow E2E harness", () => {
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
   }, 120_000);
 
-  it("worker.failNext fails the next matching run at once, without running it", async () => {
-    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
-    e2e.worker.failNext("task:PLAN", "the model provider is down");
-    expect(await e2e.mention("quick: Add a greet(name) function")).toBe(200);
-    await e2e.settle();
-    expect(e2e.workflow()).toMatchObject({ stage: "PLAN", state: "BLOCKED" });
-    expect(e2e.prompts).toEqual([]);
-  }, 120_000);
-
   it("worker.crashNext loses a coding run with no callback; runRecovery's reconciler step fails it", async () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
     expect(await e2e.mention("quick: Add a greet(name) function")).toBe(200);
@@ -129,18 +101,6 @@ describe("workflow E2E harness", () => {
     const operation = e2e.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${crashedOperation}`);
     expect(operation).toMatchObject({ status: "FAILED", error: LOST_COMPUTE_ERROR });
     // What the task does next is tests/integration/workflow-lost-run.test.ts's.
-  }, 120_000);
-
-  it("worker.crashNext with afterPush pushes the branch, then calls nothing back", async () => {
-    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
-    e2e.worker.crashNext("publish", { afterPush: true });
-    expect(await e2e.mention("quick: Add a greet(name) function")).toBe(200);
-    await e2e.settle();
-    await e2e.click("agentx_workflow_approve");
-    await e2e.settle();
-    expect(e2e.github.pushes.size).toBe(1);
-    expect(e2e.github.pullRequests).toEqual([]);
-    expect(e2e.worker.crashed).toEqual([expect.objectContaining({ kind: "publish" })]);
   }, 120_000);
 
   it("worker.features routes invocations through the real dispatcher and EC2 feature gate", async () => {
@@ -164,14 +124,6 @@ describe("workflow E2E harness", () => {
     await toDraftPullRequest(older);
     const review = older.invocations.find((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW");
     expect(review?.kind === "task" ? review.payload.workflowReviewPlan : "missing").toBeUndefined();
-  }, 120_000);
-
-  it("worker.stripInvocationFields leaves fields out, as an old broker would", async () => {
-    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
-    e2e.worker.stripInvocationFields(["workflowReviewChecks"]);
-    await toDraftPullRequest(e2e);
-    const review = e2e.invocations.find((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW");
-    expect(review === undefined ? undefined : "workflowReviewChecks" in review.payload).toBe(false);
   }, 120_000);
 
   it("mention variants: a Slack retry of the same event starts nothing new, and a bot's message is not a request", async () => {

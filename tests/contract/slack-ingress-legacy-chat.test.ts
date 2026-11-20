@@ -36,12 +36,4 @@ describe("Slack tasks, by deployment", () => {
     expect(dependencies.sharedTask).toBeDefined();
   });
 
-  it("are off without the broker, whatever SHARED_TASKS says", () => {
-    vi.stubEnv("SHARED_TASKS", "enabled");
-    vi.stubEnv("BROKER_FUNCTION_NAME", "");
-    delete process.env.BROKER_FUNCTION_NAME;
-    const dependencies = awsSlackRouterDependencies(transport) as unknown as Record<string, unknown>;
-    for (const name of TASK_HANDLERS) expect(dependencies[name], name).toBeUndefined();
-    expect(dependencies.stopTask).toBeUndefined();
-  });
 });

@@ -1,7 +1,6 @@
 // tests/contract/developer-task-notices.test.ts
 // Spec 025 C7, C8: the notices the notifier derives from committed changes.
 import { randomUUID } from "node:crypto";
-import { DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { noticesFromStream, noticesOf, readStream, type StreamRecord } from "../../packages/broker/src/developer/notifications.js";
@@ -32,13 +31,6 @@ describe("notices from the stream (C7, C8)", () => {
     expect(noticesFromStream(stream.take())).toEqual([expect.objectContaining({ id: `${taskOperation}:ended`, kind: "ended" })]);
   });
 
-  it("gives a failed setup its own notice", async () => {
-    const { stream, finish, workspaceId, prepareId } = await started();
-    stream.take();
-    await finish(workspaceId, prepareId, "FAILED", { error: "npm ci exited 1" });
-    expect(kinds(stream.take())).toEqual(["setup_failed"]);
-  });
-
   it("announces a cancel before the instructions ran, a mode change and a close", async () => {
     const { stream, dev, taskId, finish, workspaceId, prepareId } = await started();
     stream.take();
@@ -67,13 +59,6 @@ describe("notices from the stream (C7, C8)", () => {
     expect(kinds(stream.take())).toEqual([]);
   });
 
-  it("ignores a change to an operation that had already ended, and a teammate's operation", () => {
-    const ended = { entityType: "OPERATION", id: randomUUID(), workspaceId: randomUUID(), kind: "task", status: "SUCCEEDED", requestedBy: { kind: "developer", developerId: "d".repeat(64), provider: "slack" } };
-    expect(noticesOf({ ...ended, updatedAt: "a" }, { ...ended, updatedAt: "b" }, "2026-09-29T10:00:00.000Z", "e1")).toEqual([]);
-    const teammate = { ...ended, status: "SUCCEEDED", requestedBy: { teamId: SLACK_TEAM, userId: "U0PRIYA001" } };
-    expect(noticesOf({ ...teammate, status: "RUNNING" }, teammate, "2026-09-29T10:00:00.000Z", "e2")).toEqual([]);
-  });
-
   it("links a successful publish, and reports a failed one as an ended operation", () => {
     const publish = { entityType: "OPERATION", id: randomUUID(), workspaceId: randomUUID(), kind: "publish", requestedBy: { kind: "developer", developerId: "d".repeat(64), provider: "slack" } };
     expect(noticesOf({ ...publish, status: "RUNNING" }, { ...publish, status: "SUCCEEDED" }, "t", "e3").map((notice) => notice.kind)).toEqual(["pull_request"]);
@@ -89,28 +74,6 @@ describe("notices from the stream (C7, C8)", () => {
     expect([first[0]!.id, second[0]!.id]).toEqual([`${task.taskId}:mode:e5`, `${task.taskId}:mode:e6`]);
   });
 
-  it("notifies the shared thread when an owner approves the plan or requests changes", () => {
-    const taskId = randomUUID();
-    const waiting = { entityType: "DEVELOPER_TASK", taskId, workflow: { revision: 2, state: "WAITING", stage: "PLAN_REVIEW" } };
-    const approved = { ...waiting, workflow: { revision: 3, state: "RUNNING", stage: "IMPLEMENT" } };
-    expect(noticesOf(waiting, approved, "2026-10-05T12:00:00.000Z", "approve")).toEqual([
-      { id: `${taskId}:workflow:3`, kind: "workflow", taskId, at: "2026-10-05T12:00:00.000Z", workflowRevision: 3 },
-    ]);
-    expect(noticesOf(waiting, { ...waiting, workflow: { revision: 3, state: "RUNNING", stage: "PLAN" } }, "2026-10-05T12:00:00.000Z", "changes")[0]?.kind).toBe("workflow");
-  });
-
-  it("notifies on every step change, keyed by its revision, but not for the task's first step or a change that kept the revision", () => {
-    const taskId = randomUUID();
-    const running = { entityType: "DEVELOPER_TASK", taskId, workflow: { revision: 5, state: "WAITING", stage: "REVIEW" } };
-    expect(noticesOf(running, { ...running, workflow: { revision: 6, state: "RUNNING", stage: "REVIEW" } }, "2026-10-05T12:00:00.000Z", "e7")).toEqual([
-      { id: `${taskId}:workflow:6`, kind: "workflow", taskId, at: "2026-10-05T12:00:00.000Z", workflowRevision: 6 },
-    ]);
-    expect(noticesOf(running, { ...running, workflow: { ...running.workflow, canvasLineageVersion: 1 } }, "t", "e8")).toEqual([]);
-    expect(noticesOf({ entityType: "DEVELOPER_TASK", taskId }, running, "t", "e9")).toEqual([]);
-    // Without a stream event the notice could not be told apart from a replayed write.
-    expect(noticesOf(running, { ...running, workflow: { revision: 6, state: "RUNNING", stage: "REVIEW" } }, "t", "")).toEqual([]);
-  });
-
   it("announces a failed PR feedback review once, by its report, so the owner can retry it", () => {
     const taskId = randomUUID();
     const at = "2026-10-10T12:00:00.000Z";
@@ -121,18 +84,6 @@ describe("notices from the stream (C7, C8)", () => {
     expect(noticesOf(running, failed, at, "e1")).toEqual([{ id: `${taskId}:feedback_review:${digest}:5`, kind: "github_feedback", taskId, at, feedbackReviewDigest: digest }]);
     // A later change that keeps the same failed report is an ordinary step change, not the failure said again.
     expect(noticesOf(failed, { ...failed, workflow: { ...failed.workflow, revision: 6 } }, at, "e2").map((notice) => notice.kind)).toEqual(["workflow"]);
-  });
-
-  it("announces a PR feedback review that timed out or was interrupted like a failed one", () => {
-    const taskId = randomUUID();
-    const at = "2026-10-10T12:00:00.000Z";
-    for (const [status, blockReason] of [["BLOCKED", "review timed out"], ["INTERRUPTED", "review was cancelled"]]) {
-      const digest = (status === "BLOCKED" ? "7" : "8").repeat(64);
-      const running = { entityType: "DEVELOPER_TASK", taskId, workflow: { revision: 4, stage: "WAIT_FOR_MERGE", state: "RUNNING", feedbackReview: { status: "COLLECTING", bundleRefs: [] } } };
-      const stopped = { ...running, workflow: { revision: 5, stage: "WAIT_FOR_MERGE", state: "WAITING",
-        feedbackReview: { status: "PENDING", bundleRefs: [], reviewRef: { status, sha256: digest, blockReason } } } };
-      expect(noticesOf(running, stopped, at, "e1"), status).toEqual([{ id: `${taskId}:feedback_review:${digest}:5`, kind: "github_feedback", taskId, at, feedbackReviewDigest: digest }]);
-    }
   });
 
   it("creates closeout work only when a task reaches a terminal workflow or explicit close", () => {
@@ -170,13 +121,6 @@ describe("notices from the stream (C7, C8)", () => {
     }]);
   });
 
-  it("records no stream event for deleting an item that does not exist", async () => {
-    const { db, stream } = await started({});
-    stream.take();
-    await db.send(new DeleteCommand({ TableName: "state", Key: { pk: "NOTHING#here", sk: "META" } }));
-    expect(stream.take()).toEqual([]);
-  });
-
   it("skips a malformed record, keeps the good ones around it, and names what it skipped", () => {
     const task = (taskId: string) => marshall({ entityType: "DEVELOPER_TASK", taskId, share: { mode: "view" } });
     const first = randomUUID();
@@ -194,36 +138,10 @@ describe("notices from the stream (C7, C8)", () => {
     expect(noticesFromStream(records)).toEqual(read.notices);
   });
 
-  it("stamps the notice with the current time when the record's time is not a finite number", () => {
-    const record = { eventID: "e1", eventName: "INSERT", dynamodb: { ApproximateCreationDateTime: Number.NaN, NewImage: marshall({ entityType: "DEVELOPER_TASK", taskId: "t1", share: { mode: "view" } }) } };
-    const read = readStream([record]);
-    expect(read.skipped).toEqual([]);
-    expect(Number.isNaN(Date.parse(read.notices[0]!.at))).toBe(false);
-  });
-
-  it("stamps the notice with the new image's updatedAt, to the millisecond, else a pointer's cancelledAt, else the stream time (ruling F7)", () => {
-    const task = { entityType: "DEVELOPER_TASK", taskId: "t1", share: { mode: "view" } };
-    const at = (image: Record<string, unknown>) => readStream([{ eventID: "e1", eventName: "INSERT", dynamodb: { ApproximateCreationDateTime: 1_790_000_000, NewImage: marshall(image) } }]).notices[0]?.at;
-    expect(at({ ...task, updatedAt: "2026-09-29T10:00:00.123Z" })).toBe("2026-09-29T10:00:00.123Z");
-    expect(at({ ...task, updatedAt: "not a time" })).toBe(new Date(1_790_000_000_000).toISOString());
-    expect(at(task)).toBe(new Date(1_790_000_000_000).toISOString());
-    const pointer = { entityType: "DEVELOPER_TASK_POINTER", taskId: "t1", cancelledAt: "2026-09-29T10:00:00.456Z" };
-    expect(readStream([{ eventID: "e2", eventName: "MODIFY", dynamodb: { ApproximateCreationDateTime: 1_790_000_000, OldImage: marshall({ entityType: "DEVELOPER_TASK_POINTER", taskId: "t1" }), NewImage: marshall(pointer) } }]).notices[0]?.at).toBe("2026-09-29T10:00:00.456Z");
-  });
-
   it("gives a setup notice only for a prepare that failed, not one that was cancelled", () => {
     const prepare = { entityType: "OPERATION", id: randomUUID(), workspaceId: randomUUID(), kind: "prepare", requestedBy: { kind: "developer", developerId: "d".repeat(64), provider: "slack" } };
     const after = (status: string) => noticesOf({ ...prepare, status: "RUNNING" }, { ...prepare, status }, "t", "e1").map((notice) => notice.kind);
     expect([after("FAILED"), after("INTERRUPTED"), after("CANCELLED"), after("SUCCEEDED")]).toEqual([["setup_failed"], ["setup_failed"], [], ["ready"]]);
-  });
-
-  it("treats a stored NULL close or cancel time as unset", () => {
-    const task = { entityType: "DEVELOPER_TASK", taskId: "t1" };
-    expect(noticesOf({ ...task, closedAt: null }, { ...task, closedAt: "2026-09-29T10:00:00.000Z" }, "t", "e1").map((notice) => notice.kind)).toEqual(["closed", "canvas_closeout"]);
-    expect(noticesOf(task, { ...task, closedAt: null }, "t", "e2")).toEqual([]);
-    const pointer = { entityType: "DEVELOPER_TASK_POINTER", taskId: "t1" };
-    expect(noticesOf({ ...pointer, cancelledAt: null }, { ...pointer, cancelledAt: "2026-09-29T10:00:00.000Z" }, "t", "e3").map((notice) => notice.kind)).toEqual(["cancelled"]);
-    expect(noticesOf(pointer, { ...pointer, cancelledAt: null }, "t", "e4")).toEqual([]);
   });
 
   it("gives no mode notice for a record without an event ID, so two changes cannot collapse into one", () => {

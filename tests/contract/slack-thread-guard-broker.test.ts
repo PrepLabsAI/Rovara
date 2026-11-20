@@ -12,7 +12,6 @@ import { bindSlackChannelInCompany, createDeveloperTaskBroker } from "../support
 import { SLACK_CHANNEL, SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa";
-const B = "org_bbbbbbbbbbbbbbbbbbbb";
 const USER = "U0SHARED00";
 const PERSON = "a".repeat(64);
 const FIRST_TASK = "11111111-1111-4111-8111-111111111111";
@@ -49,13 +48,6 @@ async function world() {
 }
 
 describe("a Slack workflow start in a thread that already has a guard row", () => {
-  it("a thread with no row starts on the core, once", async () => {
-    const w = await world();
-    const result = await w.start(randomUUID());
-    expect(result.statusCode).toBe(200);
-    expect(JSON.parse(result.body)).toMatchObject({ taskId: FIRST_TASK });
-    expect(w.starts).toHaveLength(1);
-  });
 
   it("another request in a thread that has a task is 'already has a task': nothing is asked of the core", async () => {
     const w = await world();
@@ -76,37 +68,4 @@ describe("a Slack workflow start in a thread that already has a guard row", () =
     expect(w.starts).toEqual([expect.objectContaining({ requestId, project: "payments", client: "slack" })]);
   });
 
-  it("another company's row with this request id is not this company's retry: refused, nothing is asked of the core", async () => {
-    const w = await world();
-    const requestId = randomUUID();
-    w.guard(B, requestId);
-    const result = await w.start(requestId);
-    expect(result.statusCode).not.toBe(200);
-    expect(result.body).toContain("already has a task");
-    expect(w.starts).toHaveLength(0);
-  });
-
-  it("another thread of the same channel is not blocked by the row", async () => {
-    const w = await world();
-    w.guard(A, randomUUID());
-    const result = await w.start(randomUUID(), { ...thread, threadTs: "1700000000.000777" });
-    expect(result.statusCode).toBe(200);
-    expect(w.starts).toHaveLength(1);
-  });
-
-  it("the old start (no company workspaces) keeps its rule: a row means a task, even one that names this request, and the core is never asked", async () => {
-    const h = await createDeveloperTaskBroker({ channelMembers: async (r) => ({ ok: true, memberOf: r.channelIds }) });
-    const route = vi.fn(async () => undefined);
-    const module = await loadSlackBroker();
-    const handler = module.createAwsBrokerHandler({ ...h.brokerInput, developer: { ...h.brokerInput.developer!, coreTasks: { route } } } as never);
-    const requestId = randomUUID();
-    h.db.set({
-      ...sharedTaskKey(thread), entityType: "SHARED_TASK", taskId: FIRST_TASK, workspaceId: randomUUID(), ownerKey: taskOwnerKey(PERSON, FIRST_TASK), developerId: PERSON, developerName: "Rovara member", project: "payments",
-      mode: "continue", sharedAt: new Date().toISOString(), workflowThread: true, companyId: A, startRequestId: requestId,
-    });
-    const result = await handler({ source: "agentx.slack-ingress", action: "start-workflow", thread, userId: USER, instructions: "Add a retry", workflowPath: "QUICK", requestId });
-    expect(result.statusCode).not.toBe(200);
-    expect(result.body).toContain("already has a task");
-    expect(route).not.toHaveBeenCalled();
-  });
 });

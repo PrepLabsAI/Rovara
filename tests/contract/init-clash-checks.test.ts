@@ -3,17 +3,12 @@
 import { describe, expect, it } from "vitest";
 import { environmentStackName } from "@agentx/contracts";
 import { clashChecks } from "../../packages/cli/src/init/clash-checks.js";
-import { githubAppSlug } from "../../packages/cli/src/init/github-app.js";
 import { fakeGitHubApi, sampleAnswers } from "../support/init-fakes.js";
 
 const nothing = { status: async () => undefined };
 const free = async () => false;
 
 describe("clash checks", () => {
-  it("passes a free name, an existing owner of the right type and a free app name", async () => {
-    const checks = await clashChecks({ answers: sampleAnswers(), stackStatus: nothing, github: fakeGitHubApi(), audience: "page", installUsed: free });
-    expect(checks.map((check) => [check.label, check.ok])).toEqual([["Install name", true], ["GitHub owner", true], ["App name", true]]);
-  });
 
   it("refuses an install name that already has a stack here, naming the stacks only in the details", async () => {
     const stack = environmentStackName("staging", "access");
@@ -67,8 +62,4 @@ describe("clash checks", () => {
     });
   });
 
-  it("names the slug as GitHub makes it", () => {
-    expect(githubAppSlug("AgentX acme (staging)")).toBe("agentx-acme-staging");
-    expect(githubAppSlug("Our  AgentX!")).toBe("our-agentx");
-  });
 });

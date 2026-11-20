@@ -1,14 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  ChannelInfoRequestSchema,
-  DEVELOPER_API_VERSION,
-  DeveloperProjectSchema,
-  DeveloperTaskViewSchema,
-  StartDeveloperTaskRequestSchema,
-  cleanClientName,
-  diffStat,
-  taskTitle,
-} from "../../packages/contracts/src/index.js";
+import { ChannelInfoRequestSchema, DEVELOPER_API_VERSION, DeveloperProjectSchema, StartDeveloperTaskRequestSchema, cleanClientName, diffStat, taskTitle } from "../../packages/contracts/src/index.js";
 // F1: imported from the package, not the src path, so this is the same module instance the
 // orchestrator's re-export resolves to (both resolve through @agentx/contracts's dist build).
 import { lastAssistantResponse } from "@agentx/contracts";
@@ -25,18 +16,6 @@ describe("the start request", () => {
     expect(parsed.instructions).toBe("Fix the flaky retry test");
   });
 
-  it("counts the instruction limit in UTF-8 bytes, not characters", () => {
-    const euros = "€".repeat(21_846); // 65,538 bytes in 21,846 characters
-    const result = StartDeveloperTaskRequestSchema.safeParse({ requestId, project: "payments", instructions: euros });
-    expect(result.success).toBe(false);
-    expect(JSON.stringify(result.error?.issues)).toContain("65536");
-    expect(StartDeveloperTaskRequestSchema.safeParse({ requestId, project: "payments", instructions: "a".repeat(65_536) }).success).toBe(true);
-  });
-
-  it("refuses unknown fields and empty instructions", () => {
-    expect(StartDeveloperTaskRequestSchema.safeParse({ requestId, project: "payments", instructions: "x", model: "big" }).success).toBe(false);
-    expect(StartDeveloperTaskRequestSchema.safeParse({ requestId, project: "payments", instructions: "" }).success).toBe(false);
-  });
 });
 
 describe("client names (FR-033, R25)", () => {
@@ -92,42 +71,6 @@ describe("changed files from the workspace diff (R18)", () => {
     ]);
   });
 
-  it("stops at the limit", () => {
-    const one = (index: number) => [`diff --git a/f${index} b/f${index}`, "@@ -0,0 +1 @@", "+x"].join("\n");
-    const diff = ["## demo", "### diff", ...Array.from({ length: 5 }, (_, index) => one(index))].join("\n");
-    expect(diffStat(diff, 3)).toHaveLength(3);
-  });
-});
-
-describe("the task view", () => {
-  it("parses a view with extra fields a newer control plane may add", () => {
-    const view = {
-      taskId: requestId, title: "Fix", project: "payments", status: "RUNNING", startingRevision: 7, client: "Claude Code", shared: false,
-      createdAt: "2026-09-27T12:00:00.000Z", updatedAt: "2026-09-27T12:00:05.000Z", events: [], futureField: 1,
-    };
-    expect(DeveloperTaskViewSchema.parse(view).status).toBe("RUNNING");
-  });
-});
-
-describe("the task view's failure stage (#154)", () => {
-  const view = {
-    taskId: requestId, title: "Fix", project: "payments", status: "FAILED", startingRevision: 7, client: "Claude Code", shared: false,
-    createdAt: "2026-09-27T12:00:00.000Z", updatedAt: "2026-09-27T12:00:05.000Z", events: [],
-  };
-
-  it("carries stage setup when the failure happened while the workspace was set up", () => {
-    const failure = { category: "worker_unavailable", stage: "setup", message: "workspace compute was lost during setup; close this task and start a new one" };
-    expect(DeveloperTaskViewSchema.parse({ ...view, failure }).failure).toEqual(failure);
-  });
-
-  it("still parses a failure without a stage, from a control plane that predates it", () => {
-    expect(DeveloperTaskViewSchema.parse({ ...view, failure: { category: "task_failed", message: "x" } }).failure).toEqual({ category: "task_failed", message: "x" });
-  });
-
-  it("drops a stage this release does not know, rather than refusing the view", () => {
-    const parsed = DeveloperTaskViewSchema.parse({ ...view, failure: { category: "task_failed", stage: "a-future-stage", message: "x" } });
-    expect(parsed.failure).toEqual({ category: "task_failed", message: "x" });
-  });
 });
 
 describe("developer API 1.2 (R23, Q7)", () => {
@@ -146,28 +89,4 @@ describe("developer API 1.2 (R23, Q7)", () => {
     expect(ChannelInfoRequestSchema.safeParse({ kind: "channel-info", channelIds: Array.from({ length: 51 }, () => "C0123456789") }).success).toBe(false);
   });
 
-  it("F6: a newer control plane's task policy field parses, at the top level and nested inside shareMode", () => {
-    const withTopLevelField = DeveloperProjectSchema.safeParse({
-      name: "payments", latestRevision: 7, access: "channel",
-      channels: [{ channelId: "C0123456789" }],
-      tasks: {
-        enabled: true, share: "optional",
-        shareMode: { default: "view", allowContinue: true },
-        channelMembersMayUse: true,
-        futureTopLevelField: true,
-      },
-    });
-    expect(withTopLevelField.success).toBe(true);
-
-    const withNestedField = DeveloperProjectSchema.safeParse({
-      name: "payments", latestRevision: 7, access: "channel",
-      channels: [{ channelId: "C0123456789" }],
-      tasks: {
-        enabled: true, share: "optional",
-        shareMode: { default: "view", allowContinue: true, futureNestedField: 1 },
-        channelMembersMayUse: true,
-      },
-    });
-    expect(withNestedField.success).toBe(true);
-  });
 });

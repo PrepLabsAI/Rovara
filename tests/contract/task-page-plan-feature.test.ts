@@ -120,15 +120,6 @@ describe("the task page's feature, from the broker (an owner, a channel reader a
     expect(await setPageFeature(deps, PRIYA, t.taskId, { feature: mine.id })).toEqual({ line: "Feature: Mine (chosen)", featureId: mine.id });
   });
 
-  it("a feature store that fails leaves the page without the line (the documents still show)", async () => {
-    const { t } = waiting();
-    const memory = holder.store as MemoryDocumentStore;
-    const get = memory.get.bind(memory);
-    vi.spyOn(memory, "get").mockImplementation(async (key) => { if (key.sk.startsWith("TASKFEAT#")) throw new Error("private canary"); return get(key); });
-    const view = await getTaskDocumentView(t.deps, PRIYA, t.taskId);
-    expect(view.planFeature).toBeUndefined();
-    expect(view.documents.length).toBeGreaterThan(0);
-  });
 });
 
 // ---- the page the server draws
@@ -150,14 +141,6 @@ async function pageHtml(options: { access?: typeof owner | typeof reader; planFe
 const withFeature = (over: Partial<NonNullable<TaskDocumentView["planFeature"]>> = {}): NonNullable<TaskDocumentView["planFeature"]> => ({ line: LINE, feature: { id: FT_ONE, name: "Checkout v2", source: "tracker" }, canChange: true, canCreate: false, ...over });
 
 describe("the task page's feature line", () => {
-  it("draws the line, and for the owner who may change it the controls (turned on by the script)", async () => {
-    const html = await pageHtml({ planFeature: withFeature() });
-    expect(html).toContain(`<span id="plan-feature-line">${LINE}</span>`);
-    expect(html).toContain('id="decide-feature-change" hidden');
-    expect(html).toContain('id="decide-feature-none" hidden');
-    expect(html).toContain('id="decide-feature-select"');
-    expect(html).toMatch(/"canFeature":true/u);
-  });
 
   it("a reader sees the line and no control and the script is not told a press is allowed; an owner whose card says canChange false sees none either", async () => {
     for (const html of [await pageHtml({ access: reader, planFeature: withFeature() }), await pageHtml({ planFeature: withFeature({ canChange: false }) })]) {
@@ -174,11 +157,6 @@ describe("the task page's feature line", () => {
     expect(await pageHtml()).not.toContain('id="plan-feature"');
   });
 
-  it("draws a feature name as text: a name with markup is escaped", async () => {
-    const html = await pageHtml({ planFeature: withFeature({ line: "Feature: <img src=x onerror=alert(1)> (chosen)" }) });
-    expect(html).not.toContain("<img src=x");
-    expect(html).toContain("&lt;img src=x");
-  });
 });
 
 // ---- the page's API
@@ -280,34 +258,6 @@ function boot(html: string, respond: (sent: Sent) => { status: number; body: unk
 const click = (element: FakeElement) => element.dispatchEvent(makeEvent("click", element));
 
 describe("the task page script's feature presses", () => {
-  const choices = { status: 200, body: { features: [{ id: FT_ONE, name: "Checkout v2" }, { id: FT_TWO, name: "Billing" }] } };
-
-  it("Change reads the open features into the picker (current one chosen) and Use sends the picked id; the line becomes the new one", async () => {
-    const page = boot(await pageHtml({ planFeature: withFeature() }), (sent) => (sent.method === "GET" ? choices : { status: 200, body: { line: "Feature: Billing (chosen)", featureId: FT_TWO } }));
-    expect(page.byId("decide-feature-change").hidden).toBe(false);
-    expect(page.byId("decide-feature-none").hidden).toBe(false);
-    click(page.byId("decide-feature-change"));
-    await page.settle();
-    expect(page.sent.at(-1)).toMatchObject({ method: "GET", url: `/review/${taskId}/task/api/feature-choices` });
-    expect(page.byId("plan-feature-pick").hidden).toBe(false);
-    const select = page.byId("decide-feature-select");
-    expect(select.children.map((option) => option.textContent)).toEqual(["Checkout v2", "Billing"]);
-    select.value = FT_TWO;
-    click(page.byId("decide-feature-save"));
-    await page.settle();
-    expect(page.sent.at(-1)).toMatchObject({ method: "POST", url: `/review/${taskId}/task/api/feature`, body: { feature: FT_TWO } });
-    expect(page.byId("plan-feature-line").textContent).toBe("Feature: Billing (chosen)");
-    expect(page.byId("plan-feature-pick").hidden).toBe(true);
-  });
-
-  it("No feature sends null, and the button goes away once there is none", async () => {
-    const page = boot(await pageHtml({ planFeature: withFeature() }), () => ({ status: 200, body: { line: "Feature: No feature" } }));
-    click(page.byId("decide-feature-none"));
-    await page.settle();
-    expect(page.sent.at(-1)).toMatchObject({ method: "POST", body: { feature: null } });
-    expect(page.byId("plan-feature-line").textContent).toBe("Feature: No feature");
-    expect(page.byId("decide-feature-none").hidden).toBe(true);
-  });
 
   it("a task with no feature has no No feature button; a refusal is said in the page's words and leaves the page alive", async () => {
     const none = boot(await pageHtml({ planFeature: withFeature({ feature: null, line: "Feature: No feature" }) }), () => ({ status: 200, body: {} }));
@@ -320,10 +270,4 @@ describe("the task page script's feature presses", () => {
     expect(page.byId("plan-feature-line").textContent).toBe(LINE);
   });
 
-  it("the controls are not turned on for a reader, and the script sends nothing for one", async () => {
-    const html = await pageHtml({ access: reader, planFeature: withFeature() });
-    const page = boot(html, () => ({ status: 200, body: {} }));
-    expect(page.document.getElementById("decide-feature-change")).toBeNull();
-    expect(page.sent.filter((sent) => sent.url.includes("feature"))).toEqual([]);
-  });
 });

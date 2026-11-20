@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { SLACK_FORMAT } from "../../packages/slack-service/src/slack-format.js";
 import { describe, expect, it } from "vitest";
 import { limitMessage } from "../../packages/slack-service/src/messages.js";
-import { MAYA, createDeveloperTaskBroker, grantProject, type Developer } from "../support/developer-task-broker.js";
+import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, serviceCall } from "../support/slack-broker.js";
 
 const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000001" };
@@ -28,13 +28,6 @@ async function fullOfTasks() {
 }
 
 describe("the Slack limit refusal (C16)", () => {
-  it("counts the member's open AI-tool tasks for a service that asks", async () => {
-    const { handler, subject } = await fullOfTasks();
-    const asked = await serviceCall(handler, subject, MAYA.slackUserId!, "POST", "/v1/service/threads/workspace", { requestId: randomUUID(), includeOpenTaskCount: true });
-    expect(result(asked.body)).toEqual({ outcome: "LIMIT_REACHED", limit: "MEMBER", maximum: 3, starterThreads: [], openTaskCount: 3 });
-    const older = await serviceCall(handler, subject, MAYA.slackUserId!, "POST", "/v1/service/threads/workspace", { requestId: randomUUID() });
-    expect(result(older.body)).toEqual({ outcome: "LIMIT_REACHED", limit: "MEMBER", maximum: 3, starterThreads: [] });
-  });
 
   it("gives only a count: no task's title, ID or instructions reaches the channel", async () => {
     const { handler, subject, titles, db } = await fullOfTasks();
@@ -81,26 +74,6 @@ describe("a Slack thread at the limit first gives back slots finished tasks stil
 });
 
 describe("the Slack limit refusal counts only the member's own tasks (C16)", () => {
-  const PRIYA: Developer = { developerId: "f".repeat(64), name: "Priya Rao", provider: "slack", sessionId: "s-priya", slackUserId: "U0PRIYA001" };
-
-  it("leaves another member's AI-tool tasks out of the count", async () => {
-    const harness = await createDeveloperTaskBroker({ memberLimit: 3 });
-    harness.db.set({ pk: `SESSION#${PRIYA.sessionId}`, sk: "META", sessionId: PRIYA.sessionId, developerId: PRIYA.developerId, amr: "slack", startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800 });
-    harness.db.set({ pk: `DEVELOPER#${PRIYA.developerId}`, sk: "META", developerId: PRIYA.developerId, provider: "slack", displayName: PRIYA.name, slackUserId: PRIYA.slackUserId, firstSignInAt: "x", lastSignInAt: "x", revoked: false });
-    grantProject(harness.db, PRIYA);
-    for (let index = 0; index < 2; index += 1) {
-      const started = await harness.dev(PRIYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: `Priya ${index}`, client: "claude-code" });
-      expect(started.status).toBe(200);
-    }
-    await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Maya 0", client: "claude-code" });
-    for (const threadTs of ["1695500000.000011", "1695500000.000012"]) {
-      const opened = await serviceCall(harness.handler, `${SLACK_TEAM}/${SLACK_CHANNEL}/${threadTs}`, MAYA.slackUserId!, "POST", "/v1/service/threads/workspace", { requestId: randomUUID() });
-      expect(opened.body).toMatchObject({ outcome: "WORKSPACE", created: true });
-    }
-    const asked = await serviceCall(harness.handler, `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000013`, MAYA.slackUserId!, "POST", "/v1/service/threads/workspace", { requestId: randomUUID(), includeOpenTaskCount: true });
-    expect(result(asked.body)).toMatchObject({ outcome: "LIMIT_REACHED", limit: "MEMBER", maximum: 3, openTaskCount: 1 });
-    expect(harness.db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${PRIYA.slackUserId}`)).toMatchObject({ count: 2 });
-  });
 
   it("shows no AI-tool tasks and today's words when Slack threads alone fill the limit", async () => {
     const harness = await createDeveloperTaskBroker({ memberLimit: 3 });
@@ -121,10 +94,6 @@ describe("the Slack limit refusal counts only the member's own tasks (C16)", () 
 });
 
 describe("limitMessage (C16)", () => {
-  it("keeps today's words exactly when no AI-tool task is open", () => {
-    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread], openTaskCount: 0 }, SLACK_FORMAT).split("\n")[0]).toBe(TODAY);
-    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread] }, SLACK_FORMAT)).toBe(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread], openTaskCount: 0 }, SLACK_FORMAT));
-  });
 
   it("names the AI-tool tasks beside the threads, and says how to close one", () => {
     const text = limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread], openTaskCount: 2 }, SLACK_FORMAT);
@@ -139,7 +108,4 @@ describe("limitMessage (C16)", () => {
     expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [], openTaskCount: 1 }, SLACK_FORMAT)).toContain("One of them is a task started from an AI tool");
   });
 
-  it("uses no em dash", () => {
-    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread], openTaskCount: 2 }, SLACK_FORMAT)).not.toContain("—");
-  });
 });

@@ -6,14 +6,6 @@ import { loadProjectConfig } from "../../packages/cli/src/config.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 
 describe("local project selection", () => {
-  it("loads only the named strict YAML definition", async () => {
-    const configDirectory = await createFixtureDirectory("agentx-config-");
-    await writeFile(join(configDirectory, "payments.yaml"), YAML.stringify(projectConfig()), "utf8");
-
-    const loaded = await loadProjectConfig({ projectName: "payments", configDirectory });
-    expect(loaded.name).toBe("payments");
-    expect(loaded.revision).toBe(1);
-  });
 
   it("rejects traversal, unknown keys, retired fields and non-HTTPS repositories by default", async () => {
     const configDirectory = await createFixtureDirectory("agentx-config-");

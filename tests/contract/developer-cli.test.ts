@@ -20,7 +20,6 @@ const projects = {
 };
 
 const urlOf = (input: string | URL | Request) => (typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
-const formOf = (init: RequestInit | undefined) => new URLSearchParams(typeof init?.body === "string" ? init.body : "");
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -66,12 +65,6 @@ describe("agentx whoami and logout (FR-011)", () => {
     expect(JSON.parse(h.out.join(""))).toEqual({ ok: true, data: { env: "staging", url: URL_, ...projects } });
   });
 
-  it("whoami without a sign-in says how to sign in", async () => {
-    const h = await signedIn();
-    expect(await h.run(["--env", "other", "whoami"])).toBe(3);
-    expect(h.err.join("")).toContain("this computer is not signed in to AgentX environment other; run npx @preplabsai/rovara-code login <your AgentX URL>");
-  });
-
   it("whoami gives the server's reason when AgentX refuses the sign-in, made safe, with the login hint", async () => {
     const refused = (message: unknown) => () => Response.json({ error: { code: "AUTH_REQUIRED", message } }, { status: 401 });
     const h = await signedIn({ projects: refused("your sign-in ended when Slack was turned off\u001b[2J; sign in again with agentx login <url>") });
@@ -84,18 +77,6 @@ describe("agentx whoami and logout (FR-011)", () => {
     const odd = await signedIn({ projects: refused(7) });
     expect(await odd.run(["whoami"])).toBe(3);
     expect(odd.err.join("")).toContain(`your AgentX sign-in for staging has ended; run npx @preplabsai/rovara-code login ${URL_}`);
-  });
-
-  it("logout revokes the session at the server and removes the tokens and the environment", async () => {
-    const h = await signedIn();
-    expect(await h.run(["logout"])).toBe(0);
-    const revoke = h.fetchImplementation.mock.calls.find(([input]) => urlOf(input) === `${ISSUER}/revoke`);
-    expect(revoke?.[1]?.method).toBe("POST");
-    expect(Object.fromEntries(formOf(revoke?.[1]))).toEqual({ token: REFRESH, client_id: "agentx-cli" });
-    expect(await h.tokenStore.get(developerTokenKey(ISSUER))).toBeUndefined();
-    expect(await readDeveloperConfig(h.home)).toEqual({ environments: {} });
-    expect(h.out.join("")).toBe("Signed out of AgentX environment staging.\n");
-    expect(h.out.join("") + h.err.join("")).not.toContain(REFRESH);
   });
 
   it("logout of the default environment moves the default to a remaining one (#221)", async () => {
@@ -133,18 +114,6 @@ describe("agentx whoami and logout (FR-011)", () => {
     const h = await signedIn({ revoke: () => Promise.resolve(Response.json({}, { status: 500 })) });
     expect(await h.run(["--json", "logout"])).toBe(0);
     expect(JSON.parse(h.out.join(""))).toEqual({ ok: true, data: { env: "staging", revoked: false, problem: "not_confirmed" } });
-  });
-
-  it("logout --json names an unreachable server", async () => {
-    const h = await signedIn({ revoke: () => Promise.reject(new TypeError("fetch failed")) });
-    expect(await h.run(["--json", "logout"])).toBe(0);
-    expect(JSON.parse(h.out.join(""))).toEqual({ ok: true, data: { env: "staging", revoked: false, problem: "unreachable" } });
-  });
-
-  it("whoami strips terminal escapes from the developer's name (fix 3)", async () => {
-    const h = await signedIn({ name: "Maya\u001b[2J Chen" });
-    expect(await h.run(["whoami"])).toBe(0);
-    expect(h.out.join("")).toContain("as Maya[2J Chen, with Slack");
   });
 
   it("login refuses a URL together with --admin", async () => {

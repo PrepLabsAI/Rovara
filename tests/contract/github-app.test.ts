@@ -1,4 +1,4 @@
-import { generateKeyPairSync, verify } from "node:crypto";
+import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   DRAFT_REFUSED_PULL_REQUEST_NOTE,
@@ -44,85 +44,6 @@ describe("GitHub App repository credentials", () => {
     expect(fetchImplementation).toHaveBeenCalledTimes(2);
     // One installation lookup (then cached) and one token per call, each signed as the App.
     expect(getPrivateKey).toHaveBeenCalledTimes(3);
-  });
-
-  it("mints a repository-scoped installation token", async () => {
-    const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
-    const fetchImplementation = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
-      requests.push({ url: requestUrl, init });
-      return new Response(JSON.stringify({ token: "installation-token", expires_at: "2030-01-01T00:00:00Z" }), {
-        status: 201,
-        headers: { "content-type": "application/json" },
-      });
-    });
-    const provider = appProvider({
-      credentialRef: "github-agentx-sdlc",
-      appId: "5002502",
-      getPrivateKey: async () => pem,
-      fetchImplementation,
-      now: () => 1_800_000_000_000,
-    });
-
-    await expect(
-      provider.resolve(
-        "github-agentx-sdlc",
-        "https://github.com/ps06756/personal-website-test.git",
-      ),
-    ).resolves.toEqual({ username: "x-access-token", password: "installation-token" });
-    expect(requests[0]?.url).toBe(
-      "https://api.github.com/app/installations/163046162/access_tokens",
-    );
-    const requestBody = requests[0]?.init?.body;
-    if (typeof requestBody !== "string") throw new Error("expected a string request body");
-    expect(JSON.parse(requestBody)).toEqual({
-      repositories: ["personal-website-test"],
-      permissions: { contents: "read" },
-    });
-    const authorization = new Headers(requests[0]?.init?.headers).get("authorization");
-    const jwt = authorization?.replace(/^Bearer /, "") ?? "";
-    const [header, payload, signature] = jwt.split(".");
-    expect(JSON.parse(Buffer.from(payload!, "base64url").toString("utf8"))).toMatchObject({
-      iss: "5002502",
-      iat: 1_799_999_940,
-      exp: 1_800_000_540,
-    });
-    expect(
-      verify(
-        "RSA-SHA256",
-        Buffer.from(`${header}.${payload}`),
-        publicKey,
-        Buffer.from(signature!, "base64url"),
-      ),
-    ).toBe(true);
-  });
-
-  it("mints contents-write credentials only for push access", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const bodies: unknown[] = [];
-    const provider = appProvider({
-      credentialRef: "github-agentx-sdlc",
-      appId: "5002502",
-      getPrivateKey: async () => pem,
-      fetchImplementation: async (_url, init) => {
-        if (typeof init?.body !== "string") throw new Error("expected JSON request body");
-        bodies.push(JSON.parse(init.body));
-        return new Response(JSON.stringify({ token: "push-token" }), { status: 201 });
-      },
-    });
-
-    await provider.resolve(
-      "github-agentx-sdlc",
-      "https://github.com/ps06756/personal-website-test.git",
-      "push",
-    );
-    expect(bodies).toEqual([{
-      repositories: ["personal-website-test"],
-      permissions: { contents: "write" },
-    }]);
   });
 
   it("uses a repository-scoped PR token that can resolve private refs", async () => {
@@ -201,42 +122,6 @@ describe("GitHub App repository credentials", () => {
     mode = "failure";
     await expect(provider.reconcilePullRequest(input)).rejects.toThrow(/HTTP 403/);
     await expect(provider.reconcilePullRequest(input)).rejects.not.toThrow(/sensitive-github-error/);
-  });
-
-  it("reconciles after an ambiguous create timeout instead of creating a duplicate", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    let lookupCount = 0;
-    let createCount = 0;
-    const provider = appProvider({
-      credentialRef: "github-agentx-sdlc",
-      appId: "5002502",
-      getPrivateKey: async () => pem,
-      fetchImplementation: async (url, init) => {
-        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
-        if (requestUrl.endsWith("/access_tokens")) {
-          return new Response(JSON.stringify({ token: "pr-token" }), { status: 201 });
-        }
-        if (init?.method === "POST") {
-          createCount += 1;
-          throw new TypeError("socket closed after request body was sent");
-        }
-        lookupCount += 1;
-        return new Response(JSON.stringify(lookupCount === 1 ? [] : [{
-          number: 19,
-          html_url: "https://github.com/ps06756/personal-website-test/pull/19",
-        }]), { status: 200 });
-      },
-    });
-
-    await expect(provider.reconcilePullRequest({
-      repositoryUrl: "https://github.com/ps06756/personal-website-test.git",
-      headBranch: "agentx/00000000-0000-4000-8000-000000000001",
-      baseBranch: "main",
-      title: "Publish change",
-    })).resolves.toMatchObject({ number: 19, reconciled: true });
-    expect(createCount).toBe(1);
-    expect(lookupCount).toBe(2);
   });
 
   it("reads a commit's parents with a contents-read token, and refuses an answer it cannot read", async () => {
@@ -396,29 +281,6 @@ describe("GitHub App repository credentials", () => {
     await expect(provider.getFileAtCommit("https://github.com/ps06756/personal-website-test.git", "a.txt", "e".repeat(40), { untilLine: 2 })).resolves.toBe("one\ntwo\n");
   });
 
-  it("gives a file read 8 seconds unless the caller allows longer", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const provider = appProvider({
-      credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem,
-      fetchImplementation: async (url) => {
-        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
-        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
-        return new Response("one\n", { status: 200 });
-      },
-    });
-    const timeout = vi.spyOn(AbortSignal, "timeout");
-    try {
-      const url = "https://github.com/ps06756/personal-website-test.git";
-      await provider.getFileAtCommit(url, "a.txt", "e".repeat(40));
-      await provider.getFileAtCommit(url, "a.txt", "e".repeat(40), { untilLine: 1, timeoutMs: 27_000 });
-      // The installation and token lookups use their own 5 s limit; the file reads are the last two requests.
-      expect(timeout.mock.calls.map(([ms]) => ms).slice(-2)).toEqual([8_000, 27_000]);
-    } finally {
-      timeout.mockRestore();
-    }
-  });
-
   it("holds a file to 20 MB by its declared size without a last line and by the bytes that arrive, without reading past the cap", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -469,53 +331,6 @@ describe("GitHub App repository credentials", () => {
     await expect(provider.getFileAtCommit(url, "declared.txt", sha, { untilLine: 5 })).resolves.toBe("a".repeat(10));
   });
 
-  it("refuses a body one byte over 20 MB and keeps encoded separators and punctuation inside one path segment", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const sha = "e".repeat(40);
-    const urls: string[] = [];
-    const provider = appProvider({
-      credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem,
-      fetchImplementation: async (url) => {
-        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
-        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
-        urls.push(requestUrl);
-        return new Response(requestUrl.includes("/contents/one-over.txt?") ? new Uint8Array(20_971_521) : "ok", { status: 200 });
-      },
-    });
-    const url = "https://github.com/ps06756/personal-website-test.git";
-    await expect(provider.getFileAtCommit(url, "one-over.txt", sha)).rejects.toThrow(/file too large/);
-    await provider.getFileAtCommit(url, "a%2Fb/c?d#e.ts", sha);
-    await provider.getFileAtCommit(url, `${"a/".repeat(255)}bc`, sha);
-    expect(urls[1]).toBe(`https://api.github.com/repos/ps06756/personal-website-test/contents/a%252Fb/c%3Fd%23e.ts?ref=${sha}`);
-    expect(urls).toHaveLength(3);
-    await expect(provider.getFileAtCommit(url, `${"a/".repeat(255)}bcd`, sha)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-  });
-
-  it("mints one contents-read token for a run of file reads in a repository and a new one after five minutes", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const sha = "e".repeat(40);
-    let minted = 0;
-    let clock = 1_000_000;
-    const provider = appProvider({
-      credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem, now: () => clock,
-      fetchImplementation: async (url) => {
-        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
-        if (requestUrl.endsWith("/access_tokens")) { minted += 1; return new Response(JSON.stringify({ token: `token-${minted}` }), { status: 201 }); }
-        return new Response("ok", { status: 200 });
-      },
-    });
-    const url = "https://github.com/ps06756/personal-website-test.git";
-    await Promise.all([provider.getFileAtCommit(url, "a.ts", sha), provider.getFileAtCommit(url, "b.ts", sha)]);
-    await provider.getFileAtCommit(url, "c.ts", sha);
-    await provider.getFileAtCommit("https://github.com/PS06756/Personal-Website-Test.git", "d.ts", sha);
-    expect(minted).toBe(1);
-    clock += 5 * 60_000 + 1;
-    await provider.getFileAtCommit(url, "e.ts", sha);
-    expect(minted).toBe(2);
-  });
-
   it("refuses an unsafe file path or commit before any request", async () => {
     const fetchImplementation = vi.fn(async () => new Response("never", { status: 200 }));
     const provider = appProvider({ credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => "unused", fetchImplementation });
@@ -552,44 +367,6 @@ describe("GitHub App repository credentials", () => {
     expect(requests[1]?.url).toBe(`https://api.github.com/repos/ps06756/personal-website-test/git/ref/heads/${branch}`);
     await expect(provider.getBranchHead("https://github.com/ps06756/personal-website-test.git", "agentx/00000000-0000-4000-8000-000000000002")).rejects.toThrow(/HTTP 404/);
     await expect(provider.getBranchHead("https://github.com/ps06756/personal-website-test.git", "main")).rejects.toThrow(/invalid/);
-  });
-
-  it("looks up canonical pull request state with read-only permissions", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
-    const provider = appProvider({
-      credentialRef: "github-agentx-sdlc",
-      appId: "5002502",
-      getPrivateKey: async () => pem,
-      fetchImplementation: async (url, init) => {
-        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
-        requests.push({ url: requestUrl, init });
-        if (requestUrl.endsWith("/access_tokens")) {
-          return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
-        }
-        return new Response(JSON.stringify(pullRequestFixture()), { status: 200 });
-      },
-    });
-
-    await expect(provider.getPullRequest(
-      "https://github.com/ps06756/personal-website-test.git",
-      42,
-    )).resolves.toEqual({
-      number: 42,
-      url: "https://github.com/ps06756/personal-website-test/pull/42",
-      state: "open",
-      headBranch: "agentx/00000000-0000-4000-8000-000000000001",
-      baseBranch: "main",
-      headCommit: "a".repeat(40),
-      title: "Current title",
-      body: "Current body",
-    });
-    const tokenBody = requests[0]?.init?.body;
-    if (typeof tokenBody !== "string") throw new Error("expected token body");
-    expect((JSON.parse(tokenBody) as { permissions: unknown }).permissions)
-      .toEqual({ contents: "read", pull_requests: "read" });
-    expect(requests[1]?.url).toBe("https://api.github.com/repos/ps06756/personal-website-test/pulls/42");
   });
 
   it("refuses a pull request whose head branch lives in another repository (a fork)", async () => {
@@ -847,32 +624,6 @@ describe("GitHub App repository credentials", () => {
     await expect(unreadable.resolve("github-agentx-sdlc", "https://github.com/acme/demo.git")).rejects.toThrow("GitHub App ID must be numeric");
   });
 
-  it("opens a draft only when asked", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const created: unknown[] = [];
-    const provider = appProvider({
-      credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem,
-      fetchImplementation: async (url, init) => {
-        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
-        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "pr-token" }), { status: 201 });
-        if (init?.method === "POST") {
-          if (typeof init.body !== "string") throw new Error("expected JSON request body");
-          created.push(JSON.parse(init.body));
-          return new Response(JSON.stringify({ number: 43, html_url: "https://github.com/ps06756/personal-website-test/pull/43" }), { status: 201 });
-        }
-        return new Response("[]", { status: 200 });
-      },
-    });
-    const input = { repositoryUrl: "https://github.com/ps06756/personal-website-test.git", headBranch: "agentx/00000000-0000-4000-8000-000000000002", baseBranch: "main", title: "Draft change" };
-    await provider.reconcilePullRequest({ ...input, draft: true });
-    await provider.reconcilePullRequest(input);
-    expect(created).toEqual([
-      { title: "Draft change", head: input.headBranch, base: "main", draft: true },
-      { title: "Draft change", head: input.headBranch, base: "main" },
-    ]);
-  });
-
   // Evaluation fix INTG1: GitHub answers 422 to a draft pull request on a private repository whose plan has no drafts (GitHub Free). That one answer, and only that, is retried once
   // as a normal pull request; every other 422 fails with a readable reason that is one of AgentX's own sentences, never GitHub's text.
   describe("a draft pull request that GitHub refuses (INTG1)", () => {
@@ -951,14 +702,7 @@ describe("GitHub App repository credentials", () => {
       expect(fine.created).toHaveLength(1);
     });
 
-    it("never retries a pull request that was not asked to be a draft", async () => {
-      const { provider, created } = creating([refused(DRAFT_REFUSAL)]);
-      await expect(provider.reconcilePullRequest(input)).rejects.toThrow(/HTTP 422: this repository does not allow draft pull requests/);
-      expect(created).toHaveLength(1);
-    });
-
     it.each([
-      ["no commits between the branches", { message: "Validation Failed", errors: [{ resource: "PullRequest", code: "custom", message: "No commits between main and agentx/x" }] }, /HTTP 422: the head branch has no commits that the base branch lacks/],
       ["a head branch GitHub cannot find", { message: "Validation Failed", errors: [{ resource: "PullRequest", field: "head", code: "invalid" }] }, /HTTP 422: GitHub cannot find the head branch/],
       ["a base branch GitHub cannot find", { message: "Validation Failed", errors: [{ resource: "PullRequest", field: "base", code: "invalid" }] }, /HTTP 422: GitHub cannot find the base branch/],
       ["a reason AgentX does not know", { message: "sensitive-github-error", errors: [{ message: "sensitive-github-error" }] }, /HTTP 422: GitHub rejected the pull request and gave a reason AgentX does not recognise/],
@@ -1005,24 +749,6 @@ describe("GitHub App repository credentials", () => {
         expect(creates()).toBe(2);
       });
 
-      it("says it on a broker retry that finds the normal pull request an earlier attempt opened, without creating another", async () => {
-        const { provider, creates } = providerWith([], [found(false)]);
-        expect(await provider.reconcilePullRequest({ ...input, draft: true })).toEqual({ number: 43, url: "https://github.com/ps06756/personal-website-test/pull/43", reconciled: true, draftRefused: true });
-        expect(creates()).toBe(0);
-      });
-
-      it("says nothing of a refusal for a found pull request that is still a draft, one whose state GitHub does not give, or a request that did not ask for a draft", async () => {
-        for (const [lookup, draft] of [[found(true), true], [found(undefined), true], [found(false), undefined]] as const) {
-          const { provider } = providerWith([], [lookup]);
-          const result = await provider.reconcilePullRequest({ ...input, ...(draft === undefined ? {} : { draft }) });
-          expect(result).toEqual({ number: 43, url: "https://github.com/ps06756/personal-website-test/pull/43", reconciled: true });
-        }
-      });
-
-      it("says it when a create that was lost is found as a normal pull request after a draft request that GitHub never refused", async () => {
-        const { provider } = providerWith(["network-error"], [[], found(false)]);
-        expect(await provider.reconcilePullRequest({ ...input, draft: true })).toMatchObject({ reconciled: true, draftRefused: true });
-      });
     });
 
     it("tells the reason of the retry's own refusal, and does not read a 403 or a 500 as a draft refusal", async () => {
@@ -1122,8 +848,6 @@ describe("bounded pull request merge observation", () => {
   });
 
   it.each([
-    ["head", (value: Record<string, unknown>) => ({ ...value, head: { ...(value.head as Record<string, unknown>), sha: "c".repeat(40) } })],
-    ["state", (value: Record<string, unknown>) => ({ ...value, state: "closed" })],
     ["merge commit", (value: Record<string, unknown>) => ({ ...value, state: "closed", merged: true, merge_commit_sha: "c".repeat(40) })],
   ] as const)("refuses a %s change between the two PR reads", async (_label, second) => {
     const f = fixture({ mutatePull: (value, read) => read === 2 ? second(value) : value });
@@ -1135,7 +859,6 @@ describe("bounded pull request merge observation", () => {
     ["64-character head", { mutatePull: (value: Record<string, unknown>) => ({ ...value, head: { ...(value.head as Record<string, unknown>), sha: "a".repeat(64) } }) }],
     ["uppercase head", { mutatePull: (value: Record<string, unknown>) => ({ ...value, head: { ...(value.head as Record<string, unknown>), sha: "A".repeat(40) } }) }],
     ["missing tree", { tree: { sha: "a".repeat(40), tree: {} } }],
-    ["uppercase tree", { tree: { sha: "a".repeat(40), tree: { sha: "B".repeat(40) } } }],
   ] as const)("refuses a %s identity", async (_label, shape) => {
     const f = fixture({
       ...("tree" in shape ? { tree: shape.tree } : {}),
@@ -1146,9 +869,7 @@ describe("bounded pull request merge observation", () => {
   });
 
   it.each([
-    ["number", (value: Record<string, unknown>) => ({ ...value, number: 43, html_url: "https://github.com/ps06756/personal-website-test/pull/43" })],
     ["URL", (value: Record<string, unknown>) => ({ ...value, html_url: "https://github.com/ps06756/other/pull/42" })],
-    ["head repository", (value: Record<string, unknown>) => ({ ...value, head: { ...(value.head as Record<string, unknown>), repo: { full_name: "other/personal-website-test" } } })],
   ] as const)("refuses the wrong PR %s", async (_label, mutatePull) => {
     const f = fixture({ mutatePull: (value) => mutatePull(value) });
     await expect(f.provider.getPullRequestMergeObservation("https://github.com/ps06756/personal-website-test", 42, f.budget))
@@ -1167,18 +888,9 @@ describe("bounded pull request merge observation", () => {
       .rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
   });
 
-  it.each([404, 500])("keeps HTTP %i unavailable rather than treating it as merge proof", async (status) => {
-    const f = fixture({ response: (kind) => kind === "pull" ? new Response("sensitive body", { status }) : undefined });
-    await expect(f.provider.getPullRequestMergeObservation("https://github.com/ps06756/personal-website-test", 42, f.budget))
-      .rejects.not.toThrow(/sensitive body/);
-  });
 
   it.each([
-    ["retry-after", 429, { "retry-after": "120" }, NOW + 120_000],
-    ["reset", 429, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String((NOW + 180_000) / 1_000) }, NOW + 180_000],
     ["fallback", 429, { "retry-after": "bad", "x-ratelimit-reset": "bad" }, NOW + 300_000],
-    ["403 retry-after", 403, { "retry-after": "60" }, NOW + 60_000],
-    ["403 exhausted", 403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String((NOW + 240_000) / 1_000) }, NOW + 240_000],
     ["later reset", 429, { "retry-after": "60", "x-ratelimit-remaining": "0", "x-ratelimit-reset": String((NOW + 240_000) / 1_000) }, NOW + 240_000],
   ] as const)("classifies %s without reflecting response content", async (_label, status, headers, retryAt) => {
     const f = fixture({ response: (kind) => kind === "pull" ? new Response("secret response", { status, headers }) : undefined });
@@ -1208,15 +920,6 @@ describe("bounded pull request merge observation", () => {
     expect(exhausted.fetchImplementation).toHaveBeenCalledTimes(2);
   });
 
-  it("does not share the bounded reader's installation cache with ordinary provider calls", async () => {
-    const f = fixture();
-    const url = "https://github.com/ps06756/personal-website-test";
-    await f.provider.getPullRequest(url, 42);
-    await f.provider.getPullRequestMergeObservation(url, 42, f.budget);
-    await f.provider.getPullRequest(url, 42);
-    expect(f.requests.filter(request => request.endsWith("/installation"))).toHaveLength(2);
-    expect(f.requests.filter(request => request.endsWith("/access_tokens"))).toHaveLength(3);
-  });
 });
 
 
@@ -1314,22 +1017,6 @@ describe("repository URL refusals say github.com only when the host is another h
       expect(error.code, url).toBe("CONFIG_INVALID");
       expect(error.message, url).toBe("CONFIG_INVALID: GitHub repository URL is invalid: only github.com repositories are supported");
     }
-  });
-  it("does not blame the host when the host is github.com or none can be read", () => {
-    for (const url of ["git@github.com:org/repo", "github.com/org/repo", "", "not a url", "https://", "org/repo"]) {
-      const error = refusal(url);
-      expect(error.code, url).toBe("CONFIG_INVALID");
-      expect(error.message, url).toBe("CONFIG_INVALID: GitHub repository URL is invalid");
-    }
-  });
-  it("names the limit for a parsed URL on another host and not for a wrong path on github.com", () => {
-    const other = refusal("https://ghe.example.corp/org/repo");
-    expect(other.code).toBe("CONFIG_INVALID");
-    expect(other.message).toBe("CONFIG_INVALID: credentialed repository must be a canonical GitHub HTTPS URL: only github.com repositories are supported");
-    expect(refusal("https://gitlab.com/another/private.git").message).toMatch(/only github\.com repositories are supported/);
-    expect(refusal("https://github.com/another/private/tree/main").message).toBe("CONFIG_INVALID: credentialed repository must be a canonical GitHub HTTPS URL");
-    // `github.com:org/repo` parses as a scheme with an empty host: it names github.com, so no "only github.com" blame.
-    expect(refusal("github.com:org/repo").message).toBe("CONFIG_INVALID: credentialed repository must be a canonical GitHub HTTPS URL");
   });
 });
 

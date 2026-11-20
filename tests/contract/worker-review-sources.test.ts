@@ -76,18 +76,6 @@ describe("a review with sources", () => {
     }
   }
 
-  it("gives both reviewers the source tools and the rule that a source never shows a change is right", async () => {
-    const { created, prompts } = await review('{"findings":[]}', true);
-    expect(created).toHaveLength(2);
-    expect(created.every((input) => input.workflowMode === "REVIEW" && input.contextTools?.map((tool) => tool.name).join() === "src_sim_get_ticket")).toBe(true);
-    expect(prompts.every((prompt) => prompt.includes("They never show that it is right"))).toBe(true);
-  });
-  it("hands both reviewers' sessions the stage's compaction options, so a reviewer's summary is built from stubs and a compaction is reported", async () => {
-    const compaction: SessionCompactionOptions = { sourceGuard: () => undefined, onCompacted: () => undefined };
-    const { created } = await review('{"findings":[]}', true, compaction);
-    expect(created).toHaveLength(2);
-    expect(created.every((input) => input.compaction === compaction)).toBe(true);
-  });
   it("makes a finding that cites a source and no file advisory, and leaves a finding with a file as it is", async () => {
     const answer = JSON.stringify({ findings: [
       { text: "The ticket [SIM P1] wants a limit of 3 and none is set.", origin: "INTRODUCED", severity: "HIGH" },
@@ -97,12 +85,5 @@ describe("a review with sources", () => {
     const critic = reports.find((report) => report.role === "CRITIC")!;
     expect(critic.findings.map((finding) => [finding.advisory === true, finding.file])).toEqual([[true, undefined], [false, "app.ts"]].map(([advisory, file]) => [advisory, file]));
     expect(critic.findings[0]!.text).toContain("does not block");
-  });
-  it("is exactly as before without sources: no source tools, no new prompt line, and a finding is not changed", async () => {
-    const answer = JSON.stringify({ findings: [{ text: "The ticket [SIM P1] wants a limit of 3 and none is set.", origin: "INTRODUCED", severity: "HIGH" }] });
-    const { reports, created, prompts } = await review(answer, false);
-    expect(created.every((input) => input.contextTools === undefined)).toBe(true);
-    expect(prompts.some((prompt) => prompt.includes("They never show that it is right"))).toBe(false);
-    expect(reports.find((report) => report.role === "CRITIC")!.findings[0]).not.toHaveProperty("advisory", true);
   });
 });

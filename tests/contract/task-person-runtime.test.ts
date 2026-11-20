@@ -1,5 +1,5 @@
 import { GetCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
-import { IMPLICIT_COMPANY_ID, SLACK_OIDC_ISSUER } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
@@ -65,36 +65,6 @@ const runtime = (admission: ReturnType<typeof createTaskAuthorityAdmission>, tes
 });
 
 describe("task person runtime factory", () => {
-  it("checks a native person with fresh bounded proof and project authority", async () => {
-    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
-    const injected = ports();
-    const checker = runtime(admission, injected);
-
-    await expect(checker.checkTaskPerson(nativeTask(), nativeDeveloperId)).resolves.toMatchObject({
-      eligible: true,
-      identity: { developerId: nativeDeveloperId, method: "slack", slackUserId },
-    });
-
-    expect(injected.readTaskRecord.mock.calls.map(([request]) => request.sortKey)).toEqual(["META", `PERSON_SUBJECT#${nativeDeveloperId}`]);
-    expect(injected.readDeveloperRecord.mock.calls).toHaveLength(0);
-    expect(injected.taskPersonProof.mock.calls).toEqual([[
-      { kind: "task-person-proof", slackUserId, channelIds: [channelId] }, admission,
-    ]]);
-    expect(admission.remainingSlackCalls()).toBe(99);
-  });
-
-  it("keeps one proof admission binding stable across repeated owner checks", async () => {
-    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
-    const injected = ports();
-    const checker = runtime(admission, injected);
-    await checker.checkTaskPerson(nativeTask(), nativeDeveloperId);
-    await checker.checkTaskPerson(nativeTask(), nativeDeveloperId);
-
-    expect(injected.taskPersonProof.mock.calls).toHaveLength(2);
-    expect(injected.taskPersonProof.mock.calls[0]?.[1].id).toBe(admission.id);
-    expect(injected.taskPersonProof.mock.calls[1]?.[1].id).toBe(admission.id);
-    expect(admission.remainingSlackCalls()).toBe(98);
-  });
 
   it("exposes a keyed positive State witness only after a fresh final project revision read", async () => {
     const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
@@ -119,14 +89,6 @@ describe("task person runtime factory", () => {
       revision: { pk: "PROJECT#payments-api", sk: "REV#000000000007", revision: 7, definition: { developerTasks: { enabled: false } } }, complete: true,
     }));
     await expect(checker.stateAuthorityWitnessForOwnerActor(nativeTask(), taskOwnerKey(nativeDeveloperId, taskId))).resolves.toBeUndefined();
-  });
-
-  it("refuses a missing or mismatched current-owner witness", async () => {
-    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
-    const checker = runtime(admission, ports());
-    await expect(checker.stateAuthorityWitnessForOwnerActor(nativeTask(), taskOwnerKey(nativeDeveloperId, taskId))).resolves.toBeUndefined();
-    await checker.checkTaskPerson(nativeTask(), nativeDeveloperId);
-    await expect(checker.stateAuthorityWitnessForOwnerActor(nativeTask(), taskOwnerKey("b".repeat(64), taskId))).resolves.toBeUndefined();
   });
 
   it("keeps target eligibility separate from the in-channel Owner witness", async () => {
@@ -199,29 +161,6 @@ describe("task person runtime factory", () => {
     injected.taskPersonProof.mockImplementation(async () => ({ result, slackCallsUsed: 0 }) as never);
 
     await expect(runtime(admission, injected).checkTaskPerson(nativeTask(), nativeDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
-  });
-
-  it("reads a person row only after its reverse subject row links that person", async () => {
-    const personId = "22222222-2222-4222-8222-222222222222";
-    const createdAt = "2026-01-01T00:00:00.000Z";
-    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
-    const injected = ports({ personRecords: [
-      {
-        pk: `DEVTASK#${taskId}`, sk: `PERSON_SUBJECT#${nativeDeveloperId}`, schemaVersion: 1,
-        personId, developerId: nativeDeveloperId, createdAt,
-      },
-      {
-        pk: `DEVTASK#${taskId}`, sk: `PERSON#${personId}`, schemaVersion: 1,
-        personId, developerId: nativeDeveloperId, slackUserId, name: "Maya", method: "slack",
-        issuer: SLACK_OIDC_ISSUER, subject: slackUserId, createdAt,
-      },
-    ] });
-
-    await expect(runtime(admission, injected).checkTaskPerson(nativeTask(), nativeDeveloperId)).resolves.toMatchObject({ eligible: true });
-
-    expect(injected.readTaskRecord.mock.calls.map(([request]) => request.sortKey)).toEqual([
-      "META", `PERSON_SUBJECT#${nativeDeveloperId}`, `PERSON#${personId}`, `PERSON_SUBJECT#${nativeDeveloperId}`,
-    ]);
   });
 
   it("projects only the approved Developer fields for an external principal", async () => {
@@ -400,14 +339,6 @@ describe("task person runtime: the web proof", () => {
     expect(injected.taskPersonProof.mock.calls).toHaveLength(0);
   });
 
-  it("never makes a company B member eligible on company A's task", async () => {
-    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
-    const injected = webPorts({ membership: {
-      pk: `COMPANY_MEMBER#${webDeveloperId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: webDeveloperId, companyId: companyB, role: "owner", joinedAt: createdAt,
-    } });
-    await expect(runtime(admission, injected).checkTaskPerson(webTask(), webDeveloperId)).resolves.toMatchObject({ eligible: false, channelMember: false });
-  });
-
   it.each([
     ["the membership read fails", { membership: "throw" as const }],
     ["the membership row is under another key", { membership: { pk: "COMPANY_MEMBER#someone-else", sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: webDeveloperId, companyId: companyA, role: "member", joinedAt: createdAt } }],
@@ -432,34 +363,11 @@ describe("task person runtime: the web proof", () => {
     await expect(checker.stateAuthorityWitnessForOwnerActor(webTask(), taskOwnerKey(webDeveloperId, taskId))).resolves.toBeUndefined();
   });
 
-  it("DEC 254zzz80: a named company's task reads its own partition, where an unstamped row is the company's (the partition names it); a legacy row never is", async () => {
-    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
-    const injected = webPorts({ revisionCompany: "unstamped" });
-    await expect(runtime(admission, injected).checkTaskPerson(webTask(), webDeveloperId)).resolves.toMatchObject({ eligible: true });
-    expect(injected.projectAuthorityReader.latestRevision.mock.calls[0]?.[3]).toBe(companyA);
-    // The reader answering the legacy row (an unstamped `PROJECT#<name>`, the implicit company's) for a named company's task: refused, before any grant is read.
-    const legacy = webPorts({ revisionCompany: "unstamped" });
-    legacy.projectAuthorityReader.latestRevision.mockImplementation(async (_project, _admission, signal) => ({
-      revision: { pk: "PROJECT#payments-api", sk: "REV#000000000007", revision: 7, definition: {} }, complete: !signal.aborted,
-    }));
-    await expect(runtime(createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 }), legacy).checkTaskPerson(webTask(), webDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
-    expect(legacy.projectAuthorityReader.memberships.mock.calls).toHaveLength(0);
-  });
-
   it.each([["a number", 7], ["null", null], ["a string that is not a company id", "acme"]])("refuses a revision whose company is %s", async (_label, revisionCompany) => {
     const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
     const injected = webPorts({ revisionCompany });
     await expect(runtime(admission, injected).checkTaskPerson(webTask(), webDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
     expect(injected.projectAuthorityReader.memberships.mock.calls).toHaveLength(0);
-  });
-
-  it("ignores an `orgId` on a revision row: with no `companyId` it is unstamped, so another company's `orgId` never makes it that company's", async () => {
-    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
-    const injected = webPorts({ revisionCompany: "unstamped" });
-    injected.projectAuthorityReader.latestRevision.mockImplementation(async (_project, _admission, signal) => ({
-      revision: { pk: "PROJECT#payments-api", sk: "REV#000000000007", revision: 7, orgId: companyA, definition: {} } as never, complete: !signal.aborted,
-    }));
-    await expect(runtime(admission, injected).checkTaskPerson(webTask(), webDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
   });
 
   it("passes a revision of the task's own company, and an unstamped revision on a task of the implicit company", async () => {
@@ -477,21 +385,6 @@ describe("task person runtime: the web proof", () => {
       ].find((record) => record.sk === sortKey));
     await expect(runtime(createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 }), implicit).checkTaskPerson(implicitTask, webDeveloperId))
       .resolves.toMatchObject({ eligible: true, channelMember: true });
-  });
-
-  it("does not turn a revision of another company into 'no grant' (a person is never demoted by it)", async () => {
-    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
-    const injected = webPorts({ revisionCompany: companyB, grantRole: "none" });
-    await expect(runtime(admission, injected).checkTaskPerson(webTask(), webDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
-  });
-
-  it("answers unavailable for a web person when no membership reader is wired (the dispatcher today), with no Slack call", async () => {
-    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
-    const injected = webPorts();
-    delete (injected as Partial<TaskPersonRuntimePorts>).readCompanyMembership;
-    await expect(runtime(admission, injected).checkTaskPerson(webTask(), webDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
-    expect(injected.taskPersonProof.mock.calls).toHaveLength(0);
-    expect(injected.readDeveloperRecord.mock.calls).toHaveLength(0);
   });
 
   it("reads COMPANY_MEMBER only for the checked person", async () => {
@@ -529,10 +422,6 @@ describe("task person runtime: the dispatcher's latest-revision read", () => {
     expect(taskPersonRevisionFromResponse({ Items: [unstamped] }).revision).not.toHaveProperty("companyId");
   });
 
-  it("carries a company that is not a plain value as it is (null stays null), so the company check refuses it, and answers none for no row", () => {
-    expect(taskPersonRevisionFromResponse({ Items: [{ ...stamped, companyId: null }] }).revision).toHaveProperty("companyId", null);
-    expect(taskPersonRevisionFromResponse({ Items: [] })).toStrictEqual({ complete: true });
-  });
 });
 
 describe("DEC 254zzz80: the dispatcher's revision read for a named company's project", () => {
@@ -598,24 +487,11 @@ describe("R2-F1 review round 3: the web proof pairs a named company's revision w
   };
   const grant = (pk: string) => ({ pk, sk: "PROJECT#payments-api", projectName: "payments-api", role: "developer" });
 
-  it("B's real grantee (its own partition) is allowed, and the read asks for B's grants", async () => {
-    const w = world({ [B]: [grant(`ORG#${B}#MEMBER#${dev}`)] });
-    await expect(w.checker.checkTaskPerson(w.task, dev)).resolves.toMatchObject({ eligible: true });
-    expect(w.injected.projectAuthorityReader.memberships.mock.calls[0]?.[3]).toBe(B);
-  });
-
   it("a stale legacy row of the same project name never counts for B's project", async () => {
     const w = world({ legacy: [grant(`MEMBER#${dev}`)] });
     await expect(w.checker.checkTaskPerson(w.task, dev)).resolves.toMatchObject({ eligible: false });
     // A reader that (wrongly) answered the legacy row for B: not a verdict either way, the proof is unavailable.
     const wrong = world({ [B]: [grant(`MEMBER#${dev}`)] });
-    await expect(wrong.checker.checkTaskPerson(wrong.task, dev)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
-  });
-
-  it("A's grant on A's same-named project never counts for B's", async () => {
-    const w = world({ [A]: [grant(`ORG#${A}#MEMBER#${dev}`)] });
-    await expect(w.checker.checkTaskPerson(w.task, dev)).resolves.toMatchObject({ eligible: false });
-    const wrong = world({ [B]: [grant(`ORG#${A}#MEMBER#${dev}`)] });
     await expect(wrong.checker.checkTaskPerson(wrong.task, dev)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
   });
 

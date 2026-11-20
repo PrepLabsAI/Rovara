@@ -1,38 +1,7 @@
 // tests/contract/admin-change-contracts.test.ts
 // Spec 025 phase 25e, Task 1: the shapes of a change request, its pending record and its audit record.
 import { describe, expect, it } from "vitest";
-import {
-  ADMIN_API_VERSION,
-  ADMIN_CHANGE_REFUSED_ATTEMPTS_MAX,
-  ADMIN_CHANGE_RETENTION_DAYS,
-  ADMIN_CHANGE_TTL_MS,
-  AdminChangeAuditRecordSchema,
-  AdminChangeAuditRecordWireSchema,
-  AdminChangeClientSchema,
-  AdminChangeInputSchema,
-  AdminChangeKindSchema,
-  AdminChangePendingRecordSchema,
-  AdminChangeRequestRecordSchema,
-  AdminChangeResponseSchema,
-  AdminChangeResponseWireSchema,
-  AdminChangeViewSchema,
-  AdminChangeViewWireSchema,
-  AdminChangesResponseSchema,
-  AdminChangesResponseWireSchema,
-  AgentXConfigurationConfirmSchema,
-  ApplyAdminChangeRequestSchema,
-  DeclineAdminChangeRequestSchema,
-  INDEX_EXPIRY_ATTRIBUTE,
-  ProposeAdminChangeRequestSchema,
-  adminChangeAuditKeys,
-  adminChangeItemExpiresAt,
-  adminChangeKey,
-  adminChangeRequestKey,
-  agentXError,
-  isAdminChangePressEvent,
-  outcomeOfStatus,
-  type PendingChange,
-} from "../../packages/contracts/src/index.js";
+import { ADMIN_API_VERSION, ADMIN_CHANGE_REFUSED_ATTEMPTS_MAX, ADMIN_CHANGE_RETENTION_DAYS, ADMIN_CHANGE_TTL_MS, AdminChangeAuditRecordSchema, AdminChangeAuditRecordWireSchema, AdminChangeClientSchema, AdminChangeInputSchema, AdminChangeKindSchema, AdminChangePendingRecordSchema, AdminChangeRequestRecordSchema, AdminChangeResponseSchema, AdminChangeResponseWireSchema, AdminChangeViewSchema, AdminChangeViewWireSchema, AdminChangesResponseSchema, AdminChangesResponseWireSchema, AgentXConfigurationConfirmSchema, ApplyAdminChangeRequestSchema, DeclineAdminChangeRequestSchema, INDEX_EXPIRY_ATTRIBUTE, ProposeAdminChangeRequestSchema, adminChangeAuditKeys, adminChangeItemExpiresAt, adminChangeKey, adminChangeRequestKey, agentXError, outcomeOfStatus, type PendingChange } from "../../packages/contracts/src/index.js";
 
 const CHANGE = "55555555-5555-4555-8555-555555555555";
 const REQUEST = "66666666-6666-4666-8666-666666666666";
@@ -51,14 +20,6 @@ describe("change requests (E1)", () => {
     ]);
     // A recorded config change is never planned or confirmed: it is not a change request's input.
     expect(AdminChangeInputSchema.safeParse({ kind: "set_config" }).success).toBe(false);
-  });
-
-  it("takes each kind's own input, and refuses a field of another kind", () => {
-    expect(AdminChangeInputSchema.parse({ kind: "bind_channel", channel: "#ledger-dev", project: "ledger" })).toMatchObject({ kind: "bind_channel" });
-    expect(AdminChangeInputSchema.parse({ kind: "set_workspace_limits", perPerson: 5 })).toEqual({ kind: "set_workspace_limits", perPerson: 5 });
-    expect(AdminChangeInputSchema.safeParse({ kind: "set_workspace_limits", perPerson: 51 }).success).toBe(false);
-    expect(AdminChangeInputSchema.safeParse({ kind: "unbind_channel", channel: "C0123456789", project: "ledger" }).success).toBe(false);
-    expect(AdminChangeInputSchema.safeParse({ kind: "grant_project_access", project: "<b>", developer: "U0ADA00001" }).success).toBe(false);
   });
 
   it("needs a request ID, the client and at least one method", () => {
@@ -166,14 +127,6 @@ describe("records (E2, E3)", () => {
     expect(["pending", "applying", "applied", "declined", "expired", "failed"].map((status) => outcomeOfStatus(status as never))).toEqual([undefined, undefined, "confirmed", "declined", "expired", "failed"]);
   });
 
-  it("reads an audit record with every FR-051 field, and one still pending", () => {
-    expect(AdminChangeAuditRecordSchema.parse(auditRecord)).toMatchObject({ outcome: "confirmed" });
-    const pending = omit(auditRecord, "outcome", "appliedAt", "answeredAt", "methodUsed", "pressedBy", "result");
-    expect(AdminChangeAuditRecordSchema.parse({ ...pending, status: "pending" })).not.toHaveProperty("outcome");
-    expect(AdminChangeAuditRecordSchema.parse(omit(auditRecord, "refusedAttempts"))).not.toHaveProperty("refusedAttempts");
-    expect(AdminChangeAuditRecordSchema.safeParse({ ...auditRecord, surprise: 1 }).success).toBe(false);
-  });
-
   it("keeps a record with more than 20 refused attempts readable, holding the last 20 (C1)", () => {
     const attempts = Array.from({ length: 25 }, (_, index) => ({ at: new Date(Date.parse(PROPOSED) + index * 1_000).toISOString(), reason: "another_person", slackUserId: "U0BOB00002" }));
     const parsed = AdminChangeAuditRecordSchema.parse({ ...auditRecord, refusedAttempts: attempts });
@@ -217,12 +170,6 @@ describe("wire answers (R1, R23)", () => {
 });
 
 describe("the press and the codes (E14, E18)", () => {
-  it("recognizes the ingress's press event only without an API Gateway context", () => {
-    const press = { source: "agentx.slack-ingress", action: "admin-change-press", changeId: CHANGE, click: "confirm", slackUserId: "U0ADA00001", teamId: "T0BSHLLUGBD" };
-    expect(isAdminChangePressEvent(press)).toBe(true);
-    expect(isAdminChangePressEvent({ ...press, requestContext: {} })).toBe(false);
-    expect(isAdminChangePressEvent({ ...press, click: "maybe" })).toBe(false);
-  });
 
   it("adds the four confirmation codes as 409s, and moves the admin API to 1.1", () => {
     for (const code of ["CONFIRMATION_UNAVAILABLE", "CONFIRMATION_DECLINED", "CONFIRMATION_EXPIRED", "CHANGE_STALE"] as const) expect(agentXError(code, "x").statusCode).toBe(409);

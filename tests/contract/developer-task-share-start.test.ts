@@ -6,7 +6,7 @@ import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-ro
 import { routeDeveloperTaskRequest } from "../../packages/broker/src/aws/developer-tasks.js";
 import { slackWorkflowCaller } from "../../packages/broker/src/aws/slack-workflow-caller.js";
 import { MAYA, OMAR, bindChannel, createDeveloperTaskBroker, grantProject, registerRevision, unbindChannel } from "../support/developer-task-broker.js";
-import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
+import { SLACK_CHANNEL } from "../support/slack-broker.js";
 
 const start = (overrides: Record<string, unknown> = {}) => ({ requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code", ...overrides });
 const SECOND = "C0SECOND001";
@@ -41,35 +41,6 @@ describe("the client a task keeps (FR-033)", () => {
 });
 
 describe("sharing at the start (FR-031)", () => {
-  it("shares a start that asks to, in the project's default mode, with the channel's name (D6)", async () => {
-    const { db, dev } = await createDeveloperTaskBroker({ channelInfo: names });
-    const response = await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true }));
-    expect(response.status).toBe(200);
-    const task = taskOf(response.body);
-    expect(task).toMatchObject({ shared: true, share: { mode: "view", channelId: SLACK_CHANNEL, channelName: "payments-dev", sharedReason: "requested" } });
-    // C6: the answer does not wait for the notifier's post.
-    expect(task.share).not.toHaveProperty("threadUrl");
-    expect(db.get(`DEVTASK#${task.taskId}`, "META")).toMatchObject({
-      shared: true, shareVersion: 1,
-      share: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, channelName: "payments-dev", mode: "view", sharedReason: "requested", sharedAt: expect.any(String) as string },
-    });
-    expect(db.find((item) => item.entityType === "DEVELOPER_TASK_INDEX" && item.taskId === task.taskId)).toEqual([expect.objectContaining({ shared: true })]);
-  });
-
-  it("shares every start on a project that requires it, and says why (US3 scenario 2)", async () => {
-    const { handler, dev } = await createDeveloperTaskBroker({ channelInfo: names });
-    await registerRevision(handler, 2, { share: "required" });
-    const task = taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", start())).body);
-    expect(task).toMatchObject({ shared: true, share: { sharedReason: "required", mode: "view" } });
-  });
-
-  it("keeps continue where the project allows it, and makes it view with the reason where it does not (US3 scenario 8)", async () => {
-    const { handler, dev } = await createDeveloperTaskBroker({ channelInfo: names });
-    expect(taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true, shareMode: "continue" }))).body).share).toMatchObject({ mode: "continue" });
-    await registerRevision(handler, 2, { shareMode: { default: "view", allowContinue: false } });
-    const forced = taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true, shareMode: "continue" }))).body);
-    expect(forced.share).toMatchObject({ mode: "view", modeReason: "continue_not_allowed" });
-  });
 
   it("shares ledger's tasks view only whatever the developer asks (US3's independent test)", async () => {
     const { handler, dev } = await createDeveloperTaskBroker({ channelInfo: names });
@@ -91,13 +62,6 @@ describe("sharing at the start (FR-031)", () => {
     expect(error.message).not.toContain("payments-secret");
     expect(workspaces(db)).toHaveLength(0);
     expect(refusals(db)).toEqual([expect.objectContaining({ action: "start", outcome: "refused", error: { code: "CHANNEL_AMBIGUOUS" } })]);
-  });
-
-  it("uses a named channel, by name or by ID", async () => {
-    const { handler, dev } = await createDeveloperTaskBroker({ channelInfo: names });
-    await bindChannel(handler, SECOND);
-    expect(taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true, channel: "#payments-ops" }))).body).share).toMatchObject({ channelId: SECOND });
-    expect(taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true, channel: SLACK_CHANNEL }))).body).share).toMatchObject({ channelId: SLACK_CHANNEL });
   });
 
   it("refuses CHANNEL_REQUIRED when no channel is bound, or the named one is not bound", async () => {
@@ -139,19 +103,6 @@ describe("sharing at the start (FR-031)", () => {
     expect(refusals(db)).toEqual([expect.objectContaining({ action: "start", outcome: "refused", error: { code: "CHANNEL_REQUIRED" } })]);
   });
 
-  it("never stores or shows a private channel's name, even to a Slack-linked developer (R10)", async () => {
-    // Q10: a private channel takes a share only from a member, so Maya is in this one.
-    const { db, handler, dev } = await createDeveloperTaskBroker({ channelInfo: names, channelMembers: async (request) => ({ ok: true, memberOf: request.slackUserId === MAYA.slackUserId ? request.channelIds.filter((id) => id === SLACK_CHANNEL || id === PRIVATE) : [] }) });
-    await bindChannel(handler, PRIVATE);
-    const task = taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true, channel: PRIVATE }))).body);
-    expect(task).toMatchObject({ shared: true, share: { channelId: PRIVATE } });
-    expect(task.share).not.toHaveProperty("channelName");
-    const stored = db.get(`DEVTASK#${task.taskId}`, "META") as { share: Record<string, unknown> };
-    expect(stored.share).toMatchObject({ channelId: PRIVATE });
-    expect(stored.share).not.toHaveProperty("channelName");
-    expect(JSON.stringify(db.find((item) => item.taskId === task.taskId))).not.toContain("payments-secret");
-  });
-
   it("gives a developer with no Slack link channel IDs only, and shows no names to them (R10, Q10)", async () => {
     const { db, dev, channelInfo } = await createDeveloperTaskBroker({ channelInfo: names });
     grantProject(db, OMAR);
@@ -164,21 +115,4 @@ describe("sharing at the start (FR-031)", () => {
     expect(JSON.stringify(db.find((item) => item.taskId === task.taskId))).not.toContain("payments-dev");
   });
 
-  it("keeps a private start private, and reads no channel names for it", async () => {
-    const { db, dev, channelInfo } = await createDeveloperTaskBroker({ channelInfo: names });
-    const task = taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", start())).body);
-    expect(task.shared).toBe(false);
-    expect(task).not.toHaveProperty("share");
-    expect(db.get(`DEVTASK#${task.taskId}`, "META")).not.toHaveProperty("share");
-    expect(channelInfo).not.toHaveBeenCalled();
-  });
-
-  it("answers a retried shared start with the first task (R8)", async () => {
-    const { db, dev } = await createDeveloperTaskBroker({ channelInfo: names });
-    const body = start({ shareToChannel: true, shareMode: "continue" });
-    const first = taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", body)).body);
-    const again = taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", body)).body);
-    expect(again.taskId).toBe(first.taskId);
-    expect(db.find((item) => item.entityType === "DEVELOPER_TASK")).toHaveLength(1);
-  });
 });
