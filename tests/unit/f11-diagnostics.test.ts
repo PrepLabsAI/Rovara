@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { EGRESS_GATEWAY_SOURCE } from "../../packages/contracts/src/egress-gateway-source.js";
-import { F11_ALLOWED_TARGETS, f11GatewaySource, probeF11Dns, probeF11Navigation, snapshotF11Diagnostics, withF11FailureDiagnostics, type ProbePage } from "../support/f11-diagnostics.js";
+import { F11_ALLOWED_TARGETS, f11GatewaySource, probeF11Dns, probeF11Navigation, probeF11Targets, snapshotF11Diagnostics, withF11FailureDiagnostics, type ProbePage } from "../support/f11-diagnostics.js";
 
 interface FakeRequest { url(): string; failure(): { errorText: string } | null; redirectedFrom(): FakeRequest | null }
 const request = (url: string, errorText: string | null = null, previous: FakeRequest | null = null): FakeRequest => ({
@@ -17,12 +17,48 @@ class Page extends EventEmitter implements ProbePage {
     this.visits.push({ url, options });
     return this.navigate(this, url);
   }
+  async close() {}
   locator() { return { innerText: async () => this.body }; }
 }
 // Exercise the exact serialization used by the real-Docker probe too.
 const probe = runInNewContext(`(${probeF11Navigation.toString()})`) as typeof probeF11Navigation;
+const probeTargets = runInNewContext(`(${probeF11Targets.toString()})`) as typeof probeF11Targets;
 
 describe("F11 Chromium diagnostics (offline fakes)", () => {
+  it("isolates target navigations so a denied host cannot interrupt the next goto", async () => {
+    class ChromiumPage extends Page {
+      errorPage = false;
+      constructor() {
+        super(async (page, url) => {
+          if ((page as ChromiumPage).errorPage) throw new Error("Navigation interrupted by chrome-error://chromewebdata/");
+          if (url.includes("denied.example")) {
+            (page as ChromiumPage).errorPage = true;
+            throw new Error("net::ERR_TUNNEL_CONNECTION_FAILED");
+          }
+          const ok = response(url, 200);
+          page.emit("response", ok);
+          return ok;
+        });
+      }
+    }
+    class ChromiumBrowser {
+      readonly pages: ChromiumPage[] = [];
+      async newPage() { const page = new ChromiumPage(); this.pages.push(page); return page; }
+    }
+    const browser = new ChromiumBrowser();
+    const targets = ["https://denied.example/", "https://allowed.example/"];
+    const oldSharedPage = await browser.newPage();
+    const oldResults = [];
+    for (const url of targets) oldResults.push(await probe(oldSharedPage, url, 1000));
+    expect(oldResults[1]).toMatchObject({ error: "Navigation interrupted by chrome-error://chromewebdata/" });
+
+    const newBrowser = new ChromiumBrowser();
+    const results = await probeTargets(newBrowser, targets, probe, () => 1000);
+    expect(results.map((result) => result.status ?? null)).toEqual([null, 200]);
+    expect(newBrowser.pages).toHaveLength(2);
+    expect(newBrowser.pages[0]).not.toBe(newBrowser.pages[1]);
+  });
+
   it("retains the real requestfailed error when goto reports only chrome-error interruption, without retrying", async () => {
     const page = new Page(async (p, url) => {
       p.emit("requestfailed", request(url, "net::ERR_CERT_AUTHORITY_INVALID"));

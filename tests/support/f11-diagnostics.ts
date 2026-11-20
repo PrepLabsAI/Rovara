@@ -48,6 +48,29 @@ export async function probeF11Navigation(page: ProbePage, url: string, timeout: 
   }
 }
 
+// Keep external-target navigations on separate Chromium pages. A failed
+// navigation can leave Chromium's page in chrome-error://chromewebdata/, which
+// interrupts a later goto if the diagnostic reuses that page.
+export async function probeF11Targets<Page extends ProbePage & { close(): Promise<void> }, Result>(
+  browser: { newPage(): Promise<Page> },
+  targets: string[],
+  navigate: (page: ProbePage, url: string, timeout: number) => Promise<Result>,
+  timeoutFor: (url: string, index: number) => number,
+  onResult?: (url: string, index: number, result: Result) => void,
+): Promise<Result[]> {
+  const results: Result[] = [];
+  for (const [index, url] of targets.entries()) {
+    const page = await browser.newPage();
+    try {
+      const result = await navigate(page, url, timeoutFor(url, index));
+      results.push(result);
+      onResult?.(url, index, result);
+    }
+    finally { await page.close(); }
+  }
+  return results;
+}
+
 export function f11GatewaySource(source: string): string {
   const anchor = "const parsed = serverNameOf(held);";
   if (source.split(anchor).length !== 2) throw new Error("F11 TLS diagnostic anchor must occur exactly once");

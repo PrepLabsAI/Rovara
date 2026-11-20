@@ -43,7 +43,7 @@ import { APP_NODE_IMAGE } from "../support/linux-runtime.js";
 import { DOCKER_25_DIND_IMAGE, startDind, type Dind } from "../support/linux-dind.js";
 import { createGatewayNameFiles } from "../../packages/worker/src/gateway-name-files.js";
 import { docker, sudo } from "../support/linux-network-walls.js";
-import { F11_ALLOWED_TARGETS, f11GatewaySource, probeF11Dns, probeF11Navigation, snapshotF11Diagnostics, withF11FailureDiagnostics } from "../support/f11-diagnostics.js";
+import { F11_ALLOWED_TARGETS, f11GatewaySource, probeF11Dns, probeF11Navigation, probeF11Targets, snapshotF11Diagnostics, withF11FailureDiagnostics } from "../support/f11-diagnostics.js";
 import { repoExecutorSeccompProfilePath } from "../../scripts/executor-smoke.js";
 
 const run = promisify(execFile);
@@ -795,15 +795,14 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
 (async()=>{
   const dns=require('dns').promises;const resolver=new dns.Resolver({timeout:4000,tries:2});const out={};
   const navigate=${probeF11Navigation.toString()};
+  const probeTargets=${probeF11Targets.toString()};
   for(const [key,name] of [['dnsDenied','ghcr.io'],['dnsAllowed','registry.npmjs.org'],['dnsAllowedSecond','github.com']]){try{out[key]={addresses:await resolver.resolve4(name)}}catch(e){out[key]={error:e.code}}}
   const c=await openEvidenceChromium({signal:AbortSignal.timeout(180000)});
   try{const p=await c.browser.newPage();
     out.local=await navigate(p,'http://127.0.0.1:${String(port)}/checkout',10000);
     console.log(JSON.stringify(out));
-    for(const [key,url] of Object.entries(${JSON.stringify(targets)})){
-      const targetPage=await c.browser.newPage();
-      try{out[key]=await navigate(targetPage,url,key.startsWith('allowed')?20000:8000);console.log(JSON.stringify(out))}finally{await targetPage.close()}
-    }
+    const entries=Object.entries(${JSON.stringify(targets)});
+    await probeTargets(c.browser,entries.map(([,url])=>url),navigate,(url,index)=>entries[index][0].startsWith('allowed')?20000:8000,(_url,index,result)=>{out[entries[index][0]]=result;console.log(JSON.stringify(out))});
     console.log(JSON.stringify(out));
   }finally{await c.close()}
 })().catch(e=>{console.error(e);process.exit(1)})`;
