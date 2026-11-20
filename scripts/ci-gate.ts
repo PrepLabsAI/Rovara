@@ -26,9 +26,10 @@ export function expectedResults(plan: PlanOutputs): { expected: Record<string, "
   for (const [name, value] of [["docs_only", docsOnly], ["linux", linux], ["release", release]] as const) {
     if (value === undefined || !BOOLEANS.includes(value)) return { problem: `the plan's ${name} is ${JSON.stringify(value)}, not true or false` };
   }
-  // A full run runs everything; a plan that says full but also skips something is not one to trust.
-  if (mode === "full" && !(tests === "all" && lint === "all" && linux === "true" && release === "true" && docsOnly === "false")) {
-    return { problem: `the plan says full but also skips part of the run (tests ${tests}, lint ${lint}, linux ${linux}, release ${release}, docs_only ${docsOnly})` };
+  // A full run runs everything but the Linux runtime check, which runs when its area changes, per batch, nightly or on request (#1185, ci-plan.ts linuxRuns);
+  // a plan that says full but also skips anything else is not one to trust.
+  if (mode === "full" && !(tests === "all" && lint === "all" && release === "true" && docsOnly === "false")) {
+    return { problem: `the plan says full but also skips part of the run (tests ${tests}, lint ${lint}, release ${release}, docs_only ${docsOnly})` };
   }
   // The whole suite is eight shards: a plan that says so but lists fewer would run only part of it.
   if (tests === "all" && plan.shards !== FULL_SHARD_LIST) return { problem: `the plan runs the whole suite but its shard list is ${JSON.stringify(plan.shards)}, not ${FULL_SHARD_LIST}` };
