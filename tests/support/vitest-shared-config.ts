@@ -15,7 +15,9 @@ export const nativeP0Files = [
 // ci.yml), which runs one only when the change reaches it. CI's nightly job and every release run them all (`npm run test:nightly`).
 // eval-question-simulation: about 8 minutes of one-thread Monte Carlo that checks the eval check's false-alarm rate and power (packages/contracts/src/eval-check.ts).
 // worker-env-detect-growth (#1236): about 7.5 minutes timing every environment detector on hostile files of growing size, so no pattern backtracks
-// catastrophically (packages/worker/src/env-detect/). The 256 KiB sweep in worker-env-detect-hardening still runs in every full run.
+// catastrophically (packages/worker/src/env-detect/).
+// worker-env-detect-redos (#1256): about 160 s, the same detectors on every file kind filled to the 256 KiB read limit with hostile bodies. Split from
+// worker-env-detect-hardening, whose fast security checks (userinfo, variable names, key-shaped resource names) still run in every run.
 // local-up-flow: a whole task through `rovara up` on SQLite against a fake worker (243 tests, about 4 minutes).
 // workflow-e2e/*: the hosted task lifecycle, suite by suite, against fakes (about 17 minutes in all). Every file in the folder, new ones included.
 const WORKFLOW_E2E_DIR = "tests/integration/workflow-e2e";
@@ -27,6 +29,7 @@ const workflowE2eFiles = readdirSync(fileURLToPath(new URL(`../../${WORKFLOW_E2E
 export const nightlyOnlyFiles = [
   "tests/unit/eval-question-simulation.test.ts",
   "tests/unit/worker-env-detect-growth.test.ts",
+  "tests/unit/worker-env-detect-redos.test.ts",
   "tests/unit/local-up-flow.test.ts",
   ...workflowE2eFiles,
 ];
