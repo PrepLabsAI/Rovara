@@ -217,6 +217,30 @@ describe("what the web app is told: the offer and the person's own workspace", (
     expect((await w.access((await w.signIn("owner")).access)).body).not.toHaveProperty("slackTeamId");
   });
 
+  it("a merged Slack sign-in still succeeds when saving its workspace hint fails (a throttle or a racing unlink): the hint is never a gate", async () => {
+    const w = world();
+    await w.setup();
+    const id = ownerKeyForSubject(SLACK_OIDC_ISSUER, `${OTHER}:U0NEW0001`);
+    const identity = { pk: `DEVELOPER#${id}`, sk: "META", entityType: "DEVELOPER", developerId: id, provider: "slack", issuer: SLACK_OIDC_ISSUER,
+      subject: `${OTHER}:U0NEW0001`, displayName: "Kept name", email: "kept@example.test", revoked: false, mergedInto: person("owner"),
+      firstSignInAt: "2026-10-01T00:00:00.000Z", lastSignInAt: "2026-10-01T00:00:00.000Z" };
+    w.db.set(identity);
+    const send = w.db.send.bind(w.db);
+    let refused = 0;
+    w.db.send = (async (command: { input?: { UpdateExpression?: string; Key?: { pk?: string } } }) => {
+      if (command.input?.Key?.pk === `DEVELOPER#${id}` && command.input.UpdateExpression?.startsWith("SET slackTeamId")) {
+        refused += 1;
+        throw Object.assign(new Error("Rate exceeded"), { name: "ProvisionedThroughputExceededException" });
+      }
+      return send(command as never);
+    }) as typeof w.db.send;
+    const signed = await w.signIn("U0NEW0001", { slackTeam: OTHER });
+    expect(refused).toBe(1);
+    expect(signed.refused).toBeUndefined();
+    expect((await w.access(signed.access)).body).toMatchObject({ developerId: person("owner"), companyId: X, companyRole: "owner" });
+    expect(w.db.get(`DEVELOPER#${id}`, "META")).toEqual(identity);
+  });
+
   it.each(["another person", "unlinked", "revoked"] as const)("a stored session never returns a workspace from an identity that is %s", async (change) => {
     const w = world();
     await w.setup();

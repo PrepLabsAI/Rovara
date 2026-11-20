@@ -753,7 +753,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (existing?.linkedSlackUserId !== undefined) slackUserId = existing.linkedSlackUserId;
     // A merged sign-in updates only its own verified Slack workspace, keeping the survivor and all profile/index fields intact.
     if (merged && method === "slack" && identity.slackTeam !== undefined && signedInRecord?.mergedInto !== undefined) {
-      await store.rememberMergedSlackWorkspace(signedInId, signedInRecord.mergedInto, identity.slackTeam);
+      // The workspace hint is a convenience, never a gate: a throttled or racing write must not fail the sign-in.
+      try { await store.rememberMergedSlackWorkspace(signedInId, signedInRecord.mergedInto, identity.slackTeam); } catch { /* ignored: hint only */ }
     }
     if (!merged) await store.upsertDeveloper({
       developerId, provider: method, issuer: identity.issuer, subject: identity.subject, displayName: identity.displayName,
