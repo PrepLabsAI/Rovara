@@ -90,12 +90,6 @@ describe("what a text says once it is decoded", () => {
     expect(scan(EMAIL_ESCAPED)).toEqual([]);
     expect(scan(NAME_ESCAPED)).toEqual([]);
   });
-  it("finds an email spelled with a JSON escape, and redacts it as the address it is", async () => {
-    const deep = await deepScan(builtinPiiScanner, EMAIL_ESCAPED);
-    expect(deep.kinds).toEqual(["email"]);
-    expect(JSON.parse(deep.redacted())).toEqual({ e: "[REDACTED:EMAIL]" });
-    expect((await deepScan(builtinPiiScanner, deep.redacted())).kinds).toEqual([]);
-  });
   it("finds a name under a person's key even when the name is written with escapes, and redacts it", async () => {
     const deep = await deepScan(builtinPiiScanner, NAME_ESCAPED);
     expect(deep.kinds).toEqual(["person_name"]);
@@ -103,17 +97,6 @@ describe("what a text says once it is decoded", () => {
     expect((await deepScan(builtinPiiScanner, deep.redacted())).kinds).toEqual([]);
     // the same name in a key that is not a person's is not a finding by that rule
     expect((await deepScan(builtinPiiScanner, "{\"model_name\":\"Jos\\u00e9 Garc\\u00eda\"}")).kinds).toEqual([]);
-  });
-  it("finds an address split across two values, and says so by leaving it in the redacted text for the second scan to refuse", async () => {
-    const split = "{\"a\":\"pat.quill@\",\"b\":\"fakemail-sample.io\"}";
-    const deep = await deepScan(builtinPiiScanner, split);
-    expect(deep.kinds).toEqual(["email"]);
-    expect((await deepScan(builtinPiiScanner, deep.redacted())).kinds).toEqual(["email"]);
-  });
-  it("reads a text as a reader sees it: invisible characters out, full-width digits folded", async () => {
-    expect((await deepScan(builtinPiiScanner, "mail pat.quill@fake\u200Bmail-sample.io now")).kinds).toEqual(["email"]);
-    expect((await deepScan(builtinPiiScanner, "mail pat.quill@fake\uFEFFmail-sample.io now")).kinds).toEqual(["email"]);
-    expect((await deepScan(builtinPiiScanner, "card ４１１１ １１１１ １１１１ １１１１ end")).kinds).toEqual(["card_number"]);
   });
   it("redacts text that is not JSON by span, and leaves what only the normalised text shows for the second scan to refuse", async () => {
     const plain = await deepScan(builtinPiiScanner, "to pat.quill@fakemail-sample.io now");

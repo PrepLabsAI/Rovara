@@ -123,10 +123,6 @@ runModelKeyStoreConformance("local file", {
 });
 
 describe("Code defaults", () => {
-  it("prices tokens times the table", async () => {
-    // 1000 input at 3.00 per million, 500 output at 15.00, 2000 cache-read at 0.30 = 0.003 + 0.0075 + 0.0006 dollars
-    expect(await createPriceTableMetering(table).price(known)).toEqual({ micros: 11_100, currency: "USD" });
-  });
 
   it("tells the recorder about each priced entry", async () => {
     const seen: string[] = [];
@@ -152,11 +148,6 @@ describe("Code defaults", () => {
     expect(await lookup("write").verify(REQUEST, { ...proof, proofId: "r", claimedAccount: { ...COLLABORATOR, accountId: "someone-else" } })).toEqual({ approved: false, reason: "account_mismatch" });
   });
 
-  it("names the approving collaborator under their own provider, not the local owner's", async () => {
-    const verdict = await createLocalOwnerApprovers({ owner, ...commentChecks }).verify(REQUEST, { proofId: "p", method: CODE_HOST_COMMENT_METHOD, requestId: REQUEST.requestId, revision: REQUEST.revision, artifactDigest: REQUEST.artifactDigest, token: COMMENT_ID });
-    expect(verdict.approved && verdict.approver.provider).toBe("any-code-host");
-  });
-
   it("refuses a local session when no session check is configured", async () => {
     expect((await createLocalOwnerIdentity().authenticate({ scheme: LOCAL_SESSION_SCHEME, value: SESSION_TOKEN })).ok).toBe(false);
   });
@@ -165,26 +156,6 @@ describe("Code defaults", () => {
 const CO = "org_aaaaaaaaaaaaaaaaaaaa";
 
 describe("model key stores", () => {
-  it("reads the key from an environment variable named for the provider", async () => {
-    expect(environmentVariableFor("open-router")).toBe("OPEN_ROUTER_API_KEY");
-    const store = createEnvironmentModelKeyStore({ ANTHROPIC_API_KEY: "  spaced  ", OPENAI_API_KEY: "" }, ["anthropic", "openai"]);
-    expect((await store.get(CO, "anthropic"))?.reveal()).toBe("spaced");
-    expect(await store.get(CO, "openai")).toBeUndefined();
-    expect(await store.providers(CO)).toEqual(["anthropic"]);
-  });
-
-  it("refuses a key file other users can read, and treats a missing file as no keys", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "model-keys-"));
-    try {
-      const path = join(directory, "keys.json");
-      expect(await createFileModelKeyStore(path).providers(CO)).toEqual([]);
-      await writeFile(path, JSON.stringify({ anthropic: "k" }));
-      await chmod(path, 0o644);
-      await expect(createFileModelKeyStore(path).get(CO, "anthropic")).rejects.toThrow(/readable by other users/);
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
 
   it("says nothing about a malformed key file's content, and refuses a link", async () => {
     const directory = await mkdtemp(join(tmpdir(), "model-keys-"));

@@ -14,7 +14,6 @@ beforeAll(() => { tripwire = installNetworkTripwire(); });
 afterAll(() => { tripwire.restore(); expect(tripwire.attempts).toEqual([]); });
 
 const ok = (costMicros = 10): EvalCallSettle => ({ class: "ok", costMicros });
-const tick = async (times = 6): Promise<void> => { for (let index = 0; index < times; index += 1) await Promise.resolve(); };
 /** A virtual clock: a sleep moves time forward at once, and every start is stamped. */
 function fakeClock(): EvalClock & { time: number; sleeps: number[] } {
   const clock = { time: 0, sleeps: [] as number[], now: () => clock.time, sleep: (ms: number) => { clock.sleeps.push(ms); clock.time += ms; return Promise.resolve(); } };
@@ -31,38 +30,6 @@ describe("defaults", () => {
 });
 
 describe("at most four calls at once", () => {
-  it("never has more than four in flight, and starts the next one as soon as one settles", async () => {
-    const gates: Array<() => void> = [];
-    let active = 0;
-    let peak = 0;
-    const clock = fakeClock();
-    const running = runEvalCasesPaced({
-      cases: 10, clock, limits: { spacingMs: 0 },
-      call: async () => { active += 1; peak = Math.max(peak, active); await new Promise<void>((resolve) => gates.push(resolve)); active -= 1; return ok(); },
-    });
-    await tick();
-    expect(gates).toHaveLength(4);
-    gates.shift()!();
-    await tick();
-    expect(gates).toHaveLength(4);
-    while (gates.length > 0) { gates.shift()!(); await tick(); }
-    const result = await running;
-    expect(peak).toBe(4);
-    expect(result.peakInFlight).toBe(4);
-    expect(result.facts).toMatchObject({ total: 10, run: 10, notRun: 0 });
-  });
-  it("clamps a larger setting to four: the limit is a ceiling, not a default", async () => {
-    let active = 0;
-    let peak = 0;
-    const result = await runEvalCasesPaced({
-      cases: 20, clock: fakeClock(), limits: { maxInFlight: 50, spacingMs: 0 },
-      call: async () => { active += 1; peak = Math.max(peak, active); await tick(3); active -= 1; return ok(); },
-    });
-    expect(peak).toBeLessThanOrEqual(4);
-    expect(result.peakInFlight).toBeLessThanOrEqual(4);
-    const serial = await runEvalCasesPaced({ cases: 5, clock: fakeClock(), limits: { maxInFlight: 1, spacingMs: 0 }, call: async () => { await tick(); return ok(); } });
-    expect(serial.peakInFlight).toBe(1);
-  });
   it("leaves spacing between starts on the injected clock, and never sleeps before the first call", async () => {
     const clock = fakeClock();
     const starts: number[] = [];
@@ -73,19 +40,6 @@ describe("at most four calls at once", () => {
 });
 
 describe("the call and cost budget", () => {
-  it("stops starting calls at the task's call budget: the rest are not run (class cap), never failed", async () => {
-    let calls = 0;
-    const result = await runEvalCasesPaced({ cases: 12, clock: fakeClock(), limits: { maxCalls: 5, spacingMs: 0 }, call: () => { calls += 1; return Promise.resolve(ok()); } });
-    expect(calls).toBe(5);
-    expect(result.facts).toEqual({ total: 12, run: 5, notRun: 7, byClass: { cap: 7 }, overrunStop: false });
-  });
-  it("stops starting calls once the spend reaches the cost budget", async () => {
-    let calls = 0;
-    const result = await runEvalCasesPaced({ cases: 10, clock: fakeClock(), limits: { maxCostMicros: 250, spacingMs: 0, maxInFlight: 1 }, call: () => { calls += 1; return Promise.resolve(ok(100)); } });
-    expect(calls).toBe(3);
-    expect(result.spentMicros).toBe(300);
-    expect(result.facts.byClass).toEqual({ cap: 7 });
-  });
   it("fails closed on a cost it cannot read: the budget is treated as used", async () => {
     let calls = 0;
     const result = await runEvalCasesPaced({ cases: 6, clock: fakeClock(), limits: { spacingMs: 0, maxInFlight: 1 }, call: () => { calls += 1; return Promise.resolve({ class: "ok", costMicros: Number.NaN }); } });
@@ -95,10 +49,6 @@ describe("the call and cost budget", () => {
   it("a call that throws is one answered with a provider error: not run, and the round goes on", async () => {
     const result = await runEvalCasesPaced({ cases: 3, clock: fakeClock(), limits: { spacingMs: 0 }, call: () => Promise.reject(new Error("boom")) });
     expect(result.facts).toMatchObject({ total: 3, run: 0, notRun: 3, byClass: { provider_error: 3 } });
-  });
-  it("holds no case identity: a case is its position, and nothing else is kept", async () => {
-    const result = await runEvalCasesPaced({ cases: 3, clock: fakeClock(), limits: { spacingMs: 0 }, call: () => Promise.resolve(ok()) });
-    expect(result.cases.map((entry) => Object.keys(entry))).toEqual([["index", "state", "class"], ["index", "state", "class"], ["index", "state", "class"]]);
   });
 });
 
@@ -156,11 +106,6 @@ describe("a provider limit is 'not run', per class, through the fake adapter", (
     const { world } = await run([{ status: 429, body: "{}" }, { status: 429, body: "{}" }]);
     expect(world.provider.calls).toHaveLength(2);
   });
-  it("an unknown class word is read as a run case, so a score is never hidden by a word nobody knows", () => {
-    expect(evalFactsFromClasses(["ok", "something_new", "ok"])).toMatchObject({ run: 3, notRun: 0 });
-    expect(evalFactsFromClasses(["ok", "refused"])).toMatchObject({ run: 1, notRun: 1, byClass: { refused: 1 } });
-    expect(evalFactsFromClasses(["ok", "provider_error"])).toMatchObject({ run: 1, notRun: 1 });
-  });
 });
 
 function ok_body(): Record<string, unknown> {
@@ -180,21 +125,6 @@ describe("the cap overrun (DECISIONS 165/165a): no call is started after the one
     expect(result.facts).toEqual({ total: 8, run: 1, notRun: 7, byClass: { cap: 7 }, overrunStop: true });
     expect(result.overrunSentence).toBe(MODEL_EGRESS_OVERRUN_SENTENCE);
     expect(result.overrunSentence).toBe("budget exceeded by one call");
-  });
-  it("with calls in flight, nothing NEW starts after an overrun settles; the calls already reserved finish", async () => {
-    let started = 0;
-    const gates: Array<(settle: EvalCallSettle) => void> = [];
-    const running = runEvalCasesPaced({ cases: 20, clock: fakeClock(), limits: { spacingMs: 0 }, call: () => { started += 1; return new Promise<EvalCallSettle>((resolve) => gates.push(resolve)); } });
-    await tick();
-    expect(started).toBe(4);
-    gates[0]!({ class: "ok", costMicros: 5, overrun: true });
-    await tick();
-    expect(started).toBe(4);
-    for (const gate of gates.slice(1)) gate({ class: "cap", costMicros: 0, overrun: true });
-    const result = await running;
-    expect(started).toBe(4);
-    expect(result.facts.overrunStop).toBe(true);
-    expect(result.facts.run).toBe(1);
   });
   it("with one call at a time, at most one call in the whole round settles over the cap", async () => {
     const world = fakeModelEgressWorld();

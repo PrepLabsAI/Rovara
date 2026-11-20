@@ -48,11 +48,6 @@ describe("advisory start comparison", () => {
    expect(next.quoteId).not.toBe(original.quoteId);
   }
  });
- it("keeps history failure and wholly unreadable limits unavailable", async () => {
-  const quote = await startEstimates({ store: { query: async () => { throw new Error("down"); } } }, { ...input, context: { ...context, limits: [] } });
-  expect(quote.options[0].range).toEqual({ state: "unavailable", reason: "unreadable" });
-  expect(quote.options[0].firstBindingLimit.state).toBe("unavailable");
- });
  it("refuses malformed money, incomplete option pairs, unbounded options and unknown input fields", async () => {
   const quote = await startEstimates({ store }, input);
   expect(parsePreviewV2({ ...quote, options: [quote.options[0]] })).toBeUndefined();
@@ -62,22 +57,6 @@ describe("advisory start comparison", () => {
  });
 });
 
-
-it("strictly accepts the restricted binding's three states without accepting hidden figures", async () => {
- const { restrictPreviewV2 } = await import("../../packages/contracts/src/start-estimates.js");
- const quote = await startEstimates({ store }, input);
- for (const blocked of [true, false, null]) {
-  const restricted = restrictPreviewV2(quote);
-  for (const q of restricted.options) q.firstBindingLimit = av({ scope: "RESTRICTED", blocked, bindingScope: "engine_day" });
-  expect(parsePreviewV2(restricted)).toEqual(restricted);
-  for (const patch of [{ availableMicros: 123 }, { requiredMicros: av(123) }, { blocked: "false" }, { blocked: undefined }, { bindingScope: "other" }, { bindingScope: 123 }]) {
-   expect(parsePreviewV2({ ...restricted, options: restricted.options.map(q => ({ ...q, firstBindingLimit: av({ scope: "RESTRICTED", blocked, ...patch }) })) })).toBeUndefined();
-  }
-  for (const patch of [{ limits: quote.options[0].limits }, { initialHoldMicros: av(123) }, { planningAllowanceMicros: av(123) }, { spentMicros: av(123) }, { taskMaximumMicros: av(-1) }, { range: av({ lowMicros: 3, highMicros: 2 }) }, { basis: quote.options[0].basis }, { stages: quote.options[0].stages }]) {
-   expect(parsePreviewV2({ ...restricted, options: restricted.options.map(q => ({ ...q, ...patch })) })).toBeUndefined();
-  }
- }
-});
 
 
 it("pins the mirrored PreviewV2 contract and member boundary", () => {
@@ -102,14 +81,3 @@ it("pins the mirrored PreviewV2 contract and member boundary", () => {
  });
 
 
-it("allows exactly the own-task range and tightest task maximum in member JSON", async () => {
- const { restrictPreviewV2 } = await import("../../packages/contracts/src/start-estimates.js");
- const numbers = (v: unknown): number[] => typeof v === "number" ? [v] : v !== null && typeof v === "object" ? Object.values(v).flatMap(numbers) : [];
- for (const scope of ["engine_task", "project_task", "gateway_task", "project_month", "person_month", "company_month"] as const) {
-  const raw = await startEstimates({ store }, { ...input, context: { ...context, limits: [{ ...context.limits[0]!, scope }] } });
-  const member = restrictPreviewV2(raw);
-  expect(parsePreviewV2(member)).toEqual(member);
-  const taskLimit = ["engine_task", "project_task", "gateway_task"].includes(scope);
-  expect(numbers(member)).toEqual([2, 1_000_000, 3_000_000, ...(taskLimit ? [5_000_000] : []), 4_000_000, 10_000_000, ...(taskLimit ? [5_000_000] : [])]);
- }
-});

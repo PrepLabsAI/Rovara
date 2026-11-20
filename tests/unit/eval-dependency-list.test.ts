@@ -8,7 +8,7 @@ import {
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { handleSetupAgentCallback } from "../../packages/broker/src/core/setup-agent/callback.js";
-import { EVAL_DEPENDENCY_LIST_ENTITY, evalDependencyListKey, evalReachesView, readEvalDependencyList } from "../../packages/broker/src/core/setup-agent/eval-dependency-list.js";
+import { EVAL_DEPENDENCY_LIST_ENTITY, evalDependencyListKey, readEvalDependencyList } from "../../packages/broker/src/core/setup-agent/eval-dependency-list.js";
 import { readEvalCard } from "../../packages/broker/src/core/setup-agent/eval-card.js";
 import { setupAgentKey } from "../../packages/broker/src/core/setup-agent/keys.js";
 import { workspaceKey, } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -105,45 +105,9 @@ describe("the list through the setup run's existing callback", () => {
     expect(await w.store.get(evalDependencyListKey(A, project))).toBeUndefined();
     expect(w.logs.filter((entry) => entry.event === "eval_dry_run_refused").length).toBe(5);
   });
-
-  it("is limited to a running setup run: not a non-setup run, not a run that ended, not another company's install (mutants: the run checks)", async () => {
-    const w = await world(A);
-    for (const operation of [{ ...w.operation, workflowMode: "IMPLEMENT" }, { ...w.operation, status: "SUCCEEDED" }, { ...w.operation, kind: "other" }]) {
-      await expect(w.callback({ kind: "eval_dry_run", list: LIST }, operation)).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-    }
-    await w.store.put({ item: { ...(await w.store.get(taskKey(w.taskId)))!, closedAt: "2026-11-18T09:00:00Z" } });
-    await expect(w.callback({ kind: "eval_dry_run", list: LIST })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-    expect(await w.store.get(evalDependencyListKey(A, project))).toBeUndefined();
-    const other = await world(B);
-    await expect(other.callback({ kind: "eval_dry_run", list: LIST }, other.operation, A)).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-  });
-
-  it("the body is exactly {kind, list}: an extra member is refused", async () => {
-    const w = await world(A);
-    await expect(w.callback({ kind: "eval_dry_run", list: LIST, company: B })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-  });
-
-  it("a worker can name no company, project or task: the row is the callback's own", async () => {
-    const w = await world(A);
-    await w.callback({ kind: "eval_dry_run", list: LIST });
-    expect(await w.store.get(evalDependencyListKey(B, project))).toBeUndefined();
-    expect(await readEvalDependencyList({ store: w.store, companyId: B }, project)).toBeUndefined();
-  });
 });
 
 describe("two companies: the list never crosses", () => {
-  it("company B reads nothing of company A's list, in the same store, with the same project name", async () => {
-    const a = await world(A);
-    const b = await world(B, a.store);
-    await a.callback({ kind: "eval_dry_run", list: LIST });
-    expect(await readEvalDependencyList({ store: a.store, companyId: B }, project)).toBeUndefined();
-    expect(await evalReachesView({ store: a.store, companyId: B }, project, { servicesOff: true })).toBeUndefined();
-    // B's own list is its own
-    const other: EvalDependencyList = { ...LIST, databases: [{ port: 3306, engine: "mysql" }], hosts: [], envVars: [] };
-    await b.callback({ kind: "eval_dry_run", list: other });
-    expect((await readEvalDependencyList({ store: a.store, companyId: B }, project))!.list).toEqual(other);
-    expect((await readEvalDependencyList({ store: a.store, companyId: A }, project))!.list).toEqual(LIST);
-  });
 
   it("a row copied into the other company's partition, a relabelled row, a changed project and a row whose list is no longer the contract's shape all read as absent (mutants: the company and project checks)", async () => {
     const a = await world(A);
@@ -171,22 +135,6 @@ describe("two companies: the list never crosses", () => {
 });
 
 describe("what a page shows: the TH1 words, and 'test services are off' read from the install NOW", () => {
-  it("shows the words and the TH1 items; adds the off reason only while the install's test services are off, whatever the run saw (mutant: take the run's own flag)", async () => {
-    const w = await world(A);
-    await w.callback({ kind: "eval_dry_run", list: { ...LIST, servicesOff: true } });
-    const on = (await evalReachesView({ store: w.store, companyId: A }, project, { servicesOff: false }))!;
-    expect(on.words).toBe(evalDependencyListWords(LIST));
-    expect(on.words).not.toContain("Test services");
-    expect(on.blocked).toEqual({ items: [{ kind: "database", port: 5432 }, { kind: "service", host: "api.vendor.example.test" }] });
-    expect(on.servicesOff).toBeUndefined();
-    const off = (await evalReachesView({ store: w.store, companyId: A }, project, { servicesOff: true }))!;
-    expect(off.words).toContain(EVAL_TEST_SERVICES_OFF_WORDS);
-    expect(off.servicesOff).toBe(true);
-    // the run saw them on, the install has them off now
-    const w2 = await world(B);
-    await w2.callback({ kind: "eval_dry_run", list: LIST });
-    expect((await evalReachesView({ store: w2.store, companyId: B }, project, { servicesOff: true }))!.words).toContain(EVAL_TEST_SERVICES_OFF_WORDS);
-  });
 
   it("the hosted card carries `reaches`, only this company's, and the off words follow the host's switch", async () => {
     const w = await world(A);

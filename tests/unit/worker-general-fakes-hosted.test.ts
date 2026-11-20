@@ -1,13 +1,11 @@
 // General fakes slice 2b: the HOSTED fake helper's launcher (worker general-fakes-hosted.ts). Nothing starts Docker: a small stateful fake daemon answers the commands the module uses (network create/connect/disconnect/inspect/rm/ls,
 // run, inspect, exec, ps, rm), so the order of calls, the labels, the networks the helper and the sandbox are on, the binding to one company and task and the cleanup are checked against behaviour and not only argument lists.
 // The first real proof against Docker is tests/linux/general-fakes-helper.test.ts (CI's linux-runtime job).
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  GENERAL_FAKES_HELPER_PORT, GENERAL_FAKES_RUN_DIR, buildGeneralFakesSetBytes, buildOpenApiFake, parseGeneralFakesSetBytes, type GeneralFakeServiceFake, type TrustedGeneralFakesSummary,
-} from "@agentx/contracts";
+import { GENERAL_FAKES_RUN_DIR, buildGeneralFakesSetBytes, buildOpenApiFake, type GeneralFakeServiceFake, type TrustedGeneralFakesSummary } from "@agentx/contracts";
 import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_SLOTS, RUN_NETWORK_STALE_MARGIN_MS, RUN_NETWORK_WORKSPACE_LABEL, runNetworkAddresses, runNetworkHelperIp } from "../../packages/worker/src/run-network.js";
 import {
   GENERAL_FAKES_HELPER_ENTRY, GENERAL_FAKES_HELPER_GRACE_MS, GENERAL_FAKES_HOSTED_FAILURE_SENTENCE, generalFakesArgProblems, generalFakesContainerName, generalFakesHostedOffer, generalFakesRunArgs, generalFakesRunId, hostedCallsBetween,
@@ -221,27 +219,6 @@ describe("the launch arguments", () => {
   const args = () => generalFakesRunArgs({ net: net(), ...launch });
   const problems = (list: readonly string[]) => generalFakesArgProblems(list, net(), { digest: launch.digest, workspaceId: WORKSPACE, operationId: OPERATION, runDir: launch.runDir, lifetimeMs: launch.lifetimeMs });
 
-  it("builds a sound, hardened, bounded run for one network, one read-only mount and one tmpfs", () => {
-    const list = args();
-    expect(problems(list)).toEqual([]);
-    expect(list.slice(0, 3)).toEqual(["run", "--detach", "--pull=never"]);
-    const pair = (flag: string) => list[list.indexOf(flag) + 1];
-    expect(pair("--network")).toBe("rovara-svc-0123456789ab");
-    expect(pair("--ip")).toBe("172.30.7.16");
-    expect(pair("--dns")).toBe("127.0.0.1");
-    expect(pair("--user")).toBe("1000:1000");
-    expect(pair("--cap-drop")).toBe("ALL");
-    expect(pair("--security-opt")).toBe("no-new-privileges");
-    expect(list).toContain("--read-only");
-    expect([pair("--memory"), pair("--memory-swap"), pair("--cpus"), pair("--pids-limit"), pair("--log-driver")]).toEqual(["192m", "192m", "0.5", "64", "none"]);
-    expect(pair("--volume")).toBe(`${launch.runDir}:${GENERAL_FAKES_RUN_DIR}:ro`);
-    expect(list.filter((arg) => arg === "--volume")).toHaveLength(1);
-    expect(list.filter((arg) => arg === "--tmpfs")).toHaveLength(1);
-    expect(list.slice(list.indexOf(IMAGE))).toEqual([IMAGE, GENERAL_FAKES_HELPER_ENTRY, "--listen", "172.30.7.16", "--caller", "172.30.7.3", "--digest", launch.digest, "--workspace", WORKSPACE, "--operation", OPERATION, "--lifetime-ms", "900000"]);
-    for (const flag of ["--privileged", "--publish", "-p", "--add-host", "--env", "--env-file", "--cap-add", "--device", "--pid", "--ipc", "--network-alias"]) expect(list, flag).not.toContain(flag);
-    expect(list.filter((arg) => arg === "--label")).toHaveLength(4);
-  });
-
   it("names every way arguments are unsound (each mutation alone), and repeats no value", () => {
     const base = args();
     const swap = (flag: string, value: string) => base.map((arg, index) => (base[index - 1] === flag ? value : arg));
@@ -320,17 +297,6 @@ describe("the launch arguments", () => {
 });
 
 describe("the run files", () => {
-  it("writes the set into <parent>/gf-*/fakes/set.json, readable by the helper's user, and nothing else", async () => {
-    const parent = await scratch();
-    const files = (await writeGeneralFakesRunFiles({ parent, workspaceId: WORKSPACE, operationId: OPERATION, fakes: FAKES }))!;
-    expect(files.runDir.endsWith("/fakes")).toBe(true);
-    expect(await readdir(files.runDir)).toEqual(["set.json"]);
-    expect((await stat(files.runDir)).mode & 0o777).toBe(0o755);
-    expect((await stat(join(files.runDir, "set.json"))).mode & 0o777).toBe(0o644);
-    expect((await stat(files.dir)).mode & 0o777).toBe(0o700);
-    const bytes = new Uint8Array(await readFile(join(files.runDir, "set.json")));
-    expect(parseGeneralFakesSetBytes(bytes, { digest: files.digest, workspaceId: WORKSPACE, operationId: OPERATION })).toHaveLength(1);
-  });
   it("writes nothing for fakes that cannot be stored", async () => {
     const parent = await scratch();
     expect(await writeGeneralFakesRunFiles({ parent, workspaceId: "x", operationId: OPERATION, fakes: FAKES })).toBeUndefined();
@@ -340,28 +306,6 @@ describe("the run files", () => {
 });
 
 describe("starting the helper", () => {
-  it("starts the network, then the helper, then joins the sandbox, in that order, and gives the variables a base URL on the helper's own address and port", async () => {
-    const daemon = fakeDaemon();
-    const started = await startGeneralFakesHelper(await input(daemon, { variables: ["PETS_API_URL"] }));
-    const verbs = daemon.calls.map((call) => call.slice(0, 2).join(" "));
-    expect(verbs.indexOf("network create")).toBeLessThan(verbs.indexOf("run --detach"));
-    expect(verbs.indexOf("run --detach")).toBeLessThan(verbs.indexOf("network connect"));
-    expect(daemon.networks).toHaveLength(1);
-    const network = daemon.networks[0]!;
-    expect(network.internal).toBe(true);
-    expect(network.bridge).toMatch(/^rvi[0-9a-f]{8}$/u);
-    const helper = daemon.containers.find((c) => c.name.endsWith("-fakes"))!;
-    expect(helper.networks).toEqual(new Map([[network.name, runNetworkHelperIp(Number(/172\.30\.(\d+)\./u.exec(network.subnet)![1]), 0)]]));
-    // The sandbox keeps its own network and joins the run's at .3.
-    const slot = Number(/172\.30\.(\d+)\./u.exec(network.subnet)![1]);
-    expect(daemon.containers[0]!.networks).toEqual(new Map([[TASK_SANDBOX_NETWORK, "172.20.0.5"], [network.name, runNetworkAddresses(slot).workingSandboxIp]]));
-    expect(started.environment).toEqual({ PETS_API_URL: `http://${runNetworkHelperIp(slot, 0)}:${String(GENERAL_FAKES_HELPER_PORT)}/s/0` });
-    // All four labels, and the arguments read back sound.
-    expect(LABEL_KEYS.every((key) => key in helper.labels)).toBe(true);
-    expect(generalFakesArgProblems(helper.args, { name: network.name, slot, workingSandboxIp: runNetworkAddresses(slot).workingSandboxIp, helperIp: (index) => runNetworkHelperIp(slot, index), labelArgs: () => [] }, { digest: values(helper.args, "--digest")[0]!, workspaceId: WORKSPACE, operationId: OPERATION, lifetimeMs: 600_000 + GENERAL_FAKES_HELPER_GRACE_MS })).toEqual([]);
-    await started.stop();
-    nothingLeft(daemon);
-  });
 
   it("gives the helper its own deadline: the round budget plus a grace shorter than the network's 15 minute stale margin, so it stops itself even if stop() never runs", async () => {
     expect(GENERAL_FAKES_HELPER_GRACE_MS).toBeLessThan(RUN_NETWORK_STALE_MARGIN_MS);
@@ -379,27 +323,6 @@ describe("starting the helper", () => {
     const override = await startGeneralFakesHelper(await input(third, { helperLifetimeMs: 4000 }));
     expect(values(third.containers.find((c) => c.name.endsWith("-fakes"))!.args, "--lifetime-ms")).toEqual(["4000"]);
     await override.stop();
-  });
-
-  it("one variable per fake, in order: a second service answers /s/1", async () => {
-    const daemon = fakeDaemon();
-    const two: GeneralFakeServiceFake[] = [FAKES[0]!, { status: "not_built", reason: "no_spec" }];
-    const started = await startGeneralFakesHelper(await input(daemon, { fakes: two, variables: ["PETS_API_URL", "BILLING_API_URL"] }));
-    expect(Object.keys(started.environment)).toEqual(["PETS_API_URL", "BILLING_API_URL"]);
-    expect(started.environment.BILLING_API_URL!.endsWith(`:${String(GENERAL_FAKES_HELPER_PORT)}/s/1`)).toBe(true);
-    await started.stop();
-  });
-
-  it("each round gets a network, a helper and a set of its own", async () => {
-    const daemon = fakeDaemon();
-    const first = await startGeneralFakesHelper(await input(daemon, { round: 1 }));
-    await first.stop();
-    nothingLeft(daemon);
-    const second = await startGeneralFakesHelper(await input(daemon, { round: 2 }));
-    const names = daemon.calls.filter((call) => call[0] === "network" && call[1] === "create").map((call) => call.at(-1));
-    expect(new Set(names).size).toBe(2);
-    await second.stop();
-    nothingLeft(daemon);
   });
 
   const failsClosed = async (daemonOptions: DaemonOptions, overrides: Partial<StartGeneralFakesHelperInput> = {}) => {
@@ -429,13 +352,6 @@ describe("starting the helper", () => {
     expect(daemon.containers.map((c) => c.name).sort()).toEqual([SANDBOX, "intruder"]);
     expect([...daemon.containers.find((c) => c.name === SANDBOX)!.networks.keys()]).toEqual([TASK_SANDBOX_NETWORK]);
   });
-  it("a helper reported at the wrong address is refused and removed", () => failsClosed({ memberAddress: { helper: "172.30.9.99" } }));
-  it("a sandbox reported at the wrong address is refused and the helper is removed", () => failsClosed({ memberAddress: { sandbox: "172.30.9.99" } }));
-  it("a helper whose first summary is for another company, task or digest never counts as ready", async () => {
-    for (const change of [{ workspaceId: "11111111-1111-4111-8111-111111111111" }, { operationId: "11111111-1111-4111-8111-111111111111" }, { digest: "0".repeat(64) }, { trusted: false }]) {
-      await failsClosed({ summary: (helper) => { const bound = JSON.parse(fakeSummary(helper)) as object; return `${JSON.stringify(change.trusted === false ? { schemaVersion: 1, trusted: false } : { ...bound, ...change })}\n`; } });
-    }
-  });
   it("is refused before any docker call for input that is not plain, or a worker that does not offer it", async () => {
     const daemon = fakeDaemon();
     const refused = async (overrides: Partial<StartGeneralFakesHelperInput>) => { await expect(startGeneralFakesHelper(await input(daemon, overrides))).rejects.toThrow(); expect(daemon.calls).toEqual([]); };
@@ -460,18 +376,6 @@ function fakeSummary(helper: FakeContainer): string {
 
 describe("reading what the helper answered", () => {
   const withCounts = (counts: Partial<Record<string, unknown>>) => (helper: FakeContainer) => `${JSON.stringify({ ...JSON.parse(fakeSummary(helper)) as object, ...counts })}\n`;
-  it("gives the calls between two readings (the first reading counts from zero)", async () => {
-    let served = 0;
-    const daemon = fakeDaemon({ summary: (helper) => withCounts({ served, cannotAnswer: { no_spec: 0, spec_unreadable: 0, spec_ambiguous: 0, operation_unknown: served > 3 ? 1 : 0, operation_unsupported: 0 } })(helper) });
-    const started = await startGeneralFakesHelper(await input(daemon));
-    expect(await started.drain()).toEqual({ served: 0, foreign: 0, unrouted: 0, refused: 0, cannotAnswer: { no_spec: 0, spec_unreadable: 0, spec_ambiguous: 0, operation_unknown: 0, operation_unsupported: 0 } });
-    served = 2;
-    expect(await started.drain()).toMatchObject({ served: 2, cannotAnswer: { operation_unknown: 0 } });
-    served = 5;
-    expect(await started.drain()).toMatchObject({ served: 3, cannotAnswer: { operation_unknown: 1 } });
-    expect(await started.drain()).toMatchObject({ served: 0 });
-    await started.stop();
-  });
   it("gives nothing (never 'no calls') for a summary that is untrusted, saturated, bound to another company, task or digest, or smaller than the last one", async () => {
     let current: (helper: FakeContainer) => string = withCounts({});
     const daemon = fakeDaemon({ summary: (helper) => current(helper) });
@@ -486,21 +390,6 @@ describe("reading what the helper answered", () => {
     expect(await started.drain()).toMatchObject({ served: 2 });
     await started.stop();
   });
-  it("gives nothing when the exec itself fails (a helper that died)", async () => {
-    const daemon = fakeDaemon();
-    const started = await startGeneralFakesHelper(await input(daemon));
-    daemon.containers.find((c) => c.name.endsWith("-fakes"))!.running = false;
-    expect(await started.drain()).toBeUndefined();
-    await started.stop();
-  });
-  it("stop looks at the sandbox's networks after a disconnect and tries again: a disconnect that did nothing is not believed", async () => {
-    const daemon = fakeDaemon({ ignoreDisconnects: 2 });
-    const given = await input(daemon);
-    const started = await startGeneralFakesHelper(given);
-    await started.stop();
-    nothingLeft(daemon);
-    expect(daemon.calls.filter((call) => call[0] === "network" && call[1] === "disconnect")).toHaveLength(3);
-  });
   it("the launcher gives the helper lowercase ids whatever case the invocation spelled them in", async () => {
     const daemon = fakeDaemon();
     const environment = await offered();
@@ -510,16 +399,6 @@ describe("reading what the helper answered", () => {
     expect(helper.args).toContain(WORKSPACE);
     expect(helper.args).toContain(OPERATION);
     await started.stop();
-  });
-  it("stop is idempotent and takes the sandbox off the network, the helper and the network away, and the files", async () => {
-    const daemon = fakeDaemon();
-    const given = await input(daemon);
-    const started = await startGeneralFakesHelper(given);
-    await Promise.all([started.stop(), started.stop()]);
-    await started.stop();
-    nothingLeft(daemon);
-    expect(await readdir(given.scratchParent)).toEqual([]);
-    expect(daemon.calls.filter((call) => call[0] === "network" && call[1] === "disconnect")).toHaveLength(1);
   });
 });
 

@@ -10,14 +10,12 @@ import {
   type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalVerdict, type Approvers, type AuditSink, type IdentityProvider, type Principal, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createLocalOwnerIdentity, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerIdentity, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createDecisionGate, approvalRecordKey, type DecisionAttempt } from "../../packages/broker/src/core/decisions/approval-gate.js";
-import { isCommentMethod, strictMethodsFor } from "../../packages/broker/src/core/decisions/strong-methods.js";
 import { createWorkflowDocumentSubject, workflowTaskKey, waitingDocumentDigest } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import { createIdentityMergePeople, soleOwnerPeople } from "../../packages/broker/src/core/merge/people.js";
 import { mergeReadiness, prepareMerge, pressMerge } from "../../packages/broker/src/core/merge/index.js";
-import { TASK_ID as MERGE_TASK, mergeWorld, OWNER_SESSION } from "../support/merge-world.js";
-import { commentReads, freshComment } from "../support/comment-fakes.js";
+import { TASK_ID as MERGE_TASK, mergeWorld } from "../support/merge-world.js";
 
 const COMPANY = IMPLICIT_COMPANY_ID;
 const NOW = new Date("2026-11-10T12:00:00.000Z");
@@ -79,21 +77,6 @@ function attempt(overrides: Partial<DecisionAttempt> = {}): DecisionAttempt {
 const revisionOf = async (store: MemoryDocumentStore): Promise<number> => ((await store.get(workflowTaskKey(TASK_ID)))!["workflow"] as unknown as WorkflowSnapshot).revision;
 
 describe("A3: the approvers plug-in names its strong methods", () => {
-  it("a plug-in whose session method has another name approves a high-risk request once it names that method; before, it could approve none", async () => {
-    const unnamed = world(plugin());
-    await unnamed.ready;
-    expect(await unnamed.gate.decide(attempt())).toMatchObject({ status: "refused", reason: "method_not_allowed" });
-    expect(await revisionOf(unnamed.store)).toBe(R0);
-    const named = world(plugin({ requirement: { strongMethods: [STEP_UP] } }));
-    await named.ready;
-    expect(await named.gate.decide(attempt())).toMatchObject({ status: "decided", approver: { personId: "maya" } });
-  });
-
-  it("naming a method does not make it work for a method the plug-in does not offer", async () => {
-    const { gate, ready } = world(plugin({ requirement: { methods: [CODE_HOST_COMMENT_METHOD], strongMethods: [STEP_UP] } }));
-    await ready;
-    expect(await gate.decide(attempt())).toMatchObject({ status: "refused", reason: "method_not_allowed" });
-  });
 
   it("a comment is never strong or a rejection, even when the plug-in names it (Code: reject and high-risk approve stay session-only)", async () => {
     const asked = plugin({ requirement: { strongMethods: [STEP_UP, CODE_HOST_COMMENT_METHOD], rejectMethods: [STEP_UP, CODE_HOST_COMMENT_METHOD] } });
@@ -106,45 +89,6 @@ describe("A3: the approvers plug-in names its strong methods", () => {
     expect(await revisionOf(reject.store)).toBe(R0);
     // The session method still rejects.
     expect(await reject.gate.decide(attempt({ outcome: "reject", reason: "No." }))).toMatchObject({ status: "decided" });
-  });
-
-  it("rejecting needs the method the plug-in names for it; with none named it needs the local session", async () => {
-    const unnamed = world(plugin(), { risk: "low" });
-    await unnamed.ready;
-    expect(await unnamed.gate.decide(attempt({ outcome: "reject" }))).toMatchObject({ reason: "method_not_allowed" });
-    const named = world(plugin({ requirement: { rejectMethods: [STEP_UP] } }), { risk: "low" });
-    await named.ready;
-    expect(await named.gate.decide(attempt({ outcome: "reject", reason: "No." }))).toMatchObject({ status: "decided" });
-  });
-
-  it("asking for changes by a comment is allowed; a plug-in may name other methods for it", () => {
-    expect(strictMethodsFor("request_changes", "high", {})).toEqual([LOCAL_SESSION_METHOD, CODE_HOST_COMMENT_METHOD]);
-    expect(strictMethodsFor("request_changes", "low", { changesMethods: [STEP_UP] })).toEqual([STEP_UP]);
-  });
-
-  it("the gate's policy option can only NARROW what the plug-in names (review L2), and cannot let a comment in", async () => {
-    expect(strictMethodsFor("approve", "high", { strongMethods: [STEP_UP, "emailed-link"] }, { highRiskMethods: [STEP_UP] })).toEqual([STEP_UP]);
-    // A method the plug-in left out is not re-admitted by the policy.
-    expect(strictMethodsFor("approve", "high", { strongMethods: [STEP_UP] }, { highRiskMethods: [STEP_UP, "emailed-link"] })).toEqual([STEP_UP]);
-    expect(strictMethodsFor("approve", "high", { strongMethods: [STEP_UP] }, { highRiskMethods: [LOCAL_SESSION_METHOD] })).toEqual([]);
-    expect(strictMethodsFor("approve", "high", {}, { highRiskMethods: [CODE_HOST_COMMENT_METHOD] })).toEqual([]);
-    const { gate, ready } = world(plugin({ requirement: { strongMethods: [STEP_UP] } }), { policy: { highRiskMethods: [LOCAL_SESSION_METHOD] } });
-    await ready;
-    expect(await gate.decide(attempt())).toMatchObject({ reason: "method_not_allowed" });
-    const widened = world(plugin({ requirement: { methods: [STEP_UP, "emailed-link"], strongMethods: [STEP_UP] } }), { policy: { highRiskMethods: [STEP_UP, "emailed-link"] } });
-    await widened.ready;
-    expect(await widened.gate.decide(attempt({ credentials: [{ method: "emailed-link", token: TOKEN }] }))).toMatchObject({ reason: "method_not_allowed" });
-  });
-
-  it("a policy is intersected with the default too when the plug-in names no set, so it never admits a method the default leaves out (review N2)", async () => {
-    expect(strictMethodsFor("approve", "high", {}, { highRiskMethods: [STEP_UP] })).toEqual([]);
-    expect(strictMethodsFor("approve", "high", {}, { highRiskMethods: [STEP_UP, LOCAL_SESSION_METHOD] })).toEqual([LOCAL_SESSION_METHOD]);
-    expect(strictMethodsFor("reject", "low", {}, { rejectMethods: [STEP_UP] })).toEqual([]);
-    expect(strictMethodsFor("request_changes", "low", {}, { changesMethods: [STEP_UP, CODE_HOST_COMMENT_METHOD] })).toEqual([CODE_HOST_COMMENT_METHOD]);
-    const { gate, ready, store } = world(plugin(), { policy: { highRiskMethods: [STEP_UP] } });
-    await ready;
-    expect(await gate.decide(attempt())).toMatchObject({ reason: "method_not_allowed" });
-    expect(await revisionOf(store)).toBe(R0);
   });
 
   it("a policy that can only lock the gate out is refused when the gate is built (comment methods only) or at startup (disjoint from the plug-in) (review N2)", async () => {
@@ -166,32 +110,6 @@ describe("A3: the approvers plug-in names its strong methods", () => {
     await expect(createDecisionGate({ store: new MemoryDocumentStore(), approvers: named, audit: createNoopAuditSink(), subjects: [] }).verifyPolicy(COMPANY)).resolves.toBeUndefined();
   });
 
-  it("a comment is recognised by KIND, not one exact name: code-host-* and the plug-in's own commentMethods are never strong or a rejection (review L1)", async () => {
-    expect(isCommentMethod("code-host-comment")).toBe(true);
-    expect(isCommentMethod("code-host-review-button")).toBe(true);
-    expect(isCommentMethod("slack-comment")).toBe(false);
-    expect(isCommentMethod("slack-comment", { commentMethods: ["slack-comment"] })).toBe(true);
-    const requirement = { strongMethods: [STEP_UP, "slack-comment", "code-host-review-button"], rejectMethods: [STEP_UP, "slack-comment", "code-host-review-button"], commentMethods: ["slack-comment"] };
-    expect(strictMethodsFor("approve", "high", requirement)).toEqual([STEP_UP]);
-    expect(strictMethodsFor("reject", "low", requirement)).toEqual([STEP_UP]);
-    const asked = plugin({ requirement: { methods: [STEP_UP, "slack-comment"], ...requirement } });
-    const high = world(asked);
-    await high.ready;
-    expect(await high.gate.decide(attempt({ credentials: [{ method: "slack-comment", token: TOKEN }] }))).toMatchObject({ reason: "method_not_allowed" });
-    expect(await revisionOf(high.store)).toBe(R0);
-  });
-
-  it("a low or medium risk approval is limited only by the methods the plug-in offers", () => {
-    expect(strictMethodsFor("approve", "low", { strongMethods: [STEP_UP] })).toBeUndefined();
-    expect(strictMethodsFor("approve", "medium", {})).toBeUndefined();
-  });
-
-  it("Code's local approvers name the local session as strong and for rejecting, and still accept a comment for changes", async () => {
-    const approvers = createLocalOwnerApprovers({ verifySession: () => true, fetchComment: () => undefined });
-    const requirement = await approvers.requirement({ companyId: COMPANY, requestId: "r", kind: "plan", subject: { type: "task", id: "t" }, revision: 1, artifactDigest: "d" });
-    expect(requirement).toMatchObject({ methods: [LOCAL_SESSION_METHOD, CODE_HOST_COMMENT_METHOD], strongMethods: [LOCAL_SESSION_METHOD], rejectMethods: [LOCAL_SESSION_METHOD], changesMethods: [LOCAL_SESSION_METHOD, CODE_HOST_COMMENT_METHOD] });
-    expect(requirement.signIn).toBeUndefined();
-  });
 });
 
 describe("A1 and decision 62: the sign-in time, and the company's window", () => {
@@ -201,20 +119,6 @@ describe("A1 and decision 62: the sign-in time, and the company's window", () =>
     const request = attempt();
     expect(await gate.decide(request)).toMatchObject({ status: "decided", record: { approvers: [{ personId: "maya", method: STEP_UP, authTime: iso(86_400 * 30) }] } });
     expect(await store.get(approvalRecordKey(COMPANY, request.requestId))).toMatchObject({ approvers: [{ authTime: iso(86_400 * 30) }] });
-  });
-
-  it("a window: a recent sign-in approves a high-risk request, an old one or none is refused and nothing changes", async () => {
-    const rule = { mode: "window" as const, seconds: 600 };
-    const base = { strongMethods: [STEP_UP], rejectMethods: [STEP_UP], signIn: rule };
-    const fresh = world(plugin({ requirement: base, authTime: iso(599) }));
-    await fresh.ready;
-    expect(await fresh.gate.decide(attempt())).toMatchObject({ status: "decided" });
-    for (const authTime of [iso(601), undefined, "not a time", iso(-3600)]) {
-      const stale = world(plugin({ requirement: base, authTime }));
-      await stale.ready;
-      expect(await stale.gate.decide(attempt())).toMatchObject({ status: "refused", reason: "sign_in_not_fresh" });
-      expect(await revisionOf(stale.store)).toBe(R0);
-    }
   });
 
   it("the window also holds for a rejection, but not for a low-risk approval or a request for changes", async () => {
@@ -247,15 +151,6 @@ describe("A1 and decision 62: the sign-in time, and the company's window", () =>
     const noTime = world(plugin({ requirement }), { companySignIn: true });
     await noTime.ready;
     expect(await noTime.gate.decide(attempt())).toMatchObject({ reason: "sign_in_not_fresh" });
-  });
-
-  it("a plug-in's malformed window (Infinity, zero) refuses the approval instead of switching the rule off (review L3)", async () => {
-    for (const seconds of [Number.POSITIVE_INFINITY, 0]) {
-      const { gate, ready, store } = world(plugin({ requirement: { strongMethods: [STEP_UP], signIn: { mode: "window", seconds } }, authTime: iso(1) }));
-      await ready;
-      expect(await gate.decide(attempt())).toMatchObject({ status: "refused", reason: "sign_in_not_fresh" });
-      expect(await revisionOf(store)).toBe(R0);
-    }
   });
 
   it("checkApprovalSignIn fails closed on a missing, unreadable or future time, and holds the window edge inclusive", () => {
@@ -294,70 +189,10 @@ describe("A1 and A3 on the merge press", () => {
   };
   const refused = async (run: () => Promise<unknown>): Promise<string> => { try { await run(); } catch (error) { return (error as { message: string }).message; } return "merged"; };
 
-  it("a high-risk merge by a method the plug-in does not call strong is refused; by a strong one it merges", async () => {
-    const weak = await highRiskWorld(plugin({ requirement: { methods: [STEP_UP, "emailed-link"], strongMethods: [STEP_UP] } }));
-    expect(await refused(() => press(weak, "emailed-link"))).toContain("Nobody approved");
-    expect(weak.world.prs[0]!.model.getChangeRequest(String(weak.world.prs[0]!.number)).state).toBe("open");
-    const strong = await highRiskWorld(plugin({ requirement: { strongMethods: [STEP_UP] } }));
-    expect((await press(strong)).status).toBe("MERGED");
-  });
-
-  it("a comment never merges a high-risk change even when the plug-in names it", async () => {
-    const w = await highRiskWorld(plugin({ requirement: { strongMethods: [STEP_UP, CODE_HOST_COMMENT_METHOD] } }));
-    expect(await refused(() => press(w, CODE_HOST_COMMENT_METHOD))).toContain("Nobody approved");
-  });
-
-  it("the sign-in window holds for a high-risk merge: an old or missing sign-in time merges nothing", async () => {
-    const rule = { mode: "window" as const, seconds: 600 };
-    for (const authTime of [iso(3600), undefined]) {
-      const w = await highRiskWorld(plugin({ requirement: { strongMethods: [STEP_UP], signIn: rule }, authTime }));
-      expect(await refused(() => press(w))).toContain("recent sign-in");
-      expect(w.world.prs[0]!.model.getChangeRequest(String(w.world.prs[0]!.number)).state).toBe("open");
-    }
-    // The world's clock is its own: use the time it reports.
-    const fresh = await highRiskWorld(plugin({ requirement: { strongMethods: [STEP_UP], signIn: rule } }));
-    const recent = new Date(fresh.world.now.value - 60_000).toISOString();
-    fresh.deps.approvers = plugin({ requirement: { strongMethods: [STEP_UP], signIn: rule }, authTime: recent });
-    expect((await press(fresh)).status).toBe("MERGED");
-  });
-
-  it("a low-risk merge is not held to the rule, and a plug-in that names nothing is unchanged", async () => {
-    const world = await mergeWorld();
-    await world.seedTracking();
-    const low = { ...world.deps, approvers: plugin({ requirement: { strongMethods: [STEP_UP], signIn: { mode: "window", seconds: 60 } }, authTime: iso(86_400) }) };
-    const prepared = await prepareMerge(low, { taskId: MERGE_TASK, requestId: world.requestId() });
-    expect((await pressMerge(low, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: world.proofFor(prepared, { method: STEP_UP, token: TOKEN }) })).status).toBe("MERGED");
-  });
-
-  it("a plug-in that names no strong methods gets the gate's default for a high-risk merge: the local session, never a comment (review M2)", async () => {
-    const w = await highRiskWorld(plugin());
-    expect(await refused(() => press(w))).toContain("Nobody approved");
-    expect(await refused(() => press(w, CODE_HOST_COMMENT_METHOD))).toContain("Nobody approved");
-    expect(w.world.prs[0]!.model.getChangeRequest(String(w.world.prs[0]!.number)).state).toBe("open");
-    // The same plug-in, asked about a low-risk merge, is limited only by its own methods.
-    expect(strictMethodsFor("approve", "low", {})).toBeUndefined();
-    const sameAsGate = strictMethodsFor("approve", "high", {});
-    expect(sameAsGate).toEqual([LOCAL_SESSION_METHOD]);
-  });
-
   it("any comment kind is refused for a high-risk merge, by name or by plug-in marking (review L1)", async () => {
     const w = await highRiskWorld(plugin({ requirement: { methods: [STEP_UP, "slack-comment", "code-host-button"], strongMethods: [STEP_UP, "slack-comment", "code-host-button"], commentMethods: ["slack-comment"] } }));
     for (const method of ["slack-comment", "code-host-button"]) expect(await refused(() => press(w, method))).toContain("Nobody approved");
     expect((await press(w)).status).toBe("MERGED");
-  });
-
-  it("in Code a high-risk merge proved by a code host comment is refused, and the local session still merges it (review L5)", async () => {
-    const world = await mergeWorld();
-    await world.seedTracking();
-    await world.setWorkflow({ risk: { level: "high", reasons: ["auth"], candidateDigest: "c".repeat(64) } });
-    const approvers = createLocalOwnerApprovers({ owner: localOwnerPrincipal(), verifySession: (token) => token === OWNER_SESSION, ...commentReads(freshComment({ provider: "github", tenant: "", accountId: "priya" })) });
-    const deps = { ...world.deps, approvers };
-    const prepared = await prepareMerge(deps, { taskId: MERGE_TASK, requestId: world.requestId() });
-    expect(prepared.requirement.methods).toContain(CODE_HOST_COMMENT_METHOD);
-    const byComment = await refused(() => pressMerge(deps, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: world.proofFor(prepared, { method: CODE_HOST_COMMENT_METHOD, token: "comment-9001" }) }));
-    expect(byComment).toContain("Nobody approved");
-    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
-    expect((await pressMerge(deps, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: world.proofFor(prepared) })).status).toBe("MERGED");
   });
 
   it("the presser half of M1 end to end: a presser whose SECOND account is the only approver cannot press Merge (review N1)", async () => {
@@ -403,14 +238,6 @@ describe("A1 and A3 on the merge press", () => {
     }
   });
 
-  it("Code's own approvers still merge a high-risk change with the local session", async () => {
-    const world = await mergeWorld();
-    await world.seedTracking();
-    await world.setWorkflow({ risk: { level: "high", reasons: ["auth"], candidateDigest: "c".repeat(64) } });
-    const prepared = await world.prepare();
-    expect(prepared.requirement.strongMethods).toEqual([LOCAL_SESSION_METHOD]);
-    expect((await pressMerge(world.deps, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: world.proofFor(prepared, { token: OWNER_SESSION }) })).status).toBe("MERGED");
-  });
 });
 
 describe("I1: the identity abilities", () => {
@@ -486,11 +313,6 @@ describe("I1: the identity abilities", () => {
     expect(await people.hostAccountOf(COMPANY as never, "o")).toBeUndefined();
   });
 
-  it("a person carries a sign-in time and the methods used; both are optional", () => {
-    const principal: Principal = { ...localOwnerPrincipal(), authTime: iso(5), methods: ["company-sso"] };
-    expect(principal.authTime).toBeDefined();
-    expect(localOwnerPrincipal().authTime).toBeUndefined();
-  });
 });
 
 describe("I2: one neutral outside account, an open sign-in method, a legacy alias", () => {

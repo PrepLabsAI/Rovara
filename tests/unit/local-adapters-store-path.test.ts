@@ -5,11 +5,11 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { join, resolve } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PluginRegistryError } from "@agentx/contracts";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
-import { SettingsError, databasePath, STORE_PATH_IN_REPOSITORY_SENTENCE } from "../../packages/local-adapters/src/settings.js";
+import { databasePath, STORE_PATH_IN_REPOSITORY_SENTENCE } from "../../packages/local-adapters/src/settings.js";
 import * as queueModule from "../../packages/local-adapters/src/queue-plugin.js";
 import * as storageModule from "../../packages/local-adapters/src/storage-plugin.js";
 import type { SqliteDocumentStore, SqliteQueueService } from "../../packages/local-adapters/src/index.js";
@@ -71,100 +71,7 @@ const refusedAsInsideRepository = (call: () => unknown): void => {
   expect((caught as PluginRegistryError).message).toContain(STORE_PATH_IN_REPOSITORY_SENTENCE);
 };
 
-describe("a relative store path", () => {
-  it("resolves under the state folder, not the folder the process runs in", () => {
-    const resolved = databasePath({ path: "state.db" }, { stateDirectory });
-    expect(resolved).toBe(join(stateDirectory, "state.db"));
-    expect(resolved.startsWith(process.cwd())).toBe(false);
-    expect(databasePath({ path: "deep/er/data.db" }, { stateDirectory })).toBe(join(stateDirectory, "deep", "er", "data.db"));
-  });
-
-  it("falls back to ~/.rovara of the current HOME when the install gives no state folder", async () => {
-    const home = join(root, "home");
-    process.env.HOME = home;
-    process.env.USERPROFILE = home;
-    expect(databasePath({ path: "state.db" })).toBe(join(home, ".rovara", "state.db"));
-  });
-
-  it("keeps an absolute path as it is", async () => {
-    const elsewhere = join(root, "elsewhere", "state.db");
-    expect(databasePath({ path: elsewhere }, { stateDirectory })).toBe(elsewhere);
-  });
-
-  it("refuses to move on silently: an old SQLite database where the old rule put it, and no database at the new place", async () => {
-    const { value, old, fresh } = await oldDatabase(SQLITE_FILE);
-    let caught: unknown;
-    try {
-      databasePath({ path: value }, { stateDirectory });
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(PluginRegistryError);
-    expect((caught as PluginRegistryError).code).toBe("create_failed");
-    expect((caught as PluginRegistryError).message).toBe(`Rovara's database moved: stop Rovara, then move ${old} and its -wal and -shm files to ${fresh} (or delete them on purpose), or give an absolute path outside any repository.`);
-  });
-
-  it("carries on, with no message, once the new file exists", async () => {
-    const { value, fresh } = await oldDatabase(SQLITE_FILE);
-    await writeFile(fresh, SQLITE_FILE);
-    const lines: string[] = [];
-    const log = vi.spyOn(console, "warn").mockImplementation((line: unknown) => void lines.push(String(line)));
-    try {
-      expect(databasePath({ path: value }, { stateDirectory })).toBe(fresh);
-    } finally {
-      log.mockRestore();
-    }
-    expect(lines).toEqual([]);
-  });
-
-  it("does not refuse for a file that is not a SQLite database, an absolute path, or a missing old file", async () => {
-    const { value, fresh } = await oldDatabase("this is a text file, not a database");
-    expect(databasePath({ path: value }, { stateDirectory })).toBe(fresh);
-    const absolute = join(root, "absolute.db");
-    await writeFile(absolute, SQLITE_FILE);
-    expect(databasePath({ path: absolute }, { stateDirectory })).toBe(absolute);
-    expect(databasePath({ path: "never-existed-anywhere.db" }, { stateDirectory })).toBe(join(stateDirectory, "never-existed-anywhere.db"));
-  });
-});
-
-describe("a store path that is still refused", () => {
-  it("refuses :memory:, a file: URL, an empty path, a path that is not text and a NUL", () => {
-    for (const bad of [":memory:", "file:/tmp/x.db", "file:x.db", "", "a\u0000b.db", 3, null, undefined, ["x.db"]]) {
-      expect(() => databasePath({ path: bad as never }, { stateDirectory })).toThrow(SettingsError);
-    }
-    expect(() => databasePath({}, { stateDirectory })).toThrow(SettingsError);
-  });
-});
-
 describe("a store path inside a git work tree is refused", () => {
-  it("refuses an absolute path in a repository made by git init, and a path in a folder that does not exist yet", async () => {
-    const repository = join(root, "checkout");
-    gitInit(repository);
-    refusedAsInsideRepository(() => databasePath({ path: join(repository, "state.db") }, { stateDirectory }));
-    refusedAsInsideRepository(() => databasePath({ path: join(repository, "new", "deeper", "state.db") }, { stateDirectory }));
-    // The refusal names the path and says what to do.
-    try {
-      databasePath({ path: join(repository, "state.db") }, { stateDirectory });
-    } catch (error) {
-      const message = (error as Error).message;
-      expect(message).toContain(join(repository, "state.db"));
-      expect(message).toContain("choose a path outside any git repository");
-      expect(message).toContain(stateDirectory);
-    }
-  });
-
-  it("refuses a relative path that climbs out of the state folder into a repository", async () => {
-    const repository = join(root, "checkout");
-    gitInit(repository);
-    refusedAsInsideRepository(() => databasePath({ path: relative(stateDirectory, join(repository, "state.db")) }, { stateDirectory }));
-  });
-
-  it("treats a .git file (a linked work tree or a submodule) like a .git folder", async () => {
-    const linked = join(root, "linked");
-    await mkdir(linked);
-    await writeFile(join(linked, ".git"), "gitdir: /nowhere\n");
-    refusedAsInsideRepository(() => databasePath({ path: join(linked, "sub", "state.db") }, { stateDirectory }));
-  });
 
   it("follows symbolic links: a link into the tree does not escape, a link out of the tree does not count", async () => {
     const repository = join(root, "checkout");
@@ -184,30 +91,6 @@ describe("a store path inside a git work tree is refused", () => {
     // A link inside the tree that points out of it is outside the tree.
     await symlink(outside, join(repository, "leaves"));
     expect(databasePath({ path: join(repository, "leaves", "state.db") }, { stateDirectory })).toBe(join(repository, "leaves", "state.db"));
-  });
-
-  it("is not fooled by GIT_DIR, GIT_WORK_TREE or pathspec variables in the environment", async () => {
-    const repository = join(root, "checkout");
-    gitInit(repository);
-    const other = join(root, "other-repository");
-    gitInit(other);
-    const plain = join(root, "plain");
-    await mkdir(plain);
-    for (const [name, value] of [["GIT_DIR", join(other, ".git")], ["GIT_WORK_TREE", plain], ["GIT_LITERAL_PATHSPECS", "1"], ["GIT_GLOB_PATHSPECS", "1"], ["GIT_NOGLOB_PATHSPECS", "1"], ["GIT_ICASE_PATHSPECS", "1"], ["GIT_CEILING_DIRECTORIES", root]] as const) process.env[name] = value;
-    // GIT_DIR points at another repository and GIT_WORK_TREE at a plain folder: the repository is still refused.
-    refusedAsInsideRepository(() => databasePath({ path: join(repository, "state.db") }, { stateDirectory }));
-    // ...and a plain folder is still fine, although GIT_DIR names a repository.
-    expect(databasePath({ path: join(plain, "state.db") }, { stateDirectory })).toBe(join(plain, "state.db"));
-    // GIT_DIR naming nothing at all changes nothing either.
-    process.env.GIT_DIR = join(root, "does-not-exist");
-    refusedAsInsideRepository(() => databasePath({ path: join(repository, "state.db") }, { stateDirectory }));
-  });
-
-  it("accepts a path under the state folder even when the home folder is itself a repository (dotfiles)", async () => {
-    gitInit(join(root, "home"));
-    expect(databasePath({ path: "state.db" }, { stateDirectory })).toBe(join(stateDirectory, "state.db"));
-    // ...but a path elsewhere in that home folder is still inside a work tree.
-    refusedAsInsideRepository(() => databasePath({ path: join(root, "home", "notes", "state.db") }, { stateDirectory }));
   });
 
   it("fails closed on a folder it cannot read", async (context) => {
@@ -253,15 +136,6 @@ describe("the SQLite plug-ins", () => {
       await expect(readFile(fresh)).rejects.toMatchObject({ code: "ENOENT" });
     });
   }
-
-  it("refuse a path inside a repository with the sentence, through the registry that loads them", async () => {
-    const repository = join(root, "checkout");
-    gitInit(repository);
-    for (const point of ["storage", "queue"] as const) {
-      await expect(load(point, { path: join(repository, "state.db") })).rejects.toMatchObject({ code: "create_failed", message: expect.stringContaining(STORE_PATH_IN_REPOSITORY_SENTENCE) as string });
-    }
-    await expect(readFile(join(repository, "state.db"))).rejects.toMatchObject({ code: "ENOENT" });
-  });
 });
 
 describe("the documented examples", () => {

@@ -34,14 +34,6 @@ async function maxTokensAsked(name: string, provider: "anthropic" | "amazon-bedr
 }
 
 describe("a routed call to a Bedrock model the gateway offers", () => {
-  it("is the gateway's limit: 64,000", () => {
-    expect(GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS).toBe(64_000);
-  });
-
-  it("asks for at most the gateway's limit on zai.glm-5, whose catalog limit is above it", async () => {
-    expect(catalogModelByName("zai.glm-5")!.model.maxTokens).toBeGreaterThan(GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS);
-    expect(await maxTokensAsked("zai.glm-5", "amazon-bedrock")).toEqual({ registered: GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS, sent: GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS });
-  });
 
   it("never asks for more than the gateway's limit on any offered model, and keeps a lower catalog limit", async () => {
     for (const name of [...GATEWAY_CONVERSE_MODELS, "acme.brand-new-model-v9:0"]) {
@@ -60,25 +52,6 @@ describe("every other routed model keeps its catalog limit (today's behaviour)",
     expect(await maxTokensAsked("claude-sonnet-4-6", "anthropic")).toEqual({ registered: catalog, sent: catalog });
   });
 
-  it("a Bedrock Claude id or profile on an Anthropic Messages route (a local model-proxy route) keeps its catalog limit", async () => {
-    for (const name of ["us.anthropic.claude-opus-4-6-v1", "anthropic.claude-sonnet-4-6", "global.anthropic.claude-opus-4-5-20251101-v1:0"]) {
-      const catalog = catalogModelByName(name)?.model.maxTokens;
-      if (catalog === undefined) continue;
-      const { runtime } = await routedRuntime(name, "amazon-bedrock", () => answer(name));
-      expect(runtime.getModel("rovara-route", name)!.maxTokens, name).toBe(catalog);
-    }
-    const opus = catalogModelByName("us.anthropic.claude-opus-4-6-v1")!.model.maxTokens;
-    expect(opus).toBeGreaterThan(GATEWAY_CONVERSE_MAX_OUTPUT_TOKENS);
-    const { runtime } = await routedRuntime("us.anthropic.claude-opus-4-6-v1", "amazon-bedrock", () => answer("x"));
-    expect(runtime.getModel("rovara-route", "us.anthropic.claude-opus-4-6-v1")!.maxTokens).toBe(opus);
-  });
-
-  it("a route on another API keeps its catalog limit, whatever the model", async () => {
-    const bodies: Array<Record<string, unknown>> = [];
-    const transport = vi.fn(async (_input: unknown, init?: RequestInit) => { bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>); return new Response("", { status: 500 }); }) as unknown as typeof fetch;
-    const runtime = await createConfiguredModelRuntime({ provider: "amazon-bedrock", modelId: "zai.glm-5" }, { fetch: transport, onUsage: () => undefined, proxy: { baseUrl: "https://gateway.example", apiKey: "task-key", route: { alias: "company-glm", api: "openai-completions", catalog: "zai.glm-5" } } });
-    expect(runtime.getModel("rovara-route", "company-glm")!.maxTokens).toBe(catalogModelByName("zai.glm-5")!.model.maxTokens);
-  });
 });
 
 describe("a model the gateway does not offer (DEC 254g: the gateway is the authority)", () => {

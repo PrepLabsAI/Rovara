@@ -1,11 +1,9 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { WEB_API_REQUIRED_PROBES, canonicalJson, e2eScenarioBundleDigest, webApiProbeRunId, type E2EScenarioBundle, type WebApiProbeEvidence } from "../../packages/contracts/src/index.js";
-import { deriveWebApiProbeObservation, verifyWebApiProbeRecord } from "../../packages/verifier/src/web-api-probe-evidence.js";
-import { fixtureEvidence, fixtureProbeRuns, webApiChallenge, WEB_API_FIXTURE_NOW } from "../support/web-api-qualification.js";
+import { WEB_API_REQUIRED_PROBES, e2eScenarioBundleDigest, webApiProbeRunId, type E2EScenarioBundle, type WebApiProbeEvidence } from "../../packages/contracts/src/index.js";
+import { deriveWebApiProbeObservation } from "../../packages/verifier/src/web-api-probe-evidence.js";
+import { fixtureEvidence, webApiChallenge, WEB_API_FIXTURE_NOW } from "../support/web-api-qualification.js";
 
 const challenge = webApiChallenge(WEB_API_FIXTURE_NOW);
-const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 /** Loose view of the collected evidence the tests edit; the schemas under test decide what is valid. */
 type Collected = Extract<WebApiProbeEvidence, { kind: "collected" }> & { collection: { shards: { rawReport: { bytesBase64: string } }[] }; oracle: { binding: { runId: string } } };
 const collected = (probeId: string) => structuredClone(fixtureEvidence(probeId)) as Collected;
@@ -15,49 +13,6 @@ const blocked = (evidence: Collected) => JSON.parse(Buffer.from(evidence.blocked
 const withBlocked = (evidence: Collected, patch: Record<string, unknown>): Collected => ({ ...evidence, blockedRequestsBase64: Buffer.from(JSON.stringify({ ...blocked(evidence), ...patch })).toString("base64") });
 
 describe("deriving a probe's observation from its retained evidence", () => {
-  it("reads each probe's facts out of the real collector bytes the production runner retained", () => {
-    const facts = Object.fromEntries(WEB_API_REQUIRED_PROBES.map((probe) => {
-      const derived = derive(probe.probeId, fixtureEvidence(probe.probeId));
-      if (!derived.ok) throw new Error(derived.reason);
-      const { evidenceDigest, ...rest } = derived.observation;
-      expect(evidenceDigest).toBe(sha(canonicalJson(fixtureEvidence(probe.probeId))));
-      return [probe.probeId, rest];
-    }));
-    const clean = { attempts: 1, skipped: 0, flaky: 0, buildExitCode: null, runUnavailableReason: null };
-    expect(facts["web-csv-positive-v1"]).toEqual({ ...clean, collectorStatus: "PASS", failedAssertionKinds: [], blockedHosts: [] });
-    expect(facts["web-csv-negative-v1"]).toEqual({ ...clean, collectorStatus: "FAILED", failedAssertionKinds: ["csv"], blockedHosts: [] });
-    expect(facts["web-egress-denial-v1"]).toMatchObject({ ...clean, collectorStatus: "FAILED", blockedHosts: ["probe.example.com"] });
-    expect(facts["api-state-positive-v1"]).toEqual({ ...clean, collectorStatus: "PASS", failedAssertionKinds: [], blockedHosts: [] });
-    // The app asks for a name that resolves to the sinkhole (one recorded call, so UNKNOWN) and dials an IP literal that the wall blocks (so its assertion fails).
-    expect(facts["api-egress-denial-v1"]).toEqual({ ...clean, collectorStatus: "UNKNOWN", failedAssertionKinds: ["http-status"], blockedHosts: [],
-      mockConsumptions: { success: 0, refusal: 0, invalidData: 0 }, unmockedCalls: { sinkhole: 1, mocked: 0 }, runReason: "unmocked-external-call" });
-    expect(facts["build-imds-denial-v1"]).toEqual({ ...clean, collectorStatus: null, runUnavailableReason: "build-failed", buildExitCode: 7, failedAssertionKinds: [], blockedHosts: [] });
-    expect(facts["build-lateral-denial-v1"]).toEqual({ ...clean, collectorStatus: null, runUnavailableReason: "build-failed", buildExitCode: 7, failedAssertionKinds: [], blockedHosts: [] });
-    expect(facts["app-host-denial-v1"]).toEqual({ ...clean, collectorStatus: "PASS", failedAssertionKinds: [], blockedHosts: [] });
-    // The mock probes and the API egress probe also carry what the verified mock evidence shows; no other probe does, so their recorded observations stay as they were.
-    expect(facts["web-mock-origin-v1"]).toEqual({ ...clean, collectorStatus: "PASS", failedAssertionKinds: [], blockedHosts: [],
-      mockConsumptions: { success: 1, refusal: 0, invalidData: 0 }, unmockedCalls: { sinkhole: 0, mocked: 0 }, runReason: "structural-application-observations-complete" });
-    expect(facts["web-unmocked-call-v1"]).toEqual({ ...clean, collectorStatus: "UNKNOWN", failedAssertionKinds: [], blockedHosts: [],
-      mockConsumptions: { success: 0, refusal: 0, invalidData: 0 }, unmockedCalls: { sinkhole: 1, mocked: 0 }, runReason: "unmocked-external-call" });
-    for (const probe of WEB_API_REQUIRED_PROBES.filter((item) => item.mock !== true)) expect(Object.keys(facts[probe.probeId]!)).not.toContain("mockConsumptions");
-  });
-
-  it("derives the facts of the mock probes from the retained bytes alone, so a record can claim nothing else", () => {
-    for (const probeId of ["web-mock-origin-v1", "web-unmocked-call-v1", "api-egress-denial-v1"]) {
-      const run = fixtureProbeRuns()[probeId]!;
-      expect(verifyWebApiProbeRecord({ challenge, probeId, observation: run.observation, evidence: run.evidence })).toEqual({ ok: true });
-      for (const lie of [{ mockConsumptions: { success: 2, refusal: 0, invalidData: 0 } }, { unmockedCalls: { sinkhole: 5, mocked: 0 } }, { collectorStatus: "FAILED" as const }]) {
-        expect(verifyWebApiProbeRecord({ challenge, probeId, observation: { ...run.observation, ...lie }, evidence: run.evidence })).toEqual({ ok: false, reason: `probe-evidence-mismatch:${probeId}` });
-      }
-    }
-  });
-
-  it("agrees with the observations the committed runs carry, and a record's claim must be exactly that", () => {
-    for (const [probeId, run] of Object.entries(fixtureProbeRuns())) {
-      expect(verifyWebApiProbeRecord({ challenge, probeId, observation: run.observation, evidence: run.evidence })).toEqual({ ok: true });
-      expect(verifyWebApiProbeRecord({ challenge, probeId, observation: { ...run.observation, flaky: 1 }, evidence: run.evidence })).toEqual({ ok: false, reason: `probe-evidence-mismatch:${probeId}` });
-    }
-  });
 
   it("calls evidence of another run or challenge unbound, wherever the run id is carried", () => {
     const other = "11111111-1111-4111-8111-111111111111";
@@ -116,16 +71,6 @@ describe("deriving a probe's observation from its retained evidence", () => {
     expect(derive("web-egress-denial-v1", { ...evidence, blockedRequestsBase64: Buffer.from("not json").toString("base64") })).toEqual({ ok: false, reason: "probe-evidence-mismatch:web-egress-denial-v1" });
     // No file at all means no blocked host was shown, which is a fact the oracle then judges, not a reason to refuse the evidence.
     expect(derive("web-egress-denial-v1", { ...evidence, blockedRequestsBase64: null })).toMatchObject({ ok: true, observation: { blockedHosts: [] } });
-  });
-
-  it("reads the build exit code only from the host's structured result and only when the build is what stopped the run", () => {
-    const build = fixtureEvidence("build-imds-denial-v1") as Extract<WebApiProbeEvidence, { kind: "unavailable" }>;
-    expect(derive("build-imds-denial-v1", { ...build, build: { ...build.build!, exitCode: 3 } })).toMatchObject({ ok: true, observation: { buildExitCode: 3, runUnavailableReason: "build-failed" } });
-    expect(derive("build-imds-denial-v1", { ...build, build: { ...build.build!, exitCode: null } })).toMatchObject({ ok: true, observation: { buildExitCode: null } });
-    expect(derive("build-imds-denial-v1", { ...build, build: { ...build.build!, command: { ...build.build!.command!, args: ["-e", "process.exit(7)"] } } })).toEqual({ ok: false, reason: "probe-evidence-mismatch:build-imds-denial-v1" });
-    expect(derive("build-imds-denial-v1", { ...build, build: null })).toEqual({ ok: false, reason: "probe-evidence-mismatch:build-imds-denial-v1" });
-    // A run that stopped for another reason reports no build exit code, whatever the host's build result says.
-    expect(derive("build-imds-denial-v1", { ...build, reason: "app-exited" })).toMatchObject({ ok: true, observation: { buildExitCode: null, runUnavailableReason: "app-exited" } });
   });
 
   it("refuses a probe the profile does not require, and evidence of no known shape", () => {

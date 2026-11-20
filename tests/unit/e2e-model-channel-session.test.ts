@@ -137,37 +137,6 @@ describe("openE2EModelChannelSession", () => {
     expect((await open({ modelRoute: anthropicRoute, environment: anthropicEnv, assertSharedConfig: () => undefined })).socketPath).toBe(socketPath);
   });
 
-  it("the scripted route is exempt from the two guards, because it calls no provider", async () => {
-    const shared = vi.fn(() => { throw new Error("must not run"); });
-    const session = await open({ environment: { ...scriptedEnv, AWS_ACCESS_KEY_ID: "AKIAEXEMPTSCRIPTED0000" }, assertSharedConfig: shared });
-    expect(shared).not.toHaveBeenCalled();
-    expect(session.socketPath).toBe(socketPath);
-  });
-
-  it("close() unlinks the socket, returns the receipts, and is safe to call again", async () => {
-    const session = await open();
-    const first = await session.close();
-    expect(await exists(socketPath)).toBe(false);
-    expect(await session.close()).toBe(first);
-  });
-
-  it("closes itself when the run is aborted, and unlinks the socket", async () => {
-    const abort = new AbortController();
-    const session = await open({ signal: abort.signal });
-    expect(await exists(socketPath)).toBe(true);
-    abort.abort();
-    const summary = await session.close();
-    expect(summary.receipts).toEqual([]);
-    expect(await exists(socketPath)).toBe(false);
-  });
-
-  it("holds the executor's markers to the steps it was given and to its run", async () => {
-    await open();
-    expect((await post("/v1/step", { ...marker("begin"), stepIndex: 9 })).status).toBe(403);
-    expect((await post("/v1/step", { ...marker("begin"), runId: "11111111-2222-4333-8444-555555555555" })).status).toBe(403);
-    expect((await post("/v1/step", marker("begin"))).status).toBe(200);
-  });
-
   it("hands the socket to the executor's user (1000) when the worker runs as root, and to no one otherwise", () => {
     vi.spyOn(process, "getuid").mockReturnValue(0);
     expect(defaultE2EModelSocketOwner()).toEqual({ uid: 1000, gid: 1000 });

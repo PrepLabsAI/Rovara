@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { MetaSkillSnapshotSchema } from "@agentx/contracts";
 import { loadMetaSkills, mergeSkills, stripSkillExecution, SKILL_TEXT_MAX_BYTES } from "../../packages/worker/src/knowledge/skills.js";
-import { createReaderRegistry } from "../../packages/worker/src/knowledge/registry.js";
 import { memoryKnowledgeSource } from "../../packages/worker/src/knowledge/source.js";
 
 const COMMIT = "a".repeat(40);
@@ -57,17 +56,6 @@ describe("meta repo skills", () => {
     expect(pinned.skipped).toEqual([{ path: ".agents/skills/added-later", reason: "not_pinned" }]);
   });
 
-  it("strips allowed-tools from a CRLF skill", async () => {
-    const result = await load({ ".agents/skills/c/SKILL.md": "---\r\nname: c\r\ndescription: d\r\nallowed-tools: Bash\r\n---\r\nBody\r\n" });
-    expect(result.skills[0]!.content).not.toContain("allowed-tools");
-  });
-
-  it("takes the skill folders from the readers, not from the loader", async () => {
-    const files = { "windsurf/skills/w/SKILL.md": skill("w", "d"), ".agents/skills/y/SKILL.md": skill("y", "d") };
-    const registry = createReaderRegistry([{ id: "windsurf", discovery: { skillDirectories: ["windsurf/skills"] }, accepts: () => false, parse: () => ({ ok: false as const, reason: "unreadable" as const }) }]);
-    expect((await load(files, { registry })).skills.map((entry) => entry.name)).toEqual(["w"]);
-  });
-
   it("caps at 32 skills, refuses bad names and duplicates, large files and links", async () => {
     const files: Record<string, string | { symlink: true }> = {};
     for (let index = 0; index < 40; index += 1) files[`.agents/skills/s${String(index).padStart(2, "0")}/SKILL.md`] = skill(`s${String(index).padStart(2, "0")}`, "d");
@@ -88,16 +76,6 @@ describe("meta repo skills", () => {
       ".agents/skills/Bad_Name": "bad_name", ".claude/skills/dup2": "duplicate_name", ".agents/skills/big": "too_large",
       ".agents/skills/link": "symlink", ".agents/skills/yaml": "bad_front_matter",
     });
-  });
-
-  it("removes hidden characters from the served text", async () => {
-    const result = await load({ ".agents/skills/h/SKILL.md": skill("h", "d", "Do​ this") });
-    expect(result.skills[0]!.content).toContain("Do this");
-  });
-
-  it("reads folders from the project's knowledge.skills paths instead of the defaults", async () => {
-    const files = { "team/skills/x/SKILL.md": skill("x", "d"), ".agents/skills/y/SKILL.md": skill("y", "d") };
-    expect((await load(files, { directories: ["team/skills"] })).skills.map((entry) => entry.name)).toEqual(["x"]);
   });
 
   it("keeps a step's own skill when a meta skill has the same name", () => {

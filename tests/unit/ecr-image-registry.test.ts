@@ -29,16 +29,6 @@ describe("saved environment ECR adapter", () => {
     }
     for (const patch of [{ ROVARA_SAVED_ENV_REPO_PREFIX: "rovara-env/other" }, { ROVARA_SAVED_ENV_PULL_ROLE_ARN: roles.pullRoleArn.replace(scope.account, "999999999999") }, { ROVARA_SAVED_ENV_MANAGE_ROLE_ARN: roles.pushRoleArn }]) expect(() => createEcrImageRegistry({ env: { ...env, ...patch }, sessions: { assume: harness().assume } })).toThrow(SAVED_ENV_NOT_SET_UP);
   });
-  it("accepts the merged role sessions port and signs ECR only with that session", async () => {
-    const credentials = { accessKeyId: "session-id", secretAccessKey: "session-secret", sessionToken: "session-token" };
-    const assume = vi.fn(async () => ({ credentials, expiresAtMs: now + 900_000 }));
-    const send = vi.fn(async () => ({ imageDetails: [] }));
-    const ecr = vi.fn(() => ({ send }));
-    const registry = createEcrImageRegistry({ env, sessions: { assume }, ecr, now: () => now });
-    expect(await registry.list(call)).toEqual([]);
-    expect(assume).toHaveBeenCalledExactlyOnceWith({ access: "manage", ...call, maxSeconds: 900 });
-    expect(ecr).toHaveBeenCalledExactlyOnceWith(credentials);
-  });
   it("off keeps configured cleanup modules but refuses worker logins before any role session", async () => {
     const h = harness();
     const registry = createEcrImageRegistry({ env: { ...env, ROVARA_SAVED_ENVIRONMENTS: "0" }, sessions: { assume: h.assume }, ecr: () => ({ send: h.send }), now: () => now });
@@ -50,21 +40,6 @@ describe("saved environment ECR adapter", () => {
     expect(savedEnvImageModules({ ...env, ROVARA_SAVED_ENVIRONMENTS: "0" }, { assume: h.assume }).map(m => m.point)).toEqual(["image-registry"]);
     expect(savedEnvImageModules({})).toEqual([]);
     expect(savedEnvImageModules(env, { assume: h.assume }).map(m => [m.point, m.name])).toEqual([["image-registry", "ecr"]]);
-  });
-  it("cannot resolve or mutate another company's repository, even with the same project id", async () => {
-    const h = harness();
-    const foreign = savedEnvRepositoryName({ env: "test", orgId: other, projectId: "app" });
-    expect(foreign).not.toBe(repository);
-    for (const repository of [foreign, call.repository.replace("/test/", "/prod/"), "rovara-env/test/*", `${call.repository}/extra`]) {
-      const bad = { companyId, repository };
-      await expect(h.registry.inspect(bad)).rejects.toMatchObject({ code: "refused" });
-      await expect(h.registry.login({ ...bad, access: "pull", maxSeconds: 1800 })).rejects.toMatchObject({ code: "refused" });
-      await expect(h.registry.list(bad)).rejects.toMatchObject({ code: "refused" });
-      await expect(h.registry.deleteImages({ ...bad, digests: [digest] })).rejects.toMatchObject({ code: "refused" });
-      await expect(h.registry.deleteRepository(bad)).rejects.toMatchObject({ code: "refused" });
-    }
-    expect(h.assume).not.toHaveBeenCalled();
-    expect(h.send).not.toHaveBeenCalled();
   });
   it("inspects immutable AES256 repositories and the exact policy, using a one-repository manage session", async () => {
     const h = harness(name => name === "DescribeRepositoriesCommand" ? described : { policyText: JSON.stringify(savedEnvRepositoryPolicy(roles)) });

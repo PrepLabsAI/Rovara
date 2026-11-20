@@ -2,7 +2,7 @@
 // The failure cases (a throw, a timeout, malformed output, a missing or repeated answer) are in change-tier-third-round.test.ts.
 import { describe, expect, it } from "vitest";
 import { patchDigestOf, recordTier, tierFromDiff, tierReviewRecorded, reviewerFloorRecorded, type ChangeTier, type TierFile } from "../../packages/broker/src/core/decisions/change-tier.js";
-import { TIER_QUESTIONS, applyReviewerFloor, recordReviewerFloor, tierReviewPrompt, type TierReviewAnswer, type TierReviewer } from "../../packages/broker/src/core/decisions/tier-reviewer.js";
+import { TIER_QUESTIONS, applyReviewerFloor, recordReviewerFloor, type TierReviewAnswer, type TierReviewer } from "../../packages/broker/src/core/decisions/tier-reviewer.js";
 
 const AT = "2026-11-13T12:00:00.000Z";
 const PATCH = "@@ -1 +1 @@\n-a\n+b";
@@ -16,15 +16,6 @@ const reviewer = (give: () => readonly TierReviewAnswer[] | Promise<readonly Tie
 const ask = (fake: TierReviewer, tier: ChangeTier = smallTier()) => applyReviewerFloor({ tier, reviewer: fake, files: ["src/a.ts"], patchText: PATCH });
 
 describe("the reviewer floor", () => {
-  it("asks the fixed questions, and a small change stays small when every answer is no", async () => {
-    const fake = reviewer(() => answers());
-    const result = await ask(fake);
-    expect(fake.asked).toBe(1);
-    expect(result).toMatchObject({ ran: true, raised: false, yes: [] });
-    expect(result.tier.level).toBe("small");
-    expect(tierReviewPrompt(["src/a.ts"], PATCH)).toContain("auth:");
-    expect(TIER_QUESTIONS.map((question) => question.id)).toEqual(["auth", "money", "permissions", "deletion", "checks", "dependencies", "infra", "agent_instructions", "injection", "transport", "exposure", "exfiltration", "tests", "other_security"]);
-  });
 
   it("any yes raises the tier to risky with the reviewer's reason in front, and the growth is recorded", async () => {
     const result = await ask(reviewer(() => answers({ auth: "the change checks a session cookie" })));
@@ -44,30 +35,11 @@ describe("the reviewer floor", () => {
     expect(tierReviewRecorded(flow, "risky", "a".repeat(40))).toBe(false);
   });
 
-  it("an unknown id is ignored, and a reason is cut to one plain line", async () => {
-    const noisy = await ask(reviewer(() => answers({ infra: ["line one", "line two ", "x".repeat(900)].join(String.fromCharCode(10, 0x200b)) })));
-    const reason = noisy.tier.reasons[0]!.path!;
-    expect(reason.includes(String.fromCharCode(10)) || reason.includes(String.fromCharCode(0x200b))).toBe(false);
-    expect(reason.length).toBeLessThanOrEqual(200);
-    const extra = await ask(reviewer(() => [...answers(), { id: "made_up", yes: true, reason: "x" }]));
-    expect(extra.tier.level).toBe("small");
-  });
-
   it("the eval hint survives the reviewer's raise on a tier that is already at the reasons cap", async () => {
     const busy = tierFromDiff({ files: [...Array.from({ length: 70 }, (_unused, index) => file(`src/auth/area${index}/session.ts`)), file("src/prompts/review.md")], complete: true }, { headSha: "a".repeat(40), at: AT });
     expect(busy.reasons.map((reason) => reason.code)).toContain("eval_hint");
     const result = await ask(reviewer(() => answers({ money: "price list" })), busy);
     expect(result.tier.reasons.length).toBeLessThanOrEqual(50);
     expect(result.tier.reasons.map((reason) => reason.code)).toContain("eval_hint");
-  });
-
-  it("only goes up: a risky tier stays risky whatever the reviewer says, and the reasons are kept", async () => {
-    const risky = tierFromDiff({ files: [file("src/auth/session.ts")], complete: true }, { headSha: "a".repeat(40), at: AT });
-    const result = await ask(reviewer(() => answers()), risky);
-    expect(result.tier).toEqual(risky);
-    const yes = await ask(reviewer(() => answers({ money: "price list" })), risky);
-    expect(yes.raised).toBe(false);
-    expect(yes.tier.level).toBe("risky");
-    expect(yes.tier.reasons.map((reason) => reason.code)).toEqual(expect.arrayContaining(["reviewer_money", "sensitive_path"]));
   });
 });

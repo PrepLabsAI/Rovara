@@ -1,0 +1,26 @@
+{
+  "files": [
+    "tests/unit/e2e-midstep*.test.ts"
+  ],
+  "modules": [
+    "packages/*credential-classifier*",
+    "packages/*redact*",
+    "packages/*mask*",
+    "packages/*secret*",
+    "packages/*access*",
+    "packages/*authz*",
+    "packages/*permission*",
+    "packages/*admission*",
+    "packages/*sandbox*",
+    "packages/*egress*",
+    "packages/*firewall*",
+    "packages/*signin*",
+    "packages/*sign-in*",
+    "packages/*token-verif*",
+    "packages/*verify-token*",
+    "packages/*task-token*",
+    "packages/*script-tokens/authenticate*",
+    "packages/*script-tokens/token-format*",
+    "packages/*model-gateway/token*"
+  ]
+}

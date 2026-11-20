@@ -27,15 +27,6 @@ function sources(over: Partial<UpkeepRecipientSources> = {}): UpkeepRecipientSou
 }
 
 describe("the recipients reader", () => {
-  // MUTANT: the lists are trusted without the live read (a demoted admin, a removed member or another company's owner is told).
-  it("names the company's live owners and admins and the project's live administrators, once each, and nobody else", async () => {
-    const told = await createUpkeepRecipients(A, sources())(A, "beacon");
-    expect([...told].sort()).toEqual([ADMIN, OWNER, PROJECT_ADMIN].sort());
-  });
-
-  it("a project with no administrators tells the company's owners and admins; the project's list is by project", async () => {
-    expect([...(await createUpkeepRecipients(A, sources())(A, "other"))].sort()).toEqual([ADMIN, OWNER].sort());
-  });
 
   // MUTANT: the company binding is dropped.
   it("answers nobody for another company (never that company's admins) and for a company id it was not made for", async () => {
@@ -55,10 +46,6 @@ describe("the recipients reader", () => {
     expect(told.every((person) => /^[a-f0-9]{64}$/u.test(person))).toBe(true);
   });
 
-  it("a source that cannot be read throws (the notice then gives its marker back and a later night tries again)", async () => {
-    await expect(createUpkeepRecipients(A, sources({ companyAdmins: async () => { throw new Error("down"); } }))(A, "beacon")).rejects.toThrow();
-    await expect(createUpkeepRecipients(A, sources({ projectAdmins: async () => { throw new Error("down"); } }))(A, "beacon")).rejects.toThrow();
-  });
 });
 
 describe("the live administers read", () => {

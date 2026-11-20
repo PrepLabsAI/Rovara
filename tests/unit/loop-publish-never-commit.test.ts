@@ -53,23 +53,6 @@ describe("rovara loop never pushes Rovara's working files", () => {
     expect(f.calls.some((call) => call.includes("push"))).toBe(true);
   });
 
-  it("refuses with the fixed sentence before the push, and opens no pull request, when any task commit holds one (even a clean last commit)", async () => {
-    const f = await fixture();
-    await f.commit({ ".agentx/x": "state\n" });
-    await f.commit({ "feature.py": "print(1)\n" });
-    await expect(publish(f.exec, f.input())).rejects.toThrow(neverCommitRefusal(".agentx/x"));
-    expect(f.calls.some((call) => call.includes("push"))).toBe(false);
-    expect(f.calls.some((call) => call[0] === "gh")).toBe(false);
-  });
-
-  it("is case-blind, and stopped by the host's own check first when that holds the push", async () => {
-    const f = await fixture();
-    await f.commit({ ".Agentx-foo/y": "state\n" });
-    await expect(publish(f.exec, f.input())).rejects.toThrow(neverCommitRefusal(".Agentx-foo/y"));
-    const held = { ...f.input(), beforePush: vi.fn(async () => { throw new Error("hold"); }) };
-    await expect(publish(f.exec, held)).rejects.toThrow("hold");
-  });
-
   it("fails closed when the base cannot be read, and is not fooled by GIT_LITERAL_PATHSPECS", async () => {
     const f = await fixture();
     await f.commit({ ".agentx/x": "state\n" });

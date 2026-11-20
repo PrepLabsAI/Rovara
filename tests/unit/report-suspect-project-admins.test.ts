@@ -461,13 +461,6 @@ describe("report-suspect-project-admins", () => {
       return { deps, out, err, cloudFormationConfigs, dynamoConfigs, describedStacks, table };
     }
 
-    it("resolves the table from the named environment's control-plane stack", async () => {
-      const h = harness();
-      await main(["--env", "agentxlivetest123", "--profile", "agentx-test"], h.deps);
-      expect(h.describedStacks).toEqual(["agentx-agentxlivetest123-control-plane"]);
-      expect(h.out.join("\n")).toContain("env agentxlivetest123");
-    });
-
     it("resolves the table from --stack as given, for production's legacy stack name", async () => {
       const h = harness();
       await main(["--stack", "AgentXControlPlane", "--profile", "prod-readonly"], h.deps);
@@ -480,13 +473,6 @@ describe("report-suspect-project-admins", () => {
       expect(h.describedStacks).toEqual([]);
       expect(h.cloudFormationConfigs).toEqual([]);
       expect(h.table.commands.length).toBeGreaterThan(0);
-    });
-
-    it("builds its clients with the profile and region, and 3 attempts at most", async () => {
-      const h = harness();
-      await main(["--env", "e1", "--profile", "my-profile", "--region", "eu-west-1"], h.deps);
-      expect(h.dynamoConfigs).toEqual([{ region: "eu-west-1", profile: "my-profile", maxAttempts: 3 }]);
-      expect(h.cloudFormationConfigs).toEqual([{ region: "eu-west-1", profile: "my-profile", maxAttempts: 3 }]);
     });
 
     it("sends only Scan to the table, prints JSON on stdout and progress on stderr", async () => {

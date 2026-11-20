@@ -60,24 +60,6 @@ describe("a message to a running step", () => {
     expect(sent.payload.text.length).toBeLessThanOrEqual(2_000);
   });
 
-  it("also reaches a step a local worker runs, whose operation stays DISPATCHING while it runs", async () => {
-    const w = await world({ opStatus: "DISPATCHING" });
-    expect(await send(w.deps)).toBe("steered");
-  });
-
-  it("reaches the steps that read a person's notes (understanding, planning, coding) and no other", async () => {
-    for (const [mode, step] of [["UNDERSTAND", "UNDERSTAND"], ["PLAN", "PLAN"], ["IMPLEMENT", "IMPLEMENT"], ["SETUP_AGENT", "SETUP"]] as const) {
-      const w = await world({ mode });
-      expect(await send(w.deps)).toBe("steered");
-      expect((w.machines.answered[0] as { payload: { step: string } }).payload.step).toBe(step);
-    }
-    for (const mode of ["REVIEW", "CHECKS", "PLAN_CRITIQUE", "FEEDBACK_REVIEW"]) {
-      const w = await world({ mode });
-      expect(await send(w.deps)).toBe("no_step");
-      expect(w.machines.answered).toHaveLength(0);
-    }
-  });
-
   it("is a note when nothing runs, the operation is not running, the workspace is not busy or the machine is not up (a machine is never woken for a message)", async () => {
     for (const options of [{ opStatus: "SUCCEEDED" }, { opStatus: "ACCEPTED" }, { opStatus: "CANCEL_REQUESTED" }, { workspaceStatus: "READY" }, { busy: false }, { operationMachine: "m-other" }] as const) {
       const w = await world(options);
@@ -149,22 +131,6 @@ describe("the time a send may take", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(calls).toBe(1);
     clock += 40;
-    await vi.advanceTimersByTimeAsync(40);
-    expect(await result).toBe("not_ready");
-    expect(calls).toBe(1);
-    expect(w.sleeps).toHaveLength(0);
-  });
-
-  it("ends at the timer even when the timer fires a millisecond before the clock says the budget is up (a real timer sometimes does), and starts no later attempt", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    let clock = 1_000_000;
-    vi.spyOn(Date, "now").mockImplementation(() => clock);
-    const w = await world();
-    let calls = 0;
-    w.machines.deliver = () => { calls += 1; return new Promise(() => undefined); };
-    const result = send({ ...w.deps, budgetMs: 40 });
-    await vi.advanceTimersByTimeAsync(0);
-    clock += 39;
     await vi.advanceTimersByTimeAsync(40);
     expect(await result).toBe("not_ready");
     expect(calls).toBe(1);

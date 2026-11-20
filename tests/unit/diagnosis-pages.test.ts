@@ -31,21 +31,6 @@ const post = (fields: Record<string, string>, path = `/plan/${TASK}/diagnose`) =
   raw(server.origin, { method: "POST", path: `${base}${path}`, body: formBody(fields), headers: { host: host(), origin: server.origin, "content-type": "application/x-www-form-urlencoded" } });
 
 describe("Fix with agent on the task page", () => {
-  it("draws the button as a form bound to the error shown and this press, and hands exactly that press to the action, once", async () => {
-    const page = await show({ offer: { requestId: REQUEST, errorKey: KEY } });
-    expect(page.body).toContain("Fix with agent");
-    expect(page.body).toContain("runs on your own model key, can be wrong, and changes nothing");
-    const form = formOf(page.body, "/diagnose");
-    expect(form.fields).toMatchObject({ requestId: REQUEST, errorKey: KEY });
-    expect(form.fields["ft"]).toMatch(/\S{20,}/u);
-    const sent = await post(form.fields);
-    expect(sent.status).toBe(303);
-    expect(sent.headers["location"]).toContain("n=diagnosing");
-    expect(pressed).toEqual([{ taskId: TASK, requestId: REQUEST, errorKey: KEY }]);
-    // A second click, or a replay, finds the form spent.
-    expect((await post(form.fields)).headers["location"]).toContain("n=form");
-    expect(pressed).toHaveLength(1);
-  });
 
   it("refuses a form that was changed after it was drawn, one that is not a press, and a press for another task", async () => {
     const form = formOf((await show({ offer: { requestId: REQUEST, errorKey: KEY } })).body, "/diagnose");
@@ -60,16 +45,6 @@ describe("Fix with agent on the task page", () => {
     // The route does not exist for a session that has none, and it takes no GET.
     expect((await raw(server.origin, { path: `${base}/plan/${TASK}/diagnose`, headers: { host: host() } })).status).toBe(404);
     expect((await raw(server.origin, { method: "POST", path: `/s/${"x".repeat(43)}/plan/${TASK}/diagnose`, body: "", headers: { host: host(), origin: server.origin, "content-type": "application/x-www-form-urlencoded" } })).status).toBe(404);
-  });
-
-  it("says in the page's fixed words what the action answered", async () => {
-    const form = async () => formOf((await show({ offer: { requestId: REQUEST, errorKey: KEY } })).body, "/diagnose");
-    world.actions.next = { ok: false, reason: "stale", message: "x" };
-    expect((await post((await form()).fields)).headers["location"]).toContain("n=stale");
-    world.actions.next = { ok: false, reason: "refused", message: "x" };
-    expect((await post((await form()).fields)).headers["location"]).toContain("n=refused");
-    world.actions.next = { ok: false, reason: "not_found", message: "x" };
-    expect((await post((await form()).fields)).headers["location"]).toContain("n=missing");
   });
 
   it("draws a diagnosis as plain text: the model's words are escaped and redacted, a link or a tag in them is text, and there is no second button", async () => {

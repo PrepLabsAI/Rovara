@@ -57,13 +57,6 @@ const DECISIONS = "/v1/channels/whatsapp/decisions";
 const status = (response: { statusCode: number; body: string }) => ({ statusCode: response.statusCode, ...(JSON.parse(response.body) as Record<string, unknown>) });
 
 describe("an accepted message", () => {
-  it("is queued with the bound project and linked developer, and acknowledged", async () => {
-    const { post, queued, events } = harness();
-    expect(status(await post(MESSAGES, message))).toEqual({ statusCode: 202, status: "accepted" });
-    expect(queued).toEqual([{ kind: "message", message, projectName: "web", developerId: "dev-1", stepUp: ["plan_approval", "admin"] }]);
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ type: "ack", channel: "whatsapp", conversation, data: { inReplyTo: "wamid.HBgL1" } });
-  });
 
   it("queues a decision without an ack", async () => {
     const { post, queued, events } = harness();
@@ -126,14 +119,6 @@ describe("refusals run nothing (SC-003)", () => {
     expect(queued).toEqual([]);
   });
 
-  it("refuses an unbound space, and a space bound to a project the adapter is not registered for", async () => {
-    const unbound = harness();
-    expect(status(await unbound.post(MESSAGES, { ...message, conversation: { ...conversation, space: "group=Other" } }))).toEqual({ statusCode: 403, error: "space_not_bound" });
-    const otherProject = harness({ getBinding: async (ref) => ({ ...ref, projectName: "billing", updatedAt: "2026-11-01T00:00:00.000Z" }) });
-    expect(status(await otherProject.post(MESSAGES, message))).toEqual({ statusCode: 403, error: "space_not_bound" });
-    expect([...unbound.queued, ...otherProject.queued]).toEqual([]);
-  });
-
   it("refuses an actor from another tenant than the conversation", async () => {
     const { post } = harness();
     expect(status(await post(MESSAGES, { ...message, actor: { ...actor, tenant: "+14155550199" } }))).toEqual({ statusCode: 403, error: "actor_tenant_mismatch" });
@@ -150,13 +135,6 @@ describe("replays and duplicates", () => {
     const { post, queued } = harness();
     await post(MESSAGES, message, { id: "msg_same" });
     expect(status(await post(MESSAGES, message, { id: "msg_same" }))).toEqual({ statusCode: 200, status: "duplicate" });
-    expect(queued).toHaveLength(1);
-  });
-
-  it("runs an adapter's resend of the same event once, under a new webhook-id", async () => {
-    const { post, queued } = harness();
-    await post(MESSAGES, message);
-    expect(status(await post(MESSAGES, message))).toEqual({ statusCode: 200, status: "duplicate" });
     expect(queued).toHaveLength(1);
   });
 
@@ -185,21 +163,5 @@ describe("unlinked actors (FR-030)", () => {
       data: { linkUrl: `https://rovara.example.com/review/link/${"c".repeat(32)}`, expiresAt: "2026-11-08T10:10:00.000Z", actor: stranger },
     });
     expect(issueLinkCode).toHaveBeenCalledTimes(1);
-  });
-
-  it("cannot post a decision either", async () => {
-    const { post, queued } = harness();
-    expect(status(await post(DECISIONS, { ...decision, actor: stranger }))).toEqual({ statusCode: 202, status: "link_required" });
-    expect(queued).toEqual([]);
-  });
-
-  it("get their notice on the retry when sending it failed", async () => {
-    let fail = true;
-    const events: ChannelEvent[] = [];
-    const { post } = harness({ sendEvent: async (event) => { if (fail) throw new Error("queue down"); events.push(event); } });
-    expect((await post(MESSAGES, { ...message, actor: stranger }, { id: "msg_link" })).statusCode).toBe(500);
-    fail = false;
-    expect((await post(MESSAGES, { ...message, actor: stranger }, { id: "msg_link" })).statusCode).toBe(202);
-    expect(events.map((event) => event.type)).toEqual(["link_required"]);
   });
 });

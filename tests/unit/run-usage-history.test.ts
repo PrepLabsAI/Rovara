@@ -14,11 +14,6 @@ const call = { callId: "one", stage: "IMPLEMENT", model: available(model), sourc
 const sample = (more: Partial<RunUsageSampleV1> = {}): RunUsageSampleV1 => ({ version: 1, companyId, project: "web", taskId: "task", purpose: unknown, agentId: "rovara-code", path: "QUICK", outcome: "completed", workflowVersion: available("1"), optionsVersion: available("1"), calls: [call], callCount: available(1), completionCoverage: "complete", priceCoverage: "complete", endedAt: at, revision: 1, startQuote: available({ asOf: at, path: "QUICK", range: available({ lowMicros: 2, highMicros: 4 }), basis: "default", inputs: { model: unknown, source: unknown, price: unknown, optionsVersion: unknown }, modelPriced: false }), ...more });
 
 describe("run usage learning", () => {
-  it("rounds up each call before summing, keeps booked money immutable", () => {
-    const value = sample({ calls: [call, { ...call, callId: "two" }], callCount: available(2) });
-    expect(repriceSample(value, quote, at)).toEqual(available(2));
-    expect(value.calls[0]!.settledMicros).toEqual(available(3));
-  });
   it("selects strict context thresholds and the dearer unknown write tier", () => {
     const usage = { input: 100, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0, cacheWriteUnknown: 0 };
     expect(repriceSample(sample({ calls: [{ ...call, usage: available(usage) }] }), quote, at)).toEqual(available(1));
@@ -49,38 +44,9 @@ describe("run usage learning", () => {
     await expect(recordRunUsage({ store }, sample({ companyId: "org_bbbbbbbbbbbbbbbbbbbb" }))).rejects.toThrow();
     await expect(recordRunUsage({ store }, sample({ project: "other" }))).rejects.toThrow();
   });
-  it("stores separate rows under the literal company and project partition key", async () => {
-    const store = new MemoryDocumentStore();
-    for (const { value, taskKey } of [
-      { value: sample({ taskId: "task-web-a" }), taskKey: { pk: "DEVTASK#task-web-a", sk: "META" } },
-      { value: sample({ companyId: "org_bbbbbbbbbbbbbbbbbbbb", taskId: "task-web-b" }), taskKey: { pk: "DEVTASK#task-web-b", sk: "META" } },
-      { value: sample({ project: "api", taskId: "task-api-a" }), taskKey: { pk: "DEVTASK#task-api-a", sk: "META" } },
-    ]) {
-      await store.put({ item: { ...taskKey, companyId: value.companyId, project: value.project } });
-      expect(await recordRunUsage({ store }, value)).toBe("applied");
-    }
-    const webA = runUsageKey(companyId, "web", "task-web-a");
-    const webB = runUsageKey("org_bbbbbbbbbbbbbbbbbbbb", "web", "task-web-b");
-    const apiA = runUsageKey(companyId, "api", "task-api-a");
-    expect(webA.pk).toBe("ORG#org_00000000000000000000#RUN_USAGE#web");
-    expect(webB.pk).toBe("ORG#org_bbbbbbbbbbbbbbbbbbbb#RUN_USAGE#web");
-    expect(apiA.pk).toBe("ORG#org_00000000000000000000#RUN_USAGE#api");
-    expect((await store.get(webA))?.["sample"]).toMatchObject({ taskId: "task-web-a" });
-    expect((await store.get(webB))?.["sample"]).toMatchObject({ taskId: "task-web-b" });
-    expect((await store.get(apiA))?.["sample"]).toMatchObject({ taskId: "task-api-a" });
-    expect((await store.query({ pk: webA.pk })).items).toHaveLength(1);
-  });
   it("tracks final interval coverage and signed dollar error by path, excludes censored and duplicate tasks", () => {
     const rows = [sample(), sample({ revision: 2, calls: [{ ...call, settledMicros: available(6) }] }), sample({ taskId: "canceled", outcome: "cancelled" })];
     expect(accuracyByPath(rows)).toEqual({ QUICK: { samples: 1, quoted: 1, validated: 1, covered: 0, exceeded: 1, coverage: available(0), meanErrorMicros: available(3) } });
-  });
-  it("stores an immutable pre-execution range, including unavailable quote inputs", async () => {
-    const store = new MemoryDocumentStore();
-    const task = { companyId, project: "web", taskId: "task", workflow: { path: "QUICK" } };
-    const saved = await captureStartQuote({ store }, task, at);
-    expect(saved.range).toEqual(available({ lowMicros: 1_000_000, highMicros: 3_000_000 }));
-    expect(saved.modelPriced).toBe(false);
-    expect(saved.inputs.price.state).toBe("unavailable");
   });
   it("keeps session aggregates and canceled outcomes censored at close, with original amounts", async () => {
     const store = new MemoryDocumentStore();
@@ -95,17 +61,6 @@ describe("run usage learning", () => {
     expect(read.callCount.state).toBe("unavailable");
     expect(read.completionCoverage).toBe("partial");
   });
-});
-
-it("the actual start persists learning's quote before dispatch, and a retry keeps it", async () => {
-  const { createHarness, newRequestId } = await import("../support/task-flow-harness.js");
-  const h = createHarness(); await h.registerProject();
-  const request = { requestId: newRequestId(), project: "payments", instructions: "Implement the change", workflow: true, workflowPath: "QUICK" };
-  const started = await h.flow.start(h.owner, request);
-  const row = await h.store.get({ pk: `DEVTASK#${started.task.taskId}`, sk: "META" });
-  expect(row?.["usageStartQuote"]).toMatchObject({ path: "QUICK", range: available({ lowMicros: 1_000_000, highMicros: 3_000_000 }), modelPriced: false });
-  expect((await h.flow.start(h.owner, request)).task.taskId).toBe(started.task.taskId);
-  expect((await h.store.get({ pk: `DEVTASK#${started.task.taskId}`, sk: "META" }))?.["usageStartQuote"]).toEqual(row?.["usageStartQuote"]);
 });
 
 

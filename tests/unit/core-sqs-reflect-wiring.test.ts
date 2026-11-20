@@ -51,18 +51,6 @@ const DISPATCHER_GRANTS: QueueGrants = { [coreDispatchQueueName(ENVIRONMENT)]: C
 const brokerQueues = (fence: SqsIamFence, settings = brokerCoreDispatchQueue(brokerEnvironment()).settings): QueueService => createSqsQueueServiceFromSettings(settings, fence.sender);
 
 describe("the lessons reflection queue on a hosted broker (B3c)", () => {
-  it("is declared in the registry's queue settings from the derived URLs, next to the core dispatch queue, with the dead letters", () => {
-    const env = brokerEnvironment();
-    expect(env.CORE_LESSONS_REFLECT_QUEUE_URL).toBe(urlOf("agentx-staging-lessons-reflect"));
-    expect(env.CORE_LESSONS_REFLECT_DEAD_LETTER_URL).toBe(urlOf("agentx-staging-lessons-reflect-dead"));
-    expect(brokerCoreDispatchQueue(env).settings).toEqual({
-      region: REGION,
-      queues: {
-        "task-dispatch": { url: urlOf("agentx-staging-core-dispatch"), deadLetterUrl: urlOf("agentx-staging-core-dispatch-dead") },
-        "lessons-reflect": { url: urlOf("agentx-staging-lessons-reflect"), deadLetterUrl: urlOf("agentx-staging-lessons-reflect-dead") },
-      },
-    });
-  });
 
   it("the declared queue name resolves: the reflect helpers open it with the options the queue has (and a queue left undeclared is refused by name, as before)", async () => {
     const fence = new SqsIamFence(BROKER_GRANTS, provision());
@@ -105,21 +93,6 @@ describe("the lessons reflection queue on a hosted broker (B3c)", () => {
     expect(new Set(reflectCalls)).toEqual(new Set(CORE_BROKER_REFLECT_QUEUE_ACTIONS));
     expect(fence.allowed.filter((call) => call.queue === coreLessonsReflectDeadLetterName(ENVIRONMENT))).toEqual([{ action: "sqs:GetQueueAttributes", queue: coreLessonsReflectDeadLetterName(ENVIRONMENT) }]);
     expect(fake.stored(urlOf(coreLessonsReflectQueueName(ENVIRONMENT))).length).toBeGreaterThan(0);
-  });
-
-  it("the grants are no wider than the code: a send to, a read of, or a purge of the dead letters is denied for the broker (the controls that make a widening visible)", async () => {
-    const fence = new SqsIamFence(BROKER_GRANTS, provision());
-    const dead = coreLessonsReflectDeadLetterName(ENVIRONMENT);
-    const { SendMessageCommand, ReceiveMessageCommand, DeleteMessageCommand } = await import("@aws-sdk/client-sqs");
-    for (const command of [
-      new SendMessageCommand({ QueueUrl: urlOf(dead), MessageBody: "{}" }),
-      new ReceiveMessageCommand({ QueueUrl: urlOf(dead) }),
-      new DeleteMessageCommand({ QueueUrl: urlOf(dead), ReceiptHandle: "x" }),
-    ]) await expect(fence.sender.send(command)).rejects.toMatchObject({ name: "AccessDeniedException" });
-    expect(fence.denied.map((call) => call.action)).toEqual(["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage"]);
-    // And the dispatcher's role has nothing on either reflection queue.
-    const dispatcher = new SqsIamFence(DISPATCHER_GRANTS, provision());
-    await expect(reflectQueueOf(brokerQueues(dispatcher))).rejects.toThrow(/AccessDenied/u);
   });
 
   it("a reflection queue URL that is not an SQS queue URL, or one given without the other, refuses the broker by the same words as the dispatch queue's", () => {

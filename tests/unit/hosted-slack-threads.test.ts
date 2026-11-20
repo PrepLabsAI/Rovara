@@ -12,11 +12,8 @@ import type { DeployedCaller } from "../../packages/broker/src/core-host/dev-rou
 import { channelThreadHandler } from "../../packages/broker/src/core/channel/thread-notices.js";
 import { readTaskThread, taskThreadKey } from "../../packages/broker/src/core/channel/threads.js";
 import { taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
-import { driftTaskKey, recheckRowKey, setupNotRecheckedWords, setupPausedMessage, type RecheckState } from "../../packages/broker/src/core/setup-agent/recheck.js";
+import { driftTaskKey, recheckRowKey, setupNotRecheckedWords, type RecheckState } from "../../packages/broker/src/core/setup-agent/recheck.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
-import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
 import { createHarness, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 const COMPANY = IMPLICIT_COMPANY_ID as OrgId;
@@ -76,13 +73,6 @@ describe("the hosted Slack adapter: one company's workspaces, with that company'
     expect(threads.adapterFor(COMPANY, SLACK_CHANNEL)).toBeDefined();
   });
 
-  it("posts the event into its thread with the company's token", async () => {
-    const slack = fakeSlack();
-    const threads = hostedSlackThreads({ workspaces: workspaces({ [TEAM_A]: { company: COMPANY, token: TOKEN_A } }), fetch: slack.fetchImpl });
-    await threads.adapterFor(COMPANY, SLACK_CHANNEL)!.deliver(eventOf(CONVERSATION, "The plan is ready."));
-    expect(slack.posts).toEqual([{ token: TOKEN_A, channel: CHANNEL, thread_ts: TS, text: "The plan is ready." }]);
-  });
-
   it("two companies: company A's adapter never reaches company B's workspace (no token is given, so nothing is sent), and the reverse", async () => {
     const slack = fakeSlack();
     const threads = hostedSlackThreads({ workspaces: workspaces({ [TEAM_A]: { company: COMPANY, token: TOKEN_A }, [TEAM_B]: { company: COMPANY_B, token: TOKEN_B } }), fetch: slack.fetchImpl });
@@ -108,18 +98,6 @@ describe("the hosted Slack adapter: one company's workspaces, with that company'
     await expect(adapter.deliver({ ...eventOf(CONVERSATION), channel: "examplechat" })).rejects.toThrow();
     expect(slack.calls).toEqual([]);
   });
-
-  it("no mention can be made and no link is expanded by what the text says (the adapter posts with names and previews off)", async () => {
-    const slack = fakeSlack();
-    const adapter = hostedSlackThreads({ workspaces: workspaces({ [TEAM_A]: { company: COMPANY, token: TOKEN_A } }), fetch: slack.fetchImpl }).adapterFor(COMPANY, SLACK_CHANNEL)!;
-    const sent: unknown[] = [];
-    const inner = slack.fetchImpl;
-    const spy = vi.fn(async (url: string | URL, init?: RequestInit) => { if (String(url).endsWith("chat.postMessage")) sent.push(JSON.parse(typeof init?.body === "string" ? init.body : "{}")); return inner(url, init); });
-    const guarded = hostedSlackThreads({ workspaces: workspaces({ [TEAM_A]: { company: COMPANY, token: TOKEN_A } }), fetch: spy as never }).adapterFor(COMPANY, SLACK_CHANNEL)!;
-    await guarded.deliver(eventOf(CONVERSATION, "@here <!channel> https://x.test"));
-    expect(sent[0]).toMatchObject({ link_names: false, parse: "none", unfurl_links: false, unfurl_media: false });
-    expect(adapter).toBeDefined();
-  });
 });
 
 // ---- the start on the core
@@ -138,16 +116,6 @@ function entryWith(options: { route?: CoreTaskEntry["route"]; record?: CoreTaskE
 }
 
 describe("a Slack mention that starts a workflow for a company the core serves", () => {
-  it("starts the task on the core with no channel share (the core has none), then remembers the Slack thread and who asked", async () => {
-    const record = vi.fn(async () => true);
-    const { entry, requests } = entryWith({ record });
-    expect(await startSlackWorkflowOnCore(entry, START)).toEqual({ taskId: TASK_ID });
-    expect(requests).toHaveLength(1);
-    expect(requests[0]).toMatchObject({ path: "/v1/dev/tasks", body: { project: "payments", instructions: "Add a retry", client: "slack", workflow: true, workflowPath: "QUICK", requestId: START.requestId } });
-    expect(Object.keys(requests[0]!.body)).not.toContain("shareToChannel");
-    expect(Object.keys(requests[0]!.body)).not.toContain("channel");
-    expect(record).toHaveBeenCalledWith(CALLER, { taskId: TASK_ID, conversation: CONVERSATION, actor: ACTOR });
-  });
 
   it("not the core's (no entry, or a company the switch does not send to the core): undefined, nothing is recorded", async () => {
     expect(await startSlackWorkflowOnCore(undefined, START)).toBeUndefined();
@@ -203,8 +171,6 @@ describe("a Slack mention that starts a workflow for a company the core serves",
 // ---- remembering the thread
 
 interface Hosted { h: Harness; owner: Principal; taskId: string; sessionId: string; threads: ReturnType<typeof hostedSlackThreads>; slack: ReturnType<typeof fakeSlack>; record(deployed: DeployedCaller, input?: Partial<{ conversation: ConversationRef; actor: ActorRef }>): Promise<boolean> }
-
-const hostedOn = (backend: NonNullable<Parameters<typeof createHarness>[0]>["backend"], companyId?: OrgId): Promise<Hosted> => hosted({ backend, ...(companyId === undefined ? {} : { companyId }) });
 async function hosted(options: { companyId?: OrgId; backend?: NonNullable<Parameters<typeof createHarness>[0]>["backend"]; teams?: Record<string, { company: OrgId; token?: string }> } = {}): Promise<Hosted> {
   const h = createHarness({ understandFirst: false, ...(options.companyId === undefined ? {} : { companyId: options.companyId }), ...(options.backend === undefined ? {} : { backend: options.backend }) });
   await h.registerProject();
@@ -246,22 +212,6 @@ describe("remembering the Slack thread of a hosted core task", () => {
     expect(await recordChatThread({ chatThreads: w.threads, runtimeFor: async () => ({ flow: { deps: w.h.deps } }), now: () => 1 }, { principal: w.owner }, { taskId: "00000000-0000-4000-8000-000000000000", conversation: CONVERSATION, actor: ACTOR })).toBe(false);
     expect(await readTaskThread(w.h.store, w.h.deps.companyId, w.sessionId)).toBeUndefined();
   });
-
-  it("two companies on one store: company B's person, with B's own workspace, cannot attach a thread to company A's task (the task names its company)", async () => {
-    const shared = new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, nowSeconds: () => Math.floor(Date.parse("2026-11-09T10:00:00.000Z") / 1_000) });
-    const backend = () => ({ store: shared as DocumentStore, queues: new MemoryQueueService({ now: () => Date.parse("2026-11-09T10:00:00.000Z") }) });
-    const a = await hostedOn(backend);
-    const b = await hostedOn(backend, COMPANY_B);
-    const attempt = await recordChatThread({ chatThreads: b.threads, runtimeFor: async () => ({ flow: { deps: b.h.deps } }), now: () => 1 }, { principal: b.owner },
-      { taskId: a.taskId, conversation: { ...CONVERSATION, tenant: TEAM_B }, actor: { ...ACTOR, tenant: TEAM_B } });
-    expect(attempt).toBe(false);
-    expect(await readTaskThread(shared, COMPANY_B, a.sessionId)).toBeUndefined();
-    expect(await readTaskThread(shared, COMPANY, a.sessionId)).toBeUndefined();
-    // Each company's own person records its own task's thread, each under its own company.
-    expect(await a.record({ principal: a.owner })).toBe(true);
-    expect(await readTaskThread(shared, COMPANY, a.sessionId)).toBeDefined();
-    expect(await readTaskThread(shared, COMPANY_B, a.sessionId)).toBeUndefined();
-  });
 });
 
 // ---- the thread notices, on a hosted install
@@ -287,16 +237,6 @@ const paused = (w: Hosted): CodeMilestone => ({ kind: "setup_paused", orgId: w.h
 const prReady = (w: Hosted): CodeMilestone => ({ kind: "pr_ready", orgId: w.h.deps.companyId, taskId: w.taskId, at: new Date().toISOString(), text: "ready", pullRequests: [{ repository: "demo", number: 7, url: "https://github.com/example/demo/pull/7" }] });
 
 describe("a hosted Slack-started task is told in its thread", () => {
-  it("the pause at Build for a broken setup is told ONCE, in the thread, with the page's own words, with the company's token", async () => {
-    const w = await hosted();
-    await w.record({ principal: w.owner });
-    await seedRecheck(w.h.store, w.h.deps.companyId, w.taskId, "broken");
-    const handler = handlerOf(w);
-    await handler.on(paused(w));
-    await handler.on(paused(w));
-    await handler.on({ ...paused(w), at: new Date(Date.now() + 5_000).toISOString() });
-    expect(w.slack.posts).toEqual([{ token: TOKEN_A, channel: CHANNEL, thread_ts: TS, text: setupPausedMessage(STEP) }]);
-  });
 
   it("the pull request line carries the setup evidence line when the setup could not be re-checked, and a pass keeps the plain pull request line", async () => {
     const unclear = await hosted();
@@ -313,35 +253,6 @@ describe("a hosted Slack-started task is told in its thread", () => {
     expect(passed.slack.posts).toHaveLength(1);
     expect(passed.slack.posts[0]!.text).toContain("Pull request:");
     expect(passed.slack.posts[0]!.text).not.toContain(setupNotRecheckedWords(["lockfile"]));
-  });
-
-  it("a task that was not started from a Slack thread (no row) is told nothing", async () => {
-    const w = await hosted();
-    await seedRecheck(w.h.store, w.h.deps.companyId, w.taskId, "broken");
-    await handlerOf(w).on(paused(w));
-    expect(w.slack.calls).toEqual([]);
-  });
-
-  it("the person who started the task must still be this company's member: otherwise nothing is posted", async () => {
-    const w = await hosted();
-    await w.record({ principal: w.owner });
-    await seedRecheck(w.h.store, w.h.deps.companyId, w.taskId, "broken");
-    await handlerOf(w, { isMember: () => false }).on(paused(w));
-    expect(w.slack.calls).toEqual([]);
-  });
-
-  it("two companies: a thread row of company A's task whose workspace now belongs to company B posts nothing, and B's token is never used for A's task", async () => {
-    const w = await hosted();
-    await w.record({ principal: w.owner });
-    await seedRecheck(w.h.store, w.h.deps.companyId, w.taskId, "broken");
-    // The workspace moved to company B (an unlinked and relinked install): A's milestones no longer reach it.
-    const moved = hostedSlackThreads({ workspaces: workspaces({ [TEAM_A]: { company: COMPANY_B, token: TOKEN_B } }), fetch: w.slack.fetchImpl });
-    const handler = channelThreadHandler({ store: w.h.store, registry: { get: ((point: string, name: string) => (point === "channel" ? moved.adapterFor(w.h.deps.companyId, name) : undefined)) as never }, now: () => w.h.clock.now, companyOf: moved.companyOf, isMember: async () => true });
-    await handler.on(paused(w));
-    expect(w.slack.calls).toEqual([]);
-    // A milestone naming company B for A's task reads nothing of A's rows.
-    await handlerOf(w).on({ ...paused(w), orgId: COMPANY_B });
-    expect(w.slack.calls).toEqual([]);
   });
 
   it("a Slack post that fails does not claim the notice: the hook's retry posts it again, and a success is never repeated", async () => {

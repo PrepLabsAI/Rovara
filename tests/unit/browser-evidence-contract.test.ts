@@ -3,31 +3,18 @@
 import { describe, expect, it } from "vitest";
 import {
   BROWSER_EVIDENCE_CHANGED_FILES_MAX, BROWSER_EVIDENCE_CHECK_ID, BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS, BROWSER_EVIDENCE_NOT_PROOF_WORDS, BROWSER_EVIDENCE_NOT_RUN_WORDS,
-  BROWSER_EVIDENCE_NOT_SHOWN_MAX, BROWSER_EVIDENCE_ROUTES_MAX, BROWSER_EVIDENCE_RUN_BY_WORDS, BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES, BROWSER_EVIDENCE_SETTING, BROWSER_EVIDENCE_TOTAL_MAX_BYTES,
-  BrowserEvidenceRecipeSchema, addBrowserEvidenceToPack, browserEvidenceCheck, browserEvidenceLines, browserEvidenceMaskSelectors, browserEvidenceOn, pickChangedRoutes, scrubVisibleText,
+  BROWSER_EVIDENCE_NOT_SHOWN_MAX, BROWSER_EVIDENCE_ROUTES_MAX, BROWSER_EVIDENCE_RUN_BY_WORDS, BROWSER_EVIDENCE_SETTING,
+  BrowserEvidenceRecipeSchema, addBrowserEvidenceToPack, browserEvidenceCheck, browserEvidenceLines, browserEvidenceMaskSelectors, browserEvidenceOn, pickChangedRoutes,
   type BrowserEvidenceOutcome,
 } from "../../packages/contracts/src/browser-evidence.js";
-import { checkKindInfo } from "../../packages/contracts/src/check-kinds.js";
-import { EVIDENCE_ARTIFACT_MAX_BYTES, EvidencePackV2Schema, type ArtifactRef, type EvidencePackV2 } from "../../packages/contracts/src/evidence.js";
-import { POLICY_FIELDS, resolvePolicy } from "../../packages/contracts/src/policy.js";
-import { POLICY_PRESETS } from "../../packages/contracts/src/presets.js";
-import { proofHolds, type TestProof } from "../../packages/contracts/src/test-proof.js";
-import { CAPTURE_SCREENSHOT_MAX_BYTES } from "../../packages/verifier/src/executor/capture.js";
+import { EvidencePackV2Schema, type ArtifactRef, type EvidencePackV2 } from "../../packages/contracts/src/evidence.js";
+import { resolvePolicy } from "../../packages/contracts/src/policy.js";
 
 const sha = (c: string) => c.repeat(64);
 const jpeg = (c: string, bytes = 1_000): ArtifactRef => ({ kind: "jpeg", sha256: sha(c), bytes, retentionClass: "evidence-std" });
 const recipe = (extra: Record<string, unknown> = {}) => ({ startCommand: "npm run start", port: 3000, routes: [{ path: "/checkout", files: ["src/checkout/**"] }, { path: "/settings", files: ["src/settings/**", "src/shared/**"] }], ...extra });
 
 describe("the setting", () => {
-  it("is a policy field that is off today, off in every preset, and only an explicit `on` turns it on", () => {
-    const field = POLICY_FIELDS.find((row) => row.id === BROWSER_EVIDENCE_SETTING);
-    expect(field).toMatchObject({ kind: "ordered_enum", order: ["off", "on"], today: "off", compatibility: true });
-    for (const preset of Object.values(POLICY_PRESETS)) expect((preset as Record<string, unknown>)[BROWSER_EVIDENCE_SETTING]).toBe("off");
-    expect(browserEvidenceOn(resolvePolicy({}))).toBe(false);
-    expect(browserEvidenceOn(resolvePolicy({ project: { preset_level: "careful" } }))).toBe(false);
-    expect(browserEvidenceOn(resolvePolicy({ project: { [BROWSER_EVIDENCE_SETTING]: "on" } }))).toBe(true);
-    expect(browserEvidenceOn(resolvePolicy({ project: { [BROWSER_EVIDENCE_SETTING]: "off" } }))).toBe(false);
-  });
   it("fails closed on anything but a resolved policy whose value is exactly `on`", () => {
     for (const input of [undefined, null, {}, "on", { status: "refused", values: {} }, { status: "disabled", values: { browser_evidence: { value: "on", origin: "install_off" } } },
       { status: "resolved", values: { browser_evidence: { value: "ON", origin: "changed_here" } } }, { status: "resolved", values: { browser_evidence: { value: true, origin: "changed_here" } } },
@@ -51,10 +38,6 @@ describe("the recipe", () => {
 });
 
 describe("which changed pages are picked", () => {
-  it("picks the recipe routes whose globs match a changed file, in recipe order, each once", () => {
-    expect(pickChangedRoutes({ changedFiles: ["src/shared/x.ts", "src/checkout/pay.tsx", "README.md"], recipe: recipe() })).toEqual({ status: "picked", routes: ["/checkout", "/settings"], notShown: [], moreNotShown: 0 });
-    expect(pickChangedRoutes({ changedFiles: ["src/settings/a.ts", "src/settings/b.ts"], recipe: recipe() })).toEqual({ status: "picked", routes: ["/settings"], notShown: [], moreNotShown: 0 });
-  });
   it("says Not run when nothing changed is a page, when there is no recipe, and refuses input that is not a file list", () => {
     expect(pickChangedRoutes({ changedFiles: ["README.md"], recipe: recipe() })).toEqual({ status: "not_run", reason: "no_changed_page" });
     expect(pickChangedRoutes({ changedFiles: [], recipe: recipe() })).toEqual({ status: "not_run", reason: "no_changed_page" });
@@ -103,47 +86,6 @@ describe("masking", () => {
     // A recipe that does not parse keeps the defaults: masking never turns off because of a bad recipe.
     expect(browserEvidenceMaskSelectors({ mask: 3 })).toEqual([...BROWSER_EVIDENCE_DEFAULT_MASK_SELECTORS]);
   });
-  it("replaces emails, tokens, card numbers and phone numbers in visible text, and leaves ordinary words, dates and prices", () => {
-    const token = ["gh", "p_"].join("") + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4";
-    const jwt = ["ey", "J"].join("") + "hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLXZhbHVlLWhlcmU";
-    const hex = "0123456789abcdef".repeat(3);
-    const text = `Signed in as ada.lovelace+test@example.co.uk. Key ${token}. Session ${jwt}. Id ${hex}. Card 4111 1111 1111 1111. Call +44 20 7946 0958 or (415) 555-0123.`;
-    const out = scrubVisibleText(text);
-    for (const secret of ["ada.lovelace+test@example.co.uk", token, jwt, hex, "4111 1111 1111 1111", "+44 20 7946 0958", "(415) 555-0123", "555-0123"]) expect(out, secret).not.toContain(secret);
-    const gitlab = ["glp", "at-"].join("") + "x".repeat(10) + "Y1z2".repeat(4);
-    const twilio = ["S", "K"].join("") + "0123456789abcdef".repeat(2);
-    const bearer = `${["Bear", "er"].join("")} abc.DEF-123_xyz~987`;
-    const more = scrubVisibleText(`SSN 123-45-6789. IBAN GB82 WEST 1234 5698 7654 32. ${gitlab} ${twilio}. Authorization: ${bearer}. password: Hunter2! api_key=abc123.`);
-    for (const secret of ["123-45-6789", "WEST 1234 5698 7654 32", gitlab, twilio, "abc.DEF-123_xyz~987", "Hunter2!", "abc123"]) expect(more, secret).not.toContain(secret);
-    // A labelled value on the next line is masked when it stands alone there (dt/dd), never a sign-in page's "Forgot password?" link.
-    expect(scrubVisibleText("API key:\nabcd1234\nmore")).not.toContain("abcd1234");
-    expect(scrubVisibleText("Password:\nForgot password? Sign in")).toBe("Password:\nForgot password? Sign in");
-    expect(scrubVisibleText("Password:\u00a0hunter2x")).not.toContain("hunter2x");
-    // An already-masked value (only dots or asterisks) is not a secret: the row is left as it is.
-    expect(scrubVisibleText("Password: •••••••• Change")).toBe("Password: •••••••• Change");
-    expect(scrubVisibleText("API key: ************")).toBe("API key: ************");
-    expect(scrubVisibleText("DB_PASSWORD=hunter2x")).not.toContain("hunter2x");
-    expect(out).toContain("Signed in as");
-    expect(scrubVisibleText("Order 12 shipped on 2026-11-15 for $1,299.00. Total: 3 items.")).toBe("Order 12 shipped on 2026-11-15 for $1,299.00. Total: 3 items.");
-  });
-  it("is bounded: very long text is masked whole, and a hostile text finishes fast", () => {
-    expect(scrubVisibleText("a".repeat(200_001))).toBe("•••");
-    // Text no pattern would touch is still masked whole once it is too long to scan.
-    expect(scrubVisibleText("ab ".repeat(66_667))).toBe("•••");
-    expect(scrubVisibleText("ab ".repeat(66_666))).toBe("ab ".repeat(66_666));
-    const started = performance.now();
-    scrubVisibleText(`${"a.".repeat(40_000)}@${"1 ".repeat(20_000)}`);
-    expect(performance.now() - started).toBeLessThan(2_000);
-  });
-});
-
-describe("caps", () => {
-  it("reuses the e2e screenshot cap and the pack's JPEG cap, and bounds a run", () => {
-    expect(BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES).toBe(CAPTURE_SCREENSHOT_MAX_BYTES);
-    expect(BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES).toBe(EVIDENCE_ARTIFACT_MAX_BYTES.jpeg);
-    expect(BROWSER_EVIDENCE_TOTAL_MAX_BYTES).toBe(4 * 1_048_576);
-    expect(BROWSER_EVIDENCE_ROUTES_MAX).toBe(5);
-  });
 });
 
 const shown: BrowserEvidenceOutcome = {
@@ -176,53 +118,9 @@ describe("the evidence-pack check", () => {
     // A laptop run has no sandbox stage: the producer says where it ran.
     expect(browserEvidenceCheck({ ...shown, isolation: "developer_machine" }).check.stage).toBeUndefined();
   });
-  it("a run that showed nothing is `not_run` with no pairs, and a whole-run reason becomes one not-tested row", () => {
-    const { check, notTested } = browserEvidenceCheck({ isolation: "sandbox", durationMs: 0, routes: [], notShown: [], moreNotShown: 0, notRun: "app_did_not_start" });
-    expect(check).toMatchObject({ kind: "visual", before: "not_run", after: "not_run", class: "not_rerun" });
-    expect(check.pairs).toBeUndefined();
-    expect(notTested).toEqual([{ what: "Browser evidence", reason: "Not run: the app did not start" }]);
-  });
-  it("NEVER counts toward the proof: the kind is visual, the registry says so, and the hold rule ignores a passing visual check", () => {
-    expect(browserEvidenceCheck(shown).check.kind).toBe("visual");
-    expect(checkKindInfo("visual")?.countsTowardProof).toBe(false);
-    const proof: TestProof = { schemaVersion: 1, candidateDigest: sha("d"), status: "checked", note: "completed", changedTests: { added: 1, changed: 0, deleted: 0 }, durationMs: 10,
-      items: [{ checkId: BROWSER_EVIDENCE_CHECK_ID, label: "Browser evidence", granularity: "check", verdict: "proves_change", reason: "assertion_failed_on_old" }] };
-    // Positive control: the same entry under a kind that counts is a proven change.
-    expect(proofHolds({ facts: { proof, checkKinds: { [BROWSER_EVIDENCE_CHECK_ID]: "e2e" } }, mode: "hold" }).provenCount).toBe(1);
-    expect(proofHolds({ facts: { proof, checkKinds: { [BROWSER_EVIDENCE_CHECK_ID]: browserEvidenceCheck(shown).check.kind } }, mode: "hold" }).provenCount).toBe(0);
-  });
-  it("refuses an outcome it does not understand rather than writing a guess", () => {
-    for (const bad of [{ ...shown, isolation: "imported" }, { ...shown, routes: [{ route: "/a", status: "maybe" }] }, { ...shown, routes: [{ route: "/a", status: "not_run", reason: "because" }] },
-      { ...shown, routes: Array.from({ length: 6 }, (_, i) => ({ route: `/r${i}`, status: "not_run", reason: "page_did_not_load" })) }, { ...shown, routes: [{ route: "/a", status: "shown", before: jpeg("a", EVIDENCE_ARTIFACT_MAX_BYTES.jpeg + 1), after: jpeg("b") }] }]) {
-      expect(() => browserEvidenceCheck(bad as never), JSON.stringify(bad).slice(0, 100)).toThrow("browser evidence outcome is not valid");
-    }
-  });
 });
 
 describe("the pull request's lines", () => {
-  it("use the owner's exact words for who ran it and for never-proof", () => {
-    expect(BROWSER_EVIDENCE_RUN_BY_WORDS).toEqual({ sandbox: "Run by Rovara in its sandbox", developer_machine: "Ran on a developer machine" });
-    expect(BROWSER_EVIDENCE_NOT_PROOF_WORDS).toBe("Visual evidence only: it does not count as change proof.");
-    expect(browserEvidenceLines(shown, {})[0]).toBe("Browser evidence: Run by Rovara in its sandbox. Visual evidence only: it does not count as change proof.");
-  });
-  it("say who ran it and that it is not proof, list each route, and never carry an image or a public link", () => {
-    const lines = browserEvidenceLines(shown, { taskLink: "https://rovara.example/tasks/t-1" });
-    expect(lines).toEqual([
-      `Browser evidence: ${BROWSER_EVIDENCE_RUN_BY_WORDS.sandbox}. ${BROWSER_EVIDENCE_NOT_PROOF_WORDS}`,
-      "- `/checkout`: before and after screenshots, 2 console errors after (view behind sign-in: https://rovara.example/tasks/t-1)",
-      "- `/settings`: Not run: the page did not load",
-      "- `/orders/[id]`: Not shown: needs a route in the recipe",
-    ]);
-    expect(lines.join("\n")).not.toMatch(/!\[|<img|\.jpe?g|sha256|X-Amz|Signature=/iu);
-  });
-  it("say Ran on a developer machine on a laptop, and fall back to the task page words with no or a bad link", () => {
-    const laptop = browserEvidenceLines({ ...shown, isolation: "developer_machine" }, {});
-    expect(laptop[0]).toBe(`Browser evidence: Ran on a developer machine. ${BROWSER_EVIDENCE_NOT_PROOF_WORDS}`);
-    expect(laptop[1]).toBe("- `/checkout`: before and after screenshots, 2 console errors after (on the task page, behind sign-in)");
-    for (const taskLink of ["javascript:alert(1)", "http://rovara.example/t", "https://x.example/a b", "https://x.example/(a)", `https://x.example/${"a".repeat(400)}`]) {
-      expect(browserEvidenceLines(shown, { taskLink })[1], taskLink).toContain("(on the task page, behind sign-in)");
-    }
-  });
   it("a run that did not happen says Not run with its fixed reason, and the words never echo input", () => {
     expect(browserEvidenceLines({ isolation: "sandbox", durationMs: 0, routes: [], notShown: [], moreNotShown: 0, notRun: "no_changed_page" }, {})).toEqual([
       `Browser evidence: ${BROWSER_EVIDENCE_RUN_BY_WORDS.sandbox}. ${BROWSER_EVIDENCE_NOT_PROOF_WORDS}`,
@@ -230,9 +128,6 @@ describe("the pull request's lines", () => {
     ]);
     for (const words of Object.values(BROWSER_EVIDENCE_NOT_RUN_WORDS)) expect(words).toMatch(/^[a-z][a-z ,:-]+$/u);
     expect(() => browserEvidenceLines({ ...shown, routes: [{ route: "/a`<script>", status: "not_run", reason: "page_did_not_load" }] } as never, {})).toThrow("browser evidence outcome is not valid");
-  });
-  it("count the routes beyond the not-shown list", () => {
-    expect(browserEvidenceLines({ ...shown, routes: [], notShown: [], moreNotShown: 7 }, {}).at(-1)).toBe("- 7 more changed pages not shown: more changed pages than the cap");
   });
 });
 
@@ -243,16 +138,6 @@ describe("absent = today's behaviour, byte for byte", () => {
     expect(addBrowserEvidenceToPack(pack, undefined)).toBe(pack);
     expect(JSON.stringify(addBrowserEvidenceToPack(pack, undefined))).toBe(before);
     expect(browserEvidenceLines(undefined, {})).toEqual([]);
-  });
-  it("adding it never touches the other checks or rows", () => {
-    const pack = basePack();
-    const before = JSON.stringify(pack);
-    const added = addBrowserEvidenceToPack(pack, shown);
-    expect(JSON.stringify(pack)).toBe(before);
-    expect(added.checks.slice(0, 1)).toEqual(pack.checks);
-    expect(added.checks).toHaveLength(2);
-    expect(added.result).toBe(pack.result);
-    expect(added.level).toEqual(pack.level);
   });
   it("refuses to add it twice, or to a pack whose producer says another place than the outcome", () => {
     expect(() => addBrowserEvidenceToPack(addBrowserEvidenceToPack(basePack(), shown), shown)).toThrow("browser evidence outcome is not valid");

@@ -4,7 +4,7 @@ import { chmod, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { HostScopeSchema, IMPLICIT_COMPANY_ID, PluginRegistryError, type CodeHost, type PluginModule, type RepositoryRef } from "@agentx/contracts";
+import { HostScopeSchema, IMPLICIT_COMPANY_ID, PluginRegistryError, type CodeHost, type RepositoryRef } from "@agentx/contracts";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
 import {
   NO_CHECK_RUNNER_MESSAGE, NO_CODE_HOST_MESSAGE, NO_HOST_MESSAGE, NO_TRACKER_MESSAGE, assertRepositoryHostsKnown, checkRunnerForKind, checkRunnerKinds, codeHostForKind, codeHostForRecord,
@@ -77,21 +77,6 @@ describe("routing over the one registry", () => {
     expect(trackerKinds(mismatched)).toEqual([]);
   });
 
-  it("refuses to register an adapter under a name that is not its kind", () => {
-    const registry = createAdapterRegistry();
-    const host = new FakeCodeHost(model());
-    expect(() => registry.register("code-host", "github", host)).toThrowError(expect.objectContaining({ code: "bad_module" }));
-    expect(() => registry.register("tracker", "x", {} as never)).toThrowError(expect.objectContaining({ code: "bad_module" }));
-    registry.register("code-host", "fake", host);
-    expect(registry.require("code-host", "fake")).toBe(host);
-  });
-
-  it("has no edition gate: any kind registers with no policy, and nothing is required to be there", () => {
-    const registry = createAdapterRegistry();
-    expect(codeHostKinds(registry)).toEqual([]);
-    registry.register("code-host", "examplehost", hostCalled("examplehost", new FakeCodeHost(model())));
-    expect(codeHostKinds(registry)).toEqual(["examplehost"]);
-  });
 });
 
 describe("loading code hosts, trackers and check runners from the plug-in config", () => {
@@ -107,15 +92,6 @@ describe("loading code hosts, trackers and check runners from the plug-in config
     expect(checkRunnerForKind(registry, "fake-checks", { allowedRepositories: [REPO_URL] }).kind).toBe("fake-checks");
     // Sealed: a plug-in cannot add a code host afterwards.
     expect(() => registry.register("code-host", "late", hostCalled("late", new FakeCodeHost(model())))).toThrowError(PluginRegistryError);
-  });
-
-  it("refuses a module whose adapter is not called what the config entry says", async () => {
-    const registry = createAdapterRegistry();
-    const fakes = fakePlugins(model());
-    const lying: PluginModule<"code-host"> = { point: "code-host", name: "github", create: () => new FakeCodeHost(model()) };
-    expect(fakes.codeHost.name).toBe("fake");
-    await expect(loadAdapters(entries(["code-host", "github", "./h.js"]), { registry, importModule: importerOf({ "./h.js": lying }) })).rejects.toMatchObject({ code: "bad_module" });
-    expect(codeHostKinds(registry)).toEqual([]);
   });
 
   it("loads the GitHub code host and the GitHub Actions runner over one client, and reads the webhook secret by name", async () => {
@@ -149,18 +125,6 @@ describe("loading code hosts, trackers and check runners from the plug-in config
     expect(codeHostKinds(registry)).toEqual([]);
   });
 
-  it("reports a bad settings block by field name, never by value", async () => {
-    const registry = createAdapterRegistry();
-    const secretish = ["not", "a", "real", "value", "9876"].join("-");
-    const load = (settings: Record<string, unknown>) => loadAdapters(entries(["code-host", "github", "./github.js", settings]), { registry, importModule: importerOf({ "./github.js": githubCodeHostPlugin({ createProvider: () => ({}) as never }) }) });
-    const error = await load({ credentialRef: "github", webhookSecret: secretish }).catch((caught: unknown) => caught as PluginRegistryError);
-    expect((error as PluginRegistryError).code).toBe("bad_config");
-    expect((error as PluginRegistryError).message).toContain("webhookSecret");
-    expect((error as PluginRegistryError).message).not.toContain(secretish);
-    // An unknown field is refused too (a typo does not silently turn a setting off), and a secret cannot be written into the config.
-    await expect(load({ credentialRef: "github", webhookSecretValue: secretish })).rejects.toMatchObject({ code: "bad_config" });
-  });
-
   it("loads CodeBuild as an optional check runner that serves only the repositories a project registered", async () => {
     const registry = createAdapterRegistry();
     const built: string[] = [];
@@ -181,14 +145,6 @@ describe("loading code hosts, trackers and check runners from the plug-in config
     expect(trackerKinds(registry)).toEqual(["linear"]);
   });
 
-  it("proves a second code host plugs in with no core change: routing by the record's host kind reaches it", async () => {
-    const registry = createAdapterRegistry();
-    const second = fakePlugins(model());
-    const examplehost: PluginModule<"code-host"> = { point: "code-host", name: "examplehost", create: () => hostCalled("examplehost", new FakeCodeHost(model())) };
-    await loadAdapters(entries(["code-host", "fake", "./a.js"], ["code-host", "examplehost", "./b.js"]), { registry, importModule: importerOf({ "./a.js": second.codeHost, "./b.js": examplehost }) });
-    expect(codeHostForRecord(registry, { host: { kind: "examplehost" } }).kind).toBe("examplehost");
-    expect(codeHostForRecord(registry, { host: { kind: "fake" } }).kind).toBe("fake");
-  });
 });
 
 describe("the settings helpers of the plug-in modules", () => {

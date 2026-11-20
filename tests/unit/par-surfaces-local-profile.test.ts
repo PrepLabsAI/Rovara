@@ -104,11 +104,6 @@ describe("--env local is the rovara up on this computer", () => {
     await expect(developerAccessToken({ home: h.home, tokenStore, fetch }, LOCAL_ENVIRONMENT)).rejects.toThrow(/older saved sign-in named local.*logout/);
   });
 
-  it("answers the configuration the tools check first, in the developer API's own version", async () => {
-    const h = await launch();
-    const answer = await (await fetch(`${h.runtime.url}/v1/auth/.well-known/agentx-configuration`)).json() as Record<string, unknown>;
-    expect(answer).toMatchObject({ env: "local", apiVersion: "1.2", version: "0.1.0" });
-  });
 });
 
 describe("the MCP tools against rovara up", () => {

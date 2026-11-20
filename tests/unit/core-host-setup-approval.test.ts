@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
-  change, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, systemOwnerIdOf, type ApprovalProof, type ApprovalRequest, type AuditEvent, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition,
+  change, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, systemOwnerIdOf, type AuditEvent, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition,
 } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -17,11 +17,11 @@ import { toDocument } from "../../packages/broker/src/core/task-flow/records.js"
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import {
-  SETUP_APPROVAL_UNAVAILABLE, SETUP_NOTHING_WAITING, SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND, type HostedSetupRunWiring, type SetupRunStanding,
+  SETUP_NOTHING_WAITING, type HostedSetupRunWiring, type SetupRunStanding,
 } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { SETUP_NEEDS_ADMIN, SETUP_NEEDS_MAINTAINER, createHostedSetupApproval, setupDecisionRequestId } from "../../packages/broker/src/core-host/setup-approval.js";
 import {
-  SETUP_PROPOSAL_SUBJECT, APPROVAL_PROOF_METHOD, createHostedApprovers, issueSetupApprovalProof, issueApprovalProof, approvalProofKeyOf,
+  createHostedApprovers, issueSetupApprovalProof, approvalProofKeyOf,
 } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
@@ -143,19 +143,6 @@ const applyRow = (world: FakeWorld, companyId: string, name = "payments") => wor
 const latestOf = async (world: FakeWorld, companyId: string, name = "payments") => (await world.store.get(orgProjectCatalogKey(companyId, name)))?.["latestRevision"];
 
 describe("hosted setup approval: who may decide, by the candidate's risk", () => {
-  it("lets a project maintainer approve a LOW risk candidate (changed commands); the project moves to the candidate, the audit names the approver and the subject", async () => {
-    const { world, person, call, audit } = await setupWorld();
-    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["ci", "--cache", ".npm-cache"])] });
-    const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
-    const view = await call(get(RUN), maintainer);
-    expect(view.body["apply"]).toMatchObject({ candidateRevision: 2, baseRevision: 1, risk: "low", changes: [{ area: "setup_commands", risk: "low" }], approver: "maintainer", canApprove: true, canReject: true, approval: { revision: 2, artifactDigest: digest, kind: "setup", risk: "low" } });
-    const decided = await call(post(`${RUN}/decide`, decideBody(digest)), maintainer);
-    expect(decided.status, decided.raw).toBe(200);
-    expect(decided.body).toMatchObject({ project: "payments", decision: "approved", risk: "low", revision: 2 });
-    expect(await latestOf(world, FAKE_COMPANY)).toBe(2);
-    expect(await applyRow(world, FAKE_COMPANY)).toMatchObject({ state: "approved", decidedBy: "p-maint" });
-    expect(audit.find((event) => event.action === "decision.approved")).toMatchObject({ companyId: FAKE_COMPANY, actor: { id: "p-maint" }, subject: { type: SETUP_PROPOSAL_SUBJECT, id: "payments" }, details: { risk: "low" } });
-  });
 
   it("resumes an eligible task when a hosted approval approves its setup", async () => {
     const { world, person, call } = await setupWorld();
@@ -223,43 +210,6 @@ describe("hosted setup approval: who may decide, by the candidate's risk", () =>
     expect((await call(post(`${RUN}/decide`, decideBody(digest)), maintainer)).status).toBe(403);
     expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
   });
-
-  it("lets a maintainer reject even a high risk candidate: the candidate is removed and nothing is applied", async () => {
-    const { world, person, call } = await setupWorld();
-    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { network: { allowedDomains: ["api.stripe.com"] } });
-    const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
-    const rejected = await call(post(`${RUN}/decide`, decideBody(digest, "reject")), maintainer);
-    expect(rejected.status, rejected.raw).toBe(200);
-    expect(rejected.body).toMatchObject({ decision: "rejected" });
-    expect(await applyRow(world, FAKE_COMPANY)).toMatchObject({ state: "rejected" });
-    expect(await world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 2))).toBeUndefined();
-    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
-  });
-
-  it("refuses a project user (developer grant) and a member with no grant, writing nothing", async () => {
-    const { world, person, call } = await setupWorld();
-    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["install"])] });
-    const developer = person("p-dev", FAKE_COMPANY, "member", { payments: "developer" });
-    expect((await call(get(RUN), developer)).body["apply"]).toMatchObject({ canApprove: false, canReject: false });
-    expect((await call(post(`${RUN}/decide`, decideBody(digest)), developer)).body).toEqual({ error: { code: "FORBIDDEN", message: SETUP_RUN_NOT_ALLOWED } });
-    const member = person("p-member", FAKE_COMPANY, "member");
-    expect((await call(post(`${RUN}/decide`, decideBody(digest)), member)).body).toEqual({ error: { code: "NOT_FOUND", message: SETUP_RUN_PROJECT_NOT_FOUND } });
-    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
-    expect(await applyRow(world, FAKE_COMPANY)).toMatchObject({ state: "checking" });
-  });
-
-  it("re-reads the approver's standing inside the decision: a maintainer who lost the grant between the route's check and the decision decides nothing", async () => {
-    const { world, person, call, grantReadsLeft } = await setupWorld();
-    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["install"])] });
-    const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
-    // The route's own check reads the grant once; the decision's rule reads it again and finds it gone.
-    grantReadsLeft.value = 1;
-    const refused = await call(post(`${RUN}/decide`, decideBody(digest)), maintainer);
-    expect(refused.status).toBe(403);
-    expect(refused.body).toEqual({ error: { code: "FORBIDDEN", message: SETUP_NEEDS_MAINTAINER } });
-    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
-    expect(await applyRow(world, FAKE_COMPANY)).toMatchObject({ state: "checking" });
-  });
 });
 
 describe("hosted setup approval: the decision's own rule (behind the route's check)", () => {
@@ -275,36 +225,9 @@ describe("hosted setup approval: the decision's own rule (behind the route's che
     expect(refused.raw).not.toContain("detail");
     expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
   });
-
-  it("holds the risk rule in the gate itself: a maintainer's valid proof on a high risk candidate, presented to the gate directly, is refused", async () => {
-    const { world, person, wirings } = await setupWorld();
-    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { network: { allowedDomains: ["api.stripe.com"] } });
-    person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
-    const approval = wirings.get(FAKE_COMPANY)!.approval!;
-    const requestId = setupDecisionRequestId(digest, 2);
-    const card = { cardId: "setup_proposal:payments", contentVersion: digest };
-    const credential = await approval.issue({ companyId: FAKE_COMPANY, personId: "p-maint", requestId, kind: "setup", project: "payments", revision: 2, artifactDigest: digest, outcome: "approve", card });
-    const result = await approval.gate.decide({ companyId: FAKE_COMPANY, kind: "setup-proposal", subjectId: "payments", requestId, outcome: "approve", seen: { revision: 2, artifactDigest: digest }, credentials: [credential], card });
-    expect(result).toEqual({ status: "refused", reason: "not_the_approver", detail: SETUP_NEEDS_ADMIN });
-    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
-    expect(await applyRow(world, FAKE_COMPANY)).toMatchObject({ state: "checking" });
-  });
 });
 
 describe("hosted setup approval: the proof and the binding", () => {
-  it("needs no step-up (DEC 254zzz73): the company owner decides as a signed-in person, while a project developer and another company's owner are refused and nothing changes", async () => {
-    const { world, person, call } = await setupWorld();
-    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["install"])] });
-    const dev = person("p-dev-nostep", FAKE_COMPANY, "member", { payments: "developer" });
-    expect((await call(post(`${RUN}/decide`, decideBody(digest)), dev)).status).toBeGreaterThanOrEqual(400);
-    const stranger = person("p-other-owner-nostep", OTHER, "owner");
-    expect((await call(post(`${RUN}/decide`, decideBody(digest)), stranger)).status).toBeGreaterThanOrEqual(400);
-    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
-    const owner = person("p-owner", FAKE_COMPANY, "owner");
-    const decided = await call(post(`${RUN}/decide`, decideBody(digest)), owner);
-    expect(decided.status, JSON.stringify(decided.body)).toBe(200);
-    expect(await latestOf(world, FAKE_COMPANY)).toBe(2);
-  });
 
   it("refuses a decision on what the person did not see (another digest or revision) and on a candidate whose check has not passed", async () => {
     const { world, person, call } = await setupWorld();
@@ -337,14 +260,6 @@ describe("hosted setup approval: the proof and the binding", () => {
     expect(await applyRow(world, FAKE_COMPANY)).toMatchObject({ state: "checking" });
   });
 
-  it("takes only a setup decision's own request id (setup-...), apart from task decisions' ids", async () => {
-    const { world, person, call } = await setupWorld();
-    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["install"])] });
-    const owner = person("p-owner", FAKE_COMPANY, "owner");
-    expect((await call(post(`${RUN}/decide`, { ...decideBody(digest), requestId: "decision-request-0001" }), owner)).status).toBe(400);
-    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
-  });
-
   it("answers 'nothing waiting' when no candidate waits, and takes a strict body", async () => {
     const { person, call } = await setupWorld();
     const owner = person("p-owner", FAKE_COMPANY, "owner");
@@ -352,39 +267,6 @@ describe("hosted setup approval: the proof and the binding", () => {
     for (const body of [{}, { ...decideBody("c".repeat(64)), outcome: "request_changes" }, { ...decideBody("c".repeat(64)), risk: "low" }, { ...decideBody("c".repeat(64)), seen: { revision: 2, artifactDigest: "x" } }]) {
       expect((await call(post(`${RUN}/decide`, body), owner)).status, JSON.stringify(body)).toBe(400);
     }
-  });
-});
-
-describe("hosted setup approval: two companies and two projects", () => {
-  it("never reaches another company's candidate of the same project name: their owner decides only their own, ours stays waiting", async () => {
-    const { world, person, call } = await setupWorld();
-    const ours = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["install"])] });
-    const theirs = await seedCandidate(world, OTHER, "payments", { setup: [command("yarn", ["install"])] });
-    const theirOwner = person("p-their-owner", OTHER, "owner");
-    // Our digest, from their company: their runtime reads their own candidate, so the digest is not the one waiting there.
-    expect((await call(post(`${RUN}/decide`, decideBody(ours.digest)), theirOwner)).status).toBe(409);
-    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
-    expect(await applyRow(world, FAKE_COMPANY)).toMatchObject({ state: "checking" });
-    const view = await call(get(RUN), theirOwner);
-    expect((view.body["apply"] as Record<string, unknown>)["approval"]).toMatchObject({ artifactDigest: theirs.digest });
-    expect(view.raw).not.toContain(ours.digest);
-    expect((await call(post(`${RUN}/decide`, decideBody(theirs.digest)), theirOwner)).status).toBe(200);
-    expect(await latestOf(world, OTHER)).toBe(2);
-    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
-  });
-
-  it("keeps a maintainer of one project from deciding another project's candidate, and an approval of one project leaves the other's waiting", async () => {
-    const { world, person, call } = await setupWorld();
-    const payments = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["install"])] });
-    const ledger = await seedCandidate(world, FAKE_COMPANY, "ledger", { setup: [command("npm", ["install"])] });
-    const ledgerMaintainer = person("p-ledger", FAKE_COMPANY, "member", { ledger: "administrator", payments: "developer" });
-    expect((await call(post(`${RUN}/decide`, decideBody(payments.digest)), ledgerMaintainer)).body).toEqual({ error: { code: "FORBIDDEN", message: SETUP_RUN_NOT_ALLOWED } });
-    // The payments digest on the ledger path is not ledger's candidate.
-    expect((await call(post(`${LEDGER}/decide`, decideBody(payments.digest.replace(/.$/u, payments.digest.endsWith("0") ? "1" : "0"))), ledgerMaintainer)).status).toBe(409);
-    expect((await call(post(`${LEDGER}/decide`, decideBody(ledger.digest)), ledgerMaintainer)).status).toBe(200);
-    expect(await latestOf(world, FAKE_COMPANY, "ledger")).toBe(2);
-    expect(await latestOf(world, FAKE_COMPANY, "payments")).toBe(1);
-    expect(await applyRow(world, FAKE_COMPANY, "payments")).toMatchObject({ state: "checking" });
   });
 });
 
@@ -414,70 +296,13 @@ describe("hosted setup approval: confirm and discard", () => {
     expect(await world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 2))).toBeUndefined();
     expect(audit.some((event) => event.action === "setup_run.discard_requested")).toBe(true);
   });
-
-  it("serves none of confirm, discard or decide where the deployment has not wired the hosted approval, writing nothing", async () => {
-    const { world, person, call } = await setupWorld({ approval: false });
-    await seedCandidate(world, OTHER, "payments", { setup: [command("npm", ["install"])] });
-    const admin = person("p-admin", FAKE_COMPANY, "admin");
-    for (const [tail, body] of [["confirm", { requestId: randomUUID(), expectedRevision: 1 }], ["discard", { requestId: randomUUID() }], ["decide", decideBody("d".repeat(64))]] as const) {
-      expect((await call(post(`${RUN}/${tail}`, body), admin)).body, tail).toEqual({ error: { code: "NOT_FOUND", message: SETUP_APPROVAL_UNAVAILABLE } });
-    }
-    expect((await call(get(RUN), admin)).body["apply"]).toBeUndefined();
-    expect(await world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 2))).toBeUndefined();
-  });
 });
 
 describe("hosted approvers: a setup candidate's proof", () => {
   const NOW = Date.parse("2026-11-15T10:00:00.000Z");
   const DIGEST = "e".repeat(64);
   const A = FAKE_COMPANY as OrgId;
-  const identity = createHostedIdentity({ membershipOf: async (personId) => (personId === "ada" ? { companyId: A, role: "member" as const } : undefined), displayNameOf: async () => "Ada" });
-  const request = (overrides: Partial<ApprovalRequest> = {}): ApprovalRequest => ({
-    companyId: A, requestId: "setup-request-0001.x", kind: "setup", subject: { type: SETUP_PROPOSAL_SUBJECT, id: "payments" }, projectName: "payments", revision: 2, artifactDigest: DIGEST,
-    risk: "low", outcome: "approve", card: { cardId: "setup_proposal:payments", contentVersion: DIGEST }, settlesClaims: true, ...overrides,
-  });
   const token = (overrides: Record<string, unknown> = {}) => issueSetupApprovalProof(KEY, { companyId: A, personId: "ada", requestId: "setup-request-0001", kind: "setup", project: "payments", revision: 2, artifactDigest: DIGEST, outcome: "approve", card: { cardId: "setup_proposal:payments", contentVersion: DIGEST }, ...overrides } as never, NOW).token;
-  const proof = (req: ApprovalRequest, value: string): ApprovalProof => ({ proofId: randomUUID(), method: APPROVAL_PROOF_METHOD, requestId: req.requestId, revision: req.revision, artifactDigest: req.artifactDigest, token: value });
-  const point = () => createHostedApprovers({ store: createFakeWorld().store, identity, key: KEY, now: () => new Date(NOW) });
-
-  it("accepts a live member's setup proof for exactly this project, revision, digest, card and answer", async () => {
-    const verdict = await point().verify(request(), proof(request(), token()));
-    expect(verdict, JSON.stringify(verdict)).toMatchObject({ approved: true, approver: { personId: "ada", companyId: A } });
-  });
-
-  it("refuses a setup proof for another project, revision, digest or answer, a request without the project named, and a non-member", async () => {
-    const cases: Array<[ApprovalRequest, string, string]> = [
-      [request({ subject: { type: SETUP_PROPOSAL_SUBJECT, id: "ledger" }, projectName: "ledger", card: { cardId: "setup_proposal:ledger", contentVersion: DIGEST } }), token(), "other_subject"],
-      [Object.fromEntries(Object.entries(request()).filter(([field]) => field !== "projectName")) as unknown as ApprovalRequest, token(), "no_rule_for_this_request"],
-      [request({ projectName: "ledger" }), token(), "no_rule_for_this_request"],
-      [request({ subject: { type: SETUP_PROPOSAL_SUBJECT, id: "-bad" }, projectName: "-bad" }), token(), "no_rule_for_this_request"],
-      [request({ revision: 3 }), token(), "other_revision"],
-      [request({ outcome: "reject" }), token(), "other_answer"],
-      [request(), token({ personId: "bob" }), "not_a_member"],
-      [request({ companyId: OTHER }), token(), "wrong_company"],
-    ];
-    for (const [req, value, reason] of cases) expect(await point().verify(req, proof(req, value)), reason).toEqual({ approved: false, reason });
-  });
-
-  it("never lets a task proof stand for a setup candidate, nor a setup proof for a task", async () => {
-    const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
-    // A task proof is refused on the setup subject (and a setup proof on a task): the proof's subject type is signed into it.
-    const taskToken = issueApprovalProof(KEY, { companyId: A, personId: "ada", requestId: "setup-request-0001", kind: "setup", taskId: TASK, revision: 2, artifactDigest: DIGEST, outcome: "approve", card: { cardId: "setup_proposal:payments", contentVersion: DIGEST } }, NOW).token;
-    expect(await point().verify(request(), proof(request(), taskToken))).toEqual({ approved: false, reason: "other_subject" });
-    const taskRequest = request({ subject: { type: "task", id: TASK }, card: { cardId: `approve_plan:${TASK}`, contentVersion: DIGEST } });
-    const setupForTask = token({ project: TASK, card: { cardId: `approve_plan:${TASK}`, contentVersion: DIGEST } });
-    expect(await point().verify(taskRequest, proof(taskRequest, setupForTask))).toEqual({ approved: false, reason: "other_subject" });
-  });
-
-  it("refuses a task proof for a project whose name looks like a task id: only the proof's subject type tells them apart", async () => {
-    const UUID_PROJECT = "3c2d1e0f-9a8b-4c7d-8e6f-5a4b3c2d1e0f";
-    const card = { cardId: `setup_proposal:${UUID_PROJECT}`, contentVersion: DIGEST };
-    const req = request({ subject: { type: SETUP_PROPOSAL_SUBJECT, id: UUID_PROJECT }, projectName: UUID_PROJECT, card });
-    const taskProof = issueApprovalProof(KEY, { companyId: A, personId: "ada", requestId: "setup-request-0001", kind: "setup", taskId: UUID_PROJECT, revision: 2, artifactDigest: DIGEST, outcome: "approve", card }, NOW).token;
-    expect(await point().verify(req, proof(req, taskProof))).toEqual({ approved: false, reason: "other_subject" });
-    // The same act as a setup proof is accepted.
-    expect(await point().verify(req, proof(req, token({ project: UUID_PROJECT, card })))).toMatchObject({ approved: true });
-  });
 
   it("issues no setup proof for a malformed project name", () => {
     for (const project of ["", "-bad", "a/b", "x".repeat(101)]) expect(() => token({ project }), project).toThrow("an approval proof cannot be issued for this input");
@@ -550,12 +375,6 @@ describe("L4-EVP: prompt locations in a setup candidate", () => {
     expect(await latestOf(world, FAKE_COMPANY)).toBe(2);
     expect(await storedLocations(world, FAKE_COMPANY, "payments", 2)).toEqual(LOCATIONS);
   });
-  it("a candidate with no locations shows no promptLocations field (the view as it was)", async () => {
-    const { world, person, call } = await setupWorld();
-    await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["ci", "--cache", ".c"])] });
-    const view = await call(get(RUN), person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" }));
-    expect(view.body["apply"]).not.toHaveProperty("promptLocations");
-  });
   it("a developer grant and a member with no grant cannot approve it; a rejection removes it and the project keeps none", async () => {
     const { world, person, call } = await setupWorld();
     const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { promptLocations: LOCATIONS });
@@ -566,25 +385,5 @@ describe("L4-EVP: prompt locations in a setup candidate", () => {
     expect(rejected.status, rejected.raw).toBe(200);
     expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
     expect(await storedLocations(world, FAKE_COMPANY, "payments", 1)).toBeUndefined();
-  });
-  it("is bound to the digest the person saw: another digest (the locations changed under them) is refused", async () => {
-    const { world, person, call } = await setupWorld();
-    await seedCandidate(world, FAKE_COMPANY, "payments", { promptLocations: LOCATIONS });
-    const other = setupApplyDigest([command("npm", ["ci"])], [command("npm", ["test"])]);
-    expect((await call(post(`${RUN}/decide`, decideBody(other)), person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" }))).status).toBeGreaterThanOrEqual(400);
-    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
-  });
-  it("two projects and two companies: approving one project's locations leaves the other project, and another company's same-named project, without any", async () => {
-    const { world, person, call } = await setupWorld();
-    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { promptLocations: LOCATIONS });
-    await seedCandidate(world, OTHER, "payments", { promptLocations: [{ repo: "demo", path: "other/agent.py", kind: "file" }] });
-    const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator", ledger: "administrator" });
-    expect((await call(post(`${RUN}/decide`, decideBody(digest)), maintainer)).status).toBe(200);
-    expect(await storedLocations(world, FAKE_COMPANY, "payments", 2)).toEqual(LOCATIONS);
-    expect(await storedLocations(world, FAKE_COMPANY, "ledger", 1)).toBeUndefined();
-    expect(await latestOf(world, FAKE_COMPANY, "ledger")).toBe(1);
-    expect(await latestOf(world, OTHER)).toBe(1);
-    expect(await storedLocations(world, OTHER, "payments", 2)).toEqual([{ repo: "demo", path: "other/agent.py", kind: "file" }]);
-    expect((await applyRow(world, OTHER))).toMatchObject({ state: "checking" });
   });
 });

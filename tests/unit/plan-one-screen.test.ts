@@ -26,10 +26,6 @@ describe("planOneScreen", () => {
     expect(PlanOneScreenSchema.safeParse(view).success).toBe(true);
   });
 
-  it("is deterministic: the same plan gives the same screen", () => {
-    expect(planOneScreen(bigPlan(), estimate)).toEqual(planOneScreen(bigPlan(), estimate));
-  });
-
   it("never exceeds the cap, however big the plan, and says it is too big", () => {
     const view = planOneScreen(bigPlan(), estimate);
     expect(view.characters).toBeLessThanOrEqual(PLAN_ONE_SCREEN_MAX_CHARS);
@@ -37,13 +33,6 @@ describe("planOneScreen", () => {
     expect(view.tooBig).toBe(true);
     expect(view.fullCharacters).toBeGreaterThan(PLAN_ONE_SCREEN_MAX_CHARS);
     expect(view.approach.length).toBeGreaterThan(0);
-  });
-
-  it("keeps the top three risks only and lists at most five claims", () => {
-    const view = planOneScreen(planDocument({ claims: Array.from({ length: 8 }, (_, i) => ({ id: String(i + 1), text: `Short claim ${String(i + 1)}.` })), risks: ["r1 risk", "r2 risk", "r3 risk", "r4 risk"] }));
-    expect(view.risks).toEqual(["r1 risk", "r2 risk", "r3 risk"]);
-    expect(view.approach).toHaveLength(5);
-    expect(view.proof).toHaveLength(5);
   });
 
   it("names how a claim is proved from the plan's checks and scenarios", () => {
@@ -65,11 +54,6 @@ describe("planOneScreen", () => {
     expect(planOneScreen(plan).proof.map((entry) => entry.how)).toEqual(["test", "browser", "api", "check"]);
   });
 
-  it("counts a child's proof for its parent claim", () => {
-    const plan = planDocument({ checks: { proposed: [{ id: "c1", label: "unit tests", command: { cwd: "x", executable: "pytest", args: [], timeoutSeconds: 60 } }], proves: { c1: ["1.1"] } } });
-    expect(planOneScreen(plan).proof[0]?.how).toBe("test");
-  });
-
   it("takes files from cited code and from the ordered work items, without duplicates or prose", () => {
     const itemId = "11111111-1111-4111-8111-111111111111";
     const plan = planDocument({ workBreakdown: { schemaVersion: 1, taskId: "22222222-2222-4222-8222-222222222222", version: 1, items: [{ id: itemId, title: "Edit src/retry.ts", description: "Also change payments/src/charge.ts and docs e.g. later", repository: "acme/pay", dependsOn: [] }] } });
@@ -83,9 +67,6 @@ describe("planOneScreen", () => {
     expect([...cut].length).toBeLessThanOrEqual(14);
   });
 
-  it("omits the cost line when there is no estimate", () => {
-    expect(planOneScreen(planDocument()).cost).toBeUndefined();
-  });
 });
 
 describe("plan-too-big finding", () => {

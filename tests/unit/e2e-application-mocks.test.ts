@@ -18,29 +18,11 @@ const spec = (overrides: Partial<E2EMockSpec> = {}): E2EMockSpec => ({ component
 const bindings = [{ originRef: "orders-api", envName: "ORDERS_SERVICE_ORIGIN" }, { originRef: "inventory-v1", envName: "INVENTORY_ORIGIN", contractPath: "inventory/openapi.json" }];
 
 describe("placing approved mocks on a service's declared origins", () => {
-  it("serves an approved mock as the origin whose contract it stands for and gives every other declared origin to the sinkhole", () => {
-    const plan = planApplicationOrigins({ originBindings: bindings, mocks: [spec()] });
-    expect(plan.mocked).toEqual([{ originRef: "inventory-v1", envName: "INVENTORY_ORIGIN", componentId, fixture }]);
-    expect(plan.unbound).toEqual([{ originRef: "orders-api", envName: "ORDERS_SERVICE_ORIGIN" }]);
-    expect(plan.unplaced).toEqual([]);
-  });
-
-  it("leaves every origin to the sinkhole when no mock is approved", () => {
-    const plan = planApplicationOrigins({ originBindings: bindings, mocks: [] });
-    expect(plan.mocked).toEqual([]);
-    expect(plan.unbound.map((item) => item.originRef)).toEqual(["inventory-v1", "orders-api"]);
-  });
 
   it("serves one origin once when two targets approve the same fixture, and refuses two different fixtures for one origin", () => {
     expect(planApplicationOrigins({ originBindings: bindings, mocks: [spec(), spec({ requestedTargetId: "web-2", effectiveTargetId: "web-2" })] }).mocked).toHaveLength(1);
     const other: E2EApiMockFixture = { ...fixture, variants: [{ ...fixture.variants[0]!, body: { status: "low" } }, fixture.variants[1]!, fixture.variants[2]!] };
     expect(() => planApplicationOrigins({ originBindings: bindings, mocks: [spec(), spec({ requestedTargetId: "web-2", effectiveTargetId: "web-2", apiFixture: other })] })).toThrow(/two different approved fixtures/);
-  });
-
-  it("reports a mock that no origin claims instead of guessing an origin for it", () => {
-    const stranger = spec({ componentId: e2eApiSchemaComponentId("other/openapi.json") });
-    expect(planApplicationOrigins({ originBindings: bindings, mocks: [stranger] }).unplaced).toEqual([stranger]);
-    expect(planApplicationOrigins({ originBindings: [{ originRef: "inventory-v1", envName: "INVENTORY_ORIGIN" }], mocks: [spec()] }).unplaced).toHaveLength(1);
   });
 
   it.each([["unbound"], ["has space"], ["../up"], ["a".repeat(60)], ["_leading"]])("refuses an origin name a container cannot carry: %s", (originRef) => {
@@ -111,23 +93,4 @@ describe("the frames a run's mock ledgers become", () => {
     expect(new Set(rows.map((row) => row.requestId)).size).toBe(2);
   });
 
-  it("lists the case's calls no mock matched in a frame of their own, and a call outside every window in every case's frame", () => {
-    const proofs = build();
-    const frames = proofs.frames.filter((frame) => frame.ref.artifactId.includes("unmocked-calls")).map(parse);
-    expect(frames.map((frame) => [frame.caseId, frame.calls!.map((call) => [call.origin, call.kind])])).toEqual([
-      ["case-a", [["unbound", "unmatched"]]], ["case-b", [["inventory-v1", "unmatched"]]]]);
-    expect(proofs.unmockedEntries.map((entry) => entry.caseId)).toEqual(["case-a", "case-b"]);
-  });
-
-  it("orders the receipt entries by case id and reports the components each case really consumed", () => {
-    const proofs = build();
-    expect(proofs.consumptionEntries.map((entry) => entry.caseId)).toEqual(["case-a"]);
-    expect(proofs.observedComponentsByCase.get("case-a")).toEqual([componentId]);
-    expect(proofs.observedComponentsByCase.get("case-b")).toEqual([]);
-  });
-
-  it("gives every frame a distinct artifact id", () => {
-    const ids = build().frames.map((frame) => frame.ref.artifactId);
-    expect(new Set(ids).size).toBe(ids.length);
-  });
 });

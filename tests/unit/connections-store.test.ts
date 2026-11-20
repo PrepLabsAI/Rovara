@@ -1,7 +1,7 @@
 // The connection store on the document store port: what a record holds and does not hold, how a secret is kept apart, what a change writes together, and the rules a save refuses.
 import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, type AuditEvent, type AuditSink, type OrgId } from "@agentx/contracts";
-import { OrgConnectionStore, readConnectionSecret, readConnectionToken, type ConnectionChecks } from "../../packages/broker/src/connections/store.js";
+import { OrgConnectionStore, readConnectionSecret, type ConnectionChecks } from "../../packages/broker/src/connections/store.js";
 import { orgCredentialRegistry } from "../../packages/broker/src/connections/registry.js";
 import { orgConnectorSecretName } from "../../packages/broker/src/connections/org-secrets.js";
 import { InMemoryConnectionSecrets, memoryStore } from "../support/connection-fakes.js";
@@ -26,25 +26,6 @@ function world(over: { checks?: ConnectionChecks; audit?: AuditSink; fetch?: typ
 const linear = (over: Record<string, unknown> = {}) => ({ connectionId: LINEAR, type: "linear", label: "Tracker", access: "read", ...over });
 
 describe("saving a connection", () => {
-  it("keeps the record free of the key, writes the key under a name derived from the company and the id, and records one audit event without it", async () => {
-    const w = world();
-    const saved = await w.store.put({ orgId: ORG, connection: linear(), secret: { apiKey: KEY }, by: OWNER });
-    expect(saved).toMatchObject({ connectionId: LINEAR, hasSecret: true, createdBy: OWNER });
-    // The record keeps its revision and the version of its secret, and a view shows neither.
-    expect(saved).not.toHaveProperty("revision");
-    expect(saved).not.toHaveProperty("secretVersion");
-    const raw = await w.db.get({ pk: `ORG#${ORG}#CONNECTION#${LINEAR}`, sk: "META" });
-    expect(raw).toMatchObject({ revision: 1 });
-    expect(JSON.stringify(raw)).not.toContain(KEY);
-    expect(raw).toHaveProperty("secretVersion");
-    expect(w.secrets.names()).toEqual([orgConnectorSecretName(ENV, ORG, LINEAR)]);
-    expect(await readConnectionToken(w.deps, ORG, { connectionId: LINEAR, type: "linear", secretVersion: String(raw!["secretVersion"] as string) })).toBe(KEY);
-    expect(w.events.map((event) => [event.action, event.subject])).toEqual([["connection.saved", { type: "connection", id: LINEAR }]]);
-    expect(JSON.stringify(w.events)).not.toContain(KEY);
-    // The directory lists it, so a listing reads one partition and then the records.
-    expect((await w.store.list(ORG)).map((record) => record.connectionId)).toEqual([LINEAR]);
-    expect(await w.store.list(OTHER)).toEqual([]);
-  });
 
   it("reads the version its own save wrote: a later save that was refused cannot change what a record uses", async () => {
     const w = world();

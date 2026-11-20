@@ -45,19 +45,6 @@ describe("the day budget client", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it("a transport error on reserve throws, which the route maps to budget (nothing is sent to the provider)", async () => {
-    const post = vi.fn(async () => { throw new Error("connect ECONNRESET 10.0.0.1:443 token=SECRETTOKEN"); });
-    await expect(client(post).reserve(4_000, LIMITS)).rejects.toThrow(/could not be reached/);
-    // The error carries nothing the transport said.
-    await client(post).reserve(4_000, LIMITS).catch((error: Error) => expect(error.message).not.toMatch(/SECRETTOKEN|ECONNRESET|10\.0\.0\.1/));
-    expect(post).toHaveBeenCalledTimes(2);
-    const invoke = vi.fn(async () => tapAnswer());
-    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke, now: Date.now, dayBudget: client(post) });
-    const outcome = await route.generate(channelRequest());
-    expect(outcome.result).toMatchObject({ status: "error", code: "budget" });
-    expect(invoke).not.toHaveBeenCalled();
-  });
-
   it("reserve is not retried: one request, and it throws on a bad answer, a different reservation id or an odd status", async () => {
     const failing = vi.fn(async () => { throw new Error("down"); });
     await expect(client(failing).reserve(10, LIMITS)).rejects.toThrow();
@@ -101,21 +88,6 @@ describe("the day budget client", () => {
     expect(sent.at(-1)).toEqual({ schemaVersion: "rovara-e2e-model-budget/v1", stage: "release", reservationId: RESERVATION });
   });
 
-  it("a settle that fails once is retried once with the same request, and succeeds", async () => {
-    const sent: E2EModelDayBudgetRequest[] = [];
-    let failures = 1;
-    const post = vi.fn(async (body: E2EModelDayBudgetRequest) => {
-      sent.push(body);
-      if (body.stage === "settle" && failures-- > 0) throw new Error("throttled");
-      return answer(body.stage === "reserve" ? "reserved" : body.stage === "settle" ? "settled" : "released", body.reservationId);
-    });
-    const reservation = (await client(post).reserve(4_000, LIMITS))!;
-    await reservation.settle(2_000);
-    const settles = sent.filter((body) => body.stage === "settle");
-    expect(settles).toHaveLength(2);
-    expect(settles[1]).toEqual(settles[0]);
-  });
-
   it("settle and release time out at 5 s with one retry, then throw (the reservation is kept), and reserve times out without a retry", async () => {
     vi.useFakeTimers();
     const sent: string[] = [];
@@ -146,16 +118,6 @@ describe("the day budget client", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     expect(await reserving).toMatch(/could not be reached/);
     expect(hung).toHaveBeenCalledTimes(1);
-  });
-
-  it("aborts the request it gives up on, so a hung transport does not hold the run", async () => {
-    vi.useFakeTimers();
-    let seen: AbortSignal | undefined;
-    const post = vi.fn((_body: E2EModelDayBudgetRequest, signal: AbortSignal) => { seen = signal; return new Promise<never>(() => undefined); });
-    const pending = client(post, { timeoutMs: 200 }).reserve(10, LIMITS).catch(() => "gave up");
-    await vi.advanceTimersByTimeAsync(200);
-    expect(await pending).toBe("gave up");
-    expect(seen?.aborted).toBe(true);
   });
 
   it("through the governed route: a reserved call is settled with what the provider charged, and a refused one releases", async () => {

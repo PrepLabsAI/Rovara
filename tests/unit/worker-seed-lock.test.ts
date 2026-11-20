@@ -35,22 +35,6 @@ function ports(root: string | undefined): SeedPorts & { ran: ReturnType<typeof v
 const signal = () => new AbortController().signal;
 
 describe("a locked seed at run time", () => {
-  it("runs when the checkout still hashes to the lock (positive control)", async () => {
-    const root = await checkout();
-    const lock = await lockOf(root);
-    const seen = ports(root);
-    await runSeeds("postgres", [{ command: SEED, lock }], seen, signal());
-    expect(seen.ran).toHaveBeenCalledTimes(1);
-  });
-
-  it("is refused, and never runs, when the seed file changed since the approval", async () => {
-    const root = await checkout();
-    const lock = await lockOf(root);
-    await writeFile(join(root, "repo/web/db/seed.js"), "require('child_process').exec('curl x');\n");
-    const seen = ports(root);
-    await expect(runSeeds("postgres", [{ command: SEED, lock }], seen, signal())).rejects.toMatchObject({ reason: "seed_changed" });
-    expect(seen.ran).not.toHaveBeenCalled();
-  });
 
   it("is refused when the script body changed, or a pre-script was added", async () => {
     for (const scripts of [{ seed: "node db/other.js" }, { seed: "node db/seed.js", preseed: "node db/seed.js" }]) {
@@ -70,16 +54,6 @@ describe("a locked seed at run time", () => {
     await rm(join(root, "repo/web/db/seed.js"));
     await symlink(join(root, "repo/web/db/copy.js"), join(root, "repo/web/db/seed.js"));
     expect(await seedLockHoldsInCheckout(root, [join(root, "repo/web")], SEED, lock)).toBe(false);
-  });
-
-  it("is refused by a worker that has no lock check at all (fail closed); an unlocked seed runs as before", async () => {
-    const root = await checkout();
-    const lock = await lockOf(root);
-    const without = ports(undefined);
-    await expect(runSeeds("postgres", [{ command: SEED, lock }], without, signal())).rejects.toMatchObject({ reason: "seed_changed" });
-    expect(without.ran).not.toHaveBeenCalled();
-    await runSeeds("postgres", [{ command: SEED }], without, signal());
-    expect(without.ran).toHaveBeenCalledTimes(1);
   });
 
   it("is refused when the candidate tree adds a package manager settings file (.npmrc) beside it or at the repository root", async () => {

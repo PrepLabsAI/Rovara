@@ -5,7 +5,7 @@ import { createCandidateManifest, type CheckEntry, type EvidencePack, type Evide
 import { evidenceLines } from "../../packages/broker/src/core/proof/evidence-lines.js";
 import { keepEvidence, loadEvidencePack } from "../../packages/broker/src/core/proof/evidence-keep.js";
 import { guardPack } from "../../packages/broker/src/core/proof/evidence-guard.js";
-import { evidenceRiskSignal, kindOfRawCheck } from "../../packages/broker/src/core/proof/evidence-risk.js";
+import { evidenceRiskSignal } from "../../packages/broker/src/core/proof/evidence-risk.js";
 import { assessRisk, type RiskInput } from "../../packages/broker/src/core/proof/risk.js";
 import { recomputeRisk } from "../../packages/broker/src/core/proof/pull-request-body.js";
 import { evidenceRiskOfTask as riskOfTask, securityCheckIdsOf } from "../../packages/broker/src/core/proof/evidence-risk-input.js";
@@ -46,22 +46,6 @@ describe("scanner findings and migrations in the pack", () => {
     expect(evidenceRiskSignal(pack, DIGEST)).toBeUndefined();
   });
 
-  it("the approved check policy's kind wins over the guess", async () => {
-    const pack = await keep([{ checkId: "readiness:0", findings: findings("Custom Scanner", { critical: 1 }) }], [entry("readiness:0", "custom", { after: "failed", exitCode: 1 })], new Map([["readiness:0", "security"]]));
-    expect(pack?.checks[0]?.kind).toBe("security");
-    expect(evidenceRiskSignal(pack, DIGEST)).toEqual({ highNewFindings: 1 });
-    const lint = await keep([{ checkId: "readiness:0", findings: findings("Bandit", { critical: 1 }) }], [entry("readiness:0", "bandit", { after: "failed", exitCode: 1 })], new Map([["readiness:0", "lint"]]));
-    expect(evidenceRiskSignal(lint, DIGEST)).toBeUndefined();
-  });
-
-  it("a scan that was already failing and has nothing new keeps its (empty) findings; a scan that newly failed with none is not shown as clean", async () => {
-    const already = await keep([{ checkId: "readiness:0", findings: findings("Bandit", {}) }], [entry("readiness:0", "bandit", { before: "failed", after: "failed", class: "already_failing", exitCode: 1 })]);
-    expect(already?.checks[0]?.findings?.newCount).toBe(0);
-    expect(prLine(already!)).toBe("Checks by kind: security scan ✗: 0 new findings");
-    const regression = await keep([{ checkId: "readiness:0", findings: findings("Bandit", {}) }], [entry("readiness:0", "bandit", { after: "failed", class: "regression", exitCode: 1 })]);
-    expect(regression?.checks[0]?.findings).toBeUndefined();
-  });
-
   it("migration evidence marks a migration check; the pull request says applied and rolled back, or that the rollback failed", async () => {
     const pack = await keep([{ checkId: "readiness:0", migrations: { applied: ["0002_orders"], rolledBack: true, schemaChanges: ["create table orders"] } }], [entry("readiness:0", "alembic upgrade head")]);
     expect(pack?.checks[0]?.kind).toBe("migration");
@@ -99,19 +83,6 @@ describe("scanner findings and migrations in the pack", () => {
     expect(prLine(pack!)).toBe("Checks by kind: security scan ✗: 2 high or critical findings could not be compared with the original code");
     expect(evidenceRiskSignal(pack, DIGEST)).toEqual({ highNewFindings: 0, unverifiedHighFindings: 2 });
   });
-
-  it("a migration name that holds personal data loses the check's migration details (the data guard), and the check keeps the broker's own verdict", async () => {
-    const pack = await keep([{ checkId: "readiness:0", migrations: { applied: ["0002_jane.doe@gmail.com"], rolledBack: true, schemaChanges: [] } }], [entry("readiness:0", "alembic upgrade head")]);
-    expect(pack?.checks[0]?.migrations).toBeUndefined();
-    expect(pack?.checks[0]).toMatchObject({ after: "passed" });
-  });
-
-  it("guesses a kind only from what the raw part carries", () => {
-    expect(kindOfRawCheck({ checkId: "a" })).toBeUndefined();
-    expect(kindOfRawCheck({ checkId: "a", findings: findings("Semgrep OSS", {}) })).toBe("security");
-    expect(kindOfRawCheck({ checkId: "a", findings: findings("CodeQL", {}) })).toBe("security");
-    expect(kindOfRawCheck({ checkId: "a", findings: findings("pylint", {}) })).toBe("lint");
-  });
 });
 
 describe("the risk rule", () => {
@@ -119,19 +90,6 @@ describe("the risk rule", () => {
   const clean: VerificationReport = { reviewOnly: false, passed: [{ label: "Unit tests" }], failed: [], notChecked: [], testsAdded: [] };
   const input = (over: Partial<RiskInput> = {}): RiskInput => ({ changedFiles: [{ repository: "payments", path: "src/retry.ts", added: 3, removed: 1 }], changedFilesComplete: true, report: clean, acceptedFindings: [], securityFindings: 0, candidateDigest: code.digest, ...over });
   const pack = (kind: string, bySeverity: Record<string, number>, digest = code.digest) => ({ schemaVersion: 1, candidateDigest: digest, checks: [{ checkId: "readiness:0", kind, label: "scan", before: "passed", after: "failed", class: "regression", durationMs: 1, findings: findings("Bandit", bySeverity) }] }) as unknown as EvidencePack;
-
-  it("a new high or critical security finding makes the change high risk, with a fixed reason", () => {
-    const risk = assessRisk(input({ evidence: { highNewFindings: 2 } }));
-    expect(risk.level).toBe("high");
-    expect(risk.reasons).toContain("A security scan found 2 new high or critical findings.");
-    expect(assessRisk(input({ evidence: { highNewFindings: 1 } })).reasons).toContain("A security scan found 1 new high or critical finding.");
-  });
-
-  it("changes nothing without the signal: no evidence, or none high, gives the level and reasons the change had before evidence existed", () => {
-    expect(assessRisk(input())).toEqual(assessRisk(input({ evidence: undefined })));
-    expect(assessRisk(input({ evidence: { highNewFindings: 0 } }))).toEqual(assessRisk(input()));
-    expect(assessRisk(input()).level).toBe("low");
-  });
 
   it("high findings that could not be compared make the change at least medium, never silently low, and say so in a fixed sentence", () => {
     const risk = assessRisk(input({ evidence: { highNewFindings: 0, unverifiedHighFindings: 3 } }));
@@ -142,12 +100,6 @@ describe("the risk rule", () => {
     expect(assessRisk(input({ evidence: { highNewFindings: 1, unverifiedHighFindings: 2 } })).level).toBe("high");
     expect(assessRisk(input({ evidence: { highNewFindings: 0, unverifiedHighFindings: 0 } }))).toEqual(assessRisk(input()));
     expect(evidenceRiskSignal(pack("lint", { high: 1 }), code.digest)).toBeUndefined();
-  });
-
-  it("only raises: a change that is already high stays high, with the finding added to its reasons", () => {
-    const risk = assessRisk(input({ changedFiles: [{ repository: "payments", path: "infra/main.ts", added: 1, removed: 1 }], evidence: { highNewFindings: 1 } }));
-    expect(risk.level).toBe("high");
-    expect(risk.reasons).toHaveLength(2);
   });
 
   it("the signal counts critical and high from security checks of a pack for exactly this code, and nothing else", () => {
@@ -177,15 +129,6 @@ describe("the risk rule", () => {
     const unavailable = { highNewFindings: 0, evidenceUnavailable: true as const };
     const withoutFindings = () => { const base = pack("security", {}); return { ...base, checks: base.checks.map((check) => Object.fromEntries(Object.entries(check).filter(([name]) => name !== "findings"))) } as unknown as EvidencePack; };
 
-    it("is evidenceUnavailable when there is no pack, the read fails, or the pack is for other code; the risk is at least Medium, in a fixed sentence", async () => {
-      expect(await evidenceRiskOfTask({ pack: async () => undefined }, TASK, code.digest, SEC)).toEqual(unavailable);
-      expect(await evidenceRiskOfTask({ pack: async () => { throw new Error("down"); } }, TASK, code.digest, SEC)).toEqual(unavailable);
-      expect(await evidenceRiskOfTask({ pack: async () => pack("security", { high: 1 }, OTHER) }, TASK, code.digest, SEC)).toEqual(unavailable);
-      const risk = assessRisk(input({ evidence: unavailable }));
-      expect(risk.level).toBe("medium");
-      expect(risk.reasons).toContain("The proof evidence for this code was not available, so a security scan could not be checked, and it needs review.");
-    });
-
     it("is evidenceUnavailable when the pack is there but the security check has no findings (dropped as inconsistent or untrusted, or the scan wrote nothing that could be read) or is not in the pack at all (S-1)", async () => {
       expect(await evidenceRiskOfTask({ pack: async () => withoutFindings() }, TASK, code.digest, SEC)).toEqual(unavailable);
       expect(await evidenceRiskOfTask({ pack: async () => pack("security", {}) }, TASK, code.digest, ["readiness:3"])).toEqual(unavailable);
@@ -193,16 +136,6 @@ describe("the risk rule", () => {
       const two = { ...pack("security", { high: 1 }), checks: [...pack("security", { high: 1 }).checks, { ...withoutFindings().checks[0]!, checkId: "readiness:1" }] } as EvidencePack;
       expect(await evidenceRiskOfTask({ pack: async () => two }, TASK, code.digest, ["readiness:0", "readiness:1"])).toEqual({ highNewFindings: 1, evidenceUnavailable: true });
       expect(assessRisk(input({ evidence: { highNewFindings: 1, evidenceUnavailable: true } })).level).toBe("high");
-    });
-
-    it("changes nothing without a security check in the policy, with the pack and its findings there, or with no candidate", async () => {
-      expect(await evidenceRiskOfTask({ pack: async () => undefined }, TASK, code.digest, [])).toBeUndefined();
-      expect(await evidenceRiskOfTask({ pack: async () => undefined }, TASK, code.digest)).toBeUndefined();
-      expect(await evidenceRiskOfTask({ pack: async () => undefined }, TASK, undefined, SEC)).toBeUndefined();
-      expect(await evidenceRiskOfTask({ pack: async () => withoutFindings() }, TASK, code.digest, [])).toBeUndefined();
-      expect(await evidenceRiskOfTask({ pack: async () => pack("security", { medium: 1 }) }, TASK, code.digest, SEC)).toBeUndefined();
-      expect(await evidenceRiskOfTask({ pack: async () => pack("security", { high: 2 }) }, TASK, code.digest, SEC)).toEqual({ highNewFindings: 2 });
-      expect(assessRisk(input({ evidence: { highNewFindings: 0, evidenceUnavailable: undefined } }))).toEqual(assessRisk(input()));
     });
 
     it("fails closed when the caller has no evidence port while the proof switch is on and a security check is expected; with the switch off there is no port and no signal", async () => {

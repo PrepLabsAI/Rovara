@@ -20,6 +20,7 @@ import type { PiSessionAdapter, PiSessionInput } from "../../packages/worker/src
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import { FAUX_MODEL } from "../support/faux-model.js";
+import { processEnded } from "../support/process-liveness.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
@@ -1473,7 +1474,7 @@ describe("the push token never meets code the agent or a project controls (final
     await publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}), pullRequestSink: sink });
     const pid = Number(await readFile(pidFile, "utf8"));
     expect(Number.isInteger(pid) && pid > 0).toBe(true);
-    expect(() => process.kill(pid, 0)).toThrow();
+    expect(processEnded(pid)).toBe(true);
   });
 
   it("builds the published commit on the base the broker pinned, not the workspace manifest's", async () => {

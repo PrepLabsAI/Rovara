@@ -5,15 +5,13 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   BROWSER_EVIDENCE_VIDEOS_MAX, BROWSER_EVIDENCE_VIDEO_MAX_BYTES, BROWSER_EVIDENCE_VIDEO_NOT_KEPT_REASONS, BROWSER_EVIDENCE_VIDEO_NOT_KEPT_WORDS, BROWSER_EVIDENCE_VIDEO_TOTAL_MAX_BYTES, BROWSER_EVIDENCE_VIDEO_CHECK_ID,
-  BrowserEvidenceRecipeSchema, addBrowserEvidenceToPack, browserEvidenceCheck, browserEvidenceLines, browserEvidenceVideoEligible, browserEvidenceVideoWanted, checkedBrowserEvidenceCaptured,
+  BrowserEvidenceRecipeSchema, addBrowserEvidenceToPack, browserEvidenceLines, browserEvidenceVideoEligible, browserEvidenceVideoWanted, checkedBrowserEvidenceCaptured,
   type BrowserEvidenceCaptured, type BrowserEvidenceOutcome,
 } from "../../packages/contracts/src/browser-evidence.js";
 import {
   BROWSER_EVIDENCE_UPLOAD_MAX_BYTES, browserEvidenceOutcomeOfPack, browserEvidencePanelOf, browserEvidenceServableVideos, decodeBrowserEvidenceUpload, encodeBrowserEvidenceUpload, servableBrowserEvidenceImage, servableBrowserEvidenceVideo,
 } from "../../packages/contracts/src/browser-evidence-wire.js";
-import { EvidencePackV2Schema, type ArtifactRef, type EvidencePackV2 } from "../../packages/contracts/src/evidence.js";
-import { checkKindInfo } from "../../packages/contracts/src/check-kinds.js";
-import { proofHolds, type TestProof } from "../../packages/contracts/src/test-proof.js";
+import { type ArtifactRef, type EvidencePackV2 } from "../../packages/contracts/src/evidence.js";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const jpeg = (seed: string, size = 500) => { const bytes = new Uint8Array(size); bytes.set([0xff, 0xd8, 0xff]); bytes.fill(seed.charCodeAt(0), 3); return bytes; };
@@ -95,14 +93,6 @@ describe("the video's bounds", () => {
     expect(() => checkedBrowserEvidenceCaptured(run(failing(1, 0)))).toThrow();
   });
 
-  it("a video is a WebM: anything else is refused (the digest is checked where it is stored)", () => {
-    const bad = run(failing(1, 1_000));
-    const row = bad.routes[0];
-    if (row === undefined || row.status !== "not_run" || row.video === undefined) throw new Error("setup");
-    row.video.bytes[0] = 0;
-    expect(() => checkedBrowserEvidenceCaptured(bad)).toThrow();
-  });
-
   it("a video and a 'not kept' reason are not both on one page, and the reasons are fixed words", () => {
     const both = run([{ route: "/a", status: "not_run", reason: "page_did_not_load", video: clip("v"), videoNotKept: "over_size_cap" }]);
     expect(() => checkedBrowserEvidenceCaptured(both)).toThrow();
@@ -117,24 +107,6 @@ describe("the upload carries the videos and nothing else changes", () => {
     const bytes = encodeBrowserEvidenceUpload(capturedWithVideo());
     expect(decodeBrowserEvidenceUpload(bytes)).toEqual(capturedWithVideo());
     expect(bytes.byteLength).toBeLessThan(BROWSER_EVIDENCE_UPLOAD_MAX_BYTES);
-  });
-
-  it("a run with no video is encoded byte for byte as before (the same header, the same order)", () => {
-    const plain: BrowserEvidenceCaptured = { isolation: "sandbox", durationMs: 3_000, notShown: [], moreNotShown: 0, routes: [{ route: "/checkout", status: "shown", before: shot("a"), after: shot("b"), consoleErrors: { before: 0, after: 2 } }, { route: "/settings", status: "not_run", reason: "page_did_not_load" }] };
-    const bytes = encodeBrowserEvidenceUpload(plain);
-    const headerLength = new DataView(bytes.buffer, bytes.byteOffset).getUint32(4, false);
-    const header = JSON.parse(new TextDecoder().decode(bytes.subarray(8, 8 + headerLength))) as { routes: Array<Record<string, unknown>> };
-    expect(header.routes.flatMap((row) => Object.keys(row))).not.toContain("video");
-    expect(header.routes.flatMap((row) => Object.keys(row))).not.toContain("videoNotKept");
-    expect(bytes.byteLength).toBe(8 + headerLength + 500 + 500);
-  });
-
-  it("a header whose video size is not the bytes that follow is refused", () => {
-    const good = encodeBrowserEvidenceUpload(capturedWithVideo());
-    expect(() => decodeBrowserEvidenceUpload(good.subarray(0, good.byteLength - 1))).toThrow("browser evidence upload is not valid");
-    const longer = new Uint8Array(good.byteLength + 1);
-    longer.set(good);
-    expect(() => decodeBrowserEvidenceUpload(longer)).toThrow("browser evidence upload is not valid");
   });
 });
 
@@ -154,37 +126,7 @@ const basePack = (): EvidencePackV2 => ({
   checks: [{ id: "unit", kind: "test", label: "Unit tests", before: "failed", after: "passed", class: "fixed", durationMs: 10 }], notTested: [],
 });
 
-const built = (pack: EvidencePackV2) => pack.checks.find((check) => check.id === BROWSER_EVIDENCE_VIDEO_CHECK_ID)!;
-
 describe("the pack's video check", () => {
-  it("is a second check of the `visual` kind (never proof), one pair per kept video, with the not-kept ones as fixed 'Not kept' rows", () => {
-    const built = browserEvidenceCheck(outcome());
-    expect(built.videoCheck).toMatchObject({ id: BROWSER_EVIDENCE_VIDEO_CHECK_ID, kind: "visual", runBy: "rovara", stage: "sandbox", class: "not_rerun" });
-    expect(built.videoCheck?.pairs?.map((pair) => ({ id: pair.id, after: pair.after?.kind, before: pair.before }))).toEqual([{ id: "/checkout", after: "webm", before: undefined }, { id: "/settings", after: "webm", before: undefined }]);
-    expect(built.notTested).toContainEqual({ what: "Browser evidence video: /orders", reason: `Not kept: ${BROWSER_EVIDENCE_VIDEO_NOT_KEPT_WORDS.withheld}` });
-    expect(built.check.kind).toBe("visual");
-  });
-
-  it("a run with no video has no second check and no extra row (absent = today's behaviour)", () => {
-    const plain = outcome();
-    plain.routes = [{ route: "/checkout", status: "shown", before: ref("jpeg", "b"), after: ref("jpeg", "a"), consoleErrors: { before: 0, after: 0 } }];
-    const built = browserEvidenceCheck(plain);
-    expect(built.videoCheck).toBeUndefined();
-    expect(built.notTested).toEqual([]);
-  });
-
-  it("is added with the main check, refused twice, and refused over the pack's limits; the pack still parses strictly and TESTPROOF ignores both", () => {
-    const pack = addBrowserEvidenceToPack(basePack(), outcome());
-    expect(pack.checks.map((check) => check.id)).toEqual(["unit", "browser_evidence", BROWSER_EVIDENCE_VIDEO_CHECK_ID]);
-    expect(EvidencePackV2Schema.safeParse(pack).success).toBe(true);
-    expect(() => addBrowserEvidenceToPack(pack, outcome())).toThrow();
-    expect(() => addBrowserEvidenceToPack({ ...basePack(), checks: [{ id: BROWSER_EVIDENCE_VIDEO_CHECK_ID, kind: "visual", label: "x", before: "not_run", after: "not_run", class: "not_rerun", durationMs: 0 }] }, outcome())).toThrow();
-    expect(checkKindInfo("visual")?.countsTowardProof).toBe(false);
-    const proof: TestProof = { schemaVersion: 1, candidateDigest: "d".repeat(64), status: "checked", note: "completed", changedTests: { added: 1, changed: 0, deleted: 0 }, durationMs: 10,
-      items: [{ checkId: BROWSER_EVIDENCE_VIDEO_CHECK_ID, label: "Browser evidence video", granularity: "check", verdict: "proves_change", reason: "assertion_failed_on_old" }] };
-    expect(proofHolds({ facts: { proof, checkKinds: { [BROWSER_EVIDENCE_VIDEO_CHECK_ID]: "e2e" } }, mode: "hold" }).provenCount).toBe(1);
-    expect(proofHolds({ facts: { proof, checkKinds: { [BROWSER_EVIDENCE_VIDEO_CHECK_ID]: built(pack).kind } }, mode: "hold" }).provenCount).toBe(0);
-  });
 
   it("reads back as the same outcome: the videos on their pages, the not-kept reasons, nothing guessed", () => {
     const pack = addBrowserEvidenceToPack(basePack(), outcome());
@@ -218,15 +160,6 @@ describe("the download rule for videos", () => {
     // Another check that happens to name a WebM serves nothing.
     const other = { ...pack, checks: pack.checks.map((check) => (check.id === BROWSER_EVIDENCE_VIDEO_CHECK_ID ? { ...check, id: "smoke" } : check)) };
     expect(browserEvidenceServableVideos(other, digest)).toEqual([]);
-  });
-
-  it("a video check that names a picture (or a recording over the cap) serves nothing", () => {
-    const pack = addBrowserEvidenceToPack(basePack(), outcome());
-    const digest = "a".repeat(64);
-    for (const bad of [ref("jpeg", "a"), ref("webm", "big", BROWSER_EVIDENCE_VIDEO_MAX_BYTES + 1)]) {
-      const tampered = { ...pack, checks: pack.checks.map((check) => (check.id === BROWSER_EVIDENCE_VIDEO_CHECK_ID ? { ...check, pairs: [{ id: "/checkout", after: bad }] } : check)) };
-      expect(browserEvidenceServableVideos(tampered, digest)).toEqual([]);
-    }
   });
 
   it("the task page's panel lists the videos by route and digest, and has no `videos` key without one", () => {

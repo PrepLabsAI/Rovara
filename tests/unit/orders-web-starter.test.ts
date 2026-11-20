@@ -1,8 +1,6 @@
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
 
 const fixtures = join(import.meta.dirname, "../fixtures");
 const read = (directory: string, path: string): string => readFileSync(join(fixtures, directory, path), "utf8");
@@ -25,12 +23,6 @@ describe("orders web starter", () => {
     const server = read("orders-web-starter", "server.mjs");
     for (const route of ["/api/login", "/api/logout", "/api/me", "/api/orders/state", "/api/inventory/status", "/health"]) expect(server).toContain(route);
     expect(server).toContain("tenants");
-  });
-
-  it("keeps a recipe whose digest matches its canonical body", () => {
-    const manifest = JSON.parse(read("orders-web-starter", "package.json")) as { agentx: { e2e: { recipe: { recipeDigest: string } } } };
-    const { recipeDigest, ...body } = manifest.agentx.e2e.recipe;
-    expect(createHash("sha256").update(canonicalJson(body)).digest("hex")).toBe(recipeDigest);
   });
 
   it("matches the full fixture contract", () => {

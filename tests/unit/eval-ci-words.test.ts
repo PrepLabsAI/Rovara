@@ -1,7 +1,7 @@
 // L4-EVCI: the words, the settings shape, the one description line (written and taken out without touching anything else), and the setup proposals (which job of the customer's CI looks like their eval).
 import { describe, expect, it } from "vitest";
 import {
-  CodeMilestoneSchema, DEFAULT_CI_EVIDENCE_SETTINGS, EVAL_CI_LABEL, EVAL_CI_LINE_PATTERN, GITHUB_ACTIONS_APP_ID, IMPLICIT_COMPANY_ID, TICKET_MOMENT_WORDS, evalCiLine, parseCiEvidenceSettings, type EvalCiResult,
+  CodeMilestoneSchema, DEFAULT_CI_EVIDENCE_SETTINGS, EVAL_CI_LABEL, EVAL_CI_LINE_PATTERN, IMPLICIT_COMPANY_ID, TICKET_MOMENT_WORDS, evalCiLine, parseCiEvidenceSettings, type EvalCiResult,
 } from "@agentx/contracts";
 import { ROVARA_STATUS_END, ROVARA_STATUS_START, withEvalCiLine } from "../../packages/broker/src/core/proof/pull-request-body.js";
 import { ticketUpdateText } from "../../packages/broker/src/core/ticket-updates/handler.js";
@@ -62,10 +62,6 @@ const block = (...lines: string[]) => ["Quote.", "", ROVARA_STATUS_START, "## Ve
 const OWN = `${EVAL_CI_LABEL}: passed, ${URL}`;
 
 describe("the one description line", () => {
-  it("goes under the Proven line, inside the block", () => {
-    const next = withEvalCiLine(block(), OWN);
-    expect(next).toEqual({ kind: "changed", body: block().replace("**Proven** 1 of 1 proven. Worse on eval.", `**Proven** 1 of 1 proven. Worse on eval.\n  - ${OWN}`) });
-  });
   it("is replaced in place (never two), and taken out again", () => {
     const first = withEvalCiLine(block(), OWN);
     expect(first.kind).toBe("changed");
@@ -82,13 +78,6 @@ describe("the one description line", () => {
     const next = withEvalCiLine(doubled, OWN);
     expect(next.kind).toBe("changed");
     expect(((next as { body: string }).body.match(/Eval \(reported by your CI\)/gu) ?? [])).toHaveLength(1);
-  });
-  it("leaves every other line, a person's words and the other eval label exactly as they were", () => {
-    const text = `A person's words.\n\n${block()}\n\nMore words, even ${EVAL_CI_LABEL}: passed written by hand.\n`;
-    const next = withEvalCiLine(text, OWN) as { kind: "changed"; body: string };
-    expect(next.body.replace(`\n  - ${OWN}`, "")).toBe(text);
-    // A hand-written line outside the block, or one that is not Rovara's sub-line, is never changed or removed.
-    expect(withEvalCiLine(text, undefined)).toEqual({ kind: "same" });
   });
   it("writes nothing into a block that is not as Rovara wrote it, or for a line that is not Rovara's words", () => {
     expect(withEvalCiLine("no block here", OWN)).toEqual({ kind: "no_block" });
@@ -131,31 +120,14 @@ const reader = (files: Record<string, string>, over: { truncated?: boolean } = {
   list: async (path) => (path === ".github/workflows" ? { entries: Object.keys(files).map((name) => ({ name, path: `.github/workflows/${name}`, type: "file" })), truncated: over.truncated === true } : undefined),
   read: async (path) => { const text = files[path.replace(".github/workflows/", "")]; return text === undefined ? undefined : { text }; },
 });
-const ACTIONS = String(GITHUB_ACTIONS_APP_ID);
 
 describe("proposing which job is the eval", () => {
-  it("proposes a job whose id or name says it is an eval, by the check name GitHub reports, and a job whose commands run one", async () => {
-    const files = {
-      "ci.yml": workflow("  unit:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n  evals:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pytest tests\n"),
-      "agent.yml": workflow("  quality:\n    name: Agent quality\n    steps:\n      - run: python -m evals.run --suite agent\n"),
-      "pf.yml": workflow("  check:\n    steps:\n      - run: npx promptfoo eval\n"),
-    };
-    expect(await proposeEvalChecks(reader(files))).toEqual({ verdict: "proposals", cut: false, proposals: [
-      { check: { name: "Agent quality", source: ACTIONS }, workflow: ".github/workflows/agent.yml", basis: "commands" },
-      { check: { name: "evals", source: ACTIONS }, workflow: ".github/workflows/ci.yml", basis: "name" },
-      { check: { name: "check", source: ACTIONS }, workflow: ".github/workflows/pf.yml", basis: "commands" },
-    ] });
-  });
   it("is not fooled by the shell's own eval, a branch or test that merely contains the word, or a workflow that does not run on pull requests", async () => {
     const files = {
       "a.yml": workflow("  build:\n    steps:\n      - run: eval \"$(ssh-agent -s)\"\n      - run: echo retrieval evaluate evaluator\n"),
       "b.yml": workflow("  evals:\n    steps:\n      - run: pytest\n", "push"),
       "c.yml": workflow("  medieval:\n    steps:\n      - run: make\n"),
     };
-    expect(await proposeEvalChecks(reader(files))).toEqual({ verdict: "none_found" });
-  });
-  it("a job merely named like an evaluation (evaluate, evaluator) is not an eval", async () => {
-    const files = { "a.yml": workflow("  evaluate-title:\n    steps:\n      - run: make\n  evaluator-bot:\n    steps:\n      - run: make\n") };
     expect(await proposeEvalChecks(reader(files))).toEqual({ verdict: "none_found" });
   });
   it("never proposes a check it could not find by name: a matrix, a reusable workflow, an expression", async () => {

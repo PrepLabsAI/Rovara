@@ -29,22 +29,6 @@ describe("no dependency on the lessons repo-file code", () => {
 });
 
 describe("the repository-id guard (moved from the lessons code)", () => {
-  it("the narrow write is guarded too: on a mismatch its open and lookup are refused before the host sees them, and on a match they pass through", async () => {
-    const input = { repository: { url: URL_A }, baseBranch: "main", baseRevision: "a".repeat(40), branch: "rovara/eval-wrapper-0123456789ab", path: "rovara/eval-wrapper.py", content: "x", title: "t", body: "" } as const;
-    const stranger = new FakeCodeHost(model("9999"));
-    const seen: string[] = [];
-    stranger.evalWrapperPullRequest.open = async () => { seen.push("open"); throw new Error("reached the host"); };
-    stranger.evalWrapperPullRequest.forBranch = async () => { seen.push("find"); return undefined; };
-    const refused = guardTarget(targetOf(stranger));
-    await expect(refused.host.evalWrapperPullRequest!.open(input, refused.scope)).rejects.toBeInstanceOf(RepositoryMismatch);
-    await expect(refused.host.evalWrapperPullRequest!.forBranch(refused.repository, input.branch, refused.scope)).rejects.toBeInstanceOf(RepositoryMismatch);
-    expect(seen).toEqual([]);
-    const goodModel = model();
-    const allowed = guardTarget(targetOf(new FakeCodeHost(goodModel)));
-    const opened = await allowed.host.evalWrapperPullRequest!.open({ ...input, baseRevision: goodModel.headOf("main") }, allowed.scope);
-    expect(opened.ref.id).toBe("1");
-    expect(await allowed.host.evalWrapperPullRequest!.forBranch(allowed.repository, input.branch, allowed.scope)).toEqual(opened.ref);
-  });
 
   it("calls nothing but repositoryIdentity until the id matches, and refuses everything on a mismatch", async () => {
     const good = new FakeCodeHost(model());

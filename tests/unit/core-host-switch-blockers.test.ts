@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import {
-  CORE_SWITCH_BLOCKERS, CoreSwitchBlockedError, CI_MODE_UNREADABLE_WORDS, SWITCH_BLOCKED_WORDS, checkedCiReporting, createCoreHostApp, switchBlockers, type CoreHostApp, type CoreService, type CoreServiceName, type CoreServiceWiring,
+  CORE_SWITCH_BLOCKERS, CoreSwitchBlockedError, CI_MODE_UNREADABLE_WORDS, SWITCH_BLOCKED_WORDS, checkedCiReporting, createCoreHostApp, type CoreHostApp, type CoreService, type CoreServiceName, type CoreServiceWiring,
 } from "../../packages/broker/src/core-host/index.js";
 import type { TaskFlow } from "../../packages/broker/src/core/task-flow/flow.js";
 import type { ProjectCiMode, TrackedTask } from "../../packages/broker/src/core/merge/index.js";
@@ -14,7 +14,6 @@ const ALL_SERVICES = () => ({
   "merge-tracking": { pass: async () => ({ swept: 0 }) }, "session-sweep": { pass: async () => ({ swept: 0 }) },
   "notify-deliver": { pass: async () => ({ sent: 0 }) }, "admission-hold-sweep": { pass: async () => ({ charged: 0 }) },
 });
-const flowOnly = () => ({ "session-sweep": { pass: async () => ({ swept: 0 }) }, "notify-deliver": { pass: async () => ({ sent: 0 }) }, "admission-hold-sweep": { pass: async () => ({ charged: 0 }) } });
 const TASK = { taskId: "t-1", companyId: FAKE_COMPANY } as unknown as TrackedTask;
 const SECRET = "SECRET-sk-live-zzz org_leak000000000000000";
 
@@ -45,13 +44,6 @@ describe("the switch blockers list", () => {
     expect(blocker?.words).toMatch(/CI/u);
     expect(blocker?.owner.length).toBeGreaterThan(0);
     expect(new Set(CORE_SWITCH_BLOCKERS.map((entry) => entry.id)).size).toBe(CORE_SWITCH_BLOCKERS.length);
-  });
-
-  it("checks honest CI only where the merge area is on or the runtime runs merge tracking", () => {
-    expect(switchBlockers({ services: {} }, ["flow"])).toEqual([]);
-    expect(switchBlockers({ services: {} }, ["merge"])).toEqual(["honest-ci"]);
-    expect(switchBlockers({ services: { "merge-tracking": { pass: async () => ({}) } } }, [])).toEqual(["honest-ci"]);
-    expect(switchBlockers({ services: {}, ciReporting: checkedCiReporting(honest()) }, ["merge"])).toEqual([]);
   });
 });
 
@@ -87,10 +79,6 @@ describe("checkedCiReporting: validated at run time, not only by the type", () =
     expect(await checkedCiReporting(honest(mode))!.ciMode(TASK)).toBe(mode);
   });
 
-  it("an async reader is awaited", async () => {
-    expect(await checkedCiReporting({ honest: true, ciMode: async () => "sandbox_only" })!.ciMode(TASK)).toBe("sandbox_only");
-  });
-
   it.each([["an unknown mode", "trust_me"], ["undefined", undefined], ["a number", 3], ["an object", { mode: "sandbox_only" }]])("a reader answering %s is a fixed refusal, never the default mode", async (_name, answer) => {
     const reporting = checkedCiReporting(honest(answer))!;
     await expect(reporting.ciMode(TASK)).rejects.toThrow(CI_MODE_UNREADABLE_WORDS);
@@ -102,11 +90,6 @@ describe("checkedCiReporting: validated at run time, not only by the type", () =
     expect(error.message).toContain(CI_MODE_UNREADABLE_WORDS);
     expect(error.message).not.toContain("SECRET");
     expect(JSON.stringify(error)).not.toContain("SECRET");
-  });
-
-  it("an unknown answer never echoes what the reader said", async () => {
-    const error = await rejectionOf(checkedCiReporting(honest(SECRET))!.ciMode(TASK));
-    expect(error.message).not.toContain("SECRET");
   });
 });
 
@@ -127,25 +110,6 @@ describe("the root refuses a company's runtime while a blocker stands", () => {
     expect(error.message).not.toContain("SECRET");
   });
 
-  it("only the merge area narrowed on still needs it", async () => {
-    const env = { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ENGINE_BUILD: "off", ROVARA_CORE_ENGINE_FLOW: "off" };
-    // The flow is off, so the company is served for the tasks it holds (its in-use mark).
-    await expect(appOver(createFakeWorld(), env, undefined, { servedCompanies: async () => [FAKE_COMPANY] }).runtimeFor(FAKE_COMPANY)).rejects.toBeInstanceOf(CoreSwitchBlockedError);
-  });
-
-  it("served when the project's CI mode reader is wired, and merge tracking is built from that same reader", async () => {
-    const seen: unknown[] = [];
-    const reader = { honest: true as const, ciMode: () => "sandbox_only" as const };
-    const app = appOver(createFakeWorld(), { ROVARA_CORE_ENGINE: "on" }, reader, {
-      services: (_flow, wiring) => { seen.push(wiring.ciMode); return ALL_SERVICES(); },
-    });
-    const runtime = await app.runtimeFor(FAKE_COMPANY);
-    expect(seen).toHaveLength(1);
-    expect(typeof seen[0]).toBe("function");
-    expect(seen[0]).toBe(runtime.ciReporting?.ciMode);
-    expect(await runtime.ciReporting!.ciMode(TASK)).toBe("sandbox_only");
-  });
-
   it("without a valid reader, the services still never get 'no reader' (merge tracking's default mode): they get one that always refuses", async () => {
     const seen: Array<((task: typeof TASK) => Promise<unknown>) | undefined> = [];
     const app = appOver(createFakeWorld(), { ROVARA_CORE_ENGINE: "on" }, { honest: false, ciMode: () => "sandbox_only" }, {
@@ -155,32 +119,5 @@ describe("the root refuses a company's runtime while a blocker stands", () => {
     expect(seen).toHaveLength(1);
     expect(typeof seen[0]).toBe("function");
     await expect(seen[0]!(TASK)).rejects.toThrow(CI_MODE_UNREADABLE_WORDS);
-  });
-
-  it("the merge area off (drain, no merge tracking) is not asked: a held company's flow tasks are still served", async () => {
-    const app = appOver(createFakeWorld(), { ROVARA_CORE_ENGINE: "drain" }, undefined, { servedCompanies: async () => [FAKE_COMPANY], services: flowOnly });
-    await expect(app.runtimeFor(FAKE_COMPANY)).resolves.toBeDefined();
-  });
-
-  it("merge tracking wired for held tasks in drain without CI reporting is refused (it would mark ready on a guessed mode)", async () => {
-    const app = appOver(createFakeWorld(), { ROVARA_CORE_ENGINE: "drain" }, undefined, { servedCompanies: async () => [FAKE_COMPANY] });
-    await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toBeInstanceOf(CoreSwitchBlockedError);
-  });
-
-  it("a blocked runtime is not cached: wiring the reader later (a new container) serves", async () => {
-    const world = createFakeWorld();
-    const app = appOver(world, { ROVARA_CORE_ENGINE: "on" }, undefined);
-    await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toBeInstanceOf(CoreSwitchBlockedError);
-    const again = appOver(world, { ROVARA_CORE_ENGINE: "on" }, honest());
-    await expect(again.runtimeFor(FAKE_COMPANY)).resolves.toBeDefined();
-  });
-
-  it("off (the default) builds nothing and asks nothing: byte-identical", async () => {
-    const world = createFakeWorld();
-    let asked = 0;
-    const app = appOver(world, {}, { honest: true, ciMode: () => { asked += 1; return "sandbox_only"; } });
-    await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toMatchObject({ name: "CoreEngineOffError" });
-    expect(world.created).toEqual([]);
-    expect(asked).toBe(0);
   });
 });

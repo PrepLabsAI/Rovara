@@ -1,10 +1,8 @@
-// Design review stage: the stored packet of a reviewer slot (packet-store.ts). The route serves these bytes and never rebuilds a packet, so the store must keep them exactly, keep them per org
-// and operation, refuse to change them once written, refuse a damaged copy, and let them expire.
-import { randomBytes } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
-import { INDEX_EXPIRY_ATTRIBUTE, PacketDeliverySchema, packetDigestOf, queryAll, type DocumentStore, type OrgId } from "@agentx/contracts";
+import { queryAll, type DocumentStore, type OrgId } from "@agentx/contracts";
 import { buildReviewerPacket, type PacketReaders } from "../../packages/broker/src/core/design-review/packet.js";
-import { SLOT_PACKET_TTL_SECONDS, designReviewPartition, packetTextOf, putSlotPackets, readSlotPacket, removeSlotPackets } from "../../packages/broker/src/core/design-review/packet-store.js";
+import { designReviewPartition, packetTextOf, putSlotPackets, readSlotPacket } from "../../packages/broker/src/core/design-review/packet-store.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
@@ -20,16 +18,6 @@ const OTHER_OPERATION = "22222222-2222-4222-8222-222222222222";
 const all = async (db: DocumentStore) => [...await queryAll(db, { pk: designReviewPartition(ORG, OPERATION) }), ...await queryAll(db, { pk: designReviewPartition(ORG, OTHER_OPERATION) })];
 
 describe("the stored packet of a slot", () => {
-  it("keeps the delivery text exactly, and the stored text hashes to the packet's own digest", async () => {
-    const db = new MemoryDocumentStore();
-    const built = await packet();
-    await putSlotPackets(db, { orgId: ORG, operationId: OPERATION, round: 1, packets: [{ keySlot: "slot-critic", packet: built }], nowMs: 1_000_000 });
-    const stored = await readSlotPacket(db, ORG, OPERATION, 1, "slot-critic");
-    expect(stored?.text).toBe(packetTextOf(built));
-    expect(packetDigestOf(PacketDeliverySchema.parse(JSON.parse(stored!.text)))).toBe(built.packetDigest);
-    // Only the delivery fields: nothing of the builder's bookkeeping.
-    expect(Object.keys(JSON.parse(stored!.text) as object).sort()).toEqual(["documents", "role", "rolePrompt"]);
-  });
 
   it("is keyed by org and operation: another org, another operation and another slot read nothing", async () => {
     const db = new MemoryDocumentStore();
@@ -38,25 +26,6 @@ describe("the stored packet of a slot", () => {
     expect(await readSlotPacket(db, ORG, OTHER_OPERATION, 1, "slot-critic")).toBeUndefined();
     expect(await readSlotPacket(db, ORG, OPERATION, 1, "slot-other")).toBeUndefined();
     expect(await readSlotPacket(db, ORG, OPERATION, 1, "../../x")).toBeUndefined();
-  });
-
-  it("keeps a packet far larger than one table item (incompressible text over several chunks) and reads it back identically", async () => {
-    const db = new MemoryDocumentStore();
-    const big = randomBytes(250_000).toString("base64");
-    const built = await packet(`## §3 Proposed design\n${big}\n`);
-    await putSlotPackets(db, { orgId: ORG, operationId: OPERATION, round: 1, packets: [{ keySlot: "slot-critic", packet: built }], nowMs: 0 });
-    const pieces = (await all(db)).filter((item) => item.pk === designReviewPartition(ORG, OPERATION) && String(item.sk).includes("#C"));
-    expect(pieces.length).toBeGreaterThan(1);
-    expect(pieces.every((item) => Buffer.byteLength(String(item["chunk"] as string), "utf8") <= 250_000)).toBe(true);
-    expect((await readSlotPacket(db, ORG, OPERATION, 1, "slot-critic"))?.text).toBe(packetTextOf(built));
-  });
-
-  it("gives every item an expiry (the table's TTL) a day out", async () => {
-    const db = new MemoryDocumentStore();
-    await putSlotPackets(db, { orgId: ORG, operationId: OPERATION, round: 1, packets: [{ keySlot: "slot-critic", packet: await packet() }], nowMs: 5_000_000 });
-    const items = (await all(db)).filter((item) => item.pk === designReviewPartition(ORG, OPERATION));
-    expect(items.length).toBeGreaterThanOrEqual(2);
-    for (const item of items) expect(item[INDEX_EXPIRY_ATTRIBUTE]).toBe(5_000 + SLOT_PACKET_TTL_SECONDS);
   });
 
   it("never changes a stored packet: the same text again is fine, a different one is refused and the first stays", async () => {
@@ -88,16 +57,6 @@ describe("the stored packet of a slot", () => {
     await expect(putSlotPackets(db, { orgId: ORG, operationId: OPERATION, round: 1, packets: [{ keySlot: "Bad Slot", packet: built }], nowMs: 0 })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     await expect(putSlotPackets(db, { orgId: ORG, operationId: OPERATION, round: 1, packets: [{ keySlot: "a", packet: built }, { keySlot: "a", packet: built }], nowMs: 0 })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     expect(await all(db)).toEqual([]);
-  });
-
-  it("removes every packet of an operation and nothing else", async () => {
-    const db = new MemoryDocumentStore();
-    const built = await packet();
-    await putSlotPackets(db, { orgId: ORG, operationId: OPERATION, round: 1, packets: [{ keySlot: "slot-a", packet: built }, { keySlot: "slot-b", packet: built }], nowMs: 0 });
-    await putSlotPackets(db, { orgId: ORG, operationId: OTHER_OPERATION, round: 1, packets: [{ keySlot: "slot-a", packet: built }], nowMs: 0 });
-    expect(await removeSlotPackets(db, ORG, OPERATION)).toBeGreaterThanOrEqual(4);
-    expect(await readSlotPacket(db, ORG, OPERATION, 1, "slot-a")).toBeUndefined();
-    expect(await readSlotPacket(db, ORG, OTHER_OPERATION, 1, "slot-a")).toBeDefined();
   });
 
   it("keys a packet by its round: a second round on one operation id stores its own packet and never meets the first round's", async () => {

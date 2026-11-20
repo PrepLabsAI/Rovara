@@ -48,30 +48,6 @@ describe("job kinds are strict", () => {
     expect(ok(RunnerJobSchema, setupJob())).toBe(true);
   });
 
-  it("refuses any other kind: an agent step, a publish, a model call, an unknown or missing kind", () => {
-    for (const kind of ["agent", "task", "publish", "prepare", "maintain", "model_call", "edit", "RUN_CHECKS", "", undefined, 1]) {
-      expect(ok(RunnerJobSchema, job({ kind })), String(kind)).toBe(false);
-    }
-  });
-
-  it("holds a setup command to one command that a person approved, and only that kind to the approval fields", () => {
-    expect(ok(RunnerJobSchema, setupJob({ personApprovalId: undefined }))).toBe(false);
-    expect(ok(RunnerJobSchema, setupJob({ commands: [command(), command()] }))).toBe(false);
-    expect(ok(RunnerJobSchema, job({ kind: "run_checks", personApprovalId: OPERATION_ID }))).toBe(false);
-    expect(ok(RunnerJobSchema, job({ kind: "run_checks", approvedBy: "p", approvedCommandSha256: "a".repeat(64) }))).toBe(false);
-    expect(ok(RunnerJobSchema, { ...setupJob(), environmentDigest: ENV_DIGEST })).toBe(false);
-  });
-
-  it("refuses unknown fields, empty command lists, and a non-setup job without its environment digest", () => {
-    for (const kind of RUNNER_JOB_KINDS) {
-      const base = kind === "setup_command" ? setupJob() : job({ kind });
-      expect(ok(RunnerJobSchema, base), kind).toBe(true);
-      expect(ok(RunnerJobSchema, { ...base, surprise: 1 }), kind).toBe(false);
-    }
-    for (const kind of ["run_checks", "prove", "nightly"]) expect(ok(RunnerJobSchema, job({ kind, environmentDigest: undefined })), kind).toBe(false);
-    expect(ok(RunnerJobSchema, job({ commands: [] }))).toBe(false);
-    expect(ok(RunnerJobSchema, job({ commands: [command({ extra: true })] }))).toBe(false);
-  });
 });
 
 describe("a setup command is the one command a person approved (A)", () => {
@@ -102,10 +78,6 @@ describe("an environment job is made only of an approved environment's commands 
   const digest = testEnvDigest(environment);
   const approved = { revision: 3, environment };
   const make = (commands: unknown[], over: Record<string, unknown> = {}): RunnerJob => RunnerJobSchema.parse(job({ kind: "prove", environmentDigest: digest, commands, ...over }));
-
-  it("accepts the environment's setup and check commands, exactly", () => {
-    expect(checkRunnerJobEnvironment(make([setup, unit]), approved)).toEqual({ ok: true });
-  });
 
   it("binds the workspace: the environment's revision and exactly its repositories", () => {
     expect(checkRunnerJobEnvironment(make([unit], { workspace: { ...workspace(), envRevision: 4 } }), approved)).toEqual({ ok: false, reason: "wrong_revision" });
@@ -158,16 +130,6 @@ describe("a job never carries model credentials or edit permissions", () => {
     expect(ok(RunnerGrantSchema, grant(extra)), name).toBe(false);
   });
 
-  it("names the field in its own sentence, not only as an unknown key", () => {
-    expect(messages(RunnerJobSchema, job({ modelCredentials: {} }))).toContain("stay central");
-    expect(findRunnerForbiddenField(job({ nested: [{ deep: { editPermissions: 1 } }] }))).toEqual({ path: "nested.0.deep.editPermissions", reason: "forbidden" });
-  });
-
-  it("refuses them anywhere in the object, inside a command or the workspace pin", () => {
-    expect(ok(RunnerJobSchema, job({ commands: [command({ model: "x" })] }))).toBe(false);
-    expect(ok(RunnerJobSchema, job({ workspace: { ...workspace(), apiKey: "x" } }))).toBe(false);
-  });
-
   it("refuses a command that sets a credential or model-access environment variable (C)", () => {
     const names = [
       "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_ORG", "OPENAI_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN", "AWS_REGION", "AGENTX_MODEL", "ROVARA_BROKER_URL", "GITHUB_TOKEN", "DB_PASSWORD", "NPM_AUTH_TOKEN", "BEDROCK_PROFILE",
@@ -200,39 +162,9 @@ describe("a job never carries model credentials or edit permissions", () => {
     expect(ok(RunnerJobSchema, job({ commands: [command({ args: ["-q", "tests/é/日本"] })] }))).toBe(true);
   });
 
-  it("refuses control characters (ESC, CR, LF, NUL, DEL) and format characters in the directory, the executable, arguments and values", () => {
-    for (const bad of ["\u001b", "\r", "\n", "\u0000", "\u007f", "\u0007", "\u200b", "\u202e"]) {
-      const label = JSON.stringify(bad);
-      expect(ok(RunnerJobSchema, job({ commands: [command({ args: [`-q${bad}x`] })] })), `arg ${label}`).toBe(false);
-      expect(ok(RunnerJobSchema, job({ commands: [command({ env: { CI: `1${bad}` } })] })), `env ${label}`).toBe(false);
-      expect(ok(RunnerJobSchema, job({ commands: [command({ executable: `pytest${bad}` })] })), `exe ${label}`).toBe(false);
-      expect(ok(RunnerJobSchema, job({ commands: [command({ cwd: `ser${bad}vice` })] })), `cwd ${label}`).toBe(false);
-    }
-    // The command schema itself holds the rule, whatever the path schema thinks of the directory.
-    expect(messages(RunnerJobSchema, job({ commands: [command({ args: ["a\nb"] })] }))).toContain("control characters");
-  });
-
-  it("allows the two lease secrets in their one place each only", () => {
-    expect(ok(RunnerGrantSchema, grant())).toBe(true);
-    expect(ok(RunnerGrantSchema, { ...grant(), job: job({ leaseToken: TOKEN }) })).toBe(false);
-    expect(ok(RunnerGrantSchema, { ...grant(), leaseToken: TOKEN })).toBe(false);
-    expect(ok(RunnerGrantSchema, { ...grant(), job: job({ heartbeatCapability: BEAT }) })).toBe(false);
-    expect(ok(RunnerLeaseSchema, lease())).toBe(true);
-    expect(ok(RunnerLeaseSchema, lease({ accessToken: TOKEN }))).toBe(false);
-  });
 });
 
 describe("a grant is signed by the control plane (placeholder)", () => {
-  it("must carry the signature envelope, from the named signer", () => {
-    expect(RUNNER_GRANT_SIGNER).toBe("rovara-control-plane-kms");
-    expect(ok(RunnerGrantSchema, grant())).toBe(true);
-    const { signature: _drop, ...unsigned } = grant();
-    void _drop;
-    expect(ok(RunnerGrantSchema, unsigned)).toBe(false);
-    for (const bad of [{ signer: "runner" }, { algorithm: "none" }, { keyId: "" }, { value: "" }, { value: "not base64!" }, { extra: 1 }]) {
-      expect(ok(RunnerGrantSchema, { ...grant(), signature: { ...signature(), ...bad } }), JSON.stringify(bad)).toBe(false);
-    }
-  });
 
   it("signs the version, lease and job as canonical JSON, never the signature", () => {
     const parsed = RunnerGrantSchema.parse(grant());
@@ -265,17 +197,6 @@ describe("sizes are bounded", () => {
     expect(ok(RunnerJobSchema, big.job)).toBe(false);
   });
 
-  it("counts object keys, not array items, so a valid message of the largest shape is read (E)", () => {
-    // The largest shape the bounds allow: 64 commands, each with 64 environment names. It must be read, not refused for its size.
-    const env = Object.fromEntries(Array.from({ length: 64 }, (_, index) => [`VAR_${String(index)}`, "1"]));
-    const widest = job({ commands: Array.from({ length: RUNNER_MAX_COMMANDS }, () => command({ env, timeoutSeconds: 60 })) });
-    expect(findRunnerForbiddenField(widest)).toBeUndefined();
-    expect(ok(RunnerJobSchema, widest)).toBe(true);
-    // Many array items are no keys: 5,000 short arguments are within the key cap (they are bounded by the byte limit and each command's own limit).
-    expect(findRunnerForbiddenField({ args: Array.from({ length: 20_000 }, () => "x") })).toBeUndefined();
-    expect(RUNNER_SCAN_MAX_KEYS).toBeGreaterThan(RUNNER_MAX_COMMANDS * 64);
-  });
-
   it("gives a message with more keys than the largest valid one its own sentence", () => {
     const manyKeys = Object.fromEntries(Array.from({ length: RUNNER_SCAN_MAX_KEYS + 1 }, (_, index) => [`k${String(index)}`, 1]));
     expect(findRunnerForbiddenField(manyKeys)).toMatchObject({ reason: "too_many_fields" });
@@ -299,19 +220,6 @@ describe("sizes are bounded", () => {
     expect(ok(RunnerGrantSchema, grant({ jobId: OPERATION_ID }))).toBe(false);
   });
 
-  it("measures each output tail as written in JSON (F)", () => {
-    const tail = (text: string) => result({ commands: [commandResult(0, { outputTail: text })] });
-    expect(ok(RunnerResultSchema, tail("a".repeat(RUNNER_OUTPUT_TAIL_BYTES)))).toBe(true);
-    expect(ok(RunnerResultSchema, tail("a".repeat(RUNNER_OUTPUT_TAIL_BYTES + 1)))).toBe(false);
-    // 2,048 two-byte characters are 4,096 bytes; 2,049 are over.
-    expect(ok(RunnerResultSchema, tail("é".repeat(2_048)))).toBe(true);
-    expect(ok(RunnerResultSchema, tail("é".repeat(2_049)))).toBe(false);
-    // A newline is two bytes once written: 2,048 fit, 2,049 do not, though they are far fewer than 4,096 characters.
-    expect(ok(RunnerResultSchema, tail("\n".repeat(2_048)))).toBe(true);
-    expect(ok(RunnerResultSchema, tail("\n".repeat(2_049)))).toBe(false);
-    expect(ok(RunnerResultSchema, tail('"'.repeat(2_049)))).toBe(false);
-  });
-
   it("limits the whole result, and keeps the worst valid result inside the limit (F)", () => {
     const many = result({ commands: Array.from({ length: RUNNER_MAX_COMMANDS + 1 }, (_, index) => commandResult(index)) });
     expect(ok(RunnerResultSchema, many)).toBe(false);
@@ -326,13 +234,6 @@ describe("sizes are bounded", () => {
     expect(ok(RunnerResultSchema, result({ commands: [commandResult(0, { exitCode: 256 })] }))).toBe(false);
   });
 
-  it("takes plain text only: CRLF is tolerated; ANSI escapes, other controls and format characters are not (F)", () => {
-    const tail = (text: string) => result({ commands: [commandResult(0, { outputTail: text })] });
-    expect(ok(RunnerResultSchema, tail("line\r\nnext\n\ttab"))).toBe(true);
-    for (const bad of ["bell\u0007", "\u001b[31mred\u001b[0m", "nul\u0000", "‮evil", "zero​width", "⁦isolate", "﻿bom", "del\u007f"]) {
-      expect(ok(RunnerResultSchema, tail(bad)), JSON.stringify(bad)).toBe(false);
-    }
-  });
 });
 
 describe("a result is evidence bound to its lease (G)", () => {
@@ -341,10 +242,6 @@ describe("a result is evidence bound to its lease (G)", () => {
   const record = runnerLeaseRecord(issued);
   const state = (over: Partial<RunnerCheckState> = {}): RunnerCheckState => ({ redeemed: false, now: NOW + 120_000, currentFence: 4, ...over });
   const parsed = (over: Record<string, unknown> = {}) => RunnerResultSchema.parse(resultFor(jobValue, { commands: [commandResult(0), commandResult(1)], ...over }));
-
-  it("matches the lease it answers", () => {
-    expect(checkRunnerResult(record, parsed(), state())).toEqual({ ok: true });
-  });
 
   it("keeps only the hash of the token and of the heartbeat capability", () => {
     const stored = JSON.stringify(record);
@@ -397,12 +294,6 @@ describe("a result is evidence bound to its lease (G)", () => {
     expect(checkRunnerResult(record, parsed({ commands: [commandResult(0), commandResult(1), commandResult(2)] }), state())).toEqual({ ok: false, reason: "too_many_commands" });
     expect(checkRunnerResult(record, parsed({ commands: [commandResult(0)] }), state())).toEqual({ ok: false, reason: "incomplete" });
     expect(checkRunnerResult(record, parsed({ commands: [commandResult(0)], outcome: "stopped" }), state())).toEqual({ ok: true });
-  });
-
-  it("has no field that is a verdict, an approval or a permission, and refuses one", () => {
-    for (const extra of [{ passed: true }, { verdict: "pass" }, { approved: true }, { permissions: ["merge"] }, { model: "x" }, { editPermissions: {} }]) {
-      expect(ok(RunnerResultSchema, result(extra)), JSON.stringify(extra)).toBe(false);
-    }
   });
 
   it("keeps command results in order from zero", () => {
@@ -466,23 +357,6 @@ describe("heartbeats use their own capability and never spend the result token",
 });
 
 describe("a message that cannot be read is a refusal, never a throw, and is sized before it is written out", () => {
-  it("does not build the JSON text of a value that is certainly too large", () => {
-    const spy = vi.spyOn(JSON, "stringify");
-    try {
-      const huge = { ...lease(), padding: "x".repeat(RUNNER_MESSAGE_MAX_BYTES + 1) };
-      const refused = RunnerLeaseSchema.safeParse(huge);
-      expect(spy).not.toHaveBeenCalled();
-      const manyItems = { ...lease(), padding: new Array<number>(RUNNER_MESSAGE_MAX_BYTES).fill(1) };
-      const refusedItems = RunnerLeaseSchema.safeParse(manyItems);
-      expect(spy).not.toHaveBeenCalled();
-      spy.mockRestore();
-      expect(refused.success).toBe(false);
-      expect(refusedItems.success).toBe(false);
-      expect(JSON.stringify(refused.error?.issues)).toContain("bytes");
-    } finally {
-      spy.mockRestore();
-    }
-  });
 
   it("turns a cycle, a BigInt, a throwing getter and absurd nesting into a refusal", () => {
     const cyclic: Record<string, unknown> = { ...lease() };

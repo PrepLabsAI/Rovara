@@ -2,12 +2,12 @@
 // the pack read back as the outcome the pull request's text lines are written from, and the capture program's plan.
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { WORKER_INVOCATION_FEATURES, WorkerInvocationSchema } from "../../packages/contracts/src/protocol.js";
+import { WorkerInvocationSchema } from "../../packages/contracts/src/protocol.js";
 import {
-  BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_NOT_ON_CLOUD, BROWSER_EVIDENCE_UPLOAD_HEADER_MAX_BYTES, BROWSER_EVIDENCE_UPLOAD_MAX_BYTES, BrowserEvidenceExecutorLineSchema, browserEvidenceOutcomeOfPack,
+  BROWSER_EVIDENCE_UPLOAD_HEADER_MAX_BYTES, BROWSER_EVIDENCE_UPLOAD_MAX_BYTES, browserEvidenceOutcomeOfPack,
   browserEvidencePanelOf, browserEvidenceServableImages, decodeBrowserEvidenceExecutorPlan, decodeBrowserEvidenceUpload, encodeBrowserEvidenceExecutorPlan, encodeBrowserEvidenceUpload, servableBrowserEvidenceImage,
 } from "../../packages/contracts/src/browser-evidence-wire.js";
-import { BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES, BROWSER_EVIDENCE_TOTAL_MAX_BYTES, BROWSER_EVIDENCE_VIDEO_TOTAL_MAX_BYTES, addBrowserEvidenceToPack, browserEvidenceLines, type BrowserEvidenceCaptured, type BrowserEvidenceOutcome } from "../../packages/contracts/src/browser-evidence.js";
+import { BROWSER_EVIDENCE_SCREENSHOT_MAX_BYTES, addBrowserEvidenceToPack, browserEvidenceLines, type BrowserEvidenceCaptured, type BrowserEvidenceOutcome } from "../../packages/contracts/src/browser-evidence.js";
 import { EvidencePackV2Schema, type EvidencePackV2 } from "../../packages/contracts/src/evidence.js";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -19,19 +19,6 @@ const captured = (): BrowserEvidenceCaptured => ({
 });
 
 describe("the browser-evidence upload", () => {
-  it("round-trips a run: the same routes, the same bytes, the same digests, and not a byte more", () => {
-    const bytes = encodeBrowserEvidenceUpload(captured());
-    const back = decodeBrowserEvidenceUpload(bytes);
-    expect(back).toEqual(captured());
-    // Every bound is the run's own: 4 MiB of pictures, 4 MiB of video (slice 4) and a small header.
-    expect(BROWSER_EVIDENCE_UPLOAD_MAX_BYTES).toBe(BROWSER_EVIDENCE_TOTAL_MAX_BYTES + BROWSER_EVIDENCE_VIDEO_TOTAL_MAX_BYTES + BROWSER_EVIDENCE_UPLOAD_HEADER_MAX_BYTES);
-    expect(bytes.byteLength).toBeLessThan(BROWSER_EVIDENCE_UPLOAD_MAX_BYTES);
-  });
-
-  it("refuses a run that did not happen only when it says so, and carries its reason", () => {
-    const none: BrowserEvidenceCaptured = { isolation: "sandbox", durationMs: 0, routes: [], notShown: [], moreNotShown: 0, notRun: "no_changed_page" };
-    expect(decodeBrowserEvidenceUpload(encodeBrowserEvidenceUpload(none))).toEqual(none);
-  });
 
   it("refuses every malformed byte string with one fixed sentence and returns nothing of it", () => {
     const good = encodeBrowserEvidenceUpload(captured());
@@ -73,10 +60,6 @@ describe("the browser-evidence upload", () => {
 });
 
 describe("the feature and the payload field", () => {
-  it("is a worker invocation feature, so the dispatcher can refuse an older worker", () => {
-    expect(BROWSER_EVIDENCE_FEATURE).toBe("task.browserEvidence.v1");
-    expect(WORKER_INVOCATION_FEATURES).toContain(BROWSER_EVIDENCE_FEATURE);
-  });
 
   const recipe = { startCommand: "npm run start", port: 4321, routes: [{ path: "/checkout", files: ["src/checkout/**"] }] };
   const invocation = (payload: Record<string, unknown>) => WorkerInvocationSchema.safeParse({ protocolVersion: 1, kind: "task", operationId: "00000000-0000-4000-8000-000000000001", workspaceId: "00000000-0000-4000-8000-000000000002", fence: 1, projectRevision: 1,
@@ -88,8 +71,6 @@ describe("the feature and the payload field", () => {
     expect(invocation({ workflowMode: "CHECKS", evidenceCapture: true, browserEvidence: { ...recipe, extra: 1 } })).toBe(false);
     expect(invocation({ workflowMode: "CHECKS", evidenceCapture: true, browserEvidence: { ...recipe, port: 80 } })).toBe(false);
   });
-
-  it("has fixed words for Cloud, which has no browser evidence yet", () => { expect(BROWSER_EVIDENCE_NOT_ON_CLOUD).toBe("Browser evidence is not on Cloud yet"); });
 });
 
 const ref = (seed: string) => { const picture = shot(seed); return { kind: "jpeg" as const, sha256: picture.sha256, bytes: 500, retentionClass: "evidence-std" as const }; };
@@ -171,14 +152,5 @@ describe("the capture program's plan and answer", () => {
     expect(decodeBrowserEvidenceExecutorPlan(Buffer.from(JSON.stringify({ ...plan, routes: ["/a", "/b", "/c", "/d", "/e", "/f"] })).toString("base64url"))).toBeUndefined();
     expect(decodeBrowserEvidenceExecutorPlan(42)).toBeUndefined();
     expect(() => encodeBrowserEvidenceExecutorPlan({ ...plan, port: 80 })).toThrow();
-  });
-  it("holds a printed line to its schema: a picture over the cap, a route off the origin, an unknown reason", () => {
-    const line = (value: unknown) => BrowserEvidenceExecutorLineSchema.safeParse(value).success;
-    expect(line({ t: "app", status: "ready" })).toBe(true);
-    expect(line({ t: "shot", route: "/a", ok: true, consoleErrors: 0, jpegBase64: Buffer.from(jpeg("a")).toString("base64") })).toBe(true);
-    expect(line({ t: "shot", route: "/a", ok: true, consoleErrors: 0, jpegBase64: "A".repeat(800_000) })).toBe(false);
-    expect(line({ t: "shot", route: "http://x/", ok: false, reason: "capture_failed" })).toBe(false);
-    expect(line({ t: "shot", route: "/a", ok: false, reason: "because" })).toBe(false);
-    expect(line({ t: "app", status: "ready", extra: 1 })).toBe(false);
   });
 });

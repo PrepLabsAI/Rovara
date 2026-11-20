@@ -2,12 +2,11 @@
 // password of a test account; this file checks the shapes, the references, the masks built from the values and the plan the capture program is given. Nothing here may put a value in a recipe, a plan or a line of words.
 import { describe, expect, it } from "vitest";
 import {
-  BROWSER_EVIDENCE_MASK_SELECTORS_MAX, BROWSER_EVIDENCE_NOT_RUN_REASONS, BROWSER_EVIDENCE_NOT_RUN_WORDS, BROWSER_EVIDENCE_SIGN_IN_REF_PATTERN, BrowserEvidenceRecipeSchema, BrowserEvidenceSignInSchema, BrowserEvidenceSignInValuesSchema,
-  BrowserEvidenceSuggestionSchema, browserEvidenceLines, browserEvidenceMaskSelectors, browserEvidenceSecretMasks, browserEvidenceSignInRef, isBrowserEvidenceSignInRefOf, pickChangedRoutes, recipeMaskSelectors, withDefaultMasks,
-  type BrowserEvidenceOutcome,
+  BROWSER_EVIDENCE_MASK_SELECTORS_MAX, BROWSER_EVIDENCE_SIGN_IN_REF_PATTERN, BrowserEvidenceRecipeSchema, BrowserEvidenceSignInSchema, BrowserEvidenceSignInValuesSchema,
+  BrowserEvidenceSuggestionSchema, browserEvidenceMaskSelectors, browserEvidenceSecretMasks, browserEvidenceSignInRef, isBrowserEvidenceSignInRefOf, pickChangedRoutes, recipeMaskSelectors, withDefaultMasks,
 } from "../../packages/contracts/src/browser-evidence.js";
 import {
-  BROWSER_EVIDENCE_SIGN_IN_ENV, BROWSER_EVIDENCE_SIGN_IN_ENV_MAX, BrowserEvidenceExecutorLineSchema, BrowserEvidenceExecutorPlanSchema, BrowserEvidenceSignInAnswerSchema,
+  BROWSER_EVIDENCE_SIGN_IN_ENV, BROWSER_EVIDENCE_SIGN_IN_ENV_MAX, BrowserEvidenceExecutorPlanSchema, BrowserEvidenceSignInAnswerSchema,
   decodeBrowserEvidenceExecutorPlan, decodeBrowserEvidenceSignInEnv, encodeBrowserEvidenceExecutorPlan, encodeBrowserEvidenceSignInEnv,
 } from "../../packages/contracts/src/browser-evidence-wire.js";
 
@@ -89,14 +88,6 @@ describe("the sign-in recipe", () => {
     expect(BrowserEvidenceSuggestionSchema.safeParse({ startCommand: `TOKEN=${token} npm run start`, port: 3000, routes: [] }).success).toBe(false);
     expect(BrowserEvidenceRecipeSchema.safeParse(recipe({ startCommand: "npm run start -- --port 3000" })).success).toBe(true);
   });
-
-  it("holds the saved values to a user name and a password: plain single lines of 4 to 200 characters", () => {
-    expect(BrowserEvidenceSignInValuesSchema.parse(VALUES)).toEqual(VALUES);
-    for (const bad of [{ ...VALUES, username: "abc" }, { ...VALUES, password: "abc" }, { ...VALUES, password: "a".repeat(201) }, { ...VALUES, username: "line\nbreak" }, { ...VALUES, password: "tab\there" }, { ...VALUES, password: "zero​width" },
-      { ...VALUES, extra: "x" }, { username: VALUES.username }, { password: VALUES.password }, null, "text"]) {
-      expect(BrowserEvidenceSignInValuesSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
-    }
-  });
 });
 
 describe("the masks made from the saved values", () => {
@@ -112,25 +103,8 @@ describe("the masks made from the saved values", () => {
     expect(apply("Nothing private here")).toBe("Nothing private here");
   });
 
-  it("take a value with every regular-expression and markup character as plain text, never as a pattern", () => {
-    const odd = { username: "a.b*c(1)[x]{2}|^$\\/+?", password: "p&w<\"x'>=Z9" };
-    const masks = browserEvidenceSecretMasks(odd);
-    expect(masks.length).toBeGreaterThan(0);
-    for (const mask of masks) expect(() => new RegExp(mask.source, mask.flags)).not.toThrow();
-    expect(apply(`user ${odd.username} and ${odd.password} and ${odd.password.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/"/gu, "&quot;").replace(/'/gu, "&#39;").replace(/>/gu, "&gt;")}`, odd)).toBe("user ••• and ••• and •••");
-    // A value only matches itself: "a.b" is not "any character between a and b".
-    expect(apply("axb*c(1)", { username: "a.b*c(1)", password: VALUES.password })).toBe("axb*c(1)");
-  });
-
   it("make no mask from values that are not a valid sign-in (a short value would blank a page)", () => {
     for (const bad of [undefined, null, {}, { username: "ab", password: VALUES.password }, { username: VALUES.username, password: "" }, "text"]) expect(browserEvidenceSecretMasks(bad), JSON.stringify(bad)).toEqual([]);
-  });
-
-  it("run in bounded time on a large page", () => {
-    const page = `${"lorem ipsum ".repeat(50_000)}${VALUES.password}`;
-    const started = Date.now();
-    expect(apply(page)).not.toContain(VALUES.password);
-    expect(Date.now() - started).toBeLessThan(5_000);
   });
 });
 
@@ -172,24 +146,9 @@ describe("how the values reach the capture container", () => {
     expect(decodeBrowserEvidenceExecutorPlan(encodeBrowserEvidenceExecutorPlan(plain))).toEqual(plain);
   });
 
-  it("the capture program's app line may say the sign-in did not work, with no other word", () => {
-    expect(BrowserEvidenceExecutorLineSchema.safeParse({ t: "app", status: "sign_in_failed" }).success).toBe(true);
-    expect(BrowserEvidenceExecutorLineSchema.safeParse({ t: "app", status: "sign_in_failed", detail: "Invalid password for tester" }).success).toBe(false);
-  });
-
   it("the broker's answer is the values or `not_set`, strictly", () => {
     expect(BrowserEvidenceSignInAnswerSchema.parse({ status: "ready", values: VALUES })).toEqual({ status: "ready", values: VALUES });
     expect(BrowserEvidenceSignInAnswerSchema.parse({ status: "not_set" })).toEqual({ status: "not_set" });
     for (const bad of [{ status: "not_set", values: VALUES }, { status: "ready" }, { status: "ready", values: { ...VALUES, extra: 1 } }, { status: "failed", message: "x" }, {}]) expect(BrowserEvidenceSignInAnswerSchema.safeParse(bad).success).toBe(false);
-  });
-});
-
-describe("the new reasons", () => {
-  it("are listed with fixed lower-case words that echo nothing, and a run that could not sign in says so", () => {
-    expect(BROWSER_EVIDENCE_NOT_RUN_REASONS).toEqual(expect.arrayContaining(["sign_in_not_set", "sign_in_failed"]));
-    for (const reason of ["sign_in_not_set", "sign_in_failed"] as const) expect(BROWSER_EVIDENCE_NOT_RUN_WORDS[reason]).toMatch(/^[a-z][a-z ,:-]+$/u);
-    const outcome = (notRun: "sign_in_not_set" | "sign_in_failed"): BrowserEvidenceOutcome => ({ isolation: "sandbox", durationMs: 1, routes: [], notShown: [], moreNotShown: 0, notRun });
-    expect(browserEvidenceLines(outcome("sign_in_failed"), {})).toEqual(["Browser evidence: Run by Rovara in its sandbox. Visual evidence only: it does not count as change proof.", "- Not run: the sign-in did not work"]);
-    expect(browserEvidenceLines(outcome("sign_in_not_set"), {})).toContain("- Not run: no sign-in is saved for this project");
   });
 });

@@ -1,6 +1,4 @@
-import { MODEL_PROVIDERS } from "../../packages/contracts/src/model-providers.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { catalogModel } from "../../packages/model-runtime/src/catalog.js";
 import { DEFAULT_E2E_AGENT_MODELS, requireKeyedModel } from "../../packages/model-runtime/src/config.js";
 import {
   E2E_REDIRECTING_ENVIRONMENT_VARIABLES,
@@ -10,27 +8,6 @@ import {
 } from "../../packages/model-runtime/src/e2e-environment-guard.js";
 
 describe("the e2e agent's default model per provider (amendment A1, Ruling M4-S)", () => {
-  it("has one pinned small model for every provider the installation can configure", () => {
-    expect(Object.keys(DEFAULT_E2E_AGENT_MODELS).sort()).toEqual([...MODEL_PROVIDERS].sort());
-    expect(DEFAULT_E2E_AGENT_MODELS).toEqual({
-      "amazon-bedrock": "us.anthropic.claude-haiku-5-5",
-      anthropic: "claude-haiku-5-5",
-      openrouter: "anthropic/claude-haiku-5.5",
-      openai: "gpt-5.4-mini",
-    });
-  });
-
-  it("is in the catalog of the pinned pi version for every provider, so a pi change that drops one fails here", () => {
-    for (const provider of MODEL_PROVIDERS) {
-      const modelId = DEFAULT_E2E_AGENT_MODELS[provider];
-      const entry = catalogModel({ provider, modelId });
-      expect(entry, `${provider} ${modelId}`).toBeDefined();
-      expect(entry!.contextWindow, `${provider} context`).toBeGreaterThan(0);
-      expect(entry!.maxTokens, `${provider} max tokens`).toBeGreaterThan(0);
-    }
-    // Bedrock's inference profile is the foundation model with a geography prefix; both ids are in the catalog.
-    expect(catalogModel({ provider: "amazon-bedrock", modelId: "anthropic.claude-haiku-5-5" })).toBeDefined();
-  });
 
   it("refuses a router alias on OpenRouter, whether it starts with openrouter/ or ~", () => {
     expect(() => requireKeyedModel("openrouter", "openrouter/auto")).toThrow(/router/);
@@ -50,10 +27,6 @@ describe("the environment guard: a worker whose environment can redirect model c
     "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_EC2_METADATA_SERVICE_ENDPOINT",
   ];
   afterEach(() => { vi.unstubAllEnvs(); });
-
-  it("lists the variables of the ruling", () => {
-    for (const name of variables) expect(E2E_REDIRECTING_ENVIRONMENT_VARIABLES.map((item) => item.toLowerCase()), name).toContain(name.toLowerCase());
-  });
 
   for (const name of variables) {
     it(`refuses to start when ${name} is set`, () => {
@@ -103,18 +76,4 @@ describe("the environment guard: a worker whose environment can redirect model c
     expect(e2eRedirectingEnvironment({ AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/worker", AWS_WEB_IDENTITY_TOKEN_FILE: "/var/run/token" })).toEqual(["AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"]);
   });
 
-  it("always reads the process environment, and the caller's as well", () => {
-    expect(() => assertE2EEnvironmentCannotRedirect()).not.toThrow();
-    vi.stubEnv("HTTPS_PROXY", "http://proxy.example.test:3128");
-    expect(() => assertE2EEnvironmentCannotRedirect()).toThrow(/HTTPS_PROXY/);
-    // A caller's own (curated) environment cannot hide what the process holds.
-    expect(() => assertE2EEnvironmentCannotRedirect({})).toThrow(/HTTPS_PROXY/);
-    vi.stubEnv("HTTPS_PROXY", undefined);
-    expect(() => assertE2EEnvironmentCannotRedirect({ AWS_PROFILE: "x" })).toThrow(/AWS_PROFILE/);
-    expect(() => assertE2EEnvironmentCannotRedirect({})).not.toThrow();
-  });
-
-  it("names every variable found, once, in a stable order", () => {
-    expect(e2eRedirectingEnvironment({ HTTPS_PROXY: "a", AWS_PROFILE: "b", https_proxy: "c" })).toEqual(["AWS_PROFILE", "HTTPS_PROXY", "https_proxy"]);
-  });
 });

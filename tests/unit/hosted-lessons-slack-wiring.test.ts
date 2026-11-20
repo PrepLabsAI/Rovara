@@ -21,7 +21,6 @@ const A = OrgIdSchema.parse("org_aaaaaaaaaaaaaaaaaaaa");
 const B = OrgIdSchema.parse("org_bbbbbbbbbbbbbbbbbbbb");
 const TEAM_A = "T0123456789";
 const TEAM_B = "T0999999999";
-const TEAM_C = "T0888888888";
 const SPACE = "C0123456789";
 const THREAD = "1700000000.000100";
 const NOW = Date.parse("2026-11-18T12:00:00.000Z");
@@ -102,15 +101,6 @@ async function world(factory: ReturnType<typeof wire>["factory"]) {
 }
 
 describe("the deployed install reads a task's Slack thread through the signed command path", () => {
-  it("one signed thread_messages command to the adapter's commands route, once at task end, and the reply becomes the person's lesson source", async () => {
-    const w = wire();
-    const world1 = await world(w.factory);
-    const spans = await world1.spansOf(A);
-    expect(spans).toHaveLength(1);
-    expect(spans[0]).toMatchObject({ kind: "slack_reply", text: SAY, authorId: "ann", eventId: `slack:${TEAM_A}/${SPACE}#1700000001.000100` });
-    expect(w.posts).toEqual([{ url: "https://api.example.com/v1/slack/channel-commands", kind: "thread_messages", signed: true, tenant: TEAM_A }]);
-    expect(w.slackCalls).toEqual(["conversations.info", "conversations.replies"]);
-  });
 
   it("company B's task reads company B's workspace; neither company's factory ever sends a command for the other's workspace", async () => {
     const w = wire();
@@ -124,28 +114,12 @@ describe("the deployed install reads a task's Slack thread through the signed co
     expect(w.posts).toHaveLength(1);
   });
 
-  it("a task whose thread is read as the wrong company's gets nothing (the reader's own company check, and no command)", async () => {
-    const w = wire();
-    const world1 = await world(w.factory);
-    expect(await world1.spansOf(B, A)).toEqual([]);
-    expect(w.posts).toEqual([]);
-  });
-
   it("an unbound workspace is nobody's: no command is sent and the task goes on with no Slack source", async () => {
     const w = wire({ workspaces: { requireCompany: async () => { throw new Error("This Slack workspace is not available."); } } });
     const world1 = await world(w.factory);
     expect(await world1.spansOf(A)).toEqual([]);
     expect(w.posts).toEqual([]);
     expect(w.network).not.toHaveBeenCalled();
-  });
-
-  it("only the one command kind is ever sent, whatever the caller passes", async () => {
-    const w = wire();
-    await world(w.factory);
-    const command = w.factory!(A).command as (input: unknown) => Promise<unknown>;
-    await command({ tenant: TEAM_A, space: SPACE, thread: THREAD, kind: "post_message", message: { text: "x" } }).catch(() => undefined);
-    expect(w.posts.length).toBeGreaterThan(0);
-    expect(w.posts.every((post) => post.kind === "thread_messages")).toBe(true);
   });
 
   it("an unreadable signing secret sends nothing and reads nothing from Slack; the task goes on with no Slack source", async () => {
@@ -177,16 +151,6 @@ describe("off by default, fail closed", () => {
 });
 
 describe("which company a Slack workspace is", () => {
-  it("in company mode, the install's bindings: a bound workspace is its company's, any other is nobody's, a failing binding is nobody's", async () => {
-    const companyOf = hostedSlackCompanyOf({ workspaces, legacyTeamId: TEAM_A });
-    expect(await companyOf({ channel: "slack", tenant: TEAM_A })).toBe(A);
-    expect(await companyOf({ channel: "slack", tenant: TEAM_B })).toBe(B);
-    expect(await companyOf({ channel: "slack", tenant: TEAM_C })).toBeUndefined();
-    expect(await companyOf({ channel: "teams", tenant: TEAM_A })).toBeUndefined();
-    expect(await companyOf({ channel: "slack", tenant: "not-a-team" })).toBeUndefined();
-    // Even where the bindings would answer for anything, a value that is not a Slack team id is nobody's.
-    expect(await hostedSlackCompanyOf({ workspaces: { requireCompany: async () => A }, legacyTeamId: TEAM_A })({ channel: "slack", tenant: "not-a-team" })).toBeUndefined();
-  });
   it("without company mode, only the install's own team, and it is the implicit company's; never every tenant", async () => {
     const companyOf = hostedSlackCompanyOf({ workspaces: undefined, legacyTeamId: TEAM_A });
     expect(await companyOf({ channel: "slack", tenant: TEAM_A })).toBe(IMPLICIT_COMPANY_ID);

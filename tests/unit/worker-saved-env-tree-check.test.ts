@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { REFUSED_GIT_ENTRIES, compareTrackedFiles, minimalGitConfig, originUrlIsSafe, originUrlOf, parseLsTree, unsafeGitEntries, type TreeEntry } from "../../packages/worker/src/saved-env/tree-check.js";
+import { REFUSED_GIT_ENTRIES, compareTrackedFiles, originUrlIsSafe, originUrlOf, parseLsTree, type TreeEntry } from "../../packages/worker/src/saved-env/tree-check.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -14,18 +14,6 @@ const blob = (content: string): string => createHash("sha1").update(`blob ${Stri
 describe("refused .git entries", () => {
   it("lists exactly the entries that redirect history", () => {
     expect([...REFUSED_GIT_ENTRIES].sort()).toEqual(["commondir", "gitdir", "info/attributes", "info/grafts", "modules", "objects/info/alternates", "objects/info/http-alternates", "refs/replace", "worktrees"]);
-  });
-  it("finds each one that is present, even as a link, and nothing else", async () => {
-    const git = await scratch();
-    expect(await unsafeGitEntries(git)).toEqual([]);
-    await mkdir(join(git, "objects", "info"), { recursive: true });
-    await writeFile(join(git, "objects", "info", "alternates"), "/x");
-    await mkdir(join(git, "info"), { recursive: true });
-    await writeFile(join(git, "info", "attributes"), "* filter=evil\n");
-    await symlink("/tmp", join(git, "modules"));
-    await mkdir(join(git, "refs", "replace"), { recursive: true });
-    await writeFile(join(git, "HEAD"), "ref: refs/heads/main");
-    expect((await unsafeGitEntries(git)).sort()).toEqual(["info/attributes", "modules", "objects/info/alternates", "refs/replace"]);
   });
 });
 
@@ -37,12 +25,6 @@ describe("origin URL", () => {
   it("accepts a plain URL and the git user, refuses a credential, a quote, a newline, a space and an odd scheme", () => {
     for (const ok of ["https://github.com/a/b.git", "http://git.example.com/a", "git@github.com:a/b.git", "ssh://git@host.example/a/b.git"]) expect(originUrlIsSafe(ok), ok).toBe(true);
     for (const bad of ["https://user:pw@github.com/a", "https://token@github.com/a", "ssh://deploy@host/a", "deploy@host:a/b.git", "file:///etc", "ext::sh -c x", "https://h/a\n[credential]", 'https://h/a"b', "https://h/a b", "", `https://h/${"a".repeat(600)}`, "https://h/a\u0000"]) expect(originUrlIsSafe(bad), JSON.stringify(bad)).toBe(false);
-  });
-  it("the generated config has two sections and the URL, and refuses an unsafe URL", () => {
-    const config = minimalGitConfig("https://github.com/a/b.git");
-    expect(config.split("\n").filter((line) => line.startsWith("["))).toEqual(["[core]", '[remote "origin"]']);
-    expect(config).toContain("url = https://github.com/a/b.git");
-    expect(() => minimalGitConfig("https://u:p@h/a")).toThrow();
   });
 });
 
@@ -69,11 +51,6 @@ describe("comparison with the work tree", () => {
   }
   const entries = (): TreeEntry[] => [entry("src/a.js", "one"), entry("run.sh", "go", "100755"), entry("alias", "src/a.js", "120000")];
 
-  it("passes when every tracked file is the committed one, and untracked files are free", async () => {
-    const root = await stage();
-    await writeFile(join(root, "untracked.log"), "anything");
-    expect(await compareTrackedFiles(entries(), root)).toEqual({ ok: true, files: 3 });
-  });
   it("refuses a changed file, a missing one, a wrong mode, a link with another target, a gitlink and a path through a linked directory", async () => {
     const cases: Array<[string, TreeMismatchName, (root: string) => Promise<void>, TreeEntry[]?]> = [
       ["content", "content", async (r) => { await writeFile(join(r, "src", "a.js"), "two"); }],

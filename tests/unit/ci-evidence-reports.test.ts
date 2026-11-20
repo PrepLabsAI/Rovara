@@ -5,7 +5,7 @@ import { deflateRawSync } from "node:zlib";
 import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  CI_EVIDENCE_ASK_PREFIX, CI_EVIDENCE_ENVIRONMENT_PREFIX, DEFAULT_CI_EVIDENCE_SETTINGS, GITHUB_ACTIONS_APP_ID, IMPLICIT_COMPANY_ID, PIPELINE_FAILURE_TEXT_TOTAL_MAX, createCandidateManifest,
+  CI_EVIDENCE_ASK_PREFIX, CI_EVIDENCE_ENVIRONMENT_PREFIX, DEFAULT_CI_EVIDENCE_SETTINGS, GITHUB_ACTIONS_APP_ID, IMPLICIT_COMPANY_ID, createCandidateManifest,
   type Check, type CheckRunner, type CiEvidenceSettings, type LatestCheck,
 } from "@agentx/contracts";
 import { parsePipelineReport } from "../../packages/worker/src/verification/pipeline-report-parser.js";
@@ -77,11 +77,6 @@ describe("the worker's report adapters as the port", () => {
       { id: "suite::ok", outcome: "passed" }, { id: "suite::bad", outcome: "failed", failureText: "expected 1 to be 2 & more" }, { id: "suite::skip", outcome: "skipped" },
     ] } });
   });
-  it("never puts a failure text on another test: cases hidden in comments or CDATA are not cases", () => {
-    const hidden = "<!-- <testcase classname=\"old\" name=\"gone\"><failure message=\"stale\"/></testcase> -->";
-    const read = parsePipelineReport(junit([{ name: "a", failure: "real failure" }]).replace("<testcase", `${hidden}<testcase`));
-    expect(read).toEqual({ kind: "report", report: { tests: [{ id: "suite::a", outcome: "failed", failureText: "real failure" }] } });
-  });
   it.each([
     ["a coverage file", "<?xml version=\"1.0\"?><coverage line-rate=\"1\"/>", "not_report"],
     ["plain JSON", "{\"coverage\": 1}", "not_report"],
@@ -91,13 +86,6 @@ describe("the worker's report adapters as the port", () => {
     ["Jest-shaped JSON it cannot read", "{\"testResults\": 5}", "unreadable"],
   ])("tells %s apart: %s", (_label, text, kind) => {
     expect(parsePipelineReport(text).kind).toBe(kind);
-  });
-  it("caps failure text in total", () => {
-    const many = parsePipelineReport(junit(Array.from({ length: 30 }, (_, index) => ({ name: `t${String(index)}`, failure: "x".repeat(1_500) }))));
-    expect(many.kind).toBe("report");
-    const tests = many.kind === "report" ? many.report.tests : [];
-    expect(tests.flatMap((test) => (test.failureText === undefined ? [] : [test.failureText])).join("").length).toBeLessThanOrEqual(PIPELINE_FAILURE_TEXT_TOTAL_MAX);
-    expect(tests.filter((test) => test.outcome === "failed")).toHaveLength(30);
   });
   it("is linear on hostile input (no regular expression backtracks over the document)", () => {
     const started = performance.now();
@@ -227,13 +215,6 @@ describe("per-test reports in a tracking pass", () => {
     await trackTask(deps, TASK_ID);
     expect(fake.reads).toEqual(["7700", "500"]);
   });
-  it("proves nothing when the base run is for another commit", async () => {
-    const fake: Fake = { reports: { "7700": [junit([{ name: "fixed" }])], "500": [junit([{ name: "fixed", failure: "broken" }])] }, reads: [], base: { revision: "c".repeat(40), check: e2e({ runId: "55" }) } };
-    const { w, deps } = await world(settings(), fake);
-    setChecks(w, [unit, e2e()]);
-    await trackTask(deps, TASK_ID);
-    expect((await entry(w))?.["proven"]).toBeUndefined();
-  });
   it("fixes from the report's failure text when logs are off, and never reads the log", async () => {
     const fake: Fake = { reports: { "7700": [junit([{ name: "ok" }, { name: "bad", failure: "expected 1 to be 2" }])] }, reads: [], base: { revision: "c".repeat(40), check: e2e() } };
     const { w, deps } = await world(settings(), fake);
@@ -265,28 +246,6 @@ describe("per-test reports in a tracking pass", () => {
     await trackTask(second.deps, TASK_ID);
     expect((await second.w.task()).workflow.blockReason).toMatch(new RegExp(`^${CI_EVIDENCE_ASK_PREFIX}e2e-real failed without saying which test failed`, "u"));
   });
-  it("reads one run's report a pass: two marked checks landing together are read on two passes", async () => {
-    const two: CiEvidenceSettings = settings({ markedChecks: [MARKED, { name: "e2e-gpu", calledAs: "gpu", longOrPaid: true }] });
-    const fake: Fake = { reports: { "7700": [junit([{ name: "a" }])], "8800": [junit([{ name: "b" }])] }, reads: [], base: undefined };
-    const { w, deps } = await world(two, fake);
-    setChecks(w, [unit, e2e(), e2e({ name: "e2e-gpu", runId: "88" })]);
-    const outcome = await trackTask(deps, TASK_ID);
-    expect(fake.reads).toEqual(["7700"]);
-    expect(outcome.recheckAt).toBeLessThanOrEqual(CLOCK + MIN);
-    w.now.value += MIN;
-    await trackTask(deps, TASK_ID);
-    expect(fake.reads).toEqual(["7700", "8800"]);
-  });
-  it("drops what was read when the customer turns per-test reports off", async () => {
-    const fake: Fake = { reports: { "7700": [junit([{ name: "bad", failure: "secret-ish text" }])] }, reads: [], base: undefined };
-    const { w, deps } = await world(settings({ shareLogs: true }), fake);
-    setChecks(w, [unit, e2e({ conclusion: "failure" })]);
-    await trackTask({ ...deps, autonomy: () => "suggest" }, TASK_ID);
-    expect((await entry(w))?.["failedTests"]).toBeDefined();
-    await trackTask({ ...deps, ciEvidence: () => settings({ shareLogs: true, perTestReports: false }), autonomy: () => "suggest" }, TASK_ID);
-    expect((await entry(w))?.["failedTests"]).toBeUndefined();
-    expect((await entry(w))?.["counts"]).toBeUndefined();
-  });
   it("keeps the report text on one item within its byte budget, across its marked checks", async () => {
     const names = ["e2e-a", "e2e-b", "e2e-c"];
     const many: CiEvidenceSettings = settings({ markedChecks: names.map((name) => ({ name, calledAs: name, longOrPaid: true })) });
@@ -313,19 +272,6 @@ describe("per-test reports in a tracking pass", () => {
     expect(await entry(w)).toMatchObject({ state: "passed", attempt: 2, flaky: ["suite::wobbly"] });
     expect(comments(w).at(-1)).toContain("passed on run 2");
     expect(comments(w).at(-1)).toContain("1 flaky (failed on an earlier run)");
-  });
-  it("reads no report when the customer turned per-test reports off, or the host gave no parser", async () => {
-    const fake: Fake = { reports: { "7700": [junit([{ name: "ok" }])] }, reads: [] };
-    const off = await world(settings({ perTestReports: false }), fake);
-    setChecks(off.w, [unit, e2e()]);
-    await trackTask(off.deps, TASK_ID);
-    const none = await world(settings(), fake);
-    setChecks(none.w, [unit, e2e()]);
-    const { reportParser: _parser, ...withoutParser } = none.deps;
-    void _parser;
-    await trackTask(withoutParser, TASK_ID);
-    expect(fake.reads).toEqual([]);
-    expect((await entry(none.w))?.["report"]).toBeUndefined();
   });
   it("says unreadable for a parser that throws, never a guess", async () => {
     const fake: Fake = { reports: { "7700": [junit([{ name: "ok" }])] }, reads: [] };

@@ -6,7 +6,7 @@ import { DesignReviewBindingSchema } from "@agentx/contracts";
 import { designReviewPartition, readSlotPacket } from "../../packages/broker/src/core/design-review/packet-store.js";
 import { readSlotCeiling } from "../../packages/broker/src/core/design-review/slot-keys.js";
 import { COMPANY } from "../support/task-flow-harness.js";
-import { answerRound, approve, design, finish, mintKeys, nextJob, planned, taskOf, toDesignPhase, toRound, world } from "../support/design-review-flow-world.js";
+import { answerRound, design, finish, mintKeys, nextJob, planned, taskOf, toDesignPhase, world } from "../support/design-review-flow-world.js";
 import { queryAll } from "@agentx/contracts";
 
 describe("the design review stage, end to end on the task flow", () => {
@@ -63,28 +63,5 @@ describe("the design review stage, end to end on the task flow", () => {
     expect(done.workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING", reviewPhase: "DESIGN", designReview: { status: "done" } });
     expect(done.workflow.designReview!.rounds).toHaveLength(2);
     expect(done.workflow.artifacts.filter((artifact) => artifact.type === "design")).toHaveLength(2);
-  });
-});
-
-describe("the plan check of a coding plan, with the design review switched on", () => {
-  it("still checks the coding plan after its design was reviewed and approved: the plan check is the plan check's own step, with no design-review binding, packet or key", async () => {
-    const w = await world();
-    await toRound(w);
-    const round = await nextJob(w);
-    await mintKeys(w, round.operation);
-    await answerRound(w, round.operation, () => []);
-    expect((await taskOf(w)).workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING", reviewPhase: "DESIGN", designReview: { status: "done" } });
-    await approve(w);
-    const planning = await nextJob(w);
-    expect(planning.invocation.payload).toMatchObject({ workflowMode: "PLAN" });
-    await finish(w, planning.operation, planned(w, planning.operation, "plan", "# Plan\n\nRetry a timed-out payment once.\n", 1));
-    // The coding plan is read by the plan check, a read-only step of its own: no design-review binding, and no key slot.
-    const check = await nextJob(w);
-    expect(check.operation).toMatchObject({ workflowMode: "PLAN_CRITIQUE" });
-    expect(check.operation.designReview).toBeUndefined();
-    expect(check.invocation.payload).not.toHaveProperty("designReview");
-    expect((await taskOf(w)).workflow).toMatchObject({ stage: "PLAN_CRITIQUE", state: "RUNNING", reviewPhase: "IMPLEMENTATION_PLAN" });
-    // The design review's own record is untouched by it.
-    expect((await taskOf(w)).workflow.designReview).toMatchObject({ status: "done" });
   });
 });

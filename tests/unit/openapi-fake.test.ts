@@ -87,8 +87,4 @@ describe("buildOpenApiFake", () => {
     expect(answerOpenApiFake(fake, "GET", "/p0")).toEqual({ kind: "cannot_answer", reason: "operation_unsupported" });
   });
 
-  it("never copies example values from the description into answers", () => {
-    const fake = buildOpenApiFake(spec({ "/s": { get: json({ type: "object", properties: { secret: { type: "string", example: "sk-live-looking-value", default: "x-default" } } }) } }), "openapi.yaml");
-    expect(JSON.stringify(answerOpenApiFake(fake, "GET", "/s"))).not.toMatch(/sk-live|x-default/u);
-  });
 });

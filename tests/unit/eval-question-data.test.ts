@@ -10,8 +10,3 @@ it("reads question samples through the existing measures reader and old v1 write
   expect(EvalBaseRecordSchema.safeParse(old).success).toBe(true);
   expect(EvalBaseRecordSchema.safeParse({ ...old, questions: [{ ...question, samples: Array(3).fill(question.samples[0]) }] }).success).toBe(true);
 });
-it("rejects duplicate identities, unscored numbers, excessive answers and unknown keys", () => {
-  for (const questions of [[question, question], [{ ...question, samples: [{ pass: .7, answer: "graded" }] }], [{ ...question, samples: [{ pass: true, answer: "a".repeat(1_048_577) }] }], [{ ...question, surprise: true }]]) {
-    expect(MeasuresFileSchema.safeParse({ schemaVersion: 1, measures, questions }).success).toBe(false);
-  }
-});

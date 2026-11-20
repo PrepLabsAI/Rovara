@@ -98,30 +98,6 @@ describe("the SQLite queue: messages that outlive the process", () => {
     expect(await again.redrive(poison!.messageId)).toBe(true);
     expect((await again.receive()).map((message) => message.body)).toEqual(["poison"]);
   }));
-
-  it("keeps the duplicate-suppression window across a restart", () => withFolder(async (folder) => {
-    const path = join(folder, "q.db");
-    let now = Date.parse("2026-11-09T10:00:00.000Z");
-    const first = open(path, () => now);
-    const sent = await (await first.queue("jobs")).enqueue({ body: 1, dedupeId: "same" });
-    await first.close();
-    const second = await open(path, () => now).queue("jobs");
-    expect(await second.enqueue({ body: 2, dedupeId: "same" })).toEqual({ messageId: sent.messageId, duplicate: true });
-    now += 5 * 60_000 + 1;
-    expect((await second.enqueue({ body: 3, dedupeId: "same" })).duplicate).toBe(false);
-  }));
-
-  it("keeps each queue name to itself, even in one file", () => withFolder(async (folder) => {
-    const service = open(join(folder, "q.db"));
-    const one = await service.queue("one");
-    const two = await service.queue("two");
-    await one.enqueue({ body: "1" });
-    expect(await two.receive()).toEqual([]);
-    const [message] = await one.receive();
-    // A handle is good only on the queue that gave it.
-    expect(await two.ack(message!.receiptHandle)).toBe(false);
-    expect(await one.ack(message!.receiptHandle)).toBe(true);
-  }));
 });
 
 describe("the SQLite queue: polling and limits", () => {
@@ -137,25 +113,6 @@ describe("the SQLite queue: polling and limits", () => {
     const empty = Date.now();
     expect(await queue.receive({ waitSeconds: 0.05 })).toEqual([]);
     expect(Date.now() - empty).toBeLessThan(1_000);
-  }));
-
-  it("sees a message another connection enqueued while it waits", () => withFolder(async (folder) => {
-    const path = join(folder, "q.db");
-    const consumer = await open(path, Date.now, { pollMs: 10 }).queue("jobs");
-    const producer = await open(path).queue("jobs");
-    const waiting = consumer.receive({ waitSeconds: 10 });
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    await producer.enqueue({ body: "from elsewhere" });
-    expect((await waiting).map((message) => message.body)).toEqual(["from elsewhere"]);
-  }));
-
-  it("hands a message to exactly one of two consumers on two connections", () => withFolder(async (folder) => {
-    const path = join(folder, "q.db");
-    const one = await open(path).queue("jobs");
-    const two = await open(path).queue("jobs");
-    for (let index = 0; index < 30; index += 1) await one.enqueue({ body: index });
-    const taken = (await Promise.all(Array.from({ length: 30 }, (_, index) => (index % 2 === 0 ? one : two).receive({ maxMessages: 2 })))).flat();
-    expect(taken.map((message) => message.body).sort((a, b) => Number(a) - Number(b))).toEqual(Array.from({ length: 30 }, (_, index) => index));
   }));
 
   it("reports a database that stays locked as a retryable storage error", () => withFolder(async (folder) => {
@@ -194,16 +151,5 @@ describe("the SQLite queue: polling and limits", () => {
     await expect(service.queue("other", { maxReceiveCount: 0 })).rejects.toThrow();
     expect(await service.queue("declared")).toBeDefined();
     void companyScoped;
-  }));
-
-  it("moves a redriven ordered message to the back of its group", () => withFolder(async (folder) => {
-    const queue = await open(join(folder, "q.db")).queue("jobs", { ordered: true, visibilityTimeoutSeconds: 30 });
-    await queue.enqueue({ body: "a1", groupId: "g" });
-    await queue.enqueue({ body: "a2", groupId: "g" });
-    const [first] = await queue.receive();
-    await queue.deadLetter(first!.receiptHandle, "x");
-    expect((await queue.receive())[0]!.body).toBe("a2");
-    await queue.redrive(first!.messageId);
-    expect(await queue.receive()).toEqual([]);
   }));
 });

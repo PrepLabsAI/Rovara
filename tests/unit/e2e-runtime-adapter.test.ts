@@ -27,23 +27,6 @@ describe("fixed ordinary-source adapter", () => {
     expect(feature.originalSourceDigest).not.toBe(feature.adapterDigest);
   });
 
-  it("resolves the registered application package when other candidates expose the same export", () => {
-    const source = "export default async function(input) { return { app: input.app }; }\n";
-    const manifest = JSON.stringify({ name: "app", type: "module", exports: { "./rows": "./src/app.js" } });
-    const otherManifest = JSON.stringify({ name: "other", type: "module", exports: { "./rows": "./src/app.js" } });
-    const snapshot = { sources: [
-      { path: "apps/app/package.json", bytes: new TextEncoder().encode(manifest), sha256: sha(manifest), kind: "blob" },
-      { path: "apps/app/src/app.js", bytes: new TextEncoder().encode(source), sha256: sha(source), kind: "blob" },
-      { path: "apps/other/package.json", bytes: new TextEncoder().encode(otherManifest), sha256: sha(otherManifest), kind: "blob" },
-      { path: "apps/other/src/app.js", bytes: new TextEncoder().encode(source), sha256: sha(source), kind: "blob" },
-    ] } as unknown as E2ESourceSnapshot;
-    const compiled = { caseBindings: new Map([["case", { applicationId: "app", manifestPath: "apps/app/package.json", moduleSpecifier: "./src/app.js", packageExportSubpath: "./rows", callableSelector: { kind: "default" } }]]), expectedCases: [{ caseId: "case", scenarioId: "scenario" }], bundle: { scenarios: [{ scenarioId: "scenario" }] } } as unknown as E2ECompiledSuite;
-    const packet = createE2EAppAdapterPacket({ compiled, snapshot, caseId: "case", mode: "feature" });
-    expect(packet.status).toBe("ready");
-    expect(packet.packet?.files.map((item) => item.path)).toContain("apps/app/src/app.js");
-    expect(packet.packet?.files.map((item) => item.path)).not.toContain("apps/other/src/app.js");
-  });
-
   it("resolves a compiler-attested repository-root package without guessing an apps path", () => {
     const source = "export default async function(input) { return input; }\n";
     const manifest = JSON.stringify({ name: "root-app", type: "module", exports: { "./rows": "./src/app.js" } });

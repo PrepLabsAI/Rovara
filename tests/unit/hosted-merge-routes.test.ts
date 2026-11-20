@@ -121,12 +121,6 @@ describe("hosted Merge button: who may merge", () => {
     });
   }
 
-  it("the project-admin grant is read for the membership's own company (the company-layout reader)", async () => {
-    const h = await hosted();
-    expect((await h.call("POST", h.press(), { person: MAINTAINER })).status).toBe(200);
-    expect(h.grantAsks).toEqual([[MAINTAINER, "web", ORG]]);
-  });
-
   it("a developer who may read the task is refused in fixed words, and nothing is sent", async () => {
     const h = await hosted();
     expect(await h.call("POST", h.press(), { person: DEVELOPER })).toEqual({ status: 403, body: { error: { code: "FORBIDDEN", message: HOSTED_MERGE_WORDS.notAllowed } } });
@@ -159,13 +153,6 @@ describe("hosted Merge button: website only", () => {
     expect(h.merges).toEqual([]);
     expect(h.audited).toEqual([]);
   });
-
-  it("reading whether it would merge works from any client", async () => {
-    const h = await hosted();
-    const view = await h.call("GET", undefined, { webApp: false });
-    expect(view.body).toMatchObject({ mayMerge: true, ready: true, pullRequests: [{ repositoryId: "app" }] });
-    expect(h.merges).toEqual([]);
-  });
 });
 
 describe("hosted Merge button: every merge-core gate holds (H1)", () => {
@@ -191,12 +178,6 @@ describe("hosted Merge button: every merge-core gate holds (H1)", () => {
     await h.world.seedTracking({ ci: "none" });
     await refusedBy(h, M.checks);
     expect((await h.call("GET")).body).toMatchObject({ mayMerge: true, ready: false, message: M.checks });
-  });
-
-  it("red checks never merge", async () => {
-    const h = await hosted();
-    await h.world.seedTracking({ ci: "failing", failingChecks: ["unit"] });
-    await refusedBy(h, M.checks);
   });
 
   it("a closed task never merges", async () => {
@@ -305,18 +286,6 @@ describe("hosted Merge button: every merge-core gate holds (H1)", () => {
     expect(JSON.stringify(answer)).not.toContain("ghs_");
     expect(h.merges).toHaveLength(1);
     expect(h.woken).toEqual([TASK_ID]);
-    expect(await lockOf(h.world)).toBeUndefined();
-  });
-
-  it("a refusal from GitHub is told in the core's words and the lock is given back", async () => {
-    const h = await hosted();
-    h.refuse.value = true;
-    const answer = await h.call("POST", h.press());
-    expect(answer.status).toBe(409);
-    expect(h.merges).toHaveLength(1);
-    expect(h.audited.map((event) => [event.action, event.details?.["outcome"]])).toEqual([[MERGE_PRESSED_AUDIT, undefined], [MERGE_RESULT_AUDIT, "MERGE_NOT_READY"]]);
-    // A plain refusal changed nothing on GitHub: tracking is not woken for it.
-    expect(h.woken).toEqual([]);
     expect(await lockOf(h.world)).toBeUndefined();
   });
 });

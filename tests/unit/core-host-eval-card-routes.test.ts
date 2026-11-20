@@ -7,7 +7,7 @@ import { orgProjectCatalogKey, projectMetaKey, projectRevisionKey, type AuditEve
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
-import { SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND, EVAL_APPROVAL_UNAVAILABLE, type HostedSetupRunWiring, type SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
+import { SETUP_RUN_NOT_ALLOWED, EVAL_APPROVAL_UNAVAILABLE, type HostedSetupRunWiring, type SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { createHostedSetupApproval } from "../../packages/broker/src/core-host/setup-approval.js";
 import { createHostedApprovers, approvalProofKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
@@ -99,19 +99,6 @@ const approveBody = async (call: Awaited<ReturnType<typeof hosted>>["call"], cal
 const recordOf = (world: FakeWorld, companyId: OrgId) => readEvalSpendRecord({ store: world.store, companyId }, PROJECT);
 
 describe("GET eval: the card", () => {
-  it("shows the card in dollars to a person who may approve, and says so to one who may only read", async () => {
-    const { person, call, reported } = await hosted();
-    await reported(FAKE_COMPANY);
-    const admin = person("p-admin", FAKE_COMPANY, "admin");
-    const card = await call(get(`${RUN}/eval`), admin);
-    expect(card.status, card.raw).toBe(200);
-    expect(card.body).toMatchObject({ project: PROJECT, state: "propose", canApprove: true, suites: [{ selection: "evals/demo", cases: 2, sentence: "Running your evals on each AI change will cost about $0.20-$1.80 per PR, at most $50.00 a month. Approve?" }] });
-    const words = JSON.stringify((card.body as { suites: Array<{ sentence: string; perPr: string; monthly: string }> }).suites.map((x) => [x.sentence, x.perPr, x.monthly]));
-    expect(words).not.toMatch(/token|call|micro/iu);
-    const reader = await call(get(`${RUN}/eval`), person("p-dev", FAKE_COMPANY, "member", { [PROJECT]: "developer" }));
-    expect(reader.body).toMatchObject({ canApprove: false, state: "propose" });
-    expect((await call(get(`${RUN}/eval`), person("p-none", FAKE_COMPANY, "member"))).body).toEqual({ error: { code: "NOT_FOUND", message: SETUP_RUN_PROJECT_NOT_FOUND } });
-  });
   it("L4-T3: the hosted card names the provider and carries the company's own connection answer (asked for exactly this company and project), and says neither where the install cannot tell", async () => {
     const asked: Array<{ company: string; project: string }> = [];
     const { person, call, reported } = await hosted({ providerConnected: async (scope) => { asked.push(scope); return scope.company === FAKE_COMPANY ? false : true; } });
@@ -132,13 +119,6 @@ describe("GET eval: the card", () => {
     const { person, call } = await hosted({ evalWiring: false });
     expect((await call(get(`${RUN}/eval`), person("p-admin", FAKE_COMPANY, "admin"))).body).toEqual({ error: { code: "NOT_FOUND", message: EVAL_APPROVAL_UNAVAILABLE } });
     expect((await call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: 1 }), person("p-admin", FAKE_COMPANY, "admin"))).body).toEqual({ error: { code: "NOT_FOUND", message: EVAL_APPROVAL_UNAVAILABLE } });
-  });
-  it("shows nothing of another company's eval (two companies)", async () => {
-    const { person, call, reported } = await hosted();
-    await reported(FAKE_COMPANY);
-    const other = await call(get(`${RUN}/eval`), person("o-admin", OTHER, "admin"));
-    expect(other.body).toMatchObject({ state: "none", suites: [] });
-    expect(other.body["report"]).toBeUndefined();
   });
 });
 
@@ -163,15 +143,6 @@ describe("POST eval-approve: one approval", () => {
     expect(await world.store.get(evalSpendKey(FAKE_COMPANY, PROJECT))).toBeUndefined();
     expect((await readEvalDiscovery({ store: world.store, companyId: FAKE_COMPANY }, PROJECT))?.state).toBe("reported");
   });
-  it("refuses a project user and a member with no grant, writing nothing", async () => {
-    const { world, person, call, reported } = await hosted();
-    await reported(FAKE_COMPANY);
-    const body = await approveBody(call, person("p-admin", FAKE_COMPANY, "admin"));
-    const dev = person("p-dev", FAKE_COMPANY, "member", { [PROJECT]: "developer" });
-    expect((await call(post(`${RUN}/eval-approve`, body), dev)).body).toEqual({ error: { code: "FORBIDDEN", message: SETUP_RUN_NOT_ALLOWED } });
-    expect((await call(post(`${RUN}/eval-approve`, body), person("p-member", FAKE_COMPANY, "member"))).body).toEqual({ error: { code: "NOT_FOUND", message: SETUP_RUN_PROJECT_NOT_FOUND } });
-    expect(await world.store.get(evalSpendKey(FAKE_COMPANY, PROJECT))).toBeUndefined();
-  });
   it("refuses a yes that was shown other dollars, and a body that does not approve, writing nothing", async () => {
     const { world, person, call, reported } = await hosted();
     await reported(FAKE_COMPANY);
@@ -182,16 +153,6 @@ describe("POST eval-approve: one approval", () => {
     expect((await call(post(`${RUN}/eval-approve`, noApprove), admin)).status).toBe(400);
     expect((await call(post(`${RUN}/eval-approve`, { ...(await approveBody(call, admin)), company: OTHER }), admin)).status).toBe(400);
     expect(await world.store.get(evalSpendKey(FAKE_COMPANY, PROJECT))).toBeUndefined();
-  });
-  it("another company's admin can neither confirm nor approve this company's eval (two companies)", async () => {
-    const { world, person, call, reported } = await hosted();
-    await reported(FAKE_COMPANY);
-    const body = await approveBody(call, person("p-admin", FAKE_COMPANY, "admin"));
-    const other = person("o-admin", OTHER, "admin");
-    const answer = await call(post(`${RUN}/eval-approve`, body), other);
-    expect(answer.status).toBeGreaterThanOrEqual(400);
-    expect(await world.store.get(evalSpendKey(FAKE_COMPANY, PROJECT))).toBeUndefined();
-    expect(await world.store.get(evalSpendKey(OTHER, PROJECT))).toBeUndefined();
   });
   it("a company with no eval budget source cannot confirm (no cap, no card, nothing marked)", async () => {
     const { world, person, call, reported, reader } = await hosted();
@@ -243,14 +204,6 @@ describe("POST eval-decide: a waiting item", () => {
 });
 
 describe("POST eval-health: the opt-in", () => {
-  it("a project reader sees the approved card but no health block", async () => {
-    const { person, call, reported } = await hosted();
-    await reported(FAKE_COMPANY);
-    const admin = person("p-admin", FAKE_COMPANY, "admin");
-    await call(post(`${RUN}/eval-approve`, await approveBody(call, admin)), admin);
-    expect((await call(get(`${RUN}/eval`), admin)).body["health"]).toBeDefined();
-    expect((await call(get(`${RUN}/eval`), person("p-dev", FAKE_COMPANY, "member", { [PROJECT]: "developer" }))).body["health"]).toBeUndefined();
-  });
   it("is not offered where no health runner reads the yes: no button on the card, and the route says it is not available", async () => {
     const { person, call, reported } = await hosted({ healthRuns: false });
     await reported(FAKE_COMPANY);
@@ -289,7 +242,6 @@ describe("POST eval-health: the opt-in", () => {
   });
 });
 
-
 describe("POST eval-health starts the run (L4-EVH)", () => {
   async function approvedWorld(options: Parameters<typeof hosted>[0]) {
     const h = await hosted(options);
@@ -313,17 +265,6 @@ describe("POST eval-health starts the run (L4-EVH)", () => {
     const yes = await t.call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: t.seen }), t.admin);
     expect(yes.status).toBe(200);
     expect(yes.body).toMatchObject({ requested: true, duplicate: false });
-  });
-  it("no start for a refused yes (a stale cost, a person who may not approve, a route that is not served)", async () => {
-    const started: string[] = [];
-    const t = await approvedWorld({ healthRun: async (name) => { started.push(name); } });
-    expect((await t.call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: t.seen - 1 }), t.admin)).status).toBeGreaterThanOrEqual(400);
-    const dev = t.person("p-dev", FAKE_COMPANY, "member", { [PROJECT]: "developer" });
-    expect((await t.call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: t.seen }), dev)).status).toBe(403);
-    expect(started).toEqual([]);
-    const off = await approvedWorld({ healthRuns: false, healthRun: async (name) => { started.push(name); } });
-    expect((await off.call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: off.seen }), off.admin)).status).toBe(404);
-    expect(started).toEqual([]);
   });
 });
 

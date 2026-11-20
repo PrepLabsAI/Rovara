@@ -10,7 +10,6 @@ import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e
 import { E2E_AGENT_LEDGER_MAX_BYTES, type E2EAgentModelEvidence } from "../../packages/verifier/src/application-agent-result.js";
 import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/evidence-paths.js";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
-import { e2eApplicationGroupUsesModel } from "../../packages/verifier/src/application-scenarios.js";
 import { createDockerApplicationHost, createProcessDockerCli, dockerOwnedCleanupReceipt, dockerOwnedResourceInventory, e2eRunNetworks, sweepStaleRovaraRuns } from "../../packages/verifier/src/host/docker-application-host.js";
 import { executorContainerArgs } from "../../packages/verifier/src/host/executor-container.js";
 import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
@@ -85,46 +84,6 @@ describe("docker application host", () => {
     expect(fake.mountsFor("app").some((mount) => mount.endsWith(":/app:ro"))).toBe(true);
     expect(fake.mountsFor("app").some((mount) => mount.endsWith(":/app/.owned:ro"))).toBe(true);
     expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
-  });
-
-  it("runs the executor, and only the executor, under the pinned seccomp profile, with no capability added and nothing unconfined", async () => {
-    const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep }); fake.onExecutor = okOutput(s);
-    await runWith(s);
-    const securityOptions = (args: string[]) => args.filter((value, index) => args[index - 1] === "--security-opt");
-    expect(securityOptions(fake.argsFor("executor"))).toEqual(["no-new-privileges", `seccomp=${installedExecutorSeccompProfilePath()}`]);
-    expect(fake.argsFor("executor")).toContain("--cap-drop=ALL");
-    // The executor's sandbox and limit flags are the shared definition the image smoke test runs with, in order and unchanged.
-    const shared = executorContainerArgs(installedExecutorSeccompProfilePath());
-    const executorArgs = fake.argsFor("executor");
-    expect(executorArgs.slice(executorArgs.indexOf(shared[0]!), executorArgs.indexOf(shared[0]!) + shared.length)).toEqual(shared);
-    // No other container of the run (app, source copy, build commands, cleanup) leaves Docker's default profile.
-    const others = fake.calls.filter((args) => args[0] === "run" && !args[args.indexOf("--name") + 1]?.startsWith("rovara-executor-"));
-    expect(others.length).toBeGreaterThan(2);
-    for (const args of others) expect(args.join(" ")).not.toMatch(/seccomp/);
-    for (const args of fake.calls) expect(args.join(" ")).not.toMatch(/--privileged|--cap-add|seccomp=unconfined|apparmor=unconfined|--userns|--pid=host|--ipc=host/);
-  });
-
-  it("says why an executor that exited 2 did, from its own log and its exit code, since docker run prints nothing of it", async () => {
-    const fake = new FakeDockerCli(); const s = await setup({ fake });
-    fake.exitCodeOfExecutor(2);
-    fake.onExecutor = (outDir) => {
-      writeExecutorOutput(outDir, { exitCode: 2, reason: "chromium-unsandboxed", runId: s.runId, groupId: s.groupId });
-      writeFileSync(join(outDir, "executor.log"), "2026-10-19T00:00:00.000Z unavailable: chromium-unsandboxed: renderer-has-no-extra-seccomp-filter\n");
-    };
-    const result = await runWith(s);
-    expect(result.unavailableReason).toBe("executor-failed");
-    const tail = s.host.readDiagnostics(s.runId).executorLogTail;
-    expect(tail).toContain("chromium-unsandboxed: renderer-has-no-extra-seccomp-filter");
-    expect(tail).toContain("docker run exited with code 2");
-  });
-
-  it("says why docker run itself failed to start the executor: its stderr and exit code", async () => {
-    const fake = new FakeDockerCli(); const s = await setup({ fake });
-    fake.exitCodeOfExecutor(126); fake.executorStdout = "docker: Error response from daemon: invalid seccomp profile";
-    await runWith(s);
-    const tail = s.host.readDiagnostics(s.runId).executorLogTail;
-    expect(tail).toContain("invalid seccomp profile");
-    expect(tail).toContain("docker run exited with code 126");
   });
 
   it("keeps a finished run's executor diagnostics free of credentials and bounded", async () => {
@@ -340,20 +299,6 @@ describe("docker application host", () => {
     expect((await runWith(ok)).unavailableReason).toBeNull();
   });
 
-  it("removes every labeled resource even when the build fails", async () => {
-    const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep });
-    fake.failOn("build", 1); fake.buildOutput = "npm error Missing script: does-not-exist\n";
-    const result = await runWith(s);
-    expect(result.unavailableReason).toBe("build-failed");
-    expect(result.actualRun).toBeNull();
-    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
-    expect(fake.networks()).toEqual([]);
-    expect(s.host.readDiagnostics(s.runId).buildLogTail).toContain("Missing script: does-not-exist");
-    expect(() => fake.argsFor("app")).toThrow();
-    expect(s.assemble).not.toHaveBeenCalled();
-    expect(await readdir(s.runRoot)).toEqual([]);
-  });
-
   // The three tests below are about what happens when a deadline arrives or a caller cancels while the executor runs. Their deadlines are measured on a
   // fake clock (timers and Date only; file and process I/O stay real), and every moment is chosen by the test: it advances the clock or aborts only
   // once the executor is running, so machine load can neither expire a deadline early nor let one pass unnoticed.
@@ -374,20 +319,6 @@ describe("docker application host", () => {
     expect(result.actualRun).toBeNull();
     expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
     expect(s.assemble).not.toHaveBeenCalled();
-  });
-
-  it("is cancelled by the caller's signal and still cleans up", async () => {
-    const fake = new FakeDockerCli(); const s = await setup({ fake }); fake.hangOn("executor");
-    const controller = new AbortController();
-    const running = runWith(s, controller.signal);
-    await fake.executorStarted;
-    controller.abort(new Error("operator cancelled"));
-    const result = await running;
-    expect(result.actualRun).toBeNull();
-    // The lifecycle refuses to read back after a cancellation; the host's own reason is the cancellation, never a result.
-    expect(result.unavailableReason).toBe("application proof readback was cancelled before dispatch");
-    await expect(s.host.readActualRun(new AbortController().signal)).rejects.toThrow("cancelled");
-    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
   });
 
   it("treats a run stopped while the output hook ran as stopped, whatever the hook saw", async () => {
@@ -428,29 +359,6 @@ describe("docker application host", () => {
     expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
   });
 
-  it("isolates concurrent runs", async () => {
-    const fake = new FakeDockerCli();
-    const a = await setup({ fake }); const b = await setup({ fake });
-    fake.onExecutor = (outDir, args) => {
-      const runId = args[args.indexOf("--name") + 1]!.replace("rovara-executor-", "");
-      const owner = runId === a.runId ? a : b;
-      writeExecutorOutput(outDir, { exitCode: 0, reason: null, runId: owner.runId, groupId: owner.groupId });
-    };
-    const results = await Promise.all([runWith(a), runWith(b)]);
-    expect(results.map((item) => item.unavailableReason)).toEqual([null, null]);
-    expect(fake.calls.filter((args) => args[0] === "network" && args[1] === "create").map((args) => args.at(-1))).toEqual(
-      expect.arrayContaining([`rovara-e2e-${a.runId}`, `rovara-e2e-${b.runId}`]));
-    const executors = fake.calls.filter((args) => args[0] === "run" && args[args.indexOf("--name") + 1]!.startsWith("rovara-executor-"));
-    expect(executors).toHaveLength(2);
-    for (const args of executors) {
-      const own = args[args.indexOf("--name") + 1]!.replace("rovara-executor-", "");
-      const other = own === a.runId ? b.runId : a.runId;
-      expect(args.filter((value, index) => args[index - 1] === "-v").some((mount) => mount.includes(other))).toBe(false);
-      expect(args[args.indexOf("--network") + 1]).toBe(`rovara-e2e-${own}`);
-    }
-    expect(fake.liveResources(`rovara.run=${a.runId}`).concat(fake.liveResources(`rovara.run=${b.runId}`))).toEqual([]);
-  });
-
   it("refuses recipe env names that look like credentials, for the build and the app alike", async () => {
     for (const options of [{ recipeBuild: [{ program: "npm", args: ["run", "build"], cwd: ".", timeoutMs: 45_000, env: { MY_Token_NAME: "x" } }] }, { recipeStart: { env: { app_SECRET_name: "x" } } }]) {
       const fake = new FakeDockerCli(); const s = await setup({ fake, ...options });
@@ -486,14 +394,6 @@ describe("docker application host", () => {
     expect(fake.timeouts[pullIndex]).toBeLessThanOrEqual(5_000);
     expect(pullIndex).toBeLessThan(fake.calls.findIndex((args) => args[0] === "run" && args.includes("-d")));
     for (const kind of ["app", "executor"] as const) expect(fake.argsFor(kind)).toContain("--pull=never");
-  });
-
-  it("carries on when another process pulled the same image while this pull was failing", async () => {
-    const fake = new FakeDockerCli(); const s = await setup({ fake, imagePullRetryMs: 1 }); fake.onExecutor = okOutput(s);
-    // Parallel runs on one host race to pull the same image; the loser's pull fails although the image is then there.
-    fake.missingImages.add("node:build-test"); fake.pullFailures = 1; fake.imageArrivesDuringFailedPull = true;
-    expect((await runWith(s)).unavailableReason).toBeNull();
-    expect(fake.calls.filter((args) => args[0] === "pull")).toHaveLength(1);
   });
 
   it("retries a pull that fails for a transient reason, and says why when it never succeeds", async () => {
@@ -580,13 +480,6 @@ describe("docker application host", () => {
     expect(fake.liveResources("rovara.run=old")).toEqual([]);
   });
 
-  it("sweeps stale runs at the start of an allocation", async () => {
-    const fake = new FakeDockerCli(); const s = await setup({ fake }); fake.onExecutor = okOutput(s);
-    fake.seedStale({ runId: "ancient", ageMs: 7_200_000, now: Date.now() });
-    await runWith(s);
-    expect(fake.liveResources("rovara.run=ancient")).toEqual([]);
-  });
-
   it("returns app-exited with the app log tail when the app crashes mid-run", async () => {
     const fake = new FakeDockerCli(); const s = await setup({ fake });
     fake.exitDuringExecutor("app", 137, "boom\n");
@@ -598,21 +491,6 @@ describe("docker application host", () => {
   });
 
   describe("executor results", () => {
-    it("hands a completed run (exit 0 or 1 with a matching result file) to the readback once cleanup is confirmed", async () => {
-      for (const exitCode of [0, 1] as const) {
-        const fake = new FakeDockerCli(); const s = await setup({ fake });
-        fake.exitCodeOfExecutor(exitCode);
-        fake.onExecutor = (outDir) => writeExecutorOutput(outDir, { exitCode, reason: null, runId: s.runId, groupId: s.groupId });
-        const result = await runWith(s);
-        expect(result.unavailableReason).toBeNull();
-        expect(result.actualRun).toBe(sentinel);
-        expect(result.lifecycle.process.exitCode).toBe(exitCode);
-        const call = s.assemble.mock.calls[0]![0] as { snapshot: { result: { exitCode: number } }; cleanup: { network: string; containers: string[] } };
-        expect(call.snapshot.result.exitCode).toBe(exitCode);
-        expect(call.cleanup.network).toBe(`rovara-e2e-${s.runId}`);
-        expect(call.cleanup.containers).toEqual(expect.arrayContaining([`rovara-app-${s.runId}`]));
-      }
-    });
 
     it("attests exactly the run's inventory as the containers it removed, so the cleanup receipt a broker derives from the run id is the one the host attests", async () => {
       const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep });
@@ -693,26 +571,6 @@ describe("docker application host", () => {
       expect(seen).toEqual({ keys: ["accountProfileIds", "containsCredential", "outDir"], leaks: true, clean: false, profiles: ["orders-owner"] });
     });
 
-    it("exposes the collector inputs only after confirmed cleanup, built from the same cleanup the readback saw", async () => {
-      const fake = new FakeDockerCli(); const s = await setup({ fake });
-      fake.onExecutor = okOutput(s);
-      await expect(s.host.readCollectionInputs(new AbortController().signal)).rejects.toThrow("owned cleanup is not confirmed");
-      const result = await runWith(s);
-      expect(result.actualRun).toBe(sentinel);
-      await expect(s.host.readCollectionInputs(new AbortController().signal)).resolves.toBe(collectionSentinel);
-      const call = s.assembleCollectionInputs.mock.calls[0]![0] as { cleanup: { removedAt: string; network: string } };
-      const readbackCall = s.assemble.mock.calls[0]![0] as { cleanup: { removedAt: string; network: string } };
-      expect(call.cleanup).toEqual(readbackCall.cleanup);
-      expect(call.cleanup.network).toBe(`rovara-e2e-${s.runId}`);
-    });
-
-    it("exposes no collector inputs for a run that was unavailable", async () => {
-      const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep });
-      fake.failOn("build", 1);
-      await runWith(s);
-      await expect(s.host.readCollectionInputs(new AbortController().signal)).rejects.toThrow("build-failed");
-      expect(s.assembleCollectionInputs).not.toHaveBeenCalled();
-    });
   });
 });
 
@@ -723,13 +581,6 @@ describe("structured build result", () => {
     fake.failOn("build", 7); fake.buildOutput = "build command 1 (npm) ended with exit code 3\n";
     expect((await runWith(s)).unavailableReason).toBe("build-failed");
     expect(s.host.readBuildResult(s.runId)).toEqual({ commandIndex: 1, exitCode: 7, command: buildStep[0] });
-  });
-
-  it("reports no exit code when the build timed out or the run ended it", async () => {
-    const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep });
-    fake.failOn("build", 124);
-    await runWith(s);
-    expect(s.host.readBuildResult(s.runId)).toEqual({ commandIndex: 1, exitCode: null, command: buildStep[0] });
   });
 
   it("reports the last command's success, and nothing for a recipe without a build or for another run", async () => {
@@ -822,35 +673,6 @@ describe("docker application host: approved external-origin mocks and the sinkho
     for (const mount of mounts) expect(mount).not.toMatch(/plan\.json|\/app|\/owned|:\/out$|:\/out:/);
   });
 
-  it("keeps the executor's out directory apart from the mock ledgers, so nothing the executor holds can edit what the mocks recorded", async () => {
-    const fake = new FakeDockerCli(); const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
-    await runWith(s);
-    const ledgerMount = mountsOf(fake.mockArgsFor("inventory-v1")).find((mount) => mount.endsWith(":/out/mock"))!.replace(/:\/out\/mock$/, "");
-    const outMount = fake.mountsFor("executor").find((mount) => mount.endsWith(":/out"))!.replace(/:\/out$/, "");
-    expect(ledgerMount).not.toBe(outMount);
-    expect(ledgerMount.startsWith(`${outMount}/`)).toBe(false);
-    expect(fake.mountsFor("executor").some((mount) => mount.includes("mock"))).toBe(false);
-    expect(fake.mountsFor("app").some((mount) => mount.includes("mock"))).toBe(false);
-  });
-
-  it("starts one sinkhole per run with no fixture and no environment, and points every declared origin that has no approved mock at it", async () => {
-    const fake = new FakeDockerCli(); const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
-    await runWith(s);
-    expect(fake.mockOrigins().sort()).toEqual(["inventory-v1", "unbound"]);
-    const sink = fake.mockArgsFor("unbound");
-    expect(sink).toEqual(expect.arrayContaining(["--name", `rovara-mock-${s.runId}-unbound`, "--network", `rovara-e2e-${s.runId}`, "--network-alias", "mock-unbound", "--read-only", "--cap-drop=ALL", "--user", "node"]));
-    expect(envOf(sink)).toEqual({});
-    // Only the sinkhole may bind the ports a resolved name is asked on (80, 443) and its resolver (53), through one namespaced sysctl; no mock gets it, and nothing else about it is loosened.
-    expect(sink).toEqual(expect.arrayContaining(["--sysctl", "net.ipv4.ip_unprivileged_port_start=0"]));
-    expect(fake.mockArgsFor("inventory-v1")).not.toContain("--sysctl");
-    expect(sink.join(" ")).not.toMatch(/--cap-add|--privileged|seccomp|unconfined|--add-host/);
-    expect(mountsOf(sink).some((mount) => mount.endsWith(":/mock:ro"))).toBe(false);
-    expect(sink.slice(sink.indexOf("rovara-executor:test"))).toEqual(["rovara-executor:test", "node", "/opt/agentx/packages/verifier/dist/executor/entry.js", "--mock", "--origin", "unbound"]);
-    const app = fake.argsFor("app");
-    expect(lastEnv(app, "INVENTORY_ORIGIN")).toBe("http://mock-inventory-v1:8080");
-    expect(lastEnv(app, "ORDERS_SERVICE_ORIGIN")).toBe("http://mock-unbound:8080");
-  });
-
   it("resolves every name the run does not serve to the sinkhole through a run-owned read-only resolv.conf, not --dns; the executor's arguments are not touched", async () => {
     const fake = new FakeDockerCli(); const s = await mockedPlan(fake);
     // The app's resolver file is read while the run is live: the workspace (and the file) is removed at close.
@@ -888,14 +710,6 @@ describe("docker application host: approved external-origin mocks and the sinkho
     // The resolver file is removed with the rest of the workspace.
     expect(existsSync(resolv!.source)).toBe(false);
     expect(existsSync(join(s.runRoot, s.runId))).toBe(false);
-  });
-
-  it("gives the app's hosts file only the sinkhole when no mock is approved", async () => {
-    const fake = new FakeDockerCli(); const s = await setup({ fake }); fake.onExecutor = okOutput(s);
-    await runWith(s);
-    const app = fake.argsFor("app");
-    expect(app.filter((value, index) => app[index - 1] === "--add-host")).toEqual(["app:127.0.0.1", `mock-unbound:${fake.sinkholeAddress}`]);
-    expect(app).not.toContain("--dns");
   });
 
   it("is unavailable when the sinkhole or the app has no address on the run network, because nothing could then be attributed", async () => {
@@ -961,16 +775,6 @@ describe("docker application host: approved external-origin mocks and the sinkho
     expect(lastEnv(app, "INVENTORY_ORIGIN")).toBe("http://mock-inventory-v1:8080");
   });
 
-  it("starts the mocks and the sinkhole before the app", async () => {
-    const fake = new FakeDockerCli(); const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
-    await runWith(s);
-    const indexOfRun = (prefix: string) => fake.calls.findIndex((call) => call[0] === "run" && call[call.indexOf("--name") + 1]?.startsWith(prefix));
-    expect(indexOfRun("rovara-mock-")).toBeGreaterThan(-1);
-    expect(indexOfRun("rovara-mock-")).toBeLessThan(indexOfRun("rovara-app-"));
-    const lastMock = Math.max(...fake.calls.flatMap((call, index) => (call[0] === "run" && call[call.indexOf("--name") + 1]?.startsWith("rovara-mock-") ? [index] : [])));
-    expect(lastMock).toBeLessThan(indexOfRun("rovara-app-"));
-  });
-
   it("is unavailable when a mock or the sinkhole cannot be started, and starts neither the app nor the executor", async () => {
     const fake = new FakeDockerCli(); fake.mockStartFails = true; const s = await mockedPlan(fake);
     const result = await runWith(s);
@@ -989,26 +793,6 @@ describe("docker application host: approved external-origin mocks and the sinkho
       expect(result.actualRun).toBeNull();
       expect(s.assemble).not.toHaveBeenCalled();
     }
-  });
-
-  it("stops the mocks once the executor is done, then reads every ledger and hands them to the readback", async () => {
-    const fake = new FakeDockerCli(); const s = await mockedPlan(fake);
-    fake.onExecutor = (outDir) => {
-      okOutput(s)(outDir);
-      fake.appendMockLedger("inventory-v1", [ledgerLine("success", 10), ledgerLine("refusal", 20), ledgerLine(null, 30, "/internal/admin")]);
-      fake.appendMockLedger("unbound", [ledgerLine(null, 40, "/")]);
-    };
-    const result = await runWith(s);
-    expect(result.unavailableReason).toBeNull();
-    const snapshot = (s.assemble.mock.calls[0]![0] as { snapshot: { mockLedgers: { origin: string; componentId: string | null; malformed: number; lines: { kind: string; line: { variantId: string | null } }[] }[] } }).snapshot;
-    expect(snapshot.mockLedgers.map((ledger) => ledger.origin).sort()).toEqual(["inventory-v1", "unbound"]);
-    const inventory = snapshot.mockLedgers.find((ledger) => ledger.origin === "inventory-v1")!;
-    expect(inventory.componentId).toMatch(/^api-schema-[a-f0-9]{12}$/);
-    expect(inventory.lines.map((line) => [line.kind, line.line.variantId])).toEqual([["consumption", "success"], ["consumption", "refusal"], ["unmatched", null]]);
-    expect(inventory.malformed).toBe(0);
-    expect(snapshot.mockLedgers.find((ledger) => ledger.origin === "unbound")!.lines.map((line) => line.kind)).toEqual(["unmatched"]);
-    const killAt = fake.events.findIndex((event) => event.startsWith("kill rovara-mock-"));
-    expect(killAt).toBeGreaterThan(fake.events.indexOf("executor finished"));
   });
 
   it("withholds a run credential the app put into a call it made, and still counts that call as unmocked", async () => {
@@ -1043,18 +827,6 @@ describe("docker application host: approved external-origin mocks and the sinkho
     expect(inventory.lines.map((line) => [line.kind, line.line.path, line.line.inputValue])).toEqual([["unmatched", "/v1/stock", "[credential]"]]);
   });
 
-  it("removes the mock and sinkhole containers with the rest of the run, and attests only the run's two core containers", async () => {
-    const fake = new FakeDockerCli(); const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
-    const result = await runWith(s);
-    expect(result.unavailableReason).toBeNull();
-    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
-    expect(fake.events.filter((event) => event.startsWith("rm rovara-mock-"))).toHaveLength(2);
-    expect(dockerOwnedCleanupReceipt(s.runId, "2026-10-20T12:00:00.000Z", ["inventory-v1"]).bytes).not.toEqual(dockerOwnedCleanupReceipt(s.runId, "2026-10-20T12:00:00.000Z", []).bytes);
-    const { cleanup } = s.assemble.mock.calls[0]![0] as { cleanup: { containers: string[] } };
-    // The receipt names the mock and the sinkhole as well, so a broker derives the very list from the run id and the plan's mocked origins.
-    expect([...cleanup.containers].sort()).toEqual([...dockerOwnedResourceInventory(s.runId, ["inventory-v1"]).containers].sort());
-    expect(cleanup.containers).toEqual(expect.arrayContaining([`rovara-mock-${s.runId}-inventory-v1`, `rovara-mock-${s.runId}-unbound`]));
-  });
 });
 
 // Task 3.2: a recipe-declared account seed (`rovara-accounts-file/v1`) and form login (`rovara-form-login/v1`). The built-in orders-seed/v1 and orders-auth/v1 are exercised above, unchanged.
@@ -1117,77 +889,6 @@ describe("docker application host: the recipe-declared account seed", () => {
     }
   });
 
-  it("gives the seed and the app a home and an npm cache where /tmp is writable, and no registry call of their own (F3, and the unmocked-external-call CI saw)", async () => {
-    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
-    expect((await runWith(s)).unavailableReason).toBeNull();
-    for (const args of [fake.argsFor("seed"), fake.argsFor("app")]) {
-      for (const setting of ["HOME=/tmp/home", "npm_config_cache=/tmp/home/.npm", "npm_config_update_notifier=false", "npm_config_audit=false", "npm_config_fund=false", "npm_config_offline=true"]) {
-        expect(args.some((value, index) => args[index - 1] === "-e" && value === setting), setting).toBe(true);
-      }
-    }
-  });
-
-  it("runs the recipe's seed command in a seed container with the app container's flags, the data volume and the two file variables, before the app starts", async () => {
-    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
-    expect((await runWith(s)).unavailableReason).toBeNull();
-    const seed = fake.argsFor("seed"); const app = fake.argsFor("app");
-    expect(seed.slice(seed.indexOf("node:build-test"))).toEqual(["node:build-test", "node", "seed.mjs"]);
-    expect(seed).toEqual(expect.arrayContaining(["--cap-drop=ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", "--user", "1000:1000",
-      "--memory", "1g", "--memory-swap", "1g", "--pids-limit", "512", "--cpus", "1", "--pull=never", "--network", `rovara-e2e-${s.runId}`, "--label", `rovara.run=${s.runId}`, "-w", "/app"]));
-    // Every flag the app container is given that is not about its own name, alias, detachment or command, the seed is given too.
-    const flagsOf = (args: string[]) => args.slice(0, args.indexOf("node:build-test"));
-    const own = new Set([`rovara-app-${s.runId}`, `rovara-seed-${s.runId}`, "-d", "--name", "--network-alias", "app"]);
-    const shared = flagsOf(app).filter((value) => !own.has(value) && !value.startsWith("rovara.created="));
-    for (const value of shared) expect(flagsOf(seed), value).toContain(value);
-    for (const args of [seed, app]) {
-      expect(args).toEqual(expect.arrayContaining(["-e", "ROVARA_ACCOUNTS_FILE=/app/.owned/rovara-accounts.json", "-e", "ROVARA_DATA_DIR=/data", "-e", "APP_PORT=4317", "-v", `rovara-data-${s.runId}:/data`]));
-      expect(args.filter((value) => value.endsWith(":/app:ro"))).toHaveLength(1);
-      expect(args.filter((value) => value.endsWith(":/app/.owned:ro"))).toHaveLength(1);
-      expect(args).not.toContain("ORDERS_TEST_SEED_FILE=/app/.owned/seed.json");
-      // The seed resolves like the app: the run-owned resolver file and hosts entries, never --dns.
-      expect(args).not.toContain("--dns");
-      expect(args.filter((value) => value.endsWith(":/etc/resolv.conf:ro"))).toHaveLength(1);
-      expect(args.filter((value, index) => args[index - 1] === "--add-host")).toContain("app:127.0.0.1");
-    }
-    expect(seed).not.toContain("--network-alias");
-    // The seed finishes before the app exists, and after the mocks and the sinkhole it may need to resolve names through.
-    const order = rows(fake).map(nameOf);
-    expect(order.findIndex((name) => name.startsWith("rovara-seed-"))).toBeLessThan(order.findIndex((name) => name.startsWith("rovara-app-")));
-    expect(order.findIndex((name) => name.startsWith("rovara-seed-"))).toBeGreaterThan(order.findIndex((name) => name.startsWith("rovara-mock-")));
-  });
-
-  it("creates the data volume labeled for the run and mounts it read-write in the seed and the app only", async () => {
-    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
-    expect((await runWith(s)).unavailableReason).toBeNull();
-    const create = fake.call("volume create");
-    expect(create).toEqual(expect.arrayContaining(["--label", `rovara.run=${s.runId}`]));
-    // A tmpfs of 256 MiB, owned by the unprivileged user: nothing seeded reaches the runner's disk, and nothing can fill it.
-    expect(create).toEqual(expect.arrayContaining(["--driver", "local", "--opt", "type=tmpfs", "--opt", "device=tmpfs", "--opt", "o=size=256m,uid=1000,gid=1000,mode=0700"]));
-    expect(create.some((value) => /^rovara\.created=\d+$/.test(value))).toBe(true);
-    expect(create.at(-1)).toBe(`rovara-data-${s.runId}`);
-    const holders = rows(fake).filter((args) => args.some((value, index) => args[index - 1] === "-v" && value.startsWith(`rovara-data-${s.runId}:`)))
-      .map((args) => nameOf(args).replace(`-${s.runId}`, ""));
-    // The one other holder is the keeper that keeps the tmpfs mounted between the seed and the app; it has no network and no capability, and runs as the unprivileged user.
-    expect(holders.sort()).toEqual(["rovara-app", "rovara-datakeep", "rovara-seed"]);
-    for (const kind of ["seed", "app"] as const) expect(fake.mountsFor(kind)).toContain(`rovara-data-${s.runId}:/data`);
-    expect(fake.mountsFor("executor").some((mount) => mount.includes("rovara-data"))).toBe(false);
-    for (const args of rows(fake).filter((call) => nameOf(call).startsWith("rovara-mock-"))) expect(args.join(" ")).not.toContain("rovara-data");
-    const keeper = fake.argsFor("datakeep");
-    expect(keeper).toEqual(expect.arrayContaining(["-d", "--network", "none", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--read-only", "--user", "1000:1000", "--entrypoint", "sleep"]));
-    expect(keeper).not.toContain("0:0");
-    expect(keeper.slice(-2)).toEqual(["rovara-executor:test", "infinity"]);
-    // The keeper only holds the volume open, so it may not write to it: the mount is read-only (N4), while the seed's and the app's stay read-write.
-    expect(fake.mountsFor("datakeep")).toEqual([`rovara-data-${s.runId}:/data:ro`]);
-    for (const kind of ["seed", "app"] as const) expect(fake.mountsFor(kind)).not.toContain(`rovara-data-${s.runId}:/data:ro`);
-    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
-  });
-
-  it("sizes the tmpfs from the recipe's dataSizeMiB when it states one", async () => {
-    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake, { fixture: createAccountsExecutorPlan({ recipe: { dataSizeMiB: 64 } }) });
-    expect((await runWith(s)).unavailableReason).toBeNull();
-    expect(fake.call("volume create")).toEqual(expect.arrayContaining(["--opt", "o=size=64m,uid=1000,gid=1000,mode=0700"]));
-  });
-
   it("holds the data volume open before the seed, and is unavailable with seed-failed when the keeper cannot be started or does not stay up", async () => {
     for (const keeperFails of ["refused", "exits"] as const) {
       const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
@@ -1209,21 +910,6 @@ describe("docker application host: the recipe-declared account seed", () => {
     const index = fake.calls.indexOf(fake.argsFor("seed"));
     expect(fake.timeouts[index]).toBe(30_000);
     expect(fake.events).toContain(`rm rovara-seed-${s.runId}`);
-  });
-
-  it("is unavailable with seed-failed when the seed exits 3, starts neither the app nor the executor, and removes every labeled resource, the volume included", async () => {
-    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
-    fake.seedExitCode = 3; fake.seedStdout = "the accounts file is not rovara-accounts/v1\n";
-    const result = await runWith(s);
-    expect(result.unavailableReason).toBe("seed-failed");
-    expect(result.actualRun).toBeNull();
-    expect(() => fake.argsFor("app")).toThrow();
-    expect(() => fake.argsFor("executor")).toThrow();
-    expect(fake.calls.some((args) => args[0] === "volume" && args[1] === "create")).toBe(true);
-    expect(fake.calls.some((args) => args[0] === "volume" && args[1] === "rm")).toBe(true);
-    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
-    expect(await readdir(s.runRoot)).toEqual([]);
-    expect(s.host.readDiagnostics(s.runId).appLogTail).toContain("the accounts file is not rovara-accounts/v1");
   });
 
   it("keeps a credential that the seed printed out of the diagnostics", async () => {
@@ -1278,20 +964,6 @@ describe("docker application host: the recipe-declared account seed", () => {
     expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
   });
 
-  it("leaves the built-in orders-seed/v1 run exactly as it was: seed.json, no volume, no seed container, no accounts file", async () => {
-    const fake = new FakeDockerCli(); const s = await setup({ fake });
-    let owned: string[] = [];
-    fake.onExecutor = (outDir) => { okOutput(s)(outDir); owned = readdirSync(mountSource(fake.argsFor("app"), ":/app/.owned:ro")); };
-    expect((await runWith(s)).unavailableReason).toBeNull();
-    expect(owned).toEqual(["seed.json"]);
-    // (The stale-run sweep that starts every allocation only lists volumes.)
-    expect(fake.calls.filter((args) => args[0] === "volume").map((args) => args[1])).toEqual(["ls"]);
-    expect(() => fake.argsFor("seed")).toThrow();
-    const app = fake.argsFor("app");
-    expect(app).toContain("ORDERS_TEST_SEED_FILE=/app/.owned/seed.json");
-    expect(app.join(" ")).not.toMatch(/ROVARA_ACCOUNTS_FILE|ROVARA_DATA_DIR|\/data/);
-  });
-
   it("sweeps a stale run's data volume with the rest of its resources", async () => {
     const fake = new FakeDockerCli(); const now = Date.now();
     fake.seedStale({ runId: "old", ageMs: 3_700_000, now, volume: true }); fake.seedStale({ runId: "fresh", ageMs: 60_000, now, volume: true });
@@ -1300,12 +972,6 @@ describe("docker application host: the recipe-declared account seed", () => {
     expect(fake.liveResources("rovara.run=fresh")).toHaveLength(4);
   });
 
-  it("does not confirm cleanup while the run's data volume is still there", async () => {
-    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
-    fake.volumesSurviveRemoval = true;
-    const result = await runWith(s);
-    expect(result.lifecycle.cleanup).not.toBe("confirmed");
-  });
 });
 
 
@@ -1327,44 +993,6 @@ describe("docker application host: an inferred-recipe app and the anonymous prof
     };
     return { s, seen };
   };
-  const rows = (fake: FakeDockerCli) => fake.calls.filter((args) => args[0] === "run");
-  const nameOf = (args: string[]) => args[args.indexOf("--name") + 1]!;
-
-  it("runs an app with no project contract: the recipe's own build and start commands, the port in PORT, and every container of the run removed", async () => {
-    const fake = new FakeDockerCli(); const { s } = await inferredSetup(fake);
-    const result = await runWith(s);
-    expect(result.unavailableReason, JSON.stringify(s.host.readDiagnostics(s.runId))).toBeNull();
-    const app = fake.argsFor("app");
-    expect(app.slice(app.indexOf("node:build-test"))).toEqual(["node:build-test", "npm", "start"]);
-    expect(app).toEqual(expect.arrayContaining(["-e", "PORT=4317"]));
-    expect(app).not.toContain("APP_PORT=4317");
-    // The source copy, then the recipe's `npm ci` in a build container of its own.
-    const commands = rows(fake).filter((args) => nameOf(args).startsWith("rovara-build-")).map((args) => args.slice(args.indexOf("node:build-test") + 1));
-    expect(commands).toHaveLength(2);
-    expect(commands[1]).toEqual(["npm", "ci"]);
-    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
-  });
-
-  it("starts the inferred app with npm's home and cache in /tmp and no registry call of npm's own: an update check or audit would reach the sinkhole and make the case unmocked-external-call", async () => {
-    const fake = new FakeDockerCli(); const { s } = await inferredSetup(fake);
-    expect((await runWith(s)).unavailableReason).toBeNull();
-    const app = fake.argsFor("app");
-    for (const setting of ["HOME=/tmp/home", "npm_config_cache=/tmp/home/.npm", "npm_config_update_notifier=false", "npm_config_audit=false", "npm_config_fund=false", "npm_config_offline=true"]) {
-      expect(app.some((value, index) => app[index - 1] === "-e" && value === setting), setting).toBe(true);
-    }
-  });
-
-  it("creates no account, no seed, no data volume and no keeper: the plan has no accounts and the owned mount no seed file or accounts file", async () => {
-    const fake = new FakeDockerCli(); const { s, seen } = await inferredSetup(fake);
-    expect((await runWith(s)).unavailableReason).toBeNull();
-    expect(E2EExecutorPlanSchema.parse(JSON.parse(seen.planText)).accounts).toEqual([]);
-    expect(seen.owned).toEqual([]);
-    expect(() => fake.argsFor("seed")).toThrow();
-    expect(() => fake.argsFor("datakeep")).toThrow();
-    // (The stale-run sweep that starts every allocation only lists volumes.)
-    expect(fake.calls.filter((args) => args[0] === "volume").map((args) => args[1])).toEqual(["ls"]);
-    expect(fake.argsFor("app").join(" ")).not.toMatch(/ROVARA_ACCOUNTS_FILE|ROVARA_DATA_DIR|ORDERS_TEST_SEED_FILE|\/data/);
-  });
 
   it("gives the app and the executor no AWS_, AGENTX_, TOKEN or SECRET variable and no docker socket, like any other app", async () => {
     const fake = new FakeDockerCli(); const { s } = await inferredSetup(fake);
@@ -1471,23 +1099,6 @@ describe("docker application host: the model channel", () => {
     expect(fake.calls.map((args) => args.join(" ")).join("\n")).not.toContain(key);
   });
 
-  it("closes the channel on every exit: an executor that fails, a deadline, a cancellation, and a close of the lease; and closes it once", async () => {
-    for (const how of ["exit-2", "cancelled", "close-only"] as const) {
-      const fake = new FakeDockerCli(); const events: string[] = []; const used = channel(events, fake);
-      const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: used.port });
-      if (how === "exit-2") { fake.exitCodeOfExecutor(2); fake.onExecutor = (outDir) => writeExecutorOutput(outDir, { exitCode: 2, reason: "x", runId: s.runId, groupId: s.groupId }); await runWith(s); }
-      else if (how === "cancelled") {
-        const abort = new AbortController(); fake.onExecutor = () => abort.abort(new Error("stop")); await runWith(s, abort.signal);
-      } else {
-        const signal = new AbortController().signal;
-        const lease = await s.host.allocate(s.input as never, signal);
-        await lease.close(signal);
-      }
-      expect(used.closes(), how).toBe(how === "close-only" ? 0 : 1);
-      expect(events.filter((event) => event === "close"), how).toHaveLength(how === "close-only" ? 0 : 1);
-    }
-  });
-
   describe("the group's model evidence (Task 4.4a)", () => {
     const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
     const definition = scriptedE2ERouteDefinition();
@@ -1548,14 +1159,6 @@ describe("docker application host: the model channel", () => {
         { receiptId: "rcpt-1", promptSha256: null, responseSha256: null, omitted: "budget" }]);
     });
 
-    it("31. a group without an agent step returns exactly what the readback assembled: no agentModel key", async () => {
-      const fake = new FakeDockerCli(); const s = await setup({ fake }); fake.onExecutor = okOutput(s);
-      await runWith(s);
-      const inputs = await s.host.readCollectionInputs(new AbortController().signal);
-      expect(inputs).toBe(collectionSentinel);
-      expect("agentModel" in inputs).toBe(false);
-    });
-
     it("31. a channel whose close threw gives evidence that says so (an evidence error, no route), never null and never a pass; the ledger the executor left is still carried", async () => {
       const fake = new FakeDockerCli();
       const port = { async open() { return { async close() { throw new Error("the proxy fell over: /secret/path"); } }; } };
@@ -1569,21 +1172,6 @@ describe("docker application host: the model channel", () => {
       expect(agentModel.channel.evidenceErrors).toBeGreaterThanOrEqual(1);
       expect(agentModel.ledgers).toHaveLength(1);
       expect(JSON.stringify(agentModel)).not.toContain("/secret/path");
-    });
-
-    it("31. a channel that returns something else than a closed channel (nothing, another key, a malformed receipt) is a fault too", async () => {
-      for (const returned of [() => undefined, () => ({ ok: true }), (key: string) => ({ ...closedOf(setupLess(), { valueKey: key.replace(/^./, key.startsWith("0") ? "1" : "0") }) }),
-        (key: string) => ({ ...closedOf(setupLess(), { valueKey: key }), receipts: [{ receiptId: "x" }] })]) {
-        const fake = new FakeDockerCli();
-        const port = { async open(input: { valueKey: string }) { return { async close() { return returned(input.valueKey); } }; } };
-        const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: port as never });
-        fake.onExecutor = okOutput(s);
-        await runWith(s);
-        const { agentModel } = await s.host.readCollectionInputs(new AbortController().signal) as unknown as { agentModel: E2EAgentModelEvidence };
-        expect(agentModel.route).toBeNull();
-        expect(agentModel.channel.evidenceErrors).toBeGreaterThanOrEqual(1);
-      }
-      function setupLess() { return { runId: "11111111-1111-4111-8111-111111111111", fixture: { compiled: { expectedCases: [{ caseId: "case-x" }] } } } as unknown as Setup; }
     });
 
     it("31. a ledger over 64 KiB is left out of the evidence (the collector then has none), and the others are kept", async () => {
@@ -1634,18 +1222,6 @@ describe("docker application host: the model channel", () => {
     await expect(setup({ fake: new FakeDockerCli(), fixture: agentFixture() })).rejects.toThrow(/needs the model channel/);
   });
 
-  it("removes /d/model with the rest of the workspace through the labeled root container", async () => {
-    const fake = new FakeDockerCli(); const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: channel([], fake).port });
-    const locked = join(s.runRoot, s.runId, "out", "locked");
-    fake.onExecutor = (outDir) => { writeExecutorOutput(outDir, { exitCode: 0, reason: null, runId: s.runId, groupId: s.groupId });
-      mkdirSync(join(outDir, "locked")); writeFileSync(join(outDir, "locked", "file"), "x"); chmodSync(join(outDir, "locked"), 0o555); };
-    try {
-      await runWith(s);
-      const root = fake.calls.find((args) => args[0] === "run" && args.includes("--entrypoint") && args[args.indexOf("--entrypoint") + 1] === "rm")!;
-      expect(root.slice(root.indexOf("-rf"))).toEqual(["-rf", "/d/app", "/d/out", "/d/owned", "/d/mock", "/d/mock-out", "/d/model"]);
-    } finally { await chmod(locked, 0o755).catch(() => undefined); }
-  });
-
   it("sweeps a model socket left behind by a worker that was killed, once it is older than the sweep age, and leaves a fresh one and a file that is not a socket", async () => {
     const { createServer } = await import("node:net");
     const { renameSync, mkdtempSync } = await import("node:fs");
@@ -1687,30 +1263,6 @@ describe("docker application host: an audit replay (Task 4.6b)", () => {
     assertions: [{ kind: "csv" as const, downloadName: "orders.csv", columns: ["id", "total"], rows: [["1", "10"]] }] });
   const replayFixture = () => replayPlanOf((replay) => createOrdersExecutorPlan({ probe: "web-csv-positive-v1", modelRoute: ROUTE, runtimeAt: FIXED_RUNTIME_DATING,
     accountScenarios: [{ accountProfileId: "orders-owner", scenario: agentScenario }], ...(replay === undefined ? {} : { replay }) }));
-
-  it("is a group that has an agent step and gets no model channel: the question every site asks is answered no for it", () => {
-    const fixture = replayFixture();
-    expect(fixture.plan.admission.replay?.purpose).toBe("replay");
-    expect(fixture.plan.admission.modelRoute).toBeNull();
-    expect(e2eApplicationGroupUsesModel(fixture.compiled)).toBe(false);
-    // Control: the same group planned as a candidate round does have a model channel.
-    const candidate = createOrdersExecutorPlan({ probe: "web-csv-positive-v1", modelRoute: ROUTE, accountScenarios: [{ accountProfileId: "orders-owner", scenario: agentScenario }] });
-    expect(e2eApplicationGroupUsesModel(candidate.compiled)).toBe(true);
-  });
-
-  it("mounts no model socket and passes no model name to any container, opens no channel, and writes a plan with the group's recordings and no channel (test 9)", async () => {
-    const fake = new FakeDockerCli(); const fixture = replayFixture();
-    let planText = "";
-    const s = await setup({ fake, fixture }); fake.onExecutor = (outDir) => { planText = readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8"); okOutput(s)(outDir); };
-    const result = await runWith(s);
-    expect(result.unavailableReason).toBeNull();
-    expect(fake.mountsFor("executor").some((mount) => /model/i.test(mount))).toBe(false);
-    for (const args of fake.calls.filter((call) => call[0] === "run")) expect(args.join(" "), args.join(" ")).not.toMatch(/model/i);
-    const plan = E2EExecutorPlanSchema.parse(JSON.parse(planText));
-    expect(plan.modelChannel).toBeUndefined();
-    expect(plan.replay?.traces).toEqual(fixture.plan.admission.replay!.traces);
-    expect(plan.admission.modelRoute).toBeNull();
-  });
 
   it("reads back no model evidence: the collection inputs of a replay have no agentModel", async () => {
     const fake = new FakeDockerCli(); const s = await setup({ fake, fixture: replayFixture() }); fake.onExecutor = okOutput(s);

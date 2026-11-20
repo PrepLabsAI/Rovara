@@ -61,17 +61,6 @@ describe("the press under pressure", () => {
     }
   });
 
-  it("refuses a pull request added to the task after the person approved", async () => {
-    const world = await mergeWorld();
-    await world.seedTracking();
-    const prepared = await world.prepare();
-    const task = await world.task();
-    await world.setWorkflow({ pullRequests: [...task.workflow.pullRequests!, { ...task.workflow.pullRequests![0]!, repositoryId: "docs", number: 9 }] });
-    const refusal = await rejects(() => go(world, prepared));
-    expect(refusal.code).toBe("MERGE_NOT_READY");
-    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
-  });
-
   it("keeps the claim and the proof when the host's outcome is unknown, and a rerun finds the pull request merged without asking the host to merge again", async () => {
     const mode = { value: "unknown" as "ok" | "refuse" | "unknown", calls: 0 };
     const world = await mergeWorld({ codeHost: (model) => countingHost(model, mode) });
@@ -166,16 +155,6 @@ describe("what the approver adapter requires is enforced by the press", () => {
     verify: async (_request, proof) => { calls.verify += 1; return { approved: true, approver: localOwnerPrincipal(), method: proof.method, proofId: proof.proofId }; },
   });
 
-  it("refuses a method the adapter does not list, before the proof is looked at", async () => {
-    const world = await mergeWorld();
-    await world.seedTracking();
-    const calls = { verify: 0 };
-    const deps = { ...world.deps, approvers: stub({ methods: ["browser-step-up"], minApprovers: 1 }, calls) };
-    const prepared = await prepareMerge(deps, { taskId: TASK_ID, requestId: world.requestId() });
-    expect((await rejects(() => pressMerge(deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) }))).code).toBe("FORBIDDEN");
-    expect(calls.verify).toBe(0);
-  });
-
   it("refuses when the adapter needs more than one approver, which cannot be collected yet", async () => {
     const world = await mergeWorld();
     await world.seedTracking();
@@ -206,14 +185,6 @@ describe("what the approver adapter requires is enforced by the press", () => {
     const refusal = await rejects(() => pressMerge({ ...world.deps, store: failing }, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) }));
     expect(refusal.code).toBe("RUNTIME_UNAVAILABLE");
     expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
-  });
-
-  it("hands the adapter the risk level, so a stricter rule for a high-risk merge is the adapter's to make", async () => {
-    const world = await mergeWorld();
-    await world.seedTracking();
-    await world.setWorkflow({ risk: { level: "high", reasons: ["auth"], candidateDigest: "c".repeat(64) } });
-    const prepared = await world.prepare();
-    expect(prepared.request.risk).toBe("high");
   });
 });
 

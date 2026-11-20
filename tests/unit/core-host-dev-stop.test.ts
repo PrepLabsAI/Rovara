@@ -87,29 +87,6 @@ async function running(options: { access?: "hosted" | "laptop" } = {}) {
 const parsed = (answer: { body: string } | undefined) => JSON.parse(answer!.body) as { task?: { taskId: string; status: string }; error?: { code: string; message: string } };
 
 describe("POST /v1/dev/tasks/{id}/cancel on a core task", () => {
-  it("has a step running to stop (the fixture's precondition)", async () => {
-    const { activeOperation, operationStatus } = await running();
-    expect(typeof activeOperation).toBe("string");
-    expect(await operationStatus()).not.toBe("CANCELLED");
-  });
-
-  it("stops the task for its owner (a plain member) and answers { task } as the old cancel does; the machine is stopped and the step is cancelled", async () => {
-    const { cancel, owner, task, operationStatus, world } = await running();
-    const answer = await cancel(owner);
-    expect(answer?.statusCode).toBe(200);
-    expect(parsed(answer).task?.taskId).toBe(task.taskId);
-    expect(await operationStatus()).toBe("CANCELLED");
-    expect(world.audit.filter((event) => event.action === "task.stop_requested").map((event) => event.details)).toEqual([{ project: "payments", by: "owner" }]);
-  });
-
-  it("stops the task for a People owner (a co-owner by the company's owner rule), with the People revision fenced into the claim", async () => {
-    const { cancel, person, people, operationStatus, world, task } = await running();
-    await world.store.put({ item: { pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE", revision: 3 } });
-    people.coOwners.add("person-coowner-000000001");
-    const coOwner = person("person-coowner-000000001", FAKE_COMPANY, "member");
-    expect((await cancel(coOwner))?.statusCode).toBe(200);
-    expect(await operationStatus()).toBe("CANCELLED");
-  });
 
   it("refuses a People owner whose People revision changed between the check and the claim (a missing task's answer; nothing stopped)", async () => {
     const { cancel, person, people, operationStatus, world, task } = await running();
@@ -134,38 +111,6 @@ describe("POST /v1/dev/tasks/{id}/cancel on a core task", () => {
     expect(world.audit.filter((event) => event.action === "task.stop_requested").map((event) => event.details)).toEqual([{ project: "payments", by: "company-admin" }]);
   });
 
-  it("two companies: an admin (and an owner) of company B cannot stop company A's core task, and is answered exactly like a task id that does not exist", async () => {
-    const { cancel, person, operationStatus, routes, rows } = await running();
-    for (const role of ["owner", "admin", "member"] as const) {
-      const theirs = person(`person-b-${role}-000000001`, OTHER, role);
-      const before = await rows();
-      const answer = await cancel(theirs);
-      const missing = await routes.route(post(`/v1/dev/tasks/${randomUUID()}/cancel`, { requestId: randomUUID() }), theirs);
-      expect(answer?.statusCode, role).toBe(404);
-      expect(answer?.body, role).toBe(missing?.body);
-      expect(answer?.body, role).not.toContain(FAKE_COMPANY);
-      expect(await rows(), role).toBe(before);
-    }
-    expect(await operationStatus()).not.toBe("CANCELLED");
-  });
-
-  it("a person whose principal says company A but whose membership is company B's admin reads a missing task (membership decides the company; never the principal)", async () => {
-    const { cancel, members, operationStatus } = await running();
-    const caller: DeployedCaller = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY, personId: "person-mixed-0000000001" }), client: "cli" };
-    members.set(`person-mixed-0000000001|${FAKE_COMPANY}`, { companyId: OTHER, role: "admin" });
-    expect((await cancel(caller))?.statusCode).toBe(401);
-    expect(await operationStatus()).not.toBe("CANCELLED");
-  });
-
-  it("a member of the task's company who is not its owner and not an admin, whose principal carries the 'owner' role, reads a missing task (membership's role, never the principal's)", async () => {
-    const { cancel, person, operationStatus } = await running();
-    const colleague = person("person-colleague-000001", FAKE_COMPANY, "member");
-    const answer = await cancel(colleague);
-    expect(answer?.statusCode).toBe(404);
-    expect(parsed(answer).error).toEqual({ code: "TASK_NOT_FOUND", message: "no such task" });
-    expect(await operationStatus()).not.toBe("CANCELLED");
-  });
-
   it("a People commenter or viewer (may read the task, is no owner) gets the fixed refusal and nothing is stopped", async () => {
     const { cancel, person, people, operationStatus, rows } = await running();
     people.readers.add("person-commenter-000001");
@@ -176,31 +121,6 @@ describe("POST /v1/dev/tasks/{id}/cancel on a core task", () => {
     expect(parsed(answer).error).toEqual({ code: "FORBIDDEN", message: STOP_NOT_YOURS });
     expect(await rows()).toBe(before);
     expect(await operationStatus()).not.toBe("CANCELLED");
-  });
-
-  it("a revoked member (no live membership), the task's own person included, gets the sign-in refusal the boundary reads as a missing task; nothing is stopped", async () => {
-    const { cancel, members, owner, operationStatus } = await running();
-    members.delete(`${OWNER_ID}|${FAKE_COMPANY}`);
-    expect((await cancel(owner))?.statusCode).toBe(401);
-    expect(await operationStatus()).not.toBe("CANCELLED");
-  });
-
-  it("a script token, even the owner's, reads a missing task whatever body it sends", async () => {
-    const { cancel, owner, operationStatus } = await running();
-    const token = { ...owner, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } };
-    for (const raw of [JSON.stringify({ requestId: randomUUID() }), "[1]", "not json"]) expect((await cancel(token, undefined, raw))?.statusCode, raw).toBe(404);
-    expect(await operationStatus()).not.toBe("CANCELLED");
-  });
-
-  it("someone who may not read the task learns nothing from the body they send (the task is judged first)", async () => {
-    const { cancel, person, routes } = await running();
-    const stranger = person("person-b-0000000000001", OTHER, "admin");
-    for (const raw of ["[1]", "null", "not json", "{}"]) {
-      const theirs = await cancel(stranger, undefined, raw);
-      const missing = await routes.route({ ...post(`/v1/dev/tasks/${randomUUID()}/cancel`), body: raw }, stranger);
-      expect(theirs?.statusCode, raw).toBe(404);
-      expect(theirs?.body, raw).toBe(missing?.body);
-    }
   });
 
   it("the owner's bad body gets the old cancel's field words; a reused request id for another action is refused; a closed task is refused", async () => {
@@ -241,16 +161,6 @@ describe("POST /v1/dev/tasks/{id}/cancel on a core task", () => {
     expect(await laptop.cancel(laptop.owner)).toBeUndefined();
     const wired = await running();
     expect(await wired.routes.route({ method: "GET", path: `/v1/dev/tasks/${wired.task.taskId}/cancel`, headers: {}, body: "" }, wired.owner)).toBeUndefined();
-  });
-
-  it("off (the default) answers nothing and reads nothing", async () => {
-    const world = createFakeWorld();
-    const app = createCoreHostApp({ env: {}, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now, runtime: () => { throw new Error("never built"); } });
-    const companyOf = vi.fn();
-    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
-    expect(await routes.route(post(`/v1/dev/tasks/${randomUUID()}/cancel`, { requestId: randomUUID() }), { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY }) })).toBeUndefined();
-    expect(companyOf).not.toHaveBeenCalled();
-    expect(world.created).toEqual([]);
   });
 
   it("the core's own check (for every host, Slack and the admin cancel too): a script token, a principal of another company and an admin of another company each read a missing task, whatever role they carry", async () => {

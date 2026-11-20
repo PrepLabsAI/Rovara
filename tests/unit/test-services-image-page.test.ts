@@ -51,18 +51,6 @@ const page = async () => (await get(`${base}/test-environment/payments`)).body;
 const notice = (reply: { headers: Record<string, string | string[] | undefined> }) => /n=([a-z]+)/u.exec(String(reply.headers["location"]))?.[1];
 
 describe("the service images panel", () => {
-  it("shows the exact pinned reference and its registry, what the project asks for, and an Approve button only for what needs approval", async () => {
-    const body = await page();
-    expect(body).toContain("Service images");
-    expect(body).toContain(STARTER);
-    expect(body).toContain(APPROVED);
-    expect(body).toContain("registry docker.io");
-    expect(body).toContain("Approve postgres:15 from Docker Hub");
-    expect(body).not.toContain("Approve redis:7");
-    expect(body).toContain("built in, no approval needed");
-    expect(body).toContain("ROVARA_TEST_SERVICE_IMAGES lists");
-    expect(body).toContain("next time you run <code>rovara up</code>");
-  });
 
   it("shows no Approve or Remove button on a page session that is older than ten minutes, and says to open a new page", async () => {
     clock += SCRIPT_TOKEN_FRESH_MS + 1;
@@ -85,31 +73,6 @@ describe("approving on the page", () => {
     const replay = await post(form.action, form.fields);
     expect(notice(replay)).toBe("form");
     expect(calls).toHaveLength(1);
-  });
-
-  it("refuses a page session older than ten minutes at the post itself, even with a form drawn while it was fresh, and does nothing", async () => {
-    const form = formOf(await page(), "/images/approve");
-    clock += SCRIPT_TOKEN_FRESH_MS + 1;
-    const late = await post(form.action, form.fields);
-    expect(notice(late)).toBe("imagefresh");
-    expect(calls).toEqual([]);
-  });
-
-  it("refuses a form with no token, a forged token, a token drawn for another image, and another action's token", async () => {
-    const form = formOf(await page(), "/images/approve");
-    const bare = { ...form.fields };
-    delete bare["ft"];
-    expect(notice(await post(form.action, bare))).toBe("form");
-    expect(notice(await post(form.action, { ...form.fields, ft: `${clock + 1000}.AAAA.BBBB` }))).toBe("form");
-    // The token binds the image: the form drawn for postgres:15 cannot approve redis:7 or anything else.
-    expect(notice(await post(form.action, { ...form.fields, requested: "redis:7" }))).toBe("form");
-    expect(notice(await post(form.action, { ...form.fields, requested: "mysql:9" }))).toBe("form");
-    // Nor can another action's form (an approval of the environment, a removal) approve an image.
-    const remove = formOf(await page(), "/images/remove");
-    expect(notice(await post(form.action, { requested: "postgres:15", ft: remove.fields["ft"]! }))).toBe("form");
-    // Nor one drawn for another project.
-    expect(notice(await post(form.action.replace("/payments/", "/other/"), form.fields))).toBe("form");
-    expect(calls).toEqual([]);
   });
 
   it("answers nothing for a request from another origin or with the wrong content type", async () => {

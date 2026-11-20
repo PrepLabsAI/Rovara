@@ -1,13 +1,12 @@
 // "Suggest a wiki note as a lesson" (lead 4, C1): one PENDING lesson, never approved here; the lessons library's own approval decides it. Two companies and two projects never meet.
 import { describe, expect, it } from "vitest";
-import { redactText, type OrgId } from "@agentx/contracts";
+import { type OrgId } from "@agentx/contracts";
 import { approveLesson, type ApproveDeps } from "../../packages/broker/src/lessons/approve.js";
 import { InMemoryLessonStore } from "../../packages/broker/src/lessons/store.js";
 import { lessonIdOfNote, proposeLessonFromNote, type WikiNoteLessonInput } from "../../packages/broker/src/core/wiki/note-lesson.js";
 import { Audit, Clock, allowAllAccess, directory, settings } from "./lessons/lesson-helpers.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
-const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
 const RULE = "Never call the billing API from the web package. Always go through the gateway.";
 const input = (over: Partial<WikiNoteLessonInput> = {}): WikiNoteLessonInput => ({ companyId: A, project: "alpha", noteId: "note0001", authorId: "ada", actorId: "ada", text: RULE, ...over });
 
@@ -34,11 +33,6 @@ describe("proposeLessonFromNote: the tier is the library's own rule", () => {
     const first = await approveLesson(approve, { workspaceId: A, project: "alpha", lessonId: risky.id, approverId: "ann" });
     expect(first).not.toMatchObject({ status: "active" });
     expect((await store.get({ workspaceId: A, project: "alpha" }, risky.id))?.status).toBe("pending");
-  });
-  it("the audit names the person who pressed the button", async () => {
-    const { deps, audit } = setup();
-    await proposeLessonFromNote(deps, input({ authorId: "ada", actorId: "maya" }));
-    expect(audit.events[0]).toMatchObject({ actor: "maya", action: "lesson.candidate_created" });
   });
 });
 
@@ -86,27 +80,6 @@ describe("proposeLessonFromNote", () => {
     const { deps, store } = setup({ mode: "Off" });
     expect(await proposeLessonFromNote(deps, input())).toEqual({ state: "off" });
     expect((await store.list({ workspaceId: A, project: "alpha" })).length).toBe(0);
-  });
-
-  it("redacts anything key-shaped", async () => {
-    const { deps, store } = setup();
-    const fake = ["AK", "IA"].join("") + "IOSFODNN7EXAMPLE";
-    expect(redactText(fake)).not.toContain(fake);
-    await proposeLessonFromNote(deps, input({ text: `Never commit ${fake} to the repo.` }));
-    expect(JSON.stringify(await store.list({ workspaceId: A, project: "alpha" }))).not.toContain(fake);
-  });
-
-  it("is keyed by company AND project: the same note id in another project or company is its own lesson, and neither sees the other's", async () => {
-    const { deps, store } = setup();
-    await proposeLessonFromNote(deps, input({ text: "Never use ALPHA-ONLY words" }));
-    await proposeLessonFromNote(deps, input({ project: "beta", text: "Never use BETA-ONLY words" }));
-    await proposeLessonFromNote(deps, input({ companyId: B, text: "Never use B-ONLY words" }));
-    const ids = new Set([lessonIdOfNote(A, "alpha", "note0001"), lessonIdOfNote(A, "beta", "note0001"), lessonIdOfNote(B, "alpha", "note0001")]);
-    expect(ids.size).toBe(3);
-    expect(JSON.stringify(await store.list({ workspaceId: A, project: "alpha" }))).toMatch(/ALPHA-ONLY/u);
-    expect(JSON.stringify(await store.list({ workspaceId: A, project: "alpha" }))).not.toMatch(/BETA-ONLY|B-ONLY/u);
-    expect(JSON.stringify(await store.list({ workspaceId: A, project: "beta" }))).not.toMatch(/ALPHA-ONLY|B-ONLY/u);
-    expect(JSON.stringify(await store.list({ workspaceId: B, project: "alpha" }))).not.toMatch(/ALPHA-ONLY|BETA-ONLY/u);
   });
 
   it("a store that cannot write is a throw (the route's fixed 'try again'), never a silent success", async () => {

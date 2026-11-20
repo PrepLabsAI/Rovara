@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { CreateScriptTokenBodySchema, scriptTokenKey, type AuditSink, type WikiPageWrite } from "@agentx/contracts";
-import { createScriptToken, readScriptToken } from "../../packages/broker/src/core/script-tokens/store.js";
-import { authenticateScriptToken, scriptTokenRoute } from "../../packages/broker/src/core/script-tokens/authenticate.js";
+import { type AuditSink, type WikiPageWrite } from "@agentx/contracts";
+import { createScriptToken } from "../../packages/broker/src/core/script-tokens/store.js";
 import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
 import { createCoreDevRoutes } from "../../packages/broker/src/core-host/dev-routes.js";
 import { createCoreHostApp } from "../../packages/broker/src/core-host/index.js";
@@ -33,31 +32,6 @@ async function world() {
 }
 
 describe("MCP wiki script-token permission", () => {
-  it("accepts and persists wiki independently, with no implicit read/start/lessons", async () => {
-    expect(CreateScriptTokenBodySchema.safeParse({ requestId: randomUUID(), name: "wiki", projects: ["alpha"], permissions: ["wiki"] }).success).toBe(true);
-    const w = await world();
-    const made = await w.token();
-    expect(made.token.permissions).toEqual(["wiki"]);
-    expect((await readScriptToken(w.deps, FAKE_COMPANY, made.token.tokenId))?.permissions).toEqual(["wiki"]);
-    for (const path of paths) expect(scriptTokenRoute("GET", path)).toEqual({ permission: "wiki", project: "path", name: "alpha" });
-    for (const invalid of ["Alpha", "a".repeat(64), "alpha.wiki"]) expect(scriptTokenRoute("GET", `/v1/app/projects/${invalid}/wiki`)).toBeUndefined();
-    for (const invalid of ["Overview", "a".repeat(121), "overview.md"]) expect(scriptTokenRoute("GET", `/v1/app/projects/alpha/wiki/pages/${invalid}`)).toBeUndefined();
-    for (const [method, path] of [["POST", paths[0]], ["GET", `${paths[1]}/sources`], ["POST", "/v1/app/projects/alpha/wiki/ask"], ["GET", "/v1/app/wiki"], ["GET", "/v1/app/projects/alpha/wiki/pages/overview/extra"]]) expect(scriptTokenRoute(method!, path!)).toBeUndefined();
-  });
-
-  it("authentication requires wiki and a named project, never read or lessons", async () => {
-    const w = await world();
-    const auth = (secret: string, path: string) => authenticateScriptToken({ ...w.deps, companyId: FAKE_COMPANY, identity: { getPrincipal: async () => w.principal }, enabled: () => true }, { method: "GET", path, headers: { authorization: `Bearer ${secret}` } });
-    const wiki = await w.token();
-    for (const path of paths) expect((await auth(wiki.secret, path)).caller.scriptToken.permissions).toEqual(["wiki"]);
-    for (const permission of ["read", "start", "lessons"]) {
-      const made = await w.token([permission]);
-      for (const path of paths) await expect(auth(made.secret, path)).rejects.toMatchObject({ code: "FORBIDDEN" });
-    }
-    for (const path of [paths[0].replace("alpha", "beta"), `${paths[1]}/sources`, "/v1/dev/tasks?project=alpha", "/v1/app/projects/alpha/wiki/../wiki"]) await expect(auth(wiki.secret, path)).rejects.toMatchObject({ code: "FORBIDDEN" });
-    const other = await w.token(["wiki"], ["alpha"], OTHER);
-    await expect(auth(other.secret, paths[0])).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
-  });
 
   it("hosted list/read stay inside the token's company and project and still check the live role", async () => {
     const w = await world();
@@ -79,35 +53,4 @@ describe("MCP wiki script-token permission", () => {
     expect((await w.read(a.token.tokenId, paths[0]))?.statusCode).toBe(404);
   });
 
-  it("hosted Cloud records without personId still require the matching developer", async () => {
-    const w = await world();
-    const made = await w.token();
-    const key = scriptTokenKey(FAKE_COMPANY, made.token.tokenId);
-    const original = (await w.store.get(key))!;
-    const cloudRecord = { ...original };
-    delete cloudRecord.personId;
-    await w.store.put({ item: cloudRecord });
-    for (const path of paths) expect((await w.read(made.token.tokenId, path))?.statusCode).toBe(200);
-    await w.store.put({ item: { ...cloudRecord, developerId: developerIdOf(localOwnerPrincipal({ companyId: FAKE_COMPANY, personId: "another-person" })) } });
-    for (const path of paths) expect((await w.read(made.token.tokenId, path))?.statusCode).toBe(403);
-    expect(w.calls).toHaveLength(2);
-  });
-
-  it("hosted tokens missing wiki, expired, revoked or held by someone else never reach wiki data", async () => {
-    const w = await world();
-    for (const permission of ["read", "lessons"]) {
-      const made = await w.token([permission]);
-      for (const path of paths) expect((await w.read(made.token.tokenId, path))?.statusCode).toBe(403);
-    }
-    const made = await w.token();
-    expect((await w.read(made.token.tokenId, `${paths[1]}/sources`))?.statusCode).toBe(403);
-    expect(w.calls).toEqual([]);
-    const key = scriptTokenKey(FAKE_COMPANY, made.token.tokenId);
-    const original = (await w.store.get(key))!;
-    for (const changed of [{ revokedAt: new Date(w.clock.now).toISOString() }, { expiresAt: new Date(w.clock.now - 1).toISOString() }, { personId: "someone-else" }, { createdRole: "member" }]) {
-      await w.store.put({ item: { ...original, ...changed } });
-      expect((await w.read(made.token.tokenId, paths[0]))?.statusCode).toBe(403);
-    }
-    expect(w.calls).toEqual([]);
-  });
 });

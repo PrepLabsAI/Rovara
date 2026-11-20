@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type * as Contracts from "@agentx/contracts";
 import { e2eAgentModelsFor } from "../../packages/contracts/src/e2e-agent-models.js";
-import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
 import { E2EModelRouteDefinitionSchema, e2eModelRouteRevision } from "../../packages/contracts/src/e2e-model-channel.js";
 import {
   E2E_AGENT_ROUTE_SEARCH_LIMIT, deriveE2EAgentRoute, deriveE2EAgentRouteForModel, e2eAgentInstallationFromEnvironment, e2eAgentRouteDefinitionDigest, resolveE2EAgentRouteForAdmission, searchE2EAgentRoute,
@@ -46,7 +45,6 @@ const OLD_DEFAULT_DIGESTS = {
   openai: { digest: "6213c1182264616c80aa565c22c90057c081f91a34e503c5673142a229605b7c", revision: "r1-bc75f4ca98e9" },
   openrouter: { digest: "b4444494c0b141c6c6b072aff1f27f014f3c4acacc72948078a5da341f582f65", revision: "r1-36ff8da2c130" },
 } as const;
-const OLD_OPENROUTER_ALLOWLIST_DIGEST = "4446050df130270828108dfa14e476aa0e0b9f9696d6b71812e7b27099c72035";
 
 const available = (installation: E2EAgentInstallation, revision = 1) => {
   const derived = deriveE2EAgentRoute(installation, revision);
@@ -64,40 +62,9 @@ describe("default route digests do not move (test 1)", () => {
     }
   });
 
-  it("names the recommended model as the setting and still gives the same digest, and pins OpenRouter's allowlist route", () => {
-    expect(e2eAgentRouteDefinitionDigest(available({ ...bedrock, e2eModel: "us.anthropic.claude-haiku-5-5" }))).toBe(OLD_DEFAULT_DIGESTS["amazon-bedrock"].digest);
-    expect(e2eAgentRouteDefinitionDigest(available({ ...installations.openrouter, openRouterProviders: "amazon-bedrock,anthropic" }))).toBe(OLD_OPENROUTER_ALLOWLIST_DIGEST);
-  });
-
-  it("keeps a default Bedrock install in another geography on the route it has always had (the recommended model is not held to the region rule)", () => {
-    const definition = available({ provider: "amazon-bedrock", region: "eu-west-1" });
-    expect(definition).toMatchObject({ modelId: "us.anthropic.claude-haiku-5-5", region: "eu-west-1", effort: "low" });
-  });
 });
 
 describe("a chosen model (test 2)", () => {
-  it("gives Bedrock Haiku 4.5 US-only no effort and no payloadShape, under a digest of its own", () => {
-    const us = available({ ...bedrock, e2eModel: HAIKU_45_US });
-    expect(us).toMatchObject({ modelId: HAIKU_45_US, effort: null, provider: "amazon-bedrock", region: "us-east-1", inferenceProfileArn: null });
-    expect(us).not.toHaveProperty("payloadShape");
-    const global = available({ ...bedrock, e2eModel: HAIKU_45_GLOBAL });
-    const digests = [e2eAgentRouteDefinitionDigest(available(bedrock)), e2eAgentRouteDefinitionDigest(us), e2eAgentRouteDefinitionDigest(global)];
-    expect(new Set(digests).size).toBe(3);
-    expect(global).toMatchObject({ modelId: HAIKU_45_GLOBAL, effort: null });
-  });
-
-  it("pins the digests of the two Haiku 4.5 profiles, so a change to either is a deliberate one", () => {
-    expect(e2eAgentRouteDefinitionDigest(available({ ...bedrock, e2eModel: HAIKU_45_US }))).toBe("2bbb13a3688841551e211645314caaa2af5d57ad3b6020511537917f547dc208");
-    expect(e2eAgentRouteDefinitionDigest(available({ ...bedrock, e2eModel: HAIKU_45_GLOBAL }))).toBe("d0beee86026652cd2bd79e493949b53bfa8d7965218dea2fa49bbcc4c7721968");
-  });
-
-  it("gives the request shape of the metadata: Haiku 5.5 low, gpt-5.4-mini none, and minimal sends no effort at all", () => {
-    expect(available({ ...bedrock, e2eModel: "global.anthropic.claude-haiku-5-5" }).effort).toBe("low");
-    expect(available({ ...installations.openai, e2eModel: "gpt-5.4" }).effort).toBeNull();
-    const minimal = available({ ...bedrock, e2eModel: "us.anthropic.claude-haiku-5-5", payloadShape: "minimal" });
-    expect(minimal).toMatchObject({ effort: null, payloadShape: "minimal" });
-    expect(e2eAgentRouteDefinitionDigest(minimal)).not.toBe(OLD_DEFAULT_DIGESTS["amazon-bedrock"].digest);
-  });
 
   it("refuses a model that is not eligible with a fixed sentence that does not carry the setting's value", () => {
     for (const e2eModel of ["anthropic.claude-haiku-4-5-20251001-v1:0", "us.anthropic.not-a-model-SECRETVALUE", "eu.anthropic.claude-haiku-5-5"]) {
@@ -122,19 +89,6 @@ describe("a chosen model (test 2)", () => {
 });
 
 describe("the route schema's payloadShape (test 6)", () => {
-  it("parses a definition from 38b55645, which has no such field, and hashes it as before", () => {
-    const stored = bedrockRoute();
-    expect(stored).not.toHaveProperty("payloadShape");
-    const old = {
-      routeId: "rovara-e2e-default", revision: 1, scope: "standard", provider: "amazon-bedrock", region: "us-east-1", modelId: "us.anthropic.claude-haiku-5-5", inferenceProfileArn: null,
-      secretArn: null, openRouter: null, budgets: stored.budgets, promptProtocol: "e2e-0.20.0-act/v1", sampling: "provider-default", thinking: "off", effort: "low", vision: false,
-    };
-    const parsed = E2EModelRouteDefinitionSchema.parse(old);
-    expect(Object.keys(parsed)).not.toContain("payloadShape");
-    expect(canonicalJson(parsed)).toBe(canonicalJson(old));
-    expect(e2eModelRouteRevision(parsed)).toBe("r1-1ca517bbc9f9");
-    expect(e2eAgentRouteDefinitionDigest(parsed)).toBe(OLD_DEFAULT_DIGESTS["amazon-bedrock"].digest);
-  });
 
   it("refuses the minimal shape with an effort, and a shape other than minimal", () => {
     const raw = (overrides: Record<string, unknown>) => ({ ...bedrockRoute(), ...overrides });

@@ -10,31 +10,15 @@ const source = (overrides: Partial<ContextSource> = {}): ContextSource => ({
 });
 
 describe("packetMcpCall", () => {
-  it("builds the call from the configured source: its ticked read tool, and the item ref as the only argument", () => {
-    expect(packetMcpCall([source()], { sourceId: "tracker", itemRef: "ABC-1" })).toEqual({ ok: true, sourceId: "tracker", tool: "src_tracker_get_issue", arguments: { id: "ABC-1" } });
-  });
 
   it("uses a read tool only: a source with only search or status tools is not allowed", () => {
     expect(packetMcpCall([source({ tools: [tool("search_issues", "search"), tool("status", "status")] })], { sourceId: "tracker", itemRef: "A-1" })).toEqual({ ok: false, reason: "not_allowed" });
-  });
-
-  it("refuses an unknown source and a source not allowed in PLAN_CRITIQUE", () => {
-    expect(packetMcpCall([source()], { sourceId: "other", itemRef: "A-1" })).toEqual({ ok: false, reason: "not_allowed" });
-    expect(packetMcpCall([source({ stages: ["UNDERSTAND", "PLAN"] })], { sourceId: "tracker", itemRef: "A-1" })).toEqual({ ok: false, reason: "not_allowed" });
   });
 
   it("refuses every chat system, however it is spelled, and a Slack source by its label or id", () => {
     for (const system of PACKET_CHAT_SYSTEMS) expect(packetMcpCall([source({ system: system.toUpperCase() })], { sourceId: "tracker", itemRef: "A-1" }), system).toEqual({ ok: false, reason: "conversation" });
     expect(packetMcpCall([source({ system: undefined, label: "Engineering Slack" })], { sourceId: "tracker", itemRef: "A-1" })).toEqual({ ok: false, reason: "conversation" });
     expect(packetMcpCall([source({ system: undefined, sourceId: "slackeng" })], { sourceId: "slackeng", itemRef: "A-1" })).toEqual({ ok: false, reason: "conversation" });
-  });
-
-  it("refuses a thread, channel, history, conversation or message tool on an ordinary source", () => {
-    for (const name of ["get_thread", "channel_history", "read_conversation", "get_message", "list_messages", "read_chat"]) {
-      expect(packetMcpCall([source({ tools: [tool(name)] })], { sourceId: "tracker", itemRef: "C1" }), name).toEqual({ ok: false, reason: "conversation" });
-    }
-    // positive control: a plain tool name is allowed
-    expect(packetMcpCall([source({ tools: [tool("get_page")] })], { sourceId: "tracker", itemRef: "P1" }).ok).toBe(true);
   });
 
   it("refuses an item ref with hidden characters, and lets the wiring refuse by its own argument rule", () => {

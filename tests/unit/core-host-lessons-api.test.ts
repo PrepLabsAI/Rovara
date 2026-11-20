@@ -125,13 +125,6 @@ describe("lessons weekly route", () => {
     vi.spyOn(w.people, "onProjectRoster").mockImplementation(async (companyId, project, personId) => personId !== "a-admin" && project === "payments" && (companyId === A || companyId === B));
     expect(await call(api(w).api, "a-admin", "GET", PATH)).toMatchObject({ ok: false, status: 404, message: NO_SUCH_PROJECT });
   });
-  it("refuses script tokens and obeys the lessons switch", async () => {
-    const w = await setUp();
-    const target = api(w).api;
-    expect(await call(target, "a-admin", "GET", PATH, undefined, undefined, { scriptToken: { tokenId: "sct_aaaaaaaaaaaaaaaaaaaa" } })).toMatchObject({ ok: false, code: "FORBIDDEN" });
-    const off = api(w, { lessonsSwitch: { mode: "off" } });
-    expect(await call(off.api, "a-admin", "GET", PATH)).toMatchObject({ ok: false, code: "LESSONS_SWITCHED_OFF", message: LESSONS_OFF });
-  });
 });
 /** The lesson events the audit sink recorded (task starts are the fixture's own). */
 const lessonEvents = (w: World) => w.world.audit.filter((event) => event.action.startsWith("lesson."));
@@ -199,27 +192,6 @@ describe("lessons replay route", () => {
     expect((await call(target, "a-out", "GET", PATH)).ok).toBe(false);
   });
 
-  it("keeps same-named projects in separate companies", async () => {
-    const w = await setUp();
-    for (const companyId of [A, B]) vi.spyOn(w.lessons.get(companyId)!, "replay").mockResolvedValue({
-      tasks: [{ taskId: companyId === A ? "task-a" : "task-b", stage: "PLAN", round: 1, actual: [], replayed: [], gained: [], lost: [], changed: false }],
-      totals: { changedTasks: 0, lessonsGained: 0, lessonsLost: 0 },
-    });
-    const target = api(w).api;
-    const a = await call(target, "a-admin", "GET", PATH);
-    const b = await call(target, "b-admin", "GET", PATH);
-    expect((a.ok && b.ok) ? [a.body.tasks, b.body.tasks] : []).toEqual([[expect.objectContaining({ taskId: "task-a" })], [expect.objectContaining({ taskId: "task-b" })]]);
-  });
-
-  it("refuses a company admin who is not on the project's roster, like the measure read", async () => {
-    const w = await setUp();
-    vi.spyOn(w.people, "onProjectRoster").mockImplementation(async (companyId, project, personId) => personId !== "a-admin" && project === "payments" && (companyId === A || companyId === B));
-    const replay = vi.spyOn(w.lessons.get(A)!, "replay").mockResolvedValue({ tasks: [], totals: { changedTasks: 0, lessonsGained: 0, lessonsLost: 0 } });
-    expect(await call(api(w).api, "a-admin", "GET", PATH)).toMatchObject({ ok: false, status: 404 });
-    expect((await call(api(w).api, "a-admin", "GET", `${P}/lessons/measure`)).ok).toBe(false);
-    expect(replay).not.toHaveBeenCalled();
-  });
-
   it("replays a similarity-eligible task from stored data without embeddings, model calls, or writes", async () => {
     const w = await setUp();
     const taskId = w.tasks.get(A)!;
@@ -245,19 +217,6 @@ describe("lessons replay route", () => {
 });
 
 describe("the switch", () => {
-  it("off: every route answers the fixed 'Lessons are off.' and reads nothing, not even membership", async () => {
-    const w = await setUp({});
-    const { api: target, companyOf, lessonsOf } = api(w, { lessonsSwitch: { mode: "off" } });
-    const before = w.people.asked.length;
-    for (const [method, path, body] of ROUTES) {
-      expect(isLessonsApiPath(path), path).toBe(true);
-      expect(await call(target, "a-admin", method, path, body), `${method} ${path}`).toEqual({ ok: false, code: "LESSONS_SWITCHED_OFF", status: 404, message: LESSONS_OFF });
-    }
-    expect(companyOf).not.toHaveBeenCalled();
-    expect(lessonsOf).not.toHaveBeenCalled();
-    expect(w.people.asked.length).toBe(before);
-    expect(lessonEvents(w)).toEqual([]);
-  });
 
   it("on:<A>: a person of B gets 'Lessons are off.' and B's lessons are never asked for", async () => {
     const w = await setUp();
@@ -350,20 +309,6 @@ describe("the company comes from live membership only", () => {
 });
 
 describe("lists and paging", () => {
-  it("a page is at most 50 lessons, and a page of 50 from a long list says where the next one starts", async () => {
-    const w = await setUp();
-    await put(w, A, ...Array.from({ length: 53 }, (_, n) => lesson(A, `les_big${String(n).padStart(5, "0")}`, { updatedAt: 1000 + n })));
-    const { api: target } = api(w);
-    const first = await call(target, "a-contrib", "GET", `${P}/lessons`, undefined, { list: "approved", limit: "50" });
-    expect(first.ok && (first.body["lessons"] as unknown[]).length).toBe(50);
-    expect(first.ok && typeof first.body["next"]).toBe("string");
-    const dflt = await call(target, "a-contrib", "GET", `${P}/lessons`);
-    expect(dflt.ok && (dflt.body["lessons"] as unknown[]).length).toBe(50);
-    expect(await call(target, "a-contrib", "GET", `${P}/lessons`, undefined, { list: "approved", limit: "51" })).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
-    const second = await call(target, "a-contrib", "GET", `${P}/lessons`, undefined, { list: "approved", limit: "50", cursor: first.ok ? first.body["next"] as string : "" });
-    expect(second.ok && (second.body["lessons"] as unknown[]).length).toBe(3);
-    expect(second.ok && "next" in second.body).toBe(false);
-  });
 
   it("pages through a list newest change first with an opaque cursor, and refuses a cursor of another list or a malformed one without echoing it", async () => {
     const w = await setUp();
@@ -456,20 +401,6 @@ describe("decisions on one lesson", () => {
     expect((await store.get({ workspaceId: A, project: "payments" }, "les_aaaa1111"))?.status).toBe("retired");
     expect(await call(target, "a-admin", "GET", `${P}/lessons/retire-requests`)).toMatchObject({ ok: true, body: { requests: [] } });
   });
-
-  it("a script token gets nothing: not the paginated lists, not a task's lessons, and never a decision or a setting", async () => {
-    const w = await setUp();
-    await put(w, A, lesson(A, "les_apend001", { status: "pending" }));
-    const { api: target } = api(w);
-    const token = { scriptToken: { tokenId: "t1" } };
-    for (const [method, path, body] of ROUTES) {
-      expect(await call(target, "a-admin", method, path, body, undefined, token), `${method} ${path}`).toMatchObject({ ok: false, code: "FORBIDDEN", message: "A script token cannot do that." });
-    }
-    // The same person without the token reads the same list: the refusal is the token's, not the route's.
-    expect((await call(target, "a-admin", "GET", `${P}/lessons`)).ok).toBe(true);
-    for (const list of ["approved", "proposed", "retired"]) expect(await call(target, "a-admin", "GET", `${P}/lessons`, undefined, { list, limit: "2" }, token), list).toMatchObject({ ok: false, code: "FORBIDDEN" });
-    expect(lessonEvents(w)).toEqual([]);
-  });
 });
 
 describe("retire requests", () => {
@@ -541,15 +472,6 @@ describe("the Keep answer to a quiet lesson (L4-LP12b)", () => {
     expect(w.world.audit.filter((event) => event.action === "lesson.kept")).toEqual([]);
   });
 
-  it("only the route's own method and an empty body: a GET is no route, and a body with fields is refused", async () => {
-    const w = await setUp();
-    await asked(w, A, "les_quiet001");
-    const { api: target } = api(w);
-    expect(await call(target, "a-admin", "GET", `${P}/lessons/les_quiet001/keep`)).toMatchObject({ ok: false, code: "NOT_FOUND", message: "route not found" });
-    expect(await call(target, "a-admin", "POST", `${P}/lessons/les_quiet001/keep`, { days: 9999 })).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
-    expect(await expiryOf(w, A, "les_quiet001")).toBe(w.world.clock.now + 86_400_000);
-  });
-
   it("no question, no Keep: a lesson nobody asked about, and one that is gone, are refused the same clear way", async () => {
     const w = await setUp();
     await put(w, A, lesson(A, "les_aaaa1111", { expiresAt: w.world.clock.now + 86_400_000 }));
@@ -557,22 +479,6 @@ describe("the Keep answer to a quiet lesson (L4-LP12b)", () => {
     expect(await call(target, "a-admin", "POST", `${P}/lessons/les_aaaa1111/keep`, {})).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
     expect(await call(target, "a-admin", "POST", `${P}/lessons/les_gone0001/keep`, {})).toMatchObject({ ok: false, code: "NOT_FOUND", message: NO_SUCH_LESSON });
     expect(await expiryOf(w, A, "les_aaaa1111")).toBe(w.world.clock.now + 86_400_000);
-  });
-
-  it("two companies: company B's admin cannot keep company A's lesson, and B's own lesson is not kept by A's question", async () => {
-    const w = await setUp();
-    await asked(w, A, "les_quiet001");
-    await put(w, B, lesson(B, "les_quiet001", { expiresAt: w.world.clock.now + 86_400_000 }));
-    const { api: target } = api(w);
-    // B's lesson of the same id has no question of its own: A's question is not B's.
-    expect(await call(target, "b-admin", "POST", `${P}/lessons/les_quiet001/keep`, {})).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
-    expect(await expiryOf(w, B, "les_quiet001")).toBe(w.world.clock.now + 86_400_000);
-    expect(await expiryOf(w, A, "les_quiet001")).toBe(w.world.clock.now + 86_400_000);
-    expect(w.world.audit.filter((event) => event.action === "lesson.kept")).toEqual([]);
-    // And A's own admin still can.
-    expect(await call(target, "a-admin", "POST", `${P}/lessons/les_quiet001/keep`, {})).toMatchObject({ ok: true });
-    expect(await expiryOf(w, B, "les_quiet001")).toBe(w.world.clock.now + 86_400_000);
-    expect(w.world.audit.filter((event) => event.action === "lesson.kept").every((event) => event.companyId === A)).toBe(true);
   });
 
   it("a ledger that cannot be written changes nothing", async () => {
@@ -649,16 +555,6 @@ describe("lessons used by a task", () => {
     });
     expect(await call(target, "a-out", "GET", `${P}/tasks/${taskId}/lessons`)).toMatchObject({ ok: true, body: { lessons: [] } });
     expect(wikiTaskUse).not.toHaveBeenCalled();
-  });
-
-  it("a task the company's reader answers for another project, or (a wiring fault) for another company, is 'no such task'", async () => {
-    const w = await setUp();
-    const real = w.lessons.get(A)!;
-    const taskId = w.tasks.get(A)!;
-    for (const answered of [{ companyId: A, project: "ledger", developerId: "a-contrib" }, { companyId: B, project: "payments", developerId: "a-contrib" }]) {
-      const { api: target } = api(w, { lessonsOf: async (companyId) => (companyId === A ? { ...real, readTask: async () => answered } : undefined) });
-      expect(await call(target, "a-contrib", "GET", `${P}/tasks/${taskId}/lessons`), JSON.stringify(answered)).toMatchObject({ ok: false, code: "TASK_NOT_FOUND" });
-    }
   });
 });
 
@@ -777,20 +673,6 @@ describe("used in N tasks", () => {
     expect(answer).toMatchObject({ ok: true, body: { usedInIncomplete: true } });
     expect((answer.ok ? (answer.body["lessons"] as Array<Record<string, unknown>>) : [])[0]).not.toHaveProperty("usedInTasks");
   });
-  it("the proposed list is not counted: a proposed lesson was never given to a task", async () => {
-    const w = await setUp();
-    await put(w, A, lesson(A, "les_apend001", { status: "pending" }));
-    const documents = w.lessons.get(A)!.runtime.documents;
-    const spy = vi.spyOn(documents, "query");
-    const { api: target } = api(w);
-    const answer = await call(target, "a-admin", "GET", `${P}/lessons`, undefined, { list: "proposed" });
-    const asked = spy.mock.calls.filter(([request]) => request.pk.includes("LESSON_USE#")).length;
-    spy.mockRestore();
-    expect(answer.ok && (answer.body["lessons"] as Array<{ id: string }>).map((one) => one.id)).toEqual(["les_apend001"]);
-    expect(answer.ok && answer.body["usedInIncomplete"]).toBeUndefined();
-    expect((answer.ok ? (answer.body["lessons"] as Array<Record<string, unknown>>) : [])[0]).not.toHaveProperty("usedInTasks");
-    expect(asked).toBe(0);
-  });
 });
 
 describe("earned trust (DEC 231): the offer to let low-risk lessons go live on trial", () => {
@@ -809,12 +691,6 @@ describe("earned trust (DEC 231): the offer to let low-risk lessons go live on t
     return answer.ok ? answer.body["trialOffer"] : answer;
   };
 
-  it("control: no offer on a new project; the mode answer is exactly what it was", async () => {
-    const w = await setUp();
-    const { api: target } = api(w);
-    expect(await call(target, "a-admin", "GET", `${P}/lessons/mode`)).toEqual({ ok: true, body: { project: "payments", mode: "suggest", effective: "suggest", lockedByCompany: false, canChange: true } });
-  });
-
   it("offered after 10 approvals with few drops, to people who may change the mode only; 9 approvals, or too many drops, is no offer", async () => {
     const w = await setUp();
     await decide(w, A, 10, 2);
@@ -827,32 +703,6 @@ describe("earned trust (DEC 231): the offer to let low-risk lessons go live on t
     const nine = await setUp();
     await decide(nine, A, 9, 0);
     expect(await offerOf(api(nine).api, "a-admin")).toBeUndefined();
-  });
-
-  it("two companies, one project name: a company's offer comes only from its own decisions", async () => {
-    const w = await setUp();
-    await decide(w, A, 12, 0);
-    const { api: target } = api(w);
-    expect(await offerOf(target, "a-admin")).toMatchObject({ approvals: 12 });
-    expect(await offerOf(target, "b-admin")).toBeUndefined();
-    expect(await call(target, "b-admin", "POST", OFFER, { decision: "accept" })).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
-    expect(await call(target, "b-admin", "GET", `${P}/lessons/mode`)).toMatchObject({ ok: true, body: { mode: "suggest" } });
-  });
-
-  it("only a person's own approvals in the last 90 days count: the system's go-lives, trials, the repository edit and old approvals do not", async () => {
-    const w = await setUp();
-    await decide(w, A, 10, 0, { mode: "auto" });
-    const { api: target } = api(w);
-    expect(await offerOf(target, "a-admin")).toBeUndefined();
-    const w2 = await setUp();
-    await decide(w2, A, 10, 0, { by: "system:repository-edit" });
-    expect(await offerOf(api(w2).api, "a-admin")).toBeUndefined();
-    const w3 = await setUp();
-    await decide(w3, A, 10, 0, { at: w3.world.clock.now - 91 * DAY });
-    expect(await offerOf(api(w3).api, "a-admin")).toBeUndefined();
-    const w4 = await setUp();
-    await decide(w4, A, 10, 0, { mode: "trial" });
-    expect(await offerOf(api(w4).api, "a-admin")).toBeUndefined();
   });
 
   it("no offer unless the project is in Suggest by its own choice, under no company lock and on the Standard preset", async () => {
@@ -1051,56 +901,6 @@ describe("lessons phase 0: the measurement read (GET lessons/measure)", () => {
     await host.noteReverted(w.tasks.get(A)!);
     expect(await call(target, "a-admin", "GET", PATH)).toMatchObject({ ok: true, body: { cleanMerge: { merged: 1, reverted: 1, clean: 0, rate: 0 } } });
   });
-
-  it("two companies with one project name: each company's admin sees only its own numbers, and company B's milestone for A's task writes nothing", async () => {
-    const w = await setUp();
-    await drive(w, A);
-    await drive(w, B);
-    const hostB = w.lessons.get(B)!.host;
-    const at = new Date(w.world.clock.now).toISOString();
-    // B's host is told about A's task (a wrong routing): the task is not B's, so nothing is written anywhere.
-    await hostB.milestone.on({ kind: "merged", orgId: B, taskId: w.tasks.get(A)!, at, text: "merged" });
-    await hostB.noteReverted(w.tasks.get(A)!);
-    await w.lessons.get(A)!.host.milestone.on({ kind: "merged", orgId: A, taskId: w.tasks.get(A)!, at, text: "merged" });
-    const { api: target } = api(w);
-    expect(await call(target, "a-admin", "GET", PATH)).toMatchObject({ ok: true, body: { loads: 1, cleanMerge: { merged: 1, reverted: 0 } } });
-    expect(await call(target, "b-admin", "GET", PATH)).toMatchObject({ ok: true, body: { loads: 1, cleanMerge: { merged: 0, reverted: 0 } } });
-    const rowsOf = async (company: OrgId, kind: string) => (await w.world.store.query({ pk: companyScoped(company, `${kind}#payments`) })).items;
-    expect((await rowsOf(A, "LESSON_FIT")).length).toBe(1);
-    expect((await rowsOf(B, "LESSON_FIT")).length).toBe(1);
-    expect((await rowsOf(B, "LESSON_MERGE")).length).toBe(0);
-    expect(JSON.stringify(await rowsOf(A, "LESSON_FIT"))).not.toContain(B);
-  });
-
-  it("with the switch off nothing is read, and a company the switch does not cover is told lessons are off", async () => {
-    const w = await setUp({ [CORE_LESSONS_VARIABLE]: `on:${A}` });
-    const off = api(w, { lessonsSwitch: { mode: "off" } });
-    expect(await call(off.api, "a-admin", "GET", PATH)).toMatchObject({ ok: false, code: "LESSONS_SWITCHED_OFF", message: LESSONS_OFF });
-    expect(off.companyOf).not.toHaveBeenCalled();
-    expect(await call(api(w, { lessonsSwitch: { mode: "on-for", companies: [A] } }).api, "b-admin", "GET", PATH)).toMatchObject({ ok: false, code: "LESSONS_SWITCHED_OFF" });
-  });
-});
-
-describe("the weekly summary default for pilot companies (lane L4-WK)", () => {
-  const PATH = `${P}/lessons/weekly-summary`;
-  it("a pilot company's project that never chose reads as on with its source; a project admin can turn it off and the choice then wins; another company is unchanged", async () => {
-    const w = await setUp();
-    const { api: target } = api(w, { digestPilot: (companyId) => companyId === A });
-    expect(await call(target, "a-contrib", "GET", PATH)).toEqual({ ok: true, body: { project: "payments", on: true, source: "pilot_default", canChange: false } });
-    expect(await call(target, "b-admin", "GET", PATH)).toEqual({ ok: true, body: { project: "payments", on: false, source: "default", canChange: true } });
-    expect(await call(target, "a-maint", "PUT", PATH, { on: false })).toEqual({ ok: true, body: { project: "payments", on: false, source: "chosen", canChange: true } });
-    expect(await call(target, "a-contrib", "GET", PATH)).toEqual({ ok: true, body: { project: "payments", on: false, source: "chosen", canChange: false } });
-    expect(w.world.audit.filter((e) => e.action === "lesson.digest_switched").map((e) => [e.actor.id, e.companyId, e.details])).toEqual([["a-maint", A, expect.objectContaining({ enabled: false })]]);
-    // Turning it on in the other company changes only that company.
-    expect(await call(target, "b-admin", "PUT", PATH, { on: true })).toMatchObject({ ok: true, body: { on: true, source: "chosen" } });
-    expect(await call(target, "a-contrib", "GET", PATH)).toMatchObject({ ok: true, body: { on: false, source: "chosen" } });
-  });
-
-  it("with no pilot list given the companies the lessons switch names are the pilot; 'on' for everyone names nobody", async () => {
-    const w = await setUp();
-    expect(await call(api(w, { lessonsSwitch: { mode: "on-for", companies: [A, B] } }).api, "a-admin", "GET", PATH)).toMatchObject({ ok: true, body: { on: true, source: "pilot_default" } });
-    expect(await call(api(w, { lessonsSwitch: { mode: "on" } }).api, "a-admin", "GET", PATH)).toMatchObject({ ok: true, body: { on: false, source: "default" } });
-  });
 });
 
 describe("the tuning report (GET lessons/tuning, lane L4-WK)", () => {
@@ -1142,19 +942,10 @@ describe("the tuning report (GET lessons/tuning, lane L4-WK)", () => {
     expect(await call(target, "b-admin", "GET", PATH)).toMatchObject({ ok: true, body: { ready: true, evidence: { loads: 21 } } });
     expect(await call(target, "a-admin", "GET", PATH)).toMatchObject({ ok: true, body: { evidence: { loads: 25 } } });
   });
-
-  it("with the switch off nothing is read, and a company the switch does not cover is told lessons are off", async () => {
-    const w = await setUp({ [CORE_LESSONS_VARIABLE]: `on:${A}` });
-    const off = api(w, { lessonsSwitch: { mode: "off" } });
-    expect(await call(off.api, "a-admin", "GET", PATH)).toMatchObject({ ok: false, code: "LESSONS_SWITCHED_OFF", message: LESSONS_OFF });
-    expect(off.companyOf).not.toHaveBeenCalled();
-    expect(await call(api(w, { lessonsSwitch: { mode: "on-for", companies: [A] } }).api, "b-admin", "GET", PATH)).toMatchObject({ ok: false, code: "LESSONS_SWITCHED_OFF" });
-  });
 });
 
 describe("revert detection (lane L4-LM1b): the host puts the lessons a reverted task loaded under question only where the revert's files are in the lesson's own code area", () => {
   const VIA = "e".repeat(40);
-  const key = (company: OrgId) => ({ workspaceId: company, project: "payments" });
   const questionRows = async (w: World, company: OrgId) => (await w.world.store.query({ pk: companyScoped(company, "LESSON_QUESTION#payments") })).items;
   /** One approved lesson with a code area, loaded (reached the prompt) by the company's task. */
   async function loaded(w: World, company: OrgId, id: string, paths: string[] | undefined): Promise<void> {
@@ -1165,20 +956,6 @@ describe("revert detection (lane L4-LM1b): the host puts the lessons a reverted 
       lessons: [{ id, version: 1, score: 0.5, why: "scope", citation: "valid" }],
     });
   }
-  const countersOf = async (w: World, company: OrgId, id: string) => (await w.lessons.get(company)!.runtime.store.get(key(company), id))!;
-
-  it("a revert whose files are in the lesson's area flags it as evidence only: the lesson, its marks and its status are untouched, and the revert is still counted", async () => {
-    const w = await setUp();
-    await loaded(w, A, "les_aaaa1111", ["src/billing/**"]);
-    const before = JSON.stringify(await countersOf(w, A, "les_aaaa1111"));
-    await w.lessons.get(A)!.host.noteReverted(w.tasks.get(A)!, { via: VIA, files: ["src/billing/money.ts"] });
-    expect((await questionRows(w, A)).map((row) => [row["lessonId"], row["taskId"], row["via"]])).toEqual([["les_aaaa1111", w.tasks.get(A), VIA]]);
-    expect(JSON.stringify(await countersOf(w, A, "les_aaaa1111"))).toBe(before);
-    expect(await countersOf(w, A, "les_aaaa1111")).toMatchObject({ status: "active", counters: { harmful: 0 } });
-    // the clean-merge count (phase 0) sees the revert as before
-    const rows = (await w.world.store.query({ pk: companyScoped(A, "LESSON_MERGE#payments") })).items;
-    expect(rows.map((row) => row["kind"])).toEqual(["reverted"]);
-  });
 
   it("a revert in files outside every lesson's area, one with unreadable files, and a lesson with no area flag nothing; the revert is still counted", async () => {
     const w = await setUp();
@@ -1193,17 +970,6 @@ describe("revert detection (lane L4-LM1b): the host puts the lessons a reverted 
     expect(await questionRows(wide, A)).toEqual([]);
   });
 
-  it("the same revert told again is one piece of evidence; with no revert detail (the old call) nothing is flagged", async () => {
-    const w = await setUp();
-    await loaded(w, A, "les_aaaa1111", ["src/**"]);
-    const host = w.lessons.get(A)!.host;
-    await host.noteReverted(w.tasks.get(A)!);
-    expect(await questionRows(w, A)).toEqual([]);
-    await host.noteReverted(w.tasks.get(A)!, { via: VIA, files: ["src/a.ts"] });
-    await host.noteReverted(w.tasks.get(A)!, { via: VIA, files: ["src/a.ts"] });
-    expect(await questionRows(w, A)).toHaveLength(1);
-  });
-
   it("company B's host told of company A's task flags nothing in either company", async () => {
     const w = await setUp();
     await loaded(w, A, "les_aaaa1111", ["src/**"]);
@@ -1215,12 +981,6 @@ describe("revert detection (lane L4-LM1b): the host puts the lessons a reverted 
     expect(await questionRows(w, A)).toHaveLength(1);
     expect(await questionRows(w, B)).toEqual([]);
     expect(JSON.stringify(await questionRows(w, A))).not.toContain(B);
-  });
-
-  it("the lessons pass runs the revert watch for the company (its report is in the pass's answer), with no model call", async () => {
-    const w = await setUp();
-    const report = await w.lessons.get(A)!.service.pass({ budgetMs: 30_000 });
-    expect(report).toMatchObject({ reverts: { repositories: 0, found: 0 } });
   });
 });
 

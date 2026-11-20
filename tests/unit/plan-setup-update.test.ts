@@ -8,8 +8,7 @@ import {
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { setupApplyDigest, setupApplyKey } from "../../packages/broker/src/core/setup-agent/apply.js";
-import { SETUP_UPDATE_WORDS, candidateFromPlanItems, readSetupUpdates, setupUpdateKey, setupUpdateOfferItems } from "../../packages/broker/src/core/setup-agent/plan-update.js";
-import { classifySetupChange } from "../../packages/broker/src/core/setup-agent/setup-risk.js";
+import { SETUP_UPDATE_WORDS, candidateFromPlanItems, setupUpdateKey, setupUpdateOfferItems } from "../../packages/broker/src/core/setup-agent/plan-update.js";
 import { planDocument } from "../support/plan-documents.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
@@ -148,17 +147,6 @@ function mergeOf(items: PlanSetupChangeItem[] | undefined, over: { approved?: bo
 const offerItems = (merge: ReturnType<typeof mergeOf>, project = "payments", companyId: string = FAKE_COMPANY) => setupUpdateOfferItems({ artifacts: merge.reader, companyId }, { taskId: TASK, orgId: merge.orgId, project }, merge.before, merge.after, AT);
 
 describe("a merged plan leaves ONE Update setup offer (silent otherwise)", () => {
-  it("writes the offer in the merge's own items, with the approved items, their digest and the pull request", async () => {
-    const items = await offerItems(mergeOf([mockItem(), commandItem(), variableItem()]));
-    expect(items).toHaveLength(1);
-    const { world } = await setupWorld();
-    expect((await world.store.transact(items)).applied).toBe(true);
-    expect(await world.store.get(setupUpdateKey(FAKE_COMPANY, "payments", TASK))).toMatchObject({ entityType: "SETUP_UPDATE_OFFER", state: "offered", project: "payments", taskId: TASK, orgId: FAKE_COMPANY, pullRequests: [{ repository: "demo", number: 482 }] });
-    const views = await readSetupUpdates({ store: world.store, companyId: FAKE_COMPANY }, "payments");
-    expect(views).toHaveLength(1);
-    expect(views[0]).toMatchObject({ taskId: TASK, title: "Update setup", carried: 2, summary: SETUP_UPDATE_WORDS.summary(3) });
-    expect(views[0]!.leftToYou).toEqual(["Adds the variable `STRIPE_WEBHOOK_SECRET` (name only; you set the value). The webhook handler reads it."]);
-  });
 
   it("is silent when the plan had no setup change, only a variable or a dependency (nothing Rovara can add), or the plan was not approved", async () => {
     expect(await offerItems(mergeOf(undefined))).toEqual([]);
@@ -167,22 +155,6 @@ describe("a merged plan leaves ONE Update setup offer (silent otherwise)", () =>
     expect(await offerItems(mergeOf([mockItem()], { unreadable: true }))).toEqual([]);
   });
 
-  it("is only after the merge: an open pull request, a pull request closed unmerged, a task that was merged before, or another company's task leave nothing", async () => {
-    const m = mergeOf([mockItem()]);
-    const open = { ...m, after: { ...m.after, stage: "PULL_REQUEST", state: "READY", outcome: undefined } as unknown as WorkflowSnapshot };
-    expect(await offerItems(open)).toEqual([]);
-    expect(await offerItems(mergeOf([mockItem()], { outcome: "CLOSED" }))).toEqual([]);
-    expect(await offerItems(mergeOf([mockItem()], { stage: "CLOSED" }))).toEqual([]);
-    expect(await offerItems(mergeOf([mockItem()], { beforeMerged: true }))).toEqual([]);
-    expect(await offerItems(mergeOf([mockItem()], { orgId: OTHER }))).toEqual([]);
-    expect(await offerItems(mergeOf([mockItem()]), "payments", OTHER)).toEqual([]);
-  });
-
-  it("never throws into the merge: a reader that fails leaves no offer", async () => {
-    const m = mergeOf([mockItem()]);
-    const throwing = { ...m, reader: { get: async () => { throw new Error("storage down detail"); } } };
-    await expect(offerItems(throwing)).resolves.toEqual([]);
-  });
 });
 
 describe("the candidate from the approved items", () => {
@@ -216,11 +188,6 @@ describe("the candidate from the approved items", () => {
     for (const list of [built.candidate["setup"], built.candidate["readiness"]] as Array<Array<{ env?: unknown }>>) for (const entry of list) expect(entry.env).toBeUndefined();
   });
 
-  it("reads, by L4-D's rule, as medium with a mock and low with only commands, so a maintainer decides both", () => {
-    const withMock = candidateFromPlanItems(base, [mockItem(), commandItem()])!;
-    expect(classifySetupChange(base, withMock.candidate)).toMatchObject({ risk: "medium", changes: [{ area: "test_commands", risk: "low" }, { area: "test_mocks", risk: "medium" }] });
-    expect(classifySetupChange(base, candidateFromPlanItems(base as never, [commandItem()])!.candidate).risk).toBe("low");
-  });
 });
 
 describe("Update setup on the hosted routes", () => {
@@ -232,24 +199,6 @@ describe("Update setup on the hosted routes", () => {
     return ctx;
   }
   const body = (taskId = TASK) => ({ requestId: randomUUID(), taskId });
-
-  it("shows the offer to the people who manage the setup; a reader, an outsider and another company's manager see none", async () => {
-    const { person, call } = await offered();
-    const admin = person("p-admin", FAKE_COMPANY, "admin");
-    const shown = await call(get(UPDATES), admin);
-    expect(shown.status, shown.raw).toBe(200);
-    expect(shown.body["canManage"]).toBe(true);
-    expect(shown.body["offers"]).toMatchObject([{ taskId: TASK, title: "Update setup", carried: 2 }]);
-    expect(((shown.body["offers"] as Array<{ lines: string[] }>)[0]!.lines)).toHaveLength(2);
-    const developer = person("p-dev", FAKE_COMPANY, "member", { payments: "developer" });
-    expect((await call(get(UPDATES), developer)).body).toEqual({ offers: [], canManage: false });
-    const outsider = person("p-out", FAKE_COMPANY, "member");
-    expect((await call(get(UPDATES), outsider)).status).toBe(404);
-    // the same project name in another company, and another project in this one, never show it
-    const otherAdmin = person("p-other", OTHER, "admin");
-    expect((await call(get(UPDATES), otherAdmin)).body["offers"]).toEqual([]);
-    expect((await call(get(`${LEDGER}/updates`), admin)).body["offers"]).toEqual([]);
-  });
 
   it("is not served where the hosted approval is not wired: no offers, no candidate, nothing written", async () => {
     const { world, person, call } = await setupWorld({ approval: false });

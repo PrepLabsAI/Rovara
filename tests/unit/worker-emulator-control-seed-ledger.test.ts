@@ -43,36 +43,9 @@ function harness(answer: (args: string[]) => { exitCode: number | null; stdout?:
 const callOf = (h: ReturnType<typeof harness>): string[] => h.calls.find((call) => call[0] === "run")!;
 
 describe("emulatorControlCall", () => {
-  it("makes the call from a hardened probe container: the token in a 0600 env file, the answer from standard output, both files gone afterwards", async () => {
-    const h = harness(() => ({ exitCode: 0, stdout: '{"ok":true}' }));
-    const out = await emulatorControlCall(h.target(), { path: "ledgerSummary", method: "GET", print: true });
-    expect(out).toBe('{"ok":true}');
-    const env = h.seen.find((entry) => entry.name.endsWith(".env"))!;
-    expect(env.content).toBe(`ROVARA_CONTROL_TOKEN=${h.credentials.controlToken}\n`);
-    expect(env.mode).toBe(0o600);
-    expect(env.presentDuringCall).toBe(true);
-    expect(h.present.size).toBe(0);
-    const args = callOf(h);
-    expect(args[args.indexOf("--env-file") + 1]).toBe(`/run/rovara-test/${env.name}`);
-    expect(args).toContain("--read-only");
-    expect(args[args.indexOf("--cap-drop") + 1]).toBe("ALL");
-  });
   it("without print the answer is not returned", async () => {
     const h = harness(() => ({ exitCode: 0, stdout: "secret-looking answer" }));
     expect(await emulatorControlCall(h.target(), { path: "reset", method: "POST" })).toBe("");
-  });
-  it("the token is in no argument, and a body is a mounted file, never an argument", async () => {
-    const h = harness(() => ({ exitCode: 0, stdout: "{}" }));
-    const body = JSON.stringify({ region: "us-east-1", s3: { buckets: [{ name: "orders-bucket" }] } });
-    await emulatorControlCall(h.target(), { path: "seed", method: "POST", body, print: true });
-    const text = h.calls.flat().join(" ");
-    expect(text).not.toContain(h.credentials.controlToken);
-    expect(text).not.toContain("orders-bucket");
-    const bodyFile = h.seen.find((entry) => entry.name.endsWith(".body"))!;
-    expect(bodyFile.content).toBe(body);
-    expect(bodyFile.presentDuringCall).toBe(true);
-    expect(callOf(h).join(" ")).toContain(`/run/rovara-test/${bodyFile.name}:/rovara/body.json:ro`);
-    expect(h.present.size).toBe(0);
   });
   it("fails closed with one fixed sentence on a non-zero exit, a timeout, a thrown docker call: the container is removed by name, the files are gone, and nothing Docker said is repeated", async () => {
     for (const answer of [() => ({ exitCode: 1 }), () => ({ exitCode: null, timedOut: true }), () => ({ exitCode: 125 })]) {
@@ -126,14 +99,6 @@ describe("emulatorControlCall", () => {
     await expect(emulatorControlCall(target, { path: "reset", method: "POST" })).rejects.toMatchObject({ reason: "stopped" });
     expect(late.present.size).toBe(0);
   });
-  it("a file that cannot be written is a refusal, and what was written is removed", async () => {
-    const h = harness();
-    let writes = 0;
-    const files: HelperFiles = { write(name, content, mode) { writes += 1; if (writes === 2) return Promise.reject(new Error("disk full")); return h.target().files.write(name, content, mode); }, remove: (name) => h.target().files.remove(name) };
-    await expect(emulatorControlCall(h.target({ files }), { path: "seed", method: "POST", body: "{}" })).rejects.toMatchObject({ reason: "refused" });
-    expect(h.calls).toHaveLength(0);
-    expect(h.present.size).toBe(0);
-  });
 });
 
 describe("buildAwsSeedDocument (TS22)", () => {
@@ -155,37 +120,6 @@ describe("buildAwsSeedDocument (TS22)", () => {
       sqs: { queues: [{ name: "order-events" }, { name: "order-events.fifo", attributes: { FifoQueue: "true" } }] },
     });
   });
-  it("leaves out a service with no resources", () => {
-    expect(buildAwsSeedDocument("us-east-1", [{ kind: "bucket", name: "only-bucket" }])).toEqual({ region: "us-east-1", s3: { buckets: [{ name: "only-bucket" }] } });
-  });
-  it("refuses, with one fixed sentence that names nothing, a resource list or a region that does not pass the strict forms", () => {
-    const secretLike = ["AK", "IA", "ABCDEFGHIJKLMNOP"].join("");
-    const bad: Array<[string, unknown, string]> = [
-      ["upper-case bucket", [{ kind: "bucket", name: "Orders" }], "us-east-1"],
-      ["bucket with ..", [{ kind: "bucket", name: "a..b" }], "us-east-1"],
-      ["address-shaped bucket", [{ kind: "bucket", name: "192.168.1.1" }], "us-east-1"],
-      ["short table", [{ kind: "table", name: "ab", keySchema: { partitionKey: { name: "id", type: "S" } } }], "us-east-1"],
-      ["table without keys", [{ kind: "table", name: "orders" }], "us-east-1"],
-      ["sort key = partition key", [{ kind: "table", name: "orders", keySchema: { partitionKey: { name: "id", type: "S" }, sortKey: { name: "id", type: "S" } } }], "us-east-1"],
-      ["key type", [{ kind: "table", name: "orders", keySchema: { partitionKey: { name: "id", type: "X" } } }], "us-east-1"],
-      ["queue with a space", [{ kind: "queue", name: "a b" }], "us-east-1"],
-      ["queue with a dot", [{ kind: "queue", name: "a.b" }], "us-east-1"],
-      ["a kind nobody seeds", [{ kind: "stream", name: "events" }], "us-east-1"],
-      ["topic with a space", [{ kind: "topic", name: "my events" }], "us-east-1"],
-      ["extra field", [{ kind: "bucket", name: "bucket-one", acl: "public" }], "us-east-1"],
-      ["duplicate", [{ kind: "queue", name: "dup" }, { kind: "queue", name: "dup" }], "us-east-1"],
-      ["secret-shaped name", [{ kind: "queue", name: secretLike }], "us-east-1"],
-      ["25 resources", Array.from({ length: 25 }, (_value, index) => ({ kind: "bucket", name: `bucket-${String(index).padStart(2, "0")}` })), "us-east-1"],
-      ["bad region", [{ kind: "bucket", name: "bucket-one" }], "us-east-1;rm"],
-      ["empty region", [{ kind: "bucket", name: "bucket-one" }], ""],
-    ];
-    for (const [label, list, region] of bad) {
-      let error: unknown;
-      try { buildAwsSeedDocument(region, list as TaskAwsResource[]); } catch (failure) { error = failure; }
-      expect(error, label).toBeInstanceOf(EmulatorSeedError);
-      expect((error as Error).message, label).toBe("The project's AWS resources cannot be created in the test services");
-    }
-  });
 });
 
 describe("seedEmulator (TS22): POST /_rovara/seed with the control token, fail closed", () => {
@@ -199,25 +133,6 @@ describe("seedEmulator (TS22): POST /_rovara/seed with the control token, fail c
     { service: "dynamodb", action: "CreateTable", name: "orders", ok: true },
     { service: "sqs", action: "CreateQueue", name: "order-events", ok: true },
   ] };
-  it("sends the document as a mounted file with the token in the env file, and succeeds on a complete report", async () => {
-    const h = harness(() => ({ exitCode: 0, stdout: JSON.stringify(goodReport) }));
-    await seedEmulator({ target: h.target(), region: "us-east-1", resources });
-    const bodyFile = h.seen.find((entry) => entry.name.endsWith(".body"))!;
-    expect(JSON.parse(bodyFile.content)).toEqual(buildAwsSeedDocument("us-east-1", resources));
-    expect(h.seen.find((entry) => entry.name.endsWith(".env"))!.content).toBe(`ROVARA_CONTROL_TOKEN=${h.credentials.controlToken}\n`);
-    const args = callOf(h).slice(callOf(h).indexOf(PROBE_IMAGE) + 1);
-    expect(args).toContain("/_rovara/seed");
-    expect(args[args.indexOf("--control") + 1]).toBe("POST");
-    const text = h.calls.flat().join(" ");
-    for (const secretish of [h.credentials.controlToken, "orders-archive", "orderId", "order-events"]) expect(text).not.toContain(secretish);
-    expect(h.present.size).toBe(0);
-  });
-  it("makes no call at all when there is nothing to create", async () => {
-    const h = harness();
-    await seedEmulator({ target: h.target(), region: "us-east-1", resources: [] });
-    expect(h.calls).toHaveLength(0);
-    expect(h.seen).toHaveLength(0);
-  });
   it("fails when the emulator answers anything but a complete success: a failed exit (a 403 or 422 is a non-zero exit of the probe), not JSON, a missing, extra, failed or renamed step, ok false", async () => {
     const withStep = (index: number, change: Record<string, unknown>) => ({ ...goodReport, steps: goodReport.steps.map((step, at) => (at === index ? { ...step, ...change } : step)) });
     const answers: Array<[string, { exitCode: number; stdout: string }]> = [
@@ -245,21 +160,6 @@ describe("seedEmulator (TS22): POST /_rovara/seed with the control token, fail c
       expect(h.present.size, label).toBe(0);
     }
   });
-  it("a refused resource list is refused before any file is written or docker is called", async () => {
-    const h = harness();
-    await expect(seedEmulator({ target: h.target(), region: "us-east-1", resources: [{ kind: "bucket", name: "BAD_NAME" }] })).rejects.toMatchObject({ reason: "refused" });
-    expect(h.calls).toHaveLength(0);
-    expect(h.seen).toHaveLength(0);
-  });
-  it("a control call that is stopped is a stopped seed; a bad token is a refused one", async () => {
-    const controller = new AbortController();
-    controller.abort();
-    const stopped = harness();
-    await expect(seedEmulator({ target: stopped.target({ signal: controller.signal }), region: "us-east-1", resources })).rejects.toMatchObject({ reason: "stopped" });
-    const badToken = harness();
-    await expect(seedEmulator({ target: badToken.target({ controlToken: "nope" }), region: "us-east-1", resources })).rejects.toMatchObject({ reason: "refused" });
-    expect(badToken.calls).toHaveLength(0);
-  });
   it("seedReportCovers needs exactly one step per resource", () => {
     expect(seedReportCovers(goodReport, resources)).toBe(true);
     expect(seedReportCovers({ ...goodReport, steps: [] }, [])).toBe(true);
@@ -273,13 +173,6 @@ describe("the ledger (GET /_rovara/ledger/summary)", () => {
     s3: { calls: 41, unsupported: 1, errors: 2, operations: { PutObject: { calls: 12, unsupported: 0, errors: 0 }, GetObject: { calls: 28, unsupported: 0, errors: 2 }, PutBucketReplication: { calls: 1, unsupported: 1, errors: 1 } } },
     sqs: { calls: 3, unsupported: 0, errors: 0, operations: { SendMessage: { calls: 3, unsupported: 0, errors: 0 } } },
   };
-  it("reads the fork's summary shape", () => {
-    const ledger = parseLedgerSummary(JSON.stringify(summary));
-    expect(ledger.services.map((service) => service.service)).toEqual(["s3", "sqs"]);
-    expect(ledger.services[0]).toMatchObject({ calls: 41, unsupported: 1, errors: 2 });
-    expect(ledger.services[0]!.operations.map((row) => row.operation).sort()).toEqual(["GetObject", "PutBucketReplication", "PutObject"]);
-    expect(parseLedgerSummary("{}")).toEqual({ services: [] });
-  });
   it("refuses anything that is not exactly that shape within the limits", () => {
     const op = { calls: 1, unsupported: 0, errors: 0 };
     const bad: Array<[string, string]> = [

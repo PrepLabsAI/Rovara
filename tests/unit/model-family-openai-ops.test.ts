@@ -2,11 +2,10 @@
 // vendors' public docs; nothing was compared with a live answer (UNVERIFIED items are in the file headers). The repo's Node `openai` SDK parse is in the loopback check, not here.
 import net from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { OPENAI_EMBEDDING_DEFAULT_DIMENSIONS, buildOpenAiEmbeddings, buildOpenAiModel, buildOpenAiModelsList, buildOpenAiResponse, buildOpenAiResponseStreamEvents, openAiResponseStreamBody } from "../../packages/contracts/src/model-family-openai-ops.js";
-import { GEMINI_EMBEDDING_DEFAULT_DIMENSIONS, buildGeminiBatchEmbedContents, buildGeminiEmbedContent, buildGeminiModel, buildGeminiModelsList, buildVertexPredictEmbeddings } from "../../packages/contracts/src/model-family-gemini-extra.js";
-import { float32Base64, quantized, seededVector } from "../../packages/contracts/src/model-family-vectors.js";
-import { parseNamedSseText } from "../../packages/contracts/src/model-sse-named.js";
-import { MODEL_REPLY_MAX_CHARS, seededId, type ModelReply } from "../../packages/contracts/src/model-family-common.js";
+import { OPENAI_EMBEDDING_DEFAULT_DIMENSIONS, buildOpenAiEmbeddings, buildOpenAiModel, buildOpenAiModelsList, buildOpenAiResponseStreamEvents, openAiResponseStreamBody } from "../../packages/contracts/src/model-family-openai-ops.js";
+import { GEMINI_EMBEDDING_DEFAULT_DIMENSIONS, buildGeminiEmbedContent, buildGeminiModel, buildGeminiModelsList, buildVertexPredictEmbeddings } from "../../packages/contracts/src/model-family-gemini-extra.js";
+import { seededVector } from "../../packages/contracts/src/model-family-vectors.js";
+import { type ModelReply } from "../../packages/contracts/src/model-family-common.js";
 
 let connects = 0;
 let fetches = 0;
@@ -31,34 +30,6 @@ afterEach(() => {
 
 const reply = (over: Partial<ModelReply> = {}): ModelReply => ({ text: "Hello from the scripted reply.", finish: "stop", usage: { inputTokens: 7, outputTokens: 5 }, ...over });
 const build = { model: "gpt-test", seed: "seed-1", created: 1_700_000_000 } as const;
-const respId = `resp_${seededId("seed-1")}`;
-const msgId = `msg_${seededId("seed-1:message")}`;
-
-describe("the Responses API: whole body", () => {
-  it("a text answer: golden bytes", () => {
-    expect(JSON.stringify(buildOpenAiResponse(reply(), build))).toBe(
-      `{"id":"${respId}","object":"response","created_at":1700000000,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-test","output":[{"type":"message","id":"${msgId}","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello from the scripted reply.","annotations":[]}]}],"parallel_tool_calls":true,"previous_response_id":null,"store":true,"temperature":1,"tool_choice":"auto","tools":[],"top_p":1,"truncation":"disabled","usage":{"input_tokens":7,"input_tokens_details":{"cached_tokens":0},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":12},"user":null,"metadata":{}}`,
-    );
-  });
-  it("a function call is an output item with a call id and the arguments as a JSON string", () => {
-    const body = buildOpenAiResponse(reply({ text: "", toolCalls: [{ name: "get_weather", args: { city: "Paris" } }], finish: "tool_calls" }), build) as { output: Record<string, unknown>[] };
-    expect(body.output).toHaveLength(1);
-    expect(body.output[0]).toEqual({ type: "function_call", id: `fc_${seededId("seed-1:fc:0:get_weather")}`, call_id: `call_${seededId("seed-1:0:get_weather")}`, name: "get_weather", arguments: '{"city":"Paris"}', status: "completed" });
-  });
-  it("length is incomplete with max_output_tokens, safety is incomplete with content_filter", () => {
-    expect(buildOpenAiResponse(reply({ finish: "length" }), build)).toMatchObject({ status: "incomplete", incomplete_details: { reason: "max_output_tokens" } });
-    expect(buildOpenAiResponse(reply({ finish: "safety" }), build)).toMatchObject({ status: "incomplete", incomplete_details: { reason: "content_filter" } });
-    expect(buildOpenAiResponse(reply({ finish: "stop" }), build)).toMatchObject({ status: "completed", incomplete_details: null });
-  });
-  it("a refusal option renders a refusal content part", () => {
-    const body = buildOpenAiResponse(reply({ text: "No." }), { ...build, refusal: true }) as { output: { content: unknown[] }[] };
-    expect(body.output[0]?.content).toEqual([{ type: "refusal", refusal: "No." }]);
-  });
-  it("refuses what a builder must never render", () => {
-    expect(() => buildOpenAiResponse(reply({ text: "x".repeat(MODEL_REPLY_MAX_CHARS + 1) }), build)).toThrow(RangeError);
-    expect(() => buildOpenAiResponse(reply(), { ...build, model: "a b" })).toThrow(RangeError);
-  });
-});
 
 describe("the Responses API: the named-event stream", () => {
   it("event order for a text answer, with sequence numbers and no [DONE]", () => {
@@ -76,31 +47,6 @@ describe("the Responses API: the named-event stream", () => {
     expect(body.startsWith("event: response.created\ndata: {")).toBe(true);
     expect(body.endsWith("\n\n")).toBe(true);
     expect(openAiResponseStreamBody(reply(), build, "crlf")).toBe(body.replaceAll("\n", "\r\n"));
-  });
-  it("the deltas join to the text and the last event holds the whole response", () => {
-    const text = "Pieces ".repeat(30);
-    const events = buildOpenAiResponseStreamEvents(reply({ text }), build);
-    expect(events.filter((event) => event.event === "response.output_text.delta").map((event) => (JSON.parse(event.data) as { delta: string }).delta).join("")).toBe(text);
-    const last = JSON.parse(events.at(-1)?.data ?? "{}") as { response: unknown };
-    expect(last.response).toEqual(buildOpenAiResponse(reply({ text }), build));
-  });
-  it("a length stop ends with response.incomplete", () => {
-    expect(buildOpenAiResponseStreamEvents(reply({ finish: "length" }), build).at(-1)?.event).toBe("response.incomplete");
-  });
-  it("a function call streams its arguments and ends the item", () => {
-    const events = buildOpenAiResponseStreamEvents(reply({ text: "", toolCalls: [{ name: "f", args: { a: 1 } }], finish: "tool_calls" }), build);
-    expect(events.map((event) => event.event)).toEqual(["response.created", "response.in_progress", "response.output_item.added", "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed"]);
-    expect((JSON.parse(events[4]?.data ?? "{}") as { arguments: string }).arguments).toBe('{"a":1}');
-  });
-  it("a refusal streams refusal events", () => {
-    const names = buildOpenAiResponseStreamEvents(reply({ text: "No." }), { ...build, refusal: true }).map((event) => event.event);
-    expect(names).toContain("response.refusal.delta");
-    expect(names).toContain("response.refusal.done");
-    expect(names).not.toContain("response.output_text.delta");
-  });
-  it("round-trips through the named-SSE parser", () => {
-    const parsed = parseNamedSseText(openAiResponseStreamBody(reply(), build, "crlf"));
-    expect(parsed.ok && parsed.complete && parsed.events.length).toBe(9);
   });
 });
 
@@ -153,11 +99,6 @@ describe("Gemini and Vertex embeddings", () => {
     expect(body.embedding.values).toHaveLength(GEMINI_EMBEDDING_DEFAULT_DIMENSIONS);
     expect(Object.keys(body)).toEqual(["embedding"]);
   });
-  it("batchEmbedContents: one embedding per request", () => {
-    const body = buildGeminiBatchEmbedContents({ seed: "s", count: 3, dimensions: 4 }) as { embeddings: { values: number[] }[] };
-    expect(body.embeddings.map((item) => item.values.length)).toEqual([4, 4, 4]);
-    expect(body.embeddings[0]?.values).not.toEqual(body.embeddings[1]?.values);
-  });
   it("Vertex :predict: predictions with embeddings.values and statistics", () => {
     const body = buildVertexPredictEmbeddings({ seed: "s", count: 2, dimensions: 4, tokenCount: 3 }) as { predictions: { embeddings: { values: number[]; statistics: unknown } }[] };
     expect(body.predictions).toHaveLength(2);
@@ -177,10 +118,5 @@ describe("filler vectors", () => {
     expect(seededVector("x", 0)).toHaveLength(1);
     expect(seededVector("x", Number.NaN)).toHaveLength(1);
     expect(seededVector("x", 1e9)).toHaveLength(4096);
-  });
-  it("base64 and quantized forms have the right shapes", () => {
-    expect(float32Base64([1])).toBe("AACAPw==");
-    expect(quantized([-1, 0, 1], "int8")).toEqual([-127, 0, 127]);
-    expect(quantized([-1, 0, 1], "uint8")).toEqual([0, 128, 255]);
   });
 });

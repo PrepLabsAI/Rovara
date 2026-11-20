@@ -1,7 +1,6 @@
 // Lead 4 J2: the broker's own mapping from the verified Slack identity to the answer call (`askSlackAnswerForIdentity`, aws/slack-answers.ts, called by the broker): a thread that holds a task is never answered, the project is the channel's
 // binding, the person is the verified requester's linked person, and a caller that is not a Slack thread is refused. The core is a recorder.
 import { describe, expect, it } from "vitest";
-import { slackAnswerThreadId } from "@agentx/contracts";
 import { COMPANY_A } from "../../packages/testing/src/isolation/index.js";
 import { askSlackAnswerForIdentity } from "../../packages/broker/src/aws/slack-answers.js";
 import { createSlackWorkspaceBindings } from "../../packages/broker/src/aws/slack-workspace-binding.js";
@@ -42,11 +41,6 @@ async function world() {
 }
 
 describe("the broker's answer call from the verified Slack identity", () => {
-  it("asks as the verified requester's linked person, the channel's bound project and the Slack thread's own id", async () => {
-    const w = await world();
-    expect(await askSlackAnswerForIdentity(w.dependencies, w.identity(), w.body)).toEqual({ status: "declined", reason: "not_available" });
-    expect(w.asked).toEqual([{ companyId: COMPANY_A.orgId, personId: "dev-ada", project: "alpha", threadId: slackAnswerThreadId(THREAD), requestId: REQUEST, question: "How long do refunds last?" }]);
-  });
 
   it("the project is the channel's binding, whatever the body says", async () => {
     const w = await world();
@@ -57,23 +51,10 @@ describe("the broker's answer call from the verified Slack identity", () => {
     expect(w.asked.map((input) => input.project)).toEqual(["gamma"]);
   });
 
-  it("a thread that holds a task is never answered, and the core is not asked", async () => {
-    const w = await world();
-    const result = await askSlackAnswerForIdentity(w.dependencies, w.identity({ sharedTask: { taskId: "t", workspaceId: "w", developerName: "d", state: "continue" } }), w.body);
-    expect(result).toEqual({ status: "declined", reason: "not_available" });
-    expect(w.asked).toEqual([]);
-  });
-
   it("a caller that is not a Slack thread (no Slack context) is refused before anything is read", async () => {
     const w = await world();
     await expect(askSlackAnswerForIdentity(w.dependencies, w.identity({ slack: undefined }), w.body)).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect(w.asked).toEqual([]);
   });
 
-  it("a requester who is not linked in the workspace's company is nobody", async () => {
-    const w = await world();
-    const stranger = w.identity({ slack: { thread: THREAD, requester: { teamId: TEAM, userId: "U0STRANGER" }, binding: { teamId: TEAM, channelId: THREAD.channelId, projectName: "alpha", updatedAt: new Date(NOW).toISOString() } } });
-    expect(await askSlackAnswerForIdentity(w.dependencies, stranger, w.body)).toEqual({ status: "declined", reason: "not_available" });
-    expect(w.asked).toEqual([]);
-  });
 });

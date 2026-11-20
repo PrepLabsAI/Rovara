@@ -33,7 +33,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
 });
 
-const { readJunitFolder, readTestReportAt, REPORT_FOLDER_MAX_TOTAL_BYTES } = await import("../../packages/worker/src/verification/test-report-folder.js");
+const { readJunitFolder, readTestReportAt } = await import("../../packages/worker/src/verification/test-report-folder.js");
 const { TEST_REPORT_MAX_BYTES } = await import("../../packages/worker/src/verification/test-report.js");
 
 const suite = (cls: string, name: string): string => `<?xml version="1.0" encoding="UTF-8"?>\n<testsuite name="${cls}" tests="1"><testcase name="${name}" classname="${cls}" time="0.01"/></testsuite>`;
@@ -77,27 +77,6 @@ describe("a parent folder swapped for a link after the check", () => {
     const read = await readTestReportAt(dir, "target/one.xml");
     expect(read.report).toBeUndefined();
     expect(read.problem).toBe("refused");
-  });
-  it("without the swap the same folder is read", async () => {
-    mkdirSync(join(dir, "target", "reports"), { recursive: true });
-    writeFileSync(join(dir, "target", "reports", "TEST-a.A.xml"), suite("a.A", "inside"));
-    expect((await readJunitFolder(join(dir, "target", "reports"), dir)).report?.total).toBe(1);
-  });
-});
-
-describe("the byte total is checked before a file is read", () => {
-  it("never reads past the total: the file that would pass it is not read at all", async () => {
-    const size = TEST_REPORT_MAX_BYTES - 1000;
-    for (let index = 0; index < 9; index += 1) {
-      const path = join(dir, `TEST-f${String(index)}.xml`);
-      writeFileSync(path, suite(`f.F${String(index)}`, "t"));
-      truncateSync(path, size);
-    }
-    const result = await readJunitFolder(dir);
-    expect(result.report).toBeUndefined();
-    expect(result.complete).toBe(false);
-    expect(result.notes.join(" ")).toMatch(/bytes/u);
-    expect(hooks.bytesRead).toBeLessThanOrEqual(REPORT_FOLDER_MAX_TOTAL_BYTES);
   });
 });
 

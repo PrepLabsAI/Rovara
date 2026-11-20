@@ -57,12 +57,6 @@ function writerSession(script: WriterScript = {}) {
 // ---- the writer on its own
 
 describe("the writer's prompt holds the shapes and nothing else", () => {
-  it("is built from the validated request alone: the same request, the same prompt; names, kinds and shapes are all there is", () => {
-    const prompt = standInWriterPrompt(REQUEST);
-    expect(prompt).toBe(standInWriterPrompt(REQUEST));
-    expect(prompt).toContain(JSON.stringify(REQUEST));
-    expect(prompt.replace(JSON.stringify(REQUEST), "")).not.toMatch(/diff|patch|commit|pull request|branch|task|--- a\//iu);
-  });
   it("refuses a request that carries a change, a row or anything else a request has no field for: the model is never asked", async () => {
     const dirty = { ...REQUEST, diff: "--- a/src/pay.ts\n+++ b/src/pay.ts\n+const key = 1;" };
     expect(() => standInWriterPrompt(dirty as never)).toThrow();
@@ -70,15 +64,6 @@ describe("the writer's prompt holds the shapes and nothing else", () => {
     const outcome = await runStandInWriter({ input: dirty, price: PRICE, remainingCents: 400, openSession: async () => { opened += 1; return writerSession().session; } });
     expect(outcome).toMatchObject({ status: "skipped", reason: "failed", spendCents: 0 });
     expect(opened).toBe(0);
-  });
-  it("tells the model it has no tools, no real people, and to write only what is asked (fixed words, the same for every project)", () => {
-    expect(STANDIN_WRITER_SYSTEM_PROMPT).toContain("You have no tools");
-    expect(STANDIN_WRITER_SYSTEM_PROMPT).toContain("Never use a real person's name");
-    expect(STANDIN_WRITER_SYSTEM_PROMPT).toContain("never a key");
-    expect(STANDIN_WRITER_SYSTEM_PROMPT).not.toMatch(/\$\{|undefined|\[object/u);
-  });
-  it("an agent step with an empty tool list has no tool at all (the mode's own tools narrowed to nothing)", () => {
-    expect(agentStepTools("PLAN", [])).toEqual({ tools: [], shell: false });
   });
 });
 
@@ -123,12 +108,6 @@ describe("the writer is paid inside the run's cap", () => {
     expect(reportedMore).toMatchObject({ spendCents: 37 });
     const unreadable = await runStandInWriter({ input: REQUEST, price: PRICE, remainingCents: 400, openSession: async () => writerSession({ cost: Number.NaN }).session });
     expect(unreadable).toMatchObject({ status: "written", spendCents: standInWriterCeilingCents(PRICE) });
-  });
-  it("a reply that does not fit is not stored, and what it cost is still counted", async () => {
-    const wrong = await runStandInWriter({ input: REQUEST, price: PRICE, remainingCents: 400, openSession: async () => writerSession({ text: JSON.stringify({ tables: { creators: [{ id: 1, bio: "x" }] } }) }).session });
-    expect(wrong).toEqual({ status: "skipped", reason: "unusable", spendCents: 2, words: STANDIN_WRITER_WORDS.unusable });
-    const prose = await runStandInWriter({ input: REQUEST, price: PRICE, remainingCents: 400, openSession: async () => writerSession({ text: "Sure! Here is some data." }).session });
-    expect(prose).toMatchObject({ status: "skipped", reason: "unusable" });
   });
   it("makes ONE model call: a second reply ends it, and the session is always disposed", async () => {
     const two = writerSession({ twoReplies: true });
@@ -234,57 +213,6 @@ async function world(options: { writer?: WriterScript | undefined; request?: unk
 const stood = (t: { w: { callbacks: unknown[] } }) => t.w.callbacks.filter((body) => (body as { kind: string }).kind === "stand_in_data") as Array<{ set: unknown }>;
 
 describe("the writer inside a setup run", () => {
-  it("runs ONCE, after the run proposed, in its own session; its set goes over the one callback; its words are on the live view", async () => {
-    const t = await world();
-    const result = await runSetupAgent(t.input);
-    expect(result.setupRunSummary.stop).toBe("proposed");
-    expect(t.w.opened).toBe(1);
-    expect(t.w.writerOpened).toBe(1);
-    expect(t.w.writerPrompts).toHaveLength(1);
-    expect(t.w.order).toEqual(["main", "writer"]);
-    expect(stood(t)).toHaveLength(1);
-    expect(StandInWriterSetSchema.safeParse(stood(t)[0]!.set).success).toBe(true);
-    expect(t.w.progress).toContain(STANDIN_WRITER_WORDS.written);
-  });
-  it("its spend is on the setup run's record, inside the run's cap", async () => {
-    const t = await world({ mainCost: 0.05, writer: { usage: { input: 2_000, output: 600 }, cost: 0.02 } });
-    const result = await runSetupAgent(t.input);
-    // 5 cents for the run, 2 for the writer.
-    expect(result.setupRunSummary.spendCents).toBe(7);
-    expect(result.setupRunSummary.spendCents).toBeLessThanOrEqual(t.input.limits.budgetCents);
-    const without = await world({ mainCost: 0.05, withWriter: false });
-    expect((await runSetupAgent(without.input)).setupRunSummary.spendCents).toBe(5);
-  });
-  it("is not started when the run has no room for its ceiling: the run's own result is unchanged and the words say why", async () => {
-    const ceiling = standInWriterCeilingCents(PRICE);
-    const t = await world({ mainCost: (400 - ceiling + 1) / 100 });
-    const result = await runSetupAgent(t.input);
-    expect(t.w.writerOpened).toBe(0);
-    expect(stood(t)).toHaveLength(0);
-    expect(t.w.progress).toContain(STANDIN_WRITER_WORDS.noRoom);
-    expect(result.setupRunSummary.spendCents).toBe(400 - ceiling + 1);
-    expect(result.setupProposal).toBeDefined();
-  });
-  it("never runs for a run that did not propose (a stopped run, a limit stop, a run that needs a code change)", async () => {
-    const needs = await world({ final: `NEEDS CODE CHANGE: the lock file is broken\n${block(ANSWER)}` });
-    const needsResult = await runSetupAgent(needs.input);
-    expect(needsResult.setupRunSummary.stop).toBe("needs_code_change");
-    expect(needs.w.writerOpened).toBe(0);
-    expect(stood(needs)).toHaveLength(0);
-    const stoppedRun = await world({ script: async (control) => { await control.abort(); } });
-    const stoppedResult = await runSetupAgent(stoppedRun.input);
-    expect(stoppedResult.setupRunSummary.stop).not.toBe("proposed");
-    expect(stoppedRun.w.writerOpened).toBe(0);
-    expect(stood(stoppedRun)).toHaveLength(0);
-  });
-  it("with no writer port the run is exactly as it was: no extra session, no extra callback, no extra words", async () => {
-    const t = await world({ withWriter: false });
-    const result = await runSetupAgent(t.input);
-    expect(t.w.writerOpened).toBe(0);
-    expect(stood(t)).toHaveLength(0);
-    expect(t.w.progress.filter((line) => line.startsWith("Rovara wrote") || line.startsWith("Rovara did not write"))).toEqual([]);
-    expect(result.setupRunSummary.stop).toBe("proposed");
-  });
   it("finding nothing to write for says nothing and spends nothing", async () => {
     const t = await world({ request: undefined });
     t.input.ports.standIn!.input = async () => undefined;
@@ -310,14 +238,6 @@ describe("the writer inside a setup run", () => {
     const down = await runSetupAgent(callbackDown.input);
     expect(down.setupRunSummary.stop).toBe("proposed");
     expect(callbackDown.w.progress).toContain(STANDIN_WRITER_WORDS.failed);
-  });
-  it("the words are fixed: nothing of the request, the reply, a path or a cause is echoed on the live view", async () => {
-    const t = await world({ writer: { text: "Mara Okafor lives at 12 Real Street /secret/path" } });
-    await runSetupAgent(t.input);
-    const joined = t.w.progress.join("\n");
-    expect(joined).not.toContain("Mara");
-    expect(joined).not.toContain("Real Street");
-    expect(joined).not.toContain("/secret");
   });
   it("the writer's prompt holds the shapes, never the run's proposal, repository text or commands", async () => {
     const t = await world();

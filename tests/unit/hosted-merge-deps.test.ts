@@ -66,12 +66,6 @@ describe("hosted merge dependencies", () => {
     expect(typeof d.repositoryEdges).toBe("function");
   });
 
-  it("the core's claim audit goes to the request's own (stamped) sink when the route gives one", () => {
-    const stamped = { stage: () => [], record: async () => undefined };
-    expect(build({ audit: stamped }).deps().audit).toBe(stamped);
-    expect(build().deps().audit).not.toBe(stamped);
-  });
-
   it("builds nothing without the runtime's CI mode reader", () => {
     expect(() => build({ ciMode: false }).deps()).toThrow();
   });

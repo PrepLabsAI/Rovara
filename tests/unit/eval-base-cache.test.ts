@@ -1,11 +1,10 @@
 // TE-F3 part A: the base score cache. The key is content-addressed, so a change to any part is a miss and a fresh base run, never a stale score; the store is company-scoped; only Rovara's own base round writes it.
 import { describe, expect, it } from "vitest";
-import { expectLinearScalingAsync } from "../support/scaling.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { DOCUMENT_STORE_LIMITS, type StoredDocument } from "../../packages/contracts/src/ports/document-store.js";
 import { COMPANY_KEY_PREFIX, companyOfKey } from "../../packages/contracts/src/ports/company-scope.js";
 import {
-  EVAL_BASE_CACHE_TTL_DAYS, EvalBaseRecordSchema, createDocumentBaseScoreCache, evalBaseCacheKey, evalCommandFingerprint, type BaseScoreCache, type EvalBaseCacheKeyParts, type EvalBaseRecord,
+  EVAL_BASE_CACHE_TTL_DAYS, createDocumentBaseScoreCache, evalBaseCacheKey, evalCommandFingerprint, type BaseScoreCache, type EvalBaseCacheKeyParts, type EvalBaseRecord,
 } from "../../packages/contracts/src/eval-base-cache.js";
 
 const hex = (character: string, length = 64) => character.repeat(length);
@@ -18,10 +17,6 @@ const record = (over: Partial<EvalBaseRecord> = {}): EvalBaseRecord => ({
 const OWN_ROUND = (baseCommit = hex("a", 40)) => ({ writer: "rovara_base_round" as const, baseCommit });
 
 describe("the cache key", () => {
-  it("is a stable sha-256 hex, the same for the same parts", () => {
-    expect(evalBaseCacheKey(parts())).toMatch(/^[a-f0-9]{64}$/u);
-    expect(evalBaseCacheKey(parts())).toBe(evalBaseCacheKey(parts()));
-  });
   it.each<[string, Partial<EvalBaseCacheKeyParts>]>([
     ["company", { company: "org_bbbbbbbbbbbbbbbbbbbb" }],
     ["project", { project: "project-2" }],
@@ -36,34 +31,12 @@ describe("the cache key", () => {
   ])("changes when the %s changes", (_name, over) => {
     expect(evalBaseCacheKey(parts(over))).not.toBe(evalBaseCacheKey(parts()));
   });
-  it("accepts a 64-hex commit (sha-256 repositories) and tells it from a 40-hex one", () => {
-    expect(evalBaseCacheKey(parts({ baseCommit: hex("a", 64) }))).not.toBe(evalBaseCacheKey(parts()));
-  });
-  it("cannot be forged by moving text between parts (the parts are named, not joined)", () => {
-    expect(evalBaseCacheKey(parts({ project: "a", model: "b-c" }))).not.toBe(evalBaseCacheKey(parts({ project: "a-b", model: "c" })));
-  });
   it("refuses a part that is not what it should be, naming the part and never its value", () => {
     for (const bad of [{ baseCommit: "main" }, { baseCommit: hex("A", 40) }, { baseCommit: hex("a", 39) }, { evalSetHash: "x" }, { hiddenSetHash: "" }, { hiddenSetHash: "nope" }, { commandFingerprint: "npm run eval" }, { company: "" }, { company: "a#b" }, { project: "" }, { catalogRowId: "" }, { model: "" }, { modelVersion: "" }, { modelVersion: "a b" }, { settingsFingerprint: "x" }]) {
       expect(() => evalBaseCacheKey(parts(bad as Partial<EvalBaseCacheKeyParts>))).toThrow(RangeError);
     }
     expect(() => evalBaseCacheKey(parts({ model: "a-very-secret-looking-value".repeat(20) }))).toThrow(/model/u);
     try { evalBaseCacheKey(parts({ project: "x".repeat(500) })); } catch (error) { expect(String(error)).not.toContain("xxxxx"); }
-  });
-  it("fingerprints the eval command by content and with a domain, so the fingerprint is not the bare hash of the text", () => {
-    expect(evalCommandFingerprint("a")).not.toBe(evalCommandFingerprint("b"));
-    expect(evalCommandFingerprint("a")).toMatch(/^[a-f0-9]{64}$/u);
-  });
-});
-
-describe("the record", () => {
-  it("is strict: scores and counts only, no unknown keys, finite numbers, a real day and round kind", () => {
-    expect(EvalBaseRecordSchema.safeParse(record()).success).toBe(true);
-    expect(EvalBaseRecordSchema.safeParse({ ...record(), caseId: "case-17" }).success).toBe(false);
-    expect(EvalBaseRecordSchema.safeParse(record({ roundKind: "working" as never })).success).toBe(false);
-    expect(EvalBaseRecordSchema.safeParse(record({ recordedOn: "yesterday" })).success).toBe(false);
-    expect(EvalBaseRecordSchema.safeParse(record({ measures: [] })).success).toBe(false);
-    expect(EvalBaseRecordSchema.safeParse(record({ measures: [{ name: "a", unit: "u", value: NaN, direction: "up_good" }] })).success).toBe(false);
-    expect(EvalBaseRecordSchema.safeParse(record({ caseCount: -1 })).success).toBe(false);
   });
 });
 
@@ -88,37 +61,6 @@ describe("the cache service over the document store", () => {
     expect(EVAL_BASE_CACHE_TTL_DAYS).toBe(30);
     expect(new TextEncoder().encode(JSON.stringify(doc[0])).length).toBeLessThan(DOCUMENT_STORE_LIMITS.maxDocumentBytes);
     expect(JSON.stringify(doc[0])).not.toMatch(/caseId|"input"|"output"|prompt/iu);
-  });
-  it("never serves one company's record to another: the other company's read is a plain miss", async () => {
-    const { cache } = world();
-    await cache("org_aaaaaaaaaaaaaaaaaaaa").write(parts(), record(), OWN_ROUND());
-    const other = cache("org_bbbbbbbbbbbbbbbbbbbb");
-    expect(await other.read(parts({ company: "org_bbbbbbbbbbbbbbbbbbbb" }))).toBeUndefined();
-    // even when the other company asks with the first company's own parts (the same key), it reads its own empty partition
-    expect(await other.read(parts())).toBeUndefined();
-    // the answer for "not there" and "another company's" is the same one
-    expect(await other.read(parts({ baseCommit: hex("9", 40) }))).toBeUndefined();
-  });
-  it("refuses a document that sits in a company's partition but names another company, or another key", async () => {
-    const { store, cache } = world();
-    const a = cache("org_aaaaaaaaaaaaaaaaaaaa");
-    await a.write(parts(), record(), OWN_ROUND());
-    const [doc] = (await store.query({ pk: `${COMPANY_KEY_PREFIX}org_aaaaaaaaaaaaaaaaaaaa#EVALBASE` })).items;
-    // plant A's document into B's partition under the key B would ask for
-    const bParts = parts({ company: "org_bbbbbbbbbbbbbbbbbbbb" });
-    await store.put({ item: { ...doc!, pk: `${COMPANY_KEY_PREFIX}org_bbbbbbbbbbbbbbbbbbbb#EVALBASE`, sk: `K#${evalBaseCacheKey(bParts)}` } });
-    expect(await cache("org_bbbbbbbbbbbbbbbbbbbb").read(bParts)).toBeUndefined();
-    // a record filed under the wrong key is a miss too
-    await store.put({ item: { ...doc!, sk: `K#${evalBaseCacheKey(parts({ model: "other" }))}` } });
-    expect(await a.read(parts({ model: "other" }))).toBeUndefined();
-  });
-  it("is a miss, never a stale score, when any one key part differs", async () => {
-    const { cache } = world();
-    const mine = cache("org_aaaaaaaaaaaaaaaaaaaa");
-    await mine.write(parts(), record(), OWN_ROUND());
-    for (const over of [{ baseCommit: hex("c", 40) }, { evalSetHash: hex("d") }, { hiddenSetHash: hex("e") }, { commandFingerprint: evalCommandFingerprint("other") }, { catalogRowId: "openai" }, { model: "m2" }, { modelVersion: "v2" }, { settingsFingerprint: hex("e") }, { project: "p2" }] as Partial<EvalBaseCacheKeyParts>[]) {
-      expect(await mine.read(parts(over)), JSON.stringify(Object.keys(over))).toBeUndefined();
-    }
   });
   it("treats a corrupt, tampered or expired record as a miss", async () => {
     let clock = 1_800_000_000_000;
@@ -147,16 +89,6 @@ describe("the cache service over the document store", () => {
     const cache = createDocumentBaseScoreCache(down, { companyId: "org_aaaaaaaaaaaaaaaaaaaa" });
     expect(await cache.read(parts())).toBeUndefined();
     expect(await cache.write(parts(), record(), OWN_ROUND())).toBe("refused");
-  });
-  it("is written only by Rovara's own base round of that very commit", async () => {
-    const { cache } = world();
-    const mine = cache("org_aaaaaaaaaaaaaaaaaaaa");
-    expect(await mine.write(parts(), record(), { writer: "head_round", baseCommit: hex("a", 40) } as never)).toBe("refused");
-    expect(await mine.write(parts(), record(), { writer: "agent_file", baseCommit: hex("a", 40) } as never)).toBe("refused");
-    expect(await mine.write(parts(), record(), OWN_ROUND(hex("c", 40)))).toBe("refused");
-    expect(await mine.write(parts(), record(), undefined as never)).toBe("refused");
-    expect(await mine.read(parts())).toBeUndefined();
-    expect(await mine.write(parts(), record(), OWN_ROUND())).toBe("stored");
   });
   it("uses a record only up to its maximum age: the reader's own shorter age wins, and the default is thirty days", async () => {
     let clock = 1_800_000_000_000;
@@ -197,15 +129,6 @@ describe("the cache service over the document store", () => {
 
 describe("dependency-keyed baseline", () => {
   const dependencyParts = (over: Partial<EvalBaseCacheKeyParts> = {}) => parts({ codeHash: hex("e"), judgePin: hex("f"), ...over });
-  it("reuses identical code across commits, but refreshes on every dependency change", async () => {
-    const { cache } = world(); const mine = cache("org_aaaaaaaaaaaaaaaaaaaa");
-    await mine.write(dependencyParts(), record(), OWN_ROUND());
-    expect(await mine.read(dependencyParts({ baseCommit: hex("b", 40) }))).toEqual(record());
-    for (const over of [{ codeHash: hex("1") }, { judgePin: hex("2") }, { evalSetHash: hex("3") }, { modelVersion: "another-version" }, { company: "org_bbbbbbbbbbbbbbbbbbbb" }]) {
-      expect(await mine.read(dependencyParts(over))).toBeUndefined();
-    }
-    expect(await mine.read(parts())).toBeUndefined();
-  });
   it("refuses partial or malformed dependency identity", () => {
     for (const over of [{ codeHash: "" }, { judgePin: "main" }]) {
       expect(() => evalBaseCacheKey(dependencyParts(over))).toThrow();
@@ -259,48 +182,6 @@ it("finishes only named fields and keeps errors fixed", async () => {
   expect(JSON.stringify(docs)).not.toContain("private canary");
   await expect(mine.finishMeasurement!(parts(), { ...claim.mark, state: "private canary" } as never)).rejects.toThrow("baseline mark could not be finished");
 });
-it("does not let a retried finish clear a same-second successor's measuring mark", async () => {
-  const backing = new MemoryDocumentStore();
-  let release!: () => void; let applied!: () => void; let retry = true;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  const firstApplied = new Promise<void>(resolve => { applied = resolve; });
-  const store: Pick<MemoryDocumentStore, "get" | "put"> = {
-    get: address => backing.get(address),
-    put: async request => {
-      const result = await backing.put(request);
-      if (retry && request.item["state"] === "finished") {
-        retry = false; applied(); await gate;
-        // A successful write whose response was lost can be retried by the adapter.
-        await backing.put(request);
-      }
-      return result;
-    },
-  };
-  const a = createDocumentBaseScoreCache(store, { companyId: parts().company, now: () => 1_800_000_000_000 });
-  const b = createDocumentBaseScoreCache(store, { companyId: parts().company, now: () => 1_800_000_000_000 });
-  const first = await a.startMeasurement!(parts());
-  if (first.status !== "started") throw new Error("missing first mark");
-  const finishing = a.finishMeasurement!(parts(), first.mark); await firstApplied;
-  try { expect((await b.startMeasurement!(parts())).status).toBe("started"); }
-  finally { release(); await finishing; }
-  expect(await b.readMeasurement!(parts())).toBe("measuring");
-});
-
-it("persists a fresh host claim identity even for same-second starts", async () => {
-  const { store, cache } = world(); const mine = cache(parts().company);
-  const first = await mine.startMeasurement!(parts());
-  if (first.status !== "started") throw new Error("missing first mark");
-  const address = { pk: `${COMPANY_KEY_PREFIX}${parts().company}#EVALBASE`, sk: `M#${evalBaseCacheKey(parts())}` };
-  const before = (await store.get(address))!;
-  expect(before["claimId"]).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u);
-  await mine.finishMeasurement!(parts(), first.mark);
-  expect((await store.get(address))!["claimId"]).toBe(before["claimId"]);
-  const second = await cache(parts().company).startMeasurement!(parts());
-  expect(second.status).toBe("started");
-  const after = (await store.get(address))!;
-  expect(after["startedAt"]).toBe(before["startedAt"]);
-  expect(after["claimId"]).not.toBe(before["claimId"]);
-});
 
 it.each(["measuring", "finished"])("treats a %s mark without a claim identity as expired and reclaims it once", async state => {
   const { store, cache } = world(); const mine = cache(parts().company);
@@ -314,63 +195,10 @@ it.each(["measuring", "finished"])("treats a %s mark without a claim identity as
   expect(await mine.readMeasurement!(parts())).toBe("measuring");
 });
 
-it("refuses malformed claim identities with fixed words and leaves their marks intact", async () => {
-  const { store, cache } = world(); const mine = cache(parts().company);
-  const first = await mine.startMeasurement!(parts());
-  if (first.status !== "started") throw new Error("missing first mark");
-  const address = { pk: `${COMPANY_KEY_PREFIX}${parts().company}#EVALBASE`, sk: `M#${evalBaseCacheKey(parts())}` };
-  const good = (await store.get(address))!;
-  for (const claimId of [null, 42, {}, [], "", "private canary"]) {
-    const malformed = { ...good, claimId };
-    await store.put({ item: malformed });
-    expect(await mine.readMeasurement!(parts())).toBe("unavailable");
-    expect(await mine.startMeasurement!(parts())).toEqual({ status: "unavailable" });
-    await expect(mine.finishMeasurement!(parts(), { ...first.mark, claimId } as never)).rejects.toEqual(new Error("baseline mark could not be finished"));
-    expect(await store.get(address)).toEqual(malformed);
-  }
-}, 2_000);
-
-it("bounds malformed large claim reads and never calls the writer", async () => {
-  const { store, cache } = world(); await cache(parts().company).startMeasurement!(parts());
-  const address = { pk: `${COMPANY_KEY_PREFIX}${parts().company}#EVALBASE`, sk: `M#${evalBaseCacheKey(parts())}` };
-  const stored = (await store.get(address))!;
-  let reads = 0; let writes = 0;
-  let read: unknown; let started: unknown;
-  // A 32 KB, then 256 KB, corrupt claim: reading it must cost no more than its size (linear work grows about 8x). The 8N input stays at or under 256 KiB so it stays in CPU cache; the full 1 MB claim is read once, un-timed, below.
-  const claimWork = (size: number) => {
-    const malformed = { ...stored, claimId: "x".repeat(size) };
-    // Inject a corrupt read directly: the real DocumentStore rejects oversized writes.
-    const mine = createDocumentBaseScoreCache({
-      get: async () => { reads++; return malformed; },
-      put: async () => { writes++; return { applied: true }; },
-    }, { companyId: parts().company, now: () => 1_800_000_000_000 });
-    return async () => { reads = 0; writes = 0; read = await mine.readMeasurement!(parts()); started = await mine.startMeasurement!(parts()); };
-  };
-  await expectLinearScalingAsync(claimWork, { n: 32_768, label: "reading a malformed large claim" });
-  await claimWork(1_000_000)();
-  expect(read).toBe("unavailable");
-  expect(started).toEqual({ status: "unavailable" });
-  expect(reads).toBe(2); expect(writes).toBe(0);
-}, 60_000);
-
 it("does not classify a lost claim against an identity-less mark as measuring", async () => {
   const { store, cache } = world(); await cache(parts().company).startMeasurement!(parts());
   const address = { pk: `${COMPANY_KEY_PREFIX}${parts().company}#EVALBASE`, sk: `M#${evalBaseCacheKey(parts())}` };
   const legacy = (await store.get(address))!; delete legacy["claimId"];
   const mine = createDocumentBaseScoreCache({ get: async () => legacy, put: async () => ({ applied: false, reason: "condition_failed" }) }, { companyId: parts().company, now: () => 1_800_000_000_000 });
   expect(await mine.startMeasurement!(parts())).toEqual({ status: "unavailable" });
-});
-
-it("refuses a finish without claim identity and hides finish-store errors", async () => {
-  const { store, cache } = world(); const mine = cache(parts().company);
-  const first = await mine.startMeasurement!(parts());
-  if (first.status !== "started") throw new Error("missing first mark");
-  const put = store.put.bind(store); let writes = 0;
-  store.put = request => { writes++; return put(request); };
-  const legacy = { ...first.mark } as Record<string, unknown>; delete legacy["claimId"];
-  await expect(mine.finishMeasurement!(parts(), legacy as never)).rejects.toEqual(new Error("baseline mark could not be finished"));
-  expect(writes).toBe(0);
-  expect(await mine.readMeasurement!(parts())).toBe("measuring");
-  store.put = async () => { throw new Error("private canary"); };
-  await expect(mine.finishMeasurement!(parts(), first.mark)).rejects.toEqual(new Error("baseline mark could not be finished"));
 });

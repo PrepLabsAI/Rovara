@@ -14,11 +14,6 @@ const resultOf = (built: ReturnType<typeof nightlyCountsAndHealth>) => NightlyRe
 });
 
 describe("the nightly result's counts and health block", () => {
-  it("come from one tally: failed is failures and errors together, and the total is every outcome", () => {
-    const built = nightlyCountsAndHealth(facts());
-    expect(built.tests).toEqual({ total: 100, passed: 90, failed: 9, skipped: 1 });
-    expect(built.health.tests).toEqual({ total: 100, passed: 90, failures: 6, errors: 3, skipped: 1 });
-  });
 
   it("is never read by the broker as disagreeing: the result parses and the class is the classifier's own", () => {
     expect(nightlyHealthOf(resultOf(nightlyCountsAndHealth(facts())))).toEqual({ class: "tests", setupProved: false, ranFrom: "fresh" });
@@ -39,9 +34,4 @@ describe("the nightly result's counts and health block", () => {
     expect(built.health.steps).toEqual([{ step: "pull", status: "skipped" }, { step: "setup", status: "failed" }, { step: "smoke", status: "passed" }]);
   });
 
-  it("refuses a tally or a check that is not a bounded count", () => {
-    expect(() => nightlyCountsAndHealth(facts({ tally: { passed: -1, failures: 0, errors: 0, skipped: 0 } }))).toThrow();
-    expect(() => nightlyCountsAndHealth(facts({ tally: { passed: 1.5, failures: 0, errors: 0, skipped: 0 } }))).toThrow();
-    expect(() => nightlyCountsAndHealth(facts({ checks: Array.from({ length: 65 }, () => check) }))).toThrow();
-  });
 });

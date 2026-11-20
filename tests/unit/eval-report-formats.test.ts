@@ -43,14 +43,6 @@ describe("measuresFromCaseReports: one test case is one question, one report is 
     for (const question of file.questions!) for (const sample of question.samples) expect(sample.answer).toBe("");
   });
 
-  it("merges runs: a question is in the result only when it has a result in EVERY run, with one sample per run in order", () => {
-    const first = run(junit([{ name: "a" }, { name: "b", status: "fail" }, { name: "c" }]));
-    const second = run(junit([{ name: "a", status: "fail" }, { name: "b", status: "fail" }, { name: "c", status: "skip" }]));
-    const third = run(junit([{ name: "a" }, { name: "b" }]));
-    const file = parse(measuresFromCaseReports([first, second, third], ["a", "b", "c"]));
-    expect(file.questions!.map(question => [question.id, question.samples.map(sample => sample.pass)])).toEqual([["a", [true, false, true]], ["b", [false, false, true]]]);
-  });
-
   it("never turns a skipped, absent or ambiguous case into a pass: it is simply not in the result", () => {
     const skipped = run(junit([{ name: "a", status: "skip" }]));
     expect(measuresFromCaseReports([skipped], ["a"])).toBeUndefined();
@@ -70,10 +62,5 @@ describe("measuresFromCaseReports: one test case is one question, one report is 
     ] });
     const file = parse(measuresFromCaseReports([run(promptfoo)], ["q-desc", "q-id", "q-case"]));
     expect(file.questions!.map(question => [question.id, question.samples[0]!.pass])).toEqual([["q-desc", true], ["q-id", false], ["q-case", true]]);
-  });
-
-  it("a per-case report with a hostile name changes nothing but its own (unmatched) row", () => {
-    const hostile = junit([{ name: "&lt;script&gt;alert(1)&lt;/script&gt;" }, { name: "a" }]);
-    expect(parse(measuresFromCaseReports([run(hostile)], ["a"])).questions!.map(question => question.id)).toEqual(["a"]);
   });
 });

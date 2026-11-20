@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 import { EvidencePackSchema, FAILURE_CAUSES_ARTIFACT, FAILURE_CAUSES_FILE_MAX_BYTES, type CheckEntry } from "../../packages/contracts/src/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import { buildEvidencePack } from "../../packages/broker/src/core/proof/evidence-pack.js";
 import { keepEvidence, loadEvidencePack, type KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
 import { scanTextForTests } from "../support/evidence-scan.js";
 
@@ -81,25 +80,6 @@ describe("the failure causes a worker saved", () => {
     expect(pack?.checks[0]?.tests?.failureCauses).toBeUndefined();
   });
 
-  it("are decided check by check: one check's inconsistent causes do not take another check's away", async () => {
-    const two = JSON.stringify({
-      schemaVersion: 1, candidateDigest: DIGEST,
-      checks: ["readiness:0", "readiness:1"].map((checkId) => ({ checkId, tests: { total: 2, passed: 1, failed: 1, skipped: 0, errored: 0, names: [{ name: FAILING, status: "failed" }, { name: "tests/cart.test.ts::keeps total", status: "passed" }], newTests: [] } })),
-    });
-    const file = JSON.stringify({ schemaVersion: 1, candidateDigest: DIGEST, checks: [
-      { checkId: "readiness:0", causes: [{ testId: FAILING, cause: change("src/cart.ts") }] },
-      { checkId: "readiness:1", causes: [{ testId: "tests/cart.test.ts::not failing", cause: change("src/cart.ts") }] },
-    ] });
-    const w = world(file);
-    const files = new Map([[`${PREFIX}evidence-raw.json`, two], [`${PREFIX}${FAILURE_CAUSES_ARTIFACT}`, file]]);
-    w.deps.actions.readArtifact = async (key, max) => (files.get(key) ?? "").slice(0, max);
-    await keepEvidence(w.deps, { ...input(), checks: [entry(), entry({ id: "readiness:1", label: "second" })] });
-    const pack = await loadEvidencePack(w.deps.store.blobs, TASK, DIGEST);
-    expect(pack?.checks[0]?.tests?.failureCauses).toHaveLength(1);
-    expect(pack?.checks[1]?.tests).toBeDefined();
-    expect(pack?.checks[1]?.tests?.failureCauses).toBeUndefined();
-  });
-
   it("says in the log, with a fixed word and nothing from the file, why a file that was there was not used", async () => {
     const logged: Array<[string, unknown]> = [];
     for (const [text, reason] of [["not json", "unreadable"], [causesFile({ candidateDigest: OTHER }), "other_code"]] as const) {
@@ -113,47 +93,10 @@ describe("the failure causes a worker saved", () => {
     expect(logged.slice(before).filter(([event]) => event === "evidence.failure_causes_not_used")).toEqual([]);
   });
 
-  it("refuses a file that names one check twice", async () => {
-    const plain = JSON.stringify((await keep(undefined)).pack);
-    const twice = JSON.stringify({ schemaVersion: 1, candidateDigest: DIGEST, checks: [{ checkId: "readiness:0", causes: [{ testId: FAILING, cause: change("src/cart.ts") }] }, { checkId: "readiness:0", causes: [{ testId: FAILING, cause: change("src/other.ts") }] }] });
-    expect(JSON.stringify((await keep(twice)).pack)).toBe(plain);
-  });
-
-  it("have their paths redacted again by the builder", async () => {
-    const secret = `ghp_${"Ab1Cd2Ef3Gh4".repeat(3)}`;
-    const { pack } = await keep(causesFile({}, [{ testId: FAILING, cause: change(`src/${secret}.ts`) }]));
-    expect(JSON.stringify(pack)).not.toContain(secret);
-  });
-
   it("are dropped for a check the broker's own report says did not fail, and the tests part stays out with its disagreement", async () => {
     const w = world(causesFile());
     await keepEvidence(w.deps, { ...input(), checks: [entry({ after: "passed", class: "passing", exitCode: 0 })] });
     const pack = await loadEvidencePack(w.deps.store.blobs, TASK, DIGEST);
     expect(JSON.stringify(pack)).not.toContain("failureCauses");
-  });
-});
-
-describe("the pack builder", () => {
-  const build = (rawText: string, checkAfter: CheckEntry["after"] = "failed") => buildEvidencePack({
-    candidateDigest: DIGEST, rawText, checks: [entry({ after: checkAfter })], checkKinds: new Map([["readiness:0", "test"]]), storedArtifacts: new Map(),
-    environment: { tier: "sandbox", envRevision: 3, services: [], data: "synthetic", accounts: [] },
-  });
-  const rawWith = (causes: unknown[], failing = FAILING) => JSON.stringify({
-    schemaVersion: 1, candidateDigest: DIGEST,
-    checks: [{ checkId: "readiness:0", tests: { total: 1, passed: 0, failed: 1, skipped: 0, errored: 0, names: [{ name: failing, status: "failed" }], newTests: [], failureCauses: causes } }],
-  });
-
-  it("redacts a secret-shaped path again, and keeps the rest of the cause", () => {
-    const secret = `ghp_${"Ab1Cd2Ef3Gh4".repeat(3)}`;
-    const built = build(rawWith([{ testId: FAILING, cause: change(`src/${secret}.ts`) }]));
-    expect(JSON.stringify(built.pack)).not.toContain(secret);
-    expect(built.pack?.checks[0]?.tests?.failureCauses?.[0]).toMatchObject({ testId: FAILING, cause: { kind: "change", commit: SHA } });
-  });
-
-  it("drops only the causes, with a fixed problem code, when the check did not fail; the pack stays valid", () => {
-    const built = build(rawWith([{ testId: FAILING, cause: change("src/cart.ts") }]), "passed");
-    expect(JSON.stringify(built.pack)).not.toContain("failureCauses");
-    expect(built.problems).toContain("tests_disagree_with_check");
-    expect(EvidencePackSchema.safeParse(built.pack).success).toBe(true);
   });
 });

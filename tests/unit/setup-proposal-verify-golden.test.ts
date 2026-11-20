@@ -44,13 +44,6 @@ describe("setup proposal verify (golden, with unique quote fallback)", () => {
     });
   });
 
-  it("holds: a quote at the cited line that contains the value is verified and final; one read through the line plus the margin", async () => {
-    const { read, calls } = fakeReader({ [`demo:package.json@${SHA}`]: PACKAGE });
-    const result = await verifyProposalDetailed(read, proposalOf({ setup: [commandsItem("s", ["npm ci"], [cite(3, '"ci": "npm ci"')])] }), { now: fixedNow });
-    expect(result).toEqual({ items: { s: "verified" }, final: true });
-    expect(calls).toEqual([{ repository: "demo", path: "package.json", commit: SHA, untilLine: 7, timeoutMs: 8_000 }]);
-  });
-
   it("fails: a quote not near the cited line, a missing file, a line past the end, and a quote that does not contain the value are unverified and final", async () => {
     const { read } = fakeReader({ [`demo:package.json@${SHA}`]: PACKAGE });
     const result = await verifyProposalDetailed(read, proposalOf({

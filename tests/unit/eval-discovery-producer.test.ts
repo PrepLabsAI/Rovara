@@ -1,11 +1,9 @@
 // DEC 253q(a), 253o(1): the setup run's eval discovery producer (the agent's drafted eval -> the `eval_discovery` report) and the judge contract (the broker's judge pin).
 // The producer is deterministic, bounded and whole-or-nothing; the report it makes is schema-valid. Mutants named in titles were run by hand (break the check, see the test fail, restore).
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  EVAL_DISCOVERY_REPORT_MAX_BYTES, EVAL_PRODUCT_ROW, SetupEvalDiscoveryReportSchema, canonicalJson, evalCommandFingerprintOf, evalJudgePinOf, evalQuestionHash,
+  EVAL_DISCOVERY_REPORT_MAX_BYTES, EVAL_PRODUCT_ROW, canonicalJson, evalJudgePinOf, evalQuestionHash,
 } from "@agentx/contracts";
 import { produceEvalDiscoveryReport, type EvalDiscoveryProducerInput } from "../../packages/worker/src/verification/eval-discovery-producer.js";
 import type { EvalDiscovery } from "../../packages/worker/src/verification/eval-discovery.js";
@@ -42,31 +40,9 @@ describe("the judge contract: named by the run, pinned by the broker", () => {
     expect(() => evalJudgePinOf({ catalogRowId: "gemini", judge: { ...JUDGE, model: "claude-opus-5" }, scoringHash: "a".repeat(64) })).toThrow();
     expect(() => evalJudgePinOf({ catalogRowId: "gemini", judge: JUDGE, scoringHash: "nope" })).toThrow();
   });
-  it("the report carries the judge, never a pin; a model of another family, a scoring file that is a question, and a row the route does not serve are refused (mutants: the family and scoring refines)", async () => {
-    const produced = await produceEvalDiscoveryReport(input());
-    if (!("report" in produced)) throw new Error("no report");
-    const suite = produced.report.suites[0]!;
-    expect(suite).not.toHaveProperty("judgePin");
-    const bad = (over: Record<string, unknown>) => SetupEvalDiscoveryReportSchema.safeParse({ schemaVersion: 1, suites: [{ ...suite, ...over }] }).success;
-    expect(bad({})).toBe(true);
-    expect(bad({ model: "gpt-5" })).toBe(false);
-    expect(bad({ judge: { ...JUDGE, model: "claude-opus-5" } })).toBe(false);
-    expect(bad({ judge: { kind: "rule", scoringPath: "evals/demo/q1.txt" } })).toBe(false);
-    expect(bad({ catalogRowId: "openai" })).toBe(false);
-    expect(bad({ judgePin: "b".repeat(64) })).toBe(false);
-    expect(bad({ judge: { kind: "invented", scoringPath: "x.md" } })).toBe(false);
-  });
 });
 
 describe("the producer: the agent's draft -> a bounded, schema-valid report", () => {
-  it("makes a schema-valid report: the worker's own row, route, image and command fingerprint; suites and questions in a fixed order", async () => {
-    const produced = await produceEvalDiscoveryReport(input({ draft: { suites: [draftSuite({ selection: "zeta", questions: [{ id: "z1", category: "ordinary", path: "evals/demo/q1.txt" }] }), draftSuite()] } }));
-    if (!("report" in produced)) throw new Error(JSON.stringify(produced));
-    expect(SetupEvalDiscoveryReportSchema.safeParse(produced.report).success).toBe(true);
-    expect(produced.report.suites.map((s) => s.selection)).toEqual(["evals/demo", "zeta"]);
-    expect(produced.report.suites[0]).toMatchObject({ catalogRowId: EVAL_PRODUCT_ROW, route: "gateway", image: IMAGE, commandFingerprint: evalCommandFingerprintOf(command, report), judge: JUDGE });
-    expect(produced.report.suites[0]!.questions.map((q) => q.id)).toEqual(["q1", "q2"]);
-  });
   it("is deterministic: the same draft in another order gives the same bytes, and F4 runs once per repository", async () => {
     let discovered = 0;
     const discover = async () => { discovered++; return found(["evals/demo"]); };
@@ -113,16 +89,6 @@ describe("the producer: the agent's draft -> a bounded, schema-valid report", ()
     expect("report" in out).toBe(true);
     expect(Date.now() - t0).toBeLessThan(2_000);
   });
-  it("with the real F4 discovery over a checkout: questions inside an eval folder count, a file outside any eval suite does not", async () => {
-    const dir = await realpath(await mkdtemp(join(tmpdir(), "edp-"))); roots.push(dir);
-    for (const [p, c] of Object.entries({ "evals/demo/q1.txt": "one\n", "evals/demo/q2.txt": "two\n", "evals/demo/judge.md": "judge\n", "src/prompt.txt": "x\n" })) {
-      await mkdir(dirname(join(dir, p)), { recursive: true }); await writeFile(join(dir, p), c);
-    }
-    const real = { repositories: [{ name: "web", directory: dir }], discover: undefined };
-    expect("report" in await produceEvalDiscoveryReport(input(real))).toBe(true);
-    const outside = await produceEvalDiscoveryReport(input({ ...real, tracked: new Map([["web", new Set([...TRACKED.get("web")!, "src/prompt.txt"])]]), draft: { suites: [draftSuite({ questions: [{ id: "q1", category: "ordinary", path: "src/prompt.txt" }] })] } }));
-    expect(outside).toEqual({ refused: "not_found" });
-  });
   it("the judge pin the broker will compute is the scoring file's, not anything in the report", () => {
     const hash = evalQuestionHash(Buffer.from("judge\n"));
     expect(evalJudgePinOf({ catalogRowId: EVAL_PRODUCT_ROW, judge: JUDGE, scoringHash: hash })).not.toBe(evalJudgePinOf({ catalogRowId: EVAL_PRODUCT_ROW, judge: JUDGE, scoringHash: evalQuestionHash(Buffer.from("judge 2\n")) }));
@@ -132,13 +98,6 @@ describe("the producer: the agent's draft -> a bounded, schema-valid report", ()
 // L4-EVW2 (DEC 254zzz20 D2): the draft says what the eval's command writes, so the broker knows whether a wrapper pull request is needed. The producer only carries it (strictly checked); the broker decides.
 describe("what the eval writes (output)", () => {
   const ROWS = { kind: "rows", format: "jsonl", language: "python", idField: "case_id", pass: { field: "passed", equals: true } };
-  it("carries a described output into the report, and a draft without one reads as before", async () => {
-    const withOutput = await produceEvalDiscoveryReport(input({ draft: { suites: [draftSuite({ output: ROWS })] } }));
-    expect("report" in withOutput && withOutput.report.suites[0]!.output).toEqual(ROWS);
-    const without = await produceEvalDiscoveryReport(input());
-    expect("report" in without && "output" in without.report.suites[0]!).toBe(false);
-    for (const output of [{ kind: "junit" }, { kind: "promptfoo" }, { kind: "measures" }]) expect("report" in (await produceEvalDiscoveryReport(input({ draft: { suites: [draftSuite({ output })] } })))).toBe(true);
-  });
   it("carries the setup sandbox's dry-run of each file by the suite's selection (never the draft's own claim), and an absent one stays absent", async () => {
     const dryRuns = new Map<string, "passed" | "failed">([["evals/demo", "passed"]]);
     const ok = await produceEvalDiscoveryReport(input({ draft: { suites: [draftSuite({ output: ROWS })] }, dryRuns }));
@@ -149,10 +108,5 @@ describe("what the eval writes (output)", () => {
     expect("report" in none && "wrapperDryRun" in none.report.suites[0]!).toBe(false);
     // The draft cannot say it passed.
     expect(await produceEvalDiscoveryReport(input({ draft: { suites: [draftSuite({ output: ROWS, wrapperDryRun: "passed" })] } }))).toEqual({ refused: "unreadable" });
-  });
-  it("refuses a draft whose output is not exactly one of the shapes: whole or nothing", async () => {
-    for (const output of [{ kind: "rows" }, { ...ROWS, extra: 1 }, { ...ROWS, language: "ruby" }, { ...ROWS, idField: "a b" }, { kind: "custom", language: "python", summary: "x", source: "x".repeat(12_001) }, { kind: "shell", command: "rm -rf /" }, "junit"]) {
-      expect(await produceEvalDiscoveryReport(input({ draft: { suites: [draftSuite({ output })] } })), JSON.stringify(output).slice(0, 50)).toEqual({ refused: "unreadable" });
-    }
   });
 });

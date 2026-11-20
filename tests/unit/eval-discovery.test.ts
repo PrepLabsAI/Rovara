@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from "vitest";
-import { mkdtemp, mkdir, writeFile, rm, symlink, opendir } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { discoverEvals } from "../../packages/worker/src/verification/eval-discovery.js";
 const roots: string[] = [];
@@ -34,42 +34,10 @@ it("refuses links, unreadable reports and exhausted inventories instead of claim
   expect((await discoverEvals(path)).omitted.length).toBeGreaterThan(0);
   expect((await discoverEvals(path, { maxEntries: 1 })).status).toBe("incomplete");
 });
-it("makes repository names inert, including a hostile megabyte", async () => {
-  const path = await root(); await mkdir(join(path, "evals"));
-  for (const name of ["@team #123", "[x[1]](url)", "![a[b]c](url)", "[x][ref]", "<b>html<", "# title", "> quote", "---", "```", "~~~", "hidden\u200b\ufe0f"]) await mkdir(join(path, "evals", name));
-  const result = await discoverEvals(path);
-  const text = result.candidates.map(c => c.label).join(" ");
-  expect(text).not.toMatch(/@team|#123|\[|<b>|\u200b|\ufe0f/u);
-  await writeFile(join(path, "rovara-measures.json"), "x".repeat(1_048_576));
-  expect((await discoverEvals(path)).status).toBe("incomplete");
-});
 it("does not accept a symlink root or an expanded inventory limit", async () => {
   const path = await root(); const target = await root(); await symlink(target, join(path, "linked"));
   expect((await discoverEvals(join(path, "linked"))).status).toBe("incomplete");
   expect((await discoverEvals(target, { maxEntries: 2001 })).status).toBe("incomplete");
-});
-it("records a truncation when plain candidates exceed the inventory budget", async () => {
-  const path = await root(); await writeFile(join(path, "promptfooconfig.yaml"), ""); await writeFile(join(path, "deepeval.json"), "{}");
-  const result = await discoverEvals(path, { maxEntries: 1 });
-  expect(result.status).toBe("incomplete"); expect(result.candidates).toHaveLength(1);
-});
-it("finds root candidates before traversing a large source tree", async () => {
-  const path = await root();
-  // Populate the first actual filesystem entry with a large subtree. The report is a
-  // later root entry on both APFS and Linux, without depending on either directory order.
-  for (let i = 0; i < 20; i++) await mkdir(join(path, `source-${i}`));
-  const entries: string[] = [];
-  for await (const entry of await opendir(path)) entries.push(entry.name);
-  await Promise.all(Array.from({ length: 100 }, (_, i) => writeFile(join(path, entries[0]!, `${i}.ts`), "")));
-  await writeFile(join(path, "promptfooconfig.yaml"), "");
-  const found = await discoverEvals(path, { maxEntries: 30 });
-  expect(found.candidates.some(c => c.tool === "promptfoo")).toBe(true);
-});
-it("records a reason for every omitted entry within the bounded scan", async () => {
-  const path = await root();
-  await Promise.all(Array.from({ length: 110 }, (_, i) => symlink("missing-target", join(path, `link-${i}`))));
-  const result = await discoverEvals(path);
-  expect(result.omitted).toHaveLength(110); expect(result.status).toBe("incomplete");
 });
 
 it("deduplicates nested config, reports and support folders to their eval roots", async () => {

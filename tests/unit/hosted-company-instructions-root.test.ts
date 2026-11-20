@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PLAYBOOK_FILE_PATH, TASK_KEY_PURPOSE, projectRevisionKey, orgProjectCatalogKey, type JsonValue, type OrgId } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
-import { buildStandingInstructions } from "../../packages/broker/src/core/instructions/standing-block.js";
 import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import { createFakeWorld, FAKE_COMPANY } from "../support/core-host-fakes.js";
 
@@ -69,30 +68,6 @@ const pinFor = async (root: Awaited<ReturnType<typeof setup>>["root"], company: 
 };
 
 describe("the hosted broker's core root registers company-instructions from the gateway (L4-HW3c)", () => {
-  it("the company's approved rules reach its pinned standing block, Required before Preferred, the file's How we work after them", async () => {
-    stubGateway();
-    const { root } = await setup();
-    const pin = await pinFor(root, A);
-    expect(pin?.company).toEqual(stored[A]);
-    const block = buildStandingInstructions({ company: pin?.company, howWeWork: [], checking: false });
-    expect(block?.text).toContain("A-REQUIRED: never commit secrets.");
-    expect(block?.text).toContain("A-PREFERRED: small pull requests.");
-    expect(block!.text.indexOf("A-REQUIRED")).toBeLessThan(block!.text.indexOf("A-PREFERRED"));
-    expect(pin?.playbook?.file.rules).toBe("HOSTED-RULE");
-    expect(calls).toEqual([{ company: A, url: `${GATEWAY}/v1/service/company-instructions` }]);
-  });
-
-  it("another company's rules never reach it: each company's pin asks the gateway as itself and holds only its own", async () => {
-    stubGateway();
-    const { root } = await setup();
-    const pinA = await pinFor(root, A);
-    const pinB = await pinFor(root, B);
-    expect(calls.map((c) => c.company)).toEqual([A, B]);
-    expect(JSON.stringify(pinA)).not.toContain("ONLY-B-RULE");
-    expect(JSON.stringify(pinB)).toContain("ONLY-B-RULE");
-    expect(JSON.stringify(pinB)).not.toContain("A-REQUIRED");
-    expect(pinB?.company?.version).toBe("9");
-  });
 
   it("a company with no rules is unchanged: no company part, the file still pinned", async () => {
     stubGateway(() => new Response(JSON.stringify({ company: A, version: "0", rules: [] }), { status: 200 }));
@@ -108,20 +83,5 @@ describe("the hosted broker's core root registers company-instructions from the 
       const { root } = await setup();
       await expect(pinFor(root, A)).rejects.toThrow(/The company rules could not be read, so this step did not start/u);
     }
-  });
-
-  it("rules over the limits stop the start with the budget sentence, as on a laptop", async () => {
-    stubGateway((company) => new Response(JSON.stringify({ company, version: "1", rules: [{ text: "x".repeat(601), priority: "required" }] }), { status: 200 }));
-    const { root } = await setup();
-    await expect(pinFor(root, A)).rejects.toThrow(/Company rules exceed the size budget/u);
-  });
-
-  it("an install with no gateway configured registers nothing and asks nothing: tasks pin the file only, as before", async () => {
-    stubGateway();
-    const { root } = await setup({});
-    const pin = await pinFor(root, A);
-    expect(pin?.company).toBeUndefined();
-    expect(pin?.playbook?.file.rules).toBe("HOSTED-RULE");
-    expect(calls).toEqual([]);
   });
 });

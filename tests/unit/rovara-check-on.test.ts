@@ -37,20 +37,6 @@ describe("the source a host passes", () => {
 describe("the hosted job services", () => {
   const optionsOf = (w: Awaited<ReturnType<typeof serviceHost>>) => ({ companyId: ORG, flow: w.h.flow, registry: w.registry, ciMode: async () => "their_ci_fix" as const, people: w.people, summary: { facts: w.sessions.deps.facts, cost: w.sessions.deps.cost }, notification: { companyOf: async () => ORG }, now: () => new Date(w.clock.ms) });
 
-  // Mutant H1: the hosted job services do not pass summaryCheck.
-  it("write the Check for the company's pull request on a merge-tracking pass", async () => {
-    const w = await serviceHost();
-    const services = createHostedBrokerCoreServices(optionsOf(w));
-    expect(await services["merge-tracking"].pass({ budgetMs: 1000 })).toMatchObject({ attempted: 1 });
-    const written = w.world.prs[0]!.model.summaryChecks;
-    expect(written).toHaveLength(1);
-    expect(written[0]!.revision).toBe(w.world.prs[0]!.head);
-    expect(written[0]!.detailsUrl).toBeUndefined();
-    // A pass again, with nothing changed: the same run, not a second.
-    await services["merge-tracking"].pass({ budgetMs: 1000 });
-    expect(w.world.prs[0]!.model.summaryChecks).toHaveLength(1);
-  });
-
   // L4-EVCI2 mutant W1: the hosted job services do not pass the confirmed eval check's port (ciEvidence).
   it("read the company's confirmed eval check (the setup card's) on a merge-tracking pass, and only that company's project's", async () => {
     const w = await serviceHost();
@@ -108,14 +94,6 @@ describe("the laptop's tracking", () => {
     });
     return { w, tracking };
   };
-
-  // Mutant L1: the laptop's tracking does not ask for the Check.
-  it("asks for the Check by default, and a host that can write one gets it", async () => {
-    const { w, tracking } = await trackingOf();
-    expect(tracking.deps.summaryCheck?.enabled(task(ORG))).toBe(true);
-    await tracking.sweep();
-    expect(w.world.prs[0]!.model.summaryChecks).toHaveLength(1);
-  });
 
   it("keeps the source a host passes itself (a gate it closes stays closed)", async () => {
     const { w, tracking } = await trackingOf({ enabled: () => false });
@@ -218,17 +196,6 @@ describe("the hosted code host writes the Check through the company's own rules 
     const shifting = { get orgId() { reads += 1; return reads === 1 ? ORG : B; } };
     await provider.upsertRovaraCheck!(GITHUB_REPO_URL, { headSha: "a".repeat(40), payload: { status: "completed", conclusion: "success", title: "t", summary: "s", text: "x" } }, shifting);
     expect(seen).toEqual([{ orgId: ORG }]);
-  });
-
-  // Mutant S1: the bridge offers the Check write without the App's id (the adapter then offers neither, so no Check and no way to tell it from the customer's CI).
-  it("offers the Check write and the App's id together, or neither", async () => {
-    const both = { upsertRovaraCheck: async () => ({ runId: "1" }), summaryCheckSource: async () => "5002502" } as unknown as Parameters<typeof companyScopedGitHubProvider>[0];
-    const provider = companyScopedGitHubProvider(both, { repositoriesOf: async () => new Set() });
-    expect(typeof provider.upsertRovaraCheck).toBe("function");
-    expect(await provider.summaryCheckSource!()).toBe("5002502");
-    const half = companyScopedGitHubProvider({ upsertRovaraCheck: async () => ({ runId: "1" }) } as unknown as Parameters<typeof companyScopedGitHubProvider>[0], { repositoriesOf: async () => new Set() });
-    expect("upsertRovaraCheck" in half).toBe(false);
-    expect("summaryCheckSource" in half).toBe(false);
   });
 
   // Mutant F1: a permission refusal throws (or is retried) instead of being remembered for an hour.

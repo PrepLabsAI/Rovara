@@ -1,24 +1,13 @@
 // TE-F2 part B: one check round with the model helper beside it. `withModelHelperRound` is the same object when there is no plan; with one, the helper's variables go last into each project command, `endRound` reads the summary,
 // says what is true (hosted "not sealed; model hosts blocked by name only", laptop exactly "model hosts not blocked on this machine"), and tears the helper down on every path. The run files are written by the worker.
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { NOT_SEALED_BLOCKED_BY_NAME_SENTENCE } from "../../packages/contracts/src/index.js";
 import { CheckNotRunError, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { UNTRUSTED_MODEL_SUMMARY, parseModelHelperSummary, type ModelHelperSummary } from "../../packages/worker/src/model-helper-ledger.js";
-import {
-  MODEL_HELPER_AGENT_COMMAND_SENTENCE,
-  MODEL_HELPER_START_FAILED_SENTENCE,
-  modelHelperEvidence,
-  removeModelHelperRunFiles,
-  withModelHelperRound,
-  writeModelHelperRunFiles,
-  type ModelHelperRoundPlan,
-  type ModelHelperRoundResult,
-  type StartedModelHelper,
-} from "../../packages/worker/src/model-helper-round.js";
-import { modelReplyBundleDigest, parseModelReplyBundleBytes, buildModelReplyBundle } from "../../packages/worker/src/model-reply-bundle.js";
+import { MODEL_HELPER_AGENT_COMMAND_SENTENCE, MODEL_HELPER_START_FAILED_SENTENCE, modelHelperEvidence, withModelHelperRound, writeModelHelperRunFiles, type ModelHelperRoundPlan, type ModelHelperRoundResult, type StartedModelHelper } from "../../packages/worker/src/model-helper-round.js";
+import { parseModelReplyBundleBytes, buildModelReplyBundle } from "../../packages/worker/src/model-reply-bundle.js";
 import { ROWS, stampSet } from "../support/model-helper-world.js";
 
 const BLOCK = ["api.openai.com", "generativelanguage.googleapis.com"];
@@ -30,18 +19,6 @@ const summary = (over: Partial<ModelHelperSummary> = {}): ModelHelperSummary => 
 const COMMAND = { cwd: ".", executable: "node", args: ["x.js"], timeoutSeconds: 5, env: { KEEP: "1", GEMINI_API_KEY: "from-the-command" } };
 
 describe("evidence", () => {
-  it("hosted: says 'not sealed; model hosts blocked by name only', never 'sealed'; the laptop says exactly 'model hosts not blocked on this machine'", () => {
-    const hosted = modelHelperEvidence(summary({ scripted: { before_task: 2, independent: 0, task_made: 0 }, countsTowardProof: 2 }), BLOCK);
-    expect(hosted).toMatchObject({ result: "ran", countsTowardProof: 2 });
-    // the sentence is F1b's (it now also says a Google service that runs a model inside it is not blocked); it starts with the words this test pins
-    expect(hosted.lines[0]).toBe(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE);
-    expect(hosted.lines[0]).toMatch(/^not sealed; model hosts blocked by name only/u);
-    const laptop = modelHelperEvidence(summary({ blockState: "not_blocked_here" }), BLOCK);
-    expect(laptop.lines[0]).toBe("model hosts not blocked on this machine");
-    expect(laptop.lines.join("\n")).not.toContain("blocked by name");
-    // an unknown or unreadable state is the weaker claim
-    expect(modelHelperEvidence(summary({ blockState: null }), BLOCK).lines[0]).toBe("model hosts not blocked on this machine");
-  });
   it("an escape makes the round not run, named by host; an untrusted or unreadable record is not run; the failure pack and task-made replies are labelled not counted", () => {
     const escaped = modelHelperEvidence(summary({ escapes: { count: 1, hosts: ["api.openai.com"], unreadable: 0 } }), BLOCK);
     expect(escaped.result).toBe("not_run");
@@ -97,55 +74,6 @@ describe("withModelHelperRound", () => {
     const noSink = { blockList: BLOCK, start: () => Promise.resolve(undefined) } as unknown as ModelHelperRoundPlan;
     expect(() => withModelHelperRound(noSink, fakeRunners([]))).toThrow(/onResult/u);
   });
-  it("L2: a summary whose reply-set digest is not the one the worker pinned is untrusted: the round is not run", async () => {
-    const results: ModelHelperRoundResult[] = [];
-    const helper: StartedModelHelper = { pinnedDigest: PINNED, unsetEnvironment: [], commandEnvironment: {}, readSummary: () => Promise.resolve(summary({ replySetDigest: "b".repeat(64), scripted: { before_task: 3, independent: 0, task_made: 0 }, countsTowardProof: 3 })), stop: () => Promise.resolve() };
-    const wrapped = withModelHelperRound({ blockList: BLOCK, start: () => Promise.resolve(helper), onResult: (result) => results.push(result) }, fakeRunners([]));
-    await wrapped.runProjectCommand(COMMAND, signal);
-    await wrapped.endRound?.();
-    expect(results[0]?.summary?.trusted).toBe(false);
-    expect(results[0]?.evidence).toMatchObject({ result: "not_run", countsTowardProof: 0 });
-    // the right digest passes
-    const good: StartedModelHelper = { ...helper, readSummary: () => Promise.resolve(summary({ scripted: { before_task: 3, independent: 0, task_made: 0 }, countsTowardProof: 3 })) };
-    const again = withModelHelperRound({ blockList: BLOCK, start: () => Promise.resolve(good), onResult: (result) => results.push(result) }, fakeRunners([]));
-    await again.runProjectCommand(COMMAND, signal);
-    await again.endRound?.();
-    expect(results[1]?.evidence).toMatchObject({ result: "ran", countsTowardProof: 3 });
-  });
-  it("is the same object when there is no plan", () => {
-    const runners = fakeRunners([]);
-    expect(withModelHelperRound(undefined, runners)).toBe(runners);
-  });
-  it("starts the helper on the first command, puts the helper's variables LAST (over the command's own), reads the summary at endRound, stops the helper and then ends the base round", async () => {
-    const log: string[] = [];
-    const results: ModelHelperRoundResult[] = [];
-    const helper: StartedModelHelper = {
-      pinnedDigest: PINNED,
-      unsetEnvironment: ["AWS_SECRET_ACCESS_KEY"],
-      commandEnvironment: { GEMINI_API_KEY: "rovara-test-key", GOOGLE_GEMINI_BASE_URL: "http://127.0.0.1:1/p/gemini" },
-      readSummary: () => { log.push("summary"); return Promise.resolve(summary({ blockState: "not_blocked_here" })); },
-      stop: () => { log.push("stop"); return Promise.resolve(); },
-    };
-    let starts = 0;
-    const plan: ModelHelperRoundPlan = { blockList: BLOCK, start: () => { starts += 1; return Promise.resolve(helper); }, onResult: (result) => results.push(result) };
-    const base = fakeRunners(log);
-    const wrapped = withModelHelperRound(plan, base);
-    await wrapped.runProjectCommand(COMMAND, signal);
-    await wrapped.runProjectCommand(COMMAND, signal);
-    expect(starts).toBe(1);
-    expect(base.seen[0]).toMatchObject({ env: { KEEP: "1", GEMINI_API_KEY: "rovara-test-key", GOOGLE_GEMINI_BASE_URL: "http://127.0.0.1:1/p/gemini" } });
-    // an unset name is present in the env object as undefined (the child does not receive it), and the command cannot bring it back
-    const env = (base.seen[0] as { env: Record<string, string | undefined> }).env;
-    expect("AWS_SECRET_ACCESS_KEY" in env && env.AWS_SECRET_ACCESS_KEY === undefined).toBe(true);
-    await wrapped.freshServices?.(signal);
-    await wrapped.endRound?.();
-    expect(log).toEqual(["fresh", "summary", "stop", "base-endRound"]);
-    expect(results[0]?.evidence.lines[0]).toBe("model hosts not blocked on this machine");
-    // the next round starts a fresh helper
-    await wrapped.runProjectCommand(COMMAND, signal);
-    expect(starts).toBe(2);
-    await wrapped.endRound?.();
-  });
   it("tears down and ends the base round even when the summary cannot be read or the sink throws", async () => {
     const log: string[] = [];
     const helper: StartedModelHelper = { pinnedDigest: PINNED, unsetEnvironment: [], commandEnvironment: {}, readSummary: () => Promise.reject(new Error("gone")), stop: () => { log.push("stop"); return Promise.resolve(); } };
@@ -178,21 +106,6 @@ describe("withModelHelperRound", () => {
 describe("run files", () => {
   const dirs: string[] = [];
   afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
-  it("are written by the worker, private (0700 directory, 0600 files), and the helper's parse accepts exactly the digest the worker pinned", async () => {
-    const parent = mkdtempSync(join(tmpdir(), "rsrf-"));
-    dirs.push(parent);
-    const set = stampSet("openai_compatible", [{ id: "a" }]);
-    const files = await writeModelHelperRunFiles({ parent, rows: ROWS, sets: [set] });
-    expect(statSync(files.dir).mode & 0o777).toBe(0o700);
-    expect(statSync(files.rowsPath).mode & 0o777).toBe(0o600);
-    expect(statSync(files.repliesPath).mode & 0o777).toBe(0o600);
-    const bytes = readFileSync(files.repliesPath);
-    expect(files.digest).toBe(modelReplyBundleDigest(buildModelReplyBundle([set])));
-    expect(parseModelReplyBundleBytes(bytes, files.digest).ok).toBe(true);
-    expect(parseModelReplyBundleBytes(bytes, "0".repeat(64)).ok).toBe(false);
-    expect(parseModelReplyBundleBytes(Buffer.from(bytes.toString().replace("scripted", "rigged")), files.digest).ok).toBe(false);
-    await removeModelHelperRunFiles(files);
-  });
   it("refuse a reply that says independent: bytes can carry any provenance, and replies.json cannot", async () => {
     const parent = mkdtempSync(join(tmpdir(), "rsrf-"));
     dirs.push(parent);

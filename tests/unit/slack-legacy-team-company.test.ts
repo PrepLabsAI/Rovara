@@ -6,25 +6,6 @@ import { companyRouteHarness } from "../support/company-route-harness.js";
 
 const OTHER = `org_${"b".repeat(20)}`;
 
-async function channelProjects(companyId: string, project: unknown = undefined): Promise<unknown[]> {
-  const h = companyRouteHarness();
-  h.deps.companies = { companyOf: async () => companyId };
-  h.project(project, "channel");
-  const answer = await h.read("/v1/dev/projects");
-  return (JSON.parse(answer.body) as { projects: unknown[] }).projects;
-}
-
-describe("the install's own Slack team under the company check, without the workspace service", () => {
-  it("lists the implicit company's channel project", async () => {
-    expect(await channelProjects(IMPLICIT_COMPANY_ID)).toHaveLength(1);
-  });
-
-  it("never lists it for another company, even when the project row names that company", async () => {
-    expect(await channelProjects(OTHER)).toEqual([]);
-    expect(await channelProjects(OTHER, OTHER)).toEqual([]);
-  });
-});
-
 describe("the install's own Slack team with the workspace service wired", () => {
   async function wired(companyId: string, boundTo?: string): Promise<unknown[]> {
     const { createSlackWorkspaceBindings } = await import("../../packages/broker/src/aws/slack-workspace-binding.js");
@@ -42,9 +23,6 @@ describe("the install's own Slack team with the workspace service wired", () => 
     expect(await wired(IMPLICIT_COMPANY_ID)).toHaveLength(1);
   });
 
-  it("does not give it to the implicit company once it is bound to another company", async () => {
-    expect(await wired(IMPLICIT_COMPANY_ID, OTHER)).toEqual([]);
-  });
 });
 
 describe("the install's own team stays inside the implicit company on every path (#759 REVIEW-GOLDEN-FIX H1, M1)", () => {

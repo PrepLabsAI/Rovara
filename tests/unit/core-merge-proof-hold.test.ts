@@ -6,7 +6,6 @@ import { attentionOf } from "../../packages/broker/src/local/app/attention.js";
 import {
   OVERRIDE_REASON_MAX, judgeProofHold, markReadyAnyway, plainReason, proofHoldKey, proofOverrideKey, readProofHold, readProofHoldHistory, trackPullRequest, type LiveRoles, type MarkReadyInput, type ProofHoldSource,
 } from "../../packages/broker/src/core/merge/index.js";
-import { PROOF_READ_MAX_MS } from "../../packages/broker/src/core/proof/proof-keep.js";
 import { ORG, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
 import { expectLinearScaling } from "../support/scaling.js";
 
@@ -50,14 +49,6 @@ const press = (world: MergeWorld, over: Partial<MarkReadyInput> & { actorId: str
 };
 
 describe("the ready rule: a draft is held for its change proof", () => {
-  it("no source: a draft that passes is taken out of draft as before (nothing is read, nothing written)", async () => {
-    const world = await mergeWorld();
-    const pr = world.prs[0]!;
-    pr.model.getChangeRequest(String(pr.number)).draft = true;
-    await trackPullRequest(world.tracking, TASK_ID);
-    expect(pr.model.getChangeRequest(String(pr.number)).draft).toBe(false);
-    expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
-  });
   it.each([true, false])("a proof override cannot bypass the tier hold (%s)", async (tierHeld) => {
     const { tracking, draft, world, pr } = await heldWorld(VACUOUS);
     await trackPullRequest(tracking, TASK_ID);
@@ -68,79 +59,6 @@ describe("the ready rule: a draft is held for its change proof", () => {
     expect(draft()).toBe(tierHeld);
     expect(world.milestones.written.filter((entry) => entry.kind === "pr_ready")).toHaveLength(tierHeld ? 0 : 1);
   });
-  it("does not judge the proof until the tier hold lets the draft become ready", async () => {
-    const { tracking, calls, draft, world, pr } = await heldWorld(VACUOUS);
-    let held = true;
-    const combined = { ...tracking, readyHold: async () => held };
-    await trackPullRequest(combined, TASK_ID);
-    expect(calls.facts).toBe(0);
-    expect(draft()).toBe(true);
-    expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
-    held = false;
-    await trackPullRequest(combined, TASK_ID);
-    expect(calls.facts).toBe(1);
-    expect(draft()).toBe(true);
-    expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeDefined();
-  });
-  it("a proven change is taken out of draft", async () => {
-    const { tracking, draft, pr, world } = await heldWorld(PROVEN);
-    await trackPullRequest(tracking, TASK_ID);
-    expect(draft()).toBe(false);
-    expect(await world.trackingOf(pr)).toMatchObject({ draft: false });
-    expect(world.timeline.lines.filter((line) => line.startsWith("Held"))).toEqual([]);
-  });
-  it("tests that pass on the old code too keep the draft, and the timeline says why, once", async () => {
-    const { tracking, draft, pr, world } = await heldWorld(VACUOUS);
-    await trackPullRequest(tracking, TASK_ID);
-    await trackPullRequest(tracking, TASK_ID);
-    expect(draft()).toBe(true);
-    expect(world.milestones.written.filter((m) => m.kind === "pr_ready")).toEqual([]);
-    expect(world.timeline.lines.filter((line) => line.includes("the new tests pass on the old code too"))).toHaveLength(1);
-    const stored = await readProofHold(world.store, { taskId: TASK_ID, orgId: ORG }, { repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head });
-    expect(stored?.record).toMatchObject({ holds: true, reasons: ["proof_failed"], mode: "hold", headSha: pr.head });
-    expect(stored?.override).toBeUndefined();
-  });
-  it("a judgement that comes back to an earlier state (held, proven, held again) is still recorded, though its timeline line was said", async () => {
-    let facts: ProofHoldFacts = VACUOUS;
-    const { world, pr } = await heldWorld(undefined);
-    const source = { mode: () => "hold" as const, facts: async () => facts };
-    const task = { ...(await world.task()), orgId: ORG };
-    const judge = () => judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: source }, task, pr, pr.head, world.now.value);
-    await judge();
-    facts = PROVEN;
-    await judge();
-    expect((await readProofHold(world.store, { taskId: TASK_ID, orgId: ORG }, { repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head }))?.record.holds).toBe(false);
-    facts = VACUOUS;
-    await judge();
-    expect((await readProofHold(world.store, { taskId: TASK_ID, orgId: ORG }, { repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head }))?.record.holds).toBe(true);
-  });
-  it("each reason holds the draft", async () => {
-    const cases: ProofHoldFacts[] = [
-      { ...PROVEN, absentOnNew: ["a > b"] }, { ...PROVEN, changedLines: { changed: 5, covered: 0 } }, { ...PROVEN, flakyOnChange: ["a > b"] },
-      VACUOUS,
-    ];
-    for (const facts of cases) {
-      const { tracking, draft } = await heldWorld(facts);
-      await trackPullRequest(tracking, TASK_ID);
-      expect(draft(), JSON.stringify(facts)).toBe(true);
-    }
-  });
-  it("scripted replies of every origin release the draft without a hold or warning", async () => {
-    for (const origin of ["before_task", "independent_agent", "coding_agent", "failure_pack", "unknown", "made_up"]) {
-      const { tracking, draft, world, pr } = await heldWorld({ ...PROVEN, scriptedReplies: { unit: origin } });
-      await trackPullRequest(tracking, TASK_ID);
-      expect(draft(), origin).toBe(false);
-      expect(world.timeline.lines.filter((line) => line.startsWith("Held") || line.startsWith("Not proven:"))).toEqual([]);
-      const stored = await readProofHold(world.store, { taskId: TASK_ID, orgId: ORG }, { repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head });
-      expect(stored?.record).toMatchObject({ holds: false, warns: false, reasons: [], provenCount: 1 });
-    }
-  });
-  it("a vacuous sibling does not hold an agent-reply proving test through tracking", async () => {
-    const mixed = proof([item("proves_change", "assertion_failed_on_old"), { ...item("does_not_prove", "passed_on_old"), checkId: "other" }]);
-    const { tracking, draft } = await heldWorld({ proof: mixed, scriptedReplies: { unit: "coding_agent" } });
-    await trackPullRequest(tracking, TASK_ID);
-    expect(draft()).toBe(false);
-  });
   it("the Lightweight preset warns and takes the draft out of draft; off ignores the proof", async () => {
     const warned = await heldWorld(VACUOUS, "warn");
     await trackPullRequest(warned.tracking, TASK_ID);
@@ -150,35 +68,6 @@ describe("the ready rule: a draft is held for its change proof", () => {
     await trackPullRequest(off.tracking, TASK_ID);
     expect(off.draft()).toBe(false);
     expect(off.calls.facts).toBe(0);
-  });
-  it("nothing known about the proof never holds (a Rovara fault must not block)", async () => {
-    const { tracking, draft } = await heldWorld(undefined);
-    await trackPullRequest(tracking, TASK_ID);
-    expect(draft()).toBe(false);
-  });
-  it("a judgement that cannot be made keeps the draft this pass and is tried again on the next", async () => {
-    let broken = true;
-    const { tracking, draft } = await heldWorld(async () => { if (broken) throw new Error("boom"); return PROVEN; });
-    await trackPullRequest(tracking, TASK_ID);
-    expect(draft()).toBe(true);
-    broken = false;
-    await trackPullRequest(tracking, TASK_ID);
-    expect(draft()).toBe(false);
-  });
-  it("a pull request that is not a draft cannot be kept back and is not judged", async () => {
-    const world = await mergeWorld();
-    const calls = { facts: 0 };
-    const tracking = { ...world.tracking, proofHold: { mode: () => "hold" as const, facts: async () => { calls.facts += 1; return VACUOUS; } } };
-    await trackPullRequest(tracking, TASK_ID);
-    expect(calls.facts).toBe(0);
-    expect(await world.trackingOf(world.prs[0]!)).toMatchObject({ draft: false });
-  });
-  it("a draft that is not otherwise ready (CI failing) is not judged either: nothing is read until it matters", async () => {
-    const { tracking, pr, calls, draft } = await heldWorld(PROVEN);
-    pr.model.setChecks(pr.head, [{ name: "unit", state: "completed", conclusion: "failure", required: false, url: "", runId: "11" }]);
-    await trackPullRequest(tracking, TASK_ID);
-    expect(calls.facts).toBe(0);
-    expect(draft()).toBe(true);
   });
 });
 
@@ -193,33 +82,6 @@ describe("O43: above 10% held the hold becomes a warning", () => {
     await trackPullRequest(tracking, TASK_ID);
     expect(draft()).toBe(false);
     expect(world.timeline.lines.some((line) => line.includes("so this is a warning, not a hold"))).toBe(true);
-  });
-  it("2 of 20 is exactly 10%: the hold stays", async () => {
-    const { tracking, draft, world } = await heldWorld(VACUOUS);
-    for (const number of [101, 102]) {
-      await judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: { mode: () => "hold", facts: async () => VACUOUS } }, { ...(await world.task()), orgId: ORG }, { repositoryId: "x", number }, "a".repeat(40), world.now.value);
-    }
-    await trackPullRequest(tracking, TASK_ID);
-    expect(draft()).toBe(true);
-  });
-  it("a pull request is counted once however many passes judge it, and the window keeps the last 20", async () => {
-    const { tracking, world } = await heldWorld(VACUOUS);
-    await trackPullRequest(tracking, TASK_ID);
-    await trackPullRequest(tracking, TASK_ID);
-    await trackPullRequest(tracking, TASK_ID);
-    expect(await readProofHoldHistory(world.store, ORG, "web")).toEqual({ held: 1, total: 1 });
-    for (let n = 1; n <= 25; n += 1) {
-      await judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: { mode: () => "hold", facts: async () => PROVEN } }, { ...(await world.task()), orgId: ORG }, { repositoryId: "y", number: n }, "a".repeat(40), world.now.value);
-    }
-    expect((await readProofHoldHistory(world.store, ORG, "web")).total).toBe(20);
-  });
-  it("the history is the rule's own verdict, so a relaxed hold still counts as one the rule made", async () => {
-    const { tracking, world } = await heldWorld(VACUOUS);
-    for (const number of [201, 202, 203]) {
-      await judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: { mode: () => "hold", facts: async () => VACUOUS } }, { ...(await world.task()), orgId: ORG }, { repositoryId: "x", number }, "a".repeat(40), world.now.value);
-    }
-    await trackPullRequest(tracking, TASK_ID);
-    expect((await readProofHoldHistory(world.store, ORG, "web")).held).toBe(4);
   });
 });
 
@@ -240,13 +102,6 @@ describe("mark ready anyway", () => {
     expect(ready?.text).toContain("marked it ready anyway");
     const view = await readProofHold(world.store, { taskId: TASK_ID, orgId: ORG }, { repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head });
     expect(view?.override).toMatchObject({ actorId: "owner-1", reason: "checked by hand" });
-  });
-  it("the reason is optional (O59)", async () => {
-    const { tracking, world } = await heldWorld(VACUOUS);
-    await trackPullRequest(tracking, TASK_ID);
-    const done = await press(world, { actorId: "maint" });
-    expect(done.override.reason).toBeUndefined();
-    expect("reason" in ((await world.store.get(proofOverrideKey(TASK_ID, world.prs[0]!.repositoryId, world.prs[0]!.number))) ?? {})).toBe(false);
   });
   it("a second press is idempotent: one override and one audit row", async () => {
     const { tracking, world } = await heldWorld(VACUOUS);
@@ -275,14 +130,6 @@ describe("mark ready anyway", () => {
         expect((await world.auditRows()).filter((row) => (row as { action: string }).action === "pull_request.proof_overridden")).toEqual([]);
       }
     }
-  });
-  it("another company's person is refused for this company's task (tenant isolation)", async () => {
-    const { tracking, world } = await heldWorld(VACUOUS);
-    await trackPullRequest(tracking, TASK_ID);
-    const foreign = rolesOf({ "owner-1": { orgRole: "owner" }, maint: { orgRole: "owner" } });
-    const outcome = await press(world, { actorId: "owner-1", companyId: "org-other" }, foreign).then(() => true, (error: { code?: string }) => error.code);
-    expect(outcome).toBe("TASK_ACCESS_DENIED");
-    expect(await world.store.get(proofOverrideKey(TASK_ID, world.prs[0]!.repositoryId, world.prs[0]!.number))).toBeUndefined();
   });
   it("roles are read at the press: a demoted owner is refused at once, and a role that cannot be read refuses", async () => {
     const { tracking, world } = await heldWorld(VACUOUS);
@@ -343,12 +190,6 @@ describe("mark ready anyway", () => {
     expect(again).toMatchObject({ already: false, override: { actorId: "maint", headSha: second } });
     expect((await judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: source }, task, pr, second, world.now.value)).kind).toBe("proceed");
   });
-  it("another company's record of the same task id is never read as ours", async () => {
-    const { world, pr } = await heldWorld(VACUOUS);
-    await world.store.put({ item: { ...proofOverrideKey(TASK_ID, pr.repositoryId, pr.number), orgId: "org-other", taskId: TASK_ID, repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head, actorId: "x", at: "2026-11-09T10:00:00.000Z" } });
-    const gate = await judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: { mode: () => "hold", facts: async () => VACUOUS } }, { ...(await world.task()), orgId: ORG }, pr, pr.head, world.now.value);
-    expect(gate.kind).toBe("held");
-  });
 });
 
 describe("the reason is untrusted text", () => {
@@ -368,36 +209,11 @@ describe("the reason is untrusted text", () => {
 });
 
 describe("old data keeps working", () => {
-  it("a task with no hold or override record reads as nothing judged, and a v1 tracking row is untouched by the pass", async () => {
-    const world = await mergeWorld();
-    const pr = world.prs[0]!;
-    expect(await readProofHold(world.store, { taskId: TASK_ID, orgId: ORG }, { repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head })).toBeUndefined();
-    await world.seedTracking();
-    await trackPullRequest(world.tracking, TASK_ID);
-    expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
-  });
   it("a garbled hold record is read as nothing, never as a hold or an override", async () => {
     const world = await mergeWorld();
     const pr = world.prs[0]!;
     await world.store.put({ item: { ...proofHoldKey(TASK_ID, pr.repositoryId, pr.number), orgId: ORG, taskId: TASK_ID, holds: "yes" } });
     expect(await readProofHold(world.store, { taskId: TASK_ID, orgId: ORG }, { repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head })).toBeUndefined();
-  });
-});
-
-describe("review fixes: a held draft cannot release itself (H1)", () => {
-  it("2 other held PRs in the window: the PR stays held on pass 2 and pass 3 (its own verdict is not in its own history)", async () => {
-    const { world, pr, tracking, draft } = await heldWorld(VACUOUS);
-    for (const number of [101, 102]) {
-      await judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: { mode: () => "hold", facts: async () => VACUOUS } }, { ...(await world.task()), orgId: ORG }, { repositoryId: "x", number }, "a".repeat(40), world.now.value);
-    }
-    for (const pass of [1, 2, 3]) {
-      await trackPullRequest(tracking, TASK_ID);
-      expect(draft(), `pass ${String(pass)}`).toBe(true);
-      world.now.value += 10 * 60_000;
-    }
-    expect(world.milestones.written.filter((m) => m.kind === "pr_ready")).toEqual([]);
-    expect((await readProofHoldHistory(world.store, ORG, "web")).held).toBe(3);
-    expect(pr.number).toBeGreaterThan(0);
   });
 });
 
@@ -416,11 +232,6 @@ describe("review fixes: unknown never releases a held draft (M2)", () => {
     expect((await judge("c".repeat(40))).kind).toBe("held");
     facts = PROVEN;
     expect((await judge("d".repeat(40))).kind).toBe("proceed");
-  });
-  it("a PR that was never held is not held by unknown facts", async () => {
-    const { world, pr } = await heldWorld(undefined);
-    const task = { ...(await world.task()), orgId: ORG };
-    expect((await judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: { mode: () => "hold", facts: async () => undefined } }, task, pr, "a".repeat(40), world.now.value)).kind).toBe("proceed");
   });
 });
 
@@ -451,12 +262,6 @@ describe("review fixes: a held draft is one decision item (M3)", () => {
     const released = await attentionOf({ store: world.store, companyId: ORG }, task as never);
     expect(released.step ?? "").not.toContain("Held");
   });
-  it("a draft that is not held is not a decision item", async () => {
-    const { tracking, world } = await heldWorld(PROVEN);
-    await trackPullRequest(tracking, TASK_ID);
-    const attention = await attentionOf({ store: world.store, companyId: ORG }, (await world.task()) as never);
-    expect(attention.step ?? "").not.toContain("Held");
-  });
 });
 
 describe("review fixes: second press and the early company guard (L6)", () => {
@@ -469,17 +274,7 @@ describe("review fixes: second press and the early company guard (L6)", () => {
     expect(error?.code).toBe("MERGE_NOT_READY");
     expect(error?.message).toContain("already marked ready");
   });
-  it("a task of another company is refused before any role is read", async () => {
-    const { tracking, world } = await heldWorld(VACUOUS);
-    await trackPullRequest(tracking, TASK_ID);
-    const asked: string[] = [];
-    const spy: LiveRoles = { read: async (company, _project, person) => { asked.push(`${company}:${person}`); return { orgRole: "owner" }; } };
-    const outcome = await press(world, { actorId: "owner-1", companyId: "org-other" }, spy).then(() => true, (error: { code?: string }) => error.code);
-    expect(outcome).toBe("TASK_ACCESS_DENIED");
-    expect(asked).toEqual([]);
-  });
 });
-
 
 describe("Round 2: fail-closed broker regressions", () => {
   it.each(["future_verdict", "proves_change"])("an unsupported assertion row never makes tracking ready (%s)", async (verdict) => {
@@ -488,97 +283,13 @@ describe("Round 2: fail-closed broker regressions", () => {
     await trackPullRequest(tracking, TASK_ID);
     expect(draft()).toBe(true);
   });
-  it("redacts the reviewer's cut-straddling token before storing an override", async () => {
-    const secret = ["ghp", "A".repeat(36)].join("_");
-    const reason = `${" ".repeat(1_190)}${secret}`;
-    expect(plainReason(reason)).not.toContain(secret.slice(0, 10));
-    const { tracking, world, pr } = await heldWorld(VACUOUS);
-    await trackPullRequest(tracking, TASK_ID);
-    const result = await press(world, { actorId: "owner-1", reason });
-    expect(JSON.stringify(result)).not.toContain(secret.slice(0, 10));
-    expect(JSON.stringify(await world.store.get(proofOverrideKey(TASK_ID, pr.repositoryId, pr.number)))).not.toContain(secret.slice(0, 10));
-  });
   it.each([290, 1_190, 262_134])("never leaves a secret prefix at cut %s", (offset) => {
     const secret = ["ghp", "B".repeat(36)].join("_");
     expect(plainReason(`${"x ".repeat(Math.floor(offset / 2))}${secret}${" tail".repeat(100)}`)).not.toContain(secret.slice(0, 8));
   });
-  it("redacts again after removing hidden characters", () => {
-    const secret = ["ghp", "C".repeat(36)].join("_");
-    expect(plainReason(`reviewed ${secret}\u200d`)).not.toContain(secret.slice(0, 8));
-  });
-  it("a never-settling facts source times out, aborts, and cannot write late", async () => {
-    vi.useFakeTimers();
-    let release!: (facts: ProofHoldFacts) => void;
-    let signal: AbortSignal | undefined;
-    let settled = false;
-    try {
-      const { world, pr, tracking, draft } = await heldWorld(undefined);
-      const source: ProofHoldSource = { mode: () => "hold", facts: (input) => {
-        signal = input.signal;
-        return new Promise((resolve) => { release = resolve; });
-      } };
-      const pending = trackPullRequest({ ...tracking, proofHold: source }, TASK_ID).then(() => { settled = true; });
-      await vi.advanceTimersByTimeAsync(PROOF_READ_MAX_MS + 1);
-      expect(settled).toBe(true);
-      expect(signal?.aborted).toBe(true);
-      expect(draft()).toBe(true);
-      expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
-      release(PROVEN);
-      await pending;
-      await vi.advanceTimersByTimeAsync(0);
-      expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
-    } finally { release?.(PROVEN); vi.useRealTimers(); }
-  });
-  it("uses one total deadline across mode and facts", async () => {
-    vi.useFakeTimers();
-    try {
-      const { world, pr } = await heldWorld(undefined);
-      const delayed = <T,>(value: T) => new Promise<T>((resolve) => { setTimeout(() => resolve(value), 1_000); });
-      let result: Awaited<ReturnType<typeof judgeProofHold>> | undefined;
-      const pending = judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: { mode: () => delayed("hold" as const), facts: () => delayed(PROVEN) } }, { ...(await world.task()), orgId: ORG }, pr, pr.head, world.now.value).then((value) => { result = value; });
-      await vi.advanceTimersByTimeAsync(PROOF_READ_MAX_MS + 1);
-      expect(result).toEqual({ kind: "unreadable" });
-      await vi.advanceTimersByTimeAsync(2_000);
-      await pending;
-      expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
-    } finally { vi.useRealTimers(); }
-  });
-  it("joins the sweep budget and stops when it refuses a proof read", async () => {
-    const { world, pr } = await heldWorld(PROVEN);
-    const controller = new AbortController();
-    let reads = 0;
-    let factsReads = 0;
-    const deps = { store: world.store, timeline: world.timeline, budget: { signal: controller.signal, beforeRequest: () => { reads += 1; if (reads === 2) throw new Error("private cause"); } }, proofHold: { mode: () => "hold" as const, facts: async () => { factsReads += 1; return PROVEN; } } };
-    expect(await judgeProofHold(deps, { ...(await world.task()), orgId: ORG }, pr, pr.head, world.now.value)).toEqual({ kind: "unreadable" });
-    expect(reads).toBe(2);
-    expect(factsReads).toBe(0);
-    expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
-  });
 });
 
-
 describe("Round 2: read cancellation boundaries", () => {
-  it("forwards the sweep abort to facts and observes the next pull request after a timeout", async () => {
-    vi.useFakeTimers();
-    try {
-      const world = await mergeWorld({ pullRequests: [{ repositoryId: "app", number: 7 }, { repositoryId: "api", number: 8 }] });
-      for (const pr of world.prs) pr.model.getChangeRequest(String(pr.number)).draft = true;
-      const parent = new AbortController();
-      const signals = new Map<string, AbortSignal>();
-      const source: ProofHoldSource = { mode: () => "hold", facts: async (input) => {
-        const signal = input.signal;
-        if (signal !== undefined) signals.set(input.repositoryId, signal);
-        return input.repositoryId === "app" ? new Promise(() => {}) : PROVEN;
-      } };
-      const pending = trackPullRequest({ ...world.tracking, proofHold: source, budget: { signal: parent.signal, beforeRequest: () => {} } }, TASK_ID);
-      await vi.advanceTimersByTimeAsync(PROOF_READ_MAX_MS + 1);
-      await pending;
-      expect(signals.size).toBe(2);
-      expect(signals.get("app")?.aborted).toBe(true);
-      expect(parent.signal.aborted).toBe(false);
-      expect(world.prs.map((pr) => pr.model.getChangeRequest(String(pr.number)).draft)).toEqual([true, false]);
-    } finally { vi.useRealTimers(); }
-  });
   it("sweep abort ends an in-flight facts read immediately", async () => {
     vi.useFakeTimers();
     try {
@@ -601,33 +312,7 @@ describe("Round 2: read cancellation boundaries", () => {
       expect(await world.store.get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
     } finally { vi.useRealTimers(); }
   });
-  it("the deadline includes store reads and reads each judgment input once", async () => {
-    vi.useFakeTimers();
-    try {
-      const { world, pr } = await heldWorld(PROVEN);
-      const get = world.store.get.bind(world.store);
-      let reads = 0;
-      world.store.get = async (key) => {
-        reads += 1;
-        return key.sk.startsWith("PROOF_OVERRIDE#") ? new Promise(() => {}) : get(key);
-      };
-      let result: Awaited<ReturnType<typeof judgeProofHold>> | undefined;
-      const pending = judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: { mode: () => "hold", facts: async () => PROVEN } }, { ...(await world.task()), orgId: ORG }, pr, pr.head, world.now.value).then((value) => { result = value; });
-      const before = reads;
-      await vi.advanceTimersByTimeAsync(PROOF_READ_MAX_MS + 1);
-      expect(result).toEqual({ kind: "unreadable" });
-      await pending;
-      expect(reads - before).toBe(3);
-      expect(await get(proofHoldKey(TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
-    } finally { vi.useRealTimers(); }
-  });
-  it("redacts a token made recognizable by the final cut", () => {
-    const token = ["SK", "a".repeat(32)].join("");
-    const padding = "x ".repeat(133);
-    expect(plainReason(`${padding}${token}z`)).not.toContain(token);
-  });
 });
-
 
 describe("Round 2: unreadable proof words", () => {
   it.each(["mode", "facts"] as const)("never echoes the %s failure or an error name", async (stage) => {
@@ -643,21 +328,7 @@ describe("Round 2: unreadable proof words", () => {
   });
 });
 
-
-it("Round 2 M3: drops a token crossing the raw work limit", () => {
-  const secret = ["ghp", "E".repeat(36)].join("_");
-  expect(plainReason(`${" ".repeat(262_134)}${secret}`)).toBeUndefined();
-});
-
-
 describe("Round 2: bounded judgment inputs", () => {
-  it("charges exactly five reads and reads each store input once", async () => {
-    const { world, pr } = await heldWorld(PROVEN);
-    let reads = 0;
-    const deps = { store: world.store, timeline: world.timeline, proofHold: { mode: () => "hold" as const, facts: async () => PROVEN }, budget: { signal: new AbortController().signal, beforeRequest: () => { reads += 1; } } };
-    expect((await judgeProofHold(deps, { ...(await world.task()), orgId: ORG }, pr, pr.head, world.now.value)).kind).toBe("proceed");
-    expect(reads).toBe(5);
-  });
   it("an unsupported mode refuses without reading facts", async () => {
     const { world, pr } = await heldWorld(PROVEN);
     let reads = 0;

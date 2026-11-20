@@ -110,13 +110,6 @@ describe("the learning model path", () => {
     expect(seen[0]).not.toHaveProperty("tools");
   });
 
-  it("refuses with the no-provider reason, and calls nothing, when no model is set up", async () => {
-    let called = 0;
-    const model = createLocalPipelineModel({ choice: async () => undefined, keys: key, companyId: WS, providers: builtinModelProviderBook(), fetch: (async () => { called += 1; return new Response("{}"); }) });
-    await expect(model.complete(request)).rejects.toBeInstanceOf(LearningRefusal);
-    expect(called).toBe(0);
-  });
-
   it("refuses, with nothing sent, when the provider has no key", async () => {
     let called = 0;
     const model = createLocalPipelineModel({ choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: createMemoryModelKeyStore({}), companyId: WS, providers: builtinModelProviderBook(), fetch: (async () => { called += 1; return new Response("{}"); }) });

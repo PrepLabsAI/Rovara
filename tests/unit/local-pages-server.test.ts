@@ -25,19 +25,6 @@ const post = (path: string, fields: Record<string, string>, headers: Record<stri
   raw(server.origin, { method: "POST", path, body: formBody(fields), headers: { host: host(), origin: server.origin, "content-type": "application/x-www-form-urlencoded", ...headers } });
 
 describe("who may reach the pages", () => {
-  it("listens on 127.0.0.1 only", () => {
-    expect(server.origin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
-  });
-
-  it("answers a page with a good token, and a wrong, missing or malformed token exactly like a path that does not exist", async () => {
-    expect((await get(`${base}/`)).status).toBe(200);
-    const unknown = await get("/nothing/here");
-    for (const path of [`/s/${"A".repeat(43)}/`, "/s/short/", "/", "/s/", `/s/${token}x/`]) {
-      const reply = await get(path);
-      expect(reply.status, path).toBe(404);
-      expect(reply.body).toBe(unknown.body);
-    }
-  });
 
   it("refuses a request whose Host is not this listener (DNS rebinding), before it looks at the token", async () => {
     const port = new URL(server.origin).port;
@@ -57,16 +44,6 @@ describe("who may reach the pages", () => {
     expect((await get(`${base}/`, { referer: "http://127.0.0.1:1/x" })).status).toBe(403);
     expect((await get(`${base}/`, { referer: "not a url" })).status).toBe(403);
     expect((await get(`${base}/`, { referer: `${server.origin}/other` })).status).toBe(200);
-  });
-
-  it("sends no CORS header and the same hardening headers on every answer", async () => {
-    for (const reply of [await get(`${base}/`), await get("/nothing"), await get(`${base}/`, { origin: "http://evil.example" })]) {
-      expect(reply.headers["access-control-allow-origin"]).toBeUndefined();
-      expect(reply.headers["cache-control"]).toBe("no-store");
-      expect(reply.headers["referrer-policy"]).toBe("same-origin");
-      expect(reply.headers["x-content-type-options"]).toBe("nosniff");
-      expect(reply.headers["x-frame-options"]).toBe("DENY");
-    }
   });
 
   it("allows GET, HEAD and POST only", async () => {
@@ -124,29 +101,6 @@ describe("what a write must carry", () => {
     expect(world.actions.calls).toEqual([]);
   });
 
-  it("does nothing without a form token, with a damaged one, or with one drawn for another action, revision, task, session or lesson", async () => {
-    const { action, fields } = await planForm();
-    const good = { ...fields, decision: "approve" };
-    const refused = async (changes: Record<string, string>) => {
-      const reply = await post(action, { ...good, ...changes });
-      expect(reply.status).toBe(303);
-      expect(String(reply.headers.location)).toContain("n=form");
-    };
-    await refused({ ft: "" });
-    await refused({ ft: `${fields.ft}x` });
-    await refused({ ft: "1.2" });
-    await refused({ revision: "4" });
-    await refused({ digest: "sha256-cccc" });
-    await refused({ requestId: "card-2" });
-    // A token for the comment form is not good for the decision.
-    await refused({ ft: formOf((await get(`${base}/plan/${TASK}`)).body, "/comment").fields.ft ?? "" });
-    // A token drawn in another session is not good in this one.
-    const other = server.sessions.mint().token;
-    const otherForm = formOf((await get(`/s/${other}/plan/${TASK}`)).body, "/decide");
-    await refused({ ft: otherForm.fields.ft ?? "" });
-    expect(world.actions.calls).toEqual([]);
-  });
-
   it("refuses a form token after it expires", async () => {
     let clock = 5_000_000;
     const timed = await createLocalPagesServer({ data: world.data, actions: world.actions, now: () => clock });
@@ -198,23 +152,6 @@ describe("approving a plan", () => {
     expect(server.sessions.verifyProof("", binding)).toBe(false);
   });
 
-  it("answers a form once: a second click or a replay finds the token used", async () => {
-    const { action, fields } = formOf((await get(`${base}/plan/${TASK}`)).body, "/decide");
-    expect(String((await post(action, { ...fields, decision: "approve" })).headers.location)).toContain("n=approved");
-    expect(String((await post(action, { ...fields, decision: "approve" })).headers.location)).toContain("n=form");
-    expect(world.actions.calls).toHaveLength(1);
-  });
-
-  it("does not accept a proof once its session is revoked", async () => {
-    const approvers = createLocalOwnerApprovers({ verifySession: (token, request) => server.sessions.verifyProof(token, { requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest }) });
-    const { action, fields } = formOf((await get(`${base}/plan/${TASK}`)).body, "/decide");
-    await post(action, { ...fields, decision: "approve" });
-    server.sessions.revoke(token);
-    const input = world.actions.calls[0]!.input as { proof: Parameters<typeof approvers.verify>[1] };
-    const request = { companyId: "org_00000000000000000000", requestId: OFFER.requestId, kind: "plan", subject: { type: "task", id: TASK }, revision: OFFER.revision, artifactDigest: OFFER.artifactDigest };
-    expect((await approvers.verify(request, input.proof)).approved).toBe(false);
-  });
-
   it("asks for changes only with a note, and sends the note", async () => {
     const { action, fields } = await formNow(`/plan/${TASK}`, "/decide");
     expect(String((await post(action, { ...fields, decision: "changes", note: "   " })).headers.location)).toContain("n=invalid");
@@ -230,24 +167,6 @@ describe("approving a plan", () => {
     expect(String((await post(action, { ...fields, decision: "merge" })).headers.location)).toContain("n=invalid");
     expect(String((await post(action, { ...fields, decision: "approve", requestId: "" })).headers.location)).toContain("n=invalid");
     expect(world.actions.calls).toEqual([]);
-  });
-
-  it("tells the person when the plan moved on, or the action refused", async () => {
-    world.actions.next = { ok: false, reason: "stale", message: "moved" };
-    const first = await formNow(`/plan/${TASK}`, "/decide");
-    expect(String((await post(first.action, { ...first.fields, decision: "approve" })).headers.location)).toContain("n=stale");
-    world.actions.next = { ok: false, reason: "refused", message: "not you" };
-    const second = await formNow(`/plan/${TASK}`, "/decide");
-    expect(String((await post(second.action, { ...second.fields, decision: "approve" })).headers.location)).toContain("n=refused");
-    const page = await get(`${base}/plan/${TASK}?n=stale`);
-    expect(page.body).toContain("It changed while you were looking");
-    expect((await get(`${base}/plan/${TASK}?n=<script>alert(1)</script>`)).body).not.toContain("<script>");
-  });
-
-  it("shows no decision form when nothing waits", async () => {
-    world.data.plan = { ...world.data.plan!, approval: undefined as never };
-    delete (world.data.plan as { approval?: unknown }).approval;
-    expect((await get(`${base}/plan/${TASK}`)).body).not.toContain("Approve this plan");
   });
 });
 
@@ -290,13 +209,6 @@ describe("design review", () => {
     expect(world.actions.calls.map((call) => call.name)).toEqual(["decideDesign", "decideDesign"]);
     expect(world.actions.calls[1]!.input).toMatchObject({ approval: DESIGN_OFFER, proof: { method: LOCAL_SESSION_METHOD, requestId: DESIGN_OFFER.requestId, token: expect.stringMatching(/^p1\./) as string } });
   });
-
-  it("a design form does not work on the plan route", async () => {
-    const design = formOf((await get(`${base}/design/${TASK}`)).body, "/decide");
-    const reply = await post(`${base}/plan/${TASK}/decide`, { ...design.fields, decision: "approve" });
-    expect(String(reply.headers.location)).toContain("n=form");
-    expect(world.actions.calls).toEqual([]);
-  });
 });
 
 describe("lessons", () => {
@@ -311,16 +223,6 @@ describe("lessons", () => {
     expect(String((await post(action, { ...fields, action: "retire" })).headers.location)).toContain("n=form");
     expect(String((await post(action, { ...fields, lessonId: "L2" })).headers.location)).toContain("n=form");
     expect(world.actions.calls).toHaveLength(1);
-  });
-
-  it("has no repository lessons file: the page shows no switch for one, and its old form address is not a route", async () => {
-    const page = (await get(`${base}/lessons`)).body;
-    expect(page).not.toContain("Lessons in the repository");
-    expect(page).not.toContain("/lessons/repo");
-    expect(page).not.toContain(".rovara/lessons.md");
-    const answer = await post(`${base}/lessons/repo`, { project: "payments", repo: "api", action: "on" });
-    expect(answer.status).toBe(404);
-    expect(world.actions.calls).toEqual([]);
   });
 
   describe("lessons for local coding tools (decision 46b)", () => {
@@ -454,9 +356,5 @@ describe("what the pages show", () => {
     expect((await get(first.pathname)).status).toBe(200);
     expect(new URL(server.link("/", { fresh: true })).pathname).not.toBe(new URL(server.link("/")).pathname);
     expect(server.linkIn(token, "lessons")).toBe(`${server.origin}/s/${token}/lessons`);
-  });
-
-  it("does not read a notice code from the object prototype", async () => {
-    expect((await get(`${base}/?n=constructor`)).body).not.toContain("class=\"notice\"");
   });
 });

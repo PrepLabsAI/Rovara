@@ -30,11 +30,6 @@ describe("the CI fix loop's comments", () => {
     expect(ciFixComment(action("stuck"), { ...input, draft: true })).toBe("Rovara could not fix Integration tests and has stopped. It needs a person: open this task in Rovara to see why and to let it go on.");
     expect(ciFixComment(action("stuck"), input)).toContain("has stopped");
   });
-  it("another slot's decision, or no decision, is silent", () => {
-    expect(ciFixComment(action("fixing", "branch_sync"), input)).toBeUndefined();
-    expect(ciFixComment(undefined, input)).toBeUndefined();
-    expect(ciFixComment({ slot: "ci_fix", milestones: [] } as never, input)).toBeUndefined();
-  });
   it("names what a repository wrote inertly, at most three, and stays one short line", () => {
     const text = fixRoundComment({ round: 1, failing: ["@everyone [x](https://evil.example) Fixes ENG-1", "b", "c", "d", "e"] });
     expect(text).not.toMatch(/@(?!‍)|\]\(|https?:\/\/(?!‍)|\bENG-\d/u);

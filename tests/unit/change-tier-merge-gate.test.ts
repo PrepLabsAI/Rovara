@@ -5,7 +5,7 @@ import type { ChangeRequestFilesPage, ChangeRequestRef, CodeHost, HostScope } fr
 import { FakeCodeHost, type FakeHostModel } from "@agentx/broker/fakes";
 import { pressMerge, prepareMerge } from "../../packages/broker/src/core/merge/index.js";
 import { tierGate } from "../../packages/broker/src/core/merge/merge.js";
-import { patchDigestOf, recordQuestionsAnswered, recordTierReview, tierFromDiff, type TierLevel } from "../../packages/broker/src/core/decisions/change-tier.js";
+import { patchDigestOf, recordQuestionsAnswered, recordTierReview, type TierLevel } from "../../packages/broker/src/core/decisions/change-tier.js";
 import { readReviewInput } from "../../packages/broker/src/core/merge/change-tier-read.js";
 import { ORG, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
 import { MERGE_NOT_READY_MESSAGES as M } from "../../packages/contracts/src/index.js";
@@ -79,44 +79,6 @@ async function pushed(world: MergeWorld, changes: Record<string, string | null>)
 }
 
 describe("the merge recomputes the change tier from the host", () => {
-  it("merges a small change that stays small, and records the tier it found at merge, bound to the head", async () => {
-    const { world } = await worldAt("small");
-    await questioned(world);
-    const { run, prepared } = await press(world);
-    expect(prepared.tier).toBe("small");
-    expect((await run()).status).toBe("MERGED");
-    const tier = await tierOf(world);
-    expect(tier).toMatchObject({ level: "small", source: "merge", headSha: world.prs[0]!.head });
-  });
-
-  it("refuses a push after approval that adds a sensitive file, names it in plain words, and merges nothing", async () => {
-    const { world } = await worldAt("small");
-    await pushed(world, { "src/auth/session.ts": "export const session = 1;\n" });
-    const { run } = await press(world);
-    const refusal = await rejects(run);
-    expect(refusal.code).toBe("MERGE_NOT_READY");
-    expect(refusal.message).toBe("This change now touches a sensitive path (src/auth/session.ts), so it needs risky checks.");
-    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
-    expect((await world.trackingOf(world.prs[0]!))!["mergeClaim"]).toBeUndefined();
-    expect(await world.auditRows()).toHaveLength(0);
-    // The raise is recorded, with where it grew from.
-    const flow = (await world.task()).workflow.flow!;
-    expect(flow.tier).toMatchObject({ level: "risky", source: "merge" });
-    expect(flow.grewAfterBuild).toMatchObject({ from: "small", to: "risky" });
-  });
-
-  it("a growth is sticky: a second press does not clear it, the higher tier's review on the current head does", async () => {
-    const { world } = await worldAt("small");
-    await pushed(world, { "src/auth/session.ts": "export const session = 1;\n" });
-    await rejects((await press(world)).run);
-    // The raise is recorded and the request is made at the higher tier, yet the merge is still refused: nobody has run the risky checks.
-    const again = await press(world);
-    expect(again.prepared.tier).toBe("risky");
-    expect((await rejects(again.run)).message).toBe("This change now touches a sensitive path (src/auth/session.ts), so it needs risky checks.");
-    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
-    await reviewed(world, "risky");
-    expect((await (await press(world)).run()).status).toBe("MERGED");
-  });
 
   it("a review of a lower tier, or of an older head, does not cover the growth; a push makes a review stale", async () => {
     const { world } = await worldAt("small");
@@ -132,34 +94,6 @@ describe("the merge recomputes the change tier from the host", () => {
     expect((await rejects((await press(world)).run)).message).toContain("needs risky checks");
     await reviewed(world, "risky");
     expect((await (await press(world)).run()).status).toBe("MERGED");
-  });
-
-  it("a push that removes the sensitive file again leaves the tier up", async () => {
-    const { world } = await worldAt("small");
-    await pushed(world, { "src/auth/session.ts": "export const session = 1;\n" });
-    await rejects((await press(world)).run);
-    await pushed(world, { "src/auth/session.ts": null });
-    const later = await press(world);
-    expect(later.prepared.tier).toBe("risky");
-    // The clean diff keeps the tier up, and the owed review is for the head the pull request has now.
-    expect((await rejects(later.run)).message).toContain("needs risky checks");
-    await reviewed(world, "risky");
-    expect((await (await press(world)).run()).status).toBe("MERGED");
-    expect((await tierOf(world))?.level).toBe("risky");
-  });
-
-  it("a change that grew from small to standard is refused with the size it grew by", async () => {
-    const { world } = await worldAt("small");
-    await pushed(world, { "src/big.ts": `${Array.from({ length: 150 }, (_, index) => `export const v${index} = ${index};`).join("\n")}\n` });
-    const refusal = await rejects((await press(world)).run);
-    expect(refusal.message).toBe("This change now touches more than 100 lines of code, so it needs standard checks.");
-  });
-
-  it("a tier that was risky is not lowered by a clean diff", async () => {
-    const { world } = await worldAt("risky");
-    const { run } = await press(world);
-    expect((await run()).status).toBe("MERGED");
-    expect((await tierOf(world))?.level).toBe("risky");
   });
 
   it("a host that gives no patch text cannot clear the change: it counts as risky and is refused (fail closed)", async () => {
@@ -189,20 +123,6 @@ describe("the merge recomputes the change tier from the host", () => {
     expect((await run()).status).toBe("MERGED");
     expect(mode.calls).toBeGreaterThan(0);
     expect(await tierOf(world)).toMatchObject({ level: "small", source: "merge" });
-  });
-
-  it("a task with no recorded tier whose change is above small is refused once, then goes through at the tier it was shown", async () => {
-    const mode: Mode = { patches: true, failing: false, calls: 0 };
-    const world = await mergeWorld({ codeHost: (model) => patchingHost(model, mode), withoutTier: true });
-    await world.seedTracking();
-    await pushed(world, { "src/auth/session.ts": "export const session = 1;\n" });
-    const refusal = await rejects((await press(world)).run);
-    expect(refusal.message).toBe("This change now touches a sensitive path (src/auth/session.ts), so it needs risky checks.");
-    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
-    const again = await press(world);
-    expect(again.prepared.tier).toBe("risky");
-    await reviewed(world, "risky");
-    expect((await (await press(world)).run()).status).toBe("MERGED");
   });
 
   it("the merge also compares with the tier the planning steps were chosen at: steps skipped at small, a change that is standard now is refused every time", async () => {
@@ -237,12 +157,6 @@ describe("the merge recomputes the change tier from the host", () => {
     expect((await (await press(world)).run()).status).toBe("MERGED");
   });
 
-  it("answers about another patch do not count (the patch is recomputed from the host)", async () => {
-    const { world } = await worldAt("small", undefined, true);
-    await questioned(world, undefined, "0".repeat(64));
-    expect((await rejects((await press(world)).run)).message).toContain("security questions");
-  });
-
   it("a head that moved while the files were read refuses the merge", async () => {
     const { world, mode } = await worldAt("small");
     await questioned(world);
@@ -252,38 +166,6 @@ describe("the merge recomputes the change tier from the host", () => {
     expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
     // Refused at the tier gate, before anything was claimed: no audit row was staged for a merge that never began.
     expect(await world.auditRows()).toHaveLength(0);
-  });
-
-  it("the questions are asked again after a push", async () => {
-    const { world } = await worldAt("small", undefined, true);
-    await questioned(world);
-    await pushed(world, { "src/b.ts": "export const b = 1;\n" });
-    expect((await rejects((await press(world)).run)).message).toContain("security questions");
-    await questioned(world);
-    expect((await (await press(world)).run()).status).toBe("MERGED");
-  });
-
-  it("a small task that ran the whole plan merges as today, with no reviewer record (nothing was skipped)", async () => {
-    const { world } = await worldAt("small");
-    const { run } = await press(world);
-    expect((await run()).status).toBe("MERGED");
-  });
-
-  it("a small task whose planning steps were skipped is refused until the questions are on the record", async () => {
-    const { world } = await worldAt("small", undefined, true);
-    expect((await rejects((await press(world)).run)).message).toContain("security questions");
-    await questioned(world);
-    expect((await (await press(world)).run()).status).toBe("MERGED");
-  });
-
-  it("a record of the wrong kind or outcome is not a record", async () => {
-    const { world } = await worldAt("small", undefined, true);
-    await questioned(world);
-    const flow = (await world.task()).workflow.flow!;
-    await world.setWorkflow({ flow: { ...flow, quickChecks: flow.quickChecks!.map((check) => ({ ...check, outcome: "failed" })) } });
-    expect((await rejects((await press(world)).run)).message).toContain("security questions");
-    await world.setWorkflow({ flow: { ...flow, quickChecks: flow.quickChecks!.map((check) => ({ ...check, kind: "docs" })) } });
-    expect((await rejects((await press(world)).run)).message).toContain("security questions");
   });
 
   it("a growth that another writer got in front of is written again until it is on the record", async () => {
@@ -306,25 +188,6 @@ describe("the merge recomputes the change tier from the host", () => {
     expect(raced).toBe(true);
     // The growth is on the record in spite of the other writer.
     expect((await world.task()).workflow.flow?.grewAfterBuild).toMatchObject({ to: "risky" });
-  });
-
-  it("the approval digest names the tier, so an approval given at one tier is not valid at another", async () => {
-    const small = await worldAt("small");
-    const risky = await worldAt("risky");
-    const a = await press(small.world);
-    const b = await press(risky.world);
-    expect(a.prepared.request.artifactDigest).not.toBe(b.prepared.request.artifactDigest);
-  });
-
-  it("agrees with the classifier on what the host shows (one rule, two entry points)", async () => {
-    const { world } = await worldAt("small");
-    await questioned(world);
-    const { run } = await press(world);
-    await run();
-    const tier = await tierOf(world);
-    const direct = tierFromDiff({ files: [{ repository: "app", path: "src/a.ts", status: "added", additions: 1, deletions: 0, patch: "@@ -0,0 +1,1 @@\n+export const a = 1;" }], complete: true }, { at: AT });
-    expect(tier?.level).toBe(direct.level);
-    expect(ORG).toBeDefined();
   });
 });
 

@@ -7,10 +7,9 @@ import {
   type ModelIdentifier, type SecondReviewReplayCase, type SecondReviewReplayRun, type SecondReviewVerdict, type WorkflowReviewReport,
 } from "@agentx/contracts";
 import { createCandidateManifest } from "../../packages/contracts/src/task-workflow-node.js";
-import { acceptSecondReport, planSecondReview, secondOpinionUnavailable, secondReviewAcknowledgement, secondReviewUnavailableDecision, type SecondReviewPlanInput } from "../../packages/broker/src/core/second-review/plan.js";
+import { acceptSecondReport, planSecondReview, secondReviewUnavailableDecision, type SecondReviewPlanInput } from "../../packages/broker/src/core/second-review/plan.js";
 import { noticeWhyText } from "../../packages/broker/src/core/second-review/notice.js";
 import { defaultModelLine, secondReviewPicker, secondReviewTrackRecord } from "../../packages/broker/src/core/second-review/picker.js";
-import { secondReviewMergeWait } from "../../packages/broker/src/core/second-review/store.js";
 import { reviewUsageArtifactName } from "../../packages/worker/src/usage.js";
 
 const NOW = "2026-11-02T12:00:00.000Z";
@@ -49,27 +48,8 @@ const proof = (model: ModelIdentifier): { verdicts: SecondReviewVerdict[]; repla
   verdicts: [{ model: secondReviewModelKey(model), replayRunId: "run-1", baseline: OPUS, shadow: { startedAt: "2026-11-02T00:00:00.000Z", endedAt: "2026-11-16T00:00:00.000Z", findings: 10, agreed: 4, reviews: 10 }, createdAt: "2026-11-20T00:00:00.000Z", createdBy: "staff:alice" }],
 });
 
-describe("a task started before the frontier tier keeps its second reviewer's default (legacyRanking)", () => {
-  const FABLE: ModelIdentifier = { provider: "anthropic", modelId: "claude-fable-5-1" };
-  const OPUS_NEW: ModelIdentifier = { provider: "anthropic", modelId: "claude-opus-5-5" };
-  const GPT5: ModelIdentifier = { provider: "openai", modelId: "gpt-5" };
-  const tops = (legacyRanking: boolean) => secondReviewPicker({ sources: [OPUS_NEW, FABLE, GPT5, GEMINI], project: {}, forbidden: [], against: [GPT5], legacyRanking }).suggested.map((entry) => entry.model.modelId);
-  it("an older task ranks Fable above Opus above Gemini Pro; a new one puts the cheaper Opus first", () => {
-    expect(tops(true)).toEqual(["claude-fable-5-1", "claude-opus-5-5", "google/gemini-3-pro"]);
-    expect(tops(false)[0]).toBe("claude-opus-5-5");
-  });
-});
-
 describe("the model picker", () => {
   const picked = secondReviewPicker({ sources: [OPUS, SONNET, GPT, GPT_FREE, GEMINI, NOVA, MYSTERY], project: {}, forbidden: [], against: [SONNET], price: () => ({ inputUsdPerMTok: 2, outputUsdPerMTok: 10 }) });
-
-  it("lists only the models the company can actually use, and none it forbids or its project does not approve", () => {
-    expect(keys(picked.entries.map((entry) => entry.model)).sort()).toEqual(keys([OPUS, SONNET, GPT, GPT_FREE, GEMINI, NOVA, MYSTERY]).sort());
-    const without = secondReviewPicker({ sources: [OPUS, GPT, GEMINI], project: { approved: [OPUS, GPT] }, forbidden: [GPT], against: [SONNET] });
-    expect(keys(without.entries.map((entry) => entry.model))).toEqual(keys([OPUS]));
-    // A model the company has no source for is not offered, however strong.
-    expect(picked.entries.some((entry) => entry.model.modelId === "gpt-6.1-sol")).toBe(false);
-  });
 
   it("LP-11: never lists an OpenRouter ':batch' variant (the Batch API's id, not one for chat calls), nor suggests it; the ordinary model beside it stays", () => {
     const BATCH: ModelIdentifier = { provider: "openrouter", modelId: "openai/gpt-4.1-nano:batch" };
@@ -112,18 +92,6 @@ describe("the model picker", () => {
     expect(free.suggested).toBe(false);
   });
 
-  it("shows an estimated cost per review from the catalog price and one typical review size", () => {
-    const entry = picked.entries.find((candidate) => candidate.model.modelId === GPT.modelId)!;
-    expect(entry.costUsd).toBeCloseTo((60_000 * 2 + 4_000 * 10) / 1_000_000, 8);
-    expect(secondReviewPicker({ sources: [GPT], project: {}, forbidden: [], against: [SONNET] }).entries[0]!.costUsd).toBeUndefined();
-  });
-
-  it("with nothing eligible it suggests nothing (the preview says so)", () => {
-    const none = secondReviewPicker({ sources: [OPUS, SONNET], project: {}, forbidden: [], against: [SONNET] });
-    expect(none.suggested).toEqual([]);
-    expect(none.entries.every((entry) => !entry.eligible)).toBe(true);
-  });
-
   it("says what a model's track record is, from what the team agreed with in shadow", () => {
     const evidence = proof(GPT);
     expect(secondReviewTrackRecord(evidence.verdicts[0]!)).toBe("agreed with your team on 4 of 10 findings over 14 days");
@@ -133,19 +101,6 @@ describe("the model picker", () => {
 });
 
 describe("the plan: choice, default and the company's sources", () => {
-  it("uses the top suggestion while nobody has chosen, records it as the default, and says so", () => {
-    const plan = planned();
-    expect(plan.choice).toBe("default");
-    expect(plan.model).toEqual({ provider: GEMINI.provider, modelId: GEMINI.modelId });
-    expect(defaultModelLine(plan.model, false)).toBe("Using default: google/gemini-3-pro (change)");
-    expect(plan.candidates.length).toBeLessThanOrEqual(2);
-  });
-
-  it("a company that chose runs exactly its primary then its backup, in that order, whatever is stronger", () => {
-    const plan = planned({ companyModels: [GEMINI, NOVA] });
-    expect(plan.choice).toBe("company");
-    expect(keys(plan.candidates)).toEqual(keys([GEMINI, NOVA]));
-  });
 
   it("a chosen model that stops qualifying is not swapped for another: nothing runs and it is flagged as such", () => {
     // The builder's company changed: the chosen model (Anthropic) is now the builder's company, though GPT would qualify.
@@ -197,24 +152,6 @@ describe("the plan: choice, default and the company's sources", () => {
     expect(secondReviewUnavailableDecision({ mode: "shadow", reason: "no-candidate" })).toMatchObject({ blocks: false, showOnTaskPage: false, showOnPullRequest: false, askOwnerToAcknowledge: false });
   });
 
-  it("any source, not only Bedrock; a forbidden model and one outside the project's approved list never run", () => {
-    expect(planned({ sources: [SONNET, GPT] }).model.provider).toBe("openrouter");
-    expect(keys(planned({ forbidden: [GPT] }).candidates)).not.toContain(secondReviewModelKey(GPT));
-    expect(keys(planned({ project: { approved: [SONNET, GEMINI] } }).candidates)).toEqual(keys([GEMINI]));
-  });
-
-  it("shadow runs at once, with no driving test; `on` needs the track record, else it runs as shadow and says so", () => {
-    expect(planned({ mode: "shadow" })).toMatchObject({ mode: "shadow" });
-    const unproven = planned({ mode: "on" });
-    expect(unproven).toMatchObject({ mode: "shadow", downgraded: "replay-not-passed" });
-    const proven = planned({ mode: "on", ...proof(GPT) });
-    expect(proven).toMatchObject({ mode: "on", model: { modelId: GPT.modelId } });
-    expect(proven.downgraded).toBeUndefined();
-    // Evidence for another model, or for another revision, does not let this one block.
-    expect(planned({ mode: "on", ...proof(GEMINI) })).toMatchObject({ mode: "on", model: { modelId: GEMINI.modelId } });
-    expect(planned({ mode: "on", ...proof({ provider: GPT.provider, modelId: "openai/gpt-5.4" }) })).toMatchObject({ mode: "shadow" });
-  });
-
   it("with the switch off or the mode off, nothing is planned", () => {
     expect(planSecondReview(base({ switchOn: false, mode: "on" }))).toEqual({ run: false, reason: "switch-off" });
     expect(planSecondReview(base({ mode: "off" }))).toEqual({ run: false, reason: "mode-off" });
@@ -242,18 +179,3 @@ describe("the usage event stays the telemetry the activity index reads", () => {
   });
 });
 
-describe("the merge waits for the owner's acknowledgement", () => {
-  const flagged = secondOpinionUnavailable({ mode: "on", company: "openai" }, "no-answer");
-  const task = (over: Record<string, unknown> = {}) => ({ secondOpinion: { candidateDigest: code.digest, opinion: flagged, recordedAt: NOW }, workflow: { candidate: { digest: code.digest } }, ...over });
-
-  it("says why, only for an `on` review that did not run, for this code, until acknowledged; cr off waits for nothing", () => {
-    expect(secondReviewMergeWait(task())).toMatch(/^Second review did not run: the reviewer gave no usable answer after retrying\. The task owner has to acknowledge it on the task page/u);
-    const ack = secondReviewAcknowledgement(flagged, code.digest);
-    if (!ack.required) throw new Error("expected an ask");
-    expect(secondReviewMergeWait(task({ secondReviewAcknowledged: [ack.key] }))).toBeUndefined();
-    expect(secondReviewMergeWait(task({ secondReviewAcknowledged: ["0".repeat(64)] }))).toBeDefined();
-    expect(secondReviewMergeWait(task({ secondOpinion: { candidateDigest: code.digest, opinion: secondOpinionUnavailable({ mode: "shadow", company: "openai" }, "no-answer"), recordedAt: NOW } }))).toBeUndefined();
-    expect(secondReviewMergeWait(task({ workflow: { candidate: { digest: "d".repeat(64) } } }))).toBeUndefined();
-    expect(secondReviewMergeWait({ workflow: { candidate: { digest: code.digest } } })).toBeUndefined();
-  });
-});

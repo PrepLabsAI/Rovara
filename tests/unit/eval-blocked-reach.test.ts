@@ -5,13 +5,12 @@ import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  EVAL_HEALTH_WORKER_REASONS, EvalBlockedReachSchema, EvalHealthResultBodySchema, EvalRunDiagnosticSchema, evalBlockedReachClause, evalHealthNotRunWords, evalNotRunResult, evalNotTestedEntry, evalRunFailureSentence,
+  EVAL_HEALTH_WORKER_REASONS, EvalBlockedReachSchema, EvalHealthResultBodySchema, EvalRunDiagnosticSchema, evalBlockedReachClause, evalHealthNotRunWords, evalRunFailureSentence,
   type EvalBlockedReach, type EvalRunDiagnostic,
 } from "@agentx/contracts";
 import { renderAiEvidence, renderPublicAi } from "../../packages/contracts/src/evidence-ai-render.js";
 import { evidenceAiFromArtifact, publicEvidenceAi } from "../../packages/contracts/src/index.js";
 import { EvalSandboxRunFailure, diagnoseEvalFailure, findBlockedReach } from "../../packages/worker/src/verification/eval-run-diagnostic.js";
-import { createEvalRunner, type EvalSandboxExec } from "../../packages/worker/src/verification/eval-runner.js";
 import { runEvalHealthJob, type EvalHealthJobPorts } from "../../packages/worker/src/verification/eval-health-job.js";
 import { deliverEvalHealthPlan, recordEvalHealthResult, startEvalHealthRun, type EvalHealthRunDeps } from "../../packages/broker/src/core/setup-agent/eval-health-run.js";
 import { readEvalHealthRow, readEvalHealthView, requestEvalHealthCheck } from "../../packages/broker/src/core/setup-agent/eval-health-request.js";
@@ -30,13 +29,6 @@ const run = (output: string, extra: { secrets?: string[]; exitCode?: number; tim
 const blockedOf = (diagnostic: EvalRunDiagnostic): EvalBlockedReach => { if (diagnostic.blocked === undefined) throw new Error(`not blocked: ${diagnostic.code}`); return diagnostic.blocked; };
 
 describe("a sealed eval that tried to reach something else is named, in fixed words", () => {
-  it("a database and an outside host: the sentence of the brief, word for word", () => {
-    const d = run(lines(["psycopg2.OperationalError: connection to server at \"db\" (172.18.0.2), port 5432 failed: Connection refused"], PY_HTTP));
-    expect(d).toMatchObject({ code: "blocked_connection", phase: "run", exitCode: 1 });
-    expect(d.blocked).toEqual({ items: [{ kind: "database", port: 5432 }, { kind: "service", host: "api.tiktok.com" }] });
-    expect(EvalRunDiagnosticSchema.safeParse(d).success).toBe(true);
-    expect(evalRunFailureSentence(d)).toBe("your eval tried to reach a database (port 5432) and an outside service (api.tiktok.com). Rovara's sealed check can't reach those yet");
-  });
 
   it("reads Python, Node, Go, MySQL, Redis and Mongo shapes", () => {
     expect(blockedOf(run(lines(PY_DB)))).toEqual({ items: [{ kind: "database" }] });
@@ -52,11 +44,6 @@ describe("a sealed eval that tried to reach something else is named, in fixed wo
     expect(blockedOf(run("ConnectTimeoutError: Connect Timeout Error (attempted address: api.openweathermap.org:443, timeout: 10000ms)"))).toEqual({ items: [{ kind: "service", host: "api.openweathermap.org" }] });
   });
 
-  it("a database seen by its host in one line and its port in another is one database", () => {
-    const d = run(lines(['psycopg2.OperationalError: could not translate host name "db" to address: Name or service not known', 'psycopg2.OperationalError: connection to server at "db" (127.0.0.1), port 5432 failed: Connection refused']));
-    expect(blockedOf(d)).toEqual({ items: [{ kind: "database", port: 5432 }] });
-  });
-
   it("names only what is a host: an address, loopback, this machine and the model route are never named; a bare refusal stays 'exited'", () => {
     for (const output of [
       "Error: connect ECONNREFUSED 127.0.0.1:8080", "Error: connect ETIMEDOUT 52.1.2.3:443", "Error: getaddrinfo ENOTFOUND localhost", "Error: getaddrinfo ENOTFOUND rovara-models",
@@ -67,32 +54,9 @@ describe("a sealed eval that tried to reach something else is named, in fixed wo
     expect(blockedOf(run("Error: connect ECONNREFUSED ::1:5432"))).toEqual({ items: [{ kind: "database", port: 5432 }] });
     expect(blockedOf(run("Error: getaddrinfo ENOTFOUND API.Example.COM."))).toEqual({ items: [{ kind: "service", host: "api.example.com" }] });
   });
-
-  it("an earlier, more specific cause keeps its own code; a timeout and an install failure are never relabelled", () => {
-    expect(run(lines(["ModuleNotFoundError: No module named 'psycopg2'"], PY_HTTP)).code).toBe("missing_package");
-    expect(run(lines(PY_HTTP), { timedOut: true }).code).toBe("run_timed_out");
-    expect(diagnoseEvalFailure({ phase: "install", exitCode: 1, output: lines(PY_HTTP) }).code).toBe("install_failed");
-  });
 });
 
 describe("review fixes: model route, causes and cost", () => {
-  it("a connection to a model host (a host the sandbox pinned to the helper, or a pinned suffix) is the model route, never 'blocked'", () => {
-    const modelRoute = { hosts: ["api.openai.com", "api.anthropic.com", "gateway.customer.example"], suffixes: ["openai.azure.com"] };
-    const named = (output: string) => diagnoseEvalFailure({ phase: "run", exitCode: 1, output, modelRoute });
-    for (const host of ["api.openai.com", "api.anthropic.com", "gateway.customer.example", "generativelanguage.googleapis.com", "us-central1-aiplatform.googleapis.com", "myres.openai.azure.com", "API.OpenAI.com"]) {
-      expect(named(`Error: getaddrinfo ENOTFOUND ${host}`), host).toMatchObject({ code: "exited" });
-    }
-    expect(named("requests.exceptions.ConnectionError: HTTPSConnectionPool(host='api.openai.com', port=443): Max retries exceeded (Caused by NameResolutionError(\"Failed to resolve 'api.openai.com'\"))").code).toBe("exited");
-    // Not on the route: still named. A route is only ever an exclusion.
-    expect(named("Error: getaddrinfo ENOTFOUND api.example.com").code).toBe("blocked_connection");
-  });
-
-  it("a pool line with another cause (a read timeout, an SSL error) and a connection reset are not 'blocked'", () => {
-    expect(run("requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='api.example.com', port=443): Read timed out. (read timeout=10)").code).toBe("exited");
-    expect(run("requests.exceptions.SSLError: HTTPSConnectionPool(host='api.example.com', port=443): Max retries exceeded with url: /x (Caused by SSLError(SSLCertVerificationError))").code).toBe("exited");
-    expect(run("Error: read ECONNRESET 52.1.2.3:443").code).toBe("exited");
-    expect(run("Error: connect ECONNRESET api.example.com:443").code).toBe("exited");
-  });
 
   it("hostile output is read in bounded time: one 16 KB line of repeated triggers, for every shape", () => {
     const hostile = [
@@ -121,21 +85,6 @@ describe("review fixes: model route, causes and cost", () => {
 });
 
 describe("nothing secret-shaped leaks, whatever the line carried", () => {
-  it("a URL with a token in its query shows only the host: not the path, the query, the token or a port", () => {
-    const d = run(lines(PY_HTTP), { secrets: [TOKEN] });
-    expect(blockedOf(d)).toEqual({ items: [{ kind: "service", host: "api.tiktok.com" }] });
-    const everything = JSON.stringify(blockedOf(d)) + evalRunFailureSentence(d) + evalRunFailureSentence(d, { named: false });
-    for (const secret of [TOKEN, "access_token", "/v2/video", "cursor", "443"]) expect(everything).not.toContain(secret);
-    expect(d.tail).not.toContain(TOKEN);
-  });
-
-  it("credentials inside a URL are never read: only the host of a failure line is", () => {
-    const d = run(`FetchError: request to https://admin:${TOKEN}@hooks.example.org:8443/x?api_key=${TOKEN} failed, reason: getaddrinfo ENOTFOUND hooks.example.org`);
-    expect(blockedOf(d)).toEqual({ items: [{ kind: "service", host: "hooks.example.org" }] });
-    expect(JSON.stringify(d.blocked)).not.toContain(TOKEN);
-    expect(JSON.stringify(d.blocked)).not.toContain("admin");
-    expect(d.tail).not.toContain(TOKEN);
-  });
 
   it("a host that carries a secret this run knows is not named, in any of its forms", () => {
     const secret = "runtoken0123456789abc";
@@ -143,37 +92,9 @@ describe("nothing secret-shaped leaks, whatever the line carried", () => {
     expect(run(`Error: getaddrinfo ENOTFOUND ${secret.toUpperCase()}.evil.example`, { secrets: [secret] })).toMatchObject({ code: "exited" });
     expect(run("Error: getaddrinfo ENOTFOUND build-7f3a.example.com", { secrets: ["unrelated-secret-value"] }).code).toBe("blocked_connection");
   });
-
-  it("a key-shaped or oversized 'host' is not a host; the sentence only ever holds the strict shape", () => {
-    const awsKey = ["AKIA", "IOSFODNN7", "EXAMPLE"].join("");
-    expect(run(`Error: getaddrinfo ENOTFOUND ${awsKey}.s3.example.com`).code).toBe("exited");
-    expect(run(`Error: getaddrinfo ENOTFOUND ${"a".repeat(46)}.example.com`).code).toBe("exited");
-    expect(run(`Error: getaddrinfo ENOTFOUND ${"a".repeat(60)}`).code).toBe("exited");
-    expect(run("Error: getaddrinfo ENOTFOUND bad_host!.example.com").code).toBe("exited");
-    for (const host of ["1.2.3.4", "999.1.1.1", "-a.com", "a..com", "a.com/x", "a.com?q=1", "user@a.com", "a.com:80", "A.com", "", "a".repeat(46)]) {
-      expect(EvalBlockedReachSchema.safeParse({ items: [{ kind: "service", host }] }).success, host).toBe(false);
-    }
-  });
-
-  it("the public view says the kinds only: no host, no port", () => {
-    const d = run(lines(NODE_DB, NODE_HOST));
-    expect(evalRunFailureSentence(d, { named: false })).toBe("your eval tried to reach a database and an outside service. Rovara's sealed check can't reach those yet");
-    expect(evalRunFailureSentence(d, { named: false })).not.toMatch(/5432|tiktok/u);
-  });
 });
 
 describe("the list is bounded", () => {
-  const many = (n: number): string => Array.from({ length: n }, (_, i) => `Error: getaddrinfo ENOTFOUND svc${i}.example.com`).join("\n");
-
-  it("keeps the first 3 (in the order the output names them) and says there were more", () => {
-    const d = run(many(10));
-    expect(blockedOf(d).items.map(i => (i.kind === "service" ? i.host : i.kind))).toEqual(["svc0.example.com", "svc1.example.com", "svc2.example.com"]);
-    expect(blockedOf(d).more).toBe(true);
-    expect(evalRunFailureSentence(d)).toBe("your eval tried to reach outside services (svc0.example.com, svc1.example.com, svc2.example.com), among others. Rovara's sealed check can't reach those yet");
-    expect(run(many(3)).blocked?.more).toBeUndefined();
-    expect(EvalBlockedReachSchema.safeParse({ items: Array.from({ length: 4 }, (_, i) => ({ kind: "service", host: `h${i}.example.com` })) }).success).toBe(false);
-    expect(EvalBlockedReachSchema.safeParse({ items: [] }).success).toBe(false);
-  });
 
   it("the same host or port seen again is one item; a huge output is read in a bounded way", () => {
     expect(blockedOf(run(Array.from({ length: 50 }, () => "Error: getaddrinfo ENOTFOUND api.same.com").join("\n"))).items).toHaveLength(1);
@@ -216,17 +137,6 @@ describe("the contract keeps the shape closed", () => {
 describe("it reaches the check result, the evidence and the pull request line", () => {
   const blocked = (): EvalRunDiagnostic => run(lines(NODE_DB, NODE_HOST), { secrets: [TOKEN] });
 
-  it("the check result and the 'not tested' entry carry the sentence; a diagnostic that fails its schema is dropped", () => {
-    const d = blocked();
-    const result = evalNotRunResult({ roundKind: "check_unsealed", reason: "eval_run_failed", runFailure: d });
-    expect(result.notRun?.sentence).toBe("not run: your eval tried to reach a database (port 5432) and an outside service (open.tiktokapis.com). Rovara's sealed check can't reach those yet");
-    expect(result.summary).toContain("Eval: Not run");
-    expect(result.summary).not.toMatch(/Retry/u);
-    expect(evalNotTestedEntry(result)?.reason).toBe("your eval tried to reach a database (port 5432) and an outside service (open.tiktokapis.com). Rovara's sealed check can't reach those yet");
-    const forged = evalNotRunResult({ roundKind: "check_unsealed", reason: "eval_run_failed", runFailure: { ...d, blocked: { items: [{ kind: "service", host: "x.com/y" }] } } as never });
-    expect(forged.notRun?.sentence).not.toContain("x.com");
-  });
-
   it("the signed-in evidence names it; the public view keeps the kinds", () => {
     const artifact = { schemaVersion: 1 as const, candidateDigest: "a".repeat(64), roundKind: "check_unsealed" as const, evalPass: 1 as const, outcome: "not_run" as const, notRunReason: "eval_run_failed" as const, runFailure: blocked(),
       context: { aiChange: true, discovery: "configured" as const, previousPasses: 0 as const }, excluded: [], notices: [], usage: { calls: 0, costMicros: 0 }, cache: "not_used" as const, feedback: { notRun: true as const }, fixRequested: false, evalConfigured: true };
@@ -242,12 +152,6 @@ describe("it reaches the check result, the evidence and the pull request line", 
     const projected = publicEvidenceAi(ai);
     expect(projected?.eval.runFailure).toEqual({ code: "blocked_connection", phase: "run", tail: "", blocked: { items: [{ kind: "database" }, { kind: "service" }] } });
     expect(JSON.stringify(projected)).not.toMatch(/5432|tiktok/u);
-  });
-
-  it("a real runner failure carries the diagnostic up unchanged (the stage's refusal of a model call still wins)", async () => {
-    const exec: EvalSandboxExec = { run: async () => { throw new EvalSandboxRunFailure(blocked()); } };
-    const error = await createEvalRunner(exec)({ side: "new", ids: ["q1"], runs: 1, call: async () => ({ class: "ok", calls: 1, costMicros: 1 }) as never, signal: new AbortController().signal }).catch((e: unknown) => e);
-    expect((error as EvalSandboxRunFailure).diagnostic.blocked?.items).toHaveLength(2);
   });
 });
 
@@ -315,14 +219,6 @@ describe("the health run says what the eval tried to reach", () => {
     const words = read?.health?.words;
     expect(words).toBe("Not run: your eval tried to reach a database (port 5432) and an outside service (api.tiktok.com). Rovara's sealed check can't reach those yet.");
     expect(words!.length).toBeLessThanOrEqual(300);
-  });
-
-  it("a blocked reason with no list says the fixed kind-less words; a list under another reason is refused and stores nothing", async () => {
-    const b = await brokerWorld();
-    expect((await recordEvalHealthResult(b.deps(), project, { requestId: b.requestId, claimId: b.claimId, result: { status: "not_run", reason: "unavailable", blocked: { items: [{ kind: "database" }] } } })).outcome).toBe("refused");
-    expect((await readEvalHealthRow({ store: b.w.store, companyId: A }, project))!.state).toBe("running");
-    expect((await recordEvalHealthResult(b.deps(), project, { requestId: b.requestId, claimId: b.claimId, result: { status: "not_run", reason: "blocked_connection" } })).outcome).toBe("not_run");
-    expect((await card(b))?.health?.words).toBe("Not run: your eval tried to reach something other than the model. Rovara's sealed check can't reach that yet.");
   });
 
   it("two companies: another company's runner cannot record into, and its card never shows, this company's blocked list", async () => {

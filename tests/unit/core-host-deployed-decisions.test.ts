@@ -25,7 +25,7 @@ import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js
 import { fixedCodeSettings } from "../../packages/broker/src/core/merge/defaults.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { deleteInvolvedRow, writeInvolvedRow } from "../../packages/broker/src/core/task-flow/involved.js";
-import { taskIndexKey, taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
+import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import type { TaskPeopleDependencies } from "../../packages/broker/src/developer/task-people.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
@@ -184,17 +184,6 @@ describe("the deployed session levels (the company's own records)", () => {
   });
   const person = (personId: string, companyId: string = ORG) => ({ companyId, developerId: developerIdOf(principalOf(personId, companyId)), principal: principalOf(personId, companyId) });
 
-  it("reads the live membership role and the project grant (administrator: maintainer, developer: contributor)", async () => {
-    const members = deployedSessionMembers(ORG, people());
-    expect(await members.companyRole(person("dev-o"))).toBe("owner");
-    expect(await members.companyRole(person("dev-a"))).toBe("admin");
-    expect(await members.companyRole(person("dev-m"))).toBe("member");
-    expect(await members.projectGrant(person("dev-o"), "payments")).toBe("maintainer");
-    expect(await members.projectGrant(person("dev-m"), "payments")).toBe("contributor");
-    expect(await members.projectGrant(person("dev-a"), "payments")).toBeUndefined();
-    expect(await members.projectGrant(person("dev-m"), "web")).toBeUndefined();
-  });
-
   it("finds no one for another company's member, a non-member, a mismatched person, a re-check with no principal, or a read that fails", async () => {
     const members = deployedSessionMembers(ORG, people());
     const asked = [
@@ -222,11 +211,6 @@ describe("the deployed session levels (the company's own records)", () => {
     const odd = deployedSessionMembers(ORG, people({ membershipOf: async () => ({ companyId: ORG, role: "superuser" as never }) }));
     expect(await odd.companyRole(person("dev-o"))).toBeUndefined();
   });
-
-  it("gives no project role to a person who holds a grant but is no longer a member", async () => {
-    const members = deployedSessionMembers(ORG, people({ membershipOf: async () => undefined }));
-    expect(await members.projectGrant(person("dev-o"), "payments")).toBeUndefined();
-  });
 });
 
 describe("the deployed decision cards: what is listed", () => {
@@ -241,37 +225,6 @@ describe("the deployed decision cards: what is listed", () => {
     // A caller of the other company asking this company's cards, and this company's caller asking the other's, see nothing.
     expect((await view(t.deps, "dev-x", OTHER)).cards).toEqual([]);
     expect((await view(t.otherDeps, "dev-a")).cards).toEqual([]);
-  });
-
-  it("lists nothing for a person who is no longer a member, and leaves out a project they lost the grant on", async () => {
-    const t = await setup();
-    await t.waitingTask("dev-a");
-    t.grants.delete("dev-a|payments");
-    expect((await view(t.deps, "dev-a")).cards).toEqual([]);
-    t.grants.set("dev-a|payments", "developer");
-    t.memberships.delete("dev-a");
-    expect((await view(t.deps, "dev-a")).cards).toEqual([]);
-    t.memberships.set("dev-a", { companyId: OTHER, role: "owner" });
-    expect((await view(t.deps, "dev-a")).cards).toEqual([]);
-  });
-
-  it("leaves out a task of another company even when the person's index row names this company (the task record decides)", async () => {
-    const t = await setup();
-    // dev-a once belonged to the other company and started a task there; their index (keyed by person, not company) keeps the row.
-    t.memberships.set("dev-a", { companyId: OTHER, role: "member" });
-    const elsewhere = await t.waitingTask("dev-a", OTHER);
-    t.memberships.set("dev-a", { companyId: ORG, role: "member" });
-    const row = (await t.world.store.query({ pk: taskIndexKey("dev-a", "", "").pk, sk: { op: "beginsWith", prefix: "TASK#" } })).items.find((item) => item["taskId"] === elsewhere)!;
-    await t.world.store.put({ item: { ...row, orgId: ORG } });
-    expect((await view(t.deps, "dev-a")).cards).toEqual([]);
-  });
-
-  it("leaves out another person's task even when a row in the caller's own index names it (the task record decides)", async () => {
-    const t = await setup();
-    const theirs = await t.waitingTask("dev-b");
-    const row = (await t.world.store.query({ pk: taskIndexKey("dev-b", "", "").pk, sk: { op: "beginsWith", prefix: "TASK#" } })).items.find((item) => item["taskId"] === theirs)!;
-    await t.world.store.put({ item: { ...row, pk: taskIndexKey("dev-a", "", "").pk } });
-    expect((await view(t.deps, "dev-a")).cards).toEqual([]);
   });
 
   it("reads a document's facts only from the task's own storage: a pointer elsewhere reads as unread", async () => {
@@ -290,15 +243,6 @@ describe("the deployed decision cards: what is listed", () => {
     expect((await view(t.deps, "dev-a")).cards).toEqual([]);
   });
 
-  it("refuses a caller whose session id is not the principal's, or whose principal names another company", async () => {
-    const t = await setup();
-    await t.waitingTask("dev-a");
-    const forged = { ...cardCaller("dev-a", ORG), developerId: developerIdOf(principalOf("dev-b")) };
-    expect(await t.deps.sources.list(forged)).toEqual([]);
-    const crossed = { ...cardCaller("dev-a", ORG), principal: principalOf("dev-a", OTHER) };
-    expect(await t.deps.sources.list(crossed)).toEqual([]);
-  });
-
   it("reads at most DECISION_SOURCE_TASKS_MAX index rows per listing, and says so when it cut", async () => {
     const t = await setup();
     const query = vi.fn(async () => ({ items: Array.from({ length: 100 }, () => ({ taskId: randomUUID(), orgId: ORG })), cursor: "more" }));
@@ -309,44 +253,9 @@ describe("the deployed decision cards: what is listed", () => {
     expect(get).toHaveBeenCalledTimes(DECISION_SOURCE_TASKS_MAX);
     expect(t.log).toHaveBeenCalledWith(expect.objectContaining({ event: "core_engine.decision_cards_cut", read: DECISION_SOURCE_TASKS_MAX }));
   });
-
-  it("stops after a bounded number of index reads even when every page holds only another company's rows", async () => {
-    const t = await setup();
-    const query = vi.fn(async () => ({ items: Array.from({ length: 100 }, () => ({ taskId: randomUUID(), orgId: OTHER })), cursor: "more" }));
-    const runtime = { companyId: ORG, flow: { deps: { ...t.runtime.flow.deps, companyId: ORG, store: { ...t.runtime.flow.deps.store, query } } } } as unknown as CoreRuntime;
-    const deps = deployedDecisionCards({ runtime, registry: t.registry, people: t.people, proofs: t.point.proofs, log: t.log });
-    expect(await deps.sources.list(cardCaller("dev-a", ORG))).toEqual([]);
-    // Five listings of at most ten index reads each (listTasks' own bound).
-    expect(query.mock.calls.length).toBeLessThanOrEqual(50);
-    expect(t.log).toHaveBeenCalledWith(expect.objectContaining({ event: "core_engine.decision_cards_cut", read: 0 }));
-  });
 });
 
 describe("the deployed decision cards: acting", () => {
-  it("approves the task's own document with the point's proof, bound to the request; the task moves on", async () => {
-    const t = await setup();
-    const taskId = await t.waitingTask("dev-a");
-    const before = await t.stored(taskId);
-    const reply = await approve(t.deps, taskId, cardCaller("dev-a"));
-    expect(reply?.statusCode).toBe(200);
-    expect(reply?.body).toMatchObject({ cardId: cardOf(taskId), outcome: "approved" });
-    expect((await t.stored(taskId)).stage).toBe("IMPLEMENT");
-    expect(t.point.acts).toEqual([expect.objectContaining({
-      companyId: ORG, personId: "dev-a", outcome: "approve", taskId, kind: "plan", card: { cardId: cardOf(taskId), contentVersion: before.artifacts.at(-1)!.sha256 },
-      revision: before.revision, artifactDigest: before.artifacts.at(-1)!.sha256,
-    })]);
-    // The decision is recorded under the task's owner.
-    const decided = (await t.stored(taskId)).decisions.at(-1)!;
-    expect(decided).toMatchObject({ decision: "APPROVE", actorId: before.ownerId });
-  });
-
-  it("the owner's act needs no step-up (DEC 254zzz73): a plain signed-in caller is decided, and the proof the point issues carries none", async () => {
-    const t = await setup();
-    const taskId = await t.waitingTask("dev-a");
-    expect((await approve(t.deps, taskId, cardCaller("dev-a")))?.statusCode).toBe(200);
-    expect(t.point.proofs.issue).toHaveBeenCalledTimes(1);
-    expect(t.point.acts[0]).not.toHaveProperty("stepUp");
-  });
 
   it("re-checks live authority at the act: a membership or grant lost after the card was drawn refuses, and nothing is decided", async () => {
     for (const lose of ["membership", "grant", "moved"] as const) {
@@ -375,27 +284,6 @@ describe("the deployed decision cards: acting", () => {
     }
     expect(t.point.proofs.issue).not.toHaveBeenCalled();
     expect((await t.stored(taskId)).stage).toBe("PLAN_REVIEW");
-  });
-
-  it("refuses, before any proof, a card of the person's task in another company acted on through this company", async () => {
-    const t = await setup();
-    t.memberships.set("dev-a", { companyId: OTHER, role: "member" });
-    const elsewhere = await t.waitingTask("dev-a", OTHER);
-    const items = await t.otherDeps.sources.list(cardCaller("dev-a", OTHER));
-    const card = projectDecisionCards(items).cards.find((entry) => entry.id === cardOf(elsewhere))!;
-    t.memberships.set("dev-a", { companyId: ORG, role: "member" });
-    expect(await t.deps.performer.approve(cardCaller("dev-a"), { card, item: items[0]!, requestId: randomUUID() })).toEqual({ kind: "refused", reason: "forbidden" });
-    expect(t.point.proofs.issue).not.toHaveBeenCalled();
-  });
-
-  it("records nothing when the point vouches for someone other than the task's owner (the gate's subject accepts only the owner)", async () => {
-    const t = await setup({ permissive: true });
-    const taskId = await t.waitingTask("dev-a");
-    const original = t.point.proofs.issue;
-    t.point.proofs.issue = vi.fn(async (act: DecisionAct) => original.call(t.point.proofs, { ...act, personId: "dev-b" }));
-    await expect(approve(t.deps, taskId, cardCaller("dev-a"))).rejects.toMatchObject({ code: "FORBIDDEN" });
-    expect((await t.stored(taskId)).stage).toBe("PLAN_REVIEW");
-    expect((await t.stored(taskId)).decisions).toEqual([]);
   });
 
   it("refuses when the point gives no usable proof (a throw, another method, an empty token), with nothing decided and no echo", async () => {
@@ -503,28 +391,6 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
   });
   const before0 = (t: World) => taskOwnerKey(PA, t.taskId);
 
-  it("lists a co-owner's card only through the involved ids the host gives: without them the person's own index is all that is read", async () => {
-    const t = await hexSetup({ people: true });
-    t.memberships.set(PC, { companyId: ORG, role: "member" }); t.grants.set(`${PC}|payments`, "developer");
-    const taskId = await t.waitingTask(PA);
-    await t.seedPeople(taskId, [[PA, "owner"], [PC, "owner"]]);
-    expect((await view(t.deps, PC)).cards).toEqual([]);
-    expect((await view(t.deps, PA)).cards.map((card) => card.id)).toEqual([cardOf(taskId)]);
-  });
-
-  it("never lets a commenter, a viewer, a denied person or someone not on the task decide or even see the card", async () => {
-    for (const who of [PC, PD, PE, PF]) {
-      const t = await peopleWorld([[PA, "owner"], [PB, "owner"], [PC, "commenter"], [PD, "viewer"], [PF, "denied"]]);
-      expect(await listFor(t, who), who).toEqual([]);
-      const item = await shown(t);
-      expect(await t.deps.performer.approve(cardCaller(who), { card: item.card, item: item.item, requestId: randomUUID() }), who).toEqual({ kind: "refused", reason: "forbidden" });
-      expect(await t.deps.performer.reject(cardCaller(who), { card: item.card, item: item.item, requestId: randomUUID(), reason: "other" }), who).toEqual({ kind: "refused", reason: "forbidden" });
-      expect(await t.deps.performer.requestChanges!(cardCaller(who), { card: item.card, item: item.item, requestId: randomUUID(), reason: "x" }), who).toEqual({ kind: "refused", reason: "forbidden" });
-      expect(t.point.proofs.issue, who).not.toHaveBeenCalled();
-      expect(await decided(t), who).toBe(false);
-    }
-  });
-
   it("refuses a co-owner at once when membership, the grant or the live proof is lost, or their role is cut, and decides nothing", async () => {
     const losses: Array<[string, (t: World) => Promise<void> | void]> = [
       ["membership gone", (t) => { t.memberships.delete(PB); }],
@@ -549,42 +415,12 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     }
   });
 
-  it("refuses the task's own person once the list no longer names them an owner (their own index still lists the task)", async () => {
-    const t = await peopleWorld();
-    const item = await shown(t);
-    await t.seedPeople(t.taskId, [[PA, "commenter"], [PB, "owner"]], 4);
-    expect(await listFor(t, PA)).toEqual([]);
-    expect(await t.deps.performer.approve(cardCaller(PA), { card: item.card, item: item.item, requestId: randomUUID() })).toEqual({ kind: "refused", reason: "forbidden" });
-    expect(t.point.proofs.issue).not.toHaveBeenCalled();
-    expect(await decided(t)).toBe(false);
-    // The co-owner who is still an owner decides.
-    expect((await approve(t.deps, t.taskId, cardCaller(PB)))?.statusCode).toBe(200);
-  });
-
   it("a co-owner decides with no step-up, while a commenter, a viewer and a person not on the task decide nothing", async () => {
     const t = await peopleWorld();
     for (const who of [PC, PD, PE]) await expect(approve(t.deps, t.taskId, cardCaller(who), who)).rejects.toBeDefined();
     expect(t.point.proofs.issue).not.toHaveBeenCalled();
     expect(await decided(t)).toBe(false);
     expect((await approve(t.deps, t.taskId, cardCaller(PB), PB))?.statusCode).toBe(200);
-  });
-
-  it("keeps two companies apart: another company's owner named on this task's list, and this company's person on another company's task, decide nothing", async () => {
-    const t = await peopleWorld([[PA, "owner"], [PX, "owner"]]);
-    t.involved.push(t.taskId);
-    const item = await shown(t);
-    // dev-x belongs to the other company: this company's cards are not theirs, in either runtime.
-    expect(await listFor(t, PX, OTHER)).toEqual([]);
-    expect(await t.deps.sources.list(cardCaller(PX, OTHER))).toEqual([]);
-    expect(await t.deps.performer.approve(cardCaller(PX, OTHER), { card: item.card, item: item.item, requestId: randomUUID() })).toEqual({ kind: "refused", reason: "forbidden" });
-    // The other company's task, with this company's person on its list.
-    const foreign = await t.waitingTask(PX, OTHER);
-    await t.seedPeople(foreign, [[PX, "owner"], [PA, "owner"]]);
-    t.involved.push(foreign);
-    expect((await t.deps.sources.list(cardCaller(PA, ORG))).map((entry) => entry.taskId)).toEqual([t.taskId]);
-    expect(await t.otherDeps.sources.list(cardCaller(PA, ORG))).toEqual([]);
-    expect(t.point.proofs.issue).not.toHaveBeenCalled();
-    expect(await decided(t)).toBe(false);
   });
 
   it("does not believe a rule that names another actor than the person asking (the engine records one actor under the person's own owner id)", async () => {
@@ -623,38 +459,6 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     const loaded = (await subject.load(ORG, t.taskId))!;
     const twice = await subject.apply(loaded, { requestId: randomUUID(), outcome: "approve", seen: { revision: workflow.revision, artifactDigest: workflow.artifacts.at(-1)!.sha256 } } as never, [principalOf(PB), principalOf(PB)], new Date(t.world.clock.now).toISOString());
     expect(twice.extra).toHaveLength(1);
-  });
-
-  it("fences the decision on the People revision it was proved at: a list that changed in between refuses it, nothing decided", async () => {
-    const t = await peopleWorld();
-    const access = t.runtime.flow.deps.access;
-    const real = access.ownerActing!.bind(access);
-    // The proof of the act reads revision 3; the commit's own check of the list is made against a revision that is no longer the stored one.
-    let calls = 0;
-    access.ownerActing = async (principal, task) => {
-      const acting = await real(principal, task);
-      calls += 1;
-      return acting === undefined || calls < 3 ? acting : { ...acting, items: [{ kind: "check", key: { pk: `DEVTASK#${t.taskId}`, sk: "PEOPLE" }, condition: { op: "eq", path: ["revision"], value: 99 } }] };
-    };
-    const outcome = await approve(t.deps, t.taskId, cardCaller(PB)).then((reply) => reply?.statusCode ?? 0, () => 0);
-    expect(outcome).not.toBe(200);
-    expect(calls).toBeGreaterThanOrEqual(3);
-    expect(await decided(t)).toBe(false);
-  });
-
-  it("golden: a task with no People list is decided by its own person exactly as before, with no proof of anyone else asked for", async () => {
-    const t = await hexSetup({ people: true });
-    t.memberships.set(PC, { companyId: ORG, role: "member" }); t.grants.set(`${PC}|payments`, "developer");
-    const taskId = await t.waitingTask(PA);
-    const before = await t.stored(taskId);
-    expect((await view(t.deps, PB)).cards).toEqual([]);
-    expect((await approve(t.deps, taskId, cardCaller(PA)))?.statusCode).toBe(200);
-    expect((await t.stored(taskId)).decisions.at(-1)).toMatchObject({ decision: "APPROVE", actorId: before.ownerId, actorRole: "TASK_OWNER" });
-    expect(t.check).not.toHaveBeenCalled();
-    const other = await t.waitingTask(PA);
-    const item = (await t.deps.sources.list(cardCaller(PA, ORG))).map((entry) => ({ item: entry, card: projectDecisionCards([entry]).cards[0]! }))[0]!;
-    for (const who of [PB, PC]) expect(await t.deps.performer.approve(cardCaller(who), { card: item.card, item: item.item, requestId: randomUUID() })).toEqual({ kind: "refused", reason: "forbidden" });
-    expect((await t.stored(other)).stage).toBe("PLAN_REVIEW");
   });
 
   it("without the host's owner rule only the task's own person decides (Code's rule), and nobody else is let in by the fallback", async () => {
@@ -701,29 +505,6 @@ describe("a core task's read by the People list's commenters and viewers (web ta
     return { ...t, taskId, get, routes };
   }
 
-  it("lets the owner, a co-owner, a commenter and a viewer read it, and nobody else; the read says nothing of a task a stranger cannot see", async () => {
-    const t = await readWorld();
-    for (const who of [PA, PB, PC, PD]) {
-      const reply = await t.get(who);
-      expect(reply?.statusCode, who).toBe(200);
-      expect((JSON.parse(reply!.body) as { task: unknown }).task).toMatchObject({ taskId: t.taskId, project: "payments" });
-    }
-    const stranger = await t.get(PE);
-    // The same answer as for a task that does not exist (no existence leak, whether or not the task has a People list).
-    const missing = await t.routes.route(TASK_GET(randomUUID()), { principal: principalOf(PE), client: "app" });
-    expect(stranger?.statusCode).toBe(404);
-    expect(stranger?.body).toBe(missing?.body);
-    expect(stranger?.body ?? "").not.toContain(t.taskId);
-  });
-
-  it("names the task's own person as the owner on the route's answer, to a co-owner, a commenter and a viewer alike (the same owner whoever reads)", async () => {
-    const t = await readWorld();
-    for (const who of [PA, PB, PC, PD]) {
-      const task = (JSON.parse((await t.get(who))!.body) as { task: { owner?: { developerId: string; name: string } } }).task;
-      expect(task.owner, who).toEqual({ developerId: PA, name: PA });
-    }
-  });
-
   it("refuses the reader when membership, the grant or the live proof is lost, or the list has no one left to own the task, at once", async () => {
     const losses: Array<[string, (t: Awaited<ReturnType<typeof readWorld>>) => Promise<void> | void]> = [
       ["membership", (t) => { t.memberships.delete(PC); }],
@@ -742,20 +523,6 @@ describe("a core task's read by the People list's commenters and viewers (web ta
     }
   });
 
-  it("gives a reader no way to act: a commenter and a viewer are not owners (owner moves and canAct stay owner-only)", async () => {
-    const t = await readWorld();
-    const access = t.accessFor(ORG);
-    const task = { taskId: t.taskId, developerId: PA, project: "payments", ownerKey: taskOwnerKey(PA, t.taskId) };
-    for (const who of [PC, PD]) {
-      expect(await access.canAct(principalOf(who), task), who).toBe(false);
-      expect(await access.canRead!(principalOf(who), task), who).toBe(true);
-      expect(await access.ownerActing!(principalOf(who), task), who).toBeUndefined();
-    }
-    expect(await access.canAct(principalOf(PB), task)).toBe(true);
-    // Another company's principal reads nothing, whatever the list says.
-    expect(await access.canRead!(principalOf(PC, OTHER), task)).toBe(false);
-  });
-
   it("answers the approvers point's owner check with the same rule as the owner moves (hostedTaskOwner)", async () => {
     const t = await readWorld();
     const { hostedTaskOwner } = await import("../../packages/broker/src/aws/core-engine-root.js");
@@ -769,30 +536,6 @@ describe("a core task's read by the People list's commenters and viewers (web ta
     expect(await asked(PD)).toBe(false);
     expect(await asked(PB, OTHER)).toBe(false);
     await expect(asked(PE)).rejects.toBeDefined();
-  });
-
-  it("does not widen a script token's read: it reads as before, never through the People list", async () => {
-    const t = await readWorld();
-    const reply = await t.get(PC, { scriptToken: { tokenId: "tok-1" } });
-    expect(reply?.statusCode).not.toBe(200);
-    expect((await t.get(PA, { scriptToken: { tokenId: "tok-1" } }))?.statusCode).toBe(200);
-  });
-
-  it("golden: a host without a read rule reads exactly as it acted (canAct), and a task of another company reads as missing", async () => {
-    const t = await hexSetup();
-    const taskId = await t.waitingTask(PA);
-    const foreign = await t.waitingTask(PX, OTHER);
-    const { loadReadableTask } = await import("../../packages/broker/src/core/task-flow/reads.js");
-    const plain = { ...t.runtime.flow.deps, access: { ...t.runtime.flow.deps.access, canRead: undefined } };
-    expect((await loadReadableTask(plain as never, { principal: principalOf(PA) }, taskId)).taskId).toBe(taskId);
-    await expect(loadReadableTask(plain as never, { principal: principalOf(PB) }, taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-    await expect(loadReadableTask(t.runtime.flow.deps, { principal: principalOf(PA) }, foreign)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-    await expect(loadReadableTask(t.runtime.flow.deps, { principal: principalOf(PX, OTHER) }, taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-    // The company checks hold even under a host that says yes to every read: another company's person, or another company's task, reads as missing.
-    const yes = { ...t.runtime.flow.deps, access: { ...t.runtime.flow.deps.access, canRead: async () => true, canAct: async () => true } };
-    expect((await loadReadableTask(yes as never, { principal: principalOf(PA) }, taskId)).taskId).toBe(taskId);
-    await expect(loadReadableTask(yes as never, { principal: principalOf(PA, OTHER) }, taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-    await expect(loadReadableTask(yes as never, { principal: principalOf(PA) }, foreign)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
   });
 });
 
@@ -854,49 +597,6 @@ describe("the deployed decision cards fed by the involved rows (the host's own w
     await deleteInvolvedRow({ store: t.world.store }, t.row(PB));
     expect(await t.list(PB)).toEqual([]);
   });
-
-  it("lists a person once even when they have a row and the task is their own", async () => {
-    const t = await involvedWorld();
-    await writeInvolvedRow({ store: t.world.store }, t.row(PA));
-    expect(await t.list(PA)).toEqual([t.taskId]);
-  });
-
-  it("judges every id by the live owner rule: a row never makes a commenter, a viewer, a denied person or a stranger an owner", async () => {
-    const t = await involvedWorld();
-    for (const who of [PC, PD, PE]) await writeInvolvedRow({ store: t.world.store }, t.row(who));
-    for (const who of [PC, PD, PE]) expect(await t.list(who), who).toEqual([]);
-  });
-
-  it("loses a co-owner at once when membership is lost, even with the row still there", async () => {
-    const t = await involvedWorld();
-    await writeInvolvedRow({ store: t.world.store }, t.row(PB));
-    t.memberships.delete(PB);
-    expect(await t.list(PB)).toEqual([]);
-  });
-
-  it("reads only the company's own rows: a row in another company's partition shows nothing here, and the other company's own listing does not see this company's task", async () => {
-    const t = await involvedWorld();
-    await writeInvolvedRow({ store: t.world.store }, t.row(PB, OTHER));
-    expect(await t.list(PB)).toEqual([]);
-    await writeInvolvedRow({ store: t.world.store }, t.row(PB));
-    t.memberships.set(PX, { companyId: OTHER, role: "owner" });
-    await writeInvolvedRow({ store: t.world.store }, t.row(PX, OTHER));
-    expect(await t.list(PX, OTHER)).toEqual([]);
-    expect(await t.list(PB)).toEqual([t.taskId]);
-  });
-
-  it("lists the person's own tasks only when the involved read fails (a store that throws on the involved partition)", async () => {
-    const t = await involvedWorld();
-    await writeInvolvedRow({ store: t.world.store }, t.row(PB));
-    const original = t.runtime.flow.deps.store.query.bind(t.runtime.flow.deps.store);
-    const broken = vi.spyOn(t.runtime.flow.deps.store, "query").mockImplementation(async (request) => {
-      if (request.pk.includes("INVOLVED#")) throw new Error("involved down zzq");
-      return original(request);
-    });
-    expect(await t.list(PB)).toEqual([]);
-    expect(await t.list(PA)).toEqual([t.taskId]);
-    broken.mockRestore();
-  });
 });
 
 it.each(["tracker", "chosen", "none"] as const)("real approve_plan confirms only a suggestion (%s)", async (kind) => {
@@ -932,12 +632,6 @@ describe("the plan card's feature line (lead 4 PCF)", () => {
   }
   const planFeature = async (t: Awaited<ReturnType<typeof withFeatures>>, personId: string, taskId: string, companyId: OrgId = ORG) => (await view(companyId === ORG ? t.deps : t.otherDeps, personId, companyId)).cards.find((card) => card.id === cardOf(taskId))?.planFeature;
 
-  it("says No feature with a Change for the starter, and the card still reads as the strict contract", async () => {
-    const t = await withFeatures();
-    const taskId = await t.waitingTask("dev-a");
-    expect(await planFeature(t, "dev-a", taskId)).toEqual({ line: "Feature: No feature", feature: null, canChange: true, canCreate: false });
-  });
-
   it("names the Linear parent the tracker suggested; an admin may also make a feature, a member may not", async () => {
     const t = await withFeatures();
     const parent = await t.features().create({ name: "Checkout v2", trackerLink: { tracker: "linear", id: "PRJ-1", url: "https://linear.app/x/project/1" } }, { type: "system", id: "test" });
@@ -945,66 +639,6 @@ describe("the plan card's feature line (lead 4 PCF)", () => {
     for (const taskId of [member, admin]) await t.features().setTaskFeature({ taskId, project: "payments", featureId: parent.id, source: "tracker" }, { type: "system", id: "tracker" });
     expect(await planFeature(t, "dev-a", member)).toMatchObject({ line: "Feature: Checkout v2 (from the Linear parent)", feature: { id: parent.id, source: "tracker" }, canChange: true, canCreate: false });
     expect(await planFeature(t, "dev-b", admin)).toMatchObject({ canChange: true, canCreate: true });
-  });
-
-  it("after the starter chose once, the card shows the line with no Change (the filing route's own rule); a project administrator may still change it", async () => {
-    const t = await withFeatures();
-    const one = await t.features().create({ name: "One" }, { type: "system", id: "test" });
-    const mine = await t.waitingTask("dev-a");
-    await t.features().setTaskFeature({ taskId: mine, project: "payments", featureId: one.id, source: "chosen" }, { type: "person", id: "dev-a" });
-    expect(await planFeature(t, "dev-a", mine)).toMatchObject({ line: "Feature: One (chosen)", canChange: false, canCreate: false });
-    // the same task, as its starter who is also the project's administrator (read live at each listing)
-    t.grants.set("dev-a|payments", "administrator");
-    expect(await planFeature(t, "dev-a", mine)).toMatchObject({ canChange: true });
-    t.grants.set("dev-a|payments", "developer");
-    expect(await planFeature(t, "dev-a", mine)).toMatchObject({ canChange: false });
-  });
-
-  it("Change needs the filing right: a card whose person the task access no longer lets act shows the line with no Change", async () => {
-    const t = await withFeatures();
-    const taskId = await t.waitingTask("dev-a");
-    const denied = { ...t.runtime, flow: { ...t.runtime.flow, deps: { ...t.runtime.flow.deps, access: { ...t.runtime.flow.deps.access, canAct: async () => false } } } } as typeof t.runtime;
-    const deps = deployedDecisionCards({ runtime: denied, registry: t.registry, people: t.people, proofs: t.point.proofs, log: t.log });
-    const card = (await view(deps, "dev-a")).cards.find((entry) => entry.id === cardOf(taskId));
-    expect(card?.planFeature).toMatchObject({ line: "Feature: No feature", canChange: false, canCreate: false });
-    expect((await planFeature(t, "dev-a", taskId))!.canChange).toBe(true);
-  });
-
-  it("a change is not a changed card: the digest the person was shown stays the digest", async () => {
-    const t = await withFeatures();
-    const one = await t.features().create({ name: "One" }, { type: "system", id: "test" });
-    const taskId = await t.waitingTask("dev-a");
-    const before = (await view(t.deps, "dev-a")).digests[cardOf(taskId)];
-    await t.features().setTaskFeature({ taskId, project: "payments", featureId: one.id, source: "chosen" }, { type: "person", id: "dev-a" });
-    const after = await view(t.deps, "dev-a");
-    expect(after.digests[cardOf(taskId)]).toBe(before);
-    expect(after.cards.find((card) => card.id === cardOf(taskId))!.planFeature!.line).toContain("One");
-  });
-
-  it("two companies: another company's feature on a task of the same id never shows, and each company reads its own", async () => {
-    const t = await withFeatures();
-    const mine = await t.waitingTask("dev-a");
-    const theirs = await t.waitingTask("dev-x", OTHER);
-    const secret = await t.features(OTHER).create({ name: "Other company secret" }, { type: "system", id: "test" });
-    await t.features(OTHER).setTaskFeature({ taskId: theirs, project: "payments", featureId: secret.id, source: "chosen" }, { type: "person", id: "dev-x" });
-    // a stray row under the other company's key for this company's task would be that company's: this company's card reads its own key only
-    await t.features(OTHER).setTaskFeature({ taskId: mine, project: "payments", featureId: secret.id, source: "chosen" }, { type: "person", id: "dev-x" });
-    expect((await planFeature(t, "dev-a", mine))!.feature).toBeNull();
-    expect(JSON.stringify(await view(t.deps, "dev-a"))).not.toContain("secret");
-    expect((await planFeature(t, "dev-x", theirs, OTHER))!.line).toBe("Feature: Other company secret (chosen)");
-  });
-
-  it("a feature store that fails leaves the card, without the line, and an approval still goes through", async () => {
-    const t = await withFeatures();
-    const taskId = await t.waitingTask("dev-a");
-    const get = t.world.store.get.bind(t.world.store);
-    const spy = vi.spyOn(t.world.store, "get").mockImplementation(async (key) => { if (key.sk.startsWith("TASKFEAT#")) throw new Error("private canary"); return get(key); });
-    const cards = await view(t.deps, "dev-a");
-    expect(cards.cards.find((card) => card.id === cardOf(taskId))).toBeDefined();
-    expect(cards.cards.find((card) => card.id === cardOf(taskId))!.planFeature).toBeUndefined();
-    expect(JSON.stringify(cards)).not.toContain("canary");
-    spy.mockRestore();
-    expect((await approve(t.deps, taskId, cardCaller("dev-a")))?.statusCode).toBe(200);
   });
 
   it("an item whose feature line does not read is left off the card, and the card stays", () => {

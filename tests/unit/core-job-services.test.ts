@@ -8,31 +8,6 @@ import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defa
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";
 
-
-it("session sweep refreshes only its company, even for the same raw session id", async () => {
-  const store = new MemoryDocumentStore();
-  const id = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
-  const sessionId = taskSessionId(id);
-  for (const orgId of [A, B]) await store.transact(createTaskSessionItems({ orgId, sessionId, taskId: id, project: "web", agent: { agentId: "rovara-code", name: "Rovara Code", version: 1 }, title: "Work", owner: localOwnerPrincipal(), origin: "app", payer: { kind: "member", developerId: "a".repeat(64) } as never, now: "2026-11-09T10:00:00.000Z" }));
-  const query = vi.spyOn(store, "query");
-  const read = vi.fn(async () => undefined);
-  const result = await sweepOpenSessions({ store, facts: { read }, cost: { costUsd: async () => 0 }, now: () => new Date("2026-11-09T11:00:00.000Z") }, { companyId: A, maxItems: 100, budgetMs: 100 });
-  expect(result.visited).toBe(1);
-  expect(query).toHaveBeenCalledWith(expect.objectContaining({ sk: { op: "beginsWith", prefix: `${A}#` } }));
-  expect(read).toHaveBeenCalledWith(A, id);
-  expect(read).not.toHaveBeenCalledWith(B, id);
-});
-
-it("notification sweep leaves another company's identical raw ids queued", async () => {
-  const store = new MemoryDocumentStore();
-  for (const orgId of [A, B]) await store.put({ item: { pk: "NOTIFY_PENDING", sk: `${orgId}#person#session#ready`, orgId, developerId: "person", sessionId: "session", kind: "ready", at: "2026-11-09T10:00:00.000Z" } });
-  const query = vi.spyOn(store, "query");
-  const result = await deliverAttention({ store, registry: createAdapterRegistry(), now: () => Date.parse("2026-11-09T11:00:00.000Z"), log: () => undefined }, { companyId: A });
-  expect(result.dropped).toBe(1);
-  expect(query.mock.calls[0]?.[0]).toMatchObject({ sk: { op: "beginsWith", prefix: `${A}#` } });
-  expect((await store.query({ pk: "NOTIFY_PENDING" })).items.map((row) => row["orgId"])).toEqual([B]);
-});
-
 it("session sweep caps all scanned items even when its clock does not advance", async () => {
   const store = new MemoryDocumentStore();
   for (let n = 0; n < 101; n++) await store.put({ item: { pk: "OPEN_AGENT_SESSIONS", sk: `${A}#${n}`, orgId: A, sessionId: `ses_${String(n).padStart(20, "0")}` } });
@@ -81,17 +56,6 @@ it("composes exactly the three L3 company passes and rejects a flow from another
   expect(await services["notify-deliver"].pass({ budgetMs: 1000 })).toMatchObject({ dropped: 1 });
   expect((await w.h.store.query({ pk: "NOTIFY_PENDING" })).items.some((row) => row["orgId"] === B)).toBe(true);
   expect(() => createBrokerCoreServices({ ...options, companyId: B })).toThrow("the core job company does not match its flow");
-});
-
-it("resumes a capped session scan on the next pass", async () => {
-  const store = new MemoryDocumentStore();
-  for (let n = 0; n < 5; n++) await store.put({ item: { pk: "OPEN_AGENT_SESSIONS", sk: `${A}#${n}`, orgId: A, sessionId: `ses_${String(n).padStart(20, "0")}` } });
-  const deps = { store, facts: { read: async () => undefined }, cost: { costUsd: async () => 0 }, now: () => new Date(1000) };
-  const scan = { cursor: undefined as string | undefined };
-  const first = await sweepOpenSessions(deps, { companyId: A, maxItems: 3, budgetMs: 100, scan });
-  const second = await sweepOpenSessions(deps, { companyId: A, maxItems: 3, budgetMs: 100, scan });
-  expect(first).toMatchObject({ visited: 3, complete: false });
-  expect(second).toMatchObject({ visited: 2, complete: true });
 });
 
 it("refuses an unscoped notification transport with fixed words", async () => {

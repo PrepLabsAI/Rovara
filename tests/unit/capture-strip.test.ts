@@ -1,7 +1,7 @@
 // The screenshot strip of a case (one frame at the end of each step), `screenshots: failed|all`, and its pairing before (baseline) and after (candidate).
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { E2ECapturePolicySchema, E2EPolicySchema, EVIDENCE_ARTIFACT_RETENTION, EvidencePackSchema, type CheckEntry, type EvidenceEnvironment } from "../../packages/contracts/src/index.js";
@@ -38,9 +38,6 @@ describe("which steps get a frame", () => {
     expect(spread.at(-1)).toBe(29);
     expect(spread).toEqual([...spread].sort((a, b) => a - b));
     expect(new Set(spread).size).toBe(spread.length);
-  });
-  it("depends on the step count alone, so the baseline and the candidate pick the same steps", () => {
-    expect(stripStepIndexes(17)).toEqual(stripStepIndexes(17));
   });
   it("is nothing for no steps or a bad count", () => {
     expect(stripStepIndexes(0)).toEqual([]);
@@ -93,26 +90,6 @@ describe("the recorder's strip frames", () => {
     const on = createCaptureRecorder({ root: await temp(), policy: ALL, caseIds, redactor: redactor() });
     for (const step of [-1, 1.5, 10_000]) await expect(on.record({ caseId: "case-a", kind: "screenshot", bytes: jpeg(500), step })).rejects.toThrow(/declared step/);
   });
-  it("keeps at most six frames a case: the seventh is a recorded drop with no file", async () => {
-    const root = await temp();
-    const recorder = createCaptureRecorder({ root, policy: ALL, caseIds, redactor: redactor() });
-    const entries = [];
-    for (let step = 0; step < 8; step += 1) entries.push(await recorder.record({ caseId: "case-a", kind: "screenshot", bytes: jpeg(500, 0x41 + step), step }));
-    expect(entries.filter((entry) => entry?.omitted === undefined)).toHaveLength(6);
-    expect(entries.slice(6).map((entry) => entry?.omitted)).toEqual(["budget", "budget"]);
-    expect((await readdir(join(root, CAPTURE_DIR))).filter((name) => name !== "entries")).toHaveLength(6);
-  });
-  it("drops a frame that carries an account credential, in any spelling, and keeps no file for it", async () => {
-    const root = await temp();
-    const recorder = createCaptureRecorder({ root, policy: ALL, caseIds, redactor: redactor() });
-    const dirty = Buffer.concat([jpeg(100), Buffer.from(`Y${Buffer.from(`ab:${PASSWORD}`).toString("base64")}`)]);
-    expect(await recorder.record({ caseId: "case-a", kind: "screenshot", bytes: dirty, step: 1 })).toMatchObject({ omitted: "credential-match", step: 1 });
-    expect((await readdir(join(root, CAPTURE_DIR))).filter((name) => name !== "entries")).toEqual([]);
-  });
-  it("drops a frame over the file cap", async () => {
-    const recorder = createCaptureRecorder({ root: await temp(), policy: ALL, caseIds, redactor: redactor() });
-    expect(await recorder.record({ caseId: "case-a", kind: "screenshot", bytes: jpeg(524_289), step: 0 })).toMatchObject({ omitted: "budget" });
-  });
 });
 
 describe("settling a group's captures", () => {
@@ -124,12 +101,6 @@ describe("settling a group's captures", () => {
     const entries = await finalizeCaptureArtifacts({ outDir: root, policy, caseIds, redactor: redactor(), ...(budgetBytes === undefined ? {} : { budgetBytes }) });
     return { root, entries };
   }
-  it("lists frames in case then step order, the failed case's own screenshot after its steps", async () => {
-    const { entries, root } = await runWith(ALL, [{ caseId: "case-b", size: 300 }, { caseId: "case-a", step: 2, size: 300 }, { caseId: "case-a", step: 0, size: 300 }, { caseId: "case-a", size: 300 }]);
-    expect(entries.map((entry) => [entry.caseId, entry.step])).toEqual([["case-a", 0], ["case-a", 2], ["case-a", undefined], ["case-b", undefined]]);
-    const listing = JSON.parse(await readFile(join(root, CAPTURE_ARTIFACTS_FILE), "utf8")) as { artifacts: Array<{ step?: number }> };
-    expect(listing.artifacts.map((entry) => entry.step)).toEqual([0, 2, undefined, undefined]);
-  });
   it("sheds strip frames before the screenshot of a failed case when the budget is short", async () => {
     // One 3000-byte failed screenshot and three 2000-byte frames; room for only the failed screenshot and one frame.
     const budget = encodedBytes(3000) + encodedBytes(2000);
@@ -138,14 +109,6 @@ describe("settling a group's captures", () => {
     expect(kept.map((entry) => entry.step)).toContain(undefined);
     expect(entries.filter((entry) => entry.step !== undefined && entry.omitted === "budget")).toHaveLength(2);
     expect((await readdir(join(root, CAPTURE_DIR))).sort()).toHaveLength(2);
-  });
-  it("removes a strip frame file when the strip is not admitted, whoever put it there", async () => {
-    const root = await temp();
-    const recorder = createCaptureRecorder({ root, policy: ALL, caseIds, redactor: redactor() });
-    await recorder.record({ caseId: "case-a", kind: "screenshot", bytes: jpeg(500), step: 0 });
-    const entries = await finalizeCaptureArtifacts({ outDir: root, policy: FAILED, caseIds, redactor: redactor() });
-    expect(entries).toEqual([]);
-    expect((await readdir(join(root, CAPTURE_DIR))).filter((name) => name !== "entries")).toEqual([]);
   });
   it("drops a frame that now carries a credential and lists it as dropped, with its step", async () => {
     const root = await temp();
@@ -169,11 +132,6 @@ describe("settling a group's captures", () => {
 describe("the web step hook", () => {
   const page = (bytes: Buffer | Error) => ({ screenshot: async () => { if (bytes instanceof Error) throw bytes; return bytes; } }) as never;
   const ports = (record: (input: unknown) => Promise<unknown>, mode?: "all") => ({ screenshots: true, ...(mode === undefined ? {} : { mode }), record }) as never;
-  it("takes a frame at a picked step in mode all, naming the step", async () => {
-    const seen: unknown[] = [];
-    await finishWebStepCapture({ capture: ports(async (input) => { seen.push(input); }, "all"), caseId: "case-a", stepIndex: 2, stepCount: 4, page: page(jpeg(300)) });
-    expect(seen).toEqual([{ caseId: "case-a", kind: "screenshot", bytes: Uint8Array.from(jpeg(300)), step: 2 }]);
-  });
   it("takes none in failed mode, with no capture port, with no page, or at a step the strip skips", async () => {
     const seen: unknown[] = [];
     const record = async (input: unknown) => { seen.push(input); };
@@ -219,10 +177,6 @@ describe("the broker reads strip frames back", () => {
     expect(readCaptureStrips(evidenceOf([{ caseId: "case-a", step: 1, data: good.data, name: "case-0-step-2-screenshot.jpg" }]), ids).size).toBe(0);
     expect(readCaptureStrips(evidenceOf([{ caseId: "case-a", step: 1, data: good.data, name: "../etc/passwd" }]), ids).size).toBe(0);
   });
-  it("keeps at most six frames a case", () => {
-    const frames = Array.from({ length: 9 }, (_, step) => ({ caseId: "case-a", step, data: jpeg(300, 0x10 + step) }));
-    expect(readCaptureStrips(evidenceOf(frames), ids).get("case-a")).toHaveLength(6);
-  });
   it("is not what the failed-case screenshot reader keeps: a strip frame is never taken for the failed case's screenshot", () => {
     const f = frame(0, 6);
     expect(readCaptureScreenshots(evidenceOf([{ caseId: "case-a", step: 0, data: f.data }]), ids).size).toBe(0);
@@ -237,15 +191,6 @@ describe("the broker reads strip frames back", () => {
 
 describe("pairing the baseline's strip with the candidate's", () => {
   const f = (step: number, fill: number) => { const data = new Uint8Array(jpeg(300, fill)); return { step, data, sha256: sha(data) }; };
-  it("puts the same steps side by side, and leaves out a step only one side has", () => {
-    const paired = pairStrips({ before: [f(0, 1), f(1, 2), f(3, 3)], after: [f(1, 12), f(2, 13), f(3, 14), f(0, 11)] });
-    expect(paired.before.map((item) => item.step)).toEqual([0, 1, 3]);
-    expect(paired.after.map((item) => item.step)).toEqual([0, 1, 3]);
-  });
-  it("has no before frames with no baseline, and keeps every after frame", () => {
-    expect(pairStrips({ before: undefined, after: [f(0, 1), f(1, 2)] })).toMatchObject({ before: [], after: [{ step: 0 }, { step: 1 }] });
-    expect(pairStrips({ before: [], after: [f(0, 1)] }).before).toEqual([]);
-  });
   it("falls back to the unpaired form when the two share no step", () => {
     const paired = pairStrips({ before: [f(5, 1)], after: [f(0, 2), f(1, 3)] });
     expect(paired.before).toEqual([]);

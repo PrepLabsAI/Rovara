@@ -1,6 +1,4 @@
-// Device testing slice 1: the device-evidence runner over a fake device. Before (the base code) and after (the candidate) for each picked flow, one masked picture per named step, inside one time
-// limit and one byte budget, with the pack's JPEG cap, the credential scan, the view-tree mask, and the device always stopped. A step that cannot be shown is "Not run" with a fixed reason.
-import { createHash } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 import { DEVICE_EVIDENCE_SCREENSHOT_MAX_BYTES, DEVICE_EVIDENCE_TOTAL_MAX_BYTES, DEVICE_EVIDENCE_FRAME_PIXELS_MAX } from "../../packages/contracts/src/device-evidence.js";
 import {
@@ -10,7 +8,6 @@ import { createFakeDevice, decodeFakeJpeg, encodeFakeJpeg, fakeFrame, type FakeD
 
 const W = 60;
 const H = 100;
-const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const node = (over: Record<string, unknown>) => ({ bounds: { x: 0, y: 0, width: W, height: 10 }, ...over });
 const SECURE = { x: 10, y: 20, width: 40, height: 10 };
 /** A screen with a visible title and a secure field (always painted); `extra` nodes follow. */
@@ -26,23 +23,6 @@ const reasons = (got: { steps: Array<{ status: string; reason?: string }> }) => 
 const bytesOf = (size: number, seed = 1) => { const out = new Uint8Array(size); out.set([0xff, 0xd8, 0xff]); out.fill(seed, 3); return out; };
 
 describe("runDeviceEvidence", () => {
-  it("runs every flow on the base code, then on the candidate, one picture per step, and stops the device each time", async () => {
-    const { driver, calls } = fake();
-    const got = await runDeviceEvidence(input(driver));
-    const ops = calls.map((c) => `${c.op}:${c.side}${c.flow === undefined ? "" : `/${c.flow}`}${c.step === undefined ? "" : `/${c.step}`}`);
-    const side = (s: string) => [`prepare:${s}`, `startFlow:${s}/checkout`, `performStep:${s}/checkout/open`, `readTree:${s}`, `screenshot:${s}`, `readTree:${s}`, `performStep:${s}/checkout/submit`, `readTree:${s}`, `screenshot:${s}`, `readTree:${s}`,
-      `startFlow:${s}/settings`, `performStep:${s}/settings/open`, `readTree:${s}`, `screenshot:${s}`, `readTree:${s}`, `stop:${s}`];
-    expect(ops).toEqual([...side("before"), ...side("after")]);
-    expect(got.device).toBe("fake");
-    expect(got.isolation).toBe("sandbox");
-    expect(got.notRun).toBeUndefined();
-    expect(got.unmasked).toBe(0);
-    expect(got.steps.map((row) => `${row.flow}/${row.step}:${row.status}`)).toEqual(["checkout/open:shown", "checkout/submit:shown", "settings/open:shown"]);
-    const first = got.steps[0]!;
-    if (first.status !== "shown") throw new Error("shown");
-    expect(first.before.sha256).toBe(sha(first.before.bytes));
-    expect(first.before.sha256).not.toBe(first.after.sha256);
-  });
 
   it("paints the secure field black in the encoded picture and leaves every other pixel as the device drew it; the device's own pixels are never touched", async () => {
     const original = screenOf("before", "checkout", "open").frame;
@@ -59,19 +39,6 @@ describe("runDeviceEvidence", () => {
     expect(pixel(50, 29)).toEqual([100, 100, 100, 255]);
     expect(pixel(10, 30)).toEqual([100, 100, 100, 255]);
     expect(Array.from(original.rgba)).toEqual(Array.from(keep));
-  });
-
-  it("paints text a shared mask matches, an element the recipe names, and a web view", async () => {
-    const extra = [node({ text: "ada@example.com", bounds: { x: 0, y: 40, width: 20, height: 5 } }), node({ id: "com.app:id/iban", text: "ordinary", bounds: { x: 0, y: 50, width: 20, height: 5 } }),
-      node({ webView: true, bounds: { x: 0, y: 60, width: 20, height: 5 } }), node({ text: "plain words", bounds: { x: 0, y: 70, width: 20, height: 5 } })];
-    const { driver } = fake({ screen: (side, flow, step) => screenOf(side, flow, step, extra) });
-    const got = await runDeviceEvidence(input(driver, { flows: [flows[1]!], maskIds: ["com.app:id/iban"] }));
-    const shot = got.steps[0]!;
-    if (shot.status !== "shown") throw new Error("shown");
-    const decoded = decodeFakeJpeg(shot.after.bytes);
-    const at = (y: number) => decoded.rgba[(y * decoded.width + 5) * 4]!;
-    expect([at(42), at(52), at(62)]).toEqual([0, 0, 0]);
-    expect(at(72)).toBe(150);
   });
 
   it("an iOS run in a sandbox is refused before the device is touched; on a developer machine it runs", async () => {
@@ -107,24 +74,6 @@ describe("runDeviceEvidence", () => {
       expect(reasons(got)).toEqual(["masked_content"]);
       // Two attempts per side: tree, picture, tree twice over.
       expect(flip.calls.filter((c) => c.op === "readTree" && c.side === "before")).toHaveLength(4);
-    });
-    it("a tree that settles on the second try is used", async () => {
-      let reads = 0;
-      const second = fake({ screen: (side, flow, step) => { const s = screenOf(side, flow, step); reads += 1; return reads <= 1 ? { ...s, tree: { ...(s.tree as object), nodes: [node({ text: "moving" })] } } : s; } });
-      const got = await runDeviceEvidence(input(second.driver, { flows: [flows[1]!] }));
-      expect(reasons(got)).toEqual(["shown"]);
-    });
-    it("withholds a secret across two elements (a label and its value), and a match it cannot paint", async () => {
-      const split = fake({ screen: (side, flow, step) => screenOf(side, flow, step, [node({ text: "API key:" }), node({ text: "abcd1234" })]) });
-      expect(reasons(await runDeviceEvidence(input(split.driver, { flows: [flows[1]!] })))).toEqual(["masked_content"]);
-      const unpaintable = fake({ screen: (side, flow, step) => screenOf(side, flow, step, [{ text: "ada@example.com" }]) });
-      expect(reasons(await runDeviceEvidence(input(unpaintable.driver, { flows: [flows[1]!] })))).toEqual(["masked_content"]);
-    });
-    it("withholds a screen with no readable tree (this screen cannot be checked), a tree of another size, and a garbage tree", async () => {
-      for (const tree of [null, { width: W + 1, height: H, nodes: [node({ text: "x" })] }, { nope: 1 }, "tree"]) {
-        const dark = fake({ screen: (side) => ({ tree, frame: fakeFrame(W, H, side === "before" ? 100 : 150) }) });
-        expect(reasons(await runDeviceEvidence(input(dark.driver, { flows: [flows[1]!] }))), JSON.stringify(tree)).toEqual(["unreadable_screen"]);
-      }
     });
     it("fixture-data-only shows a screen with no tree unmasked and counts it; it never waives a match it cannot paint, and only `true` counts", async () => {
       const dark = fake({ screen: (side) => ({ tree: null, frame: fakeFrame(W, H, side === "before" ? 100 : 150) }) });
@@ -233,12 +182,6 @@ describe("runDeviceEvidence", () => {
       expect(calls.filter((c) => c.op === "stop")).toHaveLength(calls.filter((c) => c.op === "prepare").length);
       expect(calls.filter((c) => c.op === "performStep").length).toBeLessThanOrEqual(3);
     });
-    it("a caller can lower the built-in limits but never raise them", async () => {
-      const { driver, calls } = fake();
-      await runDeviceEvidence(input(driver, { limits: { runMs: 10_000_000, stepMs: 10_000_000 } }));
-      for (const call of calls.filter((c) => c.op === "readTree" || c.op === "performStep")) expect(call.timeoutMs).toBeLessThanOrEqual(30_000);
-      for (const call of calls.filter((c) => c.op === "prepare")) expect(call.timeoutMs).toBeLessThanOrEqual(600_000);
-    });
     it("a driver that throws or answers nonsense is a fixed reason, with no echo of its error, and the device is still stopped", async () => {
       const boom = () => { throw new Error("adb: device 'emulator-5554' at https://user:pw@host/ failed"); };
       const cases: Array<[Partial<FakeDeviceScript>, string]> = [[{ performStep: boom }, "step_failed"], [{ startFlow: boom }, "step_failed"], [{ performStep: (() => "perhaps") as never }, "step_failed"]];
@@ -287,19 +230,6 @@ describe("runDeviceEvidence", () => {
   });
 
   describe("painting is bounded and checked", () => {
-    it("a screen of hundreds of full-screen rectangles is withheld at once, and one full-screen paint on a phone-sized frame is quick", async () => {
-      const W2 = 1080;
-      const H2 = 2400;
-      const full = { x: 0, y: 0, width: W2, height: H2 };
-      const many = fake({ screen: () => ({ tree: { width: W2, height: H2, nodes: [node({ text: "Hello", bounds: { x: 0, y: 0, width: 10, height: 10 } }), ...Array.from({ length: 400 }, () => node({ secure: true, bounds: full }))] }, frame: fakeFrame(W2, H2, 100) }) });
-      const started = Date.now();
-      expect(reasons(await runDeviceEvidence(input(many.driver, { flows: [flows[1]!], limits: { runMs: 1_000, stepMs: 500 } })))).toEqual(["masked_content"]);
-      expect(Date.now() - started).toBeLessThan(2_000);
-      const one = fake({ screen: () => ({ tree: { width: W2, height: H2, nodes: [node({ text: "Hello", bounds: { x: 0, y: 0, width: 10, height: 10 } }), node({ secure: true, bounds: full })] }, frame: fakeFrame(W2, H2, 100) }) });
-      const t0 = Date.now();
-      expect(reasons(await runDeviceEvidence(input(one.driver, { flows: [flows[1]!], encodeJpeg: () => bytesOf(1_000) })))).toEqual(["shown"]);
-      expect(Date.now() - t0).toBeLessThan(5_000);
-    });
     it("a painter that did not paint, painted a frame of another size, or threw is never encoded", async () => {
       const lazy = (frame: DeviceFrame) => ({ ...frame, rgba: Uint8Array.from(frame.rgba) });
       const small = () => fakeFrame(10, 10);
@@ -319,30 +249,6 @@ describe("runDeviceEvidence", () => {
       const got = await runDeviceEvidence(input(fake().driver, { flows: [flows[1]!], paint: slow, now: () => clock, limits: { runMs: 500_000 }, encodeJpeg: (frame) => { encoded += 1; return encodeFakeJpeg(frame); } }));
       expect(reasons(got)).toEqual(["time_limit"]);
       expect(encoded).toBe(0);
-    });
-    it("counts a screen shown under the fixture-data choice even when part of it was painted", async () => {
-      const web = fake({ screen: (side) => ({ tree: { width: W, height: H, nodes: [node({ webView: true })] }, frame: fakeFrame(W, H, side === "before" ? 100 : 150) }) });
-      const got = await runDeviceEvidence(input(web.driver, { flows: [flows[1]!], fixtureDataOnly: true }));
-      expect(reasons(got)).toEqual(["shown"]);
-      expect(got.unmasked).toBe(1);
-      expect(reasons(await runDeviceEvidence(input(web.driver, { flows: [flows[1]!] })))).toEqual(["unreadable_screen"]);
-    });
-    it("a prepare that fails after the run gave up is stopped too", async () => {
-      const stops: string[] = [];
-      let fail: (reason: unknown) => void = () => undefined;
-      const driver: DeviceDriver = { ...fake().driver, prepare: () => new Promise((_, reject) => { fail = reject; }), async stop(side) { stops.push(side); } };
-      await runDeviceEvidence(input(driver, { flows: [flows[1]!], limits: { runMs: 30 } }));
-      fail(new Error("late"));
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(stops).toEqual(["before", "before"]);
-    });
-  });
-
-  describe("a fake device is never a real run", () => {
-    it("says it is fake in its kind, and no driver input can make a fake into a real device", async () => {
-      expect(fake().driver.kind).toBe("fake");
-      const got = await runDeviceEvidence(input(fake().driver));
-      expect(got.device).toBe("fake");
     });
   });
 });

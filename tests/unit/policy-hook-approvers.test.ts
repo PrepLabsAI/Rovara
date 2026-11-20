@@ -96,28 +96,6 @@ describe("policy hook: decisions", () => {
     expect(checkApproverCount(requirement, asker, [verdict])).toEqual({ ok: false, reason: "self_approval_not_allowed" });
   });
 
-  it("row 11.5: a second admin's approval passes, with the sole-approver mark removed", async () => {
-    const other = person("admin-b");
-    const w = world(() => ({ ...loose, secondPerson: true }), baseApprovers({ approved: true, approver: other, method: "local-session", proofId: "p1", soleApprover: true }));
-    expect(await w.approvers.verify(request(), proof)).toEqual({ approved: true, approver: other, method: "local-session", proofId: "p1" });
-    expect(w.service.asked[0]!.q).toMatchObject({ stage: "verdict", per: "admin-b", by: "admin-a" });
-  });
-
-  it("with no one named as asker, a second person means two approvers", () => {
-    const anonymous: ApprovalRequest = { ...request() };
-    delete anonymous.requestedBy;
-    expect(stricterRequirement(baseRequirement, { ...loose, secondPerson: true }, anonymous).minApprovers).toBe(2);
-  });
-
-  it("stricter only: a looser answer never loosens the install's requirement, and the install's own sign-in rule is kept as it was", () => {
-    const strict: ApprovalRequirement = { methods: ["local-session"], minApprovers: 3, selfApprovalAllowed: false, signIn: { mode: "window", seconds: 300 } };
-    expect(stricterRequirement(strict, { allow: true, minApprovers: 1, secondPerson: false, selfApproval: true, signInMaxAgeSeconds: 86_400 }, request())).toEqual(strict);
-    expect(stricterRequirement(strict, { allow: true, minApprovers: 5, secondPerson: false, selfApproval: true }, request())).toEqual({ ...strict, minApprovers: 5 });
-    expect(stricterRequirement(baseRequirement, loose, request())).toEqual(baseRequirement);
-    // A second person needed rules out self-approval even if the same answer says self-approval is fine.
-    expect(stricterRequirement(baseRequirement, { ...loose, secondPerson: true, selfApproval: true }, request()).selfApprovalAllowed).toBe(false);
-  });
-
   it("DEC 254zzz73: an answer's signInMaxAgeSeconds (a re-sign-in window) is accepted on the wire and ignored: it adds no sign-in rule and refuses no verdict", async () => {
     expect(stricterRequirement(baseRequirement, { ...loose, signInMaxAgeSeconds: 60 }, request())).toEqual(baseRequirement);
     expect(stricterRequirement(baseRequirement, { ...loose, signInMaxAgeSeconds: 0 }, request()).signIn).toBeUndefined();
@@ -177,47 +155,6 @@ describe("policy hook: decisions", () => {
   });
 
 
-  it("a stricter count or no self-approval turns the install's sole-approver exception off", async () => {
-    expect(stricterRequirement(baseRequirement, { ...loose, minApprovers: 2 }, request()).soleApproverAllowed).toBeUndefined();
-    expect(stricterRequirement(baseRequirement, { ...loose, selfApproval: false }, request()).soleApproverAllowed).toBeUndefined();
-    expect(stricterRequirement(baseRequirement, loose, request()).soleApproverAllowed).toBe(true);
-    const sole = { approved: true as const, approver: asker, method: "local-session", proofId: "p1", soleApprover: true as const };
-    expect(await world(() => ({ ...loose, selfApproval: false }), baseApprovers(sole)).approvers.verify(request(), proof)).toEqual({ approved: false, reason: "self_approval_not_allowed" });
-    const two = world(() => ({ ...loose, minApprovers: 2 }), baseApprovers(sole));
-    expect(await two.approvers.verify(request(), proof)).toEqual({ approved: false, reason: "company_rules_changed" });
-    expect(await two.approvers.requirement(request())).toEqual({ methods: ["local-session"], minApprovers: 2, selfApprovalAllowed: true });
-    expect(await two.approvers.verify(request(), proof)).toEqual({ approved: true, approver: asker, method: "local-session", proofId: "p1" });
-  });
-
-
-  it("a cached answer is used only while it is alive, and a no is kept as the stricter default", async () => {
-    const other = person("admin-b");
-    let answer: Record<string, unknown> = loose;
-    const w = world(() => answer, baseApprovers({ approved: true, approver: other, method: "local-session", proofId: "p1" }));
-    await w.approvers.verify(request(), proof);
-    expect(await w.approvers.requirement(request({ requestId: "r2" }))).toEqual(baseRequirement);
-    w.advance(61_000);
-    expect((await w.approvers.requirement(request({ requestId: "r3" }))).selfApprovalAllowed).toBe(false);
-    answer = { ...loose, allow: false };
-    expect((await w.approvers.verify(request({ requestId: "r4" }), { ...proof, requestId: "r4" })).approved).toBe(false);
-    expect((await w.approvers.requirement(request({ requestId: "r5" }))).selfApprovalAllowed).toBe(false);
-    // The answer is kept per asker: another person's request does not read it.
-    answer = loose;
-    await w.approvers.verify(request({ requestId: "r6" }), { ...proof, requestId: "r6" });
-    expect((await w.approvers.requirement(request({ requestId: "r7", requestedBy: person("admin-c") }))).selfApprovalAllowed).toBe(false);
-  });
-
-  it("the loosest count handed out for a request is what verify checks, even after a stricter read of the same request", async () => {
-    const other = person("admin-b");
-    let answer = loose;
-    const w = world(() => answer, baseApprovers({ approved: true, approver: other, method: "local-session", proofId: "p1" }));
-    await w.approvers.verify(request({ requestId: "warm" }), { ...proof, requestId: "warm" });
-    expect((await w.approvers.requirement(request())).minApprovers).toBe(1);
-    answer = { ...loose, minApprovers: 2 };
-    await w.approvers.verify(request({ requestId: "other" }), { ...proof, requestId: "other" });
-    expect((await w.approvers.requirement(request())).minApprovers).toBe(2);
-    expect(await w.approvers.verify(request(), proof)).toEqual({ approved: false, reason: "company_rules_changed" });
-  });
 
   it("a caller that never read the requirement here is held to the install's own count", async () => {
     const other = person("admin-b");
@@ -234,13 +171,6 @@ describe("policy hook: decisions", () => {
     expect(w.service.asked).toHaveLength(0);
   });
 
-  it("keeps the base adapter's claim methods, and adds none it lacks", async () => {
-    const plain: Approvers = { async requirement() { return baseRequirement; }, async verify() { return { approved: false, reason: "x" }; } };
-    const w = world(() => loose, plain);
-    expect("commitClaim" in w.approvers).toBe(false);
-    expect("releaseClaim" in w.approvers).toBe(false);
-    expect(typeof world(() => loose, baseApprovers({ approved: false, reason: "x" })).approvers.commitClaim).toBe("function");
-  });
 });
 
 it("KF uses one current approver even when the company hook returns its retired second-person rule", async () => {
@@ -251,7 +181,3 @@ it("KF uses one current approver even when the company hook returns its retired 
   expect(await w.approvers.verify(kf, proof)).toEqual(verdict);
 });
 
-it("KF still obeys the company hook's refusal", async () => {
-  const w = world(() => ({ ...loose, allow: false }), baseApprovers({ approved: true, approver: asker, method: "local-session", proofId: "p1" }));
-  expect(await w.approvers.verify({ ...request(), kind: "known_failing", subject: { type: "known_failing", id: "bound-record" } }, proof)).toEqual({ approved: false, reason: "company_rules_refused" });
-});

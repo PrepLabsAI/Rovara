@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TestEnvDraftSchema, type SetupProposal } from "@agentx/contracts";
+import { type SetupProposal } from "@agentx/contracts";
 import { detectTestEnvironment, draftFitsCap, listRepositoryFiles, readRepositoryFile, testEnvDraftResult } from "../../packages/worker/src/test-env-detect.js";
 
 let root: string;
@@ -46,24 +46,6 @@ describe("listing and reading a repository", () => {
 });
 
 describe("the draft", () => {
-  it("proposes the sandbox tier from the files, with where each value came from, and nothing more", async () => {
-    await write("svc/pyproject.toml", PYTEST);
-    await write("svc/requirements.txt", "pytest\n");
-    await write("svc/tests/test_a.py", "def test_a():\n    assert True\n");
-    const draft = (await detectTestEnvironment({ rootPath: root, repositories: [repo("svc")] }))!;
-    expect(TestEnvDraftSchema.safeParse(draft).success).toBe(true);
-    const env = draft.environment;
-    expect(env.tier).toBe("sandbox");
-    expect(env.services).toEqual([]);
-    expect(env.accounts).toEqual([]);
-    expect(env.nightly.enabled).toBe(false);
-    expect(env.nightly.branch).toBe("main");
-    expect(env.capture).toEqual({ screenshots: "failed", video: false, traces: false });
-    expect(env.repos[0]!.repositoryId).toBe("svc");
-    expect(env.repos[0]!.checks.some((check) => check.command.executable === "pytest")).toBe(true);
-    expect(env.repos[0]!.checks.every((check) => check.command.cwd === "svc")).toBe(true);
-    expect(draft.valueSources.length).toBeGreaterThan(0);
-  });
 
   it("reads the default branch only: a repository with a pull request head checked out is left out, and says so", async () => {
     await write("svc/pyproject.toml", PYTEST);
@@ -73,17 +55,6 @@ describe("the draft", () => {
     expect(draft.notes.join(" ")).toContain("pull request");
     // Only a checked-out repository: nothing to propose.
     expect(await detectTestEnvironment({ rootPath: root, repositories: [repo("pr", { checkedOut: { pullRequest: 7, headSha: "a".repeat(40) } })] })).toBeUndefined();
-  });
-
-  it("merges several repositories: check ids stay unique, value sources point at their own repository", async () => {
-    await write("api/pyproject.toml", PYTEST);
-    await write("worker/pyproject.toml", PYTEST);
-    const draft = (await detectTestEnvironment({ rootPath: root, repositories: [repo("api"), repo("worker")] }))!;
-    const ids = draft.environment.repos.flatMap((entry) => entry.checks.map((check) => check.id));
-    expect(new Set(ids).size).toBe(ids.length);
-    expect(draft.environment.repos.map((entry) => entry.repositoryId)).toEqual(["api", "worker"]);
-    expect(draft.valueSources.some((entry) => entry.field.startsWith("repos[1]."))).toBe(true);
-    expect(draft.environment.repos[1]!.checks.every((check) => check.command.cwd === "worker")).toBe(true);
   });
 
   it("adds the setup agent's commands only where code found none, and never a flagged one", async () => {

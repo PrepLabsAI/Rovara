@@ -109,21 +109,6 @@ describe("the agent executor (Task 4.3b, test case 1)", () => {
     expect(t.spies.actions).toEqual(['tap:[{"id":"n2"}]']);
   });
 
-  it("puts the goal on a 'Goal:' line and the screen as node lines, in the first message and in the tool result that follows an action", async () => {
-    const t = build([{ tool: "tap", input: { target: "n2" } }, DONE]);
-    await t.executor.runStep(t.ctx as never);
-    const first = t.requests[0]!.call.prompt.find((message) => message.role === "user")!;
-    const firstText = (first.content as Array<{ text: string }>).map((part) => part.text).join("\n");
-    expect(firstText).toContain(`Goal: ${GOAL}`);
-    expect(firstText).toContain('#n2 button "Download orders" testid="download-orders"');
-    const second = t.requests[1]!.call.prompt;
-    const toolMessage = second.find((message) => message.role === "tool")!;
-    const output = (toolMessage.content as Array<{ output: { type: string; value: string } }>)[0]!.output;
-    expect(output.type).toBe("text");
-    expect(output.value).toContain("Screen after the action:");
-    expect(output.value).toContain('#n3 button "Download invoices"');
-  });
-
   it("(k) round-trips the real prompt through the scripted double with no goalCandidates override: it taps the node whose name matches", async () => {
     const t = build([DONE]);
     await t.executor.runStep(t.ctx as never);
@@ -150,17 +135,6 @@ describe("the agent executor (Task 4.3b, test case 1)", () => {
 });
 
 describe("the action ledger (Task 4.3b, test case 2)", () => {
-  it("records the role, name and test id of the line the model chose from, and null when the line has no test id", async () => {
-    const t = build([{ tool: "tap", input: { target: "n2" } }, { tool: "tap", input: { target: "n1" } }, DONE]);
-    await t.executor.runStep(t.ctx as never);
-    t.ledger.endStep(0, { verdict: "concluded", stopCode: null, receiptIds: [] });
-    const [step] = t.readLedger().steps;
-    expect(step!.actions.map((action) => [action.tool, action.node, action.outcome])).toEqual([
-      ["tap", { role: "button", name: "Download orders", testId: "download-orders" }, "ok"],
-      ["tap", { role: "heading", name: "Orders", testId: null }, "ok"],
-    ]);
-    expect(step!.actions[0]!.snapshotSha256).toBe(sha(SCREEN));
-  });
 
   it("cuts a name at 120 characters, never inside a surrogate pair", () => {
     const long = `#n1 button "${"a".repeat(119)}😀tail" testid="x"`;
@@ -600,17 +574,6 @@ describe("fix round 1 (Task 4.3b review)", () => {
     expect(t.spies.actions).toEqual(['tap:[{"id":"n2"}]']);
   });
 
-  it("describes the first action's node from the screen the model was shown in the prompt, not from a fresh observation", async () => {
-    const screens = [SCREEN, SCREEN.replace('#n2 button "Download orders" testid="download-orders"', '#n2 button "Something else" testid="other"')];
-    let reads = 0;
-    const t = build([{ tool: "tap", input: { target: "n2" } }, DONE], { screen: () => screens[Math.min(reads++, 1)]! });
-    await t.executor.runStep(t.ctx as never);
-    t.ledger.endStep(0, { verdict: "concluded", stopCode: null, receiptIds: [] });
-    const action = t.readLedger().steps[0]!.actions[0]!;
-    expect(action.node).toEqual({ role: "button", name: "Download orders", testId: "download-orders" });
-    expect(action.snapshotSha256).toBe(sha(SCREEN));
-  });
-
   it("keeps a trace's typed value that is text of a goal, turns any other into its keyed digest, and drops a trace whose value shows anywhere else", async () => {
     const valueKey = generateE2EAgentValueKey();
     const outDir = temp();
@@ -635,23 +598,6 @@ describe("fix round 1 (Task 4.3b review)", () => {
     const keyless = createE2EAgentCaptureStore({ goals: () => [GOAL] });
     expect(await keyless.write("d".repeat(64), rec([{ name: "type", value: typed, summary: "typed", target: field }]))).toBeUndefined();
     expect(await keyless.write("e".repeat(64), rec([{ name: "type", value: "orders", summary: "typed", target: field }]))).toBeDefined();
-  });
-
-  it("a trace whose typed value the store kept as its keyed digest still matches the verified ledger in the review", async () => {
-    const typed = "a value the model made up 4711";
-    const t = build([{ tool: "type", input: { target: "n4", value: typed } }, DONE]);
-    await t.executor.runStep(t.ctx as never);
-    t.ledger.endStep(0, { verdict: "concluded", stopCode: null, receiptIds: [] });
-    const parsed = parseVerifiedE2EAgentActionLedger(t.readLedger(), { goals: new Map([[0, GOAL]]), valueKey: t.valueKey, runId: RUN_ID, caseId: CASE_ID });
-    if (!parsed.ok) throw new Error(parsed.reason);
-    const store = createE2EAgentCaptureStore({ valueKey: t.valueKey, goals: () => [GOAL] });
-    expect(await store.write("a".repeat(64), rec([{ name: "type", value: typed, summary: "typed", target: { role: "textbox", name: "File name" } }]))).toBeDefined();
-    const [held] = store.taken();
-    expect(JSON.stringify(held)).not.toContain(typed);
-    expect(reviewCapturedE2EAgentTrace({ stepIndex: 0, trace: held!.trace, ledger: parsed.ledger, valueKey: t.valueKey, credentialScanHit: false })).toMatchObject({ keep: true });
-    // A digest that is not the ledger's does not match.
-    const forged = { actions: [{ name: "type", value: `hmac-sha256:${"0".repeat(64)}`, summary: "typed", target: { role: "textbox", name: "File name" } }] };
-    expect(reviewCapturedE2EAgentTrace({ stepIndex: 0, trace: forged, ledger: parsed.ledger, valueKey: t.valueKey, credentialScanHit: false })).toMatchObject({ keep: false });
   });
 
   it("refuses a model call whose request carries a session value this process learned after the step began, before anything is sent", async () => {

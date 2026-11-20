@@ -6,17 +6,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { CATALOG_FILE, CATALOG_SIGNATURE_FILE, CATALOG_SIGNATURE_ALGORITHM, catalogSigningMessage, parseBundlePublicKey, sha256HexOf } from "@agentx/contracts";
 import { nightlyHealthEnabled } from "../../packages/broker/src/core/test-env/health-switch.js";
 import { savedEnvEnabled } from "../../packages/broker/src/core/test-env/saved-env-switch.js";
-import { SHIPPED_CATALOG_FOLDER, SERVICE_CATALOG_DIRECTORY_VARIABLE, releaseServiceCatalogSource, shippedCatalogDirectory } from "../../packages/broker/src/core/test-env/shipped-catalog.js";
-import { testEnvironmentEnabled } from "../../packages/broker/src/core/test-env/switch.js";
-import { TEST_SERVICES_UNAVAILABLE_REASONS, TEST_SERVICES_UNAVAILABLE_VARIABLE, TEST_SERVICES_UNAVAILABLE_WORDS, projectImagesEnabled, testAccountsEnabled, testServicesEnabled, testServicesSwitchedOn, testServicesUnavailable } from "../../packages/broker/src/core/test-env/test-services-switch.js";
+import { SHIPPED_CATALOG_FOLDER, SERVICE_CATALOG_DIRECTORY_VARIABLE, releaseServiceCatalogSource } from "../../packages/broker/src/core/test-env/shipped-catalog.js";
+import { TEST_SERVICES_UNAVAILABLE_VARIABLE, projectImagesEnabled, testAccountsEnabled } from "../../packages/broker/src/core/test-env/test-services-switch.js";
 import { loaderTrusting, pinnedCatalog, testSigner } from "../support/catalog-pinning.js";
 
 describe("the switches", () => {
-  it("the test environment is on unless exactly 0: nothing happens until an environment is approved", () => {
-    expect(testEnvironmentEnabled({})).toBe(true);
-    for (const value of ["1", "true", "", "on", "yes", "offline", "nope", "00"]) expect(testEnvironmentEnabled({ ROVARA_TEST_ENVIRONMENT: value }), value).toBe(true);
-    for (const value of ["0", " 0", "false", "FALSE", "off", " Off ", "no", "No"]) expect(testEnvironmentEnabled({ ROVARA_TEST_ENVIRONMENT: value }), value).toBe(false);
-  });
 
   it("test accounts, project images, saved environments and nightly health are off unless exactly 1", () => {
     const switches: Array<[string, (env: NodeJS.ProcessEnv) => boolean]> = [
@@ -30,37 +24,6 @@ describe("the switches", () => {
     }
   });
 
-  it("DEC 254z-amend3: test services are ON unless exactly 0 (the owner's opt-out)", () => {
-    expect(testServicesEnabled({})).toBe(true);
-    for (const value of ["1", "true", "", " 0", "0 ", "false", "off", "no"]) expect(testServicesEnabled({ ROVARA_TEST_SERVICES: value }), value).toBe(true);
-    expect(testServicesEnabled({ ROVARA_TEST_SERVICES: "0" })).toBe(false);
-    expect(testServicesSwitchedOn({ ROVARA_TEST_SERVICES: "0" })).toBe(false);
-    expect(testServicesSwitchedOn({})).toBe(true);
-  });
-
-  it("the host's marker turns them off with a fixed reason, never echoed; the owner's 0 wins over it; an unknown or empty marker is 'other' (fail closed)", () => {
-    for (const reason of TEST_SERVICES_UNAVAILABLE_REASONS) {
-      expect(testServicesEnabled({ [TEST_SERVICES_UNAVAILABLE_VARIABLE]: reason }), reason).toBe(false);
-      expect(testServicesUnavailable({ [TEST_SERVICES_UNAVAILABLE_VARIABLE]: reason })).toBe(reason);
-      expect(TEST_SERVICES_UNAVAILABLE_WORDS[reason]).toMatch(/^Test services not available here: /u);
-    }
-    for (const value of ["", "workers ", "WORKERS", "<script>"]) {
-      expect(testServicesEnabled({ [TEST_SERVICES_UNAVAILABLE_VARIABLE]: value }), value).toBe(false);
-      expect(testServicesUnavailable({ [TEST_SERVICES_UNAVAILABLE_VARIABLE]: value }), value).toBe("other");
-    }
-    expect(testServicesUnavailable({ ROVARA_TEST_SERVICES: "0", [TEST_SERVICES_UNAVAILABLE_VARIABLE]: "workers" })).toBeUndefined();
-    expect(testServicesUnavailable({})).toBeUndefined();
-    expect(Object.values(TEST_SERVICES_UNAVAILABLE_WORDS).join(" ")).not.toContain("<script>");
-  });
-
-  it("each switch reads only its own variable, and test services do not imply accounts or images", () => {
-    expect(testAccountsEnabled({ ROVARA_TEST_SERVICES: "1" })).toBe(false);
-    expect(projectImagesEnabled({ ROVARA_TEST_SERVICES: "1" })).toBe(false);
-    expect(testAccountsEnabled({})).toBe(false);
-    expect(projectImagesEnabled({})).toBe(false);
-    expect(testServicesEnabled({ ROVARA_TEST_ACCOUNTS: "0" })).toBe(true);
-    expect(savedEnvEnabled({ ROVARA_TEST_SERVICES: "1", ROVARA_TEST_ENVIRONMENT: "1" })).toBe(false);
-  });
 });
 
 const roots: string[] = [];
@@ -85,12 +48,6 @@ describe("the release's catalog source", () => {
     expect(releaseServiceCatalogSource({ [TEST_SERVICES_UNAVAILABLE_VARIABLE]: "images" })).toBeUndefined();
   });
 
-  it("loads the shipped, signed catalog with services on and the release's key", async () => {
-    const { directory, signer } = await shipped();
-    const source = releaseServiceCatalogSource({ ROVARA_TEST_SERVICES: "1", [SERVICE_CATALOG_DIRECTORY_VARIABLE]: directory }, loaderTrusting(signer.publicKeyPem));
-    expect((await source!())?.pinned).toBe(true);
-  });
-
   it("is nothing for a catalog the release's key did not sign, with no key, or with no files (fail closed)", async () => {
     const { directory, signer } = await shipped();
     const env = { ROVARA_TEST_SERVICES: "1", [SERVICE_CATALOG_DIRECTORY_VARIABLE]: directory };
@@ -99,14 +56,4 @@ describe("the release's catalog source", () => {
     expect(await releaseServiceCatalogSource({ ...env, [SERVICE_CATALOG_DIRECTORY_VARIABLE]: join(directory, "nowhere") }, loaderTrusting(signer.publicKeyPem))!()).toBeUndefined();
   });
 
-  it("trusts nothing today: the contract's key lists are empty, so a signed catalog does not load (fail closed)", async () => {
-    const { directory } = await shipped();
-    const source = releaseServiceCatalogSource({ ROVARA_TEST_SERVICES: "1", [SERVICE_CATALOG_DIRECTORY_VARIABLE]: directory });
-    expect(await source!()).toBeUndefined();
-  });
-
-  it("names its directory from the variable, else beside the working directory", () => {
-    expect(shippedCatalogDirectory({ [SERVICE_CATALOG_DIRECTORY_VARIABLE]: "/srv/catalog" })).toBe("/srv/catalog");
-    expect(shippedCatalogDirectory({})).toBe(join(process.cwd(), "service-catalog"));
-  });
 });

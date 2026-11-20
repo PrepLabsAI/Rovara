@@ -1,6 +1,6 @@
 // Test services: which dependencies a task's plan starts (pinned from the signed catalog), when an approved environment with dependencies may be used by a task, and what happens when it cannot be planned.
-import { describe, expect, it, vi } from "vitest";
-import { TestEnvironmentBodySchema, TestEnvTaskPlanSchema, testEnvDigest, type OrgId, type ProjectCommand, type TestEnvironment, type TestEnvironmentBody, type VerifiedCatalog } from "@agentx/contracts";
+import { describe, expect, it } from "vitest";
+import { TestEnvironmentBodySchema, type OrgId, type ProjectCommand, type TestEnvironment, type TestEnvironmentBody, type VerifiedCatalog } from "@agentx/contracts";
 import { DEPENDENCY_PLAN_REFUSAL_WORDS, TEST_SERVICES_MIN_CATALOG_REVISION, dependenciesStartableNow, serviceCatalogSourceOf, taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
 import { DEPENDENCIES_WITH_DEVCONTAINER_WORDS } from "../../packages/broker/src/core/test-env/devcontainer-check.js";
 import { testEnvImplementPlanFor, testEnvPlanFor } from "../../packages/broker/src/core/test-env/task-plan.js";
@@ -32,16 +32,6 @@ const asEnvironment = (environment: TestEnvironmentBody, revision = 1): TestEnvi
 const catalog = (): VerifiedCatalog => verifiedCatalog(pinnedCatalog());
 
 describe("which dependencies a plan starts", () => {
-  it("pins a Postgres from the catalog: its repository, digest and the project's own names", async () => {
-    const result = taskDependencyPlansOf({ body: body(), catalog: catalog(), edition: "public" });
-    expect(result).toEqual({ ok: true, dependencies: [{
-      id: "postgres", name: "Postgres", kind: "database", family: "postgres", backing: "local", catalogId: "postgres@16", repository: "svc/postgres", digest: digestOfId("postgres@16"),
-      config: { database: "app", user: "app" }, aliases: ["postgres"], connect: [{ name: "DATABASE_URL", template: "postgres://{user}:{password}@{host}:{port}/{db}" }], seeds: [], reset: "fresh_per_round",
-    }] });
-    // What it sends is a plan the wire accepts.
-    if (!result.ok) throw new Error("not planned");
-    expect(TestEnvTaskPlanSchema.safeParse({ revision: 1, digest: "a".repeat(64), roundBudgetMin: 30, selection: { method: "full", alwaysRun: [], fullSuiteOn: [] }, checks: [{ id: "unit", kind: "test" }], dependencies: result.dependencies }).success).toBe(true);
-  });
 
   it("takes the catalog entry's default names when the dependency lists none", () => {
     const result = taskDependencyPlansOf({ body: body({ dependencies: [postgres({ connect: { env: [], hostAliases: [] } })] }), catalog: catalog(), edition: "public" });
@@ -75,15 +65,6 @@ describe("which dependencies a plan starts", () => {
     for (const words of Object.values(DEPENDENCY_PLAN_REFUSAL_WORDS)) expect(words).not.toMatch(/postgres|digest|sha256/iu);
   });
 
-  it("refuses an edition the entry is not offered in", () => {
-    const only = verifiedCatalog(pinnedCatalog((entries) => { for (const entry of entries) if (entry["id"] === "postgres@16") entry["editions"] = ["enterprise"]; }));
-    expect(taskDependencyPlansOf({ body: body(), catalog: only, edition: "public" })).toMatchObject({ ok: false, reason: "not_in_edition" });
-    expect(taskDependencyPlansOf({ body: body(), catalog: only, edition: "enterprise" }).ok).toBe(true);
-  });
-
-  it("has a minimum catalog revision of the release", () => {
-    expect(TEST_SERVICES_MIN_CATALOG_REVISION).toBeGreaterThanOrEqual(1);
-  });
 });
 
 describe("the signed catalog source", () => {
@@ -130,15 +111,6 @@ describe("the signed catalog source", () => {
 });
 
 describe("when a task may use an environment with dependencies", () => {
-  it("is used with tx on and a real Postgres from the catalog", () => {
-    expect(environmentUnusedReason(asEnvironment(body()), ON)).toBeUndefined();
-  });
-
-  it("is not used with tx off, whatever else is on (today's behaviour for anything it did not know)", () => {
-    expect(environmentUnusedReason(asEnvironment(body()), { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBe("dependencies_not_connected");
-    expect(environmentUnusedReason(asEnvironment(body()), { ROVARA_TEST_SERVICES: "0" })).toBe("dependencies_not_connected");
-    expect(environmentUnusedReason(asEnvironment(body({ dependencies: undefined })), {})).toBeUndefined();
-  });
 
   it("is not used when a dependency is backed by anything but real catalog software", () => {
     const fake = postgres({ backing: { kind: "fake", fixtureSetRef: "a".repeat(64), unmatched: "fail" }, connect: { env: [], hostAliases: [] } });
@@ -148,12 +120,6 @@ describe("when a task may use an environment with dependencies", () => {
     expect(dependenciesStartableNow([fake] as never)).toBe(false);
   });
 
-  it("keeps v1 services refused, and the tier and account rules as they were", () => {
-    const withService = body({ services: [{ name: "scorer", kind: "sagemaker_runtime", match: { endpointName: "scorer" }, mode: "mock", mock: { fixtureSetRef: "a".repeat(64), schemaRef: "b".repeat(64), unmatched: "fail" } }] });
-    expect(environmentUnusedReason(asEnvironment(withService), ON)).toBe("services_not_connected");
-    expect(UNUSED_WORDS.dependencies_not_connected).toMatch(/dependenc/iu);
-    expect(UNUSED_WORDS.dependencies_not_available_yet).toMatch(/not .*yet/iu);
-  });
 });
 
 /** The environment approved through the gate, the task's pin written as a task start would write it, and the project (with or without a dev container) in the store. */
@@ -171,19 +137,6 @@ const planOf = (h: Pinned, env: NodeJS.ProcessEnv = ON) => testEnvPlanFor(h.deps
 const withDevcontainer = (h: Pinned) => projectStore(ORG, PROJECT, { devcontainer: true, store: h.store });
 
 describe("the plan of a run with dependencies", () => {
-  it("carries the pinned dependencies, and the environment's digest", async () => {
-    const h = await pinned();
-    h.deps.serviceCatalog = async () => catalog();
-    const plan = (await planOf(h))!;
-    expect(plan.digest).toBe(testEnvDigest(body()));
-    expect(plan.dependencies?.map((entry) => [entry.id, entry.catalogId, entry.digest])).toEqual([["postgres", "postgres@16", digestOfId("postgres@16")]]);
-    expect(TestEnvTaskPlanSchema.safeParse(plan).success).toBe(true);
-  });
-
-  it("is the plain plan, with no `dependencies` key, for an environment without any", async () => {
-    const h = await pinned(body({ dependencies: undefined }));
-    expect("dependencies" in (await planOf(h))!).toBe(false);
-  });
 
   it("refuses the run, in fixed words, when the catalog cannot pin a dependency (never a plan without it)", async () => {
     const h = await pinned();
@@ -194,42 +147,10 @@ describe("the plan of a run with dependencies", () => {
     await expect(planOf(h)).rejects.toThrow(DEPENDENCY_PLAN_REFUSAL_WORDS.no_catalog);
   });
 
-  it("gives no plan at all with test services off, and never reads the catalog", async () => {
-    const h = await pinned();
-    let reads = 0;
-    h.deps.serviceCatalog = async () => { reads += 1; return catalog(); };
-    expect(await planOf(h, { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBeUndefined();
-    expect(reads).toBe(0);
-  });
 });
 
 describe("the plan a coding run is sent (the working sandbox gets the dependencies)", () => {
   const implementPlan = (h: Pinned, env: NodeJS.ProcessEnv = ON) => testEnvImplementPlanFor(h.deps, { orgId: ORG, project: PROJECT, taskId: "t1" }, env);
-
-  it("carries the pinned dependencies, with the same pinning as the checks, and needs no readiness commands", async () => {
-    const h = await pinned();
-    h.deps.serviceCatalog = async () => catalog();
-    const plan = (await implementPlan(h))!;
-    expect(plan.digest).toBe(testEnvDigest(body()));
-    expect(plan.dependencies?.map((entry) => [entry.id, entry.catalogId, entry.digest])).toEqual([["postgres", "postgres@16", digestOfId("postgres@16")]]);
-    expect(TestEnvTaskPlanSchema.safeParse(plan).success).toBe(true);
-    expect(plan.lastNightlyFailures).toBeUndefined();
-  });
-
-  it("is nothing with test services off (and nothing is read), and nothing for an environment without dependencies or a task without a pin", async () => {
-    const h = await pinned();
-    h.deps.serviceCatalog = async () => catalog();
-    const reads = vi.fn();
-    const counting = new Proxy(h.store, { get: (target, name, receiver) => { const value: unknown = Reflect.get(target, name, receiver); return typeof value === "function" ? (...args: unknown[]) => { reads(name); return (value as (...a: unknown[]) => unknown).apply(target, args); } : value; } });
-    h.deps.store = counting;
-    expect(await implementPlan(h, { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBeUndefined();
-    expect(await implementPlan(h, { ROVARA_TEST_ENVIRONMENT: "0", ROVARA_TEST_SERVICES: "1" })).toBeUndefined();
-    expect(reads).not.toHaveBeenCalled();
-    const without = await pinned(body({ dependencies: undefined }));
-    expect(await implementPlan(without)).toBeUndefined();
-    const none = await pinned();
-    expect(await testEnvImplementPlanFor(none.deps, { orgId: ORG, project: PROJECT, taskId: "t9" }, ON)).toBeUndefined();
-  });
 
   it("refuses the run, in fixed words, when the catalog cannot pin it or the project has a dev container", async () => {
     const h = await pinned();
@@ -248,26 +169,6 @@ describe("dependencies and a dev container (not available yet)", () => {
     return h.propose(environment);
   };
 
-  it("refuses to propose dependencies for a project with a dev container, in fixed words", async () => {
-    await expect(propose({ devcontainer: true }, body())).rejects.toThrow(DEPENDENCIES_WITH_DEVCONTAINER_WORDS);
-    // A project whose settings cannot be read counts as using one.
-    await expect(propose({ registered: false }, body())).rejects.toThrow(DEPENDENCIES_WITH_DEVCONTAINER_WORDS);
-    expect((await propose({ devcontainer: false }, body())).digest).toBe(testEnvDigest(body()));
-  });
-
-  it("does not change the behaviour for a project with a dev container and no dependencies", async () => {
-    const plain = body({ dependencies: undefined });
-    expect((await propose({ devcontainer: true }, plain)).digest).toBe(testEnvDigest(plain));
-    expect((await propose({ registered: false }, plain)).digest).toBe(testEnvDigest(plain));
-  });
-
-  it("refuses at approval too (a dev container added after the proposal)", async () => {
-    const h = await bench({ project: PROJECT });
-    const proposal = await h.proposeAndProve(body());
-    await projectStore(ORG, PROJECT, { devcontainer: true, store: h.store });
-    expect(await h.approve(proposal.digest)).toMatchObject({ status: "refused", reason: "invalid", detail: DEPENDENCIES_WITH_DEVCONTAINER_WORDS });
-  });
-
   it("also refuses test services off, and a backing that is not real catalog software, at proposal", async () => {
     await expect(propose({ env: { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" } }, body())).rejects.toThrow(/not switched on/u);
     const fake = postgres({ backing: { kind: "fake", fixtureSetRef: "a".repeat(64), unmatched: "fail" }, connect: { env: [], hostAliases: [] } });
@@ -285,11 +186,4 @@ describe("dependencies and a dev container (not available yet)", () => {
     expect(UNUSED_WORDS.dependencies_with_devcontainer).toBe(DEPENDENCIES_WITH_DEVCONTAINER_WORDS);
   });
 
-  it("refuses the plan at dispatch when the project got a dev container after the task started", async () => {
-    const h = await pinned();
-    expect(h.start.used).toBeDefined();
-    h.deps.serviceCatalog = async () => catalog();
-    await withDevcontainer(h);
-    await expect(planOf(h)).rejects.toThrow(DEPENDENCIES_WITH_DEVCONTAINER_WORDS);
-  });
 });

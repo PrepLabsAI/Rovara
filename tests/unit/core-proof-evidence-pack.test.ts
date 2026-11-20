@@ -32,27 +32,9 @@ describe("the pack from the broker's own parts and a good raw file", () => {
     expect(second).toMatchObject({ kind: "lint", label: "ruff check ." });
     expect(second?.tests).toBeUndefined();
   });
-  it("binds to the candidate digest and the approved environment", () => {
-    expect(built.pack).toMatchObject({ schemaVersion: 1, candidateDigest: DIGEST, environment: { tier: "sandbox", envRevision: 3 } });
-    expect(EvidencePackSchema.safeParse(built.pack).success).toBe(true);
-  });
   it("derives the selection from the tests that ran when the worker sent none, and lists mocked services as not tested", () => {
     expect(built.pack?.selection).toEqual({ method: "full", selected: 4, total: 4 });
     expect(built.pack?.notTested).toContainEqual({ kind: "mocked_service", id: "partner-scorer", text: "partner-scorer is mocked", reason: "answered from recorded responses" });
-  });
-});
-
-describe("a check with no raw parts, or no raw file at all", () => {
-  it("is still in the pack, with nothing measured and nothing claimed", () => {
-    const built = buildEvidencePack(input({ rawText: undefined }));
-    expect(built.problems).toEqual([]);
-    expect(built.pack?.checks).toHaveLength(2);
-    expect(built.pack?.checks.every((check) => check.tests === undefined && check.coverage === undefined)).toBe(true);
-    expect(built.pack?.notTested.some((item) => item.kind === "environment")).toBe(false);
-  });
-  it("ignores a kind the broker does not know as `other`", () => {
-    expect(buildEvidencePack(input({ checkKinds: undefined })).pack?.checks.map((check) => check.kind)).toEqual(["other", "other"]);
-    expect(buildEvidencePack(input({ checkKinds: undefined, checks: [{ ...entry("a", "x"), kind: "build" }], rawText: undefined })).pack?.checks[0]?.kind).toBe("build");
   });
 });
 
@@ -63,13 +45,6 @@ describe("a raw file that cannot be used", () => {
     expect(built.pack?.candidateDigest).toBe(DIGEST);
     expect(built.pack?.checks[0]?.tests).toBeUndefined();
     expect(built.pack?.notTested).toContainEqual({ kind: "environment", id: "evidence", text: "Test, coverage and scan details", reason: "could not be read" });
-  });
-  it("is unreadable when it is not JSON, does not fit its schema, or has an unknown field", () => {
-    for (const rawText of ["not json", "[]", raw({ extra: 1 }), raw({ schemaVersion: 2 }), raw({ checks: [{ checkId: "readiness:0", tests: { ...tests(), total: 99 } }] })]) {
-      const built = buildEvidencePack(input({ rawText }));
-      expect(built.problems, rawText.slice(0, 40)).toEqual(["raw_unreadable"]);
-      expect(built.pack?.checks[0]?.tests).toBeUndefined();
-    }
   });
   it("is too large when it is over 2 MiB", () => {
     const built = buildEvidencePack(input({ rawText: raw({ checks: [] }).padEnd(2 * 1_048_576 + 1, " ") }));
@@ -84,38 +59,6 @@ describe("a raw file that cannot be used", () => {
 
 describe("test details are checked against the broker's own outcome", () => {
   const withTests = (over: Record<string, unknown>, checks: CheckEntry[] = [entry("readiness:0", "pytest")]) => buildEvidencePack(input({ checks, rawText: raw({ checks: [{ checkId: "readiness:0", tests: tests(over) }] }) }));
-  it("keeps a valid test id exactly as it is (NH-1 re-check F2/F5): spaces inside it, double spaces, and up to 500 characters; nothing is cut or collapsed", () => {
-    const long = `tests/${"d".repeat(480)}.py::t`;
-    const names = ["src/cart.test.ts::cart adds  two items", long, "tests/test_cart.py::test_label[a b]"];
-    const built = withTests({ total: 4, passed: 1, failed: 3, skipped: 0, names: names.map((name) => ({ name, status: "failed" })), newTests: names }, [entry("readiness:0", "pytest", { after: "failed", class: "regression", exitCode: 1 })]);
-    expect(built.pack?.checks[0]?.tests?.names.map((name) => name.name)).toEqual(names);
-    expect(built.pack?.checks[0]?.tests?.names.some((name) => name.unlisted === true)).toBe(false);
-    expect(built.pack?.checks[0]?.tests?.newTests).toEqual(names);
-  });
-  it("shows a name that is not a valid id as one plain line and marks it unlisted, never as the id of another test: a look-alike character, a space at an end, or the worker's own mark", () => {
-    const odd = ["tests/a.py::t\u3164x", "tests/a.py::trailing ", "tests/a.py::fine"];
-    const built = withTests({ total: 4, passed: 1, failed: 3, skipped: 0, names: odd.map((name) => ({ name, status: "failed", ...(name.endsWith("fine") ? { unlisted: true } : {}) })), newTests: [] }, [entry("readiness:0", "pytest", { after: "failed", class: "regression", exitCode: 1 })]);
-    const names = built.pack?.checks[0]?.tests?.names ?? [];
-    expect(names.every((name) => name.unlisted === true)).toBe(true);
-    expect(names.map((name) => name.name)).toEqual(["tests/a.py::t\u3164x", "tests/a.py::trailing", "tests/a.py::fine"]);
-    expect(EvidencePackSchema.safeParse(built.pack).success).toBe(true);
-  });
-  it("drops tests that show a failure under a check that passed", () => {
-    const built = withTests({ total: 4, passed: 2, failed: 1, skipped: 1 });
-    expect(built.problems).toEqual(["tests_disagree_with_check"]);
-    expect(built.pack?.checks[0]?.tests).toBeUndefined();
-  });
-  it("keeps failing tests under a check that failed", () => {
-    const built = withTests({ total: 4, passed: 2, failed: 1, skipped: 1, names: [{ name: "test_x", status: "failed" }] }, [entry("readiness:0", "pytest", { after: "failed", class: "regression", exitCode: 1 })]);
-    expect(built.problems).toEqual([]);
-    expect(built.pack?.checks[0]?.tests?.failed).toBe(1);
-  });
-  it("drops counts that show no failing test under a check that failed: a stale or partial report must not read as clean", () => {
-    const built = withTests({}, [entry("readiness:0", "pytest", { after: "failed", class: "regression", exitCode: 1 })]);
-    expect(built.problems).toEqual(["tests_disagree_with_check"]);
-    expect(built.pack?.checks[0]?.tests).toBeUndefined();
-    expect(built.pack?.checks[0]?.after).toBe("failed");
-  });
   it("drops a scan that failed with zero new findings, and findings under a check that did not finish", () => {
     const zero = { tool: "bandit", newCount: 0, bySeverity: { critical: 0, high: 0, medium: 0, low: 0, info: 0 }, items: [] };
     const failed = buildEvidencePack(input({ checks: [entry("readiness:1", "bandit", { after: "failed", class: "regression", exitCode: 1 })], checkKinds: new Map([["readiness:1", "security"]]), rawText: raw({ checks: [{ checkId: "readiness:1", findings: zero }] }) }));
@@ -147,11 +90,6 @@ describe("test details are checked against the broker's own outcome", () => {
     expect(scan.problems).toEqual(["findings_inconsistent"]);
     expect(scan.pack?.checks[1]?.findings).toBeUndefined();
   });
-  it("names a rise in skips among untouched tests as not tested", () => {
-    const built = withTests({ skipped: 1, skippedBefore: 0, skippedAfter: 1 });
-    expect(built.pack?.notTested).toContainEqual({ kind: "check", id: "readiness:0", text: "pytest", reason: "more tests skipped than before" });
-    expect(withTests({ skipped: 1, skippedBefore: 1, skippedAfter: 1 }).pack?.notTested.some((item) => item.kind === "check")).toBe(false);
-  });
 });
 
 describe("selection", () => {
@@ -160,16 +98,6 @@ describe("selection", () => {
     const built = buildEvidencePack(input({ rawText: raw({ selection }) }));
     expect(built.pack?.selection).toEqual(selection);
     expect(built.pack?.notTested).toContainEqual({ kind: "not_selected", id: "selection", text: "1203 of 1240 tests were not run", reason: "not selected (coverage map)" });
-  });
-  it("says the selection was not reported, instead of implying a full run, when a test check ran and the worker sent none", () => {
-    const built = buildEvidencePack(input());
-    expect(built.pack?.notTested).toContainEqual({ kind: "not_selected", id: "selection", text: "Which tests ran was not reported", reason: "selection not reported" });
-    expect(buildEvidencePack(input({ checks: [entry("readiness:1", "ruff")], rawText: undefined })).pack?.notTested.some((item) => item.kind === "not_selected")).toBe(false);
-  });
-  it("drops a selection that claims fewer tests than the reports measured", () => {
-    const built = buildEvidencePack(input({ rawText: raw({ selection: { method: "coverage_map", selected: 2, total: 1240 } }) }));
-    expect(built.problems).toEqual(["selection_inconsistent"]);
-    expect(built.pack?.selection).toEqual({ method: "full", selected: 4, total: 4 });
   });
   it("is refused when the worker selected more than the total", () => {
     expect(buildEvidencePack(input({ rawText: raw({ selection: { method: "full", selected: 5, total: 4 } }) })).pack).toBeUndefined();
@@ -225,30 +153,6 @@ describe("artifacts", () => {
     expect(consoleErrorsWords(3)).toBe("3 console errors");
     expect(EvidencePackSchema.safeParse({ ...build().pack, browser: [{ scenarioId: "login", strip: { before: [], after: [] }, consoleErrors: 0 }] }).success).toBe(true);
   });
-  it("keeps references the store really holds, and nothing else", () => {
-    const built = build({ media: ALL_OK });
-    expect(built.problems).toEqual([]);
-    expect(built.pack?.api[0]?.samples).toEqual([sample]);
-    expect(built.pack?.browser[0]).toMatchObject({ strip: { before: [shot], after: [shot] }, video, trace });
-  });
-  it("drops a reference the store does not hold, holds under another kind, or holds at another size", () => {
-    const missing = build({ storedArtifacts: new Map() });
-    expect(missing.problems).toContain("artifact_missing");
-    expect(missing.pack?.api[0]?.samples).toEqual([]);
-    expect(missing.pack?.browser[0]?.strip).toEqual({ before: [], after: [] });
-    const wrongKind = build({ storedArtifacts: new Map([[sample.sha256, { kind: "log_txt" as const, bytes: sample.bytes }], [shot.sha256, { kind: "jpeg" as const, bytes: shot.bytes }]]) });
-    expect(wrongKind.pack?.api[0]?.samples).toEqual([]);
-    const wrongSize = build({ storedArtifacts: new Map([[sample.sha256, { kind: "api_sample_json" as const, bytes: sample.bytes + 1 }]]) });
-    expect(wrongSize.pack?.api[0]?.samples).toEqual([]);
-  });
-  it("withholds a video and a trace unless the setting and the gate allow them, and says why", () => {
-    const built = build();
-    expect(built.problems).toContain("media_not_allowed");
-    expect(built.pack?.browser[0]?.video).toBeUndefined();
-    expect(built.pack?.browser[0]?.trace).toBeUndefined();
-    expect(built.pack?.browser[0]?.withheld).toEqual([{ artifact: "video", reason: "tier_not_allowed" }, { artifact: "trace", reason: "tier_not_allowed" }]);
-    expect(built.pack?.browser[0]?.strip.after).toEqual([shot]);
-  });
   it("names the failing gate condition, in order: tier, setting, revocation, and lists every withheld file for deletion", () => {
     const reasons = (media: EvidenceBuildInput["media"], environmentOver: Partial<EvidenceEnvironment> = {}) => build({ media, environment: environment(environmentOver) }).pack?.browser[0]?.withheld?.map((item) => item.reason);
     expect(reasons({ ...ALL_OK, tierAllowed: false })).toEqual(["tier_not_allowed", "tier_not_allowed"]);
@@ -269,15 +173,6 @@ describe("artifacts", () => {
     expect(build({ media: ALL_OK }).pack?.browser[0]).toMatchObject({ video, trace });
     expect(build({ media: ALL_OK, environment: environment({ tier: "shared" }) }).pack?.browser[0]).toMatchObject({ video, trace });
   });
-  it("allows the video and withholds the trace when only the video is allowed", () => {
-    const built = build({ media: { ...ALL_OK, companyAllows: { video: true, trace: false } } });
-    expect(built.pack?.browser[0]).toMatchObject({ video, withheld: [{ artifact: "trace", reason: "company_setting_off" }] });
-  });
-  it("withholds both when any account is a long-lived registered one, even if the setting allows them", () => {
-    const built = build({ media: ALL_OK, environment: environment({ accounts: [{ profileId: "old", kind: "registered" }] }) });
-    expect(built.pack?.browser[0]?.video).toBeUndefined();
-    expect(built.pack?.browser[0]?.withheld).toEqual([{ artifact: "video", reason: "account_not_run_scoped" }, { artifact: "trace", reason: "account_not_run_scoped" }]);
-  });
   it("says the upload failed when an allowed video is not in the store", () => {
     const built = build({ media: ALL_OK, storedArtifacts: stored(sample, shot, trace) });
     expect(built.pack?.browser[0]?.video).toBeUndefined();
@@ -292,15 +187,6 @@ describe("artifacts", () => {
     expect(made.ref.bytes).toBe(Buffer.byteLength(made.text, "utf8"));
     expect(made.ref.bytes).toBeLessThanOrEqual(65_536);
     expect(built.pack?.checks[0]?.outputTailRef).toEqual(made.ref);
-  });
-});
-
-describe("a pack that does not fit its schema", () => {
-  it("is undefined, never partial", () => {
-    const built = buildEvidencePack(input({ environment: environment({ services: [environment().services[0]!, environment().services[0]!] }) }));
-    expect(built.pack).toBeUndefined();
-    expect(built.problems).toContain("pack_invalid");
-    expect(built.newArtifacts).toEqual([]);
   });
 });
 

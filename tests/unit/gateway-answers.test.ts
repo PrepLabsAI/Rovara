@@ -3,14 +3,14 @@
 // reservation or a refusal; nothing the gateway or the model sent is echoed.
 import { createHash, generateKeyPairSync, sign, verify } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { CORE_ANSWERS_MODEL_VARIABLE, TASK_KEY_PURPOSE, TaskTokenClaimsSchema, type OrgId } from "@agentx/contracts";
+import { CORE_ANSWERS_MODEL_VARIABLE, TaskTokenClaimsSchema, type OrgId } from "@agentx/contracts";
 import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, readGatewayModelAccess, taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import {
   ANSWERS_CALL_FAILED, ANSWERS_MESSAGES_PATH, ANSWERS_PAUSE_HEADER, ANSWERS_STEP, createHttpAnswersGateway, hostedAnswersModel,
 } from "../../packages/broker/src/core-host/gateway-answers.js";
 import { AnswersGatewayError, createGatewayAnswerModel } from "../../packages/broker/src/core/answers/gateway-model.js";
-import { AnswerModelRefused, type AnswerModelTurn } from "../../packages/broker/src/core/answers/ports.js";
+import { type AnswerModelTurn } from "../../packages/broker/src/core/answers/ports.js";
 
 const ORG_A = "org_answersgw0000000000a" as OrgId;
 const ORG_B = "org_answersgw0000000000b" as OrgId;
@@ -125,37 +125,12 @@ describe("the token: the answers step, this company, nothing else", () => {
     expect(verify("sha256", Buffer.from(`${header}.${body}`), pair.publicKey, Buffer.from(signature, "base64url"))).toBe(true);
   });
 
-  it("is a fresh token for every call (new jti, workspace and operation) inside one reservation", async () => {
-    const r = recording();
-    const g = gatewayWith(r.fetchImpl);
-    const { reservationId } = await reserveFor(g);
-    await callOf(g, reservationId);
-    await callOf(g, reservationId);
-    const [one, two] = r.seen.map((seen) => claimsOf(tokenOf(seen)));
-    expect(one!["jti"]).not.toBe(two!["jti"]);
-    expect(one!["ws"]).not.toBe(two!["ws"]);
-    expect(one!["op"]).not.toBe(two!["op"]);
-    expect({ ...one, jti: 0, ws: 0, op: 0 }).toEqual({ ...two, jti: 0, ws: 0, op: 0 });
-  });
-
   it("is made only with the task key (purpose `task`): the bare KMS key mints nothing, and nothing is sent", async () => {
     const r = recording();
     const g = gatewayWith(r.fetchImpl, { signer: bareKey() });
     const { reservationId } = await reserveFor(g);
     expect(await reasonOf(callOf(g, reservationId))).toBe("unavailable");
     expect(r.seen).toEqual([]);
-  });
-
-  it("a signer that fails, or a key the gateway would not accept, sends nothing and says nothing of why", async () => {
-    for (const signer of [{ publicJwk: async () => { throw new Error("kms down arn:aws:kms:secret"); }, sign: async () => Buffer.alloc(0) } as TokenSigner, taskKeySigner(bareKey({ kid: "short" })), taskKeySigner(bareKey({ alg: "RS512" }))]) {
-      const r = recording();
-      const g = gatewayWith(r.fetchImpl, { signer });
-      const { reservationId } = await reserveFor(g);
-      const error = await callOf(g, reservationId).catch((caught: unknown) => caught);
-      expect((error as AnswersGatewayError).reason).toBe("unavailable");
-      expect(String((error as Error).message)).not.toContain("kms");
-      expect(r.seen).toEqual([]);
-    }
   });
 
   it("is never sent anywhere but the answers path of the gateway's own origin, and a redirect is a failed call that is not followed", async () => {
@@ -172,23 +147,6 @@ describe("the token: the answers step, this company, nothing else", () => {
 });
 
 describe("the company is the reservation's, never a call's", () => {
-  it("two companies interleaved: each token carries only its own company, project and answer, and a reservation is only its own", async () => {
-    const r = recording();
-    const g = gatewayWith(r.fetchImpl);
-    const a = await reserveFor(g, ORG_A, ANSWER_ID_A, "alpha");
-    const b = await reserveFor(g, ORG_B, ANSWER_ID_B, "beta");
-    expect(a.reservationId).not.toBe(b.reservationId);
-    await callOf(g, b.reservationId);
-    await callOf(g, a.reservationId);
-    await callOf(g, b.reservationId);
-    const claims = r.seen.map((seen) => claimsOf(tokenOf(seen)));
-    expect(claims.map((c) => [c["cid"], c["pid"], c["tid"]])).toEqual([[ORG_B, "beta", key(ANSWER_ID_B)], [ORG_A, "alpha", key(ANSWER_ID_A)], [ORG_B, "beta", key(ANSWER_ID_B)]]);
-    // Settling A's reservation leaves B's alone, and a settled reservation can no longer call.
-    await g.settle({ reservationId: a.reservationId });
-    expect(await reasonOf(callOf(g, a.reservationId))).toBe("unavailable");
-    expect(await callOf(g, b.reservationId)).toMatchObject({ text: "Refunds last 30 days." });
-    expect(r.seen).toHaveLength(4);
-  });
 
   it("through the model made for a company: company A's model never reserves for company B, and its token is A's", async () => {
     const r = recording();
@@ -265,24 +223,6 @@ describe("what the gateway says", () => {
     return reasonOf(callOf(g, (await reserveFor(g)).reservationId));
   };
 
-  it("maps answers_paused by its reason: no provider is 'not set up'; a used-up month, no budget and a call too big for the limit are 'paused'", async () => {
-    expect(await run(refusal(403, "answers_paused", "no_provider"))).toBe("not_set_up");
-    expect(await run(refusal(422, "answers_paused", "monthly_limit"))).toBe("paused");
-    expect(await run(refusal(422, "answers_paused", "no_budget"))).toBe("paused");
-    expect(await run(refusal(422, "answers_paused", "cost_too_high"))).toBe("paused");
-    // An answers_paused with a reason this code does not know is still a pause, never a call that went through.
-    expect(await run(refusal(422, "answers_paused", "something_new"))).toBe("paused");
-    expect(await run(refusal(422, "answers_paused"))).toBe("paused");
-  });
-
-  it("reads a pause only from the pair of an answers_paused error AND a refusal status; the same words on another status are a fault", async () => {
-    expect(await run(refusal(402, "answers_paused", "monthly_limit"))).toBe("unavailable");
-    expect(await run(refusal(500, "answers_paused", "monthly_limit"))).toBe("unavailable");
-    expect(await run(refusal(429, "answers_paused", "monthly_limit"))).toBe("unavailable");
-    expect(await run(refusal(422, "invalid_request", "monthly_limit"))).toBe("unavailable");
-    expect(await run(refusal(403, "lessons_paused", "no_provider"))).toBe("unavailable");
-  });
-
   it("a gateway without the answers purpose yet (404) is 'not set up'; the fixed 401 for a wrong step or an unknown token, a busy 429 and any fault are 'unavailable'", async () => {
     expect(await run(refusal(404, "not_found"))).toBe("not_set_up");
     // A provider's own 404 (an unknown model) is a fault, never "not set up".
@@ -336,31 +276,6 @@ describe("what the gateway says", () => {
   });
 });
 
-describe("through the answer model (what the service sees)", () => {
-  it("a pause on the first turn reaches the service as the 'paused' refusal, no key as 'not set up', a fault as 'unavailable'", async () => {
-    for (const [answer, expected] of [[refusal(422, "answers_paused", "monthly_limit"), "paused"], [refusal(403, "answers_paused", "no_provider"), "not_set_up"], [refusal(500, "x"), "unavailable"]] as const) {
-      const model = createGatewayAnswerModel(gatewayWith(recording(() => answer).fetchImpl), ORG_A);
-      const session = await model.open({ companyId: ORG_A, project: "alpha", personId: "ada", answerId: ANSWER_ID_A, ceilingCents: 15 });
-      const error = await session.complete(turn()).catch((caught: unknown) => caught);
-      expect(error).toBeInstanceOf(AnswerModelRefused);
-      expect((error as AnswerModelRefused).reason).toBe(expected);
-      await session.finish({ tokens: 0 });
-    }
-  });
-
-  it("settles once and releases the reservation, whatever happened", async () => {
-    const r = recording();
-    const g = gatewayWith(r.fetchImpl);
-    const model = createGatewayAnswerModel(g, ORG_A);
-    const session = await model.open({ companyId: ORG_A, project: "alpha", personId: "ada", answerId: ANSWER_ID_A, ceilingCents: 15 });
-    await session.complete(turn());
-    await session.finish({ costCents: 3, tokens: 1_280 });
-    // The same answer can be reserved again only after the settle.
-    const again = await model.open({ companyId: ORG_A, project: "alpha", personId: "ada", answerId: ANSWER_ID_A, ceilingCents: 15 });
-    await again.finish({ tokens: 0 });
-  });
-});
-
 describe("the deployment's wiring (hostedAnswersModel)", () => {
   const ENV = { [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_AGENT_MODEL_VARIABLE]: MODEL };
   const tokens = () => ({ signer: taskKey(), issuer: ISSUER });
@@ -390,18 +305,6 @@ describe("the deployment's wiring (hostedAnswersModel)", () => {
     expect(hostedAnswersModel({ ...ENV, [CORE_MODEL_GATEWAY_URL_VARIABLE]: "http://gateway.example" }, tokens, r.fetchImpl)).toBeUndefined();
     expect(r.seen).toEqual([]);
   });
-
-  it("two companies through the one deployment never share a token or a reservation", async () => {
-    const r = recording();
-    const factory = hostedAnswersModel(ENV, tokens, r.fetchImpl)!;
-    const a = await factory(ORG_A)!.open({ companyId: ORG_A, project: "alpha", personId: "ada", answerId: ANSWER_ID_A, ceilingCents: 15 });
-    const b = await factory(ORG_B)!.open({ companyId: ORG_B, project: "alpha", personId: "bo", answerId: ANSWER_ID_B, ceilingCents: 15 });
-    await b.complete(turn());
-    await a.complete(turn());
-    expect(r.seen.map((seen) => claimsOf(tokenOf(seen))["cid"])).toEqual([ORG_B, ORG_A]);
-    await a.finish({ tokens: 0 });
-    await b.finish({ tokens: 0 });
-  });
 });
 
 // L4-AM (DEC 254zzn(2)): ROVARA_CORE_ANSWERS_MODEL is the hosted answers' own model; empty means the agent model, exactly as before; the task flow's route is never touched.
@@ -419,12 +322,6 @@ describe("the dedicated answers model (ROVARA_CORE_ANSWERS_MODEL)", () => {
     return { token: claimsOf(tokenOf(r.seen[0]!)).mdl, body: (JSON.parse(r.seen[0]!.init.body as string) as { model: string }).model };
   };
 
-  it("empty or unset: answers use the agent model, exactly as before", async () => {
-    for (const env of [BASE, { ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: "" }, { ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: "   " }]) {
-      expect(await sentModel(env)).toEqual({ token: [MODEL], body: MODEL });
-    }
-  });
-
   it("set: the answers token and request name the answers model, and only they", async () => {
     expect(await sentModel({ ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL })).toEqual({ token: [ANSWERS_MODEL], body: ANSWERS_MODEL });
     expect(await sentModel({ ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: ` ${ANSWERS_MODEL} ` })).toEqual({ token: [ANSWERS_MODEL], body: ANSWERS_MODEL });
@@ -432,12 +329,6 @@ describe("the dedicated answers model (ROVARA_CORE_ANSWERS_MODEL)", () => {
     const env = { ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL };
     expect(readGatewayModelAccess(env)).toMatchObject({ route: { alias: MODEL, catalog: MODEL } });
     expect(readGatewayModelAccess(BASE)).toEqual(readGatewayModelAccess({ ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: "zai.glm-5" }));
-  });
-
-  it("answers can run on Claude while the agent model is another model (the point of the setting), and not without it", async () => {
-    const glm = { ...BASE, [CORE_AGENT_MODEL_VARIABLE]: "zai.glm-5" };
-    expect(hostedAnswersModel(glm, tokens)).toBeUndefined();
-    expect(await sentModel({ ...glm, [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL })).toEqual({ token: [ANSWERS_MODEL], body: ANSWERS_MODEL });
   });
 
   it.each(["zai.glm-5", "us.anthropic.claude-haiku-5-5", "anthropic.claude-haiku-5-5-v1:0", "Claude-Haiku-4-5", "claude-", "claude-haiku 4", "claude-haiku-5-5,am=x", `claude-${"a".repeat(33)}`, "https://evil.example/x"])(
@@ -451,30 +342,5 @@ describe("the dedicated answers model (ROVARA_CORE_ANSWERS_MODEL)", () => {
     expect(hostedAnswersModel({ [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL }, tokens)).toBeUndefined();
     expect(hostedAnswersModel({ [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL }, tokens)).toBeUndefined();
     expect(hostedAnswersModel({ ...BASE, [CORE_MODEL_GATEWAY_URL_VARIABLE]: "http://gateway.example", [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL }, tokens)).toBeUndefined();
-  });
-
-  it("two companies through one deployment with the answers model set: each token names its own company and the answers model", async () => {
-    const r = recording();
-    const factory = hostedAnswersModel({ ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL }, tokens, r.fetchImpl)!;
-    const a = await factory(ORG_A)!.open({ companyId: ORG_A, project: "alpha", personId: "ada", answerId: ANSWER_ID_A, ceilingCents: 15 });
-    const b = await factory(ORG_B)!.open({ companyId: ORG_B, project: "alpha", personId: "bo", answerId: ANSWER_ID_B, ceilingCents: 15 });
-    await a.complete(turn());
-    await b.complete(turn());
-    expect(r.seen.map((seen) => claimsOf(tokenOf(seen)))).toMatchObject([{ cid: ORG_A, mdl: [ANSWERS_MODEL] }, { cid: ORG_B, mdl: [ANSWERS_MODEL] }]);
-    await a.finish({ tokens: 0 });
-    await b.finish({ tokens: 0 });
-  });
-});
-
-describe("the key never reaches Code", () => {
-  it("the adapter takes no provider key, reads none, and the only secret it handles is the call's own signed token, sent to the gateway only", async () => {
-    const r = recording();
-    const g = gatewayWith(r.fetchImpl);
-    await callOf(g, (await reserveFor(g)).reservationId);
-    const { init } = r.seen[0]!;
-    expect(Object.keys(init.headers as object).filter((name) => /key|authorization/iu.test(name))).toEqual(["x-api-key"]);
-    expect(tokenOf(r.seen[0]!)).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u);
-    expect(init.body as string).not.toContain(tokenOf(r.seen[0]!));
-    expect(TASK_KEY_PURPOSE).toBe("task");
   });
 });

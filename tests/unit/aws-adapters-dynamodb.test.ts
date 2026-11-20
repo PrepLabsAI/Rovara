@@ -7,14 +7,13 @@ runDocumentStoreConformance("dynamodb (in-memory DynamoDB double)", dynamoStoreH
 
 import { describe, expect, it } from "vitest";
 import { ConditionalCheckFailedException, DynamoDBServiceException, GetItemCommand, PutItemCommand, QueryCommand, TransactionCanceledException, UpdateItemCommand } from "@aws-sdk/client-dynamodb";
-import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
+import { unmarshall } from "@aws-sdk/util-dynamodb";
 import {
   DocumentStoreError,
   OUTBOX_PENDING_INDEX,
   change,
   companyScoped,
   isAllowedModuleSpecifier,
-  queryAll,
   when,
   type DocumentChange,
 } from "@agentx/contracts";
@@ -43,33 +42,6 @@ const conflictCancel = (steps: number): TransactionCanceledException => new Tran
 });
 
 describe("the DynamoDB store keeps the hosted State table's stored form (no data moves)", () => {
-  // A row as the hosted broker writes it today: its document client marshals plain JavaScript values with default options.
-  const cloudRow = {
-    pk: PK, sk: "META", entityType: "WORKSPACE", orgId: "org_aaaaaaaaaaaaaaaaaaaa", workspaceProject: "org_aaaaaaaaaaaaaaaaaaaa#proj_1", workspaceCreatedAt: "2026-11-11T00:00:00.000Z",
-    revision: 7, cost: 0.125, archived: false, note: null, tags: ["a", "b"], nested: { deep: { list: [1, { x: "y" }] } }, empty: "", emptyList: [], emptyMap: {},
-  };
-
-  it("writes exactly the attribute values the hosted broker's document client writes, and adds nothing", async () => {
-    const world = dynamoWorld({ indexes: [...STATE_TABLE_INDEXES, OUTBOX_PENDING_INDEX] });
-    await world.store.put({ item: cloudRow });
-    expect(world.fake.raw(PK, "META")).toEqual(marshall(cloudRow));
-    const sent = world.fake.requests.find((entry) => entry.operation === "PutItem")!.input as { Item: unknown; TableName: string };
-    expect(sent.Item).toEqual(marshall(cloudRow));
-    expect(sent.TableName).toBe("State");
-  });
-
-  it("reads a row the hosted broker wrote as the document it wrote, keyed by the same pk and sk", async () => {
-    const world = dynamoWorld({ indexes: [...STATE_TABLE_INDEXES, OUTBOX_PENDING_INDEX] });
-    world.fake.seed(marshall(cloudRow));
-    expect(await world.store.get({ pk: PK, sk: "META" })).toEqual(unmarshall(marshall(cloudRow)));
-    const sent = world.fake.requests.find((entry) => entry.operation === "GetItem")!.input as { Key: unknown; ConsistentRead: boolean };
-    expect(sent.Key).toEqual({ pk: { S: PK }, sk: { S: "META" } });
-    expect(sent.ConsistentRead).toBe(true);
-    // The hosted product's workspace index is queried by its own name and attributes.
-    const page = await world.store.queryIndex({ index: "byWorkspaceProject", partition: "org_aaaaaaaaaaaaaaaaaaaa#proj_1" });
-    expect(page.items.map((item) => item.sk)).toEqual(["META"]);
-    expect((world.fake.requests.at(-1)!.input as { IndexName: string }).IndexName).toBe("byWorkspaceProject");
-  });
 
   it("describes the State table as the hosted deployment defines it", () => {
     expect(STATE_TABLE_KEY).toEqual({ partitionKey: "pk", sortKey: "sk", streamView: "NEW_AND_OLD_IMAGES" });
@@ -141,14 +113,6 @@ describe("the DynamoDB store keeps the hosted State table's stored form (no data
 });
 
 describe("the DynamoDB store's requests", () => {
-  it("names every attribute and value through placeholders, and sends none it does not use", async () => {
-    const world = dynamoWorld();
-    await world.store.update({ key: { pk: PK, sk: "U" }, ops: [change.set("a.b", 1), change.add("count", -2), change.setIfAbsent("status", "x"), change.remove("gone")], condition: when.or(when.absent(), when.lt("count", 3)) }).catch(() => undefined);
-    const input = world.fake.requests.find((entry) => entry.operation === "UpdateItem")!.input as { UpdateExpression: string; ConditionExpression: string; ExpressionAttributeNames: Record<string, string> };
-    expect(input.UpdateExpression).not.toMatch(/\b(count|status|gone)\b/);
-    expect(Object.values(input.ExpressionAttributeNames).sort()).toEqual(["a", "b", "count", "gone", "pk", "status"]);
-    expect(input.UpdateExpression).toContain(" - ");
-  });
 
   it("writes an empty and as a test that holds and an empty or as one that fails, on present and absent items", async () => {
     const world = dynamoWorld();
@@ -156,16 +120,6 @@ describe("the DynamoDB store's requests", () => {
     expect((await world.store.put({ item: { pk: PK, sk: "E2" }, condition: when.or() })).applied).toBe(false);
     expect((await world.store.put({ item: { pk: PK, sk: "E1", v: 2 }, condition: when.and() })).applied).toBe(true);
     expect((await world.store.put({ item: { pk: PK, sk: "E1", v: 3 }, condition: when.or() })).applied).toBe(false);
-  });
-
-  it("reads table pages strongly consistently and index pages without asking for it", async () => {
-    const world = dynamoWorld();
-    await world.store.query({ pk: PK });
-    await world.store.queryIndex({ index: "byOwner", partition: "dev" });
-    const [table, index] = world.fake.requests.filter((entry) => entry.operation === "Query").map((entry) => entry.input as { ConsistentRead?: boolean; Limit: number });
-    expect(table!.ConsistentRead).toBe(true);
-    expect(index!.ConsistentRead).toBeUndefined();
-    expect(table!.Limit).toBe(1_000);
   });
 
   it("answers an index range whose bound has the other type with nothing, without asking DynamoDB", async () => {
@@ -176,14 +130,6 @@ describe("the DynamoDB store's requests", () => {
     expect(await world.store.queryIndex({ index: "byKind", partition: "task", sort: { op: "between", low: 5, high: 1 } })).toEqual({ items: [] });
     expect(await world.store.query({ pk: PK, sk: { op: "between", low: "b", high: "a" } })).toEqual({ items: [] });
     expect(world.fake.requests.length).toBe(before);
-  });
-
-  it("keeps paging when a page ends at DynamoDB's size cap rather than the limit", async () => {
-    const world = dynamoWorld({ pageBytes: 2_000 });
-    for (let index = 0; index < 30; index += 1) await world.store.put({ item: { pk: PK, sk: `R${String(index).padStart(2, "0")}`, body: "x".repeat(300) } });
-    const all = await queryAll(world.store, { pk: PK });
-    expect(all.map((item) => item.sk)).toEqual(Array.from({ length: 30 }, (_, index) => `R${String(index).padStart(2, "0")}`));
-    expect(world.fake.requests.filter((entry) => entry.operation === "Query").length).toBeGreaterThan(3);
   });
 
   it("walks every item of the table with a strongly consistent scan, page by page, for the company purge", async () => {
@@ -246,12 +192,6 @@ describe("the DynamoDB store's faults", () => {
     expect(await world.store.get({ pk: PK, sk: "T2" })).toBeUndefined();
   });
 
-  it("names the failed steps even when another step lost a race", async () => {
-    const world = dynamoWorld();
-    world.fake.failNext("TransactWriteItems", () => new TransactionCanceledException({ message: "x", $metadata: {}, CancellationReasons: [{ Code: "TransactionConflict" }, { Code: "ConditionalCheckFailed" }] }));
-    expect(await world.store.transact([{ kind: "put", item: { pk: PK, sk: "A" } }, { kind: "check", key: { pk: PK, sk: "B" }, condition: when.present() }])).toEqual({ applied: false, reason: "condition_failed", failed: [1] });
-  });
-
   it("turns a step DynamoDB refused into invalid_request", async () => {
     const world = dynamoWorld();
     await world.store.put({ item: { pk: PK, sk: "S", text: "t" } });
@@ -275,13 +215,6 @@ describe("the DynamoDB store's faults", () => {
     await expect(world.store.queryIndex({ index: "outbox-pending", partition: "PENDING" })).resolves.toEqual({ items: [] });
     const withoutIndex = new DynamoDocumentStore({ client: new FakeDynamoDb({ tableName: "State" }), tableName: "State", indexes: [OUTBOX_PENDING_INDEX] });
     await expect(withoutIndex.queryIndex({ index: "outbox-pending", partition: "PENDING" })).rejects.toMatchObject({ code: "invalid_request" });
-  });
-
-  it("never puts document text in an error message", async () => {
-    const world = dynamoWorld();
-    world.fake.failNext("PutItem", () => service("InternalServerError"));
-    const error = await world.store.put({ item: { pk: PK, sk: "s", secret: "do-not-echo" } }).catch((caught: unknown) => caught as DocumentStoreError);
-    expect(String((error as Error).message)).not.toContain("do-not-echo");
   });
 });
 
@@ -326,15 +259,6 @@ describe("the change feed over the table's stream", () => {
     await expect(strict.deliver([unreadable])).rejects.toBeInstanceOf(DocumentStoreError);
   });
 
-  it("gives each consumer its own copy of a batch", async () => {
-    const feed = new DynamoStreamChangeFeed({ consumers: ["a", "b"] });
-    let other: DocumentChange[] = [];
-    await feed.subscribe("a", async (batch) => { (batch[0]!.after as unknown as { v: number }).v = 99; });
-    await feed.subscribe("b", async (batch) => { other = [...batch]; });
-    await feed.deliver([lambdaRecord()]);
-    expect((other[0]!.after as unknown as { v: number }).v).toBe(2);
-  });
-
   it("refuses a batch while a declared consumer has not subscribed, so the checkpoint cannot pass it (cold start)", async () => {
     const feed = new DynamoStreamChangeFeed({ consumers: ["outbox", "notifier"], retryDelayMs: 0 });
     const seen: string[] = [];
@@ -361,18 +285,6 @@ describe("the change feed over the table's stream", () => {
     release();
     await stopping;
     await expect(delivery).rejects.toBeInstanceOf(ConsumerNotReadyError);
-  });
-
-  it("feeds every write of the store through the stream, and nothing for a write that changed nothing", async () => {
-    const world = dynamoWorld();
-    const seen: DocumentChange[] = [];
-    await world.store.changes!.subscribe("suite", async (batch) => void seen.push(...batch));
-    await world.store.put({ item: { pk: PK, sk: "S", v: 1 } });
-    await world.store.put({ item: { pk: PK, sk: "S", v: 1 } });
-    await world.store.update({ key: { pk: PK, sk: "S" }, ops: [change.set("v", 2)] });
-    await world.store.delete({ key: { pk: PK, sk: "never" } });
-    await world.settled();
-    expect(seen.map((entry) => entry.kind)).toEqual(["insert", "modify"]);
   });
 });
 

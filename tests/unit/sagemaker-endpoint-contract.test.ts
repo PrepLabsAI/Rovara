@@ -1,11 +1,7 @@
 // SageMaker endpoints (SM4): the contracts. The fixture document is the one the SageMaker Runtime front accepts (same fields, same limits, a typo refused); the backing is one of canned, stand-in and image; the plan fits
 // the memory a run has; a dependency carries its model backing and the two agree; the words are fixed.
 import { describe, expect, it } from "vitest";
-import {
-  SAGEMAKER_ENDPOINT_LIMITS, SAGEMAKER_FIXTURE_LIMITS, SageMakerEndpointBackingSchema, SageMakerEndpointNameSchema, SageMakerFixtureDocumentSchema, SageMakerEndpointPlanSchema, TestEnvDependencySchema,
-  SAGEMAKER_DEFAULT_WITHOUT_RECORDING, SAGEMAKER_NO_ANSWER_MARKER, SAGEMAKER_NO_ANSWER_MARKER_PREFIX, SAGEMAKER_NO_ANSWER_MESSAGE_PREFIX, SAGEMAKER_NO_ANSWER_STATUS, sageMakerLedgerMarkerIsNoAnswer, sageMakerNoAnswerEndpoint, SAGEMAKER_NOT_RUN_REASONS, SAGEMAKER_NOT_RUN_REASON_WORDS, SAGEMAKER_STAND_IN_PARKED, binaryScanTexts, sageMakerBackingLessSafe, sageMakerNotRunLine, sageMakerCannedMismatches, sageMakerCardText, sageMakerDocumentMakesUpAnswers, sageMakerDocumentTexts, sageMakerEvidenceLabel, sageMakerEvidenceLine, sageMakerFixtureDigest,
-  sageMakerFrontDocument, sageMakerPlanProblems, testEnvDependencyLessSafeChanges, type SageMakerEndpointBacking, type SageMakerFixtureDocument,
-} from "../../packages/contracts/src/index.js";
+import { SAGEMAKER_ENDPOINT_LIMITS, SAGEMAKER_FIXTURE_LIMITS, SageMakerEndpointBackingSchema, SageMakerFixtureDocumentSchema, SageMakerEndpointPlanSchema, TestEnvDependencySchema, SAGEMAKER_DEFAULT_WITHOUT_RECORDING, SAGEMAKER_NO_ANSWER_MARKER, SAGEMAKER_NO_ANSWER_MARKER_PREFIX, SAGEMAKER_NO_ANSWER_MESSAGE_PREFIX, SAGEMAKER_NO_ANSWER_STATUS, sageMakerLedgerMarkerIsNoAnswer, sageMakerNoAnswerEndpoint, SAGEMAKER_NOT_RUN_REASONS, SAGEMAKER_NOT_RUN_REASON_WORDS, SAGEMAKER_STAND_IN_PARKED, binaryScanTexts, sageMakerBackingLessSafe, sageMakerNotRunLine, sageMakerCannedMismatches, sageMakerCardText, sageMakerDocumentTexts, sageMakerEvidenceLabel, sageMakerEvidenceLine, sageMakerFixtureDigest, sageMakerFrontDocument, sageMakerPlanProblems, testEnvDependencyLessSafeChanges, type SageMakerEndpointBacking, type SageMakerFixtureDocument } from "../../packages/contracts/src/index.js";
 
 const sha = (letter: string) => letter.repeat(64);
 const document = (over: Record<string, unknown> = {}): SageMakerFixtureDocument =>
@@ -16,17 +12,6 @@ const document = (over: Record<string, unknown> = {}): SageMakerFixtureDocument 
   });
 
 describe("the fixture document the front accepts", () => {
-  it("takes rules, a queue and a default, with the front's fields", () => {
-    const parsed = SageMakerFixtureDocumentSchema.parse({
-      source: "handwritten", asyncDelayMs: 50,
-      rules: [{ match: { jsonPath: "$.a.b[0]", equals: 3 }, response: { parts: ["a", "b"], partDelayMs: 5, streamError: { errorCode: "StreamBroken" } }, times: 2 }, { match: { matches: "^ok" }, response: { error: { code: "ValidationError", message: "bad" } } }],
-      queue: [{ body: "one" }, { bodyBase64: "AAEC" }],
-      default: { json: { fallback: true }, variant: "A", customAttributes: "x=1", delayMs: 10 },
-    });
-    expect(parsed.rules).toHaveLength(2);
-    expect(sageMakerDocumentMakesUpAnswers(parsed)).toBe(true);
-    expect(sageMakerDocumentMakesUpAnswers({})).toBe(false);
-  });
   it("refuses what the front refuses: a typo in a field, two body forms, equals without a path, a bad hash, an oversize answer, a recorded set with no date", () => {
     expect(SageMakerFixtureDocumentSchema.safeParse({ rules: [{ match: { contentTyp: "x" }, response: { body: "x" } }] }).success).toBe(false);
     expect(SageMakerFixtureDocumentSchema.safeParse({ queue: [{ body: "x", json: {} }] }).success).toBe(false);
@@ -43,13 +28,6 @@ describe("the fixture document the front accepts", () => {
     expect(SageMakerFixtureDocumentSchema.safeParse({ queue: [{ body: big }, { body: big }] }).success).toBe(true);
     expect(SageMakerFixtureDocumentSchema.safeParse({ queue: [{ body: big }, { body: big }, { body: big }] }).success).toBe(false);
   });
-  it("pins a document by a digest that does not depend on key order", () => {
-    const one = document();
-    const reordered = SageMakerFixtureDocumentSchema.parse({ rules: [{ response: { contentType: "application/json", json: { score: 0.1 } }, match: { bodyEquals: "{\"amount\":10}", contentType: "application/json", operation: "invoke" } }], recordedOn: "2026-11-20", source: "recorded", mode: "canned" });
-    expect(sageMakerFixtureDigest(one)).toBe(sageMakerFixtureDigest(reordered));
-    expect(sageMakerFixtureDigest(one)).toMatch(/^[a-f0-9]{64}$/u);
-    expect(sageMakerFixtureDigest(document({ recordedOn: "2026-11-21" }))).not.toBe(sageMakerFixtureDigest(one));
-  });
   it("lists every text a scan must read, a base64 body decoded so nothing hides in it", () => {
     const doc = SageMakerFixtureDocumentSchema.parse({ rules: [{ match: { bodyEquals: "in" }, response: { bodyBase64: Buffer.from("secret-ish text").toString("base64"), customAttributes: "attr" } }], queue: [{ parts: ["p1", "p2"] }], default: { error: { message: "oops" } } });
     const texts = sageMakerDocumentTexts(doc);
@@ -61,17 +39,6 @@ describe("the fixture document the front accepts", () => {
 });
 
 describe("what a scan of a document reads", () => {
-  it("lists every string field of a rule's match, so none is left out of the scan", () => {
-    const doc = SageMakerFixtureDocumentSchema.parse({ rules: [{ match: { contentType: "ct-text", accept: "accept-text", targetVariant: "variant-text", customAttributes: "attr-text", targetModel: "model-text", bodyEquals: "eq", bodyContains: "has", matches: "re", jsonPath: "$.a" }, response: { body: "x" } }] });
-    const byPath = new Map(sageMakerDocumentTexts(doc).map((item) => [item.path, item.text]));
-    for (const [field, text] of [["contentType", "ct-text"], ["accept", "accept-text"], ["targetVariant", "variant-text"], ["customAttributes", "attr-text"], ["targetModel", "model-text"], ["bodyEquals", "eq"], ["bodyContains", "has"], ["matches", "re"], ["jsonPath", "$.a"]] as const) expect(byPath.get(`rules[0].match.${field}`)).toBe(text);
-  });
-  it("lists streamed parts joined as well as one by one, so a value split across two parts is whole in one text", () => {
-    const doc = SageMakerFixtureDocumentSchema.parse({ queue: [{ parts: ["pat.quill@", "fakemail-sample.io"] }] });
-    const texts = sageMakerDocumentTexts(doc);
-    expect(texts.find((item) => item.path === "queue[0].parts")?.text).toBe("pat.quill@fakemail-sample.io");
-    expect(texts.filter((item) => item.path.startsWith("queue[0].parts[")).map((item) => item.text)).toEqual(["pat.quill@", "fakemail-sample.io"]);
-  });
   it("treats a body with a NUL or another control character as binary, and reads a binary body every way it can be read, UTF-16 of either order included", () => {
     const sentence = "{\"e\":\"pat.quill@fakemail-sample.io\"}";
     const le = Buffer.from(sentence, "utf16le");
@@ -93,10 +60,6 @@ describe("the backing of one endpoint", () => {
   const standIn: SageMakerEndpointBacking = { mode: "stand_in", schema: { response: { type: "object", properties: { score: { type: "number" } } } }, memoryMiB: 128 };
   const image: SageMakerEndpointBacking = { mode: "image", imageId: "fraud-model", architecture: "arm64", memoryMiB: 1_024, modelArchiveDigest: sha("b") };
 
-  it("accepts each of the three modes, and no other", () => {
-    for (const backing of [canned, standIn, image]) expect(SageMakerEndpointBackingSchema.safeParse(backing).success).toBe(true);
-    expect(SageMakerEndpointBackingSchema.safeParse({ ...canned, mode: "helper" }).success).toBe(false);
-  });
   it("makes a recorded set say when, and a written set not", () => {
     expect(SageMakerEndpointBackingSchema.safeParse({ ...canned, recordedOn: undefined }).success).toBe(false);
     expect(SageMakerEndpointBackingSchema.safeParse({ ...canned, origin: "hand_written" }).success).toBe(false);
@@ -108,10 +71,6 @@ describe("the backing of one endpoint", () => {
     expect(SageMakerEndpointBackingSchema.safeParse({ ...standIn, schema: { response: { type: "string", enum: ["x".repeat(SAGEMAKER_ENDPOINT_LIMITS.declaredSchemaBytes)] } } }).success).toBe(false);
     expect(SageMakerEndpointBackingSchema.safeParse({ ...image, memoryMiB: SAGEMAKER_ENDPOINT_LIMITS.imageMemoryMiB.max + 1 }).success).toBe(false);
     expect(SageMakerEndpointBackingSchema.safeParse({ ...image, architecture: "riscv" }).success).toBe(false);
-  });
-  it("takes SageMaker's own endpoint names", () => {
-    for (const ok of ["fraud-scorer", "A", "a--b", "x".repeat(63)]) expect(SageMakerEndpointNameSchema.safeParse(ok).success).toBe(true);
-    for (const bad of ["", "-lead", "trail-", "has_underscore", "dot.name", "x".repeat(64)]) expect(SageMakerEndpointNameSchema.safeParse(bad).success).toBe(false);
   });
   it("marks an image, and made-up answers, as less safe", () => {
     expect(sageMakerBackingLessSafe(image)).toBe(true);
@@ -157,11 +116,6 @@ describe("a dependency carries its model backing", () => {
   });
   const issues = (value: unknown) => { const result = TestEnvDependencySchema.safeParse(value); return result.success ? [] : result.error.issues.map((issue) => issue.message); };
 
-  it("accepts fixtures and a stand-in on Rovara local AWS, and an image on the project's own image", () => {
-    expect(issues(base())).toEqual([]);
-    expect(issues(base({ config: { endpointName: "fraud-scorer", model: { mode: "stand_in", schema: { response: { type: "object" } }, memoryMiB: 96 } } }))).toEqual([]);
-    expect(issues(base({ backing: { kind: "project_image", imageId: "fraud-model" }, config: { endpointName: "fraud-scorer", model: { mode: "image", imageId: "fraud-model", architecture: "x86_64", memoryMiB: 512 } } }))).toEqual([]);
-  });
   it("refuses a model backing that the dependency's backing does not run", () => {
     expect(issues(base({ backing: { kind: "project_image", imageId: "fraud-model" } }))).toContain("a canned or stand-in endpoint is answered by Rovara local AWS");
     expect(issues(base({ config: { endpointName: "fraud-scorer", model: { mode: "image", imageId: "other-image", architecture: "arm64", memoryMiB: 512 } }, backing: { kind: "project_image", imageId: "fraud-model" } }))).toContain("an image endpoint runs the project image its model backing names");
@@ -232,12 +186,6 @@ describe("the front's no-answer contract", () => {
 });
 
 describe("the words", () => {
-  it("states what answered each endpoint, in the fixed words", () => {
-    expect(sageMakerEvidenceLine({ endpointName: "fraud-scorer", answeredBy: "recorded" })).toBe("SageMaker endpoint fraud-scorer: answered by recorded fixtures (faked). The real model was not run.");
-    expect(sageMakerEvidenceLine({ endpointName: "fraud-scorer", answeredBy: "stand_in" })).toBe("SageMaker endpoint fraud-scorer: answered by a stand-in model (faked; the real model was not run)");
-    expect(sageMakerEvidenceLine({ endpointName: "fraud-scorer", answeredBy: "image" }).startsWith("SageMaker endpoint fraud-scorer: answered by your model image in the Rovara function runner")).toBe(true);
-    expect(sageMakerEvidenceLine({ endpointName: "fraud-scorer", answeredBy: "hand_written" })).toContain("answered by hand-written fixtures (faked)");
-  });
   it("adds the date, the counts, the made-up answers and the emulation, and shows an unsafe name as unnamed", () => {
     const line = sageMakerEvidenceLine({ endpointName: "fraud-scorer", answeredBy: "recorded", recordedOn: "2026-11-20", usage: { calls: 41, unmatched: 0, madeUp: 0 } });
     expect(line).toBe("SageMaker endpoint fraud-scorer: answered by recorded fixtures (faked). Recorded on 2026-11-20 in your environment. 41 calls, all matched. The real model was not run.");

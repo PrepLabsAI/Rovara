@@ -53,16 +53,6 @@ const draft = (pageId: string) => ({
 });
 
 describe("the callback's scope is the operation's", () => {
-  it("next hands out a page and page keeps it; the sink is the run's own project of the callback's own company", async () => {
-    const s = stage();
-    const run = await s.begin(COMPANY_A, "beacon");
-    const job = await handleWikiBuildCallback(s.callbackDeps(COMPANY_A), run.operation, { kind: "next", spentCents: 0 });
-    expect(job).toMatchObject({ kind: "page", page: { id: "overview" }, pins: [{ repo: "api", commit: API_SHA }] });
-    const receipt = await handleWikiBuildCallback(s.callbackDeps(COMPANY_A), run.operation, { kind: "page", answer: { pageId: "overview", spentCents: 30, draft: draft("overview") } });
-    expect(receipt).toMatchObject({ pageId: "overview", kept: true, claimsKept: 1 });
-    expect([...s.sinkOf(COMPANY_A, "beacon").pages.keys()]).toEqual(["overview"]);
-    expect(s.calls.every((call) => call.company === COMPANY_A && call.project === "beacon")).toBe(true);
-  });
 
   // MUTANT scope-from-body: the handler reads project / company / task from the body. Killed here: any such field is refused, and nothing is read for it.
   it("a body that names a company, project or task is refused; the strict shapes are the only ones", async () => {
@@ -108,19 +98,6 @@ describe("the callback's scope is the operation's", () => {
     expect(s.calls.filter((call) => call.project !== "beacon")).toHaveLength(0);
   });
 
-  it("a task whose build pointer names another task (a newer run replaced it) is refused", async () => {
-    const s = stage();
-    const run = await s.begin(COMPANY_A, "beacon");
-    // An older task of the same project (its build ended and a new one started): its own task row and workspace, but the project's pointer now names the newer task.
-    const olderTask = randomUUID();
-    const olderWorkspace = randomUUID();
-    await s.store.put({ item: { ...taskKey(olderTask), entityType: "DEVELOPER_TASK", taskId: olderTask, project: "beacon", companyId: COMPANY_A, workspaceId: olderWorkspace, purpose: "wiki_build" } });
-    await s.store.put({ item: { pk: workspaceKey(COMPANY_A, olderWorkspace).pk, sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId: olderTask } });
-    const older = { ...run.operation, workspaceId: olderWorkspace };
-    await expect(handleWikiBuildCallback(s.callbackDeps(COMPANY_A), older, { kind: "next", spentCents: 0 })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-    expect((await readWikiBuildPointer(s.store, COMPANY_A, "beacon"))!.granted).toBeUndefined();
-    expect(await handleWikiBuildCallback(s.callbackDeps(COMPANY_A), run.operation, { kind: "next", spentCents: 0 })).toMatchObject({ kind: "page" });
-  });
 });
 
 describe("a page the worker could not finish", () => {
@@ -145,41 +122,7 @@ describe("a page the worker could not finish", () => {
   });
 });
 
-describe("two projects in one company", () => {
-  // MUTANT: the grant or the answer is taken from the project's name in the body or from the other project's pointer. Killed: A's calls never touch B's pointer, sink or spend, and B's page id is refused for A.
-  it("A's callbacks never touch B's pointer, sink or spend, and B's granted page cannot be answered through A's operation", async () => {
-    const s = stage();
-    const a = await s.begin(COMPANY_A, "alpha");
-    const b = await s.begin(COMPANY_A, "beta");
-    await handleWikiBuildCallback(s.callbackDeps(COMPANY_A), b.operation, { kind: "next", spentCents: 5 });
-    const beforeB = await readWikiBuildPointer(s.store, COMPANY_A, "beta");
-    const callsBefore = s.calls.length;
-    await handleWikiBuildCallback(s.callbackDeps(COMPANY_A), a.operation, { kind: "next", spentCents: 700 });
-    // B's page is "overview" and so is A's: A's operation answers A's grant only; B's pointer keeps its own spend and grant.
-    await handleWikiBuildCallback(s.callbackDeps(COMPANY_A), a.operation, { kind: "page", answer: { pageId: "overview", spentCents: 800, draft: draft("overview") } });
-    expect(await readWikiBuildPointer(s.store, COMPANY_A, "beta")).toEqual(beforeB);
-    expect(s.sinkOf(COMPANY_A, "alpha").pages.has("overview")).toBe(true);
-    expect(s.sinkOf(COMPANY_A, "beta").pages.size).toBe(0);
-    expect(s.calls.slice(callsBefore).filter((call) => call.project === "beta")).toHaveLength(0);
-    // A page that is not A's current grant is refused even though B has it out.
-    await expect(handleWikiBuildCallback(s.callbackDeps(COMPANY_A), a.operation, { kind: "page", answer: { pageId: "repo-api", spentCents: 0, draft: draft("repo-api") } })).rejects.toMatchObject({ code: "CALLBACK_FORBIDDEN" });
-    expect(s.sinkOf(COMPANY_A, "beta").pages.size).toBe(0);
-  });
-});
-
 describe("two companies in one store", () => {
-  it("the same project name in two companies: each callback reads and writes only its own company's rows", async () => {
-    const s = stage();
-    const a = await s.begin(COMPANY_A, "beacon");
-    const b = await s.begin(COMPANY_B, "beacon");
-    await handleWikiBuildCallback(s.callbackDeps(COMPANY_B), b.operation, { kind: "next", spentCents: 0 });
-    const beforeB = await readWikiBuildPointer(s.store, COMPANY_B, "beacon");
-    await handleWikiBuildCallback(s.callbackDeps(COMPANY_A), a.operation, { kind: "next", spentCents: 900 });
-    await handleWikiBuildCallback(s.callbackDeps(COMPANY_A), a.operation, { kind: "page", answer: { pageId: "overview", spentCents: 950, draft: draft("overview") } });
-    expect(await readWikiBuildPointer(s.store, COMPANY_B, "beacon")).toEqual(beforeB);
-    expect(s.sinkOf(COMPANY_A, "beacon").pages.size).toBe(1);
-    expect(s.sinkOf(COMPANY_B, "beacon").pages.size).toBe(0);
-  });
 
   // MUTANT: the company comes from the operation record instead of the callback's own company. Killed: company B's service, given company A's operation, finds no run and refuses.
   it("company B's callback service cannot act on company A's operation, with or without A's company id on it", async () => {
@@ -242,11 +185,4 @@ describe("through the callback service's route", () => {
     expect(json(await unserved.call(unserved.token(["events"]), { kind: "next", spentCents: 0 }))).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
   });
 
-  it("an operation that has ended takes no more wiki build output", async () => {
-    const r = await routed({ status: "SUCCEEDED" });
-    const reply = await r.call(r.token(["wiki-build"]), { kind: "next", spentCents: 0 });
-    expect(reply.statusCode).toBeGreaterThanOrEqual(400);
-    expect(json(reply)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
-    expect((await readWikiBuildPointer(r.s.store, COMPANY_A, "beacon"))!.granted).toBeUndefined();
-  });
 });

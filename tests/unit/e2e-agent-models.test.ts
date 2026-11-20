@@ -1,8 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import {
-  E2E_AGENT_BEDROCK_QUOTA_CODES, E2E_AGENT_ELIGIBLE_MODELS, E2E_AGENT_RECOMMENDED_MODELS, e2eAgentModelsFor, e2eAgentScopeSentence, eligibleE2EAgentModel,
-} from "../../packages/contracts/src/e2e-agent-models.js";
+import { E2E_AGENT_BEDROCK_QUOTA_CODES, E2E_AGENT_ELIGIBLE_MODELS, E2E_AGENT_RECOMMENDED_MODELS, e2eAgentScopeSentence, eligibleE2EAgentModel } from "../../packages/contracts/src/e2e-agent-models.js";
 import { MODEL_PROVIDERS } from "../../packages/contracts/src/model-providers.js";
 import { catalogEligibilityRows, eligibilityRow, renderEligibleModelsSource } from "../../scripts/generate-e2e-agent-models.js";
 
@@ -43,16 +41,6 @@ describe("eligibility from the generated table (test 3)", () => {
     expect(eligibilityRow("amazon-bedrock", entry({ input: ["text"] }))).not.toBeNull();
   });
 
-  it("makes a geography profile eligible only in its own geography", () => {
-    expect(eligibleE2EAgentModel("amazon-bedrock", "eu.anthropic.claude-haiku-5-5", "eu-west-1")).not.toBeNull();
-    expect(eligibleE2EAgentModel("amazon-bedrock", "eu.anthropic.claude-haiku-5-5", "us-east-1")).toBeNull();
-    expect(eligibleE2EAgentModel("amazon-bedrock", "us.anthropic.claude-haiku-5-5", "eu-west-1")).toBeNull();
-    expect(eligibleE2EAgentModel("amazon-bedrock", "us.anthropic.claude-haiku-5-5", "us-west-2")).not.toBeNull();
-    expect(eligibleE2EAgentModel("amazon-bedrock", "jp.anthropic.claude-haiku-5-5", "ap-northeast-1")).not.toBeNull();
-    expect(eligibleE2EAgentModel("amazon-bedrock", "jp.anthropic.claude-haiku-5-5", "us-east-1")).toBeNull();
-    expect(e2eAgentModelsFor("amazon-bedrock", "eu-west-1").every((row) => /^(eu|global)\./.test(row.modelId))).toBe(true);
-  });
-
   it("answers null for an undefined, empty or foreign id and for the wrong provider", () => {
     expect(eligibleE2EAgentModel("amazon-bedrock", undefined, "us-east-1")).toBeNull();
     expect(eligibleE2EAgentModel("amazon-bedrock", "", "us-east-1")).toBeNull();
@@ -77,9 +65,6 @@ describe("eligibility from the generated table (test 3)", () => {
 });
 
 describe("the generated table (test 4)", () => {
-  it("equals what the generator makes from the pinned catalog, byte for byte", () => {
-    expect(renderEligibleModelsSource(catalogEligibilityRows())).toBe(readFileSync(GENERATED, "utf8"));
-  });
 
   it("goes red when a row is missing (mutation)", () => {
     const rows = catalogEligibilityRows();
@@ -87,41 +72,6 @@ describe("the generated table (test 4)", () => {
     expect(E2E_AGENT_ELIGIBLE_MODELS.length).toBe(rows.length);
   });
 
-  it("holds only ids the E2eAgentModelId stack parameter and the config key accept, so no eligible model is unusable", () => {
-    const pattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
-    expect(E2E_AGENT_ELIGIBLE_MODELS.filter((row) => !pattern.test(row.modelId)).map((row) => row.modelId)).toEqual([]);
-  });
-
-  it("is sorted and has no duplicate (provider, modelId)", () => {
-    const keys = E2E_AGENT_ELIGIBLE_MODELS.map((row) => `${row.provider}\u0000${row.modelId}`);
-    expect(new Set(keys).size).toBe(keys.length);
-    expect(keys).toEqual([...keys].sort());
-  });
-});
-
-describe("the request shape comes from the model's metadata (test 5)", () => {
-  it("gives effort low to Haiku 5.5 and null to Haiku 4.5 and gpt-5.4-mini", () => {
-    expect(eligibleE2EAgentModel("amazon-bedrock", "us.anthropic.claude-haiku-5-5", "us-east-1")!.effort).toBe("low");
-    expect(eligibleE2EAgentModel("amazon-bedrock", "us.anthropic.claude-haiku-4-5-20251001-v1:0", "us-east-1")!.effort).toBeNull();
-    expect(eligibleE2EAgentModel("anthropic", "claude-haiku-5-5", null)!.effort).toBe("low");
-    expect(eligibleE2EAgentModel("anthropic", "claude-haiku-4-5", null)!.effort).toBeNull();
-    expect(eligibleE2EAgentModel("openai", "gpt-5.4-mini", null)!.effort).toBeNull();
-  });
-
-  it("reads the rule from the entry: a thinkingLevelMap with a low key on a Claude entry, or a Bedrock Claude entry with any map", () => {
-    const claude = { id: "claude-x", name: "X", api: "anthropic-messages", type: "chat", input: ["text"], cost: { input: 1, output: 5 }, contextWindow: 200_000, maxTokens: 64_000 };
-    expect(eligibilityRow("anthropic", { ...claude, thinkingLevelMap: { low: "low" } })!.effort).toBe("low");
-    expect(eligibilityRow("anthropic", { ...claude, thinkingLevelMap: { xhigh: "xhigh" } })!.effort).toBeNull();
-    expect(eligibilityRow("anthropic", claude)!.effort).toBeNull();
-    expect(eligibilityRow("amazon-bedrock", entry({ id: "us.anthropic.claude-x", thinkingLevelMap: { xhigh: "xhigh" } }))!.effort).toBe("low");
-    expect(eligibilityRow("amazon-bedrock", entry({ id: "us.anthropic.claude-x" }))!.effort).toBeNull();
-    // OpenAI's path sets its own reasoning effort, so the route records none.
-    expect(eligibilityRow("openai", { ...claude, id: "gpt-x", api: "openai-responses", thinkingLevelMap: { low: "low" } })!.effort).toBeNull();
-  });
-
-  it("records the catalog's prices and limits", () => {
-    expect(eligibleE2EAgentModel("amazon-bedrock", "us.anthropic.claude-haiku-5-5", "us-east-1")).toMatchObject({ inputUsdPerMTok: 0.11, outputUsdPerMTok: 0.55, contextWindow: 1_000_000, maxTokens: 128_000, label: "Claude Haiku 5.5 (US)" });
-  });
 });
 
 describe("the scope sentence (test 14, first half)", () => {

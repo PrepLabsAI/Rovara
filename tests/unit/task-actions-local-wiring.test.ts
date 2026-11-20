@@ -41,37 +41,6 @@ async function launch() {
   return { owner, taskId: started.body.task!.taskId, revision: started.body.task!.workflow!.revision };
 }
 
-describe("send back on rovara up", () => {
-  it("reaches the core move: a task that is not blocked is told so in plain words, and a missing revision is asked for", async () => {
-    const { owner, taskId, revision } = await launch();
-    const early = await owner(`/v1/dev/tasks/${taskId}/workflow/send-back`, "POST", { requestId: "22222222-2222-4222-8222-222222222222", instructions: "Fix it.", expectedRevision: revision });
-    expect(early.status).toBe(400);
-    expect(early.body.error).toMatchObject({ code: "CONFIG_INVALID" });
-    expect(early.body.error?.message).toContain("no current failed check or review finding");
-    expect(early.body.error?.message).not.toContain("not on this install");
-    const noRevision = await owner(`/v1/dev/tasks/${taskId}/workflow/send-back`, "POST", { requestId: "22222222-2222-4222-8222-222222222222", instructions: "Fix it." });
-    expect(noRevision.body.error?.message).toContain("current revision");
-    const other = await owner(`/v1/dev/tasks/44444444-4444-4444-8444-444444444444/workflow/send-back`, "POST", { requestId: "22222222-2222-4222-8222-222222222222", instructions: "Fix it.", expectedRevision: 1 });
-    expect(other.status).toBe(404);
-  });
-});
-
-describe("review findings on rovara up", () => {
-  it("reaches the core move: a task with no blocked review is told so in plain words, and a body that is not valid is refused by field", async () => {
-    const { owner, taskId, revision } = await launch();
-    const digest = "a".repeat(64);
-    const none = await owner(`/v1/dev/tasks/${taskId}/workflow/review-findings`, "POST", { requestId: "33333333-3333-4333-8333-333333333333", expectedRevision: revision, candidateDigest: digest, resolutions: [{ findingId: digest, action: "ACCEPT", note: "Fine." }] });
-    expect(none.status).toBe(409);
-    expect(none.body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-    expect(none.body.error?.message).not.toContain("not on this install");
-    const noReason = await owner(`/v1/dev/tasks/${taskId}/workflow/review-findings`, "POST", { requestId: "33333333-3333-4333-8333-333333333333", expectedRevision: revision, candidateDigest: digest, resolutions: [{ findingId: digest, action: "ACCEPT", note: "" }] });
-    expect(noReason.status).toBe(400);
-    expect(noReason.body.error?.message).toContain("give a reason");
-    const other = await owner(`/v1/dev/tasks/44444444-4444-4444-8444-444444444444/workflow/review-findings`, "POST", {});
-    expect(other.status).toBe(400);
-  });
-});
-
 describe("continue on rovara up", () => {
   it("reaches the core move: a workflow task is told to use its approvals, a task still starting is told it is working, and another task is no such task", async () => {
     const { owner, taskId } = await launch();

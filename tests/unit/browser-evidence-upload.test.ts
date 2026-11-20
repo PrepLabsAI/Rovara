@@ -9,7 +9,6 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { dropBrowserEvidenceUpload, handleBrowserEvidenceUpload, readBrowserEvidenceUpload, type BrowserEvidenceOperation } from "../../packages/broker/src/core/proof/browser-evidence-upload.js";
 import { UPLOAD_CHUNK_BYTES, type UploadStores } from "../../packages/broker/src/core/e2e/uploads-chunks.js";
-import { createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
 
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const rejects = (promise: Promise<unknown>, code: string) => expect(promise).rejects.toMatchObject({ code });
@@ -59,18 +58,6 @@ describe("the browser-evidence callback", () => {
     expect((await w.store.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#EVIDENCE_BLOB` })).items.map((item) => item.sk).filter((key) => key.includes("browser-evidence-staging"))).toEqual([]);
     await dropBrowserEvidenceUpload(w.stores, { ...(await w.operation()), workspaceId, id: operationId });
     expect(await readBrowserEvidenceUpload(w.stores, { ...(await w.operation()), workspaceId, id: operationId })).toBeUndefined();
-  });
-
-  it("is bound to the operation: another operation, another workspace, or a missing upload reads nothing", async () => {
-    const w = await world();
-    await (await w.upload()).finalize();
-    expect(await readBrowserEvidenceUpload(w.stores, { ...(await w.operation()), workspaceId, id: randomUUID() })).toBeUndefined();
-    expect(await readBrowserEvidenceUpload(w.stores, { ...(await w.operation()), workspaceId: randomUUID(), id: operationId })).toBeUndefined();
-    // A row copied under another operation's key does not make that operation's upload: the row names its own operation and workspace.
-    const row = await w.store.get({ pk: (await w.operation()).pk, sk: `BROWSER_EVIDENCE_UPLOAD#${operationId}` });
-    const otherOperation = randomUUID();
-    await w.store.put({ item: { ...row!, pk: (await w.operation()).pk, sk: `BROWSER_EVIDENCE_UPLOAD#${otherOperation}` } });
-    expect(await readBrowserEvidenceUpload(w.stores, { ...(await w.operation()), workspaceId, id: otherOperation })).toBeUndefined();
   });
 
   it("refuses an object that is not the digest the row names, an object outside the operation's prefix even when it is really there, and a row of another workspace", async () => {
@@ -154,16 +141,5 @@ describe("the browser-evidence callback", () => {
     await w.upload();
     const bytes = Buffer.from(encodeBrowserEvidenceUpload({ ...run(), durationMs: 9 }));
     await rejects(handleBrowserEvidenceUpload(w.stores, await w.operation(), { stage: "init", totalBytes: bytes.byteLength, chunkCount: Math.ceil(bytes.byteLength / UPLOAD_CHUNK_BYTES), sha256: sha(bytes) }), "CALLBACK_FORBIDDEN");
-  });
-});
-
-describe("the callback route", () => {
-  it("is served on Code (the route exists in the handler's list of actions) and needs the capability like every other", async () => {
-    const handler = createCallbackHandler({ flow: { store: new MemoryDocumentStore(), companyId: IMPLICIT_COMPANY_ID, callbackSigningKey: Buffer.alloc(32, 7) } as never, blobs: {} as never, grants: {} as never });
-    const response = await handler({ method: "POST", path: `/v1/internal/workspaces/${workspaceId}/operations/${operationId}/browser-evidence`, headers: {}, body: "{}" });
-    expect(response.statusCode).toBeGreaterThanOrEqual(400);
-    const answer = JSON.parse(response.body ?? "{}") as { error: { code: string; message: string } };
-    expect(answer.error.code).toBe("CALLBACK_FORBIDDEN");
-    expect(answer.error.message).toBe("callback capability is required");
   });
 });

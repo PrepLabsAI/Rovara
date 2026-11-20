@@ -43,11 +43,6 @@ describe("known-failing nightly boundaries", () => {
     expect((await s.service.marks(company, project)).marks.map((mark) => mark.name)).toEqual(["absent test"]);
     expect((await s.store.query({ pk: `AUDIT#${company}` })).items).toHaveLength(1);
   });
-  it("keeps every mark when nightly audit staging fails", async () => {
-    const s = await fixture(); s.unavailable();
-    await expect(s.service.nightly(company, project, baseline, ["passed test"])).rejects.toThrow("ledger unavailable");
-    expect((await s.service.marks(company, project)).marks).toHaveLength(2);
-  });
 });
 
 

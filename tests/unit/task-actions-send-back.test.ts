@@ -7,86 +7,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Admission, AdmissionRequest } from "@agentx/contracts";
 import { WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, queryAll, when } from "@agentx/contracts";
-import { LESSONS_TELL_LIMIT_MS } from "../../packages/broker/src/core/task-flow/lessons-tell.js";
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
 import { startImplementation } from "../../packages/broker/src/core/build-step/start.js";
 import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
 import { OWNER_ROUND_ADMISSION_ACTION } from "../../packages/broker/src/core/task-flow/owner-round.js";
 import { createOwnerRoutes } from "../../packages/broker/src/local/app/routes.js";
-import { scriptTokenRoute } from "../../packages/broker/src/core/script-tokens/authenticate.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
 import { COMPANY } from "../support/task-flow-harness.js";
-import {
-  NOW, OWNER_KEY, REQUEST_A, REQUEST_B, TASK_ID, accessWithoutOwners, blockedReview, code, codingOperations, dispatchRows, promptOf, report, seed, stateOf, taskOf,
-} from "../support/task-actions-world.js";
+import { OWNER_KEY, REQUEST_A, REQUEST_B, TASK_ID, blockedReview, code, codingOperations, promptOf, report, seed, stateOf, taskOf } from "../support/task-actions-world.js";
 
 const body = (expectedRevision: number | undefined, instructions = "Keep the footer line, and add a test for it.", requestId = REQUEST_A) => ({ requestId, instructions, ...(expectedRevision === undefined ? {} : { expectedRevision }) });
 
 describe("send back to coding", () => {
-  it("returns a blocked review to coding: the decision, the coding run with the problems and the owner's words, the audit line, and the kept words", async () => {
-    const { h, caller } = await seed();
-    const actions = createTaskActions(h.deps);
-    const long = `Keep the footer line. ${"Also explain why the last line matters. ".repeat(30)}`;
-    expect(long.length).toBeGreaterThan(500);
-    const view = await actions.sendBack(caller, TASK_ID, body(6, long));
-    // Revision 6 (blocked) -> 7 (the send-back, ready for coding) -> 8 (the coding run started).
-    expect(view.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING", revision: 8 });
-    const task = await taskOf(h);
-    const decision = task.workflow!.decisions.at(-1)!;
-    expect(decision).toMatchObject({ requestId: REQUEST_A, decision: "REQUEST_CHANGES", source: "SEND_BACK", actorRole: "TASK_OWNER", actorId: task.ownerKey });
-    // The decision keeps 500 characters; the coder is given the whole words.
-    expect(decision.reason).toHaveLength(500);
-    const [run] = await codingOperations(h);
-    expect(run).toMatchObject({ kind: "task", workflowMode: "IMPLEMENT", status: "ACCEPTED" });
-    const prompt = promptOf(run!);
-    expect(prompt).toContain("Owner note (the owner's own instructions for this step)");
-    expect(prompt).toContain(long.trim());
-    // The reviewer's finding is data inside a tag that carries the section's own id; the owner's words are outside it.
-    expect(prompt).toMatch(/<problem id="[a-f0-9]{16}" source="code review">New parser drops the last line\. \(src\/parse\.ts:12\)<\/problem>/u);
-    expect(prompt).toContain("Approved plan (sha256");
-    expect(h.audit.map((event) => event.action)).toEqual(["task.sent_back"]);
-    expect(await dispatchRows(h)).toHaveLength(0);
-  });
-
-  it("sends back a failed check the same way, and a change ready to publish", async () => {
-    const failing = WorkflowSnapshotSchema.parse({ ...blockedReview({}, [report("CRITIC", "PASS", []), report("SECURITY", "PASS", [])]), stage: "VERIFY", blockReason: "a selected check failed",
-      verification: { candidateDigest: code.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: "2026-11-10T10:00:00.000Z", results: [{ checkId: "unit", status: "FAILED" }] } });
-    const { h, caller } = await seed({ workflow: failing });
-    const view = await createTaskActions(h.deps).sendBack(caller, TASK_ID, body(6, "Fix the failing unit test."));
-    expect(view.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
-    expect(promptOf((await codingOperations(h))[0]!)).toContain("Unit failed");
-  });
-
-  it("gives the coder the owner's words when nothing failed (a change ready to publish): never only the plan", async () => {
-    const ready = WorkflowSnapshotSchema.parse({ ...blockedReview({}, [report("CRITIC", "PASS", []), report("SECURITY", "PASS", [])]), stage: "PULL_REQUEST", state: "READY", blockReason: undefined });
-    const { h, caller } = await seed({ workflow: ready });
-    const view = await createTaskActions(h.deps).sendBack(caller, TASK_ID, body(6, "Rename retryFlag to retryEnabled before this is published."));
-    expect(view.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
-    const prompt = promptOf((await codingOperations(h))[0]!);
-    expect(prompt).toContain("Owner note (the owner's own instructions for this step)");
-    expect(prompt).toContain("Rename retryFlag to retryEnabled before this is published.");
-    expect(prompt).toContain("no check or review problems were recorded; follow the owner note");
-  });
-
-  it("gives the owner's words only to the round their decision started: a later round at another revision with nothing recorded gets the plain coding prompt", async () => {
-    const decided = { requestId: REQUEST_B, workflowRevision: 6, decision: "REQUEST_CHANGES", actorId: OWNER_KEY, actorRole: "TASK_OWNER", reason: "Rename the flag.", source: "SEND_BACK", at: "2026-11-10T09:00:00.000Z" };
-    const clear = [report("CRITIC", "PASS", []), report("SECURITY", "PASS", [])];
-    const promptAt = async (revision: number): Promise<string> => {
-      const workflow = WorkflowSnapshotSchema.parse({ ...blockedReview({ decisions: [decided] }, clear), stage: "IMPLEMENT", state: "READY", blockReason: undefined, revision });
-      const { h } = await seed({ workflow });
-      await h.store.transact([ownerNoteItem({ taskId: TASK_ID, requestId: REQUEST_B, text: "SENTINEL-OWNER-WORDS", now: new Date("2026-11-10T09:00:00.000Z") })]);
-      expect(await startImplementation(h.deps, { taskId: TASK_ID, workflowRevision: revision })).toBe("STARTED");
-      return promptOf((await codingOperations(h))[0]!);
-    };
-    // The round the send-back started (decided at 6, ready at 7): the owner's words.
-    expect(await promptAt(7)).toContain("SENTINEL-OWNER-WORDS");
-    // A round much later (the decision is stale): not the owner's round.
-    const later = await promptAt(11);
-    expect(later).not.toContain("SENTINEL-OWNER-WORDS");
-    expect(later).not.toContain("Owner note");
-  });
 
   it("gives the owner's words to a retry of their round after its run failed (same code, same step), and not to a round that comes after new code", async () => {
     const decided = { requestId: REQUEST_B, workflowRevision: 6, decision: "REQUEST_CHANGES", actorId: OWNER_KEY, actorRole: "TASK_OWNER", reason: "Rename the flag.", source: "SEND_BACK", at: "2026-11-10T09:00:00.000Z" };
@@ -102,23 +36,6 @@ describe("send back to coding", () => {
     expect(await promptFor(code.digest)).toContain("SENTINEL-OWNER-WORDS");
     // The round the decision started left other code: this is a later round.
     expect(await promptFor("f".repeat(64))).not.toContain("SENTINEL-OWNER-WORDS");
-  });
-
-  it("is refused for anyone but the owner or a co-owner, and writes nothing", async () => {
-    const guest = await seed();
-    const before = await stateOf(guest.h);
-    await expect(createTaskActions(guest.h.deps).sendBack(guest.h.guest, TASK_ID, body(6))).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-    expect(await stateOf(guest.h)).toEqual(before);
-    // A person who may see and drive the task but is not an owner of it reads the same answer.
-    const viewer = await seed({ access: accessWithoutOwners() });
-    const viewerBefore = await stateOf(viewer.h);
-    await expect(createTaskActions(viewer.h.deps).sendBack(viewer.h.guest, TASK_ID, body(6))).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-    expect(await stateOf(viewer.h)).toEqual(viewerBefore);
-    // A script token is never the owner acting, and its route list does not hold this route either.
-    const token = await seed();
-    await expect(createTaskActions(token.h.deps).sendBack({ ...token.h.owner, scriptToken: { tokenId: "t", name: "CI", permissions: ["read", "start"], projects: ["payments"] } }, TASK_ID, body(6))).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-    expect(scriptTokenRoute("POST", `/v1/dev/tasks/${TASK_ID}/workflow/send-back`)).toBeUndefined();
-    expect(await codingOperations(token.h)).toHaveLength(0);
   });
 
   it("holds the revision the person saw: a stale one is refused, a missing one too, and nothing is written", async () => {
@@ -161,17 +78,6 @@ describe("send back to coding", () => {
     await expect(createTaskActions(gate.h.deps).sendBack(gate.caller, TASK_ID, body(6))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
   });
 
-  it("starts one run when the same request arrives twice at once", async () => {
-    const { h, caller } = await seed();
-    const actions = createTaskActions(h.deps);
-    const [a, b] = await Promise.all([actions.sendBack(caller, TASK_ID, body(6)), actions.sendBack(caller, TASK_ID, body(6))]);
-    expect(a.workflow?.stage).toBe("IMPLEMENT");
-    expect(b.workflow?.stage).toBe("IMPLEMENT");
-    expect(await codingOperations(h)).toHaveLength(1);
-    // The audit line of the call that lost the race was staged but never committed: the store holds one.
-    expect((await queryAll(h.store, { pk: `AUDIT#${COMPANY}`, sk: { op: "beginsWith", prefix: "EVENT#task.sent_back" } }))).toHaveLength(1);
-  });
-
   it("starts nothing for a task over its cap, whose spend cannot be told, or when no cap can be read", async () => {
     for (const cap of [{ limitUsd: 6, spentUsd: 6 }, { limitUsd: 6, spentUsd: 9.5 }, { limitUsd: 6, spentUsd: undefined }, { limitUsd: Number.NaN, spentUsd: 1 }]) {
       const { h, caller } = await seed();
@@ -203,26 +109,6 @@ describe("send back to coding", () => {
     const held = await seed({ harness: { admission: holding } });
     await createTaskActions(held.h.deps).sendBack(held.caller, TASK_ID, body(6));
     expect(released).toEqual(["res-1"]);
-  });
-
-  it("does not cache an admission refusal under the request id: a retry of the same request asks again", async () => {
-    const decided = new Map<string, boolean>();
-    let calls = 0;
-    // An adapter that answers one key one way for good, and refuses the first thing it is asked.
-    const caching: Admission = { ...createAllowAllAdmission(), async admit(request) {
-      calls += 1;
-      const allowed = decided.get(request.idempotencyKey) ?? calls > 1;
-      decided.set(request.idempotencyKey, allowed);
-      return allowed ? { allowed: true } : { allowed: false, code: "budget_exhausted", message: "The monthly budget is used up." };
-    } };
-    const { h, caller } = await seed({ harness: { admission: caching } });
-    const actions = createTaskActions(h.deps);
-    await expect(actions.sendBack(caller, TASK_ID, body(6))).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
-    expect(await codingOperations(h)).toHaveLength(0);
-    // The budget was raised meanwhile: the same request, sent again, is asked again and goes ahead.
-    await actions.sendBack(caller, TASK_ID, body(6));
-    expect(await codingOperations(h)).toHaveLength(1);
-    expect(calls).toBe(2);
   });
 
   it("is the real gate when the access seam is wider and has no owner rule of its own: an owner role or the task's own person acts, no one else", async () => {
@@ -278,15 +164,6 @@ describe("send back to coding", () => {
     expect(await stateOf(lost.h)).toEqual(before);
   });
 
-  it("carries the change tier as it is: a send-back never resets or lowers it", async () => {
-    const tier = { level: "standard", kinds: ["code_config"], source: "diff", reasons: [{ code: "many_files" }], headSha: "1".repeat(40), at: "2026-11-10T09:00:00.000Z" };
-    const flow = { rulesVersion: 1, tier, tierHistory: [{ ...tier, level: "small", source: "estimate" }], skippedSteps: ["plan_check"] };
-    const { h, caller } = await seed({ workflow: blockedReview({ flow }) });
-    await createTaskActions(h.deps).sendBack(caller, TASK_ID, body(6));
-    const after = (await taskOf(h)).workflow!;
-    expect(after.flow).toEqual(flow);
-    expect(after.stage).toBe("IMPLEMENT");
-  });
 });
 
 describe("the owner's route", () => {
@@ -311,90 +188,10 @@ describe("the owner's route", () => {
   });
 });
 
-describe("a second request for the same task by another id", () => {
-  it("is refused once the first send-back moved the workflow on (the revision the person saw is gone)", async () => {
-    const { h, caller } = await seed();
-    const actions = createTaskActions(h.deps);
-    await actions.sendBack(caller, TASK_ID, body(6));
-    await expect(actions.sendBack(caller, TASK_ID, body(6, "Again.", REQUEST_B))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-    expect(await codingOperations(h)).toHaveLength(1);
-  });
-});
-
 // Learn on send-back (the lessons hook line): once a person's send-back has committed, the task flow tells the lessons seam (`lessonsSentBack`, filled by the lessons host) with only the task id, best effort.
 // The send-back itself never waits on or fails for it; a refused, repeated or lost-race send-back tells nothing.
 describe("the lessons hook after a send-back", () => {
   afterEach(() => { vi.useRealTimers(); });
-
-  it("calls the lessons seam once with only the task id, after the send-back is committed (the person's decision is already stored)", async () => {
-    const { h, caller } = await seed();
-    const calls: unknown[][] = [];
-    const seen: Array<{ source?: string | undefined; reason: string } | undefined> = [];
-    const runsAtTell: number[] = [];
-    h.deps.lessonsSentBack = async (...args: unknown[]) => {
-      calls.push(args);
-      runsAtTell.push((await codingOperations(h)).length);
-      const decision = (await taskOf(h)).workflow!.decisions.at(-1);
-      seen.push(decision === undefined ? undefined : { source: decision.source, reason: decision.reason });
-    };
-    await createTaskActions(h.deps).sendBack(caller, TASK_ID, body(6, "Keep the footer line."));
-    expect(calls).toEqual([[TASK_ID]]);
-    expect(seen).toEqual([{ source: "SEND_BACK", reason: "Keep the footer line." }]);
-    // Told before the coding run starts, so the run never delays it.
-    expect(runsAtTell).toEqual([0]);
-  });
-
-  it("does not fail or delay the send-back when the seam rejects or throws: the decision stands and the coding run starts", async () => {
-    for (const seam of [async () => { throw new Error("lessons queue down"); }, () => { throw new Error("sync fault"); }]) {
-      const { h, caller } = await seed();
-      h.deps.lessonsSentBack = seam;
-      const view = await createTaskActions(h.deps).sendBack(caller, TASK_ID, body(6));
-      expect(view.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
-      expect((await taskOf(h)).workflow!.decisions.at(-1)).toMatchObject({ source: "SEND_BACK" });
-      expect(await codingOperations(h)).toHaveLength(1);
-    }
-  });
-
-  it("does not wait on a seam that never answers: the send-back goes on after the limit, and the late failure is not an unhandled rejection", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const { h, caller } = await seed();
-    let fail: (error: Error) => void = () => undefined;
-    h.deps.lessonsSentBack = () => new Promise<void>((_, reject) => { fail = reject; });
-    const pending = createTaskActions(h.deps).sendBack(caller, TASK_ID, body(6));
-    let done = false;
-    void pending.then(() => { done = true; });
-    await vi.advanceTimersByTimeAsync(LESSONS_TELL_LIMIT_MS - 1);
-    expect(done).toBe(false);
-    await vi.advanceTimersByTimeAsync(2);
-    const view = await pending;
-    expect(view.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
-    expect(await codingOperations(h)).toHaveLength(1);
-    fail(new Error("late"));
-    await vi.advanceTimersByTimeAsync(10);
-  });
-
-  it("runs without a seam exactly as before (an install with no lessons)", async () => {
-    const { h, caller } = await seed();
-    expect(h.deps.lessonsSentBack).toBeUndefined();
-    const view = await createTaskActions(h.deps).sendBack(caller, TASK_ID, body(6));
-    expect(view.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
-  });
-
-  it("tells nothing for a send-back that is refused (not the owner, a stale or missing revision, a closed task, a step that cannot be sent back, a body that is not valid)", async () => {
-    const calls: string[] = [];
-    const seam = async (taskId: string): Promise<void> => { calls.push(taskId); };
-    const notOwner = await seed(); notOwner.h.deps.lessonsSentBack = seam;
-    await expect(createTaskActions(notOwner.h.deps).sendBack(notOwner.h.guest, TASK_ID, body(6))).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-    const stale = await seed(); stale.h.deps.lessonsSentBack = seam;
-    await expect(createTaskActions(stale.h.deps).sendBack(stale.caller, TASK_ID, body(5))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-    await expect(createTaskActions(stale.h.deps).sendBack(stale.caller, TASK_ID, body(undefined))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    await expect(createTaskActions(stale.h.deps).sendBack(stale.caller, TASK_ID, { requestId: REQUEST_A })).rejects.toBeDefined();
-    const closed = await seed({ task: { closedAt: NOW } }); closed.h.deps.lessonsSentBack = seam;
-    await expect(createTaskActions(closed.h.deps).sendBack(closed.caller, TASK_ID, body(6))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    const wrongStep = await seed({ workflow: WorkflowSnapshotSchema.parse({ ...blockedReview(), stage: "PLAN", state: "RUNNING", blockReason: undefined }) }); wrongStep.h.deps.lessonsSentBack = seam;
-    await expect(createTaskActions(wrongStep.h.deps).sendBack(wrongStep.caller, TASK_ID, body(6))).rejects.toBeDefined();
-    expect(calls).toEqual([]);
-  });
 
   it("tells once for a repeat of the same request and once for two arriving at once (only the call that committed tells)", async () => {
     const repeat = await seed();

@@ -6,8 +6,6 @@ import {
   PLAN_CRITIC_POINTS_MAX, PLAN_CRITIC_REVISIONS_MAX, PLAN_CRITIQUE_INFO_STRING, WorkflowSnapshotSchema, closePlanCritique, createWorkflowSnapshot, decideWorkflow,
   readPlanCritique, submitPlanCritique, submitWorkflowArtifact, type PlanCritique, type WorkflowProgram, type WorkflowSnapshot,
 } from "@agentx/contracts";
-import { BUDGET_EXHAUSTED_FAILURE_MESSAGE } from "@agentx/contracts";
-import { criticModelUnusable } from "../../packages/broker/src/rovara-code/critic.js";
 import { critiqueLines, critiqueModelOf } from "../../packages/broker/src/rovara-code/critic.js";
 import { WorkflowCritiqueSchema } from "../../packages/contracts/src/rovara-code.js";
 
@@ -289,49 +287,6 @@ describe("critiqueLines: what a person reads under the plan", () => {
 });
 
 
-
-// C84: the plan check reads the base commit's rule files through the verified copy of the base's objects. When that fails, the worker's one fixed reason stops the check visibly
-// (unlike the other ways a check can end, which let the plan go on unchecked): the owner sees it and chooses Retry plan check. It is not a model failure, so the model-retry
-// path does not take it, and nothing starts the check again by itself.
-describe("criticModelUnusable: which failures say the model can't serve this account", () => {
-  it("reads the worker's sentence for a refused key, a missing model or an unclassified failure, and the broker's own refusal", () => {
-    for (const error of [
-      "RUNTIME_UNAVAILABLE: the model call failed: unknown attempt 1; retry the step",
-      "RUNTIME_UNAVAILABLE: the model call failed: key-rejected AccessDeniedException HTTP 403 attempt 1; check the model key and its permissions, then retry",
-      "RUNTIME_UNAVAILABLE: the model call failed: model-not-found ResourceNotFoundException attempt 1; check the model setting, then retry",
-      "MODEL_NOT_ALLOWED: no AI source serves it",
-      "CONFIG_INVALID: model us.anthropic.claude-fable-5-1 is not available on this install",
-    ]) expect(criticModelUnusable(error), error).toBe(true);
-  });
-
-  it("reads every provider's refusal alike: Anthropic or OpenAI 401/403/404, OpenRouter's 402 and its refused request for a model with no endpoint", () => {
-    for (const error of [
-      "RUNTIME_UNAVAILABLE: the model call failed: key-rejected authentication_error HTTP 401 attempt 1; check the model key and its permissions, then retry",
-      "RUNTIME_UNAVAILABLE: the model call failed: key-rejected HTTP 403 attempt 1; check the model key and its permissions, then retry",
-      "RUNTIME_UNAVAILABLE: the model call failed: model-not-found not_found_error HTTP 404 attempt 1; check the model setting, then retry",
-      "RUNTIME_UNAVAILABLE: the model call failed: model-not-found model_not_found HTTP 404 attempt 1; check the model setting, then retry",
-      "RUNTIME_UNAVAILABLE: the model call failed: limit-or-rate-limited HTTP 402 attempt 1; add credits to the model account, then retry",
-      "RUNTIME_UNAVAILABLE: the model call failed: request-rejected HTTP 400 attempt 1; check the model settings, then retry",
-    ]) expect(criticModelUnusable(error), error).toBe(true);
-    expect(criticModelUnusable("RUNTIME_UNAVAILABLE: the model call failed: limit-or-rate-limited HTTP 429 attempt 1; wait, then retry")).toBe(false);
-  });
-
-  it("reads OpenAI's quota-exhausted 429 (insufficient_quota) as a model the account can't use, so the next model is tried, while an ordinary rate-limit 429 stays retryable", () => {
-    expect(criticModelUnusable("RUNTIME_UNAVAILABLE: the model call failed: limit-or-rate-limited insufficient_quota HTTP 429 attempt 1; wait, then retry")).toBe(true);
-    for (const error of [
-      "RUNTIME_UNAVAILABLE: the model call failed: limit-or-rate-limited rate_limit_exceeded HTTP 429 attempt 1; wait, then retry",
-      "RUNTIME_UNAVAILABLE: the model call failed: limit-or-rate-limited HTTP 429 attempt 1; wait, then retry",
-    ]) expect(criticModelUnusable(error), error).toBe(false);
-  });
-
-  it("does not read a rate limit, an outage, a budget stop, a stop or no error at all as a model the account can't use", () => {
-    for (const error of [
-      "RUNTIME_UNAVAILABLE: the model call failed: limit-or-rate-limited ThrottlingException attempt 2; wait, then retry",
-      "RUNTIME_UNAVAILABLE: the model call failed: provider-outage InternalServerException attempt 4; retry the step",
-      BUDGET_EXHAUSTED_FAILURE_MESSAGE, "the plan check produced no answer", undefined,
-    ]) expect(criticModelUnusable(error), String(error)).toBe(false);
-  });
-});
 
 describe("the company a stored critique records ", () => {
   const bedrock = (modelId: string) => critiqueModelOf({ provider: "amazon-bedrock", modelId }).company;

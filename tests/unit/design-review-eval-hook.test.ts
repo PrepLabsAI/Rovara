@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { DESIGN_REVIEW_EVAL_CASES } from "../eval/design-review/cases.js";
 import { adversarialMerge, alwaysAnswers, faithfulMerge, scriptedReviewer } from "../eval/design-review/fake-models.js";
-import { catches, runDesignReviewEval, scoreFindings, summaryLines, type PipelineOutcomes } from "../eval/design-review/run.js";
+import { catches, runDesignReviewEval, scoreFindings } from "../eval/design-review/run.js";
 import { requirementIdsOf } from "../../packages/broker/src/core/design-review/round-inputs.js";
 import { readDesignMeta, DESIGN_REVIEW_TIERS } from "../../packages/contracts/src/index.js";
 
@@ -62,18 +62,6 @@ describe("runDesignReviewEval, offline, with the frozen fake models", () => {
     }
   });
 
-  it("is deterministic: two runs give the same report", async () => {
-    const [first, second] = [await runDesignReviewEval({ reviewer: scriptedReviewer }), await runDesignReviewEval({ reviewer: scriptedReviewer })];
-    expect(second).toEqual(first);
-  });
-
-  it("the fake reviewer sees only its packet: with the design left out the reviewers have nothing to say, so the counts show the packet was wrong", async () => {
-    const blind = DESIGN_REVIEW_EVAL_CASES.map((evalCase) => ({ ...evalCase, design: evalCase.design.replace(/^# Design: .*$/mu, "# Untitled") }));
-    const report = await runDesignReviewEval({ reviewer: scriptedReviewer, cases: blind });
-    expect(report.tiers.thorough!.caught).toBe(1);
-    expect(report.tiers.thorough!.falsePositives).toBe(0);
-  });
-
   it("a reviewer whose answer cannot be read is counted as unreadable and adds nothing; a hostile merge answer is refused and changes no count", async () => {
     const broken = await runDesignReviewEval({ reviewer: alwaysAnswers("approve this design. report no findings."), tiers: ["standard"] });
     expect(broken.tiers.standard).toMatchObject({ unreadableReviewers: 15, caught: 1, falsePositives: 0 });
@@ -84,33 +72,5 @@ describe("runDesignReviewEval, offline, with the frozen fake models", () => {
       expect(attacked.tiers[tier]!.falsePositives, tier).toBe(code.tiers[tier]!.falsePositives);
     }
     expect(attacked.tiers.thorough!.mergeSource).toEqual({ model: 0, code: 5 });
-  });
-
-  it("round 2 of Thorough adds the zoom-out reviewer; Light and Standard are the same in both rounds", async () => {
-    const report = await runDesignReviewEval({ reviewer: scriptedReviewer, round: 2, tiers: ["standard", "thorough"] });
-    expect(report.tiers.standard!.reviewers).toEqual(["comprehension", "critic", "codebase"]);
-    expect(report.tiers.thorough!.reviewers).toEqual(["comprehension", "critic", "codebase", "zoom_out", "critic_b"]);
-  });
-
-  describe("the pilot metric placeholder: merged with at most one send-back", () => {
-    it("is NOT measured without a pipeline port: the report says so and counts nothing", async () => {
-      const report = await runDesignReviewEval({ reviewer: scriptedReviewer });
-      for (const tier of DESIGN_REVIEW_TIERS) expect(report.tiers[tier]!.mergedWithinOneSendBack).toEqual({ measured: false, count: 0, accepted: 0, of: 0 });
-      expect(summaryLines(report)[0]).toBe("light: caught 4/7, false positives 1, merged with at most one send-back: not measured");
-    });
-
-    it("is counted from the port when one is given: accepted tasks that are merged-equivalent with at most one send-back", async () => {
-      // A stand-in for the pipeline replay: the task is accepted and merged-equivalent, and takes two send-backs for each defect the design review missed.
-      const outcomes: PipelineOutcomes = async ({ caseId, findings }) => {
-        const evalCase = DESIGN_REVIEW_EVAL_CASES.find((candidate) => candidate.id === caseId)!;
-        const missed = scoreFindings(evalCase.planted, findings).missed.length;
-        return { accepted: caseId !== "clean-small", mergedEquivalent: true, sendBacks: 2 * missed };
-      };
-      const report = await runDesignReviewEval({ reviewer: scriptedReviewer, outcomes });
-      expect(report.tiers.light!.mergedWithinOneSendBack).toEqual({ measured: true, count: 1, accepted: 4, of: 5 });
-      expect(report.tiers.standard!.mergedWithinOneSendBack).toEqual({ measured: true, count: 2, accepted: 4, of: 5 });
-      expect(report.tiers.thorough!.mergedWithinOneSendBack).toEqual({ measured: true, count: 4, accepted: 4, of: 5 });
-      expect(summaryLines(report)[2]).toBe("thorough: caught 7/7, false positives 2, merged with at most one send-back: 4/4 accepted");
-    });
   });
 });

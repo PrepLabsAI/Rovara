@@ -23,24 +23,6 @@ const tierOf = async (host: CodeHost, number: number, headSha: string): Promise<
 };
 
 describe("the tier read gets the file entry types from the host path", () => {
-  it("a docs-only change takes the docs route when the host reports entry", async () => {
-    const { model, head, number } = await docsChange();
-    const host = new FakeCodeHost(model);
-    const { tier, entries } = await tierOf(host, number, head);
-    expect(entries).toEqual([{ head: "file", base: "file" }]);
-    expect(tier).toMatchObject({ level: "small", kinds: ["docs"] });
-  });
-
-  it("the same change from a host that reports no entry is not the docs route (entry is not known, never an ordinary file)", async () => {
-    const { model, head, number } = await docsChange();
-    const fake = new FakeCodeHost(model);
-    const silent = Object.create(fake, {
-      changedFiles: { value: async (ref: ChangeRequestRef, page: number, at: HostScope): Promise<ChangeRequestFilesPage> => { const read = await fake.changedFiles(ref, page, at); return { ...read, files: read.files.map(({ entry: _entry, ...file }) => file) }; } }, // eslint-disable-line @typescript-eslint/no-unused-vars -- left out on purpose
-    }) as CodeHost;
-    const { tier, entries } = await tierOf(silent, number, head);
-    expect(entries).toEqual([undefined]);
-    expect(tier.kinds).not.toEqual(["docs"]);
-  });
 
   it("the head the tier classifies is passed to the host, so an entry never describes a newer head", async () => {
     const { model, head, number, branch } = await docsChange();

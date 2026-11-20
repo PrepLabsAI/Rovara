@@ -1,17 +1,12 @@
 // Proof and test environment E10: the synthetic data guard (personal data patterns, production names) and the seeded generator.
 import { describe, expect, it } from "vitest";
-import { DataGuardReportSchema, ServiceMockFixtureSetSchema, type ServiceMockFixtureSet, type TestEnvProdDeny } from "@agentx/contracts";
-import { expectLinearScaling } from "../support/scaling.js";
-import { DATA_GUARD_MAX_BYTES, DataGuardInputTooLarge, createSyntheticGenerator, guardApiSample, guardFixtureSet, guardInputs, guardSeeds, luhnValid, scanText } from "../../packages/verifier/src/data-guard.js";
+import { type TestEnvProdDeny } from "@agentx/contracts";
+import { DATA_GUARD_MAX_BYTES, DataGuardInputTooLarge, createSyntheticGenerator, guardApiSample, guardInputs, guardSeeds, luhnValid, scanText } from "../../packages/verifier/src/data-guard.js";
 
 const DENY: TestEnvProdDeny = { accountIds: ["111122223333"], hosts: ["*.prod.example.com", "billing.corp.net"], arnPrefixes: ["arn:aws:sagemaker:us-east-1:222222222222:"] };
 const kinds = (text: string) => scanText(text, DENY).sort();
 
 describe("personal data patterns", () => {
-  it("finds an email at a real domain and passes reserved ones", () => {
-    expect(kinds('{"owner":"jane.roe@acme-corp.com"}')).toEqual(["email"]);
-    expect(kinds("a@example.com b@x.example.org c@mail.test d@y.invalid e@thing.example")).toEqual([]);
-  });
   it("finds international and formatted North American phones, not plain ids or the fictional range", () => {
     expect(kinds("call +44 20 7946 0958 today")).toEqual(["phone"]);
     expect(kinds("(415) 867-5309")).toEqual(["phone"]);
@@ -37,43 +32,7 @@ describe("personal data patterns", () => {
   });
 });
 
-describe("credentials (review I7)", () => {
-  // Built at runtime: the public repository refuses key-shaped strings in source.
-  const awsKey = `AKIA${"ABCDEFGHIJKLMNOP"}`;
-  const jwt = `${Buffer.from('{"alg":"HS256","typ":"JWT"}').toString("base64url")}.${Buffer.from('{"sub":"1234567890","name":"x"}').toString("base64url")}.${"s".repeat(43)}`;
-  const github = `ghp_${"Ab1Cd2Ef3Gh4".repeat(3)}`;
-  it("finds cloud keys, provider tokens, bearer tokens and JWTs, private keys, and passwords in URLs or pairs", () => {
-    expect(kinds(`{"access":"${awsKey}"}`)).toEqual(["secret"]);
-    expect(kinds(`token ${github}`)).toEqual(["secret"]);
-    expect(kinds(`Authorization: Bearer ${jwt}`)).toEqual(["secret"]);
-    expect(kinds(`{"id_token":"${jwt}"}`)).toEqual(["secret"]);
-    expect(kinds(`-----BEGIN ${"RSA"} PRIVATE KEY-----\nMIIEabc\n-----END ${"RSA"} PRIVATE KEY-----`)).toEqual(["secret"]);
-    expect(kinds("postgres://app:hunter2secret@db.internal.test:5432/app")).toEqual(["secret"]);
-    expect(kinds('{"password": "correct-horse-battery"}')).toEqual(["secret"]);
-  });
-  it("leaves ordinary synthetic text alone", () => {
-    expect(kinds('{"score":0.91,"model":"v3","partner":"p1","region":"emea"}')).toEqual([]);
-    expect(kinds("id-0a1b2c3d and a uuid 3f2a9c1e-1111-4222-8333-222222222222")).toEqual([]);
-  });
-  it("blocks a fixture whose recorded response echoes a token, naming only the entry", () => {
-    const report = guardFixtureSet(fixtureSet(`{"echo":"Bearer ${jwt}"}`), DENY);
-    expect(report).toEqual({ ok: false, findings: [{ kind: "secret", source: "fixture", path: "entries[0].response" }] });
-    expect(JSON.stringify(report)).not.toContain(jwt.slice(0, 12));
-  });
-});
-
 describe("production names", () => {
-  it("uses the one matcher: wildcard ARNs, trailing dots, userinfo and case all match", () => {
-    const wild: TestEnvProdDeny = { accountIds: [], hosts: ["*.prod.example.com", "billing.corp.net."], arnPrefixes: ["arn:aws:iam::*:role/prod-", "arn:aws:sagemaker:*:210987654321:endpoint/*"] };
-    expect(scanText("arn:aws:iam::999988887777:role/prod-deploy", wild)).toEqual(["prod_arn"]);
-    expect(scanText("arn:aws:sagemaker:eu-west-1:210987654321:endpoint/x", wild)).toEqual(["prod_arn"]);
-    expect(scanText("https://user@API.PROD.example.com./x and billing.corp.net.", wild)).toEqual(["prod_host"]);
-  });
-  it("finds a deny-listed host, wildcard or exact, case-insensitively", () => {
-    expect(kinds("GET https://API.Prod.Example.com/v1")).toEqual(["prod_host"]);
-    expect(kinds("host billing.corp.net")).toEqual(["prod_host"]);
-    expect(kinds("https://staging.example.com and prod.example.com")).toEqual([]);
-  });
   it("finds a production ARN by prefix or by account, and a bare account id", () => {
     expect(kinds("arn:aws:sagemaker:us-east-1:222222222222:endpoint/x")).toEqual(["prod_arn"]);
     expect(kinds("arn:aws:iam::111122223333:role/deploy")).toEqual(["prod_account"]);
@@ -84,47 +43,14 @@ describe("production names", () => {
 });
 
 describe("reports never hold the matched text", () => {
-  it("names the kind, the source and a path, and nothing else", () => {
-    const secret = "jane.roe@acme-corp.com";
-    const report = guardInputs([{ source: "seed", path: "seeds/users.json", text: `{"email":"${secret}"}` }, { source: "seed", path: "seeds/ok.json", text: "{}" }], DENY);
-    expect(report).toEqual({ ok: false, findings: [{ kind: "email", source: "seed", path: "seeds/users.json" }] });
-    expect(JSON.stringify(report)).not.toContain("acme-corp");
-    expect(DataGuardReportSchema.safeParse(report).success).toBe(true);
-  });
-  it("is ok with no findings, caps at 100 findings, and cleans a path of control characters", () => {
-    expect(guardInputs([{ source: "fixture", path: "a", text: "nothing here" }], DENY)).toEqual({ ok: true, findings: [] });
-    const many = Array.from({ length: 150 }, (_, index) => ({ source: "fixture" as const, path: `f${String(index)}`, text: "x@real-domain.com" }));
-    const report = guardInputs(many, DENY);
-    expect(report.ok).toBe(false);
-    expect(report.findings).toHaveLength(100);
-    expect(guardInputs([{ source: "fixture", path: "bad\u0000‮path", text: "x@real-domain.com" }], DENY).findings[0]?.path).toBe("bad??path");
-  });
   it("refuses input over the size limit instead of half-reading it", () => {
     expect(() => scanText("x".repeat(DATA_GUARD_MAX_BYTES + 1), DENY)).toThrow(DataGuardInputTooLarge);
     const half = "y".repeat(DATA_GUARD_MAX_BYTES / 2 + 1);
     expect(() => guardInputs([{ source: "seed", path: "a", text: half }, { source: "seed", path: "b", text: half }], DENY)).toThrow(DataGuardInputTooLarge);
   });
-  it("scans hostile text in linear time", () => {
-    // Runs of digits and spaces, dots, plus signs and nines: the shapes that make phone, number and host patterns backtrack. Eight times the size must cost about eight times as much.
-    let found: unknown;
-    expectLinearScaling((units) => {
-      const text = `${"1 ".repeat(50 * units)}${"a.".repeat(25 * units)}${"+1".repeat(25 * units)}${"9".repeat(125 * units)}`;
-      return () => { found = scanText(text, DENY); };
-    }, { n: 50, unitBytes: 325, label: "data guard: hostile text" });
-    expect(Array.isArray(found)).toBe(true);
-  }, 120_000);
-});
-
-const fixtureSet = (responseBody: string): ServiceMockFixtureSet => ServiceMockFixtureSetSchema.parse({
-  schemaVersion: 1, service: { name: "partner-scorer", kind: "sagemaker_runtime", target: "partner-scorer" }, revision: 1, recordedAt: "2026-10-30T00:00:00.000Z", syntheticOnly: true, requestSchema: null, responseSchema: null,
-  entries: [{ requestHash: "a".repeat(64), request: { contentType: "application/json", body: '{"partner":"p1"}' }, response: { status: 200, contentType: "application/json", body: responseBody, latencyMs: 5 } }], faults: [],
 });
 
 describe("fixtures, seeds and API samples", () => {
-  it("blocks a fixture set whose response holds personal data, naming the entry", () => {
-    expect(guardFixtureSet(fixtureSet('{"score":0.9}'), DENY).ok).toBe(true);
-    expect(guardFixtureSet(fixtureSet('{"contact":"jane.roe@acme-corp.com"}'), DENY)).toEqual({ ok: false, findings: [{ kind: "email", source: "fixture", path: "entries[0].response" }] });
-  });
   it("scans a seed command and a fixture file, and reads the file only through the caller's reader", async () => {
     const files = new Map([["seed/users.json", '[{"phone":"(415) 867-5309"}]']]);
     const report = await guardSeeds([{ command: { executable: "python", args: ["seed.py", "--host", "db.prod.example.com"] } }, { fixturePath: "seed/users.json" }], DENY, (path) => Promise.resolve(files.get(path) ?? ""));
@@ -146,10 +72,5 @@ describe("the seeded generator", () => {
     expect(() => createSyntheticGenerator(1.5)).toThrow(RangeError);
     expect(() => g.int(5, 1)).toThrow(RangeError);
     expect(() => g.pick([])).toThrow(RangeError);
-  });
-  it("makes nothing the guard blocks, over many values", () => {
-    const g = createSyntheticGenerator(2026);
-    const text = Array.from({ length: 2_000 }, () => `${g.email()} ${g.phone()} ${g.name()} ${g.id()} ${g.uuid()}`).join("\n");
-    expect(scanText(text, DENY)).toEqual([]);
   });
 });

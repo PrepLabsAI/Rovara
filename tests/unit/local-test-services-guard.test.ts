@@ -8,7 +8,7 @@ import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer as createNetServer, connect as netConnect, type Server as NetServer } from "node:net";
 import { request as httpRequest, type Server } from "node:http";
-import { tmpdir, totalmem } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { DOCKER_SOCKET_GUARD_SOURCE } from "../../packages/broker/src/local/isolation/docker-socket-guard-source.js";
@@ -123,7 +123,7 @@ async function world(services: boolean, options: { policyExtra?: Record<string, 
   const directory = await mkdtemp(join(tmpdir(), "rg-prog-"));
   scratch.push(directory);
   const file = join(directory, "guard.cjs");
-  await writeFile(file, DOCKER_SOCKET_GUARD_SOURCE);
+  await writeFile(file, GUARD_SOURCE_ON_FIXED_MACHINE);
   const saved = { ...process.env };
   Object.assign(process.env, { ROVARA_SOCK_POLICY: JSON.stringify({ ...policy(services, options.policyExtra, options.policyTop), upstream: daemon.socketPath }), ROVARA_SOCK_LIBRARY: "1" });
   let guard: { createServer(): Server; services: unknown };
@@ -156,6 +156,15 @@ async function world(services: boolean, options: { policyExtra?: Record<string, 
   };
 }
 type World = Awaited<ReturnType<typeof world>>;
+// The guard sizes its memory ceilings from the machine (os.totalmem()), so a share of it is a different number on every runner: a container that names no memory
+// asks for 4 GiB, which fits 40% of a 16 GB GitHub runner and not of an 8 GB CodeBuild one. The guard under test runs on a fixed 16 GiB machine instead.
+const MACHINE_MEMORY = 16 * 1024 * 1048576;
+const MEMORY_LINE = 'const MEMORY_CEILING = require("os").totalmem();';
+const GUARD_SOURCE_ON_FIXED_MACHINE = DOCKER_SOCKET_GUARD_SOURCE.replace(MEMORY_LINE, `const MEMORY_CEILING = ${MACHINE_MEMORY};`);
+it("the guard sizes its memory ceilings from the machine's memory, which these tests fix at 16 GiB", () => {
+  expect(DOCKER_SOCKET_GUARD_SOURCE.split(MEMORY_LINE)).toHaveLength(2);
+  expect(GUARD_SOURCE_ON_FIXED_MACHINE).toContain(`const MEMORY_CEILING = ${MACHINE_MEMORY};`);
+});
 async function using<T>(services: boolean, body: (w: World) => Promise<T>, options?: Parameters<typeof world>[1]): Promise<T> {
   const w = await world(services, options);
   try { return await body(w); } finally { await w.close(); }
@@ -971,7 +980,7 @@ async function loadGuard(): Promise<{ checkExecBody(text: string, kind?: unknown
   const directory = await mkdtemp(join(tmpdir(), "rg-lib-"));
   scratch.push(directory);
   const file = join(directory, "guard.cjs");
-  await writeFile(file, DOCKER_SOCKET_GUARD_SOURCE);
+  await writeFile(file, GUARD_SOURCE_ON_FIXED_MACHINE);
   const saved = { ...process.env };
   Object.assign(process.env, { ROVARA_SOCK_POLICY: JSON.stringify({ ...policy(true), upstream: "/nowhere.sock" }), ROVARA_SOCK_LIBRARY: "1" });
   try { return createRequire(import.meta.url)(file) as { checkExecBody(text: string, kind?: unknown): string; buildHostConfig(host: unknown, mode?: unknown): Record<string, any> }; } finally { for (const key of ["ROVARA_SOCK_POLICY", "ROVARA_SOCK_LIBRARY"]) delete process.env[key]; Object.assign(process.env, saved); }
@@ -1132,7 +1141,7 @@ describe("test services: the program profile and the caps", () => {
   it("caps the memory of all a worker's service containers together, from what the daemon holds", async () => {
     await using(true, async (w) => {
       // 3 GiB each: the machine this runs on decides the total (three quarters of its memory), so give the existing ones a label that fills it.
-      const total = Math.floor(totalmem() * 0.75);
+      const total = Math.floor(MACHINE_MEMORY * 0.75);
       w.state.containers.find((entry) => entry.name === `${NET}-h0123456789`)!.labels["rovara.local.memory"] = String(total);
       const answer = await create(w, `${NET}-h0123456788`, mutated(helperBody, () => undefined));
       expect(answer.status, answer.text).toBe(429);
@@ -1247,7 +1256,7 @@ describe("test services: the resource ceilings", () => {
   });
 
   it("defaults: all the service containers together may be given 40% of the machine's memory, not 75%", async () => {
-    const total = Math.floor(totalmem() * 0.4);
+    const total = Math.floor(MACHINE_MEMORY * 0.4);
     await using(true, async (w) => { fill(w, total - 512 * MIB); expect((await create(w, `${NET}-h0000000001`, helper(512 * MIB))).status).toBe(201); }, withLimits({}));
     await using(true, async (w) => {
       fill(w, total - 512 * MIB + 1);
@@ -1256,11 +1265,11 @@ describe("test services: the resource ceilings", () => {
       expect(JSON.parse(answer.text)).toEqual({ message: `rovara: ${TEST_SERVICES_LIMIT_SENTENCES.memory}` });
       expect(w.forwarded("/containers/create")).toHaveLength(0);
     }, withLimits({}));
-    await using(true, async (w) => { fill(w, Math.floor(totalmem() * 0.5)); expect((await create(w, `${NET}-h0000000001`, helper(512 * MIB))).status).toBe(429); }, withLimits({}));
+    await using(true, async (w) => { fill(w, Math.floor(MACHINE_MEMORY * 0.5)); expect((await create(w, `${NET}-h0000000001`, helper(512 * MIB))).status).toBe(429); }, withLimits({}));
   });
 
   it("an owner setting raises the memory share, and the guard never goes past the old 75%", async () => {
-    const at = (percent: number) => Math.floor(totalmem() * percent / 100);
+    const at = (percent: number) => Math.floor(MACHINE_MEMORY * percent / 100);
     await using(true, async (w) => { fill(w, at(60) - 512 * MIB); expect((await create(w, `${NET}-h0000000001`, helper(512 * MIB))).status).toBe(201); }, withLimits({ maxMemoryPercent: 60 }));
     await using(true, async (w) => { fill(w, at(60) - 512 * MIB + 1); expect((await create(w, `${NET}-h0000000001`, helper(512 * MIB))).status).toBe(429); }, withLimits({ maxMemoryPercent: 60 }));
     await using(true, async (w) => { fill(w, at(75) - 512 * MIB + 1); expect((await create(w, `${NET}-h0000000001`, helper(512 * MIB))).status).toBe(429); }, withLimits({ maxMemoryPercent: 99 }));
@@ -1268,11 +1277,11 @@ describe("test services: the resource ceilings", () => {
   });
 
   it("the sealed check sandbox is sized by the sandbox rule, so it counts toward the container cap but not toward the services memory total", async () => {
-    const total = Math.floor(totalmem() * 0.4);
+    const total = Math.floor(MACHINE_MEMORY * 0.4);
     // A check sandbox the size the sandbox rule gives (about 80% of the machine) may be made even when the helpers already fill the share.
     await using(true, async (w) => {
       fill(w, total);
-      const big = mutated(checkBody, (v) => { v.HostConfig.Memory = Math.floor(totalmem() * 0.8); v.HostConfig.MemorySwap = Math.floor(totalmem() * 0.8); });
+      const big = mutated(checkBody, (v) => { v.HostConfig.Memory = Math.floor(MACHINE_MEMORY * 0.8); v.HostConfig.MemorySwap = Math.floor(MACHINE_MEMORY * 0.8); });
       expect((await create(w, CHECK, big)).status).toBe(201);
     }, { ...withLimits({}), containers: [owned({ name: "agentx-task-w-1", id: SANDBOX_ID }), owned({ name: `${NET}-h0123456789`, id: HELPER_ID, labels: serviceLabels("helper"), user: "999:999" })] });
     // And an existing check sandbox is not charged against the helpers (it carries no memory label: the old code charged it 4 GiB).

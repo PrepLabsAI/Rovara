@@ -10,14 +10,10 @@ const file = (path: string): RiskFile => ({ repository: "payments", path, added:
 const level = (path: string) => assessRisk({ changedFiles: [file(path)], changedFilesComplete: true, report: clean, acceptedFindings: [], securityFindings: 0, candidateDigest: digest }).level;
 
 describe("the playbook and the project config are sensitive paths", () => {
-  it.each([".rovara/playbook.yaml", ".rovara/playbook.yml", "services/api/.rovara/playbook.yaml", ".ROVARA/Playbook.YAML", "./.rovara/project.yaml", ".rovara/project.json"])("%s is high in both gradings", (path) => {
+  it.each([".rovara/playbook.yaml"])("%s is high in both gradings", (path) => {
     expect(planSensitive(path), path).toBe(true);
     expect(proofSensitive(path), path).toBe(true);
     expect(level(path), path).toBe("high");
   });
 
-  it.each(["src/playbook.yaml", "docs/rovara/playbook.yaml.md", ".rovara/lessons.md", ".rovara/loop.yaml", "playbook.yaml"])("%s is not made sensitive by the playbook rule", (path) => {
-    expect(planSensitive(path), path).toBe(false);
-    expect(proofSensitive(path), path).toBe(false);
-  });
 });

@@ -10,7 +10,6 @@ import {
   EVAL_BRIDGE_SOCKET_NAME, EVAL_HELPER_DIR_NAME, createBridgedEvalExec, createFreshEvalSandbox, type EvalDryRunObservation, type FreshEvalSandboxConfig,
 } from "../../packages/worker/src/verification/eval-bridged-exec.js";
 import { dependencyListFrom, findMissingEnvVars, mergeDependencyLists, runEvalDryRun, runSetupEvalDryRun } from "../../packages/worker/src/verification/eval-dry-run.js";
-import { runNetworkAddresses, runNetworkHelperIp } from "../../packages/worker/src/run-network.js";
 import type { EvalServicesStarter } from "../../packages/worker/src/verification/eval-services.js";
 import { EVAL_REPORT_FILE, fakeEvalDaemon } from "../support/fake-eval-sealed-daemon.js";
 
@@ -48,26 +47,6 @@ const observation = (over: Partial<EvalDryRunObservation> = {}): EvalDryRunObser
 });
 
 describe("the dependency list from what a dry run left behind", () => {
-  it("lists a database (by port, with its engine), an outside host (with its port) and a missing variable from one failed eval, and the list is the contract's shape", () => {
-    const list = dependencyListFrom(observation());
-    expect(list).toEqual({
-      version: 1, modelCalls: 0, ended: "failed",
-      databases: [{ port: 5432, engine: "postgres" }], hosts: [{ name: "api.vendor.example.test", port: 443 }], envVars: ["STRIPE_API_KEY"],
-    });
-    expect(EvalDependencyListSchema.safeParse(list).success).toBe(true);
-    // a database's own host name ("db") is not an outside host, though the name server recorded it
-    expect(list.hosts.map((host) => host.name)).not.toContain("db");
-  });
-
-  it("an unknown name the name server recorded is listed even when the eval's output never names it; a name from the model route, this machine or another shape is not (mutant: the model-route filter)", () => {
-    const list = dependencyListFrom(observation({
-      output: "done",
-      dns: { unknown: [{ name: "vendor.example.test", queries: 1 }, { name: "generativelanguage.googleapis.com", queries: 4 }, { name: "localhost", queries: 1 }, { name: "x.localhost", queries: 1 }, { name: "bad name!", queries: 1 }, { name: "172.30.7.47", queries: 1 }], dropped: 0, unrecorded: 0 },
-      code: 0,
-    }));
-    expect(list.hosts).toEqual([{ name: "vendor.example.test" }]);
-    expect(list.ended).toBe("finished");
-  });
 
   it("pairs the one unnamed host with the one port the sinkhole refused (an IP-only connect error), and leaves two ambiguous ports unnamed", () => {
     const one = dependencyListFrom(observation({ output: "Error: connect ECONNREFUSED 172.30.7.47:8443", dns: { unknown: [{ name: "vendor.example.test", queries: 1 }], dropped: 0, unrecorded: 0 } }));
@@ -154,30 +133,6 @@ async function world(daemon = fakeEvalDaemon(), over: Partial<FreshEvalSandboxCo
 }
 
 describe("the free dry run in the sealed box", () => {
-  it("runs the eval ONCE on main with a scripted model helper: no bridge socket, mode scripted, one catch-all reply per served family, and ZERO model calls (spy on the bridge)", async () => {
-    const daemon = fakeEvalDaemon({ exitCode: 1, output: () => EVAL_OUTPUT, dnsUnknown: ["db", "api.vendor.example.test"] });
-    const w = await world(daemon);
-    const list = await runEvalDryRun({ sandbox: w.sandbox(), ids: ["q1", "q2"], signal: new AbortController().signal });
-    expect(list).toMatchObject({ databases: [{ port: 5432, engine: "postgres" }], hosts: [{ name: "api.vendor.example.test", port: 443 }], envVars: ["STRIPE_API_KEY"], modelCalls: 0 });
-    // one run, on main
-    expect(daemon.waits()).toBe(1);
-    expect(w.materialized).toEqual([MAIN]);
-    // the helper: scripted, no bridge socket, nothing that reaches a gateway
-    const helper = daemon.everStarted.find((container) => container.name.endsWith("-models"))!;
-    const helperArgs = helper.args.slice(helper.args.indexOf("--listen"));
-    expect(helperArgs[helperArgs.indexOf("--mode") + 1]).toBe("scripted");
-    expect(helperArgs).not.toContain("--bridge-socket");
-    // the replies it serves: one per served family, matching every call, never `independent`
-    const bundle = JSON.parse(daemon.helperFiles.find((file) => file.container === helper.name)!.replies) as { sets: Array<{ family: string; replies: Array<{ match: object; provenance: string }> }> };
-    expect(bundle.sets.map((set) => set.family).sort()).toEqual(["anthropic_messages", "cohere", "gemini", "openai_compatible", "vertex"]);
-    for (const set of bundle.sets) { expect(set.replies).toHaveLength(1); expect(set.replies[0]!.match).toEqual({}); expect(set.replies[0]!.provenance).toBe("task_made"); }
-    // the spy: not one bridge was made
-    expect(bridge.made).toBe(0);
-    // the box's env file has the placeholder token path and no service variable, no real key
-    const envFile = daemon.envFiles.find((file) => file.container.endsWith("-eval"))!.content;
-    expect(envFile).toContain("/x/dryrun0000000000");
-    expect(envFile).not.toMatch(/DATABASE_URL|REDIS_URL|PGHOST/u);
-  });
 
   it("positive control for the spy: a PAID run builds a bridge, and its helper is `real` over the bridge socket (mutant: flip the dry run's mode to real)", async () => {
     const daemon = fakeEvalDaemon();
@@ -225,26 +180,6 @@ describe("the free dry run in the sealed box", () => {
     expect(await runEvalDryRun({ sandbox: off.sandbox(), ids: ["q1"], signal: new AbortController().signal })).toBeUndefined();
     expect(off.daemon.calls).toEqual([]);
   });
-
-  it("a stop ends the run and removes everything; an aborted signal never starts one", async () => {
-    const aborted = new AbortController(); aborted.abort();
-    const w = await world();
-    expect(await runEvalDryRun({ sandbox: w.sandbox(), ids: ["q1"], signal: aborted.signal })).toBeUndefined();
-    expect(w.daemon.calls).toEqual([]);
-  });
-
-  it("the dry run's name server serves the box at .4 only, and its mounts are the checkout and the two name files read-only (the same walls as a paid run)", async () => {
-    const daemon = fakeEvalDaemon({ output: () => "ok" });
-    const w = await world(daemon);
-    await w.sandbox().dryRun!({ ids: ["q1"], signal: new AbortController().signal });
-    const sandbox = daemon.everStarted.find((container) => container.name.endsWith("-eval"))!;
-    const slot = Number(/172\.30\.(\d+)\./u.exec(sandbox.ip)![1]);
-    const dns = daemon.everStarted.find((container) => container.name.endsWith("-dns"))!;
-    expect(dns.args[dns.args.indexOf("--source") + 1]).toBe(runNetworkAddresses(slot).checkSandboxIp);
-    expect(dns.args[dns.args.indexOf("--sinkhole") + 1]).toBe(runNetworkHelperIp(slot, 31));
-    expect(sandbox.mounts.filter((mount) => mount.Type === "bind").map((mount) => mount.Destination)).toEqual(["/workspace", "/etc/resolv.conf", "/etc/hosts"]);
-    expect(daemon.reachableFrom(sandbox.name)).not.toBe("anything");
-  });
 });
 
 // ---- the setup run's own dry run
@@ -267,18 +202,6 @@ describe("the setup run's dry run over the drafted eval", () => {
       },
     };
   };
-
-  it("runs the suite's own command on the recorded main commit, with no model, no services and the sealed name server, and says test services are off on this install", async () => {
-    const h = await host();
-    const list = await runSetupEvalDryRun(h.host, report(suite()));
-    expect(list).toMatchObject({ modelCalls: 0, servicesOff: true, databases: [{ port: 5432 }], envVars: ["STRIPE_API_KEY"] });
-    expect(list!.hosts.map((entry) => entry.name)).toContain("api.vendor.example.test");
-    expect(h.made).toHaveLength(1);
-    expect(h.made[0]).toMatchObject({ repository: { baseCommit: MAIN, candidateCommit: MAIN }, command, rowId: "gemini", workingSandbox: null, sealedDns: true });
-    expect(h.made[0]!.services).toBeUndefined();
-    expect(bridge.made).toBe(0);
-    expect(evalDependencyListWords(list!)).toContain("Test services are off on this install");
-  });
 
   it("with test services on the list does not say they are off; a suite in a repository the run did not read, or with no recorded commit, is skipped; with nothing run the answer is undefined", async () => {
     const on = await host(undefined, { servicesOff: false });

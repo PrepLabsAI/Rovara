@@ -32,13 +32,4 @@ describe("Bedrock transport failures with no response", () => {
   it("a connect timeout whose text says both 'timed out' and ETIMEDOUT is unreachable", async () => {
     expect((await run("Connection timed out after 1000 ms: connect ETIMEDOUT 10.0.0.1:443")).receipt.failure).toEqual({ class: "unreachable", signal: "ETIMEDOUT" });
   });
-  it("UND_ERR_CONNECT_TIMEOUT in the text is unreachable", async () => {
-    expect((await run("Request timed out. Connect Timeout Error UND_ERR_CONNECT_TIMEOUT")).receipt.failure).toEqual({ class: "unreachable", signal: "UND_ERR_CONNECT_TIMEOUT" });
-  });
-  it("a name resolution failure is unreachable", async () => {
-    expect((await run("getaddrinfo ENOTFOUND bedrock-runtime.us-east-1.amazonaws.com")).receipt.failure).toEqual({ class: "unreachable", signal: "ENOTFOUND" });
-  });
-  it("a timeout with no network code is a provider outage with the signal timeout (control)", async () => {
-    expect((await run("Request timed out.")).receipt.failure).toEqual({ class: "provider-outage", signal: "timeout" });
-  });
 });

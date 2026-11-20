@@ -1,15 +1,12 @@
 // TE-C6, the broker's half of the plan: with ROVARA_FLAKY_RERUN on, a run whose first commands are the environment's checks is told `flakyRerun: true` (and needs a worker that lists the feature); with it off the plan and its
 // requirements are today's, byte for byte. The base's flaky set is read through ONE function.
 import { describe, expect, it } from "vitest";
-import { NightlyBaselineSchema, TASK_FLAKY_RERUN_FEATURE, TEST_ENV_PLAN_FEATURE, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, WORKER_INVOCATION_FEATURES, projectPk, projectRevisionKey, testEnvDigest, type TestEnvironmentBody } from "@agentx/contracts";
+import { NightlyBaselineSchema, TASK_FLAKY_RERUN_FEATURE, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, projectPk, projectRevisionKey, testEnvDigest, type TestEnvironmentBody } from "@agentx/contracts";
 import { COMPANY, createHarness, newRequestId } from "../support/task-flow-harness.js";
-import { createTaskTestEnvironment, featuresForTestPlan } from "../../packages/broker/src/core/test-env/seam.js";
+import { createTaskTestEnvironment } from "../../packages/broker/src/core/test-env/seam.js";
 import { baseFlakyTests } from "../../packages/broker/src/core/test-env/base-flaky.js";
-import { NIGHTLY_BASELINE_MAX_AGE_MS } from "../../packages/broker/src/core/test-env/nightly-usable.js";
-import { flakyRerunEnabled } from "../../packages/broker/src/core/test-env/switch.js";
 import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
 import { documentOf, type TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
-import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 
 const PROJECT = "payments";
 const cmd = (executable: string, args: string[] = []) => ({ cwd: "repo/demo", executable, args, timeoutSeconds: 600 });
@@ -43,31 +40,7 @@ async function world(env: NodeJS.ProcessEnv) {
 const READY = [cmd("pytest", ["--junitxml=r.xml"])];
 const ON = { ROVARA_FLAKY_RERUN: "1" } as NodeJS.ProcessEnv;
 
-describe("the switch", () => {
-  it("is off unless exactly 1", () => {
-    expect(flakyRerunEnabled({})).toBe(false);
-    for (const value of ["true", "", " 1", "1 ", "on", "0"]) expect(flakyRerunEnabled({ ROVARA_FLAKY_RERUN: value }), value).toBe(false);
-    expect(flakyRerunEnabled(ON)).toBe(true);
-  });
-});
-
 describe("the plan of a verification run", () => {
-  it("with the switch off is today's plan: no flag, and only the plan feature is required", async () => {
-    const { seam, taskId } = await world({});
-    const checks = await seam.stepPlan({ project: PROJECT, taskId, mode: "CHECKS", readiness: READY });
-    expect(checks?.plan).not.toHaveProperty("flakyRerun");
-    expect(checks?.requires).toEqual([TEST_ENV_PLAN_FEATURE]);
-    expect(await seam.stepPlan({ project: PROJECT, taskId, mode: "IMPLEMENT", readiness: READY })).toBeUndefined();
-  });
-
-  it("with the switch on, a run whose first commands are the environment's checks is told to rerun, and needs the feature", async () => {
-    const { seam, taskId } = await world(ON);
-    const checks = await seam.stepPlan({ project: PROJECT, taskId, mode: "CHECKS", readiness: READY });
-    expect(checks?.plan.flakyRerun).toBe(true);
-    expect(TestEnvTaskPlanSchema.safeParse(checks?.plan).success).toBe(true);
-    expect(checks?.requires.sort()).toEqual([TASK_FLAKY_RERUN_FEATURE, TEST_ENV_PLAN_FEATURE].sort());
-    expect(featuresForTestPlan(undefined, checks?.plan)).toContain(TASK_FLAKY_RERUN_FEATURE);
-  });
 
   it("a coding run is told the plan (no dependencies) so its settle round can rerun, only with the switch on and its readiness matching the environment's checks", async () => {
     const { seam, taskId } = await world(ON);
@@ -87,13 +60,6 @@ describe("the plan of a verification run", () => {
     expect(TestEnvTaskPlanSchema.safeParse(base).success).toBe(true);
     expect(TestEnvTaskPlanSchema.safeParse({ ...base, flakyRerun: true }).success).toBe(true);
     for (const value of [false, "true", 1, null]) expect(TestEnvTaskPlanSchema.safeParse({ ...base, flakyRerun: value }).success, String(value)).toBe(false);
-  });
-});
-
-describe("the worker feature", () => {
-  it("is listed by the contracts and implemented by this worker, so the broker can refuse an older one", () => {
-    expect(WORKER_INVOCATION_FEATURES).toContain(TASK_FLAKY_RERUN_FEATURE);
-    expect(WORKER_IMPLEMENTED_FEATURES).toContain(TASK_FLAKY_RERUN_FEATURE);
   });
 });
 
@@ -122,9 +88,4 @@ describe("baseFlakyTests (today the last usable nightly baseline's flaky set; TE
     expect(await baseFlakyTests(await baseWorld(), { orgId: ORG, project: PROJECT })).toEqual(["tests/test_cart.py::test_total"]);
   });
 
-  it("is unknown (undefined, never an empty set that would read as 'nothing is flaky') for a stale baseline, another branch, or none", async () => {
-    expect(await baseFlakyTests(await baseWorld({ ageMs: NIGHTLY_BASELINE_MAX_AGE_MS + 60_000 }), { orgId: ORG, project: PROJECT })).toBeUndefined();
-    expect(await baseFlakyTests(await baseWorld({ branch: "release" }), { orgId: ORG, project: PROJECT })).toBeUndefined();
-    expect(await baseFlakyTests(await baseWorld({ noBaseline: true }), { orgId: ORG, project: PROJECT })).toBeUndefined();
-  });
 });

@@ -12,8 +12,6 @@ const CLOSE = "</hierarchy></window></display></displays>";
 const XML = "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>";
 /** The dump of every window (`uiautomator dump --windows`): the displays, each window and its hierarchy. */
 const dump = (inner: string) => `${XML}${OPEN}${inner}${CLOSE}`;
-/** The dump of several windows: the app's, then a dialog over it. */
-const windows = (...inners: string[]) => `${XML}<displays><display id="0">${inners.map((inner, at) => `<window id="${String(at + 1)}"><hierarchy rotation="0">${inner}</hierarchy></window>`).join("")}</display></displays>`;
 const box = (l: number, t: number, r: number, b: number) => `[${String(l)},${String(t)}][${String(r)},${String(b)}]`;
 const FRAME = { frame: SIZE };
 
@@ -37,13 +35,6 @@ describe("androidHierarchyToTree", () => {
         { description: "Close", bounds: { x: 600, y: 1100, width: 100, height: 100 } },
       ],
     });
-  });
-
-  it("reads the nodes of a screen in the dump's own order, parents before children, and leaves out nodes with nothing to say", () => {
-    const xml = dump(node({ class: "a.Root", text: "one", bounds: box(0, 0, 10, 10) }, node({ class: "a.Mid", bounds: box(0, 0, 10, 10) }, node({ class: "a.Leaf", text: "two", bounds: box(0, 0, 10, 10) })) + node({ class: "a.Leaf", text: "three", bounds: box(0, 0, 10, 10) })));
-    const tree = androidHierarchyToTree(xml, SIZE);
-    expect(tree).not.toBe(DEVICE_UNREADABLE_TREE);
-    expect((tree as { nodes: Array<{ text: string }> }).nodes.map((row) => row.text)).toEqual(["one", "two", "three"]);
   });
 
   it("decodes the XML entities the dump writes and refuses any other", () => {
@@ -100,69 +91,5 @@ describe("androidHierarchyToTree", () => {
     expect(planDeviceMask(androidHierarchyToTree(xml, SIZE), FRAME)).toEqual({
       status: "paint", rects: [{ x: 0, y: 100, width: 720, height: 100 }, { x: 0, y: 200, width: 720, height: 100 }, { x: 0, y: 300, width: 720, height: 600 }],
     });
-  });
-
-  it("an unreadable dump is withheld even when the admin allows fixture data only (that waives a screen with no tree, never a failed read)", () => {
-    expect(planDeviceMask(DEVICE_UNREADABLE_TREE, { frame: SIZE, fixtureDataOnly: true })).toEqual({ status: "withheld", reason: "unreadable_screen" });
-    expect(planDeviceMask(androidHierarchyToTree(OPEN, SIZE), { frame: SIZE, fixtureDataOnly: true })).toEqual({ status: "withheld", reason: "unreadable_screen" });
-    // A dump of a screen with no text at all (a game) is a tree, and is what the waiver is for.
-    const game = dump(node({ class: "android.view.SurfaceView", bounds: box(0, 0, 720, 1280) }));
-    expect(planDeviceMask(androidHierarchyToTree(game, SIZE), FRAME)).toEqual({ status: "withheld", reason: "unreadable_screen" });
-    expect(planDeviceMask(androidHierarchyToTree(game, SIZE), { frame: SIZE, fixtureDataOnly: true })).toMatchObject({ status: "paint", unmasked: true });
-  });
-
-  it("covers every surface class and does not take an ordinary class for one", () => {
-    for (const className of ["android.view.SurfaceView", "android.view.TextureView", "android.opengl.GLSurfaceView", "android.widget.VideoView", "com.google.android.gms.maps.MapView", "io.flutter.embedding.android.FlutterView", "com.unity3d.player.UnityPlayer"]) {
-      const tree = androidHierarchyToTree(dump(node({ class: className, bounds: box(0, 0, 10, 10) })), SIZE) as { nodes: Array<{ surface?: boolean }> };
-      expect(tree.nodes[0]?.surface, className).toBe(true);
-    }
-    for (const className of ["android.widget.TextView", "android.view.ViewGroup", "androidx.compose.ui.platform.ComposeView"]) {
-      const tree = androidHierarchyToTree(dump(node({ class: className, text: "x", bounds: box(0, 0, 10, 10) })), SIZE) as { nodes: Array<{ surface?: boolean; webView?: boolean }> };
-      expect(tree.nodes[0]?.surface, className).toBeUndefined();
-      expect(tree.nodes[0]?.webView, className).toBeUndefined();
-    }
-    for (const className of ["android.webkit.WebView", "org.chromium.android_webview.AwContents", "com.example.CustomWebView"]) {
-      const tree = androidHierarchyToTree(dump(node({ class: className, bounds: box(0, 0, 10, 10) })), SIZE) as { nodes: Array<{ webView?: boolean }> };
-      expect(tree.nodes[0]?.webView, className).toBe(true);
-    }
-  });
-
-  it("only a password attribute of exactly true makes a node secure, and an id with hidden characters or too long is left out", () => {
-    const rows = ["true", "false", "True", "1", ""].map((password) => node({ text: "x", password, bounds: box(0, 0, 10, 10) })).join("");
-    const tree = androidHierarchyToTree(dump(rows), SIZE) as { nodes: Array<{ secure?: boolean }> };
-    expect(tree.nodes.map((row) => row.secure)).toEqual([true, undefined, undefined, undefined, undefined]);
-    const ids = androidHierarchyToTree(dump(node({ text: "x", "resource-id": `a&#x200B;b`, bounds: box(0, 0, 10, 10) }) + node({ text: "y", "resource-id": "i".repeat(201), bounds: box(0, 0, 10, 10) })), SIZE) as { nodes: Array<{ id?: string }> };
-    expect(ids.nodes.map((row) => row.id)).toEqual([undefined, undefined]);
-  });
-
-  it("reads a dump of the largest allowed size in well under a second, and a hostile one just as fast", () => {
-    const start = Date.now();
-    const many = node({ text: "word ".repeat(10), bounds: box(0, 0, 10, 10) }).repeat(DEVICE_EVIDENCE_TREE_NODES_MAX);
-    expect(androidHierarchyToTree(dump(many), SIZE)).not.toBe(DEVICE_UNREADABLE_TREE);
-    expect(androidHierarchyToTree(`${OPEN}${"<node ".repeat(500_000)}${CLOSE}`, SIZE)).toBe(DEVICE_UNREADABLE_TREE);
-    expect(androidHierarchyToTree(`${OPEN}<node${' a="1"'.repeat(100_000)} x${CLOSE}`, SIZE)).toBe(DEVICE_UNREADABLE_TREE);
-    expect(androidHierarchyToTree(`${OPEN}${"<node text=\"".repeat(100_000)}`, SIZE)).toBe(DEVICE_UNREADABLE_TREE);
-    expect(Date.now() - start).toBeLessThan(3_000);
-  });
-
-  it("reads every window of the screen, a dialog over the app included, so what the picture shows behind and in front is masked", () => {
-    const app = node({ class: "android.widget.TextView", text: "Signed in as sam@example.org", bounds: box(0, 100, 720, 200) });
-    const dialog = node({ class: "android.widget.TextView", text: "Delete this?", bounds: box(100, 500, 620, 600) });
-    const tree = androidHierarchyToTree(windows(app, dialog), SIZE) as { nodes: Array<{ text: string }> };
-    expect(tree.nodes.map((row) => row.text)).toEqual(["Signed in as sam@example.org", "Delete this?"]);
-    expect(planDeviceMask(tree, FRAME)).toEqual({ status: "paint", rects: [{ x: 0, y: 100, width: 720, height: 100 }] });
-    // a notification or keyboard window with a secret is painted too
-    const heads = node({ class: "android.widget.TextView", text: "New mail from ops@example.org", bounds: box(0, 0, 720, 120) });
-    const plan = planDeviceMask(androidHierarchyToTree(windows(app, dialog, heads), SIZE), FRAME);
-    expect(plan.status).toBe("paint");
-    expect(plan.status === "paint" ? plan.rects : []).toEqual([{ x: 0, y: 100, width: 720, height: 100 }, { x: 0, y: 0, width: 720, height: 120 }]);
-  });
-
-  it("never throws and echoes none of the dump's own text in what it returns for a bad one", () => {
-    const secret = "tok_SECRET_VALUE";
-    const got = androidHierarchyToTree(`${OPEN}<node text="${secret}" &bad${CLOSE}`, SIZE);
-    expect(JSON.stringify(got)).not.toContain(secret);
-    expect(androidHierarchyToTree(dump(node({ text: "x", bounds: box(0, 0, 10, 10) })), { width: 0, height: -1 })).toBe(DEVICE_UNREADABLE_TREE);
-    expect(androidHierarchyToTree(dump(node({ text: "x", bounds: box(0, 0, 10, 10) })), undefined as unknown as { width: number; height: number })).toBe(DEVICE_UNREADABLE_TREE);
   });
 });

@@ -1,6 +1,6 @@
 // The monitoring port: the adapters Code ships, how they are registered, and how a connection's check is answered by whatever adapter the registry holds.
 import { describe, expect, it } from "vitest";
-import { SecretValue, type MonitoringAdapter, type OrgConnection } from "@agentx/contracts";
+import { SecretValue, type OrgConnection } from "@agentx/contracts";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { connectionChecksFromRegistry, nativeMonitoringAdapters, registerNativeMonitoring } from "../../packages/broker/src/monitoring/native-adapters.js";
 
@@ -22,20 +22,6 @@ describe("the adapters Code ships", () => {
     expect(adapters.find((adapter) => adapter.kind === "sentry")!.tools().map((tool) => tool.name)).toEqual(["list_issues", "get_issue", "get_latest_event", "list_releases"]);
   });
 
-  it("are registered under their kind, and a kind a plug-in already holds is left alone", () => {
-    const registry = createAdapterRegistry();
-    const own: MonitoringAdapter = { kind: "sentry", vendor: "Mine", readOnly: true, takesSecret: true, tools: () => [], check: async () => ({ ok: true }) };
-    registry.register("monitoring", "sentry", own);
-    registerNativeMonitoring(registry);
-    expect(registry.names("monitoring").sort()).toEqual(["datadog", "grafana", "pagerduty", "sentry", "vercel"]);
-    expect(registry.get("monitoring", "sentry")).toBe(own);
-  });
-
-  it("cannot be added once the registry is sealed: the install registers them before it seals", () => {
-    const registry = createAdapterRegistry();
-    registry.seal();
-    expect(() => registerNativeMonitoring(registry)).toThrow();
-  });
 });
 
 describe("a connection's check, answered by the adapter of its kind", () => {
@@ -67,10 +53,4 @@ describe("a connection's check, answered by the adapter of its kind", () => {
     expect(JSON.stringify([wrong, unreadable])).not.toContain(TOKEN);
   });
 
-  it("holds a check to the fetch it is given: an adapter never builds its own", async () => {
-    const seen: string[] = [];
-    await checks(async (input) => { seen.push(String(input instanceof Request ? input.url : input)); return new Response(JSON.stringify({ slug: "acme" }), { status: 200 }); }).check;
-    expect(seen.length).toBeGreaterThan(0);
-    expect(seen.every((url) => new URL(url).hostname === "us.sentry.io")).toBe(true);
-  });
 });

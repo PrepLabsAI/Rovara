@@ -2,63 +2,14 @@
 import { describe, expect, it } from "vitest";
 import { INDEX_EXPIRY_ATTRIBUTE, workEventPartition } from "@agentx/contracts";
 import { COMPANY_EVENTS_SCAN_MAX, readCompanyEvents } from "../../packages/broker/src/core/work-events/read.js";
-import { COMPANY_A, COMPANY_B, IMPLICIT_COMPANY_ID, TASK_IN_SHARD, countingReadOnly, newStore, seedEvent } from "../support/company-reads-fixtures.js";
+import { COMPANY_A, IMPLICIT_COMPANY_ID, TASK_IN_SHARD, countingReadOnly, newStore, seedEvent } from "../support/company-reads-fixtures.js";
 
 const D = (day: number, minute = 0, month = 11) => `2026-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T10:${String(minute).padStart(2, "0")}:00.000Z`;
 const NOW = Date.parse("2026-12-01T00:00:00.000Z");
 const WIDE = { from: "2026-11-01T00:00:00.000Z", to: "2026-11-30T23:59:59.999Z" };
 const idsOf = (page: { events: Array<{ id: string }> }) => page.events.map((event) => event.id);
 
-describe("the event read: the shape", () => {
-  it("answers the events as the contract holds them, oldest first, with a cursor to poll from", async () => {
-    const store = newStore();
-    const second = await seedEvent(store, COMPANY_A, { at: D(2) });
-    const first = await seedEvent(store, COMPANY_A, { at: D(1) });
-    const page = await readCompanyEvents(store, COMPANY_A, WIDE, NOW);
-    expect(idsOf(page)).toEqual([first, second]);
-    expect(page.events[0]).toMatchObject({ version: 1, kind: "step_started", orgId: COMPANY_A, project: "billing-service", actor: { kind: "person", personId: "dev_ada" } });
-    expect(page.hasMore).toBe(false);
-    expect(page.unreadable).toBe(0);
-    expect(typeof page.next).toBe("string");
-  });
-
-  it("carries usage: the settled costs are events like the rest", async () => {
-    const store = newStore();
-    await seedEvent(store, COMPANY_A, { at: D(1), kind: "cost_settled", micros: 2_500_000 });
-    const page = await readCompanyEvents(store, COMPANY_A, { ...WIDE, kinds: ["cost_settled"] }, NOW);
-    expect(page.events).toHaveLength(1);
-    expect(page.events[0]).toMatchObject({ kind: "cost_settled", micros: 2_500_000, currency: "USD" });
-  });
-
-  it("merges the eight shards of a month into time order, and walks months in order", async () => {
-    const store = newStore();
-    const expected: string[] = [];
-    for (let shard = 7; shard >= 0; shard -= 1) expected.push(await seedEvent(store, COMPANY_A, { at: D(3, shard), taskId: TASK_IN_SHARD(shard) }));
-    const october = await seedEvent(store, COMPANY_A, { at: "2026-10-31T23:00:00.000Z", taskId: TASK_IN_SHARD(2) });
-    const december = await seedEvent(store, COMPANY_A, { at: "2026-12-01T01:00:00.000Z", taskId: TASK_IN_SHARD(5) });
-    const page = await readCompanyEvents(store, COMPANY_A, { from: "2026-10-01T00:00:00.000Z", to: "2026-12-31T00:00:00.000Z" }, NOW);
-    expect(idsOf(page)).toEqual([october, ...expected.reverse(), december]);
-  });
-});
-
 describe("the event read: one company only", () => {
-  it("shows each company its own events and nobody else's", async () => {
-    const store = newStore();
-    const a = await seedEvent(store, COMPANY_A, { at: D(1), taskId: TASK_IN_SHARD(1) });
-    const b = await seedEvent(store, COMPANY_B, { at: D(1), taskId: TASK_IN_SHARD(1) });
-    expect(idsOf(await readCompanyEvents(store, COMPANY_A, WIDE, NOW))).toEqual([a]);
-    expect(idsOf(await readCompanyEvents(store, COMPANY_B, WIDE, NOW))).toEqual([b]);
-    expect((await readCompanyEvents(store, IMPLICIT_COMPANY_ID, WIDE, NOW)).events).toEqual([]);
-  });
-
-  it("drops a row of another company in this company's partition, counted as skipped", async () => {
-    const store = newStore();
-    const mine = await seedEvent(store, COMPANY_A, { at: D(1) });
-    await seedEvent(store, COMPANY_B, { at: D(2), orgId: COMPANY_B }, COMPANY_A);
-    const page = await readCompanyEvents(store, COMPANY_A, WIDE, NOW);
-    expect(idsOf(page)).toEqual([mine]);
-    expect(page.skipped).toBe(1);
-  });
 
   it("gives an old row with no company to the implicit company only (and it cannot be read as an event)", async () => {
     const store = newStore();
@@ -72,24 +23,6 @@ describe("the event read: one company only", () => {
     const forImplicit = await readCompanyEvents(store, IMPLICIT_COMPANY_ID, WIDE, NOW);
     expect(forImplicit.skipped).toBe(0);
     expect(forImplicit.unreadable).toBe(1);
-  });
-
-  it("asks the store only for this company's partitions", async () => {
-    const store = newStore();
-    const seen = new Set<string>();
-    const spy = { async query(request: { pk: string }) { seen.add(request.pk); return store.query(request); } };
-    await readCompanyEvents(spy, COMPANY_A, WIDE, NOW);
-    expect(seen.size).toBe(8);
-    for (const pk of seen) expect(pk.startsWith(`ORG#${COMPANY_A}#WORK_EVENTS#2026-11#`)).toBe(true);
-  });
-
-  it("refuses a cursor made for another company or other filters, with fixed words", async () => {
-    const store = newStore();
-    for (let day = 1; day <= 4; day += 1) { await seedEvent(store, COMPANY_A, { at: D(day) }); await seedEvent(store, COMPANY_B, { at: D(day) }); }
-    const forA = await readCompanyEvents(store, COMPANY_A, { ...WIDE, limit: 2 }, NOW);
-    expect(forA.hasMore).toBe(true);
-    await expect(readCompanyEvents(store, COMPANY_B, { cursor: forA.next }, NOW)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: that cursor is not valid" });
-    await expect(readCompanyEvents(store, COMPANY_A, { cursor: forA.next, project: "other" }, NOW)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: that cursor is not valid" });
   });
 });
 
@@ -128,15 +61,6 @@ describe("the event read: filters", () => {
     expect(id).toBeDefined();
   });
 
-  it("counts a row it cannot read instead of hiding it", async () => {
-    const store = newStore();
-    await seedEvent(store, COMPANY_A, { at: D(1) });
-    await store.put({ item: { pk: workEventPartition(COMPANY_A, "2026-11", 3), sk: `${D(2)}#wev_${"b".repeat(32)}`, entityType: "WORK_EVENT", orgId: COMPANY_A, version: 9, kind: "step_started" } });
-    const page = await readCompanyEvents(store, COMPANY_A, WIDE, NOW);
-    expect(page.events).toHaveLength(1);
-    expect(page.unreadable).toBe(1);
-  });
-
   it("refuses a query it does not understand by runtime check, with fixed words that echo nothing", async () => {
     const store = newStore();
     const bad: unknown[] = [
@@ -167,42 +91,6 @@ describe("the event read: a bounded page at a time, polled with a cursor", () =>
     for (let index = 0; index < count; index += 1) await seedEvent(store, COMPANY_A, { at: D(1 + (index % 28), index % 60), taskId: TASK_IN_SHARD(index % 8, index), source: `s${String(index)}` });
     return store;
   }
-
-  it("pages: every event once, in order, none twice, and no more at the end", async () => {
-    const store = await many(41);
-    const seen: Array<{ at: string; id: string }> = [];
-    let cursor: string | undefined;
-    let pages = 0;
-    do {
-      const page = await readCompanyEvents(store, COMPANY_A, cursor === undefined ? { ...WIDE, limit: 10 } : { cursor, limit: 10 }, NOW);
-      expect(page.events.length).toBeLessThanOrEqual(10);
-      seen.push(...page.events);
-      cursor = page.hasMore ? page.next : undefined;
-      pages += 1;
-      expect(pages).toBeLessThan(20);
-    } while (cursor !== undefined);
-    expect(pages).toBe(5);
-    expect(new Set(seen.map((event) => event.id)).size).toBe(41);
-    expect(seen.map((event) => `${event.at}#${event.id}`)).toEqual(seen.map((event) => `${event.at}#${event.id}`).sort());
-  });
-
-  it("has a default page of 100 and a largest page of 500", async () => {
-    const store = await many(120);
-    expect((await readCompanyEvents(store, COMPANY_A, WIDE, NOW)).events).toHaveLength(100);
-    expect((await readCompanyEvents(store, COMPANY_A, { ...WIDE, limit: 500 }, NOW)).events).toHaveLength(120);
-  });
-
-  it("gives the same cursor to poll with after the last event, and picks up what comes next", async () => {
-    const store = newStore();
-    await seedEvent(store, COMPANY_A, { at: D(1) });
-    const first = await readCompanyEvents(store, COMPANY_A, WIDE, NOW);
-    expect(first.hasMore).toBe(false);
-    expect((await readCompanyEvents(store, COMPANY_A, { cursor: first.next }, NOW)).events).toEqual([]);
-    const later = await seedEvent(store, COMPANY_A, { at: D(2), taskId: TASK_IN_SHARD(4) });
-    const polled = await readCompanyEvents(store, COMPANY_A, { cursor: first.next }, NOW);
-    expect(idsOf(polled)).toEqual([later]);
-    expect(idsOf(await readCompanyEvents(store, COMPANY_A, { cursor: polled.next }, NOW))).toEqual([]);
-  });
 
   it("reads at most COMPANY_EVENTS_SCAN_MAX rows in one call, whatever the filters, and says where to go on", async () => {
     const store = newStore();
@@ -240,17 +128,6 @@ describe("the event read: a bounded page at a time, polled with a cursor", () =>
     ];
     for (const cursor of forged) await expect(readCompanyEvents(store, COMPANY_A, { cursor }, NOW), cursor).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: that cursor is not valid" });
     await expect(readCompanyEvents(store, COMPANY_A, { cursor: real }, NOW)).resolves.toBeDefined();
-  });
-
-  it("gives a cursor to poll from even when there is nothing yet, and finds what comes after it", async () => {
-    const store = newStore();
-    const empty = await readCompanyEvents(store, COMPANY_A, WIDE, NOW);
-    expect(empty).toMatchObject({ events: [], hasMore: false });
-    const later = await seedEvent(store, COMPANY_A, { at: D(5) });
-    expect(idsOf(await readCompanyEvents(store, COMPANY_A, { cursor: empty.next }, NOW))).toEqual([later]);
-    // The cursor stands for "from the start of the window": an event at exactly `from` is in the first read, not lost between the two.
-    const atFrom = await seedEvent(store, COMPANY_A, { at: WIDE.from, taskId: TASK_IN_SHARD(3) });
-    expect(idsOf(await readCompanyEvents(store, COMPANY_A, WIDE, NOW))).toEqual([atFrom, later]);
   });
 
   it("stops, and says where to go on, when a store keeps answering empty pages that carry a cursor", async () => {

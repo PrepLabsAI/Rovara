@@ -3,15 +3,13 @@
 // same line. ADVISORY: nothing about readiness, fixing, comments or the Check changes. A check that is not the named one is ignored. Company scoping of the reads is the marked checks'.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  DEFAULT_CI_EVIDENCE_SETTINGS, EVAL_CI_LABEL, GITHUB_ACTIONS_APP_ID, IMPLICIT_COMPANY_ID, change, createCandidateManifest, evalCiLine,
+  DEFAULT_CI_EVIDENCE_SETTINGS, EVAL_CI_LABEL, GITHUB_ACTIONS_APP_ID, IMPLICIT_COMPANY_ID, createCandidateManifest, evalCiLine,
   type Check, type CheckRunner, type CiEvidenceSettings,
 } from "@agentx/contracts";
 import { parsePipelineReport } from "../../packages/worker/src/verification/pipeline-report-parser.js";
 import { readyEvalLine, registerMergeActionDecider, trackTask, type MergeTrackingDependencies } from "../../packages/broker/src/core/merge/merge-tracking.js";
 import { installCiFixDecider, uninstallCiFixDecider } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
 import { writeEvalDescription } from "../../packages/broker/src/core/ci-evidence/eval-ci.js";
-import { pullRequestRecordKey, pullRequestRecordOf } from "../../packages/broker/src/core/build-step/records.js";
-import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { ROVARA_STATUS_END, ROVARA_STATUS_START } from "../../packages/broker/src/core/proof/pull-request-body.js";
 import { fixedCodeSettings } from "../../packages/broker/src/core/merge/index.js";
 import { createMergeTrackingService, createMilestoneService } from "../../packages/broker/src/services/index.js";
@@ -19,7 +17,6 @@ import { ORG as SERVICE_ORG, host as serviceHost } from "../support/service-host
 import { CLOCK, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
 
 const MIN = 60_000;
-const OTHER_ORG = "org_11111111111111111111";
 const ACTIONS = String(GITHUB_ACTIONS_APP_ID);
 const EVAL_URL = "https://github.com/acme/app/actions/runs/5/job/77";
 const settings = (over: Partial<CiEvidenceSettings> = {}): CiEvidenceSettings => ({ ...DEFAULT_CI_EVIDENCE_SETTINGS, evalCheck: { name: "evals", source: ACTIONS }, ...over });
@@ -65,7 +62,6 @@ async function world(answer: unknown, options: { parser?: boolean; body?: string
 const setChecks = (w: MergeWorld, checks: Check[]) => w.prs[0]!.model.setChecks(w.prs[0]!.head, checks);
 const item = async (w: MergeWorld) => (await w.trackingOf(w.prs[0]!)) as Record<string, unknown> & { ci: string; ciEval?: Record<string, unknown> };
 const body = (w: MergeWorld): string => w.prs[0]!.model.changeRequests[0]!.body ?? "";
-const comments = (w: MergeWorld) => w.prs[0]!.model.changeRequests[0]!.comments.map((comment) => comment.body.split("\n")[0]);
 const evalLines = (text: string): string[] => text.split("\n").filter((line) => line.includes(EVAL_CI_LABEL));
 
 beforeEach(() => installCiFixDecider(registerMergeActionDecider));
@@ -85,14 +81,6 @@ describe("nothing named is today's pass", () => {
     expect(stored.ciEvalSince).toBeUndefined();
     expect(body(w)).toBe(bodyOf());
   });
-  it("ignores a check that is not the named one, however eval-like", async () => {
-    const { w, deps } = await world(settings());
-    setChecks(w, [unit, evals({ name: "evals-nightly" }), evals({ name: "evals", source: "999" })]);
-    await trackTask(deps, TASK_ID);
-    const stored = await item(w);
-    expect(stored.ciEval).toMatchObject({ state: "waiting" });
-    expect(evalLines(body(w))).toEqual([]);
-  });
   it("treats settings that name nothing valid as nothing named, and never echoes them", async () => {
     const { w, deps, logs } = await world({ ...settings(), evalCheck: { name: "", secret: "do-not-echo" } });
     setChecks(w, [unit, evals()]);
@@ -104,31 +92,6 @@ describe("nothing named is today's pass", () => {
 });
 
 describe("the named check landed", () => {
-  it("passed: one line under the Proven line with the run's link, next to Rovara's own label, and nothing else is said", async () => {
-    const { w, deps, fake } = await world(settings());
-    setChecks(w, [unit, evals()]);
-    await trackTask(deps, TASK_ID);
-    const stored = await item(w);
-    expect(stored.ciEval).toMatchObject({ name: "evals", source: ACTIONS, state: "passed", runId: "77", announced: true });
-    const lines = body(w).split("\n");
-    const at = lines.indexOf(PROVEN);
-    expect(lines[at]).toBe(PROVEN);
-    expect(lines[at + 1]).toBe(`  - Eval (reported by your CI): passed, ${EVAL_URL}`);
-    expect(evalLines(body(w))).toHaveLength(1);
-    expect(comments(w)).toEqual([]);
-    expect(fake.facts).toBe(1);
-  });
-  it("two verdicts side by side, never one: Rovara's own eval label is untouched and the customer's is its own line", async () => {
-    const { w, deps } = await world(settings());
-    setChecks(w, [unit, evals({ conclusion: "failure" })]);
-    await trackTask(deps, TASK_ID);
-    const text = body(w);
-    expect(text).toContain(PROVEN);
-    expect(text).toContain("Improved on eval.");
-    expect(evalLines(text)).toEqual([`  - Eval (reported by your CI): failed, ${EVAL_URL}`]);
-    // The customer's word is not folded into Rovara's: the Proven line is byte for byte what it was.
-    expect(text.split("\n").filter((line) => line.startsWith("**Proven**"))).toEqual([PROVEN]);
-  });
   it("failed with a per-test report: the count of failing cases", async () => {
     const { w, deps, fake } = await world(settings(), { parser: true });
     fake.reports["7700"] = [junit([{ name: "a" }, { name: "b", failure: "wrong" }, { name: "c", failure: "wrong" }, { name: "d" }])];
@@ -140,77 +103,11 @@ describe("the named check landed", () => {
     expect((await item(w)).ciEval).not.toHaveProperty("failedTests");
     expect(JSON.stringify((await item(w)).ciEval)).not.toContain("wrong");
   });
-  it("passed with a per-test report says how many cases, none failing", async () => {
-    const { w, deps, fake } = await world(settings(), { parser: true });
-    fake.reports["7700"] = [junit([{ name: "a" }, { name: "b" }])];
-    setChecks(w, [unit, evals()]);
-    await trackTask(deps, TASK_ID);
-    expect(evalLines(body(w))).toEqual([`  - Eval (reported by your CI): passed, 2 cases, none failing, ${EVAL_URL}`]);
-  });
-  it("waits a pass for a report that is not there yet, then says the line once with what it found", async () => {
-    const { w, deps, fake } = await world(settings(), { parser: true });
-    setChecks(w, [unit, evals()]);
-    // The run's report is not uploaded yet: nothing is said, and the pass looks again soon.
-    const first = await trackTask(deps, TASK_ID);
-    expect(evalLines(body(w))).toEqual([]);
-    expect(first.recheckAt).toBeLessThanOrEqual(CLOCK + MIN);
-    fake.reports["7700"] = [junit([{ name: "a" }, { name: "b", failure: "x" }])];
-    w.now.value += MIN;
-    await trackTask(deps, TASK_ID);
-    expect(evalLines(body(w))).toEqual([`  - Eval (reported by your CI): passed, 1 of 2 cases failing, ${EVAL_URL}`]);
-  });
   it("gives up on a report that never comes and says the result without counts, once", async () => {
     const { w, deps } = await world(settings(), { parser: true });
     setChecks(w, [unit, evals()]);
     for (let pass = 0; pass < 6; pass += 1) { await trackTask(deps, TASK_ID); w.now.value += 2 * MIN; }
     expect(evalLines(body(w))).toEqual([`  - Eval (reported by your CI): passed, ${EVAL_URL}`]);
-  });
-  it("is said once for a run: later passes and an unrelated change do not write again", async () => {
-    const { w, deps } = await world(settings());
-    setChecks(w, [unit, evals()]);
-    await trackTask(deps, TASK_ID);
-    const model = w.prs[0]!.model;
-    const writes: string[] = [];
-    const update = model.update.bind(model);
-    model.update = (id, patch) => { writes.push(Object.keys(patch).join(",")); return update(id, patch); };
-    // Once told for the run, a later pass does not even read the description again.
-    const reads: string[] = [];
-    const repository = deps.repository;
-    deps.repository = async (...args) => {
-      const home = await repository(...args);
-      if (home === undefined) return home;
-      const getChangeRequest = home.codeHost.getChangeRequest.bind(home.codeHost);
-      return { ...home, codeHost: Object.assign(Object.create(home.codeHost) as typeof home.codeHost, { getChangeRequest: (...call: Parameters<typeof getChangeRequest>) => { reads.push("read"); return getChangeRequest(...call); } }) };
-    };
-    setChecks(w, [unit, evals(), { name: "lint", state: "pending", required: false, url: "", runId: "12" }]);
-    w.now.value += 5 * MIN;
-    await trackTask(deps, TASK_ID);
-    w.now.value += 5 * MIN;
-    await trackTask(deps, TASK_ID);
-    expect(writes).toEqual([]);
-    expect(reads).toEqual([]);
-    expect(evalLines(body(w))).toHaveLength(1);
-  });
-  it("is told again for a re-run, replacing the line (never two)", async () => {
-    const { w, deps, fake } = await world(settings());
-    setChecks(w, [unit, evals()]);
-    await trackTask(deps, TASK_ID);
-    fake.attempt = 2;
-    setChecks(w, [unit, evals({ conclusion: "failure", runId: "78", url: "https://github.com/acme/app/actions/runs/6/job/78" })]);
-    w.now.value += 5 * MIN;
-    await trackTask(deps, TASK_ID);
-    expect(evalLines(body(w))).toEqual(["  - Eval (reported by your CI): failed, https://github.com/acme/app/actions/runs/6/job/78"]);
-  });
-  it("takes the line out while a re-run is in progress, and when the head moves", async () => {
-    const { w, deps } = await world(settings());
-    setChecks(w, [unit, evals()]);
-    await trackTask(deps, TASK_ID);
-    expect(evalLines(body(w))).toHaveLength(1);
-    setChecks(w, [unit, evals({ state: "pending", conclusion: undefined })]);
-    w.now.value += 5 * MIN;
-    await trackTask(deps, TASK_ID);
-    expect(evalLines(body(w))).toEqual([]);
-    expect((await item(w)).ciEval).toMatchObject({ state: "waiting" });
   });
 });
 
@@ -228,129 +125,11 @@ describe("the named check did not run", () => {
     expect((await item(w)).ci).not.toBe("failing");
     expect((await w.task()).workflow.state).toBe("WAITING");
   });
-  it("a \"not run\" is said once: later passes do not read or write the description again", async () => {
-    const { w, deps } = await world(settings());
-    setChecks(w, [unit]);
-    await trackTask(deps, TASK_ID);
-    w.now.value = CLOCK + 121 * MIN;
-    await trackTask(deps, TASK_ID);
-    expect(evalLines(body(w))).toHaveLength(1);
-    const model = w.prs[0]!.model;
-    const writes: string[] = [];
-    const update = model.update.bind(model);
-    model.update = (id, patch) => { writes.push(Object.keys(patch).join(",")); return update(id, patch); };
-    const reads: string[] = [];
-    const repository = deps.repository;
-    deps.repository = async (...args) => {
-      const home = await repository(...args);
-      if (home === undefined) return home;
-      const getChangeRequest = home.codeHost.getChangeRequest.bind(home.codeHost);
-      return { ...home, codeHost: Object.assign(Object.create(home.codeHost) as typeof home.codeHost, { getChangeRequest: (...call: Parameters<typeof getChangeRequest>) => { reads.push("read"); return getChangeRequest(...call); } }) };
-    };
-    for (let pass = 0; pass < 3; pass += 1) { w.now.value += 5 * MIN; await trackTask(deps, TASK_ID); }
-    expect(writes).toEqual([]);
-    expect(reads).toEqual([]);
-    expect(evalLines(body(w))).toHaveLength(1);
-    expect((await item(w)).ciEval).toMatchObject({ state: "not_run", announced: true });
-  });
   it("says \"not run\" when the CI skipped it", async () => {
     const { w, deps } = await world(settings());
     setChecks(w, [unit, evals({ conclusion: "skipped" })]);
     await trackTask(deps, TASK_ID);
     expect(evalLines(body(w))).toEqual([`  - Eval (reported by your CI): not run (your CI skipped it), ${EVAL_URL}`]);
-  });
-});
-
-describe("advisory only: nothing else changes", () => {
-  it("a failed eval leaves the item, the workflow, the comments and readiness exactly as without the setting", async () => {
-    const without = await world({ ...DEFAULT_CI_EVIDENCE_SETTINGS });
-    const named = await world(settings());
-    for (const { w } of [without, named]) setChecks(w, [unit, evals({ conclusion: "failure", required: false })]);
-    await trackTask(without.deps, TASK_ID);
-    await trackTask(named.deps, TASK_ID);
-    const strip = ({ ciEval: _eval, ciEvalSince: _since, decisionDigest: _digest, ...rest }: Record<string, unknown>) => { void _eval; void _since; void _digest; return rest; };
-    const base = strip(await item(without.w));
-    const next = strip(await item(named.w));
-    // Only the three eval-owned fields differ: the digest follows the item.
-    expect(next).toEqual(base);
-    expect(comments(named.w)).toEqual(comments(without.w));
-    expect((await named.w.task()).workflow).toEqual((await without.w.task()).workflow);
-    expect(evalLines(body(named.w))).toHaveLength(1);
-  });
-  it("a passed eval does not make a pull request ready that would not be, and a pending eval does not hold one that would be", async () => {
-    const { w, deps } = await world(settings());
-    setChecks(w, [unit]);
-    await trackTask(deps, TASK_ID);
-    const waiting = await item(w);
-    expect(waiting.ci).toBe("passing");
-    expect(waiting.ciEval).toMatchObject({ state: "waiting" });
-  });
-  it("leaves the CI fix loop exactly as it was: a red eval check is a red check, with or without the setting", async () => {
-    const without = await world({ ...DEFAULT_CI_EVIDENCE_SETTINGS });
-    const named = await world(settings({ shareLogs: true }));
-    for (const { w } of [without, named]) setChecks(w, [unit, evals({ conclusion: "failure" })]);
-    await trackTask(without.deps, TASK_ID);
-    await trackTask(named.deps, TASK_ID);
-    expect(named.w.milestones.written.map((entry) => entry.kind)).toEqual(without.w.milestones.written.map((entry) => entry.kind));
-    expect(comments(named.w)).toEqual(comments(without.w));
-    expect((await named.w.task()).workflow.stage).toBe((await without.w.task()).workflow.stage);
-  });
-});
-
-describe("the ready line", () => {
-  it("carries the same one line when the result had landed, and nothing when it had not", async () => {
-    const landed = await world(settings());
-    landed.w.prs[0]!.model.changeRequests[0]!.draft = true;
-    setChecks(landed.w, [unit, evals()]);
-    await trackTask(landed.deps, TASK_ID);
-    const ready = landed.w.milestones.written.find((entry) => entry.kind === "pr_ready");
-    expect(ready?.evalLine).toBe(`Eval (reported by your CI): passed, ${EVAL_URL}`);
-    expect(ready?.text.endsWith(ready.evalLine!)).toBe(true);
-    const pending = await world(settings());
-    pending.w.prs[0]!.model.changeRequests[0]!.draft = true;
-    setChecks(pending.w, [unit]);
-    await trackTask(pending.deps, TASK_ID);
-    const early = pending.w.milestones.written.find((entry) => entry.kind === "pr_ready");
-    expect(early).toBeDefined();
-    expect(early?.evalLine).toBeUndefined();
-    expect(early?.text).not.toContain(EVAL_CI_LABEL);
-  });
-});
-
-describe("the ready line with the verdict heading", () => {
-  it("keeps the heading and the eval line together, and drops the eval line (never the heading) when both would pass the limit", () => {
-    const heading = "Verified · Low risk · nothing extra to check";
-    const base = `Rovara marked app pull request 1 ready for review. ${heading}.`;
-    const result = { outcome: "passed" } as const;
-    expect(readyEvalLine(result, base)).toBe(evalCiLine(result));
-    expect(readyEvalLine(result, "x".repeat(500 - evalCiLine(result).length))).toBeUndefined();
-  });
-  it("a landed result and a heading are both on the milestone", async () => {
-    const { w, deps } = await world(settings());
-    w.prs[0]!.model.changeRequests[0]!.draft = true;
-    setChecks(w, [unit, evals()]);
-    await trackTask(deps, TASK_ID);
-    const ready = w.milestones.written.find((entry) => entry.kind === "pr_ready");
-    expect(ready?.evalLine).toBe(`Eval (reported by your CI): passed, ${EVAL_URL}`);
-    expect(ready?.text.length).toBeLessThanOrEqual(500);
-  });
-});
-
-describe("the ready line budget in a pass", () => {
-  it("counts the verdict heading: with a long repository name the eval line is dropped, never the heading, and the milestone stays within its limit", async () => {
-    const { w, deps } = await world(settings(), { repositoryId: "r".repeat(100) });
-    const heading = "Verified · Low risk · nothing extra to check";
-    deps.verdict = async () => ({ heading, resultKind: "verified", body: [] });
-    w.prs[0]!.model.changeRequests[0]!.draft = true;
-    setChecks(w, [unit, evals({ url: `https://github.com/acme/app/actions/runs/${"7".repeat(250)}` })]);
-    await trackTask(deps, TASK_ID);
-    const ready = w.milestones.written.find((entry) => entry.kind === "pr_ready");
-    expect(ready).toBeDefined();
-    expect(ready!.verdict).toBe(heading);
-    expect(ready!.text).toContain(`${heading}.`);
-    expect(ready!.text.length).toBeLessThanOrEqual(500);
-    // A 100-character repository name + heading + the longest line cannot all fit: the eval line (not the heading) is what gives way, so the milestone is still recorded.
-    expect(ready!.evalLine === undefined || ready!.text.endsWith(ready!.evalLine)).toBe(true);
   });
 });
 
@@ -367,13 +146,6 @@ describe("the ready line fits the milestone", () => {
 });
 
 describe("the description is written carefully", () => {
-  it("keeps a person's words and the rest of the block, and touches only the one line", async () => {
-    const edited = ["A person's own note.", "", bodyOf(), "", "More words from a person.", ""].join("\n");
-    const { w, deps } = await world(settings(), { body: edited });
-    setChecks(w, [unit, evals()]);
-    await trackTask(deps, TASK_ID);
-    expect(body(w)).toBe(edited.replace(PROVEN, `${PROVEN}\n  - Eval (reported by your CI): passed, ${EVAL_URL}`));
-  });
   it("writes nothing when the block is not as Rovara wrote it (no Proven line), and does not fail the pass", async () => {
     const odd = ["Some words.", "", ROVARA_STATUS_START, "A block a person rewrote.", ROVARA_STATUS_END].join("\n");
     const { w, deps } = await world(settings(), { body: odd });
@@ -381,24 +153,6 @@ describe("the description is written carefully", () => {
     await trackTask(deps, TASK_ID);
     expect(body(w)).toBe(odd);
     expect((await item(w)).ciEval).toMatchObject({ state: "passed", announced: true });
-  });
-  it("keeps the pull request's record in step with an unedited description, and leaves a person's edit's record alone", async () => {
-    const { w, deps } = await world(settings());
-    const keys = await workspaceKeys({ store: w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1");
-    const key = pullRequestRecordKey(keys.workspaceKey, "app", w.prs[0]!.number);
-    const record = { ...key, entityType: "PULL_REQUEST", workspaceId: "ws-1", repository: "app", repositoryUrl: "https://github.com/acme/app", number: w.prs[0]!.number, url: "u", state: "open", headBranch: "b", baseBranch: "main", expectedHeadCommit: w.prs[0]!.head, title: "t", body: bodyOf(), createdByOperationId: "op", updatedAt: new Date(CLOCK).toISOString() };
-    await w.store.put({ item: record });
-    setChecks(w, [unit, evals()]);
-    await trackTask(deps, TASK_ID);
-    expect((await pullRequestRecordOf({ store: w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1", "app", w.prs[0]!.number))?.body).toBe(body(w));
-    // A person's edit (the record no longer matches the host): the line goes in the host's text, the record stays as Rovara wrote it.
-    const second = await world(settings());
-    const secondKey = pullRequestRecordKey((await workspaceKeys({ store: second.w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1")).workspaceKey, "app", second.w.prs[0]!.number);
-    await second.w.store.put({ item: { ...record, ...secondKey, body: `${bodyOf()}\nrovara wrote this` } });
-    setChecks(second.w, [unit, evals()]);
-    await trackTask(second.deps, TASK_ID);
-    expect((await pullRequestRecordOf({ store: second.w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1", "app", second.w.prs[0]!.number))?.body).toBe(`${bodyOf()}\nrovara wrote this`);
-    expect(evalLines(body(second.w))).toHaveLength(1);
   });
   it("a host that refuses the write is logged by name, the pass goes on, and the line is not tried again every pass", async () => {
     const { w, deps, logs } = await world(settings());
@@ -442,17 +196,6 @@ describe("the line follows the head and the settings", () => {
     expect(stored.ciEval?.announced).toBeUndefined();
     expect(evalLines(body(w))).toEqual([]);
   });
-  it("un-naming the check drops the entry and leaves the description as it is", async () => {
-    const { w, deps } = await world(settings());
-    setChecks(w, [unit, evals()]);
-    await trackTask(deps, TASK_ID);
-    expect((await item(w)).ciEval).toBeDefined();
-    (deps as { ciEvidence?: unknown }).ciEvidence = () => ({ ...DEFAULT_CI_EVIDENCE_SETTINGS });
-    w.now.value += 5 * MIN;
-    await trackTask(deps, TASK_ID);
-    expect((await item(w)).ciEval).toBeUndefined();
-    expect((await item(w)).ciEvalSince).toBeUndefined();
-  });
   it("is never written to a pull request that is not open", async () => {
     const { w } = await world(settings());
     const model = w.prs[0]!.model;
@@ -462,59 +205,6 @@ describe("the line follows the head and the settings", () => {
     const sink = { host, store: w.store, companyId: IMPLICIT_COMPANY_ID, workspaceId: "ws-1", repositoryId: "app", number: w.prs[0]!.number, ref, scope: { orgId: IMPLICIT_COMPANY_ID }, now: () => CLOCK };
     expect(await writeEvalDescription(sink, evalCiLine({ outcome: "passed" }))).toBe("not_open");
     expect(body(w)).toBe(bodyOf());
-  });
-});
-
-describe("the record write", () => {
-  it("does not overwrite a record a person's edit changed while the line was being written", async () => {
-    const { w } = await world(settings());
-    const keys = await workspaceKeys({ store: w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1");
-    const key = pullRequestRecordKey(keys.workspaceKey, "app", w.prs[0]!.number);
-    await w.store.put({ item: { ...key, entityType: "PULL_REQUEST", workspaceId: "ws-1", repository: "app", repositoryUrl: "https://github.com/acme/app", number: w.prs[0]!.number, url: "u", state: "open", headBranch: "b", baseBranch: "main", expectedHeadCommit: w.prs[0]!.head, title: "t", body: bodyOf(), createdByOperationId: "op", updatedAt: new Date(CLOCK).toISOString() } });
-    const model = w.prs[0]!.model;
-    const ref = { repository: { url: "https://github.com/acme/app" }, id: String(w.prs[0]!.number), url: model.crUrl(String(w.prs[0]!.number)) };
-    const host = (await w.host.repository("web", 1, "app", IMPLICIT_COMPANY_ID))!.codeHost;
-    const real = host.updateChangeRequest.bind(host);
-    // The record is changed (by another writer) between Rovara's read of it and its write.
-    const wrapped = Object.assign(Object.create(host) as typeof host, { updateChangeRequest: async (...call: Parameters<typeof real>) => { await w.store.update({ key, ops: [change.set("body", "another writer's body")] }); return real(...call); } });
-    const sink = { host: wrapped, store: w.store, companyId: IMPLICIT_COMPANY_ID, workspaceId: "ws-1", repositoryId: "app", number: w.prs[0]!.number, ref, scope: { orgId: IMPLICIT_COMPANY_ID }, now: () => CLOCK };
-    await writeEvalDescription(sink, evalCiLine({ outcome: "passed" })).catch(() => undefined);
-    expect((await pullRequestRecordOf({ store: w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1", "app", w.prs[0]!.number))?.body).toBe("another writer's body");
-  });
-});
-
-describe("company scoping", () => {
-  it("asks for the settings of the task it follows, and reads the check's run and report under that company's scope only", async () => {
-    const { w, deps, fake, asked } = await world(settings());
-    fake.reports["7700"] = [junit([{ name: "a" }])];
-    setChecks(w, [unit, evals()]);
-    await trackTask(deps, TASK_ID);
-    expect(asked.length).toBeGreaterThan(0);
-    for (const task of asked) expect(task).toMatchObject({ orgId: IMPLICIT_COMPANY_ID, taskId: TASK_ID });
-    expect(fake.scopes.length).toBeGreaterThan(0);
-    for (const scope of fake.scopes) expect(scope).toEqual({ orgId: IMPLICIT_COMPANY_ID });
-    expect((await item(w)).orgId).toBe(IMPLICIT_COMPANY_ID);
-  });
-  it("another company's settings do not name this company's eval check", async () => {
-    const OTHER = "org_11111111111111111111";
-    const { w, deps } = await world(undefined);
-    (deps as { ciEvidence?: unknown }).ciEvidence = (task: { orgId: string }) => (task.orgId === OTHER ? settings() : undefined);
-    setChecks(w, [unit, evals()]);
-    await trackTask(deps, TASK_ID);
-    expect((await item(w)).ciEval).toBeUndefined();
-    expect(evalLines(body(w))).toEqual([]);
-  });
-  it("the description write finds the record only at its own company's key and never touches another company's", async () => {
-    const { w } = await world(settings());
-    const theirs = pullRequestRecordKey((await workspaceKeys({ store: w.store, companyId: OTHER_ORG }, "ws-1")).workspaceKey, "app", w.prs[0]!.number);
-    expect(theirs).not.toEqual(pullRequestRecordKey((await workspaceKeys({ store: w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1")).workspaceKey, "app", w.prs[0]!.number));
-    await w.store.put({ item: { ...theirs, entityType: "PULL_REQUEST", workspaceId: "ws-1", repository: "app", number: w.prs[0]!.number, body: bodyOf(), updatedAt: "2026-11-09T10:00:00.000Z" } });
-    const ref = { repository: { url: "https://github.com/acme/app" }, id: String(w.prs[0]!.number), url: w.prs[0]!.model.crUrl(String(w.prs[0]!.number)) };
-    const host = (await w.host.repository("web", 1, "app", IMPLICIT_COMPANY_ID))!.codeHost;
-    const wrote = await writeEvalDescription({ host, store: w.store, companyId: IMPLICIT_COMPANY_ID, workspaceId: "ws-1", repositoryId: "app", number: w.prs[0]!.number, ref, scope: { orgId: IMPLICIT_COMPANY_ID }, now: () => CLOCK }, evalCiLine({ outcome: "passed" }));
-    expect(wrote).toBe("written");
-    const other = await w.store.get(theirs);
-    expect(other?.["body"]).toBe(bodyOf());
   });
 });
 

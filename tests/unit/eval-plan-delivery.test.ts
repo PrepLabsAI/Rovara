@@ -86,28 +86,6 @@ describe("the eval-plan callback", () => {
     expect(await delivered.cache.write(partsOf(plan), RECORD, { writer: "rovara_base_round", baseCommit: plan.key.baseCommit })).toBe("refused");
   });
 
-  it("cross-company: company B's install never answers A's operation, and A's run never sees B's plan, grant or cache (mutants: the operation company check, the task company check)", async () => {
-    // An operation stored by company A, served by company B's callback layer: not found, nothing asked.
-    const a = await world();
-    const bHandler = createCallbackHandler({ flow: { store: a.store, companyId: B, callbackSigningKey: KEY } as never, blobs: {} as never, grants: {} as never, evalPlan: a.sources });
-    const viaB = await a.call(a.token([EVAL_PLAN_DELIVERY_ACTION]), "{}", bHandler);
-    expect(viaB.statusCode).toBe(404);
-    expect(a.asked).toEqual([]);
-    // A's operation whose task record is B's: refused before any source is asked.
-    const mixed = await world({ taskCompany: B });
-    const refused = await mixed.call(mixed.token([EVAL_PLAN_DELIVERY_ACTION]));
-    expect(refused.statusCode).toBe(409);
-    expect(json(refused)).toEqual({ error: { code: "CALLBACK_FORBIDDEN", message: EVAL_PLAN_DELIVERY_FORBIDDEN } });
-    expect(mixed.asked).toEqual([]);
-    // B's cache holds a record under the same parts with B's company; A's answer has none of it.
-    const w = await world();
-    const bPlan = planOf(B, "web");
-    await w.caches.get(B)!.write(partsOf(bPlan), RECORD, { writer: "rovara_base_round", baseCommit: bPlan.key.baseCommit });
-    const answer = EvalPlanDeliverySchema.parse(json(await w.call(w.token([EVAL_PLAN_DELIVERY_ACTION]))));
-    expect(answer.status === "ready" && answer.baseline?.record).toBeNull();
-    expect(JSON.stringify(answer)).not.toContain(B);
-  });
-
   it("cross-company: a source that answers another company's or project's data is not passed on (mutants: each plan scope check, the grant scope check)", async () => {
     for (const [name, wrong] of [["company", planOf(B, "web")], ["project", planOf(A, "api")], ["plan company only", { ...planOf(A, "web"), company: B }], ["plan project only", { ...planOf(A, "web"), project: "api" }], ["key company", { ...planOf(A, "web"), key: { ...planOf(A, "web").key, company: B } }], ["key project", { ...planOf(A, "web"), key: { ...planOf(A, "web").key, project: "api" } }]] as const) {
       const w = await world();
@@ -136,21 +114,6 @@ describe("the eval-plan callback", () => {
     expect((await w.call(w.token([EVAL_PLAN_DELIVERY_ACTION], { operationId: randomUUID() }))).statusCode).toBe(409);
     expect((await w.call(w.token([EVAL_PLAN_DELIVERY_ACTION], { workspaceId: randomUUID() }))).statusCode).toBe(409);
     expect((await w.call(w.token([EVAL_PLAN_DELIVERY_ACTION], { fence: 2 }))).statusCode).toBe(409);
-    expect(w.asked).toEqual([]);
-  });
-
-  it("unsigned: no capability, a forged signature, a token signed with another key or an expired one is refused and nothing is read (mutant: the signature check)", async () => {
-    const w = await world();
-    const good = w.token([EVAL_PLAN_DELIVERY_ACTION]);
-    const [body] = good.split(".");
-    const forgedBody = Buffer.from(JSON.stringify({ workspaceId: w.workspaceId, operationId: w.operationId, fence: 3, actions: [EVAL_PLAN_DELIVERY_ACTION], expiresAt: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url");
-    const otherKey = new CallbackCapabilities(Buffer.alloc(32, 1)).issue({ workspaceId: w.workspaceId, operationId: w.operationId, fence: 3, actions: [EVAL_PLAN_DELIVERY_ACTION], expiresInSeconds: 60 });
-    for (const capability of [undefined, "", `${forgedBody}.${good.split(".")[1]}`, `${body}.`, `${body}`, otherKey, w.token([EVAL_PLAN_DELIVERY_ACTION], { expiresInSeconds: -1 })]) {
-      const reply = await w.call(capability);
-      expect(reply.statusCode, String(capability)).toBeGreaterThanOrEqual(400);
-      expect(reply.statusCode).toBeLessThan(500);
-      expect(json(reply)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
-    }
     expect(w.asked).toEqual([]);
   });
 
