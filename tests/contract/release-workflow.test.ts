@@ -97,7 +97,8 @@ describe("release workflow", () => {
     const pushStepIndex = steps.findIndex((s) => (s.run ?? "").includes("docker buildx build"));
     expect(buildxIndex).toBeLessThan(pushStepIndex);
 
-    expect(push).toContain("--platform linux/arm64");
+    const workerPlatforms = push.match(/worker\) platforms=([^\s;]+)/)?.[1];
+    expect(workerPlatforms).toBe("linux/arm64,linux/amd64");
     // Without these, buildx adds attestation entries to the pushed index, and the digest read back would
     // be the index's, not the image's. With them, the worker's index lists exactly its platforms.
     expect(push).toContain("--provenance=false");
@@ -139,10 +140,17 @@ describe("release workflow", () => {
     const index = (match: (step: (typeof steps)[number]) => boolean) => steps.findIndex(match);
     const text = (step: (typeof steps)[number]) => step.run ?? "";
     const awsIndex = index((step) => step.uses?.startsWith("aws-actions/configure-aws-credentials") === true);
+    const qemuIndex = index((step) => step.uses?.startsWith("docker/setup-qemu-action") === true);
     const pushIndex = index((step) => step.id === "push");
     // Dependencies, the build and the userns sysctl come before any AWS credential exists, and only when the executor is published.
     const npmIndex = index((step) => text(step).includes("npm ci") && text(step).includes("npm run build"));
     const nodeIndex = index((step) => step.uses?.startsWith("actions/setup-node") === true);
+    expect(qemuIndex).toBeGreaterThanOrEqual(0);
+    expect(steps[qemuIndex]?.with).toEqual({
+      platforms: "amd64",
+      image: "tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0",
+    });
+    expect(qemuIndex).toBeLessThan(awsIndex);
     const sysctlIndex = index((step) => text(step).includes("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"));
     for (const found of [nodeIndex, npmIndex, sysctlIndex]) { expect(found).toBeGreaterThanOrEqual(0); expect(found).toBeLessThan(awsIndex); expect(steps[found]!.if).toBe("vars.AGENTX_PUBLISH_EXECUTOR_IMAGE == 'true'"); }
     expect(nodeIndex).toBeLessThan(npmIndex);

@@ -28,7 +28,7 @@ A release directory looks like this:
   index's, and the release job fails unless the registry shows both platforms under it. A worker
   boot pulls that one digest and Docker resolves the index to the machine's own chip. The release job runs on an arm64
   runner, so the amd64 half is built under QEMU emulation (`docker/setup-qemu-action`, amd64 only; the job
-  has a 90-minute limit). The x86 AMI is not pinned (the
+  has a 90-minute limit). x86 sizes stay off until an install turns on `ROVARA_MACHINE_SIZE_X86`. The x86 AMI is not pinned (the
   qualified-AMI pin is arm64 only).
 - The worker image carries Node 22, Git, the Docker CLI and Compose, Python 3 with pip and venv,
   and uv. A change to `environments/base/Dockerfile` reaches installs only through a new release's
