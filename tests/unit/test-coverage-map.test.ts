@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCoverage, decodeMappings, globMatch, isTableCase, offsetLines, reduce, type TestRecord } from "../../scripts/test-coverage-map.js";
+import { buildCoverage, decodeMappings, executedUnion, globMatch, isTableCase, offsetLines, reduce, type TestRecord } from "../../scripts/test-coverage-map.js";
 import { executedIntervals, isProductScript } from "../support/coverage-map-core.js";
 
 // #1211: per-test coverage, and the smallest set of tests that keeps it.
@@ -63,6 +63,13 @@ describe("the smallest covering set (buildCoverage + reduce)", () => {
   });
 });
 
+describe("comparing two runs (executedUnion)", () => {
+  it("is the same for two runs that executed the same ranges, however the tests split them, and differs when a range is missing", () => {
+    expect(executedUnion([record("a", [[0, 40]]), record("b", [[30, 100]])])).toEqual(executedUnion([record("c", [[0, 100]])]));
+    expect(executedUnion([record("a", [[0, 40]])])).not.toEqual(executedUnion([record("c", [[0, 100]])]));
+  });
+});
+
 describe("flagging table cases and matching keep rules", () => {
   it("flags another case of the same table (same suites, titles differ only in the input) for the owner", () => {
     expect(isTableCase("f > cookies > _uetsid is never strong in any browser", ["f > cookies > _clsk is never strong in any browser"])).toBe(true);
@@ -73,5 +80,7 @@ describe("flagging table cases and matching keep rules", () => {
     expect(globMatch("tests/unit/*-access-*.test.ts", "tests/unit/task-access-policy.test.ts")).toBe(true);
     expect(globMatch("*refuses*", "tests/unit/a.test.ts > x > refuses a token")).toBe(true);
     expect(globMatch("tests/unit/a.test.ts", "tests/unit/ab.test.ts")).toBe(false);
+    expect(globMatch("*sandbox*", "tests/unit/a.test.ts > Sandbox egress stays closed", true)).toBe(true);
+    expect(globMatch("*sandbox*", "tests/unit/a.test.ts > Sandbox egress stays closed")).toBe(false);
   });
 });

@@ -13,7 +13,8 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { join } from "node:path";
 
 export interface TestRecord { id: string; file: string; concurrent: boolean; failed?: boolean; scripts: Record<string, { h: string; iv: Array<[number, number]> }> }
-export interface KeepRules { files?: string[]; titles?: string[] }
+/** Tests never called redundant: by test file, by test id (case-insensitive), or by the module a test mostly runs (its main module). */
+export interface KeepRules { files?: string[]; titles?: string[]; modules?: string[] }
 
 /** Reads every record the setup file wrote; a test id seen twice (an `it.each` with a fixed title) gets `#2`, `#3`. */
 export function readRecords(directory: string): TestRecord[] {
@@ -149,10 +150,10 @@ function lowerBound(sorted: readonly number[], value: number): number {
   return low;
 }
 
-/** A glob with `*` only (any run of characters), matched against the whole string. */
-export function globMatch(pattern: string, value: string): boolean {
+/** A glob with `*` only (any run of characters), matched against the whole string; `ignoreCase` for test titles. */
+export function globMatch(pattern: string, value: string, ignoreCase = false): boolean {
   const escaped = pattern.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/gu, "\\$&")).join(".*");
-  return new RegExp(`^${escaped}$`, "u").test(value);
+  return new RegExp(`^${escaped}$`, ignoreCase ? "iu" : "u").test(value);
 }
 
 export interface Reduction { kept: string[]; redundant: Array<{ id: string; coveredBy: string[]; tableCase?: boolean }>; forced: string[] }
@@ -277,7 +278,8 @@ function main(argv: string[]): number {
     const keep = readKeep(keepPath);
     const forcedKeep = new Set(records.filter((record) => record.concurrent || record.failed === true
       || (keep.files ?? []).some((glob) => globMatch(glob, record.file))
-      || (keep.titles ?? []).some((glob) => globMatch(glob, record.id))).map((record) => record.id));
+      || (keep.titles ?? []).some((glob) => globMatch(glob, record.id, true))
+      || (keep.modules ?? []).some((glob) => globMatch(glob, coverage.module.get(record.id) ?? ""))).map((record) => record.id));
     const order = records.map((record) => record.id);
     const result = reduce(order, coverage.perTest, forcedKeep);
     const all = totals(coverage);
@@ -319,14 +321,39 @@ function main(argv: string[]): number {
   if (command === "compare") {
     const [left, right] = rest;
     if (left === undefined || right === undefined) { console.error("usage: compare <dir-a> <dir-b>"); return 2; }
-    const a = totals(buildCoverage(readRecords(left), sourceReader(left))), b = totals(buildCoverage(readRecords(right), sourceReader(right)));
+    const leftRecords = readRecords(left), rightRecords = readRecords(right);
+    const a = totals(buildCoverage(leftRecords, sourceReader(left))), b = totals(buildCoverage(rightRecords, sourceReader(right)));
     const missing = [...a.lineSet].filter((line) => !b.lineSet.has(line));
     const extra = [...b.lineSet].filter((line) => !a.lineSet.has(line));
-    console.log(JSON.stringify({ linesA: a.lines, linesB: b.lines, missingInB: missing.length, extraInB: extra.length, sampleMissing: missing.slice(0, 20) }, null, 2));
-    return missing.length === 0 ? 0 : 1;
+    // Blocks: the executed byte ranges of each script (same transformed code, same hash), so a branch on a line already covered counts too.
+    const ua = executedUnion(leftRecords), ub = executedUnion(rightRecords);
+    const blocksSame = ua.size === ub.size && [...ua].every(([key, ranges]) => ub.get(key) === ranges);
+    console.log(JSON.stringify({ linesA: a.lines, linesB: b.lines, missingInB: missing.length, extraInB: extra.length, scriptsA: ua.size, scriptsB: ub.size,
+      executedRangesIdentical: blocksSame, sampleMissing: missing.slice(0, 20) }, null, 2));
+    return missing.length === 0 && blocksSame ? 0 : 1;
   }
   console.error("usage: test-coverage-map.ts collect|reduce|compare …");
   return 2;
+}
+
+/** Per script (url and transformed-code hash): the union of the executed ranges every test reported, as a canonical string. */
+export function executedUnion(records: readonly TestRecord[]): Map<string, string> {
+  const ranges = new Map<string, Array<[number, number]>>();
+  for (const record of records) for (const [url, { h, iv }] of Object.entries(record.scripts)) {
+    const list = ranges.get(`${url}@${h}`) ?? [];
+    list.push(...iv);
+    ranges.set(`${url}@${h}`, list);
+  }
+  const result = new Map<string, string>();
+  for (const [key, list] of ranges) {
+    const merged: Array<[number, number]> = [];
+    for (const [start, end] of [...list].sort((x, y) => x[0] - y[0])) {
+      const last = merged[merged.length - 1];
+      if (last !== undefined && start <= last[1]) last[1] = Math.max(last[1], end); else merged.push([start, end]);
+    }
+    result.set(key, merged.map(([start, end]) => `${String(start)}-${String(end)}`).join(","));
+  }
+  return result;
 }
 
 function groupBy<T>(items: readonly T[], key: (item: T) => string): Map<string, T[]> {
