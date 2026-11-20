@@ -112,10 +112,11 @@ describe("the test service starter copies (DEC 254zm)", () => {
     expect(entries.map((entry) => entry.reference)).toEqual(testServiceMirrorRepositories("staging").map((mirror) => `111122223333.dkr.ecr.us-west-2.amazonaws.com/${mirror.repositoryName}@sha256:${mirror.digest}`));
   });
 
-  it("the legacy deployment has no copies and no read statement", () => {
-    for (const template of legacy) {
-      expect(ofType(template, "AWS::ECR::Repository").filter(([, resource]) => String(resource.Properties.RepositoryName).includes("test-services"))).toEqual([]);
-      expect(JSON.stringify(template.toJSON())).not.toContain("TestServiceImageRead");
-    }
+  // #1159: the legacy deployment (production) has the copies too, as `production` (legacy-test-service-mirror-infrastructure.test.ts pins them).
+  it("the legacy deployment has the copies under production's names, and the worker's read statement", () => {
+    const all = legacy.map((template) => JSON.stringify(template.toJSON())).join("\n");
+    expect(all).toContain("agentx-production--test-services/");
+    expect(all).toContain("TestServiceImageRead");
+    expect(all).not.toContain("agentx-undefined");
   });
 });

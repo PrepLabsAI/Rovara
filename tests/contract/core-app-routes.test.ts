@@ -69,6 +69,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/test-environment", "full"],
     // L4-MF1: the project's saved environment image panel, read only.
     ["GET", "/v1/app/projects/payments/environment-image", "full"],
+    // #1175: the company's per-step agent model choice (core-host/agent-model-routes.ts); missing, the broker refused it before auth and Cloud's "AI and spending" never finished.
+    ["GET", "/v1/app/agent-models", "full"], ["POST", "/v1/app/agent-models", "full"],
     ["GET", "/v1/app/script-tokens", "full"], ["POST", "/v1/app/script-tokens", "full"], ["POST", "/v1/app/script-tokens/tok_1/revoke", "full"],
     ["POST", "/v1/app/people/p1/erase", "full"],
     // Guided onboarding L2-3: the hosted setup run.
@@ -282,6 +284,18 @@ describe("the core's /v1/app routes, switch on (a core entry)", () => {
       for (const path of ["/v1/dev/projects", "/v1/admin/changes", "/v1/internal/workspaces/w/operations/o/result"]) expect((await call("GET", path, authorization)).status, path).toBe(404);
     }
     expect(send).not.toHaveBeenCalled();
+    expect(spy.seen).toEqual([]);
+  });
+
+  it("says once, bounded, when it refuses a path the table does not list (#1175), never naming a project or id", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect((await call("GET", "/v1/app/projects/secret-project-name/not-a-route", await cli())).status).toBe(404);
+      const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("developer.app_route_unlisted"));
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0]!)).toMatchObject({ event: "developer.app_route_unlisted", method: "GET", path: "/v1/app/projects" });
+      expect(lines[0]).not.toContain("secret-project-name");
+    } finally { log.mockRestore(); }
     expect(spy.seen).toEqual([]);
   });
 

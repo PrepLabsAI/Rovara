@@ -1070,6 +1070,22 @@ function installTeamView(dependencies: AwsBrokerDependencies): AwsBrokerDependen
     installTeamCompanyMode: { workspaces, ...(companies === undefined ? {} : { companies }) } };
 }
 
+/**
+ * #1161: the GitHub binding operator events (backfill, claim) need the bindings store over the State table. The deployed broker gives the broker-wide
+ * `githubBindings` only where the host set it (it never does), but it always gives the client project routes theirs (`clientProjects.bindings`, the same
+ * table): the events use the host's when there is one, else that one. Neither: refused, as before.
+ */
+function operatorGithubBindings(dependencies: AwsBrokerDependencies): GithubInstallationBindings {
+  const bindings = dependencies.githubBindings ?? dependencies.clientProjects?.bindings;
+  if (bindings === undefined) throw githubBindingRefusal();
+  return bindings;
+}
+
+/** #1161: an operator event's refusal is logged with its reason (the error's name and a bounded message; the answer itself stays the fixed words). */
+function operatorEventRefused(event: string, error: unknown): void {
+  brokerLogLine({ event, reason: error instanceof Error ? `${error.name}: ${error.message}`.replace(/\s+/gu, " ").slice(0, 200) : "unknown" });
+}
+
 function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBrokerDependencies) {
   // Spec 025: the broker actions the developer task routes call, built once per handler.
   const tasks = developerTaskActions(dependencies);
@@ -1137,20 +1153,28 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
         // IAM protects direct Lambda invocation. HTTP/admin-shaped envelopes are
         // refused even if they carry the source string; no body flag grants authority.
         const input = z.object({ source: z.literal("agentx.github-binding-claim"), installationId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), companyId: OrgIdSchema }).strict().parse(event);
-        if (dependencies.githubBindings === undefined || dependencies.githubBindingInstallations === undefined) throw githubBindingRefusal();
+        const bindings = operatorGithubBindings(dependencies);
+        if (dependencies.githubBindingInstallations === undefined) throw githubBindingRefusal();
         const installation = await dependencies.githubBindingInstallations.get(input.installationId);
         if (installation === undefined || installation.installationId !== input.installationId) throw githubBindingRefusal();
-        await dependencies.githubBindings.claimOperator(input.companyId, installation);
+        await bindings.claimOperator(input.companyId, installation);
         companyLog(input.companyId, brokerLogLine)({ event: "github.binding_claimed", installationId: input.installationId });
         return json({ claimed: true }, "github-binding-claim");
-      } catch { return json({ error: { code: "GITHUB_NOT_CONNECTED", message: "the GitHub installation is not connected" } }, "github-binding-claim", 403); }
+      } catch (error) {
+        operatorEventRefused("github.binding_claim_refused", error);
+        return json({ error: { code: "GITHUB_NOT_CONNECTED", message: "the GitHub installation is not connected" } }, "github-binding-claim", 403);
+      }
     }
     if (typeof event === "object" && event !== null && "source" in event && event.source === "agentx.github-binding-backfill") {
       try {
         const input = z.object({ source: z.literal("agentx.github-binding-backfill"), continuation: z.number().int().positive().max(1_000_000).optional() }).strict().parse(event);
-        if (dependencies.githubBindings === undefined || dependencies.githubBindingInstallations === undefined) throw githubBindingRefusal();
-        return json(await dependencies.githubBindings.backfillPage(page => dependencies.githubBindingInstallations!.page(page), input.continuation), "github-binding-backfill");
-      } catch { return json({ error: "backfill_failed" }, "github-binding-backfill", 500); }
+        const bindings = operatorGithubBindings(dependencies);
+        if (dependencies.githubBindingInstallations === undefined) throw githubBindingRefusal();
+        return json(await bindings.backfillPage(page => dependencies.githubBindingInstallations!.page(page), input.continuation), "github-binding-backfill");
+      } catch (error) {
+        operatorEventRefused("github.binding_backfill_refused", error);
+        return json({ error: "backfill_failed" }, "github-binding-backfill", 500);
+      }
     }
     if (isGithubWebhookRecoveryEvent(event)) {
       try { return json(await retryDueGithubWebhookEvents(dependencies, "continuation" in event ? event.continuation : undefined), "github-webhook-recovery"); }

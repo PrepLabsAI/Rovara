@@ -55,7 +55,8 @@ describe("channel adapters infrastructure", () => {
     expect(variables("ChannelApiIngress")).toMatchObject({ CHANNEL_ADAPTERS: { Ref: "ChannelAdapters" }, BUILT_IN_ADAPTER: { Ref: "SlackViaChannel" }, SHARED_TASKS: "disabled",
       BUILT_IN_ADAPTER_SECRET_NAME: "agentx/production/channel-adapter/slack", SLACK_VIA_CHANNEL: { Ref: "SlackViaChannel" }, SLACK_ADAPTER_TEAM_ID: { Ref: "SlackTeamId" } });
     const broker = ofType(legacy, "AWS::Lambda::Function").find(([id]) => withoutHash(id).startsWith("Broker"))![1];
-    expect((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({
+    // #1149: the legacy broker's settings are packed and the prefix derived (unpackedBrokerVariables reads them as the broker does).
+    expect(unpackedBrokerVariables((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables, legacy as never)).toMatchObject({
       CHANNEL_ADAPTERS: { Ref: "ChannelAdapters" }, CHANNEL_ADAPTER_SECRET_PREFIX: "agentx/production/" });
     // The broker writes adapter secrets under the deployment's own prefix, and creates or updates nothing else.
     const brokerRole = (broker.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];

@@ -76,7 +76,11 @@ describe("(a) no step-up email (DEC 254zzz73)", () => {
       Condition: { StringEquals: { "ses:FromAddress": { Ref: "CoreAttentionEmailSender" } } },
       Sid: "AttentionEmailSend",
     }]);
-    expect(JSON.stringify(legacy)).not.toContain("ses:");
+    // #1148: the legacy template has the attention email's sender too (off by default): the same one statement, under its own condition.
+    const legacySes = ofType(legacy, "AWS::IAM::Policy").flatMap(([id, policy]) => (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement
+      .filter((statement) => actionsOf(statement).some((action) => action.startsWith("ses:"))).map(() => id));
+    expect(legacySes).toHaveLength(1);
+    expect(legacySes[0]!.startsWith("CoreEngineJobsAttentionEmailSenderServiceRoleDefaultPolicy")).toBe(true);
   });
 });
 
@@ -115,14 +119,13 @@ describe("(b) no passkeys (DEC 254zzz73)", () => {
 });
 
 describe("(c) the policy hook's question key", () => {
-  it("is its own RSA signing key with its own alias, named environments only", () => {
+  it("is its own RSA signing key with its own alias (the legacy install's too since #1148)", () => {
     const { id } = keyPolicy(named, "DeveloperSignInPolicyHookKey");
     const [, key] = ofType(named, "AWS::KMS::Key").find(([keyId]) => keyId === id)!;
     expect(key.Properties).toMatchObject({ KeySpec: "RSA_2048", KeyUsage: "SIGN_VERIFY", PendingWindowInDays: 7 });
     expect(ofType(named, "AWS::KMS::Alias").filter(([, alias]) => alias.Properties.AliasName === "alias/agentx/staging/policy-questions").map(([, alias]) => alias.Properties.TargetKeyId)).toEqual([{ "Fn::GetAtt": [id, "Arn"] }]);
     expect(id).not.toBe(keyPolicy(named, "DeveloperSignInTaskTokenKey").id);
-    expect(JSON.stringify(legacy)).not.toContain("PolicyHookKey");
-    expect(JSON.stringify(legacy)).not.toContain("POLICY_HOOK_KEY_ARN");
+    expect(ofType(legacy, "AWS::KMS::Alias").map(([, alias]) => alias.Properties.AliasName)).toContain("alias/agentx/production/policy-questions");
   });
 
   it("only the broker and the dispatcher may sign; only they and the sign-in function read the public key", () => {
@@ -154,9 +157,9 @@ describe("(c) the policy hook's question key", () => {
     // The dispatcher's question signer: the key's ARN and the install's issuer, the sign-in function's own value (hosted-wiring.ts policyHookInstallFromEnvironment).
     expect(envOf(named, "Dispatcher").POLICY_HOOK_KEY_ARN).toEqual({ "Fn::GetAtt": [id, "Arn"] });
     expect(envOf(named, "Dispatcher").DEVELOPER_TOKEN_ISSUER).toEqual(envOf(named, "DeveloperSignInFunction").DEVELOPER_TOKEN_ISSUER);
-    // The legacy deployment has no question key: its dispatcher is given neither.
-    expect(envOf(legacy, "Dispatcher")).not.toHaveProperty("POLICY_HOOK_KEY_ARN");
-    expect(envOf(legacy, "Dispatcher")).not.toHaveProperty("DEVELOPER_TOKEN_ISSUER");
+    // #1148: the legacy deployment has the question key too, and its dispatcher both.
+    expect(envOf(legacy, "Dispatcher")).toHaveProperty("POLICY_HOOK_KEY_ARN");
+    expect(envOf(legacy, "Dispatcher")).toHaveProperty("DEVELOPER_TOKEN_ISSUER");
   });
 });
 

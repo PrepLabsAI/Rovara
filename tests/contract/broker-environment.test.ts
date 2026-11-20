@@ -97,7 +97,8 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
 
     it("packs every name in the table, and every setting", () => {
       expect([...names.keys()].sort()).toEqual(Object.values(BROKER_NAMES).map((spec) => spec.code).sort());
-      expect([...settings.keys()].sort()).toEqual(Object.values(BROKER_SETTINGS).map((spec) => spec.code).sort());
+      // #1149: the layout marker is the legacy install's own; a named environment never packs it.
+      expect([...settings.keys()].sort()).toEqual(Object.values(BROKER_SETTINGS).filter((spec) => spec.code !== BROKER_SETTINGS.installLayout.code).map((spec) => spec.code).sort());
     });
 
     it("points each code at the resource it names, not another of the same kind", () => {
@@ -128,7 +129,7 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
       expect(hydrated.HEALTH_DEAD_LETTER_QUEUES).toBe(JSON.stringify(Object.fromEntries(queues.map((spec) => [spec.label, resolver.ref(logicalIdOf(names.get(spec.code)))]))));
     });
 
-    for (const spec of Object.values(BROKER_SETTINGS).filter((each) => !("switchFlag" in each))) {
+    for (const spec of Object.values(BROKER_SETTINGS).filter((each) => !("switchFlag" in each) && each.code !== BROKER_SETTINGS.installLayout.code)) {
       it(`${spec.variable} (${spec.code}) is its parameter's value`, () => {
         const parameter = (settings.get(spec.code) as { Ref?: string }).Ref;
         expect(parameter, "a setting is a parameter's value").toBeDefined();
