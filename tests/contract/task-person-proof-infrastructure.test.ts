@@ -299,12 +299,14 @@ describe("the named TEST proof-only installation gate", () => {
         template: named,
         withRoute: "ff39867ccbebe339f5521b328242810296cf9f22de7164fc0c753a22d8ad994a", withoutRoute: "d2e9d7f43372743cffea7a4c6550137b924b4e751adcee11c4e27420b94ac1f8",
         beforeStepUpRemoval: { withRoute: "d58b14cb4439b703997e2d5384f7965da0149c0fe6267f70f1b7e0eed9208bd9", withoutRoute: "4d23c397d6fcd7b7d9b117358b7684afb36f811ce460095553b334a01791d139" },
+        beforeCapabilityRoutes: undefined,
       },
       {
         label: "foreign",
         template: foreign,
         withRoute: "89f0bd99f26d69338ba56b954d8233b0f2cf24202aa20f3765130a1c53176a13", withoutRoute: "64558d40113fef82c6c9a2e9ce36e20306b73a7c64d472c73f56798c33904487",
         beforeStepUpRemoval: { withRoute: "773ebd697b866d1844dc835ed3eb504a4fb61cfddc004f2e25ef15ea0fe8bc6e", withoutRoute: "1d6fd5d890d61ab815c6fbb4e6640e69d9997eb7cfc58d09687434fe23e1124e" },
+        beforeCapabilityRoutes: undefined,
       },
       {
         label: "legacy",
@@ -314,16 +316,19 @@ describe("the named TEST proof-only installation gate", () => {
         // #1148: re-pinned for the core engine in the legacy template (CoreEngine off by default, the /v1/app route, saved environment images, the core's keys).
         // SIGNIN-STATE-TABLE: re-pinned for ONE change: the sign-in function's STATE_TABLE_NAME is the plain Ref to State instead of an Fn::If on SlackCompanyModeOn to "" (rule D: with the old
         // Fn::If put back, the old pins 5e7b09b2... and 40317b61... held). Named and foreign are unchanged (withoutSlackCompanyMode takes the variable out in both forms).
-        withRoute: "e2e5356f32d994932404dd8147336996aa5cd897b89c7e17998e1540848786c1",
-        withoutRoute: "73dec60e0ae54317d76cc9443a59ac1b2df17ae4ae6007650f2b79b7bb8f1ac6",
+        // LEGACY-WORKER-CAPABILITY-ROUTES: re-pinned for ONE change: the legacy template gains the ContextToolsListRoute and DesignReviewPacketRoute resources (named and foreign already had
+        // them). Rule D: with exactly those two resources taken out, the old pins e2e5356f... and 73dec60e... hold (beforeCapabilityRoutes proves it).
+        withRoute: "0ec5a0304ec26e6188376fae81aa7e8e1b1c419b08ad90434baf9ca08cab5059",
+        withoutRoute: "48097497f1719ecd5f12d66d7dbbc22efe89d0a6a64f2210f0d256838489d5b6",
         beforeStepUpRemoval: undefined,
+        beforeCapabilityRoutes: { withRoute: "e2e5356f32d994932404dd8147336996aa5cd897b89c7e17998e1540848786c1", withoutRoute: "73dec60e0ae54317d76cc9443a59ac1b2df17ae4ae6007650f2b79b7bb8f1ac6" },
       },
     ] as const;
     expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();
     expect(foreign.Parameters?.CoreEngine, "foreign has the core engine switch").toBeDefined();
     // #1148: the legacy (production) template has the core engine too, off by default.
     expect(legacy.Parameters?.CoreEngine, "legacy has the core engine switch, off").toMatchObject({ Default: "off" });
-    for (const { label, template, withRoute, withoutRoute, beforeStepUpRemoval } of digestCases) {
+    for (const { label, template, withRoute, withoutRoute, beforeStepUpRemoval, beforeCapabilityRoutes } of digestCases) {
       const creatorChecks = developerSignInConditionCheckEntries(template);
       {
         expect(creatorChecks, `${label} has exactly one broker creator identity fence`).toHaveLength(1);
@@ -355,6 +360,14 @@ describe("the named TEST proof-only installation gate", () => {
       const priorRemainder = structuredClone(pinned);
       delete priorRemainder.Resources?.ProjectSetupExecutionReadRoute;
       expect(parentRemainderDigest(priorRemainder, label !== "legacy"), `${label} parent remainder with only the approved route removed`).toBe(withoutRoute);
+      if (beforeCapabilityRoutes !== undefined) {
+        const withoutCapabilityRoutes = structuredClone(pinned);
+        delete withoutCapabilityRoutes.Resources?.ContextToolsListRoute;
+        delete withoutCapabilityRoutes.Resources?.DesignReviewPacketRoute;
+        expect(parentRemainderDigest(withoutCapabilityRoutes, false), `${label} with the two capability routes taken out`).toBe(beforeCapabilityRoutes.withRoute);
+        delete withoutCapabilityRoutes.Resources?.ProjectSetupExecutionReadRoute;
+        expect(parentRemainderDigest(withoutCapabilityRoutes, false), `${label} with the two capability routes and the approved route taken out`).toBe(beforeCapabilityRoutes.withoutRoute);
+      }
       if (beforeStepUpRemoval !== undefined) {
         // Rule D proof (owner DEC 254zzz73): with exactly the step-up's removed parameter, variables and statements put back, the pre-removal pins hold.
         const restored = withStepUpRestored(pinned);
