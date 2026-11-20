@@ -10,6 +10,8 @@ import { moduleMockingFiles, nativeP0Files, nightlyOnlyFiles, postDeployFiles } 
 describe("the test runner's configuration", () => {
   it("gives every test, CDK synths included, 60 seconds", () => {
     expect(config.test?.testTimeout).toBe(60_000);
+    // #1263: and every setup or teardown hook the same 60 seconds.
+    expect(config.test?.hookTimeout).toBe(60_000);
   });
 
   it("keeps the three required contained P0 journeys in an explicit no-empty native profile", () => {
