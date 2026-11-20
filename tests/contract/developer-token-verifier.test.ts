@@ -1,5 +1,3 @@
-// Spec 025 D17: the broker verifies developer access tokens itself (no API Gateway JWT authorizer).
-import { createHmac, createPublicKey, type JsonWebKey } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { AgentXError } from "@agentx/contracts";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
@@ -46,29 +44,6 @@ describe("the broker's developer token check (D17)", () => {
     expect(await h.verify(`Bearer ${token}`)).toMatchObject({ iss: ISSUER, aud: "agentx-developer", sub: SUB, amr: "slack", env: "staging", sid: "s-1" });
   });
 
-  it.each([
-    ["no Authorization header", undefined],
-    ["an empty header", ""],
-    ["another scheme", "Basic dXNlcjpwYXNz"],
-    ["a token that is not a JWT", "Bearer agxr_notajwt"],
-  ])("refuses %s", async (_name, header) => {
-    const h = await setup();
-    await expectUnauthorized(h.verify(header));
-  });
-
-  it("refuses alg none", async () => {
-    const h = await setup();
-    const token = `${b64({ alg: "none", typ: "JWT", kid: h.jwk.kid })}.${b64(claims())}.`;
-    await expectUnauthorized(h.verify(`Bearer ${token}`));
-  });
-
-  it("refuses HS256 signed with the public key as the secret", async () => {
-    const h = await setup();
-    const pem = createPublicKey({ key: h.jwk as unknown as JsonWebKey, format: "jwk" }).export({ type: "spki", format: "pem" });
-    const input = `${b64({ alg: "HS256", typ: "JWT", kid: h.jwk.kid })}.${b64(claims())}`;
-    const token = `${input}.${createHmac("sha256", pem).update(input).digest("base64url")}`;
-    await expectUnauthorized(h.verify(`Bearer ${token}`));
-  });
 
   it("refuses another alg even with a valid RSA signature, a missing kid and a wrong kid", async () => {
     const h = await setup();

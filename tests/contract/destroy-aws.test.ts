@@ -65,20 +65,6 @@ describe("the destroy adapter", () => {
     await expect(awsDestroyApi(foreign.clients).deleteUserPool("us-east-1_AbC", "agentx-staging-123456789012")).rejects.toThrow("user pool us-east-1_AbC has the domain someone-else, which is not agentx-staging-123456789012; delete that domain yourself, then run agentx destroy again");
   });
 
-  it("finds workers by all three tags, and drops any answer that does not carry them", async () => {
-    const fake = fakeClients({
-      DescribeInstances: () => ({ Reservations: [{ Instances: [
-        { InstanceId: "i-1", State: { Name: "running" }, Tags: [{ Key: "DeploymentMode", Value: "ec2-ebs" }, { Key: "Environment", Value: "staging" }, { Key: "agentx:env", Value: "staging" }] },
-        { InstanceId: "i-2", State: { Name: "running" }, Tags: [{ Key: "DeploymentMode", Value: "ec2-ebs" }, { Key: "Environment", Value: "staging" }] },
-      ] }] }),
-    });
-    const found = await awsDestroyApi(fake.clients).workerInstances("staging");
-    expect(found.map((instance) => instance.id)).toEqual(["i-1"]);
-    expect(fake.calls[0]!.input.Filters).toEqual(expect.arrayContaining([
-      { Name: "tag:DeploymentMode", Values: ["ec2-ebs"] }, { Name: "tag:Environment", Values: ["staging"] }, { Name: "tag:agentx:env", Values: ["staging"] },
-    ]));
-  });
-
   it("lists only this environment's secrets, and force-deletes one already scheduled for deletion by restoring it first", async () => {
     const fake = fakeClients({
       ListSecrets: () => ({ SecretList: [{ Name: "agentx/staging/slack" }, { Name: "agentx/staging-eu/slack" }, { Name: "agentx/staging/github-app", DeletedDate: new Date() }] }),
@@ -101,11 +87,6 @@ describe("the destroy adapter", () => {
     expect(await api.scheduleKeyDeletion("k-1")).toBe("already");
   });
 
-  it("treats a KMS key that is already deleted as already scheduled, so a re-run continues", async () => {
-    const fake = fakeClients({ DescribeKey: notFound("NotFoundException") });
-    expect(await awsDestroyApi(fake.clients).scheduleKeyDeletion("k-1")).toBe("already");
-  });
-
   it("reads a table's tags through its ARN, and answers undefined for one already gone", async () => {
     const fake = fakeClients({ DescribeTable: () => ({ Table: { TableArn: "arn:aws:dynamodb:us-east-1:1:table/t" } }), ListTagsOfResource: () => ({ Tags: [{ Key: "agentx:env", Value: "staging" }] }) });
     expect(await awsDestroyApi(fake.clients).resourceTags({ part: "control-plane", logicalId: "State", type: "AWS::DynamoDB::Table", physicalId: "t" })).toEqual({ "agentx:env": "staging" });
@@ -125,24 +106,10 @@ describe("waiting for a stack delete", () => {
   }
   const clock = () => { let time = 0; return { now: () => time, sleep: async (ms: number) => { time += ms; } }; };
 
-  it("waits through a 40-minute control-plane delete, with a progress line each minute, and never gives up early", async () => {
-    const statuses = [...Array.from({ length: 160 }, () => "DELETE_IN_PROGRESS"), undefined];
-    const lines: string[] = [];
-    await waitForStackDelete({ api: stackApi(statuses), name: "agentx-staging-control-plane", write: (line) => lines.push(line), ...clock() });
-    expect(lines.filter((line) => line.startsWith("still deleting agentx-staging-control-plane")).length).toBeGreaterThanOrEqual(39);
-    expect(lines).toContain("still deleting agentx-staging-control-plane: 1 minute so far; last event: SlackIngressFunction DELETE_IN_PROGRESS");
-    expect(lines.at(-1)).toBe("deleted agentx-staging-control-plane (40 minutes)");
-  });
-
   it("gives up only after 3 hours, saying a re-run keeps waiting", async () => {
     const time = clock();
     await expect(waitForStackDelete({ api: stackApi(["DELETE_IN_PROGRESS"]), name: "s", write: () => undefined, ...time })).rejects.toThrow("stack s is still DELETE_IN_PROGRESS after 3 hours; it may still finish. Run agentx destroy again to keep waiting and continue");
     expect(time.now()).toBeGreaterThanOrEqual(STACK_DELETE_TIMEOUT_MS);
-  });
-
-  it("stops on DELETE_FAILED with the failing resources", async () => {
-    await expect(waitForStackDelete({ api: stackApi(["DELETE_FAILED"]), name: "agentx-staging-foundation", write: () => undefined, ...clock() }))
-      .rejects.toThrow("stack agentx-staging-foundation could not be deleted: WorkerSecurityGroup: resource sg-1 has a dependent object. Fix that, then run agentx destroy again to continue");
   });
 
   it("retries a volume that is still attached until it is free", async () => {
@@ -160,35 +127,10 @@ describe("waiting for a stack delete", () => {
     expect(time.now()).toBeGreaterThanOrEqual(30 * 60_000);
   });
 
-  it("counts a terminated instance, or one not asked about, as gone", async () => {
-    const api = { workerInstances: async () => [{ id: "i-1", state: "terminated", tags: {} }, { id: "i-9", state: "running", tags: {} }] } as unknown as DestroyApi;
-    await expect(waitForInstancesGone({ api, env: "staging", ids: ["i-1"], ...clock() })).resolves.toBeUndefined();
-  });
 });
 
 describe("the destroy adapter, fix round 1", () => {
   const tags = (env: string) => [{ Key: "DeploymentMode", Value: "ec2-ebs" }, { Key: "Environment", Value: env }, { Key: "agentx:env", Value: env }];
-
-  it("never returns a volume EC2 is already deleting after termination", async () => {
-    const fake = fakeClients({ DescribeVolumes: () => ({ Volumes: [
-      { VolumeId: "vol-root", State: "deleting", Tags: tags("staging") },
-      { VolumeId: "vol-gone", State: "deleted", Tags: tags("staging") },
-      { VolumeId: "vol-ws", State: "available", Tags: tags("staging") },
-    ] }) });
-    expect((await awsDestroyApi(fake.clients).workerVolumes("staging")).map((volume) => volume.id)).toEqual(["vol-ws"]);
-    expect(fake.calls[0]!.input.Filters).toEqual(expect.arrayContaining([{ Name: "status", Values: ["creating", "available", "in-use", "error"] }]));
-  });
-
-  it("finds a secret scheduled for deletion by itself, restores it, then force-deletes it", async () => {
-    const scheduled = fakeClients({ DescribeSecret: () => ({ Name: "agentx/staging/slack", DeletedDate: new Date() }), RestoreSecret: () => ({}), DeleteSecret: () => ({}) });
-    await awsDestroyApi(scheduled.clients).deleteSecret("agentx/staging/slack");
-    expect(scheduled.calls.map((call) => call.name)).toEqual(["DescribeSecret", "RestoreSecret", "DeleteSecret"]);
-    const live = fakeClients({ DescribeSecret: () => ({ Name: "agentx/staging/slack" }), DeleteSecret: () => ({}) });
-    await awsDestroyApi(live.clients).deleteSecret("agentx/staging/slack");
-    expect(live.calls.map((call) => call.name)).toEqual(["DescribeSecret", "DeleteSecret"]);
-    const gone = fakeClients({ DescribeSecret: notFound("ResourceNotFoundException") });
-    await expect(awsDestroyApi(gone.clients).deleteSecret("agentx/staging/slack")).resolves.toBeUndefined();
-  });
 
   it("leaves a table that is already deleting, and retries the delete while the protection change settles", async () => {
     const deleting = fakeClients({ DescribeTable: () => ({ Table: { TableStatus: "DELETING", DeletionProtectionEnabled: true } }) });
@@ -243,14 +185,6 @@ describe("the destroy adapter, fix round 1", () => {
     expect(await awsDestroyApi(fake.clients).resourceTags({ part: "foundation", logicalId: "L", type: "AWS::Logs::LogGroup", physicalId: "g" })).toEqual({ "agentx:env": "staging" });
   });
 
-  it("deletes a user pool without protection or a domain, and one already gone", async () => {
-    const plain = fakeClients({ DescribeUserPool: () => ({ UserPool: { Id: "p", DeletionProtection: "INACTIVE" } }), DeleteUserPool: () => ({}) });
-    await awsDestroyApi(plain.clients).deleteUserPool("p", "agentx-staging-123456789012");
-    expect(plain.calls.map((call) => call.name)).toEqual(["DescribeUserPool", "DeleteUserPool"]);
-    const gone = fakeClients({ DescribeUserPool: notFound("ResourceNotFoundException") });
-    await expect(awsDestroyApi(gone.clients).deleteUserPool("p", "agentx-staging-123456789012")).resolves.toBeUndefined();
-  });
-
   it("reads every page of secrets, instances, volumes, aliases and stack resources", async () => {
     const paged = <T>(first: T, second: T, token: string) => (input: Record<string, unknown>) => (input[token] === undefined ? first : second);
     const fake = fakeClients({
@@ -268,27 +202,10 @@ describe("the destroy adapter, fix round 1", () => {
     expect((await api.stackResources("s")).map((entry) => entry.logicalId)).toEqual(["A", "B"]);
   });
 
-  it("reports only the failures since the latest delete began, not a failure from an earlier run", async () => {
-    const fake = fakeClients({ DescribeStackEvents: () => ({ StackEvents: [
-      { LogicalResourceId: "s", ResourceStatus: "DELETE_FAILED" },
-      { LogicalResourceId: "NewSg", ResourceStatus: "DELETE_FAILED", ResourceStatusReason: "has a dependent object" },
-      { LogicalResourceId: "s", ResourceStatus: "DELETE_IN_PROGRESS" },
-      { LogicalResourceId: "s", ResourceStatus: "DELETE_FAILED" },
-      { LogicalResourceId: "OldSg", ResourceStatus: "DELETE_FAILED", ResourceStatusReason: "old" },
-      { LogicalResourceId: "s", ResourceStatus: "DELETE_IN_PROGRESS" },
-    ] }) });
-    expect(await awsDestroyApi(fake.clients).failedResources("s")).toEqual(["NewSg: has a dependent object"]);
-  });
 });
 
 describe("waits, fix round 1", () => {
   const clock = () => { let time = 0; return { now: () => time, sleep: async (ms: number) => { time += ms; } }; };
-
-  it("sleeps one poll before the first check, so a stale DELETE_FAILED from an earlier run does not stop a re-run", async () => {
-    const time = clock();
-    const api = { stack: async () => (time.now() === 0 ? { status: "DELETE_FAILED", terminationProtection: false, outputs: {} } : undefined), failedResources: async () => ["old"] } as unknown as DestroyApi;
-    await expect(waitForStackDelete({ api, name: "s", write: () => undefined, ...time })).resolves.toBeUndefined();
-  });
 
   it("prints the actual stack timeout", async () => {
     const api = { stack: async () => ({ status: "DELETE_IN_PROGRESS", terminationProtection: false, outputs: {} }), latestEvent: async () => undefined } as unknown as DestroyApi;
@@ -330,24 +247,6 @@ describe("the destroy adapter, queued minors", () => {
     expect(await api.failedResources("s", "mine")).toEqual(["Sg: now"]);
   });
 
-  it("passes the delete's token to the failure report", async () => {
-    let asked: string | undefined;
-    const api = { stack: async () => ({ status: "DELETE_FAILED", terminationProtection: false, outputs: {} }), failedResources: async (_name: string, token?: string) => { asked = token; return ["Sg: now"]; } } as unknown as DestroyApi;
-    let time = 0;
-    await expect(waitForStackDelete({ api, name: "s", token: "mine", write: () => undefined, now: () => time, sleep: async (ms) => { time += ms; } })).rejects.toThrow("Sg: now");
-    expect(asked).toBe("mine");
-  });
-
-  it("retries turning a busy table's deletion protection off", async () => {
-    let updates = 0;
-    const fake = fakeClients({
-      DescribeTable: () => ({ Table: { TableStatus: "UPDATING", DeletionProtectionEnabled: true } }),
-      UpdateTable: () => { updates += 1; if (updates < 2) throw Object.assign(new Error("busy"), { name: "ResourceInUseException" }); return {}; },
-      DeleteTable: () => ({}),
-    });
-    await awsDestroyApi(fake.clients, { sleep: async () => undefined }).deleteTable("t");
-    expect(fake.calls.map((call) => call.name)).toEqual(["DescribeTable", "UpdateTable", "UpdateTable", "DeleteTable"]);
-  });
 });
 
 describe("deleting a secret that is being force-deleted", () => {
@@ -363,15 +262,6 @@ describe("deleting a secret that is being force-deleted", () => {
     await awsDestroyApi(fake.clients, { sleep: async (ms) => { slept.push(ms); } }).deleteSecret("agentx/staging/a");
     expect(fake.calls.map((call) => call.name)).toEqual(["DescribeSecret", "RestoreSecret", "DescribeSecret", "DescribeSecret"]);
     expect(slept).toEqual([5000, 5000]);
-  });
-
-  it("gives up after 2 minutes when the secret is still there, saying to run destroy again", async () => {
-    const fake = fakeClients({ DescribeSecret: () => ({ Name: "agentx/staging/a", DeletedDate: new Date() }), RestoreSecret: refused });
-    let time = 0;
-    await expect(awsDestroyApi(fake.clients, { sleep: async (ms) => { time += ms; } }).deleteSecret("agentx/staging/a"))
-      .rejects.toThrow("secret agentx/staging/a refused RestoreSecret and is still listed after 2 minutes; run agentx destroy again to continue");
-    expect(time).toBe(120_000);
-    expect(fake.calls.map((call) => call.name)).not.toContain("DeleteSecret");
   });
 
   it("does not treat another RestoreSecret error as gone", async () => {

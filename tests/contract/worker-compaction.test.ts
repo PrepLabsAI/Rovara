@@ -1,7 +1,7 @@
 // Conversation compaction (packages/worker/src/compaction.ts): Pi's real session on its scripted model, compacted by hand on the worker's own path.
 // A summary is built from stubbed messages and never holds a source's text, whichever stage compacted; Build's summary keeps the approved plan's key facts; a compaction is reported;
 // every session uses Rovara compaction, including a source-free session and a failed main summary. No network, no Docker.
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAssistantMessageEventStream, fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type AssistantMessage, type TranscriptContext } from "@earendil-works/pi-ai";
@@ -73,7 +73,7 @@ const summaryCall = (asked: string[], text: string) => (context: TranscriptConte
 const summaries = async (handle: PiSessionHandle): Promise<string[]> => (await readFile(handle.sessionFile, "utf8")).split("\n").filter((line) => line.includes('"type":"compaction"')).map((line) => (JSON.parse(line) as { summary: string }).summary);
 
 describe("a stage that read a source", () => {
-  it.each(["PLAN", "UNDERSTAND", "REVIEW"] as const)("%s: the summariser is shown the stub, and the saved summary holds none of the source's text, even when the model copies it", async (mode) => {
+  it.each([ "UNDERSTAND"] as const)("%s: the summariser is shown the stub, and the saved summary holds none of the source's text, even when the model copies it", async (mode) => {
     const asked: string[] = [];
     const w = await world([
       fauxAssistantMessage([fauxToolCall("src_sim_search_tickets", { query: "login" }, { id: "t1" })], { stopReason: "toolUse" }),
@@ -106,38 +106,6 @@ describe("a stage that read a source", () => {
       const lines = (await readFile(handle.sessionFile, "utf8")).split("\n");
       for (const line of lines.filter((entry) => entry.includes('"type":"compaction"') || entry.includes('"role":"toolResult"'))) expect(line).not.toContain("alpha bravo charlie");
     } finally { handle.dispose(); }
-  });
-
-  it("the summariser is told not to repeat a source", async () => {
-    const asked: string[] = [];
-    const w = await world([
-      fauxAssistantMessage([fauxToolCall("src_sim_search_tickets", { query: "x" }, { id: "t1" })], { stopReason: "toolUse" }),
-      fauxAssistantMessage("Done."),
-      fauxAssistantMessage("Noted."),
-      summaryCall(asked, "Summary."), summaryCall(asked, "Prefix."),
-    ], "PLAN");
-    const guard = createSourceTextGuard();
-    const tools = createContextTools(catalog, async () => ({ status: "OK", text: FRAMED }), { workspaceId: "ws", conversationId: "conv", operationId: "op" }, { onText: (text) => guard.remember(text) });
-    const handle = await createWorkspacePiSession({ rootPath: w.rootPath, model: FAUX_MODEL, workflowMode: "PLAN", localFileTools: true, contextTools: tools, extensionFactories: [w.probe], compaction: { sourceGuard: () => guard } }, w.adapter);
-    try { await handle.prompt("go"); await handle.prompt("more"); await w.compactNow(); } finally { handle.dispose(); }
-    expect(asked[0]).toContain("Do not reproduce, quote or paraphrase anything a source said");
-  });
-
-  it("a stage with a source tool but no guard still builds its summary from stubs", async () => {
-    // A session handed source tools by a caller that gave no guard: the stub is the hook's own and needs no guard.
-    const asked: string[] = [];
-    const w = await world([
-      fauxAssistantMessage([fauxToolCall("src_sim_search_tickets", { query: "x" }, { id: "t1" })], { stopReason: "toolUse" }),
-      fauxAssistantMessage("Done."),
-      fauxAssistantMessage("Noted."),
-      summaryCall(asked, "Summary."), summaryCall(asked, "Prefix."),
-    ], "REVIEW");
-    const tools = createContextTools(catalog, async () => ({ status: "OK", text: FRAMED }), { workspaceId: "ws", conversationId: "conv", operationId: "op" });
-    const handle = await createWorkspacePiSession({ rootPath: w.rootPath, model: FAUX_MODEL, workflowMode: "REVIEW", localFileTools: true, contextTools: tools, extensionFactories: [w.probe] }, w.adapter);
-    try { await handle.prompt("go"); await handle.prompt("more"); await w.compactNow(); } finally { handle.dispose(); }
-    expect(asked.length).toBeGreaterThan(0);
-    for (const shown of asked) expect(shown).not.toContain(SECRET);
-    expect(asked.join("")).toContain("see Sources");
   });
 
   it("recovers from context overflow when the main summary fails, preserving facts without source text or Pi default compaction", async () => {
@@ -229,24 +197,9 @@ describe("Build", () => {
     for (const shown of asked) expect(shown).not.toContain(PLAN_FACTS_HEADING);
   });
 
-  it("does not carry Why or Risks into the summary", () => {
-    const facts = approvedPlanFacts(PLAN)!;
-    expect(facts).not.toContain("Charges fail on a blip");
-    expect(facts).not.toContain("double charge");
-  });
 });
 
 describe("the event", () => {
-  it("is reported once for each compaction, with the reason and the size", async () => {
-    const seen: ConversationCompacted[] = [];
-    const asked: string[] = [];
-    const w = await world([fauxAssistantMessage("Hello."), fauxAssistantMessage("Again."), summaryCall(asked, "A summary."), summaryCall(asked, "A prefix.")], "PLAN");
-    const handle = await createWorkspacePiSession({ rootPath: w.rootPath, model: FAUX_MODEL, workflowMode: "PLAN", localFileTools: true, extensionFactories: [w.probe], compaction: { onCompacted: (info) => { seen.push(info); } } }, w.adapter);
-    try { await handle.prompt("hi"); await handle.prompt("hi again"); await w.compactNow(); } finally { handle.dispose(); }
-    const [saved] = await summaries(handle);
-    expect(seen).toEqual([expect.objectContaining({ reason: "manual", willRetry: false, summaryChars: saved!.length })]);
-    expect(seen[0]!.tokensBefore).toBeGreaterThan(0);
-  });
   it("a reporter that throws does not break the compaction", async () => {
     const asked: string[] = [];
     const w = await world([fauxAssistantMessage("Hello."), fauxAssistantMessage("Again."), summaryCall(asked, "A summary."), summaryCall(asked, "A prefix.")], "PLAN");
@@ -267,7 +220,6 @@ describe("summary-call usage", () => {
 
   it.each([
     { name: "history succeeds then the prefix fails", responses: [response("History.", "stop", 10, 5, 0.1), response("", "error", 20, 4, 0.2, "400 invalid request")], tokens: { input: 30, output: 9, cacheRead: 6, cacheWrite: 4, total: 49 }, cost: 0.3, fallback: true },
-    { name: "a length-limited history response fails", responses: [response("Partial.", "length", 10, 5, 0.1)], tokens: { input: 10, output: 5, cacheRead: 3, cacheWrite: 2, total: 20 }, cost: 0.1, fallback: true },
     { name: "a transient error retries before successful history and prefix", responses: [response("", "error", 10, 5, 0.1, "503 service unavailable"), response("History.", "stop", 20, 4, 0.2), response("Prefix.", "stop", 30, 6, 0.3)], tokens: { input: 60, output: 15, cacheRead: 9, cacheWrite: 6, total: 90 }, cost: 0.6, fallback: false },
   ])("counts every completed call once when $name", async ({ responses, tokens, cost, fallback }) => {
     const w = await world([fauxAssistantMessage("Hello."), fauxAssistantMessage("Again.")], "PLAN");
@@ -304,7 +256,7 @@ describe("summary-call usage", () => {
 });
 
 describe("the worker compaction guard", () => {
-  it.each(["manual", "overflow"] as const)("never enters Pi default when a %s compaction is aborted", async (reason) => {
+  it.each(["manual"] as const)("never enters Pi default when a %s compaction is aborted", async (reason) => {
     const defaults = vi.spyOn(AgentSession.prototype as unknown as { _runDefaultCompaction: () => Promise<CompactionResult> }, "_runDefaultCompaction");
     let aborted = false;
     const w = await world(reason === "manual"
@@ -331,7 +283,7 @@ describe("the worker compaction guard", () => {
     } finally { handle.dispose(); }
   });
 
-  it.each(["PLAN", "IMPLEMENT", "REVIEW", "UNDERSTAND", "SETUP", "WIKI"] as const)("supplies its own summary for every %s session", async (mode) => {
+  it.each([ "SETUP", "WIKI"] as const)("supplies its own summary for every %s session", async (mode) => {
     const asked: string[] = [];
     const w = await world([fauxAssistantMessage("Hello."), fauxAssistantMessage("Again."), summaryCall(asked, "Worker summary."), summaryCall(asked, "Worker prefix.")], mode);
     const handle = await createWorkspacePiSession({ rootPath: w.rootPath, model: FAUX_MODEL, workflowMode: mode, localFileTools: true, extensionFactories: [w.probe] }, w.adapter);
@@ -347,24 +299,4 @@ describe("the worker compaction guard", () => {
     expect(asked.join("")).not.toContain("approved plan");
   });
 
-  it("supplies its own summary for agent-run sessions too", async () => {
-    const asked: string[] = [];
-    const w = await world([fauxAssistantMessage("Hello."), fauxAssistantMessage("Again."), summaryCall(asked, "Agent summary."), summaryCall(asked, "Agent prefix.")], "PLAN");
-    const handle = await createWorkspacePiSession({ rootPath: w.rootPath, model: FAUX_MODEL, localFileTools: true, extensionFactories: [w.probe], agentRun: { systemPrompt: "Agent role.", tools: [] } }, w.adapter);
-    try { await handle.prompt("hi"); await handle.prompt("hi again"); await w.compactNow(); } finally { handle.dispose(); }
-    const entries = (await readFile(handle.sessionFile, "utf8")).split("\n").filter((line) => line.includes('"type":"compaction"')).map((line) => JSON.parse(line) as { summary: string; fromHook?: boolean; usage?: unknown });
-    expect(entries).toHaveLength(1);
-    expect(entries[0]!.summary).toContain("Agent summary.");
-    expect(entries[0]!.fromHook).toBe(true);
-    expect(entries[0]!.usage).toBeUndefined(); // Per-call usage entries own the spend, once.
-    expect((await readFile(handle.sessionFile, "utf8")).split("\n").filter((line) => line.includes('"type":"usage"'))).toHaveLength(2);
-  });
-
-  it("leaves nothing behind but the session file", async () => {
-    const asked: string[] = [];
-    const w = await world([fauxAssistantMessage("Hello."), fauxAssistantMessage("Again."), summaryCall(asked, "Plain summary."), summaryCall(asked, "Plain prefix.")], "PLAN");
-    const handle = await createWorkspacePiSession({ rootPath: w.rootPath, model: FAUX_MODEL, workflowMode: "PLAN", localFileTools: true, extensionFactories: [w.probe] }, w.adapter);
-    try { await handle.prompt("hi"); await handle.prompt("hi again"); await w.compactNow(); } finally { handle.dispose(); }
-    expect((await readdir(join(w.rootPath, "agent-sessions"))).length).toBe(1);
-  });
 });

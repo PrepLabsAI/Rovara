@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -23,35 +23,12 @@ function capture() {
 }
 
 describe("agentx env", () => {
-  it("lists environments from SSM", async () => {
-    const store = new MemoryParameterStore();
-    await writeEnvironmentSettings(store, stagingSettings);
-    const io = capture();
-    const code = await executeCli(["--json", "env", "list"], { ...io, environments: { store, home: await home() } });
-    expect(code).toBe(0);
-    expect(JSON.parse(io.out.join(""))).toMatchObject({ ok: true, data: { environments: ["staging"] } });
-  });
 
   it("tells a plain-text listing there are no environments, rather than printing nothing", async () => {
     const io = capture();
     const code = await executeCli(["env", "list"], { ...io, environments: { store: new MemoryParameterStore(), home: await home() } });
     expect(code).toBe(0);
     expect(io.out.join("")).toBe("no environments in this account and region\n");
-  });
-
-  it("use writes the environment cache from SSM with owner-only permissions", async () => {
-    const store = new MemoryParameterStore();
-    await writeEnvironmentSettings(store, stagingSettings);
-    const dir = await home();
-    const io = capture();
-    const code = await executeCli(["--env", "staging", "env", "use"], { ...io, environments: { store, home: dir } });
-    expect(code).toBe(0);
-    const path = environmentCachePath(dir, "staging");
-    const text = await readFile(path, "utf8");
-    expect(text).toContain("env: staging");
-    expect(text).toContain(stagingSettings.controlPlaneUrl);
-    expect(text).toContain(`clientId: ${stagingSettings.identity.clientId}`);
-    expect((await stat(path)).mode & 0o777).toBe(0o600);
   });
 
   it("use explains how to install when the environment does not exist", async () => {
@@ -82,23 +59,6 @@ describe("agentx env", () => {
     const code = await executeCli(["--env", ENVIRONMENT_PLACEHOLDER, "env", "list"], { ...io, environments: { store: throwingStore, home: await home() } });
     expect(code).not.toBe(0);
     expect(io.err.join("")).toContain("reserved");
-  });
-
-  it("scopes env list's and env use's SSM client to --region", async () => {
-    expect(await environmentSsmClient("eu-west-2").config.region()).toBe("eu-west-2");
-  });
-
-  it("accepts --region on env list and env use without disturbing a test-injected store", async () => {
-    const store = new MemoryParameterStore();
-    await writeEnvironmentSettings(store, stagingSettings);
-    const io = capture();
-    const listCode = await executeCli(["--json", "env", "list", "--region", "eu-west-2"], { ...io, environments: { store, home: await home() } });
-    expect(listCode).toBe(0);
-    expect(JSON.parse(io.out.join(""))).toMatchObject({ ok: true, data: { environments: ["staging"] } });
-
-    const io2 = capture();
-    const useCode = await executeCli(["--env", "staging", "env", "use", "--region", "eu-west-2"], { ...io2, environments: { store, home: await home() } });
-    expect(useCode).toBe(0);
   });
 
   it("passes --region into env list's and env use's own SSM client construction, not just past a test-injected store", async () => {
@@ -193,27 +153,6 @@ describe("agentx env adopt", () => {
     expect(store.calls).toEqual([]);
   });
 
-  it("never reads the Slack secret or records the Slack team ID for the legacy production deployment (sign-in refuses legacy environments)", async () => {
-    const arn = "arn:aws:secretsmanager:us-east-1:944937319445:secret:SlackSecret-AbCdEf";
-    const withSecret: StackReader = { describe: async (name) => (name === "AgentXControlPlane" ? { ...liveStacks[name]!, outputs: { ...liveStacks[name]!.outputs, SlackSecretArn: arn } } : liveStacks[name]) };
-    const slack: string[] = [];
-    const fetchImplementation = (async (url: Parameters<typeof fetch>[0]) => {
-      slack.push(typeof url === "string" ? url : url instanceof URL ? url.href : url.url);
-      throw new Error("test setup: Slack must not be called");
-    }) as typeof fetch;
-    const store = new MemoryParameterStore();
-    const io = capture();
-    const code = await executeCli(
-      ["--env", "production", "env", "adopt", "--region", "us-east-1"],
-      { ...io, fetchImplementation, environments: { store, home: await home(), stacks: withSecret, sts: identity } },
-    );
-    expect(code).toBe(0);
-    expect(slack).toEqual([]);
-    expect(io.err.join("")).toBe("");
-    expect(store.values.has("/agentx/production/slack/teamId")).toBe(false);
-    expect(store.values.has("/agentx/production/settings")).toBe(true);
-  });
-
   it("scopes env adopt's SSM, CloudFormation and STS clients to --region", async () => {
     const clients = environmentAdoptClients("eu-west-2");
     expect(await clients.ssm.config.region()).toBe("eu-west-2");
@@ -293,16 +232,4 @@ describe("legacy deployment file and --env validation", () => {
     expect(io.err.join("")).toContain("this computer holds no admin sign-in for production; run agentx --env production login --admin");
   });
 
-  it("refuses an invalid --env before any SSM or file access, for a non-env command", async () => {
-    const throwing: ParameterStore = {
-      get: () => { throw new Error("must not be called"); },
-      put: () => { throw new Error("must not be called"); },
-      delete: () => { throw new Error("must not be called"); },
-      list: () => { throw new Error("must not be called"); },
-    };
-    const io = capture();
-    const code = await executeCli(["--env", "Prod", "login"], { ...io, environments: { store: throwing, home: await home() } });
-    expect(code).not.toBe(0);
-    expect(io.err.join("")).toContain("invalid --env");
-  });
 });

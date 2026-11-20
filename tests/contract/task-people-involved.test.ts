@@ -2,7 +2,7 @@
 // An owner after the change has the row (added as owner, promoted, taking ownership); any other role (commenter, viewer, denied) deletes it; the row is in the TASK'S company, never for the task's own
 // person, and only for core tasks (a record with a `companyId`). The row grants nothing: the reader re-checks. A change that does not commit writes no row.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, type TaskPersonProofRequest, type TaskPersonProofResponse } from "@agentx/contracts";
+import { type TaskPersonProofRequest, type TaskPersonProofResponse } from "@agentx/contracts";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { checkTaskPersonIdentity, listTaskWebCandidates, registerTaskWebPerson, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../../packages/broker/src/developer/task-person-identity.js";
@@ -102,42 +102,6 @@ function harness(options: Options = {}) {
 }
 
 describe("an owner added from the web has an involved row, written with the People change", () => {
-  it("writes exactly one pointer in the task's company for the new owner, with the task's id and creation time and nothing else about the task", async () => {
-    const h = harness();
-    await expect(h.add("owner")).resolves.toMatchObject({ status: "COMMITTED" });
-    expect(h.rowIn(COMPANY_A, WREN_ID)).toStrictEqual({
-      ...h.rowKeyOf(COMPANY_A, WREN_ID), entityType: INVOLVED_ENTITY, companyId: COMPANY_A, personId: WREN_ID, taskId: TASK_A, createdAt: CREATED, addedAt: new Date(T0).toISOString(),
-    });
-    expect(h.involvedItems()).toHaveLength(1);
-    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ revision: 4, people: [GALE("owner"), WREN("owner")] });
-  });
-
-  it("puts the row in the TASK'S company only: the same person has nothing in another company, and a task of another company writes only there", async () => {
-    const a = harness();
-    await a.add("owner");
-    expect(a.rowIn(COMPANY_B, WREN_ID)).toBeUndefined();
-    expect(a.involvedItems().map((item) => item.pk)).toEqual([a.rowKeyOf(COMPANY_A, WREN_ID).pk]);
-    const b = harness({ company: COMPANY_B, memberOf: COMPANY_B });
-    await b.add("owner");
-    expect(b.rowIn(COMPANY_B, WREN_ID)).toMatchObject({ companyId: COMPANY_B, taskId: TASK_A });
-    expect(b.rowIn(COMPANY_A, WREN_ID)).toBeUndefined();
-    expect(b.involvedItems()).toHaveLength(1);
-  });
-
-  it("writes the row only for the person the change names, never for the caller or the task's own person", async () => {
-    const h = harness();
-    await h.add("owner");
-    expect(h.rowIn(COMPANY_A, GALE_ID)).toBeUndefined();
-    expect(h.involvedItems().map((item) => item.personId)).toEqual([WREN_ID]);
-  });
-
-  it("is idempotent: the same confirmed request again leaves one row and the same answer", async () => {
-    const h = harness();
-    await h.add("owner");
-    const again = await confirmTaskPeopleProposal(h.deps, GALE_CALLER, TASK_A, uuid(1));
-    expect(again.status).toBe("COMMITTED");
-    expect(h.involvedItems()).toHaveLength(1);
-  });
 
   it("does not let a creation time that is not an instant block the People change (no row, change committed)", async () => {
     const h = harness({ createdAt: "yesterday" });
@@ -145,54 +109,6 @@ describe("an owner added from the web has an involved row, written with the Peop
     expect(h.involvedItems()).toEqual([]);
   });
 
-  it("gives a task of an install without a company (a legacy record) no row, and the add still stands", async () => {
-    const h = harness({ company: undefined, memberOf: IMPLICIT_COMPANY_ID });
-    await expect(h.add("owner")).resolves.toMatchObject({ status: "COMMITTED" });
-    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ revision: 4 });
-    expect(h.involvedItems()).toEqual([]);
-  });
-});
-
-describe("a person who is not an owner has no involved row", () => {
-  it.each(["commenter", "viewer"] as const)("adding someone as a %s writes no row (the list and the cards read owners only)", async (role) => {
-    const h = harness();
-    await expect(h.add(role)).resolves.toMatchObject({ status: "COMMITTED" });
-    expect(h.involvedItems()).toEqual([]);
-  });
-
-  it.each(["commenter", "viewer", "denied"] as const)("changing an owner to %s deletes their row, in the same commit", async (role) => {
-    const h = harness();
-    await h.add("owner", 1);
-    expect(h.rowIn(COMPANY_A, WREN_ID)).toBeDefined();
-    await expect(h.change(role, 2, 4)).resolves.toMatchObject({ status: "COMMITTED" });
-    expect(h.rowIn(COMPANY_A, WREN_ID)).toBeUndefined();
-    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ revision: 5 });
-  });
-
-  it("removing someone who has no row is quiet (nothing to delete)", async () => {
-    const h = harness();
-    await h.add("commenter", 1);
-    await expect(h.change("denied", 2, 4)).resolves.toMatchObject({ status: "COMMITTED" });
-    expect(h.involvedItems()).toEqual([]);
-  });
-
-  it("promoting a commenter to owner writes the row", async () => {
-    const h = harness();
-    await h.add("commenter", 1);
-    expect(h.involvedItems()).toEqual([]);
-    await h.change("owner", 2, 4);
-    expect(h.rowIn(COMPANY_A, WREN_ID)).toMatchObject({ personId: WREN_ID, taskId: TASK_A });
-  });
-
-  it("removing one owner leaves the other owner's row", async () => {
-    const h = harness({ wrenRegistered: true, people: { revision: 3, orphaned: false, people: [GALE("owner"), WREN("owner")] } });
-    h.db.set({ ...h.rowKeyOf(COMPANY_A, WREN_ID), entityType: INVOLVED_ENTITY, companyId: COMPANY_A, personId: WREN_ID, taskId: TASK_A, createdAt: CREATED, addedAt: CREATED });
-    // Gale (the creator) steps down: no row is made for the creator, and Wren's stays.
-    await proposeTaskPeopleRole(h.deps, GALE_CALLER, TASK_A, { requestId: uuid(5), expectedPeopleRevision: 3, personId: P_GALE, role: "commenter" });
-    await confirmTaskPeopleProposal(h.deps, GALE_CALLER, TASK_A, uuid(5));
-    expect(h.rowIn(COMPANY_A, GALE_ID)).toBeUndefined();
-    expect(h.rowIn(COMPANY_A, WREN_ID)).toBeDefined();
-  });
 });
 
 describe("an owner the system demotes (they left the company or lost the project) loses their involved row in the same commit", () => {
@@ -205,25 +121,6 @@ describe("an owner the system demotes (they left the company or lost the project
     return resolveTaskPeopleAccess(h.deps, task, as);
   };
 
-  it("deletes the row when the owner is no longer a member of the task's company (denied), together with the new People revision", async () => {
-    const h = harness();
-    await seedOwners(h);
-    h.leave(WREN_ID);
-    await reconcileNow(h);
-    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ revision: 5, people: [GALE("owner"), WREN("denied")] });
-    expect(h.rowIn(COMPANY_A, WREN_ID)).toBeUndefined();
-    expect(h.involvedItems()).toEqual([]);
-  });
-
-  it("deletes the row when the owner lost the project grant (denied)", async () => {
-    const h = harness();
-    await seedOwners(h);
-    h.loseGrant(WREN_ID);
-    await reconcileNow(h);
-    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ people: [GALE("owner"), WREN("denied")] });
-    expect(h.rowIn(COMPANY_A, WREN_ID)).toBeUndefined();
-  });
-
   it("deletes the row when the owner is eligible but no longer present (commenter)", async () => {
     const h = harness();
     await seedOwners(h);
@@ -235,36 +132,6 @@ describe("an owner the system demotes (they left the company or lost the project
     await reconcileNow(h);
     expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ people: [GALE("owner"), WREN("commenter")] });
     expect(h.rowIn(COMPANY_A, WREN_ID)).toBeUndefined();
-  });
-
-  it("leaves an unrelated person's involved row alone: only the demoted owner's row goes", async () => {
-    const h = harness({ wrenRegistered: true, people: { revision: 3, orphaned: false, people: [GALE("owner"), WREN("owner")] } });
-    const ivyRow = { ...h.rowKeyOf(COMPANY_A, IVY_ID), entityType: INVOLVED_ENTITY, companyId: COMPANY_A, personId: IVY_ID, taskId: TASK_A, createdAt: CREATED, addedAt: CREATED };
-    h.db.set({ ...h.rowKeyOf(COMPANY_A, WREN_ID), entityType: INVOLVED_ENTITY, companyId: COMPANY_A, personId: WREN_ID, taskId: TASK_A, createdAt: CREATED, addedAt: CREATED });
-    h.db.set(ivyRow);
-    h.leave(WREN_ID);
-    await reconcileNow(h);
-    expect(h.rowIn(COMPANY_A, WREN_ID)).toBeUndefined();
-    expect(h.rowIn(COMPANY_A, IVY_ID)).toStrictEqual(ivyRow);
-  });
-
-  it("leaves a different task's row of the same person alone", async () => {
-    const h = harness();
-    await seedOwners(h);
-    const other = { ...involvedRowKey({ companyId: COMPANY_A, personId: WREN_ID, taskId: uuid(99), createdAt: CREATED }), entityType: INVOLVED_ENTITY, companyId: COMPANY_A, personId: WREN_ID, taskId: uuid(99), createdAt: CREATED, addedAt: CREATED };
-    h.db.set(other);
-    h.loseGrant(WREN_ID);
-    await reconcileNow(h);
-    expect(h.rowIn(COMPANY_A, WREN_ID)).toBeUndefined();
-    expect(h.db.get(other.pk, other.sk)).toStrictEqual(other);
-  });
-
-  it("writes no delete when nothing is demoted (the revision does not move, the row stays)", async () => {
-    const h = harness();
-    await seedOwners(h);
-    await reconcileNow(h);
-    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ revision: 4 });
-    expect(h.rowIn(COMPANY_A, WREN_ID)).toBeDefined();
   });
 
   it("deletes nothing when the People write loses its revision race (row and list never disagree)", async () => {
@@ -312,21 +179,6 @@ describe("an owner the system demotes (they left the company or lost the project
     expect(h.involvedItems()).toEqual([]);
   });
 
-  it("never makes a row for the task's own person when they are the one demoted (the other owner's row stays, and no involved item for the creator is in the transaction)", async () => {
-    const h = harness({ wrenRegistered: true, people: { revision: 3, orphaned: false, people: [GALE("owner"), WREN("owner")] } });
-    h.db.set({ ...h.rowKeyOf(COMPANY_A, WREN_ID), entityType: INVOLVED_ENTITY, companyId: COMPANY_A, personId: WREN_ID, taskId: TASK_A, createdAt: CREATED, addedAt: CREATED });
-    const send = h.deps.documentClient.send.bind(h.deps.documentClient);
-    const sent: Array<Record<string, { Key?: { pk: string }; Item?: { pk: string } }>> = [];
-    h.deps.documentClient = { send: async (command: unknown) => { sent.push(...((command as { input?: { TransactItems?: Array<Record<string, never>> } }).input?.TransactItems ?? [])); return send(command); } };
-    h.leave(GALE_ID);
-    await reconcileNow(h, WREN_ID);
-    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ people: [GALE("denied"), WREN("owner")] });
-    expect(sent.length).toBeGreaterThan(0);
-    const partitions = sent.flatMap((item) => Object.values(item).map((op) => op.Key?.pk ?? op.Item?.pk ?? ""));
-    expect(partitions.some((pk) => pk.includes("INVOLVED#"))).toBe(false);
-    expect(h.rowIn(COMPANY_A, GALE_ID)).toBeUndefined();
-    expect(h.rowIn(COMPANY_A, WREN_ID)).toBeDefined();
-  });
 });
 
 describe("a change that does not commit writes no row", () => {
@@ -358,16 +210,6 @@ describe("taking ownership of an ownerless task", () => {
   });
 });
 
-describe("the task's own person", () => {
-  it("never gets a row for their own task, even when they take the ownerless task back", async () => {
-    const h = harness({ people: { revision: 3, orphaned: true, people: [GALE("commenter")] } });
-    await proposeTaskOwnership(h.deps, GALE_CALLER, TASK_A, { requestId: uuid(7), expectedPeopleRevision: 3 });
-    await expect(confirmTaskPeopleProposal(h.deps, GALE_CALLER, TASK_A, uuid(7))).resolves.toMatchObject({ status: "COMMITTED" });
-    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ revision: 4, orphaned: false, people: [GALE("owner")] });
-    expect(h.involvedItems()).toEqual([]);
-  });
-});
-
 describe("the row People writes is the row the readers use", () => {
   /** The stored row, moved into a store the readers can query (the same keys and fields). */
   const readerStore = (h: ReturnType<typeof harness>) => {
@@ -388,16 +230,6 @@ describe("the row People writes is the row the readers use", () => {
 });
 
 describe("the People view says how each person signs in", () => {
-  it("gives each person's sign-in method, read from the stored identity, and nothing else of it", async () => {
-    const h = harness();
-    const committed = await h.add("owner");
-    expect(committed.status).toBe("COMMITTED");
-    const people = (committed as { view: { people: Array<Record<string, unknown>> } }).view.people;
-    expect(people.map((entry) => [entry.name, entry.method])).toEqual([["Gale GitHub", "github"], ["Wren Cloud", "cloud"]]);
-    for (const entry of people) expect(Object.keys(entry).sort()).toEqual(["effectiveRole", "method", "name", "personId", "role", "you"]);
-    expect(JSON.stringify(people)).not.toContain(CLOUD);
-    expect(JSON.stringify(people)).not.toContain("wren-7");
-  });
 
   it("still answers a replay whose stored outcome was written before `method` existed", async () => {
     const h = harness();

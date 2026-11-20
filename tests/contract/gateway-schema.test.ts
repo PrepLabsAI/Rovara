@@ -2,20 +2,6 @@ import { describe, expect, it } from "vitest";
 import { flattenSchema } from "../../packages/gateway/src/index.js";
 
 describe("vendor schema flattening", () => {
-  it("inlines local $defs references and drops the definitions", () => {
-    const result = flattenSchema({
-      type: "object",
-      properties: { team: { $ref: "#/$defs/Team" }, labels: { type: "array", items: { $ref: "#/definitions/Label" } } },
-      required: ["team"],
-      $defs: { Team: { type: "string", description: "Team ID" } },
-      definitions: { Label: { type: "string" } },
-    });
-    expect(result).toEqual({ schema: {
-      type: "object",
-      properties: { team: { type: "string", description: "Team ID" }, labels: { type: "array", items: { type: "string" } } },
-      required: ["team"],
-    } });
-  });
 
   it("merges allOf object parts and lets a $ref's sibling annotations win", () => {
     const result = flattenSchema({
@@ -32,11 +18,6 @@ describe("vendor schema flattening", () => {
     } });
   });
 
-  it("keeps properties named definitions or $defs", () => {
-    const result = flattenSchema({ type: "object", properties: { definitions: { type: "string" }, $defs: { type: "number" } } });
-    expect(result).toEqual({ schema: { type: "object", properties: { definitions: { type: "string" }, $defs: { type: "number" } } } });
-  });
-
   it("refuses recursive, external, unresolvable and conflicting schemas", () => {
     expect(flattenSchema({ type: "object", properties: { node: { $ref: "#/$defs/Node" } }, $defs: { Node: { type: "object", properties: { child: { $ref: "#/$defs/Node" } } } } }))
       .toEqual({ unsupported: "recursive reference #/$defs/Node" });
@@ -48,14 +29,6 @@ describe("vendor schema flattening", () => {
       .toEqual({ unsupported: "conflicting definitions of property a" });
     expect(flattenSchema({ allOf: [{ type: "object" }, { type: "array" }] }))
       .toEqual({ unsupported: "conflicting type" });
-  });
-
-  it("treats the same property defined with keys in a different order as one definition", () => {
-    const result = flattenSchema({ allOf: [
-      { type: "object", properties: { a: { type: "string", description: "A" } } },
-      { type: "object", properties: { a: { description: "A", type: "string" } } },
-    ] });
-    expect(result).toEqual({ schema: { type: "object", properties: { a: { type: "string", description: "A" } } } });
   });
 
   it("resolves references into arrays", () => {
@@ -73,15 +46,6 @@ describe("vendor schema flattening", () => {
   it("refuses a malformed reference instead of throwing", () => {
     expect(flattenSchema({ type: "object", properties: { a: { $ref: "#/$defs/100%" } }, $defs: { "100%": { type: "string" } } }))
       .toEqual({ unsupported: "malformed reference #/$defs/100%" });
-  });
-
-  it("drops identifiers that would repeat once a definition is inlined twice", () => {
-    const result = flattenSchema({
-      type: "object",
-      properties: { a: { $ref: "#/$defs/T" }, b: { $ref: "#/$defs/T" } },
-      $defs: { T: { $id: "https://vendor.test/T", $anchor: "t", type: "string" } },
-    });
-    expect(result).toEqual({ schema: { type: "object", properties: { a: { type: "string" }, b: { type: "string" } } } });
   });
 
   it("refuses a reference graph that expands beyond the size bound", () => {

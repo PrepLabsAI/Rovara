@@ -2,21 +2,10 @@
 // place it maps to, and the teardown guide gives destroy's order and the worker tag guard.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { CONFIG_KEYS } from "../../packages/cli/src/config/keys.js";
 
 const read = (path: string) => readFileSync(path, "utf8");
 
 describe("the guides (FR-054)", () => {
-  it("lists every config key in the day-2 guide, on one table row with where it lives", () => {
-    const rows = read("docs/day-two.md").split("\n").filter((line) => line.startsWith("| `"));
-    for (const entry of CONFIG_KEYS) {
-      const row = rows.find((line) => line.startsWith(`| \`${entry.key}\` |`));
-      expect(row, entry.key).toBeDefined();
-      const place = entry.target.kind === "stack-parameter" ? entry.target.parameter : entry.target.kind === "settings" ? "alertAddress"
-        : entry.target.kind === "chatgpt-setting" ? `CHATGPT.${entry.target.field}` : `WORKSPACE_LIMITS.${entry.target.field}`;
-      expect(row, entry.key).toContain(place);
-    }
-  });
 
   it("gives the teardown order, the three worker tags, and agentx destroy", () => {
     const guide = read("docs/teardown.md");

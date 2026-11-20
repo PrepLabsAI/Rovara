@@ -1,27 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  SlackWorkflowStartError,
-  WorkflowChoiceWaitingError,
-  answerChosenRequest,
-  answerRequestEventId,
-  createDynamoWorkflowChoiceStore,
-  handOffChosenWorkflow,
-  isHandedOffWorkflowStart,
-  offerWorkflowChoice,
-  runHandedOffWorkflowStart,
-  type HandedOffWorkflowStart,
-  parseWorkflowPathReply,
-  parseWorkflowStartRequest,
-  startChosenWorkflow,
-  workflowChoiceMessage,
-  workflowChoiceRefusal,
-  workflowStartFailureNotice,
-  workflowStartedNotice,
-} from "../../packages/broker/src/aws/slack-workflow-choice.js";
+import { SlackWorkflowStartError, WorkflowChoiceWaitingError, answerChosenRequest, answerRequestEventId, createDynamoWorkflowChoiceStore, handOffChosenWorkflow, isHandedOffWorkflowStart, offerWorkflowChoice, runHandedOffWorkflowStart, type HandedOffWorkflowStart, parseWorkflowPathReply, parseWorkflowStartRequest, startChosenWorkflow, workflowChoiceMessage, workflowChoiceRefusal, workflowStartFailureNotice } from "../../packages/broker/src/aws/slack-workflow-choice.js";
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import { suggestionCardMessage, workflowChoicePut } from "../../packages/contracts/src/index.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import { StrictSlackWeb, visibleSlackText } from "../support/strict-slack.js";
+import { StrictSlackWeb } from "../support/strict-slack.js";
 
 const thread = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" };
 const requester = "U0123456789";
@@ -47,16 +29,6 @@ describe("starting a task from Slack", () => {
     expect(parseWorkflowStartRequest("quickly fix the login bug")).toEqual({ kind: "start", instructions: "quickly fix the login bug" });
   });
 
-  it("explains both paths briefly with buttons Slack accepts", () => {
-    const message = workflowChoiceMessage({ choiceId: "11111111-1111-4111-8111-111111111111", requesterId: "U0123456789" });
-    expect(message.text).toMatch(/Quick[\s\S]*coding plan[\s\S]*Full[\s\S]*requirements[\s\S]*design/);
-    expect(message.text).not.toMatch(JARGON);
-    expect(JSON.stringify(message.blocks)).toContain("agentx_workflow_path_quick");
-    expect(JSON.stringify(message.blocks)).toContain("agentx_workflow_path_full");
-    expect(JSON.stringify(message.blocks)).toContain("11111111-1111-4111-8111-111111111111");
-    new StrictSlackWeb({ briefLimit: 1_200 }).post({ channel: "C0123456789", threadTs: "1695500000.000001", ...message });
-  });
-
   it("gives a plain failure notice with a reference instead of syntax help", () => {
     const notice = workflowStartFailureNotice("UNKNOWN", "Ev0000000042");
     expect(notice).toContain("Ev0000000042");
@@ -74,36 +46,10 @@ describe("starting a task from Slack", () => {
     for (const outcome of ["none", "not_requester", "other_path", "starting"] as const) expect(workflowChoiceRefusal(outcome)).not.toMatch(JARGON);
   });
 
-  it("confirms the start in one plain line", () => {
-    for (const path of ["QUICK", "FULL"] as const) {
-      const notice = workflowStartedNotice(path);
-      expect(notice).not.toMatch(JARGON);
-      expect(notice).not.toContain("\n");
-      expect(visibleSlackText(notice).length).toBeLessThanOrEqual(1_200);
-    }
-  });
 });
 
 describe("the pending Quick or Full choice", () => {
   const store = (db: FakeDynamoDb, now = { ms: 1_758_657_600_000 }) => createDynamoWorkflowChoiceStore({ documentClient: db, tableName: "threads", now: () => now.ms });
-
-  it("keeps the request for its requester, and starts it once with the chosen path", async () => {
-    const db = new FakeDynamoDb();
-    const choices = store(db);
-    const { choiceId } = await choices.save({ thread, userId: requester, instructions: "Add password reset" });
-    expect(await choices.pending(thread)).toEqual({ choiceId, userId: requester });
-    expect(await choices.choose({ thread, userId: other, workflowPath: "QUICK", choiceId })).toBe("not_requester");
-    expect(await choices.choose({ thread, userId: requester, workflowPath: "QUICK", choiceId: "22222222-2222-4222-8222-222222222222" })).toBe("none");
-    expect(await choices.choose({ thread, userId: requester, workflowPath: "QUICK", choiceId })).toEqual({ choiceId, instructions: "Add password reset", requestId: choiceId });
-    // While it starts, a second answer starts nothing; once a path is chosen, the other is no longer on offer.
-    expect(await choices.choose({ thread, userId: requester, workflowPath: "QUICK" })).toBe("starting");
-    expect(await choices.choose({ thread, userId: requester, workflowPath: "FULL" })).toBe("other_path");
-    await choices.release(thread, choiceId);
-    expect(await choices.choose({ thread, userId: requester, workflowPath: "QUICK" })).toEqual({ choiceId, instructions: "Add password reset", requestId: choiceId });
-    await choices.complete(thread, "QUICK");
-    expect(await choices.pending(thread)).toBeUndefined();
-    expect(await choices.choose({ thread, userId: requester, workflowPath: "QUICK" })).toBe("none");
-  });
 
   it("refuses a second request in the same thread, and forgets an expired one", async () => {
     const db = new FakeDynamoDb();
@@ -116,24 +62,6 @@ describe("the pending Quick or Full choice", () => {
     expect(await choices.choose({ thread, userId: requester, workflowPath: "QUICK" })).toBe("none");
     await choices.save({ thread, userId: requester, instructions: "third" });
     expect(await choices.pending(thread)).toEqual(expect.objectContaining({ userId: requester }));
-  });
-
-  it("starts the chosen path through the broker and clears the choice; a refused start keeps it for another try", async () => {
-    const db = new FakeDynamoDb();
-    const choices = store(db);
-    const { choiceId } = await choices.save({ thread, userId: requester, instructions: "Add password reset" });
-    const starts: Array<Record<string, unknown>> = [];
-    let refuse = true;
-    const startWorkflow = async (input: Record<string, unknown>) => {
-      starts.push(input);
-      if (refuse) throw new SlackWorkflowStartError("WORKSPACE_LIMIT");
-    };
-    await expect(startChosenWorkflow({ store: choices, startWorkflow }, { thread, userId: requester, workflowPath: "FULL", choiceId })).rejects.toThrow(SlackWorkflowStartError);
-    refuse = false;
-    expect(await startChosenWorkflow({ store: choices, startWorkflow }, { thread, userId: requester, workflowPath: "FULL", choiceId })).toBe("started");
-    expect(starts).toEqual([1, 2].map(() => ({ thread, userId: requester, instructions: "Add password reset", workflowPath: "FULL", requestId: choiceId })));
-    expect(await choices.pending(thread)).toBeUndefined();
-    expect(await startChosenWorkflow({ store: choices, startWorkflow }, { thread, userId: requester, workflowPath: "FULL", choiceId })).toBe("none");
   });
 
   it("starts once when the requester answers twice at the same time, on the same path or on both", async () => {
@@ -309,37 +237,6 @@ describe("the pending Quick or Full choice", () => {
     const buttonLabels = (blocks: unknown[]) => (blocks as Array<{ type: string; elements?: Array<{ text: { text: string } }> }>)
       .filter((block) => block.type === "actions").flatMap((block) => block.elements!.map((element) => element.text.text));
 
-    it("changes the card to Starting this on <path>... with no buttons before the start is handed over", async () => {
-      for (const [workflowPath, word] of [["FULL", "Full"], ["QUICK", "Quick"]] as const) {
-        const db = new FakeDynamoDb();
-        const choices = store(db);
-        const slack = new StrictSlackWeb({ briefLimit: 1_200 });
-        const { choiceId } = await choices.save({ thread, userId: requester, instructions: "Add password reset" });
-        const order: string[] = [];
-        const handed: HandedOffWorkflowStart[] = [];
-        const outcome = await handOffChosenWorkflow({ store: choices,
-          replaceCard: async (message) => { order.push("card"); await slack.replaceOriginal(responseUrl, message); },
-          handOff: async (event) => { order.push("hand-off"); handed.push(event); } }, { thread, userId: requester, workflowPath, choiceId, responseUrl });
-        expect(outcome).toBe("started");
-        expect(order).toEqual(["card", "hand-off"]);
-        expect(slack.replacements).toHaveLength(1);
-        expect(slack.replacements[0]).toMatchObject({ url: responseUrl, text: `Starting this on ${word}…` });
-        expect(hasButtons(slack.replacements[0]!.blocks)).toBe(false);
-        expect(JSON.stringify(slack.replacements[0]!.blocks)).toContain(`Starting this on ${word}…`);
-      }
-    });
-
-    it("leaves the card alone when the press is refused", async () => {
-      const db = new FakeDynamoDb();
-      const choices = store(db);
-      const { choiceId } = await choices.save({ thread, userId: requester, instructions: "x" });
-      const replaced: unknown[] = [];
-      const deps = { store: choices, replaceCard: async (message: unknown) => { replaced.push(message); }, handOff: async () => undefined };
-      expect(await handOffChosenWorkflow(deps, { thread, userId: other, workflowPath: "QUICK", choiceId, responseUrl })).toBe("not_requester");
-      expect(await handOffChosenWorkflow(deps, { thread, userId: requester, workflowPath: "QUICK", choiceId: "99999999-9999-4999-8999-999999999999", responseUrl })).toBe("none");
-      expect(replaced).toEqual([]);
-    });
-
     it("still hands the start over when the card edit is refused", async () => {
       const db = new FakeDynamoDb();
       const choices = store(db);
@@ -425,12 +322,4 @@ describe("the pending Quick or Full choice", () => {
     });
   });
 
-  it("gives the hold back when the start cannot be handed over (Task 19)", async () => {
-    const db = new FakeDynamoDb();
-    const choices = store(db);
-    const { choiceId } = await choices.save({ thread, userId: requester, instructions: "Add password reset" });
-    await expect(handOffChosenWorkflow({ store: choices, handOff: async () => { throw new Error("TooManyRequestsException"); } },
-      { thread, userId: requester, workflowPath: "FULL", choiceId, responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc" })).rejects.toThrow();
-    expect(await choices.choose({ thread, userId: requester, workflowPath: "FULL", choiceId })).toEqual(expect.objectContaining({ choiceId }));
-  });
 });

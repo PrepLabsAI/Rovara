@@ -2,7 +2,7 @@
 // Who: a live owner or admin of the project's company, or an administrator of that project. Never a plain member, never another company (their project looks missing).
 // Preview first: each change has a read that says what it does and the revisions the change must name; a change made against other revisions is refused as stale.
 import { describe, expect, it, vi } from "vitest";
-import { AgentXError, IMPLICIT_COMPANY_ID, ReviewedProjectArchiveOutcomeSchema, ReviewedProjectArchivePreviewSchema, ReviewedProjectRestoreOutcomeSchema, ReviewedProjectRestorePreviewSchema, SLACK_CHANNEL, channelBindingPartition, orgProjectCatalogKey, projectMetaKey, projectRevisionKey } from "@agentx/contracts";
+import { AgentXError, IMPLICIT_COMPANY_ID, ReviewedProjectArchiveOutcomeSchema, ReviewedProjectRestoreOutcomeSchema, SLACK_CHANNEL, channelBindingPartition, orgProjectCatalogKey, projectMetaKey, projectRevisionKey } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
 import { namedCompany, revisionKeyFor } from "../../packages/broker/src/aws/company-layout.js";
@@ -70,15 +70,6 @@ const error = (code: string, message: string) => ({ error: { code, message } });
 const MISSING = { status: 404, body: error("NOT_FOUND", "project not found") };
 
 describe("the archive preview", () => {
-  it("answers the company, status, the revisions a change must name, and what archiving does", async () => {
-    const h = harness(); h.join(ADA, A, "admin"); h.project("alpha", A);
-    const answer = await h.call("GET", P("archive-preview"));
-    expect(answer).toEqual({ status: 200, body: {
-      orgId: A, project: "alpha", status: "active", expectedRevision: 0, expectedProjectRevision: 1, checkedAt: new Date(NOW).toISOString(), access: { actions: ["archive"] },
-      impact: { stopsNewWork: true, stopsRunningTasksAtNextStep: true, linkedSlackChannels: 0, slackChannelsStayLinked: true, deletesNothing: true },
-    } });
-    expect(ReviewedProjectArchivePreviewSchema.parse(answer.body)).toEqual(answer.body);
-  });
 
   it("counts the project's own linked Slack channels only, in the caller's company", async () => {
     const h = harness(); h.join(ADA, IMPLICIT_COMPANY_ID, "owner"); h.join(BEN, A, "owner"); h.project("alpha", undefined); h.project("gamma", A);
@@ -90,24 +81,6 @@ describe("the archive preview", () => {
     expect((await h.call("GET", P("archive-preview", "gamma"))).body).toMatchObject({ orgId: A, impact: { linkedSlackChannels: 0 } });
   });
 
-  it("shows a project user the preview with no action they may take", async () => {
-    const h = harness(); h.join(ADA, A, "member"); h.project("alpha", A); h.grant(ADA, "alpha", "developer");
-    expect(await h.call("GET", P("archive-preview"))).toMatchObject({ status: 200, body: { access: { actions: [] } } });
-    expect(await h.call("GET", P("restore-preview"))).toMatchObject({ status: 200, body: { access: { actions: [] } } });
-  });
-
-  it("answers the restore preview with its own words", async () => {
-    const h = harness(); h.join(ADA, A, "admin"); h.project("alpha", A);
-    expect((await h.call("POST", P("archive"), archiveBody())).status).toBe(200);
-    const answer = await h.call("GET", P("restore-preview"));
-    expect(answer).toEqual({ status: 200, body: {
-      orgId: A, project: "alpha", status: "archived", expectedRevision: 1, expectedProjectRevision: 1, checkedAt: new Date(NOW).toISOString(), prerequisites: "not_required", access: { actions: ["restore"] },
-      impact: { allowsNewWork: true, linkedSlackChannels: 0 },
-    } });
-    expect(ReviewedProjectRestorePreviewSchema.parse(answer.body)).toEqual(answer.body);
-    // An active project offers no restore, an archived one no archive.
-    expect((await h.call("GET", P("archive-preview"))).body).toMatchObject({ status: "archived", access: { actions: [] } });
-  });
 });
 
 describe("who may archive and restore", () => {
@@ -156,13 +129,6 @@ describe("who may archive and restore", () => {
     expect(h.meta(A, "foreign")).toBeUndefined();
   });
 
-  it("an administrator of one project is refused on another project of the same company", async () => {
-    const h = harness(); h.join(ADA, A, "member"); h.project("alpha", A); h.project("beta", A); h.grant(ADA, "alpha", "administrator"); h.grant(ADA, "beta", "developer");
-    expect((await h.call("POST", P("archive", "alpha"), archiveBody())).status).toBe(200);
-    expect(await h.call("POST", P("archive", "beta"), archiveBody())).toEqual({ status: 403, body: error("FORBIDDEN", LIFECYCLE_NOT_ALLOWED) });
-    expect(h.meta(A, "beta")).toBeUndefined();
-  });
-
   it("reads the role live: a demoted admin or a removed member is refused at once", async () => {
     const h = harness(); h.join(ADA, A, "admin"); h.project("alpha", A);
     expect((await h.call("GET", P("archive-preview"))).body).toMatchObject({ access: { actions: ["archive"] } });
@@ -172,24 +138,11 @@ describe("who may archive and restore", () => {
     expect(await h.call("POST", P("archive"), archiveBody())).toMatchObject({ status: 401, body: { error: { code: "AUTH_REQUIRED" } } });
   });
 
-  it("refuses a sign-in client without full access before reading anything", async () => {
-    const h = harness({ fullAccess: false }); h.join(ADA, A, "owner"); h.project("alpha", A);
-    expect(await h.call("POST", P("archive"), archiveBody())).toMatchObject({ status: 403, body: { error: { code: "FORBIDDEN" } } });
-    expect(h.meta(A)).toBeUndefined();
-  });
-
   it("without the company layer every project looks missing, even to its administrator", async () => {
     const h = harness({ companies: false }); h.project("alpha", undefined); h.grant(ADA, "alpha", "administrator");
     expect(await h.call("GET", P("archive-preview"))).toEqual(MISSING);
     expect(await h.call("POST", P("archive"), archiveBody())).toEqual(MISSING);
     expect(h.db.find((item) => String(item.pk).startsWith("ORG#"))).toEqual([]);
-  });
-
-  it("keeps the method table: a preview is read, a change is posted", async () => {
-    const h = harness(); h.join(ADA, A, "owner"); h.project("alpha", A);
-    for (const [method, action] of [["POST", "archive-preview"], ["GET", "archive"], ["POST", "restore-preview"], ["GET", "restore"], ["DELETE", "archive"]] as const) {
-      expect(await h.call(method, P(action), method === "POST" ? archiveBody() : undefined)).toEqual({ status: 404, body: error("NOT_FOUND", "route not found") });
-    }
   });
 
   it("the rule itself: owners, admins and the project's administrators manage; a project user sees; anyone else nothing", () => {
@@ -256,21 +209,6 @@ describe("archiving and restoring", () => {
     expect(await engine.latest("alpha")).toMatchObject({ archived: true });
   });
 
-  it("restores: the engine takes new work again", async () => {
-    const h = harness(); h.join(ADA, A, "member"); h.project("alpha", A); h.grant(ADA, "alpha", "administrator");
-    await h.call("POST", P("archive"), archiveBody());
-    const answer = await h.call("POST", P("restore"), restoreBody());
-    expect(answer).toEqual({ status: 200, body: {
-      receipt: { project: "alpha", status: "active", revision: 2, projectRevision: 1, restoredAt: new Date(NOW).toISOString(), egressReconciliation: "pending" },
-      replayed: false,
-      current: { orgId: A, project: "alpha", status: "active", expectedRevision: 2, expectedProjectRevision: 1, checkedAt: new Date(NOW).toISOString(), prerequisites: "not_required", access: { actions: [] }, impact: { allowsNewWork: true, linkedSlackChannels: 0 } },
-      effects: { egress: "not_attempted" },
-    } });
-    expect(h.meta(A)).toMatchObject({ status: "active", lifecycleRevision: 2, lifecycleChangedBy: ADA });
-    const audits = h.db.find(() => true).filter((item) => String(item.sk).startsWith(lifecycleAuditPrefix));
-    expect(audits.map((row) => [row.action, row.basis, row.fromRevision, row.toRevision])).toEqual(expect.arrayContaining([["archive", "project-admin", 0, 1], ["restore", "project-admin", 1, 2]]));
-  });
-
   it("a repeat of the same request answers the first receipt and changes nothing more", async () => {
     const h = harness(); h.join(ADA, A, "owner"); h.project("alpha", A);
     const first = await h.call("POST", P("archive"), archiveBody());
@@ -285,13 +223,6 @@ describe("archiving and restoring", () => {
     await h.call("POST", P("archive"), archiveBody());
     h.as(BEN, "s-ben");
     expect(await h.call("POST", P("archive"), archiveBody())).toEqual({ status: 409, body: error("CHANGE_STALE", LIFECYCLE_STALE) });
-    expect(await h.call("POST", P("restore"), restoreBody({ requestId: REQUEST }))).toEqual({ status: 409, body: error("CHANGE_STALE", LIFECYCLE_STALE) });
-    expect(h.meta(A)).toMatchObject({ status: "archived", lifecycleRevision: 1 });
-  });
-
-  it("the same person reusing a request id for the other change is refused, not answered with the first receipt", async () => {
-    const h = harness(); h.join(ADA, A, "owner"); h.project("alpha", A);
-    expect((await h.call("POST", P("archive"), archiveBody())).status).toBe(200);
     expect(await h.call("POST", P("restore"), restoreBody({ requestId: REQUEST }))).toEqual({ status: 409, body: error("CHANGE_STALE", LIFECYCLE_STALE) });
     expect(h.meta(A)).toMatchObject({ status: "archived", lifecycleRevision: 1 });
   });
@@ -330,15 +261,6 @@ describe("archiving and restoring", () => {
     expect(await h.call("POST", P("archive"), archiveBody({ requestId: OTHER_REQUEST, expectedProjectRevision: 2, expectedRevision: 1 }))).toEqual(stale); // already archived
   });
 
-  it("two changes at once: exactly one wins, the other is stale", async () => {
-    const h = harness(); h.join(ADA, A, "owner"); h.join(BEN, A, "admin"); h.project("alpha", A);
-    const benCall = async () => { h.as(BEN, "s-ben"); return h.call("POST", P("archive"), archiveBody({ requestId: OTHER_REQUEST })); };
-    const answers = await Promise.all([h.call("POST", P("archive"), archiveBody()), benCall()]);
-    expect(answers.map((answer) => answer.status).sort()).toEqual([200, 409]);
-    expect(h.meta(A)).toMatchObject({ status: "archived", lifecycleRevision: 1 });
-    expect(h.db.find(() => true).filter((item) => String(item.sk).startsWith(lifecycleAuditPrefix))).toHaveLength(1);
-  });
-
   it("refuses unknown fields, a missing acknowledgement and bad values in fixed words that echo nothing", async () => {
     const h = harness(); h.join(ADA, A, "owner"); h.project("alpha", A);
     for (const body of [archiveBody({ extra: CANARY }), archiveBody({ acknowledgeNewWorkStops: false }), archiveBody({ requestId: CANARY }), archiveBody({ expectedRevision: -1 }), archiveBody({ expectedOrgId: CANARY }), `{${CANARY}`, ""]) {
@@ -359,10 +281,4 @@ describe("archiving and restoring", () => {
     }
   });
 
-  it("keeps an earlier row's other fields (a laptop's setup check) when it archives", async () => {
-    const h = harness(); h.join(ADA, A, "owner"); h.project("alpha", A);
-    h.db.set({ ...projectMetaKey(A, "alpha"), entityType: "PROJECT_META", status: "active", setupCheck: { status: "ready" } });
-    expect((await h.call("POST", P("archive"), archiveBody())).status).toBe(200);
-    expect(h.meta(A)).toMatchObject({ status: "archived", lifecycleRevision: 1, setupCheck: { status: "ready" } });
-  });
 });

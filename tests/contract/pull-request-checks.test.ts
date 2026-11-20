@@ -1,14 +1,7 @@
 // Spec 051 Task 5 (FR-008, D-2, D-7/P-2): a remaining regression opens a draft pull request with a checks section, the
 // workspace keeps its latest task report, and with nothing to report the pull request is exactly as before.
 import { randomUUID } from "node:crypto";
-import {
-  AGENTX_PREAMBLE_VERSION,
-  agentxPreambleSha256,
-  checksReplyPrefix,
-  checksSection,
-  type CheckEntry,
-  type CheckReport,
-} from "@agentx/contracts";
+import { AGENTX_PREAMBLE_VERSION, agentxPreambleSha256, checksReplyPrefix, type CheckEntry, type CheckReport } from "@agentx/contracts";
 import { beforeAll, describe, expect, it, type vi } from "vitest";
 import { DRAFT_REFUSED_PULL_REQUEST_NOTE } from "../../packages/broker/src/github-app.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -29,7 +22,6 @@ import {
 const thread = `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000002`;
 const user = "U0123456789";
 const readiness = [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 300 }];
-const attribution = `Requested in Slack thread https://slack.com/archives/${SLACK_CHANNEL}/p1695500000000002 by ${user}.`;
 
 const entry = (overrides: Partial<CheckEntry> = {}): CheckEntry => ({
   id: "readiness:0", label: "npm test (in repo/demo)", source: "project", before: "passed", after: "passed", class: "passing",
@@ -155,52 +147,6 @@ describe("the pull request's checks (spec 051 FR-008)", () => {
     expect(invocation.payload.reportChecks).toBe(true);
   });
 
-  it("does not ask when the project has no readiness checks, so the dispatcher need not ping the worker (M-3)", async () => {
-    const h = await harness({ readiness: [] });
-    const { invocation } = await publish(h);
-    expect(invocation.payload).not.toHaveProperty("reportChecks");
-  });
-
-  // Ruling S (C-1): task 2 sees task 1's failure as already failing, but the pull request is the whole change since
-  // preparation, where the check passed. It must open as a draft.
-  it("opens a draft when task 1 regressed and task 2 reported the check as already failing", async () => {
-    const h = await harness();
-    await completeTask(h, report({ status: "regression", checks: [regression], extraTry: "given" }));
-    const already = entry({ before: "failed", after: "failed", class: "already_failing", output: "1 failed" });
-    const second = report({ checks: [already] });
-    await completeTask(h, second);
-    // The worker judges publish against preparation (Ruling S): passed then, failing now.
-    await publish(h, [regression]);
-    const sent = sentToGitHub(h);
-    expect(sent.draft).toBe(true);
-    expect(sent.body).toBe(`${attribution}\n\n${checksSection([regression], second)}`);
-  });
-
-  // Ruling S (I-1): a workspace prepared before spec 051 has no prepared keys, so its checks have no earlier result.
-  it("opens a draft for a pre-051 workspace whose check fails at publish", async () => {
-    const h = await harness();
-    await publish(h, [entry({ before: "unknown", after: "failed", class: "failing_no_before", output: "1 failed" })]);
-    const sent = sentToGitHub(h);
-    expect(sent.draft).toBe(true);
-    expect(sent.body).toContain("**This pull request is a draft: a check fails at publish.**");
-    expect(sent.body).toContain("unknown → failed, fails now, with no earlier result");
-  });
-
-  it("keeps the developer API's draft default, and appends the section (M-5)", async () => {
-    const h = await harness();
-    const latest = report();
-    await completeTask(h, latest);
-    await publish(h, [entry()], { draft: true });
-    expect(sentToGitHub(h)).toMatchObject({ draft: true, body: `${attribution}\n\n${checksSection([entry()], latest)}` });
-  });
-
-  it("tells the worker whether the pull request opened as a draft (Ruling Z)", async () => {
-    const drafted = await harness();
-    expect(await publishAnswer(drafted, [regression])).toMatchObject({ number: 7, draft: true });
-    const normal = await harness();
-    expect(await publishAnswer(normal, [entry()])).toMatchObject({ number: 7, draft: false });
-  });
-
   // Evaluation fix INTG1: GitHub refuses drafts on a private repository without draft support (GitHub Free); the GitHub client then opens a normal pull request, says so in its
   // result, and the broker tells the worker it is not a draft and records that drafts were refused.
   it("says the pull request is not a draft, and records why, when GitHub refused the draft and a normal pull request opened (INTG1)", async () => {
@@ -211,105 +157,6 @@ describe("the pull request's checks (spec 051 FR-008)", () => {
     const [record] = h.db.find((item) => item.entityType === "PULL_REQUEST");
     expect(record).toMatchObject({ number: 7, draftRefused: true });
     expect(String(record!.body)).toContain(DRAFT_REFUSED_PULL_REQUEST_NOTE);
-  });
-
-  it("tells the truth too when the pull request was found again as a normal one (a lost response or a broker retry), not only when it was just created (I2)", async () => {
-    const h = await harness();
-    h.reconcilePullRequest.mockResolvedValue({ number: 7, url: "https://github.com/example/demo/pull/7", reconciled: true, draftRefused: true });
-    expect(await publishAnswer(h, [regression])).toMatchObject({ number: 7, draft: false });
-    const [record] = h.db.find((item) => item.entityType === "PULL_REQUEST");
-    expect(record).toMatchObject({ number: 7, draftRefused: true });
-  });
-
-  it("records no draft refusal for a pull request that opened as asked", async () => {
-    const h = await harness();
-    expect(await publishAnswer(h, [regression])).toMatchObject({ number: 7, draft: true });
-    const [record] = h.db.find((item) => item.entityType === "PULL_REQUEST");
-    expect(record).not.toHaveProperty("draftRefused");
-    expect(String(record!.body)).not.toContain(DRAFT_REFUSED_PULL_REQUEST_NOTE);
-  });
-
-  it("forces a draft over an explicit draft: false when a check regressed", async () => {
-    const h = await harness();
-    await publish(h, [regression], { draft: false });
-    expect(sentToGitHub(h).draft).toBe(true);
-  });
-
-  it("redacts a secret in a label or output again before it reaches GitHub (M-1)", async () => {
-    const h = await harness();
-    const secret = `ghp_${"a".repeat(36)}`;
-    await publish(h, [entry({ label: `npm test --token ${secret}`, after: "failed", class: "regression", output: `token=${secret}` })]);
-    expect(sentToGitHub(h).body).not.toContain(secret);
-  });
-
-  // P-2 (approved): this publication used to be refused by the worker; it now opens as a draft.
-  it("opens a draft with the section when a publish-time check regressed", async () => {
-    const h = await harness();
-    expect((await publish(h, [regression])).status).toBe(200);
-    const sent = sentToGitHub(h);
-    expect(sent.draft).toBe(true);
-    expect(sent.body).toBe(`${attribution}\n\n${checksSection([regression], undefined)}`);
-    expect(sent.body).toContain("**This pull request is a draft: a check that passed before this change fails now.**");
-    expect(sent.body).toContain("```text\n1 failed\n```");
-    // The record keeps the body GitHub was given.
-    expect(h.db.find((item) => item.entityType === "PULL_REQUEST")[0]).toMatchObject({ body: sent.body });
-  });
-
-  it("opens a draft after a task whose report is a regression, even when publish's checks pass", async () => {
-    const h = await harness();
-    const latest = report({ status: "regression", checks: [regression], extraTry: "given" });
-    await completeTask(h, latest);
-    await publish(h, [entry()]);
-    const sent = sentToGitHub(h);
-    expect(sent.draft).toBe(true);
-    expect(sent.body).toBe(`${attribution}\n\n${checksSection([entry()], latest)}`);
-  });
-
-  it("opens a normal pull request with the section after a verified task", async () => {
-    const h = await harness();
-    const latest = report();
-    await completeTask(h, latest);
-    await publish(h, [entry()]);
-    const sent = sentToGitHub(h);
-    expect(sent).not.toHaveProperty("draft");
-    expect(sent.body).toBe(`${attribution}\n\n${checksSection([entry()], latest)}`);
-    expect(sent.body).toContain("No check that passed before this change fails now.");
-  });
-
-  it("leaves the pull request exactly as before with no report and passing checks (Review Focus 5)", async () => {
-    const h = await harness();
-    await completeTask(h);
-    const { invocation } = await publish(h, [entry()]);
-    expect(sentToGitHub(h)).toStrictEqual({
-      repositoryUrl: "https://github.com/example/demo.git",
-      headBranch: invocation.payload.headBranch,
-      baseBranch: "main",
-      title: "Fix the bug",
-      body: attribution,
-    });
-    // Ruling T: the old worker's task is recorded as sending no report, which adds nothing to the description.
-    expect(latestChecksOf(h)).toMatchObject({ report: { status: "not_verified", reason: "no_report" } });
-  });
-
-  it("leaves it exactly as before for a worker that reports no checks", async () => {
-    const h = await harness();
-    const { invocation } = await publish(h);
-    expect(sentToGitHub(h)).toStrictEqual({
-      repositoryUrl: "https://github.com/example/demo.git",
-      headBranch: invocation.payload.headBranch,
-      baseBranch: "main",
-      title: "Fix the bug",
-      body: attribution,
-    });
-  });
-
-  it("notes a check the last task found already failing, and opens a normal pull request when publish's checks pass", async () => {
-    const h = await harness();
-    await completeTask(h, report({ checks: [entry({ before: "failed", after: "failed", class: "already_failing", output: "lint error" })] }));
-    await publish(h, [entry()]);
-    const sent = sentToGitHub(h);
-    expect(sent).not.toHaveProperty("draft");
-    expect(sent.body).toContain("- `npm test (in repo/demo)`: failed → failed, already failing before this change");
   });
 
   it("says Not verified, and opens a normal pull request, after a task that failed following a verified one (Ruling T)", async () => {
@@ -323,18 +170,6 @@ describe("the pull request's checks (spec 051 FR-008)", () => {
     expect(sent.body).not.toContain("AgentX reran the project's checks:\n- `npm test (in repo/demo)`: passed → passed, passing\n\nAt publish");
   });
 
-  it("keeps the whole description within GitHub's limit", async () => {
-    const h = await harness();
-    const many = Array.from({ length: 64 }, (_, index) => entry({
-      id: `readiness:${index}`, label: `check ${index} ${"y".repeat(1_000)}`, after: "failed", class: "regression", output: "z\n".repeat(39) + "z".repeat(3_900),
-    }));
-    await publish(h, many);
-    const sent = sentToGitHub(h);
-    expect((sent.body as string).length).toBeLessThanOrEqual(65_536);
-    expect(sent.body).toContain("to keep this description within GitHub's limit._");
-    expect(sent.draft).toBe(true);
-  });
-
   it("refuses checks that are not check entries", async () => {
     const h = await harness();
     expect((await publish(h, [{ ...regression, class: "bogus" } as unknown as CheckEntry])).status).toBe(400);
@@ -343,30 +178,8 @@ describe("the pull request's checks (spec 051 FR-008)", () => {
 });
 
 describe("the workspace's latest checks (spec 051, Ruling T)", () => {
-  it("stores the report of a task that succeeded, with its operation and fence", async () => {
-    const h = await harness();
-    const latest = report({ checks: [entry({ output: "q".repeat(10_000) })] });
-    const operationId = await completeTask(h, latest);
-    const stored = latestChecksOf(h)!;
-    expect(stored).toMatchObject({
-      operationId,
-      // Cut to what the section shows, so the workspace record stays small.
-      report: { ...latest, checks: [{ ...latest.checks[0], output: "q".repeat(4_000) }] },
-    });
-    expect(typeof stored.recordedAt).toBe("string");
-    expect(stored.fence).toBe(h.db.get(`WORKSPACE#${h.workspaceId}`, `OPERATION#${operationId}`)!.fence);
-  });
-
-  it("reads a running task as interrupted, so an older report never stands for it", async () => {
-    const h = await harness();
-    await completeTask(h, report());
-    const running = await completeTask(h, undefined, "none");
-    expect(latestChecksOf(h)).toMatchObject({ operationId: running, report: { status: "not_verified", reason: "interrupted" } });
-  });
 
   it.each([
-    ["SUCCEEDED", "no_report"],
-    ["FAILED", "failed"],
     ["CANCELLED", "cancelled"],
   ] as const)("records a %s task without a report as not verified (%s)", async (status, reason) => {
     const h = await harness();
@@ -375,49 +188,6 @@ describe("the workspace's latest checks (spec 051, Ruling T)", () => {
     expect(latestChecksOf(h)).toMatchObject({ operationId, report: { status: "not_verified", reason } });
   });
 
-  it("keeps a failed task's report when it has one", async () => {
-    const h = await harness();
-    const stopped = report({ status: "not_verified", notVerifiedReason: "stopped", source: "none", checks: [] });
-    await completeTask(h, stopped, "FAILED");
-    expect(latestChecksOf(h)).toMatchObject({ report: stopped });
-  });
-
-  it("records a task its cancel ended as cancelled, and one whose cancel failed as interrupted", async () => {
-    for (const [cancelStatus, reason] of [["SUCCEEDED", "cancelled"], ["FAILED", "interrupted"]] as const) {
-      const h = await harness();
-      await completeTask(h, report());
-      const task = await completeTask(h, undefined, "none");
-      const stopped = await h.handler({
-        source: "agentx.slack-ingress", action: "stop-task", userId: user,
-        thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000002" },
-      });
-      const cancelId = (JSON.parse(stopped.body) as { cancelOperationId: string }).cancelOperationId;
-      await finishOperation(h.handler, h.db, h.workspaceId, cancelId, cancelStatus);
-      expect(latestChecksOf(h)).toMatchObject({ operationId: task, report: { status: "not_verified", reason } });
-    }
-  });
-
-  it("keeps the newer report when an older task's result arrives again after it", async () => {
-    const h = await harness();
-    const older = await completeTask(h, report({ status: "regression", checks: [regression] }));
-    const newer = await completeTask(h, report());
-    expect(latestChecksOf(h)).toMatchObject({ operationId: newer, report: { status: "verified" } });
-    // The older task's terminal callback, retried late.
-    await finishOperation(h.handler, h.db, h.workspaceId, older, "SUCCEEDED", { summary: "done", checks: report({ status: "regression", checks: [regression] }) });
-    expect(latestChecksOf(h)).toMatchObject({ operationId: newer, report: { status: "verified" } });
-  });
-
-  it("writes the checks in the terminal transaction, so they land with the result or not at all", async () => {
-    const h = await harness();
-    const sent: string[] = [];
-    const original = h.db.send;
-    h.db.send = async (command) => {
-      sent.push(command.constructor.name);
-      return original(command);
-    };
-    await completeTask(h, report());
-    expect(sent.filter((name) => name === "UpdateCommand")).toHaveLength(0);
-  });
 });
 
 // Ruling Y (C-1): with the agent's own commands there is no preparation baseline to judge publish against, so the
@@ -433,9 +203,6 @@ describe("standing failures across tasks (spec 051 Ruling Y)", () => {
 
   it.each([
     ["runs no tests", agentReport([], { status: "not_verified", notVerifiedReason: "no_checks", source: "none" })],
-    ["reruns the test before editing, so it is already failing", agentReport([agentEntry({ before: "failed", class: "already_failing" })])],
-    ["reruns the test after editing, with no earlier result", agentReport([agentEntry({ before: "unknown", class: "failing_no_before" })])],
-    ["runs a different test that passes", agentReport([agentEntry({ id: "agent:0", label: "pytest -k b", before: "unknown", after: "passed", class: "passing", output: "ok" })])],
   ])("opens a draft listing the earlier regression when task 2 %s (C-1a)", async (_name, second) => {
     const h = await harness({ readiness: [] });
     await completeTask(h, task1());
@@ -453,59 +220,5 @@ describe("standing failures across tasks (spec 051 Ruling Y)", () => {
     expect(checksReplyPrefix([agentReport([], { status: "not_verified", notVerifiedReason: "no_checks", source: "none" })])).not.toContain("Checks passed");
   });
 
-  it("clears the failure when task 2 reruns the test and it now passes, and opens a normal pull request (C-1b)", async () => {
-    const h = await harness({ readiness: [] });
-    await completeTask(h, task1());
-    const fixed = agentReport([agentEntry({ before: "failed", after: "passed", class: "fixed", output: "ok" })]);
-    await completeTask(h, fixed);
-    expect(standingOf(h)).toStrictEqual([]);
-    await publish(h);
-    const sent = sentToGitHub(h);
-    expect(sent).not.toHaveProperty("draft");
-    expect(sent.body).toContain("No check that passed before this change fails now.");
-  });
 
-  it("keeps a regression when the extra turn failed on a model error, because the failed task still reports it (C-1c)", async () => {
-    const h = await harness({ readiness: [] });
-    await completeTask(h, task1(), "FAILED");
-    expect(standingOf(h)).toMatchObject(listed);
-    await completeTask(h, undefined);
-    await publish(h);
-    expect(sentToGitHub(h).draft).toBe(true);
-  });
-
-  it.each([
-    ["a task without a report", async (h: Harness) => { await completeTask(h, undefined, "SUCCEEDED"); }],
-    ["a failed task", async (h: Harness) => { await completeTask(h, undefined, "FAILED"); }],
-    ["a cancelled task", async (h: Harness) => { await completeTask(h, undefined, "CANCELLED"); }],
-    ["a task still running", async (h: Harness) => { await completeTask(h, undefined, "none"); }],
-    ["a task its cancel ended", async (h: Harness) => {
-      await completeTask(h, undefined, "none");
-      const stopped = await h.handler({
-        source: "agentx.slack-ingress", action: "stop-task", userId: user,
-        thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000002" },
-      });
-      await finishOperation(h.handler, h.db, h.workspaceId, (JSON.parse(stopped.body) as { cancelOperationId: string }).cancelOperationId, "SUCCEEDED");
-    }],
-  ])("keeps the earlier failures through %s", async (_name, marker) => {
-    const h = await harness({ readiness: [] });
-    await completeTask(h, task1());
-    await marker(h);
-    expect(standingOf(h)).toMatchObject(listed);
-    expect(latestChecksOf(h)).toMatchObject({ report: { status: "not_verified" } });
-  });
-
-  it("keeps a failure that a later task stopped before rerunning, and clears it only on a pass", async () => {
-    const h = await harness({ readiness: [] });
-    await completeTask(h, task1());
-    await completeTask(h, agentReport([], { status: "not_verified", notVerifiedReason: "stopped", source: "none" }));
-    expect(standingOf(h)).toMatchObject(listed);
-  });
-
-  it("does not let a project check's earlier failure draft a pull request that publish reran and passed", async () => {
-    const h = await harness();
-    await completeTask(h, report({ checks: [entry({ before: "failed", after: "failed", class: "already_failing", output: "lint error" })] }));
-    await publish(h, [entry()]);
-    expect(sentToGitHub(h)).not.toHaveProperty("draft");
-  });
 });

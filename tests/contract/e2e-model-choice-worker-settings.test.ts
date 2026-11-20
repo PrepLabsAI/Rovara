@@ -53,22 +53,6 @@ describe("the session steps' read of the worker settings", () => {
     }
   });
 
-  it("puts the chosen fallback model in the boot user data, and nothing when it is none or absent (MODEL3)", async () => {
-    const { gunzipSync } = await import("node:zlib");
-    const boot = async (extra: Record<string, string>) => { answer({ ...settings, ...extra }); return gunzipSync(Buffer.from((await launch()).userData, "base64")).toString("utf8"); };
-    expect(await boot({ "worker-model-fallback": "us.anthropic.claude-sonnet-4-6" })).toContain("export AGENTX_MODEL_FALLBACK='us.anthropic.claude-sonnet-4-6'");
-    expect(await boot({ "worker-model-fallback": "none" })).not.toContain("AGENTX_MODEL_FALLBACK='");
-    expect(await boot({})).not.toContain("AGENTX_MODEL_FALLBACK='");
-  });
-
-  it("puts no AI navigation model in the worker's boot user data", async () => {
-    answer({ ...settings, "worker-e2e-agent-model": "us.anthropic.claude-haiku-4-5-20251001-v1:0" });
-    const { gunzipSync } = await import("node:zlib");
-    const userData = gunzipSync(Buffer.from((await launch()).userData, "base64")).toString("utf8");
-    expect(userData).not.toContain("claude-haiku-4-5");
-    expect(userData).not.toMatch(/E2E_AGENT_MODEL|E2E_MODEL/);
-  });
-
   it("gives the boot script no variable for it: user data has almost no headroom, and the worker never reads the model from its boot environment", () => {
     const boot = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
     expect(boot).not.toMatch(/E2E_AGENT_MODEL|E2E_MODEL|e2eAgentModel|worker-e2e-agent-model/);

@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { WorkflowSnapshot } from "@agentx/contracts";
 import { getTaskDocumentView } from "../../packages/broker/src/aws/developer-tasks.js";
 import { runPlanEvidenceJob, type PlanEvidenceRunDependencies } from "../../packages/broker/src/aws/plan-evidence-handler.js";
-import { PLAN_EVIDENCE_EVENT_SOURCE, planEvidenceDueKey } from "../../packages/broker/src/developer/plan-evidence-jobs.js";
+import { PLAN_EVIDENCE_EVENT_SOURCE } from "../../packages/broker/src/developer/plan-evidence-jobs.js";
 import { MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
@@ -69,36 +69,6 @@ describe("the PlanEvidence job", () => {
     expect(view.documents[0]).toMatchObject({ evidence: { excerpts: [{ status: "ok", lines: ["two", "three"] }] } });
   });
 
-  it("schedules the next attempt after a GitHub failure: 1, 2, 4 then 8 minutes, moving the row's index key with it", async () => {
-    const harness = await jobBroker();
-    const { taskId, artifact } = await plannedTask(harness);
-    const time = clock(rows(harness)[0]!.nextAttemptAt + 1_000);
-    const event = { taskId, artifactId: artifact.id };
-    for (const [attempts, minutes] of [[1, 1], [2, 2], [3, 4], [4, 8]] as const) {
-      expect(await runPlanEvidenceJob(jobDeps(harness, down, time.now), event)).toBe("retry");
-      const [row] = rows(harness);
-      expect(row).toMatchObject({ attempts, nextAttemptAt: time.state.t + minutes * MINUTE, dispatchDueSk: `${planEvidenceDueKey(time.state.t + minutes * MINUTE)}#${taskId}#${artifact.id}` });
-      expect(pointerOf(harness, taskId, artifact.id)).toBeUndefined();
-      time.state.t = row!.nextAttemptAt;
-    }
-  });
-
-  it("attaches a final bundle on the fifth attempt, unresolved places unavailable, and deletes the row", async () => {
-    const harness = await jobBroker();
-    const { taskId, artifact } = await plannedTask(harness, ["repo/demo/src/charge.ts", "repo/demo/src/missing.ts"]);
-    // The first file is read on the last attempt; the second is not in the repository at all.
-    const reads: string[] = [];
-    const getFile: GetFile = async (_url, path) => { reads.push(path); if (path === "src/missing.ts") return undefined; throw new Error("GitHub is down"); };
-    const row = rows(harness)[0]!;
-    harness.db.set({ ...row, attempts: 4, nextAttemptAt: row.nextAttemptAt - 1 });
-    expect(await runPlanEvidenceJob(jobDeps(harness, getFile), { taskId, artifactId: artifact.id })).toBe("attached");
-    expect(bundleOf(harness, taskId, artifact.id).excerpts).toEqual([
-      expect.objectContaining({ claimId: "1", status: "unavailable" }),
-      expect.objectContaining({ claimId: "2", status: "not_found", commit: "e".repeat(40) }),
-    ]);
-    expect(rows(harness)).toEqual([]);
-  });
-
   it("counts a thrown error as an attempt", async () => {
     const harness = await jobBroker();
     const { taskId, artifact } = await plannedTask(harness);
@@ -161,20 +131,6 @@ describe("the PlanEvidence job", () => {
     expect(pointerOf(harness, taskId, artifact.id)).toBeUndefined();
   });
 
-  it("never reads GitHub a sixth time: however many times the row is run, it reads at most five", async () => {
-    const harness = await jobBroker();
-    const { taskId, artifact } = await plannedTask(harness);
-    const getFile = vi.fn<GetFile>(down);
-    const time = clock(rows(harness)[0]!.nextAttemptAt + 1_000);
-    for (let run = 0; run < 8; run += 1) {
-      await runPlanEvidenceJob(jobDeps(harness, getFile, time.now), { taskId, artifactId: artifact.id });
-      time.state.t += 10 * MINUTE;
-    }
-    expect(getFile).toHaveBeenCalledTimes(5);
-    expect(rows(harness)).toEqual([]);
-    allUnavailable(harness, taskId, artifact.id);
-  });
-
   it("does not run a row that is not due or that another run holds, and two concurrent invocations read once", async () => {
     const harness = await jobBroker();
     const { taskId, artifact } = await plannedTask(harness);
@@ -193,33 +149,6 @@ describe("the PlanEvidence job", () => {
     expect([...outcomes].sort()).toEqual(["attached", "busy"]);
     expect(getFileAtCommit).toHaveBeenCalledTimes(1);
     expect(rows(harness)).toEqual([]);
-  });
-
-  it("holds a running row for longer than the Lambda can run, so the sweep leaves it alone", async () => {
-    const harness = await jobBroker();
-    const { taskId, artifact } = await plannedTask(harness);
-    const time = clock(rows(harness)[0]!.nextAttemptAt + 1_000);
-    let during: Row | undefined;
-    await runPlanEvidenceJob(jobDeps(harness, async () => { during = rows(harness)[0]; return FILE; }, time.now), { taskId, artifactId: artifact.id });
-    expect(during).toMatchObject({ attempts: 1 });
-    expect(during!.nextAttemptAt).toBeGreaterThan(time.state.t + 150_000);
-    expect(during!.dispatchDueSk.startsWith(planEvidenceDueKey(during!.nextAttemptAt))).toBe(true);
-  });
-
-  it("gives each file read what is left of the 120 second limit, and at most 30 seconds", async () => {
-    const harness = await jobBroker();
-    const paths = ["a", "b", "c", "d", "e"].map((name) => `repo/demo/src/${name}.ts`);
-    const { taskId, artifact } = await plannedTask(harness, paths);
-    const time = clock(rows(harness)[0]!.nextAttemptAt + 1_000);
-    const timeouts: number[] = [];
-    await runPlanEvidenceJob(jobDeps(harness, async (_url, _path, _commit, options) => {
-      timeouts.push(options.timeoutMs ?? -1);
-      // The first read takes 100 seconds, so the rest have 20 seconds left.
-      if (timeouts.length === 1) time.state.t += 100_000;
-      return FILE;
-    }, time.now), { taskId, artifactId: artifact.id });
-    expect(timeouts[0]).toBe(30_000);
-    expect(timeouts.slice(1)).toEqual([20_000, 20_000, 20_000, 20_000]);
   });
 
   it("deletes the row and attaches nothing for a closed task, a missing or replaced plan, or evidence already attached", async () => {
@@ -250,13 +179,6 @@ describe("the PlanEvidence job", () => {
     expect(await runPlanEvidenceJob(jobDeps(harness, attached), { taskId, artifactId: artifact.id })).toBe("no_job");
   });
 
-  it("logs a retry with the error's name and no plan text", async () => {
-    const harness = await jobBroker();
-    const { taskId, artifact } = await plannedTask(harness);
-    const lines: Array<Record<string, unknown>> = [];
-    await runPlanEvidenceJob(jobDeps(harness, down, Date.now, { log: (entry) => lines.push(entry) }), { taskId, artifactId: artifact.id });
-    expect(lines).toEqual([{ event: "plan_evidence.retry", taskId, artifactId: artifact.id, attempt: 1, reason: "unavailable" }]);
-  });
 });
 
 describe("a deployment with no PlanEvidence function", () => {
@@ -277,42 +199,9 @@ describe("a deployment with no PlanEvidence function", () => {
     expect(view.documents[0]).toMatchObject({ evidence: { excerpts: [{ status: "ok", lines: ["two", "three"] }] } });
   });
 
-  it("stores the plan with its places unavailable when GitHub cannot be read, and still leaves no job row", async () => {
-    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: { getFileAtCommit: down } } });
-    const { taskId, artifact } = await plannedTask(harness);
-    expect(taskRecord(harness, taskId).workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
-    expect(rows(harness)).toEqual([]);
-    expect(bundleOf(harness, taskId, artifact.id).excerpts).toEqual([expect.objectContaining({ claimId: "1", status: "unavailable" })]);
-  });
-
-  it("reads nothing in the callback when the evidence job is configured", async () => {
-    const getFileAtCommit = vi.fn(async () => FILE);
-    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { startPlanEvidenceJob: async () => undefined, githubPullRequests: { getFileAtCommit } } });
-    const { taskId, artifact } = await plannedTask(harness);
-    expect(getFileAtCommit).not.toHaveBeenCalled();
-    expect(pointerOf(harness, taskId, artifact.id)).toBeUndefined();
-    expect(rows(harness)).toHaveLength(1);
-  });
 });
 
 describe("starting the PlanEvidence job from the broker", () => {
-  it("starts the job once, with the task and artifact, right after the plan commits; no job for a plan that cites no code", async () => {
-    const start = vi.fn(async () => undefined);
-    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { startPlanEvidenceJob: start } });
-    const { taskId, artifact } = await plannedTask(harness);
-    expect(start.mock.calls).toEqual([[{ source: PLAN_EVIDENCE_EVENT_SOURCE, taskId, artifactId: artifact.id }]]);
-    const none = vi.fn(async () => undefined);
-    const quiet = await createSingleAnswerPlanBroker({ brokerExtra: { startPlanEvidenceJob: none } });
-    const started = await quiet.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Retry failed payments", client: "test-client", workflow: true, workflowPath: "QUICK" });
-    const quietTask = String((started.body.task as { taskId: string }).taskId);
-    const workspaceId = String(taskRecord(quiet, quietTask).workspaceId);
-    await quiet.finish(workspaceId, String(operations(quiet, workspaceId).find((item) => item.kind === "prepare")?.id), "SUCCEEDED", PREPARED);
-    const active = operations(quiet, workspaceId).find((item) => item.workflowMode === "PLAN" && item.status === "ACCEPTED")!;
-    await quiet.artifact(workspaceId, String(active.id), "plan.md", planAnswer(planDocument({ claims: [{ id: "1", text: "A claim." }], decisions: [] })));
-    await quiet.finish(workspaceId, String(active.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
-    expect(taskRecord(quiet, quietTask).workflow).toMatchObject({ stage: "PLAN_REVIEW" });
-    expect(none).not.toHaveBeenCalled();
-  });
 
   it("still stores the plan when the job cannot be started, and the recovery sweep starts the row later", async () => {
     const start = vi.fn<() => Promise<void>>(async () => { throw new Error("lambda unavailable"); });
@@ -334,22 +223,4 @@ describe("starting the PlanEvidence job from the broker", () => {
     }
   });
 
-  it("sweeps due rows only: a row waiting out a backoff or held by a running job is left alone, and at most 25 are started", async () => {
-    const start = vi.fn(async () => undefined);
-    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { startPlanEvidenceJob: start } });
-    const row = (n: number, at: number) => ({ pk: "PLAN_EVIDENCE", sk: `t${n}#a${n}`, entityType: "PLAN_EVIDENCE", taskId: `t${n}`, artifactId: `a${n}`, artifactSha256: "b".repeat(64), attempts: 0,
-      nextAttemptAt: at, dispatchDuePk: "PLAN_EVIDENCE", dispatchDueSk: `${planEvidenceDueKey(at)}#t${n}#a${n}` });
-    const now = Date.now();
-    harness.db.set(row(1, now - 5_000));
-    harness.db.set(row(2, now + 60_000));
-    harness.db.set(row(3, now + 180_000));
-    const sweep = async () => JSON.parse((await harness.handler({ source: "agentx.workflow-dispatch-recovery" })).body) as { planEvidence: { attempted: number; started: number } };
-    expect(await sweep()).toMatchObject({ planEvidence: { attempted: 1, started: 1 } });
-    expect(start.mock.calls).toEqual([[{ source: PLAN_EVIDENCE_EVENT_SOURCE, taskId: "t1", artifactId: "a1" }]]);
-    // Dispatch rows share the index under their own partition and are never read as evidence rows.
-    start.mockClear();
-    for (let n = 10; n < 45; n += 1) harness.db.set(row(n, now - 10_000 + n));
-    expect((await sweep()).planEvidence).toEqual({ attempted: 25, started: 25 });
-    expect(start).toHaveBeenCalledTimes(25);
-  });
 });

@@ -2,7 +2,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { LIGHT_CRITIC_PROMPT_ID, REVIEWER_ROLES, ReviewerRunSchema, readDesignMerge, readDesignResolve, readDesignReview } from "../../packages/contracts/src/index.js";
+import { REVIEWER_ROLES, ReviewerRunSchema, readDesignMerge, readDesignResolve, readDesignReview } from "../../packages/contracts/src/index.js";
 import { ALL_DESIGN_REVIEW_PROMPTS, CRITIC_LIGHT_PROMPT, MATERIAL_MARKER, MERGE_PROMPT, REVIEWER_PROMPTS, promptDigest, promptRecord, reviewerPromptFor } from "../../packages/broker/src/core/design-review/prompts/index.js";
 
 const root = process.cwd();
@@ -11,13 +11,6 @@ const HEADER = /^\/\/ Adapted from the Elephant-Goldfish Model \(github\.com\/go
 const ATTRIBUTION_FILES = ["common.ts", "comprehension.ts", "critic.ts", "critic-light.ts", "critic-b.ts", "codebase.ts", "zoom-out.ts", "merge.ts", "resolve.ts"];
 
 describe("design review prompts", () => {
-  it("has one prompt per reviewer role, plus the Light Critic variant, the merge and resolve steps, with unique ids and a version", () => {
-    expect(Object.keys(REVIEWER_PROMPTS).sort()).toEqual([...REVIEWER_ROLES].sort());
-    const ids = ALL_DESIGN_REVIEW_PROMPTS.map((prompt) => prompt.id);
-    expect(new Set(ids).size).toBe(ids.length);
-    expect(ALL_DESIGN_REVIEW_PROMPTS).toHaveLength(REVIEWER_ROLES.length + 3);
-    for (const prompt of ALL_DESIGN_REVIEW_PROMPTS) expect(prompt.version).toBeGreaterThanOrEqual(1);
-  });
 
   it("computes digests in code: stable, 64 hex, different per prompt, and moved by any change to the text, id or version", () => {
     const digests = ALL_DESIGN_REVIEW_PROMPTS.map(promptDigest);
@@ -51,33 +44,6 @@ describe("design review prompts", () => {
     }
   });
 
-  it("describes the output block each role is read with, and the template sections", () => {
-    for (const role of REVIEWER_ROLES) {
-      const text = REVIEWER_PROMPTS[role].text;
-      expect(text, role).toContain("```rovara-design-review");
-      expect(text, role).toContain("At most 15 findings");
-      expect(text, role).toContain("§8 Sources");
-      expect(text, role).toContain("1 to 5");
-      expect(text.includes('"paraphrase"'), role).toBe(role === "comprehension");
-    }
-    // minor 7: the Light tier's Critic is the one critic whose prompt asks for the comprehension paraphrase
-    expect(CRITIC_LIGHT_PROMPT.text).toContain('"paraphrase"');
-    expect(CRITIC_LIGHT_PROMPT.text).toContain("FIRST, THE PARAPHRASE");
-    expect(CRITIC_LIGHT_PROMPT.text).toContain("At most 15 findings");
-    expect(CRITIC_LIGHT_PROMPT.text).toContain("Lens 2, what is more than needed");
-    expect(CRITIC_LIGHT_PROMPT.id).toBe(LIGHT_CRITIC_PROMPT_ID);
-    expect(MERGE_PROMPT.text).toContain("```rovara-design-merge");
-    expect(ALL_DESIGN_REVIEW_PROMPTS.find((prompt) => prompt.id === "design-review-resolve")!.text).toContain("```rovara-design-resolve");
-  });
-
-  it("rule 3 names the frames, and the merge prompt asks for one section and a top finding's own words", () => {
-    for (const prompt of ALL_DESIGN_REVIEW_PROMPTS) for (const tag of ["source-file", "source-result", "request-information"]) expect(prompt.text, `${prompt.id} ${tag}`).toContain(`<${tag}`);
-    expect(MERGE_PROMPT.text).toContain("Only findings of the same section can share a group");
-    expect(MERGE_PROMPT.text).toContain("copied word for word");
-    // each prompt's version was raised when its text changed, so the recorded digest is a new one
-    for (const prompt of ALL_DESIGN_REVIEW_PROMPTS.filter((entry) => entry.id !== LIGHT_CRITIC_PROMPT_ID)) expect(prompt.version, prompt.id).toBeGreaterThanOrEqual(2);
-  });
-
   it("the example blocks in the prompts are readable by the readers", () => {
     const example = (text: string, info: string): string => {
       const match = new RegExp("```" + info + "\\n(.*)\\n```").exec(text);
@@ -90,14 +56,6 @@ describe("design review prompts", () => {
     expect(readDesignMerge(example(MERGE_PROMPT.text, "rovara-design-merge"))).toMatchObject({ ok: true });
     const resolve = ALL_DESIGN_REVIEW_PROMPTS.find((prompt) => prompt.id === "design-review-resolve")!;
     expect(readDesignResolve(example(resolve.text, "rovara-design-resolve"), ["m1", "m2", "m3"])).toMatchObject({ ok: true });
-  });
-
-  it("names no Google or EGM product in anything a person or a model can read: only the attribution files and notices do", () => {
-    const names = /goldfish|elephant|\begm\b|google|gemini/iu;
-    for (const prompt of ALL_DESIGN_REVIEW_PROMPTS) {
-      expect(prompt.text, prompt.id).not.toMatch(names);
-      expect(prompt.id, prompt.id).not.toMatch(names);
-    }
   });
 
   it("carries the attribution header in every adapted prompt file", async () => {

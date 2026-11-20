@@ -97,13 +97,6 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     }
   });
 
-  it("writes back a refresh token Asana rotated during the test read", async () => {
-    const secrets = memoryInitSecrets();
-    const base = input({ secrets, vendors: fakeVendors({ asanaProject: { name: "Payments" }, asanaRotates: "refresh-2" }), script: [CLIENT_ID, SECRET, BOT, GID] });
-    await addAsana({ ...base, services: { ...base.services, authorize: fakeAuthorize().authorize, authorizeSecrets: authorizeSecretsOver(secrets) } });
-    expect(JSON.parse(secrets.values.get(SECRET_NAME)!)).toEqual({ clientId: CLIENT_ID, clientSecret: SECRET, refreshToken: "refresh-2" });
-  });
-
   it("writes a rotated refresh token back before the project read, so a failed read still leaves the live token stored", async () => {
     const plane = fakeControlPlane();
     const secrets = memoryInitSecrets();
@@ -111,22 +104,6 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     await expect(addAsana(withAuthorize(base, secrets))).rejects.toThrow(/cannot see, or could not read, project/);
     expect((JSON.parse(secrets.values.get(SECRET_NAME)!) as { refreshToken?: string }).refreshToken).toBe("refresh-2");
     expect(plane.registered).toEqual([]);
-  });
-
-  it("refuses when the bot cannot see, or could not read, the project, before saving the revision", async () => {
-    const plane = fakeControlPlane();
-    const secrets = memoryInitSecrets();
-    const base = input({ plane, secrets, vendors: fakeVendors({ asanaProject: undefined }), script: [CLIENT_ID, SECRET, BOT, GID] });
-    await expect(addAsana({ ...base, services: { ...base.services, authorize: fakeAuthorize().authorize, authorizeSecrets: authorizeSecretsOver(secrets) } }))
-      .rejects.toThrow(`the bot cannot see, or could not read, project ${GID}; invite it to the project (${BOT}, as a guest with Editor access: docs/connectors/asana.md, Step 1) or try again: agentx --env staging connector add asana --project payments-api`);
-    expect(plane.registered).toEqual([]);
-  });
-
-  it("passes on the refusal of a sign-in by the wrong account (FR-037)", async () => {
-    const secrets = memoryInitSecrets();
-    const base = input({ secrets, script: [CLIENT_ID, SECRET, BOT, GID] });
-    await expect(addAsana({ ...base, services: { ...base.services, authorize: fakeAuthorize("owner@example.com").authorize, authorizeSecrets: authorizeSecretsOver(secrets) } }))
-      .rejects.toThrow("the sign-in was for owner@example.com, not agentx-bot@example.com");
   });
 
   it("with the real sign-in, refuses another Asana account before a refresh token is stored or the credential registered, and closes the listener", async () => {
@@ -191,26 +168,6 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
       const run = addAsana({ ...base, services: { ...base.services, fetch: fetchImplementation, authorize, authorizeSecrets: authorizeSecretsOver(secrets) } });
       return { run, secrets, plane };
     }
-
-    it("leaves the stored secret byte-identical when the sign-in is by another account", async () => {
-      const { run, secrets, plane } = await rerun({ callback: (state) => `code=code-1&state=${state}`, email: "owner@example.com" });
-      await expect(run).rejects.toThrow("not agentx-bot@example.com; nothing was stored or registered");
-      expect(secrets.values.get(SECRET_NAME)).toBe(EXISTING);
-      expect(plane.registered).toEqual([]);
-    });
-
-    it("leaves the stored secret byte-identical when the sign-in is cancelled", async () => {
-      const { run, secrets, plane } = await rerun({ callback: (state) => `error=access_denied&state=${state}`, email: BOT });
-      await expect(run).rejects.toThrow("the sign-in was refused or cancelled (access_denied); nothing was stored");
-      expect(secrets.values.get(SECRET_NAME)).toBe(EXISTING);
-      expect(plane.registered).toEqual([]);
-    });
-
-    it("replaces the whole secret, with the new client, once the bot's new sign-in succeeds", async () => {
-      const { run, secrets } = await rerun({ callback: (state) => `code=code-1&state=${state}`, email: BOT });
-      expect(await run).toEqual({ ref: "asana", revision: 2 });
-      expect(JSON.parse(secrets.values.get(SECRET_NAME)!)).toEqual({ clientId: CLIENT_ID, clientSecret: SECRET, refreshToken: "refresh-new" });
-    });
 
     it("after a first run whose sign-in failed (a client-only secret), a successful rerun stores the client and the refresh token", async () => {
       const secrets = memoryInitSecrets();

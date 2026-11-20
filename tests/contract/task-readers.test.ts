@@ -77,18 +77,6 @@ describe("sharing a task with a reader (spec 067)", () => {
     }
   });
 
-  it("writes nothing when a reader reads", async () => {
-    const { db, path, share, dev } = await mayasTask();
-    grantProject(db, OMAR);
-    await share();
-    const writes: unknown[] = [];
-    const stop = db.onWrite((change) => { writes.push(change); });
-    await dev(OMAR, "GET", path);
-    await dev(OMAR, "GET", `${path}/events`);
-    stop();
-    expect(writes).toEqual([]);
-  });
-
   it("ends a reader's access when they leave the project or the owner unshares", async () => {
     const { db, taskId, path, share, unshare, readers, dev } = await mayasTask();
     grantProject(db, OMAR);

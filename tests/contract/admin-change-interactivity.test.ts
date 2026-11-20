@@ -25,16 +25,6 @@ function event(actionId: string, value = CHANGE, now = Date.now(), channel = "D0
 }
 
 describe("an admin change press (E14)", () => {
-  it("hands a Confirm press to the broker, answers the presser, and logs the change's trace ID", async () => {
-    const press = vi.fn(async () => undefined);
-    const respondEphemeral = vi.fn(async () => undefined);
-    const log = vi.fn();
-    const handler = createSlackInteractivityHandler({ secrets: async () => ({ signingSecret: SIGNING, botToken: "xoxb-1" }), handlers: [], respondEphemeral, log, adminChange: { press, traceOf: async () => "trace-7" } });
-    expect((await handler(event("agentx_admin_change_confirm") as never)).statusCode).toBe(200);
-    expect(press).toHaveBeenCalledWith({ changeId: CHANGE, click: "confirm", slackUserId: "U0ADA00001", teamId: "T0BSHLLUGBD" });
-    expect(respondEphemeral).toHaveBeenCalledWith("https://hooks.slack.com/actions/T/1/abc", ADMIN_CHANGE_RECEIVED_TEXT);
-    expect(log).toHaveBeenCalledWith("admin_change.press_received", { changeId: CHANGE, traceId: "trace-7", click: "confirm" });
-  });
 
   it("tells the presser to try again when the hand-over fails, and ignores a press with no change ID", async () => {
     const respondEphemeral = vi.fn(async () => undefined);

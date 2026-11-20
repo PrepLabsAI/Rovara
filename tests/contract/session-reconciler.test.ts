@@ -117,15 +117,6 @@ describe("reconciler: instances", () => {
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
   });
 
-  it("terminates a READY session's stopped instance and treats it as lost", async () => {
-    const lost = ready();
-    const { db, state, reconcile, terminate } = setup();
-    const workspaceId = seedSession(db, "READY", lost);
-    state.instances = [{ instanceId: lost.instanceId, state: "stopped", workspaceId, launchedAt: minutesAgo(60) }];
-    expect((await reconcile()).lostInstances).toEqual([lost.instanceId]);
-    expect(terminate).toHaveBeenCalledWith(lost.instanceId);
-  });
-
   it("replaces a worker after three consecutive failed probes, and forgets failures after a good one", async () => {
     const worker = ready();
     let healthy = false;
@@ -197,21 +188,6 @@ describe("reconciler: workers on another AMI than the qualified one (AUTOREQUALI
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerRecycledStaleAmi: 1 }));
   });
 
-  it("recycles per worker: only the one on another AMI", async () => {
-    const harness = setup({ qualifiedWorkerAmi: async () => PINNED });
-    const stale = { ...ready(), lastActivityAt: minutesAgo(10) };
-    const current = { ...ready(), lastActivityAt: minutesAgo(10) };
-    const staleWorkspace = seedSession(harness.db, "READY", stale);
-    const currentWorkspace = seedSession(harness.db, "READY", { ...current, privateIp: "10.42.128.11" });
-    harness.state.instances = [
-      { instanceId: stale.instanceId, state: "running", workspaceId: staleWorkspace, launchedAt: minutesAgo(60), imageId: STALE },
-      { instanceId: current.instanceId, state: "running", workspaceId: currentWorkspace, launchedAt: minutesAgo(60), imageId: PINNED },
-    ];
-    expect((await harness.reconcile()).recycledStaleAmi).toEqual([staleWorkspace]);
-    expect(sessionOf(harness.db, staleWorkspace)).toMatchObject({ state: "STOPPING" });
-    expect(sessionOf(harness.db, currentWorkspace)).toMatchObject({ state: "READY" });
-  });
-
   const cases: Array<[string, string | undefined, () => Promise<string | undefined>]> = [
     ["is on the pinned AMI", PINNED, async () => PINNED],
     ["has no pin yet (before the first automatic requalification)", STALE, async () => undefined],
@@ -224,44 +200,8 @@ describe("reconciler: workers on another AMI than the qualified one (AUTOREQUALI
     expect(sessionOf(db, workspaceId)).toMatchObject({ state: "READY" });
   });
 
-  it("waits until the worker has been idle for 5 minutes, like the reaper, so a warm worker is not cold-started mid-session", async () => {
-    const recent = readyWorker({ qualifiedWorkerAmi: async () => PINNED }, STALE, {}, { lastActivityAt: minutesAgo(4) });
-    expect((await recent.reconcile()).recycledStaleAmi).toEqual([]);
-    expect(sessionOf(recent.db, recent.workspaceId)).toMatchObject({ state: "READY" });
-
-    const settled = readyWorker({ qualifiedWorkerAmi: async () => PINNED }, STALE, {}, { lastActivityAt: minutesAgo(6) });
-    expect((await settled.reconcile()).recycledStaleAmi).toEqual([settled.workspaceId]);
-  });
-
-  it("rolls a renewal gradually: at most 2 idle workers per run, the rest on the next runs", async () => {
-    const harness = setup({ qualifiedWorkerAmi: async () => PINNED });
-    const workspaces: string[] = [];
-    harness.state.instances = [];
-    for (let index = 0; index < 5; index += 1) {
-      const worker = { ...ready(), lastActivityAt: minutesAgo(10), privateIp: `10.42.128.${10 + index}` };
-      const workspaceId = seedSession(harness.db, "READY", worker);
-      workspaces.push(workspaceId);
-      harness.state.instances.push({ instanceId: worker.instanceId, state: "running", workspaceId, launchedAt: minutesAgo(60), imageId: STALE });
-    }
-    const stoppingNow = () => workspaces.filter((id) => sessionOf(harness.db, id).state === "STOPPING");
-    const first = await harness.reconcile();
-    expect(first.recycledStaleAmi).toHaveLength(2);
-    expect(stoppingNow()).toHaveLength(2);
-    expect(harness.emit).toHaveBeenLastCalledWith(expect.objectContaining({ ReconcilerRecycledStaleAmi: 2 }));
-    // The two stopped workers' instances leave (as after the reaper's terminate); the rest wait their turn.
-    harness.state.instances = harness.state.instances.filter((instance) => !stoppingNow().includes(instance.workspaceId!));
-    expect((await harness.reconcile()).recycledStaleAmi).toHaveLength(2);
-    expect(workspaces.filter((id) => sessionOf(harness.db, id).state === "STOPPING")).toHaveLength(4);
-  });
-
   it("never touches a worker that reports busy, however stale its AMI", async () => {
     const { db, reconcile, workspaceId } = readyWorker({ qualifiedWorkerAmi: async () => PINNED, ping: async () => "HealthyBusy" }, STALE);
-    expect((await reconcile()).recycledStaleAmi).toEqual([]);
-    expect(sessionOf(db, workspaceId)).toMatchObject({ state: "READY" });
-  });
-
-  it("never touches a worker that cannot be probed (the unresponsive path owns it)", async () => {
-    const { db, reconcile, workspaceId } = readyWorker({ qualifiedWorkerAmi: async () => PINNED, ping: async () => { throw new Error("timeout"); } }, STALE);
     expect((await reconcile()).recycledStaleAmi).toEqual([]);
     expect(sessionOf(db, workspaceId)).toMatchObject({ state: "READY" });
   });
@@ -274,15 +214,6 @@ describe("reconciler: workers on another AMI than the qualified one (AUTOREQUALI
     const parked = readyWorker({ qualifiedWorkerAmi: async () => PINNED }, STALE, {}, { waitingOutboxIds: new Set([randomUUID()]) });
     expect((await parked.reconcile()).recycledStaleAmi).toEqual([]);
     expect(sessionOf(parked.db, parked.workspaceId)).toMatchObject({ state: "READY" });
-  });
-
-  it("loses to a dispatch that touched the session after the reconciler read it", async () => {
-    let touch = () => undefined as unknown;
-    // The ping is where a dispatch can land between the session read and the claim.
-    const harness = readyWorker({ qualifiedWorkerAmi: async () => PINNED, ping: async () => { touch(); return "Healthy"; } }, STALE);
-    touch = () => harness.db.set({ ...sessionOf(harness.db, harness.workspaceId), lastActivityAt: NOW.toISOString() });
-    expect((await harness.reconcile()).recycledStaleAmi).toEqual([]);
-    expect(sessionOf(harness.db, harness.workspaceId)).toMatchObject({ state: "READY" });
   });
 
   it("when the pin cannot be read, recycles nothing, logs only the error name, and still repairs the rest", async () => {
@@ -301,13 +232,6 @@ describe("reconciler: workers on another AMI than the qualified one (AUTOREQUALI
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerQualifiedAmiReadFailures: 1, ReconcilerRecycledStaleAmi: 0 }));
   });
 
-  it("changes nothing where the pin is not wired (report and metrics as before)", async () => {
-    const { db, reconcile, emit, workspaceId } = readyWorker({}, STALE);
-    const report = await reconcile();
-    expect(report).not.toHaveProperty("recycledStaleAmi");
-    expect(sessionOf(db, workspaceId)).toMatchObject({ state: "READY" });
-    expect(Object.keys(emit.mock.calls[0]![0])).not.toContain("ReconcilerRecycledStaleAmi");
-  });
 });
 
 describe("reconciler: stuck transitions", () => {
@@ -361,16 +285,6 @@ describe("reconciler: stuck transitions", () => {
     expect(sessionOf(db, workspaceId)).toMatchObject({ state: "DELETED" });
   });
 
-  it("re-sends work still parked on a READY session", async () => {
-    const worker = ready();
-    const outboxId = randomUUID();
-    const { db, state, reconcile } = setup();
-    const workspaceId = seedSession(db, "READY", { ...worker, waitingOutboxIds: new Set([outboxId]) });
-    db.set({ pk: `OUTBOX#${outboxId}`, sk: "OUTBOX", id: outboxId, entityType: "OUTBOX", status: "WAITING_FOR_SESSION", workspaceId });
-    state.instances = [{ instanceId: worker.instanceId, state: "running", workspaceId, launchedAt: minutesAgo(60) }];
-    expect((await reconcile()).requeued).toEqual([outboxId]);
-    expect(db.get(`OUTBOX#${outboxId}`, "OUTBOX")).toMatchObject({ status: "PENDING" });
-  });
 });
 
 describe("reconciler: volumes", () => {
@@ -415,36 +329,6 @@ describe("failing an active operation", () => {
 });
 
 describe("reconciler: stuck setups (spec 025 FR-055)", () => {
-  it("runs the sweep last, reports what it failed and counts it", async () => {
-    const failedWorkspace = randomUUID();
-    const sweep = vi.fn(async () => ({ failed: [failedWorkspace], dropped: 0, kept: 0 }));
-    const logs: Array<Record<string, unknown>> = [];
-    const { reconcile, emit } = setup({ sweepStuckSetups: sweep, log: (entry) => { logs.push(entry); } });
-    const report = await reconcile();
-    expect(sweep).toHaveBeenCalledExactlyOnceWith(NOW);
-    expect(report.stuckSetups).toEqual([failedWorkspace]);
-    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerStuckSetups: 1 }));
-    // The sweep logs each failed setup itself (stuck_setup.failed); the reconciler does not repeat it.
-    expect(logs.filter((entry) => JSON.stringify(entry).includes(failedWorkspace))).toEqual([]);
-  });
-
-  it("still emits the EC2 repair metrics when the sweep throws, counts the error, and fails the run (F17)", async () => {
-    const orphan: InstanceView = { instanceId: `i-${hex()}`, state: "running", launchedAt: minutesAgo(30) };
-    const logs: Array<Record<string, unknown>> = [];
-    const failure = Object.assign(new Error("PLANTED-SWEEP-MESSAGE"), { name: "ProvisionedThroughputExceededException" });
-    const { reconcile, emit, terminate } = setup({ instances: [orphan], sweepStuckSetups: async () => { throw failure; }, log: (entry) => { logs.push(entry); } });
-    await expect(reconcile()).rejects.toBe(failure);
-    expect(terminate).toHaveBeenCalledWith(orphan.instanceId);
-    expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ReconcilerOrphanInstances: 1, ReconcilerStuckSetups: 0, ReconcilerStuckSetupErrors: 1 }));
-    expect(logs).toContainEqual({ event: "reconciler.stuck_setup_sweep_failed", errorName: "ProvisionedThroughputExceededException" });
-    expect(JSON.stringify(logs)).not.toContain("PLANTED-SWEEP-MESSAGE");
-  });
-
-  it("reports no stuck setups and no sweep errors when no sweep is wired", async () => {
-    const { reconcile, emit } = setup();
-    expect((await reconcile()).stuckSetups).toEqual([]);
-    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerStuckSetups: 0, ReconcilerStuckSetupErrors: 0 }));
-  });
 
   it("still runs the index expiry when the sweep throws, and still rethrows the sweep's error (A6, F17)", async () => {
     const failure = Object.assign(new Error("PLANTED-SWEEP-MESSAGE"), { name: "ProvisionedThroughputExceededException" });
@@ -530,61 +414,6 @@ describe("reconciler: stuck cancels (issue 195)", () => {
     }));
   });
 
-  it("issue 202: passes each READY worker's ping answer (idle or busy) to the sweep, and none for a failed ping", async () => {
-    const sweep = vi.fn<NonNullable<ReconcilerDependencies["sweepStuckCancels"]>>(async () => ({ retried: [], ended: [], interrupted: [], unretried: [], failed: [] }));
-    const answers: Record<string, string | Error> = { "10.0.0.1": "Healthy", "10.0.0.2": "HealthyBusy", "10.0.0.3": new Error("timeout"), "10.0.0.4": "Starting" };
-    const { db, state, reconcile } = setup({ sweepStuckCancels: sweep, ping: async (url) => {
-      const answer = answers[new URL(url).hostname]!;
-      if (answer instanceof Error) throw answer;
-      return answer;
-    } });
-    const workers = Object.keys(answers).map((privateIp) => {
-      const worker = { ...ready(), privateIp };
-      const workspaceId = seedSession(db, "READY", worker);
-      state.instances.push({ instanceId: worker.instanceId, state: "running", workspaceId, launchedAt: minutesAgo(60) });
-      return workspaceId;
-    });
-    await reconcile();
-    const candidates = new Map([...sweep.mock.calls[0]![0]].map((candidate) => [candidate.workspaceId, candidate]));
-    expect(candidates.get(workers[0]!)).toEqual({ workspaceId: workers[0], compute: "alive", worker: "idle" });
-    expect(candidates.get(workers[1]!)).toEqual({ workspaceId: workers[1], compute: "alive", worker: "busy" });
-    expect(candidates.get(workers[2]!)).toEqual({ workspaceId: workers[2], compute: "alive" });
-    expect(candidates.get(workers[3]!)).toEqual({ workspaceId: workers[3], compute: "alive" });
-  });
-
-  it("issue 202: frees the workspace an INTERRUPTED task holds after a failed cancel in the same run that finds its compute lost", async () => {
-    const table: { db?: FakeDynamoDb } = {};
-    const { db, state, reconcile, emit } = setup({ sweepStuckCancels: (candidates, now) => sweepStuckCancels({ client: table.db!, tableName: "state" }, candidates, now) });
-    table.db = db;
-    const operationId = randomUUID();
-    const lost = ready();
-    const workspaceId = seedSession(db, "READY", lost, { status: "BUSY", activeOperationId: operationId, fence: 2 });
-    db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}`, kind: "task", status: "INTERRUPTED", fence: 2, updatedAt: minutesAgo(1) });
-    state.instances = [];
-    const report = await reconcile();
-    // The lost-compute path fails only live operations, so it leaves this one to the sweep.
-    expect(report.lostInstances).toEqual([lost.instanceId]);
-    expect(report.stuckCancels?.interrupted).toEqual([operationId]);
-    expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)).toMatchObject({ status: "INTERRUPTED", workspaceReleaseReason: "compute-gone" });
-    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "READY" });
-    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
-    expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ReconcilerStuckCancelsInterrupted: 1, ReconcilerStuckCancelFailures: 0 }));
-  });
-
-  it("issue 202: counts a failed cancel held by a busy worker past 30 minutes as a failure, so the StuckCancels alarm fires", async () => {
-    const table: { db?: FakeDynamoDb } = {};
-    const { db, state, reconcile, emit } = setup({ ping: async () => "HealthyBusy", sweepStuckCancels: (candidates, now) => sweepStuckCancels({ client: table.db!, tableName: "state" }, candidates, now) });
-    table.db = db;
-    const operationId = randomUUID();
-    const worker = ready();
-    const workspaceId = seedSession(db, "READY", worker, { status: "BUSY", activeOperationId: operationId, fence: 2 });
-    db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}`, kind: "task", status: "INTERRUPTED", fence: 2, updatedAt: minutesAgo(31) });
-    state.instances = [{ instanceId: worker.instanceId, state: "running", workspaceId, launchedAt: minutesAgo(60) }];
-    expect((await reconcile()).stuckCancels?.failed).toEqual([operationId]);
-    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "BUSY", activeOperationId: operationId });
-    expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ReconcilerStuckCancelsInterrupted: 0, ReconcilerStuckCancelFailures: 1 }));
-  });
-
   it("logs and counts a sweep that throws, and the run goes on", async () => {
     const logs: Array<Record<string, unknown>> = [];
     const failure = Object.assign(new Error("PLANTED-CANCEL-MESSAGE"), { name: "ThrottlingException" });
@@ -636,12 +465,6 @@ describe("reconciler: unwaited Slack tasks (#173)", () => {
     expect(JSON.stringify(logs)).not.toContain("PLANTED-UNWAITED-MESSAGE");
   });
 
-  it("adds no metric and no report field where the backstop is not wired (the legacy deployment)", async () => {
-    const { reconcile, emit } = setup();
-    const report = await reconcile();
-    expect(report).not.toHaveProperty("unwaitedTasks");
-    expect(Object.keys(emit.mock.calls[0]![0]).filter((name) => name.includes("Unwaited"))).toEqual([]);
-  });
 });
 
 it("posts concurrent identical thread addresses with their company tokens, never the install token", async () => {

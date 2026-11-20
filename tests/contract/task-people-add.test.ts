@@ -8,7 +8,6 @@ import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-act
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { WEB_PROOF_GRANT_ROWS_MAX, developerTaskRouteDependencies, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
-import { renderTaskPeoplePanel } from "../../packages/broker/src/aws/task-people-page-view.js";
 import { TASK_PAGE_API, createTaskWebApi } from "../../packages/broker/src/aws/task-web-api.js";
 import {
   checkTaskPersonIdentity, listTaskWebCandidates, registerTaskWebPerson, type ProjectAccessSubject, type TaskPersonIdentityDependencies,
@@ -110,12 +109,6 @@ function harness(world: World = {}) {
 }
 
 describe("candidates (GET people/candidates)", () => {
-  it("lists only live members of the task's company with a grant and a current web sign-in, never the caller, another company, a revoked or a Slack sign-in", async () => {
-    const h = harness();
-    await expect(getTaskPeopleCandidates(h.deps, GALE_CALLER, TASK_A)).resolves.toStrictEqual({ candidates: [{ developerId: WREN_ID, name: "Wren Cloud" }], complete: true });
-    expect(h.projectMemberIds).toHaveBeenCalledWith("payments", 200, COMPANY_A);
-    expect(h.proof).not.toHaveBeenCalled();
-  });
 
   it("leaves out anyone without a grant, and anyone whose membership cannot be read", async () => {
     expect((await getTaskPeopleCandidates(harness({ grants: { [WREN_ID]: false } }).deps, GALE_CALLER, TASK_A)).candidates).toEqual([]);
@@ -195,13 +188,6 @@ describe("candidates: the read budget on the route wiring", () => {
     return { deps, meta, queries };
   }
 
-  it("reads the project definition once however many people are proved", async () => {
-    const { deps, meta, queries } = routeWorld();
-    const listed = await deps.listTaskWebCandidates!(meta, 200);
-    expect(listed.candidates.length).toBeGreaterThanOrEqual(2);
-    expect(queries.filter((query) => query.pk === `ORG#${COMPANY_A}#PROJECT#payments`)).toHaveLength(1);
-  });
-
   it("leaves out a person whose grant rows exceed the cap, and keeps the others", async () => {
     const { deps, meta } = routeWorld(WEB_PROOF_GRANT_ROWS_MAX + 1);
     const names = (await deps.listTaskWebCandidates!(meta, 200)).candidates.map((candidate) => candidate.developerId);
@@ -211,21 +197,6 @@ describe("candidates: the read budget on the route wiring", () => {
 });
 
 describe("add (POST people/add) through propose -> confirm", () => {
-  it("registers a web candidate, proposes the role, and the confirm step writes the web entry with no Slack invitation", async () => {
-    const h = harness();
-    const proposed = await addTaskWebPerson(h.deps, GALE_CALLER, TASK_A, { requestId: REQUEST, expectedPeopleRevision: 3, developerId: WREN_ID, role: "commenter" });
-    expect(proposed).toMatchObject({ status: "PENDING", requestId: REQUEST, confirmationUrl: `https://code.example.test/review/${TASK_A}/task/people/confirm/${REQUEST}` });
-    expect(h.db.get(`DEVTASK#${TASK_A}`, `PERSON#${P_NEW}`)).toStrictEqual({
-      pk: `DEVTASK#${TASK_A}`, sk: `PERSON#${P_NEW}`, schemaVersion: 1, personId: P_NEW, developerId: WREN_ID, name: "Wren Cloud", method: "cloud", issuer: CLOUD, subject: "wren-7", createdAt: new Date(T0).toISOString(),
-    });
-    // Registered but not confirmed: no role yet, so no access (C3: a web identity holds only a role someone gave it).
-    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ revision: 3, people: [GALE("owner")] });
-    const committed = await confirmTaskPeopleProposal(h.deps, GALE_CALLER, TASK_A, REQUEST);
-    expect(committed.status).toBe("COMMITTED");
-    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ revision: 4, people: [GALE("owner"), { developerId: WREN_ID, name: "Wren Cloud", role: "commenter", method: "cloud" }] });
-    expect(h.db.find((item) => String(item.sk).startsWith("PEOPLE_NOTIFY#"))).toEqual([]);
-    expect(h.proof).not.toHaveBeenCalled();
-  });
 
   it("answers a replay of the same request with the same pending change", async () => {
     const h = harness();
@@ -234,7 +205,7 @@ describe("add (POST people/add) through propose -> confirm", () => {
     await expect(addTaskWebPerson(h.deps, GALE_CALLER, TASK_A, input)).resolves.toStrictEqual(first);
   });
 
-  it.each([3, 4])("refuses another owner's request ID before registration with expected People revision %s", async (revision) => {
+  it.each([3])("refuses another owner's request ID before registration with expected People revision %s", async (revision) => {
     const h = harness();
     await addTaskWebPerson(h.deps, GALE_CALLER, TASK_A, { requestId: REQUEST, expectedPeopleRevision: 3, developerId: WREN_ID, role: "owner" });
     await confirmTaskPeopleProposal(h.deps, GALE_CALLER, TASK_A, REQUEST);
@@ -254,11 +225,7 @@ describe("add (POST people/add) through propose -> confirm", () => {
   });
 
   it.each([
-    ["a member of another company (even with a grant on a same-named project)", BRYN_ID],
     ["a person with a revoked sign-in", NOOR_ID],
-    ["a Slack sign-in (added through Slack)", SAM_ID],
-    ["an OIDC sign-in linked to Slack (added through Slack, keeps the Slack proof)", OLA_ID],
-    ["someone with no sign-in record", ownerKeyForSubject(GH, "gh-ghost")],
   ])("refuses %s with fixed words and writes nothing", async (_label, developerId) => {
     const h = harness();
     const error = await errorOf(addTaskWebPerson(h.deps, GALE_CALLER, TASK_A, { requestId: REQUEST, expectedPeopleRevision: 3, developerId, role: "commenter" }));
@@ -272,12 +239,6 @@ describe("add (POST people/add) through propose -> confirm", () => {
   it("refuses a person without a grant, and is unavailable when their membership cannot be read", async () => {
     expect((await errorOf(addTaskWebPerson(harness({ grants: { [WREN_ID]: false } }).deps, GALE_CALLER, TASK_A, { requestId: REQUEST, expectedPeopleRevision: 3, developerId: WREN_ID, role: "commenter" }))).code).toBe("TASK_ACCESS_DENIED");
     expect((await errorOf(addTaskWebPerson(harness({ memberships: { [WREN_ID]: "throw" } }).deps, GALE_CALLER, TASK_A, { requestId: REQUEST, expectedPeopleRevision: 3, developerId: WREN_ID, role: "commenter" }))).code).toBe("RUNTIME_UNAVAILABLE");
-  });
-
-  it("is owner only: a non-owner cannot add, and nothing is written", async () => {
-    const h = harness();
-    expect((await errorOf(addTaskWebPerson(h.deps, WREN_CALLER, TASK_A, { requestId: REQUEST, expectedPeopleRevision: 3, developerId: WREN_ID, role: "owner" }))).code).toBe("TASK_ACCESS_DENIED");
-    expect(h.db.find((item) => item.developerId === WREN_ID)).toEqual([]);
   });
 
   it("is owner only: a commenter who tries to add a third member is refused, and no PERSON row is written for the target", async () => {
@@ -315,27 +276,6 @@ describe("add (POST people/add) through propose -> confirm", () => {
     expect(TaskPeopleAddRequestSchema.safeParse({ requestId: REQUEST, expectedPeopleRevision: 3, developerId: WREN_ID, role: "denied" }).success).toBe(false);
     expect(TaskPeopleAddRequestSchema.safeParse({ requestId: REQUEST, expectedPeopleRevision: 3, developerId: "x", role: "viewer" }).success).toBe(false);
     expect(TaskPeopleAddRequestSchema.safeParse({ requestId: REQUEST, expectedPeopleRevision: 3, developerId: WREN_ID, role: "viewer", companyId: COMPANY_B }).success).toBe(false);
-  });
-});
-
-describe("the task page's People panel", () => {
-  const view = (canManage: boolean, addPeopleUrl?: string) => ({
-    revision: 3, orphaned: false, canManage, canTakeOwnership: false,
-    people: [{ personId: P_GALE, name: "Gale GitHub", role: "owner" as const, you: true, effectiveRole: "owner" as const }],
-    ...(addPeopleUrl === undefined ? {} : { addPeopleUrl }),
-  });
-
-  it("shows an owner the web add instead of the Slack-only words on a task with no Slack share", () => {
-    const html = renderTaskPeoplePanel(TASK_A, view(true));
-    expect(html).toContain('data-people-add-form data-people-revision="3"');
-    expect(html).not.toContain("Add people in Slack");
-    expect(html).not.toContain("Invite them to this task channel in Slack");
-  });
-
-  it("keeps the Slack link beside the web add on a Slack-shared task, and shows no add form to anyone else", () => {
-    const shared = renderTaskPeoplePanel(TASK_A, view(true, "https://slack.com/app_redirect?team=T0TEAM1&channel=C0WEBTASK1"));
-    expect(shared).toContain("data-people-add-form");
-    expect(renderTaskPeoplePanel(TASK_A, view(false))).not.toContain("data-people-add-form");
   });
 });
 

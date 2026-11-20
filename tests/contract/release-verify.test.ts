@@ -1,32 +1,71 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
-import { afterEach, describe, expect, it } from "vitest";
-import { buildRelease } from "../../scripts/release/build.js";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import type * as ReleaseBuild from "../../scripts/release/build.js";
+import type { BuildReleaseInput } from "../../scripts/release/build.js";
+import type { ReleaseManifest } from "../../scripts/release/manifest.js";
 import { verifyRelease } from "../../scripts/release/verify.js";
+
+// A release build is a CDK synth of every region plus the packages (about a minute on CI), and verifyRelease rebuilds one to compare against. The file builds
+// one release, once. The first test verifies a copy of it with a real rebuild, so two independent builds still have to match; the tampering tests verify
+// copies too, and their rebuild is a copy of that same build (`reuseBuild`), since what they check is that verify names the changed file.
+const VERSION = "1.2.3";
+const GIT_COMMIT = "c".repeat(40);
+const built: { dir?: string; manifest?: ReleaseManifest; parent?: string } = {};
+let reuseBuild = false;
+
+vi.mock("../../scripts/release/build.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof ReleaseBuild>();
+  return {
+    ...actual,
+    buildRelease: async (input: BuildReleaseInput): Promise<ReleaseManifest> => {
+      if (!reuseBuild || built.dir === undefined || built.manifest === undefined) return actual.buildRelease(input);
+      expect({ version: input.version, gitCommit: input.gitCommit }).toEqual({ version: VERSION, gitCommit: GIT_COMMIT });
+      await cp(built.dir, input.out, { recursive: true });
+      return structuredClone(built.manifest);
+    },
+  };
+});
 
 const temporaryDirectories: string[] = [];
 
+beforeAll(async () => {
+  const { buildRelease } = await import("../../scripts/release/build.js");
+  built.parent = await mkdtemp(join(tmpdir(), "agentx-verify-built-"));
+  built.dir = join(built.parent, "r");
+  built.manifest = await buildRelease({ version: VERSION, out: built.dir, gitCommit: GIT_COMMIT });
+}, 900_000);
+
 afterEach(async () => {
+  reuseBuild = false;
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
+afterAll(async () => {
+  if (built.parent !== undefined) await rm(built.parent, { recursive: true, force: true });
+});
+
+/** A fresh copy of the one release this file builds, and its manifest. */
+async function copyOfRelease(): Promise<{ dir: string; manifest: ReleaseManifest }> {
+  const base = await mkdtemp(join(tmpdir(), "agentx-verify-"));
+  temporaryDirectories.push(base);
+  const dir = join(base, "r");
+  await cp(built.dir!, dir, { recursive: true });
+  return { dir, manifest: structuredClone(built.manifest!) };
+}
+
 describe("release verification", () => {
   it("passes for a release built from the current source", async () => {
-    const base = await mkdtemp(join(tmpdir(), "agentx-verify-"));
-    temporaryDirectories.push(base);
-    const dir = join(base, "r");
-    await buildRelease({ version: "1.2.3", out: dir, gitCommit: "c".repeat(40) });
+    const { dir } = await copyOfRelease();
     expect(await verifyRelease({ dir })).toEqual({ ok: true });
-  }, 900_000);
+  }, 300_000);
 
   it("names a tampered package and a tampered template", async () => {
-    const base = await mkdtemp(join(tmpdir(), "agentx-verify-"));
-    temporaryDirectories.push(base);
-    const dir = join(base, "r");
-    const manifest = await buildRelease({ version: "1.2.3", out: dir, gitCommit: "c".repeat(40) });
+    const { dir, manifest } = await copyOfRelease();
+    reuseBuild = true;
     await writeFile(join(dir, manifest.packages[0]!.file), "tampered");
     await writeFile(join(dir, manifest.templates[0]!.file), "{}\n");
     const result = await verifyRelease({ dir });
@@ -34,25 +73,21 @@ describe("release verification", () => {
     const problems = result.ok ? [] : result.problems;
     expect(problems.some((p) => p.includes(manifest.packages[0]!.file))).toBe(true);
     expect(problems.some((p) => p.includes(manifest.templates[0]!.file))).toBe(true);
-  }, 900_000);
+  }, 300_000);
 
   it("names a missing file instead of throwing", async () => {
-    const base = await mkdtemp(join(tmpdir(), "agentx-verify-"));
-    temporaryDirectories.push(base);
-    const dir = join(base, "r");
-    const manifest = await buildRelease({ version: "1.2.3", out: dir, gitCommit: "c".repeat(40) });
+    const { dir, manifest } = await copyOfRelease();
+    reuseBuild = true;
     await rm(join(dir, manifest.templates[0]!.file));
     const result = await verifyRelease({ dir });
     expect(result.ok).toBe(false);
     const problems = result.ok ? [] : result.problems;
     expect(problems.some((p) => p.includes(manifest.templates[0]!.file))).toBe(true);
-  }, 900_000);
+  }, 300_000);
 
   it("names a template that a rebuild from current source produces but the release doesn't have, not just the reverse", async () => {
-    const base = await mkdtemp(join(tmpdir(), "agentx-verify-"));
-    temporaryDirectories.push(base);
-    const dir = join(base, "r");
-    const manifest = await buildRelease({ version: "1.2.3", out: dir, gitCommit: "c".repeat(40) });
+    const { dir, manifest } = await copyOfRelease();
+    reuseBuild = true;
     const dropped = manifest.templates[0]!;
     const edited = {
       ...manifest,
@@ -63,7 +98,7 @@ describe("release verification", () => {
     expect(result.ok).toBe(false);
     const problems = result.ok ? [] : result.problems;
     expect(problems.some((p) => p.includes(dropped.file) && p.includes("not present in this release"))).toBe(true);
-  }, 900_000);
+  }, 300_000);
 });
 
 describe("verifyRelease: release.json problems", () => {

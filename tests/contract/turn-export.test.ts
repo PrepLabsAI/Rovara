@@ -35,36 +35,6 @@ function exporter(source: TurnRecordSource, projectOf: (workspaceId: string) => 
 }
 
 describe("turn record export", () => {
-  it("asks for 100 records since the given time, strips storage keys, adds the project, and returns an opaque cursor", async () => {
-    const lastEvaluatedKey = keyOf(stored("EvTURN00001", "2026-09-24T10:00:00.000Z"));
-    const page = vi.fn<TurnRecordSource["page"]>(async () => ({
-      items: [stored("EvTURN00002", "2026-09-24T11:00:00.000Z"), stored("EvTURN00001", "2026-09-24T10:00:00.000Z")], lastEvaluatedKey,
-    }));
-    const { exporter: turns, projectOf, log } = exporter({ page });
-    const first = await turns.page(new URLSearchParams({ since: "2026-09-17T12:00:00Z" }));
-    expect(page).toHaveBeenCalledWith({ since: "2026-09-17T12:00:00.000Z", limit: 100, nowSeconds: now / 1000 });
-    expect(first.turns.filter(isSlackTurnRecord).map((turn) => [turn.eventId, turn.project])).toEqual([["EvTURN00002", "payments"], ["EvTURN00001", "payments"]]);
-    expect(first.turns[0]).not.toHaveProperty("pk");
-    expect(first.turns[0]).not.toHaveProperty("sk");
-    expect(first.turns[0]).not.toHaveProperty("exportPk");
-    expect(first.turns[0]).not.toHaveProperty("exportSk");
-    expect(first.turns[0]).not.toHaveProperty("expiresAt");
-    expect(first.turns[0]?.requestText).toBe("list issues");
-    expect(projectOf).toHaveBeenCalledTimes(1);
-    expect(first.cursor).toMatch(/^[A-Za-z0-9_-]+$/);
-    await turns.page(new URLSearchParams({ since: "2026-09-17T12:00:00Z", cursor: first.cursor! }));
-    expect(page).toHaveBeenLastCalledWith({ since: "2026-09-17T12:00:00.000Z", limit: 100, nowSeconds: now / 1000, exclusiveStartKey: lastEvaluatedKey });
-    expect(log).not.toHaveBeenCalled();
-  });
-
-  it("returns stored recording errors and usage errors as they are", async () => {
-    const item = stored("EvTURN00010", "2026-09-24T08:00:00.000Z", { recordingErrors: ["observer_failed"], usageError: "usage_unavailable" });
-    const { exporter: turns } = exporter({ page: async () => ({ items: [item] }) });
-    const [turn] = (await turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }))).turns;
-    if (turn === undefined || !isSlackTurnRecord(turn)) throw new Error("expected a Slack turn record");
-    expect(turn.recordingErrors).toEqual(["observer_failed"]);
-    expect(turn.usageError).toBe("usage_unavailable");
-  });
 
   it("skips a malformed item and an expired one still waiting for DynamoDB's TTL, logging the count and key but no contents", async () => {
     const expired = { ...stored("EvTURN00003", "2026-08-20T10:00:00.000Z"), expiresAt: now / 1000 - 1 };
@@ -100,15 +70,6 @@ describe("turn record export", () => {
     expect(text).not.toContain("hunter2");
     expect(text).not.toContain("secretField");
     expect(text).not.toContain("list issues");
-  });
-
-  it("refuses a missing or malformed since and a tampered cursor", async () => {
-    const { exporter: turns } = exporter({ page: async () => ({ items: [] }) });
-    await expect(turns.page(new URLSearchParams())).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    await expect(turns.page(new URLSearchParams({ since: "last week" }))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    const forged = Buffer.from(JSON.stringify({ pk: "WORKSPACE#x", sk: "META", exportPk: "OTHER", exportSk: "z" })).toString("base64url");
-    await expect(turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z", cursor: forged }))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    await expect(turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z", cursor: "%%%" }))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
   });
 
   it("refuses a forged cursor that points outside the export partition or the since window, before any read", async () => {
@@ -167,62 +128,11 @@ describe("turn record export", () => {
     expect(page).toHaveBeenLastCalledWith(expect.objectContaining({ since: "2026-12-31T23:00:00.000Z" }));
   });
 
-  it("looks up the projects of distinct workspaces concurrently, once each", async () => {
-    const otherWorkspace = "22222222-2222-4222-8222-222222222222";
-    const pending = new Map<string, (project: string) => void>();
-    const projectOf = vi.fn((id: string) => new Promise<string | undefined>((resolve) => { pending.set(id, resolve); }));
-    const items = [
-      stored("EvTURN00040", "2026-09-24T08:00:00.000Z"),
-      stored("EvTURN00041", "2026-09-24T07:00:00.000Z", { workspaceId: otherWorkspace }),
-      stored("EvTURN00042", "2026-09-24T06:00:00.000Z"),
-    ];
-    const { exporter: turns } = exporter({ page: async () => ({ items }) }, projectOf);
-    const result = turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }));
-    await vi.waitFor(() => expect(projectOf).toHaveBeenCalledTimes(2));
-    expect(projectOf.mock.calls.map(([id]) => id)).toEqual([workspaceId, otherWorkspace]);
-    pending.get(otherWorkspace)?.("billing");
-    pending.get(workspaceId)?.("payments");
-    expect((await result).turns.filter(isSlackTurnRecord).map((turn) => [turn.eventId, turn.project])).toEqual([
-      ["EvTURN00040", "payments"], ["EvTURN00041", "billing"], ["EvTURN00042", "payments"],
-    ]);
-    expect(projectOf).toHaveBeenCalledTimes(2);
-  });
-
-  it("reports a failed project lookup as a missing project, once per workspace", async () => {
-    const throttled = Object.assign(new Error("slow down"), { name: "ProvisionedThroughputExceededException" });
-    const projectOf = vi.fn(async (): Promise<string | undefined> => { throw throttled; });
-    const items = [stored("EvTURN00006", "2026-09-24T08:00:00.000Z"), stored("EvTURN00007", "2026-09-24T07:00:00.000Z")];
-    const { exporter: turns, log } = exporter({ page: async () => ({ items }) }, projectOf);
-    const result = await turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }));
-    expect(result.turns.filter(isSlackTurnRecord).map((turn) => turn.eventId)).toEqual(["EvTURN00006", "EvTURN00007"]);
-    expect(result.turns[0]?.project).toBeUndefined();
-    expect(result.turns[0]).not.toHaveProperty("project");
-    expect(projectOf).toHaveBeenCalledTimes(1);
-    expect(log).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toEqual({
-      component: "broker", event: "turn_record.project_unavailable", workspaceId, errorName: "ProvisionedThroughputExceededException",
-    });
-  });
-
   it("refuses to hand out a cursor it would not accept back", async () => {
     const log = vi.fn();
     const { exporter: turns } = exporter({ page: async () => ({ items: [], lastEvaluatedKey: { pk: "a", sk: "b", exportPk: "TURNS", exportSk: "c" } }) }, undefined, log);
     await expect(turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }))).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toEqual({ component: "broker", event: "turn_record.cursor_unusable" });
-  });
-
-  it("queries the time index newest first and filters expired items in DynamoDB", async () => {
-    const send = vi.fn(async () => ({ Items: [], LastEvaluatedKey: { pk: "a", sk: "b", exportPk: "TURNS", exportSk: "c" } }));
-    const page = await dynamoTurnRecordSource({ send } as never, "turns").page({ since: "2026-09-17T00:00:00.000Z", limit: 100, nowSeconds: 5 });
-    const input = (send.mock.calls[0] as unknown as [{ input: Record<string, unknown> }])[0].input;
-    expect(input).toEqual({
-      TableName: "turns", IndexName: "byTime",
-      KeyConditionExpression: "exportPk = :partition AND exportSk >= :since",
-      FilterExpression: "expiresAt > :now",
-      ExpressionAttributeValues: { ":partition": "TURNS", ":since": "2026-09-17T00:00:00.000Z", ":now": 5 },
-      ScanIndexForward: false, Limit: 100,
-    });
-    expect(page.lastEvaluatedKey).toEqual({ pk: "a", sk: "b", exportPk: "TURNS", exportSk: "c" });
   });
 
   it("passes the start key to DynamoDB and fails loudly on a last key it does not recognise", async () => {
@@ -335,17 +245,6 @@ describe("turn record export page size", () => {
 });
 
 describe("turn record export skipped count", () => {
-  it("reports how many malformed items a page skipped, and says nothing when none were", async () => {
-    const malformed = { ...stored("EvSKIP00001", "2026-09-24T09:00:00.000Z"), disposition: "unheard-of" };
-    const expired = { ...stored("EvSKIP00002", "2026-08-20T10:00:00.000Z"), expiresAt: now / 1000 - 1 };
-    const { exporter: turns } = exporter({ page: async () => ({ items: [malformed, expired, stored("EvSKIP00003", "2026-09-24T08:00:00.000Z")] }) });
-    const result = await turns.page(new URLSearchParams({ since: "2026-08-01T00:00:00Z" }));
-    expect(result.turns.filter(isSlackTurnRecord).map((turn) => turn.eventId)).toEqual(["EvSKIP00003"]);
-    expect(result.skipped).toBe(1);
-    const clean = await exporter({ page: async () => ({ items: [stored("EvSKIP00004", "2026-09-24T08:00:00.000Z")] }) }).exporter
-      .page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }));
-    expect(clean).not.toHaveProperty("skipped");
-  });
 
   it("counts only the skipped items before a page cut short by size, so the next page does not count them again", async () => {
     const big = { requestText: "\u0001".repeat(40_000), responseText: "€".repeat(40_000) };
@@ -360,15 +259,6 @@ describe("turn record export skipped count", () => {
     expect(result.skipped).toBe(1);
   });
 
-  it("carries the skipped count on the route response", async () => {
-    const malformed = { ...stored("EvSKIP00005", "2026-09-24T09:00:00.000Z"), disposition: "unheard-of" };
-    const { handler } = await createAdminBroker({
-      turnRecords: new TurnRecordExport({ source: { page: async () => ({ items: [malformed] }) }, projectOf: async () => undefined, now: () => now, log: vi.fn() }),
-    });
-    const response = await adminCall(handler, { method: "GET", path: "/v1/admin/turns?since=2026-09-17T00:00:00.000Z" });
-    expect(response.status).toBe(200);
-    expect(response.body.skipped).toBe(1);
-  });
 });
 
 function aiTool(turnId: string, receivedAt: string): Record<string, unknown> {
@@ -389,21 +279,4 @@ describe("turn record export with AI-tool records (spec 025 FR-037)", () => {
     expect(result.turns[0]).toMatchObject({ origin: "ai_tool", project: "payments" });
   });
 
-  it("hands out and accepts a cursor that ends on an AI-tool record (Review Focus 4)", async () => {
-    const last = aiTool("66666666-6666-4666-8666-666666666666", "2026-09-24T09:00:00.000Z");
-    const lastEvaluatedKey = { pk: last.pk as string, sk: last.sk as string, exportPk: last.exportPk as string, exportSk: last.exportSk as string };
-    const page = vi.fn<TurnRecordSource["page"]>(async () => ({ items: [last], lastEvaluatedKey }));
-    const { exporter: turns } = exporter({ page });
-    const first = await turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }));
-    expect(first.cursor).toBeDefined();
-    await turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z", cursor: first.cursor! }));
-    expect(page).toHaveBeenLastCalledWith(expect.objectContaining({ exclusiveStartKey: lastEvaluatedKey }));
-  });
-
-  it("logs a malformed AI-tool record's field name, like a Slack one's", async () => {
-    const malformed = { ...aiTool("77777777-7777-4777-8777-777777777777", "2026-09-24T08:00:00.000Z"), outcome: "exploded" };
-    const { exporter: turns, log } = exporter({ page: async () => ({ items: [malformed] }) });
-    expect((await turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }))).turns).toEqual([]);
-    expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({ event: "turn_record.invalid", count: 1, fields: ["outcome"] });
-  });
 });

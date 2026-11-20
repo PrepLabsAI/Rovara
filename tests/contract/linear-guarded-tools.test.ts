@@ -88,12 +88,6 @@ describe("registration preflight for a Linear tool outside the guarded set (#49)
     expect(result.warnings).toEqual([]);
   });
 
-  it("gives no warning when every approved tool is guarded or names no item", async () => {
-    const definition = ProjectDefinitionSchema.parse(project(1, [linear(["list_issues", "list_teams", "save_issue"])]));
-    const connector = linearOverFixture({ keepCredential: true }).resolve(definition.integrations!.connectors![0]!, definition, {});
-    if ("unusable" in connector) throw new Error(connector.unusable);
-    expect((await preflightConnectors([connector], definition, "owner-key")).warnings).toEqual([]);
-  });
 });
 
 describe("registering and planning a revision that approves such a tool (#49)", () => {

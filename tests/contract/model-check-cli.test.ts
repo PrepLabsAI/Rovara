@@ -78,16 +78,6 @@ describe("discover", () => {
 });
 
 describe("test", () => {
-  it("shows the worst-case cost, asks, runs the driving test, and prints the sentence", async () => {
-    const p = plane([{ checkId: "c2" }, { status: "passed", checkId: "c2", sentence: "The driving test passed with `m`: ...", drive: { modelId: MODEL, payloadShape: "standard", calls: 3, inputTokens: 4000, outputTokens: 300 } }]);
-    const prompter = scriptedPrompter([true]);
-    const view = await testModelCheck({ ...p.input, prompter, model: MODEL });
-    expect(view.status).toBe("passed");
-    expect(p.lines[0]).toContain("worst case $0.0565");
-    expect(prompter.asked[0]).toContain(`Run the driving test of ${MODEL}`);
-    expect(p.requests[0]!.body).toEqual({ kind: "drive", modelId: MODEL });
-    expect(p.lines.join("\n")).toContain(`agentx --env agentxlivetest123 config set models.e2eAgent ${MODEL}`);
-  });
 
   it("with no --model it drives the installation's own model, whose cost the control plane's tiers give", async () => {
     const p = plane([{ tiers }, { checkId: "c3" }, { status: "failed", checkId: "c3", sentence: "Amazon Bedrock refused ..." }]);

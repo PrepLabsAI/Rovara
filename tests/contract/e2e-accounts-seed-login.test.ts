@@ -131,18 +131,6 @@ describe("the registry re-versions an account when its seed or login changes", (
     .map((write): E2EAccountRegistryEntry => ({ definition: write.definition, latest: write.latest }));
   const initial = entriesOf(generic);
 
-  it("writes nothing for the same contract registered again", () => {
-    expect(planSyntheticAccountWrites({ contract: generic, applicationId: ORDERS_APPLICATION_ID, prior: initial, now: T0 + 86_400_000 })).toEqual([]);
-  });
-
-  it("writes revision 2 of every account when the seed command changes", () => {
-    const changed = edited((e2e) => { seedOf(e2e).args = ["seed.mjs", "--v2"]; });
-    const writes = planSyntheticAccountWrites({ contract: changed, applicationId: ORDERS_APPLICATION_ID, prior: initial, now: T0 + 86_400_000 });
-    expect(writes.map((write) => [write.definition.profileId, write.definition.revision, write.previousRevision]).sort()).toEqual(
-      generic.accountProfiles.map((profile) => [profile.profileId, 2, 1]).sort());
-    for (const write of writes) expect(write.definition.contractDigest).toBe(digestOf(changed, write.definition.profileId));
-  });
-
   it("writes revision 2 of the one account whose login form changes", () => {
     const changed = edited((e2e) => { loginOf(e2e, "orders-owner").successTestId = "welcome"; });
     const writes = planSyntheticAccountWrites({ contract: changed, applicationId: ORDERS_APPLICATION_ID, prior: initial, now: T0 + 86_400_000 });

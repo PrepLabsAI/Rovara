@@ -17,20 +17,6 @@ async function stateWith(bootFailure?: string) {
 }
 
 describe("/ping of a worker that failed its start-up scratch check", () => {
-  it("positive control: a worker with no boot failure answers Healthy with 200", async () => {
-    const response = await handleWorkerRequest(new Request("http://worker/ping"), await stateWith());
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ status: "Healthy" });
-  });
-
-  it("answers 503 BootFailed with the reason, and lists no features", async () => {
-    const response = await handleWorkerRequest(new Request("http://worker/ping"), await stateWith("worker scratch: no scratch directory outside the workspace volume"));
-    expect(response.status).toBe(503);
-    const body = await response.json() as Record<string, unknown>;
-    expect(body).toMatchObject({ status: "BootFailed", reason: "worker scratch: no scratch directory outside the workspace volume" });
-    expect(body["status"]).not.toBe("Healthy");
-    expect(body["status"]).not.toBe("HealthyBusy");
-  });
 
   it("is read by the broker's own probe as BootFailed with the reason (not healthy)", async () => {
     const answer = await handleWorkerRequest(new Request("http://worker/ping"), await stateWith("worker scratch: unavailable"));

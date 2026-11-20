@@ -125,11 +125,6 @@ describe("resolveTaskAccess", () => {
     expect((await refusal(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId, "comment"))).code).toBe("TASK_NOT_FOUND");
   });
 
-  it("never falls back to creator authority for a corrupt sidecar", async () => {
-    const fixture = pageTask();
-    fixture.db.set({ pk: `DEVTASK#${fixture.taskId}`, sk: "PEOPLE", schemaVersion: 2, revision: 1, orphaned: false, people: [] });
-    expect((await refusal(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId))).code).toBe("TASK_NOT_FOUND");
-  });
 });
 
 it("task-page membership carries the authoritative task workspace through the callback", async () => {

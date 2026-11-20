@@ -20,7 +20,7 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
   it("keeps the port guard a check of its own, outside `quick` and the `local` gate, with nothing waiting on it", async () => {
     const { jobs } = await workflow();
     expect(jobs.local!.needs).toEqual(["plan", "quick", "build", "test", "linux-runtime", "ci-mode"]);
-    expect(Object.keys(jobs).sort()).toEqual(["build", "ci-mode", "device-runtime", "linux-runtime", "live-aws", "local", "plan", "port-guard", "quick", "test"]);
+    expect(Object.keys(jobs).sort()).toEqual(["build", "ci-mode", "device-runtime", "linux-runtime", "live-aws", "local", "nightly-tests", "plan", "port-guard", "quick", "test"]);
     for (const [name, job] of Object.entries(jobs)) expect(JSON.stringify(job.needs ?? []), name).not.toContain("port-guard");
     expect(jobs.quick!.steps.map((step) => step.run ?? "").join("\n")).not.toContain("port-guard");
   });

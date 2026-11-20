@@ -52,7 +52,7 @@ function setupContext(prompts: Array<string | boolean>, options: { code?: string
 }
 
 describe("Add to Slack", () => {
-  it.each([false, true])("makes the app with one pasted token and takes Slack's redirect (Cloud address supplied: %s)", async (withCloud) => {
+  it.each([ true])("makes the app with one pasted token and takes Slack's redirect (Cloud address supplied: %s)", async (withCloud) => {
     const slack = fakeSlackApi();
     const { context, cards, opened, states, stored } = setupContext([...(withCloud ? ["cloud", "https://cloud.example.test/app"] : []), "token", CONFIG_TOKEN], { code: "slack-code" });
     const progress = progressHandle();
@@ -117,16 +117,6 @@ describe("Add to Slack", () => {
     expect(await slackAppStep(slack).run(context, progressHandle())).toMatchObject({ status: "done" });
     expect(slack.manifests).toEqual([]);
     expect(opened.some((url) => url.startsWith("https://api.slack.com/apps?new_app=1"))).toBe(true);
-  });
-
-  it("is offered only on the setup page: the terminal and the local page make the app by hand", async () => {
-    const prompter = { ...scriptedPrompter(["installed", `${TEST_SIGNING_SECRET}\n`, TEST_BOT_TOKEN]), confirm: async () => true };
-    const { context } = setupContext([], { prompter });
-    delete context.slackInstallHost;
-    delete context.setupPageUrl;
-    context.answers = { ...context.answers, signinMethods: "oidc" };
-    expect(await slackAppStep(fakeSlackApi()).run(context, progressHandle())).toMatchObject({ status: "done" });
-    expect(prompter.asked).not.toContain("How do you want to make the Slack app?");
   });
 
   it("builds its manifest and Slack's install address from the one AgentX always makes", () => {

@@ -5,7 +5,7 @@ import { legacyWorkspaceKey } from "../../packages/broker/src/core/task-flow/leg
 import { taskKey as coreTaskKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { DeveloperTaskDetailedListResponseSchema, INTENT_NOT_WAITING_MESSAGE, WorkflowSnapshotSchema, createWorkflowSnapshot, endStuckUnderstand, orgProjectCatalogKey, projectRevisionKey, recordIntentAssessment, sharedTaskKey, startWorkflowUnderstand, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
+import { DeveloperTaskDetailedListResponseSchema, INTENT_NOT_WAITING_MESSAGE, endStuckUnderstand, orgProjectCatalogKey, projectRevisionKey, recordIntentAssessment, sharedTaskKey, startWorkflowUnderstand, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
 import { readTask as readCoreTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { commitWorkflow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
@@ -15,9 +15,7 @@ import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defa
 import { writeInvolvedRow } from "../../packages/broker/src/core/task-flow/involved.js";
 import { createCoreHostApp, engineStampKey, stampOf, type CoreHostApp, type EngineStamp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
-import {
-  TASK_ENTRY_AREAS, coreAnswerValue, coreTaskEntryFrom, entryOwner, ownerOfExistingTask, ownerOfTaskId, ownerOfWorkspace, taskEntryOperation, type CoreTaskEntry,
-} from "../../packages/broker/src/aws/engine-boundary.js";
+import { TASK_ENTRY_AREAS, coreAnswerValue, coreTaskEntryFrom, entryOwner, ownerOfTaskId, ownerOfWorkspace, taskEntryOperation, type CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { workspaceOwner } from "../../packages/broker/src/aws/admin-reads.js";
 import { requireOperation } from "../../packages/broker/src/aws/cancellation.js";
 import { getTaskPageState, getWorkflowFeedbackReview, listPageComments, loadOwnedTask } from "../../packages/broker/src/aws/developer-tasks.js";
@@ -79,39 +77,6 @@ describe("reading the stamp", () => {
     const failing = new FakeDynamoDb();
     failing.injectFault({ command: "GetCommand", error: { name: "ProvisionedThroughputExceededException" } });
     await expect(ownerOfTaskId(table(failing), randomUUID())).rejects.toThrow();
-  });
-
-  it("asks nothing for a malformed id; keeps a verdict only for a task that exists or a stamp that is there", async () => {
-    const db = new FakeDynamoDb();
-    const sent = vi.spyOn(db, "send");
-    expect(await ownerOfTaskId(table(db), "not-a-task")).toBe("workflow");
-    expect(sent).not.toHaveBeenCalled();
-    // No task and no stamp yet: not kept, so a stamp written later is seen.
-    const later = randomUUID();
-    expect(await ownerOfTaskId(table(db), later)).toBe("workflow");
-    db.set({ ...engineStampKey(later), coreEngine: CORE });
-    expect(await ownerOfTaskId(table(db), later)).toBe("core");
-    const another = randomUUID();
-    expect(await ownerOfTaskId(table(db), another)).toBe("workflow");
-    db.set({ ...engineStampKey(another), coreEngine: CORE });
-    expect(await ownerOfExistingTask(table(db), another)).toBe("core");
-    // An existing task's verdict is fixed: asked once.
-    const existing = randomUUID();
-    expect(await ownerOfExistingTask(table(db), existing)).toBe("workflow");
-    const before = sent.mock.calls.length;
-    expect(await ownerOfExistingTask(table(db), existing)).toBe("workflow");
-    expect(sent.mock.calls.length).toBe(before);
-  });
-
-  it("a legacy workspace with no task pointer is the workflow's; one whose task the core owns is the core's", async () => {
-    const db = new FakeDynamoDb();
-    const coreTask = randomUUID();
-    db.set({ ...legacyWorkspaceKey("w-core"), sk: "DEVELOPER_TASK", taskId: coreTask });
-    db.set({ ...engineStampKey(coreTask), coreEngine: MIXED });
-    db.set({ ...legacyWorkspaceKey("w-flow"), sk: "DEVELOPER_TASK", taskId: randomUUID() });
-    expect(await ownerOfWorkspace(table(db), "w-none")).toBe("workflow");
-    expect(await ownerOfWorkspace(table(db), "w-flow")).toBe("workflow");
-    expect(await ownerOfWorkspace(table(db), "w-core")).toBe("core");
   });
 
   it("never uses a discovery pointer alone or a cached engine verdict to bypass scoped ownership", async () => {
@@ -222,16 +187,6 @@ async function coreWorld(options: { access?: TaskFlowDeps["access"]; withoutRead
 }
 
 describe("a core task on the AWS developer routes", () => {
-  it("is read through the core's own handlers: the same answer the core gives, and no AWS reader touches its workspace", async () => {
-    const { dev, task, coreRead, workspaceReads } = await coreWorld();
-    const own = await coreRead();
-    expect(own?.statusCode).toBe(200);
-    const read = await dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`);
-    expect(read.status).toBe(200);
-    expect(read.body).toEqual(JSON.parse(own!.body));
-    expect(read.body).toMatchObject({ task: { taskId: task.taskId } });
-    expect(workspaceReads()).toEqual([]);
-  });
 
   it("answers another company's caller exactly like a task id that does not exist (the core decides; the words are the developer routes' own)", async () => {
     const { dev, task, workspaceReads, db } = await coreWorld();
@@ -249,18 +204,6 @@ describe("a core task on the AWS developer routes", () => {
     }
     // The core task's rows are as they were.
     expect(JSON.stringify(db.find((item) => String(item.pk).includes(task.taskId) || String(item.pk).includes(task.workspaceId)))).toBe(coreRows);
-    expect(workspaceReads()).toEqual([]);
-  });
-
-  it("tells the owner, in fixed words, that an operation the core has no handler for is not on the core here yet; never runs the workflow's handler", async () => {
-    const { dev, task, workspaceReads, db } = await coreWorld();
-    const before = JSON.stringify(db.find(() => true));
-    for (const suffix of ["/continue", "/close", "/cancel", "/pull-requests", "/workflow/retry", "/workflow/decision", "/share"]) {
-      const answer = await dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}${suffix}`, { requestId: randomUUID(), instructions: "more", decision: "APPROVE" });
-      expect(answer.status, suffix).toBe(404);
-      expect(answer.body, suffix).toEqual({ error: { code: "NOT_FOUND", message: NOT_ON_THE_CORE_YET } });
-    }
-    expect(JSON.stringify(db.find(() => true))).toBe(before);
     expect(workspaceReads()).toEqual([]);
   });
 
@@ -292,16 +235,6 @@ describe("a core task on the AWS developer routes", () => {
     }
     // Every answer above was a refusal: the AWS rows are as they were, and no AWS reader touched the core task's workspace.
     expect(JSON.stringify(db.find(() => true))).toBe(before);
-    expect(workspaceReads()).toEqual([]);
-  });
-
-  it("with a mixed stamp (flow on the core, build and merge narrowed to the workflow) every operation stays the core's, build and merge ones included", async () => {
-    const { dev, task, db, workspaceReads, coreRead } = await coreWorld();
-    db.set({ ...(db.get(engineStampKey(task.taskId).pk, "STAMP") as Record<string, unknown> & { pk: string; sk: string }), coreEngine: MIXED });
-    expect((await dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body).toEqual(JSON.parse((await coreRead())!.body));
-    for (const suffix of ["/continue", "/workflow/send-back", "/pull-requests", "/workflow/keep-pull-requests"]) {
-      expect((await dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}${suffix}`, { requestId: randomUUID() })).body, suffix).toEqual({ error: { code: "NOT_FOUND", message: NOT_ON_THE_CORE_YET } });
-    }
     expect(workspaceReads()).toEqual([]);
   });
 
@@ -338,24 +271,6 @@ describe("a core task on the AWS developer routes", () => {
     }
   });
 
-  it("without the core's handlers on this install, reads exactly like a task that does not exist, for its owner too", async () => {
-    const { dev, task, workspaceReads } = await coreWorld({ wired: false });
-    const theirs = await dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`);
-    const missingId = randomUUID();
-    const missing = await dev(MAYA, "GET", `/v1/dev/tasks/${missingId}`);
-    expect(theirs.status).toBe(404);
-    expect(JSON.stringify(theirs.body).replaceAll(task.taskId, "<id>")).toBe(JSON.stringify(missing.body).replaceAll(missingId, "<id>"));
-    expect(workspaceReads()).toEqual([]);
-  });
-
-  it("a stamp read that fails fails the request; the workflow's readers never answer in its place", async () => {
-    const { dev, task, db, workspaceReads } = await coreWorld();
-    db.injectFault({ command: "GetCommand", match: (input) => JSON.stringify(input).includes("TASK_ENGINE#"), error: { name: "ProvisionedThroughputExceededException" } });
-    const answer = await dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`);
-    expect(answer.status).toBeGreaterThanOrEqual(500);
-    expect(JSON.stringify(answer.body)).not.toContain("Add a /health endpoint");
-    expect(workspaceReads()).toEqual([]);
-  });
 });
 
 describe("the proof index on the AWS developer route `GET /v1/dev/tasks/{id}/evidence` (Cloud's Proof tab)", () => {
@@ -369,14 +284,6 @@ describe("the proof index on the AWS developer route `GET /v1/dev/tasks/{id}/evi
     expect(workspaceReads()).toEqual([]);
   });
 
-  it("another company's caller reads a core task's index exactly like a task id that does not exist", async () => {
-    const { dev, task } = await coreWorld();
-    const theirs = await dev(OMAR, "GET", `/v1/dev/tasks/${task.taskId}/evidence`);
-    const missingId = randomUUID();
-    const missing = await dev(OMAR, "GET", `/v1/dev/tasks/${missingId}/evidence`);
-    expect(theirs.status).toBe(404);
-    expect(JSON.stringify(theirs).replaceAll(task.taskId, "<id>")).toBe(JSON.stringify(missing).replaceAll(missingId, "<id>"));
-  });
 });
 
 describe("the owner's answers on the AWS developer route `POST /v1/dev/tasks/{id}/answers` (S3)", () => {
@@ -418,15 +325,6 @@ describe("the owner's answers on the AWS developer route `POST /v1/dev/tasks/{id
       expect(JSON.stringify(theirs.body).replaceAll(task.taskId, "<id>"), JSON.stringify(body)).toBe(JSON.stringify(missing.body).replaceAll(missingId, "<id>"));
       expect(JSON.stringify(theirs.body)).not.toContain(FAKE_COMPANY);
     }
-    expect((await readCoreTask((await app.runtimeFor(FAKE_COMPANY)).flow.deps, task.taskId))!.workflow!.intent!.answers).toHaveLength(0);
-  });
-
-  it("without the company's owner rule the owner reads 'not on the core yet' (fixed words), and nothing is answered", async () => {
-    const { dev, task, world, app } = await coreWorld({ understand: true });
-    await asked(world, app, task.taskId);
-    const answer = await dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/answers`, { requestId: randomUUID(), round: 1, answers: ANSWERS });
-    expect(answer.status).toBe(404);
-    expect(answer.body).toEqual({ error: { code: "NOT_FOUND", message: NOT_ON_THE_CORE_YET } });
     expect((await readCoreTask((await app.runtimeFor(FAKE_COMPANY)).flow.deps, task.taskId))!.workflow!.intent!.answers).toHaveLength(0);
   });
 
@@ -515,19 +413,6 @@ describe("the owner's answers on the AWS developer route `POST /v1/dev/tasks/{id
     expect((await detailRow(unwired.dev, MAYA, unwired.task.taskId))?.round).toBeUndefined();
   });
 
-  it("?detail=1 makes no read of the core's task for a row with no round to show, and one check for a row with one", async () => {
-    const { dev, task, world, app, db, coreTasks } = await coreWorld({ actions: true, understand: true });
-    const checks = vi.spyOn(coreTasks, "taskReadable");
-    await publish(world, db, task.taskId);
-    // Understand has not asked anything yet: nothing to show, so nothing to check.
-    expect((await detailRow(dev, MAYA, task.taskId))?.round).toBeUndefined();
-    expect(checks).not.toHaveBeenCalled();
-    await asked(world, app, task.taskId);
-    await publish(world, db, task.taskId);
-    expect((await detailRow(dev, MAYA, task.taskId))?.round).toBeDefined();
-    expect(checks).toHaveBeenCalledTimes(1);
-  });
-
   it("golden: an unstamped (workflow) task's answers route answers and writes exactly as with no core entry on the install: 'not waiting' for its owner, the missing task's answer for another company", async () => {
     const legacyAnswers = async (harness: Awaited<ReturnType<typeof createDeveloperTaskBroker>>) => {
       const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: "22222222-2222-4222-8222-222222222222", project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
@@ -581,15 +466,6 @@ describe("the AWS readers see only workflow rows", () => {
     expect(await actions.failedPublications(task.workspaceId, { repositoryId: "demo", candidateDigest: "d", treeSha: "t" })).toBe(0);
   });
 
-  it("a workflow task's workspace still reads as before through the same actions", async () => {
-    const { actions, dev, db } = await coreWorld({ newTasksOnWorkflow: true });
-    const started = await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
-    const taskId = (started.body.task as { taskId: string }).taskId;
-    const { workspaceId } = db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
-    expect((await actions.workspace(workspaceId)).id).toBe(workspaceId);
-    expect((await actions.operations(workspaceId)).map((operation) => operation.kind)).toEqual(["prepare"]);
-  });
-
   it("the workflow's task access and owned-task load refuse a core task exactly as a missing one", async () => {
     const { db, task, actions, brokerInput } = await coreWorld();
     // Even with the record made to look like the caller's own, the core's task is not read here.
@@ -600,19 +476,6 @@ describe("the AWS readers see only workflow rows", () => {
     await expect(loadOwnedTask(deps, caller, task.taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND", message: `TASK_NOT_FOUND: no task ${task.taskId} of yours` });
     // The task page's poll and comments and the PR feedback review page go through the same access.
     for (const page of [getTaskPageState, listPageComments, getWorkflowFeedbackReview]) await expect(page(deps, caller, task.taskId), page.name).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-  });
-
-  it("the task list shows a core task's row as its index row says, and never works out or rewrites its status through the workflow", async () => {
-    const { db, task, dev, workspaceReads } = await coreWorld();
-    db.set({ ...(db.get(`DEVTASK#${task.taskId}`, "META") as Record<string, unknown> & { pk: string; sk: string }), developerId: MAYA.developerId });
-    const row = { pk: `DEVELOPER#${MAYA.developerId}`, sk: `TASK#2026-11-15T00:00:00.000Z#${task.taskId}`, entityType: "DEVELOPER_TASK_INDEX", taskId: task.taskId, title: "Core work", project: "payments", status: "RUNNING", shared: false, createdAt: "2026-11-15T00:00:00.000Z", updatedAt: "2026-11-15T00:00:00.000Z" };
-    db.set(row);
-    const writes: unknown[] = [];
-    db.onWrite((change) => writes.push(change));
-    const listed = await dev(MAYA, "GET", "/v1/dev/tasks");
-    expect(listed.body).toEqual({ tasks: [{ taskId: task.taskId, title: "Core work", project: "payments", status: "RUNNING", shared: false, createdAt: row.createdAt, updatedAt: row.updatedAt }] });
-    expect(writes).toEqual([]);
-    expect(workspaceReads()).toEqual([]);
   });
 
   it("?detail=1 adds each row's detail (Cloud #188 item 5): a core task's workflow stage and state, its cost and run limit from the core's own money read, as its owner; nothing is written", async () => {
@@ -661,36 +524,6 @@ describe("the AWS readers see only workflow rows", () => {
     expect(JSON.stringify(theirs.body)).not.toContain(taskId);
   });
 
-  it("?detail=1 on a workflow task's row carries the workflow's outcome (the task read's own word) and never a round; the ordinary list is untouched", async () => {
-    const { dev, db, coreTasks } = await coreWorld({ newTasksOnWorkflow: true });
-    // A readable check that says yes to everything: the list must still not ask it about a workflow task.
-    const checks = vi.fn(async () => true);
-    (coreTasks as { taskReadable?: CoreTaskEntry["taskReadable"] }).taskReadable = checks;
-    const started = await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code", workflow: true, workflowPath: "QUICK" });
-    const taskId = (started.body.task as { taskId: string }).taskId;
-    const meta = db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { pk: string; sk: string; workflow: Record<string, unknown> };
-    expect(meta.workflow).toBeDefined();
-    const before = await detailRow(dev, MAYA, taskId);
-    expect(before?.outcome).toBeUndefined();
-    db.set({ ...meta, workflow: JSON.parse(JSON.stringify(WorkflowSnapshotSchema.parse({ ...meta.workflow, stage: "CLOSED", state: "COMPLETE", outcome: "CLOSED" }))) as Record<string, unknown> });
-    const row = await detailRow(dev, MAYA, taskId);
-    expect(row?.outcome).toBe("CLOSED");
-    expect(row?.workflow).toMatchObject({ stage: "CLOSED", state: "COMPLETE" });
-    expect(row?.round).toBeUndefined();
-    expect(JSON.stringify((await dev(MAYA, "GET", "/v1/dev/tasks")).body)).not.toContain("outcome");
-    // Understand's questions are a core task's: even a workflow row whose record holds a waiting round lists none.
-    const now = "2026-11-15T00:00:00.000Z";
-    const understanding = createWorkflowSnapshot({ taskId, ownerId: meta.workflow["ownerId"] as string, now, path: "QUICK", definitionVersion: "1.1.0", understand: true });
-    const waiting = recordIntentAssessment(startWorkflowUnderstand(understanding, now), { expectedRevision: understanding.revision + 1, now, assessment: { kind: "questions", restatement: "Fix it.", questions: [{ id: "q1", text: "Which test?" }] } });
-    db.set({ ...meta, workflow: JSON.parse(JSON.stringify(waiting)) as Record<string, unknown> });
-    const asking = await detailRow(dev, MAYA, taskId);
-    expect(asking?.workflow).toMatchObject({ stage: "UNDERSTAND", state: "WAITING" });
-    expect(asking?.round).toBeUndefined();
-    expect(JSON.stringify(asking)).not.toContain("Which test?");
-    // The core is never asked about a workflow task.
-    expect(checks).not.toHaveBeenCalled();
-  });
-
   it("the core's money read for a list row answers only the task's owner in their own company; anyone else gets nothing", async () => {
     const { task, coreTasks, routes, owner } = await coreWorld({ actions: true, roundCap: async () => ({ limitUsd: 9, spentUsd: 2 }) });
     expect(await coreTasks.taskMoney!({ developerId: MAYA.developerId, sessionId: "s", name: "Maya" }, task.taskId)).toMatchObject({ costUsd: 2, runLimitUsd: 9, money: { taskId: task.taskId, state: "unavailable" } });
@@ -701,18 +534,6 @@ describe("the AWS readers see only workflow rows", () => {
     expect(await coreTasks.taskMoney!({ developerId: MAYA.developerId, sessionId: "s", name: "Maya" }, randomUUID())).toBeUndefined();
     // A script token never reads money.
     expect(await routes.taskMoney({ principal: owner, client: "cli", scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } }, task.taskId)).toBeUndefined();
-  });
-
-  it("the ordinary task list is unchanged by the involved list: every query but exactly involved=1 is the same list, byte for byte (web task channel C5)", async () => {
-    const { db, task, dev } = await coreWorld();
-    db.set({ ...(db.get(`DEVTASK#${task.taskId}`, "META") as Record<string, unknown> & { pk: string; sk: string }), developerId: MAYA.developerId });
-    db.set({ pk: `DEVELOPER#${MAYA.developerId}`, sk: `TASK#2026-11-15T00:00:00.000Z#${task.taskId}`, entityType: "DEVELOPER_TASK_INDEX", taskId: task.taskId, title: "Core work", project: "payments", status: "RUNNING", shared: false, createdAt: "2026-11-15T00:00:00.000Z", updatedAt: "2026-11-15T00:00:00.000Z" });
-    const golden = { tasks: [{ taskId: task.taskId, title: "Core work", project: "payments", status: "RUNNING", shared: false, createdAt: "2026-11-15T00:00:00.000Z", updatedAt: "2026-11-15T00:00:00.000Z" }] };
-    expect((await dev(MAYA, "GET", "/v1/dev/tasks")).body).toEqual(golden);
-    for (const query of ["?involved=0", "?involved=true", "?involved=11", "?involved=", "?involved=1x", "?involvedx=1", "?detail=0", "?detail=true", "?detail=", "?detail=11", "?details=1"]) {
-      const answer = await dev(MAYA, "GET", `/v1/dev/tasks${query}`);
-      expect(JSON.stringify(answer), query).toBe(JSON.stringify({ status: 200, body: golden }));
-    }
   });
 
   it("?involved=1 is the core's list: empty with nothing added (never the ordinary list), empty with no core handlers on this install, and another company's task is never listed even for a row that names it", async () => {
@@ -782,24 +603,6 @@ describe("the operation readers behind requireOperation see only workflow rows (
     });
   }
 
-  it("a failed engine read fails the operation read; it is never taken for the workflow", async () => {
-    const { db, task, actions } = await coreWorld();
-    const operation = await operationOf(db, task.workspaceId);
-    db.injectFault({ command: "GetCommand", match: (input) => JSON.stringify(input).includes("DEVELOPER_TASK"), error: { name: "ProvisionedThroughputExceededException" } });
-    await expect(actions.workflowBinding(task.workspaceId, operation.id)).rejects.toMatchObject({ name: "ProvisionedThroughputExceededException" });
-  });
-
-  it("a workflow task's operation still reads through all three", async () => {
-    const { actions, dev, db, brokerInput } = await coreWorld({ newTasksOnWorkflow: true });
-    const started = await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
-    const taskId = (started.body.task as { taskId: string }).taskId;
-    const { workspaceId } = db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
-    const operation = await operationOf(db, workspaceId);
-    expect((await requireOperation({ documentClient: db, tableName: brokerInput.tableName }, workspaceId, operation.id)).id).toBe(operation.id);
-    expect(await actions.workflowBinding(workspaceId, operation.id)).toBeUndefined();
-    expect(await actions.workflowCandidateSourceExportDigest(workspaceId, operation.id)).toBeUndefined();
-    await expect(actions.workflowBinding(workspaceId, "missing-operation")).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: operation not found" });
-  });
 });
 
 describe("a task's start on the AWS developer route (lane E2 step 6)", () => {
@@ -812,46 +615,9 @@ describe("a task's start on the AWS developer route (lane E2 step 6)", () => {
     expect(db.get(`DEVTASK#${taskId}`, "META")).toBeUndefined();
   });
 
-  it("stays the workflow's start for a caller the core's mapping names no company for, and without the core's handlers", async () => {
-    const unknown = await coreWorld({ unknown: "principal" });
-    const coreWrites = vi.spyOn(unknown.world.store, "transact");
-    const theirs = await unknown.dev(OMAR, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
-    expect(coreWrites).not.toHaveBeenCalled();
-    const unwired = await coreWorld({ wired: false });
-    const mine = await unwired.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
-    expect(mine.status).toBe(200);
-    expect(unwired.db.get(`DEVTASK#${(mine.body.task as { taskId: string }).taskId}`, "META")).toBeDefined();
-    // The workflow's own start answered OMAR (his task rows are the workflow's when it let him start).
-    if (theirs.status === 200) expect(unknown.db.get(`DEVTASK#${(theirs.body.task as { taskId: string }).taskId}`, "META")).toBeDefined();
-    else expect(theirs.status).toBeLessThan(500);
-  });
 });
 
 describe("a Stop on the AWS developer route `POST /v1/dev/tasks/{id}/cancel` (S1, the switch-on gate)", () => {
-  it("with the company's owner rule wired, the owner stops a core task through the core: the old route's status and { task }, the core step cancelled, no AWS reader touches its workspace", async () => {
-    const { dev, task, world, workspaceReads } = await coreWorld({ actions: true });
-    const workspace = (await world.store.get({ pk: workspacePartition(FAKE_COMPANY, task.workspaceId), sk: "META" }))!;
-    const operationId = workspace["activeOperationId"] as string;
-    const answer = await dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/cancel`, { requestId: randomUUID() });
-    expect(answer.status).toBe(200);
-    expect(answer.body).toMatchObject({ task: { taskId: task.taskId } });
-    expect((await world.store.get({ pk: workspacePartition(FAKE_COMPANY, task.workspaceId), sk: `OPERATION#${operationId}` }))?.["status"]).toBe("CANCELLED");
-    expect(workspaceReads()).toEqual([]);
-  });
-
-  it("another company's caller is answered exactly like a task id that does not exist, for every body; nothing is stopped", async () => {
-    const { dev, task, world } = await coreWorld({ actions: true });
-    const workspace = (await world.store.get({ pk: workspacePartition(FAKE_COMPANY, task.workspaceId), sk: "META" }))!;
-    const operationId = workspace["activeOperationId"] as string;
-    for (const body of [{ requestId: randomUUID() }, {}, [1], null, undefined]) {
-      const missingId = randomUUID();
-      const theirs = await dev(OMAR, "POST", `/v1/dev/tasks/${task.taskId}/cancel`, body);
-      const missing = await dev(OMAR, "POST", `/v1/dev/tasks/${missingId}/cancel`, body);
-      expect(theirs.status, JSON.stringify(body)).toBe(missing.status);
-      expect(JSON.stringify(theirs.body).replaceAll(task.taskId, "<id>"), JSON.stringify(body)).toBe(JSON.stringify(missing.body).replaceAll(missingId, "<id>"));
-    }
-    expect((await world.store.get({ pk: workspacePartition(FAKE_COMPANY, task.workspaceId), sk: `OPERATION#${operationId}` }))?.["status"]).not.toBe("CANCELLED");
-  });
 
   it("golden: an unstamped (workflow) task's cancel answers and writes exactly as with no core entry on the install", async () => {
     const legacyCancel = async (harness: Awaited<ReturnType<typeof createDeveloperTaskBroker>>) => {

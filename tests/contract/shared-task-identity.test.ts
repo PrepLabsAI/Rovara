@@ -2,10 +2,10 @@
 // Spec 025 FR-054, C11, C13, C14: a shared thread's service calls, resolved by the broker.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { indexExpiresAt, SLACK_OIDC_ISSUER } from "@agentx/contracts";
+import { SLACK_OIDC_ISSUER } from "@agentx/contracts";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { MAYA, createDeveloperTaskBroker, markThreadPosted, teammate } from "../support/developer-task-broker.js";
-import { SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
+import { SLACK_TEAM } from "../support/slack-broker.js";
 
 const PRIYA = "U0PRIYA001";
 /** Every broker answer carries the request's requestId beside the result's own fields: the result alone. */
@@ -77,56 +77,6 @@ describe("an ordinary thread beside a shared one (characterization, C23)", () =>
 });
 
 describe("a continue thread acts on the task's workspace (FR-054)", () => {
-  it("answers the task's workspace: never created, never charged, nothing to recover", async () => {
-    const h = await continueThread();
-    const before = h.workspaces();
-    const answer = await h.ensure();
-    expect(answer.status).toBe(200);
-    expect(answer.body).toMatchObject({ outcome: "WORKSPACE", workspaceId: h.workspaceId, status: "READY", created: false, recoverableOperations: [], sharedTask: { taskId: h.taskId, developerName: "Maya Chen" } });
-    expect(h.workspaces()).toBe(before);
-    expect(h.db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${PRIYA}`)).toBeUndefined();
-  });
-
-  it("runs the teammate's request as the teammate, and records who started it (C13)", async () => {
-    const h = await continueThread();
-    const accepted = await channelTask(h, "Priya");
-    expect(accepted.status).toBe(202);
-    const operationId = String((accepted.body.operation as { id: string }).id);
-    expect(h.db.get(`WORKSPACE#${h.workspaceId}`, `OPERATION#${operationId}`)).toMatchObject({ kind: "task", requestedBy: { teamId: SLACK_TEAM, userId: PRIYA } });
-    expect(h.db.get(`DEVTASK#${h.taskId}`, `CHANNEL_OPERATION#${operationId}`)).toMatchObject({ slackUserId: PRIYA, name: "Priya" });
-  });
-
-  it("gives the channel operation marker the 30-day TTL attribute (25c note 2)", async () => {
-    const h = await continueThread();
-    const accepted = await channelTask(h, "Priya");
-    const operationId = String((accepted.body.operation as { id: string; createdAt: string }).id);
-    const createdAt = String((accepted.body.operation as { createdAt: string }).createdAt);
-    expect(h.db.get(`DEVTASK#${h.taskId}`, `CHANNEL_OPERATION#${operationId}`)).toMatchObject({ indexExpiresAt: indexExpiresAt(createdAt) });
-  });
-
-  it("writes no TTL attribute for an ordinary thread's request, which has no channel operation marker (25c note 2)", async () => {
-    const h = await continueThread();
-    const other = `${SLACK_TEAM}/${h.subject.split("/")[1]}/1695500000.000900`;
-    const own = String((await teammate(h.handler, other, PRIYA, "POST", "/v1/service/threads/workspace", { requestId: randomUUID(), includeIntegrations: true })).body.workspaceId);
-    const preparing = (h.db.get(`WORKSPACE#${own}`, "META") as { activeOperationId: string | null }).activeOperationId;
-    if (preparing !== null) await h.finish(own, preparing, "SUCCEEDED");
-    const conversation = String(((await teammate(h.handler, other, PRIYA, "POST", `/v1/service/workspaces/${own}/conversations`, {})).body.conversation as { id: string }).id);
-    const before = new Set(h.db.find((item) => item.indexExpiresAt !== undefined));
-    expect((await teammate(h.handler, other, PRIYA, "POST", `/v1/service/workspaces/${own}/tasks`, { requestId: randomUUID(), conversationId: conversation, prompt: "hello" })).status).toBe(202);
-    expect(h.db.find((item) => item.indexExpiresAt !== undefined && !before.has(item))).toEqual([]);
-    expect(h.db.find((item) => item.entityType === "CHANNEL_OPERATION" && item.pk !== `DEVTASK#${h.taskId}`)).toEqual([]);
-  });
-
-  it("writes no AI-tool completed record under the developer's name when a teammate's operation ends (F3)", async () => {
-    const h = await continueThread();
-    const accepted = await channelTask(h, "Priya");
-    const operationId = String((accepted.body.operation as { id: string }).id);
-    await h.finish(h.workspaceId, operationId, "SUCCEEDED");
-    expect(h.db.get(`WORKSPACE#${h.workspaceId}`, `OPERATION#${operationId}`)).toMatchObject({ status: "SUCCEEDED" });
-    expect(h.db.find((item) => item.pk === `TASK#${h.taskId}` && item.operationId === operationId)).toEqual([]);
-    // The developer's own operations still get theirs.
-    expect(h.db.find((item) => item.pk === `TASK#${h.taskId}` && item.phase === "completed").length).toBeGreaterThan(0);
-  });
 
   it("names the running operation only when the channel started it, so the developer's own run stays private (D22)", async () => {
     const h = await continueThread();
@@ -146,13 +96,6 @@ describe("a continue thread acts on the task's workspace (FR-054)", () => {
     expect(running.body).not.toHaveProperty("activeOperation");
     const prepared = await teammate(h.handler, h.subject, PRIYA, "POST", "/v1/service/threads/workspace/prepare", { requestId: randomUUID() });
     expect(prepared.body).toMatchObject({ outcome: "WORKSPACE", operationId: channels });
-  });
-
-  it("hides the developer's running operation from the prepare route too", async () => {
-    const h = await continueThread();
-    await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "keep going" });
-    const prepared = await teammate(h.handler, h.subject, PRIYA, "POST", "/v1/service/threads/workspace/prepare", { requestId: randomUUID() });
-    expect(prepared.body).toMatchObject({ outcome: "WORKSPACE", status: "BUSY", operationId: null });
   });
 
   it("treats the workspace as idle when its active operation's record is missing", async () => {
@@ -185,10 +128,6 @@ describe("a continue thread acts on the task's workspace (FR-054)", () => {
     expect((await prepare({})).status).toBe(403);
   });
 
-  it("keeps a WORKSPACE answer strict for a Slack service that does not ask for sharedTask", async () => {
-    const h = await continueThread();
-    expect((await h.ensure(OLDER_REQUEST)).body).not.toHaveProperty("sharedTask");
-  });
 });
 
 describe("the developer's own run stays private from the thread (D22)", () => {
@@ -243,28 +182,6 @@ describe("the developer's own run stays private from the thread (D22)", () => {
 });
 
 describe("a thread that is not open to the channel (C11, Review Focus 2)", () => {
-  it("answers VIEW_ONLY and creates nothing once the thread is view only", async () => {
-    const h = await continueThread();
-    await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/share`, { requestId: randomUUID(), shareMode: "view" });
-    const before = h.workspaces();
-    expect(result((await h.ensure()).body)).toEqual({ outcome: "VIEW_ONLY", taskId: h.taskId, closed: false });
-    expect((await h.ensure(OLDER_REQUEST)).body.error).toMatchObject({ code: "FORBIDDEN" });
-    expect(h.workspaces()).toBe(before);
-    // The thread's own key owns no workspace, so the task's is out of reach.
-    expect((await teammate(h.handler, h.subject, PRIYA, "POST", `/v1/service/workspaces/${h.workspaceId}/conversations`, {})).status).toBe(404);
-  });
-
-  it("says the task is closed, never the ordinary closed workspace, when the workspace closed first (Q3)", async () => {
-    const h = await continueThread();
-    h.db.set({ ...h.db.get(`WORKSPACE#${h.workspaceId}`, "META")!, status: "CLOSED", closedAt: new Date().toISOString() });
-    expect(result((await h.ensure()).body)).toEqual({ outcome: "VIEW_ONLY", taskId: h.taskId, closed: true });
-  });
-
-  it("says closed once the task is closed", async () => {
-    const h = await continueThread();
-    h.db.set({ ...h.db.get(`SHARED_TASK#${h.subject}`, "META")!, closedAt: new Date().toISOString() });
-    expect(result((await h.ensure()).body)).toEqual({ outcome: "VIEW_ONLY", taskId: h.taskId, closed: true });
-  });
 
   it("treats a Slack-started task's own thread as closed to the channel's chat agent, even in continue mode", async () => {
     const h = await continueThread();
@@ -274,12 +191,6 @@ describe("a thread that is not open to the channel (C11, Review Focus 2)", () =>
     expect((await h.ensure(OLDER_REQUEST)).body.error).toMatchObject({ code: "FORBIDDEN" });
     expect(h.workspaces()).toBe(before);
     expect((await teammate(h.handler, h.subject, PRIYA, "POST", `/v1/service/workspaces/${h.workspaceId}/conversations`, {})).status).toBe(404);
-  });
-
-  it("treats a thread whose channel now serves another project as view only", async () => {
-    const h = await continueThread();
-    h.db.set({ ...h.db.get(`SHARED_TASK#${h.subject}`, "META")!, project: "ledger" });
-    expect((await h.ensure()).body).toMatchObject({ outcome: "VIEW_ONLY" });
   });
 
   it("refuses to close the task from the thread: only the developer closes it", async () => {
@@ -358,46 +269,6 @@ describe("stop in a shared thread (Q8)", () => {
     expect(h.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string }).kind === "cancel")).toEqual([]);
   });
 
-  it("fences a first PEOPLE sidecar created after absence was read before a legacy stop commits", async () => {
-    const h = await continueThread();
-    await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "keep going" });
-    const owner = h.db.get(`DEVTASK#${h.taskId}`, "META")!.developerId as string;
-    const personId = randomUUID();
-    const createdAt = new Date().toISOString();
-    const firstPeople = { pk: `DEVTASK#${h.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
-      people: [{ developerId: owner, slackUserId: MAYA.slackUserId!, name: MAYA.name, role: "owner" }] };
-    const send = h.db.send;
-    let installed = false;
-    h.db.send = async (command) => {
-      const result = await send(command);
-      if (!installed && command.constructor.name === "GetCommand"
-        && (command.input.Key as { pk?: string; sk?: string } | undefined)?.pk === `DEVTASK#${h.taskId}`
-        && (command.input.Key as { sk?: string } | undefined)?.sk === "PEOPLE") {
-        installed = true;
-        h.db.set(firstPeople);
-        h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `PERSON#${personId}`, schemaVersion: 1, personId,
-          developerId: owner, slackUserId: MAYA.slackUserId!, name: MAYA.name, method: "slack", issuer: SLACK_OIDC_ISSUER,
-          subject: MAYA.slackUserId!, createdAt });
-        h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `PERSON_SUBJECT#${owner}`, schemaVersion: 1, personId, developerId: owner, createdAt });
-      }
-      return result;
-    };
-    const response = await h.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: threadOf(h.subject), userId: PRIYA });
-    expect(installed).toBe(true);
-    expect(response.statusCode).toBe(409);
-    expect(JSON.parse(response.body)).toMatchObject({ error: { code: "WORKSPACE_BUSY" } });
-    expect(h.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toEqual([]);
-    expect(h.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string }).kind === "cancel")).toEqual([]);
-  });
-
-  it("stops nothing when the channel now serves another project (F16)", async () => {
-    const h = await continueThread();
-    await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "keep going" });
-    h.db.set({ ...h.db.get(`SHARED_TASK#${h.subject}`, "META")!, project: "ledger" });
-    const response = await h.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: threadOf(h.subject), userId: PRIYA });
-    expect(JSON.parse(response.body)).toMatchObject({ outcome: "NOTHING_RUNNING" });
-    expect(h.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toEqual([]);
-  });
 });
 
 describe("the developer meets a channel turn (C14, D4)", () => {
@@ -448,27 +319,6 @@ describe("the developer meets a channel turn (C14, D4)", () => {
       if (expected === undefined) expect(message).not.toContain("waiting");
       else expect(message).toContain(expected);
     }
-  });
-
-  it("reads the waiting count from the Slack threads table, and gives none without one (C14 wiring)", async () => {
-    const h = await continueThread();
-    const accepted = await channelTask(h, "Priya");
-    const operationId = String((accepted.body.operation as { id: string }).id);
-    h.db.set({ pk: `THREAD#${h.subject}`, sk: "META", pendingRequests: 4 });
-    const reads: Array<Record<string, unknown>> = [];
-    const send = h.db.send;
-    h.db.send = async (command) => {
-      if (command.constructor.name === "GetCommand") reads.push({ TableName: command.input.TableName, Key: command.input.Key });
-      return send(command);
-    };
-    expect(await h.actions.channelActivity({ taskId: h.taskId, operationId, threadSubject: h.subject })).toEqual({ driver: { slackUserId: PRIYA, name: "Priya" }, waiting: 3 });
-    expect(reads).toContainEqual({ TableName: "threads", Key: { pk: `THREAD#${h.subject}`, sk: "META" } });
-    const module = await loadSlackBroker() as unknown as { createDeveloperTaskActions: (input: never) => typeof h.actions };
-    const legacy: Record<string, unknown> = { ...h.brokerInput };
-    delete legacy.slackThreadsTableName;
-    expect(await module.createDeveloperTaskActions(legacy as never).channelActivity({ taskId: h.taskId, operationId, threadSubject: h.subject })).toEqual({ driver: { slackUserId: PRIYA, name: "Priya" }, waiting: 0 });
-    // An operation no teammate started names no driver.
-    expect(await h.actions.channelActivity({ taskId: h.taskId, operationId: randomUUID(), threadSubject: h.subject })).toEqual({ waiting: 0 });
   });
 
   it("keeps 25b's TASK_BUSY words when the running operation is the developer's own", async () => {

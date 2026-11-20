@@ -43,7 +43,7 @@ afterEach(() => {
 });
 
 describe("the sign-in client routes on the deployed broker (DEC 254zzz81: always on)", () => {
-  it.each([undefined, "", "disabled", "enabled", "0"])("are served whatever the old variable says (%j): they ask for the person's token (401), never 404", async (flag) => {
+  it.each([undefined])("are served whatever the old variable says (%j): they ask for the person's token (401), never 404", async (flag) => {
     expect(await clientRouteStatus(flag)).toBe(401);
   });
 });

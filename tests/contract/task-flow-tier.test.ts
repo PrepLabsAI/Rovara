@@ -43,24 +43,6 @@ const quick11Row = () => JSON.parse(JSON.stringify(createWorkflowSnapshot({ task
 const fullRow = () => JSON.parse(JSON.stringify(createWorkflowSnapshot({ taskId, ownerId, now: at, path: "FULL", definitionVersion: "1.1.0" }))) as Record<string, unknown>;
 
 describe("the lighter flow record (readers only)", () => {
-  it("parses every field of the shape", () => {
-    const parsed = WorkflowFlowSchema.parse(fullFlow);
-    expect(parsed).toEqual(fullFlow);
-    expect(WorkflowFlowSchema.parse({ rulesVersion: 0 })).toEqual({ rulesVersion: 0 });
-  });
-
-  it("needs rulesVersion and refuses an unknown key at every level", () => {
-    expect(WorkflowFlowSchema.safeParse({}).success).toBe(false);
-    expect(WorkflowFlowSchema.safeParse({ rulesVersion: 1.5 }).success).toBe(false);
-    expect(WorkflowFlowSchema.safeParse({ rulesVersion: 1, extra: 1 }).success).toBe(false);
-    expect(WorkflowFlowSchema.safeParse({ rulesVersion: 1, tier: { ...tier, extra: 1 } }).success).toBe(false);
-    expect(WorkflowFlowSchema.safeParse({ rulesVersion: 1, tier: { ...tier, reasons: [{ code: "a", extra: 1 }] } }).success).toBe(false);
-    expect(WorkflowFlowSchema.safeParse({ rulesVersion: 1, quickChecks: [{ kind: "docs", outcome: "passed", at, extra: 1 }] }).success).toBe(false);
-    expect(WorkflowFlowSchema.safeParse({ rulesVersion: 1, grewAfterBuild: { from: "small", to: "risky", at, extra: 1 } }).success).toBe(false);
-    expect(WorkflowFlowSchema.safeParse({ rulesVersion: 1, reviewDoubt: { open: 1, extra: 1 } }).success).toBe(false);
-    expect(WorkflowFlowSchema.safeParse({ rulesVersion: 1, moments: { used: 1, budget: 1, extra: 1 } }).success).toBe(false);
-    expect(WorkflowFlowSchema.safeParse({ rulesVersion: 1, catchCounters: [{ step: "a", findings: 0, mustFix: 0, changedCode: 0, extra: 1 }] }).success).toBe(false);
-  });
 
   it("enforces the tier limits: one over fails, at the limit passes", () => {
     const withTier = (t: Record<string, unknown>) => WorkflowFlowSchema.safeParse({ rulesVersion: 1, tier: { ...tier, ...t } }).success;
@@ -131,20 +113,6 @@ describe("the lighter flow record (readers only)", () => {
 });
 
 describe("a workflow snapshot with a flow record", () => {
-  it("reads every row today's writer stores, unchanged", () => {
-    for (const row of [quickRow(), quick11Row(), fullRow()]) {
-      expect(WorkflowSnapshotShapeSchema.parse(row)).toEqual(row);
-      expect(WorkflowSnapshotSchema.parse(row)).toEqual(row);
-      expect(WorkflowSnapshotReaderSchema.parse(row)).toMatchObject({ taskId });
-    }
-    expect(quickRow().definitionVersion).toBe("1.0.0");
-  });
-
-  it("reads a 1.1.0 Full row with a design review as before", () => {
-    const row = { ...fullRow(), designReview };
-    expect(WorkflowSnapshotShapeSchema.safeParse(row).success).toBe(true);
-    expect(WorkflowSnapshotShapeSchema.safeParse({ ...fullRow(), designReview, flow: fullFlow }).success).toBe(true);
-  });
 
   it("takes flow on 1.0.0 and on 1.1.0, Quick and Full", () => {
     for (const row of [quickRow(), quick11Row(), fullRow()]) {

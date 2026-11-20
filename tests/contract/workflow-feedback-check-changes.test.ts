@@ -25,13 +25,6 @@ const workflow = (checkPolicy: WorkflowCheckPolicyInput, feedbackDecisions = 0) 
 });
 
 describe("check changes of an approved PR feedback fix", () => {
-  it("resolves obsolete checks by ID or label among the proposed checks the task runs, and normalizes corrected checks", () => {
-    const parsed = WorkflowSnapshotSchema.parse(workflow(policy())).checkPolicy;
-    expect(workflowFeedbackCheckChanges(parsed, [finding({ obsoleteChecks: ["proposed-1"], replacementChecks: [replacement] })])).toMatchObject({
-      obsolete: [SENTENCE], added: [{ label: replacement.label, command: { cwd: replacement.cwd, executable: replacement.executable, args: replacement.args, timeoutSeconds: 600 } }], problems: [],
-    });
-    expect(workflowFeedbackCheckChanges(parsed, [finding({ obsoleteChecks: ["code of conduct sentence present in readme.md"] })]).obsolete).toEqual([SENTENCE]);
-  });
 
   it("never drops a required project check or a check the task does not have, and names the problem; an unticked proposed check is already not run", () => {
     const unticked = WorkflowSnapshotSchema.parse(workflow(policy({ selectedProposedIds: ["proposed-2"] }))).checkPolicy;
@@ -70,11 +63,6 @@ describe("check changes of an approved PR feedback fix", () => {
     const PLAIN = "keep the command to at most 300 plain characters without ` or $(";
     it.each([
       ["a backtick", { ...replacement, args: ["-q", "`id`", "README.md"] }],
-      ["$(", { ...replacement, args: ["-q", "$(id)", "README.md"] }],
-      ["a right-to-left override", { ...replacement, args: ["-q", "kind.\u202E", "README.md"] }],
-      ["a zero-width space", { ...replacement, args: ["-q", "kind.\u200B", "README.md"] }],
-      ["a character outside plain ASCII in its label", { ...replacement, label: "Shorter sentence \u00e9" }],
-      ["301 characters", { ...replacement, args: ["-q", "x".repeat(301 - "grep -q  README.md".length), "README.md"] }],
     ])("refuses %s", (_name, check) => {
       expect(feedbackReplacementCheckProblem(check, ["repo/demo"])).toBe(PLAIN);
       expect(workflowFeedbackCheckChanges(parsed(), [finding({ replacementChecks: [check] })], ["repo/demo"]).problems).toEqual([PLAIN]);
@@ -90,8 +78,6 @@ describe("check changes of an approved PR feedback fix", () => {
     });
     it.each([
       ["a backtick", "repo/demo/`x`"],
-      ["$(", "repo/demo/$(x)"],
-      ["121 characters", `repo/demo/${"d".repeat(111)}`],
     ])("refuses a folder with %s", (_name, cwd) => {
       expect(cwd.length <= 120 || cwd.length === 121).toBe(true);
       expect(feedbackReplacementCheckProblem({ ...replacement, cwd }, ["repo/demo"])).toBe("keep its folder to at most 120 plain characters without ` or $(");
@@ -99,8 +85,6 @@ describe("check changes of an approved PR feedback fix", () => {
     const FOLDER = "keep its folder to letters, digits and . _ / + - only, with no spaces";
     it.each([
       ["a trailing space", "repo/demo/sub "],
-      ["a space after the slash", "repo/demo/ "],
-      ["a space inside", "repo/demo/a b"],
     ])("refuses a folder with %s, so the owner reads exactly where it runs", (_name, cwd) => {
       expect(feedbackReplacementCheckProblem({ ...replacement, cwd }, ["repo/demo"])).toBe(FOLDER);
     });
@@ -156,13 +140,6 @@ describe("check changes of an approved PR feedback fix", () => {
     ]);
     expect(describeWorkflowCheckChanges([{ obsolete: ["Old"], added: [] }])).toEqual(["Updates checks: Old → removed"]);
     expect(describeWorkflowCheckChanges([{ obsolete: [], added: [] }])).toEqual([]);
-  });
-
-  it("adds a corrected check once, and not when it is the same command as a check that stays", () => {
-    const parsed = WorkflowSnapshotSchema.parse(workflow(policy())).checkPolicy;
-    const sameAsLinks = { label: "Links", cwd: "repo/demo", executable: "grep", args: LINKS.command.args, timeoutSeconds: 30 };
-    const changes = workflowFeedbackCheckChanges(parsed, [finding({ replacementChecks: [replacement, sameAsLinks] }), finding({ replacementChecks: [replacement] })]);
-    expect(changes.added.map((check) => check.label)).toEqual([replacement.label]);
   });
 
   it("stores the updated set: the obsolete check removed, the corrected one added, the required one kept", () => {

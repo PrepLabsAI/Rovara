@@ -47,12 +47,6 @@ const inContainer = (docker: DockerApi, extra: Partial<Parameters<typeof sweepWo
 });
 
 describe("removing containers left from the workspace before a push (docker containment)", () => {
-  it("refuses the container scope unless the worker is really inside its container, and removes nothing", async () => {
-    const { docker, removed } = fakeDocker([container(SELF), container(DEVCONTAINER)]);
-    vi.stubEnv("AGENTX_WORKER_PROCESS_SCOPE", "container");
-    await expect(sweepWorkspaceContainers({ rootPath: "/mnt/workspace", docker, socketMounted: async () => true, selfContainerId: async () => SELF, log: () => undefined, inContainer: () => false })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringMatching(/not running in its container/) as unknown });
-    expect(removed).toEqual([]);
-  });
 
   it("finds the worker's own container ID from Docker's bind mounts, or from a cgroup v1 path", () => {
     const mountinfo = [

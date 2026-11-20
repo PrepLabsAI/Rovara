@@ -178,17 +178,6 @@ describe("task messages", () => {
     expect(fixture.db.get(`DEVTASK#${fixture.taskId}`, "META")).not.toHaveProperty("threadNoteCount");
   });
 
-  it("only the owner steers; a teammate who may comment gets the same answer as a missing task", async () => {
-    const fixture = withPlan();
-    const missing = await refusal(sendTaskMessage(fixture.deps, SAM, randomUUID(), { requestId: "s", kind: "steer", text: "go left" }));
-    const teammate = await refusal(sendTaskMessage(fixture.deps, SAM, fixture.taskId, { requestId: "s", kind: "steer", text: "go left" }));
-    expect([teammate.code, teammate.message]).toEqual([missing.code, missing.message]);
-    expect(Object.keys(fixture.db.get(`DEVTASK#${fixture.taskId}`, "META")!)).not.toContain("threadNoteCount");
-    // The owner is the only one whose steering note is saved.
-    await sendTaskMessage(fixture.deps, PRIYA, fixture.taskId, { requestId: "s", kind: "steer", text: "go left" });
-    expect(fixture.db.get(`DEVTASK#${fixture.taskId}`, "META")).toMatchObject({ threadNoteCount: 1 });
-  });
-
   it("a steering note is the task flow's own note item, counted once, and a resent request is the same note", async () => {
     const fixture = withPlan();
     const first = await sendTaskMessage(fixture.deps, PRIYA, fixture.taskId, { requestId: "same", kind: "steer", text: "Use the helper. password=hunter2hunter2" });
@@ -252,20 +241,6 @@ describe("task messages", () => {
 });
 
 describe("the pull request diff", () => {
-  it("answers one page in the contract's shape", async () => {
-    const fixture = withPlan();
-    const read = vi.fn(goodDiff);
-    withPullRequests(fixture, read);
-    const diff = Diff.parse(await readTaskDiff(fixture.deps, SAM, fixture.taskId, at(fixture, "/diff?repository=demo&number=7&page=2")));
-    expect(diff).toEqual({
-      repository: "demo", number: 7, page: 2, more: true,
-      files: [{ path: "src/a.ts", additions: 3, deletions: 1, patch: "@@ -1 +1,3 @@\n-a\n+b\n+c\n+d" }, { path: "logo.png", additions: 0, deletions: 0, patch: "" }],
-    });
-    expect(read).toHaveBeenCalledWith("https://github.com/acme/demo", 7, 2);
-    // The page defaults to the first.
-    await readTaskDiff(fixture.deps, SAM, fixture.taskId, at(fixture, "/diff?repository=demo&number=7"));
-    expect(read).toHaveBeenLastCalledWith("https://github.com/acme/demo", 7, 1);
-  });
 
   it("reads only a pull request this task opened", async () => {
     const fixture = withPlan();
@@ -352,30 +327,6 @@ describe("the pull request diff", () => {
 });
 
 describe("the company rule", () => {
-  const routes = (fixture: PageTaskFixture, caller: DeveloperCaller) => [
-    () => listTaskMessages(fixture.deps, caller, fixture.taskId, at(fixture, "/messages")),
-    () => sendTaskMessage(fixture.deps, PRIYA, fixture.taskId, { requestId: "k", kind: "steer", text: "hello" }),
-    () => sendTaskMessage(fixture.deps, caller, fixture.taskId, { requestId: "k", kind: "comment", text: "hello" }),
-    () => readTaskDiff(fixture.deps, caller, fixture.taskId, at(fixture, "/diff?repository=demo&number=7")),
-    () => listPlanComments(fixture.deps, caller, fixture.taskId),
-    () => createPlanComment(fixture.deps, caller, fixture.taskId, { requestId: "k", document: "plan", text: "hello" }),
-  ];
-
-  it("a task of another company reads as a missing task on every route, even to its own owner", async () => {
-    for (const owned of [{ companyId: OTHER }, { orgId: OTHER }]) {
-      const fixture = withPlan();
-      withPullRequests(fixture, vi.fn(goodDiff));
-      patchTask(fixture, owned);
-      const gone = await refusal(listTaskMessages(fixture.deps, PRIYA, randomUUID(), at(fixture, "/messages")));
-      for (const call of routes(fixture, PRIYA)) {
-        const error = await refusal(call());
-        expect([error.code, error.message]).toEqual([gone.code, gone.message]);
-        expect(error.message).not.toContain(OTHER);
-      }
-      expect(fixture.db.get(`DEVTASK#${fixture.taskId}`, "META")).not.toHaveProperty("threadNoteCount");
-      expect(fixture.db.get(`DEVTASK#${fixture.taskId}`, "COMMENTS")).toBeUndefined();
-    }
-  });
 
   it("a task of this company is served, and a task that names none belongs to the implicit company only", async () => {
     const own = withPlan();
@@ -413,28 +364,6 @@ describe("the company rule", () => {
     expect((await refusal(sendTaskMessage(fixture.deps, PRIYA, fixture.taskId, { requestId: "mine", kind: "steer", text: "mine" }))).code).toBe("IDEMPOTENCY_CONFLICT");
   });
 
-  it("a task of a real company keeps its own steering notes: listed, and a resent request is the same note", async () => {
-    const fixture = withPlan();
-    fixture.deps.companyId = OTHER;
-    patchTask(fixture, { companyId: OTHER });
-    const sent = await sendTaskMessage(fixture.deps, PRIYA, fixture.taskId, { requestId: "c1", kind: "steer", text: "in company" });
-    expect((await sendTaskMessage(fixture.deps, PRIYA, fixture.taskId, { requestId: "c1", kind: "steer", text: "again" })).message).toEqual(sent.message);
-    expect((await listTaskMessages(fixture.deps, SAM, fixture.taskId, at(fixture, "/messages"))).messages.map((message) => message.text)).toEqual(["in company"]);
-    expect(fixture.db.get(`DEVTASK#${fixture.taskId}`, "META")).toMatchObject({ threadNoteCount: 1 });
-  });
-
-  it("a task of another company answers a reader on its workspace who is not in its channel exactly as a missing task does", async () => {
-    const fixture = withPlan();
-    const before = await refusal(listTaskMessages(fixture.deps, OMAR, fixture.taskId, at(fixture, "/messages")));
-    expect(before.code).toBe("TASK_ACCESS_DENIED");
-    patchTask(fixture, { companyId: OTHER });
-    const gone = await refusal(listTaskMessages(fixture.deps, OMAR, randomUUID(), at(fixture, "/messages")));
-    for (const call of routes(fixture, OMAR)) {
-      const error = await refusal(call());
-      expect([error.code, error.message]).toEqual([gone.code, gone.message]);
-      expect(error).not.toHaveProperty("owners");
-    }
-  });
 });
 
 describe("the routes on the task router", () => {

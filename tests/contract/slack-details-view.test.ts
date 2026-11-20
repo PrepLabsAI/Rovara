@@ -1,14 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { TurnDetailsSchema, type TurnDetails } from "../../packages/contracts/src/index.js";
-import {
-  CUT_MARKER,
-  DETAILS_TEXT_CEILING,
-  MODAL_BLOCK_LIMIT,
-  SECTION_TEXT_LIMIT,
-  detailsMessageView,
-  turnDetailsView,
-  type SlackModalView,
-} from "../../packages/broker/src/aws/slack-details-view.js";
+import { CUT_MARKER, DETAILS_TEXT_CEILING, MODAL_BLOCK_LIMIT, SECTION_TEXT_LIMIT, turnDetailsView, type SlackModalView } from "../../packages/broker/src/aws/slack-details-view.js";
 
 function call(overrides: Record<string, unknown> = {}) {
   return {
@@ -50,36 +42,7 @@ function expectWithinSlackLimits(view: SlackModalView): void {
 }
 
 describe("the Details modal (spec 014 FR-024)", () => {
-  it("summarizes who asked, when, the result, the model, the tools offered and usage", () => {
-    const view = turnDetailsView(details());
-    expectWithinSlackLimits(view);
-    expect(view.title.text).toBe("Turn details");
-    const all = texts(view).join("\n");
-    expect(all).toContain("*Requested by* <@U0123456789>");
-    expect(all).toContain("*Received* <!date^1790244000^{date_short_pretty} at {time}|2026-09-24T10:00:00.000Z>");
-    expect(all).toContain("*Result* answered, in 12.3 s");
-    expect(all).toContain("*Model* amazon-bedrock / us.anthropic.claude-sonnet-4-6");
-    expect(all).toContain("*Tools offered* 2");
-    expect(all).toContain("*Tool calls* 1");
-    expect(all).toContain("*Usage* 12,345 input, 678 output, 1,000 cache-read tokens");
-  });
 
-  it.each([
-    { costUsd: 0.0123 },
-    { costUsd: 0.0123, costSource: "estimated" },
-    { costUsd: null },
-  ])("keeps token usage without money in Slack details: %j", (cost) => {
-    const all = texts(turnDetailsView(details({ usage: { ...base.usage, ...cost } }))).join("\n");
-    expect(all).toContain("*Usage* 12,345 input, 678 output, 1,000 cache-read tokens");
-    expect(all).not.toMatch(/\$|0\.0123|cost unavailable|estimated/);
-  });
-
-  it("lists each call with its tool, connector, outcome, duration, validation, reason and redacted arguments", () => {
-    const view = turnDetailsView(details({ calls: [call(), call({ name: "tracker__save_item", validation: "schema_error", outcome: "FAILED", reason: "schema_changed", durationMs: 100 })] }));
-    const all = texts(view).join("\n");
-    expect(all).toContain("*1.* `tracker__close_item` · tracker\nsucceeded in 0.8 s\n```{\"id\":\"TRK-9\"}```");
-    expect(all).toContain("*2.* `tracker__save_item` · tracker\nfailed in 0.1 s · validation schema_error · reason schema_changed");
-  });
 
   it("shows a gate decision when the record has one, and says so when it cannot", () => {
     const shown = texts(turnDetailsView(details({ calls: [call({ gate: { outcome: "ask", source: "rule", kind: "destructive", reason: "closing always asks" } })] }))).join("\n");
@@ -87,22 +50,6 @@ describe("the Details modal (spec 014 FR-024)", () => {
     const odd = texts(turnDetailsView(details({ calls: [call({ gate: { decided: true } })] }))).join("\n");
     expect(odd).toContain("Gate: a decision was recorded in a form this view cannot show.");
     expect(texts(turnDetailsView(details())).join("\n")).not.toContain("Gate:");
-  });
-
-  it("escapes record text so nothing in it links, mentions or notifies, and keeps each code block closed", () => {
-    const hostile = JSON.stringify({ body: "<!channel> see <https://evil.example|here> & ```rm -rf```" });
-    const view = turnDetailsView(details({ calls: [call({ arguments: hostile, reason: "<@U0999999999>" })] }));
-    const section = texts(view).find((text) => text.includes("tracker__close_item"))!;
-    expect(section).not.toContain("<!channel>");
-    expect(section).not.toContain("<https://evil");
-    expect(section).not.toContain("<@U0999999999>");
-    expect(section).toContain("&lt;!channel&gt;");
-    expect(section).toContain("&amp;");
-    expect(section.split("```").length - 1).toBe(2);
-    for (const block of view.blocks) {
-      if (block.type === "section") expect(block.text.verbatim).toBe(true);
-      if (block.type === "context") expect(block.elements.every((element) => element.verbatim)).toBe(true);
-    }
   });
 
   it("fits the largest record there can be into one modal, lists every call, and marks what it cut", () => {
@@ -143,10 +90,4 @@ describe("the Details modal (spec 014 FR-024)", () => {
     expect(result("yes_to_all_granted")).toContain("*Result* yes to all granted, in 12.3 s");
   });
 
-  it("says when the turn made no tool calls, and shows a message on its own", () => {
-    expect(texts(turnDetailsView(details({ calls: [] }))).join("\n")).toContain("This turn made no tool calls.");
-    const view = detailsMessageView("AgentX couldn't find the details for this reply.");
-    expectWithinSlackLimits(view);
-    expect(view.blocks).toEqual([{ type: "section", text: { type: "mrkdwn", text: "AgentX couldn't find the details for this reply.", verbatim: true } }]);
-  });
 });

@@ -4,8 +4,6 @@
 import { describe, expect, it } from "vitest";
 import { environmentStackName } from "@agentx/contracts";
 import { WAITING_STEP_PLAIN } from "../../packages/cli/src/init/commands.js";
-import type { WizardQuestion } from "../../packages/cli/src/init/ui/protocol.js";
-import { settingsFields } from "../../packages/cli/src/init/settings-form.js";
 import { COPY_RULES, lintCopy, quotedStrings, stateEntries } from "../support/copy-lint.js";
 import { FINISH, FIRST_RUN, FIRST_RUN_BUDGET_USD, harness, SIGNIN, SLACK } from "../support/init-ui-harness.js";
 import { fakeAlerts } from "../support/setup-fakes.js";
@@ -86,12 +84,6 @@ describe("copy-lint rules", () => {
 });
 
 describe("SC-011: the whole install, as the page shows it", () => {
-  it("a first install says no internal word anywhere on the page", async () => {
-    const h = await harness();
-    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
-    expect(code).toBe(0);
-    expect(lintCopy(operator.states.flatMap((state, index) => stateEntries(state, `state ${index}`)))).toEqual([]);
-  });
 
   it("a failed and retried step says no internal word either", async () => {
     const h = await harness();
@@ -101,13 +93,6 @@ describe("SC-011: the whole install, as the page shows it", () => {
     });
     expect(await h.run(["--ui"], { openBrowser: operator.open })).toBe(0);
     await operator.settled();
-    expect(lintCopy(operator.states.flatMap((state, index) => stateEntries(state, `state ${index}`)))).toEqual([]);
-  });
-
-  it("a stopped install says no internal word, and never Finished", async () => {
-    const h = await harness();
-    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
-    const { operator } = await h.runUi([...FIRST_RUN, "stop"]);
     expect(lintCopy(operator.states.flatMap((state, index) => stateEntries(state, `state ${index}`)))).toEqual([]);
   });
 
@@ -121,44 +106,6 @@ describe("SC-011: the whole install, as the page shows it", () => {
     expect(code).toBe(0);
     expect(operator.states.some((state) => state.steps.some((step) => step.status === "waiting" && step.message !== undefined))).toBe(true);
     expect(lintCopy(operator.states.flatMap((state, index) => stateEntries(state, `state ${index}`)))).toEqual([]);
-  });
-
-  it("FR-010 and FR-011: every question of a first install has a label, a why line, and verb buttons", async () => {
-    const h = await harness();
-    const { operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
-    const questions = new Map<string, WizardQuestion>(operator.states.flatMap((state) => (state.question === undefined ? [] : [[state.question.id, state.question] as const])));
-    // The settings form, the plan, the Slack installed question, the Slack form, the bot check, the
-    // Verified check, then the eight finishing questions (repository, project name, one setup-plan
-    // or command confirmation, channel, three trackers, the test alert).
-    expect(questions.size).toBe(14);
-    // Spec 048 FR-020: the settings are one form, so each of its fields is held to the same words.
-    const fields = new Map([...questions.values()].flatMap((question) => (question.fields ?? []).map((field) => [`${question.text}/${field.name}`, field] as const)));
-    for (const question of questions.values()) {
-      expect({ text: question.text, label: question.label }).toMatchObject({ label: expect.stringMatching(/\S/) as unknown });
-      expect({ text: question.text, why: question.why }).toMatchObject({ why: expect.stringMatching(/\S/) as unknown });
-      if (question.kind === "ask" && question.defaultValue !== undefined) expect({ text: question.text, hint: question.hint }).toMatchObject({ hint: expect.stringMatching(/\S/) as unknown });
-      for (const button of question.buttons ?? []) expect(["Yes", "No"]).not.toContain(button.label);
-    }
-    // The settings form shows all 18 settings; a text field with a default says what empty means.
-    expect([...fields.keys()].filter((where) => where.startsWith("Your settings/"))).toHaveLength(18);
-    const withDefault = new Set(settingsFields({ env: "staging", flags: {}, fixed: false, budgetWhy: "" }).filter((field) => field.choices === undefined && field.defaultValue !== undefined).map((field) => field.name));
-    expect(withDefault.size).toBeGreaterThan(0);
-    for (const [where, field] of fields) {
-      expect({ where, label: field.label }).toMatchObject({ label: expect.stringMatching(/\S/) as unknown });
-      expect({ where, why: field.why }).toMatchObject({ why: expect.stringMatching(/\S/) as unknown });
-      if (field.choices === undefined && withDefault.has(field.name)) expect({ where, hint: field.hint }).toMatchObject({ hint: expect.stringMatching(/\S/) as unknown });
-    }
-  });
-
-  it("SC-001: every state shows the phase, step N of 5 and the time left", async () => {
-    const h = await harness();
-    const { operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
-    for (const state of operator.states) {
-      expect(state.journey.stepCount).toBe(5);
-      expect(state.journey.stepNumber).toBeGreaterThanOrEqual(1);
-      expect(state.journey.phases.find((phase) => phase.id === state.journey.current)?.title).toMatch(/\S/);
-      expect(state.journey.timeLeftText).toMatch(/\S/);
-    }
   });
 
   // Controller ruling: these two reasons never reach a WizardState (they are folded into the

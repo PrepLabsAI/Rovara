@@ -3,8 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProjectDefinitionSchema } from "../../packages/contracts/src/index.js";
 import { CredentialUnavailable } from "../../packages/gateway/src/index.js";
-import { mcpConnectorType } from "../../packages/broker/src/aws/connector-presets.js";
-import { BUILT_IN_CONNECTOR_TYPES, resolveConnectors } from "../../packages/broker/src/aws/connector-types.js";
+import { resolveConnectors } from "../../packages/broker/src/aws/connector-types.js";
 import { CredentialRegistry, hostPinProblem } from "../../packages/broker/src/aws/credentials.js";
 import { credentialRefusals } from "../../packages/broker/src/aws/registration-preflight.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -44,18 +43,6 @@ function setup(records: Record_[] = []) {
 }
 
 describe("mcp connector type", () => {
-  it("is built in and resolves labels, scopes as { alias, ...values }, ledger and a required host pin", () => {
-    expect(BUILT_IN_CONNECTOR_TYPES.mcp).toBe(mcpConnectorType);
-    const { resolve } = setup();
-    const connector = resolve(sentry());
-    expect(connector).toMatchObject({
-      name: "sentry", type: "mcp", label: "Sentry issues", vendor: "Sentry", scopeNoun: "organization", attribution: true,
-      ledger: { prefix: "CONNECTOR#sentry#", entityType: "CONNECTOR_INVOCATION" },
-      credential: { ref: "sentry-bot", accepts: ["static-secret", "oauth-refresh-token", "oauth-client-credentials"], pin: { host: "mcp.sentry.dev", required: true } },
-    });
-    expect(connector.scopes).toEqual([{ alias: "acme", scope: { alias: "acme", organizationSlug: "acme" } }]);
-    expect(connector.approvals).toEqual([{ name: "get_issue_details", access: "read" }]);
-  });
 
   it("is not connected until its credential is registered, of the right type and pinned to the endpoint's host", async () => {
     const { resolve, put } = setup();
@@ -87,24 +74,6 @@ describe("mcp connector type", () => {
       .rejects.toThrow(new CredentialUnavailable("credential sentry-bot is pinned to mcp.other.example, not mcp.sentry.dev, so AgentX does not send it there"));
   });
 
-  it("refuses a revision whose mcp credential is unpinned or pinned elsewhere", async () => {
-    const { registry, put, resolve } = setup([{ ref: "sentry-bot", type: "static-secret" }]);
-    const connector = resolve(sentry());
-    expect(await credentialRefusals([connector], registry)).toEqual(["connector sentry: credential sentry-bot is not pinned to a host; register it again with --host mcp.sentry.dev"]);
-    put({ ref: "sentry-bot", type: "static-secret", host: "mcp.sentry.dev" });
-    expect(await credentialRefusals([connector], registry)).toEqual([]);
-  });
-
-  it("skips, with the schema's own reason, a stored entry with a plain-http endpoint", () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    try {
-      const { registry } = setup();
-      const stored = { ...project([sentry({ endpoint: "http://mcp.sentry.dev/mcp" })]) };
-      expect(resolveConnectors(stored as never, { credentialRegistry: registry })).toEqual([]);
-      const line = log.mock.calls.map(([entry]) => String(entry)).find((entry) => entry.includes("connector.unusable"));
-      expect(JSON.parse(line!)).toMatchObject({ connector: "sentry", type: "mcp", reason: "invalid mcp connector configuration: endpoint; endpoint must use https" });
-    } finally { log.mockRestore(); }
-  });
 });
 
 describe("host pins on built-in presets", () => {

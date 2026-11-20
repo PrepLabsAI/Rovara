@@ -29,13 +29,6 @@ describe("readRenewalAgeDays", () => {
     expect(await age(db)).toBe(2.5);
   });
 
-  it("uses a success even if it is older than the first enable (a renewal that ran before the schedule was switched on still counts)", async () => {
-    const db = new FakeDynamoDb();
-    enabled(db, 1);
-    success(db, 5);
-    expect(await age(db)).toBe(5);
-  });
-
   it("refuses a row that is not as the renewal writes it, rather than reporting a made-up age", async () => {
     const db = new FakeDynamoDb();
     db.set({ ...requalifyScheduleEnabledKey(REQUALIFY_PROFILE_ID), at: "yesterday" });
@@ -48,9 +41,6 @@ describe("renewalAgeMetrics", () => {
   it("is empty where the reader is not wired, and where nothing was enabled", async () => {
     expect(await renewalAgeMetrics(undefined, NOW, log)).toEqual({});
     expect(await renewalAgeMetrics(async () => undefined, NOW, log)).toEqual({});
-  });
-  it("carries the age under the metric the alarm watches, with a zero failure count", async () => {
-    expect(await renewalAgeMetrics(async () => 6.5, NOW, log)).toEqual({ [REQUALIFY_AGE_METRIC]: 6.5, ReconcilerRenewalAgeReadFailures: 0 });
   });
   it("counts an unreadable record as a failure, logs only the error name, and never throws", async () => {
     const failing = vi.fn();
@@ -81,17 +71,4 @@ describe("the reconciler run", () => {
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ [REQUALIFY_AGE_METRIC]: 7, ReconcilerRenewalAgeReadFailures: 0 }));
   });
 
-  it("emits neither the age nor the failure count where it is not wired, so other deployments' metrics are unchanged", async () => {
-    const { run, emit } = reconciler({});
-    await run();
-    const names = Object.keys(emit.mock.calls[0]![0]);
-    expect(names).not.toContain(REQUALIFY_AGE_METRIC);
-    expect(names).not.toContain("ReconcilerRenewalAgeReadFailures");
-  });
-
-  it("an unreadable record never stops the repairs: the run finishes and counts the failure", async () => {
-    const { run, emit } = reconciler({ renewalAgeDays: async () => { throw new Error("x"); } });
-    await expect(run()).resolves.toBeDefined();
-    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerRenewalAgeReadFailures: 1 }));
-  });
 });

@@ -162,15 +162,6 @@ describe("session steps", () => {
     expect(spy).toHaveBeenCalledWith("http://10.42.128.10:8080/ping");
   });
 
-  // #211: a failed boot answers /ping with its reason, so the probe fails the provisioning at once
-  // (ProbePing's Catch goes to Cleanup) instead of waiting out the 10 minute /ping window.
-  it("fails the probe at once with the reason a failed boot reports", async () => {
-    const { handler } = setup(async () => ({ status: "BootFailed", reason: "could not install Docker: package download failed after 5 tries" }));
-    const probe = handler({ action: "probePing", privateIp: "10.42.128.10" });
-    await expect(probe).rejects.toThrow("could not install Docker: package download failed after 5 tries");
-    await expect(probe).rejects.toMatchObject({ name: "WorkerBootFailed", stack: "WorkerBootFailed: could not install Docker: package download failed after 5 tries" });
-  });
-
   it("keeps a reported boot failure reason to one short line of plain text", async () => {
     const { handler } = setup(async () => ({ status: "BootFailed", reason: `bad\u0000\nline\t${"x".repeat(1_000)}` }));
     const error: Error = await handler({ action: "probePing", privateIp: "10.42.128.10" }).then(() => new Error("the probe did not fail"), (failure: unknown) => failure as Error);
@@ -218,13 +209,6 @@ describe("session steps", () => {
     }
   });
 
-  it("refuses unknown steps and anything but a private IPv4 address to probe", async () => {
-    const { handler, ping } = setup();
-    await expect(handler({ action: "launchInstance" })).rejects.toThrow();
-    await expect(handler({ action: "probePing", privateIp: "example.com" })).rejects.toThrow();
-    await expect(handler({ action: "markReady", workspaceId, generation: 1, extra: true })).rejects.toThrow();
-    expect(ping).not.toHaveBeenCalled();
-  });
 });
 
 
@@ -237,9 +221,3 @@ it("passes the saved builder pin from the provisioner configuration through to w
   expect(rendered).toContain('printf \'AGENTX_SAVED_ENV_BUILDER_IMAGE=%s\\n\'');
 });
 
-it("treats an empty builder configuration as absent without failing worker launch", async () => {
-  const launch = { action: "launchConfiguration", workspaceId, generation: 2, volumeId: "vol-0123456789abcdef0", expectNewVolume: false };
-  const absent = await setup().handler(launch);
-  const empty = await setup(undefined, {}, { savedEnvBuilderImage: "" }).handler(launch);
-  expect(empty).toEqual(absent);
-});

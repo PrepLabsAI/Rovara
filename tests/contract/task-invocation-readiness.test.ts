@@ -31,11 +31,6 @@ async function taskInvocation(registrations: Array<{ revision: number; readiness
 }
 
 describe("the task invocation's readiness (spec 051)", () => {
-  it("carries the project's readiness commands", async () => {
-    const invocation = await taskInvocation([{ revision: 1, readiness: [check(["test"])] }]);
-    expect(invocation.payload.readiness).toEqual([check(["test"])]);
-    expect(WorkerInvocationSchema.parse(invocation)).toMatchObject({ payload: { readiness: [check(["test"])] } });
-  });
 
   // Ruling J: the latest revision's checks, which publication gates on. The worker gives a check that preparation did
   // not run, and no task has run since, no before result, so one that already fails is never the agent's regression.
@@ -45,19 +40,6 @@ describe("the task invocation's readiness (spec 051)", () => {
       { revision: 2, readiness: [check(["run", "lint"]), check(["test"])] },
     ]);
     expect(invocation.payload.readiness).toEqual([check(["run", "lint"]), check(["test"])]);
-  });
-
-  it("carries no readiness for a project without any, so the dispatcher need not ask the worker", async () => {
-    const invocation = await taskInvocation([{ revision: 1, readiness: [] }]);
-    expect(invocation.payload).not.toHaveProperty("readiness");
-  });
-
-  it("a payload from an older broker, without readiness, still parses", async () => {
-    const invocation = await taskInvocation([{ revision: 1, readiness: [check(["test"])] }]);
-    const older = { ...invocation, payload: { ...invocation.payload } };
-    delete older.payload.readiness;
-    const parsed = WorkerInvocationSchema.parse(older);
-    expect(parsed.kind === "task" && parsed.payload.readiness).toBeUndefined();
   });
 
   it("refuses a readiness entry that is not a project command", () => {

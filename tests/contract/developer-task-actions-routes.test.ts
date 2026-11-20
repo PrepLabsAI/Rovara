@@ -2,9 +2,8 @@
 // records (FR-016, FR-021, FR-023, FR-037, R12, R16, R17, US1 scenarios 4 and 5).
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import type { ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
-import { SLACK_CHANNEL, call } from "../support/slack-broker.js";
+import { call } from "../support/slack-broker.js";
 
 const said = (text: string) => ({ type: "progress", payload: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } } });
 
@@ -44,13 +43,6 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     expect(db.find((item) => item.entityType === "OPERATION" && item.workspaceId === task.workspaceId && item.kind === "task")).toHaveLength(2);
   });
 
-  it("keeps the starting revision when the project has a newer one", async () => {
-    const { db, handler, post, task } = await finished();
-    await registerRevision(handler, 2, [{ name: "demo" }]);
-    await post("continue", { requestId: randomUUID(), instructions: "more" });
-    expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).toMatchObject({ projectRevision: 1 });
-  });
-
   it("answers TASK_BUSY while the task runs, naming what to do", async () => {
     const { post } = await finished();
     await post("continue", { requestId: randomUUID(), instructions: "one" });
@@ -58,19 +50,6 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     expect(busy.body.error).toMatchObject({ code: "TASK_BUSY" });
     expect(String((busy.body.error as { message: string }).message)).toContain("agentx_wait_for_task");
     expect(String((busy.body.error as { message: string }).message)).toContain("agentx_cancel_task");
-  });
-
-  it("gives two concurrent continues one RUNNING and one TASK_BUSY, and one new task operation", async () => {
-    const { db, post, task, turns } = await finished();
-    const answers = await Promise.all([
-      post("continue", { requestId: randomUUID(), instructions: "one" }),
-      post("continue", { requestId: randomUUID(), instructions: "two" }),
-    ]);
-    expect(answers.filter((answer) => (answer.body.task as { status?: string } | undefined)?.status === "RUNNING")).toHaveLength(1);
-    expect(answers.filter((answer) => (answer.body.error as { code?: string } | undefined)?.code === "TASK_BUSY")).toHaveLength(1);
-    // The first task and one continue.
-    expect(db.find((item) => item.entityType === "OPERATION" && item.workspaceId === task.workspaceId && item.kind === "task")).toHaveLength(2);
-    expect(turns().filter((item) => item.action === "continue" && item.phase === "accepted")).toHaveLength(1);
   });
 
   it("refuses a task that never started (R17)", async () => {
@@ -83,54 +62,11 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     expect(refused.body.error).toEqual({ code: "CONFIG_INVALID", message: "this task never started and its workspace was released, so it no longer counts toward your workspace limit; start a new task with agentx_start_task, and close this one with agentx_close_task" });
   });
 
-  it("refuses a task whose setup failed for want of a worker too (R17), not as TASK_BUSY", async () => {
-    const harness = await createDeveloperTaskBroker();
-    const response = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "x" });
-    const taskId = (response.body.task as { taskId: string }).taskId;
-    const { workspaceId } = harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
-    await harness.finish(workspaceId, String((harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { activeOperationId: string }).activeOperationId), "FAILED", { error: "RUNTIME_UNAVAILABLE: no capacity" });
-    for (const [route, body] of [["continue", { requestId: randomUUID(), instructions: "retry" }], ["pull-requests", { requestId: randomUUID(), title: "x" }]] as const) {
-      const refused = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/${route}`, body);
-      expect(refused.body.error).toEqual({ code: "CONFIG_INVALID", message: "this task never started and its workspace was released, so it no longer counts toward your workspace limit; start a new task with agentx_start_task, and close this one with agentx_close_task" });
-    }
-  });
-
-  it("lets a developer who lost channel access continue and open a PR on their own task (R11, spec edge case)", async () => {
-    let member = true;
-    const channelMembers = async (request: ChannelMembersRequest): Promise<ChannelMembersResponse> => ({ ok: true, memberOf: member ? request.channelIds.filter((id) => id === SLACK_CHANNEL) : [] });
-    const { post, turns, finish, task, active } = await finished("SUCCEEDED", { channelMembers });
-    member = false;
-    const continued = await post("continue", { requestId: randomUUID(), instructions: "more" });
-    expect(continued.status).toBe(200);
-    expect(continued.body.task).toMatchObject({ status: "RUNNING" });
-    await finish(task.workspaceId, active(), "SUCCEEDED");
-    const opened = await post("pull-requests", { requestId: randomUUID(), title: "x" });
-    expect(opened.status).toBe(200);
-    expect(opened.body).toMatchObject({ operationStatus: "ACCEPTED" });
-    expect(turns().filter((item) => (item.action === "continue" || item.action === "pull_request") && item.phase === "accepted")).toHaveLength(2);
-  });
-
-  it("refuses to cancel a closed task, as continue does, and writes no audit record (final review M2)", async () => {
-    const { db, post, taskId, turns } = await finished();
-    (db.get(`DEVTASK#${taskId}`, "META") as { closedAt?: string }).closedAt = new Date().toISOString();
-    const before = turns().length;
-    expect((await post("cancel", { requestId: randomUUID() })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
-    expect(turns()).toHaveLength(before);
-    expect(turns().filter((item) => item.action === "cancel")).toHaveLength(0);
-  });
-
   it("refuses to cancel a task whose workspace is closed, with no audit record (final review M2)", async () => {
     const { db, post, task, turns } = await finished();
     Object.assign(db.get(`WORKSPACE#${task.workspaceId}`, "META")!, { status: "CLOSED", closedAt: new Date().toISOString() });
     expect((await post("cancel", { requestId: randomUUID() })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
     expect(turns().filter((item) => item.action === "cancel")).toHaveLength(0);
-  });
-
-  it("refuses a closed task", async () => {
-    const { db, post, taskId } = await finished();
-    (db.get(`DEVTASK#${taskId}`, "META") as { closedAt?: string }).closedAt = new Date().toISOString();
-    expect((await post("continue", { requestId: randomUUID(), instructions: "more" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
-    expect((await post("pull-requests", { requestId: randomUUID(), title: "x" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
   });
 
   it("refuses every legacy mutation on a terminal workflow before closedAt, with no effects", async () => {
@@ -148,61 +84,9 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     expect(db.find((item) => item.entityType === "OPERATION" && item.workspaceId === task.workspaceId)).toHaveLength(beforeOperations);
   });
 
-  it("redacts a secret in the instructions from the accepted record but sends them unchanged to the worker", async () => {
-    const planted = "xoxb-2222222222-planted-secret";
-    const { db, post, active, turns } = await finished();
-    await post("continue", { requestId: randomUUID(), instructions: `use ${planted}` });
-    const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === active())[0];
-    expect((outbox?.invocation as { payload: { prompt: string } }).payload.prompt).toBe(`use ${planted}`);
-    expect(JSON.stringify(turns())).not.toContain(planted);
-  });
 });
 
 describe("cancel", () => {
-  it("before the instructions run, removes them, and the task reads CANCELLED (R16)", async () => {
-    const harness = await createDeveloperTaskBroker();
-    const response = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "x" });
-    const taskId = (response.body.task as { taskId: string }).taskId;
-    const cancelled = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: randomUUID() });
-    expect(cancelled.body.task).toMatchObject({ status: "CANCELLED" });
-    const { workspaceId } = harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
-    expect(harness.db.get(`WORKSPACE#${workspaceId}`, "DEVELOPER_TASK")).toMatchObject({ cancelledAt: expect.any(String) as string });
-    expect(harness.db.find((item) => item.pk === `TASK#${taskId}` && item.action === "cancel")).toHaveLength(1);
-  });
-
-  it("before the instructions run, touches only the pointer, never the workspace or the prepare (P45)", async () => {
-    const harness = await createDeveloperTaskBroker();
-    const response = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "x" });
-    const taskId = (response.body.task as { taskId: string }).taskId;
-    const { workspaceId } = harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
-    const workspace = structuredClone(harness.db.get(`WORKSPACE#${workspaceId}`, "META"));
-    const prepareId = String((workspace as { activeOperationId: string }).activeOperationId);
-    const prepare = structuredClone(harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`));
-    await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: randomUUID() });
-    expect(harness.db.get(`WORKSPACE#${workspaceId}`, "META")).toEqual(workspace);
-    expect(harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`)).toEqual(prepare);
-    expect(harness.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toHaveLength(0);
-    // The prepare's result then queues nothing.
-    await harness.finish(workspaceId, prepareId, "SUCCEEDED");
-    expect(harness.db.find((item) => item.entityType === "OPERATION" && item.kind === "task")).toHaveLength(0);
-    expect((await harness.dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body.task).toMatchObject({ status: "CANCELLED" });
-  });
-
-  it("while it runs, asks the worker to stop, and the task reads CANCELLED once the worker says so", async () => {
-    const { db, post, task, active, finish, taskId, dev } = await finished();
-    await post("continue", { requestId: randomUUID(), instructions: "long job" });
-    const running = active();
-    await post("cancel", { requestId: randomUUID() });
-    expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${running}`)).toMatchObject({ status: "CANCEL_REQUESTED" });
-    const cancelOperation = db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")[0]!;
-    await finish(task.workspaceId, String(cancelOperation.id), "SUCCEEDED");
-    expect((await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body.task).toMatchObject({ status: "CANCELLED" });
-  });
-
-  it("with nothing running, answers with the task as it is", async () => {
-    const { post } = await finished();
-    expect((await post("cancel", { requestId: randomUUID() })).body.task).toMatchObject({ status: "SUCCEEDED" });
-  });
 
   it("keeps the final status of a turn that finishes just before the cancel is written, and queues no cancel (#196)", async () => {
     const { db, post, task, active, turns } = await finished();
@@ -255,17 +139,6 @@ describe("cancel", () => {
     expect(harness.db.find(() => true)).toHaveLength(startingCount);
   });
 
-  it("answers a concurrent duplicate cancel with the task, writing one cancel", async () => {
-    const { db, post, turns } = await finished();
-    await post("continue", { requestId: randomUUID(), instructions: "long job" });
-    const requestId = randomUUID();
-    const answers = await Promise.all([post("cancel", { requestId }), post("cancel", { requestId })]);
-    for (const answer of answers) expect(answer.body.task).toMatchObject({ status: "RUNNING" });
-    expect(db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toHaveLength(1);
-    expect(db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string } | undefined)?.kind === "cancel")).toHaveLength(1);
-    expect(turns().filter((item) => item.action === "cancel")).toHaveLength(1);
-  });
-
   it("answers a cancel that met a changing task in plain words, naming the tool, with the code kept", async () => {
     const { db, post, task, active } = await finished();
     await post("continue", { requestId: randomUUID(), instructions: "long job" });
@@ -282,13 +155,6 @@ describe("cancel", () => {
     expect((await post("cancel", { requestId })).body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
   });
 
-  it("writes each accepted record in the cancel's own transaction, with the cancel operation", async () => {
-    const { post, turns, db } = await finished();
-    await post("continue", { requestId: randomUUID(), instructions: "long job" });
-    await post("cancel", { requestId: randomUUID() });
-    const cancelOperation = db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")[0]!;
-    expect(turns().filter((item) => item.action === "cancel")).toEqual([expect.objectContaining({ phase: "accepted", operationId: cancelOperation.id, responseText: "Asked the worker to stop." })]);
-  });
 });
 
 describe("pull requests (US1 scenario 4, FR-023)", () => {
@@ -306,12 +172,6 @@ describe("pull requests (US1 scenario 4, FR-023)", () => {
     const again = await post("pull-requests", { requestId, title: "Fix the flaky retry test", body: "Uses a fake clock." });
     expect(again.body.operationId).toBe(operationId);
     expect(turns().filter((item) => item.action === "pull_request")).toHaveLength(1);
-  });
-
-  it("passes draft: false on to the publication", async () => {
-    const { db, post, task } = await finished();
-    const response = await post("pull-requests", { requestId: randomUUID(), title: "Ready", draft: false });
-    expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${String(response.body.operationId)}`)).toMatchObject({ publication: { draft: false } });
   });
 
   it("returns the pull request, and records it once, after the worker publishes it", async () => {
@@ -353,14 +213,6 @@ describe("pull requests (US1 scenario 4, FR-023)", () => {
     expect((await post("pull-requests", { requestId: randomUUID(), title: "x" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task's project revision is no longer registered; ask an admin" });
   });
 
-  it("answers a repeated requestId after the task closed with the closed-task error", async () => {
-    const { db, post, taskId } = await finished();
-    const requestId = randomUUID();
-    await post("pull-requests", { requestId, title: "x" });
-    (db.get(`DEVTASK#${taskId}`, "META") as { closedAt?: string }).closedAt = new Date().toISOString();
-    expect((await post("pull-requests", { requestId, title: "x" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
-  });
-
   it("answers TASK_BUSY while the task runs", async () => {
     const { post } = await finished();
     await post("continue", { requestId: randomUUID(), instructions: "one" });
@@ -369,26 +221,6 @@ describe("pull requests (US1 scenario 4, FR-023)", () => {
 });
 
 describe("completed audit records (R12, FR-037)", () => {
-  it("records the result summary when a task operation ends, once, keyed by the operation", async () => {
-    const { turns, finish, task, firstTaskId } = await finished();
-    const completed = turns().filter((item) => item.phase === "completed");
-    expect(completed).toEqual([expect.objectContaining({ action: "start", outcome: "succeeded", operationId: firstTaskId, responseText: "Fixed: the test used a real clock." })]);
-    await finish(task.workspaceId, firstTaskId, "SUCCEEDED");
-    expect(turns().filter((item) => item.phase === "completed")).toHaveLength(1);
-  });
-
-  it("records a failure with its outcome", async () => {
-    const { turns } = await finished("FAILED");
-    expect(turns().filter((item) => item.phase === "completed")).toEqual([expect.objectContaining({ outcome: "failed" })]);
-  });
-
-  it("records a continue's result as a continue", async () => {
-    const { post, turns, finish, task, active } = await finished();
-    await post("continue", { requestId: randomUUID(), instructions: "more" });
-    const running = active();
-    await finish(task.workspaceId, running, "SUCCEEDED");
-    expect(turns().filter((item) => item.phase === "completed" && item.operationId === running)).toEqual([expect.objectContaining({ action: "continue", outcome: "succeeded" })]);
-  });
 
   it("keeps a cancelled task's completed record, written with the cancel's result, once (F13)", async () => {
     const { db, post, turns, finish, task, active } = await finished();

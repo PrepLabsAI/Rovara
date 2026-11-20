@@ -41,42 +41,6 @@ async function seeded(): Promise<MemoryParameterStore> {
 }
 
 describe("agentx doctor", () => {
-  it("prints every check and exits 0 when nothing fails", async () => {
-    const io = capture();
-    const code = await executeCli(["--env", "staging", "doctor"], { ...io, doctor: { store: await seeded(), services: () => doctorServices() } });
-    expect(code).toBe(0);
-    expect(io.out.join("")).toContain("agentx doctor: environment staging (release 1.2.3, templates engine, us-east-1)");
-  });
-
-  it("exits non-zero when a check fails, naming how many (FR-051)", async () => {
-    const io = capture();
-    const services = () => doctorServices({ slackApi: fakeSlackApi({ authTest: async () => ({ ok: false, error: "invalid_auth" }) }) });
-    const code = await executeCli(["--env", "staging", "doctor"], { ...io, doctor: { store: await seeded(), services } });
-    expect(code).toBe(2);
-    expect(io.out.join("")).toContain("FAIL  slack       bot token: Slack refused the bot token (invalid_auth)");
-    expect(io.err.join("")).toContain("1 doctor check failed; fix what each one names, then run agentx doctor again");
-  });
-
-  it("prints machine-readable results with --json", async () => {
-    const io = capture();
-    await executeCli(["--env", "staging", "--json", "doctor"], { ...io, doctor: { store: await seeded(), services: () => doctorServices() } });
-    const parsed = JSON.parse(io.out.join("")) as { ok: boolean; data: { env: string; failed: number; checks: unknown[] } };
-    expect(parsed.data).toMatchObject({ env: "staging", failed: 0 });
-    expect(parsed.data.checks.length).toBeGreaterThan(20);
-    expect(parsed.ok).toBe(true);
-    expectNoSecret(io);
-  });
-
-  it("with --json and a failed check: exit 2, stdout's document says ok false with the report, stderr's says why", async () => {
-    const io = capture();
-    const code = await executeCli(["--env", "staging", "--json", "doctor"], { ...io, doctor: { store: await seeded(), services: failingServices } });
-    expect(code).toBe(2);
-    const report = JSON.parse(io.out.join("")) as { ok: boolean; data: { failed: number } };
-    expect(report).toMatchObject({ ok: false, data: { failed: 1 } });
-    const error = JSON.parse(io.err.join("")) as { ok: boolean; error: { code: string; message: string } };
-    expect(error).toMatchObject({ ok: false, error: { code: "CONFIG_INVALID", message: "1 doctor check failed; fix what each one names, then run agentx doctor again" } });
-    expectNoSecret(io);
-  });
 
   it("never prints a secret value, passing or failing, in text or JSON", async () => {
     for (const argv of [["--env", "staging", "doctor"], ["--env", "staging", "--json", "doctor"]]) {
@@ -121,20 +85,6 @@ describe("doctor's real services (carry-forwards)", () => {
     // No sign-in settings are stored, so checkDeveloperSignIn answers before any AWS or Slack call.
     expect(await services.signIn(SETTINGS)).toEqual(await checkDeveloperSignIn({ env: "staging", store, secrets: { get: async () => undefined }, settings: SETTINGS, fetch: fetch, slackApi: fakeSlackApi() }));
     expect((await services.signIn(SETTINGS))[0]).toMatchObject({ name: "settings", ok: false });
-  });
-
-  it("calls the real checkDeveloperSignIn with doctor's own store, secrets and Slack client", async () => {
-    const store = new MemoryParameterStore();
-    const services = realDoctorServices({ settings: SETTINGS, store, fetch: (async () => { throw new Error("no network in tests"); }), home: "/nonexistent-agentx-home", configDir: "/nonexistent-agentx-projects", stderr: { write: () => undefined } });
-    vi.mocked(checkDeveloperSignIn).mockClear();
-    await services.signIn(SETTINGS);
-    expect(vi.mocked(checkDeveloperSignIn)).toHaveBeenCalledTimes(1);
-    const [input] = vi.mocked(checkDeveloperSignIn).mock.calls[0]!;
-    expect(input.env).toBe("staging");
-    expect(input.settings).toBe(SETTINGS);
-    expect(input.store).toBe(store);
-    expect(input.secrets).toBe(services.secrets);
-    expect(input.slackApi).toBe(services.slackApi);
   });
 
   it("never starts drift detection: it only reads the last result (question 5)", async () => {

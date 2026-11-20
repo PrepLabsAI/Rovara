@@ -18,23 +18,6 @@ describe("task person proof transport", () => {
     expect(command.input).toMatchObject({ FunctionName: "proof-function", InvocationType: "RequestResponse" });
   });
 
-  it("shares the guard UUID and call budget with an accepted fresh proof", async () => {
-    const now = 1_100;
-    const admission = createTaskAuthorityAdmission({ now: () => now, lambdaRemainingMs: 20_000 });
-    let sent: unknown;
-    const check = taskPersonProofThroughLambda({
-      admission, expectedTeamId: "T123ABC", now: () => now,
-      async invoke(payload) {
-        sent = JSON.parse(Buffer.from(payload).toString("utf8"));
-        return response(result(admission.id, 3));
-      },
-    });
-    await expect(check(request)).resolves.toEqual({ result: positive, slackCallsUsed: 3 });
-    expect(sent).toMatchObject({ kind: "task-dispatch-person-proof", admission: { id: admission.id, slackCallsLimit: 100 } });
-    admission.recordSlackUsage(3);
-    expect(admission.remainingSlackCalls()).toBe(97);
-  });
-
   it("does not invoke when calls are exhausted and seals zero-call authoritative replies", async () => {
     const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
     admission.recordSlackUsage(100);

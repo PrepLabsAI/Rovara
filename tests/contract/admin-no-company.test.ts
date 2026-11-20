@@ -2,37 +2,17 @@
 // AUTH_REQUIRED ("your AgentX sign-in has ended; run agentx login <url> again"), which signing in again can never fix. resolveAdminCompany keeps every refusal, but says what is
 // wrong (403 FORBIDDEN ADMIN_NOT_IN_A_COMPANY); a membership read that fails still gets the fixed sign-in words (fail closed).
 import { describe, expect, it } from "vitest";
-import { AgentXError, agentXError } from "@agentx/contracts";
-import { ADMIN_NOT_IN_A_COMPANY, resolveAdminCompany, resolveCompany, type CompanyMembershipReader } from "../../packages/broker/src/aws/company-check.js";
+import type { AgentXError } from "@agentx/contracts";
+import { ADMIN_NOT_IN_A_COMPANY, resolveAdminCompany, type CompanyMembershipReader } from "../../packages/broker/src/aws/company-check.js";
 import { planChange, type PlanDependencies } from "../../packages/broker/src/aws/admin-change-plans.js";
 import type { AuthenticatedIdentity } from "../../packages/broker/src/auth.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 
 const ORG_A = "org_adminnocompany00000a";
-const ORG_B = "org_adminnocompany00000b";
 const reader = (answer: () => Promise<unknown>): CompanyMembershipReader => ({ companyOf: answer as () => Promise<string | undefined> });
 const caught = async (work: Promise<unknown>) => await work.then(() => undefined, (error: unknown) => error as AgentXError);
 
 describe("resolveAdminCompany", () => {
-  it("answers the administrator's own company exactly as resolveCompany does", async () => {
-    for (const company of [ORG_A, ORG_B]) {
-      expect(await resolveAdminCompany(reader(async () => company), "person")).toBe(company);
-      expect(await resolveCompany(reader(async () => company), "person")).toBe(company);
-    }
-    expect(await resolveAdminCompany(undefined, "person")).toBeUndefined();
-  });
-
-  it("refuses an administrator in no company (or a malformed one) with FORBIDDEN in fixed words, not AUTH_REQUIRED", async () => {
-    for (const answer of [undefined, "", "not-a-company", "org_../../secret", 42]) {
-      const error = await caught(resolveAdminCompany(reader(async () => answer), "person"));
-      expect(error, String(answer)).toBeInstanceOf(AgentXError);
-      expect(error?.code, String(answer)).toBe("FORBIDDEN");
-      expect(error?.statusCode, String(answer)).toBe(403);
-      expect(error?.message, String(answer)).toContain(ADMIN_NOT_IN_A_COMPANY);
-      // Before: the loop the operator could not leave.
-      expect((await caught(resolveCompany(reader(async () => answer), "person")))?.code, String(answer)).toBe("AUTH_REQUIRED");
-    }
-  });
 
   it("keeps the fixed sign-in refusal when the membership read fails (fail closed), never its cause", async () => {
     const error = await caught(resolveAdminCompany(reader(async () => { throw new Error("secret-table broke"); }), "person"));
@@ -40,11 +20,6 @@ describe("resolveAdminCompany", () => {
     expect(error?.message).not.toContain("secret");
   });
 
-  it("takes the caller's own refusal", async () => {
-    const error = await caught(resolveAdminCompany(reader(async () => undefined), "person", () => agentXError("CONFIG_INVALID", "name one")));
-    expect(error?.code).toBe("CONFIG_INVALID");
-    expect(error?.message).toContain("name one");
-  });
 });
 
 describe("GET /v1/admin/sign-in-clients for an operator in no company", () => {
@@ -59,15 +34,6 @@ describe("GET /v1/admin/sign-in-clients for an operator in no company", () => {
     const answer = await adminCall(handler, { method: "GET", path: "/v1/admin/sign-in-clients" });
     expect(answer).toMatchObject({ status: 403, body: { error: { code: "FORBIDDEN", message: ADMIN_NOT_IN_A_COMPANY } } });
     expect(clients.asked).toEqual([]);
-  });
-
-  it("still lists only the member administrator's own company", async () => {
-    for (const company of [ORG_A, ORG_B]) {
-      const clients = registry();
-      const { handler } = await createAdminBroker({ linking: { companies: reader(async () => company), signInClients: clients.signInClients } as never });
-      expect((await adminCall(handler, { method: "GET", path: "/v1/admin/sign-in-clients" })).status, company).toBe(200);
-      expect(clients.asked, company).toEqual([company]);
-    }
   });
 
   it("is never looser for a non-administrator", async () => {

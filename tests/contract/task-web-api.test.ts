@@ -77,22 +77,6 @@ describe("task page API", () => {
       expect((await call(fakeDeps(), post(api("retry"), retry()))).statusCode).toBe(404);
     });
 
-    it("answers a refusal the way a decision's is: a non-owner as 403, a changed task as 409", async () => {
-      const owners = fakeDeps({ retryApplicationRound: async () => { throw Object.assign(new Error("FORBIDDEN: Only owners retry."), { code: "FORBIDDEN", pageReason: "owners_only" }); } });
-      expect((await call(owners, post(api("retry"), retry()))).statusCode).toBe(403);
-      const changed = fakeDeps({ retryApplicationRound: async () => { throw Object.assign(new Error("IDEMPOTENCY_CONFLICT: This task changed. Refresh the page and try again."), { code: "IDEMPOTENCY_CONFLICT" }); } });
-      const answer = await call(changed, post(api("retry"), retry()));
-      expect(answer.statusCode).toBe(409);
-      expect(answer.json).toMatchObject({ error: "changed", message: "This task changed. Refresh the page and try again." });
-    });
-  });
-
-  it("matches only its own paths", () => {
-    expect(TASK_PAGE_API.test(api("state"))).toBe(true);
-    expect(TASK_PAGE_API.test(api(`comments/${randomUUID()}/edit`))).toBe(true);
-    expect(TASK_PAGE_API.test(api("decision"))).toBe(true);
-    expect(TASK_PAGE_API.test(api("other"))).toBe(false);
-    expect(TASK_PAGE_API.test(`/review/${taskId}/api/decision`)).toBe(false);
   });
 
   it("an edit or a delete reaches that comment's edit or delete, never the decision", async () => {
@@ -104,36 +88,6 @@ describe("task page API", () => {
       ["editComment", { commentId: id, rev: 1, text: "Better words." }],
       ["deleteComment", { commentId: id, rev: 2 }],
     ]);
-  });
-
-  it("every POST needs same origin, the CSRF header and its cookie", async () => {
-    const deps = fakeDeps();
-    const refused = [
-      post(api("comments"), commentBody, { "x-agentx-csrf": undefined }),
-      post(api("comments"), commentBody, { "x-agentx-csrf": "d".repeat(43) }),
-      post(api("comments"), commentBody, { cookie: cookies(null) }),
-      post(api("comments"), commentBody, { cookie: cookies("short"), "x-agentx-csrf": "short" }),
-      post(api("comments"), commentBody, { origin: undefined }),
-      post(api("comments"), commentBody, { origin: "null" }),
-      post(api("comments"), commentBody, { origin: "https://evil.example" }),
-      post(api("decision"), {}, { origin: "https://evil.example" }),
-    ];
-    for (const request of refused) {
-      const answer = await call(deps, request);
-      expect(answer.statusCode).toBe(403);
-      expect(answer.json).toEqual({ error: "request_refused" });
-    }
-    expect(deps.calls).toEqual([]);
-    const accepted = await call(deps, post(api("comments"), commentBody));
-    expect(accepted.statusCode).toBe(201);
-    // A signed-out request is told to sign in, before anything else.
-    const signedOut = await call(deps, post(api("comments"), commentBody, { cookie: undefined }));
-    expect(signedOut.statusCode).toBe(401);
-    expect(signedOut.json).toEqual({ error: "sign_in_required" });
-    // Reads are GET only and writes POST only.
-    expect((await call(deps, { ...get(api("state")), method: "POST", headers: post(api("state"), {}).headers })).statusCode).toBe(405);
-    expect((await call(deps, get(api("comments/" + randomUUID() + "/edit")))).statusCode).toBe(405);
-    expect((await call(deps, { ...get(api("decision")), method: "PUT" })).statusCode).toBe(405);
   });
 
   it("JSON only, at most 16 KB, strict fields", async () => {
@@ -284,21 +238,6 @@ describe("task page API through the broker", () => {
     expect(answer.statusCode).toBe(403);
     expect(answer.json).toEqual({ error: "owners_only", message: "Only owners decide." });
     expect((t.harness.db.get(`DEVTASK#${t.id}`, "META") as { workflow: { revision: number } }).workflow.revision).toBe(t.revision);
-  });
-
-  it("a reader without access cannot tell a task exists", async () => {
-    const t = await sharedTask();
-    const missing = randomUUID();
-    for (const who of [NIA, OMAR]) {
-      for (const [method, suffix, body] of [["GET", "state", undefined], ["GET", "comments", undefined], ["POST", "comments", { ...commentBody, requestId: randomUUID() }], ["POST", "decision", t.decision()]] as const) {
-        const real = await t.send(who, method, `/review/${t.id}/task/api/${suffix}`, body);
-        const none = await t.send(who, method, `/review/${missing}/task/api/${suffix}`, body);
-        expect(real.statusCode, `${who.name} ${suffix}`).toBe(404);
-        expect(real.body).toBe(none.body);
-        expect(real.json).toEqual({ error: "not_found", message: "You don't have access to this task." });
-        expect(real.body).not.toContain("Maya");
-      }
-    }
   });
 
   it("a stale decision answers 409 with the refusal sentence", async () => {

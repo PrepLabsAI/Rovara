@@ -77,17 +77,4 @@ describe("a real review run with a second reviewer", () => {
     for (const event of usage) expect(TaskUsageTelemetrySchema.safeParse(event.payload).success, JSON.stringify(event.payload)).toBe(true);
   });
 
-  it("asks nothing of a second reviewer when the invocation names none: the result has no such key (cr off)", async () => {
-    const w = await workspace();
-    const events: Array<{ type: string; payload: unknown }> = [];
-    await runTaskInvocation({
-      protocolVersion: 1 as const, kind: "task" as const, operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1, callbackCapability: "c".repeat(64),
-      payload: { conversationId: randomUUID(), prompt: "Run the independent read-only reviews.", workflowMode: "REVIEW" as const, workflowBase: [{ repositoryId: "payments", baseCommitSha: w.base }] },
-    }, {
-      rootPath: w.rootPath, model: { provider: "test", modelId: "first-v1" }, piAdapter: reviewer("first-v1"),
-      eventSink: async (batch) => { for (const event of (Array.isArray(batch) ? batch : [batch]) as Array<{ type: string; payload: unknown }>) events.push(event); },
-      artifactSink: async () => undefined,
-    });
-    expect(Object.keys(events.filter((event) => event.type === "result").at(-1)!.payload as object)).not.toContain(SECOND_REVIEW_RESULT_KEY);
-  });
 });

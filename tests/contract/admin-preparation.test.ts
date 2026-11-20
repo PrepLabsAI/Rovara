@@ -8,7 +8,6 @@ import {
   type AuthenticatedIdentity,
 } from "../../packages/broker/src/index.js";
 import { describe, expect, it } from "vitest";
-import { reorderMaps } from "../support/fake-dynamodb.js";
 
 const administrator = identity("a".repeat(64), true);
 const memberships = [
@@ -41,18 +40,6 @@ describe("administrator project registration", () => {
     expect(() => projects.register(identity("b".repeat(64), false), definition, memberships)).toThrow(
       /administrator/i,
     );
-  });
-});
-
-describe("administrator project re-registration", () => {
-  it("treats a stored definition whose maps are in another key order as the same revision", () => {
-    const projects = new InMemoryProjectRegistry();
-    const definition = projectDefinition();
-    projects.register(administrator, definition, memberships);
-    const key = [...projects.projects.keys()][0]!;
-    const stored = projects.projects.get(key)!;
-    projects.projects.set(key, { ...stored, definition: reorderMaps(stored.definition) as ProjectDefinition });
-    expect(projects.register(administrator, definition, memberships).duplicate).toBe(true);
   });
 });
 
@@ -153,49 +140,6 @@ describe("workspace preparation coordination", () => {
     expect(retry.invocation).toBeUndefined();
   });
 
-  it("builds the prepare invocation for a stored revision with a connector of an unknown type", async () => {
-    const projects = new InMemoryProjectRegistry();
-    projects.register(administrator, projectDefinition(), memberships);
-    // A revision written by a later control plane, before a rollback to this one: requireLatestProject
-    // (mirrored here by the registry's own stored record) does not re-parse a stored definition, so
-    // this is seeded directly rather than through registration, which still refuses this connector type.
-    const [registered] = [...projects.projects.values()];
-    if (!registered) throw new Error("expected a registered project");
-    registered.definition = {
-      ...registered.definition,
-      integrations: {
-        connectors: [
-          { name: "tracker", type: "future-vendor", credentialRef: "future-vendor-key", scopes: ["payments"] },
-        ],
-      },
-    } as unknown as ProjectDefinition;
-
-    const registry = new InMemoryRegistry();
-    const coordinator = new PreparationCoordinator({
-      projects,
-      registry,
-      memberships,
-      repositoryGrants: new RepositoryGrantService(Buffer.alloc(32, 9), async (reference) => ({
-        token: `resolved-${reference}`,
-      })),
-      allocateRuntime: async () => ({
-        deploymentMode: "ec2-ebs" as const,
-      }),
-      createCallbackCapability: () => "c".repeat(64),
-    });
-
-    const dispatch = await coordinator.prepare(administrator, {
-      requestId: randomUUID(),
-      projectName: "payments",
-      projectRevision: 1,
-      targetOwnerKey: "e".repeat(64),
-    });
-    expect(dispatch.invocation?.kind).toBe("prepare");
-    if (dispatch.invocation?.kind !== "prepare") throw new Error("missing prepare invocation");
-    expect(dispatch.invocation.payload.project.integrations?.connectors).toEqual([
-      { name: "tracker", type: "future-vendor", credentialRef: "future-vendor-key", scopes: ["payments"] },
-    ]);
-  });
 });
 
 function identity(ownerKey: string, isAdministrator: boolean): AuthenticatedIdentity {

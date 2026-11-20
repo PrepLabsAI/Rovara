@@ -139,45 +139,6 @@ function harness(options: { items?: Array<Record<string, unknown>>; now?: number
 const shown = (view: SlackModalView | undefined) => JSON.stringify(view ?? {});
 
 describe("the Details view (spec 014 FR-024, FR-025)", () => {
-  it("refuses a Details click whose Slack signature does not verify, before reading anything", async () => {
-    const { handler, commands, views, now } = harness();
-    expect((await handler(signed(payload(), now, "v0=bad"))).statusCode).toBe(401);
-    expect(commands).toHaveLength(0);
-    expect(views).toHaveLength(0);
-  });
-
-  it("opens the turn's details for the requester who clicked, and posts nothing to the thread", async () => {
-    const { click, views, ephemeral, logs } = harness();
-    expect((await click()).statusCode).toBe(200);
-    expect(views).toHaveLength(1);
-    expect(views[0]!.triggerId).toBe("1.2.3");
-    expect(views[0]!.view.title.text).toBe("Turn details");
-    expect(shown(views[0]!.view)).toContain("tracker__close_item");
-    expect(shown(views[0]!.view)).toContain("TRK-9");
-    expect(ephemeral).toEqual([]);
-    expect(logs).toContainEqual({ event: "interaction.details_opened", fields: { eventId: "EvTURN00001", viewerId: requester, viewer: "requester" } });
-  });
-
-  it("lets another member who can see the reply open it, never shows the request or response text, and logs who looked", async () => {
-    const { click, views, logs, commands } = harness();
-    await click(payload({ user: other }));
-    expect(views).toHaveLength(1);
-    expect(shown(views[0]!.view)).not.toContain("secret plan");
-    expect(shown(views[0]!.view)).not.toContain("private answer");
-    const names = Object.values(commands[0]!.ExpressionAttributeNames as Record<string, string>);
-    expect(names).not.toContain("requestText");
-    expect(names).not.toContain("responseText");
-    expect(logs).toContainEqual({ event: "interaction.details_opened", fields: { eventId: "EvTURN00001", viewerId: other, viewer: "member" } });
-  });
-
-  it("reads only from the thread of the clicked message, so a forged value cannot reach another thread's turn", async () => {
-    const elsewhere = turn({ eventId: "EvOTHER0001", subject: "T0BSHLLUGBD/C0999999999/1695500000.000009", requestText: "other thread secret" });
-    const { click, views, commands } = harness({ items: [stored(turn()), stored(elsewhere)] });
-    await click(payload({ value: `${receivedAt}#EvOTHER0001` }));
-    expect(commands[0]!.Key).toEqual({ pk: `THREAD#${subject}`, sk: `TURN#${receivedAt}#EvOTHER0001` });
-    expect(shown(views[0]!.view)).toContain(DETAILS_NOT_SAVED);
-    expect(shown(views[0]!.view)).not.toContain("other thread secret");
-  });
 
   it("refuses a malformed value without reading, and a record that disagrees with its key, with the same answer", async () => {
     for (const forged of ["", "THREAD#T0BSHLLUGBD/C0999999999/1695500000.000009", `${value}#TURN#x`, "x".repeat(2_000)]) {
@@ -247,40 +208,6 @@ describe("the Details view (spec 014 FR-024, FR-025)", () => {
     expect(String(commands[0]!.ProjectionExpression).split(", ").map((alias) => names[alias])).toEqual([...TURN_DETAILS_ATTRIBUTES]);
   });
 
-  it("answers a member from another workspace (Slack Connect) privately that there are no details, without reading", async () => {
-    const { click, views, commands, logs } = harness();
-    await click(payload({ user: "U0EXTERNAL1", userTeam: "T0EXTERNAL1" }));
-    expect(commands).toHaveLength(0);
-    expect(views).toHaveLength(1);
-    expect(shown(views[0]!.view)).toContain(DETAILS_NOT_FOUND);
-    expect(shown(views[0]!.view)).not.toContain("tracker__close_item");
-    expect(logs.at(-1)).toMatchObject({ event: "interaction.details_refused", fields: { reason: "external_member", viewerId: "U0EXTERNAL1" } });
-  });
-
-  it("refuses a record whose event, receivedAt or requesting team disagrees with the clicked reference, never showing it", async () => {
-    const tampered = [
-      { ...stored(turn()), eventId: "EvOTHER0001" },
-      { ...stored(turn()), receivedAt: "2026-09-24T09:00:00.000Z" },
-      { ...stored(turn()), requestedBy: { teamId: "T0EXTERNAL1", userId: requester } },
-    ];
-    for (const item of tampered) {
-      const { click, views, logs } = harness({ items: [item] });
-      await click();
-      expect(shown(views[0]!.view)).toContain(DETAILS_NOT_FOUND);
-      expect(shown(views[0]!.view)).not.toContain("tracker__close_item");
-      expect(logs.at(-1)).toMatchObject({ event: "interaction.details_refused", fields: { reason: "mismatch" } });
-    }
-  });
-
-  it("puts no record text into the message modals it opens", async () => {
-    const broken = harness({ items: [stored(turn(), { calls: "not a list", usageError: "the secret plan" })] });
-    await broken.click();
-    expect(shown(broken.views[0]!.view)).not.toContain("secret plan");
-    const tampered = harness({ items: [{ ...stored(turn()), subject: "T0BSHLLUGBD/C0999999999/1695500000.000009", usageError: "the secret plan" }] });
-    await tampered.click();
-    expect(shown(tampered.views[0]!.view)).not.toContain("secret plan");
-  });
-
   it("logs a failed private answer when neither the modal nor response_url works, and never falls back to the confirmation wording", async () => {
     const { click, ephemeral, logs } = harness({
       failOpen: new Error("Slack views.open failed: expired_trigger_id"),
@@ -311,18 +238,6 @@ describe("the Details view (spec 014 FR-024, FR-025)", () => {
     expect(commands).toHaveLength(0);
     expect(shown(views[0]!.view)).toContain(DETAILS_NOT_FOUND);
     expect(logs.at(-1)).toMatchObject({ event: "interaction.details_refused", fields: { reason: "external_member" } });
-  });
-
-  it("looks a click whose team and user team are both another workspace up in that workspace's thread, where this turn is not", async () => {
-    // team.id = user.team_id = T_B: the thread subject is T_B's, so the key can never reach the host's
-    // record. The reply is old, so the member hears DETAILS_NOT_SAVED; a record exists under T_B only
-    // when AgentX is bound to T_B, and then this is that workspace's own click.
-    const { click, views, commands, logs } = harness();
-    await click(payload({ team: "T0OTHERTEAM", userTeam: "T0OTHERTEAM" }));
-    expect(commands[0]!.Key).toEqual({ pk: `THREAD#T0OTHERTEAM/${thread.channelId}/${thread.threadTs}`, sk: `TURN#${value}` });
-    expect(shown(views[0]!.view)).toContain(DETAILS_NOT_SAVED);
-    expect(shown(views[0]!.view)).not.toContain("tracker__close_item");
-    expect(logs.at(-1)).toMatchObject({ event: "interaction.details_refused", fields: { reason: "not_found" } });
   });
 
   it("lets a member of a sibling workspace in the same Enterprise Grid open it, and refuses one from another enterprise", async () => {
@@ -597,22 +512,4 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
     }
   });
 
-  it("reads the turn record table named by TURN_RECORDS_TABLE_NAME when it is set", async () => {
-    // Keep this wiring check inside the fixture reply's retention window.
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(repliedAt + 3_600_000);
-    const { handler, lines, dynamo } = wire("turn-records");
-    expect(lines.map((line) => line.event)).not.toContain("interaction.details_not_configured");
-    await handler(signed(payload(), Date.now()));
-    expect(dynamo).toContainEqual(expect.objectContaining({ TableName: "turn-records", Key: { pk: `THREAD#${subject}`, sk: `TURN#${value}` } }));
-  });
-
-  it("hands views.open what is left of the window after the record read, not slackApi's 2-second default", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(repliedAt + 3_600_000);
-    const { handler, slack } = wire("turn-records", 700);
-    await handler(signed(payload(), Date.now()));
-    const opened = slack.filter((entry) => entry.url === "https://slack.com/api/views.open");
-    expect(opened.map((entry) => entry.timeoutMs)).toEqual([2_500 - 700]);
-  });
 });

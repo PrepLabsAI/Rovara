@@ -6,15 +6,14 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { orgProjectCatalogKey, projectRevisionKey, sharedTaskKey, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
-import { taskKey, taskPointerKey, workspaceKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
-import { ADMIN_GRANT_MISSING, WORKSPACE_NOT_FOUND, stopWorkspaceAsAdministrator } from "../../packages/broker/src/core/task-flow/stop-request.js";
+import { taskKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
+import { WORKSPACE_NOT_FOUND, stopWorkspaceAsAdministrator } from "../../packages/broker/src/core/task-flow/stop-request.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, engineStampKey, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { coreTaskEntryFrom, stopCoreTaskAs, type CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
-import { coreAdminStop } from "../../packages/broker/src/aws/core-stop-entry.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, issuer, loadSlackBroker } from "../support/slack-broker.js";
@@ -120,13 +119,6 @@ describe("Slack's thread stop on a core task", () => {
     expect(await status()).toBe("CANCELLED");
   });
 
-  it("stops it for a live admin of the task's company", async () => {
-    const { shareThread, slackStop, status } = await coreWorld();
-    shareThread();
-    expect((await slackStop(SLACK.admin)).body).toMatchObject({ outcome: "CANCEL_REQUESTED" });
-    expect(await status()).toBe("CANCELLED");
-  });
-
   it("refuses a colleague who is no owner and no admin, an admin of another company and an unknown Slack person, as not the owner; nothing is stopped", async () => {
     const { shareThread, slackStop, status } = await coreWorld();
     shareThread();
@@ -143,13 +135,6 @@ describe("Slack's thread stop on a core task", () => {
     expect(await status()).not.toBe("CANCELLED");
   });
 
-  it("never runs the workflow's cancel for a core task (no AWS cancel operation or outbox row is written)", async () => {
-    const { shareThread, slackStop, harness } = await coreWorld();
-    shareThread();
-    await slackStop(SLACK.colleague);
-    await slackStop(SLACK.owner);
-    expect(harness.db.find((item) => item.entityType === "OUTBOX" || (item.entityType === "OPERATION" && item.kind === "cancel"))).toEqual([]);
-  });
 });
 
 describe("the Slack Stop button on a core task", () => {
@@ -189,75 +174,9 @@ describe("the administrator's workspace cancel on a core task's workspace", () =
     expect(await status()).not.toBe("CANCELLED");
   });
 
-  it("golden (Q2): an administrator of the task's own company with the grant gets exactly the answer it got before the company check", async () => {
-    const { harness, task, status } = await coreWorld();
-    const answer = await call(harness.handler, { method: "POST", path: `/v1/admin/workspaces/${task.workspaceId}/cancel`, user: ADMIN });
-    expect(answer).toEqual({ status: 202, body: { outcome: "CANCEL_REQUESTED", workspaceId: task.workspaceId, taskId: task.taskId, requestId: expect.any(String) as unknown } });
-    expect(await status()).toBe("CANCELLED");
-  });
-
-  it("two companies (Q2): an administrator whose grant names 'payments' but whose membership is another company's is refused on this company's 'payments' task with exactly the no-grant answer; nothing is stopped", async () => {
-    const noGrant = { subject: "other-admin", admin: true };
-    const { harness, task, status, world } = await coreWorld({ adminCompanies: new Map([[ADMIN_KEY, OTHER], [ownerKeyForSubject(issuer, noGrant.subject), FAKE_COMPANY]]) });
-    const path = `/v1/admin/workspaces/${task.workspaceId}/cancel`;
-    const foreign = await call(harness.handler, { method: "POST", path, user: ADMIN });
-    // The same company's administrator without any grant: the route's own refusal (requireAdministrator), read the same way.
-    const missing = await call(harness.handler, { method: "POST", path, user: noGrant });
-    expect(missing).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND", message: ADMIN_GRANT_MISSING } } });
-    const withoutRequestId = (answer: { status: number; body: Record<string, unknown> }) => JSON.stringify({ ...answer, body: { ...answer.body, requestId: "<id>" } });
-    expect(withoutRequestId(foreign)).toBe(withoutRequestId(missing));
-    expect(await status()).not.toBe("CANCELLED");
-    expect(world.audit.filter((event) => event.action === "task.stop_requested")).toEqual([]);
-  });
-
-  it("two companies (Q2): no membership, a membership that can't be read (its cause never shown) and the other company's membership all read as the missing grant; nothing is stopped", async () => {
-    for (const held of [undefined, new Error("sign-in table timed out at shard 7"), OTHER] as const) {
-      const { harness, task, status } = await coreWorld({ adminCompanies: new Map(held === undefined ? [] : [[ADMIN_KEY, held]]) });
-      const answer = await call(harness.handler, { method: "POST", path: `/v1/admin/workspaces/${task.workspaceId}/cancel`, user: ADMIN });
-      expect(answer).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND", message: ADMIN_GRANT_MISSING } } });
-      expect(JSON.stringify(answer)).not.toMatch(/shard|timed out|org_/u);
-      expect(await status()).not.toBe("CANCELLED");
-    }
-  });
-
-  it("without the core's administrator stop on the install, answers a core workspace as before (a missing workspace)", async () => {
-    const { harness, task, status } = await coreWorld({ adminStop: false });
-    const answer = await call(harness.handler, { method: "POST", path: `/v1/admin/workspaces/${task.workspaceId}/cancel`, user: ADMIN });
-    expect(answer).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
-    expect(await status()).not.toBe("CANCELLED");
-  });
-
-  it("golden: a workflow (unstamped) workspace's cancel answers and writes as with no core entry", async () => {
-    const run = async (harness: Awaited<ReturnType<typeof createDeveloperTaskBroker>>) => {
-      const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: "22222222-2222-4222-8222-222222222222", project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
-      const taskId = (started.body.task as { taskId: string }).taskId;
-      const { workspaceId } = harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
-      const writes: string[] = [];
-      const stop = harness.db.onWrite((change) => writes.push(Object.keys(change).join()));
-      const answer = await call(harness.handler, { method: "POST", path: `/v1/admin/workspaces/${workspaceId}/cancel`, user: ADMIN });
-      stop();
-      return { answer: JSON.stringify(answer).replaceAll(workspaceId, "<w>").replace(/"[0-9a-f-]{36}"/gu, "\"<id>\""), writes };
-    };
-    const { coreTasks } = await coreWorld();
-    const without = await run(await createDeveloperTaskBroker());
-    const withCore = await run(await createDeveloperTaskBroker({ developerExtra: { coreTasks: { ...coreTasks, route: async () => undefined } } }));
-    expect(withCore.answer).toBe(without.answer);
-    expect(withCore.writes).toEqual(without.writes);
-  });
 });
 
 describe("the core's administrator stop (stopWorkspaceAsAdministrator)", () => {
-  it("asks the route's project check with the task's own project, and stops nothing when it refuses", async () => {
-    const { app, world, task, status } = await coreWorld();
-    const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
-    // The project comes from the stored task, whatever it is named.
-    const record = (await world.store.get(taskKey(task.taskId)))!;
-    await world.store.put({ item: { ...record, project: "ledger" } });
-    const asked: string[] = [];
-    await expect(stopWorkspaceAsAdministrator(deps, task.workspaceId, { id: "admin", companyOf: async () => FAKE_COMPANY }, async (project) => { asked.push(project); throw new Error("no grant"); })).rejects.toThrow("no grant");
-    expect(asked).toEqual(["ledger"]);
-    expect(await status()).not.toBe("CANCELLED");
-  });
 
   it("a closed task: the project check still comes first (no grant reads its refusal); with the grant, nothing runs and nothing is stopped", async () => {
     const { app, world, task, status } = await coreWorld();
@@ -270,13 +189,6 @@ describe("the core's administrator stop (stopWorkspaceAsAdministrator)", () => {
     expect(world.audit.filter((event) => event.action === "task.stop_requested")).toEqual([]);
   });
 
-  it("an administrator's stop leaves a task.stop_requested audit line naming the administrator", async () => {
-    const { app, world, task } = await coreWorld();
-    const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
-    await stopWorkspaceAsAdministrator(deps, task.workspaceId, { id: "admin-owner-key", companyOf: async () => FAKE_COMPANY }, async () => undefined);
-    expect(world.audit.filter((event) => event.action === "task.stop_requested").map((event) => ({ actor: event.actor, details: event.details }))).toEqual([{ actor: { type: "person", id: "admin-owner-key" }, details: { project: "payments", by: "install-admin" } }]);
-  });
-
   it("two companies: another company's runtime never stops this company's workspace (a missing workspace's words), and an unknown workspace reads the same", async () => {
     const { app, task, status } = await coreWorld();
     const other = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
@@ -284,74 +196,6 @@ describe("the core's administrator stop (stopWorkspaceAsAdministrator)", () => {
     await expect(stopWorkspaceAsAdministrator({ ...other, companyId: OTHER }, task.workspaceId, { id: "admin", companyOf: async () => FAKE_COMPANY }, authorize)).rejects.toMatchObject({ code: "NOT_FOUND", message: `NOT_FOUND: ${WORKSPACE_NOT_FOUND}` });
     await expect(stopWorkspaceAsAdministrator(other, randomUUID(), { id: "admin", companyOf: async () => FAKE_COMPANY }, authorize)).rejects.toMatchObject({ code: "NOT_FOUND", message: `NOT_FOUND: ${WORKSPACE_NOT_FOUND}` });
     expect(authorize).not.toHaveBeenCalled();
-    expect(await status()).not.toBe("CANCELLED");
-  });
-});
-
-describe("the administrator's company (Q2: a grant names a project by name only)", () => {
-  it("binds the grant to the stored task's company: another company's administrator, no company and an unreadable one are refused before the project check, in the missing grant's words", async () => {
-    const { app, task, status, world } = await coreWorld();
-    const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
-    const authorize = vi.fn(async () => undefined);
-    const companies: Array<() => Promise<string | undefined>> = [async () => OTHER, async () => undefined, async () => { throw new Error("membership read failed: secret-cause"); }];
-    for (const companyOf of companies) {
-      const refused = stopWorkspaceAsAdministrator(deps, task.workspaceId, { id: "admin", companyOf }, authorize);
-      await expect(refused).rejects.toMatchObject({ code: "NOT_FOUND", message: `NOT_FOUND: ${ADMIN_GRANT_MISSING}` });
-      await expect(refused).rejects.not.toThrow(/secret-cause/u);
-    }
-    expect(authorize).not.toHaveBeenCalled();
-    expect(await status()).not.toBe("CANCELLED");
-    expect(world.audit.filter((event) => event.action === "task.stop_requested")).toEqual([]);
-    // The task's own company: the project check is asked and the stop runs.
-    expect(await stopWorkspaceAsAdministrator(deps, task.workspaceId, { id: "admin", companyOf: async () => FAKE_COMPANY }, authorize)).toEqual({ taskId: task.taskId, nothingRunning: false });
-    expect(authorize).toHaveBeenCalledWith("payments");
-    expect(await status()).toBe("CANCELLED");
-  });
-
-  it("the task's company decides, not the runtime's: a task row naming another company is a missing workspace before any company check", async () => {
-    const { app, world, task } = await coreWorld();
-    const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
-    const record = (await world.store.get(taskKey(task.taskId)))!;
-    await world.store.put({ item: { ...record, companyId: OTHER } });
-    const companyOf = vi.fn(async () => OTHER);
-    await expect(stopWorkspaceAsAdministrator(deps, task.workspaceId, { id: "admin", companyOf }, async () => undefined)).rejects.toMatchObject({ code: "NOT_FOUND", message: `NOT_FOUND: ${WORKSPACE_NOT_FOUND}` });
-    expect(companyOf).not.toHaveBeenCalled();
-  });
-
-  it("a closed task of this company is refused to another company's administrator too (the company check comes before the closed answer)", async () => {
-    const { app, world, task } = await coreWorld();
-    const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
-    const record = (await world.store.get(taskKey(task.taskId)))!;
-    await world.store.put({ item: { ...record, closedAt: "2026-11-15T10:00:00.000Z" } });
-    await expect(stopWorkspaceAsAdministrator(deps, task.workspaceId, { id: "admin", companyOf: async () => OTHER }, async () => undefined)).rejects.toMatchObject({ code: "NOT_FOUND", message: `NOT_FOUND: ${ADMIN_GRANT_MISSING}` });
-  });
-});
-
-describe("pointers that name a task they do not hold", () => {
-  it("a workspace of company B whose pointer names company A's task, and a workspace of company A whose pointer names a task of another workspace, both read as missing; nothing is stopped", async () => {
-    const { app, world, task, status } = await coreWorld();
-    const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
-    const authorize = vi.fn(async () => undefined);
-    // Company B's copy of the same workspace id, naming company A's task: only the task's company tells them apart.
-    const foreign = task.workspaceId;
-    await world.store.put({ item: { ...workspaceKey(OTHER, foreign), entityType: "WORKSPACE", id: foreign, companyId: OTHER, ownerKey: "k", status: "READY", activeOperationId: null } });
-    await world.store.put({ item: { ...taskPointerKey(OTHER, foreign), taskId: task.taskId } });
-    await expect(stopWorkspaceAsAdministrator({ ...deps, companyId: OTHER }, foreign, { id: "admin", companyOf: async () => FAKE_COMPANY }, authorize)).rejects.toMatchObject({ code: "NOT_FOUND" });
-    const stray = randomUUID();
-    await world.store.put({ item: { ...workspaceKey(FAKE_COMPANY, stray), entityType: "WORKSPACE", id: stray, companyId: FAKE_COMPANY, ownerKey: "k", status: "READY", activeOperationId: null } });
-    await world.store.put({ item: { ...taskPointerKey(FAKE_COMPANY, stray), taskId: task.taskId } });
-    await expect(stopWorkspaceAsAdministrator(deps, stray, { id: "admin", companyOf: async () => FAKE_COMPANY }, authorize)).rejects.toMatchObject({ code: "NOT_FOUND" });
-    expect(authorize).not.toHaveBeenCalled();
-    expect(await status()).not.toBe("CANCELLED");
-  });
-});
-
-describe("coreAdminStop", () => {
-  it("refuses a caller without the administrator claim before the core is asked, even when the project check would pass", async () => {
-    const { harness, coreTasks, task, status } = await coreWorld();
-    const stop = vi.spyOn(coreTasks, "stopWorkspaceForAdmin");
-    await expect(coreAdminStop({ documentClient: harness.db, tableName: harness.brokerInput.tableName }, coreTasks, { isAdministrator: false, ownerKey: "k" }, task.workspaceId, async () => undefined)).rejects.toMatchObject({ code: "FORBIDDEN" });
-    expect(stop).not.toHaveBeenCalled();
     expect(await status()).not.toBe("CANCELLED");
   });
 });

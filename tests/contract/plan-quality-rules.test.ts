@@ -175,20 +175,6 @@ describe("mock-missing-for-target", () => {
   const targets = TARGETS.map((target) => target.targetId);
   const plan = (mocks: string[], list = scenarios) => withChecks([], {}, { e2e: intentOf({ targets, scenarios: list, mocks }) });
 
-  it("names every viewer target that has no mock selected, and only those", () => {
-    const findings = quality(plan(["orders-owner-web"]), { context: context() }).filter((finding) => finding.code === "mock-missing-for-target");
-    expect(findings.map((finding) => finding.targetIds)).toEqual([["orders-viewer-web"], ["orders-viewer-api"]]);
-    expect(findings[0]).toMatchObject({ fixtureIds: ["inventory-v1"], revisable: true });
-    expect(findings[0]!.plannerLine).toContain("orders-viewer-web");
-    expect(findings[0]!.plannerLine).toContain("inventory-v1");
-  });
-
-  it("is quiet once every target that runs the app selects the mock, or when no mock is offered for it", () => {
-    expect(codesOf(quality(plan(targets), { context: context() }))).not.toContain("mock-missing-for-target");
-    expect(codesOf(quality(plan([]), { context: context({ mockFixtures: [] }) }))).not.toContain("mock-missing-for-target");
-    expect(codesOf(quality(plan(["orders-owner-web"]), { context: context({ mockFixtures: [{ componentId: "inventory-v1", requestedTargetIds: ["orders-owner-web"] }] }) }))).not.toContain("mock-missing-for-target");
-  });
-
   it("ignores a target whose scenarios only call source-interface contracts, and skips the rule without a planning context", () => {
     const portable = [scenario("p", ["orders-viewer-web"], [step("invoke-contract", { operationId: "op", input: {} })])];
     expect(codesOf(quality(plan([], portable), { context: context() }))).not.toContain("mock-missing-for-target");
@@ -227,26 +213,12 @@ describe("check-command-lint", () => {
     expect(lintOf("Retry tests", "npx", ["vitest", "run"])).toEqual([]);
   });
 
-  it("accepts the built-in kinds and leaves model text out of every sentence", () => {
-    const builtin = builtinFileCheckCommand({ kind: "file-not-contains", cwd: FOLDER, path: "public/app.js", text: "export-csv" });
-    expect(lintOf("No export button", builtin.executable, builtin.args)).toEqual([]);
-    const [finding] = lintOf("SECRET-LABEL-hunter2 not present", "grep", ["-cL", "SECRET-PATTERN-hunter2", "public/app.js"]);
-    expect(finding).toBeDefined();
-    for (const text of [finding!.ownerSentence, finding!.plannerLine, JSON.stringify(finding)]) expect(text).not.toMatch(/hunter2|SECRET/u);
-    expect(finding!.plannerLine).toContain("file-contains");
-  });
 });
 
 describe("claim-not-covered and claim-static-only", () => {
   const grep = check("proposed-1", "Route exists", "grep", ["-c", "orders.csv", "server.js"]);
   const runner = check("proposed-2", "Retry tests", "npx", ["vitest", "run"]);
   const coverage = (plan: PlanDocument) => quality(plan).filter((finding) => finding.code.startsWith("claim-"));
-
-  it("reports a claim proved only by a grep as static-only, and one with no check as not covered", () => {
-    const findings = coverage(withChecks([grep], { "proposed-1": ["1.1"] }));
-    expect(findings).toMatchObject([{ code: "claim-not-covered", claimIds: ["2", "nc1"], revisable: true }, { code: "claim-static-only", claimIds: ["1.1"], revisable: true }]);
-    expect(findings[0]!.ownerSentence).toContain("Not changing 1");
-  });
 
   it("counts a running check, a scenario that drives the app, and a child claim's proof", () => {
     expect(coverage(withChecks([runner], { "proposed-2": ["1.1", "2", "nc1"] }))).toEqual([]);
@@ -317,10 +289,6 @@ describe("e2e-kind-unavailable and e2e-target-unavailable", () => {
     expect(revisablePlanQualityFindings(findings).every((finding) => finding.code.startsWith("claim-") || finding.code.startsWith("mock-"))).toBe(true);
   });
 
-  it("is quiet when everything the plan needs is offered", () => {
-    expect(quality(codingPlan({ e2e: intentOf({ targets: ["orders-owner-web"], scenarios: [ownerScenario] }) }), { context: context(), needs: { stepKinds: ["agent"] } })
-      .filter((finding) => finding.code.startsWith("e2e-"))).toEqual([]);
-  });
 });
 
 describe("the same findings for every path, in the stored shape", () => {
@@ -347,13 +315,6 @@ describe("the same findings for every path, in the stored shape", () => {
 describe("fix round 1: requiredReal and mocks (65fd0cd0)", () => {
   const real = { ...scenario("viewer-web-hidden", ["orders-viewer-web"], [step("navigate", { path: "/" })], [{ kind: "visible", testId: "export", equals: false }]), requiredRealComponentIds: ["inventory-v1"] };
 
-  it("does not ask for the mock of a component a scenario on the target requires real", () => {
-    const plan = withChecks([], {}, { e2e: intentOf({ targets: ["orders-viewer-web"], scenarios: [real] }) });
-    const codes = codesOf(quality(plan, { context: context() }));
-    expect(codes).not.toContain("mock-missing-for-target");
-    expect(codes).not.toContain("real-component-mocked");
-  });
-
   it("flags a component that is mocked and required real on the same target, naming target, component and scenario, with or without a planning context", () => {
     const plan = withChecks([], {}, { e2e: intentOf({ targets: ["orders-viewer-web", "orders-owner-web"], mocks: ["orders-viewer-web", "orders-owner-web"], scenarios: [real, scenario("owner", ["orders-owner-web"], [step("navigate", { path: "/" })])] }) });
     for (const input of [{ context: context() }, {}]) {
@@ -375,10 +336,6 @@ describe("fix round 1: AI step budget", () => {
     expect(budget(9, { maxActions: 20 })).toMatchObject([{ limit: 8 }]);
   });
 
-  it("accepts a step within the limit", () => {
-    expect(budget(5, { maxActions: 5 })).toEqual([]);
-    expect(budget(8)).toEqual([]);
-  });
 });
 
 describe("fix round 1: proof by scenario", () => {
@@ -400,12 +357,6 @@ describe("fix round 1: proof by scenario", () => {
     expect(quality(empty).filter((finding) => finding.code === "claim-not-covered")).toMatchObject([{ claimIds: ["1", "2", "nc1"] }]);
   });
 
-  it("holds every leaf claim to a proof: a child is not exempt, and its proof covers its ancestors but not the reverse", () => {
-    const runner = check("proposed-1", "Retry tests", "npx", ["vitest", "run"]);
-    const covered = (proves: string[]) => quality(withChecks([runner], { "proposed-1": proves })).filter((finding) => finding.code.startsWith("claim-"));
-    expect(covered(["1", "2", "nc1"])).toMatchObject([{ code: "claim-not-covered", claimIds: ["1.1"] }]);
-    expect(covered(["1.1", "2", "nc1"])).toEqual([]);
-  });
 });
 
 describe("fix round 1: reading scripts", () => {
@@ -443,20 +394,6 @@ describe("fix round 1: reading scripts", () => {
     expect(isStaticReaderCommand({ executable, args })).toBe(false);
   });
 
-  it("sees a quoted separator as part of the pattern, so a grep-only check is still static-only and lint reads the whole pattern", () => {
-    const grepOnly = check("proposed-1", "Route exists", "sh", ["-c", "grep -E 'a|b' public/app.js"]);
-    const found = quality(withChecks([grepOnly], { "proposed-1": ["1.1", "2", "nc1"] })).filter((finding) => finding.code.startsWith("claim-"));
-    expect(found).toMatchObject([{ code: "claim-static-only", claimIds: ["1.1", "2", "nc1"] }]);
-    const withQuote = check("proposed-1", "Route exists", "sh", ["-c", "grep -q 'a;b\"c' public/app.js"]);
-    expect(quality(withChecks([withQuote], { "proposed-1": ["1.1"] })).filter((finding) => finding.code === "check-command-lint")).toMatchObject([{ lint: "quoted-literal" }]);
-  });
-
-  it("finds ecf67d6a's grep -cL inside a quoted script and in git grep", () => {
-    const lint = (executable: string, args: string[]) => quality(withChecks([check("proposed-1", "Export button removed", executable, args)], { "proposed-1": ["1.1"] })).filter((finding) => finding.code === "check-command-lint");
-    expect(lint("sh", ["-c", "grep -cL \"export-csv\" public/app.js"])).toMatchObject([{ lint: "grep-files-without-match-count" }]);
-    expect(lint("git", ["grep", "-cL", "export-csv"])).toMatchObject([{ lint: "grep-files-without-match-count" }]);
-  });
-
   it("flags a check that ends in a command whose exit code ignores the match (sed, awk, wc), unless it decides on purpose", () => {
     const lint = (executable: string, args: string[]) => quality(withChecks([check("proposed-1", "Route present", executable, args)], { "proposed-1": ["1.1"] })).filter((finding) => finding.code === "check-command-lint");
     expect(lint("sed", ["-n", "/x/p", "public/app.js"])).toMatchObject([{ lint: "exit-ignores-match" }]);
@@ -477,18 +414,6 @@ describe("fix round 1: absence lint reads semantics, the wording is a hint", () 
     expect(lint("Server check", "grep", ["--invert-match", "3000", "server.js"])).toMatchObject([{ lint: "grep-invert-match" }]);
   });
 
-  it("flags every grep -c, because the count never reaches the exit code", () => {
-    expect(lint("Route handler exists", "grep", ["-c", "orders.csv", "server.js"])).toMatchObject([{ lint: "grep-count" }]);
-    expect(lint("Route handler exists", "grep", ["-q", "orders.csv", "server.js"])).toEqual([]);
-  });
-
-  it("reads absence from more words, and from the claim the check proves", () => {
-    expect(lint("Default port dropped", "grep", ["-q", "3000", "server.js"])).toMatchObject([{ lint: "grep-absence" }]);
-    expect(lint("fallback eliminated", "grep", ["-q", "fallback", "server.js"])).toMatchObject([{ lint: "grep-absence" }]);
-    // Claim 2 reads "A payment is never charged twice."
-    expect(lint("Server check", "grep", ["-q", "chargeOnce", "server.js"], ["2"])).toMatchObject([{ lint: "grep-absence" }]);
-    expect(lint("Server check", "grep", ["-q", "chargeOnce", "server.js"], ["1.1"])).toEqual([]);
-  });
 });
 
 describe("fix round 1: built-in file checks stay inside the repository", () => {
@@ -523,14 +448,6 @@ describe("fix round 1: built-in file checks stay inside the repository", () => {
 });
 
 describe("fix round 1: a waived check list is shown, and only coding plans are judged", () => {
-  it("surfaces none_reason with behaviour claims as a finding the planner is not asked to revise", () => {
-    const claims = ["Exports are logged.", "Viewers cannot export.", "Owners can export.", "The CSV has a header.", "Empty exports are refused."].map((text, index) => ({ id: String(index + 1), text }));
-    const waived = quality(codingPlan({ claims, checks: { proposed: [], noneReason: "Docs-only change.", proves: {} } }));
-    expect(waived).toMatchObject([{ code: "checks-waived", revisable: false, count: 6 }]);
-    expect(waived[0]!.ownerSentence).toBe("The plan says no check applies, so 6 claims have no proof.");
-    expect(revisablePlanQualityFindings(waived)).toEqual([]);
-    expect(PlanQualityFindingSchema.parse(waived[0])).toEqual(waived[0]);
-  });
 
   it("returns nothing for a requirements or design document", () => {
     for (const kind of ["requirements", "design"] as const) expect(planQualityFindings(planDocument(), { kind })).toEqual([]);

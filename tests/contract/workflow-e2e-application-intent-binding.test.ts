@@ -1,10 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, canonicalJson, canonicalPlanJson, readCanonicalPlan } from "@agentx/contracts";
+import { canonicalPlanJson, readCanonicalPlan } from "@agentx/contracts";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { planDocument } from "../support/plan-documents.js";
 import { sha, startApplicationRound, type ApplicationRound } from "../support/e2e-application-round-harness.js";
-import { applicationIntentDigest, applicationRoundIntent } from "../../packages/broker/src/e2e/application-plan-approval.js";
 
 // The plan a planner writes leaves out what its schema makes optional (portableOperationRefs, mockFixtureRefs, unavailableTargetRefs). The broker stores that plan as it is,
 // and the admission it builds holds the intent derived for the round, with those members written out as empty lists. Verification must hold the stored plan to that
@@ -40,35 +39,6 @@ function storedIntentOf(round: ApplicationRound): Record<string, unknown> {
 }
 
 describe("an application plan stored the way the planner writes it", () => {
-  it("is the plan the round was admitted on: the stored intent omits what the admission writes out as empty lists", async () => {
-    const round = await startApplicationRound();
-    const stored = storedIntentOf(round);
-    // The shape of the live failure: the stored plan has no such members, the admission has them empty.
-    expect(Object.keys(stored)).not.toContain("mockFixtureRefs");
-    expect(Object.keys(stored)).not.toContain("portableOperationRefs");
-    expect(round.admission.intent.mockFixtureRefs).toEqual([]);
-    expect(round.admission.intent.portableOperationRefs).toEqual([]);
-    expect(canonicalJson(stored)).not.toBe(canonicalJson(round.admission.intent));
-
-    const broker = await brokerModule();
-    const diagnostic: { reason?: string } = {};
-    const valid = await broker.workflowE2EApplicationAuthorityIsValid(round.harness.brokerInput as never, round.taskNow() as never, round.candidate, round.admission, diagnostic);
-    expect(diagnostic.reason).toBeUndefined();
-    expect(valid).toBe(true);
-  });
-
-  it("is still refused, for the same reason as ever, when one scenario of the stored plan is not the admitted one", async () => {
-    const round = await startApplicationRound();
-    const stored = storedIntentOf(round) as { scenarios: Array<{ assertions: Array<Record<string, unknown>> }> };
-    const changed = { ...stored, scenarios: stored.scenarios.map((scenario, index) => (index === 0
-      ? { ...scenario, assertions: scenario.assertions.map((assertion) => ({ ...assertion, equals: 201 })) } : scenario)) };
-    expect(canonicalJson(changed)).not.toBe(canonicalJson(stored));
-    const broker = await brokerModule();
-    const diagnostic: { reason?: string } = {};
-    const valid = await broker.workflowE2EApplicationAuthorityIsValid(round.harness.brokerInput as never, taskStoring(round, changed) as never, round.candidate, round.admission, diagnostic);
-    expect(valid).toBe(false);
-    expect(diagnostic.reason).toBe("approved-plan-is-not-the-admitted-intent");
-  });
 
   it("is also refused when the stored intent is the admitted one with a member of it written in, for the same reason", async () => {
     const round = await startApplicationRound();
@@ -79,25 +49,6 @@ describe("an application plan stored the way the planner writes it", () => {
     expect(await broker.workflowE2EApplicationAuthorityIsValid(round.harness.brokerInput as never, taskStoring(round, { ...stored, mockFixtureRefs: [reference] }) as never,
       round.candidate, round.admission, diagnostic)).toBe(false);
     expect(diagnostic.reason).toBe("approved-plan-is-not-the-admitted-intent");
-  });
-
-  it("gives approval, dispatch and verification one intent digest, which is that of the stored plan's parsed intent", async () => {
-    const round = await startApplicationRound();
-    const stored = storedIntentOf(round);
-    const parsed = E2EApplicationPlanIntentSchema.parse(stored);
-    // Approval recorded it; the round was dispatched only because dispatch derived the same one again and the admission builder held it to the record.
-    const recorded = E2EApplicationSelectionRecordSchema.parse((round.workflowNow().e2e as { applicationSelection?: unknown }).applicationSelection);
-    expect(recorded.intentDigest).toBe(applicationIntentDigest(parsed));
-    // The admission carries the intent derived for the round, and its own digest is that intent's.
-    expect(canonicalJson(round.admission.intent)).toBe(canonicalJson(applicationRoundIntent(parsed)));
-    expect(round.admission.intentDigest).toBe(sha(canonicalJson(round.admission.intent)));
-    // The two digests name two intents (the plan's, and the one derived for the round), which differ exactly by the members the planner left out.
-    expect(round.admission.intentDigest).not.toBe(recorded.intentDigest);
-    // Verification binds the stored plan to the record with the same digest and the admission to its own intent: nothing it checks here fails for this plan.
-    const broker = await brokerModule();
-    const diagnostic: { reason?: string } = {};
-    expect(await broker.workflowE2EApplicationAuthorityIsValid(round.harness.brokerInput as never, round.taskNow() as never, round.candidate, round.admission, diagnostic)).toBe(true);
-    expect(diagnostic.reason).toBeUndefined();
   });
 
   it("is dispatched, and verified, the same when the plan was stored with its optional members written out as empty lists", async () => {

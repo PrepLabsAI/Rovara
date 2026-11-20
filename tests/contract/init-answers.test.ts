@@ -3,7 +3,6 @@ import {
   alertWebhookSecretName, assertResumeFlagsMatch, BUDGET_TAG_NOTE, collectInitAnswers, defaultAppName, GITHUB_APP_NAME_LIMIT, GLM_NOTE, HAIKU_NOTE, persistInitAnswers, type InitFlags,
 } from "../../packages/cli/src/init/answers.js";
 import { readInstallAnswers } from "../../packages/cli/src/init/install-state.js";
-import { estimateMonthlyCost, suggestedBudgetUsd } from "../../packages/cli/src/init/cost.js";
 import { unattendedPrompter } from "../../packages/cli/src/init/prompts.js";
 import { GITHUB_LOGIN_PATTERN } from "../../packages/cli/src/deploy/answer-schemas.js";
 import { SecretAlreadyExistsError } from "../../packages/cli/src/deploy/signing-key.js";
@@ -67,26 +66,6 @@ describe("init questions", () => {
     expect(() => assertResumeFlagsMatch(answers, { workerProvider: "amazon-bedrock" })).toThrow();
     await expect(collectWithFlags({ ...base, flags: { ...flags, openrouterSecretArn: "sk-raw-secret" } })).rejects.toThrow("invalid model configuration");
   });
-  it("takes every default with Enter and asks for what has no default", async () => {
-    const prompter = scriptedPrompter(FIRST_RUN);
-    const { answers, notes, alertWebhook } = await collectInitAnswers({ ...base, flags: {}, prompter });
-    expect(prompter.remaining()).toBe(0);
-    expect(prompter.asked).toEqual([...FORM_QUESTIONS, "Is acme an organization or a personal account?"]);
-    expect(alertWebhook).toBeUndefined();
-    expect(notes).toEqual([HAIKU_NOTE]);
-    expect(answers).toEqual({
-      schemaVersion: 1, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates", releaseVersion: "1.2.3",
-      identity: { mode: "cognito" },
-      models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
-      alert: { kind: "email", address: "ops@example.com" },
-      budget: { monthlyUsd: 260, scope: "account" },
-      github: { account: "acme", accountType: "organization", appName: "Rovara acme (staging)" },
-      slack: { appName: "Rovara acme (staging)", appPostedMessages: "accept" },
-      // Spec 048 FR-020: your email and the developer sign-in are settings now.
-      adminEmail: "ops@example.com", signinMethods: "slack",
-      createdAt: "2026-09-27T00:00:00.000Z",
-    });
-  });
 
   it("spec 048 FR-023: the budget's default is the estimate plus 20% for the whole account, with the estimate beside it", async () => {
     const asked: Array<{ question: string; defaultValue?: string; why?: string; hint?: string }> = [];
@@ -104,13 +83,6 @@ describe("init questions", () => {
     expect(collected.notes).not.toContain(BUDGET_TAG_NOTE);
   });
 
-  it("asks only the install name and the Advanced question when every flag is given", async () => {
-    const prompter = scriptedPrompter(settingsScript({ flags: everyFlag }));
-    const { answers } = await collectInitAnswers({ ...base, flags: everyFlag, prompter });
-    expect(prompter.asked).toEqual(["Install name", "Change the advanced settings?"]);
-    expect(answers.github.appName).toBe("Rovara acme (staging)");
-  });
-
   it("states GLM 4.7's trade-off and Claude Haiku 4.5's model-access need when chosen", async () => {
     const { answers, notes } = await collectWithFlags({ ...base, flags: { ...everyFlag, orchestratorModel: "zai.glm-4.7", classifierModel: "us.anthropic.claude-haiku-4-5-20251001-v1:0" } });
     expect(answers.models.orchestrator).toBe("zai.glm-4.7");
@@ -124,12 +96,6 @@ describe("init questions", () => {
     const { answers } = await collectInitAnswers({ ...base, flags, prompter });
     expect(prompter.asked.at(-1)).toBe("Orchestrator model id");
     expect(answers.models.orchestrator).toBe("us.anthropic.claude-opus-4-1-20250805-v1:0");
-  });
-
-  it("collects your own OIDC provider's issuer, audience, client and admin claim", async () => {
-    const flags: InitFlags = { ...everyFlag, identity: "oidc", oidcIssuer: "https://id.example.com", oidcAudience: "agentx", oidcClientId: "cli", adminClaim: "groups", adminValues: "agentx-admins, platform" };
-    const { answers } = await collectWithFlags({ ...base, flags });
-    expect(answers.identity).toEqual({ mode: "oidc", issuer: "https://id.example.com", audience: "agentx", clientId: "cli", adminClaim: "groups", adminValues: ["agentx-admins", "platform"] });
   });
 
   it("keeps a webhook address out of the answers and stores it only as a secret (Review Focus 4)", async () => {
@@ -164,21 +130,6 @@ describe("init questions", () => {
     expect(message).not.toContain("SECRET-KEY");
   });
 
-  it("with --yes and no alert flag, refuses for want of your email, and sends alerts to --admin-email when given", async () => {
-    const flags = withExplicitUndefined(everyFlag, "alertEmail");
-    // Spec 048 FR-025 (Ruling 9): alerts go to your email, so with neither flag your email is what is missing.
-    await expect(collectInitAnswers({ ...base, flags, prompter: unattendedPrompter() }))
-      .rejects.toThrow("Your email, for your AgentX admin user and alerts needs an answer; with --yes, pass --admin-email");
-    const { answers } = await collectInitAnswers({ ...base, flags, prompter: unattendedPrompter(), adminEmail: "alice@example.com" });
-    expect(answers.alert).toEqual({ kind: "email", address: "alice@example.com" });
-  });
-
-  it("records no alerts for --no-alerts, with a note saying nobody will hear about failures", async () => {
-    const { answers, notes } = await collectWithFlags({ ...base, flags: withExplicitUndefined({ ...everyFlag, alerts: false }, "alertEmail") });
-    expect(answers.alert).toEqual({ kind: "none" });
-    expect(notes.join("\n")).toContain("nobody is told when AgentX fails");
-  });
-
   it("refuses an --admin-email that is not an email address, naming the flag", async () => {
     await expect(collectWithFlags({ ...base, flags: everyFlag, adminEmail: "not-an-email" }))
       .rejects.toThrow("--admin-email not-an-email is not an email address");
@@ -205,11 +156,6 @@ describe("init questions", () => {
     expect((await collectWithFlags({ ...base, flags: { ...everyFlag, workerImage: inside } })).answers.images?.worker).toBe(inside);
   });
 
-  it("with --yes and no GitHub account, names the flag", async () => {
-    await expect(collectInitAnswers({ ...base, flags: withExplicitUndefined(everyFlag, "githubAccount"), prompter: unattendedPrompter() }))
-      .rejects.toThrow("with --yes, pass --github-account");
-  });
-
   it("shares the GitHub login pattern with install-state's schema (Fix round 1, item 1), refusing the same invalid login", async () => {
     expect(GITHUB_LOGIN_PATTERN.test("-bad")).toBe(false);
     await expect(collectWithFlags({ ...base, flags: { ...everyFlag, githubAccount: "-bad" } }))
@@ -218,33 +164,12 @@ describe("init questions", () => {
 });
 
 describe("the budget question (FR-047)", () => {
-  it("defaults to the estimate plus 20% for the whole account, and only the tag choice needs it activated", async () => {
-    const suggested = suggestedBudgetUsd(estimateMonthlyCost({ orchestrator: everyFlag.orchestratorModel!, classifier: everyFlag.classifierModel!, worker: everyFlag.workerModel! }));
-    const result = await collectWithFlags({ ...base, flags: withExplicitUndefined(everyFlag, "budget") });
-    expect(result.answers.budget).toEqual({ monthlyUsd: suggested, scope: "account" });
-    expect(result.notes).not.toContain(BUDGET_TAG_NOTE);
-  });
-
-  it("takes --budget 0 as no budget, asking nothing", async () => {
-    const result = await collectWithFlags({ ...base, flags: { ...everyFlag, budget: "0" } });
-    expect(result.answers.budget).toBeUndefined();
-  });
-
-  it("takes --budget 250 --budget-scope account without the tag note", async () => {
-    const result = await collectWithFlags({ ...base, flags: { ...everyFlag, budget: "250", budgetScope: "account" } });
-    expect(result.answers.budget).toEqual({ monthlyUsd: 250, scope: "account" });
-    expect(result.notes).not.toContain(BUDGET_TAG_NOTE);
-  });
 
   it("refuses a budget that is not a whole number of dollars", async () => {
     await expect(collectWithFlags({ ...base, flags: { ...everyFlag, budget: "99.5" } }))
       .rejects.toThrow("--budget must be a whole number of US dollars from 1 to 1000000, or 0 for no budget");
   });
 
-  it.each(["00", "-5", "12.5", "abc", "2000000"])("refuses a malformed or too-large budget (--budget %s), before the plan is shown", async (bad) => {
-    await expect(collectWithFlags({ ...base, flags: { ...everyFlag, budget: bad } }))
-      .rejects.toThrow("--budget must be a whole number of US dollars from 1 to 1000000, or 0 for no budget");
-  });
 
   it("accepts the maximum budget of $1,000,000 (BudgetAnswersSchema's own max)", async () => {
     const result = await collectWithFlags({ ...base, flags: { ...everyFlag, budget: "1000000", budgetScope: "tag" } });
@@ -335,13 +260,6 @@ describe("OpenRouter from init", () => {
     const saved = await persistInitAnswers({ store: new MemoryParameterStore(), secrets, collected });
     expect(saved.models.openRouter).toEqual({ secretArn });
     expect(secrets.values.size).toBe(0);
-  });
-
-  it("lets per-component provider flags win over the provider question, so mixed setups still come from flags", async () => {
-    const flags: InitFlags = { ...everyFlag, modelProvider: "openrouter", classifierProvider: "amazon-bedrock", orchestratorModel: "a/b", workerModel: "a/b", openrouterKey: { envName: "OR_KEY" } };
-    const { answers } = await collectWithFlags({ ...base, processEnv: { OR_KEY: OPENROUTER_KEY }, flags });
-    expect(answers.models.providers).toEqual({ orchestrator: "openrouter", classifier: "amazon-bedrock", worker: "openrouter" });
-    expect(answers.models.classifier).toBe("us.anthropic.claude-haiku-4-5-20251001-v1:0");
   });
 
   it("writes no answers when the key cannot be stored, and never names the key in the error", async () => {
@@ -465,15 +383,6 @@ describe("the questions an export bundle already answered (FR-026)", () => {
 });
 
 describe("spec 048 FR-026: app names", () => {
-  it("names both apps Rovara <owner> (<install name>)", () => {
-    expect(defaultAppName({ owner: "acme", env: "staging" })).toBe("Rovara acme (staging)");
-  });
-
-  it("keeps the owner at the GitHub name limit and drops it above the limit", () => {
-    const env = "a".repeat(20);
-    expect(defaultAppName({ owner: "a".repeat(4), env })).toBe(`Rovara ${"a".repeat(4)} (${env})`);
-    expect(defaultAppName({ owner: "a".repeat(5), env })).toBe(`Rovara (${env})`);
-  });
 
   it("the longest owner and install name still fit, and both apps match", async () => {
     const owner = "a".repeat(39);

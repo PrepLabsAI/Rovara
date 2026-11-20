@@ -7,60 +7,10 @@ const redactText = (text: string): string => {
   expect(redactOnce(once), `redacting the output again: ${text}`).toBe(once);
   return once;
 };
-import {
-  EMPTY_TURN_OBSERVATION,
-  TURN_TEXT_LIMIT,
-  TurnRecordSchema,
-  capText,
-  redactAndCap,
-  turnRecordKeys,
-  type TurnRecord,
-} from "../../packages/contracts/src/turns.js";
+import { TURN_TEXT_LIMIT, capText, redactAndCap } from "../../packages/contracts/src/turns.js";
 import { TURN_ARGUMENT_LIMIT, redactArguments } from "../../packages/contracts/src/turns.js";
 import { expectLinearScaling } from "../support/scaling.js";
-import { AiToolTurnRecordSchema, aiToolTurnRecordKeys, isSlackTurnRecord, type AiToolTurnRecord } from "../../packages/contracts/src/turns.js";
-
-const record: TurnRecord = {
-  ...EMPTY_TURN_OBSERVATION,
-  eventId: "EvTURN00001",
-  subject: "T0123456789/C0123456789/1695500000.000001",
-  receivedAt: "2026-09-24T10:00:00.000Z",
-  requestedBy: { teamId: "T0123456789", userId: "U0123456789" },
-  disposition: "answered",
-  startedAt: "2026-09-24T10:00:01.000Z",
-  finishedAt: "2026-09-24T10:00:03.500Z",
-  durationMs: 2_500,
-  requestText: "list open issues",
-  responseText: "There are no open issues.",
-};
-
-describe("turn record contract", () => {
-  it("accepts a minimal record and refuses unknown fields", () => {
-    expect(TurnRecordSchema.parse(record)).toEqual(record);
-    expect(TurnRecordSchema.safeParse({ ...record, secret: "x" }).success).toBe(false);
-  });
-
-  it("refuses text over the limit and more than 50 calls", () => {
-    expect(TurnRecordSchema.safeParse({ ...record, requestText: "a".repeat(TURN_TEXT_LIMIT + 1) }).success).toBe(false);
-    const call = { name: "agentx_submit_task", arguments: "{}", argumentsFingerprint: "a".repeat(32), validation: "ok", outcome: "SUCCEEDED", durationMs: 1 };
-    expect(TurnRecordSchema.safeParse({ ...record, calls: Array.from({ length: 51 }, () => call) }).success).toBe(false);
-  });
-
-  it("caps text and says so", () => {
-    expect(capText("abc", 2)).toEqual({ text: "ab", truncated: true });
-    expect(capText("abc", 3)).toEqual({ text: "abc", truncated: false });
-  });
-
-  it("keys a record by thread and Slack receive time, expiring 30 days later", () => {
-    expect(turnRecordKeys(record)).toEqual({
-      pk: "THREAD#T0123456789/C0123456789/1695500000.000001",
-      sk: "TURN#2026-09-24T10:00:00.000Z#EvTURN00001",
-      exportPk: "TURNS",
-      exportSk: "2026-09-24T10:00:00.000Z#EvTURN00001",
-      expiresAt: Date.parse("2026-09-24T10:00:00.000Z") / 1000 + 30 * 86_400,
-    });
-  });
-});
+import { AiToolTurnRecordSchema, type AiToolTurnRecord } from "../../packages/contracts/src/turns.js";
 
 describe("secret redaction", () => {
   it.each([
@@ -610,51 +560,6 @@ describe("AI-tool turn records (spec 025 FR-037)", () => {
     expect(AiToolTurnRecordSchema.safeParse({ ...aiRecord, eventId: "EvX1234" }).success).toBe(false);
   });
 
-  it("is keyed by task and exported on the same time index, kept 30 days", () => {
-    expect(aiToolTurnRecordKeys(aiRecord)).toEqual({
-      pk: "TASK#44444444-4444-4444-8444-444444444444",
-      sk: "TURN#2026-09-27T12:00:00.000Z#55555555-5555-4555-8555-555555555555",
-      exportPk: "TURNS",
-      exportSk: "2026-09-27T12:00:00.000Z#55555555-5555-4555-8555-555555555555",
-      expiresAt: Math.floor(Date.parse(aiRecord.receivedAt) / 1000) + 30 * 86_400,
-    });
-  });
-
-  it("still parses Slack records written before origin existed, and with origin slack", () => {
-    const slack = TurnRecordSchema.parse(record);
-    expect(slack).not.toHaveProperty("origin");
-    expect(TurnRecordSchema.parse({ ...slack, origin: "slack" }).origin).toBe("slack");
-    expect(TurnRecordSchema.safeParse({ ...slack, origin: "ai_tool" }).success).toBe(false);
-  });
-
-  it("round-trips a completed record carrying the result summary as response text (owner decision 3)", () => {
-    const completed: AiToolTurnRecord = {
-      ...aiRecord,
-      phase: "completed",
-      outcome: "succeeded",
-      responseText: "Fixed the flaky retry test and opened a pull request.",
-    };
-    expect(AiToolTurnRecordSchema.parse(completed)).toEqual(completed);
-  });
-
-  it("round-trips a refused record with an error code (owner decision 3)", () => {
-    const refused: AiToolTurnRecord = {
-      ...aiRecord,
-      phase: "refused",
-      outcome: "refused",
-      responseText: "The project's developer task limit is reached.",
-      error: { code: "WORKSPACE_LIMIT" },
-    };
-    expect(AiToolTurnRecordSchema.parse(refused)).toEqual(refused);
-  });
-
-  it("isSlackTurnRecord is false for an AI-tool record and true for a Slack record with or without origin", () => {
-    expect(isSlackTurnRecord(aiRecord)).toBe(false);
-    const slack = TurnRecordSchema.parse(record);
-    expect(slack).not.toHaveProperty("origin");
-    expect(isSlackTurnRecord(slack)).toBe(true);
-    expect(isSlackTurnRecord({ ...slack, origin: "slack" })).toBe(true);
-  });
 });
 
 // Fix round 1 (review of spec 025 phase 25b, Task 4): TEXT_PATTERNS did not cover AgentX's own

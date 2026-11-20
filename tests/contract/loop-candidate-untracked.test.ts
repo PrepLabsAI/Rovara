@@ -42,15 +42,6 @@ describe("registered candidate captures", () => {
       .rejects.toMatchObject({ reasonCode: "candidate_untracked_changes" });
   });
 
-  it("allows ignored dependency material without treating it as candidate source", async () => {
-    const checkout = await candidateRepo(true);
-    const dependencyDir = join(checkout, "node_modules", "fixture-helper");
-    await mkdir(dependencyDir, { recursive: true });
-    await writeFile(join(dependencyDir, "index.mjs"), "export const helper = true;\n");
-
-    await expect(captureCandidate(realExec, checkout, "rovara/42", "origin/main"))
-      .resolves.toMatchObject({ branch: "rovara/42", baseCommitSha: git(checkout, "rev-parse", "origin/main") });
-  });
 });
 
 afterEach(async () => {

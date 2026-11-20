@@ -51,16 +51,6 @@ describe("share-mode and e2e-replay bind the administrator's grant to the task's
     expect(task.mode()).toBe("view");
   });
 
-  it("an administrator of the task's own company (an old task without a company is the install's company) gets past the authority check exactly as without company sign-in", async () => {
-    const task = await legacyTask(new Map([[ADMIN_KEY, IMPLICIT_COMPANY_ID]]));
-    const plain = await legacyTask(undefined, false);
-    for (const route of ["shareMode", "replays"] as const) {
-      const answer = await task[route](ADMIN);
-      expect(answer.body.error).not.toMatchObject({ code: "FORBIDDEN" });
-      expect(withoutRequestId(answer, task.taskId)).toBe(withoutRequestId(await plain[route](ADMIN), plain.taskId));
-    }
-  });
-
   it("two companies: an administrator whose grant names 'payments' but whose membership is another company's (or none, or unreadable) gets exactly the no-grant answer; nothing changes", async () => {
     for (const held of [OTHER, undefined, new Error("sign-in table throttled: secret-cause")] as const) {
       const task = await legacyTask(new Map<string, string | Error>([...(held === undefined ? [] : [[ADMIN_KEY, held] as const]), [NO_GRANT_KEY, IMPLICIT_COMPANY_ID]]));

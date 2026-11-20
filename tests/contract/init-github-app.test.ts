@@ -1,23 +1,16 @@
-import { createVerify } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { agentXError, environmentStackName } from "@agentx/contracts";
-import {
-  githubAppJwt, githubAppManifest, githubAppSecretName, githubAppStep, githubNewAppUrl, githubRestApi, manifestFormPage, parseManifestCallback, startManifestListener,
-} from "../../packages/cli/src/init/github-app.js";
+import { environmentStackName } from "@agentx/contracts";
+import { githubAppSecretName, githubAppStep, githubNewAppUrl, githubRestApi, parseManifestCallback, startManifestListener } from "../../packages/cli/src/init/github-app.js";
 import { emptyProgress, type InstallProgress } from "../../packages/cli/src/init/install-state.js";
-import { terminalPrompter, unattendedPrompter } from "../../packages/cli/src/init/prompts.js";
+import { terminalPrompter } from "../../packages/cli/src/init/prompts.js";
 import { problemText } from "../../packages/cli/src/init/retry.js";
 import { githubCard } from "../../packages/cli/src/init/ui/cards.js";
-import { startInstallWizard } from "../../packages/cli/src/init/ui/index.js";
 import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
 import type { PreMadeGitHubApp } from "../../packages/cli/src/init/context.js";
 import type { ProgressHandle } from "../../packages/cli/src/init/steps.js";
-import {
-  allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedDeployer, scriptedPrompter, T0, TEST_PRIVATE_KEY, TEST_PUBLIC_KEY,
-  type ScriptedAnswer, type TestInitContext,
-} from "../support/init-fakes.js";
+import { allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedDeployer, scriptedPrompter, T0, TEST_PRIVATE_KEY, type ScriptedAnswer, type TestInitContext } from "../support/init-fakes.js";
 
 const homes: string[] = [];
 afterEach(async () => { await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true }))); });
@@ -48,29 +41,10 @@ async function githubContext(input: {
 }
 
 describe("GitHub App manifest", () => {
-  it("the manifest subscribes to the four PR events and points the webhook at the control plane", () => {
-    expect(githubAppManifest({ appName: "AgentX acme (staging)", redirectUrl: "http://127.0.0.1:50123/github/created", webhookUrl: WEBHOOK_URL })).toEqual({
-      name: "AgentX acme (staging)",
-      url: "https://github.com/PrepLabsAI/Rovara",
-      redirect_url: "http://127.0.0.1:50123/github/created",
-      public: false,
-      hook_attributes: { url: WEBHOOK_URL, active: true },
-      default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read", checks: "write" },
-      default_events: ["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment"],
-    });
-  });
 
   it("opens the new-app page for an organization or a personal account", () => {
     expect(githubNewAppUrl({ account: "acme", accountType: "organization", state: "s1" })).toBe("https://github.com/organizations/acme/settings/apps/new?state=s1");
     expect(githubNewAppUrl({ account: "alice", accountType: "user", state: "s1" })).toBe("https://github.com/settings/apps/new?state=s1");
-  });
-
-  it("posts the manifest from an auto-submitting form, escaping everything", () => {
-    const page = manifestFormPage({ actionUrl: "https://github.com/settings/apps/new?state=s1", manifest: githubAppManifest({ appName: "A\"<b>'&", redirectUrl: "http://127.0.0.1:1/github/created", webhookUrl: "https://cp.example.test/v1/github/webhooks" }) });
-    expect(page).toContain('<form id="manifest-form" method="post" action="https://github.com/settings/apps/new?state=s1">');
-    expect(page).toContain('name="manifest" value="{&quot;name&quot;:&quot;A\\&quot;&lt;b&gt;&#39;&amp;&quot;');
-    expect(page).not.toContain("<b>");
-    expect(page).toContain('document.getElementById("manifest-form").submit()');
   });
 
   it("takes a pasted redirect address or a bare code, and refuses another run's address", () => {
@@ -81,13 +55,6 @@ describe("GitHub App manifest", () => {
     expect(() => parseManifestCallback("no", "s1")).toThrow("that is not a GitHub manifest code");
   });
 
-  it("signs an app JWT GitHub accepts: RS256, issued a minute early, nine minutes long", () => {
-    const jwt = githubAppJwt({ appId: "424242", privateKey: TEST_PRIVATE_KEY, nowSeconds: 1_800_000_000 });
-    const [header, payload, signature] = jwt.split(".");
-    expect(JSON.parse(Buffer.from(header!, "base64url").toString())).toEqual({ alg: "RS256", typ: "JWT" });
-    expect(JSON.parse(Buffer.from(payload!, "base64url").toString())).toEqual({ iat: 1_799_999_940, exp: 1_800_000_540, iss: "424242" });
-    expect(createVerify("RSA-SHA256").update(`${header}.${payload}`).verify(TEST_PUBLIC_KEY, Buffer.from(signature!, "base64url"))).toBe(true);
-  });
 });
 
 describe("manifest listener", () => {
@@ -109,36 +76,6 @@ describe("manifest listener", () => {
 });
 
 describe("GitHub App step", () => {
-  it("creates the app, stores its key straight into Secrets Manager, and waits for an installation with repositories", async () => {
-    const opened: string[] = [];
-    const api = fakeGitHubApi({ installAfterPolls: 2 });
-    const context = initContext({ openBrowser: browserThatCreatesGitHubApp(opened) });
-    homes.push(context.home);
-    const progress = progressHandle();
-    const outcome = await githubAppStep(api).run(context, progress);
-    expect(outcome.status).toBe("done");
-    expect(api.conversions).toEqual(["0123456789abcdef0123"]);
-    expect(JSON.parse(context.secrets.values.get(SECRET)!)).toMatchObject({ appId: "424242", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY });
-    expect(progress.value().github).toEqual({ account: "acme", appId: "424242", slug: "agentx-acme-staging", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", installationId: "777" });
-    expect(opened).toContain("https://github.com/apps/agentx-acme-staging/installations/new");
-    expect(context.lines.join("\n")).not.toContain("PRIVATE KEY");
-    expect(JSON.stringify(progress.value())).not.toContain("PRIVATE KEY");
-  });
-
-  it("puts the control plane's webhook URL in the manifest form it posts to GitHub", async () => {
-    const pages: string[] = [];
-    const context = initContext({
-      openBrowser: async () => true,
-      manifestHost: async (host) => {
-        pages.push(host.page("http://127.0.0.1:50123/github/created"));
-        return { startUrl: "http://127.0.0.1:50123/github/start", redirectUrl: "http://127.0.0.1:50123/github/created", port: 50123, code: Promise.resolve("0123456789abcdef0123"), close: () => undefined };
-      },
-    });
-    homes.push(context.home);
-    await githubAppStep(fakeGitHubApi()).run(context, progressHandle());
-    expect(pages[0]).toContain(WEBHOOK_URL);
-    expect(pages[0]).toContain("pull_request_review_comment");
-  });
 
   it("falls back to the control plane's API endpoint for the webhook URL", async () => {
     const outputs = { ...allStackOutputs() };
@@ -210,31 +147,6 @@ describe("GitHub App step", () => {
     expect(`${String(failure)} ${problemText(failure)}`).not.toContain("PRIVATE KEY");
   });
 
-  it("keeps the webhook secret an earlier run stored when the step runs again", async () => {
-    const api = fakeGitHubApi({ installationId: 555, hookUrl: WEBHOOK_URL });
-    const secrets = memoryInitSecrets({ [SECRET]: JSON.stringify({ appId: "424242", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY, webhookSecret: GITHUB_WEBHOOK_SECRET }) });
-    const context = initContext({ secrets });
-    homes.push(context.home);
-    const progress = progressHandle({ ...emptyProgress("staging", T0), github: { account: "acme", appId: "424242", slug: "agentx-acme-staging", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf" } });
-    await githubAppStep(api).run(context, progress);
-    expect((JSON.parse(secrets.values.get(SECRET)!) as { webhookSecret: string }).webhookSecret).toBe(GITHUB_WEBHOOK_SECRET);
-    expect(api.hookWrites).toEqual([{ url: WEBHOOK_URL, secret: GITHUB_WEBHOOK_SECRET }]);
-  });
-
-  it("writes 'If no browser opens' only on the terminal path; on the page the address is the card's button", async () => {
-    const terminal = initContext({ openBrowser: browserThatCreatesGitHubApp([]) });
-    homes.push(terminal.home);
-    expect((await githubAppStep(fakeGitHubApi()).run(terminal, progressHandle())).status).toBe("done");
-    expect(terminal.lines.some((line) => /^If no browser opens, open http:\/\/127\.0\.0\.1:\d+\//.test(line))).toBe(true);
-
-    const cards: WizardCard[] = [];
-    const page = initContext({ openBrowser: browserThatCreatesGitHubApp([]), surface: { card: (card) => { cards.push(card); } } });
-    homes.push(page.home);
-    expect((await githubAppStep(fakeGitHubApi()).run(page, progressHandle())).status).toBe("done");
-    expect(page.lines.some((line) => line.startsWith("If no browser opens"))).toBe(false);
-    expect(cards[0]?.link?.label).toBe("Open GitHub");
-  });
-
   it("refuses an app created under another account, saving nothing and saying how to delete it", async () => {
     const context = initContext({ openBrowser: browserThatCreatesGitHubApp([]) });
     homes.push(context.home);
@@ -243,17 +155,6 @@ describe("GitHub App step", () => {
     expect(message).toContain("the GitHub App was created under someone-else, not acme; nothing was saved. Delete it at https://github.com/settings/apps/agentx-acme-staging/advanced and run agentx init again");
     expect(message).not.toContain("PRIVATE KEY");
     expect(context.secrets.values.size).toBe(0);
-  });
-
-  it("resumes after the app was created: never creates a second app, reads the key back from the secret", async () => {
-    const api = fakeGitHubApi();
-    const secrets = memoryInitSecrets({ [SECRET]: JSON.stringify({ appId: "424242", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY }) });
-    const context = initContext({ secrets });
-    homes.push(context.home);
-    const progress = progressHandle({ ...emptyProgress("staging", T0), github: { account: "acme", appId: "424242", slug: "agentx-acme-staging", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf" } });
-    await githubAppStep(api).run(context, progress);
-    expect(api.conversions).toEqual([]);
-    expect(progress.value().github?.installationId).toBe("777");
   });
 
   it("recovers an app whose secret was stored just before a crash, without creating another", async () => {
@@ -265,13 +166,6 @@ describe("GitHub App step", () => {
     await githubAppStep(api).run(context, progress);
     expect(api.conversions).toEqual([]);
     expect(context.lines).toContain("Found the GitHub App agentx-acme-staging an earlier run created.");
-  });
-
-  it("waits until the installation can see at least one repository", async () => {
-    const context = initContext({ openBrowser: browserThatCreatesGitHubApp([]) });
-    homes.push(context.home);
-    await githubAppStep(fakeGitHubApi({ repositoryCounts: [0, 0, 2] })).run(context, progressHandle());
-    expect(context.lines.join("\n")).toContain("The app is installed but can see no repositories. Choose at least one at https://github.com/organizations/acme/settings/installations/777");
   });
 
   it("gives up waiting for an installation after 15 minutes, naming the install page", async () => {
@@ -287,24 +181,6 @@ describe("GitHub App step", () => {
       progress: progressHandle({ ...emptyProgress("staging", T0), github: { account: "acme", appId: "424242", slug: "agentx-acme-staging", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf" } }),
     });
 
-    it("an installation wait that times out shows the failed GitHub card, and the page drops the install page's button", async () => {
-      const wizard = await startInstallWizard({ env: "staging", write: () => undefined });
-      try {
-        const { secrets, progress } = recorded();
-        const context = initContext({ secrets, surface: wizard.surface, openBrowser: wizard.openLink });
-        homes.push(context.home);
-        const failure = await githubAppStep(fakeGitHubApi({ installAfterPolls: 1_000_000 })).run(context, progress).then(() => undefined, (error: unknown) => error);
-        expect((failure as Error).message).toBe("CONFIG_INVALID: the GitHub App was not installed on acme within 15 minutes; install it at https://github.com/apps/agentx-acme-staging/installations/new, then run agentx init again");
-        const card = wizard.hub.state().cards?.find((shown) => shown.id === "github");
-        expect(card).toEqual(githubCard({ stage: "failed", problem: problemText(failure) }));
-        expect(card?.lines).toEqual(["The GitHub app was not set up."]);
-        expect(card?.details).toEqual(["the GitHub App was not installed on acme within 15 minutes; install it at https://github.com/apps/agentx-acme-staging/installations/new, then run agentx init again"]);
-        expect(wizard.hub.state().link).toBeUndefined();
-      } finally {
-        await wizard.close();
-      }
-    });
-
     it("a repositories wait that times out shows the failed GitHub card", async () => {
       const { secrets, progress } = recorded();
       const cards: WizardCard[] = [];
@@ -314,44 +190,6 @@ describe("GitHub App step", () => {
       expect((failure as Error).message).toContain("the GitHub App can see no repositories");
       expect(cards.map((card) => card.status)).toEqual(["waiting", "waiting", "failed"]);
       expect(cards.at(-1)).toEqual(githubCard({ stage: "failed", problem: problemText(failure) }));
-    });
-
-    it("a failure after the create card shows the failed GitHub card, and the step rejects with that error", async () => {
-      const refused = agentXError("RUNTIME_UNAVAILABLE", "GitHub manifest conversion failed with HTTP 422");
-      const cards: WizardCard[] = [];
-      const context = initContext({ openBrowser: browserThatCreatesGitHubApp([]), surface: { card: (card) => { cards.push(card); } } });
-      homes.push(context.home);
-      const api = { ...fakeGitHubApi(), convertManifest: async () => { throw refused; } };
-      await expect(githubAppStep(api).run(context, progressHandle())).rejects.toBe(refused);
-      expect(cards.map((card) => card.status)).toEqual(["waiting", "failed"]);
-      expect(cards.at(-1)).toEqual(githubCard({ stage: "failed", problem: "GitHub manifest conversion failed with HTTP 422" }));
-    });
-
-    it("a failure after the create card, on the page, shows the failed GitHub card and drops the create button", async () => {
-      const refused = agentXError("RUNTIME_UNAVAILABLE", "GitHub manifest conversion failed with HTTP 422");
-      const wizard = await startInstallWizard({ env: "staging", write: () => undefined });
-      try {
-        const creates = browserThatCreatesGitHubApp([]);
-        const shown: string[] = [];
-        // The page's button first (as --ui does), then the operator presses it and GitHub creates the app.
-        const openBrowser = async (url: string) => {
-          await wizard.openLink(url);
-          shown.push(wizard.hub.state().link?.url ?? "");
-          return creates(url);
-        };
-        const context = initContext({ openBrowser, surface: wizard.surface });
-        homes.push(context.home);
-        const api = { ...fakeGitHubApi(), convertManifest: async () => { throw refused; } };
-        await expect(githubAppStep(api).run(context, progressHandle())).rejects.toBe(refused);
-        expect(shown).toHaveLength(1);
-        expect(shown[0]).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/github\/start/);
-        const card = wizard.hub.state().cards?.find((each) => each.id === "github");
-        expect(card).toEqual(githubCard({ stage: "failed", problem: "GitHub manifest conversion failed with HTTP 422" }));
-        expect(card?.status).toBe("failed");
-        expect(wizard.hub.state().link).toBeUndefined();
-      } finally {
-        await wizard.close();
-      }
     });
 
     it("a failure before any GitHub card shows none", async () => {
@@ -372,29 +210,6 @@ describe("GitHub App step", () => {
     await githubAppStep(api).run(context, progressHandle());
     expect(api.conversions).toEqual(["0123456789abcdef0123"]);
     expect(context.lines.join("\n")).toContain("ssh -L");
-  });
-
-  it("stores a GitHub App key given with Windows line endings with plain ones", async () => {
-    const context = initContext({
-      preMadeGitHubApp: { appId: "424242", installationId: "777" },
-      secretFlags: { githubPrivateKey: { envName: "GH_KEY" } },
-      processEnv: { GH_KEY: `${TEST_PRIVATE_KEY.replaceAll("\n", "\r\n")}\r\n` },
-    });
-    homes.push(context.home);
-    await githubAppStep(fakeGitHubApi()).run(context, progressHandle());
-    expect((JSON.parse(context.secrets.values.get(SECRET)!) as { privateKey: string }).privateKey).toBe(TEST_PRIVATE_KEY);
-  });
-
-  it("on resume, refuses --github-app-id for a different app than the one this install recorded", async () => {
-    const api = fakeGitHubApi({ installationId: 555 });
-    const secrets = memoryInitSecrets({ [SECRET]: JSON.stringify({ appId: "424242", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY }) });
-    const context = initContext({ secrets, preMadeGitHubApp: { appId: "999999", installationId: "555" }, secretFlags: { githubPrivateKey: { envName: "GH_KEY" } }, processEnv: { GH_KEY: TEST_PRIVATE_KEY } });
-    homes.push(context.home);
-    const progress = progressHandle({ ...emptyProgress("staging", T0), github: { account: "acme", appId: "424242", slug: "agentx-acme-staging", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf" } });
-    await expect(githubAppStep(api).run(context, progress))
-      .rejects.toThrow("this install already uses GitHub App 424242, not 999999 from --github-app-id; pass --github-app-id 424242, or leave the GitHub App flags off to continue with the recorded app");
-    expect(progress.value().github?.installationId).toBeUndefined();
-    expect(api.polls()).toBe(0);
   });
 
   it("uses a GitHub App made beforehand, checking its owner and installation", async () => {
@@ -430,39 +245,6 @@ describe("manifest listener, every path closes it", () => {
     await expect(fetch(listener.startUrl)).rejects.toThrow();
   });
 
-  it("closes the listener when opening the browser fails", async () => {
-    const opened: string[] = [];
-    const context = initContext({ openBrowser: async (url) => { opened.push(url); throw new Error("no browser here"); } });
-    homes.push(context.home);
-    await expect(githubAppStep(fakeGitHubApi()).run(context, progressHandle())).rejects.toThrow("no browser here");
-    expect(opened[0]).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/github\/start$/);
-    await expect(fetch(opened[0]!)).rejects.toThrow();
-  });
-
-  it("falls back to the pasted address when the browser cannot open, and still closes the listener", async () => {
-    const opened: string[] = [];
-    const api = fakeGitHubApi();
-    const context = initContext({ openBrowser: async (url) => { opened.push(url); return false; }, prompter: scriptedPrompter(["0123456789abcdef0123"]) });
-    homes.push(context.home);
-    const progress = progressHandle();
-    expect((await githubAppStep(api).run(context, progress)).status).toBe("done");
-    expect(api.conversions).toEqual(["0123456789abcdef0123"]);
-    expect(context.lines.join("\n")).toContain("ssh -L");
-    // The install page is offered too; a browser that fails there does not stop the step.
-    expect(opened).toContain("https://github.com/apps/agentx-acme-staging/installations/new");
-    expect(progress.value().github?.installationId).toBe("777");
-    await expect(fetch(opened[0]!)).rejects.toThrow();
-  });
-
-  it("closes the listener when the pasted address is refused", async () => {
-    const context = initContext({ prompter: scriptedPrompter(["http://127.0.0.1:1/github/created?code=abc123def456&state=other"]) });
-    delete (context as { openBrowser?: unknown }).openBrowser;
-    homes.push(context.home);
-    await expect(githubAppStep(fakeGitHubApi()).run(context, progressHandle())).rejects.toThrow("that address is from a different agentx init run");
-    const startUrl = /Open (http:\/\/127\.0\.0\.1:\d+\/github\/start)/.exec(context.lines.join("\n"))?.[1];
-    expect(startUrl).toBeDefined();
-    await expect(fetch(startUrl!)).rejects.toThrow();
-  });
 });
 
 describe("GitHub REST client", () => {
@@ -523,15 +305,6 @@ describe("GitHub App made beforehand", () => {
     expect(context.secrets.values.size).toBe(0);
   });
 
-  it("reads the key from an environment variable whole, stores it trimmed, and never prints it", async () => {
-    const context = initContext({ preMadeGitHubApp: { appId: "424242", installationId: "777" }, secretFlags: { githubPrivateKey: { envName: "GH_KEY" } }, processEnv: { GH_KEY: `\n${TEST_PRIVATE_KEY}\r\n` } });
-    homes.push(context.home);
-    const progress = progressHandle();
-    await githubAppStep(fakeGitHubApi()).run(context, progress);
-    expect((JSON.parse(context.secrets.values.get(SECRET)!) as { privateKey: string }).privateKey).toBe(TEST_PRIVATE_KEY);
-    expect(`${context.lines.join("\n")}${JSON.stringify(progress.value())}`).not.toContain("PRIVATE KEY");
-  });
-
   it("refuses an app that belongs to another account without telling the owner to delete it", async () => {
     const context = initContext({ preMadeGitHubApp: { appId: "424242", installationId: "555" }, secretFlags: { githubPrivateKey: { envName: "GH_KEY" } }, processEnv: { GH_KEY: TEST_PRIVATE_KEY } });
     homes.push(context.home);
@@ -553,16 +326,6 @@ describe("fix round 1 hardening", () => {
     });
     request.on("error", reject);
     request.end();
-  });
-
-  it("stops listening when its timeout passes, even though nobody awaited the code", async () => {
-    const listener = await startManifestListener({ state: "s1", page: () => "<p>form</p>", timeoutMs: 20 });
-    try {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
-      await expect(fetch(listener.startUrl)).rejects.toThrow();
-    } finally {
-      listener.close();
-    }
   });
 
   it("refuses a request whose Host is not the listener's own address, without revealing the state", async () => {
@@ -621,49 +384,9 @@ describe("fix round 1 hardening", () => {
     expect(progress.value().github).toBeUndefined();
   });
 
-  it("creates one installation token for a wait of several polls", async () => {
-    const context = initContext({ openBrowser: browserThatCreatesGitHubApp([]) });
-    homes.push(context.home);
-    const api = fakeGitHubApi({ repositoryCounts: [0, 0, 0, 0, 2] });
-    await githubAppStep(api).run(context, progressHandle());
-    expect(api.tokens()).toBe(1);
-  });
-
-  it("creates a new installation token about five minutes before the old one expires", async () => {
-    const context = initContext({ openBrowser: browserThatCreatesGitHubApp([]) });
-    homes.push(context.home);
-    // Expires 6 minutes after T0, so from T0 + 1 minute on it is renewed; polls are 5 seconds apart.
-    const api = fakeGitHubApi({ repositoryCounts: [...Array<number>(14).fill(0), 2], tokenExpiresAt: T0 + 6 * 60_000 });
-    await githubAppStep(api).run(context, progressHandle());
-    expect(api.tokens()).toBeGreaterThan(1);
-    expect(api.tokens()).toBeLessThan(15);
-  });
 });
 
 describe("spec 048 FR-032: a GitHub app made but not stored", () => {
-  it("is recorded before its key is stored, so a failed store leaves it findable", async () => {
-    const { context, progress } = await githubContext({ secrets: memoryInitSecrets({}, { failCreate: true }) });
-    await expect(githubAppStep(fakeGitHubApi()).run(context, progress)).rejects.toThrow("could not store the private key");
-    expect(progress.current().githubPending).toEqual({ account: "acme", appId: "424242", slug: "agentx-acme-staging" });
-    expect(progress.current().github).toBeUndefined();
-  });
-
-  it("on resume, Finish takes a new private key for the same app and makes no new app", async () => {
-    const api = fakeGitHubApi();
-    const { context, progress } = await githubContext({ pending: { account: "acme", appId: "424242", slug: "agentx-acme-staging" }, script: ["finish", TEST_PRIVATE_KEY] });
-    await expect(githubAppStep(api).run(context, progress)).resolves.toMatchObject({ status: "done" });
-    expect(api.conversions).toEqual([]);
-    expect(progress.current().github).toMatchObject({ appId: "424242", slug: "agentx-acme-staging" });
-  });
-
-  it("on resume, Finish also gives the app a generated webhook secret and its hook", async () => {
-    const api = fakeGitHubApi();
-    const { context, progress } = await githubContext({ pending: { account: "acme", appId: "424242", slug: "agentx-acme-staging" }, script: ["finish", TEST_PRIVATE_KEY] });
-    await githubAppStep(api).run(context, progress);
-    const stored = JSON.parse(context.secrets.values.get(SECRET)!) as { webhookSecret: string };
-    expect(stored.webhookSecret).toMatch(/^[0-9a-f]{64}$/);
-    expect(api.hookWrites).toEqual([{ url: WEBHOOK_URL, secret: stored.webhookSecret }]);
-  });
 
   it("on resume, Replace sends the user to delete the old app, then makes a new one", async () => {
     const api = fakeGitHubApi();
@@ -683,11 +406,4 @@ describe("spec 048 FR-032: a GitHub app made but not stored", () => {
     expect(cards.find((card) => card.lines.some((line) => line.includes("cannot show that key again")))?.link?.url).toBe("https://github.com/organizations/oldco/settings/apps/agentx-oldco-staging/advanced");
   });
 
-  it("an unattended resume takes the safe Finish default", async () => {
-    const api = fakeGitHubApi();
-    const { context, progress } = await githubContext({ pending: { account: "acme", appId: "424242", slug: "agentx-acme-staging" } });
-    context.prompter = { ...unattendedPrompter(), secret: async () => TEST_PRIVATE_KEY };
-    await expect(githubAppStep(api).run(context, progress)).resolves.toMatchObject({ status: "done" });
-    expect(api.conversions).toEqual([]);
-  });
 });

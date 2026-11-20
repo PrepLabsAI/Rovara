@@ -3,17 +3,15 @@
 // The hand-over itself (DEC 254zzz84 (5)) is company-member-handover.test.ts.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { AgentXError, ON_THE_WEBSITE_MESSAGE } from "@agentx/contracts";
+import { AgentXError } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { companyMemberActionsThroughLambda } from "../../packages/broker/src/aws/company-member-forwarding.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
-import {
-  LIST_QUERY, MEMBERS_UNAVAILABLE, MEMBER_NOT_FOUND, NOT_FOUND, OWNER_ONLY, OWN_MEMBERSHIP, REMOVAL_BODY, ROLE_BODY, TOO_MUCH_WORK,
-} from "../../packages/broker/src/aws/company-member-routes.js";
+import { LIST_QUERY, MEMBERS_UNAVAILABLE, MEMBER_NOT_FOUND, OWNER_ONLY, OWN_MEMBERSHIP, REMOVAL_BODY, ROLE_BODY, TOO_MUCH_WORK } from "../../packages/broker/src/aws/company-member-routes.js";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
-import { MEMBER_LAST_OWNER, MEMBER_ONLY_OWNER, MEMBER_REVOKED } from "../../packages/broker/src/developer/company-member-contract.js";
+import { MEMBER_ONLY_OWNER, MEMBER_REVOKED } from "../../packages/broker/src/developer/company-member-contract.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { companyProjectRow } from "../support/company-layout-projects.js";
 
@@ -77,19 +75,6 @@ function world(options: { fullAccess?: boolean; helper?: boolean; webApp?: boole
 const refusal = (status: number, code: string, message: string) => ({ status, body: { error: { code, message } } });
 
 describe("the member list", () => {
-  it("lists the caller's own company, with names and emails, never another company's people", async () => {
-    const h = world();
-    const answer = await h.call("GET", MEMBERS);
-    expect(answer.status).toBe(200);
-    const members = answer.body["members"] as Array<Record<string, unknown>>;
-    expect(members.map((row) => [row["personId"], row["role"], row["name"], row["email"]]).sort()).toEqual([
-      [OWNER, "owner", "Olive", "olive@example.test"], [ADMIN, "admin", "Ada", "ada@example.test"], [MEMBER, "member", "Max", "max@example.test"],
-    ].sort());
-    expect(answer.body["more"]).toBe(false);
-    expect(JSON.stringify(answer.body)).not.toContain(OTHER);
-    expect(JSON.stringify(answer.body)).not.toMatch(/"pk"|"sk"|COMPANY_MEMBER#|ORG#/);
-    expect(h.forwarded).toEqual([{ kind: "company-member-list", companyId: A }]);
-  });
 
   it("pages with the opaque cursor it gave; another company's cursor and unknown query keys are refused without echo", async () => {
     const h = world();
@@ -122,33 +107,10 @@ describe("company isolation", () => {
     expect(h.forwarded).toEqual([]);
   });
 
-  it("the company is the live membership, never a claim: a forged company claim changes nothing", async () => {
-    const h = world(); h.as(OTHER); Object.assign(h.claims, { companyId: A, orgId: A, role: "owner" });
-    expect((await h.call("GET", MEMBERS)).body["members"]).toEqual([expect.objectContaining({ personId: OTHER, companyId: B })]);
-    expect(h.forwarded).toEqual([{ kind: "company-member-list", companyId: B }]);
-  });
-
   it("a membership that moved to another company after the company was resolved refuses the sign-in", async () => {
     const h = world(); h.deps.companies = { companyOf: async () => B };
     expect((await h.call("GET", MEMBERS)).status).toBe(401);
     expect(h.forwarded).toEqual([]);
-  });
-
-  it("the route re-reads the membership itself: revoked, missing or unreadable refuses even when the company was resolved", async () => {
-    for (const damage of ["revoked", "missing", "malformed"] as const) {
-      const h = world(); h.deps.companies = { companyOf: async () => A };
-      if (damage === "revoked") h.join(ADMIN, A, "admin", { revokedAt: TIME });
-      if (damage === "missing") h.db.delete(membershipKey(ADMIN).pk, "COMPANY");
-      if (damage === "malformed") h.db.set({ ...h.db.get(membershipKey(ADMIN).pk, "COMPANY")!, personId: OTHER });
-      expect((await h.call("GET", member(MEMBER, "removal-preview"))).status, damage).toBe(401);
-      expect(h.forwarded).toEqual([]);
-    }
-  });
-
-  it("a person id that is not one of Code's ids is not found, even if a row answers to it", async () => {
-    const h = world(); const legacy = "legacy-person";
-    h.db.set({ ...membershipKey(legacy), entityType: "COMPANY_MEMBERSHIP", personId: legacy, companyId: A, role: "member", joinedAt: TIME });
-    expect(await h.call("GET", member(legacy, "removal-preview"))).toEqual(refusal(404, "NOT_FOUND", MEMBER_NOT_FOUND));
   });
 
   it("a member list naming another company's person is refused whole, even if the helper let it through", async () => {
@@ -158,28 +120,9 @@ describe("company isolation", () => {
     expect(await h.call("GET", MEMBERS)).toEqual(refusal(503, "RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE));
   });
 
-  it("a membership that is revoked, missing or does not read refuses the sign-in, before anything is forwarded", async () => {
-    for (const damage of ["revoked", "missing", "malformed"] as const) {
-      const h = world();
-      if (damage === "revoked") h.join(ADMIN, A, "admin", { revokedAt: TIME });
-      if (damage === "missing") h.db.delete(membershipKey(ADMIN).pk, "COMPANY");
-      if (damage === "malformed") h.db.set({ ...h.db.get(membershipKey(ADMIN).pk, "COMPANY")!, role: CANARY });
-      const answer = await h.call("GET", MEMBERS);
-      expect(answer.status, damage).toBe(401);
-      expect(JSON.stringify(answer)).not.toContain(CANARY);
-      expect(h.forwarded).toEqual([]);
-    }
-  });
 });
 
 describe("who may use the routes", () => {
-  it("a plain member gets not found everywhere and nothing is forwarded", async () => {
-    const h = world(); h.as(MEMBER);
-    for (const [method, path, body] of [["GET", MEMBERS, undefined], ["GET", member(ADMIN, "removal-preview"), undefined], ["POST", member(ADMIN, "removal"), {}], ["PUT", member(ADMIN, "role"), { role: "member" }]] as const) {
-      expect(await h.call(method, path, body)).toEqual(refusal(404, "NOT_FOUND", NOT_FOUND));
-    }
-    expect(h.forwarded).toEqual([]);
-  });
 
   it("a sign-in client without full access is refused, whatever scope it holds", async () => {
     const h = world({ fullAccess: false }); h.claims.scope = "tasks:read";
@@ -210,22 +153,6 @@ describe("who may use the routes", () => {
 });
 
 describe("removal and role change", () => {
-  it("an admin removes a member with no step-up (DEC 254zzz73); the removal fences the role seen and the successor (the admin, by default)", async () => {
-    const h = world();
-    const requestId = randomUUID();
-    expect(await h.call("POST", member(MEMBER, "removal"), { requestId, expectedRole: "member" })).toEqual({ status: 200, body: { removalId: requestId, state: "DONE", successorId: ADMIN, moved: nothingMoved } });
-    expect(h.revoked(MEMBER)).toBe(true);
-    expect(h.forwarded).toEqual([{ kind: "company-member-revoke", companyId: A, personId: MEMBER, expectedRole: "member", successorId: ADMIN, createdBy: ADMIN }]);
-    // Another request for the same person: already removed, as before.
-    expect(await h.call("POST", member(MEMBER, "removal"))).toEqual(refusal(409, "MEMBER_ALREADY_REMOVED", MEMBER_REVOKED));
-  });
-
-  it("an admin demotes another admin with no step-up (DEC 254zzz73: T3b has no step-up seam)", async () => {
-    const h = world(); h.join(OWNER2, A, "admin");
-    expect(await h.call("PUT", member(OWNER2, "role"), { role: "member" })).toEqual({ status: 200, body: { ok: true } });
-    expect(h.role(OWNER2)).toBe("member");
-    expect(h.forwarded).toEqual([{ kind: "company-member-role-set", companyId: A, personId: OWNER2, role: "member", createdBy: ADMIN }]);
-  });
 
   it("an admin promotes a member to admin with no step-up, and T3b's removed-member refusal keeps its fixed words", async () => {
     const h = world();
@@ -233,27 +160,6 @@ describe("removal and role change", () => {
     expect(h.role(MEMBER)).toBe("admin");
     h.join(OWNER2, A, "member", { revokedAt: TIME });
     expect(await h.call("PUT", member(OWNER2, "role"), { role: "member" })).toEqual(refusal(409, "MEMBER_ALREADY_REMOVED", MEMBER_REVOKED));
-  });
-
-  it("an admin cannot change their own role, and nobody removes themselves here", async () => {
-    const h = world(); h.as(OWNER);
-    expect(await h.call("POST", member(OWNER, "removal"))).toEqual(refusal(403, "FORBIDDEN", OWN_MEMBERSHIP));
-    expect(h.forwarded).toEqual([]);
-    h.as(ADMIN);
-    expect(await h.call("PUT", member(ADMIN, "role"), { role: "member" })).toEqual(refusal(403, "FORBIDDEN", OWN_MEMBERSHIP));
-    expect(await h.call("POST", member(ADMIN, "removal"))).toEqual(refusal(403, "FORBIDDEN", OWN_MEMBERSHIP));
-    expect(h.forwarded).toEqual([]);
-  });
-
-  it("a live owner can step down only while another live owner remains", async () => {
-    const h = world(); h.as(OWNER);
-    expect(await h.call("PUT", member(OWNER, "role"), { role: "member" })).toEqual(refusal(409, "LAST_OWNER", "a company must keep at least one active owner"));
-    expect(h.role(OWNER)).toBe("owner");
-    h.join(OWNER2, A, "owner");
-    expect(await h.call("PUT", member(OWNER, "role"), { role: "admin" })).toEqual({ status: 200, body: { ok: true } });
-    expect(h.role(OWNER)).toBe("admin");
-    expect(h.role(OWNER2)).toBe("owner");
-    expect(h.forwarded.map((event) => event["createdBy"])).toEqual([OWNER, OWNER]);
   });
 
   it("refuses unknown fields, bad roles and non-JSON in fixed words that never echo the body", async () => {
@@ -282,20 +188,6 @@ describe("only an owner changes or removes an owner (DEC 232e)", () => {
     expect(h.forwarded).toEqual([]);
   });
 
-  it("an owner demotes and then removes another owner with no step-up (DEC 254zzz73)", async () => {
-    const h = world(); h.join(OWNER2, A, "owner"); h.as(OWNER);
-    expect(await h.call("PUT", member(OWNER2, "role"), { role: "member" })).toEqual({ status: 200, body: { ok: true } });
-    expect((await h.call("POST", member(OWNER2, "removal"), { requestId: randomUUID(), expectedRole: "member" })).status).toBe(200);
-    expect(h.role(OWNER2)).toBe("member"); expect(h.revoked(OWNER2)).toBe(true);
-    expect(h.forwarded.map((event) => [event["kind"], event["createdBy"]])).toEqual([["company-member-role-set", OWNER], ["company-member-revoke", OWNER]]);
-  });
-
-  it("an admin cannot remove someone the screen showed as an owner, whatever their role now", async () => {
-    const h = world();
-    expect(await h.call("POST", member(MEMBER, "removal"), { requestId: randomUUID(), expectedRole: "owner" })).toEqual(refusal(403, "FORBIDDEN", OWNER_ONLY));
-    expect(h.revoked(MEMBER)).toBe(false); expect(h.forwarded).toEqual([]);
-  });
-
   it("T3b's own owner-only refusal reaches the caller as 403 in its words: the target became an owner after the route read it", async () => {
     const h = world(); h.join(OWNER2, A, "member");
     const helper = h.deps.developer.companyMembers!;
@@ -313,34 +205,6 @@ describe("only an owner changes or removes an owner (DEC 232e)", () => {
     expect(await h.call("GET", member(ADMIN, "removal-preview"))).toEqual(refusal(403, "FORBIDDEN", OWN_MEMBERSHIP));
     h.as(OWNER);
     expect((await h.call("GET", member(ADMIN, "removal-preview"))).body["mayRemove"]).toBe(true);
-  });
-});
-
-describe("no step-up (DEC 254zzz73)", () => {
-  it.each([
-    ["no step-up claim", () => undefined],
-    ["a leftover step-up claim of any age or method", (h: ReturnType<typeof world>) => { h.claims.step_up_at = 1; h.claims.step_up_amr = "slack"; }],
-  ])("an admin removes a member and changes an admin's role with %s", async (_name, setUp) => {
-    const h = world(); setUp(h);
-    expect((await h.call("POST", member(MEMBER, "removal"))).status).toBe(200);
-    h.join(OWNER2, A, "admin");
-    expect(await h.call("PUT", member(OWNER2, "role"), { role: "member" })).toEqual({ status: 200, body: { ok: true } });
-    expect(h.revoked(MEMBER)).toBe(true); expect(h.role(OWNER2)).toBe("member");
-  });
-
-  it("the role and company rules still hold without a step-up: a plain member, an admin on an owner, and another company's admin change nothing", async () => {
-    const h = world(); h.join(OWNER2, A, "admin");
-    h.as(MEMBER);
-    expect(await h.call("POST", member(OWNER2, "removal"))).toEqual(refusal(404, "NOT_FOUND", NOT_FOUND));
-    expect(await h.call("PUT", member(OWNER2, "role"), { role: "member" })).toEqual(refusal(404, "NOT_FOUND", NOT_FOUND));
-    h.as(ADMIN);
-    expect(await h.call("POST", member(OWNER, "removal"))).toEqual(refusal(403, "FORBIDDEN", OWNER_ONLY));
-    expect(await h.call("PUT", member(OWNER, "role"), { role: "member" })).toEqual(refusal(403, "FORBIDDEN", OWNER_ONLY));
-    h.as(OTHER);
-    expect(await h.call("POST", member(OWNER2, "removal"))).toEqual(refusal(404, "NOT_FOUND", MEMBER_NOT_FOUND));
-    expect(await h.call("PUT", member(OWNER2, "role"), { role: "member" })).toEqual(refusal(404, "NOT_FOUND", MEMBER_NOT_FOUND));
-    expect(h.role(OWNER2)).toBe("admin"); expect(h.revoked(OWNER2)).toBe(false); expect(h.role(OWNER)).toBe("owner"); expect(h.revoked(OWNER)).toBe(false);
-    expect(h.forwarded).toEqual([]);
   });
 });
 
@@ -395,50 +259,5 @@ describe("transport failures", () => {
     }
   });
 
-  it("the last-owner refusal reaches the caller in T3b's words", async () => {
-    const h = world(); h.join(OWNER2, A, "owner"); h.as(OWNER);
-    // A concurrent change revokes the caller's own ownership witness between the route's read and the write: T3b's store refuses with its fixed last-owner words.
-    h.deps.developer.companyMembers = companyMemberActionsThroughLambda({ documentClient: h.db, tableName: "SignIn", invoke: async () => ({ Payload: Buffer.from(JSON.stringify({ ok: false, error: "unavailable", message: MEMBER_LAST_OWNER })) }) });
-    expect(await h.call("POST", member(OWNER2, "removal"))).toEqual(refusal(409, "LAST_OWNER", MEMBER_LAST_OWNER));
-  });
 });
 
-describe("owner DEC 254zzz91: a role change or a removal is the Rovara website's own client's act", () => {
-  const website = refusal(403, "FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
-  it("another full-access client (an AI tool's) reads and previews, but changes no role and removes nobody: 403 with the website words, nothing forwarded", async () => {
-    const h = world({ webApp: false });
-    expect((await h.call("GET", MEMBERS)).status).toBe(200);
-    expect((await h.call("GET", member(MEMBER, "removal-preview"))).status).toBe(200);
-    h.forwarded.length = 0;
-    expect(await h.call("PUT", member(MEMBER, "role"), { role: "admin" })).toEqual(website);
-    expect(await h.call("POST", member(MEMBER, "removal"))).toEqual(website);
-    expect(h.forwarded.filter((event) => event["kind"] !== "company-member-list")).toEqual([]);
-    expect([h.role(MEMBER), h.revoked(MEMBER)]).toEqual(["member", false]);
-  });
-
-  it("the Rovara CLI's own token (no registered client) is refused the same way", async () => {
-    const h = world();
-    delete h.claims.azp;
-    Object.assign(h.claims, { iss: "https://signin.example.test", aud: "agentx-developer", iat: NOW / 1000, exp: NOW / 1000 + 3600 });
-    // The CLI path takes the session's own method: a session made by the CLI has no client.
-    h.db.set({ pk: "SESSION#s-admin", sk: "META", sessionId: "s-admin", developerId: ADMIN, amr: "slack", startedAt: new Date(NOW - 60_000).toISOString(), endsAt: NOW / 1000 + 3600 });
-    expect((await h.call("GET", MEMBERS)).status).toBe(200);
-    expect(await h.call("PUT", member(MEMBER, "role"), { role: "admin" })).toEqual(website);
-    expect(await h.call("POST", member(MEMBER, "removal"))).toEqual(website);
-    expect([h.role(MEMBER), h.revoked(MEMBER)]).toEqual(["member", false]);
-  });
-
-  it("on the website's own client the change is made, and the role and company rules still refuse first", async () => {
-    const h = world();
-    expect((await h.call("PUT", member(MEMBER, "role"), { role: "admin" })).status).toBe(200);
-    expect(h.role(MEMBER)).toBe("admin");
-    // An admin on an owner: the owner-only rule, not the client; another company's person: not found.
-    expect(await h.call("POST", member(OWNER, "removal"))).toEqual(refusal(403, "FORBIDDEN", OWNER_ONLY));
-    expect((await h.call("POST", member(OTHER, "removal"))).status).toBe(404);
-    // A plain member, on the website's own client, is refused for the role (the member routes answer not found).
-    const m = world();
-    m.as(MEMBER);
-    expect((await m.call("PUT", member(ADMIN, "role"), { role: "member" })).status).toBe(404);
-    expect(m.role(ADMIN)).toBe("admin");
-  });
-});

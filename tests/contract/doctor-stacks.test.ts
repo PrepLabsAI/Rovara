@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { doctorReport, guarded, reportText } from "../../packages/cli/src/doctor/checks.js";
+import { doctorReport, reportText } from "../../packages/cli/src/doctor/checks.js";
 import { releaseMismatch, stackChecks } from "../../packages/cli/src/doctor/stacks.js";
 import { doctorContext, doctorServices, healthyStacks, MANIFEST, SETTINGS } from "../support/doctor-fakes.js";
 
@@ -11,14 +11,6 @@ const withStack = (name: string, change: Partial<ReturnType<typeof healthyStacks
 };
 
 describe("doctor: stacks (FR-050)", () => {
-  it("passes a healthy environment deployed from the release in its settings", async () => {
-    const checks = await stackChecks(doctorContext());
-    expect(checks.filter((entry) => entry.status !== "ok")).toEqual([]);
-    expect(checks.map((entry) => entry.name)).toEqual([
-      "agentx-staging-access", "agentx-staging-foundation", "agentx-staging-identity", "agentx-staging-control-plane", "agentx-staging-runtime", "agentx-staging-slack",
-      "engine", "drift", "release 1.2.3",
-    ]);
-  });
 
   it("fails a missing stack and says upgrade deploys it again", async () => {
     const found = (await stackChecks(withStack("agentx-staging-slack", undefined))).find((entry) => entry.name === "agentx-staging-slack")!;
@@ -95,14 +87,6 @@ describe("doctor: stacks (FR-050)", () => {
     return doctorContext({ settings: { ...SETTINGS, engine: "cdk" }, services: doctorServices({ stackMap: stacks }) });
   };
 
-  it("passes a cdk environment whose stacks carry BootstrapVersion and no asset parameters (F4)", async () => {
-    const checks = await stackChecks(cdkEnvironment());
-    expect(checks.filter((entry) => entry.status !== "ok")).toEqual([]);
-    const release = checks.find((entry) => entry.name === "release 1.2.3")!;
-    expect(release.detail).toContain("cdk: code packages are not compared (they live in the bootstrap bucket)");
-    expect(checks.find((entry) => entry.name === "engine")!.detail).toBe("every stack was deployed with the cdk engine");
-  });
-
   it("still compares a cdk stack's image digest, and never its code packages (F4)", async () => {
     const context = cdkEnvironment((stacks) => {
       stacks["agentx-staging-runtime"]!.parameters.WorkerImageUri = `x@sha256:${"9".repeat(64)}`;
@@ -114,14 +98,6 @@ describe("doctor: stacks (FR-050)", () => {
     expect(release.detail).not.toContain("AssetHash");
     // On cdk the image digest is the only sign of a stale release, so the cause is not stated as fact.
     expect(release.detail).toContain("(the testing-only image flags set this, or the stack runs another release)");
-  });
-
-  it("names the upgrade a cdk environment can run: --source and admin credentials (carry-forward from ruling F20)", async () => {
-    const context = cdkEnvironment((stacks) => {
-      stacks["agentx-staging-runtime"]!.parameters.WorkerImageUri = `x@sha256:${"9".repeat(64)}`;
-    });
-    const release = (await stackChecks(context)).find((entry) => entry.name === "release 1.2.3")!;
-    expect(release.fix).toBe("with admin credentials, agentx --env staging upgrade --to 1.2.3 --source <a clean checkout of tag v1.2.3>, without --worker-image or --slack-image");
   });
 
   it("warns, and does not fail, when the release manifest cannot be read", async () => {
@@ -146,8 +122,4 @@ describe("doctor: reporting (FR-051)", () => {
     expect(text.trimEnd().split("\n").at(-1)).toBe("1 failed, 1 warning, 1 passed, 1 skipped");
   });
 
-  it("turns a check group that throws into one failed check, without the error's code prefix", async () => {
-    const checks = await guarded("github", async () => { throw new Error("GitHub app lookup failed with HTTP 502"); });
-    expect(checks).toEqual([{ group: "github", name: "github checks", status: "fail", detail: "could not run the github checks: GitHub app lookup failed with HTTP 502", fix: "check this computer's network access to github.com, then run agentx doctor again" }]);
-  });
 });

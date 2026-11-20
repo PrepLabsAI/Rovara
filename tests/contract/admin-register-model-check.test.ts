@@ -62,26 +62,6 @@ describe("admin project register --file checks the project's models", () => {
     expect(result.stderr).not.toContain("sk-ant");
   });
 
-  it("registers a failing approved pair with a warning and the stored class, and a pair that passes with its record", async () => {
-    const c = await context(true);
-    await seeded(c);
-    const result = await register(c, answers({ "anthropic/claude-opus-5": fail("model-not-found") }));
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toContain("The approved model Opus (anthropic/claude-opus-5) failed its check, and is registered anyway");
-    expect(result.body?.definition.models?.approved.map((model) => [model.modelId, (model.lastCheck as { status: string; class?: string }).status, (model.lastCheck as { class?: string }).class])).toEqual([
-      ["claude-sonnet-4-6", "ok", undefined], ["claude-opus-5", "failed", "model-not-found"],
-    ]);
-  });
-
-  it("registers an unchecked default (the check could not tell) with a warning, and records it unchecked", async () => {
-    const c = await context(true);
-    await seeded(c);
-    const result = await register(c, answers({ "anthropic/claude-sonnet-4-6": fail("provider-outage") }));
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toContain("could not be checked");
-    expect(result.body?.definition.models?.default.lastCheck).toMatchObject({ status: "unchecked", class: "provider-outage" });
-  });
-
   it("registers a refused default when --accept-unchecked-model gives a reason, and sends the reason with the revision", async () => {
     const c = await context(true);
     await seeded(c);

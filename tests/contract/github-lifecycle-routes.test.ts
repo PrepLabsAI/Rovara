@@ -91,30 +91,9 @@ describe("the connections read", () => {
 });
 
 describe("disconnect", () => {
-  it("an owner (no step-up, DEC 254zzz73) unbinds, with an audit row naming them, a company log line, and GitHub's uninstall page", async () => {
-    const h = await world();
-    const answer = await h.disconnect(101);
-    expect(answer).toEqual({ status: 200, body: { status: "disconnected", installationId: 101, accountLogin: "acme", uninstallUrl: "https://github.com/organizations/acme/settings/installations/101" } });
-    expect(binding(h.db, 101)).toBeUndefined();
-    expect(h.db.find((item) => item.pk === "GITHUB_INSTALLATION#101" && String(item.sk).startsWith("AUDIT#DISCONNECT#"))[0]).toMatchObject({ actor: OWNER, companyId: A });
-    expect(h.logs).toContainEqual({ companyId: A, event: "github.binding_disconnected", installationId: 101, actor: OWNER });
-    expect((await h.read()).body["installations"]).toEqual([]);
-    expect(binding(h.db, 202)).toMatchObject({ companyId: B });
-  });
   it("a User installation's page is the person's own settings", async () => {
     const h = await world(); h.as(OTHER);
     expect((await h.disconnect(202)).body["uninstallUrl"]).toBe("https://github.com/settings/installations/202");
-  });
-  it("an admin and a member are refused (live role); nothing changes", async () => {
-    const h = await world();
-    for (const id of [ADMIN, MEMBER]) {
-      h.as(id);
-      expect(await h.disconnect(101)).toEqual(refusal(403, "FORBIDDEN", DISCONNECT_OWNER_ONLY));
-    }
-    // The live role counts: the owner demoted since sign-in is refused too.
-    h.as(OWNER); h.db.set({ ...h.db.get(membershipKey(OWNER).pk, "COMPANY")!, role: "admin" });
-    expect(await h.disconnect(101)).toEqual(refusal(403, "FORBIDDEN", DISCONNECT_OWNER_ONLY));
-    expect(binding(h.db, 101)).toBeDefined();
   });
   it("owner DEC 254zzz99: the owner's CLI (or AI-tool) token, with no web-app client, is refused with the website words; nothing changes", async () => {
     const h = await world();
@@ -130,13 +109,6 @@ describe("disconnect", () => {
     cli(ADMIN);
     expect(await h.disconnect(101)).toEqual(refusal(403, "FORBIDDEN", DISCONNECT_OWNER_ONLY));
     expect(binding(h.db, 101)).toBeDefined();
-  });
-  it("DEC 254zzz73: an owner disconnects with no step-up claim, and a leftover old or foreign step-up claim changes nothing", async () => {
-    for (const claims of [{}, { step_up_at: 1, step_up_amr: "slack" }]) {
-      const h = await world(); Object.assign(h.claims, claims);
-      expect((await h.disconnect(101)).status).toBe(200);
-      expect(binding(h.db, 101)).toBeUndefined();
-    }
   });
   it("another company's installation, an unknown one and a malformed id get the same 404, and change nothing", async () => {
     const h = await world();
@@ -174,25 +146,6 @@ describe("disconnect", () => {
     project(h.db, "web", A, [repo("https://github.com/acme/web")]);
     expect((await h.disconnect(101)).status).toBe(200);
     expect((await h.disconnect(103)).status).toBe(409);
-  });
-  it("a non-owner learns nothing: the same 403 whether the id is in use, another company's, or free", async () => {
-    const h = await world(); h.as(ADMIN);
-    project(h.db, "web", A, [repo("https://github.com/acme/web", 101)]);
-    for (const id of [101, 202, 999]) expect(await h.disconnect(id)).toEqual(refusal(403, "FORBIDDEN", DISCONNECT_OWNER_ONLY));
-    expect(binding(h.db, 101)).toBeDefined(); expect(binding(h.db, 202)).toMatchObject({ companyId: B });
-  });
-  it("probing another company's installation is the 404 even when the caller's own projects use that account (no 404/409 oracle)", async () => {
-    const h = await world();
-    project(h.db, "mine-on-beta", A, [repo("https://github.com/beta/x", 202)]);
-    expect(await h.disconnect(202)).toEqual(refusal(404, "NOT_FOUND", CONNECTION_NOT_FOUND));
-    expect(binding(h.db, 202)).toMatchObject({ companyId: B });
-  });
-  it("another installation of the same account that is not active does not take over unpinned repositories", async () => {
-    const h = await world();
-    expect(await h.bindings.claimPerson(A, { installationId: 103, accountLogin: "acme" }, OWNER)).toBe("bound");
-    await h.bindings.markLifecycle(103, "suspend", D1);
-    project(h.db, "web", A, [repo("https://github.com/acme/web")]);
-    expect(await h.disconnect(101)).toEqual(refusal(409, "GITHUB_IN_USE", githubInUseMessage(["web"])));
   });
   it("repository matching: pins decide; other code hosts never count; unreadable entries do", () => {
     const install = { installationId: 101, accountLogin: "acme" };
@@ -278,15 +231,6 @@ describe("GitHub's installation webhook", () => {
     expect(answer.statusCode).toBe(503);
     expect(answer.body).not.toContain("private-canary");
     expect(binding(h.db, 101)).not.toHaveProperty("state");
-  });
-  it("without the company bindings (a single-company install), an installation event is refused exactly as before", async () => {
-    const h = await world();
-    const { handler } = createBroker({ extra: { documentClient: h.db, githubWebhookSecret: async () => SECRET } });
-    const raw = JSON.stringify({ action: "deleted", installation: { id: 101, account: { login: "acme" } }, sender: { login: "olive" } });
-    const answer = await handler({ rawPath: "/v1/github/webhooks", body: raw, headers: { "x-github-delivery": D1, "x-github-event": "installation", "x-hub-signature-256": `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}` },
-      requestContext: { requestId: "r", http: { method: "POST" } } });
-    expect(answer.statusCode).toBe(403);
-    expect((JSON.parse(answer.body) as { error: unknown }).error).toEqual({ code: "FORBIDDEN", message: "GitHub webhook event type is unsupported" });
   });
 });
 

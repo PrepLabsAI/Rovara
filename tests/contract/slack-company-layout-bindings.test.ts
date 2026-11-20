@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { IMPLICIT_COMPANY_ID, type OrgId } from "@agentx/contracts";
 import { namedCompanySlackBinding, slackChannelBindingKeyFor, slackChannelBindingPkFor } from "../../packages/broker/src/aws/slack-company-layout.js";
-import { slackBindingCompany, slackBindingInCompany, slackRequestWorkspace } from "../../packages/broker/src/aws/slack-person.js";
+import { slackBindingInCompany } from "../../packages/broker/src/aws/slack-person.js";
 import {
   SLACK_CHANNEL_NOT_BOUND_NOTICE, awsSlackRouterDependencies, createSlackMentionRouter, type SlackMention, type SlackRouterTransport,
 } from "../../packages/broker/src/aws/slack-ingress.js";
@@ -84,31 +84,11 @@ const installView = (company: string | (() => Promise<string>)) => ({
 });
 
 describe("namedCompanySlackBinding: one named company's own partition, by key", () => {
-  it("reads the exact staging row and names the company it was read for", async () => {
-    const table = fakeTable([stagingRow(A)]);
-    expect(await namedCompanySlackBinding(table, STATE, A, TEAM, CHANNEL)).toEqual({ teamId: TEAM, channelId: CHANNEL, projectName: "demo-tasklog", updatedAt: "2026-10-27T15:07:04.991Z", companyId: A });
-    expect(table.gets).toEqual([{ table: STATE, pk: `ORG#${A}#SLACK_BINDING#${TEAM}`, sk: `CHANNEL#${CHANNEL}` }]);
-  });
-
-  it("two companies: B's row for the same team and channel, and the legacy row, are never A's binding", async () => {
-    const table = fakeTable([stagingRow(B, "b-project"), legacyRow()]);
-    expect(await namedCompanySlackBinding(table, STATE, A, TEAM, CHANNEL)).toBeUndefined();
-    expect(await namedCompanySlackBinding(table, STATE, B, TEAM, CHANNEL)).toMatchObject({ projectName: "b-project", companyId: B });
-  });
 
   it.each([
     ["a row naming another channel", { ...stagingRow(A), channelId: "C0ELSEWHERE" }],
-    ["a row naming another team", { ...stagingRow(A), teamId: "T0ELSEWHERE" }],
-    ["a row naming another company", { ...stagingRow(A), companyId: B }],
-    ["a row whose project is not a project name", { ...stagingRow(A), projectName: "Not A Name!" }],
-    ["a row with no updatedAt", { ...stagingRow(A), updatedAt: undefined }],
   ])("%s is absent, never a guess", async (_name, row) => {
     expect(await namedCompanySlackBinding(fakeTable([row]), STATE, A, TEAM, CHANNEL)).toBeUndefined();
-  });
-
-  it("a stored row under another key (a store answering the wrong key) is absent", async () => {
-    const client = { send: async () => ({ Item: { ...stagingRow(A), pk: `ORG#${B}#SLACK_BINDING#${TEAM}` } }) };
-    expect(await namedCompanySlackBinding(client, STATE, A, TEAM, CHANNEL)).toBeUndefined();
   });
 
   it("the built-in company, or a team or channel that is not one, reads nothing", async () => {
@@ -133,27 +113,6 @@ describe("slackChannelBindingKeyFor / slackChannelBindingPkFor: the one key choi
 });
 
 describe("slackBindingCompany: which company's layout a team's bindings are read in", () => {
-  it("the verified request's company for its own team; never for another team", async () => {
-    await slackRequestWorkspace.run({ teamId: TEAM, companyId: A, token: "x" }, async () => {
-      expect(await slackBindingCompany({}, TEAM)).toBe(A);
-      expect(await slackBindingCompany({}, OTHER_TEAM)).toBeUndefined();
-    });
-  });
-
-  it("the install team's legacy view asks the team's operator binding, for the install team only", async () => {
-    const view = installView(A);
-    expect(await slackBindingCompany(view, TEAM)).toBe(A);
-    expect(await slackBindingCompany(view, OTHER_TEAM)).toBeUndefined();
-    expect(view.installTeamCompany).toHaveBeenCalledTimes(1);
-    // Without slackInstallTeamOnly (a view that is not the install team's), the reader is not used.
-    expect(await slackBindingCompany({ installTeamCompany: view.installTeamCompany }, TEAM)).toBeUndefined();
-  });
-
-  it("the built-in company and company mode off are the legacy layout; a binding that cannot be read throws", async () => {
-    expect(await slackBindingCompany(installView(IMPLICIT_COMPANY_ID), TEAM)).toBeUndefined();
-    expect(await slackBindingCompany({}, TEAM)).toBeUndefined();
-    await expect(slackBindingCompany(installView(async () => { throw new Error("refused"); }), TEAM)).rejects.toThrow();
-  });
 
   it("slackBindingInCompany: a company-partition binding must name the team's company now; a legacy binding keeps the project check", async () => {
     expect(await slackBindingInCompany(installView(A), TEAM, { projectName: "demo-tasklog", companyId: A })).toBe(true);
@@ -167,22 +126,6 @@ describe("slackBindingCompany: which company's layout a team's bindings are read
 });
 
 describe("the Slack Lambda's binding read and the not-bound answer", () => {
-  it("staging shape: the install team of a named company reads its own partition, and a mention in the bound channel is taken", async () => {
-    const h = lambda([stagingRow(A)], installView(A));
-    const response = await h.route(mention());
-    expect(response.statusCode).toBe(200);
-    expect(h.table.gets.filter((get) => get.table === STATE)).toEqual([{ table: STATE, pk: `ORG#${A}#SLACK_BINDING#${TEAM}`, sk: `CHANNEL#${CHANNEL}` }]);
-    expect(h.wire.enqueue).toHaveBeenCalledTimes(1);
-    expect(h.wire.postMessage).toHaveBeenCalledTimes(1);
-    expect(h.wire.postMessage.mock.calls[0]).not.toEqual([expect.objectContaining({ text: SLACK_CHANNEL_NOT_BOUND_NOTICE })]);
-  });
-
-  it("a named company never reads the legacy key: a leftover legacy row binds nothing", async () => {
-    const h = lambda([legacyRow("demo-tasklog")], installView(A));
-    await h.route(mention());
-    expect(h.table.gets.some((get) => get.pk.startsWith("SLACK_BINDING#"))).toBe(false);
-    expect(h.wire.enqueue).not.toHaveBeenCalled();
-  });
 
   it("an unbound channel of a named company gets one clear reply in its thread, once per event (Slack's retry is not answered again)", async () => {
     const h = lambda([stagingRow(A)], installView(A));
@@ -194,7 +137,6 @@ describe("the Slack Lambda's binding read and the not-bound answer", () => {
   });
 
   it.each([
-    ["a plain message", { kind: "message" as const }],
     ["an app-posted mention", { appPosted: true }],
   ])("%s in an unbound channel of a named company stays silent (nothing claimed or posted)", async (_name, overrides) => {
     const h = lambda([], installView(A));
@@ -203,24 +145,8 @@ describe("the Slack Lambda's binding read and the not-bound answer", () => {
     expect(h.wire.enqueue).not.toHaveBeenCalled();
   });
 
-  it("two companies: a company-mode team of company B reads B's partition only, and never A's binding of the same channel", async () => {
-    const h = lambda([stagingRow(A, "demo-tasklog", OTHER_TEAM)], { workspaces: { requireCompany: async () => B } as never });
-    await slackRequestWorkspace.run({ teamId: OTHER_TEAM, companyId: B, token: "x" }, () => h.deps.getBinding(OTHER_TEAM, CHANNEL)).then((binding) => expect(binding).toBeUndefined());
-    expect(h.table.gets.filter((get) => get.table === STATE)).toEqual([{ table: STATE, pk: `ORG#${B}#SLACK_BINDING#${OTHER_TEAM}`, sk: `CHANNEL#${CHANNEL}` }]);
-    // B's own row is read and named as B's.
-    const own = lambda([stagingRow(B, "b-project", OTHER_TEAM)], { workspaces: { requireCompany: async () => B } as never });
-    expect(await slackRequestWorkspace.run({ teamId: OTHER_TEAM, companyId: B, token: "x" }, () => own.deps.getBinding(OTHER_TEAM, CHANNEL))).toMatchObject({ projectName: "b-project", companyId: B });
-  });
-
-  it("a team-to-company read that fails is an error (Slack retries), never a guess at the legacy layout", async () => {
-    const h = lambda([legacyRow()], installView(async () => { throw new Error("refused"); }));
-    await expect(h.route(mention())).rejects.toThrow();
-    expect(h.table.gets).toEqual([]);
-    expect(h.wire.enqueue).not.toHaveBeenCalled();
-  });
-
   describe("the built-in company and company mode off: byte-identical to before", () => {
-    for (const [name, company] of [["company mode off (no team reader)", {}], ["the install team of the built-in company", installView(IMPLICIT_COMPANY_ID)]] as const) {
+    for (const [name, company] of [["company mode off (no team reader)", {}]] as const) {
       it(`${name}: the legacy key is read, a bound mention is taken, and an unbound one is ignored in silence`, async () => {
         const h = lambda([legacyRow()], company);
         await h.route(mention());

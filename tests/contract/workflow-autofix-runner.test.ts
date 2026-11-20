@@ -56,13 +56,6 @@ const run = (d: AutofixDependencies, mutate?: (t: DeveloperTaskRecord) => Develo
 const asked = (writes: Array<Record<string, unknown>>) => AutoFixAskSchema.parse((writes.at(-1)!.ExpressionAttributeValues as { ":ask": unknown })[":ask"]);
 
 describe("an unclear browser and API fault is settled by each UNKNOWN scenario's own result on the original code", () => {
-  it("sends back when every UNKNOWN scenario passed on the original code", async () => {
-    moves.sendBack.mockClear();
-    const { deps: d, writes } = deps({ baseline: recorded([row("a", "PASSED"), row("b", "PASSED"), row("c", "FAILED")]), unknown: ["a", "b"] });
-    expect(await run(d)).toBe("SENT_BACK");
-    expect(moves.sendBack).toHaveBeenCalledTimes(1);
-    expect(writes).toEqual([]);
-  });
 
   it("asks and lists EVERY UNKNOWN scenario when one of them also fails, or was not run, on the original code", async () => {
     moves.sendBack.mockClear();
@@ -72,14 +65,6 @@ describe("an unclear browser and API fault is settled by each UNKNOWN scenario's
     const ask = asked(writes);
     expect(ask).toMatchObject({ workflowRevision: 9, reason: "original-code-also-fails", groupCount: 3 });
     expect(ask.groups).toEqual([{ id: "a", original: "passed" }, { id: "b", original: "failed" }, { id: "c", original: "skipped" }]);
-  });
-
-  it("never decides a scenario the original-code round skipped (AI-navigated) on another scenario's result", async () => {
-    moves.sendBack.mockClear();
-    const { deps: d, writes } = deps({ baseline: recorded([row("a", "PASSED")], ["b"]), unknown: ["a", "b"] });
-    expect(await run(d)).toBe("ASKED");
-    expect(moves.sendBack).not.toHaveBeenCalled();
-    expect(asked(writes)).toMatchObject({ reason: "unclear-fault" });
   });
 
   it("waits while the original-code round is running, then asks once the wait is spent; a round that cannot run asks at once", async () => {
@@ -115,20 +100,6 @@ describe("an unclear browser and API fault is settled by each UNKNOWN scenario's
     expect(moves.retryChecks).toHaveBeenCalledWith(expect.anything(), TASK, expect.objectContaining({ expectedRevision: 9, reason: expect.stringContaining("unchanged code is checked first") as string }));
     expect(moves.sendBack).not.toHaveBeenCalled();
     expect(writes).toEqual([]);
-  });
-
-  it("asks at once, never waiting, when the requested round cannot run (no exported code), was already retried for this code, or the money forbids a retry", async () => {
-    moves.retryChecks.mockClear();
-    const noSource = deps({ baseline: { state: "REQUESTED" }, unknown: ["a"], sourceReady: false });
-    expect(await run(noSource.deps)).toBe("ASKED");
-    expect(asked(noSource.writes)).toMatchObject({ reason: "unclear-fault", groups: [{ id: "a", original: "not-run" }] });
-    const retried = deps({ baseline: { state: "REQUESTED" }, unknown: ["a"], sourceReady: true });
-    expect(await run(retried.deps, (t) => ({ ...t, workflow: { ...t.workflow!, decisions: [{ requestId: "r", workflowRevision: 8, decision: "REQUEST_CHANGES", actorId: "x", actorRole: "AGENTX", reason: "x", source: "AUTO_RETRY",
-      auto: { stage: "VERIFY", candidateDigest: "d".repeat(64) }, at: "2026-10-25T09:00:00.000Z" }] } } as unknown as DeveloperTaskRecord))).toBe("ASKED");
-    const poor = deps({ baseline: { state: "REQUESTED" }, unknown: ["a"], sourceReady: true, spent: 14 });
-    expect(await run(poor.deps)).toBe("ASKED");
-    expect(asked(poor.writes)).toMatchObject({ reason: "unclear-fault" });
-    expect(moves.retryChecks).not.toHaveBeenCalled();
   });
 
   it("lists every UNKNOWN scenario of the round, however many, and says the original code could not be checked when none actually failed there", async () => {
@@ -195,11 +166,4 @@ describe("AUTOREQUALIFY: the worker is recycled before the one retry of a kernel
     expect(order).toEqual(["recycle", "retry"]);
   });
 
-  it("does not recycle for any other retry", async () => {
-    moves.retryChecks.mockClear();
-    const recycle = vi.fn(async () => undefined);
-    const { deps: d } = deps({ baseline: { state: "REQUESTED" }, unknown: ["a"], sourceReady: true, recycle });
-    expect(await run(d)).toBe("RETRIED");
-    expect(recycle).not.toHaveBeenCalled();
-  });
 });

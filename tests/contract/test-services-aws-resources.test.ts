@@ -1,8 +1,6 @@
 // Slice 2, s2-emulator-run: the AWS resources the worker reads from the project's infrastructure code for Rovara local AWS (contracts/src/test-services-aws-resources.ts), and the `aws` facts of the usage record. Names and attribute types only, strict forms.
 import { describe, expect, it } from "vitest";
-import {
-  TASK_AWS_RESOURCES_MAX, TaskAwsResourceSchema, TaskAwsResourcesSchema, TestServicesAwsUsageSchema, TestServicesUsageRecordSchema,
-} from "../../packages/contracts/src/index.js";
+import { TASK_AWS_RESOURCES_MAX, TaskAwsResourceSchema, TaskAwsResourcesSchema, TestServicesAwsUsageSchema } from "../../packages/contracts/src/index.js";
 
 const table = { kind: "table", name: "orders", keySchema: { partitionKey: { name: "orderId", type: "S" }, sortKey: { name: "createdAt", type: "N" } } };
 
@@ -27,20 +25,10 @@ describe("TaskAwsResourcesSchema", () => {
     ]) expect(TaskAwsResourcesSchema.safeParse([bad]).success, JSON.stringify(bad)).toBe(false);
     expect(TaskAwsResourcesSchema.safeParse([{ kind: "table", name: "orders", keySchema: { partitionKey: { name: "id", type: "S" }, sortKey: { name: "id", type: "S" } } }]).success).toBe(false);
   });
-  it("refuses a name shaped like a secret", () => {
-    const key = ["AK", "IA", "ABCDEFGHIJKLMNOP"].join("");
-    expect(TaskAwsResourcesSchema.safeParse([{ kind: "queue", name: key }]).success).toBe(false);
-    expect(TaskAwsResourcesSchema.safeParse([{ kind: "queue", name: key.toLowerCase() }]).success).toBe(false);
-  });
 });
 
 describe("the record's aws facts", () => {
-  const record = (aws: unknown) => ({ schemaVersion: 1, dependencies: [], unknownCalls: { domains: [], otherCount: 0 }, ...(aws === undefined ? {} : { aws }) });
   const read = { ledger: "read", services: [{ service: "s3", calls: 6, unsupported: 1 }], unsupportedOperations: [{ service: "s3", operation: "PutBucketReplication", count: 1 }], otherCalls: 0, otherUnsupported: 0 };
-  it("is optional (slice 1's record is unchanged) and parses when present", () => {
-    expect(TestServicesUsageRecordSchema.safeParse(record(undefined)).success).toBe(true);
-    expect(TestServicesUsageRecordSchema.parse(record(read))).toEqual(record(read));
-  });
   it("is strict: operation names are camel case words, service keys are keys, a service and an operation are listed once, and an unreadable ledger says nothing", () => {
     const aws = (over: Record<string, unknown>) => TestServicesAwsUsageSchema.safeParse({ ...read, ...over }).success;
     expect(aws({})).toBe(true);

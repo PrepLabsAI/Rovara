@@ -81,34 +81,6 @@ function harness(options: {
 }
 
 describe("workflow merge recovery enrollment and seeding", () => {
-  it("preserves an existing lease, due time, and failure count when publication enrolls again", async () => {
-    const h = harness();
-    const taskId = uuid(1);
-    await enroll(h.db, taskId, h.now());
-    await h.db.send(new UpdateCommand({
-      TableName: TABLE,
-      Key: recoveryKey(taskId),
-      UpdateExpression: "SET attempts = :attempts, nextAttemptAt = :due, dispatchDueSk = :dueKey, leaseToken = :token, leaseExpiresAt = :lease",
-      ExpressionAttributeValues: {
-        ":attempts": 3,
-        ":due": h.now() + 1_800_000,
-        ":dueKey": `${new Date(h.now() + 1_800_000).toISOString()}#${taskId}`,
-        ":token": "lease-one",
-        ":lease": h.now() + 30_000,
-      },
-    }));
-
-    await enroll(h.db, taskId, h.now() + 5_000);
-
-    expect(h.db.get(RECOVERY_PK, `TASK#${taskId}`)).toMatchObject({
-      taskId,
-      attempts: 3,
-      nextAttemptAt: h.now() + 1_800_000,
-      leaseToken: "lease-one",
-      leaseExpiresAt: h.now() + 30_000,
-    });
-    expect(h.db.refusals).toEqual([]);
-  });
 
   it("requires a trusted validator, validates every UUID before writes, and caps one seed at 25", async () => {
     const noValidator = harness();
@@ -133,29 +105,6 @@ describe("workflow merge recovery enrollment and seeding", () => {
   });
 });
 describe("workflow merge recovery sweep admission", () => {
-  it("queries one exact due page and claims at most ten of eleven rows", async () => {
-    const h = harness();
-    for (let index = 1; index <= 11; index += 1) {
-      const taskId = uuid(index);
-      h.db.set(taskRecord(taskId));
-      await enroll(h.db, taskId, h.now() - (12 - index) * 1_000);
-    }
-
-    const result = await runDueWorkflowMergeRecovery(h.dependencies);
-
-    expect(result).toEqual({ attempted: 10, reconciled: 10, deferred: 0 });
-    expect(h.reconcile).toHaveBeenCalledTimes(10);
-    const queries = h.commands.filter((command) => command instanceof Object && (command as { constructor: { name: string } }).constructor.name === "QueryCommand") as Array<{ input: Record<string, unknown> }>;
-    expect(queries).toHaveLength(1);
-    expect(queries[0]?.input).toMatchObject({
-      IndexName: "workflow-dispatch-due",
-      KeyConditionExpression: "dispatchDuePk = :pk AND dispatchDueSk BETWEEN :low AND :high",
-      Limit: 10,
-      ExpressionAttributeValues: { ":pk": RECOVERY_PK, ":low": "0" },
-    });
-    expect(h.db.commandNames()).not.toContain("ScanCommand");
-    expect(h.db.refusals).toEqual([]);
-  });
 
   it("admits neither a future row nor a row with a live lease", async () => {
     const h = harness();
@@ -174,43 +123,6 @@ describe("workflow merge recovery sweep admission", () => {
 
     expect(await runDueWorkflowMergeRecovery(h.dependencies)).toEqual({ attempted: 0, reconciled: 0, deferred: 0 });
     expect(h.reconcile).not.toHaveBeenCalled();
-  });
-
-  it("cannot discover ordinary workflow-dispatch or plan-evidence rows through its exact partition query", async () => {
-    const h = harness();
-    h.db.set({
-      pk: "WORKFLOW_DISPATCH",
-      sk: "TASK#other#1",
-      dispatchDuePk: "WORKFLOW_DISPATCH",
-      dispatchDueSk: `${new Date(h.now() - 1).toISOString()}#other#1`,
-    });
-    h.db.set({
-      pk: "PLAN_EVIDENCE",
-      sk: "other#artifact",
-      dispatchDuePk: "PLAN_EVIDENCE",
-      dispatchDueSk: `${new Date(h.now() - 1).toISOString()}#other#artifact`,
-    });
-
-    expect(await runDueWorkflowMergeRecovery(h.dependencies)).toEqual({ attempted: 0, reconciled: 0, deferred: 0 });
-    expect(h.reconcile).not.toHaveBeenCalled();
-  });
-
-  it("allows only one of two concurrent sweep invocations to acquire the global admission", async () => {
-    let release!: () => void;
-    const blocked = new Promise<void>((resolve) => { release = resolve; });
-    const h = harness({ reconcile: async () => { await blocked; return { kind: "OBSERVED" }; } });
-    const taskId = uuid(1);
-    h.db.set(taskRecord(taskId));
-    await enroll(h.db, taskId, h.now() - 1);
-
-    const first = runDueWorkflowMergeRecovery(h.dependencies);
-    await vi.waitFor(() => expect(h.reconcile).toHaveBeenCalledTimes(1));
-    const second = await runDueWorkflowMergeRecovery(h.dependencies);
-    release();
-
-    expect(second).toEqual({ attempted: 0, reconciled: 0, deferred: 0 });
-    expect(await first).toEqual({ attempted: 1, reconciled: 1, deferred: 0 });
-    expect(h.reconcile).toHaveBeenCalledTimes(1);
   });
 
   it("does not settle a row after its lease token becomes stale", async () => {
@@ -262,23 +174,6 @@ describe("workflow merge recovery outcomes", () => {
     expect(failed).toMatchObject({ attempts: 1, nextAttemptAt: h.now() + FIVE_MINUTES });
     expect(failed).not.toHaveProperty("indexExpiresAt");
     expect(String(failed.dispatchDueSk) > secondOverdueKey).toBe(true);
-  });
-
-  it("backs repeated task failures off for 5, 10, 20, then 30 minutes without dead-lettering", async () => {
-    const taskId = uuid(1);
-    const h = harness({ reconcile: async () => ({ kind: "RETRY", retryAt: h.now(), scope: "task" }) });
-    h.db.set(taskRecord(taskId));
-    await enroll(h.db, taskId, h.now() - 1);
-
-    for (const expectedMinutes of [5, 10, 20, 30, 30]) {
-      const before = h.now();
-      expect(await runDueWorkflowMergeRecovery(h.dependencies)).toEqual({ attempted: 1, reconciled: 0, deferred: 1 });
-      const row = h.db.get(RECOVERY_PK, `TASK#${taskId}`)!;
-      expect(row.nextAttemptAt).toBe(before + expectedMinutes * 60_000);
-      expect(row).not.toHaveProperty("indexExpiresAt");
-      expect(row).not.toHaveProperty("recoveryStatus");
-      h.setNow(row.nextAttemptAt as number);
-    }
   });
 
   it("quarantines malformed and missing discovery without changing the task", async () => {
@@ -450,19 +345,6 @@ describe("workflow merge recovery outcomes", () => {
     expect(h.db.get(RECOVERY_PK, `TASK#${taskId}`)).not.toHaveProperty("indexExpiresAt");
   });
 
-  it("keeps a closed task pending when its charged member counter is unreadable", async () => {
-    const taskId = uuid(1);
-    const h = harness({ reconcile: async () => ({ kind: "TERMINAL", release: "confirmed" }) });
-    const task = taskRecord(taskId, { closedAt: new Date(h.now()).toISOString() });
-    h.db.set(task);
-    h.db.set({ pk: `WORKSPACE#workspace-${taskId}`, sk: "META", status: "CLOSED" });
-    h.db.set({ pk: "SLACK_LIMIT#team", sk: `MEMBER#${taskId}`, count: "zero" });
-    h.db.set({ pk: "SLACK_LIMIT#team", sk: "ORGANIZATION", count: 0 });
-    await enroll(h.db, taskId, h.now() - 1);
-
-    expect(await runDueWorkflowMergeRecovery(h.dependencies)).toEqual({ attempted: 1, reconciled: 0, deferred: 1 });
-    expect(h.db.get(RECOVERY_PK, `TASK#${taskId}`)).not.toHaveProperty("indexExpiresAt");
-  });
 });
 
 describe("workflow merge recovery global cooldown and request budget", () => {

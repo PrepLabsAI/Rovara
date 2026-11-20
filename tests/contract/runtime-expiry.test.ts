@@ -81,12 +81,6 @@ describe("GET /v1/admin/runtime-installation/status", () => {
     expect(await none.status()).toMatchObject({ status: 404, body: { error: { message: "browser and API runtimes are not set up in this deployment" } } });
   });
 
-  it("leaves a row that does not read as state and times out of the answer, instead of guessing", async () => {
-    const h = await controlPlane();
-    h.put("web");
-    h.harness.db.set({ ...e2eRegisteredRuntimeKey("catalog", PROFILE, "api"), entityType: "E2E_FEATURE_VERIFIER", state: 7 });
-    expect((await h.status()).body).toMatchObject({ rows: [{ kind: "web" }] });
-  });
 });
 
 describe("readRuntimeStatus", () => {
@@ -118,13 +112,6 @@ describe("agentx doctor's browser and API runtime checks", () => {
     expect(await lines(status([row("web"), row("api")]))).toEqual([
       { name: "api runtime", status: "ok", detail: `qualified, good until ${at(24 * 6)}` },
       { name: "web runtime", status: "ok", detail: `qualified, good until ${at(24 * 6)}` },
-    ]);
-  });
-
-  it("warns, naming the expiry time and the exact renew command, from 48 hours before, and when it has expired", async () => {
-    expect(await lines(status([row("web", { expiresAt: at(40) }), row("api", { expiresAt: at(-3) })]))).toEqual([
-      { name: "api runtime", status: "warn", detail: `the api runtime expired at ${at(-3)}, so browser and API checks cannot run`, fix: `renew it with: ${RENEW}` },
-      { name: "web runtime", status: "warn", detail: `the web runtime expires at ${at(40)}, in 40.0 hours, and browser and API checks stop then`, fix: `renew it with: ${RENEW}` },
     ]);
   });
 

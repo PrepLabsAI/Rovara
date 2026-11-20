@@ -224,14 +224,6 @@ describe("plan comments and People on a core task (the old routes' own functions
     expect(h.rows()).toBe(before);
   });
 
-  it("without the deployment's wiring, the owner is told in fixed words that these are not on the core here yet; another company's caller still reads no such task", async () => {
-    const h = await ruleWorld({ rules: false });
-    for (const [method, suffix] of [["GET", "/people"], ["GET", "/readers"], ["GET", "/events"], ["GET", "/comments"], ["POST", "/people/take-ownership"]] as const) {
-      const owner = await h.dev(MAYA, method, `/v1/dev/tasks/${h.task.taskId}${suffix}`, method === "POST" ? { requestId: randomUUID(), expectedPeopleRevision: 1 } : undefined);
-      expect(owner, suffix).toEqual({ status: 404, body: { error: { code: "NOT_FOUND", message: NOT_ON_THE_CORE_YET } } });
-      expect(await h.dev(OMAR, method, `/v1/dev/tasks/${h.task.taskId}${suffix}`), suffix).toEqual(await h.missing(OMAR, method, suffix));
-    }
-  });
 });
 
 describe("DEC 254zzz44 (a): a reader the owner shared a core task with opens it (the old task read's reader rule)", () => {

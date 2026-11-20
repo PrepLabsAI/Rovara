@@ -6,8 +6,8 @@ import { describe, expect, it } from "vitest";
 import { indexActivity } from "../../packages/broker/src/aws/activity-index.js";
 import { failureIndexKey, usageIndexKey } from "../../packages/contracts/src/index.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
-import { MAYA, bearerFor, recordStream } from "../support/developer-task-broker.js";
-import { ADMIN_TOKEN, NON_ADMIN_TOKEN, REFRESH_TOKEN, adminSignedInClient } from "../support/mcp-broker-client.js";
+import { MAYA, recordStream } from "../support/developer-task-broker.js";
+import { ADMIN_TOKEN, REFRESH_TOKEN, adminSignedInClient } from "../support/mcp-broker-client.js";
 import { call } from "../support/slack-broker.js";
 
 const PLANTED = [`ghp_${"Q".repeat(36)}`, `xoxb-${"2".repeat(12)}-planted`, `agxr_${"z".repeat(43)}`];
@@ -75,28 +75,11 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
     expect([...new Set(sentByTools)].sort()).toEqual(["GetCommand", "QueryCommand"]);
   });
 
-  it("lists the admin read tools in the first tools/list after connecting, for a client that lists once (issue 203)", async () => {
-    const { harness } = await failedTask();
-    const mcp = await adminSignedInClient(harness);
-    // Codex lists once and does not re-list on list_changed: no poll here.
-    expect((await mcp.names()).filter((name) => name.startsWith("agentx_admin_") && ADMIN_TOOLS.includes(name))).toEqual(ADMIN_TOOLS);
-  });
-
   it("offers no admin tool to a developer without an admin sign-in, and refuses a direct call with ADMIN_REQUIRED", async () => {
     const { harness } = await failedTask();
     const mcp = await adminSignedInClient(harness, { adminToken: null });
     expect((await mcp.names()).filter((name) => name.startsWith("agentx_admin_"))).toEqual([]);
     for (const name of ADMIN_TOOLS) expect((await mcp.tool(name, name === "agentx_admin_turns" ? { since: new Date().toISOString() } : name === "agentx_admin_usage" ? { group_by: "day" } : {})).error, name).toMatchObject({ code: "ADMIN_REQUIRED" });
-  });
-
-  it("answers ADMIN_REQUIRED for a sign-in without the admin claim, and for a developer token sent as one", async () => {
-    const { harness } = await failedTask();
-    const notAdmin = await adminSignedInClient(harness, { adminToken: NON_ADMIN_TOKEN });
-    await expect.poll(async () => (await notAdmin.names()).includes("agentx_admin_health")).toBe(true);
-    expect((await notAdmin.tool("agentx_admin_health")).error).toMatchObject({ code: "ADMIN_REQUIRED" });
-    const confused = await adminSignedInClient(harness, { adminToken: (await bearerFor(MAYA)).slice("Bearer ".length) });
-    await expect.poll(async () => (await confused.names()).includes("agentx_admin_health")).toBe(true);
-    expect((await confused.tool("agentx_admin_list_projects")).error).toMatchObject({ code: "ADMIN_REQUIRED" });
   });
 
   it("carries no planted secret in any admin result or log line (SC-004)", async () => {

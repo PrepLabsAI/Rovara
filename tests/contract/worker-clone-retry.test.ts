@@ -73,16 +73,6 @@ describe("workspace clone retries only Git's 'Repository not found'", () => {
     expect(JSON.stringify(f.events)).not.toContain("github.com");
   });
 
-  it("keeps the existing failure after the last attempt", async () => {
-    const f = await fixture();
-    await expect(prepareWorkspace({
-      rootPath: await f.workspace(), project: f.project, readOnly: true, cloneRetry: f.retry,
-      materializer: flaky(f.source, [NOT_FOUND, NOT_FOUND, NOT_FOUND, NOT_FOUND]),
-    })).rejects.toThrow(/Repository not found/);
-    expect(f.sleeps).toEqual([2_000, 5_000]);
-    expect(f.events.map((event) => event.outcome)).toEqual(["repository_not_found", "repository_not_found"]);
-  });
-
   it("does not retry any other failure, nor one that appears on a retry", async () => {
     const f = await fixture();
     await expect(prepareWorkspace({
@@ -149,12 +139,6 @@ describe("workspace clone retries only Git's 'Repository not found'", () => {
 
 describe("P1: a setup run's preparation is held to the heads the broker pinned", () => {
   const headOf = async (source: string) => (await execFileAsync("git", ["-C", source, "rev-parse", "HEAD"], { env: gitEnv })).stdout.trim();
-  it("prepares when each repository's own resolution is exactly its pin", async () => {
-    const f = await fixture();
-    const pin = await headOf(f.source);
-    const manifest = await prepareWorkspace({ rootPath: await f.workspace(), project: f.project, readOnly: true, cloneRetry: f.retry, credentialProvider: async () => ({}), materializer: flaky(f.source, []), pins: [{ repository: "demo", commit: pin }] });
-    expect(manifest.repositories.map((repository) => repository.resolvedCommit)).toEqual([pin]);
-  });
   it("refuses when the head differs from the pin, when a repository has no pin, and when the pin is for another repository; and reports no base", async () => {
     const f = await fixture();
     for (const pins of [[{ repository: "demo", commit: "b".repeat(40) }], [], [{ repository: "other", commit: await headOf(f.source) }]]) {
@@ -174,16 +158,5 @@ describe("P1: a setup run's preparation is held to the heads the broker pinned",
     }
     // And a preparation without pins reuses it as before.
     await expect(prepareWorkspace(options)).resolves.toMatchObject({ complete: true });
-  });
-  it("without pins (every other preparation) nothing changes", async () => {
-    const f = await fixture();
-    const manifest = await prepareWorkspace({ rootPath: await f.workspace(), project: f.project, readOnly: true, cloneRetry: f.retry, credentialProvider: async () => ({}), materializer: flaky(f.source, []) });
-    expect(manifest.complete).toBe(true);
-  });
-  it("reports no base for a 64-hex commit (the broker's baseCommitSha is a 40-hex SHA-1: a longer one keeps no preparedBase, which fails closed)", async () => {
-    const { preparedBaseResult } = await import("../../packages/worker/src/prepare.js");
-    const long = "d".repeat(64);
-    expect(preparedBaseResult({ repositories: [{ name: "demo", resolvedCommit: long }] } as never)).toEqual({});
-    expect(preparedBaseResult({ repositories: [{ name: "demo", resolvedCommit: "short" }] } as never)).toEqual({});
   });
 });

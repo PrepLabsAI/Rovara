@@ -4,7 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
-import { ADMIN_READ_TOOLS, DEVELOPER_TOOLS, ToolError, createAgentXMcpServer, type AdminControlPlaneClient, type ToolContext } from "../../packages/mcp/src/index.js";
+import { ADMIN_READ_TOOLS, DEVELOPER_TOOLS, createAgentXMcpServer, type AdminControlPlaneClient, type ToolContext } from "../../packages/mcp/src/index.js";
 import { toolError as parseToolError } from "../support/mcp-tool-error.js";
 
 const PLANTED = `xoxb-${"1".repeat(10)}-planted-bot-token`;
@@ -44,37 +44,6 @@ describe("the admin read tools (FR-030)", () => {
     } finally {
       await client.close();
     }
-  });
-  it("allows every MCP output money figure to be omitted", async () => {
-    const client = await connect({});
-    try {
-      const { tools } = await client.listTools();
-      const figures: string[] = [];
-      const walk = (node: unknown, path: string): void => {
-        if (node === null || typeof node !== "object") return;
-        const schema = node as { properties?: Record<string, unknown>; required?: string[] };
-        for (const key of Object.keys(schema.properties ?? {})) {
-          if (key.endsWith("_usd") || (path.endsWith("price_usd_per_million") && ["input", "output"].includes(key)) || (path.endsWith("run_estimate") && key === "cost")) {
-            figures.push(`${path}.${key}`);
-            expect(schema.required ?? [], `${path}.${key}`).not.toContain(key);
-          }
-        }
-        for (const [key, value] of Object.entries(node)) walk(value, key === "properties" ? path : `${path}.${key}`);
-      };
-      for (const tool of tools) walk(tool.outputSchema, tool.name);
-      expect(figures).toEqual(expect.arrayContaining(["agentx_get_session.cost.spent_usd", "agentx_stop_session.cost.spent_usd", "agentx_admin_usage.groups.items.cost_usd"]));
-    } finally {
-      await client.close();
-    }
-  });
-  it("are exactly FR-030's eight, each with an output schema and no em dash", async () => {
-    expect(ADMIN_READ_TOOLS.map((tool) => tool.name)).toEqual([
-      "agentx_admin_health", "agentx_admin_failed_tasks", "agentx_admin_turns", "agentx_admin_usage",
-      "agentx_admin_list_projects", "agentx_admin_list_channels", "agentx_admin_list_credentials", "agentx_admin_list_workspaces",
-    ]);
-    const tools = (await (await connect({})).listTools()).tools.filter((tool) => tool.name.startsWith("agentx_admin_"));
-    for (const tool of tools) expect(tool.outputSchema, tool.name).toBeDefined();
-    expect(JSON.stringify(tools)).not.toContain("\u2014");
   });
 
   it("shows failed tasks with FR-030's fields, and the turn record link", async () => {
@@ -129,11 +98,6 @@ describe("the admin read tools (FR-030)", () => {
   it("answers ADMIN_REQUIRED when the server holds no admin client", async () => {
     const client = await connect(undefined);
     expect(toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run npx @preplabsai/rovara-code login --admin" });
-  });
-
-  it("passes a refusal through as its tool error", async () => {
-    const client = await connect({ health: async () => { throw new ToolError("ADMIN_REQUIRED", "AgentX refused this computer's admin sign-in, or it has expired", "run npx @preplabsai/rovara-code login --admin"); } });
-    expect(toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED" });
   });
 
   it("shows the dead-letter queues' own check (ruling R18), and says their status", async () => {
@@ -218,11 +182,6 @@ describe("the admin read tools (FR-030)", () => {
     expect((await client.callTool({ name: "agentx_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({ workspaces: [{ owner: { task_id: "33333333-3333-4333-8333-333333333333", developer_id: "d".repeat(64), developer: "`Maya Chen`" } }] });
   });
 
-  it("shows a Slack workspace owner's identity and keeps their name inert", async () => {
-    const client = await connect({ workspaces: async () => ({ workspaces: [{ id: "22222222-2222-4222-8222-222222222222", project: "payments", origin: "slack", owner: { slackTeamId: "T0123456789", slackUserId: "U0123456789", slackName: "Priya Shah" }, status: "READY", busy: false, lastActivityAt: "t" }], limits: { perPerson: 3, perOrganization: 20, source: "setting" }, counts: { organization: 1 }, truncated: false }) });
-    expect((await client.callTool({ name: "agentx_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({ workspaces: [{ owner: { slack_team_id: "T0123456789", slack_user_id: "U0123456789", slack_name: "`Priya Shah`" } }] });
-  });
-
   it("shows the neutral source and owner fields beside the older slack ones (item I2)", async () => {
     const client = await connect({ workspaces: async () => ({ workspaces: [{ id: "22222222-2222-4222-8222-222222222222", project: "payments", origin: "slack", owner: { slackTeamId: "T0123456789", slackUserId: "U0123456789", slackName: "Priya Shah" }, status: "READY", busy: false, lastActivityAt: "t" }], limits: { perPerson: 3, perOrganization: 20, source: "setting" }, counts: { organization: 1 }, truncated: false }) });
     expect((await client.callTool({ name: "agentx_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({
@@ -245,16 +204,6 @@ describe("the admin read tools (FR-030)", () => {
     expect(chat.structuredContent).toMatchObject({ turns: [{ source: "chat", origin: "slack" }, { source: "ai_tool", origin: "ai_tool" }] });
     expect((await client.callTool({ name: "agentx_admin_turns", arguments: { since, source: "ai_tool", origin: "slack" } })).isError).toBe(true);
     expect(turns).toHaveBeenCalledTimes(4);
-  });
-
-  it("each description says when to use the tool and what to do next", () => {
-    for (const tool of ADMIN_READ_TOOLS) {
-      expect(tool.description, tool.name).toMatch(/\bUse it\b/);
-      expect(tool.description, tool.name).toMatch(/\b(then|next|Next|after|before)\b/);
-    }
-    // When to use it comes before what to do next.
-    const failed = ADMIN_READ_TOOLS.find((tool) => tool.name === "agentx_admin_failed_tasks")!.description;
-    expect(failed.indexOf("Use it")).toBeLessThan(failed.indexOf("pass its turn_record"));
   });
 
   it("shows a secret named by its ARN by the name alone, so FR-029's redaction keeps it", async () => {

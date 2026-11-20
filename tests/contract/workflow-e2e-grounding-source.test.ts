@@ -81,30 +81,6 @@ function harness() {
 
 
 describe("a planning run asked for the unchanged code may upload it, and nothing else of a coding run's", () => {
-  it("stores the export and its build source on the PLAN operation through the worker's own callbacks, judged against the base it exports", async () => {
-    const repo = await repository();
-    const built = readyOf(await exportBaselineSource({ repositories: inputsOf(repo), signal: new AbortController().signal }));
-    const h = harness();
-    await h.sinks.baselineSourceSink(built);
-    const stored = h.operation().baselineSource as Record<string, unknown>;
-    expect(stored).toMatchObject({ status: "READY", repositoryId: "fixture/app", baseCommitSha: repo.base.commitSha, baseTreeSha: repo.base.treeSha });
-    const exportBytes = Buffer.from(JSON.stringify(built.source), "utf8");
-    expect(h.objects.get((stored.sourceRef as { key: string }).key)?.equals(exportBytes)).toBe(true);
-    expect(h.operation().candidateSourceRef).toBeUndefined();
-  });
-
-  it("refuses the upload from a planning run that was not asked, and from one whose capability does not carry it", async () => {
-    const repo = await repository();
-    const built = readyOf(await exportBaselineSource({ repositories: inputsOf(repo), signal: new AbortController().signal }));
-    const notAsked = harness();
-    notAsked.putOperation({ groundingSourceAsked: undefined });
-    await expect(notAsked.sinks.baselineSourceSink(built)).rejects.toThrow();
-    expect(notAsked.operation().baselineSource).toBeUndefined();
-    const noGrant = harness();
-    noGrant.setCapability(noGrant.issue(false, false));
-    expect((await noGrant.send("baseline-source", { stage: "unavailable", schemaVersion: "workflow-baseline-source-unavailable/v1", reason: "x" })).status).toBe(409);
-    expect(noGrant.operation().baselineSource).toBeUndefined();
-  });
 
   it("is limited to the running planning operation: not a finished one, not a CHECKS or REVIEW one that carries the flag", async () => {
     const repo = await repository();
@@ -115,24 +91,6 @@ describe("a planning run asked for the unchanged code may upload it, and nothing
       await expect(h.sinks.baselineSourceSink(built), JSON.stringify(patch)).rejects.toThrow();
       expect(h.operation().baselineSource, JSON.stringify(patch)).toBeUndefined();
     }
-  });
-
-  it("grants a planning run the baseline-source action only: the candidate's export and build source stay the coding run's", async () => {
-    const h = harness();
-    for (const path of ["candidate-export", "candidate-build-source"]) {
-      const denied = await h.send(path, { stage: "init" });
-      expect(denied.status, path).toBe(409);
-    }
-    expect((await h.send("baseline-source", { stage: "unavailable", schemaVersion: "workflow-baseline-source-unavailable/v1", reason: "x" })).status).toBe(200);
-    // The coding run's own capability is unchanged: it still carries all three.
-    const coding = JSON.parse(Buffer.from(h.issue(true).split(".")[0]!, "base64url").toString("utf8")) as { actions: string[] };
-    expect(coding.actions).toEqual(expect.arrayContaining(["candidate-export", "candidate-build-source", "baseline-source"]));
-    const planning = JSON.parse(Buffer.from(h.issue(false, true).split(".")[0]!, "base64url").toString("utf8")) as { actions: string[] };
-    expect(planning.actions).toContain("baseline-source");
-    expect(planning.actions).not.toContain("candidate-export");
-    expect(planning.actions).not.toContain("candidate-build-source");
-    const neither = JSON.parse(Buffer.from(h.issue(false, false).split(".")[0]!, "base64url").toString("utf8")) as { actions: string[] };
-    expect(neither.actions).not.toContain("baseline-source");
   });
 
   it("never overwrites a coding run's baseline source: the upload lands on the planning operation's own row only", async () => {

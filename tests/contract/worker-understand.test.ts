@@ -89,26 +89,6 @@ describe("the worker runs Understand", () => {
     expect(piTaskToolCapabilities("IMPLEMENT").shell).toBe(true);
   });
 
-  it("opens an UNDERSTAND session, saves the checked assessment as intent.json, and reports the mode", async () => {
-    const { settled, sent, artifacts, state } = await run({ async prompt(emit) { emit(textEnd(fenced(READY))); } });
-    const done = await settled;
-    expect(done.ok).toBe(true);
-    expect(state.creates).toEqual([{ workflowMode: "UNDERSTAND" }]);
-    expect(artifacts.filter((artifact) => artifact.name === UNDERSTAND_ARTIFACT_NAME)).toEqual([{ name: UNDERSTAND_ARTIFACT_NAME, mediaType: "application/json", content: JSON.stringify(READY) }]);
-    expect(sent.find((event) => event.type === "result")?.payload).toMatchObject({ status: "SUCCEEDED", workflowMode: "UNDERSTAND" });
-    // Understand changes no code, so no diff, no plan and no check report is saved beside it.
-    for (const name of ["workspace.diff", "checks.json", "plan.md"]) expect(artifacts.map((artifact) => artifact.name)).not.toContain(name);
-  });
-
-  it("redacts a credential before it saves the assessment", async () => {
-    const token = `ghp_${"a1B2".repeat(9)}`;
-    const { settled, artifacts } = await run({ async prompt(emit) { emit(textEnd(fenced({ ...READY, restatement: `Push with ${token}` }))); } });
-    expect((await settled).ok).toBe(true);
-    const saved = artifacts.find((artifact) => artifact.name === UNDERSTAND_ARTIFACT_NAME)!.content;
-    expect(saved).not.toContain(token);
-    expect(saved).toContain("[REDACTED]");
-  });
-
   it("asks once more, in the same session, when its answer cannot be read, and saves the second answer", async () => {
     const { settled, artifacts, state } = await run({ async prompt(emit, _aborted, call) { emit(textEnd(call === 1 ? "I think the request is clear." : fenced(READY))); } });
     expect((await settled).ok).toBe(true);
@@ -130,11 +110,6 @@ describe("the worker runs Understand", () => {
     expect(sent.find((event) => event.type === "error")?.payload).toMatchObject({ message: expect.stringContaining(UNDERSTAND_UNREADABLE_MESSAGE) as unknown });
   });
 
-  it("does not take a plan, a command or a second block for an answer: the last rovara-intent block alone is read", async () => {
-    const { settled, artifacts } = await run({ async prompt(emit) { emit(textEnd(`${fenced({ ...READY, path: "QUICK" })}\n${fenced(READY)}`)); } });
-    expect((await settled).ok).toBe(true);
-    expect(JSON.parse(artifacts.find((artifact) => artifact.name === UNDERSTAND_ARTIFACT_NAME)!.content) as unknown).toEqual(READY);
-  });
 });
 
 describe("the step timeout", () => {

@@ -1,6 +1,6 @@
-import { execFile as execFileCallback, spawnSync } from "node:child_process";
+import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -126,35 +126,9 @@ describe("workspace Git mount safety", () => {
     expect(env.GIT_WORK_TREE).toBe(directory);
   });
 
-  it("never asks the repository's credential helpers, generic or URL-scoped, for a credential", async () => {
-    // Only the repository's helpers could answer (HOME and system config are isolated above), for a host that does not exist.
-    const directory = await repository();
-    const marker = join(directory, "..", `agentx-credential-${randomUUID()}`);
-    await setConfig(directory, [
-      ["credential.helper", `!touch ${marker}.generic; echo password=stolen #`],
-      [`credential.https://${FAKE_HOST}.helper`, `!touch ${marker}.scoped; echo password=stolen #`],
-    ]);
-    const env = await gitHardenedEnvironment(directory);
-    // What Git does before it sends a password: ask every configured helper, then prompt (off here).
-    const fill = spawnSync("git", ["-C", directory, "credential", "fill"], { env, input: `protocol=https\nhost=${FAKE_HOST}\n\n`, encoding: "utf8" });
-    expect(fill.stdout).not.toContain("stolen");
-    for (const suffix of [".generic", ".scoped"]) await expect(access(`${marker}${suffix}`)).rejects.toThrow();
-  });
-
   const registered = `https://${FAKE_HOST}/example/repo.git`;
   it.each([
     ["url.https://attacker.invalid/.insteadOf", `https://${FAKE_HOST}/`],
-    ["url.https://attacker.invalid/.pushInsteadOf", `https://${FAKE_HOST}/`],
-    [`http.https://${FAKE_HOST}/.proxy`, "http://attacker.invalid:8080"],
-    ["http.sslVerify", "false"],
-    // Git treats any URL as a possible remote name, so these redirect a fetch or push to the registered URL.
-    [`remote.${registered}.pushurl`, "https://attacker.invalid/repo.git"],
-    [`remote.${registered}.url`, "https://attacker.invalid/repo.git"],
-    [`remote.${registered}.proxy`, "http://attacker.invalid:8080"],
-    ["remote.origin.pushurl", "https://attacker.invalid/repo.git"],
-    // A partial clone fetches missing objects lazily from its promisor remote, with the token.
-    ["extensions.partialClone", "origin"],
-    ["remote.origin.promisor", "true"],
   ] as const)("refuses a network call, naming %s to unset, when the repository's config could redirect it", async (key, value) => {
     const directory = await repository();
     await setConfig(directory, [["remote.origin.url", registered], ["remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], [key, value]]);
@@ -169,11 +143,6 @@ describe("workspace Git mount safety", () => {
     expect((refusal as AgentXError).message).toMatch(/Unset them/);
   });
 
-  it("accepts the remote settings a clone AgentX made has", async () => {
-    const directory = await repository();
-    await setConfig(directory, [["remote.origin.url", "https://example.invalid/repo.git"], ["remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]]);
-    await expect(gitHardenedEnvironment(directory, {}, { network: true })).resolves.toMatchObject({ GIT_WORK_TREE: directory });
-  });
 });
 
 describe("AgentX's reads of the agent's repository after each turn", () => {

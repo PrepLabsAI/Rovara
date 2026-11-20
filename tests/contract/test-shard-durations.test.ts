@@ -10,7 +10,7 @@ import { durationsFromReport, median, renderTimings } from "../../scripts/test-s
 import { DurationSequencer } from "../support/duration-sequencer.js";
 import { MIN_WEIGHT_SECONDS, TIMINGS_PATH, loadTimings, parseTimings, planShards, shardTotals, weightOf } from "../support/duration-shards.js";
 import { FULL_SHARDS } from "../../scripts/ci-plan.js";
-import { nativeP0Files } from "../support/vitest-shared-config.js";
+import { nativeP0Files, nightlyOnlyFiles } from "../support/vitest-shared-config.js";
 
 const SKIPPED_DIRECTORIES = new Set(["node_modules", "dist", "cypress", ".git", ".test-build"]);
 
@@ -27,7 +27,7 @@ function testFiles(): string[] {
   };
   walk("tests");
   walk("packages");
-  return found.filter((file) => !nativeP0Files.includes(file)).sort();
+  return found.filter((file) => !nativeP0Files.includes(file) && !nightlyOnlyFiles.includes(file)).sort();
 }
 
 const SHARDS = 8;

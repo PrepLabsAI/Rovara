@@ -10,7 +10,7 @@ import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
 import { problemText } from "../../packages/cli/src/init/retry.js";
 import { alertsCard, channelCard, projectCard } from "../../packages/cli/src/init/ui/cards.js";
 import { startInstallWizard } from "../../packages/cli/src/init/ui/index.js";
-import type { WizardCard, WizardLink } from "../../packages/cli/src/init/ui/protocol.js";
+import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
 import { initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedPrompter, T0, TEST_BOT_TOKEN, TEST_SIGNING_SECRET, type TestInitContext } from "../support/init-fakes.js";
 import { accessToken, ADMIN_EMAIL, ALERTS_TOPIC_ARN, CONTROL_PLANE, fakeAlerts, fakeCognito, fakeControlPlane, fakeSlackChannels, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
 
@@ -21,28 +21,6 @@ const session = { controlPlaneUrl: CONTROL_PLANE, accessToken: "t" };
 const TIMED_OUT = agentXError("OPERATION_INTERRUPTED", "the AgentX sign-in did not finish within 10 minutes; run agentx init again and finish signing in as the admin user in the browser");
 
 describe("the admin user on the page (FR-050)", () => {
-  it("shows the new admin user and the sign-in wait, then who signed in", async () => {
-    const surface = page();
-    context = initContext({ prompter: scriptedPrompter([ADMIN_EMAIL]), surface, setup: setupServices({ cognito: fakeCognito() }), adminSession: async () => session });
-    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
-    expect(await adminUserStep().run(context, progressHandle())).toEqual({ status: "done", note: `admin ${ADMIN_EMAIL}` });
-    expect(surface.cards.map((card) => [card.id, card.status, card.lines])).toEqual([
-      ["admin", "waiting", [
-        `First, check your email at ${ADMIN_EMAIL} for your temporary password. It comes from no-reply@verificationemail.com with the subject "Your temporary password", can take a few minutes, and often lands in Spam. It works for 7 days.`,
-        `Then press Sign in, enter ${ADMIN_EMAIL} and the temporary password, and choose your own password. This page moves on by itself when you have.`,
-      ]],
-      ["admin", "ok", [`You are signed in to Rovara as ${ADMIN_EMAIL}.`]],
-    ]);
-  });
-
-  it("still says where the temporary password is when a resumed run finds the admin user waiting for its first sign-in", async () => {
-    const surface = page();
-    context = initContext({ prompter: scriptedPrompter([]), surface, setup: setupServices({ cognito: fakeCognito({ [ADMIN_EMAIL]: "FORCE_CHANGE_PASSWORD" }) }), adminSession: async () => session });
-    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
-    const resumed = progressHandle({ ...emptyProgress("staging", T0), admin: { username: ADMIN_EMAIL, mode: "cognito" } });
-    await adminUserStep().run(context, resumed);
-    expect(surface.cards[0]?.lines[0]).toContain(`check your email at ${ADMIN_EMAIL} for your temporary password`);
-  });
 
   it("leaves the password notice out for an admin user who has signed in before", async () => {
     const surface = page();
@@ -67,33 +45,6 @@ describe("the admin user on the page (FR-050)", () => {
     expect(surface.cards.map((card) => [card.id, card.status])).toEqual([["admin", "waiting"], ["admin", "failed"], ["admin", "waiting"], ["admin", "ok"]]);
   });
 
-  it("a failed sign-in's button leaves the page while Sign in again? is asked, and the retry's own button appears", async () => {
-    const wizard = await startInstallWizard({ env: "staging", write: () => undefined });
-    try {
-      let sessions = 0;
-      const linkWhenAsked: Array<WizardLink | undefined> = [];
-      const prompter = scriptedPrompter([ADMIN_EMAIL, true]);
-      const watching = { ...prompter, confirm: async (...args: Parameters<typeof prompter.confirm>) => { linkWhenAsked.push(wizard.hub.state().link); return prompter.confirm(...args); } };
-      context = initContext({
-        prompter: watching, surface: wizard.surface, setup: setupServices({ cognito: fakeCognito() }),
-        // As context.adminSession does on the page: the sign-in address becomes the page's button.
-        adminSession: async () => {
-          sessions += 1;
-          await wizard.openLink(`https://login.example.com/authorize?attempt=${sessions}`);
-          if (sessions === 1) throw TIMED_OUT;
-          return session;
-        },
-      });
-      await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
-      await adminUserStep().run(context, progressHandle());
-      expect(prompter.asked).toEqual(["Your email address, for your AgentX admin user", "Sign in again?"]);
-      expect(linkWhenAsked).toEqual([undefined]);
-      expect(wizard.hub.state().link?.url).toBe("https://login.example.com/authorize?attempt=2");
-    } finally {
-      await wizard.close();
-    }
-  });
-
   describe("with your own OIDC provider (M2)", () => {
     const OIDC_SETTINGS = { ...STAGING_SETTINGS, identity: { mode: "oidc" as const, issuer: "https://login.example.com", audience: "agentx", clientId: "cli" } };
     const oidcAnswers = sampleAnswers({ identity: { mode: "oidc", issuer: "https://login.example.com", audience: "agentx", clientId: "cli", adminClaim: "groups", adminValues: ["agentx-admins"] } });
@@ -108,19 +59,6 @@ describe("the admin user on the page (FR-050)", () => {
         ["admin", "waiting", ["Sign in to Rovara as an administrator of your company's sign-in in the tab the Sign in button opens. This page moves on by itself when you have."]],
         ["admin", "ok", ["You are signed in to Rovara as bob@example.com."]],
       ]);
-    });
-
-    it("a token with no email or sub claim shows a failed admin card, and the step rejects with that error", async () => {
-      const surface = page();
-      const token = accessToken({ groups: ["agentx-admins"] });
-      context = initContext({ answers: oidcAnswers, prompter: scriptedPrompter([]), surface, adminSession: async () => ({ controlPlaneUrl: CONTROL_PLANE, accessToken: token }) });
-      await writeEnvironmentSettings(context.store, OIDC_SETTINGS);
-      const failure = await adminUserStep().run(context, progressHandle()).then(() => undefined, (error: unknown) => error);
-      expect((failure as Error).message).toContain("your sign-in token has no email or sub claim of 3 to 128 characters");
-      expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual([]);
-      expect(surface.cards.map((card) => [card.id, card.status])).toEqual([["admin", "waiting"], ["admin", "failed"]]);
-      expect(surface.cards[1]?.lines).toEqual(["Rovara sign-in did not finish.", "Close this tab and start sign-in again."]);
-      expect(surface.cards[1]?.details).toEqual([]);
     });
 
     it("a token the page cannot retry drops the sign-in's button when the failed card shows", async () => {
@@ -141,33 +79,6 @@ describe("the admin user on the page (FR-050)", () => {
     });
   });
 
-  it("the terminal path stops on a timed-out sign-in, as before", async () => {
-    context = initContext({ prompter: scriptedPrompter([ADMIN_EMAIL]), setup: setupServices({ cognito: fakeCognito() }), adminSession: async () => { throw TIMED_OUT; } });
-    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
-    await expect(adminUserStep().run(context, progressHandle())).rejects.toBe(TIMED_OUT);
-    expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual(["Your email address, for your AgentX admin user"]);
-  });
-});
-
-describe("the first project on the page, resumed (M6)", () => {
-  it("an earlier run's project is shown without its repository, then its channel, with no invite wait", async () => {
-    const surface = page();
-    const slackChannels = fakeSlackChannels([]);
-    context = initContext({ prompter: scriptedPrompter([]), surface, setup: setupServices({ slackChannels }), adminSession: async () => session });
-    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
-    const progress = progressHandle({
-      ...emptyProgress("staging", T0),
-      slack: { appId: "A0APP00001", teamId: "T0123456789", botUserId: "U0BOT00001" },
-      project: { name: "payments-api", revision: 1, channelName: "payments", channelId: "C0PAY00001", teamId: "T0123456789" },
-    });
-    expect(await firstProjectStep().run(context, progress)).toEqual({ status: "done", note: "project payments-api in #payments" });
-    expect(surface.cards).toEqual([
-      projectCard({ name: "payments-api", revision: 1 }),
-      channelCard({ stage: "done", channelName: "payments", projectName: "payments-api" }),
-    ]);
-    expect(surface.cards[0]?.lines).toEqual(["The project payments-api is set up."]);
-    expect(slackChannels.finds()).toBe(0);
-  });
 });
 
 describe("the first project's channel wait on the page", () => {
@@ -254,24 +165,6 @@ describe("the alerts on the page", () => {
     expect(surface.cards[1]?.details).toEqual([problemText(failure)]);
   });
 
-  it("the terminal path still stops and says to run agentx init again when nobody has confirmed", async () => {
-    const alerts = fakeAlerts({ confirmAfterPolls: 1_000_000, budgetUsd: 100 });
-    context = initContext({ answers, prompter: scriptedPrompter([]), setup: setupFor(alerts) });
-    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
-    const outcome = await alertsStep().run(context, progressHandle());
-    expect(outcome).toMatchObject({ status: "waiting" });
-  });
-
-  it("saying no on the page stops the same way", async () => {
-    const surface = page();
-    const alerts = fakeAlerts({ confirmAfterPolls: 1_000_000, budgetUsd: 100 });
-    context = initContext({ answers, prompter: scriptedPrompter([false]), surface, setup: setupFor(alerts) });
-    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
-    expect(await alertsStep().run(context, progressHandle())).toMatchObject({ status: "waiting" });
-    expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual(["Have you confirmed the subscription? Answer Yes to check again."]);
-    expect(surface.cards.map((card) => card.status)).toEqual(["waiting", "waiting"]);
-  });
-
   it("--no-alerts shows that there is no alert address yet", async () => {
     const surface = page();
     context = initContext({ answers: sampleAnswers({ alert: { kind: "none" } }), prompter: scriptedPrompter([]), surface, setup: setupFor(fakeAlerts()) });
@@ -288,26 +181,6 @@ describe("the test reply on the page (FR-051)", () => {
     project: { name: "payments-api", revision: 1, channelName: "payments", channelId: "C0PAY00001", teamId: "T0123456789" },
   });
   const SUBJECT = "T0123456789/C0PAY00001/1790000000.000100";
-
-  it("shows how to mention the bot and a link to the channel, then the reply", async () => {
-    const surface = page();
-    const plane = fakeControlPlane();
-    plane.turns = [turn({ subject: SUBJECT, receivedAt: new Date(T0 + 2000).toISOString(), disposition: "answered", durationMs: 12_000 })];
-    context = initContext({ surface, setup: setupServices({ fetch: plane.fetch }), adminSession: async () => session });
-    await e2eStep().run(context, progress());
-    expect(surface.cards.map((card) => [card.status, card.link?.url])).toEqual([
-      ["waiting", "https://slack.com/app_redirect?team=T0123456789&channel=C0PAY00001"],
-      ["ok", undefined],
-    ]);
-    expect(surface.cards[0]?.lines[1]).toContain("pick agentx");
-  });
-
-  it("Review Focus 1: counts a mention made just before the watch started", async () => {
-    const plane = fakeControlPlane();
-    plane.turns = [turn({ subject: SUBJECT, receivedAt: new Date(T0 - 3000).toISOString(), disposition: "answered", durationMs: 9_000 })];
-    context = initContext({ surface: page(), setup: setupServices({ fetch: plane.fetch }), adminSession: async () => session });
-    expect(await e2eStep().run(context, progress())).toEqual({ status: "done", note: "a mention in #payments got a threaded reply in 9 seconds" });
-  });
 
   it("Review Focus 3: a second watch does not fail on the turn the first one reported, and waits for a new mention", async () => {
     const surface = page();
@@ -327,10 +200,4 @@ describe("the test reply on the page (FR-051)", () => {
     expect(surface.cards.find((card) => card.status === "failed")?.lines.join(" ")).not.toContain("init again");
   });
 
-  it("without a page, a failed reply still stops with what to fix", async () => {
-    const plane = fakeControlPlane();
-    plane.turns = [turn({ subject: SUBJECT, receivedAt: new Date(T0 + 2000).toISOString(), disposition: "error" })];
-    context = initContext({ setup: setupServices({ fetch: plane.fetch }), adminSession: async () => session });
-    await expect(e2eStep().run(context, progress())).rejects.toThrow("but the turn ended as error; see agentx --env staging admin turns export --since 15m, fix it, then run agentx --env staging init again");
-  });
 });

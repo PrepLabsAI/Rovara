@@ -112,15 +112,6 @@ describe("task code on an EC2 worker without a devcontainer", () => {
     await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("refuses the local shell even when the caller asks for it, and starts no coding session", async () => {
-    const { root } = await workspace();
-    stubEc2Environment();
-    const inputs: PiSessionInput[] = [];
-    await expect(runTaskInvocation(taskInvocation(), dependencies(root, adapterOf(inputs), { taskShell: { kind: "local" } })))
-      .rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-    expect(inputs).toEqual([]);
-  });
-
   it("does not fall back to the worker when the sandbox image is missing", async () => {
     const { root } = await workspace();
     stubEc2Environment();

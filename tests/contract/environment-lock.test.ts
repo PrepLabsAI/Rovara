@@ -7,15 +7,6 @@ const base = { env: "staging", holder: "arn:aws:iam::123456789012:user/alice", c
 const t0 = Date.parse("2026-09-26T00:00:00.000Z");
 
 describe("environment lock", () => {
-  it("holds the lock while the work runs and releases it afterwards", async () => {
-    const store = new MemoryParameterStore();
-    const result = await withEnvironmentLock({ ...base, store, now: () => t0 }, async () => {
-      expect(JSON.parse(store.values.get(lockParameterName("staging"))!)).toEqual({ holder: base.holder, command: "env adopt", acquiredAt: "2026-09-26T00:00:00.000Z" });
-      return 42;
-    });
-    expect(result).toBe(42);
-    expect(store.values.has("/agentx/staging/lock")).toBe(false);
-  });
 
   it("releases the lock when the work fails", async () => {
     const store = new MemoryParameterStore();
@@ -31,34 +22,6 @@ describe("environment lock", () => {
       .rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining(`locked by bob running "upgrade" since ${new Date(t0 - 60_000).toISOString()}; wait for it to finish, then run the same agentx command again`) as unknown });
     expect(work).not.toHaveBeenCalled();
     expect(store.values.has("/agentx/staging/lock")).toBe(true);
-  });
-
-  it("tells the caller what to do when the fresh lock's command is no longer running (final review M1)", async () => {
-    const store = new MemoryParameterStore();
-    store.values.set("/agentx/staging/lock", JSON.stringify({ holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - 60_000).toISOString() }));
-    await expect(withEnvironmentLock({ ...base, command: "destroy", store, now: () => t0, takeOverOwn: true, confirmTakeover: async () => true }, async () => 1))
-      .rejects.toThrow(`; wait for it to finish, then run the same agentx command again. If it is no longer running, agentx init, upgrade and destroy offer a takeover once the lock is 2 hours old, or delete it now (aws ssm delete-parameter --name /agentx/staging/lock --region <region>)`);
-  });
-
-  it("does not offer takeover of a fresh lock", async () => {
-    const store = new MemoryParameterStore();
-    store.values.set("/agentx/staging/lock", JSON.stringify({ holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - 60_000).toISOString() }));
-    const confirmTakeover = vi.fn(async () => true);
-    await expect(withEnvironmentLock({ ...base, store, now: () => t0, confirmTakeover }, async () => 1)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    expect(confirmTakeover).not.toHaveBeenCalled();
-  });
-
-  it("refuses a stale lock without confirmTakeover, naming how to clear it instead of offering takeover", async () => {
-    const store = new MemoryParameterStore();
-    const stale = { holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - STALE_LOCK_MS - 1).toISOString() };
-    store.values.set("/agentx/staging/lock", JSON.stringify(stale));
-    const error = await withEnvironmentLock({ ...base, store, now: () => t0 }, async () => 1)
-      .catch((caught: unknown) => caught) as { code?: string; message?: string };
-    expect(error.code).toBe("CONFIG_INVALID");
-    expect(error.message).toContain("older than 2 hours");
-    expect(error.message).not.toContain("confirm to take it over");
-    expect(error.message).toContain("/agentx/staging/lock");
-    expect(error.message).toMatch(/no AgentX command is running/);
   });
 
   it("says the lock was released while waiting for takeover confirmation, when the recheck finds it gone", async () => {
@@ -156,17 +119,6 @@ describe("environment lock", () => {
     expect(error.message).toContain("carol");
     expect(error.message).toContain("between this command's delete and re-create; wait for it to finish, then run the same agentx command again");
     expect(error.message).not.toContain("took over the lock first");
-  });
-
-  it("takes over a stale lock only after confirmation", async () => {
-    const store = new MemoryParameterStore();
-    const stale = { holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - STALE_LOCK_MS - 1).toISOString() };
-    store.values.set("/agentx/staging/lock", JSON.stringify(stale));
-    await expect(withEnvironmentLock({ ...base, store, now: () => t0, confirmTakeover: async () => false }, async () => 1))
-      .rejects.toMatchObject({ message: expect.stringContaining("older than 2 hours") as unknown });
-    const confirmTakeover = vi.fn(async () => true);
-    expect(await withEnvironmentLock({ ...base, store, now: () => t0, confirmTakeover }, async () => 7)).toBe(7);
-    expect(confirmTakeover).toHaveBeenCalledWith(stale);
   });
 
   it("treats an unreadable lock as held, not as free", async () => {
@@ -271,44 +223,4 @@ describe("environment lock", () => {
     expect(store.values.get(lockParameterName("staging"))).toBe(otherLock);
   });
 
-  it("keeps rethrowing the work's error when the lock was replaced during a failing work, and leaves the other lock in place", async () => {
-    const store = new MemoryParameterStore();
-    const otherLock = JSON.stringify({ holder: "carol", command: "env upgrade", acquiredAt: new Date(t0).toISOString() });
-    await expect(
-      withEnvironmentLock({ ...base, store, now: () => t0 }, async () => {
-        store.values.set(lockParameterName("staging"), otherLock);
-        throw new Error("boom");
-      }),
-    ).rejects.toThrow("boom");
-    expect(store.values.get(lockParameterName("staging"))).toBe(otherLock);
-  });
-
-  it("offers a takeover of the caller's own fresh lock for the same command when takeOverOwn is set (Review Focus 1)", async () => {
-    const store = new MemoryParameterStore();
-    store.values.set("/agentx/staging/lock", JSON.stringify({ holder: base.holder, command: "init", acquiredAt: new Date(t0 - 60_000).toISOString() }));
-    const confirmTakeover = vi.fn(async () => true);
-    const result = await withEnvironmentLock({ ...base, command: "init", store, now: () => t0, takeOverOwn: true, confirmTakeover }, async () => 7);
-    expect(result).toBe(7);
-    expect(confirmTakeover).toHaveBeenCalledOnce();
-    expect(store.values.has("/agentx/staging/lock")).toBe(false);
-  });
-
-  it("refuses the caller's own fresh lock, saying how, when the takeover is declined", async () => {
-    const store = new MemoryParameterStore();
-    store.values.set("/agentx/staging/lock", JSON.stringify({ holder: base.holder, command: "init", acquiredAt: new Date(t0 - 60_000).toISOString() }));
-    await expect(withEnvironmentLock({ ...base, command: "init", store, now: () => t0, takeOverOwn: true, confirmTakeover: async () => false }, async () => 1))
-      .rejects.toThrow("(your own earlier \"init\"; confirm the takeover only if that run is no longer going)");
-  });
-
-  it("never offers a takeover of someone else's fresh lock, or of the caller's own lock for another command", async () => {
-    const confirmTakeover = vi.fn(async () => true);
-    const other = new MemoryParameterStore();
-    other.values.set("/agentx/staging/lock", JSON.stringify({ holder: "bob", command: "init", acquiredAt: new Date(t0 - 60_000).toISOString() }));
-    await expect(withEnvironmentLock({ ...base, command: "init", store: other, now: () => t0, takeOverOwn: true, confirmTakeover }, async () => 1)).rejects.toThrow("locked by bob running \"init\" since 2026");
-    await expect(withEnvironmentLock({ ...base, command: "init", store: other, now: () => t0, takeOverOwn: true, confirmTakeover }, async () => 1)).rejects.toThrow("; wait for it to finish, then run the same agentx command again");
-    const own = new MemoryParameterStore();
-    own.values.set("/agentx/staging/lock", JSON.stringify({ holder: base.holder, command: "deploy install", acquiredAt: new Date(t0 - 60_000).toISOString() }));
-    await expect(withEnvironmentLock({ ...base, command: "init", store: own, now: () => t0, takeOverOwn: true, confirmTakeover }, async () => 1)).rejects.toThrow("running \"deploy install\"");
-    expect(confirmTakeover).not.toHaveBeenCalled();
-  });
 });

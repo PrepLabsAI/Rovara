@@ -70,19 +70,6 @@ describe("an adapter conversation's workspace", () => {
     expect((await ensure(handler)).body.workspaceId).toBe(answer.body.workspaceId);
   });
 
-  it("is prepared on the developer's charge, and the operation names the developer", async () => {
-    const { handler, db } = await setup();
-    const workspaceId = (await ensure(handler)).body.workspaceId as string;
-    const prepared = await prepare(handler);
-    expect(prepared.body).toMatchObject({ outcome: "WORKSPACE", status: "PREPARING", created: true });
-    const charge = { member: { pk: `DEVELOPER_LIMIT#${developerId}`, sk: "MEMBER" }, organization: { pk: `SLACK_LIMIT#${SLACK_TEAM}`, sk: "ORGANIZATION" } };
-    expect(db.get(`SLACK_THREAD#${ownerKey}`, "META")).toMatchObject({ starterDeveloperId: developerId, charge, workspaceId });
-    expect(db.get(charge.member.pk, charge.member.sk)).toMatchObject({ count: 1, tasks: new Set([`conversation:${subject}`]) });
-    expect(db.get(charge.organization.pk, charge.organization.sk)).toMatchObject({ count: 1 });
-    const operation = db.find((item) => item.entityType === "OPERATION" && item.workspaceId === workspaceId)[0];
-    expect(operation).toMatchObject({ kind: "prepare", requestedBy: { kind: "developer", developerId, provider: "oidc" } });
-  });
-
   it("shares the Slack member's counter when the developer is linked to Slack (R6)", async () => {
     const { handler, db } = await setup({ slackUserId: "U0MAYA001" });
     await ensure(handler);

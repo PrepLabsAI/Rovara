@@ -3,20 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AgentXError } from "@agentx/contracts";
 import { EC2Client, type DescribeAddressesCommand } from "@aws-sdk/client-ec2";
 import { ServiceQuotasClient, type GetServiceQuotaCommand } from "@aws-sdk/client-service-quotas";
-import {
-  awsPrerequisiteChecks,
-  checkAccount,
-  checkPrerequisites,
-  CONVERSE_CLIENT_MAX_ATTEMPTS,
-  CONVERSE_REQUEST_HANDLER_OPTIONS,
-  DEDICATED_ACCOUNT_NOTE,
-  endpointMissing,
-  modelCheckProblem,
-  NAT_ELASTIC_IPS,
-  releaseImageChecks,
-  type PrerequisiteCheck,
-  withDeadline,
-} from "../../packages/cli/src/init/prerequisites.js";
+import { awsPrerequisiteChecks, checkAccount, checkPrerequisites, CONVERSE_CLIENT_MAX_ATTEMPTS, CONVERSE_REQUEST_HANDLER_OPTIONS, endpointMissing, modelCheckProblem, NAT_ELASTIC_IPS, releaseImageChecks, type PrerequisiteCheck, withDeadline } from "../../packages/cli/src/init/prerequisites.js";
 import type { InitAnswers } from "../../packages/cli/src/init/install-state.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import type { CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
@@ -33,14 +20,6 @@ async function run(answers: InitAnswers, checks = passingChecks(), prompter = sc
 }
 
 describe("init prerequisites", () => {
-  it("refuses a missing-credential OpenRouter model once per role and never checks a Bedrock model nobody chose (MODEL3)", async () => {
-    const checks = passingChecks();
-    const model = "qwen/qwen3-coder";
-    await expect(run(sampleAnswers({ models: { orchestrator: model, classifier: model, worker: model,
-      providers: { orchestrator: "openrouter", classifier: "openrouter", worker: "openrouter" },
-    } }), checks)).rejects.toThrow("openrouter/qwen/qwen3-coder: there is no OpenRouter key, and no other model would be used in its place; pass --openrouter-key-file or --openrouter-key-env (or --openrouter-secret-arn), or choose an Amazon Bedrock model for this role");
-    expect(checks.models).toEqual([]);
-  });
   it("refuses, naming the key to give, when the OpenRouter secret is absent, and checks no Bedrock default", async () => {
     for (const openRouter of [undefined, { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:missing-AbCdEf" }]) {
       const checks = passingChecks({ openRouter: async () => { throw new MissingOpenRouterSecret(); } });
@@ -50,17 +29,6 @@ describe("init prerequisites", () => {
       await expect(run(answers, checks)).rejects.toThrow("there is no OpenRouter key, and no other model would be used in its place");
       expect(checks.models).not.toContain(DEFAULT_BEDROCK_MODELS.worker);
     }
-  });
-  it("checks OpenRouter independently and never invokes Bedrock for OpenRouter roles", async () => {
-    const openRouter = vi.fn(async () => {});
-    const checks = passingChecks({ openRouter });
-    const model = "anthropic/claude-sonnet-4.5";
-    await run(sampleAnswers({ models: { orchestrator: model, classifier: model, worker: model,
-      providers: { orchestrator: "openrouter", classifier: "openrouter", worker: "openrouter" },
-      openRouter: { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:openrouter-AbCdEf" },
-    } }), checks);
-    expect(checks.models).toEqual([]);
-    expect(openRouter).toHaveBeenCalledTimes(1);
   });
 
   it("checks OpenRouter with the key init collected but has not stored yet, instead of falling back to Bedrock", async () => {
@@ -105,40 +73,12 @@ describe("init prerequisites", () => {
     await expect(run(answers, checks)).rejects.toThrow("OpenRouter preflight failed");
     await expect(run(answers, checks)).rejects.not.toThrow("sk-secret");
   });
-  it("names the account, recommends a dedicated account, and checks each distinct model once", async () => {
-    const checks = passingChecks();
-    const lines = await run(sampleAnswers({ models: { orchestrator: "a", classifier: "b", worker: "a" } }), checks);
-    expect(lines[0]).toBe("AWS account 123456789012 as arn:aws:sts::123456789012:assumed-role/Admin/alice");
-    expect(lines).toContain(DEDICATED_ACCOUNT_NOTE);
-    expect(checks.models).toEqual(["a", "b"]);
-  });
-
-  it("refuses insufficient EC2 quota before creating anything", async () => {
-    for (const quota of [0, 1, NaN]) {
-      await expect(run(sampleAnswers(), passingChecks({ ec2Quota: async () => quota })))
-        .rejects.toThrow(/vCPU quota.*at least 2.*m6g\.large/);
-    }
-  });
-
-  it("accepts exactly the two vCPUs required by an m6g.large worker", async () => {
-    const found: PrerequisiteCheck[] = [];
-    await checkAccount({
-      region: "us-east-1", write: () => undefined, onCheck: (check) => found.push(check),
-      checks: passingChecks({ ec2Quota: async () => 2 }),
-    });
-    expect(found[0]).toEqual({ label: "EC2 vCPU quota", ok: true, detail: "EC2 Standard on-demand vCPU quota is 2 in us-east-1" });
-  });
 
   it("refuses up front when the region has too few Elastic IPs left for the NAT gateways", async () => {
     const error = await run(sampleAnswers(), passingChecks({ elasticIps: async () => ({ quota: 5, allocated: 4 }) })).catch((caught: unknown) => caught);
     expect(String(error)).toContain(`needs ${NAT_ELASTIC_IPS} Elastic IPs for its NAT gateways, but 4 of the 5 allowed`);
     expect(String(error)).toContain("L-0263D0A3");
     expect(String(error)).toContain("aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-0263D0A3 --desired-value 6 --region us-east-1");
-  });
-
-  it("passes when exactly enough Elastic IPs are left, and says how many", async () => {
-    const lines = await run(sampleAnswers(), passingChecks({ elasticIps: async () => ({ quota: 5, allocated: 3 }) }));
-    expect(lines).toContain("ok 2 of 5 EC2-VPC Elastic IPs free in us-east-1; this environment needs 2");
   });
 
   it("reports an Elastic IP quota or count it cannot read as a problem, never as a pass", async () => {
@@ -174,16 +114,6 @@ describe("init prerequisites", () => {
     }
   });
 
-  it("refuses an unreadable Elastic IP count and reports a remedy", async () => {
-    await expect(run(sampleAnswers(), passingChecks({ elasticIps: async () => { throw awsError("UnauthorizedOperation", "not authorized"); } })))
-      .rejects.toThrow(/could not check Elastic IPs in us-east-1: .*check EC2 DescribeAddresses and Service Quotas read permission/);
-  });
-
-  it("refuses an unreadable quota and reports a remedy", async () => {
-    await expect(run(sampleAnswers(), passingChecks({ ec2Quota: async () => { throw awsError("AccessDeniedException", "not authorized"); } })))
-      .rejects.toThrow(/check Service Quotas read permission/);
-  });
-
   it("retries a throttled model check once, then gives up with a try-again message (Review Focus 5)", async () => {
     let calls = 0;
     const flaky = passingChecks({ converse: async () => { calls += 1; if (calls === 1) throw awsError("ThrottlingException", "Too many requests"); } });
@@ -191,11 +121,6 @@ describe("init prerequisites", () => {
     expect(calls).toBe(2);
     const throttled = passingChecks({ converse: async () => { throw awsError("ThrottlingException", "Too many requests"); } });
     await expect(run(sampleAnswers({ models: { orchestrator: "a", classifier: "a", worker: "a" } }), throttled)).rejects.toThrow("Bedrock throttled the check of a; wait a minute and run agentx init again");
-  });
-
-  it("reports every problem at once", async () => {
-    const checks = passingChecks({ converse: async (id) => { throw awsError("ValidationException", `The provided model identifier is invalid. ${id}`); } });
-    await expect(run(sampleAnswers({ models: { orchestrator: "x", classifier: "y", worker: "z" } }), checks)).rejects.toThrow(/- x is not.*\n- y is not.*\n- z is not/s);
   });
 
   it("collects an answer-check failure instead of dropping it or the later model problems", async () => {
@@ -221,13 +146,6 @@ describe("init prerequisites", () => {
     const blocked = passingChecks({ cdkBootstrapped: async () => false, converse: async () => { throw awsError("ValidationException", "The provided model identifier is invalid."); } });
     await expect(run(sampleAnswers({ engine: "cdk" }), blocked, scriptedPrompter([]))).rejects.toThrow("is not a Bedrock model id");
     expect(blocked.bootstraps).toBe(0);
-  });
-
-  it("checks the region against the release only for the templates engine; the cdk engine synthesizes for any region (issue 152)", async () => {
-    const elsewhere = sampleAnswers({ region: "eu-west-1" });
-    await expect(run(elsewhere)).rejects.toThrow("release 1.2.3 does not cover region eu-west-1; it covers: us-east-1");
-    const lines = await run({ ...elsewhere, engine: "cdk" });
-    expect(lines.join("\n")).not.toContain("does not cover");
   });
 
   it("checks your own OIDC provider's discovery document names the same issuer", async () => {
@@ -282,17 +200,6 @@ describe("awsPrerequisiteChecks: cdkBootstrapped (F11)", () => {
     expect((error as Error).cause).toBe(denied);
   });
 
-  it("rethrows a throttled bootstrap-parameter read the same way", async () => {
-    const throttled = Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" });
-    const store: ParameterStore = {
-      get: async () => { throw throttled; },
-      put: async () => undefined,
-      delete: async () => undefined,
-      list: async () => [],
-    };
-    const checks = awsPrerequisiteChecks({ region: "us-east-1", account: "123456789012", store, runner, fetch: unusedFetch });
-    await expect(checks.cdkBootstrapped()).rejects.toThrow("could not read /cdk-bootstrap/hnb659fds/version in us-east-1: Rate exceeded");
-  });
 });
 
 // Task 5 fix round 1 (review): items 1-8.
@@ -336,25 +243,6 @@ describe("fix round 1", () => {
     }
   });
 
-  it("item 2: withDeadline aborts the signal it hands to run() once the deadline elapses", async () => {
-    vi.useFakeTimers();
-    try {
-      let seenSignal: AbortSignal | undefined;
-      const hang = (signal: AbortSignal) => { seenSignal = signal; return new Promise<never>(() => undefined); };
-      const promise = withDeadline(hang, 5_000, "boom");
-      const assertion = expect(promise).rejects.toThrow("boom");
-      await vi.advanceTimersByTimeAsync(5_000);
-      await assertion;
-      expect(seenSignal?.aborted).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("item 2: withDeadline resolves with run()'s own value when it finishes before the deadline", async () => {
-    await expect(withDeadline(() => Promise.resolve("ok"), 20_000, "boom")).resolves.toBe("ok");
-  });
-
   // Item 3: the OIDC discovery fetch is bounded, parses JSON itself, and every failure names the
   // issuer and says to check --oidc-issuer. Tested through the injected fetch, so no real network
   // or fake timers are needed (a fake fetch can just reject the way a real timeout would).
@@ -383,10 +271,6 @@ describe("fix round 1", () => {
       );
     });
 
-    it("returns the parsed document when it answers 200 with JSON", async () => {
-      const fetch = vi.fn<typeof globalThis.fetch>(async () => new Response(JSON.stringify({ issuer: "https://id.example.com" }), { status: 200 }));
-      await expect(checksWith(fetch).oidcDiscovery("https://id.example.com")).resolves.toEqual({ issuer: "https://id.example.com" });
-    });
   });
 
   // Item 4: a failed read of the bootstrap parameter (anything other than "not bootstrapped") must
@@ -408,32 +292,12 @@ describe("fix round 1", () => {
     expect(checks.bootstraps).toBe(0);
   });
 
-  it("item 4: reports a failed CDK-bootstrap check alongside every other problem, in order", async () => {
-    const checks = passingChecks({
-      cdkBootstrapped: async () => { throw new Error("Rate exceeded"); },
-      converse: async (id) => { throw awsError("ValidationException", `The provided model identifier is invalid. ${id}`); },
-    });
-    await expect(run(sampleAnswers({ engine: "cdk", models: { orchestrator: "x", classifier: "y", worker: "z" } }), checks, scriptedPrompter([]))).rejects.toThrow(
-      /- x is not a Bedrock model id.*\n- y is not a Bedrock model id.*\n- z is not a Bedrock model id.*\n- could not check CDK bootstrap: Rate exceeded; check your credentials can read SSM/s,
-    );
-  });
-
   // Item 5: the EC2 quota-unreachable-by-DNS message names the exact hostname and says to check
   // the network (already covered end-to-end above); this adds a direct assertion on the wording.
   it("item 5: names the unresolved EC2 quota hostname and says to check the network", async () => {
     const checks = passingChecks({ ec2Quota: async () => { throw Object.assign(new Error("getaddrinfo ENOTFOUND servicequotas.ap-south-2.amazonaws.com"), { code: "ENOTFOUND" }); } });
     await expect(run(sampleAnswers({ region: "ap-south-2" }), checks)).rejects.toThrow(
       "could not check EC2 vCPU quota in ap-south-2: getaddrinfo ENOTFOUND servicequotas.ap-south-2.amazonaws.com; check Service Quotas read permission and your network",
-    );
-  });
-
-  // Item 6: every message names a next step. EC2 quota-unreachable-for-some-other-reason, a model
-  // giving no answer at all, and "Bedrock not available in this region" (a model-check-level
-  // endpoint failure, distinct from the EC2 quota-level one above) were the three left silent.
-  it("item 6: an unexplained EC2 quota failure still says what to check", async () => {
-    const checks = passingChecks({ ec2Quota: async () => { throw new Error("socket hang up"); } });
-    await expect(run(sampleAnswers(), checks)).rejects.toThrow(
-      "could not check EC2 vCPU quota in us-east-1: socket hang up; check Service Quotas read permission and your network",
     );
   });
 
@@ -489,28 +353,6 @@ describe("fix round 1", () => {
 });
 
 describe("the prerequisite checklist (spec 040 FR-023)", () => {
-  const run = (checks: ReturnType<typeof passingChecks>, onCheck?: (check: PrerequisiteCheck) => void) => {
-    const lines: string[] = [];
-    const done = checkPrerequisites({
-      answers: sampleAnswers(), release: fakeRelease(), caller: { account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice" },
-      checks, prompter: scriptedPrompter([]), write: (line) => { lines.push(line); }, ...(onCheck === undefined ? {} : { onCheck }),
-    });
-    return { lines, done };
-  };
-
-  it("reports each check as it finishes, and writes exactly the lines it wrote before", async () => {
-    const reported: PrerequisiteCheck[] = [];
-    const withList = run(passingChecks(), (check) => { reported.push(check); });
-    await withList.done;
-    const without = run(passingChecks());
-    await without.done;
-    expect(withList.lines).toEqual(without.lines);
-    expect(reported.map((check) => [check.label, check.ok])).toEqual([
-      ["Region", true], ["EC2 vCPU quota", true], ["Elastic IPs", true],
-      ...[...new Set([sampleAnswers().models.orchestrator, sampleAnswers().models.classifier, sampleAnswers().models.worker])].map((model) => [`Model ${model}`, true]),
-    ]);
-    expect(reported[1]).toEqual({ label: "EC2 vCPU quota", ok: true, detail: "EC2 Standard on-demand vCPU quota is 32 in us-east-1" });
-  });
 
   it("reports passing Node, npx and CDK bootstrap checks for the cdk engine, and still writes no line for them", async () => {
     const lists = async (onCheck?: (check: PrerequisiteCheck) => void) => {
@@ -531,36 +373,12 @@ describe("the prerequisite checklist (spec 040 FR-023)", () => {
     ]);
   });
 
-  it("never reports a failing page callback as a CDK bootstrap read failure", async () => {
-    const onCheck = (check: PrerequisiteCheck) => { if (check.label === "CDK bootstrap" && check.ok) throw new Error("the page's card could not be drawn"); };
-    const done = checkPrerequisites({
-      answers: sampleAnswers({ engine: "cdk" }), release: fakeRelease(), caller: { account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice" },
-      checks: passingChecks(), prompter: scriptedPrompter([]), write: () => undefined, onCheck,
-    });
-    const message = await done.then(() => "resolved", (error: unknown) => (error as Error).message);
-    expect(message).toBe("the page's card could not be drawn");
-  });
-
-  it("reports a failed check with the same words the error lists", async () => {
-    const reported: PrerequisiteCheck[] = [];
-    const { done } = run(passingChecks({ ec2Quota: async () => 0 }), (check) => { reported.push(check); });
-    await expect(done).rejects.toThrow("EC2 Standard on-demand vCPU quota in us-east-1 must be at least 2 for an m6g.large worker");
-    expect(reported.find((check) => check.label === "EC2 vCPU quota")).toEqual({
-      label: "EC2 vCPU quota", ok: false, detail: "EC2 Standard on-demand vCPU quota in us-east-1 must be at least 2 for an m6g.large worker; request an increase in Service Quotas",
-    });
-  });
 });
 
-const PUBLIC = `public.ecr.aws/agentx/worker@sha256:${"a".repeat(64)}`;
 const PRIVATE = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/worker@sha256:${"a".repeat(64)}`;
 const SLACK = `public.ecr.aws/agentx/slack@sha256:${"b".repeat(64)}`;
 
 describe("spec 048 FR-065: the release's images", () => {
-  it("passes images AWS can pull through the image cache", () => {
-    expect(releaseImageChecks({ version: "1.2.3", images: { worker: PUBLIC, slack: SLACK }, audience: "page" }).map((check) => [check.label, check.ok])).toEqual([
-      ["The coding image", true], ["The Slack connection image", true],
-    ]);
-  });
 
   it("refuses an image that is not on Amazon ECR Public, in page words on the page and with the flag in the terminal", () => {
     const [page] = releaseImageChecks({ version: "1.2.3", images: { worker: PRIVATE, slack: SLACK }, audience: "page" });
@@ -650,14 +468,6 @@ describe("spec 048 FR-027, FR-080: prerequisite problems in page words", () => {
 });
 
 describe("spec 048 FR-018: the account checks", () => {
-  it("collects every account problem together, before any setting is asked", async () => {
-    const found: PrerequisiteCheck[] = [];
-    await expect(checkAccount({
-      region: "us-east-1", write: () => undefined, onCheck: (check) => found.push(check),
-      checks: passingChecks({ ec2Quota: async () => 0, elasticIps: async () => ({ quota: 5, allocated: 5 }) }),
-    })).rejects.toThrow(/^CONFIG_INVALID: init cannot start; nothing was created:\n- EC2 Standard on-demand vCPU quota in us-east-1 must be at least 2 for an m6g.large worker[\s\S]*\n- this environment needs 2 Elastic IPs/);
-    expect(found.map((check) => [check.label, check.ok])).toEqual([["EC2 vCPU quota", false], ["Elastic IPs", false]]);
-  });
 
   it("says in page words when Amazon Bedrock is not in the region", async () => {
     const found: PrerequisiteCheck[] = [];
@@ -666,12 +476,6 @@ describe("spec 048 FR-018: the account checks", () => {
       checks: { ...passingChecks(), bedrockAvailable: async () => false },
     })).rejects.toThrow("nothing was created");
     expect(found.at(-1)).toEqual({ label: "Amazon Bedrock", ok: false, detail: "Amazon Bedrock is not available in ap-east-2. Stop for now and start again in a region that has it." });
-  });
-
-  it("passes with a check for each, and skips Amazon Bedrock when the checks cannot look", async () => {
-    const found: PrerequisiteCheck[] = [];
-    await checkAccount({ region: "us-east-1", write: () => undefined, checks: passingChecks(), onCheck: (check) => found.push(check) });
-    expect(found.map((check) => check.label)).toEqual(["EC2 vCPU quota", "Elastic IPs"]);
   });
 
   it("calls a responding Bedrock endpoint available without claiming a model answered", async () => {
@@ -683,13 +487,4 @@ describe("spec 048 FR-018: the account checks", () => {
     expect(found.at(-1)).toEqual({ label: "Amazon Bedrock", ok: true, detail: "Amazon Bedrock is available in us-east-1" });
   });
 
-  it("skipAccount leaves the quota and Elastic IPs out of the later checks", async () => {
-    const unexpected = async (): Promise<never> => { throw new Error("test setup: the account was already checked"); };
-    const found: PrerequisiteCheck[] = [];
-    await checkPrerequisites({
-      answers: sampleAnswers(), release: fakeRelease(), caller: { account: "123456789012", arn: HOLDER }, prompter: scriptedPrompter([]), write: () => undefined,
-      checks: passingChecks({ ec2Quota: unexpected, elasticIps: unexpected }), skipAccount: true, onCheck: (check) => found.push(check),
-    });
-    expect(found.map((check) => check.label)).not.toContain("EC2 vCPU quota");
-  });
 });

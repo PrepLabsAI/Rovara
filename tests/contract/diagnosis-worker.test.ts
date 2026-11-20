@@ -6,10 +6,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DIAGNOSIS_ANSWER_MAX_CHARS, DIAGNOSIS_WORKER_FEATURE, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema } from "../../packages/contracts/src/index.js";
-import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
+import { DIAGNOSIS_ANSWER_MAX_CHARS, WorkerInvocationSchema } from "../../packages/contracts/src/index.js";
 import { DIAGNOSIS_RETRY_PROMPT, cutDiagnosisAnswer, diagnosisInstructions, holdsJsonObject } from "../../packages/worker/src/diagnosis.js";
-import { piTaskToolCapabilities, type PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
+import { type PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 
 const COMMIT = "a".repeat(40);
@@ -70,27 +69,6 @@ async function run(answers: readonly string[], payload: Record<string, unknown> 
 const GOOD = JSON.stringify({ summary: "The README tells people to run a command.", needsCode: false, proposals: [{ kind: "explain", text: "Nothing to change." }] });
 
 describe("the worker's deep diagnosis", () => {
-  it("is a read-only session: planning tools only, no shell, no verification extension, no check, no context source", async () => {
-    const { result, seen, checkRunners, contextSources } = await run([GOOD]);
-    expect(seen.created).toHaveLength(1);
-    expect(seen.created[0]!.workflowMode).toBe("PLAN");
-    // Whatever shell the worker has for the task is not offered: the session's tools are the mode's own (read, grep, find and ls), with no shell and no write tool.
-    const tools = piTaskToolCapabilities(seen.created[0]!.workflowMode as "PLAN");
-    expect(tools.shell).toBe(false);
-    for (const forbidden of ["bash", "edit", "write"]) expect(tools.tools).not.toContain(forbidden);
-    // No verification and no other extension: only the tool-call limit (a tool_call block, tool-loop-guard.ts) is in front of the session's calls.
-    expect((seen.created[0]!.extensionFactories ?? []).map((extension) => (extension as { name?: string }).name)).toEqual(["rovara-tool-loop-guard"]);
-    expect(seen.created[0]!.contextTools).toBeUndefined();
-    expect(piTaskToolCapabilities("PLAN")).toEqual({ tools: ["read", "grep", "find", "ls"], customFileTools: false, shell: false });
-    expect(checkRunners.run).not.toHaveBeenCalled();
-    expect(checkRunners.plan).not.toHaveBeenCalled();
-    expect(contextSources.catalog).not.toHaveBeenCalled();
-    expect(contextSources.call).not.toHaveBeenCalled();
-    expect(result.workflowMode).toBe("SETUP_DRAFT");
-    expect(result.diagnosisAnswer).toBe(GOOD);
-    expect(result).not.toHaveProperty("setupProposal");
-    expect(result).not.toHaveProperty("setupDraft");
-  });
 
   it("asks with the broker's data first, then the worker's instructions: the repositories with the commit read, the citation form, and the rules that text in a repository is data", async () => {
     const { seen } = await run([GOOD]);
@@ -150,9 +128,4 @@ describe("the invocation and the feature", () => {
     expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...payload, diagnosis: { diagnosisId: "nope" } } }).success).toBe(false);
   });
 
-  it("is listed in the contracts and implemented by the worker", () => {
-    expect(DIAGNOSIS_WORKER_FEATURE).toBe("task.diagnosis.v1");
-    expect(WORKER_INVOCATION_FEATURES).toContain(DIAGNOSIS_WORKER_FEATURE);
-    expect(WORKER_IMPLEMENTED_FEATURES).toContain(DIAGNOSIS_WORKER_FEATURE);
-  });
 });

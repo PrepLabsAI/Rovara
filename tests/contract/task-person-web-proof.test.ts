@@ -7,12 +7,7 @@
 // "present" (carried in `channelMember`) is rules 3 and 4. A proven loss is `eligible: false` and reconciles like a Slack departure;
 // anything unreadable is a refusal. A `slack` identity keeps its proof byte for byte (D2).
 import { describe, expect, it, vi } from "vitest";
-import {
-  IMPLICIT_COMPANY_ID,
-  SLACK_OIDC_ISSUER,
-  type TaskPersonProofRequest,
-  type TaskPersonProofResponse,
-} from "@agentx/contracts";
+import { SLACK_OIDC_ISSUER, type TaskPersonProofRequest, type TaskPersonProofResponse } from "@agentx/contracts";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
@@ -24,17 +19,8 @@ import {
   type ProjectAccessSubject,
   type TaskPersonIdentityDependencies,
 } from "../../packages/broker/src/developer/task-person-identity.js";
-import {
-  changeTaskPeople,
-  getTaskPeopleCapabilities,
-  resolveTaskDispatchPeople,
-  resolveTaskPeopleAccess,
-  resolveTaskPeopleTarget,
-  takeTaskOwnership,
-  taskPersonPresent,
-  type TaskPeopleDependencies,
-} from "../../packages/broker/src/developer/task-people.js";
-import { taskOwnerKey, type DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
+import { changeTaskPeople, resolveTaskDispatchPeople, resolveTaskPeopleAccess, taskPersonPresent, type TaskPeopleDependencies } from "../../packages/broker/src/developer/task-people.js";
+import { type DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import type { DeveloperRecord } from "../../packages/broker/src/developer/store.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { companyProjectRow } from "../support/company-layout-projects.js";
@@ -156,8 +142,6 @@ function mixed(galeRole = "commenter", world: WebWorld = {}, options: { samRole?
   return h;
 }
 
-const ELIGIBLE = { subject: { developerId: GALE_ID }, identity: { developerId: GALE_ID, name: "Gale GitHub", method: "github", issuer: GH_ISSUER, subject: "gh-1234" }, eligible: true, channelMember: true };
-
 describe("the web proof: all four rules, read live, no Slack call", () => {
   it.each([
     ["github", {}, {}],
@@ -181,11 +165,6 @@ describe("the web proof: all four rules, read live, no Slack call", () => {
     expect(h.slackCalls()).toBe(0);
   });
 
-  it("answers exactly the golden result shape for an eligible web person", async () => {
-    const h = mixed();
-    expect(await checkTaskPersonIdentity(h.identityDeps, task(), GALE_ID)).toStrictEqual(ELIGIBLE);
-  });
-
   // Mutation proof: each rule removed lets one of these through.
   it("rule 1: refuses a row whose developer id is not its own sign-in subject's, before reading the sign-in record", async () => {
     const h = harness({ records: { [GALE_ID]: galeRecord({ subject: "gh-other" }) } });
@@ -193,13 +172,6 @@ describe("the web proof: all four rules, read live, no Slack call", () => {
     expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, task(), GALE_ID))).code).toBe("PROJECT_ACCESS_DENIED");
     expect(h.developerRecord).not.toHaveBeenCalled();
     expect(h.companyMembership).not.toHaveBeenCalled();
-  });
-
-  it("rule 2: a revoked sign-in record is a proven loss (eligible false, not present), with no further read", async () => {
-    const h = mixed("commenter", { records: { [GALE_ID]: galeRecord({ revoked: true }) } });
-    expect(await checkTaskPersonIdentity(h.identityDeps, task(), GALE_ID)).toMatchObject({ eligible: false, channelMember: false });
-    expect(h.companyMembership).not.toHaveBeenCalled();
-    expect(h.projectGrant).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -215,35 +187,6 @@ describe("the web proof: all four rules, read live, no Slack call", () => {
     expect(h.companyMembership).not.toHaveBeenCalled();
   });
 
-  it("rule 2: accepts a sign-in record that later linked a Slack account (no Slack-id equality; the identity stays web)", async () => {
-    const h = mixed("commenter", { records: { [GALE_ID]: galeRecord({ slackUserId: SAM }) } });
-    expect(await checkTaskPersonIdentity(h.identityDeps, task(), GALE_ID)).toStrictEqual(ELIGIBLE);
-    expect(h.slackCalls()).toBe(0);
-  });
-
-  it("rule 3: no membership, or a revoked one, is a proven loss", async () => {
-    const h = mixed("commenter");
-    h.companyMembership.mockResolvedValueOnce(undefined);
-    expect(await checkTaskPersonIdentity(h.identityDeps, task(), GALE_ID)).toMatchObject({ eligible: false, channelMember: false });
-    expect(h.projectGrant).not.toHaveBeenCalled();
-  });
-
-  it("rule 3 (company boundary): a member of company B is never eligible on company A's task, even with a grant on a same-named project", async () => {
-    const h = mixed("commenter", { memberships: { [GALE_ID]: { companyId: COMPANY_B } }, grants: { [GALE_ID]: true } });
-    expect(await checkTaskPersonIdentity(h.identityDeps, task(), GALE_ID)).toMatchObject({ eligible: false, channelMember: false });
-    expect(h.projectGrant).not.toHaveBeenCalled();
-    expect((await errorOf(resolveTaskPeopleAccess(h.peopleDeps, task(), GALE_ID))).code).toBe("TASK_ACCESS_DENIED");
-  });
-
-  it("rule 3: the task's company is the stored task's (absent = the implicit company)", async () => {
-    const legacy = task();
-    delete legacy.companyId;
-    const h = harness({ tasks: [legacy], memberships: { [GALE_ID]: { companyId: IMPLICIT_COMPANY_ID } } });
-    h.seed(webRow(), subjectRow(P_GALE, GALE_ID));
-    expect(await checkTaskPersonIdentity(h.identityDeps, legacy, GALE_ID)).toMatchObject({ eligible: true, channelMember: true });
-    expect(h.projectGrant).toHaveBeenCalledWith(GALE_ID, "payments", IMPLICIT_COMPANY_ID);
-  });
-
   it.each([
     ["a malformed company id on the stored task", { companyId: "acme" }, {}],
     ["a null company id on the stored task", { companyId: null }, {}],
@@ -255,12 +198,6 @@ describe("the web proof: all four rules, read live, no Slack call", () => {
     const h = harness({ tasks: [stored] });
     h.seed(webRow(), subjectRow(P_GALE, GALE_ID));
     expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, { ...stored, ...givenOverride }, GALE_ID))).code).toBe("PROJECT_ACCESS_DENIED");
-    expect(h.slackCalls()).toBe(0);
-  });
-
-  it("rule 4: no developer or administrator grant is a proven loss", async () => {
-    const h = mixed("commenter", { grants: { [GALE_ID]: false } });
-    expect(await checkTaskPersonIdentity(h.identityDeps, task(), GALE_ID)).toMatchObject({ eligible: false, channelMember: false });
     expect(h.slackCalls()).toBe(0);
   });
 
@@ -279,73 +216,6 @@ describe("the web proof: all four rules, read live, no Slack call", () => {
     expect(h.slackCalls()).toBe(0);
   });
 
-  it("is unavailable, before any read, when the membership or grant reader is not wired", async () => {
-    for (const missing of ["companyMembership", "projectGrant"] as const) {
-      const h = mixed();
-      delete h.identityDeps[missing];
-      expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, task(), GALE_ID))).code).toBe("SLACK_UNAVAILABLE");
-      expect(h.developerRecord).not.toHaveBeenCalled();
-      expect(h.slackCalls()).toBe(0);
-    }
-  });
-
-  it("proves a GitHub task creator (a task started with GitHub sign-in) as a web identity", async () => {
-    const meta = task({ developerId: GALE_ID, provider: "github", developerName: "Gale GitHub" });
-    delete (meta as { slackUserId?: string }).slackUserId;
-    const h = harness({ tasks: [meta] });
-    expect(await checkTaskPersonIdentity(h.identityDeps, meta, GALE_ID)).toStrictEqual(ELIGIBLE);
-    expect(h.slackCalls()).toBe(0);
-  });
-
-  it("proves a GitHub task creator with no Slack link as web, with no Slack call", async () => {
-    const meta = task({ developerId: GALE_ID, provider: "github", developerName: "Gale GitHub" });
-    delete (meta as { slackUserId?: string }).slackUserId;
-    const h = harness({ tasks: [meta] });
-    expect(await checkTaskPersonIdentity(h.identityDeps, meta, GALE_ID)).toStrictEqual(ELIGIBLE);
-    expect(h.slackCalls()).toBe(0);
-  });
-
-  it("DEC 254n (2): a GitHub task creator that stored a Slack id is Slack-linked like an OIDC one, so a sign-in record with no Slack link is refused (never proven as web)", async () => {
-    const meta = task({ developerId: GALE_ID, provider: "github", developerName: "Gale GitHub", slackUserId: SAM });
-    const h = harness({ tasks: [meta] });
-    expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, meta, GALE_ID))).code).toBe("PROJECT_ACCESS_DENIED");
-    expect(h.slackCalls()).toBe(0);
-  });
-
-  it("refuses a creator whose sign-in record is of another method than the task's", async () => {
-    const meta = task({ developerId: GALE_ID, provider: "cloud", developerName: "Gale GitHub" });
-    delete (meta as { slackUserId?: string }).slackUserId;
-    const h = harness({ tasks: [meta] });
-    expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, meta, GALE_ID))).code).toBe("PROJECT_ACCESS_DENIED");
-  });
-
-  it("refuses a task whose stored sign-in method is unknown", async () => {
-    const meta = task({ provider: "google" as never });
-    const h = harness({ tasks: [meta] });
-    h.seed(webRow(), subjectRow(P_GALE, GALE_ID));
-    expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, meta, GALE_ID))).code).toBe("PROJECT_ACCESS_DENIED");
-  });
-
-  it("never treats a trusted web caller's own claims as a task person (only stored rows or the task creator)", async () => {
-    const h = harness();
-    h.identityDeps.trustedCaller = { developerId: GALE_ID, amr: "github", name: "Gale GitHub" };
-    expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, task(), GALE_ID))).code).toBe("PROJECT_ACCESS_DENIED");
-    expect(h.companyMembership).not.toHaveBeenCalled();
-  });
-});
-
-describe("Slack identities keep their proof (D2)", () => {
-  it("never asks the web readers about a Slack person", async () => {
-    const h = mixed();
-    await expect(checkTaskPersonIdentity(h.identityDeps, task(), SAM_ID)).resolves.toStrictEqual({
-      subject: { developerId: SAM_ID, slackUserId: SAM },
-      identity: { developerId: SAM_ID, slackUserId: SAM, name: "Sam Slack", method: "slack", issuer: SLACK_OIDC_ISSUER, subject: SAM },
-      eligible: true, channelMember: true,
-    });
-    expect(h.proof).toHaveBeenCalledTimes(1);
-    expect(h.companyMembership).not.toHaveBeenCalled();
-    expect(h.projectGrant).not.toHaveBeenCalled();
-  });
 });
 
 describe("resolveTaskPersonId for a web person", () => {
@@ -368,21 +238,6 @@ describe("resolveTaskPersonId for a web person", () => {
 });
 
 describe("People lifecycle with web identities (real proof wired in)", () => {
-  it("mixed task: a Slack owner and a web commenter each keep their role; only Sam's proof calls Slack", async () => {
-    const h = mixed("commenter");
-    await expect(resolveTaskPeopleAccess(h.peopleDeps, task(), GALE_ID)).resolves.toMatchObject({ role: "commenter", peopleRevision: 3, orphaned: false });
-    await expect(resolveTaskPeopleAccess(h.peopleDeps, task(), SAM_ID)).resolves.toMatchObject({ role: "owner", peopleRevision: 3 });
-    await expect(getTaskPeopleCapabilities(h.peopleDeps, GALE_CALLER, TASK_A)).resolves.toEqual({ peopleRevision: 3, canManagePeople: false, canTakeOwnership: false });
-    expect(h.proof.mock.calls.every(([request]) => request.slackUserId === SAM)).toBe(true);
-    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ revision: 3 });
-  });
-
-  it("counts a present web owner for dispatch beside the Slack owner", async () => {
-    const h = mixed("owner");
-    await expect(resolveTaskDispatchPeople(h.peopleDeps, task())).resolves.toStrictEqual({
-      peopleRevision: 3, ownerActorIds: [taskOwnerKey(SAM_ID, TASK_A), taskOwnerKey(GALE_ID, TASK_A)], status: "ALLOWED",
-    });
-  });
 
   it.each([
     ["loses company membership", { memberships: { [GALE_ID]: { companyId: COMPANY_B } } }],
@@ -396,24 +251,6 @@ describe("People lifecycle with web identities (real proof wired in)", () => {
     expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ revision: 4, orphaned: true, people: [SAM_ENTRY("commenter"), GALE_ENTRY("denied")] });
   });
 
-  it("keeps the PEOPLE row untouched and parks dispatch (UNKNOWN) when a web owner's membership cannot be read", async () => {
-    const h = mixed("owner", { memberships: { [GALE_ID]: "throw" } }, { samRole: "commenter" });
-    const before = JSON.stringify(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE"));
-    await expect(resolveTaskDispatchPeople(h.peopleDeps, task())).resolves.toStrictEqual({ peopleRevision: 3, ownerActorIds: [], status: "UNKNOWN" });
-    expect((await errorOf(resolveTaskPeopleAccess(h.peopleDeps, task(), SAM_ID))).code).toBe("TASK_ACCESS_DENIED");
-    expect(JSON.stringify(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE"))).toBe(before);
-  });
-
-  it("lets the Slack owner make a present web person an owner, writing the web entry shape and no Slack invite", async () => {
-    const h = mixed("commenter");
-    await changeTaskPeople(h.peopleDeps, SAM_CALLER, TASK_A, {
-      requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", expectedPeopleRevision: 3, targetDeveloperId: GALE_ID, role: "owner",
-    });
-    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ revision: 4, people: [SAM_ENTRY("owner"), GALE_ENTRY("owner")] });
-    expect(h.db.find((item) => String(item.sk).startsWith("PEOPLE_NOTIFY#"))).toEqual([]);
-    await expect(resolveTaskPeopleTarget(h.peopleDeps, TASK_A, P_GALE)).resolves.toEqual({ developerId: GALE_ID });
-  });
-
   it("refuses to make a web person without a grant an owner, and writes nothing", async () => {
     const h = mixed("commenter", { grants: { [GALE_ID]: false } });
     const before = JSON.stringify(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE"));
@@ -423,18 +260,6 @@ describe("People lifecycle with web identities (real proof wired in)", () => {
     expect(JSON.stringify(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE"))).toBe(before);
   });
 
-  it("lets a present web commenter take ownership of an orphaned task", async () => {
-    const h = mixed("commenter", {}, { samRole: "commenter", orphaned: true });
-    await takeTaskOwnership(h.peopleDeps, GALE_CALLER, TASK_A, { requestId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expectedPeopleRevision: 3 });
-    expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ orphaned: false, people: [SAM_ENTRY("commenter"), GALE_ENTRY("owner")] });
-  });
-
-  it("never lets a company B web person take ownership of company A's orphaned task", async () => {
-    const h = mixed("commenter", { memberships: { [GALE_ID]: { companyId: COMPANY_B } } }, { samRole: "commenter", orphaned: true });
-    const before = JSON.stringify(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE"));
-    expect((await errorOf(takeTaskOwnership(h.peopleDeps, GALE_CALLER, TASK_A, { requestId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expectedPeopleRevision: 3 }))).code).toBe("TASK_ACCESS_DENIED");
-    expect(JSON.stringify(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE"))).toBe(before);
-  });
 });
 
 describe("the route wiring (developerTaskRouteDependencies)", () => {
@@ -460,11 +285,6 @@ describe("the route wiring (developerTaskRouteDependencies)", () => {
     const deps = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer, now: () => T0, tasks: {} } as never, GALE_CALLER);
     return { db, deps, meta };
   }
-
-  it("proves a web person on an install with no Slack at all", async () => {
-    const { deps, meta } = routeWorld();
-    await expect(deps.checkTaskPerson!(meta, GALE_ID)).resolves.toMatchObject({ eligible: true, channelMember: true });
-  });
 
   it.each([["developer"], ["administrator"]])("accepts a live %s grant", async (role) => {
     const { deps, meta } = routeWorld({ grantRole: role });
@@ -515,10 +335,4 @@ describe("the route wiring (developerTaskRouteDependencies)", () => {
     await expect(deps.checkTaskPerson!(meta, GALE_ID)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
   });
 
-  it("still refuses a Slack person when the Slack parts cannot be built, with the build's own error and no Slack call", async () => {
-    const { db, deps, meta } = routeWorld();
-    db.set(slackRow(P_SAM, SAM, "Sam Slack"));
-    db.set(subjectRow(P_SAM, SAM_ID));
-    await expect(deps.checkTaskPerson!(meta, SAM_ID)).rejects.toMatchObject({ name: "SlackWorkspaceRefused" });
-  });
 });

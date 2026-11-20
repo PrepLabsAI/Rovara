@@ -5,17 +5,14 @@
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, type ClientRepositoriesResponse } from "@agentx/contracts";
-import { revisionKeyFor } from "../../packages/broker/src/aws/company-layout.js";
 import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
 import { REPOSITORIES_NOT_AVAILABLE } from "../../packages/broker/src/aws/client-project-create.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
-import { createBroker, loadSlackBroker, registerSlackProject } from "../support/slack-broker.js";
+import { createBroker, loadSlackBroker } from "../support/slack-broker.js";
 
 const STAGING_COMPANY = "org_stagingshape00000000";
 const OTHER = "org_bbbbbbbbbbbbbbbbbbbb";
-// DEC 254zzz80 (#1106, batch b21): a named company's project revision lives in that company's own partition (company-layout.ts revisionKeyFor).
-const revisionOf = (db: { get: (pk: string, sk: string) => Record<string, unknown> | undefined }, companyId: string | undefined, name: string) => { const key = revisionKeyFor(companyId, name, 1); return db.get(key.pk, key.sk); };
 const STAGING_INSTALLATION = 700001;
 const OTHER_INSTALLATION = 88;
 const repo = (fullName: string, id: number) => ({ fullName, githubRepositoryId: id, private: true, defaultBranch: "main" });
@@ -77,44 +74,11 @@ async function hosted(options: { company?: string; role?: Role; administrator?: 
 }
 const json = (response: { body: string }) => JSON.parse(response.body) as Record<string, unknown>;
 const ids = (response: { body: string }) => (json(response)["installations"] as Array<{ installationId: number }>).map((row) => row.installationId);
-const choiceNames = (response: { body: string }) => (json(response)["repositories"] as Array<{ fullName: string }>).map((row) => row.fullName);
 const FORBIDDEN = { code: "FORBIDDEN", message: "only a Rovara administrator can create a project" };
 const ROUTES = [["/v1/dev/client/repositories", undefined], ["/v1/dev/client/repositories/available", undefined],
   ["/v1/dev/client/projects", { repository: "acme-staging/web" }], ["/v1/dev/client/projects/bulk", { repositories: ["acme-staging/docs"] }]] as const;
 
 describe("hosted client project routes with the company GitHub bindings", () => {
-  it.each([["owner", "developer"], ["admin", "developer"], ["owner", "linking"]] as const)("the staging shape: a company %s (%s) lists, picks and creates from its own installation only", async (role, mode) => {
-    const h = await hosted({ role, mode });
-    const listed = await h.call("/v1/dev/client/repositories");
-    expect(listed.statusCode).toBe(200);
-    expect(ids(listed)).toEqual([STAGING_INSTALLATION]);
-    const picker = await h.call("/v1/dev/client/repositories/available");
-    expect(picker.statusCode).toBe(200);
-    expect(choiceNames(picker)).toEqual(["acme-staging/docs", "acme-staging/web"]);
-    const created = await h.call("/v1/dev/client/projects", { repository: "acme-staging/web" });
-    expect(created.statusCode).toBe(200);
-    const name = (json(created) as { name: string }).name;
-    expect(revisionOf(h.db, STAGING_COMPANY, name)?.companyId).toBe(STAGING_COMPANY);
-    const bulk = await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-staging/docs"] });
-    expect(bulk.statusCode).toBe(200);
-    expect((json(bulk)["results"] as Array<{ outcome: string }>).map((row) => row.outcome)).toEqual(["created"]);
-  });
-
-  it("another company's installation never shows and cannot be created from", async () => {
-    const h = await hosted({ company: OTHER, role: "owner" });
-    expect(ids(await h.call("/v1/dev/client/repositories"))).toEqual([OTHER_INSTALLATION]);
-    expect(choiceNames(await h.call("/v1/dev/client/repositories/available"))).toEqual(["other-co/payroll"]);
-    const refused = await h.call("/v1/dev/client/projects", { repository: "acme-staging/web" });
-    expect(refused.statusCode).toBe(400);
-    expect(refused.body).not.toContain(STAGING_COMPANY);
-    expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined(); expect(revisionOf(h.db, OTHER, "web")).toBeUndefined(); expect(revisionOf(h.db, STAGING_COMPANY, "web")).toBeUndefined();
-    expect(h.clientProjects.repositoryDefaults).not.toHaveBeenCalled();
-    // And the other way round: the staging company sees nothing of the second company's.
-    const staging = await hosted({ role: "owner" });
-    expect(ids(await staging.call("/v1/dev/client/repositories"))).not.toContain(OTHER_INSTALLATION);
-    expect((await staging.call("/v1/dev/client/projects", { repository: "other-co/payroll" })).statusCode).toBe(400);
-    expect(staging.db.get("PROJECT#payroll", "REV#000000000001")).toBeUndefined(); expect(revisionOf(staging.db, STAGING_COMPANY, "payroll")).toBeUndefined(); expect(revisionOf(staging.db, OTHER, "payroll")).toBeUndefined();
-  });
 
   it("the multi-repository and bulk creates refuse another company's repository and write nothing", async () => {
     const h = await hosted({ company: OTHER, role: "admin" });
@@ -151,25 +115,6 @@ describe("hosted client project routes with the company GitHub bindings", () => 
     expect(h.clientProjects.repositoryDefaults).not.toHaveBeenCalled();
   });
 
-  it("the install administrator still lists and creates, filtered to their own company", async () => {
-    const h = await hosted({ administrator: true, role: "member" });
-    expect(ids(await h.call("/v1/dev/client/repositories"))).toEqual([STAGING_INSTALLATION]);
-    const created = await h.call("/v1/dev/client/projects", { repository: "acme-staging/web" });
-    expect(created.statusCode).toBe(200);
-    expect(revisionOf(h.db, STAGING_COMPANY, "web")?.companyId).toBe(STAGING_COMPANY);
-    // The legacy member of the implicit company (staging's fourth row): the marker is written, so no installation is the implicit company's.
-    const legacy = await hosted({ administrator: true, company: IMPLICIT_COMPANY_ID, role: "member" });
-    expect(ids(await legacy.call("/v1/dev/client/repositories"))).toEqual([]);
-    expect((await legacy.call("/v1/dev/client/projects", { repository: "acme-staging/web" })).statusCode).toBe(400);
-  });
-
-  it("a removed membership is refused at once, before any provider read", async () => {
-    const h = await hosted({ administrator: true });
-    h.db.set({ ...h.db.get(`COMPANY_MEMBER#${PERSON}`, "COMPANY")!, revokedAt: TIME, revokedBy: "test" });
-    expect((await h.call("/v1/dev/client/repositories")).statusCode).toBe(401);
-    expect(h.clientProjects.repositories).not.toHaveBeenCalled();
-  });
-
   it("without a company layer nothing changes: the App's installations are listed as before and the bindings are not read", async () => {
     const h = await hosted({ administrator: true, companyLayer: false });
     const send = vi.spyOn(h.db, "send");
@@ -181,12 +126,6 @@ describe("hosted client project routes with the company GitHub bindings", () => 
     expect(h.db.get("PROJECT#x", "REV#000000000001")?.companyId).toBeUndefined();
   });
 
-  it("only the client project routes get the bindings: the administrator's own project registration keeps its path", async () => {
-    const h = await hosted({ administrator: true });
-    // example/demo's installation (456 in the support's GitHub double) is bound to no company; registration through /v1/admin/projects does not check bindings.
-    await registerSlackProject(h.broker.handler, { bind: false });
-    expect(h.db.get("PROJECT#payments", "REV#000000000001")).toBeDefined();
-  });
 });
 
 describe("the deployed broker's root wiring", () => {

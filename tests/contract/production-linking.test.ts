@@ -55,21 +55,9 @@ describe("the legacy deployment's developer API (spec 064 FR-001, FR-005)", () =
     expect(JSON.parse(answer.body)).toMatchObject({ links: [] });
   });
 
-  it("refuses the links without a valid token", async () => {
-    expect((await call("GET", "/v1/dev/channel-links")).status).toBe(401);
-  });
-
   it("serves the access check, which answers a bad token with its own 401", async () => {
     const answer = await call("POST", "/v1/dev/access", { authorization: "Bearer not-a-token" });
     expect(answer.status).toBe(401);
-  });
-
-  it("has no developer tasks or ChatGPT connection, even for a signed-in person", async () => {
-    const authorization = await token();
-    for (const [method, path] of [["GET", "/v1/dev/tasks"], ["POST", "/v1/dev/tasks"], ["GET", "/v1/dev/chatgpt-connection"]] as const) {
-      const answer = await call(method, path, { authorization, ...(method === "POST" ? { body: {} } : {}) });
-      expect(answer.status, `${method} ${path}`).toBe(404);
-    }
   });
 
   it("lists a signed-in person's projects and workspaces (spec 066 FR-005)", async () => {

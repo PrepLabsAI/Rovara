@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { listAwsProfiles, parseAwsIni, pickAwsProfile, resolveCaller, signInCommand, type AwsProfile } from "../../packages/cli/src/init/aws-account.js";
 import type { CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
-import { ADMIN_USER_GUIDE_URL, DEDICATED_ACCOUNT_NOTE, isRootUser, ROOT_WARNING } from "../../packages/cli/src/init/prerequisites.js";
+import { DEDICATED_ACCOUNT_NOTE, ROOT_WARNING } from "../../packages/cli/src/init/prerequisites.js";
 import { isOperatorStop } from "../../packages/cli/src/init/stop.js";
 import { signedInAs } from "../../packages/cli/src/init/ui/cards.js";
 import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
@@ -52,13 +52,6 @@ describe("the AWS profiles on this machine", () => {
     for (const secret of ["AKIAEXAMPLEKEY", "SECRETexampleVALUE", "AKIAOTHERKEY", "SECRETotherVALUE"]) expect(listed).not.toContain(secret);
   });
 
-  it("reads AWS_CONFIG_FILE and AWS_SHARED_CREDENTIALS_FILE when they are set, and finds nothing where there are no files", async () => {
-    const dir = await home();
-    await writeFile(join(dir, "elsewhere"), "[profile dev]\nsso_session = acme\n");
-    expect(await listAwsProfiles({ home: dir, processEnv: { AWS_CONFIG_FILE: join(dir, "elsewhere"), AWS_SHARED_CREDENTIALS_FILE: join(dir, "none") } })).toEqual([DEV]);
-    expect(await listAwsProfiles({ home: join(dir, "missing"), processEnv: {} })).toEqual([]);
-  });
-
   it("reads sections and keys, ignoring comments and blank lines", () => {
     expect(parseAwsIni("# note\n[profile a]\n Region = eu-west-1 \n; other\n\n[b]\nx=1")).toEqual(new Map([
       ["profile a", new Map([["region", "eu-west-1"]])],
@@ -75,28 +68,12 @@ describe("the AWS profiles on this machine", () => {
 });
 
 describe("choosing the profile", () => {
-  it("asks which of two or more, defaulting to AWS_PROFILE, and puts the answer in AWS_PROFILE", async () => {
-    const processEnv: NodeJS.ProcessEnv = { AWS_PROFILE: "dev" };
-    const prompter = scriptedPrompter([""]);
-    const picked = await pickAwsProfile({ profiles: [{ name: "default", kind: "keys" }, DEV], processEnv, prompter });
-    expect(picked).toEqual(DEV);
-    expect(prompter.asked).toEqual(["AWS profile to install with"]);
-    expect(processEnv.AWS_PROFILE).toBe("dev");
-  });
 
   it("uses the only profile without asking", async () => {
     const processEnv: NodeJS.ProcessEnv = {};
     const prompter = scriptedPrompter([]);
     expect(await pickAwsProfile({ profiles: [DEV], processEnv, prompter })).toEqual(DEV);
     expect(processEnv.AWS_PROFILE).toBe("dev");
-  });
-
-  it("keeps an AWS_PROFILE it cannot list (a credential_process section, say) when it is the only one, without asking", async () => {
-    const processEnv: NodeJS.ProcessEnv = { AWS_PROFILE: "vault" };
-    const prompter = scriptedPrompter([]);
-    expect(await pickAwsProfile({ profiles: [], processEnv, prompter })).toEqual({ name: "vault", kind: "other" });
-    expect(prompter.asked).toEqual([]);
-    expect(processEnv.AWS_PROFILE).toBe("vault");
   });
 
   it("offers an unlisted AWS_PROFILE beside the listed one, as the default, and never swaps it silently", async () => {
@@ -115,27 +92,6 @@ describe("choosing the profile", () => {
 });
 
 describe("the account the install lands in", () => {
-  it("shows the account, the role and the profile once AWS answers", async () => {
-    const page = surface();
-    const caller = await resolveCaller({ identity: () => ({ get: async () => ({ account: "123456789012", arn: HOLDER }) }), region: "us-east-1", prompter: scriptedPrompter([]), runner: runner(), surface: page, profile: DEV });
-    expect(caller).toEqual({ account: "123456789012", arn: HOLDER });
-    expect(page.cards).toEqual([{
-      id: "aws", title: "AWS account", status: "ok",
-      lines: [
-        "Rovara installs into AWS account 123456789012 in us-east-1.",
-        `You are signed in as ${signedInAs(HOLDER)}, with the AWS profile dev.`,
-        "Tip: a separate AWS account just for Rovara keeps its costs and permissions apart from your other work.",
-      ],
-      details: [HOLDER],
-    }]);
-  });
-
-  it("without a page, an expired session fails exactly as before and runs nothing", async () => {
-    const failure = expired();
-    const commands = runner();
-    await expect(resolveCaller({ identity: () => ({ get: async () => { throw failure; } }), region: "us-east-1", prompter: scriptedPrompter([]), runner: commands, profile: DEV })).rejects.toBe(failure);
-    expect(commands.runs).toEqual([]);
-  });
 
   it("on the page, offers the profile's sign-in, runs it, and asks AWS again with a new client", async () => {
     const page = surface();
@@ -205,26 +161,6 @@ describe("the account the install lands in", () => {
     await expect(resolveCaller({ identity: () => ({ get: async () => { throw denied; } }), region: "us-east-1", prompter: scriptedPrompter([]), runner: runner(), surface: surface(), profile: DEV })).rejects.toBe(denied);
   });
 
-  it("FR-016: warns a root user on the page, links to making an admin user, and continuing works", async () => {
-    const page = surface();
-    const root = "arn:aws:iam::123456789012:root";
-    const prompter = scriptedPrompter([""]);
-    const caller = await resolveCaller({ identity: () => ({ get: async () => ({ account: "123456789012", arn: root }) }), region: "us-east-1", prompter, runner: runner(), surface: page });
-    expect(caller).toEqual({ account: "123456789012", arn: root });
-    expect(prompter.asked).toEqual(["You are signed in as the AWS root user. Continue?"]);
-    expect(page.cards[0]).toMatchObject({
-      id: "aws", status: "waiting",
-      lines: [
-        "Rovara installs into AWS account 123456789012 in us-east-1.",
-        "You are signed in as the AWS root user. Rovara works, but AWS advises an admin user instead.",
-        "You can continue as root. A few day-two commands need an admin user instead; the ready screen says which.",
-      ],
-      link: { url: ADMIN_USER_GUIDE_URL, label: "How to create an admin user" },
-      details: [root],
-    });
-    expect(page.cards[1]).toMatchObject({ id: "aws", status: "ok" });
-  });
-
   it("FR-016: stopping at the root warning is the person's own stop, not a failure", async () => {
     const error = await resolveCaller({ identity: () => ({ get: async () => ({ account: "123456789012", arn: "arn:aws:iam::123456789012:root" }) }), region: "us-east-1", prompter: scriptedPrompter(["stop"]), runner: runner(), surface: surface() }).catch((caught: unknown) => caught);
     expect(isOperatorStop(error)).toBe(true);
@@ -236,17 +172,6 @@ describe("the account the install lands in", () => {
     await resolveCaller({ identity: () => ({ get: async () => ({ account: "123456789012", arn: "arn:aws:iam::123456789012:root" }) }), region: "us-east-1", prompter, runner: runner(), write: (line) => lines.push(line) });
     expect(lines).toEqual([ROOT_WARNING]);
     expect(prompter.asked).toEqual([]);
-  });
-
-  it("FR-017: the account tip is plain words with no double negative", () => {
-    expect(DEDICATED_ACCOUNT_NOTE).toBe("Tip: a separate AWS account just for AgentX keeps its costs and permissions apart from your other work.");
-    expect(DEDICATED_ACCOUNT_NOTE).not.toMatch(/\bnot\b|\bno\b|\bnever\b/);
-  });
-
-  it("knows the root user from its ARN only", () => {
-    expect(isRootUser("arn:aws:iam::123456789012:root")).toBe(true);
-    expect(isRootUser("arn:aws-us-gov:iam::123456789012:root")).toBe(true);
-    expect(isRootUser("arn:aws:sts::123456789012:assumed-role/root/alice")).toBe(false);
   });
 
   it("spec 048 FR-015: shows the account, its alias and who is signed in, before any region is chosen", async () => {

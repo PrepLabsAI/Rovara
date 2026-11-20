@@ -1,25 +1,7 @@
 // Plan 3 Task 4: overlays, structural recipe checks, coding programs, digests and diffs.
 import { describe, expect, it } from "vitest";
-import {
-  EMPTY_RECIPE,
-  RecipeOverlaySchema,
-  ResolvedRecipeSchema,
-  applyOverlay,
-  codingProgram,
-  diffRecipes,
-  formatRecipeProblem,
-  overlayPaths,
-  overlayProblems,
-  recipeDigest,
-  recipeProblems,
-  recipeRunner,
-  type RecipeOverlay,
-  type ResolvedRecipe,
-  type ResolvedStep,
-} from "../../packages/contracts/src/agent-recipe-node.js";
+import { EMPTY_RECIPE, RecipeOverlaySchema, ResolvedRecipeSchema, applyOverlay, codingProgram, diffRecipes, formatRecipeProblem, overlayPaths, overlayProblems, recipeProblems, recipeRunner, type RecipeOverlay, type ResolvedRecipe, type ResolvedStep } from "../../packages/contracts/src/agent-recipe-node.js";
 
-const MIXING = "steps: a recipe can't mix coding steps and agent steps; link the two agents in a chain instead";
-const PULL_REQUEST = "steps: a pull request step needs a check step and a review step with both reviewers after the last build step";
 
 const NO_INSTRUCTIONS = { instructions: [] };
 
@@ -41,9 +23,6 @@ function pullRequest(): ResolvedStep {
 function agentStep(id = "agent", workspace: "none" | "read" = "none", settings: Record<string, unknown> = {}): ResolvedStep {
   return { id, name: id, kind: "agent", workspace, settings: { ...NO_INSTRUCTIONS, ...settings } };
 }
-function approval(id = "approval"): ResolvedStep {
-  return { id, name: id, kind: "approval", prompt: "Go on?", settings: { ...NO_INSTRUCTIONS } };
-}
 function recipeOf(steps: ResolvedStep[], extra: Partial<ResolvedRecipe> = {}): ResolvedRecipe {
   return { ...structuredClone(EMPTY_RECIPE), steps, ...extra };
 }
@@ -58,21 +37,6 @@ const BASE_LAYER = { agentId: "rovara-code" as const, name: "Rovara Code", versi
 const MODEL_A = { provider: "anthropic", modelId: "claude-sonnet-4-6" };
 const MODEL_B = { provider: "openai", modelId: "gpt-5.4" };
 
-function messages(recipe: ResolvedRecipe): string[] {
-  return recipeProblems(recipe).map(formatRecipeProblem);
-}
-
-describe("EMPTY_RECIPE", () => {
-  it("has no steps or tools, a person trigger, prepare autonomy and no mentions, and parses", () => {
-    expect(EMPTY_RECIPE.steps).toEqual([]);
-    expect(EMPTY_RECIPE.tools).toEqual([]);
-    expect(EMPTY_RECIPE.triggers).toEqual([{ kind: "person" }]);
-    expect(EMPTY_RECIPE.autonomy).toBe("prepare");
-    expect(EMPTY_RECIPE.allowMentions).toBe(false);
-    expect(ResolvedRecipeSchema.safeParse(EMPTY_RECIPE).success).toBe(true);
-  });
-});
-
 describe("recipeProblems", () => {
   it("accepts Rovara Code's built-in version 1", () => {
     expect(recipeProblems(rovaraCode())).toEqual([]);
@@ -84,25 +48,6 @@ describe("recipeProblems", () => {
     expect(problems.map(formatRecipeProblem)).toEqual(["steps: a recipe needs at least one step"]);
   });
 
-  it("refuses duplicate step ids", () => {
-    const problems = recipeProblems(recipeOf([build("same"), check("same"), review("review", ["code", "security"])]));
-    expect(problems.some((problem) => problem.path === "steps.1.id")).toBe(true);
-  });
-
-  it("limits a plan step's tools to the read-only set and names the step and the tool", () => {
-    const problems = recipeProblems(recipeOf([plan({ tools: ["read", "bash"] }), build()]));
-    expect(problems).toHaveLength(1);
-    expect(problems[0]?.path).toBe("steps.0.settings.tools");
-    expect(problems[0]?.message).toContain("plan");
-    expect(problems[0]?.message).toContain("bash");
-  });
-
-  it("allows bash on a build step and refuses it on a review step", () => {
-    expect(recipeProblems(recipeOf([build("build", { tools: ["read", "bash", "write"] })]))).toEqual([]);
-    const problems = recipeProblems(recipeOf([build(), review("review", ["code"], undefined)].map((step, index) => (index === 1 ? { ...step, settings: { instructions: [], tools: ["write"] } } : step))));
-    expect(problems.some((problem) => problem.path === "steps.1.settings.tools" && problem.message.includes("write"))).toBe(true);
-  });
-
   it("refuses bash on an agent step, and a workspace tool when the step has no workspace", () => {
     const bash = recipeProblems(recipeOf([agentStep("agent", "read", { tools: ["bash"] })]));
     expect(bash).toHaveLength(1);
@@ -110,10 +55,6 @@ describe("recipeProblems", () => {
     const noWorkspace = recipeProblems(recipeOf([agentStep("agent", "none", { tools: ["read"] })]));
     expect(noWorkspace).toHaveLength(1);
     expect(recipeProblems(recipeOf([agentStep("agent", "read", { tools: ["read", "grep"] })]))).toEqual([]);
-  });
-
-  it("allows connector tool patterns on an agent step", () => {
-    expect(recipeProblems(recipeOf([agentStep("agent", "none", { tools: ["linear__get_*", "search"] })]))).toEqual([]);
   });
 
   it("refuses tools on a check step, and settings other than a timeout", () => {
@@ -129,44 +70,6 @@ describe("recipeProblems", () => {
   });
 
   describe("sequences", () => {
-    it("accepts the eight-step custom sequence", () => {
-      const recipe = recipeOf([
-        build("tests"),
-        build("code"),
-        check("check_one"),
-        review("review_one", ["code", "security"]),
-        build("docs"),
-        check("check_two"),
-        review("review_two", ["code", "security"]),
-        pullRequest(),
-      ]);
-      expect(recipeProblems(recipe)).toEqual([]);
-    });
-
-    it("refuses a pull request step with no check step", () => {
-      expect(messages(recipeOf([build(), review("review", ["code", "security"]), pullRequest()]))).toContain(PULL_REQUEST);
-    });
-
-    it("refuses a pull request step whose review has one reviewer", () => {
-      expect(messages(recipeOf([build(), check(), review("review", ["security"]), pullRequest()]))).toContain(PULL_REQUEST);
-    });
-
-    it("refuses a pull request step whose check and review come before the last build", () => {
-      const recipe = recipeOf([build("first"), check(), review("review", ["code", "security"]), build("second"), pullRequest()]);
-      expect(messages(recipe)).toContain(PULL_REQUEST);
-    });
-
-    it("refuses a recipe that mixes coding and agent steps", () => {
-      expect(messages(recipeOf([agentStep(), build()]))).toContain(MIXING);
-    });
-
-    it("refuses an approval step in a coding recipe", () => {
-      expect(messages(recipeOf([approval(), build()]))).toContain(MIXING);
-    });
-
-    it("accepts an agent recipe with an approval step", () => {
-      expect(recipeProblems(recipeOf([agentStep("look"), approval(), agentStep("act", "read")]))).toEqual([]);
-    });
 
     it("needs a build step and puts a plan first", () => {
       expect(recipeProblems(recipeOf([plan(), check()])).some((problem) => problem.message.includes("build"))).toBe(true);
@@ -183,13 +86,6 @@ describe("recipeProblems", () => {
       expect(twice.some((problem) => problem.path === "steps.4")).toBe(true);
     });
 
-    it("needs onFindings.backTo to name an earlier build step", () => {
-      expect(recipeProblems(recipeOf([build(), review("review", ["code"], { backTo: "build", maxRounds: 2 })]))).toEqual([]);
-      for (const backTo of ["missing", "check", "later"]) {
-        const recipe = recipeOf([build(), check(), review("review", ["code"], { backTo, maxRounds: 2 }), build("later")]);
-        expect(recipeProblems(recipe).some((problem) => problem.path === "steps.2.onFindings.backTo"), backTo).toBe(true);
-      }
-    });
   });
 
   describe("differentCompanyFrom", () => {
@@ -206,10 +102,6 @@ describe("recipeProblems", () => {
     });
   });
 
-  it("no longer refuses event and schedule triggers: Plan 4 launches all three kinds (the specs themselves are checked by the schema)", () => {
-    const recipe = recipeOf([build()], { triggers: [{ kind: "person" }, { kind: "event", source: "github", type: "pull_request.opened" }, { kind: "schedule", schedule: { kind: "interval", minutes: 60 }, timezone: "UTC", missed: "run_once" }] as unknown as ResolvedRecipe["triggers"] });
-    expect(recipeProblems(recipe).filter((problem) => problem.path === "triggers")).toEqual([]);
-  });
 });
 
 describe("recipe problem messages", () => {
@@ -272,12 +164,6 @@ describe("applyOverlay", () => {
     expect(ResolvedRecipeSchema.safeParse(resolved).success).toBe(true);
   });
 
-  it("builds sequence steps from scratch when the base has none", () => {
-    const overlay: RecipeOverlay = { sequence: [{ id: "build", name: "build", kind: "build", settings: { instructions: "Write tests first.", model: MODEL_A } }] };
-    const resolved = applyOverlay(EMPTY_RECIPE, overlay, LAYER);
-    expect(resolved.steps[0]?.settings).toEqual({ model: MODEL_A, instructions: [{ agentName: "Payments Expert", text: "Write tests first." }] });
-  });
-
   it("patches a step: scalars replace, null clears, instructions append a layer", () => {
     const base = recipeOf([build("build", { model: MODEL_A, thinkingLevel: "high", instructions: [{ agentName: "Rovara Code", text: "base" }] })]);
     const resolved = applyOverlay(base, { steps: { build: { model: MODEL_B, thinkingLevel: null, instructions: "child", stepBudgetUsd: 5 } } }, LAYER);
@@ -288,31 +174,12 @@ describe("applyOverlay", () => {
     });
   });
 
-  it("clears a model with null", () => {
-    const base = recipeOf([build("build", { model: MODEL_A, fallbackModel: MODEL_B })]);
-    const resolved = applyOverlay(base, { steps: { build: { model: null } } }, LAYER);
-    expect(resolved.steps[0]?.settings).toEqual({ fallbackModel: MODEL_B, instructions: [] });
-  });
-
-  it("resolves two instruction layers in chain order", () => {
-    const first = applyOverlay(EMPTY_RECIPE, { instructions: "first", sequence: [{ id: "build", name: "b", kind: "build" }] }, BASE_LAYER);
-    const second = applyOverlay(first, { instructions: "second", steps: { build: { instructions: "second build" } } }, LAYER);
-    expect(second.instructions).toEqual([{ agentName: "Rovara Code", text: "first" }, { agentName: "Payments Expert", text: "second" }]);
-    expect(second.steps[0]?.settings.instructions).toEqual([{ agentName: "Payments Expert", text: "second build" }]);
-  });
-
   it("intersects a coding step's tools with the base step's tools, and replaces them when the base has none", () => {
     const base = recipeOf([build("build", { tools: ["read", "edit", "bash"] }), review("review", ["code"], undefined)]);
     const narrowed = applyOverlay(base, { steps: { build: { tools: ["read", "bash", "write"] } } }, LAYER);
     expect(narrowed.steps[0]?.settings).toMatchObject({ tools: ["read", "bash"] });
     const fresh = applyOverlay(base, { steps: { review: { tools: ["read", "grep"] } } }, LAYER);
     expect(fresh.steps[1]?.settings).toMatchObject({ tools: ["read", "grep"] });
-  });
-
-  it("replaces an agent step's tools", () => {
-    const base = recipeOf([agentStep("look", "none", { tools: ["linear__get_*"] })]);
-    const resolved = applyOverlay(base, { steps: { look: { tools: ["jira__*"] } } }, LAYER);
-    expect(resolved.steps[0]?.settings).toMatchObject({ tools: ["jira__*"] });
   });
 
   it("leaves unknown step ids out of the result and reports them as a problem, not a throw", () => {
@@ -367,9 +234,6 @@ describe("applyOverlay", () => {
     expect(() => applyOverlay(EMPTY_RECIPE, { skills: { add: [{ skillId: `skl_${"a".repeat(20)}` }] } }, LAYER)).toThrow(/skill/);
   });
 
-  it("treats a null instructions as adding no layer", () => {
-    expect(applyOverlay(EMPTY_RECIPE, { instructions: null }, LAYER).instructions).toEqual([]);
-  });
 });
 
 describe("codingProgram", () => {
@@ -404,40 +268,14 @@ describe("codingProgram", () => {
     expect(codingProgram(noFindings)?.steps[3]).toEqual({ id: "review", kind: "review", reviewers: ["code", "security"] });
   });
 
-  it("gives a program for a custom sequence and none for an agent recipe", () => {
-    const custom = recipeOf([build("tests"), build("code"), check(), review("review", ["code", "security"]), pullRequest()]);
-    expect(codingProgram(custom)?.steps.map((step) => step.id)).toEqual(["tests", "code", "check", "review", "pull_request"]);
-    expect(codingProgram(recipeOf([agentStep()]))).toBeUndefined();
-    expect(codingProgram(EMPTY_RECIPE)).toBeUndefined();
-  });
-});
-
-describe("recipeDigest", () => {
-  it("is a SHA-256 hex digest that ignores key order and changes with content", () => {
-    const recipe = rovaraCode();
-    const shuffled = JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(recipe).reverse()))) as ResolvedRecipe;
-    expect(recipeDigest(recipe)).toMatch(/^[a-f0-9]{64}$/);
-    expect(recipeDigest(shuffled)).toBe(recipeDigest(recipe));
-    expect(recipeDigest({ ...recipe, autonomy: "run" })).not.toBe(recipeDigest(recipe));
-  });
 });
 
 describe("diffRecipes", () => {
-  it("returns nothing for equal recipes", () => {
-    expect(diffRecipes(rovaraCode(), rovaraCode())).toEqual([]);
-  });
 
   it("returns one path for one model change", () => {
     const before = recipeOf([plan(), build("build", { model: MODEL_A })]);
     const after = recipeOf([plan(), build("build", { model: MODEL_B })]);
     expect(diffRecipes(before, after)).toEqual(["/steps/1/settings/model"]);
-  });
-
-  it("reports a model set from nothing, and removed, at the setting", () => {
-    const before = recipeOf([plan(), build()]);
-    const after = recipeOf([plan(), build("build", { model: MODEL_A })]);
-    expect(diffRecipes(before, after)).toEqual(["/steps/1/settings/model"]);
-    expect(diffRecipes(after, before)).toEqual(["/steps/1/settings/model"]);
   });
 
   it("reports allowMentions, autonomy and appended steps", () => {
@@ -446,12 +284,6 @@ describe("diffRecipes", () => {
     expect(diffRecipes(before, { ...before, autonomy: "run" })).toEqual(["/autonomy"]);
     expect(diffRecipes(before, { ...before, steps: [...before.steps, check()] })).toEqual(["/steps/1"]);
     expect(diffRecipes(recipeOf([build(), check()]), before)).toEqual(["/steps/1"]);
-  });
-
-  it("reports array element changes by index", () => {
-    const before = recipeOf([build()], { approvals: { alwaysAsk: ["delete_*", "create_*"] } });
-    const after = recipeOf([build()], { approvals: { alwaysAsk: ["delete_*", "create_issue"] } });
-    expect(diffRecipes(before, after)).toEqual(["/approvals/alwaysAsk/1"]);
   });
 
   it("ignores the chain but for the base's versions, reported as /base/version", () => {
@@ -466,12 +298,6 @@ describe("diffRecipes", () => {
     expect(diffRecipes(published, renamed)).toEqual([]);
   });
 
-  it("escapes / and ~ in keys", () => {
-    const before = recipeOf([build()]);
-    const after = structuredClone(before);
-    (after.steps[0] as { settings: Record<string, unknown> }).settings["a/b~c"] = 1;
-    expect(diffRecipes(before, after)).toEqual(["/steps/0/settings/a~1b~0c"]);
-  });
 });
 
 describe("overlayPaths", () => {
