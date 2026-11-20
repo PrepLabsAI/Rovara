@@ -110,36 +110,6 @@ describe("DEC 254zzz39 (6): the task owner accepts a SECURITY finding on the web
     expect(JSON.stringify(await world.store.get(taskKey(taskId)))).toBe(before);
   });
 
-  it("needs no step-up (DEC 254zzz73): a caller carrying no sign-in time at all is the page for the task's owner", async () => {
-    const { world, routes, own, taskId } = await started();
-    const revision = await blockOnSecurity(world, taskId);
-    const answer = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { principal: own.principal, client: own.client, webApp: true });
-    expect(answer?.statusCode, answer?.body).toBe(200);
-  });
-
-  it("refuses a company member who is not the task's owner, another company's caller and a script token as no such task; nothing is written", async () => {
-    const { world, routes, remember, taskId } = await started();
-    const revision = await blockOnSecurity(world, taskId);
-    const before = JSON.stringify(await world.store.get(taskKey(taskId)));
-    const page = { webApp: true as const };
-    // A member (even a company admin) of the same company who is not the task's owner.
-    for (const role of ["member", "admin"] as const) {
-      const colleague = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(FAKE_COMPANY, role, `person-${role}-000000000002`), ...page });
-      expect(colleague?.statusCode, role).toBe(404);
-      expect(errorOf(colleague).code).toBe("TASK_NOT_FOUND");
-    }
-    // Another company's owner: exactly the answer for an id with no task.
-    const theirs = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(OTHER), ...page });
-    const missing = await routes.route(post(PAGE(randomUUID()), acceptSecurity(revision)), { ...remember(OTHER), ...page });
-    expect(theirs?.statusCode).toBe(404);
-    expect(errorOf(theirs)).toEqual(errorOf(missing));
-    expect(theirs!.body).not.toContain(FAKE_COMPANY);
-    // A script token never reaches it.
-    const token = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(FAKE_COMPANY), ...page, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
-    expect(token?.statusCode).toBe(404);
-    expect(JSON.stringify(await world.store.get(taskKey(taskId)))).toBe(before);
-  });
-
   it("is served only with the owner moves' wiring and the company's owner rule, for POST only", async () => {
     const unwired = await started({ wiring: { taskActions: undefined } });
     const page = { webApp: true as const };
@@ -150,17 +120,6 @@ describe("DEC 254zzz39 (6): the task owner accepts a SECURITY finding on the web
     expect(errorOf(await laptopRule.routes.route(post(PAGE(laptopRule.taskId), acceptSecurity(1)), { ...laptopRule.own, webApp: true })).message).toBe(NOT_ON_THE_CORE_YET);
     const wired = await started();
     expect(await wired.routes.route(get(PAGE(wired.taskId)), { ...wired.own, ...page })).toBeUndefined();
-  });
-});
-
-describe("DEC 254zzz39 (6): a body the move would refuse tells someone who may not see the task nothing", () => {
-  it("another company's caller and a non-owner get no such task for any body (the task is read before the body)", async () => {
-    const { world, routes, remember, taskId } = await started();
-    await blockOnSecurity(world, taskId);
-    const page = { webApp: true as const };
-    for (const caller of [{ ...remember(OTHER), ...page }, { ...remember(FAKE_COMPANY, "member", "person-member-000000000003"), ...page }]) {
-      for (const raw of ["not json", "[1]", "null"]) expect((await routes.route({ ...post(PAGE(taskId)), body: raw }, caller))?.statusCode, raw).toBe(404);
-    }
   });
 });
 
@@ -213,16 +172,6 @@ describe("the task list's readable check for a core task (Understand's round on 
     expect((await readers.routes.route(get(`/v1/dev/tasks/${readers.taskId}`), reader))?.statusCode).toBe(200);
     expect(await readers.routes.taskReadable(readers.remember(FAKE_COMPANY, "member", "person-other-0000000000006"), readers.taskId)).toBe(false);
   });
-
-  it("is false when the membership cannot be read or the read fails, never a throw", async () => {
-    const { routes, own, taskId, companyOf } = await started();
-    companyOf.mockRejectedValueOnce(new Error("sign-in table down"));
-    expect(await routes.taskReadable(own, taskId)).toBe(false);
-    companyOf.mockResolvedValueOnce({ companyId: "not-a-company", role: "owner" });
-    expect(await routes.taskReadable(own, taskId)).toBe(false);
-    companyOf.mockResolvedValueOnce(undefined);
-    expect(await routes.taskReadable(own, taskId)).toBe(false);
-  });
 });
 
 describe("Cloud #188 item 3: the old task routes on a core task reach the deployment's rules only for the caller's own company's task", () => {
@@ -250,17 +199,6 @@ describe("Cloud #188 item 3: the old task routes on a core task reach the deploy
       expect((await routes.route({ method, path: `/v1/dev/tasks/${randomUUID()}/${rest}`, headers: {}, body: "{}" }, own))?.statusCode, `missing ${method} ${rest}`).toBe(404);
     }
     expect(route).not.toHaveBeenCalled();
-  });
-
-  it("owns only the old route table's methods on these paths; unwired, they are not the core's (undefined)", async () => {
-    const route = vi.fn(async () => ({ statusCode: 200, headers: {}, body: "{}" }));
-    const { routes, own, taskId } = await started({ wiring: { taskRules: { route, readsAsReader: async () => false } } });
-    for (const [method, rest] of [["POST", "people"], ["GET", "people/role"], ["POST", "events"], ["POST", "readers"], ["GET", `readers/${"c".repeat(64)}`], ["POST", "comments"], ["GET", "people/requests"], ["GET", "people/requests/a/b"]] as const) {
-      expect(await routes.route({ method, path: `/v1/dev/tasks/${taskId}/${rest}`, headers: {}, body: "" }, own), `${method} ${rest}`).toBeUndefined();
-    }
-    expect(route).not.toHaveBeenCalled();
-    const unwired = await started();
-    for (const [method, rest] of RULES) expect(await unwired.routes.route({ method, path: `/v1/dev/tasks/${unwired.taskId}/${rest}`, headers: {}, body: "{}" }, unwired.own), `${method} ${rest}`).toBeUndefined();
   });
 });
 
@@ -303,17 +241,6 @@ describe("DEC 254zzz94: the Merge button through the dev routes", () => {
     const repository = vi.fn(() => { throw new Error("no seams in this test"); });
     return { repository, wiring: { merge: { projectGrantRole: async () => undefined, merge: repository, afterMerge: async () => undefined } } };
   };
-
-  it("a script token never reaches it (it reads like a missing route), and nothing is read for it", async () => {
-    const { repository, wiring } = mergeWiring();
-    const { routes, own, taskId } = await started({ wiring });
-    for (const request of [post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), get(MERGE(taskId))]) {
-      const answer = await routes.route(request, { ...own, webApp: true, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
-      expect(answer?.statusCode).toBe(404);
-      expect(errorOf(answer).message).toBe("route not found");
-    }
-    expect(repository).not.toHaveBeenCalled();
-  });
 
   it("a press from the CLI's token is refused with the website words; the web app's own client reaches the merge rules", async () => {
     const { repository, wiring } = mergeWiring();

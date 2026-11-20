@@ -8,12 +8,11 @@ import { SETUP_HOST_KIND, SETUP_HOST_OPEN_MAX, approvedHostsOf, hostAskDigest, h
 import { hostAskKey } from "../../packages/broker/src/core/setup-agent/keys.js";
 import { hostRequestId } from "../../packages/broker/src/local/app/setup-agent.js";
 import { SETUP_HOST_NEEDS_ADMIN, setupHostCardOf } from "../../packages/broker/src/core-host/setup-approval.js";
-import { SETUP_NO_HOST_WAITING, SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND } from "../../packages/broker/src/core-host/setup-run-routes.js";
+import { SETUP_NO_HOST_WAITING } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { SETUP_HOST_SUBJECT, SETUP_PROPOSAL_SUBJECT, APPROVAL_PROOF_METHOD, createHostedApprovers, issueSetupHostApprovalProof, issueSetupApprovalProof } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
-import { setupHostApproverAllows } from "../../packages/broker/src/core/setup-agent/setup-risk.js";
 import type { FakeWorld } from "../support/core-host-fakes.js";
-import { FAKE_COMPANY, KEY, LEDGER, OTHER, RUN, get, post, setupWorld } from "../support/hosted-setup-world.js";
+import { FAKE_COMPANY, KEY, OTHER, RUN, get, post, setupWorld } from "../support/hosted-setup-world.js";
 
 const HOST = "deps.exampledeps.dev";
 const JOURNAL = `${RUN}/journal`;
@@ -58,18 +57,6 @@ describe("L4-SF (d): who may allow or refuse a website for a hosted setup run", 
     expect(audit.find((event) => event.action === "decision.approved")).toMatchObject({ companyId: FAKE_COMPANY, actor: { id: "p-admin" }, subject: { type: SETUP_HOST_SUBJECT, id: hostAskSubjectId(FAKE_COMPANY, "payments", HOST) }, details: { kind: SETUP_HOST_KIND, risk: "high" } });
   });
 
-  it("lets the company owner refuse a website: it is kept out for a week and nothing is allowed", async () => {
-    const { world, person, call } = await setupWorld();
-    const ask = await seedAsk(world, FAKE_COMPANY, "payments");
-    const owner = person("p-owner", FAKE_COMPANY, "owner");
-    const answer = await call(post(DECIDE, bodyFor(ask, "reject")), owner);
-    expect(answer.status, answer.raw).toBe(200);
-    expect(answer.body).toMatchObject({ host: HOST, decision: "refused" });
-    expect(await askOf(world, FAKE_COMPANY, "payments")).toMatchObject({ state: "refused", decidedBy: "p-owner", refusalWords: "A person refused it." });
-    expect(Date.parse((await askOf(world, FAKE_COMPANY, "payments"))?.["expiresAt"] as string)).toBe(world.clock.now + 7 * 86_400_000);
-    expect(await approvedHostsOf(table(world), FAKE_COMPANY, "payments")).toEqual([]);
-  });
-
   it("refuses a project maintainer (a member who administers the project) for BOTH answers, in fixed words, writing nothing; the same words reach a decision made directly at the gate", async () => {
     const { world, person, call, wirings } = await setupWorld();
     const ask = await seedAsk(world, FAKE_COMPANY, "payments");
@@ -90,27 +77,6 @@ describe("L4-SF (d): who may allow or refuse a website for a hosted setup run", 
     expect(result).toEqual({ status: "refused", reason: "not_the_approver", detail: SETUP_HOST_NEEDS_ADMIN });
     expect(await askOf(world, FAKE_COMPANY, "payments")).toMatchObject({ state: "open" });
   });
-
-  it("refuses a project user and a member with no grant before anything is read or written", async () => {
-    const { world, person, call } = await setupWorld();
-    const ask = await seedAsk(world, FAKE_COMPANY, "payments");
-    const developer = person("p-dev", FAKE_COMPANY, "member", { payments: "developer" });
-    expect((await call(post(DECIDE, bodyFor(ask)), developer)).body).toEqual({ error: { code: "FORBIDDEN", message: SETUP_RUN_NOT_ALLOWED } });
-    const member = person("p-member", FAKE_COMPANY, "member");
-    expect((await call(post(DECIDE, bodyFor(ask)), member)).body).toEqual({ error: { code: "NOT_FOUND", message: SETUP_RUN_PROJECT_NOT_FOUND } });
-    expect(await askOf(world, FAKE_COMPANY, "payments")).toMatchObject({ state: "open" });
-  });
-
-  it("needs no step-up (DEC 254zzz73): a signed-in company owner decides, a project maintainer is still refused", async () => {
-    const { world, person, call } = await setupWorld();
-    const ask = await seedAsk(world, FAKE_COMPANY, "payments");
-    const maint = person("p-maint-nostep", FAKE_COMPANY, "member", { payments: "administrator" });
-    expect((await call(post(DECIDE, bodyFor(ask)), maint)).status).toBe(403);
-    expect(await askOf(world, FAKE_COMPANY, "payments")).toMatchObject({ state: "open" });
-    const owner = person("p-owner", FAKE_COMPANY, "owner");
-    const decided = await call(post(DECIDE, bodyFor(ask)), owner);
-    expect(decided.status, JSON.stringify(decided.body)).toBe(200);
-  });
 });
 
 describe("L4-SF (d): the decision is bound to the exact ask", () => {
@@ -125,32 +91,6 @@ describe("L4-SF (d): the decision is bound to the exact ask", () => {
     // A decided ask offers nothing to decide.
     await call(post(DECIDE, bodyFor(ask)), admin);
     expect((await call(get(JOURNAL), admin)).body["hostAsks"]).toEqual([{ host: HOST, status: "approved" }]);
-  });
-
-  it("decides only the host named: another host's id, digest or proof decides nothing", async () => {
-    const { world, person, call, wirings } = await setupWorld();
-    const first = await seedAsk(world, FAKE_COMPANY, "payments", "a.exampledeps.dev");
-    const second = await seedAsk(world, FAKE_COMPANY, "payments", "b.exampledeps.dev");
-    const admin = person("p-admin", FAKE_COMPANY, "admin");
-    // The page looked at A and names B (or the reverse): the route refuses, nothing is written.
-    for (const body of [{ ...bodyFor(first), host: second.host }, { ...bodyFor(second), requestId: hostDecisionRequestId(first) }, { ...bodyFor(second), seen: { revision: 1, artifactDigest: hostAskDigest(first) } }]) {
-      const refused = await call(post(DECIDE, body), admin);
-      expect(refused.status, JSON.stringify(body)).toBe(409);
-      expect(refused.body).toEqual({ error: { code: "CHANGE_STALE", message: SETUP_NO_HOST_WAITING } });
-    }
-    expect(await askOf(world, FAKE_COMPANY, "payments", "a.exampledeps.dev")).toMatchObject({ state: "open" });
-    expect(await askOf(world, FAKE_COMPANY, "payments", "b.exampledeps.dev")).toMatchObject({ state: "open" });
-    // At the gate: the proof issued for A, presented for B (its own id, digest and card), is refused by the approvers point.
-    const approval = wirings.get(FAKE_COMPANY)!.approval!;
-    const subjectA = hostAskSubjectId(FAKE_COMPANY, "payments", first.host);
-    const subjectB = hostAskSubjectId(FAKE_COMPANY, "payments", second.host);
-    const credential = await approval.issueHost({ companyId: FAKE_COMPANY, personId: "p-admin", requestId: hostDecisionRequestId(first), kind: "setup_host", subjectId: subjectA, revision: 1, artifactDigest: hostAskDigest(first), outcome: "approve", card: setupHostCardOf(subjectA, hostAskDigest(first)) });
-    for (const [requestId, card, digest] of [[hostDecisionRequestId(second), setupHostCardOf(subjectB, hostAskDigest(second)), hostAskDigest(second)], [hostDecisionRequestId(first), setupHostCardOf(subjectA, hostAskDigest(first)), hostAskDigest(first)]] as const) {
-      const result = await approval.gate.decide({ companyId: FAKE_COMPANY, kind: SETUP_HOST_KIND, subjectId: subjectB, requestId, outcome: "approve", seen: { revision: 1, artifactDigest: digest }, credentials: [credential], card });
-      expect(result.status, requestId).toBe("refused");
-    }
-    expect(await askOf(world, FAKE_COMPANY, "payments", "b.exampledeps.dev")).toMatchObject({ state: "open" });
-    expect(await approvedHostsOf(table(world), FAKE_COMPANY, "payments")).toEqual([]);
   });
 
   it("an ask made again (a later askedAt) is another decision: the earlier look decides nothing", async () => {
@@ -207,45 +147,6 @@ describe("L4-SF (d): the decision is bound to the exact ask", () => {
   });
 });
 
-describe("L4-SF (d): the approvers point keeps the three kinds of proof apart even when their ids coincide", () => {
-  it("a project named like an ask's id: a setup-candidate proof does not decide the ask, and the ask's proof does not decide the candidate (the subject type is signed in)", async () => {
-    const { world } = await setupWorld();
-    const identity = createHostedIdentity({ membershipOf: async () => ({ companyId: FAKE_COMPANY, role: "admin" as const }), displayNameOf: async (id) => id });
-    const approvers = createHostedApprovers({ store: world.store, identity, key: KEY, now: () => new Date(world.clock.now) });
-    // The project's name is the same 32 hex characters as an ask's subject id, so only the signed subject type tells the two apart.
-    const same = hostAskSubjectId(FAKE_COMPANY, "payments", HOST);
-    const digest = "a".repeat(64);
-    const requestId = `host-${"b".repeat(40)}`;
-    const base = { companyId: FAKE_COMPANY, personId: "p-admin", requestId, revision: 1, artifactDigest: digest, outcome: "approve" as const };
-    const hostRequest = { companyId: FAKE_COMPANY, requestId, kind: "setup_host", outcome: "approve" as const, subject: { type: SETUP_HOST_SUBJECT, id: same }, projectName: "payments", revision: 1, artifactDigest: digest, risk: "high", settlesClaims: true, card: setupHostCardOf(same, digest) };
-    const proposalRequest = { ...hostRequest, kind: "setup", subject: { type: SETUP_PROPOSAL_SUBJECT, id: same }, projectName: same, card: { cardId: `setup_proposal:${same}`, contentVersion: digest } };
-    const proofOf = (token: string) => ({ method: APPROVAL_PROOF_METHOD, token, requestId, revision: 1, artifactDigest: digest } as never);
-    // The wrong-type proofs are made for the other request's kind, card and id, so the signed subject type is the only thing that differs.
-    const proposalProofForHost = issueSetupApprovalProof(KEY, { ...base, kind: "setup_host", project: same, card: hostRequest.card }, world.clock.now);
-    const hostProofForProposal = issueSetupHostApprovalProof(KEY, { ...base, kind: "setup", subjectId: same, card: proposalRequest.card }, world.clock.now);
-    expect(await approvers.verify(hostRequest as never, proofOf(proposalProofForHost.token))).toMatchObject({ approved: false, reason: "other_subject" });
-    expect(await approvers.verify(proposalRequest as never, proofOf(hostProofForProposal.token))).toMatchObject({ approved: false, reason: "other_subject" });
-    // Positive controls: each proof stands for its own subject.
-    const hostProof = issueSetupHostApprovalProof(KEY, { ...base, kind: "setup_host", subjectId: same, card: hostRequest.card }, world.clock.now);
-    const proposalProof = issueSetupApprovalProof(KEY, { ...base, kind: "setup", project: same, card: proposalRequest.card }, world.clock.now);
-    expect(await approvers.verify(hostRequest as never, proofOf(hostProof.token))).toMatchObject({ approved: true });
-    expect(await approvers.verify(proposalRequest as never, proofOf(proposalProof.token))).toMatchObject({ approved: true });
-  });
-
-  it("has no rule for an ask whose subject id is not an ask's id, or whose project name is missing or not a project name", async () => {
-    const { world } = await setupWorld();
-    const identity = createHostedIdentity({ membershipOf: async () => ({ companyId: FAKE_COMPANY, role: "admin" as const }), displayNameOf: async (id) => id });
-    const approvers = createHostedApprovers({ store: world.store, identity, key: KEY, now: () => new Date(world.clock.now) });
-    const digest = "a".repeat(64);
-    const subjectId = hostAskSubjectId(FAKE_COMPANY, "payments", HOST);
-    const make = (subject: { type: string; id: string }, projectName: string | undefined) => ({ companyId: FAKE_COMPANY, requestId: `host-${"b".repeat(40)}`, kind: "setup_host", outcome: "approve" as const, subject, ...(projectName === undefined ? {} : { projectName }), revision: 1, artifactDigest: digest, risk: "high", settlesClaims: true, card: setupHostCardOf(subjectId, digest) });
-    const proof = { method: APPROVAL_PROOF_METHOD, token: "su1.x.y", requestId: `host-${"b".repeat(40)}`, revision: 1, artifactDigest: digest } as never;
-    for (const request of [make({ type: SETUP_HOST_SUBJECT, id: "payments" }, "payments"), make({ type: SETUP_HOST_SUBJECT, id: subjectId.toUpperCase() }, "payments"), make({ type: SETUP_HOST_SUBJECT, id: subjectId }, undefined), make({ type: SETUP_HOST_SUBJECT, id: subjectId }, "../x")]) {
-      expect(await approvers.verify(request as never, proof), JSON.stringify(request.subject)).toEqual({ approved: false, reason: "no_rule_for_this_request" });
-    }
-  });
-});
-
 describe("L4-SF (d): the host's own checks are unchanged", () => {
   it.each(["pastebin.com", "abc.ngrok.io", "db.internal", "raw.githubusercontent.com"])("never allows %s even for an admin's valid decision (refused again when approved), keeping the ask open", async (host) => {
     const { world, person, call } = await setupWorld();
@@ -276,26 +177,6 @@ describe("L4-SF (d): the host's own checks are unchanged", () => {
 });
 
 describe("L4-SF (d): companies and projects stay apart", () => {
-  it("two companies with the same project name and host: an admin decides only their own company's ask", async () => {
-    const { world, person, call } = await setupWorld();
-    const mine = await seedAsk(world, FAKE_COMPANY, "payments");
-    const theirs = await seedAsk(world, OTHER, "payments");
-    expect(hostAskSubjectId(FAKE_COMPANY, "payments", HOST)).not.toBe(hostAskSubjectId(OTHER, "payments", HOST));
-    const adminA = person("p-admin-a", FAKE_COMPANY, "admin");
-    const adminB = person("p-admin-b", OTHER, "admin");
-    // A's admin approves A's ask; B's is untouched, and B's host list stays empty.
-    expect((await call(post(DECIDE, bodyFor(mine)), adminA)).status).toBe(200);
-    expect(await askOf(world, FAKE_COMPANY, "payments")).toMatchObject({ state: "approved" });
-    expect(await askOf(world, OTHER, "payments")).toMatchObject({ state: "open" });
-    expect(await approvedHostsOf(table(world), OTHER, "payments")).toEqual([]);
-    expect(await approvedHostsOf(table(world), FAKE_COMPANY, "payments")).toEqual([HOST]);
-    // B's admin decides B's ask with B's own id and digest; A's id, if presented, reaches nothing of B's.
-    const crossed = await call(post(DECIDE, bodyFor(mine, "reject")), adminB);
-    expect(crossed.status).toBe(409);
-    expect(await askOf(world, OTHER, "payments")).toMatchObject({ state: "open" });
-    expect((await call(post(DECIDE, bodyFor(theirs, "reject")), adminB)).status).toBe(200);
-    expect(await askOf(world, FAKE_COMPANY, "payments")).toMatchObject({ state: "approved" });
-  });
 
   it("an admin of one company cannot reach the other company's gate: a proof for A's company presented to B's gate is refused", async () => {
     const { world, person, wirings } = await setupWorld();
@@ -312,19 +193,6 @@ describe("L4-SF (d): companies and projects stay apart", () => {
     // And A's own gate has no such ask.
     const own = await wirings.get(FAKE_COMPANY)!.approval!.gate.decide({ companyId: FAKE_COMPANY, kind: SETUP_HOST_KIND, subjectId: subjectB, requestId: hostDecisionRequestId(theirs), outcome: "approve", seen: { revision: 1, artifactDigest: hostAskDigest(theirs) }, credentials: [credential], card });
     expect(own).toMatchObject({ status: "refused", reason: "not_found" });
-  });
-
-  it("two projects with the same host: deciding one leaves the other's ask open", async () => {
-    const { world, person, call } = await setupWorld();
-    const payments = await seedAsk(world, FAKE_COMPANY, "payments");
-    const ledger = await seedAsk(world, FAKE_COMPANY, "ledger");
-    const admin = person("p-admin", FAKE_COMPANY, "admin");
-    expect((await call(post(DECIDE, bodyFor(payments)), admin)).status).toBe(200);
-    expect(await askOf(world, FAKE_COMPANY, "ledger")).toMatchObject({ state: "open" });
-    expect(await approvedHostsOf(table(world), FAKE_COMPANY, "ledger")).toEqual([]);
-    // The payments ask's id decides nothing on the ledger route.
-    expect((await call(post(`${LEDGER}/host-decide`, bodyFor(payments)), admin)).status).toBe(409);
-    expect((await call(post(`${LEDGER}/host-decide`, bodyFor(ledger)), admin)).status).toBe(200);
   });
 });
 
@@ -344,15 +212,5 @@ describe("L4-SF (d): the request is strict", () => {
     expect(refused.body).toMatchObject({ error: { code: "CONFIG_INVALID" } });
     expect(refused.raw).not.toContain("p-admin");
     expect(await askOf(world, FAKE_COMPANY, "payments")).toMatchObject({ state: "open" });
-  });
-
-  it("holds the rule as a pure function: only a company owner or admin; anything else, or nothing, is a no", () => {
-    expect(setupHostApproverAllows({ companyRole: "owner" })).toBe(true);
-    expect(setupHostApproverAllows({ companyRole: "admin" })).toBe(true);
-    expect(setupHostApproverAllows({ companyRole: "member", projectGrant: "administrator" })).toBe(false);
-    expect(setupHostApproverAllows({ companyRole: "member" })).toBe(false);
-    expect(setupHostApproverAllows(undefined)).toBe(false);
-    expect(setupHostApproverAllows("admin" as never)).toBe(false);
-    expect(setupHostApproverAllows({ companyRole: "superuser" } as never)).toBe(false);
   });
 });

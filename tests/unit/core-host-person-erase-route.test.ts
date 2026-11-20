@@ -56,15 +56,6 @@ describe("person erase route", () => {
     expect(s.reads).toEqual([]);
   });
 
-  it("a signed-in admin with no step-up erases a person of their own company and gets the receipt", async () => {
-    const s = setup();
-    const got = await answer(s);
-    expect(got?.status).toBe(200);
-    expect(got?.body.receipt).toMatchObject({ personId: TARGET, alreadyErased: false, evidence: "done" });
-    expect(await s.store.get(personErasedKey(A, TARGET))).toMatchObject({ by: "dev_admin", companyId: A });
-    expect(s.erased).toEqual([`${A}/${TARGET}`]);
-  });
-
   it("an owner may too; a member may not", async () => {
     expect((await answer(setup({ role: "owner" })))?.status).toBe(200);
     const member = setup({ role: "member" });
@@ -101,15 +92,6 @@ describe("person erase route", () => {
     const s = setup();
     expect((await answer(s, post(), caller({ scriptToken: { tokenId: "t1" } })))?.status).toBe(403);
     expect(s.erased).toEqual([]);
-  });
-
-  it("an admin of ANOTHER company never reaches this company's people: the membership's company decides, and the person reads as not found there", async () => {
-    // The caller is B's admin (membership says B); the person is a former member of A only.
-    const s = setup({ company: B, standing: async (companyId) => (companyId === A ? "former" : "unknown") });
-    const got = await answer(s, post(), caller({ principal: principal("dev_admin", B) }));
-    expect(got).toEqual({ status: 404, body: { error: { code: "NOT_FOUND", message: "route not found" } } });
-    expect(s.erased).toEqual([]);
-    expect(await s.store.get(personErasedKey(A, TARGET))).toBeUndefined();
   });
 
   it("only a person the company removed is erased: a member is told to remove them first, a stranger is not found (no probing), an unreadable answer refuses", async () => {

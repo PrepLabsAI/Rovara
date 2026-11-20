@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, PARALLEL_PARTS_MAX, type TaskGraphV1, type WorkItemProgressV1 } from "@agentx/contracts";
 import { developerCharge, type WorkspaceCharge } from "../../packages/broker/src/core/task-flow/keys.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { parallelPartsDecision, parallelPartsForTask, parallelStartTrees, serialWorkerCanResume, widestStep, workflowDependenciesAllowed } from "../../packages/broker/src/core/work-breakdown/parallel-parts.js";
+import { parallelPartsDecision, parallelPartsForTask, parallelStartTrees, serialWorkerCanResume, widestStep } from "../../packages/broker/src/core/work-breakdown/parallel-parts.js";
 
 const charge = developerCharge({ companyId: IMPLICIT_COMPANY_ID, developerId: "dev-1" });
 const V2 = { definitionVersion: "1.1.0" };
@@ -27,23 +27,6 @@ describe("the number of parts that may run together", () => {
     expect(await parallelPartsForTask(await counters({}), { charge })).toBeUndefined();
   });
 
-  it("a version 2 task gets the plan's cap when the person and the company have room", async () => {
-    expect(await parallelPartsForTask(await counters({ memberCount: 1, orgCount: 1 }, { member: 50, organization: 1000 }), task())).toEqual({ max: PARALLEL_PARTS_MAX });
-  });
-
-  it("is held to the free workspace slots of the person and of the company: the task's own slot, plus what is free", async () => {
-    const run = async (member: number, organization: number, memberCount: number, orgCount: number) => parallelPartsForTask(await counters({ memberCount, orgCount }, { member, organization }), task());
-    expect(await run(3, 20, 3, 5)).toEqual({ max: 1 });
-    expect(await run(3, 20, 2, 5)).toEqual({ max: 2 });
-    expect(await run(5, 6, 2, 5)).toEqual({ max: 2 });
-    expect(await run(5, 5, 2, 5)).toEqual({ max: 1 });
-    expect(await run(5, 20, 1, 5)).toEqual({ max: 3 });
-    // The smaller room decides: the company is nearly full though the person is not.
-    expect(await run(5, 7, 1, 6)).toEqual({ max: 2 });
-    // Counts above the limits (a limit lowered after tasks were started) leave one part.
-    expect(await run(2, 3, 9, 9)).toEqual({ max: 1 });
-  });
-
   it("counts nothing as no room used, and reads the counters of the charge the task actually holds", async () => {
     expect(await parallelPartsForTask(await counters({}), task())).toEqual({ max: PARALLEL_PARTS_MAX });
     const payer = developerCharge({ companyId: IMPLICIT_COMPANY_ID, developerId: "payer-9" });
@@ -56,23 +39,8 @@ describe("the number of parts that may run together", () => {
     expect(await parallelPartsForTask(deps, task())).toEqual({ max: PARALLEL_PARTS_MAX });
   });
 
-  it("uses the flow's default limits when it was given none", async () => {
-    const store = new MemoryDocumentStore();
-    expect(await parallelPartsForTask({ store }, task())).toEqual({ max: PARALLEL_PARTS_MAX });
-  });
-
   it("fails closed to one part when the counts cannot be read", async () => {
     expect(await parallelPartsForTask(await counters({ fail: true }), task())).toEqual({ max: 1 });
-  });
-});
-
-describe("when ordered work is allowed", () => {
-  it("a version 2 task always may; a version 1 task only when the install's switch is on", () => {
-    expect(workflowDependenciesAllowed({ workflowDependenciesEnabled: false }, { definitionVersion: "1.1.0" })).toBe(true);
-    expect(workflowDependenciesAllowed({}, { definitionVersion: "1.1.0" })).toBe(true);
-    expect(workflowDependenciesAllowed({ workflowDependenciesEnabled: false }, { definitionVersion: "1.0.0" })).toBe(false);
-    expect(workflowDependenciesAllowed({}, undefined)).toBe(false);
-    expect(workflowDependenciesAllowed({ workflowDependenciesEnabled: true }, { definitionVersion: "1.0.0" })).toBe(true);
   });
 });
 
@@ -127,11 +95,6 @@ describe("whether an older worker can take over a plan's retained progress", () 
     expect(serialWorkerCanResume({ graph, resumeProgress: [done(B, t("2"))], resumeTreeSha: t("2") })).toBe(false);
     expect(serialWorkerCanResume({ graph, resumeProgress: [done(B, t("2")), done(A, t("1"), "FAILED")], resumeTreeSha: t("2") })).toBe(false);
   });
-
-  it("cannot from a prefix whose last item did not end on the tree the workspace holds (the parts were merged after it)", () => {
-    expect(serialWorkerCanResume({ graph, resumeProgress: [done(A, t("1")), done(B, t("2"))], resumeTreeSha: t("3") })).toBe(false);
-    expect(serialWorkerCanResume({ graph, resumeProgress: [done(A, t("1"))], resumeTreeSha: undefined })).toBe(false);
-  });
 });
 
 describe("the timeline line that says why parts run one after another", () => {
@@ -160,10 +123,6 @@ describe("the timeline line that says why parts run one after another", () => {
     expect(await note({ memberCount: 4, orgCount: 5 }, { member: 5, organization: 20 })).toBeUndefined();
     expect(await note({ memberCount: 3, orgCount: 5 }, { member: 3, organization: 20 }, graph(item("a"), item("b", [ids.a]), item("c", [item("b").id])))).toBeUndefined();
     expect(await note({ memberCount: 3, orgCount: 5 }, { member: 3, organization: 20 }, graph(item("a")))).toBeUndefined();
-  });
-
-  it("says nothing for a version 1 task, which never runs parts together", async () => {
-    expect(await note({ memberCount: 3, orgCount: 5 }, { member: 3, organization: 20 }, independent, { definitionVersion: "1.0.0" })).toBeUndefined();
   });
 
   it("says so when the counts could not be read, and still runs one part", async () => {

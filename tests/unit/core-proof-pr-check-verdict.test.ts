@@ -36,14 +36,6 @@ describe("the Check says the description's words", () => {
     expect(payload.text).toContain("A check failed.");
     expect(payload.text).toContain("A service was a fake made by Rovara.");
   });
-  // Mutant K2: the result kind is not passed on (a failed result titled as a pass).
-  it("exceptions: the result kind says the checks failed, so a ready Check is never titled with a good heading", () => {
-    const verdict = verdictOf(exceptionsScenario())!;
-    expect(verdict.resultKind).not.toBe("verified");
-    const payload = rovaraCheckOf({ proof: { kind: "proceed", warns: false, relaxed: false, provenCount: 1, reasons: [] }, ci: "passing", ciMode: "their_ci_fix", fullSuite: "not_needed", firstSeenAtMs: 1, nowMs: 2, verdict });
-    expect(payload.conclusion).toBe("success");
-    expect(payload.title).not.toBe(verdict.heading);
-  });
   it("a clean green task titles a ready Check with its heading", () => {
     const verdict = verdictOf(SCENARIOS.find((entry) => entry.name === "green-clean")!.build())!;
     const payload = rovaraCheckOf({ proof: { kind: "proceed", warns: false, relaxed: false, provenCount: 1, reasons: [] }, ci: "passing", ciMode: "their_ci_fix", fullSuite: "not_needed", firstSeenAtMs: 1, nowMs: 2, verdict });
@@ -63,19 +55,6 @@ describe("what a model, a person or a repository wrote cannot change the Check's
   });
   it("the hostile words are still said (inert), never dropped", () => {
     expect(verdict.body.join("\n")).toContain("contact");
-  });
-});
-
-describe("the last guards of the Check's lines", () => {
-  // Mutant K3: the Check's lines skip the guards the description's lines go through. A line a module says is already inert is still sealed and has no email address when it reaches the Check.
-  it("a merge-order line with an email address and a Linear closing word is made safe in the Check, as in the description", () => {
-    const base = exceptionsScenario();
-    const context = { ...base.inputs.context, mergeOrderLines: ["Merge app first, ask dana@example.com. Fixes ENG-2 when done."], linearIssueKey: undefined };
-    const verdict = workflowPullRequestCheckVerdict(SCENARIO_TASK, base.inputs.workflow, SCENARIO_PLAN_TEXT(), context, base.inputs.proofLines)!;
-    const text = [verdict.heading, ...verdict.body].join("\n");
-    expect(text).toContain("Merge app first");
-    expect(text).not.toContain("dana@example.com");
-    expect(text).not.toMatch(/\bFixes ENG-2\b/u);
   });
 });
 

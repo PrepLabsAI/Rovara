@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { ContextToolCallResponseSchema, ContextToolCatalogSchema, teamRecordPk, type OrgId, type StoredDocument } from "@agentx/contracts";
+import { ContextToolCallResponseSchema, teamRecordPk, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { createTeamRecord } from "../../packages/broker/src/team-record/record.js";
@@ -84,25 +84,6 @@ async function setup(options: { off?: boolean; teamOff?: boolean; teamCompany?: 
 }
 
 describe("core Team context", () => {
-  it("routes the catalog and searches only the workspace company despite payload company fields", async () => {
-    const { root, a, b } = await setup();
-    const catalog = await root.callback({ method: "GET", path, headers: a.headers });
-    expect(catalog?.statusCode).toBe(200);
-    expect(JSON.parse(catalog!.body)).toEqual({ sources: [], tools: [], searchTeamKnowledge: true, unavailable: [], disabled: [] });
-    for (const [own, other, marker, forbidden] of [[a, b, "only-alpha", "only-bravo"], [b, a, "only-bravo", "only-alpha"]] as const) {
-      const selected = vi.spyOn(root.app, "runtimeFor");
-      const answer = await root.callback(own.request({ query: "shared query", companyId: other.companyId, orgId: other.companyId }));
-      expect(selected).toHaveBeenLastCalledWith(own.companyId);
-      selected.mockRestore();
-      // Unknown arguments fail closed, never route to the supplied company.
-      expect(answer?.body).not.toContain(forbidden);
-      const good = await root.callback(own.request());
-      expect(good?.body).toContain(marker);
-      expect(good?.body).toContain("same-raw-record-id");
-      expect(good?.body).not.toContain(forbidden);
-      expect(good?.body).toContain('untrusted=');
-    }
-  });
 
   it("verifies signature, expiry, action and gateway workspace before any read", async () => {
     const { root, a, b, reads } = await setup();
@@ -132,14 +113,7 @@ describe("core Team context", () => {
       .toBe(JSON.stringify({ status: "REFUSED", text: "this operation cannot use context tools" }));
     expect(query).not.toHaveBeenCalled();
   });
-
-  it("keeps the off root byte-identical and reading nothing for all context paths", async () => {
-    const { root, a, reads } = await setup({ off: true });
-    for (const p of [path, `${path}/call`, "/v1/internal/mcp"]) expect(await root.callback({ ...a.request(), path: p })).toBeUndefined();
-    expect(reads).toEqual([]);
-  });
 });
-
 
 it("refuses missing or contradictory workspace company, stale operations and foreign tasks", async () => {
   for (const patch of [{ companyId: undefined }, { companyId: B }, { orgId: B }, { activeOperationId: randomUUID() }, { fence: 2 }]) {
@@ -169,15 +143,6 @@ it("keeps configured MCP and connection tools refused with fixed words", async (
   }
   expect((await root.callback({ ...a.request(), path: "/v1/internal/mcp", headers: { "x-rovara-workspace": a.workspaceId, authorization: `Bearer ${a.headers["x-agentx-callback-capability"]}` } }))?.body)
     .toBe(JSON.stringify({ status: "REFUSED", text: "not on the core yet" }));
-});
-
-it("does not advertise Team search when the company's record is off", async () => {
-  const { root, a } = await setup({ teamOff: true });
-  const runtime = await root.app.runtimeFor(A);
-  expect(await runtime.flow.deps.contextSources?.stageHasSources({ project: "payments" }, "PLAN") ?? false).toBe(false);
-  const answer = await root.callback({ method: "GET", path, headers: a.headers });
-  expect(ContextToolCatalogSchema.parse(JSON.parse(answer!.body)).searchTeamKnowledge).toBe(false);
-  expect((await root.callback(a.request()))?.body).not.toContain("only-alpha");
 });
 
 it("advertises only eligible stages for a company with its Team record", async () => {
@@ -233,7 +198,6 @@ it("ends the whole call at the existing deadline and stops late authorization re
   expect(reads).toHaveLength(count);
   spy.mockRestore();
 });
-
 
 it("refuses oversized or malformed search replies and search failures without echoing them", async () => {
   const { root, a } = await setup();

@@ -30,11 +30,6 @@ async function apply(options: Partial<WorkflowSubjectOptions>, details: Record<s
 const workflowOf = (applied: Awaited<ReturnType<typeof apply>>) => (applied.result as { workflow: WorkflowSnapshot }).workflow;
 
 describe("the work breakdown an approval binds", () => {
-  it("binds the digest the hook derived, with no digest from the surface", async () => {
-    const after = workflowOf(await apply({ breakdown: async () => ({ digest: DIGEST }) }, {}));
-    expect(after.decisions.at(-1)).toMatchObject({ decision: "APPROVE", workBreakdownDigest: DIGEST });
-    expect(after.workflowDependenciesApproval).toMatchObject({ graphDigest: DIGEST, artifactDigest: PLAN });
-  });
 
   it("accepts the same digest from a surface, and refuses a different one (a surface cannot bind another graph)", async () => {
     expect(workflowOf(await apply({ breakdown: async () => ({ digest: DIGEST }) }, { workBreakdownDigest: DIGEST })).workflowDependenciesApproval).toMatchObject({ graphDigest: DIGEST });

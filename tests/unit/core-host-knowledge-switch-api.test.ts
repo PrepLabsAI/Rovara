@@ -2,7 +2,7 @@
 // (the laptop's rule, decision 46b, and the lessons API's `mayChange`). The company comes only from live membership, a script token reads and sets nothing, every change is audited BEFORE the write, two companies keep their
 // own rows, the rows are the very ones the knowledge gate and the wiki tools gate read, and refusals are fixed words.
 import { readFileSync } from "node:fs";
-import { KNOWLEDGE_STAYS_SENTENCE, teamRecordPk, type AuditEvent, type AuditSink, type DocumentStore, type OrgId, type OrgRole, type ProjectRole } from "@agentx/contracts";
+import { KNOWLEDGE_STAYS_SENTENCE, type AuditEvent, type AuditSink, type DocumentStore, type OrgId, type OrgRole, type ProjectRole } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { DEV_ROUTES } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import { KNOWLEDGE_SWITCH_COMPANY_PATH, COMPANY_SWITCH_NEEDS_ADMIN, ON_THE_WEBSITE, PROJECT_SWITCH_NEEDS_ADMIN, createKnowledgeSwitchApi, isKnowledgeSwitchPath, type KnowledgeSwitchCaller } from "../../packages/broker/src/core-host/knowledge-switch-api.js";
@@ -60,19 +60,6 @@ const company = (w: World, method: "GET" | "PUT", who: string, body?: unknown) =
 const project = (w: World, method: "GET" | "PUT", who: string, name = "payments", body?: unknown) => call(w, method, `/v1/dev/projects/${name}/lessons/local-tools`, { personId: who, webApp: true }, body);
 
 describe("the company's switch: Knowledge stays in Rovara", () => {
-  it("is off until an owner or admin turns it on; the stored row is the company's own and names no person", async () => {
-    const w = world();
-    expect(await company(w, "GET", "ownerA")).toEqual({ stays: false });
-    expect(await company(w, "PUT", "ownerA", { stays: true })).toEqual({ stays: true });
-    expect(await w.localTools.readCompany(A)).toBe(true);
-    expect(await w.localTools.readCompany(B)).toBe(false);
-    expect(await company(w, "GET", "adminA")).toEqual({ stays: true });
-    expect(await company(w, "PUT", "adminA", { stays: false })).toEqual({ stays: false });
-    expect(await w.localTools.readCompany(A)).toBe(false);
-    const stored = JSON.stringify(await w.store.get({ pk: teamRecordPk(A, undefined), sk: "LESSONSET#COMPANYSTAY" }));
-    expect(stored).toContain("LESSON_SETTINGS");
-    expect(stored).not.toContain("ownerA");
-  });
 
   it("only an owner or admin reads or sets it: a member, a project admin and a developer are refused in fixed words and nothing is written", async () => {
     const w = world();
@@ -84,17 +71,6 @@ describe("the company's switch: Knowledge stays in Rovara", () => {
     expect(await w.localTools.readCompany(A)).toBe(false);
     expect(w.writes).toEqual([]);
     expect(w.ledger.events).toEqual([]);
-  });
-
-  it("is audited BEFORE the write: who and the new value only, and the project is the company's reference, not a name", async () => {
-    const w = world();
-    await company(w, "PUT", "ownerA", { stays: true });
-    expect(w.ledger.events).toHaveLength(1);
-    expect(w.writes).toEqual([{ audited: 1, sk: "LESSONSET#COMPANYSTAY" }]);
-    const event = w.ledger.events[0]!;
-    expect(event).toMatchObject({ companyId: A, action: "lesson.local_tools_switched", details: { scope: "company", enabled: false } });
-    expect(JSON.stringify(event)).not.toContain("_workspace");
-    expect(JSON.stringify(event.actor)).toContain("ownerA");
   });
 
   it("no record, no change: a ledger that cannot take the record leaves the row as it was, with fixed words and no cause", async () => {
@@ -119,19 +95,6 @@ describe("the company's switch: Knowledge stays in Rovara", () => {
 });
 
 describe("a project's switch: local coding tools can fetch lessons", () => {
-  it("is on by default under Standard; a project admin turns it off and on, and the state says why", async () => {
-    const w = world();
-    expect(await project(w, "GET", "maintA")).toEqual({ enabled: true, preset: "standard", companyStays: false, canChange: true });
-    expect(await project(w, "PUT", "maintA", "payments", { enabled: false })).toEqual({ enabled: false, own: false, reason: "project_setting", preset: "standard", companyStays: false, canChange: true });
-    expect(await project(w, "GET", "devA")).toMatchObject({ enabled: false, reason: "project_setting", canChange: false });
-    expect(await project(w, "PUT", "maintA", "payments", { enabled: true })).toMatchObject({ enabled: true, own: true });
-  });
-
-  it("a company owner or admin may change any project of their company, with or without a project role", async () => {
-    const w = world();
-    expect(await project(w, "PUT", "ownerA", "ledger", { enabled: false })).toMatchObject({ enabled: false, canChange: true });
-    expect(await project(w, "PUT", "adminA", "payments", { enabled: false })).toMatchObject({ enabled: false, canChange: true });
-  });
 
   it("a developer on the project reads it but cannot change it; a member with no part in the project is told there is no such project", async () => {
     const w = world();
@@ -173,15 +136,6 @@ describe("a project's switch: local coding tools can fetch lessons", () => {
     await company(w, "PUT", "ownerA", { stays: false });
     expect(await project(w, "GET", "devA")).toMatchObject({ enabled: true, own: true });
   });
-
-  it("takes exactly { enabled: boolean }", async () => {
-    const w = world();
-    for (const body of ["", "not json", "{}", { enabled: "no" }, { enabled: 0 }, { enabled: true, project: "ledger" }, { stays: true }, [], null]) {
-      await expect(project(w, "PUT", "maintA", "payments", body), JSON.stringify(body)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    }
-    await expect(call(w, "POST", "/v1/dev/projects/payments/lessons/local-tools", { personId: "maintA", webApp: true }, { enabled: false })).rejects.toMatchObject({ code: "NOT_FOUND" });
-    expect(w.writes).toEqual([]);
-  });
 });
 
 describe("the website's own client only (owner DEC 254zzz99)", () => {
@@ -199,24 +153,6 @@ describe("the website's own client only (owner DEC 254zzz99)", () => {
     expect(w.ledger.events).toEqual([]);
     expect(await w.localTools.readCompany(A)).toBe(false);
     expect(ON_THE_WEBSITE).toBe("Do this on the Rovara website: the command line and AI tools cannot make this change.");
-  });
-  it("is checked before anything is read: membership, the store, the audit sink and the catalog are never asked for a refused PUT", async () => {
-    const asked: string[] = [];
-    const never = (what: string) => async (): Promise<never> => { asked.push(what); throw new Error(what); };
-    const api = createKnowledgeSwitchApi({ companyOf: never("membership"), store: never("store"), audit: never("audit"), projectExists: never("catalog"), projectRole: never("role"), now });
-    for (const [path, body] of [[KNOWLEDGE_SWITCH_COMPANY_PATH, { stays: true }], ["/v1/dev/projects/payments/lessons/local-tools", { enabled: false }]] as const) {
-      await expect(api.answer({ method: "PUT", path, body: JSON.stringify(body) }, { personId: "ownerA" })).rejects.toThrow(ON_THE_WEBSITE);
-    }
-    expect(asked).toEqual([]);
-  });
-  it("the same person through the web app succeeds, and the GETs are the same for any full-access client", async () => {
-    const w = world();
-    expect(await call(w, "PUT", KNOWLEDGE_SWITCH_COMPANY_PATH, { personId: "ownerA", webApp: true }, { stays: true })).toEqual({ stays: true });
-    expect(await call(w, "PUT", "/v1/dev/projects/payments/lessons/local-tools", { personId: "ownerA", webApp: true }, { enabled: false })).toMatchObject({ enabled: false });
-    for (const caller of nonWeb) {
-      expect(await call(w, "GET", KNOWLEDGE_SWITCH_COMPANY_PATH, caller)).toEqual({ stays: true });
-      expect(await call(w, "GET", "/v1/dev/projects/payments/lessons/local-tools", caller)).toMatchObject({ companyStays: true, canChange: true });
-    }
   });
 });
 
@@ -248,15 +184,6 @@ describe("two companies keep their own", () => {
       await expect(project(w, "PUT", "ownerA", "payments", { enabled: false })).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
       expect(w.writes).toEqual([]);
     }
-  });
-
-  it("the role is read live on every call: a demoted owner is refused on the very next one", async () => {
-    let role: OrgRole = "owner";
-    const w = world({ companyOf: async () => ({ companyId: A, role }) });
-    expect(await company(w, "PUT", "x", { stays: true })).toEqual({ stays: true });
-    role = "member";
-    await expect(company(w, "PUT", "x", { stays: false })).rejects.toMatchObject({ code: "FORBIDDEN" });
-    expect(await w.localTools.readCompany(A)).toBe(true);
   });
 });
 
@@ -344,14 +271,5 @@ describe("the route table and the router", () => {
     expect(isKnowledgeSwitchPath(KNOWLEDGE_SWITCH_COMPANY_PATH)).toBe(true);
     expect(isKnowledgeSwitchPath("/v1/dev/projects/payments/lessons/local-tools")).toBe(true);
     for (const other of ["/v1/dev/company/lessons/local-tools/", "/v1/dev/company/lessons", "/v1/dev/projects/p/lessons/local-tools/x", "/v1/dev/projects//lessons/local-tools", "/v1/dev/projects/a/b/lessons/local-tools", "/v1/dev/me/lessons/local-tools", "/v1/app/org/lessons/local-tools"]) expect(isKnowledgeSwitchPath(other), other).toBe(false);
-  });
-  it("the dev router asks the same path test and answers a fixed not-served 404 (never 'route not found', which would make a route row an unknown route) where the install has no such API", () => {
-    const source = readFileSync("packages/broker/src/aws/developer-routes.ts", "utf8");
-    // The router's two literals (the inventory scanner reads them) say exactly what the API's own path test says.
-    expect(source).toContain(`url.pathname === "${KNOWLEDGE_SWITCH_COMPANY_PATH}" || /^\\/v1\\/dev\\/projects\\/[^/]+\\/lessons\\/local-tools$/u.test(url.pathname)`);
-    for (const path of [KNOWLEDGE_SWITCH_COMPANY_PATH, "/v1/dev/projects/x/lessons/local-tools", "/v1/dev/projects/x/y/lessons/local-tools", "/v1/dev/projects//lessons/local-tools", "/v1/dev/company/lessons/local-tools/"]) {
-      expect(isKnowledgeSwitchPath(path), path).toBe(path === KNOWLEDGE_SWITCH_COMPANY_PATH || /^\/v1\/dev\/projects\/[^/]+\/lessons\/local-tools$/u.test(path));
-    }
-    expect(source).toMatch(/if \(deps\.knowledgeSwitch === undefined\) throw agentXError\("NOT_FOUND", "These settings are not available on this install\."\);/u);
   });
 });

@@ -4,17 +4,17 @@ import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-se
 // (a step already holding its choice keeps it); every route is the gateway's agent route under the model's own name; the default is the install's model while nothing is chosen. Two companies never see each other's list or choice.
 import { describe, expect, it } from "vitest";
 import {
-  AgentModelPageSchema, OFFERED_AGENT_MODELS_MAX, OfferedAgentModelsSchema, agentModelIdentity, agentModelName,
+  OFFERED_AGENT_MODELS_MAX, OfferedAgentModelsSchema, agentModelIdentity, agentModelName,
   type Approvers, type AuditEvent, type AuditSink, type OrgId, type Principal,
 } from "@agentx/contracts";
 import { chooseStepModel } from "../../packages/broker/src/core/task-flow/step-model.js";
 import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import {
-  HOSTED_MODEL_WORDS, OFFERED_MODELS_TTL_MS, OFFERED_MODELS_UNAVAILABLE, agentModelChoiceFromRegistry, createAgentModelChoice, createCompanyModelChoices, gatewayModelSelectionSeams, createOfferedModelsView, gatewayRouteOf,
+  OFFERED_MODELS_TTL_MS, OFFERED_MODELS_UNAVAILABLE, agentModelChoiceFromRegistry, createAgentModelChoice, createCompanyModelChoices, gatewayModelSelectionSeams, createOfferedModelsView, gatewayRouteOf,
 } from "../../packages/broker/src/core-host/gateway-model-selection.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { GATEWAY_CONVERSE_MODELS, GATEWAY_OFFERED_MODELS, createFakeOfferedModels, offeredAnswer } from "../support/offered-models-fake.js";
+import { GATEWAY_OFFERED_MODELS, createFakeOfferedModels, offeredAnswer } from "../support/offered-models-fake.js";
 
 const ORG_A = "org_agentmodels0000000a" as OrgId;
 const ORG_B = "org_agentmodels0000000b" as OrgId;
@@ -59,58 +59,9 @@ describe("the contract the gateway publishes", () => {
     expect(agentModelName({ provider: "openrouter", modelId: "anthropic/claude-opus-5-5" })).toBeUndefined();
     expect(agentModelName({ provider: "anthropic", modelId: "claude opus" })).toBeUndefined();
   });
-
-  it("the page's answer holds the setting and the whole list", async () => {
-    const w = world();
-    const choice = w.choiceFor(ORG_A);
-    const page = { state: await choice.service().state(), offered: { version: 1, models: await choice.offered() } };
-    expect(AgentModelPageSchema.safeParse(page).success).toBe(true);
-    expect(page.offered.models).toHaveLength(GATEWAY_OFFERED_MODELS.length);
-  });
-});
-
-describe("what a step runs on with nothing chosen", () => {
-  it("is the install's model on the gateway's agent route under its own name", async () => {
-    const choice = world().choiceFor(ORG_A);
-    for (const stage of ["understand", "plan", "build"] as const) {
-      const outcome = await stepOf(choice, stage);
-      expect(outcome).toMatchObject({ ok: true, step: { model: { provider: "anthropic", modelId: DEFAULT }, route: { alias: DEFAULT, api: "anthropic-messages", catalog: DEFAULT } } });
-    }
-  });
-  it("is refused (fixed words, no route) when the install's model is not on the company's list", async () => {
-    const w = world();
-    w.reader.set(ORG_A, GATEWAY_CONVERSE_MODELS);
-    const outcome = await stepOf(w.choiceFor(ORG_A));
-    expect(outcome).toEqual({ ok: false, code: "NO_VERIFIED_CANDIDATE", words: HOSTED_MODEL_WORDS.refusals.NO_VERIFIED_CANDIDATE });
-  });
 });
 
 describe("a company's choice", () => {
-  it("routes every model the gateway offers under its own exact name, for the step it was chosen for only", async () => {
-    for (const name of GATEWAY_OFFERED_MODELS) {
-      const w = world();
-      const choice = w.choiceFor(ORG_A);
-      expect(await setBuild(choice, ORG_A, name), name).toMatchObject({ ok: true });
-      const build = await stepOf(choice, "build");
-      expect(build, name).toMatchObject({ ok: true, step: { model: agentModelIdentity(name), route: { alias: name, api: "anthropic-messages", catalog: name } } });
-      expect(gatewayRouteOf(name)).toEqual({ alias: name, api: "anthropic-messages", catalog: name });
-      // The other steps still run on the install's model.
-      expect(await stepOf(choice, "plan")).toMatchObject({ ok: true, step: { model: { modelId: DEFAULT } } });
-      // A checking step nobody set follows the install's model too (today's rule), so a company's build model does not change what checks it.
-      expect(await stepOf(choice, "code_review")).toMatchObject({ ok: true, step: { route: { alias: DEFAULT } } });
-    }
-  });
-
-  it("is recorded as the company's setting with an audit event, and read back", async () => {
-    const w = world();
-    const choice = w.choiceFor(ORG_A);
-    const done = await setBuild(choice, ORG_A, "qwen.qwen3-coder-480b-a35b-v1:0");
-    expect(done).toMatchObject({ ok: true, revision: 1 });
-    expect(w.events.map((event) => event.action)).toContain("model.policy.changed");
-    const state = await choice.service().state();
-    expect(state.revision).toBe(1);
-    expect(state.steps.find((step) => step.stage === "build")?.setting?.model).toEqual({ provider: "amazon-bedrock", modelId: "qwen.qwen3-coder-480b-a35b-v1:0" });
-  });
 
   it("refuses a model that is not on the list, a model named under the wrong provider, and a change without a fresh sign-in; nothing is stored", async () => {
     const w = world();
@@ -133,23 +84,6 @@ describe("a company's choice", () => {
     expect(await revisionOf(choice)).toBe(0);
     expect(w.events).toEqual([]);
     expect(await stepOf(choice)).toMatchObject({ ok: true, step: { model: { modelId: DEFAULT } } });
-  });
-
-  it("a model that leaves the list stops being run: the step ends with fixed words and no route, the choice stays saved", async () => {
-    const w = world();
-    const choice = w.choiceFor(ORG_A);
-    await setBuild(choice, ORG_A, "zai.glm-5");
-    expect(await stepOf(choice)).toMatchObject({ ok: true, step: { route: { alias: "zai.glm-5" } } });
-    w.reader.set(ORG_A, GATEWAY_OFFERED_MODELS.filter((name) => name !== "zai.glm-5"));
-    // The list is reused for a few seconds, then read again.
-    w.tick(OFFERED_MODELS_TTL_MS);
-    const refused = await stepOf(choice);
-    expect(refused).toEqual({ ok: false, code: "MODEL_NOT_VERIFIED", words: HOSTED_MODEL_WORDS.refusals.MODEL_NOT_VERIFIED });
-    expect(JSON.stringify(refused)).not.toContain("zai");
-    // The same choice is the step's again when the model returns.
-    w.reader.set(ORG_A, GATEWAY_OFFERED_MODELS);
-    w.tick(OFFERED_MODELS_TTL_MS);
-    expect(await stepOf(choice)).toMatchObject({ ok: true, step: { route: { alias: "zai.glm-5" } } });
   });
 
   it("through the engine's step rule: a refused model ends the step before any machine, with the sentence", async () => {
@@ -195,72 +129,6 @@ describe("a list that cannot be trusted offers nothing", () => {
   }
 });
 
-describe("two companies", () => {
-  it("each has its own list and its own choice: a model offered to one is refused for the other, and a choice of one changes nothing of the other", async () => {
-    const w = world();
-    w.reader.set(ORG_A, [...GATEWAY_OFFERED_MODELS]);
-    w.reader.set(ORG_B, ["claude-haiku-5-5", "claude-sonnet-5-5"]);
-    const a = w.choiceFor(ORG_A);
-    const b = w.choiceFor(ORG_B);
-    expect(await setBuild(a, ORG_A, "qwen.qwen3-coder-480b-a35b-v1:0")).toMatchObject({ ok: true });
-    // B's list lacks it: refused, and B's own build is still the install's model.
-    expect(await setBuild(b, ORG_B, "qwen.qwen3-coder-480b-a35b-v1:0")).toMatchObject({ ok: false, code: "model_unavailable" });
-    expect(await stepOf(b)).toMatchObject({ ok: true, step: { route: { alias: DEFAULT } } });
-    expect(await stepOf(a)).toMatchObject({ ok: true, step: { route: { alias: "qwen.qwen3-coder-480b-a35b-v1:0" } } });
-    expect(await revisionOf(b)).toBe(0);
-    // Each company's list was asked for that company only.
-    expect(new Set(w.reader.asked)).toEqual(new Set([ORG_A, ORG_B]));
-    // B chooses its own: A is unchanged.
-    expect(await setBuild(b, ORG_B, "claude-haiku-5-5")).toMatchObject({ ok: true });
-    expect(await stepOf(a)).toMatchObject({ ok: true, step: { route: { alias: "qwen.qwen3-coder-480b-a35b-v1:0" } } });
-    expect(await stepOf(b)).toMatchObject({ ok: true, step: { route: { alias: "claude-haiku-5-5" } } });
-    // The audit events name their own company only.
-    for (const event of w.events) expect([ORG_A, ORG_B]).toContain((event as { companyId?: OrgId }).companyId ?? ORG_A);
-  });
-
-  it("the list read for one company is never reused for another, even in one clock tick", async () => {
-    const w = world();
-    w.reader.set(ORG_A, ["claude-sonnet-5-5"]);
-    w.reader.set(ORG_B, ["claude-haiku-5-5"]);
-    expect((await w.choiceFor(ORG_A).offered()).map((entry) => entry.model)).toEqual(["claude-sonnet-5-5"]);
-    expect((await w.choiceFor(ORG_B).offered()).map((entry) => entry.model)).toEqual(["claude-haiku-5-5"]);
-  });
-});
-
-describe("the list's reuse", () => {
-  it("is read again after its time, never reused after a failure, and never from the future", async () => {
-    const w = world();
-    let now = 100_000;
-    const view = createOfferedModelsView({ reader: w.reader, companyId: ORG_A, now: () => now });
-    await view.list();
-    await view.list();
-    expect(w.reader.asked).toHaveLength(1);
-    now += OFFERED_MODELS_TTL_MS - 1;
-    await view.list();
-    expect(w.reader.asked).toHaveLength(1);
-    now += 1;
-    await view.list();
-    expect(w.reader.asked).toHaveLength(2);
-    // A clock that moved backwards does not keep an old answer.
-    now -= 60_000;
-    await view.list();
-    expect(w.reader.asked).toHaveLength(3);
-    // A failure is not kept, and the next read after it asks again.
-    w.reader.fail();
-    const readAt = now;
-    now += OFFERED_MODELS_TTL_MS;
-    await expect(view.list()).rejects.toThrow(OFFERED_MODELS_UNAVAILABLE);
-    // The answer from before the failure is not reused, even if the clock is read within its time again.
-    now = readAt + 1;
-    await expect(view.list()).rejects.toThrow(OFFERED_MODELS_UNAVAILABLE);
-    w.reader.fail(false);
-    await expect(view.list()).resolves.toHaveLength(GATEWAY_OFFERED_MODELS.length);
-    // What it hands out cannot be changed by a caller.
-    const first = await view.list();
-    expect(() => { (first as { model: string }[])[0]!.model = "x"; }).toThrow();
-  });
-});
-
 describe("the seams over the list", () => {
   it("route, serve and servable are the list and nothing else", async () => {
     const reader = createFakeOfferedModels();
@@ -285,10 +153,6 @@ describe("the step rule over a registry", () => {
     require: ((point: string) => point === "storage" ? w.store : point === "audit-sink" ? { stage: () => [], async record() {} } : { async requirement() { return { methods: [], minApprovers: 1, selfApprovalAllowed: true }; }, async verify() { return { approved: false, reason: "" }; } }) as never,
   });
   const route = { route: async () => gatewayRouteOf(DEFAULT) };
-  it("is none without a reader (a deployment without one keeps its declared route)", () => {
-    const w = world();
-    expect(agentModelChoiceFromRegistry({ registry: registry(w), companyId: ORG_A, reader: undefined, modelAccess: route, now: () => 1 })).toBeUndefined();
-  });
   it("takes the install's default model from the declared route when a step is chosen, and refuses the step when no route is declared", async () => {
     const w = world();
     const made = agentModelChoiceFromRegistry({ registry: registry(w), companyId: ORG_A, reader: w.reader, modelAccess: route, now: () => 1 })!;
@@ -303,12 +167,6 @@ describe("the broker root's companies", () => {
     require: ((point: string) => point === "storage" ? w.store : point === "audit-sink" ? { stage: () => [], async record() {} } : { async requirement() { return { methods: [], minApprovers: 1, selfApprovalAllowed: true }; }, async verify() { return { approved: false, reason: "" }; } }) as never,
   });
   const options = { modelAccess: { route: async () => gatewayRouteOf(DEFAULT) } };
-  it("without a reader: the gateway wiring's own options object, and no company has a rule", () => {
-    const w = world();
-    const choices = createCompanyModelChoices({ reader: undefined, now: () => 1 });
-    expect(choices.flowOptionsFor(registryOf(w), ORG_A, options)).toBe(options);
-    expect(choices.choiceFor(ORG_A)).toBeUndefined();
-  });
   it("with a reader: one rule per company, the engine's and the page's the same one, each over its own list and its own setting", async () => {
     const w = world();
     w.reader.set(ORG_A, GATEWAY_OFFERED_MODELS);

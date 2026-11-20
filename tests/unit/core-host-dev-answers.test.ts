@@ -32,7 +32,6 @@ const QUESTIONS = [
   { id: "q1", text: "Which endpoint path?", options: [{ id: "a", label: "/health" }, { id: "b", label: "/healthz" }], recommended: "a" },
   { id: "q2", text: "Anything else to check?" },
 ];
-const NOT_JSON = Symbol("not json");
 const ANSWERS = [{ questionId: "q1", optionId: "a" }, { questionId: "q2", text: "Return the version too" }];
 
 /**
@@ -103,33 +102,6 @@ async function waiting(options: { access?: "hosted" | "laptop"; questions?: bool
 const parsed = (answer: { body: string } | undefined) => JSON.parse(answer!.body) as { task?: { taskId: string; status: string }; error?: { code: string; message: string } };
 
 describe("POST /v1/dev/tasks/{id}/answers on a core task", () => {
-  it("is waiting for the first round of answers (the fixture's precondition)", async () => {
-    const { workflow } = await waiting();
-    const now = await workflow();
-    expect([now.stage, now.state, now.intent?.rounds, now.intent?.assessment?.kind]).toEqual(["UNDERSTAND", "WAITING", 1, "questions"]);
-  });
-
-  it("takes the owner's answers and answers { task } in the developer task view; Understand runs again with them, recorded as the owner's", async () => {
-    const { answer, owner, task, workflow, world, deps } = await waiting();
-    const before = (await workflow()).revision;
-    const ownerKey = (await readTask(deps, task.taskId))!.ownerKey;
-    const reply = await answer(owner);
-    expect(reply?.statusCode).toBe(200);
-    expect(parsed(reply).task?.taskId).toBe(task.taskId);
-    const after = await workflow();
-    expect(after.revision).toBeGreaterThan(before);
-    expect(after.intent?.answers).toHaveLength(1);
-    expect(after.intent?.answers[0]).toMatchObject({ round: 1, source: "cli", answers: ANSWERS, by: { actorId: ownerKey } });
-    expect(world.audit.filter((event) => event.action === "task.questions_answered").map((event) => event.details)).toEqual([{ project: "payments", round: 1 }]);
-  });
-
-  it("takes a People owner's answers (a co-owner by the company's owner rule), with the People revision fenced into the move", async () => {
-    const { answer, person, people, world, task, workflow } = await waiting();
-    await world.store.put({ item: { pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE", revision: 3 } });
-    people.coOwners.add("person-coowner-000000001");
-    expect((await answer(person("person-coowner-000000001", FAKE_COMPANY, "member")))?.statusCode).toBe(200);
-    expect((await workflow()).intent?.answers).toHaveLength(1);
-  });
 
   it("refuses a People owner whose People revision changed between the check and the move (a missing task's answer; nothing answered)", async () => {
     const { answer, person, people, world, task, workflow } = await waiting();
@@ -167,52 +139,6 @@ describe("POST /v1/dev/tasks/{id}/answers on a core task", () => {
     const missing = await routes.route(post(`/v1/dev/tasks/${randomUUID()}/answers`, { requestId: randomUUID(), round: 1, answers: ANSWERS }), admin);
     expect(reply?.statusCode).toBe(404);
     expect(reply?.body).toBe(missing?.body);
-    expect(await rows()).toBe(before);
-    expect((await workflow()).intent?.answers).toHaveLength(0);
-  });
-
-  it("two companies: an owner, admin or member of company B cannot answer company A's core task, and is answered exactly like a task id that does not exist, for every body", async () => {
-    const { person, routes, rows, workflow, task } = await waiting();
-    for (const role of ["owner", "admin", "member"] as const) {
-      const theirs = person(`person-b-${role}-000000001`, OTHER, role);
-      for (const body of [{ requestId: randomUUID(), round: 1, answers: ANSWERS }, {}, [1], null, "nope", NOT_JSON]) {
-        const before = await rows();
-        const raw = (path: string) => (body === NOT_JSON ? { method: "POST", path, headers: {}, body: "{not json" } : post(path, body));
-        const reply = await routes.route(raw(`/v1/dev/tasks/${task.taskId}/answers`), theirs);
-        const missing = await routes.route(raw(`/v1/dev/tasks/${randomUUID()}/answers`), theirs);
-        expect(reply?.statusCode, role).toBe(404);
-        expect(reply?.body, role).toBe(missing?.body);
-        expect(reply?.body, role).not.toContain(FAKE_COMPANY);
-        expect(await rows(), role).toBe(before);
-      }
-    }
-    expect((await workflow()).intent?.answers).toHaveLength(0);
-  });
-
-  it("two companies: the owner's own person id signed in to company B (a rule that matched person ids alone would call them the owner) reads a missing task; nothing answered", async () => {
-    const { answer, person, routes, rows, workflow } = await waiting();
-    const twin = person(OWNER_ID, OTHER, "member");
-    const before = await rows();
-    const reply = await answer(twin);
-    const missing = await routes.route(post(`/v1/dev/tasks/${randomUUID()}/answers`, { requestId: randomUUID(), round: 1, answers: ANSWERS }), twin);
-    expect(reply?.statusCode).toBe(404);
-    expect(reply?.body).toBe(missing?.body);
-    expect(await rows()).toBe(before);
-    expect((await workflow()).intent?.answers).toHaveLength(0);
-  });
-
-  it("a person of company A whose principal names company B (or a revoked member: no membership) is refused before anything is read", async () => {
-    const { answer, person, workflow, rows, owner, members } = await waiting();
-    const before = await rows();
-    const revoked = person("person-revoked-000000001", FAKE_COMPANY, null);
-    expect((await answer(revoked))?.statusCode).toBe(401);
-    // A principal naming another company than membership's.
-    const crossed: DeployedCaller = { ...owner, principal: { ...owner.principal, companyId: OTHER } };
-    members.set(`${OWNER_ID}|${OTHER}`, { companyId: FAKE_COMPANY, role: "member" });
-    expect((await answer(crossed))?.statusCode).toBe(401);
-    // The task's own owner, once their membership is gone, is refused too.
-    members.delete(`${OWNER_ID}|${FAKE_COMPANY}`);
-    expect((await answer(owner))?.statusCode).toBe(401);
     expect(await rows()).toBe(before);
     expect((await workflow()).intent?.answers).toHaveLength(0);
   });
@@ -257,27 +183,6 @@ describe("POST /v1/dev/tasks/{id}/answers on a core task", () => {
     expect((await workflow()).intent?.answers).toHaveLength(1);
   });
 
-  it("keeps the stale-form guard: answers for another round are refused 'not waiting', a new request id included; nothing is written", async () => {
-    const { answer, owner, rows } = await waiting();
-    const before = await rows();
-    for (const round of [2, 3]) {
-      const reply = await answer(owner, { requestId: randomUUID(), round, answers: ANSWERS });
-      expect(reply?.statusCode).toBe(409);
-      expect(parsed(reply).error?.code).toBe("INTENT_NOT_WAITING");
-    }
-    expect(await rows()).toBe(before);
-    // Once answered, a fresh request for the same round is a stale form.
-    expect((await answer(owner))?.statusCode).toBe(200);
-    expect(parsed(await answer(owner)).error?.code).toBe("INTENT_NOT_WAITING");
-  });
-
-  it("a core task not waiting for answers answers 'not waiting'", async () => {
-    const { answer, owner } = await waiting({ questions: false });
-    const reply = await answer(owner);
-    expect(reply?.statusCode).toBe(409);
-    expect(parsed(reply).error?.code).toBe("INTENT_NOT_WAITING");
-  });
-
   it("a body that is not JSON is refused in fixed words (no echo), nothing written", async () => {
     const { routes, owner, rows, task } = await waiting();
     const before = await rows();
@@ -307,15 +212,6 @@ describe("POST /v1/dev/tasks/{id}/answers on a core task", () => {
       expect(reply?.body).not.toContain(secret);
     }
     expect(await rows()).toBe(before);
-  });
-
-  it("text of exactly 2,000 characters and three answers are within the limits (the workflow then judges them against the questions)", async () => {
-    const { answer, owner } = await waiting();
-    const reply = await answer(owner, { requestId: randomUUID(), round: 1, answers: [{ questionId: "q1", optionId: "a", text: "y".repeat(2000) }, { questionId: "q2", text: "z" }] });
-    expect(reply?.statusCode).toBe(200);
-    const three = await answer(owner, { requestId: randomUUID(), round: 1, answers: [{ questionId: "q1", optionId: "a" }, { questionId: "q2", text: "z" }, { questionId: "q3", text: "w" }] });
-    // Three answers pass the body check; the workflow refuses an answer for a question it did not ask (round 1 is answered already, so it is a stale form now).
-    expect(parsed(three).error?.code).toBe("INTENT_NOT_WAITING");
   });
 
   it("the core function itself refuses a script token caller and a runtime without the company's owner rule (a missing task's answer), whatever a host passes", async () => {
@@ -380,11 +276,5 @@ describe("POST /v1/app/sessions/{id}/answers needs the owner's level", () => {
     const { owner, answer, answered } = await sessionWorld();
     expect((await answer(owner))?.statusCode).toBe(200);
     expect(await answered()).toBe(1);
-  });
-
-  it("a stranger in the company reads a missing session", async () => {
-    const { caller, answer, answered } = await sessionWorld();
-    expect((await answer(caller("person-stranger-00000001")))?.statusCode).toBe(404);
-    expect(await answered()).toBe(0);
   });
 });

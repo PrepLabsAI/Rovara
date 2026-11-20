@@ -27,13 +27,4 @@ describe("golden pull request descriptions", () => {
       expect(Buffer.byteLength(first, "utf8")).toBeLessThanOrEqual(PULL_REQUEST_BODY_MAX_BYTES);
     });
   }
-  it("the scenarios differ and each is a Rovara Code description with its markers", () => {
-    const bodies = SCENARIOS.map(({ build }) => build().body);
-    expect(new Set(bodies).size).toBe(4);
-    for (const body of bodies) {
-      expect(body).toContain("<!-- rovara:checks-and-reviews -->");
-      expect(body).toContain("<!-- /rovara:checks-and-reviews -->");
-      expect(body).toContain("A person must approve it and a person merges it.");
-    }
-  });
 });

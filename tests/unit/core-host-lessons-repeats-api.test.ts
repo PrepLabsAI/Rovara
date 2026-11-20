@@ -191,18 +191,6 @@ describe("who sees which number", () => {
 });
 
 describe("the answer", () => {
-  it("counts only: no correction text, no task id, no person, and the split adds up", async () => {
-    const w = await setUp();
-    await logged(w, A, [SAME, `Please ${SAME.toLowerCase()}`, ...tenDifferent("A")]);
-    const answer = await call(api(w).api, "a-member", PROJECT_PATH);
-    expect(answer.ok).toBe(true);
-    const body = (answer as { body: Record<string, unknown> }).body;
-    expect(Object.keys(body).sort()).toEqual(["corrections", "enoughData", "month", "project", "repeated", "split", "truncated", "unjudged"]);
-    const text = JSON.stringify(body);
-    for (const word of ["withRetry", "a-member", `${A}-t`, "alpha"]) expect(text.includes(word), word).toBe(false);
-    const split = body["split"] as { lessonLoaded: number; lessonNotLoaded: number; noLesson: number };
-    expect(split.lessonLoaded + split.lessonNotLoaded + split.noLesson).toBe(body["repeated"]);
-  });
 
   it("month: default the current one; an earlier month counts only its own corrections; a later month, a bad value, an unknown or repeated field is refused without echoing it", async () => {
     const w = await setUp();

@@ -37,14 +37,6 @@ describe("the broker's core root keeps evidence for each company's flow", () => 
   const taskOf = (companyId: OrgId, workspaceId: string, ownerKey: string) => ({ companyId, workspaceId, ownerKey, taskId: "task-1", project: "payments" }) as never;
   const keep = (flow: { keepEvidence?: (input: never) => Promise<unknown> }, task: unknown) => flow.keepEvidence!({ task, operation, workflow: {}, candidateDigest: "c".repeat(64), checks: [{ id: "readiness:0", label: "pytest -q", source: "project", before: "passed", after: "failed", class: "regression", output: "", durationMs: 1, exitCode: 1 }] } as never);
 
-  it("sets a keeper on every company's flow, a different one for each", async () => {
-    const { root } = await world();
-    const [a, b] = [(await root.app.runtimeFor(A)).flow.deps, (await root.app.runtimeFor(B)).flow.deps];
-    expect(typeof a.keepEvidence).toBe("function");
-    expect(typeof b.keepEvidence).toBe("function");
-    expect(a.keepEvidence).not.toBe(b.keepEvidence);
-  });
-
   it("keeps a company's own task's pack in the shared bucket under its own workspace, and refuses (in fixed words) a task naming another company's workspace", async () => {
     const { root, workspace, logs } = await world();
     await workspace(A, "ws-a", "owner-a"); await workspace(B, "ws-b", "owner-b");

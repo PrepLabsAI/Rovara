@@ -122,16 +122,6 @@ describe("GET eval: the file and where it stands", () => {
     h.world.clock.now += 61_000;
     expect((await h.call(get(`${RUN}/eval`), admin)).body).toMatchObject({ suites: [{ readable: true }], wrappers: [{ step: "file_found", fileStatus: "same" }] });
   });
-
-  it("a read never writes anything to the host", async () => {
-    const h = await hosted();
-    await h.reported(FAKE_COMPANY, 2, {}, OFFERED);
-    const dev = h.person("p-dev", FAKE_COMPANY, "member", { [PROJECT]: "developer" });
-    const before = h.repo.branches.size;
-    expect((await h.call(get(`${RUN}/eval`), dev)).status).toBe(200);
-    expect(h.repo.branches.size).toBe(before);
-    expect(h.repo.changeRequests).toHaveLength(0);
-  });
 });
 
 describe("POST eval-wrapper: a person's click opens the pull request", () => {

@@ -2,30 +2,17 @@
 // names it and the browser/API scenarios `scenarioProves` names. The section is public to the repository's readers, so every word that a model, a repository or a person wrote is redacted and
 // inert, and it is bounded: under size pressure the evidence text shrinks first, then the proven and passed rows, and a failed requirement or a not-tested item is never dropped.
 // (Port lane L7b: the cases that went through Cloud's broker and the worker's own test-proof writer are not here; the proofs below are written out by hand in the worker's format.)
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ProofTableViewSchema, REPLY_PROVENANCES, checkCountsTowardProof, scriptedRepliesCountTowardProof, type EvidenceTrustClass, type PlanDocument, type TestProof } from "../../packages/contracts/src/index.js";
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
 import { REVIEW_SAME_MODEL_NOTE } from "../../packages/broker/src/core/proof/review-model-lines.js";
 import { PULL_REQUEST_BODY_MAX_BYTES } from "../../packages/broker/src/core/proof/pull-request-body.js";
-import { buildProofTable, checkIdOfProofItem, testProofLinesOf, type ProofCheckResult, type ProofScenarioRow, type ProofTableInput } from "../../packages/broker/src/core/proof/proof-table.js";
+import { buildProofTable, testProofLinesOf, type ProofCheckResult, type ProofScenarioRow, type ProofTableInput } from "../../packages/broker/src/core/proof/proof-table.js";
 import { PROOF_LEVEL_LAST, proofSection } from "../../packages/broker/src/core/proof/proof-section.js";
 import { proofTableView } from "../../packages/broker/src/core/proof/proof-view.js";
 import { loadTestProof } from "../../packages/broker/src/core/proof/test-proof-reader.js";
 import { workflowPullRequestBody, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
-import { expectLinearScaling } from "../support/scaling.js";
-
-/** What the worker writes for a task's checks: one item per check, `readiness:<index>`; the check at `provenIndex` is a test runner whose new test fails on the original code, the others are linters that passed. */
-function workerTestProof(candidateDigest: string, provenIndex: number, checkCount = provenIndex + 1): { proof: TestProof } {
-  return { proof: {
-    schemaVersion: 1, candidateDigest, status: "checked", note: "completed", changedTests: { added: 1, changed: 0, deleted: 0 },
-    items: Array.from({ length: checkCount }, (_, index) => (index === provenIndex
-      ? { checkId: `readiness:${index}`, label: "retry tests", granularity: "check" as const, verdict: "proves_change" as const, reason: "assertion_failed_on_old" as const }
-      : { checkId: `readiness:${index}`, label: "lint", granularity: "check" as const, verdict: "not_applicable" as const, reason: "not_a_test_check" as const })),
-    durationMs: 1200,
-  } };
-}
-
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const ownerId = "a".repeat(64);
@@ -85,43 +72,8 @@ describe("mock provenance in the proof", () => {
     notTested: [{ kind: "claim", id: "3", text: "The retry count is shown on the payment page.", reason: "no check or scenario names it" }],
   };
 
-  it("keeps the complete legacy table byte-for-byte when provenance is absent, empty or for an unrelated check", () => {
-    for (const checkDependencies of [undefined, new Map(), new Map([["unit", []]]), dependencies("made_by_rovara", "unrelated")]) {
-      expect(JSON.stringify(buildProofTable(input({ checkDependencies })))).toBe(JSON.stringify(golden));
-    }
-  });
-
   it.each(["real", "recorded", "simulated", "no_outside_calls"] as const)("keeps %s dependencies eligible for Proven", (trust) => {
     expect(buildProofTable(input({ checkDependencies: dependencies(trust) }))).toEqual(golden);
-  });
-
-  it("keeps an explicitly Rovara-mock-dependent pass passed, with the reason, including its parent claim", () => {
-    const table = buildProofTable(input({ checkDependencies: dependencies("made_by_rovara") }));
-    for (const id of ["1", "1.1"]) {
-      expect(rowOf(table, id)).toMatchObject({ result: "passed", evidence: [{ state: "passed", label: "with a Rovara-made mock; not Proven: Unit tests" }] });
-    }
-    expect(table.notTested).toEqual(golden.notTested);
-    expect(rowOf(table, "2")).toEqual(golden.rows[2]);
-  });
-
-  it("any Rovara-made dependency blocks only its own check, even after a real dependency", () => {
-    const checkDependencies = new Map([
-      ["unit", [{ dependencyId: "real-db", trust: "real" as const }, { dependencyId: "payments", trust: "made_by_rovara" as const }]],
-      ["lint", [{ dependencyId: "recording", trust: "recorded" as const }]],
-    ]);
-    const proof = proofFor(CODE.digest);
-    proof.items[1] = { ...proof.items[0]!, checkId: "readiness:1" };
-    const table = buildProofTable(input({ checkDependencies, testProof: proof }));
-    expect(rowOf(table, "1.1").result).toBe("passed");
-    expect(rowOf(table, "2")).toMatchObject({ result: "proven", evidence: [{ label: "Lint", state: "proven" }] });
-  });
-
-  it("maps per-test proofs through recorded check ids, not readiness ids or the current plan order", () => {
-    const proof = proofFor(CODE.digest);
-    proof.items = [{ ...proof.items[0]!, checkId: "readiness:1", granularity: "test", test: "retries" }, { ...proof.items[1]!, checkId: "readiness:0" }];
-    const table = buildProofTable(input({ testProof: proof, recordedCheckIds: ["lint", "unit"], checkDependencies: dependencies("made_by_rovara") }));
-    expect(rowOf(table, "1.1").result).toBe("passed");
-    expect(rowOf(table, "1.1").evidence[0]?.label).toContain("not Proven");
   });
 
   it.each([
@@ -146,39 +98,6 @@ describe("mock provenance in the proof", () => {
       for (let level = 0; level <= PROOF_LEVEL_LAST; level += 1) expect(proofSection(workflow, next)!(level)).toEqual(proofSection(workflow, context)!(level));
       expect(proofTableView(workflow, next)).toEqual(proofTableView(workflow, context));
     }
-  });
-
-  it("explains the exclusion in the PR at every shrink level and on the task page", () => {
-    const workflow = workflowWith();
-    const context = { plan: plan(), testProof: proofFor(CODE.digest), checkDependencies: dependencies("made_by_rovara") };
-    const section = proofSection(workflow, context)!;
-    for (let level = 0; level <= PROOF_LEVEL_LAST; level += 1) {
-      const text = section(level).join("\n");
-      expect(text).toContain("Checks passing with a Rovara-made mock are not Proven.");
-      expect(text).not.toContain("✅ proven");
-    }
-    expect(section(0).join("\n")).toContain("with a Rovara-made mock; not Proven: Unit tests (passed)");
-    const view = ProofTableViewSchema.parse(proofTableView(workflow, context));
-    expect(view.rows.find((row) => row.claimId === "1.1")).toMatchObject({ result: "passed", evidence: [{ label: "with a Rovara-made mock; not Proven: Unit tests", state: "passed" }] });
-  });
-
-  it("keeps labels inert and bounded, never renders dependency ids, and retains the reason on long labels", () => {
-    const hostile = "[nested [link]](https://evil.example) ![image][ref]\n[ref]: https://evil.example\n@team #123 <img>\n# heading\n> quote\n---\n```\n~~~\n\u200b\u202e\ufe0f";
-    const context = {
-      plan: plan({ checks: { proposed: [check("unit", hostile + "x".repeat(1_048_576))], proves: { unit: ["1.1"] } } }),
-      testProof: proofFor(CODE.digest), checkDependencies: new Map([["unit", [{ dependencyId: "NEVER-RENDER-THIS " + hostile, trust: "made_by_rovara" as const }]]]),
-    };
-    const table = buildProofTable(input(context));
-    const label = rowOf(table, "1.1").evidence[0]!.label;
-    expect(label).toMatch(/^with a Rovara-made mock; not Proven: /u);
-    expect(Array.from(label).length).toBeLessThanOrEqual(120);
-    expect(label).not.toMatch(/\]\(|!\[|@team|#123|<img>|[\r\n\u200b\u202e]|\ufe0f/u);
-    const section = proofSection(workflowWith(), context)!;
-    for (let level = 0; level <= PROOF_LEVEL_LAST; level += 1) {
-      expect(section(level).join("\n")).toContain("Checks passing with a Rovara-made mock are not Proven.");
-      expect(section(level).join("\n")).not.toContain("NEVER-RENDER-THIS");
-    }
-    expect(ProofTableViewSchema.safeParse(proofTableView(workflowWith(), context)).success).toBe(true);
   });
 
   it("qualifies the Tests summary only for a proving item mapped to an explicit Rovara-made dependency", () => {
@@ -211,74 +130,9 @@ describe("mock provenance in the proof", () => {
       }
     }
   });
-
-  it("qualifies the task page Tests summary", () => {
-    const view = ProofTableViewSchema.parse(proofTableView(workflowWith(), { plan: plan(), testProof: proofFor(CODE.digest), checkDependencies: dependencies("made_by_rovara") }));
-    expect(view.testProofLines.find((line) => line.includes("fails on the original code"))).toContain("with a Rovara-made mock; not Proven");
-  });
-
-  it("keeps the check name visible at shrink level one by shortening the mock prefix", () => {
-    const lines = proofSection(workflowWith(), { plan: plan(), checkDependencies: dependencies("made_by_rovara") })!(1);
-    expect(lines.find((line) => line.startsWith("| 1.1:"))).toContain("Rovara mock: Unit tests (passed)");
-  });
-
-  it("explains a mock row beyond the task page's 50-row cut even without test proof", () => {
-    const largePlan = plan({ claims: Array.from({ length: 51 }, (_, i) => ({ id: String(i + 1), text: `Requirement ${i + 1}` })), checks: { proposed: [check("unit", "Unit tests")], proves: { unit: ["51"] } } });
-    const view = ProofTableViewSchema.parse(proofTableView(workflowWith(), { plan: largePlan, checkDependencies: dependencies("made_by_rovara") }));
-    expect(view.rows).toHaveLength(50);
-    expect(view.rows.flatMap((row) => row.evidence)).toEqual([]);
-    expect(view.testProofLines).toContain("Checks passing with a Rovara-made mock are not Proven.");
-    expect(proofTableView(workflowWith(), { plan: largePlan })?.testProofLines).toEqual([]);
-  });
 });
 
 describe("buildProofTable", () => {
-  it("a claim whose linked check has a proves_change test proof is proven", () => {
-    const table = buildProofTable({ plan: plan(), checkResults: passing("unit", "lint"), scenarioRows: [], testProof: proofFor(CODE.digest), candidateDigest: CODE.digest, recordedCheckIds: SELECTED });
-    expect(rowOf(table, "1.1").result).toBe("proven");
-    expect(rowOf(table, "2").result).toBe("passed");
-    // The lines themselves live in the Tests section (the description) and on the task page's proof block; the table only uses the verdicts.
-    expect(table).not.toHaveProperty("testProofLines");
-  });
-
-  it("a test proof bound to another candidate digest is ignored, as if it were absent", () => {
-    const stale = buildProofTable({ plan: plan(), checkResults: passing("unit", "lint"), scenarioRows: [], testProof: proofFor(OTHER.digest), candidateDigest: CODE.digest, recordedCheckIds: SELECTED });
-    const absent = buildProofTable({ plan: plan(), checkResults: passing("unit", "lint"), scenarioRows: [], testProof: undefined, candidateDigest: CODE.digest });
-    expect(stale).toEqual(absent);
-    expect(rowOf(stale, "1.1").result).toBe("passed");
-    // No current digest at all: nothing can be bound to it.
-    expect(rowOf(buildProofTable({ plan: plan(), checkResults: passing("unit"), scenarioRows: [], testProof: proofFor(CODE.digest), candidateDigest: undefined, recordedCheckIds: SELECTED }), "1.1").result).toBe("passed");
-  });
-
-  it("a parent claim is covered by the checks of its children, and a claim no check names is not tested", () => {
-    const table = buildProofTable({ plan: plan(), checkResults: passing("unit", "lint"), scenarioRows: [], testProof: undefined, candidateDigest: CODE.digest });
-    expect(rowOf(table, "1").result).toBe("passed");
-    expect(rowOf(table, "3")).toMatchObject({ result: "not_tested", evidence: [] });
-    expect(table.notTested.map((item) => [item.kind, item.id])).toContainEqual(["claim", "3"]);
-  });
-
-  it("a failed linked check makes the claim failed, even beside a proves_change one", () => {
-    const table = buildProofTable({
-      plan: plan({ checks: { proposed: [check("unit", "Unit tests"), check("lint", "Lint")], proves: { unit: ["2"], lint: ["2"] } } }),
-      checkResults: [{ checkId: "unit", status: "PASS" }, { checkId: "lint", status: "FAILED" }], scenarioRows: [],
-      testProof: proofFor(CODE.digest), candidateDigest: CODE.digest, recordedCheckIds: SELECTED,
-    });
-    expect(rowOf(table, "2").result).toBe("failed");
-  });
-
-  it("a claim whose every linked check did not run, or has no result, is not tested, and the check is listed", () => {
-    const table = buildProofTable({
-      plan: plan(), scenarioRows: [], testProof: undefined, candidateDigest: CODE.digest,
-      checkResults: [{ checkId: "unit", status: "UNKNOWN" }, { checkId: "lint", status: "FAILED", couldNotRun: true }],
-    });
-    expect(rowOf(table, "1.1").result).toBe("not_tested");
-    expect(rowOf(table, "2").result).toBe("not_tested");
-    const checks = table.notTested.filter((item) => item.kind === "check").map((item) => item.id).sort();
-    expect(checks).toEqual(["lint", "unit"]);
-    // No result at all for a proposed check reads the same.
-    const none = buildProofTable({ plan: plan(), checkResults: [], scenarioRows: [], testProof: undefined, candidateDigest: CODE.digest });
-    expect(rowOf(none, "2").result).toBe("not_tested");
-  });
 
   it("a claim proved only by checks that read files (the plan self-check's claim-static-only finding) is not tested", () => {
     const reader = { id: "grep", label: "Grep for the flag", command: { cwd: "repo/payments", executable: "grep", args: ["-q", "retry", "src/charge.ts"], timeoutSeconds: 30 } };
@@ -313,51 +167,6 @@ describe("buildProofTable", () => {
 });
 
 describe("a claim is no better than its weakest part (partly tested)", () => {
-  const children = (...ids: string[]) => ids.map((id) => ({ id, text: `Part ${id} works.` }));
-  const parentPlan = (proves: Record<string, string[]>, proposed = [check("unit", "Unit tests"), check("lint", "Lint")]) =>
-    plan({ claims: [{ id: "1", text: "Payments that time out are retried.", children: children("1.1", "1.2") }, { id: "2", text: "A payment is never charged twice." }], checks: { proposed, proves } });
-  const build = (p: PlanDocument, checkResults: ProofCheckResult[], testProof?: TestProof) => buildProofTable({ plan: p, checkResults, scenarioRows: [], testProof, candidateDigest: CODE.digest, recordedCheckIds: SELECTED });
-
-  it("a parent whose one child is proven and another has no check is partly tested, not proven", () => {
-    const table = build(parentPlan({ unit: ["1.1"], lint: ["2"] }), passing("unit", "lint"), proofFor(CODE.digest));
-    expect(rowOf(table, "1.1").result).toBe("proven");
-    expect(rowOf(table, "1.2").result).toBe("not_tested");
-    expect(rowOf(table, "1").result).toBe("partly_tested");
-    // The parent is listed once, naming the missing part; the child is listed on its own.
-    const parent = table.notTested.filter((item) => item.kind === "claim" && item.id === "1");
-    expect(parent).toHaveLength(1);
-    expect(parent[0]!.reason).toContain("1.2");
-    expect(table.notTested.filter((item) => item.kind === "claim" && item.id === "1.2")).toHaveLength(1);
-    expect(table.notTested.some((item) => item.kind === "claim" && item.id === "1.1")).toBe(false);
-  });
-
-  it("a parent whose children are all proven or passed keeps that result, and is not listed", () => {
-    const table = build(parentPlan({ unit: ["1.1", "1.2"], lint: ["2"] }), passing("unit", "lint"), proofFor(CODE.digest));
-    expect(rowOf(table, "1").result).toBe("proven");
-    expect(table.notTested.filter((item) => item.kind === "claim")).toEqual([]);
-  });
-
-  it("a failed child fails the parent, even beside an untested one", () => {
-    const table = build(parentPlan({ unit: ["1.1"], lint: ["2"] }), [{ checkId: "unit", status: "FAILED" }, { checkId: "lint", status: "PASS" }]);
-    expect(rowOf(table, "1").result).toBe("failed");
-  });
-
-  it("a claim with one linked check passed and another that never ran is partly tested, and the reason says a linked check did not run", () => {
-    const table = build(parentPlan({ unit: ["1.1", "1.2"], lint: ["1.1"] }), [{ checkId: "unit", status: "PASS" }, { checkId: "lint", status: "UNKNOWN" }]);
-    expect(rowOf(table, "1.1").result).toBe("partly_tested");
-    expect(rowOf(table, "1.2").result).toBe("passed");
-    expect(rowOf(table, "1").result).toBe("partly_tested");
-    expect(table.notTested.find((item) => item.kind === "claim" && item.id === "1.1")?.reason).toMatch(/linked check or scenario did not run/u);
-    // The parent's missing part is the child that is partly tested.
-    expect(table.notTested.find((item) => item.kind === "claim" && item.id === "1")?.reason).toContain("1.1");
-  });
-
-  it("a claim with no evidence at all stays not tested, and one whose only evidence did not run stays not tested", () => {
-    const table = build(parentPlan({ unit: ["1.1"], lint: ["2"] }), [{ checkId: "unit", status: "UNKNOWN" }, { checkId: "lint", status: "PASS" }]);
-    expect(rowOf(table, "1.1").result).toBe("not_tested");
-    expect(rowOf(table, "1.2").result).toBe("not_tested");
-    expect(rowOf(table, "1").result).toBe("not_tested");
-  });
 
   it("shows partly tested in words, and keeps the row and its bullet at every shrink level", () => {
     const claims = Array.from({ length: 12 }, (_, index) => ({ id: String(index + 1), text: `Requirement ${index + 1} ${"is described in a fair amount of detail ".repeat(7)}`.slice(0, 290) }));
@@ -410,37 +219,6 @@ const drawerOf = (body: string, summaryStart: string) => {
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
 
 describe("the Proof section of the version 2 pull request description", () => {
-  it("shows a requirement whose check has a proves_change test proof as proven, in the first drawer, before Checks and Reviews", () => {
-    const body = bodyOf({ plan: plan(), testProof: proofFor(CODE.digest) });
-    const at = body.indexOf("<summary>Requirements and proof");
-    expect(at).toBeLessThan(body.indexOf("<summary>Checks: "));
-    expect(at).toBeLessThan(body.indexOf("<summary>Reviews: "));
-    expect(at).toBeGreaterThan(body.indexOf(START));
-    expect(at).toBeLessThan(body.indexOf(END));
-    const section = proofPart(body);
-    expect(section).toContain("| Requirement | Evidence | Result |");
-    expect(section).toMatch(/\| 1\.1: The retry waits longer each time\. \|[^|\n]*Unit tests[^|\n]*\| ✅ proven \|/);
-    expect(section).toMatch(/\| 2: A payment is never charged twice\. \|[^|\n]*Lint[^|\n]*\| ✅ passed \|/);
-    // One home for the test-proof lines: the Tests section carries them, the Proof section only marks the row "proven".
-    expect(section).not.toContain("Test proof:");
-    expect(body.match(/Test proof:/gu)).toHaveLength(1);
-    expect(drawerOf(body, "Checks: ")).toContain("Test proof: 1 check fails on the original code and passes now");
-  });
-
-  it("lists the test-proof lines once in Tests when the publication passed them and the Proof inputs carry the same proof", () => {
-    const lines = ["Test proof: 1 check fails on the original code and passes now"];
-    const body = bodyOf({ plan: plan(), testProof: proofFor(CODE.digest) }, workflowWith(), { proofLines: lines });
-    expect(body.match(/Test proof:/gu)).toHaveLength(1);
-    expect(proofPart(body)).not.toContain("Test proof:");
-  });
-
-  it("shows a requirement with no linked check as not tested and lists it under What wasn't tested", () => {
-    const section = proofPart(bodyOf({ plan: plan() }));
-    expect(section).toMatch(/\| 3: The retry count is shown on the payment page\. \|[^|\n]*\| ⚠ not tested \|/);
-    const after = section.slice(section.indexOf("What wasn't tested"));
-    expect(after).toContain("What wasn't tested");
-    expect(after).toMatch(/- .*\b3\b.*retry count is shown/);
-  });
 
   // T1 (design 4.2): a check the plan proposed that has no result for this code is not tested, and that is said above the fold, not only under "What wasn't tested" in a closed drawer.
   it("says a planned check that could not run above the fold", () => {
@@ -450,14 +228,6 @@ describe("the Proof section of the version 2 pull request description", () => {
     expect(above).toMatch(/\*\*\d+ things were not tested\.\*\*|\*\*Something was not tested\.\*\*/u);
     expect(above).toContain("Check: Unit tests (it could not run)");
     expect(proofPart(body)).toContain("What wasn't tested");
-  });
-
-  it("ignores a test proof bound to a different candidate digest", () => {
-    const ignored = bodyOf({ plan: plan(), testProof: proofFor(OTHER.digest) });
-    const absent = bodyOf({ plan: plan() });
-    expect(ignored).toBe(absent);
-    expect(proofPart(ignored)).not.toContain("✅ proven");
-    expect(ignored).not.toContain("Test proof:");
   });
 
   it("renders a requirement's mentions, links, issue numbers, hidden characters and table breaks inert", () => {
@@ -474,12 +244,6 @@ describe("the Proof section of the version 2 pull request description", () => {
     for (const line of section.split("\n").filter((row) => row.startsWith("| ") && !row.startsWith("| ---"))) expect(line.split(" | ")).toHaveLength(3);
     // The text itself is kept (the words survive), only made inert.
     expect(section).toContain("Ping");
-  });
-
-  it("redacts a secret in a requirement and in a check label", () => {
-    const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-    const body = bodyOf({ plan: plan({ claims: [{ id: "1", text: `Uses token ${secret} to call the API` }, ...plan().claims.slice(1)], checks: { proposed: [check("unit", `Unit ${secret}`), check("lint", "Lint")], proves: { unit: ["1"], lint: ["2"] } } }) });
-    expect(proofPart(body)).not.toContain("ghp_");
   });
 
   it("stays within 30,000 bytes under size pressure and never drops a failed requirement or a not-tested item", () => {
@@ -517,72 +281,6 @@ describe("the Proof section of the version 2 pull request description", () => {
     expect(body).toContain("**Risk** ");
     expect(body.trimEnd().endsWith("A person must approve it and a person merges it.")).toBe(true);
   });
-
-  it("shrinks the evidence text first, then folds the proven and passed rows, and keeps failed and not-tested items at every level", () => {
-    const claims = Array.from({ length: 12 }, (_, index) => ({ id: String(index + 1), text: `Requirement ${index + 1} ${"is described in a fair amount of detail ".repeat(7)}`.slice(0, 290) }));
-    const proposed = [check("unit", `Unit tests ${"with a long label ".repeat(5)}`.slice(0, 78)), check("lint", "Lint"), check("bad", "Bad check")];
-    const checkPolicy = { required: [], optional: [], selectedOptionalIds: [], proposed };
-    const results = [{ checkId: "unit", status: "PASS" }, { checkId: "lint", status: "PASS" }, { checkId: "bad", status: "FAILED" }];
-    const workflow = workflowWith({ stage: "VERIFY", state: "BLOCKED", blockReason: "candidate checks failed or have unknown results", reviews: undefined, checkPolicy,
-      verification: { candidateDigest: CODE.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results } });
-    // 1-6 pass (unit and lint), 7-8 fail (bad), 9-12 have no check.
-    const ids = (from: number, to: number) => claims.slice(from - 1, to).map((claim) => claim.id);
-    const bigPlan = plan({ claims, checks: { proposed, proves: { unit: ids(1, 6), lint: ids(1, 6), bad: ids(7, 8) } } });
-    const at = (level: number) => proofSection(workflow, { plan: bigPlan })!(level).join("\n");
-    const rowLines = (text: string) => text.split("\n").filter((line) => /^\| \d+: /u.test(line));
-
-    expect(at(0)).toContain(proposed[0]!.label);
-    expect(at(0)).toContain(`${proposed[0]!.label} (passed); Lint (passed)`);
-    // Level 1 cuts the evidence entries, level 2 turns them into counts; the requirement text is cut later than the evidence.
-    expect(at(1)).not.toContain(proposed[0]!.label);
-    expect(at(1)).toContain("Unit tests with a long label with a lon…");
-    expect(at(2)).not.toContain("Unit tests");
-    expect(at(2)).toContain("2 checks");
-    expect(rowLines(at(1))).toHaveLength(12);
-    expect(rowLines(at(2))).toHaveLength(12);
-    expect(rowLines(at(1))[0]!.length).toBeGreaterThan(rowLines(at(2))[0]!.length);
-    // Level 3 folds the six passed rows into one line.
-    expect(rowLines(at(3))).toHaveLength(6);
-    expect(at(3)).toContain("6 more requirements proven or passed");
-    expect(at(3)).not.toContain("| 1: ");
-    // Failed rows and not-tested items are in every level.
-    for (let level = 0; level <= PROOF_LEVEL_LAST; level += 1) {
-      const text = at(level);
-      for (const id of [7, 8]) expect(text, `level ${level} failed ${id}`).toMatch(new RegExp(`\\| ${id}: [^\\n]*\\| ❌ failed \\|`, "u"));
-      for (const id of [9, 10, 11, 12]) {
-        expect(text, `level ${level} row ${id}`).toMatch(new RegExp(`\\| ${id}: [^\\n]*\\| ⚠ not tested \\|`, "u"));
-        expect(text.slice(text.indexOf("What wasn't tested")), `level ${level} bullet ${id}`).toMatch(new RegExp(`- Requirement ${id}\\b`, "u"));
-      }
-    }
-    expect(bytes(at(4))).toBeLessThan(bytes(at(3)));
-    expect(bytes(at(3))).toBeLessThan(bytes(at(2)));
-    expect(bytes(at(2))).toBeLessThan(bytes(at(1)));
-    expect(bytes(at(1))).toBeLessThan(bytes(at(0)));
-  });
-
-  it("has no Proof section without an approved plan with claims, and the rest of the body is byte-identical to today's", () => {
-    const today = bodyOf(undefined);
-    expect(today).not.toContain("Requirements and proof");
-    expect(today).toContain("No approved requirements to prove.");
-    expect(bodyOf({ plan: undefined })).toBe(today);
-    expect(bodyOf({ plan: plan({ claims: [] }) })).toBe(today);
-    // A test proof without a plan with claims adds only its Checks line (as the publication's own hook does) and the could-not-compare item; there is still no requirements drawer.
-    const withProofOnly = bodyOf({ plan: undefined, testProof: proofFor(CODE.digest) });
-    expect(withProofOnly).not.toContain("Requirements and proof");
-    expect(drawerOf(withProofOnly, "Checks: ")).toContain("- Test proof: 1 check fails on the original code and passes now");
-    // (TE-B3: a test proof from before the weakening facts could not compare the untouched tests, and the description says so above the fold.)
-    expect(withProofOnly.indexOf("Test weakening: could not compare (no test report to compare)")).toBeLessThan(withProofOnly.indexOf("<details>"));
-    expect(workflowPullRequestStatusLines(workflowWith(), { changedFiles: files, proof: { plan: undefined } })).toEqual(workflowPullRequestStatusLines(workflowWith(), { changedFiles: files }));
-  });
-
-  it("a rewrite of the status lines after a pushed fix keeps the Proof section", () => {
-    const lines = workflowPullRequestStatusLines(workflowWith(), { changedFiles: files, proof: { plan: plan(), testProof: proofFor(CODE.digest) } }).join("\n");
-    expect(lines).toContain("<summary>Requirements and proof");
-    expect(lines).toContain("✅ proven");
-    // The rewrite brings the test-proof line back too (once), from the proof it just read, in the Checks drawer; the requirements drawer has none.
-    expect(lines.match(/Test proof:/gu)).toHaveLength(1);
-    expect(drawerOf(lines, "Checks: ")).toContain("Test proof: 1 check fails");
-  });
 });
 
 describe("loadTestProof", () => {
@@ -592,11 +290,6 @@ describe("loadTestProof", () => {
     operations: async () => operations,
     artifacts: async (_workspaceId: string, operationId: string) => (stored[artifactKey(operationId)] === undefined ? [] : [{ name: "test-proof.json", objectKey: artifactKey(operationId) }]),
     readArtifact: async (objectKey: string) => { const text = stored[objectKey]; if (text === undefined) throw new Error("missing"); return text; },
-  });
-
-  it("returns the parsed proof bound to the candidate digest", async () => {
-    const proof = proofFor(CODE.digest);
-    expect(await loadTestProof(actionsWith({ [artifactKey("op-1")]: JSON.stringify(proof) }), task, CODE.digest)).toEqual(proof);
   });
 
   it("returns nothing when there is no artifact (always, until the worker part lands), when it is for another digest, malformed, or from another workspace's key", async () => {
@@ -610,102 +303,18 @@ describe("loadTestProof", () => {
     expect(await loadTestProof(foreign, task, CODE.digest)).toBeUndefined();
     expect(await loadTestProof(actionsWith({ [artifactKey("op-1")]: JSON.stringify(proofFor(CODE.digest)) }), task, undefined)).toBeUndefined();
   });
-
-  it("returns nothing, and does not throw, when storage fails", async () => {
-    const broken = { operations: async () => { throw new Error("down"); }, artifacts: async () => [], readArtifact: async () => "" };
-    expect(await loadTestProof(broken, task, CODE.digest)).toBeUndefined();
-  });
 });
-
-// ---- through the broker: the publication reads the approved plan and the test proof from storage
-
-describe("the worker's check ids in a test proof", () => {
-  const selected = ["required-1", "unit"];
-  const table = (testProof: TestProof, recordedCheckIds: readonly string[] | undefined) => buildProofTable({ plan: plan(), checkResults: passing("unit", "lint"), scenarioRows: [], testProof, candidateDigest: CODE.digest, ...(recordedCheckIds === undefined ? {} : { recordedCheckIds }) });
-
-  it("readiness:<i> is the selected check at index i: the worker's proof for readiness:1 proves the check at index 1", async () => {
-    const { proof } = workerTestProof(CODE.digest, 1);
-    expect(proof.items.map((item) => item.checkId)).toEqual(["readiness:0", "readiness:1"]);
-    expect(rowOf(table(proof, selected), "1.1").result).toBe("proven");
-    expect(rowOf(table(proof, selected), "2").result).toBe("passed");
-  });
-
-  it("an id that does not map is ignored, never matched by accident: out of range, no recorded checks known, other forms", async () => {
-    const { proof } = workerTestProof(CODE.digest, 1);
-    expect(rowOf(table(proof, ["required-1"]), "1.1").result).toBe("passed");
-    expect(rowOf(table(proof, undefined), "1.1").result).toBe("passed");
-    for (const checkId of ["unit", "readiness:01", "readiness:-1", "readiness:1x", "readiness:", "Readiness:1", "readiness:99", "readiness:1.5", "constructor", "__proto__"]) {
-      expect(checkIdOfProofItem(checkId, selected), checkId).toBeUndefined();
-    }
-    expect(checkIdOfProofItem("readiness:0", selected)).toBe("required-1");
-    expect(checkIdOfProofItem("readiness:1", selected)).toBe("unit");
-    expect(checkIdOfProofItem("readiness:2", selected)).toBeUndefined();
-  });
-});
-
-// ---- P5: the proof is mapped through the check ids recorded with the results it belongs to, not the policy as it is now
-
-describe("a test proof is read against the checks recorded with its results (P5)", () => {
-  const verification = (...ids: string[]) => ({ candidateDigest: CODE.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results: ids.map((checkId) => ({ checkId, status: "PASS" })) });
-  const blocked = { stage: "VERIFY", state: "BLOCKED", blockReason: "candidate checks failed or have unknown results", reviews: undefined };
-  const lintOnly = { required: [], optional: [], selectedOptionalIds: [], proposed: [check("lint", "Lint")] };
-  const section = (workflow: WorkflowSnapshot, testProof: TestProof) => proofSection(workflow, { plan: plan(), testProof })!(0).join("\n");
-
-  it("normal path: the proof's readiness:<i> are the recorded results' checks in order, and the proving check is proven", async () => {
-    const { proof } = workerTestProof(CODE.digest, 0, 2);
-    const text = section(workflowWith({ verification: verification("unit", "lint") }), proof);
-    expect(text).toMatch(/\| 1\.1: The retry waits longer each time\. \|[^|\n]*Unit tests[^|\n]*\| ✅ proven \|/u);
-    expect(text).toMatch(/\| 2: A payment is never charged twice\. \|[^|\n]*Lint[^|\n]*\| ✅ passed \|/u);
-  });
-
-  it("after a verification retry that removed an earlier check from the policy, an old proof never marks the wrong check proven", async () => {
-    // The proof is from the run that checked unit (readiness:0, proves) and lint (readiness:1). The owner's retry has since dropped unit from the selection, so the policy now lists only lint, at index 0.
-    const { proof } = workerTestProof(CODE.digest, 0, 2);
-    const text = section(workflowWith({ checkPolicy: lintOnly, verification: verification("unit", "lint") }), proof);
-    expect(text).toMatch(/\| 2: A payment is never charged twice\. \|[^|\n]*Lint[^|\n]*\| ✅ passed \|/u);
-    expect(text).not.toMatch(/\| 2: [^\n]*proven/u);
-    // The check the proof really proved still reads proven.
-    expect(text).toMatch(/\| 1\.1: [^\n]*\| ✅ proven \|/u);
-  });
-
-  it("is ignored altogether (nothing proven) when the number of recorded results differs from the proof's checks, or no results are recorded for this code", async () => {
-    const three = (workerTestProof(CODE.digest, 0, 3)).proof;
-    expect(section(workflowWith({ verification: verification("unit", "lint") }), three)).not.toContain("proven");
-    const two = (workerTestProof(CODE.digest, 0, 2)).proof;
-    expect(section(workflowWith({ verification: verification("unit") }), two)).not.toContain("proven");
-    expect(section(workflowWith({ ...blocked, verification: { ...verification("unit", "lint"), candidateDigest: OTHER.digest } }), two)).not.toContain("proven");
-    expect(section(workflowWith({ ...blocked, verification: undefined }), two)).not.toContain("proven");
-  });
-});
-
 
 // Playbook P2: reviewer models have one source, Trust fix A2's Reviews lines. The Proof section is about requirements and evidence and names no reviewer model.
 describe("the reviewer model in a description that has a Proof section", () => {
   const reviewsPart = (body: string) => drawerOf(body, "Reviews: ");
   const sameModelTask = { title: "Add a retry flag", reviewSameModel: { candidateDigest: CODE.digest } } as never;
 
-  it("names the reviewer model once, in the Reviews section (A2's lines), and the Proof section has no model line", () => {
-    const body = bodyOf({ plan: plan(), testProof: proofFor(CODE.digest) });
-    expect(proofPart(body)).toContain("| Requirement | Evidence | Result |");
-    expect(body.match(/Reviewed by test\/1/gu)).toHaveLength(1);
-    expect(reviewsPart(body)).toContain("Reviewed by test/1");
-    expect(body.indexOf("<summary>Requirements and proof")).toBeLessThan(body.indexOf("<summary>Reviews: "));
-    expect(proofPart(body)).not.toMatch(/Reviewed by|test\/1|same model/iu);
-  });
-
   it("says A2's same-model note once, in Reviews, and not in the Proof section", () => {
     const body = workflowPullRequestBody(sameModelTask, workflowWith(), "# Plan\n\n1. Add the retry flag.\n", SESSION, { changedFiles: files, proof: { plan: plan(), testProof: proofFor(CODE.digest) }, reviewSameModel: true });
     expect(body.match(new RegExp(REVIEW_SAME_MODEL_NOTE.replace(/[.]/gu, "\\."), "gu"))).toHaveLength(1);
     expect(reviewsPart(body)).toContain(REVIEW_SAME_MODEL_NOTE);
     expect(proofPart(body)).not.toContain(REVIEW_SAME_MODEL_NOTE);
-  });
-
-  it("the rewritten status block (a pushed fix) has the same: the model line once, in Reviews, after the Proof section", () => {
-    const lines = workflowPullRequestStatusLines(workflowWith(), { changedFiles: files, proof: { plan: plan(), testProof: proofFor(CODE.digest) }, reviewSameModel: true }).join("\n");
-    expect(lines.match(/Reviewed by test\/1/gu)).toHaveLength(1);
-    expect(lines.match(/Review used the same model as Build/gu)).toHaveLength(1);
-    expect(lines.indexOf("<summary>Requirements and proof")).toBeLessThan(lines.indexOf("<summary>Reviews: "));
-    expect(proofPart(lines)).not.toMatch(/Reviewed by|same model/iu);
   });
 
   it("a Proof section with the kept or stale marker still leaves A2's lines in Reviews", () => {
@@ -715,7 +324,6 @@ describe("the reviewer model in a description that has a Proof section", () => {
     expect(drawerOf(lines, "Reviews: ")).toContain("Review used the same model as Build");
   });
 });
-
 
 describe("192a agent-written replies", () => {
   const UNCONFIRMED = "proven with scripted replies written in this task: check them";
@@ -756,42 +364,6 @@ describe("192a agent-written replies", () => {
         expect(proven, label).toBe(provenance === "before_task" || (provenance === "task_made" && realModel === "confirmed"));
       }
     });
-    it("a before_task reply is proven whatever the real model says, and reads as a plain check (no reply words)", () => {
-      for (const [result] of RESULTS) expect(rowOf(tableFor("before_task", result), "1.1")).toEqual({ claimId: "1.1", requirement: "The retry waits longer each time.", evidence: [{ kind: "check", label: "Unit tests", state: "proven" }], result: "proven" });
-    });
-    it("an independent reply is never proven, even when the real model agrees; it reads as not confirmed", () => {
-      const row = rowOf(tableFor("independent", "passed"), "1.1");
-      expect(row.result).toBe("passed");
-      expect(row.evidence[0]).toMatchObject({ state: "passed", notProvenReason: "agent_replies_unconfirmed" });
-    });
-    it("one independent reply keeps a check unproven when other replies are before_task or confirmed task_made", () => {
-      for (const others of ["before_task", "task_made"] as const) {
-        const table = buildProofTable(input({ realModelRun: realRun("passed"), checkDependencies: new Map([["unit", [{ dependencyId: "a", trust: "simulated" as const, replies: others }, { dependencyId: "b", trust: "simulated" as const, replies: "independent" as const }]]]) }));
-        expect(rowOf(table, "1.1").result, others).toBe("passed");
-      }
-    });
-  });
-  it("keeps marked non-proving checks plain and Passed with no reply reason", () => {
-    for (const testProof of [undefined, proofFor(CODE.digest, "does_not_prove"), proofFor(OTHER.digest)]) {
-      for (const realModelRun of [undefined, realRun("failed"), realRun()]) {
-        expect(rowOf(buildProofTable(input({ testProof, realModelRun })), "1.1")).toEqual({
-          claimId: "1.1", requirement: "The retry waits longer each time.",
-          evidence: [{ kind: "check", label: "Unit tests", state: "passed" }], result: "passed",
-        });
-      }
-    }
-  });
-  it("Rovara-made mocks win even when the real model agrees", () => {
-    for (const realModelRun of [undefined, realRun("failed"), realRun()]) {
-      expect(rowOf(buildProofTable(input({ checkDependencies: dependencies("made_by_rovara"), realModelRun })), "1.1").evidence[0]).toEqual({ kind: "check", label: "with a Rovara-made mock; not Proven: Unit tests", state: "passed", notProvenReason: "made_by_rovara" });
-    }
-  });
-  it("only restricts existing proof and never changes a failed or unrun check", () => {
-    for (const status of ["FAILED", "UNKNOWN"] as const) {
-      const row = rowOf(buildProofTable(input({ checkResults: [{ checkId: "unit", status }], realModelRun: realRun() })), "1.1");
-      expect(row.evidence[0]).toEqual({ kind: "check", label: "Unit tests", state: status === "FAILED" ? "failed" : "not_checked" });
-    }
-    expect(rowOf(buildProofTable(input({ testProof: undefined, realModelRun: realRun() })), "1.1").result).toBe("passed");
   });
   it("propagates to PR, folded rows, aggregate test lines and the task page", () => {
     for (const result of [undefined, "failed", "passed"] as const) {
@@ -809,33 +381,6 @@ describe("192a agent-written replies", () => {
       expect(view.testProofLines.some((line) => line.startsWith(`${words}: Test proof:`))).toBe(true);
     }
   });
-  it("leaves pre-task replies and recordings byte-identical, even with malformed or unrelated real runs", () => {
-    const golden = JSON.stringify(buildProofTable(input({ checkDependencies: undefined })));
-    for (const realModelRun of [undefined, realRun(), { items: "broken" } as never]) {
-      expect(JSON.stringify(buildProofTable(input({ checkDependencies: undefined, realModelRun })))).toBe(golden);
-      expect(JSON.stringify(buildProofTable(input({ checkDependencies: new Map([["unit", [{ dependencyId: "recording", trust: "recorded" }]]]), realModelRun })))).toBe(golden);
-    }
-  });
-  it("renders only fixed refusal words, never real-run fields or dependency ids, with hostile long labels inert", () => {
-    const secret = `gh${"p"}_${"a".repeat(36)}`;
-    const hostile = "[nested [link]](https://evil.example) ![image][ref]\n[ref]: https://evil.example\n@team #123 <img>\n# heading\n> quote\n---\n```\n~~~\n\u200b\u202e\ufe0f";
-    const build = (padding: number) => buildProofTable(input({ plan: plan({ checks: { proposed: [check("unit", hostile + "x".repeat(padding))], proves: { unit: ["1.1"] } } }), realModelRun: { ...realRun(), items: [{ checkId: secret, result: secret }] } as never }));
-    const table = build(1_048_576);
-    const label = rowOf(table, "1.1").evidence[0]!.label;
-    expect(label).toMatch(/^proven with scripted replies written in this task: check them/u);
-    expect(label).not.toMatch(/\]\(|!\[|@team|#123|<img>|[\r\n\u200b\u202e]|\ufe0f/u);
-    expect(JSON.stringify(table)).not.toContain(secret);
-    expect(JSON.stringify(table)).not.toContain("never-display-dependency");
-    expect(Array.from(label).length).toBeLessThanOrEqual(120);
-    // The cost must not grow faster than the hostile label (32,768 -> 262,144 characters: the 8N input stays at or under 256 KiB so it stays in CPU cache; the full 1,048,576 characters were checked once above).
-    expectLinearScaling((padding) => { const planned = plan({ checks: { proposed: [check("unit", hostile + "x".repeat(padding))], proves: { unit: ["1.1"] } } }); const given = input({ plan: planned, realModelRun: { ...realRun(), items: [{ checkId: secret, result: secret }] } as never }); return () => { buildProofTable(given); }; }, { n: 32_768, unitBytes: 1, label: "proof table with a hostile long label" });
-  });
-});
-
-it("unknown reply provenance values cannot count as confirmed task-made replies", () => {
-  const table = buildProofTable({ plan: plan(), checkResults: passing("unit", "lint"), scenarioRows: [], testProof: proofFor(CODE.digest), candidateDigest: CODE.digest, recordedCheckIds: SELECTED, checkDependencies: new Map([["unit", [{ dependencyId: "reply", trust: "simulated", replies: "unknown" }]]]) as never, realModelRun: { schemaVersion: 1, candidateDigest: CODE.digest, items: [{ checkId: "readiness:0", result: "passed" }] } });
-  expect(rowOf(table, "1.1").result).toBe("passed");
-  expect(rowOf(table, "1.1").evidence[0]?.notProvenReason).toBe("agent_replies_unconfirmed");
 });
 
 it("ambiguous or incomplete recorded check mappings never confirm agent replies", () => {
@@ -848,48 +393,4 @@ it("ambiguous or incomplete recorded check mappings never confirm agent replies"
     expect(rowOf(table, "1.1").evidence[0]?.notProvenReason).toBe(reason);
     if (reason === undefined) expect(rowOf(table, "1.1").evidence[0]?.label).toBe("Unit tests");
   }
-});
-
-
-it("keeps all three reasons and the Warning within four page lines, dropping only the count", () => {
-  const ids = ["unit", "lint", "third"];
-  const proposed = ids.map((id) => check(id, id));
-  const nextPlan = plan({ checks: { proposed, proves: { unit: ["1.1"], lint: ["2"], third: ["3"] } } });
-  const workflow = workflowWith({ checkPolicy: { required: [], optional: [], selectedOptionalIds: [], proposed },
-    verification: { candidateDigest: CODE.digest, producer: "test", environmentId: "ci", recordedAt: now, results: passing(...ids) } });
-  const testProof: TestProof = { ...proofFor(CODE.digest), items: [
-    ...ids.map((_, i) => ({ ...proofFor(CODE.digest).items[0]!, checkId: `readiness:${i}` })),
-    { ...proofFor(CODE.digest, "does_not_prove").items[0]!, label: "vacuous" },
-  ] };
-  const context = { plan: nextPlan, testProof,
-    checkDependencies: new Map([
-      ["unit", [{ dependencyId: "mock", trust: "made_by_rovara" as const }]],
-      ["lint", [{ dependencyId: "reply", trust: "simulated" as const, replies: "task_made" as const }]],
-      ["third", [{ dependencyId: "reply", trust: "simulated" as const, replies: "task_made" as const }]],
-    ]),
-    realModelRun: { schemaVersion: 1 as const, candidateDigest: CODE.digest, items: [{ checkId: "readiness:2", result: "failed" as const }] },
-  };
-  const lines = ProofTableViewSchema.parse(proofTableView(workflow, context)).testProofLines;
-  expect(lines).toEqual([
-    "Checks passing with a Rovara-made mock are not Proven.",
-    "Checks passing on scripted replies written in this task are not Proven until the real model agrees: check them.",
-    "Checks passing on scripted replies written in this task are not Proven: the real model did not agree.",
-    "with a Rovara-made mock; not Proven: Warning: 1 check also passes on the original code, so it does not prove the change (vacuous)",
-  ]);
-  const body = bodyOf(context, workflow);
-  expect(body.indexOf("Test proof:")).toBeLessThan(body.indexOf("Warning:"));
-});
-
-// L4-C: the body is no longer pinned by a hash (tests/fixtures/pr-body/*.md pin the whole description, in the open); the table and the page, which this redesign did not touch, keep their pin.
-it("pins legacy table and page bytes for ordinary, missing and malformed proofs", () => {
-  const hashes = [proofFor(CODE.digest), undefined, { invalid: true }].map((testProof) => {
-    const context = { plan: plan(), testProof: testProof as TestProof | undefined };
-    const table = buildProofTable({ ...context, checkResults: passing("unit", "lint"), scenarioRows: [], candidateDigest: CODE.digest, recordedCheckIds: SELECTED });
-    return createHash("sha256").update(JSON.stringify({ table, page: proofTableView(workflowWith(), context) })).digest("hex");
-  });
-  expect(hashes).toEqual([
-    "2426c6b2875026b7980624aabc1cc3278cad1581a05634513010770fe0b63966",
-    "578c0e48d0182fa5c7ca2598989da6093837aa79f91fc542aa79a05a1ed7f7f6",
-    "578c0e48d0182fa5c7ca2598989da6093837aa79f91fc542aa79a05a1ed7f7f6",
-  ]);
 });

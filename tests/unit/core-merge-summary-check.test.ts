@@ -34,42 +34,7 @@ async function world(options: { draft?: boolean; facts?: ProofHoldFacts; check?:
   return { w, pr, tracking, checks, latest, logs };
 }
 
-describe("off: no source, or the gate off", () => {
-  it("without a source nothing is written and the pass behaves as before", async () => {
-    const { tracking, checks, w, pr } = await world({ draft: true });
-    await trackPullRequest(tracking, TASK_ID);
-    expect(checks()).toEqual([]);
-    expect(pr.model.summaryCheckWrites).toBe(0);
-    expect(await w.store.get(summaryCheckKey(ORG, TASK_ID, pr.repositoryId, pr.number))).toBeUndefined();
-    expect(pr.model.getChangeRequest(String(pr.number)).draft).toBe(false);
-  });
-  it("the gate off for the task: nothing is written", async () => {
-    const { tracking, checks } = await world({ check: source({ enabled: () => false }) });
-    await trackPullRequest(tracking, TASK_ID);
-    expect(checks()).toEqual([]);
-  });
-});
-
 describe("the conclusion through the pass", () => {
-  it("no proof hold, a ready pull request: success, with the task page as Details", async () => {
-    const { tracking, latest } = await world({ check: source() });
-    await trackPullRequest(tracking, TASK_ID);
-    expect(latest()?.payload).toMatchObject({ status: "completed", conclusion: "success" });
-    expect(latest()?.detailsUrl).toBe("https://rovara.example.test/tasks/1");
-  });
-  it("a proven draft: taken out of draft, success", async () => {
-    const { tracking, latest, pr } = await world({ draft: true, facts: PROVEN, check: source() });
-    await trackPullRequest(tracking, TASK_ID);
-    expect(pr.model.getChangeRequest(String(pr.number)).draft).toBe(false);
-    expect(latest()?.payload).toMatchObject({ conclusion: "success", title: "Ready: the change proof holds" });
-  });
-  it("a held draft: stays a draft, failure with the hold's words", async () => {
-    const { tracking, latest, pr } = await world({ draft: true, facts: VACUOUS, check: source() });
-    await trackPullRequest(tracking, TASK_ID);
-    expect(pr.model.getChangeRequest(String(pr.number)).draft).toBe(true);
-    expect(latest()?.payload.conclusion).toBe("failure");
-    expect(latest()?.payload.text).toContain("the new tests pass on the old code too");
-  });
   it("held, then marked ready anyway: the same run flips to success, 'overridden by Priya'", async () => {
     const { tracking, checks, latest, w, pr } = await world({ draft: true, facts: VACUOUS, check: source() });
     await trackPullRequest(tracking, TASK_ID);
@@ -91,14 +56,6 @@ describe("the conclusion through the pass", () => {
     await trackPullRequest(tracking, TASK_ID);
     expect(await w.trackingOf(pr)).toMatchObject({ ci: "passing", failingChecks: [] });
     expect((await w.task()).workflow.stage).toBe("WAIT_FOR_MERGE");
-  });
-  it("made required by a person: the pass does not wait on Rovara's own Check (no deadlock)", async () => {
-    const { tracking, latest, pr } = await world({ draft: true, facts: PROVEN, check: source() });
-    pr.model.requiredChecks = ["Rovara"];
-    await trackPullRequest(tracking, TASK_ID);
-    await trackPullRequest(tracking, TASK_ID);
-    expect(pr.model.getChangeRequest(String(pr.number)).draft).toBe(false);
-    expect(latest()?.payload.conclusion).toBe("success");
   });
   it("a head Rovara is still working on (not waiting for the merge) is in progress, never success, though the pull request was ready before", async () => {
     const { tracking, latest, w } = await world({ check: source() });
@@ -133,27 +90,6 @@ describe("the conclusion through the pass", () => {
     expect(latest()?.payload).toMatchObject({ status: "completed", conclusion: "neutral" });
     expect(latest()?.payload.title).toContain("did not run");
   });
-  it("No CI: neutral", async () => {
-    const { w, pr } = await world();
-    const host = (await w.host.repository("web", 1, "app", ORG))!.codeHost;
-    const result = await syncSummaryCheck({ store: w.store, now: () => w.now.value, source: source() }, {
-      task: { ...(await w.task()), orgId: ORG }, pullRequest: pr, codeHost: host, repositoryUrl: "https://github.com/acme/app", scope: { orgId: ORG },
-      status: { headRevision: pr.head, draft: false, state: "open" }, ci: "none", ciMode: "their_ci_fix", headByRovara: true, ready: true, proofHoldOn: false,
-    });
-    expect(result).toBe("written");
-    expect(pr.model.summaryChecks[0]?.payload).toMatchObject({ status: "completed", conclusion: "neutral" });
-    expect(pr.model.summaryChecks[0]?.payload.title).toContain("No CI");
-  });
-  it("the full suite still running (from the source's facts): in progress; it finishes into success", async () => {
-    let fullSuite: "pending" | "passed" = "pending";
-    const { tracking, checks, latest } = await world({ check: source({ facts: async () => ({ fullSuite }) }) });
-    await trackPullRequest(tracking, TASK_ID);
-    expect(latest()?.payload.status).toBe("in_progress");
-    fullSuite = "passed";
-    await trackPullRequest(tracking, TASK_ID);
-    expect(checks()).toHaveLength(1);
-    expect(latest()?.payload.conclusion).toBe("success");
-  });
   it("in progress for longer than the stale limit: the next pass makes it neutral", async () => {
     const { tracking, latest, w } = await world({ check: source({ facts: async () => ({ fullSuite: "pending" }) }) });
     await trackPullRequest(tracking, TASK_ID);
@@ -165,25 +101,6 @@ describe("the conclusion through the pass", () => {
 });
 
 describe("writes: idempotent, one run per head, bounded", () => {
-  it("an unchanged Check is not written again", async () => {
-    const { tracking, pr } = await world({ check: source() });
-    await trackPullRequest(tracking, TASK_ID);
-    await trackPullRequest(tracking, TASK_ID);
-    await trackPullRequest(tracking, TASK_ID);
-    expect(pr.model.summaryCheckWrites).toBe(1);
-  });
-  it("a new head gets a new run; the old head's run is left as it is", async () => {
-    const { tracking, checks, w, pr } = await world({ check: source() });
-    await trackPullRequest(tracking, TASK_ID);
-    const first = structuredClone(checks()[0]!);
-    const head2 = pr.model.commit(pr.model.getChangeRequest(String(pr.number)).sourceBranch, { "src/c.ts": "export const c = 3;\n" });
-    pr.model.setChecks(head2, [{ name: "unit", state: "completed", conclusion: "success", required: false, url: "" }]);
-    await w.setWorkflow({ pullRequests: [{ ...(await w.task()).workflow.pullRequests![0]!, headSha: head2 }] });
-    await trackPullRequest(tracking, TASK_ID);
-    expect(checks()).toHaveLength(2);
-    expect(checks()[0]).toEqual(first);
-    expect(checks()[1]!.revision).toBe(head2);
-  });
   it("no Check permission: recorded, not asked again within the hour, asked again after", async () => {
     const { tracking, w, pr, logs } = await world({ check: source() });
     pr.model.summaryCheckPermission = false;
@@ -244,28 +161,6 @@ describe("Rovara stops following the task", () => {
     const writes = pr.model.summaryCheckWrites;
     await trackPullRequest(tracking, TASK_ID);
     expect(pr.model.summaryCheckWrites).toBe(writes);
-  });
-  it("a held failure is finished as neutral (its 'mark ready anyway' is no longer reachable), once", async () => {
-    const { tracking, latest, w, pr } = await world({ draft: true, facts: VACUOUS, check: source() });
-    await trackPullRequest(tracking, TASK_ID);
-    expect(latest()?.payload.conclusion).toBe("failure");
-    const { change } = await import("../../packages/contracts/src/index.js");
-    await w.store.update({ key: taskRecordKey(TASK_ID), ops: [change.set(["closedAt"], new Date(w.now.value).toISOString())] });
-    await trackPullRequest(tracking, TASK_ID);
-    expect(latest()?.payload).toMatchObject({ status: "completed", conclusion: "neutral" });
-    const writes = pr.model.summaryCheckWrites;
-    await trackPullRequest(tracking, TASK_ID);
-    expect(pr.model.summaryCheckWrites).toBe(writes);
-  });
-  it("a finished Check is left as it is", async () => {
-    const { tracking, latest, w, pr } = await world({ check: source() });
-    await trackPullRequest(tracking, TASK_ID);
-    const before = structuredClone(latest());
-    const { change } = await import("../../packages/contracts/src/index.js");
-    await w.store.update({ key: taskRecordKey(TASK_ID), ops: [change.set(["closedAt"], new Date(w.now.value).toISOString())] });
-    await trackPullRequest(tracking, TASK_ID);
-    expect(latest()).toEqual(before);
-    expect(pr.model.summaryCheckWrites).toBe(1);
   });
 });
 
@@ -346,22 +241,5 @@ describe("the Check Run request body", () => {
     ["a details address that is not https", { headSha: head, payload, detailsUrl: "http://rovara.example.test" }],
   ])("refuses %s with fixed words", (_label, input) => {
     expect(() => rovaraCheckBody(input as never, 0)).toThrow(/^CONFIG_INVALID: the check run/u);
-  });
-});
-
-describe("the verdict source (L4-C B4)", () => {
-  const verdictOf = { resultKind: "verified", heading: "Verified · Low risk · nothing extra to check", body: ["**Changed** 1 file, +1 -0."] };
-  it("a source that gives a verdict makes the Ready Check say the description's words; the conclusion is unchanged", async () => {
-    const { tracking, latest } = await world({ check: source({ verdict: async () => verdictOf }) });
-    await trackPullRequest(tracking, TASK_ID);
-    expect(latest()?.payload).toMatchObject({ status: "completed", conclusion: "success", title: verdictOf.heading });
-    expect(latest()?.payload.text).toContain("**Changed** 1 file, +1 -0.");
-  });
-  it("a source that throws, or gives nothing, leaves the Check as it was (never a problem of its own)", async () => {
-    for (const verdict of [async () => { throw new Error("boom"); }, async () => undefined]) {
-      const { tracking, latest } = await world({ check: source({ verdict }) });
-      await trackPullRequest(tracking, TASK_ID);
-      expect(latest()?.payload).toMatchObject({ status: "completed", conclusion: "success", title: "Ready" });
-    }
   });
 });

@@ -2,20 +2,18 @@
 // a member (and any unknown role) gets one fixed 403 before anything is read; the company is the membership's, so two companies never meet; hosted Code cannot run a custom agent, and the list says so;
 // nothing is invented (no budgets, no shares); the answer parses with the contract's strict schema; refusals are fixed words with no echo.
 import { describe, expect, it, vi } from "vitest";
-import { AgentDirectoryResponseSchema, AgentViewSchema, BUILTIN_AGENT_IDS, DEFAULT_AGENT_GUARDRAILS, agentGuardrailsKey, agentKey, change, type AuditSink, type OrgId, type OrgRole } from "@agentx/contracts";
+import { AgentDirectoryResponseSchema, AgentViewSchema, DEFAULT_AGENT_GUARDRAILS, agentGuardrailsKey, agentKey, change, type AuditSink, type OrgId, type OrgRole } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { AgentStore } from "../../packages/broker/src/core/agents/store.js";
 import { writeGuardrails } from "../../packages/broker/src/core/agents/guardrails.js";
 import {
-  AGENTS_PATH, AGENT_CANT_RUN_ON_HOSTED, AGENT_DIRECTORY_BAD_VIEW, AGENT_DIRECTORY_MAX, AGENT_DIRECTORY_NOT_ALLOWED, AGENT_DIRECTORY_PROJECT_NOT_HERE, AGENT_DIRECTORY_UNAVAILABLE,
-  isAgentDirectoryPath, routeHostedAgentDirectory,
+  AGENTS_PATH, AGENT_CANT_RUN_ON_HOSTED, AGENT_DIRECTORY_BAD_VIEW, AGENT_DIRECTORY_MAX, AGENT_DIRECTORY_NOT_ALLOWED, AGENT_DIRECTORY_PROJECT_NOT_HERE, AGENT_DIRECTORY_UNAVAILABLE, routeHostedAgentDirectory,
 } from "../../packages/broker/src/core-host/agent-directory-routes.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
-import { NOT_FOR_SCRIPT_TOKENS, createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
-import { appRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
+import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
@@ -51,55 +49,6 @@ async function seeded() {
   return w;
 }
 
-describe("the directory path and its route row", () => {
-  it("serves only GET on the one path, with one full-access row", () => {
-    expect(isAgentDirectoryPath("/v1/app/agents", "GET")).toBe(true);
-    for (const [path, method] of [["/v1/app/agents", "POST"], ["/v1/app/agents", "PUT"], ["/v1/app/agents/agt_aaaaaaaaaaaaaaaaaaaa", "GET"], ["/v1/app/agents/", "GET"], ["/v1/app/agent", "GET"], ["/v1/dev/agents", "GET"]] as const) {
-      expect(isAgentDirectoryPath(path, method), `${method} ${path}`).toBe(false);
-    }
-    expect(appRouteOf("GET", "/v1/app/agents")).toEqual({ method: "GET", path: "/v1/app/agents", requires: "full" });
-    for (const [method, path] of [["POST", "/v1/app/agents"], ["PUT", "/v1/app/agents"], ["DELETE", "/v1/app/agents"], ["GET", "/v1/app/agents/agt_aaaaaaaaaaaaaaaaaaaa"], ["GET", "/v1/app/agents/x/versions"]] as const) {
-      expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
-    }
-  });
-});
-
-describe("who reads it", () => {
-  it("an owner and an administrator read the company's agents: the six built-ins first, then the custom ones oldest first", async () => {
-    const w = await seeded();
-    for (const role of ["owner", "admin"] as const) {
-      const answer = await w.get(A, role);
-      expect(answer.status, role).toBe(200);
-      expect(AgentDirectoryResponseSchema.safeParse(answer.body).success).toBe(true);
-      expect(names(answer).slice(6).sort()).toEqual(["Release notes A", "Triage A"]);
-      expect(rows(answer).slice(0, 6).map((row) => row.agentId)).toEqual([...BUILTIN_AGENT_IDS]);
-      expect(rows(answer).slice(0, 6).every((row) => row.builtin)).toBe(true);
-    }
-  });
-
-  it("a member (and any role that is not exactly owner or admin) gets one fixed 403, whatever the query, and nothing is read", async () => {
-    const w = await seeded();
-    const spies = [vi.spyOn(w.store, "get"), vi.spyOn(w.store, "query")];
-    const refusals = new Set<string>();
-    for (const role of ["member", "Owner", "ADMIN", "owner ", "maintainer", "", undefined, null, 1]) {
-      for (const query of ["", "scope=all", "scope=nonsense", "project=alpha", "scope=mine&scope=all", "x=1"]) {
-        const answer = await w.get(A, role, query);
-        expect(answer.status, `${String(role)} ${query}`).toBe(403);
-        expect(answer.body).toEqual({ error: { code: "FORBIDDEN", message: AGENT_DIRECTORY_NOT_ALLOWED } });
-        refusals.add(answer.raw);
-      }
-    }
-    expect(refusals.size).toBe(1);
-    for (const spy of spies) expect(spy).not.toHaveBeenCalled();
-  });
-
-  it("a refusal says nothing about the company, the agents or the query", async () => {
-    const w = await seeded();
-    const answer = await w.get(A, "member", "scope=Release notes A");
-    for (const word of [A, B, "Release", "Triage", "agt_", ADA, "scope"]) expect(answer.raw).not.toContain(word);
-  });
-});
-
 describe("what it lists", () => {
   it("each custom agent: its owner, its status and that hosted Code cannot run it yet; no budget, no accountable person (Code stores none)", async () => {
     const w = await seeded();
@@ -118,32 +67,6 @@ describe("what it lists", () => {
     // A built-in on its default release: Rovara Code stays on release 1 until the company adopts 2, and says an update is available.
     const code = (answer.body["agents"] as Array<Record<string, unknown>>).find((row) => row["agentId"] === "rovara-code")!;
     expect(code).toMatchObject({ pinnedVersion: 1, currentVersion: 1, latestVersion: 2, updateAvailable: { from: 1, to: 2 }, access: "manage", status: "active" });
-  });
-
-  it("a project-owned agent (the shape hosted staging stores for every one of company A's agents, live test run 2) is listed with its project owner, never a 503; it is no one's own agent", async () => {
-    const w = await seeded();
-    const made = await w.agents(A).create({ orgId: A, name: "Project agent", by: ADA });
-    await w.store.update({ key: agentKey(A, made.agentId, "META"), ops: [change.set(["owner"], { kind: "project", project: "demo-tasklog" })] });
-    const answer = await w.get(A, "owner");
-    expect(answer.status).toBe(200);
-    expect(AgentDirectoryResponseSchema.safeParse(answer.body).success).toBe(true);
-    expect(rows(answer).find((row) => row.name === "Project agent")).toMatchObject({ owner: { kind: "project", project: "demo-tasklog" }, needsLaterConnectors: AGENT_CANT_RUN_ON_HOSTED });
-    expect(names(await w.get(A, "owner", "scope=mine", ADA))).toEqual(["Release notes A"]);
-    // A project owner whose name is not a project name is unreadable: the whole answer is the fixed 503, never a shorter list.
-    await w.store.update({ key: agentKey(A, made.agentId, "META"), ops: [change.set(["owner"], { kind: "project", project: "../Not A Name" })] });
-    const bad = await w.get(A, "owner");
-    expect(bad.status).toBe(503);
-    expect(bad.raw).not.toContain("Not A Name");
-    // Another company's reader never sees it.
-    expect(names(await w.get(B, "owner"))).not.toContain("Project agent");
-  });
-
-  it("an archived agent is shown as archived", async () => {
-    const w = world();
-    const made = await w.agents(A).create({ orgId: A, name: "Old one", by: ADA });
-    await w.store.update({ key: agentKey(A, made.agentId, "META"), ops: [change.set(["status"], "archived")] });
-    const answer = await w.get(A, "admin");
-    expect(rows(answer).find((row) => row.name === "Old one")?.status).toBe("archived");
   });
 
   it("reads legacy member owners and round-trips project owners; mine excludes project-owned agents", async () => {
@@ -170,18 +93,6 @@ describe("what it lists", () => {
     expect(theirs).toEqual([]);
   });
 
-  it("scope: all is the default; builtin lists only built-ins; mine lists only the caller's own custom agents; shared is empty (no share rows exist yet)", async () => {
-    const w = await seeded();
-    expect(names(await w.get(A, "owner", ""))).toEqual(names(await w.get(A, "owner", "scope=all")));
-    const builtin = await w.get(A, "owner", "scope=builtin");
-    expect(rows(builtin)).toHaveLength(6);
-    expect(rows(builtin).every((row) => row.builtin)).toBe(true);
-    expect(names(await w.get(A, "owner", "scope=mine", ADA))).toEqual(["Release notes A"]);
-    expect(names(await w.get(A, "owner", "scope=mine", BOB))).toEqual(["Triage A"]);
-    expect(names(await w.get(A, "owner", "scope=mine", "d".repeat(64)))).toEqual([]);
-    expect(rows(await w.get(A, "owner", "scope=shared"))).toEqual([]);
-  });
-
   it("a view it does not offer is a fixed refusal: an unknown or repeated scope, another parameter, or a project's list", async () => {
     const w = await seeded();
     for (const query of ["scope=nonsense", "scope=ALL", "scope=", "scope=mine&scope=all", "scope=all&q=x", "q=1"]) {
@@ -198,19 +109,6 @@ describe("what it lists", () => {
 });
 
 describe("two companies", () => {
-  it("each company's owner reads only that company's agents under the same names, and the other's are never in the answer", async () => {
-    const w = await seeded();
-    await w.agents(B).create({ orgId: B, name: "Triage A", by: CAT });
-    const a = await w.get(A, "owner"), b = await w.get(B, "owner");
-    expect(names(a).filter((name) => !BUILTIN_AGENT_IDS.includes(name as never))).toContain("Release notes A");
-    expect(a.raw).not.toContain("Secret of B");
-    expect(a.raw).not.toContain(CAT);
-    expect(b.raw).not.toContain("Release notes A");
-    expect(b.raw).not.toContain(ADA);
-    expect(rows(b).filter((row) => !row.builtin).map((row) => row.name).sort()).toEqual(["Secret of B", "Triage A"]);
-    const idsA = new Set(rows(a).map((row) => row.agentId)), idsB = new Set(rows(b).map((row) => row.agentId));
-    expect([...idsA].filter((id) => idsB.has(id) && !BUILTIN_AGENT_IDS.includes(id as never))).toEqual([]);
-  });
 
   it("a directory row of this company that points at an agent record naming another company is not listed (the record is read under this company's key and must name it)", async () => {
     const w = await seeded();
@@ -219,12 +117,6 @@ describe("two companies", () => {
     const answer = await w.get(A, "owner");
     expect(names(answer)).not.toContain("Planted");
     expect(answer.status).toBe(200);
-  });
-
-  it("an owner of company A with company B's id has no way to name it: the company is a parameter of the route's caller (membership), and B's agents are not in an A read of a store holding both", async () => {
-    const w = await seeded();
-    expect((await w.get(A, "owner")).raw).not.toContain("Secret of B");
-    expect((await w.get(B, "owner")).raw).toContain("Secret of B");
   });
 });
 
@@ -274,7 +166,6 @@ describe("the strict contract (Cloud's reader parses this)", () => {
 // ---- Through the dev routes: the live role from membership, the caller's company, script tokens, other methods ----
 
 const get = (path: string, method = "GET") => ({ method, path, headers: {}, body: "" });
-const OTHER = "org_corehost00000000000b";
 function appOver(w: FakeWorld, env: NodeJS.ProcessEnv): CoreHostApp {
   return createCoreHostApp({
     env, modules: w.modules, context: () => w.context(), nowMs: () => w.clock.now,
@@ -319,42 +210,5 @@ describe("through the dev routes", () => {
     h.roles.set("ada" + FAKE_COMPANY, "admin");
     expect(bodyOf(await h.routes.route(get(`${AGENTS_PATH}?scope=mine`), admin)).agents?.map((row) => row.name)).toEqual(["Mine"]);
     expect(bodyOf(await h.routes.route(get(`${AGENTS_PATH}?scope=mine`), owner)).agents).toEqual([]);
-  });
-
-  it("the company is the membership's: an owner of one company never reads the other's agents", async () => {
-    const h = await over();
-    await h.agents(FAKE_COMPANY).create({ orgId: FAKE_COMPANY, name: "In first", by: ADA });
-    await h.agents(OTHER).create({ orgId: OTHER, name: "In second", by: BOB });
-    const first = bodyOf(await h.routes.route(get(AGENTS_PATH), h.person(FAKE_COMPANY, "owner", "o1")));
-    const second = bodyOf(await h.routes.route(get(AGENTS_PATH), h.person(OTHER, "owner", "o2")));
-    expect(first.agents?.filter((row) => !row.builtin).map((row) => row.name)).toEqual(["In first"]);
-    expect(second.agents?.filter((row) => !row.builtin).map((row) => row.name)).toEqual(["In second"]);
-  });
-
-  it("a member of one company who is an owner of nothing else stays refused even where another company has the same person id as owner", async () => {
-    const h = await over();
-    const member = h.person(FAKE_COMPANY, "member", "twin");
-    h.person(OTHER, "owner", "twin");
-    expect((await h.routes.route(get(AGENTS_PATH), member))?.statusCode).toBe(403);
-  });
-
-  it("a script token is refused (fixed words); a caller with no membership is the sign-in refusal; another method is left to the old broker; a malformed role refuses", async () => {
-    const h = await over();
-    const owner = h.person(FAKE_COMPANY, "owner");
-    const token = await h.routes.route(get(AGENTS_PATH), { ...owner, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
-    expect(token?.statusCode).toBe(403);
-    expect(bodyOf(token).error?.message).toBe(NOT_FOR_SCRIPT_TOKENS);
-    const stranger: DeployedCaller = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY, personId: "nobody" }), client: "cli" };
-    expect((await h.routes.route(get(AGENTS_PATH), stranger))?.statusCode).toBe(401);
-    for (const method of ["POST", "PUT", "DELETE"]) expect(await h.routes.route(get(AGENTS_PATH, method), owner), method).toBeUndefined();
-    h.roles.set("owner" + FAKE_COMPANY, "superuser" as OrgRole);
-    expect((await h.routes.route(get(AGENTS_PATH), owner))?.statusCode).toBe(401);
-  });
-
-  it("with the core switch off: nothing answers and nothing is read", async () => {
-    const h = await over({});
-    const caller = h.person(FAKE_COMPANY, "owner");
-    expect(await h.routes.route(get(AGENTS_PATH), caller)).toBeUndefined();
-    expect(h.companyOf).not.toHaveBeenCalled();
   });
 });

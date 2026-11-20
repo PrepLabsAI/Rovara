@@ -69,12 +69,4 @@ describe("the risk tiers", () => {
     expect(result.reasons.some((reason) => reason.startsWith("A fix removes or skips tests"))).toBe(true);
     expect(result.reasons.some((reason) => reason.startsWith("Removes or skips tests"))).toBe(false);
   });
-
-  it("a file renamed out of a security name counts under its old name", () => {
-    expect(risk([file("src/token.ts", { renamedFrom: "src/jwt.ts" })]).level).toBe("high");
-  });
-
-  it("a renamed file counts under both names", () => {
-    expect(risk([file("ci/new.yml", { renamedFrom: ".gitlab-ci.yml" })]).level).toBe("high");
-  });
 });

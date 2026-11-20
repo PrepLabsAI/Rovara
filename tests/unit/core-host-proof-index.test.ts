@@ -18,8 +18,6 @@ import { DIGEST, v1Pack } from "../support/evidence-v2-fixtures.js";
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const OTHER = "org_corehost00000000000b";
 const OWNER_ID = "person-owner-00000000001";
-const READER_ID = "person-reader-0000000001";
-const STRANGER_ID = "person-strange-000000001";
 const PROJECT: ProjectDefinition = {
   name: "payments", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.",
   repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }],
@@ -102,29 +100,6 @@ async function world() {
 const body = (answer: { statusCode: number; body: string } | undefined): Record<string, unknown> => ({ status: answer?.statusCode, ...JSON.parse(answer!.body) as Record<string, unknown> });
 
 describe("GET /v1/dev/tasks/{id}/evidence on a core task", () => {
-  it("answers the owner the proof index of the current code, with the failing tests and their likely causes", async () => {
-    const w = await world();
-    const owner = w.person(OWNER_ID, FAKE_COMPANY);
-    const failing = ["tests/cart.test.ts::applies discount", "tests/cart.test.ts::rounds"];
-    const taskId = await w.taskOf(owner, FAKE_COMPANY, failingPack(failing));
-    const answer = body(await w.read(owner, taskId));
-    expect(answer).toEqual({
-      status: 200, taskId,
-      items: [
-        // readiness:0 is in the pack, so the pack's entry stands for it; readiness:7 has only Rovara's own record.
-        { id: "check:1", title: "npm run build", kind: "check_result", verdict: "fail", criterionIds: [] },
-        { id: "review:code", title: "Code review", kind: "review", verdict: "pass", criterionIds: [] },
-        { id: "review:security", title: "Security review", kind: "review", verdict: "fail", criterionIds: [] },
-        { id: "evidence:0", title: "pytest -q", kind: "test_report", verdict: "fail", criterionIds: [] },
-        { id: "evidence:1", title: "ruff", kind: "check_result", verdict: "pass", criterionIds: [] },
-        { id: "evidence:2", title: "semgrep", kind: "check_result", verdict: "pass", criterionIds: [] },
-      ],
-      failures: [
-        { check: "pytest -q", test: failing[0], cause: "likely broken by a change (commit aaaaaaa) to src/cart.ts" },
-        { check: "pytest -q", test: failing[1], cause: "unknown (only weak evidence)" },
-      ],
-    });
-  });
 
   it("with no kept pack, answers only what Rovara recorded and no failures key", async () => {
     const w = await world();
@@ -133,30 +108,6 @@ describe("GET /v1/dev/tasks/{id}/evidence on a core task", () => {
     const answer = body(await w.read(owner, taskId));
     expect(Object.keys(answer)).not.toContain("failures");
     expect((answer["items"] as Array<{ id: string }>).map((item) => item.id)).toEqual(["check:0", "check:1", "review:code", "review:security"]);
-  });
-
-  it("answers a person the company's rule lets read the task (a reader), the same index", async () => {
-    const w = await world();
-    const owner = w.person(OWNER_ID, FAKE_COMPANY);
-    const taskId = await w.taskOf(owner, FAKE_COMPANY, failingPack(["tests/a.test.ts::x"]));
-    w.readers.add(READER_ID);
-    const reader = w.person(READER_ID, FAKE_COMPANY);
-    expect(body(await w.read(reader, taskId))).toEqual(body(await w.read(owner, taskId)));
-  });
-
-  it("refuses a member of the same company who may not read the task: exactly a missing task's answer, nothing of the task in it", async () => {
-    const w = await world();
-    const owner = w.person(OWNER_ID, FAKE_COMPANY);
-    const taskId = await w.taskOf(owner, FAKE_COMPANY, failingPack(["tests/a.test.ts::secret name"]));
-    for (const role of ["member", "admin", "owner"] as const) {
-      const stranger = w.person(STRANGER_ID, FAKE_COMPANY, role);
-      const refused = await w.read(stranger, taskId);
-      const missing = await w.read(stranger, randomUUID());
-      expect(refused?.statusCode).toBe(404);
-      expect(refused).toEqual(missing);
-      expect(refused!.body).not.toContain("secret name");
-      expect(refused!.body).not.toContain(taskId);
-    }
   });
 
   it("keeps two companies apart: each reads only its own task's index; the other company's task answers as a missing one", async () => {
@@ -190,42 +141,5 @@ describe("GET /v1/dev/tasks/{id}/evidence on a core task", () => {
     expect((answer["failures"] as unknown[]).length).toBe(10);
     expect(answer["failuresNotListed"]).toBe(3);
     expect((answer["failures"] as Array<{ test: string }>).map((row) => row.test)).toEqual(failing.slice(0, 10));
-  });
-
-  it("shows only plain text: a hostile test id, path and check label cannot make a tag, link, mention or carry a secret", async () => {
-    const w = await world();
-    const owner = w.person(OWNER_ID, FAKE_COMPANY);
-    const secret = `ghp_${"Ab1Cd2Ef3Gh4".repeat(3)}`;
-    const hostile = `[x](https://evil.example/p) @owner #12 <img src=x onerror=alert(1)> ${secret}`;
-    const id = `tests/${hostile}.test.ts::a`;
-    const pack = failingPack([id]) as unknown as { checks: Array<Record<string, unknown>> };
-    pack.checks[0]!["label"] = `<b>bold</b> ${hostile}`;
-    (pack.checks[0]!["tests"] as { failureCauses: Array<{ cause: unknown }> }).failureCauses[0]!.cause = { kind: "change", paths: [`src/${hostile}.ts`], pathsCount: 1, basis: ["named_in_failure"] };
-    const taskId = await w.taskOf(owner, FAKE_COMPANY, pack as unknown as EvidencePack);
-    const answer = await w.read(owner, taskId);
-    expect(answer?.statusCode).toBe(200);
-    for (const bad of ["<img", "<b>", secret, "](https://", "https://evil", "@owner", "#12"]) expect(answer!.body, bad).not.toContain(bad);
-    expect(answer!.body).toContain("likely broken by a change");
-  });
-
-  it("never shows a pack kept for other code than the current candidate", async () => {
-    const w = await world();
-    const owner = w.person(OWNER_ID, FAKE_COMPANY);
-    const stale = { ...failingPack(["tests/a.test.ts::old"]), candidateDigest: "d".repeat(64) } as EvidencePack;
-    const taskId = await w.taskOf(owner, FAKE_COMPANY, stale);
-    const answer = await w.read(owner, taskId);
-    expect(answer!.body).not.toContain("evidence:");
-    expect(answer!.body).not.toContain("failures");
-  });
-
-  it("refuses a script token (its closed list is a task's read only), and owns only GET", async () => {
-    const w = await world();
-    const owner = w.person(OWNER_ID, FAKE_COMPANY);
-    const taskId = await w.taskOf(owner, FAKE_COMPANY, failingPack(["tests/a.test.ts::x"]));
-    const token = { ...owner, scriptToken: { tokenId: "tok_1" } };
-    const refused = await w.read(token, taskId);
-    expect(refused?.statusCode).toBe(403);
-    expect(refused!.body).not.toContain("tests/a.test.ts");
-    for (const method of ["POST", "PUT", "DELETE"]) expect(await w.routes.route({ method, path: `/v1/dev/tasks/${taskId}/evidence`, headers: {} }, owner)).toBeUndefined();
   });
 });

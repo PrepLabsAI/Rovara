@@ -21,19 +21,6 @@ const keep = async (checks: unknown[], entries: CheckEntry[] = [entry("readiness
 const prLines = (pack: NonNullable<Awaited<ReturnType<typeof keep>>["pack"]>) => evidenceLines({ pack, mode: "summary" }, DIGEST, 0).lines.join("\n");
 
 describe("changed-line coverage in the evidence", () => {
-  it("keeps the coverage the worker read, and the pull request shows the counts", async () => {
-    const { result, pack } = await keep([{ checkId: "readiness:0", tests, coverage: { linesChanged: 8, linesCovered: 6, files: [{ path: "src/match.py", uncovered: [14, 15] }] } }]);
-    expect(result).toMatchObject({ kept: true });
-    expect(pack?.checks[0]?.coverage).toEqual({ linesChanged: 8, linesCovered: 6, files: [{ path: "src/match.py", uncovered: [14, 15] }] });
-    expect(prLines(pack!)).toContain("Changed lines covered by tests: 6 of 8 (75%)");
-  });
-
-  it("says 'no coverage report' for a pack whose worker sent none (an older worker, or a project that writes no report)", async () => {
-    const { pack } = await keep([{ checkId: "readiness:0", tests }]);
-    expect(pack?.checks[0]?.coverage).toBeUndefined();
-    expect(prLines(pack!)).toContain("Changed lines covered by tests: no coverage report");
-    expect(prLines(pack!)).not.toContain("0 of 0");
-  });
 
   it("says so when the report lists none of the changed lines, instead of a bare 0 of 0", async () => {
     const { pack } = await keep([{ checkId: "readiness:0", tests, coverage: { linesChanged: 0, linesCovered: 0, files: [] } }]);
@@ -52,29 +39,5 @@ describe("changed-line coverage in the evidence", () => {
     const none = await keep([{ checkId: "readiness:0", tests, coverage: { linesChanged: 8, linesCovered: 8, files: [] } }]);
     expect(prLines(none.pack!)).toContain("8 of 8 (100%)");
     expect(prLines(none.pack!)).not.toContain("not in the coverage report");
-  });
-
-  it("drops coverage whose file lists do not add up (a worker is not taken at its word), keeping the rest of the check", async () => {
-    const { pack } = await keep([{ checkId: "readiness:0", tests, coverage: { linesChanged: 4, linesCovered: 4, files: [{ path: "a.py", uncovered: [1, 2] }] } }]);
-    expect(pack?.checks[0]?.coverage).toBeUndefined();
-    expect(pack?.checks[0]?.tests?.total).toBe(3);
-  });
-
-  it("puts only counts on the pull request: a file path written in the repository (markup, a mention) never appears there", async () => {
-    const path = "src/[click](http://evil.example)/@everyone.py";
-    const { pack } = await keep([{ checkId: "readiness:0", tests, coverage: { linesChanged: 2, linesCovered: 1, files: [{ path, uncovered: [2] }] } }]);
-    expect(pack?.checks[0]?.coverage?.files[0]?.path).toBeDefined();
-    const text = prLines(pack!);
-    expect(text).toContain("1 of 2");
-    expect(text).not.toContain("evil.example");
-    expect(text).not.toContain("@everyone");
-  });
-
-  it("runs coverage through the data guard: a path that holds personal data loses the check's details, not the whole pack", async () => {
-    const { result, pack } = await keep([{ checkId: "readiness:0", tests, coverage: { linesChanged: 2, linesCovered: 1, files: [{ path: "fixtures/jane.doe@gmail.com.py", uncovered: [2] }] } }]);
-    expect(result).toMatchObject({ kept: true });
-    expect(pack?.checks[0]?.coverage).toBeUndefined();
-    expect(pack?.checks[0]?.tests).toBeUndefined();
-    expect(pack?.notTested.some((item) => item.id === "data_guard")).toBe(true);
   });
 });

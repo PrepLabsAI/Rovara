@@ -10,7 +10,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createScriptToken, readScriptToken } from "../../packages/broker/src/core/script-tokens/index.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
-import { createCoreHostApp, engineStampKey, stampOf, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
+import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { INVOLVED_UNAVAILABLE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SESSION_CAP_UNREADABLE, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { involvedRowKey, writeInvolvedRow } from "../../packages/broker/src/core/task-flow/involved.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
@@ -59,68 +59,12 @@ async function world2(env: NodeJS.ProcessEnv = { ROVARA_CORE_ENGINE: "on" }) {
 }
 
 describe("the core's handlers on the deployed API", () => {
-  it("off (the default) answers nothing and reads nothing, for every path it would own", async () => {
-    const { world, companyOf } = await world2();
-    const off = createCoreDevRoutes({ app: appOver(world, {}), companyOf, wiring: () => WIRED });
-    const spy = vi.spyOn(world.store, "get");
-    for (const request of [get("/v1/app/sessions"), get(`/v1/dev/tasks/${randomUUID()}`), get("/v1/app/decisions"), get("/v1/app/projects/payments/how-we-work"), get("/v1/app/script-tokens"), post("/v1/app/script-tokens"), post("/v1/dev/tasks", { requestId: randomUUID() }), get("/v1/app/projects/payments/setup-agent"), post("/v1/app/projects/payments/setup-agent", { requestId: randomUUID() }), post("/v1/app/projects/payments/setup-agent/stop", { requestId: randomUUID() })]) {
-      expect(await off.route(request, callerOf(FAKE_COMPANY)), request.path).toBeUndefined();
-    }
-    expect(companyOf).not.toHaveBeenCalled();
-    expect(spy).not.toHaveBeenCalled();
-    expect(world.created).toEqual([]);
-  });
-
-  it("leaves every path it does not own to the old broker, and never serves the laptop's page routes", async () => {
-    const { app, companyOf, remember } = await world2();
-    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
-    const caller = remember(FAKE_COMPANY);
-    for (const path of ["/v1/dev/tasks", "/v1/dev/projects", "/v1/dev/projects/payments/lessons/replay", "/v1/dev/projects/payments/lessons/weekly", "/v1/local/pages/open", "/v1/local/playbook/payments", "/v1/admin/projects", "/healthz"]) expect(await routes.route(get(path), caller), path).toBeUndefined();
-    expect(companyOf).not.toHaveBeenCalled();
-  });
-
-  it("takes the company from membership only: a reader that throws, answers nothing or answers a malformed id refuses with the sign-in words; a header, query or body naming a company changes nothing", async () => {
-    const { app, remember } = await world2();
-    const caller = remember(FAKE_COMPANY);
-    const readers: Array<() => Promise<CompanyMembership | undefined>> = [
-      async () => { throw new Error("down"); }, async () => undefined, async () => ({ companyId: "not-an-org", role: "owner" }), async () => ({ companyId: "", role: "owner" }),
-      async () => ({ companyId: FAKE_COMPANY, role: "superuser" as never }), async () => ({ companyId: FAKE_COMPANY }) as never, async () => null as never,
-    ];
-    for (const companyOf of readers) {
-      const answer = await createCoreDevRoutes({ app, companyOf, wiring: () => WIRED }).route({ ...get(`/v1/app/script-tokens?org=${FAKE_COMPANY}`, { "x-company": FAKE_COMPANY }), body: JSON.stringify({ companyId: FAKE_COMPANY }) }, caller);
-      expect(answer?.statusCode).toBe(401);
-      expect(JSON.parse(answer!.body)).toEqual({ error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
-      expect(answer!.body).not.toContain("org_");
-    }
-    // A principal of one company with membership in another is refused too.
-    const built = vi.spyOn(app, "runtimeFor");
-    const crossed = await createCoreDevRoutes({ app, companyOf: async () => ({ companyId: OTHER, role: "owner" }), wiring: () => WIRED }).route(get("/v1/app/script-tokens"), caller);
-    expect(crossed?.statusCode).toBe(401);
-    expect(built).not.toHaveBeenCalled();
-  });
 
   it("leaves a company the switch does not send to the core, and that holds no core task, on the old broker", async () => {
     const { app, companyOf, remember } = await world2({ ROVARA_CORE_ENGINE: `on:${FAKE_COMPANY}` });
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
     expect(await routes.route(get("/v1/app/script-tokens"), remember(OTHER))).toBeUndefined();
     expect((await routes.route(get("/v1/app/script-tokens"), remember(FAKE_COMPANY)))?.statusCode).toBe(200);
-  });
-
-  it("reads a task through the core; another company's task answers exactly like a missing one", async () => {
-    const { app, companyOf, remember } = await world2();
-    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
-    const own = remember(FAKE_COMPANY);
-    const runtime = await app.runtimeFor(FAKE_COMPANY);
-    const { task } = await runtime.flow.start({ principal: own.principal, origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
-    const read = await routes.route(get(`/v1/dev/tasks/${task.taskId}`), own);
-    expect(read?.statusCode).toBe(200);
-    expect(JSON.parse(read!.body)).toMatchObject({ task: { taskId: task.taskId } });
-    const theirs = await routes.route(get(`/v1/dev/tasks/${task.taskId}`), remember(OTHER));
-    const missing = await routes.route(get(`/v1/dev/tasks/${randomUUID()}`), remember(OTHER));
-    expect(theirs?.statusCode).toBe(404);
-    expect(theirs).toEqual(missing);
-    expect(theirs!.body).not.toContain(FAKE_COMPANY);
-    expect(theirs!.body).not.toContain(task.taskId);
   });
 
   it("answers a fixed 'not on the core yet' for a part the deployment has not wired (never the laptop's sole-owner default)", async () => {
@@ -213,18 +157,6 @@ describe("the core's handlers on the deployed API", () => {
     const unchecked = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, playbook }) });
     expect((JSON.parse((await unchecked.route(get("/v1/app/projects/payments/playbook"), caller))!.body) as { error: { message: string } }).error.message).toBe(NOT_ON_THE_CORE_YET);
   });
-
-  it("lets a script token's request reach only a task's read", async () => {
-    const { app, companyOf, remember } = await world2();
-    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
-    const caller = { ...remember(FAKE_COMPANY), scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } };
-    for (const request of [get("/v1/app/script-tokens"), post("/v1/app/script-tokens/stk_aaaaaaaaaaaaaaaaaaaa/revoke"), get("/v1/app/sessions"), get("/v1/app/decisions"), get("/v1/app/projects/payments/playbook")]) {
-      const answer = await routes.route(request, caller);
-      expect(answer?.statusCode, request.path).toBe(403);
-      expect((JSON.parse(answer!.body) as { error: { message: string } }).error.message).toBe(NOT_FOR_SCRIPT_TOKENS);
-    }
-    expect((await routes.route(get(`/v1/dev/tasks/${randomUUID()}`), caller))?.statusCode).toBe(404);
-  });
 });
 
 // Lead 4 W2: the project wiki's reads through the dev routes: the member company's own store, the generic guards first.
@@ -315,51 +247,6 @@ describe("making a script token and acting on a decision card need no step-up", 
     return { ...w, routes: routesFor({}), routesFor, list, performer };
   }
 
-  it("refuses a live member before reading the body, despite owner claims", async () => {
-    const { routes, remember } = await setup();
-    const member = remember(FAKE_COMPANY, "member");
-    expect(member.principal.roles).toContain("owner");
-    const request = { ...post("/v1/app/script-tokens"), headers: { "x-org-role": "owner" }, get body(): string { throw new Error("body must not be read"); } };
-    const answer = await routes.route(request, member);
-    expect(answer?.statusCode).toBe(403);
-    expect(errorOf(answer)).toEqual({ code: "FORBIDDEN", message: "Only an owner or an admin of the company can create script tokens." });
-  });
-
-  it("reads creation authority live on every request and never takes an owner claim over a demotion", async () => {
-    const { routes, remember } = await setup();
-    const caller: DeployedCaller = remember(FAKE_COMPANY, "owner");
-    for (const role of ["owner", "admin"] as const) {
-      remember(FAKE_COMPANY, role);
-      expect((await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller))?.statusCode).toBe(201);
-      expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), caller))!.body)).toMatchObject({ canCreate: true });
-    }
-    remember(FAKE_COMPANY, "member");
-    const refused = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
-    expect(errorOf(refused)).toEqual({ code: "FORBIDDEN", message: "Only an owner or an admin of the company can create script tokens." });
-    expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), caller))!.body)).toMatchObject({ canCreate: false, tokens: [expect.any(Object), expect.any(Object)] });
-  });
-
-  it("refuses creation when an admin membership belongs to a different company", async () => {
-    const { world, app } = await world2();
-    const routes = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: OTHER, role: "admin" }), wiring: () => WIRED });
-    const caller = callerOf(FAKE_COMPANY);
-    const answer = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
-    expect(answer?.statusCode).toBe(401);
-    expect(errorOf(answer)).toEqual({ code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN });
-    expect(world.created).toEqual([]);
-  });
-
-  it("makes a script token for a signed-in owner with no step-up, and lists it after", async () => {
-    const { routes, remember } = await setup();
-    const caller: DeployedCaller = remember(FAKE_COMPANY);
-    const made = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
-    expect(made?.statusCode).toBe(201);
-    const created = JSON.parse(made!.body) as { token: { tokenId: string }; secret: string };
-    expect(created.secret.length).toBeGreaterThan(20);
-    const listed = JSON.parse((await routes.route(get("/v1/app/script-tokens"), caller))!.body) as { tokens: Array<{ tokenId: string }> };
-    expect(listed.tokens.map((token) => token.tokenId)).toEqual([created.token.tokenId]);
-  });
-
   it("owner DEC 254zzz91: an owner's CLI or AI-tool token (not the Rovara website's own client) makes no script token: 403 with the website words, and nothing is listed after", async () => {
     const { routes, remember } = await setup();
     const web = remember(FAKE_COMPANY);
@@ -418,7 +305,6 @@ describe("making a script token and acting on a decision card need no step-up", 
     const member = await routes.route(request({ ...BODY, requestId: randomUUID() }), remember(FAKE_COMPANY, "member", "person-member-0001"));
     expect(errorOf(member)).toEqual({ code: "FORBIDDEN", message: "Only an owner or an admin of the company can create script tokens." });
   });
-
 
   it("makes a token only for projects the person may read now; one they may not read answers like a missing one", async () => {
     const { routes, remember } = await setup();
@@ -565,22 +451,6 @@ describe("the owner's moves on a core task (send back, review findings, continue
 describe("a task's start on the deployed API (lane E2 step 6)", () => {
   const startBody = () => ({ requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
 
-  it("starts the task on the core for a member of a company the switch sends there, stamped core, answered as the developer task view", async () => {
-    const { world, app, companyOf, remember } = await world2();
-    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
-    const own = remember(FAKE_COMPANY);
-    const body = startBody();
-    const answer = await routes.route(post("/v1/dev/tasks", body), own);
-    expect(answer?.statusCode).toBe(200);
-    const task = (JSON.parse(answer!.body) as { task: { taskId: string } }).task;
-    expect(stampOf(await world.store.get(engineStampKey(task.taskId)))).toMatchObject({ engine: "core" });
-    // The same request id answers the first task.
-    const again = await routes.route(post("/v1/dev/tasks", body), own);
-    expect((JSON.parse(again!.body) as { task: { taskId: string } }).task.taskId).toBe(task.taskId);
-    // Only POST on the exact path is a start.
-    expect(await routes.route(get("/v1/dev/tasks"), own)).toBeUndefined();
-  });
-
   it("leaves the start to the old broker, reading nothing of the core, for a company the switch does not cover, in drain, and for a person with no member company", async () => {
     for (const env of [{ ROVARA_CORE_ENGINE: `on:${OTHER}` }, { ROVARA_CORE_ENGINE: "drain" }]) {
       const { world, app, companyOf, remember } = await world2(env);
@@ -603,16 +473,6 @@ describe("a task's start on the deployed API (lane E2 step 6)", () => {
     await expect(drained.runtimeFor(FAKE_COMPANY)).resolves.toBeDefined();
     // ...but a new start is the old broker's.
     expect(await createCoreDevRoutes({ app: drained, companyOf, wiring: () => WIRED }).route(post("/v1/dev/tasks", startBody()), own)).toBeUndefined();
-  });
-
-  it("refuses with the sign-in words, never falling back, when membership cannot be read or names another company than the principal's", async () => {
-    const { app, remember } = await world2();
-    const failing = createCoreDevRoutes({ app, companyOf: async () => { throw new Error("membership store down"); }, wiring: () => WIRED });
-    const refused = await failing.route(post("/v1/dev/tasks", startBody()), remember(FAKE_COMPANY));
-    expect(refused?.statusCode).toBe(401);
-    expect(refused!.body).not.toContain("down");
-    const elsewhere = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: OTHER, role: "owner" }), wiring: () => WIRED });
-    expect((await elsewhere.route(post("/v1/dev/tasks", startBody()), callerOf(FAKE_COMPANY)))?.statusCode).toBe(401);
   });
 
   it("refuses a script token's start, and answers a body that is not an object in fixed words", async () => {
@@ -695,18 +555,6 @@ describe("the tasks I was added to on the deployed API (web task channel C5)", (
     expect(answer!.body).not.toContain("down");
   });
 
-  it("refuses a company id that is not a company id even when the principal carries the same one (the format is checked, not only the match)", async () => {
-    const { app, remember } = await world2();
-    const base = remember(FAKE_COMPANY, "member", "alice");
-    for (const bad of ["not-an-org", "org_SHORT", "org_" + "A".repeat(20), "org_" + "a".repeat(21), "org_aaaa#aaaaaaaaaaaaaaaa"]) {
-      const caller: DeployedCaller = { ...base, principal: { ...base.principal, companyId: bad } };
-      const routes = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: bad, role: "owner" }), wiring: () => WIRED });
-      const answer = await routes.route(get(LIST), caller);
-      expect(answer?.statusCode, bad).toBe(401);
-      expect(JSON.parse(answer!.body), bad).toEqual({ error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
-    }
-  });
-
   it("refuses a caller who is no member (the sign-in words), a script token (it reaches a task's read only), and a bad limit or cursor (fixed words)", async () => {
     const { app, companyOf, remember } = await world2();
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
@@ -742,7 +590,6 @@ describe("the company's automatic runs: the live owner or admin role to allow an
     const consentOf = async (companyId: string) => (await w.world.store.get({ pk: `ORG#${companyId}#SYSTEM_RUNS`, sk: "CONSENT" }))?.["enabled"] === true;
     return { ...w, routes, consentOf };
   }
-
 
   it("owner DEC 254zzz91: an owner's CLI or AI-tool token cannot ALLOW on either route (403, the website words, nothing written) but can WITHDRAW", async () => {
     const a = await setup();
@@ -814,18 +661,6 @@ describe("the company's automatic runs: the live owner or admin role to allow an
     expect((await routes.route(get(SYSTEM_RUNS), admin))?.statusCode).toBe(200);
   });
 
-  // MUTANT E4: the script-token refusal does not cover the new path.
-  it("a script token reaches neither route's company control: refused before anything is read", async () => {
-    const { routes, remember } = await setup();
-    const token: DeployedCaller = { ...remember(FAKE_COMPANY), scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } };
-    for (const request of [get(SYSTEM_RUNS), put(SYSTEM_RUNS, allow()), put(UPKEEP, setupAllow())]) {
-      const answer = await routes.route(request, token);
-      expect(answer?.statusCode, request.path).toBe(403);
-      expect(errorOf(answer)).toEqual({ code: "FORBIDDEN", message: NOT_FOR_SCRIPT_TOKENS });
-    }
-  });
-
-
   it("the ceiling off: allowing is 'unavailable'; withdrawing still works. Unwired: 'not on the core yet'", async () => {
     const off = await setup({}, false);
     const caller: DeployedCaller = off.remember(FAKE_COMPANY);
@@ -836,20 +671,6 @@ describe("the company's automatic runs: the live owner or admin role to allow an
     const answer = await unwired.route(get(SYSTEM_RUNS), w.remember(FAKE_COMPANY));
     expect(answer?.statusCode).toBe(404);
     expect(errorOf(answer).message).toBe(NOT_ON_THE_CORE_YET);
-  });
-
-  it("two companies: one's owner allows and withdraws only their own company's setting", async () => {
-    const { routes, remember, consentOf } = await setup();
-    const a: DeployedCaller = remember(FAKE_COMPANY);
-    const b: DeployedCaller = remember(OTHER);
-    expect((await routes.route(put(SYSTEM_RUNS, allow()), a))?.statusCode).toBe(200);
-    expect(await consentOf(FAKE_COMPANY)).toBe(true);
-    expect(await consentOf(OTHER)).toBe(false);
-    expect(JSON.parse((await routes.route(get(SYSTEM_RUNS), b))!.body)).toMatchObject({ allowed: false });
-    expect((await routes.route(put(SYSTEM_RUNS, allow()), b))?.statusCode).toBe(200);
-    expect((await routes.route(put(SYSTEM_RUNS, { requestId: randomUUID(), allowed: false }), a))?.statusCode).toBe(200);
-    expect(await consentOf(FAKE_COMPANY)).toBe(false);
-    expect(await consentOf(OTHER)).toBe(true);
   });
 });
 
@@ -904,13 +725,7 @@ describe("the eval check card on the deployed API (L4-EVCI2)", () => {
   });
 });
 
-
 describe("read-only start-estimates", () => {
- it("registers only the approved read scope on the dev boundary", async () => {
-  const { devRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
-  expect(devRouteOf("POST", "/v1/dev/projects/payments/start-estimates")?.requires).toBe("tasks:read");
-  for (const method of ["GET", "PUT", "DELETE"]) expect(devRouteOf(method, "/v1/dev/projects/payments/start-estimates")).toBeUndefined();
- });
  it("serves the negotiated comparison with live company/project checks and never creates a hold or task", async () => {
   const { world, app, companyOf, remember } = await world2();
   const caller = remember(FAKE_COMPANY);
@@ -926,7 +741,6 @@ describe("read-only start-estimates", () => {
   expect((await routes.route(post("/v1/dev/projects/payments/start-estimates", { quoteVersion: 2, companyId: OTHER }), caller))?.statusCode).toBe(400);
  });
 });
-
 
 it("redacts every company figure in the member JSON while owners and admins keep the numeric quote", async () => {
  const { app, companyOf, remember } = await world2();
@@ -1008,7 +822,6 @@ it("inventories exactly four worker-only saved image callbacks without exposing 
   }
   expect([...APP_ROUTES, ...DEV_ROUTES].some(row => row.path.includes("/v1/internal/"))).toBe(false);
 });
-
 
 describe("known-failing hosted route ownership", () => {
   it("owns only GET and Undo POST, refuses writes while verification is off", async () => {

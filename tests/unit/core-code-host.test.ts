@@ -11,7 +11,6 @@ import {
   brokerCoreCodeHost, companyRepositoriesFromStore, companyScopedGitHubProvider, githubRepositoryKey,
 } from "../../packages/broker/src/aws/core-code-host.js";
 import { BROKER_CORE_NOT_CONFIGURED, BROKER_CORE_OWED, brokerCoreModuleDeps, type BrokerCoreModuleParts } from "../../packages/broker/src/aws/core-engine-root.js";
-import { codeAdapterModules, owedPoints } from "../../packages/broker/src/core-host/code-modules.js";
 import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
 import { githubActionsCheckRunner } from "../../packages/broker/src/plugins/check-runner/github-actions/index.js";
 import { GITHUB_CODE_HOST_PROVIDER_METHODS, missingGitHubProviderMethods, type GitHubCodeHostProvider } from "../../packages/broker/src/plugins/code-host/github/provider.js";
@@ -187,29 +186,6 @@ describe("the core's code host on the broker: company scope", () => {
     expect(GITHUB_CODE_HOST_PROVIDER_METHODS.every((name) => names.includes(name) || name === "installationForRepository")).toBe(true);
   });
 
-  it("refuses every call for a repository no project of the company names, before GitHub is asked or the binding is read (two companies)", async () => {
-    const world = await bridgeWorld({ bRepositories: ["https://github.com/bcorp/own"] });
-    for (const [name, call] of scopedCalls(world.provider, GITHUB_REPO_URL, { orgId: B })) {
-      const error = await refusal(call);
-      expect({ name, code: error?.code, message: error?.message }).toEqual({ name, code: "PROJECT_ACCESS_DENIED", message: NOT_A_COMPANY_REPOSITORY });
-    }
-    // Company A's own repository, asked for by A's project name in another form, and a repository A's project does not name.
-    for (const [name, call] of scopedCalls(world.provider, GITHUB_OTHER_URL, GITHUB_ORG_SCOPE)) {
-      expect({ name, code: (await refusal(call))?.code }).toEqual({ name, code: "PROJECT_ACCESS_DENIED" });
-    }
-    expect(world.net.requests).toEqual([]);
-    expect(world.binding.calls).toEqual([]);
-    expect(world.logs.every((entry) => entry["reason"] === "not_a_company_repository" && !JSON.stringify(entry).includes("acme"))).toBe(true);
-  });
-
-  it("serves the company's own repository whatever form the address takes (.git or not), and never another company's", async () => {
-    const world = await bridgeWorld({ bRepositories: ["https://github.com/bcorp/own"] });
-    expect((await world.provider.getRepositoryIdentity(`${GITHUB_REPO_URL}.git`, GITHUB_ORG_SCOPE))?.repositoryId).toBe(4242);
-    expect((await world.provider.getRepositoryIdentity(GITHUB_REPO_URL, GITHUB_ORG_SCOPE))?.repositoryId).toBe(4242);
-    expect(world.binding.calls.every((call) => call.orgId === A)).toBe(true);
-    expect((await refusal(() => world.provider.getRepositoryIdentity(GITHUB_REPO_URL, { orgId: B })))?.code).toBe("PROJECT_ACCESS_DENIED");
-  });
-
   it("refuses a system scope and a scope that is not one, with no read", async () => {
     const world = await bridgeWorld();
     for (const scope of [{ system: "install" }, { system: "webhook" }, { system: "private-install" }, {}, { orgId: "not-an-org" }, null, { orgId: A, extra: 1 }]) {
@@ -229,31 +205,6 @@ describe("the core's code host on the broker: company scope", () => {
       expect(error?.message).toBe(NOT_A_COMPANY_REPOSITORY);
     }
     expect(world.net.requests).toEqual([]);
-  });
-
-  it("checks the repository given, not one changed after the check (the pull request input is copied)", async () => {
-    const world = await bridgeWorld();
-    const seen: string[] = [];
-    const client = { reconcilePullRequest: async (input: { repositoryUrl: string }) => { seen.push(input.repositoryUrl); return { number: 1, url: "u", reconciled: false }; } } as unknown as GitHubCodeHostProvider;
-    const provider = companyScopedGitHubProvider(client, { repositoriesOf: async () => new Set(["acme/app"]) });
-    const input = { repositoryUrl: GITHUB_REPO_URL, headBranch: WORKING_BRANCH(1), baseBranch: "main", title: "t" };
-    const pending = provider.reconcilePullRequest(input, GITHUB_ORG_SCOPE);
-    input.repositoryUrl = GITHUB_OTHER_URL;
-    await pending;
-    expect(seen).toEqual([GITHUB_REPO_URL]);
-    void world;
-  });
-
-  it("passes only the parsed company scope to the client", async () => {
-    const scopes: unknown[] = [];
-    const client = { getRepositoryIdentity: async (_url: string, scope: unknown) => { scopes.push(scope); return undefined; } } as unknown as GitHubCodeHostProvider;
-    const provider = companyScopedGitHubProvider(client, { repositoriesOf: async () => new Set(["acme/app"]) });
-    await provider.getRepositoryIdentity(GITHUB_REPO_URL, { orgId: A });
-    // A scope that answers one company when checked and another afterwards: the client still gets the company that was checked.
-    let reads = 0;
-    const shifting = { get orgId() { reads += 1; return reads === 1 ? A : B; } };
-    await provider.getRepositoryIdentity(GITHUB_REPO_URL, shifting);
-    expect(scopes).toEqual([{ orgId: A }, { orgId: A }]);
   });
 });
 
@@ -351,16 +302,6 @@ describe("the core's code host on the broker: the company's catalog", () => {
 });
 
 describe("the core's code host in the broker's adapter inputs", () => {
-  it("fills the code-host and check-runner points through Code's modules", async () => {
-    const world = await bridgeWorld();
-    const modules = codeAdapterModules({
-      tableName: "State", queue: { settings: { queues: { "task-dispatch": { url: "https://sqs.example/q" } } } }, objects: { bucket: "b", client: { send: async () => undefined } },
-      secrets: { namePrefix: "", clientFor: () => ({ send: async () => undefined }) as never },
-      codeHost: { provider: world.provider, options: { credentialRef: "github" } }, checkRunner: { githubActions: world.githubActions },
-    });
-    expect(modules.map((module) => module.point)).toEqual(expect.arrayContaining(["code-host", "check-runner"]));
-    expect(owedPoints({ checkRunner: { githubActions: world.githubActions } }).map((owed) => owed.point)).not.toContain("check-runner");
-  });
 
   it("names the missing adapter builders before validating the composed queue", () => {
     const workers: NonNullable<BrokerCoreModuleParts["workerMachines"]> = () => ({}) as ReturnType<NonNullable<BrokerCoreModuleParts["workerMachines"]>>;

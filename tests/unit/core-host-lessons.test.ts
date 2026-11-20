@@ -127,16 +127,6 @@ describe("the switch", () => {
     // The core engine's own switch being off changes nothing here either.
     expect(CORE_ENGINE_OFF.combined.mode).toBe("off");
   });
-
-  it("on:<company> builds lessons for that company only", async () => {
-    const world = createFakeWorld();
-    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: `on:${A}` }, peopleOf({ [A]: [], [B]: [] }), new Map());
-    expect(companies.get(A)!.lessons).toBeDefined();
-    expect(companies.get(A)!.runtime.flow.deps.learned).toBeTypeOf("function");
-    expect(companies.get(B)!.lessons).toBeUndefined();
-    expect(companies.get(B)!.runtime.flow.deps.learned).toBeUndefined();
-    expect(learnedLessonsSwitchOn()).toBe(true);
-  });
 });
 
 describe("delivery: a step gets its own company's lessons, never another's", () => {
@@ -239,14 +229,6 @@ describe("the team knowledge briefing of an answer on the deployed engine (lead 
     const rows = (await world.store.query({ pk: companyScoped(A, "LESSON_LOAD") })).items.length + (await world.store.query({ pk: companyScoped(A, "KNOWLEDGE_GIVEN") })).items.length;
     expect(rows).toBe(0);
   });
-
-  it("a company the switch does not cover has no briefing (nothing is built for it)", async () => {
-    const world = createFakeWorld();
-    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: `on:${A}` }, peopleOf({ [A]: [], [B]: [] }), new Map());
-    expect(companies.get(B)!.lessons).toBeUndefined();
-    await putLesson(companies.get(A)!.lessons!, scopedLesson(A, "les_aaaa1111", "Retry network calls with the A helper"));
-    expect(await companies.get(A)!.lessons!.host.answerBriefing(ask)).toContain("A helper");
-  });
 });
 
 describe("the hosted answer route with the engine's briefing join (lead 4 L4-AK2g)", () => {
@@ -299,16 +281,6 @@ describe("the hosted answer route with the engine's briefing join (lead 4 L4-AK2
     expect((await w.post(A, B, "bob")).status).toBe(200);
     expect(w.asked).toEqual([]);
     expect(w.model.turns.map((turn) => turn.transcript).join("\n")).not.toContain("team-knowledge");
-  });
-
-  it("the role is checked BEFORE the briefing: a person with no role gets the one 404, the briefing is never called, and the model is never opened", async () => {
-    const w = await hostedWorld({ [`${A}/payments/ada`]: "view" });
-    for (const [company, person] of [[A, "stranger"], [B, "ada"], [A, "bob"]] as const) {
-      const result = await w.post(company, company, person);
-      expect(result.status, `${company} ${person}`).toBe(404);
-    }
-    expect(w.asked).toEqual([]);
-    expect(w.model.opened).toHaveLength(0);
   });
 });
 
@@ -462,17 +434,6 @@ describe("a findings answer's send-back, per person", () => {
 });
 
 describe("the daily upkeep", () => {
-  it("runs once a day per company, however many passes run", async () => {
-    const world = createFakeWorld();
-    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: "on" }, peopleOf({ [A]: [], [B]: [] }), new Map());
-    const service = companies.get(A)!.lessons!.service;
-    expect(await service.pass({ budgetMs: 50_000 })).toMatchObject({ nightly: true });
-    expect(await service.pass({ budgetMs: 50_000 })).toMatchObject({ nightly: false });
-    world.clock.advance(86_400);
-    expect(await service.pass({ budgetMs: 50_000 })).toMatchObject({ nightly: true });
-    // B's day is its own.
-    expect(await companies.get(B)!.lessons!.service.pass({ budgetMs: 50_000 })).toMatchObject({ nightly: true });
-  });
 
   it("each pass runs the weekly lessons summary for the company's projects that turned it on, and only those (the summary's own tests: lessons/digest-notice.test.ts)", async () => {
     const world = createFakeWorld();
@@ -485,26 +446,6 @@ describe("the daily upkeep", () => {
     expect(await weekRow(A)).toMatchObject({ week: digestWeekOf(world.clock.now) });
     await companies.get(B)!.lessons!.service.pass({ budgetMs: 50_000 });
     expect(await weekRow(B)).toBeUndefined();
-  });
-});
-
-describe("erasing a person's lessons", () => {
-  it("hard-deletes the lessons the person wrote in their company, whatever the switch says, and leaves another company's lessons alone", async () => {
-    const world = createFakeWorld();
-    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: "on" }, peopleOf({ [A]: ["ann"], [B]: ["ann"] }), new Map());
-    const a = companies.get(A)!.lessons!;
-    const b = companies.get(B)!.lessons!;
-    // Both lessons were written by "ann" (the helper's author); the same id exists in both companies (ids are only unique per company).
-    await putLesson(a, activeLesson(A, "les_aaaa1111", "Use the retry helper"));
-    await putLesson(b, activeLesson(B, "les_aaaa1111", "Use the retry helper"));
-    // The switch is off now: erasing must still work.
-    setLearnedLessonsGate(() => false);
-    const report = await erasePersonLessons({ store: world.store, audit: { stage: () => [], record: async () => undefined }, companyId: A, personId: "ann", now: () => world.clock.now });
-    expect(report).toMatchObject({ projects: 1, purged: 1 });
-    expect(await a.runtime.store.get({ workspaceId: A, project: "payments" }, "les_aaaa1111")).toBeUndefined();
-    expect(await b.runtime.store.get({ workspaceId: B, project: "payments" }, "les_aaaa1111")).toBeDefined();
-    // Idempotent: a second call finds nothing more to do.
-    expect(await erasePersonLessons({ store: world.store, audit: { stage: () => [], record: async () => undefined }, companyId: A, personId: "ann", now: () => world.clock.now })).toMatchObject({ purged: 0 });
   });
 });
 

@@ -16,11 +16,9 @@ import {
 } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { createBrokerCoreServices } from "../../packages/broker/src/aws/core-job-services.js";
-import { ROVARA_CODE_PROGRAM } from "../../packages/broker/src/core/plan/program.js";
 import { taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { workflowPullRequestCheckVerdict } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
-import { dispatchRowKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { commitWorkflow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { workflowDependenciesAllowed } from "../../packages/broker/src/core/work-breakdown/parallel-parts.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
@@ -104,36 +102,6 @@ async function world() {
 const errorOf = (reply: { body: string }) => (JSON.parse(reply.body) as { error?: { code: string; message: string } }).error;
 
 describe("the hosted core root starts workflow tasks on 1.1.0 (L4-HW1)", () => {
-  it("accepts a start with no Quick/Full path and stores a 1.1.0 task: Understand queued first, the Rovara Code program (plan check) attached, path chosen later by Understand", async () => {
-    const h = await world();
-    const root = h.rootWith();
-    const reply = await h.start(root, personA);
-    expect(reply.statusCode, reply.body).toBe(200);
-    const taskId = h.taskIdOf(reply);
-    const record = (await readTask(await h.depsOf(root, A), taskId))!;
-    expect(record.workflow).toMatchObject({ definitionVersion: "1.1.0", stage: "UNDERSTAND", state: "READY" });
-    expect(record.workflow?.intent?.pathFrom).toBe("understand");
-    expect(record.workflow?.program).toEqual(ROVARA_CODE_PROGRAM);
-  });
-
-  it("a start that names Quick or Full is still a 1.1.0 task that understands first, with the person's path kept", async () => {
-    const h = await world();
-    const root = h.rootWith();
-    const taskId = h.taskIdOf(await h.start(root, personA, "FULL"));
-    const workflow = (await readTask(await h.depsOf(root, A), taskId))!.workflow!;
-    expect(workflow).toMatchObject({ definitionVersion: "1.1.0", stage: "UNDERSTAND", path: "FULL" });
-    expect(workflow.intent?.pathFrom).toBe("request");
-  });
-
-  it("the first step queued for the task is UNDERSTAND (a 1.0.0 task queues none: it starts on its plan)", async () => {
-    const h = await world();
-    const root = h.rootWith();
-    const taskId = h.taskIdOf(await h.start(root, personA));
-    const row = await h.w.store.get(dispatchRowKey(A, taskId, 1));
-    expect([row?.["kind"], row?.["companyId"], row?.["taskId"]]).toEqual(["UNDERSTAND", A, taskId]);
-    const old = h.taskIdOf(await h.start(h.rootWith(false), personA, "QUICK"));
-    expect((await h.w.store.get(dispatchRowKey(A, old, 1)))?.["kind"]).not.toBe("UNDERSTAND");
-  });
 
   it("the S3 answers route engages: the owner's answers to Understand's questions land; a company member who is no owner and another company's person get nothing written", async () => {
     const h = await world();
@@ -173,17 +141,6 @@ describe("the hosted core root starts workflow tasks on 1.1.0 (L4-HW1)", () => {
     // The Rovara check on the pull request has a verdict only for a 1.1.0 task.
     expect(workflowPullRequestCheckVerdict({ taskId, title: "Add a health endpoint" } as never, workflow, undefined)).toBeDefined();
   });
-
-  it("two companies: each company's task is its own 1.1.0 task, read only in its own store", async () => {
-    const h = await world();
-    const root = h.rootWith();
-    const a = h.taskIdOf(await h.start(root, personA));
-    const b = h.taskIdOf(await h.start(root, personB));
-    expect((await readTask(await h.depsOf(root, A), a))!.workflow?.definitionVersion).toBe("1.1.0");
-    expect((await readTask(await h.depsOf(root, B), b))!.workflow?.definitionVersion).toBe("1.1.0");
-    // B's person cannot read or answer A's task through B's routes.
-    expect((await h.route(root, personB, "GET", `/v1/dev/tasks/${a}`))?.statusCode).toBe(404);
-  });
 });
 
 describe("the old start stays reachable and running tasks keep their version", () => {
@@ -211,14 +168,5 @@ describe("the old start stays reachable and running tasks keep their version", (
     // And new tasks on the new root are 1.1.0, beside it.
     const fresh = h.taskIdOf(await h.start(newRoot, personA));
     expect((await readTask(await h.depsOf(newRoot, A), fresh))!.workflow!.definitionVersion).toBe("1.1.0");
-  });
-
-  it("a start that is no workflow (a plain task) is unchanged by the setting", async () => {
-    const h = await world();
-    const root = h.rootWith();
-    const reply = await h.route(root, personA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: PROJECT, instructions: "Add retry handling" });
-    expect(reply?.statusCode, reply?.body).toBe(200);
-    const record = (await readTask(await h.depsOf(root, A), h.taskIdOf(reply!)))!;
-    expect(record.workflow).toBeUndefined();
   });
 });

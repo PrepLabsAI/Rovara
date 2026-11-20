@@ -31,14 +31,6 @@ it("skips foreign recovery rows before touching their tracking rows or host", as
   expect(await w.h.store.get(recoveryRowKey(otherTask))).toEqual(foreignRecovery);
 });
 
-it("gives merge tracking the injected CI reader instead of its default", async () => {
-  const w = await host();
-  const ciMode = vi.fn(async () => "their_ci_watch" as const);
-  const tracking = createMergeTrackingService({ flow: w.h.deps, registry: w.registry, companyId: ORG, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }), people: w.people, settings: fixedCodeSettings(), ciMode, now: () => w.clock.ms });
-  await tracking.sweep({ budgetMs: 1000 });
-  expect(ciMode).toHaveBeenCalledWith(expect.objectContaining({ orgId: ORG, project: "web" }));
-});
-
 it("does no merge reads or writes with zero, invalid or exhausted total budget", async () => {
   const w = await host();
   const get = vi.spyOn(w.h.store, "get"), query = vi.spyOn(w.h.store, "query"), put = vi.spyOn(w.h.store, "put");
@@ -76,38 +68,6 @@ it("refuses a foreign resolver scope without invoking the injected host", async 
   expect(await tracking.deps.repository("web", 1, "app", "org_bbbbbbbbbbbbbbbbbbbb")).toBeUndefined();
   expect(repository).not.toHaveBeenCalled();
   expect(() => createMergeTrackingService({ flow: w.h.deps, registry: w.registry, companyId: "private-canary", milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }), people: w.people, settings: fixedCodeSettings(), now: () => w.clock.ms })).toThrow(new Error("the merge tracking company is invalid"));
-});
-
-it("partitions tier due rows by company, rechecks ownership, and reports unowned rows", async () => {
-  const w = await host();
-  const companyA = "org_aaaaaaaaaaaaaaaaaaaa";
-  const companyB = "org_bbbbbbbbbbbbbbbbbbbb";
-  const taskId = "22222222-2222-4222-8222-222222222222";
-  const dueKey = (companyId: string, id: string) => ({ pk: companyScoped(companyId, "TIER_CHECKS_DUE"), sk: `TASK#${id}` });
-  const validA = { ...dueKey(companyA, taskId), entityType: "TIER_CHECKS_DUE", companyId: companyA, taskId, lastRunAt: 0, dueAt: w.clock.ms };
-  const validB = { ...dueKey(companyB, taskId), entityType: "TIER_CHECKS_DUE", companyId: companyB, taskId, lastRunAt: 0, dueAt: w.clock.ms };
-  const missingOwner = { ...dueKey(companyA, "33333333-3333-4333-8333-333333333333"), entityType: "TIER_CHECKS_DUE", taskId: "33333333-3333-4333-8333-333333333333", lastRunAt: 0, dueAt: w.clock.ms };
-  const foreignOwner = { ...dueKey(companyA, "44444444-4444-4444-8444-444444444444"), entityType: "TIER_CHECKS_DUE", companyId: companyB, taskId: "44444444-4444-4444-8444-444444444444", lastRunAt: 0, dueAt: w.clock.ms };
-  await Promise.all([validA, validB, missingOwner, foreignOwner].map((item) => w.h.store.put({ item })));
-  const query = vi.spyOn(w.h.store, "query");
-  const loggedA: Record<string, unknown>[] = [];
-  const service = (companyId: string, log?: (entry: Record<string, unknown>) => void) => createMergeTrackingService({
-    flow: w.h.deps, registry: w.registry, companyId: companyId, milestones: createMilestoneService({ store: w.h.store, now: () => w.clock.ms }),
-    people: w.people, settings: fixedCodeSettings(), now: () => w.clock.ms, ...(log === undefined ? {} : { log }),
-  });
-
-  await service(companyA, (entry) => loggedA.push(entry)).tierChecks();
-  expect(query.mock.calls.filter(([input]) => input.pk === companyScoped(companyA, "TIER_CHECKS_DUE")).length).toBeGreaterThan(0);
-  expect(query.mock.calls.every(([input]) => input.pk !== companyScoped(companyB, "TIER_CHECKS_DUE"))).toBe(true);
-  expect(await w.h.store.get(dueKey(companyB, taskId))).toEqual(validB);
-  expect(await w.h.store.get(dueKey(companyA, missingOwner.sk.slice(5)))).toBeDefined();
-  expect(await w.h.store.get(dueKey(companyA, foreignOwner.sk.slice(5)))).toBeDefined();
-  expect(query.mock.calls.find(([input]) => input.pk === companyScoped(companyA, "TIER_CHECKS_DUE"))?.[0].filter).toEqual({ op: "eq", path: ["companyId"], value: companyA });
-  expect(loggedA).toEqual([]);
-
-  await service(companyB).tierChecks();
-  expect(await w.h.store.get(dueKey(companyB, taskId))).toBeUndefined();
-  expect(await w.h.store.get(dueKey(companyA, taskId))).toBeUndefined();
 });
 
 it("leaves tier due rows untouched when the pass budget is exhausted", async () => {

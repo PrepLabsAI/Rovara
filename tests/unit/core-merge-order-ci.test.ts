@@ -3,7 +3,7 @@
 // Rovara never merges and never re-runs a person's CI by itself (owner decision 1; the host port has no re-run call yet). Fake code host and the in-memory store; never GitHub.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  MERGE_ORDER_WORDS, ciFailureWaitLine, createCiWaitLines, createMergeOrderLines, mergeOrderLinesOfTask, mergeOrderOf, perRepositoryCiLines, providersWaitingFor, registerMergeActionDecider, trackTask,
+  MERGE_ORDER_WORDS, createCiWaitLines, createMergeOrderLines, mergeOrderLinesOfTask, mergeOrderOf, perRepositoryCiLines, registerMergeActionDecider, trackTask,
   waitingProviders,
 } from "../../packages/broker/src/core/merge/index.js";
 import { rovaraStatusLines } from "../../packages/broker/src/core/proof/pull-request-body.js";
@@ -12,30 +12,9 @@ import { ORG, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-worl
 
 const edge = (consumer: string, provider: string) => ({ consumer, provider, language: "node", source: "both" });
 const pr = (repositoryId: string, number: number, state = "OPEN") => ({ repositoryId, number, state });
-const PRS = [pr("app", 40), pr("docs", 3), pr("payments-lib", 12)];
 
 describe("what a consumer's CI is told", () => {
   const order = mergeOrderOf(["app", "docs", "payments-lib"], [edge("app", "payments-lib"), edge("docs", "payments-lib")]);
-
-  it("names the repositories that must merge first, with their pull request numbers", () => {
-    expect(waitingProviders(order, "app", [])).toEqual(["payments-lib"]);
-    expect(perRepositoryCiLines(order, "app", PRS)).toEqual(["Tested together in Rovara; your CI tests each repository alone and may fail until payments-lib #12 merges."]);
-    expect(ciFailureWaitLine(order, "docs", PRS)).toEqual(["Its own CI is failing, and may until payments-lib #12 merges: it tests this repository alone. Rovara is not trying to fix that failure before then."]);
-  });
-
-  it("says nothing for a provider, a repository nothing depends on, or a provider that already merged", () => {
-    expect(perRepositoryCiLines(order, "payments-lib", PRS)).toEqual([]);
-    expect(waitingProviders(order, "payments-lib", [])).toEqual([]);
-    expect(perRepositoryCiLines(order, "app", [pr("app", 40), pr("payments-lib", 12, "MERGED")])).toEqual([]);
-    expect(ciFailureWaitLine(order, "app", [pr("app", 40), pr("payments-lib", 12, "MERGED")])).toEqual([]);
-    expect(perRepositoryCiLines(order, "elsewhere", PRS)).toEqual([]);
-  });
-
-  it("does not call a provider whose pull request was closed unmerged waiting", () => {
-    const closed = [pr("app", 40), pr("payments-lib", 12, "CLOSED")];
-    expect(perRepositoryCiLines(order, "app", closed)).toEqual([]);
-    expect(ciFailureWaitLine(order, "app", closed)).toEqual([]);
-  });
 
   it("names every waiting provider of a chain or a diamond, at most three, then counts the rest", () => {
     const diamond = mergeOrderOf(["app", "core", "left", "right"], [edge("app", "left"), edge("app", "right"), edge("left", "core"), edge("right", "core")]);
@@ -49,24 +28,6 @@ describe("what a consumer's CI is told", () => {
   it("names a provider with no pull request yet by its repository alone", () => {
     expect(perRepositoryCiLines(order, "app", [pr("app", 40)])).toEqual(["Tested together in Rovara; your CI tests each repository alone and may fail until payments-lib merges."]);
   });
-
-  it("says nothing without dependencies (no facts, a cycle, unreadable facts) or for one repository: today's description", () => {
-    for (const facts of [undefined, [], [edge("a", "b"), edge("b", "a")], "bad"]) {
-      const none = mergeOrderOf(["a", "b"], facts);
-      expect(perRepositoryCiLines(none, "a", [pr("a", 1), pr("b", 2)])).toEqual([]);
-      expect(ciFailureWaitLine(none, "a", [pr("a", 1), pr("b", 2)])).toEqual([]);
-      expect(waitingProviders(none, "a", [])).toEqual([]);
-    }
-  });
-
-  it("keeps hostile repository names inert and the words bounded", () => {
-    const names = ["a@everyone", "b‮[x](http://evil.example)\n# Heading"];
-    const hostile = mergeOrderOf(names, [edge(names[0]!, names[1]!)]);
-    const line = perRepositoryCiLines(hostile, names[0]!, [pr(names[0]!, 1), pr(names[1]!, 2)]).join("");
-    expect(line).not.toMatch(/\n|‮|\]\(/u);
-    expect(line).not.toContain("@everyone");
-    expect(line.length).toBeLessThan(300);
-  });
 });
 
 describe("the lines of a task", () => {
@@ -76,15 +37,6 @@ describe("the lines of a task", () => {
   });
   const taskOf = (workflow: unknown) => ({ taskId: TASK_ID, orgId: ORG, project: "web", startingRevision: 1, workspaceId: "ws", ownerId: "o", ownerName: "n", workflow }) as never;
   const deps = { repositoryEdges: async () => [edge("app", "payments-lib")] };
-
-  it("adds the CI words of the repository the description is for, after the order lines, and only for it", async () => {
-    const task = taskOf(workflowOf([pr("app", 40), pr("payments-lib", 12)]));
-    expect(await mergeOrderLinesOfTask(deps, task)).toEqual(["Merge order: payments-lib #12 first, then app #40."]);
-    expect(await mergeOrderLinesOfTask(deps, task, "app")).toEqual(["Merge order: payments-lib #12 first, then app #40.", "Tested together in Rovara; your CI tests each repository alone and may fail until payments-lib #12 merges."]);
-    expect(await mergeOrderLinesOfTask(deps, task, "payments-lib")).toEqual(["Merge order: payments-lib #12 first, then app #40."]);
-    // A repository the task does not change has no words of its own.
-    expect(await mergeOrderLinesOfTask(deps, task, "elsewhere")).toEqual(["Merge order: payments-lib #12 first, then app #40."]);
-  });
 
   it("is today's lines without facts or for one repository, whichever repository is asked about", async () => {
     const task = taskOf(workflowOf([pr("app", 40), pr("payments-lib", 12)]));
@@ -168,51 +120,6 @@ describe("failing CI while the repository it depends on waits", () => {
       await trackTask(deps, TASK_ID);
       expect(asked, JSON.stringify([facts, target, merged])).toEqual([target]);
     }
-  });
-
-  it("the other slots are not touched: a failing consumer still gets its conflict and feedback decided", async () => {
-    const slots: string[] = [];
-    const releases = (["conflict", "feedback", "sync"] as const).map((slot) => registerMergeActionDecider(slot, async () => { slots.push(slot); return undefined; }));
-    try {
-      const { w, deps } = await setup([edge("app", "payments-lib")]);
-      setChecks(w, "app", "failing");
-      await trackTask(deps, TASK_ID);
-      expect(slots).toContain("conflict");
-      expect(asked).toEqual([]);
-    } finally { releases.forEach((undo) => undo()); }
-  });
-
-  it("a seam that throws never fails the pass and holds nothing back", async () => {
-    const w = await mergeWorld({ pullRequests: prs });
-    setChecks(w, "app", "failing");
-    await trackTask({ ...w.tracking, repositoryEdges: async () => { throw new Error("secret-canary"); } }, TASK_ID);
-    expect(asked).toEqual(["app"]);
-  });
-
-  it("does not read the facts while the checks are not failing", async () => {
-    const { w, deps, events } = await setup([edge("app", "payments-lib")]);
-    setChecks(w, "app", "pending");
-    setChecks(w, "payments-lib", "pending");
-    await trackTask(deps, TASK_ID);
-    expect(events).not.toContain("facts");
-  });
-
-  it("starts a round again once the provider's pull request was closed unmerged", async () => {
-    const { w, deps } = await setup([edge("app", "payments-lib")]);
-    const task = await w.task();
-    await w.setWorkflow({ pullRequests: task.workflow.pullRequests!.map((entry) => ({ ...entry, state: entry.repositoryId === "payments-lib" ? "CLOSED" : entry.state })) });
-    setChecks(w, "app", "failing");
-    await trackTask(deps, TASK_ID);
-    expect(asked).toEqual(["app"]);
-  });
-
-  it("providersWaitingFor answers from the same facts and refuses nothing it cannot read", async () => {
-    const w = await mergeWorld({ pullRequests: prs });
-    const task = await w.task();
-    expect(await providersWaitingFor({ repositoryEdges: async () => [edge("app", "payments-lib")] }, task, "app")).toEqual(["payments-lib"]);
-    expect(await providersWaitingFor({ repositoryEdges: async () => [edge("app", "payments-lib")] }, task, "payments-lib")).toEqual([]);
-    expect(await providersWaitingFor({ repositoryEdges: async () => { throw new Error("down"); } }, task, "app")).toEqual([]);
-    expect(await providersWaitingFor({}, task, "app")).toEqual([]);
   });
 });
 

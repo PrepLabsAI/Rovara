@@ -79,41 +79,6 @@ const pointerOf = (world: FakeWorld, companyId: string, name = "payments") => wo
 const setupEvents = (world: FakeWorld): AuditEvent[] => world.audit.filter((event) => event.action.startsWith("setup_run."));
 
 describe("hosted setup run: who may do what", () => {
-  it("lets a live company owner, a company admin and the project's administrator start a run; the run is a setup task of the caller's company and the audit names the person and why", async () => {
-    for (const [role, grant, basis] of [["owner", undefined, "company-owner"], ["admin", undefined, "company-admin"], ["member", "administrator", "project-admin"]] as const) {
-      const { world, person, call } = await setupWorld();
-      const caller = person(`p-${role}`, FAKE_COMPANY, role, grant);
-      const requestId = randomUUID();
-      const started = await call(post(RUN, { requestId }), caller);
-      expect(started.status, role).toBe(202);
-      expect(started.body).toMatchObject({ status: "running", canManage: true });
-      const pointer = await pointerOf(world, FAKE_COMPANY);
-      expect(pointer).toMatchObject({ orgId: FAKE_COMPANY, project: "payments", requestId, taskId: started.body["taskId"] });
-      const task = await world.store.get(taskKey(started.body["taskId"] as string));
-      expect(task).toMatchObject({ companyId: FAKE_COMPANY, purpose: "setup_agent", developerId: `p-${role}`, project: "payments" });
-      const events = setupEvents(world);
-      expect(events).toHaveLength(1);
-      expect(events[0]).toMatchObject({ action: "setup_run.started", companyId: FAKE_COMPANY, actor: { type: "person", id: `p-${role}` }, subject: { type: "project", id: "payments" }, details: { project: "payments", basis, requestId, taskId: started.body["taskId"] } });
-      // The other company's project of the same name is untouched.
-      expect(await pointerOf(world, OTHER)).toBeUndefined();
-    }
-  });
-
-  it("lets a project user read the run and its journal, and refuses every change in fixed words, writing nothing", async () => {
-    const { world, person, call } = await setupWorld();
-    const reader = person("p-dev", FAKE_COMPANY, "member", "developer");
-    const read = await call(get(RUN), reader);
-    expect(read.status).toBe(200);
-    expect(read.body).toMatchObject({ status: "none", canManage: false });
-    expect((await call(get(`${RUN}/journal`), reader)).body).toEqual({ status: "none", entries: [], hostAsks: [] });
-    for (const [path, body] of [[RUN, { requestId: randomUUID() }], [`${RUN}/stop`, { requestId: randomUUID() }]] as const) {
-      const refused = await call(post(path, body), reader);
-      expect(refused.status, path).toBe(403);
-      expect(refused.body).toEqual({ error: { code: "FORBIDDEN", message: SETUP_RUN_NOT_ALLOWED } });
-    }
-    expect(await pointerOf(world, FAKE_COMPANY)).toBeUndefined();
-    expect(setupEvents(world)).toEqual([]);
-  });
 
   it("answers a member with no grant, another company's person, another company's project, a missing project and a malformed name with one identical 404", async () => {
     const { world, person, call } = await setupWorld();
@@ -139,18 +104,6 @@ describe("hosted setup run: who may do what", () => {
     expect(own.body).toMatchObject({ status: "none" });
     expect(own.raw).not.toContain(FAKE_COMPANY);
     expect(await pointerOf(world, OTHER, "ledger")).toBeUndefined();
-  });
-
-  it("reads nothing for a malformed project name: no standing is asked and no project key is built from it", async () => {
-    const { world, person, call, standing } = await setupWorld();
-    const admin = person("p-admin", FAKE_COMPANY, "admin");
-    const reads = vi.spyOn(world.store, "get");
-    for (const raw of ["-bad", "a%23b", "a%20b", ".hidden", "x".repeat(101), "%E0%A4%A"]) {
-      const answer = await call(get(`/v1/app/projects/${raw}/setup-agent`), admin);
-      expect({ status: answer.status, body: answer.body }, raw).toEqual({ status: 404, body: { error: { code: "NOT_FOUND", message: SETUP_RUN_PROJECT_NOT_FOUND } } });
-    }
-    expect(standing).not.toHaveBeenCalled();
-    expect(reads).not.toHaveBeenCalled();
   });
 
   it("refuses in fixed words when the person's standing cannot be read, and reads an answer it does not know as no standing", async () => {

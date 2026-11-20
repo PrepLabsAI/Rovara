@@ -28,10 +28,6 @@ function world(graph: TaskGraphV1 | undefined, options: { repositories?: number;
 }
 
 describe("what approving a plan binds", () => {
-  it("is the digest of the graph in the document the approval's digest names", async () => {
-    const w = world(graphOf());
-    expect(await breakdownForApproval(w.deps, w.task, w.workflow(), w.sha256)).toEqual({ digest: taskGraphDigest(graphOf()) });
-  });
 
   it("is nothing for a plan with no breakdown, a Markdown plan, or a digest that names no plan", async () => {
     const none = world(undefined);

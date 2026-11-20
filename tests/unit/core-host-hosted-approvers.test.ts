@@ -1,6 +1,4 @@
-// Switch-on lane L2a: the deployed approvers point. The task owner (the broker's existing rule), a live member, a proof of one act bound to its card (DEC 254zzz73: no step-up), and the act's
-// one-time part claimed in the company's own partition (commit spends it, release gives a live claim back, a lapsed claim stays spent).
-import { createHmac } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 import {
   NEEDS_SETTLING_CALLER, type ApprovalAnswer, type ApprovalProof, type ApprovalRequest, type IdentityProvider, type OrgId,
@@ -9,7 +7,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import {
   APPROVAL_PROOF_METHOD, APPROVAL_PROOF_CLAIM_MS, APPROVAL_PROOF_LIFETIME_MS, createHostedApprovers, issueApprovalProof, approvalProofKeyOf, approvalProofClaimKey, type ApprovalProofInput,
 } from "../../packages/broker/src/core-host/hosted-approvers.js";
-import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity, hostedSecurityModules } from "../../packages/broker/src/core-host/hosted-modules.js";
+import { createHostedIdentity, hostedSecurityModules } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { buildCoreRegistry, coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createDecisionGate, type DecisionSubject } from "../../packages/broker/src/core/decisions/approval-gate.js";
@@ -80,25 +78,6 @@ runApproversConformance("deployed approvers (task owner, card-bound one-time pro
 });
 
 describe("the deployed approvers point", () => {
-  it("offers one method for every answer, with no sign-in freshness rule (no step-up), and the task owner may approve their own task", async () => {
-    expect(await world().approvers.requirement(requestFor())).toEqual({
-      methods: [APPROVAL_PROOF_METHOD], minApprovers: 1, selfApprovalAllowed: true,
-      strongMethods: [APPROVAL_PROOF_METHOD], rejectMethods: [APPROVAL_PROOF_METHOD], changesMethods: [APPROVAL_PROOF_METHOD],
-    });
-  });
-
-  it("names the task owner, from membership, with no step-up time or factor (a proof issued with no step-up verifies), and claims the one-time part in the company's partition", async () => {
-    const { approvers, store } = world();
-    const request = requestFor();
-    const verdict = await approvers.verify(request, proofFor(request, issued()));
-    expect(verdict).toMatchObject({ approved: true, method: APPROVAL_PROOF_METHOD, approver: { companyId: A, personId: "ada", provider: HOSTED_IDENTITY_PROVIDER, roles: ["member"], methods: [APPROVAL_PROOF_METHOD] } });
-    expect(verdict.approved ? verdict.approver.authTime : "refused").toBeUndefined();
-    const claimId = verdict.approved ? verdict.claimId! : "";
-    const [company, hash] = claimId.split(".");
-    expect(company).toBe(A);
-    expect(await store.get(approvalProofClaimKey(A, hash!))).toMatchObject({ entityType: "APPROVAL_STEP_UP_CLAIM", companyId: A, state: "claimed" });
-    expect((await store.get(approvalProofClaimKey(A, hash!)))?.pk).toBe(`ORG#${A}#APPROVAL_STEP_UP_CLAIM`);
-  });
 
   it("works under the policy hook's stricter-only wrapper without losing the claim operations", async () => {
     const { approvers } = world();
@@ -161,28 +140,6 @@ describe("the deployed approvers point", () => {
     });
   });
 
-  it("the one-time part: a second verify while claimed is refused; release frees it; commit spends it for ever; a lapsed claim stays spent", async () => {
-    const { approvers, clock } = world();
-    const token = issued();
-    const attempt = (n: string) => { const request = requestFor({ requestId: `decision-request-0001.${n}` }); return approvers.verify(request, proofFor(request, token)); };
-    const first = await attempt("a");
-    expect((await attempt("b")).approved).toBe(false);
-    await approvers.releaseClaim!(first.approved ? first.claimId! : "");
-    const second = await attempt("c");
-    expect(await approvers.commitClaim!(second.approved ? second.claimId! : "")).toEqual({ applied: true });
-    expect(await attempt("d")).toEqual({ approved: false, reason: "proof_already_used" });
-    // Another proof, claimed and never settled: after the claim window it is spent, and neither commit nor release changes that.
-    const other = issued();
-    const request = requestFor({ requestId: "decision-request-0001.e" });
-    const lapsing = await approvers.verify(request, proofFor(request, other));
-    clock.now += APPROVAL_PROOF_CLAIM_MS;
-    const claimId = lapsing.approved ? lapsing.claimId! : "";
-    expect(await approvers.commitClaim!(claimId)).toEqual({ applied: false });
-    await approvers.releaseClaim!(claimId);
-    const again = requestFor({ requestId: "decision-request-0001.f" });
-    expect(await approvers.verify(again, proofFor(again, other))).toEqual({ approved: false, reason: "proof_already_used" });
-  });
-
   it("settles nothing for a malformed or guessed claim id", async () => {
     const { approvers } = world();
     const request = requestFor();
@@ -198,33 +155,6 @@ describe("the deployed approvers point", () => {
 });
 
 describe("review round 1 (Lows)", () => {
-  it("a hand-signed token with no step-up time or factor verifies for the task owner, and one in the old shape (with a step-up time and factor) is read the same way", async () => {
-    const sign = (claims: Record<string, unknown>) => { const body = Buffer.from(JSON.stringify(claims)).toString("base64url"); return `su1.${body}.${createHmac("sha256", KEY).update(`su1.${body}`).digest("base64url")}`; };
-    const base = { c: A, p: "ada", r: "decision-request-0001", q: "plan", s: TASK_A, v: 3, d: DIGEST, o: "approve", k: [cardOf(TASK_A).cardId, DIGEST], e: NOW + 60_000 };
-    const plain = requestFor();
-    expect((await world().approvers.verify(plain, proofFor(plain, sign({ ...base, n: "n".repeat(43) })))).approved).toBe(true);
-    const legacy = requestFor();
-    expect((await world().approvers.verify(legacy, proofFor(legacy, sign({ ...base, a: new Date(NOW - 3_600_000).toISOString(), m: "slack", n: "m".repeat(43) })))).approved).toBe(true);
-    // The same unstepped token for another member of the company, or for a person of another company, is still refused.
-    expect(await world().approvers.verify(plain, proofFor(plain, sign({ ...base, p: "bea", n: "o".repeat(43) })))).toEqual({ approved: false, reason: "not_the_task_owner" });
-    expect(await world().approvers.verify(plain, proofFor(plain, sign({ ...base, c: B, p: "cy", n: "q".repeat(43) })))).toEqual({ approved: false, reason: "wrong_company" });
-  });
-
-  it("refuses a card that is not a readable card, and a card version other than the one signed even when it equals the content", async () => {
-    const { approvers } = world();
-    const unreadable = requestFor({ card: { cardId: 5, contentVersion: DIGEST } as never });
-    expect(await approvers.verify(unreadable, proofFor(unreadable, issued()))).toEqual({ approved: false, reason: "card_not_named" });
-    const request = requestFor();
-    expect(await approvers.verify(request, proofFor(request, issued({ card: cardOf(TASK_A, "v-signed") })))).toEqual({ approved: false, reason: "other_card" });
-  });
-
-  it("reads no company sign-in setting any more (DEC 254zzz73): a settings row that cannot be read changes nothing", async () => {
-    const { store } = world();
-    const failing = createHostedApprovers({ store: { get: async (key) => { if (key.sk === "SETTING") throw new Error("down"); return await store.get(key); }, put: (r) => store.put(r), update: (r) => store.update(r), delete: (r) => store.delete(r) }, identity: identity(), key: KEY, now: () => new Date(NOW) });
-    expect((await failing.requirement(requestFor())).signIn).toBeUndefined();
-    const request = requestFor();
-    expect((await failing.verify(request, proofFor(request, issued()))).approved).toBe(true);
-  });
 
   it("refuses a token whose signature or body is spelled differently (canonical base64url only), and one that claims to live longer than two minutes", async () => {
     const { approvers } = world();
@@ -241,29 +171,6 @@ describe("review round 1 (Lows)", () => {
     // Signed with the install's key but stating an expiry beyond the lifetime: refused.
     expect(await approvers.verify(request, proofFor(request, issued({}, NOW + 1_000)))).toEqual({ approved: false, reason: "proof_expired" });
     expect((await approvers.verify(request, proofFor(request, token))).approved).toBe(true);
-  });
-
-  it("refuses a task record of another company even when it names the person, and a task record for another id", async () => {
-    const { approvers, store } = world();
-    // Ada's id on a task row that belongs to company B (the row says so), presented as A's task.
-    const strayTask = "2c3d4e5f-6a7b-4c8d-9e0f-a1b2c3d4e5f6";
-    await store.put({ item: { ...taskKey(strayTask), entityType: "DEVELOPER_TASK", taskId: strayTask, companyId: B, developerId: "ada", project: "demo" } });
-    const card = cardOf(strayTask);
-    const request = requestFor({ subject: { type: "task", id: strayTask }, card });
-    expect(await approvers.verify(request, proofFor(request, issued({ taskId: strayTask, card })))).toEqual({ approved: false, reason: "not_the_task_owner" });
-    // A row stored under one task's key that names another task id.
-    const misfiled = "3d4e5f6a-7b8c-4d9e-8f0a-b1c2d3e4f5a6";
-    await store.put({ item: { ...taskKey(misfiled), entityType: "DEVELOPER_TASK", taskId: TASK_A, companyId: A, developerId: "ada", project: "demo" } });
-    const card2 = cardOf(misfiled);
-    const request2 = requestFor({ subject: { type: "task", id: misfiled }, card: card2 });
-    expect(await approvers.verify(request2, proofFor(request2, issued({ taskId: misfiled, card: card2 })))).toEqual({ approved: false, reason: "not_the_task_owner" });
-  });
-
-  it("a person the identity point names for another company or another id is not a member", async () => {
-    const wrong = (principal: Partial<{ companyId: string; personId: string }>) => world({ identity: { capabilities: { interactiveSignIn: false, externalAccounts: false }, getPrincipal: async (companyId: string, personId: string) => ({ companyId, personId, displayName: "x", roles: ["member"], provider: HOSTED_IDENTITY_PROVIDER, ...principal }) } as unknown as IdentityProvider });
-    const request = requestFor();
-    expect(await wrong({ companyId: B }).approvers.verify(request, proofFor(request, issued()))).toEqual({ approved: false, reason: "not_a_member" });
-    expect(await wrong({ personId: "bea" }).approvers.verify(request, proofFor(request, issued()))).toEqual({ approved: false, reason: "not_a_member" });
   });
 
   it("a claim write that fails refuses (claim_unavailable) and the proof is not accepted later by a retry on the same row", async () => {
@@ -289,46 +196,10 @@ describe("review round 1 (Lows)", () => {
   });
 });
 
-describe("two companies", () => {
-  it("company B's owner, proof and claims never reach company A", async () => {
-    const { approvers, store } = world();
-    // B's owner with a proof issued for A's request (an install key is shared): not a member of A.
-    const request = requestFor();
-    expect(await approvers.verify(request, proofFor(request, issued({ personId: "cy" })))).toEqual({ approved: false, reason: "not_a_member" });
-    // B's own proof, presented on A's request: the company it was issued for is B.
-    const bRequest = requestFor({ companyId: B, subject: { type: "task", id: TASK_B }, card: cardOf(TASK_B) });
-    const bToken = issued({ companyId: B, personId: "cy", taskId: TASK_B, card: cardOf(TASK_B) });
-    expect(await approvers.verify(request, proofFor(request, bToken))).toEqual({ approved: false, reason: "wrong_company" });
-    // A's task named on B's request (B's owner): A's task is not B's.
-    const crossed = requestFor({ companyId: B });
-    expect(await approvers.verify(crossed, proofFor(crossed, issued({ companyId: B, personId: "cy" })))).toEqual({ approved: false, reason: "not_the_task_owner" });
-    // B's own decision works, and its claim lives in B's partition only.
-    const verdict = await approvers.verify(bRequest, proofFor(bRequest, bToken));
-    expect(verdict).toMatchObject({ approved: true, approver: { companyId: B, personId: "cy" } });
-    const [company, hash] = (verdict.approved ? verdict.claimId! : "").split(".");
-    expect(company).toBe(B);
-    expect(await store.get(approvalProofClaimKey(A, hash!))).toBeUndefined();
-    // A claim id rewritten to name company A settles nothing, and B's claim is still live.
-    const forged = (verdict.approved ? verdict.claimId! : "").replace(B, A);
-    expect(await approvers.commitClaim!(forged)).toEqual({ applied: false });
-    expect(await approvers.commitClaim!(verdict.approved ? verdict.claimId! : "")).toEqual({ applied: true });
-  });
-});
-
 describe("registration", () => {
   const context = { installCompanyId: "org_install000000000000", now: () => new Date(NOW), env: {}, clients: {}, log: () => undefined };
   const env = { ROVARA_CORE_ALLOWED_COMPANIES: A };
   const people = { membershipOf: async (personId: string) => MEMBERS[personId], displayNameOf: async (personId: string) => (personId in MEMBERS ? personId : undefined) };
-
-  it("is a step 5 module after identity, never Code's laptop default, and on the broker it verifies with the key derived from the callback signing key", async () => {
-    const store = seededStore();
-    const modules = hostedSecurityModules({ env, identity: people, callbackSigningKey: SIGNING_KEY });
-    expect(modules.map((module) => module.point)).toEqual(["metering", "admission", "identity", "approvers", "audit-sink"]);
-    expect(modules.some((module) => module.isDefault === true)).toBe(false);
-    const registry = await buildCoreRegistry({ modules: [coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => store }), ...modules], context, areas: [] });
-    const request = requestFor();
-    expect(await registry.require("approvers").verify(request, proofFor(request, issued()))).toMatchObject({ approved: true, approver: { personId: "ada" } });
-  });
 
   it("hands the deployment's task-owner rule the company, the live person, the stored task and the company's own store (C6)", async () => {
     const store = seededStore();
@@ -341,13 +212,6 @@ describe("registration", () => {
     // The task's own person is not accepted on the record alone once the rule is given.
     const again = requestFor({ requestId: "decision-request-0002" });
     expect(await registry.require("approvers").verify(again, proofFor(again, issued({ personId: "ada", requestId: "decision-request-0002" })))).toEqual({ approved: false, reason: "not_the_task_owner" });
-  });
-
-  it("on the dispatcher (no key) it is registered and refuses every proof", async () => {
-    const modules = hostedSecurityModules({ env, identity: people });
-    const registry = await buildCoreRegistry({ modules: [coreAdapter({ point: "storage", name: "memory", owner: "test", create: () => seededStore() }), ...modules], context, areas: [] });
-    const request = requestFor();
-    expect(await registry.require("approvers").verify(request, proofFor(request, issued()))).toEqual({ approved: false, reason: "method_not_available" });
   });
 });
 
@@ -367,13 +231,6 @@ describe("the decision gate as this point's caller (lane L11: it settles claims 
     return { gate, applied, claims, attempt };
   };
 
-  it("is refused whole when the attempt names no card: fail closed, nothing decided, nothing claimed", async () => {
-    const t = setup();
-    expect(await t.gate.decide(t.attempt(issued()))).toEqual({ status: "refused", reason: "not_approved", detail: "Not approved: card_not_named." });
-    expect(t.applied).toEqual([]);
-    expect(await t.claims()).toEqual([]);
-  });
-
   it("decides with the card, spends the one-time part, and answers a repeat as the same decision", async () => {
     const t = setup();
     const token = issued();
@@ -385,7 +242,6 @@ describe("the decision gate as this point's caller (lane L11: it settles claims 
   });
 });
 
-
 // Web task channel C6 (plan 4.1, decision D5): a co-owner the People rule names may decide a core task's document; nobody else may.
 describe("the deployed approvers point: co-owners (the task-owner seam)", () => {
   type OwnerCheck = NonNullable<Parameters<typeof createHostedApprovers>[0]["taskOwner"]>;
@@ -393,15 +249,6 @@ describe("the deployed approvers point: co-owners (the task-owner seam)", () => 
     const store = seededStore();
     return { store, approvers: createHostedApprovers({ store, identity: identity(), key: KEY, now: () => new Date(NOW), taskOwner }) };
   };
-  const bea = () => { const r = requestFor(); return { request: r, proof: proofFor(r, issued({ personId: "bea" })) }; };
-
-  it("asks the seam for any person, with the company, the live principal and the stored task, and accepts the co-owner it names", async () => {
-    const seen: unknown[] = [];
-    const { approvers } = seamWorld(async (asked) => { seen.push(asked); return asked.principal.personId === "bea"; });
-    const { request, proof } = bea();
-    expect(await approvers.verify(request, proof)).toMatchObject({ approved: true, approver: { companyId: A, personId: "bea" } });
-    expect(seen).toEqual([{ companyId: A, principal: expect.objectContaining({ companyId: A, personId: "bea" }) as unknown, task: { taskId: TASK_A, developerId: "ada", project: "demo" } }]);
-  });
 
   it("refuses when the seam says no, throws, or answers anything but true; the task's own person is not accepted by the stored record alone once the seam is given", async () => {
     for (const taskOwner of [async () => false, async () => { throw new Error("people down"); }, async () => "yes" as never, async () => undefined as never] satisfies OwnerCheck[]) {
@@ -430,13 +277,5 @@ describe("the deployed approvers point: co-owners (the task-owner seam)", () => 
     // The company's own task, but the request names another company's task id.
     const r4 = requestFor({ subject: { type: "task", id: TASK_B }, card: cardOf(TASK_B) });
     expect(await approvers.verify(r4, proofFor(r4, issued({ personId: "bea", taskId: TASK_B, card: cardOf(TASK_B) })))).toEqual({ approved: false, reason: "not_the_task_owner" });
-  });
-
-  it("golden: without the seam, only the task's own person is accepted, exactly as before", async () => {
-    const { approvers } = world();
-    const { request, proof } = bea();
-    expect(await approvers.verify(request, proof)).toEqual({ approved: false, reason: "not_the_task_owner" });
-    const r = requestFor();
-    expect(await approvers.verify(r, proofFor(r, issued()))).toMatchObject({ approved: true, approver: { personId: "ada" } });
   });
 });

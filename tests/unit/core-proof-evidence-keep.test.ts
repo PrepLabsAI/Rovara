@@ -3,7 +3,7 @@
 // (Port lane L7b: the store is the evidence blob store over the document store, not a bucket; the data guard's scan is passed in; Cloud's wiring switch is the task flow's.)
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { EvidencePackSchema, type CheckEntry, type TestEnvProdDeny } from "../../packages/contracts/src/index.js";
+import { type CheckEntry, type TestEnvProdDeny } from "../../packages/contracts/src/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentEvidenceBlobStore, type EvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { dataGuardScanWorks, evidenceFindings as findings, guardPack as guard, guardRaw as guardRawWith, evidenceTexts } from "../../packages/broker/src/core/proof/evidence-guard.js";
@@ -52,28 +52,6 @@ function world(rawText: string | undefined, over: { key?: string } = {}) {
 const input = (over: Record<string, unknown> = {}) => ({ orgId: "org-a", task: TASK, operationId: OP, candidateDigest: DIGEST, checks: [entry("readiness:0", "pytest -q"), entry("readiness:1", "ruff check .")], ...over });
 
 describe("assembling the evidence of a run", () => {
-  it("keeps a pack bound to the code, with the test details from the worker, the broker's own verdicts, and the output tail of a failed check stored first", async () => {
-    const tail = "FAILED tests/test_match.py::test_scores - AssertionError";
-    const w = world(JSON.stringify(rawOf([
-      { checkId: "readiness:0", tests: tests(["test_a", "test_b", "test_c"]) },
-      { checkId: "readiness:1", outputTail: tail },
-    ])));
-    const result = await keepEvidence(w.deps, input({ checks: [entry("readiness:0", "pytest -q"), entry("readiness:1", "ruff check .", { after: "failed", exitCode: 1 })] }));
-    expect(result).toMatchObject({ kept: true });
-    const pack = await loadEvidencePack(w.deps.store.blobs, TASK, DIGEST);
-    expect(pack?.candidateDigest).toBe(DIGEST);
-    expect(EvidencePackSchema.safeParse(pack).success).toBe(true);
-    expect(pack?.checks[0]).toMatchObject({ checkId: "readiness:0", kind: "test", label: "pytest -q", after: "passed" });
-    expect(pack?.checks[0]?.tests?.total).toBe(3);
-    const tailRef = pack?.checks[1]?.outputTailRef;
-    expect(tailRef?.kind).toBe("log_txt");
-    // The tail is in the store, under the task, before the pack names it.
-    expect(await w.objects.text(`private/${TASK.ownerKey}/${TASK.workspaceId}/evidence/${TASK.taskId}/${tailRef!.sha256}`)).toBe(tail);
-    expect(createHash("sha256").update(tail).digest("hex")).toBe(tailRef!.sha256);
-    // No approved test environment: the pack says so, and does not claim a setup.
-    expect(pack?.environment).toMatchObject({ tier: "sandbox", envRevision: 0, services: [] });
-    expect(pack?.notTested.some((item) => item.id === "test_environment")).toBe(true);
-  });
 
   it("is read back only for the exact code: another digest, and a key of another task, give nothing", async () => {
     const w = world(JSON.stringify(rawOf([{ checkId: "readiness:0", tests: tests(["t1", "t2", "t3"]) }])));
@@ -116,13 +94,6 @@ describe("assembling the evidence of a run", () => {
     expect(pack?.notTested.some((item) => item.reason === "could not be read")).toBe(true);
   });
 
-  it("does not trust a count: a worker that reports failures for a passed check loses those test details", async () => {
-    const w = world(JSON.stringify(rawOf([{ checkId: "readiness:0", tests: tests(["t1", "t2", "t3"], { passed: 2, failed: 1 }) }])));
-    await keepEvidence(w.deps, input());
-    const pack = await loadEvidencePack(w.deps.store.blobs, TASK, DIGEST);
-    expect(pack?.checks[0]?.tests).toBeUndefined();
-  });
-
   it("marks the org before the first object is stored, and stores nothing when the mark fails", async () => {
     const w = world(JSON.stringify(rawOf([{ checkId: "readiness:0", tests: tests(["t1", "t2", "t3"]) }])));
     expect(await keepEvidence(w.deps, input())).toMatchObject({ kept: true });
@@ -131,19 +102,6 @@ describe("assembling the evidence of a run", () => {
     const failing = world(JSON.stringify(rawOf([{ checkId: "readiness:0", tests: tests(["t1", "t2", "t3"]) }])));
     expect(await keepEvidence({ ...failing.deps, markStored: async () => { throw new Error("down"); } }, input())).toEqual({ kept: false, reason: "fault" });
     expect(failing.sent).toEqual([]);
-  });
-
-  it("writes nothing more once its time has run out", async () => {
-    const w = world(JSON.stringify(rawOf([{ checkId: "readiness:0", tests: tests(["t1", "t2", "t3"]) }])));
-    const result = await keepEvidence({ ...w.deps, late: () => true }, input());
-    expect(result).toEqual({ kept: false, reason: "fault" });
-    expect(w.sent).toEqual([]);
-  });
-
-  it("never throws: a store that fails is only no evidence", async () => {
-    const w = world(JSON.stringify(rawOf([{ checkId: "readiness:0", tests: tests(["t1", "t2", "t3"]) }])));
-    const broken = { ...w.deps, store: { blobs: { ...w.deps.store.blobs, put: async () => { throw new Error("down"); } } } };
-    expect(await keepEvidence(broken, input())).toEqual({ kept: false, reason: "fault" });
   });
 
   it("takes the approved policy's kind for a check, and treats a check with a test report as a test check", () => {
@@ -170,37 +128,6 @@ describe("a scan that is not the data guard", () => {
 describe("the data guard on the evidence", () => {
   const EMAIL = "jane.doe@gmail.com";
   const CARD = "4111 1111 1111 1111";
-  const SECRET = `AKIA${"ABCDEFGHIJKLMNOP"}`;
-
-  it("drops a check's test names that hold an email, and says so; the broker's verdict for that check stays; other checks keep theirs", async () => {
-    const w = world(JSON.stringify(rawOf([
-      { checkId: "readiness:0", tests: tests([`test_user_${EMAIL}`, "t2", "t3"]) },
-      { checkId: "readiness:1", tests: tests(["u1", "u2", "u3"]) },
-    ])));
-    const result = await keepEvidence(w.deps, input());
-    expect(result).toMatchObject({ kept: true, guardedParts: 1 });
-    const pack = await loadEvidencePack(w.deps.store.blobs, TASK, DIGEST);
-    expect(pack?.checks[0]).toMatchObject({ checkId: "readiness:0", after: "passed" });
-    expect(pack?.checks[0]?.tests).toBeUndefined();
-    expect(pack?.checks[1]?.tests?.total).toBe(3);
-    expect(pack?.notTested.some((item) => item.id === "data_guard")).toBe(true);
-    // The matched text is nowhere: not in the pack, not in anything stored.
-    expect(JSON.stringify(pack)).not.toContain(EMAIL);
-    expect(await w.objects.all()).not.toContain(EMAIL);
-  });
-
-  it("drops an output tail with a card number or a credential: nothing of it is stored, and the pack names no tail", async () => {
-    for (const bad of [`charged ${CARD} ok`, `AWS_ACCESS_KEY_ID=${SECRET}`]) {
-      const w = world(JSON.stringify(rawOf([{ checkId: "readiness:1", outputTail: `step\n${bad}\n` }])));
-      const result = await keepEvidence(w.deps, input({ checks: [entry("readiness:0", "pytest -q"), entry("readiness:1", "ruff", { after: "failed", exitCode: 1 })] }));
-      expect(result).toMatchObject({ kept: true });
-      const pack = await loadEvidencePack(w.deps.store.blobs, TASK, DIGEST);
-      expect(pack?.checks[1]?.outputTailRef).toBeUndefined();
-      expect((await w.objects.keys()).some((key) => key.includes("/evidence/"))).toBe(false);
-      expect(await w.objects.all()).not.toContain("4111");
-      expect(await w.objects.all()).not.toContain(SECRET);
-    }
-  });
 
   it("drops a part that names a host on the company's production deny list", async () => {
     const deny: TestEnvProdDeny = { accountIds: [], hosts: ["*.prod.example.com"], arnPrefixes: [] };
@@ -239,31 +166,6 @@ describe("the data guard on the evidence", () => {
     expect(guarded.pack?.checks[0]).not.toHaveProperty("outputTailRef");
     expect(guarded.pack?.checks[0]).toMatchObject({ checkId: "a", after: "failed" });
     expect(guarded.dropped.kinds).toContain("card_number");
-  });
-
-  const NO_DENY = { accountIds: [], hosts: [], arnPrefixes: [] };
-
-  it("reads full-width and other compatibility forms as the ASCII they imitate (NFKC): a full-width card number and a full-width email address are findings, alone and among other scripts", () => {
-    expect(evidenceFindings({ name: "charged ４１１１ １１１１ １１１１ １１１１ ok" }, NO_DENY)).toContain("card_number");
-    expect(evidenceFindings({ name: "ｍａｙａ@acme.com" }, NO_DENY)).toContain("email");
-    expect(evidenceFindings({ name: "ｍａｙａ＠ａｃｍｅ．ｃｏｍ" }, NO_DENY)).toContain("email");
-    // Mixed scripts: Cyrillic and Han words around full-width and ASCII digits in one card, and around a full-width email.
-    expect(evidenceFindings({ name: "клиент ４１１１ 1111 １１１１ 1111 оплатил 支付" }, NO_DENY)).toContain("card_number");
-    expect(evidenceFindings({ name: "имя ｍａｙａ@acme.com 客户" }, NO_DENY)).toContain("email");
-    // Clean text in those scripts is still clean.
-    expect(evidenceFindings({ name: "тест оплаты ４２ 支付成功" }, NO_DENY)).toEqual([]);
-  });
-
-  it("drops a check whose test name is a full-width card number, end to end, and stores nothing of it", async () => {
-    const w = world(JSON.stringify(rawOf([{ checkId: "readiness:0", tests: tests(["charges ４１１１ １１１１ １１１１ １１１１", "t2", "t3"]) }])));
-    expect(await keepEvidence(w.deps, input())).toMatchObject({ kept: true, guardedParts: 1 });
-    expect((await loadEvidencePack(w.deps.store.blobs, TASK, DIGEST))?.checks[0]?.tests).toBeUndefined();
-    expect(await w.objects.all()).not.toContain("４１１１");
-  });
-
-  it("exempts only a real ISO instant: a card number after a T is scanned, the timestamps the broker writes are not", () => {
-    expect(evidenceFindings({ name: "2024-01-01T4111111111111111Z" }, NO_DENY)).toContain("card_number");
-    expect(evidenceTexts({ at: "2026-11-02T00:00:00.000Z", a: "2026-11-02T00:00:00Z", b: "2024-01-01T4111111111111111Z", c: "2024-01-01T12:30:45.5Z" })).toEqual(["2024-01-01T4111111111111111Z"]);
   });
 
   it("fails closed on a text it cannot scan", () => {

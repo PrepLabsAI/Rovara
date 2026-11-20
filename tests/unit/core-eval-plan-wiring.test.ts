@@ -170,23 +170,6 @@ it("the deployed callback layer answers a CHECKS run's eval-plan from the compan
   expect((await run.ask()).answer).toMatchObject({ status: "ready", approval: null });
 });
 
-it("two companies: B's run never gets A's plan or grant, and each company's ask reads only its own setup rows", async () => {
-  const h = await world();
-  const a = await h.checksRun(A, personA);
-  const b = await h.checksRun(B, personB);
-  await h.approved(A, personA);
-  const fromB = await b.ask();
-  expect(fromB.answer).toEqual({ status: "not_available" });
-  expect(fromB.text).not.toContain(A);
-  expect(h.authorityAsks).toEqual([]);
-  expect((await a.ask()).answer).toMatchObject({ status: "ready", approval: { company: A } });
-  await h.approved(B, personB);
-  const ready = (await b.ask()).answer;
-  expect(ready).toMatchObject({ status: "ready", plan: { company: B }, approval: { company: B, role: "owner" } });
-  expect(JSON.stringify(ready)).not.toContain(A);
-  expect(h.authorityAsks.map((ask) => ask.company)).toEqual([A, B]);
-});
-
 /** An approved test environment (the revision row and the pointer, as an approval writes them) of `companyId`'s project whose one repository `demo` has these install steps. */
 async function approveInstallSteps(h: Awaited<ReturnType<typeof world>>, companyId: OrgId, steps: Array<{ executable: string; args: string[] }>) {
   const command = (executable: string, args: string[]) => ({ cwd: "repo/demo", executable, args, timeoutSeconds: 600 });

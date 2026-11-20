@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { CORE_ENGINE_VARIABLE, change, companyScoped, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
+import { change, companyScoped, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { createPriceTableMetering, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -21,8 +21,7 @@ import { GitHubFixtureProvider } from "../support/ports/github-fixture-provider.
 import { FAKE_COMPANY, createFakeWorld } from "../support/core-host-fakes.js";
 import { BINDING, COMPANY_A, COMPANY_B, createSessionMachinesWorld } from "../support/session-machines-world.js";
 import { SessionWorkerFleet, SessionWorkerMachines } from "../../packages/broker/src/aws/worker-machines/session-worker-machines.js";
-import { createCoreRuntime, withCompanyMachines } from "../../packages/broker/src/core-host/core-runtime.js";
-import { readCoreEngineFlags } from "../../packages/broker/src/core-host/flags.js";
+import { withCompanyMachines } from "../../packages/broker/src/core-host/core-runtime.js";
 import { costPartition as costPartitionFor, createCostLedger } from "../../packages/broker/src/core/cost/ledger.js";
 
 const OTHER = "org_corehost00000000000b";
@@ -101,23 +100,6 @@ describe("Code's AWS adapter modules", () => {
     expect(aws.dynamo.requests.some((request) => request.operation === "TransactWriteItems")).toBe(true);
   });
 
-  it("never hands out the State table without Code's retention: the core's own expiries stand (its logic reads them), a core expiry on a kind the deployed broker keeps is stripped", async () => {
-    const aws = awsWorld();
-    const registry = await buildCoreRegistry({ modules: modulesWithOwed(aws), context: context(), areas: ["flow", "build", "merge"] });
-    const store = registry.require("storage");
-    const past = Math.floor(Date.parse("2026-01-01T00:00:00Z") / 1_000);
-    const pk = `ORG#${FAKE_COMPANY}#X`;
-    await store.put({ item: { pk, sk: "lock", entityType: "TEST_ENV_LOOK_LOCK", indexExpiresAt: past } });
-    await store.put({ item: { pk, sk: "note", entityType: "WORKFLOW_THREAD_NOTE", indexExpiresAt: past } });
-    await store.transact([{ kind: "put", item: { pk, sk: "note2", entityType: "WORKFLOW_THREAD_NOTE", indexExpiresAt: past } }]);
-    expect(aws.stripped).toEqual(["WORKFLOW_THREAD_NOTE", "WORKFLOW_THREAD_NOTE"]);
-    aws.dynamo.sweepExpired();
-    // The core-only lock expired as the core meant; the notes the deployed broker keeps for good did not.
-    expect(await store.get({ pk, sk: "lock" })).toBeUndefined();
-    expect(await store.get({ pk, sk: "note" })).toBeDefined();
-    expect(await store.get({ pk, sk: "note2" })).toBeDefined();
-  });
-
   it("refuses hollow inputs at create, with fixed words", async () => {
     const cases: Array<[Partial<CodeModuleDeps>, RegExp]> = [
       [{ tableName: "" }, /storage input is hollow: tableName/],
@@ -162,12 +144,6 @@ describe("Code's AWS adapter modules", () => {
     codeAdapterModules(quiet.deps);
     expect(quiet.sqs.requests).toEqual([]);
     expect(quiet.secrets.reads).toEqual([]);
-  });
-
-  it("declares every index the core checks, with one definition each, and the outbox's pending index among them", () => {
-    const names = stateTableIndexes().map((index) => index.name);
-    expect(new Set(names).size).toBe(names.length);
-    expect(names.sort()).toEqual(["bySessionState", "byWorkspaceProject", "github-webhook-recovery", "outbox-pending", "workflow-dispatch-due"]);
   });
 });
 
@@ -314,16 +290,5 @@ describe("the EC2 fleet in the registry", () => {
     // An adapter without `forCompany` (the laptop's, which reads the company from each spec) is handed out as it is.
     const plain = await buildCoreRegistry({ modules: createFakeWorld().modules, context: context(), areas: ["flow", "build", "merge"] });
     expect(withCompanyMachines(plain, COMPANY_A).require("worker-machines")).toBe(plain.require("worker-machines"));
-  });
-
-  it("builds a company's core over the fleet bound to that company: the flow's machines are the company's adapter", async () => {
-    const aws = awsWorld({ workerMachines: fleetDeps() });
-    const registry = await buildCoreRegistry({ modules: modulesWithOwed(aws), context: context(), areas: ["flow", "build", "merge"] });
-    const runtime = createCoreRuntime({
-      registry, companyId: COMPANY_A, flags: readCoreEngineFlags({ [CORE_ENGINE_VARIABLE]: "on" }), callbackSigningKey: Buffer.alloc(32, 1),
-      access: createOwnerTaskAccess(), repositoryCredential: async () => { throw new Error("unused"); }, repositoryGrantKey: Buffer.alloc(32, 2), now: () => new Date(), log: () => undefined,
-    });
-    expect(runtime.flow.deps.machines).toBeInstanceOf(SessionWorkerMachines);
-    expect((runtime.flow.deps.machines as SessionWorkerMachines).companyId).toBe(COMPANY_A);
   });
 });

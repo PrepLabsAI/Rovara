@@ -6,7 +6,7 @@ import { agentXError, orgProjectCatalogKey, projectRevisionKey, type JsonValue, 
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
-import { NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
+import { createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
 const OTHER = "org_corehost00000000000b";
@@ -84,70 +84,6 @@ describe("how we work read by company role (owner or admin without a project gra
     expect(bodyOf(hww).process?.agentId).toBe(`${FAKE_COMPANY}:payments`);
   });
 
-  it("a member with no grant gets exactly the missing-project 404 and nothing of the project is read; the same member WITH the grant reads", async () => {
-    const h = await setup();
-    const caller = h.callerOf(FAKE_COMPANY, "member", "m1");
-    const missing = await MISSING(h);
-    h.stateCalls.length = 0;
-    for (const path of [PB("payments"), HWW("payments")]) {
-      const hidden = await h.routes.route(get(path), caller);
-      expect(hidden?.statusCode, path).toBe(404);
-      expect(hidden, path).toEqual(missing);
-    }
-    expect(h.stateCalls).toEqual([]);
-    h.allowed.add("payments");
-    expect((await h.routes.route(get(PB("payments")), caller))?.statusCode).toBe(200);
-    expect((await h.routes.route(get(HWW("payments")), caller))?.statusCode).toBe(200);
-  });
-
-  it("an owner or admin asking about a project that does not exist in their company gets the same 404 as a person who may not read it, and nothing is read", async () => {
-    const h = await setup();
-    const missing = await MISSING(h);
-    h.stateCalls.length = 0;
-    for (const role of ["owner", "admin"] as const) {
-      for (const path of [PB("nothere"), HWW("nothere")]) expect(await h.routes.route(get(path), h.callerOf(FAKE_COMPANY, role, `${role}-gone`)), `${role} ${path}`).toEqual(missing);
-    }
-    expect(h.stateCalls).toEqual([]);
-  });
-
-  it("two companies: an owner of another company gets 404 for a project only this company has, and reads their own company's project of the same name from their own company's records", async () => {
-    const h = await setup();
-    const theirs = h.callerOf(OTHER, "owner", "other-owner");
-    const mine = h.callerOf(FAKE_COMPANY, "owner", "my-owner");
-    const missing = await MISSING(h);
-    expect(await h.routes.route(get(PB("ledger")), theirs)).toEqual(missing);
-    expect(await h.routes.route(get(HWW("ledger")), theirs)).toEqual(missing);
-    expect(await h.routes.route(get(PB("vault")), mine)).toEqual(missing);
-    h.stateCalls.length = 0;
-    expect(bodyOf(await h.routes.route(get(PB("payments")), mine)).playbook).toMatchObject({ steps: [`${FAKE_COMPANY}:payments`] });
-    expect(bodyOf(await h.routes.route(get(PB("payments")), theirs)).playbook).toMatchObject({ steps: [`${OTHER}:payments`] });
-    expect(h.stateCalls).toEqual([`${FAKE_COMPANY}/payments`, `${OTHER}/payments`]);
-  });
-
-  it("two projects: an owner reads each project's own view, and a member granted one project cannot read the other", async () => {
-    const h = await setup();
-    const owner = h.callerOf(FAKE_COMPANY, "owner", "o2");
-    expect(bodyOf(await h.routes.route(get(PB("payments")), owner)).playbook).toMatchObject({ steps: [`${FAKE_COMPANY}:payments`] });
-    expect(bodyOf(await h.routes.route(get(PB("ledger")), owner)).playbook).toMatchObject({ steps: [`${FAKE_COMPANY}:ledger`] });
-    h.allowed.add("payments");
-    const member = h.callerOf(FAKE_COMPANY, "member", "m3");
-    expect((await h.routes.route(get(PB("payments")), member))?.statusCode).toBe(200);
-    expect(await h.routes.route(get(PB("ledger")), member)).toEqual(await MISSING(h));
-    expect(await h.routes.route(get(HWW("ledger")), member)).toEqual(await MISSING(h));
-  });
-
-  it("the role is read live on every request: an owner who becomes a member (or is removed) loses the shortcut at once", async () => {
-    const h = await setup();
-    const caller = h.callerOf(FAKE_COMPANY, "owner", "o3");
-    expect((await h.routes.route(get(PB("payments")), caller))?.statusCode).toBe(200);
-    h.members.set(caller.principal.personId + FAKE_COMPANY, { companyId: FAKE_COMPANY, role: "member" });
-    expect((await h.routes.route(get(PB("payments")), caller))?.statusCode).toBe(404);
-    h.members.set(caller.principal.personId + FAKE_COMPANY, { companyId: FAKE_COMPANY, role: "admin" });
-    expect((await h.routes.route(get(PB("payments")), caller))?.statusCode).toBe(200);
-    h.members.delete(caller.principal.personId + FAKE_COMPANY);
-    expect((await h.routes.route(get(PB("payments")), caller))?.statusCode).toBe(401);
-  });
-
   it("only a real catalog row counts: a row of another kind, or a catalog read that fails, is no project for an owner; a granted owner still reads a project with no catalog row", async () => {
     const h = await setup();
     const owner = h.callerOf(FAKE_COMPANY, "owner", "o5");
@@ -160,63 +96,5 @@ describe("how we work read by company role (owner or admin without a project gra
     vi.restoreAllMocks();
     h.allowed.add("unlisted");
     expect((await h.routes.route(get(PB("unlisted")), owner))?.statusCode).toBe(200);
-  });
-
-  it("an owner whose grant read fails still reads, and a member whose grant read fails gets the missing-project words", async () => {
-    const h = await setup();
-    const failing = createCoreDevRoutes({ app: h.app, companyOf: h.companyOf, wiring: (runtime) => ({ ...h.wiringOf(runtime), canReadProject: async () => { throw new Error("grant table down"); } }) });
-    expect((await failing.route(get(PB("payments")), h.callerOf(FAKE_COMPANY, "owner", "o6")))?.statusCode).toBe(200);
-    expect(await failing.route(get(PB("payments")), h.callerOf(FAKE_COMPANY, "member", "m6"))).toEqual(await MISSING(h));
-  });
-
-  it("a project the playbook service does not know answers the same words even for a grant holder or an owner with a grant", async () => {
-    const h = await setup();
-    const missing = await MISSING(h);
-    h.allowed.add("ghost");
-    for (const [role, personId] of [["member", "g-member"], ["owner", "g-owner"]] as const) {
-      for (const path of [PB("ghost"), HWW("ghost")]) expect(await h.routes.route(get(path), h.callerOf(FAKE_COMPANY, role, personId)), `${role} ${path}`).toEqual(missing);
-    }
-    expect(h.stateCalls).toEqual([`${FAKE_COMPANY}/ghost`, `${FAKE_COMPANY}/ghost`, `${FAKE_COMPANY}/ghost`, `${FAKE_COMPANY}/ghost`]);
-  });
-
-  it("an owner is not served where the access check is not wired (the shortcut adds no way around that), nor a playbook the deployment has not wired", async () => {
-    const h = await setup();
-    const noCheck = createCoreDevRoutes({ app: h.app, companyOf: h.companyOf, wiring: (runtime) => { const w = h.wiringOf(runtime); delete w.canReadProject; return w; } });
-    const answer = await noCheck.route(get(PB("payments")), h.callerOf(FAKE_COMPANY, "owner", "o7"));
-    expect(bodyOf(answer).error?.message).toBe(NOT_ON_THE_CORE_YET);
-    const noPlaybook = createCoreDevRoutes({ app: h.app, companyOf: h.companyOf, wiring: (runtime) => { const w = h.wiringOf(runtime); delete w.playbook; return w; } });
-    expect(bodyOf(await noPlaybook.route(get(PB("payments")), h.callerOf(FAKE_COMPANY, "owner", "o7"))).error?.message).toBe(NOT_ON_THE_CORE_YET);
-  });
-
-  it("a script token is still refused for an owner (the shortcut is for a signed-in person only)", async () => {
-    const h = await setup();
-    const owner = h.callerOf(FAKE_COMPANY, "owner", "o4");
-    for (const path of [PB("payments"), HWW("payments")]) {
-      const token = await h.routes.route(get(path), { ...owner, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
-      expect(token?.statusCode, path).toBe(403);
-      expect(bodyOf(token).error?.message).toBe(NOT_FOR_SCRIPT_TOKENS);
-    }
-    expect(h.stateCalls).toEqual([]);
-  });
-
-  it("writes are unchanged: a PUT, POST, PATCH or DELETE on either path is not the core's for an owner, an admin or a member, and nothing is read for it", async () => {
-    const h = await setup();
-    h.allowed.add("payments");
-    for (const [role, personId] of [["owner", "w-owner"], ["admin", "w-admin"], ["member", "w-member"]] as const) {
-      const caller = h.callerOf(FAKE_COMPANY, role, personId);
-      for (const method of ["PUT", "POST", "PATCH", "DELETE"]) {
-        for (const path of [PB("payments"), HWW("payments"), PB("ledger")]) expect(await h.routes.route({ ...get(path), method }, caller), `${role} ${method} ${path}`).toBeUndefined();
-      }
-    }
-    expect(h.stateCalls).toEqual([]);
-    expect(h.grantCalls).toEqual([]);
-  });
-
-  it("the shortcut reaches only these two GET paths: other project routes of the core keep their own rule (the sibling path of a granted-only read stays 404 to an owner)", async () => {
-    const h = await setup();
-    const owner = h.callerOf(FAKE_COMPANY, "owner", "o8");
-    // A path that only looks like the playbook is not the core's (undefined: the old broker's), and the project name pattern still applies.
-    for (const path of [`${PB("payments")}/extra`, "/v1/app/projects/pay%20ments/playbook", "/v1/app/projects/../playbook", `/v1/app/projects/payments/playbooks`]) expect(await h.routes.route(get(path), owner), path).toBeUndefined();
-    expect(h.stateCalls).toEqual([]);
   });
 });

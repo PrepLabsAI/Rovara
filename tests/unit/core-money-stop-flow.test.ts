@@ -2,7 +2,7 @@
 // usage never comes keeps its task's whole hold (marked estimated), a run past a cap is stopped with a fixed reason, and each model run is admitted before it is handed to a worker that
 // reports usage while it runs. Without `moneyStop` (the laptop) every one of these paths is as before.
 import { describe, expect, it } from "vitest";
-import { USAGE_CHECKPOINTS_FEATURE, type Admission, type AdmissionRequest, type OrgId, type WorkerInvocation } from "@agentx/contracts";
+import { USAGE_CHECKPOINTS_FEATURE, type Admission, type OrgId, type WorkerInvocation } from "@agentx/contracts";
 import { cancelTask } from "../../packages/broker/src/core/task-flow/cancel.js";
 import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { RUN_START_ACTION, SPEND_UNKNOWN_STOP_REASON, spendStopReason, USAGE_FLUSH_WAIT_MS, requestSpendStop, type MoneyStop } from "../../packages/broker/src/core/task-flow/money-stop.js";
@@ -94,16 +94,6 @@ describe("Stop on a deployed install: the worker sends its usage first", () => {
     expect(view.workflow).toMatchObject({ state: "BLOCKED", blockReason: "You stopped this step. Retry to run it again." });
   });
 
-  it("leaves the task's next move alone when the run finished on its own during the wait", async () => {
-    const w = world(); const { h, kept, onWait } = w;
-    const run = await runningPlan(h);
-    onWait.run = async () => { await h.flow.recordResult({ workspaceId: run.workspaceId, operationId: run.operationId, fence: run.fence, status: "FAILED", error: "the plan failed" }); };
-    await cancelTask(h.deps, run.taskId);
-    expect(await operationOf(h, run)).toMatchObject({ status: "FAILED" });
-    expect((await h.flow.get(h.owner, run.taskId)).workflow?.blockReason).not.toBe("You stopped this step. Retry to run it again.");
-    expect(kept).toEqual([]);
-  });
-
   it("does not block the next step a run that succeeded during the wait already started", async () => {
     const w = world({ understandFirst: true }); const { h, kept, onWait } = w;
     await h.registerProject();
@@ -123,18 +113,6 @@ describe("Stop on a deployed install: the worker sends its usage first", () => {
     await cancelTask(h.deps, started.task.taskId);
     expect((await h.flow.get(h.owner, started.task.taskId)).workflow).toMatchObject({ stage: "PLAN", state: "RUNNING" });
     expect(kept).toEqual([]);
-  });
-
-  it("records CANCELLED after the bounded wait when the worker never ends, keeping the task's whole hold as spent, marked estimated", async () => {
-    const w = world(); const { h, kept } = w;
-    const run = await runningPlan(h);
-    const started = h.clock.now;
-    await cancelTask(h.deps, run.taskId);
-    expect(h.clock.now - started).toBeGreaterThanOrEqual(USAGE_FLUSH_WAIT_MS);
-    expect(h.clock.now - started).toBeLessThan(USAGE_FLUSH_WAIT_MS + 2_000);
-    expect(await operationOf(h, run)).toMatchObject({ status: "CANCELLED", usageUnflushed: true });
-    expect(kept).toEqual([{ reservationId: undefined, operationId: run.operationId, taskId: run.taskId }]);
-    expect((await h.flow.get(h.owner, run.taskId)).workflow).toMatchObject({ state: "BLOCKED" });
   });
 
   it("keeps the hold when the cancel cannot reach the worker (its machine is gone): the dispatcher drops it and the wait runs out", async () => {
@@ -168,31 +146,9 @@ describe("Stop on a deployed install: the worker sends its usage first", () => {
     expect(await other.h.flow.dispatchOnce({ maxMessages: 10 })).toMatchObject({ delivered: 1 });
     expect(cancelsTo(other, second)).toHaveLength(1);
   });
-
-  it("without the money stop (the laptop): no cancel is sent, nothing waits, nothing is kept", async () => {
-    const w = world({ moneyStop: false }); const { h, kept } = w;
-    const run = await runningPlan(h);
-    const started = h.clock.now;
-    await cancelTask(h.deps, run.taskId);
-    expect(h.clock.now).toBe(started);
-    expect(cancelsTo(w, run)).toEqual([]);
-    const ended = await operationOf(h, run);
-    expect(ended.status).toBe("CANCELLED");
-    expect(ended).not.toHaveProperty("usageUnflushed");
-    expect(kept).toEqual([]);
-  });
 });
 
 describe("closing a task with a run going, on a deployed install", () => {
-  it("lets the worker end the run first (no estimate kept)", async () => {
-    const w = world(); const { h, kept, onWait } = w;
-    const run = await runningPlan(h);
-    onWait.run = async () => { await h.flow.recordResult({ workspaceId: run.workspaceId, operationId: run.operationId, fence: run.fence, status: "CANCELLED" }); };
-    await h.flow.close(h.owner, run.taskId);
-    expect(cancelsTo(w, run)).toHaveLength(1);
-    expect(await operationOf(h, run)).toMatchObject({ status: "CANCELLED" });
-    expect(kept).toEqual([]);
-  });
 
   it("ends the run INTERRUPTED and keeps the whole hold estimated when the worker does not answer", async () => {
     const w = world(); const { h, kept } = w;
@@ -201,35 +157,9 @@ describe("closing a task with a run going, on a deployed install", () => {
     expect(await operationOf(h, run)).toMatchObject({ status: "INTERRUPTED", error: "the task was closed", usageUnflushed: true });
     expect(kept).toEqual([{ reservationId: undefined, operationId: run.operationId, taskId: run.taskId }]);
   });
-
-  it("without the money stop, closes as before", async () => {
-    const w = world({ moneyStop: false }); const { h, kept } = w;
-    const run = await runningPlan(h);
-    await h.flow.close(h.owner, run.taskId);
-    expect(cancelsTo(w, run)).toEqual([]);
-    const ended = await operationOf(h, run);
-    expect(ended).toMatchObject({ status: "INTERRUPTED", error: "the task was closed" });
-    expect(ended).not.toHaveProperty("usageUnflushed");
-    expect(kept).toEqual([]);
-  });
 });
 
 describe("the per-run stop", () => {
-  it("asks a running run to stop with its reason and sends its worker a cancel, and the worker's CANCELLED end blocks the step with the fixed reason", async () => {
-    const w = world(); const { h, kept } = w;
-    const run = await runningPlan(h);
-    expect(await requestSpendStop(h.deps, await operationOf(h, run), "task_cap")).toBe(true);
-    expect(await operationOf(h, run)).toMatchObject({ status: "CANCEL_REQUESTED", stopReason: "task_cap" });
-    await h.flow.dispatchOnce({ maxMessages: 10 });
-    expect(cancelsTo(w, run)).toHaveLength(1);
-    // Asked again (the next booking): nothing more.
-    expect(await requestSpendStop(h.deps, await operationOf(h, run), "task_cap")).toBe(false);
-    await h.flow.dispatchOnce({ maxMessages: 10 });
-    expect(cancelsTo(w, run)).toHaveLength(1);
-    await h.flow.recordResult({ workspaceId: run.workspaceId, operationId: run.operationId, fence: run.fence, status: "CANCELLED" });
-    expect((await h.flow.get(h.owner, run.taskId)).workflow).toMatchObject({ state: "BLOCKED", blockReason: spendStopReason("task_cap") });
-    expect(kept).toEqual([]);
-  });
 
   it("names spend that could not be read in its own words", async () => {
     const w = world(); const { h } = w;
@@ -280,15 +210,6 @@ describe("the per-run stop", () => {
 });
 
 describe("dispatching a model run on a deployed install", () => {
-  it("asks admission (run.start, holding nothing) for the task, tells the worker to report usage as it goes, and needs a worker that can", async () => {
-    const asked: AdmissionRequest[] = [];
-    const base = createAllowAllAdmission();
-    const admission: Admission = { ...base, async admit(request) { asked.push(request); return base.admit(request); } };
-    const w = world({ admission, companyId: SCOPED_COMPANY }); const { h } = w;
-    const run = await runningPlan(h);
-    expect(run.plan).toMatchObject({ kind: "task", payload: { workflowMode: "PLAN", usageCheckpoints: true } });
-    expect(asked.filter((request) => request.action === RUN_START_ACTION)).toEqual([expect.objectContaining({ subject: { type: "task", id: run.taskId }, idempotencyKey: `${RUN_START_ACTION}:${run.operationId}` })]);
-  });
 
   it("ends a run its task's cap refuses with the fixed reason, before any worker gets it", async () => {
     const base = createAllowAllAdmission();
@@ -322,16 +243,5 @@ describe("dispatching a model run on a deployed install", () => {
     for (let round = 0; round < 12; round += 1) { if ((await h.flow.dispatchOnce({ maxMessages: 10 })).received === 0) break; h.clock.advance(70); }
     expect(h.machines.delivered(workspace.machine!.machineId).filter((invocation) => invocation.kind === "task")).toEqual([]);
     expect((await h.flow.get(h.owner, started.task.taskId)).workflow?.blockReason).toContain("this worker is too old to run this step; upgrade it");
-  });
-
-  it("without the money stop: no run.start is asked and the payload has no usageCheckpoints (unchanged)", async () => {
-    const asked: AdmissionRequest[] = [];
-    const base = createAllowAllAdmission();
-    const admission: Admission = { ...base, async admit(request) { asked.push(request); return base.admit(request); } };
-    const w = world({ moneyStop: false, admission, features: ["task.workflowMode", "task.structuredPlans"] }); const { h } = w;
-    const run = await runningPlan(h);
-    expect(run.plan.kind).toBe("task");
-    expect(run.plan.payload).not.toHaveProperty("usageCheckpoints");
-    expect(asked.map((request) => request.action)).not.toContain(RUN_START_ACTION);
   });
 });

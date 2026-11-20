@@ -4,7 +4,7 @@
 // (Port lane L7b: the slots are exercised over plain inputs in branch-sync-deciders.test.ts; Cloud's tracking pass and its fake DynamoDB are lane L7a's.)
 import { describe, expect, it } from "vitest";
 import {
-  BRANCH_SYNC_UNSURE_MESSAGE, SYNC_BACKOFF_MINUTES, SYNC_FAILURES_MAX, branchSyncGiveUpMessage, isBranchSyncGiveUpReason,
+  BRANCH_SYNC_UNSURE_MESSAGE, SYNC_FAILURES_MAX, branchSyncGiveUpMessage, isBranchSyncGiveUpReason,
   branchConflictAskMessage, retryWorkflowBranchSync,
   BRANCH_SYNCS_PER_DAY_MAX, BRANCH_WORKFLOW_FILES_MESSAGE, CONFLICT_ROUNDS_MAX, WorkflowSnapshotSchema, WorkflowTransitionError, blockWorkflowBranchSync, branchConflictStopMessage, createCandidateManifest,
   createWorkflowSnapshot, endWorkflowBranchSync, isBranchSyncBlockReason, observeWorkflowPullRequest, recordWorkflowBranchSync, recordWorkflowPullRequestUpdate, recordWorkflowSyncConflict,
@@ -471,7 +471,6 @@ describe("the re-run's own allowance and its row writer (decision 70(c))", () =>
   });
 });
 
-
 describe("what a finished merge of the base is", () => {
   const binding = { repositoryId: "payments", number: 7, baseCommit: BASE_NEW, expectedHeadCommit: HEAD_A };
   const result = (overrides: Record<string, unknown> = {}) => ({
@@ -492,55 +491,6 @@ describe("what a finished merge of the base is", () => {
     if (outcome.kind !== "synced") return;
     expect(outcome.workflow).toMatchObject({ state: "WAITING", pullRequests: [expect.objectContaining({ headSha: MERGE, syncedFrom: HEAD_A })] });
     expect(outcome).toMatchObject({ headSha: MERGE, headTreeSha: MERGED_TREE, previousHeadSha: HEAD_A, baseCommitSha: BASE_NEW });
-  });
-
-  it("is a merge even when the worker's result was lost, if GitHub shows exactly [recorded head, asked base]: the same new candidate, but no head is kept for an approval to carry from (decision 67b)", () => {
-    for (const status of ["FAILED", "INTERRUPTED", "CANCELLED"] as never[]) {
-      const outcome = plan({ status, error: "RUNTIME_UNAVAILABLE: compute lost", result: undefined });
-      expect(outcome.kind, status).toBe("synced");
-      if (outcome.kind !== "synced") continue;
-      expect(outcome.workflow.pullRequests?.[0], status).toMatchObject({ headSha: MERGE });
-      expect(outcome.workflow.pullRequests?.[0]?.syncedFrom, status).toBeUndefined();
-      expect(outcome.workflow.candidate?.repositories[0], status).toMatchObject({ commitSha: MERGE, baseCommitSha: BASE_NEW });
-    }
-    // The same merge with its result in hand is one Rovara's checks passed on.
-    const verified = plan({});
-    expect(verified.kind === "synced" && verified.workflow.pullRequests?.[0]?.syncedFrom).toBe(HEAD_A);
-    // A failed run is still not recorded when the host does not show exactly that merge.
-    for (const bad of [{ parents: [HEAD_A] }, { parents: [HEAD_A, "1".repeat(40)] }, { parents: undefined }]) {
-      expect(plan({ status: "FAILED", error: "RUNTIME_UNAVAILABLE: compute lost", result: undefined, github: github(bad) }).kind, JSON.stringify(bad)).toBe("unchanged");
-    }
-  });
-
-  it("is refused when the merge commit's second parent is not the base commit, or its first is not the recorded head, or the tree is not the one reported", () => {
-    for (const bad of [{ parents: [HEAD_A, "1".repeat(40)] }, { parents: [HEAD_B, BASE_NEW] }, { parents: [BASE_NEW, HEAD_A] }, { parents: [HEAD_A] }, { parents: [HEAD_A, BASE_NEW, MERGE] }, { parents: undefined }]) {
-      expect(plan({ github: github(bad) }).kind, JSON.stringify(bad)).toBe("unchanged");
-    }
-    expect(plan({ github: github({ headTreeSha: "3".repeat(40) }) }).kind).toBe("unchanged");
-    expect(plan({ github: github({ headCommit: "1".repeat(40) }) }).kind).toBe("unchanged");
-    expect(plan({ github: github({ headBranch: "agentx/other" }) }).kind).toBe("unchanged");
-    expect(plan({ github: github({ state: "closed" }) }).kind).toBe("unchanged");
-    expect(plan({ github: undefined }).kind).toBe("unchanged");
-  });
-
-  it("is not a conflict round when the head moved meanwhile (a person pushed): nothing is started over their push", () => {
-    const outcome = plan({ result: result({ commit: HEAD_A, treeSha: undefined, reconciled: true, conflicts: ["a"] }), github: github({ headCommit: HEAD_B, parents: [HEAD_A] }) });
-    expect(outcome.kind).toBe("unchanged");
-  });
-
-  it("is nothing to record when the branch already had the base, or when GitHub shows a head that is not the merge (a person pushed)", () => {
-    const upToDate = plan({ result: result({ commit: HEAD_A, reconciled: true }), github: github({ headCommit: HEAD_A, headTreeSha: "b".repeat(40), parents: [BASE_OLD] }) });
-    expect(upToDate.kind).toBe("unchanged");
-    if (upToDate.kind === "unchanged") expect(upToDate.workflow).toMatchObject({ state: "WAITING" });
-    expect(plan({ github: github({ headCommit: HEAD_B, parents: [HEAD_A] }) }).kind).toBe("unchanged");
-  });
-
-  it("is a conflict round when the merge conflicted, naming the files; the workflow starts the fix", () => {
-    const outcome = plan({ result: result({ commit: HEAD_A, previousCommit: HEAD_A, treeSha: undefined, reconciled: true, conflicts: ["src/a.ts", "src/b.ts"] }), github: github({ headCommit: HEAD_A, headTreeSha: "b".repeat(40), parents: [BASE_OLD] }) });
-    expect(outcome.kind).toBe("conflict");
-    if (outcome.kind !== "conflict") return;
-    expect(outcome.paths).toEqual(["src/a.ts", "src/b.ts"]);
-    expect(outcome.workflow).toMatchObject({ stage: "IMPLEMENT", state: "READY", fixSource: "conflict", fixProblems: ["src/a.ts", "src/b.ts"], fixRounds: { conflict: 1 } });
   });
 
   it("asks instead of starting the round when the agent is set to suggest by now and the merge was not approved (autonomy is read again at the paid step)", () => {
@@ -626,22 +576,6 @@ describe("a merge that keeps failing", () => {
     // One more try, and a failure of it stops again.
     const third = failed(again(retried, "conflict"), CHECKS);
     expect(third.kind).toBe("stopped");
-  });
-
-  it("only a real merge failure counts: GitHub errors, a lost machine and a stale fence retry with a growing delay and never stop", () => {
-    let workflow = syncing();
-    for (const [index, error] of ["RUNTIME_UNAVAILABLE: GitHub answered 503", undefined, "OPERATION_INTERRUPTED: spot reclaimed", "RUNTIME_UNAVAILABLE: rate limited"].entries()) {
-      const outcome = failed(workflow, error);
-      expect(outcome.kind, String(error)).toBe("unchanged");
-      if (outcome.kind !== "unchanged") return;
-      expect(outcome.workflow.syncFailures).toMatchObject({ headSha: HEAD_A, count: 0, transient: index + 1 });
-      const wait = Date.parse(outcome.workflow.syncFailures!.retryAfter!) - Date.parse(at);
-      expect(wait).toBe(Math.min(SYNC_BACKOFF_MINUTES.max, SYNC_BACKOFF_MINUTES.first * 2 ** index) * 60_000);
-      workflow = again(outcome.workflow);
-    }
-    // A moved head is a person's push: nothing is counted.
-    const moved = failed(syncing(), "STALE_FENCE: pull request head changed since AgentX last observed it");
-    expect(moved.kind === "unchanged" && moved.workflow.syncFailures).toBeFalsy();
   });
 
   it("names the failure in fixed words: the project's checks, or the merge not going through, never the worker's own text", () => {

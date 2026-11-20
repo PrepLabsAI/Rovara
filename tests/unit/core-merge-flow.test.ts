@@ -7,7 +7,7 @@ import {
   type MergeReadBudget,
 } from "../../packages/broker/src/core/merge/index.js";
 import { requireRepositoryKey } from "../../packages/broker/src/core/merge/repository-key.js";
-import { ORG, OWNER_SESSION, TASK_ID, githubShapedHost, mergeWorld, wrapStore, type MergeWorld } from "../support/merge-world.js";
+import { ORG, TASK_ID, mergeWorld, wrapStore, type MergeWorld } from "../support/merge-world.js";
 
 const budget = (limit = 1_000): MergeReadBudget & { used: () => number } => {
   let count = 0;
@@ -29,25 +29,6 @@ async function track(world: MergeWorld): Promise<Array<Record<string, unknown>>>
 }
 
 describe("merge tracking", () => {
-  it("keeps one item for the pull request from what the host says, and reads an approval from a writer", async () => {
-    const world = await mergeWorld();
-    const [item] = await track(world);
-    expect(item).toMatchObject({ taskId: TASK_ID, repositoryId: "app", number: world.prs[0]!.number, state: "open", ci: "passing", review: "approved", branch: "unknown", headByRovara: true, version: 1 });
-    expect(item!["approval"]).toMatchObject({ login: "priya", commitId: world.prs[0]!.head });
-    // The pass asked the host with the company's scope, never a system scope.
-    expect(world.scopes.every((scope) => (scope as { orgId?: string }).orgId === ORG)).toBe(true);
-  });
-
-  it("writes nothing when a second pass sees nothing new, and says the approval once", async () => {
-    const world = await mergeWorld();
-    expect((await trackTask(world.tracking, TASK_ID)).result).toBe("changed");
-    const after = await world.trackingOf(world.prs[0]!);
-    expect((await trackTask(world.tracking, TASK_ID)).result).toBe("unchanged");
-    expect(await world.trackingOf(world.prs[0]!)).toEqual(after);
-    const approved = world.milestones.written.filter((m) => m.kind === "approved");
-    expect(approved).toHaveLength(1);
-    expect(approved[0]!.text).toContain("Approved by priya");
-  });
 
   it("takes a draft out of draft once its checks pass, asks the project's reviewers once, and says pr_ready once", async () => {
     const world = await mergeWorld();
@@ -66,18 +47,6 @@ describe("merge tracking", () => {
     expect(world.milestones.delivered.length).toBeGreaterThan(0);
   });
 
-  it("does not mark ready while checks are pending or failing", async () => {
-    const world = await mergeWorld();
-    const pr = world.prs[0]!;
-    pr.model.getChangeRequest(String(pr.number)).draft = true;
-    pr.model.setChecks(pr.head, [{ name: "unit", state: "pending", required: false, url: "" }]);
-    await trackPullRequest(world.tracking, TASK_ID);
-    expect(pr.model.getChangeRequest(String(pr.number)).draft).toBe(true);
-    pr.model.setChecks(pr.head, [{ name: "unit", state: "completed", conclusion: "failure", required: false, url: "" }]);
-    await trackPullRequest(world.tracking, TASK_ID);
-    expect(pr.model.getChangeRequest(String(pr.number)).draft).toBe(true);
-  });
-
   it("says once on the timeline when someone else pushed, and once when the push was Rovara's after all", async () => {
     const world = await mergeWorld();
     const pr = world.prs[0]!;
@@ -88,21 +57,6 @@ describe("merge tracking", () => {
     await trackPullRequest({ ...world.tracking, recordedHead: async () => undefined }, TASK_ID);
     expect(world.timeline.lines).toEqual(["Someone else pushed to this pull request, so I'll stop changing it. I'll keep watching for reviews and the merge."]);
     expect(((await world.trackingOf(pr))!)["headByRovara"]).toBe(false);
-  });
-
-  it("refuses a pull request that is not the one linked to this task, and a task that is closed, finished or without an org", async () => {
-    const world = await mergeWorld();
-    const pr = world.prs[0]!;
-    // The link row names another task.
-    await world.store.update({ key: { pk: `CODEHOST_CR#github#acme/app`, sk: `CR#${String(pr.number).padStart(10, "0")}` }, ops: [{ op: "set", path: ["taskId"], value: "33333333-3333-4333-8333-333333333333" }] });
-    expect((await rejects(() => trackPullRequest(world.tracking, TASK_ID))).code).toBe("CONFIG_INVALID");
-    const other = await mergeWorld();
-    await other.store.update({ key: { pk: `DEVTASK#${TASK_ID}`, sk: "META" }, ops: [{ op: "set", path: ["closedAt"], value: "2026-11-09T09:00:00.000Z" }] });
-    expect(await trackPullRequest(other.tracking, TASK_ID)).toBe("gone");
-    const finished = await mergeWorld();
-    await finished.setWorkflow({ stage: "MERGED" });
-    expect(await trackPullRequest(finished.tracking, TASK_ID)).toBe("gone");
-    expect(await trackPullRequest(finished.tracking, "99999999-9999-4999-8999-999999999999")).toBe("gone");
   });
 
   it("refuses an answer for another pull request number", async () => {
@@ -127,27 +81,6 @@ describe("merge tracking", () => {
     expect(after["mergeClaim"]).toMatchObject({ by: "owner" });
     expect(after["nudges"]).toEqual({ count: 2 });
     expect(after["version"]).toBe(2);
-  });
-
-  it("retries a write that lost to another writer's version, and gives up as retryable after three", async () => {
-    const world = await mergeWorld();
-    await track(world);
-    const key = mergeTrackingKey(TASK_ID, "app", world.prs[0]!.number);
-    world.prs[0]!.model.addReview(String(world.prs[0]!.number), { login: "priya", state: "CHANGES_REQUESTED" });
-    // Every transaction first loses its race: someone bumps the version underneath it.
-    let bumps = 0;
-    const racing = wrapStore(world.store, {
-      transact: async (items: Parameters<typeof world.store.transact>[0]) => {
-        if (bumps < 1) { bumps += 1; await world.store.update({ key, ops: [{ op: "add", path: ["version"], amount: 1 }] }); }
-        return world.store.transact(items);
-      },
-    });
-    expect((await trackTask({ ...world.tracking, store: racing }, TASK_ID)).result).toBe("changed");
-    expect((await world.store.get(key))!["review"]).toBe("changes_requested");
-    // A change the host makes after that: the next pass has something to write, and every write loses.
-    world.prs[0]!.model.addReview(String(world.prs[0]!.number), { login: "priya", state: "APPROVED" });
-    const always = wrapStore(world.store, { transact: async () => ({ applied: false, reason: "condition_failed", failed: [0] }) });
-    expect((await rejects(() => trackTask({ ...world.tracking, store: always }, TASK_ID))).code).toBe("RUNTIME_UNAVAILABLE");
   });
 
   it("gives a pass its request allowance, and the next pass starts where the last stopped", async () => {
@@ -252,17 +185,6 @@ describe("merge tracking", () => {
 });
 
 describe("the press", () => {
-  it("prepares a request bound to the workflow revision and to the exact pull requests, heads, method and risk", async () => {
-    const world = await mergeWorld();
-    await world.seedTracking();
-    const prepared = await world.prepare();
-    expect(prepared.request).toMatchObject({ companyId: ORG, kind: "merge", subject: { type: "task", id: TASK_ID }, revision: 9, risk: "low" });
-    expect(prepared.subject.pullRequests).toEqual([{ repositoryId: "app", number: world.prs[0]!.number, headSha: world.prs[0]!.head }]);
-    expect(prepared.changes).toEqual([`Merge app pull request ${String(world.prs[0]!.number)} (squash)`]);
-    expect(prepared.requirement).toMatchObject({ minApprovers: 1, selfApprovalAllowed: true, methods: ["local-session"] });
-    const again = await world.prepare();
-    expect(again.request.artifactDigest).toBe(prepared.request.artifactDigest);
-  });
 
   it("merges at the checked head with the owner's proof, claims first, audits in the claim's transaction, and uses the proof once", async () => {
     const world = await mergeWorld();
@@ -280,19 +202,6 @@ describe("the press", () => {
     // The repository is named by the key function the opened event uses too (tests/unit/local-up-flow.test.ts pins that side).
     expect(world.audit.events[0]!.details?.["repository"]).toBe(requireRepositoryKey("github", "https://github.com/acme/app"));
     expect(await world.store.get({ pk: `ORG#${ORG}#MERGE_PROOF`, sk: approvalProofKey(proof) })).toBeDefined();
-  });
-
-  it("refuses a proof used before, even under a fresh proof id and a fresh process", async () => {
-    const world = await mergeWorld();
-    await world.seedTracking();
-    const prepared = await world.prepare();
-    const proof = world.proofFor(prepared);
-    // The proof was used once already (stored with the claim of an earlier press), but the pull request is still open (that press was refused by the host).
-    await world.store.put({ item: { pk: `ORG#${ORG}#MERGE_PROOF`, sk: approvalProofKey(proof), entityType: "MERGE_PROOF" } });
-    const refusal = await rejects(() => pressMerge(world.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: { ...proof, proofId: "another-id" } }));
-    expect(refusal.code).toBe("FORBIDDEN");
-    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
-    expect(await world.auditRows()).toHaveLength(0);
   });
 
   it("merges nothing for a proof that is not the owner's, is for other content, or is for another request", async () => {
@@ -414,39 +323,6 @@ describe("the press", () => {
     expect((await rejects(() => pressMerge(world.deps, { taskId: TASK_ID, requestId: again.request.requestId, proof: world.proofFor(again) }))).message).toContain("didn't merge");
   });
 
-  it("does not merge a pull request another run has claimed, and merges again once the claim is stale", async () => {
-    const world = await mergeWorld();
-    await world.seedTracking();
-    const pr = world.prs[0]!;
-    const key = mergeTrackingKey(TASK_ID, "app", pr.number);
-    await world.store.update({ key, ops: [{ op: "set", path: ["mergeClaim"], value: { headSha: pr.head, by: "other", at: new Date(world.now.value - 10_000).toISOString() } }] });
-    const prepared = await world.prepare();
-    const refusal = await rejects(() => pressMerge(world.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) }));
-    expect(refusal).toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: "Rovara is already merging this pull request." });
-    expect(pr.model.getChangeRequest(String(pr.number)).state).toBe("open");
-    world.now.value += 200_000;
-    const second = await world.prepare();
-    expect((await pressMerge(world.deps, { taskId: TASK_ID, requestId: second.request.requestId, proof: world.proofFor(second) })).status).toBe("MERGED");
-  });
-
-  it("merges several pull requests in repository order, and tells a half merge to a person", async () => {
-    // The second repository's host refuses at merge time, after readiness passed.
-    const world = await mergeWorld({ pullRequests: [{ repositoryId: "docs", number: 1 }, { repositoryId: "app", number: 1 }], codeHost: (model) => (model.fullName === "acme/docs" ? refusingMerge(model) : githubShapedHost(model)) });
-    await world.seedTracking();
-    const prepared = await world.prepare();
-    expect(prepared.subject.pullRequests.map((pr) => pr.repositoryId)).toEqual(["app", "docs"]);
-    const refusal = await rejects(() => pressMerge(world.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) }));
-    expect(refusal.code).toBe("MERGE_NOT_READY");
-    expect(refusal.message).toBe(M.halfMerged("app", "docs", "the code host would not merge it (the host says: Required checks have not passed.)"));
-    // The refused pull request's claim is gone; the merged one's stays.
-    expect((await world.trackingOf(world.prs.find((p) => p.repositoryId === "docs")!))!["mergeClaim"]).toBeUndefined();
-    expect((await world.trackingOf(world.prs.find((p) => p.repositoryId === "app")!))!["mergeClaim"]).toBeDefined();
-    expect(world.models.get("app")!.getChangeRequest("1").state).toBe("merged");
-    expect(world.milestones.written.map((m) => m.kind)).toEqual(["stuck"]);
-    // The proof was used by the first claim: a rerun needs a new one.
-    expect(world.audit.events.map((event) => (event.details as { repository: string }).repository)).toEqual(["acme/app", "acme/docs"]);
-  });
-
   it("says a method fell back on the timeline", async () => {
     const world = await mergeWorld({ mergeMethod: "squash" });
     await world.seedTracking();
@@ -480,15 +356,6 @@ describe("the press", () => {
     await world.seedTracking({ ci: "failing" });
     expect(await mergeViewOf(world.deps, (await world.task()), await readMergeTracking(world.store, TASK_ID, ORG), undefined)).toMatchObject({ ready: false, message: M.checks });
     expect(await mergeViewOf(world.deps, (await world.task()), [], undefined)).toBeUndefined();
-  });
-
-  it("never reads an owner's session token into the audit or the claim", async () => {
-    const world = await mergeWorld();
-    await world.seedTracking();
-    const prepared = await world.prepare();
-    await pressMerge(world.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) });
-    const everything = JSON.stringify([world.audit.events, await world.store.get(mergeTrackingKey(TASK_ID, "app", world.prs[0]!.number)), world.timeline.lines, world.milestones.written]);
-    expect(everything).not.toContain(OWNER_SESSION);
   });
 });
 

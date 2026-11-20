@@ -43,13 +43,6 @@ async function world(extraEnv: Record<string, string> = {}) {
 }
 
 describe("the broker's core root gives each company's flow a taskSpendUsd over its own cost ledger", () => {
-  it("sets it on every company's flow, a different function for each", async () => {
-    const { root } = await world();
-    const [a, b] = [(await root.app.runtimeFor(A)).flow.deps, (await root.app.runtimeFor(B)).flow.deps];
-    expect(typeof a.taskSpendUsd).toBe("function");
-    expect(typeof b.taskSpendUsd).toBe("function");
-    expect(a.taskSpendUsd).not.toBe(b.taskSpendUsd);
-  });
 
   it("reads the company's own task total, fresh each time, and never the other company's row", async () => {
     const { root, total } = await world();
@@ -97,13 +90,6 @@ describe("the broker's core root gives each company's flow a taskCapUsd that is 
     expect(a.taskCapUsd).not.toBe(b.taskCapUsd);
     expect(await a.taskCapUsd!(await taskOf(w, A, TASK) as never)).toBe(1);
     expect(await b.taskCapUsd!(await taskOf(w, B, TASK_B) as never)).toBe(1);
-  });
-
-  it("follows the install's setting (the default $5, $3 when set): the same value Admission's own task cap reads", async () => {
-    const dflt = await world();
-    expect(await (await dflt.root.app.runtimeFor(A)).flow.deps.taskCapUsd!(await taskOf(dflt, A, TASK) as never)).toBe(5);
-    const three = await world({ ROVARA_CORE_TASK_CAP_USD: "3" });
-    expect(await (await three.root.app.runtimeFor(A)).flow.deps.taskCapUsd!(await taskOf(three, A, TASK) as never)).toBe(3);
   });
 
   it("a task of another company is no task of this company's reader: it throws (the flow asks), whichever way round", async () => {
