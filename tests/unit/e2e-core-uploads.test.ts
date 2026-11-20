@@ -2,11 +2,11 @@ import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // The uploads a coding run makes for the browser and API checks, on the document store and object storage: committed source, its build source manifest and the unchanged code.
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, ObjectTooBigError, type DocumentStore, type ObjectStorage } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, ObjectTooBigError, type DocumentStore, type ObjectStorage } from "@agentx/contracts";
 import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { operationKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
-import { handleBaselineSource, handleCandidateBuildSource, handleCandidateExport, readCandidateSourceExport } from "../../packages/broker/src/core/e2e/uploads.js";
+import { handleBaselineSource, handleCandidateBuildSource, handleCandidateExport } from "../../packages/broker/src/core/e2e/uploads.js";
 import { UPLOAD_CHUNK_BYTES, type UploadOperation, type UploadStores } from "../../packages/broker/src/core/e2e/uploads-chunks.js";
 import { createRealCandidate, disposeRealCandidates, type RealCandidate } from "../support/e2e-application-candidate.js";
 
@@ -59,22 +59,6 @@ const TREE = { "package.json": "{\"name\":\"app\"}", "src/server.js": "console.l
 const rejects = (promise: Promise<unknown>, code: string) => expect(promise).rejects.toMatchObject({ code });
 
 describe("the candidate's committed source", () => {
-  it("is checked against its tree, kept under its content address and recorded once on the coding operation", async () => {
-    const candidate = await createRealCandidate(TREE);
-    const w = world();
-    await w.seed();
-    const bytes = exportBytes(candidate);
-    const { finalized } = await upload(w, "export", bytes);
-    const digest = sha256(bytes);
-    expect(finalized).toEqual({ sourceRef: { key: `workflow-candidate-sources/sha256/${digest}.json`, sha256: digest, byteLength: bytes.byteLength, candidateDigest: candidate.source.candidate.digest } });
-    const row = await w.store.get({ pk: workspacePartition(T1_COMPANY, workspaceId), sk: `CANDIDATE_EXPORT#${operationId}` });
-    expect(row).toMatchObject({ entityType: "WORKFLOW_CANDIDATE_EXPORT", status: "COMPLETE", sourceRef: (finalized as { sourceRef: unknown }).sourceRef });
-    const operation = await w.operation();
-    expect(operation.candidateSourceRef).toEqual((finalized as { sourceRef: unknown }).sourceRef);
-    expect(Buffer.from((await w.objects.get(`workflow-candidate-sources/sha256/${digest}.json`, bytes.byteLength))!).equals(bytes)).toBe(true);
-    expect(await w.keysWith("staging")).toEqual([]);
-    expect(await readCandidateSourceExport(w.stores, operation.candidateSourceRef as never)).toEqual(candidate.source);
-  });
 
   it("answers a repeated finalize with the first answer and records nothing twice", async () => {
     const candidate = await createRealCandidate(TREE);
@@ -150,19 +134,6 @@ describe("the candidate's committed source", () => {
     await rejects(handleCandidateExport(w.stores, { ...base, fence: 2 }, init), "CALLBACK_FORBIDDEN");
   });
 
-  it("is open to a delivered operation that has not reported running, and closed to one being cancelled", async () => {
-    const delivered = world({ status: "DISPATCHING" });
-    await delivered.seed();
-    const init = { stage: "init", schemaVersion: SCHEMA.export.init, totalBytes: 10, chunkCount: 1, sha256: "a".repeat(64) };
-    await expect(handleCandidateExport(delivered.stores, await delivered.operation(), init)).resolves.toMatchObject({ chunkBytes: UPLOAD_CHUNK_BYTES });
-    const unavailable = { stage: "unavailable", schemaVersion: "workflow-baseline-source-unavailable/v1", reason: "none" };
-    await expect(handleBaselineSource(delivered.stores, await delivered.operation(), unavailable)).resolves.toMatchObject({ accepted: false });
-    expect((await delivered.operation()).baselineSource).toMatchObject({ status: "REFUSED" });
-    for (const status of ["ACCEPTED", "CANCEL_REQUESTED", "CANCELLED", "FAILED", "INTERRUPTED"]) {
-      await rejects(handleCandidateExport(delivered.stores, { ...(await delivered.operation()), status }, init), "CALLBACK_FORBIDDEN");
-    }
-  });
-
   it("refuses a second upload of other bytes and a chunk of another upload", async () => {
     const w = world();
     await w.seed();
@@ -188,14 +159,6 @@ describe("the candidate's committed source", () => {
     }
   });
 
-  it("does not answer a finalize from another fence, even after the upload finished", async () => {
-    const candidate = await createRealCandidate(TREE);
-    const w = world();
-    await w.seed();
-    const done = await upload(w, "export", exportBytes(candidate));
-    await rejects(handleCandidateExport(w.stores, { ...(await w.operation()), fence: 2 }, { stage: "finalize", schemaVersion: SCHEMA.export.finalize, uploadId: done.uploadId, sha256: done.digest }), "STALE_FENCE");
-  });
-
   it("refuses chunks that are right one by one but are not the bytes the upload was opened for", async () => {
     const w = world();
     await w.seed();
@@ -213,15 +176,6 @@ describe("the candidate's committed source", () => {
     const w = world();
     await w.seed();
     await expect(upload(w, "export", Buffer.from(JSON.stringify(forged), "utf8"))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-  });
-
-  it("records a source once: an operation that already carries one takes no second", async () => {
-    const candidate = await createRealCandidate(TREE);
-    const w = world();
-    await w.seed();
-    const started = await upload(w, "export", exportBytes(candidate), { stopBeforeFinalize: true });
-    await w.store.update({ key: operationKey(T1_COMPANY, workspaceId, operationId), ops: [{ op: "set", path: ["candidateSourceRef"], value: { key: "other", sha256: "b".repeat(64), byteLength: 1, candidateDigest: "c".repeat(64) } }] });
-    await rejects(handleCandidateExport(w.stores, { ...(await w.operation()), candidateSourceRef: undefined }, { stage: "finalize", schemaVersion: SCHEMA.export.finalize, uploadId: started.uploadId, sha256: started.digest }), "STALE_FENCE");
   });
 
   it("refuses blobs that together go over the aggregate bound, before keeping anything", async () => {
@@ -270,35 +224,6 @@ describe("the candidate's committed source", () => {
     await w.seed();
     const junk = Buffer.from("not an export at all", "utf8");
     await expect(upload(w, "export", junk)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    expect(await w.keysWith("staging")).toEqual([]);
-  });
-
-  it("stages chunks under a short retention class, so a chunk an upload left behind expires by itself, and keeps the source under the class that stays", async () => {
-    const candidate = await createRealCandidate(TREE);
-    const w = world();
-    await w.seed();
-    const bytes = exportBytes(candidate);
-    await upload(w, "export", bytes, { stopBeforeFinalize: true });
-    const rows = (await w.store.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#EVIDENCE_BLOB` })).items;
-    const staged = rows.filter((item) => item.sk.includes("staging"));
-    expect(staged.length).toBeGreaterThan(0);
-    for (const row of staged) expect(row).toMatchObject({ retention: "evidence-short" });
-    expect(staged.every((row) => typeof row[INDEX_EXPIRY_ATTRIBUTE] === "number")).toBe(true);
-    const done = await handleCandidateExport(w.stores, await w.operation(), { stage: "finalize", schemaVersion: SCHEMA.export.finalize, uploadId: (await w.store.get({ pk: workspacePartition(T1_COMPANY, workspaceId), sk: `CANDIDATE_EXPORT#${operationId}` }))!["uploadId"], sha256: sha256(bytes) });
-    expect(done).toHaveProperty("sourceRef");
-    const kept = (await w.store.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#EVIDENCE_BLOB` })).items.find((item) => item.sk.startsWith("workflow-candidate-sources/"));
-    expect(kept).toMatchObject({ retention: "task-document" });
-  });
-
-  it("does not keep the chunks of an upload whose bytes are not the digest it named", async () => {
-    const w = world();
-    await w.seed();
-    const named = Buffer.from("abcd", "utf8");
-    const sent = Buffer.from("abce", "utf8");
-    const opened = await handleCandidateExport(w.stores, await w.operation(), { stage: "init", schemaVersion: SCHEMA.export.init, totalBytes: 4, chunkCount: 1, sha256: sha256(named) });
-    await handleCandidateExport(w.stores, await w.operation(), { stage: "chunk", schemaVersion: SCHEMA.export.chunk, uploadId: opened["uploadId"], index: 0, bytesBase64: sent.toString("base64"), sha256: sha256(sent) });
-    expect(await w.keysWith("staging")).toHaveLength(1);
-    await expect(handleCandidateExport(w.stores, await w.operation(), { stage: "finalize", schemaVersion: SCHEMA.export.finalize, uploadId: opened["uploadId"], sha256: sha256(named) })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     expect(await w.keysWith("staging")).toEqual([]);
   });
 

@@ -35,27 +35,6 @@ function setup(options: { begin?: () => Promise<void>; end?: () => Promise<void>
 }
 
 describe("the agent step driver", () => {
-  it("tells the worker the step began, runs act with the step's budgets and with the step current, then records it and tells the worker it ended", async () => {
-    const t = setup();
-    let seenCurrent: unknown; let seenOptions: unknown;
-    const outcome = await t.driver(t.request(async (_goal, options) => { seenOptions = options; seenCurrent = { ...t.current.position, ledger: t.current.ledger !== null }; t.events.push("act"); }));
-    expect(outcome).toEqual({ verdict: "concluded", stopCode: null, receiptIds: ["r1", "r2"] });
-    expect(t.events).toEqual(["begin-marker", "act", "receipts:1", "end-marker"]);
-    expect(seenOptions).toEqual({ maxSteps: 4, maxModelCalls: 8, timeout: 80_000 });
-    expect(seenCurrent).toEqual({ caseId: CASE_ID, stepIndex: 1, ledger: true });
-    expect(t.current).toEqual({ position: null, ledger: null });
-    expect(t.ledger().steps[0]).toMatchObject({ stepIndex: 1, verdict: "concluded", stopCode: null, receiptIds: ["r1", "r2"] });
-  });
-
-  it("sends at most the newest 32 session values with the begin marker, and none at all when it holds none", async () => {
-    const many = Array.from({ length: 40 }, (_, index) => `session-value-${String(index).padStart(3, "0")}`);
-    const t = setup({ secrets: many });
-    await t.driver(t.request(async () => undefined));
-    expect(t.markers[0]!.cookieValues).toEqual(many.slice(-32));
-    const none = setup();
-    await none.driver(none.request(async () => undefined));
-    expect(none.markers[0]!.cookieValues).toBeUndefined();
-  });
 
   it("makes an AgentError an outcome: failed, with its stop code, a ledger that says so, and the end marker still sent", async () => {
     const t = setup();

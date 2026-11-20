@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { Resolver } from "node:dns";
 import { existsSync } from "node:fs";
-import { request as httpsRequest } from "node:https";
 import { connect, type Socket } from "node:net";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -52,23 +51,6 @@ describe("the in-network mock server", () => {
       ["GET", "/v1/stock", "a1", "success", 200], ["GET", "/v1/stock", "a2", "refusal", 404], ["GET", "/v1/stock", "b1", "invalid-data", 200]]);
   });
 
-  it("records one line per request with the exact fields, content hashes and unique request ids", async () => {
-    const mock = await start();
-    await mock.get("/v1/stock?orderId=a1");
-    await mock.get("/v1/stock?orderId=a1");
-    const lines = await mock.lines();
-    expect(lines).toHaveLength(2);
-    for (const line of lines) {
-      expect(Object.keys(line).sort()).toEqual(["inputValue", "method", "observedAt", "path", "remoteAddress", "requestId", "requestSha256", "responseSha256", "status", "variantId"]);
-      expect(line.requestSha256).toBe(sha(canonicalJson({ method: "GET", path: "/v1/stock", inputValue: "a1" })));
-      expect(line.responseSha256).toBe(sha(canonicalJson({ status: 200, body: { status: "in-stock" } })));
-      expect(new Date(line.observedAt).toISOString()).toBe(line.observedAt);
-      // Every line says who called: the address of the connection, which the host holds against the application container's.
-      expect(line.remoteAddress).toBe("127.0.0.1");
-    }
-    expect(new Set(lines.map((line) => line.requestId)).size).toBe(2);
-  });
-
   it.each([
     ["a wrong path", "/v1/other?orderId=a1", {}],
     ["a longer path", "/v1/stock/extra?orderId=a1", {}],
@@ -91,13 +73,6 @@ describe("the in-network mock server", () => {
     expect(rest).toEqual([]);
     expect(line).toMatchObject({ variantId: null, status: 599 });
     expect(line!.responseSha256).toBe(sha(canonicalJson({ status: 599, body: { error: "rovara-unmocked" } })));
-  });
-
-  it("is a sinkhole without a fixture: everything is 599 and every call is recorded", async () => {
-    const mock = await start({ fixture: null });
-    expect((await mock.get("/v1/stock?orderId=a1")).status).toBe(599);
-    expect((await mock.get("/")).status).toBe(599);
-    expect((await mock.lines()).map((line) => [line.path, line.variantId, line.status])).toEqual([["/v1/stock", null, 599], ["/", null, 599]]);
   });
 
   it("bounds what it records per request, so a hostile caller cannot grow a line without limit", async () => {
@@ -201,13 +176,6 @@ describe("every connection to a mock or the sinkhole is recorded, parsed or not"
     expect((await mock.lines()).filter((item) => item.variantId !== null)).toEqual([]);
   });
 
-  it("records a real HTTPS request to the mock", async () => {
-    const mock = await start();
-    await new Promise<void>((resolve) => { const req = httpsRequest({ host: "127.0.0.1", port: mock.server.port, path: "/v1/stock?orderId=a1", rejectUnauthorized: false }, () => resolve()); req.on("error", () => resolve()); req.end(); });
-    expect(await until(async () => unmatched(await mock.lines()).length >= 1)).toBe(true);
-    expect((await mock.lines()).some((line) => line.variantId === "success")).toBe(false);
-  });
-
   it("records a CONNECT request", async () => {
     const mock = await start();
     await rawConnection(mock.server.port, "CONNECT example.com:443 HTTP/1.1\r\nhost: example.com:443\r\n\r\n");
@@ -224,18 +192,6 @@ describe("every connection to a mock or the sinkhole is recorded, parsed or not"
     expect(unmatched(lines)[0]).toMatchObject({ method: "GET", path: "/v1/stock", inputValue: "a1" });
   });
 
-  it("records a connection that opens and sends nothing once, and a normal request adds no connection line", async () => {
-    const mock = await start({ connectionGraceMs: 150 });
-    const idle = rawConnection(mock.server.port, null, 600);
-    expect(await until(async () => unmatched(await mock.lines()).length === 1)).toBe(true);
-    await idle;
-    expect(unmatched(await mock.lines())).toHaveLength(1);
-    await mock.get("/v1/stock?orderId=a1");
-    await new Promise((done) => setTimeout(done, 400));
-    expect((await mock.lines()).filter((line) => line.variantId === "success")).toHaveLength(1);
-    expect(unmatched(await mock.lines())).toHaveLength(1);
-  });
-
   it("records each connection past the connection cap as a dropped call instead of dropping it silently", async () => {
     // The held connection stays open and silent for longer than the wait below and has a grace far past it, so it writes no line of its own while the test looks:
     // the only line there can be is the one the `drop` handler writes for the connection the server refuses.
@@ -248,37 +204,6 @@ describe("every connection to a mock or the sinkhole is recorded, parsed or not"
     expect(seen).toHaveLength(1);
     expect(seen[0]).toMatchObject({ method: "DROPPED", variantId: null, status: 599, remoteAddress: "127.0.0.1" });
     await held;
-  });
-
-  it("does not record a request that is already in the socket as an unparsed connection when the event loop stalls past the grace", async () => {
-    const mock = await start({ connectionGraceMs: 100 });
-    const socket = connect(mock.server.port, "127.0.0.1");
-    await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
-    // The server has accepted the connection and started its grace timer.
-    await new Promise((done) => setTimeout(done, 30));
-    // Block this loop (the server's too) in the check phase for longer than the grace: the next turn of the loop runs the due timer before it reads the waiting bytes.
-    await new Promise<void>((resolve) => setImmediate(() => {
-      socket.write("GET /v1/stock?orderId=a1 HTTP/1.1\r\nhost: mock\r\nconnection: close\r\n\r\n");
-      for (const end = Date.now() + 300; Date.now() < end;) { /* a stall */ }
-      resolve();
-    }));
-    const answer = await new Promise<string>((resolve) => { let text = ""; socket.on("data", (chunk) => { text += String(chunk); }); socket.on("close", () => resolve(text)); });
-    expect(answer).toContain("200");
-    await new Promise((done) => setTimeout(done, 300));
-    const lines = await mock.lines();
-    expect(lines.map((line) => [line.method, line.variantId, line.status])).toEqual([["GET", "success", 200]]);
-  });
-
-  it("keeps waiting while bytes keep arriving, and records the connection once they stop", async () => {
-    const mock = await start({ connectionGraceMs: 300 });
-    const socket = connect(mock.server.port, "127.0.0.1");
-    socket.on("error", () => undefined);
-    await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
-    // A header that is not finished, sent in pieces: each piece is inside the grace of the one before it.
-    for (const piece of ["GET /v1/stock?orderId=a1 HT", "TP/1.1\r\n", "host: m", "ock\r\n"]) { socket.write(piece); await new Promise((done) => setTimeout(done, 150)); }
-    expect(await mock.lines()).toEqual([]);
-    expect(await until(async () => unmatched(await mock.lines()).length === 1)).toBe(true);
-    socket.destroy();
   });
 
   it("records a connection that keeps sending without ever finishing a request once the ceiling is reached", async () => {

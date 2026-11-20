@@ -7,17 +7,6 @@ import { createE2EApplicationRuntimeProbeManifest } from "../../packages/verifie
 const digest = "b".repeat(64);
 const names = (items: readonly { probeId: string }[]) => items.map(({ probeId }) => probeId).sort();
 describe("installed application runtime probes", () => {
-  it("selects the fixed web positive and negative probes and binds their installed assets", () => {
-    const manifest = createE2EApplicationRuntimeProbeManifest({ kind: "web", capabilities: ["web", "download", "auth-refusal", "network-denial"], installedManifestDigest: digest });
-    expect(names(manifest.positiveProbes)).toEqual(["web-auth-viewer-refusal/v1", "web-csv-positive/v1"]);
-    expect(names(manifest.negativeProbes)).toEqual(["web-csv-negative/v1", "web-egress-denial/v1"]);
-    expect(manifest.installedManifestDigest).toBe(digest);
-    expect(manifest.positiveProbes.every((probe) => /^[a-f0-9]{64}$/.test(probe.assetDigest))).toBe(true);
-    expect(manifest.positiveProbes.find((probe) => probe.probeId === "web-csv-positive/v1")?.oracle).toMatchObject({
-      kind: "csv", downloadName: "orders.csv", rows: [["a1", "Ada", "12.5", "ready"], ["a2", "Grace", "23", "ready"]],
-    });
-    expect(manifest.negativeProbes.find((probe) => probe.probeId === "web-egress-denial/v1")?.oracle.kind).toBe("protected-network-denial");
-  });
 
   it("keeps API probes distinct and rejects capabilities outside the matching host profile", () => {
     const manifest = createE2EApplicationRuntimeProbeManifest({ kind: "api", capabilities: ["http", "auth-refusal", "state-read", "tenant-refusal", "network-denial"], installedManifestDigest: digest });

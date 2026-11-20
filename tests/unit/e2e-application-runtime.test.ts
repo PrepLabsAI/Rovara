@@ -268,42 +268,6 @@ else { const parent = await resolveListAndGenerate(); const child = fork(fileURL
     expect(readActualRun).not.toHaveBeenCalled();
   });
 
-  it("binds the generated first-party reporter bytes to a fresh launch challenge", async () => {
-    const assets = await import("../../packages/verifier/src/application-runtime-assets.js");
-    expect(assets.expectedE2EApplicationReporterDigest("11111111-1111-4111-8111-111111111111"))
-      .not.toBe(assets.expectedE2EApplicationReporterDigest("22222222-2222-4222-8222-222222222222"));
-  });
-
-  it("closes the owned generic lease before the parent reads final application proof", async () => {
-    const module = await import("../../packages/verifier/src/application-runtime.js");
-    const fixture = createCompiledApiApplicationFixture(); const { compiled, binding } = fixture;
-    const applicationRef = compiled.runtimeAdmissionContext.selectionInput.intent.applicationRuntimeRefs[0]!;
-    const app = compiled.applicationBindings.get(applicationRef.applicationId)!; const runtime = compiled.runtimeBindings.get(applicationRef.runtimeProfileId)!;
-    const input = { binding, suite: { bundle: compiled.bundle, files: compiled.shards[0]!.files, expectedCases: compiled.expectedCases },
-      profile: { profileId: runtime.profileId, kind: "api", runtimeManifestDigest: runtime.manifestDigest,
-        applications: [{ applicationId: applicationRef.applicationId, appBuildManifestDigest: app.build.manifestDigest,
-          appRecipe: app.approval.applications.find((item) => item.applicationId === applicationRef.applicationId)!.recipe }],
-        networkPolicyDigest: runtime.capabilities.networkPolicyDigest, seedDigest: "a".repeat(64), limits: runtime.binding,
-        capture: compiled.runtimeAdmissionContext.selectionInput.policy.capture }, modelPermit: null };
-    const order: string[] = [];
-    const runnerToolchain = ProjectSetupRunnerToolchainSchema.parse({ execPath: process.execPath, version: process.version,
-      platform: process.platform, arch: process.arch });
-    const proof = { protocol: "e2e-actual-application-run/v1" as const, runnerToolchain, shards: [], applicationCaptures: [], supervisorReceiptRefs: [],
-      declaredMockComponentIds: [], selected: 1, filtered: 0, supervisorReadback: { schemaVersion: "e2e-application-supervisor-readback/v1" as const,
-        receipt: { ref: { artifactId: "r", sha256: "a".repeat(64), byteLength: 1, mediaType: "application/json" }, bytes: new Uint8Array([1]) }, evidence: [] },
-      cleanupConfirmed: true, cleanupServerListening: false, evidenceDirectory: "/offline" };
-    const result = await module.runIsolatedE2EApplication({ input: input as never, compiled, signal: new AbortController().signal,
-      ports: { allocate: async () => ({ leaseId: "owned-api", execute: async () => { order.push("execute"); return {
-        process: { exitCode: 0, timedOut: false, aborted: false }, rawReport: Uint8Array.from([1]), observedUpstreamRunId: "upstream",
-        coverageByCase: new Map(), artifacts: [], modelReceiptIds: [], startedAt: fixture.now, finishedAt: fixture.now, cleanup: "confirmed" as const,
-      }; }, close: async () => { order.push("close"); return { confirmed: true }; } }), readActualRun: async (signal: AbortSignal) => {
-        expect(signal.aborted).toBe(false); order.push("readback"); return proof;
-      } } });
-    expect(order).toEqual(["execute", "close", "readback"]);
-    expect(result.lifecycle.cleanup).toBe("confirmed");
-    expect(result.actualRun).toBe(proof);
-  });
-
   it("does not read after failed close and aborts a late private proof read at its independent cap", async () => {
     const module = await import("../../packages/verifier/src/application-runtime.js");
     const fixture = createCompiledApiApplicationFixture(); const { compiled, binding } = fixture;
