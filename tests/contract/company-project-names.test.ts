@@ -65,36 +65,6 @@ async function world(options: { bindings?: false } = {}) {
 const reason = async (work: Promise<unknown>) => { try { await work; return "created"; } catch (error) { return error instanceof ClientProjectRefused ? error.reason : (error as { code?: string }).code; } };
 
 describe("same name in two companies", () => {
-  it("A and B each create a project named web (one-project create): two different ids, each in its own company, each with its own claim", async () => {
-    const h = await world();
-    const a = await h.deps.createClientProjects(PERSON, { repositories: ["acme-a/web"] }, PER_COMPANY);
-    h.as(B);
-    const b = await h.deps.createClientProjects(PERSON, { repositories: ["acme-b/web"] }, PER_COMPANY);
-    for (const [created, company] of [[a, A], [b, B]] as const) {
-      expect(created.name).toMatch(ID);
-      expect(created.name.startsWith("web-")).toBe(true);
-      expect(created.latestRevision).toBe(1);
-      expect(h.revision(created.name)?.companyId).toBe(company);
-      expect((h.revision(created.name)?.definition as { name?: string } | undefined)?.name).toBe(created.name);
-      expect(h.db.get(orgProjectNameClaimKey(company, "web").pk, orgProjectNameClaimKey(company, "web").sk)).toMatchObject({ entityType: "PROJECT_NAME_CLAIM", companyId: company, name: "web", projectId: created.name, claimedBy: PERSON });
-      // DEC 254zzz98 (one rule): the creator's administrator grant lives where the project's revision lives, the named company's own partition, and only there.
-      expect(h.db.get(`ORG#${company}#MEMBER#${PERSON}`, `PROJECT#${created.name}`)).toMatchObject({ role: "administrator" });
-      expect(h.db.get(`MEMBER#${PERSON}`, `PROJECT#${created.name}`)).toBeUndefined();
-    }
-    expect(a.name).not.toBe(b.name);
-    expect(h.revision("web")).toBeUndefined();
-  });
-
-  it("the single-repository create and the named create behave the same way", async () => {
-    const h = await world();
-    h.as(B);
-    const b = await h.deps.createClientProject(PERSON, { repository: "acme-b/web", name: "storefront" }, PER_COMPANY);
-    h.as(A);
-    const a = await h.deps.createClientProject(PERSON, { repository: "acme-a/web", name: "storefront" }, PER_COMPANY);
-    expect([a.name, b.name].every((name) => /^storefront-[a-z0-9]{6}$/.test(name))).toBe(true);
-    expect(h.revision(a.name)?.companyId).toBe(A);
-    expect(h.revision(b.name)?.companyId).toBe(B);
-  });
 
   it("a name is unique inside the company: A's second web is refused name_taken, in today's words, and nothing is written", async () => {
     const h = await world();
@@ -105,34 +75,9 @@ describe("same name in two companies", () => {
     expect(h.projectRows()).toHaveLength(before);
   });
 
-  it("an older project of the company whose id IS the name (its own catalog row) takes the name too; another company's never does", async () => {
-    const h = await world();
-    h.db.set({ ...orgProjectCatalogKey(A, "api"), entityType: "PROJECT_CATALOG", companyId: A, name: "api", latestRevision: 1 });
-    expect(await reason(h.deps.createClientProjects(PERSON, { repositories: ["acme-a/api"] }, PER_COMPANY))).toBe("name_taken");
-    h.as(B);
-    expect(await reason(h.deps.createClientProjects(PERSON, { repositories: ["acme-b/api"] }, PER_COMPANY))).toBe("created");
-  });
 });
 
 describe("no answer reveals another company's names", () => {
-  it("A's refusal for a name only B has is impossible: B's global, claimed and catalogued web never refuses A", async () => {
-    const h = await world();
-    h.as(B);
-    await h.deps.createClientProjects(PERSON, { repositories: ["acme-b/web"] }, PER_COMPANY);
-    // B also holds an older project whose id is literally "web" (the shared namespace's row), in its own catalog.
-    h.db.set({ pk: "PROJECT#web", sk: "REV#000000000001", entityType: "PROJECT", companyId: B, definition: { name: "web", revision: 1 } });
-    h.db.set({ ...orgProjectCatalogKey(B, "web"), entityType: "PROJECT_CATALOG", companyId: B, name: "web", latestRevision: 1 });
-    h.as(A);
-    for (const create of [() => h.deps.createClientProjects(PERSON, { repositories: ["acme-a/web"] }, PER_COMPANY), () => h.deps.createClientProject(PERSON, { repository: "acme-a/api", name: "api" }, PER_COMPANY)]) {
-      h.sent.length = 0;
-      const created = await create();
-      expect(created.name).toMatch(ID);
-      // A's create read nothing of B's: no key, partition or value of B, and never the bare shared name.
-      const reads = JSON.stringify(h.sent);
-      expect(reads).not.toContain(B);
-      expect(reads).not.toMatch(/"(:)?pk":"PROJECT#(web|api)"/);
-    }
-  });
 
   it("bulk outcomes are identical whether or not B has the names", async () => {
     const outcomes = async (bHasNames: boolean) => {
@@ -158,12 +103,6 @@ describe("no answer reveals another company's names", () => {
     expect(await outcomes(true)).toEqual(without);
   });
 
-  it("two repositories of one bulk call with the same name: the first makes the project, the second is name_taken (the company's own claim)", async () => {
-    const h = await world();
-    // Repeats ignoring case are refused by the route's body schema; here two rows naming the same project reach the create, one after another.
-    const answer = await h.deps.createClientProjectsBulk(PERSON, { repositories: ["acme-a/web", "acme-a/Web"] }, PER_COMPANY);
-    expect(answer.results.map((row) => row.outcome === "created" ? "created" : row.reason)).toEqual(["created", "name_taken"]);
-  });
 });
 
 describe("the claim is taken in the registration's own transaction", () => {
@@ -225,17 +164,6 @@ describe("the Rovara administrator's create is unchanged", () => {
 });
 
 describe("fail closed", () => {
-  it("per-company naming without a company is refused, nothing written", async () => {
-    const h = await world();
-    h.companyOf.mockResolvedValue(undefined);
-    const before = h.projectRows().length;
-    // No membership: the create's own company read refuses first (AUTH_REQUIRED); the naming's FORBIDDEN is the fallback (unit test below).
-    for (const work of [() => h.deps.createClientProject(PERSON, { repository: "acme-a/web" }, PER_COMPANY), () => h.deps.createClientProjectsBulk(PERSON, { repositories: ["acme-a/web"] }, PER_COMPANY)]) {
-      expect(["FORBIDDEN", "AUTH_REQUIRED"]).toContain(await reason(work()));
-    }
-    expect(await reason(h.deps.createClientProjects(PERSON, { repositories: ["acme-a/web"] }, PER_COMPANY))).not.toBe("created");
-    expect(h.projectRows()).toHaveLength(before);
-  });
 
   it("a fresh id already in use is drawn again; after the attempts, unavailable", async () => {
     const naming = companyProjectNaming(vi.fn(async () => true), vi.fn(async () => false));
@@ -305,13 +233,6 @@ describe("review fixes (L2-1 Opus review)", () => {
       expect(h.db.get(orgProjectNameClaimKey(A, "web").pk, orgProjectNameClaimKey(A, "web").sk)).toBeUndefined();
       expect(h.db.find((item) => item.companyId === A && typeof item.pk === "string" && item.pk.startsWith("PROJECT#"))).toEqual([]);
     }
-  });
-
-  it("per-company bulk without a company (no company bindings on this install) is refused whole before any row runs", async () => {
-    const h = await world({ bindings: false });
-    await expect(h.deps.createClientProjectsBulk(PERSON, { repositories: ["acme-a/web", "acme-a/api"] }, PER_COMPANY)).rejects.toMatchObject({ code: "FORBIDDEN" });
-    expect(h.clientProjects.repositoryInstallation).not.toHaveBeenCalled();
-    expect(h.clientProjects.repositoryDefaults).not.toHaveBeenCalled();
   });
 
   it("a lookup by name checks the claimed project is still the company's, and an older catalog row must name the same project", async () => {

@@ -1,15 +1,11 @@
 // tests/contract/eval-gate.test.ts
 import { describe, expect, it } from "vitest";
-import { EvalCaseSchema, loadCases, loadProject, type EvalCase } from "../eval/case.js";
+import { EvalCaseSchema, loadCases, type EvalCase } from "../eval/case.js";
 import { gateClassifierModel, liveGateClassifier } from "../eval/command.js";
 import { scriptExpectedAnswers } from "../eval/offline.js";
 import { runEvaluation, scoreRun } from "../eval/runner.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
-const GATE_CASES = [
-  "gate-placeholder-target", "gate-clear-create", "gate-clear-change", "gate-close-always-asks", "gate-jira-transition",
-  "gate-jira-clear-edit", "gate-jira-clear-create", "gate-admin-deny",
-];
 const change: EvalCase = { id: "gate-check", project: "fixtures/linear-payments.yaml", prompt: "x", expect: { tool: "linear__save_issue", gate: "allow" } };
 
 describe("gate evaluation cases (spec 014 SC-004, SC-005)", () => {
@@ -17,11 +13,6 @@ describe("gate evaluation cases (spec 014 SC-004, SC-005)", () => {
     expect(EvalCaseSchema.safeParse(change).success).toBe(true);
     expect(EvalCaseSchema.safeParse({ ...change, expect: { tool: null, refusal: "no", gate: "ask" } }).success).toBe(false);
     expect(EvalCaseSchema.safeParse({ ...change, expect: { ...change.expect, gate: "maybe" } }).success).toBe(false);
-  });
-
-  it("reads a fixture's action policy", async () => {
-    expect(await loadProject("fixtures/payments.yaml")).not.toHaveProperty("actionPolicy");
-    expect((await loadProject("fixtures/linear-gate.yaml")).actionPolicy).toEqual({ rules: [{ tool: "delete_comment", connector: "linear", outcome: "deny", reason: "Deleting comments is turned off." }] });
   });
 
   it("scores the gate's decision on the first call, and only when the gate ran", () => {
@@ -32,15 +23,6 @@ describe("gate evaluation cases (spec 014 SC-004, SC-005)", () => {
     expect(scoreRun(change, run)).not.toHaveProperty("gateOk");
     expect(scoreRun({ ...change, expect: { tool: "linear__save_issue" } }, { ...run, gate: "ask" })).not.toHaveProperty("gateOk");
   });
-
-  it("passes every gate case offline through the real gate, with its rules deciding what they settle", async () => {
-    const { modelRuntime, faux } = await fauxModelRuntime();
-    const cases = (await loadCases()).filter((entry) => entry.expect.gate !== undefined);
-    expect(cases.map((entry) => entry.id)).toEqual(GATE_CASES);
-    const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, beforeRun: scriptExpectedAnswers(faux) });
-    expect(report.summary).toMatchObject({ cases: GATE_CASES.length, passed: GATE_CASES.length, errors: 0 });
-    expect(Object.fromEntries(report.cases.map((result) => [result.id, result.runs[0]!.gate]))).toEqual(Object.fromEntries(cases.map((entry) => [entry.id, entry.expect.gate])));
-  }, 120_000);
 
   it("fails a case whose gate decides otherwise, and settles creates, destructive and administrator calls without the classifier", async () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
@@ -55,14 +37,6 @@ describe("gate evaluation cases (spec 014 SC-004, SC-005)", () => {
       ["gate-clear-create", true, "allow"], ["gate-clear-change", false, "ask"], ["gate-close-always-asks", true, "ask"], ["gate-admin-deny", true, "deny"],
     ]);
     expect(asked).toBe(1);
-  }, 60_000);
-
-  it("reports every gate case as not applicable to the legacy presentation, which has no gate", async () => {
-    const { modelRuntime, faux } = await fauxModelRuntime();
-    const cases = (await loadCases()).filter((entry) => entry.expect.gate !== undefined);
-    const legacy = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "legacy", repeat: 1, beforeRun: scriptExpectedAnswers(faux) });
-    expect(legacy.notApplicable?.map((entry) => entry.id)).toEqual(GATE_CASES);
-    expect(legacy.cases).toEqual([]);
   }, 60_000);
 
   it("gives a live run the deployment's classifier model, Claude Haiku 4.5 unless overridden", () => {

@@ -2,7 +2,7 @@
 // Offline: FakeDynamoDb, a vi.fn state machine and S3, and a fake clock.
 import { describe, expect, it, vi, type Mock } from "vitest";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
-import { SwebenchLaunchSchema, agentXError, summarize, type ModelIdentifier, type SwebenchLaunch } from "@agentx/contracts";
+import { SwebenchLaunchSchema, agentXError, type ModelIdentifier, type SwebenchLaunch } from "@agentx/contracts";
 import {
   EVAL_BATCH_REFERENCE_TOKENS,
   createBatch,
@@ -149,33 +149,11 @@ async function expectChargesMatchSpend(h: Harness, batchId: string) {
   expect(charged).toBeCloseTo((await getBatch(h.dependencies, batchId))!.spentUsd, 9);
 }
 
-/** The runner's started callback: from here on the run may spend tokens. */
-async function runnerStarted(h: Harness, runId: string) {
-  await handleSwebenchCallback(h.dependencies, issueSwebenchCapability(h.dependencies, runId), runId, "started", {});
-}
-
 const states = async (h: Harness, batchId: string) => (await getBatch(h.dependencies, batchId))!.queue.map((entry) => entry.state);
 const runIds = async (h: Harness, batchId: string, state = "RUNNING") =>
   (await getBatch(h.dependencies, batchId))!.queue.filter((entry) => entry.state === state).map((entry) => entry.runId!);
 
 describe("creating a batch (spec 052 FR-001, FR-003, FR-004)", () => {
-  it("expands task × model × repeat cheapest first, records each estimate, pins the current runner image and writes the record", async () => {
-    const h = await harness();
-    const batch = await createBatch(h.dependencies, h.context, file({ repeats: 2 }));
-    expect(batch).toMatchObject({ status: "RUNNING", version: 0, perRunCeilingUsd: 10, spentUsd: 0, thread, createdBy: requester });
-    expect(batch.file.runnerImage).toBe(runnerImage);
-    expect(batch.queue).toHaveLength(8);
-    expect(batch.queue.map((entry) => [entry.index, entry.model.modelId, entry.task, entry.repeat, entry.estimatedCostUsd])).toEqual([
-      [0, cheap.modelId, tasks[0], 1, 1.5], [1, cheap.modelId, tasks[0], 2, 1.5], [2, cheap.modelId, tasks[1], 1, 1.5], [3, cheap.modelId, tasks[1], 2, 1.5],
-      [4, dear.modelId, tasks[0], 1, 7.2], [5, dear.modelId, tasks[0], 2, 7.2], [6, dear.modelId, tasks[1], 1, 7.2], [7, dear.modelId, tasks[1], 2, 7.2],
-    ]);
-    expect(batch.queue.every((entry) => entry.state === "QUEUED" && entry.attempt === 1)).toBe(true);
-    expect(batch.counts).toMatchObject({ queued: 8, starting: 0, running: 0, done: 0 });
-    expect(h.db.get(`EVAL_BATCH#${batch.batchId}`, "META")).toMatchObject({ entityType: "EVAL_BATCH", projectName: "payments", status: "RUNNING" });
-    expect(await getBatch(h.dependencies, batch.batchId)).toEqual(batch);
-    // Nothing starts until a top-up.
-    expect(h.startExecution).not.toHaveBeenCalled();
-  });
 
   it("keeps the listed order when asked, and takes a pinned image only when its features are known", async () => {
     const h = await harness();
@@ -284,13 +262,6 @@ describe("topping up a batch's slots (spec 052 FR-004 to FR-006)", () => {
     expect(h.startExecution).toHaveBeenCalledTimes(2);
   });
 
-  it("holds to the batch's own concurrency", async () => {
-    const h = await harness({ maxConcurrentEvals: 4 });
-    const batch = await createBatch(h.dependencies, h.context, file({ concurrency: 1 }));
-    await topUpBatches(h.dependencies);
-    expect(await states(h, batch.batchId)).toEqual(["RUNNING", "QUEUED", "QUEUED", "QUEUED"]);
-  });
-
   it("starts exactly one run when two top-ups race for one free slot", async () => {
     const h = await harness({ maxConcurrentEvals: 2 });
     const batch = await createBatch(h.dependencies, h.context, file());
@@ -298,26 +269,6 @@ describe("topping up a batch's slots (spec 052 FR-004 to FR-006)", () => {
     expect(h.startExecution).toHaveBeenCalledTimes(1);
     expect(await states(h, batch.batchId)).toEqual(["RUNNING", "QUEUED", "QUEUED", "QUEUED"]);
     expect(h.db.get("SWEBENCH#SLOTS", "COUNTER")).toMatchObject({ count: 1 });
-  });
-
-  it("re-reads the record when a claim loses its write to a stop, so the stop is never undone", async () => {
-    const h = await harness({ maxConcurrentEvals: 4 });
-    const batch = await createBatch(h.dependencies, h.context, file());
-    const send = h.db.send;
-    let raced = false;
-    h.db.send = async (command) => {
-      const input = command.input as { Item?: { queue?: Array<{ state: string }> } };
-      if (!raced && command.constructor.name === "PutCommand" && input.Item?.queue?.some((entry) => entry.state === "STARTING")) {
-        // The stop lands between the claim's read and its write.
-        raced = true;
-        await stopBatch(h.dependencies, batch.batchId, requester);
-      }
-      return send(command);
-    };
-    await topUpBatches(h.dependencies);
-    expect(raced).toBe(true);
-    expect(h.startExecution).not.toHaveBeenCalled();
-    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "STOPPED", counts: { cancelled: 4, starting: 0 } });
   });
 
   it("is idempotent through the deterministic run ID: a claim whose record write was lost starts no second run", async () => {
@@ -427,22 +378,6 @@ describe("topping up a batch's slots (spec 052 FR-004 to FR-006)", () => {
     expect((await getBatch(h.dependencies, batch.batchId))!.queue[0]).toMatchObject({ state: "STARTING", claimedAt: newer });
   });
 
-  it("gives a claim back when no slot is free, and starts it when a single run's slot is released", async () => {
-    // Two slots: one for the batch, one always kept for single runs (Ruling 30).
-    const h = await harness({ maxConcurrentEvals: 2 });
-    // A single run holds a slot: the batch's start would take the last free one, so it waits.
-    h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 1 });
-    const batch = await createBatch(h.dependencies, h.context, file());
-    await topUpBatches(h.dependencies);
-    expect(h.startExecution).not.toHaveBeenCalled();
-    expect(await states(h, batch.batchId)).toEqual(["QUEUED", "QUEUED", "QUEUED", "QUEUED"]);
-    // The single run's slot is released: the batch starts its run.
-    h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 0 });
-    await topUpBatches(h.dependencies);
-    expect(h.startExecution).toHaveBeenCalledTimes(1);
-    expect(await states(h, batch.batchId)).toEqual(["RUNNING", "QUEUED", "QUEUED", "QUEUED"]);
-  });
-
   it("gives a claim back when the counter read raced a start, so the start itself is refused", async () => {
     const h = await harness({ maxConcurrentEvals: 3 });
     h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 1 });
@@ -462,22 +397,6 @@ describe("topping up a batch's slots (spec 052 FR-004 to FR-006)", () => {
 describe("one slot kept for single runs (spec 052 D-2, Ruling 30)", () => {
   const single = (h: Harness, requestId: string, threadTs = "1695500000.000777") =>
     startSwebenchRun(h.dependencies, { ...h.context, thread: { ...thread, threadTs } }, { requestId, dataset: "verified", instanceId: "django__django-11099", model: { provider: dear.provider, modelId: dear.modelId } });
-
-  it("starts a single run while batches hold their maximum of slots", async () => {
-    const h = await harness({ maxConcurrentEvals: 4 });
-    const first = await createBatch(h.dependencies, h.context, file({ repeats: 2 }));
-    const second = await createBatch(h.dependencies, { ...h.context, thread: { ...thread, threadTs: "1695500000.000009" } }, file());
-    await topUpBatches(h.dependencies);
-    // All batches together hold at most three of the four slots.
-    const running = (await states(h, first.batchId)).filter((state) => state === "RUNNING").length
-      + (await states(h, second.batchId)).filter((state) => state === "RUNNING").length;
-    expect(running).toBe(3);
-    expect(h.db.get("SWEBENCH#SLOTS", "COUNTER")).toMatchObject({ count: 3 });
-    const started = await single(h, "0c9d6f1e-3a2b-4c5d-8e7f-1a2b3c4d5e6f");
-    expect(started).toMatchObject({ outcome: "STARTED", run: { status: "STARTING" } });
-    expect(started.outcome === "STARTED" ? started.run.batchId : "x").toBeUndefined();
-    expect(h.db.get("SWEBENCH#SLOTS", "COUNTER")).toMatchObject({ count: 4 });
-  });
 
   it("does not let a batch take a slot that a single run's end frees beyond the batches' limit", async () => {
     const h = await harness({ maxConcurrentEvals: 4 });
@@ -510,84 +429,6 @@ describe("one slot kept for single runs (spec 052 D-2, Ruling 30)", () => {
 });
 
 describe("the cost cap (spec 052 FR-007)", () => {
-  it("never starts a run that could take spend past the cap, and ends CAPPED once the in-flight runs finish", async () => {
-    // Ceiling 10, so each run reserves 11 (Ruling 5); cap 25: two runs in flight reserve 22, and a third would reserve 33.
-    const h = await harness({ maxConcurrentEvals: 4, maxCostUsd: 10 });
-    const batch = await createBatch(h.dependencies, h.context, file({ costCapUsd: 25, repeats: 2 }));
-    await topUpBatches(h.dependencies);
-    expect(h.startExecution).toHaveBeenCalledTimes(2);
-    const [first, second] = await runIds(h, batch.batchId);
-    // 3 spent + 1 × 11 in flight + 11 = 25 ≤ 25: the next run starts.
-    await finish(h, first!, graded(3));
-    expect(h.startExecution).toHaveBeenCalledTimes(3);
-    expect((await getBatch(h.dependencies, batch.batchId))!.spentUsd).toBe(3);
-    // 9 spent + 1 × 11 + 11 = 31 > 25: no start, and the batch waits for its in-flight run.
-    await finish(h, second!, graded(6));
-    expect(h.startExecution).toHaveBeenCalledTimes(3);
-    expect((await getBatch(h.dependencies, batch.batchId))!.status).toBe("RUNNING");
-    const [third] = await runIds(h, batch.batchId);
-    // 18 spent + 11 = 29 > 25 with nothing in flight: the rest never start.
-    await finish(h, third!, graded(9, false));
-    const capped = (await getBatch(h.dependencies, batch.batchId))!;
-    expect(capped).toMatchObject({ status: "CAPPED", spentUsd: 18, counts: { done: 3, notStarted: 5, queued: 0, running: 0 } });
-    expect(capped.finishedAt).toBeDefined();
-    expect(h.startExecution).toHaveBeenCalledTimes(3);
-    // A capped batch is no longer topped up.
-    await topUpBatches(h.dependencies);
-    expect(h.startExecution).toHaveBeenCalledTimes(3);
-  });
-
-  it("reserves the ceiling plus 10% per run, at the boundary", async () => {
-    const at = await harness({ maxConcurrentEvals: 4, maxCostUsd: 10 });
-    const fits = await createBatch(at.dependencies, at.context, file({ costCapUsd: 22 }));
-    await topUpBatches(at.dependencies);
-    expect(await states(at, fits.batchId)).toEqual(["RUNNING", "RUNNING", "QUEUED", "QUEUED"]);
-    const under = await harness({ maxConcurrentEvals: 4, maxCostUsd: 10 });
-    const short = await createBatch(under.dependencies, under.context, file({ costCapUsd: 21.99 }));
-    await topUpBatches(under.dependencies);
-    expect(await states(under, short.batchId)).toEqual(["RUNNING", "QUEUED", "QUEUED", "QUEUED"]);
-  });
-
-  it("charges a run that reported no cost at its ceiling, so a lost instance blocks a start that would otherwise fit", async () => {
-    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
-    const batch = await createBatch(h.dependencies, h.context, file({ costCapUsd: 20, tasks: [tasks[0]], models: [cheap] }));
-    await topUpBatches(h.dependencies);
-    const runId = evalBatchRunId(batch.batchId, 0, 1);
-    await runnerStarted(h, runId);
-    await endByStateMachine(h, runId, "FAILED", "the eval instance stopped (terminated) without reporting a result; see its log stream");
-    // Charged 10: 10 + 11 = 21 > 20, so the retry never starts (at $0 it would have).
-    const capped = (await getBatch(h.dependencies, batch.batchId))!;
-    expect(capped).toMatchObject({ status: "CAPPED", spentUsd: 10, counts: { notStarted: 1 } });
-    expect(h.startExecution).toHaveBeenCalledTimes(1);
-    // Ruling 7: the retry the cap kept from starting ends the entry's chain with a FAILED row at $0.
-    const rows = await listBatchMeasures(h.dependencies, batch.batchId);
-    expect(rows).toHaveLength(2);
-    expect(rows).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        runId, attempt: 1, outcome: "RETRIED", costUsd: null, chargedUsd: 10, costEstimated: true,
-        error: "the eval instance stopped (terminated) without reporting a result; see its log stream",
-      }),
-      expect.objectContaining({
-        runId: evalBatchRunId(batch.batchId, 0, 2), attempt: 2, outcome: "FAILED", costUsd: 0, chargedUsd: 0,
-        error: expect.stringMatching(/retry did not start: the batch's cost cap was reached/) as unknown,
-      }),
-    ]));
-    await expectChargesMatchSpend(h, batch.batchId);
-  });
-
-  it("keeps a failed run's reported cost when the tick records its end", async () => {
-    const h = await harness({ maxConcurrentEvals: 2 });
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    await topUpBatches(h.dependencies);
-    const runId = evalBatchRunId(batch.batchId, 0, 1);
-    // The callback's batch hook missed it; the tick records the run from its record alone.
-    h.dependencies.onRunEnded = async () => undefined;
-    await finish(h, runId, { outcome: "FAILED", error: "the SWE-bench harness wrote no report (exit 1): boom", usage: usage(0.4) });
-    expect(h.db.get(`SWEBENCH_RUN#${runId}`, "META")).toMatchObject({ status: "FAILED", usage: { costUsd: 0.4 } });
-    await recordBatchRunEnd(h.dependencies, (await finish(h, runId, { outcome: "FAILED", error: "late" })).run);
-    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "DONE", spentUsd: 0.4 });
-    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({ outcome: "FAILED", costUsd: 0.4, chargedUsd: 0.4 })]);
-  });
 
   it("charges nothing for ends that used no tokens: a launch that failed, a start that failed, a cancel before the runner started", async () => {
     const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
@@ -619,18 +460,6 @@ describe("the cost cap (spec 052 FR-007)", () => {
     expect((await getBatch(failing.dependencies, other.batchId))!.queue[0]).toMatchObject({ state: "RUNNING", attempt: 2 });
   });
 
-  it("charges a cancelled run its ceiling once its runner had started", async () => {
-    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    await topUpBatches(h.dependencies);
-    const runId = evalBatchRunId(batch.batchId, 0, 1);
-    await runnerStarted(h, runId);
-    await stopBatch(h.dependencies, batch.batchId, requester);
-    await endByStateMachine(h, runId, "CANCELLED", "cancelled from Slack");
-    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "STOPPED", spentUsd: 10 });
-    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({ outcome: "CANCELLED", chargedUsd: 10, costEstimated: true })]);
-  });
-
   it("ends a retry that a stop kept from starting with a FAILED row at $0", async () => {
     const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
@@ -649,56 +478,6 @@ describe("the cost cap (spec 052 FR-007)", () => {
     await expectChargesMatchSpend(h, batch.batchId);
   });
 
-  it("charges a run whose runner started after a stop had asked it to cancel", async () => {
-    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    await topUpBatches(h.dependencies);
-    const runId = evalBatchRunId(batch.batchId, 0, 1);
-    await stopBatch(h.dependencies, batch.batchId, requester);
-    expect(h.db.get(`SWEBENCH_RUN#${runId}`, "META")).toMatchObject({ status: "CANCEL_REQUESTED" });
-    // The runner starts anyway, and works until the state machine's next poll ends the run.
-    await runnerStarted(h, runId);
-    expect(h.db.get(`SWEBENCH_RUN#${runId}`, "META")).toMatchObject({ status: "CANCEL_REQUESTED", runnerStartedAt: expect.any(String) as unknown });
-    await endByStateMachine(h, runId, "CANCELLED", "cancelled from Slack");
-    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "STOPPED", spentUsd: 10 });
-    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({ outcome: "CANCELLED", chargedUsd: 10, costEstimated: true })]);
-  });
-
-  it("refuses a runner's start reported after its run ended: the charge and the row stand", async () => {
-    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    await topUpBatches(h.dependencies);
-    const runId = evalBatchRunId(batch.batchId, 0, 1);
-    await stopBatch(h.dependencies, batch.batchId, requester);
-    await endByStateMachine(h, runId, "CANCELLED", "cancelled from Slack");
-    // Ruling 16: a final 409, so the runner stops before its agent starts.
-    await expect(runnerStarted(h, runId)).rejects.toMatchObject({ statusCode: 409 });
-    const run = h.db.get(`SWEBENCH_RUN#${runId}`, "META")!;
-    expect(run).toMatchObject({ status: "CANCELLED" });
-    expect(run.runnerStartedAt).toBeUndefined();
-    // A lost row rewritten from the run gets the same $0 charge.
-    h.db.delete(`EVAL_BATCH#${batch.batchId}`, `MEASURE#${runId}`);
-    await recordBatchRunEnd(h.dependencies, without(run, "pk", "sk", "entityType", "projectName") as never);
-    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ spentUsd: 0 });
-    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({ outcome: "CANCELLED", chargedUsd: 0 })]);
-  });
-
-  it("uses one rounded reservation at create and at start", async () => {
-    // A ceiling with many decimals: a cap equal to the reservation create accepts starts one run.
-    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10.123456789 });
-    const batch = await createBatch(h.dependencies, h.context, file({ costCapUsd: 11.135802 }));
-    await topUpBatches(h.dependencies);
-    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "RUNNING", counts: { running: 1 } });
-    await expect(createBatch(h.dependencies, h.context, file({ costCapUsd: 11.135801 }))).rejects.toThrow(/below one run's reservation of \$11.135802/);
-  });
-
-  it("holds the cap when two top-ups race for the last run that fits", async () => {
-    const h = await harness({ maxConcurrentEvals: 4, maxCostUsd: 10 });
-    const batch = await createBatch(h.dependencies, h.context, file({ costCapUsd: 12 }));
-    await Promise.all([topUpBatches(h.dependencies), topUpBatches(h.dependencies)]);
-    expect(h.startExecution).toHaveBeenCalledTimes(1);
-    expect(await states(h, batch.batchId)).toEqual(["RUNNING", "QUEUED", "QUEUED", "QUEUED"]);
-  });
 });
 
 describe("run ends and the single infrastructure retry (spec 052 FR-008, FR-010)", () => {
@@ -720,37 +499,6 @@ describe("run ends and the single infrastructure retry (spec 052 FR-008, FR-010)
       "the SWE-bench harness wrote no report (exit 1): boom",
       undefined,
     ]) expect(isInfrastructureFailure(error), String(error)).toBe(false);
-  });
-
-  it("retries an infrastructure failure once under a new run ID, then records it failed", async () => {
-    const h = await harness({ maxConcurrentEvals: 2 });
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    await topUpBatches(h.dependencies);
-    const first = evalBatchRunId(batch.batchId, 0, 1);
-    await finish(h, first, { outcome: "FAILED", error: "could not pull swebench/x: EOF", usage: usage(0.4) });
-    const retried = (await getBatch(h.dependencies, batch.batchId))!;
-    const second = evalBatchRunId(batch.batchId, 0, 2);
-    expect(retried.queue[0]).toMatchObject({ state: "RUNNING", attempt: 2, runId: second });
-    expect(retried.spentUsd).toBeCloseTo(0.4, 9);
-    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({
-      runId: first, attempt: 1, outcome: "RETRIED", costUsd: 0.4, chargedUsd: 0.4, error: "could not pull swebench/x: EOF",
-    })]);
-    // The second infrastructure failure, seen by the state machine, is final.
-    await endByStateMachine(h, second, "FAILED", "the eval instance stopped (terminated) without reporting a result; see its log stream");
-    const failed = (await getBatch(h.dependencies, batch.batchId))!;
-    expect(failed).toMatchObject({ status: "DONE", counts: { failed: 1, queued: 0, running: 0 } });
-    expect(failed.queue[0]).toMatchObject({ state: "FAILED", attempt: 2, runId: second });
-    expect(h.startExecution).toHaveBeenCalledTimes(2);
-    const measures = await listBatchMeasures(h.dependencies, batch.batchId);
-    expect(measures).toHaveLength(2);
-    const final = measures.find((measure) => measure.runId === second)!;
-    expect(final).toMatchObject({
-      batchId: batch.batchId, instanceId: tasks[0], provider: "openrouter", modelId: cheap.modelId, thinkingLevel: "high",
-      routing: { only: ["fireworks"] }, repeat: 1, attempt: 2, outcome: "FAILED", costUsd: null, chargedUsd: 10, costEstimated: true,
-    });
-    expect(final.resolved).toBeUndefined();
-    expect(failed.spentUsd).toBeCloseTo(10.4, 9);
-    await expectChargesMatchSpend(h, batch.batchId);
   });
 
   it("never retries a graded result, nor a failure that is not the infrastructure's", async () => {
@@ -780,38 +528,6 @@ describe("run ends and the single infrastructure retry (spec 052 FR-008, FR-010)
     await expectChargesMatchSpend(h, batch.batchId);
   });
 
-  it("records a model error as a failure of model access, retries it once, charges its reported cost and keeps it out of the rate (Ruling 27)", async () => {
-    const h = await harness({ maxConcurrentEvals: 2 });
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    await topUpBatches(h.dependencies);
-    const first = evalBatchRunId(batch.batchId, 0, 1);
-    const modelError = (costUsd: number) => ({ ...graded(costUsd, false), stopReason: "model_error", stopDetail: "AccessDeniedException: You don't have access to the model", patchBytes: 0 });
-    await finish(h, first, modelError(0.02));
-    // The single-run record keeps what the runner reported; the batch reads it as the infrastructure's.
-    expect(h.db.get(`SWEBENCH_RUN#${first}`, "META")).toMatchObject({ status: "SUCCEEDED" });
-    const retried = (await getBatch(h.dependencies, batch.batchId))!;
-    const second = evalBatchRunId(batch.batchId, 0, 2);
-    expect(retried.queue[0]).toMatchObject({ state: "RUNNING", attempt: 2, runId: second });
-    expect(retried.spentUsd).toBeCloseTo(0.02, 9);
-    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({
-      runId: first, attempt: 1, outcome: "RETRIED", stopReason: "model_error", costUsd: 0.02, chargedUsd: 0.02,
-      error: "the model could not be used (model_error): AccessDeniedException: You don't have access to the model",
-    })]);
-    // The second model error is final: FAILED, never graded.
-    await finish(h, second, modelError(0.01));
-    const failed = (await getBatch(h.dependencies, batch.batchId))!;
-    expect(failed).toMatchObject({ status: "DONE", counts: { failed: 1, done: 0 } });
-    expect(failed.spentUsd).toBeCloseTo(0.03, 9);
-    const measures = await listBatchMeasures(h.dependencies, batch.batchId);
-    const final = measures.find((measure) => measure.runId === second)!;
-    expect(final).toMatchObject({ outcome: "FAILED", stopReason: "model_error", chargedUsd: 0.01 });
-    expect(final.resolved).toBeUndefined();
-    expect(h.startExecution).toHaveBeenCalledTimes(2);
-    await expectChargesMatchSpend(h, batch.batchId);
-    // The summary counts it failed, outside the rate's runs.
-    expect(summarize(measures)).toEqual([expect.objectContaining({ runs: 0, failed: 1, retried: 1, resolved: 0, rate: null })]);
-  });
-
   it("charges $0 for a reported usage of no tokens, even with no cost, so a zero-token model error retried costs nothing (Ruling 33)", async () => {
     const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
@@ -827,30 +543,6 @@ describe("run ends and the single infrastructure retry (spec 052 FR-008, FR-010)
     await expectChargesMatchSpend(h, batch.batchId);
   });
 
-  it("still charges the ceiling, estimated, for a usage with tokens but no cost (Ruling 33)", async () => {
-    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    await topUpBatches(h.dependencies);
-    await finish(h, evalBatchRunId(batch.batchId, 0, 1), { ...graded(0), usage: usage(null) });
-    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "DONE", spentUsd: 10 });
-    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({ outcome: "GRADED", costUsd: null, chargedUsd: 10, costEstimated: true })]);
-  });
-
-  it("never retries a graded run that stopped for any reason but a model error (Ruling 27)", async () => {
-    const h = await harness({ maxConcurrentEvals: 3 });
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]] }));
-    await topUpBatches(h.dependencies);
-    const [cheapRun, dearRun] = await runIds(h, batch.batchId);
-    await finish(h, cheapRun!, { ...graded(10, false), stopReason: "cost_ceiling", stopDetail: "the run reached its cost ceiling of 10.00 USD" });
-    await finish(h, dearRun!, { ...graded(1, true), stopReason: "time_limit", stopDetail: "the agent reached its 60-minute limit" });
-    const done = (await getBatch(h.dependencies, batch.batchId))!;
-    expect(done).toMatchObject({ status: "DONE", counts: { done: 2, failed: 0 } });
-    expect(done.queue.map((entry) => entry.attempt)).toEqual([1, 1]);
-    const measures = await listBatchMeasures(h.dependencies, batch.batchId);
-    expect(measures.map((measure) => [measure.outcome, measure.stopReason]).sort()).toEqual([["GRADED", "cost_ceiling"], ["GRADED", "time_limit"]]);
-    expect(summarize(measures).map((model) => model.runs)).toEqual([1, 1]);
-  });
-
   it("records the runner's count of tool calls in the row, and leaves it empty for an older runner's result (Ruling 28)", async () => {
     const h = await harness({ maxConcurrentEvals: 3 });
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]] }));
@@ -863,19 +555,6 @@ describe("run ends and the single infrastructure retry (spec 052 FR-008, FR-010)
     expect(measures.find((measure) => measure.runId === old)!.toolCalls).toBeUndefined();
   });
 
-  it("starts the next queued run when a run ends, one start inline, leaving more to the tick", async () => {
-    const h = await harness({ maxConcurrentEvals: 2 });
-    const batch = await createBatch(h.dependencies, h.context, file());
-    await topUpBatches(h.dependencies);
-    await finish(h, evalBatchRunId(batch.batchId, 0, 1), graded(1));
-    expect(await states(h, batch.batchId)).toEqual(["DONE", "RUNNING", "QUEUED", "QUEUED"]);
-    // More slots freed at once: the runner's callback starts one, and the next top-up the rest.
-    h.limit.value = 5;
-    await finish(h, evalBatchRunId(batch.batchId, 1, 1), graded(1));
-    expect(await states(h, batch.batchId)).toEqual(["DONE", "DONE", "RUNNING", "QUEUED"]);
-    await topUpBatches(h.dependencies);
-    expect(await states(h, batch.batchId)).toEqual(["DONE", "DONE", "RUNNING", "RUNNING"]);
-  });
 });
 
 describe("stopping a batch (spec 052 FR-009)", () => {

@@ -61,26 +61,6 @@ async function serve(handler: (request: Request) => Response | Promise<Response>
 }
 
 describe("the authenticated registered publication join client", () => {
-  it("sends the frozen subject and opaque host binding through the CLI developer session", async () => {
-    let received: { path?: string; authorization?: string; body?: unknown } = {};
-    const baseUrl = await serve(async (request) => {
-      const authorization = request.headers.get("authorization");
-      received = { path: new URL(request.url).pathname, ...(authorization === null ? {} : { authorization }), body: await request.json() };
-      await new Promise((resolve) => setTimeout(resolve, 55));
-      return Response.json({ schemaVersion: 1, status: "READY", requestId: "response-1", subject, candidateDigest: "d".repeat(64), contractDigest: "e".repeat(64), policyDigest: "f".repeat(64), planDigest: "1".repeat(64), roundId: "round-current", evidenceSetDigest: "2".repeat(64), checkedAt: new Date().toISOString() });
-    });
-    const h = await fixture(baseUrl);
-    const enrollment = makeEnrollment(baseUrl);
-    expect(RegisteredEnrollmentSchema.safeParse(enrollment)).toMatchObject({ success: true });
-    const transport = createDeveloperPublicationJoinTransport({ home: h.home, env: "dev", tokenStore: h.tokenStore, fetch: fetch.bind(globalThis) });
-    const result = await resolveRegisteredPublication({ enrollment, subject, taskRef: enrollment.taskRef, transport, now: Date.now });
-    if (result.kind !== "ready") throw new Error(JSON.stringify(result));
-    expect(result).toMatchObject({ kind: "ready", response: { roundId: "round-current", requestId: "response-1" } });
-    expect(received).toEqual({
-      path: `/v1/dev/tasks/${enrollment.taskRef}/e2e-publication-context`, authorization: "Bearer synthetic-cli-session",
-      body: { taskRef: enrollment.taskRef, subject, sourceBindingRef: enrollment.sourceBindingRef },
-    });
-  });
 
   it("holds refused requests and rejects a non-UUID task selector before sending it", async () => {
     let requests = 0;

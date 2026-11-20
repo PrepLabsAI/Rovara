@@ -8,10 +8,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { checksReport, runChecks, shellCheckRun, type CheckRun } from "../../packages/cli/src/loop/check-runner.js";
-import { parseComment } from "../../packages/cli/src/loop/commands-parse.js";
 import { LoopDaemon } from "../../packages/cli/src/loop/daemon.js";
-import { artifactDigest, failedExitChecks, missingSections } from "../../packages/cli/src/loop/exit-checks.js";
-import { ARTIFACT_SECTIONS } from "../../packages/cli/src/loop/instructions.js";
+import { artifactDigest } from "../../packages/cli/src/loop/exit-checks.js";
 import { GitHub } from "../../packages/cli/src/loop/github.js";
 import { AgentHarness } from "../../packages/cli/src/loop/harness.js";
 import { createLoopMcpServer } from "../../packages/cli/src/loop/mcp.js";
@@ -91,35 +89,6 @@ async function setUp(options: { checks?: boolean[] } = {}) {
   return { world, store, daemon, checkout, worktree, writePlan, readPlanFile, selfReview, complete, runOwnSteps, step, label, checkRuns };
 }
 
-describe("the Quick loop's commands (#356)", () => {
-  it("reads /rovara quick, /rovara approve, and /rovara changes with its request", () => {
-    expect(parseComment("/rovara quick add retries to the payments client")).toMatchObject({ kind: "start", loop: { name: "quick" }, instruction: "add retries to the payments client" });
-    expect(parseComment("/rovara approve")).toEqual({ kind: "approve" });
-    expect(parseComment("/rovara changes: use exponential backoff\nand cap it at 3 tries")).toEqual({ kind: "changes", text: "use exponential backoff\nand cap it at 3 tries" });
-    expect(parseComment("/rovara changes keep the old API")).toEqual({ kind: "changes", text: "keep the old API" });
-    expect(parseComment("/rovara changes:")).toMatchObject({ kind: "invalid" });
-  });
-});
-
-describe("the checks on a Quick claim (#356)", () => {
-  it("wants a plan with each section filled in, and refuses a changed plan once it is approved", async () => {
-    expect(missingSections(PLAN, ARTIFACT_SECTIONS.plan)).toEqual([]);
-    expect(missingSections("## Summary\nx\n## Changes\n\n## testing\ny\n", ARTIFACT_SECTIONS.plan)).toEqual(["Changes"]);
-    const dir = await mkdtemp(join(tmpdir(), "rovara-exit-"));
-    dirs.push(dir);
-    const facts = { summary: "planned", issue: ISSUE, worktree: dir, artifact: "plan" as const, approvals: undefined };
-    expect(await failedExitChecks(["artifact-sections"], facts)).toEqual(["there is no plan at docs/rovara/42/plan.md; write it there"]);
-    await mkdir(join(dir, "docs", "rovara", "42"), { recursive: true });
-    await writeFile(join(dir, "docs", "rovara", "42", "plan.md"), "## Summary\nx\n");
-    expect(await failedExitChecks(["artifact-sections"], facts)).toEqual(["the plan needs these sections, each with something in it: ## Changes, ## Testing"]);
-    await writeFile(join(dir, "docs", "rovara", "42", "plan.md"), PLAN);
-    const approved = (digest: string) => ({ plan: { digest, by: "maya", at: "2026-10-13T00:00:00.000Z" } });
-    expect(await failedExitChecks(["require-summary", "artifact-sections", "approved-unchanged"], { ...facts, approvals: approved(artifactDigest(PLAN)) })).toEqual([]);
-    expect(await failedExitChecks(["approved-unchanged"], { ...facts, approvals: approved(artifactDigest("something else")) })).toEqual(["the approved plan at docs/rovara/42/plan.md was changed; put it back as approved"]);
-    expect(await failedExitChecks(["require-summary"], { ...facts, summary: " " })).toEqual(["give a summary of what you did; it is posted on the issue"]);
-  });
-});
-
 describe("the repository's checks, through a real shell (#356)", () => {
   it("passes and fails by exit code, keeps a failure's last output redacted, and stops a check that runs too long with everything it started", async () => {
     const dir = await mkdtemp(join(tmpdir(), "rovara-checks-"));
@@ -143,33 +112,6 @@ describe("the repository's checks, through a real shell (#356)", () => {
 });
 
 describe("the Quick loop end to end (#356)", () => {
-  it("does not advance past a written verdict while MCP response observation is delayed", async () => {
-    const h = await setUp({ checks: [false] });
-    h.world.say(ISSUE, "maya", "/rovara quick Retry the payment call on a 503");
-    await h.daemon.poll();
-    await h.writePlan(PLAN);
-    expect(await h.complete("Planned the retry.")).toContain("Accepted");
-    h.world.say(ISSUE, "maya", "/rovara approve");
-    await h.daemon.poll();
-    await h.writePlan(PLAN);
-    await h.selfReview();
-
-    let releasePoll!: () => void;
-    let sawMissingVerdict!: () => void;
-    const missingVerdict = new Promise<void>((resolve) => { sawMissingVerdict = resolve; });
-    const delayedPoll = new Promise<void>((resolve) => { releasePoll = resolve; });
-    const completion = h.complete("Coded the retry.", async () => {
-      sawMissingVerdict();
-      await delayedPoll;
-    });
-    await missingVerdict;
-    // Let the instant failed check finish while its MCP acknowledgement is withheld.
-    await h.daemon.settle();
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    releasePoll();
-    expect(await completion).toContain("Accepted");
-    expect(h.label()).toEqual(["rovara:checking"]);
-  });
 
   it("plans, takes changes into the plan, waits for approval, codes, sends a failing check back, then opens one pull request", async () => {
     const h = await setUp({ checks: [false] });

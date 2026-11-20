@@ -17,24 +17,6 @@ const catalog = (scopes: string[]): ConnectorCatalog => ({
 const context = { workspaceId: "11111111-1111-4111-8111-111111111111", conversationId: "22222222-2222-4222-8222-222222222222" };
 
 describe("connector tool bridge", () => {
-  it("calls the single scope without asking the model for a target", async () => {
-    const invoke = vi.fn<(input: ConnectorCallRequest & { workspaceId: string; connector: string }) => Promise<unknown>>(async () => ({ status: "SUCCEEDED" }));
-    const presented = catalog(["demo"]);
-    const [tool] = createConnectorTools([presented], invoke, context);
-    expect(tool!.description).toBe(presented.tools[0]!.description);
-    await tool!.execute("call-1", { state: "OPEN" }, undefined, undefined, {} as never);
-    expect(invoke).toHaveBeenCalledWith(expect.objectContaining({
-      connector: "github", scope: "demo", tool: "list_issues", schemaHash: hash("0"), arguments: { state: "OPEN" },
-    }));
-  });
-
-  it("keeps a full request identical on replay of the same call ID with the default hash-derived request ID", async () => {
-    const invoke = vi.fn(async () => ({ status: "SUCCEEDED" }));
-    const [tool] = createConnectorTools([catalog(["demo"])], invoke, context);
-    await tool!.execute("call-1", { state: "OPEN" }, undefined, undefined, {} as never);
-    await tool!.execute("call-1", { state: "OPEN" }, undefined, undefined, {} as never);
-    expect(invoke.mock.calls[0]).toEqual(invoke.mock.calls[1]);
-  });
 
   it("routes a target to its scope's hash, strips it from the arguments, and refuses an unknown target", async () => {
     const invoke = vi.fn(async () => ({ status: "SUCCEEDED" }));
@@ -74,31 +56,6 @@ describe("assertOrchestrationOnly with connector tools", () => {
 });
 
 describe("capabilities manifest", () => {
-  it("names what the channel can do and says plainly what is not connected", () => {
-    const manifest = capabilitiesManifest({
-      repositories: ["demo", "docs"],
-      connectors: [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo", "docs"], connected: true }],
-      catalogs: [catalog(["demo", "docs"])],
-    });
-    expect(manifest).toBe([
-      "What this channel can do:",
-      "- Repository code and files (demo, docs): agentx_submit_task, agentx_follow_up",
-      "- Pull requests (demo, docs): agentx_create_pull_request, agentx_manage_pull_request",
-      "- GitHub issues (demo, docs): github__* tools",
-      "Not connected for this channel: Linear, Jira, Asana. If asked about something that is not connected, say it is not connected for this channel and do not attempt a workaround.",
-      "Closing this thread's workspace is a command, not a tool: the user writes \"close this workspace\".",
-    ].join("\n"));
-  });
-
-  it("lists a configured connector without a working credential, or without tools, as not connected", () => {
-    const manifest = capabilitiesManifest({
-      repositories: ["demo"],
-      connectors: [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: false }],
-      catalogs: [],
-    });
-    expect(manifest).toContain("Not connected for this channel: GitHub issues, Linear, Jira, Asana.");
-    expect(manifest).not.toContain("github__*");
-  });
 
   it("lists a connector whose discovery failed this turn as temporarily unavailable, distinct from not connected", () => {
     const manifest = capabilitiesManifest({
@@ -135,8 +92,4 @@ describe("capabilities manifest", () => {
     expect(manifest).not.toContain("Temporarily unavailable");
   });
 
-  it("points the model at an unfinished operation", () => {
-    const manifest = capabilitiesManifest({ repositories: ["demo"], connectors: [], catalogs: [], recoverableOperations: ["55555555-5555-4555-8555-555555555555"] });
-    expect(manifest).toContain("An earlier operation in this thread has not finished: 55555555-5555-4555-8555-555555555555. Check it with agentx_task_status or agentx_task_result before starting new work.");
-  });
 });

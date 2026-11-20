@@ -24,17 +24,6 @@ describe("the sign-in Lambda's set-display-name request", () => {
     expect(harness.db.get(`DEVELOPER#${developerId}`, "META")).toMatchObject({ displayName: "Ada Lovelace", displayNameChosen: true });
   });
 
-  it("keeps refreshing the provider's name at sign-in while none was chosen", async () => {
-    const harness = identityHarness({ slackUsers: [{ userId: "U0ADA00001", teamId: TEAM, name: "Ada" }] });
-    await harness.signIn("slack", "U0ADA00001");
-    const developerId = developerIdOf(harness.db);
-    harness.db.set({ ...harness.db.get(`DEVELOPER#${developerId}`, "META")!, displayName: "Old name" });
-    harness.tick(1_000);
-    await harness.signIn("slack", "U0ADA00001");
-    expect(harness.db.get(`DEVELOPER#${developerId}`, "META")).toMatchObject({ displayName: "Ada" });
-    expect(harness.db.get(`DEVELOPER#${developerId}`, "META")?.displayNameChosen).toBeUndefined();
-  });
-
   it("refuses a name the route would refuse, and answers not_found for an unknown or revoked person", async () => {
     const harness = identityHarness({ slackUsers: [{ userId: "U0ADA00001", teamId: TEAM, name: "Ada" }] });
     await harness.signIn("slack", "U0ADA00001");

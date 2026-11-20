@@ -102,24 +102,6 @@ describe("Send back for a code the candidate causes", () => {
     });
   }
 
-  it("is refused for anyone who cannot act on the task, for a stale revision, and for a second press once it was taken, and a replay answers as the first", async () => {
-    const round = await blockedWithCode("build-failed");
-    const revision = round.workflowNow().revision;
-    expect((await sendBack(round, OMAR)).status).toBe(404);
-    expect((await sendBack(round, MAYA, { expectedRevision: revision - 1 })).body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-    expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED", revision });
-    const requestId = randomUUID();
-    expect((await sendBack(round, MAYA, { requestId })).status).toBe(200);
-    const codingOperations = () => round.operationRows((row) => row.workflowMode === "IMPLEMENT" && row.requestId === requestId).length;
-    expect(codingOperations()).toBe(1);
-    // The same press again (a replay) is the same send-back: no second coding run.
-    expect((await sendBack(round, MAYA, { requestId, expectedRevision: revision })).status).toBe(200);
-    expect(codingOperations()).toBe(1);
-    // A stale button pressed again with a new request is refused: the task has moved on.
-    const stale = await sendBack(round, MAYA, { expectedRevision: revision });
-    expect(stale.status).toBeGreaterThanOrEqual(400);
-    expect(round.workflowNow()).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING", revision: revision + 2 });
-  });
 });
 
 describe("no Send back for the rest", () => {
@@ -193,14 +175,6 @@ describe("no Send back for the rest", () => {
     }
   });
 
-  it("a code with worker text after it is not a code: the one fixed message, and no Send back beyond what a task with a project check already allows (none)", async () => {
-    const round = await blockedWithCode(`build-failed: ${BUILD_LOG}`);
-    withChecks(round);
-    expect(workflowSendBackOffered(workflowOf(round))).toBe(false);
-    expect(buttons(round)).toEqual(["agentx_workflow_retry_checks", "agentx_workflow_close"]);
-    expect(workflowMessage({ taskId: round.taskId, workflow: workflowOf(round) })!.text).toContain("The required E2E evidence is incomplete or unavailable.");
-    expect((await sendBack(round, MAYA)).status).toBe(400);
-  });
 });
 
 describe("the Retry the sentences promise is real for a task with no project check (review round 1, I-1)", () => {

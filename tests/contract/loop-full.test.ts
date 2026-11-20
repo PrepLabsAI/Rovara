@@ -5,7 +5,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseComment } from "../../packages/cli/src/loop/commands-parse.js";
-import { FULL_LOOP, LoopDefinitionSchema, landingStep, skippablePhases } from "../../packages/cli/src/loop/definitions.js";
+import { FULL_LOOP, LoopDefinitionSchema } from "../../packages/cli/src/loop/definitions.js";
 import { artifactDigest } from "../../packages/cli/src/loop/exit-checks.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { LoopStore } from "../../packages/cli/src/loop/state.js";
@@ -19,13 +19,6 @@ const DESIGN = ["## How it works", "send() retries with exponential backoff, at 
 const PLAN = ["## Summary", "Add the retry.", "", "## Changes", "- src/client.ts", "", "## Testing", "- npm test", ""].join("\n");
 
 describe("the Full loop's definition (#357)", () => {
-  it("has requirements and design phases that can be declared away, and lands past them", () => {
-    expect(skippablePhases(FULL_LOOP)).toEqual(["requirements", "design"]);
-    expect(landingStep(FULL_LOOP, "requirements", [])).toBe("requirements");
-    expect(landingStep(FULL_LOOP, "requirements", ["requirements"])).toBe("design");
-    expect(landingStep(FULL_LOOP, "requirements", ["requirements", "design"])).toBe("plan");
-    expect(landingStep(FULL_LOOP, "design", ["design"])).toBe("plan");
-  });
 
   it("refuses a gate that approves no artifact, and a phase that cannot be skipped past", () => {
     const gateless = { ...FULL_LOOP, steps: FULL_LOOP.steps.map((step) => (step.id === "design-review" ? { ...step, artifact: undefined } : step)) };

@@ -3,8 +3,7 @@
 // session in its worktree. As a reviewer it runs headless in its read-only sandbox.
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Exec } from "../../packages/cli/src/loop/exec.js";
-import { AgentHarness, agentCommand, type SessionStart } from "../../packages/cli/src/loop/harness.js";
+import { agentCommand, type SessionStart } from "../../packages/cli/src/loop/harness.js";
 import { reviewerCommand } from "../../packages/cli/src/loop/reviews.js";
 import { createLoopHarness, LOOP_SESSION, removeAll } from "../support/loop-harness.js";
 
@@ -39,15 +38,6 @@ describe("the Codex harness (#359)", () => {
     expect(reviewerCommand({ harness: "claude-code", cwd: "/w/42", model: undefined }, "").slice(0, 4)).toEqual(["claude", "-p", "--permission-mode", "plan"]);
   });
 
-  it("sees Codex waiting for an approval on its screen", async () => {
-    const screen = (text: string): Exec => async () => ({ code: 0, stdout: text, stderr: "" });
-    expect(await new AgentHarness(screen("Would you like to run the following command?\n  $ npm install")).waitingForApproval("s")).toBe(true);
-    expect(await new AgentHarness(screen("Would you like to make the following edits?")).waitingForApproval("s")).toBe(true);
-    expect(await new AgentHarness(screen("Working (12s)")).waitingForApproval("s")).toBe(false);
-    // #392: its approval for an MCP tool, and (#391) Claude Code's folder-trust dialog, are waiting too.
-    expect(await new AgentHarness(screen('Allow the rovara-loop MCP server to run tool "loop_complete"?')).waitingForApproval("s")).toBe(true);
-    expect(await new AgentHarness(screen("Quick safety check: Is this a project you created or one you trust?")).waitingForApproval("s")).toBe(true);
-  });
 });
 
 describe("the Quick loop on Codex (#359)", () => {

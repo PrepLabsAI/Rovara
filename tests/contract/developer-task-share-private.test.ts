@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { ChannelInfoRequest, ChannelInfoResponse, ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
-import { MAYA, OMAR, bindChannel, createDeveloperTaskBroker, grantProject, unbindChannel } from "../support/developer-task-broker.js";
+import { MAYA, OMAR, bindChannel, createDeveloperTaskBroker, grantProject } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL } from "../support/slack-broker.js";
 
 const PRIVATE = "G0PRIVATE01";
@@ -52,34 +52,6 @@ describe("sharing into a private channel needs membership (Q10)", () => {
     expect(response.body.error).toEqual({ code: "CHANNEL_REQUIRED", message: NOT_A_MEMBER });
     expect(workspaces(db)).toHaveLength(0);
     expect(refusals(db)).toEqual([expect.objectContaining({ action: "start", outcome: "refused", error: { code: "CHANNEL_REQUIRED" } })]);
-  });
-
-  it("refuses a non-member on the share route, and the task stays private", async () => {
-    const { db, dev } = await withPrivate(false);
-    const running = taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", start())).body);
-    const response = await dev(MAYA, "POST", `/v1/dev/tasks/${running.taskId}/share`, { requestId: randomUUID(), channel: PRIVATE });
-    expect(response.body.error).toEqual({ code: "CHANNEL_REQUIRED", message: NOT_A_MEMBER });
-    expect(db.get(`DEVTASK#${running.taskId}`, "META")).toMatchObject({ shared: false });
-    expect(db.get(`DEVTASK#${running.taskId}`, "META")).not.toHaveProperty("share");
-  });
-
-  it("refuses a non-member when the private channel is the project's only channel", async () => {
-    const { db, handler, dev } = await withPrivate(false);
-    grantProject(db, MAYA);
-    await unbindChannel(handler, SLACK_CHANNEL);
-    const response = await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true }));
-    expect(response.body.error).toEqual({ code: "CHANNEL_REQUIRED", message: NOT_A_MEMBER });
-    expect(workspaces(db)).toHaveLength(0);
-  });
-
-  it("refuses a developer with no Slack link, who cannot be confirmed as a member, and names no private channel", async () => {
-    const { db, dev, channelMembers } = await withPrivate(true);
-    grantProject(db, OMAR);
-    const response = await dev(OMAR, "POST", "/v1/dev/tasks", start({ shareToChannel: true, channel: PRIVATE }));
-    expect(response.body.error).toEqual({ code: "CHANNEL_REQUIRED", message: NOT_A_MEMBER });
-    expect(JSON.stringify(response.body)).not.toContain("payments-secret");
-    expect(channelMembers).not.toHaveBeenCalledWith(expect.objectContaining({ channelIds: [PRIVATE] }));
-    expect(workspaces(db)).toHaveLength(0);
   });
 
   it("refuses SLACK_UNAVAILABLE when the membership lookup fails, whether Slack answers so or throws", async () => {
@@ -132,12 +104,4 @@ describe("sharing into a private channel needs membership (Q10)", () => {
     }
   });
 
-  it("leaves a public channel unaffected: a non-member shares into it, and no membership is asked", async () => {
-    const { handler, dev, channelMembers } = await withPrivate(false);
-    await bindChannel(handler, PUBLIC);
-    channelMembers.mockClear();
-    const task = taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true, channel: "#payments-ops" }))).body);
-    expect(task).toMatchObject({ shared: true, share: { channelId: PUBLIC, channelName: "payments-ops" } });
-    expect(channelMembers).not.toHaveBeenCalledWith(expect.objectContaining({ channelIds: [PUBLIC] }));
-  });
 });

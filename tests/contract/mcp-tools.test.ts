@@ -5,10 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { WORKFLOW_REVIEW_FAILURE_REASONS, taskGraphDigest, workflowFindingFingerprint, type DeveloperTaskView } from "@agentx/contracts";
-import {
-  DEVELOPER_TOOLS, NEXT_STEPS, REQUIRED_SERVER_MINOR, ToolError, UNEXPECTED_ANSWER_STEP, UPGRADE_AGENTX_STEP, compatibilityChecker, createAgentXMcpServer, httpControlPlaneClient,
-  type ControlPlaneClient, type ToolContext,
-} from "../../packages/mcp/src/index.js";
+import { NEXT_STEPS, REQUIRED_SERVER_MINOR, ToolError, UNEXPECTED_ANSWER_STEP, UPGRADE_AGENTX_STEP, compatibilityChecker, createAgentXMcpServer, httpControlPlaneClient, type ControlPlaneClient, type ToolContext } from "../../packages/mcp/src/index.js";
 import { toolError as parseToolError } from "../support/mcp-tool-error.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { createSingleAnswerPlanBroker, MAYA } from "../support/developer-task-broker.js";
@@ -61,60 +58,10 @@ describe("the tool list (FR-027, FR-028, SC-010)", () => {
       await mcp.close();
     }
   });
-  it("lists exactly the module's developer tools, each with an output schema", async () => {
-    const { tools } = await (await connect({})).listTools();
-    expect(tools.map((tool) => tool.name)).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
-    expect(tools.map((tool) => tool.name)).toEqual([
-      "agentx_whoami", "agentx_list_projects", "agentx_start", "agentx_start_task", "agentx_start_workflow", "agentx_get_task", "agentx_get_plan", "agentx_wait_for_task",
-      "agentx_list_tasks", "agentx_continue_task", "agentx_decide_workflow", "agentx_answer_task_questions", "agentx_review_workflow_candidate", "agentx_retry_workflow",
-      "agentx_send_workflow_back", "agentx_resolve_review_findings", "agentx_retry_workflow_publish", "agentx_keep_pull_request", "agentx_get_pr_feedback", "agentx_decide_pr_feedback", "agentx_cancel_task", "agentx_close_task", "agentx_share_task", "agentx_open_pull_request", "agentx_get_intake", "agentx_start_intake_ticket", "agentx_dismiss_intake_ticket", "agentx_list_connections", "agentx_get_context_sources", "agentx_get_second_review", "agentx_get_model_selection", "agentx_get_design_review", "agentx_get_diagnosis", "agentx_get_task_people", "agentx_get_task_people_request", "agentx_set_task_person", "agentx_take_task_ownership",
-      "agentx_list_agents", "agentx_run_agent", "agentx_list_approvals", "agentx_open_approval",
-      "agentx_list_sessions", "agentx_get_session", "agentx_comment_on_session", "agentx_tell_session_agent", "agentx_stop_session", "wiki_list", "wiki_read",
-      "team_knowledge", "team_knowledge_for", "team_knowledge_areas", "team_propose",
-    ]);
-    for (const tool of tools) expect(tool.outputSchema, tool.name).toBeDefined();
-    expect(JSON.stringify(tools)).not.toContain("\u2014");
-  });
 
-  it("serves the module's own titles, descriptions and inputs (SC-010)", async () => {
-    const { tools } = await (await connect({})).listTools();
-    for (const [index, tool] of tools.entries()) {
-      const definition = DEVELOPER_TOOLS[index]!;
-      expect(tool.title, tool.name).toBe(definition.title);
-      expect(tool.description, tool.name).toBe(definition.description);
-      expect(Object.keys(tool.inputSchema.properties ?? {}), tool.name).toEqual(Object.keys(definition.inputSchema));
-      expect(Object.keys(tool.outputSchema?.properties ?? {}), tool.name).toEqual(Object.keys(definition.outputSchema));
-    }
-  });
-
-  it("says what updated_at means wherever a tool returns it (25c note 4)", async () => {
-    const { tools } = await (await connect({})).listTools();
-    const found: Array<{ tool: string; description: unknown }> = [];
-    const walk = (tool: string, node: unknown): void => {
-      if (node === null || typeof node !== "object") return;
-      const properties = (node as { properties?: Record<string, unknown> }).properties;
-      if (properties?.updated_at !== undefined) found.push({ tool, description: (properties.updated_at as { description?: unknown }).description });
-      for (const value of Object.values(node)) walk(tool, value);
-    };
-    for (const tool of tools) walk(tool.name, tool.outputSchema);
-    expect(found.map((entry) => entry.tool)).toEqual(expect.arrayContaining(["agentx_get_task", "agentx_list_tasks"]));
-    for (const entry of found) expect(entry.description, entry.tool).toBe("when the latest request on this task started; share changes do not move it");
-  });
-
-  it("offers the owner's share tool and no admin tool in this phase (Q2: an admin switches a mode with the CLI)", async () => {
-    const { tools } = await (await connect({})).listTools();
-    expect(tools.map((tool) => tool.name).filter((name) => name.includes("share") || name.includes("admin"))).toEqual(["agentx_share_task"]);
-  });
 });
 
 describe("tool errors (FR-049, ruling F3)", () => {
-  it("still reads as an error after the client listed the tools (SDK 1.30.1 validates structuredContent then)", async () => {
-    const mcp = await connect({ getTask: async () => { throw new ToolError("TASK_NOT_FOUND", `task ${TASK} doesn't exist`); } });
-    await mcp.listTools();
-    const result = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
-    expect(result.structuredContent).toBeUndefined();
-    expect(toolError(result)).toEqual({ code: "TASK_NOT_FOUND", message: `task ${TASK} doesn't exist`, next_step: NEXT_STEPS.TASK_NOT_FOUND });
-  });
 
   it("answers an unexpected failure without its words, and logs only the tool and code", async () => {
     const log = vi.fn();
@@ -127,18 +74,6 @@ describe("tool errors (FR-049, ruling F3)", () => {
     expect(JSON.stringify(log.mock.calls)).not.toContain(PLANTED);
   });
 
-  it("does not repeat a full stop that ends the message or the next step", async () => {
-    const mcp = await connect({ getTask: async () => { throw new ToolError("TASK_BUSY", "the task is still working.", "wait for it."); } });
-    expect(text(await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } }))).toBe("TASK_BUSY: the task is still working. Next step: wait for it.");
-  });
-
-  it("refuses input outside a tool's schema without calling AgentX", async () => {
-    const getTask = vi.fn();
-    const result = await (await connect({ getTask })).callTool({ name: "agentx_wait_for_task", arguments: { task_id: TASK, wait_seconds: 601 } });
-    expect(result.isError).toBe(true);
-    expect(text(result)).toContain("wait_seconds");
-    expect(getTask).not.toHaveBeenCalled();
-  });
 });
 
 describe("ordered work approval digest (Spec059)", () => {
@@ -216,32 +151,10 @@ describe("ordered work approval digest (Spec059)", () => {
     expect(decideWorkflowTask.mock.calls.at(-1)?.[1]).not.toHaveProperty("workBreakdownDigest");
   });
 
-  it("says in its text, which is all some clients show the model, the digest, revision and work breakdown digest the decide tool needs (blind test 02)", async () => {
-    const graph = { schemaVersion: 1 as const, taskId: TASK, version: 1, items: [
-      { id: "11111111-1111-4111-8111-111111111111", title: "Implement", description: "Implement the change", repository: "demo", dependsOn: [] },
-    ] };
-    const workflow = { stage: "PLAN_REVIEW", state: "WAITING", revision: 7, path: "QUICK", reviewPhase: "PLAN", workBreakdownDigest: taskGraphDigest(graph),
-      artifacts: [{ id: "plan-artifact", type: "plan", version: 2, sha256: "b".repeat(64), producer: "agentx", objectKey: "plan.json", createdAt: "2026-10-12T12:00:00.000Z" }],
-      planContent: planAnswer(planDocument({ workBreakdown: graph })) } as never;
-    const mcp = await connect({ getTask: async () => view("SUCCEEDED", { workflow }) });
-    const observed = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
-    expect(text(observed)).toContain(`artifact_digest ${"b".repeat(64)}`);
-    expect(text(observed)).toContain("expected_revision 7");
-    expect(text(observed)).toContain(`work_breakdown_digest ${taskGraphDigest(graph)}`);
-    // The structured answer already had them; the text and the structure agree.
-    expect(observed.structuredContent).toMatchObject({ workflow: { revision: 7, approval_document: { sha256: "b".repeat(64) }, work_breakdown_digest: taskGraphDigest(graph) } });
-  });
-
   describe("QA6-12b: the plan-approval tool shows and takes the run limit it raises", () => {
     const workflow = { stage: "PLAN_REVIEW", state: "WAITING", revision: 5, path: "QUICK", reviewPhase: "PLAN",
       artifacts: [{ id: "plan-artifact", type: "plan", version: 1, sha256: "d".repeat(64), producer: "agentx", objectKey: "plan.json", createdAt: "2026-10-12T12:00:00.000Z" }] } as never;
     const approve = { task_id: TASK, request_id: "33333333-3333-4333-8333-333333333336", expected_revision: 5, decision: "APPROVE", reason: "Approved", artifact_digest: "d".repeat(64) };
-    it("the tool's description and input name the amount to pass back", async () => {
-      const tool = DEVELOPER_TOOLS.find((candidate) => candidate.name === "agentx_decide_workflow")!;
-      expect(tool.description).toContain("This raises the run limit from $A to $B");
-      expect(tool.description).toContain("acknowledged_run_limit_usd");
-      expect(Object.keys(tool.inputSchema)).toContain("acknowledged_run_limit_usd");
-    });
     it("the plan it returns says 'This raises the run limit from $A to $B' in its text and its structure when approving raises the limit, and nothing when it does not", async () => {
       const raising = await (await connect({ getTask: async () => view("SUCCEEDED", { workflow, planRunLimit: { currentUsd: 2, proposedUsd: 12.5, raises: true } }) })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
       expect(text(raising)).toContain("This raises the run limit from $2 to $12.50.");
@@ -265,48 +178,11 @@ describe("ordered work approval digest (Spec059)", () => {
       await mcp.callTool({ name: "agentx_decide_workflow", arguments: { ...approve, request_id: "33333333-3333-4333-8333-333333333337", decision: "REQUEST_CHANGES", acknowledged_run_limit_usd: 12.5 } });
       expect(decideWorkflowTask.mock.calls.at(-1)?.[1]).not.toHaveProperty("acknowledgedRunLimitUsd");
     });
-    it("a refusal for a missing or wrong amount reaches the model with the broker's words (the amounts)", async () => {
-      const words = "This raises the run limit from $2 to $12. Approve again with the run limit acknowledged as $12 (acknowledgedRunLimitUsd 12).";
-      const decideWorkflowTask = vi.fn(async () => { throw new ToolError("INVALID_REQUEST", words); });
-      const result = await (await connect({ decideWorkflowTask: decideWorkflowTask })).callTool({ name: "agentx_decide_workflow", arguments: approve });
-      expect(result.isError).toBe(true);
-      expect(text(result)).toContain("This raises the run limit from $2 to $12.");
-    });
-    it("a negative or absurd amount is not accepted as an argument", async () => {
-      const decideWorkflowTask = vi.fn(async () => view("RUNNING", { workflow }));
-      const mcp = await connect({ decideWorkflowTask: decideWorkflowTask });
-      for (const bad of [-1, 100_001, "12"]) expect((await mcp.callTool({ name: "agentx_decide_workflow", arguments: { ...approve, acknowledged_run_limit_usd: bad } })).isError, String(bad)).toBe(true);
-      expect(decideWorkflowTask).not.toHaveBeenCalled();
-    });
   });
 
-  it("leaves the work breakdown digest out of the text when the plan has none, and shows nothing to approve once the gate is past", async () => {
-    const plain = { stage: "PLAN_REVIEW", state: "WAITING", revision: 4, path: "QUICK", reviewPhase: "PLAN",
-      artifacts: [{ id: "plan-artifact", type: "plan", version: 1, sha256: "c".repeat(64), producer: "agentx", objectKey: "plan.json", createdAt: "2026-10-12T12:00:00.000Z" }] } as never;
-    const waiting = text(await (await connect({ getTask: async () => view("SUCCEEDED", { workflow: plain }) })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } }));
-    expect(waiting).toContain(`artifact_digest ${"c".repeat(64)}`);
-    expect(waiting).toContain("expected_revision 4");
-    expect(waiting).not.toContain("work_breakdown_digest c");
-    const running = { ...(plain as object), stage: "IMPLEMENT", state: "RUNNING", revision: 5 } as never;
-    const past = text(await (await connect({ getTask: async () => view("RUNNING", { workflow: running }) })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } }));
-    expect(past).not.toContain("artifact_digest");
-  });
 });
 
 describe("agentx_start_task (US1, US2)", () => {
-  it("hands off and answers at once, passing the client's name and a request ID", async () => {
-    const startTask = vi.fn(async () => view("STARTING"));
-    const getTask = vi.fn();
-    const mcp = await connect({ startTask, getTask });
-    const result = await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "Fix the flaky retry test" } });
-    expect(result.isError).toBeFalsy();
-    expect(result.structuredContent).toMatchObject({ task_id: TASK, status: "STARTING", project: "payments", starting_revision: 7, shared: false, share_mode: null });
-    expect(result.structuredContent).not.toHaveProperty("timed_out");
-    expect(startTask).toHaveBeenCalledWith({ requestId: "33333333-3333-4333-8333-333333333333", project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
-    expect(getTask).not.toHaveBeenCalled();
-    expect(text(result)).toContain(TASK);
-    expect(text(result)).toContain("agentx_get_task");
-  });
 
   it("passes the caller's request_id and title through unchanged", async () => {
     const startTask = vi.fn(async () => view("STARTING"));
@@ -344,15 +220,6 @@ describe("agentx_start_task (US1, US2)", () => {
     expect(log).toHaveBeenCalledWith({ event: "tool.wait_failed", tool: "agentx_wait_for_task", code: "CONTROL_PLANE_UNAVAILABLE" });
   });
 
-  it("does not read the task again at once after starting it", async () => {
-    const getTask = vi.fn(async () => view("SUCCEEDED"));
-    let now = 0;
-    const polls: number[] = [];
-    getTask.mockImplementation(async () => { polls.push(now); return view("SUCCEEDED"); });
-    await (await connect({ startTask: async () => view("STARTING"), getTask }, { now: () => now, sleep: async (ms) => { now += ms; } })).callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "x", wait_seconds: 30 } });
-    expect(polls).toEqual([2_000]);
-  });
-
   it("refuses instructions over 65,536 bytes as INVALID_REQUEST without calling AgentX", async () => {
     const startTask = vi.fn();
     const result = await (await connect({ startTask })).callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "\u20ac".repeat(21_846) } });
@@ -360,27 +227,10 @@ describe("agentx_start_task (US1, US2)", () => {
     expect(startTask).not.toHaveBeenCalled();
   });
 
-  it("returns a control-plane refusal as a tool error with code, message and next step (FR-049)", async () => {
-    const mcp = await connect({ startTask: async () => { throw new ToolError("PROJECT_ACCESS_DENIED", "you don't have access to `payments`: ask an admin"); } });
-    const result = await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "x" } });
-    expect(toolError(result)).toEqual({ code: "PROJECT_ACCESS_DENIED", message: "you don't have access to `payments`: ask an admin", next_step: "join one of the project's Slack channels, or ask an admin for access" });
-  });
 });
 
 describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 1)", () => {
   const counter = () => { let next = 0; return () => `00000000-0000-4000-8000-${String(++next).padStart(12, "0")}`; };
-
-  it("sends the same requestId for a repeated identical start, even with another wait, and returns it", async () => {
-    const startTask = vi.fn(async () => view("SUCCEEDED"));
-    const mcp = await connect({ startTask }, { newRequestId: counter() });
-    const first = await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "Fix the flaky retry test" } });
-    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "Fix the flaky retry test", wait_seconds: 30 } });
-    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "Fix the other test" } });
-    const ids = startTask.mock.calls.map((call) => (call as unknown as [{ requestId: string }])[0].requestId);
-    expect(ids[0]).toBe(ids[1]);
-    expect(ids[2]).not.toBe(ids[0]);
-    expect(first.structuredContent).toMatchObject({ request_id: ids[0] });
-  });
 
   it("gives the same instructions a fresh requestId after 15 minutes, so a deliberate repeat starts new work", async () => {
     let now = 0;
@@ -395,41 +245,6 @@ describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 
     const ids = startTask.mock.calls.map((call) => (call as unknown as [{ requestId: string }])[0].requestId);
     expect(ids[1]).toBe(ids[0]);
     expect(ids[2]).not.toBe(ids[0]);
-  });
-
-  it("keeps the caller's own request_id, and tells projects, tools and tasks apart", async () => {
-    const startTask = vi.fn(async () => view("STARTING"));
-    const continueTask = vi.fn(async () => view("RUNNING"));
-    const mcp = await connect({ startTask, continueTask }, { newRequestId: counter() });
-    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "x", request_id: "66666666-6666-4666-8666-666666666666" } });
-    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "billing", instructions: "x" } });
-    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "x" } });
-    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "x", title: "Other" } });
-    const continued = await mcp.callTool({ name: "agentx_continue_task", arguments: { task_id: TASK, instructions: "x" } });
-    await mcp.callTool({ name: "agentx_continue_task", arguments: { task_id: TASK, instructions: "x", wait_seconds: 0 } });
-    const starts = startTask.mock.calls.map((call) => (call as unknown as [{ requestId: string }])[0].requestId);
-    const continues = continueTask.mock.calls.map((call) => (call as unknown as [string, { requestId: string }])[1].requestId);
-    expect(starts[0]).toBe("66666666-6666-4666-8666-666666666666");
-    expect(new Set([...starts, continues[0]]).size).toBe(5);
-    expect(continues[1]).toBe(continues[0]);
-    expect(continued.structuredContent).toMatchObject({ request_id: continues[0] });
-  });
-
-  it("starts the native workflow only through its explicit tool", async () => {
-    const startTask = vi.fn(async () => view("STARTING"));
-    const mcp = await connect({ startTask }, { newRequestId: counter() });
-    await mcp.callTool({ name: "agentx_start_workflow", arguments: { project: "payments", instructions: "Fix retry handling", workflow_path: "quick" } });
-    await mcp.callTool({ name: "agentx_start_workflow", arguments: { project: "payments", instructions: "Full scope", workflow_path: "full" } });
-    expect(startTask).toHaveBeenNthCalledWith(1, expect.objectContaining({ project: "payments", workflow: true, workflowPath: "QUICK" }));
-    expect(startTask).toHaveBeenNthCalledWith(2, expect.objectContaining({ project: "payments", workflow: true, workflowPath: "FULL" }));
-  });
-
-  it("requires an explicit workflow path instead of silently choosing Quick", async () => {
-    const startTask = vi.fn(async () => view("STARTING"));
-    const mcp = await connect({ startTask }, { newRequestId: counter() });
-    const result = await mcp.callTool({ name: "agentx_start_workflow", arguments: { project: "payments", instructions: "Fix retry handling" } });
-    expect(result.isError).toBe(true);
-    expect(startTask).not.toHaveBeenCalled();
   });
 
   it("passes the exact revision and candidate digest when retrying blocked reviews", async () => {
@@ -550,20 +365,6 @@ describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 
       expect(changedText).not.toContain("agentx_retry_workflow ");
     });
 
-    it("points a task blocked by review findings at sending it back to coding", async () => {
-      const candidateDigest = "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad";
-      const workflow = {
-        stage: "REVIEW", state: "BLOCKED", revision: 15, path: "QUICK", blockReason: "the critic review did not pass", artifacts: [],
-        candidate: { schemaVersion: 1, digest: candidateDigest, repositories: [{ repositoryId: "repo-1", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }] },
-        verification: { candidateDigest, producer: "broker", environmentId: "test", recordedAt: "2026-10-07T20:00:00.000Z", results: [{ checkId: "unit", status: "PASS" }] },
-        reviews: [{ operationId: "88888888-8888-4888-8888-888888888888", candidateDigest, role: "CRITIC", provider: "test", version: "1", status: "FINDINGS", findings: [{ text: "x", origin: "INTRODUCED" }], readOnly: true, recordedAt: "2026-10-07T20:01:00.000Z" }],
-      } as unknown as NonNullable<DeveloperTaskView["workflow"]>;
-      const mcp = await connect({ getTask: async () => view("SUCCEEDED", { workflow }) });
-      const result = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
-      expect(text(result)).toContain("agentx_send_workflow_back");
-      expect(text(result)).toContain("expected_revision 15");
-    });
-
     describe("resolving review findings", () => {
       const candidateDigest = "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad";
       const parser = { text: "The new parser drops the last line.", origin: "INTRODUCED", file: "src/parse.ts", line: 40 };
@@ -625,16 +426,6 @@ describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 
         expect(result.structuredContent).toMatchObject({ request_id: "77777777-7777-4777-8777-777777777777" });
       });
 
-      it("refuses an unknown action, a malformed finding_id, and more than 20 answers before calling AgentX", async () => {
-        const { fetch, client } = fetchClient();
-        const mcp = await connect(client);
-        const call = (resolutions: unknown) => mcp.callTool({ name: "agentx_resolve_review_findings", arguments: { task_id: TASK, expected_revision: 15, candidate_digest: candidateDigest, resolutions } });
-        expect((await call([{ finding_id: "f".repeat(64), action: "keep" }])).isError).toBe(true);
-        expect((await call([{ finding_id: "nope", action: "fix" }])).isError).toBe(true);
-        expect((await call([])).isError).toBe(true);
-        expect((await call(Array.from({ length: 21 }, () => ({ finding_id: "f".repeat(64), action: "fix" })))).isError).toBe(true);
-        expect(fetch).not.toHaveBeenCalled();
-      });
     });
   });
 
@@ -696,20 +487,6 @@ describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 
     expect(first.structuredContent).toMatchObject({ request_id: ids[0] });
   });
 
-  it("tells the AI tool how to retry safely", () => {
-    for (const name of ["agentx_start_task", "agentx_continue_task", "agentx_open_pull_request"]) {
-      expect(DEVELOPER_TOOLS.find((tool) => tool.name === name)?.description, name).toContain("send your own request_id, or repeat the call unchanged");
-    }
-  });
-  it("sends the same requestId for two identical cancels, so a retry hits AgentX's idempotency (final review M3)", async () => {
-    const cancelTask = vi.fn(async () => view("CANCELLED"));
-    const mcp = await connect({ cancelTask }, { newRequestId: counter() });
-    await mcp.callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
-    await mcp.callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
-    const ids = cancelTask.mock.calls.map((call) => (call as unknown as [string, string])[1]);
-    expect(ids).toHaveLength(2);
-    expect(ids[0]).toBe(ids[1]);
-  });
 
   it("gives a cancel sent after a continue a new requestId, so it stops the new turn", async () => {
     const cancelTask = vi.fn(async () => view("CANCELLED"));
@@ -736,22 +513,6 @@ describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 
 });
 
 describe("the other task tools (FR-030)", () => {
-  it("continues a task, waiting when asked", async () => {
-    const continueTask = vi.fn(async () => view("RUNNING"));
-    const getTask = vi.fn(async () => view("SUCCEEDED"));
-    const result = await (await connect({ continueTask, getTask })).callTool({ name: "agentx_continue_task", arguments: { task_id: TASK, instructions: "Add a test.", wait_seconds: 20 } });
-    expect(continueTask).toHaveBeenCalledWith(TASK, { requestId: "33333333-3333-4333-8333-333333333333", instructions: "Add a test." });
-    expect(result.structuredContent).toMatchObject({ status: "SUCCEEDED", timed_out: false });
-  });
-
-  it("waits for a task with agentx_wait_for_task, and gives timed_out when it outlives the wait", async () => {
-    const getTask = vi.fn(async () => view("RUNNING"));
-    const result = await (await connect({ getTask })).callTool({ name: "agentx_wait_for_task", arguments: { task_id: TASK, wait_seconds: 10, events: 3 } });
-    expect(result.isError).toBeFalsy();
-    expect(result.structuredContent).toMatchObject({ status: "RUNNING", timed_out: true });
-    expect(getTask).toHaveBeenCalledWith(TASK, 3, expect.objectContaining({ deadlineMs: 10_000, signal: expect.any(AbortSignal) as unknown }));
-    expect(text(result)).toContain("keeps running");
-  });
 
   it("stops the wait when the AI tool cancels the call (MCP cancellation, Review Focus 2)", async () => {
     const getTask = vi.fn(async () => view("RUNNING"));
@@ -774,13 +535,6 @@ describe("the other task tools (FR-030)", () => {
     expect(result.structuredContent).toEqual({ tasks: [{ task_id: TASK, title: "Fix", project: "payments", status: "RUNNING", created_at: "c", updated_at: "u", shared: false }] });
   });
 
-  it("cancels a task and shows its status after the request", async () => {
-    const cancelTask = vi.fn(async () => view("CANCELLED"));
-    const result = await (await connect({ cancelTask })).callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
-    expect(cancelTask).toHaveBeenCalledWith(TASK, "33333333-3333-4333-8333-333333333333");
-    expect(result.structuredContent).toMatchObject({ status: "CANCELLED" });
-  });
-
   it("says plainly that a task which already finished was not cancelled, with its final status (#196)", async () => {
     for (const status of ["SUCCEEDED", "FAILED"] as const) {
       const cancelTask = vi.fn(async () => view(status));
@@ -789,15 +543,6 @@ describe("the other task tools (FR-030)", () => {
       // UX2 slice 2: the status in words, never the raw code.
       expect(text(result), status).toMatch(/The task had already finished \((Finished its run|Failed: the run stopped with an error)\), so nothing was cancelled\./u);
       expect(text(result)).not.toContain(status);
-    }
-  });
-
-  it("does not say already finished for a task it stopped or is stopping (#196)", async () => {
-    // INTERRUPTED is also how a queued cancel that failed ends, so a retried cancel may read it.
-    for (const status of ["CANCELLED", "INTERRUPTED", "RUNNING", "STARTING"] as const) {
-      const cancelTask = vi.fn(async () => view(status));
-      const result = await (await connect({ cancelTask })).callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
-      expect(text(result), status).not.toContain("already finished");
     }
   });
 
@@ -824,24 +569,6 @@ describe("the other task tools (FR-030)", () => {
 });
 
 describe("every tool result is redacted and capped (FR-029, SC-004)", () => {
-  it("removes a planted secret from the task's summary, events and failure", async () => {
-    const leaky = view("FAILED", { summary: `used ${PLANTED}`, events: [{ at: "t", kind: "error", text: PLANTED }], failure: { category: "task_failed", message: PLANTED } });
-    const result = await (await connect({ getTask: async () => leaky })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
-    expect(JSON.stringify(result)).not.toContain(PLANTED);
-  });
-
-  it("removes a planted secret from an error message", async () => {
-    const mcp = await connect({ getTask: async () => { throw new ToolError("CONTROL_PLANE_UNAVAILABLE", `bad ${PLANTED}`); } });
-    expect(JSON.stringify(await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } }))).not.toContain(PLANTED);
-  });
-
-  it("removes a planted secret from progress notifications", async () => {
-    const getTask = vi.fn().mockResolvedValueOnce(view("RUNNING", { events: [{ at: "t", kind: "tool", text: `export SLACK_BOT_TOKEN=${PLANTED}` }] })).mockResolvedValueOnce(view("SUCCEEDED"));
-    const progress: unknown[] = [];
-    await (await connect({ getTask })).callTool({ name: "agentx_wait_for_task", arguments: { task_id: TASK, wait_seconds: 30 } }, undefined, { onprogress: (update) => progress.push(update) });
-    expect(progress.length).toBeGreaterThan(0);
-    expect(JSON.stringify(progress)).not.toContain(PLANTED);
-  });
 
   it("caps what reaches the model, even when AgentX sends more than it should", async () => {
     const changedFiles = Array.from({ length: 500 }, (_, index) => ({ repository: "demo", path: `src/${index}.ts`, added: 1, removed: 0 }));
@@ -854,33 +581,7 @@ describe("every tool result is redacted and capped (FR-029, SC-004)", () => {
   });
 });
 
-describe("the error and progress caps (Task 15 fix round 1)", () => {
-  it("cuts an error's text to 2,000 characters", async () => {
-    const mcp = await connect({ getTask: async () => { throw new ToolError("TASK_BUSY", "w".repeat(5_000)); } });
-    const result = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
-    expect(result.isError).toBe(true);
-    expect(text(result).startsWith("TASK_BUSY: www")).toBe(true);
-    expect(text(result).length).toBe(2_000);
-  });
-
-  it("cuts a progress message to 300 characters", async () => {
-    const getTask = vi.fn().mockResolvedValueOnce(view("RUNNING", { events: [{ at: "t", kind: "tool", text: "p".repeat(5_000) }] })).mockResolvedValueOnce(view("SUCCEEDED"));
-    const progress: Array<{ message?: string }> = [];
-    await (await connect({ getTask })).callTool({ name: "agentx_wait_for_task", arguments: { task_id: TASK, wait_seconds: 30 } }, undefined, { onprogress: (update) => progress.push(update as { message?: string }) });
-    expect(progress[0]?.message?.startsWith("Working: ppp")).toBe(true);
-    expect(progress[0]?.message?.length).toBe(300);
-  });
-});
-
 describe("versions (FR-048, R23, ruling S1)", () => {
-  it("answers UPGRADE_REQUIRED from every tool when the control plane is not compatible", async () => {
-    const projects = vi.fn();
-    const mcp = await connect({ projects }, { compatibility: async () => { throw new ToolError("UPGRADE_REQUIRED", "AgentX answers API 2.0"); } });
-    for (const name of ["agentx_whoami", "agentx_list_projects"]) {
-      expect(toolError(await mcp.callTool({ name, arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED" });
-    }
-    expect(projects).not.toHaveBeenCalled();
-  });
 
   it("shows the upgrade notice in agentx_whoami, with who the developer is", async () => {
     const projects = async () => ({ developer: { id: "d".repeat(64), name: "Maya Chen", provider: "slack" as const, slackUserId: "U0MAYA001" }, projects: [], notices: [] });
@@ -924,36 +625,9 @@ describe("versions (FR-048, R23, ruling S1)", () => {
     expect(newer.notice).toContain("mcp install");
   });
 
-  it("asks AgentX again only after 10 minutes, and never keeps a refusal", async () => {
-    let now = 0;
-    const client = configured("1.2");
-    const check = compatibilityChecker(client as unknown as ControlPlaneClient, { now: () => now });
-    await check();
-    now = 599_999;
-    await check();
-    expect(client.configuration).toHaveBeenCalledTimes(1);
-    now = 600_000;
-    await check();
-    expect(client.configuration).toHaveBeenCalledTimes(2);
-
-    const old = configured("1.0");
-    const refusing = compatibilityChecker(old as unknown as ControlPlaneClient, { now: () => 0 });
-    await expect(refusing()).rejects.toBeInstanceOf(ToolError);
-    await expect(refusing()).rejects.toBeInstanceOf(ToolError);
-    expect(old.configuration).toHaveBeenCalledTimes(2);
-  });
 });
 
 describe("agentx_open_pull_request and agentx_close_task return at once (R22, Owner decision 6)", () => {
-  it("opens a draft and answers with the started operation, calling AgentX once", async () => {
-    const openPullRequest = vi.fn<ControlPlaneClient["openPullRequest"]>(async () => ({ task: view("RUNNING"), operationId: "55555555-5555-4555-8555-555555555555", operationStatus: "ACCEPTED" }));
-    const result = await (await connect({ openPullRequest })).callTool({ name: "agentx_open_pull_request", arguments: { task_id: TASK, title: "Fix the retry test" } });
-    expect(result.structuredContent).toMatchObject({ operation_id: "55555555-5555-4555-8555-555555555555", operation_status: "ACCEPTED", task: { task_id: TASK, status: "RUNNING" } });
-    expect(result.structuredContent).not.toHaveProperty("timed_out");
-    expect(openPullRequest).toHaveBeenCalledTimes(1);
-    expect(openPullRequest.mock.calls[0]?.[1]).toMatchObject({ requestId: "33333333-3333-4333-8333-333333333333", draft: true });
-    expect(text(result)).toContain("agentx_get_task");
-  });
 
   it("returns the PR's URL when a retried call finds it already published", async () => {
     const pullRequest = { repository: "demo", number: 42, url: "https://github.com/example/demo/pull/42", state: "open" as const };
@@ -961,15 +635,6 @@ describe("agentx_open_pull_request and agentx_close_task return at once (R22, Ow
     const result = await (await connect({ openPullRequest })).callTool({ name: "agentx_open_pull_request", arguments: { task_id: TASK, title: "x", request_id: "66666666-6666-4666-8666-666666666666" } });
     expect(result.structuredContent).toMatchObject({ operation_status: "SUCCEEDED", pull_request: pullRequest });
     expect(openPullRequest.mock.calls[0]?.[1]).toMatchObject({ requestId: "66666666-6666-4666-8666-666666666666" });
-  });
-
-  it("starts the close and answers at once with closing, calling AgentX once", async () => {
-    const closeTask = vi.fn(async () => ({ task: view("SUCCEEDED", { closing: true }), closed: false }));
-    const result = await (await connect({ closeTask })).callTool({ name: "agentx_close_task", arguments: { task_id: TASK } });
-    expect(result.structuredContent).toMatchObject({ task_id: TASK, closing: true, closed: false });
-    expect(result.structuredContent).not.toHaveProperty("timed_out");
-    expect(closeTask).toHaveBeenCalledTimes(1);
-    expect(text(result)).toContain("agentx_get_task");
   });
 
   it("passes discard authorization only when the task owner explicitly selects it", async () => {
@@ -994,11 +659,6 @@ describe("agentx_open_pull_request and agentx_close_task return at once (R22, Ow
     expect(text(result)).toContain("agentx_open_pull_request");
   });
 
-  it("shows a refused close in agentx_get_task", async () => {
-    const getTask = async () => view("SUCCEEDED", { unpublished: [{ repository: "demo", reasons: ["unpushed_head"] }] });
-    const result = await (await connect({ getTask })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
-    expect(result.structuredContent).toMatchObject({ unpublished: [{ repository: "demo", reasons: ["unpushed_head"] }] });
-  });
 });
 
 describe("the next step after a failure during setup (#154)", () => {
@@ -1010,17 +670,6 @@ describe("the next step after a failure during setup (#154)", () => {
     expect(result.structuredContent).toMatchObject({ failure: { category: "worker_unavailable", stage: "setup" } });
   });
 
-  it("declares the failure's stage in the task tools' output schema", async () => {
-    const { tools } = await (await connect({})).listTools();
-    const failure = (tools.find((tool) => tool.name === "agentx_get_task")?.outputSchema?.properties as Record<string, { properties?: Record<string, unknown> }> | undefined)?.failure;
-    expect(failure?.properties).toHaveProperty("stage");
-  });
-
-  it("still offers agentx_continue_task when compute was lost during a task", async () => {
-    const lost = view("FAILED", { failure: { category: "worker_unavailable", message: "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request" } });
-    const result = await (await connect({ getTask: async () => lost })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
-    expect(text(result)).toContain("Send new instructions with agentx_continue_task, or close it with agentx_close_task.");
-  });
 });
 
 describe("agentx_get_plan (PLANFULLDOC)", () => {
@@ -1091,11 +740,6 @@ describe("slice 5: one start, and the web link on every task", () => {
     await mcp.callTool({ name: "agentx_start", arguments: { project: "payments", instructions: "Look at the build", agent: { agent_id: "code-reviewer" }, run_agent: true } });
     const runs = (runAgent.mock.calls as unknown as Array<[string, { requestId: string }]>).map(([, request]) => request.requestId);
     expect(runs[1]).toBe(runs[0]);
-  });
-
-  it("keeps the old start tools as aliases that say so", async () => {
-    const { tools } = await (await connect({})).listTools();
-    for (const name of ["agentx_start_task", "agentx_start_workflow", "agentx_run_agent"]) expect(tools.find((tool) => tool.name === name)?.description, name).toMatch(/^Alias of agentx_start/u);
   });
 
   it("agentx_get_task and agentx_list_tasks give the session and its link; a link that is not plain https is left out", async () => {

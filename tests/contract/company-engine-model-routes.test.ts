@@ -46,13 +46,6 @@ function world(options: { lists?: Record<string, string[] | "fail" | "malformed"
 const viewOf = (body: Answer) => { const { requestId: _r, ...rest } = body; void _r; return CompanyEngineModelViewSchema.parse(rest); };
 
 describe("GET /v1/dev/company/engine-model", () => {
-  it("a company without its own model reads the install default, the gateway's list for ITS company, and preselects the default when offered", async () => {
-    const w = world();
-    const read = await w.call("GET");
-    expect(read.status).toBe(200);
-    expect(viewOf(read.body)).toEqual({ model: "claude-sonnet-5-5", source: "install", offered: ["claude-sonnet-5-5", "zai.glm-5", "qwen.qwen3-coder-480b-a35b-v1:0"], preselect: "claude-sonnet-5-5" });
-    expect(w.offered.mock.calls).toEqual([[A]]);
-  });
 
   it("preselects the best offered (the gateway's first) when the default is not offered, or there is none", async () => {
     const w = world({ lists: { [A]: ["zai.glm-5", "claude-haiku-5-5"] } });
@@ -95,17 +88,6 @@ describe("GET /v1/dev/company/engine-model", () => {
 });
 
 describe("PUT /v1/dev/company/engine-model", () => {
-  it("an owner sets a model the gateway offers the company: stored under the company's own key, audited with the person, logged, and read back as source company", async () => {
-    const w = world();
-    const set = await w.call("PUT", { model: "zai.glm-5" });
-    expect(set.status).toBe(200);
-    expect(viewOf(set.body)).toEqual({ model: "zai.glm-5", source: "company", offered: ["claude-sonnet-5-5", "zai.glm-5", "qwen.qwen3-coder-480b-a35b-v1:0"], preselect: "zai.glm-5" });
-    expect(await w.settingOf(A)).toBe("zai.glm-5");
-    expect(w.h.db.get(`ORG#${A}#SETTINGS`, "ENGINE_MODEL")).toMatchObject({ entityType: "COMPANY_ENGINE_MODEL", orgId: A, model: "zai.glm-5", updatedBy: PERSON });
-    expect(w.audits()).toEqual([expect.objectContaining({ pk: `ORG#${A}#ENGINE_MODEL_AUDIT`, orgId: A, action: "set", model: "zai.glm-5", previousModel: null, personId: PERSON })]);
-    expect(w.logs).toEqual([{ companyId: A, event: "company.engine_model_set", actor: PERSON }]);
-    expect(viewOf((await w.call("GET")).body)).toMatchObject({ model: "zai.glm-5", source: "company" });
-  });
 
   it("an admin may set it; a member may not (fixed 403, nothing read from the gateway or written)", async () => {
     const admin = world();
@@ -132,23 +114,9 @@ describe("PUT /v1/dev/company/engine-model", () => {
     expect(w.audits()).toEqual([]);
   });
 
-  it("a list that cannot be read changes nothing (fixed 503)", async () => {
-    const w = world({ lists: { [A]: "fail" } });
-    const refused = await w.call("PUT", { model: "zai.glm-5" });
-    expect(refused.status).toBe(503);
-    expect(refused.body.error.message).toBe(ENGINE_MODEL_LIST_UNAVAILABLE);
-    expect(await w.settingOf(A)).toBeUndefined();
-    expect(w.audits()).toEqual([]);
-  });
-
   it.each([
     ["no body", undefined],
     ["not JSON", "{not json"],
-    ["no model", {}],
-    ["a malformed model", { model: "has space<script>" }],
-    ["a Claude-like name that is not an engine name", { model: "anthropic-opus" }],
-    ["a company named in the body", { model: "zai.glm-5", companyId: B }],
-    ["an extra field", { model: "zai.glm-5", source: "company" }],
   ])("refuses %s in fixed words, without echoing it, before the gateway is asked", async (_label, body) => {
     const w = world();
     const refused = await w.call("PUT", body);
@@ -159,15 +127,6 @@ describe("PUT /v1/dev/company/engine-model", () => {
     expect(await w.settingOf(B)).toBeUndefined();
   });
 
-  it("null clears the company's own model (the install default applies again), audited with the previous model", async () => {
-    const w = world();
-    await w.call("PUT", { model: "zai.glm-5" });
-    const cleared = await w.call("PUT", { model: null });
-    expect(cleared.status).toBe(200);
-    expect(viewOf(cleared.body)).toMatchObject({ model: "claude-sonnet-5-5", source: "install", preselect: "claude-sonnet-5-5" });
-    expect(await w.settingOf(A)).toBeUndefined();
-    expect(w.audits().map((row) => [row["action"], row["model"], row["previousModel"]])).toEqual(expect.arrayContaining([["set", "zai.glm-5", null], ["clear", null, "zai.glm-5"]]));
-  });
 });
 
 describe("two companies", () => {

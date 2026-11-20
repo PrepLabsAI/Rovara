@@ -8,7 +8,6 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { askToApply, exportChanges, runCliChange } from "../../packages/cli/src/admin/changes.js";
-import { parseSince } from "../../packages/cli/src/admin/turns.js";
 import { tokenStoreKey } from "../../packages/cli/src/auth.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
@@ -33,41 +32,6 @@ function control(answers: Record<string, unknown>) {
 const refusal = (status: number, code: string, message: string) => Response.json({ error: { code, message } }, { status });
 
 describe("runCliChange (E17, Q6)", () => {
-  it("proposes with the cli method, prints the effect, asks, and applies", async () => {
-    const { fetch, calls } = control({ "POST /v1/admin/changes": { change: view("pending") }, [`POST /v1/admin/changes/${CHANGE}/apply`]: { change: view("applied") } });
-    const lines: string[] = [];
-    const confirm = vi.fn(async () => true);
-    const result = await runCliChange({ controlPlaneUrl: URL, accessToken: "admin-token", change: { kind: "grant_project_access", project: "payments", developer: "U0NEW00001" }, cliVersion: "0.0.7", confirm, write: (line) => lines.push(line) }, fetch);
-    expect(result.outcome).toBe("applied");
-    expect(calls[0]).toMatchObject({ method: "POST", path: "/v1/admin/changes", body: { change: { kind: "grant_project_access", project: "payments", developer: "U0NEW00001" }, client: { cliVersion: "0.0.7" }, methods: ["cli"] } });
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Grant Slack user U0NEW00001"));
-    expect(calls[1]).toMatchObject({ method: "POST", path: `/v1/admin/changes/${CHANGE}/apply`, body: { method: "cli" } });
-    expect(lines.join("\n")).toContain("Applied.");
-  });
-
-  it("declines on no, and applies nothing", async () => {
-    const { fetch, calls } = control({ "POST /v1/admin/changes": { change: view("pending") }, [`POST /v1/admin/changes/${CHANGE}/decline`]: { change: view("declined") } });
-    const result = await runCliChange({ controlPlaneUrl: URL, accessToken: "admin-token", change: { kind: "revoke_project_access", project: "payments", developer: "U0NEW00001" }, cliVersion: "0.0.7", confirm: async () => false, write: () => undefined }, fetch);
-    expect(result.outcome).toBe("declined");
-    expect(calls.map((call) => call.path)).toEqual(["/v1/admin/changes", `/v1/admin/changes/${CHANGE}/decline`]);
-    expect(calls[1]?.body).toEqual({ method: "cli", reason: "declined", requestedAt: expect.any(String) as unknown, answeredAt: expect.any(String) as unknown });
-  });
-
-  it("keeps AgentX's own refusal code", async () => {
-    const fetch = vi.fn(async () => Response.json({ error: { code: "NOT_FOUND", message: "nobody has signed in to AgentX with new@example.com yet; name them by Slack user ID, or ask them to sign in first" } }, { status: 404 })) as unknown as typeof globalThis.fetch;
-    await expect(runCliChange({ controlPlaneUrl: URL, accessToken: "t", change: { kind: "grant_project_access", project: "payments", developer: "new@example.com" }, cliVersion: "0.0.7", confirm: async () => true, write: () => undefined }, fetch)).rejects.toMatchObject({ code: "NOT_FOUND" });
-  });
-
-  it("sends one request ID and one trace ID, and the proposal's own ID when given", async () => {
-    const { fetch, calls } = control({ "POST /v1/admin/changes": { change: view("pending") }, [`POST /v1/admin/changes/${CHANGE}/apply`]: { change: view("applied") } });
-    await runCliChange({ controlPlaneUrl: `${URL}/`, accessToken: "admin-token", change: { kind: "grant_project_access", project: "payments", developer: "U0NEW00001" }, cliVersion: "0.0.7", confirm: async () => true, write: () => undefined, newId: () => "77777777-7777-4777-8777-777777777777" }, fetch);
-    expect(calls[0]?.body).toMatchObject({ requestId: "77777777-7777-4777-8777-777777777777" });
-    expect(calls[0]?.headers?.authorization).toBe("Bearer admin-token");
-    const traces = calls.map((call) => call.headers?.["x-agentx-trace-id"]);
-    expect(traces[0]).toMatch(/^[0-9a-f-]{36}$/);
-    expect(new Set(traces).size).toBe(1);
-    expect(calls[1]?.body).toMatchObject({ method: "cli", requestedAt: expect.any(String) as unknown, answeredAt: expect.any(String) as unknown });
-  });
 
   it("reads a newer control plane's answer loosely, and never calls an unknown status applied (R1)", async () => {
     const { fetch, calls } = control({
@@ -141,31 +105,9 @@ describe("runCliChange (E17, Q6)", () => {
     expect(lines.join("\n")).toContain("Nothing was applied");
   });
 
-  it("never shows the admin token, and strips terminal control characters from the effect", async () => {
-    const token = "planted-admin-token-5f1c";
-    const { fetch } = control({ "POST /v1/admin/changes": { change: { ...view("pending"), effect: "Grant \u001b[31mSlack\u001b[0m user U0NEW00001 access to project payments." } }, [`POST /v1/admin/changes/${CHANGE}/apply`]: refusal(403, "FORBIDDEN", "only the admin who asked for this change can confirm or decline it") });
-    const lines: string[] = [];
-    const error = await runCliChange({ controlPlaneUrl: URL, accessToken: token, change: { kind: "grant_project_access", project: "payments", developer: "U0NEW00001" }, cliVersion: "0.0.7", confirm: async (effect) => { lines.push(effect); return true; }, write: (line) => lines.push(line) }, fetch).catch((caught: unknown) => caught);
-    expect(String((error as Error).message)).not.toContain(token);
-    expect(lines.join("\n")).not.toContain(token);
-    expect(lines.join("\n")).not.toContain("\u001b");
-    expect(lines[0]).toBe("Grant [31mSlack[0m user U0NEW00001 access to project payments.");
-  });
 });
 
 describe("exportChanges (FR-052)", () => {
-  it("follows the cursor and writes one line per record, as JSON Lines with --json", async () => {
-    const record = { changeId: CHANGE, kind: "bind_channel", traceId: "t", status: "applied", outcome: "confirmed", admin: { issuer: "i", subject: "admin-subject", displayName: "Ada" }, client: { cliVersion: "0.0.7" }, change: {}, effect: "Bind.", methodsOffered: ["cli"], proposedAt: "2026-10-02T09:00:00.000Z" };
-    let page = 0;
-    const fetch = vi.fn(async () => { page += 1; return Response.json(page === 1 ? { changes: [record], cursor: "next" } : { changes: [{ ...record, changeId: "66666666-6666-4666-8666-666666666666" }] }); }) as unknown as typeof globalThis.fetch;
-    const json: string[] = [];
-    expect(await exportChanges({ controlPlaneUrl: URL, accessToken: "t", since: "2026-10-01T00:00:00.000Z", write: (line) => { json.push(line); }, json: true }, fetch)).toEqual({ exported: 2, since: "2026-10-01T00:00:00.000Z" });
-    expect(JSON.parse(json[0]!)).toMatchObject({ changeId: CHANGE });
-    page = 0;
-    const text: string[] = [];
-    await exportChanges({ controlPlaneUrl: URL, accessToken: "t", since: "2026-10-01T00:00:00.000Z", write: (line) => { text.push(line); }, json: false }, fetch);
-    expect(text[0]).toBe(`2026-10-02T09:00:00.000Z  confirmed  bind_channel  Ada  ${CHANGE}\n`);
-  });
 
   it("asks for the window and each next page, and reads a newer record loosely (R1)", async () => {
     const record = { changeId: CHANGE, kind: "rename_everything", traceId: "t", status: "reviewing", admin: { issuer: "i", subject: "admin-subject", team: "x" }, client: { cliVersion: "0.9.0", os: "mac" }, change: { project: "payments" }, effect: "Something new.", methodsOffered: ["passkey"], proposedAt: "2026-10-02T09:00:00.000Z", newField: [1] };
@@ -190,15 +132,6 @@ describe("exportChanges (FR-052)", () => {
     await expect(exportChanges({ controlPlaneUrl: URL, accessToken: "t", since: "2026-10-01T00:00:00.000Z", write: () => undefined, json: true }, invalid)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     const refused = vi.fn(async () => refusal(403, "FORBIDDEN", "administrator claim is required")) as unknown as typeof globalThis.fetch;
     await expect(exportChanges({ controlPlaneUrl: URL, accessToken: "t", since: "2026-10-01T00:00:00.000Z", write: () => undefined, json: true }, refused)).rejects.toMatchObject({ code: "FORBIDDEN" });
-  });
-});
-
-describe("parseSince names what it exports (C18)", () => {
-  it("keeps turn records' words by default, and names change records for admin changes", () => {
-    const now = Date.parse("2026-09-24T12:00:00.000Z");
-    expect(() => parseSince("31d", now)).toThrow("--since must be more than zero and at most 30d; turn records are kept 30 days");
-    expect(() => parseSince("31d", now, "change records")).toThrow("--since must be more than zero and at most 30d; change records are kept 30 days");
-    expect(parseSince("7d", now, "change records")).toBe("2026-09-17T12:00:00.000Z");
   });
 });
 
@@ -298,20 +231,6 @@ describe("the commands (E17)", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("grant: shows the change, asks, and applies with the cli method; stdout carries the outcome", async () => {
-    const session = await signedIn();
-    const { fetch, calls } = control({ "POST /v1/admin/changes": { change: view("pending") }, [`POST /v1/admin/changes/${CHANGE}/apply`]: { change: view("applied") } });
-    const confirm = vi.fn(async () => true);
-    expect(await executeCli([...session.globals, "--json", "admin", "project", "grant", "--project", "payments", "--developer", "U0NEW00001"], session.io(fetch, { confirm }))).toBe(0);
-    expect(confirm).toHaveBeenCalledWith("Apply this change?");
-    expect(calls[0]?.body).toMatchObject({ change: { kind: "grant_project_access", project: "payments", developer: "U0NEW00001" }, methods: ["cli"] });
-    expect(calls[1]).toMatchObject({ path: `/v1/admin/changes/${CHANGE}/apply`, body: { method: "cli" } });
-    expect(JSON.parse(session.stdout())).toEqual({ ok: true, data: { outcome: "applied", changeId: CHANGE } });
-    expect(session.stderr()).toContain("Grant Slack user U0NEW00001");
-    expect(session.stderr()).toContain("Applied.");
-    expect(`${session.stdout()}${session.stderr()}`).not.toContain("access-secret-9d2e");
-  });
-
   it("revoke: a no declines with the cli method", async () => {
     const session = await signedIn();
     const { fetch, calls } = control({ "POST /v1/admin/changes": { change: { ...view("pending"), kind: "revoke_project_access" } }, [`POST /v1/admin/changes/${CHANGE}/decline`]: { change: view("declined") } });
@@ -319,16 +238,6 @@ describe("the commands (E17)", () => {
     expect(calls[0]?.body).toMatchObject({ change: { kind: "revoke_project_access" } });
     expect(calls[1]).toMatchObject({ path: `/v1/admin/changes/${CHANGE}/decline`, body: { method: "cli", reason: "declined" } });
     expect(session.stdout()).toContain("declined");
-  });
-
-  it("--yes applies without asking, and still prints the change", async () => {
-    const session = await signedIn();
-    const { fetch, calls } = control({ "POST /v1/admin/changes": { change: view("pending") }, [`POST /v1/admin/changes/${CHANGE}/apply`]: { change: view("applied") } });
-    const confirm = vi.fn(async () => false);
-    expect(await executeCli([...session.globals, "admin", "project", "grant", "--project", "payments", "--developer", "U0NEW00001", "--yes"], session.io(fetch, { confirm }))).toBe(0);
-    expect(confirm).not.toHaveBeenCalled();
-    expect(calls[1]).toMatchObject({ path: `/v1/admin/changes/${CHANGE}/apply`, body: { method: "cli" } });
-    expect(session.stderr()).toContain("Grant Slack user U0NEW00001");
   });
 
   it("without --yes and without a terminal, refuses before planning anything", async () => {

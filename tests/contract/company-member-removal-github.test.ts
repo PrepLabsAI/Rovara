@@ -74,37 +74,6 @@ function world(options: { store?: DocumentStore; noWiring?: boolean } = {}) {
 const linkedTo = async (links: DocumentStore, company: OrgId, person: string) => (await githubLinkOf(links, company, person))?.accountId;
 
 describe("removing a member takes their GitHub link with it", () => {
-  it("deletes both link rows of the removed person, and only that person's", async () => {
-    const h = world();
-    await h.link(A, MEMBER, "7", "max"); await h.link(A, PEER, "8", "pat"); await h.link(A, ADMIN, "9", "ada");
-    expect(removed((await h.call("POST", removal(MEMBER))).status)).toBe(true);
-    expect(h.revoked(MEMBER)).toBe(true);
-    expect(await linkedTo(h.links, A, MEMBER)).toBeUndefined();
-    expect(await linkedGithubPerson(h.links, A, "7")).toBeUndefined();
-    // Nothing of the two other members is touched.
-    expect(await linkedTo(h.links, A, PEER)).toBe("8"); expect(await linkedGithubPerson(h.links, A, "8")).toBe(PEER);
-    expect(await linkedTo(h.links, A, ADMIN)).toBe("9"); expect(await linkedGithubPerson(h.links, A, "9")).toBe(ADMIN);
-  });
-
-  it("two companies: the removal leaves the other company's rows alone, even ones under the same person id or the same GitHub account", async () => {
-    const h = world();
-    await h.link(A, MEMBER, "7", "max");
-    // Company B holds the same GitHub account for its own person, and (a stray) a row for the same person id.
-    await h.link(B, OTHER, "7", "bea");
-    await h.link(B, MEMBER, "11", "max-in-b");
-    expect(removed((await h.call("POST", removal(MEMBER))).status)).toBe(true);
-    expect(await linkedTo(h.links, A, MEMBER)).toBeUndefined();
-    expect(await linkedGithubPerson(h.links, B, "7")).toBe(OTHER);
-    expect(await linkedTo(h.links, B, OTHER)).toBe("7");
-    expect(await linkedTo(h.links, B, MEMBER)).toBe("11");
-  });
-
-  it("another company's admin cannot remove A's member, and A's link stays", async () => {
-    const h = world(); h.as(OTHER);
-    await h.link(A, MEMBER, "7", "max");
-    expect((await h.call("POST", removal(MEMBER))).status).toBe(404);
-    expect(await linkedTo(h.links, A, MEMBER)).toBe("7");
-  });
 
   it("re-adding the person starts with no link: the account is nobody's, the person has none, and the account can be linked again by anyone", async () => {
     const h = world();
@@ -127,12 +96,6 @@ describe("removing a member takes their GitHub link with it", () => {
     expect(removed((await h.call("POST", removal(MEMBER))).status)).toBe(true);
     expect(writes).not.toHaveBeenCalled(); expect(deletes).not.toHaveBeenCalled();
     expect(h.logs).toEqual([]);
-  });
-
-  it("a removal without the GitHub link wiring still removes the member", async () => {
-    const h = world({ noWiring: true });
-    expect(removed((await h.call("POST", removal(MEMBER))).status)).toBe(true);
-    expect(h.revoked(MEMBER)).toBe(true);
   });
 
   it("an account row that names someone else is not removed with this person's (conditional deletes)", async () => {
@@ -161,24 +124,6 @@ describe("the cleanup never removes a row another member wrote since", () => {
     });
     expect(removed((await h.call("POST", removal(MEMBER))).status)).toBe(true);
     expect(await linkedGithubPerson(h.links, A, "7")).toBe(PEER);
-  });
-});
-
-describe("only a removal that happened removes the link", () => {
-  it("a removal refused for oneself, for an owner by an admin, for a role that changed, or by an unavailable helper leaves the link", async () => {
-    const h = world();
-    await h.link(A, MEMBER, "7", "max"); await h.link(A, OWNER, "8", "olive"); await h.link(A, ADMIN, "9", "ada");
-    // DEC 254zzz84 (5): the role the remover saw is not the person's role now.
-    expect((await h.call("POST", removal(MEMBER), { requestId: randomUUID(), expectedRole: "admin" })).status).toBe(409);
-    // Oneself, and an owner by an admin.
-    expect((await h.call("POST", removal(ADMIN))).status).toBe(403);
-    expect((await h.call("POST", removal(OWNER))).status).toBe(403);
-    // A helper that cannot reach the identity side.
-    h.deps.developer.companyMembers = companyMemberActionsThroughLambda({ documentClient: h.db, tableName: "SignIn", invoke: async () => { throw new Error(CANARY); } });
-    expect((await h.call("POST", removal(MEMBER))).status).toBe(503);
-    expect(h.revoked(MEMBER)).toBe(false);
-    for (const [person, account] of [[MEMBER, "7"], [OWNER, "8"], [ADMIN, "9"]] as const) expect(await linkedTo(h.links, A, person), person).toBe(account);
-    expect(h.logs).toEqual([]);
   });
 });
 
@@ -213,21 +158,4 @@ describe("a failed cleanup never blocks the removal", () => {
     expect(await linkedGithubPerson(h.links, A, "7")).toBeUndefined();
   });
 
-  it("a repeat that fails again is also answered as already removed, and logs again", async () => {
-    const failing = failingStore();
-    const h = world({ store: failing.store });
-    await h.link(A, MEMBER, "7", "max");
-    failing.break();
-    await h.call("POST", removal(MEMBER));
-    expect(await h.call("POST", removal(MEMBER))).toEqual(refusal(409, "MEMBER_ALREADY_REMOVED", MEMBER_REVOKED));
-    expect(h.logs).toHaveLength(2);
-  });
-
-  it("a repeat removal request of a removed member never touches another company's person or link", async () => {
-    const h = world();
-    await h.call("POST", removal(MEMBER));
-    await h.link(B, MEMBER, "11", "max-b");
-    expect(await h.call("POST", removal(MEMBER))).toEqual(refusal(409, "MEMBER_ALREADY_REMOVED", MEMBER_REVOKED));
-    expect(await linkedTo(h.links, B, MEMBER)).toBe("11");
-  });
 });

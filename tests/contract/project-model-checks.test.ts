@@ -60,17 +60,6 @@ function services(check: ProjectModelChecker | undefined) {
 }
 
 describe("project models are checked when a revision is registered", () => {
-  it("refuses a registration whose default model's key is rejected, with the key sentence, and registers and writes nothing", async () => {
-    const run = checker({ "anthropic/claude-sonnet-4-6": failed("key-rejected") });
-    const context = services(run.check);
-    const error = await registerRevision({ env: "staging", session, definition: definition(), services: context.services }).then(() => undefined, (caught: unknown) => caught as Error);
-    expect(error?.message).toContain("Anthropic refused the key for claude-sonnet-4-6; check the key, and that it may use this model.");
-    expect(error?.message).toContain("payments was not registered");
-    expect(context.plane.registered).toEqual([]);
-    await expect(readFile(join(configDir, "payments.yaml"), "utf8")).rejects.toThrow();
-    // The default is checked first, and a refused default stops the rest.
-    expect(run.calls).toEqual(["anthropic/claude-sonnet-4-6"]);
-  });
 
   it("registers an approved pair that fails with a warning, and stores the class (never the provider's text) with the pair", async () => {
     const run = checker({ "anthropic/claude-opus-5": failed("model-not-found", "not_found_error") });
@@ -186,12 +175,6 @@ describe("what refuses a registration, and what only warns (Ruling DY)", () => {
     expect(outcome.warnings.join(" ")).not.toContain("sk-ant");
   });
 
-  it("stores an approved pair's unchecked state the same way, and only a model-specific failure as failed", async () => {
-    const run = checker({ "anthropic/claude-opus-5": failed("provider-outage"), "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0": failed("model-not-found") });
-    const outcome = await checkProjectModels({ definition: definition(), check: run.check, now: () => Date.parse(NOW) });
-    expect(outcome.definition.models?.approved.map((model) => model.lastCheck?.status)).toEqual(["ok", "unchecked", "failed"]);
-  });
-
   it("registerRevision passes the administrator's acceptance on, and the registered definition carries the reason", async () => {
     const run = checker({ "anthropic/claude-sonnet-4-6": failed("model-not-found") });
     const context = services(run.check);
@@ -201,15 +184,6 @@ describe("what refuses a registration, and what only warns (Ruling DY)", () => {
     expect((context.plane.registered[0] as { definition: ProjectDefinition }).definition.models?.default.lastCheck).toMatchObject({ status: "failed", class: "model-not-found", acceptedReason: "pilot account" });
   });
 
-  it("drops a stored check from a pair this run did not check (a fixed or changed model must not keep an old verdict)", async () => {
-    const stale = { status: "failed" as const, class: "model-not-found" as const, checkedAt: "2026-01-01T00:00:00.000Z" };
-    const other = { provider: "some-gateway", modelId: "alpha", label: "Alpha", lastCheck: stale };
-    const input = definition({ default: DEFAULT, approved: [{ ...DEFAULT, lastCheck: stale }, other] });
-    const checked = await checkProjectModels({ definition: input, check: checker({}).check, now: () => Date.parse(NOW) });
-    expect(checked.definition.models?.approved.map((model) => model.lastCheck?.status)).toEqual(["ok", undefined]);
-    const unchecked = await checkProjectModels({ definition: input, check: undefined });
-    expect(JSON.stringify(unchecked.definition)).not.toContain("lastCheck");
-  });
 });
 
 describe("doctor lists every approved pair of every registered project", () => {

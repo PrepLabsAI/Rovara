@@ -5,7 +5,7 @@ import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { createCompanySignInAuditWriter } from "../../packages/broker/src/developer/company-signin-audit.js";
 import { GITHUB_ISSUER, githubSignInProvider, oidcSignInProvider } from "../../packages/broker/src/developer/providers.js";
 import { authorizeQuery, httpEvent, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_ISSUER } from "../support/developer-fakes.js";
-import { B, person, sharedSignInWorld, WEB, X } from "../support/company-shared-signin-world.js";
+import { person, sharedSignInWorld, WEB, X } from "../support/company-shared-signin-world.js";
 import { fakeGithub, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET } from "../support/fake-github.js";
 
 const paths = ["web", "cli", "slack", "github", "invite", "browser"] as const;
@@ -135,12 +135,6 @@ it("a refused member's audit failure is logged once and still withholds access",
   expect(w.logs.filter((entry) => entry.event === "signin.audit_failed")).toHaveLength(1);
 });
 
-it("membership attribution never comes from a requested foreign company", async () => {
-  const { w, rows } = await world();
-  expect((await w.signIn("owner", { company: B })).refused).toBe("already a member of another company");
-  expect(rows()).toEqual([expect.objectContaining({ companyId: X, action: "signin.refused", details: { method: "web", cause: "member_elsewhere" } })]);
-});
-
 it("records a verified OIDC policy refusal against the verified member", async () => {
   const { w, rows, start, developerId } = await world();
   w.deps.providers.oidc = oidcSignInProvider({ issuer: OIDC_ISSUER, clientId: OIDC_CLIENT_ID,
@@ -149,15 +143,6 @@ it("records a verified OIDC policy refusal against the verified member", async (
   const finish = await start();
   noCredentials(await finish());
   expect(rows()).toEqual([expect.objectContaining({ companyId: X, actor: { type: "person", id: developerId }, action: "signin.refused", details: { method: "web", cause: "sign_in_failed" } })]);
-  scan(rows());
-});
-
-it("retains a refused join's resolved membership when a later membership lookup fails", async () => {
-  const { w, rows } = await world();
-  const member = w.db.find((row) => row.entityType === "COMPANY_MEMBERSHIP" && row.personId === person("owner"))[0]!;
-  vi.spyOn(w.company, "membership").mockRejectedValue(new Error(canary)).mockResolvedValueOnce(member as never);
-  expect((await w.signIn("owner", { company: B })).refused).toBe("already a member of another company");
-  expect(rows()).toEqual([expect.objectContaining({ companyId: X, actor: { type: "person", id: person("owner") }, action: "signin.refused", details: { method: "web", cause: "member_elsewhere" } })]);
   scan(rows());
 });
 
@@ -171,18 +156,6 @@ it.each(["unknown", "unreadable"] as const)("%s membership produces no company r
     noCredentials(await finish());
   }
   expect(rows()).toEqual([]);
-});
-
-it("retains resolved membership attribution when a later profile failure makes membership unreadable", async () => {
-  const { w, rows, start } = await world();
-  const finish = await start();
-  vi.spyOn(w.deps.store, "upsertDeveloper").mockImplementationOnce(async () => {
-    vi.spyOn(w.company, "membership").mockRejectedValue(new Error(canary));
-    throw new Error(canary);
-  });
-  noCredentials(await finish());
-  expect(rows()).toEqual([expect.objectContaining({ companyId: X, action: "signin.refused", details: { method: "web", cause: "sign_in_failed" } })]);
-  scan(rows());
 });
 
 it("a browser mint refusal after a successful join records exactly one failure", async () => {

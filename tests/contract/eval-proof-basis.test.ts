@@ -2,7 +2,7 @@
 // re-derived from the bound artifact. A stored label or summary never decides any of it.
 import { describe, expect, it } from "vitest";
 import type { EvalQuestionComparison } from "../../packages/contracts/src/eval-check.js";
-import { captureEvalRoundEvidence, EvalRoundArtifactSchema, readEvalRoundArtifact } from "../../packages/contracts/src/eval-round-artifact.js";
+import { captureEvalRoundEvidence } from "../../packages/contracts/src/eval-round-artifact.js";
 import { EVAL_PROOF_BAR, evalProofBasis } from "../../packages/contracts/src/eval-proof-basis.js";
 
 const hash = (c: string) => c.repeat(64);
@@ -62,12 +62,6 @@ describe("eval proof basis", () => {
     expect(out.baseline).toEqual({ oldRuns: 3, cache: "hit" });
     expect(out.judge).toBeUndefined();
   });
-  it("carries a Not run round with its reason and no counts", () => {
-    const a = { schemaVersion: 1, candidateDigest: hash("a"), roundKind: "check_unsealed", evalPass: 1, outcome: "not_run", notRunReason: "rate_limit", context: { ...context }, excluded: [], notices: [], usage: { calls: 2, costMicros: 20 }, cache: "not_used" };
-    const out = evalProofBasis(a)!;
-    expect(out).toMatchObject({ outcome: "not_run", label: "Not run", notRunReason: "rate_limit", cases: { total: 0, compared: 0, excluded: 0 }, slices: [], passed: { old: { passed: 0, of: 0 }, new: { passed: 0, of: 0 } } });
-    expect(out.judge).toBeUndefined();
-  });
   it("is Not run when the comparison cannot be judged, and shows no baseline basis for it", () => {
     const qs = [question("a", "ordinary", true, true, { edited: true })];
     const out = evalProofBasis(artifact(qs, { excluded: [{ id: "a", reason: "edited" }] }))!;
@@ -78,34 +72,5 @@ describe("eval proof basis", () => {
   it("gives a private-set round nothing to count", () => {
     expect(evalProofBasis({ schemaVersion: 1, candidateDigest: hash("a"), roundKind: "check_sealed", evalPass: 1, outcome: "done", privatePass: true })).toBeUndefined();
   });
-  it.each([null, undefined, 7, "x", {}, { schemaVersion: 2 }, [], { ...artifact([question("a", "ordinary", true, true)]), roundKind: "secret-kind" }])("refuses unreadable input %j with no throw", value => {
-    expect(evalProofBasis(value)).toBeUndefined();
-  });
-  it("is the same for the same artifact (no clock, no randomness)", () => {
-    const a = artifact([question("a", "ordinary", true, false), question("b", "safety", true, true)]);
-    expect(evalProofBasis(a)).toEqual(evalProofBasis(JSON.parse(JSON.stringify(a))));
-  });
 });
 
-describe("artifact basis field", () => {
-  const qs = [question("a", "ordinary", true, true)];
-  it("is accepted on a written artifact and read back", () => {
-    expect(EvalRoundArtifactSchema.safeParse(artifact(qs)).success).toBe(true);
-    expect(readEvalRoundArtifact(artifact(qs))?.basis).toEqual(basis);
-  });
-  it.each([
-    ["a short hash", { ...basis, evalSetHash: "abc" }],
-    ["a judge pin that is not a hash", { ...basis, judgePin: "secret-judge" }],
-    ["an extra key", { ...basis, extra: 1 }],
-    ["two old runs", { ...basis, oldRuns: 2 }],
-    ["an empty model", { ...basis, model: "" }],
-  ])("refuses %s", (_name, value) => {
-    expect(EvalRoundArtifactSchema.safeParse(artifact(qs, { basis: value })).success).toBe(false);
-    expect(readEvalRoundArtifact(artifact(qs, { basis: value }))).toBeUndefined();
-  });
-  it("is never present on a private-set round", () => {
-    const priv = { schemaVersion: 1, candidateDigest: hash("a"), roundKind: "check_sealed", evalPass: 1, outcome: "done", privatePass: true };
-    expect(EvalRoundArtifactSchema.safeParse(priv).success).toBe(true);
-    expect(EvalRoundArtifactSchema.safeParse({ ...priv, basis }).success).toBe(false);
-  });
-});

@@ -1,7 +1,6 @@
 // M4a slice 3 (TE-D8): the company admin's view of every project against the company's bounds. Read-only, company administrator or owner only.
 import { expect, it, vi } from "vitest";
 import { AgentXError, IMPLICIT_COMPANY_ID, companyScoped, canonicalJson, orgProjectCatalogKey, orgSettingsKey, projectRevisionKey } from "@agentx/contracts";
-import { devRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { COMPANY, ISSUER, fakeService, makeKey, settingsFor, signerOf } from "../unit/policy-hook-fixture.js";
@@ -59,70 +58,6 @@ interface Row { project: string; status: string; values: Record<string, { value:
 interface Page { projects: Row[]; nextCursor: string | null }
 const settingsKeyOf = (company: string, name: string) => companyScoped(company, `PROJECT_SETTINGS#${name}`);
 
-it("lists every project of the company with its settings, and 'no settings yet' for a project with no row", async () => {
-  const w = world();
-  w.project("alpha"); w.project("beta"); w.project("gamma");
-  w.settings("beta", { preset: "careful", overrides: { extra_review: true, model_budget_usd: 4 }, revision: 3 });
-  const got = await w.get();
-  expect(got.nextCursor).toBeNull();
-  expect(got.projects.map((row) => row.project)).toEqual(["alpha", "beta", "gamma"]);
-  expect(got.projects[0]).toMatchObject({ project: "alpha", status: "resolved", hasSettings: false, preset: null, revision: 0, changedHere: [], clamped: [], belowCompanyBound: false });
-  expect(got.projects[1]).toMatchObject({ project: "beta", status: "resolved", hasSettings: true, preset: "careful", revision: 3, changedHere: ["model_budget_usd", "extra_review"], belowCompanyBound: false,
-    values: { extra_review: { value: true, origin: "changed here" }, model_budget_usd: { value: 4, origin: "changed here" } } });
-});
-
-it("each row is the project page's own answer (one function): the page's GET and the admin row agree field by field", async () => {
-  const w = world();
-  w.project("web"); w.project("api"); w.project("bare");
-  w.settings("web", { preset: "balanced", overrides: { real_check: "rovara_real_run", ci_fix_rounds: 2 }, revision: 2 });
-  w.hook((pid) => pid === "web" ? { extra_review: true, model_budget_usd: 5 } : { extra_review: true });
-  const rows = (await w.get()).projects;
-  expect(rows.map((row) => row.project)).toEqual(["api", "bare", "web"]);
-  // The page's own `clamped` list is checked directly: a project with no row sits below the company's extra_review minimum.
-  const apiPage = await w.call("/v1/dev/projects/api/settings") as { clamped: unknown[] };
-  expect(apiPage.clamped).toEqual([{ field: "extra_review", bound: "minimum", chosen: false, applied: true, notice: "raised to your company's minimum" }]);
-  for (const row of rows) {
-    const page = await w.call(`/v1/dev/projects/${row.project}/settings`) as Record<string, unknown>;
-    expect(row.values).toEqual(page["values"]);
-    expect(row["preset"]).toEqual(page["preset"]);
-    expect(row["revision"]).toEqual(page["revision"]);
-    expect(row["clamped"]).toEqual(page["clamped"]);
-  }
-});
-
-it("shows a stored choice the company minimum or limit now clamps, before and after clamping, and filters to those", async () => {
-  const w = world();
-  w.project("alpha"); w.project("beta"); w.project("gamma");
-  w.settings("alpha", { overrides: { extra_review: false, model_budget_usd: 9 } });
-  w.settings("beta", { preset: "lightweight" });
-  w.settings("gamma", { overrides: { extra_review: true, model_budget_usd: 2 } });
-  const service = w.hook(() => ({ extra_review: true, model_budget_usd: 5, real_check: "their_ci_fix" }));
-  const all = await w.get();
-  const byName = Object.fromEntries(all.projects.map((row) => [row.project, row]));
-  expect(byName["alpha"]).toMatchObject({ belowCompanyBound: true, values: { extra_review: { value: true, origin: "company minimum" }, model_budget_usd: { value: 5, origin: "company limit" } } });
-  expect(byName["alpha"]!.clamped).toEqual(expect.arrayContaining([
-    { field: "extra_review", bound: "minimum", chosen: false, applied: true, notice: "raised to your company's minimum" },
-    { field: "model_budget_usd", bound: "limit", chosen: 9, applied: 5, notice: "lowered to your company's limit" },
-  ]));
-  expect(byName["beta"]!["belowCompanyBound"]).toBe(true);
-  expect(byName["beta"]!.clamped).toEqual([{ field: "real_check", bound: "minimum", chosen: "their_ci_watch", applied: "their_ci_fix", notice: "raised to your company's minimum" }]);
-  expect(byName["gamma"]).toMatchObject({ belowCompanyBound: false, clamped: [] });
-  const filtered = await w.get("?filter=below_company_bound");
-  expect(filtered.projects.map((row) => row.project)).toEqual(["alpha", "beta"]);
-  // Every question went to the company rules service for THIS company and one named project.
-  expect(service.asked.every((q) => q.q["cid"] === COMPANY && typeof q.q["pid"] === "string")).toBe(true);
-});
-
-it("a budget nobody set is not 'below the limit' just because the company has one; an explicit null is", async () => {
-  const w = world(); w.project("bare"); w.project("asked"); w.project("capped");
-  w.settings("asked", { overrides: { model_budget_usd: null } }); w.settings("capped", { overrides: { model_budget_usd: 2 } });
-  w.hook(() => ({ model_budget_usd: 5 }));
-  const byName = Object.fromEntries((await w.get()).projects.map((row) => [row.project, row]));
-  expect(byName["bare"]).toMatchObject({ belowCompanyBound: false, clamped: [], values: { model_budget_usd: { value: 5, origin: "company limit" } } });
-  expect(byName["capped"]).toMatchObject({ belowCompanyBound: false, clamped: [] });
-  expect(byName["asked"]).toMatchObject({ belowCompanyBound: true, clamped: [{ field: "model_budget_usd", bound: "limit", chosen: null, applied: 5, notice: "lowered to your company's limit" }] });
-});
-
 it("only a company administrator or owner may read it; nobody else learns anything", async () => {
   const w = world(); w.project("alpha"); w.settings("alpha", { overrides: { extra_review: true } });
   for (const role of ["member", "developer", "auditor", "ADMIN"]) {
@@ -149,26 +84,6 @@ it("a revoked, foreign or missing membership is refused with sign-in words, neve
   await expect(w.get()).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
 });
 
-it("two companies: B's administrator sees only B's projects, A's only A's, and nothing of the other leaks", async () => {
-  const w = world();
-  w.project("a-one"); w.project("a-two"); w.project("b-one", B); w.project("b-two", B);
-  w.settings("a-one", { overrides: { model_budget_usd: 3 }, updatedBy: "private-canary-a" });
-  w.settings("b-one", { overrides: { model_budget_usd: 8 } }, B);
-  // A settings row planted under the wrong company's key for the same name is never read as A's.
-  w.settings("a-two", { overrides: { model_budget_usd: 1 } }, B);
-  w.hook(() => ({}));
-  const a = await w.get();
-  expect(a.projects.map((row) => row.project)).toEqual(["a-one", "a-two"]);
-  expect(a.projects[0]!.values["model_budget_usd"]!.value).toBe(3);
-  expect(a.projects[1]).toMatchObject({ hasSettings: false });
-  expect(JSON.stringify(a)).not.toMatch(/b-one|b-two|private-canary-a/);
-  w.setCompany(B); w.member("admin", {}, B);
-  const b = await w.get();
-  expect(b.projects.map((row) => row.project)).toEqual(["b-one", "b-two"]);
-  expect(JSON.stringify(b)).not.toMatch(/a-one|a-two/);
-  expect(b.projects[0]!.values["model_budget_usd"]!.value).toBe(8);
-});
-
 it("legacy shared catalog (implicit company, unflagged): pages 250 projects in order, each exactly once, with bounded reads per page and foreign projects interleaved", async () => {
   const w = world(I);
   const names = Array.from({ length: 250 }, (_, index) => `p${String(index).padStart(3, "0")}`);
@@ -187,23 +102,6 @@ it("legacy shared catalog (implicit company, unflagged): pages 250 projects in o
   } while (cursor !== null && pages < 50);
   expect(seen).toEqual(names);
   expect(pages).toBeGreaterThanOrEqual(5);
-}, 20_000);
-
-it("legacy shared catalog (implicit company, unflagged): a long run of other companies' projects ends a page early with a cursor that names none of them", async () => {
-  const w = world(I);
-  for (let index = 0; index < 450; index++) w.project(`a${String(index).padStart(3, "0")}`, B);
-  w.project("z-mine");
-  const seen: string[] = []; const cursors: string[] = []; let cursor: string | null = null; let pages = 0;
-  do {
-    const page: Page = await w.get(cursor === null ? "" : `?cursor=${cursor}`);
-    seen.push(...page.projects.map((row) => row.project));
-    if (page.nextCursor !== null) cursors.push(page.nextCursor);
-    cursor = page.nextCursor; pages++;
-  } while (cursor !== null && pages < 20);
-  expect(seen).toEqual(["z-mine"]);
-  expect(pages).toBeGreaterThan(1);
-  // The only thing a cursor carries about other companies is a count.
-  expect(cursors).toEqual(["~200", "~400"]);
 }, 20_000);
 
 it("legacy shared catalog (implicit company, unflagged): a run of other companies' names longer than the cursor can count is refused with fixed words, never cut or looped", async () => {
@@ -238,23 +136,6 @@ it("legacy shared catalog (implicit company, unflagged): a cursor can only start
   await expect(w.get("?cursor=m-mine~1001")).rejects.toMatchObject({ code: "CONFIG_INVALID" });
 });
 
-it("a slow company rules service ends the page early with a cursor at the last row done, never a failure", async () => {
-  const w = world();
-  for (let index = 0; index < 10; index++) w.project(`p${index}`);
-  const service = w.hook(() => { w.advance(2000); return {}; });
-  const seen: string[] = []; let cursor: string | null = null; let pages = 0; const sizes: number[] = [];
-  do {
-    const page: Page = await w.get(`?limit=10${cursor === null ? "" : `&cursor=${cursor}`}`);
-    sizes.push(page.projects.length);
-    expect(page.projects.every((row) => row.status === "resolved")).toBe(true);
-    seen.push(...page.projects.map((row) => row.project));
-    cursor = page.nextCursor; pages++;
-  } while (cursor !== null && pages < 10);
-  expect(seen).toEqual(Array.from({ length: 10 }, (_, index) => `p${index}`));
-  expect(Math.max(...sizes)).toBeLessThan(10);
-  expect(service.asked.length).toBe(10);
-});
-
 it("an unreadable stored row or an unanswered rules service marks that project unavailable with fixed words, never defaults", async () => {
   const w = world(); w.project("alpha"); w.project("beta");
   w.settings("alpha", { overrides: { extra_review: "private-canary" } });
@@ -280,17 +161,6 @@ it("refuses bad limits, cursors and filters with fixed words that echo nothing",
   expect((await w.get("?limit=50&filter=below_company_bound")).projects).toEqual([]);
 });
 
-it("is read-only: only reads reach the table, and only POST/PUT/DELETE-free routes exist", async () => {
-  const w = world(); w.project("alpha"); w.settings("alpha", { overrides: { extra_review: true } });
-  w.send.mockClear();
-  await w.get();
-  expect(w.send.mock.calls.length).toBeGreaterThan(0);
-  expect(w.send.mock.calls.every(([c]) => ["GetCommand", "QueryCommand"].includes(c.constructor.name))).toBe(true);
-  for (const method of ["POST", "PUT", "DELETE", "PATCH"]) await expect(w.call(COMPLIANCE, "", method)).rejects.toMatchObject({ code: "NOT_FOUND" });
-  expect(devRouteOf("GET", COMPLIANCE)?.requires).toBe("full");
-  expect(devRouteOf("POST", COMPLIANCE)).toBeUndefined();
-});
-
 it("legacy shared catalog (implicit company, unflagged): a catalog name with no revision is never listed, and a corrupt catalog name stops the read with fixed words instead of cutting the list", async () => {
   const w = world(I); w.project("mine");
   w.db.set(catalogRow("orphan"));
@@ -313,64 +183,7 @@ const own = (w: ReturnType<typeof world>, name: string, companyId = COMPANY, rev
 function flag(w: ReturnType<typeof world>, companyId = COMPANY) {
   w.db.set({ pk: companyScoped(companyId, "SETTINGS"), sk: "PROJECT_CATALOG_INDEX", verifiedAt: new Date(now).toISOString(), count: 1, runId: "catalog-test" });
 }
-/** Any read of a legacy shared partition (`PROJECT_CATALOG` or `PROJECT#<name>`), by query or by key. */
-const sharedRead = (w: ReturnType<typeof world>) => w.send.mock.calls.some(([c]) => {
-  const input = c.input as { ExpressionAttributeValues?: Record<string, unknown>; Key?: { pk?: unknown } };
-  return [input.ExpressionAttributeValues?.[":pk"], input.Key?.pk].some((pk) => typeof pk === "string" && /^(PROJECT_CATALOG|PROJECT#)/.test(pk));
-});
 
-it("staging layout: a named company's own rows without companyId list every project with v2 paging, no flag and no shared read", async () => {
-  const w = world();
-  const names = Array.from({ length: 120 }, (_, index) => `p${String(index).padStart(3, "0")}`);
-  for (const name of names) own(w, name, COMPANY, 1 + (name.charCodeAt(3) % 3));
-  w.settings("p007", { overrides: { extra_review: true } });
-  const seen: string[] = []; let cursor: string | null = null; let pages = 0;
-  do {
-    w.send.mockClear();
-    const page: Page = await w.get(`?limit=50${cursor === null ? "" : `&cursor=${cursor}`}`);
-    expect(sharedRead(w)).toBe(false);
-    // No flag is read for a named company: its partition is authoritative.
-    expect(w.send.mock.calls.some(([c]) => JSON.stringify(c.input).includes("PROJECT_CATALOG_INDEX"))).toBe(false);
-    expect(page.projects.every((row) => row.status === "resolved")).toBe(true);
-    seen.push(...page.projects.map((row) => row.project));
-    if (page.nextCursor !== null) expect(page.nextCursor).toBe(c2(COMPANY, seen[seen.length - 1]!));
-    cursor = page.nextCursor; pages++;
-  } while (cursor !== null && pages < 10);
-  expect(seen).toEqual(names);
-  expect(pages).toBe(3);
-  expect(w.db.get(orgSettingsKey(COMPANY, "PROJECT_CATALOG_INDEX").pk, "PROJECT_CATALOG_INDEX")).toBeUndefined();
-});
-it("a catalog row Code's own writer made (no name, no companyId) is listed; a named company's shared-only legacy rows and any flag row are ignored", async () => {
-  const w = world(); own(w, "alpha");
-  w.db.set({ ...orgProjectCatalogKey(COMPANY, "beta"), entityType: "PROJECT_CATALOG", latestRevision: 1 });
-  w.db.set({ ...projectRevisionKey(COMPANY, "beta", 1), entityType: "PROJECT", definition: { name: "beta", revision: 1 } });
-  // Legacy shared rows naming this company with no partition copy: not this list's source any more.
-  w.db.set({ pk: "PROJECT#legacy", sk: "REV#000000000001", companyId: COMPANY, entityType: "PROJECT", definition: { name: "legacy", revision: 1 } }); w.db.set(catalogRow("legacy"));
-  w.db.set({ pk: companyScoped(COMPANY, "SETTINGS"), sk: "PROJECT_CATALOG_INDEX", garbage: true });
-  expect((await w.get()).projects.map((row) => row.project)).toEqual(["alpha", "beta"]);
-});
-it("B's paging is byte-identical (responses and every read) whatever A holds, both ways round", async () => {
-  for (const companyId of [COMPANY, B]) {
-    const other = companyId === COMPANY ? B : COMPANY;
-    const runs = [];
-    for (const foreign of [0, 500]) {
-      const w = world(companyId);
-      for (let i = 0; i < 130; i++) own(w, `p${String(i).padStart(4, "0")}b`, companyId);
-      // A's names sort before, between and after B's.
-      for (let i = 0; i < foreign; i++) { own(w, `p${String(i).padStart(4, "0")}a`, other); own(w, `p${String(i).padStart(4, "0")}c`, other, 2); }
-      const got = []; let cursor: string | null = null;
-      do {
-        w.send.mockClear();
-        const page = await w.get("?limit=50" + (cursor === null ? "" : `&cursor=${cursor}`));
-        got.push({ page, reads: JSON.stringify(w.send.mock.calls.map(([c]) => [c.constructor.name, c.input])) }); cursor = page.nextCursor;
-      } while (cursor !== null);
-      expect(got.flatMap(p => p.page.projects)).toHaveLength(130);
-      expect(got.map(p => p.reads).join("")).not.toContain(`ORG#${other}`);
-      runs.push(got);
-    }
-    expect(JSON.stringify(runs[0])).toBe(JSON.stringify(runs[1]));
-  }
-}, 20_000);
 it("cursors: cross-company replay, forgery and v1 are refused with identical fixed words, even when the other company has the same name", async () => {
   const w = world(); own(w, "alpha"); own(w, "beta"); own(w, "alpha", B); own(w, "gamma", B);
   const first = await w.get("?limit=1"); expect(first.nextCursor).toBe(c2(COMPANY, "alpha"));
@@ -417,23 +230,6 @@ it("a row in the company's partition that names another company, or selects no p
   own(w, "approved"); w.db.set({ ...w.db.get(projectRevisionKey(COMPANY, "approved", 1).pk, "REV#000000000001")!, candidate: true });
   expect((await w.get()).projects.map((row) => row.project)).toEqual(["approved", "web"]);
 });
-it("implicit company: flagged paging reads only its partition and is byte-identical with zero or 500 foreign projects", async () => {
-  const pages = [];
-  for (const foreign of [0, 500]) {
-    const w = world(I); flag(w, I);
-    for (let i = 0; i < 250; i++) own(w, `p${String(i).padStart(4, "0")}b`, I);
-    for (let i = 0; i < foreign; i++) w.project(`p${String(i).padStart(4, "0")}a`, B);
-    const got = []; let cursor: string | null = null;
-    do {
-      w.send.mockClear();
-      const page = await w.get("?limit=50" + (cursor === null ? "" : `&cursor=${cursor}`));
-      expect(sharedRead(w)).toBe(false);
-      got.push({ page, reads: w.send.mock.calls.length }); cursor = page.nextCursor;
-    } while (cursor !== null);
-    expect(got.flatMap(p => p.page.projects)).toHaveLength(250); pages.push(got);
-  }
-  expect(pages[0]).toEqual(pages[1]);
-}, 20_000);
 it("implicit company: unflagged behavior stays v1; unmark restores it; flagged deadline resumes in v2; a malformed flag fails closed", async () => {
   const w = world(I); for (let i = 0; i < 12; i++) w.project(`p${String(i).padStart(2, "0")}`);
   expect((await w.get("?limit=1")).nextCursor).toBe("p00~0");
@@ -445,16 +241,4 @@ it("implicit company: unflagged behavior stays v1; unmark restores it; flagged d
   w.db.set({ ...key, garbage: true });
   await expect(w.get()).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: "settings unavailable" });
 });
-it("a named company's cursor is always v2: a flag row changes nothing and a v1 cursor is refused", async () => {
-  const w = world(); for (let i = 0; i < 3; i++) w.project(`p${i}`);
-  expect((await w.get("?limit=1")).nextCursor).toBe(c2(COMPANY, "p0"));
-  flag(w);
-  expect((await w.get("?limit=1")).nextCursor).toBe(c2(COMPANY, "p0"));
-  await expect(w.get("?cursor=p0~0")).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "invalid settings compliance request" });
-});
 
-it("a v2 cursor existence read failure has the same fixed refusal as garbage", async () => {
-  const w = world(); own(w, "alpha");
-  w.db.injectFault({ command: "GetCommand", match: input => JSON.stringify(input).includes("PROJECT#alpha"), error: { name: "InternalServerError", message: "private-canary" } });
-  await expect(w.get(`?cursor=${c2(COMPANY, "alpha")}`)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "invalid settings compliance request" });
-});

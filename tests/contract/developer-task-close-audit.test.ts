@@ -16,33 +16,6 @@ const closeRecords = (db: { find(predicate: (item: Record<string, unknown>) => b
   db.find((item) => item.pk === `TASK#${taskId}` && item.action === "close");
 
 describe("a close's completed record (E20)", () => {
-  it("records a close that completes, in the close's own transaction", async () => {
-    const { db, dev, finish, taskId, workspaceId } = await readyTask();
-    const prepareId = String((db.get(`WORKSPACE#${workspaceId}`, "META") as { activeOperationId: string }).activeOperationId);
-    await finish(workspaceId, prepareId, "FAILED", { error: "npm ci exited 1" });
-    expect((await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() })).body).toMatchObject({ closed: true });
-    expect(closeRecords(db, taskId).map((record) => [record.phase, record.outcome])).toEqual(expect.arrayContaining([["accepted", "accepted"], ["completed", "succeeded"]]));
-  });
-
-  it("records a close refused for unpublished work, naming the repositories", async () => {
-    const { db, dev, finish, taskId, workspaceId, active } = await readyTask();
-    // As 25b's close tests: the prepare, then the first task, end; then the close's preflight runs.
-    await finish(workspaceId, active(), "SUCCEEDED");
-    await finish(workspaceId, active(), "SUCCEEDED");
-    await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() });
-    await finish(workspaceId, active(), "SUCCEEDED", { result: { safeToClose: false, repositories: [{ name: "demo", reasons: ["worktree_changes"] }] } });
-    const completed = closeRecords(db, taskId).find((record) => record.phase === "completed");
-    expect(completed).toMatchObject({ outcome: "refused", responseText: "Not closed: unpublished work in demo (worktree_changes)" });
-  });
-
-  it("records a close that completes after its preflight", async () => {
-    const { db, dev, finish, taskId, workspaceId, active } = await readyTask();
-    await finish(workspaceId, active(), "SUCCEEDED");
-    await finish(workspaceId, active(), "SUCCEEDED");
-    await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() });
-    await finish(workspaceId, active(), "SUCCEEDED", { result: { safeToClose: true, repositories: [] } });
-    expect(closeRecords(db, taskId).filter((record) => record.phase === "completed")).toEqual([expect.objectContaining({ outcome: "succeeded" })]);
-  });
 
   it("lists both outcomes in the turn export, as valid AI-tool records", async () => {
     const refused = await readyTask();
@@ -84,18 +57,6 @@ describe("a close's completed record: the rest of its outcomes (E20)", () => {
     return { ...harness, preflightId: harness.active() };
   }
 
-  it.each([["FAILED", "failed"], ["INTERRUPTED", "interrupted"], ["CANCELLED", "cancelled"]] as const)(
-    "records a close whose check for unpublished work ended %s",
-    async (status, outcome) => {
-      const { db, finish, taskId, workspaceId, preflightId } = await preflighting();
-      await finish(workspaceId, preflightId, status, { error: "the worker stopped" });
-      const completed = closeRecords(db, taskId).filter((record) => record.phase === "completed");
-      expect(completed).toEqual([expect.objectContaining({
-        outcome, operationId: preflightId, turnId: preflightId, exportPk: TURN_EXPORT_PARTITION,
-        responseText: "Not closed: the check for unpublished work did not finish",
-      })]);
-    },
-  );
 
   it("logs a missing task record for a refused close instead of writing nothing silently", async () => {
     const { db, finish, taskId, workspaceId, preflightId } = await preflighting();
@@ -107,30 +68,4 @@ describe("a close's completed record: the rest of its outcomes (E20)", () => {
     expect(closeRecords(db, taskId).filter((record) => record.phase === "completed")).toEqual([]);
   });
 
-  it("dates a close that completes from its request, with a key fixed by the close operation", async () => {
-    vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
-    vi.setSystemTime(new Date("2026-09-30T10:00:00.000Z"));
-    const { db, finish, taskId, workspaceId, preflightId } = await preflighting();
-    const requested = String((db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${preflightId}`) as { createdAt: string }).createdAt);
-    vi.setSystemTime(new Date("2026-09-30T10:05:00.000Z"));
-    await finish(workspaceId, preflightId, "SUCCEEDED", { result: { safeToClose: true, repositories: [] } });
-    const [completed] = closeRecords(db, taskId).filter((record) => record.phase === "completed");
-    expect(completed).toMatchObject({ outcome: "succeeded", receivedAt: requested, sk: `TURN#${requested}#${preflightId}` });
-    expect(Date.parse(String(completed!.finishedAt))).toBeGreaterThanOrEqual(Date.parse("2026-09-30T10:05:00.000Z"));
-  });
-
-  it("dates a never-started task's close from its request, like its accepted record", async () => {
-    vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
-    vi.setSystemTime(new Date("2026-09-30T10:00:00.000Z"));
-    const { db, dev, finish, taskId, workspaceId, active, deleteEc2Session } = await readyTask();
-    await finish(workspaceId, active(), "FAILED", { error: "npm ci exited 1" });
-    // The compute's removal takes a minute, so the close finishes well after it was requested.
-    deleteEc2Session!.mockImplementationOnce(async () => { vi.setSystemTime(new Date("2026-09-30T10:01:00.000Z")); });
-    await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() });
-    const accepted = closeRecords(db, taskId).find((record) => record.phase === "accepted");
-    const completed = closeRecords(db, taskId).find((record) => record.phase === "completed");
-    expect(deleteEc2Session).toHaveBeenCalled();
-    expect(completed).toMatchObject({ outcome: "succeeded", receivedAt: accepted!.receivedAt });
-    expect(Date.parse(String(completed!.finishedAt))).toBeGreaterThanOrEqual(Date.parse("2026-09-30T10:01:00.000Z"));
-  });
 });

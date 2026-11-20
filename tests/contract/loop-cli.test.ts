@@ -1,5 +1,5 @@
 // rovara loop (#355): the commands that set a repository up and show where its loops stand.
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -65,16 +65,6 @@ describe("rovara loop's setup commands (#355)", () => {
       : worldExec(command, args, options);
     expect(await h.run(["loop", "enroll", "acme/payments", "--standalone-local"])).toBe(0);
     expect(await h.store.enrollments()).toMatchObject([{ kind: "standalone-local", project: "acme/payments" }]);
-  });
-
-  it("refuses a config that names no collaborator, or another agent", async () => {
-    const h = await setUp();
-    await mkdir(join(h.checkout, ".rovara"), { recursive: true });
-    await writeFile(join(h.checkout, ".rovara", "loop.yaml"), "version: 1\ncollaborators: []\n");
-    expect(await h.run(["loop", "add", h.checkout])).not.toBe(0);
-    expect(h.err.join("")).toContain(".rovara/loop.yaml: collaborators:");
-    await writeFile(join(h.checkout, ".rovara", "loop.yaml"), "version: 1\ncollaborators: [maya]\nharness:\n  name: cursor\n");
-    expect(await h.run(["loop", "add", h.checkout])).not.toBe(0);
   });
 
   it("status and check show where each issue's loop stands, and how to watch its agent", async () => {

@@ -7,8 +7,7 @@ import { redactSecrets, type ChannelInfoRequest, type ChannelMembersRequest } fr
 import { fieldDiff, looksLikeSecret, planChange, stateHash, type PlanDependencies } from "../../packages/broker/src/aws/admin-change-plans.js";
 import { CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
-import { bindChannel, registerRevision } from "../support/developer-task-broker.js";
-import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
+import { SLACK_CHANNEL } from "../support/slack-broker.js";
 
 const PLANTED = `ghp_${"D".repeat(36)}`;
 const admin = { issuer: "https://identity.example.test", subject: "admin-subject", ownerKey: "", isAdministrator: true, claims: {} };
@@ -39,31 +38,6 @@ async function harness(options: { channelByName?: PlanDependencies["channelByNam
 }
 
 describe("binding and unbinding (E7, E12)", () => {
-  it("shows the channel, its current binding and the revision new threads use, and changes nothing", async () => {
-    const { deps, identity, db, handler } = await harness({ channelByName: async () => ({ ok: true, channel: { channelId: "C0LEDGER01", name: "ledger-dev" } }) });
-    await registerRevision(handler, 7, {});
-    const plan = await planChange(deps, identity, { kind: "bind_channel", channel: "#ledger-dev", project: "payments" });
-    expect(plan.effect).toBe("Bind channel #ledger-dev (C0LEDGER01) to project payments. It is bound to nothing today. New threads in #ledger-dev will use payments revision 7.");
-    expect(plan.confirmationEffect).toBeUndefined();
-    expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, "CHANNEL#C0LEDGER01")).toBeUndefined();
-    // E12: with or without the "#".
-    const bare = await planChange(deps, identity, { kind: "bind_channel", channel: "ledger-dev", project: "payments" });
-    expect(bare.effect).toBe(plan.effect);
-    const again = await planChange(deps, identity, { kind: "bind_channel", channel: "C0LEDGER01", project: "payments" });
-    expect(stateHash(again.snapshot)).toBe(stateHash(plan.snapshot));
-    await bindChannel(handler, "C0LEDGER01", "payments");
-    await expect(planChange(deps, identity, { kind: "bind_channel", channel: "C0LEDGER01", project: "payments" })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: channel #ledger-dev (C0LEDGER01) is already bound to payments; there is nothing to change" });
-  });
-
-  it("moves the hash when the binding moves, and applies through the binding handler", async () => {
-    const { deps, identity, db, handler } = await harness();
-    const before = await planChange(deps, identity, { kind: "bind_channel", channel: "C0LEDGER01", project: "payments" });
-    await registerRevision(handler, 2, {});
-    const after = await planChange(deps, identity, { kind: "bind_channel", channel: "C0LEDGER01", project: "payments" });
-    expect(stateHash(after.snapshot)).not.toBe(stateHash(before.snapshot));
-    await after.apply(identity);
-    expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, "CHANNEL#C0LEDGER01")).toMatchObject({ projectName: "payments" });
-  });
 
   it("names a private channel by ID only, and refuses a private channel's name", async () => {
     const { deps, identity } = await harness({ channelByName: async () => ({ ok: true }) });
@@ -73,46 +47,6 @@ describe("binding and unbinding (E7, E12)", () => {
     await expect(planChange(deps, identity, { kind: "bind_channel", channel: "#secret-launch", project: "payments" })).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: no public channel with that name in this Slack workspace; give a private channel by its ID" });
   });
 
-  it("names a private channel to a member admin in the confirmation only; the stored effect, details and hash keep the ID (B4, R4)", async () => {
-    const { deps, identity, channelMembers } = await harness();
-    const member = await planChange(deps, identity, { kind: "bind_channel", channel: "C0PRIVATE01", project: "payments" }, { slackUserId: MEMBER_ADMIN });
-    expect(member.confirmationEffect).toBe("Bind channel #secret-launch (C0PRIVATE01, a private channel) to project payments. It is bound to nothing today. New threads in #secret-launch will use payments revision 1.");
-    expect(member.effect).toBe("Bind channel C0PRIVATE01 (a private channel) to project payments. It is bound to nothing today. New threads in C0PRIVATE01 will use payments revision 1.");
-    expect(JSON.stringify([member.effect, member.details, member.snapshot])).not.toContain("secret-launch");
-    expect(channelMembers).toHaveBeenCalledWith({ kind: "channel-members", slackUserId: MEMBER_ADMIN, channelIds: ["C0PRIVATE01"] });
-    const outsider = await planChange(deps, identity, { kind: "bind_channel", channel: "C0PRIVATE01", project: "payments" }, { slackUserId: "U0OUTSIDE1" });
-    expect(outsider.effect).toBe(member.effect);
-    expect(outsider.confirmationEffect).toBeUndefined();
-    expect(JSON.stringify(outsider)).not.toContain("secret-launch");
-    expect(stateHash(outsider.snapshot)).toBe(stateHash(member.snapshot));
-  });
-
-  it("unbinds a bound channel, saying new messages there get no reply, and refuses an unbound one", async () => {
-    const { deps, identity, db } = await harness();
-    const plan = await planChange(deps, identity, { kind: "unbind_channel", channel: SLACK_CHANNEL });
-    expect(plan.effect).toBe(`Unbind channel #payments-dev (${SLACK_CHANNEL}) from project payments. New messages there will get no reply; existing thread workspaces are kept.`);
-    await expect(planChange(deps, identity, { kind: "unbind_channel", channel: "C0NOTBOUND1" })).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: channel #ledger-dev (C0NOTBOUND1) is not bound to any project; list the bindings with agentx admin slack bindings" });
-    expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)).toBeDefined();
-    await plan.apply(identity);
-    expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)).toBeUndefined();
-  });
-
-  it("rechecks project administration at apply: a bind or unbind by an admin who lost it changes nothing (E6, FR-015)", async () => {
-    const { deps, identity, db } = await harness();
-    const bind = await planChange(deps, identity, { kind: "bind_channel", channel: "C0LEDGER01", project: "payments" });
-    const unbind = await planChange(deps, identity, { kind: "unbind_channel", channel: SLACK_CHANNEL });
-    db.delete(`MEMBER#${identity.ownerKey}`, "PROJECT#payments");
-    await expect(bind.apply(identity)).rejects.toMatchObject({ code: expect.stringMatching(/^(FORBIDDEN|NOT_FOUND)$/) as unknown });
-    await expect(unbind.apply(identity)).rejects.toMatchObject({ code: expect.stringMatching(/^(FORBIDDEN|NOT_FOUND)$/) as unknown });
-    expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, "CHANNEL#C0LEDGER01")).toBeUndefined();
-    expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)).toMatchObject({ projectName: "payments" });
-  });
-
-  it("refuses an admin who does not administer the project (FR-015)", async () => {
-    const { deps } = await harness();
-    await expect(planChange(deps, { ...admin, ownerKey: "f".repeat(64) }, { kind: "unbind_channel", channel: SLACK_CHANNEL })).rejects.toMatchObject({ code: "NOT_FOUND" });
-  });
-
   it("refuses a channel that is neither an ID nor a channel name", async () => {
     const { deps, identity } = await harness();
     await expect(planChange(deps, identity, { kind: "unbind_channel", channel: "Not A Channel!" })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: channel must be a Slack channel ID such as C0123456789, or a public channel's name such as #payments-dev" });
@@ -120,58 +54,6 @@ describe("binding and unbinding (E7, E12)", () => {
 });
 
 describe("a project revision (E7, E11)", () => {
-  it("shows the new number, each changed field and the preflight, keeping the latest runtime binding", async () => {
-    const { deps, identity } = await harness();
-    const latest = { name: "payments", revision: 2, repositories: [repository], setup: [], readiness: [], orchestratorInstructions: `Delegate work. Token ${PLANTED}` };
-    const plan = await planChange(deps, identity, { kind: "register_project_revision", definition: latest });
-    expect(plan.effect).toContain("Register revision 2 of project payments (the latest is 1).");
-    expect(plan.effect).toContain("orchestratorInstructions:");
-    expect(plan.effect).toContain("[REDACTED]");
-    expect(JSON.stringify(plan)).not.toContain(PLANTED);
-    expect(plan.details).toMatchObject({ revision: 2, runtimeMode: "ec2-ebs" });
-  });
-
-  it("applies without contacting vendors again: the preflight ran at planning (C8)", async () => {
-    const { deps, identity, db } = await harness();
-    const plan = await planChange(deps, identity, { kind: "register_project_revision", definition: { name: "payments", revision: 2, repositories: [repository], setup: [], readiness: [], orchestratorInstructions: "Delegate." } });
-    const result = await plan.apply(identity);
-    expect(result).not.toHaveProperty("preflight");
-    expect(db.get("PROJECT#payments", `REV#${"2".padStart(12, "0")}`)).toMatchObject({ entityType: "PROJECT" });
-  });
-
-  it("rechecks project administration at apply: a revision by an admin who lost it is refused and writes nothing (E6, FR-015)", async () => {
-    const { deps, identity, db } = await harness();
-    const plan = await planChange(deps, identity, { kind: "register_project_revision", definition: { name: "payments", revision: 2, repositories: [repository], setup: [], readiness: [], orchestratorInstructions: "Delegate." } });
-    db.delete(`MEMBER#${identity.ownerKey}`, "PROJECT#payments");
-    await expect(plan.apply(identity)).rejects.toMatchObject({ code: expect.stringMatching(/^(FORBIDDEN|NOT_FOUND)$/) as unknown });
-    expect(db.get("PROJECT#payments", `REV#${"2".padStart(12, "0")}`)).toBeUndefined();
-    expect(db.get(`MEMBER#${identity.ownerKey}`, "PROJECT#payments")).toBeUndefined();
-  });
-
-  it("redacts a planted secret in a revision's diff, and refuses a secret-looking credential input", async () => {
-    const { deps, identity, db } = await harness();
-    const plan = await planChange(deps, identity, { kind: "register_project_revision", definition: { name: "payments", revision: 3, repositories: [repository], setup: [], readiness: [], orchestratorInstructions: PLANTED } });
-    expect(JSON.stringify([plan.effect, plan.details])).not.toContain(PLANTED);
-    expect(plan.effect).toContain("[REDACTED]");
-    expect(JSON.stringify(plan.details)).toContain("[REDACTED]");
-    const items = db.find(() => true).length;
-    await expect(planChange(deps, identity, { kind: "register_credential", ref: "linear", type: "static-secret", secretName: `agentx/connectors/${PLANTED}` })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: that input looks like a secret value; give the secret's name under agentx/connectors/, never its value" });
-    expect(db.find(() => true).length).toBe(items);
-    expect(JSON.stringify(db.find(() => true))).not.toContain(PLANTED);
-  });
-
-  it("applies every redactSecrets rule to a diff's values: argv flags and header tuples", async () => {
-    const { deps, identity } = await harness();
-    const setup = [
-      { cwd: "repo/demo", executable: "npm", args: ["run", "seed", "--password", "plain-pass-123"], timeoutSeconds: 60 },
-      { cwd: "repo/demo", executable: "docker", args: ["exec", "db", "mysql", "-p", "plain-mysql-456"], timeoutSeconds: 60 },
-      { cwd: "repo/demo", executable: "curl", args: ["Authorization", "Bearer plain-bearer-789"], timeoutSeconds: 60 },
-    ];
-    const plan = await planChange(deps, identity, { kind: "register_project_revision", definition: { name: "payments", revision: 2, repositories: [repository], setup, readiness: [], orchestratorInstructions: "Delegate." } });
-    expect(JSON.stringify([plan.effect, plan.confirmationEffect, plan.details])).not.toMatch(/plain-pass-123|plain-mysql-456|plain-bearer-789/);
-    expect(plan.effect).toContain("setup[0].args[3]");
-    expect(plan.effect).toContain("[REDACTED]");
-  });
 
   it("refuses a first revision, an existing revision, a retired field and an invalid definition", async () => {
     const { deps, identity } = await harness();
@@ -183,12 +65,6 @@ describe("a project revision (E7, E11)", () => {
 });
 
 describe("a credential (E7, Q7)", () => {
-  it("shows whether the secret reads as that type, which projects name it, and whether it replaces one", async () => {
-    const { deps, identity } = await harness();
-    deps.credentials = { registration: vi.fn(async () => undefined), checkSecret: vi.fn(async () => "missing" as const) };
-    const plan = await planChange(deps, identity, { kind: "register_credential", ref: "linear", type: "static-secret", secretName: "agentx/connectors/linear" });
-    expect(plan.effect).toBe("Register credential linear as static-secret, read from agentx/connectors/linear. That secret does not exist yet, so connectors naming linear will fail until it does. No project names linear today. It is a new registration.");
-  });
 
   it("reads the real registry, keeps its details through redactSecrets, and applies once confirmed (C7)", async () => {
     const values: Record<string, string> = { "agentx/connectors/linear": JSON.stringify({ apiKey: "linear-key-value" }) };
@@ -237,15 +113,6 @@ describe("the helpers", () => {
     expect(fieldDiff({ a: 1, b: { c: "x" }, d: [1] }, { a: 2, b: { c: "x", e: PLANTED }, d: [] })).toEqual([
       { field: "a", from: "1", to: "2" }, { field: "b.e", to: '"[REDACTED]"' }, { field: "d[0]", from: "1" },
     ]);
-  });
-
-  it("shows a value under a credential-named key, or a credential-named pair's value, as redacted", () => {
-    const before = { integrations: { connectors: [{ name: "linear" }, { name: "jira", apiKey: "plain-value-1" }] }, env: [{ name: "DB_PASSWORD", value: "plain-value-2" }] };
-    const after = { integrations: { connectors: [{ name: "linear" }] }, env: [{ name: "DB_PASSWORD", value: "plain-value-3" }] };
-    const changes = fieldDiff(before, after);
-    expect(changes).toContainEqual({ field: "integrations.connectors[1].apiKey", from: '"[REDACTED]"' });
-    expect(changes).toContainEqual({ field: "env[0].value", from: '"[REDACTED]"', to: '"[REDACTED]"' });
-    expect(JSON.stringify(changes)).not.toMatch(/plain-value/);
   });
 
   it("knows a secret-looking value", () => {

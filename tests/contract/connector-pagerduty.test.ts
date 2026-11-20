@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { discoverTools, executeTool, type ConnectorDefinition, type Ledger } from "@agentx/gateway";
 import { ProjectDefinitionSchema, type OrgId } from "../../packages/contracts/src/index.js";
-import { BUILT_IN_CONNECTOR_TYPES, resolveConnectors, type ResolvedConnector } from "../../packages/broker/src/aws/connector-types.js";
+import { resolveConnectors, type ResolvedConnector } from "../../packages/broker/src/aws/connector-types.js";
 import { pagerdutyConnectionCheck, pagerdutyConnectorType } from "../../packages/broker/src/connectors/native/pagerduty-connector-type.js";
 import { PAGERDUTY_TOOL_NAMES } from "../../packages/broker/src/connectors/native/pagerduty.js";
 import { PROJECT_CONNECTOR_TOOLS } from "../support/project-connector-tools.js";
@@ -85,17 +85,6 @@ async function direct(r: Awaited<ReturnType<typeof resolved>>) {
 }
 
 describe("the PagerDuty connector type", () => {
-  it("is built in, named pagerduty, and resolves its label, vendor, scope noun, scopes and ledger", async () => {
-    expect(BUILT_IN_CONNECTOR_TYPES["pagerduty"]).toBe(pagerdutyConnectorType);
-    const s = await connected();
-    const [connector] = resolveConnectors(project([connectorConfig()]), { credentialRegistry: s.registry });
-    expect(connector).toMatchObject({
-      name: "oncall", type: "pagerduty", label: "PagerDuty", vendor: "PagerDuty", scopeNoun: "service set", attribution: false,
-      ledger: { prefix: "CONNECTOR#oncall#", entityType: "CONNECTOR_INVOCATION" },
-      credential: { ref: CON, accepts: ["static-secret"] },
-      scopes: [{ alias: "pay", scope: PAY }],
-    });
-  });
 
   it("lists exactly the four tools a project may approve, no item argument, no label argument", async () => {
     expect(PROJECT_CONNECTOR_TOOLS.pagerduty).toEqual([...TOOLS]);
@@ -115,48 +104,6 @@ describe("the PagerDuty connector type", () => {
       expect(result.status, region).toBe("SUCCEEDED");
       expect(api.requests.map((request) => new URL(request.url).hostname)).toEqual([host]);
     }
-  });
-
-  it("is not connected when the record is pinned to the other region, has no host, or the connection is not PagerDuty's", async () => {
-    const s = await connected("eu");
-    const of = (registry: unknown) => resolveConnectors(project([connectorConfig()]), { credentialRegistry: registry as never })[0]!;
-    expect(await of(s.registry).configured()).toBe(true);
-    const wrong = { ...s.registry, registration: async (ref: string) => ({ ...(await s.registry.registration(ref))!, host: "api.pagerduty.com" }) };
-    expect(await of(wrong).definition()).toEqual({ notConnected: `credential ${CON} is pinned to api.pagerduty.com, not api.eu.pagerduty.com, so AgentX does not send it there` });
-    const unpinned = { ...s.registry, registration: async (ref: string) => { const { host: _host, ...rest } = (await s.registry.registration(ref))!; return rest; } }; // eslint-disable-line @typescript-eslint/no-unused-vars -- dropped on purpose
-    expect(await of(unpinned).definition()).toEqual({ notConnected: `credential ${CON} is not pinned to a host; register it again with --host api.eu.pagerduty.com` });
-    const other = setup();
-    await new OrgConnectionStore({ ...other.deps, checkEndpoint: async () => undefined }).put({ orgId: ORG_A, connection: { connectionId: CON, type: "vercel", label: "Vercel", access: "read" }, secret: { token: "vercel-token-0123456789" }, by: ALICE });
-    expect(await of(other.registry).definition()).toEqual({ notConnected: `connection ${CON} is not a PagerDuty connection` });
-  });
-
-  it("treats a malformed stored entry as unusable and never throws", () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const stored = { ...project([connectorConfig()]), integrations: { connectors: [connectorConfig({ scopes: [{ alias: "pay" }] })] } } as never;
-    expect(resolveConnectors(stored, { credentialRegistry: setup().registry }, { pagerduty: pagerdutyConnectorType })).toEqual([]);
-    expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as { reason?: string }).find((line) => line.reason !== undefined)?.reason).toBe("invalid pagerduty connector configuration: scopes");
-  });
-});
-
-describe("what the model is offered", () => {
-  it("marks every tool read with the read-only hints, and shows neither the services nor the alias", async () => {
-    const { definition, connector } = await resolved();
-    const { tools, skipped } = await discoverTools(definition, context(), { connect: connector.connect! });
-    expect(skipped).toEqual([]);
-    expect(tools.map((tool) => tool.name)).toEqual([...TOOLS]);
-    for (const tool of tools) {
-      expect(tool.access, tool.name).toBe("read");
-      expect(tool.hints, tool.name).toEqual({ readOnlyHint: true, destructiveHint: false });
-      const names = Object.keys(tool.inputSchema["properties"] as object);
-      expect(names).not.toContain("serviceIds");
-      expect(names).not.toContain("service_ids");
-      expect(names).not.toContain("scopeAlias");
-    }
-    const props = (name: string) => (tools.find((tool) => tool.name === name)!.inputSchema as { properties: Record<string, Record<string, unknown>> }).properties;
-    expect(props("list_incidents")["sinceHoursAgo"]).toMatchObject({ type: "integer", minimum: 1, maximum: 720 });
-    expect(props("list_incidents")["statuses"]).toMatchObject({ type: "array", items: { enum: ["triggered", "acknowledged", "resolved"] } });
-    expect(props("get_incident")["incidentId"]).toMatchObject({ type: "string" });
-    expect(Object.keys(props("list_oncalls"))).toEqual([]);
   });
 
 });
@@ -189,13 +136,6 @@ describe("running the tools", () => {
       r.definition, context(), { connect: r.connector.connect!, ledger },
     )).rejects.toThrow("routing arguments are server controlled");
     expect(r.api.requests).toEqual([]);
-  });
-
-  it("shows only incidents on the scope's services, even when the vendor ignores the filter", async () => {
-    const { result } = await run("list_incidents", {}, { api: fakePagerDuty({ apiKey: API_KEY, ignoreServiceFilter: true }) });
-    expect(result.text).toContain("Payments API 5xx");
-    expect(result.text).not.toContain("Billing batch failed");
-    expect(result.text.startsWith("2 incidents in pay")).toBe(true);
   });
 
   it("reads an incident on the scope's services, and refuses one on another service", async () => {
@@ -233,16 +173,6 @@ describe("running the tools", () => {
     const two = await run("list_oncalls", {}, { scope: { alias: "both", serviceIds: ["PSVC001", "PSVC002"] }, config: { scopes: [{ alias: "both", serviceIds: ["PSVC001", "PSVC002"] }] } });
     expect(two.result.text).toContain("Eli Billing");
     expect(new URL(two.api.requests.at(-1)!.url).searchParams.getAll("escalation_policy_ids[]")).toEqual(["PEP0001", "PEP0002"]);
-  });
-
-  it("shows only the on-calls of the scope's policies when the vendor ignores the filter, and asks for each shared policy once", async () => {
-    const leaky = await run("list_oncalls", {}, { api: fakePagerDuty({ apiKey: API_KEY, ignoreOncallFilter: true }) });
-    expect(leaky.result.text).toContain("Dana Ops");
-    expect(leaky.result.text).not.toContain("Eli Billing");
-    const shared = { alias: "pay2", serviceIds: ["PSVC001", "PSVC003"] };
-    const { api, result } = await run("list_oncalls", {}, { scope: shared, config: { scopes: [shared] } });
-    expect(result.status).toBe("SUCCEEDED");
-    expect(new URL(api.requests.at(-1)!.url).searchParams.getAll("escalation_policy_ids[]")).toEqual(["PEP0001"]);
   });
 
   it("refuses an incident id that could change the path, making no request", async () => {

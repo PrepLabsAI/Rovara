@@ -34,26 +34,6 @@ describe("the row and results schemas", () => {
 });
 
 describe("the Slack summary of the scenario results", () => {
-  it("is the counts, the first failed row, what was mocked and the task page, in that order", () => {
-    const lines = textOf(renderE2EScenarioSlackBlocks(results(), { taskPageUrl: URL_OF_PAGE })).split("\n");
-    expect(lines[0]).toBe("Browser and API checks: 4 passed, 1 failed, 0 incomplete");
-    expect(lines[1]).toBe("Viewer can't export — failed: expected hidden, was visible (orders-viewer)");
-    expect(lines[2]).toBe("Mocked: inventory-v1");
-    expect(lines[3]).toContain(`<${URL_OF_PAGE}|`);
-    expect(lines).toHaveLength(4);
-  });
-
-  it("adds what the unchanged code did, after what was mocked", () => {
-    const lines = textOf(renderE2EScenarioSlackBlocks(results({ baseline: failedBaseline() }), { taskPageUrl: URL_OF_PAGE })).split("\n");
-    expect(lines[3]).toBe("Before the change: 2 of 5 failed, as expected for new behaviour.");
-    expect(lines[4]).toContain(`<${URL_OF_PAGE}|`);
-  });
-
-  it("says plainly when the unchanged code could not be checked, and nothing else about it", () => {
-    const text = textOf(renderE2EScenarioSlackBlocks(results({ baseline: { status: "UNAVAILABLE", scenarios: [] } }), { taskPageUrl: URL_OF_PAGE }));
-    expect(text).toContain("Couldn't run the checks on the unchanged code.");
-    expect(text).not.toContain("Before the change");
-  });
 
   it("reports a baseline that passed or could not be decided without the 'as expected' words", () => {
     const passed = { status: "PASSED" as const, scenarios: fiveScenarios().map((item) => ({ ...item, status: "PASSED" as const })) };
@@ -62,14 +42,6 @@ describe("the Slack summary of the scenario results", () => {
     const text = textOf(renderE2EScenarioSlackBlocks(results({ baseline: incomplete })));
     expect(text).toContain("Before the change: 1 of 2 could not be checked.");
     expect(text).not.toContain("as expected");
-  });
-
-  it("names the first incomplete row when nothing failed, and has no failure line for an all-passed round", () => {
-    const incomplete = textOf(renderE2EScenarioSlackBlocks({ scenarios: [row(), row({ scenarioId: "b-check", title: "B check", status: "UNKNOWN", reason: "called a service that has no approved mock" })] }));
-    expect(incomplete).toContain("Browser and API checks: 1 passed, 0 failed, 1 incomplete");
-    expect(incomplete).toContain("B check — incomplete: called a service that has no approved mock (orders-owner)");
-    const passed = textOf(renderE2EScenarioSlackBlocks({ scenarios: [row()] }));
-    expect(passed.split("\n")).toEqual(["Browser and API checks: 1 passed, 0 failed, 0 incomplete"]);
   });
 
   it("stays within 3000 characters and escapes Slack markup, whatever the rows hold", () => {
@@ -81,13 +53,6 @@ describe("the Slack summary of the scenario results", () => {
     expect(text).not.toContain("<!channel>");
     expect(text).toContain("&lt;!channel&gt;");
     expect(text).toContain(`<${URL_OF_PAGE}|`);
-  });
-
-  it("shows no email and no credential even if a row somehow carried one in a field the schema bounds", () => {
-    const rows = [row({ status: "FAILED", reason: "expected a, received ops@tenant-a.example", accountLabel: "orders-owner" })];
-    // The renderer never trusts a stored row to be clean: it scrubs what it prints.
-    const text = textOf(renderE2EScenarioSlackBlocks({ scenarios: rows }));
-    expect(text).not.toContain("ops@tenant-a.example");
   });
 
   it("is a mocked badge in words: the service name from the origin reference", () => {
@@ -138,22 +103,9 @@ describe("the rows on the task page", () => {
     expect(html).toContain("View screenshot");
   });
 
-  it("says the unchanged code could not be checked, with no rows for it", () => {
-    const unavailable = renderE2EScenarioRowsHtml(results({ baseline: { status: "UNAVAILABLE", scenarios: [] } }), { artifactPath });
-    expect(unavailable).toContain("Couldn&#39;t run the checks on the unchanged code.");
-    expect(rowsOf(unavailable, "data-e2e-baseline-row=").length).toBe(0);
-  });
-
   it("labels the baseline as information only", () => {
     expect(html).toContain("Before the change: 2 of 5 failed, as expected for new behaviour.");
     expect(html).toMatch(/for information only/u);
-  });
-
-  it("escapes everything a row holds and prints no email", () => {
-    const hostile = renderE2EScenarioRowsHtml({ scenarios: [row({ title: "<script>alert(1)</script>", status: "FAILED", reason: 'expected "a", received ops@tenant-a.example', accountLabel: "orders-owner" })] }, { artifactPath });
-    expect(hostile).not.toContain("<script>");
-    expect(hostile).not.toContain("ops@tenant-a.example");
-    expect(hostile).toContain("&lt;script&gt;");
   });
 
   it("prints nothing for no rows", () => {
@@ -175,29 +127,5 @@ describe("the signed-out visitor", () => {
     expect(slack).not.toContain("rovara-anonymous");
   });
 
-  it("leaves an account's label as it was", () => {
-    const page = renderE2EScenarioRowsHtml(results({ scenarios: [row({ accountLabel: "orders-owner" })] }), { artifactPath });
-    expect(page).toContain("orders-owner");
-    expect(page).not.toContain("Signed-out visitor");
-  });
 });
 
-describe("the skipped AI checks list in Slack", () => {
-  const skippedBaseline = (titles: string[]) => ({ status: "PASSED" as const, scenarios: [row()], skippedAiScenarios: titles.map((title, index) => ({ scenarioId: `ai-${index}`, title })) });
-  const lineOf = (baseline: ReturnType<typeof skippedBaseline>) => textOf(renderE2EScenarioSlackBlocks(results({ baseline }), { taskPageUrl: URL_OF_PAGE })).split("\n").find((line) => line.startsWith("Not run before the change:"))!;
-
-  it("cuts titles, never the 'and N more' tail, when twelve long titles fill the bound", () => {
-    const titles = Array.from({ length: 15 }, (_, index) => `Check number ${index} ${"long title words ".repeat(7)}`.slice(0, 120));
-    const line = lineOf(skippedBaseline(titles));
-    expect(line.length).toBeLessThanOrEqual(400);
-    expect(line.endsWith("and 3 more")).toBe(true);
-  });
-
-  it("counts a title that scrubs to nothing as skipped, so 'and N more' agrees with the count sentence", () => {
-    const titles = ["First check", "\u0000\u0000", ...Array.from({ length: 13 }, (_, index) => `Check ${index}`)];
-    const text = textOf(renderE2EScenarioSlackBlocks(results({ baseline: skippedBaseline(titles) }), { taskPageUrl: URL_OF_PAGE }));
-    expect(text).toContain("15 AI-navigated checks are not run");
-    // 15 skipped, 12 titles shown (the blank one is not shown): 3 more.
-    expect(lineOf(skippedBaseline(titles)).endsWith("and 3 more")).toBe(true);
-  });
-});

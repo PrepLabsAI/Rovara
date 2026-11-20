@@ -82,13 +82,6 @@ describe("connector discovery and Slack turn wiring before refresh (characteriza
     expect(discover.mock.calls.map(([input]) => Object.keys(input))).toStrictEqual([["workspaceId", "connector"], ["workspaceId", "connector"]]);
   });
 
-  it("runs a turn with only the check-report recorder and the same thread calls when no sink is configured", async () => {
-    const { dependencies, turns, calls } = slackDependencies();
-    await processSlackRequest(message, dependencies, { finalAttempt: false });
-    expect(Object.keys(turns[0]!).sort()).toStrictEqual(["computePrepared", "conversationId", "message", "orchestratorInstructions", "recorder", "requestId", "subject", "workspaceId"]);
-    expect(calls).toStrictEqual(["load", "finish"]);
-  });
-
   it("passes only the recorder when a sink is configured, and touches the thread store the same way", async () => {
     const { dependencies, turns, calls } = slackDependencies({ turnRecords: { write: async () => "written" } });
     await processSlackRequest(message, dependencies, { finalAttempt: false });

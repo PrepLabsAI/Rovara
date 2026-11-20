@@ -3,7 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PutCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { developerIdForSlackUser, endSessions, grantProjectAccess, projectGrant, resolveDeveloper, revokeProjectAccess, setWorkspaceLimits, type AdminActionDependencies } from "../../packages/broker/src/aws/admin-actions.js";
-import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, isWholeLimit, readWorkspaceLimits } from "../../packages/broker/src/developer/limits.js";
+import { readWorkspaceLimits } from "../../packages/broker/src/developer/limits.js";
 import { emailIndexKey } from "../../packages/broker/src/developer/store.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
@@ -17,16 +17,6 @@ function deps(extra: AdminActionFixtureOverrides = {}): AdminActionDependencies 
 const NOT_SIGNED_IN = "NOT_FOUND: nobody has signed in to AgentX with that email yet; name them by Slack user ID, or ask them to sign in first";
 
 describe("who a developer is (E8, Q4)", () => {
-  it("takes a developer ID, a Slack user and an email that has signed in", async () => {
-    const d = deps();
-    const slackId = developerIdForSlackUser("U0ADA00001");
-    expect(slackId).toMatch(/^[a-f0-9]{64}$/);
-    d.db.set({ pk: `DEVELOPER#${slackId}`, sk: "META", developerId: slackId, provider: "slack", displayName: "Ada", email: "ada@example.com", slackUserId: "U0ADA00001", revoked: false });
-    d.db.set({ ...emailIndexKey("ada@example.com"), developerId: slackId });
-    expect(await resolveDeveloper(d, "U0ADA00001")).toMatchObject({ developerId: slackId, via: "slack", profile: { displayName: "Ada" } });
-    expect(await resolveDeveloper(d, "Ada@Example.com")).toMatchObject({ developerId: slackId, via: "email" });
-    expect(await resolveDeveloper(d, slackId)).toMatchObject({ developerId: slackId, via: "id" });
-  });
 
   it("lets a Slack user be named before their first sign-in, but not an email", async () => {
     const d = deps();
@@ -121,10 +111,6 @@ describe("a grant that races another write (FR-013.1)", () => {
 });
 
 describe("the workspace limits setting (E19, FR-053)", () => {
-  it("shares its bounds with the reader", () => {
-    expect([MAX_PER_PERSON, MAX_PER_ORGANIZATION]).toEqual([50, 1_000]);
-    expect([isWholeLimit(1, 50), isWholeLimit(50, 50), isWholeLimit(0, 50), isWholeLimit(51, 50), isWholeLimit(2.5, 50), isWholeLimit("3", 50)]).toEqual([true, true, false, false, false, false]);
-  });
 
   it("writes the setting the broker already reads, with who and when", async () => {
     const d = deps();

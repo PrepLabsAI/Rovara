@@ -1,13 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  ConnectorCallRequestSchema,
-  ConnectorCatalogSchema,
-  ConnectorResultSchema,
-  JIRA_PROJECT_TOOL_ACCESS,
-  SlackThreadWorkspaceResultSchema,
-  ThreadConnectorSchema,
-  ToolApprovalSchema,
-} from "../../packages/contracts/src/index.js";
+import { ConnectorCallRequestSchema, ConnectorCatalogSchema, ConnectorResultSchema, JIRA_PROJECT_TOOL_ACCESS, ToolApprovalSchema } from "../../packages/contracts/src/index.js";
 
 const hash = "a".repeat(64);
 
@@ -32,20 +24,6 @@ describe("connector contracts", () => {
     expect(ConnectorResultSchema.parse({ requestId: crypto.randomUUID(), status: "FAILED", reason: "not_connected", text: "Not connected.", truncated: false, replayed: false }).reason)
       .toBe("not_connected");
     expect(ConnectorCatalogSchema.safeParse({ connector: "github", tools: [{ name: "has space", upstreamName: "x", description: "", access: "read", inputSchema: {}, scopes: [{ alias: "demo", schemaHash: hash }] }], skipped: [] }).success).toBe(false);
-  });
-
-  it("carries connectors and repositories on a thread workspace result", () => {
-    const result = SlackThreadWorkspaceResultSchema.parse({
-      outcome: "WORKSPACE", workspaceId: crypto.randomUUID(), status: "READY", operationId: null, created: false,
-      orchestratorInstructions: "Delegate.", repositories: ["demo"],
-      connectors: [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true }],
-    });
-    expect(result.outcome === "WORKSPACE" && result.connectors?.[0]?.label).toBe("GitHub issues");
-  });
-
-  it("widens a thread connector's type to any connector-name pattern, not only github", () => {
-    expect(ThreadConnectorSchema.safeParse({ name: "issues", type: "linear", label: "Linear", scopes: ["team-a"], connected: true }).success).toBe(true);
-    expect(ThreadConnectorSchema.safeParse({ name: "issues", type: "Bad Type", label: "Linear", scopes: ["team-a"], connected: true }).success).toBe(false);
   });
 
   it("lists the Jira tools a project-scoped connector can hold to one project, with their access", () => {

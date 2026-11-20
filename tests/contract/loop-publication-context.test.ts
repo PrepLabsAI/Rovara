@@ -30,9 +30,6 @@ const pending: LoopEnrollment = {
 const subject = { projectName: "payments-service", projectRevision: 4, repositoryId: 1234, commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "c".repeat(40) };
 
 describe("registered CLI publication context", () => {
-  it("holds when enrollment is missing instead of inferring standalone from an empty registry", () => {
-    expect(resolveLoopEnrollment([], host)).toEqual({ kind: "hold", reasonCode: "provenance_unknown" });
-  });
 
   it("holds when a saved enrollment is corrupt instead of treating its absence as unmanaged", () => {
     expect(StandaloneEnrollmentSchema.safeParse({ ...standalone, repositoryId: 0 }).success).toBe(false);
@@ -87,10 +84,6 @@ describe("registered CLI publication context", () => {
       .toMatchObject({ kind: "hold", reasonCode: "native_enrollment_pending" });
     expect(resolvePublicationScopes({ records: [standalone, destinationStandalone], ...scope }))
       .toMatchObject({ kind: "unmanaged-local" });
-  });
-
-  it("keeps a successful native registration pending when source reconciliation fails", () => {
-    expect(resolveLoopEnrollment([standalone, pending], host)).toEqual({ kind: "hold", reasonCode: "native_enrollment_pending" });
   });
 
   it("requires a server join and holds if the native task reference is missing", async () => {

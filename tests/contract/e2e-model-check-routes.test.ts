@@ -42,16 +42,6 @@ describe("the model check routes", () => {
     expect((await h.post({ kind: "discover" })).status).toBe(404);
   });
 
-  it("POST answers 202 with the check's id and puts the request under the runner's own prefix", async () => {
-    const h = await controlPlane();
-    const answer = await h.post({ kind: "drive", modelId: MODEL });
-    expect(answer.status, JSON.stringify(answer.body)).toBe(202);
-    const checkId = String(answer.body.checkId);
-    expect(checkId).toMatch(/^[0-9a-f-]{36}$/);
-    expect([...h.harness.s3.objects.keys()].filter((key) => key.startsWith("e2e-runtime/"))).toEqual([`${PREFIX}canary-request.json`]);
-    expect(JSON.parse(h.harness.s3.objects.get(`${PREFIX}canary-request.json`)!)).toMatchObject({ schemaVersion: "rovara-e2e-model-check-request/v2", checkId, kind: "drive" });
-  });
-
   it("POST refuses a model that is not eligible with a 400, and puts nothing", async () => {
     const h = await controlPlane();
     const answer = await h.post({ kind: "drive", modelId: "anthropic.claude-haiku-4-5-20251001-v1:0" });

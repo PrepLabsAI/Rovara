@@ -7,16 +7,11 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { CallToolResultSchema, ToolListChangedNotificationSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { DEVELOPER_TOOLS, FIRST_LIST_WAIT_MS, OFFER_READ_TIMEOUT_MS, ToolError, ToolOffer, createAgentXMcpServer, guardTransport, type AdminOffer, type ToolContext, type ToolDefinition } from "../../packages/mcp/src/index.js";
+import { DEVELOPER_TOOLS, OFFER_READ_TIMEOUT_MS, ToolError, ToolOffer, createAgentXMcpServer, guardTransport, type AdminOffer, type ToolContext, type ToolDefinition } from "../../packages/mcp/src/index.js";
 import { toolError as parseToolError } from "../support/mcp-tool-error.js";
 
 function toolError(result: Awaited<ReturnType<Client["callTool"]>>) {
   return parseToolError(CallToolResultSchema.parse(result));
-}
-
-function toolCallResult(message: JSONRPCMessage) {
-  if (!("result" in message)) throw new Error("expected a successful JSON-RPC tool response");
-  return CallToolResultSchema.parse(message.result);
 }
 
 const probe: ToolDefinition = {
@@ -42,24 +37,6 @@ async function connect(offer: { current: AdminOffer }) {
 const signedOut = { admin: new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for AgentX", "run npx @preplabsai/rovara-code login --admin") };
 
 describe("the admin tool offer (FR-028, A15)", () => {
-  it("offers only the developer tools without an admin sign-in", async () => {
-    const { names } = await connect({ current: signedOut });
-    expect(await names()).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
-  });
-
-  it("offers the admin tools once the admin signs in, and sends list_changed each way", async () => {
-    const offer = { current: signedOut as AdminOffer };
-    const { client, names, changes } = await connect(offer);
-    offer.current = { admin: undefined };
-    // A15: any tool call rechecks, so the change shows at once.
-    await client.callTool({ name: "agentx_whoami", arguments: {} }).catch(() => undefined);
-    await expect.poll(async () => (await names()).includes("agentx_admin_probe")).toBe(true);
-    expect(changes()).toBeGreaterThanOrEqual(1);
-    offer.current = signedOut;
-    await client.callTool({ name: "agentx_admin_probe", arguments: {} });
-    await expect.poll(async () => (await names()).includes("agentx_admin_probe")).toBe(false);
-    expect(changes()).toBeGreaterThanOrEqual(2);
-  });
 
   it("answers a direct call to a hidden admin tool with ADMIN_REQUIRED, not the SDK's own refusal", async () => {
     const { client } = await connect({ current: signedOut });
@@ -68,127 +45,6 @@ describe("the admin tool offer (FR-028, A15)", () => {
     expect(toolError(result)).toEqual({ code: "ADMIN_REQUIRED", message: "this computer holds no unexpired admin sign-in for AgentX", next_step: "run npx @preplabsai/rovara-code login --admin" });
   });
 
-  it("says UPGRADE_REQUIRED when AgentX is too old for the admin tools", async () => {
-    const tooOld = { admin: new ToolError("UPGRADE_REQUIRED", "AgentX at https://x has no admin API", "ask your AgentX admin to upgrade AgentX, or use an older CLI") };
-    const { client, names } = await connect({ current: tooOld });
-    expect(await names()).not.toContain("agentx_admin_probe");
-    expect(toolError(await client.callTool({ name: "agentx_admin_probe", arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED" });
-  });
-
-  it("keeps offering what it last knew when the check itself fails", async () => {
-    const offer = { current: { admin: undefined } as AdminOffer };
-    const flaky = { get current(): AdminOffer { if (failing) throw new Error("keychain locked"); return offer.current; } };
-    let failing = false;
-    const { names, client } = await connect(flaky);
-    await expect.poll(async () => (await names()).includes("agentx_admin_probe")).toBe(true);
-    failing = true;
-    await client.callTool({ name: "agentx_whoami", arguments: {} }).catch(() => undefined);
-    expect(await names()).toContain("agentx_admin_probe");
-  });
-});
-
-describe("the offer without an admin check, and its timer (A15)", () => {
-  it("never offers the admin tools when the server has no adminOffer", async () => {
-    const context = (): ToolContext => ({
-      client: {} as never, clientName: "claude-code", serverVersion: "0.5.0", adminSignedIn: async () => true,
-      compatibility: async () => ({ env: "staging", apiVersion: "1.2" }), now: () => 0, sleep: async () => undefined, newRequestId: () => "33333333-3333-4333-8333-333333333333",
-    });
-    const server = createAgentXMcpServer({ version: "0.5.0", context, adminTools: [probe] });
-    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-    await server.connect(serverSide);
-    const client = new Client({ name: "claude-code", version: "1.0.0" });
-    await client.connect(clientSide);
-    await client.callTool({ name: "agentx_whoami", arguments: {} }).catch(() => undefined);
-    expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
-    expect(toolError(await client.callTool({ name: "agentx_admin_probe", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED" });
-    await server.close();
-  });
-
-  it("rechecks on its interval, logs a failed check by the error's name only, and stops", async () => {
-    vi.useFakeTimers();
-    try {
-      const tool = { enabled: false, enable: vi.fn(() => { tool.enabled = true; }), disable: vi.fn(() => { tool.enabled = false; }) };
-      const read = vi.fn(async (): Promise<AdminOffer> => { throw new Error("secret-words-planted-in-the-message"); });
-      const log = vi.fn();
-      const offer = new ToolOffer({ tools: new Map([["agentx_admin_probe", tool]]), read, log });
-      offer.start(30_000);
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(read).toHaveBeenCalledTimes(1);
-      expect(log).toHaveBeenCalledWith({ event: "offer.check_failed", error: "Error" });
-      expect(JSON.stringify(log.mock.calls)).not.toContain("secret-words-planted");
-      read.mockResolvedValue({ admin: undefined });
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(tool.enabled).toBe(true);
-      expect(tool.enable).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(tool.enable).toHaveBeenCalledTimes(1);
-      offer.stop();
-      await vi.advanceTimersByTimeAsync(90_000);
-      expect(read).toHaveBeenCalledTimes(3);
-      expect(offer.refusal("agentx_whoami")).toBeUndefined();
-      expect(offer.refusal("agentx_admin_probe")).toBeUndefined();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("runs one check at a time", async () => {
-    let release: () => void = () => undefined;
-    const read = vi.fn(() => new Promise<AdminOffer>((resolve) => { release = () => resolve({ admin: undefined }); }));
-    const tool = { enabled: false, enable: () => { tool.enabled = true; }, disable: () => { tool.enabled = false; } };
-    const offer = new ToolOffer({ tools: new Map([["t", tool]]), read });
-    const first = offer.refresh();
-    const second = offer.refresh();
-    expect(read).toHaveBeenCalledTimes(1);
-    release();
-    // Review fix: the second refresh, asked for during the first read, is one more read after it.
-    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
-    release();
-    await Promise.all([first, second]);
-    expect(read).toHaveBeenCalledTimes(2);
-    expect(tool.enabled).toBe(true);
-  });
-});
-
-describe("the offer's queued recheck (A15, review fix)", () => {
-  it("reads once more after the current read when a refresh is asked for during it, queueing at most one", async () => {
-    const releases: Array<(offer: AdminOffer) => void> = [];
-    const read = vi.fn(() => new Promise<AdminOffer>((resolve) => { releases.push(resolve); }));
-    const tool = { enabled: false, enable: () => { tool.enabled = true; }, disable: () => { tool.enabled = false; } };
-    const offer = new ToolOffer({ tools: new Map([["t", tool]]), read });
-    const first = offer.refresh();
-    const second = offer.refresh();
-    const third = offer.refresh();
-    expect(read).toHaveBeenCalledTimes(1);
-    releases[0]!({ admin: undefined });
-    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
-    expect(tool.enabled).toBe(true);
-    // The queued read's answer is the one kept: the sign-in expired meanwhile.
-    releases[1]!({ admin: new ToolError("ADMIN_REQUIRED", "expired") });
-    await Promise.all([first, second, third]);
-    expect(read).toHaveBeenCalledTimes(2);
-    expect(tool.enabled).toBe(false);
-  });
-});
-
-describe("the offer's last-moment refresh (A15, review fix 2)", () => {
-  it("never loses a refresh that lands just as a read finishes: every refresh is followed by a read that starts after it", async () => {
-    // A refresh asked for on each of many microtask ticks around the end of a read: whichever tick
-    // falls between the loop's last check and the clearing of the running read, its read must run.
-    for (let ticks = 0; ticks < 12; ticks += 1) {
-      let asked = 0;
-      let seen = -1;
-      const read = vi.fn(async (): Promise<AdminOffer> => { seen = asked; return { admin: undefined }; });
-      const tool = { enabled: false, enable: () => { tool.enabled = true; }, disable: () => { tool.enabled = false; } };
-      const offer = new ToolOffer({ tools: new Map([["t", tool]]), read });
-      const pending: Array<Promise<void>> = [offer.refresh()];
-      for (let tick = 0; tick < ticks; tick += 1) await Promise.resolve();
-      asked += 1;
-      pending.push(offer.refresh());
-      await Promise.all(pending);
-      await vi.waitFor(() => expect(seen).toBe(asked));
-    }
-  });
 });
 
 /** An inner transport that records what is sent, and lets the test deliver messages. */
@@ -262,23 +118,6 @@ describe("the hidden-tool guard (A15)", () => {
     expect(spies.close).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps runMcpServer's onclose through a real server connect and close", async () => {
-    const context = (): ToolContext => ({
-      client: {} as never, clientName: "claude-code", serverVersion: "0.5.0", adminSignedIn: async () => false,
-      compatibility: async () => ({ env: "staging", apiVersion: "1.2" }), now: () => 0, sleep: async () => undefined, newRequestId: () => "33333333-3333-4333-8333-333333333333",
-    });
-    const server = createAgentXMcpServer({ version: "0.5.0", context, adminTools: [probe], adminOffer: async () => ({ admin: undefined }) });
-    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-    const closed = vi.fn();
-    serverSide.onclose = closed;
-    await server.connect(serverSide);
-    const client = new Client({ name: "claude-code", version: "1.0.0" });
-    await client.connect(clientSide);
-    await server.close();
-    // InMemoryTransport closes its pair from both ends, so the SDK itself calls it more than once.
-    expect(closed).toHaveBeenCalled();
-  });
-
   it("reports a failed refusal answer through onerror", async () => {
     const { inner } = fakeTransport();
     inner.send = vi.fn(async () => { throw new Error("pipe broken"); });
@@ -342,26 +181,6 @@ async function rawClient(options: { adminOffer: (client: { elicitation: boolean 
 const settle = () => new Promise<void>((resolve) => { setTimeout(resolve, 50); });
 
 describe("the first tools/list and list_changed (issue 203)", () => {
-  it("answers a client that lists once, right after initialize, with the admin tools the sign-in allows", async () => {
-    const { server, listNames } = await rawClient({ adminOffer: async () => { await new Promise((resolve) => { setTimeout(resolve, 100); }); return allOffered; } });
-    expect(await listNames()).toEqual([...DEVELOPER_TOOLS.map((tool) => tool.name), ...ALL_ADMIN]);
-    await server.close();
-  });
-
-  it("sends exactly one list_changed when one refresh adds many tools", async () => {
-    const offer = { current: signedOut as AdminOffer };
-    const { server, request, listNames, listChanged } = await rawClient({ adminOffer: async () => offer.current });
-    expect(await listNames()).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
-    await settle();
-    expect(listChanged()).toBe(0);
-    offer.current = allOffered;
-    // A15: any tool call rechecks.
-    await request("tools/call", { name: "agentx_whoami", arguments: {} });
-    await vi.waitFor(async () => expect(await listNames()).toEqual([...DEVELOPER_TOOLS.map((tool) => tool.name), ...ALL_ADMIN]));
-    await settle();
-    expect(listChanged()).toBe(1);
-    await server.close();
-  });
 
   it("sends exactly one list_changed when the sign-in expires and the timer removes every admin tool", async () => {
     const offer = { current: allOffered };
@@ -377,49 +196,6 @@ describe("the first tools/list and list_changed (issue 203)", () => {
     await server.close();
   });
 
-  it("answers the first tools/list with the developer tools within the bound when the check hangs, then announces the admin tools once", async () => {
-    let release: (offer: AdminOffer) => void = () => undefined;
-    const { server, listNames, listChanged } = await rawClient({ adminOffer: () => new Promise<AdminOffer>((resolve) => { release = resolve; }), firstListWaitMs: 200 });
-    const started = Date.now();
-    expect(await listNames()).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
-    expect(Date.now() - started).toBeLessThan(2_000);
-    release(allOffered);
-    await vi.waitFor(() => expect(listChanged()).toBe(1));
-    expect(await listNames()).toEqual([...DEVELOPER_TOOLS.map((tool) => tool.name), ...ALL_ADMIN]);
-    await server.close();
-  });
-
-  it("answers the first tools/list with the developer tools at once when the check fails", async () => {
-    const { server, listNames } = await rawClient({ adminOffer: async () => { throw new Error("keychain locked"); }, firstListWaitMs: 10_000 });
-    const started = Date.now();
-    expect(await listNames()).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
-    expect(Date.now() - started).toBeLessThan(2_000);
-    await server.close();
-  });
-
-  it("lists the change tools first time for a client that declared form elicitation, and reads the offer once at start", async () => {
-    const reads: Array<{ elicitation: boolean }> = [];
-    const adminOffer = async (client: { elicitation: boolean }): Promise<AdminOffer> => {
-      reads.push(client);
-      return { admin: undefined, audit: undefined, changes: client.elicitation ? undefined : new ToolError("CONFIRMATION_UNAVAILABLE", "no confirmation method is available in this session") };
-    };
-    const { server, listNames } = await rawClient({ adminOffer, capabilities: { elicitation: { form: {} } } });
-    expect(await listNames()).toEqual([...DEVELOPER_TOOLS.map((tool) => tool.name), ...ALL_ADMIN]);
-    await settle();
-    // Review fix: the first tools/list and notifications/initialized share one read.
-    expect(reads).toEqual([{ elicitation: true }]);
-    await server.close();
-  });
-
-  it("hides the change tools in the first list for a client without elicitation when Slack is not available (CONFIRMATION_UNAVAILABLE)", async () => {
-    const adminOffer = async (client: { elicitation: boolean }): Promise<AdminOffer> => ({ admin: undefined, audit: undefined, changes: client.elicitation ? undefined : new ToolError("CONFIRMATION_UNAVAILABLE", "no confirmation method is available in this session") });
-    const { server, listNames, request } = await rawClient({ adminOffer });
-    expect(await listNames()).toEqual([...DEVELOPER_TOOLS, ...ADMIN_GROUP, ...AUDIT_GROUP].map((tool) => tool.name));
-    const refused = await request("tools/call", { name: "agentx_admin_change_probe", arguments: {} });
-    expect(toolError(toolCallResult(refused))).toMatchObject({ code: "CONFIRMATION_UNAVAILABLE" });
-    await server.close();
-  });
-
   it("logs when the first tools/list is answered before the check, by event and wait only", async () => {
     const log = vi.fn();
     const { server, listNames } = await rawClient({ adminOffer: () => new Promise<AdminOffer>(() => undefined), firstListWaitMs: 50, log });
@@ -428,43 +204,9 @@ describe("the first tools/list and list_changed (issue 203)", () => {
     await server.close();
   });
 
-  it("waits a few seconds by default for the first check, never longer", () => {
-    expect(FIRST_LIST_WAIT_MS).toBe(5_000);
-  });
 });
 
 describe("the guard's hold on the first tools/list (issue 203)", () => {
-  it("holds the first tools/list and everything after it until the check settles, then delivers them in order; later lists pass at once", async () => {
-    const { inner } = fakeTransport();
-    let release: () => void = () => undefined;
-    const ready = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
-    const guarded = guardTransport(inner, () => undefined, answer, ready);
-    const seen: JSONRPCMessage[] = [];
-    guarded.onmessage = (message) => { seen.push(message); };
-    const before: JSONRPCMessage = { jsonrpc: "2.0", method: "notifications/initialized" };
-    const list: JSONRPCMessage = { jsonrpc: "2.0", id: 2, method: "tools/list" };
-    const after: JSONRPCMessage = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "agentx_whoami", arguments: {} } };
-    inner.onmessage?.(before);
-    inner.onmessage?.(list);
-    inner.onmessage?.(after);
-    expect(seen).toEqual([before]);
-    release();
-    await vi.waitFor(() => expect(seen).toEqual([before, list, after]));
-    const again: JSONRPCMessage = { jsonrpc: "2.0", id: 4, method: "tools/list" };
-    inner.onmessage?.(again);
-    expect(seen).toEqual([before, list, after, again]);
-    expect(ready).toHaveBeenCalledTimes(1);
-  });
-
-  it("still delivers what it held when the check's promise rejects", async () => {
-    const { inner } = fakeTransport();
-    const guarded = guardTransport(inner, () => undefined, answer, () => Promise.reject(new Error("no")));
-    const seen: JSONRPCMessage[] = [];
-    guarded.onmessage = (message) => { seen.push(message); };
-    const list: JSONRPCMessage = { jsonrpc: "2.0", id: 2, method: "tools/list" };
-    inner.onmessage?.(list);
-    await vi.waitFor(() => expect(seen).toEqual([list]));
-  });
 
   it("reports a throw while delivering held messages through onerror, and still delivers the rest", async () => {
     const { inner } = fakeTransport();

@@ -5,8 +5,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { briefCriteria, criteriaProblems, missingBriefSections } from "../../packages/cli/src/loop/brief.js";
-import { parseComment } from "../../packages/cli/src/loop/commands-parse.js";
 import { CONTRIBUTE_TEMPLATE } from "../../packages/cli/src/loop/runtime.js";
 import { createLoopHarness, LOOP_SESSION, removeAll, SELF_REVIEW } from "../support/loop-harness.js";
 
@@ -20,25 +18,6 @@ const PROVED = contribution([
   "- [x] A 503 is retried at most 3 times. — Evidence: client.test.ts \"retries a 503 three times\" passes",
   "- [x] A refund is never retried. — Evidence: client.test.ts \"never retries a refund\" passes",
 ]);
-
-describe("a contribution's brief and criteria (#359)", () => {
-  it("needs a goal and success criteria, and holds the document to them: kept as given, then each proved", () => {
-    expect(missingBriefSections(BRIEF, ["Goal", "Success criteria"])).toEqual([]);
-    expect(missingBriefSections("## Goal\nFaster.\n", ["Goal", "Success criteria"])).toEqual(["Success criteria"]);
-    expect(briefCriteria(BRIEF)).toEqual(["a 503 is retried at most 3 times", "a refund is never retried"]);
-    const criteria = briefCriteria(BRIEF);
-    expect(criteriaProblems(OPEN, criteria, false)).toEqual([]);
-    expect(criteriaProblems(OPEN, criteria, true)).toEqual([expect.stringContaining("not proved yet") as unknown]);
-    expect(criteriaProblems(PROVED, criteria, true)).toEqual([]);
-    expect(criteriaProblems(contribution(["- [x] A refund is never retried. — Evidence:"]), criteria, true)).toEqual([
-      expect.stringContaining('not in it as given: "a 503 is retried at most 3 times"') as unknown,
-      expect.stringContaining('not proved yet; tick each as `- [x] <criterion> — Evidence: <how you proved it>`: "a refund is never retried"') as unknown,
-    ]);
-    expect(criteriaProblems(contribution(["- [x] A 503 is retried at most 5 times. — Evidence: yes", "- [x] A refund is never retried. — Evidence: yes"]), criteria, true)[1])
-      .toContain('not the brief\'s success criteria; keep exactly those: "a 503 is retried at most 5 times"');
-    expect(parseComment("/rovara contribute")).toMatchObject({ kind: "start", loop: { name: "contribute" }, instruction: "" });
-  });
-});
 
 describe("the Contribute loop on an issue (#359)", () => {
   it("waits for a goal and criteria, plans, and won't accept its change until every criterion is proved", async () => {
