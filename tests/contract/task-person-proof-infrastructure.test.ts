@@ -296,7 +296,7 @@ describe("the named TEST proof-only installation gate", () => {
       {
         label: "named",
         template: named,
-        withRoute: "cf7edb8e853a33e3571d5e540ed9b2e12ba2ffad1de11025fa418b36cefb14bf", withoutRoute: "4c7bfd1c54470b7d7a29b6ca16ddfda40613cb3a4034e2714993d148c7d42c44",
+        withRoute: "cf7edb8e853a33e3571d5e540ed9b2e12ba2ffad1de11025fa418b36cefb14bf", withoutRoute: "ce829248fbfa91003b34e937522753b586a8d44dc942510b98bb405d132bff1b",
         beforeStepUpRemoval: { withRoute: "28ac511b3de836798c7019b85d17a9b78f1ab41f6612bbca09bc2b88078871ce", withoutRoute: "8ff25bf806a8428450ecb20234834bcb937208beefa487af7a257dbfcb9bc990" },
       },
       {
