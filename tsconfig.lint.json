@@ -10,7 +10,8 @@
     "tests/**/*.ts",
     "packages/**/*.ts",
     "infra/**/*.ts",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "vitest.coverage-map.config.ts"
   ],
   "exclude": ["**/dist/**", "**/node_modules/**", "cdk.out/**", ".release-synth/**"]
 }
