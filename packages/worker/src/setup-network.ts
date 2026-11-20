@@ -17,7 +17,7 @@
 //   3. queries reach the helper from the sandbox's own address (tcpdump on the helper), which is what `allowedSources` relies on;
 //   4. NXDOMAIN and REFUSED from the DNS firewall reach the sandbox unchanged (the helper relays byte for byte), and a blocked name appears in blocked.json;
 //   5. the embedded DNS does not fall back to the daemon's resolvers when the helper drops a query (a query from another source must get no answer, and the sandbox must not resolve around the helper).
-//   6. the boot firewall (packages/worker/ec2/boot.sh `wall_off_containers`; the exception is in boot-stage2.sh `block_imds`) walls every `rvb*` bridge, and a run's network is named `rvbs<slot>` so it is walled too: from the sandbox, the host's gateway address and every host port, every
+//   6. the boot firewall (packages/worker/ec2/boot.sh `wall_off_containers`; the exception is in the same unit, above the rvb+ rules) walls every `rvb*` bridge, and a run's network is named `rvbs<slot>` so it is walled too: from the sandbox, the host's gateway address and every host port, every
 //      private range (10/8, 172.16/12 which holds 172.29/16, 192.168/16, 100.64/10, link-local, loopback) and the metadata address are dropped; the only exception between `rvbs*` interfaces is UDP/TCP port 53 of 172.29.0.0/16 (the helper), and
 //      the public internet and the host's resolvers' port 53 stay open, which is the path the helper's upstream and the sandbox's allowed websites use. Check from inside a sandbox: the gateway (172.29.<slot>.1) on any port, a 10.x address,
 //      the helper on a port other than 53, and another run's helper all fail; the helper's port 53 and a public name resolve. Docker's own isolation chains (after DOCKER-USER) keep one run's network from another's.
@@ -34,7 +34,7 @@ export const SETUP_NETWORK_LABEL = "agentx.setup-run";
 export const SETUP_WORKSPACE_LABEL = "agentx.setup-workspace";
 export const SETUP_NETWORK_FIRST_OCTET = "172.29";
 export const SETUP_NETWORK_SLOTS = 253;
-/** The host interface of a run's network is `rvbs<slot>`: the boot firewall walls `rvb*` bridges (private ranges, the host's own ports, metadata) and opens only port 53 of 172.29.0.0/16 between `rvbs*` interfaces (boot.sh's firewall unit walls it, boot-stage2.sh's launcher opens the helper's port). */
+/** The host interface of a run's network is `rvbs<slot>`: the boot firewall walls `rvb*` bridges (private ranges, the host's own ports, metadata) and opens only port 53 of 172.29.0.0/16 between `rvbs*` interfaces (boot.sh's firewall unit walls it and opens the helper's port above those walls). */
 export const SETUP_BRIDGE_PREFIX = "rvbs";
 export const SETUP_HELPER_ENTRY = "/opt/agentx/packages/worker/dist/setup-dns-watch-helper.js";
 const NODE = "/usr/local/bin/node";
