@@ -56,7 +56,7 @@ async function questionWhenAsked(hub: WizardHub, text: string) {
 describe("Slack app manifest", () => {
   it("carries AgentX's bot scopes, the app_mention event and this environment's URLs", () => {
     expect(slackAppManifest({ appName: "AgentX", eventsUrl: EVENTS, interactivityUrl: INTERACTIONS, signInCallbackUrl: SIGNIN })).toEqual({
-      display_information: { name: "AgentX", description: "AgentX: ask in Slack, and AgentX works in your repositories and trackers." },
+      display_information: { name: "AgentX", description: "Rovara: ask in Slack, and Rovara works in your repositories and trackers." },
       features: { bot_user: { display_name: "agentx", always_online: true } },
       oauth_config: {
         redirect_urls: [SIGNIN],

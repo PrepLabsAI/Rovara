@@ -120,7 +120,7 @@ describe("answers from the settings", () => {
     expect([typed.answers.github.appName, typed.answers.slack.appName]).toEqual(["Our AgentX", "Our AgentX"]);
     const moved = await collectInitAnswers({ ...base, env: "staging", flags: {}, prompter: scriptedPrompter(settingsScript({ owner: "acme", installName: "prod" })), ownerType: async () => "organization" });
     expect(moved.answers.env).toBe("prod");
-    expect(moved.answers.github.appName).toBe("AgentX acme (prod)");
+    expect(moved.answers.github.appName).toBe("Rovara acme (prod)");
   });
 });
 
@@ -145,7 +145,7 @@ describe("the settings form's own checks", () => {
     const { answers } = await collectInitAnswers({ ...base, env: "staging", flags: { slackAppName: "Our Slack AgentX" }, prompter, signinMethods: "both", ownerType: async () => "organization" });
     expect(answers.signinMethods).toBe("both");
     expect(answers.slack.appName).toBe("Our Slack AgentX");
-    expect(answers.github.appName).toBe("AgentX acme (staging)");
+    expect(answers.github.appName).toBe("Rovara acme (staging)");
     expect(prompter.asked).not.toContain("How will developers sign in to AgentX from their AI tools?");
   });
 
