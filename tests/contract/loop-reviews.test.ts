@@ -51,7 +51,7 @@ describe("the loop's reviews (#358)", () => {
     const onError = (error: unknown) => { unhandled.push(error); };
     process.on("uncaughtException", onError);
     try {
-      const answer = await agentReviewerRun({ harness: "claude", cwd: root, prompt: "x".repeat(4 * 1024 * 1024), model: undefined, timeoutMs: 30_000 });
+      const answer = await agentReviewerRun({ harness: "claude-code", cwd: root, prompt: "x".repeat(4 * 1024 * 1024), model: undefined, timeoutMs: 30_000 });
       expect(answer.ok).toBe(false);
       expect(answer.ok ? "" : answer.reason).toMatch(/^claude exited 3/u);
       await new Promise((settle) => setTimeout(settle, 50));
