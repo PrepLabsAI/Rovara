@@ -1,0 +1,19 @@
+{
+  "files": [
+    "tests/unit/e2e-midstep*.test.ts"
+  ],
+  "modules": [
+    "packages/verifier/src/executor/credential-classifier.ts",
+    "packages/verifier/src/executor/model-mask.ts",
+    "packages/verifier/src/executor/redact.ts",
+    "packages/verifier/src/executor/*secret*.ts",
+    "packages/verifier/src/executor/storage-entry-classifier.ts",
+    "packages/verifier/src/executor/visitor-cookie.ts"
+  ],
+  "titles": [
+    "*refus*", "*reject*", "*denied*", "*deny*", "*forbid*", "*not allowed*", "*admission*", "*access*",
+    "*never*", "*secret*", "*credential*", "*token*", "*password*",
+    "*sandbox*", "*egress*", "*dns*", "*firewall*",
+    "*symlink*", "*link in place*", "*follow a link*", "*read-only*", "*read only*", "*readonly*", "*path*", "*traversal*", "*escape*"
+  ]
+}
