@@ -83,6 +83,11 @@ export function hostedAnswerService(input: { companyId: OrgId; store: DocumentSt
 export async function routeHostedAnswers(input: HostedAnswersInput): Promise<BrokerResponse> {
   const notRight = input.request.method === "POST" ? NOT_RIGHT_PATH.exec(input.path) : null;
   if (notRight !== null) return await routeNotRight(input, notRight[1]!, notRight[2]!);
+  let failureLogged = false;
+  const log = (entry: Record<string, unknown>): void => {
+    if (entry.event === "answer.failed") failureLogged = true;
+    input.log?.(entry);
+  };
   try {
     const match = input.request.method === "POST" ? ANSWERS_PATH.exec(input.path) : null;
     if (match === null) throw agentXError("NOT_FOUND", "route not found");
@@ -90,9 +95,12 @@ export async function routeHostedAnswers(input: HostedAnswersInput): Promise<Bro
     try { project = decodeURIComponent(match[1]!); } catch { throw agentXError("NOT_FOUND", ANSWER_WORDS.projectNotFound); }
     let body: unknown;
     try { body = input.request.body === undefined || input.request.body === "" ? {} : JSON.parse(input.request.body) as unknown; } catch { body = undefined; }
-    const service = hostedAnswerService(input);
+    const service = hostedAnswerService({ ...input, log });
     return json(200, await service.ask({ personId: input.personId, project, body }));
   } catch (error) {
+    if (!failureLogged && (!(error instanceof AgentXError) || error.code === "RUNTIME_UNAVAILABLE")) {
+      try { log({ component: "answers", event: "answer.failed", cause: "unexpected" }); } catch { /* diagnostic logging must not change the answer */ }
+    }
     if (error instanceof AgentXError) return errorAnswer(error);
     return errorAnswer(agentXError("RUNTIME_UNAVAILABLE", ANSWER_WORDS.unavailable));
   }

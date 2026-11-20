@@ -931,7 +931,10 @@ describe("suggestions from a script token", () => {
     const w = await setUp();
     const b = build(w);
     const secret = await makeToken(w, "a-admin");
-    for (const bad of ["rvst_notatoken", `${secret}x`, `${secret.slice(0, -1)}A`, "garbage"]) expect(await askToken(b, bad, GOOD), bad).toMatchObject({ ok: false, code: "AUTH_REQUIRED" });
+    // The tampered token must DIFFER from the real one: a random secret already ends in "A" one time in 64, which made this case accept the real token.
+    const tampered = `${secret.slice(0, -1)}${secret.endsWith("A") ? "B" : "A"}`;
+    expect(tampered).not.toBe(secret);
+    for (const bad of ["rvst_notatoken", `${secret}x`, tampered, "garbage"]) expect(await askToken(b, bad, GOOD), bad).toMatchObject({ ok: false, code: "AUTH_REQUIRED" });
     const principal = (await identityOf(w).getPrincipal(A, "a-admin"))!;
     await revokeScriptToken({ store: w.world.store, audit: w.audits.get(A)!, now: () => w.world.clock.now }, { developerId: developerIdOf(principal), personId: "a-admin", orgId: A, orgRole: "admin" }, `stk_${secret.split("_")[2]!}`);
     expect(await askToken(b, secret, GOOD)).toMatchObject({ ok: false, code: "AUTH_REQUIRED", message: "This script token was revoked." });

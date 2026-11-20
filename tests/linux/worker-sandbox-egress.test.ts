@@ -700,6 +700,35 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       metadataVia = peerIps[remoteName]!;
       const metadataUrl = `http://${metadataAddress}:${String(remotePort)}/`;
 
+      const listeningTcpSockets = async (): Promise<Array<[address: string, port: number, inode: string]>> => {
+        const result = await docker("exec", sandboxName, "node", "-e", String.raw`
+          const fs = require("node:fs");
+          const sockets = [];
+          for (const file of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+            let contents;
+            try { contents = fs.readFileSync(file, "utf8"); }
+            catch (error) {
+              if (file === "/proc/net/tcp6" && error.code === "ENOENT") continue;
+              throw error;
+            }
+            for (const line of contents.trim().split("\n").slice(1)) {
+              const fields = line.trim().split(/\s+/u);
+              if (fields[3] !== "0A") continue;
+              const [address, port] = fields[1].split(":");
+              sockets.push([address, parseInt(port, 16), fields[9]]);
+            }
+          }
+          console.log(JSON.stringify(sockets.sort()));
+        `);
+        expect(result.code, result.stderr).toBe(0);
+        return JSON.parse(result.stdout.trim()) as Array<[address: string, port: number, inode: string]>;
+      };
+      const beforeCapture = await listeningTcpSockets();
+      // Docker can bind its embedded DNS resolver to a random TCP port on
+      // 127.0.0.11 (0B00007F in /proc), even with a mounted resolv.conf.
+      expect(beforeCapture.filter(([address]) => address === "0B00007F").length).toBeLessThanOrEqual(1);
+      expect(beforeCapture.filter(([address]) => address !== "0B00007F").map(([, socketPort]) => socketPort)).toEqual([port]);
+
       const plan = encodeBrowserEvidenceExecutorPlan({ port, readyPath: "/health", routes: ["/checkout", "/missing", "/busy"], maskSelectors: [], runMs: 60_000, pageMs: 15_000 });
       const captureArgs = browserEvidenceExecutorArgs({ image, sandbox: sandboxName, name: captureName, seccompProfile: seccomp, plan });
       expect(captureArgs.filter((value) => value === "--network")).toHaveLength(1);
@@ -716,7 +745,10 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       expect(launched.code, launched.stderr).toBe(0);
       const mode = await docker("inspect", "--format", "{{.HostConfig.NetworkMode}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.CapDrop}}|{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}", captureName);
       expect(mode.code, mode.stderr).toBe(0);
-      expect(mode.stdout.trim()).toBe(`container:${sandboxName}|true|[ALL]|`);
+      // Docker reads a `container:<name>` network mode back as `container:<full id>`: compare with the id of THIS sandbox (never any container).
+      const sandboxId = (await docker("inspect", "--format", "{{.Id}}", sandboxName)).stdout.trim();
+      expect(sandboxId).toMatch(/^[0-9a-f]{64}$/u);
+      expect(mode.stdout.trim()).toBe(`container:${sandboxId}|true|[ALL]|`);
 
       const browserUp = async () => {
         const top = await docker("top", captureName, "-eo", "pid,comm");
@@ -725,10 +757,9 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       const browserDeadline = Date.now() + 20_000;
       while (!(await browserUp()) && Date.now() < browserDeadline) await pause();
       expect(await browserUp(), "Chromium must start before inspecting listeners").toBe(true);
-      const listeners = await docker("exec", sandboxName, "node", "-e", "const fs=require('fs');const p=new Set();for(const f of ['/proc/net/tcp','/proc/net/tcp6']){try{for(const l of fs.readFileSync(f,'utf8').trim().split('\\n').slice(1)){const c=l.trim().split(/\\s+/);if(c[3]==='0A')p.add(parseInt(c[1].split(':').pop(),16))}}catch(e){if(f==='/proc/net/tcp')throw e}}console.log(JSON.stringify([...p].sort((a,b)=>a-b)))");
-      expect(listeners.code, listeners.stderr).toBe(0);
+      const duringCapture = await listeningTcpSockets();
       expect(await browserUp(), "Chromium must still run after reading listeners").toBe(true);
-      expect(JSON.parse(listeners.stdout.trim()) as number[]).toEqual([port]);
+      expect(duringCapture, "capture must not add or replace any TCP listener").toEqual(beforeCapture);
       await waitForExit(captureName, 120_000);
       const captureLog = await docker("logs", captureName);
       expect(captureLog.code, captureLog.stderr).toBe(0);
@@ -814,7 +845,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       expect(probe.code, probe.stderr).toBe(0);
       const result = JSON.parse(probe.stdout.trim().split("\n").at(-1) ?? "{}") as Record<string, { status?: number; body?: string; error?: string; addresses?: string[] }>;
       expect(result.local?.status).toBe(200);
-      expect(result.local?.body).toContain("Account");
+      expect(result.local?.body).toContain("Checkout");
       expect(result.dnsDenied).toEqual({ error: "ENOTFOUND" });
       expect(result.dnsAllowed).toEqual({ addresses: [GATEWAY_IP] });
       const isNetworkDenial = (answer: { status?: number; error?: string } | undefined): boolean => answer?.status === undefined && /net::ERR_(ADDRESS_UNREACHABLE|CONNECTION_TIMED_OUT|CONNECTION_REFUSED)\b/u.test(answer?.error ?? "");
@@ -864,7 +895,14 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const broken = `"use strict";\n// ${"x".repeat(21_000)}\nprocess.exit(3);\n`;
     const result = await stage(broken);
     expect(result.code).not.toBe(0);
-    expect(result.failure).toMatch(/sandbox egress gateway|did not pass its checks/u);
+    // Every step after the gateway starts depends on a LIVE gateway, so a gateway that dies at once fails the boot at whichever of them first sees it dead: the start, the running check, the bridge-port isolation (it execs into the gateway to find
+    // its port, sandbox-egress.sh se_container_port_index, so it fails closed on a dead one) or the boot probe. Exactly these four, nothing else (an unrelated failure must not pass for this one).
+    expect(result.failure?.trim()).toMatch(/^(could not start the sandbox egress gateway|the sandbox egress gateway is not running on its two networks|could not set and verify sandbox bridge port isolation|the sandbox egress gateway did not pass its checks.*)$/u);
+    // And the failure is because the gateway is dead, with no sandbox started by the stage and the worker given nothing.
+    // (Docker may be restarting it under its `unless-stopped` policy, so "running" is not stable: what proves it died is its own exit code 3 or a restart.)
+    const state = await docker("inspect", "--format", "{{.State.ExitCode}}|{{.RestartCount}}", "rovara-egw");
+    const [exitCode, restarts] = state.stdout.trim().split("|").map(Number);
+    expect(exitCode === 3 || (restarts ?? 0) > 0, state.stdout).toBe(true);
     expect(await readFile(join(dir, "worker.env"), "utf8")).toBe("AWS_REGION=us-west-2\n");
   }, 180_000);
 });

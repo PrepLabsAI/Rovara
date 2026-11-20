@@ -122,9 +122,9 @@ describe("the account the install lands in", () => {
     expect(page.cards).toEqual([{
       id: "aws", title: "AWS account", status: "ok",
       lines: [
-        "AgentX installs into AWS account 123456789012 in us-east-1.",
+        "Rovara installs into AWS account 123456789012 in us-east-1.",
         `You are signed in as ${signedInAs(HOLDER)}, with the AWS profile dev.`,
-        "Tip: a separate AWS account just for AgentX keeps its costs and permissions apart from your other work.",
+        "Tip: a separate AWS account just for Rovara keeps its costs and permissions apart from your other work.",
       ],
       details: [HOLDER],
     }]);
@@ -166,10 +166,11 @@ describe("the account the install lands in", () => {
       runner: runner(Object.assign(new Error("spawn aws ENOENT"), { code: "ENOENT" })), surface: page, profile: DEV,
     })).rejects.toBe(failure);
     expect(prompter.asked).toEqual(["Your AWS sign-in is missing or has expired. What next?", "Your AWS sign-in is missing or has expired. What next?"]);
-    expect(page.cards.at(-1)?.details).toContain("could not run aws sso login --profile dev: spawn aws ENOENT");
+    expect(page.cards.at(-1)?.details).toEqual([]);
+    expect(page.cards.at(-1)?.lines).toContain("Choose Sign in again. A browser tab opens for the AWS sign-in; finish it there, then come back to this tab.");
   });
 
-  it("names a sign-in that could not start in one line, without the command twice or a stderr tail", async () => {
+  it("keeps failed sign-in recovery in the browser without command or stderr details", async () => {
     const page = surface();
     const prompter = scriptedPrompter(["signin", "signin", "stop"]);
     let runs = 0;
@@ -182,9 +183,11 @@ describe("the account the install lands in", () => {
       },
     };
     await expect(resolveCaller({ identity: () => ({ get: async () => { throw expired(); } }), region: "us-east-1", prompter, runner: failing, surface: page, profile: DEV })).rejects.toThrow("expired");
-    const problems = page.cards.map((card) => card.details?.[2]);
-    expect(problems[1]).toBe("aws sso login --profile dev could not start: spawn aws ENOENT");
-    expect(problems[2]).toBe("aws sso login --profile dev exited with code 255");
+    expect(runs).toBe(2);
+    for (const card of page.cards) {
+      expect(card.details).toEqual([]);
+      expect(JSON.stringify(card.lines)).not.toMatch(/aws sso login|command|stderr/);
+    }
     for (const card of page.cards) for (const line of card.lines) expect(line).not.toContain("\n");
   });
 
@@ -212,8 +215,8 @@ describe("the account the install lands in", () => {
     expect(page.cards[0]).toMatchObject({
       id: "aws", status: "waiting",
       lines: [
-        "AgentX installs into AWS account 123456789012 in us-east-1.",
-        "You are signed in as the AWS root user. AgentX works, but AWS advises an admin user instead.",
+        "Rovara installs into AWS account 123456789012 in us-east-1.",
+        "You are signed in as the AWS root user. Rovara works, but AWS advises an admin user instead.",
         "You can continue as root. A few day-two commands need an admin user instead; the ready screen says which.",
       ],
       link: { url: ADMIN_USER_GUIDE_URL, label: "How to create an admin user" },
@@ -255,9 +258,9 @@ describe("the account the install lands in", () => {
     });
     expect(caller.account).toBe("123456789012");
     expect(cards.at(-1)?.lines).toEqual([
-      "AgentX installs into AWS account 123456789012 (acme-prod).",
+      "Rovara installs into AWS account 123456789012 (acme-prod).",
       `You are signed in as ${signedInAs(arn)}.`,
-      DEDICATED_ACCOUNT_NOTE,
+      DEDICATED_ACCOUNT_NOTE.replaceAll("AgentX", "Rovara"),
     ]);
   });
 });

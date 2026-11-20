@@ -1,5 +1,5 @@
 // TE-H1 browser evidence: the real driver. The project's own start command starts the app (in its own process group, so stopping it stops only what it started; a start command that
-// daemonizes out of the group is left to the sandbox's own teardown), and a headless Chromium (the executor's `launchLocalChromium`, its own sandbox on) opens each route on the app's
+// daemonizes out of the group is left to the sandbox's own teardown), and a headless Chromium (Playwright's pipe launch, its own sandbox on) opens each route on the app's
 // origin only (`http://127.0.0.1:<port>`; any other origin is aborted before and during the load; WebSockets are not routed, which the sandbox's network walls cover).
 //
 // Masking, in this order, around the one JPEG: every frame's text, open shadow roots, form values, placeholders, image alt text and title are scrubbed (contracts' text masks); the
@@ -23,7 +23,6 @@ import {
   type BrowserEvidenceExecutorSignIn, type BrowserEvidenceSignInValues,
 } from "@agentx/contracts";
 import type { BrowserEvidenceCaptureAnswer, BrowserEvidenceDriver, BrowserEvidenceSide } from "./browser-evidence.js";
-import { launchLocalChromium } from "./local-browser.js";
 
 /** The e2e capture's JPEG quality and screenshot timeout (web-runtime.ts). */
 const SCREENSHOT_QUALITY = 70;
@@ -502,24 +501,40 @@ async function collectVideo(video: Video | undefined, dir: string): Promise<{ vi
 }
 
 
-/** The executor's Chromium (its own sandbox on, DevTools on loopback), connected for the driver. `close` ends the browser and removes its scratch. */
+/** The executor's Chromium (its own sandbox on, Playwright pipe transport), used by the driver. `close` ends the browser and removes its scratch. */
 export async function openEvidenceChromium(input: { signal: AbortSignal }): Promise<{ browser: Browser; close(): Promise<void> }> {
   const downloads = await mkdtemp(join(tmpdir(), "rovara-evidence-"));
-  let local: Awaited<ReturnType<typeof launchLocalChromium>> | undefined;
+  let browser: Browser | undefined;
+  let abortListener: (() => void) | undefined;
   try {
-    local = await launchLocalChromium({ downloadDir: downloads, signal: input.signal });
-    const browser = await chromium.connectOverCDP(local.cdpEndpoint);
-    const opened = local;
+    if (input.signal.aborted) throw input.signal.reason instanceof Error ? input.signal.reason : new Error("chromium launch was cancelled");
+    const launching = chromium.launch({
+      executablePath: chromium.executablePath(), headless: false, chromiumSandbox: true, timeout: 30_000,
+      args: ["--headless=new", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-component-update", "--disable-sync", "--disable-extensions",
+        "--metrics-recording-only", "--mute-audio", "--password-store=basic", "--use-mock-keychain"],
+      env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", HOME: downloads, TMPDIR: tmpdir(), LANG: "C.UTF-8", ...(process.env["PLAYWRIGHT_BROWSERS_PATH"] === undefined ? {} : { PLAYWRIGHT_BROWSERS_PATH: process.env["PLAYWRIGHT_BROWSERS_PATH"] }) },
+    });
+    const aborted = new Promise<never>((_resolve, reject) => {
+      abortListener = () => reject(input.signal.reason instanceof Error ? input.signal.reason : new Error("chromium launch was cancelled"));
+      input.signal.addEventListener("abort", abortListener, { once: true });
+    });
+    try { browser = await Promise.race([launching, aborted]); }
+    catch (error) {
+      if (input.signal.aborted) void launching.then((lateBrowser) => lateBrowser.close(), () => undefined);
+      throw error;
+    } finally {
+      if (abortListener !== undefined) input.signal.removeEventListener("abort", abortListener);
+    }
+    const opened = browser;
     return {
-      browser,
+      browser: opened,
       async close() {
-        await browser.close().catch(() => undefined);
         await opened.close().catch(() => undefined);
         await rm(downloads, { recursive: true, force: true }).catch(() => undefined);
       },
     };
   } catch (error) {
-    await local?.close().catch(() => undefined);
+    await browser?.close().catch(() => undefined);
     await rm(downloads, { recursive: true, force: true }).catch(() => undefined);
     throw error;
   }

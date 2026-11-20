@@ -196,6 +196,27 @@ describe("Slack Web API client", () => {
 });
 
 describe("Slack app step", () => {
+  it("registers the separately supplied Cloud application origin, never the installer origin", async () => {
+    const context = slackContext(["cloud", "https://cloud.example.test/app", "manual", "installed", TEST_SIGNING_SECRET, TEST_BOT_TOKEN, true], { setupPageUrl: "https://installer.example.test/", slackInstallHost: async () => { throw new Error("manual flow must not start Add to Slack"); } });
+    await slackAppStep(fakeSlackApi()).run(context, progressHandle());
+    const opened = new URL(context.opened[0]!);
+    const manifest = JSON.parse(opened.searchParams.get("manifest_json") ?? "{}") as { oauth_config: { redirect_urls: string[] } };
+    expect(manifest.oauth_config.redirect_urls).toEqual([SIGNIN, "https://cloud.example.test/api/connect/slack/callback"]);
+  });
+
+  it.each([false, true])("does not invent a Cloud callback when the Cloud address is omitted (opt-in: %s)", async (optIn) => {
+    const context = slackContext([...(optIn ? ["cloud", ""] : []), "manual", "installed", TEST_SIGNING_SECRET, TEST_BOT_TOKEN, true], { setupPageUrl: "https://installer.example.test", slackInstallHost: async () => { throw new Error("manual flow must not start Add to Slack"); } });
+    await slackAppStep(fakeSlackApi()).run(context, progressHandle());
+    const manifest = JSON.parse(new URL(context.opened[0]!).searchParams.get("manifest_json")!) as { oauth_config: { redirect_urls: string[] } };
+    expect(manifest.oauth_config.redirect_urls).toEqual([SIGNIN]);
+  });
+
+  it.each(["http://cloud.example.test", "https://user@cloud.example.test", "https://cloud.example.test/app?token=private", "https://cloud.example.test/other", "not a URL"])("rejects an invalid Cloud address before opening Slack: %s", async (address) => {
+    const context = slackContext(["cloud", address], { setupPageUrl: "https://installer.example.test", slackInstallHost: async () => { throw new Error("invalid address must not start Add to Slack"); } });
+    await expect(slackAppStep(fakeSlackApi()).run(context, progressHandle())).rejects.toThrow("Use the https address of your hosted web app");
+    expect(context.opened).toEqual([]);
+  });
+
   it("stores the bot token and signing secret in the Slack secret and records the app, never printing either", async () => {
     const confirmations: Array<{ question: string; defaultValue: boolean }> = [];
     const prompter = { ...scriptedPrompter(["installed", `${TEST_SIGNING_SECRET}\n`, TEST_BOT_TOKEN]), confirm: async (question: string, options: { defaultValue: boolean }) => { confirmations.push({ question, defaultValue: options.defaultValue }); return true; } };
@@ -542,7 +563,7 @@ describe("verifying the Slack URLs after the Slack service deploys", () => {
       ["slack-urls", "running"], ["slack-urls", "running"], ["slack-urls", "waiting"], ["slack-urls", "failed"],
       ["slack-urls", "running"], ["slack-urls", "waiting"], ["slack-urls", "ok"],
     ]);
-    expect(surface.cards[1]?.lines).toContain("AgentX can take up to 5 minutes to start using the new Signing Secret. Checking again every 15 seconds.");
+    expect(surface.cards[1]?.lines).toContain("Rovara can take up to 5 minutes to start using the new Signing Secret. Checking again every 15 seconds.");
     expect(surface.cards[3]?.link).toEqual({ url: "https://api.slack.com/apps/A0APP/event-subscriptions", label: "Open Event Subscriptions" });
     expect(JSON.stringify(surface.cards)).not.toContain(TEST_SIGNING_SECRET);
   });

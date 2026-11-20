@@ -173,6 +173,34 @@ describe("native task workflow contracts", () => {
     expect(ready).toMatchObject({ stage: "PULL_REQUEST", state: "READY" });
   });
 
+  it("holds the PR stage when a required review could not run", () => {
+    const current = { ...createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z" }), stage: "VERIFY" as const, state: "BLOCKED" as const };
+    const candidate = createCandidateManifest([{ repositoryId: "payments", commitSha: "a".repeat(40), treeSha: "1".repeat(40) }]);
+    const reviewing = recordWorkflowVerification(current, { candidate, now: "2026-10-05T12:02:00.000Z",
+      checks: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: "2026-10-05T12:01:00.000Z", results: [{ checkId: "unit", status: "PASS" as const }] } });
+    const critic = submitWorkflowReview(reviewing, {
+      operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role: "CRITIC", provider: "scripted", version: "1",
+      status: "UNKNOWN", failureReason: "SESSION_FAILED", findings: [], readOnly: true, recordedAt: "2026-10-05T12:03:00.000Z",
+    }, "2026-10-05T12:03:00.000Z");
+    const afterSecurity = submitWorkflowReview(critic, {
+      operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role: "SECURITY", provider: "scripted", version: "1",
+      status: "PASS", findings: [], readOnly: true, recordedAt: "2026-10-05T12:04:00.000Z",
+    }, "2026-10-05T12:04:00.000Z");
+    expect(critic).toMatchObject({ stage: "REVIEW", state: "BLOCKED" });
+    expect(afterSecurity).toMatchObject({ stage: "REVIEW", state: "BLOCKED" });
+    expect(afterSecurity.pullRequests).toBeUndefined();
+
+    const contradictory = submitWorkflowReview(reviewing, {
+      operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role: "CRITIC", provider: "scripted", version: "1",
+      status: "PASS", failureReason: "SESSION_FAILED", findings: [], readOnly: true, recordedAt: "2026-10-05T12:03:00.000Z",
+    }, "2026-10-05T12:03:00.000Z");
+    const contradictoryReady = submitWorkflowReview(contradictory, {
+      operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role: "SECURITY", provider: "scripted", version: "1",
+      status: "PASS", findings: [], readOnly: true, recordedAt: "2026-10-05T12:04:00.000Z",
+    }, "2026-10-05T12:04:00.000Z");
+    expect(contradictoryReady).toMatchObject({ stage: "REVIEW", state: "BLOCKED" });
+  });
+
   it("lets reviews pass with advisory pre-existing findings and blocks only introduced ones", () => {
     const current = { ...createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z" }), stage: "VERIFY" as const, state: "BLOCKED" as const };
     const candidate = createCandidateManifest([{ repositoryId: "payments", commitSha: "a".repeat(40), treeSha: "1".repeat(40) }]);

@@ -8,14 +8,21 @@ import { scriptedPrompter } from "../support/init-fakes.js";
 
 describe("the failure screen", () => {
   it("says what happened in plain words, what to do, and keeps the raw message and the stacks in the details", () => {
-    const screen = failureScreen({ env: "staging", region: "us-east-1", stepTitle: "Start the AgentX service", stepId: "control-plane", error: new Error("Resource limit exceeded"), logPath: "/home/a/.agentx/logs/init-staging.log" });
+    const screen = failureScreen({ env: "staging", region: "us-east-1", stepTitle: "Start the Rovara service", stepId: "control-plane", error: new Error("Resource limit exceeded"), logPath: "/home/a/.agentx/logs/init-staging.log" });
     expect(screen).toEqual({
       title: "The install stopped",
-      what: "Start the AgentX service did not finish. Resource limit exceeded.",
+      what: "Start the Rovara service did not finish. Resource limit exceeded.",
       next: "Nothing is lost: the steps that finished are kept. Try this step again, or stop for now and continue later.",
       details: ["Resource limit exceeded", "Stack: agentx-staging-control-plane", "Stack: agentx-staging-runtime", "Log file: /home/a/.agentx/logs/init-staging.log"],
       link: { url: "https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks?filteringText=agentx-staging-", label: "Open the stacks in the AWS console" },
     });
+  });
+
+  it("keeps branding and command recovery out of browser failure copy and details", () => {
+    const screen = failureScreen({ env: "staging", region: "us-east-1", stepTitle: "Sign in to AgentX", error: new Error("AgentX could not connect; run agentx init again") });
+    expect(JSON.stringify(screen)).not.toMatch(/AgentX|run agentx|terminal/);
+    expect(screen.what).toBe("Sign in to Rovara did not finish. Rovara could not connect.");
+    expect(screen.details).toEqual(["Rovara could not connect"]);
   });
 
   it("keeps error codes, ARNs and flags out of what happened", () => {

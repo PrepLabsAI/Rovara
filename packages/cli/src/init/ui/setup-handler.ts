@@ -58,9 +58,9 @@ export type SetupPageAuth =
 /** What the page shows before the identity stack is up: there is no sign-in to send anyone to yet. */
 export const SETTING_UP_HTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="30"><title>Install AgentX</title></head>
-<body><h1>Install AgentX</h1>
-<p>AgentX is still setting up sign-in in your AWS account. This takes about five minutes from when the stack was created.</p>
+<meta http-equiv="refresh" content="30"><title>Install Rovara</title></head>
+<body><h1>Install Rovara</h1>
+<p>Rovara is still setting up sign-in in your AWS account. This takes about five minutes from when the stack was created.</p>
 <p>When it is ready, you get an email with your temporary password. This page reloads by itself.</p></body></html>`;
 
 export function setupPageHandler(input: {
@@ -190,13 +190,13 @@ async function githubCallback(store: SetupStore, query: Record<string, string | 
   });
   const manifest = await store.getGitHubManifest();
   if (manifest === undefined || !tokensMatch(query.state, manifest.state)) {
-    return answer(400, "This page is from another AgentX install, or its GitHub app was already created. Go back to the setup page.");
+    return answer(400, "This page is from another Rovara install, or its GitHub app was already created. Go back to the setup page.");
   }
   if (query.code === undefined || query.code === "") return answer(400, "GitHub sent no code. Go back to the setup page.");
   await store.putGitHubCode(manifest.state, query.code);
   await store.deleteGitHubManifest();
   // GitHub has not converted the code yet; the setup page says whether that worked.
-  return answer(200, "GitHub sent AgentX the new app. You can close this tab and go back to the setup page.");
+  return answer(200, "GitHub sent Rovara the new app. You can close this tab and go back to the setup page.");
 }
 
 async function slackCallback(store: SetupStore, query: Record<string, string | undefined>): Promise<SetupResponse> {
@@ -205,7 +205,7 @@ async function slackCallback(store: SetupStore, query: Record<string, string | u
   });
   const state = await store.getSlackInstall();
   if (state === undefined || !tokensMatch(query.state, state)) {
-    return answer(400, "This page is from another AgentX install, or its Slack app was already added. Go back to the setup page.");
+    return answer(400, "This page is from another Rovara install, or its Slack app was already added. Go back to the setup page.");
   }
   // Cancel, or Request to Install in a workspace that needs an admin's approval: nothing to take
   // yet, and the setup page still offers Add to Slack. Slack's own word, never echoed raw.
@@ -216,7 +216,7 @@ async function slackCallback(store: SetupStore, query: Record<string, string | u
   if (query.code === undefined || query.code === "") return answer(400, "Slack sent no code. Go back to the setup page.");
   await store.putSlackCode(state, query.code);
   await store.deleteSlackInstall();
-  return answer(200, "Slack sent AgentX the app's install. You can close this tab and go back to the setup page.");
+  return answer(200, "Slack sent Rovara the app's install. You can close this tab and go back to the setup page.");
 }
 
 /** A redirect, with each cookie in its own Set-Cookie (the Lambda adapter sends them as a list). */

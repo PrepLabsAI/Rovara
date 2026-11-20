@@ -209,7 +209,7 @@ describe("asking AgentX to answer a page comment", () => {
     expect((await t.answered({ ...body, commentId: top.comment.id })).status).toBe(409);
     // The page shows it as AgentX's reply, with the chip.
     const views = await listPageComments(t.deps, t.owner, t.taskId);
-    expect(views.comments.find((view) => view.id === agentxAnswerCommentId(asked.comment.id))).toMatchObject({ author: { kind: "agentx", name: "AgentX" }, parentId: top.comment.id });
+    expect(views.comments.find((view) => view.id === agentxAnswerCommentId(asked.comment.id))).toMatchObject({ author: { kind: "agentx", name: "Rovara" }, parentId: top.comment.id });
     expect(views.comments.find((view) => view.id === asked.comment.id)?.agentx).toBe("answered");
   });
 
@@ -242,7 +242,7 @@ describe("asking AgentX to answer a page comment", () => {
     expect((await t.answered({ taskId: t.taskId, commentId: asked.comment.id, thread: t.thread, outcome: "ANSWERED", text: "Only the owner decides, on the page." })).status).toBe(200);
     const views = await listPageComments(t.deps, t.owner, t.taskId);
     // The name comes from the stored comment that asked, never from the answer's text.
-    expect(views.comments.find((view) => view.id === agentxAnswerCommentId(asked.comment.id))).toMatchObject({ author: { kind: "agentx", name: "AgentX" }, answering: "Sam Lee" });
+    expect(views.comments.find((view) => view.id === agentxAnswerCommentId(asked.comment.id))).toMatchObject({ author: { kind: "agentx", name: "Rovara" }, answering: "Sam Lee" });
     // Teammates can still ask.
     expect(t.sent).toHaveLength(2);
   });

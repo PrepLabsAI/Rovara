@@ -130,6 +130,13 @@ The page walks you through five parts, and tells you when it needs you:
    app, then create the Slack app and paste its Client ID, Client Secret, Signing Secret and Bot
    User OAuth Token on one form. Rovara checks that Slack reaches it, and turns on developer
    sign-in with the Slack connection, as the plan said.
+   The Slack app's OAuth Redirect URLs must include both the Code sign-in callback shown by the
+   installer and `https://<your-web-app-host>/api/connect/slack/callback` for Slack workspace
+   connections. In the hosted installer, choose “Set the hosted web app address (optional)” before
+   choosing how to create the Slack app. This adds the application origin’s callback to the manifest.
+   The installer’s own address is different; its `/slack/callback` is retained for Add to Slack.
+   If you skip the web app address, or create or
+   update the app by hand, add the web app URL on OAuth & Permissions before connecting from the web app.
 5. **Finish.** Your admin sign-in, the first project and channel, alerts, and a first reply.
 
 Without a browser (`--no-ui`, SSH, CI) the terminal asks in the same order and runs the same checks;

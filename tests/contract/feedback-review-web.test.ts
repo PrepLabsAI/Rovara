@@ -229,8 +229,8 @@ describe("authenticated PR feedback review web journey", () => {
   });
 
   it.each([
-    ["APPROVE", "APPROVED", "Approved", "AgentX will continue with implementation"],
-    ["REQUEST_CHANGES", "CHANGES_REQUESTED", "Changes requested", "AgentX is waiting for your updated instructions"],
+    ["APPROVE", "APPROVED", "Approved", "Rovara will continue with implementation"],
+    ["REQUEST_CHANGES", "CHANGES_REQUESTED", "Changes requested", "Rovara is waiting for your updated instructions"],
     ["DISMISS", "DISMISSED", "Dismissed", "No code changes will start from this proposal"],
   ] as const)("renders a durable read-only %s outcome after the pending decision controls disappear", async (action, status, label, nextActionText) => {
     const deps = dependencies({ getWorkflowFeedbackReview: vi.fn(async () => ({
@@ -937,7 +937,7 @@ describe("broker-backed feedback review data", () => {
     expect(pageAfterRestart.body).toContain("Current operation status: FAILED");
     expect(pageAfterRestart.body).toContain("Required unit check failed");
     expect(pageAfterRestart.body).toContain("Resolve the blocker before continuing.");
-    expect(pageAfterRestart.body).not.toContain("AgentX will continue with implementation and the selected checks.");
+    expect(pageAfterRestart.body).not.toContain("Rovara will continue with implementation and the selected checks.");
 
     const beforeMerge = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as Record<string, unknown> & { workspaceId: string; workflow: WorkflowSnapshot };
     const waitingForMerge = { ...beforeMerge.workflow, stage: "WAIT_FOR_MERGE", state: "WAITING", blockReason: undefined };
@@ -957,7 +957,7 @@ describe("broker-backed feedback review data", () => {
     expect(pageAfterRestart.body).toContain("All required pull requests are merged.");
     expect(pageAfterRestart.body).toContain('aria-label="Slack cleanup status"');
     expect(pageAfterRestart.body).toContain("Work complete.");
-    expect(pageAfterRestart.body).toContain("AgentX is retrying Slack Canvas cleanup in the background.");
+    expect(pageAfterRestart.body).toContain("Rovara is retrying Slack Canvas cleanup in the background.");
     expect(pageAfterRestart.body).toContain("No action is needed.");
   });
 

@@ -63,8 +63,17 @@ describe("authorize (FR-001, FR-002)", () => {
       expect(response.statusCode).toBe(400);
       expect(response.headers.location).toBeUndefined();
       expect(response.headers["content-type"]).toBe("text/html; charset=utf-8");
-      expect(response.body).toContain("agentx login");
+      expect(response.body).toContain("Start signing in again");
+      expect(response.body).not.toMatch(/AgentX|\bCLI\b|terminal|agentx login/);
     }
+  });
+
+  it("uses customer wording when browser sign-in has no enabled method", async () => {
+    const h = identityHarness({ teamId: undefined });
+    const response = await h.http(httpEvent("GET", "/v1/auth/browser/authorize?return_to=" + encodeURIComponent("/review/11111111-1111-4111-8111-111111111111/task")));
+    expect(response.statusCode).toBe(503);
+    expect(response.body).toContain("Rovara administrator");
+    expect(response.body).not.toMatch(/AgentX|\bCLI\b|terminal|agentx login/);
   });
 
   it("sends a bad PKCE or response type back to the CLI as invalid_request", async () => {
@@ -94,7 +103,18 @@ describe("authorize (FR-001, FR-002)", () => {
     expect(response.statusCode).toBe(200);
     expect(response.body).toContain("Sign in with Slack");
     expect(response.body).toContain("Sign in with &lt;Okta &amp; co&gt;");
+    expect(response.body).toContain("Sign in to Rovara");
+    expect(response.body).not.toContain("Sign in to AgentX");
     expect(response.headers["content-security-policy"]).toContain("default-src 'none'");
+  });
+
+  it("uses plain words for an expired sign-in link, with no CLI command", async () => {
+    const h = identityHarness();
+    const response = await h.http(httpEvent("GET", "/v1/auth/callback/slack?state=nope&code=x"));
+    expect(response.statusCode).toBe(400);
+    expect(response.body).toContain("This sign-in link has expired");
+    expect(response.body).toContain("Start signing in again.");
+    expect(response.body).not.toMatch(/agentx login|Rovara CLI/i);
   });
 
   it("sends the security headers on every HTML page, including refusals", async () => {
@@ -118,7 +138,8 @@ describe("authorize (FR-001, FR-002)", () => {
     const h = identityHarness({ slack: false });
     const location = new URL((await h.http(httpEvent("GET", authorizeQuery()))).headers.location!);
     expect(location.searchParams.get("error")).toBe("access_denied");
-    expect(location.searchParams.get("error_description")).toContain("agentx signin enable");
+    expect(location.searchParams.get("error_description")).toContain("Rovara administrator");
+    expect(location.searchParams.get("error_description")).not.toMatch(/AgentX|agentx signin|\bCLI\b/);
   });
 
   it("says Slack sign-in is not finished when the Slack secret has no bot token (F25)", async () => {
@@ -245,9 +266,9 @@ describe("Sign in with Slack end to end (US4 scenario 1, FR-003, FR-005, FR-008)
     expect(back.searchParams.get("code")).toBeNull();
     expect(back.searchParams.get("error")).toBe("access_denied");
     // The hint matters: a provider that silently reuses the refused account's session refuses again.
-    expect(back.searchParams.get("error_description")).toBe(`you signed in to Slack workspace T0OTHER1, but this AgentX serves ${TEAM}. If you signed in with the wrong account, sign out of Slack or use a private window, then try again.`);
+    expect(back.searchParams.get("error_description")).toBe(`you signed in to Slack workspace T0OTHER1, but this Rovara serves ${TEAM}. If you signed in with the wrong account, sign out of Slack or use a private window, then try again.`);
     expect(h.db.get(`DEVELOPER#${mayaId}`, "META")).toBeUndefined();
-    expect(h.logs.some((entry) => entry.event === "signin.refused" && entry.method === "slack")).toBe(true);
+    expect(h.logs).toContainEqual({ event: "signin.refused", method: "slack", reason: `you signed in to Slack workspace T0OTHER1, but this AgentX serves ${TEAM}` });
   });
 
   it("refuses a developer an admin revoked", async () => {
@@ -296,7 +317,7 @@ describe("company sign-in (US4 scenario 3, FR-004, FR-012)", () => {
   it("refuses a person outside the required group, naming it", async () => {
     const h = identityHarness({ slack: false, oidc: { requiredClaim: "groups", requiredValues: ["engineering"] }, oidcUsers: [sam] });
     const back = await h.signIn("oidc", "okta-sam");
-    expect(back.searchParams.get("error_description")).toBe("this AgentX requires the groups claim to include engineering. If you signed in with the wrong account, sign out of Okta or use a private window, then try again.");
+    expect(back.searchParams.get("error_description")).toBe("this Rovara requires the groups claim to include engineering. If you signed in with the wrong account, sign out of Okta or use a private window, then try again.");
   });
 
   it("links a company user to the Slack user with the same verified email", async () => {
@@ -727,7 +748,8 @@ describe("the Lambda's configuration", () => {
     expect(`${company.origin}${company.pathname}`).toBe(CLI_REDIRECT);
     expect(company.searchParams.get("error")).toBe("access_denied");
     expect(company.searchParams.get("error_description")).toContain("not finished");
-    expect(company.searchParams.get("error_description")).toContain("DEVELOPER_OIDC_REQUIRED_CLAIM");
+    expect(company.searchParams.get("error_description")).toContain("Rovara administrator");
+    expect(h.logs.some((entry) => typeof entry.detail === "string" && entry.detail.includes("DEVELOPER_OIDC_REQUIRED_CLAIM"))).toBe(true);
   });
 
   it("parses the Slack secret with or without the sign-in keys, and never echoes it", () => {

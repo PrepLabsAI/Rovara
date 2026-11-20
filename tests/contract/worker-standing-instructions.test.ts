@@ -167,7 +167,7 @@ describe("the reviewers", () => {
         let listener: ((event: unknown) => void) | undefined;
         return {
           conversationId: input.conversationId ?? "review-session", sessionFile,
-          async prompt() { listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: '{"findings":[]}' }] } }); },
+          async prompt() { listener?.({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: '{"findings":[]}' }] } }); },
           async abort() {},
           getModel: () => ({ provider: "test", modelId: "review-v1" }),
           getSessionStats: () => ({ tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 } as never),

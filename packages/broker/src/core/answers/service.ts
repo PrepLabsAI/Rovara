@@ -92,12 +92,20 @@ function transcriptOf(input: { question: string; context: string | undefined; br
 
 export function createAnswerService(deps: AnswerServiceDeps) {
   const log = (entry: Record<string, unknown>): void => deps.log?.({ component: "answers", ...entry });
+  const failed = (cause: "access_unavailable" | "repository_unavailable" | "answer_store_unavailable" | "rate_limit_unavailable" | "model_unavailable" | "thread_unavailable" | "briefing_unavailable" | "code_lookup_unavailable" | "wiki_search_unavailable" | "wiki_read_unavailable" | "citation_read_unavailable" | "model_output_invalid"): void => {
+    try { log({ event: "answer.failed", cause }); } catch { /* diagnostic logging must not change the answer */ }
+  };
+  // Keep failure categories at the service logging boundary. Readers still reject so the
+  // toolbox and citation checker retain their existing degraded, fail-closed responses.
+  const diagnosedRead = async <T>(cause: Parameters<typeof failed>[0], read: () => Promise<T>): Promise<T> => {
+    try { return await read(); } catch (error) { failed(cause); throw error; }
+  };
   const threads = createAnswerThreads({ store: deps.store, wiki: deps.wiki, companyId: deps.companyId, now: deps.now });
   const rate = createAnswerRate({ store: deps.store, companyId: deps.companyId, now: deps.now, limit: deps.perPersonPerHour });
   const ceilingCents = Math.min(ANSWER_COST_CEILING_CENTS, deps.ceilingCents ?? ANSWER_COST_CEILING_CENTS);
 
   async function mayAsk(personId: string, project: string): Promise<boolean> {
-    try { return (await deps.access.mayAsk(personId, project)) === true; } catch { throw unavailable(); }
+    try { return (await deps.access.mayAsk(personId, project)) === true; } catch { failed("access_unavailable"); throw unavailable(); }
   }
 
   /** Flags the wiki claims the model named as wrong, but only those Code itself could not find at the current commit. Never throws. */
@@ -116,15 +124,15 @@ export function createAnswerService(deps: AnswerServiceDeps) {
         // The claim's own places, read again at the commit bound now and looked for ANYWHERE in the file (no line: a quote that only moved is still there). Flagged only when EVERY place was truly looked for
         // and is not in its file at all, or the file is gone: a place that could not be read, was too short to check, is in a repository no longer bound, or only moved is no reason to hide a claim from agents.
         const refs: CitationRef[] = claim.citations.map((citation) => ({ repo: citation.repo, path: citation.path, commit: input.heads.get(citation.repo) ?? "unbound", quote: citation.quote }));
-        const checked = await checkCitations(refusingSecrets(input.code.read), refs, { mode: "plain", commits: input.heads });
+        const checked = await checkCitations(refusingSecrets((...args) => diagnosedRead("citation_read_unavailable", () => input.code.read(...args))), refs, { mode: "plain", commits: input.heads });
         if (checked.results.length === 0 || !checked.results.every((result) => result.outcome === "source_not_found" && (result.reason === "quote_not_at_line" || result.reason === "file_missing"))) continue;
         const page = await deps.wiki.readPage(input.project, claim.pageId, "person");
         if (page === undefined || page.flags.some((flag) => flag.claimId === claim.claimId)) continue;
         await deps.wiki.addFlag(input.project, { pageId: claim.pageId, claimId: claim.claimId, by: { kind: "answer", answerId: input.answerId } });
         flagged += 1;
       }
-    } catch (error) {
-      log({ event: "answer.flag_failed", error: error instanceof Error ? error.name : "unknown" });
+    } catch {
+      log({ event: "answer.flag_failed", cause: "wiki_flag_unavailable" });
     }
     return flagged;
   }
@@ -136,7 +144,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
     try {
       const text = await Promise.race([Promise.resolve().then(() => deps.briefing!(input)), new Promise<undefined>((resolve) => { timer = setTimeout(() => { resolve(undefined); }, ANSWER_BRIEFING_WAIT_MS); timer.unref?.(); })]);
       return typeof text === "string" && text.trim() !== "" ? text : undefined;
-    } catch { return undefined; } finally { if (timer !== undefined) clearTimeout(timer); }
+    } catch { failed("briefing_unavailable"); return undefined; } finally { if (timer !== undefined) clearTimeout(timer); }
   }
 
   async function ask(input: AskInput): Promise<AnswerResponse> {
@@ -147,7 +155,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
     if (!parsed.success) throw agentXError("CONFIG_INVALID", ANSWER_WORDS.badRequest);
     const request = parsed.data;
     let code: AnswerCodeSource | undefined;
-    try { code = await deps.code(input.project); } catch { throw unavailable(); }
+    try { code = await deps.code(input.project); } catch { failed("repository_unavailable"); throw unavailable(); }
     if (code === undefined) throw notFound();
 
     const personId = input.personId;
@@ -158,7 +166,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
 
     // A repeat of the same request is the same answer and spends nothing.
     let earlier: WikiAnswerRecord | undefined;
-    try { earlier = await deps.wiki.readAnswer(project, answerId); } catch { throw unavailable(); }
+    try { earlier = await deps.wiki.readAnswer(project, answerId); } catch { failed("answer_store_unavailable"); throw unavailable(); }
     if (earlier !== undefined) {
       const outcome = fromRecordOutcome(earlier.outcome);
       // The same shape as the first reply (B8): a "not found" answer holds no text, and its record keeps its fixed words (the honesty line), which the repeat gives back as honesty.
@@ -170,10 +178,10 @@ export function createAnswerService(deps: AnswerServiceDeps) {
     }
 
     // No model set up: the fixed outcome, before a place is taken or anything is read. No action: there is nothing to attach.
-    const available = deps.model === undefined ? false : await deps.model.available().catch(() => false);
+    const available = deps.model === undefined ? false : await deps.model.available().catch(() => { failed("model_unavailable"); return false; });
     if (deps.model === undefined || !available) return AnswerResponseSchema.parse({ threadId, outcome: "not_set_up", text: "", honesty: ANSWER_WORDS.notSetUp, unconfirmed: [], sources: [], wikiPages: [] });
 
-    const took = await rate.take(personId).catch(() => { throw unavailable(); });
+    const took = await rate.take(personId).catch(() => { failed("rate_limit_unavailable"); throw unavailable(); });
     if (!took) throw agentXError("TOO_MANY_REQUESTS", ANSWER_WORDS.rate);
     const startedAt = deps.now();
     let session: AnswerModelSession | undefined;
@@ -183,19 +191,29 @@ export function createAnswerService(deps: AnswerServiceDeps) {
       let heads: ReadonlyMap<string, string>;
       try {
         heads = await code.heads();
+        // The production adapter omits repositories whose host cannot supply a usable head.
+        if (code.repositories.some((repository) => !heads.has(repository))) failed("repository_unavailable");
         // A repository that left the project leaves nothing behind: its pages go before the wiki is read.
         await deps.wiki.pruneRepositories(project, code.projectRepositories);
-      } catch { await rate.give(personId); throw unavailable(); }
-      const thread = await threads.turns(project, threadId, scope).catch(() => [] as ThreadTurn[]);
-      const toolbox = createToolbox({ project, wiki: deps.wiki, code, heads });
+      } catch { await rate.give(personId); failed("repository_unavailable"); throw unavailable(); }
+      const thread = await threads.turns(project, threadId, scope).catch(() => { failed("thread_unavailable"); return [] as ThreadTurn[]; });
+      const toolbox = createToolbox({ project, heads,
+        wiki: {
+          readIndex: (...args) => diagnosedRead("wiki_search_unavailable", () => deps.wiki.readIndex(...args)),
+          readPage: (...args) => diagnosedRead("wiki_read_unavailable", () => deps.wiki.readPage(...args)),
+        },
+        code: { ...code, repositories: code.repositories, read: (...args) => diagnosedRead("code_lookup_unavailable", () => code.read(...args)) },
+      });
       try {
         session = await deps.model.open({ companyId: deps.companyId, project, personId, answerId, ceilingCents });
       } catch (error) {
         await rate.give(personId);
         if (error instanceof AnswerModelRefused) {
           if (error.reason === "not_set_up") return AnswerResponseSchema.parse({ threadId, outcome: "not_set_up", text: "", honesty: ANSWER_WORDS.notSetUp, unconfirmed: [], sources: [], wikiPages: [] });
+          if (error.reason === "unavailable") failed("model_unavailable");
           throw agentXError("TOO_MANY_REQUESTS", error.reason === "over_budget" ? ANSWER_WORDS.limitReached : error.reason === "paused" ? ANSWER_WORDS.paused : ANSWER_WORDS.unavailable);
         }
+        failed("model_unavailable");
         throw unavailable();
       }
 
@@ -220,6 +238,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
             if (error.reason === "paused") throw agentXError("TOO_MANY_REQUESTS", ANSWER_WORDS.paused);
             return AnswerResponseSchema.parse({ threadId, outcome: "not_set_up", text: "", honesty: ANSWER_WORDS.notSetUp, unconfirmed: [], sources: [], wikiPages: [] });
           }
+          failed("model_unavailable");
           if (turn === 0) throw unavailable();
           ranOut = true;
           break;
@@ -230,7 +249,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
         if (parsedTurn.kind === "final") { final = parsedTurn.final; break; }
         if (parsedTurn.kind === "bad") {
           bad += 1;
-          if (bad >= 2) break;
+          if (bad >= 2) { failed("model_output_invalid"); break; }
           exchanges.push({ call: "(your reply)", result: "Your reply was not one JSON object of the kind described. Reply with exactly one JSON object." });
           continue;
         }
@@ -243,7 +262,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
       }
 
       // The check: every place again, at the bound commit.
-      const checked = final === undefined ? undefined : await checkAnswer({ final, heads, read: code.read });
+      const checked = final === undefined ? undefined : await checkAnswer({ final, heads, read: (...args) => diagnosedRead("citation_read_unavailable", () => code.read(...args)) });
       const written = checked?.written ?? 0;
       const keptCount = checked?.kept.length ?? 0;
       let outcome: AnswerOutcome;
@@ -277,9 +296,9 @@ export function createAnswerService(deps: AnswerServiceDeps) {
           sources: usedSources.map((source) => ({ repo: source.repo, path: source.path, commit: source.commit, line: source.line, quote: source.quote })), pagesRead: [...toolbox.pagesRead.keys()].slice(0, 20),
         });
         recorded = true;
-        await threads.add(project, threadId, scope, answerId).catch((error: unknown) => log({ event: "answer.thread_not_kept", error: error instanceof Error ? error.name : "unknown" }));
-      } catch (error) {
-        log({ event: "answer.not_recorded", error: error instanceof Error ? error.name : "unknown" });
+        await threads.add(project, threadId, scope, answerId).catch(() => log({ event: "answer.thread_not_kept", cause: "thread_unavailable" }));
+      } catch {
+        log({ event: "answer.not_recorded", cause: "answer_store_unavailable" });
       }
       log({ event: "answer.done", outcome, turns: exchanges.length + 1, lookups: toolbox.used, written, kept: keptCount, dropped: checked?.dropped.length ?? 0, complete: checked?.complete ?? false, flagged, cents: spentCents, tokens, recorded,
         // A gap for the wiki (J5 reads answer records): code carried the answer and the wiki showed nothing.
@@ -288,7 +307,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
         ...(recorded ? { answerId } : {}), threadId, outcome, text: storedWords(text, 6_000), ...(honesty === undefined ? {} : { honesty }), unconfirmed, sources, wikiPages, ...(action === undefined || !recorded ? {} : { action }),
       });
     } finally {
-      if (session !== undefined) await session.finish({ costCents: spentCents, tokens }).catch((error: unknown) => log({ event: "answer.settle_failed", error: error instanceof Error ? error.name : "unknown" }));
+      if (session !== undefined) await session.finish({ costCents: spentCents, tokens }).catch(() => log({ event: "answer.settle_failed", cause: "model_settlement_unavailable" }));
     }
   }
 
@@ -300,7 +319,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
     if (!WikiProjectSchema.safeParse(input.project).success || !WikiPersonIdSchema.safeParse(input.personId).success) return undefined;
     if (!(await mayAsk(input.personId, input.project))) return undefined;
     let record: WikiAnswerRecord | undefined;
-    try { record = await deps.wiki.readAnswer(input.project, input.answerId); } catch { throw unavailable(); }
+    try { record = await deps.wiki.readAnswer(input.project, input.answerId); } catch { failed("answer_store_unavailable"); throw unavailable(); }
     if (record === undefined || record.askedBy !== input.personId) return undefined;
     const sources = record.sources.map((source, index) => `[${String(index + 1)}] ${source.repo}/${source.path}:${String(source.line)} at ${source.commit.slice(0, 12)}`).join("\n");
     const body = [`Question: ${record.question}`, `Answer: ${record.answer}`, sources === "" ? "" : `Sources:\n${sources}`, record.pagesRead.length === 0 ? "" : `Wiki pages read: ${record.pagesRead.join(", ")}`].filter((part) => part !== "").join("\n\n");

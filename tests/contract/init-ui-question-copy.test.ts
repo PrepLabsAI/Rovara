@@ -107,7 +107,7 @@ describe("the page's words for each question", () => {
 
   it("FR-010: says what an empty field means, and never an empty Leave empty for", () => {
     expect(pageHint(undefined, {})).toBeUndefined();
-    expect(pageHint("", {})).toBe("Optional. Leave empty to use AgentX's default.");
+    expect(pageHint("", {})).toBe("Optional. Leave empty to use Rovara's default.");
     expect(pageHint("production", {})).toBe("Leave empty to use production.");
     expect(pageHint("us.anthropic.claude-sonnet-4-6", { defaultText: "Claude Sonnet 4.6" })).toBe("Leave empty to use Claude Sonnet 4.6.");
     expect(pageHint("", { hint: "Optional. Leave empty if the project needs none." })).toBe("Optional. Leave empty if the project needs none.");
@@ -117,13 +117,13 @@ describe("the page's words for each question", () => {
 describe("the settings form's words (spec 048 FR-020, FR-025)", () => {
   it("names the form's forward button, and says what turning alerts off gives up", () => {
     expect(questionHelp({ kind: "form", text: "Your settings" })).toMatchObject({ label: "Your settings", submitLabel: "Review the plan" });
-    expect(questionHelp({ kind: "choose", text: "Where should AgentX send alerts?", flag: ALERT_FLAG }).choiceLabels?.none).toBe("Nowhere for now. Nobody is told when AgentX stops working.");
-    expect(questionHelp({ kind: "choose", text: "Is acme an organization or a personal account?", flag: "--github-account-type" }).why).toBe("GitHub could not tell AgentX, and keeps apps in a different place for each.");
+    expect(questionHelp({ kind: "choose", text: "Where should AgentX send alerts?", flag: ALERT_FLAG }).choiceLabels?.none).toBe("Nowhere for now. Nobody is told when Rovara stops working.");
+    expect(questionHelp({ kind: "choose", text: "Is acme an organization or a personal account?", flag: "--github-account-type" }).why).toBe("GitHub could not tell Rovara, and keeps apps in a different place for each.");
   });
 
   it("does not tell the later admin-user question that it still chooses the alert address", () => {
     expect(questionHelp({ kind: "ask", text: "Your email address, for your AgentX admin user", flag: "--admin-email" }).why)
-      .toBe("AgentX creates your admin sign-in with it.");
+      .toBe("Rovara creates your admin sign-in with it.");
   });
 });
 
@@ -134,7 +134,7 @@ describe("browserPrompter with help", () => {
     const answer = prompter.ask("GitHub organization or user that will own the AgentX GitHub App", { flag: "--github-account" });
     expect(shown(hub)).toMatchObject({
       kind: "ask", text: "GitHub organization or user that will own the AgentX GitHub App",
-      label: "GitHub owner", why: "The GitHub organization or user that will own AgentX's GitHub app.", example: "acme",
+      label: "GitHub owner", why: "The GitHub organization or user that will own Rovara's GitHub app.", example: "acme",
     });
     expect(shown(hub).hint).toBeUndefined();
     hub.answer(shown(hub).id, "acme");
@@ -145,7 +145,7 @@ describe("browserPrompter with help", () => {
     const hub = createWizardHub("staging");
     const answer = browserPrompter(hub).confirm("Create all of this?", { defaultValue: false });
     expect(shown(hub).buttons).toEqual([
-      { value: "yes", label: "Create AgentX", primary: true },
+      { value: "yes", label: "Create Rovara", primary: true },
       { value: "no", label: "Cancel the install", primary: false },
     ]);
     hub.answer(shown(hub).id, "yes");
@@ -176,7 +176,7 @@ describe("browserPrompter with help", () => {
     ], { flag: "--engine", defaultValue: "templates" });
     expect(shown(hub).choices).toEqual([
       { value: "templates", label: "Published templates (recommended)" },
-      { value: "cdk", label: "From AgentX's source code, for contributors" },
+      { value: "cdk", label: "From Rovara's source code, for contributors" },
     ]);
     hub.answer(shown(hub).id, "");
     await expect(answer).resolves.toBe("templates");
