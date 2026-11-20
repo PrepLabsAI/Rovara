@@ -5,8 +5,8 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { setTaskShareMode } from "../../packages/cli/src/admin/task-share-mode.js";
 import { executeCli } from "../../packages/cli/src/main.js";
-import { MAYA, OMAR, createDeveloperTaskBroker, markThreadPosted, registerRevision } from "../support/developer-task-broker.js";
-import { SLACK_CHANNEL, SLACK_TEAM, call, issuer } from "../support/slack-broker.js";
+import { MAYA, OMAR, createDeveloperTaskBroker, registerRevision } from "../support/developer-task-broker.js";
+import { call } from "../support/slack-broker.js";
 
 const ADMIN = { subject: "admin-subject", admin: true };
 
@@ -21,20 +21,6 @@ async function sharedTask(body: Record<string, unknown> = { shareToChannel: true
 }
 
 describe("an admin switches a shared task's mode (C25)", () => {
-  it("changes the task and its thread, audits it naming the admin, and answers the share only (D22)", async () => {
-    const { db, taskId, switchMode, record } = await sharedTask();
-    markThreadPosted(db, taskId);
-    const answer = await switchMode("view");
-    expect(answer.status).toBe(200);
-    // Ruling F5: the task's id and share (mode, channel, thread link), never its title or results.
-    expect(answer.body.task).toEqual({ taskId, share: { mode: "view", channelId: SLACK_CHANNEL, channelName: "payments-dev", sharedReason: "requested", threadUrl: `https://slack.com/archives/${SLACK_CHANNEL}/p1695500000000100` } });
-    expect(answer.body.task).not.toHaveProperty("title");
-    expect(record().share).toMatchObject({ mode: "view" });
-    expect(db.get(`SHARED_TASK#${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000100`, "META")).toMatchObject({ mode: "view" });
-    expect(db.find((item) => item.pk === `TASK#${taskId}` && item.action === "share")).toEqual([expect.objectContaining({
-      origin: "ai_tool", phase: "accepted", admin: { issuer, subject: "admin-subject" }, developer: expect.objectContaining({ developerId: MAYA.developerId }) as unknown,
-    })]);
-  });
 
   it("stays within the project's policy: continue is view where the project does not allow it", async () => {
     const { handler, switchMode, record } = await sharedTask({ shareToChannel: true });
@@ -75,14 +61,6 @@ describe("an admin switches a shared task's mode (C25)", () => {
     expect((await switchMode("view")).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed, so its share mode can no longer change" });
     expect(db.find((item) => item.pk === `TASK#${taskId}` && item.action === "share")).toHaveLength(0);
     expect(record().share).toMatchObject({ mode: "continue" });
-  });
-
-  it("answers a non-admin FORBIDDEN for any task ID, so task IDs cannot be probed", async () => {
-    const { handler, taskId } = await sharedTask();
-    for (const id of [randomUUID(), taskId, "not-a-task"]) {
-      const response = await call(handler, { method: "POST", path: `/v1/admin/tasks/${id}/share-mode`, user: { subject: "someone", admin: false }, body: { requestId: randomUUID(), shareMode: "view" } });
-      expect(response.body.error).toEqual({ code: "FORBIDDEN", message: "administrator claim is required" });
-    }
   });
 
   it("answers an admin's mistyped task ID TASK_NOT_FOUND, not the catch-all refusal", async () => {

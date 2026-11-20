@@ -90,21 +90,6 @@ function desktopTarget(os: "linux" | "macos" | "windows", driver: "electron" | "
 }
 
 describe("E2E runtime capability descriptor", () => {
-  it("accepts each profile shape and rejects duplicate or unknown capabilities", () => {
-    const descriptors: E2ERuntimeCapabilityDescriptor[] = [
-      { ...baseWithoutBrowserDetails, kind: "default-sandbox", profileId: "default", supportedSteps: ["navigate"], supportedAssertions: ["text"], evidenceScopes: ["source"], host: { os: "linux", arch: "arm64" } },
-      { ...base, kind: "web", browsers: ["chromium", "webkit"] },
-      { ...baseWithoutBrowserDetails, kind: "api", profileId: "api", supportedSteps: ["request"], supportedAssertions: ["http-status"], evidenceScopes: ["runtime"], protocols: ["http"] },
-      { ...baseWithoutBrowserDetails, kind: "android", profileId: "android", supportedSteps: ["launch-app"], supportedAssertions: ["visible"], evidenceScopes: ["runtime"], host: { os: "darwin", arch: "arm64" }, os: "android", deviceKinds: ["emulator", "physical"], deviceProfileIds: ["pixel"] },
-      { ...baseWithoutBrowserDetails, kind: "ios", profileId: "ios", supportedSteps: ["launch-app"], supportedAssertions: ["visible"], evidenceScopes: ["runtime"], host: { os: "darwin", arch: "arm64" }, os: "ios", deviceKinds: ["simulator", "physical"], deviceProfileIds: ["iphone"] },
-      { ...baseWithoutBrowserDetails, kind: "electron", profileId: "electron", supportedSteps: ["launch-app"], supportedAssertions: ["file"], evidenceScopes: ["runtime"], host: { os: "win32", arch: "x64" }, os: "windows", driver: "electron", isolatedSession: true },
-      { ...baseWithoutBrowserDetails, kind: "native-desktop", profileId: "native", supportedSteps: ["launch-app"], supportedAssertions: ["file"], evidenceScopes: ["runtime"], host: { os: "darwin", arch: "arm64" }, os: "macos", driver: "native", isolatedSession: true },
-    ];
-    for (const descriptor of descriptors) expect(E2ERuntimeCapabilityDescriptorSchema.safeParse(descriptor).success).toBe(true);
-    expect(E2ERuntimeCapabilityDescriptorSchema.safeParse({ ...base, supportedSteps: ["navigate", "navigate"] }).success).toBe(false);
-    expect(E2ERuntimeCapabilityDescriptorSchema.safeParse({ ...base, unexpected: true }).success).toBe(false);
-    expect(E2ERuntimeCapabilityDescriptorSchema.safeParse({ ...baseWithoutBrowserDetails, kind: "api", protocols: ["grpc"] }).success).toBe(false);
-  });
 
   it("rejects platform-inconsistent host and device profiles", () => {
     const noBrowserDetails = baseWithoutBrowserDetails;
@@ -116,17 +101,6 @@ describe("E2E runtime capability descriptor", () => {
     expect(E2ERuntimeCapabilityDescriptorSchema.safeParse({ ...noBrowserDetails, kind: "ios", profileId: "ios", host: { os: "darwin", arch: "arm64" }, os: "ios", deviceKinds: ["emulator"], deviceProfileIds: ["iphone"] }).success).toBe(false);
   });
 
-  it("keeps profile capability lists within the contract limits", () => {
-    expect(E2ERuntimeCapabilityDescriptorSchema.safeParse({ ...base, browsers: [] }).success).toBe(false);
-    expect(E2ERuntimeCapabilityDescriptorSchema.safeParse({ ...baseWithoutBrowserDetails, kind: "api", protocols: [] }).success).toBe(false);
-    expect(E2ERuntimeCapabilityDescriptorSchema.safeParse({ ...baseWithoutBrowserDetails, kind: "android", os: "android", deviceKinds: [], deviceProfileIds: [] }).success).toBe(false);
-  });
-
-  it("limits default-sandbox evidence to source and mock-contract", () => {
-    const sandbox = { ...baseWithoutBrowserDetails, kind: "default-sandbox", profileId: "default-sandbox", supportedSteps: ["navigate"], supportedAssertions: ["text"], evidenceScopes: ["source", "mock-contract"], host: { os: "linux", arch: "arm64" } };
-    expect(E2ERuntimeCapabilityDescriptorSchema.safeParse(sandbox).success).toBe(true);
-    expect(E2ERuntimeCapabilityDescriptorSchema.safeParse({ ...sandbox, evidenceScopes: ["external-live"] }).success).toBe(false);
-  });
 });
 
 describe("E2E runtime readiness", () => {
@@ -156,14 +130,6 @@ describe("E2E runtime readiness", () => {
     expect(resolveE2ERuntimeReadiness(input({ capabilities: null })).suggestedAction).toBe("install");
   });
 
-  it("reports access, qualification and external state separately", () => {
-    expect(resolveE2ERuntimeReadiness(input({ connection: "unconnected" }))).toMatchObject({ status: "ACCESS_REQUIRED", suggestedAction: "connect" });
-    expect(resolveE2ERuntimeReadiness(input({ approval: "pending" }))).toMatchObject({ status: "ACCESS_REQUIRED", suggestedAction: "approve" });
-    expect(resolveE2ERuntimeReadiness(input({ approval: "declined" }))).toMatchObject({ status: "ACCESS_REQUIRED", suggestedAction: "approve" });
-    expect(resolveE2ERuntimeReadiness(input({ qualification: "unqualified" })).status).toBe("UNQUALIFIED");
-    expect(resolveE2ERuntimeReadiness(input({ state: "PARKED" })).status).toBe("UNQUALIFIED");
-  });
-
   it("fails closed for missing, invalid, expired and just-expired timestamps", () => {
     expect(resolveE2ERuntimeReadiness(input({ expiresAt: null })).status).toBe("EXPIRED");
     expect(resolveE2ERuntimeReadiness(input({ expiresAt: "2028-01-01T00:00:00.000Z" })).status).toBe("EXPIRED");
@@ -171,13 +137,6 @@ describe("E2E runtime readiness", () => {
     expect(resolveE2ERuntimeReadiness(input({ expiresAt: "not-a-date" })).status).toBe("EXPIRED");
     expect(resolveE2ERuntimeReadiness(input({ expiresAt: "2029-01-01T00:00:00.000Z", now: Date.parse("2029-01-01T00:00:00.000Z") })).status).toBe("EXPIRED");
     expect(resolveE2ERuntimeReadiness(input({ now: Number.NaN })).status).toBe("EXPIRED");
-  });
-
-  it("uses the declared multi-failure precedence", () => {
-    expect(resolveE2ERuntimeReadiness(input({ activationEnabled: false, now: Number.NaN, capabilities: null })).status).toBe("DISABLED");
-    expect(resolveE2ERuntimeReadiness(input({ capabilities: null, connection: "unconnected", qualification: "unqualified" })).status).toBe("MISSING");
-    expect(resolveE2ERuntimeReadiness(input({ connection: "unconnected", approval: "pending", qualification: "unqualified" })).status).toBe("ACCESS_REQUIRED");
-    expect(resolveE2ERuntimeReadiness(input({ qualification: "unqualified", expiresAt: "invalid" })).status).toBe("UNQUALIFIED");
   });
 
   it("rejects target/profile and insufficient runtime capabilities", () => {

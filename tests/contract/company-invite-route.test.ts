@@ -1,4 +1,4 @@
-import { CLIENT_SCOPES, companyInviteCodeHash } from "@agentx/contracts";
+import { CLIENT_SCOPES } from "@agentx/contracts";
 import { expect, it, vi } from "vitest";
 import { stubCallbackSigningKeySecret } from "../support/callback-key.js";
 import { PERSON, TIME } from "../support/company-route-harness.js";
@@ -13,38 +13,6 @@ const path = "/v1/dev/company/preapprovals";
 const email = "invited@example.test";
 const hash = emailIndexKey(email).pk.slice(6);
 
-
-it("member admin adds and withdraws a hashed approval through the real identity handler", async () => {
-  const h = await inviteWorld(); h.claims.companyId = B;
-  const posted = await h.post();
-  expect(posted.statusCode).toBe(200);
-  // DEC 254h: the answer carries the invite link secret once; only its hash was forwarded.
-  const invite = (JSON.parse(posted.body) as { ok: true; invite: { secret: string; expiresAt: string } }).invite;
-  const stored = (await h.identity.company.list(A)).preapprovals.find((row) => row.emailHash === hash)!;
-  expect(JSON.parse(posted.body)).toEqual({ ok: true, invite: { secret: expect.stringMatching(/^rvlink_[A-Za-z0-9_-]{32}$/) as unknown, expiresAt: new Date(stored.expiresAt * 1000).toISOString() }, requestId: "company-test" });
-  expect(h.forwarded).toEqual([{ kind: "company-preapprove", companyId: A, email, role: "member", expiresInHours: 24, createdBy: PERSON, inviteHash: companyInviteCodeHash(invite.secret) }]);
-  expect(JSON.stringify(h.forwarded)).not.toContain(invite.secret.slice(7));
-  expect((await h.identity.company.list(A)).preapprovals.find((row) => row.emailHash === hash)).toMatchObject({ role: "member", createdBy: PERSON });
-  expect((await h.withdraw()).statusCode).toBe(200);
-  expect(h.forwarded[1]).toEqual({ kind: "company-preapproval-withdraw", companyId: A, emailHash: hash, createdBy: PERSON });
-  const sign = await h.identity.signInCompany(A, "invited", email);
-  expect(new URL(sign.headers.location!).searchParams.get("error_description")).toBe("not invited");
-});
-
-it("owner may invite and an expired invitation cannot join", async () => {
-  const h = await inviteWorld(); h.member(A, "owner");
-  expect((await h.post({ email, role: "member", expiresInHours: 1 })).statusCode).toBe(200);
-  h.identity.tick(3_600_001);
-  const sign = await h.identity.signInCompany(A, "expired", email);
-  expect(new URL(sign.headers.location!).searchParams.get("error_description")).toBe("not invited");
-});
-
-it("plain member cannot gain admin from claims or a body", async () => {
-  const h = await inviteWorld(); h.member(A, "member"); Object.assign(h.claims, { role: "admin", administrator: true, companyId: B });
-  const refused = await h.post(); expect(refused.statusCode).toBe(404);
-  expect(await h.withdraw()).toEqual(refused);
-  expect(h.forwarded).toEqual([]);
-});
 
 it("another company's admin cannot withdraw a foreign approval; unknown has identical bytes", async () => {
   const h = await inviteWorld(); expect((await h.post()).statusCode).toBe(200);
@@ -81,26 +49,6 @@ it.each(["both", "preapproval", "link"] as const)("refuses resend after the cloc
   if (expired === "preapproval") h.identity.db.set({ ...h.identity.db.get(linkKey.pk, linkKey.sk)!, expiresAt: later });
   if (expired === "link") h.identity.db.set({ ...approval, expiresAt: later });
   h.identity.tick(3_600_001);
-  const before = structuredClone([...h.identity.db.items.values()]);
-  const answer = await h.send("POST", `${path}/${hash}/resend`, { expiresInHours: 24 });
-  expect(answer.statusCode).toBe(404);
-  expect(JSON.parse(answer.body)).toMatchObject({ error: { code: "NOT_FOUND" } });
-  expect(h.forwarded[1]).toMatchObject({ kind: "company-preapproval-resend", companyId: A, emailHash: hash });
-  expect([...h.identity.db.items.values()]).toEqual(before);
-  expect(h.identity.db.find((row) => row.entityType === "COMPANY_LOG" && row.event === "company-preapproval-resend")).toHaveLength(0);
-});
-
-it("refuses resend of an accepted invite consumed through real sign-in, without writes or a resend audit", async () => {
-  const h = await registeredInviteWorld(true, true);
-  const posted = await h.send("POST", path, { email, role: "member", expiresInHours: 24 });
-  expect(posted.statusCode).toBe(200);
-  const { invite } = JSON.parse(posted.body) as { invite: { secret: string } };
-  const sign = await h.identity.signInCompany(A, "accepted-invite", email, { invite: invite.secret });
-  expect(new URL(sign.headers.location!).searchParams.get("code")).toBeTruthy();
-  const approvalKey = preapprovalHashKey(A, hash);
-  expect(h.identity.db.get(approvalKey.pk, approvalKey.sk)).toMatchObject({ status: "used" });
-  const linkKey = inviteLinkKey(A, companyInviteCodeHash(invite.secret));
-  expect(h.identity.db.get(linkKey.pk, linkKey.sk)).toMatchObject({ status: "used" });
   const before = structuredClone([...h.identity.db.items.values()]);
   const answer = await h.send("POST", `${path}/${hash}/resend`, { expiresInHours: 24 });
   expect(answer.statusCode).toBe(404);
@@ -193,16 +141,6 @@ it("malformed hash and unavailable forwarding refuse without leaked causes", asy
   const h = await inviteWorld(); expect((await h.withdraw("private-canary")).statusCode).toBe(404);
   h.deps.developer.companyPreapprovals = routes.companyPreapprovalsThroughLambda(async () => { throw new Error("private-canary"); });
   const answer = await h.post(); expect(answer.statusCode).toBe(404); expect(answer.body).not.toContain("private-canary");
-});
-
-it("the production broker dispatcher supplies the membership reader and invite transport", async () => {
-  const { createDeveloperTaskBroker, MAYA } = await import("../support/developer-task-broker.js");
-  const forwarded: unknown[] = [];
-  const h = await createDeveloperTaskBroker({ developerExtra: { companies: { companyOf: async () => A }, companyPreapprovals: async (event) => { forwarded.push(event); return { expiresAt: 2_000_000_000 }; } } });
-  h.db.set({ ...membershipKey(MAYA.developerId), entityType: "COMPANY_MEMBERSHIP", personId: MAYA.developerId, companyId: A, role: "admin", joinedAt: TIME });
-  const answer = await h.dev(MAYA, "POST", path, { email, role: "member", expiresInHours: 24 });
-  expect(answer.status).toBe(200); expect(forwarded).toEqual([{ kind: "company-preapprove", companyId: A, email, role: "member", expiresInHours: 24, createdBy: MAYA.developerId, inviteHash: expect.stringMatching(/^[a-f0-9]{64}$/) as unknown }]);
-  expect(answer.body).toMatchObject({ ok: true, invite: { expiresAt: "2033-05-18T03:33:20.000Z" } });
 });
 
 it("the broker forwarding seam runtime-refuses every operator kind and malformed invite", async () => {

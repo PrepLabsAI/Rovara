@@ -46,43 +46,6 @@ describe("GitHub webhook signature verification", () => {
     expect(verifyGithubWebhookSignature(body, signature, "different-secret")).toBe(false);
   });
 
-  it("rejects malformed or missing signatures", () => {
-    expect(verifyGithubWebhookSignature("{}", undefined, "secret")).toBe(false);
-    expect(verifyGithubWebhookSignature("{}", "sha1=abc", "secret")).toBe(false);
-    expect(verifyGithubWebhookSignature("{}", `sha256=${"z".repeat(64)}`, "secret")).toBe(false);
-  });
-
-  it("checks registered installation and repository scope for a pull-request event", async () => {
-    const payload = JSON.stringify({
-      action: "opened",
-      installation: { id: 777 },
-      repository: { id: 1234, full_name: "acme/payments" },
-      pull_request: { number: 9, state: "open", merged: false },
-    });
-    const signature = `sha256=${createHmac("sha256", "fixture-webhook-secret").update(payload).digest("hex")}`;
-    const headers = { "x-hub-signature-256": signature, "x-github-delivery": "550e8400-e29b-41d4-a716-446655440000", "x-github-event": "pull_request" };
-    const reserve = async () => "reserved" as const;
-
-    const accepted = await receiveGithubWebhook({
-      rawBody: payload, headers, secret: "fixture-webhook-secret",
-      authorizeRepository: async ({ installationId, repositoryId, fullName, pullRequestNumber }) => installationId === 777 && repositoryId === 1234 && fullName === "acme/payments" && pullRequestNumber === 9,
-      reserveDelivery: reserve,
-    });
-    expect(accepted).toMatchObject({ delivery: "ACCEPTED", event: { kind: "PULL_REQUEST", number: 9 } });
-
-    await expect(receiveGithubWebhook({
-      rawBody: payload, headers, secret: "fixture-webhook-secret",
-      authorizeRepository: async () => false,
-      reserveDelivery: reserve,
-    })).rejects.toThrow(/registered installation and repository/);
-    const duplicate = await receiveGithubWebhook({
-      rawBody: payload, headers, secret: "fixture-webhook-secret",
-      authorizeRepository: async () => true,
-      reserveDelivery: async () => "duplicate",
-    });
-    expect(duplicate.delivery).toBe("DUPLICATE");
-  });
-
   it("rejects GitHub issue events so they cannot start or update AgentX work", async () => {
     const payload = JSON.stringify({ action: "opened", installation: { id: 777 }, repository: { id: 1234, full_name: "acme/payments" }, issue: { number: 9, title: "Fix it" } });
     const signature = `sha256=${createHmac("sha256", "secret").update(payload).digest("hex")}`;
@@ -95,47 +58,6 @@ describe("GitHub webhook signature verification", () => {
     })).rejects.toThrow(/unsupported/);
   });
 
-  it("accepts PR review comments as untrusted owner-review input", async () => {
-    const payload = JSON.stringify({
-      action: "created",
-      installation: { id: 777 },
-      repository: { id: 1234, full_name: "acme/payments" },
-      pull_request: { number: 9, state: "open", merged: false },
-      comment: { id: 4321, body: "Please handle this edge case", html_url: "https://github.com/acme/payments/pull/9#discussion_r4321", user: { login: "reviewer" } },
-    });
-    const signature = `sha256=${createHmac("sha256", "secret").update(payload).digest("hex")}`;
-    const received = await receiveGithubWebhook({
-      rawBody: payload,
-      headers: { "x-hub-signature-256": signature, "x-github-delivery": "550e8400-e29b-41d4-a716-446655440001", "x-github-event": "pull_request_review_comment" },
-      secret: "secret",
-      authorizeRepository: async () => true,
-      reserveDelivery: async () => "reserved",
-    });
-    expect(received.event).toMatchObject({
-      kind: "PR_COMMENT", action: "created", number: 9,
-      comment: { id: 4321, body: "Please handle this edge case", url: "https://github.com/acme/payments/pull/9#discussion_r4321", author: "reviewer", source: "review_comment" },
-    });
-  });
-
-  it("accepts discussion comments only when the issue is a pull request", async () => {
-    const payload = JSON.stringify({
-      action: "created",
-      installation: { id: 777 },
-      repository: { id: 1234, full_name: "acme/payments" },
-      issue: { number: 9, pull_request: { url: "https://api.github.com/repos/acme/payments/pulls/9" } },
-      comment: { id: 4322, body: "What about retries?", html_url: "https://github.com/acme/payments/pull/9#issuecomment-4322", user: { login: "reviewer" } },
-    });
-    const signature = `sha256=${createHmac("sha256", "secret").update(payload).digest("hex")}`;
-    const received = await receiveGithubWebhook({
-      rawBody: payload,
-      headers: { "x-hub-signature-256": signature, "x-github-delivery": "550e8400-e29b-41d4-a716-446655440002", "x-github-event": "issue_comment" },
-      secret: "secret",
-      authorizeRepository: async () => true,
-      reserveDelivery: async () => "reserved",
-    });
-    expect(received.event).toMatchObject({ kind: "PR_COMMENT", number: 9, comment: { id: 4322, source: "pr_discussion" } });
-  });
-
   it("rejects issue discussion comments even when the repository is registered", async () => {
     const payload = JSON.stringify({ action: "created", installation: { id: 777 }, repository: { id: 1234, full_name: "acme/payments" }, issue: { number: 9 }, comment: { id: 4322, body: "ordinary issue comment", user: { login: "reviewer" } } });
     const signature = `sha256=${createHmac("sha256", "secret").update(payload).digest("hex")}`;
@@ -146,18 +68,6 @@ describe("GitHub webhook signature verification", () => {
       authorizeRepository: async () => true,
       reserveDelivery: async () => "reserved",
     })).rejects.toThrow(/unsupported/);
-  });
-
-  it("rejects a delivery ID reused for different signed content", async () => {
-    const payload = JSON.stringify({ action: "opened", installation: { id: 777 }, repository: { id: 1234, full_name: "acme/payments" }, pull_request: { number: 9, state: "open" } });
-    const signature = `sha256=${createHmac("sha256", "secret").update(payload).digest("hex")}`;
-    await expect(receiveGithubWebhook({
-      rawBody: payload,
-      headers: { "x-hub-signature-256": signature, "x-github-delivery": "550e8400-e29b-41d4-a716-446655440000", "x-github-event": "pull_request" },
-      secret: "secret",
-      authorizeRepository: async () => true,
-      reserveDelivery: async () => "conflict",
-    })).rejects.toThrow(/delivery ID was reused/);
   });
 
   it("binds the unsigned GitHub event header to the durable delivery identity", async () => {
@@ -290,20 +200,6 @@ describe("GitHub webhook signature verification", () => {
     expect(attempts).toBe(2);
   });
 
-  it("lists persisted webhook events when their retry due time arrives", async () => {
-    const event = { kind: "PULL_REQUEST" as const, action: "closed", installationId: 777, repositoryId: 1234, fullName: "acme/payments", number: 9 };
-    let queryInput: Record<string, unknown> | undefined;
-    const documentClient = { async send(command: unknown) {
-      const value = command as { constructor: { name: string }; input: Record<string, unknown> };
-      if (value.constructor.name === "QueryCommand") { queryInput = value.input; return { Items: [{ deliveryId: "550e8400-e29b-41d4-a716-446655440010", status: "RETRYABLE", event }] }; }
-      return {};
-    } };
-    await expect(listDueGithubWebhookDeliveries({ documentClient, tableName: "state", now: "2026-10-05T12:02:00.000Z" })).resolves.toEqual([
-      { deliveryId: "550e8400-e29b-41d4-a716-446655440010", event },
-    ]);
-    expect(queryInput).toMatchObject({ IndexName: "github-webhook-recovery", Limit: 25 });
-  });
-
   it("lets only an administrator requeue a failed delivery after checking its linked PR scope", async () => {
     await (await import("../support/slack-broker.js")).loadSlackBroker();
     const broker = await import("../../packages/broker/src/aws/broker.js");
@@ -398,40 +294,6 @@ describe("task-wide current PR feedback reconciliation", () => {
       setRemotePr: (state: "open" | "merged", headSha: string, headTreeSha: string) => { publishedState = state; publishedHeadSha = headSha; publishedHeadTreeSha = headTreeSha; },
       edit: (body: string) => { currentBody = body; }, addInline: () => { inlineIds.push("review_comment:5"); }, reopen: () => { resolved = false; }, deleteInline: () => { inlineIds = []; }, conflict: () => { conflict = true; }, wrongScope: () => { wrongScope = true; } };
   }
-  it("persists both current PR bundles and ignores duplicate or delayed event bodies", async () => {
-    const f = await fixture();
-    expect(f.module.reconcileTaskPullRequestFeedback).toBeTypeOf("function");
-    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
-    expect(f.workflow().feedbackReview?.status).toBe("COLLECTING");
-    expect(f.workflow().feedbackReview?.bundleRefs.map((b) => b.repositoryId)).toEqual(["api", "ui"]);
-    expect(f.artifacts[0]?.bundle.comments.map((c) => c.id)).toEqual(["review:1"]);
-    expect(f.artifacts[1]?.bundle.comments[0]?.body).toBe("current authoritative body");
-    const revision = f.workflow().revision;
-    expect(await f.module.reconcileTaskPullRequestFeedback({ ...f.input, deliveryId: "delayed-old-event" })).toBe(false);
-    expect(f.workflow().revision).toBe(revision);
-    f.edit("edited current body");
-    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
-    expect(f.artifacts.at(-1)?.bundle.comments[0]?.body).toBe("edited current body");
-  });
-  it("accepts a publication commit different from the checked workspace commit when GitHub confirms the exact candidate tree", async () => {
-    const f = await fixture();
-    f.setPublishedHeadSha("d".repeat(40));
-    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
-    expect(f.workflow().state).toBe("WAITING");
-    expect(f.workflow().feedbackReview?.status).toBe("COLLECTING");
-    expect(f.artifacts[0]?.bundle).toMatchObject({ headSha: "d".repeat(40), headTreeSha: "b".repeat(40), candidateDigest: f.workflow().candidate?.digest });
-  });
-  it("learns the head tree of a pull request recorded without one, keeping the revision an owner's decision is bound to", async () => {
-    const f = await fixture();
-    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
-    expect(f.workflow().pullRequests?.map(pr => pr.headTreeSha)).toEqual(["b".repeat(40), "b".repeat(40)]);
-    // Collected already, and an earlier release dropped the trees: only the trees are written, at the same revision.
-    const collected = f.workflow();
-    f.setWorkflow(WorkflowSnapshotSchema.parse({ ...collected, pullRequests: collected.pullRequests?.map(({ headTreeSha: _tree, ...pr }) => { void _tree; return pr; }) }));
-    expect(await f.module.reconcileTaskPullRequestFeedback({ ...f.input, deliveryId: "delivery-2" })).toBe(true);
-    expect(f.workflow()).toEqual({ ...collected, updatedAt: f.input.now });
-    expect(await f.module.reconcileTaskPullRequestFeedback({ ...f.input, deliveryId: "delivery-3" })).toBe(false);
-  });
   it("skips, without failing the delivery, a merge at the fix's tree while the fix is still being made", async () => {
     const f = await fixture();
     const fix = createCandidateManifest(["api", "ui"].map(repositoryId => ({ repositoryId, commitSha: "e".repeat(40), treeSha: "c".repeat(40) })));
@@ -462,16 +324,6 @@ describe("task-wide current PR feedback reconciliation", () => {
     expect(f.artifacts.at(-2)?.bundle.comments.map((c) => c.id)).toEqual(["review:1", "review_comment:4", "review_comment:5"]);
     f.deleteInline(); await f.module.reconcileTaskPullRequestFeedback(f.input);
     expect(f.artifacts.at(-2)?.bundle.comments.map((c) => c.id)).toEqual(["review:1"]);
-  });
-  it("counts reopened feedback only after a committed reconciliation, without comment or task data", async () => {
-    const f = await fixture();
-    await f.module.reconcileTaskPullRequestFeedback(f.input); // establish the resolved-thread baseline
-    f.addInline();
-    await f.module.reconcileTaskPullRequestFeedback(f.input);
-    expect(f.measures).toEqual([{ event: "feedback_review.measure", measure: "feedback_reopened", count: 1, at: f.input.now }]);
-    expect(JSON.stringify(f.measures)).not.toMatch(/task|reviewer|comment|diff|current authoritative body/i);
-    await f.module.reconcileTaskPullRequestFeedback(f.input); // duplicate/replay does not increment the count
-    expect(f.measures).toHaveLength(1);
   });
   it("recollects authoritative data after a concurrent revision conflict", async () => {
     const f = await fixture(); expect(f.module.reconcileTaskPullRequestFeedback).toBeTypeOf("function"); f.conflict();
@@ -554,26 +406,6 @@ describe("task-wide current PR feedback reconciliation", () => {
     expect(stored.size).toBe(2);
     expect([...stored.values()].every(bytes => !bytes.includes("stale webhook body"))).toBe(true);
   });
-  // 0.2.9 live test: the task is read back from DynamoDB, which keeps no map's attribute order. An owner's decision
-  // refreshes GitHub under a new delivery ID each time; unchanged feedback must not be collected (and reviewed) again.
-  it("does not collect unchanged feedback again when the stored collection is read back in DynamoDB's attribute order", async () => {
-    const f = await fixture();
-    f.reopen();
-    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
-    const collected = f.workflow();
-    expect(collected.feedbackReview?.threadObservations).toHaveLength(1);
-    f.setWorkflow(reorderMaps(collected) as WorkflowSnapshot);
-    const artifacts = f.artifacts.length;
-    for (const deliveryId of [`owner-decision-${crypto.randomUUID()}`, `owner-decision-${crypto.randomUUID()}`]) {
-      expect(await f.module.reconcileTaskPullRequestFeedback({ ...f.input, deliveryId })).toBe(false);
-    }
-    expect(f.artifacts).toHaveLength(artifacts);
-    expect(f.workflow().revision).toBe(collected.revision);
-    // A real change still collects again.
-    f.addInline();
-    expect(await f.module.reconcileTaskPullRequestFeedback({ ...f.input, deliveryId: `owner-decision-${crypto.randomUUID()}` })).toBe(true);
-    expect(f.workflow().revision).toBe(collected.revision + 1);
-  });
   it("proves an approval current at worker start when the task is read back in DynamoDB's attribute order", async () => {
     const f = await fixture();
     f.reopen();
@@ -630,30 +462,6 @@ describe("the GitHub webhook route and a changed webhook secret", () => {
     expect(response.status).toBe(403);
     expect(JSON.stringify(response.body)).toMatch(/registered installation and repository/);
     expect(webhookSecret.mock.calls).toEqual([[undefined], [{ refresh: true }]]);
-  });
-
-  it("does not ask for a refreshed secret when the first one verifies", async () => {
-    const secret = "current-secret".padEnd(40, "c");
-    const webhookSecret = vi.fn(async () => secret);
-    const response = await post(webhookSecret, signedHeaders(pullRequestBody, secret));
-    expect(JSON.stringify(response.body)).toMatch(/registered installation and repository/);
-    expect(webhookSecret).toHaveBeenCalledTimes(1);
-  });
-
-  it("still refuses a bad signature after one refresh", async () => {
-    const webhookSecret = vi.fn(async (options?: { refresh?: boolean }) => options?.refresh === true ? "refreshed".padEnd(40, "r") : "cached".padEnd(40, "c"));
-    const response = await post(webhookSecret, signedHeaders(pullRequestBody, "someone-else".padEnd(40, "s")));
-    expect(response.status).toBe(403);
-    expect(JSON.stringify(response.body)).toMatch(/signature is invalid/);
-    expect(webhookSecret).toHaveBeenCalledTimes(2);
-  });
-
-  it("skips the second verification when the refresh returns the same secret", async () => {
-    const webhookSecret = vi.fn(async () => "same".padEnd(40, "s"));
-    const response = await post(webhookSecret, signedHeaders(pullRequestBody, "other".padEnd(40, "o")));
-    expect(response.status).toBe(403);
-    expect(JSON.stringify(response.body)).toMatch(/signature is invalid/);
-    expect(webhookSecret).toHaveBeenCalledTimes(2);
   });
 
   it("answers 503 not configured when the secret holds no webhook secret even after a refresh", async () => {

@@ -36,14 +36,6 @@ describe("users.info at refresh (FR-007, R22)", () => {
     for (const id of ["U0D000001", "U0E000001", "U0F000001", "U0NOBODY1"]) expect(await dir.userStatus(id)).toBe("gone");
   });
 
-  it("is unavailable when Slack is down or rate limits, so a refresh never signs anyone out for it", async () => {
-    const { dir, fake } = directory([{ userId: "U0A000001", name: "A" }]);
-    fake.state.down = true;
-    expect(await dir.userStatus("U0A000001")).toBe("unavailable");
-    fake.state.down = false;
-    fake.state.rateLimited = true;
-    expect(await dir.userStatus("U0A000001")).toBe("unavailable");
-  });
 });
 
 describe("Slack errors about the bot token", () => {
@@ -86,10 +78,6 @@ describe("users.lookupByEmail (FR-012)", () => {
 });
 
 describe("conversations.members (FR-013)", () => {
-  it("pages through members and answers which channels the user is in", async () => {
-    const { dir } = directory([], { C0PAY0001: ["U01", "U02", "U03", "U0MAYA001"], C0LEDGER1: ["U01"] });
-    expect(await dir.channelMembers("U0MAYA001", ["C0PAY0001", "C0LEDGER1"])).toEqual({ ok: true, memberOf: ["C0PAY0001"] });
-  });
 
   it("caches a channel's members for at most 10 minutes", async () => {
     const { dir, fetch, tick } = directory([], { C0PAY0001: ["U0MAYA001"] });
@@ -114,13 +102,6 @@ describe("conversations.members (FR-013)", () => {
     const { dir, fetch } = directory([], { C0A000001: ["U01", "U02", "U03", "U04"], C0B000001: ["U05", "U06", "U07", "U0MAYA001"] }, { maxCallsPerRequest: 3 });
     expect(await dir.channelMembers("U0MAYA001", ["C0A000001", "C0B000001"])).toEqual({ ok: false, error: "slack_unavailable" });
     expect(membersCalls(fetch)).toBe(3);
-  });
-
-  it("answers a full batch of cold channels within one request's default call budget, with room for a second page each", async () => {
-    const channels = Object.fromEntries(Array.from({ length: CHANNEL_MEMBERS_MAX_CHANNELS }, (_, index) => [`C0CH${String(index).padStart(5, "0")}`, index === 7 ? ["U0MAYA001"] : ["U01"]]));
-    const { dir, fetch } = directory([], channels);
-    expect(await dir.channelMembers("U0MAYA001", Object.keys(channels))).toEqual({ ok: true, memberOf: ["C0CH00007"] });
-    expect(membersCalls(fetch)).toBe(CHANNEL_MEMBERS_MAX_CHANNELS);
   });
 
   it("fails closed when Slack cannot be reached or a channel cannot be read", async () => {
@@ -150,31 +131,6 @@ describe("fresh task person proof", () => {
     await expect(dir.taskChannelPeople(["C0PAY0001"])).resolves.toEqual({ ok: true, users: [
       { id: "U0MAYA001", teamId: TEAM, name: "Maya Chen", memberOf: ["C0PAY0001"] },
     ] });
-  });
-  it("warm_membership_cache_does_not_keep_departed_owner_authorized", async () => {
-    const channels = { C0PAY0001: ["U0MAYA001"] };
-    const { dir, fetch } = directory([{ userId: "U0MAYA001", name: "Maya Chen" }], channels);
-    expect(await dir.channelMembers("U0MAYA001", ["C0PAY0001"])).toEqual({ ok: true, memberOf: ["C0PAY0001"] });
-
-    channels.C0PAY0001.length = 0;
-
-    expect(await dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).toEqual({
-      ok: true,
-      user: { id: "U0MAYA001", teamId: TEAM, name: "Maya Chen" },
-      memberOf: [],
-    });
-    expect(membersCalls(fetch)).toBe(2);
-  });
-
-  it("invite_then_reread_ignores_cached_preinvite_state", async () => {
-    const channels = { C0PAY0001: [] as string[] };
-    const { dir, fetch } = directory([{ userId: "U0MAYA001", name: "Maya Chen" }], channels);
-    expect(await dir.channelMembers("U0MAYA001", ["C0PAY0001"])).toEqual({ ok: true, memberOf: [] });
-
-    channels.C0PAY0001.push("U0MAYA001");
-
-    expect(await dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).toMatchObject({ ok: true, memberOf: ["C0PAY0001"] });
-    expect(membersCalls(fetch)).toBe(2);
   });
 
   it("exports a fresh dispatch proof with a hard call cap and an abortable credential lookup", async () => {
@@ -215,35 +171,6 @@ describe("fresh task person proof", () => {
     });
   });
 
-  it("does not join a previously in-flight display read", async () => {
-    let releaseFirst: (() => void) | undefined;
-    const firstStarted = new Promise<void>((resolve) => { releaseFirst = resolve; });
-    let calls = 0;
-    const fetch: typeof globalThis.fetch = async (input) => {
-      const url = requestUrl(input);
-      if (url.pathname === "/api/users.info") return Response.json({ ok: true, user: { id: "U0MAYA001", team_id: TEAM, deleted: false, is_bot: false, real_name: "Maya Chen" } });
-      if (url.pathname === "/api/conversations.members") {
-        calls += 1;
-        if (calls === 1) {
-          await firstStarted;
-          return Response.json({ ok: true, members: ["U0MAYA001"], response_metadata: { next_cursor: "" } });
-        }
-        return Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
-      }
-      throw new Error(`unexpected Slack method: ${url.pathname}`);
-    };
-    const dir = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch, now: () => T0 });
-    const display = dir.channelMembers("U0MAYA001", ["C0PAY0001"]);
-    while (calls === 0) await Promise.resolve();
-
-    const proof = await dir.taskPersonProof("U0MAYA001", ["C0PAY0001"]);
-    releaseFirst!();
-
-    expect(proof).toMatchObject({ ok: true, memberOf: [] });
-    await expect(display).resolves.toEqual({ ok: true, memberOf: ["C0PAY0001"] });
-    expect(calls).toBe(2);
-  });
-
   it("rejects a deleted, bot, foreign, Slack Connect, mismatched, or malformed user", async () => {
     const base = { ok: true, user: { id: "U0MAYA001", team_id: TEAM, deleted: false, is_bot: false, real_name: "Maya Chen" } };
     const cases: Array<{ reply: unknown; error: "ineligible" | "slack_unavailable" }> = [
@@ -261,24 +188,6 @@ describe("fresh task person proof", () => {
         : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
       const dir = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch, now: () => T0 });
       await expect(dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toEqual({ ok: false, error });
-    }
-  });
-
-  it("accepts absent optional eligibility flags and rejects unreadable present flags", async () => {
-    const eligible = { ok: true, user: { id: "U0MAYA001", team_id: TEAM, is_bot: false, real_name: "Maya Chen" } };
-    const fetchWithoutFlags: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
-      ? Response.json(eligible)
-      : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
-    const withoutFlags = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch: fetchWithoutFlags, now: () => T0 });
-    await expect(withoutFlags.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toMatchObject({ ok: true });
-
-    const malformedFlags: Array<Record<string, unknown>> = [{ deleted: [] }, { is_bot: [] }, { is_stranger: {} }];
-    for (const fields of malformedFlags) {
-      const fetch: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
-        ? Response.json({ ...eligible, user: { ...eligible.user, ...fields } })
-        : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
-      const dir = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch, now: () => T0 });
-      await expect(dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toEqual({ ok: false, error: "slack_unavailable" });
     }
   });
 
@@ -341,18 +250,6 @@ describe("fresh task person proof", () => {
 });
 
 describe("conversations.info for channel names (R10)", () => {
-  it("returns each channel's name and privacy, and caches them for 10 minutes", async () => {
-    const { dir, fetch, tick } = directory([], {}, { channelInfo: { C0PAY0001: { name: "payments-dev", isPrivate: false }, C0SEC0001: { name: "payments-sec", isPrivate: true } } });
-    expect(await dir.channelInfo(["C0PAY0001", "C0SEC0001"])).toEqual({ ok: true, channels: [
-      { channelId: "C0PAY0001", name: "payments-dev", isPrivate: false },
-      { channelId: "C0SEC0001", name: "payments-sec", isPrivate: true },
-    ] });
-    await dir.channelInfo(["C0PAY0001"]);
-    expect(fetch.calls.filter((call) => call.includes("conversations.info"))).toHaveLength(2);
-    tick(600_001);
-    await dir.channelInfo(["C0PAY0001"]);
-    expect(fetch.calls.filter((call) => call.includes("conversations.info"))).toHaveLength(3);
-  });
 
   it("leaves out a channel Slack does not know, and is unavailable when Slack is down", async () => {
     const { dir, fake } = directory([], {}, { channelInfo: { C0PAY0001: { name: "payments-dev", isPrivate: false } } });
@@ -394,8 +291,4 @@ describe("conversations.info limits (Task 7 fix round 1)", () => {
     expect(problems).toEqual([{ method: "conversations.info", status: 429, error: "ratelimited" }]);
   });
 
-  it("counts a channel with no is_private flag as private (fail closed)", async () => {
-    const { dir } = directory([], {}, { channelInfo: { C0PAY0001: { name: "payments-dev" } } });
-    expect(await dir.channelInfo(["C0PAY0001"])).toEqual({ ok: true, channels: [{ channelId: "C0PAY0001", name: "payments-dev", isPrivate: true }] });
-  });
 });

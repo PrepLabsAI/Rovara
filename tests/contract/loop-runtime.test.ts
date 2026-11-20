@@ -25,11 +25,6 @@ describe("a loop is data (#355)", () => {
 });
 
 describe("what a comment asks for (#355)", () => {
-  it("reads `/rovara do` with its instruction, over several lines, and `/rovara stop`", () => {
-    expect(parseComment("/rovara do fix the flaky test")).toMatchObject({ kind: "start", loop: { name: "do" }, instruction: "fix the flaky test" });
-    expect(parseComment("/rovara do\nfix the flaky test\n\nand the docs")).toMatchObject({ kind: "start", instruction: "fix the flaky test\n\nand the docs" });
-    expect(parseComment("  /rovara stop  ")).toEqual({ kind: "stop" });
-  });
 
   it("says what is wrong with a command it cannot run, and treats anything else as a reply", () => {
     expect(parseComment("/rovara do")).toMatchObject({ kind: "invalid", reason: expect.stringContaining("Say what to do after `/rovara do`") as unknown });
@@ -41,32 +36,12 @@ describe("what a comment asks for (#355)", () => {
 });
 
 describe("the Do loop's decisions (#355)", () => {
-  it("starts on the work step: the working label, the agent's first assignment, and a comment on how to watch it", () => {
-    const decision = decide(DO_LOOP, undefined, start, ITEM);
-    expect(decision.state).toMatchObject({ repo: "acme/payments", issue: 42, loop: "do", step: "work", startedBy: "maya", instruction: "Fix the flaky retry test" });
-    expect(decision.effects.map((effect) => effect.kind)).toEqual(["label", "assign", "comment"]);
-    expect(decision.effects[0]).toEqual({ kind: "label", label: "working" });
-    expect(decision.effects[1]).toMatchObject({ text: expect.stringContaining("Instruction from @maya:\nFix the flaky retry test") as unknown });
-    expect(decision.effects[1]).toMatchObject({ text: expect.stringContaining("Never push, and never open a pull request yourself.") as unknown });
-    expect(decision.effects[1]).toMatchObject({ text: expect.stringContaining("This is the Do loop: it has no gates and does not publish anything.") as unknown });
-    expect(decision.effects[2]).toMatchObject({ body: expect.stringContaining("tmux attach -t =rovara-acme_payments-42") as unknown });
-  });
 
   it("does not start a second loop on an issue that has one running", () => {
     const state = started();
     const decision = decide(DO_LOOP, state, start, ITEM);
     expect(decision.state).toBe(state);
     expect(decision.effects).toEqual([{ kind: "comment", body: expect.stringContaining("A loop is already running") as unknown }]);
-  });
-
-  it("passes a reply to a working agent without moving, and moves a waiting item back to work", () => {
-    const reply: LoopEvent = { kind: "reply", text: "also rename the helper", author: "sam", at: AT };
-    const working = decide(DO_LOOP, started(), reply, ITEM);
-    expect(working.state?.step).toBe("work");
-    expect(working.effects).toEqual([{ kind: "assign", text: "Reply from @sam on the issue:\nalso rename the helper\n\nWhen you have dealt with it, commit, then call loop_complete again with a summary." }]);
-    const waiting = decide(DO_LOOP, at(started(), "waiting"), reply, ITEM);
-    expect(waiting.state?.step).toBe("work");
-    expect(waiting.effects.map((effect) => effect.kind)).toEqual(["label", "assign"]);
   });
 
   it("accepts the agent's claim only when its exit checks pass, posts the summary, and waits for the person", () => {

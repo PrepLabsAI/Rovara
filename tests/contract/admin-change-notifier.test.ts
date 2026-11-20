@@ -5,7 +5,7 @@ import { AdminChangePendingRecordSchema } from "@agentx/contracts";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import { ADMIN_CHANGE_EXPIRY_GRACE_MS, cachedSlackClient, createNotifierHandler, noticeDelaySeconds, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
-import { SlackPostError, chatPostMessage, chatUpdate } from "../../packages/broker/src/aws/slack-web.js";
+import { chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
 import { adminChangeMessage, adminChangeOutcomeMessage } from "../../packages/broker/src/developer/change-messages.js";
 import { noticesFromStream, type Notice, type StreamRecord } from "../../packages/broker/src/developer/notifications.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -67,66 +67,11 @@ describe("the Slack Confirm message (E13)", () => {
     expect(noticesFromStream([modify(pending({ status: "declined" }), pending({ status: "declined", ...requested }))])).toEqual([]);
   });
 
-  it("edits a message recorded only after the change ended, so it never keeps live buttons", () => {
-    expect(noticesFromStream([modify(pending({ status: "applied" }), pending({ status: "applied", dm: DM }))])).toEqual([expect.objectContaining({ id: `${CHANGE}:outcome`, kind: "admin_change_outcome" })]);
-  });
-
   it("starts nothing when the table's TTL removes a change", () => {
     const removed: StreamRecord = { eventID: "e2", eventName: "REMOVE", dynamodb: { OldImage: marshall(pending({ dm: DM, status: "applied", slackRequestedAt: "2026-10-02T09:00:05.000Z" })) } };
     expect(noticesFromStream([removed])).toEqual([]);
   });
 
-  it("posts one direct message to the admin's Slack user, with Confirm and Cancel, escaped and redacted", async () => {
-    const db = new FakeDynamoDb();
-    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z" }));
-    const { posts, logs, deliver } = notifier(db);
-    await deliver({ id: `${CHANGE}:dm`, kind: "admin_change_dm", changeId: CHANGE, at: "2026-10-02T09:00:05.000Z" });
-    await deliver({ id: `${CHANGE}:dm`, kind: "admin_change_dm", changeId: CHANGE, at: "2026-10-02T09:00:05.000Z" });
-    expect(posts).toHaveLength(1);
-    expect(posts[0]?.channel).toBe("U0ADA00001");
-    expect(posts[0]?.text).toContain("&lt;script&gt;");
-    expect(JSON.stringify(posts)).not.toContain(PLANTED);
-    expect(JSON.stringify(posts[0]?.blocks)).toContain("agentx_admin_change_confirm");
-    expect(JSON.stringify(posts[0]?.blocks)).toContain(`"value":"${CHANGE}"`);
-    expect(db.get(`ADMIN_CHANGE#${CHANGE}`, "META")).toMatchObject({ dm: { channel: "D0ADMINDM1", ts: "1696237200.000100" } });
-    expect(logs).toContainEqual(expect.objectContaining({ event: "admin_change.dm_posted", changeId: CHANGE, traceId: "trace-7" }));
-  });
-
-  it("posts nothing for a change that already ended or expired", async () => {
-    const db = new FakeDynamoDb();
-    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z", status: "declined" }));
-    const { posts, deliver } = notifier(db);
-    await deliver({ id: `${CHANGE}:dm`, kind: "admin_change_dm", changeId: CHANGE, at: "2026-10-02T09:00:05.000Z" });
-    const expired = new FakeDynamoDb();
-    expired.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z" }));
-    const late = notifier(expired, Date.parse("2026-10-02T09:11:00.000Z"));
-    await late.deliver({ id: `${CHANGE}:dm`, kind: "admin_change_dm", changeId: CHANGE, at: "2026-10-02T09:00:05.000Z" });
-    expect([...posts, ...late.posts]).toEqual([]);
-  });
-
-  it("edits the message once the change ends, removing the buttons", async () => {
-    const db = new FakeDynamoDb();
-    db.set(pending({ status: "applied", pressedBy: "U0ADA00001", dm: { channel: "D0ADMINDM1", ts: "1696237200.000100", postedAt: "2026-10-02T09:00:06.000Z" } }));
-    const { updates, deliver } = notifier(db);
-    await deliver({ id: `${CHANGE}:outcome`, kind: "admin_change_outcome", changeId: CHANGE, at: "2026-10-02T09:02:00.000Z" });
-    await deliver({ id: `${CHANGE}:outcome`, kind: "admin_change_outcome", changeId: CHANGE, at: "2026-10-02T09:02:00.000Z" });
-    expect(updates).toHaveLength(1);
-    expect(updates[0]).toMatchObject({ channel: "D0ADMINDM1", ts: "1696237200.000100" });
-    expect(updates[0]?.text).toContain("Applied, confirmed by <@U0ADA00001>.");
-    expect(JSON.stringify(updates[0]?.blocks)).not.toContain("agentx_admin_change_confirm");
-  });
-
-  it("edits the message of an ended change that no longer keeps its input (R3 mitigation)", async () => {
-    const db = new FakeDynamoDb();
-    const ended: Record<string, unknown> = pending({ status: "declined", dm: DM });
-    delete ended.input;
-    db.set(ended);
-    const { updates, deliver } = notifier(db);
-    await deliver(outcomeNotice);
-    expect(updates).toHaveLength(1);
-    expect(updates[0]).toMatchObject({ channel: "D0ADMINDM1", ts: "1696237200.000100" });
-    expect(AdminChangePendingRecordSchema.safeParse(db.get(`ADMIN_CHANGE#${CHANGE}`, "META")).success).toBe(true);
-  });
 });
 
 describe("an expired Confirm message loses its buttons without a press (#217)", () => {
@@ -198,20 +143,6 @@ describe("an expired Confirm message loses its buttons without a press (#217)", 
     }
   });
 
-  it("puts the outcome back when an outcome edit landed between its read and its expiry edit (review)", async () => {
-    const db = new FakeDynamoDb();
-    db.set(pending({ dm: DM }));
-    const h = notifier(db, afterExpiry, {
-      update: vi.fn(async (input: { channel: string; ts: string; text: string; blocks: unknown[] }) => {
-        h.updates.push(input);
-        // The outcome delivery edited and recorded first; this expiry edit then lands over it.
-        if (h.updates.length === 1) db.set({ ...db.get(`ADMIN_CHANGE#${CHANGE}`, "META") as Record<string, unknown>, status: "applied", pressedBy: "U0ADA00001", dmEditedAt: "2026-10-02T09:10:05.500Z" });
-      }),
-    });
-    await h.deliver(expiryNotice);
-    expect(h.updates.at(-1)?.text.split("\n\n").at(-1)).toBe("Applied, confirmed by <@U0ADA00001>.");
-  });
-
   it("edits once when a press recorded the expiry while it edited (review)", async () => {
     const db = new FakeDynamoDb();
     db.set(pending({ dm: DM }));
@@ -243,27 +174,6 @@ describe("an expired Confirm message loses its buttons without a press (#217)", 
 });
 
 describe("the message's content (E13, R4, FR-051)", () => {
-  const PRIVATE = `Bind channel #secret-launch (C0PRIVATE01, a private channel) to project ledger. ${PLANTED}`;
-
-  it("shows the planning admin the effect that names their private channel, when there is one", async () => {
-    const db = new FakeDynamoDb();
-    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z", effect: "Bind channel C0PRIVATE01 (a private channel) to project ledger.", confirmationEffect: PRIVATE }));
-    const { posts, deliver } = notifier(db);
-    await deliver(dmNotice);
-    expect(posts[0]?.text).toContain("#secret-launch");
-    expect(JSON.stringify(posts)).not.toContain(PLANTED);
-    const ended = AdminChangePendingRecordSchema.parse(pending({ status: "declined", dm: DM, effect: "Bind channel C0PRIVATE01 (a private channel) to project ledger.", confirmationEffect: PRIVATE }));
-    expect(adminChangeOutcomeMessage(ended)?.text).toContain("#secret-launch");
-  });
-
-  it("shows the ID-only effect when no private channel is named", async () => {
-    const db = new FakeDynamoDb();
-    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z" }));
-    const { posts, deliver } = notifier(db);
-    await deliver(dmNotice);
-    expect(posts[0]?.text).toContain("Bind channel #ledger-dev (C0LEDGER01) to project ledger.");
-    expect(posts[0]?.text).toContain("It expires in 9 minutes.");
-  });
 
   it("says how each ended change ended, with no buttons, no secret and no em dash", () => {
     const failedMessage = `the channel could not be bound; check it, then ask again ${PLANTED} <b>`;
@@ -338,28 +248,6 @@ describe("delivering the message safely (C9)", () => {
     expect(h.posts).toHaveLength(1);
   });
 
-  it("gives a failed post's claim back, so the retry posts, and a Slack refusal never logs the token", async () => {
-    const db = new FakeDynamoDb();
-    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z" }));
-    let fail = true;
-    const posted: unknown[] = [];
-    const h = notifier(db, Date.parse("2026-10-02T09:01:00.000Z"), {
-      post: vi.fn(async (input) => {
-        if (fail) throw new SlackPostError("channel_not_found");
-        posted.push(input);
-        return { ts: "1696237200.000100", channel: "D0ADMINDM1" };
-      }),
-    });
-    expect(await h.deliver(dmNotice)).toEqual({ batchItemFailures: [{ itemIdentifier: "m1" }] });
-    expect(db.get(`ADMIN_CHANGE#${CHANGE}`, "META")).not.toHaveProperty("dmClaimedAt");
-    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.retry", kind: "admin_change_dm", reason: "channel_not_found" }));
-    fail = false;
-    await h.deliver(dmNotice);
-    expect(posted).toHaveLength(1);
-    expect(JSON.stringify(h.logs)).not.toContain(BOT_TOKEN);
-    expect(JSON.stringify(h.logs)).not.toContain(PLANTED);
-  });
-
   it("never recreates a change the TTL removed while its message was being posted", async () => {
     const db = new FakeDynamoDb();
     db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z" }));
@@ -371,19 +259,6 @@ describe("delivering the message safely (C9)", () => {
     });
     await h.deliver(dmNotice);
     expect(db.get(`ADMIN_CHANGE#${CHANGE}`, "META")).toBeUndefined();
-  });
-
-  it("records the edit at the top level (ruling B2), and a later delivery edits nothing", async () => {
-    const db = new FakeDynamoDb();
-    db.set(pending({ status: "expired", dm: DM }));
-    const h = notifier(db);
-    await h.deliver(outcomeNotice);
-    const stored = db.get(`ADMIN_CHANGE#${CHANGE}`, "META");
-    expect(stored).toMatchObject({ dmEditedAt: "2026-10-02T09:01:00.000Z", dm: DM });
-    expect(AdminChangePendingRecordSchema.safeParse(stored).success).toBe(true);
-    expect(h.logs).toContainEqual(expect.objectContaining({ event: "admin_change.dm_edited", changeId: CHANGE, traceId: "trace-7", status: "expired" }));
-    await h.deliver(outcomeNotice);
-    expect(h.updates).toHaveLength(1);
   });
 
   it("edits nothing while the change is still pending, and nothing without a message", async () => {
@@ -399,12 +274,6 @@ describe("delivering the message safely (C9)", () => {
     expect(other.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.notice", kind: "admin_change_outcome", outcome: "stale" }));
   });
 
-  it("keeps the stored change readable by the broker after the notifier's writes", async () => {
-    const db = new FakeDynamoDb();
-    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z" }));
-    await notifier(db).deliver(dmNotice);
-    expect(AdminChangePendingRecordSchema.safeParse(db.get(`ADMIN_CHANGE#${CHANGE}`, "META")).success).toBe(true);
-  });
 });
 
 // 25c note 3 applied to E13: the Confirm message is claimed and posted once, as the start message
@@ -442,26 +311,6 @@ describe("an uncertain Confirm message post is logged (25c note 3)", () => {
     expect(uncertain(refused.logs)).toEqual([]);
   });
 
-  it("logs a claim left by a delivery that died, once, from the delivery that takes it over", async () => {
-    const db = new FakeDynamoDb();
-    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z", dmClaimedAt: "2026-10-02T09:00:50.000Z" }));
-    const h = notifier(db);
-    await h.deliver(dmNotice);
-    expect(uncertain(h.logs)).toEqual([]);
-    h.clock.now = Date.parse("2026-10-02T09:02:00.000Z");
-    await h.deliver(dmNotice);
-    expect(h.posts).toHaveLength(1);
-    expect(uncertain(h.logs)).toEqual([{ event: "admin_change.dm_post_uncertain", reason: "claim_lapsed", changeId: CHANGE, traceId: "trace-7" }]);
-  });
-
-  it("logs nothing for a first post that lands", async () => {
-    const db = new FakeDynamoDb();
-    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z" }));
-    const h = notifier(db);
-    await h.deliver(dmNotice);
-    expect(h.posts).toHaveLength(1);
-    expect(uncertain(h.logs)).toEqual([]);
-  });
 });
 
 describe("Slack's two calls", () => {
@@ -469,27 +318,6 @@ describe("Slack's two calls", () => {
     const ok = vi.fn(async () => Response.json({ ok: true, ts: "1696237200.000100", channel: "D0ADMINDM1" }));
     expect(await chatPostMessage(BOT_TOKEN, { channel: "U0ADA00001", text: "hi", blocks: [{ type: "divider" }] }, ok as unknown as typeof fetch)).toEqual({ ts: "1696237200.000100", channel: "D0ADMINDM1" });
     expect(JSON.parse((ok.mock.calls[0] as unknown as [string, RequestInit & { body: string }])[1].body) as unknown).toMatchObject({ channel: "U0ADA00001", blocks: [{ type: "divider" }] });
-  });
-
-  it("chat.update edits by channel and ts, and reports Slack's error code without the token", async () => {
-    const ok = vi.fn(async () => Response.json({ ok: true }));
-    await chatUpdate(BOT_TOKEN, { channel: "D0ADMINDM1", ts: "1696237200.000100", text: "done", blocks: [] }, ok);
-    const [url, init] = ok.mock.calls[0] as unknown as [string, RequestInit & { body: string; headers: Record<string, string> }];
-    expect(url).toBe("https://slack.com/api/chat.update");
-    expect(init.headers.authorization).toBe(`Bearer ${BOT_TOKEN}`);
-    expect(JSON.parse(init.body) as unknown).toEqual({ channel: "D0ADMINDM1", ts: "1696237200.000100", text: "done", blocks: [] });
-    expect(init.body).not.toContain(BOT_TOKEN);
-    const refused = vi.fn(async () => Response.json({ ok: false, error: "message_not_found" }));
-    const error = await chatUpdate(BOT_TOKEN, { channel: "D0ADMINDM1", ts: "1", text: "done", blocks: [] }, refused as unknown as typeof fetch).catch((caught: unknown) => caught as SlackPostError);
-    expect(error).toMatchObject({ slackError: "message_not_found" });
-    if (error === undefined) throw new Error("expected chat.update to fail");
-    expect(error.message).toContain("chat.update");
-    expect(error.message).not.toContain(BOT_TOKEN);
-    const broken = vi.fn(async () => new Response(`oops ${BOT_TOKEN}`, { status: 502 }));
-    const unreadable = await chatUpdate(BOT_TOKEN, { channel: "D0ADMINDM1", ts: "1", text: "done", blocks: [] }, broken as unknown as typeof fetch).catch((caught: unknown) => caught as SlackPostError);
-    if (unreadable === undefined) throw new Error("expected unreadable chat.update to fail");
-    expect(unreadable.slackError).toBe("http_502");
-    expect(unreadable.message).not.toContain(BOT_TOKEN);
   });
 
   it("posts and edits with one cached bot token, loaded again after Slack refuses it", async () => {

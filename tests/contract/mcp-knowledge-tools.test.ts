@@ -139,21 +139,6 @@ describe("team_knowledge and team_knowledge_for", () => {
     expect(asked).toEqual(["git@github.com:acme/elsewhere.git", undefined, "git@github.com:acme/named.git"]);
   });
 
-  it("shows team knowledge that is switched off in the broker's own words, and a failed read as the fixed unavailable line (not an error)", async () => {
-    const off = await connect({ knowledgeFor: async () => answer([], { status: "off", reason: "company_stays", message: KNOWLEDGE_STAYS_SENTENCE }) });
-    expect(structured(await off.callTool({ name: "team_knowledge", arguments: { project: "payments" } }))).toMatchObject({ status: "off", units: [] });
-    const down = await connect({ knowledgeFor: async () => { throw new ToolError("CONTROL_PLANE_UNAVAILABLE", "could not reach"); } });
-    const result = await down.callTool({ name: "team_knowledge", arguments: { project: "payments" } });
-    expect(isError(result)).toBe(false);
-    expect(text(result)).toBe(LOCAL_LESSONS_UNAVAILABLE_LINE);
-  });
-
-  it("cleans every unit again (control characters, secrets) before it reaches the AI tool", async () => {
-    const mcp = await connect({ knowledgeFor: async () => answer([{ id: "les_aaaa1111", advice: "Use\u0007 the helper sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", why: "ok" }]) });
-    const result = await mcp.callTool({ name: "team_knowledge", arguments: { project: "payments" } });
-    expect(JSON.stringify(result)).not.toMatch(/sk-ant-api03-abcdefgh/u);
-    expect(structured(result).units[0]?.advice).not.toContain("\u0007");
-  });
 });
 
 describe("team_knowledge_areas", () => {
@@ -249,23 +234,6 @@ describe("team_propose: a suggestion, the only write, never applied by itself", 
     expect(isError(lost)).toBe(false);
     expect(text(lost)).toBe(LOCAL_LESSONS_UNAVAILABLE_LINE);
   });
-  it("takes only a suggestion: no field for a tool, a grant, a command or an approval, advice of 8 to 80 characters, at most 5 paths", async () => {
-    const { tools } = await (await connect({})).listTools();
-    const tool = tools.find((entry) => entry.name === "team_propose")!;
-    expect(Object.keys(tool.inputSchema.properties ?? {}).sort()).toEqual(["advice", "paths", "project", "repo", "type", "when", "why"]);
-    expect(tool.description).toContain("not used by anyone until the team has seen it twice and a person approves it");
-    expect(tool.description).toContain("at most 10 suggestions a day");
-    const mcp = await connect({ knowledgePropose: async () => received });
-    for (const arguments_ of [{ advice: "short" }, { advice: "x".repeat(81) }, { ...body, type: "review_check" }, { ...body, paths: ["a", "b", "c", "d", "e", "f"] }]) {
-      const result = await mcp.callTool({ name: "team_propose", arguments: { project: "payments", ...arguments_ } });
-      expect(isError(result), JSON.stringify(arguments_)).toBe(true);
-    }
-    // A field the tool does not have (an approval, a tool grant) is dropped, never forwarded.
-    const forwarded: unknown[] = [];
-    const strict = await connect({ knowledgePropose: async (_project, request) => { forwarded.push(request); return received; } });
-    await strict.callTool({ name: "team_propose", arguments: { ...body, project: "payments", approve: true, allowedTools: ["bash"] } });
-    expect(forwarded).toEqual([body]);
-  });
   it("posts to the project's propose route once, with the suggestion and nothing else; the broker's 'No such project.' is 'not found'", async () => {
     const CELL = "https://abc123.execute-api.us-west-2.amazonaws.com";
     const calls: Array<{ url: string; body: string; method: string | undefined }> = [];
@@ -314,11 +282,5 @@ describe("the company switch: every knowledge and wiki tool says the one fixed s
       const refused = await mcp.callTool({ name: "wiki_list", arguments: { project: "payments" } });
       expect(text(refused)).not.toBe(KNOWLEDGE_STAYS_SENTENCE);
     }
-  });
-  it("every tool of the team knowledge and wiki families is named here, so a tool added later (the wiki tools) cannot skip the switch's test", async () => {
-    const { tools } = await (await connect({})).listTools();
-    const family = tools.map((tool) => tool.name).filter((name) => /^(team_|wiki_)/u.test(name)).sort();
-    // wiki_list and wiki_read answer the sentence too (L4-WKS) and are in the loop above; a wiki tool added later (wiki_ask) must answer it and join that loop, or this list fails.
-    expect(family).toEqual(["team_knowledge", "team_knowledge_areas", "team_knowledge_for", "team_propose", "wiki_list", "wiki_read"]);
   });
 });

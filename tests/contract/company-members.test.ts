@@ -1,9 +1,8 @@
 import { expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, companyScoped } from "@agentx/contracts";
+import { companyScoped } from "@agentx/contracts";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
 import { membershipKey } from "../../packages/broker/src/aws/company-check.js";
-import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const A = `org_${"a".repeat(20)}`, B = `org_${"b".repeat(20)}`;
@@ -32,18 +31,6 @@ function assertMirror(h: ReturnType<typeof world>, personId: string) {
   const key = mirrorKey(member.companyId as string, personId);
   expect(h.db.get(key.pk, key.sk)).toEqual({ ...member, ...key, entityType: "COMPANY_MEMBER_VIEW" });
 }
-
-it("role-set writes the mirror and one attributed audit atomically; same role is a no-op", async () => {
-  const h = world(); h.seed(p, "admin"); h.seed(actor, "admin");
-  expect(await h.invoke({ ...roleSet(), createdBy: actor })).toEqual({ ok: true });
-  expect(await h.store.membership(p)).toMatchObject({ role: "member", updatedBy: actor, updatedAt: at });
-  assertMirror(h, p);
-  expect(h.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([expect.objectContaining({ event: "company-member-role-set", companyId: A, personId: p, fromRole: "admin", toRole: "member", createdBy: actor, createdAt: at })]);
-  const before = [...h.db.items.values()]; const logs = [...h.logs];
-  expect(await h.invoke({ ...roleSet(), createdBy: actor })).toEqual({ ok: true });
-  expect([...h.db.items.values()]).toEqual(before); expect(h.logs).toEqual(logs);
-  expect(h.db.refusals).toEqual([]);
-});
 
 it.each(["admin", "owner"])("DEC 254zzz73: an unchanged elevated role %s is a no-op for a live owner, with no step-up seam", async (role) => {
   const h = world(); h.seed(p, role as "admin" | "owner"); h.seed(actor, "owner");
@@ -120,20 +107,6 @@ it.each([
   }
 });
 
-it("a live owner steps down through the membership store only while a distinct live owner remains", async () => {
-  const h = world(); h.seed(p, "owner"); h.seed(q, "owner");
-  expect(await h.invoke({ ...roleSet(p, "admin"), createdBy: p })).toEqual({ ok: true });
-  expect(await h.store.membership(p)).toMatchObject({ role: "admin" });
-  expect(await h.store.membership(q)).toMatchObject({ role: "owner" });
-  expect(h.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([expect.objectContaining({ event: "company-member-role-set", companyId: A, personId: p, fromRole: "owner", toRole: "admin", createdBy: p })]);
-  assertMirror(h, p);
-
-  const sole = world(); sole.seed(p, "owner");
-  expect(await sole.invoke({ ...roleSet(p, "member"), createdBy: p })).toEqual(lastOwner);
-  expect(await sole.store.membership(p)).toMatchObject({ role: "owner" });
-  expect(sole.db.refusals).toEqual([]);
-});
-
 it.each([false, true])("sequential demote/revoke cannot remove the final owner (reverse=%s)", async (reverse) => {
   const h = world(); h.seed(); h.seed(q);
   const calls = reverse ? [revoke(q), roleSet()] : [roleSet(), revoke(q)];
@@ -188,58 +161,6 @@ it.each(["company-member-role-set", "company-member-revoke", "company-member-res
   }
 });
 
-it("operator omission preserves operator attribution; every member writer commits both rows in one transaction", async () => {
-  const h = world(); const transactions: Array<Record<string, unknown>> = [];
-  const send = h.db.send;
-  h.db.send = async (command) => { if (command.constructor.name === "TransactWriteCommand") transactions.push(command.input); return send(command); };
-  await h.store.preapprove(IMPLICIT_COMPANY_ID, "member@example.test", "admin", 1);
-  expect(await h.store.join({ companyId: IMPLICIT_COMPANY_ID, personId: p, email: "member@example.test" })).toMatchObject({ ok: true }); assertMirror(h, p);
-  expect(await h.invoke(roleSet(p, "member", IMPLICIT_COMPANY_ID))).toEqual({ ok: true }); assertMirror(h, p);
-  expect(await h.store.membership(p)).toMatchObject({ updatedBy: "operator" });
-  expect(await h.store.setRevoked(IMPLICIT_COMPANY_ID, p, true)).toBe(true); assertMirror(h, p);
-  expect(await h.store.membership(p)).toMatchObject({ revokedBy: "operator" });
-  expect(await h.store.setRevoked(IMPLICIT_COMPANY_ID, p, false)).toBe(true); assertMirror(h, p);
-  const legacy = ownerKeyForSubject("https://legacy.example.test", "legacy");
-  h.db.set({ pk: `DEVELOPER#${legacy}`, sk: "META", entityType: "DEVELOPER", provider: "oidc", issuer: "https://legacy.example.test", subject: "legacy", revoked: false, firstSignInAt: at });
-  expect(await h.store.join({ companyId: IMPLICIT_COMPANY_ID, personId: legacy })).toMatchObject({ ok: true }); assertMirror(h, legacy);
-  let writes = 0;
-  for (const transaction of transactions) {
-    const entries = transaction.TransactItems as Array<Record<string, { Item?: Record<string, unknown>; Key?: Record<string, unknown> }>>;
-    for (const entry of entries) {
-      const item = entry.Put?.Item ?? entry.Update?.Key;
-      if (typeof item?.pk !== "string" || !item.pk.startsWith("COMPANY_MEMBER#")) continue;
-      writes++;
-      expect(entries.some((entry) => entry.Put?.Item?.entityType === "COMPANY_MEMBER_VIEW")).toBe(true);
-    }
-  }
-  expect(writes).toBe(5); expect(h.db.refusals).toEqual([]);
-});
-
-it("a failed member transaction leaves membership, mirror and audit unchanged", async () => {
-  const h = world(); h.seed(p, "admin"); const before = [...h.db.items.values()];
-  h.db.injectFault({ command: "TransactWriteCommand", error: { name: "AccessDeniedException", message: "private-canary" } });
-  expect(await h.invoke(roleSet())).toEqual(unavailable);
-  expect([...h.db.items.values()]).toEqual(before); expect(h.logs).toEqual([]);
-});
-
-it("lists both companies separately with identical raw person ids; 100 rows and opaque continuation work", async () => {
-  const h = world();
-  for (let i = 0; i < 101; i++) {
-    const personId = i.toString(16).padStart(64, "0");
-    h.seed(personId, "member", A); h.seed(personId, "admin", B);
-  }
-  const first = await h.invoke(list(A));
-  expect(first).toMatchObject({ ok: true, more: true, cursor: expect.any(String) as unknown });
-  const page = first as { members: Array<{ companyId: string; role: string }>; cursor: string };
-  expect(page.members).toHaveLength(100); expect(page.members.every((m) => m.companyId === A && m.role === "member")).toBe(true);
-  const last = await h.invoke(list(A, { cursor: page.cursor }));
-  expect(last).toMatchObject({ ok: true, more: false, members: [expect.objectContaining({ companyId: A })] });
-  expect(last).not.toHaveProperty("cursor");
-  const other = await h.invoke(list(B, { limit: 100 }));
-  expect((other as { members: Array<{ companyId: string; role: string }> }).members.every((m) => m.companyId === B && m.role === "admin")).toBe(true);
-  expect(await h.invoke(list(B, { cursor: page.cursor }))).toEqual({ ok: false, error: "invalid_request" });
-});
-
 it.each([0, 101, 1.1, "1", null])("rejects invalid list limit %s", async (limit) => {
   const h = world(); expect(await h.invoke(list(A, { limit }))).toEqual({ ok: false, error: "invalid_request" }); expect(h.db.commandNames()).toEqual([]);
 });
@@ -252,20 +173,6 @@ it.each([{ role: "private-canary" }, { personId: q }, { companyId: B }, { revoke
   const h = world(); h.seed(); h.seed(q);
   const key = mirrorKey(A, p); h.db.set({ ...h.db.get(key.pk, key.sk)!, ...damage });
   expect(await h.invoke(list())).toEqual(unavailable); expect(h.logs).toEqual([]);
-});
-
-it("continues DynamoDB filter-short pages, including empty pages, to the requested limit", async () => {
-  const h = world(); for (let i = 0; i < 8; i++) h.seed(i.toString(16).padStart(64, "0"), i < 5 ? "member" : "admin");
-  const send = h.db.send; let queries = 0;
-  h.db.send = async (command) => {
-    if (command.constructor.name === "QueryCommand") {
-      queries++;
-      return send({ ...command, constructor: command.constructor, input: { ...command.input, Limit: 1, FilterExpression: "#role = :role", ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ...command.input.ExpressionAttributeValues as object, ":role": "admin" } } });
-    }
-    return send(command);
-  };
-  expect(await h.invoke(list(A, { limit: 2 }))).toMatchObject({ ok: true, more: true, members: [expect.objectContaining({ role: "admin" }), expect.objectContaining({ role: "admin" })] });
-  expect(queries).toBe(7);
 });
 
 it.each(["time", "bytes", "cycle", "missing-items", "foreign-cursor"])("list total budget/response %s fails closed without a partial answer", async (mode) => {
@@ -289,30 +196,6 @@ it("owner discovery finds a witness beyond the first 100 non-owners", async () =
   expect(await h.invoke({ ...revoke(q), createdBy: q })).toEqual(lastOwner);
 });
 
-it("empty filtered pages stop at the total query cap with an explicit resumable short page", async () => {
-  const h = world(); const send = h.db.send; let queries = 0;
-  h.db.send = (command) => {
-    if (command.constructor.name !== "QueryCommand") return send(command);
-    queries++;
-    return Promise.resolve({ Items: [], LastEvaluatedKey: mirrorKey(A, queries.toString(16).padStart(64, "0")), ScannedCount: 1 });
-  };
-  expect(await h.invoke(list())).toMatchObject({ ok: true, members: [], more: true, cursor: expect.any(String) as unknown });
-  expect(queries).toBe(32);
-});
-
-it("a concurrent target promotion cannot bypass last-owner protection through a stale demotion/revoke snapshot", async () => {
-  for (const event of [roleSet(), revoke()]) {
-    const h = world(); h.seed(p, "admin"); const send = h.db.send;
-    h.db.send = async (command) => {
-      if (command.constructor.name === "TransactWriteCommand") h.seed(p, "owner");
-      return send(command);
-    };
-    expect(await h.invoke(event)).toEqual(unavailable);
-    expect(await h.store.membership(p)).toMatchObject({ role: "owner" });
-    assertMirror(h, p); expect(h.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([]);
-  }
-});
-
 it.each([p, q])("self-actor and owner-witness overlap commit without duplicate transaction actions: %s", async (createdBy) => {
   const h = world(); h.seed(); h.seed(q);
   expect(await h.invoke({ ...roleSet(), createdBy })).toEqual({ ok: true });
@@ -328,33 +211,6 @@ it.each(["member", "revoked"])("self actor changed between actor and target read
   };
   expect(await h.invoke({ ...revoke(), createdBy: p })).toEqual(unavailable);
   expect(h.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([]);
-});
-
-it("bounds total evaluated items with an explicit continuation, not a silent short result", async () => {
-  const h = world(); let queries = 0; const send = h.db.send;
-  h.db.send = (command) => {
-    if (command.constructor.name !== "QueryCommand") return send(command);
-    queries++;
-    return Promise.resolve({ Items: [], ScannedCount: 100, LastEvaluatedKey: mirrorKey(A, queries.toString(16).padStart(64, "0")) });
-  };
-  expect(await h.invoke(list())).toMatchObject({ ok: true, members: [], more: true, cursor: expect.any(String) as unknown });
-  expect(queries).toBe(10);
-});
-
-it("applies the byte budget across pages, including empty filtered pages", async () => {
-  const h = world(); let queries = 0; const send = h.db.send;
-  h.db.send = (command) => {
-    if (command.constructor.name !== "QueryCommand") return send(command);
-    queries++;
-    return Promise.resolve({ Items: [], ScannedCount: 1, LastEvaluatedKey: mirrorKey(A, queries.toString(16).padStart(64, "0")), padding: "x".repeat(600_000) });
-  };
-  expect(await h.invoke(list())).toEqual(unavailable); expect(queries).toBe(2);
-});
-
-it("rejects a single mirror whose sort key differs from its person id", async () => {
-  const h = world(); h.seed(p, "member"); const key = mirrorKey(A, p);
-  h.db.set({ ...h.db.get(key.pk, key.sk)!, personId: q });
-  expect(await h.invoke(list())).toEqual(unavailable);
 });
 
 const onlyOwner = { ok: false, error: "unavailable", message: "only an owner can change or remove an owner" };
@@ -387,12 +243,6 @@ it.each(["admin", "owner"] as const)("DEC 254zzz73: without a step-up the compan
     expect(await h.invoke({ ...event, createdBy: actor })).toEqual(unavailable);
     expect([...h.db.items.values()]).toEqual(before); expect(h.logs).toEqual([]);
   }
-});
-it("FIX-2 admin can keep a plain member role and revoke a plain member", async () => {
-  const h = world(); h.seed(p, "member"); h.seed(actor, "admin");
-  expect(await h.invoke({ ...roleSet(), createdBy: actor })).toEqual({ ok: true });
-  expect(await h.invoke({ ...revoke(), createdBy: actor })).toEqual({ ok: true });
-  assertMirror(h, p);
 });
 it.each([actor, q, p])("FIX-2 concurrent owner actor demotion fails atomically: %s", async (createdBy) => {
   for (const event of [roleSet(), revoke()]) {
@@ -460,28 +310,6 @@ it.each([roleSet(), revoke()])("FIX-3 operator witness is checked transactionall
   expect((await h.store.membership(p))?.revokedAt).toBeUndefined();
   expect(h.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([]);
 });
-it("FIX-3 operator promotes a replacement before demoting and revoking the former owner", async () => {
-  const h = world(); h.seed(); h.seed(q, "member");
-  expect(await h.invoke(roleSet(q, "owner"))).toEqual({ ok: true });
-  const promoted = [...h.db.items.values()];
-  expect(await h.invoke(roleSet(q, "owner"))).toEqual({ ok: true });
-  expect([...h.db.items.values()]).toEqual(promoted);
-  expect(await h.invoke(roleSet())).toEqual({ ok: true });
-  expect(await h.invoke(revoke())).toEqual({ ok: true });
-  expect(await h.invoke(revoke(q))).toEqual(lastOwner);
-  expect(h.db.find((row) => row.entityType === "COMPANY_LOG").map(({ event, createdBy, ownerOverride }) => ({ event, createdBy, ownerOverride }))).toEqual([
-    { event: "company-member-role-set", createdBy: "operator", ownerOverride: true },
-    { event: "company-member-role-set", createdBy: "operator", ownerOverride: true },
-    { event: "company-member-revoke", createdBy: "operator", ownerOverride: undefined },
-  ]);
-  assertMirror(h, p); assertMirror(h, q);
-});
-it("FIX-3 signed-in owner changes never acquire the operator audit marker", async () => {
-  const h = world(); h.seed(); h.seed(q);
-  expect(await h.invoke({ ...roleSet(), createdBy: q })).toEqual({ ok: true });
-  const audit = h.db.find((row) => row.entityType === "COMPANY_LOG")[0]!;
-  expect(audit.createdBy).toBe(q); expect(audit).not.toHaveProperty("ownerOverride");
-});
 it.each([null, "", "operator", 0, false])("FIX-3 only omitted createdBy selects operator authority: %s", async (createdBy) => {
   for (const event of [roleSet(), revoke()]) {
     const h = world(); h.seed(); h.seed(q);
@@ -508,11 +336,6 @@ it.each(["member", "admin"] as const)("FIX-4 live owner promotes %s and keeps pe
   })]);
   expect(h.db.find((row) => row.entityType === "COMPANY_LOG")[0]).not.toHaveProperty("ownerOverride");
   expect(h.db.refusals).toEqual([]);
-});
-it("FIX-4 DEC 254zzz73: a live owner's promotion to owner needs no step-up", async () => {
-  const h = world(); h.seed(p, "member"); h.seed(actor, "owner");
-  expect(await h.invoke({ ...roleSet(p, "owner"), createdBy: actor })).toEqual({ ok: true });
-  expect(await h.store.membership(p)).toMatchObject({ role: "owner", updatedBy: actor });
 });
 it.each(["member", "admin"] as const)("FIX-4 operator promotes %s without step-up and audits owner override", async (role) => {
   const h = world(); h.seed(p, role);

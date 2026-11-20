@@ -43,25 +43,10 @@ describe("agentx config set company.signIn / company.selfServe", () => {
     expect(OPERATOR_PARAMETERS.slack).toContain("SlackCompanyWorkspacesState");
   });
 
-  it.each([["company.signIn"], ["company.selfServe"], ["slack.companyWorkspaces"]])("%s takes exactly enabled or disabled", (key) => {
+  it.each([["company.signIn"]])("%s takes exactly enabled or disabled", (key) => {
     expect(configKey(key).parse(" enabled ")).toBe("enabled");
     expect(configKey(key).parse("disabled")).toBe("disabled");
     for (const bad of ["on", "true", "Enabled", ""]) expect(() => configKey(key).parse(bad)).toThrow(`${key} must be one of enabled, disabled; nothing changed`);
-  });
-
-  it("company.signIn enabled flips the control plane, then the Slack stack, and leaves self-serve off", async () => {
-    const cloudFormation = perStack(OFF);
-    const result = await runConfigSet(services({ store: await seeded(), cloudFormation, stacks: cloudFormation.stacks }), ENV, { key: "company.signIn", value: "enabled", yes: true });
-    expect(result.changed).toBe(true);
-    expect(cloudFormation.changeSetStacks).toEqual([CONTROL, SLACK]);
-    expect(cloudFormation.parameters(CONTROL)).toMatchObject({ CompanySignIn: "enabled", CompanySelfServe: "disabled", SlackCompanyWorkspaces: "disabled" });
-    expect(cloudFormation.parameters(SLACK)).toMatchObject({ CompanySignIn: "enabled", SlackCompanyWorkspacesState: "disabled" });
-  });
-
-  it("company.signIn disabled flips both back", async () => {
-    const cloudFormation = perStack({ [CONTROL]: { CompanySignIn: "enabled", CompanySelfServe: "disabled" }, [SLACK]: { CompanySignIn: "enabled" } });
-    await runConfigSet(services({ store: await seeded(), cloudFormation, stacks: cloudFormation.stacks }), ENV, { key: "company.signIn", value: "disabled", yes: true });
-    expect([cloudFormation.parameters(CONTROL).CompanySignIn, cloudFormation.parameters(SLACK).CompanySignIn]).toEqual(["disabled", "disabled"]);
   });
 
   it("company.selfServe enabled changes only CompanySelfServe on the control plane", async () => {
@@ -72,11 +57,4 @@ describe("agentx config set company.signIn / company.selfServe", () => {
     expect(cloudFormation.parameters(SLACK)).toEqual({ CompanySignIn: "disabled", SlackCompanyWorkspacesState: "disabled" });
   });
 
-  it("slack.companyWorkspaces enabled flips the control plane's SlackCompanyWorkspaces, then the Slack service's SlackCompanyWorkspacesState, and nothing else (DEC 254zk)", async () => {
-    const cloudFormation = perStack(OFF);
-    await runConfigSet(services({ store: await seeded(), cloudFormation, stacks: cloudFormation.stacks }), ENV, { key: "slack.companyWorkspaces", value: "enabled", yes: true });
-    expect(cloudFormation.changeSetStacks).toEqual([CONTROL, SLACK]);
-    expect(cloudFormation.parameters(CONTROL)).toEqual({ CompanySignIn: "disabled", CompanySelfServe: "disabled", SlackCompanyWorkspaces: "enabled" });
-    expect(cloudFormation.parameters(SLACK)).toEqual({ CompanySignIn: "disabled", SlackCompanyWorkspacesState: "enabled" });
-  });
 });

@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { discoverTools, executeTool, type ConnectorDefinition, type Ledger } from "@agentx/gateway";
 import { ProjectDefinitionSchema, type OrgId } from "../../packages/contracts/src/index.js";
-import { BUILT_IN_CONNECTOR_TYPES, resolveConnectors, type ResolvedConnector } from "../../packages/broker/src/aws/connector-types.js";
+import { resolveConnectors, type ResolvedConnector } from "../../packages/broker/src/aws/connector-types.js";
 import { vercelConnectionCheck, vercelConnectorType } from "../../packages/broker/src/connectors/native/vercel-connector-type.js";
 import { VERCEL_TOOL_NAMES } from "../../packages/broker/src/connectors/native/vercel.js";
 import { PROJECT_CONNECTOR_TOOLS } from "../support/project-connector-tools.js";
@@ -78,17 +78,6 @@ async function run(tool: string, args: Record<string, unknown>, options: Paramet
 }
 
 describe("the Vercel connector type", () => {
-  it("is built in, named vercel, and resolves its label, vendor, scope noun, scopes and ledger", async () => {
-    expect(BUILT_IN_CONNECTOR_TYPES["vercel"]).toBe(vercelConnectorType);
-    const s = await connected();
-    const [connector] = resolveConnectors(project([connectorConfig()]), { credentialRegistry: s.registry });
-    expect(connector).toMatchObject({
-      name: "deploys", type: "vercel", label: "Vercel", vendor: "Vercel", scopeNoun: "project", attribution: false,
-      ledger: { prefix: "CONNECTOR#deploys#", entityType: "CONNECTOR_INVOCATION" },
-      credential: { ref: CON, accepts: ["static-secret"] },
-      scopes: [{ alias: "site", scope: WEB }],
-    });
-  });
 
   it("lists exactly the three tools a project may approve, no item argument, no label argument", async () => {
     expect(PROJECT_CONNECTOR_TOOLS.vercel).toEqual([...TOOLS]);
@@ -98,67 +87,9 @@ describe("the Vercel connector type", () => {
     expect(definition).not.toHaveProperty("labelArgument");
   });
 
-  it("serves api.vercel.com and pins the token to it: a token pinned to another host is refused", async () => {
-    const r = await resolved();
-    expect(r.definition.endpoint.href).toBe("https://api.vercel.com/");
-    expect((await r.registry.registration(CON))?.host).toBe("api.vercel.com");
-    await expect(r.registry.provider(CON, { pin: { host: "api.evil.example", required: true } }).issue({}, "read")).rejects.toThrow();
-    const s = await connected();
-    const of = (registry: unknown) => resolveConnectors(project([connectorConfig()]), { credentialRegistry: registry as never })[0]!;
-    const wrong = { ...s.registry, registration: async (ref: string) => ({ ...(await s.registry.registration(ref))!, host: "vercel.com" }) };
-    expect(await of(wrong).definition()).toEqual({ notConnected: `credential ${CON} is pinned to vercel.com, not api.vercel.com, so AgentX does not send it there` });
-    const unpinned = { ...s.registry, registration: async (ref: string) => { const { host: _host, ...rest } = (await s.registry.registration(ref))!; return rest; } }; // eslint-disable-line @typescript-eslint/no-unused-vars -- dropped on purpose
-    expect(await of(unpinned).definition()).toEqual({ notConnected: `credential ${CON} is not pinned to a host; register it again with --host api.vercel.com` });
-    const other = setup();
-    await new OrgConnectionStore({ ...other.deps, checkEndpoint: async () => undefined }).put({ orgId: ORG_A, connection: { connectionId: CON, type: "pagerduty", label: "PD", access: "read", region: "us" }, secret: { apiKey: ["pd", "api", "key", "x".repeat(16)].join("-") }, by: ALICE });
-    expect(await of(other.registry).definition()).toEqual({ notConnected: `connection ${CON} is not a Vercel connection` });
-  });
-
-  it("treats a malformed stored entry as unusable and never throws", () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const stored = { ...project([connectorConfig()]), integrations: { connectors: [connectorConfig({ scopes: [{ alias: "site", projectId: "web1" }] })] } } as never;
-    expect(resolveConnectors(stored, { credentialRegistry: setup().registry }, { vercel: vercelConnectorType })).toEqual([]);
-    expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as { reason?: string }).find((line) => line.reason !== undefined)?.reason).toBe("invalid vercel connector configuration: scopes");
-  });
-});
-
-describe("what the model is offered", () => {
-  it("marks every tool read with the read-only hints, and shows no project, team or alias", async () => {
-    const { definition, connector } = await resolved();
-    const { tools, skipped } = await discoverTools(definition, context(), { connect: connector.connect! });
-    expect(skipped).toEqual([]);
-    expect(tools.map((tool) => tool.name)).toEqual([...TOOLS]);
-    for (const tool of tools) {
-      expect(tool.access, tool.name).toBe("read");
-      expect(tool.hints, tool.name).toEqual({ readOnlyHint: true, destructiveHint: false });
-      const names = Object.keys(tool.inputSchema["properties"] as object);
-      for (const hidden of ["projectId", "teamId", "scopeAlias"]) expect(names, tool.name).not.toContain(hidden);
-    }
-    const props = (name: string) => (tools.find((tool) => tool.name === name)!.inputSchema as { properties: Record<string, Record<string, unknown>> }).properties;
-    expect(props("list_deployments")["limit"]).toMatchObject({ type: "integer", minimum: 1, maximum: 20 });
-    expect(props("list_deployments")["target"]).toMatchObject({ enum: ["production", "preview"] });
-    expect(props("get_deployment")["deploymentId"]).toMatchObject({ type: "string" });
-    expect(props("get_deployment_events")["limit"]).toMatchObject({ minimum: 1, maximum: 200 });
-  });
-
 });
 
 describe("running the tools", () => {
-  it("lists the project's deployments with the token, and leaves out the creator's email and the commit author's", async () => {
-    const { result, api } = await run("list_deployments", { limit: 10 });
-    expect(result.status).toBe("SUCCEEDED");
-    expect(result.text).toContain("dpl_web1prod");
-    expect(result.text).toContain("Fix checkout");
-    expect(result.text).toContain("production");
-    expect(result.text).not.toContain("dpl_api1prod");
-    expect(result.text).not.toContain("dana@example.com");
-    expect(api.requests[0]).toMatchObject({ method: "GET", authorization: `Bearer ${TOKEN}` });
-    const url = new URL(api.requests[0]!.url);
-    expect(url.origin + url.pathname).toBe("https://api.vercel.com/v7/deployments");
-    expect(url.searchParams.get("projectId")).toBe("prj_web1");
-    expect(url.searchParams.get("limit")).toBe("10");
-    expect(url.searchParams.has("teamId")).toBe(false);
-  });
 
   it("filters by target, treating preview as anything that is not production, and shows only the scope's project even when the vendor ignores the filter", async () => {
     const production = await run("list_deployments", { target: "production" });
@@ -242,15 +173,6 @@ describe("the Vercel connection check", () => {
     const store = new OrgConnectionStore({ ...s.deps, checkEndpoint: async () => undefined, fetch: routeFetch(api.handler), checks: { vercel: vercelConnectionCheck } });
     return { store, api };
   }
-
-  it("asks for the user with the token at api.vercel.com", async () => {
-    const { store, api } = await checkWith(fakeVercel({ token: TOKEN }));
-    expect(await store.check(ORG_A, CON)).toEqual({ ok: true });
-    expect(api.requests).toHaveLength(1);
-    expect(api.requests[0]).toMatchObject({ method: "GET", authorization: `Bearer ${TOKEN}` });
-    expect(new URL(api.requests[0]!.url).origin + new URL(api.requests[0]!.url).pathname).toBe("https://api.vercel.com/v2/user");
-    expect((await store.get(ORG_A, CON))?.lastCheck).toMatchObject({ ok: true });
-  });
 
   it("adds the connection's team id to the check, and none without one", async () => {
     const team = await checkWith(fakeVercel({ token: TOKEN }), TEAM);

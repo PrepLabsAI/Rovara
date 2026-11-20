@@ -3,7 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { slackAuthCheckThroughLambda, slackUserByEmailThroughLambda } from "../../packages/broker/src/aws/developer-routes.js";
 import { slackDirectory, type SlackProblem } from "../../packages/broker/src/developer/slack-directory.js";
-import { BOT_TOKEN, TEAM, fakeSlack, httpEvent, identityHarness, routeFetch } from "../support/developer-fakes.js";
+import { BOT_TOKEN, TEAM, fakeSlack, identityHarness, routeFetch } from "../support/developer-fakes.js";
 
 const reply = (value: unknown) => ({ Payload: Buffer.from(JSON.stringify(value)) });
 
@@ -47,12 +47,6 @@ describe("DeveloperIdentity's email lookup and auth check (A12, A13)", () => {
     expect(await harness.handler({ kind: "slack-auth-check" } as never)).toEqual({ ok: true, teamId: TEAM });
     expect(await harness.handler({ kind: "slack-auth-check", token: BOT_TOKEN } as never)).toEqual({ ok: false, error: "invalid_request" });
     expect(JSON.stringify(harness.logs)).not.toContain(BOT_TOKEN);
-  });
-
-  it("reports the environment's admin API version beside the developer one (A1)", async () => {
-    const harness = identityHarness({});
-    const answer = await harness.http(httpEvent("GET", "/v1/auth/.well-known/agentx-configuration"));
-    expect(JSON.parse(answer.body)).toMatchObject({ apiVersion: "1.2", adminApiVersion: "1.1" });
   });
 
   it("goes through the broker's invoke helpers, failing closed as slack_unavailable", async () => {

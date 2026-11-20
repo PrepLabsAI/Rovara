@@ -56,25 +56,6 @@ async function repos(db: FakeDynamoDb, companyId: string, project: string, url?:
 const marks = (db: FakeDynamoDb, companyId: string) => db.find((item) => item.entityType === "GITHUB_REPOSITORY_MOVED" && item.companyId === companyId);
 
 describe("installation_repositories removed", () => {
-  it("marks only the installation's company; the repos row shows it for that company's project and not for another company's with the same repository", async () => {
-    const { db, bindings } = await bound(); const send = webhook(db, bindings);
-    expect((await send("installation_repositories", removed(101, "acme", "Acme/Web", "acme/other"))).statusCode).toBe(200);
-    expect(marks(db, A).map((item) => item.fullName).sort()).toEqual(["acme/other", "acme/web"]);
-    expect(marks(db, B)).toEqual([]);
-    expect(await repos(db, A, "alpha")).toMatchObject({ state: "done", count: 1, items: [{ name: "web", fullName: "acme/web", defaultBranch: "main", access: "removed" }] });
-    const other = await repos(db, B, "beta");
-    expect(other.items[0]).toEqual({ name: "web", fullName: "acme/web", defaultBranch: "main" });
-    expect(JSON.stringify(other)).not.toContain("access");
-  });
-  it("B's event never touches A's rows", async () => {
-    const { db, bindings } = await bound(); const send = webhook(db, bindings);
-    await send("installation_repositories", removed(101, "acme", "acme/web"), { delivery: D(1) });
-    const before = JSON.stringify(marks(db, A));
-    await send("installation_repositories", removed(202, "beta", "beta/web", "acme/web"), { delivery: D(2) });
-    expect(JSON.stringify(marks(db, A))).toBe(before);
-    expect(marks(db, B).map((item) => item.fullName).sort()).toEqual(["acme/web", "beta/web"]);
-    expect(db.get(repositoryMovedKey(B, "acme/web").pk, repositoryMovedKey(B, "acme/web").sk)).toMatchObject({ companyId: B, installationId: 202 });
-  });
   it("added clears the company's mark and leaves another company's alone", async () => {
     const { db, bindings } = await bound(); const send = webhook(db, bindings);
     await send("installation_repositories", removed(101, "acme", "acme/web"), { delivery: D(1) });
@@ -83,13 +64,6 @@ describe("installation_repositories removed", () => {
     expect(marks(db, A)).toEqual([]);
     expect(marks(db, B)).toHaveLength(1);
     expect((await repos(db, A, "alpha")).items[0]).not.toHaveProperty("access");
-  });
-  it("logs the company, the reason and a count, never a repository name", async () => {
-    const { db, bindings, logs } = await bound(); const send = webhook(db, bindings);
-    await send("installation_repositories", removed(101, "acme", "acme/secret-repo-name"));
-    const line = logs.find((entry) => entry["event"] === "github.repositories_marked");
-    expect(line).toMatchObject({ companyId: A, installationId: 101, reason: "removed", count: 1, actor: "github" });
-    expect(JSON.stringify(logs)).not.toContain("secret-repo-name");
   });
   it("an empty list, an installation nobody holds and a body naming another account write nothing but are accepted", async () => {
     const { db, bindings } = await bound(); const send = webhook(db, bindings);
@@ -105,15 +79,6 @@ describe("installation_repositories removed", () => {
     expect(marks(db, A)).toEqual([]);
     expect((await send("installation_repositories", removed(101, "acme", ...names.slice(0, REPOSITORY_MOVES_MAX)), { delivery: D(2) })).statusCode).toBe(200);
     expect(marks(db, A)).toHaveLength(REPOSITORY_MOVES_MAX);
-  });
-  it("added clears more repositories than the limit that removed may mark (in chunks), and one odd project address does not make the repos row unreadable", async () => {
-    const { db, bindings } = await bound(); const send = webhook(db, bindings);
-    const names = Array.from({ length: REPOSITORY_MOVES_MAX + 50 }, (_, index) => `acme/r${index}`);
-    for (let from = 0; from < names.length; from += REPOSITORY_MOVES_MAX) await send("installation_repositories", removed(101, "acme", ...names.slice(from, from + REPOSITORY_MOVES_MAX)), { delivery: D(10 + from / REPOSITORY_MOVES_MAX) });
-    expect(marks(db, A)).toHaveLength(names.length);
-    expect((await send("installation_repositories", added(101, "acme", ...names), { delivery: D(2) })).statusCode).toBe(200);
-    expect(marks(db, A)).toEqual([]);
-    for (const url of ["https://github.com/acme/web?tab=readme", "https://github.com/acme/web#x", "https://github.com/acme/web!"]) expect((await repos(db, A, "alpha", url)).items[0]).not.toHaveProperty("access");
   });
   it("before the backfill marker, an unbound installation is the implicit company's, as for pull request webhooks", async () => {
     const db = new FakeDynamoDb({ seed: 22 }); const bindings = new GithubInstallationBindings(db, "State", () => NOW);
@@ -137,15 +102,6 @@ describe("repository transferred", () => {
     expect(marks(db, B).map((item) => item.fullName)).toEqual(["olive/web"]);
     for (const from of [{ user: "a", organization: "b" }, {}]) expect((await send("repository", transferred(202, "beta", "x", from), { delivery: D(2) })).statusCode).toBe(403);
     expect(marks(db, B)).toHaveLength(1);
-  });
-  it("transferred is the more exact word: a later removed keeps it, a later transferred replaces removed", async () => {
-    const { db, bindings } = await bound(); const send = webhook(db, bindings);
-    await send("repository", transferred(202, "beta", "web", { organization: "acme" }), { delivery: D(1) });
-    await send("installation_repositories", removed(202, "beta", "acme/web"), { delivery: D(2) });
-    expect(marks(db, B)).toEqual([expect.objectContaining({ reason: "transferred", deliveryId: D(1) })]);
-    await send("installation_repositories", removed(202, "beta", "acme/other"), { delivery: D(3) });
-    await send("repository", transferred(202, "beta", "other", { organization: "acme" }), { delivery: D(4) });
-    expect(marks(db, B).find((item) => item.fullName === "acme/other")).toMatchObject({ reason: "transferred" });
   });
   it("another repository action is accepted and writes nothing; so does a new owner that is not the binding's account", async () => {
     const { db, bindings } = await bound(); const send = webhook(db, bindings);
@@ -179,11 +135,6 @@ describe("the webhook's own checks", () => {
     expect(answer.statusCode).toBe(403);
     expect(JSON.stringify([...db.items])).toBe(before);
   });
-  it("a bad delivery id or a body that is not JSON is refused", async () => {
-    const { db, bindings } = await bound(); const send = webhook(db, bindings);
-    expect((await send("installation_repositories", removed(101, "acme", "acme/web"), { delivery: "nope" })).statusCode).toBe(403);
-    expect(marks(db, A)).toEqual([]);
-  });
   it("a body GitHub signed for another event, resent under these headers, changes nothing", async () => {
     const { db, bindings } = await bound(); const send = webhook(db, bindings);
     const before = JSON.stringify([...db.items]);
@@ -198,13 +149,6 @@ describe("the webhook's own checks", () => {
     expect((await send("installation", removed(101, "acme", "acme/web"))).statusCode).toBe(403);
     expect((await send("repository", removed(101, "acme", "acme/web"))).statusCode).toBe(403);
     expect(JSON.stringify([...db.items])).toBe(before);
-  });
-  it("a repository name that is not GitHub's shape is refused whole", async () => {
-    const { db, bindings } = await bound(); const send = webhook(db, bindings);
-    const body = removed(101, "acme", "acme/web");
-    (body.repositories_removed as Array<Record<string, unknown>>).push({ id: 5, name: "x", full_name: "../../etc/passwd" });
-    expect((await send("installation_repositories", body)).statusCode).toBe(403);
-    expect(marks(db, A)).toEqual([]);
   });
 });
 

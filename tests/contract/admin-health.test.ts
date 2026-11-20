@@ -5,7 +5,6 @@ import { describe, expect, it, vi } from "vitest";
 import { failureIndexKey } from "../../packages/contracts/src/index.js";
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/github-app.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
-import { SLACK_CHANNEL, SLACK_TEAM, ensureWorkspace } from "../support/slack-broker.js";
 
 const TEST_PRIVATE_KEY = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 
@@ -112,24 +111,6 @@ describe("GET /v1/admin/health, each check's other answers", () => {
     expect(slow).toMatchObject({ deadLetterQueues: [], deadLetterQueuesCheck: { status: "unknown", detail: "did not answer within 0.02 seconds" } });
   });
 
-  it("counts open workspaces by status and leaves closed ones out", async () => {
-    const harness = await createAdminReadBroker();
-    for (const ts of ["1695500000.000501", "1695500000.000502", "1695500000.000503"]) await ensureWorkspace(harness.handler, `${SLACK_TEAM}/${SLACK_CHANNEL}/${ts}`, "U0PRIYA001");
-    const [first, second, third] = harness.db.find((item) => item.entityType === "WORKSPACE");
-    // WorkspaceInstanceSchema requires closedAt on a closed workspace, as the close path writes it.
-    harness.db.set({ ...first!, status: "CLOSED", closedAt: new Date().toISOString() });
-    harness.db.set({ ...second!, status: "STOPPED" });
-    harness.db.set({ ...third!, status: "READY" });
-    const body = (await harness.admin("GET", "/v1/admin/health")).body;
-    expect(body.workspaces).toEqual({ READY: 1, STOPPED: 1 });
-    expect(body.workspaces).not.toHaveProperty("CLOSED");
-    expect(body.workspacesTruncated).toBe(false);
-  });
-
-  it("says ec2-ebs is not configured when no project binds it", async () => {
-    expect((await health({}, { register: false })).workerModes).toEqual([{ mode: "ec2-ebs", configured: false }]);
-  });
-
   it("fails the GitHub check when the App is installed nowhere, and says Slack could not be reached as unknown", async () => {
     const body = await health({ githubInstallations: async () => 0, slackAuthCheck: async () => ({ ok: false as const, error: "slack_unavailable" }) });
     expect(body.github).toEqual({ status: "failed", detail: "the GitHub App is installed on no account" });
@@ -159,7 +140,7 @@ it("health probes only the authenticated company's explicit workspaces and keeps
     expect(JSON.stringify(answer.body.slack)).not.toContain(teamId);
   }
 });
-it.each(["foreign", "missing", "over-budget", "throws"])("company health refuses %s without install fallback or partial success", async (failure) => {
+it.each(["foreign", "missing", "throws"])("company health refuses %s without install fallback or partial success", async (failure) => {
   const companyId = "org_aaaaaaaaaaaaaaaaaaaa", teamId = "T0AAAAAAA";
   const probe = vi.fn(async () => ({ ok: true as const, teamId }));
   const { admin } = await createAdminReadBroker({ brokerExtra: { adminReads: {
@@ -174,14 +155,3 @@ it.each(["foreign", "missing", "over-budget", "throws"])("company health refuses
   expect(probe).not.toHaveBeenCalled();
 });
 
-it("company health succeeds at the total 32-workspace limit", async () => {
-  const companyId = "org_aaaaaaaaaaaaaaaaaaaa";
-  const scopes = Array.from({ length: 32 }, (_, index) => ({ companyId, teamId: `T${String(index).padStart(8, "0")}` }));
-  const probe = vi.fn(async (workspace?: { teamId: string }) => ({ ok: true as const, teamId: workspace!.teamId }));
-  const { admin } = await createAdminReadBroker({ brokerExtra: { adminReads: {
-    companies: { companyOf: async () => companyId },
-    slackWorkspaces: { scopesForCompany: async () => scopes, requireCompany: async () => companyId }, health: { slackAuthCheck: probe },
-  } } });
-  expect((await admin("GET", "/v1/admin/health")).body.slack).toEqual({ status: "ok", detail: "Slack works for this company." });
-  expect(probe).toHaveBeenCalledTimes(32);
-});

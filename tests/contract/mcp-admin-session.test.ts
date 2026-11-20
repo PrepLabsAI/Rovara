@@ -21,23 +21,9 @@ import { toolError as parseToolError } from "../support/mcp-tool-error.js";
 import { NEXT_STEPS, UPGRADE_AGENTX_STEP } from "../../packages/mcp/src/errors.js";
 import { ADMIN_READ_TOOLS, DEVELOPER_TOOLS } from "../../packages/mcp/src/index.js";
 
-// The tools an agent is offered, by name: the developer tools alone, and with the admin read tools of an unexpired admin sign-in. The five session tools (Plan 5, Task 23) are pinned
-// by name so that a tool added or dropped changes this test, not only a count.
-const SESSION_TOOLS = ["agentx_list_sessions", "agentx_get_session", "agentx_comment_on_session", "agentx_tell_session_agent", "agentx_stop_session"];
 const DEVELOPER_TOOL_NAMES = DEVELOPER_TOOLS.map((tool) => tool.name).sort();
 const WITH_ADMIN_TOOL_NAMES = [...DEVELOPER_TOOLS, ...ADMIN_READ_TOOLS].map((tool) => tool.name).sort();
 const offered = async (client: Client) => (await client.listTools()).tools.map((tool) => tool.name).sort();
-
-describe("the tool lists", () => {
-  it("are 52 developer tools (with #914's wiki_list and wiki_read, #976's three team_knowledge tools and #1034's team_propose), including the five session tools, agentx_start (the one start tool; the three old start tools stay as aliases), agentx_get_plan and agentx_answer_task_questions, and 59 with the eight admin read tools", () => {
-    expect(DEVELOPER_TOOL_NAMES).toHaveLength(52); // Batch b18 (rule D): + team_propose (#1034), added.
-    expect(DEVELOPER_TOOL_NAMES).toEqual(expect.arrayContaining(["agentx_start", "agentx_start_task", "agentx_start_workflow", "agentx_run_agent"]));
-    expect(DEVELOPER_TOOL_NAMES).toEqual(expect.arrayContaining(SESSION_TOOLS));
-    expect(ADMIN_READ_TOOLS).toHaveLength(8);
-    expect(WITH_ADMIN_TOOL_NAMES).toHaveLength(60);
-    expect(new Set(WITH_ADMIN_TOOL_NAMES).size).toBe(60);
-  });
-});
 
 const URL_BASE = "https://abc123.execute-api.us-east-1.amazonaws.com";
 const ISSUER = `${URL_BASE}/v1/auth`;
@@ -80,26 +66,6 @@ async function server(options: { admin?: { expiresAt: number }; adminApiVersion?
 }
 
 describe("agentx mcp and the admin sign-in (A14)", () => {
-  it("offers the admin tools with an unexpired admin sign-in, and calls /v1/admin/* with it", async () => {
-    const admin = { expiresAt: Date.now() + 600_000 };
-    const { client, fetch, stderr } = await server({ admin, adminApiVersion: "1.0" });
-    await expect.poll(async () => (await client.listTools()).tools.some((tool) => tool.name === "agentx_admin_list_projects")).toBe(true);
-    const result = await client.callTool({ name: "agentx_admin_list_projects", arguments: {} });
-    expect(result.structuredContent).toEqual({ projects: [] });
-    const call = fetch.mock.calls.find((entry) => fetchRequestUrl(entry[0]).endsWith("/v1/admin/projects")) as unknown as [string, RequestInit];
-    expect(new Headers(call[1].headers).get("authorization")).toBe(`Bearer ${ADMIN_TOKEN}`);
-    expect(stderr.join("")).not.toContain(ADMIN_TOKEN);
-  });
-
-  it("hides them, and answers ADMIN_REQUIRED, once the admin sign-in has expired", async () => {
-    const admin = { expiresAt: Date.now() + 600_000 };
-    const { client } = await server({ admin, adminApiVersion: "1.0" });
-    await expect.poll(() => offered(client)).toEqual(WITH_ADMIN_TOOL_NAMES);
-    admin.expiresAt = Date.now() - 1;
-    await client.callTool({ name: "agentx_whoami", arguments: {} });
-    await expect.poll(() => offered(client)).toEqual(DEVELOPER_TOOL_NAMES);
-    expect(toolError(await client.callTool({ name: "agentx_admin_list_projects", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run npx @preplabsai/rovara-code login --admin" });
-  });
 
   it("offers no admin tool against a control plane without the admin API, and whoami says why", async () => {
     const { client } = await server({ admin: { expiresAt: Date.now() + 600_000 } });

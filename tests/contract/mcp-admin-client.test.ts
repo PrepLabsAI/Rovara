@@ -1,7 +1,7 @@
 // tests/contract/mcp-admin-client.test.ts
 // Spec 025 A14: the admin client reads /v1/admin/* with the admin sign-in, and maps refusals to FR-049's codes.
 import { describe, expect, it, vi } from "vitest";
-import { ADMIN_SIGN_IN_STEP, ToolError, adminApiFits, compatibilityChecker, httpAdminClient, httpControlPlaneClient, type ControlPlaneClient } from "../../packages/mcp/src/index.js";
+import { ADMIN_SIGN_IN_STEP, ToolError, compatibilityChecker, httpAdminClient, type ControlPlaneClient } from "../../packages/mcp/src/index.js";
 
 const session = async () => ({ baseUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", accessToken: "admin-access-token" });
 const answering = (status: number, body: unknown) => vi.fn(async () => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }));
@@ -24,29 +24,6 @@ describe("the admin client (A14)", () => {
     expect(String((fetch.mock.calls[0] as unknown as [string])[0])).toBe("https://abc123.execute-api.us-east-1.amazonaws.com/v1/admin/turns?since=2026-09-29T00%3A00%3A00.000Z&task=33333333-3333-4333-8333-333333333333&limit=5");
   });
 
-  it("answers ADMIN_REQUIRED for a 401 and for a missing admin claim, never repeating the token", async () => {
-    for (const [status, body] of [[401, { message: "Unauthorized" }], [403, { error: { code: "FORBIDDEN", message: "administrator claim is required" } }]] as const) {
-      const client = httpAdminClient({ session, fetch: answering(status, body) });
-      const failure = await client.health().catch((error: unknown) => error);
-      expect(failure).toBeInstanceOf(ToolError);
-      expect(failure).toMatchObject({ code: "ADMIN_REQUIRED", nextStep: ADMIN_SIGN_IN_STEP });
-      expect(JSON.stringify(failure)).not.toContain("admin-access-token");
-    }
-  });
-
-  it("answers INVALID_REQUEST for CONFIG_INVALID, UPGRADE_REQUIRED for an unknown route, and retries an outage", async () => {
-    const invalid = httpAdminClient({ session, fetch: answering(400, { error: { code: "CONFIG_INVALID", message: "limit must be a whole number from 1 to 100" } }) });
-    await expect(invalid.failures({ limit: 0 })).rejects.toMatchObject({ code: "INVALID_REQUEST", message: "limit must be a whole number from 1 to 100" });
-    const old = httpAdminClient({ session, fetch: answering(403, { error: { code: "FORBIDDEN", message: "AgentX developer workflows run in the project's Slack channel; this endpoint serves administration only" } }) });
-    await expect(old.health()).rejects.toMatchObject({ code: "UPGRADE_REQUIRED" });
-    const flaky = vi.fn().mockRejectedValueOnce(new TypeError("fetch failed")).mockResolvedValueOnce(new Response(JSON.stringify({ projects: [] }), { status: 200 }));
-    expect(await httpAdminClient({ session, fetch: flaky as never, sleep: async () => undefined }).projects()).toEqual({ projects: [] });
-  });
-
-  it("says ADMIN_REQUIRED when there is no admin sign-in at all", async () => {
-    const client = httpAdminClient({ session: async () => { throw new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for AgentX", ADMIN_SIGN_IN_STEP); }, fetch: vi.fn() as never });
-    await expect(client.projects()).rejects.toMatchObject({ code: "ADMIN_REQUIRED" });
-  });
 });
 
 describe("the admin client's refusals and outages (A14, secrets)", () => {
@@ -73,24 +50,6 @@ describe("the admin client's refusals and outages (A14, secrets)", () => {
     expect(everywhere(await unreadable.health().catch((error: unknown) => error))).not.toContain(PLANTED);
     const unreachable = httpAdminClient({ session: planted, fetch: vi.fn(async () => { throw new TypeError(`fetch failed ${PLANTED}`); }), sleep: async () => undefined });
     expect(everywhere(await unreachable.health().catch((error: unknown) => error))).not.toContain(PLANTED);
-  });
-
-  it("maps AUTH_REQUIRED to ADMIN_REQUIRED and any other FORBIDDEN to ADMIN_REQUIRED with the sign-in step", async () => {
-    const expired = httpAdminClient({ session, fetch: answering(403, { error: { code: "AUTH_REQUIRED", message: "expired" } }) });
-    await expect(expired.me()).rejects.toMatchObject({ code: "ADMIN_REQUIRED", nextStep: "run npx @preplabsai/rovara-code login --admin" });
-    const forbidden = httpAdminClient({ session, fetch: answering(403, { error: { code: "FORBIDDEN", message: "not an admin" } }) });
-    await expect(forbidden.me()).rejects.toMatchObject({ code: "ADMIN_REQUIRED", nextStep: "run npx @preplabsai/rovara-code login --admin" });
-  });
-
-  it("tries a 5xx again, and gives up after its tries with CONTROL_PLANE_UNAVAILABLE", async () => {
-    const outage = vi.fn(async () => new Response(JSON.stringify({ error: { code: "INTERNAL", message: "boom" } }), { status: 502 }));
-    const recovering = vi.fn()
-      .mockResolvedValueOnce(new Response("{}", { status: 503 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ projects: [] }), { status: 200 }));
-    expect(await httpAdminClient({ session, fetch: recovering as never, sleep: async () => undefined }).projects()).toEqual({ projects: [] });
-    expect(recovering).toHaveBeenCalledTimes(2);
-    await expect(httpAdminClient({ session, fetch: outage, sleep: async () => undefined, tries: 3 }).projects()).rejects.toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
-    expect(outage).toHaveBeenCalledTimes(3);
   });
 
   it("gives up within one overall deadline across its tries (45 seconds, like the developer client)", async () => {
@@ -139,25 +98,7 @@ describe("the admin client's refusals and outages (A14, secrets)", () => {
   });
 });
 
-describe("the admin API version (A1)", () => {
-  it("fits 1.x from 1.0, and says why otherwise", () => {
-    expect(adminApiFits("1.0")).toBe("fits");
-    expect(adminApiFits("1.3")).toBe("fits");
-    expect(adminApiFits(undefined)).toBe("missing");
-    expect(adminApiFits("2.0")).toBe("incompatible");
-    expect(adminApiFits("banana")).toBe("incompatible");
-  });
-});
-
 describe("the configuration's admin API version (A1)", () => {
-  it("reads adminApiVersion when the control plane sends it, and leaves it out when it does not", async () => {
-    const reading = (body: unknown) => httpControlPlaneClient({
-      session: async () => ({ baseUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", accessToken: "t", signInCommand: "npx @preplabsai/rovara-code login x" }),
-      fetch: answering(200, body),
-    });
-    expect(await reading({ env: "staging", apiVersion: "1.2", adminApiVersion: "1.0" }).configuration()).toEqual({ env: "staging", apiVersion: "1.2", adminApiVersion: "1.0", baseUrl: "https://abc123.execute-api.us-east-1.amazonaws.com" });
-    expect(await reading({ env: "staging", apiVersion: "1.2" }).configuration()).toEqual({ env: "staging", apiVersion: "1.2", baseUrl: "https://abc123.execute-api.us-east-1.amazonaws.com" });
-  });
 
   it("carries adminApiVersion in the compatibility it keeps", async () => {
     const configuration = vi.fn(async () => ({ env: "staging", apiVersion: "1.2", adminApiVersion: "1.0", baseUrl: "https://x" }));

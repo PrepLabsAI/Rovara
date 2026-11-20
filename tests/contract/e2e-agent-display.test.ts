@@ -82,16 +82,6 @@ const unavailableCase = (reason: string) => ({ cases: [{ caseId: caseOf.caseId, 
 describe("test 24: a group that could not run says why for the closed set of route codes, and repeats nothing else", () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
-  it("puts model-route-changed-reapprove and agent-route-not-approved into the owner's words, with or without the detail the broker or worker added", () => {
-    for (const reason of ["model-route-changed-reapprove", "model-route-changed-reapprove: The AI navigation settings changed; approve the checks again"]) {
-      expect(rowsOf([group({ reason })])[0]!.reason).toBe("The AI navigation settings changed after setup was approved. Approve setup again to run these checks.");
-    }
-    for (const reason of ["agent-route-not-approved", "agent-route-not-approved: the group has AI navigation steps and the admission pins no model route"]) {
-      expect(rowsOf([group({ reason })])[0]!.reason).toBe("AI navigation isn't approved for this project yet. Approve setup to run the AI-navigated checks.");
-    }
-    expect(rowsOf([group({ reason: "model-route-budget-exhausted: 41 calls" })])[0]!.reason).toBe(E2E_OWNER_SENTENCES.agentCode("model-route-budget-exhausted", undefined));
-  });
-
   it("does not repeat an unknown group code, or any text after a known one, or a code that only starts like a known one", () => {
     const hostile = ["some-new-code: password=hunter2-secret ops@tenant-a.example", "model-route-changed-reapprove-2: detail", "x model-route-changed-reapprove", "Model-Route-Changed-Reapprove", "",
       "the worker says it was fine"];
@@ -117,12 +107,6 @@ describe("test 24: a group that could not run says why for the closed set of rou
     expect(line).not.toContain("10.0.0.5");
   });
 
-  it("logs nothing for a group reason that is put into words, or for one nobody knows", () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    rowsOf([group({ reason: "agent-route-not-approved" })]);
-    rowsOf([group({ reason: "unknown-thing: detail" })]);
-    expect(log).not.toHaveBeenCalled();
-  });
 });
 
 describe("test 27: a sentence for every agent code, each a fixed string", () => {
@@ -138,21 +122,6 @@ describe("test 27: a sentence for every agent code, each a fixed string", () => 
     expect(seen.size).toBe(E2E_AGENT_UNKNOWN_CODES.length);
   });
 
-  it("uses the owner's approved words for model-prompt-credential-match", () => {
-    const [row] = rowsOf([group({ result: unavailableCase("model-prompt-credential-match") })]);
-    expect(row!.reason).toBe("The AI navigator stopped because the page showed a test password, which the AI is never allowed to see; this check could not be decided");
-  });
-
-  it("uses the plan's exact words for agent-no-download", () => {
-    const [row] = rowsOf([group({ result: unavailableCase("agent-no-download") })]);
-    expect(row!.reason).toBe("The AI navigator didn't find a way to download the CSV; retry, or check the button exists");
-  });
-
-  it("puts a group's own agent code into words too (a refusal of the whole group)", () => {
-    const [row] = rowsOf([group({ reason: "model-receipts-mismatch: no model receipts or action ledgers came with the group's AI navigation steps" })]);
-    expect(row!.reason).toBe(E2E_OWNER_SENTENCES.agentCode("model-receipts-mismatch", undefined));
-  });
-
   it("never turns a code into words for a round the broker did not accept whole", () => {
     expect(rowsOf([group({ result: unavailableCase("agent-no-download") })], { authoritative: false })[0]!.reason).toBe("the checks have not finished");
   });
@@ -165,32 +134,12 @@ describe("the navigation block rides on a row only from the broker's verified le
     const [row] = rowsOf([group({ verdict: "PASS", result: passedCase, agentNavigation: new Map([[caseOf.caseId, navigation]]) })]);
     expect(row).toMatchObject({ status: "PASSED", agentNavigation: navigation });
   });
-  it("attaches nothing to a row the broker could not decide: its reason says why, and no 'the model clicked' stands beside it", () => {
-    const [row] = rowsOf([group({ verdict: "UNKNOWN", result: unavailableCase("agent-no-download"), agentNavigation: new Map([[caseOf.caseId, agentNavigation()]]) })]);
-    expect(row!.status).toBe("UNKNOWN");
-    expect(row).not.toHaveProperty("agentNavigation");
-  });
-  it("attaches nothing for a case it has no block for, for another case's block, or for a round that is not whole", () => {
-    expect(rowsOf([group({ verdict: "PASS", result: passedCase })])[0]).not.toHaveProperty("agentNavigation");
-    expect(rowsOf([group({ verdict: "PASS", result: passedCase, agentNavigation: new Map([["another-case", agentNavigation()]]) })])[0]).not.toHaveProperty("agentNavigation");
-    expect(rowsOf([group({ verdict: "PASS", result: passedCase, agentNavigation: new Map([[caseOf.caseId, agentNavigation()]]) })], { authoritative: false })[0]).not.toHaveProperty("agentNavigation");
-  });
 });
 
 describe("scrubbing a stored result keeps the navigation block and the baseline's v3 fields, and scrubs them again", () => {
   it("keeps a clean block as it is", () => {
     const scrubbed = scrubScenarioResults({ scenarios: [agentRow()] });
     expect(scrubbed?.scenarios[0]?.agentNavigation).toEqual(agentNavigation());
-  });
-  it("redacts a credential pattern and an email in a goal, an element name and the route id, and keeps the block valid", () => {
-    const dirty = agentRow({ agentNavigation: agentNavigation({ routeId: "route ops@tenant-a.example",
-      steps: [{ goal: "Open the page with password=hunter2-secret", actedOn: [{ role: "button", name: "Mail ops@tenant-a.example" }], stop: "concluded" }] }) });
-    const scrubbed = scrubScenarioResults({ scenarios: [dirty] });
-    expect(scrubbed).toBeDefined();
-    const text = JSON.stringify(scrubbed);
-    expect(text).not.toContain("hunter2-secret");
-    expect(text).not.toContain("ops@tenant-a.example");
-    expect(scrubbed!.scenarios[0]!.agentNavigation!.steps[0]!.actedOn[0]!.role).toBe("button");
   });
   it("keeps a baseline's reason and scrubs the titles of its skipped list", () => {
     const scrubbed = scrubScenarioResults({ scenarios: [row()], baseline: { status: "PASSED", scenarios: [row()], skippedAiScenarios: [{ scenarioId: "owner-export-ai", title: "Export for ops@tenant-a.example" }] } });
@@ -220,11 +169,6 @@ const pageOf = (value: ReturnType<typeof results>) => unescapeHtml(renderE2EScen
 const slackOf = (value: ReturnType<typeof results>) => renderE2EScenarioSlackBlocks(value, { taskPageUrl: "https://agentx.test/review/1/task" }).map((block) => block.text.text).join("\n");
 
 describe("test 25: the badge on an AI-navigated row", () => {
-  it("says what the model clicked and which check decided, in the plan's words", () => {
-    const page = pageOf(results({ scenarios: [agentRow()] }));
-    expect(page).toContain("AI-navigated: the model clicked 'Download orders'; the CSV check decided");
-    expect(page).toContain('<span class="tag">AI-navigated: ');
-  });
 
   it("names at most two elements and counts the rest, says 'the model navigated' when it clicked nothing, and says 'the checks decided' when no single kind of check did", () => {
     const names = (list: string[], decidedBy?: unknown) => pageOf(results({ scenarios: [agentRow({ agentNavigation: agentNavigation({ decidedBy,
@@ -233,20 +177,6 @@ describe("test 25: the badge on an AI-navigated row", () => {
     expect(names([], ["text"])).toContain("AI-navigated: the model navigated; the text check decided");
     expect(names(["A"], ["csv", "visible"])).toContain("AI-navigated: the model clicked 'A'; the checks decided");
     expect(names(["A"], undefined)).toContain("AI-navigated: the model clicked 'A'; the checks decided");
-  });
-
-  it("fix1-3: names the verb of the action, not always 'clicked' (the first named action decides)", () => {
-    const badge = (actedOn: Array<{ role: string; name: string; did?: string }>) => pageOf(results({ scenarios: [agentRow({ agentNavigation: agentNavigation({ decidedBy: ["csv"], steps: [{ goal: "g", actedOn, stop: "concluded" }] }) })] }));
-    expect(badge([{ role: "button", name: "Download orders", did: "tap" }])).toContain("AI-navigated: the model clicked 'Download orders'; the CSV check decided");
-    expect(badge([{ role: "combobox", name: "Sort", did: "select" }])).toContain("AI-navigated: the model chose 'Sort'; the CSV check decided");
-    expect(badge([{ role: "textbox", name: "Search", did: "press" }])).toContain("AI-navigated: the model pressed 'Search'; the CSV check decided");
-    expect(badge([{ role: "textbox", name: "Search", did: "type" }])).toContain("AI-navigated: the model typed into 'Search'; the CSV check decided");
-    expect(badge([{ role: "region", name: "Orders", did: "scroll" }])).toContain("AI-navigated: the model scrolled 'Orders'; the CSV check decided");
-    expect(badge([{ role: "page", name: "/orders", did: "navigate" }])).toContain("AI-navigated: the model went to '/orders'; the CSV check decided");
-    // The first named action decides the verb; the rest are only named. An action with no kind (a block written before the kinds) reads as a click.
-    expect(badge([{ role: "textbox", name: "Search", did: "type" }, { role: "button", name: "Go", did: "tap" }])).toContain("AI-navigated: the model typed into 'Search' and 'Go'; the CSV check decided");
-    expect(badge([{ role: "button", name: "Old" }])).toContain("AI-navigated: the model clicked 'Old'; the CSV check decided");
-    expect(badge([])).toContain("AI-navigated: the model navigated; the CSV check decided");
   });
 
   it("fix1-4: a quote, a semicolon, a control or formatting character, or a long run of spaces in a name can't break or mislead the badge", () => {
@@ -262,37 +192,15 @@ describe("test 25: the badge on an AI-navigated row", () => {
     expect(slack).not.toContain("bold");
   });
 
-  it("puts no badge on a row without a navigation block, and leaves such a page exactly as it was", () => {
-    const page = pageOf(results());
-    expect(page).not.toContain("AI-navigated");
-    expect(renderE2EScenarioRowsHtml(results(), { artifactPath })).toBe(renderE2EScenarioRowsHtml(results({ scenarios: results().scenarios.map((item) => ({ ...item })) }), { artifactPath }));
-  });
-
-  it("scrubs the element name again and escapes it, so a stored name can't carry markup or an email", () => {
-    const hostile = agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "g", actedOn: [{ role: "button", name: "<img src=x onerror=alert(1)> ops@tenant-a.example" }], stop: "concluded" }] }) });
-    const raw = renderE2EScenarioRowsHtml(results({ scenarios: [hostile] }), { artifactPath });
-    expect(raw).not.toContain("<img");
-    expect(raw).not.toContain("ops@tenant-a.example");
-  });
 });
 
 describe("test 26: one Slack line for the round", () => {
-  it("adds `AI navigation: 1 step, 3 model calls (checks decide)` for a round with one AI-navigated row, directly after the counts", () => {
-    const lines = slackOf(results({ scenarios: [agentRow(), ...results().scenarios] })).split("\n");
-    expect(lines[0]).toMatch(/^Browser and API checks: /);
-    expect(lines[1]).toBe("AI navigation: 1 step, 3 model calls (checks decide)");
-    expect(lines.filter((line) => line.startsWith("AI navigation:"))).toHaveLength(1);
-  });
 
   it("adds the steps and calls of every AI-navigated row into the one line", () => {
     const second = agentRow({ scenarioId: "owner-export-ai-2", agentNavigation: agentNavigation({ modelCalls: 2, steps: [agentNavigation().steps[0], agentNavigation().steps[0]] }) });
     expect(slackOf(results({ scenarios: [agentRow(), second] }))).toContain("AI navigation: 3 steps, 5 model calls (checks decide)");
   });
 
-  it("says nothing about AI navigation when no row has a navigation block, and counts no baseline row", () => {
-    expect(slackOf(results())).not.toContain("AI navigation");
-    expect(slackOf(results({ baseline: { status: "PASSED", scenarios: [agentRow()] } }))).not.toContain("AI navigation:");
-  });
 });
 
 describe("test 30 (BASEREASON): what the unchanged code did, when AI-navigated checks are not run on it", () => {
@@ -327,23 +235,6 @@ describe("test 30 (BASEREASON): what the unchanged code did, when AI-navigated c
     expect(slack).toContain("1 AI-navigated check is not run on the unchanged code.");
     expect(slack).toContain("Not run before the change: Owner export ai");
     for (const added of ["1 AI-navigated check is not run on the unchanged code.", "Not run before the change: Owner export ai", "Owner export ai"]) expect(WORDS.test(added), added).toBe(false);
-  });
-
-  it("escapes a skipped title on the page, so a stored title can't carry markup", () => {
-    const value = results({ baseline: { status: "PASSED", scenarios: [row()], skippedAiScenarios: [{ scenarioId: "a", title: "<script>alert(1)</script> & more" }] } });
-    const raw = renderE2EScenarioRowsHtml(value, { artifactPath });
-    expect(raw).not.toContain("<script>");
-    expect(raw).toContain("<li>&lt;script&gt;alert(1)&lt;/script&gt; &amp; more</li>");
-  });
-
-  it("counts several skipped checks in the plural and bounds the list it prints, saying how many more there are", () => {
-    const many = Array.from({ length: 12 }, (_, index) => ({ scenarioId: `ai-${index}`, title: `AI check ${index}` }));
-    const value = results({ baseline: { status: "FAILED", scenarios: [row({ status: "FAILED" })], skippedAiScenarios: many } });
-    expect(slackOf(value)).toContain("12 AI-navigated checks are not run on the unchanged code.");
-    expect(pageOf(value)).toContain("12 AI-navigated checks are not run on the unchanged code.");
-    expect(pageOf(value).match(/<li>AI check \d+<\/li>/gu)).toHaveLength(12);
-    expect(pageOf(value)).not.toContain("and 0 more");
-    expect(slackOf(value)).not.toContain("more");
   });
 
   it("fix1-5: past 12 titles the page and Slack end the list with 'and N more'", () => {

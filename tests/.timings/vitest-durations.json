@@ -145,7 +145,6 @@
     "tests/contract/connector-contracts.test.ts": 0.007,
     "tests/contract/connector-datadog.test.ts": 0.179,
     "tests/contract/connector-grafana.test.ts": 0.355,
-    "tests/contract/connector-ledger.test.ts": 0.005,
     "tests/contract/connector-metrics.test.ts": 0.025,
     "tests/contract/connector-pagerduty.test.ts": 0.155,
     "tests/contract/connector-presentation.test.ts": 0.004,

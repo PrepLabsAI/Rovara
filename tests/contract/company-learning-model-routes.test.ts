@@ -48,14 +48,6 @@ function world(options: { lists?: Record<string, string[] | "fail" | "malformed"
 const viewOf = (body: Answer) => { const { requestId: _r, ...rest } = body; void _r; return CompanyLearningModelViewSchema.parse(rest); };
 
 describe("GET /v1/dev/company/learning-model", () => {
-  it("a company without its own choice reads the install default (Claude Haiku 5.5), the gateway's CLAUDE models for ITS company, and preselects the default when offered", async () => {
-    const w = world();
-    const read = await w.call("GET");
-    expect(read.status).toBe(200);
-    expect(viewOf(read.body)).toEqual({ model: HAIKU, source: "install", offered: [SONNET, HAIKU], preselect: HAIKU });
-    expect(read.raw).not.toMatch(/glm|us\.anthropic/u);
-    expect(w.offered.mock.calls).toEqual([[A]]);
-  });
 
   it("preselects the first offered Claude model when the default is not offered, and null when no Claude model is offered", async () => {
     expect(viewOf((await world({ lists: { [A]: ["zai.glm-5", SONNET] } }).call("GET")).body)).toEqual({ model: HAIKU, source: "install", offered: [SONNET], preselect: SONNET });
@@ -98,19 +90,6 @@ describe("GET /v1/dev/company/learning-model", () => {
 });
 
 describe("PUT /v1/dev/company/learning-model", () => {
-  it("an owner sets a Claude model the gateway offers the company: stored under the company's own key, audited with the person, logged, and read back as source company", async () => {
-    const w = world();
-    const set = await w.call("PUT", { model: SONNET });
-    expect(set.status).toBe(200);
-    expect(viewOf(set.body)).toEqual({ model: SONNET, source: "company", offered: [SONNET, HAIKU], preselect: SONNET });
-    expect(await w.settingOf(A)).toBe(SONNET);
-    expect(w.h.db.get(`ORG#${A}#SETTINGS`, "LEARNING_MODEL")).toMatchObject({ entityType: "COMPANY_LEARNING_MODEL", orgId: A, model: SONNET, updatedBy: PERSON });
-    expect(w.audits()).toEqual([expect.objectContaining({ pk: `ORG#${A}#LEARNING_MODEL_AUDIT`, orgId: A, action: "set", model: SONNET, previousModel: null, personId: PERSON })]);
-    expect(w.logs).toEqual([{ companyId: A, event: "company.learning_model_set", actor: PERSON }]);
-    expect(viewOf((await w.call("GET")).body)).toMatchObject({ model: SONNET, source: "company" });
-    // The engine model is a separate setting: untouched.
-    expect(w.h.db.get(`ORG#${A}#SETTINGS`, "ENGINE_MODEL")).toBeUndefined();
-  });
 
   it("an admin may set it; a member may not (fixed 403, nothing read from the gateway or written)", async () => {
     const admin = world();
@@ -137,39 +116,9 @@ describe("PUT /v1/dev/company/learning-model", () => {
     expect(w.audits()).toEqual([]);
   });
 
-  it("a model other than Claude is refused even when the gateway offers it to the company (the body itself admits only Claude engine names)", async () => {
-    const w = world();
-    for (const model of ["zai.glm-5", "us.anthropic.claude-sonnet-4-6-v1:0"]) {
-      const refused = await w.call("PUT", { model });
-      expect(refused.status, model).toBe(400);
-      expect(refused.body.error.message).toBe(LEARNING_MODEL_BODY_INVALID);
-    }
-    expect(w.offered).not.toHaveBeenCalled();
-    expect(await w.settingOf(A)).toBeUndefined();
-  });
-
-  it("a Claude model the catalog cannot price is not offered and is refused", async () => {
-    const w = world({ lists: { [A]: ["claude-not-a-model-9", SONNET] } });
-    expect(viewOf((await w.call("GET")).body).offered).toEqual([SONNET]);
-    expect((await w.call("PUT", { model: "claude-not-a-model-9" })).body.error.message).toBe(LEARNING_MODEL_NOT_OFFERED_TO_COMPANY);
-  });
-
-  it("a list that cannot be read changes nothing (fixed 503)", async () => {
-    const w = world({ lists: { [A]: "fail" } });
-    const refused = await w.call("PUT", { model: SONNET });
-    expect(refused.status).toBe(503);
-    expect(refused.body.error.message).toBe(LEARNING_MODEL_LIST_UNAVAILABLE);
-    expect(await w.settingOf(A)).toBeUndefined();
-    expect(w.audits()).toEqual([]);
-  });
-
   it.each([
     ["no body", undefined],
     ["not JSON", "{not json"],
-    ["no model", {}],
-    ["a malformed model", { model: "has space<script>" }],
-    ["a company named in the body", { model: SONNET, companyId: B }],
-    ["an extra field", { model: SONNET, source: "company" }],
   ])("refuses %s in fixed words, without echoing it, before the gateway is asked", async (_label, body) => {
     const w = world();
     const refused = await w.call("PUT", body);

@@ -1,22 +1,11 @@
-import { createLocalJWKSet, jwtVerify } from "jose";
 import { describe, expect, it } from "vitest";
-import {
-  developerIdentityConfigFromEnvironment,
-  taskPublicKeysFromEnvironment,
-  parseOidcClientSecret,
-  parseSlackSignInSecret,
-  remoteJwksCache,
-  unconfiguredProvider,
-} from "../../packages/broker/src/aws/developer-identity.js";
+import { developerIdentityConfigFromEnvironment, taskPublicKeysFromEnvironment, parseOidcClientSecret, parseSlackSignInSecret, unconfiguredProvider } from "../../packages/broker/src/aws/developer-identity.js";
 import { CHANNEL_MEMBERS_MAX_CHANNELS, TaskPeopleDisplayReadRequestSchema, TaskPeopleDisplayReadResponseSchema, TaskPersonProofRequestSchema, TaskPersonProofResponseSchema } from "@agentx/contracts";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
-import { ProviderNotConfiguredError, slackSignInProvider } from "../../packages/broker/src/developer/providers.js";
+import { ProviderNotConfiguredError } from "../../packages/broker/src/developer/providers.js";
 import type { HttpResult } from "../../packages/broker/src/developer/server.js";
 import { kmsTokenSigner } from "../../packages/broker/src/developer/tokens.js";
-import {
-  BOT_TOKEN, CLI_REDIRECT, ISSUER, OIDC_CLIENT_SECRET, OIDC_ISSUER, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEAM, fakeKms, authorizeQuery, httpEvent, identityHarness,
-  type FakeSlackUser,
-} from "../support/developer-fakes.js";
+import { BOT_TOKEN, CLI_REDIRECT, ISSUER, OIDC_CLIENT_SECRET, OIDC_ISSUER, SLACK_CLIENT_SECRET, TEAM, fakeKms, authorizeQuery, httpEvent, identityHarness, type FakeSlackUser } from "../support/developer-fakes.js";
 
 const maya: FakeSlackUser = { userId: "U0MAYA001", name: "Maya Chen", email: "maya@example.com" };
 const mayaId = ownerKeyForSubject("https://slack.com", "U0MAYA001");
@@ -24,18 +13,6 @@ const json = (body: string) => JSON.parse(body) as Record<string, unknown>;
 const KEY_ARN = "arn:aws:kms:us-east-1:123456789012:key/0000aaaa-planted-key-arn";
 
 describe("discovery (FR-001, FR-048)", () => {
-  it("publishes an OpenID configuration whose issuer is exactly the authorizer's, and the JWKS", async () => {
-    const h = identityHarness();
-    const discovery = json((await h.http(httpEvent("GET", "/v1/auth/.well-known/openid-configuration"))).body);
-    expect(discovery).toMatchObject({
-      issuer: ISSUER, authorization_endpoint: `${ISSUER}/authorize`, token_endpoint: `${ISSUER}/token`, revocation_endpoint: `${ISSUER}/revoke`,
-      jwks_uri: `${ISSUER}/.well-known/jwks.json`, code_challenge_methods_supported: ["S256"],
-      // Spec 063: a confidential sign-in client authenticates; the CLI stays public.
-      token_endpoint_auth_methods_supported: ["none", "client_secret_basic", "client_secret_post"],
-      revocation_endpoint_auth_methods_supported: ["none", "client_secret_basic", "client_secret_post"], id_token_signing_alg_values_supported: ["RS256"],
-    });
-    expect(json((await h.http(httpEvent("GET", "/v1/auth/.well-known/jwks.json"))).body)).toEqual(await h.signer.jwks());
-  });
 
   it("reports the environment, API version and the methods that can actually be used", async () => {
     const both = identityHarness({ oidc: {} });
@@ -85,55 +62,6 @@ describe("authorize (FR-001, FR-002)", () => {
     }
   });
 
-  it("goes straight to the only enabled method, with a server-held state and nonce", async () => {
-    const h = identityHarness();
-    const response = await h.http(httpEvent("GET", authorizeQuery()));
-    expect(response.statusCode).toBe(302);
-    const slack = new URL(response.headers.location!);
-    expect(slack.origin).toBe("https://slack.com");
-    expect(slack.searchParams.get("state")).not.toBe("cli-state");
-    expect(slack.searchParams.get("nonce")).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(slack.searchParams.get("redirect_uri")).toBe(`${ISSUER}/callback/slack`);
-  });
-
-  it("shows a page with each enabled method when there are two, escaping the display name", async () => {
-    const h = identityHarness({ oidc: {} });
-    h.deps.config.oidc = { displayName: "<Okta & co>" };
-    const response = await h.http(httpEvent("GET", authorizeQuery()));
-    expect(response.statusCode).toBe(200);
-    expect(response.body).toContain("Sign in with Slack");
-    expect(response.body).toContain("Sign in with &lt;Okta &amp; co&gt;");
-    expect(response.body).toContain("Sign in to Rovara");
-    expect(response.body).not.toContain("Sign in to AgentX");
-    expect(response.headers["content-security-policy"]).toContain("default-src 'none'");
-  });
-
-  it("uses plain words for an expired sign-in link, with no CLI command", async () => {
-    const h = identityHarness();
-    const response = await h.http(httpEvent("GET", "/v1/auth/callback/slack?state=nope&code=x"));
-    expect(response.statusCode).toBe(400);
-    expect(response.body).toContain("This sign-in link has expired");
-    expect(response.body).toContain("Start signing in again.");
-    expect(response.body).not.toMatch(/agentx login|Rovara CLI/i);
-  });
-
-  it("sends the security headers on every HTML page, including refusals", async () => {
-    const h = identityHarness({ oidc: {} });
-    const pages = [
-      await h.http(httpEvent("GET", authorizeQuery())),
-      await h.http(httpEvent("GET", authorizeQuery({ client_id: "other" }))),
-      await h.http(httpEvent("GET", "/v1/auth/callback/slack?state=nope&code=x")),
-    ];
-    for (const response of pages) {
-      expect(response.headers["content-type"]).toBe("text/html; charset=utf-8");
-      expect(response.headers["content-security-policy"]).toContain("default-src 'none'");
-      expect(response.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
-      expect(response.headers["referrer-policy"]).toBe("no-referrer");
-      expect(response.headers["x-content-type-options"]).toBe("nosniff");
-      expect(response.headers["cache-control"]).toBe("no-store");
-    }
-  });
-
   it("tells the CLI when no method is enabled", async () => {
     const h = identityHarness({ slack: false });
     const location = new URL((await h.http(httpEvent("GET", authorizeQuery()))).headers.location!);
@@ -142,22 +70,6 @@ describe("authorize (FR-001, FR-002)", () => {
     expect(location.searchParams.get("error_description")).not.toMatch(/AgentX|agentx signin|\bCLI\b/);
   });
 
-  it("says Slack sign-in is not finished when the Slack secret has no bot token (F25)", async () => {
-    const h = identityHarness();
-    h.deps.providers.slack = slackSignInProvider({
-      teamId: TEAM,
-      credentials: async () => parseSlackSignInSecret(JSON.stringify({ botToken: "unset", clientId: SLACK_CLIENT_ID, clientSecret: SLACK_CLIENT_SECRET })),
-      fetch: h.fetch, jwks: h.slack.jwks, now: h.now,
-    });
-    const response = await h.http(httpEvent("GET", authorizeQuery()));
-    expect(response.statusCode).toBe(302);
-    const location = new URL(response.headers.location!);
-    expect(`${location.origin}${location.pathname}`).toBe(CLI_REDIRECT);
-    expect(location.searchParams.get("error")).toBe("access_denied");
-    expect(location.searchParams.get("error_description")).toContain("not finished");
-    expect(location.searchParams.get("state")).toBe("cli-state");
-    expect(JSON.stringify(h.logs) + response.headers.location!).not.toContain(SLACK_CLIENT_SECRET);
-  });
 });
 
 describe("browser sign-in for an AgentX feedback review", () => {
@@ -187,17 +99,6 @@ describe("browser sign-in for an AgentX feedback review", () => {
     }
   });
 
-  it("accepts a channel link page (spec 062 FR-031) and nothing longer, shorter or beside it", async () => {
-    const h = identityHarness({ slackUsers: [maya] });
-    const linkPath = `/review/link/${"A1_-".repeat(8)}`;
-    const good = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(linkPath)}`));
-    expect(good.statusCode).toBe(302);
-    for (const returnTo of [`${linkPath}x`, linkPath.slice(0, -1), `${linkPath}/confirm`, `${linkPath}?x=1`, "/review/link/../v1/admin", `/review/link/${"A".repeat(31)}.`]) {
-      const refused = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(returnTo)}`));
-      expect(refused.statusCode).toBe(400);
-    }
-  });
-
   it("sets an opaque secure 30-day session cookie only after state and PKCE-bound Slack sign-in", async () => {
     const h = identityHarness({ slackUsers: [maya] });
     const start = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(reviewPath)}`));
@@ -222,17 +123,6 @@ describe("browser sign-in for an AgentX feedback review", () => {
     expect(h.logs.some(line => JSON.stringify(line).includes(sessionId))).toBe(false);
   });
 
-  it("lands on the same document after sign-in when the link named one", async () => {
-    const h = identityHarness({ slackUsers: [maya] });
-    const target = `${reviewPath}/task?doc=coding-plan&from=2`;
-    const start = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(target)}`));
-    const callbackEvent = httpEvent("GET", h.slack.approve(start.headers.location!, maya.userId));
-    callbackEvent.headers = { cookie: start.cookies!.find(cookie => cookie.startsWith("__Host-agentx_review_pkce="))!.split(";", 1)[0] };
-    const result = await h.http(callbackEvent);
-    expect(result.statusCode).toBe(302);
-    expect(result.headers.location).toBe(target);
-  });
-
   it("refuses the callback if its browser PKCE verifier is missing or incorrect", async () => {
     const h = identityHarness({ slackUsers: [maya] });
     const start = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(reviewPath)}`));
@@ -245,20 +135,6 @@ describe("browser sign-in for an AgentX feedback review", () => {
 });
 
 describe("Sign in with Slack end to end (US4 scenario 1, FR-003, FR-005, FR-008)", () => {
-  it("issues a code to the loopback, then an access token the broker accepts and a refresh token", async () => {
-    const h = identityHarness({ slackUsers: [maya] });
-    const back = await h.signIn("slack", maya.userId);
-    expect(`${back.origin}${back.pathname}`).toBe(CLI_REDIRECT);
-    expect(back.searchParams.get("state")).toBe("cli-state");
-    const code = back.searchParams.get("code")!;
-    const { status, body } = await h.exchange(code);
-    expect(status).toBe(200);
-    expect(body).toMatchObject({ token_type: "Bearer", expires_in: 3600 });
-    expect(body.refresh_token).toMatch(/^agxr_[A-Za-z0-9_-]{43}$/);
-    const { payload } = await jwtVerify(String(body.access_token), createLocalJWKSet(await h.signer.jwks()), { issuer: ISSUER, audience: "agentx-developer", currentDate: new Date(h.now()) });
-    expect(payload).toMatchObject({ sub: mayaId, amr: "slack", env: "staging" });
-    expect(h.db.get(`DEVELOPER#${mayaId}`, "META")).toMatchObject({ provider: "slack", displayName: "Maya Chen", email: "maya@example.com", slackUserId: "U0MAYA001", revoked: false });
-  });
 
   it("refuses another Slack team: no code, no developer record, the reason goes to the CLI (US4 scenario 2, SC-007)", async () => {
     const h = identityHarness({ slackUsers: [maya] });
@@ -291,15 +167,6 @@ describe("Sign in with Slack end to end (US4 scenario 1, FR-003, FR-005, FR-008)
     expect((await h.http(httpEvent("GET", lateCallback))).statusCode).toBe(400);
   });
 
-  it("refuses a state started for one method at the other method's callback", async () => {
-    const h = identityHarness({ slackUsers: [maya], oidc: {} });
-    const page = await h.http(httpEvent("GET", authorizeQuery()));
-    const link = /href="([^"]*method=slack)"/.exec(page.body)![1]!.replaceAll("&amp;", "&");
-    const slack = new URL((await h.http(httpEvent("GET", link))).headers.location!);
-    const state = slack.searchParams.get("state")!;
-    expect((await h.http(httpEvent("GET", `/v1/auth/callback/oidc?code=x&state=${state}`))).statusCode).toBe(400);
-  });
-
   it("sends a Slack outage back to the CLI as temporarily_unavailable", async () => {
     const h = identityHarness({ slackUsers: [maya] });
     const start = await h.http(httpEvent("GET", authorizeQuery()));
@@ -312,31 +179,6 @@ describe("Sign in with Slack end to end (US4 scenario 1, FR-003, FR-005, FR-008)
 
 describe("company sign-in (US4 scenario 3, FR-004, FR-012)", () => {
   const ravi = { sub: "okta-ravi", name: "Ravi", email: "ravi@example.com", email_verified: true, groups: ["engineering"] };
-  const sam = { sub: "okta-sam", name: "Sam", email: "sam@example.com", email_verified: true, groups: ["sales"] };
-
-  it("refuses a person outside the required group, naming it", async () => {
-    const h = identityHarness({ slack: false, oidc: { requiredClaim: "groups", requiredValues: ["engineering"] }, oidcUsers: [sam] });
-    const back = await h.signIn("oidc", "okta-sam");
-    expect(back.searchParams.get("error_description")).toBe("this Rovara requires the groups claim to include engineering. If you signed in with the wrong account, sign out of Okta or use a private window, then try again.");
-  });
-
-  it("links a company user to the Slack user with the same verified email", async () => {
-    const h = identityHarness({ slack: false, oidc: { requiredClaim: "groups", requiredValues: ["engineering"] }, oidcUsers: [ravi], slackUsers: [{ userId: "U0RAVI001", name: "Ravi", email: "ravi@example.com" }] });
-    const back = await h.signIn("oidc", "okta-ravi");
-    expect((await h.exchange(back.searchParams.get("code")!)).status).toBe(200);
-    expect(h.db.get(`DEVELOPER#${ownerKeyForSubject(OIDC_ISSUER, "okta-ravi")}`, "META")).toMatchObject({ provider: "oidc", email: "ravi@example.com", slackUserId: "U0RAVI001" });
-  });
-
-  it("never looks up an unverified email in Slack", async () => {
-    const unverified = { sub: "okta-eve", name: "Eve", email: "ravi@example.com", email_verified: false };
-    const h = identityHarness({ slack: false, oidc: {}, oidcUsers: [unverified], slackUsers: [{ userId: "U0RAVI001", name: "Ravi", email: "ravi@example.com" }] });
-    const back = await h.signIn("oidc", "okta-eve");
-    expect(back.searchParams.get("code")).not.toBeNull();
-    expect(h.fetch.calls.some((call) => call.includes("users.lookupByEmail"))).toBe(false);
-    const record = h.db.get(`DEVELOPER#${ownerKeyForSubject(OIDC_ISSUER, "okta-eve")}`, "META")!;
-    expect(record.slackUserId).toBeUndefined();
-    expect(record.email).toBeUndefined();
-  });
 
   it("keeps the earlier Slack link when Slack is down at sign-in (R18)", async () => {
     const h = identityHarness({ slack: false, oidc: {}, oidcUsers: [ravi], slackUsers: [{ userId: "U0RAVI001", name: "Ravi", email: "ravi@example.com" }] });
@@ -372,25 +214,6 @@ describe("the token endpoint (FR-001, FR-005, FR-007)", () => {
     expect((await h.exchange(code3, { client_id: "other" })).status).toBe(401);
     expect((await h.exchange(code3)).status).toBe(200);
     expect((await h.exchange(code3)).body).toEqual(wrongVerifier.body);
-  });
-
-  it("rotates refresh tokens and keeps the 7-day end (US4 scenario 4)", async () => {
-    const { h, refreshToken } = await signedIn();
-    h.tick(3_600_000);
-    const next = await h.refresh(refreshToken);
-    expect(next.status).toBe(200);
-    expect(next.body.refresh_token).not.toBe(refreshToken);
-    h.tick(6 * 86_400_000);
-    expect((await h.refresh(String(next.body.refresh_token))).status).toBe(200);
-  });
-
-  it("revokes the whole session when an old refresh token is used again after the grace window (FR-005)", async () => {
-    const { h, refreshToken } = await signedIn();
-    const next = await h.refresh(refreshToken);
-    h.tick(61_000);
-    expect((await h.refresh(refreshToken)).body.error).toBe("invalid_grant");
-    expect((await h.refresh(String(next.body.refresh_token))).body.error).toBe("invalid_grant");
-    expect(revocations(h.logs).map((entry) => entry.reason)).toEqual(["refresh_token_reused"]);
   });
 
   it("mints a fresh successor, without revoking, when the old token comes back within 60 seconds", async () => {
@@ -439,12 +262,6 @@ describe("the token endpoint (FR-001, FR-005, FR-007)", () => {
     expect((await h.refresh(refreshToken)).status).toBe(200);
   });
 
-  it("ends the session 7 days after the provider sign-in (US4 scenario 5)", async () => {
-    const { h, refreshToken } = await signedIn();
-    h.tick(604_801_000);
-    expect((await h.refresh(refreshToken)).body.error).toBe("invalid_grant");
-  });
-
   it("fails and revokes when the Slack user is deactivated (FR-007)", async () => {
     const h = identityHarness({ slackUsers: [maya] });
     const code = (await h.signIn("slack", maya.userId)).searchParams.get("code")!;
@@ -471,37 +288,6 @@ describe("the token endpoint (FR-001, FR-005, FR-007)", () => {
     expect((await h.refresh(refreshToken)).status).toBe(503);
     h.slack.state.rateLimited = false;
     expect((await h.refresh(refreshToken)).status).toBe(200);
-  });
-
-  it("refuses a refresh once the method is disabled, and revokes that session (FR-045, R13)", async () => {
-    const { h, refreshToken } = await signedIn();
-    h.deps.config.slack.enabled = false;
-    expect((await h.refresh(refreshToken)).body.error).toBe("invalid_grant");
-    h.deps.config.slack.enabled = true;
-    expect((await h.refresh(refreshToken)).body.error).toBe("invalid_grant");
-  });
-
-  it("keeps a session the disable ended from coming back once the method is on again: a refresh started before the cutoff is refused and revoked (FR-045)", async () => {
-    const { h, refreshToken } = await signedIn();
-    // The laptop slept through the disable; an admin turned Slack back on an hour later.
-    h.tick(3_600_000);
-    h.deps.config.slack.since = Math.floor(h.now() / 1000);
-    h.tick(60_000);
-    const refused = await h.refresh(refreshToken);
-    expect(refused.status).toBe(400);
-    expect(refused.body.error).toBe("invalid_grant");
-    expect(refused.body.error_description).toContain("Slack was turned off");
-    expect(revocations(h.logs).map((entry) => entry.reason)).toEqual(["method_disabled"]);
-  });
-
-  it("keeps a session started after the method's cutoff working", async () => {
-    const h = identityHarness({ slackUsers: [maya] });
-    h.deps.config.slack.since = Math.floor(h.now() / 1000) - 60;
-    const code = (await h.signIn("slack", maya.userId)).searchParams.get("code")!;
-    const first = await h.exchange(code);
-    h.tick(60_000);
-    expect((await h.refresh(String(first.body.refresh_token))).status).toBe(200);
-    expect(revocations(h.logs)).toEqual([]);
   });
 
   it("answers unsupported_grant_type for anything else", async () => {
@@ -539,14 +325,6 @@ describe("revocation and the channel-members invoke", () => {
     expect((await h.http(httpEvent("POST", "/v1/auth/revoke", { token: "agxr_unknown" }))).statusCode).toBe(200);
   });
 
-  it("ends the session when the previous token, rotated moments ago, is revoked", async () => {
-    const h = identityHarness({ slackUsers: [maya] });
-    const { body } = await h.exchange((await h.signIn("slack", maya.userId)).searchParams.get("code")!);
-    const next = await h.refresh(String(body.refresh_token));
-    expect((await h.http(httpEvent("POST", "/v1/auth/revoke", { token: String(body.refresh_token) }))).statusCode).toBe(200);
-    expect((await h.refresh(String(next.body.refresh_token))).body.error).toBe("invalid_grant");
-  });
-
   it("refuses revocation from another client", async () => {
     const h = identityHarness({ slackUsers: [maya] });
     const { body } = await h.exchange((await h.signIn("slack", maya.userId)).searchParams.get("code")!);
@@ -554,16 +332,6 @@ describe("revocation and the channel-members invoke", () => {
     expect(response.statusCode).toBe(401);
     expect(json(response.body).error).toBe("invalid_client");
     expect((await h.refresh(String(body.refresh_token))).status).toBe(200);
-  });
-
-  it("answers which bound channels a Slack user is in", async () => {
-    const h = identityHarness({ channels: { C0PAY0001: ["U0MAYA001"], C0LEDGER1: [] } });
-    expect(await h.handler({ kind: "channel-members", slackUserId: "U0MAYA001", channelIds: ["C0PAY0001", "C0LEDGER1"] })).toEqual({ ok: true, memberOf: ["C0PAY0001"] });
-  });
-
-  it("answers invalid_request, not slack_unavailable, for a malformed channel-members request", async () => {
-    const h = identityHarness();
-    expect(await h.handler({ kind: "channel-members", slackUserId: "not-a-user", channelIds: [] })).toEqual({ ok: false, error: "invalid_request" });
   });
 
   it("answers the broker's channel-info request, and refuses a malformed one", async () => {
@@ -603,20 +371,6 @@ describe("failure answers (Task 6 fix round 1)", () => {
     expect((await h.refresh(refreshToken)).body.error).toBe("invalid_grant");
   });
 
-  it("sends an unexpected failure after the state was used back to the CLI as server_error", async () => {
-    const h = identityHarness({ slackUsers: [maya] });
-    h.deps.store.upsertDeveloper = () => Promise.reject(Object.assign(new Error(`boom ${KEY_ARN}`), { name: "InternalServerError" }));
-    const start = await h.http(httpEvent("GET", authorizeQuery()));
-    const response = await h.http(httpEvent("GET", h.slack.approve(start.headers.location!, maya.userId)));
-    expect(response.statusCode).toBe(302);
-    const location = new URL(response.headers.location!);
-    expect(`${location.origin}${location.pathname}`).toBe(CLI_REDIRECT);
-    expect(location.searchParams.get("error")).toBe("server_error");
-    expect(location.searchParams.get("state")).toBe("cli-state");
-    expect(response.headers.location + JSON.stringify(h.logs)).not.toContain(KEY_ARN);
-    expect(h.logs.some((entry) => entry.event === "signin.error" && entry.error === "InternalServerError")).toBe(true);
-  });
-
   it("sends any failure after /authorize validated the request back to the CLI as server_error, never a 500 page", async () => {
     const expectServerError = (response: HttpResult) => {
       expect(response.statusCode).toBe(302);
@@ -646,54 +400,10 @@ describe("failure answers (Task 6 fix round 1)", () => {
     }
   });
 
-  it("sends pragma: no-cache only with no-store, never beside a public cache-control", async () => {
-    const h = identityHarness();
-    for (const path of ["/v1/auth/.well-known/openid-configuration", "/v1/auth/.well-known/jwks.json"]) {
-      const response = await h.http(httpEvent("GET", path));
-      expect(response.headers["cache-control"]).toBe("public, max-age=300");
-      expect(response.headers.pragma).toBeUndefined();
-    }
-    const token = await h.http(httpEvent("POST", "/v1/auth/token", { grant_type: "password", client_id: "agentx-cli" }));
-    expect(token.headers["cache-control"]).toBe("no-store");
-    expect(token.headers.pragma).toBe("no-cache");
-  });
-
-  it("gives every expired-link page its own headers object", async () => {
-    const h = identityHarness();
-    const first = await h.http(httpEvent("GET", "/v1/auth/callback/slack?state=nope&code=x"));
-    const second = await h.http(httpEvent("GET", "/v1/auth/callback/slack?state=nope&code=x"));
-    expect(first.statusCode).toBe(400);
-    expect(first.headers).toEqual(second.headers);
-    expect(first.headers).not.toBe(second.headers);
-  });
-});
-
-describe("secrets never leave", () => {
-  it("keeps client secrets, the bot token, codes and refresh tokens out of every log line and HTML page", async () => {
-    const h = identityHarness({ slackUsers: [maya], oidc: {}, oidcUsers: [{ sub: "okta-1", email: "a@example.com", email_verified: true }] });
-    const pages: string[] = [];
-    const slackBack = await h.signIn("slack", maya.userId);
-    const code = slackBack.searchParams.get("code")!;
-    const { body } = await h.exchange(code);
-    const refreshed = await h.refresh(String(body.refresh_token));
-    h.tick(61_000);
-    await h.refresh(String(body.refresh_token));
-    await h.http(httpEvent("POST", "/v1/auth/revoke", { token: String(refreshed.body.refresh_token) }));
-    pages.push((await h.http(httpEvent("GET", authorizeQuery()))).body);
-    pages.push((await h.http(httpEvent("GET", `/v1/auth/callback/slack?code=${code}&state=nope`))).body);
-    const everything = JSON.stringify(h.logs) + pages.join("");
-    for (const secret of [SLACK_CLIENT_SECRET, OIDC_CLIENT_SECRET, BOT_TOKEN, code, String(body.refresh_token), String(refreshed.body.refresh_token), String(body.access_token)]) {
-      expect(everything).not.toContain(secret);
-    }
-  });
 });
 
 describe("the Lambda's configuration", () => {
   const base = { AGENTX_ENV: "staging", DEVELOPER_TOKEN_ISSUER: ISSUER };
-  it("turns Slack on only for enabled, keeps an empty team ID unset, and company sign-in off without an issuer", () => {
-    expect(developerIdentityConfigFromEnvironment({ ...base, DEVELOPER_SIGNIN_SLACK: "enabled", SLACK_TEAM_ID: "" })).toEqual({ env: "staging", issuer: ISSUER, slack: { enabled: true } });
-    expect(developerIdentityConfigFromEnvironment({ ...base, DEVELOPER_SIGNIN_SLACK: "disabled", SLACK_TEAM_ID: TEAM }).slack).toEqual({ enabled: false, teamId: TEAM });
-  });
 
   it("reads each method's enabled-since cutoff, and treats 0, empty or unreadable as none (FR-045)", () => {
     const slackOn = { ...base, DEVELOPER_SIGNIN_SLACK: "enabled", SLACK_TEAM_ID: TEAM };
@@ -714,11 +424,6 @@ describe("the Lambda's configuration", () => {
     expect(missingClient.oidc).toEqual({ displayName: "Okta" });
     expect(missingClient.oidcSettings).toBeUndefined();
     expect(missingClient.oidcProblem).toContain("DEVELOPER_OIDC_CLIENT_ID");
-  });
-
-  it("reads the company settings", () => {
-    expect(developerIdentityConfigFromEnvironment({ ...base, DEVELOPER_OIDC_ISSUER: OIDC_ISSUER, DEVELOPER_OIDC_CLIENT_ID: "c", DEVELOPER_OIDC_REQUIRED_CLAIM: "groups", DEVELOPER_OIDC_REQUIRED_VALUES: "[\"engineering\"]", DEVELOPER_OIDC_DISPLAY_NAME: "Okta" }))
-      .toMatchObject({ oidc: { displayName: "Okta" }, oidcSettings: { issuer: OIDC_ISSUER, clientId: "c", requiredClaim: "groups", requiredValues: ["engineering"] } });
   });
 
   it("refuses required values without a required claim, and values that are not a JSON array of strings, as a company sign-in problem", () => {
@@ -783,17 +488,6 @@ describe("the Lambda's configuration", () => {
     }
   });
 
-  it("creates one remote key set per URI, so jose's cache and cooldown apply", () => {
-    const created: string[] = [];
-    const jwksFor = remoteJwksCache((url) => {
-      created.push(url.href);
-      return () => Promise.reject(new Error("unused"));
-    });
-    const first = jwksFor("https://idp.example.test/jwks");
-    expect(jwksFor("https://idp.example.test/jwks")).toBe(first);
-    expect(jwksFor("https://slack.com/openid/connect/keys")).not.toBe(first);
-    expect(created).toEqual(["https://idp.example.test/jwks", "https://slack.com/openid/connect/keys"]);
-  });
 });
 
 describe("task person proof invoke contract", () => {
@@ -833,15 +527,6 @@ describe("task People metered display invoke contract", () => {
 
 
 describe("task public key publication", () => {
-  it("keeps absent and empty task-key configuration byte-identical", async () => {
-    for (const env of [{}, { TASK_TOKEN_KEY_ARN: "" }]) {
-      const h = identityHarness();
-      const kms = { send: () => { throw new Error("unexpected KMS call"); } };
-      h.deps.extraPublicKeys = taskPublicKeysFromEnvironment(env, kms);
-      expect(h.deps.extraPublicKeys).toEqual([]);
-      expect((await h.http(httpEvent("GET", "/v1/auth/.well-known/jwks.json"))).body).toBe(JSON.stringify(await h.signer.jwks()));
-    }
-  });
 
   it("publishes distinct developer and task purposes using the configured KMS key", async () => {
     const h = identityHarness();

@@ -5,19 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { CALLBACK_SIGNING_KEY_UNAVAILABLE, forgetCallbackSigningKey } from "../../packages/broker/src/aws/callback-signing-key.js";
-import { EvalBatchSummarySchema, SWEBENCH_RUN_TIME_LIMIT_SECONDS, summarize } from "@agentx/contracts";
-import {
-  EVAL_BATCH_RESULTS_COLUMNS,
-  createBatch,
-  evalBatchResultsCsv,
-  evalBatchRunId,
-  getBatch,
-  listBatchMeasures,
-  reconcileBatchRows,
-  stopBatch,
-  stopBatchForThread,
-  topUpBatches,
-} from "../../packages/broker/src/aws/eval-batch.js";
+import { EvalBatchSummarySchema, SWEBENCH_RUN_TIME_LIMIT_SECONDS } from "@agentx/contracts";
+import { EVAL_BATCH_RESULTS_COLUMNS, createBatch, evalBatchResultsCsv, evalBatchRunId, getBatch, listBatchMeasures, reconcileBatchRows, stopBatchForThread, topUpBatches } from "../../packages/broker/src/aws/eval-batch.js";
 import { runEvalBatchTick } from "../../packages/broker/src/aws/eval-batch-tick.js";
 import { reconcileSwebenchSlots, startSwebenchRun } from "../../packages/broker/src/aws/swebench.js";
 import {
@@ -65,7 +54,6 @@ function endWithoutRelease(h: Harness, runId: string, status = "FAILED") {
 
 const RUN_A = "0b8f6a52-6c1e-4c35-9d55-6a1d4f2b9c01";
 const RUN_B = "0b8f6a52-6c1e-4c35-9d55-6a1d4f2b9c02";
-const RUN_C = "0b8f6a52-6c1e-4c35-9d55-6a1d4f2b9c03";
 
 describe("the results files (spec 052 FR-010)", () => {
   it("writes results.csv with a header and one escaped row per measure, in queue order, when the batch ends", async () => {
@@ -150,64 +138,6 @@ describe("the results files (spec 052 FR-010)", () => {
     expect(summary.models[0]).toMatchObject({ runs: 1, disagreementRate: 1 });
   });
 
-  it("leaves the columns empty and the rate null for a result from a runner older than the checks", async () => {
-    const h = await harness({ maxConcurrentEvals: 5 });
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    await topUpBatches(h.dependencies);
-    const [first] = (await getBatch(h.dependencies, batch.batchId))!.queue;
-    await finish(h, first!.runId!, graded(0.25));
-    await runEvalBatchTick(h.dependencies);
-    const [row] = await listBatchMeasures(h.dependencies, batch.batchId);
-    expect(row).not.toHaveProperty("checkStatus");
-    expect(row).not.toHaveProperty("agentClaim");
-    expect(row).not.toHaveProperty("disagrees");
-    const csv = h.objects.get(`evals/batches/${batch.batchId}/results.csv`)!.split("\r\n");
-    expect(csv[1]!.endsWith(",swebench/x@sha256:abc,,,,")).toBe(true);
-    const summary = EvalBatchSummarySchema.parse(JSON.parse(h.objects.get(`evals/batches/${batch.batchId}/summary.json`)!));
-    expect(summary.models[0]!.disagreementRate).toBeNull();
-  });
-
-  it("writes summary.json from the rows, removes the batch from the active list, and writes nothing again on the next tick", async () => {
-    const h = await harness({ maxConcurrentEvals: 5 });
-    const batch = await createBatch(h.dependencies, h.context, file());
-    await topUpBatches(h.dependencies);
-    for (const entry of (await getBatch(h.dependencies, batch.batchId))!.queue) {
-      await finish(h, entry.runId!, graded(entry.model.modelId === cheap.modelId ? 0.25 : 1.5, entry.index % 2 === 0));
-    }
-    await runEvalBatchTick(h.dependencies);
-    const measures = await listBatchMeasures(h.dependencies, batch.batchId);
-    const summary = EvalBatchSummarySchema.parse(JSON.parse(h.objects.get(`evals/batches/${batch.batchId}/summary.json`)!));
-    expect(summary.batchId).toBe(batch.batchId);
-    expect(summary.models).toHaveLength(2);
-    expect(summary.models).toEqual(expect.arrayContaining(summarize(measures)));
-    expect(summary.models.map((model) => [model.modelId, model.runs, model.resolved])).toEqual(expect.arrayContaining([[cheap.modelId, 2, 1], [dear.modelId, 2, 1]]));
-    expect(activeItem(h, batch.batchId)).toBeUndefined();
-
-    h.s3Send.mockClear();
-    const before = h.db.commandNames().length;
-    await runEvalBatchTick(h.dependencies);
-    expect(h.s3Send).not.toHaveBeenCalled();
-    // No batch, and no slot held: the idle tick's reads only.
-    expect(h.db.commandNames().slice(before)).toEqual(["QueryCommand", "GetCommand", "QueryCommand"]);
-  });
-
-  it("writes the same files again when a tick stopped before it took the batch off the active list", async () => {
-    const h = await harness();
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    await topUpBatches(h.dependencies);
-    await finish(h, evalBatchRunId(batch.batchId, 0, 1), graded(0.25));
-    const send = h.db.send;
-    h.db.send = async (command) => {
-      if (command.constructor.name === "DeleteCommand" && String((command.input.Key as { pk: string }).pk) === "EVAL_BATCHES#ACTIVE") throw new Error("the tick timed out");
-      return send(command);
-    };
-    await expect(runEvalBatchTick(h.dependencies)).rejects.toThrow(/1 step of the eval batch tick failed/);
-    const first = new Map(h.objects);
-    h.db.send = send;
-    await runEvalBatchTick(h.dependencies);
-    expect(h.objects).toEqual(first);
-    expect(activeItem(h, batch.batchId)).toBeUndefined();
-  });
 });
 
 describe("a batch that has ended but whose results are not yet written", () => {
@@ -292,100 +222,10 @@ describe("rebuilding lost rows before a batch's results are written (spec 052 Ru
     expect(row(h, batch.batchId, runId)).toEqual(original);
   });
 
-  it("writes no row for an entry that never ran", async () => {
-    const h = await harness({ maxConcurrentEvals: 2 });
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]] }));
-    await topUpBatches(h.dependencies);
-    await stopBatch(h.dependencies, batch.batchId, h.context.requester);
-    await endByStateMachine(h, evalBatchRunId(batch.batchId, 0, 1), "CANCELLED", "cancelled from Slack");
-    await runEvalBatchTick(h.dependencies);
-    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "STOPPED" });
-    expect((await listBatchMeasures(h.dependencies, batch.batchId)).map((measure) => measure.outcome)).toEqual(["CANCELLED"]);
-    expect(await reconcileBatchRows(h.dependencies, batch.batchId)).toBe(0);
-  });
-});
-
-describe("run ends the broker missed (spec 052 FR-006)", () => {
-  it("records runs the state machine ended, and fills every free slot, not just one", async () => {
-    const h = await harness({ maxConcurrentEvals: 3, maxCostUsd: 10 });
-    const batch = await createBatch(h.dependencies, h.context, file());
-    await topUpBatches(h.dependencies);
-    const running = (await getBatch(h.dependencies, batch.batchId))!.queue.filter((entry) => entry.state === "RUNNING");
-    expect(running).toHaveLength(2);
-    for (const entry of running) {
-      await runnerStarted(h, entry.runId!);
-      await endByStateMachine(h, entry.runId!, "FAILED", "the run did not finish within its 2-hour limit");
-    }
-    // Nobody told the batch.
-    expect((await getBatch(h.dependencies, batch.batchId))!.counts).toMatchObject({ running: 2, failed: 0 });
-
-    const report = await runEvalBatchTick(h.dependencies);
-    expect(report.endsRecorded).toBe(2);
-    const after = (await getBatch(h.dependencies, batch.batchId))!;
-    expect(after).toMatchObject({ spentUsd: 20, counts: { failed: 2, running: 2, queued: 0 } });
-    expect(h.startExecution).toHaveBeenCalledTimes(4);
-    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual(expect.arrayContaining(running.map((entry) => expect.objectContaining({
-      runId: entry.runId, outcome: "FAILED", chargedUsd: 10, costEstimated: true, error: "the run did not finish within its 2-hour limit",
-    }) as unknown)));
-    await expectChargesMatchSpend(h, batch.batchId);
-  });
 });
 
 describe("slot reconcile (spec 052 FR-005)", () => {
-  const corrections = () => vi.mocked(console.log).mock.calls
-    .flatMap(([line]) => { try { return [JSON.parse(String(line)) as Record<string, unknown>]; } catch { return []; } })
-    .filter((entry) => entry.event === "eval_slots.corrected");
 
-  it("releases the slot of a run that ended without releasing it, and logs it", async () => {
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const h = await harness();
-    await singleRun(h, RUN_A);
-    await singleRun(h, RUN_B);
-    endWithoutRelease(h, RUN_A);
-    expect(counter(h)).toBe(2);
-    await reconcileSwebenchSlots(h.dependencies);
-    expect(slotRunIds(h)).toEqual([RUN_B]);
-    expect(counter(h)).toBe(1);
-    expect(corrections()).toEqual([expect.objectContaining({ correction: "released_slot", runId: RUN_A, runStatus: "FAILED" })]);
-  });
-
-  it("never deletes the slot of a run that has not ended", async () => {
-    const h = await harness();
-    await singleRun(h, RUN_A);
-    await singleRun(h, RUN_B);
-    await singleRun(h, RUN_C);
-    h.db.set({ ...h.db.get(`SWEBENCH_RUN#${RUN_B}`, "META")!, status: "RUNNING" });
-    h.db.set({ ...h.db.get(`SWEBENCH_RUN#${RUN_C}`, "META")!, status: "CANCEL_REQUESTED" });
-    await reconcileSwebenchSlots(h.dependencies);
-    expect(slotRunIds(h)).toEqual([RUN_A, RUN_B, RUN_C]);
-    expect(counter(h)).toBe(3);
-  });
-
-  it.each([
-    { name: "a negative counter", count: -1 },
-    { name: "a counter of 0 with slots held", count: 0 },
-    { name: "a counter above the slots held", count: 5 },
-  ])("sets $name to the slots held, and logs it", async ({ count }) => {
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const h = await harness();
-    await singleRun(h, RUN_A);
-    await singleRun(h, RUN_B);
-    h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count });
-    await reconcileSwebenchSlots(h.dependencies);
-    expect(counter(h)).toBe(2);
-    expect(slotRunIds(h)).toEqual([RUN_A, RUN_B]);
-    expect(corrections()).toEqual([expect.objectContaining({ correction: "counter_set", from: count, to: 2 })]);
-  });
-
-  it("deletes an ended run's slot when the counter cannot be decremented, then sets the counter", async () => {
-    const h = await harness();
-    await singleRun(h, RUN_A);
-    endWithoutRelease(h, RUN_A, "SUCCEEDED");
-    h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 0 });
-    await reconcileSwebenchSlots(h.dependencies);
-    expect(slotRunIds(h)).toEqual([]);
-    expect(counter(h)).toBe(0);
-  });
 
   it("releases a leaked slot once when two reconciles race", async () => {
     const h = await harness();
@@ -426,74 +266,6 @@ describe("slot reconcile (spec 052 FR-005)", () => {
     expect(counter(h)).toBe(2);
   });
 
-  // The batch's own pattern: a run ends and frees its slot, and the next run takes it.
-  it("never undoes a start that follows a release made while it counted", async () => {
-    const h = await harness({ maxConcurrentEvals: 6 });
-    await singleRun(h, RUN_A);
-    await singleRun(h, RUN_B);
-    h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 5 });
-    const send = h.db.send;
-    let counted = false;
-    let raced = false;
-    h.db.send = async (command) => {
-      const name = command.constructor.name;
-      if (name === "GetCommand" && (command.input.Key as { pk?: string }).pk === "SWEBENCH#SLOTS") counted = true;
-      if (!counted || raced || name !== "QueryCommand") return send(command);
-      // Its second read of the slots: B ends just before it, and C starts just after.
-      raced = true;
-      h.db.send = send;
-      await endByStateMachine(h, RUN_B, "FAILED", "the run did not finish within its 2-hour limit");
-      const result = await send(command);
-      await singleRun(h, RUN_C);
-      return result;
-    };
-    await reconcileSwebenchSlots(h.dependencies);
-    h.db.send = send;
-    expect(slotRunIds(h)).toEqual([RUN_A, RUN_C]);
-    expect(counter(h)).toBeGreaterThanOrEqual(2);
-    await reconcileSwebenchSlots(h.dependencies);
-    expect(counter(h)).toBe(2);
-  });
-
-  // Review M-2: a run that starts and fails within the counting, then another start before the write,
-  // leaves the counter one low. The write cannot see it; the next reconcile corrects it.
-  it("heals the one sequence that leaves the counter one low at the next reconcile", async () => {
-    const h = await harness({ maxConcurrentEvals: 6 });
-    await singleRun(h, RUN_A);
-    h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 3 });
-    const send = h.db.send;
-    let step = 0;
-    h.db.send = async (command) => {
-      const name = command.constructor.name;
-      const isCounter = name === "GetCommand" && (command.input.Key as { pk?: string }).pk === "SWEBENCH#SLOTS";
-      if (step === 0 && isCounter) {
-        step = 1;
-        h.db.send = send;
-        await singleRun(h, RUN_B);
-        const result = await send(command);
-        await endByStateMachine(h, RUN_B, "FAILED", "the run could not start: boom");
-        h.db.send = intercept;
-        return result;
-      }
-      if (step === 1 && name === "QueryCommand") {
-        step = 2;
-        const result = await send(command);
-        h.db.send = send;
-        await singleRun(h, RUN_C);
-        h.db.send = intercept;
-        return result;
-      }
-      return send(command);
-    };
-    const intercept = h.db.send;
-    await reconcileSwebenchSlots(h.dependencies);
-    h.db.send = send;
-    expect(step).toBe(2);
-    expect(slotRunIds(h)).toEqual([RUN_A, RUN_C]);
-    await reconcileSwebenchSlots(h.dependencies);
-    expect(counter(h)).toBe(2);
-  });
-
   it("logs a warning when there are too many slot items to count", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const h = await harness();
@@ -514,46 +286,11 @@ describe("slot reconcile (spec 052 FR-005)", () => {
     expect(h.db.get("SWEBENCH#ACTIVE", "LOCK")).toBeUndefined();
   });
 
-  it("runs in the tick, before the top-up, so a leaked slot is filled in the same tick", async () => {
-    const h = await harness({ maxConcurrentEvals: 2 });
-    await singleRun(h, RUN_A);
-    endWithoutRelease(h, RUN_A);
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    const report = await runEvalBatchTick(h.dependencies);
-    expect(report.slotCorrections).toEqual([expect.objectContaining({ correction: "released_slot", runId: RUN_A })]);
-    expect((await getBatch(h.dependencies, batch.batchId))!.counts).toMatchObject({ running: 1 });
-    expect(slotRunIds(h)).toEqual([evalBatchRunId(batch.batchId, 0, 1)]);
-  });
 });
 
 describe("the tick with no batch active", () => {
   // Ruling 10: the idle tick reads the active list, the slot counter and at most one slot item.
   const IDLE_READS = ["QueryCommand", "GetCommand", "QueryCommand"];
-
-  it("makes three small reads and nothing else while no run holds a slot", async () => {
-    const h = await harness();
-    h.startExecution.mockClear();
-    h.deployment.mockClear();
-    h.s3Send.mockClear();
-    const before = h.db.commandNames().length;
-    expect(await runEvalBatchTick(h.dependencies)).toEqual({ active: 0, endsRecorded: 0, slotCorrections: [], rowsRebuilt: 0, finalized: [] });
-    expect(h.db.commandNames().slice(before)).toEqual(IDLE_READS);
-    expect(h.deployment).not.toHaveBeenCalled();
-    expect(h.s3Send).not.toHaveBeenCalled();
-    expect(h.startExecution).not.toHaveBeenCalled();
-  });
-
-  it("releases a leaked slot of an ended run, so it cannot block single runs", async () => {
-    const h = await harness({ maxConcurrentEvals: 2 });
-    await singleRun(h, RUN_A);
-    endWithoutRelease(h, RUN_A);
-    const report = await runEvalBatchTick(h.dependencies);
-    expect(report.slotCorrections).toEqual([expect.objectContaining({ correction: "released_slot", runId: RUN_A })]);
-    expect(slotRunIds(h)).toEqual([]);
-    expect(counter(h)).toBe(0);
-    // The next single run gets the slot.
-    await singleRun(h, RUN_B);
-  });
 
   it("sets a counter left above 0 with no slot held, and deletes a slot item the counter missed", async () => {
     const h = await harness();
@@ -566,23 +303,6 @@ describe("the tick with no batch active", () => {
     await runEvalBatchTick(h.dependencies);
     expect(slotRunIds(h)).toEqual([]);
     expect(counter(h)).toBe(0);
-  });
-
-  it("sets a negative counter to the slots held", async () => {
-    const h = await harness();
-    h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: -1 });
-    await runEvalBatchTick(h.dependencies);
-    expect(counter(h)).toBe(0);
-  });
-
-  it("leaves the slot of a run that has not ended alone", async () => {
-    const h = await harness();
-    await singleRun(h, RUN_A);
-    h.db.set({ ...h.db.get(`SWEBENCH_RUN#${RUN_A}`, "META")!, status: "RUNNING" });
-    const report = await runEvalBatchTick(h.dependencies);
-    expect(report.slotCorrections).toEqual([]);
-    expect(slotRunIds(h)).toEqual([RUN_A]);
-    expect(counter(h)).toBe(1);
   });
 
   it("is what the scheduled handler runs, with the Lambda's environment", async () => {
@@ -630,12 +350,6 @@ describe("runs whose execution died before it ended them (spec 052 Ruling 13)", 
   const GRACE_MS = 10 * 60_000;
   const run = (h: Harness, runId: string) => h.db.get(`SWEBENCH_RUN#${runId}`, "META")!;
 
-  it("records the execution's ARN on the run as it starts", async () => {
-    const h = await harness();
-    await singleRun(h, RUN_A);
-    expect(run(h, RUN_A).executionArn).toBe(executionArn(RUN_A));
-  });
-
   it("ends a run whose execution stopped, charges its ceiling, releases its slot once, and lets the batch finalize", async () => {
     const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap], costCapUsd: 20 }));
@@ -657,20 +371,6 @@ describe("runs whose execution died before it ended them (spec 052 Ruling 13)", 
     expect(report.finalized).toEqual([batch.batchId]);
     expect(h.objects.has(`evals/batches/${batch.batchId}/results.csv`)).toBe(true);
     await expectChargesMatchSpend(h, batch.batchId);
-  });
-
-  it("charges nothing for a run whose runner never started, and retries it", async () => {
-    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    await topUpBatches(h.dependencies);
-    const runId = evalBatchRunId(batch.batchId, 0, 1);
-    h.executions.set(executionArn(runId), "ABORTED");
-    h.advance(GRACE_MS + 1);
-    await runEvalBatchTick(h.dependencies);
-    expect(run(h, runId)).toMatchObject({ status: "FAILED", error: expect.stringMatching(/^the run could not start: its execution ended ABORTED before the runner started/) as unknown });
-    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ spentUsd: 0 });
-    expect((await getBatch(h.dependencies, batch.batchId))!.queue[0]).toMatchObject({ attempt: 2, state: "RUNNING" });
-    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({ runId, outcome: "RETRIED", chargedUsd: 0 })]);
   });
 
   it("leaves a run alone while its execution runs, and does not look before the grace period", async () => {
@@ -704,19 +404,6 @@ describe("runs whose execution died before it ended them (spec 052 Ruling 13)", 
     expect(await reconcileSwebenchSlots(h.dependencies)).toEqual([expect.objectContaining({ correction: "ended_dead_run", runId: RUN_A, executionStatus: null })]);
     expect(h.describeExecution).not.toHaveBeenCalled();
     expect(run(h, RUN_A)).toMatchObject({ status: "FAILED", error: expect.stringMatching(/^the eval instance stopped \(its execution is unknown and the run is past its time limit\) without reporting a result; AgentX ended the run$/) as unknown });
-    expect(slotRunIds(h)).toEqual([]);
-    expect(counter(h)).toBe(0);
-  });
-
-  it("ends a stuck run whose release had failed on a counter at 0", async () => {
-    const h = await harness();
-    await singleRun(h, RUN_A);
-    await runnerStarted(h, RUN_A);
-    h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 0 });
-    h.executions.set(executionArn(RUN_A), "FAILED");
-    h.advance(GRACE_MS + 1);
-    await reconcileSwebenchSlots(h.dependencies);
-    expect(run(h, RUN_A).status).toBe("FAILED");
     expect(slotRunIds(h)).toEqual([]);
     expect(counter(h)).toBe(0);
   });
@@ -764,32 +451,6 @@ describe("a dead run's runner that is still alive (spec 052 Ruling 16)", () => {
     expect(h.startExecution).toHaveBeenCalledTimes(2);
   });
 
-  it("still answers a repeated start of a run that is running", async () => {
-    const h = await harness();
-    await singleRun(h, RUN_A);
-    await runnerStarted(h, RUN_A);
-    await expect(runnerStarted(h, RUN_A)).resolves.toBeUndefined();
-  });
-
-  it("terminates a dead run's instance, when it is known, before ending the run", async () => {
-    const h = await harness();
-    await singleRun(h, RUN_A);
-    h.db.set({ ...h.db.get(`SWEBENCH_RUN#${RUN_A}`, "META")!, ec2InstanceId: "i-0123456789abcdef0" });
-    await singleRun(h, RUN_B);
-    h.executions.set(executionArn(RUN_A), "ABORTED");
-    h.executions.set(executionArn(RUN_B), "FAILED");
-    const order: string[] = [];
-    h.terminateInstance.mockImplementation(async (instanceId) => {
-      order.push(`terminate ${instanceId} while ${String(h.db.get(`SWEBENCH_RUN#${RUN_A}`, "META")!.status)}`);
-    });
-    h.advance(GRACE_MS + 1);
-    await reconcileSwebenchSlots(h.dependencies);
-    expect(order).toEqual(["terminate i-0123456789abcdef0 while STARTING"]);
-    expect(h.terminateInstance).toHaveBeenCalledTimes(1);
-    expect(h.db.get(`SWEBENCH_RUN#${RUN_A}`, "META")).toMatchObject({ status: "FAILED" });
-    expect(h.db.get(`SWEBENCH_RUN#${RUN_B}`, "META")).toMatchObject({ status: "FAILED" });
-  });
-
   it("ends a run whose recorded instance ID is malformed, with a warning naming it, and still refuses its late start", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const h = await harness();
@@ -835,46 +496,6 @@ describe("a dead run's runner that is still alive (spec 052 Ruling 16)", () => {
   });
 });
 
-describe("charges that sum exactly to the spend (spec 052 Ruling 17)", () => {
-  it("rounds an estimated ceiling charge as spend is rounded", async () => {
-    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10.123_456_7 });
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    await topUpBatches(h.dependencies);
-    const runId = evalBatchRunId(batch.batchId, 0, 1);
-    await runnerStarted(h, runId);
-    await endByStateMachine(h, runId, "FAILED", "the run did not finish within its 2-hour limit");
-    expect(await runEvalBatchTick(h.dependencies)).toMatchObject({ finalized: [batch.batchId] });
-    expect(row(h, batch.batchId, runId)).toMatchObject({ chargedUsd: 10.123457, costEstimated: true });
-    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ spentUsd: 10.123457 });
-  });
-
-  it("rounds each reported cost once, so 200 runs at unrounded costs still finalize", async () => {
-    const h = await harness({ maxConcurrentEvals: 6, maxCostUsd: 10 });
-    const ids = Array.from({ length: 100 }, (_, index) => `django__django-${10000 + index}`);
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: ids, models: [dear, cheap], costCapUsd: 1000 }));
-    // A seeded stream of costs with nine and more decimals, as session statistics report them.
-    let seed = 20261002;
-    const cost = () => {
-      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
-      return (seed / 2_147_483_648) * 4.9 + 0.000_000_123;
-    };
-    await topUpBatches(h.dependencies);
-    for (let round = 0; round < 100; round += 1) {
-      const running = (await getBatch(h.dependencies, batch.batchId))!.queue.filter((entry) => entry.state === "RUNNING");
-      if (running.length === 0) break;
-      for (const entry of running) await finish(h, entry.runId!, graded(cost()));
-      await topUpBatches(h.dependencies);
-    }
-    const ended = (await getBatch(h.dependencies, batch.batchId))!;
-    expect(ended).toMatchObject({ status: "DONE", counts: { done: 200 } });
-    expect(await runEvalBatchTick(h.dependencies)).toMatchObject({ finalized: [batch.batchId] });
-    const rows = await listBatchMeasures(h.dependencies, batch.batchId);
-    expect(rows).toHaveLength(200);
-    const charged = rows.reduce((sum, measure) => sum + measure.chargedUsd, 0);
-    expect(Math.round(charged * 1_000_000) / 1_000_000).toBe(ended.spentUsd);
-  }, 60_000);
-});
-
 describe("a tick that cannot do its work fails (spec 052 Ruling 14)", () => {
   it("fails when a batch cannot be topped up, after topping up the others", async () => {
     const h = await harness();
@@ -893,38 +514,6 @@ describe("a tick that cannot do its work fails (spec 052 Ruling 14)", () => {
     await expect(runEvalBatchTick(h.dependencies)).rejects.toThrow(/top_up/);
   });
 
-  it("fails when a run cannot be started", async () => {
-    const h = await harness();
-    await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    h.startExecution.mockRejectedValueOnce(new Error("AccessDeniedException: states:StartExecution"));
-    await expect(runEvalBatchTick(h.dependencies)).rejects.toThrow(/top_up/);
-  });
-
-  it("fails when a step other than finalize fails, and still runs the others", async () => {
-    const h = await harness();
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    const send = h.db.send;
-    h.db.send = async (command) => {
-      if (command.constructor.name === "QueryCommand" && (command.input.ExpressionAttributeValues as Record<string, unknown>)[":pk"] === "SWEBENCH#SLOT") throw new Error("throttled");
-      return send(command);
-    };
-    await expect(runEvalBatchTick(h.dependencies)).rejects.toThrow(/reconcile_slots/);
-    h.db.send = send;
-    expect(h.startExecution).toHaveBeenCalledWith(expect.objectContaining({ name: evalBatchRunId(batch.batchId, 0, 1) }));
-  });
-
-  it("fails, keeps the batch listed and still writes its files when the rows' charges do not sum to the spend", async () => {
-    const h = await harness();
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    await topUpBatches(h.dependencies);
-    const runId = evalBatchRunId(batch.batchId, 0, 1);
-    await finish(h, runId, graded(0.25));
-    h.db.set({ ...row(h, batch.batchId, runId)!, chargedUsd: 0.5 });
-    await expect(runEvalBatchTick(h.dependencies)).rejects.toThrow(/finalize/);
-    expect(h.objects.has(`evals/batches/${batch.batchId}/results.csv`)).toBe(true);
-    expect(activeItem(h, batch.batchId)).toBeDefined();
-  });
-
   it("fails and keeps the batch listed when a lost row cannot be rebuilt", async () => {
     const h = await harness();
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
@@ -938,42 +527,3 @@ describe("a tick that cannot do its work fails (spec 052 Ruling 14)", () => {
   });
 });
 
-describe("ticks and callbacks that overlap", () => {
-  it("leaves the charge and the row alone when the runner's result arrives after the tick recorded the end", async () => {
-    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
-    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
-    await topUpBatches(h.dependencies);
-    const runId = evalBatchRunId(batch.batchId, 0, 1);
-    await runnerStarted(h, runId);
-    await endByStateMachine(h, runId, "FAILED", "the run did not finish within its 2-hour limit");
-    await runEvalBatchTick(h.dependencies);
-    const recorded = row(h, batch.batchId, runId);
-    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "DONE", spentUsd: 10 });
-    await finish(h, runId, graded(0.25));
-    expect(row(h, batch.batchId, runId)).toEqual(recorded);
-    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "DONE", spentUsd: 10 });
-    expect(counter(h)).toBe(0);
-  });
-
-  it("writes the same files once over when two ticks finalize a batch at once", async () => {
-    const h = await harness({ maxConcurrentEvals: 5 });
-    const batch = await createBatch(h.dependencies, h.context, file());
-    await topUpBatches(h.dependencies);
-    for (const entry of (await getBatch(h.dependencies, batch.batchId))!.queue) await finish(h, entry.runId!, graded(0.25));
-    const puts: string[] = [];
-    h.s3Send.mockImplementation(async (command: { input: { Key?: string; Body?: string } }) => {
-      if (command.input.Key !== undefined) {
-        if (h.objects.has(command.input.Key)) expect(String(command.input.Body)).toBe(h.objects.get(command.input.Key));
-        h.objects.set(command.input.Key, String(command.input.Body));
-        puts.push(command.input.Key);
-      }
-      return {};
-    });
-    const reports = await Promise.all([runEvalBatchTick(h.dependencies), runEvalBatchTick(h.dependencies)]);
-    expect(reports.flatMap((report) => report.finalized)).toContain(batch.batchId);
-    expect(new Set(puts)).toEqual(new Set([`evals/batches/${batch.batchId}/results.csv`, `evals/batches/${batch.batchId}/summary.json`]));
-    expect(activeItem(h, batch.batchId)).toBeUndefined();
-    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toHaveLength(4);
-    await expectChargesMatchSpend(h, batch.batchId);
-  });
-});

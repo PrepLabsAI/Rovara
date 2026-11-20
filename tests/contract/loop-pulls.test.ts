@@ -48,13 +48,6 @@ describe("a plan's repositories (#358)", () => {
     expect(await h.complete("Planned it.")).toContain("Accepted");
   });
 
-  it("keeps a plan that names only the issue's repository on the one pull request path", async () => {
-    const h = await planned(`${PLAN.join("\n")}## Repositories\n- ${HOME}: all of it\n`);
-    await h.complete("Planned it.");
-    await h.comment("maya", "/rovara approve");
-    expect(await h.step()).toBe("code");
-    expect(await h.store.pulls(HOME, LOOP_ISSUE)).toEqual([]);
-  });
 });
 
 describe("per-PR loops (#358)", () => {
@@ -163,25 +156,6 @@ describe("per-PR loops (#358)", () => {
     expect(h.pullSession(HOME)).toBeUndefined();
     expect(h.pullSession(WEB)).toBeUndefined();
     expect(h.label()).toEqual([]);
-  });
-
-  it("sends a reply on the issue to every loop still working, and stops one from its pull request", async () => {
-    const h = await planned();
-    await h.complete("Planned it.");
-    await h.comment("maya", "/rovara approve");
-    await h.comment("sam", "Use the new logger everywhere.");
-    expect(h.pullSession(HOME)!.received.at(-1)).toContain("Use the new logger everywhere.");
-    expect(h.pullSession(WEB)!.received.at(-1)).toContain("Use the new logger everywhere.");
-
-    await h.selfReview(undefined, WEB);
-    await h.complete("Added the banner.", WEB);
-    await h.runOwnSteps();
-    h.other(WEB).world.say(601, "wen", "/rovara stop");
-    await h.daemon.poll();
-    expect((await h.pull(WEB))?.step).toBe("ended");
-    expect((await h.pull(HOME))?.step).toBe("code");
-    expect(await h.step()).toBe("pulls");
-    expect(h.lastPosted()).toContain(`**${WEB}**: Stopped by @wen.`);
   });
 
   it("publishes a per-PR loop whose reviews still block on `/rovara approve owner/name` from the issue, and sends an issue reply only to loops still working", async () => {

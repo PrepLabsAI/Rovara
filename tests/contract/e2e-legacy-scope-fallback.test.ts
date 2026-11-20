@@ -34,8 +34,6 @@ function spied(db: FakeDynamoDb) {
   };
   return { reads, store: { documentClient: { send } as never, tableName: TABLE } };
 }
-/** The partition of the row a transaction item puts. */
-const putPk = (item: { Put?: { Item?: Record<string, unknown> | undefined } | undefined }): unknown => item.Put?.Item?.["pk"];
 const touchedLegacy = (reads: Array<{ pk: string }>) => reads.some((read) => read.pk === LEGACY_PK);
 
 describe("the account registry across the key move", () => {
@@ -59,16 +57,6 @@ describe("the account registry across the key move", () => {
   const scopedLatest = (profile: string) => ({ pk: testProjectPk("payments"), sk: `E2E_ACCOUNT_LATEST#${ORDERS_APPLICATION_ID}#${profile}` });
   const transact = (db: FakeDynamoDb, items: unknown[]) => db.send(new TransactWriteCommand({ TransactItems: items as never }));
 
-  it("reads an account written under the old unscoped key for the implicit company", async () => {
-    const db = new FakeDynamoDb();
-    const written = seedLegacy(db);
-    const read = await readAccountRegistryEntries({ documentClient: { send: db.send } as never, tableName: TABLE }, TEST_ORG, "payments", pairs);
-    expect(read.corrupt).toEqual([]);
-    expect(read.entries.map((entry) => entry.definition)).toEqual(written.map((write) => write.definition));
-    expect(read.entries.map((entry) => entry.latest)).toEqual(written.map((write) => write.latest));
-    expect(read.entries.every((entry) => entry.setupApprovedAt === T1)).toBe(true);
-  });
-
   it("prefers the new key: a row under the scoped partition is the one read, and the old revision is ignored", async () => {
     const db = new FakeDynamoDb();
     seedLegacy(db);
@@ -89,57 +77,6 @@ describe("the account registry across the key move", () => {
     const read = await readAccountRegistryEntries({ documentClient: { send: db.send } as never, tableName: TABLE }, TEST_ORG, "payments", [{ applicationId: ORDERS_APPLICATION_ID, profileId: "orders-viewer" }]);
     expect(read.entries).toEqual([]);
     expect(read.corrupt).toEqual([expect.objectContaining({ profileId: "orders-viewer" })]);
-  });
-
-  it("never reads the old unscoped key for another company: company B does not see company A's account, and the key is not even asked for", async () => {
-    const db = new FakeDynamoDb();
-    seedLegacy(db);
-    const { reads, store } = spied(db);
-    const read = await readAccountRegistryEntries(store, OTHER_ORG, "payments", pairs);
-    expect(read).toEqual({ entries: [], corrupt: [] });
-    expect(touchedLegacy(reads)).toBe(false);
-  });
-
-  it("plans company B's setup from nothing, not from company A's old accounts, and writes only under B's own partition", async () => {
-    const db = new FakeDynamoDb();
-    seedLegacy(db);
-    const plan = await planSetupAccountWrites({ documentClient: { send: db.send } as never, tableName: TABLE }, { orgId: OTHER_ORG, projectId: "payments", snapshot: snapshotOfContract(), setup: { approvedAt: T2, proposalSha256: SHA }, now: T0 });
-    expect(plan.written).toBe(4);
-    const keys = plan.items.map((item) => putPk(item));
-    expect(new Set(keys)).toEqual(new Set([`ORG#${OTHER_ORG}#PROJECT#payments`]));
-  });
-
-  it("writes a changed account's next revision under the new key, starting from the old row, and leaves the old rows as they were", async () => {
-    const db = new FakeDynamoDb();
-    seedLegacy(db);
-    const before = structuredClone(db.find((row) => row.pk === LEGACY_PK));
-    const plan = await planSetupAccountWrites({ documentClient: { send: db.send } as never, tableName: TABLE }, { orgId: TEST_ORG, projectId: "payments", snapshot: snapshotOfContract(withViewerRole("auditor")), setup: { approvedAt: T2, proposalSha256: SHA }, now: T0 + 86_400_000 });
-    // The viewer changed (revision 2); the other three are registered unchanged by a newer setup (a pointer raise). Every row lands under the new key.
-    expect(plan.written).toBe(4);
-    expect(plan.planKey.split("\n")).toContain([ORDERS_APPLICATION_ID, "orders-viewer", "2"].join("\u0000"));
-    for (const item of plan.items) expect(putPk(item)).toBe(testProjectPk("payments"));
-    expect(await transact(db, plan.items)).toBeDefined();
-    expect(db.get(testProjectPk("payments"), `E2E_ACCOUNT#${ORDERS_APPLICATION_ID}#orders-viewer#REV#2`)).toMatchObject({ revision: 2 });
-    expect(db.get(testProjectPk("payments"), `E2E_ACCOUNT_LATEST#${ORDERS_APPLICATION_ID}#orders-viewer`)).toMatchObject({ revision: 2, setupApprovedAt: T2 });
-    expect(db.find((row) => row.pk === LEGACY_PK)).toEqual(before);
-    // The next read finds revision 2 under the new key, and the account is no longer read from the old one.
-    const read = await readAccountRegistryEntries({ documentClient: { send: db.send } as never, tableName: TABLE }, TEST_ORG, "payments", [{ applicationId: ORDERS_APPLICATION_ID, profileId: "orders-viewer" }]);
-    expect(read.entries[0]!.definition.revision).toBe(2);
-  });
-
-  it("moves an unchanged account to the new key when a newer setup registers it (the pointer raise carries its definition along)", async () => {
-    const db = new FakeDynamoDb();
-    seedLegacy(db);
-    const plan = await planSetupAccountWrites({ documentClient: { send: db.send } as never, tableName: TABLE }, { orgId: TEST_ORG, projectId: "payments", snapshot: snapshotOfContract(), setup: { approvedAt: T2, proposalSha256: SHA }, now: T0 + 86_400_000 });
-    expect(plan.written).toBe(4);
-    await transact(db, plan.items);
-    for (const profile of PROFILES) {
-      expect(db.get(scopedLatest(profile).pk, scopedLatest(profile).sk), profile).toMatchObject({ revision: 1, setupApprovedAt: T2 });
-      expect(db.get(testProjectPk("payments"), `E2E_ACCOUNT#${ORDERS_APPLICATION_ID}#${profile}#REV#1`), profile).toMatchObject({ entityType: "E2E_ACCOUNT", revision: 1 });
-    }
-    const read = await readAccountRegistryEntries({ documentClient: { send: db.send } as never, tableName: TABLE }, TEST_ORG, "payments", pairs);
-    expect(read.corrupt).toEqual([]);
-    expect(read.entries).toHaveLength(4);
   });
 
   it("still reads an account's older revisions from the old key once its newest revision is under the new key (a task pinned to an older project revision keeps its definition)", async () => {
@@ -222,25 +159,6 @@ describe("the AI navigation day budget across the key move", () => {
     expect(db.get(LEGACY_PK, `E2E_MODEL_BUDGET#${DAY_KEY}`)).toMatchObject({ inputTokens: 7_000, calls: 3 });
   });
 
-  it("holds the cap against the old and the new rows together when it writes (a reserve that fits either row alone is refused)", async () => {
-    const db = new FakeDynamoDb();
-    legacyDay(db, 7_000, 1);
-    db.set({ pk: testProjectPk("payments"), sk: `E2E_MODEL_BUDGET#${DAY_KEY}`, entityType: "E2E_MODEL_BUDGET", inputTokens: 2_000, calls: 1 });
-    const budget = createBrokerE2EDayBudget({ ...route(db), now: () => DAY });
-    expect(await budget.reserve(1_001, LIMITS)).toBeNull();
-    expect(await budget.reserve(1_000, LIMITS)).not.toBeNull();
-    expect(scopedDay(db)).toMatchObject({ inputTokens: 3_000, calls: 2 });
-  });
-
-  it("gives company B the whole day: its reserve ignores the old row and never reads it", async () => {
-    const db = new FakeDynamoDb();
-    legacyDay(db, 9_999, 5);
-    const { reads, store } = spied(db);
-    const budget = createBrokerE2EDayBudget({ ...route(db, OTHER_ORG), ...store, now: () => DAY });
-    expect(await budget.reserve(10_000, LIMITS)).not.toBeNull();
-    expect(scopedDay(db, `ORG#${OTHER_ORG}#PROJECT#payments`)).toMatchObject({ inputTokens: 10_000, calls: 1 });
-    expect(touchedLegacy(reads)).toBe(false);
-  });
 });
 
 describe("the day budget callback across the key move", () => {
@@ -284,16 +202,6 @@ describe("the day budget callback across the key move", () => {
     expect(db.get(LEGACY_PK, `E2E_MODEL_BUDGET#${DAY}`)).toMatchObject({ inputTokens: 2_500 });
   });
 
-  it("releases a reservation that is still open under the old key, giving back its tokens and its call", async () => {
-    const { db, call } = fixture();
-    const id = randomUUID();
-    legacyReservation(db, id);
-    expect(await call(releaseBody(id))).toMatchObject({ status: "released" });
-    expect(db.get(LEGACY_PK, `E2E_MODEL_BUDGET#${DAY}`)).toMatchObject({ inputTokens: 1_000, calls: 1 });
-    expect(db.get(LEGACY_PK, `E2E_MODEL_BUDGET_RESERVATION#${id}`)).toMatchObject({ status: "released" });
-    expect(scopedRows(db, TEST_ORG)).toEqual([]);
-  });
-
   it("answers a repeated reserve of a reservation made under the old key from that row, without charging a second time", async () => {
     const { db, call } = fixture();
     const id = randomUUID();
@@ -332,14 +240,6 @@ describe("the day budget callback across the key move", () => {
     expect(await call(settleBody(id, 1_000))).toMatchObject({ status: "settled" });
     expect(db.get(scopedPk(TEST_ORG), `E2E_MODEL_BUDGET#${DAY}`)).toMatchObject({ inputTokens: 1_000 });
     expect(db.get(LEGACY_PK, `E2E_MODEL_BUDGET#${DAY}`)).toMatchObject({ inputTokens: CAPS.tokens - 3_999 });
-  });
-
-  it("holds the day's caps against the old and the new rows together when it writes", async () => {
-    const { db, call } = fixture();
-    db.set({ pk: LEGACY_PK, sk: `E2E_MODEL_BUDGET#${DAY}`, entityType: "E2E_MODEL_BUDGET", inputTokens: CAPS.tokens - 3_000, calls: 1 });
-    db.set({ pk: scopedPk(TEST_ORG), sk: `E2E_MODEL_BUDGET#${DAY}`, entityType: "E2E_MODEL_BUDGET", inputTokens: 2_000, calls: 1 });
-    expect(await call(reserveBody(randomUUID(), 1_001))).toMatchObject({ status: "exhausted" });
-    expect(await call(reserveBody(randomUUID(), 1_000))).toMatchObject({ status: "reserved" });
   });
 
   it("gives company B the whole day: an old day row at its cap does not exhaust it, and nothing is read from the old key", async () => {

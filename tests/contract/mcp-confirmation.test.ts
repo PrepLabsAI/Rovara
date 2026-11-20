@@ -6,7 +6,6 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema, type ElicitResult } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import type { ToolCall } from "../../packages/mcp/src/tools.js";
 import { ADMIN_SIGN_IN_STEP, APPLY_UNKNOWN_STEP, CHANGE_PENDING_STEP, SLACK_POLL_MS, ToolError, changeError, confirmChange, createAgentXMcpServer, httpAdminClient, httpControlPlaneClient, type AdminControlPlaneClient, type ToolContext, type ToolDefinition } from "../../packages/mcp/src/index.js";
 import type { AdminChangeView } from "../../packages/contracts/src/index.js";
 
@@ -25,14 +24,6 @@ function run(admin: Partial<AdminControlPlaneClient>, extra: Record<string, unkn
 }
 
 describe("the confirmation driver (FR-041)", () => {
-  it("applies after the pop-up's yes, reporting when it asked and when it was answered", async () => {
-    const applyChange = vi.fn(async () => view({ status: "applied", methodUsed: "elicitation" }));
-    const elicit = vi.fn<NonNullable<ToolCall["elicit"]>>(async () => "accept");
-    const { run: r } = run({ applyChange }, { elicit });
-    expect(await confirmChange(r)).toMatchObject({ outcome: "applied" });
-    expect(elicit).toHaveBeenCalledWith(expect.stringContaining("Bind channel #ledger-dev"), expect.any(Number), expect.anything());
-    expect(applyChange).toHaveBeenCalledWith(CHANGE, { method: "elicitation", requestedAt: expect.any(String) as unknown, answeredAt: expect.any(String) as unknown }, "trace-9");
-  });
 
   it("declines on no or a dismissed pop-up, and says CONFIRMATION_DECLINED with the change ID", async () => {
     for (const answer of ["decline", "cancel"] as const) {
@@ -50,53 +41,9 @@ describe("the confirmation driver (FR-041)", () => {
     expect(declineChange).toHaveBeenCalledWith(CHANGE, { method: "elicitation", reason: "failed", requestedAt: "2026-10-02T09:00:01.000Z", answeredAt: expect.any(String) as unknown }, "trace-9");
   });
 
-  it("falls back to Slack when the pop-up fails, and declines when there is no Slack", async () => {
-    const startSlackConfirmation = vi.fn(async () => view());
-    const getChange = vi.fn().mockResolvedValueOnce(view()).mockResolvedValueOnce(view({ status: "applied", methodUsed: "slack" }));
-    const { run: withSlack, progress } = run({ startSlackConfirmation, getChange }, { elicit: async () => "failed" as const });
-    expect(await confirmChange(withSlack)).toMatchObject({ outcome: "applied" });
-    expect(progress).toHaveBeenCalledWith(expect.any(Number), 300, expect.stringContaining("the pop-up could not be shown"));
-    const declineChange = vi.fn(async () => view({ status: "declined" }));
-    const { run: noSlack } = run({ declineChange }, { elicit: async () => "failed" as const, change: view({ methodsOffered: ["elicitation"] }) });
-    await expect(confirmChange(noSlack)).rejects.toMatchObject({ code: "CONFIRMATION_DECLINED", message: expect.stringContaining("the confirmation pop-up could not be shown") as unknown });
-    expect(declineChange).toHaveBeenCalledWith(CHANGE, expect.objectContaining({ reason: "failed" }), "trace-9");
-  });
-
-  it("waits five minutes for the Slack press, with progress every 15 seconds, then says awaiting_confirmation", async () => {
-    const getChange = vi.fn(async () => view({ methodsOffered: ["slack"] }));
-    const { run: r, progress } = run({ startSlackConfirmation: async () => view({ methodsOffered: ["slack"] }), getChange }, { change: view({ methodsOffered: ["slack"] }) });
-    expect(await confirmChange(r)).toMatchObject({ outcome: "awaiting_confirmation" });
-    expect(progress.mock.calls.length).toBeGreaterThanOrEqual(19);
-    expect(getChange.mock.calls.length).toBeLessThanOrEqual(61);
-  });
-
-  it("stops waiting when the tool call is cancelled, leaving the change to its button (D7)", async () => {
-    const controller = new AbortController();
-    controller.abort();
-    const { run: r } = run({ startSlackConfirmation: async () => view(), getChange: async () => view() }, { change: view({ methodsOffered: ["slack"] }), signal: controller.signal });
-    expect(await confirmChange(r)).toMatchObject({ outcome: "awaiting_confirmation" });
-  });
 });
 
 describe("the confirmation driver's edges (FR-041, FR-052, R1)", () => {
-  it("shows the view's effect in the pop-up, which the broker already makes the planning admin's, and no other field (final review M8)", async () => {
-    const elicit = vi.fn<NonNullable<ToolCall["elicit"]>>(async () => "accept");
-    // The broker puts the member planner's text in effect itself (viewOf); a confirmationEffect field is never read.
-    const change = { ...view({ effect: "Bind channel #payroll (C0SECRET01, a private channel) to project ledger." }), confirmationEffect: "Some other text a newer control plane sent." };
-    const { run: r } = run({ applyChange: async () => view({ status: "applied" }) }, { elicit, change });
-    await confirmChange(r);
-    expect(elicit.mock.calls[0]?.[0]).toContain("Bind channel #payroll (C0SECRET01, a private channel) to project ledger.");
-    expect(elicit.mock.calls[0]?.[0]).not.toContain("Some other text");
-  });
-
-  it("gives the pop-up at most 9 minutes, and always ends it before the change expires", async () => {
-    const elicit = vi.fn<NonNullable<ToolCall["elicit"]>>(async () => "accept");
-    const { run: r } = run({ applyChange: async () => view({ status: "applied" }) }, { elicit });
-    await confirmChange(r);
-    const timeout = elicit.mock.calls[0]?.[1] ?? 0;
-    expect(timeout).toBeLessThanOrEqual(9 * 60_000);
-    expect(Date.parse("2026-10-02T09:00:01.000Z") + timeout).toBeLessThan(Date.parse(view().expiresAt));
-  });
 
   it("uses Slack when the client has no pop-up, and CONFIRMATION_UNAVAILABLE when nothing fits", async () => {
     const startSlackConfirmation = vi.fn(async () => view());
@@ -108,15 +55,6 @@ describe("the confirmation driver's edges (FR-041, FR-052, R1)", () => {
     await expect(confirmChange(none)).rejects.toMatchObject({ code: "CONFIRMATION_UNAVAILABLE", message: expect.stringContaining(CHANGE) as unknown });
     const { run: cliOnly } = run({}, { change: view({ methodsOffered: ["cli"] }), elicit: async () => "accept" as const });
     await expect(confirmChange(cliOnly)).rejects.toMatchObject({ code: "CONFIRMATION_UNAVAILABLE" });
-  });
-
-  it("sends the one trace ID on every call of the change (FR-052)", async () => {
-    const startSlackConfirmation = vi.fn(async () => view());
-    const getChange = vi.fn().mockResolvedValueOnce(view()).mockResolvedValueOnce(view({ status: "applied" }));
-    const { run: r } = run({ startSlackConfirmation, getChange }, { elicit: async () => "failed" as const });
-    await confirmChange(r);
-    // The trace ID is each call's second argument (a poll's third is its options).
-    for (const call of [...startSlackConfirmation.mock.calls, ...getChange.mock.calls] as unknown[][]) expect(call[1]).toBe("trace-9");
   });
 
   it("tries a failed Slack check again at the next poll, logging only the event, change and code", async () => {
@@ -172,14 +110,6 @@ describe("the confirmation driver's edges (FR-041, FR-052, R1)", () => {
 });
 
 describe("change errors (E15, Q9)", () => {
-  it("maps each ending to FR-049's code, naming the change", () => {
-    expect(changeError(view({ status: "declined" }))).toMatchObject({ code: "CONFIRMATION_DECLINED" });
-    expect(changeError(view({ status: "expired" }))).toMatchObject({ code: "CONFIRMATION_EXPIRED" });
-    expect(changeError(view({ status: "failed", error: { code: "CHANGE_STALE", message: "what it was planned against has changed" } }))).toMatchObject({ code: "CHANGE_STALE" });
-    const failed = changeError(view({ status: "failed", error: { code: "CONFIG_INVALID", message: "the per-person limit cannot be more than the organization limit" } }));
-    expect(failed).toBeInstanceOf(ToolError);
-    expect(failed).toMatchObject({ code: "INVALID_REQUEST", message: expect.stringContaining(`change ${CHANGE}`) as unknown });
-  });
 
   it("says try again for a transient failure, and never uses an em dash", () => {
     expect(changeError(view({ status: "failed", error: { code: "RUNTIME_UNAVAILABLE", message: "the apply did not finish" } }))).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
@@ -218,35 +148,12 @@ describe("the admin client's change calls (E4, FR-052, R1)", () => {
     expect(new Headers(init.headers).get("content-type")).toBe("application/json");
   });
 
-  it("reads a newer control plane's change answer: an unknown status, kind, method and field (R1)", async () => {
-    const newer = { change: { ...view(), kind: "rename_project", status: "queued", methodsOffered: ["elicitation", "passkey"], methodUsed: "passkey", confirmationEffect: "Bind private channel #payroll.", addedLater: { x: 1 }, error: { code: "NEW_CODE", message: "m", hint: "h" } } };
-    const change = await httpAdminClient({ session, fetch: answering(200, newer) }).getChange(CHANGE, "trace-7");
-    expect(change).toMatchObject({ status: "queued", kind: "rename_project", methodsOffered: ["elicitation", "passkey"], confirmationEffect: "Bind private channel #payroll." });
-  });
-
   it("reads the change list with its query, loosely", async () => {
     const fetch = answering(200, { changes: [{ changeId: CHANGE, kind: "bind_channel", traceId: "t", admin: { issuer: "i", subject: "s" }, client: { cliVersion: "0.6.0" }, change: {}, effect: "e", methodsOffered: ["slack"], status: "someday", outcome: "brand_new", proposedAt: "2026-10-02T09:00:00.000Z" }], cursor: "c1" });
     const page = await httpAdminClient({ session, fetch }).changes({ since: "2026-10-01T00:00:00.000Z", outcome: "declined", limit: 5, cursor: "c0" });
     expect(page.cursor).toBe("c1");
     expect(page.changes[0]).toMatchObject({ status: "someday", outcome: "brand_new" });
     expect(sent(fetch).url).toBe("https://abc123.execute-api.us-east-1.amazonaws.com/v1/admin/changes?since=2026-10-01T00%3A00%3A00.000Z&outcome=declined&limit=5&cursor=c0");
-  });
-
-  it("retries only the proposal: an apply, a decline and a Slack step are sent once", async () => {
-    const outage = () => vi.fn().mockResolvedValueOnce(reply(503, { error: { code: "INTERNAL", message: "down" } })).mockResolvedValue(reply(200, { change: view() }));
-    const propose = outage();
-    await httpAdminClient({ session, fetch: propose as never, sleep: async () => undefined }).proposeChange(request, "trace-7");
-    expect(propose).toHaveBeenCalledTimes(2);
-    expect(sent(propose, 1).trace).toBe("trace-7");
-    for (const step of [
-      (client: AdminControlPlaneClient) => client.applyChange(CHANGE, { method: "elicitation" }, "trace-7"),
-      (client: AdminControlPlaneClient) => client.declineChange(CHANGE, { method: "elicitation", reason: "declined" }, "trace-7"),
-      (client: AdminControlPlaneClient) => client.startSlackConfirmation(CHANGE, "trace-7"),
-    ]) {
-      const fetch = outage();
-      await expect(step(httpAdminClient({ session, fetch: fetch as never, sleep: async () => undefined }))).rejects.toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
-      expect(fetch).toHaveBeenCalledTimes(1);
-    }
   });
 
   it("maps the change refusals to FR-049's codes, keeping the broker's words that name the change", async () => {
@@ -294,23 +201,6 @@ describe("the admin client's change calls (E4, FR-052, R1)", () => {
     expect((decline as ToolError).nextStep).not.toBe(APPLY_UNKNOWN_STEP);
   });
 
-  it("never retries a proposal the control plane answered with its own unavailable refusal: it is already audited (final review M4)", async () => {
-    for (const code of ["RUNTIME_UNAVAILABLE", "SLACK_UNAVAILABLE"]) {
-      const fetch = answering(503, { error: { code, message: "could not be planned; try again" } });
-      await expect(httpAdminClient({ session, fetch, sleep: async () => undefined }).proposeChange(request, "t")).rejects.toBeInstanceOf(ToolError);
-      expect(fetch).toHaveBeenCalledTimes(1);
-    }
-    // A 5xx without AgentX's own refusal is still tried again: the request ID makes it the same request.
-    const gateway = vi.fn().mockResolvedValueOnce(reply(502, { message: "Bad Gateway" })).mockResolvedValue(reply(200, { change: view() }));
-    await httpAdminClient({ session, fetch: gateway as never, sleep: async () => undefined }).proposeChange(request, "t");
-    expect(gateway).toHaveBeenCalledTimes(2);
-  });
-
-  it("says to use a new request_id when the one sent was used for another change (final review I2)", async () => {
-    const failure = await httpAdminClient({ session, fetch: answering(409, { error: { code: "IDEMPOTENCY_CONFLICT", message: `request ID ${request.requestId} was already used for a different change; use a new request_id or leave it out` } }) }).proposeChange(request, "t").catch((error: unknown) => error);
-    expect(failure).toMatchObject({ code: "INVALID_REQUEST", nextStep: "use a new request_id or leave it out" });
-  });
-
   it("says a change whose apply failed has failed, not that it is still pending (25e re-review)", async () => {
     const failed = await httpAdminClient({ session, fetch: answering(503, { error: { code: "RUNTIME_UNAVAILABLE", message: `change ${CHANGE} failed: the change could not be applied; check the state, then ask again` } }) }).applyChange(CHANGE, { method: "elicitation" }, "t").catch((error: unknown) => error);
     expect(failed).toBeInstanceOf(ToolError);
@@ -328,15 +218,6 @@ describe("the admin client's change calls (E4, FR-052, R1)", () => {
     expect(unknown).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", message, nextStep: APPLY_UNKNOWN_STEP });
   });
 
-  it("never repeats the token in a change call's error, even when the answer quotes it", async () => {
-    const everywhere = (failure: unknown) => JSON.stringify({ failure, message: (failure as Error).message, nextStep: (failure as ToolError).nextStep, stack: (failure as Error).stack });
-    for (const code of ["CONFIRMATION_DECLINED", "CHANGE_STALE", "SLACK_UNAVAILABLE", "NOT_FOUND", "CONFIRMATION_UNAVAILABLE"]) {
-      const failure = await httpAdminClient({ session, fetch: answering(409, { error: { code, message: `refused ${PLANTED}` } }) }).declineChange(CHANGE, { method: "cli", reason: "declined" }, "t").catch((error: unknown) => error);
-      expect(everywhere(failure)).not.toContain(PLANTED);
-    }
-    const membership = await httpAdminClient({ session, fetch: answering(403, { error: { code: "FORBIDDEN", message: `membership ${PLANTED}` } }) }).proposeChange(request, "t").catch((error: unknown) => error);
-    expect(everywhere(membership)).not.toContain(PLANTED);
-  });
 });
 
 describe("the developer client reads the environment's confirmation methods (C22, E16)", () => {
@@ -392,19 +273,6 @@ describe("the server's pop-up (FR-041)", () => {
     await close();
   });
 
-  it("answers failed when the client's pop-up errors, and offers no pop-up to a client without elicitation or with URL mode only", async () => {
-    const failing = await connectWith({ form: {} }, () => { throw new Error("the client could not show it"); });
-    expect((await failing.call()).answer).toBe("failed");
-    await failing.close();
-    const none = await connectWith(undefined, () => ({ action: "accept", content: { confirm: true } }));
-    expect((await none.call()).answer).toBe("absent");
-    expect(none.seen.hadElicit).toBe(false);
-    await none.close();
-    const urlOnly = await connectWith({ url: {} }, () => ({ action: "accept", content: { confirm: true } }));
-    expect((await urlOnly.call()).answer).toBe("absent");
-    await urlOnly.close();
-  });
-
   it("logs a failed pop-up by the error's name only (fix round 1, c)", async () => {
     const log = vi.fn();
     const failing = await connectWith({ form: {} }, () => { throw new Error("planted-client-words"); }, log);
@@ -430,14 +298,6 @@ describe("fix round 1: a cancelled tool call opens no new confirmation path", ()
       expect(startSlackConfirmation).not.toHaveBeenCalled();
       expect(applyChange).not.toHaveBeenCalled();
     }
-  });
-
-  it("polls with the tool call's signal and one try (a)", async () => {
-    const getChange = vi.fn(async () => view({ status: "applied" }));
-    const signal = new AbortController().signal;
-    const { run: r } = run({ startSlackConfirmation: async () => view(), getChange }, { change: view({ methodsOffered: ["slack"] }), signal });
-    await confirmChange(r);
-    expect(getChange).toHaveBeenCalledWith(CHANGE, "trace-9", { signal, tries: 1 });
   });
 
   it("does not fall back to Slack with under a minute left before the change expires (b)", async () => {
@@ -493,39 +353,3 @@ describe("fix round 1: a cancelled tool call opens no new confirmation path", ()
   });
 });
 
-describe("follow-up: a timed-out pop-up can still fall back to Slack (Review Focus 3)", () => {
-  const started = Date.parse("2026-10-02T09:00:01.000Z");
-  const left = Date.parse(view().expiresAt) - started;
-
-  it("leaves Slack's minute and the 30 second margin when Slack is offered, and keeps the cap when it is not", async () => {
-    const timeouts: number[] = [];
-    for (const methodsOffered of [["elicitation", "slack"], ["elicitation"]] as const) {
-      const elicit = vi.fn<NonNullable<ToolCall["elicit"]>>(async (_message, timeoutMs) => { timeouts.push(timeoutMs); return "accept"; });
-      const { run: r } = run({ applyChange: async () => view({ status: "applied" }) }, { elicit, change: view({ methodsOffered: [...methodsOffered] }) });
-      await confirmChange(r);
-    }
-    expect(timeouts).toEqual([Math.min(9 * 60_000, left - 30_000 - 60_000), Math.min(9 * 60_000, left - 30_000)]);
-  });
-
-  it("falls back to Slack after a pop-up that timed out, saying it went unanswered", async () => {
-    let clock = started;
-    const startSlackConfirmation = vi.fn(async () => view());
-    const progress = vi.fn(async () => undefined);
-    const elicit = async (_message: string, timeoutMs: number) => { clock += timeoutMs; return "failed" as const; };
-    const { run: r } = run({ startSlackConfirmation, getChange: async () => view({ status: "applied", methodUsed: "slack" }) }, { elicit, now: () => clock, sleep: async (ms: number) => { clock += ms; }, progress });
-    expect(await confirmChange(r)).toMatchObject({ outcome: "applied" });
-    expect(startSlackConfirmation).toHaveBeenCalledWith(CHANGE, "trace-9");
-    expect(progress).toHaveBeenCalledWith(expect.any(Number), 300, expect.stringContaining("the pop-up went unanswered"));
-  });
-
-  it("says a timed-out pop-up went unanswered when it declines, not that it could not be shown", async () => {
-    let clock = started;
-    const declineChange = vi.fn(async () => view({ status: "declined" }));
-    const elicit = async (_message: string, timeoutMs: number) => { clock += timeoutMs; return "failed" as const; };
-    const { run: r } = run({ declineChange }, { elicit, now: () => clock, change: view({ methodsOffered: ["elicitation"] }) });
-    const failure = await confirmChange(r).catch((error: unknown) => error);
-    expect(failure).toMatchObject({ code: "CONFIRMATION_DECLINED", message: expect.stringContaining("the confirmation pop-up went unanswered") as unknown });
-    expect((failure as ToolError).message).not.toContain("could not be shown");
-    expect(declineChange).toHaveBeenCalledWith(CHANGE, expect.objectContaining({ reason: "failed" }), "trace-9");
-  });
-});

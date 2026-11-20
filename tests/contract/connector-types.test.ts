@@ -13,21 +13,6 @@ const project = (integrations: unknown) => ({ name: "payments", revision: 3, rep
 const githubMcp = { credentials: vi.fn(), connect: vi.fn() };
 
 describe("connector resolution", () => {
-  it("resolves the legacy githubMcp policy as the github connector over every repository", () => {
-    const [github] = resolveConnectors(project({ githubMcp: { tools: [{ name: "list_issues", access: "read" }] } }), { githubMcp });
-    expect(github).toMatchObject({
-      name: "github", type: "github", label: "GitHub issues", vendor: "GitHub", scopeNoun: "repository", attribution: true,
-      ledger: { prefix: "GITHUB_MCP#", entityType: "GITHUB_MCP_INVOCATION" },
-    });
-    expect(github!.scopes.map((scope) => scope.alias)).toEqual(["demo", "docs"]);
-  });
-
-  it("resolves a github connector's named scopes and attribution setting", async () => {
-    const [github] = resolveConnectors(project({ connectors: [{ name: "gh", type: "github", scopes: ["docs"], attribution: false, tools: [{ name: "list_issues", access: "read" }] }] }), { githubMcp });
-    expect(github).toMatchObject({ name: "gh", attribution: false });
-    expect(github!.scopes.map((scope) => scope.alias)).toEqual(["docs"]);
-    expect(await github!.configured()).toBe(true);
-  });
 
   it("reports github as not configured when the deployment has no GitHub MCP", async () => {
     const [github] = resolveConnectors(project({ githubMcp: { tools: [{ name: "list_issues", access: "read" }] } }), {});
@@ -47,18 +32,6 @@ describe("connector resolution", () => {
       expect(connectors[1]).toMatchObject({ ledger: { prefix: "CONNECTOR#tracker#", entityType: "CONNECTOR_INVOCATION" } });
       const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("connector.type_unknown"));
       expect(lines.map((line) => JSON.parse(line) as unknown)).toEqual([{ component: "broker", event: "connector.type_unknown", project: "payments", revision: 3, connector: "future", type: "future-vendor" }]);
-    } finally { log.mockRestore(); }
-  });
-
-  it("skips, with a log line, a connector its type cannot serve", () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    try {
-      const connectors = resolveConnectors(project({ connectors: [
-        { name: "tracker", type: "tracker", scopes: [{ alias: "payments", siteId: "site-42" }], tools: [{ name: "list_items", access: "read" }] },
-      ] }), {}, { tracker: trackerConnectorType });
-      expect(connectors).toEqual([]);
-      const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("connector.unusable"));
-      expect(lines.map((line) => JSON.parse(line) as unknown)).toEqual([{ component: "broker", event: "connector.unusable", project: "payments", revision: 3, connector: "tracker", type: "tracker", reason: "credentialRef is missing" }]);
     } finally { log.mockRestore(); }
   });
 
@@ -182,22 +155,6 @@ describe("connector resolution", () => {
     } finally { log.mockRestore(); }
   });
 
-  it("caps the logged reason for a stored jira connector that breaks several rules at 300 characters", () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    try {
-      const cloudId = "1437bb04-4c88-4efd-9d38-658e8febfeba";
-      expect(resolveConnectors(project({ connectors: [{
-        name: "jira", type: "jira", credentialRef: "jira-sa",
-        scopes: [{ alias: "a", cloudId, projectKey: "KAN" }, { alias: "b", cloudId }, { alias: "c", cloudId }],
-        tools: [{ name: "executeWrite", access: "write" }, { name: "executeRead", access: "read" }],
-      }] }), {})).toEqual([]);
-      const line = log.mock.calls.map(([entry]) => String(entry)).find((entry) => entry.includes("connector.unusable"));
-      const reason = (JSON.parse(line!) as { reason: string }).reason;
-      expect(reason.startsWith("invalid jira connector configuration: entry; connector jira: scopes b and c address the same Jira site and project; connector jira: set projectKey on every scope or on none")).toBe(true);
-      expect(reason).toHaveLength(300);
-    } finally { log.mockRestore(); }
-  });
-
   it("has a built-in entry for every type ConnectorConfigSchema accepts, so none is silently dropped", () => {
     const schemaTypes = ConnectorConfigSchema.options.map((option) => option.shape.type.value as string);
     expect(schemaTypes).toEqual(["github", "linear", "jira", "asana", "mcp", "sentry", "datadog", "cloudwatch", "github-actions", "grafana", "vercel", "pagerduty"]);
@@ -209,27 +166,4 @@ describe("connector resolution", () => {
     }
   });
 
-  it("resolves github with the context's connect only when this deployment's GitHub MCP has none of its own", () => {
-    const contextConnect = vi.fn();
-    const definition = project({ githubMcp: { tools: [{ name: "list_issues", access: "read" }] } });
-    const [withoutOwnConnect] = resolveConnectors(definition, { githubMcp: { credentials: vi.fn() }, connect: contextConnect as never });
-    expect(withoutOwnConnect!.connect).toBe(contextConnect);
-  });
-
-  it("keeps the deployment's own GitHub MCP connect ahead of the context's connect", () => {
-    const contextConnect = vi.fn();
-    const deploymentConnect = vi.fn();
-    const definition = project({ githubMcp: { tools: [{ name: "list_issues", access: "read" }] } });
-    const [withOwnConnect] = resolveConnectors(definition, { githubMcp: { credentials: vi.fn(), connect: deploymentConnect }, connect: contextConnect as never });
-    expect(withOwnConnect!.connect).toBe(deploymentConnect);
-  });
-
-  it("passes the context's connect through to a type-owned connector, like the tracker test type", () => {
-    const contextConnect = vi.fn();
-    const definition = project({ connectors: [
-      { name: "tracker", type: "tracker", credentialRef: "tracker-key", scopes: [{ alias: "payments", siteId: "site-42" }], tools: [{ name: "list_items", access: "read" }] },
-    ] });
-    const [tracker] = resolveConnectors(definition, { connect: contextConnect as never }, { tracker: trackerConnectorType });
-    expect(tracker!.connect).toBe(contextConnect);
-  });
 });

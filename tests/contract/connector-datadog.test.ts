@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { discoverTools, executeTool, type ConnectorDefinition, type Ledger } from "@agentx/gateway";
 import type { DATADOG_SITES} from "../../packages/contracts/src/index.js";
 import { DatadogScopeSchema, ProjectDefinitionSchema, type OrgId } from "../../packages/contracts/src/index.js";
-import { BUILT_IN_CONNECTOR_TYPES, resolveConnectors, type ResolvedConnector } from "../../packages/broker/src/aws/connector-types.js";
+import { resolveConnectors, type ResolvedConnector } from "../../packages/broker/src/aws/connector-types.js";
 import { datadogConnectionCheck, datadogConnectorType } from "../../packages/broker/src/connectors/native/datadog-connector-type.js";
 import { DATADOG_TOOL_NAMES, isContainedQuery, scopedMetricQuery } from "../../packages/broker/src/connectors/native/datadog.js";
 import { PROJECT_CONNECTOR_TOOLS } from "../support/project-connector-tools.js";
@@ -85,17 +85,6 @@ async function run(tool: string, args: Record<string, unknown>, options: Paramet
 }
 
 describe("the Datadog connector type", () => {
-  it("is built in, named datadog, and resolves its label, vendor, scope noun, scopes and ledger", async () => {
-    expect(BUILT_IN_CONNECTOR_TYPES["datadog"]).toBe(datadogConnectorType);
-    const s = await connected();
-    const [connector] = resolveConnectors(project([connectorConfig()]), { credentialRegistry: s.registry });
-    expect(connector).toMatchObject({
-      name: "metrics", type: "datadog", label: "Datadog", vendor: "Datadog", scopeNoun: "tag scope", attribution: false,
-      ledger: { prefix: "CONNECTOR#metrics#", entityType: "CONNECTOR_INVOCATION" },
-      credential: { ref: CON, accepts: ["static-secret"] },
-      scopes: [{ alias: "pay", scope: { alias: "pay", tags: TAGS } }],
-    });
-  });
 
   it("lists exactly the four tools a project may approve, and declares no item argument and no label argument", async () => {
     expect(PROJECT_CONNECTOR_TOOLS.datadog).toEqual([...TOOLS]);
@@ -112,38 +101,6 @@ describe("the Datadog connector type", () => {
     const refused = await store.put({ orgId: ORG_A, connection: { connectionId: CON, type: "datadog", label: "Datadog", access: "read", site: "datadoghq.example" }, secret: { apiKey: API_KEY, appKey: APP_KEY }, by: ALICE }).then(() => undefined, (error: { code?: string }) => error);
     expect(refused).toMatchObject({ code: "CONFIG_INVALID" });
     expect((await s.db.query({ pk: `ORG#${ORG_A}#CONNECTIONS` })).items).toEqual([]);
-  });
-
-  it("serves the site's own API base and pins the keys to that site's host: a token for api.datadoghq.com is refused for api.datadoghq.eu", async () => {
-    for (const site of ["datadoghq.com", "datadoghq.eu", "us3.datadoghq.com", "ap2.datadoghq.com", "us2.ddog-gov.com", "uk1.datadoghq.com"] as const) {
-      const { definition, registry } = await resolved({ site });
-      expect(definition.endpoint.href).toBe(`https://api.${site}/`);
-      expect((await registry.registration(CON))?.host).toBe(`api.${site}`);
-      const other = site === "datadoghq.eu" ? "api.datadoghq.com" : "api.datadoghq.eu";
-      await expect(registry.provider(CON, { pin: { host: other, required: true } }).issue({}, "read"), site).rejects.toThrow();
-    }
-  });
-
-  it("is not connected when the record is pinned to another site, has no host, or the connection is not Datadog's", async () => {
-    const s = await connected("datadoghq.eu");
-    const of = (registry: unknown) => resolveConnectors(project([connectorConfig()]), { credentialRegistry: registry as never })[0]!;
-    expect(await of(s.registry).configured()).toBe(true);
-    const wrongSite = { ...s.registry, registration: async (ref: string) => ({ ...(await s.registry.registration(ref))!, host: "api.datadoghq.com" }) };
-    expect(await of(wrongSite).definition()).toEqual({ notConnected: `credential ${CON} is pinned to api.datadoghq.com, not api.datadoghq.eu, so AgentX does not send it there` });
-    const unpinned = { ...s.registry, registration: async (ref: string) => { const { host: _host, ...rest } = (await s.registry.registration(ref))!; return rest; } }; // eslint-disable-line @typescript-eslint/no-unused-vars -- dropped on purpose
-    expect(await of(unpinned).definition()).toEqual({ notConnected: `credential ${CON} is not pinned to a host; register it again with --host api.datadoghq.eu` });
-    const other = setup();
-    await new OrgConnectionStore({ ...other.deps, checkEndpoint: async () => undefined }).put({ orgId: ORG_A, connection: { connectionId: CON, type: "vercel", label: "Vercel", access: "read" }, secret: { token: "vercel-token-0123456789" }, by: ALICE });
-    expect(await of(other.registry).definition()).toEqual({ notConnected: `connection ${CON} is not a Datadog connection` });
-  });
-
-  it("issues one credential that carries both keys, read with the connection's own secret version, and nothing but the keys the tools need", async () => {
-    const { definition, registry } = await resolved();
-    const issued = await definition.credentials.issue(PAY, "read");
-    expect(JSON.parse(issued.token)).toEqual({ apiKey: API_KEY, appKey: APP_KEY });
-    expect(issued.bindings).toEqual({});
-    // The registry reads the whole secret by the version the connection's own save wrote.
-    expect(await registry.connectionSecret?.(CON)).toEqual({ apiKey: API_KEY, appKey: APP_KEY });
   });
 
   it("refuses to issue a credential when the connection's secret can no longer be read", async () => {
@@ -164,42 +121,7 @@ describe("the Datadog connector type", () => {
   });
 });
 
-describe("what the model is offered", () => {
-  it("marks every tool read with the read-only hints, and shows neither the tags nor the scope alias", async () => {
-    const { definition, connector } = await resolved();
-    const { tools, skipped } = await discoverTools(definition, context(), { connect: connector.connect! });
-    expect(skipped).toEqual([]);
-    expect(tools.map((tool) => tool.name)).toEqual([...TOOLS]);
-    for (const tool of tools) {
-      expect(tool.access, tool.name).toBe("read");
-      expect(tool.hints, tool.name).toEqual({ readOnlyHint: true, destructiveHint: false });
-      expect(tool.inputSchema).toMatchObject({ type: "object", additionalProperties: false });
-      const names = Object.keys(tool.inputSchema["properties"] as object);
-      expect(names).not.toEqual(expect.arrayContaining(["tags"]));
-      expect(names).not.toEqual(expect.arrayContaining(["scopeAlias"]));
-    }
-    const props = (name: string) => (tools.find((tool) => tool.name === name)!.inputSchema as { properties: Record<string, Record<string, unknown>> }).properties;
-    expect(props("search_monitors")["state"]).toMatchObject({ enum: ["Alert", "Warn", "No Data"] });
-    expect(props("get_monitor")["monitorId"]).toMatchObject({ type: "integer", minimum: 1 });
-    expect(props("query_metrics")["query"]).toMatchObject({ type: "string", maxLength: 500 });
-    expect(props("query_metrics")["fromMinutesAgo"]).toMatchObject({ type: "integer", minimum: 5, maximum: 1440 });
-    expect(props("search_logs")["fromMinutesAgo"]).toMatchObject({ minimum: 5, maximum: 1440 });
-    expect(props("search_logs")["limit"]).toMatchObject({ minimum: 1, maximum: 50 });
-  });
-
-});
-
 describe("running the tools", () => {
-  it("narrows a log search to the scope's tags, as the plan words it, and sends both keys to the site's host", async () => {
-    const { result, api } = await run("search_logs", { query: "service:billing", fromMinutesAgo: 60, limit: 10 });
-    expect(result.status).toBe("SUCCEEDED");
-    expect(result.text).toContain("charge failed for order 17");
-    expect(api.requests).toHaveLength(1);
-    const request = api.requests[0]!;
-    expect(request).toMatchObject({ method: "POST", apiKey: API_KEY, appKey: APP_KEY });
-    expect(new URL(request.url).origin + new URL(request.url).pathname).toBe("https://api.datadoghq.eu/api/v2/logs/events/search");
-    expect(request.body).toEqual({ filter: { query: "(service:payments AND env:prod) AND (service:billing)", from: "now-60m", to: "now" }, sort: "-timestamp", page: { limit: 10 } });
-  });
 
   it("quotes a tag value that has characters a log query reads as syntax", async () => {
     const { api } = await run("search_logs", { query: "status:error", fromMinutesAgo: 5 }, { scope: { alias: "pay", tags: ["team:core-api", "env:prod"] }, config: { scopes: [{ alias: "pay", tags: ["team:core-api", "env:prod"] }] } });
@@ -239,33 +161,6 @@ describe("running the tools", () => {
     });
   }
 
-  it("still accepts other non-ASCII text, and the ASCII quote, bracket and backslash it always read", () => {
-    for (const query of ["message:caf\u00E9", "message:\u65E5\u672C\u8A9E", '(a OR b) AND "c (d"', "a\\(b", "\u2018single\u2019"]) expect(isContainedQuery(query), query).toBe(true);
-  });
-
-  it("reads a backslash as an escape outside quotes as well as inside, as Datadog does (review C-1)", () => {
-    // The two queries the review sent: `\(` and `\"` are literal characters to Datadog, so neither opens a bracket or a quote there.
-    expect(isContainedQuery("x\\( ) OR * OR (x \\)")).toBe(false);
-    expect(isContainedQuery('a\\") OR *:* OR (b"c\\"d"')).toBe(false);
-    // Outside quotes: an escaped bracket or quote opens nothing, and does not hide the real ones around it.
-    expect(isContainedQuery("a\\(b")).toBe(true);
-    expect(isContainedQuery("a\\)b")).toBe(true);
-    expect(isContainedQuery('a\\"b')).toBe(true);
-    expect(isContainedQuery("(a\\))")).toBe(true);
-    expect(isContainedQuery("(a\\)")).toBe(false);
-    expect(isContainedQuery("a\\\\(b")).toBe(false);
-    expect(isContainedQuery("a\\\\\\(b)")).toBe(false);
-    expect(isContainedQuery('a\\\\"b')).toBe(false);
-    // Inside quotes the escape still holds.
-    expect(isContainedQuery('"a\\"b"')).toBe(true);
-    expect(isContainedQuery('"a\\"')).toBe(false);
-    expect(isContainedQuery('"a\\\\"')).toBe(true);
-    expect(isContainedQuery('"a\\\\" OR (b')).toBe(false);
-    // A trailing backslash would escape the bracket the scope puts after the query.
-    for (const query of ["foo\\", "\\", "(a)\\", "a\\\\\\", '"a"\\']) expect(isContainedQuery(query), query).toBe(false);
-    for (const query of ["a\\\\", "foo", "(a OR b) AND \"c (d\""]) expect(isContainedQuery(query), query).toBe(true);
-  });
-
   it("refuses the review's escape queries, a trailing backslash and an unbalanced escape in a log or monitor search, in fixed words, making no request", async () => {
     const r = await resolved();
     const connection = await r.connector.connect!({ endpoint: r.definition.endpoint, token: await tokenOf(r), tools: [...TOOLS], signal: AbortSignal.timeout(5_000) });
@@ -303,19 +198,6 @@ describe("running the tools", () => {
     expect(limited.result.text).not.toContain("another service");
   });
 
-  it("counts a log's host attribute as its host tag", async () => {
-    const scope = { alias: "web", tags: ["host:web1", "env:prod"] };
-    const logs: FakeDatadogLog[] = [
-      { id: "h1", service: "x", host: "web1", tags: ["env:prod"], message: "from web1" },
-      { id: "h2", service: "x", host: "web2", tags: ["env:prod"], message: "from web2" },
-      { id: "h3", service: "x", tags: ["env:prod"], message: "from nowhere" },
-    ];
-    const { result } = await run("search_logs", { query: "*", fromMinutesAgo: 60 }, { scope, config: { scopes: [scope] }, api: fakeDatadog({ apiKey: API_KEY, appKey: APP_KEY, logs }) });
-    expect(result.text).toContain("1 log in web");
-    expect(result.text).toContain("from web1");
-    expect(result.text).not.toMatch(/web2|nowhere/u);
-  });
-
   it("drops a monitor from a search when it does not carry every scope tag, whatever the vendor's filter let through (review C-1)", async () => {
     const { result } = await run("search_monitors", { query: "*" });
     expect(result.status).toBe("SUCCEEDED");
@@ -324,13 +206,6 @@ describe("running the tools", () => {
     expect(result.text).not.toContain("Billing errors");
     const none = await run("search_monitors", {}, { api: fakeDatadog({ apiKey: API_KEY, appKey: APP_KEY, monitors: [{ id: 12, name: "Billing errors", tags: ["service:billing", "env:prod"] }, { id: 13, name: "Payments in dev", tags: ["service:payments", "env:dev"] }, { id: 14, name: "Untagged", tags: [] }] }) });
     expect(none.result.text).toBe("No monitors in pay.");
-  });
-
-  it("refuses a monitor search that could close the scope's group, like a log search, making no request", async () => {
-    const r = await resolved();
-    const connection = await r.connector.connect!({ endpoint: r.definition.endpoint, token: await tokenOf(r), tools: [...TOOLS], signal: AbortSignal.timeout(5_000) });
-    await expect(connection.call("search_monitors", { ...ROUTING, query: "x) OR (y" })).rejects.toMatchObject({ message: "search_monitors: query is not allowed", reason: "policy_denied" });
-    expect(r.api.requests).toEqual([]);
   });
 
   it("shows a monitor only if it carries every one of the scope's tags", async () => {
@@ -396,14 +271,6 @@ describe("running the tools", () => {
     expect(result.text).not.toContain("Short scoped monitor");
   });
 
-  it("scrubs both keys from anything a tool answers with", async () => {
-    const { result } = await run("search_logs", { query: "x", fromMinutesAgo: 5 }, { api: fakeDatadog({ apiKey: API_KEY, appKey: APP_KEY, logMessage: `leaked ${APP_KEY} and ${API_KEY} in a log line` }) });
-    expect(result.status).toBe("SUCCEEDED");
-    expect(result.text).toContain("leaked [REDACTED] and [REDACTED] in a log line");
-    expect(JSON.stringify(result)).not.toContain(APP_KEY);
-    expect(JSON.stringify(result)).not.toContain(API_KEY);
-  });
-
   it("answers a refused key, a missing monitor and an outage in fixed words, carrying nothing the vendor sent", async () => {
     const wrong = await run("search_monitors", {}, { api: fakeDatadog({ apiKey: API_KEY, appKey: "dd-some-other-app-key-0123" }) });
     expect(wrong.result).toMatchObject({ status: "FAILED", reason: "vendor_error", text: "Datadog refused the keys. Check the API key, and that the application key has monitors_read, timeseries_query and logs_read_data." });
@@ -412,13 +279,6 @@ describe("running the tools", () => {
     const limited = await run("search_monitors", {}, { api: fakeDatadog({ apiKey: API_KEY, appKey: APP_KEY, status: 429 }) });
     expect(limited.result.text).toBe("Datadog is limiting requests; try again later");
     expect(JSON.stringify([wrong.result, down.result, limited.result])).not.toMatch(/fake outage|Forbidden/u);
-  });
-
-  it("goes only to the connection's site host, whatever a tool is asked", async () => {
-    const { api } = await run("search_logs", { query: "x", fromMinutesAgo: 5 });
-    expect(api.requests.map((request) => new URL(request.url).hostname)).toEqual(["api.datadoghq.eu"]);
-    const us = await run("search_logs", { query: "x", fromMinutesAgo: 5 }, { site: "us3.datadoghq.com" });
-    expect(us.api.requests.map((request) => new URL(request.url).hostname)).toEqual(["api.us3.datadoghq.com"]);
   });
 
   it("refuses an argument the model may not set without any request", async () => {

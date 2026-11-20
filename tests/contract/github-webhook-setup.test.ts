@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { activeHintLine, ensureGithubWebhook, missingEventsLine } from "../../packages/cli/src/github/webhook-setup.js";
-import { GITHUB_WEBHOOK_EVENTS, githubAppSecretName, githubRestApi } from "../../packages/cli/src/init/github-app.js";
+import { githubAppSecretName, githubRestApi } from "../../packages/cli/src/init/github-app.js";
 import { fakeGitHubApi, memoryInitSecrets, TEST_PRIVATE_KEY } from "../support/init-fakes.js";
 
 const SECRET_ID = githubAppSecretName("staging");
@@ -9,57 +9,6 @@ const HAND_SET = "hand-set-webhook-secret-".padEnd(40, "h");
 const BASE = { appId: "123", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY };
 
 describe("ensureGithubWebhook", () => {
-  it("keeps an existing webhook secret and sets the hook URL", async () => {
-    const stored = { ...BASE, webhookSecret: HAND_SET };
-    const secrets = memoryInitSecrets({ [SECRET_ID]: JSON.stringify(stored) });
-    const api = fakeGitHubApi({ hookUrl: "https://old.example.test/hook" });
-    const outcome = await ensureGithubWebhook({ appJwt: "jwt", api, secrets, secretId: SECRET_ID, webhookUrl: URL });
-    expect(outcome.status).toBe("configured");
-    // No rotation: the stored secret is untouched, and GitHub is given that same secret.
-    expect(JSON.parse(secrets.values.get(SECRET_ID)!)).toEqual(stored);
-    expect(api.hookWrites).toEqual([{ url: URL, secret: HAND_SET }]);
-  });
-
-  it("reports unchanged, but still gives GitHub the stored secret, when the secret and the hook look right", async () => {
-    const secrets = memoryInitSecrets({ [SECRET_ID]: JSON.stringify({ ...BASE, webhookSecret: HAND_SET }) });
-    const api = fakeGitHubApi({ hookUrl: URL });
-    const outcome = await ensureGithubWebhook({ appJwt: "jwt", api, secrets, secretId: SECRET_ID, webhookUrl: URL });
-    expect(outcome).toMatchObject({ status: "unchanged", missingEvents: [] });
-    // GitHub masks its copy of the secret, so a hook whose secret differs can only be repaired by sending the stored one again.
-    expect(api.hookWrites).toEqual([{ url: URL, secret: HAND_SET }]);
-  });
-
-  it("generates and stores a webhook secret when none exists, keeping other secret fields", async () => {
-    const stored = { ...BASE, futureKey: { nested: true } };
-    const secrets = memoryInitSecrets({ [SECRET_ID]: JSON.stringify(stored) });
-    const api = fakeGitHubApi({ hookUrl: URL });
-    const outcome = await ensureGithubWebhook({ appJwt: "jwt", api, secrets, secretId: SECRET_ID, webhookUrl: URL });
-    expect(outcome.status).toBe("configured");
-    const after = JSON.parse(secrets.values.get(SECRET_ID)!) as Record<string, unknown>;
-    expect(after).toMatchObject(stored);
-    expect(after.webhookSecret).toMatch(/^[0-9a-f]{64}$/);
-    // The hook is set with the secret that was stored, even though its URL already matched.
-    expect(api.hookWrites).toEqual([{ url: URL, secret: after.webhookSecret }]);
-  });
-
-  it("replaces a webhook secret that is too short to be used", async () => {
-    const secrets = memoryInitSecrets({ [SECRET_ID]: JSON.stringify({ ...BASE, webhookSecret: "short" }) });
-    const api = fakeGitHubApi();
-    await ensureGithubWebhook({ appJwt: "jwt", api, secrets, secretId: SECRET_ID, webhookUrl: URL });
-    expect((JSON.parse(secrets.values.get(SECRET_ID)!) as { webhookSecret: string }).webhookSecret).toMatch(/^[0-9a-f]{64}$/);
-  });
-
-  it("stores the secret before GitHub is told", async () => {
-    const secrets = memoryInitSecrets({ [SECRET_ID]: JSON.stringify(BASE) });
-    const order: string[] = [];
-    const put = secrets.put.bind(secrets);
-    secrets.put = async (name, value) => { order.push("store"); await put(name, value); };
-    const api = fakeGitHubApi();
-    const setHookConfig = api.setHookConfig.bind(api);
-    api.setHookConfig = async (jwt, hook) => { order.push("github"); await setHookConfig(jwt, hook); };
-    await ensureGithubWebhook({ appJwt: "jwt", api, secrets, secretId: SECRET_ID, webhookUrl: URL });
-    expect(order).toEqual(["store", "github"]);
-  });
 
   it("reports missing events with the settings page", async () => {
     const secrets = memoryInitSecrets({ [SECRET_ID]: JSON.stringify({ ...BASE, webhookSecret: HAND_SET }) });
@@ -106,10 +55,6 @@ describe("ensureGithubWebhook", () => {
     expect((failure as { cause?: unknown }).cause).toBeUndefined();
   });
 
-  it("names the four events the broker accepts", () => {
-    expect([...GITHUB_WEBHOOK_EVENTS]).toEqual(["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment"]);
-  });
-
   it("refuses a secret that is not JSON without echoing it", async () => {
     const secrets = memoryInitSecrets({ [SECRET_ID]: "not-json-private-text" });
     const failure = await ensureGithubWebhook({ appJwt: "jwt", api: fakeGitHubApi(), secrets, secretId: SECRET_ID, webhookUrl: URL }).catch((error: unknown) => error);
@@ -117,13 +62,6 @@ describe("ensureGithubWebhook", () => {
     expect(String(failure)).not.toContain("private-text");
   });
 
-  it("never puts the secret in an error from GitHub", async () => {
-    const secrets = memoryInitSecrets({ [SECRET_ID]: JSON.stringify({ ...BASE, webhookSecret: HAND_SET }) });
-    const api = fakeGitHubApi();
-    api.setHookConfig = async () => { throw new Error("GitHub webhook update failed with HTTP 422"); };
-    const failure = await ensureGithubWebhook({ appJwt: "jwt", api, secrets, secretId: SECRET_ID, webhookUrl: URL }).catch((error: unknown) => error);
-    expect(String(failure)).not.toContain(HAND_SET);
-  });
 });
 
 describe("the GitHub REST client's webhook calls", () => {

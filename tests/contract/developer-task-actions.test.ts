@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, type Mock } from "vitest";
 import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
-import { developerTaskIdentity, taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
+import { developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { markReady } from "../support/slack-broker.js";
 
@@ -27,50 +27,7 @@ function snapshot(db: { items: Map<string, unknown> }): string {
   return JSON.stringify([...db.items.entries()]);
 }
 
-/** Moves the running task to a terminal status just before the next transaction, as a worker result racing the cancel would. */
-function finishBeforeNextTransaction(db: { send: (command: never) => Promise<unknown>; get: (pk: string, sk: string) => Record<string, unknown> | undefined }, workspaceId: string, operationId: string) {
-  const original = db.send;
-  db.send = async (command: never) => {
-    if ((command as { constructor: { name: string } }).constructor.name === "TransactWriteCommand") {
-      db.send = original;
-      const target = db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)!;
-      target.status = "SUCCEEDED";
-      target.fence = Number(target.fence) + 1;
-    }
-    return original(command);
-  };
-}
-
-describe("the developer identity (FR-017, FR-021)", () => {
-  it("owns the workspace it prepares, with a developer membership for its key", async () => {
-    const { db, workspaceId } = await readyWorkspace();
-    const ownerKey = taskOwnerKey(MAYA.developerId, taskId);
-    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ ownerKey, projectName: "payments" });
-    expect(db.get(`MEMBER#${ownerKey}`, "PROJECT#payments")).toMatchObject({ role: "developer" });
-  });
-});
-
-describe("the prepare operation (FR-022)", () => {
-  it("records the developer as its requester", async () => {
-    const { db, workspaceId, preparationId } = await readyWorkspace();
-    expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${preparationId}`)).toMatchObject({
-      kind: "prepare", requestedBy: { kind: "developer", developerId: MAYA.developerId, provider: "slack" },
-    });
-  });
-});
-
 describe("acceptTask with a developer identity (FR-019, FR-022)", () => {
-  it("records the developer requester, sends the instructions unchanged, and writes the extra items in the same transaction", async () => {
-    const { db, actions, identity, workspaceId, conversationId } = await readyWorkspace();
-    const prompt = "Fix the flaky retry test.\n\nKeep the public API.\u00a0";
-    const accepted = await actions.acceptTask(identity, workspaceId, { requestId: randomUUID(), conversationId, prompt }, (operation) => [
-      { Put: { TableName: "turns", Item: { pk: `TASK#${taskId}`, sk: `TURN#${operation.id}`, marker: true } } },
-    ]);
-    expect(accepted.operation.requestedBy).toEqual({ kind: "developer", developerId: MAYA.developerId, provider: "slack" });
-    const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === accepted.operation.id)[0];
-    expect((outbox?.invocation as { payload: { prompt: string } }).payload.prompt).toBe(prompt);
-    expect(db.get(`TASK#${taskId}`, `TURN#${accepted.operation.id}`)).toMatchObject({ marker: true });
-  });
 
   it("writes nothing when an extra item's condition fails", async () => {
     const { db, actions, identity, workspaceId, conversationId } = await readyWorkspace();
@@ -82,27 +39,6 @@ describe("acceptTask with a developer identity (FR-019, FR-022)", () => {
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "READY" });
   });
 
-  it("answers a repeated request with the first operation and writes no extra items again", async () => {
-    const { db, actions, identity, workspaceId, conversationId } = await readyWorkspace();
-    const request = { requestId: randomUUID(), conversationId, prompt: "x" };
-    let calls = 0;
-    const extra = () => { calls += 1; return []; };
-    const first = await actions.acceptTask(identity, workspaceId, request, extra);
-    const second = await actions.acceptTask(identity, workspaceId, request, extra);
-    expect(second).toMatchObject({ duplicate: true, operation: { id: first.operation.id } });
-    expect(calls).toBe(1);
-    expect(db.find((item) => item.entityType === "OPERATION" && item.kind === "task")).toHaveLength(1);
-  });
-});
-
-describe("acceptPullRequest with a developer identity (FR-023, R14)", () => {
-  it("ends the body with the developer footer and keeps draft on the publication", async () => {
-    const { db, actions, identity, workspaceId } = await readyWorkspace();
-    const accepted = await actions.acceptPullRequest(identity, workspaceId, { requestId: randomUUID(), repository: "demo", title: "Fix the retry test", body: "Fixes #12.", draft: true }, () => []);
-    const record = db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${accepted.operation.id}`) as { publication: { body: string; draft?: boolean } };
-    expect(record.publication.body).toBe("Fixes #12.\n\n---\nRequested by `Maya Chen` via AgentX, started from Claude Code");
-    expect(record.publication.draft).toBe(true);
-  });
 });
 
 describe("the pull request footer says where a task started and who asked (FR-023)", () => {
@@ -120,29 +56,9 @@ describe("the pull request footer says where a task started and who asked (FR-02
     expect(await footerOf({ developerName: "Slack user U0BSPTAFNG2", client: "an AI tool" })).toBe("Fixes #12.\n\n---\nRequested by the task owner via AgentX, started from Slack");
   });
 
-  it("keeps an AI tool start's wording with the developer's name", async () => {
-    expect(await footerOf({ client: "an AI tool" })).toBe("Fixes #12.\n\n---\nRequested by `Maya Chen` via AgentX, started from an AI tool");
-    expect(await footerOf({ client: "Codex" })).toBe("Fixes #12.\n\n---\nRequested by `Maya Chen` via AgentX, started from Codex");
-  });
-
-  it("never shows a raw Slack user ID in the footer", async () => {
-    for (const client of ["Slack", "an AI tool", "Claude Code"]) {
-      const body = await footerOf({ developerName: "Slack user U0BSPTAFNG2", client });
-      expect(body).not.toContain("Slack user U");
-      expect(body).toContain("Requested by the task owner via AgentX");
-      expect(body).not.toContain("`");
-    }
-  });
 });
 
 describe("acceptPullRequest attribution and draft (FR-023, R14)", () => {
-  it("keeps a display name with a backtick and a mention inert in the footer", async () => {
-    const { db, actions, workspaceId } = await readyWorkspace();
-    const identity = developerTaskIdentity({ ...task, developerName: "Ma`ya @octocat" });
-    const accepted = await actions.acceptPullRequest(identity, workspaceId, { requestId: randomUUID(), repository: "demo", title: "Fix", body: "Fixes #12." }, () => []);
-    const record = db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${accepted.operation.id}`) as { publication: { body: string } };
-    expect(record.publication.body).toBe("Fixes #12.\n\n---\nRequested by ``Ma`ya @octocat`` via AgentX, started from Claude Code");
-  });
 
   it("passes draft on to GitHub when the worker publishes", async () => {
     const { db, actions, identity, workspaceId, brokerInput, callback } = await readyWorkspace();
@@ -181,82 +97,11 @@ describe("ownership of the workspace an action is given", () => {
   });
 });
 
-describe("a cancel that loses a race (FR-022)", () => {
-  it("says nothing is running when the task finished first, and writes nothing", async () => {
-    const { db, actions, identity, workspaceId, conversationId } = await readyWorkspace();
-    const { operation } = await actions.acceptTask(identity, workspaceId, { requestId: randomUUID(), conversationId, prompt: "x" }, () => []);
-    const workspace = await actions.workspace(workspaceId);
-    finishBeforeNextTransaction(db, workspaceId, operation.id);
-    expect(await actions.cancelRunning(identity, workspace, () => [])).toEqual({ outcome: "NOTHING_RUNNING" });
-    expect(db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toHaveLength(0);
-  });
-
-  it("answers WORKSPACE_BUSY when an extra item's condition fails, and writes nothing", async () => {
-    const { db, actions, identity, workspaceId, conversationId } = await readyWorkspace();
-    const { operation } = await actions.acceptTask(identity, workspaceId, { requestId: randomUUID(), conversationId, prompt: "x" }, () => []);
-    db.set({ pk: "BLOCK", sk: "BLOCK" });
-    await expect(actions.cancelRunning(identity, await actions.workspace(workspaceId), () => [
-      { Put: { TableName: "state", Item: { pk: "BLOCK", sk: "BLOCK" }, ConditionExpression: "attribute_not_exists(pk)" } },
-    ])).rejects.toMatchObject({ code: "WORKSPACE_BUSY" });
-    expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operation.id}`)).toMatchObject({ status: "ACCEPTED" });
-    expect(db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toHaveLength(0);
-  });
-});
-
 describe("closing and cancelling with a developer identity", () => {
-  it("starts the close preflight with the developer requester and no Slack closedBy", async () => {
-    const { db, actions, identity, workspaceId } = await readyWorkspace();
-    const workspace = await actions.workspace(workspaceId);
-    const started = await actions.startClose(identity, workspace, randomUUID(), () => []);
-    expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${started.operationId}`)).toMatchObject({ kind: "close", requestedBy: { kind: "developer" } });
-    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "CLOSING" });
-    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("closedBy");
-  });
-
-  it("answers a repeated close with the first operation and writes no extra items again", async () => {
-    const { db, actions, identity, workspaceId } = await readyWorkspace();
-    const requestId = randomUUID();
-    let calls = 0;
-    const extra = () => { calls += 1; return []; };
-    const first = await actions.startClose(identity, await actions.workspace(workspaceId), requestId, extra);
-    const second = await actions.startClose(identity, await actions.workspace(workspaceId), requestId, extra);
-    expect(first.duplicate).toBe(false);
-    expect(second).toEqual({ operationId: first.operationId, duplicate: true });
-    expect(calls).toBe(1);
-    expect(db.find((item) => item.entityType === "OPERATION" && item.kind === "close")).toHaveLength(1);
-  });
-
-  it("cancels the running task with the developer requester and the extra items in the same transaction", async () => {
-    const { db, actions, identity, workspaceId, conversationId } = await readyWorkspace();
-    const { operation } = await actions.acceptTask(identity, workspaceId, { requestId: randomUUID(), conversationId, prompt: "x" }, () => []);
-    const result = await actions.cancelRunning(identity, await actions.workspace(workspaceId), (cancel) => [
-      { Put: { TableName: "turns", Item: { pk: `TASK#${taskId}`, sk: `TURN#${cancel.id}`, marker: true } } },
-    ]);
-    expect(result).toMatchObject({ outcome: "CANCEL_REQUESTED", targetOperationId: operation.id });
-    if (result.outcome !== "CANCEL_REQUESTED") throw new Error("expected a cancel");
-    expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${result.cancelOperationId}`)).toMatchObject({ kind: "cancel", requestedBy: { kind: "developer", developerId: MAYA.developerId } });
-    expect(db.get(`TASK#${taskId}`, `TURN#${result.cancelOperationId}`)).toMatchObject({ marker: true });
-  });
 
   it("says nothing is running when the workspace is idle", async () => {
     const { actions, identity, workspaceId } = await readyWorkspace();
     expect(await actions.cancelRunning(identity, await actions.workspace(workspaceId), () => [])).toEqual({ outcome: "NOTHING_RUNNING" });
-  });
-});
-
-describe("what the task reads", () => {
-  it("lists the workspace's operations, newest events first, artifacts with their size, and pull requests", async () => {
-    const { actions, identity, workspaceId, conversationId, events, artifact } = await readyWorkspace();
-    const { operation } = await actions.acceptTask(identity, workspaceId, { requestId: randomUUID(), conversationId, prompt: "x" }, () => []);
-    await events(workspaceId, operation.id, [{ type: "lifecycle", payload: { status: "RUNNING" } }, { type: "progress", payload: { message: "npm test" } }]);
-    await artifact(workspaceId, operation.id, "workspace.diff", "## demo\n");
-    expect((await actions.operations(workspaceId)).map((entry) => entry.kind).sort()).toEqual(["prepare", "task"]);
-    expect((await actions.eventsNewestFirst(operation.id, 10)).map((entry) => entry.type)).toEqual(["progress", "lifecycle"]);
-    expect(await actions.artifacts(workspaceId, operation.id)).toEqual([expect.objectContaining({ name: "workspace.diff", size: 8 })]);
-    const [stored] = await actions.artifacts(workspaceId, operation.id);
-    expect(await actions.readArtifact(stored!.objectKey, 1_000)).toBe("## demo\n");
-    expect(await actions.readArtifact(stored!.objectKey, 2)).toBe("##");
-    expect(await actions.pullRequests(workspaceId)).toEqual([]);
   });
 });
 

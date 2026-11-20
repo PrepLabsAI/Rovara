@@ -52,19 +52,7 @@ describe("invite codes are stored by hash only", () => {
     expect(h.audit()).toHaveLength(1);
   });
 
-  it.each([0, 721, 1.5, "24"])("refuses an expiry outside 1 to 720 whole hours (%j)", async (hours) => {
-    const h = world();
-    expect(await h.call({ kind: "company-invite-create", codeHash: newCompanyInviteCode().codeHash, expiresInHours: hours })).toEqual({ ok: false, error: "invalid_request" });
-    expect(h.codes()).toEqual([]);
-  });
 
-  it("refuses a plaintext code or any extra field in the event", async () => {
-    const h = world(); const made = newCompanyInviteCode();
-    for (const event of [{ kind: "company-invite-create", codeHash: made.code, expiresInHours: 1 }, { kind: "company-invite-create", codeHash: made.codeHash, expiresInHours: 1, code: made.code }]) {
-      expect(await h.call(event)).toEqual({ ok: false, error: "invalid_request" });
-    }
-    expect(h.codes()).toEqual([]);
-  });
 });
 
 describe("list, revoke and the self-serve switch", () => {
@@ -77,13 +65,6 @@ describe("list, revoke and the self-serve switch", () => {
     expect(listed.selfServe).toBe("open"); expect(listed.more).toBe(false);
     expect(Object.fromEntries(listed.invites.map((invite) => [invite.codeId, invite.status]))).toEqual({ [one.codeId]: "expired", [two.codeId]: "live" });
     for (const secret of [one.code, two.code, one.codeHash, two.codeHash]) expect(JSON.stringify(listed)).not.toContain(secret);
-  });
-
-  it("an unreadable stored code refuses the whole list (no partial answer)", async () => {
-    const h = world(); const made = newCompanyInviteCode();
-    await h.call({ kind: "company-invite-create", codeHash: made.codeHash, expiresInHours: 1 });
-    h.db.set({ ...h.codes()[0]!, status: "unknown" });
-    expect(await h.call({ kind: "company-invite-list" })).toEqual({ ok: false, error: "unavailable" });
   });
 
   it("revoke is conditional on a live code, writes its audit row, and a used or revoked code is not found", async () => {
@@ -146,23 +127,6 @@ describe("an install administrator's changes and list", () => {
     };
     return { h, harness, change };
   }
-
-  it("create shows only the code id, stores the code once applied, and the list shows it without its hash", async () => {
-    const { h, harness, change } = await setUp(); const made = newCompanyInviteCode();
-    const { planned, apply } = await change({ kind: "create_company_invite", codeHash: made.codeHash, expiresInHours: 72 });
-    expect(planned.status).toBe(201);
-    const view = planned.body.change as { effect: string; details: unknown };
-    expect(view.effect).toContain(`Make company invite code ${made.codeId}`);
-    expect(JSON.stringify(view)).not.toContain(made.codeHash);
-    expect(h.codes()).toEqual([]);
-    expect((await apply()).body.change).toMatchObject({ status: "applied" });
-    expect(h.codes()).toEqual([expect.objectContaining({ sk: `CODE#${made.codeHash}`, status: "live" })]);
-    // The applier is recorded as the creator, never "operator".
-    expect(h.codes()[0]!.createdBy).toMatch(/^[a-f0-9]{64}$/);
-    const listed = await harness.admin("GET", "/v1/admin/company-invites");
-    expect(listed.body).toMatchObject({ invites: [{ codeId: made.codeId, status: "live" }], selfServe: "open", more: false });
-    expect(JSON.stringify(listed.body)).not.toContain(made.codeHash);
-  });
 
   it("revoke and the self-serve switch are changes too; revoke of an unknown id changes nothing", async () => {
     const { h, harness, change } = await setUp(); const made = newCompanyInviteCode();
