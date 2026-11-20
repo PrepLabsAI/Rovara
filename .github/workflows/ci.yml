@@ -196,7 +196,9 @@ jobs:
     needs: [plan, build]
     if: needs.plan.outputs.tests != 'none'
     name: test (${{ matrix.shard }}/${{ strategy.job-total }})
-    runs-on: ubuntu-latest
+    # #1200: a pull request into mainline from this repository runs its shards on the account's CodeBuild ARM runner (infra/lib/ci-runner.ts), where they
+    # don't wait for a free GitHub runner; everything else (code/next, a fork's pull request) runs them on GitHub's free runner, as before.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.base_ref == 'mainline' && github.event.pull_request.head.repo.full_name == github.repository) && format('codebuild-rovara-ci-tests-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
     # 40, not 25: shard 2 passed 25 minutes on 2026-11-14 as code/next grew (PRs #612, #517 cancelled at the limit); shards 1, 3, 4 take 17-21.
     timeout-minutes: 40
     strategy:
@@ -214,10 +216,12 @@ jobs:
       - run: npm ci
       # tests/unit/port-guard.test.ts runs the real secret scan, and its re-check 3 cases fail loudly without gitleaks (they never skip). Same pinned
       # release and checksum as the port-guard job below; keep the two in step.
+      # #1200: the x64 or the arm64 build, for this runner (CodeBuild's is arm64); the arm64 checksum is the release's (infra/lib/release-pipeline.ts).
       - name: Install gitleaks 8.30.1 (checksum pinned)
         run: |
-          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
-          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -
+          if [ "$(uname -m)" = aarch64 ]; then arch=arm64; sum=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080; else arch=x64; sum=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb; fi
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_${arch}.tar.gz"
+          echo "${sum}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -
           mkdir "$RUNNER_TEMP/gitleaks-bin"
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
           echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
@@ -228,9 +232,26 @@ jobs:
           path: ${{ runner.temp }}/build-output
       - name: Unpack the build output
         run: tar -xzf "$RUNNER_TEMP/build-output/build-output.tgz"
+      # #1200: CodeBuild runs the job as root, and root can write to any file, so the tests that prove a read-only git directory is refused as writable cannot
+      # pass as root. As the release does (scripts/release-common.ts runTests), the tests then run as an unprivileged account (65534) that owns the checkout;
+      # root keeps working in it (safe.directory, in this throwaway container only). On GitHub's runner (not root) this does nothing and AS_TESTER stays empty.
+      - name: Run the tests as an ordinary account (CodeBuild only)
+        run: |
+          if [ "$(id -u)" != 0 ]; then exit 0; fi
+          git config --global --add safe.directory '*'
+          home="$RUNNER_TEMP/tester-home"
+          mkdir -p "$home/tmp"
+          chown -R 65534:65534 "$GITHUB_WORKSPACE" "$home"
+          # Every directory above the checkout, the tester's home and Node must be enterable by that account.
+          for path in "$GITHUB_WORKSPACE" "$home" "$(dirname "$(command -v node)")" "$RUNNER_TEMP/gitleaks-bin"; do
+            while [ "$path" != / ]; do chmod o+x "$path"; path="$(dirname "$path")"; done
+          done
+          chmod o+r "$RUNNER_TEMP"/*.txt 2>/dev/null || true
+          echo "AS_TESTER=setpriv --reuid=65534 --regid=65534 --clear-groups env HOME=$home TMPDIR=$home/tmp" >> "$GITHUB_ENV"
+          echo "available parallelism: $(node -p 'require("os").availableParallelism()'), memory: $(free -g | awk '/Mem:/{print $2}') GB"
       - name: Tests (the whole suite)
         if: needs.plan.outputs.tests == 'all'
-        run: npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+        run: $AS_TESTER npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
       # Vitest's --changed follows imports; the plan adds the tests that name a changed file or a package the change reaches (scripts/ci-plan.ts relatedTests).
       - name: Tests (the ones this change can reach)
         if: needs.plan.outputs.tests == 'changed'
@@ -253,8 +274,9 @@ jobs:
           fi
           git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
           node "$PLAN_SCRIPT" "$RUNNER_TEMP/changed.txt"
-          npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}
-          if [ -s "$CI_EXTRA_TESTS" ]; then xargs npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }} < "$CI_EXTRA_TESTS"; fi
+          [ -f "$CI_EXTRA_TESTS" ] && chmod o+r "$CI_EXTRA_TESTS"
+          $AS_TESTER npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+          if [ -s "$CI_EXTRA_TESTS" ]; then xargs $AS_TESTER npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }} < "$CI_EXTRA_TESTS"; fi
 
   # Real Chromium E2E checks need a Linux ARM64 Docker host, the platform Rovara's runtime targets. This job
   # builds the pinned browser executor image, smoke-tests it with no network, then runs tests/linux against

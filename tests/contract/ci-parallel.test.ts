@@ -77,11 +77,31 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
     expect(test.strategy.matrix.shard).toBe("${{ fromJSON(needs.plan.outputs.shards) }}");
     const all = test.steps.find((step) => step.name === "Tests (the whole suite)")!;
     expect(all.if).toBe("needs.plan.outputs.tests == 'all'");
-    expect(all.run).toBe("npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+    // #1200: $AS_TESTER is empty on GitHub's runner and drops root to an ordinary account on CodeBuild's.
+    expect(all.run).toBe("$AS_TESTER npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
     const changed = test.steps.find((step) => step.name === "Tests (the ones this change can reach)")!;
     expect(changed.if).toBe("needs.plan.outputs.tests == 'changed'");
-    expect(changed.run).toContain("npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
-    expect(changed.run).toContain("xargs npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+    expect(changed.run).toContain("$AS_TESTER npm test -- --changed HEAD^1 --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+    expect(changed.run).toContain("xargs $AS_TESTER npm test -- --passWithNoTests --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+  });
+
+  // #1200: a pull request into mainline from this repository runs its shards on the account's CodeBuild runner (infra/lib/ci-runner.ts); a fork's and
+  // every other run use GitHub's free runner. The tests run as an ordinary account there, since CodeBuild runs the job as root.
+  it("runs the shards of a same-repository pull request into mainline on the CodeBuild runner, as an ordinary account, and everything else on GitHub's", async () => {
+    const test = (await workflow()).jobs.test as Job & { "runs-on"?: string };
+    expect(test["runs-on"]).toBe("${{ (github.event_name == 'pull_request' && github.base_ref == 'mainline' && github.event.pull_request.head.repo.full_name == github.repository) && format('codebuild-rovara-ci-tests-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}");
+    const order = test.steps.map((step) => step.name ?? step.uses ?? "");
+    const asTester = test.steps.find((step) => step.name === "Run the tests as an ordinary account (CodeBuild only)")!;
+    expect(order.indexOf(asTester.name!)).toBeGreaterThan(order.indexOf("Unpack the build output"));
+    expect(order.indexOf(asTester.name!)).toBeLessThan(order.findIndex((name) => name.startsWith("Tests (")));
+    expect(asTester.run).toContain('if [ "$(id -u)" != 0 ]; then exit 0; fi');
+    expect(asTester.run).toContain("AS_TESTER=setpriv --reuid=65534 --regid=65534 --clear-groups");
+    const gitleaks = test.steps.find((step) => step.name === "Install gitleaks 8.30.1 (checksum pinned)")!;
+    expect(gitleaks.run).toContain("gitleaks_8.30.1_linux_${arch}.tar.gz");
+    // Every other job stays on GitHub's runners.
+    for (const [name, job] of Object.entries((await workflow()).jobs)) {
+      if (name !== "test") expect(String((job as { "runs-on"?: string })["runs-on"]), name).not.toContain("codebuild");
+    }
   });
 
   it("reports a check called `ci-mode (full)` only in a full run, for the merge to require", async () => {
