@@ -3,7 +3,8 @@
 import { describe, expect, it } from "vitest";
 import config from "../../vitest.config.js";
 import nativeP0Config from "../../vitest.native-p0.config.js";
-import { nativeP0Files } from "../support/vitest-shared-config.js";
+import nightlyConfig from "../../vitest.nightly.config.js";
+import { nativeP0Files, nightlyOnlyFiles } from "../support/vitest-shared-config.js";
 
 describe("the test runner's configuration", () => {
   it("gives every test, CDK synths included, 60 seconds", () => {
@@ -16,5 +17,13 @@ describe("the test runner's configuration", () => {
     expect(nativeP0Config.test?.passWithNoTests).toBe(false);
     expect(nativeP0Config.test?.globalSetup).toEqual(config.test?.globalSetup);
     expect(nativeP0Config.test?.testTimeout).toBe(config.test?.testTimeout);
+  });
+
+  it("leaves the nightly-only tests out of `npm test` and runs them, and nothing else, in the nightly profile", () => {
+    expect(nightlyOnlyFiles).toContain("tests/unit/eval-question-simulation.test.ts");
+    expect(config.test?.exclude).toEqual(expect.arrayContaining(nightlyOnlyFiles));
+    expect(nightlyConfig.test?.include).toEqual(nightlyOnlyFiles);
+    expect(nightlyConfig.test?.passWithNoTests).toBe(false);
+    expect(nightlyConfig.test?.globalSetup).toEqual(config.test?.globalSetup);
   });
 });
