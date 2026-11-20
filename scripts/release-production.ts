@@ -10,6 +10,8 @@ import {
   buildAndPushWorker,
   describeStack,
   ensureRepository,
+  legacySavedEnvRolesContext,
+  resolveLegacySavedEnvRolesContext,
   optionalControlPlaneParameters,
   parseReleaseArgs,
   profileArgs,
@@ -191,6 +193,7 @@ export function reusableImage(runner: Runner, options: ReleaseOptions, image: De
 export async function releaseProduction(
   options: ProductionReleaseOptions,
 ): Promise<ProductionReleaseManifest | undefined> {
+  legacySavedEnvRolesContext(); // refuse a bad AGENTX_LEGACY_SAVED_ENV_ROLES before anything is built
   if (options.dryRun) {
     process.stdout.write([
       "AgentX production release plan:",
@@ -214,6 +217,11 @@ export async function releaseProduction(
   }
 
   const runner = new Runner(options);
+  // Read-only and before the worker build, the push and the runtime deploy: a release that would undo the move of the saved environment roles must not end half applied (new runtime, old control plane). The mode
+  // is derived from the deployed control plane when AGENTX_LEGACY_SAVED_ENV_ROLES is unset, so a finished move carries without a pipeline change.
+  const savedEnvRolesContext = resolveLegacySavedEnvRolesContext(
+    stackExists(runner, options.region, CONTROL_PLANE_STACK) ? describeStack(runner, options.region, CONTROL_PLANE_STACK) : undefined,
+  );
   const revision = runner.capture("git", ["rev-parse", "HEAD"]).stdout.trim();
   if (!options.allowDirty) {
     const dirty = runner.capture("git", ["status", "--porcelain"]).stdout.trim();
@@ -291,7 +299,7 @@ export async function releaseProduction(
   // field an older worker image does not know about fails the task. Publishing the image first
   // means every worker booted after this point is the tolerant side of the window; a worker
   // already running keeps its image until the idle reaper stops it.
-  deployControlPlane(runner, options, foundation);
+  deployControlPlane(runner, options, foundation, savedEnvRolesContext);
   const slackOrchestratorImage = await releaseSlackOrchestrator(runner, options, identity.Account, revision, foundation);
 
   const manifest: ProductionReleaseManifest = {
@@ -452,7 +460,8 @@ function assertFoundationHasNoPendingChanges(runner: Runner, options: ReleaseOpt
   }
 }
 
-function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation: StackDescription): void {
+function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation: StackDescription, savedEnvRolesContext: readonly string[]): void {
+  // savedEnvRolesContext is the legacy saved environment roles mode resolved at the top of releaseProduction (explicit AGENTX_LEGACY_SAVED_ENV_ROLES, or derived from the deployed control plane).
   runner.run("npx", [
     "cdk",
     "deploy",
@@ -466,6 +475,7 @@ function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation:
     "agentxDeploymentMode=ec2-ebs",
     "-c",
     `agentxRegion=${options.region}`,
+    ...savedEnvRolesContext,
     ...profileArgs(options.profile),
     ...optionalControlPlaneParameters(),
     ...CONTROL_PLANE_FOUNDATION_PARAMETERS.flatMap((name) => ["--parameters", `${CONTROL_PLANE_STACK}:${name}=${stackOutput(foundation, name)}`]),
@@ -487,7 +497,10 @@ function usage(): string {
     `  --allow-dirty              Explicitly allow releasing an uncommitted checkout\n` +
     `  --skip-checks              Skip typecheck, lint, and tests\n` +
     `  --dry-run                  Print the release stages without changing AWS\n` +
-    `  --help                     Show this help\n`;
+    `  --help                     Show this help\n\n` +
+    `Environment:\n` +
+    `  AGENTX_LEGACY_SAVED_ENV_ROLES  root (default), none or path: where the saved environment registry roles are. Passed to the control plane deploy as\n` +
+    `                             -c agentxLegacySavedEnvRoles=<value>. Unset, the release derives it from the deployed control plane (path once the roles moved to /agentx/production/); set it explicitly only for the two steps of the move (none, then path).\n`;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

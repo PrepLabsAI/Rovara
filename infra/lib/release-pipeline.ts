@@ -12,6 +12,7 @@ import {
   aws_s3 as s3,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
+import { LEGACY_SAVED_ENV_ROLES_CONTEXT, legacySavedEnvRolesMode } from "./saved-env-images.js";
 import { AGENTX_SLACK_ORCHESTRATOR_REPOSITORY } from "./slack-orchestrator.js";
 
 export const AGENTX_RELEASE_REPOSITORY_OWNER = "PrepLabsAI";
@@ -20,6 +21,8 @@ export const AGENTX_RELEASE_BRANCH = "mainline";
 // Must not match the broker's `agentx-*` CodeBuild gate allow-list, or a worker could start a release.
 export const AGENTX_RELEASE_PROJECT_NAME = "release-agentx-production";
 export const AGENTX_PRODUCTION_WORKER_REPOSITORY = "agentx-worker-production";
+/** The build project's environment variable that carries the legacy saved environment roles switch to scripts/release-production.ts (the same name as LEGACY_SAVED_ENV_ROLES_ENVIRONMENT there). */
+export const LEGACY_SAVED_ENV_ROLES_ENVIRONMENT = "AGENTX_LEGACY_SAVED_ENV_ROLES";
 export const AGENTX_RELEASE_AWS_CLI_VERSION = "2.36.47";
 export const AGENTX_RELEASE_STACKS = [
   "AgentXControlPlane",
@@ -66,6 +69,8 @@ export class ReleasePipelineStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
+    // The pipeline stack exists for the legacy install only, so the context is read as that install's.
+    const savedEnvRoles = legacySavedEnvRolesMode(this.node.tryGetContext(LEGACY_SAVED_ENV_ROLES_CONTEXT), undefined);
     const project = new codebuild.PipelineProject(this, "ReleaseBuild", {
       projectName: AGENTX_RELEASE_PROJECT_NAME,
       description: "Runs npm run release:prod for AgentX mainline commits",
@@ -75,6 +80,9 @@ export class ReleasePipelineStack extends Stack {
         // with more test files at once, which makes the trusted-base rule-file reads fail intermittently (#569).
         computeType: codebuild.ComputeType.LARGE,
         privileged: true,
+        // The legacy saved environment roles switch: the pipeline's release must carry the value the install is at, or it would put the roles back (scripts/release-production.ts). Only when this stack
+        // is itself deployed with `-c agentxLegacySavedEnvRoles=none|path`; unset, the project is exactly what it was.
+        ...(savedEnvRoles === "root" ? {} : { environmentVariables: { [LEGACY_SAVED_ENV_ROLES_ENVIRONMENT]: { value: savedEnvRoles } } }),
       },
       concurrentBuildLimit: 1,
       // #1151: a release that runs the full checks (CI proof not proven) and rebuilds the worker took over 60 minutes; one proven by CI takes 5-15.

@@ -29,6 +29,7 @@ export interface ReleaseManifest {
 }
 
 export interface StackDescription {
+  StackId?: string;
   Parameters?: Array<{ ParameterKey?: string; ParameterValue?: string }>;
   Outputs?: Array<{ OutputKey?: string; OutputValue?: string }>;
 }
@@ -496,6 +497,82 @@ export function optionalControlPlaneParameters(): string[] {
     const value = process.env[environment];
     return value ? ["--parameters", `${CONTROL_PLANE_STACK}:${parameter}=${value}`] : [];
   });
+}
+
+/** The environment variable that carries the legacy saved environment roles switch (CDK context `agentxLegacySavedEnvRoles`: root, none or path; infra/lib/saved-env-images.ts) into the production release. */
+export const LEGACY_SAVED_ENV_ROLES_ENVIRONMENT = "AGENTX_LEGACY_SAVED_ENV_ROLES";
+const LEGACY_SAVED_ENV_ROLES_VALUES = ["root", "none", "path"];
+/** The deployed stack's three saved environment role ARN outputs (infra/lib/saved-env-images.ts), by role. A path-style ARN means the install moved that role under `/agentx/production/`. */
+const SAVED_ENV_ROLE_ARN_OUTPUTS = { push: "SavedEnvImgPushRoleArn", pull: "SavedEnvImgPullRoleArn", manage: "SavedEnvImgManageRoleArn" } as const;
+const SAVED_ENV_ROLE_ARN = /^arn:(aws|aws-cn|aws-us-gov):iam::(\d{12}):role\/((?:agentx\/production\/)?)agentx-production-img-(push|pull|manage)$/;
+const STACK_ID = /^arn:(aws|aws-cn|aws-us-gov):cloudformation:[a-z0-9-]+:(\d{12}):stack\//;
+
+/**
+ * The `-c` flags that carry the switch to `cdk deploy`. Unset: none, so the default (today's template) holds, unless the release derives `path` from the deployed control plane ({@link resolveLegacySavedEnvRolesContext}). An unknown value throws.
+ */
+export function legacySavedEnvRolesContext(environment: Readonly<Record<string, string | undefined>> = process.env): string[] {
+  const value = environment[LEGACY_SAVED_ENV_ROLES_ENVIRONMENT];
+  if (value === undefined || value === "") return [];
+  if (!LEGACY_SAVED_ENV_ROLES_VALUES.includes(value)) {
+    throw new Error(`${LEGACY_SAVED_ENV_ROLES_ENVIRONMENT} must be one of ${LEGACY_SAVED_ENV_ROLES_VALUES.join(", ")} (got ${JSON.stringify(value)})`);
+  }
+  return ["-c", `agentxLegacySavedEnvRoles=${value}`];
+}
+
+/**
+ * Where the deployed control plane's saved environment roles are: under `/agentx/production/` (`path`), at the root path (`root`), or not at all (`none`: the stack exists but has none of the three saved role
+ * outputs, as between the two deploys of the move). The state is read from all three outputs, and each must be exactly `arn:<partition>:iam::<account>:role/<path>agentx-production-img-<push|pull|manage>` for
+ * its own role, in the partition and account of the stack itself (its StackId), with the path `/` or `/agentx/production/`. Anything else throws: a partial set, a mix of paths, a malformed or foreign ARN
+ * is not evidence of where the roles are, so the release refuses instead of guessing.
+ */
+export function deployedSavedEnvRolesState(deployed: StackDescription): "root" | "path" | "none" {
+  const roles = Object.entries(SAVED_ENV_ROLE_ARN_OUTPUTS).map(([role, key]) => ({ role, key, arn: deployed.Outputs?.find((output) => output.OutputKey === key)?.OutputValue }));
+  const present = roles.filter((entry) => entry.arn !== undefined);
+  if (present.length === 0) return "none";
+  const unrecognized = (detail: string): Error => new Error(`the deployed control plane's saved environment role outputs are not recognized (${detail}); refusing to guess where the roles are, so inspect the stack`);
+  if (present.length !== roles.length) throw unrecognized(`only ${present.map((entry) => entry.key).join(", ")} present of the three`);
+  const stack = STACK_ID.exec(deployed.StackId ?? "");
+  if (!stack) throw unrecognized("the stack's own ARN is missing or malformed, so the account cannot be checked");
+  const paths = new Set<string>();
+  for (const { role, key, arn } of roles) {
+    const parts = SAVED_ENV_ROLE_ARN.exec(arn!);
+    if (!parts || parts[1] !== stack[1] || parts[2] !== stack[2] || parts[4] !== role) throw unrecognized(`${key} is not the ${role} role of this stack's account`);
+    paths.add(parts[3]!);
+  }
+  if (paths.size !== 1) throw unrecognized("the three roles are not all at the same path");
+  return paths.has("agentx/production/") ? "path" : "root";
+}
+
+/**
+ * Refuses a release that would undo a move that is under way or done, judged from the deployed control plane (the release pipeline stack is not where the mode is kept):
+ *   - roles under `/agentx/production/`: only `path` (or an unset value, which the release derives as `path`) may follow;
+ *   - no saved roles (between the two deploys, or after a failed second one): only an explicit `path`, or `none` again, may follow, since an unset value or `root` would create the deleted roles at the root path again;
+ *   - roles at the root path: any value (the move starts with `none`).
+ */
+export function assertSavedEnvRolesNotReverted(deployed: StackDescription, environment: Readonly<Record<string, string | undefined>> = process.env): void {
+  const state = deployedSavedEnvRolesState(deployed);
+  const value = environment[LEGACY_SAVED_ENV_ROLES_ENVIRONMENT];
+  const unset = value === undefined || value === "";
+  if (state === "path" && (unset || value === "path")) return;
+  if (state === "path") {
+    throw new Error(`the deployed control plane has its saved environment roles under /agentx/production/; ${LEGACY_SAVED_ENV_ROLES_ENVIRONMENT}=${value ?? ""} would revert them (leave it unset or set ${LEGACY_SAVED_ENV_ROLES_ENVIRONMENT}=path)`);
+  }
+  if (state === "none" && value !== "path" && value !== "none") {
+    throw new Error(`the deployed control plane has no saved environment roles (the move to /agentx/production/ is under way); set ${LEGACY_SAVED_ENV_ROLES_ENVIRONMENT}=path to finish it, or =none to repeat the first step: ${unset ? "an unset value" : value} would create the deleted roles at the root path again`);
+  }
+}
+
+/**
+ * The `-c` flags a production release passes to the control plane deploy: the explicit value of AGENTX_LEGACY_SAVED_ENV_ROLES (validated), or, when none is given and the deployed control plane has
+ * its roles under `/agentx/production/`, `path`, so routine releases (pipeline included) keep a finished move without anyone updating the pipeline. Throws when the release would undo the move
+ * ({@link assertSavedEnvRolesNotReverted}). `deployed` is undefined when the control plane does not exist yet (a fresh install: the explicit value only).
+ */
+export function resolveLegacySavedEnvRolesContext(deployed: StackDescription | undefined, environment: Readonly<Record<string, string | undefined>> = process.env): string[] {
+  const explicit = legacySavedEnvRolesContext(environment);
+  if (deployed === undefined) return explicit;
+  assertSavedEnvRolesNotReverted(deployed, environment);
+  if (explicit.length === 0 && deployedSavedEnvRolesState(deployed) === "path") return ["-c", "agentxLegacySavedEnvRoles=path"];
+  return explicit;
 }
 
 function controlPlaneParameterDefinitions(): Array<{ parameter: string; environment: string }> {
