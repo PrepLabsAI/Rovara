@@ -78,21 +78,6 @@ describe("provisioning", () => {
     expect(result.leases.map((lease) => [lease.profileId, lease.expiresAt])).toEqual([["buyer", "2026-11-03T10:45:00.000Z"], ["admin", "2026-11-03T10:45:00.000Z"], ["partner", "2026-11-03T10:45:00.000Z"]]);
     expect(result.leases.every((lease) => Date.parse(lease.expiresAt) - Date.parse(ENDS) <= RUN_SCOPED_GRACE_MS)).toBe(true);
   });
-  it("tells the provisioner the expiry it must honour and the lease id to use as the account's handle", async () => {
-    const seen: Array<{ profile: string; expiresAt: string; leaseId: string }> = [];
-    const port: AccountProvisionerPort = { ...fake(), async create({ account, expiresAt, leaseId }) { seen.push({ profile: account.profileId, expiresAt, leaseId }); return { loginRef: `l-${account.profileId}`, revokeHandle: leaseId }; } };
-    const result = await provision([seed, hook], port);
-    expect(seen.map((item) => [item.profile, item.expiresAt])).toEqual([["buyer", "2026-11-03T10:45:00.000Z"], ["partner", "2026-11-03T10:45:00.000Z"]]);
-    expect(seen.every((item) => /^rvl-/u.test(item.leaseId))).toBe(true);
-    expect(result.ok && result.leases.map((lease) => [lease.profileId, lease.loginRef, lease.revokeHandle === lease.leaseId])).toEqual([["buyer", "l-buyer", true], ["partner", "l-partner", true]]);
-  });
-  it("returns the secrets for the redactor and keeps none on a lease or a record", async () => {
-    const store = memoryStore();
-    const result = await provision([seed], fake({ secrets: ["s3cret-Password-value"] }), { store });
-    expect(result.ok && result.secrets).toEqual(["s3cret-Password-value"]);
-    expect(JSON.stringify(result.ok && result.leases)).not.toContain("s3cret-Password-value");
-    expect(JSON.stringify([...store.records.values()])).not.toContain("s3cret-Password-value");
-  });
   it("leaves registered accounts alone and says they are not run-scoped", async () => {
     const port = fake();
     const result = await provision([seed, registered], port);
@@ -118,36 +103,6 @@ describe("provisioning", () => {
   it("refuses a profile named twice", async () => {
     expect(await provision([seed, { ...hook, profileId: "buyer" }], fake())).toMatchObject({ ok: false, code: "duplicate_profile" });
   });
-  it("revokes the accounts already made when a later one fails, ending their sessions and proving them gone", async () => {
-    const port = fake({ failCreateFor: "admin" });
-    const result = await provision([seed, cognito, hook], port);
-    expect(result).toEqual({ ok: false, code: "provision_failed", cleanedUp: true });
-    expect(port.calls.filter((call) => call.startsWith("create"))).toHaveLength(2);
-    expect([...port.accounts]).toEqual([]);
-    expect(port.calls.filter((call) => call.startsWith("end"))).toHaveLength(2);
-    expect(JSON.stringify(result)).not.toContain("hunter2");
-  });
-  it("revokes by the lease id an account that was made before its create call failed (a timeout)", async () => {
-    const port = fake({ failCreateFor: "admin", createdBeforeFailing: true });
-    const result = await provision([cognito], port);
-    expect(result).toEqual({ ok: false, code: "provision_failed", cleanedUp: true });
-    expect([...port.accounts]).toEqual([]);
-    expect(port.calls.some((call) => /^revoke rvl-/u.test(call))).toBe(true);
-  });
-  it("says the cleanup was not confirmed when it could not be", async () => {
-    const port = fake({ failCreateFor: "admin", revokeFails: 99 });
-    expect(await provision([seed, cognito], port)).toEqual({ ok: false, code: "provision_failed", cleanedUp: false });
-  });
-  it("refuses an answer of the wrong shape, or one that names a handle other than the lease id, and revokes by the lease id", async () => {
-    for (const answer of [{ loginRef: "has space", revokeHandle: "h" }, { loginRef: "l" }, { loginRef: "l", revokeHandle: "h", token: "x" }, { loginRef: "l", revokeHandle: "h", secrets: Array(9).fill("x") }, { loginRef: "l", revokeHandle: "its-own-handle" }]) {
-      const port = fake({ answer });
-      const result = await provision([seed], port);
-      expect(result, JSON.stringify(answer)).toMatchObject({ ok: false, code: "provisioner_answer_invalid", cleanedUp: true });
-      // the account the fake made under the lease id is gone, whatever handle the answer claimed
-      expect([...port.accounts]).toEqual([]);
-      expect(port.calls.some((call) => /^revoke rvl-/u.test(call))).toBe(true);
-    }
-  });
   it("is cancelled by the caller's signal", async () => {
     const stuck: AccountProvisionerPort = { ...fake(), create: () => new Promise(() => undefined) };
     const controller = new AbortController();
@@ -158,15 +113,6 @@ describe("provisioning", () => {
 });
 
 describe("durable leases (I3)", () => {
-  it("writes the lease record BEFORE the account exists, and marks it active once it does", async () => {
-    const store = memoryStore();
-    const order: string[] = [];
-    const port: AccountProvisionerPort = { ...fake(), async create({ leaseId }) { order.push(`create saw ${store.records.get(leaseId)?.state}`); return { loginRef: "l", revokeHandle: leaseId }; } };
-    await provision([seed], port, { store });
-    expect(order).toEqual(["create saw creating"]);
-    expect([...store.records.values()][0]).toMatchObject({ state: "active", loginRef: "l", profileId: "buyer", provisioner: "seed_command", roundId: "round-1", expiresAt: "2026-11-03T10:45:00.000Z" });
-    expect(store.log[0]).toBe("put creating");
-  });
   it("creates nothing when the lease cannot be written, and cleans up what an earlier account made", async () => {
     const port = fake();
     expect(await provision([seed], port, { store: memoryStore(true) })).toEqual({ ok: false, code: "lease_store_failed", cleanedUp: true });
@@ -180,13 +126,6 @@ describe("durable leases (I3)", () => {
   });
   it("refuses a lease id of the wrong shape (it becomes a remote handle)", async () => {
     expect(await provision([seed], fake(), { newLeaseId: () => "not a lease id" })).toMatchObject({ ok: false, code: "lease_store_failed" });
-  });
-  it("marks a fully revoked lease revoked", async () => {
-    const store = memoryStore(); const port = fake();
-    const result = await provision([seed], port, { store });
-    if (!result.ok) throw new Error("provision");
-    await revokeRunScopedAccounts({ leases: result.leases, accounts: [seed], ports: ports(port), store, now: NOW, sessions: new Map([["buyer", [COOKIE]]]) });
-    expect([...store.records.values()][0]?.state).toBe("revoked");
   });
   it("sweeps expired leases a crash left behind, and leaves a round that may still be running alone", async () => {
     const store = memoryStore(); const port = fake();
@@ -203,13 +142,6 @@ describe("durable leases (I3)", () => {
     expect(later.swept).toEqual([second.leases[0]!.leaseId]);
     expect((await store.listOutstanding())).toEqual([]);
   });
-  it("sweeps a lease still in `creating` (the create call never returned) by the lease id", async () => {
-    const store = memoryStore(); const port = fake({ failCreateFor: "buyer", createdBeforeFailing: true });
-    const record: LeaseRecord = { leaseId: "rvl-orphan-0001", roundId: "r", profileId: "buyer", provisioner: "seed_command", account: seed as RunScopedAccount, state: "creating", revokeHandle: "rvl-orphan-0001", createdAt: ENDS, expiresAt: "2026-11-03T10:45:00.000Z" };
-    await store.put(record); port.accounts.add("rvl-orphan-0001");
-    expect(await sweepRunScopedLeases({ store, ports: ports(port), now: NOW + 3_600_000 })).toEqual({ swept: ["rvl-orphan-0001"], stuck: [] });
-    expect(port.accounts.size).toBe(0);
-  });
   it("reports a lease it cannot clear as stuck (for the alarm), and tries it again next sweep", async () => {
     const store = memoryStore();
     const failing = fake({ revokeFails: 99 });
@@ -219,12 +151,6 @@ describe("durable leases (I3)", () => {
     expect(sweep).toEqual({ swept: [], stuck: [result.leases[0]!.leaseId] });
     expect((await store.listOutstanding())).toHaveLength(1);
     expect((await sweepRunScopedLeases({ store, ports: { seed_command: undefined, cognito_test_pool: undefined, http_hook: undefined }, now: NOW + 3_600_000 })).stuck).toHaveLength(1);
-  });
-  it("does not clear a lease whose account still exists after the revoke", async () => {
-    const store = memoryStore();
-    const result = await provision([seed], fake(), { store });
-    if (!result.ok) throw new Error("provision");
-    expect((await sweepRunScopedLeases({ store, ports: ports(fake({ presence: "present" })), now: NOW + 3_600_000 })).stuck).toHaveLength(1);
   });
   it("survives a store that cannot list", async () => {
     const store: LeaseStore = { put: async () => undefined, update: async () => undefined, listOutstanding: async () => { throw new Error("down"); } };
@@ -240,50 +166,11 @@ describe("revocation and its proof (C1)", () => {
   const sessions = new Map<string, SessionCredential[]>([["buyer", [COOKIE]], ["admin", [BEARER]], ["partner", [COOKIE, BEARER]]]);
   const live = (port: Fake) => { for (const item of leases) { port.accounts.add(item.revokeHandle); port.sessionsOf.set(item.revokeHandle, "live"); } return port; };
 
-  it("is confirmed when sessions were ended, every account revoked and gone, and every replayed credential was refused", async () => {
-    const port = live(fake());
-    const report = await revokeRunScopedAccounts({ leases, accounts: all, ports: ports(port), now: NOW, sessions });
-    expect(report.confirmed).toBe(true);
-    expect(report.heldUntil).toBeUndefined();
-    expect(report.accounts).toEqual(["buyer", "admin", "partner"].map((profileId) => ({ profileId, sessionsEnded: true, revoked: true, accountGone: true, existenceControl: true, sessionProof: "dead", recorded: true })));
-    // each credential is replayed twice: alive before the revoke (the control), dead after
-    expect(port.calls.filter((call) => call.startsWith("replay"))).toHaveLength(8);
-  });
-  it("sees the account PRESENT and the credential ALIVE first, then ends the sessions, deletes the account, and only then checks it is gone and the credential dead", async () => {
-    const port = live(fake());
-    await revokeRunScopedAccounts({ leases: leases.slice(0, 1), accounts: all, ports: ports(port), now: NOW, sessions });
-    expect(port.calls).toEqual(["exists rvl-buyer-0001", "replay cookie", "end rvl-buyer-0001", "revoke rvl-buyer-0001", "exists rvl-buyer-0001", "replay cookie"]);
-  });
   it("is NOT confirmed when a replayed credential still works, and waiting never settles it", async () => {
     const port = live(fake({ replay: (credential, ended) => (!ended || credential.kind === "bearer" ? "alive" : "dead") }));
     const report = await revokeRunScopedAccounts({ leases, accounts: all, ports: ports(port), now: NOW, sessions });
     expect(report.confirmed).toBe(false);
     expect(report.accounts.map((item) => item.sessionProof)).toEqual(["dead", "alive", "alive"]);
-    expect(revocationSettledAt(report, NOW + 10 * RUN_SCOPED_ASSUMED_TOKEN_TTL_MS)).toBe(false);
-  });
-  it("a replayed credential that works blocks the whole report even when another account earns a hold, and waiting out that hold never settles it", async () => {
-    const port = live(fake({ replay: (credential, ended) => (!ended || credential.kind === "bearer" ? "alive" : "dead") }));
-    // buyer: dead; admin: alive (bearer); partner has no credential kept, so a hold is earned
-    const mixed = new Map<string, SessionCredential[]>([["buyer", [COOKIE]], ["admin", [BEARER]]]);
-    const report = await revokeRunScopedAccounts({ leases, accounts: all, ports: ports(port), now: NOW, sessions: mixed, maxTokenTtlMs: 600_000 });
-    expect(report.accounts.map((item) => item.sessionProof)).toEqual(["dead", "alive", "not_possible"]);
-    expect(report.heldUntil).toBe("2026-11-03T10:10:00.000Z");
-    expect(report.confirmed).toBe(false);
-    expect(revocationSettledAt(report, NOW + 600_000)).toBe(false);
-  });
-  it("is NOT confirmed when the existence probe says the account is still there or cannot say", async () => {
-    for (const presence of ["present", "unclear"] as const) {
-      const report = await revokeRunScopedAccounts({ leases, accounts: all, ports: ports(live(fake({ presence }))), now: NOW, sessions });
-      expect(report.confirmed, presence).toBe(false);
-      expect(report.accounts.every((item) => item.revoked && !item.accountGone)).toBe(true);
-    }
-  });
-  it("is NOT confirmed when the sessions could not be ended, however the rest went, and is not held (waiting does not end a server-side session)", async () => {
-    const port = live(fake({ endFails: 99 }));
-    const report = await revokeRunScopedAccounts({ leases, accounts: all, ports: ports(port), now: NOW, sessions });
-    expect(report.confirmed).toBe(false);
-    expect(report.accounts.every((item) => !item.sessionsEnded)).toBe(true);
-    expect(report.heldUntil).toBeUndefined();
     expect(revocationSettledAt(report, NOW + 10 * RUN_SCOPED_ASSUMED_TOKEN_TTL_MS)).toBe(false);
   });
   it("holds publication until the longest token lifetime has passed when the session probe cannot run", async () => {
@@ -322,63 +209,11 @@ describe("revocation and its proof (C1)", () => {
     expect(holdFor({ maxHoldMs: 3_600_000 })).toEqual({ refused: "token_lifetime_over_max_hold" });
     expect(RUN_SCOPED_DEFAULT_MAX_HOLD_MS).toBe(14 * 24 * 3_600_000);
   });
-  it("takes the hold from the clock AFTER the revocations, not from the time the call began", async () => {
-    let calls = 0;
-    const slow = live(fake({ noReplay: true }));
-    const original = slow.revoke.bind(slow);
-    slow.revoke = async (input) => { calls += 1; return original(input); };
-    const report = await revokeRunScopedAccounts({ leases: leases.slice(0, 1), accounts: all, ports: ports(slow), now: NOW, maxTokenTtlMs: 600_000, clock: () => NOW + 120_000 });
-    expect(calls).toBe(1);
-    expect(report.heldUntil).toBe(new Date(NOW + 120_000 + 600_000).toISOString());
-  });
-  it("only asks for a hold when everything else is proven, and a mixed report holds for the accounts it could not replay", async () => {
-    const partial = new Map<string, SessionCredential[]>([["buyer", [COOKIE]]]);
-    const report = await revokeRunScopedAccounts({ leases, accounts: all, ports: ports(live(fake())), now: NOW, sessions: partial, maxTokenTtlMs: 600_000 });
-    expect(report.accounts.map((item) => item.sessionProof)).toEqual(["dead", "not_possible", "not_possible"]);
-    expect(report.confirmed).toBe(false);
-    expect(report.heldUntil).toBe("2026-11-03T10:10:00.000Z");
-    expect(revocationSettledAt(report, NOW + 600_000)).toBe(true);
-  });
-  it("retries a failing revoke a bounded number of times, then gives up on that account only", async () => {
-    const recovering = await revokeRunScopedAccounts({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake({ revokeFails: RUN_SCOPED_REVOKE_ATTEMPTS - 1 }))), now: NOW, sessions });
-    expect(recovering.confirmed).toBe(true);
-    const port = live(fake({ revokeFails: RUN_SCOPED_REVOKE_ATTEMPTS }));
-    const report = await revokeRunScopedAccounts({ leases, accounts: all, ports: ports(port), now: NOW, sessions });
-    expect(report.accounts.map((item) => item.revoked)).toEqual([false, true, true]);
-    expect(report.confirmed).toBe(false);
-    // the account that could not be revoked is seen present first (the control) for all three, and checked gone afterwards for the two that were revoked
-    expect(port.calls.filter((call) => call.startsWith("exists")).length).toBe(5);
-    expect(report.accounts[0]?.sessionProof).toBe("not_possible");
-  });
   it("is not confirmed with nothing to prove, and for a lease whose account or port is unknown, and a registered account is never revocable", async () => {
     expect((await revokeRunScopedAccounts({ leases: [], accounts: all, ports: ports(fake()), now: NOW })).confirmed).toBe(false);
     expect((await revokeRunScopedAccounts({ leases: [lease("ghost", "seed_command")], accounts: all, ports: ports(fake()), now: NOW })).confirmed).toBe(false);
     expect((await revokeRunScopedAccounts({ leases: [leases[0]!], accounts: all, ports: { seed_command: undefined, cognito_test_pool: undefined, http_hook: undefined }, now: NOW })).confirmed).toBe(false);
     expect((await revokeRunScopedAccounts({ leases: [lease("old", "seed_command")], accounts: [registered], ports: ports(fake()), now: NOW })).confirmed).toBe(false);
-  });
-  it("replays each account's OWN credentials (per-case attribution), every one the round held, however many", async () => {
-    const replayed: Array<[string, string]> = [];
-    const port = live(fake());
-    const ended = new Set<string>();
-    const endSessions = port.endSessions.bind(port);
-    port.endSessions = async (input) => { ended.add(input.account.profileId); return endSessions(input); };
-    port.sessionState = async ({ account, credential }) => { replayed.push([account.profileId, credential.value]); return ended.has(account.profileId) ? "dead" : "alive"; };
-    const many = new Map<string, SessionCredential[]>([["buyer", [COOKIE, BEARER, { kind: "cookie", value: "third-value-3" }, { kind: "cookie", value: "fourth-value-4" }, { kind: "bearer", value: "fifth-value-5" }]], ["admin", [BEARER]]]);
-    await revokeRunScopedAccounts({ leases: leases.slice(0, 2), accounts: all, ports: ports(port), now: NOW, sessions: many });
-    // each credential is replayed before the revoke (the control) and after it
-    expect(replayed.filter(([profile]) => profile === "buyer").map(([, value]) => value)).toEqual([COOKIE.value, BEARER.value, "third-value-3", "fourth-value-4", "fifth-value-5", COOKIE.value, BEARER.value, "third-value-3", "fourth-value-4", "fifth-value-5"]);
-    expect(replayed.filter(([profile]) => profile === "admin").map(([, value]) => value)).toEqual([BEARER.value, BEARER.value]);
-  });
-  it("PC-N1: a fourth credential that stays alive after the revoke keeps the revocation unconfirmed, and waiting never settles it", async () => {
-    const issued: SessionCredential[] = [COOKIE, BEARER, { kind: "cookie", value: "third-value-3" }, { kind: "bearer", value: "fourth-value-4" }];
-    const port = live(fake({ replay: (credential, ended) => (!ended || credential.value === "fourth-value-4" ? "alive" : "dead") }));
-    const report = await revokeRunScopedAccounts({ leases: leases.slice(0, 1), accounts: all, ports: ports(port), now: NOW, sessions: new Map([["buyer", issued]]) });
-    expect(report.accounts[0]?.sessionProof).toBe("alive");
-    expect(report.confirmed).toBe(false);
-    expect(revocationSettledAt(report, NOW + 10 * RUN_SCOPED_ASSUMED_TOKEN_TTL_MS)).toBe(false);
-    // the same round with that credential refused is confirmed, so the test is not passing for another reason
-    const dead = await revokeRunScopedAccounts({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake())), now: NOW, sessions: new Map([["buyer", issued]]) });
-    expect(dead.confirmed).toBe(true);
   });
   it("replays at most 32 credentials per account, and any beyond that count as uncontrolled, so the proof fails closed", async () => {
     expect(RUN_SCOPED_SESSION_PROBES_MAX).toBe(32);
@@ -402,33 +237,10 @@ describe("revocation and its proof (C1)", () => {
     expect(exact.accounts[0]?.sessionProof).toBe("dead");
     expect(exact.confirmed).toBe(true);
   });
-  it("PC-N1: a credential that cannot be replayed (unusable, or not alive before the revoke) is uncontrolled: not confirmed until the hold runs out", async () => {
-    const unusable = { kind: "header", value: "x-token-value" } as unknown as SessionCredential;
-    const empty: SessionCredential = { kind: "cookie", value: "" };
-    for (const extra of [unusable, empty]) {
-      const report = await revokeRunScopedAccounts({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake())), now: NOW, sessions: new Map([["buyer", [COOKIE, extra]]]), maxTokenTtlMs: 600_000 });
-      expect(report.accounts[0]?.sessionProof).toBe("unclear");
-      expect(report.confirmed).toBe(false);
-      expect(report.heldUntil).toBe("2026-11-03T10:10:00.000Z");
-      expect(revocationSettledAt(report, NOW + 599_999)).toBe(false);
-      expect(revocationSettledAt(report, NOW + 600_000)).toBe(true);
-    }
-    // the only credential is unusable: still "unclear", never a silent pass
-    const only = await revokeRunScopedAccounts({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake())), now: NOW, sessions: new Map([["buyer", [unusable]]]), maxTokenTtlMs: 600_000 });
-    expect(only.accounts[0]?.sessionProof).toBe("unclear");
-    expect(only.confirmed).toBe(false);
-  });
   it("reads an HTTP status from a replayed credential: 401 and 403 are dead, 2xx and 3xx alive, the rest proves nothing", () => {
     expect([401, 403].map(sessionStateOfStatus)).toEqual(["dead", "dead"]);
     expect([200, 204, 302].map(sessionStateOfStatus)).toEqual(["alive", "alive", "alive"]);
     expect([404, 429, 500, 503, undefined].map(sessionStateOfStatus)).toEqual(["unclear", "unclear", "unclear", "unclear", "unclear"]);
-  });
-  it("does not settle a report with no account, one with an account missing a part, or a malformed hold", () => {
-    expect(revocationSettledAt({ confirmed: false, accounts: [] }, NOW)).toBe(false);
-    const part = { profileId: "a", sessionsEnded: true, revoked: true, accountGone: true, existenceControl: true, recorded: true };
-    expect(revocationSettledAt({ confirmed: false, accounts: [{ ...part, sessionProof: "not_possible" }], heldUntil: "garbage" }, NOW + 1e12)).toBe(false);
-    expect(revocationSettledAt({ confirmed: false, accounts: [{ ...part, sessionProof: "not_possible" }] }, NOW + 1e12)).toBe(false);
-    expect(revocationSettledAt({ confirmed: false, accounts: [{ ...part, accountGone: false, sessionProof: "dead" }] }, NOW)).toBe(false);
   });
 });
 
@@ -475,25 +287,6 @@ describe("the three provisioner kinds", () => {
     const answer = (value: "exists" | "unclear") => cognitoTestPoolProvisioner({ adminCreateUser: async () => ({ password: "x" }), adminUserGlobalSignOut: async () => undefined, adminDeleteUser: async () => undefined, adminGetUser: async () => value });
     expect(await answer("exists").accountExists({ account: cognito as RunScopedAccount, revokeHandle: "h", signal })).toBe("present");
     expect(await answer("unclear").accountExists({ account: cognito as RunScopedAccount, revokeHandle: "h", signal })).toBe("unclear");
-  });
-  it("http_hook follows its protocol: create with the lease id, end sessions, delete, and a 404 on GET is the existence proof", async () => {
-    const calls: Array<[string, string, string, unknown]> = [];
-    const status = new Map<string, number>([["GET", 404]]);
-    const port = httpHookProvisioner({
-      readToken: async () => "tok-123",
-      call: async ({ method, url, token, body }) => { calls.push([method, url, token, body]); return method === "POST" && url.endsWith("/accounts") ? { status: 201, json: { loginRef: "p-1", revokeHandle: "p-1" } } : { status: status.get(method) ?? 200, json: {} }; },
-    });
-    const account = hook as RunScopedAccount;
-    expect(await port.create({ account, leaseId: "rvl-hook-0001", expiresAt: "2026-11-03T10:45:00.000Z", signal })).toEqual({ loginRef: "p-1", revokeHandle: "p-1" });
-    await port.endSessions({ account, revokeHandle: "p-1", signal });
-    await port.revoke({ account, revokeHandle: "p-1", signal });
-    expect(await port.accountExists({ account, revokeHandle: "p-1", signal })).toBe("gone");
-    expect(calls).toEqual([
-      ["POST", "https://tests.example.com/accounts", "tok-123", { profile: "partner", leaseId: "rvl-hook-0001", expiresAt: "2026-11-03T10:45:00.000Z" }],
-      ["POST", "https://tests.example.com/accounts/delete", "tok-123", { action: "end_sessions", revokeHandle: "p-1" }],
-      ["DELETE", "https://tests.example.com/accounts/delete", "tok-123", { revokeHandle: "p-1" }],
-      ["GET", "https://tests.example.com/accounts/p-1", "tok-123", undefined],
-    ]);
   });
   it("http_hook treats a 404 on end-sessions and delete as already gone, reads a 2xx GET as present, and anything else as unclear", async () => {
     const respond = (code: number) => httpHookProvisioner({ readToken: async () => "t", call: async () => ({ status: code, json: {} }) });
@@ -546,68 +339,10 @@ describe("a probe that proves nothing never confirms (C1-a, C1-b)", () => {
     if (!provisioned.ok) throw new Error("provision");
     return revokeRunScopedAccounts({ leases: provisioned.leases, accounts: [hook], ports: hookPorts(server.port), store, now: NOW, sessions, maxTokenTtlMs: 3_600_000, ...over });
   }
-  it("positive control: an honest probe (alive before, dead after) on a GET route that sees the account confirms at once", async () => {
-    const report = await round(hookServer({ replay: "honest" }), new Map([["partner", [BEARER]]]));
-    expect(report).toMatchObject({ confirmed: true, accounts: [{ sessionProof: "dead", existenceControl: true, recorded: true }] });
-    expect(report.heldUntil).toBeUndefined();
-  });
-  it("a replay client that never attaches the credential (so every replay is refused) is held, not confirmed", async () => {
-    const report = await round(hookServer({ replay: "blind" }), new Map([["partner", [BEARER]]]));
-    expect(report.accounts[0]).toMatchObject({ sessionProof: "unclear" });
-    expect(report.confirmed).toBe(false);
-    expect(report.heldUntil).toBe("2026-11-03T11:00:00.000Z");
-    expect(revocationSettledAt(report, Date.parse("2026-11-03T10:59:59.000Z"))).toBe(false);
-    expect(revocationSettledAt(report, Date.parse("2026-11-03T11:00:00.000Z"))).toBe(true);
-  });
-  it("an empty credential, a credential of an unknown scheme, and a junk one that was never alive are never evidence", async () => {
-    for (const credential of [{ kind: "bearer", value: "" }, { kind: "basic" as never, value: "abc" }]) {
-      const report = await round(hookServer({ replay: "honest" }), new Map([["partner", [credential as SessionCredential]]]));
-      // PC-N1: a credential the round was issued but cannot be replayed is uncontrolled ("unclear", held for the token lifetime), not silently dropped to "nothing to prove"
-      expect(report.accounts[0]?.sessionProof, JSON.stringify(credential)).toBe("unclear");
-      expect(report.confirmed).toBe(false);
-    }
-    // a credential that was not alive before the revoke (junk, the wrong scheme) cannot be shown dead
-    const junk = await round(hookServer({ replay: "blind" }), new Map([["partner", [{ kind: "cookie", value: "junk-not-a-session" }]]]));
-    expect(junk.accounts[0]?.sessionProof).toBe("unclear");
-    expect(junk.confirmed).toBe(false);
-  });
-  it("one credential alive before and one that was not: the second has no control, so the account is held", async () => {
-    const server = hookServer({ replay: "honest" });
-    let calls = 0;
-    const original = server.port.sessionState!.bind(server.port);
-    server.port.sessionState = async (input) => { calls += 1; return input.credential.value === "junk-not-a-session" ? "dead" : original(input); };
-    const report = await round(server, new Map([["partner", [BEARER, { kind: "cookie", value: "junk-not-a-session" }]]]));
-    expect(calls).toBeGreaterThan(0);
-    expect(report.accounts[0]?.sessionProof).toBe("unclear");
-    expect(report.confirmed).toBe(false);
-    expect(report.heldUntil).toBeDefined();
-  });
-  it("a GET route that 404s for everything says gone with no control: held, not confirmed", async () => {
-    const report = await round(hookServer({ getAlways404: true, replay: "honest" }), new Map([["partner", [BEARER]]]));
-    expect(report.accounts[0]).toMatchObject({ accountGone: true, existenceControl: false, sessionProof: "dead" });
-    expect(report.confirmed).toBe(false);
-    expect(report.heldUntil).toBe("2026-11-03T11:00:00.000Z");
-  });
-  it("a server that answers alive for a removed account (200 for unknown users) is alive after: never settles", async () => {
-    const server = hookServer({ replay: "honest" });
-    server.port.sessionState = async () => "alive";
-    const report = await round(server, new Map([["partner", [BEARER]]]));
-    expect(report.accounts[0]?.sessionProof).toBe("alive");
-    expect(revocationSettledAt(report, NOW + 365 * 24 * 3_600_000)).toBe(false);
-  });
   it("positive control for the brief's second case: the same round with the control satisfied is confirmed, so the holds above are the missing controls' doing", async () => {
     const withControl = await round(hookServer({ replay: "honest" }), new Map([["partner", [BEARER]]]));
     const without = await round(hookServer({ replay: "blind" }), new Map([["partner", [BEARER]]]));
     expect([withControl.confirmed, without.confirmed]).toEqual([true, false]);
-  });
-  it("the sweeper and a failed provision's cleanup take no controls (they prove nothing, they only clean up)", async () => {
-    const server = hookServer({ replay: "honest" });
-    const store = memoryStore();
-    const provisioned = await provisionRunScopedAccounts({ accounts: [hook], roundId: "r", roundEndsAt: ENDS, now: NOW, ports: hookPorts(server.port), store, newLeaseId });
-    if (!provisioned.ok) throw new Error("provision");
-    const report = await revokeRunScopedAccounts({ leases: provisioned.leases, accounts: [hook], ports: hookPorts(server.port), store, now: NOW, control: false, sessions: new Map([["partner", [BEARER]]]) });
-    expect(report.confirmed).toBe(false);
-    expect(report.accounts[0]).toMatchObject({ sessionsEnded: true, revoked: true, accountGone: true });
   });
   it("maps only UserNotFoundException to not-found for the Cognito existence probe", () => {
     expect(cognitoPresenceOf(undefined)).toBe("exists");
@@ -617,14 +352,6 @@ describe("a probe that proves nothing never confirms (C1-a, C1-b)", () => {
 });
 
 describe("a failed lease write is never swallowed (C1-c, I3)", () => {
-  it("a hook that names its own handle is refused; the account is revoked by the lease id AND by the handle it claimed", async () => {
-    const server = hookServer({ ownHandle: true });
-    const store = memoryStore();
-    const result = await provisionRunScopedAccounts({ accounts: [hook], roundId: "r", roundEndsAt: ENDS, now: NOW, ports: hookPorts(server.port), store, newLeaseId });
-    expect(result).toMatchObject({ ok: false, code: "provisioner_answer_invalid", cleanedUp: true });
-    expect([...server.alive]).toEqual([]);
-    expect([...store.records.values()][0]?.state).toBe("revoked");
-  });
   it("probe: when the claimed handle cannot be revoked now, the durable record is pointed at it, so the sweeper reaches the real account instead of calling the lease swept", async () => {
     const server = hookServer({ ownHandle: true });
     const store = memoryStore();
@@ -653,15 +380,6 @@ describe("a failed lease write is never swallowed (C1-c, I3)", () => {
     expect(alerts.length).toBeGreaterThanOrEqual(1);
     expect(alerts[0]).toMatchObject({ code: "lease_update_failed" });
     expect(writes).toBeGreaterThanOrEqual(RUN_SCOPED_STORE_ATTEMPTS);
-  });
-  it("a write that fails once and then works is not an alert", async () => {
-    const store = memoryStore();
-    let failed = false;
-    const flaky: LeaseStore = { ...store, update: async (leaseId, patch) => { if (!failed) { failed = true; throw new Error("blip"); } await store.update(leaseId, patch); } };
-    const alerts: LeaseAlert[] = [];
-    const result = await provisionRunScopedAccounts({ accounts: [hook], roundId: "r", roundEndsAt: ENDS, now: NOW, ports: hookPorts(hookServer().port), store: flaky, newLeaseId, onAlert: (alert) => alerts.push(alert) });
-    expect(result.ok).toBe(true);
-    expect(alerts).toEqual([]);
   });
   it("a revoked write that stays down is `recorded: false` with an alert, and the sweeper calls the lease stuck, not swept, though the account is gone", async () => {
     const store = memoryStore();

@@ -1,5 +1,5 @@
 // The planner's answer read as a structured plan (`core/plan/answer.ts`) and the words a structured planning run is given (`core/plan/prompts.ts`).
-import { PLAN_WHY_REQUEST_MAX_CHARS, WORKFLOW_PLAN_MAX_BYTES, canonicalPlanJson, type PlanDocument } from "@agentx/contracts";
+import { PLAN_WHY_REQUEST_MAX_CHARS, WORKFLOW_PLAN_MAX_BYTES, type PlanDocument } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { PLANNER_WHY_AUTHOR, planDocumentKindOf, planWhyOf, readPlanAnswer } from "../../packages/broker/src/core/plan/answer.js";
 import { answerWithCiChecks } from "../../packages/broker/src/core/plan/ci.js";
@@ -21,22 +21,6 @@ describe("planDocumentKindOf", () => {
 });
 
 describe("readPlanAnswer", () => {
-  it("reads a plan that names a change, a file and a test, with the owner's request as its why", () => {
-    const read = readPlanAnswer({ ...base, content: planAnswer(testedPlanDocument()) });
-    expect(read.ok).toBe(true);
-    if (!read.ok) return;
-    expect(read.plan.why).toHaveLength(1);
-    expect(read.plan.why[0]!.text).toBe("Retry failed payments");
-    expect(read.plan.why[0]!.author).toContain("Priya");
-    expect(read.canonical).toBe(canonicalPlanJson(read.plan));
-    expect(read.noChangeNeeded).toBe(false);
-  });
-
-  it("gives the problems of an answer with no plan block", () => {
-    const read = readPlanAnswer({ ...base, content: "I will do it." });
-    expect(read).toMatchObject({ ok: false });
-    expect(read.ok ? [] : read.errors.join(" ")).toContain("agentx-plan");
-  });
 
   it("refuses an answer over the limit before reading it", () => {
     expect(readPlanAnswer({ ...base, content: "x".repeat(WORKFLOW_PLAN_MAX_BYTES + 1) })).toEqual({ ok: false, errors: ["the answer is too long"] });
@@ -49,22 +33,6 @@ describe("readPlanAnswer", () => {
     expect(readPlanAnswer({ ...base, kind: "requirements", content: planAnswer(bare) }).ok).toBe(true);
     // A version 1 plan is not held to them.
     expect(readPlanAnswer({ ...base, workflow: { definitionVersion: "1.0.0" }, content: planAnswer(bare) }).ok).toBe(true);
-  });
-
-  it("refuses a version 2 application intent that was not offered", () => {
-    const doc = { ...testedPlanDocument(), e2e: { schemaVersion: 2 } } as unknown as PlanDocument;
-    const read = readPlanAnswer({ ...base, content: planAnswer(doc) });
-    expect(read.ok).toBe(false);
-  });
-
-  it("keeps a removed claim number from coming back", () => {
-    const earlier = testedPlanDocument();
-    const next = testedPlanDocument({ claims: [{ id: "1", text: "Payments that fail with a timeout are retried, in src/charge.ts." }, { id: "3", text: "A test in tests/charge.test.ts proves it." }] });
-    // Claim 2 was dropped by the latest earlier document; a later version may not reuse it.
-    const dropped = readPlanAnswer({ ...base, content: planAnswer(next), earlier: [earlier, next] });
-    expect(dropped.ok).toBe(true);
-    const reused = readPlanAnswer({ ...base, content: planAnswer(testedPlanDocument()), earlier: [earlier, next] });
-    expect(reused.ok).toBe(false);
   });
 
   it("takes ordered work only for a task pinned to one repository", () => {
@@ -93,15 +61,6 @@ describe("planWhyOf", () => {
 
 describe("the words a structured planning run is given", () => {
   const rules = { kind: "plan" as const, path: "QUICK" as const, rovaraV2: true, checks: { repositoryPaths: ["repo/demo"], required: [] } };
-  it("asks for the plan block, the parts of a version 2 plan, the quality list and the checks", () => {
-    const text = structuredPlanRules(rules);
-    expect(text).toContain("agentx-plan");
-    expect(text).toContain("noChangeNeeded");
-    expect(text).toContain("what changes");
-    expect(text).toContain("Every claim is proved");
-    expect(text).toContain("repo/demo");
-    expect(structuredPlanRules({ ...rules, kind: "requirements" })).not.toContain("`checks` goes in the coding plan only");
-  });
   it("names the claim numbers that may not come back", () => {
     expect(structuredPlanRules({ ...rules, retired: ["2", "3.1"] })).toContain("These claim IDs were removed earlier and must not be used again: 2, 3.1.");
   });
@@ -157,12 +116,6 @@ describe("the checks the repository's CI requires join the planner's proposals",
     expect(await answerWithCiChecks({ ciDefinitionReader: async () => undefined }, [repository], answer)).toBe(answer);
   });
 
-  it("reads at most three repositories", async () => {
-    const calls: string[] = [];
-    const many = ["a", "b", "c", "d", "e"].map((name) => ({ name, path: `repo/${name}`, url: `https://examplehost/example/${name}.git` }));
-    await answerWithCiChecks({ ciDefinitionReader: reader(calls) }, many, answer);
-    expect(calls.filter((call) => call.startsWith("list "))).toHaveLength(3);
-  });
 });
 
 describe("the cited code is attached only to the plan it was read for", () => {

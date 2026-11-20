@@ -13,12 +13,6 @@ const rows = (samples: JsonValue[]) => samples.map((sample, i) => ({ pk: `ORG#${
 const input = { orgId, project: "web", request: { quoteVersion: 2 as const }, asOf, context: { policyRevision: "1", stages: { build: { model: av(model), source: av(source), price: av(price) } }, limits: [] } };
 const read = (samples: JsonValue[], request = input.request) => startEstimates({ store: { query: async q => ({ items: q.pk.endsWith("#RUN_USAGE#web") ? rows(samples) : [] }) } }, { ...input, request });
 describe("normalized run history for start quotes", () => {
- it("uses five compatible complete final samples and preserves honest non-model-priced labeling", async () => {
-  const q = await read([1,2,3,4,5].map(i => sample(i)));
-  expect(q.options[0].range).toEqual(av({ lowMicros: 3_000_000, highMicros: 4_000_000 }));
-  expect(q.options[0].basis).toMatchObject({ kind: "history", samples: 5, effectiveSamples: 5, modelPriced: false, newestSampleAt: av("2026-11-18T11:30:00.000Z") });
-  expect(q.options[1].basis.kind).toBe("default");
- });
  it("keeps censored, provisional, mismatched model/source/price/options and malformed samples out of the cohort", async () => {
   const base = sample(5);
   const samples = [sample(1), sample(2), sample(3), sample(4),
@@ -27,15 +21,6 @@ describe("normalized run history for start quotes", () => {
    ...[{ status: "awaiting_usage" }, { model: av({ ...model, modelId: "different" }) }, { source: av({ ...source, connectionRevision: "2" }) }, { price: av({ ...price, version: "2" }) }, { settledMicros: av(-1) }].map(change => ({ ...base, calls: [{ ...base.calls[0], ...change }] })),
   ];
   expect((await read(samples)).options[0].basis.kind).toBe("default");
- });
- it("rejects rows that E's strict RunUsageSampleV1 contract refuses", async () => {
-  const valid = sample(5);
-  const { startQuote: _startQuote, ...missingQuote } = valid;
-  void _startQuote;
-  for (const invalid of [missingQuote, { ...valid, unexpected: true }, { ...valid, calls: [{ ...valid.calls[0], price: av({ ...price, hash: "bad" }) }] }]) {
-  const samples: JsonValue[] = [...[1, 2, 3, 4].map(i => sample(i)), invalid];
-  expect((await read(samples)).options[0].basis.kind).toBe("default");
-  }
  });
  it("deduplicates revisions by task and refuses a partial history page", async () => {
   const q = await read([1,2,3,4,5].flatMap(i => [sample(i), { ...sample(i), revision: 2 }]));

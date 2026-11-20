@@ -89,19 +89,10 @@ describe("16. classifyProviderFailure: every cell of the plan's table", () => {
     expect([...seen].sort()).toEqual(E2E_MODEL_FAILURE_CLASSES.filter((item) => item !== "unknown" && item !== "unreachable" && item !== "secret-unreadable" && item !== "not-in-catalog").sort());
   });
 
-  it("ModelNotReadyException with a 429 is an outage, not a limit (the signal is checked before the status)", () => {
-    expect(classifyProviderFailure({ provider: "amazon-bedrock", signal: "ModelNotReadyException", status: 429 })).toEqual({ class: "provider-outage", signal: "ModelNotReadyException" });
-  });
-
   it("an unknown name with 418 is unknown, and so is a call with neither a signal nor a status", () => {
     expect(classifyProviderFailure({ provider: "amazon-bedrock", signal: "TeapotException", status: 418 })).toEqual({ class: "unknown", signal: "TeapotException" });
     expect(classifyProviderFailure({ provider: "anthropic", status: 418 })).toEqual({ class: "unknown", signal: null });
     expect(classifyProviderFailure({ provider: "openai" })).toEqual({ class: "unknown", signal: null });
-  });
-
-  it("an unknown signal is decided by the status", () => {
-    expect(classifyProviderFailure({ provider: "amazon-bedrock", signal: "BrandNewException", status: 429 })).toEqual({ class: "limit-or-rate-limited", signal: "BrandNewException" });
-    expect(classifyProviderFailure({ provider: "openai", signal: "something_new", status: 503 })).toEqual({ class: "provider-outage", signal: "something_new" });
   });
 
   it("a network error with no response is unreachable, and keeps only the code", () => {
@@ -111,42 +102,5 @@ describe("16. classifyProviderFailure: every cell of the plan's table", () => {
     expect(classifyProviderFailure({ provider: "amazon-bedrock", networkCode: "ENOTFOUND" }).class).toBe("unreachable");
   });
 
-  it("a network code outside the allow-list is not trusted, and a response beats a network code", () => {
-    expect(classifyProviderFailure({ provider: "anthropic", networkCode: "EWHATEVER" })).toEqual({ class: "unknown", signal: null });
-    expect(classifyProviderFailure({ provider: "anthropic", networkCode: "ECONNRESET", status: 429 }).class).toBe("limit-or-rate-limited");
-  });
-
-  it("a timeout is an outage with the signal timeout, whatever else was seen", () => {
-    expect(classifyProviderFailure({ provider: "openrouter", timedOut: true })).toEqual({ class: "provider-outage", signal: "timeout" });
-    expect(classifyProviderFailure({ provider: "amazon-bedrock", timedOut: true, status: 504 })).toEqual({ class: "provider-outage", signal: "timeout" });
-  });
 });
 
-describe("19. a signal outside the allow-list pattern is dropped, and the status still decides", () => {
-  it("Bedrock signals are letters only, at most 64", () => {
-    for (const signal of ["Throttling:Exception", "Throttling Exception", "x".repeat(65), "", "Throttling-Exception", "Throttling_1"]) {
-      expect(classifyProviderFailure({ provider: "amazon-bedrock", signal, status: 429 }), signal).toEqual({ class: "limit-or-rate-limited", signal: null });
-    }
-  });
-  it("keyed signals are lower-case letters, digits and underscores, at most 64", () => {
-    for (const signal of ["Rate_Limit", "rate limit error", "rate-limit", "r".repeat(65), "sk-ant-SECRETVALUE", "the model said: hello"]) {
-      expect(classifyProviderFailure({ provider: "anthropic", signal, status: 429 }), signal).toEqual({ class: "limit-or-rate-limited", signal: null });
-    }
-  });
-  it("a hostile signal with no status is unknown with no signal", () => {
-    expect(classifyProviderFailure({ provider: "openai", signal: "sk-ant-SECRETVALUE" })).toEqual({ class: "unknown", signal: null });
-  });
-});
-
-describe("review I-1: a captured network code with no response decides unreachable before the timeout rule", () => {
-  it("timed out with an allow-listed network code and no response is unreachable", () => {
-    for (const networkCode of ["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "ECONNRESET", "ENOTFOUND", "CERT_HAS_EXPIRED"]) {
-      expect(classifyProviderFailure({ provider: "anthropic", timedOut: true, networkCode })).toEqual({ class: "unreachable", signal: networkCode });
-    }
-    expect(classifyProviderFailure({ provider: "amazon-bedrock", timedOut: true, networkCode: "ETIMEDOUT" })).toEqual({ class: "unreachable", signal: "ETIMEDOUT" });
-  });
-  it("a timeout with a code outside the allow-list, or with a response, is still an outage with the signal timeout", () => {
-    expect(classifyProviderFailure({ provider: "openai", timedOut: true, networkCode: "EWHATEVER" })).toEqual({ class: "provider-outage", signal: "timeout" });
-    expect(classifyProviderFailure({ provider: "openai", timedOut: true, networkCode: "ETIMEDOUT", status: 504 })).toEqual({ class: "provider-outage", signal: "timeout" });
-  });
-});

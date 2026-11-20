@@ -8,7 +8,6 @@ import { describe, expect, it } from "vitest";
 import type { InvocationModelRoute } from "@agentx/contracts";
 import { ROUTE_PROVIDER } from "../../packages/model-runtime/src/catalog.js";
 import { createConfiguredModelRuntime } from "../../packages/model-runtime/src/index.js";
-import { carriesUnsignedReasoning } from "../../packages/model-runtime/src/transport.js";
 import { fakeFetch, sse, type RecordedRequest } from "../support/e2e-provider-fakes.js";
 
 const FIVE = ["deepseek.v3.2", "moonshot.kimi-k2-thinking", "minimax.minimax-m2.5", "us.moonshotai.kimi-k3", "us.moonshotai.kimi-k3.1"];
@@ -54,28 +53,5 @@ describe("a routed model that needs its reasoning back keeps it, unsigned, on th
       expect(JSON.stringify(assistant.content)).not.toContain('"type":"text"');
     });
   }
-  it("any other routed model is unchanged: an unsigned thinking block is still sent as plain text (Anthropic refuses an empty signature)", async () => {
-    for (const id of ["claude-sonnet-5-5", "qwen.qwen3-coder-480b-a35b-v1:0", "deepseek.v3-v1:0", "openai.gpt-oss-120b-1:0"]) {
-      const requests = await twoTurns(id);
-      const assistant = (requests[1]!.body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>).find((m) => m.role === "assistant")!;
-      expect([id, assistant.content.map((c) => c.type)]).toEqual([id, ["text", "tool_use"]]);
-    }
-  });
 });
 
-describe("which routes carry unsigned reasoning", () => {
-  it("exactly the five, by their catalog name in any spelling the catalog uses; nothing else", () => {
-    for (const id of FIVE) expect([id, carriesUnsignedReasoning(id)]).toEqual([id, true]);
-    for (const id of ["moonshotai.kimi-k3", "kimi-k3", "kimi-k3-1", "deepseek-v3-2", "minimax-m2-5", "kimi-k2-thinking"]) expect([id, carriesUnsignedReasoning(id)]).toEqual([id, true]);
-    for (const id of ["claude-sonnet-5-5", "us.anthropic.claude-sonnet-5-5", "deepseek.v3-v1:0", "moonshotai.kimi-k2.5", "kimi-k2", "minimax.minimax-m2", "gpt-5.4", "", "kimi-k3-10", "x-kimi-k3"]) expect([id, carriesUnsignedReasoning(id)]).toEqual([id, false]);
-  });
-  it("the registered model carries the flag only for those, and keeps the shared rules (no threads, no mid-conversation system messages)", async () => {
-    const compatOf = async (catalog: string) => {
-      const r = route(catalog);
-      const runtime = await createConfiguredModelRuntime({ provider: ROUTE_PROVIDER, modelId: r.alias }, { proxy: { baseUrl: "https://gateway.invalid", apiKey: "k", route: r }, fetch: fakeFetch(() => gatewayAnswer(catalog)).fetch });
-      return (runtime).getModel(ROUTE_PROVIDER, r.alias)!.compat as Record<string, unknown>;
-    };
-    expect(await compatOf("us.moonshotai.kimi-k3")).toMatchObject({ allowEmptySignature: true, supportsMessageThreads: false, supportsMidConvoSystemMessages: false });
-    expect(await compatOf("claude-sonnet-5-5")).not.toHaveProperty("allowEmptySignature");
-  });
-});

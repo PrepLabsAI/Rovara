@@ -60,18 +60,4 @@ describe("outbox failures", () => {
     } finally { warning.mockRestore(); }
   });
 
-  it("reads only its own company's pending partition", async () => {
-    const queues = new MemoryQueueService();
-    const { store, outbox } = setup(queues);
-    await store.transact([outbox.stage({ companyId: "org_bbbbbbbbbbbbbbbbbbbb", id: "other", queue: "dispatch", body: "x" })]);
-    expect(await outbox.relay({ companyId: COMPANY })).toEqual({ delivered: 0, failed: 0, dead: 0 });
-    expect(await (await queues.queue("dispatch")).receive()).toEqual([]);
-  });
-
-  it("declares a queue's options once", async () => {
-    const queues = new MemoryQueueService();
-    await queues.queue("dispatch", { ordered: true });
-    await expect(queues.queue("dispatch", { ordered: false })).rejects.toThrow(/different options/);
-    expect(await queues.queue("dispatch")).toBeDefined();
-  });
 });

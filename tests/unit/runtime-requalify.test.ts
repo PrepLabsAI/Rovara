@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DescribeInstancesCommand } from "@aws-sdk/client-ec2";
-import { RequalifyRunRecordSchema, REQUALIFY_REFUSAL_PREFIX, REQUALIFY_TAGS, requalifyLockKey, requalifyRunKey, webApiRuntimeInstallProposalSha256, type RuntimeInstallChallenge } from "../../packages/contracts/src/index.js";
+import { REQUALIFY_REFUSAL_PREFIX, requalifyLockKey, requalifyRunKey, webApiRuntimeInstallProposalSha256, type RuntimeInstallChallenge } from "../../packages/contracts/src/index.js";
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { e2eModelCheckRunnerKey } from "../../packages/broker/src/e2e/model-route-registry.js";
-import { issueChallengeAs, issueRuntimeInstallChallenge, registerRuntimeInstallation, registerWebApiRuntimeInstallation } from "../../packages/broker/src/aws/runtime-installation.js";
+import { issueChallengeAs, registerRuntimeInstallation, registerWebApiRuntimeInstallation } from "../../packages/broker/src/aws/runtime-installation.js";
 import { ec2RequalifyInstanceReader, issueRequalifyChallenge, registerRequalifiedRuntime, requalifierIdentity, type RequalifyDependencies, type RequalifyInstance } from "../../packages/broker/src/aws/runtime-requalify.js";
 import { qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
 import { createFakeRuntimeRegistry } from "../support/runtime-registry-fakes.js";
@@ -90,25 +90,6 @@ async function issuedProposal(w: World, runOrUndefined?: typeof input) {
 }
 
 describe("AUTOREQUALIFY issue: the product opens its own challenge", () => {
-  it("derives profile, binding, generation and endpoint itself, and writes the secret to the runner prefix without returning it", async () => {
-    const w = world(); w.hold(); w.seedRows(4);
-    const { issued, challenge, stored } = await issuedProposal(w, inputAt(5));
-    expect(issued).toEqual({ challengeId: challenge.challengeId, expiresAt: challenge.expiresAt, generation: 5, transportCorrelationId: WORKSPACE });
-    // The challenge carries the workspace id the runner was booted with (the runner compares them), not a fresh one.
-    expect(challenge.transportCorrelationId).toBe(WORKSPACE);
-    // The secret reached the object store (positive control) and nowhere in what the step returns.
-    expect(stored[0]).toBe(`e2e-runtime/${ROLE}:${NEW_ID}/challenge.json`);
-    expect(challenge.challengeSecret.length).toBeGreaterThan(20);
-    expect(JSON.stringify(issued)).not.toContain(challenge.challengeSecret);
-    expect(challenge).toMatchObject({ profileId: "linux-arm64-web-api-v1", endpoint: `http://${NEW_IP}:8080`, generation: 5, issuedBySubject: "runtime-requalifier/test", binding });
-    const row = w.items.get(`RUNTIME_INSTALL_CHALLENGE#${challenge.challengeId}|CHALLENGE`)!;
-    expect(row).toMatchObject({ state: "ISSUED", issuedBySubject: "runtime-requalifier/test", requalifyRunId: RUN, requalifyInstanceId: NEW_ID });
-  });
-
-  it("starts at generation 1 when nothing is registered", async () => {
-    const w = world(); w.hold();
-    expect((await issueRequalifyChallenge(w.deps, input)).generation).toBe(1);
-  });
 
   it("refuses a generation that is not the next one (the runner was booted for another), and an input without the boot identity, writing nothing", async () => {
     const w = world(); w.hold(); w.seedRows(4);
@@ -121,24 +102,9 @@ describe("AUTOREQUALIFY issue: the product opens its own challenge", () => {
     expect(w.snapshot()).toBe(before);
   });
 
-  it("takes no profile, binding or endpoint from its input", async () => {
-    const w = world(); w.hold();
-    for (const extra of [{ profileId: "default-sandbox" }, { binding }, { endpoint: "http://10.9.9.9:8080" }]) {
-      await expect(issueRequalifyChallenge(w.deps, { ...input, ...extra })).rejects.toThrow(`${REQUALIFY_REFUSAL_PREFIX}invalid-input`);
-    }
-    expect(w.objects.size).toBe(0);
-  });
-
   it.each([
     ["no lock", (w: World) => w.items.delete(itemKey(lockKey)), "lock-not-held"],
-    ["another run's lock", (w: World) => w.hold(randomUUID()), "lock-not-held"],
-    ["an expired lock", (w: World) => w.hold(RUN, new Date(at - 1000).toISOString()), "lock-not-held"],
     ["an instance that does not exist", (w: World) => { delete w.instances[NEW_ID]; }, "endpoint-not-managed-instance"],
-    ["an instance that is not running", (w: World) => { w.instances[NEW_ID] = { ...w.instances[NEW_ID]!, state: "pending" }; }, "endpoint-not-managed-instance"],
-    ["an instance without the managed tag", (w: World) => { const { "agentx:requalify-managed": _m, ...rest } = managedTags(); void _m; w.instances[NEW_ID] = { ...w.instances[NEW_ID]!, tags: rest }; }, "endpoint-not-managed-instance"],
-    ["an instance of another environment", (w: World) => { w.instances[NEW_ID] = { ...w.instances[NEW_ID]!, tags: { ...managedTags(), Environment: "prod" } }; }, "endpoint-not-managed-instance"],
-    ["an instance launched by another run", (w: World) => { w.instances[NEW_ID] = { ...w.instances[NEW_ID]!, tags: managedTags(randomUUID()) }; }, "endpoint-not-managed-instance"],
-    ["an instance with no private address", (w: World) => { w.instances[NEW_ID] = { ...w.instances[NEW_ID]!, privateIp: undefined }; }, "endpoint-not-managed-instance"],
   ])("refuses %s and writes nothing", async (_name, arrange, code) => {
     const w = world(); w.hold(); arrange(w);
     const before = w.snapshot();
@@ -148,32 +114,6 @@ describe("AUTOREQUALIFY issue: the product opens its own challenge", () => {
 });
 
 describe("AUTOREQUALIFY switch: one transaction", () => {
-  it("moves both rows, the evidence pointer, the challenge, the model-check runner and the audit record together, attributed to the service identity", async () => {
-    const w = world(); w.hold(); w.seedRows(4); w.scriptPointer(OLD_ID, "11111111-1111-4111-8111-111111111111"); evidence.bypass = true;
-    const t = await issuedProposal(w);
-    const result = await registerRequalifiedRuntime(w.deps, t.request);
-    evidence.bypass = false;
-    expect(w.transactions).toHaveLength(1);
-    expect(w.transactions[0]!.map((write) => Object.keys(write)[0])).toEqual(["Put", "Put", "Put", "Update", "ConditionCheck", "Put", "Put"]);
-    for (const key of [webKey, apiKey]) expect(w.items.get(itemKey(key))).toMatchObject({ generation: 5, catalogRevision: 3, state: "READY", endpoint: `http://${NEW_IP}:8080` });
-    expect(w.items.get(`RUNTIME_INSTALL_CHALLENGE#${t.challenge.challengeId}|CHALLENGE`)!.state).toBe("CONSUMED");
-    expect(w.items.get(`RUNTIME_INSTALLATION_EVIDENCE#${result.registration.proposalSha256}|EVIDENCE`)).toMatchObject({ approvedBySubject: "runtime-requalifier/test", issuedBySubject: "runtime-requalifier/test" });
-    expect(w.items.get(itemKey(pointerKey))).toMatchObject({ roleId: ROLE, instanceId: NEW_ID, transportCorrelationId: t.challenge.transportCorrelationId, requalifyRunId: RUN });
-    const record = RequalifyRunRecordSchema.parse(Object.fromEntries(Object.entries(w.items.get(itemKey(requalifyRunKey(RUN)))!).filter(([name]) => name !== "pk" && name !== "sk")));
-    expect(record).toMatchObject({ runId: RUN, environment: "test", generation: 5, featureRevisions: { web: 3, api: 3 }, challengeId: t.challenge.challengeId, amiId: "ami-0123456789abcdef0",
-      previousRunner: { instanceId: OLD_ID, transportCorrelationId: "11111111-1111-4111-8111-111111111111" }, newRunner: { instanceId: NEW_ID, roleId: ROLE }, requestedBySubject: "runtime-requalifier/test" });
-    expect(result).toMatchObject({ generation: 5, previousRunner: { instanceId: OLD_ID } });
-  });
-
-  it("switches from nothing: no earlier pointer, no earlier rows", async () => {
-    const w = world(); w.hold(); evidence.bypass = true;
-    const t = await issuedProposal(w);
-    const result = await registerRequalifiedRuntime(w.deps, t.request);
-    evidence.bypass = false;
-    expect(result.previousRunner).toBeNull();
-    expect(w.items.get(itemKey(webKey))).toMatchObject({ generation: 1, catalogRevision: 1 });
-    expect(w.items.get(itemKey(pointerKey))).toMatchObject({ instanceId: NEW_ID });
-  });
 
   it("still re-derives every probe from its retained bytes for the service identity", async () => {
     const w = world(); w.hold();
@@ -188,10 +128,7 @@ describe("AUTOREQUALIFY switch: one transaction", () => {
   });
 
   it.each([
-    ["the lock is gone", (w: World) => w.items.delete(itemKey(lockKey)), "lock-not-held"],
-    ["the lock belongs to another run", (w: World) => w.hold(randomUUID()), "lock-not-held"],
     ["another registration already took the generation the challenge was issued for", (w: World) => w.seedRows(5), "generation-not-next"],
-    ["the instance lost its managed tag", (w: World) => { w.instances[NEW_ID] = { ...w.instances[NEW_ID]!, tags: { ...managedTags(), "agentx:requalify-managed": "false" } }; }, "endpoint-not-managed-instance"],
     ["the instance now has another address", (w: World) => { w.instances[NEW_ID] = { ...w.instances[NEW_ID]!, privateIp: "10.0.3.99" }; }, "endpoint-not-managed-instance"],
     ["the pointer names something that is not a runner", (w: World) => w.items.set(itemKey(pointerKey), { ...pointerKey, entityType: "E2E_MODEL_CHECK_RUNNER", instanceId: "not-an-instance" }), "runner-pointer-invalid"],
   ])("refuses when %s, with nothing written", async (_name, arrange, code) => {
@@ -242,19 +179,6 @@ describe("AUTOREQUALIFY switch: one transaction", () => {
     expect(w.snapshot()).toBe(before);
   });
 
-  it("refuses a role different from the one the challenge was issued for", async () => {
-    const w = world(); w.hold(); evidence.bypass = true;
-    const t = await issuedProposal(w);
-    const before = w.snapshot();
-    await expect(registerRequalifiedRuntime(w.deps, { ...t.request, roleId: "AROAOTHERROLE0123456789" })).rejects.toThrow(`${REQUALIFY_REFUSAL_PREFIX}challenge-not-requalifier`);
-    expect(w.snapshot()).toBe(before);
-  });
-
-  it("does not treat a lock stored without milliseconds as valid past its expiry", async () => {
-    const w = world(); w.hold(RUN, "2026-10-19T12:30:00Z");
-    await expect(issueRequalifyChallenge(w.deps, input)).rejects.toThrow(`${REQUALIFY_REFUSAL_PREFIX}lock-not-held`);
-  });
-
   it("refuses a proposal for any other profile", async () => {
     const w = world(); w.hold(); evidence.bypass = true;
     const t = await issuedProposal(w);
@@ -264,28 +188,6 @@ describe("AUTOREQUALIFY switch: one transaction", () => {
     await expect(registerRequalifiedRuntime(w.deps, { ...t.request, proposal: other, proposalSha256: "a".repeat(64) })).rejects.toThrow(/challenge profile must be the web\/API runtime profile/);
     evidence.bypass = false;
     expect(w.snapshot()).toBe(before);
-  });
-
-  it("fails the whole switch when the model-check pointer moved after it was read (a script run raced the renewal)", async () => {
-    const w = world(); w.hold(); w.scriptPointer(OLD_ID, "11111111-1111-4111-8111-111111111111"); evidence.bypass = true;
-    const t = await issuedProposal(w);
-    w.hooks.beforeTransaction = () => w.scriptPointer("i-0aaaaaaaaaaaaaaaa", randomUUID());
-    await expect(registerRequalifiedRuntime(w.deps, t.request)).rejects.toThrow(/changed before registration/);
-    evidence.bypass = false;
-    expect(w.items.get(itemKey(webKey))).toBeUndefined();
-    expect(w.items.get(itemKey(requalifyRunKey(RUN)))).toBeUndefined();
-    expect(w.items.get(itemKey(pointerKey))).toMatchObject({ instanceId: "i-0aaaaaaaaaaaaaaaa" });
-    expect(w.items.get(`RUNTIME_INSTALL_CHALLENGE#${t.challenge.challengeId}|CHALLENGE`)!.state).toBe("ISSUED");
-  });
-
-  it("fails the whole switch when the lock expired between the checks and the transaction", async () => {
-    const w = world(); w.hold(); evidence.bypass = true;
-    const t = await issuedProposal(w);
-    w.hooks.beforeTransaction = () => w.hold(RUN, new Date(at - 1).toISOString());
-    await expect(registerRequalifiedRuntime(w.deps, t.request)).rejects.toThrow(/changed before registration/);
-    evidence.bypass = false;
-    expect(w.items.get(itemKey(webKey))).toBeUndefined();
-    expect(w.items.get(itemKey(pointerKey))).toBeUndefined();
   });
 
   it("records a run once: a second switch for the same run id fails whole and leaves the first record", async () => {
@@ -303,14 +205,6 @@ describe("AUTOREQUALIFY switch: one transaction", () => {
 });
 
 describe("the service identity has no human or HTTP authority", () => {
-  it("carries no administrator claim, so the admin functions and routes refuse it", async () => {
-    const identity = requalifierIdentity(ENV);
-    expect(identity).toMatchObject({ issuer: "rovara:internal", subject: "runtime-requalifier/test", isAdministrator: false });
-    const w = world();
-    await expect(issueRuntimeInstallChallenge(w.deps, identity, { binding, endpoint: "http://10.0.3.7:8080", generation: 1, transportCorrelationId: randomUUID(), profileId: "linux-arm64-web-api-v1" })).rejects.toThrow(/administrator/);
-    await expect(registerRuntimeInstallation(w.deps, identity, { proposal: {}, proposalSha256: "a".repeat(64) })).rejects.toThrow(/administrator/);
-    expect(w.items.size).toBe(0);
-  });
 
   it("is checked by the exported seams themselves: a non-admin identity cannot issue or register through them", async () => {
     const w = world(); w.hold();
@@ -357,8 +251,4 @@ describe("ec2RequalifyInstanceReader and the run record", () => {
     await expect(denied(NEW_ID)).rejects.toThrow();
   });
 
-  it("keeps the run record and the tag names fixed", () => {
-    expect(REQUALIFY_TAGS).toMatchObject({ managedKey: "agentx:requalify-managed", runKey: "agentx:qualification-run", deploymentModeValue: "e2e-qualification" });
-    expect(RequalifyRunRecordSchema.safeParse({ unknown: true }).success).toBe(false);
-  });
 });

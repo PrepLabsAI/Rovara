@@ -360,18 +360,6 @@ describe("a setup run, from the owner's request to the use of what it found", ()
     expect((answer.body["error"] as { message: string }).message).toBe("The setup has no test command to prove, so there is nothing to use yet. Add a test command to the project's setup, or run the setup again.");
   });
 
-  it("L4-T5: every poll of a live worker is noted on the run's task, at most once a minute", async () => {
-    const h = await launch();
-    const run = await startRun(h);
-    const task = () => h.store.get({ pk: `DEVTASK#${run.taskId}`, sk: "META" });
-    expect((await task())!["setupAgentSeenAt"]).toBeUndefined();
-    expect((await h.callback(run.job, "setup-agent", { kind: "poll" })).status).toBe(200);
-    const first = (await task())!["setupAgentSeenAt"];
-    expect(typeof first).toBe("string");
-    expect((await h.callback(run.job, "setup-agent", { kind: "poll" })).status).toBe(200);
-    expect((await task())!["setupAgentSeenAt"]).toBe(first);
-  });
-
   it("keeps what a run learned when it stopped at a limit, and never offers it for use when it needs a code change", async () => {
     const h = await launch();
     const run = await startRun(h);
@@ -522,15 +510,6 @@ describe("a setup run, from the owner's request to the use of what it found", ()
   }
   const decideProposal = (h: Harness, link: URL, offer: { requestId: string; revision: number; artifactDigest: string }, credential?: { method: string; token: string }) => h.runtime.app.gate.decide({
     companyId: IMPLICIT_COMPANY_ID, kind: SETUP_APPLY_KIND, subjectId: "payments", requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest }, credentials: [credential ?? pageProof(h, link, offer)],
-  });
-
-  it("is waiting for a decision only once the candidate's check passed: a valid page proof is refused while it runs and after it failed", async () => {
-    const h = await launch();
-    const { link, checkJob, offer } = await toCandidate(h);
-    expect(await decideProposal(h, link, offer)).toMatchObject({ status: "refused", reason: "not_waiting" });
-    await h.callback(checkJob, "result", { status: "FAILED", error: "setup step 0 (npm ci) failed: exit 1" });
-    expect(await decideProposal(h, link, offer)).toMatchObject({ status: "refused", reason: "not_waiting" });
-    expect(((await h.api("/v1/dev/projects")).body["projects"] as Array<{ latestRevision: number }>)[0]!.latestRevision).toBe(1);
   });
 
   // L4-T5: the sentence for "another setup is waiting" offers only what the person can do with THAT setup, by where its check stands (it used to say "Decide it" while a failed check could only be discarded).

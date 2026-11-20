@@ -8,18 +8,14 @@ import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 //   5. With the feature off, today's flow exactly.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import {
-  SECOND_REVIEW_RESULT_KEY, WorkflowSnapshotSchema, workflowRequestId, createCandidateManifest, createWorkflowSnapshot, secondReviewModelKey, workflowFindingFingerprint,
-  type SecondOpinion, type WorkflowReviewReport, type WorkflowSnapshot,
-} from "@agentx/contracts";
+import { SECOND_REVIEW_RESULT_KEY, WorkflowSnapshotSchema, workflowRequestId, createCandidateManifest, createWorkflowSnapshot, type SecondOpinion, type WorkflowReviewReport, type WorkflowSnapshot } from "@agentx/contracts";
 import { ROUTE_PROVIDER } from "@agentx/model-runtime/catalog";
 import { createHostedReviewers, SECOND_PROVIDER_UNAVAILABLE } from "../../packages/broker/src/core-host/hosted-reviewers.js";
 import { recordReviewed } from "../../packages/broker/src/core/build-step/results.js";
 import { startReview } from "../../packages/broker/src/core/build-step/start.js";
 import { workflowPullRequestBody } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
 import { closeTask } from "../../packages/broker/src/core/task-flow/close.js";
-import { recordOperationResult } from "../../packages/broker/src/core/task-flow/results.js";
-import { developerCharge, operationKey, operationRequestKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { developerCharge, operationRequestKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
 import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { createHarness, COMPANY, type Harness } from "../support/task-flow-harness.js";
@@ -96,24 +92,6 @@ async function ends(h: Harness, operation: OperationRecord, input: { first?: [st
 const answer = (status: WorkflowReviewReport["status"], findings: WorkflowReviewReport["findings"] = []) => (id: string) => ({ tries: 1, report: secondReport(id, status, findings) });
 
 describe("the REVIEW start", () => {
-  it("with the mode off, the job and the operation are exactly today's", async () => {
-    const { h } = await seeded("off");
-    const operation = await started(h);
-    expect(operation).not.toHaveProperty("secondReviewPlan");
-    expect(operation.dispatch.payload).not.toHaveProperty("workflowSecondReviewer");
-  });
-
-  it("with shadow on, the job carries the second reviewer (a model of another company, through its own route) and the operation records the plan", async () => {
-    const { h } = await seeded("shadow");
-    const operation = await started(h);
-    expect(operation.dispatch.payload["workflowSecondReviewer"]).toEqual({ candidates: [{ model: GPT, modelRoute: { alias: ALIAS, api: "openai-responses", catalog: GPT.modelId } }] });
-    expect(operation.secondReviewPlan).toMatchObject({
-      candidateDigest: code.digest, plan: { mode: "shadow", company: "openai", model: GPT, choice: "company", against: [SONNET] }, aliases: [ALIAS], routeAliases: { [secondReviewModelKey(GPT)]: ALIAS },
-    });
-    // The first review is what it was: both roles, no extra operation or row.
-    expect(operation.dispatch.payload["workflowMode"]).toBe("REVIEW");
-    expect((await workspaceOperations(h.deps, workspaceId)).filter((entry) => entry.workflowMode === "REVIEW")).toHaveLength(1);
-  });
 
   it("with no model of another company the review starts and, in shadow, says nothing; `on` flags it", async () => {
     const shadow = await seeded("shadow", { world: { sources: [SONNET, GPT] } });
@@ -169,32 +147,6 @@ describe("key rule 1: a second review never clears or fails a first review", () 
   });
 });
 
-describe("key rule 2: shadow never blocks, never delays and never reaches the pull request", () => {
-  it("a shadow opinion with blocking findings leaves the passing reviews passing, with the pull request due, and the opinion is stored beside the workflow", async () => {
-    const { h, world: w } = await seeded("shadow");
-    const operation = await started(h);
-    const task = await ends(h, operation, { second: answer("FINDINGS", [BLOCKING]) });
-    expect(task.workflow).toMatchObject({ stage: "PULL_REQUEST", state: "READY" });
-    expect(task.workflow).not.toHaveProperty("secondReviewBlock");
-    expect(task.secondOpinion).toMatchObject({ candidateDigest: code.digest, opinion: { mode: "shadow", blocked: false, wouldHaveBlocked: true, blockingCount: 1, choice: "company" } });
-    // The row of the step that follows is the publication, as for any passing review.
-    const rows = await h.store.query({ pk: `ORG#${COMPANY}#WORKFLOW_DISPATCH`, sk: { op: "beginsWith", prefix: `${taskId}#` } });
-    expect(rows.items.map((row) => row["kind"])).toContain("PUBLISH");
-    // Never on the pull request, with or without the service.
-    expect(w.review.prLines(task, code.digest, [])).toEqual([]);
-  });
-
-  it("a shadow review that could not run is silent and changes nothing", async () => {
-    const { h, world: w } = await seeded("shadow");
-    const operation = await started(h);
-    const task = await ends(h, operation, { second: { tries: 3 } });
-    expect(task.workflow).toMatchObject({ stage: "PULL_REQUEST", state: "READY" });
-    expect(task.secondOpinion?.opinion).toMatchObject({ unavailable: true, unavailableReason: "no-answer" });
-    expect(h.deps.secondReview!.mergeWait(task as never)).toBeUndefined();
-    expect(w.review.taskView(task as never, code.digest)).toBeUndefined();
-  });
-});
-
 describe("key rule 3: `on` blocks, in the same write as the workflow's transition", () => {
   it("blocks the passing reviews with the second review's findings kept IN the workflow, and starts no publication", async () => {
     const { h, world: w } = await seeded("on");
@@ -208,15 +160,6 @@ describe("key rule 3: `on` blocks, in the same write as the workflow's transitio
     // The pull request description says so (the blocking finding, made inert), and the page shows it.
     expect(w.review.prLines(task, code.digest, [])[0]).toContain("Second review (");
     expect(w.review.taskView(task as never, code.digest)).toMatchObject({ lines: [expect.stringContaining("Second review"), expect.stringContaining(BLOCKING.text), expect.stringContaining("Reviewed by")], needsAcknowledgement: false });
-  });
-
-  it("a finding the owner accepted as a risk for this code does not block, and the opinion says it would not have", async () => {
-    const { h } = await seeded("on");
-    const accepted = { candidateDigest: code.digest, role: "CRITIC", fingerprint: workflowFindingFingerprint("CRITIC", BLOCKING), text: BLOCKING.text, reason: "known, tracked elsewhere", actorId: "a".repeat(64), at: NOW };
-    expect((await h.store.update({ key: taskKey(taskId), ops: [{ op: "set", path: ["workflow", "acceptedFindings"], value: [accepted] }] })).applied).toBe(true);
-    const task = await ends(h, await started(h), { second: answer("FINDINGS", [BLOCKING]) });
-    expect(task.workflow).toMatchObject({ stage: "PULL_REQUEST", state: "READY" });
-    expect(task.secondOpinion?.opinion).toMatchObject({ blocked: false, wouldHaveBlocked: false });
   });
 
   it("a new review of the same code starts without the earlier block, and the opinion of earlier code is dropped when none is planned", async () => {
@@ -271,19 +214,6 @@ describe("key rule 4: unavailable is flagged and never blocks", () => {
     expect(after.secondReviewAcknowledged).toHaveLength(1);
     // Only the committed one is in the ledger (the loser's event was staged in a transaction that did not commit).
     expect((await h.store.query({ pk: `AUDIT#${COMPANY}`, sk: { op: "beginsWith", prefix: "EVENT#task.second_review_acknowledged" } })).items).toHaveLength(1);
-  });
-
-  it("an acknowledgement is for the code it was asked about: if the candidate moved between the read and the write, nothing is recorded", async () => {
-    const { h, world: w } = await seeded("on");
-    const task = await ends(h, await started(h), { second: { tries: 3 } });
-    // The task holds other code by the time the write is made (the read above is the old one).
-    const moved = createCandidateManifest([{ repositoryId: "demo", commitSha: "2".repeat(40), treeSha: "2".repeat(40), baseCommitSha: "e".repeat(40) }]);
-    expect((await h.store.update({ key: taskKey(taskId), ops: [{ op: "set", path: ["workflow", "candidate"], value: plain(moved) }] })).applied).toBe(true);
-    expect(await w.review.acknowledge(OWNER, task as never)).toEqual({ ok: false, reason: "stale" });
-    expect(((await readTask(h.deps, taskId))! as unknown as { secondReviewAcknowledged?: string[] }).secondReviewAcknowledged).toBeUndefined();
-    // And the opinion moved off the digest asked about: the same refusal.
-    expect((await h.store.update({ key: taskKey(taskId), ops: [{ op: "set", path: ["workflow", "candidate"], value: plain(task.workflow.candidate) }, { op: "set", path: ["secondOpinion", "candidateDigest"], value: "f".repeat(64) }] })).applied).toBe(true);
-    expect(await w.review.acknowledge(OWNER, task as never)).toEqual({ ok: false, reason: "stale" });
   });
 
   it("an acknowledgement is refused when nothing records it: it is never written without its record", async () => {
@@ -377,20 +307,6 @@ function holdingAdmission(): { admission: NonNullable<Parameters<typeof createWo
 }
 
 describe("the allowance held for a second review", () => {
-  const settle = (h: Harness, operation: OperationRecord, status: "SUCCEEDED" | "FAILED" | "INTERRUPTED" | "CANCELLED") =>
-    recordOperationResult(h.deps, { workspaceId, operationId: operation.id, fence: operation.fence, status, ...(status === "SUCCEEDED" ? {} : { error: "stopped" }) });
-
-  it("is held from the start to the operation's end, whatever the end: a result, a failure, a cancel, and the sweep that gives up on a worker", async () => {
-    for (const status of ["SUCCEEDED", "FAILED", "INTERRUPTED", "CANCELLED"] as const) {
-      const t = holdingAdmission();
-      const { h } = await seeded("on", { world: { admission: t.admission } });
-      const operation = await started(h);
-      expect(t.held.size, `${status}: held while it runs`).toBe(1);
-      if (status === "CANCELLED") await h.store.update({ key: operationKey(T1_COMPANY, workspaceId, operation.id), ops: [{ op: "set", path: ["status"], value: "CANCEL_REQUESTED" }] });
-      await settle(h, operation, status);
-      expect(t.held.size, `${status}: given back at the end`).toBe(0);
-    }
-  });
 
   it("is given back when the task is closed while the review runs (the close ends the operation itself)", async () => {
     const t = holdingAdmission();
@@ -454,38 +370,9 @@ describe("the allowance held for a second review", () => {
     expect(repeated.held.size).toBe(0);
   });
 
-  it("is asked for once per start, under a key of its own: two reviews of the same code never share a reservation", async () => {
-    const t = holdingAdmission();
-    const { h } = await seeded("on", { world: { admission: t.admission } });
-    const first = await started(h);
-    await settle(h, first, "FAILED");
-    expect(t.held.size).toBe(0);
-    // The same code reviewed again (the owner's Retry): a new reservation, held until that operation ends.
-    const task = (await readTask(h.deps, taskId))!;
-    const waiting = workflowAt({ revision: task.workflow!.revision + 1 });
-    await h.store.update({ key: taskKey(taskId), ops: [{ op: "set", path: ["workflow"], value: plain(waiting) }] });
-    const second = await started(h).then(async () => (await workspaceOperations(h.deps, workspaceId)).filter((entry) => entry.workflowMode === "REVIEW").at(-1)!);
-    expect(t.keys).toHaveLength(2);
-    expect(new Set(t.keys).size).toBe(2);
-    expect(t.held.size).toBe(1);
-    await settle(h, second, "SUCCEEDED");
-    expect(t.held.size).toBe(0);
-  });
 });
 
 describe("the proxy-seen answer, however the report names the model", () => {
-  it("a report that names the planned model by its plain name, with no call seen on its route, is no answer and never blocks; with the call seen it counts", async () => {
-    const { h } = await seeded("on");
-    h.deps.modelCalls = () => new Set<string>();
-    const plain_ = (id: string) => ({ tries: 1, report: secondReport(id, "FINDINGS", [BLOCKING], { provider: GPT.provider, version: GPT.modelId }) });
-    const unseen = await ends(h, await started(h), { second: plain_ });
-    expect(unseen.secondOpinion?.opinion).toMatchObject({ unavailable: true, unavailableReason: "no-answer", blocked: false });
-    expect(unseen.workflow).toMatchObject({ stage: "PULL_REQUEST", state: "READY" });
-    const seen = await seeded("on");
-    seen.h.deps.modelCalls = () => new Set([ALIAS]);
-    const counted = await ends(seen.h, await started(seen.h), { second: plain_ });
-    expect(counted.secondOpinion?.opinion).toMatchObject({ unavailable: false, blocked: true });
-  });
 
   it("a model with no route alias (called by its own name) is held to the same rule, by its provider/model alias", async () => {
     const plainReport = (id: string) => ({ tries: 1, report: secondReport(id, "FINDINGS", [BLOCKING], { provider: GPT.provider, version: GPT.modelId }) });

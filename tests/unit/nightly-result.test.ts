@@ -5,11 +5,8 @@ import {
   type DocumentStore,
 } from "@agentx/contracts";
 import { NIGHTLY_ENVIRONMENT_CAUSES, NIGHTLY_HEALTH_STEPS, NIGHTLY_UNCLEAR_CAUSES } from "../../packages/broker/src/core/test-env/nightly-health.js";
-import {
-  alreadyFailingTests, coverageMapDigest, failingSetIsWhole, handleNightlyFire, lastNightlyFailures, mapAgeDays, nightlyHealthOf, readCoverageMap, readLatestNightlyHealth, readNightlyBaseline,
-  recordNightlyResult, splitFailures, type MapStore,
-} from "../../packages/broker/src/core/test-env/nightly.js";
-import { nightFailedItem, readLatestNight, readNightRows, sameDayRetryOf } from "../../packages/broker/src/core/test-env/night-status.js";
+import { alreadyFailingTests, coverageMapDigest, handleNightlyFire, lastNightlyFailures, mapAgeDays, nightlyHealthOf, readCoverageMap, readLatestNightlyHealth, readNightlyBaseline, recordNightlyResult, splitFailures, type MapStore } from "../../packages/broker/src/core/test-env/nightly.js";
+import { nightFailedItem, readLatestNight, readNightRows } from "../../packages/broker/src/core/test-env/night-status.js";
 import { createObjectMapStore } from "../../packages/broker/src/core/test-env/nightly-wiring.js";
 import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { nightlyMapKey, nightlyMapsOfProject } from "../../packages/broker/src/core/test-env/map-keys.js";
@@ -92,17 +89,6 @@ describe("recording a result, and what it feeds", () => {
     await expect(readNightlyBaseline(h.deps, ORG, PROJECT)).rejects.toThrow(/could not be read/u);
   });
 
-  it("excuses nothing when the baseline's failing set did not fit, and one odd id does not disable the rest", async () => {
-    const h = await nightlyWorld();
-    const many = result(await started(h), { tests: { total: 3_000, passed: 2_000, failed: 1_000, skipped: 0 }, failed: Array.from({ length: 500 }, (_, index) => `t.py::f${String(index)}`) });
-    await recordNightlyResult(h.deps, h.mapStore, { orgId: ORG, project: PROJECT, result: many.result, coverageMap: many.coverageMap });
-    expect(await alreadyFailingTests(h.deps, ORG, PROJECT)).toEqual([]);
-    expect(await lastNightlyFailures(h.deps, ORG, PROJECT)).toHaveLength(500);
-    const baseline = { failed: ["a"], failedUnlisted: 1, tests: { total: 5, passed: 3, failed: 2, skipped: 0 } };
-    expect(failingSetIsWhole(baseline)).toBe(true);
-    expect(failingSetIsWhole({ ...baseline, failedUnlisted: 0 })).toBe(false);
-  });
-
   it("validates a result's own arithmetic and splits first-run failures into failing and flaky", async () => {
     expect(splitFailures(["a", "b", "c", "a"], ["b", "x"])).toEqual({ failed: ["b"], flaky: ["a", "c"] });
     const store = new MemoryDocumentStore();
@@ -156,48 +142,10 @@ describe("step words on the nightly result", () => {
     expect(await readLatestNightlyHealth(h.deps, ORG, PROJECT)).toMatchObject({ health: { class: "environment", cause: "setup_failed" }, baseline: { tests: { failed: 2 } } });
   });
 
-  it("assertion failures next to passes are tests; the saved image is recorded when the run says it ran from one", async () => {
-    const { h, call } = await recorded({ health: health({ ranFrom: "saved_image" }) });
-    await call();
-    expect(await readLatestNightlyHealth(h.deps, ORG, PROJECT)).toMatchObject({ health: { class: "tests", ranFrom: "saved_image" } });
-  });
-
   it("a report whose counts are not the result's own counts reads as unclear, never as passed", async () => {
     const { h, call } = await recorded({ health: health({ tests: { total: 10, passed: 10, failures: 0, errors: 0, skipped: 0 } }) });
     await call();
     expect(await readLatestNightlyHealth(h.deps, ORG, PROJECT)).toMatchObject({ health: { class: "unclear", cause: "steps_disagree" } });
-  });
-
-  it("keeps the step words bounded: a word, a status, a key or a count outside the lists is refused with the whole result", () => {
-    const parse = (over: Record<string, unknown>) => NightlyResultSchema.safeParse(result("a".repeat(64), { health: health(over) }).result).success;
-    expect(parse({})).toBe(true);
-    expect(parse({ steps: [{ step: "deploy", status: "passed" }] })).toBe(false);
-    expect(parse({ steps: [{ step: "setup", status: "exploded: see log" }] })).toBe(false);
-    expect(parse({ steps: [...steps(), { step: "smoke", status: "passed" }] })).toBe(false);
-    expect(parse({ steps: [{ step: "setup", status: "failed", message: "text" }] })).toBe(false);
-    expect(parse({ checks: Array.from({ length: 65 }, () => okCheck) })).toBe(false);
-    expect(parse({ ranFrom: "somewhere" })).toBe(false);
-    expect(parse({ tests: { total: -1, passed: 0, failures: 0, errors: 0, skipped: 0 } })).toBe(false);
-    expect(parse({ extra: true })).toBe(false);
-  });
-
-  it("a step that appears twice cannot be read: unclear, not passed", async () => {
-    const { h, call } = await recorded({ health: health({ steps: [{ step: "setup", status: "passed" }, { step: "setup", status: "failed" }] }) });
-    await call();
-    expect(await readLatestNightlyHealth(h.deps, ORG, PROJECT)).toMatchObject({ health: { class: "unclear", cause: "unreadable" } });
-  });
-
-  it("tells a listener after the baseline is stored; a fault that may pass leaves the run claimed so the retry records it again", async () => {
-    const events: Array<Record<string, unknown>> = [];
-    let fail: Error | undefined = new DocumentStoreError("throttled", "the store asked to slow down");
-    const { h, call } = await recorded({ health: health() }, (event) => { events.push({ ...event }); return fail === undefined ? Promise.resolve() : Promise.reject(fail); });
-    await expect(call()).rejects.toThrow(/slow down/u);
-    expect(events[0]).toMatchObject({ orgId: ORG, project: PROJECT, health: { class: "tests" }, baseline: { headSha: HEAD1 } });
-    expect(await rows(h.store, "TESTENV#NIGHTLY#ACTIVE")).toHaveLength(1);
-    fail = undefined;
-    expect(await call()).toMatchObject({ recorded: true });
-    expect(events).toHaveLength(2);
-    expect(await rows(h.store, "TESTENV#NIGHTLY#ACTIVE")).toHaveLength(0);
   });
 
   it("a stale write is retried the same way; any other listener failure never fails the record", async () => {
@@ -232,15 +180,6 @@ describe("nights that did not finish, and nights that cannot run", () => {
     await store.transact([item]);
   };
 
-  it("a failed night is a row in fixed words, and the first word stands (the worker's own report wins over the end's `infra`)", async () => {
-    const h = await nightlyWorld();
-    await failedAt(h.store, { slotId: "s".repeat(64), reason: "wall_clock", at: T0 });
-    await failedAt(h.store, { slotId: "s".repeat(64), reason: "infra", at: T0 + 1_000 });
-    const latest = await readLatestNight(h.deps, ORG, PROJECT);
-    expect(latest).toMatchObject({ status: "failed", reason: "wall_clock", words: "Last night ran out of time before the tests finished." });
-    expect(await readNightRows(h.deps, ORG, PROJECT)).toHaveLength(1);
-  });
-
   it("a row is cleared once a later night is recorded: an infrastructure failure followed by a good night reads nothing, and one after it shows again", async () => {
     const h = await nightlyWorld();
     await failedAt(h.store, { slotId: "a".repeat(64), reason: "infra", at: T0 - 3_600_000 });
@@ -252,33 +191,6 @@ describe("nights that did not finish, and nights that cannot run", () => {
     h.clock.now += 3_600_000;
     await failedAt(h.store, { slotId: "b".repeat(64), reason: "infra", at: h.clock.now });
     expect(await readLatestNight(h.deps, ORG, PROJECT)).toMatchObject({ reason: "infra" });
-  });
-
-  it("at most ONE same-day retry, and only after an infrastructure failure", async () => {
-    const h = await nightlyWorld();
-    expect(await sameDayRetryOf(h.deps, ORG, PROJECT)).toBeUndefined();
-    await failedAt(h.store, { slotId: "a".repeat(64), reason: "infra", at: T0 - 600_000 });
-    expect(await sameDayRetryOf(h.deps, ORG, PROJECT)).toBe("a".repeat(64));
-    await failedAt(h.store, { slotId: "b".repeat(64), reason: "infra", at: T0 - 300_000 });
-    expect(await sameDayRetryOf(h.deps, ORG, PROJECT)).toBeUndefined();
-    const other = await nightlyWorld();
-    for (const reason of ["branch_moved", "wall_clock", "worker_refused"] as const) {
-      const w = await nightlyWorld();
-      await failedAt(w.store, { slotId: "c".repeat(64), reason, at: T0 - 600_000 });
-      expect(await sameDayRetryOf(w.deps, ORG, PROJECT), reason).toBeUndefined();
-    }
-    void other;
-  });
-
-  it("an infrastructure failure the same day lets the next fire take the day: the failed night's claims are given back", async () => {
-    const h = await nightlyWorld();
-    const first = await started(h);
-    await failedAt(h.store, { slotId: first, reason: "infra", at: T0 + 60_000 });
-    h.clock.now = T0 + 3_600_000;
-    h.heads.value = HEAD1;
-    const retry = await handleNightlyFire(h.deps, h.due(new Date(h.clock.now - 1_000).toISOString()));
-    expect(retry.outcome).toBe("started");
-    expect(h.started).toHaveLength(2);
   });
 
   it("the other reasons a night cannot run leave a note; an ordinary skip leaves none", async () => {

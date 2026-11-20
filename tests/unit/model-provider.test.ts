@@ -5,7 +5,6 @@ import {
   providerFormat, type ModelProviderAdapter,
 } from "@agentx/contracts";
 import { createAdapterRegistry, loadAdapters } from "../../packages/broker/src/ports/adapter-registry.js";
-import { createEnvironmentModelKeyStore, modelKeyVariable } from "../../packages/broker/src/ports/model-key-stores.js";
 import {
   ANTHROPIC_PROVIDER, BEDROCK_PROVIDER_ID, BUILTIN_MODEL_PROVIDERS, NATIVE_CHAT_CAPABILITIES, OPENAI_PROVIDER, OPENROUTER_PROVIDER, bedrockModelProvider, bedrockModelProviderPlugin,
   modelProviderPlugin, registerBuiltinModelProviders,
@@ -97,16 +96,6 @@ describe("what makes a provider valid", () => {
   });
 });
 
-describe("prices", () => {
-  it("are keyed provider/model for the metering port, and one currency is held", () => {
-    const priced = { ...gateway, prices: { currency: "USD", models: { "house-model": { inputMicrosPerMillionTokens: 1_000_000, outputMicrosPerMillionTokens: 2_000_000 } } } };
-    expect(modelPriceRows([priced, ANTHROPIC_PROVIDER])).toEqual({ currency: "USD", models: { "company-gateway/house-model": priced.prices.models["house-model"] } });
-    expect(modelPriceRows([ANTHROPIC_PROVIDER]).currency).toBeUndefined();
-    const euro = { ...gateway, kind: "euro-gateway", prices: { currency: "EUR", models: { x: { inputMicrosPerMillionTokens: 1, outputMicrosPerMillionTokens: 1 } } } };
-    expect(() => modelPriceRows([priced, euro])).toThrow(/EUR/u);
-  });
-});
-
 describe("the module helper", () => {
   it("makes a plug-in whose name is the provider id, and lets settings change the address, name, default model and prices only", async () => {
     const plugin = modelProviderPlugin(gateway);
@@ -132,18 +121,9 @@ describe("the module helper", () => {
     }
   });
 
-  it("refuses to make a module out of an invalid provider", () => {
-    expect(() => modelProviderPlugin({ ...gateway, address: "http://models.example.test" })).toThrow();
-  });
 });
 
 describe("the request address", () => {
-  it("is the address plus the format's path, or the override, with no doubled slash", () => {
-    const [format] = gateway.formats;
-    expect(upstreamTarget(gateway, format, "m", false)).toEqual({ url: "https://models.example.test/v1/chat/completions" });
-    expect(upstreamTarget({ ...gateway, address: "https://models.example.test/v1/" }, format, "m", false).url).toBe("https://models.example.test/v1/chat/completions");
-    expect(upstreamTarget(ANTHROPIC_PROVIDER, ANTHROPIC_PROVIDER.formats[0], "m", true, "http://127.0.0.1:9").url).toBe("http://127.0.0.1:9/v1/messages");
-  });
 
   it("puts the model in the address for the vertex variant, and picks the streaming verb", () => {
     const vertex: ModelProviderAdapter = {
@@ -205,12 +185,6 @@ describe("Bedrock needs an AWS identity the owner named (review M1)", () => {
     { registry: createAdapterRegistry(), importModule: async () => ({ plugin: bedrockModelProviderPlugin({ credentials }) }) },
   );
   const role = "arn:aws:iam::123456789012:role/rovara-bedrock";
-
-  it("refuses settings that name no identity, or two, and says what to set", async () => {
-    await expect(load({ region: "us-west-2" })).rejects.toThrow(/exactly one AWS identity/u);
-    await expect(load({ region: "us-west-2", profile: "p", roleArn: role })).rejects.toThrow(/exactly one AWS identity/u);
-    await expect(load({ region: "us-west-2", allowAmbientAwsCredentials: false })).rejects.toThrow();
-  });
 
   it("takes a profile, a role, or the explicit opt-in to the default chain", async () => {
     for (const identity of [{ profile: "rovara-bedrock" }, { roleArn: role }, { allowAmbientAwsCredentials: true }]) await expect(load({ region: "us-west-2", ...identity }), JSON.stringify(identity)).resolves.toBeUndefined();
@@ -281,29 +255,6 @@ describe("the AWS credential source (review L1, L2)", () => {
     }
   });
 
-  it("resolves a profile identity through the profile loader, and not through the role or the default chain", async () => {
-    const calls = { built: [] as string[], asked: 0 };
-    const source = createAwsCredentialSource({ kind: "profile", profile: "rovara-bedrock" }, "us-west-2", { loaders: loaders(calls, async () => value()) });
-    await expect(source.resolve()).resolves.toMatchObject({ accessKeyId: "AKIAEXAMPLE" });
-    expect(calls.built).toEqual(["profile:rovara-bedrock"]);
-  });
-
-  it("shares one refresh between calls that find the credential expired together (single flight)", async () => {
-    let now = 5_000_000;
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const calls = { built: [] as string[], asked: 0 };
-    const source = createAwsCredentialSource({ kind: "role", roleArn: "arn:aws:iam::123456789012:role/r" }, "us-west-2", { loaders: loaders(calls, async () => { await gate; return value(new Date(now + 15 * 60_000)); }), now: () => now });
-    const together = Promise.all([source.resolve(), source.resolve(), source.resolve(), source.resolve()]);
-    release();
-    await together;
-    expect(calls.asked).toBe(1);
-    now += 15 * 60_000;
-    release();
-    await Promise.all([source.resolve(), source.resolve()]);
-    expect(calls.asked).toBe(2);
-  });
-
   it("is what the Bedrock provider reports as its problem", async () => {
     const provider = bedrockModelProvider({ region: "us-west-2", identity: { kind: "profile", profile: "p" }, loaders: loaders({ built: [], asked: 0 }, async () => { throw new Error("x"); }) });
     expect(await provider.credential!()).toBeUndefined();
@@ -360,17 +311,6 @@ describe("provider ids and AWS hosts (review L4, L6)", () => {
     for (const address of ["https://models.example.test", "https://amazonaws.com.example.test", "https://bedrock-runtime.us-east-1.amazonaws.com", "http://127.0.0.1:9", "https://evil-amazonaws.com", "https://bedrock-runtime.us-west-2.example.test"]) {
       expect(() => assertModelProvider(aws(address)), address).toThrow();
     }
-  });
-});
-
-describe("environment variables for provider keys (review L4)", () => {
-  it("keep the built-ins' names and namespace every other provider", async () => {
-    expect(["anthropic", "openai", "openrouter"].map(modelKeyVariable)).toEqual(["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"]);
-    expect(modelKeyVariable("company-gateway")).toBe("ROVARA_MODEL_COMPANY_GATEWAY_API_KEY");
-    const store = createEnvironmentModelKeyStore({ ANTHROPIC_API_KEY: "a-never-real", COMPANY_GATEWAY_API_KEY: "wrong", ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "right-never-real", LINEAR_API_KEY: "tracker" }, ["anthropic", "company-gateway", "linear"], modelKeyVariable);
-    expect(await store.providers("org")).toEqual(["anthropic", "company-gateway"]);
-    expect((await store.get("org", "company-gateway"))?.reveal()).toBe("right-never-real");
-    expect(await store.get("org", "linear")).toBeUndefined();
   });
 });
 

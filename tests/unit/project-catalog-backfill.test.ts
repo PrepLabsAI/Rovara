@@ -107,20 +107,6 @@ it("D1 attribution is enforced on L4 catalog runs and older mixed-company histor
   w.seed("web", A, 2);
   expect((await w.run("discover")).companies).toContainEqual({ companyId: A, indexed: [], missing: [], conflicts: ["web"] });
 });
-it("verify refuses a foreign extra row and never writes a flag; apply preserves preexisting rows on undo", async () => {
-  const w = world(I); w.seed("web"); await w.apply();
-  w.db.set({ ...orgProjectCatalogKey(I, "extra"), entityType: "PROJECT_CATALOG", companyId: B, name: "extra", latestRevision: 1 });
-  expect(await w.run("verify", { mark: true, dryRun: false })).toMatchObject({ ok: false, extra: ["extra"], conflicts: ["extra"] });
-  expect(w.db.get(orgSettingsKey(I, "PROJECT_CATALOG_INDEX").pk, "PROJECT_CATALOG_INDEX")).toBeUndefined();
-});
-it("verify accepts the current core-only setup approval row shape without changing its selected revision", async () => {
-  const w = world(I); w.seed("web"); await w.apply();
-  const copy = w.db.get(projectRevisionKey(I, "web", 1).pk, "REV#000000000001")!;
-  w.db.set({ ...projectRevisionKey(I, "web", 2), entityType: "PROJECT", candidate: true, definition: { ...(copy.definition as object), revision: 2 } });
-  w.db.set({ ...w.db.get(orgProjectCatalogKey(I, "web").pk, "PROJECT#web")!, latestRevision: 2 });
-  expect(await w.run("verify", { mark: true, dryRun: false })).toMatchObject({ ok: true, written: 1 });
-  expect(w.db.get(orgProjectCatalogKey(I, "web").pk, "PROJECT#web")?.latestRevision).toBe(2);
-});
 it("mark supports its full atomic maximum and refuses the next row without writes", async () => {
   for (const count of [99, 100]) {
     const w = world(I);

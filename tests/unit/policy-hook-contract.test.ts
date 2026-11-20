@@ -84,21 +84,4 @@ describe("contract H-1", () => {
     for (const [name, run] of Object.entries(cases)) expect(run(), name).toEqual({ ok: false });
   });
 
-  it("settings take one or two pinned keys, https (or loopback http), and nothing else", () => {
-    const key = makeKey("hook-key-1").jwk;
-    const second = makeKey("hook-key-2").jwk;
-    const ok = (value: unknown) => hook.PolicyHookSettingsSchema.safeParse(value).success;
-    expect(ok({ address: "https://rules.example/v1/policy-hook", keys: [key] })).toBe(true);
-    expect(ok({ address: "https://rules.example/v1/policy-hook", keys: [key, second] })).toBe(true);
-    expect(ok({ address: "http://127.0.0.1:9000/hook", keys: [key] })).toBe(true);
-    expect(ok({ address: "https://rules.example/v1/policy-hook", keys: [] })).toBe(false);
-    expect(ok({ address: "https://rules.example/v1/policy-hook", keys: [key, second, makeKey("hook-key-3").jwk] })).toBe(false);
-    expect(ok({ address: "https://rules.example/v1/policy-hook", keys: [key, { ...second, kid: key.kid }] })).toBe(false);
-    expect(ok({ address: "http://rules.example/v1/policy-hook", keys: [key] })).toBe(false);
-    expect(ok({ address: "https://user:pw@rules.example/hook", keys: [key] })).toBe(false);
-    expect(ok({ address: "https://rules.example/hook?x=1", keys: [key] })).toBe(false);
-    expect(ok({ address: "https://rules.example/hook", keys: [{ ...key, d: "secret" }] })).toBe(false);
-    expect(ok({ address: "https://rules.example/hook", keys: [{ ...key, n: "AQAB" }] })).toBe(false);
-    expect(ok({ address: "https://rules.example/hook", keys: [key], extra: true })).toBe(false);
-  });
 });

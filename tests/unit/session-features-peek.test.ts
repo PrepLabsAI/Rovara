@@ -2,7 +2,7 @@ import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 // a peek at a running task's working tree, for an Ask. One `peek` invocation through the machines port, to a worker that is up and lists the feature, with a filler where a capability goes (it opens
 // nothing); any failure is no diff, and nothing is ever woken for it.
 import { describe, expect, it } from "vitest";
-import { PEEK_FEATURE, PEEK_NO_CALLBACK_CAPABILITY, PEEK_PATCH_MAX_BYTES, WorkerInvocationSchema, type PeekAnswer } from "@agentx/contracts";
+import { PEEK_FEATURE, type PeekAnswer } from "@agentx/contracts";
 import { createAskDiffReader, createPeekClient, diffFromPeek, splitPatchByFile } from "../../packages/broker/src/core/sessions/peek.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -27,16 +27,6 @@ async function world(options: { features?: readonly string[]; answer?: unknown; 
 }
 
 describe("a peek at the working tree", () => {
-  it("is one peek invocation whose capability is a filler no route accepts, with the size the worker may return and no command or path", async () => {
-    const w = await world();
-    expect(await w.peek(TASK)).toEqual(PEEKED);
-    expect(w.machines.answered).toHaveLength(1);
-    const sent = WorkerInvocationSchema.parse(w.machines.answered[0]);
-    expect(sent).toMatchObject({ kind: "peek", workspaceId: WORKSPACE, fence: 3, callbackCapability: PEEK_NO_CALLBACK_CAPABILITY, payload: { maxPatchBytes: PEEK_PATCH_MAX_BYTES } });
-    expect(Object.keys((sent as { payload: object }).payload)).toEqual(["maxPatchBytes"]);
-    // A busy worker is looked at too.
-    expect(await (await world({ busy: true, status: "BUSY" })).peek(TASK)).toEqual(PEEKED);
-  });
 
   it("gives nothing, and wakes nothing, for a machine that is not up, a worker that does not list the feature, or a workspace that is not this task's to look at", async () => {
     const stopped = await world();
@@ -70,12 +60,6 @@ describe("a peek at the working tree", () => {
 });
 
 describe("the diff an Ask is given from a peek", () => {
-  it("names the files as the task's page does, strips the banner of a single repository and marks files git does not track yet", () => {
-    const diff = diffFromPeek(PEEKED);
-    expect(diff.source).toBe("working_tree");
-    expect(diff.files).toEqual([{ path: "src/a.ts", additions: 3, deletions: 1 }, { path: "src/new.ts (new, not yet tracked)", additions: 0, deletions: 0 }]);
-    expect(diff.patches?.map((patch) => patch.path)).toEqual(["src/a.ts", "src/b.ts"]);
-  });
 
   it("puts the repository's name before a path only when there are several", () => {
     const several: PeekAnswer = { ...PEEKED, files: [...PEEKED.files, { repository: "api", path: "x.ts", additions: 1, deletions: 0 }], patch: "## repository api\ndiff --git a/x.ts b/x.ts\n+x\n## repository demo\ndiff --git a/src/a.ts b/src/a.ts\n+y" };

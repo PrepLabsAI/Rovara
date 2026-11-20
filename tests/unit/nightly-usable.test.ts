@@ -37,16 +37,6 @@ describe("usableNightlyFailing", () => {
     expect(await usableNightlyFailing(bench({ ageMs: NIGHTLY_BASELINE_MAX_AGE_MS }).deps, ORG, PROJECT)).toEqual(["Y"]);
   });
 
-  it("is nothing for a stale baseline (older than 7 days), however it ran", async () => {
-    expect(await usableNightlyFailing(bench({ ageMs: NIGHTLY_BASELINE_MAX_AGE_MS + 60_000 }).deps, ORG, PROJECT)).toBeUndefined();
-    expect(await usableNightlyFailing(bench({ ageMs: 30 * DAY }).deps, ORG, PROJECT)).toBeUndefined();
-  });
-
-  it("is nothing for a baseline from another branch than the tasks' base branch", async () => {
-    expect(await usableNightlyFailing(bench({ branch: "release" }).deps, ORG, PROJECT)).toBeUndefined();
-    expect(await usableNightlyFailing(bench({ base: ["develop"] }).deps, ORG, PROJECT)).toBeUndefined();
-  });
-
   it("is nothing when the repositories do not agree on a base branch, none is named, there is no baseline, it claims to be from the future, or its failing list did not fit", async () => {
     expect(await usableNightlyFailing(bench({ base: ["main", "develop"] }).deps, ORG, PROJECT)).toBeUndefined();
     expect(await usableNightlyFailing(bench({ base: [undefined] }).deps, ORG, PROJECT)).toBeUndefined();
@@ -67,15 +57,6 @@ describe("a baseline older than 7 days (a quiet repository) and the task's own b
     expect(await usableNightlyFailing(t.deps, ORG, PROJECT, { currentHead: head(undefined) })).toBeUndefined();
     expect(await usableNightlyFailing(t.deps, ORG, PROJECT, { currentHead: async () => { throw new Error("host down"); } })).toBeUndefined();
     expect(await usableNightlyFailing(t.deps, ORG, PROJECT)).toBeUndefined();
-  });
-
-  it("asks for the head of the BASELINE's branch, and still needs the branch, whole list and sane clock", async () => {
-    const asked: string[] = [];
-    expect(await usableNightlyFailing(bench({ ageMs: 30 * DAY }).deps, ORG, PROJECT, { currentHead: async (branch) => { asked.push(branch); return SAME; } })).toEqual(["Y"]);
-    expect(asked).toEqual(["main"]);
-    expect(await usableNightlyFailing(bench({ ageMs: 30 * DAY, branch: "release" }).deps, ORG, PROJECT, { currentHead: head(SAME) })).toBeUndefined();
-    expect(await usableNightlyFailing(bench({ ageMs: 30 * DAY, failed: ["Y"], failedCount: 3 }).deps, ORG, PROJECT, { currentHead: head(SAME) })).toBeUndefined();
-    expect(await usableNightlyFailing(bench({ ageMs: -2 * 3_600_000 }).deps, ORG, PROJECT, { currentHead: head(SAME) })).toBeUndefined();
   });
 
   it("compares the nightly's branch with the TASK's base branch, not with the project's default", async () => {

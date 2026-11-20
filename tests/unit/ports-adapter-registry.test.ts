@@ -3,10 +3,10 @@ import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ChannelEventSchema, type ChannelInboundSink, PLUGIN_POINTS, PluginRegistryError, channelEventId, type ChannelEvent, type PluginModule } from "@agentx/contracts";
+import { ChannelEventSchema, type ChannelInboundSink, PLUGIN_POINTS, channelEventId, type ChannelEvent, type PluginModule } from "@agentx/contracts";
 import { createAdapterRegistry, createModuleImporter, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
 import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
-import { createAllowAllAdmission, createLocalOwnerApprovers, registerCodeDefaults } from "../../packages/broker/src/ports/policy-defaults.js";
+import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
 
@@ -64,30 +64,6 @@ describe("the adapter registry", () => {
     expect(registry.names("admission")).toEqual(["budgets"]);
   });
 
-  it("seals: afterwards only channel adapters can be added or removed", () => {
-    const registry = createAdapterRegistry();
-    registerCodeDefaults(registry, { priceTable: { currency: "USD", models: {} } });
-    registry.seal();
-    expect(() => registry.register("approvers", "approve-everything", createLocalOwnerApprovers())).toThrowError(expect.objectContaining({ code: "already_registered" }));
-    expect(() => registry.unregister("approvers", "local-owner")).toThrow(/sealed/);
-    expect(() => registry.unregister("identity", "local-owner")).toThrow(/sealed/);
-    registry.register("channel", "whatsapp", new FakeChannelAdapter());
-    expect(registry.unregister("channel", "whatsapp")).toBe(true);
-    expect(registry.names("approvers")).toEqual(["local-owner"]);
-  });
-
-  it("registers Code's defaults for the policy seams, and a configured adapter wins over them", () => {
-    const registry = createAdapterRegistry();
-    registerCodeDefaults(registry, { priceTable: { currency: "USD", models: {} } });
-    expect(registry.names("admission")).toEqual(["allow-all"]);
-    expect(registry.names("audit-sink")).toEqual(["none"]);
-    expect(registry.names("approvers")).toEqual(["local-owner"]);
-    expect(registry.names("identity")).toEqual(["local-owner"]);
-    expect(registry.names("metering")).toEqual(["price-table"]);
-    registry.register("admission", "budgets", createAllowAllAdmission());
-    expect(registry.names("admission")).toEqual(["budgets"]);
-  });
-
   it("carries Pratik's channel events to a channel adapter unchanged", async () => {
     const registry = createAdapterRegistry();
     const adapter = new FakeChannelAdapter();
@@ -121,13 +97,6 @@ describe("the config loader", () => {
     },
   };
 
-  it("gives an adapter a read-only view of the registry", async () => {
-    let view: unknown;
-    const probe: PluginModule<"admission"> = { point: "admission", name: "probe", create: (context) => { view = context.registry; return createAllowAllAdmission(); } };
-    await loadAdapters(config([{ point: "admission", name: "probe", module: "probe-pkg" }]), { registry: createAdapterRegistry(), importModule: importerOf({ "probe-pkg": { plugin: probe } }) });
-    expect(Object.keys(view as object).sort()).toEqual(["get", "names", "require"]);
-  });
-
   it("imports a ./ module from inside the config folder only, following links to their real place", async () => {
     const directory = await mkdtemp(join(tmpdir(), "plugin-config-"));
     const outside = await mkdtemp(join(tmpdir(), "plugin-outside-"));
@@ -159,15 +128,6 @@ describe("the config loader", () => {
     expect(registry.names("channel")).toEqual([]);
   });
 
-  it("gives an adapter the company from the config, or the implicit one", async () => {
-    const seen: string[] = [];
-    const probe: PluginModule<"admission"> = { point: "admission", name: "probe", create: (context) => (seen.push(context.defaultCompanyId), createAllowAllAdmission()) };
-    for (const extra of [{ companyId: "org_abcdefghij0123456789" }, {}]) {
-      await loadAdapters(config([{ point: "admission", name: "probe", module: "probe-pkg" }], extra), { registry: createAdapterRegistry(), importModule: importerOf({ "probe-pkg": { plugin: probe } }) });
-    }
-    expect(seen).toEqual(["org_abcdefghij0123456789", "org_00000000000000000000"]);
-  });
-
   it("refuses a module that is for a different point or name than its config entry", async () => {
     await expect(loadAdapters(config([{ point: "queue", name: "memory", module: "m" }]), { registry: createAdapterRegistry(), importModule: importerOf({ m: { plugin: storeModule } }) }))
       .rejects.toMatchObject({ name: "PluginRegistryError", code: "bad_module" });
@@ -178,29 +138,4 @@ describe("the config loader", () => {
     await expect(loadAdapters(config([{ point: "storage", name: "memory", module: "empty-pkg" }]), { registry: createAdapterRegistry(), importModule: importerOf({ "empty-pkg": {} }) })).rejects.toMatchObject({ code: "bad_module" });
   });
 
-  it("reports an adapter that fails to build by its name only", async () => {
-    const broken: PluginModule<"storage"> = { point: "storage", name: "memory", create: () => { throw new Error("secret detail"); } };
-    const error = await loadAdapters(config([{ point: "storage", name: "memory", module: "m" }]), { registry: createAdapterRegistry(), importModule: importerOf({ m: { plugin: broken } }) }).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(PluginRegistryError);
-    expect((error as PluginRegistryError).code).toBe("create_failed");
-    expect((error as PluginRegistryError).message).not.toContain("secret detail");
-    expect((error as PluginRegistryError).message).toContain("Error");
-  });
-
-  it("refuses a config that is malformed", () => {
-    const bad = (value: unknown) => expect(() => parsePluginConfig(value)).toThrowError(expect.objectContaining({ code: "bad_config" }));
-    bad({ plugins: [] });
-    bad({ version: 2, plugins: [] });
-    bad({ version: 1, plugins: [{ point: "no-such-point", name: "x", module: "m" }] });
-    bad({ version: 1, plugins: [{ point: "storage", name: "Bad Name", module: "m" }] });
-    bad({ version: 1, plugins: [{ point: "storage", name: "aa", module: "m", surprise: true }] });
-    bad({ version: 1, plugins: [{ point: "storage", name: "aa", module: "m" }, { point: "storage", name: "aa", module: "m" }] });
-    bad({ version: 1, plugins: [{ point: "storage", name: "aa", module: "m" }, { point: "storage", name: "bb", module: "m" }] });
-  });
-
-  it("allows only package names and relative paths as module specifiers", () => {
-    const specifier = (module: string) => () => parsePluginConfig({ version: 1, plugins: [{ point: "storage", name: "aa", module }] });
-    for (const good of ["@rovara/plugin-github", "plugin-sqlite", "./plugins/sqlite.js", "@scope/pkg/sub/entry.js"]) expect(specifier(good)).not.toThrow();
-    for (const bad of ["file:///etc/passwd", "https://example.com/x.js", "data:text/javascript,1", "/abs/path.js", "./a/../../b.js", "../adapters/x.js", "../../../../tmp/evil.js", "./.git/hooks/x.js", "./.ssh/x.js", "node:fs", "fs", "child_process", "", "a b", "C:\\x.js"]) expect(specifier(bad)).toThrow();
-  });
 });

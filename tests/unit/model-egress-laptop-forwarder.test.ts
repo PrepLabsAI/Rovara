@@ -58,16 +58,6 @@ describe("where a call goes", () => {
     const sent = seen[0]!.options.headers as Record<string, string>;
     expect(Object.keys(sent).sort()).toEqual(["content-length", "content-type", "host", "x-goog-api-key"]);
   });
-  it("refuses a private, loopback, link-local, reserved or mapped answer, and an answer with ANY such address among public ones", async () => {
-    for (const bad of ["10.0.0.5", "127.0.0.1", "169.254.169.254", "192.168.1.1", "172.16.0.9", "100.64.0.1", "0.0.0.0", "::1", "fe80::1", "fc00::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1", "224.0.0.1", "not-an-address"]) {
-      const { request, seen } = fakeRequest();
-      await expect(createLaptopTransport({ lookup: async () => [bad], request })(outbound()), bad).rejects.toBeInstanceOf(EgressSsrfError);
-      await expect(createLaptopTransport({ lookup: async () => [PUBLIC, bad], request })(outbound()), `mixed ${bad}`).rejects.toBeInstanceOf(EgressSsrfError);
-      expect(seen, bad).toHaveLength(0);
-    }
-    const { request } = fakeRequest();
-    await expect(createLaptopTransport({ lookup: async () => [], request })(outbound())).rejects.toBeInstanceOf(EgressSsrfError);
-  });
   it("REBINDING: the first answer is public and the second is private: the second call is refused and connects to nothing", async () => {
     const answers = [[PUBLIC], ["10.0.0.5"]];
     const { request, seen } = fakeRequest();

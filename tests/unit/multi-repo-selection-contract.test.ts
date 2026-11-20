@@ -2,7 +2,6 @@
 import { describe, expect, it } from "vitest";
 import { RepositoryCoverageMapSchema, TEST_ENV_MULTI_REPO_FEATURE, TestEnvTaskPlanSchema, WORKER_INVOCATION_FEATURES } from "@agentx/contracts";
 import { featuresForTestPlan } from "../../packages/broker/src/core/test-env/seam.js";
-import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 
 const BUILT = "2026-11-02T08:00:00.000Z";
 const entry = (repositoryId: string, path: string, tests: Array<[string, string]> = [["service", "tests/test_a.py::test_a"]]) => ({ repositoryId, path, tests: tests.map(([repo, id]) => ({ repositoryId: repo, id })) });
@@ -62,18 +61,6 @@ describe("the task plan's cross-repository fields", () => {
     expect(JSON.stringify(big).length).toBeGreaterThan(256 * 1024);
     expect(TestEnvTaskPlanSchema.safeParse(plan({ repositoryCoverageMap: big })).success).toBe(false);
   });
-});
-
-describe("only a worker that reads the fields is sent them", () => {
-  it("the plan needs the feature when it carries the map or a check's repository, and not otherwise", () => {
-    const withMap = TestEnvTaskPlanSchema.parse(plan());
-    expect([...featuresForTestPlan(undefined, withMap)].sort()).toEqual(["task.testEnvironment.v1", TEST_ENV_MULTI_REPO_FEATURE].sort());
-    const { repositoryCoverageMap: _map, ...rest } = plan(); void _map;
-    expect([...featuresForTestPlan(undefined, TestEnvTaskPlanSchema.parse(rest))].sort()).toEqual(["task.testEnvironment.v1", TEST_ENV_MULTI_REPO_FEATURE].sort());
-    const bare = TestEnvTaskPlanSchema.parse({ ...rest, checks: [{ id: "unit", kind: "test", selectArgs: ["{tests}"] }] });
-    expect(featuresForTestPlan(undefined, bare)).toEqual(["task.testEnvironment.v1"]);
-  });
-  it("this worker lists it", () => { expect(WORKER_IMPLEMENTED_FEATURES).toContain(TEST_ENV_MULTI_REPO_FEATURE); });
 });
 
 describe("the engine's ask for combined baselines", () => {

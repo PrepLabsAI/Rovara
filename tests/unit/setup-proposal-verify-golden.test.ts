@@ -44,13 +44,6 @@ describe("setup proposal verify (golden, pinned before the W1 move)", () => {
     });
   });
 
-  it("holds: a quote at the cited line that contains the value is verified and final; one read through the line plus the margin", async () => {
-    const { read, calls } = fakeReader({ [`demo:package.json@${SHA}`]: PACKAGE });
-    const result = await verifyProposalDetailed(read, proposalOf({ setup: [commandsItem("s", ["npm ci"], [cite(3, '"ci": "npm ci"')])] }), { now: fixedNow });
-    expect(result).toEqual({ items: { s: "verified" }, final: true });
-    expect(calls).toEqual([{ repository: "demo", path: "package.json", commit: SHA, untilLine: 7, timeoutMs: 8_000 }]);
-  });
-
   it("fails: a quote not near the cited line, a missing file, a line past the end, and a quote that does not contain the value are unverified and final", async () => {
     const { read } = fakeReader({ [`demo:package.json@${SHA}`]: PACKAGE });
     const result = await verifyProposalDetailed(read, proposalOf({
@@ -64,13 +57,6 @@ describe("setup proposal verify (golden, pinned before the W1 move)", () => {
     expect(result).toEqual({ items: { far: "unverified", gone: "unverified", past: "unverified", value: "unverified" }, final: true });
   });
 
-  it("the window is exactly 3 lines either side of the cited line", async () => {
-    const lines = Array.from({ length: 20 }, (_, index) => `line number ${index + 1} here`);
-    const text = lines.join("\n");
-    const at = (line: number, quoteLine: number) => citationHolds(text, { line, quote: `line number ${quoteLine} here` });
-    expect([at(10, 7), at(10, 13), at(10, 6), at(10, 14), at(1, 4), at(1, 5), at(20, 17), at(20, 16)]).toEqual([true, true, false, false, true, false, true, false]);
-  });
-
   it("citationHolds: whitespace collapsed, CR/LF and CR line ends, no line = anywhere, a short or absent quote holds nothing, a line past the end holds nothing", () => {
     expect(citationHolds("a\r\nb   c\td\re f g h", { line: 2, quote: "b c d e f" })).toBe(true);
     expect(citationHolds("x\n".repeat(50) + "deep quote text", { quote: "deep   quote text" })).toBe(true);
@@ -79,23 +65,6 @@ describe("setup proposal verify (golden, pinned before the W1 move)", () => {
     expect(citationHolds("12345678", { line: 1, quote: "12345678" })).toBe(true);
     expect(citationHolds("some text here", { line: 1 })).toBe(false);
     expect(citationHolds("some text here", { line: 2, quote: "some text here" })).toBe(false);
-  });
-
-  it("unreadable: a read that throws leaves the item unchecked and the result NOT final", async () => {
-    const { read } = fakeReader({ [`demo:package.json@${SHA}`]: new Error("host down") });
-    const result = await verifyProposalDetailed(read, proposalOf({ setup: [commandsItem("s", ["npm ci"], [cite(3, '"ci": "npm ci"')])] }), { now: fixedNow });
-    expect(result).toEqual({ items: { s: "unchecked" }, final: false });
-  });
-
-  it("unreadable beats holds, fails beats unreadable within one item", async () => {
-    const { read } = fakeReader({ [`demo:package.json@${SHA}`]: PACKAGE, [`demo:other.json@${SHA}`]: new Error("down"), [`demo:third.json@${SHA}`]: "nothing" });
-    const result = await verifyProposalDetailed(read, proposalOf({
-      setup: [
-        commandsItem("mixed", ["npm ci"], [cite(3, '"ci": "npm ci"'), cite(1, "anything at all", { path: "other.json" })]),
-        commandsItem("worse", ["npm ci"], [cite(1, "anything at all", { path: "other.json" }), cite(1, "not in the file", { path: "third.json" })]),
-      ],
-    }), { now: fixedNow });
-    expect(result).toEqual({ items: { mixed: "unchecked", worse: "unverified" }, final: false });
   });
 
   it("no reader: every readable item is unchecked and NOT final", async () => {

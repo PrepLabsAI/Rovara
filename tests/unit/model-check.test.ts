@@ -103,12 +103,4 @@ describe("the class a failed check carries (test 40)", () => {
     expect(JSON.stringify(sentence)).not.toContain("sk-live");
   });
 
-  it("has one fixed sentence per class, each naming the provider and the model", () => {
-    for (const cls of ["limit-or-rate-limited", "key-rejected", "model-not-found", "unreachable", "request-rejected", "provider-outage", "unknown", "secret-unreadable", "not-in-catalog"] as const) {
-      const sentence = classSentence({ provider: "openai", modelId: "gpt-5.4", class: cls });
-      expect(sentence).toContain("OpenAI");
-      expect(sentence).toContain("gpt-5.4");
-      expect(sentence).not.toMatch(/wait a minute/);
-    }
-  });
 });

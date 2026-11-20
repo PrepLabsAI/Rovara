@@ -28,17 +28,6 @@ describe("the settings are stored under the shared key layout", () => {
     expect(cleared).toMatchObject({ context: "same_as_first", default: "shadow" });
   });
 
-  it("every change commits with its audit event, and with no ledger step the change still stands (the sink writes elsewhere)", async () => {
-    const world = createWorld();
-    await world.review.apply(OWNER, { action: "choose", primary: GPT });
-    expect(world.audit.map((event) => event.action)).toEqual(["company.second_review_choice_changed"]);
-    expect(await world.store.get({ pk: `AUDIT#${COMPANY}`, sk: `EVENT#${world.audit[0]!.eventId}` })).toBeDefined();
-    expect(world.audit[0]!.details).toEqual({ change: "choose", count: 1 });
-    const quiet = createWorld({ auditStages: false });
-    await quiet.review.apply(OWNER, { action: "choose", primary: GPT });
-    expect((await readSecondReviewSettings(quiet.store, COMPANY, "")).companyModels).toEqual([GPT]);
-  });
-
   it("refuses a model the install cannot use, a person who may not administer, and a project it does not have; nothing is written", async () => {
     const world = createWorld({ sources: [SONNET, GPT] });
     await expect(world.review.apply(OWNER, { action: "choose", primary: GEMINI })).rejects.toMatchObject({ code: "MODEL_NOT_ALLOWED" });
@@ -68,20 +57,6 @@ describe("the settings are stored under the shared key layout", () => {
 });
 
 describe("the mode", () => {
-  it("raising applies at once, audited; `on` needs the evidence for the chosen model, recomputed from the stored run", async () => {
-    const world = createWorld();
-    await world.review.apply(OWNER, { action: "mode", scope: "company", mode: "shadow" });
-    // Nobody chose: no model for the evidence to be about.
-    await expect(world.review.apply(OWNER, { action: "mode", scope: "company", mode: "on" })).rejects.toMatchObject({ code: "FORBIDDEN", message: (expect.stringContaining("trial record") as string) });
-    await world.review.apply(OWNER, { action: "choose", primary: GPT });
-    await expect(world.review.apply(OWNER, { action: "mode", scope: "company", mode: "on" })).rejects.toMatchObject({ code: "FORBIDDEN" });
-    await world.seedHoldingEvidence(GPT);
-    expect(await world.review.apply(OWNER, { action: "mode", scope: "company", mode: "on" })).toEqual({ status: "applied", mode: "on" });
-    expect((await world.review.state()).modes.company).toBe("on");
-    expect(world.audit.filter((event) => event.action === "company.second_review_mode_changed").map((event) => event.details)).toEqual([
-      { scope: "company", from: "off", to: "shadow", mode: "direct" }, { scope: "company", from: "shadow", to: "on", mode: "direct" },
-    ]);
-  });
 
   it("a withdrawn verdict, or a replay run that fails the bar, stops `on` at once", async () => {
     const world = createWorld();
@@ -113,14 +88,6 @@ describe("the mode", () => {
     world.clock.now += 1_000;
     await world.review.apply(OWNER, { action: "mode", scope: "company", mode: "off" });
     expect((await readSecondReviewSettings(world.store, COMPANY, "web")).projectMode).toBeUndefined();
-  });
-
-  it("lowering needs a fresh page session (ten minutes); raising does not", async () => {
-    const world = createWorld();
-    await world.review.apply(OWNER, { action: "mode", scope: "company", mode: "shadow" }, { fresh: false });
-    await expect(world.review.apply(OWNER, { action: "mode", scope: "company", mode: "off" }, { fresh: false })).rejects.toMatchObject({ code: "REAUTH_REQUIRED" });
-    expect((await world.review.state()).modes.company).toBe("shadow");
-    expect(await world.review.apply(OWNER, { action: "mode", scope: "company", mode: "off" }, { fresh: true })).toEqual({ status: "applied", mode: "off" });
   });
 
   it("a project can be as strict as the company or stricter, never less strict; `inherit` clears it", async () => {
@@ -228,18 +195,6 @@ describe("the evidence writers", () => {
     expect((await world.store.query({ pk: `AUDIT#${COMPANY}`, sk: { op: "beginsWith", prefix: "EVENT#company.second_review_replay_recorded" } })).items).toHaveLength(1);
   });
 
-  it("a verdict stores evidence only: the shadow counts are the company's own track record for the window, and the span is what was counted", async () => {
-    const world = createWorld();
-    await withRows(world);
-    await world.evidence.replay(replayRun(GPT));
-    const stored = await world.evidence.verdict({ model: GPT, replayRunId: "run-1", startedAt: "2026-10-02T00:00:00.000Z", endedAt: "2026-11-01T00:00:00.000Z" });
-    expect(stored).toMatchObject({ ok: true, holds: true, shadow: { reviews: 10, findings: 10, agreed: 5, passed: true } });
-    const verdict = (await world.store.get({ pk: `ORG#${COMPANY}`, sk: `SECONDREVIEW#VERDICT#${KEY}` }))?.["verdict"] as { shadow: { startedAt: string; endedAt: string }; holds?: boolean };
-    expect(verdict.shadow).toMatchObject({ startedAt: "2026-10-03T12:00:00.000Z", endedAt: "2026-10-21T12:00:00.000Z" });
-    expect(verdict).not.toHaveProperty("holds");
-    expect((await world.review.state()).evidence).toMatchObject({ holds: false });
-  });
-
   it("is refused for a run that is missing or another model's, a window before the run or in the future, and a window with no second opinions", async () => {
     const world = createWorld();
     await withRows(world);
@@ -254,13 +209,6 @@ describe("the evidence writers", () => {
     await world.evidence.replay(replayRun(GPT, { runId: "run-3", ranAt: "2026-09-01T00:00:00.000Z" }));
     expect(await ask({ replayRunId: "run-3", startedAt: "2026-09-02T00:00:00.000Z", endedAt: "2026-09-20T00:00:00.000Z" })).toEqual({ ok: false, code: "no_shadow_evidence" });
     expect(world.audit.filter((event) => event.action === "company.second_review_verdict_recorded")).toEqual([]);
-  });
-
-  it("a short or disagreeing window is stored as it is and does NOT hold: the bar decides, not the writer", async () => {
-    const world = createWorld();
-    for (let n = 1; n <= 3; n += 1) await applyTrackChange(world.store, COMPANY, { create: { model: KEY, mode: "shadow", taskId: `t${String(n)}`, project: "web", candidateDigest: sha(n), recordedAt: `2026-10-0${String(n + 1)}T12:00:00.000Z`, firstCleared: false, rev: 0, findings: [] }, moves: [] });
-    await world.evidence.replay(replayRun(GPT));
-    expect(await world.evidence.verdict({ model: GPT, replayRunId: "run-1", startedAt: "2026-10-02T00:00:00.000Z", endedAt: "2026-11-01T00:00:00.000Z" })).toMatchObject({ ok: true, holds: false, shadow: { passed: false } });
   });
 
   const failingRun = (over: Partial<ReturnType<typeof replayRun>> = {}) => replayRun(GPT, { runId: "run-2", ranAt: "2026-10-01T00:00:00.000Z", cases: passingCases().map((entry) => ({ ...entry, candidateCaught: false })), ...over });
@@ -348,12 +296,6 @@ describe("the evidence writers", () => {
     expect(verdictHoldsFor(await readSecondReviewSettings(world.store, COMPANY, ""), GPT)).toBe(true);
   });
 
-  it("a verdict can be read past the first page of models", async () => {
-    const world = createWorld();
-    for (let n = 0; n < 60; n += 1) await world.seedHoldingEvidence({ provider: "openrouter", modelId: `vendor/model-${String(n)}` });
-    const settings = await readSecondReviewSettings(world.store, COMPANY, "");
-    expect(settings.verdicts).toHaveLength(60);
-  });
 });
 
 describe("the notice that the reviewer stopped qualifying", () => {

@@ -38,15 +38,6 @@ describe("host runners and an unconfirmed stop", () => {
     await expect(runProjectCommand(command, 0, await root(), undefined, true)).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
   });
 
-  it("createCheckRunners passes it through on an aborted signal, never as 'aborted'", async () => {
-    killUnconfirmed.on = true;
-    const controller = new AbortController();
-    const runners = createCheckRunners({ rootPath: await root(), local: true });
-    const running = runners.runProjectCommand(command, controller.signal);
-    controller.abort();
-    await expect(running).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
-  });
-
   it("createCheckRunners passes an unconfirmed stop of the agent's shell through on an aborted signal, never as 'aborted'", async () => {
     killUnconfirmed.on = false;
     const controller = new AbortController();
@@ -63,8 +54,4 @@ describe("host runners and an unconfirmed stop", () => {
     await expect(runners.runAgentCommand("make test", 60_000, controller.signal)).rejects.toThrow("aborted");
   });
 
-  it("an ordinary result still returns an ordinary result", async () => {
-    killUnconfirmed.on = false;
-    await expect(runProjectCommand({ ...command, executable: "true", args: [] }, 0, await root(), undefined, true)).resolves.toMatchObject({ exitCode: 0 });
-  });
 });

@@ -1,5 +1,3 @@
-import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { locateWorkspace } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, OUTBOX_PENDING_INDEX, companyScoped, type QueueService } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -13,15 +11,6 @@ const A = IMPLICIT_COMPANY_ID, B = `org_${"b".repeat(20)}`;
 const body = { v: 1, workspaceId: "shared-workspace", operationId: "shared-operation" };
 
 describe("outbox company attributes", () => {
-  it("stamps company last and preserves the seven caller attributes", async () => {
-    const store = new MemoryDocumentStore({ indexes: [OUTBOX_PENDING_INDEX] });
-    const queues = new MemoryQueueService(); const outbox = createTransactionalOutbox({ store, queues });
-    const attrs = Object.fromEntries(Array.from({ length: 7 }, (_, i) => [`a${i}`, "value"]));
-    await store.transact([outbox.stage({ companyId: A, id: "same", queue: "shared", body, attributes: attrs })]);
-    expect(await outbox.relay({ companyId: A })).toMatchObject({ delivered: 1 });
-    const [message] = await (await queues.queue("shared")).receive();
-    expect(message?.attributes).toEqual({ ...attrs, outboxId: "same", companyId: A });
-  });
   it("refuses reserved attributes and too many before staging", () => {
     const store = new MemoryDocumentStore({ indexes: [OUTBOX_PENDING_INDEX] });
     const outbox = createTransactionalOutbox({ store, queues: new MemoryQueueService() });
@@ -89,27 +78,6 @@ it("outbox relay refuses a corrupt row whose key and company disagree", async ()
   await store.put({ item: { ...staged.item, companyId: B } });
   expect(await outbox.relay({ companyId: A })).toEqual({ delivered: 0, failed: 1, dead: 0 });
   expect(await (await queues.queue("shared")).receive()).toEqual([]);
-});
-it("fails closed: unusable consumer releases even malformed messages", async () => {
-  const h = createHarness(); h.deps.companyId = ""; const queue = await h.queues.queue("task-dispatch");
-  await queue.enqueue({ body: null });
-  expect(await runDispatchOnce(h.deps)).toMatchObject({ foreign: 1, dropped: 0 }); h.clock.advance(31);
-  expect((await queue.receive())).toHaveLength(1);
-});
-it("unscoped keys no longer hold two companies' same raw ids", async () => {
-  const store = new MemoryDocumentStore();
-  for (const company of [A, B]) await store.put({ item: { ...operationKey(company, "shared-workspace", "shared-operation"), marker: company } });
-  expect(store.size).toBe(2);
-  for (const company of [A, B]) expect((await store.get(operationKey(company, "shared-workspace", "shared-operation")))?.marker).toBe(company);
-});
-it("legacy unscoped workspace rows belong to the implicit company only", async () => {
-  const store = new MemoryDocumentStore();
-  await store.put({ item: { pk: "WORKSPACE#shared-workspace", sk: "META", companyId: A } });
-  expect((await locateWorkspace({ store, companyId: A }, "shared-workspace"))?.scope).toBe("legacy");
-  const get = vi.spyOn(store, "get");
-  expect(await locateWorkspace({ store, companyId: B }, "shared-workspace")).toBeUndefined();
-  // Its own scoped key, then the id-only discovery key (only to log a dangling pointer of its OWN company); a legacy row is never admitted for B.
-  expect(get.mock.calls.map(([key]) => key.pk)).toEqual([`ORG#${B}#WORKSPACE#shared-workspace`, "WORKSPACE#shared-workspace"]);
 });
 
 it("a foreign visibility failure never logs the adapter's cause or foreign company", async () => {

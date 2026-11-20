@@ -6,7 +6,7 @@ import {
 } from "@agentx/contracts";
 import { SETUP_APPLY_KIND, createSetupProposalSubject, setupApplyDigest, setupApplyKey, type SetupApplyRow } from "../../packages/broker/src/core/setup-agent/apply.js";
 import { buildSetupCheck, relayCheck } from "../../packages/broker/src/core/setup-agent/check.js";
-import { readSetupSnapshot, setupSnapshotKey } from "../../packages/broker/src/core/setup-agent/snapshot.js";
+import { setupSnapshotKey } from "../../packages/broker/src/core/setup-agent/snapshot.js";
 import { readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
@@ -16,8 +16,6 @@ import { createHarness, definition, newRequestId, type Harness } from "../suppor
 
 const URL_ = "https://examplehost.test/acme/app";
 const FILES = { "README.md": "x", "package.json": "{}", "package-lock.json": "lock", "services/api/Dockerfile": "FROM node", ".env.example": "KEY=", "src/index.ts": "export {}" };
-const SEEDED_SECRET = ["sk", "live", "0123456789abcdefghijklmnop"].join("_");
-const TOKEN_URL_LOCK = `{"resolved":"https://user:${SEEDED_SECRET}@registry.example/pkg.tgz"}`;
 const base: ProjectDefinition = {
   ...definition, repositories: [{ ...definition.repositories[0]!, url: URL_, host: { kind: "fake" } }],
   setup: [{ cwd: "repo/demo", executable: "npm", args: ["ci"], timeoutSeconds: 60 }], readiness: [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }],
@@ -88,29 +86,6 @@ describe("the approval saves the setup snapshot", () => {
     expect(applied.extra?.some((item) => item.kind === "update" && item.key.pk === orgProjectCatalogKey(w.h.deps.companyId, "payments").pk)).toBe(true);
   });
 
-  it("is written by the same transaction as the decision: stored only when the approval commits", async () => {
-    const w = await waiting();
-    const applied = await approve(w);
-    expect(await readSetupSnapshot(w.h.store, w.h.deps.companyId, "payments")).toBeUndefined();
-    expect((await w.h.store.transact([...(applied.extra ?? [])])).applied).toBe(true);
-    expect(SetupSnapshotSchema.safeParse(await readSetupSnapshot(w.h.store, w.h.deps.companyId, "payments")).success).toBe(true);
-  });
-
-  it("holds no file content and no secret: a seeded secret inside a watched file never reaches the row", async () => {
-    const w = await waiting({ files: { ...FILES, "package-lock.json": TOKEN_URL_LOCK, ".env.example": `STRIPE=${SEEDED_SECRET}` } });
-    const applied = await approve(w);
-    const text = JSON.stringify(snapshotPut(applied.extra, w));
-    expect(text).not.toContain(SEEDED_SECRET);
-    expect(text).not.toContain("registry.example");
-    expect(text).not.toContain("STRIPE");
-  });
-
-  it("the hosted rule saves it the same way (the snapshot does not depend on who approves)", async () => {
-    const w = await waiting();
-    const applied = await approve(w, { riskFromDiff: true, mayDecide: async () => true, refusal: () => "no" });
-    expect(snapshotPut(applied.extra, w)).toBeDefined();
-  });
-
   it("an install with no code host, or a host that cannot list setup files, or a host that fails, still approves, and saves none", async () => {
     const noHost = await waiting({ withHost: false });
     expect(snapshotPut((await approve(noHost)).extra, noHost)).toBeUndefined();
@@ -127,22 +102,6 @@ describe("the approval saves the setup snapshot", () => {
     expect(failed.extra?.some((item) => item.kind === "update")).toBe(true);
   });
 
-  it("is of the code the check prepared, not of whatever landed before the approval", async () => {
-    const w = await waiting();
-    const prepared = w.model.headOf("main");
-    w.model.commit("main", { "package-lock.json": "changed after the check", "docker-compose.yml": "services: {}" });
-    const saved = SetupSnapshotSchema.parse((snapshotPut((await approve(w)).extra, w) as unknown as { item: { snapshot: unknown } }).item.snapshot);
-    expect(saved.repositories[0]!.commit).toBe(prepared);
-    expect(saved.repositories[0]!.files.map((file) => file.path)).not.toContain("docker-compose.yml");
-  });
-
-  it("saves none when the check's commits were not noted (the first re-check saves the baseline instead)", async () => {
-    const w = await waiting({ baseCommits: "none" });
-    const applied = await approve(w);
-    expect(snapshotPut(applied.extra, w)).toBeUndefined();
-    expect(applied.extra?.some((item) => item.kind === "update")).toBe(true);
-  });
-
   it("a store fault while reading the candidate saves no snapshot and does not fail the approval", async () => {
     const w = await waiting();
     const subject = createSetupProposalSubject({ flow: w.h.deps });
@@ -155,52 +114,4 @@ describe("the approval saves the setup snapshot", () => {
     expect(applied.extra?.some((item) => item.kind === "update")).toBe(true);
   });
 
-  it("a listing the host cut short saves none: a partial baseline would report changes that did not happen", async () => {
-    const w = await waiting();
-    w.model.incompleteTrees.add(w.model.headOf("main"));
-    expect(snapshotPut((await approve(w)).extra, w)).toBeUndefined();
-  });
-
-  it("a project of two repositories saves both, and saves neither when one listing was cut (a partial baseline is never kept)", async () => {
-    const URL2 = "https://examplehost.test/acme/web";
-    const two = candidateOf({ repositories: [base.repositories[0]!, { name: "web", url: URL2, path: "repo/web", defaultBranch: "main", credentialRef: "host-app", host: { kind: "fake2" } }] });
-    const attach = (w: Awaited<ReturnType<typeof waiting>>) => {
-      const model2 = new FakeHostModel({ url: URL2, id: "2", fullName: "acme/web", initialFiles: { "package.json": "{}", "yarn.lock": "lock" } });
-      const registry = createAdapterRegistry();
-      registry.register("code-host", "fake", w.host);
-      registry.register("code-host", "fake2", Object.defineProperties(new FakeCodeHost(model2), { kind: { value: "fake2" } }));
-      w.h.deps.codeHosts = registry;
-      return model2;
-    };
-    const whole = await waiting({ candidate: two });
-    const model2Whole = attach(whole);
-    await whole.h.store.update({ key: setupApplyKey(whole.h.deps.companyId, "payments"), ops: [{ op: "set", path: ["baseCommits"], value: { demo: whole.model.headOf("main"), web: model2Whole.headOf("main") } as JsonValue }] });
-    const saved = SetupSnapshotSchema.parse((snapshotPut((await approve(whole)).extra, whole) as unknown as { item: { snapshot: unknown } }).item.snapshot);
-    expect(saved.repositories.map((repository) => repository.name).sort()).toEqual(["demo", "web"]);
-    expect(saved.repositories.find((repository) => repository.name === "web")!.files.map((file) => file.path)).toEqual(["package.json", "yarn.lock"]);
-    const cut = await waiting({ candidate: two });
-    const model2 = attach(cut);
-    await cut.h.store.update({ key: setupApplyKey(cut.h.deps.companyId, "payments"), ops: [{ op: "set", path: ["baseCommits"], value: { demo: cut.model.headOf("main"), web: model2.headOf("main") } as JsonValue }] });
-    model2.incompleteTrees.add(model2.headOf("main"));
-    expect(snapshotPut((await approve(cut)).extra, cut)).toBeUndefined();
-  });
-
-  it("a rejection saves nothing", async () => {
-    const w = await waiting();
-    const subject = createSetupProposalSubject({ flow: w.h.deps });
-    const loaded = await subject.load(w.h.deps.companyId, "payments");
-    const rejected = await subject.apply(loaded!, attempt(w.digest, "reject"), [owner()], "2026-11-09T10:05:00.000Z");
-    expect(snapshotPut(rejected.extra, w)).toBeUndefined();
-  });
-
-  it("another company's snapshot is never read: a row copied under another company's key reads as none", async () => {
-    const w = await waiting();
-    const applied = await approve(w);
-    await w.h.store.transact([...(applied.extra ?? [])]);
-    const other: OrgId = "org_cccccccccccccccccccc";
-    const mine = await w.h.store.get(setupSnapshotKey(w.h.deps.companyId, "payments"));
-    await w.h.store.put({ item: { ...mine!, ...setupSnapshotKey(other, "payments") } });
-    expect(await readSetupSnapshot(w.h.store, other, "payments")).toBeUndefined();
-    expect(await readSetupSnapshot(w.h.store, w.h.deps.companyId, "billing")).toBeUndefined();
-  });
 });

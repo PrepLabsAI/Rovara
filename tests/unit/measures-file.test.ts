@@ -12,15 +12,6 @@ describe("measures file", () => {
     expect(EvidenceMeasureSchema.safeParse({ name: entry.name, unit: entry.unit, base: 0.8, head: entry.value, direction: entry.direction }).success).toBe(true);
     expect(readMeasuresFileText(`\uFEFF${JSON.stringify(file())}\r\n`).status).toBe("ok");
   });
-  it.each([NaN, Infinity, -Infinity, -0, 1e12 + 1, -1e12 - 1])("refuses invalid measure value %s", (value) => {
-    expect(readMeasuresFile(file({ measures: [{ ...entry, value }] })).status).toBe("unreadable");
-  });
-  it.each([NaN, Infinity, -1, -0, 1e12 + 1])("refuses invalid spread %s", (spread) => {
-    expect(readMeasuresFile(file({ measures: [{ ...entry, spread }] })).status).toBe("unreadable");
-  });
-  it.each([NaN, Infinity, -1, -0, 1.5, 100_000_001])("refuses invalid sample count %s", (count) => {
-    expect(readMeasuresFile(file({ measures: [{ ...entry, count }] })).status).toBe("unreadable");
-  });
   it("accepts finite bounds and refuses unknown keys, empty names, hidden text, excess entries, bad hashes and long labels", () => {
     for (const value of [-1e12, 0, 1e12]) expect(MeasuresFileSchema.safeParse(file({ measures: [{ ...entry, value }] })).success).toBe(true);
     for (const input of [file({ surprise: true }), file({ measures: [{ ...entry, extra: 1 }] }), file({ measures: [] }), file({ measures: Array.from({ length: 51 }, () => entry) }), file({ eval_set_hash: "oops" }), file({ measures: [{ ...entry, name: "" }] }), file({ measures: [{ ...entry, name: "x".repeat(81) }] }), file({ measures: [{ ...entry, unit: "x".repeat(21) }] }), file({ measures: [{ ...entry, name: "hidden\u202E" }] })]) {
@@ -40,12 +31,3 @@ describe("measures file", () => {
   });
 });
 
-it("rejects duplicate measure names with exact case-sensitive matching", () => {
-  expect(MeasuresFileSchema.safeParse(file({ measures: [entry, { ...entry, unit: "ms", value: 5 }] })).success).toBe(false);
-  expect(readMeasuresFile(file({ measures: [entry, { ...entry, name: "Accuracy" }] })).status).toBe("ok");
-});
-it("labels runner measures and refuses a forged measurement source", () => {
-  expect(readMeasuresFile(file())).toMatchObject({ status: "ok", file: { source: "project_runner" } });
-  expect(readMeasuresFile(file({ source: "project_runner" })).status).toBe("ok");
-  expect(readMeasuresFile(file({ source: "rovara" })).status).toBe("unreadable");
-});

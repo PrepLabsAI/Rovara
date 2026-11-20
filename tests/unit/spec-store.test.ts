@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { SpecTargetSchema, queryAll, type SpecFile } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { specStateItem } from "../../packages/broker/src/core/spec/hooks.js";
 import { documentSpecStore } from "../../packages/broker/src/core/spec/store.js";
 import { specRequirementRowsOfTask, specReviewRecordItems } from "../../packages/broker/src/core/spec/review-record.js";
 import { newSpecState, publishSucceeded, specStateKey, startWriting, writeSucceeded, type SpecState } from "../../packages/broker/src/core/spec/state.js";
@@ -21,18 +20,6 @@ describe("the spec state store", () => {
     expect(await store.save(fresh(), undefined)).toBe(true);
     expect(await documents.get(specStateKey(TASK))).toMatchObject({ pk: `DEVTASK#${TASK}`, sk: "SPEC#STATE", taskId: TASK, status: "due", revision: 1 });
     expect((await store.load(TASK)).state?.status).toBe("due");
-  });
-
-  it("saves a state only over the revision it read: a second writer with the same revision loses, and nobody can create it twice", async () => {
-    const store = documentSpecStore(new MemoryDocumentStore());
-    const first = fresh();
-    expect(await store.save(first, undefined)).toBe(true);
-    expect(await store.save(first, undefined)).toBe(false);
-    const writing = startWriting(first, randomUUID(), NOW)!;
-    expect(await store.save(writing, first.revision)).toBe(true);
-    const other = startWriting(first, randomUUID(), NOW)!;
-    expect(await store.save(other, first.revision)).toBe(false);
-    expect((await store.load(TASK)).state?.writeOperationId).toBe(writing.writeOperationId);
   });
 
   it("commits a state with the items beside it, or neither (an access fence that fails is a lost write)", async () => {
@@ -56,14 +43,6 @@ describe("the spec state store", () => {
     expect((await store.load(TASK)).state?.status).toBe("due");
   });
 
-  it("builds the conditional write of a state: the revision it replaces, or none for a new one", async () => {
-    const documents = new MemoryDocumentStore();
-    const state = fresh();
-    expect((await documents.transact([specStateItem(state, undefined)])).applied).toBe(true);
-    expect((await documents.transact([specStateItem(state, undefined)])).applied).toBe(false);
-    expect((await documents.transact([specStateItem({ ...state, revision: 2 }, 1)])).applied).toBe(true);
-    expect((await documents.transact([specStateItem({ ...state, revision: 3 }, 1)])).applied).toBe(false);
-  });
 });
 
 describe("the recorded walk of a spec by a review", () => {

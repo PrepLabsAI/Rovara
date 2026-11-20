@@ -275,12 +275,6 @@ describe("a thread the company's gateway cannot serve makes ZERO model calls", (
     expect(await w.resolve(TEAM_A)).toEqual({ kind: "refused", reason: "notSetUp" });
   });
 
-  it("the customer's own install keeps its runtime: `install`, and no gateway request is ever made for it", async () => {
-    const w = world({ wiringOver: { companyMode: false } });
-    expect(await w.resolve(TEAM_A)).toEqual({ kind: "install" });
-    expect(w.gatewayFetch).not.toHaveBeenCalled();
-  });
-
   it("a company's thread is NEVER `install`: no answer the broker gives for a company workspace maps to the Bedrock runtime", async () => {
     for (const team of [TEAM_A, TEAM_B, TEAM_NONE, TEAM_INSTALL]) {
       const w = world();

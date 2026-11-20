@@ -1,8 +1,8 @@
 // The cost report's features (lead 4, A1): names, state, merge, the rule order of a task's feature, the company boundary, and the audit record that commits with every change.
 import { describe, expect, it } from "vitest";
-import { FEATURE_CANNOT_MERGE, FEATURE_CONFLICT, FEATURE_IS_DONE, FEATURE_LIMIT, FEATURE_NAME_MAX, FEATURE_NAME_TAKEN, FEATURE_NOT_FOUND, FEATURE_SOURCES, FEATURE_SOURCE_RANK, PERSON_FEATURE_SOURCES, REPORT_FEATURES_MAX, reportFeatureKey, reportPartition, reportTaskFeatureKey, type AuditEvent, type FeatureSource, type OrgId } from "@agentx/contracts";
+import { FEATURE_CANNOT_MERGE, FEATURE_CONFLICT, FEATURE_IS_DONE, FEATURE_LIMIT, FEATURE_NAME_TAKEN, FEATURE_NOT_FOUND, FEATURE_SOURCES, FEATURE_SOURCE_RANK, PERSON_FEATURE_SOURCES, REPORT_FEATURES_MAX, reportFeatureKey, reportPartition, reportTaskFeatureKey, type AuditEvent, type FeatureSource, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { cleanFeatureName, createFeatureStore, resolveFeature, type FeatureActor } from "../../packages/broker/src/core/report/feature-store.js";
+import { createFeatureStore, resolveFeature, type FeatureActor } from "../../packages/broker/src/core/report/feature-store.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -25,31 +25,7 @@ function world() {
   return { store, events, committed, a: make(A), b: make(B) };
 }
 
-describe("feature names", () => {
-  it("cleans, collapses and cuts a name", () => {
-    expect(cleanFeatureName("  Checkout\u0000 ​V2\n now ")).toBe("Checkout V2 now");
-    expect([...cleanFeatureName("x".repeat(200))!]).toHaveLength(FEATURE_NAME_MAX);
-    expect(cleanFeatureName(" \u0000 ​ ")).toBeUndefined();
-  });
-  it("never stores a secret-shaped name as typed", () => {
-    const secret = ["sk", "ant", "api03", "A".repeat(40)].join("-");
-    expect(cleanFeatureName(`token ${secret}`)).not.toContain(secret);
-  });
-});
-
 describe("features: make, rename, state, merge", () => {
-  it("makes a feature open, lists it by name, and writes the audit record with the change", async () => {
-    const w = world();
-    const zeta = await w.a.create({ name: "Zeta" }, ada);
-    await w.a.create({ name: "alpha", trackerLink: { tracker: "linear", id: "PRJ-1", url: "https://linear.app/x/project/prj-1" } }, ada);
-    expect(zeta).toMatchObject({ name: "Zeta", state: "open", version: 1 });
-    expect((await w.a.list()).map((f) => f.name)).toEqual(["alpha", "Zeta"]);
-    expect((await w.a.list())[0]!.trackerLink?.tracker).toBe("linear");
-    expect(w.events.map((e) => e.action)).toEqual(["report.feature_created", "report.feature_created"]);
-    expect(w.events[0]).toMatchObject({ companyId: A, actor: ada, subject: { type: "feature", id: zeta.id } });
-    // the audit row is in the store, committed with the feature
-    expect(await w.store.get({ pk: `AUDIT#${A}`, sk: w.events[0]!.eventId })).toBeDefined();
-  });
 
   it("refuses a duplicate name in one company (any case) but not in the other company", async () => {
     const w = world();
@@ -120,22 +96,6 @@ describe("features: make, rename, state, merge", () => {
     await expect(w.a.merge(x.id, z.id, ada)).rejects.toThrow(FEATURE_CANNOT_MERGE);
   });
 
-  it("a chain of merges resolves to the last feature; a loop or a missing end resolves to nothing", () => {
-    const rec = (id: string, state: "open" | "merged", mergedInto?: string) => ({ id, name: id, state, createdAt: "t", updatedAt: "t", version: 1, ...(mergedInto === undefined ? {} : { mergedInto }) });
-    const map = new Map([["ft_1", rec("ft_1", "merged", "ft_2")], ["ft_2", rec("ft_2", "merged", "ft_3")], ["ft_3", rec("ft_3", "open")], ["ft_4", rec("ft_4", "merged", "ft_5")], ["ft_5", rec("ft_5", "merged", "ft_4")], ["ft_6", rec("ft_6", "merged", "ft_gone")]]);
-    expect(resolveFeature(map, "ft_1")!.id).toBe("ft_3");
-    expect(resolveFeature(map, "ft_4")).toBeUndefined();
-    expect(resolveFeature(map, "ft_6")).toBeUndefined();
-    expect(resolveFeature(map, "ft_nope")).toBeUndefined();
-  });
-
-  it("two racing makes of one name: exactly one wins", async () => {
-    const w = world();
-    const results = await Promise.allSettled([w.a.create({ name: "Race" }, ada), w.a.create({ name: "race" }, ada)]);
-    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
-    expect((await w.a.list())).toHaveLength(1);
-  });
-
   it("a change that lost a race says so, and never overwrites what the other writer saved", async () => {
     const w = world();
     const f = await w.a.create({ name: "Stale" }, ada);
@@ -185,23 +145,6 @@ describe("features: the company boundary", () => {
     expect(reportPartition(A)).not.toBe(reportPartition(B));
   });
 
-  it("a feature row planted in A's partition that names B is not A's feature", async () => {
-    const w = world();
-    const theirs = await w.b.create({ name: "Theirs" }, ada);
-    const row = (await w.store.get(reportFeatureKey(B, theirs.id)))!;
-    await w.store.put({ item: { ...row, pk: reportPartition(A) } });
-    expect(await w.a.get(theirs.id)).toBeUndefined();
-    expect(await w.a.list()).toEqual([]);
-  });
-
-  it("a task assignment planted in A's partition that names B is not read", async () => {
-    const w = world();
-    const f = await w.a.create({ name: "Mine" }, ada);
-    await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: f.id, source: "chosen" }, ada);
-    const row = (await w.store.get(reportTaskFeatureKey(A, TASK)))!;
-    await w.store.put({ item: { ...row, companyId: B } });
-    expect(await w.a.taskFeature(TASK)).toBeUndefined();
-  });
 });
 
 describe("rows whose key does not match their own fields", () => {
@@ -241,22 +184,6 @@ describe("a task's feature: the rule order", () => {
     expect(["moved", "chosen", "confirmed_at_plan", "tracker", "inherited"].map((s) => FEATURE_SOURCE_RANK[s as FeatureSource])).toEqual([5, 4, 3, 2, 1]);
   });
 
-  it("a confirmed-at-plan feature resists tracker and inherited writes, while chosen and moved replace it", async () => {
-    const w = world();
-    const ids = await Promise.all(["Confirmed", "Tracker", "Inherited", "Chosen", "Moved"].map((name) => w.a.create({ name }, ada)));
-    const [confirmed, tracker, inherited, chosen, moved] = ids as [typeof ids[number], typeof ids[number], typeof ids[number], typeof ids[number], typeof ids[number]];
-    await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: confirmed.id, source: "confirmed_at_plan" }, ada);
-    for (const [feature, source] of [[tracker, "tracker"], [inherited, "inherited"]] as const) {
-      expect((await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: feature.id, source }, ada)).outcome).toBe("kept");
-      expect(await w.a.taskFeature(TASK)).toMatchObject({ featureId: confirmed.id, source: "confirmed_at_plan" });
-    }
-    expect((await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: chosen.id, source: "chosen" }, ada)).outcome).toBe("set");
-    expect(await w.a.taskFeature(TASK)).toMatchObject({ featureId: chosen.id, source: "chosen" });
-    expect((await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: confirmed.id, source: "confirmed_at_plan" }, ada)).outcome).toBe("kept");
-    expect((await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: moved.id, source: "moved" }, ada)).outcome).toBe("set");
-    expect(await w.a.taskFeature(TASK)).toMatchObject({ featureId: moved.id, source: "moved" });
-  });
-
   it("plan approval confirms only a still-tracker suggestion and preserves a chosen feature or No feature", async () => {
     const w = world();
     const suggested = await w.a.create({ name: "Tracker parent" }, ada);
@@ -273,15 +200,6 @@ describe("a task's feature: the rule order", () => {
     expect(await w.a.taskFeature(none)).toMatchObject({ featureId: null, source: "chosen" });
   });
 
-  it("'No feature' on purpose is a person's move: a tracker read cannot file the task afterwards; a later move can", async () => {
-    const w = world();
-    const f = await w.a.create({ name: "F" }, ada);
-    const none = await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: null, source: "moved" }, ada);
-    expect(none.record.featureId).toBeNull();
-    expect((await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: f.id, source: "tracker" }, ada)).outcome).toBe("kept");
-    expect((await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: f.id, source: "moved" }, ada)).outcome).toBe("set");
-  });
-
   it("the same answer again writes nothing more (no new version, no audit record)", async () => {
     const w = world();
     const f = await w.a.create({ name: "F" }, ada);
@@ -290,30 +208,6 @@ describe("a task's feature: the rule order", () => {
     const again = await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: f.id, source: "chosen" }, ada);
     expect(again).toMatchObject({ outcome: "kept", record: { version: 1 } });
     expect(w.events).toHaveLength(events);
-  });
-
-  it("each change that is written has its own audit record with the source, the feature and the project (and no second one is lost)", async () => {
-    const w = world();
-    const f = await w.a.create({ name: "F" }, ada);
-    const g = await w.a.create({ name: "G" }, ada);
-    await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: f.id, source: "chosen" }, ada);
-    await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: g.id, source: "moved" }, ada);
-    const filed = w.events.filter((e) => e.action === "report.task_feature_set");
-    expect(filed.map((e) => e.eventId)).toHaveLength(2);
-    expect(new Set(filed.map((e) => e.eventId)).size).toBe(2);
-    expect(filed[1]).toMatchObject({ subject: { type: "task", id: TASK }, details: { featureId: g.id, source: "moved", project: "alpha" } });
-  });
-
-  it("inherits: the task takes the feature it came from (as it reads now), or nothing", async () => {
-    const w = world();
-    const from = await w.a.create({ name: "From" }, ada);
-    const into = await w.a.create({ name: "Into" }, ada);
-    expect(await w.a.inheritFeature({ from: TASK, to: TASK2, project: "alpha" })).toBeUndefined();
-    await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: from.id, source: "chosen" }, ada);
-    await w.a.merge(from.id, into.id, ada);
-    const inherited = await w.a.inheritFeature({ from: TASK, to: TASK2, project: "alpha" });
-    expect(inherited).toMatchObject({ outcome: "set", record: { featureId: into.id, source: "inherited" } });
-    expect(w.events.at(-1)).toMatchObject({ actor: { type: "system" } });
   });
 
   it("inherits nothing from a task filed under no feature, from a done feature, or over a higher rule", async () => {

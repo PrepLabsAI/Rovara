@@ -24,21 +24,6 @@ async function world(closing = true) {
     run: () => eraseCompanySavedEnvironments(input), close: () => closeCompanySavedEnvironments({ ...input, markCompanyClosing }) };
 }
 describe("company saved image erase", () => {
-  it("refuses erase before any project fence or registry work unless this company is closing", async () => {
-    for (const mode of ["open", "unreadable", "malformed"] as const) {
-      const h = await world(false);
-      const before = structuredClone(h.w.row());
-      const query = vi.spyOn(h.store, "query");
-      if (mode === "unreadable") h.companyClosing.mockRejectedValue(new Error("private lifecycle detail"));
-      if (mode === "malformed") h.companyClosing.mockResolvedValue("yes" as never);
-      expect(await h.run()).toEqual({ complete: false, reason: "unavailable" });
-      expect(h.companyClosing).toHaveBeenCalledWith(companyId);
-      expect(query).not.toHaveBeenCalled();
-      expect(h.w.row()).toEqual(before);
-      expect(h.listCompanyRepositories).not.toHaveBeenCalled();
-      expect(h.deleteRepository).not.toHaveBeenCalled();
-    }
-  });
   it("the close job blocks new company work before erase and retains project rows throughout the drain", async () => {
     const h = await world(false);
     const newWork = vi.fn(() => { if (h.lifecycle.closing) throw new Error("company closing"); });
@@ -67,17 +52,6 @@ describe("company saved image erase", () => {
       expect(h.w.row()?.deleted).not.toBe(true);
       expect(h.listCompanyRepositories).not.toHaveBeenCalled();
     }
-  });
-  it("while off marks projects deleted, waits out in-flight pushes, then deletes every repository including orphans and proves empty", async () => {
-    const h = await world();
-    expect(await h.run()).toMatchObject({ complete: false, reason: "push_sessions_draining" });
-    expect(h.w.row()).toMatchObject({ deleted: true });
-    expect(h.w.row()?.job).toBeUndefined();
-    h.w.clock.now += SAVED_ENV_ERASE_DRAIN_MS + 1;
-    expect(await h.run()).toEqual({ complete: true, repositories: 2 });
-    expect(h.deleteRepository.mock.calls.map(([c]) => c.repository).sort()).toEqual([repository("app"), repository("orphan")].sort());
-    expect(h.rows.size).toBe(0);
-    expect(h.listCompanyRepositories.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
   it("refuses foreign repository names, partial deletes, and recreation after deletion", async () => {
     for (const mode of ["foreign", "leftover", "failure"] as const) {

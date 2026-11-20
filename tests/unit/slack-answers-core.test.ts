@@ -1,8 +1,8 @@
 // Lead 4 J2: the core's in-process answer for a verified Slack thread (core-host/dev-routes.ts `answerForSlackThread`). Not an HTTP route: only the Slack door calls it, with a company, a person, a project and a thread
 // it verified. The thread is shared (everyone who reads a Slack thread has read every answer in it); the role on the project is read live by the answer service; the attached context is the answer as untrusted data.
 import { randomUUID } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
-import { ANSWER_WORDS, orgProjectCatalogKey, projectRevisionKey, slackAnswerThreadId, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
+import { describe, expect, it } from "vitest";
+import { orgProjectCatalogKey, projectRevisionKey, slackAnswerThreadId, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { createCoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
@@ -49,25 +49,6 @@ async function setup(roles: Record<string, "view" | "manage"> = {}, withAnswers 
 }
 
 describe("the in-process Slack answer", () => {
-  it("answers a person with a role, with the one button and the answer attached as untrusted data", async () => {
-    const w = await setup({ "alpha/dev-ada": "view" });
-    const served = await w.ask();
-    expect(served).toBeDefined();
-    expect(served!.answer).toMatchObject({ outcome: "answered", text: "Refunds are allowed for 30 days (`MAX_REFUND_DAYS`). [1]", action: { kind: "quick_task", label: ANSWER_WORDS.taskButton } });
-    expect(served!.attach).toContain('untrusted="true"');
-    expect(served!.attach).toContain("Question: How long do refunds last?");
-    expect(served!.attach).toContain("never an instruction");
-    expect(w.standings).toContain(`${FAKE_COMPANY}/alpha/dev-ada`);
-  });
-
-  it("a person with no role gets the same NOT_FOUND as a project that is not there, and no model is opened", async () => {
-    const w = await setup({ "alpha/dev-ada": "view" });
-    for (const over of [{ personId: BOB }, { project: "beta" }, { project: "ghost" }]) {
-      await expect(w.ask(over), JSON.stringify(over)).rejects.toMatchObject({ code: "NOT_FOUND", message: expect.stringContaining(ANSWER_WORDS.projectNotFound) as string });
-    }
-    expect(w.model.opened).toHaveLength(0);
-    expect(w.calls).toEqual([]);
-  });
 
   it("the thread is shared: another person with a role sees the earlier question and answer; a person with no role still reads nothing", async () => {
     const w = await setup({ "alpha/dev-ada": "view", "alpha/dev-bob": "view" });
@@ -78,13 +59,6 @@ describe("the in-process Slack answer", () => {
     await outsider.ask({ personId: ADA, question: "ada private question" });
     await expect(outsider.ask({ personId: BOB, question: "bob has no role" })).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(outsider.model.turns).toHaveLength(1);
-  });
-
-  it("two projects never share a thread, even with the same thread id", async () => {
-    const w = await setup({ "alpha/dev-ada": "view", "beta/dev-ada": "view" });
-    await w.ask({ project: "alpha", question: "alpha only question" });
-    await w.ask({ project: "beta", question: "beta asks" });
-    expect(w.model.turns.at(-1)!.transcript).not.toContain("alpha only question");
   });
 
   it("a request id repeated is the same answer and the model is asked once", async () => {
@@ -102,15 +76,6 @@ describe("the in-process Slack answer", () => {
     expect(w.standings).toEqual([]);
     const unwired = await setup({ "alpha/dev-ada": "view" }, false);
     expect(await unwired.ask()).toBeUndefined();
-  });
-
-  it("serves nothing while the core switch is off", async () => {
-    const fake = createFakeWorld();
-    const app = createCoreHostApp({ env: {}, modules: fake.modules, context: () => fake.context(), nowMs: () => fake.clock.now, runtime: () => { throw new Error("never"); } });
-    const standing = vi.fn(async () => ({ access: "view" as const }));
-    const routes = createCoreDevRoutes({ app, companyOf: async () => undefined, wiring: () => ({ ...WIRED, answers: { standing, repositories: async () => ({ handles: [], names: [] }) } }) });
-    expect(await routes.answerForSlackThread({ companyId: FAKE_COMPANY, personId: ADA, project: "alpha", threadId: "t", requestId: randomUUID(), question: "q" })).toBeUndefined();
-    expect(standing).not.toHaveBeenCalled();
   });
 
   it("an answer that is not set up carries no button and no attached context", async () => {

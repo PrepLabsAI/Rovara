@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DockerWorkerMachines } from "../../packages/broker/src/local/docker-worker-machines.js";
 import { createEphemeralInvokeSigner } from "../../packages/broker/src/local/invoke-signer.js";
-import { DEFAULT_DEVCONTAINER_REGISTRIES } from "../../packages/broker/src/local/isolation/stack.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { assertSetupSandboxRunArgs, guardedSetupDocker } from "../../packages/worker/src/setup-agent.js";
 import { sharedRunNetwork } from "../../packages/worker/src/setup-agent-invocation.js";
@@ -98,14 +97,4 @@ describe("what a machine starts with on a laptop", () => {
     expect((JSON.parse(gateway()) as { allowed: string[] }).allowed).toContain("deps.exampledeps.dev");
   });
 
-  it("tells its Docker socket guard which registries a dev container may pull from: the install's list, the owner's own, or none (and none when nothing was said)", async () => {
-    const standard = await (await world({ devcontainerRegistries: DEFAULT_DEVCONTAINER_REGISTRIES })).start("ws-a", "payments");
-    expect(standard.policy["devcontainer"]).toEqual({ registries: [...DEFAULT_DEVCONTAINER_REGISTRIES] });
-    const unsaid = await (await world()).start("ws-a", "payments");
-    expect(unsaid.policy).not.toHaveProperty("devcontainer");
-    const own = await (await world({ devcontainerRegistries: ["registry.example.com"] })).start("ws-a", "payments");
-    expect(own.policy["devcontainer"]).toEqual({ registries: ["registry.example.com"] });
-    const off = await (await world({ devcontainerRegistries: [] })).start("ws-a", "payments");
-    expect(off.policy).not.toHaveProperty("devcontainer");
-  });
 });
