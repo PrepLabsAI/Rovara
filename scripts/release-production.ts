@@ -194,12 +194,64 @@ export function reusableImage(runner: Runner, options: ReleaseOptions, image: De
   return deployedImage;
 }
 
+/** The two worker-capability routes the control plane stack creates (infra/lib/control-plane.ts). A route with either key that was made by hand makes the stack update fail with AlreadyExists. */
+export const WORKER_CAPABILITY_ROUTE_KEYS: readonly string[] = [
+  "GET /v1/internal/context-tools",
+  "GET /v1/internal/design-review/packet",
+];
+
+interface StackResourceSummaries { StackResourceSummaries?: Array<{ LogicalResourceId?: string; PhysicalResourceId?: string; ResourceType?: string; ResourceStatus?: string }>; NextToken?: string }
+interface HttpApiRoutes { Items?: Array<{ RouteId?: string; RouteKey?: string }>; NextToken?: string }
+
+/**
+ * Read-only preflight: refuse when the control plane's HTTP API holds a worker-capability route that the AgentXControlPlane stack
+ * does not own. CloudFormation would try to create the route and fail with AlreadyExists, and the template diff cannot see a
+ * hand-made route. Reads only (describe-stacks, list-stack-resources, get-routes); a missing stack passes.
+ * "Owns" means the route's RouteId is the PhysicalResourceId of one of the stack's resources.
+ */
+export function assertNoHandMadeCapabilityRoutes(runner: Pick<Runner, "aws">, options: Pick<ReleaseOptions, "region" | "profile">): void {
+  if (!stackExists(runner as Runner, options.region, CONTROL_PLANE_STACK)) return;
+  const resources: NonNullable<StackResourceSummaries["StackResourceSummaries"]> = [];
+  let token: string | undefined;
+  do {
+    const page = JSON.parse(runner.aws([
+      "cloudformation", "list-stack-resources", "--region", options.region, "--stack-name", CONTROL_PLANE_STACK, "--output", "json",
+      ...(token === undefined ? [] : ["--starting-token", token]),
+    ]).stdout) as StackResourceSummaries;
+    resources.push(...(page.StackResourceSummaries ?? []));
+    token = page.NextToken;
+  } while (token !== undefined);
+  const apiId = resources.find((row) => row.LogicalResourceId === "HttpApi" && row.ResourceType === "AWS::ApiGatewayV2::Api" && row.ResourceStatus !== "DELETE_COMPLETE")?.PhysicalResourceId;
+  if (apiId === undefined) throw new Error(`${CONTROL_PLANE_STACK} has no HttpApi resource; cannot check its routes`);
+  const owned = new Set(resources.filter((row) => row.ResourceStatus !== "DELETE_COMPLETE").map((row) => row.PhysicalResourceId).filter((id): id is string => id !== undefined));
+  const routes: NonNullable<HttpApiRoutes["Items"]> = [];
+  token = undefined;
+  do {
+    const page = JSON.parse(runner.aws([
+      "apigatewayv2", "get-routes", "--region", options.region, "--api-id", apiId, "--output", "json",
+      ...(token === undefined ? [] : ["--starting-token", token]),
+    ]).stdout) as HttpApiRoutes;
+    routes.push(...(page.Items ?? []));
+    token = page.NextToken;
+  } while (token !== undefined);
+  const handMade = routes.filter((route) => route.RouteKey !== undefined && WORKER_CAPABILITY_ROUTE_KEYS.includes(route.RouteKey) && route.RouteId !== undefined && !owned.has(route.RouteId));
+  if (handMade.length === 0) return;
+  const profile = profileArgs(options.profile).join(" ");
+  throw new Error([
+    `${CONTROL_PLANE_STACK} would fail with AlreadyExists: these worker-capability routes on API ${apiId} were not created by the stack.`,
+    ...handMade.map((route) => `  ${route.RouteKey ?? ""}  route id ${route.RouteId ?? ""}`),
+    "Nothing was changed. Delete them right before the release (tasks cannot read sources until the stack recreates them), then run the release again:",
+    ...handMade.map((route) => `  aws apigatewayv2 delete-route --region ${options.region} --api-id ${apiId} --route-id ${route.RouteId ?? ""}${profile === "" ? "" : ` ${profile}`}`),
+  ].join("\n"));
+}
+
 export async function releaseProduction(
   options: ProductionReleaseOptions,
 ): Promise<ProductionReleaseManifest | undefined> {
   if (options.dryRun) {
     process.stdout.write([
       "AgentX production release plan:",
+      "0. Read-only first: refuse if the control plane's API holds a worker-capability route the stack does not own.",
       "1. Verify the working tree and run typecheck, lint and tests.",
       "2. Apply bounded retention and immutable tags to the production ECR repository.",
       options.reuseUnchangedWorker
@@ -220,6 +272,8 @@ export async function releaseProduction(
   }
 
   const runner = new Runner(options);
+  // Read-only, before any check, build, push or deploy.
+  assertNoHandMadeCapabilityRoutes(runner, options);
   const revision = runner.capture("git", ["rev-parse", "HEAD"]).stdout.trim();
   if (!options.allowDirty) {
     const dirty = runner.capture("git", ["status", "--porcelain"]).stdout.trim();
