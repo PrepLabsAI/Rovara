@@ -5,6 +5,7 @@
 // admin-ended sessions and channel by name).
 // Nothing here logs or echoes a secret, a code, a token or a caught error's message.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import type { CompanySignInAuditInput, CompanySignInCause, CompanySignInMethod } from "./company-signin-audit.js";
 import {
   AGENTX_CLI_CLIENT_ID,
   COMPANY_INVITE_LINK_MAX,
@@ -91,6 +92,8 @@ export interface DeveloperIdentityDependencies {
   now: () => number;
   log: (entry: Record<string, unknown>) => void;
   company?: CompanySignInStore;
+  /** Sign-in-only company audit exception; company attribution is always resolved from membership. */
+  signInAudit?: (input: CompanySignInAuditInput) => Promise<void>;
   /** DEC 254a, 253z: invite codes and self-serve create (with `company` only). Absent: those events answer unavailable, and nobody signs in with no company. */
   companyInvites?: CompanyInviteStore;
   /** DEC 254b (b): an operator's import of the install's old company layout, and its undo, with Code's company layer on or off. */
@@ -216,6 +219,39 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   const { config, store } = deps;
   const endpoint = (path: string) => `${config.issuer}${path}`;
   const methodLabel = (method: DeveloperSignInMethod) => (method === "slack" ? "Slack" : method === "github" ? "GitHub" : config.oidc?.displayName ?? "company sign-in");
+  const signInMethod = async (method: DeveloperSignInMethod, request: AuthRequestRecord): Promise<CompanySignInMethod> => {
+    if (request.inviteHash !== undefined) return "invite";
+    if (method === "slack" || method === "github") return method;
+    if (request.browserReturnTo !== undefined) return "web";
+    if (request.clientId !== undefined) {
+      try { if ((await registeredClient(request.clientId))?.webApp === true) return "web"; } catch { /* a classification lookup never blocks a sign-in */ }
+    }
+    return "cli";
+  };
+  type SignInOutcome = {
+    developerId?: string;
+    companyId?: string;
+    cause: CompanySignInCause;
+    successLog?: Record<string, unknown>;
+  };
+  // One outcome per consumed callback, including unexpected failures. Only authenticated
+  // identity and server-side membership may attribute it; request.companyId is never authority.
+  const recordSignInOutcome = async (outcome: SignInOutcome, method: DeveloperSignInMethod, request: AuthRequestRecord): Promise<void> => {
+    if (deps.signInAudit === undefined || deps.company === undefined || outcome.developerId === undefined) return;
+    let companyId = outcome.companyId;
+    if (companyId === undefined) {
+      try { companyId = (await deps.company.membership(outcome.developerId))?.companyId; } catch { return; }
+    }
+    if (companyId === undefined || !OrgIdSchema.safeParse(companyId).success) return;
+    try {
+      await deps.signInAudit({ companyId, developerId: outcome.developerId, method: await signInMethod(method, request),
+        ...(outcome.successLog === undefined ? { outcome: "refused", cause: outcome.cause } : { outcome: "succeeded" }),
+      });
+    } catch (error) {
+      deps.log({ event: "signin.audit_failed", method, error: "sign_in_failed" });
+      throw error; // The callback withholds the code/cookie even if it was already persisted.
+    }
+  };
   const provider = (method: DeveloperSignInMethod): SignInProvider => {
     const found = deps.providers[method];
     if (found === undefined) throw new ProviderNotConfiguredError(`${methodLabel(method)} sign-in is not set up in this environment`);
@@ -564,6 +600,20 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   }
 
   async function completeSignIn(method: DeveloperSignInMethod, request: AuthRequestRecord, code: string | null): Promise<HttpResult> {
+    const outcome: SignInOutcome = { cause: "sign_in_failed" };
+    let response: HttpResult;
+    try {
+      response = await runSignIn(method, request, code, outcome);
+    } finally {
+      // Auditing is outside runSignIn's error handling: a failed audit is logged and
+      // propagated once, never retried as a second outcome or allowed to grant access.
+      await recordSignInOutcome(outcome, method, request);
+    }
+    if (outcome.successLog !== undefined) deps.log(outcome.successLog);
+    return response;
+  }
+
+  async function runSignIn(method: DeveloperSignInMethod, request: AuthRequestRecord, code: string | null, outcome: SignInOutcome): Promise<HttpResult> {
     const client = (params: Record<string, string>) => toClient(request.clientRedirectUri, { ...params, state: request.clientState });
     if (request.browserReturnTo !== undefined && !REVIEW_RETURN_TO.test(request.browserReturnTo)) return page(400, "Invalid review link", ["Open the review from Slack and sign in again."]);
     if (code === null) return request.browserReturnTo === undefined
@@ -585,6 +635,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       return providerFailure(error, method, request.clientRedirectUri, request.clientState);
     }
     if (!result.ok) {
+      if (result.verifiedIdentity !== undefined) {
+        outcome.developerId = ownerKeyForSubject(result.verifiedIdentity.issuer, result.verifiedIdentity.subject);
+      }
       if (deps.company !== undefined && request.companyId !== undefined) {
         deps.log({ event: "signin.refused", method, reason: "not_invited" });
         return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: "not invited" }) : browserReturn(request.browserReturnTo, false);
@@ -599,6 +652,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const identity = result.identity;
     const signedInId = ownerKeyForSubject(identity.issuer, identity.subject);
     let developerId = signedInId;
+    outcome.developerId = developerId;
     let existing = await store.getDeveloper(developerId);
     // DEC 254b: with Code's company layer on, a sign-in an operator merged into another (`mergedInto`) is seated as its survivor: the session, the
     // membership and every check are the survivor's, and neither record is rewritten by this sign-in. The walk is #820's: at most 8 hops, no
@@ -608,6 +662,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       try {
         const walk = await mergeSurvivor((id) => store.getDeveloper(id), signedInId);
         developerId = walk.survivorId;
+        outcome.developerId = developerId;
         existing = await store.getDeveloper(developerId);
         merged = existing !== undefined;
       } catch { merged = false; }
@@ -618,6 +673,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       }
     }
     if (existing?.revoked === true) {
+      outcome.cause = "person_revoked";
       deps.log({ event: "signin.refused", method, reason: "developer_revoked", developerId });
       if (request.browserReturnTo !== undefined) return browserReturn(request.browserReturnTo, false);
       return client({ error: "access_denied", error_description: "your Rovara sign-in was turned off by an administrator; contact an administrator" });
@@ -636,6 +692,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       // DEC 254e: the same for Slack, from any workspace: the company comes only from live membership (or `company=`), never from the workspace.
       try {
         const member = request.companyId === undefined && installLevel ? await deps.company.membership(developerId) : undefined;
+        if (member !== undefined) outcome.companyId = member.companyId;
         revokedMember = member?.revokedAt !== undefined;
         candidate = request.companyId ?? member?.companyId ?? IMPLICIT_COMPANY_ID;
       } catch { candidate = undefined; }
@@ -652,6 +709,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         if (bound) { ownIssuer = false; installMethod = false; }
       }
       if (ownIssuer) {
+        outcome.cause = "company_signin_mismatch";
         deps.log({ event: "signin.refused", reason: "company_own_signin", developerId });
         return request.browserReturnTo === undefined ? client({ error: "access_denied", error_description: COMPANY_OWN_SIGNIN }) : browserReturn(request.browserReturnTo, false);
       }
@@ -662,10 +720,13 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         ? { ok: false as const, reason: "not_invited" as const }
         : byInvite ? await deps.company.joinByInvite({ personId: developerId, companyId: candidate, inviteHash: request.inviteHash! })
           : await deps.company.join({ personId: developerId, companyId: candidate, ...(identity.email === undefined ? {} : { email: identity.email }) });
+      if (joined.ok) outcome.companyId = joined.membership.companyId;
+      else if (joined.attributedCompanyId !== undefined) outcome.companyId = joined.attributedCompanyId;
       // DEC 253z: not invited anywhere, no company asked for, signing in to the web app: a session with no company (it can only create one).
       companyless = !joined.ok && joined.reason === "not_invited" && request.companyId === undefined && request.browserReturnTo === undefined
         && await companylessMayMint(developerId, method, registered);
       if (!joined.ok && !companyless) {
+        outcome.cause = joined.reason;
         // DEC 254h: with an invite secret, every failure (unknown, used, expired, withdrawn, wrong company, a member elsewhere, a removed member) is the one answer.
         const text = byInvite ? "not invited" : { not_invited: "not invited", member_elsewhere: "already a member of another company", member_revoked: "access ended by a company admin" }[joined.reason];
         deps.log({ event: "signin.refused", reason: joined.reason, developerId });
@@ -697,7 +758,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ...(identity.slackTeam === undefined ? {} : { slackTeamId: identity.slackTeam.id, ...(identity.slackTeam.name === undefined ? {} : { slackTeamName: identity.slackTeam.name }) }),
     }, companyId, { ...(companyless ? { companyless: true as const } : {}), ...(deps.company === undefined ? {} : { unmerged: true as const }) });
     if (request.browserReturnTo !== undefined) {
-      if (!await companyMayMint(developerId, method, request.companyId ?? companyId, undefined, false, installMethod ? true : undefined)) return browserReturn(request.browserReturnTo, false);
+      if (!await companyMayMint(developerId, method, request.companyId ?? companyId, undefined, false, installMethod ? true : undefined)) {
+        return browserReturn(request.browserReturnTo, false);
+      }
       // A fixed 30 days from sign-in, with no renewal: the session record ends then, whatever the cookie says.
       const endsAt = Math.floor(deps.now() / 1000) + SESSION_MAX_AGE_SECONDS;
       const { session } = await store.createSession({ developerId, amr: method, ...(merged && signedInId !== developerId ? { signedInId } : {}),
@@ -706,8 +769,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         ...(companyId === undefined || (companyId === IMPLICIT_COMPANY_ID && request.companyId === undefined) ? {} : { companyId }),
         ...(installMethod ? { installMethod: true as const } : {}),
       });
-      deps.log({ event: "signin.browser_succeeded", method, developerId });
-      return browserReturn(request.browserReturnTo, true, session.sessionId);
+      const response = browserReturn(request.browserReturnTo, true, session.sessionId);
+      outcome.successLog = { event: "signin.browser_succeeded", method, developerId };
+      return response;
     }
     const grant: CodeGrant & { codeChallenge: string; redirectUri: string } = {
       developerId, amr: method, ...(merged && signedInId !== developerId ? { signedInId } : {}), ...(slackUserId === undefined ? {} : { slackUserId }), codeChallenge: request.codeChallenge, redirectUri: request.clientRedirectUri,
@@ -720,14 +784,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       // DEC 254b (a): and only into the built-in company, as before; a member of another company signed in through the shared method never is one.
       ...(method === "oidc" && request.companyId === undefined && identity.administrator === true && !companyless && (companyId === undefined || companyId === IMPLICIT_COMPANY_ID) ? { administrator: true as const } : {}),
     };
-    return issueCode(grant, request.clientState);
-  }
-
-  /** Issues the code for the client and sends the browser back to it. */
-  async function issueCode(grant: CodeGrant & { codeChallenge: string; redirectUri: string }, clientState: string): Promise<HttpResult> {
     const agentxCode = await store.issueCode(grant);
-    deps.log({ event: "signin.succeeded", method: grant.amr, developerId: grant.developerId, linkedToSlack: grant.slackUserId !== undefined, ...(grant.clientId === undefined ? {} : { clientId: grant.clientId }) });
-    return toClient(grant.redirectUri, { code: agentxCode, state: clientState });
+    const response = toClient(grant.redirectUri, { code: agentxCode, state: request.clientState });
+    outcome.successLog = { event: "signin.succeeded", method: grant.amr, developerId: grant.developerId, linkedToSlack: grant.slackUserId !== undefined, ...(grant.clientId === undefined ? {} : { clientId: grant.clientId }) };
+    return response;
   }
 
   /**

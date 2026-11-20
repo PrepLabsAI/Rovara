@@ -87,7 +87,7 @@ it("revokes and restores through the one R4 reader; revocation blocks joining an
   expect(await h.invoke({ kind: "company-member-revoke", companyId, personId })).toEqual({ ok: true });
   expect(await reader.companyOf(personId)).toBeUndefined();
   await expect(resolveCompany(reader, personId)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
-  expect(await h.store.join({ personId, companyId: IMPLICIT_COMPANY_ID, email: create.firstAdminEmail })).toEqual({ ok: false, reason: "member_revoked" });
+  expect(await h.store.join({ personId, companyId: IMPLICIT_COMPANY_ID, email: create.firstAdminEmail })).toEqual({ ok: false, reason: "member_revoked", attributedCompanyId: companyId });
   expect(await h.invoke({ kind: "company-member-restore", companyId, personId })).toEqual({ ok: true });
   expect(await reader.companyOf(personId)).toBe(companyId);
 });
@@ -178,7 +178,7 @@ it("issuer required values need a claim; a refused replacement preserves the pri
 
 it.each([undefined, "disabled", "unknown", "enabled"])("Lambda switch is strictly opt-in: %s", async (flag) => {
   vi.resetModules(); wiring.db = new FakeDynamoDb(); wiring.secrets.length = 0;
-  for (const [key, value] of Object.entries({ AGENTX_ENV: "test", AWS_REGION: "us-east-1", DEVELOPER_TOKEN_ISSUER: "https://signin.example.test/v1/auth", DEVELOPER_SIGNIN_TABLE_NAME: "signin", DEVELOPER_TOKEN_KEY_ARN: "test-key", SLACK_SECRET_ARN: "test-slack", TASK_TOKEN_KEY_ARN: "", DEVELOPER_OIDC_ISSUER: "" })) vi.stubEnv(key, value);
+  for (const [key, value] of Object.entries({ AGENTX_ENV: "test", AWS_REGION: "us-east-1", DEVELOPER_TOKEN_ISSUER: "https://signin.example.test/v1/auth", DEVELOPER_SIGNIN_TABLE_NAME: "signin", STATE_TABLE_NAME: "state", DEVELOPER_TOKEN_KEY_ARN: "test-key", SLACK_SECRET_ARN: "test-slack", TASK_TOKEN_KEY_ARN: "", DEVELOPER_OIDC_ISSUER: "" })) vi.stubEnv(key, value);
   vi.stubEnv("COMPANY_SIGNIN", flag);
   const { handler } = await import("../../packages/broker/src/aws/developer-identity.js");
   const answer = await handler(create as never);

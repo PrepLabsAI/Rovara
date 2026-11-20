@@ -39,6 +39,8 @@ export const CompanyAuditQuerySchema = z.object({
   project: AgentXNameSchema.optional(),
   person: WorkEventPersonIdSchema.optional(),
   action: AuditActionFilterSchema.optional(),
+  /** Select the separate sign-in view; omitted (or `change`) keeps the existing change log. */
+  kind: z.enum(["change", "sign-in"]).optional(),
   limit: z.number().int().min(1).max(COMPANY_AUDIT_PAGE_MAX).optional(),
   cursor: CursorTextSchema.optional(),
 }).strict();
@@ -66,6 +68,8 @@ export const EngineAuditRecordSchema = z.object({
   /** `ok`, or `refused` for an action the engine turned down. */
   outcome: z.enum(["ok", "refused"]),
   via: AuditViaSchema.optional(),
+  method: z.enum(["web", "slack", "github", "cli", "invite"]).optional(),
+  cause: z.enum(["not_invited", "member_elsewhere", "member_revoked", "person_revoked", "company_signin_mismatch", "sign_in_failed"]).optional(),
 }).strict();
 export type EngineAuditRecord = z.infer<typeof EngineAuditRecordSchema>;
 

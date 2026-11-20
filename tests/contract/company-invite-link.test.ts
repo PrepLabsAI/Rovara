@@ -227,7 +227,7 @@ describe("invite link secret (DEC 254h)", () => {
     for (const [secret, company, who] of cases) {
       const sent = w.db.commandNames().length;
       const answer = await w.company.joinByInvite({ personId: person(who), companyId: company, inviteHash: companyInviteCodeHash(secret) });
-      expect(answer).toEqual(who === "bob" ? { ok: false, reason: "member_elsewhere" } : { ok: false, reason: "not_invited" });
+      expect(answer).toEqual(who === "bob" ? { ok: false, reason: "member_elsewhere", attributedCompanyId: B } : { ok: false, reason: "not_invited" });
       expect(w.db.commandNames().slice(sent)).not.toContain("TransactWriteCommand");
     }
     expect(memberOf(w, person("frank"))).toBeUndefined();
