@@ -17,7 +17,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, labeled]
   push:
     branches: [code/next]
-  # #1185: the nightly Linux runtime run on mainline (the default branch), which runs that check (and the non-blocking device check) and nothing else heavy.
+  # #1185, #1192: the nightly run on mainline (the default branch): the non-blocking device emulator check and the typecheck. (The Linux runtime check runs in the release.)
   schedule:
     - cron: "0 6 * * *"
 
@@ -72,6 +72,7 @@ jobs:
           CI_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           CI_TITLE: ${{ github.event.pull_request.title }}
           CI_FORCE_LINUX: ${{ github.event.inputs.linux }}
+          CI_BASE_REF: ${{ github.base_ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           # On a pull request the script is the base branch's copy, never the pull request's own: a change to ci-plan.ts cannot change how its own run is judged (scripts/port-guard.ts also lists it as a guard file).
