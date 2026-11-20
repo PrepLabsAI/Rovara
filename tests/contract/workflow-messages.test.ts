@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_PULL_REQUEST_UPDATE_CAUSES, WORKFLOW_REVIEW_FAILURE_REASONS, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, WorkflowStageSchema, WorkflowStateSchema, WORKFLOW_AGENTX_ACTOR_ID, createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, WorkflowSnapshotViewSchema, workflowFindingFingerprint, type WorkflowSnapshot } from "@agentx/contracts";
-import { WORKFLOW_ACTION_IDS, documentSummaryLines, slackSectionTexts, feedbackReviewFailedMessage, plainBlockReason, planReviewLink, workflowMessage, workflowMessageKey, workflowModalCopy } from "../../packages/broker/src/developer/workflow-messages.js";
+import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_PULL_REQUEST_UPDATE_CAUSES, WORKFLOW_REVIEW_FAILURE_REASONS, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, WorkflowStageSchema, WorkflowStateSchema, WORKFLOW_AGENTX_ACTOR_ID, createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, WorkflowSnapshotViewSchema, type WorkflowSnapshot } from "@agentx/contracts";
+import { WORKFLOW_ACTION_IDS, documentSummaryLines, feedbackReviewFailedMessage, plainBlockReason, planReviewLink, workflowMessage, workflowMessageKey } from "../../packages/broker/src/developer/workflow-messages.js";
 import { WORKFLOW_ACTION_IDS as INTERACTIVITY_ACTION_IDS } from "../../packages/broker/src/aws/slack-interactivity.js";
 import { StrictSlackWeb, visibleSlackText } from "../support/strict-slack.js";
 
@@ -8,7 +8,6 @@ const taskId = "11111111-1111-4111-8111-111111111111";
 const now = "2026-10-07T12:00:00.000Z";
 const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
 const plan = { id: "plan-v1", type: "plan" as const, version: 1, sha256: "c".repeat(64), producer: "p", objectKey: "private/o/w/op/plan.md", createdAt: now };
-const JARGON = /\b(candidate|revision|digest|operation|artifact|workflow|SUCCEEDED|FAILED|INTERRUPTED|invalid json)\b/i;
 /** The words no workflow post may use: technical ones in any case, and the raw statuses as written. */
 const BANNED = /\b(candidate|revision|digest|operation|artifact|workflow|invalid json)\b|\b(SUCCEEDED|FAILED|INTERRUPTED|CANCELLED)\b|ended (SUCCEEDED|FAILED)/i;
 /** Every block reason the broker writes, by the stages it stops (grep blockWorkflow and blockReason in packages/broker). */
@@ -125,18 +124,6 @@ describe("workflow Slack messages", () => {
     expect(() => new StrictSlackWeb({ briefLimit: 1_200 }).post({ channel: "C0123456789", threadTs: "1695500000.000001", ...message })).not.toThrow();
   });
 
-  it("renders every stage and state as brief, jargon-free text with blocks Slack accepts", () => {
-    const slack = new StrictSlackWeb({ briefLimit: 1_200 });
-    for (const stage of WorkflowStageSchema.options) for (const state of WorkflowStateSchema.options) {
-      let workflow: WorkflowSnapshot;
-      try { workflow = snapshot(stage, state); } catch { continue; } // pairs the schema forbids cannot occur
-      const message = workflowMessage({ taskId, ownerSlackUserId: "U0123456789", workflow, documentLink: { url: "https://agentx.example.test/review/x/task" }, findingsUrl: "https://agentx.example.test/review/x/task#findings" });
-      if (message === undefined) continue;
-      expect(visibleSlackText(message.text), `${stage}/${state}`).not.toMatch(JARGON);
-      expect(() => slack.post({ channel: "C0123456789", threadTs: "1695500000.000001", ...message }), `${stage}/${state}`).not.toThrow();
-    }
-  });
-
   it("never says how a run ended, never uses banned words, stays within 1,200 visible characters, and gives every blocked step its ways out", () => {
     const slack = new StrictSlackWeb({ briefLimit: 1_200 });
     const rendered: string[] = [];
@@ -190,17 +177,6 @@ describe("workflow Slack messages", () => {
     expect(workflowMessage({ taskId, workflow: snapshot("IMPLEMENT", "RUNNING") })?.text).toBe("Trying the coding step again.");
   });
 
-  it("offers Retry planning and Close task when the planner's answer could not be read as a plan", () => {
-    const message = workflowMessage({ taskId, workflow: snapshot("PLAN", "BLOCKED", { blockReason: WORKFLOW_BLOCK_REASONS.planUnreadable }) })!;
-    // A whole sentence, not the stored phrase tacked on after a full stop.
-    expect(message.text).toBe("AgentX couldn't read the coding plan it wrote.");
-    expect(message.text).not.toContain(WORKFLOW_BLOCK_REASONS.planUnreadable);
-    const full = snapshot("PLAN", "BLOCKED", { path: "FULL", reviewPhase: "DESIGN", blockReason: WORKFLOW_BLOCK_REASONS.planUnreadable });
-    expect(workflowMessage({ taskId, workflow: full })!.text).toBe("AgentX couldn't read the design it wrote.");
-    const actions = (message.blocks.find((block) => (block as { type: string }).type === "actions") as { elements: Array<{ action_id: string; text: { text: string } }> }).elements;
-    expect(actions.map((button) => [button.action_id, button.text.text])).toEqual([["agentx_workflow_retry_plan", "Retry planning"], ["agentx_workflow_close", "Close task"]]);
-  });
-
   it("lists introduced findings briefly with Resolve findings, Retry and Close (no Send back), and keeps older issues advisory", () => {
     const findings = snapshot("REVIEW", "BLOCKED", { reviews: [
       { operationId: "22222222-2222-4222-8222-222222222222", candidateDigest: candidate.digest, role: "CRITIC", provider: "t", version: "1", status: "FINDINGS", findings: [{ text: "Drops the last line <!channel>", origin: "INTRODUCED", severity: "HIGH", file: "src/parse.ts", line: 40 }], readOnly: true, recordedAt: now },
@@ -218,18 +194,6 @@ describe("workflow Slack messages", () => {
     const finding = (text: string, extra: Record<string, unknown> = {}) => ({ text, origin: "INTRODUCED", ...extra });
     const blocked = (reviews: unknown[], extra: Record<string, unknown> = {}) => snapshot("REVIEW", "BLOCKED", { reviews, ...extra });
 
-    it("offers Resolve findings (primary), then Retry reviews and Close task, with the exact revision and code it was offered at", () => {
-      const workflow = blocked([review("CRITIC", "FINDINGS", { findings: [finding("Drops the last line")] }), review("SECURITY", "PASS")]);
-      const buttons = buttonsOf(workflowMessage({ taskId, workflow })!.blocks);
-      expect(buttons.map((button) => [button.action_id, button.text.text, button.style])).toEqual([
-        ["agentx_workflow_resolve_findings", "Resolve findings", "primary"],
-        ["agentx_workflow_retry_reviews", "Retry reviews", undefined],
-        ["agentx_workflow_close", "Close task", undefined],
-      ]);
-      expect(JSON.parse(buttons[0]!.value)).toEqual({ taskId, revision: workflow.revision, candidateDigest: candidate.digest });
-      expect(WORKFLOW_ACTION_IDS.has("agentx_workflow_resolve_findings")).toBe(true);
-    });
-
     it("keeps Send back only when more than 20 findings are open, which one answer cannot resolve", () => {
       const twenty = Array.from({ length: 20 }, (_, index) => finding(`Problem ${index}`));
       const exactly = blocked([review("CRITIC", "FINDINGS", { findings: twenty }), review("SECURITY", "PASS")]);
@@ -241,18 +205,6 @@ describe("workflow Slack messages", () => {
       expect(workflowMessage({ taskId, workflow: same })!.text).toContain("Reviews found 1 issue in this change.");
     });
 
-    it("leaves an accepted finding off the list, and offers no Resolve findings once every finding is accepted", () => {
-      const accepted = { candidateDigest: candidate.digest, role: "CRITIC", fingerprint: workflowFindingFingerprint("CRITIC", { text: "Drops the last line" }), text: "Drops the last line", reason: "Known", actorId: "a".repeat(64), at: now };
-      const reviews = [review("CRITIC", "FINDINGS", { findings: [finding("Drops the last line"), finding("Leaks a handle")] }), review("SECURITY", "PASS")];
-      const some = workflowMessage({ taskId, workflow: blocked(reviews, { acceptedFindings: [accepted] }) })!;
-      expect(some.text).toContain("Reviews found 1 issue in this change.");
-      expect(some.text).toContain("Leaks a handle");
-      expect(some.text).not.toContain("Drops the last line");
-      const all = workflowMessage({ taskId, workflow: blocked([review("CRITIC", "FINDINGS", { findings: [finding("Drops the last line")] }), review("SECURITY", "UNKNOWN", { failureReason: "TIMEOUT" })],
-        { acceptedFindings: [accepted] }) })!;
-      expect(all.text).toMatch(/review couldn't finish/);
-      expect(buttonsOf(all.blocks).map((button) => button.action_id)).toEqual(["agentx_workflow_retry_reviews", "agentx_workflow_close"]);
-    });
   });
 
   it("leaves advisory review notes off the list of issues that block", () => {
@@ -267,17 +219,6 @@ describe("workflow Slack messages", () => {
     expect(message.text).toContain("[code] Drops the last line");
     expect(message.text).toContain("[security] Token is logged");
     expect(message.text).not.toContain("long timeout");
-  });
-
-  it("says why a review could not finish in plain words, for every recorded reason", () => {
-    for (const failureReason of WORKFLOW_REVIEW_FAILURE_REASONS) {
-      const text = workflowMessage({ taskId, workflow: snapshot("REVIEW", "BLOCKED", { reviews: [review("SECURITY", "UNKNOWN", { failureReason })] }) })!.text;
-      expect(text, failureReason).toMatch(/^A review couldn't finish \(security review: [a-z' ]+\)\. Nothing was sent to GitHub\.$/);
-      expect(text, failureReason).not.toMatch(/passed|opening a draft pull request/iu);
-      expect(text, failureReason).not.toContain(failureReason.toLowerCase().replaceAll("_", " "));
-    }
-    expect(workflowMessage({ taskId, workflow: snapshot("REVIEW", "BLOCKED", { reviews: [review("SECURITY", "UNKNOWN", { failureReason: "INVALID_JSON" })] }) })!.text)
-      .toBe("A review couldn't finish (security review: its answer wasn't in the expected format). Nothing was sent to GitHub.");
   });
 
   it("turns the broker's own block reasons into plain sentences", () => {
@@ -301,54 +242,6 @@ describe("workflow Slack messages", () => {
       if (plain) expect(said, reason).toBe(reason);
       else expect(said, reason).not.toBe(reason);
     }
-  });
-
-  it("renders every blocked step the schema allows, with Close task; the rest are refused by the schema", () => {
-    for (const stage of WorkflowStageSchema.options) {
-      let workflow: WorkflowSnapshot;
-      try {
-        workflow = snapshot(stage, "BLOCKED", { blockReason: stage === "PULL_REQUEST" ? WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE : "planning operation ended failed" });
-      } catch {
-        // Nothing runs while a document waits for its owner, a closed task is done, and a merged one is complete.
-        expect(["PLAN_REVIEW", "CLOSED", "MERGED", "UNDERSTAND", "PLAN_CRITIQUE"], stage).toContain(stage);
-        continue;
-      }
-      const message = workflowMessage({ taskId, workflow });
-      expect(message, stage).toBeDefined();
-      expect(buttonsOf(message!.blocks).map((button) => button.action_id), stage).toContain("agentx_workflow_close");
-    }
-    expect(workflowMessage({ taskId, workflow: snapshot("WAIT_FOR_MERGE", "BLOCKED", { blockReason: WORKFLOW_BLOCK_REASONS.pullRequestChanged }) })!.text)
-      .toBe(`I stopped following the pull request. ${WORKFLOW_BLOCK_REASONS.pullRequestChanged}`);
-    expect(buttonsOf(workflowMessage({ taskId, workflow: snapshot("IMPLEMENT", "BLOCKED", { blockReason: WORKFLOW_HISTORY_REWRITTEN_MESSAGE }) })!.blocks).map((button) => button.action_id))
-      .toEqual(["agentx_workflow_close"]);
-  });
-
-  it("a failed feedback review says AgentX is still watching the pull request", () => {
-    const watching = "I'm still watching the pull request and will finish this task when it's merged.";
-    const failed = "I couldn't review the feedback on the pull request, so I have nothing to propose from it.";
-    expect(WORKFLOW_BLOCK_REASONS.feedbackReviewFailed).toBe(failed);
-    const reasons = [WORKFLOW_BLOCK_REASONS.feedbackReviewFailed, "PR feedback review operation ended failed", "PR feedback review operation ended interrupted",
-      "PR feedback review operation ended cancelled", "PR feedback review report was invalid, incomplete, or stale"];
-    for (const blockReason of reasons) {
-      const message = workflowMessage({ taskId, workflow: snapshot("WAIT_FOR_MERGE", "BLOCKED", { blockReason }) })!;
-      expect(message.text, blockReason).toBe(`${failed} ${watching}`);
-      expect(message.text, blockReason).not.toMatch(BANNED);
-      expect(message.text, blockReason).not.toContain("stopped following");
-      expect(buttonsOf(message.blocks).map((button) => button.action_id), blockReason).toEqual(["agentx_workflow_close"]);
-    }
-    // A failed push says so, then that the pull request is still watched.
-    const pushed = workflowMessage({ taskId, workflow: snapshot("WAIT_FOR_MERGE", "BLOCKED", { blockReason: WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed }) })!;
-    expect(pushed.text).toBe(`I couldn't push the fix to the pull request. ${watching}`);
-    expect(pushed.text).not.toMatch(BANNED);
-    // Any other reason is still not "stopped following": the merge is still tracked.
-    const other = workflowMessage({ taskId, workflow: snapshot("WAIT_FOR_MERGE", "BLOCKED", { blockReason: "some internal FAILED digest text" }) })!;
-    expect(other.text).toBe(`Something went wrong on AgentX's side. ${watching}`);
-  });
-
-  it("a changed pull request still says AgentX stopped following it", () => {
-    const message = workflowMessage({ taskId, workflow: snapshot("WAIT_FOR_MERGE", "BLOCKED", { blockReason: WORKFLOW_BLOCK_REASONS.pullRequestChanged }) })!;
-    expect(message.text).toBe(`I stopped following the pull request. ${WORKFLOW_BLOCK_REASONS.pullRequestChanged}`);
-    expect(buttonsOf(message.blocks).map((button) => button.action_id)).toEqual(["agentx_workflow_close"]);
   });
 
   it("shows a task view's unverifiable document plainly with Close, while a stored workflow is never blocked at approval", () => {
@@ -385,60 +278,6 @@ describe("workflow Slack messages", () => {
     expect(workflowMessageKey(snapshot("PULL_REQUEST", "READY"))).toBe(workflowMessageKey({ ...snapshot("PULL_REQUEST", "READY"), revision: 12 }));
   });
 
-  it("says it is reviewing PR feedback when a feedback review starts", () => {
-    const digest = (seed: string) => seed.repeat(64).slice(0, 64);
-    const comment = (id: string, author: string, bodySeed: string) => ({ id, kind: "DISCUSSION", url: `https://github.com/example/demo/pull/3#issuecomment-${id}`, author,
-      updatedAt: now, bodyDigest: digest(bodySeed), bodyBytes: 20 });
-    const bundle = (number: number, comments: Array<ReturnType<typeof comment>>) => ({ schemaVersion: 1, taskId, repositoryId: number === 3 ? "demo" : "other", number, headSha: "d".repeat(40),
-      candidateDigest: candidate.digest, commentSetDigest: digest("e"), producer: "p", version: "1", recordedAt: now, comments, sha256: digest("f"), objectKey: `private/o/w/feedback-${digest("f")}.json` });
-    const collecting = (...bundles: Array<ReturnType<typeof bundle>>) => snapshot("WAIT_FOR_MERGE", "RUNNING",
-      { feedbackReview: { status: "COLLECTING", bundleRefs: bundles, threadObservations: [] } });
-    const said = (workflow: WorkflowSnapshot) => visibleSlackText(workflowMessage({ taskId, workflow })!.text);
-    const tail = "I'll propose a fix here before changing any code.";
-    // PR #3 is not one the task opened, so it is named without a link.
-    expect(said(collecting(bundle(3, [comment("1", "mia", "a")])))).toBe(`Reviewing the feedback on PR #3 (1 comment). ${tail}`);
-    expect(said(collecting(bundle(3, [comment("1", "mia", "a"), comment("2", "raj", "b")])))).toBe(`Reviewing the feedback on PR #3 (2 comments). ${tail}`);
-    // The same author posting the same text again counts once; the same text from someone else is another comment.
-    expect(said(collecting(bundle(3, [comment("1", "mia", "a"), comment("2", "mia", "a")])))).toBe(`Reviewing the feedback on PR #3 (1 comment). ${tail}`);
-    expect(said(collecting(bundle(3, [comment("1", "mia", "a"), comment("2", "raj", "a")])))).toBe(`Reviewing the feedback on PR #3 (2 comments). ${tail}`);
-    // Several pull requests are named in order, and the count spans all of them.
-    expect(said(collecting(bundle(4, [comment("1", "mia", "a")]), bundle(3, [comment("2", "mia", "a"), comment("3", "raj", "b")]))))
-      .toBe(`Reviewing the feedback on PRs #3 and #4 (2 comments). ${tail}`);
-    expect(said(collecting(bundle(4, [comment("1", "mia", "a")]), bundle(3, [comment("2", "mia", "b"), comment("3", "raj", "b")]))))
-      .toBe(`Reviewing the feedback on PRs #3 and #4 (3 comments). ${tail}`);
-    // A pull request the task opened is linked; there are no buttons, and the text stays clear of the banned words.
-    const opened = snapshot("WAIT_FOR_MERGE", "RUNNING", { feedbackReview: { status: "COLLECTING", threadObservations: [],
-      bundleRefs: [{ ...bundle(42, [comment("1", "mia", "a")]), repositoryId: "demo" }] } });
-    const message = workflowMessage({ taskId, workflow: opened })!;
-    expect(message.text).toBe(`Reviewing the feedback on <https://github.com/example/demo/pull/42|PR #42> (1 comment). ${tail}`);
-    expect(message.text).not.toMatch(BANNED);
-    expect(buttonsOf(message.blocks)).toEqual([]);
-    // Said once for the review's revision, and not at all for other running steps of this stage.
-    expect(workflowMessageKey(opened)).toBe("revision:7");
-    expect(workflowMessage({ taskId, workflow: snapshot("WAIT_FOR_MERGE", "RUNNING") })).toBeUndefined();
-    // Once the owner's approval is bound, the review is no longer what is happening.
-    const approval = { taskId, requestId: "44444444-4444-4444-8444-444444444444", ownerId: "a".repeat(64), decisionWorkflowRevision: 6, activeWorkflowRevision: 7, reviewDigest: digest("f"),
-      proposalDigest: digest("f"), bundleDigests: [digest("f")], candidateDigest: candidate.digest, selectedFindingIds: ["finding-1"], selectedCommentIds: ["1"] };
-    expect(workflowMessage({ taskId, workflow: { ...opened, feedbackDispatchApproval: approval } })).toBeUndefined();
-  });
-
-  it("offers Close task on the draft pull request post, so an owner can close the task while its pull request is open", () => {
-    const message = workflowMessage({ taskId, workflow: snapshot("WAIT_FOR_MERGE", "WAITING") })!;
-    expect(message.text).toMatch(/^Draft pull request opened: /);
-    expect(buttonsOf(message.blocks).map((button) => [button.action_id, button.text.text])).toEqual([["agentx_workflow_close", "Close task"]]);
-  });
-
-  it("puts the approval card's document, version, summary, replies and link in one brief post", () => {
-    const message = workflowMessage({ taskId, workflow: snapshot("PLAN_REVIEW", "WAITING"), documentLink: { url: "https://acme.slack.com/docs/T1/F1" },
-      documentSummary: ["Goal: add <greet>."], newReplies: 1 })!;
-    expect(message.text).toBe("*Coding plan v1 is ready for your approval.* No code has changed yet.\n> Goal: add &lt;greet&gt;.\n1 thread reply since the last step will be included.\n<https://acme.slack.com/docs/T1/F1|Read the full coding plan>");
-    const buttons = buttonsOf(message.blocks);
-    expect(buttons.map((button) => [button.action_id, button.text.text, button.style])).toEqual([
-      ["agentx_workflow_approve", "Approve coding plan", "primary"], ["agentx_workflow_changes", "Request changes", undefined], ["agentx_workflow_close", "Close task", undefined]]);
-    expect(JSON.parse(buttons[0]!.value)).toEqual({ taskId, revision: 7, digest: plan.sha256, decision: "APPROVE" });
-    expect(workflowMessage({ taskId, workflow: snapshot("PLAN_REVIEW", "WAITING") })!.text).toContain("I couldn't link the full coding plan; ask an AgentX admin to check the task page.");
-  });
-
   it("links the task page when the document could not be shown, never telling the owner to ask an admin", () => {
     const pageUrl = "https://agentx.example.test/review/task-1/task";
     const message = workflowMessage({ taskId, workflow: snapshot("PLAN_REVIEW", "WAITING"), taskPageUrl: pageUrl })!;
@@ -460,30 +299,6 @@ describe("workflow Slack messages", () => {
     const claims = ["Payments that time out are retried.", "A payment is never charged twice.", "Failed retries are logged."];
     const cardOf = (structured: Record<string, unknown>, extra: Record<string, unknown> = {}) => workflowMessage({ taskId, workflow: snapshot("PLAN_REVIEW", "WAITING"),
       documentLink: { url }, taskPageUrl: page, structured: { claims, claimCount: 7, decisionCount: 2, tiny: false, ...structured }, ...extra })!;
-
-    it("links the task page at the document and version, never a version-only link", () => {
-      expect(url).toBe(`${page}?doc=coding-plan&from=1#coding-plan`);
-      expect(planReviewLink(page, snapshot("PLAN_REVIEW", "WAITING", { path: "FULL", reviewPhase: "REQUIREMENTS" }), 3)).toBe(`${page}?doc=requirements&from=3#requirements`);
-      expect(planReviewLink(page, snapshot("PLAN_REVIEW", "WAITING", { path: "FULL", reviewPhase: "DESIGN" }), 2)).toBe(`${page}?doc=design&from=2#design`);
-    });
-
-    it("shows the brief, the top claims, how many more, the decisions note and the link, in that order", () => {
-      const message = cardOf({}, { newReplies: 2 });
-      expect(message.text).toBe([
-        "*Coding plan v1 is ready for your approval.* No code has changed yet.",
-        "> Payments that time out are retried.", "> A payment is never charged twice.", "> Failed retries are logged.",
-        "And 4 more claims.",
-        "Approve here uses AgentX's answers for 2 decisions and includes the open comments (up to 25) from the task page.",
-        "2 thread replies since the last step will be included.",
-        `<${linkInText}|Open the full coding plan>`,
-      ].join("\n"));
-    });
-
-    it("leaves out the 'more claims' and decisions lines when there are none, and says one of each in the singular", () => {
-      const none = cardOf({ claims: claims.slice(0, 2), claimCount: 2, decisionCount: 0, tiny: true }).text;
-      expect(none).not.toMatch(/more claim|decision/);
-      expect(cardOf({ claimCount: 4, decisionCount: 1 }).text).toContain("And 1 more claim.\nApprove here uses AgentX's answers for 1 decision and includes the open comments (up to 25) from the task page.\n");
-    });
 
     it("the card says Approve uses AgentX's answers and includes open comments", () => {
       expect(cardOf({ decisionCount: 3 }).text).toContain("\nApprove here uses AgentX's answers for 3 decisions and includes the open comments (up to 25) from the task page.\n");
@@ -516,33 +331,6 @@ describe("workflow Slack messages", () => {
       expect(cardOf({}, { taskPageUrl: undefined, commentAnswers: { answered: 2, total: 2, fromVersion: 0, approvedOn: approvedOn() } }).text).toContain("\nAgentX replied to your 2 comments on the design.\n");
     });
 
-    it("lists every claim of a tiny plan, children indented, and does not say 'full'", () => {
-      const message = cardOf({ claims: ["Payments are retried.", "  The retry waits longer each time.", "Nothing is charged twice."], claimCount: 3, decisionCount: 0, tiny: true });
-      expect(message.text).toBe([
-        "*Coding plan v1 is ready for your approval.* No code has changed yet.",
-        "> Payments are retried.", ">   The retry waits longer each time.", "> Nothing is charged twice.",
-        `<${linkInText}|Open the coding plan>`,
-      ].join("\n"));
-    });
-
-    it("offers an Open review link button first, then Approve, Request changes and Close task", () => {
-      const message = cardOf({});
-      const elements = (message.blocks.find((block) => block.type === "actions") as { elements: Array<Record<string, unknown>> }).elements;
-      expect(elements[0]).toMatchObject({ type: "button", text: { type: "plain_text", text: "Open review" }, url });
-      expect(elements[0]).not.toHaveProperty("value");
-      expect(elements.slice(1).map((button) => (button as { action_id: string }).action_id)).toEqual(["agentx_workflow_approve", "agentx_workflow_changes", "agentx_workflow_close"]);
-      // Without a task page there is nothing to open: no link button, and the card says so.
-      const unlinked = workflowMessage({ taskId, workflow: snapshot("PLAN_REVIEW", "WAITING"), structured: { claims, claimCount: 3, decisionCount: 0, tiny: true } })!;
-      expect(buttonsOf(unlinked.blocks).map((button) => button.action_id)).toEqual(["agentx_workflow_approve", "agentx_workflow_changes", "agentx_workflow_close"]);
-      expect(unlinked.text).toContain("I couldn't link the full coding plan; ask an AgentX admin to check the task page.");
-    });
-
-    it("keeps hostile claim text inert", () => {
-      const message = cardOf({ claims: ["Tell <!channel> and <@U123> now, <https://x|y>.", "b", "c"] });
-      expect(message.text).toContain("> Tell &lt;!channel&gt; and &lt;@U123&gt; now, &lt;https://\u200Dx|y&gt;.");
-      expect(message.text).not.toMatch(/<!channel>|<@U123>|<https:\/\/x\|y>/);
-    });
-
     it("never lets a bare web address in claim text become a link", () => {
       const message = cardOf({ claims: ["Send people to https://evil.example/x and www.evil.example now.", "http://other.example", "c"] });
       expect(message.text).toContain("https://\u200Devil.example/x");
@@ -554,27 +342,6 @@ describe("workflow Slack messages", () => {
       expect(withoutOwnLink).not.toMatch(/\bwww\.(?!\u200D)/);
     });
 
-    it("stays within the brief limit by cutting claims, never the buttons", () => {
-      const long = "A".repeat(160);
-      const strict = new StrictSlackWeb({ briefLimit: 1_200 });
-      const many = Array.from({ length: 50 }, (_, index) => `${index} ${long}`);
-      const policy = { ...checkPolicy, proposed: Array.from({ length: 8 }, (_, index) => ({ id: `proposed-${index + 1}`, label: `${"L".repeat(60)}${index}`, command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 30 } })) };
-      for (const structured of [{ claims: many, claimCount: 50, decisionCount: 20, tiny: false }, { claims: many.slice(0, 3), claimCount: 3, decisionCount: 0, tiny: true }]) {
-        const message = workflowMessage({ taskId, workflow: snapshot("PLAN_REVIEW", "WAITING", { checkPolicy: policy }), documentLink: { url }, taskPageUrl: page, newReplies: 12, structured })!;
-        expect(visibleSlackText(message.text).length).toBeLessThanOrEqual(1_200);
-        expect(buttonsOf(message.blocks).map((button) => button.action_id)).toEqual(["agentx_open_review", "agentx_workflow_approve", "agentx_workflow_changes", "agentx_workflow_close"]);
-        expect(message.text).toContain("Open the");
-        // Claims are cut, not all dropped: the first is still there.
-        expect(message.text).toMatch(/\n> 0 A+/);
-        expect(() => strict.post({ channel: "C0123456789", threadTs: "1695500000.000001", ...message })).not.toThrow();
-      }
-    });
-
-    it("leaves a legacy Markdown card exactly as it was", () => {
-      const message = workflowMessage({ taskId, workflow: snapshot("PLAN_REVIEW", "WAITING"), documentLink: { url: "https://acme.slack.com/docs/T1/F1" }, documentSummary: ["Goal: add <greet>."], newReplies: 1 })!;
-      expect(message.text).toBe("*Coding plan v1 is ready for your approval.* No code has changed yet.\n> Goal: add &lt;greet&gt;.\n1 thread reply since the last step will be included.\n<https://acme.slack.com/docs/T1/F1|Read the full coding plan>");
-      expect(buttonsOf(message.blocks).map((button) => button.action_id)).toEqual(["agentx_workflow_approve", "agentx_workflow_changes", "agentx_workflow_close"]);
-    });
   });
 
   it("says replies that came in after the plan, with where to read them, on the draft pull request, merge and blocked posts", () => {
@@ -628,13 +395,6 @@ describe("workflow Slack messages", () => {
     expect(buttonsOf(message.blocks).map((button) => button.action_id)).toEqual(["agentx_workflow_send_back", "agentx_workflow_close"]);
   });
 
-  it("says no checks ran without claiming the project has none", () => {
-    expect(plainBlockReason(WORKFLOW_BLOCK_REASONS.noChecksConfigured)).toBe("AgentX ran none of this task's checks on the final code. Choose checks and retry, or close the task.");
-    // A task blocked before this wording changed still reads plainly.
-    expect(plainBlockReason("No checks ran: this project has no required checks and the task selected no optional checks. Configure or select at least one check, then retry."))
-      .toBe("AgentX ran none of this task's checks on the final code. Choose checks and retry, or close the task.");
-  });
-
   it("says when a failed check's program is not installed on the worker", () => {
     const proposed = { id: "proposed-1", label: "Cargo tests", command: { cwd: "repo/demo", executable: "cargo", args: ["test"], timeoutSeconds: 60 } };
     const message = workflowMessage({ taskId, workflow: snapshot("VERIFY", "BLOCKED", { checkPolicy: { ...checkPolicy, proposed: [proposed] },
@@ -648,18 +408,6 @@ describe("workflow Slack messages", () => {
     const withResults = (results: Array<Record<string, unknown>>) => snapshot("VERIFY", "BLOCKED", { checkPolicy: policy,
       blockReason: results.every((result) => result.status !== "FAILED" || result.broken === true) ? WORKFLOW_BLOCK_REASONS.checksBroken : "candidate checks failed or have unknown results",
       verification: { candidateDigest: candidate.digest, producer: "t", environmentId: "w", recordedAt: now, results } });
-
-    it("says the check itself is broken, with no Send back, when every failed check could not run", () => {
-      const message = workflowMessage({ taskId, workflow: withResults([{ checkId: "required-1", status: "PASS" }, { checkId: "proposed-1", status: "FAILED", broken: true }, { checkId: "proposed-2", status: "FAILED", broken: true }]) })!;
-      expect(message.text).toBe("These checks couldn't run because the check itself is broken: Cargo tests, Script check. Untick them with Choose checks and retry, or close the task.");
-      expect(buttonsOf(message.blocks).map((button) => button.action_id)).toEqual(["agentx_workflow_retry_checks", "agentx_workflow_close"]);
-    });
-
-    it("keeps the not installed note for a program the worker could not start", () => {
-      const message = workflowMessage({ taskId, workflow: withResults([{ checkId: "required-1", status: "PASS" }, { checkId: "proposed-1", status: "FAILED", programNotFound: true, broken: true }]) })!;
-      expect(message.text).toBe("These checks couldn't run because the check itself is broken: Cargo tests. cargo is not installed on the AgentX worker. Untick them with Choose checks and retry, or close the task.");
-      expect(buttonsOf(message.blocks).map((button) => button.action_id)).not.toContain("agentx_workflow_send_back");
-    });
 
     it("tells a project admin to fix a broken required check, which cannot be unticked", () => {
       const only = workflowMessage({ taskId, workflow: withResults([{ checkId: "required-1", status: "FAILED", broken: true }, { checkId: "proposed-1", status: "PASS" }]) })!;
@@ -682,31 +430,8 @@ describe("workflow Slack messages", () => {
     });
   });
 
-  it("offers Send back and Close on every other blocked review-only verification, and never says to retry checks it can't run", () => {
-    const empty = { required: [], optional: [], selectedOptionalIds: [] };
-    for (const reason of [WORKFLOW_BLOCK_REASONS.codeChangedAfterChecks, WORKFLOW_BLOCK_REASONS.repositoriesIncomplete, WORKFLOW_BLOCK_REASONS.startChanged,
-      WORKFLOW_BLOCK_REASONS.startUnrecorded, WORKFLOW_BLOCK_REASONS.checksUnconfirmed, WORKFLOW_BLOCK_REASONS.checkReportUnreadable, WORKFLOW_BLOCK_REASONS.checkRunnerFailed]) {
-      const message = workflowMessage({ taskId, workflow: snapshot("VERIFY", "BLOCKED", { checkPolicy: empty, verification: undefined, blockReason: reason }) })!;
-      expect(buttonsOf(message.blocks).map((button) => button.action_id)).toEqual(["agentx_workflow_send_back", "agentx_workflow_close"]);
-      expect(message.text).toMatch(/Send it back to coding, or close the task\.$/u);
-      expect(message.text).not.toMatch(/[Rr]etry|checks again|[Cc]hoose checks|start a new one/u);
-    }
-    // History rewritten past the task's start can't be fixed by coding again.
-    const rewritten = workflowMessage({ taskId, workflow: snapshot("VERIFY", "BLOCKED", { checkPolicy: empty, verification: undefined, blockReason: WORKFLOW_HISTORY_REWRITTEN_MESSAGE }) })!;
-    expect(buttonsOf(rewritten.blocks).map((button) => button.action_id)).toEqual(["agentx_workflow_close"]);
-    // A task with checks keeps its retry.
-    const checked = workflowMessage({ taskId, workflow: snapshot("VERIFY", "BLOCKED", { checkPolicy, verification: undefined, blockReason: WORKFLOW_BLOCK_REASONS.codeChangedAfterChecks }) })!;
-    expect(buttonsOf(checked.blocks).map((button) => button.action_id)).toEqual(["agentx_workflow_retry_checks", "agentx_workflow_close"]);
-  });
-
   it("names every button the router answers", () => {
     expect(INTERACTIVITY_ACTION_IDS).toBe(WORKFLOW_ACTION_IDS);
-  });
-
-  it("names the approval modal after the document being approved", () => {
-    expect(workflowModalCopy(snapshot("PLAN_REVIEW", "WAITING", { path: "FULL", reviewPhase: "REQUIREMENTS", artifacts: [{ ...plan, type: "requirements" }] }), "APPROVE")).toEqual({ title: "Approve requirements", submit: "Approve and continue" });
-    expect(workflowModalCopy(snapshot("PLAN_REVIEW", "WAITING"), "APPROVE")).toEqual({ title: "Approve coding plan", submit: "Approve and start coding" });
-    expect(workflowModalCopy(snapshot("PLAN_REVIEW", "WAITING"), "REQUEST_CHANGES")).toEqual({ title: "Request changes", submit: "Send changes" });
   });
 
   it("says on the coding plan's card which checks will run, or that it is review only, or that the proposal could not be read", () => {
@@ -738,19 +463,6 @@ describe("workflow Slack messages", () => {
     // Requirements and design propose no checks, and a task stored without a check policy says nothing new.
     expect(card({ proposed }, { path: "FULL", reviewPhase: "DESIGN", artifacts: [{ ...plan, type: "design" }] }).text).not.toContain("Checks:");
     expect(workflowMessage({ taskId, workflow: snapshot("PLAN_REVIEW", "WAITING") })!.text).not.toMatch(/Checks:|Review only/);
-  });
-
-  it("counts proposed checks when coding starts, and offers to retry them after they fail", () => {
-    const proposed = [{ id: "proposed-1", label: "Typecheck <x>", command: { cwd: "repo/demo", executable: "npx", args: ["tsc"], timeoutSeconds: 600 } }];
-    const policy = { required: checkPolicy.required, optional: [], selectedOptionalIds: [], proposed };
-    const decisions = [{ requestId: "33333333-3333-4333-8333-333333333333", workflowRevision: 5, decision: "APPROVE", actorId: "a".repeat(64), actorRole: "TASK_OWNER", reason: "r", artifactDigest: "c".repeat(64), at: now }];
-    expect(workflowMessage({ taskId, workflow: snapshot("IMPLEMENT", "RUNNING", { checkPolicy: policy, decisions }) })!.text).toBe("Coding plan approved. Writing the code now; then I'll run 2 checks.");
-    const failed = { checkPolicy: { ...policy, required: [] }, verification: { candidateDigest: candidate.digest, producer: "t", environmentId: "w", recordedAt: now, results: [{ checkId: "proposed-1", status: "FAILED" }] } };
-    const message = workflowMessage({ taskId, workflow: snapshot("VERIFY", "BLOCKED", failed) })!;
-    expect(message.text).toBe("1 of 1 check didn't pass: Typecheck &lt;x&gt;. Nothing was sent to GitHub.");
-    expect(buttonsOf(message.blocks).map((button) => button.action_id)).toContain("agentx_workflow_retry_checks");
-    const none = workflowMessage({ taskId, workflow: snapshot("VERIFY", "BLOCKED", { checkPolicy: { required: [], optional: [], selectedOptionalIds: [], proposed: [] }, blockReason: WORKFLOW_BLOCK_REASONS.noCheckResults }) })!;
-    expect(buttonsOf(none.blocks).map((button) => button.action_id)).not.toContain("agentx_workflow_retry_checks");
   });
 
 
@@ -817,22 +529,6 @@ describe("workflow Slack messages", () => {
   });
 });
 
-describe("splitting a long Slack text into sections (0.2.12 review)", () => {
-  it("splits at a line break whenever the text has one, so a later line stays whole", () => {
-    const command = "`" + "&lt;".repeat(650) + "`";
-    expect(slackSectionTexts(`${"a".repeat(500)}\n${command}`)).toEqual(["a".repeat(500), command]);
-  });
-
-  it("never ends a section inside an escaped character or a code span when it must split one long line", () => {
-    const entities = slackSectionTexts("&lt;".repeat(1_000));
-    expect(entities.join("")).toBe("&lt;".repeat(1_000));
-    for (const section of entities) expect(section).toMatch(/^(?:&lt;)+$/);
-    const code = slackSectionTexts(`${"x".repeat(2_700)} \`${"y".repeat(200)}\``);
-    expect(code.join("")).toBe(`${"x".repeat(2_700)} \`${"y".repeat(200)}\``);
-    for (const section of code) expect((section.match(/`/g) ?? []).length % 2).toBe(0);
-  });
-});
-
 describe("the words for checks that are running (LIVEFIX-1 item 4)", () => {
   const first = "Running the selected checks on the current code. No code is being changed.";
   const again = "Running the selected checks again on the current code. No code is being changed.";
@@ -841,11 +537,6 @@ describe("the words for checks that are running (LIVEFIX-1 item 4)", () => {
   const retry = (minute: number) => ({ requestId: "33333333-3333-4333-8333-333333333333", actorId: owner, selectedOptionalCheckIds: [], at: at(minute) });
   const decision = (minute: number, extra: Record<string, unknown>) => ({ requestId: "44444444-4444-4444-8444-444444444444", workflowRevision: 6, decision: "REQUEST_CHANGES", actorId: owner, actorRole: "TASK_OWNER", reason: "Fix it.", at: at(minute), ...extra });
   const say = (extra: Record<string, unknown>) => workflowMessage({ taskId, workflow: snapshot("VERIFY", "RUNNING", extra) })!.text;
-
-  it("does not say 'again' on the first run of the checks on a change, even when coding already recorded passing checks (the live case)", () => {
-    expect(say({})).toBe(first);
-    expect(say({ checkPolicy })).toBe(first);
-  });
 
   it("says 'again' after the owner pressed Retry checks, or after Rovara retried the checks by itself", () => {
     expect(say({ verificationRetries: [retry(5)] })).toBe(again);

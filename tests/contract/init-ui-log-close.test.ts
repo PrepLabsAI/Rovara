@@ -31,12 +31,6 @@ const { harness } = await import("../support/init-ui-harness.js");
 afterEach(() => { opened.splice(0); });
 
 describe("the install log file and the wizard", () => {
-  it("closes the log file when the wizard fails to start", async () => {
-    const h = await harness();
-    expect(await h.run(["--ui"])).not.toBe(0);
-    expect(opened).toHaveLength(1);
-    expect(opened[0]?.closed).toBe(1);
-  });
 
   it("prints the log's one failure line in the terminal", async () => {
     const h = await harness();

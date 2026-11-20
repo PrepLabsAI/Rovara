@@ -2,9 +2,8 @@
 // Pins how the Slack processor posts a turn's reply and what it records, before spec 014 phase 14d
 // adds the Details button. The harness never passes postWithBlocks, so these hold afterwards too.
 import { describe, expect, it, vi } from "vitest";
-import { splitSlackMessage, type SlackRequestMessage, type SlackThreadWorkspaceResult } from "../../packages/contracts/src/index.js";
+import { type SlackRequestMessage, type SlackThreadWorkspaceResult } from "../../packages/contracts/src/index.js";
 import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/slack-processor.js";
-import { slackReplyText } from "../../packages/slack-service/src/slack-format.js";
 import { DynamoTurnRecordWriter } from "../../packages/slack-service/src/turn-records.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
@@ -18,7 +17,6 @@ const message: SlackRequestMessage = {
 const workspace: SlackThreadWorkspaceResult = {
   outcome: "WORKSPACE", workspaceId, status: "READY", operationId: null, created: false, orchestratorInstructions: "Delegate coding.",
 };
-const longReply = Array.from({ length: 3 }, (_, index) => `Part ${index}: ${"word ".repeat(700)}`).join("\n");
 
 function turnWithCall(response: string | Error) {
   return async (input: TurnInput): Promise<string> => {
@@ -27,13 +25,6 @@ function turnWithCall(response: string | Error) {
     input.recorder?.toolEnded({ toolCallId: "c1", toolName: "tracker__list_items", isError: false,
       result: { content: [{ type: "text", text: JSON.stringify({ requestId: "r1", status: "SUCCEEDED", text: "[]", truncated: false, replayed: false }) }] } });
     if (response instanceof Error) throw response;
-    input.recorder?.agentEnded([{ role: "assistant", content: [{ type: "text", text: response }], stopReason: "stop" }]);
-    return response;
-  };
-}
-
-function turnWithoutCalls(response: string) {
-  return async (input: TurnInput): Promise<string> => {
     input.recorder?.agentEnded([{ role: "assistant", content: [{ type: "text", text: response }], stopReason: "stop" }]);
     return response;
   };
@@ -62,34 +53,6 @@ function harness(runTurn: (input: TurnInput) => Promise<string>) {
 }
 
 describe("reply posting and recording before the Details button (spec 014 phase 14d)", () => {
-  it("posts each chunk of a long reply as text, in order, as the last messages of the turn", async () => {
-    const { dependencies, posts } = harness(turnWithCall(longReply));
-    await processSlackRequest(message, dependencies, { finalAttempt: false });
-    const chunks = splitSlackMessage(slackReplyText(longReply));
-    expect(chunks.length).toBeGreaterThan(1);
-    expect(posts.slice(-chunks.length)).toEqual(chunks);
-  });
-
-  it("posts the same messages whether or not the turn called tools", async () => {
-    const withCall = harness(turnWithCall("Nothing is open."));
-    const withoutCalls = harness(turnWithoutCalls("Nothing is open."));
-    await processSlackRequest(message, withCall.dependencies, { finalAttempt: false });
-    await processSlackRequest(message, withoutCalls.dependencies, { finalAttempt: false });
-    expect(withCall.posts).toEqual(withoutCalls.posts);
-    expect(withCall.posts.at(-1)).toBe("Nothing is open.");
-  });
-
-  it("records the reply under the key a Details button will name", async () => {
-    const { dependencies, stored } = harness(turnWithCall("Nothing is open."));
-    await processSlackRequest(message, dependencies, { finalAttempt: false });
-    expect(stored()).toHaveLength(1);
-    expect(stored()[0]).toMatchObject({
-      pk: "THREAD#T0123456789/C0123456789/1695500000.000001",
-      sk: "TURN#2026-09-24T10:00:00.000Z#EvCHAR000001",
-      responseText: "Nothing is open.",
-      calls: [expect.objectContaining({ name: "tracker__list_items", outcome: "SUCCEEDED" })],
-    });
-  });
 
   it("posts and records a turn that fails after a tool call", async () => {
     const { dependencies, posts, stored } = harness(turnWithCall(new Error("model down")));

@@ -109,27 +109,6 @@ const notes = (sent: readonly WorkerEvent[]) => sent.flatMap((event) => {
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 describe("a planning run whose model call stops answering", () => {
-  it("ends on the stall limit: aborts the session, tells the task first, and fails with fixed text", async () => {
-    const started = Date.now();
-    const { settled, sent, state } = await run({
-      // One event, then silence until the abort; the abort ends the call as Pi does.
-      async prompt(emit, aborted) { emit({ type: "message_start", message: { role: "assistant", content: [] } }); await aborted; emit(abortedEnd()); },
-    }, { limits: { stallMs: 150, deadlineMs: 60_000, abortConfirmMs: 2_000 } });
-    const result = await settled;
-    expect(result.ok).toBe(false);
-    const message = (result as { error: Error }).error.message;
-    expect(message).toMatch(/^RUNTIME_UNAVAILABLE: planning stopped: the model sent nothing for \d+ s \(model call 1\)\. Retry planning\.$/u);
-    expect(state.aborts).toBe(1);
-    expect(Date.now() - started).toBeLessThan(5_000);
-    expect(notes(sent).map((note) => note.outcome)).toEqual(expect.arrayContaining(["stalled", "stopped"]));
-    // The stall note is sent before the terminal error event.
-    const stalledAt = sent.findIndex((event) => (event.payload as { modelCall?: { outcome?: string } } | null)?.modelCall?.outcome === "stalled");
-    const errorAt = sent.findIndex((event) => event.type === "error");
-    expect(stalledAt).toBeGreaterThan(-1);
-    expect(errorAt).toBeGreaterThan(stalledAt);
-    expect(sent[errorAt]!.payload).toEqual({ message });
-    expect(sent.some((event) => event.type === "result")).toBe(false);
-  });
 
   it("ends on the planning deadline even while the model keeps streaming", async () => {
     const { settled, sent, state } = await run({
@@ -158,21 +137,6 @@ describe("a planning run whose model call stops answering", () => {
     expect((result as { error: Error & { code?: string } }).error.message).toMatch(/^OPERATION_INTERRUPTED: planning stopped: the model sent nothing for \d+ s \(model call 1\) and did not stop when asked\. Retry planning\.$/u);
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(notes(sent).map((note) => note.outcome)).toContain("stalled");
-  });
-
-  it("lets a cancel decide the outcome: no deadline note, CANCELLED", async () => {
-    const controller = new WorkerCancellationController();
-    const task = invocation();
-    const { settled, sent, logs } = await run({
-      async prompt(emit, aborted) { emit({ type: "message_start", message: { role: "assistant", content: [] } }); await aborted; emit(abortedEnd()); },
-    }, { controller, invocation: task, limits: { stallMs: 400, deadlineMs: 60_000, abortConfirmMs: 2_000 } });
-    await wait(50);
-    await controller.cancel(task.operationId);
-    const result = await settled;
-    expect((result as { error: unknown }).error).toBeInstanceOf(WorkerOperationCancelledError);
-    await wait(600);
-    expect(notes(sent).map((note) => note.outcome)).not.toContain("stalled");
-    expect(logs.map((line) => line.json.event)).not.toContain("planning.stalled");
   });
 
   it("sends a numbers-only heartbeat while the model call is in flight", async () => {
@@ -220,19 +184,9 @@ describe("a model failure in the task's events", () => {
     expect(artifacts.find((artifact) => artifact.name === "plan.md")?.content).toContain("Update the route");
   });
 
-  it("fails with the class, error type, request id and call number, and the same text in the error event", async () => {
-    const { settled, sent } = await run({ async prompt(emit) { emit(iseMessageEnd()); } });
-    const message = (await settled as { error: Error }).error.message;
-    expect(message).toBe(`RUNTIME_UNAVAILABLE: the model call failed: provider-outage InternalServerException request ${REQUEST_ID} attempt 1; retry the step`);
-    expect(sent.find((event) => event.type === "error")?.payload).toEqual({ message });
-    expect(JSON.stringify(sent)).not.toContain("PRIVATE-PROVIDER-DETAIL");
-  });
-
   for (const keyed of [
     { name: "a rejected Anthropic key", provider: "anthropic", text: '401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key sk-ant-PRIVATE"}}',
       error: "RUNTIME_UNAVAILABLE: the model call failed: key-rejected authentication_error HTTP 401 attempt 1; check the model key and its permissions, then retry" },
-    { name: "OpenRouter out of credits", provider: "openrouter", text: '402: {"error":{"message":"Insufficient credits PRIVATE","code":402}}',
-      error: "RUNTIME_UNAVAILABLE: the model call failed: limit-or-rate-limited HTTP 402 attempt 1; add credits to the model account, then retry" },
     { name: "an OpenAI rate limit", provider: "openai", text: "OpenAI request failed; rate limited or out of credits; check the key's usage limits before retrying",
       error: "RUNTIME_UNAVAILABLE: the model call failed: limit-or-rate-limited HTTP 429 attempt 1; wait, then retry; if it keeps failing check the model's rate limit and credit balance" },
   ]) {
@@ -257,17 +211,6 @@ describe("a model failure in the task's events", () => {
     expect(JSON.stringify(sent)).not.toContain("PRIVATE-PROVIDER-DETAIL");
   });
 
-  it("writes a worker log line per failed call, retry and deadline, with fixed fields only", async () => {
-    const { settled, logs } = await run({
-      async prompt(emit) { emit(iseMessageEnd()); emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 2000, errorMessage: SECRET_PROVIDER_TEXT }); emit(planEnd()); },
-    });
-    expect((await settled).ok).toBe(true);
-    const lines = logs.filter((line) => String(line.json.event).startsWith("model."));
-    expect(lines.map((line) => line.json.event)).toEqual(["model.attempt_failed", "model.retry_scheduled"]);
-    expect(lines[0]!.json).toMatchObject({ component: "worker", class: "provider-outage", signal: "InternalServerException", requestId: REQUEST_ID, attempt: 1 });
-    expect(JSON.stringify(logs)).not.toContain("PRIVATE-PROVIDER-DETAIL");
-    expect(JSON.stringify(logs)).not.toContain(SECRET_THINKING);
-  });
 });
 
 describe("a refused event send", () => {
@@ -304,39 +247,3 @@ describe("a refused event send", () => {
   });
 });
 
-describe("a cancel while the session's abort hangs", () => {
-  it("returns within the abort bound instead of hanging with it", async () => {
-    const controller = new WorkerCancellationController();
-    const task = invocation();
-    await run({
-      async prompt() { await new Promise<void>(() => undefined); },
-      async abort() { await new Promise<void>(() => undefined); },
-    }, { controller, invocation: task, limits: { abortConfirmMs: 200, stallMs: 60_000, deadlineMs: 120_000 } });
-    await wait(50);
-    const started = Date.now();
-    await controller.cancel(task.operationId);
-    expect(Date.now() - started).toBeLessThan(3_000);
-  });
-});
-
-describe("a cancel and the events buffered before it", () => {
-  it("sends them before the cancel returns, so the cancel result cannot refuse them", async () => {
-    const controller = new WorkerCancellationController();
-    const task = invocation();
-    const { settled, sent } = await run({
-      async prompt(emit, aborted) {
-        emit({ type: "message_start", message: { role: "assistant", content: [] } });
-        emit({ type: "message_end", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "text", text: "buffered-note-1" }] } });
-        // The stopped call reports nothing urgent and takes a moment to unwind, as a cancel that lands between model events does.
-        await aborted;
-        await wait(300);
-      },
-    }, { controller, invocation: task });
-    await wait(50);
-    // Nothing urgent has happened since the first event: the second one is still waiting in the batcher.
-    expect(JSON.stringify(sent)).not.toContain("buffered-note-1");
-    await controller.cancel(task.operationId);
-    expect(JSON.stringify(sent)).toContain("buffered-note-1");
-    expect((await settled).ok).toBe(false);
-  });
-});

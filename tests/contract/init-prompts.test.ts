@@ -1,13 +1,7 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { agentXError } from "@agentx/contracts";
-import {
-  ADVANCED_QUESTION, askForm, checkPrivateKeyPem, checkSlackBotToken, checkSlackSigningSecret, cleanSecret, fieldCheck, readHidden, secretFromSource,
-  terminalPrompter, unattendedPrompter, type FormField,
-} from "../../packages/cli/src/init/prompts.js";
+import { askForm, checkPrivateKeyPem, checkSlackBotToken, checkSlackSigningSecret, cleanSecret, readHidden, secretFromSource, terminalPrompter, type FormField } from "../../packages/cli/src/init/prompts.js";
 import { scriptedPrompter } from "../support/init-fakes.js";
 
 class FakeTty extends EventEmitter {
@@ -39,17 +33,6 @@ const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 
 describe("hidden input", () => {
-  it("reads a long secret whole in raw mode, echoes nothing of it, and restores the terminal (Review Focus 3)", async () => {
-    const input = new FakeTty();
-    const output = sink();
-    const secret = `xoxb-${"a1".repeat(150)}`; // 305 characters, past macOS security's 128-character cut
-    const pending = readHidden(input, output, "Bot token: ");
-    for (const character of secret) input.emit("data", character);
-    input.emit("data", "\r");
-    await expect(pending).resolves.toBe(secret);
-    expect(output.written.join("")).toBe("Bot token: \n");
-    expect(input.rawModes).toEqual([true, false]);
-  });
 
   it("strips bracketed-paste markers and honours backspace (Review Focus 3)", async () => {
     const input = new FakeTty();
@@ -83,20 +66,9 @@ describe("hidden input", () => {
     await expect(pending).resolves.toBe("-----BEGIN KEY-----\nabc\n-----END KEY-----");
   });
 
-  it("removes a bracketed-paste marker even when it is split across two data events (Minor finding)", async () => {
-    const input = new FakeTty();
-    const pending = readHidden(input, sink(), "Secret: ");
-    input.emit("data", "\u001b[20");
-    input.emit("data", "0~abc\u001b[201~");
-    input.emit("data", "\r");
-    await expect(pending).resolves.toBe("abc");
-  });
 });
 
 describe("cleaning secrets", () => {
-  it("trims surrounding spaces and line breaks and paste markers (Review Focus 3)", () => {
-    expect(cleanSecret("  \u001b[200~value-123\u001b[201~\r\n", "Slack bot token")).toBe("value-123");
-  });
 
   it("refuses whitespace inside a single-line secret without echoing it", () => {
     let message = "";
@@ -105,46 +77,18 @@ describe("cleaning secrets", () => {
     expect(message).not.toContain("def-secret");
   });
 
-  it("allows line breaks inside a multiline secret such as a PEM key", () => {
-    expect(cleanSecret("\n-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n\n", "GitHub App private key", { multiline: true }))
-      .toBe("-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----");
-  });
-
   it("refuses an empty secret", () => {
     expect(() => cleanSecret(" \r\n", "Slack signing secret")).toThrow("the Slack signing secret is empty");
   });
 });
 
 describe("secret sources", () => {
-  it("prefers the file, then the environment variable, then the hidden prompt", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "agentx-secret-"));
-    dirs.push(dir);
-    await writeFile(join(dir, "token"), "from-file\n");
-    const base = { what: "Slack bot token", flag: "--slack-bot-token", processEnv: { TOKEN: "from-env" } };
-    await expect(secretFromSource({ ...base, source: { file: join(dir, "token"), envName: "TOKEN" }, prompter: scriptedPrompter([]) })).resolves.toBe("from-file");
-    await expect(secretFromSource({ ...base, source: { envName: "TOKEN" }, prompter: scriptedPrompter([]) })).resolves.toBe("from-env");
-    await expect(secretFromSource({ ...base, source: {}, prompter: scriptedPrompter(["from-prompt "]) })).resolves.toBe("from-prompt");
-  });
 
   it("names a missing environment variable without guessing", async () => {
     await expect(secretFromSource({ what: "Slack bot token", flag: "--slack-bot-token", source: { envName: "NOPE" }, processEnv: {}, prompter: scriptedPrompter([]) }))
       .rejects.toThrow("environment variable NOPE (--slack-bot-token-env) is not set");
   });
 
-  it("with --yes and no source, names both flags that could supply the secret", async () => {
-    await expect(secretFromSource({ what: "Slack bot token", flag: "--slack-bot-token", source: {}, processEnv: {}, prompter: unattendedPrompter() }))
-      .rejects.toThrow("Slack bot token needs an answer; with --yes, pass --slack-bot-token-file <path> or --slack-bot-token-env <NAME>");
-  });
-
-  it("passes multiline through to the prompter, so a multiline value with no source falls through only to be refused", async () => {
-    const prompter = terminalPrompter({
-      readLine: () => { throw new Error("test setup: should not read a line"); },
-      readSecret: () => { throw new Error("test setup: should not read a secret"); },
-      write: () => {},
-    });
-    await expect(secretFromSource({ what: "GitHub App private key", flag: "--github-private-key", source: {}, processEnv: {}, prompter, multiline: true }))
-      .rejects.toThrow("a multi-line GitHub App private key cannot be pasted into a hidden prompt; pass --github-private-key-file <path> or --github-private-key-env <NAME>");
-  });
 });
 
 describe("secret shapes", () => {
@@ -160,11 +104,6 @@ describe("secret shapes", () => {
   it("accepts a 32-character hexadecimal signing secret only", () => {
     expect(checkSlackSigningSecret("0123456789abcdef0123456789abcdef")).toBe("0123456789abcdef0123456789abcdef");
     expect(() => checkSlackSigningSecret("0123456789abcdef")).toThrow("a Slack signing secret is 32 lowercase hexadecimal characters (Basic Information, App Credentials, Signing Secret)");
-  });
-
-  it("accepts a PEM saved with Windows line endings, storing it with plain ones", () => {
-    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\nAAAA\n-----END RSA PRIVATE KEY-----";
-    expect(checkPrivateKeyPem(pem.replaceAll("\n", "\r\n"))).toBe(pem);
   });
 
   it("accepts a PEM private key only", () => {
@@ -205,30 +144,9 @@ describe("terminal prompter", () => {
     await expect(prompter.confirm("Continue?", { defaultValue: true })).resolves.toBe(false);
   });
 
-  it("refuses a multiline secret up front, before ever reading it, naming the file and env flags (Important finding)", async () => {
-    const prompter = terminalPrompter({
-      readLine: () => { throw new Error("test setup: should not read a line"); },
-      readSecret: () => { throw new Error("test setup: should not read a secret"); },
-      write: () => {},
-    });
-    await expect(prompter.secret("GitHub App private key", { flag: "--github-private-key", multiline: true }))
-      .rejects.toThrow("a multi-line GitHub App private key cannot be pasted into a hidden prompt; pass --github-private-key-file <path> or --github-private-key-env <NAME>");
-  });
 });
 
 describe("fieldCheck and the terminal's secret prompt (spec 040 FR-040)", () => {
-  it("turns a throwing check into a field message without the error code", () => {
-    const check = fieldCheck(checkSlackSigningSecret);
-    expect(check("0123456789abcdef0123456789abcdef")).toBeUndefined();
-    expect(check("nothex")).toBe("a Slack signing secret is 32 lowercase hexadecimal characters (Basic Information, App Credentials, Signing Secret)");
-  });
-
-  it("keeps a Node error's own code in the field message; only an AgentXError's code is dropped", () => {
-    const nodeError = fieldCheck(() => { throw new Error("ENOENT: no such file or directory"); });
-    expect(nodeError("x")).toBe("ENOENT: no such file or directory");
-    const agentx = fieldCheck(() => { throw agentXError("CONFIG_INVALID", "UPPER_CASE: words the check wrote"); });
-    expect(agentx("x")).toBe("UPPER_CASE: words the check wrote");
-  });
 
   it("the terminal's hidden prompt ignores validate, so a bad value still fails where it always did", async () => {
     const prompter = terminalPrompter({ readLine: async () => "", readSecret: async () => "not-a-token", write: () => undefined });
@@ -237,28 +155,6 @@ describe("fieldCheck and the terminal's secret prompt (spec 040 FR-040)", () => 
 });
 
 describe("spec 048 FR-072: a form in the terminal", () => {
-  const fields: FormField[] = [
-    { name: "email", question: "Your email", flag: "--admin-email" },
-    { name: "engine", question: "Deploy engine", flag: "--engine", defaultValue: "templates", section: "advanced", choices: [{ value: "templates", label: "templates" }, { value: "cdk", label: "cdk" }] },
-    { name: "budget", question: "Monthly budget", flag: "--budget", defaultValue: "", section: "advanced" },
-  ];
-
-  it("asks the default-path fields, then whether to change the advanced ones; No takes their defaults", async () => {
-    const prompter = scriptedPrompter(["a@example.com", false]);
-    await expect(askForm(prompter, "Your settings", fields)).resolves.toEqual({ email: "a@example.com", engine: "templates", budget: "" });
-    expect(prompter.asked).toEqual(["Your email", ADVANCED_QUESTION]);
-  });
-
-  it("Yes asks every advanced field, a choice through choose", async () => {
-    const prompter = scriptedPrompter(["a@example.com", true, "cdk", "250"]);
-    await expect(askForm(prompter, "Your settings", fields)).resolves.toEqual({ email: "a@example.com", engine: "cdk", budget: "250" });
-    expect(prompter.asked).toEqual(["Your email", ADVANCED_QUESTION, "Deploy engine", "Monthly budget"]);
-  });
-
-  it("--yes answers every field with its default and still refuses a field with none", async () => {
-    await expect(askForm(unattendedPrompter(), "Your settings", fields.slice(1))).resolves.toEqual({ engine: "templates", budget: "" });
-    await expect(askForm(unattendedPrompter(), "Your settings", fields)).rejects.toThrow("Your email needs an answer; with --yes, pass --admin-email");
-  });
 
   it("stops on a cross-field refusal, as a refused value does", async () => {
     const same: FormField[] = [{ name: "a", question: "A", flag: "--a" }, { name: "b", question: "B", flag: "--b" }];

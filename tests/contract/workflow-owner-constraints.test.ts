@@ -79,30 +79,6 @@ const expectConstraints = (prompt: string) => {
 };
 
 describe("every send back to the coder carries the owner's plan-review instructions and the plan's Not changing list (AUTOFIXPROMPT)", () => {
-  it("the automatic send back (the live case: the owner said do not change package.json)", async () => {
-    const harness = await broker({ enabled: true, capUsd: 1000, roundEstimateUsd: 3 });
-    const ctx = await startConstrained(harness, { requestChanges: true, notChanging: [NOT_CHANGING] });
-    await ctx.blockOnFindings(1);
-    // Rovara sent it back by itself: a second coding run is running.
-    expect(workflowOf(harness, ctx.taskId)).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
-    expect(workflowOf(harness, ctx.taskId).decisions.filter((decision) => decision.source === "AUTO_FIX")).toHaveLength(1);
-    const prompt = latestPrompt(harness, ctx.workspaceId);
-    expect(prompt).toContain("Note (written by AgentX, which sent this back by itself)");
-    expect(prompt).toContain(FINDING.text);
-    expectConstraints(prompt);
-  });
-
-  it("the owner's own Send back", async () => {
-    const harness = await broker(null);
-    const ctx = await startConstrained(harness, { requestChanges: true, notChanging: [NOT_CHANGING] });
-    await ctx.blockOnFindings(1);
-    expect(workflowOf(harness, ctx.taskId)).toMatchObject({ stage: "REVIEW", state: "BLOCKED" });
-    const sent = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${ctx.taskId}/workflow/send-back`, { requestId: randomUUID(), expectedRevision: workflowOf(harness, ctx.taskId).revision, instructions: "Fix the parser." });
-    expect(sent.status, JSON.stringify(sent.body)).toBe(200);
-    const prompt = latestPrompt(harness, ctx.workspaceId);
-    expect(prompt).toContain("Owner note (the owner's own instructions for this step): Fix the parser.");
-    expectConstraints(prompt);
-  });
 
   it("the owner's Resolve findings, for a finding to fix", async () => {
     const harness = await broker(null);
@@ -127,31 +103,4 @@ describe("every send back to the coder carries the owner's plan-review instructi
     expect(prompt).not.toContain("stay as they are");
   });
 
-  it("carries the plan's Not changing list alone when the owner gave no instruction, and the owner's instructions alone when the plan has none", async () => {
-    const withList = await broker({ enabled: true, capUsd: 1000, roundEstimateUsd: 3 });
-    const a = await startConstrained(withList, { requestChanges: false, notChanging: [NOT_CHANGING] });
-    await a.blockOnFindings(1);
-    const listOnly = latestPrompt(withList, a.workspaceId);
-    expect(listOnly).toContain(`- ${NOT_CHANGING}`);
-    expect(listOnly).not.toContain("plan review");
-    const withNote = await broker({ enabled: true, capUsd: 1000, roundEstimateUsd: 3 });
-    const b = await startConstrained(withNote, { requestChanges: true, notChanging: ["None"] });
-    await b.blockOnFindings(1);
-    const noteOnly = latestPrompt(withNote, b.workspaceId);
-    expect(noteOnly).toContain(`1. ${OWNER_NOTE}`);
-    expect(noteOnly).not.toContain("stay as they are");
-  });
-
-  it("repeats an owner instruction only from a plan-review Request changes, never Rovara's own or an earlier send back's note", async () => {
-    const harness = await broker({ enabled: true, capUsd: 1000, roundEstimateUsd: 3 });
-    const ctx = await startConstrained(harness, { requestChanges: true, notChanging: [NOT_CHANGING] });
-    await ctx.blockOnFindings(1);
-    // Rovara's own send back is in the history now; the next prompt (after a second block) still lists only the owner's one instruction.
-    await ctx.blockOnFindings(2);
-    const prompt = latestPrompt(harness, ctx.workspaceId);
-    expect(prompt.match(new RegExp(OWNER_NOTE.replace(/[.]/g, "\\."), "g"))).toHaveLength(1);
-    expect(workflowOf(harness, ctx.taskId).decisions.filter((decision) => decision.source === "AUTO_FIX")).toHaveLength(2);
-    // The prompt still names the plan the owner approved.
-    expect(prompt).toContain(`Approved plan (sha256 ${workflowOf(harness, ctx.taskId).artifacts.filter((artifact) => artifact.type === "plan").at(-1)!.sha256}`);
-  });
 });

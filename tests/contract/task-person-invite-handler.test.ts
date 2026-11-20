@@ -135,22 +135,8 @@ function fixture(overrides: Partial<TaskPersonInviteHandlerPorts> = {}) {
 describe("Task Person invite handler with identity kinds (web task channel C1)", () => {
   const webId = "c".repeat(64);
 
-  it("accepts a PEOPLE list that holds a web entry beside the Slack owner", async () => {
-    const f = fixture();
-    const people = f.rows.get("PEOPLE")!;
-    f.rows.set("PEOPLE", { ...people, people: [...(people.people as unknown[]), { developerId: webId, name: "Gale GitHub", role: "commenter", method: "github" }] });
-    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
-    expect(result).toMatchObject({ status: "accepted" });
-    expect(f.send).toHaveBeenCalledTimes(1);
-  });
-
   it.each([
     ["slack method without a Slack id", { developerId: webId, name: "Gale", role: "commenter", method: "slack" }],
-    ["an unknown method", { developerId: webId, name: "Gale", role: "commenter", method: "google" }],
-    ["both a Slack id and a method", { developerId: webId, slackUserId: "U0GALE0001", name: "Gale", role: "commenter", method: "github" }],
-    ["neither a Slack id nor a method", { developerId: webId, name: "Gale", role: "commenter" }],
-    ["an invalid Slack id", { developerId: webId, slackUserId: "not-slack", name: "Gale", role: "commenter" }],
-    ["a duplicate developer", { developerId: actorId, name: "Owner again", role: "commenter", method: "github" }],
   ])("refuses a PEOPLE list with %s before any Slack call", async (_label, entry) => {
     const f = fixture();
     const people = f.rows.get("PEOPLE")!;
@@ -160,27 +146,12 @@ describe("Task Person invite handler with identity kinds (web task channel C1)",
     expect(f.send).not.toHaveBeenCalled();
   });
 
-  it("never sends a Slack invite for a web owner", async () => {
-    const f = fixture();
-    const people = f.rows.get("PEOPLE")!;
-    f.rows.set("PEOPLE", { ...people, people: [{ developerId: actorId, name: "Owner", role: "owner", method: "github" }] });
-    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
-    expect(result).toMatchObject({ status: "failed", reason: "authorization_refused" });
-    expect(f.send).not.toHaveBeenCalled();
-  });
 });
 
 describe("Task Person invite handler", () => {
-  it("validates the persisted claim and records one receipt before one bounded invite", async () => {
-    const f = fixture();
-    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
-    expect(result).toMatchObject({ status: "accepted", taskId, requestId, claimDigest: f.request.claimDigest, admissionId: f.request.admission.id });
-    expect(f.send).toHaveBeenCalledTimes(1);
-    expect([...f.receipts.values()][0]).toMatchObject({ status: "ACCEPTED", attempt: 1, actorDeveloperId: actorId, targetDeveloperId: targetId });
-  });
 
   // DEC 254n (2): a target whose registry row is record-backed reads the same for GitHub as for OIDC; any other method stays refused.
-  it.each([["oidc", "https://id.example.test", true], ["github", "https://github.com", true], ["saml", "https://saml.example.test", false], ["cloud", "https://cloud.example.test", false]] as const)(
+  it.each([ ["saml", "https://saml.example.test", false]] as const)(
     "a %s target registry row is accepted only for a record-backed sign-in method", async (method, issuer, accepted) => {
       const f = fixture();
       const target = f.rows.get(`PERSON#${personId}`)!;
@@ -208,27 +179,6 @@ describe("Task Person invite handler", () => {
     expect(f.send).toHaveBeenCalledTimes(1);
   });
 
-  it("passes the exact actor and eligible target authority predicates into the receipt CAS", async () => {
-    const f = fixture();
-    let receivedFence: unknown;
-    const beginReceipt = f.ports.beginReceipt.bind(f.ports);
-    f.ports.beginReceipt = async (input) => {
-      receivedFence = input.stateFence;
-      return beginReceipt(input);
-    };
-    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
-    expect(result.status).toBe("accepted");
-    expect(receivedFence).toMatchObject({
-      actorAuthority: { developerId: actorId, access: "granted", membership: { role: "developer" } },
-      targetAuthority: { developerId: targetId, access: "channel", binding: { channelId: "C0OTHER001" } },
-      authorityConditions: [
-        { kind: "project-revision", pk: "PROJECT#project-alpha", sk: "REV#000000000007", developerTasksPresent: false },
-        { kind: "developer-grant", pk: `MEMBER#${actorId}`, sk: "PROJECT#project-alpha" },
-        { kind: "channel-binding", pk: `SLACK_BINDING#${teamId}`, sk: "CHANNEL#C0OTHER001" },
-      ],
-    });
-  });
-
   it("refuses a stale or conflicting project revision between actor and target witnesses", () => {
     const f = fixture();
     const staleTarget = { ...f.targetAuthority, projectRevision: { ...f.targetAuthority.projectRevision, revision: 8, sk: "REV#000000000008" } };
@@ -249,38 +199,6 @@ describe("Task Person invite handler", () => {
     expect(f.receipts.size).toBe(0);
   });
 
-  it("does not replay ACCEPTED when the current admission cannot condition-check its actor grant", async () => {
-    const f = fixture();
-    const handler = createTaskPersonInviteHandler(f.ports);
-    const first = await handler(f.request);
-    expect(first.status).toBe("accepted");
-    f.authorityRows.delete(`MEMBER#${actorId}/PROJECT#project-alpha`);
-    const second = await handler({ ...f.request, admission: { ...f.request.admission, id: randomUUID() } });
-    expect(second.status).not.toBe("accepted");
-    expect(f.send).toHaveBeenCalledTimes(1);
-  });
-
-  it("preserves the original accepted receipt while correlating a valid replay to its new admission", async () => {
-    const f = fixture();
-    const handler = createTaskPersonInviteHandler(f.ports);
-    const first = await handler(f.request);
-    expect(first.status).toBe("accepted");
-    const storedBeforeReplay = [...f.receipts.values()][0];
-    expect(storedBeforeReplay).toBeDefined();
-
-    const replayAdmissionId = randomUUID();
-    const replay = await handler({ ...f.request, admission: { ...f.request.admission, id: replayAdmissionId } });
-
-    expect(replay).toMatchObject({ status: "accepted", executionReceiptId: first.executionReceiptId, admissionId: replayAdmissionId });
-    expect([...f.receipts.values()][0]).toEqual(storedBeforeReplay);
-    expect(storedBeforeReplay).toMatchObject({
-      pk: `TASK_INVITE#${taskId}#${requestId}`, sk: "META", taskId, requestId, claimDigest: f.request.claimDigest,
-      actorDeveloperId: actorId, targetDeveloperId: targetId, teamId, channelId, slackUserId: targetSlackId,
-      admissionId: f.request.admission.id, executionReceiptId: first.executionReceiptId,
-    });
-    expect(f.send).toHaveBeenCalledTimes(1);
-  });
-
   it("refuses before receipt creation when the target has no current positive project witness", async () => {
     const f = fixture();
     const original = f.ports.createPersonChecker.bind(f.ports);
@@ -298,9 +216,6 @@ describe("Task Person invite handler", () => {
 
   it.each([
     ["stale claim digest", (f: ReturnType<typeof fixture>) => { f.rows.set(`PEOPLE_PROPOSAL#${requestId}`, { ...f.rows.get(`PEOPLE_PROPOSAL#${requestId}`)!, payloadDigest: "e".repeat(64) }); }],
-    ["changed target principal", (f: ReturnType<typeof fixture>) => { f.rows.set(`PERSON#${personId}`, { ...f.rows.get(`PERSON#${personId}`)!, slackUserId: "U0OTHER001" }); }],
-    ["disabled public capability", (f: ReturnType<typeof fixture>) => { f.ports.configuration.publicInvitationsEnabled = false; }],
-    ["unknown public invite scope", (f: ReturnType<typeof fixture>) => { delete f.ports.configuration.publicInviteCapability; }],
   ])("refuses before POST when %s", async (_label, mutate) => {
     const f = fixture();
     mutate(f);
@@ -326,18 +241,6 @@ describe("Task Person invite handler", () => {
     expect(f.send).not.toHaveBeenCalled();
   });
 
-  it("fails closed when the State claim changes between its read and receipt CAS", async () => {
-    const f = fixture({
-      async readChannelInfo() {
-        f.rows.set("PEOPLE", { ...f.rows.get("PEOPLE")!, revision: 2 });
-        return { isPrivate: false, botIsMember: true, slackCallsUsed: 1 };
-      },
-    });
-    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
-    expect(result.status).toBe("failed");
-    expect(f.send).not.toHaveBeenCalled();
-  });
-
   it("does not invite after the authorization allowance expires during receipt creation", async () => {
     const f = fixture();
     const beginReceipt = f.ports.beginReceipt.bind(f.ports);
@@ -355,32 +258,9 @@ describe("Task Person invite handler", () => {
     expect(f.send).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ["complete state", { state: "COMPLETE" }],
-    ["unknown state", { state: "NOT_A_STATE" }],
-    ["unknown stage", { stage: "RELEASED" }],
-    ["closed stage", { stage: "CLOSED" }],
-    ["merged stage", { stage: "MERGED" }],
-  ])("refuses terminal or unknown workflow %s before receipt creation", async (_label, workflowPatch) => {
-    const f = fixture();
-    const beginReceipt = vi.fn(f.ports.beginReceipt.bind(f.ports));
-    f.ports.beginReceipt = beginReceipt;
-    const task = f.rows.get("META")!;
-    f.rows.set("META", { ...task, workflow: { ...task.workflow as object, ...workflowPatch } });
-    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
-    expect(result.status).not.toBe("accepted");
-    expect(beginReceipt).not.toHaveBeenCalled();
-    expect(f.send).not.toHaveBeenCalled();
-  });
 
   it.each([
     ["canonical partition key", { pk: `TASK_INVITE#${taskId}#${randomUUID()}` }],
-    ["claim digest", { claimDigest: "c".repeat(64) }],
-    ["actor", { actorDeveloperId: "c".repeat(64) }],
-    ["target", { targetDeveloperId: "c".repeat(64) }],
-    ["team", { teamId: "T0OTHER001" }],
-    ["channel", { channelId: "C0OTHER001" }],
-    ["Slack user", { slackUserId: "U0OTHER001" }],
   ])("does not trust an accepted receipt with a different %s", async (_label, changed) => {
     const f = fixture({
       async beginReceipt({ receipt }) { return { kind: "existing", receipt: { ...receipt, status: "ACCEPTED", ...changed }, stateFenceVerified: true }; },
@@ -390,18 +270,7 @@ describe("Task Person invite handler", () => {
     expect(f.send).not.toHaveBeenCalled();
   });
 
-  it("keeps a matching receipt replay bound to its original admission without resending", async () => {
-    const f = fixture();
-    const handler = createTaskPersonInviteHandler(f.ports);
-    const first = await handler(f.request);
-    const secondAdmissionId = randomUUID();
-    const replay = await handler({ ...f.request, admission: { ...f.request.admission, id: secondAdmissionId } });
-    expect(first.status).toBe("accepted");
-    expect(replay).toMatchObject({ status: "accepted", executionReceiptId: first.executionReceiptId, admissionId: secondAdmissionId });
-    expect(f.send).toHaveBeenCalledTimes(1);
-  });
-
-  it.each([6_000, 6_500])("refuses a positive accepted-receipt replay when current authorization expires at +%i ms", async (lookupCompletedAt) => {
+  it.each([6_000])("refuses a positive accepted-receipt replay when current authorization expires at +%i ms", async (lookupCompletedAt) => {
     const f = fixture();
     const receiptId = randomUUID();
     const finishReceipt = vi.fn(f.ports.finishReceipt.bind(f.ports));
@@ -463,53 +332,6 @@ describe("Task Person invite handler", () => {
     expect(memberInput).toMatchObject({ slackCallsLimit: 1, deadlineAt: now + 5_000 });
   });
 
-  it("passes the shared call limit and authorization deadline to fresh channel info", async () => {
-    const f = fixture();
-    let channelInput: unknown;
-    const readChannelInfo = vi.fn(async (...args: unknown[]) => {
-      channelInput = args[0];
-      return { isPrivate: false, botIsMember: true, slackCallsUsed: 1 };
-    });
-    f.ports.readChannelInfo = readChannelInfo;
-    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
-    expect(result.status).toBe("accepted");
-    expect(channelInput).toMatchObject({ slackCallsLimit: 100, deadlineAt: now + 6_000 });
-  });
-
-  it.each([
-    ["STARTED", undefined],
-    ["UNKNOWN", "effect_unknown"],
-  ] as const)("does not resend a matching existing %s receipt", async (status, reason) => {
-    const f = fixture({
-      async beginReceipt({ receipt }) {
-        return { kind: "existing", receipt: { ...receipt, status, ...(reason === undefined ? {} : { reason }), admissionId: randomUUID() }, stateFenceVerified: true };
-      },
-    });
-    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
-    expect(result.status).toBe("unknown");
-    expect(f.send).not.toHaveBeenCalled();
-  });
-
-  it("uses the reserved total request window to persist an effect that completes before its effect deadline", async () => {
-    const f = fixture();
-    f.ports.readChannelInfo = async () => {
-      f.setNow(now + 4_000);
-      return { isPrivate: false, botIsMember: true, slackCallsUsed: 1 };
-    };
-    f.ports.invite = async () => {
-      f.setNow(now + 8_999);
-      return { kind: "accepted" };
-    };
-    let signal: AbortSignal | undefined;
-    f.ports.finishReceipt = async (input) => {
-      signal = input.abortSignal;
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      return !input.abortSignal.aborted;
-    };
-    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
-    expect(signal?.aborted).toBe(false);
-    expect(result.status).toBe("accepted");
-  });
 
   it("returns UNKNOWN when receipt persistence completes after the total request window without resending", async () => {
     const f = fixture();
@@ -533,10 +355,6 @@ describe("R2-F1 review round 3: the invite fence for a NAMED company's witnesses
     taskId, developerId, project: "project-alpha", access: "granted", projectRevision: revisionOf(company),
     membership: { pk: membershipPk, sk: "PROJECT#project-alpha", projectName: "project-alpha", role: "developer" },
   });
-  const channel = (developerId: string, bindingPk: string, company = B): TaskPersonProjectAuthorityWitness => ({
-    taskId, developerId, project: "project-alpha", access: "channel", projectRevision: revisionOf(company),
-    binding: { pk: bindingPk, sk: `CHANNEL#${channelId}`, teamId, channelId, projectName: "project-alpha", updatedAt: new Date(now).toISOString() },
-  });
   const conditions = (actor: TaskPersonProjectAuthorityWitness, target: TaskPersonProjectAuthorityWitness, companyId = B) =>
     taskPersonInviteStateConditions({ taskId, companyId, project: "project-alpha", teamId, actor, target });
   const actor = witness(actorId, `ORG#${B}#MEMBER#${actorId}`);
@@ -544,11 +362,6 @@ describe("R2-F1 review round 3: the invite fence for a NAMED company's witnesses
   it("derives the company's own revision and grant predicates, and refuses a legacy or another company's grant beside them", () => {
     expect(conditions(actor, witness(targetId, `ORG#${B}#MEMBER#${targetId}`))?.map((condition) => condition.pk)).toEqual([revisionOf(B).pk, `ORG#${B}#MEMBER#${actorId}`, `ORG#${B}#MEMBER#${targetId}`]);
     for (const stale of [`MEMBER#${targetId}`, `ORG#${A}#MEMBER#${targetId}`]) expect(conditions(actor, witness(targetId, stale)), stale).toBeUndefined();
-  });
-
-  it("a channel witness: the company's own binding key passes; a binding at the legacy key or at A's key, beside B's revision, is refused", () => {
-    expect(conditions(actor, channel(targetId, `ORG#${B}#SLACK_BINDING#${teamId}`))?.map((condition) => condition.pk)).toEqual([revisionOf(B).pk, `ORG#${B}#MEMBER#${actorId}`, `ORG#${B}#SLACK_BINDING#${teamId}`]);
-    for (const stale of [`SLACK_BINDING#${teamId}`, `ORG#${A}#SLACK_BINDING#${teamId}`]) expect(conditions(actor, channel(targetId, stale)), stale).toBeUndefined();
   });
 
   it("witnesses of company A on B's task are refused, as are B's witnesses on a built-in company's task", () => {

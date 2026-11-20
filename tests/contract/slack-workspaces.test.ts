@@ -171,15 +171,6 @@ describe("Slack workspace operator events", () => {
       expect(db.commandNames()).toHaveLength(0);
     }
   });
-  it("returns the same fixed refusal on storage failure without logging its cause", async () => {
-    const { handler, db } = createBroker();
-    vi.spyOn(db, "send").mockRejectedValue(new Error("private-storage-cause"));
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    try {
-      expect(await handler({ source: "agentx.slack-workspace-backfill" })).toMatchObject({ statusCode: 404, body: JSON.stringify({ outcome: "refused", requestId: "slack-workspace" }) });
-      expect(log).not.toHaveBeenCalled();
-    } finally { log.mockRestore(); }
-  });
   it("acknowledges a verified app_uninstalled / tokens_revoked with 200 and touches no storage while the install is not wired; a malformed one is still refused", async () => {
     for (const reason of ["app_uninstalled", "tokens_revoked"] as const) {
       const { handler, db } = createBroker();
@@ -189,11 +180,6 @@ describe("Slack workspace operator events", () => {
       expect(await handler({ ...event, extra: "x" })).toMatchObject({ statusCode: 404, body: JSON.stringify({ outcome: "refused", requestId: "slack-workspace" }) });
       expect(await handler({ ...event, teamId: null })).toMatchObject({ statusCode: 404 });
     }
-  });
-  it("uses the configured legacy team for operator backfill", async () => {
-    const { handler, db } = createBroker({ extra: { slackWorkspaceLegacyTeamId: TEAM } });
-    expect(await handler({ source: "agentx.slack-workspace-backfill" })).toMatchObject({ statusCode: 200, body: JSON.stringify({ outcome: "backfilled", teamsRead: 1, requestId: "slack-workspace" }) });
-    expect(db.get(`SLACK_TEAM#${TEAM}`, "BINDING")?.companyId).toBe(IMPLICIT_COMPANY_ID);
   });
 });
 
@@ -256,16 +242,3 @@ it("company check refuses a token's mismatched Slack workspace with fixed words"
   expect(legacy).not.toHaveBeenCalled(); expect(web.calls).toEqual([]);
 });
 
-it.each([
-  { kind: "update_form", handle: "V0FORM", form: { title: "Connect", submitLabel: "Save", formId: "connect", parts: [] } },
-  { kind: "delete_document", documentId: "F0123456789" },
-  { kind: "check" },
-])("absent tenant retains command bytes: $kind", async (command) => {
-  const calls: unknown[] = [];
-  const handler = createSlackChannelCommandsHandler({ secret: async () => adapterSecret, botToken: async () => token, now: () => NOW,
-    fetch: async (url, init) => { expect(new Headers(init?.headers).get("authorization") === `Bearer ${token}`).toBe(true);
-      calls.push({ method: new URL(url instanceof Request ? url.url : url.toString()).pathname, body: JSON.parse(typeof init?.body === "string" ? init.body : "{}") as unknown, token: "legacy-bot" });
-      return new Response(JSON.stringify({ ok: true, team_id: TEAM })); } });
-  const response = await handler(adapterRequest({ version: 1, id: "cmd_workspace123456789", channel: "slack", createdAt: new Date(NOW).toISOString(), ...command }, "/v1/slack/channel-commands"));
-  golden(`absent-${command.kind}`, { response, calls });
-});

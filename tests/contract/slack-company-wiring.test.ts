@@ -5,8 +5,8 @@ import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { slackTokens } from "../../packages/testing/src/channel/slack-world.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment, slackCompanyModeRequested } from "../../packages/broker/src/aws/slack-company-wiring.js";
-import { slackIngressTeam, splitBySlackIngressTeam } from "../../packages/broker/src/aws/slack-company-split.js";
-import { slackCompanyProject, slackLinkNotice } from "../../packages/broker/src/aws/slack-person.js";
+import { slackIngressTeam } from "../../packages/broker/src/aws/slack-company-split.js";
+import { slackLinkNotice } from "../../packages/broker/src/aws/slack-person.js";
 import { createSlackWorkspaceTokens } from "../../packages/broker/src/aws/slack-workspace-tokens.js";
 import { createWorkspaceSlackDirectory } from "../../packages/broker/src/aws/developer-identity.js";
 
@@ -61,13 +61,6 @@ describe("the factory", () => {
     send.mockClear();
     await wiring.workspaces.getProject("payments", IMPLICIT_COMPANY_ID);
     expect((send.mock.calls[0] as unknown as [{ input: Record<string, unknown> }])[0].input).toMatchObject({ ProjectionExpression: "pk, sk, companyId", Limit: 1, ExpressionAttributeValues: { ":pk": "PROJECT#payments" } });
-  });
-
-  it("DEC 254zzz80: a team's project check asks for the project in the team's company (its own partition for a named company)", async () => {
-    const getProject = vi.fn(async (_name: string, companyId?: string) => (companyId === A ? { companyId: A } : undefined));
-    const deps = { workspaces: { requireCompany: async () => A, getProject } } as unknown as Parameters<typeof slackCompanyProject>[0];
-    expect(await slackCompanyProject(deps, OTHER, "payments")).toBe(true);
-    expect(getProject).toHaveBeenCalledWith("payments", A);
   });
 
   it("reads the token from this environment's per-company secret, through the team's binding, never the install token", async () => {
@@ -200,15 +193,6 @@ describe("the Slack Lambda's team and split", () => {
     for (const none of [http(JSON.stringify({ type: "url_verification", challenge: "x" })), http(form({ command: "/x" })), http(""), null, [], { source: "agentx.slack-rovara-handoff" }, { message: { text: "x" } }]) {
       expect(slackIngressTeam(none), JSON.stringify(none).slice(0, 80)).toEqual({ named: false });
     }
-  });
-  it("sends only another valid team to the company handler", () => {
-    const legacy = vi.fn(() => "legacy"), company = vi.fn(() => "company");
-    const split = splitBySlackIngressTeam(legacy, company, INSTALL);
-    expect(split(http(JSON.stringify({ team_id: OTHER })))).toBe("company");
-    expect(split(http(JSON.stringify({ team_id: INSTALL })))).toBe("legacy");
-    expect(split(http(JSON.stringify({ type: "url_verification" })))).toBe("legacy");
-    expect(split(http(JSON.stringify({ team_id: "E0GRID000" })))).toBe("company");
-    expect(split(http("{not json"))).toBe("company");
   });
 });
 

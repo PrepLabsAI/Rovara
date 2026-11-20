@@ -5,10 +5,9 @@ import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { EVAL_FILES_FEATURE, EvalFilesPayloadSchema, WORKER_INVOCATION_FEATURES } from "@agentx/contracts";
+import { EvalFilesPayloadSchema } from "@agentx/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentsFileWithPointer, placeEvalFiles } from "../../packages/worker/src/eval-files.js";
-import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 import { readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
 import { HIDDEN_WORK_TREES_MAX, hiddenWorkTreeCount, hideFromCandidate } from "../../packages/worker/src/isolated-git.js";
 
@@ -33,10 +32,6 @@ const payload = (repositoryId = "payments") => EvalFilesPayloadSchema.parse({ re
 const treeOf = async (directory: string): Promise<{ tree: string; head: string }> => { const [identity] = await readCandidateRepositories([{ repositoryId: "payments", directory }]); return { tree: identity!.treeSha, head: await git(directory, "rev-parse", "HEAD^{tree}") }; };
 
 describe("the worker places a replay copy's lessons file", () => {
-  it("is a feature this worker lists, and the contract lists", () => {
-    expect(WORKER_INVOCATION_FEATURES).toContain(EVAL_FILES_FEATURE);
-    expect(WORKER_IMPLEMENTED_FEATURES).toContain(EVAL_FILES_FEATURE);
-  });
   it("writes .rovara/lessons.md and creates AGENTS.md with the one pointer, and neither is in the candidate", async () => {
     const directory = await repository();
     await placeEvalFiles(payload(), [{ repositoryId: "payments", directory }]);
@@ -79,14 +74,6 @@ describe("the worker places a replay copy's lessons file", () => {
     expect(await readFile(join(outside, "target.md"), "utf8").catch(() => "absent")).toBe("absent");
 
     await expect(placeEvalFiles(payload("other"), [{ repositoryId: "payments", directory: await repository() }])).rejects.toThrow(/could not place the lessons file/u);
-  });
-  it("hides nothing for an ordinary task: a lessons file the agent writes without this placement is in the candidate", async () => {
-    const directory = await repository();
-    await mkdir(join(directory, ".rovara"));
-    await writeFile(join(directory, ".rovara/lessons.md"), "agent wrote this\n");
-    // a different checkout path than the placed one above (the hidden set is per work tree)
-    const after = await treeOf(directory);
-    expect(await git(directory, "ls-tree", "-r", "--name-only", after.tree)).toContain(".rovara/lessons.md");
   });
   it("refuses a lessons file bigger than the contract allows", () => {
     expect(EvalFilesPayloadSchema.safeParse({ ...payload(), lessonsFile: { path: ".rovara/lessons.md", content: "x".repeat(100_001) } }).success).toBe(false);

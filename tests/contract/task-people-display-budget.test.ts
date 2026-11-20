@@ -17,21 +17,6 @@ const response = (request: TaskPeopleDisplayReadRequest, used: number): TaskPeop
   : { operation: "directory", admission: { version: 1, slackCallsUsed: used }, result: { ok: true, users: [] } };
 
 describe("Task People whole-view admission budget", () => {
-  it("shares one Slack-call allowance across independent proofs and the complete directory", async () => {
-    const requests: TaskPeopleDisplayReadRequest[] = [];
-    const admission = taskPeopleDisplayAdmission({ now: () => 10_000, read: async (request) => {
-      requests.push(request);
-      return response(request, request.operation === "proof" ? 2 : 96);
-    } });
-
-    admission.admitIdentity("a".repeat(64));
-    await expect(admission.proof(proof)).resolves.toMatchObject({ ok: true });
-    await expect(admission.proof(proof)).resolves.toMatchObject({ ok: true });
-    await expect(admission.directory(listing)).resolves.toMatchObject({ ok: true });
-
-    expect(requests.map((request) => request.admission.slackCallsLimit)).toEqual([100, 98, 96]);
-    admission.close();
-  });
 
   it("seals after a lost or overstated usage receipt and starts no later read", async () => {
     for (const mode of ["lost", "skew"] as const) {

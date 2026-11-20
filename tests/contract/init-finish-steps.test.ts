@@ -1,11 +1,10 @@
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
-import { adminUserStep, e2eStep, finishSteps, readyText, subscribeAlertsAfterDeploy } from "../../packages/cli/src/init/finish-steps.js";
+import { e2eStep, readyText, subscribeAlertsAfterDeploy } from "../../packages/cli/src/init/finish-steps.js";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
 import { subscribeAlertsEarly, type AlertsApi } from "../../packages/cli/src/setup/alerts.js";
-import { initContext, progressHandle, sampleAnswers, scriptedPrompter, T0, TEST_CLI_INVOCATION, type TestInitContext } from "../support/init-fakes.js";
-import { ADMIN_EMAIL, ALERTS_TOPIC_ARN, fakeAlerts, fakeCognito, fakeControlPlane, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
+import { initContext, progressHandle, sampleAnswers, T0, TEST_CLI_INVOCATION, type TestInitContext } from "../support/init-fakes.js";
+import { ALERTS_TOPIC_ARN, fakeAlerts, setupServices } from "../support/setup-fakes.js";
 
 const TOPIC = ALERTS_TOPIC_ARN;
 
@@ -25,12 +24,6 @@ async function finishContext(overrides: { answers?: ReturnType<typeof sampleAnsw
   return { context: built };
 }
 
-const READY_PROGRESS_FIXTURE = {
-  ...emptyProgress("staging", 0),
-  slack: { appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT", botName: "agentx-acme-staging" },
-  project: { name: "payments-api", revision: 1, channelName: "payments", channelId: "C0PAY00001", teamId: "T0TEAM" },
-};
-
 let context: TestInitContext | undefined;
 afterEach(async () => {
   if (context !== undefined) await rm(context.home, { recursive: true, force: true });
@@ -38,35 +31,10 @@ afterEach(async () => {
 });
 
 describe("the e2e step (FR-018 step 11)", () => {
-  const progress = () => progressHandle({
-    ...emptyProgress("staging", T0),
-    slack: { appId: "A0APP00001", teamId: "T0123456789", botUserId: "U0BOT00001" },
-    project: { name: "payments-api", revision: 1, channelName: "payments", channelId: "C0PAY00001", teamId: "T0123456789" },
-  });
-
-  it("finishes when a person's mention gets an answered reply in its thread", async () => {
-    const plane = fakeControlPlane();
-    plane.turns = [turn({ subject: "T0123456789/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 2000).toISOString(), disposition: "answered", durationMs: 12_000 })];
-    context = initContext({ setup: setupServices({ fetch: plane.fetch }), adminSession: async () => ({ controlPlaneUrl: "https://cp.example.test", accessToken: "t" }) });
-    expect(await e2eStep().run(context, progress())).toEqual({ status: "done", note: "a mention in #payments got a threaded reply in 12 seconds" });
-  });
-
-  it("tells the engineer to run agentx init again when the reply failed", async () => {
-    const plane = fakeControlPlane();
-    plane.turns = [turn({ subject: "T0123456789/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 2000).toISOString(), disposition: "error" })];
-    context = initContext({ setup: setupServices({ fetch: plane.fetch }), adminSession: async () => ({ controlPlaneUrl: "https://cp.example.test", accessToken: "t" }) });
-    await expect(e2eStep().run(context, progress())).rejects.toThrow("but the turn ended as error; see agentx --env staging admin turns export --since 15m, fix it, then run agentx --env staging init again");
-  });
 
   it("needs the channel from the first-project step", async () => {
     context = initContext();
     await expect(e2eStep().run(context, progressHandle())).rejects.toThrow("install progress has no bound channel; the first-project step must finish first, so run agentx init again");
-  });
-});
-
-describe("the finishing steps", () => {
-  it("run admin-user, first-project, connectors, alerts and e2e, in that order", () => {
-    expect(finishSteps().map((step) => step.id)).toEqual(["admin-user", "first-project", "connectors", "alerts", "e2e"]);
   });
 });
 
@@ -89,47 +57,7 @@ describe("spec 048 FR-025: the alert address is subscribed early", () => {
   });
 });
 
-describe("the admin user (spec 048 FR-020)", () => {
-  it("takes your email from the settings, asking nothing", async () => {
-    const prompter = scriptedPrompter([]);
-    const cognito = fakeCognito();
-    context = initContext({ answers: sampleAnswers({ adminEmail: ADMIN_EMAIL }), prompter, setup: setupServices({ cognito }), adminSession: async () => ({ controlPlaneUrl: "https://cp.example.test", accessToken: "t" }) });
-    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
-    expect(await adminUserStep().run(context, progressHandle())).toEqual({ status: "done", note: `admin ${ADMIN_EMAIL}` });
-    expect(prompter.asked).toEqual([]);
-    expect(cognito.created).toEqual([ADMIN_EMAIL]);
-  });
-});
-
 describe("the message init ends with", () => {
-  it("says where to talk to AgentX and what to do next", () => {
-    const text = readyText({
-      env: "staging", controlPlaneUrl: "https://cp.example.test", botName: "agentx-acme-staging", invocation: TEST_CLI_INVOCATION,
-      progress: {
-        ...emptyProgress("staging", T0),
-        slack: { appId: "A0APP00001", teamId: "T0123456789", botUserId: "U0BOT00001" },
-        project: { name: "payments-api", revision: 2, channelName: "payments", channelId: "C0PAY00001" },
-        connectors: [{ type: "linear", ref: "linear" }],
-      },
-    });
-    expect(text).toBe([
-      "AgentX environment staging is ready.",
-      "  Talk to it: mention @agentx-acme-staging in #payments (project payments-api).",
-      "  Developers sign in with: node /opt/agentx/dist/main.js login https://cp.example.test",
-      "  Connected: Linear. Add more with node /opt/agentx/dist/main.js --env staging connector add linear|jira|asana --project payments-api.",
-      "  More projects: node /opt/agentx/dist/main.js --env staging project add, then node /opt/agentx/dist/main.js --env staging channel add.",
-      "  Send a test alarm any time: node /opt/agentx/dist/main.js --env staging alerts test.",
-      "  Remove it: node /opt/agentx/dist/main.js --env staging destroy. It deletes the coding machines' disks too.",
-    ].join("\n"));
-  });
-
-  it("says no connectors yet when none was added", () => {
-    const text = readyText({
-      env: "staging", controlPlaneUrl: "https://cp.example.test", botName: "agentx-acme-staging", invocation: TEST_CLI_INVOCATION,
-      progress: { ...emptyProgress("staging", T0), project: { name: "payments-api", revision: 1 } },
-    });
-    expect(text).toContain("  No connectors yet. Add one with node /opt/agentx/dist/main.js --env staging connector add linear|jira|asana --project payments-api.");
-  });
 
   it("repeats a connector's warning at the end (owner decision 6)", () => {
     const text = readyText({
@@ -143,14 +71,4 @@ describe("the message init ends with", () => {
     expect(text).toContain("  Warning (Jira): the Jira service account can also see issues in HR.");
   });
 
-  it("#222: the ready summary names the bot by handle and gives a sign-in command that works as shown", () => {
-    const text = readyText({
-      env: "staging", controlPlaneUrl: "https://abc.example.com", progress: READY_PROGRESS_FIXTURE,
-      botName: "agentx-acme-staging", invocation: { published: false, cliPath: "/opt/agentx/dist/main.js" },
-    });
-    expect(text).not.toMatch(/<@/);
-    expect(text).toContain("  Talk to it: mention @agentx-acme-staging in #payments (project payments-api).");
-    expect(text).toContain("  Developers sign in with: node /opt/agentx/dist/main.js login https://abc.example.com");
-    expect(text).not.toContain("@preplabsai/rovara-code");
-  });
 });

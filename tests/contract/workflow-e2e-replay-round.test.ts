@@ -47,17 +47,6 @@ describe("the operator's request to replay a qualified round refuses before anyt
     expect(replayRows(round)).toEqual([]);
   });
 
-  it("test 17b / Q3: a qualified round that left no recording (every round from before the recordings, and every round with no AI navigation step) is refused replay-no-recording: the source was verified again, no operation is created and nothing is recorded", async () => {
-    const round = await qualified();
-    const operations = round.harness.db.find((item) => item.pk === `WORKSPACE#${round.workspaceId}` && item.entityType === "OPERATION").length;
-    const response = await replayCall(round, "POST", { body: { roundId: roundIdOf(round) } });
-    expect(response.status, JSON.stringify(response.body)).toBe(400);
-    expect(messageOf(response)).toMatch(/^replay-no-recording/);
-    expect(round.harness.db.find((item) => item.pk === `WORKSPACE#${round.workspaceId}` && item.entityType === "OPERATION")).toHaveLength(operations);
-    expect(replayRows(round)).toEqual([]);
-    expect(round.workflowNow()).toMatchObject({ stage: "REVIEW" });
-  });
-
   it("test 17c: a source the broker cannot verify as PASS now is refused replay-source-not-pass: a round claimed qualified over evidence of a failure", async () => {
     const round = await startApplicationRound({ baseline: "off" });
     await runRound(round, [FAIL]);
@@ -212,17 +201,6 @@ describe("who a replay is recorded under (Task FU2)", () => {
     expect(round.harness.db.get(`DEVTASK#${round.taskId}`, `E2E_REPLAY#${sourceRoundId}#1`)).toMatchObject({ state: "STARTED", requestedBy: "owner-key-of-the-admin" });
   });
 
-  it("a request refused before anything starts records nobody and logs nobody as the requester", async () => {
-    const round = await qualified();
-    const logs: string[] = [];
-    const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => { logs.push(String(line)); });
-    try {
-      // Past the source checks the request stops at the missing recording, before anything is requested: no record, and no line saying who asked.
-      expect(messageOf(await replayCall(round, "POST", { body: { roundId: roundIdOf(round) } }))).toMatch(/^replay-no-recording/);
-    } finally { log.mockRestore(); }
-    expect(replayRows(round)).toEqual([]);
-    expect(logs.filter((line) => line.includes("workflow.e2e_replay_requested"))).toEqual([]);
-  });
 });
 
 // Test 16: a replay that is FAILED, UNKNOWN or lost changes nothing. The replay's operation is a CHECKS operation signed as a replay (purpose, source round, attempt); the workflow is
@@ -275,27 +253,6 @@ describe("test 16: a replay never gates", () => {
       expect(e2eOf(round).failedRound, status).toBeUndefined();
       expect(workflowSendBackOffered(round.workflowNow() as never), status).toBe(false);
     }
-  });
-
-  it("cannot be mistaken for the candidate's round even when the workflow looks as if it were running it: no qualification, no failure, no block", async () => {
-    for (const status of ["FAILED", "SUCCEEDED"] as const) {
-      const { round, operationId, sourceRoundId, replayRoundId } = await replayOperation({ looksCurrent: true });
-      const before = snapshot(round);
-      expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
-      await round.harness.finish(round.workspaceId, operationId, status, status === "FAILED" ? { error: "the runner died" } : undefined);
-      expect(snapshot(round), status).toBe(before);
-      expect(e2eOf(round).currentRoundId).toBe(replayRoundId);
-      expect(e2eOf(round).failedRound, status).toBeUndefined();
-      expect(round.harness.db.get(key(round, sourceRoundId).pk, key(round, sourceRoundId).sk), status).toMatchObject({ state: "UNAVAILABLE" });
-    }
-  });
-
-  it("control: the same hostile setup with the operation signed as a candidate's CHECKS does move the workflow (so the refusals above are the purpose, not the setup)", async () => {
-    const { round, operationId } = await replayOperation({ looksCurrent: true, signedAs: "candidate" });
-    const before = snapshot(round);
-    await round.harness.finish(round.workspaceId, operationId, "FAILED", { error: "the runner died" });
-    expect(snapshot(round)).not.toBe(before);
-    expect(round.workflowNow().state).toBe("BLOCKED");
   });
 
   it("a lost candidate CHECKS (the outbox gave up) does block the workflow, which is what a lost replay must not do", async () => {

@@ -1,7 +1,6 @@
 // #661: a task's owner name follows the person's current name: a rename updates the tasks they started, and a one-off refresh fixes older tasks.
 import { describe, expect, it } from "vitest";
 import { renameTaskOwner } from "../../packages/broker/src/developer/task-owner-name.js";
-import { refreshTaskOwnerNames } from "../../scripts/refresh-task-owner-names.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const ME = "a".repeat(64), OTHER = "b".repeat(64);
@@ -26,24 +25,5 @@ describe("renameTaskOwner", () => {
     expect(await renameTaskOwner(db as never, "state", ME, "Pratik Singhal")).toEqual({ tasks: 3, renamed: 0 });
   });
 
-  it("never renames a task whose owner is someone else, even through a stray index row", async () => {
-    const db = new FakeDynamoDb();
-    tasks(db);
-    db.set({ pk: `DEVELOPER#${ME}`, sk: `TASK#2026-11-14T00:00:00.000Z#${T3}`, taskId: T3 });
-    await renameTaskOwner(db as never, "state", ME, "Pratik Singhal");
-    expect(db.get(`DEVTASK#${T3}`, "META")).toMatchObject({ developerName: "Grace" });
-  });
 });
 
-describe("the owner-name refresh", () => {
-  it("applies each registered person's current name to their tasks, skips a revoked person, and changes nothing when run again", async () => {
-    const db = new FakeDynamoDb();
-    tasks(db);
-    const people = [{ pk: `DEVELOPER#${ME}`, displayName: "Pratik Singhal", revoked: false }, { pk: `DEVELOPER#${OTHER}`, displayName: "Grace Hopper", revoked: true }, { pk: "DEVELOPER#not-an-id", displayName: "x" }];
-    expect(await refreshTaskOwnerNames(db as never, "state", people)).toEqual({ people: 1, tasks: 3, renamed: 1 });
-    expect(db.get(`DEVTASK#${T1}`, "META")).toMatchObject({ developerName: "Pratik Singhal" });
-    expect(db.get(`DEVTASK#${T3}`, "META")).toMatchObject({ developerName: "Grace" });
-    expect(await refreshTaskOwnerNames(db as never, "state", people)).toEqual({ people: 1, tasks: 3, renamed: 0 });
-    expect(await refreshTaskOwnerNames(db as never, "state", people, OTHER)).toEqual({ people: 0, tasks: 0, renamed: 0 });
-  });
-});

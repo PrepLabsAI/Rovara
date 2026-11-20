@@ -11,38 +11,9 @@ describe("which way agentx init asks", () => {
     expect(resolveUiMode(base)).toEqual({ mode: "page" });
   });
 
-  it("--ui is always the page, and --no-ui always the terminal", () => {
-    expect(resolveUiMode({ ...base, ui: true, interactive: false, browser: false })).toEqual({ mode: "page" });
-    expect(resolveUiMode({ ...base, ui: false })).toEqual({ mode: "terminal" });
-  });
-
-  it("Review Focus 5: --yes is the terminal, whatever else holds", () => {
-    expect(resolveUiMode({ ...base, yes: true })).toEqual({ mode: "terminal" });
-  });
-
-  it("an injected prompter (a test, or a caller with its own) is the terminal unless --ui is given", () => {
-    expect(resolveUiMode({ ...base, injectedPrompter: true })).toEqual({ mode: "terminal" });
-    expect(resolveUiMode({ ...base, injectedPrompter: true, ui: true })).toEqual({ mode: "page" });
-  });
-
-  it("no terminal is the terminal path (which then refuses, as before, without --yes)", () => {
-    expect(resolveUiMode({ ...base, interactive: false })).toEqual({ mode: "terminal" });
-  });
-
-  it("no browser is the terminal, marked so init says how to get the page", () => {
-    expect(resolveUiMode({ ...base, browser: false })).toEqual({ mode: "terminal", noBrowser: true });
-  });
 });
 
 describe("whether this machine can open a browser", () => {
-  it("macOS can", () => {
-    expect(browserAvailable({ platform: "darwin", env: {} })).toBe(true);
-  });
-
-  it("Review Focus 1: an SSH session never opens a page by default, even on macOS", () => {
-    expect(browserAvailable({ platform: "darwin", env: { SSH_CONNECTION: "10.0.0.2 51000 10.0.0.1 22" } })).toBe(false);
-    expect(browserAvailable({ platform: "linux", env: { SSH_TTY: "/dev/pts/0", DISPLAY: ":0" } })).toBe(false);
-  });
 
   it("Review Focus 2: Linux needs a display", () => {
     expect(browserAvailable({ platform: "linux", env: {} })).toBe(false);

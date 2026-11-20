@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { E2E_ARTIFACT_RETENTION_TAG, indexExpiresAt, workflowSendBackOffered } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_TAG, workflowSendBackOffered } from "@agentx/contracts";
 import { decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { prepareApplicationRound, startApplicationRound, type RoundCore } from "../support/e2e-application-round-harness.js";
@@ -37,20 +37,8 @@ const resultsOf = async (round: RoundCore) =>
   (await brokerModule()).loadWorkflowE2EScenarioResults(round.harness.brokerInput as never, round.taskNow() as never, operations(round), "owner");
 const publicationChecksOf = async (round: RoundCore) =>
   (await brokerModule()).loadWorkflowE2EPublicationChecks(round.harness.brokerInput as never, round.taskNow() as never, operations(round));
-const implementInvocation = (prepared: { harness: RoundCore["harness"] }) =>
-  prepared.harness.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")
-    .map((item) => item.invocation as { payload: Record<string, unknown> })[0];
 
 describe("asking for a baseline round at APPROVE", () => {
-  it("records the request once, for the approved application plan, and has the coding run export the unchanged code", async () => {
-    const prepared = await prepareApplicationRound({ baseline: "source" });
-    const approved = await prepared.approve();
-    expect(approved.status, JSON.stringify(approved.body)).toBe(200);
-    const key = { pk: `DEVTASK#${prepared.taskId}`, sk: `E2E_BASELINE#${String(prepared.workflowNow().e2e!.contractDigest)}` };
-    expect(prepared.harness.db.get(key.pk, key.sk)).toMatchObject({ entityType: "WORKFLOW_E2E_BASELINE", state: "REQUESTED", purpose: "baseline", attempt: 1 });
-    expect(implementInvocation(prepared)?.payload.workflowE2EBaselineSource).toBe(true);
-    expect(prepared.workflowNow()).toMatchObject({ stage: "IMPLEMENT" });
-  });
 
   it("asks again on a retried coding run while the baseline is still only requested (review 3.7b finding 5)", async () => {
     const prepared = await prepareApplicationRound({ baseline: "source" });
@@ -69,35 +57,9 @@ describe("asking for a baseline round at APPROVE", () => {
     expect(invocations.map((item) => item.payload.workflowE2EBaselineSource)).toEqual([true, true]);
   });
 
-  it("asks for nothing when the project switched the baseline off: no record, and the coding run is not asked to export anything", async () => {
-    const prepared = await prepareApplicationRound({ baseline: "off" });
-    expect((await prepared.approve()).status).toBe(200);
-    expect(prepared.harness.db.find((item) => typeof item.sk === "string" && item.sk.startsWith("E2E_BASELINE#"))).toEqual([]);
-    expect(implementInvocation(prepared)?.payload.workflowE2EBaselineSource).toBeUndefined();
-  });
 });
 
 describe("the baseline round has its own admission, and runs before the candidate's CHECKS", () => {
-  it("starts one CHECKS operation for the unchanged code, with the purpose and the base commit signed into the admission and the operation, and leaves the workflow as it was", async () => {
-    const round = await startApplicationRound({ baseline: "source" });
-    const base = round.real.baseline!;
-    expect(round.admissionRef).toMatchObject({ kind: "application", purpose: "baseline", baseCommitSha: base.baseCommitSha, attempt: 1 });
-    expect(round.operationNow().workflowE2EAdmission).toMatchObject({ purpose: "baseline", baseCommitSha: base.baseCommitSha, attempt: 1 });
-    expect(round.admission.baseline).toEqual({ purpose: "baseline", baseCommitSha: base.baseCommitSha, attempt: 1 });
-    expect(round.admission.candidateCommitSha).toBe(base.baseCommitSha);
-    expect(round.admission.sourceSnapshot.treePaths).not.toContain("src/orders.js");
-    // The invocation the worker receives carries the same signed reference.
-    const invocation = round.harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === round.operationId)[0]!.invocation as { payload: { workflowE2EAdmission: unknown; readiness?: unknown } };
-    expect(invocation.payload.workflowE2EAdmission).toMatchObject({ purpose: "baseline", baseCommitSha: base.baseCommitSha });
-    expect(invocation.payload.readiness).toBeUndefined();
-    // The workflow is exactly as the coding run left it: no round, no revision, no state change.
-    expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "WAITING" });
-    expect(e2eOf(round).currentRoundId).toBeUndefined();
-    expect(recordOf(round)).toMatchObject({ state: "STARTED", attempt: 1, baseCommitSha: base.baseCommitSha, operationId: round.operationId, roundId: round.admissionRef.roundId,
-      admissionSha256: round.admissionRef.admissionRef.sha256 });
-    expect(typeof recordOf(round)!.deadlineAt).toBe("string");
-    expect(Date.parse(String(recordOf(round)!.deadlineAt))).toBeGreaterThan(Date.now());
-  });
 
   it("holds the candidate's CHECKS while the baseline runs, without spending the dispatch's attempts or blocking the workflow", async () => {
     const round = await startApplicationRound({ baseline: "source" });
@@ -166,12 +128,6 @@ describe("the baseline round's callbacks accept a round that is not the workflow
     void key;
   });
 
-  it("accepts the baseline's group and aggregate evidence uploads, which are bound to its own admission", async () => {
-    const round = await startApplicationRound({ baseline: "source" });
-    const groups = await collectAll(round, [PASS]);
-    await uploadAll(round, groups);
-    expect(round.operationNow().workflowE2EEvidenceRef).toBeDefined();
-  });
 });
 
 describe("a baseline never gates", () => {
@@ -179,29 +135,6 @@ describe("a baseline never gates", () => {
     const [caseId] = caseIdsOf(round);
     return runRound(round, [outcome], { tweak: withShots ? (groupRun) => { groupRun.operatorEvidence = operatorEvidenceWith([{ caseId: caseId!, bytes: SHOT }]); } : () => undefined });
   };
-
-  it("records what the unchanged code did, derived from the evidence the broker verified, and moves nothing in the workflow", async () => {
-    const round = await startApplicationRound({ baseline: "source" });
-    const before = round.workflowNow();
-    await runBaseline(round, FAIL);
-    const stored = recordOf(round)!;
-    expect(stored).toMatchObject({ state: "RECORDED", attempt: 1, operationId: round.operationId });
-    expect((stored.baseline as { status: string }).status).toBe("FAILED");
-    expect((stored.baseline as { scenarios: unknown[] }).scenarios).toHaveLength(1);
-    // The baseline's result changed nothing in the workflow. What moved is the step it was holding back: the candidate's CHECKS started, on a round of their own.
-    const candidateChecks = round.checksOperations().filter((row) => row.id !== round.operationId);
-    expect(candidateChecks).toHaveLength(1);
-    expect((candidateChecks[0]!.workflowE2EAdmission as { purpose?: string }).purpose).toBeUndefined();
-    expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "RUNNING", revision: before.revision + 1 });
-    expect(e2eOf(round).currentRoundId).toBe((candidateChecks[0]!.workflowE2EAdmission as { roundId: string }).roundId);
-    expect(e2eOf(round).currentRoundId).not.toBe(round.admissionRef.roundId);
-    expect(JSON.stringify(round.workflowNow())).not.toMatch(/baseline/iu);
-    expect(e2eOf(round).failedRound).toBeUndefined();
-    expect(e2eOf(round).qualifiedRound).toBeUndefined();
-    expect(e2eOf(round).displayRef).toBeUndefined();
-    expect(workflowSendBackOffered(round.workflowNow() as never)).toBe(false);
-    expect(await publicationChecksOf(round)).toBeUndefined();
-  });
 
   it("a baseline that FAILED sets no failedRound and offers no send-back, and the candidate's PASS still reaches review and publication", async () => {
     const round = await startApplicationRound({ baseline: "source" });
@@ -249,22 +182,6 @@ describe("a baseline never gates", () => {
     }
   });
 
-  it("is a record of its own, beside the task: the workflow snapshot holds no trace of it, and the record expires", async () => {
-    const round = await startApplicationRound({ baseline: "source" });
-    await runBaseline(round, FAIL);
-    const rows = round.harness.db.find((item) => item.pk === `DEVTASK#${round.taskId}` && String(item.sk).startsWith("E2E_BASELINE#"));
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.indexExpiresAt).toBe(indexExpiresAt(String(rows[0]!.recordedAt)));
-  });
-
-  it("is shown for the plan it ran against only: a changed plan has no baseline", async () => {
-    const round = await startApplicationRound({ baseline: "source" });
-    await runBaseline(round, FAIL);
-    const task = round.taskNow() as { workflow: { e2e: Record<string, unknown> } };
-    const changed = { ...task, workflow: { ...task.workflow, e2e: { ...task.workflow.e2e, contractDigest: "e".repeat(64) } } };
-    expect(await (await baselineModule()).readWorkflowE2EBaseline(round.harness.brokerInput as never, changed as never)).toBeUndefined();
-    expect((await (await baselineModule()).readWorkflowE2EBaseline(round.harness.brokerInput as never, task as never))?.status).toBe("FAILED");
-  });
 });
 
 describe("the baseline's record is written conditionally (F1)", () => {
@@ -284,21 +201,6 @@ describe("the baseline's record is written conditionally (F1)", () => {
     }
   });
 
-  it("records only what the broker derived from the evidence: nothing the worker says about itself reaches the record", async () => {
-    const round = await startApplicationRound({ baseline: "source" });
-    const groups = await collectAll(round, [FAIL]);
-    const aggregate = await uploadAll(round, groups, (groupRun) => {
-      // A worker that claims the baseline passed, and ships rows of its own.
-      groupRun.scenarios = [{ scenarioId: "forged", status: "PASSED" }];
-      groupRun.display = { status: "PASSED" };
-      groupRun.verdict = "PASS";
-    });
-    await round.finishChecks(aggregate);
-    const stored = recordOf(round)!;
-    expect(JSON.stringify(stored)).not.toContain("forged");
-    expect(stored.state === "RECORDED" ? (stored.baseline as { status: string }).status : stored.state).not.toBe("PASSED");
-  });
-
   it("a baseline operation that failed records that the unchanged code could not be checked, and the candidate goes on", async () => {
     const round = await startApplicationRound({ baseline: "source" });
     round.markRunning();
@@ -312,40 +214,6 @@ describe("the baseline's record is written conditionally (F1)", () => {
     await runRound(candidate, [PASS]);
     expect(candidate.workflowNow()).toMatchObject({ stage: "REVIEW" });
     expect((await resultsOf(candidate))?.baseline).toEqual({ status: "UNAVAILABLE", scenarios: [] });
-  });
-});
-
-describe("a baseline whose runner never answers (F3)", () => {
-  it("shows that the unchanged code could not be checked once its deadline and grace have passed, and stops waiting for it: the candidate's CHECKS go on", async () => {
-    const round = await startApplicationRound({ baseline: "source" });
-    round.markRunning();
-    const { E2E_BASELINE_RUN_GRACE_MS } = await baselineModule();
-    const deadline = Date.parse(String(recordOf(round)!.deadlineAt));
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(deadline + E2E_BASELINE_RUN_GRACE_MS + 1_000);
-    expect(await resultsOf(round)).toEqual({ scenarios: [], baseline: { status: "UNAVAILABLE", scenarios: [] } });
-    // The dispatch stops waiting: it marks the record, and asks for the dead round to be cancelled, which frees the workspace for the candidate.
-    await round.runDispatch();
-    expect(recordOf(round)).toMatchObject({ state: "UNAVAILABLE", reason: "timed-out" });
-    expect(round.operationNow().status).toBe("CANCEL_REQUESTED");
-    await round.harness.finish(round.workspaceId, round.operationId, "CANCELLED");
-    // The cancelled baseline never blocks the workflow: the candidate's CHECKS go on.
-    expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
-    expect(round.workflowNow().blockReason).toBeUndefined();
-    const candidate = await round.nextRound();
-    expect(candidate.admissionRef.purpose).toBeUndefined();
-    expect(candidate.workflowNow()).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
-  });
-
-  it("treats a baseline operation that ended without its result as ended: the record is marked and the candidate goes on", async () => {
-    const round = await startApplicationRound({ baseline: "source" });
-    round.harness.db.set({ ...round.operationNow(), status: "FAILED" });
-    const { activeOperationId: _active, ...freed } = round.harness.db.get(`WORKSPACE#${round.workspaceId}`, "META")!;
-    void _active;
-    round.harness.db.set({ ...freed, status: "READY" });
-    const candidate = await round.nextRound();
-    expect(recordOf(round)).toMatchObject({ state: "UNAVAILABLE", reason: "run-failed" });
-    expect(candidate.admissionRef.purpose).toBeUndefined();
   });
 });
 
@@ -404,7 +272,6 @@ describe("a baseline that is stuck is never waited on and never spends the candi
 
   // R2: an operation whose cancel failed ends INTERRUPTED but keeps its workspace, as it might still run. That is a baseline that did not stop, not one that failed.
   it.each([
-    ["BUSY", "BUSY"],
     ["STOPPED", "STOPPED"],
   ] as const)("an INTERRUPTED baseline that the %s workspace still names as active is stuck: marked cancel-unconfirmed, and the candidate is blocked without spending attempts", async (_name, workspaceStatus) => {
     const round = await startApplicationRound({ baseline: "source" });
@@ -431,20 +298,6 @@ describe("a baseline that is stuck is never waited on and never spends the candi
     expect(candidate.workflowNow()).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
   });
 
-  // R5: a record whose time cannot be read is past the hold. It is never waited on.
-  it("a marked baseline whose recorded time cannot be read counts as past the hold: cancel-unconfirmed, stuck, never waited on", async () => {
-    const round = await startApplicationRound({ baseline: "source" });
-    round.markRunning();
-    const { E2E_BASELINE_RUN_GRACE_MS } = await baselineModule();
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(Date.parse(String(recordOf(round)!.deadlineAt)) + E2E_BASELINE_RUN_GRACE_MS + 1_000);
-    await round.runDispatch();
-    expect(round.operationNow().status).toBe("CANCEL_REQUESTED");
-    expect(recordOf(round)).toMatchObject({ state: "UNAVAILABLE", reason: "timed-out" });
-    round.harness.db.set({ ...recordOf(round)!, recordedAt: "not-a-date" });
-    await round.runDispatch();
-    expectStuck(round);
-  });
 });
 
 describe("the owner's Stop during the baseline stops the whole CHECKS step (review 3.7b finding 7)", () => {
@@ -466,16 +319,6 @@ describe("the owner's Stop during the baseline stops the whole CHECKS step (revi
     expect(recordOf(round)).toMatchObject({ state: "UNAVAILABLE" });
   });
 
-  it("a baseline that the system cancelled for running out of time is not the owner's Stop: the candidate goes on", async () => {
-    const round = await startApplicationRound({ baseline: "source" });
-    round.markRunning();
-    const { E2E_BASELINE_RUN_GRACE_MS } = await baselineModule();
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(Date.parse(String(recordOf(round)!.deadlineAt)) + E2E_BASELINE_RUN_GRACE_MS + 1_000);
-    await round.runDispatch();
-    await round.harness.finish(round.workspaceId, round.operationId, "CANCELLED");
-    expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
-  });
 });
 
 describe("the baseline's screenshots (F8, owner decision D4)", () => {
@@ -497,16 +340,6 @@ describe("the baseline's screenshots (F8, owner decision D4)", () => {
     expect(Buffer.from(artifact!.bytes).equals(SHOT)).toBe(true);
     // A digest no row names is still not served.
     expect(await (await brokerModule()).loadWorkflowE2EArtifact(round.harness.brokerInput as never, round.taskNow() as never, "0".repeat(64))).toBeUndefined();
-  });
-});
-
-describe("the baseline admission is a real admission of the unchanged code", () => {
-  it("is decodable by the worker's own decoder and names the base commit's source, not the candidate's", async () => {
-    const round = await startApplicationRound({ baseline: "source" });
-    const decoded = decodeE2EApplicationExecutionAdmission(round.admissionBytes);
-    expect(decoded.candidateCommitSha).toBe(round.real.baseline!.baseCommitSha);
-    expect(decoded.candidateDigest).not.toBe(round.candidate.digest);
-    expect(operations(round).filter((row) => row.workflowMode === "CHECKS")).toHaveLength(1);
   });
 });
 

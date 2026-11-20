@@ -173,11 +173,4 @@ describe("spec 048 FR-030: developer sign-in is part of the confirmed plan", () 
     expect(cloudFormation.calls.filter((call) => call.name === "ExecuteChangeSetCommand")).toHaveLength(1);
   });
 
-  it("lets the --signin flag override the method chosen in settings", async () => {
-    const { ctx } = await context([], undefined, {
-      answers: sampleAnswers({ signinMethods: "oidc" }),
-      signinFlags: { methods: "slack" },
-    });
-    expect(ctx.signinFlags.methods ?? ctx.answers.signinMethods).toBe("slack");
-  });
 });

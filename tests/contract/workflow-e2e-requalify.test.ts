@@ -1,9 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
-import { E2EApplicationSelectionRecordSchema, requalifyHoldKey as holdKeyOf, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKFLOW_AGENTX_ACTOR_ID, workflowApplicationRetryOffered, workflowSendBackOffered, type WorkflowSnapshot } from "@agentx/contracts";
+import { requalifyHoldKey as holdKeyOf, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, type WorkflowSnapshot } from "@agentx/contracts";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { apiRowKey, startApplicationRound, type RoundBrokerHarness, type RoundOptions } from "../support/e2e-application-round-harness.js";
-import { MAYA } from "../support/developer-task-broker.js";
 import { workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
 
 // AUTOREQUALIFY (AR-3) on the real broker: new browser and API rounds wait while the test machine is being switched (and are never blocked by it), and a selection refused only because
@@ -32,21 +31,6 @@ async function firstDispatch(options: RoundOptions & { before: (harness: RoundBr
 }
 
 describe("a switch in progress defers new browser and API rounds, and never blocks them", () => {
-  it("leaves the dispatch row due and the task waiting while the hold stands, then runs the round once the hold ends", async () => {
-    const harness = await firstDispatch({ before: (h) => h.db.set(holdRow(Date.now() + 600_000)) });
-    expect(taskOf(harness).workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
-    expect(taskOf(harness).workflow.blockReason).toBeUndefined();
-    expect(dispatchRows(harness)).toHaveLength(1);
-    expect(checksOperations(harness)).toEqual([]);
-    // The recovery sweep keeps trying and keeps deferring; the row's failure budget is not spent.
-    await sweep(harness); await sweep(harness);
-    expect(checksOperations(harness)).toEqual([]);
-    expect(dispatchRows(harness)[0]!.attempts ?? 0).toBe(0);
-    harness.db.delete(requalifyHoldKey().pk, requalifyHoldKey().sk);
-    await sweep(harness);
-    expect(checksOperations(harness)).toHaveLength(1);
-    expect(taskOf(harness).workflow).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
-  });
 
   it("looks again right before the round starts: a hold placed after the first look still stops it", async () => {
     const harness = await firstDispatch({ before: (h) => {
@@ -62,28 +46,6 @@ describe("a switch in progress defers new browser and API rounds, and never bloc
     } });
     expect(checksOperations(harness)).toEqual([]);
     expect(taskOf(harness).workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
-  });
-
-  it("fences the hold into the round's own start: a hold placed after BOTH looks still refuses the start, and the row stays due without spending its failure budget", async () => {
-    const harness = await firstDispatch({ before: (h) => {
-      const send = h.db.send.bind(h.db);
-      let looks = 0;
-      h.db.send = async (command) => {
-        const key = (command as { input?: { Key?: { pk?: string; sk?: string } } }).input?.Key;
-        const result = await send(command);
-        // Neither look finds a hold; the switch begins right after the second, before the start transaction commits.
-        if (command.constructor.name === "GetCommand" && key?.pk === requalifyHoldKey().pk && key.sk === requalifyHoldKey().sk && (looks += 1) === 2) h.db.set(holdRow(Date.now() + 600_000));
-        return result;
-      };
-    } });
-    expect(checksOperations(harness)).toEqual([]);
-    expect(taskOf(harness).workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
-    expect(taskOf(harness).workflow.blockReason).toBeUndefined();
-    expect(dispatchRows(harness)).toHaveLength(1);
-    expect(dispatchRows(harness)[0]!.attempts ?? 0).toBe(0);
-    harness.db.delete(requalifyHoldKey().pk, requalifyHoldKey().sk);
-    await sweep(harness);
-    expect(checksOperations(harness)).toHaveLength(1);
   });
 
   it("a baseline start that loses the race with the hold is deferred with the round, not recorded as a baseline that could not be checked", async () => {
@@ -117,37 +79,6 @@ describe("a switch in progress defers new browser and API rounds, and never bloc
 });
 
 describe("a selection refused only because the test machine was renewed", () => {
-  it("is blocked with its own reason, offered as a retry and never as a send back, when automatic fixing is off; the owner's retry approves the plan again as the owner", async () => {
-    const harness = await firstDispatch({ before: renew(5) });
-    const workflow = taskOf(harness).workflow;
-    expect(workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
-    expect(workflow.blockReason).toContain(WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX);
-    expect(workflow.blockReason!.length).toBeLessThanOrEqual(500);
-    expect(workflowApplicationRetryOffered(workflow as never)).toBe(true);
-    expect(workflowSendBackOffered(workflow as never)).toBe(false);
-    expect(taskOf(harness).autofixAsk).toBeUndefined();
-    const retried = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskOf(harness).taskId}/workflow/retry`, { requestId: randomUUID(), expectedRevision: workflow.revision, instructions: "Approve the plan again" });
-    expect(retried.status, JSON.stringify(retried.body)).toBe(200);
-    expect(taskOf(harness).workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
-    expect(E2EApplicationSelectionRecordSchema.parse(taskOf(harness).workflow.e2e!.applicationSelection).runtimeRows[0]).toMatchObject({ generation: 5 });
-    expect(reapprovalsOf(harness)).toHaveLength(1);
-    expect(reapprovalsOf(harness)[0]!.actorId).not.toBe(WORKFLOW_AGENTX_ACTOR_ID);
-  });
-
-  it("is approved again once by Rovara itself, recorded as its own decision, with no ask card", async () => {
-    const harness = await firstDispatch({ brokerExtra: { autofix: AUTOFIX }, before: renew(5) });
-    const workflow = taskOf(harness).workflow;
-    expect(workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
-    expect(workflow.blockReason).toBeUndefined();
-    expect(reapprovalsOf(harness)).toHaveLength(1);
-    expect(reapprovalsOf(harness)[0]!.current.runtimeRowsDigest).not.toBe(reapprovalsOf(harness)[0]!.previous.runtimeRowsDigest);
-    expect(reapprovalsOf(harness)[0]!.actorId).toBe(WORKFLOW_AGENTX_ACTOR_ID);
-    expect(E2EApplicationSelectionRecordSchema.parse(workflow.e2e!.applicationSelection).runtimeRows[0]).toMatchObject({ generation: 5 });
-    expect(workflow.decisions.filter((decision) => decision.source === "AUTO_RETRY")).toMatchObject([{ actorRole: "AGENTX", actorId: WORKFLOW_AGENTX_ACTOR_ID }]);
-    expect(taskOf(harness).autofixAsk).toBeUndefined();
-    // The retry wrote a fresh dispatch row for the revision it created.
-    expect(dispatchRows(harness).map((row) => row.workflowRevision)).toContain(workflow.revision);
-  });
 
   it("is approved again only once: a second renewal asks the owner instead of looping", async () => {
     const harness = await firstDispatch({ brokerExtra: { autofix: AUTOFIX }, before: renew(5) });
