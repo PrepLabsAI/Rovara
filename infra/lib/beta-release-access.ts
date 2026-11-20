@@ -1,8 +1,8 @@
-// #1242: the staging account's side of the release pipeline. The pipeline (release-pipeline.ts, in the release account) deploys every mainline merge to
-// staging first; its staging build runs the same `npm run release:prod` as production, as this role. Deployed once into the staging account, by hand
-// (-c agentxStagingAccess=enabled); no release deploys it.
+// #1242: the beta account's side of the release pipeline. The pipeline (release-pipeline.ts, in the release account) deploys every mainline merge to
+// beta first; its beta build runs the same `npm run release:prod` as production, as this role. Deployed once into the beta account, by hand
+// (-c agentxBetaAccess=enabled); no release deploys it.
 //
-// The role trusts exactly one principal: the staging build's role in the release account (AGENTX_STAGING_BUILD_ROLE_NAME). Its rights are the production
+// The role trusts exactly one principal: the beta build's role in the release account (AGENTX_BETA_BUILD_ROLE_NAME). Its rights are the production
 // release build's own (release-pipeline.ts), in this account: deploy through this account's CDK bootstrap roles, push the two release images, read the
 // release stacks. CI's proof (the GitHub App's key) stays in the release account.
 import { CfnParameter, Stack, type StackProps, aws_iam as iam } from "aws-cdk-lib";
@@ -10,12 +10,12 @@ import type { Construct } from "constructs";
 import {
   AGENTX_PRODUCTION_WORKER_REPOSITORY,
   AGENTX_RELEASE_STACKS,
-  AGENTX_STAGING_BUILD_ROLE_NAME,
-  AGENTX_STAGING_RELEASE_ROLE_NAME,
+  AGENTX_BETA_BUILD_ROLE_NAME,
+  AGENTX_BETA_RELEASE_ROLE_NAME,
 } from "./release-pipeline.js";
 import { AGENTX_SLACK_ORCHESTRATOR_REPOSITORY } from "./slack-orchestrator.js";
 
-export class StagingReleaseAccessStack extends Stack {
+export class BetaReleaseAccessStack extends Stack {
   constructor(scope: Construct, id: string, props: StackProps = {}) {
     super(scope, id, props);
     const releaseAccountId = new CfnParameter(this, "ReleaseAccountId", {
@@ -23,12 +23,12 @@ export class StagingReleaseAccessStack extends Stack {
       allowedPattern: "^[0-9]{12}$",
       description: "The AWS account that holds the release pipeline (AgentXReleasePipeline)",
     });
-    const buildRoleArn = `arn:${this.partition}:iam::${releaseAccountId.valueAsString}:role/${AGENTX_STAGING_BUILD_ROLE_NAME}`;
+    const buildRoleArn = `arn:${this.partition}:iam::${releaseAccountId.valueAsString}:role/${AGENTX_BETA_BUILD_ROLE_NAME}`;
     // The account as principal, narrowed to the one role: a principal ARN in a trust policy must already exist, and this stack may come first.
     const role = new iam.Role(this, "Role", {
-      roleName: AGENTX_STAGING_RELEASE_ROLE_NAME,
+      roleName: AGENTX_BETA_RELEASE_ROLE_NAME,
       assumedBy: new iam.AccountPrincipal(releaseAccountId.valueAsString).withConditions({ ArnEquals: { "aws:PrincipalArn": buildRoleArn } }),
-      description: "The release pipeline's staging build: deploys the release stacks in this account (#1242)",
+      description: "The release pipeline's beta build: deploys the release stacks in this account (#1242)",
     });
     const scoped = (service: string, resource: string): string =>
       `arn:${this.partition}:${service}:${this.region}:${this.account}:${resource}`;
