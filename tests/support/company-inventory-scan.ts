@@ -110,7 +110,18 @@ function regexPaths(literal: string, tick: () => void): string[] {
   return paths.map((path) => path.replace(/\{id\}(?:-?\{id\})+/g, "{id}").replace("/dev/tasks/{id}", "/dev/tasks/{taskId}"));
 }
 
+/** Enumerate exactly the sites requiring reviewed forwarding coverage in the scanner. */
+export function enumerateCompanyForwardingSites(sources: readonly InventorySource[]): Pick<ForwardingSite, "site" | "expression">[] {
+  const sites: Pick<ForwardingSite, "site" | "expression">[] = [];
+  scanSources(sources, {}, [], (site, expression) => sites.push({ site, expression }));
+  return sites;
+}
+
 export function scanCompanySources(sources: readonly InventorySource[], limits: Partial<Limits> = {}, forwarding: readonly ForwardingSite[] = []): CompanyInventory {
+  return scanSources(sources, limits, forwarding);
+}
+
+function scanSources(sources: readonly InventorySource[], limits: Partial<Limits>, forwarding: readonly ForwardingSite[], onForwarding?: (site: string, expression: string) => void): CompanyInventory {
   const tick = loadedBudgets.get(sources) ?? budget(limits);
   const records = new Set<string>(); const routes = new Set<string>(); const gateway = new Set<string>();
   const covered = new Map<string, ForwardingSite>();
@@ -187,6 +198,7 @@ export function scanCompanySources(sources: readonly InventorySource[], limits: 
     };
     const cover = (node: ts.Node, field: string, value: ts.Node): void => {
       const site = `${source.path}:${file.getLineAndCharacterOfPosition(node.getStart()).line + 1}:${file.getLineAndCharacterOfPosition(node.getStart()).character + 1}:${field}`;
+      if (onForwarding) { onForwarding(site, value.getText(file)); return; }
       const row = covered.get(site);
       if (!row || row.expression !== value.getText(file) || usedForwarding.has(site)) fail("unclassifiable");
       usedForwarding.add(site);
