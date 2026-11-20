@@ -217,6 +217,8 @@ export async function releaseProduction(
   }
 
   const runner = new Runner(options);
+  // Read-only and before the worker build, the push and the runtime deploy: a release that would revert a moved install must not end half applied (new runtime, old control plane).
+  if (stackExists(runner, options.region, CONTROL_PLANE_STACK)) assertSavedEnvRolesNotReverted(describeStack(runner, options.region, CONTROL_PLANE_STACK));
   const revision = runner.capture("git", ["rev-parse", "HEAD"]).stdout.trim();
   if (!options.allowDirty) {
     const dirty = runner.capture("git", ["status", "--porcelain"]).stdout.trim();
@@ -458,7 +460,6 @@ function assertFoundationHasNoPendingChanges(runner: Runner, options: ReleaseOpt
 function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation: StackDescription): void {
   // The legacy saved environment roles switch (AGENTX_LEGACY_SAVED_ENV_ROLES: root, none or path) rides along as a CDK context, so a later release keeps the roles where the install moved them.
   const savedEnvRolesContext = legacySavedEnvRolesContext();
-  if (stackExists(runner, options.region, CONTROL_PLANE_STACK)) assertSavedEnvRolesNotReverted(describeStack(runner, options.region, CONTROL_PLANE_STACK));
   runner.run("npx", [
     "cdk",
     "deploy",
