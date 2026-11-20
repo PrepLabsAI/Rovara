@@ -7,6 +7,13 @@ name: CI
 # run the port guard (the `port-guard` job below).
 on:
   workflow_dispatch:
+    inputs:
+      # #1182 trial: run this one manual run's linux-runtime job on the AWS CodeBuild runner (infra/lib/ci-runner.ts) instead of GitHub's.
+      linux_runtime_runner:
+        description: "Where linux-runtime runs: github (the default) or codebuild"
+        type: choice
+        options: [github, codebuild]
+        default: github
   pull_request:
     # `labeled` so that adding the `full-ci` label starts a FULL run. Any other label starts an ordinary run too (a skipped run would leave a skipped `local` that reads as a pass).
     types: [opened, synchronize, reopened, ready_for_review, labeled]
@@ -256,7 +263,9 @@ jobs:
   linux-runtime:
     needs: plan
     if: needs.plan.outputs.linux == 'true'
-    runs-on: ubuntu-24.04-arm
+    # #1182: on GitHub's ARM runner by default; on the account's CodeBuild ARM runner (8 vCPU / 16 GB, privileged, infra/lib/ci-runner.ts) when the repository
+    # variable LINUX_RUNTIME_RUNNER is `codebuild`, or a manual run asks for it. Every other job stays on GitHub's runners.
+    runs-on: ${{ (inputs.linux_runtime_runner == 'codebuild' || vars.LINUX_RUNTIME_RUNNER == 'codebuild') && format('codebuild-rovara-ci-linux-runtime-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-24.04-arm' }}
     timeout-minutes: 75
     permissions:
       contents: read
