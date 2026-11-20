@@ -84,6 +84,25 @@ describe("the settings page", () => {
     expect((await get("/second-review")).body).toContain("Reviewed by gpt-5.5 (company choice)");
   });
 
+  it("binds an approve-mode form token to the proposal id", async () => {
+    await server.close();
+    const changeId = "modechange_123";
+    const state = { ...(await world.review.state()), pending: [{ changeId, scope: "company", from: "shadow", to: "off" }] };
+    const calls: unknown[] = [];
+    server = await createLocalPagesServer({
+      data: { getSecondReview: async () => state } as never,
+      actions: { secondReview: async (input: unknown) => { calls.push(input); return { ok: true, message: "Saved." }; } } as never,
+    });
+    base = `/s/${server.sessions.mint().token}`;
+    const page = (await get("/second-review")).body;
+    const approve = formFor(page, "/second-review/act", "approve-mode");
+    expect(approve["ft"]).toBeDefined();
+    expect((await post("/second-review/act", { ...approve, changeId: "modechange_other" })).headers["location"]).toContain("n=form");
+    expect(calls).toEqual([]);
+    expect((await post("/second-review/act", approve)).headers["location"]).toContain("n=saved");
+    expect(calls).toEqual([{ action: "approve-mode", changeId }]);
+  });
+
   it("refuses a form with no token, a token made for another change, a model that is not offered, and a change the service refuses (`on` without evidence)", async () => {
     const page = (await get("/second-review")).body;
     const choose = formFor(page, "/second-review/act", "choose");

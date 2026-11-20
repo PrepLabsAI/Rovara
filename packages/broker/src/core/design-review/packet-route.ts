@@ -1,3 +1,4 @@
+import { withinTaskTokenDeadline } from "../model-gateway/deadline.js";
 import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Design review stage: `GET /v1/internal/design-review/packet?slot=<key slot>`, the one route a design-review worker reads a reviewer's packet from (on the task flow's ports).
 //
@@ -41,30 +42,37 @@ async function roundRecorded(deps: TaskFlowDeps, operation: OperationRecord, rou
   return (task.workflow?.designReview?.rounds ?? []).some((recorded) => recorded.round === round);
 }
 
-export async function handleDesignReviewPacket(deps: TaskFlowDeps, capabilities: Pick<CallbackCapabilities, "verify">, request: BrokerRequest): Promise<BrokerResponse> {
-  const token = request.headers[CAPABILITY_HEADER];
-  if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
-  const claims = (() => { try { return capabilities.verify(token, "design-review-packet"); } catch { throw agentXError("CALLBACK_FORBIDDEN", "invalid callback capability"); } })();
-  // The worker's own egress gateway stamps the workspace the call comes from: a capability is good only for its own workspace's worker.
-  if (request.headers[WORKSPACE_HEADER] !== claims.workspaceId) throw agentXError("CALLBACK_FORBIDDEN", REFUSED);
-  const operation = fromDocument<OperationRecord>(await deps.store.get((await workspaceKeys(deps, claims.workspaceId)).operationKey(claims.operationId)));
-  if (operation === undefined || operation.companyId !== deps.companyId) throw agentXError("CALLBACK_FORBIDDEN", REFUSED);
-  if (operation.fence !== claims.fence) throw agentXError("STALE_FENCE", "callback operation binding is stale");
-  if (isTerminalStatus(operation.status)) throw agentXError("STALE_FENCE", "terminal operations cannot read a packet");
-  const binding = storedBindingOf(operation);
-  // Reviewer slots only: the merge step is sent no packet.
-  const asked = new URL(request.path, "http://local.invalid").searchParams.get("slot");
-  const slot = bindingSlotOf(binding, asked);
-  const reviewer = slot?.purpose === "reviewer" ? binding.reviewers.find((entry) => entry.keySlot === slot.keySlot) : undefined;
-  if (reviewer === undefined) throw agentXError("FORBIDDEN", REFUSED);
-  if (await roundRecorded(deps, operation, binding.round)) throw agentXError("FORBIDDEN", REFUSED);
-  const stored = await readSlotPacket(deps.store, deps.companyId, operation.id, binding.round, reviewer.keySlot);
-  if (stored === undefined) throw agentXError("FORBIDDEN", REFUSED);
-  // What is served must be the packet the binding names: the stored text parses as the delivery contract, is the reviewer's role, and hashes to the binding's digest.
-  let delivery: ReturnType<typeof PacketDeliverySchema.parse>;
-  try { delivery = PacketDeliverySchema.parse(JSON.parse(stored.text)); } catch { throw agentXError("FORBIDDEN", REFUSED); }
-  if (delivery.role !== reviewer.role || packetDigestOf(delivery) !== reviewer.packetDigest || Buffer.byteLength(stored.text, "utf8") > PACKET_DELIVERY_BYTES_MAX) throw agentXError("FORBIDDEN", REFUSED);
-  deps.log?.({ component: "design-review", event: "design_review.packet_served", operationId: operation.id, slot: reviewer.keySlot, digest: reviewer.packetDigest });
-  // The stored text is the answer, as it is: no wrapper, no request id (the worker reads it with a strict schema).
-  return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: stored.text };
+export async function handleDesignReviewPacket(deps: TaskFlowDeps, capabilities: Pick<CallbackCapabilities, "verify">, request: BrokerRequest, authorize?: (claims: ReturnType<CallbackCapabilities["verify"]>) => Promise<void>): Promise<BrokerResponse> {
+  return withinTaskTokenDeadline(async (deadline) => {
+    const token = request.headers[CAPABILITY_HEADER];
+    if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
+    const claims = (() => { try { return capabilities.verify(token, "design-review-packet"); } catch { throw agentXError("CALLBACK_FORBIDDEN", "invalid callback capability"); } })();
+    // Laptop calls require the gateway stamp; hosted composition supplies company-bound live authorization.
+    if (authorize !== undefined) await authorize(claims);
+    else if (request.headers[WORKSPACE_HEADER] !== claims.workspaceId) throw agentXError("CALLBACK_FORBIDDEN", REFUSED);
+    deadline.check();
+    const operation = fromDocument<OperationRecord>(await deps.store.get((await workspaceKeys(deps, claims.workspaceId)).operationKey(claims.operationId)));
+    if (operation === undefined || operation.companyId !== deps.companyId) throw agentXError("CALLBACK_FORBIDDEN", REFUSED);
+    if (operation.fence !== claims.fence) throw agentXError("STALE_FENCE", "callback operation binding is stale");
+    if (isTerminalStatus(operation.status)) throw agentXError("STALE_FENCE", "terminal operations cannot read a packet");
+    deadline.check();
+    const binding = storedBindingOf(operation);
+    // Reviewer slots only: the merge step is sent no packet.
+    const asked = new URL(request.path, "http://local.invalid").searchParams.get("slot");
+    const slot = bindingSlotOf(binding, asked);
+    const reviewer = slot?.purpose === "reviewer" ? binding.reviewers.find((entry) => entry.keySlot === slot.keySlot) : undefined;
+    if (reviewer === undefined) throw agentXError("FORBIDDEN", REFUSED);
+    if (await roundRecorded(deps, operation, binding.round)) throw agentXError("FORBIDDEN", REFUSED);
+    deadline.check();
+    const stored = await readSlotPacket(deps.store, deps.companyId, operation.id, binding.round, reviewer.keySlot);
+    deadline.check();
+    if (stored === undefined) throw agentXError("FORBIDDEN", REFUSED);
+    // What is served must be the packet the binding names: the stored text parses as the delivery contract, is the reviewer's role, and hashes to the binding's digest.
+    let delivery: ReturnType<typeof PacketDeliverySchema.parse>;
+    try { delivery = PacketDeliverySchema.parse(JSON.parse(stored.text)); } catch { throw agentXError("FORBIDDEN", REFUSED); }
+    if (delivery.role !== reviewer.role || packetDigestOf(delivery) !== reviewer.packetDigest || Buffer.byteLength(stored.text, "utf8") > PACKET_DELIVERY_BYTES_MAX) throw agentXError("FORBIDDEN", REFUSED);
+    deps.log?.({ component: "design-review", event: "design_review.packet_served", operationId: operation.id, slot: reviewer.keySlot, digest: reviewer.packetDigest });
+    // The stored text is the answer, as it is: no wrapper, no request id (the worker reads it with a strict schema).
+    return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: stored.text };
+  });
 }

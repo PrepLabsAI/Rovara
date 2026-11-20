@@ -51,7 +51,7 @@ type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
  * then holds it), and the successor, who must be a live member of the same company (any role) at the moment the removal commits.
  */
 export interface RemovalFence { expectedRole?: Member["role"]; successorId?: string }
-export type CompanyJoin = { ok: true; membership: Member; viaPreapproval?: true } | { ok: false; reason: "not_invited" | "member_elsewhere" | "member_revoked" };
+export type CompanyJoin = { ok: true; membership: Member; viaPreapproval?: true } | { ok: false; reason: "not_invited" | "member_elsewhere" | "member_revoked"; attributedCompanyId?: string };
 const refused = (): CompanyJoin => ({ ok: false, reason: "not_invited" });
 const unavailable = () => new Error("company sign-in unavailable");
 const conditional = (error: unknown) => error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
@@ -90,8 +90,8 @@ export class CompanySignInStore {
     return found.data;
   }
   private memberResult(member: Member, companyId: string): CompanyJoin {
-    if (member.revokedAt !== undefined) return { ok: false, reason: "member_revoked" };
-    if (member.companyId !== companyId) return { ok: false, reason: "member_elsewhere" };
+    if (member.revokedAt !== undefined) return { ok: false, reason: "member_revoked", attributedCompanyId: member.companyId };
+    if (member.companyId !== companyId) return { ok: false, reason: "member_elsewhere", attributedCompanyId: member.companyId };
     return { ok: true, membership: member };
   }
   /** A bounded retry only rereads the winning membership; it never consumes another invite. */
@@ -227,6 +227,32 @@ export class CompanySignInStore {
     } }, ...(row.data.status === "live" && row.data.expiresAt > this.seconds() ? link : [])], createdBy);
     return true;
   }
+  /** Atomically replaces a pending invite's one-time link and starts a fresh expiry window. */
+  async resend(companyId: string, emailHash: string, hours: number, createdBy: string, inviteHash: string): Promise<number> {
+    const key = preapprovalHashKey(companyId, emailHash);
+    const parsed = CompanyPreapproval.safeParse(await this.read(key));
+    if (!parsed.success || parsed.data.status !== "live" || parsed.data.expiresAt <= this.seconds() || parsed.data.inviteHash === undefined) throw unavailable();
+    const previous = parsed.data;
+    const oldHash = previous.inviteHash!;
+    const oldLinkKey = inviteLinkKey(companyId, oldHash);
+    const storedLink = await this.read(oldLinkKey) as Record<string, unknown> | undefined;
+    const { pk: storedPk, sk: storedSk, ...oldLinkFields } = storedLink ?? {};
+    const oldLink = storedPk === oldLinkKey.pk && storedSk === oldLinkKey.sk ? CompanyInviteLink.safeParse(oldLinkFields) : undefined;
+    if (oldLink === undefined || !oldLink.success || oldLink.data.companyId !== companyId || oldLink.data.status !== "live" || oldLink.data.expiresAt <= this.seconds() || oldLink.data.emailHash !== emailHash) throw unavailable();
+    const expiresAt = this.seconds() + CompanyExpiryHours.parse(hours) * 3600;
+    const now = this.iso();
+    const newLink = CompanyInviteLink.parse({ entityType: "COMPANY_INVITE_LINK", companyId, status: "live", expiresAt, createdAt: now, createdBy, emailHash });
+    await this.operatorWrite(companyId, "company-preapproval-resend", [
+      { Update: { TableName: this.input.tableName, Key: key, UpdateExpression: "SET inviteHash = :next, expiresAt = :expires",
+        ConditionExpression: "#status = :live AND expiresAt = :oldExpires AND createdAt = :created AND inviteHash = :oldHash",
+        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":live": "live", ":oldExpires": previous.expiresAt, ":created": previous.createdAt, ":oldHash": oldHash, ":next": inviteHash, ":expires": expiresAt } } },
+      { Update: { TableName: this.input.tableName, Key: oldLinkKey, UpdateExpression: "SET #status = :withdrawn",
+        ConditionExpression: "#status = :live AND expiresAt = :expires AND emailHash = :emailHash",
+        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":live": "live", ":withdrawn": "withdrawn", ":expires": oldLink.data.expiresAt, ":emailHash": emailHash } } },
+      { Put: { TableName: this.input.tableName, Item: { ...inviteLinkKey(companyId, inviteHash), ...newLink }, ConditionExpression: "attribute_not_exists(pk)" } },
+    ], createdBy);
+    return expiresAt;
+  }
   async list(companyId: string): Promise<{ preapprovals: Array<z.infer<typeof CompanyPreapproval> & { emailHash: string }>; more: boolean }> {
     const started = this.input.now();
     const pk = companyScoped(OrgIdSchema.parse(companyId), "PREAPPROVAL");
@@ -272,7 +298,7 @@ export class CompanySignInStore {
     if (owner && actor?.role !== "owner") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_ONLY_OWNER });
     if (actor === undefined || actor.companyId !== companyId || actor.revokedAt !== undefined || (actor.role !== "admin" && actor.role !== "owner")) throw unavailable();
   }
-  private async writeMember(previous: Member, next: Member, event: string, createdBy?: string, fence: RemovalFence = {}): Promise<void> {
+  private async writeMember(previous: Member, next: Member, event: string, createdBy?: string, fence: RemovalFence = {}, retryWitness = true): Promise<void> {
     // A self-actor's target snapshot must itself still be authorized. The earlier
     // actor read alone can race with this read; the snapshot CAS then fences it.
     if (createdBy === previous.personId && (previous.revokedAt !== undefined || (previous.role !== "admin" && previous.role !== "owner"))) throw unavailable();
@@ -313,7 +339,13 @@ export class CompanySignInStore {
         ...(ownerChange && createdBy === undefined ? { ownerOverride: true } : {}), ...(fence.successorId === undefined ? {} : { successorId: fence.successorId }) });
     } catch (error) {
       const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> } | null)?.CancellationReasons;
-      if (witness !== undefined && conditional(error) && reasons?.[witnessIndex]?.Code === "ConditionalCheckFailed") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_LAST_OWNER });
+      if (witness !== undefined && conditional(error) && reasons?.[witnessIndex]?.Code === "ConditionalCheckFailed") {
+        // Another owner may have stepped down after the roster read while a third
+        // live owner still exists. Refresh the witness once and retry the same
+        // target snapshot transaction; if no witness remains, the retry refuses.
+        if (retryWitness) return this.writeMember(previous, next, event, createdBy, fence, false);
+        throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_LAST_OWNER });
+      }
       if (successorChecked && conditional(error) && reasons?.[successorIndex]?.Code === "ConditionalCheckFailed") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_SUCCESSOR_INVALID });
       // The target's snapshot (index 0) moved: with an expected role, that is "the person changed", in fixed words.
       if (fence.expectedRole !== undefined && conditional(error) && reasons?.[0]?.Code === "ConditionalCheckFailed") throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_CHANGED });
@@ -341,6 +373,10 @@ export class CompanySignInStore {
     const member = await this.membership(personId);
     if (member === undefined || member.companyId !== companyId) return "not_found";
     if (member.revokedAt !== undefined) throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_REVOKED });
+    // A caller may change another member's role under the ordinary owner/admin
+    // rules. Self-change is narrower: only a live owner may step down, and the
+    // witness condition in writeMember keeps another live owner at commit time.
+    if (createdBy === personId && (member.role !== "owner" || role === "owner")) throw unavailable();
     if (member.role === role) return "unchanged";
     await this.writeMember(member, { ...member, role, updatedAt: this.iso(), updatedBy: createdBy ?? "operator" }, "company-member-role-set", createdBy);
     return "changed";

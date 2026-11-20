@@ -23,6 +23,9 @@ const KEY_MAX = 400;
 const text = (value: unknown, max: number): string | undefined => (typeof value === "string" && value.length > 0 && value.length <= max ? value : undefined);
 
 interface Shown { record: EngineAuditRecord; atMs: number; project?: string }
+const SIGN_IN_ACTION = /^signin\.(?:succeeded|refused)$/u;
+const SIGN_IN_METHODS = new Set(["web", "slack", "github", "cli", "invite"]);
+const SIGN_IN_CAUSES = new Set(["not_invited", "member_elsewhere", "member_revoked", "person_revoked", "company_signin_mismatch", "sign_in_failed"]);
 
 /** The record a row holds, or undefined for a row that is not a readable audit row. */
 function recordOfRow(row: StoredDocument): Shown | undefined {
@@ -44,6 +47,12 @@ function recordOfRow(row: StoredDocument): Shown | undefined {
   const detailsProject = text(details?.["project"], 128);
   const project = subjectType === "project" && subjectId !== undefined ? subjectId : detailsProject;
   const outcome = /(?:^|[._-])refused$/u.test(action) ? "refused" : "ok";
+  const method = details?.["method"];
+  const cause = details?.["cause"];
+  const signIn = SIGN_IN_ACTION.test(action);
+  if (signIn && (typeof method !== "string" || !SIGN_IN_METHODS.has(method))) return undefined;
+  if (signIn && outcomeForSignIn(action) === "refused" && (typeof cause !== "string" || !SIGN_IN_CAUSES.has(cause))) return undefined;
+  if (signIn && outcomeForSignIn(action) === "ok" && cause !== undefined) return undefined;
   return {
     atMs,
     ...(project === undefined ? {} : { project }),
@@ -51,11 +60,17 @@ function recordOfRow(row: StoredDocument): Shown | undefined {
       eventId, at, actor: { developerId: actorId, name: actorId, type: actor.type },
       action, subject: subjectType !== undefined && subjectId !== undefined ? `${subjectType}:${subjectId}` : "", outcome,
       ...(via.success ? { via: via.data } : {}),
+      ...(signIn ? { method: method as EngineAuditRecord["method"] } : {}),
+      ...(signIn && cause !== undefined ? { cause: cause as EngineAuditRecord["cause"] } : {}),
     },
   };
 }
 
+function outcomeForSignIn(action: string): "ok" | "refused" { return action === "signin.refused" ? "refused" : "ok"; }
+
 function matches(shown: Shown, query: CompanyAuditQuery, fromMs: number | undefined, toMs: number | undefined): boolean {
+  const signIn = SIGN_IN_ACTION.test(shown.record.action);
+  if (query.kind === "sign-in" ? !signIn : signIn) return false;
   if (fromMs !== undefined && shown.atMs < fromMs) return false;
   if (toMs !== undefined && shown.atMs > toMs) return false;
   if (query.person !== undefined && shown.record.actor.developerId !== query.person) return false;
@@ -80,7 +95,7 @@ export async function readCompanyAudit(store: Pick<DocumentStore, "query">, comp
   const toMs = filters.to === undefined ? undefined : Date.parse(filters.to);
   if (fromMs !== undefined && toMs !== undefined && fromMs > toMs) throw agentXError("AUDIT_RANGE_INVALID", "the time range is not valid");
   const limit = filters.limit ?? COMPANY_AUDIT_PAGE_DEFAULT;
-  const digest = filterDigest({ from: fromMs, to: toMs, project: filters.project, person: filters.person, action: filters.action });
+  const digest = filterDigest({ from: fromMs, to: toMs, project: filters.project, person: filters.person, action: filters.action, kind: filters.kind });
   const after = filters.cursor === undefined ? undefined : decodeCursor("k", filters.cursor, companyId, digest, (position) => position.startsWith(ROW_KEY_PREFIX));
   const pk = companyScoped(companyId, "AUDIT");
 

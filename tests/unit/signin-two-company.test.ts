@@ -3,6 +3,7 @@ import { expect, it } from "vitest";
 import { companyScoped } from "@agentx/contracts";
 import { assertSurfacesIsolated, assertFailsClosed, COMPANY_A, COMPANY_B, SHARED_RAW_IDS, type IsolationSurface } from "../../packages/testing/src/isolation/two-company.js";
 import { signinCompanyWorld } from "../support/signin-company-world.js";
+import type { CompanySignInAuditInput } from "../../packages/broker/src/developer/company-signin-audit.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { resolveDeveloper } from "../../packages/broker/src/aws/admin-actions.js";
@@ -78,6 +79,19 @@ it("a membership read failure or disappearance refuses refresh on the real serve
       return answer;
     },
   }]);
+});
+
+it("writes a company audit row after membership resolves and none for an unknown person", async () => {
+  const h = signinCompanyWorld(); await h.create(COMPANY_A.orgId);
+  const rows: CompanySignInAuditInput[] = [];
+  h.deps.signInAudit = async (row) => { rows.push(row); };
+  await h.signInCompany(COMPANY_A.orgId, "known-person", "shared@example.test");
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({ companyId: COMPANY_A.orgId, method: "cli", outcome: "succeeded" });
+  expect(JSON.stringify(rows[0])).not.toContain("shared@example.test");
+  const beforeUnknown = rows.length;
+  await h.signInCompany(COMPANY_A.orgId, "unknown-person", "unknown@example.test");
+  expect(rows).toHaveLength(beforeUnknown);
 });
 
 it.each(["membership", "preapproval", "issuer", "secret"] as const)("unreadable %s cannot fall back to implicit or write a person/code/session", async (kind) => {

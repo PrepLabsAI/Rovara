@@ -237,6 +237,21 @@ f iptables DOCKER-USER -i rvi+ ! -o rvi+ -j DROP
 for r in $(awk '$1=="nameserver"&&$2~/^[0-9.]+$/{print $2}' /etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null); do
   for p in udp tcp; do f iptables DOCKER-USER -i rvb+ -d $r -p $p --dport 53 -j RETURN; done
 done
+# Setup runs (rvbs<slot>: helper .2, sandbox .3) get only their helper's port 53, above every rvb+ rule; failing that, exactly these 5 go and setup is refused.
+S=("-i rvbs+ -o rvbs+ -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN" "-i rvbs+ -o rvbs+ -m physdev --physdev-is-bridged -d 172.29.0.0/16 -p udp --dport 53 -j RETURN" "-i rvbs+ -o rvbs+ -m physdev --physdev-is-bridged -d 172.29.0.0/16 -p tcp --dport 53 -j RETURN" "-i rvbs+ -s 172.29.0.3/255.255.0.255 -p udp --dport 53 ! -o rvbs+ -j DROP" "-i rvbs+ -s 172.29.0.3/255.255.0.255 -p tcp --dport 53 ! -o rvbs+ -j DROP")
+x() { for r in "${S[@]}"; do while iptables -C DOCKER-USER $r 2>/dev/null; do iptables -D DOCKER-USER $r || return; done; done; }
+y() {
+  modprobe -a br_netfilter xt_conntrack xt_physdev 2>/dev/null
+  [[ -e ${BRIDGE_NF:-/proc/sys/net/bridge/bridge-nf-call-iptables} ]] || return
+  n=0; for r in "${S[@]}"; do iptables -C DOCKER-USER $r 2>/dev/null && ((n++)); done
+  ((n == 5)) && iptables -S DOCKER-USER | awk '/ -i rvb\+ /{b=1} / -i rvbs\+ /&&b{x=1} END{exit x}' && return
+  x || return
+  for i in 4 3 2 1 0; do iptables -I DOCKER-USER ${S[i]} || return; done
+}
+F=${SETUP_ISOLATION_FILE:-/etc/agentx/setup-isolation}; s=unavailable
+if y; then s=ready; else x || :; fi
+install -d -m 0700 "${F%/*}" && echo $s >"$F.t" && chmod 0644 "$F.t" && mv -f "$F.t" "$F" || rm -f "$F"
+echo "setup isolation: $s" >&2
 f iptables DOCKER-USER -d 169.254.169.254/32 -j DROP
 for i in rvb+ rvi+; do f iptables INPUT -i $i -j DROP; ! command -v ip6tables >/dev/null || f ip6tables INPUT -i $i -j DROP || echo "ip6tables $i rule failed" >&2; done
 FIREWALL
@@ -381,6 +396,8 @@ t=/run/agentx-test-services; ! mountpoint -q $t || args+=(--volume $t:$t --env A
 t=/var/lib/rovara-egress; [[ ! -d $t ]] || args+=(--volume $t:$t)
 # L4-NETG2: the host resolvers a gateway-mode stage wrote (the daemon default name server is the egress gateway there, which this host-network container cannot reach). Before the image, which stays the last docker argument.
 while read -r r; do args+=(--dns "$r"); done < <(cat /etc/agentx/worker-dns 2>/dev/null)
+f=/etc/agentx/setup-isolation; [[ -f $f && ! -L $f && $(stat -c %u:%a $f) == 0:644 && $(<$f) == ready ]] && s=ready || s=unavailable
+args+=(--env AGENTX_SETUP_ISOLATION=$s)
 args+=(--volume "$DOCKER_SOCKET:$DOCKER_SOCKET" --group-add "$docker_gid" --log-driver awslogs --log-opt awslogs-region="$(sed -n 's/^AWS_REGION=//p' "$WORKER_ENV_FILE")" --log-opt awslogs-group="$(cat /etc/agentx/log-group)" --log-opt awslogs-stream="$(sed -n 's/^AGENTX_WORKSPACE_ID=//p' "$WORKER_ENV_FILE")/$(sed -n 's/^AGENTX_SESSION_GENERATION=//p' "$WORKER_ENV_FILE")/$(cat /etc/agentx/instance-id)" "$worker_image")
 exec "$docker" "${args[@]}"
 LAUNCHER

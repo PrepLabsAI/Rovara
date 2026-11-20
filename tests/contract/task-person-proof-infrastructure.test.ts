@@ -289,6 +289,7 @@ describe("the named TEST proof-only installation gate", () => {
     // Batch 14 combined (DEC 254zzl-amend3, DEC 254zzn(2)): named and foreign re-pinned again; legacy unchanged. Against the first batch-14 synth the templates differ ONLY in the
     // CoreSystemRuns parameter (default off) and its condition, the hourly upkeep-night schedule (existing invoke role, DISABLED unless that condition holds), the CoreAnswersModel
     // parameter (default empty), `aa`/`sy` in the broker's and `sy` in the dispatcher's AGENTX_SETTINGS, and the proof function's CurrentVersion id (its code changed).
+    // SIGNIN-AUDIT: pre-removal hashes also include the sign-in Lambda's required State binding and AUDIT-family writer policy.
     // Owner DEC 254zzz73 (rule D, a removal): named and foreign re-pinned for the step-up's removal ONLY. A dump of the hashed remainder before and after differs in exactly the
     // StepUpEmailSender parameter, the sign-in function's STEP_UP_EMAIL_FROM and DEVELOPER_PASSKEYS variables and its two statements; `beforeStepUpRemoval` proves it (withStepUpRestored
     // puts exactly those back and gives the old pins). Legacy unchanged.
@@ -296,14 +297,14 @@ describe("the named TEST proof-only installation gate", () => {
       {
         label: "named",
         template: named,
-        withRoute: "cf7edb8e853a33e3571d5e540ed9b2e12ba2ffad1de11025fa418b36cefb14bf", withoutRoute: "ce829248fbfa91003b34e937522753b586a8d44dc942510b98bb405d132bff1b",
-        beforeStepUpRemoval: { withRoute: "f86d37e81204e6e0be5e38ce6a3459090a94fb922ed44b613909894164b991f7", withoutRoute: "714077a73c71922755b258c164cbb44539302c643be0c9c47429a6b2f6ee362e" },
+        withRoute: "ff39867ccbebe339f5521b328242810296cf9f22de7164fc0c753a22d8ad994a", withoutRoute: "d2e9d7f43372743cffea7a4c6550137b924b4e751adcee11c4e27420b94ac1f8",
+        beforeStepUpRemoval: { withRoute: "d58b14cb4439b703997e2d5384f7965da0149c0fe6267f70f1b7e0eed9208bd9", withoutRoute: "4d23c397d6fcd7b7d9b117358b7684afb36f811ce460095553b334a01791d139" },
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "4a0bccc95a8de260b550394b7950b2fbef54535045b352cb173de9522e265981", withoutRoute: "98ab4dd3fc8786f5dbae52101f4698538855c08f825448db62fcfef4b21ab45a",
-        beforeStepUpRemoval: { withRoute: "c3dcf92df4006bb1c9b2973bbf7cfd1a7c6fe5fb99fba708f5d43a8c9ee35fd0", withoutRoute: "df50c0cb0b99f3a4cea1d04a782d01f0616aca0c6d81ec5efe571357307929ee" },
+        withRoute: "89f0bd99f26d69338ba56b954d8233b0f2cf24202aa20f3765130a1c53176a13", withoutRoute: "64558d40113fef82c6c9a2e9ce36e20306b73a7c64d472c73f56798c33904487",
+        beforeStepUpRemoval: { withRoute: "773ebd697b866d1844dc835ed3eb504a4fb61cfddc004f2e25ef15ea0fe8bc6e", withoutRoute: "1d6fd5d890d61ab815c6fbb4e6640e69d9997eb7cfc58d09687434fe23e1124e" },
       },
       {
         label: "legacy",
@@ -311,8 +312,8 @@ describe("the named TEST proof-only installation gate", () => {
         // #1129, #1131: the company layer, GitHub sign-in, the company-secrets role and the reliability parts in the legacy (production) template too (no step-up: DEC 254zzz73).
         // #1149: re-pinned for the legacy broker's packed environment (names parameter, AGENTX_SETTINGS, the names parameter's read).
         // #1148: re-pinned for the core engine in the legacy template (CoreEngine off by default, the /v1/app route, saved environment images, the core's keys).
-        withRoute: "2f0c70d900577da22cc1b54644408ed566a575a37ef40014a7c502418a70eb97",
-        withoutRoute: "6b6ea8102af71072a71f7479b48eee0d2bfe2ba9414b4b88dc51acba923c1a15",
+        withRoute: "5e7b09b249041b80ebbea3cfd93e43a30ba3ffa6aa885f90b38d5c370c88357b",
+        withoutRoute: "40317b61610d9bba71d85e977652cb5b022e28bf23d3bc51147249fcf03609d0",
         beforeStepUpRemoval: undefined,
       },
     ] as const;

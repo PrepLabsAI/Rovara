@@ -69,6 +69,20 @@ async function designSlot(w: Awaited<ReturnType<typeof world>>) {
 }
 
 describe("hosted reviewer grants", () => {
+  it.each([
+    ["DISPATCHING", true], ["RUNNING", true], ["ACCEPTED", false],
+    ["CANCEL_REQUESTED", false], ["SUCCEEDED", false], ["INTERRUPTED", false],
+  ] as const)("design-review grants at operation status %s: allowed=%s", async (status, allowed) => {
+    const w = await world();
+    await designSlot(w);
+    const checked = await w.records();
+    // Pass the stored records directly so this catches the reviewer's own status guard,
+    // independently of the model route's record guard.
+    const records = { ...checked, operation: { ...checked.operation, status } };
+    const description = await w.hosted.grants.describeReviewer!(w.scope, records, "r1-critic");
+    expect(description !== undefined).toBe(allowed);
+  });
+
   it("(a) reuses the main AI payer for member, no-origin, wiki build, repair-draft and agent tasks in both reviewer kinds", async () => {
     const member = { kind: "member", developerId: "a".repeat(64) };
     const project = { kind: "project", project: "payments" };
