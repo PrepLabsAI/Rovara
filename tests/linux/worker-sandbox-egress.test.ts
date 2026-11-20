@@ -700,6 +700,35 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       metadataVia = peerIps[remoteName]!;
       const metadataUrl = `http://${metadataAddress}:${String(remotePort)}/`;
 
+      const listeningTcpSockets = async (): Promise<Array<[address: string, port: number, inode: string]>> => {
+        const result = await docker("exec", sandboxName, "node", "-e", String.raw`
+          const fs = require("node:fs");
+          const sockets = [];
+          for (const file of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+            let contents;
+            try { contents = fs.readFileSync(file, "utf8"); }
+            catch (error) {
+              if (file === "/proc/net/tcp6" && error.code === "ENOENT") continue;
+              throw error;
+            }
+            for (const line of contents.trim().split("\n").slice(1)) {
+              const fields = line.trim().split(/\s+/u);
+              if (fields[3] !== "0A") continue;
+              const [address, port] = fields[1].split(":");
+              sockets.push([address, parseInt(port, 16), fields[9]]);
+            }
+          }
+          console.log(JSON.stringify(sockets.sort()));
+        `);
+        expect(result.code, result.stderr).toBe(0);
+        return JSON.parse(result.stdout.trim()) as Array<[address: string, port: number, inode: string]>;
+      };
+      const beforeCapture = await listeningTcpSockets();
+      // Docker can bind its embedded DNS resolver to a random TCP port on
+      // 127.0.0.11 (0B00007F in /proc), even with a mounted resolv.conf.
+      expect(beforeCapture.filter(([address]) => address === "0B00007F").length).toBeLessThanOrEqual(1);
+      expect(beforeCapture.filter(([address]) => address !== "0B00007F").map(([, socketPort]) => socketPort)).toEqual([port]);
+
       const plan = encodeBrowserEvidenceExecutorPlan({ port, readyPath: "/health", routes: ["/checkout", "/missing", "/busy"], maskSelectors: [], runMs: 60_000, pageMs: 15_000 });
       const captureArgs = browserEvidenceExecutorArgs({ image, sandbox: sandboxName, name: captureName, seccompProfile: seccomp, plan });
       expect(captureArgs.filter((value) => value === "--network")).toHaveLength(1);
@@ -728,10 +757,9 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       const browserDeadline = Date.now() + 20_000;
       while (!(await browserUp()) && Date.now() < browserDeadline) await pause();
       expect(await browserUp(), "Chromium must start before inspecting listeners").toBe(true);
-      const listeners = await docker("exec", sandboxName, "node", "-e", "const fs=require('fs');const p=new Set();for(const f of ['/proc/net/tcp','/proc/net/tcp6']){try{for(const l of fs.readFileSync(f,'utf8').trim().split('\\n').slice(1)){const c=l.trim().split(/\\s+/);if(c[3]==='0A')p.add(parseInt(c[1].split(':').pop(),16))}}catch(e){if(f==='/proc/net/tcp')throw e}}console.log(JSON.stringify([...p].sort((a,b)=>a-b)))");
-      expect(listeners.code, listeners.stderr).toBe(0);
+      const duringCapture = await listeningTcpSockets();
       expect(await browserUp(), "Chromium must still run after reading listeners").toBe(true);
-      expect(JSON.parse(listeners.stdout.trim()) as number[]).toEqual([port]);
+      expect(duringCapture, "capture must not add or replace any TCP listener").toEqual(beforeCapture);
       await waitForExit(captureName, 120_000);
       const captureLog = await docker("logs", captureName);
       expect(captureLog.code, captureLog.stderr).toBe(0);
