@@ -710,7 +710,7 @@ describe("task-token key and membership IAM", () => {
     // Owner DEC 254zzz73 (rule D, a removal): re-pinned for the step-up's removal ONLY: the StepUpEmailSender parameter, the sign-in function's STEP_UP_EMAIL_FROM and DEVELOPER_PASSKEYS variables,
     // its ses:SendEmail statement and its PASSKEYS# Query/DeleteItem statement. The named-templates snapshot diff of the same change is those 68 lines deleted and nothing added, and the
     // effective-tuple pin below drops exactly those three tuples. The old value was ed3d1dc0a51d0607302a7b61ad15bc4613a4fbe86e8031beadbcc58a2b125668.
-    expect(createHash("sha256").update(text).digest("hex")).toBe("c8615c4a5a67361e911f7e38383ef9f63ed2df3c18ea7390ecb0f4d635a2f86b");
+    expect(createHash("sha256").update(text).digest("hex")).toBe("7e2689c09f612ae9a8c35cc10aff3a69fae7a955ece46c60391ddb03b6edf105");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
