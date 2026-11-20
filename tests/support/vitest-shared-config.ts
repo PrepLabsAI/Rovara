@@ -11,8 +11,11 @@ export const nativeP0Files = [
 // Tests too slow for every pull request that only matter when one file changes. `npm test` leaves them out, except in a pull request's "the ones this change
 // can reach" run (ROVARA_NIGHTLY_TESTS=1 in ci.yml), which runs one only when the change reaches it. CI's nightly job runs them all (`npm run test:nightly`).
 // eval-question-simulation: about 8 minutes of one-thread Monte Carlo that checks the eval check's false-alarm rate and power (packages/contracts/src/eval-check.ts).
+// worker-env-detect-growth (#1236): about 7.5 minutes timing every environment detector on hostile files of growing size, so no pattern backtracks
+// catastrophically (packages/worker/src/env-detect/). The 256 KiB sweep in worker-env-detect-hardening still runs in every full run.
 export const nightlyOnlyFiles = [
   "tests/unit/eval-question-simulation.test.ts",
+  "tests/unit/worker-env-detect-growth.test.ts",
 ];
 
 export const sharedVitestSettings = {

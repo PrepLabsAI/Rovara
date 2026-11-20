@@ -21,6 +21,8 @@ describe("the test runner's configuration", () => {
 
   it("leaves the nightly-only tests out of `npm test` and runs them, and nothing else, in the nightly profile", () => {
     expect(nightlyOnlyFiles).toContain("tests/unit/eval-question-simulation.test.ts");
+    // #1236: the detectors' growth check runs nightly, and in a pull request only when the change reaches it.
+    expect(nightlyOnlyFiles).toContain("tests/unit/worker-env-detect-growth.test.ts");
     expect(config.test?.exclude).toEqual(expect.arrayContaining(nightlyOnlyFiles));
     expect(nightlyConfig.test?.include).toEqual(nightlyOnlyFiles);
     expect(nightlyConfig.test?.passWithNoTests).toBe(false);
